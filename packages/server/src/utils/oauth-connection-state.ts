@@ -1,5 +1,5 @@
 import { getDb, type DbClient } from '../db/client';
-import { oauthAccountOwnershipError } from '../authz/oauth-account-ownership';
+import { assertOAuthAccountGrant, oauthAccountAppMismatch, oauthAccountGrantError, oauthAccountOwnershipError } from '../authz/oauth-account-ownership';
 import { getAuthProfileById, updateAuthProfile } from './auth-profiles';
 import { getOAuthAuthMethods, normalizeConnectorAuthSchema } from './connector-auth';
 import logger from './logger';
@@ -34,6 +34,7 @@ export async function lockOAuthAccountBinding(
     | 'profile_owner'
     | 'backing_account_absent'
     | 'backing_account_owner'
+    | 'backing_account_provider'
     | 'stored_app_mismatch'
     | 'live_connection_app_mismatch'
   ): false => {
@@ -41,7 +42,7 @@ export async function lockOAuthAccountBinding(
     return false;
   };
   const [profile] = await tx`
-    SELECT auth_data, account_id, profile_kind, created_by FROM auth_profiles
+    SELECT auth_data, account_id, profile_kind, created_by, provider FROM auth_profiles
     WHERE organization_id = ${organizationId} AND id = ${authProfileId}
       AND profile_kind = 'oauth_account'
     FOR UPDATE
@@ -49,12 +50,12 @@ export async function lockOAuthAccountBinding(
   if (!profile) return refuse('missing_account_profile');
   if (oauthAccountOwnershipError(profile as { profile_kind: string; created_by: string | null }, ownerUserId)) return refuse('profile_owner');
   if (profile.account_id) {
-    const [account] = await tx`SELECT "userId" FROM account WHERE id = ${profile.account_id}`;
-    if (!account) return refuse('backing_account_absent');
-    if (account.userId !== ownerUserId) return refuse('backing_account_owner');
+    const [account] = await tx<{ userId: string; providerId: string }>`SELECT "userId", "providerId" FROM account WHERE id = ${profile.account_id}`;
+    const error = oauthAccountGrantError(profile as { created_by: string | null; provider: string | null }, account);
+    if (error) return refuse(error);
   }
   const stored = profile.auth_data?.app_auth_profile_id;
-  if (typeof stored === 'number' && stored !== appAuthProfileId) return refuse('stored_app_mismatch');
+  if (oauthAccountAppMismatch(stored, appAuthProfileId)) return refuse('stored_app_mismatch');
   const conflicts = await tx`
     SELECT 1 FROM connections
     WHERE organization_id = ${organizationId} AND auth_profile_id = ${authProfileId}
@@ -82,6 +83,7 @@ export async function syncOAuthConnectionsForAuthProfile(
   const sql = getDb();
   const authProfile = await getAuthProfileById(organizationId, authProfileId);
   if (!authProfile || authProfile.profile_kind !== 'oauth_account') return;
+  await assertOAuthAccountGrant(sql, authProfile);
 
   if (!authProfile.account_id) {
     await sql`

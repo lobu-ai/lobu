@@ -10,6 +10,7 @@ import { randomBytes } from 'node:crypto';
 import { getDb, pgTextArray, type DbClient } from '../db/client';
 import logger from './logger';
 import { lockOAuthAccountBinding } from './oauth-connection-state';
+import { OAUTH_ACCOUNT_BINDING_ERROR } from '../authz/oauth-account-ownership';
 
 /**
  * Stamped on a connection whose connect token lapsed unused. `connections.connect`
@@ -73,7 +74,7 @@ export async function createConnectToken(
         appAuthProfileId: typeof selectedAppId === 'number' ? selectedAppId : null,
         reservePending: true, ownerUserId: params.createdBy ?? null,
       }))) {
-        throw new Error('This account is already bound to a different OAuth app or owner. Use your own account profile with its selected app.');
+        throw new Error(OAUTH_ACCOUNT_BINDING_ERROR);
       }
     }
     return tx`

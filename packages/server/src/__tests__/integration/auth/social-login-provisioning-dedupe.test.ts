@@ -2,22 +2,11 @@
  * Social-login connection auto-provisioning must dedupe by the STABLE account
  * identity, not by the auth-profile row.
  *
- * Regression context (prod, buremba org): the same Google account surfaced as
- * TWO oauth_account auth profiles (46 `personal` + 87 `gmail-account`, both
- * `account_id = 7xF6MgFl…`), and connection auto-provisioning keyed its
- * existing-connection lookup only on `auth_profile_id`. The second profile's
- * login event therefore saw "no connection for profile 87" and minted a
- * duplicate `gmail-buremba-2` row — repeated for every subsequent re-auth.
- * Auto-provisioned connections can also carry a NULL auth_profile_id (the
- * account identity then lives on the materialized `connections.account_id`).
+ * Duplicate profiles and null-profile connections must be reconciled only
+ * within the stored grant owner.
  *
- * These tests call the real `provisionConnectorFromSocialLogin` against the
- * real DB and assert the run reuses the account's live connection (no
- * `createProvisionedConnection` call, exactly one connection) and reconciles
- * it onto the resolved profile so the final sync makes it usable.
- *
- * Red→green: with the lookup keyed only on `auth_profile_id`, each scenario
- * mints a second connection (provisionCalls === 1) and fails.
+ * Foreign-owner rows stay unchanged, and a login event cannot claim another
+ * user's stored grant.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -43,8 +32,8 @@ describe('social-login connection provisioning dedupes by account', () => {
     provisionCalls = 0;
     vi.doMock('../../../connect/oauth-providers', () => ({
       fetchUserInfoWithRaw: async () => ({
-        raw: { sub: 'google-sub-1', name: 'Burak', email: 'burak@gmail.com' },
-        normalized: { name: 'Burak', email: 'burak@gmail.com' },
+        raw: { sub: 'google-sub-1', name: 'Synthetic User', email: 'synthetic-user@example.test' },
+        normalized: { name: 'Synthetic User', email: 'synthetic-user@example.test' },
       }),
     }));
     vi.doMock('../../../utils/provisioned-connection', () => ({
@@ -69,9 +58,8 @@ describe('social-login connection provisioning dedupes by account', () => {
     const user = await createTestUser();
     const sql = getTestDb();
 
-    // The better-auth account row the auth profiles link to (prod: the Google
-    // account row id IS the provider account id). Grant the connector's
-    // required scope so a synced connection is usable (active), not pending.
+    // Grant the connector's required scope so a synced connection is usable
+    // (active), not pending.
     await sql`
       INSERT INTO "account" (id, "accountId", "providerId", "userId", scope, "createdAt", "updatedAt")
       VALUES ('google-sub-1', 'google-sub-1', 'google', ${user.id}, ${`openid email ${GMAIL_SCOPE}`}, NOW(), NOW())
@@ -112,7 +100,7 @@ describe('social-login connection provisioning dedupes by account', () => {
   }
 
   /** The historical duplication: two oauth_account profiles for the SAME Google account. */
-  async function seedDuplicateProfiles(orgId: string) {
+  async function seedDuplicateProfiles(orgId: string, userId: string) {
     const older = await createAuthProfile({
       organizationId: orgId,
       connectorKey: 'google.gmail',
@@ -120,6 +108,7 @@ describe('social-login connection provisioning dedupes by account', () => {
       slug: 'personal',
       profileKind: 'oauth_account',
       accountId: 'google-sub-1',
+      createdBy: userId,
       provider: 'google',
       status: 'active',
     });
@@ -130,13 +119,14 @@ describe('social-login connection provisioning dedupes by account', () => {
       slug: 'gmail-account',
       profileKind: 'oauth_account',
       accountId: 'google-sub-1',
+      createdBy: userId,
       provider: 'google',
       status: 'active',
     });
     return older;
   }
 
-  async function runProvision(organizationId: string) {
+  async function runProvision(organizationId: string, userId: string) {
     const { provisionConnectorFromSocialLogin } = await import(
       '../../../auth/social-login-provisioning'
     );
@@ -146,7 +136,7 @@ describe('social-login connection provisioning dedupes by account', () => {
       request: new Request('https://example.test/acme/oauth2/callback/google'),
       account: {
         id: 'google-sub-1',
-        userId: 'user-1',
+        userId,
         providerId: 'google',
         accessToken: 'tok',
         scope: `openid email ${GMAIL_SCOPE}`,
@@ -164,19 +154,46 @@ describe('social-login connection provisioning dedupes by account', () => {
     `;
   }
 
-  it('reuses the connection of a duplicate older profile for the same account', async () => {
+  it('does not reuse a profile or connection owned by somebody else', async () => {
+    const { org, user, sql } = await seedBase();
+    const older = await seedDuplicateProfiles(org.id, user.id);
+    const other = await createTestUser({ name: 'Synthetic other owner' });
+    // Model legacy corruption directly; normal profile writers must reject it.
+    await sql`UPDATE auth_profiles SET created_by = ${other.id} WHERE organization_id = ${org.id} AND profile_kind = 'oauth_account'`;
+    const [connection] = await sql`INSERT INTO connections
+      (organization_id, connector_key, slug, display_name, status, auth_profile_id, account_id, created_by, visibility)
+      VALUES (${org.id}, 'google.gmail', 'synthetic-other-mail', 'Synthetic other mail', 'pending_auth',
+        ${older.id}, 'google-sub-1', ${other.id}, 'private') RETURNING *`;
+    const profilesBefore = await sql`SELECT * FROM auth_profiles WHERE profile_kind = 'oauth_account' ORDER BY id`;
+    await runProvision(org.id, user.id);
+    expect(provisionCalls).toBe(1);
+    expect(await sql`SELECT * FROM connections WHERE id = ${connection.id}`).toEqual([connection]);
+    expect(await sql`SELECT * FROM auth_profiles WHERE created_by = ${other.id} ORDER BY id`).toEqual(profilesBefore);
+    const [own] = await sql`SELECT created_by, account_id FROM auth_profiles WHERE profile_kind = 'oauth_account' AND created_by = ${user.id}`;
+    expect(own).toMatchObject({ created_by: user.id, account_id: 'google-sub-1' });
+  });
+
+  it('checks the stored grant owner before provisioning from a login event', async () => {
     const { org, sql } = await seedBase();
-    const older = await seedDuplicateProfiles(org.id);
+    const other = await createTestUser({ name: 'Synthetic forged login owner' });
+    await expect(runProvision(org.id, other.id)).rejects.toThrow();
+    expect(provisionCalls).toBe(0);
+    expect(await sql`SELECT id FROM auth_profiles WHERE profile_kind = 'oauth_account'`).toHaveLength(0);
+  });
+
+  it('reuses the connection of a duplicate older profile for the same account', async () => {
+    const { org, user, sql } = await seedBase();
+    const older = await seedDuplicateProfiles(org.id, user.id);
 
     await sql`
       INSERT INTO connections (
-        organization_id, connector_key, slug, display_name, status, auth_profile_id, visibility, created_at, updated_at
+        organization_id, connector_key, slug, display_name, status, auth_profile_id, created_by, visibility, created_at, updated_at
       ) VALUES (
-        ${org.id}, 'google.gmail', 'gmail-buremba', 'Gmail', 'active', ${older.id}, 'private', NOW(), NOW()
+        ${org.id}, 'google.gmail', 'synthetic-mail', 'Gmail', 'active', ${older.id}, ${user.id}, 'private', NOW(), NOW()
       )
     `;
 
-    await runProvision(org.id);
+    await runProvision(org.id, user.id);
 
     expect(provisionCalls).toBe(0);
     const rows = await connectionRows(sql, org.id);
@@ -186,7 +203,7 @@ describe('social-login connection provisioning dedupes by account', () => {
   });
 
   it('reuses a connection whose auth_profile_id is null but account_id is materialized', async () => {
-    const { org, sql } = await seedBase();
+    const { org, user, sql } = await seedBase();
     // No duplicate profiles needed — the connection carries the identity itself.
     await createAuthProfile({
       organizationId: org.id,
@@ -195,19 +212,20 @@ describe('social-login connection provisioning dedupes by account', () => {
       slug: 'gmail-account',
       profileKind: 'oauth_account',
       accountId: 'google-sub-1',
+      createdBy: user.id,
       provider: 'google',
       status: 'active',
     });
 
     await sql`
       INSERT INTO connections (
-        organization_id, connector_key, slug, display_name, status, auth_profile_id, account_id, visibility, created_at, updated_at
+        organization_id, connector_key, slug, display_name, status, auth_profile_id, created_by, account_id, visibility, created_at, updated_at
       ) VALUES (
-        ${org.id}, 'google.gmail', 'gmail-buremba', 'Gmail', 'active', NULL, 'google-sub-1', 'private', NOW(), NOW()
+        ${org.id}, 'google.gmail', 'synthetic-mail', 'Gmail', 'active', NULL, ${user.id}, 'google-sub-1', 'private', NOW(), NOW()
       )
     `;
 
-    await runProvision(org.id);
+    await runProvision(org.id, user.id);
 
     expect(provisionCalls).toBe(0);
     const rows = await connectionRows(sql, org.id);
@@ -218,18 +236,18 @@ describe('social-login connection provisioning dedupes by account', () => {
   });
 
   it('reconciles a pending connection on the older profile instead of leaving it stranded', async () => {
-    const { org, sql } = await seedBase();
-    const older = await seedDuplicateProfiles(org.id);
+    const { org, user, sql } = await seedBase();
+    const older = await seedDuplicateProfiles(org.id, user.id);
 
     await sql`
       INSERT INTO connections (
-        organization_id, connector_key, slug, display_name, status, auth_profile_id, visibility, created_at, updated_at
+        organization_id, connector_key, slug, display_name, status, auth_profile_id, created_by, visibility, created_at, updated_at
       ) VALUES (
-        ${org.id}, 'google.gmail', 'gmail-buremba', 'Gmail', 'pending_auth', ${older.id}, 'private', NOW(), NOW()
+        ${org.id}, 'google.gmail', 'synthetic-mail', 'Gmail', 'pending_auth', ${older.id}, ${user.id}, 'private', NOW(), NOW()
       )
     `;
 
-    await runProvision(org.id);
+    await runProvision(org.id, user.id);
 
     expect(provisionCalls).toBe(0);
     const rows = await connectionRows(sql, org.id);
@@ -239,7 +257,7 @@ describe('social-login connection provisioning dedupes by account', () => {
   });
 
   it('floors an org-visible null-profile connection to private when rebinding a personal credential', async () => {
-    const { org, sql } = await seedBase();
+    const { org, user, sql } = await seedBase();
     await createAuthProfile({
       organizationId: org.id,
       connectorKey: 'google.gmail',
@@ -247,6 +265,7 @@ describe('social-login connection provisioning dedupes by account', () => {
       slug: 'gmail-account',
       profileKind: 'oauth_account',
       accountId: 'google-sub-1',
+      createdBy: user.id,
       provider: 'google',
       status: 'active',
     });
@@ -256,13 +275,13 @@ describe('social-login connection provisioning dedupes by account', () => {
     // at org visibility, so the rebind must floor visibility to private.
     await sql`
       INSERT INTO connections (
-        organization_id, connector_key, slug, display_name, status, auth_profile_id, account_id, visibility, created_at, updated_at
+        organization_id, connector_key, slug, display_name, status, auth_profile_id, created_by, account_id, visibility, created_at, updated_at
       ) VALUES (
-        ${org.id}, 'google.gmail', 'gmail-buremba', 'Gmail', 'active', NULL, 'google-sub-1', 'org', NOW(), NOW()
+        ${org.id}, 'google.gmail', 'synthetic-mail', 'Gmail', 'active', NULL, ${user.id}, 'google-sub-1', 'org', NOW(), NOW()
       )
     `;
 
-    await runProvision(org.id);
+    await runProvision(org.id, user.id);
 
     expect(provisionCalls).toBe(0);
     const rows = await sql<{ id: number; auth_profile_id: number | null; status: string; visibility: string }[]>`

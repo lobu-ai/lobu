@@ -3,6 +3,7 @@ import { HttpAuthBindingSchema, type HttpAuthBinding } from '@lobu/core/contract
 import { Value } from '@sinclair/typebox/value';
 import { getDb, type DbClient } from '../db/client';
 import { withTransaction } from '../db/transaction';
+import { assertOAuthAccountGrant } from '../authz/oauth-account-ownership';
 import { persistAuthCredentials } from './auth-credential-secrets';
 import { ToolUserError } from './errors';
 import { isUniqueViolation } from './pg-errors';
@@ -358,6 +359,9 @@ export async function createAuthProfile(params: {
   deviceWorkerId?: string | null;
   browserKind?: BrowserKind | null;
 }, db: DbClient = getDb()): Promise<AuthProfileRow> {
+  if (params.profileKind === 'oauth_account' && params.accountId && db === getDb()) {
+    return withTransaction(undefined, tx => createAuthProfile(params, tx));
+  }
   const sql = db;
   const http = params.http ? validateHttpAuthBinding(params.http) : null;
   if (http && params.profileKind !== 'env') {
@@ -365,6 +369,16 @@ export async function createAuthProfile(params: {
   }
   if (http) assertHttpBoundFields(http, params.authData);
   const normalizedProvider = params.provider ? params.provider.toLowerCase() : null;
+  let createdBy = params.createdBy ?? null;
+  if (params.profileKind === 'oauth_account' && params.accountId) {
+    // Internal importers may omit the creator. Derive it from the stored grant,
+    // never from a caller-supplied provider identity or email address.
+    if (params.createdBy === undefined) {
+      const [account] = await sql`SELECT "userId" FROM account WHERE id = ${params.accountId}`;
+      createdBy = account?.userId ?? null;
+    }
+    await assertOAuthAccountGrant(sql, { account_id: params.accountId, created_by: createdBy, provider: normalizedProvider });
+  }
 
   // ensureUniqueAuthProfileSlug is a non-locking SELECT loop: two concurrent
   // creates can resolve the SAME free slug and race auth_profiles_org_slug_unique.
@@ -410,7 +424,7 @@ export async function createAuthProfile(params: {
           ${sql.json(http ? { http } : {})},
           ${params.accountId ?? null},
           ${normalizedProvider},
-          ${params.createdBy ?? null},
+          ${createdBy},
           ${params.deviceWorkerId ?? null},
           ${params.browserKind ?? null}
         )
@@ -533,10 +547,20 @@ export async function updateAuthProfile(params: {
   accountId?: string | null;
   provider?: string | null;
 }, transaction?: DbClient): Promise<AuthProfileRow | null> {
+  if (!transaction && (params.accountId !== undefined || params.provider !== undefined)) {
+    return withTransaction(undefined, tx => updateAuthProfile(params, tx));
+  }
   const existing = await getAuthProfileBySlug(params.organizationId, params.slug, transaction);
   if (!existing) return null;
 
   const sql = transaction ?? getDb();
+  if (existing.profile_kind === 'oauth_account' && (params.accountId !== undefined || params.provider !== undefined)) {
+    await assertOAuthAccountGrant(sql, {
+      created_by: existing.created_by,
+      provider: params.provider ?? existing.provider,
+      account_id: params.accountId ?? existing.account_id,
+    });
+  }
   const nextSlug =
     params.nextSlug && params.nextSlug.trim().length > 0
       ? await ensureUniqueAuthProfileSlug({

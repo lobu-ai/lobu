@@ -89,9 +89,10 @@ import {
 	isDeviceAutowireIdentity,
 } from "../../../../utils/device-autowire-suppression";
 import logger from "../../../../utils/logger";
-import { OAUTH_SCOPE_PAUSE_LAST_ERROR, syncOAuthConnectionsForAuthProfile } from "../../../../utils/oauth-connection-state";
+import { lockOAuthAccountBinding, OAUTH_SCOPE_PAUSE_LAST_ERROR, syncOAuthConnectionsForAuthProfile } from "../../../../utils/oauth-connection-state";
+import { ToolUserError } from '../../../../utils/errors';
 import { CONNECT_TOKEN_EXPIRED_ERROR } from "../../../../utils/connect-tokens";
-import { oauthAccountOwnershipError } from '../../../../authz/oauth-account-ownership';
+import { OAUTH_ACCOUNT_BINDING_ERROR, oauthAccountOwnershipError } from '../../../../authz/oauth-account-ownership';
 import { compileConnectionRowVisibility } from "../../../../authz/connection-visibility";
 import { authzScopeFromToolContext } from "../../../../authz/scope";
 import { resolveUsernames } from "../../../../utils/resolve-usernames";
@@ -1319,6 +1320,11 @@ export async function handleCreate(
 		authProfileId: number | null,
 		useSavepoint: boolean,
 	) => {
+    if (authSelection?.authProfile?.profile_kind === 'oauth_account' &&
+      !await lockOAuthAccountBinding(db, { organizationId, authProfileId: authSelection.authProfile.id,
+        appAuthProfileId: authSelection.appAuthProfile?.id ?? null, ownerUserId: effectiveCreatedBy, reservePending: true })) {
+      throw new ToolUserError(OAUTH_ACCOUNT_BINDING_ERROR, 409);
+    }
     const rows = await insertConnectionWithSlug({
       organizationId,
       connectorKey: args.connector_key,
@@ -1330,7 +1336,7 @@ export async function handleCreate(
 				const insert = () => db`
         INSERT INTO connections (
           organization_id, connector_key, slug, display_name, status,
-          auth_profile_id, app_auth_profile_id, config, created_by, visibility, device_worker_id,
+          auth_profile_id, app_auth_profile_id, account_id, config, created_by, visibility, device_worker_id,
           entity_ids
         ) VALUES (
           ${organizationId}, ${args.connector_key},
@@ -1339,6 +1345,8 @@ export async function handleCreate(
           ${connectionStatus},
             ${authProfileId ?? authSelection?.authProfile?.id ?? null},
           ${authSelection?.appAuthProfile?.id ?? null},
+          (SELECT account_id FROM auth_profiles WHERE id = ${authProfileId ?? authSelection?.authProfile?.id ?? null}
+            AND organization_id = ${organizationId} AND NOT ${connectionConfigToInsert?.consent_only === true}),
             ${connectionConfigToInsert ? db.json(connectionConfigToInsert) : null},
           ${effectiveCreatedBy},
           ${visibility},
@@ -2071,6 +2079,14 @@ export async function handleUpdate(
     // Mirrors the shape manage_feeds already uses for handleUpdateFeed.
     const updateOutcome = await sql.begin(async (tx) => {
       await lockOrganizationForRelationshipClaims(tx, organizationId);
+      // Match consent's profile-before-connection lock order. Reject before any
+      // binding write, rather than discovering a mismatch during post-write sync.
+      const validateOAuthBinding = effectiveSelectedAuthProfile?.profile_kind === 'oauth_account' &&
+        (hasAuthProfileArg || hasAppAuthProfileArg || hasDeviceWorkerArg || args.config !== undefined || args.status === 'active');
+      if (validateOAuthBinding && !await lockOAuthAccountBinding(tx, {
+        organizationId, authProfileId: nextAuthProfileId!, appAuthProfileId: nextAppAuthProfileId,
+        ownerUserId: ctx.userId ?? null, reservePending: true,
+      })) return { denial: { error: OAUTH_ACCOUNT_BINDING_ERROR } };
       const lockedRows = await tx`
         SELECT *
         FROM connections
@@ -2080,6 +2096,9 @@ export async function handleUpdate(
         FOR UPDATE
       `;
       if (lockedRows.length === 0) return { rows: [], previousStatus: null };
+      if (validateOAuthBinding && lockedRows[0].created_by !== ctx.userId) {
+        return { denial: { error: 'You can only manage OAuth account profiles you created, on your own connections. Ask the account owner to reconnect.' } };
+      }
       if (authSelection.pendingLiveBrowser || nextAuthProfileId !== lockedRows[0].auth_profile_id) {
         const retained = await tx`SELECT id FROM auth_profiles
           WHERE id = ${lockedRows[0].auth_profile_id} AND organization_id = ${organizationId}
@@ -2138,7 +2157,10 @@ export async function handleUpdate(
               THEN 'active' ELSE COALESCE(${effectiveStatus}, status) END,
             auth_profile_id = ${liveBrowserProfile?.id ?? nextAuthProfileId},
             app_auth_profile_id = ${nextAppAuthProfileId},
-            account_id = CASE WHEN ${explicitlyNoAuth} THEN NULL ELSE account_id END,
+            account_id = CASE WHEN ${explicitlyNoAuth} THEN NULL
+              WHEN ${hasAuthProfileArg} THEN (SELECT account_id FROM auth_profiles
+                WHERE id = ${nextAuthProfileId} AND organization_id = ${organizationId})
+              ELSE account_id END,
             error_message = CASE WHEN ${explicitlyNoAuth}
               AND (status = 'pending_auth' OR (status = 'revoked' AND error_message = ${CONNECT_TOKEN_EXPIRED_ERROR}))
               THEN NULL ELSE error_message END,

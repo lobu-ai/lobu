@@ -1,5 +1,6 @@
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { connectRoutes } from '../../../connect/routes';
+import { CredentialService } from '../../../auth/credentials';
 import type { Env } from '../../../index';
 import { buildConnectionsNamespace } from '../../../sandbox/namespaces/connections';
 import { manageAuthProfiles } from '../../../tools/admin/manage_auth_profiles';
@@ -79,6 +80,91 @@ async function waitForBlockedConnectTokens(count: number): Promise<void> {
 describe('OAuth reconnect preserves the existing connection until consent', () => {
   beforeAll(async () => { await cleanupTestDatabase(); await initWorkspaceProvider(); });
   afterEach(() => { globalThis.fetch = originalFetch; });
+
+  it.each(['owner', 'provider'] as const)('rejects a mismatched grant %s before creating or updating a profile', async (target) => {
+    const s = await seed();
+    const other = await createTestUser({ name: 'Synthetic grant owner' });
+    const sql = getTestDb();
+    const accountId = `synthetic-foreign-grant-${s.org.id}`;
+    await sql`INSERT INTO account (id, "accountId", "providerId", "userId", "createdAt", "updatedAt")
+      VALUES (${accountId}, ${accountId}, ${target === 'provider' ? 'other-provider' : 'synthetic'},
+        ${target === 'owner' ? other.id : s.user.id}, NOW(), NOW())`;
+    const before = await state(s.connection.id);
+    await expect(createAuthProfile({ organizationId: s.org.id, connectorKey: KEY,
+      displayName: 'Rejected grant', profileKind: 'oauth_account', provider: 'synthetic',
+      accountId, createdBy: s.user.id })).rejects.toThrow();
+    await expect(updateAuthProfile({ organizationId: s.org.id, slug: s.profile.slug,
+      accountId })).rejects.toThrow();
+    expect(await sql`SELECT id FROM auth_profiles WHERE account_id = ${accountId}`).toHaveLength(0);
+    expect(await state(s.connection.id)).toEqual(before);
+  });
+
+  it.each(['connection', 'profile', 'grant', 'provider', 'app', 'stale-account', 'deleted'] as const)(
+    'does not release credentials from a legacy %s mismatch', async (target) => {
+      const s = await seed();
+      const other = await createTestUser({ name: 'Synthetic legacy owner' });
+      const sql = getTestDb();
+      const service = new CredentialService(sql);
+      expect(await service.getConnectionTokens(s.connection.id, s.profile.account_id!)).toMatchObject({ accessToken: 'synthetic-original-token' });
+      if (target === 'connection') await sql`UPDATE connections SET created_by = ${other.id} WHERE id = ${s.connection.id}`;
+      if (target === 'profile') await sql`UPDATE auth_profiles SET created_by = ${other.id} WHERE id = ${s.profile.id}`;
+      if (target === 'grant') await sql`UPDATE account SET "userId" = ${other.id} WHERE id = ${s.profile.account_id}`;
+      if (target === 'provider') await sql`UPDATE auth_profiles SET provider = 'other-provider' WHERE id = ${s.profile.id}`;
+      if (target === 'app') await sql`UPDATE auth_profiles SET auth_data = auth_data || ${sql.json({ app_auth_profile_id: s.otherApp.id })}::jsonb WHERE id = ${s.profile.id}`;
+      if (target === 'stale-account') await sql`UPDATE connections SET auth_profile_id = NULL WHERE id = ${s.connection.id}`;
+      if (target === 'deleted') await sql`UPDATE connections SET deleted_at = NOW() WHERE id = ${s.connection.id}`;
+      expect(await service.getConnectionTokens(s.connection.id, s.profile.account_id!)).toBeNull();
+    });
+
+  it.each(['create', 'connect', 'reuse', 'update'] as const)('refuses a legacy foreign grant during %s', async (action) => {
+    const s = await seed();
+    const other = await createTestUser({ name: 'Synthetic legacy grant owner' });
+    const sql = getTestDb();
+    await sql`UPDATE account SET "userId" = ${other.id} WHERE id = ${s.profile.account_id}`;
+    const own = await createTestConnection({ organization_id: s.org.id, connector_key: KEY,
+      created_by: s.user.id, visibility: 'private', createDefaultFeed: false });
+    const binding = { auth_profile_slug: s.profile.slug, app_auth_profile_slug: s.app.slug };
+    const attempt = action === 'reuse'
+      ? manageConnections({ action: 'connect', connector_key: KEY, ...binding }, {} as Env, s.ctx)
+      : action === 'connect'
+        ? manageConnections({ action: 'connect', connector_key: KEY, ...binding, slug: 'synthetic-additional-connection' }, {} as Env, s.ctx)
+        : action === 'create'
+          ? manageConnections({ action: 'create', connector_key: KEY, ...binding }, {} as Env, s.ctx)
+          : manageConnections({ action: 'update', connection_id: own.id, ...binding }, {} as Env, s.ctx);
+    const result = await attempt.catch(error => {
+      expect(error).toMatchObject({ name: 'ToolUserError', httpStatus: 409 });
+      return { error: error.message };
+    });
+    expect(result).toHaveProperty('error');
+    const [row] = await sql`SELECT auth_profile_id, account_id FROM connections WHERE id = ${own.id}`;
+    expect(row).toMatchObject({ auth_profile_id: null, account_id: null });
+    expect(await sql`SELECT id FROM connections WHERE organization_id = ${s.org.id}`).toHaveLength(2);
+  });
+
+  it('atomically rebinds to an owned grant and returns the new binding while preserving feeds', async () => {
+    const s = await seed();
+    const sql = getTestDb();
+    const before = await state(s.connection.id);
+    const accountId = `synthetic-replacement-grant-${s.org.id}`;
+    await sql`INSERT INTO account (id, "accountId", "providerId", "userId", "accessToken", scope, "createdAt", "updatedAt")
+      VALUES (${accountId}, ${`lobu-connector:${s.org.id}:${KEY}:replacement`}, 'synthetic', ${s.user.id},
+        'synthetic-replacement-token', ${[BASE, OLD].join(' ')}, NOW(), NOW())`;
+    const profile = await createAuthProfile({ organizationId: s.org.id, connectorKey: KEY,
+      displayName: 'Synthetic replacement account', profileKind: 'oauth_account', provider: 'synthetic',
+      accountId, createdBy: s.user.id,
+      authData: { app_auth_profile_id: s.app.id, requested_scopes: [BASE, OLD], granted_scopes: [BASE, OLD] } });
+    expect(await manageConnections({ action: 'update', connection_id: s.connection.id,
+      auth_profile_slug: profile.slug }, {} as Env, s.ctx)).toMatchObject({
+        action: 'update', connection: { id: s.connection.id, auth_profile_id: profile.id,
+          account_id: accountId, app_auth_profile_id: s.app.id, visibility: 'private' },
+      });
+    const after = await state(s.connection.id);
+    expect(after.feeds).toEqual(before.feeds);
+    expect(after.connection).toMatchObject({ account_id: accountId, created_by: s.user.id,
+      auth_profile_id: profile.id, app_auth_profile_id: s.app.id, status: 'active' });
+    expect(await new CredentialService(sql).getConnectionTokens(s.connection.id, s.profile.account_id!)).toBeNull();
+    expect(await new CredentialService(sql).getConnectionTokens(s.connection.id, accountId)).toMatchObject({ accessToken: 'synthetic-replacement-token' });
+  });
 
   it.each([undefined, {}])('reuses an active connection for the selected personal account with config %j', async (config) => {
     const s = await seed();

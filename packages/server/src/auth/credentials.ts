@@ -6,6 +6,7 @@
  */
 
 import type { DbClient } from '../db/client';
+import { oauthAccountAppMismatch, oauthAccountGrantError, oauthAccountOwnershipError } from '../authz/oauth-account-ownership';
 import { scrubDiagnosticValue } from '@lobu/core';
 import { fetchCredentialedPublicUrl } from '@lobu/connector-worker/egress';
 import { cancelResponseBody } from '../utils/bounded-response';
@@ -53,7 +54,7 @@ export class CredentialService {
    * Optionally accepts oauthConfig for generic token refresh (non-Google providers).
    */
   async getConnectionTokens(
-    _connectionId: number,
+    connectionId: number,
     accountId: string,
     oauthConfig?: {
       tokenUrl: string;
@@ -70,14 +71,30 @@ export class CredentialService {
         a."accessToken" as "accessToken",
         a."refreshToken" as "refreshToken",
         a."accessTokenExpiresAt" as "expiresAt",
-        a.scope
+        a.scope,
+        a."userId", a."providerId",
+        ap.created_by, ap.provider AS profile_provider, ap.profile_kind,
+        ap.auth_data->'app_auth_profile_id' AS stored_app_id,
+        c.created_by AS connection_owner, c.app_auth_profile_id
       FROM "account" a
+      JOIN auth_profiles ap ON ap.account_id = a.id AND ap.profile_kind = 'oauth_account'
+      JOIN connections c ON c.auth_profile_id = ap.id AND c.organization_id = ap.organization_id
       WHERE a.id = ${accountId}
+        AND c.id = ${connectionId} AND c.deleted_at IS NULL
     `;
 
     if (result.length === 0) return null;
 
-    const tokens = result[0] as unknown as CredentialTokens;
+    const row = result[0];
+    const profile = { profile_kind: row.profile_kind as string, created_by: row.created_by as string | null, provider: row.profile_provider as string | null };
+    if (oauthAccountOwnershipError(profile, profile.created_by, row.connection_owner) ||
+      oauthAccountGrantError(profile, row as { userId: string; providerId: string }) ||
+      oauthAccountAppMismatch(row.stored_app_id, row.app_auth_profile_id)) return null;
+    // Keep validation metadata out of the credential object passed to callers.
+    const tokens: CredentialTokens = {
+      provider: row.provider, accessToken: row.accessToken, refreshToken: row.refreshToken,
+      expiresAt: row.expiresAt, scope: row.scope,
+    };
 
     // Refresh a token rejected upstream even when its stored expiry looks
     // valid. Carry the exact rejected token through the lock: if another

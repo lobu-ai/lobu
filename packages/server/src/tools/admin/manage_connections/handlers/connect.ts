@@ -10,7 +10,9 @@ import {
 	normalizeScopeList,
 	selectReconnectOAuthScopes,
 } from "../../../../auth/oauth/scopes";
-import { oauthAccountOwnershipError } from '../../../../authz/oauth-account-ownership';
+import { OAUTH_ACCOUNT_BINDING_ERROR, oauthAccountOwnershipError } from '../../../../authz/oauth-account-ownership';
+import { lockOAuthAccountBinding } from '../../../../utils/oauth-connection-state';
+import { ToolUserError } from '../../../../utils/errors';
 import { notifyConnectionPermissionRequest } from "../../../../notifications/triggers";
 import {
 	getPrimaryAuthProfileForKind,
@@ -464,6 +466,11 @@ async function handleConnectImpl(
     `;
     if (existing.length > 1) return { error: 'This account has multiple connections. Select the existing connection by slug before retrying.' };
     if (existing.length === 1) {
+      const bindingValid = await sql.begin(tx => lockOAuthAccountBinding(tx, {
+        organizationId, authProfileId: authSelection.authProfile!.id,
+        appAuthProfileId: authSelection.appAuthProfile?.id ?? null, ownerUserId: userId ?? null,
+      }));
+      if (!bindingValid) return { error: OAUTH_ACCOUNT_BINDING_ERROR };
       const target = existing[0];
       const needsAuthorization = target.status === 'pending_auth' || target.status === 'revoked' ||
         authSelection.authProfile.status !== 'active' || Boolean(args.requested_scopes?.length);
@@ -717,6 +724,11 @@ async function handleConnectImpl(
 		authProfileId: number | null,
 		useSavepoint: boolean,
 	) => {
+    if (authSelection.authProfile?.profile_kind === 'oauth_account' &&
+      !await lockOAuthAccountBinding(db, { organizationId, authProfileId: authSelection.authProfile.id,
+        appAuthProfileId: authSelection.appAuthProfile?.id ?? null, ownerUserId: userId ?? null, reservePending: true })) {
+      throw new ToolUserError(OAUTH_ACCOUNT_BINDING_ERROR, 409);
+    }
     const rows = await
 		insertConnectionWithSlug({
       organizationId,
@@ -729,7 +741,7 @@ async function handleConnectImpl(
 				const insert = () => db`
         INSERT INTO connections (
           organization_id, connector_key, slug, display_name, status,
-          auth_profile_id, app_auth_profile_id, config, created_by, visibility, device_worker_id,
+          auth_profile_id, app_auth_profile_id, account_id, config, created_by, visibility, device_worker_id,
           entity_ids
         ) VALUES (
           ${organizationId}, ${args.connector_key},
@@ -738,6 +750,8 @@ async function handleConnectImpl(
           ${connectionStatus},
             ${authProfileId ?? authSelection.authProfile?.id ?? null},
           ${authSelection.appAuthProfile?.id ?? null},
+          (SELECT account_id FROM auth_profiles WHERE id = ${authProfileId ?? authSelection.authProfile?.id ?? null}
+            AND organization_id = ${organizationId} AND NOT ${isManagedConnect}),
             ${connectionConfigToInsert ? db.json(connectionConfigToInsert) : null},
           ${userId},
           ${connectVisibility},
