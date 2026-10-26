@@ -22,6 +22,8 @@ eval "$(sed -n '/^extract_json_verdict()/,/^review_exit_cleanup()/p' "$repo_root
 
 TEST_DIR="$(mktemp -d /tmp/lobu-review-bb-test.XXXXXX)"
 TEST_DIR="$(cd "$TEST_DIR" && pwd -P)"
+# Keep library temp files under the test's cleanup trap.
+mktemp() { command mktemp "$TEST_DIR/${1##*/}"; }
 FAKE_BIN="$TEST_DIR/bin"
 FAKE_STATE="$TEST_DIR/state"
 mkdir -p "$FAKE_BIN" "$FAKE_STATE"
@@ -58,17 +60,31 @@ case "$1 $2" in
     ;;
   "provider models") cat "$state/models-$3.json" ;;
   "thread list") cat "$state/list.json" ;;
-  "thread spawn") cat "$state/spawn.json" ;;
-  "thread wait") exit "${BB_FAKE_WAIT_RC:-0}" ;;
+  "thread spawn")
+    args=("$@")
+    for ((i=0; i<${#args[@]}; i++)); do
+      if [ "${args[$i]}" = --prompt-file ]; then cp "${args[$((i+1))]}" "$state/prompt.txt"; fi
+    done
+    cat "$state/spawn.json" ;;
+  "thread wait")
+    if [ "${BB_FAKE_WAIT_SIGNAL:-0}" = 1 ]; then
+      kill -TERM "$PPID"
+      exec sleep 5
+    fi
+    if [ "${BB_FAKE_ASSERT_OWNER:-0}" = 1 ] && [ "${REVIEW_BB_CHILD_ID:-}" != "${BB_FAKE_EXPECT_OWNER:-thr_child9}" ]; then
+      exit 1
+    fi
+    exit "${BB_FAKE_WAIT_RC:-0}" ;;
   "thread interactions") cat "$state/interactions.json" ;;
   "thread output") "$BB_FAKE_JQ" -n --arg o "$(cat "$state/output.txt")" '{output:$o}' ;;
   "thread stop") printf '{"ok":true}\n' ;;
   "thread archive") printf '{"ok":true}\n' ;;
   "environment diff")
     case "$*" in
-      *branch_committed*) cat "$state/committed.patch" ;;
-      *) cat "$state/fixer.patch" ;;
+      *branch_committed*) patch="$state/committed.patch" ;;
+      *) patch="$state/fixer.patch" ;;
     esac
+    "$BB_FAKE_JQ" -n --rawfile patch "$patch" --argjson truncated "${BB_FAKE_TRUNCATED:-false}" '{outcome:"available",diff:{diff:$patch,truncated:$truncated}}'
     ;;
   *) printf '{}\n' ;;
 esac
@@ -127,7 +143,7 @@ spawn_calls() { grep -c '^thread spawn' "$FAKE_STATE/calls.log" || true; }
   review_bb_wants_run && fail "BB_REVIEW_DIRECT=1 must force the direct CLI"
   true
 )
-# 3. An invalid BB context fails closed (no spawn, no fallback).
+# 3. Invalid BB context still routes to BB, where it must fail closed.
 (
   export BB_THREAD_ID="thr_missing"
   cat > "$FAKE_BIN/bb-invalid" <<'SHIM2'
@@ -135,11 +151,12 @@ spawn_calls() { grep -c '^thread spawn' "$FAKE_STATE/calls.log" || true; }
 exit 1
 SHIM2
   chmod +x "$FAKE_BIN/bb-invalid"
-  BB_CLI="$FAKE_BIN/bb-invalid" review_bb_wants_run && fail "invalid BB context must not route to BB"
+  BB_CLI="$FAKE_BIN/bb-invalid" review_bb_wants_run || fail "invalid BB context must never select direct CLI"
   true
 )
 # 4. Valid context routes.
 review_bb_wants_run || fail "valid BB context must route to BB"
+review_bb_active || fail "valid BB context must load"
 [ "$(review_bb_project_id)" = "proj_TEST" ] || fail "project must come from the parent thread"
 
 # --- provider / model / effort selection -------------------------------------
@@ -155,16 +172,10 @@ review_bb_model_for claude does-not-exist >/dev/null 2>&1 && fail "unknown model
 true
 review_bb_check_effort codex gpt-6-astra xhigh || fail "listed effort must pass"
 review_bb_check_effort codex gpt-6-astra max >/dev/null 2>&1 && fail "unlisted effort must fail explicitly"
+review_bb_check_effort codex missing-model xhigh >/dev/null 2>&1 && fail "missing catalog model must fail explicitly"
 true
 
 # --- reviewer flow -----------------------------------------------------------
-
-run_reviewer_case() {
-  # $1=head sha basis is the repo root; run from a scratch repo so git state
-  # is deterministic.
-  reset_calls
-  RAW=""; REVIEWER_EXIT=99; REVIEW_BB_CHILD_ID=""
-}
 
 SCRATCH="$TEST_DIR/scratch"
 git init -qb main "$SCRATCH"
@@ -185,9 +196,12 @@ printf '[]\n' > "$FAKE_STATE/list.json"
 printf '{"ok":true,"note":"fine"}\n' > "$FAKE_STATE/output.txt"
 reset_calls
 RAW=""; REVIEWER_EXIT=99; REVIEW_BB_CHILD_ID=""
+export REVIEW_BB_CHILD_ID
+export BB_FAKE_ASSERT_OWNER=1
 link_out_file="$TEST_DIR/link.out"
 review_bb_run_reviewer "$PROMPT" "$HEAD_SHA_SCRATCH" "origin/main" "abcdef123456" \
   codex gpt-6-astra xhigh '(.ok == true)' "/tmp/ci.txt" >"$link_out_file" 2>&1
+unset BB_FAKE_ASSERT_OWNER
 link_out="$(cat "$link_out_file")"
 [ "$REVIEWER_EXIT" = "0" ] || fail "valid child output must be accepted (got $REVIEWER_EXIT: $RAW)"
 case "$RAW" in *'"ok":true'*) ;; *) fail "RAW must carry the child output" ;; esac
@@ -197,7 +211,8 @@ grep -q -- '--provider codex' "$FAKE_STATE/calls.log" || fail "spawn must select
 grep -q -- '--model gpt-6-astra' "$FAKE_STATE/calls.log" || fail "spawn must select the Codex model"
 grep -q -- '--reasoning-level xhigh' "$FAKE_STATE/calls.log" || fail "spawn must select the effort"
 grep -q -- "--environment $SCRATCH" "$FAKE_STATE/calls.log" || fail "spawn must attach the exact reviewed worktree"
-grep -q -- '--permission-mode accept-edits' "$FAKE_STATE/calls.log" || fail "review child must be read-only (accept-edits)"
+grep -q -- '--permission-mode accept-edits' "$FAKE_STATE/calls.log" || fail "review child must use accept-edits"
+grep -q -- '--visibility visible' "$FAKE_STATE/calls.log" || fail "review child must stay visible under a hidden parent"
 grep -q -- '--project proj_TEST' "$FAKE_STATE/calls.log" || fail "spawn must use the parent project"
 [ "$(spawn_calls)" = "1" ] || fail "exactly one spawn expected, got $(spawn_calls)"
 [ -z "$REVIEW_BB_CHILD_ID" ] || fail "settled child ownership must be cleared"
@@ -237,6 +252,13 @@ review_bb_run_reviewer "$PROMPT" "$HEAD_SHA_SCRATCH" "origin/main" "abcdef123456
 case "$RAW" in *approval*) ;; *) fail "RAW must name the approval block, got: $RAW" ;; esac
 printf '[]\n' > "$FAKE_STATE/interactions.json"
 
+# Failed interaction discovery cannot be accepted as zero pending approvals.
+printf 'INVALID JSON\n' > "$FAKE_STATE/interactions.json"
+review_bb_run_reviewer "$PROMPT" "$HEAD_SHA_SCRATCH" "origin/main" "abcdef123456" \
+  codex gpt-6-astra xhigh '(.ok == true)' "/tmp/ci.txt" >/dev/null 2>&1
+[ "$REVIEWER_EXIT" = "1" ] || fail "unreadable interactions must fail closed"
+printf '[]\n' > "$FAKE_STATE/interactions.json"
+
 # 9. HEAD moving mid-review discards the verdict.
 printf '{"ok":true}\n' > "$FAKE_STATE/output.txt"
 reset_calls
@@ -263,6 +285,15 @@ case "$RAW" in *reused*) ;; *) fail "must reuse the existing child output, got: 
 jq -n --arg p "$SCRATCH" '{thread:{id:"thr_child9",projectId:"proj_TEST",status:"idle"},environment:{id:"env_child9",path:$p}}' > "$FAKE_STATE/child-show.json"
 printf '[]\n' > "$FAKE_STATE/list.json"
 
+# Reuse must not skip the checked-out HEAD or environment checks.
+jq -n --arg t "$TITLE_FOR_REUSE" '[{id:"thr_old9",title:$t,status:"idle",updatedAt:2}]' > "$FAKE_STATE/list.json"
+jq -n '{thread:{id:"thr_old9",status:"idle"},environment:{path:"/tmp/wrong-worktree"}}' > "$FAKE_STATE/child-show.json"
+review_bb_run_reviewer "$PROMPT" "$HEAD_SHA_SCRATCH" "origin/main" "abcdef123456" \
+  codex gpt-6-astra xhigh '(.ok == true)' "/tmp/ci.txt" >/dev/null 2>&1
+[ "$REVIEWER_EXIT" = 1 ] || fail "reused verdict from the wrong environment must fail"
+jq -n --arg p "$SCRATCH" '{thread:{id:"thr_child9",status:"idle"},environment:{path:$p}}' > "$FAKE_STATE/child-show.json"
+printf '[]\n' > "$FAKE_STATE/list.json"
+
 # 11. Dedup: a running child for identical inputs is adopted, not duplicated.
 TITLE_RUNNING="$(review_bb_review_title "$(git branch --show-current)" "$HEAD_SHA_SCRATCH" codex gpt-6-astra xhigh abcdef123456 "")"
 jq -n --arg t "$TITLE_RUNNING" '[{id:"thr_live9",title:$t,status:"active",updatedAt:3}]' > "$FAKE_STATE/list.json"
@@ -286,6 +317,19 @@ reset_calls
 review_bb_cancel_owned
 [ "$(grep -c '^thread stop' "$FAKE_STATE/calls.log" || true)" = "0" ] || fail "cancel with no owned child must stop nothing"
 
+# A real TERM while waiting must trigger cleanup before the CLI timeout.
+reset_calls
+signal_rc=0
+(
+  trap 'review_bb_cancel_owned' EXIT
+  trap 'exit 143' TERM
+  REVIEW_BB_CHILD_ID=thr_signal1
+  export BB_FAKE_WAIT_SIGNAL=1
+  review_bb_wait_idle thr_signal1 20m
+) >/dev/null 2>&1 || signal_rc=$?
+[ "$signal_rc" = 143 ] || fail "TERM must interrupt the asynchronous CLI wait"
+grep -q '^thread stop thr_signal1' "$FAKE_STATE/calls.log" || fail "TERM must stop the owned child"
+
 # 13. Wait timeout stops ONLY the owned child and fails.
 export BB_FAKE_WAIT_RC=1
 printf '{"ok":true}\n' > "$FAKE_STATE/output.txt"
@@ -305,7 +349,9 @@ FIXSCRATCH="$TEST_DIR/fixscratch"
 git init -qb main "$FIXSCRATCH"
 git -C "$FIXSCRATCH" config user.email t@t.t
 printf 'one\n' > "$FIXSCRATCH/file.txt"
-git -C "$FIXSCRATCH" add file.txt
+mkdir -p "$FIXSCRATCH/prompts"
+cp "$repo_root/prompts/review-fix-prompt.md" "$FIXSCRATCH/prompts/review-fix-prompt.md"
+git -C "$FIXSCRATCH" add -- file.txt prompts/review-fix-prompt.md
 git -C "$FIXSCRATCH" commit -qm init
 pushd "$FIXSCRATCH" >/dev/null
 
@@ -323,10 +369,41 @@ JSON
   reset_calls
 }
 
+# Input snapshots preserve binary data, spaces, and the driver's real index.
+printf 'staged\n' > staged.txt
+git add -- staged.txt
+printf '\0binary\377' > 'new file.bin'
+printf 'excluded\n' > credentials.txt
+index_before="$(git diff --cached | sha1sum)"
+review_bb_input_patch > "$TEST_DIR/input.patch"
+[ "$(git diff --cached | sha1sum)" = "$index_before" ] || fail "snapshot must not mutate the real index"
+! grep -q credentials.txt "$TEST_DIR/input.patch" || fail "secret-looking files must be excluded"
+grep -q 'new file.bin' "$TEST_DIR/input.patch" || fail "spaces and binary new files must be snapshotted"
+review_bb_patch_tree HEAD "$TEST_DIR/input.patch" >/dev/null || fail "binary input must reproduce cleanly"
+git reset -q HEAD -- staged.txt
+rm -f staged.txt 'new file.bin' credentials.txt
+
+# Failed, empty, blocked, and truncated fixer results cannot transfer changes.
+for failure in error empty interactions truncated; do
+  fixer_env_ready
+  case "$failure" in
+    error) jq '.thread.status = "error"' "$FAKE_STATE/child-show.json" > "$TEST_DIR/error.json"; cp "$TEST_DIR/error.json" "$FAKE_STATE/child-show.json" ;;
+    empty) : > "$FAKE_STATE/output.txt" ;;
+    interactions) printf 'invalid\n' > "$FAKE_STATE/interactions.json" ;;
+    truncated) export BB_FAKE_TRUNCATED=true ;;
+  esac
+  review_bb_run_fixer "origin/main" >/dev/null 2>&1 && fail "$failure fixer must fail closed"
+  unset BB_FAKE_TRUNCATED
+  [ "$(cat file.txt)" = one ] || fail "$failure fixer must preserve parent content"
+done
+
 # 14. Fixer spawns isolated (new worktree, never the shared path) and the
 #     reviewed patch is transferred.
 fixer_env_ready
+export BB_FAKE_ASSERT_OWNER=1 BB_FAKE_EXPECT_OWNER=thr_fix9
 review_bb_run_fixer "origin/main" >/dev/null 2>&1 || fail "fixer run must succeed"
+unset BB_FAKE_ASSERT_OWNER BB_FAKE_EXPECT_OWNER
+grep -q -- "--base-branch $(git rev-parse HEAD)" "$FAKE_STATE/calls.log" || fail "fixer must branch at the pinned commit"
 [ "$(cat file.txt)" = "two" ] || fail "fixer patch must be applied"
 grep -q -- '--new-environment worktree' "$FAKE_STATE/calls.log" || fail "fixer must use an isolated worktree"
 grep -q -- "--environment $FIXSCRATCH" "$FAKE_STATE/calls.log" && fail "fixer must NOT attach the driver worktree"
@@ -377,9 +454,18 @@ review_bb_run_fixer "origin/main" >/dev/null 2>&1 && fail "unrecognized fixer di
 fixer_env_ready
 printf 'AKIAEXAMPLE\n' > "$FIXSCRATCH/.env"
 printf 'notes\n' > "$FIXSCRATCH/todo.txt"
+git diff --no-index -- /dev/null todo.txt > "$FAKE_STATE/committed.patch" || [ "$?" = 1 ]
 review_bb_run_fixer "origin/main" >/dev/null 2>&1 || fail "fixer with untracked files must succeed"
 [ -f "$FIXSCRATCH/.env" ] || fail "untracked files must be left alone in the driver tree"
 [ "$(cat file.txt)" = "two" ] || fail "fixer patch must still apply with untracked files present"
+printf 'one\n' > file.txt
+fixer_env_ready
+git diff --no-index -- /dev/null todo.txt > "$FAKE_STATE/committed.patch" || [ "$?" = 1 ]
+export REVIEW_BB_PRE_RECONCILE_HOOK_FOR_TESTS="printf 'changed\n' > '$FIXSCRATCH/todo.txt'"
+review_bb_run_fixer "origin/main" >/dev/null 2>&1 && fail "untracked content changes must abort transfer"
+unset REVIEW_BB_PRE_RECONCILE_HOOK_FOR_TESTS
+[ "$(cat file.txt)" = one ] || fail "untracked conflict must preserve tracked files"
+[ "$(cat todo.txt)" = changed ] || fail "untracked conflict must preserve new content"
 rm -f "$FIXSCRATCH/.env" "$FIXSCRATCH/todo.txt"
 git -C "$FIXSCRATCH" checkout -q -- file.txt 2>/dev/null || printf 'one\n' > "$FIXSCRATCH/file.txt"
 
