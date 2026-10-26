@@ -254,7 +254,9 @@ export type OAuthErrorCode =
   | 'server_error'
   | 'authorization_pending'
   | 'slow_down'
-  | 'expired_token';
+  | 'expired_token'
+  | 'invalid_token'
+  | 'insufficient_scope';
 
 export interface OAuthError {
   error: OAuthErrorCode;

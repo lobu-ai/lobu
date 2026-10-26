@@ -550,8 +550,7 @@ export class OAuthProvider {
   // ============================================
 
   /**
-   * Get user info for a verified access token
-   * Requires profile:read scope
+   * Get user info for a verified access token. Requires `profile:read`.
    */
   async getUserInfo(token: string): Promise<{
     sub: string;
@@ -574,21 +573,21 @@ export class OAuthProvider {
       /** True for the user's personal org (matches {@link personal_org_slug}). */
       personal: boolean;
     }[];
-  } | null> {
+  } | 'invalid_token' | 'insufficient_scope'> {
     const authInfo = await this.verifyAccessToken(token);
     // An access token always names its user; only the worker lane is userless.
-    if (!authInfo?.userId) return null;
+    if (!authInfo?.userId) return 'invalid_token';
     const userId = authInfo.userId;
 
     if (!authInfo.scopes.includes('profile:read')) {
-      return null;
+      return 'insufficient_scope';
     }
 
     const result = await this.sql`
       SELECT id, email, name, image FROM "user" WHERE id = ${userId}
     `;
 
-    if (result.length === 0) return null;
+    if (result.length === 0) return 'invalid_token';
 
     // Resolve the user's personal org once. Two consumers need it:
     //   - `organization_slug` falls back to it for tokens with no org binding
