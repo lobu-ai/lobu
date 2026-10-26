@@ -24,6 +24,7 @@ import {
 import {
   ensureDbForGatewayTests,
   resetTestDatabase,
+  seedOrgMembership,
 } from '../../gateway/__tests__/helpers/db-setup.js';
 import { resolveSystemJudgeTarget } from '../../gateway/inference/system-judge-target.js';
 import { authStash, installRouteTestMocks } from './helpers/route-test-mocks';
@@ -111,6 +112,7 @@ async function importAgentRoutes() {
 beforeEach(async () => {
   await resetTestDatabase();
   await seedOrgAndAgent(ORG, AGENT, 'Trips Agent');
+  await seedOrgMembership(ORG, "u1", "owner");
   authStash.user = { id: 'u1', name: 'Test', email: 'u1@test', emailVerified: true };
   authStash.organizationId = ORG;
   authStash.authSource = 'session';

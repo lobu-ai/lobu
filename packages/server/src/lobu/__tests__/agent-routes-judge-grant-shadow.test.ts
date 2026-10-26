@@ -19,6 +19,7 @@ import { beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import {
   ensureDbForGatewayTests,
   resetTestDatabase,
+  seedOrgMembership,
 } from "../../gateway/__tests__/helpers/db-setup.js";
 import {
   authStash,
@@ -97,6 +98,7 @@ beforeAll(async () => {
 beforeEach(async () => {
   await resetTestDatabase();
   await seedOrgAndAgent();
+  await seedOrgMembership(ORG, "u1", "owner");
   authStash.user = {
     id: "u1",
     name: "Test",

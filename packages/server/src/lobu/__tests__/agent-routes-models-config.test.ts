@@ -14,6 +14,7 @@ import { beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import {
   ensureDbForGatewayTests,
   resetTestDatabase,
+  seedOrgMembership,
 } from "../../gateway/__tests__/helpers/db-setup.js";
 import {
   authStash,
@@ -55,6 +56,7 @@ beforeAll(async () => {
 beforeEach(async () => {
   await resetTestDatabase();
   await seedOrgAndAgent();
+  await seedOrgMembership(ORG, "u1", "owner");
   authStash.user = {
     id: "u1",
     name: "Test",
@@ -68,6 +70,30 @@ beforeEach(async () => {
 }, 30_000);
 
 describe("agent PATCH/GET /config — models surface", () => {
+  test("failed audit rolls back settings, metadata and deletion together with lifecycle events", async () => {
+    const app = await importAgentRoutes();
+    const { getDb } = await import("../../db/client.js");
+    const sql = getDb();
+    const before = await sql`SELECT * FROM agents WHERE organization_id = ${ORG} AND id = ${AGENT}`;
+    await sql.unsafe("CREATE FUNCTION reject_agent_config_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.metadata->>'category' = 'config' THEN RAISE EXCEPTION 'synthetic agent audit failure'; END IF; RETURN NEW; END $$");
+    await sql.unsafe("CREATE TRIGGER reject_agent_config_audit BEFORE INSERT ON events FOR EACH ROW EXECUTE FUNCTION reject_agent_config_audit()");
+    try {
+      for (const [path, method, body] of [
+        [`/${AGENT}/config`, "PATCH", { soulMd: "Changed" }],
+        [`/${AGENT}`, "PATCH", { name: "Changed" }],
+        [`/${AGENT}`, "DELETE", {}],
+      ] as const) {
+        const response = await app.request(path, { method, headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+        expect(response.status).toBe(500);
+        expect(await sql`SELECT * FROM agents WHERE organization_id = ${ORG} AND id = ${AGENT}`).toEqual(before);
+        expect(await sql`SELECT id FROM events WHERE organization_id = ${ORG}`).toHaveLength(0);
+      }
+    } finally {
+      await sql.unsafe("DROP TRIGGER reject_agent_config_audit ON events");
+      await sql.unsafe("DROP FUNCTION reject_agent_config_audit()");
+    }
+  });
+
   test("#1: a PATCH carrying legacy defaultModel is rejected (not silently dropped)", async () => {
     const app = await importAgentRoutes();
     const res = await app.request(`/${AGENT}/config`, {
