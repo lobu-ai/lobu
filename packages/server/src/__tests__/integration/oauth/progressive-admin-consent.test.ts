@@ -1063,7 +1063,7 @@ describe('Progressive mcp:admin consent', () => {
     const verified = await provider.verifyAccessToken(accessToken);
     expect(verified?.grantedOrganizationIds).toEqual([]);
     const info = await provider.getUserInfo(accessToken);
-    expect(info?.organizations).toEqual([]);
+    expect(info).toMatchObject({ organizations: [] });
 
     const refreshed = await call(app, 'POST', '/oauth/token', {
       body: {
