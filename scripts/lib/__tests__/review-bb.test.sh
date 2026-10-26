@@ -51,6 +51,9 @@ case "$1 $2" in
   "thread show")
     if [ -z "${3:-}" ]; then printf '{"ok":false,"error":{"code":"missing_thread_id"}}\n'; exit 1; fi
     if [ "${3:-}" = "thr_parent1" ]; then cat "$state/parent.json"
+    elif [ -d "$state/show-queue" ] && [ -n "$(ls -A "$state/show-queue" 2>/dev/null)" ]; then
+      first="$(ls "$state/show-queue" | sort | head -n1)"
+      cat "$state/show-queue/$first"; rm -f "$state/show-queue/$first"
     else cat "$state/child-show.json"; fi
     ;;
   "provider models") cat "$state/models-$3.json" ;;
@@ -61,7 +64,12 @@ case "$1 $2" in
   "thread output") "$BB_FAKE_JQ" -n --arg o "$(cat "$state/output.txt")" '{output:$o}' ;;
   "thread stop") printf '{"ok":true}\n' ;;
   "thread archive") printf '{"ok":true}\n' ;;
-  "environment diff") cat "$state/fixer.patch" ;;
+  "environment diff")
+    case "$*" in
+      *branch_committed*) cat "$state/committed.patch" ;;
+      *) cat "$state/fixer.patch" ;;
+    esac
+    ;;
   *) printf '{}\n' ;;
 esac
 SHIM
@@ -311,6 +319,7 @@ JSON
   printf '[]\n' > "$FAKE_STATE/interactions.json"
   printf 'fixed it\n' > "$FAKE_STATE/output.txt"
   printf 'diff --git a/file.txt b/file.txt\n--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-one\n+two\n' > "$FAKE_STATE/fixer.patch"
+  printf '' > "$FAKE_STATE/committed.patch"
   reset_calls
 }
 
@@ -322,6 +331,24 @@ review_bb_run_fixer "origin/main" >/dev/null 2>&1 || fail "fixer run must succee
 grep -q -- '--new-environment worktree' "$FAKE_STATE/calls.log" || fail "fixer must use an isolated worktree"
 grep -q -- "--environment $FIXSCRATCH" "$FAKE_STATE/calls.log" && fail "fixer must NOT attach the driver worktree"
 grep -q '^thread archive thr_fix9' "$FAKE_STATE/calls.log" || fail "successful fixer child must be archived (cleanup ownership)"
+printf 'one\n' > file.txt
+git -C "$FIXSCRATCH" diff --quiet || git -C "$FIXSCRATCH" commit -qam restore-14 >/dev/null 2>&1 || true
+
+# 14b. Async worktree provisioning: env absent pre-wait is verified post-settle.
+fixer_env_ready
+mkdir -p "$FAKE_STATE/show-queue"
+printf '{"thread":{"id":"thr_fix9","projectId":"proj_TEST","status":"starting"},"environment":null}\n' > "$FAKE_STATE/show-queue/01-pending.json"
+review_bb_run_fixer "origin/main" >/dev/null 2>&1 || fail "fixer must tolerate async env provisioning"
+[ "$(cat file.txt)" = "two" ] || fail "fixer patch must apply after async provisioning"
+rm -rf "$FAKE_STATE/show-queue"
+printf 'one\n' > "$FIXSCRATCH/file.txt"
+git -C "$FIXSCRATCH" diff --quiet || git -C "$FIXSCRATCH" commit -qam restore-14b >/dev/null 2>&1 || true
+
+# 14d. A committed stack that does not match the driver input is rejected.
+fixer_env_ready
+printf 'diff --git a/other.txt b/other.txt\n--- /dev/null\n+++ b/other.txt\n@@ -0,0 +1 @@\n+sneaky commit\n' > "$FAKE_STATE/committed.patch"
+review_bb_run_fixer "origin/main" >/dev/null 2>&1 && fail "committed-stack mismatch must fail explicitly"
+[ "$(cat file.txt)" = "one" ] || fail "committed-stack mismatch must leave the tree untouched"
 
 # 15. Concurrent driver edits abort the transfer; the tree is untouched.
 printf 'one\n' > file.txt

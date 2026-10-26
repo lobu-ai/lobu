@@ -500,6 +500,10 @@ review_bb_run_fixer() {
 
   head_sha="$(git rev-parse HEAD)"
   branch="$(git branch --show-current)"
+  if [ -z "$branch" ]; then
+    echo "review_bb: detached HEAD is not supported for the isolated fixer (no branch to base the worktree on)" >&2
+    return 1
+  fi
   input_patch="$(mktemp /tmp/lobu-review-fix-bb-input.XXXXXX)"
   git diff HEAD > "$input_patch"
   untracked_list="$(git ls-files --others --exclude-standard || true)"
@@ -549,7 +553,12 @@ review_bb_run_fixer() {
     printf '2. For each listed untracked file, read it from `<parent worktree>/<path>`\n'
     printf '   and recreate it at the same relative path in your worktree when it\n'
     printf '   belongs to this change. Never copy secret-looking files.\n'
-    printf '3. Do the fixer pass in YOUR worktree only. Never touch the parent path.\n'
+    printf '3. Commit ONLY the reproduced input as `bb-fixer: reproduce driver input`\n'
+    printf '   (skip the commit when the input patch and untracked list are both\n'
+    printf '   empty). Never push, and never commit your fixes: your uncommitted\n'
+    printf '   diff must contain ONLY your fixes, because the driver transfers\n'
+    printf '   exactly that diff back.\n'
+    printf '4. Do the fixer pass in YOUR worktree only. Never touch the parent path.\n'
   } >> "$fixer_prompt"
 
   pr="$(review_bb_pr_number)"
@@ -607,22 +616,23 @@ review_bb_run_fixer() {
   fi
   rm -f "$fixer_prompt" "$input_desc"
 
-  # Isolation: the fixer must NOT share the driver's worktree.
+  # Isolation: the fixer must NOT share the driver's worktree. A fresh
+  # managed worktree provisions asynchronously, so an env that is merely
+  # absent here is re-verified strictly after the child settles; an env
+  # that is already present and equal to the driver tree is a violation now.
   child_env="$(review_bb_cli_invoke thread show "$child" --json 2>/dev/null | jq -r '.environment.id // empty' 2>/dev/null || true)"
   child_path="$(review_bb_env_path "$child")"
-  if [ -z "$child_env" ] || [ -z "$child_path" ]; then
-    echo "review_bb: fixer child @thread:$child has no usable environment; stopping it" >&2
-    review_bb_cli_invoke thread stop "$child" >/dev/null 2>&1 || true
-    review_bb_clear_child
-    return 1
-  fi
-  if [ "$child_path" = "$(pwd -P)" ]; then
+  if [ -n "$child_path" ] && [ "$child_path" = "$(pwd -P)" ]; then
     echo "review_bb: fixer child shares the driver worktree ($child_path); isolation violated, stopping it" >&2
     review_bb_cli_invoke thread stop "$child" >/dev/null 2>&1 || true
     review_bb_clear_child
     return 1
   fi
-  echo ">> fixer working in isolated worktree: $child_path (env $child_env)" >&2
+  if [ -n "$child_path" ]; then
+    echo ">> fixer working in isolated worktree: $child_path (env $child_env)" >&2
+  else
+    echo ">> fixer worktree provisioning; will verify isolation after settle" >&2
+  fi
 
   review_bb_cli_invoke thread wait "$child" --status idle --timeout "${BB_REVIEW_WAIT_TIMEOUT:-20m}" --json >/dev/null 2>&1 || wait_rc=$?
   if [ "$wait_rc" -ne 0 ]; then
@@ -632,6 +642,38 @@ review_bb_run_fixer() {
     return 1
   fi
   review_bb_clear_child
+
+  # Strict post-settle isolation verdict: the managed worktree is provisioned
+  # by now, so the env must exist and differ from the driver worktree.
+  child_env="$(review_bb_cli_invoke thread show "$child" --json 2>/dev/null | jq -r '.environment.id // empty' 2>/dev/null || true)"
+  child_path="$(review_bb_env_path "$child")"
+  if [ -z "$child_env" ] || [ -z "$child_path" ]; then
+    echo "review_bb: fixer child @thread:$child has no usable environment after settle; leaving it for inspection" >&2
+    return 1
+  fi
+  if [ "$child_path" = "$(pwd -P)" ]; then
+    echo "review_bb: fixer child @thread:$child ran in the driver worktree ($child_path); isolation violated. NOT transferring anything; leaving it for inspection" >&2
+    return 1
+  fi
+  echo ">> fixer worked in isolated worktree: $child_path (env $child_env)" >&2
+
+  # The child's committed stack must be exactly the reproduced input: the
+  # uncommitted diff transferred below is only the fixer's own changes when
+  # the reproduction was committed separately. Compare modulo `index` lines
+  # (blob hashes are content-derived, but never gate on them).
+  committed_patch="$(mktemp /tmp/lobu-review-bb-committed.XXXXXX)"
+  if ! review_bb_cli_invoke environment diff "$child_env" --target branch_committed \
+      --merge-base-branch "$branch" > "$committed_patch" 2>/dev/null; then
+    echo "review_bb: could not read fixer committed stack from env $child_env; leaving child @thread:$child for inspection" >&2
+    rm -f "$committed_patch" "$input_patch"
+    return 1
+  fi
+  if ! diff <(grep -v '^index ' "$committed_patch" || true) <(grep -v '^index ' "$input_patch" || true) >/dev/null; then
+    echo "review_bb: fixer committed stack does not match the driver input (expected exactly one 'bb-fixer: reproduce driver input' commit, fixes left uncommitted). NOT transferring. Committed stack preserved at $committed_patch; fixer at @thread:$child" >&2
+    rm -f "$committed_patch" "$input_patch"
+    return 1
+  fi
+  rm -f "$committed_patch"
 
   pending="$(review_bb_pending_interaction "$child")"
   if [ -n "$pending" ] && [ "$pending" != "0" ]; then
