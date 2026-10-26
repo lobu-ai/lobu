@@ -9,7 +9,7 @@
  *   - the agent-turn sweep (worker-api/agent-turn.ts) — `agent_turn` on the
  *     connector reaper's threshold, one row per transaction so the timeout
  *     can publish the client's `thread_response` alongside it (or put a dead
- *     attempt without a stored tool receipt back to `pending` for one re-run)
+ *     attempt without recorded tool activity back to `pending` for one re-run)
  *   - the automation sweep (automations/automation.ts) — explicit external lease
  *     expiry, otherwise a 3min heartbeat-stale path + 2h coarse TTL
  *

@@ -12,6 +12,7 @@ import {
 	extractSessionToken,
 	getRequestBodyAsText,
 	type HttpMcpServerConfig,
+	recordAgentTurnToolCall,
 	runWithWorkerOrgContext,
 	sendJsonRpcError,
 } from "./proxy-shared.js";
@@ -111,10 +112,17 @@ async function handleProxyRequestAuthenticated(
 
 	// Guard every tools/call before forwarding to the operation's authorization.
 	// Read the bounded body once and share it with forwarding.
+	// `toolCall` is what an agent turn records before forwarding: the tool's
+	// name, `null` for a POST that cannot be identified (fail closed), or
+	// undefined for a message that calls no tool.
+	let toolCall: string | null | undefined;
 	if (c.req.method === "POST") {
 		try {
 			if (requestBodyText) {
 				const jsonRpc = JSON.parse(requestBodyText);
+				if (!Array.isArray(jsonRpc) && jsonRpc?.method === "tools/call") {
+					toolCall = typeof jsonRpc.params?.name === "string" ? jsonRpc.params.name : null;
+				}
 
 				// JSON-RPC 2.0 / the MCP streamable-HTTP transport permit BATCH
 				// requests: a top-level ARRAY of request objects. The single-request
@@ -165,7 +173,18 @@ async function handleProxyRequestAuthenticated(
 				}
 			}
 		} catch {
-			// If body parsing fails, just forward the request as-is
+			// If body parsing fails, just forward the request as-is — but an
+			// agent turn cannot know it calls no tool, so it records one.
+			toolCall = null;
+		}
+		if (toolCall !== undefined) {
+			const refused = await recordAgentTurnToolCall(
+				tokenData,
+				httpServer,
+				toolCall ?? undefined,
+				proxy.isReadOnlyLobuTool,
+			);
+			if (refused) return sendJsonRpcError(c, -32603, refused.error);
 		}
 	}
 

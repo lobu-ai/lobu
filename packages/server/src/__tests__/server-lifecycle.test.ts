@@ -95,6 +95,7 @@ vi.mock("../index", async () => {
 	return {
 		app,
 		setViteDev: vi.fn(),
+		isAuthorizationReadOnlyToolName: () => false,
 	};
 });
 
@@ -413,7 +414,7 @@ describe("createServerLifecycle (source-level contract)", () => {
 	it("runs databaseReadiness before workspace + gateway init", () => {
 		const dbReady = indexOf("await databaseReadiness()");
 		const workspace = indexOf("await initWorkspaceProvider()");
-		const gateway = indexOf("await initLobuGateway()");
+		const gateway = indexOf("await initLobuGateway(");
 		expect(dbReady).toBeLessThan(workspace);
 		expect(workspace).toBeLessThan(gateway);
 	});

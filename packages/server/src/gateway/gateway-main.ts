@@ -43,6 +43,13 @@ interface GatewayOptions {
 	secretStore?: SecretStoreRegistry;
 	/** Resolve provider credentials dynamically at runtime (embedded mode). */
 	providerCredentialResolver?: RuntimeProviderCredentialResolver;
+	/**
+	 * The tool registry's authorization read-only classifier, handed to the MCP
+	 * proxy (`McpProxy` option `isReadOnlyLobuTool`). Injected from the server
+	 * entry because the registry cannot be imported from the gateway graph
+	 * without an import cycle through the tool modules.
+	 */
+	isReadOnlyLobuTool?: (toolName: string) => boolean;
 }
 
 export class Gateway {
@@ -61,6 +68,7 @@ export class Gateway {
 			providerRegistry: options?.providerRegistry,
 			secretStore: options?.secretStore,
 			providerCredentialResolver: options?.providerCredentialResolver,
+			isReadOnlyLobuTool: options?.isReadOnlyLobuTool,
 		});
 	}
 

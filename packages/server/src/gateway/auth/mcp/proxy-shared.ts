@@ -9,6 +9,7 @@ import type { Context } from "hono";
 import { captureEffect } from "../../routes/internal/capture-mode.js";
 import { getOrgId, orgContext } from "../../../lobu/stores/org-context.js";
 import { getRevokedTokenStore } from "../revoked-token-store.js";
+import { markAgentTurnToolStarted, StaleAgentTurnAttemptError } from "../../../runs/agent-turn-inputs.js";
 import type { McpTool } from "./tool-cache.js";
 import {
 	MCP_REQUEST_BODY_LIMIT,
@@ -252,4 +253,37 @@ export async function captureMcpTool(
 ) {
 	const result = await captureEffect(worker, `mcp.${mcpId}.${toolName}`, args);
 	return { content: [{ type: "text", text: JSON.stringify(result) }], isError: false };
+}
+
+/**
+ * Record an agent turn's MCP tool call before it is forwarded, so the reaper
+ * never re-runs an attempt that may have acted (`markAgentTurnToolStarted`).
+ *
+ * The one exemption is a Lobu tool the registry itself declares read-only for
+ * authorization (`search_memory`, `query_sql`, …) on the embedded server: it
+ * changes nothing a re-run could repeat beyond an audit line, and memory
+ * recall runs at the start of every turn. The registry's classifier is
+ * injected (`McpProxy` option `isReadOnlyLobuTool`) because importing the
+ * registry here closes an import cycle through the tool modules. An external
+ * server's own `readOnlyHint` is not trusted for this. `toolName` undefined
+ * means the call could not be identified, which stamps (fail closed).
+ *
+ * Returns a refusal to send instead of executing, or null to proceed.
+ */
+export async function recordAgentTurnToolCall(
+	tokenData: WorkerTokenData,
+	httpServer: { internal?: boolean },
+	toolName: string | undefined,
+	isReadOnlyLobuTool: ((toolName: string) => boolean) | undefined,
+): Promise<{ status: 409 | 503; error: string } | null> {
+	if (httpServer.internal === true && toolName && isReadOnlyLobuTool?.(toolName) === true) {
+		return null;
+	}
+	try {
+		await markAgentTurnToolStarted(tokenData);
+		return null;
+	} catch (error) {
+		if (error instanceof StaleAgentTurnAttemptError) return { status: 409, error: error.message };
+		return { status: 503, error: "Could not record the tool call for this turn; it was not executed" };
+	}
 }

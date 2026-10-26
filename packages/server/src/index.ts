@@ -2024,3 +2024,8 @@ export function setViteDev(v: any) {
 }
 
 export { app };
+// The gateway's MCP proxy classifies Lobu tools with the registry, which the
+// gateway graph cannot import without a cycle; the server lifecycle hands it
+// over at boot (`initLobuGateway`). Re-exported here because this module
+// already loads the registry through the MCP handler.
+export { isAuthorizationReadOnlyToolName } from "./tools/registry";

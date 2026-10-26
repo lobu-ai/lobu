@@ -147,10 +147,9 @@ function initializeMetrics() {
     "Agent-turn liveness-status publishes that failed on the worker heartbeat path",
     "counter"
   );
-  // Counts retries of stale turns without a stored tool receipt.
   registerMetric(
     "lobu_agent_turn_requeued_total",
-    "Agent turns re-run by the stale-run reaper without a stored tool receipt",
+    "Agent turns re-run by the stale-run reaper without recorded tool activity",
     "counter"
   );
   // A conversation whose native session outgrew the snapshot cap. Trimmed to

@@ -44,10 +44,13 @@ import { chatTurnAccessInstructions, chatTurnSender, chatTurnSenderContext, chat
 import { reapStaleRuns } from '../../scheduled/check-stalled-executions';
 import { sweepStaleAgentTurnRuns } from '../../worker-api/agent-turn';
 import { failClaimedWorkerRun } from '../../worker-api/poll';
+import { Hono } from 'hono';
+import { authenticateWorker } from '../../gateway/routes/internal/middleware';
+import { McpProxy } from '../../gateway/auth/mcp/proxy';
+import { isAuthorizationReadOnlyToolName } from '../../tools/registry';
 import type { AgentSettingsStore } from '../../gateway/auth/settings/agent-settings-store';
 import type { ProviderCatalogService } from '../../gateway/auth/provider-catalog';
 import type { McpConfigService } from '../../gateway/auth/mcp/config-service';
-import type { McpProxy } from '../../gateway/auth/mcp/proxy';
 import type { ModelProviderModule } from '../../gateway/modules/module-system';
 import { cleanupTestDatabase, getTestDb } from '../setup/test-db';
 import {
@@ -337,6 +340,9 @@ describe('agent turn producer', () => {
       catalog: catalogFor(tokenEchoingModule()),
       gatewayUrl: GATEWAY_URL,
     });
+    // A worker holds the credential only once it claims the run; the gateway
+    // refuses a side-effecting call from an attempt that does not own it.
+    expect((await pollFleet('fleet-interaction', { agent_turn: true })).status).toBe(200);
     const [run] = await agentTurnRuns();
     const postLinkButton = vi.fn(async () => ({ id: 'synthetic-post' }));
     const app = createInteractionRoutes({ postLinkButton } as never);
@@ -4791,6 +4797,97 @@ describe('agent turn reaper', () => {
     `;
     expect(await sweepStaleAgentTurnRuns(STALE_THRESHOLD_SECONDS)).toEqual({ reaped: 0, delivered: 0, requeued: 0 });
     expect((await turnRow(runId)).status).toBe('running');
+  });
+
+  /**
+   * The gateway routes a turn's tools reach, mounted as production mounts
+   * them: `authenticateWorker` in front of `/internal/*`, and the MCP proxy's
+   * REST tool route. `effects` counts calls that reached the handler.
+   */
+  function gatewayRoutes() {
+    const effects = vi.fn();
+    const app = new Hono();
+    app.post('/lobu/internal/effect', authenticateWorker, (c) => { effects(); return c.json({ ok: true }); });
+    app.get('/lobu/internal/read', authenticateWorker, (c) => { effects(); return c.json({ ok: true }); });
+    const proxy = new McpProxy({
+      getHttpServer: async (id: string) => ({ id, internal: id === 'lobu', upstreamUrl: 'http://127.0.0.1:9/unreachable' }),
+    } as never, { isReadOnlyLobuTool: isAuthorizationReadOnlyToolName });
+    app.route('/lobu/mcp', proxy.getApp());
+    return { app, effects };
+  }
+
+  async function credentialOf(runId: number): Promise<string> {
+    const sql = getTestDb();
+    const [run] = (await sql`SELECT action_input->>'credential' AS credential FROM runs WHERE id = ${runId}`) as unknown as Array<{ credential: string }>;
+    return run!.credential;
+  }
+
+  function call(app: Hono, method: 'GET' | 'POST', path: string, credential: string, body: unknown = {}) {
+    return app.fetch(new Request(`http://gateway.test${path}`, {
+      method,
+      headers: { authorization: `Bearer ${credential}`, 'content-type': 'application/json' },
+      ...(method === 'POST' ? { body: JSON.stringify(body) } : {}),
+    }));
+  }
+
+  it.each([
+    ['an internal route', '/lobu/internal/effect', {}],
+    ['an MCP tool', '/lobu/mcp/external/tools/mutate', {}],
+    ['an MCP JSON-RPC tool', '/lobu/mcp/external', { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'mutate', arguments: {} } }],
+  ])('never re-runs an attempt whose call to %s reached the gateway but whose trace never arrived', async (_kind, path, body) => {
+    const runId = await claimedTurnRun('fleet-tool-in-flight');
+    const { app } = gatewayRoutes();
+    // The tool acted at the gateway; the worker died before reporting it.
+    await call(app, 'POST', path, await credentialOf(runId), body);
+    expect((await turnRow(runId)).run_metadata?.turn_tool_started).toBe(true);
+    await loseHeartbeat(runId);
+
+    expect(await sweepStaleAgentTurnRuns(STALE_THRESHOLD_SECONDS)).toEqual({ reaped: 1, delivered: 1, requeued: 0 });
+    expect((await turnRow(runId)).status).toBe('timeout');
+    const [reply] = await threadResponses();
+    expect(reply!.action_input).toMatchObject({ errorCode: AgentErrorCode.WORKER_DIED });
+  });
+
+  it.each([
+    ['a GET read', 'GET', '/lobu/internal/read'],
+    ['a read-only Lobu memory tool', 'POST', '/lobu/mcp/lobu/tools/search_memory'],
+  ] as const)('still re-runs an attempt that only made %s', async (_kind, method, path) => {
+    const runId = await claimedTurnRun('fleet-read-only');
+    const { app } = gatewayRoutes();
+    await call(app, method, path, await credentialOf(runId));
+    expect((await turnRow(runId)).run_metadata?.turn_tool_started).toBe(false);
+    await loseHeartbeat(runId);
+    expect(await sweepStaleAgentTurnRuns(STALE_THRESHOLD_SECONDS)).toEqual({ reaped: 0, delivered: 0, requeued: 1 });
+  });
+
+  it('refuses a side-effecting call from an attempt the reaper already re-queued', async () => {
+    const runId = await claimedTurnRun('fleet-zombie');
+    const oldCredential = await credentialOf(runId);
+    await loseHeartbeat(runId);
+    expect(await sweepStaleAgentTurnRuns(STALE_THRESHOLD_SECONDS)).toEqual({ reaped: 0, delivered: 0, requeued: 1 });
+    const { app, effects } = gatewayRoutes();
+    // The "dead" worker was only stalled; it comes back and calls a tool while
+    // the re-run is waiting for a worker. Acting now would duplicate it.
+    const response = await call(app, 'POST', '/lobu/internal/effect', oldCredential);
+    expect(response.status).toBe(409);
+    expect(effects).not.toHaveBeenCalled();
+    expect((await turnRow(runId)).run_metadata?.turn_tool_started).toBe(false);
+  });
+
+  it('fences the old credential after the retry is claimed, while letting the new attempt act', async () => {
+    const runId = await claimedTurnRun('fleet-zombie-after-claim');
+    const oldCredential = await credentialOf(runId);
+    await loseHeartbeat(runId);
+    expect(await sweepStaleAgentTurnRuns(STALE_THRESHOLD_SECONDS)).toEqual({ reaped: 0, delivered: 0, requeued: 1 });
+    const retry = await (await pollFleet('fleet-retry-owner', { agent_turn: true })).json();
+    expect(retry.run_id).toBe(runId);
+    expect(retry.credentials.accessToken).not.toBe(oldCredential);
+    const { app, effects } = gatewayRoutes();
+    expect((await call(app, 'POST', '/lobu/internal/effect', oldCredential)).status).toBe(409);
+    expect(effects).not.toHaveBeenCalled();
+    expect((await turnRow(runId)).run_metadata?.turn_tool_started).toBe(false);
+    expect((await call(app, 'POST', '/lobu/internal/effect', retry.credentials.accessToken)).status).toBe(200);
+    expect(effects).toHaveBeenCalledTimes(1);
   });
 
   it('never re-runs a cancelled turn', async () => {

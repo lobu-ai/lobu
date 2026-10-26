@@ -164,7 +164,7 @@ function turnMarkerKey(deploymentName: string, messageId: string): string {
  * A turn that is executing: every isolate heartbeat re-extends to this same
  * deadline (`extendHeartbeatedTurnMarker`), not the shorter execution one. A
  * dead worker's turn is decided by `sweepStaleAgentTurnRuns` — re-run once when
- * no tool trace was stored, otherwise WORKER_DIED — so the marker must not
+ * no tool activity was recorded, otherwise WORKER_DIED — so the marker must not
  * lapse before that sweep fires, or the client holds a WORKER_UNRESPONSIVE for
  * a turn the reaper then runs again. A re-run gets this window back via
  * {@link resetTurnAdmissionDeadline}.

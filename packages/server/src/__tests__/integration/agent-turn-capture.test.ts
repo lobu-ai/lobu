@@ -179,10 +179,19 @@ describe('native capture over HTTP and Postgres', () => {
   it('rejects unreviewed routes and forged tokens, while live delivery still executes', async () => {
     expect((await request('/lobu/internal/unreviewed-mutation', {})).status).toBe(403);
     expect((await request('/lobu/internal/interactions/create', {}, token.slice(0, -8) + '00000000')).status).toBe(401);
-    const response = await request('/lobu/internal/interactions/create', { interactionType: 'link_button', url: 'https://example.invalid', label: 'live control' }, live);
-    expect(response.status).toBe(200);
-    expect(delivered).toHaveBeenCalledTimes(1);
-    delivered.mockClear();
+    // A live side effect is admitted only for the attempt that owns the run
+    // (`markAgentTurnToolStarted`), so the live control is that attempt here.
+    const sql = getTestDb();
+    const [before] = await sql`SELECT status, action_input FROM runs WHERE id = ${runId}`;
+    await sql`UPDATE runs SET status = 'running', action_input = jsonb_set(action_input, '{credential}', to_jsonb(${live}::text)) WHERE id = ${runId}`;
+    try {
+      const response = await request('/lobu/internal/interactions/create', { interactionType: 'link_button', url: 'https://example.invalid', label: 'live control' }, live);
+      expect(response.status).toBe(200);
+      expect(delivered).toHaveBeenCalledTimes(1);
+    } finally {
+      await sql`UPDATE runs SET status = ${before.status}, action_input = ${sql.json(before.action_input)} WHERE id = ${runId}`;
+      delivered.mockClear();
+    }
   });
 
   it('captures external MCP REST and RPC before discovery or forwarding', async () => {

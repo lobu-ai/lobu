@@ -189,6 +189,43 @@ describe("ChatResponseBridge.handleDelta — AsyncIterable streaming", () => {
     expect(plainPosts).toEqual([]);
   });
 
+  test.each(["telegram", "slack"])(
+    "%s: an agent turn's error after a re-run's partial restart still reaches the user",
+    async (platform) => {
+      // The reaper re-ran the turn after its worker died; the re-run's first
+      // span is published as a full replacement (worker-api/agent-turn.ts) so
+      // it does not glue onto the dead attempt's text. That span is a PARTIAL
+      // answer, not a self-contained message — so when the re-run then fails,
+      // the native turn's error row (it carries `turnRunId`) must be posted.
+      const { target, plainPosts } = createStreamingTarget();
+      const slackPost = mock(async () => ({ ok: true, ts: "1.1" }));
+      const { manager } = createHarness(target, platform, slackPost);
+      const bridge = new ChatResponseBridge(manager as any);
+      const payload = {
+        ...basePayload,
+        platform,
+        ...(platform === "slack"
+          ? {
+              channelId: "slack:C123",
+              conversationId: "slack:C123:1700000000.123456",
+              platformMetadata: { connectionId: "conn-1", chatId: "slack:C123" },
+            }
+          : {}),
+      };
+
+      await bridge.handleDelta(
+        { ...payload, delta: "the re-run's first", isFullReplacement: true },
+        "s"
+      );
+      await bridge.handleError(
+        { ...payload, error: "boom", turnRunId: 42 },
+        "s"
+      );
+
+      expect(plainPosts).toContain("Error: boom");
+    }
+  );
+
   test("handleError with no prior stream still posts fallback (worker crashed early)", async () => {
     // No delta was ever sent (e.g. NO_MODEL_CONFIGURED path calls signalError
     // with no preceding sendStreamDelta). The fallback is the only way the

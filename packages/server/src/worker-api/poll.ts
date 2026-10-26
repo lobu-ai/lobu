@@ -1177,10 +1177,10 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
             conversationId: turn.conversation_id,
             client: tx,
           });
-          // A fresh attempt has stored no tool trace yet. The reaper re-runs a
-          // dead attempt only on this explicit `false`, never on its absence.
+          // A fresh attempt has started no tool yet. The reaper re-runs a dead
+          // attempt only on this explicit `false`, never on its absence.
           await tx`UPDATE runs SET run_metadata = COALESCE(run_metadata, '{}'::jsonb)
-            || ${tx.json({ ...nativeSessionBase(sessionJsonl ?? ''), turn_tool_events_stored: false })}::jsonb WHERE id = ${runId}`;
+            || ${tx.json({ ...nativeSessionBase(sessionJsonl ?? ''), turn_tool_started: false })}::jsonb WHERE id = ${runId}`;
           row.action_input = { ...input, turn: { ...turn, session_jsonl: sessionJsonl ?? '' } };
         }
       }

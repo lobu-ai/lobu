@@ -30,7 +30,7 @@ import {
   verifyWorkerToken,
 } from "@lobu/core";
 import { RunsQueue } from "../infrastructure/queue/runs-queue.js";
-import { generateDeploymentName } from "../orchestration/deployment-identity.js";
+import { agentTurnTokenScope, generateDeploymentName } from "../orchestration/deployment-identity.js";
 import {
   armTurnTimeout,
   commitTerminalReply,
@@ -125,7 +125,7 @@ const DEPLOYMENT = generateDeploymentName(TURN);
 
 /** What `mintTurnToken` scopes the CREDENTIAL to — a per-turn namespace. */
 function credentialScope(messageId: string | undefined): string {
-  return `agent-turn:${messageId ?? "none"}`;
+  return agentTurnTokenScope(messageId ?? "none");
 }
 
 function mintToken(opts: {
@@ -224,6 +224,9 @@ describe("POST /worker/token/refresh", () => {
     // scoring instead of recording them.
     expect(data!.executionMode).toBe("capture");
     expect(data!.automationRunId).toBe(874626);
+    // A refresh is still the same agent-turn attempt, even though the bearer
+    // bytes and expiry change. Only a requeue gets a new attempt identity.
+    expect(data!.jti).toBe(verifyWorkerToken(original)!.jti);
   });
 
   test("REVOCATION: denied (403) once this turn has no live marker", async () => {

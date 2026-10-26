@@ -1,11 +1,11 @@
 import { isDeepStrictEqual } from 'node:util';
-import { isExplicitCancelMessage, isSteerableHumanMessage, verifyWorkerToken, type AgentErrorContext, type MessagePayload, type SuggestedPrompt } from '@lobu/core';
+import { isExplicitCancelMessage, isSteerableHumanMessage, verifyWorkerToken, type AgentErrorContext, type MessagePayload, type SuggestedPrompt, type WorkerTokenData } from '@lobu/core';
 import { AGENT_TURN_INPUT_MAX, type AgentTurnPollPayload, type HeartbeatResponse } from '@lobu/core/contracts/worker/protocol';
 import { CURRENT_SESSION_VERSION } from '@mariozechner/pi-coding-agent';
 import { getDb, type DbClient } from '../db/client';
 import type { TurnReply } from '../gateway/orchestration/agent-turn-producer';
 import { dischargeTurnMarkers, extendTurnDeadlines, insertThreadResponseRow, reaperBackstopDeadlineMs, resetTurnAdmissionDeadline } from '../gateway/orchestration/turn-liveness';
-import { generateDeploymentName } from '../gateway/orchestration/deployment-identity';
+import { agentTurnRunIdFromClaims, agentTurnTokenScope, generateDeploymentName } from '../gateway/orchestration/deployment-identity';
 
 export interface NativeTurnRun {
   id: number;
@@ -32,19 +32,64 @@ export interface NativeTurnRun {
     /** Last streamed delta sequence published for the current attempt. */
     turn_delta_sequence?: number;
     /**
-     * Whether the current attempt durably stored any tool trace. Stamped
-     * `false` at claim and `true` with the first stored trace. This records
-     * receipts, not execution: an in-flight or unacknowledged tool can already
-     * have side effects. Absent means unknown, which is never re-run.
+     * Whether the current attempt may have caused a side effect. Stamped
+     * `false` at claim, and `true` by the gateway BEFORE it executes any
+     * side-effecting call made with the turn's credential
+     * ({@link markAgentTurnToolStarted}) and with the first stored tool trace.
+     * Absent means unknown, which is never re-run.
      */
-    turn_tool_events_stored?: boolean;
+    turn_tool_started?: boolean;
     /** How many times the reaper put this turn back after its worker died. */
     turn_requeue_count?: number;
   } | null;
 }
 
-/** Maximum requeues of a stale turn without a stored tool receipt. */
+/** A turn whose worker died before any tool started is re-run at most this often. */
 export const AGENT_TURN_MAX_REQUEUES = 1;
+
+/** The answer when a call arrives from an attempt the reaper already retired. */
+export class StaleAgentTurnAttemptError extends Error {
+  constructor() {
+    super('this agent turn attempt no longer owns the run');
+  }
+}
+
+/**
+ * Record, BEFORE the gateway executes it, that a call made with an agent
+ * turn's credential may have a side effect — so the reaper never re-runs that
+ * attempt (`sweepStaleAgentTurnRuns`). The worker reports a tool only when it
+ * finishes; this closes the window where a tool acted and the worker died
+ * before its trace arrived.
+ *
+ * Every side-effecting route the turn can reach calls this: the MCP tool
+ * routes and every non-GET `/internal/*` route (`authenticateWorker`). A token
+ * that is not an agent turn's is not this function's business. A capture-mode
+ * call performs no effect, so it stamps nothing.
+ *
+ * Fails closed: a failed write throws, and the caller must not execute the
+ * call. A retired attempt throws {@link StaleAgentTurnAttemptError}, including
+ * after another worker claims the re-run with its new credential.
+ */
+export async function markAgentTurnToolStarted(
+  claims: Pick<WorkerTokenData, 'deploymentName' | 'messageId' | 'runId' | 'organizationId' | 'executionMode' | 'jti'>,
+): Promise<void> {
+  const runId = agentTurnRunIdFromClaims(claims);
+  if (runId === undefined || claims.executionMode === 'capture') return;
+  await getDb().begin(async (tx) => {
+    // The same row lock as the reaper: the attempt check and side-effect
+    // marker must commit together, before either caller can proceed.
+    const [row] = await tx<{ status: string; credential: string | null }>`
+      SELECT status, action_input->>'credential' AS credential FROM runs
+      WHERE id = ${runId} AND run_type = 'agent_turn' AND organization_id = ${claims.organizationId ?? null}
+      FOR UPDATE`;
+    const current = row?.credential ? verifyWorkerToken(row.credential) : null;
+    if (!row || row.status !== 'running' || !claims.jti || current?.jti !== claims.jti) {
+      throw new StaleAgentTurnAttemptError();
+    }
+    await tx`UPDATE runs SET run_metadata = COALESCE(run_metadata, '{}'::jsonb) || '{"turn_tool_started": true}'::jsonb
+      WHERE id = ${runId}`;
+  });
+}
 
 /** One namespace for admission, claims and terminal queue handoff across replicas. */
 export function agentTurnLockKey(sql: DbClient, organizationId: string | null, agentId: string | null, conversationId: string | null) {
@@ -132,7 +177,7 @@ function executionPolicy(run: NativeTurnRun) {
   if (!claims || claims.organizationId !== run.organization_id || claims.agentId !== input.turn.agent_id
     || claims.conversationId !== input.turn.conversation_id || claims.userId !== input.reply.user_id
     || claims.runId !== Number(run.id) || claims.messageId !== input.turn.message_id
-    || claims.deploymentName !== `agent-turn:${input.turn.message_id}`) return undefined;
+    || claims.deploymentName !== agentTurnTokenScope(input.turn.message_id)) return undefined;
   const { runId, messageId, deploymentName, timestamp, jti, traceId, ...scope } = claims;
   // Per-message payload is not policy: the fields below travel WITH the
   // message rather than describing the envelope it must execute in.

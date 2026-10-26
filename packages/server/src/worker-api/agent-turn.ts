@@ -8,7 +8,7 @@ import { logRunFailure } from "../runs/log-run-failure";
  * terminal transition.
  *
  * `sweepStaleAgentTurnRuns` covers the path that never reaches this route: a
- * worker that crashes mid-turn is re-run once if it stored no tool trace,
+ * worker that crashes mid-turn is re-run once if it recorded no tool activity,
  * otherwise terminalized by the reaper, which delivers the error the
  * completion route would have.
  */
@@ -17,7 +17,9 @@ import {
 	AgentErrorCode,
 	classifyErrorMessage,
 	createLogger,
+	generateWorkerToken,
 	sanitizeSuggestionPrompts,
+	verifyWorkerToken,
 } from "@lobu/core";
 import {
 	type AgentTurnToolEvent,
@@ -379,11 +381,12 @@ async function publishTurnToolEvents(
 			events,
 			repliesByInputRunId,
 		});
-		// Committed with the traces: this attempt may now have side effects, so
-		// the reaper must never re-run it (`sweepStaleAgentTurnRuns`).
-		if (stored > 0 && owner.run_metadata?.turn_tool_events_stored !== true) {
+		// Committed with the traces. The gateway already stamped this for any
+		// side-effecting call (`markAgentTurnToolStarted`); a stored trace is
+		// the same evidence for a tool that reached no gateway route.
+		if (stored > 0 && owner.run_metadata?.turn_tool_started !== true) {
 			await tx`UPDATE public.runs
-        SET run_metadata = COALESCE(run_metadata, '{}'::jsonb) || '{"turn_tool_events_stored": true}'::jsonb
+        SET run_metadata = COALESCE(run_metadata, '{}'::jsonb) || '{"turn_tool_started": true}'::jsonb
         WHERE id = ${runId}`;
 		}
 		return stored;
@@ -1076,10 +1079,10 @@ export async function completeAgentTurnRun(c: Context<{ Bindings: Env }>) {
  *    staleness threshold ends `timeout` / WORKER_UNRESPONSIVE. The worker's beat is a
  *    host interval that keeps firing when the turn itself is wedged, so
  *    heartbeat age alone never ends such a turn. This path is terminal;
- *  - a lost heartbeat marks the worker stale. If that attempt stored no tool
- *    trace and the turn has not been re-run yet, it goes back to `pending`
+ *  - a lost heartbeat marks the worker stale. If that attempt recorded no tool
+ *    activity and the turn has not been re-run yet, it goes back to `pending`
  *    for one fresh attempt instead of an error, starting from the same stored
- *    snapshot. Missing receipts do not prove that no tool executed. Otherwise
+ *    snapshot. Gateway side-effect admission and worker receipts both count. Otherwise
  *    `timeout` / WORKER_DIED as before.
  */
 export async function sweepStaleAgentTurnRuns(thresholdSeconds: number): Promise<{ reaped: number; delivered: number; requeued: number }> {
@@ -1112,21 +1115,27 @@ export async function sweepStaleAgentTurnRuns(thresholdSeconds: number): Promise
       const cancelled = !!run.run_metadata?.cancel_requested_at;
       const neverClaimed = run.status === 'pending';
       const wedged = !cancelled && !neverClaimed && state.wedged;
-      // The flag tracks stored receipts, not tool starts: a tool can have
-      // executed before its receipt arrives. An absent flag (claimed before
-      // it existed) is unknown and terminal.
+      const claims = run.action_input?.credential ? verifyWorkerToken(run.action_input.credential) : null;
+      // The flag is stamped `false` at claim and `true` by the gateway before
+      // any side-effecting call this attempt made, and by a stored trace. An
+      // absent flag (claimed before it existed) is unknown and terminal.
       const rerun = !cancelled && !neverClaimed && !wedged
-        && run.run_metadata?.turn_tool_events_stored === false
+        && run.run_metadata?.turn_tool_started === false
         && (run.run_metadata?.turn_requeue_count ?? 0) < AGENT_TURN_MAX_REQUEUES;
-      if (rerun) {
+      if (rerun && claims) {
         // The run keeps its id, so it stays ahead of the followers queued
         // behind it; nothing is released and nothing is delivered. Its worker
         // numbers deltas from 1 again, so the delta fence is cleared too.
+        // A stalled old worker may resume even after the next claim. Rotate
+        // the signed identity atomically so its tools cannot act in that attempt.
+        const credential = generateWorkerToken(claims.userId, claims.conversationId, claims.deploymentName, claims);
         const rows = await tx`UPDATE runs r SET status = 'pending', run_at = now(),
             claimed_at = NULL, claimed_by = NULL, last_heartbeat_at = NULL,
+            action_input = jsonb_set(r.action_input, '{credential}', to_jsonb(${credential}::text)),
             run_metadata = (COALESCE(r.run_metadata, '{}'::jsonb) - 'turn_delta_sequence')
               || jsonb_build_object('turn_requeue_count', COALESCE((r.run_metadata->>'turn_requeue_count')::int, 0) + 1)
-          WHERE r.id = ${run.id} AND ${stale(tx)} RETURNING r.id`;
+          WHERE r.id = ${run.id} AND ${stale(tx)}
+            AND r.run_metadata->>'turn_tool_started' = 'false' RETURNING r.id`;
         if (!rows.length) return null;
         await resetAgentTurnAdmission(tx, run);
         return 'requeued' as const;
@@ -1150,7 +1159,7 @@ export async function sweepStaleAgentTurnRuns(thresholdSeconds: number): Promise
     if (result === 'requeued') {
       requeued++;
       incrementCounter('lobu_agent_turn_requeued_total');
-      logger.warn({ runId: Number(candidate.id) }, 'Agent turn heartbeat lost without a stored tool receipt; re-running the turn');
+      logger.warn({ runId: Number(candidate.id) }, 'Agent turn heartbeat lost without recorded tool activity; re-running the turn');
       continue;
     }
     reaped++;

@@ -678,8 +678,13 @@ export class ChatResponseBridge implements ResponseRenderer {
     // For partial streams that errored mid-way (`isFullReplacement` never set),
     // the fallback still fires so the user sees a failure indicator instead of
     // silently-truncated output.
+    //
+    // A native agent turn's error row (`turnRunId`) is never such a message:
+    // its full-replacement span is a re-run restarting a PARTIAL answer
+    // (worker-api/agent-turn.ts), so its error must still be posted.
     const stream = this.streams.get(key);
-    const alreadyDeliveredCompleteMessage = !!stream?.wasFullyReplaced;
+    const alreadyDeliveredCompleteMessage =
+      !!stream?.wasFullyReplaced && payload.turnRunId == null;
     if (stream) {
       stream.iterator.close();
       try {
