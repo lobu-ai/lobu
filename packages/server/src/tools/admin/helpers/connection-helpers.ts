@@ -5,11 +5,11 @@
  */
 
 import { findLiveBrowserProfile, type LiveBrowserProfileParams } from '../../../utils/live-browser-profile';
-import { getScopedConnectorDefinition } from '../../../catalog/connector-definitions';
+import { getScopedConnectorDefinition, type ScopedConnectorDefinitionRow } from '../../../catalog/connector-definitions';
 import { oauthAccountOwnershipError } from '../../../authz/oauth-account-ownership';
 import { type DbClient, getDb } from '../../../db/client';
 import { withTransaction } from '../../../db/transaction';
-import { getErrorMessage } from '@lobu/core';
+import { getErrorMessage, type ToolErrorCode } from '@lobu/core';
 import logger from '../../../utils/logger';
 import {
   type AuthProfileKind,
@@ -25,9 +25,10 @@ import {
   summarizeBrowserSessionAuthData,
   updateAuthProfile,
 } from '../../../utils/auth-profiles';
-import { createConnectToken } from '../../../utils/connect-tokens';
+import { CONNECT_TOKEN_EXPIRED_ERROR, createConnectToken } from '../../../utils/connect-tokens';
 import { getConfiguredPublicGatewayUrl } from '../../../utils/public-origin';
 import {
+  normalizeScopeList,
   readGrantedScopesFromAuthData,
   readRequestedScopesFromAuthData,
   selectReconnectOAuthScopes,
@@ -549,6 +550,178 @@ export async function resolveOAuthProfileApp(params: {
     }
   }
   return { appAuthProfile: app };
+}
+
+/**
+ * Classify in-process ClientSDK failures without changing the public JSON shape.
+ * ClientSdkActionError retains this object by reference; serialization omits the code.
+ */
+export function withFailureCode<T extends Record<string, unknown>>(record: T, code: ToolErrorCode): T {
+  Object.defineProperty(record, 'error_code', { value: code, enumerable: false });
+  return record;
+}
+
+/**
+ * Reissue, or hand back, the OAuth connect link for a connection whose consent
+ * never completed: a row parked at pending_auth, or one revoked or paused with
+ * CONNECT_TOKEN_EXPIRED_ERROR before any account was linked. Shared by the
+ * idempotent connect path and by reauthenticate on a profile-less connection,
+ * so both keep one lock order, guard set, scope selection and token swap.
+ * `connectTokenId` pins the token connect discovery found; without it the
+ * connection's latest pending or expired OAuth token is used.
+ */
+export async function recoverPendingOAuthConnection(params: {
+  connectionId: number;
+  connectTokenId?: number;
+  connector: ScopedConnectorDefinitionRow;
+  connectorKey: string;
+  ctx: ToolContext;
+  requestedScopes?: string[];
+  appAuthProfileSlug?: string;
+}): Promise<
+  | { error: string }
+  | { action: 'connect'; connection_id: number; slug: string | undefined; status: 'active'; message: string }
+  | {
+      action: 'connect';
+      connection_id: number;
+      slug: string | undefined;
+      status: 'pending_auth';
+      auth_type: 'oauth';
+      connect_url: string;
+      connect_token: string;
+      expires_at: string;
+      instructions: string;
+    }
+> {
+  const { connectionId, connector, connectorKey, ctx } = params;
+  const { organizationId, userId } = ctx;
+  const sql = getDb();
+  const recovered = await sql.begin(async (tx) => {
+    // Match callback lock order: token, selected account profile, connection.
+    // Discovery is only a hint; authorization and renewal use these live rows.
+    const [token] = params.connectTokenId !== undefined
+      ? await tx`SELECT * FROM connect_tokens
+        WHERE id = ${params.connectTokenId} AND organization_id = ${organizationId} FOR UPDATE`
+      : await tx`SELECT * FROM connect_tokens
+        WHERE connection_id = ${connectionId} AND organization_id = ${organizationId}
+          AND auth_type = 'oauth' AND status IN ('pending', 'expired')
+        ORDER BY created_at DESC, id DESC LIMIT 1 FOR UPDATE`;
+    if (!token) {
+      return params.connectTokenId !== undefined
+        ? { error: 'Connection setup changed. Retry connecting this account.' }
+        : { error: 'Connection has no OAuth authorization to recover. Connect the account again.' };
+    }
+    const [targetHint] = await tx`SELECT auth_profile_id FROM connections
+      WHERE id = ${connectionId} AND organization_id = ${organizationId} AND deleted_at IS NULL`;
+    if (!targetHint) return withFailureCode({ error: 'Connection not found' }, 'NOT_FOUND');
+    const [profile] = targetHint.auth_profile_id ? await tx`
+      SELECT ap.*, a.scope AS account_scope FROM auth_profiles ap
+      LEFT JOIN account a ON a.id = ap.account_id
+      WHERE ap.id = ${targetHint.auth_profile_id} AND ap.organization_id = ${organizationId}
+      FOR UPDATE OF ap` : [];
+    const [target] = await tx`SELECT * FROM connections
+      WHERE id = ${connectionId} AND organization_id = ${organizationId} AND deleted_at IS NULL FOR UPDATE`;
+    if (!target || target.auth_profile_id !== targetHint.auth_profile_id) {
+      return { error: 'Connection setup changed. Retry connecting this account.' };
+    }
+    if (!userId || target.created_by !== userId) return { error: 'You can only re-authenticate connections you created.' };
+    if (target.auth_profile_id && profile?.profile_kind !== 'oauth_account') return { error: 'The selected OAuth account profile is no longer available.' };
+    if (profile) {
+      const ownershipError = oauthAccountOwnershipError(profile as { profile_kind: string; created_by: string | null }, userId, target.created_by);
+      if (ownershipError) return { error: ownershipError };
+    }
+    if (target.status === 'active') return { active: true as const, target };
+    if (token.status === 'expired') {
+      // Another retry may have replaced the token while this one waited for its
+      // lock. Rediscover that replacement instead of issuing a second live link.
+      const [latest] = await tx`SELECT id FROM connect_tokens
+        WHERE connection_id = ${target.id} AND organization_id = ${organizationId}
+          AND auth_type = 'oauth' AND status IN ('pending', 'expired')
+        ORDER BY created_at DESC, id DESC LIMIT 1`;
+      if (latest?.id !== token.id) return { error: 'Connection setup changed. Retry connecting this account.' };
+    }
+    // A paused unfinished row is the same case as a reaped one: its feeds never started.
+    if (target.status !== 'pending_auth' && !((target.status === 'revoked' || target.status === 'paused') &&
+        !target.auth_profile_id && !target.account_id && target.error_message === CONNECT_TOKEN_EXPIRED_ERROR)) {
+      return { error: 'This connection is no longer awaiting OAuth setup. Review the connection before reconnecting.' };
+    }
+    const oldConfig = (token.auth_config ?? {}) as Record<string, unknown>;
+    const appId = target.app_auth_profile_id ?? profile?.auth_data?.app_auth_profile_id ?? oldConfig.appAuthProfileId ?? null;
+    const [app] = appId ? await tx`SELECT slug, provider FROM auth_profiles
+      WHERE id = ${appId} AND organization_id = ${organizationId} AND profile_kind = 'oauth_app'` : [];
+    if (params.appAuthProfileSlug && params.appAuthProfileSlug !== app?.slug) {
+      return { error: 'A pending account connection uses a different OAuth app. Select that app on the connection before retrying.' };
+    }
+    const provider = String(profile?.provider ?? app?.provider ?? oldConfig.provider ?? '').toLowerCase();
+    const oauthMethods = getOAuthMethods(connector.auth_schema);
+    const method = oauthMethods.find((m) => m.provider.toLowerCase() === provider);
+    if (!method) return { error: 'The OAuth provider is no longer available. Review this connector’s app configuration.' };
+    // Revalidate pending requests as well as grants against the active definition.
+    const selection = selectReconnectOAuthScopes({
+      method,
+      feedsSchema: connector.feeds_schema,
+      historicalScopes: [
+        ...(String(oldConfig.provider ?? '').toLowerCase() === method.provider.toLowerCase()
+          ? normalizeScopeList(oldConfig.requestedScopes ?? oldConfig.scopes) : []),
+        ...normalizeScopeList(profile?.account_scope ?? profile?.auth_data?.granted_scopes),
+      ],
+      requestedScopes: params.requestedScopes,
+    });
+    const scopes = selection.requestedScopes;
+    const scopeAudit = {
+      droppedHistoricalScopes: selection.droppedHistoricalScopes,
+      scopeSelection: `reconnect-preserve-declared@${connector.version}`,
+    };
+    const bindingsChanged = token.auth_profile_id !== target.auth_profile_id ||
+      (appId !== null && oldConfig.appAuthProfileId !== appId);
+    const needsRenewal = bindingsChanged || token.status !== 'pending' || new Date(token.expires_at).getTime() <= Date.now();
+    if (needsRenewal) {
+      // Provider endpoints and initialization belong to the current method.
+      // Carry forward only deferred account metadata and the requested scopes.
+      const pendingMeta = oldConfig.pendingProfileMeta as { displayName: string; slug: string } | undefined;
+      const authConfig = { ...buildOAuthConnectConfig(method),
+        ...(pendingMeta ? { pendingProfileMeta: { displayName: pendingMeta.displayName, slug: pendingMeta.slug,
+          connectorKey: target.connector_key, provider: method.provider } } : {}),
+        appAuthProfileId: appId,
+        scopes, requestedScopes: scopes, ...scopeAudit };
+      // Invalidate the old bearer link and issue its replacement atomically.
+      await tx`UPDATE connect_tokens SET status = 'expired' WHERE id = ${token.id}`;
+      const fresh = await createConnectToken({ connectionId: target.id, authProfileId: target.auth_profile_id,
+        organizationId, connectorKey, authType: 'oauth', authConfig, createdBy: userId }, tx);
+      await tx`UPDATE connections SET status = 'pending_auth', error_message = NULL, updated_at = NOW()
+        WHERE id = ${target.id} AND organization_id = ${organizationId}`;
+      return { token: fresh.token as string, expires_at: fresh.expires_at as string | Date, target };
+    }
+    await tx`UPDATE connect_tokens
+      SET auth_config = COALESCE(auth_config, '{}'::jsonb) || ${tx.json({ scopes, requestedScopes: scopes, ...scopeAudit })}::jsonb
+      WHERE id = ${token.id}`;
+    return { token: token.token as string, expires_at: token.expires_at as string | Date, target };
+  });
+  if ('error' in recovered) return recovered as { error: string };
+  if ('active' in recovered) return { action: 'connect', connection_id: recovered.target.id,
+    slug: recovered.target.slug ?? undefined, status: 'active',
+    message: 'This connection is already active. Check client.operations.listAvailable({ connection_id }) for the requested capabilities before resuming the original task.' };
+  const { target } = recovered;
+  // Existing profiles were checked as oauth_account above; unlinked pending
+  // rows receive that kind on consent. Preserve the personal-scope warning.
+  const pendingScopeWarning = personalConnectionScopeWarning({
+    visibility: target.visibility,
+    profileKind: 'oauth_account',
+  });
+  return {
+    action: 'connect',
+    connection_id: target.id,
+    slug: target.slug ?? undefined,
+    status: 'pending_auth',
+    auth_type: 'oauth',
+    connect_url: `${getConnectBaseUrl(ctx)}/connect/${recovered.token}/oauth/start`,
+    connect_token: recovered.token,
+    expires_at: new Date(recovered.expires_at).toISOString(),
+    instructions:
+      'A pending connection already exists. Send the connect_url to the user to complete OAuth authorization.' +
+      (pendingScopeWarning ? ` ${pendingScopeWarning}` : '') +
+      " Poll with client.connections.get(connection_id) via query_sdk until status='active', then check client.operations.listAvailable({ connection_id }) for the requested capabilities before resuming the original task. Reuse this connection; do not create duplicate connections or feeds.",
+  };
 }
 
 export async function issueOAuthReconnectLink(params: {

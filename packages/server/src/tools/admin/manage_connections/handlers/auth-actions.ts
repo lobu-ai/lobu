@@ -22,7 +22,8 @@ import { ACTIVE_RUN_STATUSES, runStatusLiteral } from '../../../../utils/run-sta
 import type { ToolContext } from '../../../registry';
 import type { ManageConnectionsResult, ConnectionsArgs } from '../schemas';
 import { callerIsAdmin as resolveCallerIsAdmin } from '../../helpers/db-helpers';
-import { issueOAuthReconnectLink } from '../../helpers/connection-helpers';
+import { getOAuthMethods, issueOAuthReconnectLink, recoverPendingOAuthConnection, withFailureCode } from '../../helpers/connection-helpers';
+import { getScopedConnectorDefinition } from '../../../../catalog/connector-definitions';
 
 // ============================================
 // handleReauthenticate
@@ -57,7 +58,7 @@ export async function handleReauthenticate(
   `;
 
   if (rows.length === 0) {
-    return { error: 'Connection not found' };
+    return withFailureCode({ error: 'Connection not found' }, 'NOT_FOUND');
   }
 
   const row = rows[0] as {
@@ -79,7 +80,21 @@ export async function handleReauthenticate(
   }
 
   if (!row.auth_profile_id) {
-    return { error: 'Connection does not have an auth profile' };
+    // A connection whose OAuth consent never completed has no profile to
+    // reconnect. Reuse connect's pending-recovery path to retain its connection
+    // and renew expired tokens.
+    const connector = await getScopedConnectorDefinition({ organizationId, connectorKey: row.connector_key });
+    if (!connector) return { error: `Connector '${row.connector_key}' not found or not active` };
+    if (getOAuthMethods(connector.auth_schema).length === 0) {
+      return { error: `Connector '${row.connector_key}' does not support OAuth reauthentication` };
+    }
+    return recoverPendingOAuthConnection({
+      connectionId: row.id,
+      connector,
+      connectorKey: row.connector_key,
+      ctx,
+      requestedScopes: args.requested_scopes,
+    });
   }
 
   if (row.profile_kind === 'oauth_account') {
@@ -196,7 +211,7 @@ export async function handleTest(
   `;
 
   if (rows.length === 0) {
-    return { error: 'Connection not found' };
+    return withFailureCode({ error: 'Connection not found' }, 'NOT_FOUND');
   }
 
   const conn = rows[0] as any;

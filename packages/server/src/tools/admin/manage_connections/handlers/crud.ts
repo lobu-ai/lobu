@@ -44,6 +44,7 @@ import {
 } from "../../../../operations/connector-operations";
 import { denyOperatorOnlyChatSettings } from "./chat-settings-guard";
 import { projectConnectionForReader } from "../public-projection";
+import { withFailureCode } from "../../helpers/connection-helpers";
 import {
 	connectionFeedHealthLateralSql,
 	connectorHasAutoSyncableFeedsSql,
@@ -646,7 +647,7 @@ export async function handleGet(
 
   const rows = await query;
   if (rows.length === 0) {
-		return { error: "Connection not found" };
+		return withFailureCode({ error: "Connection not found" }, "NOT_FOUND");
   }
 
 	const [resolved] = await resolveUsernames(
@@ -1539,7 +1540,7 @@ export async function handleUpdate(
       AND c.deleted_at IS NULL
   `;
   if (existingRows.length === 0) {
-		return { error: "Connection not found" };
+		return withFailureCode({ error: "Connection not found" }, "NOT_FOUND");
   }
 
   const existing = existingRows[0] as {
@@ -2245,7 +2246,7 @@ export async function handleUpdate(
     }
     updated = updateOutcome.rows;
     if (updated.length === 0 || updateOutcome.previousStatus === null) {
-      return { error: "Connection not found" };
+      return withFailureCode({ error: "Connection not found" }, "NOT_FOUND");
     }
     previousConnectionStatus = updateOutcome.previousStatus;
   } catch (err) {

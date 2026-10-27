@@ -822,7 +822,7 @@ export default async (_ctx, client) => {
 	},
 	"connections.reauthenticate": {
 		summary:
-			"Recover an existing connection using its bound OAuth app. Pass requested_scopes for additional permissions; existing grants remain usable until successful consent. Return the exact connect_url to the user with the requested permissions, then refresh operations.listAvailable. Interactive pairing returns auth_run_id.",
+			"Recover an existing connection using its bound OAuth app. Pass requested_scopes for additional permissions; existing grants remain usable until successful consent. Unfinished OAuth setup without an account profile returns action:'connect', status:'pending_auth', connect_url, connect_token, and expires_at. Return the exact connect_url to the user with the requested permissions, then refresh operations.listAvailable. Interactive pairing returns auth_run_id.",
 		access: "write",
 		signature:
 			"connections.reauthenticate(connection_id: number, options?: { requested_scopes?: string[] }): Promise<unknown> // or connections.reauthenticate({ connection_id }, options)",

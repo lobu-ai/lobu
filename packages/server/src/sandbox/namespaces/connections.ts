@@ -3,8 +3,10 @@
  * `manageConnections`.
  *
  * `connect` returns a `connect_url`. `reauthenticate` returns a `connect_url`
- * for OAuth accounts or an `auth_run_id` for interactive pairing. Field names
- * follow the handler schema.
+ * for OAuth accounts or an `auth_run_id` for interactive pairing. Unfinished
+ * OAuth setup without an account profile returns the pending-recovery shape:
+ * `action: 'connect'`, `status: 'pending_auth'`, `connect_url`, `connect_token`,
+ * and `expires_at`. Field names follow the handler schema.
  */
 
 import type {
