@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as fsPromises from "node:fs/promises";
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   rmSync,
@@ -134,6 +135,7 @@ describe("native host pairing reply", () => {
     );
     const fetch = spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(Response.json({ devices: [] }))
+      .mockResolvedValueOnce(Response.json({ devices: [] }))
       .mockResolvedValue(
         Response.json({ error: "unexpected device poll" }, { status: 400 })
       );
@@ -142,7 +144,8 @@ describe("native host pairing reply", () => {
     await expect(browserStartCommand(RECORD.name, {})).rejects.toMatchObject({
       code: "ENOENT",
     });
-    expect(fetch).toHaveBeenCalledTimes(1);
+    // One lookup per bearer (child, then login), none after the failed launch.
+    expect(fetch).toHaveBeenCalledTimes(2);
   });
 
   test.each([
@@ -280,16 +283,13 @@ describe("native host pairing reply", () => {
           `${(init as RequestInit).method ?? "GET"} ${((init as RequestInit).headers as Record<string, string>).Authorization}`
       );
 
-    test("list falls back to the browser's child credential", async () => {
+    test("list asks the browser's child credential, not the login", async () => {
       const fetch = await useRevokedLogin();
       const log = spyOn(console, "log").mockImplementation(() => undefined);
 
       await browserListCommand({ json: true });
 
-      expect(bearersSent(fetch)).toEqual([
-        "GET Bearer revoked-login",
-        "GET Bearer owl_pat_child",
-      ]);
+      expect(bearersSent(fetch)).toEqual(["GET Bearer owl_pat_child"]);
       expect(
         JSON.parse(String(log.mock.calls[0]?.[0])).browsers[0].device
       ).toBe("online");
@@ -301,9 +301,80 @@ describe("native host pairing reply", () => {
       await browserRemoveCommand(RECORD.name);
 
       expect(bearersSent(fetch)).toEqual([
-        "GET Bearer revoked-login",
         "GET Bearer owl_pat_child",
         "DELETE Bearer owl_pat_child",
+      ]);
+    });
+  });
+
+  describe("with the login switched to another account on the same gateway", () => {
+    const DEVICE = {
+      id: "device-1",
+      worker_id: RECORD.workerId,
+      platform: "chrome-extension",
+      online: true,
+    };
+
+    /** Each bearer sees its own account's devices; `child` may be refused. */
+    async function useOtherAccountLogin(child: "owner" | "revoked") {
+      useBrowserRecord();
+      await deviceCredential.persistDeviceCredential(
+        RECORD.context,
+        "chrome-extension-browser-work",
+        {
+          workerId: RECORD.workerId,
+          workerApiToken: "owl_pat_child",
+          expiresAt: Date.now() + 86_400_000,
+        }
+      );
+      spyOn(credentials, "getContextToken").mockResolvedValue("other-login");
+      spyOn(console, "log").mockImplementation(() => undefined);
+      return spyOn(globalThis, "fetch").mockImplementation((async (
+        _url: string,
+        init: RequestInit
+      ) => {
+        const auth = (init.headers as Record<string, string>).Authorization;
+        if (auth === "Bearer owl_pat_child" && child === "revoked") {
+          return Response.json({ error: "Unauthorized" }, { status: 401 });
+        }
+        if (init.method === "DELETE")
+          return new Response(null, { status: 204 });
+        const owns =
+          auth === "Bearer owl_pat_child" ||
+          (auth === "Bearer other-login" && child === "revoked");
+        return Response.json({ devices: owns ? [DEVICE] : [] });
+      }) as typeof fetch);
+    }
+
+    const requests = (fetch: { mock: { calls: unknown[][] } }) =>
+      fetch.mock.calls.map(
+        ([, init]) =>
+          `${(init as RequestInit).method ?? "GET"} ${((init as RequestInit).headers as Record<string, string>).Authorization}`
+      );
+
+    test("rm deletes the original account's device before removing local state", async () => {
+      const fetch = await useOtherAccountLogin("owner");
+
+      await browserRemoveCommand(RECORD.name);
+
+      expect(requests(fetch)).toEqual([
+        "GET Bearer owl_pat_child",
+        "DELETE Bearer owl_pat_child",
+      ]);
+      expect(
+        existsSync(join(home ?? "", ".config", "lobu", "browsers", RECORD.name))
+      ).toBe(false);
+    });
+
+    test("a refused child credential falls back to the login", async () => {
+      const fetch = await useOtherAccountLogin("revoked");
+
+      await browserRemoveCommand(RECORD.name);
+
+      expect(requests(fetch)).toEqual([
+        "GET Bearer owl_pat_child",
+        "GET Bearer other-login",
+        "DELETE Bearer other-login",
       ]);
     });
   });

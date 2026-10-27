@@ -224,18 +224,19 @@ async function contextStillTargets(record: BrowserRecord): Promise<boolean> {
 }
 
 /**
- * Bearers for device requests, best first: the context's login, only while the
- * context still points at this browser's gateway, then the browser's own child
- * credential, which is bound to that gateway and outlives a lapsed login.
+ * Bearers for device requests, best first: the browser's own child credential,
+ * which belongs to the account that owns the device and outlives a lapsed
+ * login, then the context's login, only while the context still points at this
+ * browser's gateway. The login may belong to another account by now.
  */
 async function deviceBearers(record: BrowserRecord): Promise<string[]> {
   const bearers: string[] = [];
+  const live = await liveCredential(record);
+  if (live) bearers.push(live.workerApiToken);
   if (await contextStillTargets(record)) {
     const login = await getContextToken(record.context);
     if (login) bearers.push(login);
   }
-  const live = await liveCredential(record);
-  if (live) bearers.push(live.workerApiToken);
   if (bearers.length === 0) {
     throw new Error(
       `Context "${record.context}" is not logged in. Run \`lobu login --context ${record.context}\`.`
@@ -245,19 +246,23 @@ async function deviceBearers(record: BrowserRecord): Promise<string[]> {
 }
 
 /**
- * This browser's device, looked up with the first bearer the gateway accepts.
- * Returns that bearer too, so follow-up requests use a credential that works.
+ * This browser's device and the bearer that listed it. A bearer that does not
+ * list it may simply belong to another account, so the device counts as
+ * missing only once every bearer the gateway accepts has been asked.
  */
 async function findDevice(
   record: BrowserRecord
-): Promise<{ device: RemoteDevice | null; bearer: string }> {
+): Promise<{ device: RemoteDevice; bearer: string } | { device: null }> {
+  let accepted = false;
   let rejection: unknown;
   for (const bearer of await deviceBearers(record)) {
     try {
       const devices = await fetchRemoteDevices(record.gatewayOrigin, bearer);
-      const device =
-        devices.find((entry) => entry.worker_id === record.workerId) ?? null;
-      return { device, bearer };
+      const device = devices.find(
+        (entry) => entry.worker_id === record.workerId
+      );
+      if (device) return { device, bearer };
+      accepted = true;
     } catch (error) {
       const rejected =
         error instanceof DeviceListError &&
@@ -266,6 +271,7 @@ async function findDevice(
       rejection = error;
     }
   }
+  if (accepted) return { device: null };
   throw rejection;
 }
 
@@ -572,14 +578,14 @@ export async function browserRemoveCommand(rawName: string): Promise<void> {
   const record = await requireRecord(name);
   if (await runningPid(name)) await browserStopCommand(name);
 
-  const { device, bearer } = await findDevice(record);
-  if (device) {
-    const url = `${record.gatewayOrigin}/api/me/devices/${encodeURIComponent(device.id)}`;
+  const found = await findDevice(record);
+  if (found.device) {
+    const url = `${record.gatewayOrigin}/api/me/devices/${encodeURIComponent(found.device.id)}`;
     const res = await fetchWithRetry(url, {
       method: "DELETE",
       headers: {
         Accept: "application/json",
-        Authorization: `Bearer ${bearer}`,
+        Authorization: `Bearer ${found.bearer}`,
         "X-Lobu-Client": "cli",
       },
     });
@@ -595,7 +601,11 @@ export async function browserRemoveCommand(rawName: string): Promise<void> {
   }
   await deleteDeviceState(record.context, credentialSlot(name));
   await rm(browserDir(name), { recursive: true, force: true });
-  console.log(`Removed browser "${name}" and its device.`);
+  console.log(
+    found.device
+      ? `Removed browser "${name}" and its device.`
+      : `Removed browser "${name}"; no registered device was found for it.`
+  );
 }
 
 /**
