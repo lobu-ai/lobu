@@ -15,7 +15,7 @@ import { runtimeConnectionIdToSlug, upsertChatConnectionProjection } from "../..
 import { googleChatClaimProvider } from "../../../gateway/connections/gchat-claim.js";
 import { claimPendingConnection, resolveClaimContext, type ClaimEngineDeps } from "../../../gateway/connections/connection-claim.js";
 import { acceptGoogleChatWebhook, googleChatInstallationId, parkGoogleChatSpace, resolveGoogleChatRuntime, routeGoogleChatWebhook } from "../../../gateway/connections/platforms/gchat-installation.js";
-import { exportJWK, generateKeyPair, SignJWT } from "jose";
+import { exportJWK, exportSPKI, generateKeyPair, SignJWT } from "jose";
 import type { ConnectorWebhookSchema } from "@lobu/connector-sdk";
 import GoogleChatConnector from "@lobu/connectors/gchat";
 import { createAppWebhookRoutes, createChatWebhookDelivery, createDeclaredAppWebhookProvider } from "../../../gateway/routes/public/app-webhooks.js";
@@ -465,7 +465,7 @@ let googleKeys: Promise<Awaited<ReturnType<typeof generateKeyPair>>[]> | undefin
 describe("hosted Google Chat app through the declared app-webhook engine", () => {
   afterEach(() => { vi.unstubAllEnvs(); vi.unstubAllGlobals(); });
 
-  async function hostedRoute() {
+  async function hostedRoute(options: { realInstallation?: boolean } = {}) {
     configurePlatform();
     const f = await platformFixture();
     // Stand in for Google's published key sets; jose fetches them by URL. One
@@ -473,7 +473,11 @@ describe("hosted Google Chat app through the declared app-webhook engine", () =>
     googleKeys ??= Promise.all([generateKeyPair("RS256"), generateKeyPair("RS256")]);
     const [google, forger] = await googleKeys;
     const jwk = { ...await exportJWK(google.publicKey), kid: "test-google-kid", alg: "RS256", use: "sig" };
-    vi.stubGlobal("fetch", async () => Response.json({ keys: [jwk] }));
+    // The same key as the Chat SDK's PEM cert map (kid → certificate).
+    const pemCerts = { "test-google-kid": await exportSPKI(google.publicKey) };
+    vi.stubGlobal("fetch", async (url: string | URL) => String(url).includes("/service_accounts/v1/metadata/x509/")
+      ? Response.json(pemCerts)
+      : Response.json({ keys: [jwk] }));
     const endpoint = appWebhookUrl(f.deps.publicGatewayUrl, "gchat");
     const sign = (claims: Record<string, unknown>, options: { issuer: string; audience: string }, key = google.privateKey) =>
       new SignJWT(claims).setProtectedHeader({ alg: "RS256", kid: "test-google-kid" })
@@ -485,9 +489,19 @@ describe("hosted Google Chat app through the declared app-webhook engine", () =>
     const manager = new ChatInstanceManager() as any;
     manager.connectionStore = f.connections;
     manager.publicGatewayUrl = f.deps.publicGatewayUrl;
-    manager.services = { getAppInstallationStore: () => f.store, getSecretStore: () => { throw new Error("The hosted app never reads a tenant vault"); } };
+    manager.services = {
+      getConnectionStore: () => f.connections, getAppInstallationStore: () => f.store,
+      getSecretStore: () => { throw new Error("The hosted app never reads a tenant vault"); },
+      getCommandRegistry: () => ({ getAll: () => [] }),
+      getAutomationSubscriptionService: () => new AutomationSubscriptionService(),
+      getArtifactStore: () => ({}), getPublicGatewayUrl: () => manager.publicGatewayUrl,
+      getMcpProxy: () => null, getInteractionService: () => new EventEmitter(), getGrantStore: () => ({}),
+    };
+    manager.createStateAdapter = async () => new InMemoryStateAdapter();
     const delivered: string[] = [];
-    manager.handleWebhook = async (id: string) => { delivered.push(id); return new Response("delivered by installation"); };
+    if (!options.realInstallation) {
+      manager.handleWebhook = async (id: string) => { delivered.push(id); return new Response("delivered by installation"); };
+    }
     const router = createAppWebhookRoutes({
       installationStore: f.store,
       providers: [createDeclaredAppWebhookProvider({
@@ -502,7 +516,14 @@ describe("hosted Google Chat app through the declared app-webhook engine", () =>
       body: JSON.stringify(body),
     });
     const addedBody = { type: "ADDED_TO_SPACE", space: { name: f.space, type: "ROOM", displayName: "Outsider space" }, user: { name: "users/123456" } };
-    return { f, post, addedBody, projectToken, endpointToken, delivered, forger };
+    const claim = async () => {
+      const setup = await post(addedBody, await projectToken());
+      const input = { userId: f.outsider.id, ref: await f.refFrom(setup), organizationId: f.own.slug };
+      const claimed = await claimPendingConnection(f.provider, f.engine, input);
+      if (claimed.status !== "ok") throw new Error(JSON.stringify(claimed));
+      return claimed.bindingId;
+    };
+    return { f, post, addedBody, projectToken, endpointToken, delivered, forger, manager, pemCerts, claim, sign };
   }
 
   it("rejects missing, forged, wrong-audience and foreign add-on tokens with 401", async () => {
@@ -533,6 +554,86 @@ describe("hosted Google Chat app through the declared app-webhook engine", () =>
     const message = await r.post({ type: "MESSAGE", space: { name: r.f.space, type: "ROOM" }, user: { name: "users/555555" }, message: { name: `${r.f.space}/messages/after-claim`, sender: { name: "users/555555" }, text: "hello" } }, await r.endpointToken());
     expect(await message.text()).toBe("delivered by installation");
     expect(r.delivered).toEqual([googleChatInstallationId(r.f.own.id, PLATFORM_PROJECT, r.f.space)]);
+  });
+
+  it("a claimed space is verified again by its real installation adapter", async () => {
+    const r = await hostedRoute({ realInstallation: true });
+    const installation = await r.claim();
+    // google-auth-library downloads Google's OIDC certs through its own HTTP
+    // client, not the global fetch, and the installation's adapter is private
+    // to its space-scope wrapper: stand in for that download on the class.
+    // Its signature, audience, issuer and signer checks run for real.
+    const probe = await gchatPlatform.createAdapter({
+      platform: "gchat", googleChatProjectNumber: PLATFORM_PROJECT,
+      credentials: { client_email: "platform-bot@example.test", private_key: PLATFORM_KEY },
+    }, {});
+    const oidcCerts = vi.spyOn(Object.getPrototypeOf(probe.oauth2Client), "getFederatedSignonCertsAsync")
+      .mockResolvedValue({ certs: r.pemCerts, format: "PEM" } as never);
+    // The space is set up: an Automation listens, so an accepted message dispatches.
+    const agent = await createTestAgent({ organizationId: r.f.own.id, agentId: "test-outsider-agent", ownerUserId: r.f.outsider.id });
+    const [row] = await r.f.sql`SELECT id FROM connections WHERE slug = ${runtimeConnectionIdToSlug(installation)}`;
+    await new AutomationSubscriptionService().createChatAutomation(agent.agentId, "gchat", `gchat:${r.f.space}`, undefined, { organizationId: r.f.own.id, configuredBy: r.f.outsider.id, connectionId: Number(row.id) });
+    try {
+      expect(await r.manager.warmConnection(installation)).toBe(true);
+      const processed: string[] = [];
+      r.manager.getInstance(installation).chat.processMessage = (_adapter: unknown, threadId: string) => { processed.push(threadId); };
+      // The Workspace Add-on envelope the hosted app receives.
+      const space = { name: r.f.space, type: "ROOM", spaceType: "SPACE" };
+      const message = (id: string) => ({ chat: {
+        user: { name: "users/555555", type: "HUMAN" }, eventTime: "2026-01-01T00:00:00Z",
+        messagePayload: { space, message: { name: `${r.f.space}/messages/${id}`, sender: { name: "users/555555", type: "HUMAN" }, space, text: "@lobu hello", createTime: "2026-01-01T00:00:00Z" } },
+      } });
+      // Both token audiences the engine accepts also pass the installation's
+      // own verifier: the project number, and the app-webhook endpoint URL.
+      expect((await r.post(message("project-token"), await r.projectToken())).status).toBe(200);
+      expect((await r.post(message("endpoint-token"), await r.endpointToken())).status).toBe(200);
+      expect(processed).toHaveLength(2);
+      // The installation does not trust its caller: a direct delivery with a
+      // forged token, or one minted for another endpoint, is refused.
+      const direct = async (token: string) => (await r.manager.handleWebhook(installation, new Request(appWebhookUrl(r.f.deps.publicGatewayUrl, "gchat"), {
+        method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify(message("direct")),
+      }))).status;
+      expect(await direct(await r.projectToken(PLATFORM_PROJECT, r.forger.privateKey))).toBe(401);
+      expect(await direct(await r.endpointToken(undefined, `${r.f.deps.publicGatewayUrl}/api/v1/webhooks/${installation}`))).toBe(401);
+      expect(processed).toHaveLength(2);
+    } finally {
+      oidcCerts.mockRestore();
+      await r.manager.shutdown();
+    }
+  });
+
+  it("logs an unreachable Google key set differently from a rejected token", async () => {
+    const r = await hostedRoute();
+    const warn = vi.spyOn(console, "warn");
+    try {
+      const forged = await r.projectToken(PLATFORM_PROJECT, r.forger.privateKey);
+      expect((await r.post(r.addedBody, forged)).status).toBe(401);
+      // A declared signer whose key set has not been fetched yet, while Google
+      // is down: first an HTTP error, then a network failure.
+      const addOn = `service-${PLATFORM_PROJECT}@gcp-sa-gsuiteaddons.iam.gserviceaccount.com`;
+      const token = await r.sign({}, { issuer: addOn, audience: PLATFORM_PROJECT });
+      vi.stubGlobal("fetch", async () => new Response("unavailable", { status: 503 }));
+      expect((await r.post(r.addedBody, token)).status).toBe(401);
+      vi.stubGlobal("fetch", async () => { throw new TypeError("fetch failed"); });
+      expect((await r.post(r.addedBody, token)).status).toBe(401);
+      const logged = warn.mock.calls.map((call) => String(call[0])).filter((line) => line.includes("Google"));
+      expect(logged).toHaveLength(3);
+      expect(logged[0]).toContain('"reason":"token_rejected"');
+      expect(logged[0]).toContain('"code":"ERR_JWS_SIGNATURE_VERIFICATION_FAILED"');
+      expect(logged[1]).toContain('"reason":"key_set_unavailable"');
+      expect(logged[1]).toContain('"code":"ERR_JOSE_GENERIC"');
+      expect(logged[2]).toContain('"reason":"key_set_unavailable"');
+      expect(logged[2]).toContain('"code":"TypeError"');
+      for (const line of logged) {
+        expect(line).toContain('"audience":"app_id"');
+        expect(line).not.toContain(forged.split(".")[1]);
+        expect(line).not.toContain(token.split(".")[1]);
+      }
+      expect(r.delivered).toEqual([]);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("answers 404 while the hosted app is not configured", async () => {

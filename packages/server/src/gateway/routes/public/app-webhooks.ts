@@ -21,11 +21,12 @@
  * Verification + tenant extraction are GENERIC, derived entirely from the
  * connector's `ConnectorWebhookSchema`: {@link verifyDeclaredWebhook} computes
  * HMAC over the declared `signingBaseTemplate` (default `{body}` for
- * GitHub/Jira/Linear; `v0:{timestamp}:{body}` + freshness for Slack) and
- * {@link extractTenantFromSchema} reads the tenant from the declared
- * `routingKeyPath(s)` (+ optional `url-host` transform for Jira). There is NO
- * per-provider verify or extractor and NO provider-name branch — one engine,
- * one builder ({@link createDeclaredAppWebhookProvider}).
+ * GitHub/Jira/Linear; `v0:{timestamp}:{body}` + freshness for Slack),
+ * {@link verifyGoogleJwtWebhook} checks a declared provider-signed bearer
+ * token (Google Chat), and {@link extractTenantFromSchema} reads the tenant
+ * from the declared `routingKeyPath(s)` (+ optional `url-host` transform for
+ * Jira). There is NO per-provider verify or extractor and NO provider-name
+ * branch — one engine, one builder ({@link createDeclaredAppWebhookProvider}).
  *
  * Delivery before the install callback: a provider may deliver before the
  * OAuth/install callback has written the `app_installations` row. That is NOT
@@ -39,7 +40,7 @@
 
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { Hono } from "hono";
-import { createRemoteJWKSet, decodeJwt, jwtVerify } from "jose";
+import { createRemoteJWKSet, decodeJwt, errors, jwtVerify } from "jose";
 import { createLogger } from "@lobu/core";
 import type {
 	ConnectorWebhookGoogleJwtVerification,
@@ -243,6 +244,33 @@ function googleKeySet(url: string): ReturnType<typeof createRemoteJWKSet> {
 	return keys;
 }
 
+// jose's own error codes for a key set it could not obtain: a non-200 or
+// unparseable response (the generic code), a timeout, or a malformed document.
+// A network failure surfaces as a non-jose error. Every other jose code is a
+// verdict on the token itself.
+const KEY_SET_UNAVAILABLE_CODES = new Set([
+	errors.JOSEError.code,
+	errors.JWKSTimeout.code,
+	errors.JWKSInvalid.code,
+]);
+
+function logGoogleJwtRejection(audience: "app_id" | "endpoint_url", error: unknown): void {
+	const code = error instanceof errors.JOSEError ? error.code : undefined;
+	const keySetUnavailable = code === undefined || KEY_SET_UNAVAILABLE_CODES.has(code);
+	// Never the token or its claims: only which check failed and why.
+	logger.warn(
+		keySetUnavailable
+			? "Google key set unavailable; webhook rejected"
+			: "Google-signed webhook token rejected",
+		{
+			audience,
+			reason: keySetUnavailable ? "key_set_unavailable" : "token_rejected",
+			code: code ?? (error instanceof Error ? error.name : typeof error),
+			message: error instanceof Error ? error.message : String(error),
+		},
+	);
+}
+
 /**
  * THE generic Google-signed bearer verifier for `verification.type:
  * 'google-jwt'`. Accepts either declared audience: a token self-signed by a
@@ -267,12 +295,14 @@ async function verifyGoogleJwtWebhook(
 	} catch {
 		return false;
 	}
+	let audience: "app_id" | "endpoint_url" | undefined;
 	try {
 		if (
 			verification.audiences.includes("app_id") &&
 			typeof issuer === "string" &&
 			signers.includes(issuer)
 		) {
+			audience = "app_id";
 			await jwtVerify(
 				token,
 				googleKeySet(
@@ -288,6 +318,7 @@ async function verifyGoogleJwtWebhook(
 			typeof issuer === "string" &&
 			GOOGLE_OIDC_ISSUERS.includes(issuer)
 		) {
+			audience = "endpoint_url";
 			const { payload } = await jwtVerify(
 				token,
 				googleKeySet("https://www.googleapis.com/oauth2/v3/certs"),
@@ -303,7 +334,8 @@ async function verifyGoogleJwtWebhook(
 				signers.includes(payload.email)
 			);
 		}
-	} catch {
+	} catch (error) {
+		if (audience) logGoogleJwtRejection(audience, error);
 		return false;
 	}
 	return false;
@@ -568,13 +600,14 @@ export function createAppWebhookRoutes(deps: AppWebhookRouterDeps): Hono {
 			return json(401, { error: "Unauthorized" });
 		}
 
-		// 1b. Providers that own their own routing (Slack) take over here, after
-		//     the edge signing check. They do NOT resolve an `app_installations`
-		//     row — Slack's primary target is a BYO `connections` chat row
-		//     (slug `agentconn-…`) that has no install row, so the generic
-		//     resolveActiveByTenant would 200-ack the live bot's traffic into
-		//     oblivion. They run their own precedence chain and return their own
-		//     Response; the generic install/dispatch pipeline below is skipped entirely.
+		// 1b. Providers that own their own routing (chat adapters: Slack, Google
+		//     Chat) take over here, after the edge signing check. They do NOT
+		//     resolve an `app_installations` row — Slack's primary target is a
+		//     BYO `connections` chat row (slug `agentconn-…`) that has no install
+		//     row, so the generic resolveActiveByTenant would 200-ack the live
+		//     bot's traffic into oblivion. They run their own precedence chain
+		//     and return their own Response; the generic install/dispatch
+		//     pipeline below is skipped entirely.
 		if (provider.handleDelivery) {
 			try {
 				return await provider.handleDelivery({

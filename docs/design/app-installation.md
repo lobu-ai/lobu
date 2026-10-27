@@ -104,8 +104,10 @@ interface InstallationTokenProvider {
 
 ### 4.3 Shared-endpoint webhook router (provider plugins)
 `POST /api/v1/app-webhooks/:provider` →
-1. **Provider verifier** (plugin): GitHub raw-body HMAC; Slack `v0:{ts}:{rawBody}` + timestamp freshness;
-   Jira per app type. Not schema-driven (`ConnectorWebhookSchema` is HMAC-only — insufficient here).
+1. **Provider verifier**, declared on the connector's `ConnectorWebhookSchema`: an HMAC signature (GitHub raw-body;
+   Slack `v0:{ts}:{rawBody}` + timestamp freshness; Jira per app type), or a declared `verification` such as
+   `google-jwt` (a Google-signed bearer token checked against the declared audiences and signers, for Google Chat).
+   Dispatch is on the declared type, never on the provider slug.
 2. **Provider tenant extractor** (plugin): pull `(provider_instance, provider_app_id, external_tenant_id)`
    from body/headers/site-URL (GitHub: `installation.id` + headers; Slack: `team_id`/`enterprise_id`, possibly
    form-encoded under `payload`; Jira: cloudId/clientKey).
