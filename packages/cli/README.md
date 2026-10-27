@@ -190,8 +190,11 @@ binary instead. macOS and Linux only.
 The extension pairs through the profile's own native messaging host, which
 mints a worker-bound device credential from your login; no token is passed on
 the command line. If the browser later loses its pairing, open the Lobu side
-panel in that window to pair again. To run browser operations on it, pin a
-`chrome` connection to the new device.
+panel in that window to pair again. The CLI's copy of the extension has site
+access on every site, so agents need no per-site approval in a named browser;
+history, bookmarks, and downloads stay off until you allow them in the side
+panel. To run browser operations on it, pin a `chrome` connection to the new
+device.
 
 ## License
 
