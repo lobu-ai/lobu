@@ -28,6 +28,13 @@ import type { CloudCommandOptions } from "./commands/_lib/cloud-options.js";
 // (no runtime module load), so they do NOT defeat the lazy-import hot path —
 // the handler modules are still pulled in only inside each `.action`.
 import type { AgentCommandOptions } from "./commands/agent.js";
+import {
+  browserListCommand,
+  browserNativeHostCommand,
+  browserRemoveCommand,
+  browserStartCommand,
+  browserStopCommand,
+} from "./commands/browser.js";
 import type { InitOptions } from "./commands/init.js";
 import {
   type OpenCodePluginAction,
@@ -1200,7 +1207,6 @@ Memory:
         name: string,
         options: { context?: string; headless?: boolean }
       ) => {
-        const { browserStartCommand } = await import("./commands/browser.js");
         await browserStartCommand(name, options);
       }
     );
@@ -1209,7 +1215,6 @@ Memory:
     .command("stop <name>")
     .description("Close a named browser")
     .action(async (name: string) => {
-      const { browserStopCommand } = await import("./commands/browser.js");
       await browserStopCommand(name);
     });
 
@@ -1218,7 +1223,6 @@ Memory:
     .description("List named browsers and whether their devices are online")
     .option("--json", "Print JSON")
     .action(async (options: { json?: boolean }) => {
-      const { browserListCommand } = await import("./commands/browser.js");
       await browserListCommand(options);
     });
 
@@ -1226,7 +1230,6 @@ Memory:
     .command("rm <name>")
     .description("Remove a named browser, its device, and its profile")
     .action(async (name: string) => {
-      const { browserRemoveCommand } = await import("./commands/browser.js");
       await browserRemoveCommand(name);
     });
 
@@ -1234,9 +1237,6 @@ Memory:
     .command("native-host <name>", { hidden: true })
     .description("Pair the Lobu extension in a named browser (run by Chrome)")
     .action(async (name: string) => {
-      const { browserNativeHostCommand } = await import(
-        "./commands/browser.js"
-      );
       await browserNativeHostCommand(name);
     });
 

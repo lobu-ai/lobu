@@ -32,6 +32,7 @@ import {
 } from "../internal/http.js";
 import { resolveBrowserExecutable } from "./_lib/chrome-for-testing.js";
 import {
+  DeviceMintError,
   type MintedDeviceCredential,
   mintDeviceCredentialWithReauth,
   persistDeviceCredential,
@@ -253,9 +254,10 @@ async function findDevice(
 }
 
 /**
- * Mint a fresh credential for this browser. Prefers rotating the cached child
- * (which also works when the CLI login has lapsed); otherwise mints from the
- * context's login. Persists the result so the next pairing can rotate it.
+ * Mint a fresh credential for this browser and persist it. The CLI login is
+ * preferred: only a full-access login also gets the side panel's sign-in
+ * session, which a device-only child credential cannot mint. Rotating the
+ * cached child keeps the browser pairable after the login lapses.
  */
 async function mintForBrowser(
   record: BrowserRecord,
@@ -265,30 +267,39 @@ async function mintForBrowser(
   const cached = await loadDeviceState(record.context, slot);
   const cachedChild =
     cached?.workerId === record.workerId ? cached.workerApiToken : undefined;
-  let bearer = cachedChild;
-  if (!bearer) {
-    bearer = interactive
-      ? await requireInstallationLogin(record.context)
-      : ((await getContextToken(record.context)) ?? undefined);
-  }
-  if (!bearer) {
+  const login = interactive
+    ? await requireInstallationLogin(record.context)
+    : ((await getContextToken(record.context)) ?? undefined);
+  const mint = (bearer: string, isChild: boolean) =>
+    mintDeviceCredentialWithReauth({
+      contextName: record.context,
+      initialBearerIsChild: isChild,
+      initialChildExpiresAt: cached?.expiresAt,
+      interactiveReauth: interactive,
+      options: {
+        gatewayOrigin: record.gatewayOrigin,
+        bearer,
+        platform: PLATFORM,
+        workerId: record.workerId,
+        label: record.label,
+      },
+    });
+
+  let minted: MintedDeviceCredential;
+  if (login) {
+    try {
+      minted = await mint(login, false);
+    } catch (error) {
+      if (!cachedChild || !(error instanceof DeviceMintError)) throw error;
+      minted = await mint(cachedChild, true);
+    }
+  } else if (cachedChild) {
+    minted = await mint(cachedChild, true);
+  } else {
     throw new Error(
       `Context "${record.context}" is not logged in. Run \`lobu browser start ${record.name}\` in a terminal.`
     );
   }
-  const minted = await mintDeviceCredentialWithReauth({
-    contextName: record.context,
-    initialBearerIsChild: bearer === cachedChild,
-    initialChildExpiresAt: cached?.expiresAt,
-    interactiveReauth: interactive,
-    options: {
-      gatewayOrigin: record.gatewayOrigin,
-      bearer,
-      platform: PLATFORM,
-      workerId: record.workerId,
-      label: record.label,
-    },
-  });
   if (minted.workerId !== record.workerId) {
     throw new Error(
       `The gateway registered this browser as "${minted.workerId}" instead of "${record.workerId}". Another device of yours already uses that id; remove it or pick a different browser name.`
@@ -568,7 +579,9 @@ export async function nativeHostReply(
   try {
     const record = await requireRecord(name);
     const minted = await mintForBrowser(record, false);
-    await log(`paired worker ${minted.workerId}`);
+    await log(
+      `paired worker ${minted.workerId} ${minted.sessionToken ? "with" : "without"} a side panel session`
+    );
     return {
       gateway_url: record.gatewayOrigin,
       worker_id: minted.workerId,

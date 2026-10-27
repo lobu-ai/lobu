@@ -224,31 +224,91 @@ describe("native host pairing reply", () => {
     });
   });
 
-  test("a later pairing rotates the cached child instead of using the login", async () => {
-    useBrowserRecord();
-    const login = spyOn(credentials, "getContextToken").mockResolvedValue(
-      "login-token"
+  async function cacheChild(token: string): Promise<void> {
+    await deviceCredential.persistDeviceCredential(
+      RECORD.context,
+      "chrome-extension-browser-work",
+      {
+        workerId: RECORD.workerId,
+        workerApiToken: token,
+        expiresAt: Date.now() + 86_400_000,
+      }
     );
-    const mint = spyOn(deviceCredential, "mintDeviceCredentialWithReauth");
-    mint.mockResolvedValueOnce({
-      workerId: RECORD.workerId,
-      workerApiToken: "owl_pat_first",
-      expiresAt: Date.now() + 86_400_000,
-    });
-    mint.mockResolvedValueOnce({
-      workerId: RECORD.workerId,
-      workerApiToken: "owl_pat_second",
-      expiresAt: Date.now() + 86_400_000,
-    });
+  }
 
-    await nativeHostReply(RECORD.name, { op: "pair" }, noLog);
+  test("re-pairing mints from the login even with a cached child, so the side panel stays signed in", async () => {
+    useBrowserRecord();
+    await cacheChild("owl_pat_cached");
+    spyOn(credentials, "getContextToken").mockResolvedValue("login-token");
+    // A device-only child cannot mint a web session; only the login can.
+    const mint = spyOn(
+      deviceCredential,
+      "mintDeviceCredentialWithReauth"
+    ).mockImplementation(async ({ options }) => ({
+      workerId: RECORD.workerId,
+      workerApiToken: "owl_pat_rotated",
+      expiresAt: Date.now() + 86_400_000,
+      ...(options.bearer === "login-token"
+        ? { sessionToken: "panel-session" }
+        : {}),
+    }));
+
     const reply = await nativeHostReply(RECORD.name, { op: "pair" }, noLog);
 
-    expect(reply.access_token).toBe("owl_pat_second");
-    expect(login).toHaveBeenCalledTimes(1);
+    expect(readNativePairResponse(reply)?.sessionToken).toBe("panel-session");
+    expect(mint).toHaveBeenCalledTimes(1);
+    expect(mint.mock.calls[0]?.[0]).toMatchObject({
+      initialBearerIsChild: false,
+      options: { bearer: "login-token" },
+    });
+  });
+
+  test("with the login lapsed, pairing rotates the cached child", async () => {
+    useBrowserRecord();
+    await cacheChild("owl_pat_cached");
+    spyOn(credentials, "getContextToken").mockResolvedValue(null);
+    const mint = spyOn(
+      deviceCredential,
+      "mintDeviceCredentialWithReauth"
+    ).mockResolvedValue({
+      workerId: RECORD.workerId,
+      workerApiToken: "owl_pat_rotated",
+      expiresAt: Date.now() + 86_400_000,
+    });
+
+    const reply = await nativeHostReply(RECORD.name, { op: "pair" }, noLog);
+
+    expect(reply.access_token).toBe("owl_pat_rotated");
+    expect(mint.mock.calls[0]?.[0]).toMatchObject({
+      initialBearerIsChild: true,
+      options: { bearer: "owl_pat_cached" },
+    });
+  });
+
+  test("a login the gateway refuses falls back to the cached child", async () => {
+    useBrowserRecord();
+    await cacheChild("owl_pat_cached");
+    spyOn(credentials, "getContextToken").mockResolvedValue("old-login");
+    const mint = spyOn(deviceCredential, "mintDeviceCredentialWithReauth");
+    mint.mockRejectedValueOnce(
+      new deviceCredential.DeviceMintError(
+        "Could not authorize this device: insufficient_scope",
+        403,
+        "insufficient_scope"
+      )
+    );
+    mint.mockResolvedValueOnce({
+      workerId: RECORD.workerId,
+      workerApiToken: "owl_pat_rotated",
+      expiresAt: Date.now() + 86_400_000,
+    });
+
+    const reply = await nativeHostReply(RECORD.name, { op: "pair" }, noLog);
+
+    expect(reply.access_token).toBe("owl_pat_rotated");
     expect(mint.mock.calls[1]?.[0]).toMatchObject({
       initialBearerIsChild: true,
-      options: { bearer: "owl_pat_first" },
+      options: { bearer: "owl_pat_cached" },
     });
   });
 
