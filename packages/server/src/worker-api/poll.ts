@@ -41,7 +41,7 @@ import { resolveOperationFiles } from '../operations/file-inputs';
 import { applyRunConnectorPolicyAtClaim } from '../authz/operation-run-policy';
 import type { Outputs } from '../types/automations';
 import { deriveAutomationExtractionSchema } from '../utils/automation-extraction-schema';
-import { isTransientDbError, withDbRetry } from '../db/with-retry';
+import { isTransientDbError, noteDbConnRetry, withDbRetry } from '../db/with-retry';
 import { incrementCounter, setGauge } from '../gateway/metrics/prometheus';
 import { notifyThreadResponse } from '../gateway/orchestration/turn-liveness';
 import type { Env } from '../index';
@@ -550,6 +550,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
         if (!isTransientDbError(err)) throw err;
         // Recreate the idempotent heartbeat write once on a fresh connection.
         // withDbRetry allows two retries; keep this path to a single retry.
+        noteDbConnRetry('poll.device_upsert', 1, err as Error);
         return upsertDevice();
       })) as unknown as Array<{
         id: string;
@@ -557,6 +558,10 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
         inserted: boolean;
       }>;
       deviceWorkerId = upserted[0]?.id ?? null;
+      // Known gap: a CONNECTION_CLOSED can mean the first write already
+      // committed, in which case the retry updates an existing row and reports
+      // inserted=false, so device:created is skipped for that one new device.
+      // device_workers has no creation timestamp to tell the cases apart.
       if (upserted[0]?.inserted && upserted[0]?.organization_id) {
         recordLifecycleEvent({
           organizationId: upserted[0].organization_id,
