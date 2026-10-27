@@ -200,6 +200,7 @@ function hiddenMethodNote(
 		ctx.memberRole,
 		ctx.scopes,
 		ctx.allowCrossOrg,
+		ctx.tokenType,
 	);
 	if (mode === "read" && meta.access !== "read") {
 		if (guidance.available || guidance.progressivelyAuthorizable) {
@@ -499,6 +500,7 @@ async function sdkMethodSearch(
 					ctx.memberRole,
 					ctx.scopes,
 					ctx.allowCrossOrg,
+					ctx.tokenType,
 				);
 				const nextStep = guidance.available
 					? "Retry with mode='full' and call the returned methods via run_sdk."

@@ -9,6 +9,8 @@ import {
 	resolveSdkMaxAccessLevel,
 	type ToolAccessLevel,
 } from "../auth/tool-access";
+import { scopeDenialMessage } from "../tools/access-control";
+import type { TokenType } from "../tools/registry";
 import { requiredSdkAccess, type MethodAccess, type MethodAccessMetadata } from "./method-metadata";
 
 export type SdkDiscoveryMode = "read" | "full";
@@ -85,6 +87,7 @@ export function resolveSdkAccessGuidance(
 	memberRole: string | null | undefined,
 	scopes: readonly string[] | null | undefined,
 	accountScope = false,
+	tokenType: TokenType | null = null,
 ): SdkAccessGuidance {
 	const requiredTier = effectiveSdkRequiredTier(methodAccess);
 	const requiredAccess: ToolAccessLevel =
@@ -97,6 +100,15 @@ export function resolveSdkAccessGuidance(
 	const available =
 		TOOL_ACCESS_RANK[currentAccess] >= TOOL_ACCESS_RANK[requiredAccess];
 	if (available) return { requiredTier, available };
+	const denial = (access: ToolAccessLevel) =>
+		scopeDenialMessage({
+			subject: "This SDK capability",
+			requiredAccess: access,
+			memberRole,
+			tokenType,
+			workspace: null,
+			accountScope,
+		});
 
 	if (requiredTier === "administer") {
 		const isWorkspaceAdmin = accountScope || memberRole === "owner" || memberRole === "admin";
@@ -111,8 +123,8 @@ export function resolveSdkAccessGuidance(
 			instruction: progressivelyAuthorizable
 				? "This lifecycle requires administer access (workspace owner/admin + mcp:admin). The admin methods are progressively authorizable through run_sdk: invoking one will return the standard mcp:admin OAuth challenge; after approval, retry the call and repeat search_sdk."
 				: isWorkspaceAdmin
-					? "This lifecycle requires administer access (workspace owner/admin + mcp:admin). Reconnect or reauthorize this MCP connection with write access first, then repeat search_sdk."
-					: "This lifecycle requires administer access (workspace owner/admin + mcp:admin). Ask a workspace owner/admin to continue; changing MCP scopes cannot elevate a regular member to administer access.",
+					? `${denial("admin")} Then repeat search_sdk.`
+					: denial("admin"),
 		};
 	}
 
@@ -121,7 +133,7 @@ export function resolveSdkAccessGuidance(
 			requiredTier,
 			available,
 			instruction: memberRole || accountScope
-				? "This action requires operate access (mcp:write). Reconnect or reauthorize this MCP connection with mcp:write, then repeat search_sdk."
+				? `${denial("write")} Then repeat search_sdk.`
 				: "This action requires operate access (workspace member + mcp:write). Ask a workspace member to continue.",
 		};
 	}

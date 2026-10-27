@@ -2,6 +2,7 @@
 import { Type, type Static } from '@sinclair/typebox';
 import { hasRequiredMcpScope } from '../../auth/tool-access';
 import { getDb, pgBigintArray, pgTextArray } from '../../db/client';
+import { scopeDenialMessage } from '../access-control';
 import type { Env } from '../../index';
 import { ToolUserError } from '../../utils/errors';
 import { getPublicWebUrl } from '../../utils/url-builder';
@@ -35,7 +36,17 @@ async function readAccountContent(
   }
   if ((ctx.tokenType === 'oauth' || ctx.tokenType === 'pat') &&
       !hasRequiredMcpScope('read', ctx.scopes)) {
-    throw new ToolUserError('read_knowledge requires an MCP session with read access.', 403);
+    throw new ToolUserError(
+      scopeDenialMessage({
+        subject: 'read_knowledge',
+        requiredAccess: 'read',
+        memberRole: null,
+        tokenType: ctx.tokenType,
+        workspace: null,
+        accountScope: true,
+      }),
+      403
+    );
   }
   const exact = (args.content_ids?.length ?? 0) > 0;
   if (exact ? args.mcp_activity_id !== undefined || args.client_ids !== undefined

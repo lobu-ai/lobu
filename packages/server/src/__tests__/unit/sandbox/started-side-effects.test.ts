@@ -109,7 +109,7 @@ describe("sandbox started-side-effect tally", () => {
         agents: {
           delete: async () => {
             throw new McpScopeRequiredError(
-              "Action manage_agents.delete requires an MCP session with admin access.",
+              "manage_agents.delete needs admin access. This connection to example-org was approved without it, and tokens are not upgraded on refresh.",
               "mcp:admin",
             );
           },

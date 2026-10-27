@@ -14,6 +14,7 @@ import { runWithActingAutomation } from '../utils/acting-automation-context';
 import type { Context } from 'hono';
 import { isToolError, retryWithBackoff, ToolError } from '@lobu/core';
 import {
+  getAction,
   getRequiredAccessLevel,
   hasRequiredMcpScope,
   isPublicReadable,
@@ -30,7 +31,7 @@ import { ToolNotRegisteredError, ToolUserError } from '../utils/errors';
 import { logToolCallFailure } from './tool-error-log';
 import { getConfiguredPublicOrigin } from '../utils/public-origin';
 import { enforcePublicReadLimit, getClientIP } from '../utils/rate-limiter';
-import { enforceRoleScopeAccess, requireWorkspaceContext } from './access-control';
+import { enforceRoleScopeAccess, requireWorkspaceContext, scopeDenialMessage } from './access-control';
 import { recordToolInvocationAudit, recordWorkspaceActivityAudit } from './audit';
 import { getAccountContent } from './get_content';
 import {
@@ -212,18 +213,24 @@ export function extractAuthContext(c: Context<{ Bindings: Env }>): AuthContext {
   };
 }
 
-/**
- * Check access control for a tool call. Throws on denial.
- */
+/** `tool.action` for an action-routed tool, else the tool name. */
+function denialSubject(toolName: string, args: unknown): string {
+  const action = getAction(args);
+  return action ? `${toolName}.${action}` : toolName;
+}
+
 function isAccountContentRead(toolName: string, authCtx: AuthContext): boolean {
   return toolName === 'read_knowledge' && new URL(authCtx.requestUrl).pathname === ACCOUNT_CONTENT_PATH;
 }
 
-export function checkToolAccess(
+/**
+ * Check access control for a tool call. Throws on denial.
+ */
+export async function checkToolAccess(
   toolName: string,
   args: unknown,
   authCtx: AuthContext
-): ToolAccessLevel {
+): Promise<ToolAccessLevel> {
   const tool = getTool(toolName);
   if (!tool) throw new ToolNotRegisteredError(toolName);
   const accountScope = tool.scope === 'account' || isAccountContentRead(toolName, authCtx);
@@ -260,7 +267,16 @@ export function checkToolAccess(
   if (accountScope && (authCtx.allowCrossOrg || !authCtx.organizationId || toolName === 'list_organizations')) {
     if (!authCtx.isAuthenticated || !authCtx.userId) throw new Error('Authentication required.');
     if (!hasRequiredMcpScope(requiredAccess, authCtx.scopes)) {
-      throw new Error(`This MCP session does not include ${requiredAccess} access. Reconnect with the required scope.`);
+      throw new Error(
+        scopeDenialMessage({
+          subject: denialSubject(toolName, args),
+          requiredAccess,
+          memberRole: authCtx.memberRole,
+          tokenType: authCtx.tokenType,
+          workspace: null,
+          accountScope: true,
+        })
+      );
     }
     return requiredAccess;
   }
@@ -281,16 +297,7 @@ export function checkToolAccess(
 
   // No `writeRole` message: missing-membership writes are already rejected by
   // the public-readability branch above, matching the historical semantics.
-  enforceRoleScopeAccess(requiredAccess, role, authCtx.scopes, {
-    adminRole:
-      'This action requires admin or owner access. Ask an organization owner to grant elevated access.',
-    readScope:
-      'This MCP session does not include read access. Reconnect with read access for this workspace.',
-    writeScope:
-      'This MCP session is read-only. Reconnect with write-scoped OAuth, or ask an owner to add you.',
-    adminScope:
-      'This MCP session does not include admin access. Reconnect with admin access after an owner grants the role.',
-  });
+  await enforceRoleScopeAccess(requiredAccess, authCtx, denialSubject(toolName, args));
   return requiredAccess;
 }
 
@@ -362,7 +369,7 @@ export async function executeTool(
         agentId: workspace.agentId ?? null,
       };
     }
-    const requiredAccess = checkToolAccess(toolName, args, authCtx);
+    const requiredAccess = await checkToolAccess(toolName, args, authCtx);
     toolContext = {
       ...toAccountToolContext(authCtx),
       workspaceActivity,

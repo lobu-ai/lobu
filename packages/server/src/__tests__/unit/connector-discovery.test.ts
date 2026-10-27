@@ -162,9 +162,9 @@ describe("searchLiveConnectors (search_sdk connector intent search)", () => {
 			makeDeps(),
 		);
 
-		expect(hits[0]).toMatch(/ask a workspace owner\/admin/i);
-		expect(hits[0]).toMatch(/cannot elevate/i);
-		expect(hits[0]).not.toMatch(/reconnect|reauthorize/i);
+		expect(hits[0]).toMatch(/ask an owner of this workspace/i);
+		expect(hits[0]).toMatch(/reconnecting this app cannot change that/i);
+		expect(hits[0]).not.toMatch(/disconnect Lobu|Administer workspaces|reauthorize/i);
 		expect(hits[0]).not.toMatch(/client\.connections\.connect|client\.feeds\.(create|trigger)/);
 	});
 

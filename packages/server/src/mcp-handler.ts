@@ -57,7 +57,7 @@ import {
 import { MCP_SESSION_MAX_AGE_MS, McpSessionStore, type PersistedMcpSession } from './mcp-session-store';
 import { LOBU_SKILL_MARKDOWN } from './skills/lobu-skill.generated';
 import { mcpImagesForResourceLinks, readMcpAttachmentResource } from './mcp-media-resources';
-import { isAdminOrOwnerRole } from './tools/access-control';
+import { isAdminOrOwnerRole, workspaceScopeDenialMessage } from './tools/access-control';
 import {
   type AuthContext,
   executeTool,
@@ -599,7 +599,7 @@ function createServerForContext(
         throw new Error('Authentication required to read views.');
       }
       if (!hasRequiredMcpScope('read', authCtx.scopes)) {
-        throw new Error('Reading views requires an MCP session with read access.');
+        throw new Error(await workspaceScopeDenialMessage(authCtx, 'Reading views', 'read'));
       }
       const viewOrganization = viewOrganizationFromResourceUri(uri);
       // An account session has no workspace of its own: the frame names the

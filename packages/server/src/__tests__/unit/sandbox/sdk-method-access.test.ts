@@ -122,8 +122,10 @@ describe("SDK access guidance", () => {
 		]);
 
 		expect(guidance.available).toBe(false);
-		expect(guidance.instruction).toMatch(/ask a workspace owner\/admin/i);
-		expect(guidance.instruction).toMatch(/cannot elevate/i);
+		expect(guidance.instruction).toMatch(/requires admin or owner access/i);
+		expect(guidance.instruction).toMatch(/ask an owner of this workspace/i);
+		expect(guidance.instruction).toMatch(/reconnecting this app cannot change that/i);
+		expect(guidance.instruction).not.toContain("Administer workspaces");
 	});
 
 	it("recognizes an owner/admin with mcp:admin as ready to administer", () => {

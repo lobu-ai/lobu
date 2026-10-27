@@ -107,7 +107,7 @@ function lifecycleForCaller(
     if (!meta) throw new Error(`Missing SDK metadata for lifecycle method: ${path}`);
     return meta;
   });
-  const guidance = resolveSdkAccessGuidance(accesses, ctx.memberRole, ctx.scopes);
+  const guidance = resolveSdkAccessGuidance(accesses, ctx.memberRole, ctx.scopes, false, ctx.tokenType);
   if (guidance.available) return lifecycle;
   if (guidance.progressivelyAuthorizable) {
     return `${lifecycle} ${guidance.instruction ?? ""}`.trim();

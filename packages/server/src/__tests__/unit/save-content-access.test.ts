@@ -25,7 +25,7 @@ describe("saveContent org-level write gate", () => {
   it("rejects a member without mcp:write scope", async () => {
     await expect(
       saveContent(args, {} as never, ctx({ memberRole: "member", scopes: ["mcp:read"] })),
-    ).rejects.toThrow(/MCP session with write access/i);
+    ).rejects.toThrow(/save_memory needs write access.*approved read-only/i);
   });
 
   it("system contexts (userId=null + auth=true) bypass the gate", async () => {
