@@ -139,6 +139,15 @@ describe('write surfaces refuse an unowned automation_source', () => {
       entity_type: 'company',
       name: 'Borrowed To',
     })) as { entity: { id: number } };
+    const foreignSource = { automation_id: victim.automationId, run_id: victim.runId };
+    const uncredited = await attacker.api.entities.create({
+      entity_type: 'company', name: 'Uncredited', automation_source: foreignSource,
+    });
+    expect(uncredited.entity).toHaveProperty('id');
+    await attacker.api.entities.update({
+      entity_id: uncredited.entity!.id as number, name: 'Still uncredited', automation_source: foreignSource,
+    });
+    await attacker.api.entities.delete({ entity_id: uncredited.entity!.id as number, automation_source: foreignSource });
 
     await attacker.api.entities.link({
       from_entity_id: from.entity.id,
@@ -164,6 +173,25 @@ describe('write surfaces refuse an unowned automation_source', () => {
       { automation_id: attacker.automationId, run_id: attacker.runId },
     ]);
     await expect(reactionRows(victim.organizationId)).resolves.toEqual([]);
+  });
+
+  it('drops a same-org mismatched run but retains a conflicting trusted session stamp', async () => {
+    const org = await orgWithAutomationAndRun('Verified source', 'verified-source');
+    const other = await org.api.automations.create({ slug: 'other-source', prompt: 'Anything.' });
+    const otherId = Number(other.automation_id);
+    const [user] = await getTestDb()`SELECT created_by FROM automations WHERE id = ${org.automationId}`;
+    const otherRun = await createAutomationResultRun({ automationId: otherId, organizationId: org.organizationId,
+      windowStart: '2026-01-01T00:00:00.000Z', windowEnd: '2026-01-08T00:00:00.000Z', createdBy: String(user.created_by) });
+    await org.api.entity_schema.createType({ slug: 'synthetic-item', name: 'Synthetic item' });
+    const row = await org.api.entities.create({ entity_type: 'synthetic-item', name: 'Uncredited',
+      automation_source: { automation_id: org.automationId, run_id: otherRun } });
+    await expect(reactionRows(org.organizationId)).resolves.toEqual([]);
+    const stamped = org.api.withAuth({ actingAutomationId: org.automationId, actingRunId: org.runId });
+    await stamped.entities.update({ entity_id: row.entity!.id as number, name: 'Session-owned',
+      automation_source: { automation_id: otherId, run_id: otherRun } });
+    await expect(reactionRows(org.organizationId)).resolves.toEqual([
+      { automation_id: org.automationId, run_id: org.runId },
+    ]);
   });
 });
 

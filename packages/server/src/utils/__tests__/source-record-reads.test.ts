@@ -33,7 +33,7 @@ const feed = {
 };
 let feeds: Array<typeof feed> = [feed];
 const sql = Object.assign(
-  vi.fn(async () => [{ backing_sql: "SELECT 1" }]),
+  vi.fn(async () => ["account", "contact", "other"].map(slug => ({ slug, backing_sql: "SELECT 1", metadata_schema: {} }))),
   { unsafe: vi.fn(async () => feeds) }
 );
 const scope = {

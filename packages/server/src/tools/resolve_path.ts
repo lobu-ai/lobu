@@ -7,6 +7,7 @@
  * URL pattern: /:owner/entity-type/entity-slug/...
  */
 
+import { recordKey, recordKeyColumn } from '@lobu/core/contracts/entity-reference';
 import { type Static, Type } from '@sinclair/typebox';
 import { findUngrantedMemberWorkspace, formatUngrantedMemberMessage, resolveGrantedWorkspaceTarget } from '../auth/oauth/workspace-grants';
 import { getDb } from '../db/client';
@@ -61,7 +62,7 @@ export const ResolvedWorkspaceSchema = Type.Object({
 export type ResolvedWorkspace = Static<typeof ResolvedWorkspaceSchema>;
 
 export const ResolvedPathEntitySchema = Type.Object({
-  id: Type.Integer(),
+  id: Type.Union([Type.Integer(), Type.String(), Type.Null()]),
   entity_type: Type.String(),
   slug: Type.String(),
   name: Type.String(),
@@ -764,7 +765,7 @@ async function resolveDerivedLeaf(
   segment: { entity_type: string; slug: string }
 ): Promise<ResolvedEntityDetails | null> {
   const etRows = await sql`
-    SELECT backing_sql, backing_source
+    SELECT backing_sql, backing_source, metadata_schema
     FROM entity_types
     WHERE slug = ${segment.entity_type}
       AND organization_id = ${workspace.id}
@@ -779,34 +780,39 @@ async function resolveDerivedLeaf(
   // `get_type`), so the detail view can right-align/badge aggregate columns.
   const measures = inferMeasureColumns(backingSql);
 
+  const keyColumn = recordKeyColumn(etRows[0]?.metadata_schema);
   const exact = await queryDerivedEntityView(
     backingSql,
     backingSource,
-    { limit: 1, offset: 0 },
+    { limit: keyColumn ? 2 : 1, offset: 0 },
     ctx,
-    { preservePageRows: true, exactSlug: segment.slug }
+    { preservePageRows: true, exactSlug: segment.slug, keyColumn: keyColumn ?? undefined }
   );
   if (exact.error) {
     const code = exact.error_code ?? 'VALIDATION';
     throw new ToolUserError(exact.error, toolErrorHttpStatus(code), code);
   }
   // Confirm canonical identity even when a connector implements the filter.
-  const row = exact.rows.find((r) => derivedRowSlug(r) === segment.slug);
-  return row ? buildDerivedLeaf(row, measures, segment) : null;
+  const matches = exact.rows.filter((r) => (keyColumn ? recordKey(r, keyColumn) : derivedRowSlug(r)) === segment.slug);
+  if (keyColumn && matches.length > 1) {
+    throw new ToolUserError('The declared record key is not unique', 409);
+  }
+  return matches[0] ? buildDerivedLeaf(matches[0], measures, segment, keyColumn) : null;
 }
 
 /** Shape one derived row into the read-only entity both lookup paths return. */
 function buildDerivedLeaf(
   row: Record<string, unknown>,
   measures: string[],
-  segment: { entity_type: string; slug: string }
+  segment: { entity_type: string; slug: string },
+  keyColumn: string | null,
 ): ResolvedEntityDetails {
   const name = derivedRowName(row, segment.slug);
 
   return {
     // Derived rows have no stored numeric id; routing/identity use the slug, and
     // the id-keyed tabs (knowledge/connectors/automations) are hidden client-side.
-    id: 0,
+    id: keyColumn ? recordKey(row, keyColumn) : null,
     entity_type: segment.entity_type,
     slug: segment.slug,
     name,
@@ -866,8 +872,8 @@ async function fetchBootstrap(
     entity
       ? Promise.resolve(entity.total_content)
       : fetchContentCount(sql, workspace.id, null, readBoundary),
-    fetchRecentContent(sql, workspace.id, entity?.id ?? null, readBoundary),
-    fetchRecentFeeds(sql, workspace.id, entity?.id ?? null),
+    entity?.is_derived ? Promise.resolve([]) : fetchRecentContent(sql, workspace.id, typeof entity?.id === "number" ? entity.id : null, readBoundary),
+    entity?.is_derived ? Promise.resolve([]) : fetchRecentFeeds(sql, workspace.id, typeof entity?.id === "number" ? entity.id : null),
   ]);
   const connectorDefinitions = await listWorkspaceConnectorDefinitions(
     sql,

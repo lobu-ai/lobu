@@ -332,6 +332,9 @@ const GUEST_RUNNER = String.raw`
       if (job.exactMatch && !(queryCapabilities && queryCapabilities.exactMatch === true)) {
         throw Object.assign(new Error('Connector does not support exact-match queries'), { status: 400 });
       }
+      if (job.exactMatch && job.exactMatch.verbatim === true && !(queryCapabilities && queryCapabilities.verbatimExactMatch === true)) {
+        throw Object.assign(new Error('Connector does not support verbatim exact-match queries'), { status: 400 });
+      }
       var queryResult = await instance.query({
         query: job.query, config: mergedConfig, credentials: job.credentials, sessionState: job.sessionState,
         limit: job.limit, offset: job.offset, sort: job.sort, exactMatch: job.exactMatch, selection: supportsSelection ? job.selection : undefined

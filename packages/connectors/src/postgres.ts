@@ -354,7 +354,7 @@ export default class PostgresConnector extends ConnectorRuntime {
     description:
       'Bring your own PostgreSQL database as memory, read a configured feed directly, or run governed connection-level SQL.',
     version: '1.1.0',
-    queryCapabilities: { exactMatch: true, selection: true },
+    queryCapabilities: { exactMatch: true, verbatimExactMatch: true, selection: true },
     faviconDomain: 'postgresql.org',
     authSchema: {
       methods: [
@@ -530,7 +530,7 @@ export default class PostgresConnector extends ConnectorRuntime {
         const bind = (value: string) => { params.push(value); return `$${params.length}::text`; };
         let where = '';
         if (ctx.exactMatch) {
-          const { columns, value } = ctx.exactMatch;
+          const { columns, value, verbatim } = ctx.exactMatch;
           if (!columns.length) throw new Error('exactMatch.columns must not be empty');
           for (const column of columns) assertIdentifier(column, 'exactMatch.column');
           const projection = await tx.unsafe(`SELECT * FROM (\n${baseSql}\n) q LIMIT 0`);
@@ -541,7 +541,9 @@ export default class PostgresConnector extends ConnectorRuntime {
           if (!candidates.some(isScalar)) {
             throw Object.assign(new Error('Exact-match identity must be a scalar; project a text key in the source query'), { status: 400 });
           }
-          const textMatch = (ref: string) => `btrim(${ref}, ${bind('\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff')}) = ${bind(value)}`;
+          const textMatch = (ref: string) => verbatim
+            ? `${ref} = ${bind(value)}`
+            : `btrim(${ref}, ${bind('\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff')}) = ${bind(value)}`;
           const numberMatch = (ref: string, cast: string) => Number.isFinite(Number(value)) && String(Number(value)) === value
             ? `${ref} = ${bind(value)}::${cast}` : 'FALSE';
           const cases = candidates.map((column) => {

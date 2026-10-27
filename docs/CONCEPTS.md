@@ -32,6 +32,44 @@ then the feature map. `AUTOMATIONS.md` holds the Automation primitive contract;
   agent does, sources bound what it may read, outputs declare what a completed
   run persists. See `AUTOMATIONS.md`.
 
+## Source-backed records and relationships
+
+Stored records use a positive integer `entity_id`. A source-backed type declares
+its durable projected key with root `metadata_schema: { "x-lobu-record-key": "id" }`.
+Its records use a verbatim string `entity_id` plus `entity_type`; even `"007"`
+stays a source key. Views without that declaration return `id: null` and remain
+read-only views. Reads never create stored rows.
+
+Declared keys use `exactMatch.verbatim: true` on connector queries. A connector
+must advertise both `queryCapabilities.exactMatch` and `queryCapabilities.verbatimExactMatch`;
+unsupported sources reject the lookup before executing it. Legacy view slugs
+retain trimmed matching.
+
+`get` and `listLinks` accept either reference. `link`, `unlink`, and `updateLink`
+accept `from_entity_id`/`to_entity_id`, with `from_entity_type`/`to_entity_type`
+required for strings. Ordinary relationships support every stored/source pair.
+Only the assertion is stored in `entity_relationships`, using type IDs and keys
+for source endpoints; source fields stay at their source. System authorization
+and identity-group edges still require stored records. `entity_identities`
+continues to hold source identity claims, independently of these business edges.
+
+Both endpoints must be readable to disclose an authored edge. Unavailable
+endpoints are withheld with key-free `relationship_failures`; readable links stay
+available. Updating an edge requires readable endpoints; unlink by ID remains available
+without contacting the source. Page counts describe visible results, not global
+totals. A page may be empty while more candidates remain. A source page rejects
+`source`, `confidence_min`, and `include_deleted` filters, which cannot apply
+to live links. Source reads share a 20 second deadline per page. Source-owned links
+remain live, read-only `record_links`; authored assertions are `relationships`.
+`listLinks` with `record: {type, key}` reads a declared-key type exactly like
+`entity_id` plus `entity_type`; views without a declared key keep their
+source-native read.
+Raw SQL and schema table relationship columns expose stored-endpoint edges only;
+federated reads go through the entity API. Backing/key edits and type deletion
+require unlinking live source edges first. Their conflict returns up to 25 blocking
+relationship IDs for owner/admin cleanup, even when the source is unavailable.
+No source row is copied or refreshed.
+
 ## Entity identity groups
 
 A workspace can declare a relationship type with `purpose: "identity"` for its

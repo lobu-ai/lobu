@@ -42,8 +42,10 @@ interface RelationshipTypeRow {
 
 interface ClaimedRelationshipRow {
   id: number | string;
-  from_entity_id: number | string;
-  to_entity_id: number | string;
+  from_entity_id: number | string | null;
+  to_entity_id: number | string | null;
+  from_entity_type_id?: number | string | null;
+  to_entity_type_id?: number | string | null;
   relationship_type_id: number | string;
   metadata: unknown;
   confidence: number | null;
@@ -156,8 +158,12 @@ export async function lockLiveConnectionForRelationshipClaims(
 
 interface RelationshipClaimParams {
   organizationId: string;
-  fromEntityId: number;
-  toEntityId: number;
+  fromEntityId: number | null;
+  toEntityId: number | null;
+  fromEntityTypeId?: number | null;
+  toEntityTypeId?: number | null;
+  fromSourceKey?: string | null;
+  toSourceKey?: string | null;
   relationshipTypeId: number;
   claimKey: string;
   claim: Record<string, unknown>;
@@ -185,8 +191,12 @@ async function lockExistingRelationship(
            metadata, confidence, source
     FROM entity_relationships
     WHERE organization_id = ${params.organizationId}
-      AND from_entity_id = ${params.fromEntityId}
-      AND to_entity_id = ${params.toEntityId}
+      AND from_entity_id IS NOT DISTINCT FROM ${params.fromEntityId}::bigint
+      AND to_entity_id IS NOT DISTINCT FROM ${params.toEntityId}::bigint
+      AND from_entity_type_id IS NOT DISTINCT FROM ${params.fromEntityTypeId ?? null}::bigint
+      AND to_entity_type_id IS NOT DISTINCT FROM ${params.toEntityTypeId ?? null}::bigint
+      AND from_source_key IS NOT DISTINCT FROM ${params.fromSourceKey ?? null}::text
+      AND to_source_key IS NOT DISTINCT FROM ${params.toSourceKey ?? null}::text
       AND relationship_type_id = ${params.relationshipTypeId}
       AND deleted_at IS NULL
     LIMIT 1
@@ -205,19 +215,26 @@ async function insertOnlyRelationshipClaim(
   tx: DbClient,
   params: RelationshipClaimParams
 ): Promise<RelationshipClaimResult> {
+  const conflictTarget = params.fromEntityId === null || params.toEntityId === null
+    ? tx.unsafe(`(organization_id, COALESCE(from_entity_id, 0), COALESCE(from_entity_type_id, 0), COALESCE(from_source_key, ''),
+        COALESCE(to_entity_id, 0), COALESCE(to_entity_type_id, 0), COALESCE(to_source_key, ''), relationship_type_id)
+        WHERE deleted_at IS NULL AND (from_entity_id IS NULL OR to_entity_id IS NULL)`)
+    : tx.unsafe('(from_entity_id, to_entity_id, relationship_type_id) WHERE deleted_at IS NULL');
   const written = await tx<ClaimedRelationshipRow>`
     INSERT INTO entity_relationships (
       organization_id, from_entity_id, to_entity_id, relationship_type_id,
+      from_entity_type_id, from_source_key, to_entity_type_id, to_source_key,
       metadata, confidence, source, created_by, updated_by, created_at, updated_at
     ) VALUES (
       ${params.organizationId}, ${params.fromEntityId}, ${params.toEntityId},
-      ${params.relationshipTypeId}, ${tx.json(initialRelationshipMetadata(params))},
+      ${params.relationshipTypeId},
+      ${params.fromEntityTypeId ?? null}, ${params.fromSourceKey ?? null},
+      ${params.toEntityTypeId ?? null}, ${params.toSourceKey ?? null},
+      ${tx.json(initialRelationshipMetadata(params))},
       ${params.confidence ?? null}, ${params.source}, ${params.createdBy ?? null},
       ${params.createdBy ?? null}, current_timestamp, current_timestamp
     )
-    ON CONFLICT (from_entity_id, to_entity_id, relationship_type_id)
-      WHERE deleted_at IS NULL
-    DO NOTHING
+    ON CONFLICT ${conflictTarget} DO NOTHING
     RETURNING id, from_entity_id, to_entity_id, relationship_type_id,
               metadata, confidence, source, true AS inserted
   `;
@@ -273,8 +290,12 @@ export async function assertManualRelationshipClaim(
   tx: DbClient,
   params: {
     organizationId: string;
-    fromEntityId: number;
-    toEntityId: number;
+    fromEntityId: number | null;
+    toEntityId: number | null;
+    fromEntityTypeId?: number | null;
+    toEntityTypeId?: number | null;
+    fromSourceKey?: string | null;
+    toSourceKey?: string | null;
     relationshipTypeId: number;
     source: string;
     confidence?: number | null;
@@ -346,8 +367,10 @@ export async function retractManualRelationshipClaim(
   relationshipRemoved: boolean;
   relationship: {
     id: number;
-    fromEntityId: number;
-    toEntityId: number;
+    fromEntityId: number | null;
+    toEntityId: number | null;
+    fromEntityTypeId: number | null;
+    toEntityTypeId: number | null;
     relationshipTypeId: number;
     relationshipTypeSlug: string | null;
     metadata: Record<string, unknown> | null;
@@ -358,6 +381,7 @@ export async function retractManualRelationshipClaim(
   await lockOrganizationForRelationshipClaims(tx, params.organizationId);
   const rows = await tx<ClaimedRelationshipWithPurposeRow>`
     SELECT r.id, r.from_entity_id, r.to_entity_id, r.relationship_type_id,
+           r.from_entity_type_id, r.to_entity_type_id,
            rt.slug AS relationship_type_slug, rt.purpose AS relationship_type_purpose,
            r.metadata, r.confidence, r.source
     FROM entity_relationships r
@@ -384,8 +408,10 @@ export async function retractManualRelationshipClaim(
     ...result,
     relationship: {
       id: Number(row.id),
-      fromEntityId: Number(row.from_entity_id),
-      toEntityId: Number(row.to_entity_id),
+      fromEntityId: row.from_entity_id === null ? null : Number(row.from_entity_id),
+      toEntityId: row.to_entity_id === null ? null : Number(row.to_entity_id),
+      fromEntityTypeId: row.from_entity_type_id == null ? null : Number(row.from_entity_type_id),
+      toEntityTypeId: row.to_entity_type_id == null ? null : Number(row.to_entity_type_id),
       relationshipTypeId: Number(row.relationship_type_id),
       relationshipTypeSlug: row.relationship_type_slug,
       metadata: relationshipMetadataWithoutClaims(row.metadata),

@@ -18,7 +18,7 @@ import { decideIdentityAssociation, type IdentityAssociationInput } from "../../
  * - discover_duplicates: Page whole duplicate components across one entity type (read-only)
  */
 
-import { type EntityReadRestrictions, entityReadPolicySql, entityReadRestrictions, filterEntityReadRows } from "../../authz/entity-read-policy";
+import { type EntityReadRestrictions, entityReadRestrictions, filterEntityReadRows } from "../../authz/entity-read-policy";
 import { deriveToolActorSource } from '../../utils/apply-context';
 import { randomUUID } from "node:crypto";
 
@@ -37,7 +37,6 @@ import {
 	type ManageEntityResult,
 	ManageEntityResultSchema,
 	ManageEntitySchema,
-	type RelationshipCountByType,
 	type RelationshipRow,
 	UnlinkEntitiesAction,
 	UpdateEntityAction,
@@ -76,10 +75,21 @@ import {
 	type RelationshipColumnSpec,
 	updateEntity,
 } from "../../utils/entity-management";
-import { sourceReadScopeFromToolContext } from "../../authz/scope";
 import { ToolUserError } from "../../utils/errors";
 import { runTurnWriteOnce } from "../turn-write-idempotency";
-import { readSourceRecordLinks } from "../../utils/source-record-reads";
+import { recordKeyColumn } from "@lobu/core/contracts/entity-reference";
+import { normalizeEntityTypeSlug } from "../../utils/reserved";
+import {
+  endpointPredicate,
+  nextRelationshipCursor,
+  parseRelationshipCursor,
+  readAuthoredRelationshipPage,
+  readableRelationships,
+  readNativeRelationshipPage,
+  RELATIONSHIP_JOINS,
+  RELATIONSHIP_SELECT,
+} from "../../utils/relationship-reads";
+import { compareEntityEndpoints, lockEndpointTypes, resolveEntityReference } from "../../utils/entity-reference";
 import {
 	EntityPolicyDenialError,
 	type EntityWriteDenialDescription,
@@ -92,13 +102,9 @@ import {
 } from "../../utils/insert-event";
 import { canSeeMemberEmail, canSeeMemberList, redactMemberEmail } from "../../utils/member-entity-type";
 import {
-	ACL_MANAGED_TYPE_SQL,
 	assertNotAclManagedEdge,
-	canonicalizeSymmetricEdge,
 	validateConfidence,
-	validateNoSelfReference,
 	validateReconciledEdgeUpdate,
-	validateScopeRule,
 	validateSource,
 	validateTypeRule,
 } from "../../utils/relationship-validation";
@@ -147,15 +153,20 @@ function capitalize(value: string): string {
  * mode for an automation — so a reaction can't dodge its agent's envelope by omitting
  * automation_source.
  */
-function actingPrincipalFor(
+async function actingPrincipalFor(
 	args: Attributed | undefined,
 	ctx: ToolContext,
 ): Promise<ActingPrincipal> {
+	// Caller-supplied attribution is a hint, not authority. Ignore an invalid
+	// Automation/run pair before resolving policy; trusted session identity is
+	// retained by both resolvers and still fails closed if its owner is missing.
+	// Without a session stamp, omitting the hint already uses the caller's own policy.
+	const attribution = await resolveAutomationAttribution(ctx, args?.automation_source);
 	return resolveActingPrincipal(getDb(), {
 		organizationId: ctx.organizationId,
 		userId: ctx.userId,
 		agentId: ctx.agentId,
-		explicitAutomationId: args?.automation_source?.automation_id ?? null,
+		explicitAutomationId: attribution.automationId,
 		sessionAutomationId: ctx.actingAutomationId ?? null,
 	});
 }
@@ -242,7 +253,7 @@ type Attributed = Pick<Static<typeof CreateEntityAction>, "automation_source">;
 /** How `unlink`/`update_link` address an edge: by id, by endpoint triple, or both. */
 type EdgeAddress = Pick<
 	Static<typeof UnlinkEntitiesAction>,
-	"relationship_id" | "from_entity_id" | "to_entity_id" | "relationship_type_slug"
+	"relationship_id" | "from_entity_id" | "to_entity_id" | "from_entity_type" | "to_entity_type" | "relationship_type_slug"
 >;
 
 /**
@@ -254,7 +265,7 @@ type EdgeAddress = Pick<
 interface TrackedMutationArgs extends Attributed {
 	dry_run?: boolean;
 	action: "create" | "update" | "link";
-	entity_id?: number;
+	entity_id?: number | string;
 	entity_type?: string;
 	name?: string;
 }
@@ -284,7 +295,7 @@ const manageEntityTool = defineActionTool("manage_entity", {
 		handleList(args, env, ctx),
 	),
 	get: action(GetEntityAction, (args, ctx, env) =>
-		handleGet(args.entity_id, env, ctx, args.include_deleted ?? false),
+		handleGet(args.entity_id, env, ctx, args.include_deleted ?? false, args.entity_type),
 	),
 	delete: action(DeleteEntityAction, (args, ctx, env) =>
 		handleDelete(args, env, ctx),
@@ -405,7 +416,7 @@ async function trackEntityReaction(
 			entity_id: args.entity_id,
 		},
 		toolResult: result as Record<string, unknown>,
-		entityId,
+		entityId: typeof entityId === 'number' ? entityId : undefined,
 	});
 }
 
@@ -637,6 +648,8 @@ async function handleUpdate(
 	ctx: ToolContext,
 ): Promise<ManageEntityResult> {
 	const entityId = args.entity_id;
+	if (typeof entityId !== 'number') throw new ToolUserError('Source-owned entity fields are read-only', 400);
+	if (args.entity_type) await resolveEntityReference(entityId, args.entity_type, ctx);
   const sql = getDb();
 
   // Fetch before state for change tracking and validation
@@ -946,7 +959,7 @@ async function handleList(
 	> | null;
 	const relSpecs = (schema?.["x-table-relationships"] ??
 		[]) as RelationshipColumnSpec[];
-	const entityIds = entities.map((e) => e.id);
+	const entityIds = entities.filter(e => e.source_record_id === undefined).map((e) => e.id);
 
 	// Batch-load relationships and linked-column lookups in parallel.
 	const [relMap, linkedEntities] = await Promise.all([
@@ -969,7 +982,7 @@ async function handleList(
 					? redactMemberEmail(rawMetadata, schema)
 					: rawMetadata;
 			return {
-				id: e.id,
+				id: e.source_record_id !== undefined ? e.source_record_id : e.id,
 				...(e.identity ? { identity: e.identity } : {}),
 				entity_type: e.entity_type,
 				name: e.name,
@@ -1132,16 +1145,26 @@ async function resolveLinkedColumns(
 }
 
 async function handleGet(
-	entityId: number,
+	entityId: number | string,
 	env: Env,
 	ctx: ToolContext,
 	includeDeleted = false,
+	entityType?: string,
 ): Promise<ManageEntityResult> {
+	if (typeof entityId === 'string') {
+		if (includeDeleted) throw new ToolUserError('include_deleted is not supported by this source', 400);
+		const entity = await resolveEntityReference(entityId, entityType, ctx);
+		return { action: 'get', entity: { id: entity.id, entity_type: entity.entityType,
+			name: entity.name, slug: entity.slug, metadata: entity.metadata } };
+	}
 	const readRestrictions = await entityReadRestrictions(getDb(), ctx);
 	const entity = await getEntity(entityId, env, ctx, { includeDeleted, readRestrictions });
 
 	if (!entity) {
 		throw new ToolUserError(`Entity with ID ${entityId} not found`, 404);
+	}
+	if (entityType !== undefined && entity.entity_type !== normalizeEntityTypeSlug(entityType)) {
+		throw new ToolUserError('entity_type does not match entity_id', 400);
 	}
 
 	await assertEntityReadAllowed(undefined, ctx, entity.entity_type);
@@ -1198,6 +1221,8 @@ async function handleDelete(
 	ctx: ToolContext,
 ): Promise<ManageEntityResult> {
 	const entityId = args.entity_id;
+	if (typeof entityId !== 'number') throw new ToolUserError('Source-owned entities cannot be deleted through this API', 400);
+	if (args.entity_type) await resolveEntityReference(entityId, args.entity_type, ctx);
 	const force = args.force_delete_tree ?? false;
 	// Get entity info before deletion
 	const entity = await getEntity(entityId, env, ctx);
@@ -1370,43 +1395,6 @@ async function handleDelete(
 }
 
 // ============================================
-// Relationship (Link) Helpers
-// ============================================
-
-const RELATIONSHIP_SELECT = `
-  r.id,
-  r.organization_id,
-  r.from_entity_id,
-  r.to_entity_id,
-  r.relationship_type_id,
-  rt.slug as relationship_type_slug,
-  rt.name as relationship_type_name,
-  rt.is_symmetric,
-  ${ACL_MANAGED_TYPE_SQL} as acl_managed,
-  fe.name as from_entity_name,
-  fet.slug as from_entity_type,
-  te.name as to_entity_name,
-  tet.slug as to_entity_type,
-  NULLIF(r.metadata - '${RELATIONSHIP_CLAIMS_METADATA_KEY}', '{}'::jsonb) AS metadata,
-  r.confidence,
-  r.source,
-  r.created_by,
-  r.updated_by,
-  r.created_at,
-  r.updated_at,
-  r.deleted_at
-`;
-
-const RELATIONSHIP_JOINS = `
-  FROM entity_relationships r
-  JOIN entity_relationship_types rt ON r.relationship_type_id = rt.id
-  LEFT JOIN entities fe ON r.from_entity_id = fe.id
-  LEFT JOIN entity_types fet ON fet.id = fe.entity_type_id
-  LEFT JOIN entities te ON r.to_entity_id = te.id
-  LEFT JOIN entity_types tet ON tet.id = te.entity_type_id
-`;
-
-// ============================================
 // Relationship (Link) Action Handlers
 // ============================================
 
@@ -1418,8 +1406,10 @@ const RELATIONSHIP_JOINS = `
 interface EdgeAuditRow {
 	id: number | string;
 	organization_id: string;
-	from_entity_id: number | string;
-	to_entity_id: number | string;
+	from_entity_id: number | string | null;
+	to_entity_id: number | string | null;
+	from_entity_type_id: number | string | null;
+	to_entity_type_id: number | string | null;
 	relationship_type_id: number | string;
 	metadata: unknown;
 	confidence: number | null;
@@ -1435,7 +1425,7 @@ async function lockEdgeForMutation(
 	action: string,
 ): Promise<EdgeAuditRow> {
 	const rows = await tx<EdgeAuditRow>`
-    SELECT r.id, r.organization_id, r.from_entity_id, r.to_entity_id,
+    SELECT r.id, r.organization_id, r.from_entity_id, r.to_entity_id, r.from_entity_type_id, r.to_entity_type_id,
            r.relationship_type_id, r.metadata, r.confidence, r.source,
            rt.slug AS relationship_type_slug, rt.purpose
     FROM entity_relationships r
@@ -1533,22 +1523,17 @@ async function handleIdentityAssociation(input: IdentityAssociationInput, ctx: T
 }
 
 async function handleLink(
-	args: Static<typeof LinkEntitiesAction>,
-	env: Env,
-	ctx: ToolContext,
+  args: Static<typeof LinkEntitiesAction>, _env: Env, ctx: ToolContext,
 ): Promise<ManageEntityResult> {
-	const sql = getDb();
-
-	const relType = await resolveRelationshipType(
-		args.relationship_type_slug,
-		ctx.organizationId,
-	);
-  // An authorization-bearing type is what the ACL gates read. Minting one of its
-  // edges here would be minting access, so this surface refuses them outright —
-  // classification is only a trust boundary if the classified rows stop being
-  // generically writable.
+  const sql = getDb();
+  const relType = await resolveRelationshipType(args.relationship_type_slug, ctx.organizationId);
   assertNotAclManagedEdge(relType, 'link');
   if (relType.purpose === 'identity') {
+    if (typeof args.from_entity_id !== 'number' || typeof args.to_entity_id !== 'number') {
+      throw new ToolUserError('Identity associations require stored endpoints', 400);
+    }
+    if (args.from_entity_type) await resolveEntityReference(args.from_entity_id, args.from_entity_type, ctx);
+    if (args.to_entity_type) await resolveEntityReference(args.to_entity_id, args.to_entity_type, ctx);
     const attribution = await resolveAutomationAttribution(ctx, args.automation_source);
     validateConfidence(args.confidence);
     validateSource(args.source);
@@ -1558,170 +1543,89 @@ async function handleLink(
       dry_run: args.dry_run, automation_id: attribution.automationId, source: args.source, confidence: args.confidence }, ctx, attribution.runId);
   }
   if (args.dry_run) throw new ToolUserError('Relationship dry_run requires purpose identity', 400);
-  validateNoSelfReference(args.from_entity_id, args.to_entity_id);
-  await validateScopeRule(args.from_entity_id, args.to_entity_id, env, ctx);
-  const typeId = Number(relType.id);
-  const isSymmetric = Boolean(relType.is_symmetric);
-
-  await validateTypeRule(typeId, args.from_entity_id, args.to_entity_id, sql);
-
-  let fromId = args.from_entity_id;
-  let toId = args.to_entity_id;
-  if (isSymmetric) {
-    // For symmetric same-org pairs we canonicalize by id so dedup catches
-    // a → b and b → a as the same edge. For cross-org pairs (target in a
-    // public catalog), keep the caller's-org entity as `from` even if its
-    // id is higher, so the stored source matches the semantic source. The
-    // canonical form would otherwise leave rows where `from_entity_id`
-    // points at a public catalog row under a tenant `organization_id` —
-    // tenant-owned but cosmetically inverted.
-    const orgRows = await sql<{ id: number; organization_id: string }>`
-      SELECT id, organization_id FROM entities WHERE id IN (${fromId}, ${toId})
-    `;
-		const orgOf = (id: number) =>
-			String(orgRows.find((r) => Number(r.id) === id)?.organization_id);
-		const sameOrg =
-			orgOf(fromId) === ctx.organizationId &&
-			orgOf(toId) === ctx.organizationId;
-		if (sameOrg) {
-			const canonical = canonicalizeSymmetricEdge(fromId, toId);
-			fromId = canonical.from;
-			toId = canonical.to;
-		}
-		// else: cross-org symmetric — preserve caller-from / public-to.
-		// validateScopeRule already required `from` to be in caller's org.
-	}
-
-	validateConfidence(args.confidence);
-	validateSource(args.source);
-	assertNoReservedRelationshipMetadata(args.metadata);
-	const source = args.source ?? "api";
-	const confidence =
-		args.confidence ?? (source === "ui" || source === "api" ? 1.0 : null);
-
-	const created = await sql.begin(async (tx) => {
-		const asserted = await assertManualRelationshipClaim(tx, {
-			organizationId: ctx.organizationId,
-			fromEntityId: fromId,
-			toEntityId: toId,
-			relationshipTypeId: typeId,
-			metadata: args.metadata ?? null,
-			confidence,
-			source,
-			createdBy: ctx.userId,
-		});
-		if (!asserted.claimAdded) {
-			throw new ToolUserError(
-				`An active relationship of this type already exists between entities ${fromId} and ${toId}`,
-				409,
-			);
-		}
-		const relationshipId = asserted.id;
-
-		const createdRows = await tx.unsafe<RelationshipRow>(
-    `SELECT ${RELATIONSHIP_SELECT} ${RELATIONSHIP_JOINS} WHERE r.id = $1`,
-			[relationshipId],
-  );
-
-		await insertEdgeChangeEventInTransaction(
-			{
-				organizationId: ctx.organizationId,
-				relationshipId,
-				fromEntityId: fromId,
-				toEntityId: toId,
-				relationshipTypeId: typeId,
-				relationshipTypeSlug: args.relationship_type_slug ?? null,
-				op: "link",
-				changes: [
-					{ field: "exists", old: false, new: true },
-					{ field: "metadata", old: null, new: args.metadata ?? null },
-					{ field: "confidence", old: null, new: confidence },
-					{ field: "source", old: null, new: source },
-				],
-				createdBy: ctx.userId,
-				clientId: eventClientId(ctx),
-			},
-			tx,
-		);
-		return createdRows[0];
-	});
-
-	return { action: "link", relationship: created };
+  const restrictions = await entityReadRestrictions(sql, ctx, await actingPrincipalFor(args, ctx));
+  let [from, to] = await Promise.all([
+    resolveEntityReference(args.from_entity_id, args.from_entity_type, ctx, { restrictions }),
+    resolveEntityReference(args.to_entity_id, args.to_entity_type, ctx, { restrictions }),
+  ]);
+  // Retain the existing authorship scope: the source record/type belongs to the
+  // workspace; a stored target may additionally belong to a public catalog.
+  if (from.organizationId !== ctx.organizationId) throw new ToolUserError('Source entity must belong to your workspace', 403);
+  if (compareEntityEndpoints(from, to) === 0) throw new ToolUserError('Self-referencing relationships are not allowed', 400);
+  await validateTypeRule(Number(relType.id), from.entityId ?? 0, to.entityId ?? 0, sql,
+    { from: from.entityType, to: to.entityType });
+  if (relType.is_symmetric && to.organizationId === ctx.organizationId && compareEntityEndpoints(from, to) > 0) {
+    [from, to] = [to, from];
+  }
+  validateConfidence(args.confidence);
+  validateSource(args.source);
+  assertNoReservedRelationshipMetadata(args.metadata);
+  const source = args.source ?? 'api';
+  const confidence = args.confidence ?? (source === 'ui' || source === 'api' ? 1 : null);
+  const relationship = await sql.begin(async tx => {
+    await lockOrganizationForSemanticEvent(tx, ctx.organizationId);
+    await lockEndpointTypes(tx, [from, to]);
+    const asserted = await assertManualRelationshipClaim(tx, {
+      organizationId: ctx.organizationId, fromEntityId: from.entityId, toEntityId: to.entityId,
+      fromEntityTypeId: from.sourceTypeId, fromSourceKey: from.sourceKey,
+      toEntityTypeId: to.sourceTypeId, toSourceKey: to.sourceKey,
+      relationshipTypeId: Number(relType.id), metadata: args.metadata ?? null,
+      confidence, source, createdBy: ctx.userId,
+    });
+    if (!asserted.claimAdded) throw new ToolUserError('An active relationship of this type already exists between these entities', 409);
+    const rows = await tx.unsafe<RelationshipRow>(`SELECT ${RELATIONSHIP_SELECT} ${RELATIONSHIP_JOINS} WHERE r.id = $1`, [asserted.id]);
+    await insertEdgeChangeEventInTransaction({
+      organizationId: ctx.organizationId, relationshipId: asserted.id,
+      fromEntityId: from.entityId, toEntityId: to.entityId,
+      fromEntityTypeId: from.sourceTypeId, toEntityTypeId: to.sourceTypeId,
+      relationshipTypeId: Number(relType.id), relationshipTypeSlug: args.relationship_type_slug, op: 'link',
+      changes: [{ field: 'exists', old: false, new: true }, { field: 'metadata', old: null, new: args.metadata ?? null },
+        { field: 'confidence', old: null, new: confidence }, { field: 'source', old: null, new: source }],
+      createdBy: ctx.userId, clientId: eventClientId(ctx),
+    }, tx);
+    return { ...rows[0], from_entity_name: from.name, to_entity_name: to.name };
+  });
+  return { action: 'link', relationship };
 }
 
 /**
  * `unlink` and `update_link` accept either the `relationship_id` or the same
  * `{from, to, type}` triple `link` takes — which is the only addressing the SDK
- * signatures ever exposed. `idx_entity_relationships_live_triple` makes the
- * triple unique among live rows, so it names at most one edge.
+ * signatures ever exposed. `idx_entity_relationships_live_triple` (stored
+ * endpoints) and `idx_entity_relationships_live_source_pair` (source endpoints)
+ * make the triple unique among live rows, so it names at most one edge.
  *
  * A symmetric edge is stored in one orientation only — same-org pairs are
- * canonicalized by id at link time, cross-org pairs keep the caller's org as
- * `from` — and the caller has no way to know which. So for a symmetric type
- * either orientation of the endpoints resolves the same row.
+ * canonicalized by `compareEntityEndpoints` at link time, cross-org pairs keep
+ * the caller's org as `from` — and the caller has no way to know which. So for
+ * a symmetric type either orientation of the endpoints resolves the same row.
  *
  * This resolves an id and nothing more: the ACL, ownership, and org-scope
  * guards the by-id path already runs (`lockEdgeForMutation`,
  * `retractManualRelationshipClaim`) still run downstream, unchanged.
  */
-async function resolveRelationshipId(
-	args: EdgeAddress,
-	ctx: ToolContext,
-	action: "unlink" | "update_link",
-): Promise<number> {
-	const { relationship_id: namedId } = args;
-	const fromId = args.from_entity_id;
-	const toId = args.to_entity_id;
-	const typeSlug = args.relationship_type_slug;
-
-	if (!fromId || !toId || !typeSlug) {
-		if (namedId) return namedId;
-		throw new ToolUserError(
-			`relationship_id, or from_entity_id + to_entity_id + relationship_type_slug, is required for ${action}`,
-			400,
-		);
-	}
-
-	// Same search path as `link`, so an edge minted against a canonical public
-	// type is addressable the way it was created.
-	const relType = await resolveRelationshipType(typeSlug, ctx.organizationId);
-	const isSymmetric = Boolean(relType.is_symmetric);
-
-	const sql = getDb();
-	const rows = await sql<{ id: number | string }>`
-    SELECT id
-    FROM entity_relationships
-    WHERE organization_id = ${ctx.organizationId}
-      AND relationship_type_id = ${Number(relType.id)}
-      AND deleted_at IS NULL
-      AND (
-        (from_entity_id = ${fromId} AND to_entity_id = ${toId})
-        OR (
-          ${isSymmetric}::boolean
-          AND from_entity_id = ${toId}
-          AND to_entity_id = ${fromId}
-        )
-      )
-    -- At most one live row can match (idx_entity_relationships_live_triple),
-    -- but order anyway so legacy data cannot make the pick arbitrary.
-    ORDER BY id ASC
-    LIMIT 1
-  `;
-	if (rows.length === 0)
-		throw new ToolUserError(
-			`No relationship of type "${typeSlug}" between entities ${fromId} and ${toId}`,
-			404,
-		);
-	const resolved = Number(rows[0].id);
-	// Both addressings supplied and they disagree. Letting the id win would
-	// have `unlink` delete an edge the caller never named, so refuse instead of
-	// picking one.
-	if (namedId && Number(namedId) !== resolved)
-		throw new ToolUserError(
-			`relationship_id ${namedId} is not the "${typeSlug}" relationship between entities ${fromId} and ${toId} (that is relationship ${resolved}); pass one or the other`,
-			400,
-		);
-	return resolved;
+async function resolveRelationshipId(args: EdgeAddress, ctx: ToolContext, action: 'unlink' | 'update_link'): Promise<number> {
+  const namedId = args.relationship_id;
+  if (args.from_entity_id === undefined || args.to_entity_id === undefined || !args.relationship_type_slug) {
+    if (namedId) return namedId;
+    throw new ToolUserError(`relationship_id, or from_entity_id + to_entity_id + relationship_type_slug, is required for ${action}`, 400);
+  }
+  const relType = await resolveRelationshipType(args.relationship_type_slug, ctx.organizationId);
+  const [from, to] = await Promise.all([
+    resolveEntityReference(args.from_entity_id, args.from_entity_type, ctx, { readSource: false }),
+    resolveEntityReference(args.to_entity_id, args.to_entity_type, ctx, { readSource: false }),
+  ]);
+  const params: unknown[] = [ctx.organizationId, Number(relType.id)];
+  const forward = `${endpointPredicate('from', from, params)} AND ${endpointPredicate('to', to, params)}`;
+  const reverse = relType.is_symmetric ? ` OR (${endpointPredicate('from', to, params)} AND ${endpointPredicate('to', from, params)})` : '';
+  const rows = await getDb().unsafe<{ id: number }>(`
+    SELECT r.id FROM entity_relationships r
+    WHERE r.organization_id = $1 AND r.relationship_type_id = $2 AND r.deleted_at IS NULL
+      AND ((${forward})${reverse}) ORDER BY r.id LIMIT 1`, params);
+  if (!rows[0]) throw new ToolUserError(`No relationship of type "${args.relationship_type_slug}" between the specified entities`, 404);
+  const resolved = Number(rows[0].id);
+  if (namedId && namedId !== resolved) throw new ToolUserError('relationship_id and endpoints disagree; pass one or the other', 400);
+  return resolved;
 }
 
 async function handleUnlink(
@@ -1760,6 +1664,8 @@ async function handleUnlink(
 					relationshipId: edge.id,
 					fromEntityId: edge.fromEntityId,
 					toEntityId: edge.toEntityId,
+					fromEntityTypeId: edge.fromEntityTypeId,
+					toEntityTypeId: edge.toEntityTypeId,
 					relationshipTypeId: edge.relationshipTypeId,
 					relationshipTypeSlug: edge.relationshipTypeSlug,
 					op: "unlink",
@@ -1792,6 +1698,11 @@ async function handleUpdateLink(
 	ctx: ToolContext,
 ): Promise<ManageEntityResult> {
 	const relationshipId = await resolveRelationshipId(args, ctx, "update_link");
+	// Authorize the exact response before mutating. Unlink by id deliberately
+	// remains available without reading a disconnected source.
+	const readable = await getDb().unsafe<RelationshipRow>(`SELECT ${RELATIONSHIP_SELECT} ${RELATIONSHIP_JOINS} WHERE r.id = $1 AND r.organization_id = $2 AND r.deleted_at IS NULL`, [relationshipId, ctx.organizationId]);
+	const [authorized] = await readableRelationships(readable, ctx, await entityReadRestrictions(getDb(), ctx));
+	if (!authorized) throw new ToolUserError('Relationship not found or not readable', 404);
 
   const sql = getDb();
 
@@ -1861,8 +1772,10 @@ async function handleUpdateLink(
 				{
 					organizationId: ctx.organizationId,
 					relationshipId: Number(edge.id),
-					fromEntityId: Number(edge.from_entity_id),
-					toEntityId: Number(edge.to_entity_id),
+					fromEntityId: edge.from_entity_id === null ? null : Number(edge.from_entity_id),
+					toEntityId: edge.to_entity_id === null ? null : Number(edge.to_entity_id),
+					fromEntityTypeId: edge.from_entity_type_id === null ? null : Number(edge.from_entity_type_id),
+					toEntityTypeId: edge.to_entity_type_id === null ? null : Number(edge.to_entity_type_id),
 					relationshipTypeId: Number(edge.relationship_type_id),
 					relationshipTypeSlug: edge.relationship_type_slug,
 					op: "update_link",
@@ -1876,163 +1789,105 @@ async function handleUpdateLink(
 		return relationship[0];
 	});
 
-	return { action: "update_link", relationship: updated };
+	return { action: "update_link", relationship: {
+		...updated,
+		...(typeof updated.from_entity_id === 'string' ? { from_entity_name: authorized.from_entity_name } : {}),
+		...(typeof updated.to_entity_id === 'string' ? { to_entity_name: authorized.to_entity_name } : {}),
+	} };
 }
 
 async function handleListLinks(
-	args: Static<typeof ListLinksAction>,
-	ctx: ToolContext,
+  args: Static<typeof ListLinksAction>,
+  ctx: ToolContext,
 ): Promise<ManageEntityResult> {
-	if (args.record) {
-		if (args.entity_id !== undefined) {
-			throw new ToolUserError("Pass entity_id or record, not both.", 400);
-		}
-		const unsupported = [
-			args.offset ? "offset" : null,
-			args.include_deleted ? "include_deleted" : null,
-			args.source !== undefined ? "source" : null,
-			args.confidence_min !== undefined ? "confidence_min" : null,
-		].filter(Boolean);
-		if (unsupported.length) {
-			throw new ToolUserError(
-				`record cannot be combined with ${unsupported.join(", ")}.`,
-				400,
-			);
-		}
-		await assertEntityReadAllowed(args, ctx, args.record.type);
-		const result = await readSourceRecordLinks(
-			sourceReadScopeFromToolContext(ctx),
-			args.record,
-			{
-				limit: Math.min(Math.max(args.limit ?? 100, 1), 500),
-				cursor: args.cursor,
-				relationshipType: args.relationship_type_slug,
-				direction:
-					args.direction === "outbound"
-						? "outgoing"
-						: args.direction === "inbound"
-							? "incoming"
-							: undefined,
-				signal: ctx.abortSignal,
-				automationId: ctx.actingAutomationId,
-			},
-		);
-		return {
-			action: "list_links",
-			record_links: result.links,
-			record_failures: result.failures,
-			next_cursor: result.next_cursor,
-		};
-	}
-	if (args.cursor !== undefined) {
-		throw new ToolUserError(
-			"cursor requires a source-backed record; entity_id uses limit/offset pagination.",
-			400,
-		);
-	}
-	if (args.entity_id === undefined) {
-		throw new ToolUserError("list_links needs entity_id or record.", 400);
-	}
-	const sql = getDb();
-	const typeRows = await sql<{ entity_type: string }>`
-		SELECT et.slug AS entity_type
-		FROM entities e
-		JOIN entity_types et ON et.id = e.entity_type_id
-		WHERE e.id = ${args.entity_id}
-		  AND e.organization_id = ${ctx.organizationId}
-		LIMIT 1
-	`;
-	if (typeRows.length === 0) {
-		throw new ToolUserError(`Entity ${args.entity_id} not found`, 404);
-	}
-	await assertEntityReadAllowed(args, ctx, typeRows[0].entity_type);
-
-	const direction = args.direction ?? "both";
-	const includeDeleted = args.include_deleted ?? false;
-	const limit = Math.min(Math.max(args.limit ?? 100, 1), 500);
-	const offset = Math.max(args.offset ?? 0, 0);
-
-	const conditions: string[] = ["r.organization_id = $1"];
-	const params: unknown[] = [ctx.organizationId];
-	let paramIdx = 2;
-
-	if (!includeDeleted) {
-		conditions.push("r.deleted_at IS NULL");
-	}
-
-	if (direction === "outbound") {
-		conditions.push(`(r.from_entity_id = $${paramIdx})`);
-		params.push(args.entity_id);
-		paramIdx++;
-	} else if (direction === "inbound") {
-		conditions.push(`(r.to_entity_id = $${paramIdx})`);
-		params.push(args.entity_id);
-		paramIdx++;
-	} else {
-		conditions.push(
-			`(r.from_entity_id = $${paramIdx} OR r.to_entity_id = $${paramIdx})`,
-		);
-		params.push(args.entity_id);
-		paramIdx++;
-	}
-
-	if (args.relationship_type_slug) {
-		conditions.push(`rt.slug = $${paramIdx}`);
-		params.push(args.relationship_type_slug);
-		paramIdx++;
-	}
-
-	if (args.source) {
-		conditions.push(`r.source = $${paramIdx}`);
-		params.push(args.source);
-		paramIdx++;
-	}
-
-	if (args.confidence_min !== undefined) {
-		conditions.push(`r.confidence >= $${paramIdx}`);
-		params.push(args.confidence_min);
-		paramIdx++;
-	}
-
-	const readRestrictions = await entityReadRestrictions(sql, ctx, await actingPrincipalFor(args, ctx));
-	conditions.push(entityReadPolicySql(readRestrictions, 'fe', params), entityReadPolicySql(readRestrictions, 'te', params));
-
-	const whereClause = conditions.join(" AND ");
-
-	const countResult = await sql.unsafe<{ total: number }>(
-		`SELECT COUNT(*)::int as total ${RELATIONSHIP_JOINS} WHERE ${whereClause}`,
-		params,
-	);
-	const total = Number(countResult[0]?.total ?? 0);
-
-	const rows = await sql.unsafe<RelationshipRow>(
-		`SELECT ${RELATIONSHIP_SELECT} ${RELATIONSHIP_JOINS}
-     WHERE ${whereClause}
-     ORDER BY r.created_at DESC
-     LIMIT ${limit + 1}
-     OFFSET ${offset}`,
-		params,
-  );
-
-  const hasMore = rows.length > limit;
-  const relationships = hasMore ? rows.slice(0, limit) : rows;
-
-  const countsResult = await sql.unsafe<RelationshipCountByType>(
-    `SELECT
-      rt.slug as relationship_type_slug,
-      rt.name as relationship_type_name,
-      COUNT(*)::int as count
-    ${RELATIONSHIP_JOINS}
-    WHERE ${whereClause}
-    GROUP BY rt.slug, rt.name
-    ORDER BY count DESC`,
-		params,
-  );
-
+  // One deadline for the whole page, including both authored and native links.
+  const deadline = AbortSignal.timeout(20_000);
+  ctx = {
+    ...ctx,
+    abortSignal: ctx.abortSignal ? AbortSignal.any([ctx.abortSignal, deadline]) : deadline,
+  };
+  const sql = getDb();
+  let entityId = args.entity_id;
+  let entityType = args.entity_type;
+  if (args.record) {
+    if (entityId !== undefined || entityType !== undefined) {
+      throw new ToolUserError('Pass entity_id or record, not both', 400);
+    }
+    if (args.offset || args.include_deleted || args.source !== undefined || args.confidence_min !== undefined) {
+      throw new ToolUserError('record cannot be combined with offset, include_deleted, source, or confidence_min', 400);
+    }
+    entityId = args.record.key;
+    entityType = args.record.type;
+    const [type] = await sql`
+      SELECT metadata_schema FROM entity_types
+      WHERE slug = ${entityType} AND organization_id = ${ctx.organizationId} AND deleted_at IS NULL
+    `;
+    // Undeclared views retain their read-only source-native adapter.
+    if (!recordKeyColumn(type?.metadata_schema)) {
+      await assertEntityReadAllowed(args, ctx, entityType);
+      const native = await readNativeRelationshipPage(
+        args, args.record, ctx, Math.min(Math.max(args.limit ?? 100, 1), 500), args.cursor,
+      );
+      return {
+        action: 'list_links',
+        record_links: native.links,
+        record_failures: native.failures,
+        next_cursor: native.next_cursor,
+      };
+    }
+  }
+  if (entityId === undefined) throw new ToolUserError('list_links needs entity_id', 400);
+  const isSource = typeof entityId === 'string';
+  if (!isSource && args.cursor !== undefined) {
+    throw new ToolUserError('entity_id uses limit/offset; cursor requires a typed source key', 400);
+  }
+  if (isSource && args.offset) throw new ToolUserError('Source link pagination uses cursor', 400);
+  if (isSource && (args.source !== undefined || args.confidence_min !== undefined || args.include_deleted)) {
+    throw new ToolUserError('Source records do not support source, confidence_min, or include_deleted filters across live and authored links', 400);
+  }
+  const principal = await actingPrincipalFor(args, ctx);
+  const restrictions = await entityReadRestrictions(sql, ctx, principal);
+  const endpoint = await resolveEntityReference(entityId, entityType, ctx, { restrictions });
+  if (endpoint.organizationId !== ctx.organizationId) {
+    throw new ToolUserError('Entity not found in this workspace', 404);
+  }
+  const binding = JSON.stringify([
+    ctx.organizationId,
+    ctx.userId,
+    ctx.agentId,
+    ctx.actingAutomationId,
+    entityType,
+    entityId,
+    args.direction,
+    args.relationship_type_slug,
+    args.source,
+    args.confidence_min,
+    args.include_deleted,
+  ]);
+  const cursor = parseRelationshipCursor(args.cursor, binding);
+  const authored = await readAuthoredRelationshipPage(args, endpoint, ctx, restrictions, cursor);
+  const result = {
+    action: 'list_links' as const,
+    relationships: authored.relationships,
+    relationship_failures: authored.failures,
+    counts_by_type: authored.counts,
+    metadata: {
+      limit: authored.limit,
+      offset: authored.offset,
+      has_more: authored.hasMore,
+      counts_scope: 'page' as const,
+    },
+  };
+  if (!isSource) return result;
+  const native = cursor.sourceDone
+    ? { links: [], failures: [], next_cursor: undefined }
+    : await readNativeRelationshipPage(
+      args, { type: endpoint.entityType, key: String(entityId) }, ctx, authored.limit, cursor.sourceCursor,
+    );
   return {
-		action: "list_links",
-    relationships,
-    counts_by_type: countsResult,
-    metadata: { total, limit, offset, has_more: hasMore },
+    ...result,
+    record_links: native.links,
+    record_failures: native.failures,
+    next_cursor: nextRelationshipCursor(cursor, authored, native),
   };
 }

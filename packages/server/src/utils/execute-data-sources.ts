@@ -941,7 +941,9 @@ export function buildScopedQuery(
     } else if (table === 'entity_relationships') {
       // security-allowed: see block comment above the for-loop
       ctes.push(
-        `"${safeName}" AS (SELECT ${sel(table)} FROM public.entity_relationships WHERE organization_id = ${orgP} AND deleted_at IS NULL)`
+        // Live source endpoint visibility is enforced by the entity API. Raw SQL cannot
+        // bypass it, even to infer a hidden source key through counts or joins.
+        `"${safeName}" AS (SELECT ${sel(table)} FROM public.entity_relationships WHERE organization_id = ${orgP} AND deleted_at IS NULL AND from_entity_id IS NOT NULL AND to_entity_id IS NOT NULL)`
       );
     } else if (table === 'entity_relationship_types') {
       // security-allowed: see block comment above the for-loop

@@ -13,6 +13,7 @@
 import { createHash } from "node:crypto";
 import type { EventAttributionRule } from "@lobu/connector-sdk";
 import { getErrorMessage } from "@lobu/core";
+import { recordKey, recordKeyColumn } from "@lobu/core/contracts/entity-reference";
 import type { GetContentArgs } from "@lobu/core/contracts/tools/read-knowledge";
 import type { SourceReadScope } from "../authz/scope";
 import { compileConnectionRowVisibility } from "../authz/connection-visibility";
@@ -65,16 +66,17 @@ function matchablePath(
 async function loadSourceFeeds(
   scope: SourceReadScope,
   type: string
-): Promise<SourceFeed[]> {
+): Promise<{ feeds: SourceFeed[]; recordKeys: Map<string, string> }> {
   const sql = getDb();
-  const typeRows = await sql<{ backing_sql: string | null }>`
-    SELECT backing_sql FROM entity_types
-    WHERE organization_id = ${scope.organizationId} AND slug = ${type} AND deleted_at IS NULL
-    LIMIT 1
+  const typeRows = await sql<{ slug: string; backing_sql: string | null; metadata_schema: unknown }>`
+    SELECT slug, backing_sql, metadata_schema FROM entity_types
+    WHERE organization_id = ${scope.organizationId} AND deleted_at IS NULL
+    ORDER BY slug
   `;
-  if (typeRows.length === 0)
+  const recordType = typeRows.find(row => row.slug === type);
+  if (!recordType)
     throw new ToolUserError(`Entity type '${type}' not found`, 404);
-  if (!typeRows[0].backing_sql) {
+  if (!recordType.backing_sql) {
     throw new ToolUserError(
       `Entity type '${type}' is not source-backed; read its records by entity_id.`,
       400
@@ -117,7 +119,12 @@ async function loadSourceFeeds(
     connector_key: string;
     feed_schema: { matchPaths?: string[]; eventKinds?: EventKinds };
   }>;
-  return rows
+  const recordKeys = new Map<string, string>();
+  for (const row of typeRows) {
+    const column = row.backing_sql ? recordKeyColumn(row.metadata_schema) : null;
+    if (column) recordKeys.set(row.slug, column);
+  }
+  const feeds = rows
     .map((row) => ({
       feedId: Number(row.feed_id),
       connectionId: Number(row.connection_id),
@@ -134,6 +141,13 @@ async function loadSourceFeeds(
         )
       )
     );
+  return { feeds, recordKeys };
+}
+
+/** Declared source keys are verbatim; undeclared views retain legacy trimming. */
+function sourceKey(value: unknown, type: string, recordKeys: Map<string, string>): string | null {
+  if (recordKeys.has(type)) return recordKey({ key: value }, "key");
+  return value == null ? null : String(value).trim() || null;
 }
 
 /**
@@ -249,11 +263,12 @@ export async function readSourceRecordActivity(
   const platforms = [...new Set(options.platforms?.map((value) => value.trim()).filter(Boolean))].sort();
   const connections = [...new Set(options.connection_ids)].sort((a, b) => a - b);
   const selectedFeeds = [...new Set(options.feed_ids)].sort((a, b) => a - b);
-  const request = JSON.stringify([scope.organizationId, record.type, record.key, platforms, connections, selectedFeeds]);
+  const source = await loadSourceFeeds(scope, record.type);
+  const request = JSON.stringify([scope.organizationId, record.type, record.key, platforms, connections, selectedFeeds, source.recordKeys.get(record.type) ?? null]);
   const resume = decodeCursor(options.cursor, request);
   // Discovery already enforces connection visibility. Selection only narrows
   // that bounded config set and never starts a read for an excluded feed.
-  const feeds = (await loadSourceFeeds(scope, record.type)).filter((feed) =>
+  const feeds = source.feeds.filter((feed) =>
     (!platforms.length || platforms.includes(feed.connectorKey)) &&
     (!connections.length || connections.includes(feed.connectionId)) &&
     (!selectedFeeds.length || selectedFeeds.includes(feed.feedId))
@@ -317,7 +332,7 @@ export async function readSourceRecordActivity(
     if (!paths.includes(path)) return false;
     const owner = paths.find(
       (candidate) =>
-        String(getValueAtPath(row, candidate) ?? "").trim() === record.key
+        sourceKey(getValueAtPath(row, candidate), record.type, source.recordKeys) === record.key
     );
     return (owner ?? path) === path;
   };
@@ -437,20 +452,22 @@ function linkKey(link: SourceRecordLink): string {
 /** The link a source row declares through `read`, or null without the other side's key. */
 function rowLink(
   read: LinkRead,
-  row: Record<string, unknown>
+  row: Record<string, unknown>,
+  recordKeys: Map<string, string>
 ): SourceRecordLink | null {
-  const otherKey = (read.other.target.identities ?? [])
-    .map((identity) => getValueAtPath(row, identity.eventPath))
-    .find((value) => value != null && String(value).trim() !== "");
-  if (otherKey == null || !read.other.target.entityType) return null;
-  const key = String(otherKey).trim();
+  const type = read.other.target.entityType;
+  if (!type) return null;
+  const key = (read.other.target.identities ?? [])
+    .map((identity) => sourceKey(getValueAtPath(row, identity.eventPath), type, recordKeys))
+    .find((value) => value !== null);
+  if (key == null) return null;
   const name = read.other.target.titlePath
     ? getValueAtPath(row, read.other.target.titlePath)
     : null;
   return {
     relationship_type: read.type,
     direction: read.direction,
-    entity_type: read.other.target.entityType,
+    entity_type: type,
     key,
     name: name == null || String(name).trim() === "" ? key : String(name),
     occurred_at: occurredAt(row),
@@ -466,6 +483,7 @@ async function readLinkPage(
   scope: SourceReadScope,
   record: SourceRecordRef,
   reads: LinkRead[],
+  recordKeys: Map<string, string>,
   request: string,
   options: { limit: number; cursor: string | null; signal?: AbortSignal; automationId?: number | null }
 ) {
@@ -554,11 +572,11 @@ async function readLinkPage(
     for (const read of stream.group) {
       if (
         row.origin_type !== read.kind ||
-        String(getValueAtPath(row, read.path) ?? "").trim() !== record.key
+        sourceKey(getValueAtPath(row, read.path), record.type, recordKeys) !== record.key
       ) {
         continue;
       }
-      const link = rowLink(read, row);
+      const link = rowLink(read, row, recordKeys);
       if (link) links.set(linkKey(link), link);
     }
     return [...links.values()];
@@ -623,7 +641,7 @@ export async function readSourceRecordLinks(
     automationId?: number | null;
   }
 ) {
-  const feeds = await loadSourceFeeds(scope, record.type);
+  const { feeds, recordKeys } = await loadSourceFeeds(scope, record.type);
   const reads: LinkRead[] = [];
   for (const feed of feeds) {
     for (const [kind, spec] of Object.entries(feed.eventKinds)) {
@@ -667,6 +685,7 @@ export async function readSourceRecordLinks(
     scope.organizationId, scope.principal, scope.agentId ?? null,
     record.type, record.key, options.relationshipType ?? null, options.direction ?? null,
     feeds.map(feed => [feed.feedId, feed.connectionId, feed.matchPaths, feed.eventKinds]),
+    [...recordKeys].filter(([type]) => type === record.type || reads.some(read => read.other.target.entityType === type)),
   ])).digest("hex");
-  return readLinkPage(scope, record, reads, request, { ...options, cursor: options.cursor ?? null });
+  return readLinkPage(scope, record, reads, recordKeys, request, { ...options, cursor: options.cursor ?? null });
 }

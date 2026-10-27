@@ -51,7 +51,7 @@ export interface ConnectorDefinition {
   /** Available action definitions (keyed by action_key) */
   actions?: Record<string, ActionDefinition>;
   /** Query filters implemented by this connector. Unsupported filters fail before query(). */
-  queryCapabilities?: { exactMatch?: boolean; selection?: boolean };
+  queryCapabilities?: { exactMatch?: boolean; verbatimExactMatch?: boolean; selection?: boolean };
   /** Connector-normalized events that can activate Automations. */
   automationEvents?: ConnectorAutomationEvent[];
   /**
@@ -1200,12 +1200,14 @@ export interface QueryContext<F = Record<string, unknown>> {
   offset?: number;
   sort?: { column: string; order: 'asc' | 'desc' };
   /**
-   * Filter before pagination by the trimmed string of the first non-null
+   * Filter before pagination by the string (trimmed by default) of the first non-null
    * projected column, in order. Missing columns count as null; an empty string
    * does not fall through. Values must be bound or safely encoded by the
    * connector, which owns its source dialect. Requires queryCapabilities.exactMatch.
+   * `verbatim: true` preserves the scalar string without trimming and additionally
+   * requires queryCapabilities.verbatimExactMatch. The default stays trimmed.
    */
-  exactMatch?: { columns: string[]; value: string };
+  exactMatch?: { columns: string[]; value: string; verbatim?: boolean };
   /**
    * Shared collection predicates, applied before sorting and pagination.
    * Search is a literal case-insensitive substring of the projected name.

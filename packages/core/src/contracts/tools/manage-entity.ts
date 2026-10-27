@@ -22,10 +22,16 @@ const EntityType = Type.String({
   description: "Entity type as defined in your workspace",
 });
 
-const EntityId = Type.Integer({
-  minimum: 1,
-  description: "[get/update/delete/list_links] Entity ID to operate on",
-});
+const EntityId = Type.Union(
+  [
+    Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+    Type.String({ minLength: 1, maxLength: 1024 }),
+  ],
+  {
+    description:
+      "A stored integer ID, or a source key. String IDs require the accompanying entity_type; keys are case-sensitive and never coerced to integers.",
+  }
+);
 
 // Attributes an entity carries. `create` and `update` share the set; `list`
 // filters on `parent_id` and schema-declared metadata using `filters`.
@@ -90,13 +96,10 @@ const IncludeDeleted = Type.Boolean({
 // `link` needs the endpoint triple; `unlink`/`update_link` address an edge by
 // `relationship_id` OR by the triple (the handler resolves whichever is given).
 const EdgeEndpoints = {
-  from_entity_id: Type.Number({
-    description:
-      "[link/unlink/update_link] Source entity ID. For unlink/update_link, supply this triple instead of relationship_id to address the edge by its endpoints.",
-  }),
-  to_entity_id: Type.Number({
-    description: "[link/unlink/update_link] Target entity ID",
-  }),
+  from_entity_id: EntityId,
+  to_entity_id: EntityId,
+  from_entity_type: Type.Optional(EntityType),
+  to_entity_type: Type.Optional(EntityType),
   relationship_type_slug: Type.String({
     description: "[link/unlink/update_link/list_links] Relationship type slug",
     minLength: 1,
@@ -147,6 +150,7 @@ export const UpdateEntityAction = Type.Object({
       "Patch entity fields (human-owned fields queued for approval).",
   }),
   entity_id: EntityId,
+  entity_type: Type.Optional(EntityType),
   name: Type.Optional(EntityFields.name),
   content: Type.Optional(EntityFields.content),
   slug: Type.Optional(EntityFields.slug),
@@ -202,6 +206,7 @@ export const ListEntitiesAction = Type.Object({
 export const GetEntityAction = Type.Object({
   action: Type.Literal("get", { description: "Fetch one entity." }),
   entity_id: EntityId,
+  entity_type: Type.Optional(EntityType),
   include_deleted: Type.Optional(IncludeDeleted),
 });
 
@@ -210,6 +215,7 @@ export const DeleteEntityAction = Type.Object({
     description: "Delete an entity (force_delete_tree for cascading).",
   }),
   entity_id: EntityId,
+  entity_type: Type.Optional(EntityType),
   force_delete_tree: Type.Optional(
     Type.Boolean({
       description:
@@ -267,6 +273,8 @@ export const LinkEntitiesAction = Type.Object({
   }),
   from_entity_id: EdgeEndpoints.from_entity_id,
   to_entity_id: EdgeEndpoints.to_entity_id,
+  from_entity_type: EdgeEndpoints.from_entity_type,
+  to_entity_type: EdgeEndpoints.to_entity_type,
   relationship_type_slug: EdgeEndpoints.relationship_type_slug,
   confidence: Type.Optional(Confidence),
   source: Type.Optional(RelationshipSource),
@@ -283,6 +291,8 @@ export const UnlinkEntitiesAction = Type.Object({
   relationship_id: Type.Optional(RelationshipId),
   from_entity_id: Type.Optional(EdgeEndpoints.from_entity_id),
   to_entity_id: Type.Optional(EdgeEndpoints.to_entity_id),
+  from_entity_type: EdgeEndpoints.from_entity_type,
+  to_entity_type: EdgeEndpoints.to_entity_type,
   relationship_type_slug: Type.Optional(EdgeEndpoints.relationship_type_slug),
 });
 
@@ -293,6 +303,8 @@ export const UpdateLinkAction = Type.Object({
   relationship_id: Type.Optional(RelationshipId),
   from_entity_id: Type.Optional(EdgeEndpoints.from_entity_id),
   to_entity_id: Type.Optional(EdgeEndpoints.to_entity_id),
+  from_entity_type: EdgeEndpoints.from_entity_type,
+  to_entity_type: EdgeEndpoints.to_entity_type,
   relationship_type_slug: Type.Optional(EdgeEndpoints.relationship_type_slug),
   confidence: Type.Optional(Confidence),
   source: Type.Optional(RelationshipSource),
@@ -304,6 +316,7 @@ export const ListLinksAction = Type.Object({
     description: "List relationships for an entity with filters + counts.",
   }),
   entity_id: Type.Optional(EntityId),
+  entity_type: Type.Optional(EntityType),
   record: Type.Optional(
     Type.Object(
       {
@@ -336,7 +349,7 @@ export const ListLinksAction = Type.Object({
   cursor: Type.Optional(
     Type.Union([Type.String({ minLength: 1, maxLength: 65536 }), Type.Null()], {
       description:
-        "[list_links, record only] Omit or pass null for the first bounded page, then pass next_cursor until it is null. Stop automatic pagination on record_failures; the cursor retains failed sources for an explicit retry. Pages may be short or empty while next_cursor exists. Merge repeated links across pages by (relationship_type, direction, entity_type, key), keeping the newest occurred_at. Stored entity_id calls retain limit/offset pagination.",
+        "[list_links, source records] Omit or pass null for the first bounded page, then pass next_cursor until it is null. Stop automatic pagination on record_failures; the cursor retains failed sources for an explicit retry. Pages may be short or empty while next_cursor exists. Merge repeated links across pages by (relationship_type, direction, entity_type, key), keeping the newest occurred_at. Numeric entity_id calls retain limit/offset pagination; source pages bound limit to 100. Authored relationships are permission checked at both endpoints. counts_by_type describes the visible page (counts_scope: page), not a global total. Source pages reject source, confidence_min and include_deleted filters, which cannot be applied to live links. Source reads share a 20 second page deadline. Unavailable endpoints are withheld with key-free relationship_failures; readable links remain available. Updating an edge still requires readable endpoints. Unlink by relationship_id remains available during outages.",
     })
   ),
   automation_source: Type.Optional(AutomationSource),
@@ -406,8 +419,8 @@ export type EntityDiscoverDuplicatesInput = ActionInput<
 export const RelationshipRowSchema = Type.Object({
   id: Type.Integer(),
   organization_id: Type.String(),
-  from_entity_id: Type.Integer(),
-  to_entity_id: Type.Integer(),
+  from_entity_id: EntityId,
+  to_entity_id: EntityId,
   relationship_type_id: Type.Integer(),
   relationship_type_slug: Type.String(),
   relationship_type_name: Type.String(),
@@ -427,8 +440,10 @@ export const RelationshipRowSchema = Type.Object({
   // the one shared RELATIONSHIP_SELECT, so no path needs to omit it.
   acl_managed: Type.Boolean(),
   from_entity_name: Type.Optional(Type.String()),
+  from_entity_slug: Type.Optional(Type.String()),
   from_entity_type: Type.Optional(Type.String()),
   to_entity_name: Type.Optional(Type.String()),
+  to_entity_slug: Type.Optional(Type.String()),
   to_entity_type: Type.Optional(Type.String()),
   metadata: Type.Optional(
     Type.Union([Type.Record(Type.String(), Type.Unknown()), Type.Null()])
@@ -471,7 +486,7 @@ export type EntityIdentity = Static<typeof EntityIdentitySchema>;
  * user/workspace metadata.
  */
 export const ManageEntityItemSchema = Type.Object({
-  id: Type.Integer(),
+  id: Type.Union([EntityId, Type.Null()]),
   identity: Type.Optional(EntityIdentitySchema),
   entity_type: Type.String(),
   name: Type.String(),
@@ -500,6 +515,14 @@ export const ManageEntityItemSchema = Type.Object({
  * TypeBox-first: `Static<>` derives the TS type from the same schema exposed as
  * the tool's `outputSchema`.
  */
+const RelationshipReadFailureSchema = Type.Object({
+  relationship_id: Type.Integer(),
+  code: Type.String(),
+});
+export type RelationshipReadFailure = Static<
+  typeof RelationshipReadFailureSchema
+>;
+
 export const ManageEntityResultSchema = Type.Union([
   Type.Object({
     action: Type.Literal("create"),
@@ -624,6 +647,19 @@ export const ManageEntityResultSchema = Type.Union([
   ),
   Type.Object({
     action: Type.Literal("list_links"),
+    relationships: Type.Optional(Type.Array(RelationshipRowSchema)),
+    relationship_failures: Type.Optional(
+      Type.Array(RelationshipReadFailureSchema)
+    ),
+    counts_by_type: Type.Optional(Type.Array(RelationshipCountByTypeSchema)),
+    metadata: Type.Optional(
+      Type.Object({
+        limit: Type.Integer(),
+        offset: Type.Integer(),
+        has_more: Type.Boolean(),
+        counts_scope: Type.Literal("page"),
+      })
+    ),
     record_links: Type.Array(
       Type.Object({
         relationship_type: Type.String(),
@@ -646,9 +682,13 @@ export const ManageEntityResultSchema = Type.Union([
   Type.Object({
     action: Type.Literal("list_links"),
     relationships: Type.Array(RelationshipRowSchema),
+    relationship_failures: Type.Optional(
+      Type.Array(RelationshipReadFailureSchema)
+    ),
     counts_by_type: Type.Array(RelationshipCountByTypeSchema),
     metadata: Type.Object({
-      total: Type.Integer(),
+      total: Type.Optional(Type.Integer()),
+      counts_scope: Type.Optional(Type.Literal("page")),
       limit: Type.Integer(),
       offset: Type.Integer(),
       has_more: Type.Boolean(),
