@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { createWriteStream, existsSync } from "node:fs";
 import {
   mkdir,
+  mkdtemp,
   readdir,
   readFile,
   rename,
@@ -23,8 +24,6 @@ const DOWNLOAD_HOST = "storage.googleapis.com";
 /** How often `start` asks Google for a newer Stable build. */
 const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const MAX_ARCHIVE_BYTES = 1024 * 1024 * 1024;
-/** The current build plus the one before it, which a running browser may still use. */
-const KEEP_VERSIONS = 2;
 
 const execFileAsync = promisify(execFile);
 
@@ -81,7 +80,10 @@ function compareVersions(a: string, b: string): number {
   return 0;
 }
 
-async function installedVersions(root: string): Promise<string[]> {
+async function installedVersions(
+  root: string,
+  platform: ChromePlatform
+): Promise<string[]> {
   let entries: string[];
   try {
     entries = await readdir(root);
@@ -92,7 +94,8 @@ async function installedVersions(root: string): Promise<string[]> {
     .filter(
       (entry) =>
         /^\d+(\.\d+)+$/.test(entry) &&
-        existsSync(join(root, entry, ".complete"))
+        existsSync(join(root, entry, ".complete")) &&
+        existsSync(executablePath(join(root, entry), platform))
     )
     .sort(compareVersions);
 }
@@ -203,9 +206,7 @@ async function install(
   fetchImpl: typeof fetch,
   log: (message: string) => void
 ): Promise<void> {
-  const staging = join(root, `.staging-${version}-${process.pid}`);
-  await rm(staging, { recursive: true, force: true });
-  await mkdir(staging, { recursive: true });
+  const staging = await mkdtemp(join(root, `.staging-${version}-`));
   try {
     log(`Downloading Chrome for Testing ${version}…`);
     const archive = join(staging, "chrome.zip");
@@ -217,17 +218,50 @@ async function install(
     }
     await writeFile(join(staging, ".complete"), `${version}\n`);
     const target = join(root, version);
-    await rm(target, { recursive: true, force: true });
-    await rename(staging, target);
+    try {
+      await rename(staging, target);
+    } catch (error) {
+      // Another start may have published the same build while we downloaded.
+      // Never replace it: a browser may already be executing from that path.
+      const code = (error as NodeJS.ErrnoException).code;
+      if (
+        (code !== "EEXIST" && code !== "ENOTEMPTY") ||
+        !existsSync(join(target, ".complete")) ||
+        !existsSync(executablePath(target, platform))
+      ) {
+        throw error;
+      }
+    }
   } finally {
     await rm(staging, { recursive: true, force: true });
   }
 }
 
-async function prune(root: string): Promise<void> {
-  const versions = await installedVersions(root);
-  for (const version of versions.slice(0, -KEEP_VERSIONS)) {
-    await rm(join(root, version), { recursive: true, force: true });
+/**
+ * Delete superseded builds that no running process was started from. A named
+ * browser can stay open across several updates and keeps loading resources
+ * from its own build, so only the process table proves a build is unused.
+ */
+async function prune(
+  root: string,
+  current: string,
+  platform: ChromePlatform
+): Promise<void> {
+  let processes: string;
+  try {
+    ({ stdout: processes } = await execFileAsync(
+      "ps",
+      ["-axww", "-o", "command="],
+      { maxBuffer: 64 * 1024 * 1024 }
+    ));
+  } catch {
+    return;
+  }
+  for (const version of await installedVersions(root, platform)) {
+    const dir = join(root, version);
+    if (version !== current && !processes.includes(`${dir}/`)) {
+      await rm(dir, { recursive: true, force: true });
+    }
   }
 }
 
@@ -257,7 +291,7 @@ export async function resolveBrowserExecutable(
   const root = cacheRoot();
   await mkdir(root, { recursive: true });
 
-  const installed = await installedVersions(root);
+  const installed = await installedVersions(root, platform);
   const latest = await readLatest(root);
   if (
     latest &&
@@ -281,7 +315,7 @@ export async function resolveBrowserExecutable(
 
   if (!installed.includes(stable.version)) {
     await install(root, stable.version, stable.url, platform, fetchImpl, log);
-    await prune(root);
+    await prune(root, stable.version, platform);
   }
   await writeFile(
     join(root, "latest.json"),

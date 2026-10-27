@@ -196,12 +196,19 @@ async function runningPid(name: string): Promise<number | null> {
     // The lock outlives a crash, and pids are reused: confirm the process
     // really is a browser on this profile before trusting or signalling it.
     const { stdout } = await execFileAsync("ps", [
+      "-ww",
       "-p",
       String(pid),
       "-o",
       "command=",
     ]);
-    return stdout.includes(`--user-data-dir=${profile}`) ? pid : null;
+    // Chrome follows the profile flag with further flags, so a trailing space
+    // stops `/browsers/work/profile` matching `/browsers/work/profile-other`.
+    const argument = `--user-data-dir=${profile}`;
+    const command = stdout.trimEnd();
+    return command.includes(`${argument} `) || command.endsWith(argument)
+      ? pid
+      : null;
   } catch {
     return null;
   }
@@ -428,6 +435,10 @@ export async function browserStartCommand(
     ],
     { detached: true, stdio: "ignore" }
   );
+  await new Promise<void>((resolve, reject) => {
+    child.once("spawn", resolve);
+    child.once("error", reject);
+  });
   child.unref();
 
   console.log(`Starting browser "${name}"…`);

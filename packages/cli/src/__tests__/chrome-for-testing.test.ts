@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
@@ -119,6 +119,21 @@ describe("Chrome for Testing cache", () => {
     expect(String(log.mock.calls[0]?.[0])).toContain("offline");
   });
 
+  test("ignores a cached build whose executable is missing", async () => {
+    const root = useHome();
+    const executable = installVersion(root, "150.0.1.2");
+    rmSync(executable);
+    writeFileSync(
+      join(root, "latest.json"),
+      JSON.stringify({ version: "150.0.1.2", checkedAt: Date.now() })
+    );
+    await expect(
+      resolveBrowserExecutable({
+        fetchImpl: (() => Promise.reject(new Error("offline"))) as never,
+      })
+    ).rejects.toThrow("offline");
+  });
+
   test("with nothing cached, a failed check is an error", async () => {
     useHome();
     await expect(
@@ -141,10 +156,20 @@ describe("Chrome for Testing cache", () => {
     ).rejects.toThrow("Unexpected Chrome for Testing download origin");
   });
 
-  test("downloads, unpacks, and prunes to the two newest builds", async () => {
+  test("concurrent starts publish one build and prune only builds nothing runs from", async () => {
     const root = useHome();
     installVersion(root, "148.0.0.1");
-    installVersion(root, "149.0.0.1");
+    const inUse = installVersion(root, "149.0.0.1");
+    // Stands in for a browser still running from the older build.
+    const browser = spawn(
+      process.execPath,
+      ["-e", "setInterval(() => {}, 1000)", "--", inUse],
+      { stdio: "ignore" }
+    );
+    await new Promise<void>((resolve, reject) => {
+      browser.once("spawn", resolve);
+      browser.once("error", reject);
+    });
 
     // A real archive, unpacked by the same system tool the CLI shells out to.
     const fixture = mkdtempSync(join(tmpdir(), "lobu-cft-zip-"));
@@ -172,11 +197,17 @@ describe("Chrome for Testing cache", () => {
         input === url ? new Response(bytes) : versionIndex("150.0.1.2", url)
       );
 
-      const resolved = await resolveBrowserExecutable({
-        fetchImpl: fetchImpl as never,
-        now: () => 5_000,
-        log: () => undefined,
-      });
+      const results = await Promise.all(
+        Array.from({ length: 2 }, () =>
+          resolveBrowserExecutable({
+            fetchImpl: fetchImpl as never,
+            now: () => 5_000,
+            log: () => undefined,
+          })
+        )
+      );
+      const resolved = results[0]!;
+      expect(results[1]).toBe(resolved);
 
       expect(resolved).toBe(join(root, "150.0.1.2", EXECUTABLE));
       expect(existsSync(resolved)).toBe(true);
@@ -186,6 +217,7 @@ describe("Chrome for Testing cache", () => {
         JSON.parse(readFileSync(join(root, "latest.json"), "utf8"))
       ).toEqual({ version: "150.0.1.2", checkedAt: 5_000 });
     } finally {
+      browser.kill();
       rmSync(fixture, { recursive: true, force: true });
     }
   });

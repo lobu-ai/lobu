@@ -1,12 +1,26 @@
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import * as fs from "node:fs";
+import * as fsPromises from "node:fs/promises";
+import {
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import * as os from "node:os";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 // The extension's own parser for a desktop bridge reply: the host must satisfy
 // exactly what the shipped extension reads.
 import { readNativePairResponse } from "../../../owletto/apps/chrome/panel-session.js";
-import { nativeHostReply } from "../commands/browser";
+import {
+  browserStartCommand,
+  browserStopCommand,
+  nativeHostReply,
+} from "../commands/browser";
+import * as chromeForTesting from "../commands/_lib/chrome-for-testing";
 import * as deviceCredential from "../commands/_lib/device-credential";
 import {
   encodeNativeMessage,
@@ -69,6 +83,94 @@ describe("native host pairing reply", () => {
   }
 
   const noLog = async () => undefined;
+
+  test("reports launch errors before waiting for the device to connect", async () => {
+    useBrowserRecord();
+    await deviceCredential.persistDeviceCredential(
+      RECORD.context,
+      "chrome-extension-browser-work",
+      {
+        workerId: RECORD.workerId,
+        workerApiToken: "owl_pat_child",
+        expiresAt: Date.now() + 86_400_000,
+      }
+    );
+    const existsSync = fs.existsSync;
+    const readFile = fsPromises.readFile;
+    const isManifest = (path: unknown) =>
+      String(path).endsWith("/chrome-extension/manifest.json");
+    spyOn(fs, "existsSync").mockImplementation(
+      (path) => isManifest(path) || existsSync(path)
+    );
+    spyOn(fsPromises, "readFile").mockImplementation(((
+      path: string,
+      options: never
+    ) =>
+      isManifest(path)
+        ? Promise.resolve(
+            JSON.stringify({
+              key: Buffer.from("synthetic-key").toString("base64"),
+            })
+          )
+        : readFile(path, options)) as typeof fsPromises.readFile);
+    spyOn(credentials, "getContextToken").mockResolvedValue("login-token");
+    spyOn(chromeForTesting, "resolveBrowserExecutable").mockResolvedValue(
+      join(home!, "missing-browser")
+    );
+    const fetch = spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(Response.json({ devices: [] }))
+      .mockResolvedValue(
+        Response.json({ error: "unexpected device poll" }, { status: 400 })
+      );
+    spyOn(console, "log").mockImplementation(() => undefined);
+
+    await expect(browserStartCommand(RECORD.name, {})).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  test.each([
+    "",
+    "-other",
+  ])("stop matches the whole profile argument (suffix: %s)", async (suffix) => {
+    useBrowserRecord();
+    const profile = join(
+      home!,
+      ".config",
+      "lobu",
+      "browsers",
+      RECORD.name,
+      "profile"
+    );
+    mkdirSync(profile);
+    const child = spawn(
+      process.execPath,
+      [
+        "-e",
+        "setInterval(() => {}, 1000)",
+        "--",
+        `--user-data-dir=${profile}${suffix}`,
+      ],
+      { stdio: "ignore" }
+    );
+    try {
+      await new Promise<void>((resolve, reject) => {
+        child.once("spawn", resolve);
+        child.once("error", reject);
+      });
+      symlinkSync(`testhost-${child.pid}`, join(profile, "SingletonLock"));
+      const kill = spyOn(process, "kill").mockImplementation(() => {
+        if (suffix) throw new Error("must not signal another profile");
+        return child.kill();
+      });
+      spyOn(console, "log").mockImplementation(() => undefined);
+      await browserStopCommand(RECORD.name);
+      expect(kill).toHaveBeenCalledTimes(suffix ? 0 : 1);
+    } finally {
+      child.kill();
+    }
+  });
 
   test("declines anything but a pair request", async () => {
     useBrowserRecord();
