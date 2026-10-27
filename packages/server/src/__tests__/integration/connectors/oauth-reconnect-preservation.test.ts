@@ -5,7 +5,10 @@ import type { Env } from '../../../index';
 import { buildConnectionsNamespace } from '../../../sandbox/namespaces/connections';
 import { manageAuthProfiles } from '../../../tools/admin/manage_auth_profiles';
 import { manageConnections } from '../../../tools/admin/manage_connections';
-import { querySdkScript } from '../../../tools/sdk_run';
+// Through the registry, not tools/sdk_run: loading sdk_run first evaluates the
+// registry mid-cycle under the shared (isolate:false) module graph, leaving
+// run_sdk's handler undefined for later files.
+import { getTool } from '../../../tools/registry';
 import { createAuthProfile, updateAuthProfile } from '../../../utils/auth-profiles';
 import { expireStaleConnectTokens } from '../../../utils/connect-tokens';
 import { syncOAuthConnectionsForAuthProfile } from '../../../utils/oauth-connection-state';
@@ -1038,6 +1041,28 @@ describe('OAuth reconnect preserves the existing connection until consent', () =
     expect(count.count).toBe(1);
   });
 
+  it.each(['connect', 'reauthenticate'] as const)('rejects %s recovery when the selected OAuth provider was removed', async (action) => {
+    const s = await seed();
+    const sql = getTestDb();
+    const user = await createTestUser({ name: 'Synthetic removed provider owner' });
+    await addUserToOrganization(user.id, s.org.id, 'owner');
+    const client = buildConnectionsNamespace({ ...s.ctx, userId: user.id }, {} as Env);
+    const first = await client.connect({ connector_key: KEY, app_auth_profile_slug: s.app.slug }) as { connection_id: number };
+    await sql`UPDATE connect_tokens SET expires_at = NOW() - INTERVAL '1 hour' WHERE connection_id = ${first.connection_id}`;
+    await expireStaleConnectTokens();
+    await sql`UPDATE connector_definitions SET auth_schema = jsonb_set(auth_schema, '{methods,0,provider}', '"alternate"'::jsonb)
+      WHERE organization_id = ${s.org.id} AND key = ${KEY}`;
+    const before = await sql`SELECT * FROM connect_tokens WHERE connection_id = ${first.connection_id} ORDER BY id`;
+
+    await expect(action === 'connect'
+      ? client.connect({ connector_key: KEY })
+      : client.reauthenticate(first.connection_id)).rejects.toThrow('The OAuth provider is no longer available');
+
+    expect(await sql`SELECT * FROM connect_tokens WHERE connection_id = ${first.connection_id} ORDER BY id`).toEqual(before);
+    const [connection] = await sql`SELECT status, app_auth_profile_id FROM connections WHERE id = ${first.connection_id}`;
+    expect(connection).toMatchObject({ status: 'revoked', app_auth_profile_id: s.app.id });
+  });
+
   it('issues only one pending connect token for concurrent profile-less reauthentication', async () => {
     const s = await seed();
     const sql = getTestDb();
@@ -1066,7 +1091,7 @@ describe('OAuth reconnect preserves the existing connection until consent', () =
     ]);
     try {
       // Both requests must discover the expired token before either can renew it.
-      await waitForBlockedConnectTokens(2);
+      await waitForBlockedQueries('connect_tokens', 2);
     } finally {
       release();
       await Promise.allSettled([holder, replies]);
@@ -1100,7 +1125,7 @@ describe('OAuth reconnect preserves the existing connection until consent', () =
     const raw = await manageConnections({ action: 'get', connection_id: s.connection.id }, {} as Env, s.ctx);
     expect(JSON.parse(JSON.stringify(raw))).toEqual({ error: 'Connection not found' });
     expect(JSON.stringify(raw)).toBe('{"error":"Connection not found"}');
-    const result = await querySdkScript({
+    const result = await getTool('query_sdk')!.handler({
       script: `export default async (_ctx, client) => client.connections.get(${s.connection.id});`,
     }, {} as Env, s.ctx);
     expect(result).toMatchObject({ success: false, error: {

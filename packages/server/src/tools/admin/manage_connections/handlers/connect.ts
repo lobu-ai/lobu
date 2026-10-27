@@ -6,10 +6,6 @@ import { completeBrowserConnectionSetup } from '../../helpers/verify-browser-con
 import { selectedBrowserRequirement } from '../../../../connectors/browser-resource';
 import { checkBrowserConnectionSetup } from '../../helpers/browser-connection-setup';
 import { getDb, pgBigintArray, type DbClient } from "../../../../db/client";
-import {
-	normalizeScopeList,
-	selectReconnectOAuthScopes,
-} from "../../../../auth/oauth/scopes";
 import { OAUTH_ACCOUNT_BINDING_ERROR, oauthAccountOwnershipError } from '../../../../authz/oauth-account-ownership';
 import { lockOAuthAccountBinding } from '../../../../utils/oauth-connection-state';
 import { ToolUserError } from '../../../../utils/errors';
@@ -31,7 +27,6 @@ import { ensureConnectorInstalled } from "../../../../utils/ensure-connector-ins
 import {
   buildOAuthConnectConfig,
   issueOAuthReconnectLink,
-  getOAuthMethods,
   resolveOAuthProfileApp,
   ensureEnvBackedOAuthAppProfile,
   getConnectBaseUrl,
@@ -41,7 +36,7 @@ import {
   resolveConnectionAuthSelection,
   resolveConnectionDisplayName,
   resolveConnectionVisibility,
-  withFailureCode,
+  recoverPendingOAuthConnection,
 } from "../../helpers/connection-helpers";
 import { assertEntityIdsInOrg } from "../../helpers/db-helpers";
 import {
@@ -259,122 +254,16 @@ async function handleConnectImpl(
   `;
   if (pendingRows.length > 0) {
     const candidate = pendingRows[0] as { id: number; connect_token_id: number };
-    const recovered = await sql.begin(async (tx) => {
-      // Match callback lock order: token, selected account profile, connection.
-      // Discovery is only a hint; authorization and renewal use these live rows.
-      const [token] = await tx`SELECT * FROM connect_tokens
-        WHERE id = ${candidate.connect_token_id} AND organization_id = ${organizationId} FOR UPDATE`;
-      if (!token) return { error: 'Connection setup changed. Retry connecting this account.' };
-      const [targetHint] = await tx`SELECT auth_profile_id FROM connections
-        WHERE id = ${candidate.id} AND organization_id = ${organizationId} AND deleted_at IS NULL`;
-      if (!targetHint) return withFailureCode({ error: 'Connection not found' }, 'NOT_FOUND');
-      const [profile] = targetHint.auth_profile_id ? await tx`
-        SELECT ap.*, a.scope AS account_scope FROM auth_profiles ap
-        LEFT JOIN account a ON a.id = ap.account_id
-        WHERE ap.id = ${targetHint.auth_profile_id} AND ap.organization_id = ${organizationId}
-        FOR UPDATE OF ap` : [];
-      const [target] = await tx`SELECT * FROM connections
-        WHERE id = ${candidate.id} AND organization_id = ${organizationId} AND deleted_at IS NULL FOR UPDATE`;
-      if (!target || target.auth_profile_id !== targetHint.auth_profile_id) {
-        return { error: 'Connection setup changed. Retry connecting this account.' };
-      }
-      if (!userId || target.created_by !== userId) return { error: 'You can only re-authenticate connections you created.' };
-      if (target.auth_profile_id && profile?.profile_kind !== 'oauth_account') return { error: 'The selected OAuth account profile is no longer available.' };
-      if (profile) {
-        const ownershipError = oauthAccountOwnershipError(profile as { profile_kind: string; created_by: string | null }, userId, target.created_by);
-        if (ownershipError) return { error: ownershipError };
-      }
-      if (target.status === 'active') return { active: true as const, target };
-      if (token.status === 'expired') {
-        // Another retry may have replaced the token while this one waited for its
-        // lock. Rediscover that replacement instead of issuing a second live link.
-        const [latest] = await tx`SELECT id FROM connect_tokens
-          WHERE connection_id = ${target.id} AND organization_id = ${organizationId}
-            AND auth_type = 'oauth' AND status IN ('pending', 'expired')
-          ORDER BY created_at DESC, id DESC LIMIT 1`;
-        if (latest?.id !== token.id) return { error: 'Connection setup changed. Retry connecting this account.' };
-      }
-      if (target.status !== 'pending_auth' && !(target.status === 'revoked' && !target.auth_profile_id &&
-          !target.account_id && target.error_message === CONNECT_TOKEN_EXPIRED_ERROR)) {
-        return { error: 'This connection is no longer awaiting OAuth setup. Review the connection before reconnecting.' };
-      }
-      const oldConfig = (token.auth_config ?? {}) as Record<string, unknown>;
-      const appId = target.app_auth_profile_id ?? profile?.auth_data?.app_auth_profile_id ?? oldConfig.appAuthProfileId ?? null;
-      const [app] = appId ? await tx`SELECT slug, provider FROM auth_profiles
-        WHERE id = ${appId} AND organization_id = ${organizationId} AND profile_kind = 'oauth_app'` : [];
-      if (args.app_auth_profile_slug && args.app_auth_profile_slug !== app?.slug) {
-        return { error: 'A pending account connection uses a different OAuth app. Select that app on the connection before retrying.' };
-      }
-      const provider = String(profile?.provider ?? app?.provider ?? oldConfig.provider ?? '').toLowerCase();
-      const method = getOAuthMethods(connector.auth_schema).find(method => method.provider.toLowerCase() === provider);
-      if (!method) return { error: 'The OAuth provider is no longer available. Review this connector’s app configuration.' };
-      // Revalidate pending requests as well as grants against the active definition.
-      const selection = selectReconnectOAuthScopes({
-        method,
-        feedsSchema: connector.feeds_schema,
-        historicalScopes: [
-          ...(String(oldConfig.provider ?? '').toLowerCase() === provider
-            ? normalizeScopeList(oldConfig.requestedScopes ?? oldConfig.scopes) : []),
-          ...normalizeScopeList(profile?.account_scope ?? profile?.auth_data?.granted_scopes),
-        ],
-        requestedScopes: args.requested_scopes,
-      });
-      const scopes = selection.requestedScopes;
-      const scopeAudit = {
-        droppedHistoricalScopes: selection.droppedHistoricalScopes,
-        scopeSelection: `reconnect-preserve-declared@${connector.version}`,
-      };
-      const bindingsChanged = token.auth_profile_id !== target.auth_profile_id ||
-        (appId !== null && oldConfig.appAuthProfileId !== appId);
-      const needsRenewal = bindingsChanged || token.status !== 'pending' || new Date(token.expires_at).getTime() <= Date.now();
-      if (needsRenewal) {
-        // Provider endpoints and initialization belong to the current method.
-        // Carry forward only deferred account metadata and the requested scopes.
-        const pendingMeta = oldConfig.pendingProfileMeta as { displayName: string; slug: string } | undefined;
-        const authConfig = { ...buildOAuthConnectConfig(method),
-          ...(pendingMeta ? { pendingProfileMeta: { displayName: pendingMeta.displayName, slug: pendingMeta.slug,
-            connectorKey: target.connector_key, provider: method.provider } } : {}),
-          appAuthProfileId: appId,
-          scopes, requestedScopes: scopes, ...scopeAudit };
-        // Invalidate the old bearer link and issue its replacement atomically.
-        await tx`UPDATE connect_tokens SET status = 'expired' WHERE id = ${token.id}`;
-        const fresh = await createConnectToken({ connectionId: target.id, authProfileId: target.auth_profile_id,
-          organizationId, connectorKey: args.connector_key, authType: 'oauth', authConfig, createdBy: userId }, tx);
-        await tx`UPDATE connections SET status = 'pending_auth', error_message = NULL, updated_at = NOW()
-          WHERE id = ${target.id} AND organization_id = ${organizationId}`;
-        return { token: fresh.token, expires_at: fresh.expires_at, target };
-      }
-      await tx`UPDATE connect_tokens
-        SET auth_config = COALESCE(auth_config, '{}'::jsonb) || ${tx.json({ scopes, requestedScopes: scopes, ...scopeAudit })}::jsonb
-        WHERE id = ${token.id}`;
-      return { token: token.token as string, expires_at: token.expires_at as Date, target };
+    const recovered = await recoverPendingOAuthConnection({
+      connectionId: candidate.id,
+      connectTokenId: candidate.connect_token_id,
+      connector,
+      connectorKey: args.connector_key,
+      ctx,
+      requestedScopes: args.requested_scopes,
+      appAuthProfileSlug: args.app_auth_profile_slug,
     });
-    if (recovered.error) return Object.assign(recovered, { setup_url: setupUrl });
-    if ('active' in recovered) return { action: 'connect', connection_id: recovered.target.id,
-      slug: recovered.target.slug, status: 'active',
-      message: 'This connection is already active. Check client.operations.listAvailable({ connection_id }) for the requested capabilities before resuming the original task.' };
-    const pending = { ...recovered.target, token: recovered.token, expires_at: recovered.expires_at };
-    const connectUrl = `${getConnectBaseUrl(ctx)}/connect/${pending.token}/oauth/start`;
-    // Existing profiles were checked as oauth_account above; unlinked pending
-    // rows receive that kind on consent. Preserve the personal-scope warning.
-    const pendingScopeWarning = personalConnectionScopeWarning({
-      visibility: pending.visibility,
-      profileKind: "oauth_account",
-    });
-    return {
-			action: "connect",
-      connection_id: pending.id,
-      slug: pending.slug,
-			status: "pending_auth",
-			auth_type: "oauth",
-      connect_url: connectUrl,
-      connect_token: pending.token,
-      expires_at: new Date(pending.expires_at).toISOString(),
-      instructions:
-        "A pending connection already exists. Send the connect_url to the user to complete OAuth authorization." +
-        (pendingScopeWarning ? ` ${pendingScopeWarning}` : "") +
-        " Poll with client.connections.get(connection_id) via query_sdk until status='active', then check client.operations.listAvailable({ connection_id }) for the requested capabilities before resuming the original task. Reuse this connection; do not create duplicate connections or feeds.",
-    };
+    return 'error' in recovered ? Object.assign(recovered, { setup_url: setupUrl }) : recovered;
   }
 
   const authSelection = await resolveConnectionAuthSelection({

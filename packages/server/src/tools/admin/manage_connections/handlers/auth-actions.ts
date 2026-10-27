@@ -22,7 +22,8 @@ import { ACTIVE_RUN_STATUSES, runStatusLiteral } from '../../../../utils/run-sta
 import type { ToolContext } from '../../../registry';
 import type { ManageConnectionsResult, ConnectionsArgs } from '../schemas';
 import { callerIsAdmin as resolveCallerIsAdmin } from '../../helpers/db-helpers';
-import { issueOAuthReconnectLink, recoverUnfinishedOAuthConnection, withFailureCode } from '../../helpers/connection-helpers';
+import { getOAuthMethods, issueOAuthReconnectLink, recoverPendingOAuthConnection, withFailureCode } from '../../helpers/connection-helpers';
+import { getScopedConnectorDefinition } from '../../../../catalog/connector-definitions';
 
 // ============================================
 // handleReauthenticate
@@ -80,10 +81,16 @@ export async function handleReauthenticate(
 
   if (!row.auth_profile_id) {
     // A connection whose OAuth consent never completed has no profile to
-    // reconnect - hand back the connect action's pending-recovery contract
-    // (fresh connect token on the same connection) instead of dead-ending.
-    return recoverUnfinishedOAuthConnection({
+    // reconnect. Reuse connect's pending-recovery path to retain its connection
+    // and renew expired tokens.
+    const connector = await getScopedConnectorDefinition({ organizationId, connectorKey: row.connector_key });
+    if (!connector) return { error: `Connector '${row.connector_key}' not found or not active` };
+    if (getOAuthMethods(connector.auth_schema).length === 0) {
+      return { error: `Connector '${row.connector_key}' does not support OAuth reauthentication` };
+    }
+    return recoverPendingOAuthConnection({
       connectionId: row.id,
+      connector,
       connectorKey: row.connector_key,
       ctx,
       requestedScopes: args.requested_scopes,
