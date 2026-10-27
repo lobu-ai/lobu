@@ -149,3 +149,11 @@ function isErrno(error: unknown, code: string): boolean {
     (error as { code?: unknown }).code === code
   );
 }
+
+/** Forget one saved identity after its device has been removed. */
+export async function deleteDeviceState(
+  context: string,
+  platform: string
+): Promise<void> {
+  await rm(statePath(context, platform), { force: true });
+}

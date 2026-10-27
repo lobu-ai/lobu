@@ -418,8 +418,11 @@ review_bb_run_reviewer() {
       RAW="review_bb: could not build the BB child prompt"
       return 0
     fi
+    # `auto`, like the fixer: the reviewer runs read-only checks such as
+    # `bun test`, and accept-edits stops each one on a human approval prompt,
+    # which an unattended review waits out until it times out and fails closed.
     review_bb_spawn "$bb_prompt" "$title" "$provider" "$bb_model" "$effort" \
-      accept-edits --environment "$worktree" || {
+      auto --environment "$worktree" || {
       RAW="review_bb: failed to spawn a visible BB child; refusing silent fallback to the invisible CLI"
       rm -f "$bb_prompt"
       return 0

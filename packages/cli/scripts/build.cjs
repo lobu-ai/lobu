@@ -1,5 +1,6 @@
 const fs = require("node:fs");
 const path = require("node:path");
+const { copyChromeExtension } = require("./copy-chrome-extension.cjs");
 
 function copyDirIfExists(src, dest, filter) {
   if (!fs.existsSync(src)) return;
@@ -50,6 +51,9 @@ if (fs.existsSync(providersSrc)) {
 // compiles them on demand when a workspace installs or runs one. Only the
 // runtime connector source/manifests ship — internal tests are filtered out.
 copyDirIfExists("../connectors/src", "dist/connectors", excludeTests);
+
+// `lobu browser` loads the Lobu Chrome extension into Chrome for Testing.
+copyChromeExtension();
 
 // npm does not apply Bun patches. Publish the patched Ora package itself so
 // every spinner gets the zero-width terminal fix, including Node-only installs.
