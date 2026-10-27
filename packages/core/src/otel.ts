@@ -46,8 +46,9 @@ export function initTracing(config: OtelConfig): void {
     return;
   }
 
-  // Skipped by default on install; a minimal install that enables tracing
-  // gets the explicit error below instead of MODULE_NOT_FOUND.
+  // Optional peers: npm skips them on install (bun workspaces still hoist
+  // them for dev). A minimal install that enables tracing gets the explicit
+  // error below instead of MODULE_NOT_FOUND.
   let exporterCtor: typeof OTLPTraceExporter;
   let resourceFromAttributes: typeof resourceFromAttributesType;
   let NodeTracerProvider: typeof NodeTracerProviderType;
@@ -68,7 +69,11 @@ export function initTracing(config: OtelConfig): void {
       ATTR_SERVICE_NAME,
       ATTR_SERVICE_VERSION,
     } = require("@opentelemetry/semantic-conventions"));
-  } catch {
+  } catch (err) {
+    // Only a missing module means the optional peers aren't installed. A
+    // genuine load failure inside an installed OTel module (e.g. grpc native
+    // init) must surface as-is, not misreport as "not installed".
+    if ((err as NodeJS.ErrnoException)?.code !== "MODULE_NOT_FOUND") throw err;
     throw new Error(
       "Tracing is enabled (OTEL_EXPORTER_OTLP_ENDPOINT or enabled: true) but the optional OpenTelemetry peer dependencies are not installed (@opentelemetry/exporter-trace-otlp-grpc, @opentelemetry/resources, @opentelemetry/sdk-trace-node, @opentelemetry/semantic-conventions). Install them explicitly to enable tracing, or leave the endpoint unset to run without tracing."
     );
