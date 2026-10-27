@@ -4,7 +4,7 @@ import { context, SpanKind, SpanStatusCode, trace } from "@opentelemetry/api";
 // load on every `@lobu/core` import: tracing is disabled unless an OTLP
 // endpoint is configured, and the CLI never configures one. The four heavy
 // modules below are optional peer dependencies, loaded synchronously via
-// createRequire inside initTracing only when enabled (sync require preserves
+// bare require() inside initTracing only when enabled (sync require preserves
 // the initTracing(config): void signature; the exporter ships CJS). The API
 // package above stays a hard dependency: it is tiny and backs the no-op
 // spans returned while disabled.
@@ -18,7 +18,6 @@ import type {
   ATTR_SERVICE_NAME as AttrServiceName,
   ATTR_SERVICE_VERSION as AttrServiceVersion,
 } from "@opentelemetry/semantic-conventions";
-import { createRequire } from "node:module";
 import { createLogger } from "./logger";
 
 const logger = createLogger("otel");
@@ -46,9 +45,10 @@ export function initTracing(config: OtelConfig): void {
     return;
   }
 
-  // Optional peers: npm skips them on install (bun workspaces still hoist
-  // them for dev). A minimal install that enables tracing gets the explicit
-  // error below instead of MODULE_NOT_FOUND.
+  // Bare require (not createRequire(__filename)): tsc emits CJS with a native
+  // require, bun provides one for src TS, and the server ESM bundle banner
+  // defines `const require = __createRequire(import.meta.url)` for exactly
+  // these calls — while __filename has no shim there and would throw.
   let exporterCtor: typeof OTLPTraceExporter;
   let resourceFromAttributes: typeof resourceFromAttributesType;
   let NodeTracerProvider: typeof NodeTracerProviderType;
@@ -56,7 +56,6 @@ export function initTracing(config: OtelConfig): void {
   let ATTR_SERVICE_NAME: typeof AttrServiceName;
   let ATTR_SERVICE_VERSION: typeof AttrServiceVersion;
   try {
-    const require = createRequire(__filename);
     exporterCtor =
       require("@opentelemetry/exporter-trace-otlp-grpc").OTLPTraceExporter;
     resourceFromAttributes =

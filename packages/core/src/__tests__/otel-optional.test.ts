@@ -46,4 +46,18 @@ describe("otel disabled by default", () => {
     await flushTracing();
     expect(getTracer()).toBeNull();
   });
+
+  // Last: enabling mutates module-global provider/tracer state, and the
+  // shutdown at the end restores it. Port 1 never accepts connections, but
+  // no span is created so nothing is exported — init only constructs the
+  // exporter/provider and registers them.
+  test("enabled init loads the lazy peers and shutdown clears them", async () => {
+    initTracing({
+      serviceName: "test-service",
+      otlpEndpoint: "http://127.0.0.1:1",
+    });
+    expect(getTracer()).not.toBeNull();
+    await shutdownTracing();
+    expect(getTracer()).toBeNull();
+  });
 });
