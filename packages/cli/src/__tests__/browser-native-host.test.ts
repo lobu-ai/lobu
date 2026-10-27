@@ -16,6 +16,7 @@ import { join } from "node:path";
 // exactly what the shipped extension reads.
 import { readNativePairResponse } from "../../../owletto/apps/chrome/panel-session.js";
 import {
+  browserListCommand,
   browserStartCommand,
   browserStopCommand,
   nativeHostReply,
@@ -26,6 +27,7 @@ import {
   encodeNativeMessage,
   readNativeMessage,
 } from "../commands/_lib/native-messaging";
+import * as contextConfig from "../internal/context";
 import * as credentials from "../internal/credentials";
 import { loadDeviceState } from "../internal/device-state";
 
@@ -74,9 +76,18 @@ describe("native host pairing reply", () => {
     home = undefined;
   });
 
+  /** Save the browser's context, pointing at `url`. */
+  function useContextUrl(url: string): void {
+    spyOn(contextConfig, "loadContextConfig").mockResolvedValue({
+      currentContext: RECORD.context,
+      contexts: { [RECORD.context]: { url } },
+    } as Awaited<ReturnType<typeof contextConfig.loadContextConfig>>);
+  }
+
   function useBrowserRecord(): void {
     home = mkdtempSync(join(tmpdir(), "lobu-browser-host-"));
     spyOn(os, "homedir").mockReturnValue(home);
+    useContextUrl(`${RECORD.gatewayOrigin}/api/v1`);
     const dir = join(home, ".config", "lobu", "browsers", RECORD.name);
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "browser.json"), JSON.stringify(RECORD));
@@ -170,6 +181,56 @@ describe("native host pairing reply", () => {
     } finally {
       child.kill();
     }
+  });
+
+  describe("after the context is repointed at another gateway", () => {
+    function useRepointedContext(): void {
+      useBrowserRecord();
+      useContextUrl("https://other-gateway.example/api/v1");
+      spyOn(credentials, "getContextToken").mockResolvedValue(
+        "other-gateway-login"
+      );
+    }
+
+    test("pairing refuses before any request or login refresh", async () => {
+      useRepointedContext();
+      const mint = spyOn(deviceCredential, "mintDeviceCredentialWithReauth");
+      const login = spyOn(deviceCredential, "requireInstallationLogin");
+      const fetch = spyOn(globalThis, "fetch");
+
+      const reply = await nativeHostReply(RECORD.name, { op: "pair" }, noLog);
+
+      expect(String(reply.error)).toContain("no longer points at");
+      expect(mint).not.toHaveBeenCalled();
+      expect(login).not.toHaveBeenCalled();
+      expect(fetch).not.toHaveBeenCalled();
+    });
+
+    test("device requests use the browser's own child credential, never the login", async () => {
+      useRepointedContext();
+      await deviceCredential.persistDeviceCredential(
+        RECORD.context,
+        "chrome-extension-browser-work",
+        {
+          workerId: RECORD.workerId,
+          workerApiToken: "owl_pat_child",
+          expiresAt: Date.now() + 86_400_000,
+        }
+      );
+      const fetch = spyOn(globalThis, "fetch").mockResolvedValue(
+        Response.json({ devices: [] })
+      );
+      spyOn(console, "log").mockImplementation(() => undefined);
+
+      await browserListCommand({ json: true });
+
+      expect(fetch).toHaveBeenCalledTimes(1);
+      const [url, init] = fetch.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe(`${RECORD.gatewayOrigin}/api/me/devices`);
+      expect((init.headers as Record<string, string>).Authorization).toBe(
+        "Bearer owl_pat_child"
+      );
+    });
   });
 
   test("declines anything but a pair request", async () => {

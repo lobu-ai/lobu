@@ -18,6 +18,7 @@ import { promisify } from "node:util";
 import {
   apiUrlToGatewayOrigin,
   findContextByOrigin,
+  loadContextConfig,
   resolveContext,
 } from "../internal/context.js";
 import { getContextToken } from "../internal/credentials.js";
@@ -204,8 +205,26 @@ async function runningPid(name: string): Promise<number | null> {
   }
 }
 
+/**
+ * Whether the browser's context still points at the gateway it paired with. A
+ * context repointed elsewhere holds that other gateway's login, which must
+ * never be sent to this browser's gateway. Read from the saved contexts, not
+ * through LOBU_API_URL, which only overrides where a command connects.
+ */
+async function contextStillTargets(record: BrowserRecord): Promise<boolean> {
+  const entry = (await loadContextConfig()).contexts[record.context];
+  return (
+    entry !== undefined &&
+    apiUrlToGatewayOrigin(entry.url) === record.gatewayOrigin
+  );
+}
+
 async function bearerFor(record: BrowserRecord): Promise<string> {
-  const token = await getContextToken(record.context);
+  // The cached child credential is bound to the browser's own gateway, so it
+  // stays usable after the context moves; the login does not.
+  const token = (await contextStillTargets(record))
+    ? await getContextToken(record.context)
+    : null;
   if (token) return token;
   const cached = await loadDeviceState(
     record.context,
@@ -235,6 +254,13 @@ async function mintForBrowser(
   record: BrowserRecord,
   interactive: boolean
 ): Promise<MintedDeviceCredential> {
+  // Minting can fall back to the context's login, or refresh it, so it never
+  // runs once the context points at another gateway.
+  if (!(await contextStillTargets(record))) {
+    throw new Error(
+      `Context "${record.context}" no longer points at ${record.gatewayOrigin}, where browser "${record.name}" is registered. Point it back, or run \`lobu browser rm ${record.name}\` and start the browser again.`
+    );
+  }
   const slot = credentialSlot(record.name);
   const cached = await loadDeviceState(record.context, slot);
   const cachedChild =
