@@ -11,7 +11,7 @@ import {
 } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { Readable, Transform } from "node:stream";
+import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 
@@ -24,6 +24,7 @@ const DOWNLOAD_HOST = "storage.googleapis.com";
 /** How often `start` asks Google for a newer Stable build. */
 const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const MAX_ARCHIVE_BYTES = 1024 * 1024 * 1024;
+const VERSION_PATTERN = /^\d+(\.\d+)+$/;
 
 const execFileAsync = promisify(execFile);
 
@@ -70,6 +71,14 @@ function executablePath(versionDir: string, platform: ChromePlatform): string {
     : join(root, "chrome");
 }
 
+/** A build is usable once fully unpacked and marked complete. */
+function isInstalled(versionDir: string, platform: ChromePlatform): boolean {
+  return (
+    existsSync(join(versionDir, ".complete")) &&
+    existsSync(executablePath(versionDir, platform))
+  );
+}
+
 function compareVersions(a: string, b: string): number {
   const left = a.split(".").map(Number);
   const right = b.split(".").map(Number);
@@ -93,9 +102,7 @@ async function installedVersions(
   return entries
     .filter(
       (entry) =>
-        /^\d+(\.\d+)+$/.test(entry) &&
-        existsSync(join(root, entry, ".complete")) &&
-        existsSync(executablePath(join(root, entry), platform))
+        VERSION_PATTERN.test(entry) && isInstalled(join(root, entry), platform)
     )
     .sort(compareVersions);
 }
@@ -138,7 +145,7 @@ async function fetchStable(
   const url = stable?.downloads?.chrome?.find(
     (entry) => entry.platform === platform
   )?.url;
-  if (!stable?.version || !/^\d+(\.\d+)+$/.test(stable.version) || !url) {
+  if (!stable?.version || !VERSION_PATTERN.test(stable.version) || !url) {
     throw new Error(`Chrome for Testing has no Stable build for ${platform}`);
   }
   const parsed = new URL(url);
@@ -161,21 +168,18 @@ async function download(
   if (!response.ok || !response.body) {
     throw new Error(`Chrome for Testing download failed (${response.status})`);
   }
-  let bytes = 0;
-  const limit = new Transform({
-    transform(chunk: Buffer, _encoding, callback) {
-      bytes += chunk.length;
-      callback(
-        bytes > MAX_ARCHIVE_BYTES
-          ? new Error("Chrome for Testing archive exceeds 1 GiB")
-          : null,
-        chunk
-      );
-    },
-  });
   await pipeline(
     Readable.fromWeb(response.body as Parameters<typeof Readable.fromWeb>[0]),
-    limit,
+    async function* limit(chunks: AsyncIterable<Buffer>) {
+      let bytes = 0;
+      for await (const chunk of chunks) {
+        bytes += chunk.length;
+        if (bytes > MAX_ARCHIVE_BYTES) {
+          throw new Error("Chrome for Testing archive exceeds 1 GiB");
+        }
+        yield chunk;
+      }
+    },
     createWriteStream(file)
   );
 }
@@ -226,8 +230,7 @@ async function install(
       const code = (error as NodeJS.ErrnoException).code;
       if (
         (code !== "EEXIST" && code !== "ENOTEMPTY") ||
-        !existsSync(join(target, ".complete")) ||
-        !existsSync(executablePath(target, platform))
+        !isInstalled(target, platform)
       ) {
         throw error;
       }

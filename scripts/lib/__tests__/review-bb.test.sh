@@ -219,7 +219,7 @@ grep -q -- '--provider codex' "$FAKE_STATE/calls.log" || fail "spawn must select
 grep -q -- '--model gpt-6-astra' "$FAKE_STATE/calls.log" || fail "spawn must select the Codex model"
 grep -q -- '--reasoning-level xhigh' "$FAKE_STATE/calls.log" || fail "spawn must select the effort"
 grep -q -- "--environment $SCRATCH" "$FAKE_STATE/calls.log" || fail "spawn must attach the exact reviewed worktree"
-grep -q -- '--permission-mode accept-edits' "$FAKE_STATE/calls.log" || fail "review child must use accept-edits"
+grep -q -- '--permission-mode auto' "$FAKE_STATE/calls.log" || fail "review child must use auto so read-only checks never wait on approval"
 grep -q -- '--visibility visible' "$FAKE_STATE/calls.log" || fail "review child must stay visible under a hidden parent"
 grep -q -- '--project proj_TEST' "$FAKE_STATE/calls.log" || fail "spawn must use the parent project"
 [ "$(spawn_calls)" = "1" ] || fail "exactly one spawn expected, got $(spawn_calls)"

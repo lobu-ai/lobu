@@ -38,6 +38,7 @@ import {
   persistDeviceCredential,
   requireInstallationLogin,
 } from "./_lib/device-credential.js";
+import { fetchRemoteDevices, type RemoteDevice } from "./_lib/device-wizard.js";
 import {
   encodeNativeMessage,
   readNativeMessage,
@@ -59,24 +60,12 @@ const STOP_TIMEOUT_MS = 10_000;
 
 const execFileAsync = promisify(execFile);
 
-const invalidJson = (message: string): never => {
-  throw new Error(message);
-};
-
 interface BrowserRecord {
   name: string;
   context: string;
   gatewayOrigin: string;
   workerId: string;
   label: string;
-}
-
-interface DeviceSummary {
-  id: string;
-  worker_id: string;
-  app_version: string | null;
-  last_seen_at: string;
-  online: boolean;
 }
 
 export interface BrowserStartOptions {
@@ -231,26 +220,9 @@ async function bearerFor(record: BrowserRecord): Promise<string> {
 async function findDevice(
   record: BrowserRecord,
   bearer: string
-): Promise<DeviceSummary | null> {
-  const url = `${record.gatewayOrigin}/api/me/devices`;
-  const res = await fetchWithRetry(url, {
-    headers: {
-      Accept: "application/json",
-      Authorization: `Bearer ${bearer}`,
-      "X-Lobu-Client": "cli",
-    },
-  });
-  const parsed = (await parseJsonResponse(res, url, invalidJson)) as
-    | { devices?: DeviceSummary[] }
-    | undefined;
-  if (!res.ok) {
-    const { message } = extractApiError(parsed, res.status, res.statusText);
-    throw new Error(`Could not list devices: ${message}`);
-  }
-  return (
-    parsed?.devices?.find((device) => device.worker_id === record.workerId) ??
-    null
-  );
+): Promise<RemoteDevice | null> {
+  const devices = await fetchRemoteDevices(record.gatewayOrigin, bearer);
+  return devices.find((device) => device.worker_id === record.workerId) ?? null;
 }
 
 /**
@@ -352,7 +324,7 @@ async function writeNativeHost(
 async function waitForFirstPoll(
   record: BrowserRecord,
   previousSeenAt: string | null
-): Promise<DeviceSummary> {
+): Promise<RemoteDevice> {
   const deadline = Date.now() + PAIR_TIMEOUT_MS;
   for (;;) {
     const device = await findDevice(record, await bearerFor(record));
@@ -550,7 +522,9 @@ export async function browserRemoveCommand(rawName: string): Promise<void> {
       },
     });
     if (!res.ok) {
-      const parsed = await parseJsonResponse(res, url, invalidJson);
+      const parsed = await parseJsonResponse(res, url, (message: string) => {
+        throw new Error(message);
+      });
       const { message } = extractApiError(parsed, res.status, res.statusText);
       throw new Error(
         `Could not remove the "${name}" device, so its profile was kept: ${message}`

@@ -26,13 +26,16 @@ export interface DeviceWizardOptions {
   prompts?: DeviceWizardPrompts;
 }
 
-interface RemoteDevice {
+export interface RemoteDevice {
   id: string;
   worker_id: string;
   platform: string | null;
   online: boolean;
   label?: string | null;
   organization_slug?: string | null;
+  /** Stamped by the device's first poll; minting a credential leaves it unset. */
+  app_version?: string | null;
+  last_seen_at?: string | null;
 }
 
 export interface DeviceWizardResult {
@@ -160,7 +163,7 @@ export async function deviceWizard(
   return { workerId, source };
 }
 
-async function fetchRemoteDevices(
+export async function fetchRemoteDevices(
   gatewayOrigin: string,
   token: string
 ): Promise<RemoteDevice[]> {
