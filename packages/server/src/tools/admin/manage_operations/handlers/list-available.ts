@@ -38,7 +38,7 @@ import {
 	type DeviceConnectorReadiness,
 	type DeviceConnectorReadinessIndex,
 } from "../../../../worker-api/device-connector-readiness";
-import { isSystemContext } from "../../../access-control";
+import { isSystemContext, scopeDenialMessage } from "../../../access-control";
 import type { ToolContext } from "../../../registry";
 import { getOrgUrlContext } from "../../../view-urls";
 
@@ -221,6 +221,7 @@ function groupExecutionTargets(
 function operationReadinessReason(
 	readiness: string,
 	executable: boolean,
+	sessionScopeReason: string,
 ): string {
 	if (executable) return "At least one visible connection is ready.";
 	if (readiness === "unsupported") {
@@ -239,7 +240,7 @@ function operationReadinessReason(
 		return "This operation needs OAuth scopes the connection has not granted. Reauthorize to grant them.";
 	}
 	if (readiness === "session_scope_required") {
-		return SESSION_SCOPE_REASON;
+		return sessionScopeReason;
 	}
 	if (readiness === "membership_required") {
 		return MEMBERSHIP_REASON;
@@ -278,11 +279,6 @@ function resolveOperationReadiness(targets: ExecutionTarget[]): {
 	};
 }
 
-/** Shared copy for the caller-scope gate: executing operations requires an MCP
- * session at write tier (mcp:write / mcp:admin). */
-const SESSION_SCOPE_REASON =
-	"Executing operations requires an MCP session with write access (mcp:write or mcp:admin). This session has read-only access.";
-
 /** Shared copy for the caller-membership gate: a non-member can't execute even
  * with mcp:write — routeAction denies at the membership check, so readiness
  * must point at joining the workspace, not upgrading scope. */
@@ -316,6 +312,7 @@ function buildOperationNextAction(args: {
 	missingScopes: string[];
 	requestedScopes: string[];
 	viewUrl: string | undefined;
+	sessionScopeReason: string;
 }): Record<string, unknown> {
 	const {
 		operation,
@@ -326,14 +323,15 @@ function buildOperationNextAction(args: {
 		missingScopes,
 		requestedScopes,
 		viewUrl,
+		sessionScopeReason,
 	} = args;
 	if (readiness === "session_scope_required") {
 		return {
 			action: "elevate_session_scope",
 			sdk_method: "operations.execute",
 			manual: true,
-			reason: SESSION_SCOPE_REASON,
-			note: "Reconnect the MCP session with write access (mcp:write or mcp:admin) to execute operations.",
+			reason: sessionScopeReason,
+			note: "After reconnecting, call operations.listAvailable again to refresh readiness.",
 		};
 	}
 	if (readiness === "membership_required") {
@@ -453,6 +451,8 @@ function buildAvailableOperation(args: {
 	 * blocker is workspace membership, not MCP scope, so readiness must say so.
 	 */
 	callerLacksMembership: boolean;
+	/** Rendered once per listing: how this caller gets write access (see scopeDenialMessage). */
+	sessionScopeReason: string;
 	policyFor: (operation: OperationDescriptor, connectionId: number | null) => ConnectorPolicyResult;
 	hideBlocked: boolean;
 }): AvailableOperation & Record<string, unknown> {
@@ -523,7 +523,7 @@ function buildAvailableOperation(args: {
 		: "session_scope_required";
 	const callerReason = callerBlockedByMembership
 		? MEMBERSHIP_REASON
-		: SESSION_SCOPE_REASON;
+		: args.sessionScopeReason;
 	// Only a caller-blocked op whose TARGET was ready gets downgraded. An op
 	// already not-executable for its own reasons (unsupported/disconnected/
 	// blocked) keeps its target-state verdict — the caller override must not
@@ -565,7 +565,7 @@ function buildAvailableOperation(args: {
 		...(includeInputSchema ? {} : { input_schema: undefined }),
 		executable,
 		readiness,
-		reason: operationReadinessReason(readiness, executable),
+		reason: operationReadinessReason(readiness, executable, args.sessionScopeReason),
 		connection_count: targets.length,
 		execution_targets: effectiveTargets,
 		next_action: buildOperationNextAction({
@@ -578,6 +578,7 @@ function buildAvailableOperation(args: {
 			requestedScopes: remediationInternalTarget?.requested_scopes ?? [],
 			viewUrl: remediationTarget && ["scope_upgrade_required", "pending_auth", "error", "revoked"].includes(readiness)
 				? args.connectionAuthUrl(remediationTarget.connection_id) : viewUrl,
+			sessionScopeReason: args.sessionScopeReason,
 		}),
 	};
 }
@@ -784,6 +785,13 @@ export async function handleListAvailable(
 	// membership, not by MCP scope — the readiness copy must say so.
 	const callerLacksMembership = !isSystem && ctx.memberRole == null;
 	const { ownerSlug, baseUrl } = await getOrgUrlContext(ctx);
+	const sessionScopeReason = scopeDenialMessage({
+		subject: "operations.execute",
+		requiredAccess: "write",
+		memberRole: ctx.memberRole,
+		tokenType: ctx.tokenType,
+		workspace: ownerSlug ?? null,
+	});
 	const connectorViewUrl = (connectorKey: string): string | undefined =>
 		ownerSlug && baseUrl
 			? buildConnectionsUrl(ownerSlug, baseUrl, connectorKey)
@@ -799,6 +807,7 @@ export async function handleListAvailable(
 					? buildConnectionAuthUrl(ownerSlug, operation.connector_key, id, baseUrl) : undefined,
 				callerMax,
 				callerLacksMembership,
+				sessionScopeReason,
 				policyFor,
 				hideBlocked,
 			}),

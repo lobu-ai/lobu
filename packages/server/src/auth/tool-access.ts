@@ -224,7 +224,8 @@ export const PUBLIC_READ_ACTIONS: Record<string, Set<string> | null> = {
 	manage_agents: new Set(["list", "get"]),
 };
 
-function getAction(args: unknown): string | null {
+/** The `action` argument of an action-routed tool call, if present. */
+export function getAction(args: unknown): string | null {
 	if (!args || typeof args !== "object") return null;
 	const value = (args as { action?: unknown }).action;
 	return typeof value === "string" ? value : null;

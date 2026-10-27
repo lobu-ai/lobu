@@ -28,7 +28,7 @@ describe('deleteContent auth gate', () => {
   it('rejects a member without mcp:write scope', async () => {
     await expect(
       deleteContent(args, {} as never, ctx({ memberRole: 'member', scopes: ['mcp:read'] }))
-    ).rejects.toThrow(/MCP session with write access/i);
+    ).rejects.toThrow(/delete_knowledge needs write access.*approved read-only/i);
   });
 
   it('accepts a member with mcp:write and gets past the gate', async () => {

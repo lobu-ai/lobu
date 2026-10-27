@@ -2,7 +2,7 @@
  * Acceptance test for the reported MCP symptom: an mcp:write caller asked
  * search_sdk about an admin-enforced `external` method, was told it needed
  * "operate (mcp:write)" — the tier it already had — retried through run_sdk as
- * instructed, and hit a hard "requires an MCP session with admin access."
+ * instructed, and hit a hard admin-scope denial.
  *
  * Exercised over a real OAuth-scoped MCP session (HTTP + JSON-RPC), not the
  * resolver in isolation, so it pins the tier the caller is actually shown.

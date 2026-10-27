@@ -707,13 +707,7 @@ async function governEntitySchemaMutation(
   // OAuth scopes. Preserve routeAction's historical system-call bypass here,
   // then resolve their Automation principal through the write policy below.
   if (!isInProcessSystemCall(ctx)) {
-    enforceRoleScopeAccess('admin', ctx.memberRole, ctx.scopes, {
-      adminRole: 'Entity schema mutations require workspace owner or admin access.',
-      writeRole: 'Entity schema mutations require workspace owner or admin access.',
-      readScope: 'Entity schema mutations require MCP admin access.',
-      writeScope: 'Entity schema mutations require MCP admin access.',
-      adminScope: 'Entity schema mutations require MCP admin access.',
-    });
+    await enforceRoleScopeAccess('admin', ctx, `manage_entity_schema.${args.action}`);
   }
   const sql = getDb();
   const initiator = resolveRunInitiator(ctx);

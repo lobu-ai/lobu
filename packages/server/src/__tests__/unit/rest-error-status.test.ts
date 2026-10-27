@@ -70,9 +70,9 @@ describe("REST ToolUserError responses", () => {
 		);
 
 		expect(response.status).toBe(403);
-		expect(await response.json()).toEqual({
-			error: "read_knowledge requires an MCP session with read access.",
-		});
+		const body = (await response.json()) as { error: string };
+		expect(body.error).toContain("read_knowledge needs read access.");
+		expect(body.error).toContain("'Read only' or a higher level");
 	});
 
 	it("rejects a malformed automation_id instead of partially parsing it", async () => {

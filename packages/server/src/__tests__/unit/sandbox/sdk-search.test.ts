@@ -183,8 +183,8 @@ describe("sdkSearch", () => {
 			writeCtx,
 		);
 		expect(result.match_count).toBe(0);
-		expect(result.notes).toMatch(/ask a workspace owner\/admin/i);
-		expect(result.notes).toMatch(/cannot elevate/i);
+		expect(result.notes).toMatch(/ask an owner of this workspace/i);
+		expect(result.notes).toMatch(/reconnecting this app cannot change that/i);
 	});
 
 	it("shows personal account connection setup at write tier", async () => {
@@ -221,7 +221,7 @@ describe("sdkSearch", () => {
 	it("keeps hidden admin namespaces role-aware without suggesting run_sdk", async () => {
 		const member = await sdkSearch({ query: "schedules" }, stubEnv, writeCtx);
 		expect(member.match_count).toBe(0);
-		expect(member.notes).toMatch(/ask a workspace owner\/admin/i);
+		expect(member.notes).toMatch(/ask an owner of this workspace/i);
 		expect(member.notes).not.toMatch(/call via run_sdk/i);
 
 		const owner = await sdkSearch(
@@ -293,8 +293,8 @@ describe("sdkSearch", () => {
 			readCtx,
 		);
 		expect(markRead.match_count).toBe(0);
-		expect(markRead.notes ?? "").toContain("operate access (mcp:write)");
-		expect(markRead.notes ?? "").toMatch(/reconnect|reauthorize/i);
+		expect(markRead.notes ?? "").toContain("operate (mcp:write)");
+		expect(markRead.notes ?? "").toContain("'Read and make changes'");
 		expect(markRead.notes ?? "").not.toMatch(/call via run_sdk/i);
 	});
 

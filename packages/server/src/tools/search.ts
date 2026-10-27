@@ -47,7 +47,7 @@ import logger from '../utils/logger';
 import { expandSearchQueries } from '../utils/query-expansion';
 import { buildEntityUrl, getPublicWebUrl } from '../utils/url-builder';
 import { getWorkspaceProvider } from '../workspace';
-import { requireWorkspaceContext } from './access-control';
+import { requireWorkspaceContext, workspaceScopeDenialMessage } from './access-control';
 import { recordWorkspaceActivity } from '../sandbox/workspace-activity';
 import { CrossOrgAccessDenied, resolveCrossOrgToolContext } from '../sandbox/client-sdk';
 import { getContent } from './get_content';
@@ -1544,7 +1544,7 @@ async function searchWorkspaceImpl(
   // not-applicable sentinel otherwise.
   const isMcpTokenCaller = ctx.tokenType === 'oauth' || ctx.tokenType === 'pat';
   if (isMcpTokenCaller && !hasRequiredMcpScope('read', ctx.scopes)) {
-    throw new ToolUserError('search_memory requires an MCP session with read access.', 403);
+    throw new ToolUserError(await workspaceScopeDenialMessage(ctx, 'search_memory', 'read'), 403);
   }
 
   const title = args.title?.trim() || undefined;

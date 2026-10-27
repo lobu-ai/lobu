@@ -25,20 +25,19 @@ export function errorLogLevel(error: unknown): 'warn' | 'error' {
   return error instanceof ToolUserError ? 'warn' : 'error';
 }
 
-function enforceActionAccess(toolName: string, action: string, ctx: ToolContext): void {
+async function enforceActionAccess(toolName: string, action: string, ctx: ToolContext): Promise<void> {
   // Automation reactions and other in-process system calls historically run with
   // userId=null + isAuthenticated=true. Preserve that path while enforcing the
   // policy table for real user/OAuth sessions that reach handlers via run / query.
   if (isSystemContext(ctx)) return;
 
   const requiredAccess = getRequiredAccessLevel(toolName, { action }, false);
-  enforceRoleScopeAccess(requiredAccess, ctx.memberRole, ctx.scopes, {
-    adminRole: `Action ${toolName}.${action} requires admin or owner access. Ask an organization owner to grant elevated access.`,
-    writeRole: `Action ${toolName}.${action} requires workspace membership with write access.`,
-    readScope: `Action ${toolName}.${action} requires an MCP session with read access.`,
-    writeScope: `Action ${toolName}.${action} requires an MCP session with write access.`,
-    adminScope: `Action ${toolName}.${action} requires an MCP session with admin access.`,
-  });
+  await enforceRoleScopeAccess(
+    requiredAccess,
+    ctx,
+    `${toolName}.${action}`,
+    `Action ${toolName}.${action} requires workspace membership with write access.`
+  );
 }
 
 export async function routeAction<TResult>(
@@ -53,7 +52,7 @@ export async function routeAction<TResult>(
     throw new ToolUserError(`Unknown action: ${action}`, 400);
   }
 
-  enforceActionAccess(toolName, action, ctx);
+  await enforceActionAccess(toolName, action, ctx);
 
   try {
     return await handler();

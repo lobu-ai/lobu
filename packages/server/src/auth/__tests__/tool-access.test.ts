@@ -502,7 +502,7 @@ describe('routeAction per-action enforcement', () => {
           install_connector: async () => ({ ok: true }),
         }
       )
-    ).rejects.toThrow(/requires an MCP session with admin access/i);
+    ).rejects.toThrow(/manage_connections\.install_connector needs admin access/i);
   });
 
   it('preserves system reaction calls', async () => {
@@ -539,21 +539,20 @@ describe('checkToolAccess', () => {
     scopedToOrg: true,
   };
 
-  it('explains the public read-only situation on write attempts', () => {
-    expect(() => checkToolAccess('save_memory', {}, baseAuth)).toThrow(
+  it('explains the public read-only situation on write attempts', async () => {
+    await expect(checkToolAccess('save_memory', {}, baseAuth)).rejects.toThrow(
       /public workspace is read-only/i
     );
   });
 
-  it('requires write scope for member writes', () => {
-    expect(() => checkToolAccess('save_memory', {}, { ...baseAuth, memberRole: 'member' })).toThrow(
-      /MCP session is read-only/i
+  it('requires write scope for member writes', async () => {
+    await expect(checkToolAccess('save_memory', {}, { ...baseAuth, memberRole: 'member' })).rejects.toThrow(
+      /was approved read-only/i
     );
   });
 
-  it('allows members with write scope to save memory', () => {
-    expect(() =>
-      checkToolAccess(
+  it('allows members with write scope to save memory', async () => {
+    await expect(checkToolAccess(
         'save_memory',
         {},
         {
@@ -562,59 +561,54 @@ describe('checkToolAccess', () => {
           scopes: ['mcp:write'],
         }
       )
-    ).not.toThrow();
+    ).resolves.toBeDefined();
   });
 
-  it('gates invoke_view_action at write tier for write-scoped members and owners (F13)', () => {
+  it('gates invoke_view_action at write tier for write-scoped members and owners (F13)', async () => {
     const args = { view: 'poke-view', action: 'retry', interaction_id: 'click-1' };
     // Member and owner callers with mcp:read + mcp:write resolve to write.
     expect(
-      checkToolAccess('invoke_view_action', args, {
+      await checkToolAccess('invoke_view_action', args, {
         ...baseAuth,
         memberRole: 'member',
         scopes: ['mcp:read', 'mcp:write'],
       })
     ).toBe('write');
     expect(
-      checkToolAccess('invoke_view_action', args, {
+      await checkToolAccess('invoke_view_action', args, {
         ...baseAuth,
         memberRole: 'owner',
         scopes: ['mcp:read', 'mcp:write'],
       })
     ).toBe('write');
     // Read-only member is denied at the scope gate.
-    expect(() =>
-      checkToolAccess('invoke_view_action', args, {
+    await expect(checkToolAccess('invoke_view_action', args, {
         ...baseAuth,
         memberRole: 'member',
         scopes: ['mcp:read'],
       })
-    ).toThrow(/MCP session is read-only/i);
+    ).rejects.toThrow(/was approved read-only/i);
     // Authenticated nonmember is denied: a view action is not public-readable.
-    expect(() =>
-      checkToolAccess('invoke_view_action', args, {
+    await expect(checkToolAccess('invoke_view_action', args, {
         ...baseAuth,
         memberRole: null,
         scopes: ['mcp:read', 'mcp:write'],
       })
-    ).toThrow(/public workspace is read-only/i);
+    ).rejects.toThrow(/public workspace is read-only/i);
   });
 
-  it('exposes admin tools on external MCP uniformly (no internal-tool hiding)', () => {
-    expect(() =>
-      checkToolAccess('manage_entity', { action: 'list' }, { ...baseAuth, memberRole: 'owner' })
-    ).not.toThrow();
+  it('exposes admin tools on external MCP uniformly (no internal-tool hiding)', async () => {
+    await expect(checkToolAccess('manage_entity', { action: 'list' }, { ...baseAuth, memberRole: 'owner' })
+    ).resolves.toBeDefined();
   });
 
-  it('throws ToolNotRegisteredError for genuinely unregistered names so REST proxy can alert', () => {
-    expect(() =>
-      checkToolAccess('this_tool_does_not_exist', {}, { ...baseAuth, memberRole: 'owner' })
-    ).toThrow(ToolNotRegisteredError);
+  it('throws ToolNotRegisteredError for genuinely unregistered names so REST proxy can alert', async () => {
+    await expect(checkToolAccess('this_tool_does_not_exist', {}, { ...baseAuth, memberRole: 'owner' })
+    ).rejects.toThrow(ToolNotRegisteredError);
   });
 
-  it('allows admin tools on any surface subject to role x scope (uniform model)', () => {
-    expect(() =>
-      checkToolAccess(
+  it('allows admin tools on any surface subject to role x scope (uniform model)', async () => {
+    await expect(checkToolAccess(
         'manage_entity',
         { action: 'create' },
         {
@@ -623,10 +617,10 @@ describe('checkToolAccess', () => {
           scopes: ['mcp:write'],
         }
       )
-    ).not.toThrow();
+    ).resolves.toBeDefined();
   });
 
-  it('adminTools allowlist limits ADMIN-tier actions to listed tools only', () => {
+  it('adminTools allowlist limits ADMIN-tier actions to listed tools only', async () => {
     const adminToolsAuth = {
       ...baseAuth,
       memberRole: 'owner',
@@ -634,28 +628,26 @@ describe('checkToolAccess', () => {
       adminTools: ['manage_agents'],
     };
     // Admin-tier action on a listed tool — allowed.
-    expect(() => checkToolAccess('manage_agents', { action: 'update' }, adminToolsAuth)).not.toThrow();
+    await expect(checkToolAccess('manage_agents', { action: 'update' }, adminToolsAuth)).resolves.toBeDefined();
     // Admin-tier action on an unlisted tool — blocked by the allowlist.
-    expect(() => checkToolAccess('manage_classifiers', { action: 'delete' }, adminToolsAuth)).toThrow(
+    await expect(checkToolAccess('manage_classifiers', { action: 'delete' }, adminToolsAuth)).rejects.toThrow(
       /may not perform admin actions/
     );
     // Read/write-tier actions on unlisted tools follow the uniform model.
-    expect(() =>
-      checkToolAccess('manage_classifiers', { action: 'list' }, adminToolsAuth)
-    ).not.toThrow();
+    await expect(checkToolAccess('manage_classifiers', { action: 'list' }, adminToolsAuth)
+    ).resolves.toBeDefined();
   });
 
-  it('lets members run query_sql (read-tier; auth/identity tables gated per-query, not at the tool gate)', () => {
-    expect(() =>
-      checkToolAccess(
+  it('lets members run query_sql (read-tier; auth/identity tables gated per-query, not at the tool gate)', async () => {
+    await expect(checkToolAccess(
         'query_sql',
         { sql: 'SELECT 1', sort_by: 'id' },
         { ...baseAuth, memberRole: 'member', scopes: ['mcp:read'] }
       )
-    ).not.toThrow();
+    ).resolves.toBeDefined();
   });
 
-  it('keeps every entity-schema mutation admin-tier', () => {
+  it('keeps every entity-schema mutation admin-tier', async () => {
     expect(requiresOwnerAdmin('manage_entity_schema', { action: 'create' }, false)).toBe(true);
     expect(
       getRequiredAccessLevel(
@@ -673,18 +665,18 @@ describe('checkToolAccess', () => {
     ).toBe('admin');
   });
 
-  it('returns the exact access tier that was authorized', () => {
+  it('returns the exact access tier that was authorized', async () => {
     const owner = {
       ...baseAuth,
       memberRole: 'owner',
       scopes: ['mcp:read', 'mcp:write', 'mcp:admin'],
     };
 
-    expect(checkToolAccess('manage_entity_schema', { action: 'list' }, owner)).toBe('read');
-    expect(checkToolAccess('save_memory', {}, owner)).toBe('write');
-    expect(checkToolAccess('manage_entity_schema', { action: 'create' }, owner)).toBe('admin');
+    expect(await checkToolAccess('manage_entity_schema', { action: 'list' }, owner)).toBe('read');
+    expect(await checkToolAccess('save_memory', {}, owner)).toBe('write');
+    expect(await checkToolAccess('manage_entity_schema', { action: 'create' }, owner)).toBe('admin');
     expect(
-      checkToolAccess(
+      await checkToolAccess(
         'manage_entity_schema',
         { action: 'create', schema_type: 'entity_type' },
         owner

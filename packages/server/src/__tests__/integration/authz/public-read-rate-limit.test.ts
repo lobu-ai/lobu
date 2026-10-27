@@ -51,8 +51,8 @@ describe('public read rate limit', () => {
       ...overrides,
     }) as AuthContext;
 
-  const readTimes = (ctx: AuthContext, n: number) => {
-    for (let i = 0; i < n; i++) checkToolAccess('search_memory', { query: 'rents' }, ctx);
+  const readTimes = async (ctx: AuthContext, n: number) => {
+    for (let i = 0; i < n; i++) await checkToolAccess('search_memory', { query: 'rents' }, ctx);
   };
 
   const exhaust = (userId: string) => {
@@ -172,9 +172,9 @@ describe('public read rate limit', () => {
     await expect(search()).rejects.toThrow(/Public read limit reached: 300 requests per minute\. Join the workspace to lift it\. Try again in \d+s\./);
   });
 
-  it('meters per account, at 300/min', () => {
-    readTimes(callerIn({}), 300);
-    expect(() => readTimes(callerIn({}), 1)).toThrow(
+  it('meters per account, at 300/min', async () => {
+    await readTimes(callerIn({}), 300);
+    await expect(readTimes(callerIn({}), 1)).rejects.toThrow(
       expect.objectContaining({ httpStatus: 429, code: 'RATE_LIMITED' })
     );
   });
@@ -198,10 +198,10 @@ describe('public read rate limit', () => {
     expect(await anonymousResourceError(sessionId, '198.51.100.1')).toMatch(/Unknown resource/);
   });
 
-  it('never meters members, internal calls, or an unknown anonymous IP', () => {
+  it('never meters members, internal calls, or an unknown anonymous IP', async () => {
     const anonymous = { userId: null, isAuthenticated: false, tokenType: 'anonymous' } as const;
-    readTimes(callerIn({ memberRole: 'member' }), 400);
-    readTimes(callerIn({ ...anonymous, clientIP: null }), 400);
-    readTimes(callerIn({ ...anonymous, clientIP: 'unknown' }), 400);
+    await readTimes(callerIn({ memberRole: 'member' }), 400);
+    await readTimes(callerIn({ ...anonymous, clientIP: null }), 400);
+    await readTimes(callerIn({ ...anonymous, clientIP: 'unknown' }), 400);
   });
 });

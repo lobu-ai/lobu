@@ -3,7 +3,7 @@
  *
  * Regression contract for the prod-readiness finding: an MCP session was told
  * an operation was "ready/executable" (list_available) and then DENIED at
- * execute with "requires an MCP session with admin access." Three properties
+ * execute with a hard admin-scope denial. Three properties
  * must hold:
  *
  *  1. `execute` is member-write, not owner-admin — a member (or an owner whose
@@ -118,7 +118,9 @@ describe("manage_operations.execute member authorization", () => {
 		it("member with only mcp:read is denied with a write-access message", async () => {
 			await expect(
 				routeAction("manage_operations", "execute", readOnlyCtx, stub),
-			).rejects.toThrow(/requires an MCP session with write access/i);
+			).rejects.toThrow(
+				/manage_operations\.execute needs write access\. .* was approved read-only.*'Read and make changes'/i,
+			);
 		});
 	});
 
@@ -192,9 +194,11 @@ describe("manage_operations.execute member authorization", () => {
 			const op = await findRun(readOnlyCtx);
 			expect(op.executable).toBe(false);
 			expect(op.readiness).toBe("session_scope_required");
-			expect(op.reason).toMatch(/write access/i);
+			expect(op.reason).toMatch(/operations\.execute needs write access/i);
+			expect(op.reason).toContain("'Read and make changes'");
 			const next = op.next_action as Record<string, unknown>;
 			expect(next.action).toBe("elevate_session_scope");
+			expect(next.reason).toBe(op.reason);
 			// Per-target rows must not contradict the top-level verdict.
 			const targets = op.execution_targets as Array<Record<string, unknown>>;
 			expect(targets.length).toBeGreaterThan(0);
