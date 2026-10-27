@@ -52,7 +52,7 @@
 		"ajv-formats": "^3.0.1",
 		"@better-auth/core": "1.6.31",
 		"@better-auth/passkey": "1.6.31",
-		"better-auth": "1.6.31",
+		"better-auth": "1.7.7",
 		"chat": "^4.38.1",
 		"cron-parser": "^5.6.1",
 		"hono": "^4.10.4",
