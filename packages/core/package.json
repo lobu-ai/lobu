@@ -307,9 +307,9 @@
     "winston": "^3.17.0"
   },
   "peerDependencies": {
-    "@opentelemetry/exporter-trace-otlp-grpc": "^0.222.0",
-    "@opentelemetry/resources": "^2.11.0",
-    "@opentelemetry/sdk-trace-node": "^2.11.0",
+    "@opentelemetry/exporter-trace-otlp-grpc": "^0.221.0",
+    "@opentelemetry/resources": "^2.10.0",
+    "@opentelemetry/sdk-trace-node": "^2.10.0",
     "@opentelemetry/semantic-conventions": "^1.28.0"
   },
   "peerDependenciesMeta": {

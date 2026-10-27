@@ -46,9 +46,8 @@ export function initTracing(config: OtelConfig): void {
     return;
   }
 
-  // Lazy, synchronous load: keeps the grpc chain out of every core import.
-  // Optional peers are skipped by default on install; a minimal install that
-  // enables tracing gets a clear error here instead of MODULE_NOT_FOUND.
+  // Skipped by default on install; a minimal install that enables tracing
+  // gets the explicit error below instead of MODULE_NOT_FOUND.
   let exporterCtor: typeof OTLPTraceExporter;
   let resourceFromAttributes: typeof resourceFromAttributesType;
   let NodeTracerProvider: typeof NodeTracerProviderType;
