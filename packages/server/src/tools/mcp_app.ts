@@ -22,7 +22,7 @@ import {
   type ApprovalImpact,
 } from '../utils/approval-context';
 import { buildResourcePermalink } from '../utils/url-builder';
-import { CrossOrgAccessDenied, resolveCrossOrgToolContext } from '../sandbox/client-sdk';
+import { resolveToolWorkspaceTarget } from '../sandbox/client-sdk';
 import { requireWorkspaceContext } from './access-control';
 import { manageOperations } from './admin/manage_operations';
 import { getContent } from './get_content';
@@ -911,35 +911,13 @@ async function buildApprovalView(runId: number, env: Env, ctx: ToolContext): Pro
   });
 }
 
-/**
- * Resolve a target workspace for an MCP-App tool call. `resolveCrossOrgToolContext`
- * reports denial with the SDK's typed error, which only the sandbox translates;
- * at a plain tool boundary it would surface as a generic failure. Re-raise it as
- * a ToolUserError so REST and MCP agree on the status — 403 for denial, matching
- * the sibling stale-capability check. Unknown and ungranted workspaces are
- * deliberately indistinguishable.
- */
-async function resolveApprovalWorkspace(
-  slugOrId: string,
-  ctx: AccountToolContext
-): Promise<ToolContext> {
-  try {
-    return await resolveCrossOrgToolContext(slugOrId, ctx);
-  } catch (error) {
-    if (error instanceof CrossOrgAccessDenied) {
-      throw new ToolUserError(error.message, 403);
-    }
-    throw error;
-  }
-}
-
 const getApprovalImpl = async (
   args: Static<typeof GetApprovalSchema>,
   env: Env,
   ctx: AccountToolContext
 ): Promise<LobuView> => {
   const approvalCtx = args.organization
-    ? await resolveApprovalWorkspace(args.organization, ctx)
+    ? await resolveToolWorkspaceTarget(args.organization, ctx)
     : requireWorkspaceContext(ctx);
   return buildApprovalView(args.run_id, env, approvalCtx);
 };
@@ -973,10 +951,7 @@ const resolveApprovalImpl = async (
   // The encrypted card capability carries the authoritative workspace. An
   // unscoped OAuth session may resolve it under the same login; scoped/PAT
   // connections remain unable to cross their bound workspace.
-  const approvalCtx =
-    capability.organizationId === ctx.organizationId
-      ? requireWorkspaceContext(ctx)
-      : await resolveApprovalWorkspace(capability.organizationId, ctx);
+  const approvalCtx = await resolveToolWorkspaceTarget(capability.organizationId, ctx);
 
   const current = await findApprovalRow(args.run_id, env, approvalCtx);
   if (current.interaction_status !== 'pending' || current.id !== capability.eventId) {

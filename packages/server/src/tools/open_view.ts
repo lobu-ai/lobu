@@ -13,7 +13,7 @@ import { viewPathSuffix } from "@lobu/core/contracts/tools/view-path";
 import { getOrganizationSlug } from "../utils/url-builder";
 import { getView, LOBU_VIEWS_RESOURCE_URI, viewResourceUri, type StoredView } from "../views/views";
 import { listLiveGrantedMemberWorkspaces } from "../auth/oauth/workspace-grants";
-import { CrossOrgAccessDenied, resolveCrossOrgToolContext } from "../sandbox/client-sdk";
+import { resolveToolWorkspaceTarget } from "../sandbox/client-sdk";
 import { getDb } from "../db/client";
 import { requireWorkspaceContext } from "./access-control";
 import { resolveEventViewSubject } from "../views/event-subject";
@@ -89,18 +89,7 @@ export const OpenViewResultSchema = Type.Object({
 
 /** Resolve explicit frame targets through the same live grant check as SDK reads. */
 export async function resolveViewWorkspace(ctx: AccountToolContext, organization?: string) {
-	if (!organization) return requireWorkspaceContext(ctx);
-	// The session's own workspace, named by id or slug, needs no grant lookup.
-	if (ctx.organizationId) {
-		if (organization === ctx.organizationId) return requireWorkspaceContext(ctx);
-		if (organization === await getOrganizationSlug(ctx.organizationId)) return requireWorkspaceContext(ctx);
-	}
-	try {
-		return await resolveCrossOrgToolContext(organization, ctx);
-	} catch (error) {
-		if (error instanceof CrossOrgAccessDenied) throw new ToolUserError(error.message, 403, "PERMISSION");
-		throw error;
-	}
+	return organization ? resolveToolWorkspaceTarget(organization, ctx) : requireWorkspaceContext(ctx);
 }
 
 async function openViewPicker(args: OpenViewArgs, ctx: AccountToolContext): Promise<Static<typeof OpenViewResultSchema>> {

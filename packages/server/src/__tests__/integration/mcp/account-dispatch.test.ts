@@ -115,6 +115,39 @@ describe('account MCP dispatch', () => {
     });
   });
 
+  it('accepts the bound workspace as an explicit target on scoped /mcp/<slug> and still refuses another', async () => {
+    const token = await createTestAccessToken(auth.userId!, first.id, auth.clientId!, {
+      resource: `http://localhost/mcp/${first.slug}`, grantedOrganizationIds: [first.id], scope: 'mcp:read mcp:write',
+    });
+    const scopedCall = (name: string, args: Record<string, unknown>) =>
+      mcpRequest('tools/call', { name, arguments: args }, { token: token.token, orgSlug: first.slug });
+    for (const target of [first.slug, first.id]) {
+      const saved = await scopedCall('save_memory', { org_slug: target, semantic_type: 'note', content: 'Synthetic scoped self-target note', title: 'Scoped self target' });
+      expect(saved.result.isError ?? false, JSON.stringify(saved.result)).toBe(false);
+      const [event] = await getDb()`SELECT organization_id FROM events WHERE id=${saved.result.structuredContent.id}`;
+      expect(event.organization_id).toBe(first.id);
+      const queried = await scopedCall('query_sql', { org_slug: target, sql: 'SELECT 7 AS value' });
+      expect(queried.result.isError ?? false, JSON.stringify(queried.result)).toBe(false);
+      expect(queried.result.structuredContent.rows).toEqual([{ value: 7 }]);
+      const searched = await scopedCall('search_memory', { workspace: target, query: 'scoped self target' });
+      expect(searched.result.isError ?? false, JSON.stringify(searched.result)).toBe(false);
+      // No such run: the lookup must reach the bound workspace, not stop at a cross-org denial.
+      const approval = await scopedCall('get_approval', { run_id: 987654321, organization: target });
+      expect(approval.result.isError, JSON.stringify(approval.result)).toBe(true);
+      expect(approval.result.content[0].text).toBe('Approval run 987654321 was not found');
+    }
+    // Naming another workspace — even one the user belongs to — is still a switch.
+    for (const name of ['save_memory', 'query_sql'] as const) {
+      const denied = await scopedCall(name, name === 'save_memory'
+        ? { org_slug: second.slug, semantic_type: 'note', content: 'Synthetic scoped cross-target note' }
+        : { org_slug: second.slug, sql: 'SELECT 1' });
+      expect(denied.result.isError, name).toBe(true);
+      expect(denied.result.structuredContent.error, name).toMatchObject({ code: 'PERMISSION' });
+    }
+    const [leaked] = await getDb()`SELECT count(*)::int AS n FROM events WHERE organization_id=${second.id} AND payload_text LIKE 'Synthetic scoped cross-target%'`;
+    expect(leaked.n).toBe(0);
+  });
+
   it('audits early missing, invalid, and unauthorized targets privately without saving content', async () => {
     for (const args of [
       { content: 'Synthetic rejected note', semantic_type: 'note' },
