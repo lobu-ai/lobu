@@ -8,6 +8,7 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process';
+import * as childProcess from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
@@ -29,7 +30,7 @@ function deadPid(): number {
 }
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { reapStaleClustersIn, STALE_CLUSTER_MS } from '../setup/reap-stale-clusters';
 
 describe('reapStaleClustersIn', () => {
@@ -274,6 +275,178 @@ describe('reapStaleClustersIn', () => {
       expect(removed).toBe(0);
       expect(existsSync(path)).toBe(true);
       expect(isRunning(pid)).toBe(true);
+    });
+  });
+
+  describe('shared-memory cleanup failures and listing formats', () => {
+    const linuxHeader = 'key shmid owner perms bytes nattch status\n';
+    const macHeader = 'T ID KEY MODE OWNER GROUP NATTCH\n';
+
+    function probe(listing: string, ipcsStatus = 0, ipcrmStatus = 0, pid = deadPid(), key = '1275068416') {
+      const dir = makeDir('lobu-test-pg-SHM-LISTING', 5_000);
+      writeFileSync(join(dir, 'postmaster.pid'), `${pid}\n${dir}\n1\n5432\n/tmp\nlocalhost\n${key} 64\n`);
+      const t = (now - STALE_CLUSTER_MS - 60_000) / 1000;
+      utimesSync(dir, t, t);
+      const realSpawn = childProcess.spawnSync;
+      const calls: string[] = [];
+      const mock = vi.spyOn(childProcess, 'spawnSync').mockImplementation((command, ...args) => {
+        if (command !== 'ipcs' && command !== 'ipcrm') {
+          return Reflect.apply(realSpawn, childProcess, [command, ...args]);
+        }
+        calls.push(command);
+        return {
+          status: command === 'ipcs' ? ipcsStatus : ipcrmStatus,
+          stdout: command === 'ipcs' ? listing : '',
+          stderr: '', pid: 0, output: [], signal: null,
+        };
+      });
+      try {
+        reapStaleClustersIn(root, now, STALE_CLUSTER_MS);
+        return { calls, kept: existsSync(dir) };
+      } finally {
+        mock.mockRestore();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+
+    it.each([
+      linuxHeader + '0x4c000000 99 fixture 600 64 0\n',
+      macHeader + 'm 99 0x4c000000 --rw------- fixture 64 0\n',
+    ])('matches the segment ID column, not another numeric field: %s', (listing) => {
+      expect(probe(listing).calls).not.toContain('ipcrm');
+    });
+
+    it.each([
+      linuxHeader + '0x4c000000 64 fixture 600 64 1\n',
+      macHeader + 'm 64 0x4c000000 --rw------- fixture fixture 1\n',
+    ])('preserves a segment and directory while backends remain attached: %s', (listing) => {
+      expect(probe(listing)).toEqual({ calls: ['ipcs'], kept: true });
+    });
+
+    it('keeps the pid file for retry when ipcs fails', () => {
+      expect(probe('', 1).kept).toBe(true);
+    });
+
+    it('keeps the pid file for retry when ipcrm fails', () => {
+      expect(probe(linuxHeader + '0x4c000000 64 fixture 600 64 0\n', 0, 1).kept).toBe(true);
+    });
+
+    it('protects a recorded segment when the postmaster PID is malformed', () => {
+      expect(probe(linuxHeader + '0x4c000000 64 fixture 600 64 0\n', 0, 0, NaN))
+        .toEqual({ calls: [], kept: true });
+    });
+
+    it.each(['', 'unrecognized listing'])('keeps the pid file when ipcs output is unknown: %s', (listing) => {
+      expect(probe(listing)).toEqual({ calls: ['ipcs'], kept: true });
+    });
+
+    it('normalizes a signed key printed as unsigned long by PostgreSQL', () => {
+      expect(probe(linuxHeader + '0xcc000001 64 fixture 600 64 0\n', 0, 0, deadPid(), '18446744072837136385'))
+        .toEqual({ calls: ['ipcs', 'ipcrm'], kept: false });
+    });
+  });
+
+  describe('System V shared memory recorded by a dead postmaster', () => {
+    // perl's shmget creates a real segment the way PostgreSQL does, so these
+    // exercise the actual ipcs/ipcrm path the reaper relies on.
+    const created = new Set<number>();
+    const canCreate = spawnSync('perl', ['-MIPC::SysV', '-e', '1']).status === 0;
+
+    function createSegment(key: number): number {
+      const signedKey = Number(BigInt.asIntN(32, BigInt(key)));
+      const r = spawnSync('perl', ['-MIPC::SysV=IPC_CREAT,IPC_EXCL', '-e',
+        `my $id = shmget(${signedKey}, 64, IPC_CREAT | IPC_EXCL | 0600); defined $id or die "shmget: $!"; print $id`],
+        { encoding: 'utf8' });
+      if (r.status !== 0) throw new Error(`shmget failed: ${r.stderr}`);
+      const id = Number(r.stdout);
+      created.add(id);
+      return id;
+    }
+
+    function segmentExists(id: number): boolean {
+      const r = spawnSync('perl', ['-MIPC::SysV=IPC_STAT', '-MErrno=EINVAL,EIDRM', '-e',
+        `my $buf; exit 0 if defined shmctl(${id}, IPC_STAT, $buf); die "shmctl: $!" unless $! == EINVAL || $! == EIDRM; exit 1`],
+        { encoding: 'utf8' });
+      if (r.status !== 0 && r.status !== 1) throw new Error(`shmctl failed: ${r.stderr}`);
+      return r.status === 0;
+    }
+
+    afterEach(() => {
+      for (const id of created) spawnSync('ipcrm', ['-m', String(id)]);
+      created.clear();
+    });
+
+    // A synthetic key in the range PostgreSQL derives keys from, unlikely to clash.
+    function syntheticKey(): number {
+      return 0x4c000000 + Math.floor(Math.random() * 0xffffff);
+    }
+
+    function writePidFile(dir: string, pid: number, key: number, id: number): void {
+      const recordedKey = BigInt.asUintN(64, BigInt.asIntN(32, BigInt(key)));
+      writeFileSync(join(dir, 'postmaster.pid'),
+        `${pid}\n${dir}\n${Math.floor(now / 1000)}\n5432\n/tmp\nlocalhost\n${String(recordedKey).padStart(9)} ${String(id).padStart(9)}\nready\n`);
+    }
+
+    it.skipIf(!canCreate)('releases the segment of a dead postmaster, even while its dir is still young', () => {
+      const key = syntheticKey();
+      const id = createSegment(key);
+      const dir = makeDir('lobu-test-pg-SHM-DEAD', 5_000);
+      writePidFile(dir, deadPid(), key, id);
+
+      reapStaleClustersIn(root, now, STALE_CLUSTER_MS);
+      expect(segmentExists(id)).toBe(false); // its slot is free already
+      expect(existsSync(dir)).toBe(true); // the dir is too young to delete
+      rmSync(dir, { recursive: true, force: true });
+    });
+
+    it.skipIf(!canCreate)('releases the segment when an old dead cluster is removed', () => {
+      const key = syntheticKey();
+      const id = createSegment(key);
+      const dir = makeDir('lobu-test-pg-SHM-OLD', 5_000);
+      writePidFile(dir, deadPid(), key, id);
+      const t = (now - STALE_CLUSTER_MS - 60_000) / 1000;
+      utimesSync(dir, t, t);
+
+      reapStaleClustersIn(root, now, STALE_CLUSTER_MS);
+
+      expect(existsSync(dir)).toBe(false);
+      expect(segmentExists(id)).toBe(false);
+    });
+
+    it.skipIf(!canCreate)('never removes a segment whose id is now listed under a different key', () => {
+      const key = syntheticKey();
+      const id = createSegment(key);
+      const dir = makeDir('lobu-test-pg-SHM-REUSED', 5_000);
+      writePidFile(dir, deadPid(), key + 1, id); // id reassigned since the pid file was written
+
+      reapStaleClustersIn(root, now, STALE_CLUSTER_MS);
+
+      expect(segmentExists(id)).toBe(true);
+      rmSync(dir, { recursive: true, force: true });
+    });
+
+    it.skipIf(!canCreate)('releases a segment whose key has the sign bit set', () => {
+      const key = syntheticKey() + 0x80000000;
+      const id = createSegment(key);
+      const dir = makeDir('lobu-test-pg-SHM-HIGH-KEY', 5_000);
+      writePidFile(dir, deadPid(), key, id);
+
+      reapStaleClustersIn(root, now, STALE_CLUSTER_MS);
+
+      expect(segmentExists(id)).toBe(false);
+      rmSync(dir, { recursive: true, force: true });
+    });
+
+    it.skipIf(!canCreate)('never removes the segment of a live postmaster', () => {
+      const key = syntheticKey();
+      const id = createSegment(key);
+      const dir = makeDir('lobu-test-pg-SHM-LIVE', 5_000);
+      writePidFile(dir, process.pid, key, id);
+
+      reapStaleClustersIn(root, now, STALE_CLUSTER_MS);
+
+      expect(segmentExists(id)).toBe(true);
+      rmSync(dir, { recursive: true, force: true });
     });
   });
 });
