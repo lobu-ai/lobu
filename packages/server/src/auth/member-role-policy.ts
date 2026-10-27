@@ -45,6 +45,27 @@ export async function authorizeMemberRole(
 }
 
 /**
+ * Removal rules, the same as Better Auth's `remove-member`: owners and admins
+ * remove members, only an owner removes an owner, and the last owner stays.
+ * Call under `lockMemberRoleChanges` so the owner count cannot race.
+ */
+export async function authorizeMemberRemoval(
+  sql: DbClient,
+  organizationId: string,
+  actorId: string | null,
+  targetRole: string,
+): Promise<void> {
+  const [actor] = await sql`SELECT role FROM member WHERE "organizationId" = ${organizationId} AND "userId" = ${actorId}`;
+  if (!actor || (actor.role !== 'owner' && actor.role !== 'admin')) {
+    throw new ToolUserError('Only workspace owners and admins can remove members', 403);
+  }
+  if (targetRole === 'owner') {
+    if (actor.role !== 'owner') throw new ToolUserError('Only owners can remove an owner', 403);
+    await assertWorkspaceRetainsOwner(sql, organizationId);
+  }
+}
+
+/**
  * Membership changes (inviting, adding, changing a role, removing) were made
  * by a delegated identity: an OAuth/MCP connection, a personal access token,
  * the CLI, an agent or an Automation. Like run approvals, they need a person.

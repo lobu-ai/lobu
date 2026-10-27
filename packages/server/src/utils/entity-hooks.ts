@@ -15,7 +15,7 @@ import {
   lockMemberRoleChanges,
   parseMemberRole,
 } from '../auth/member-role-policy';
-import { changeMemberRoleInTransaction } from '../auth/member-roles';
+import { changeMemberRoleInTransaction, removeMemberInTransaction } from '../auth/member-roles';
 import { createElement } from 'react';
 import { sendTransactionalEmail } from '../email/send';
 import { InvitationEmail, invitationSubject } from '../email/templates/invitation';
@@ -75,10 +75,19 @@ interface EntityLifecycleHooks {
     after: { id: number; metadata?: Record<string, unknown> | null },
     ctx: EntityTransactionHookContext
   ) => Promise<void>;
-  /** Runs before soft/hard delete. For cleanup (e.g. cancelling invitations). */
+  /**
+   * Runs in the delete transaction before any entity row lock, so a hook can
+   * claim a coarser lock first (the `beforeUpdate` rule, for deletes).
+   */
+  lockBeforeDelete?: (ctx: EntityTransactionHookContext) => Promise<void>;
+  /**
+   * Runs in the delete transaction after the row rule accepted the delete, for
+   * every live entity of the type a soft or tree delete removes. Throw to roll
+   * the delete back.
+   */
   beforeDelete?: (
     entity: { id: number; entity_type: string; metadata: Record<string, unknown> | null },
-    ctx: EntityHookContext
+    ctx: EntityTransactionHookContext
   ) => Promise<void>;
 }
 
@@ -280,11 +289,51 @@ registerEntityHooks('$member', {
     }, sql);
   },
 
+  async lockBeforeDelete(ctx) {
+    await lockMemberRoleChanges(ctx.sql, ctx.organizationId);
+  },
+
+  // Deleting the record is how the web app removes a person, so it removes the
+  // membership in the same transaction, as a role edit changes it. Leaving the
+  // `member` row would tombstone the record while the person kept full access.
   async beforeDelete(entity, ctx) {
     assertHumanMemberChange(ctx.principal);
-    const sql = ctx.sql ?? getDb();
+    const sql = ctx.sql;
     const { emailField } = await resolveMemberSchemaFields(ctx.organizationId, sql);
     const email = entity.metadata?.[emailField] as string | undefined;
+
+    // Target the membership by the authentication claim, never by the editable
+    // email, as the role edit in `afterUpdate` does.
+    const members = await sql`
+      SELECT m.id FROM entity_identities ei JOIN member m
+        ON m."userId" = ei.identifier AND m."organizationId" = ei.organization_id
+      WHERE ei.organization_id = ${ctx.organizationId} AND ei.entity_id = ${entity.id}
+        AND ei.namespace = 'auth_user_id' AND ei.source_connector = 'auth:signup'
+        AND ei.deleted_at IS NULL
+    `;
+    if (members.length > 1) {
+      throw new ToolUserError('Member has more than one authentication identity', 400);
+    }
+    if (members.length === 1) {
+      await removeMemberInTransaction(sql, {
+        organizationId: ctx.organizationId, actorId: ctx.userId,
+        memberId: members[0].id as string, actorSource: ctx.actorSource ?? 'api',
+      });
+    } else if (email) {
+      // A record that lost its claim cannot be tied to a membership safely, but
+      // deleting it must never look like a removal while that person keeps access.
+      const [unlinked] = await sql`
+        SELECT 1 FROM member m JOIN "user" u ON u.id = m."userId"
+        WHERE m."organizationId" = ${ctx.organizationId} AND lower(u.email) = lower(${email})
+        LIMIT 1
+      `;
+      if (unlinked) {
+        throw new ToolUserError(
+          'This member record is not linked to the sign-in of the workspace member with this email, so deleting it would not remove their access. Nothing was changed.',
+          409
+        );
+      }
+    }
     if (!email) return;
 
     // Cancel any pending invitation for this email
@@ -304,7 +353,7 @@ registerEntityHooks('$member', {
     // cancellation so the invitation lifecycle audit (send → canceled) stays
     // complete.
     for (const inv of cancelled) {
-      const event: WorkspaceChangeEventParams = {
+      await insertWorkspaceChangeEventInTransaction({
         organizationId: ctx.organizationId,
         resourceKind: 'invitation',
         resourceId: inv.id,
@@ -318,12 +367,7 @@ registerEntityHooks('$member', {
         changedFields: ['status'],
         actorSource: ctx.actorSource,
         createdBy: ctx.userId ?? null,
-      };
-      if (ctx.sql) {
-        await insertWorkspaceChangeEventInTransaction(event, sql);
-      } else {
-        recordWorkspaceChangeEvent(event);
-      }
+      }, sql);
     }
   },
 });
