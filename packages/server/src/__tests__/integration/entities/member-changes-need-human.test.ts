@@ -124,16 +124,21 @@ describe('member changes need a human', () => {
     expect(await memberRole()).toBe('member');
   });
 
-  it('denies run_sdk from an owner MCP session with mcp:admin', async () => {
-    const result = await mcpToolsCall<{ success: boolean; error?: { message?: string } }>(
-      'run_sdk',
-      {
-        script: `export default async (_ctx, client) => client.entities.update({ entity_id: ${member.entityId}, metadata: { role: 'owner' } });`,
-      },
-      { token: adminToken, orgSlug: org.slug }
-    );
-    expect(result.success).toBe(false);
-    expect(result.error?.message ?? '').toMatch(HUMAN_ONLY);
+  it('denies run_sdk from an owner MCP session with mcp:admin as a typed permission error', async () => {
+    type RunSdkResult = { success: boolean; error?: { name?: string; code?: string; message?: string } };
+    const scripts = [
+      `export default async (_ctx, client) => client.entities.create({ entity_type: '$member', name: 'Outsider', metadata: { email: '${OUTSIDER_EMAIL}', role: 'owner' } });`,
+      `export default async (_ctx, client) => client.entities.update({ entity_id: ${member.entityId}, metadata: { role: 'owner' } });`,
+    ];
+    for (const script of scripts) {
+      const result = await mcpToolsCall<RunSdkResult>('run_sdk', { script }, { token: adminToken, orgSlug: org.slug });
+      expect(result.success).toBe(false);
+      // The copy names "(Memory, Members)": classification must come from the
+      // typed host error, never from the runtime-failure message patterns.
+      expect(result.error).toMatchObject({ name: 'MemberChangeRequiresHumanError', code: 'PERMISSION' });
+      expect(result.error?.message ?? '').toMatch(HUMAN_ONLY);
+    }
+    expect(await pendingInvitations()).toHaveLength(0);
     expect(await memberRole()).toBe('member');
   });
 

@@ -456,9 +456,21 @@ function classifyRuntimeError(
 	if (isExpectedUserError) {
 		return { name: "ValidationError", message, ...classification };
 	}
+	// A trusted classification is bound only to an error the host threw (a
+	// ToolUserError subclass with its own name, or a ToolError), so it is a
+	// typed tool failure, never an isolate runtime failure: its code is the
+	// classification and its message is never matched against the runtime
+	// patterns below ("Memory" in copy must not read as OutOfMemory).
+	if (classification) {
+		return {
+			name: classification.code === "VALIDATION" ? "ValidationError" : rawName,
+			message,
+			...classification,
+		};
+	}
 
 	if (rawName === "TimeoutError" || rawName === "AbortError" || rawName === "RuntimeUnavailable") {
-		return { name: rawName, message, ...classification };
+		return { name: rawName, message };
 	}
 
 	const isTimeout = /script execution timed out|TimeoutError/i.test(rawMessage);
@@ -483,7 +495,6 @@ function classifyRuntimeError(
 	return {
 		name,
 		message,
-		...classification,
 		...(record.stack != null
 			? {
 					stack: boundScriptErrorText(

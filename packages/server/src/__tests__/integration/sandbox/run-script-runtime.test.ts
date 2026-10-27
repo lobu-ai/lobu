@@ -17,6 +17,7 @@
  */
 
 import { describe, expect, it, vi } from "vitest";
+import { ToolError } from "@lobu/core";
 import { Type } from "@sinclair/typebox";
 import type { ClientSDK } from "../../../sandbox/client-sdk";
 import { METHOD_METADATA } from "../../../sandbox/method-metadata";
@@ -420,6 +421,31 @@ describe("sandbox runtime", () => {
       code: "PERMISSION",
       retryable: false,
     });
+  });
+
+  it("classifies typed host errors by their code, never by runtime message patterns", async () => {
+    class NamedDenialError extends ToolUserError {
+      constructor() {
+        super("Do this in the web app (Memory, Members)", 403, "PERMISSION");
+        this.name = "NamedDenialError";
+      }
+    }
+    const cases: Array<{ thrown: Error; name: string; code: string }> = [
+      { thrown: new NamedDenialError(), name: "NamedDenialError", code: "PERMISSION" },
+      {
+        thrown: new ToolError("UPSTREAM_TIMEOUT", "allocation lookup: script execution timed out"),
+        name: "ToolError",
+        code: "UPSTREAM_TIMEOUT",
+      },
+    ];
+    for (const { thrown, name, code } of cases) {
+      const result = await runScript({
+        source: "export default async (_ctx, client) => client.entities.list();",
+        sdk: stubSDK({ entities: { list: async () => { throw thrown; } } as never }),
+      });
+      expect(result.error).toMatchObject({ name, code, message: thrown.message });
+      expect(result.error).not.toHaveProperty("stack");
+    }
   });
 
   it("preserves ClientSdkActionError result codes across the isolate", async () => {
