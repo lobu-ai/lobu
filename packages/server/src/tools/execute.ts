@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { captureEffect, type CaptureIdentity } from '../gateway/routes/internal/capture-mode';
 import type { AgentTurnIdentity } from './turn-write-idempotency';
 import type { ChatSenderReach } from '../auth/oauth/types';
-import { CrossOrgAccessDenied, resolveCrossOrgToolContext } from '../sandbox/client-sdk';
+import { resolveToolWorkspaceTarget } from '../sandbox/client-sdk';
 import { verifiedAutomationSource } from '../automations/automation-source';
 import { runWithActingAutomation } from '../utils/acting-automation-context';
 import type { Context } from 'hono';
@@ -346,20 +346,7 @@ export async function executeTool(
           'VALIDATION'
         );
       }
-      const workspace = await resolveCrossOrgToolContext(
-        target,
-        toAccountToolContext(authCtx)
-      ).catch((error: unknown) => {
-        // Denial arrives as the SDK's typed error, which only the sandbox
-        // translates; at this plain tool boundary it would surface as an
-        // uncoded 400. Re-raise so REST and MCP agree on 403 plus a correlated
-        // code — the same translation `mcp_app.ts` documents for its own
-        // approval-workspace resolution.
-        if (error instanceof CrossOrgAccessDenied) {
-          throw new ToolUserError(error.message, 403, 'PERMISSION');
-        }
-        throw error;
-      });
+      const workspace = await resolveToolWorkspaceTarget(target, toAccountToolContext(authCtx));
       // The resolved target decides the agent too: a chat turn acting in the
       // sender's other workspace runs there as the sender, with no agent.
       authCtx = {

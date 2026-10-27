@@ -17,6 +17,8 @@ import type { AccountToolContext, ToolContext } from "../tools/registry";
 import type { ChatSenderReach } from "../auth/oauth/types";
 import { resolveGrantedWorkspaceTarget, findUngrantedMemberWorkspace, formatUngrantedMemberMessage } from "../auth/oauth/workspace-grants";
 import { boundedQuery } from "../utils/bounded-read";
+import { ToolUserError } from "../utils/errors";
+import { getOrganizationSlug } from "../utils/url-builder";
 import { QUERY_SQL_STATEMENT_TIMEOUT_MS } from "../utils/content-read-bounds";
 import { METHOD_METADATA } from "./method-metadata";
 import { bindClientContext } from "./workspace-activity";
@@ -185,6 +187,36 @@ export async function resolveCrossOrgToolContext(
 		organizationId: member.id,
 		memberRole: member.role,
 	};
+}
+
+/**
+ * Resolve a workspace a caller named in a tool argument (`org_slug`,
+ * `organization`, …). Naming the connection's own workspace, by id or slug,
+ * is the same as omitting it — never a switch — so a scoped `/mcp/{slug}` or
+ * PAT connection accepts it although it cannot reach any other workspace.
+ * Every other target goes through `resolveCrossOrgToolContext`, whose typed
+ * denial becomes a 403 so REST and MCP agree on the status and code.
+ */
+export async function resolveToolWorkspaceTarget(
+	slugOrId: string,
+	ctx: AccountToolContext,
+): Promise<ToolContext> {
+	const target = slugOrId.trim();
+	if (
+		ctx.organizationId &&
+		(target === ctx.organizationId ||
+			target === (await getOrganizationSlug(ctx.organizationId)))
+	) {
+		return requireWorkspaceContext(ctx);
+	}
+	try {
+		return await resolveCrossOrgToolContext(target, ctx);
+	} catch (error) {
+		if (error instanceof CrossOrgAccessDenied) {
+			throw new ToolUserError(error.message, 403, "PERMISSION");
+		}
+		throw error;
+	}
 }
 
 /**

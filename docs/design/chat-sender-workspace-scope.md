@@ -84,7 +84,10 @@ conditions: the sender is a linked member, and the conversation is private.
   an eligible token into a `chatSenderReach` (home workspace and agent) on the
   request's auth info; `resolveCrossOrgToolContext` reads the sender's live
   `member` row whenever `client.org(slug)`, `org_slug`, `organization` or
-  search's `workspace` names a workspace.
+  search's `workspace` names a workspace. A tool argument (`org_slug`,
+  `organization`) naming the turn's own workspace by id or slug is the same
+  as omitting it (`resolveToolWorkspaceTarget`); only `client.org(slug)` and
+  search's `workspace` re-read the home membership.
 - In another workspace the call acts as the sender with no agent, the same
   principal an OAuth MCP client has there. That workspace's role, connector
   policy and approvals decide; approving still needs a human web session.
