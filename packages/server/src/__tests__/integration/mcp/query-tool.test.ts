@@ -7,6 +7,7 @@
 
 import { beforeAll, describe, expect, it } from 'vitest';
 import { getDb } from '../../../db/client';
+import { getTool } from '../../../tools/registry';
 import { cleanupTestDatabase } from '../../setup/test-db';
 import {
   addUserToOrganization,
@@ -280,7 +281,11 @@ describe('MCP query_sdk / run_sdk tool surface', () => {
       headers: { 'mcp-session-id': sessionId! },
     });
     const body = await listRes.json();
-    const names = (body.result?.tools as Array<{ name: string }>).map((t) => t.name);
+    const tools = (body.result?.tools as Array<{
+      name: string;
+      annotations?: Record<string, boolean>;
+    }>) ?? [];
+    const names = tools.map((t) => t.name);
 
     // Public-readable tools survive: search_memory and search_sdk (SDK discovery).
     expect(names).toContain('search_memory');
@@ -292,5 +297,30 @@ describe('MCP query_sdk / run_sdk tool surface', () => {
     expect(names).not.toContain('run_sdk');
     expect(names).not.toContain('query_sdk');
     expect(names).not.toContain('query_sql');
+
+    // The public path builds its own listing (`publicOnly` + read tier), so an
+    // annotation regression on it stays invisible to the authenticated case
+    // that pins `expectedSafetyHints`. Derive the expectation from the
+    // registry definition — whose annotations come from the `AUDITED_READ`
+    // constant in tools/registry.ts — instead of retyping the literals, which
+    // is how a wrong expectation gets reintroduced.
+    const listedByName = new Map(tools.map((t) => [t.name, t]));
+    for (const toolName of ['search_memory', 'search_sdk']) {
+      const expected = getTool(toolName)?.annotations;
+      expect(expected, `${toolName} registry annotations`).toBeDefined();
+      const actual = listedByName.get(toolName)?.annotations;
+      expect(actual?.readOnlyHint, `${toolName}.readOnlyHint`).toBe(
+        expected?.readOnlyHint
+      );
+      expect(actual?.destructiveHint, `${toolName}.destructiveHint`).toBe(
+        expected?.destructiveHint
+      );
+      expect(actual?.openWorldHint, `${toolName}.openWorldHint`).toBe(
+        expected?.openWorldHint
+      );
+      expect(actual?.idempotentHint, `${toolName}.idempotentHint`).toBe(
+        expected?.idempotentHint
+      );
+    }
   });
 });
