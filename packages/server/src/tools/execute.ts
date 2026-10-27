@@ -5,7 +5,6 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { isAccountMcpPath } from '../mcp-surface';
 import { captureEffect, type CaptureIdentity } from '../gateway/routes/internal/capture-mode';
 import type { AgentTurnIdentity } from './turn-write-idempotency';
 import type { ChatSenderReach } from '../auth/oauth/types';
@@ -195,10 +194,10 @@ export function extractAuthContext(c: Context<{ Bindings: Env }>): AuthContext {
     scopedToOrg,
     allowCrossOrg:
       tokenType === 'oauth' &&
-      isAccountMcpPath(requestPath) && !scopedToOrg && !mcpAuthInfo?.scopes?.includes('device_worker:run'),
+      requestPath === '/mcp' && !scopedToOrg && !mcpAuthInfo?.scopes?.includes('device_worker:run'),
     grantedOrganizationIds,
     directSearchFederation:
-      tokenType === 'oauth' && isAccountMcpPath(requestPath) && !scopedToOrg && !mcpAuthInfo?.scopes?.includes('device_worker:run'),
+      tokenType === 'oauth' && requestPath === '/mcp' && !scopedToOrg && !mcpAuthInfo?.scopes?.includes('device_worker:run'),
     applyId: parseApplyId(c.req.header('x-lobu-apply-id')),
     rollbackOf: parseApplyId(c.req.header('x-lobu-rollback-of')),
     // Admin-tool LIMIT: only the verified worker token's per-turn allowlist
