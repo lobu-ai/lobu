@@ -432,7 +432,11 @@ describe('workspace-identity audit events > public-read exclusion', () => {
         entity_type: '$member',
         metadata: { email: 'cancel-me@example.com' },
       },
-      { organizationId: org.id, userId: alice.id }
+      {
+        organizationId: org.id,
+        userId: alice.id,
+        principal: { userId: alice.id },
+      }
     );
 
     // The invitation is now canceled and the cancellation is audited.

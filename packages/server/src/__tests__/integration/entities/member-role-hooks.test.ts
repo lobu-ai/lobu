@@ -186,7 +186,7 @@ describe('member roles through generic entity edits', () => {
     expect(await roles(member)).toMatchObject({ role: 'member', displayed: 'member' });
   });
   it('applies approved role edits through the same lifecycle', async () => {
-    await applyEntityFieldChangeProposal({ entity_id: member.entityId, fields: { role: 'admin' }, current: { role: 'member' } }, owner.userId);
+    await applyEntityFieldChangeProposal({ entity_id: member.entityId, fields: { role: 'admin' }, current: { role: 'member' } }, { userId: owner.userId });
     expect(await roles(member)).toMatchObject({ role: 'admin', displayed: 'admin' });
   });
   it('updates roles through the SDK', async () => {
@@ -270,18 +270,20 @@ describe('member roles through generic entity edits', () => {
     const [row] = await sql`SELECT role, "expiresAt" < now() AS expired FROM invitation WHERE "organizationId" = ${org.id} AND email = 'expired@roles.example.com'`;
     expect(row).toMatchObject({ role: 'admin', expired: true });
   });
-  it('requires admin scope for invitations and records API attribution', async () => {
+  it('refuses invitations from tokens and records web attribution', async () => {
     const client = await createTestOAuthClient();
     const { token: writeToken } = await createTestAccessToken(owner.userId, org.id, client.client_id, { scope: 'mcp:write profile:read' });
     const { token: adminToken } = await createTestAccessToken(owner.userId, org.id, client.client_id, { scope: 'mcp:admin profile:read' });
     const body = { action: 'create', entity_type: '$member', name: 'API invited', metadata: { email: 'api@roles.example.com', role: 'admin' } };
     expect((await post(`/api/${org.slug}/manage_entity`, { token: writeToken, body })).status).toBe(403);
-    expect((await post(`/api/${org.slug}/manage_entity`, { token: adminToken, body })).status).toBe(200);
-    expect((await post(`/api/${org.slug}/manage_entity`, { token: adminToken, body: { action: 'update', entity_id: member.entityId, metadata: { role: 'admin' } } })).status).toBe(200);
+    expect((await post(`/api/${org.slug}/manage_entity`, { token: adminToken, body })).status).toBe(403);
+    expect((await post(`/api/${org.slug}/manage_entity`, { token: adminToken, body: { action: 'update', entity_id: member.entityId, metadata: { role: 'admin' } } })).status).toBe(403);
+    expect((await post(`/api/${org.slug}/manage_entity`, { cookie: owner.cookie, body })).status).toBe(200);
+    expect((await edit(owner, member.entityId, 'admin')).status).toBe(200);
     const sql = getTestDb();
     const rows = await sql`SELECT metadata->>'actor_source' AS actor_source, created_by FROM events WHERE organization_id = ${org.id} AND origin_type IN ('workspace_member_updated', 'workspace_invitation_created')`;
     expect(rows).toHaveLength(2);
-    for (const row of rows) expect(row).toMatchObject({ actor_source: 'api', created_by: owner.userId });
+    for (const row of rows) expect(row).toMatchObject({ actor_source: 'ui', created_by: owner.userId });
   });
 
 });

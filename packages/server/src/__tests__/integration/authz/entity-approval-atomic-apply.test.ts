@@ -223,7 +223,7 @@ describe("an escalated card applies atomically or not at all", () => {
 		await getTestDb().begin((tx) =>
 			applyEntityFieldChangeProposal(
 				proposal as Parameters<typeof applyEntityFieldChangeProposal>[0],
-				user.id,
+				{ userId: user.id },
 				tx,
 			),
 		);
@@ -268,7 +268,7 @@ describe("an escalated card applies atomically or not at all", () => {
 		await getTestDb().begin((tx) =>
 			applyEntityFieldChangeProposal(
 				proposal as Parameters<typeof applyEntityFieldChangeProposal>[0],
-				user.id,
+				{ userId: user.id },
 				tx,
 			),
 		);
@@ -302,7 +302,7 @@ describe("an escalated card applies atomically or not at all", () => {
 				ctxFor(org.id, { userId: user.id }));
 		}
 		const applied = await applyEntityFieldChangeProposal(
-			proposal as Parameters<typeof applyEntityFieldChangeProposal>[0], user.id,
+			proposal as Parameters<typeof applyEntityFieldChangeProposal>[0], { userId: user.id },
 		);
 		expect(await readName(invoice.id)).toBe(stale ? "Human label" : "ACME");
 		expect((await readMetadata(invoice.id)).vendor).toBe(stale ? null : "ACME");
@@ -352,7 +352,7 @@ describe("an escalated card applies atomically or not at all", () => {
 
 		await applyEntityFieldChangeProposal(
 			proposal as Parameters<typeof applyEntityFieldChangeProposal>[0],
-			user.id,
+			{ userId: user.id },
 		);
 
 		const after = await readMetadata(invoice.id);

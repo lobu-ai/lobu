@@ -546,7 +546,7 @@ async function handleCreate(
 			hookContext: {
 				organizationId: ctx.organizationId,
 				userId: ctx.userId,
-				scopes: ctx.scopes,
+				principal: ctx,
 				actorSource: deriveToolActorSource(ctx),
 				env,
 			},
