@@ -65,7 +65,7 @@ describe("approved entity field application", () => {
 				},
 				reason: "Human approved the proposed entity changes",
 			},
-			approver.id,
+			{ userId: approver.id },
 		);
 
 		expect(Object.keys(result.applied).sort()).toEqual([

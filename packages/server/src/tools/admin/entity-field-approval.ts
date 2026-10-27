@@ -10,7 +10,7 @@ import { applyIdentityAssociationProposal, type IdentityAssociationProposal } fr
 
 import { deriveToolActorSource } from '../../utils/apply-context';
 import { RESERVED_COLUMN_NAMES } from "../../authz/entity-row-validation";
-import { SCOPE_CHECK_NOT_APPLICABLE } from "../../auth/tool-access";
+import type { IdentityContext } from "../../auth/direct-user-context";
 import {
 	type EntityTransactionHookContext,
 	getEntityHooks,
@@ -775,10 +775,11 @@ const ATTRIBUTE_FIELD_KEYS = new Set(["$name", "$parent_id", "$content"]);
  */
 export async function applyEntityFieldChangeProposal(
 	proposal: EntityFieldChangeProposal,
-	approverUserId: string | null,
+	approver: IdentityContext,
 	db: DbClient = getDb(),
 ): Promise<FieldMergeResult> {
 	const sql = db;
+	const approverUserId = approver.userId ?? null;
 	const metadataFields = Object.fromEntries(
 		Object.entries(proposal.fields).filter(
 			([key]) => !ATTRIBUTE_FIELD_KEYS.has(key),
@@ -802,14 +803,13 @@ export async function applyEntityFieldChangeProposal(
 			throw new ToolUserError(`Entity ${proposal.entity_id} not found`, 404);
 		}
 		const hooks = getEntityHooks(scope.entity_type);
-		// Applying a proposal is human-gated upstream (requireHumanApprovalContext),
-		// so the caller carries no MCP scope dimension — the same sentinel every
-		// session-authenticated path passes.
+		// Applying a proposal is human-gated upstream (requireHumanApprovalContext);
+		// membership hooks still check the approver's own session.
 		const hookContext: EntityTransactionHookContext = {
 			organizationId: scope.organization_id,
 			userId: approverUserId,
 			sql: tx,
-			scopes: SCOPE_CHECK_NOT_APPLICABLE,
+			principal: approver,
 			actorSource: 'ui',
 		};
 		await hooks?.beforeUpdate?.(metadataFields, hookContext);
@@ -930,7 +930,7 @@ export async function applyEntityChangeProposal(
 	if (operation === "update") {
 		return applyEntityFieldChangeProposal(
 			asUpdateProposal(proposal),
-			ctx.userId ?? null,
+			ctx,
 			db,
 		);
 	}
@@ -952,7 +952,7 @@ export async function applyEntityChangeProposal(
 				hookContext: {
 					organizationId: ctx.organizationId,
 					userId: ctx.userId,
-					scopes: ctx.scopes,
+					principal: ctx,
 					actorSource: deriveToolActorSource(ctx),
 					env,
 					deferAfterCommit: postCommitEffects

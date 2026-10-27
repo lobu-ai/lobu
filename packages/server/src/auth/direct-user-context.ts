@@ -4,7 +4,7 @@
  * their writes manual corrections or authorize human-only approval decisions.
  * These identities come from authenticated context, never tool arguments.
  */
-interface IdentityContext {
+export interface IdentityContext {
   userId?: string | null;
   agentId?: string | null;
   clientId?: string | null;
@@ -17,6 +17,15 @@ interface IdentityContext {
 export function hasDelegatedIdentity(ctx: IdentityContext): boolean {
   return !!ctx.agentId || !!ctx.clientId || !!ctx.mcpSessionId ||
     ctx.actingAutomationId != null;
+}
+
+/**
+ * A verified person deciding directly: a user identity with no agent, OAuth
+ * client (PATs carry `pat_<id>`), MCP transport or Automation behind it. Run
+ * approvals and membership changes share this one rule.
+ */
+export function isHumanDecision(ctx: IdentityContext): boolean {
+  return !!ctx.userId && !hasDelegatedIdentity(ctx);
 }
 
 /**

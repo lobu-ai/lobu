@@ -1,7 +1,7 @@
 import { IdentityAssociationStaleError, rememberIdentityRejection } from "../../../../utils/identity-association";
 import { lockIdentityOrganization } from "../../../../utils/relationship-validation";
 import { randomUUID } from "node:crypto";
-import { hasDelegatedIdentity } from "../../../../auth/direct-user-context";
+import { hasDelegatedIdentity, isHumanDecision } from "../../../../auth/direct-user-context";
 
 import {
 	ApproveAction,
@@ -920,17 +920,15 @@ function requireHumanApprovalContext(
 	ctx: ToolContext,
 	verb: "approve" | "reject",
 ): { error: string } | null {
+	if (isHumanDecision(ctx)) return null;
 	if (hasDelegatedIdentity(ctx)) {
 		return {
 			error: `Operation ${verb === "approve" ? "approval" : "rejection"} requires a human web session. Agents cannot ${verb} operations.`,
 		};
 	}
-	if (!ctx.userId) {
-		return {
-			error: `Operation ${verb === "approve" ? "approval" : "rejection"} requires a signed-in user. This request has no verified human identity.`,
-		};
-	}
-	return null;
+	return {
+		error: `Operation ${verb === "approve" ? "approval" : "rejection"} requires a signed-in user. This request has no verified human identity.`,
+	};
 }
 
 /**

@@ -8,8 +8,13 @@
 
 import type { ConfigActorSource } from './apply-context';
 import { ToolUserError } from './errors';
-import { hasRequiredMcpScope } from '../auth/tool-access';
-import { authorizeMemberRole, lockMemberRoleChanges, parseMemberRole } from '../auth/member-role-policy';
+import type { IdentityContext } from '../auth/direct-user-context';
+import {
+  assertHumanMemberChange,
+  authorizeMemberRole,
+  lockMemberRoleChanges,
+  parseMemberRole,
+} from '../auth/member-role-policy';
 import { changeMemberRoleInTransaction } from '../auth/member-roles';
 import { createElement } from 'react';
 import { sendTransactionalEmail } from '../email/send';
@@ -30,7 +35,12 @@ export interface EntityHookContext {
   organizationId: string;
   userId: string | null;
   env?: Env;
-  scopes?: readonly string[] | null;
+  /**
+   * Who is acting and through what credential. Membership hooks require a
+   * human decision, the run-approval rule (`assertHumanMemberChange`); absent
+   * means not a person.
+   */
+  principal?: IdentityContext;
   actorSource?: ConfigActorSource;
   /** Caller-owned transaction for hook database work. */
   sql?: DbClient;
@@ -135,7 +145,7 @@ async function sendMemberInvitationEmail(
 
 registerEntityHooks('$member', {
   async beforeCreate(data, ctx) {
-    if (!hasRequiredMcpScope('admin', ctx.scopes)) throw new ToolUserError('Changing membership requires mcp:admin scope', 403);
+    assertHumanMemberChange(ctx.principal);
     const sql = ctx.sql ?? getDb();
     const { emailField } = await resolveMemberSchemaFields(ctx.organizationId, sql);
     const meta = { ...(data.metadata ?? {}) };
@@ -220,7 +230,7 @@ registerEntityHooks('$member', {
 
   async afterUpdate(before, after, ctx) {
     if (before.metadata?.role === after.metadata?.role) return;
-    if (!hasRequiredMcpScope('admin', ctx.scopes)) throw new ToolUserError('Changing membership requires mcp:admin scope', 403);
+    assertHumanMemberChange(ctx.principal);
     const sql = ctx.sql;
     const { emailField } = await resolveMemberSchemaFields(ctx.organizationId, sql);
     const oldEmail = before.metadata?.[emailField];
@@ -271,6 +281,7 @@ registerEntityHooks('$member', {
   },
 
   async beforeDelete(entity, ctx) {
+    assertHumanMemberChange(ctx.principal);
     const sql = ctx.sql ?? getDb();
     const { emailField } = await resolveMemberSchemaFields(ctx.organizationId, sql);
     const email = entity.metadata?.[emailField] as string | undefined;

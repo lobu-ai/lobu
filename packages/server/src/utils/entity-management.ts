@@ -1128,7 +1128,7 @@ export async function updateEntity(
 			userId: ctx.userId,
 			env: _env,
 			sql: tx,
-			scopes: ctx.scopes,
+			principal: ctx,
 			actorSource: deriveToolActorSource(ctx),
 		};
 		await hooks?.beforeUpdate?.(metadataUpdates, hookContext);
@@ -1768,7 +1768,13 @@ export async function deleteEntity(
           if (!beforeDelete) return;
           await beforeDelete(
             { id: entityId, ...entityRow },
-            { organizationId: ctx.organizationId, userId: ctx.userId, sql: tx, actorSource: deriveToolActorSource(ctx) }
+            {
+              organizationId: ctx.organizationId,
+              userId: ctx.userId,
+              sql: tx,
+              principal: ctx,
+              actorSource: deriveToolActorSource(ctx),
+            }
           );
         }
       : null;

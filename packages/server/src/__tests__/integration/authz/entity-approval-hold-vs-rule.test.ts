@@ -345,7 +345,7 @@ describe("approval hold vs a frozen-state rule", () => {
 				escalated_fields: ["amount"],
 				reason: "approved in test",
 			} as Parameters<typeof applyEntityFieldChangeProposal>[0],
-			user.id,
+			{ userId: user.id },
 		);
 		expect((await readMetadata(invoice.id)).amount).toBe(90000);
 	}, 60_000);
@@ -402,7 +402,7 @@ describe("approval hold vs a frozen-state rule", () => {
 				escalated_fields: input.escalated_fields ?? [],
 				reason: "approved in test",
 			} as Parameters<typeof applyEntityFieldChangeProposal>[0],
-			user.id,
+			{ userId: user.id },
 		);
 
 		const after = await readMetadata(invoice.id);
@@ -436,7 +436,7 @@ describe("approval hold vs a frozen-state rule", () => {
 				escalated_fields: ["amount"],
 				reason: "approved in test",
 			} as Parameters<typeof applyEntityFieldChangeProposal>[0],
-			user.id,
+			{ userId: user.id },
 		);
 
 		// BOTH halves land. Asserting only the metadata half would still pass with
@@ -545,7 +545,7 @@ describe("approval hold vs a frozen-state rule", () => {
 					escalated_fields: ["amount"],
 					reason: "approved in test",
 				} as Parameters<typeof applyEntityFieldChangeProposal>[0],
-				user.id,
+				{ userId: user.id },
 			),
 		).rejects.toThrow(/vendor/);
 
@@ -606,7 +606,7 @@ describe("approval hold vs a frozen-state rule", () => {
 				escalated_fields: input.escalated_fields ?? [],
 				reason: "approved in test",
 			} as Parameters<typeof applyEntityFieldChangeProposal>[0],
-			user.id,
+			{ userId: user.id },
 		);
 		expect((await readMetadata(invoice.id)).amount).toBe(90000);
 	}, 60_000);

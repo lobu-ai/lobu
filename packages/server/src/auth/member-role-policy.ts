@@ -1,6 +1,7 @@
 import { ToolUserError } from '../utils/errors';
 import type { DbClient } from '../db/client';
 import { organizationLiveSql } from '../workspace/deletion-state';
+import { type IdentityContext, isHumanDecision } from './direct-user-context';
 
 export const MEMBER_ROLES = ['owner', 'admin', 'member'] as const;
 export type MemberRole = typeof MEMBER_ROLES[number];
@@ -41,6 +42,34 @@ export async function authorizeMemberRole(
   if ((role === 'owner' || previousRole === 'owner') && actor.role !== 'owner') {
     throw new ToolUserError('Only owners can grant or change ownership', 403);
   }
+}
+
+/**
+ * Membership changes (inviting, adding, changing a role, removing) were made
+ * by a delegated identity: an OAuth/MCP connection, a personal access token,
+ * the CLI, an agent or an Automation. Like run approvals, they need a person.
+ */
+class MemberChangeRequiresHumanError extends ToolUserError {
+  constructor() {
+    super(
+      'Inviting members, changing roles and removing members can only be done by a person in the Lobu web app (Memory, Members). Connected apps, agents, Automations, personal access tokens and the CLI cannot change who is in a workspace.',
+      403,
+      'PERMISSION'
+    );
+    this.name = 'MemberChangeRequiresHumanError';
+  }
+}
+
+/**
+ * The gate every entity-layer membership write runs ($member create, role
+ * update, delete): the same human-only rule as run approvals
+ * (`isHumanDecision`). Better Auth's own organization endpoints accept only a
+ * web session, so they already satisfy it. A prompt-injected agent holding
+ * mcp:admin must not be able to invite an outsider as owner or promote one.
+ * Fails closed: a write with no principal is not a person.
+ */
+export function assertHumanMemberChange(principal: IdentityContext | undefined): void {
+  if (!principal || !isHumanDecision(principal)) throw new MemberChangeRequiresHumanError();
 }
 
 export async function assertWorkspaceRetainsOwner(sql: DbClient, organizationId: string): Promise<void> {
