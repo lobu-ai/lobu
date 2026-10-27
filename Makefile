@@ -23,7 +23,7 @@ help:
 	@echo "  make typecheck                             - Strict typecheck (same as Dockerfile) for server + owletto"
 	@echo "  make task-setup NAME=<name> [CONTEXT=1]    - Create a paired worktree at .claude/worktrees/<name> (lobu + submodule, .env/ports; CONTEXT=1 registers Lobu CLI context)"
 	@echo "  make task-clean NAME=<name> [FORCE=1]      - Remove the worktree, both branches, and the Lobu context (refuses if there's uncommitted/unpushed work unless FORCE=1)"
-	@echo "  make e2e-browser [RESTART=1]               - Launch/reuse the stable 'owletto' Chrome harness (extension from this worktree) for Chrome e2e"
+	@echo "  make e2e-browser [RESTART=1]               - Open/reuse this worktree's Chrome e2e browser (lobu browser, auto-paired to the local gateway)"
 	@echo "  make bump SUBMODULE=<path> [TARGET=<ref>] [ARTIFACT=<url>] - Lightweight pointer PR + required statuses (skips bun install, .env, ports)"
 	@echo "  make review [BASE=<branch>]                - Run the cross-harness LLM reviewer against the local diff (deterministic suites run in CI); posts pi-review status and PR comment"
 	@echo "  make review-fix [BASE=<branch>]            - Pre-review fixer: reviewer CLI with write access fixes review-grade findings in the tree; posts nothing"

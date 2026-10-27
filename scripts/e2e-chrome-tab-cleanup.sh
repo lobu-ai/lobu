@@ -46,8 +46,7 @@ if [[ -n "$db_url" ]]; then
     echo "    run: lobu memory run run_sdk with operations.execute on chrome connection"
   else
     echo "    no online chrome-extension in this DB"
-    echo "    pair: make e2e-browser RESTART=1"
-    echo "          set extension Server URL to ${url} in sidepanel, then sign in"
+    echo "    pair: make e2e-browser"
   fi
 else
   echo "    DATABASE_URL not found — skip DB pairing check"

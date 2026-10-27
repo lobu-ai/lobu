@@ -1,5 +1,6 @@
 const fs = require("node:fs");
 const path = require("node:path");
+const { copyChromeExtension } = require("./copy-chrome-extension.cjs");
 
 function copyDirIfExists(src, dest, filter) {
   if (!fs.existsSync(src)) return;
@@ -51,34 +52,8 @@ if (fs.existsSync(providersSrc)) {
 // runtime connector source/manifests ship — internal tests are filtered out.
 copyDirIfExists("../connectors/src", "dist/connectors", excludeTests);
 
-// `lobu browser` loads the Lobu Chrome extension into Chrome for Testing. Ship
-// its runtime files with the manifest `key` intact: the key pins the extension
-// id that the gateway's CORS allow-list and the pairing host both expect.
-copyDirIfExists(
-  "../owletto/apps/chrome",
-  "dist/chrome-extension",
-  (srcPath) =>
-    excludeTests(srcPath) &&
-    !["README.md", "build-info.json"].includes(path.basename(srcPath)) &&
-    !srcPath.endsWith(".sh") &&
-    !path.basename(srcPath).startsWith(".")
-);
-
-// A named browser is a profile the user created for Lobu agents, so this copy
-// declares site access as required: Chrome grants it to an unpacked extension
-// at load, with no per-site prompt. History, bookmarks, and downloads stay
-// optional because granting them advertises feeds that sync browsing data.
-const cliManifestPath = "dist/chrome-extension/manifest.json";
-if (fs.existsSync(cliManifestPath)) {
-  const manifest = JSON.parse(fs.readFileSync(cliManifestPath, "utf8"));
-  manifest.host_permissions = [
-    ...new Set([...(manifest.host_permissions ?? []), "<all_urls>"]),
-  ];
-  manifest.optional_host_permissions = (
-    manifest.optional_host_permissions ?? []
-  ).filter((pattern) => pattern !== "<all_urls>");
-  fs.writeFileSync(cliManifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
-}
+// `lobu browser` loads the Lobu Chrome extension into Chrome for Testing.
+copyChromeExtension();
 
 // npm does not apply Bun patches. Publish the patched Ora package itself so
 // every spinner gets the zero-width terminal fix, including Node-only installs.
