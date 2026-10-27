@@ -1,20 +1,29 @@
 import type { Span, Tracer } from "@opentelemetry/api";
 import { context, SpanKind, SpanStatusCode, trace } from "@opentelemetry/api";
-import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-grpc";
-import { resourceFromAttributes } from "@opentelemetry/resources";
-import {
-  NodeTracerProvider,
-  SimpleSpanProcessor,
+// The OTel exporter/SDK chain (~40M install, pulls @grpc/grpc-js) must not
+// load on every `@lobu/core` import: tracing is disabled unless an OTLP
+// endpoint is configured, and the CLI never configures one. The four heavy
+// modules below are optional peer dependencies, loaded synchronously via
+// createRequire inside initTracing only when enabled (sync require preserves
+// the initTracing(config): void signature; the exporter ships CJS). The API
+// package above stays a hard dependency: it is tiny and backs the no-op
+// spans returned while disabled.
+import type { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-grpc";
+import type { resourceFromAttributes as resourceFromAttributesType } from "@opentelemetry/resources";
+import type {
+  NodeTracerProvider as NodeTracerProviderType,
+  SimpleSpanProcessor as SimpleSpanProcessorType,
 } from "@opentelemetry/sdk-trace-node";
-import {
-  ATTR_SERVICE_NAME,
-  ATTR_SERVICE_VERSION,
+import type {
+  ATTR_SERVICE_NAME as AttrServiceName,
+  ATTR_SERVICE_VERSION as AttrServiceVersion,
 } from "@opentelemetry/semantic-conventions";
+import { createRequire } from "node:module";
 import { createLogger } from "./logger";
 
 const logger = createLogger("otel");
 
-let provider: NodeTracerProvider | null = null;
+let provider: NodeTracerProviderType | null = null;
 let tracer: Tracer | null = null;
 
 export interface OtelConfig {
@@ -37,12 +46,41 @@ export function initTracing(config: OtelConfig): void {
     return;
   }
 
+  // Lazy, synchronous load: keeps the grpc chain out of every core import.
+  // Optional peers are skipped by default on install; a minimal install that
+  // enables tracing gets a clear error here instead of MODULE_NOT_FOUND.
+  let exporterCtor: typeof OTLPTraceExporter;
+  let resourceFromAttributes: typeof resourceFromAttributesType;
+  let NodeTracerProvider: typeof NodeTracerProviderType;
+  let SimpleSpanProcessor: typeof SimpleSpanProcessorType;
+  let ATTR_SERVICE_NAME: typeof AttrServiceName;
+  let ATTR_SERVICE_VERSION: typeof AttrServiceVersion;
+  try {
+    const require = createRequire(__filename);
+    exporterCtor =
+      require("@opentelemetry/exporter-trace-otlp-grpc").OTLPTraceExporter;
+    resourceFromAttributes =
+      require("@opentelemetry/resources").resourceFromAttributes;
+    ({
+      NodeTracerProvider,
+      SimpleSpanProcessor,
+    } = require("@opentelemetry/sdk-trace-node"));
+    ({
+      ATTR_SERVICE_NAME,
+      ATTR_SERVICE_VERSION,
+    } = require("@opentelemetry/semantic-conventions"));
+  } catch {
+    throw new Error(
+      "Tracing is enabled (OTEL_EXPORTER_OTLP_ENDPOINT or enabled: true) but the optional OpenTelemetry peer dependencies are not installed (@opentelemetry/exporter-trace-otlp-grpc, @opentelemetry/resources, @opentelemetry/sdk-trace-node, @opentelemetry/semantic-conventions). Install them explicitly to enable tracing, or leave the endpoint unset to run without tracing."
+    );
+  }
+
   const resource = resourceFromAttributes({
     [ATTR_SERVICE_NAME]: config.serviceName,
     [ATTR_SERVICE_VERSION]: config.serviceVersion || "1.0.0",
   });
 
-  const exporter = new OTLPTraceExporter({
+  const exporter = new exporterCtor({
     url: config.otlpEndpoint,
     timeoutMillis: 30000,
   });
