@@ -32,6 +32,7 @@ import {
 } from "./views/views";
 import { viewWorkspaceUrl } from "./utils/url-builder";
 import { getOperationsSummary } from "./operations/connector-operations";
+import { AccessDeniedError } from "./tools/access-control";
 import { manageClassifiers } from "./tools/admin/manage_classifiers";
 import { manageAutomations } from "./tools/admin/manage_automations";
 import {
@@ -191,6 +192,9 @@ function restErrorResponse(
 			toolUserErrorBody(error),
 			error.httpStatus as ContentfulStatusCode
 		);
+	}
+	if (error instanceof AccessDeniedError) {
+		return c.json({ error: error.message }, 403);
 	}
 	return c.json({ error: errorMessage(error) }, 400);
 }

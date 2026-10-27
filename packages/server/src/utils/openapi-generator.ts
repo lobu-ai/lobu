@@ -223,6 +223,19 @@ export function generateOpenAPISpec(serverUrl: string) {
             },
           },
         },
+        '403': {
+          description: 'Forbidden - your role or token scope does not allow this action',
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: {
+                  error: { type: 'string' },
+                },
+              },
+            },
+          },
+        },
         '404': {
           description: 'Tool not found',
           content: {
@@ -326,6 +339,10 @@ export function generateStrictToolPaths(): Record<string, any> {
             content: { 'application/json': { schema: responseSchema } },
           },
           '400': { description: 'Bad request - invalid parameters', ...ERROR_RESPONSE },
+          '403': {
+            description: 'Forbidden - your role or token scope does not allow this action',
+            ...ERROR_RESPONSE,
+          },
           '404': { description: 'Tool not found', ...ERROR_RESPONSE },
         },
       },

@@ -21,6 +21,18 @@ describe("generateOpenAPISpec", () => {
 		).toBeDefined();
 		expect(spec.servers[0]?.description).toContain("Automations");
 	});
+
+	it("documents the 403 an access denial answers with", () => {
+		const spec = generateOpenAPISpec("https://example.test");
+		const paths = Object.values(spec.paths) as Array<Record<string, any>>;
+		expect(paths.length).toBeGreaterThan(0);
+		for (const ops of paths) {
+			expect(ops.post.responses["403"]).toBeDefined();
+		}
+		for (const ops of Object.values(generateStrictToolPaths())) {
+			expect(ops.post.responses["403"]).toBeDefined();
+		}
+	});
 });
 
 /**

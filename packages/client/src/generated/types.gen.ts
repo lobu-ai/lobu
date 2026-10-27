@@ -119,6 +119,12 @@ export type SearchMemoryErrors = {
     error?: string;
   };
   /**
+   * Forbidden - your role or token scope does not allow this action
+   */
+  403: {
+    error?: string;
+  };
+  /**
    * Tool not found
    */
   404: {
@@ -396,6 +402,12 @@ export type SaveMemoryErrors = {
     error?: string;
   };
   /**
+   * Forbidden - your role or token scope does not allow this action
+   */
+  403: {
+    error?: string;
+  };
+  /**
    * Tool not found
    */
   404: {
@@ -476,6 +488,12 @@ export type SearchSdkErrors = {
     error?: string;
   };
   /**
+   * Forbidden - your role or token scope does not allow this action
+   */
+  403: {
+    error?: string;
+  };
+  /**
    * Tool not found
    */
   404: {
@@ -541,6 +559,12 @@ export type QuerySdkErrors = {
    * Bad request - invalid parameters
    */
   400: {
+    error?: string;
+  };
+  /**
+   * Forbidden - your role or token scope does not allow this action
+   */
+  403: {
     error?: string;
   };
   /**
@@ -714,6 +738,12 @@ export type QuerySqlErrors = {
     error?: string;
   };
   /**
+   * Forbidden - your role or token scope does not allow this action
+   */
+  403: {
+    error?: string;
+  };
+  /**
    * Tool not found
    */
   404: {
@@ -812,6 +842,12 @@ export type RunSdkErrors = {
    * Bad request - invalid parameters
    */
   400: {
+    error?: string;
+  };
+  /**
+   * Forbidden - your role or token scope does not allow this action
+   */
+  403: {
     error?: string;
   };
   /**
@@ -992,6 +1028,12 @@ export type OpenViewErrors = {
    * Bad request - invalid parameters
    */
   400: {
+    error?: string;
+  };
+  /**
+   * Forbidden - your role or token scope does not allow this action
+   */
+  403: {
     error?: string;
   };
   /**
@@ -1527,6 +1569,12 @@ export type ManageEntityErrors = {
    * Bad request - invalid parameters
    */
   400: {
+    error?: string;
+  };
+  /**
+   * Forbidden - your role or token scope does not allow this action
+   */
+  403: {
     error?: string;
   };
   /**
@@ -2127,6 +2175,12 @@ export type ManageEntitySchemaErrors = {
    * Bad request - invalid parameters
    */
   400: {
+    error?: string;
+  };
+  /**
+   * Forbidden - your role or token scope does not allow this action
+   */
+  403: {
     error?: string;
   };
   /**
@@ -3094,6 +3148,12 @@ export type ManageConnectionsErrors = {
     error?: string;
   };
   /**
+   * Forbidden - your role or token scope does not allow this action
+   */
+  403: {
+    error?: string;
+  };
+  /**
    * Tool not found
    */
   404: {
@@ -3589,6 +3649,12 @@ export type ManageCatalogErrors = {
     error?: string;
   };
   /**
+   * Forbidden - your role or token scope does not allow this action
+   */
+  403: {
+    error?: string;
+  };
+  /**
    * Tool not found
    */
   404: {
@@ -3749,6 +3815,12 @@ export type ManageAgentsErrors = {
     error?: string;
   };
   /**
+   * Forbidden - your role or token scope does not allow this action
+   */
+  403: {
+    error?: string;
+  };
+  /**
    * Tool not found
    */
   404: {
@@ -3849,6 +3921,12 @@ export type ManageConversationsErrors = {
    * Bad request - invalid parameters
    */
   400: {
+    error?: string;
+  };
+  /**
+   * Forbidden - your role or token scope does not allow this action
+   */
+  403: {
     error?: string;
   };
   /**
@@ -4078,6 +4156,12 @@ export type ManageFeedsErrors = {
    * Bad request - invalid parameters
    */
   400: {
+    error?: string;
+  };
+  /**
+   * Forbidden - your role or token scope does not allow this action
+   */
+  403: {
     error?: string;
   };
   /**
@@ -4364,6 +4448,12 @@ export type ManageAuthProfilesErrors = {
    * Bad request - invalid parameters
    */
   400: {
+    error?: string;
+  };
+  /**
+   * Forbidden - your role or token scope does not allow this action
+   */
+  403: {
     error?: string;
   };
   /**
@@ -4732,6 +4822,12 @@ export type ManageOperationsErrors = {
     error?: string;
   };
   /**
+   * Forbidden - your role or token scope does not allow this action
+   */
+  403: {
+    error?: string;
+  };
+  /**
    * Tool not found
    */
   404: {
@@ -5031,6 +5127,12 @@ export type NotifyErrors = {
     error?: string;
   };
   /**
+   * Forbidden - your role or token scope does not allow this action
+   */
+  403: {
+    error?: string;
+  };
+  /**
    * Tool not found
    */
   404: {
@@ -5150,6 +5252,12 @@ export type ManageSchedulesErrors = {
    * Bad request - invalid parameters
    */
   400: {
+    error?: string;
+  };
+  /**
+   * Forbidden - your role or token scope does not allow this action
+   */
+  403: {
     error?: string;
   };
   /**
@@ -5600,6 +5708,12 @@ export type ManageAutomationsErrors = {
     error?: string;
   };
   /**
+   * Forbidden - your role or token scope does not allow this action
+   */
+  403: {
+    error?: string;
+  };
+  /**
    * Tool not found
    */
   404: {
@@ -5917,6 +6031,12 @@ export type GetAutomationErrors = {
    * Bad request - invalid parameters
    */
   400: {
+    error?: string;
+  };
+  /**
+   * Forbidden - your role or token scope does not allow this action
+   */
+  403: {
     error?: string;
   };
   /**
@@ -6441,6 +6561,12 @@ export type ReadKnowledgeErrors = {
     error?: string;
   };
   /**
+   * Forbidden - your role or token scope does not allow this action
+   */
+  403: {
+    error?: string;
+  };
+  /**
    * Tool not found
    */
   404: {
@@ -6676,6 +6802,12 @@ export type ManageClassifiersErrors = {
     error?: string;
   };
   /**
+   * Forbidden - your role or token scope does not allow this action
+   */
+  403: {
+    error?: string;
+  };
+  /**
    * Tool not found
    */
   404: {
@@ -6777,6 +6909,12 @@ export type ManageViewsErrors = {
    * Bad request - invalid parameters
    */
   400: {
+    error?: string;
+  };
+  /**
+   * Forbidden - your role or token scope does not allow this action
+   */
+  403: {
     error?: string;
   };
   /**
@@ -7135,6 +7273,12 @@ export type ListOrganizationsErrors = {
     error?: string;
   };
   /**
+   * Forbidden - your role or token scope does not allow this action
+   */
+  403: {
+    error?: string;
+  };
+  /**
    * Tool not found
    */
   404: {
@@ -7183,6 +7327,12 @@ export type ListMetricsErrors = {
    * Bad request - invalid parameters
    */
   400: {
+    error?: string;
+  };
+  /**
+   * Forbidden - your role or token scope does not allow this action
+   */
+  403: {
     error?: string;
   };
   /**
@@ -7245,6 +7395,12 @@ export type QueryMetricErrors = {
    * Bad request - invalid parameters
    */
   400: {
+    error?: string;
+  };
+  /**
+   * Forbidden - your role or token scope does not allow this action
+   */
+  403: {
     error?: string;
   };
   /**
@@ -7314,6 +7470,12 @@ export type MetricSeriesErrors = {
     error?: string;
   };
   /**
+   * Forbidden - your role or token scope does not allow this action
+   */
+  403: {
+    error?: string;
+  };
+  /**
    * Tool not found
    */
   404: {
@@ -7361,6 +7523,12 @@ export type ResolvePathErrors = {
    * Bad request - invalid parameters
    */
   400: {
+    error?: string;
+  };
+  /**
+   * Forbidden - your role or token scope does not allow this action
+   */
+  403: {
     error?: string;
   };
   /**
