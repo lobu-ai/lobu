@@ -18,6 +18,7 @@ import { extractWhatsAppStyleRoutingInfo } from "./shared.js";
 import { scopeGoogleChatAdapter } from "./gchat-scope.js";
 import {
   acceptGoogleChatWebhook,
+  handleGoogleChatAppWebhook,
   releaseGoogleChatSource,
   resolveGoogleChatRuntime,
   revokeGoogleChatSpace,
@@ -636,6 +637,7 @@ export const gchatPlatform: ChatPlatformDescriptor = {
   resolveRuntimeConfig: resolveGoogleChatRuntime,
   routeWebhook: routeGoogleChatWebhook,
   onWebhookAccepted: acceptGoogleChatWebhook,
+  handleAppWebhook: handleGoogleChatAppWebhook,
   revokeManagedConnection: revokeGoogleChatSpace,
   releaseDeletedConnection: releaseGoogleChatSource,
 

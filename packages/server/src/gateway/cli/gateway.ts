@@ -52,6 +52,7 @@ import {
   createDeclaredAppWebhookProvider,
   createDefaultAppWebhookSecretResolver,
 } from "../routes/public/app-webhooks.js";
+import { appWebhookUrl } from "../routes/public/app-webhook-url.js";
 import { connectorRecordEnqueuer } from "../../connectors/webhook-delivery.js";
 import { createConnectAuthRoutes } from "../routes/public/connect-auth.js";
 import {
@@ -567,13 +568,14 @@ export function createGatewayApp(
     // (those declaring `webhook.delivery: 'app_installation'`) and register ONE
     // GENERIC provider per declaration — verify + tenant + registration carry no
     // provider name. The only per-KIND piece is the delivery hook (the declared
-    // feed dispatch, slack's chat-adapter forward), keyed off the connector, not
+    // feed dispatch, the chat-adapter forward), keyed off the connector, not
     // branched on a provider literal in the engine. A provider is
     // registered only when its Lobu App id is configured (the declared env var is
     // set); otherwise the route reports the provider unknown (404).
     const appWebhookSecretStore = coreServices.getSecretStore();
     const appWebhookProviders: AppWebhookProvider[] = [];
     const declaredSecretEnvKeys: Record<string, string | undefined> = {};
+    const publicGatewayUrl = coreServices.getPublicGatewayUrl();
     for (const integration of bundledIntegrationConnectors ?? []) {
       // Reference resolveAppInstallCredentials so the declared env-var contract
       // stays the single source of truth (validates the method's key names).
@@ -583,7 +585,7 @@ export function createGatewayApp(
 
       // Per-KIND delivery, dispatched off the DECLARED `deliveryKind` — never a
       // provider name. A `chat` connector forwards verified deliveries to the
-      // chat adapter for its provider (Slack today); a `data` connector
+      // chat adapter for its provider (Slack, Google Chat); a `data` connector
       // dispatches them to the feeds that declare the delivery's event type
       // when its schema names an `eventType`, else acks with nothing triggered.
       const deliveryKind = integration.webhookSchema.deliveryKind ?? "data";
@@ -611,6 +613,9 @@ export function createGatewayApp(
           appId: integration.appId,
           webhookSchema: integration.webhookSchema,
           providerInstance: integration.method?.providerInstance,
+          ...(publicGatewayUrl
+            ? { endpointUrl: appWebhookUrl(publicGatewayUrl, integration.provider) }
+            : {}),
           ...deliveryHooks,
         }),
       );

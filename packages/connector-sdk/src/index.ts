@@ -93,6 +93,7 @@ export type {
   ConnectorInstallationContext,
   ConnectorOperations,
   ConnectorRuntimeInfo,
+  ConnectorWebhookGoogleJwtVerification,
   ConnectorWebhookSchema,
   ContentItem,
   EntityIdentitySpec,

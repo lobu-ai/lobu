@@ -5,14 +5,14 @@ import { runtimeConnectionIdToSlug } from "../../lobu/stores/connections-project
 import { orgContext } from "../../lobu/stores/org-context.js";
 import { ClaimMoveBlockedError, type ClaimContinuation, type ClaimProvider } from "./connection-claim.js";
 import type { ConnectionSettings } from "./types.js";
-import { activateGoogleChatSpace, googleChatInstallationId } from "./platforms/gchat-installation.js";
+import { activateGoogleChatSpace, googleChatInstallationId, isHostedGoogleChatProject } from "./platforms/gchat-installation.js";
 
 interface PendingSpace {
   id: number;
   provider_app_id: string;
   external_tenant_id: string;
   status: string;
-  metadata: { external_id: string; source_connection_id: string; source_organization_id: string; installer_id: string; space_name: string; verified_added: boolean; claimed?: boolean; removed?: boolean };
+  metadata: { external_id: string; source_connection_id?: string; source_organization_id?: string; installer_id: string; space_name: string; verified_added: boolean; claimed?: boolean; removed?: boolean };
 }
 
 
@@ -29,23 +29,33 @@ export function googleChatClaimProvider(deps: {
     if (!/^gchatclaim-[0-9a-f-]{36}$/.test(ref)) return null;
     const [row] = await tx`
       SELECT id, provider_app_id, external_tenant_id, status, metadata FROM app_installations
-      WHERE provider = 'gchat' AND metadata->>'external_id' = ${ref}
-        AND updated_at > now() - interval '24 hours' LIMIT 1
+      WHERE provider = 'gchat' AND metadata->>'external_id' = ${ref} LIMIT 1
     `;
     return row as PendingSpace ?? null;
   };
   const sourceFor = async (pending: PendingSpace) => {
-    const source = await orgContext.exit(() => deps.getConnection(pending.metadata.source_connection_id));
+    if (!pending.metadata.source_connection_id) return null;
+    const source = await orgContext.exit(() => deps.getConnection(pending.metadata.source_connection_id!));
     if (!source || source.status !== "active" || source.platform !== "gchat" ||
       source.organizationId !== pending.metadata.source_organization_id ||
       source.config.googleChatProjectNumber !== pending.provider_app_id) return null;
     return source;
   };
+  const installerMatches = async (userId: string, pending: PendingSpace) => {
+    const accounts = await sql`SELECT "accountId" FROM account WHERE "userId" = ${userId} AND "providerId" = 'google'`;
+    return accounts.some((account) => `users/${account.accountId}` === pending.metadata.installer_id);
+  };
   const authorize = async (userId: string, pending: PendingSpace) => {
+    // The hosted app has no tenant source: Google's verified addition plus the
+    // installer's own Google identity is the whole authority, as on Slack.
+    if (isHostedGoogleChatProject(pending.provider_app_id)) {
+      if (!await installerMatches(userId, pending)) return { status: "signin_required" as const, signinProvider: "google" };
+      if (!pending.metadata.verified_added) return { status: "not_authorized" as const, code: "unverified_installation" };
+      return { status: "authorized" as const, subjectName: pending.metadata.space_name };
+    }
     const source = await sourceFor(pending);
     if (!source) return { status: "not_authorized" as const, code: "source_unavailable" };
-    const accounts = await sql`SELECT "accountId" FROM account WHERE "userId" = ${userId} AND "providerId" = 'google'`;
-    if (!accounts.some((account) => `users/${account.accountId}` === pending.metadata.installer_id)) {
+    if (!await installerMatches(userId, pending)) {
       return { status: "signin_required" as const, signinProvider: "google" };
     }
     const [membership] = await sql`SELECT role FROM member WHERE "organizationId" = ${source.organizationId!} AND "userId" = ${userId}`;
@@ -78,7 +88,8 @@ export function googleChatClaimProvider(deps: {
         JOIN member m ON m."organizationId" = o.id AND m."userId" = ${userId}
         WHERE ai.provider = 'gchat' AND ai.provider_instance = 'cloud' AND ai.status = 'active'
           AND ai.provider_app_id = ${pending.provider_app_id} AND ai.external_tenant_id = ${pending.external_tenant_id}
-          AND ai.metadata->>'source_connection_id' = ${pending.metadata.source_connection_id} LIMIT 1
+          ${isHostedGoogleChatProject(pending.provider_app_id) ? sql`` : sql`AND ai.metadata->>'source_connection_id' = ${pending.metadata.source_connection_id ?? null}`}
+        LIMIT 1
       `;
       return row ? { orgSlug: row.slug, continuation: continuation(pending, googleChatInstallationId(row.organization_id, pending.provider_app_id, pending.external_tenant_id)) } : null;
     },
@@ -87,7 +98,7 @@ export function googleChatClaimProvider(deps: {
       const [current] = await tx`SELECT status, metadata FROM app_installations WHERE id = ${pending.id} FOR UPDATE`;
       if (!current || current.status !== "pending" || current.metadata.removed) throw new Error("Google Chat setup link expired");
       if ((await authorize(userId, pending)).status !== "authorized") throw new Error("Google Chat installation authority changed");
-      const source = await sourceFor(pending);
+      const source = isHostedGoogleChatProject(pending.provider_app_id) ? "hosted" as const : await sourceFor(pending);
       if (!source) throw new Error("Google Chat source is unavailable");
       let bindingId: string;
       try {

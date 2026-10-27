@@ -191,12 +191,42 @@ export interface ConnectorRuntimeInfo {
 }
 
 /**
+ * `app_installation` deliveries authenticated by a Google-signed bearer JWT
+ * (Google Chat) instead of an HMAC. `{appId}` in {@link signers} is replaced
+ * by the value of {@link appIdKey}.
+ */
+export interface ConnectorWebhookGoogleJwtVerification {
+  type: 'google-jwt';
+  /**
+   * Env var holding the receiving app's id (the Google Cloud project number).
+   * It is the installs' `provider_app_id`; when unset the provider is not
+   * registered and its app-webhook endpoint answers 404.
+   */
+  appIdKey: string;
+  /**
+   * Token audiences to accept, either of which verifies:
+   * - `'app_id'` — a JWT self-signed by one of {@link signers} with `aud` = the
+   *   app id, checked against that service account's published keys.
+   * - `'endpoint_url'` — a Google OIDC ID token with `aud` = this provider's
+   *   public app-webhook URL and a verified `email` in {@link signers}.
+   */
+  audiences: Array<'app_id' | 'endpoint_url'>;
+  /** Google service-account emails allowed to sign a delivery. */
+  signers: string[];
+}
+
+/**
  * Declarative scheme the gateway uses to verify an inbound provider webhook in
  * the request hot path — no connector code runs before the 202 ack. The shared
  * secret is NOT here: it is minted by {@link ConnectorRuntime.registerWebhook}
  * at connect time and stored on the connection.
  */
 export interface ConnectorWebhookSchema {
+  /**
+   * Non-HMAC verification for `app_installation` deliveries. When set, the HMAC
+   * fields below are not used and no webhook secret is resolved.
+   */
+  verification?: ConnectorWebhookGoogleJwtVerification;
   /**
    * Request header carrying the provider's HMAC signature over the raw body,
    * e.g. `x-hub-signature-256` (GitHub), `linear-signature`. Omit for providers

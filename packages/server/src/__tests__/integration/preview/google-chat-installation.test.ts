@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getDb } from "../../../db/client.js";
 import { createPostgresAppInstallationStore } from "../../../lobu/stores/app-installation-store.js";
 import { createPostgresAgentConnectionStore } from "../../../lobu/stores/postgres-stores.js";
@@ -116,6 +116,25 @@ describe("Google Chat installation ownership and dispatch", () => {
     expect(await routeGoogleChatWebhook(replacement, f.request(), f.deps)).toBe(f.id);
     const runtime = await resolveGoogleChatRuntime((await f.deps.getConnection(f.id))!, f.deps);
     expect((runtime!.config as any).credentials).toContain("replacement-test-key");
+  });
+  it("deleting a legacy source of the hosted project keeps every hosted space served", async () => {
+    vi.stubEnv("GOOGLE_CHAT_PROJECT_NUMBER", "123456789");
+    vi.stubEnv("GOOGLE_CHAT_CREDENTIALS", JSON.stringify({ client_email: "hosted-bot@example.test", private_key: "hosted-test-key" }));
+    try {
+      const f = await fixture();
+      // f.id was activated through the legacy source; this one by the hosted app.
+      const hostedId = await activateGoogleChatSpace(f.store, "hosted", f.third.id, "spaces/test-hosted-space");
+      await orgContext.run({ organizationId: f.owner.id }, () => f.manager.removeConnection(f.source.id));
+      expect(await f.deps.getConnection(f.source.id)).toBeNull();
+      for (const id of [f.id, hostedId]) {
+        const connection = (await f.deps.getConnection(id))!;
+        expect(connection.status).toBe("active");
+        const runtime = await resolveGoogleChatRuntime(connection, f.deps);
+        expect((runtime!.config as any).credentials).toContain("hosted-test-key");
+      }
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
   it("observes a real vault rotation that does not change the source row", async () => {
     const f = await fixture();

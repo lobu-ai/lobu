@@ -197,10 +197,14 @@ export async function primeBundledIntegrationConnectors(): Promise<
 			const provider = method?.provider ?? def.key;
 			// The Lobu App id (`provider_app_id`) is the GitHub App id when the
 			// connector declares an app_installation method with `appIdKey`, else the
-			// OAuth client id (slack/jira/linear). Read by the DECLARED env-var name
-			// — no hardcoded `process.env.GITHUB_APP_ID`/`JIRA_CLIENT_ID` literal.
+			// OAuth client id (slack/jira/linear), else the app id a provider-signed
+			// `verification` declares (a Google Cloud project number). Read by the
+			// DECLARED env-var name — no hardcoded `process.env.GITHUB_APP_ID`/`JIRA_CLIENT_ID` literal.
 			const appIdKey =
-				method?.appIdKey ?? method?.clientIdKey ?? oauth?.clientIdKey;
+				method?.appIdKey ??
+				method?.clientIdKey ??
+				oauth?.clientIdKey ??
+				webhookSchema.verification?.appIdKey;
 			const appId = appIdKey ? process.env[appIdKey] : undefined;
 			const webhookSecretKey = method?.webhookSecretKey;
 			// Cache the resolved method for synchronous wiring accessors.

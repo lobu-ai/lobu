@@ -168,6 +168,17 @@ export interface ChatPlatformDescriptor {
     deps: ChatRuntimeDeps,
     opts?: { skipTombstone?: boolean },
   ): Promise<void>;
+  /**
+   * Chat delivery for this platform's declared app-level webhook
+   * (`/api/v1/app-webhooks/:provider` with `deliveryKind: 'chat'`), called only
+   * after the generic engine verified the delivery. `deliver` hands the request
+   * to one hydrated connection's own adapter. Absent hook = no hosted app.
+   */
+  handleAppWebhook?(
+    request: Request,
+    deps: ChatRuntimeDeps,
+    deliver: (connectionId: string) => Promise<Response>,
+  ): Promise<Response>;
   /** Release what other rows still anchor to a BYO connection being deleted. */
   releaseDeletedConnection?(
     connection: { id: string; organizationId: string },
