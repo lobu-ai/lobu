@@ -14,7 +14,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 // The extension's own parser for a desktop bridge reply: the host must satisfy
 // exactly what the shipped extension reads.
-import { readNativePairResponse } from "../../../owletto/apps/chrome/panel-session.js";
+import {
+  readNativePairResponse,
+  refreshDesktopPanelSession,
+} from "../../../owletto/apps/chrome/panel-session.js";
 import {
   browserListCommand,
   browserRemoveCommand,
@@ -396,53 +399,96 @@ describe("native host pairing reply", () => {
     });
   });
 
-  test("with the login lapsed, pairing rotates the cached child", async () => {
+  test("with the login lapsed, pairing hands back the cached credential without rotating it", async () => {
     useBrowserRecord();
     await cacheChild("owl_pat_cached");
     spyOn(credentials, "getContextToken").mockResolvedValue(null);
-    const mint = spyOn(
-      deviceCredential,
-      "mintDeviceCredentialWithReauth"
-    ).mockResolvedValue({
-      workerId: RECORD.workerId,
-      workerApiToken: "owl_pat_rotated",
-      expiresAt: Date.now() + 86_400_000,
-    });
+    const mint = spyOn(deviceCredential, "mintDeviceCredentialWithReauth");
 
     const reply = await nativeHostReply(RECORD.name, { op: "pair" }, noLog);
 
-    expect(reply.access_token).toBe("owl_pat_rotated");
-    expect(mint.mock.calls[0]?.[0]).toMatchObject({
-      initialBearerIsChild: true,
-      options: { bearer: "owl_pat_cached" },
+    expect(readNativePairResponse(reply)).toEqual({
+      gatewayUrl: RECORD.gatewayOrigin,
+      workerId: RECORD.workerId,
+      accessToken: "owl_pat_cached",
+      sessionToken: null,
     });
+    expect(mint).not.toHaveBeenCalled();
   });
 
-  test("a login the gateway refuses falls back to the cached child", async () => {
+  test("a login the gateway refuses leaves the cached credential in place", async () => {
     useBrowserRecord();
     await cacheChild("owl_pat_cached");
     spyOn(credentials, "getContextToken").mockResolvedValue("old-login");
-    const mint = spyOn(deviceCredential, "mintDeviceCredentialWithReauth");
-    mint.mockRejectedValueOnce(
+    const mint = spyOn(
+      deviceCredential,
+      "mintDeviceCredentialWithReauth"
+    ).mockRejectedValue(
       new deviceCredential.DeviceMintError(
         "Could not authorize this device: insufficient_scope",
         403,
         "insufficient_scope"
       )
     );
-    mint.mockResolvedValueOnce({
-      workerId: RECORD.workerId,
-      workerApiToken: "owl_pat_rotated",
-      expiresAt: Date.now() + 86_400_000,
-    });
 
     const reply = await nativeHostReply(RECORD.name, { op: "pair" }, noLog);
 
-    expect(reply.access_token).toBe("owl_pat_rotated");
-    expect(mint.mock.calls[1]?.[0]).toMatchObject({
-      initialBearerIsChild: true,
-      options: { bearer: "owl_pat_cached" },
+    expect(reply.access_token).toBe("owl_pat_cached");
+    expect(mint).toHaveBeenCalledTimes(1);
+    expect(
+      await loadDeviceState(RECORD.context, "chrome-extension-browser-work")
+    ).toMatchObject({ workerApiToken: "owl_pat_cached" });
+  });
+
+  test("a failed side panel recovery keeps the extension's working token", async () => {
+    useBrowserRecord();
+    await cacheChild("owl_pat_cached");
+    spyOn(credentials, "getContextToken").mockResolvedValue(null);
+    // Every mint revokes the credential it replaces on the server.
+    const mint = spyOn(deviceCredential, "mintDeviceCredentialWithReauth");
+    const keys = {
+      refreshToken: "refresh",
+      workerId: "worker",
+      accessToken: "token",
+      pairedAt: "pairedAt",
+    };
+    const stored: Record<string, unknown> = { token: "owl_pat_cached" };
+    const storage = {
+      get: async () => ({ ...stored }),
+      set: async (values: Record<string, unknown>) => {
+        Object.assign(stored, values);
+      },
+    };
+
+    const refreshed = await refreshDesktopPanelSession({
+      storage,
+      keys,
+      gatewayBase: RECORD.gatewayOrigin,
+      handshake: () => nativeHostReply(RECORD.name, { op: "pair" }, noLog),
+      normalizeGatewayBase: (url: string) => url,
     });
+
+    expect(refreshed).toBe(false);
+    expect(stored.token).toBe("owl_pat_cached");
+    expect(mint).not.toHaveBeenCalled();
+  });
+
+  test("an expired cached credential needs a login", async () => {
+    useBrowserRecord();
+    await deviceCredential.persistDeviceCredential(
+      RECORD.context,
+      "chrome-extension-browser-work",
+      {
+        workerId: RECORD.workerId,
+        workerApiToken: "owl_pat_expired",
+        expiresAt: Date.now() - 1,
+      }
+    );
+    spyOn(credentials, "getContextToken").mockResolvedValue(null);
+
+    const reply = await nativeHostReply(RECORD.name, { op: "pair" }, noLog);
+
+    expect(String(reply.error)).toContain("lobu browser start work");
   });
 
   test("refuses a credential minted for another worker id", async () => {

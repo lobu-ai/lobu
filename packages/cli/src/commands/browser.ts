@@ -234,13 +234,8 @@ async function deviceBearers(record: BrowserRecord): Promise<string[]> {
     const login = await getContextToken(record.context);
     if (login) bearers.push(login);
   }
-  const cached = await loadDeviceState(
-    record.context,
-    credentialSlot(record.name)
-  );
-  if (cached?.workerId === record.workerId && cached.workerApiToken) {
-    bearers.push(cached.workerApiToken);
-  }
+  const live = await liveCredential(record);
+  if (live) bearers.push(live.workerApiToken);
   if (bearers.length === 0) {
     throw new Error(
       `Context "${record.context}" is not logged in. Run \`lobu login --context ${record.context}\`.`
@@ -274,13 +269,34 @@ async function findDevice(
   throw rejection;
 }
 
+/** The cached credential minted for this browser, while it is unexpired. */
+async function liveCredential(
+  record: BrowserRecord
+): Promise<MintedDeviceCredential | undefined> {
+  const cached = await loadDeviceState(
+    record.context,
+    credentialSlot(record.name)
+  );
+  return cached?.workerId === record.workerId &&
+    cached.workerApiToken &&
+    cached.expiresAt &&
+    cached.expiresAt > Date.now()
+    ? {
+        workerId: cached.workerId,
+        workerApiToken: cached.workerApiToken,
+        expiresAt: cached.expiresAt,
+      }
+    : undefined;
+}
+
 /**
- * Mint a fresh credential for this browser and persist it. The CLI login is
- * preferred: only a full-access login also gets the side panel's sign-in
- * session, which a device-only child credential cannot mint. Rotating the
- * cached child keeps the browser pairable after the login lapses.
+ * The device credential to hand this browser. A login mints a fresh one, and
+ * only a full-access login also gets the side panel's sign-in session. Without
+ * a usable login the unexpired cached credential is returned unchanged: minting
+ * from it would revoke it, and the extension keeps its current token when a
+ * reply carries no session, so a rotation would strand it on a revoked one.
  */
-async function mintForBrowser(
+async function credentialForBrowser(
   record: BrowserRecord,
   interactive: boolean
 ): Promise<MintedDeviceCredential> {
@@ -291,49 +307,45 @@ async function mintForBrowser(
       `Context "${record.context}" no longer points at ${record.gatewayOrigin}, where browser "${record.name}" is registered. Point it back, or run \`lobu browser rm ${record.name}\` and start the browser again.`
     );
   }
-  const slot = credentialSlot(record.name);
-  const cached = await loadDeviceState(record.context, slot);
-  const cachedChild =
-    cached?.workerId === record.workerId ? cached.workerApiToken : undefined;
+  const live = await liveCredential(record);
   const login = interactive
     ? await requireInstallationLogin(record.context)
     : ((await getContextToken(record.context)) ?? undefined);
-  const mint = (bearer: string, isChild: boolean) =>
-    mintDeviceCredentialWithReauth({
+  if (!login) {
+    if (live) return live;
+    throw new Error(
+      `Context "${record.context}" is not logged in. Run \`lobu browser start ${record.name}\` in a terminal.`
+    );
+  }
+
+  let minted: MintedDeviceCredential;
+  try {
+    minted = await mintDeviceCredentialWithReauth({
       contextName: record.context,
-      initialBearerIsChild: isChild,
-      initialChildExpiresAt: cached?.expiresAt,
+      initialBearerIsChild: false,
       interactiveReauth: interactive,
       options: {
         gatewayOrigin: record.gatewayOrigin,
-        bearer,
+        bearer: login,
         platform: PLATFORM,
         workerId: record.workerId,
         label: record.label,
       },
     });
-
-  let minted: MintedDeviceCredential;
-  if (login) {
-    try {
-      minted = await mint(login, false);
-    } catch (error) {
-      if (!cachedChild || !(error instanceof DeviceMintError)) throw error;
-      minted = await mint(cachedChild, true);
-    }
-  } else if (cachedChild) {
-    minted = await mint(cachedChild, true);
-  } else {
-    throw new Error(
-      `Context "${record.context}" is not logged in. Run \`lobu browser start ${record.name}\` in a terminal.`
-    );
+  } catch (error) {
+    if (live && error instanceof DeviceMintError) return live;
+    throw error;
   }
   if (minted.workerId !== record.workerId) {
     throw new Error(
       `The gateway registered this browser as "${minted.workerId}" instead of "${record.workerId}". Another device of yours already uses that id; remove it or pick a different browser name.`
     );
   }
-  await persistDeviceCredential(record.context, slot, minted);
+  await persistDeviceCredential(
+    record.context,
+    credentialSlot(record.name),
+    minted
+  );
   return minted;
 }
 
@@ -436,13 +448,8 @@ export async function browserStartCommand(
   // host later runs under Chrome with no terminal. Skipped while the cached
   // credential is live, because re-minting would revoke the one the extension
   // is using.
-  const cached = await loadDeviceState(record.context, credentialSlot(name));
-  if (
-    cached?.workerId !== record.workerId ||
-    !cached.expiresAt ||
-    cached.expiresAt <= Date.now()
-  ) {
-    await mintForBrowser(record, true);
+  if (!(await liveCredential(record))) {
+    await credentialForBrowser(record, true);
   }
 
   await mkdir(profileDir(name), { recursive: true });
@@ -607,7 +614,7 @@ export async function nativeHostReply(
   }
   try {
     const record = await requireRecord(name);
-    const minted = await mintForBrowser(record, false);
+    const minted = await credentialForBrowser(record, false);
     await log(
       `paired worker ${minted.workerId} ${minted.sessionToken ? "with" : "without"} a side panel session`
     );
