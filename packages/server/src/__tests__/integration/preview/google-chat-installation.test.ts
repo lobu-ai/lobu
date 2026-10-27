@@ -6,12 +6,15 @@ import { PostgresSecretStore } from "../../../lobu/stores/postgres-secret-store.
 import { orgContext } from "../../../lobu/stores/org-context.js";
 import { runtimeConnectionIdToSlug, upsertChatConnectionProjection } from "../../../lobu/stores/connections-projection.js";
 import { ChatInstanceManager } from "../../../gateway/connections/chat-instance-manager.js";
-import { acceptGoogleChatWebhook, activateGoogleChatSpace, googleChatInstallationId, resolveGoogleChatRuntime, revokeGoogleChatSpace, routeGoogleChatWebhook } from "../../../gateway/connections/platforms/gchat-installation.js";
+import { acceptGoogleChatWebhook, activateGoogleChatSpace, googleChatInstallationId, resetHostedGoogleChatAppForTests, resolveGoogleChatRuntime, revokeGoogleChatSpace, routeGoogleChatWebhook } from "../../../gateway/connections/platforms/gchat-installation.js";
 import { cleanupTestDatabase } from "../../setup/test-db.js";
 import { createTestOrganization } from "../../setup/test-fixtures.js";
 import type { StoredConnection } from "@lobu/core";
 
-beforeEach(async () => { await cleanupTestDatabase(); });
+beforeEach(async () => { resetHostedGoogleChatAppForTests(); await cleanupTestDatabase(); });
+
+// A space installed through a bring-your-own bot connection of its project.
+const byo = (source: StoredConnection) => ({ project: String(source.config.googleChatProjectNumber), source });
 
 async function fixture() {
   const owner = await createTestOrganization();
@@ -36,7 +39,7 @@ async function fixture() {
   manager.services = { getAppInstallationStore: () => store, getSecretStore: () => secrets };
   const deps = manager.runtimeDeps();
   const space = "spaces/test-team-space";
-  const id = await activateGoogleChatSpace(store, source, target.id, space);
+  const id = await activateGoogleChatSpace(store, byo(source), target.id, space);
   const connection = await deps.getConnection(id);
   const request = (spaceName = space) => new Request("https://gateway.test/api/v1/webhooks/test-google-source", {
     method: "POST", headers: { authorization: "Bearer not-verified-here" },
@@ -60,14 +63,14 @@ describe("Google Chat installation ownership and dispatch", () => {
   });
   it("repeated concurrent activation converges on one install and projection", async () => {
     const f = await fixture();
-    const ids = await Promise.all([1, 2, 3].map(() => activateGoogleChatSpace(f.store, f.source, f.target.id, f.space)));
+    const ids = await Promise.all([1, 2, 3].map(() => activateGoogleChatSpace(f.store, byo(f.source), f.target.id, f.space)));
     expect(ids).toEqual([f.id, f.id, f.id]);
     const installs = await f.store.listByProviderAndOrg("gchat", f.target.id);
     expect(installs.filter((row) => row.status === "active")).toHaveLength(1);
     const slug = runtimeConnectionIdToSlug(f.id);
     const rows = await f.sql`SELECT id FROM connections WHERE slug = ${slug} AND deleted_at IS NULL`;
     expect(rows).toHaveLength(1);
-    await expect(activateGoogleChatSpace(f.store, f.source, f.third.id, f.space)).rejects.toThrow();
+    await expect(activateGoogleChatSpace(f.store, byo(f.source), f.third.id, f.space)).rejects.toThrow();
   });
   it("routes only the installed space and preserves other private spaces", async () => {
     const f = await fixture();
@@ -96,7 +99,7 @@ describe("Google Chat installation ownership and dispatch", () => {
   });
   it("deleting the bot connection releases its spaces so re-adding the app claims them again", async () => {
     const f = await fixture();
-    const secondId = await activateGoogleChatSpace(f.store, f.source, f.third.id, "spaces/test-second-space");
+    const secondId = await activateGoogleChatSpace(f.store, byo(f.source), f.third.id, "spaces/test-second-space");
     await orgContext.run({ organizationId: f.owner.id }, () =>
       f.manager.removeConnection(f.source.id));
     expect(await f.deps.getConnection(f.source.id)).toBeNull();
@@ -112,7 +115,7 @@ describe("Google Chat installation ownership and dispatch", () => {
       method: "POST", body: JSON.stringify({ type: "ADDED_TO_SPACE", space: { name: f.space } }),
     });
     expect(await routeGoogleChatWebhook(replacement, readded, f.deps)).toBeUndefined();
-    expect(await activateGoogleChatSpace(f.store, replacement, f.target.id, f.space)).toBe(f.id);
+    expect(await activateGoogleChatSpace(f.store, byo(replacement), f.target.id, f.space)).toBe(f.id);
     expect(await routeGoogleChatWebhook(replacement, f.request(), f.deps)).toBe(f.id);
     const runtime = await resolveGoogleChatRuntime((await f.deps.getConnection(f.id))!, f.deps);
     expect((runtime!.config as any).credentials).toContain("replacement-test-key");
@@ -120,10 +123,11 @@ describe("Google Chat installation ownership and dispatch", () => {
   it("deleting a legacy source of the hosted project keeps every hosted space served", async () => {
     vi.stubEnv("GOOGLE_CHAT_PROJECT_NUMBER", "123456789");
     vi.stubEnv("GOOGLE_CHAT_CREDENTIALS", JSON.stringify({ client_email: "hosted-bot@example.test", private_key: "hosted-test-key" }));
+    resetHostedGoogleChatAppForTests();
     try {
       const f = await fixture();
       // f.id was activated through the legacy source; this one by the hosted app.
-      const hostedId = await activateGoogleChatSpace(f.store, "hosted", f.third.id, "spaces/test-hosted-space");
+      const hostedId = await activateGoogleChatSpace(f.store, { project: "123456789", source: null, credentials: "hosted-test-key" }, f.third.id, "spaces/test-hosted-space");
       await orgContext.run({ organizationId: f.owner.id }, () => f.manager.removeConnection(f.source.id));
       expect(await f.deps.getConnection(f.source.id)).toBeNull();
       for (const id of [f.id, hostedId]) {
@@ -169,7 +173,7 @@ describe("Google Chat installation ownership and dispatch", () => {
         return row;
       },
     };
-    await expect(activateGoogleChatSpace(revokedDuringActivation, f.source, f.target.id, f.space)).rejects.toThrow();
+    await expect(activateGoogleChatSpace(revokedDuringActivation, byo(f.source), f.target.id, f.space)).rejects.toThrow();
     await expect(resolveGoogleChatRuntime(f.connection, f.deps)).rejects.toThrow();
   });
   it("serializes projection activation against a concurrent installation revoke", async () => {
@@ -184,7 +188,7 @@ describe("Google Chat installation ownership and dispatch", () => {
         return row;
       },
     };
-    const activation = activateGoogleChatSpace(pausedStore, f.source, f.target.id, f.space)
+    const activation = activateGoogleChatSpace(pausedStore, byo(f.source), f.target.id, f.space)
       .then(() => null, (error: unknown) => error);
     const installId = await activated.promise;
     await f.sql.begin(async (tx) => {

@@ -295,14 +295,20 @@ async function verifyGoogleJwtWebhook(
 	} catch {
 		return false;
 	}
-	let audience: "app_id" | "endpoint_url" | undefined;
+	if (typeof issuer !== "string") return false;
+	// Pick the declared audience the issuer can sign for: a declared signer
+	// self-signs for the app id; Google's OIDC issuers sign for the endpoint.
+	const audience =
+		verification.audiences.includes("app_id") && signers.includes(issuer)
+			? "app_id"
+			: verification.audiences.includes("endpoint_url") &&
+					target.endpointUrl &&
+					GOOGLE_OIDC_ISSUERS.includes(issuer)
+				? "endpoint_url"
+				: null;
+	if (!audience) return false;
 	try {
-		if (
-			verification.audiences.includes("app_id") &&
-			typeof issuer === "string" &&
-			signers.includes(issuer)
-		) {
-			audience = "app_id";
+		if (audience === "app_id") {
 			await jwtVerify(
 				token,
 				googleKeySet(
@@ -312,33 +318,24 @@ async function verifyGoogleJwtWebhook(
 			);
 			return true;
 		}
-		if (
-			verification.audiences.includes("endpoint_url") &&
-			target.endpointUrl &&
-			typeof issuer === "string" &&
-			GOOGLE_OIDC_ISSUERS.includes(issuer)
-		) {
-			audience = "endpoint_url";
-			const { payload } = await jwtVerify(
-				token,
-				googleKeySet("https://www.googleapis.com/oauth2/v3/certs"),
-				{
-					issuer: GOOGLE_OIDC_ISSUERS,
-					audience: target.endpointUrl,
-					clockTolerance: GOOGLE_CLOCK_SKEW_SECONDS,
-				},
-			);
-			return (
-				payload.email_verified === true &&
-				typeof payload.email === "string" &&
-				signers.includes(payload.email)
-			);
-		}
+		const { payload } = await jwtVerify(
+			token,
+			googleKeySet("https://www.googleapis.com/oauth2/v3/certs"),
+			{
+				issuer: GOOGLE_OIDC_ISSUERS,
+				audience: target.endpointUrl,
+				clockTolerance: GOOGLE_CLOCK_SKEW_SECONDS,
+			},
+		);
+		return (
+			payload.email_verified === true &&
+			typeof payload.email === "string" &&
+			signers.includes(payload.email)
+		);
 	} catch (error) {
-		if (audience) logGoogleJwtRejection(audience, error);
+		logGoogleJwtRejection(audience, error);
 		return false;
 	}
-	return false;
 }
 
 /**
@@ -581,18 +578,19 @@ export function createAppWebhookRoutes(deps: AppWebhookRouterDeps): Hono {
 		//    missing — an app-webhook endpoint must never accept unverifiable
 		//    deliveries just because its secret went unconfigured. A provider-
 		//    signed token (declared `verification`) needs no secret.
-		const needsSecret = provider.requiresAppSecret !== false;
-		const appSecret = needsSecret
-			? await deps.resolveAppWebhookSecret(providerName)
-			: "";
-		if (needsSecret && !appSecret) {
-			routeLogger.warn(
-				{ provider: providerName },
-				"[app-webhook] no app webhook secret configured — rejecting delivery",
-			);
-			return json(401, { error: "Unauthorized" });
+		let appSecret = "";
+		if (provider.requiresAppSecret !== false) {
+			const secret = await deps.resolveAppWebhookSecret(providerName);
+			if (!secret) {
+				routeLogger.warn(
+					{ provider: providerName },
+					"[app-webhook] no app webhook secret configured — rejecting delivery",
+				);
+				return json(401, { error: "Unauthorized" });
+			}
+			appSecret = secret;
 		}
-		if (!(await provider.verify(rawBody, c.req.raw.headers, appSecret ?? ""))) {
+		if (!(await provider.verify(rawBody, c.req.raw.headers, appSecret))) {
 			routeLogger.warn(
 				{ provider: providerName },
 				"[app-webhook] signature verification failed — rejecting delivery",

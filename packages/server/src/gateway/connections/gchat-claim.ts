@@ -5,7 +5,7 @@ import { runtimeConnectionIdToSlug } from "../../lobu/stores/connections-project
 import { orgContext } from "../../lobu/stores/org-context.js";
 import { ClaimMoveBlockedError, type ClaimContinuation, type ClaimProvider } from "./connection-claim.js";
 import type { ConnectionSettings } from "./types.js";
-import { activateGoogleChatSpace, googleChatInstallationId, isHostedGoogleChatProject } from "./platforms/gchat-installation.js";
+import { activateGoogleChatSpace, googleChatInstallApp, googleChatInstallationId } from "./platforms/gchat-installation.js";
 
 interface PendingSpace {
   id: number;
@@ -33,35 +33,25 @@ export function googleChatClaimProvider(deps: {
     `;
     return row as PendingSpace ?? null;
   };
-  const sourceFor = async (pending: PendingSpace) => {
-    if (!pending.metadata.source_connection_id) return null;
-    const source = await orgContext.exit(() => deps.getConnection(pending.metadata.source_connection_id!));
-    if (!source || source.status !== "active" || source.platform !== "gchat" ||
-      source.organizationId !== pending.metadata.source_organization_id ||
-      source.config.googleChatProjectNumber !== pending.provider_app_id) return null;
-    return source;
-  };
-  const installerMatches = async (userId: string, pending: PendingSpace) => {
-    const accounts = await sql`SELECT "accountId" FROM account WHERE "userId" = ${userId} AND "providerId" = 'google'`;
-    return accounts.some((account) => `users/${account.accountId}` === pending.metadata.installer_id);
-  };
+  const appFor = (pending: PendingSpace) => googleChatInstallApp(pending.provider_app_id, pending.metadata,
+    (id) => orgContext.exit(() => deps.getConnection(id)));
   const authorize = async (userId: string, pending: PendingSpace) => {
-    // The hosted app has no tenant source: Google's verified addition plus the
-    // installer's own Google identity is the whole authority, as on Slack.
-    if (isHostedGoogleChatProject(pending.provider_app_id)) {
-      if (!await installerMatches(userId, pending)) return { status: "signin_required" as const, signinProvider: "google" };
+    const app = await appFor(pending);
+    if (!app) return { status: "not_authorized" as const, code: "source_unavailable" };
+    const accounts = await sql`SELECT "accountId" FROM account WHERE "userId" = ${userId} AND "providerId" = 'google'`;
+    if (!accounts.some((account) => `users/${account.accountId}` === pending.metadata.installer_id)) {
+      return { status: "signin_required" as const, signinProvider: "google" };
+    }
+    if (!app.source) {
+      // The hosted app has no tenant source: Google's verified addition plus
+      // the installer's own Google identity is the whole authority, as on Slack.
       if (!pending.metadata.verified_added) return { status: "not_authorized" as const, code: "unverified_installation" };
       return { status: "authorized" as const, subjectName: pending.metadata.space_name };
     }
-    const source = await sourceFor(pending);
-    if (!source) return { status: "not_authorized" as const, code: "source_unavailable" };
-    if (!await installerMatches(userId, pending)) {
-      return { status: "signin_required" as const, signinProvider: "google" };
-    }
-    const [membership] = await sql`SELECT role FROM member WHERE "organizationId" = ${source.organizationId!} AND "userId" = ${userId}`;
+    const [membership] = await sql`SELECT role FROM member WHERE "organizationId" = ${app.source.organizationId!} AND "userId" = ${userId}`;
     const ownsSource = membership?.role === "owner" || membership?.role === "admin";
     // Hosted access is explicit; an ordinary message is not installation proof.
-    if (!ownsSource && !((source.settings as ConnectionSettings).previewMode === true && pending.metadata.verified_added)) {
+    if (!ownsSource && !((app.source.settings as ConnectionSettings).previewMode === true && pending.metadata.verified_added)) {
       return { status: "not_authorized" as const, code: "not_admin" };
     }
     return { status: "authorized" as const, subjectName: pending.metadata.space_name };
@@ -83,13 +73,15 @@ export function googleChatClaimProvider(deps: {
     resolveExistingBinding: async (ref, userId) => {
       const pending = await read(ref);
       if (!pending || !pending.metadata.claimed || pending.metadata.removed || (await authorize(userId, pending)).status !== "authorized") return null;
+      const app = await appFor(pending);
+      if (!app) return null;
+      const sourceId = app.source?.id ?? null;
       const [row] = await sql`
         SELECT ai.organization_id, o.slug FROM app_installations ai JOIN organization o ON o.id = ai.organization_id
         JOIN member m ON m."organizationId" = o.id AND m."userId" = ${userId}
         WHERE ai.provider = 'gchat' AND ai.provider_instance = 'cloud' AND ai.status = 'active'
           AND ai.provider_app_id = ${pending.provider_app_id} AND ai.external_tenant_id = ${pending.external_tenant_id}
-          ${isHostedGoogleChatProject(pending.provider_app_id) ? sql`` : sql`AND ai.metadata->>'source_connection_id' = ${pending.metadata.source_connection_id ?? null}`}
-        LIMIT 1
+          AND (${sourceId}::text IS NULL OR ai.metadata->>'source_connection_id' = ${sourceId}) LIMIT 1
       `;
       return row ? { orgSlug: row.slug, continuation: continuation(pending, googleChatInstallationId(row.organization_id, pending.provider_app_id, pending.external_tenant_id)) } : null;
     },
@@ -98,11 +90,11 @@ export function googleChatClaimProvider(deps: {
       const [current] = await tx`SELECT status, metadata FROM app_installations WHERE id = ${pending.id} FOR UPDATE`;
       if (!current || current.status !== "pending" || current.metadata.removed) throw new Error("Google Chat setup link expired");
       if ((await authorize(userId, pending)).status !== "authorized") throw new Error("Google Chat installation authority changed");
-      const source = isHostedGoogleChatProject(pending.provider_app_id) ? "hosted" as const : await sourceFor(pending);
-      if (!source) throw new Error("Google Chat source is unavailable");
+      const app = await appFor(pending);
+      if (!app) throw new Error("Google Chat source is unavailable");
       let bindingId: string;
       try {
-        bindingId = await activateGoogleChatSpace(deps.store, source, organizationId, pending.external_tenant_id, confirmMove, userId);
+        bindingId = await activateGoogleChatSpace(deps.store, app, organizationId, pending.external_tenant_id, confirmMove, userId);
       } catch (error) {
         if (error instanceof CrossOrgTransferBlockedError) {
           const existing = await elsewhere(pending, organizationId);

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import type { StoredConnection } from "@lobu/core";
 import { orgContext, tryGetOrgId } from "../../../../lobu/stores/org-context.js";
 import { ChatInstanceManager } from "../../chat-instance-manager.js";
-import { googleChatInstallationId, resolveGoogleChatRuntime, routeGoogleChatWebhook } from "../gchat-installation.js";
+import { googleChatInstallationId, resetHostedGoogleChatAppForTests, resolveGoogleChatRuntime, routeGoogleChatWebhook } from "../gchat-installation.js";
 
 const project = "123456789";
 const space = "spaces/team-space";
@@ -126,6 +126,7 @@ describe("hosted Google Chat app runtime", () => {
     for (const [key, value] of [["GOOGLE_CHAT_PROJECT_NUMBER", saved.project], ["GOOGLE_CHAT_CREDENTIALS", saved.credentials]] as const) {
       if (value === undefined) delete process.env[key]; else process.env[key] = value;
     }
+    resetHostedGoogleChatAppForTests();
   });
   function hosted() {
     const f = fixture();
@@ -137,6 +138,7 @@ describe("hosted Google Chat app runtime", () => {
   test("resolves the hosted key gateway-side with the app-webhook audience", async () => {
     process.env.GOOGLE_CHAT_PROJECT_NUMBER = project;
     process.env.GOOGLE_CHAT_CREDENTIALS = JSON.stringify({ client_email: "hosted-bot@example.test", private_key: "hosted-key" });
+    resetHostedGoogleChatAppForTests();
     const f = hosted();
     const resolved = await f.resolve();
     expect((resolved!.config as any).credentials).toContain("hosted-key");
@@ -149,6 +151,7 @@ describe("hosted Google Chat app runtime", () => {
   test("fails closed when the hosted app is not configured", async () => {
     delete process.env.GOOGLE_CHAT_PROJECT_NUMBER;
     delete process.env.GOOGLE_CHAT_CREDENTIALS;
+    resetHostedGoogleChatAppForTests();
     await expect(hosted().resolve()).rejects.toThrow();
   });
 });

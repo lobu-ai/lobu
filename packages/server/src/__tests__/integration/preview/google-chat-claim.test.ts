@@ -14,7 +14,7 @@ import { createPostgresAgentConnectionStore } from "../../../lobu/stores/postgre
 import { runtimeConnectionIdToSlug, upsertChatConnectionProjection } from "../../../lobu/stores/connections-projection.js";
 import { googleChatClaimProvider } from "../../../gateway/connections/gchat-claim.js";
 import { claimPendingConnection, resolveClaimContext, type ClaimEngineDeps } from "../../../gateway/connections/connection-claim.js";
-import { acceptGoogleChatWebhook, googleChatInstallationId, parkGoogleChatSpace, resolveGoogleChatRuntime, routeGoogleChatWebhook } from "../../../gateway/connections/platforms/gchat-installation.js";
+import { acceptGoogleChatWebhook, googleChatInstallationId, googleChatTransportApp, parkGoogleChatSpace, resetHostedGoogleChatAppForTests, resolveGoogleChatRuntime, routeGoogleChatWebhook } from "../../../gateway/connections/platforms/gchat-installation.js";
 import { exportJWK, exportSPKI, generateKeyPair, SignJWT } from "jose";
 import type { ConnectorWebhookSchema } from "@lobu/connector-sdk";
 import GoogleChatConnector from "@lobu/connectors/gchat";
@@ -23,7 +23,7 @@ import { appWebhookUrl } from "../../../gateway/routes/public/app-webhook-url.js
 import { cleanupTestDatabase } from "../../setup/test-db.js";
 import { addUserToOrganization, createTestAgent, createTestOrganization, createTestUser } from "../../setup/test-fixtures.js";
 
-beforeEach(async () => { await cleanupTestDatabase(); });
+beforeEach(async () => { resetHostedGoogleChatAppForTests(); await cleanupTestDatabase(); });
 
 async function fixture() {
   const owner = await createTestOrganization({ slug: "test-source-org" });
@@ -54,7 +54,7 @@ async function fixture() {
     resolveOrgSlug: async (org) => { const [row] = await sql`SELECT slug FROM organization WHERE id = ${org}`; return row?.slug ?? null; },
   };
   const space = "spaces/test-team-space";
-  const ref = await parkGoogleChatSpace(source, space, "users/123456", "Test team space", true);
+  const ref = await parkGoogleChatSpace(googleChatTransportApp(source), space, "users/123456", "Test team space", true);
   const input = { userId: user.id, ref, organizationId: target.slug };
   const deps = { publicGatewayUrl: "https://gateway.test/lobu", getConnection: (id: string) => connections.getConnection(id), getAppInstallationStore: () => store, getSecretStore: () => { throw new Error("No secrets are needed to claim"); }, resolveSecrets: async (connection: StoredConnection) => connection.config };
   return { sql, owner, target, third, user, source, space, ref, provider, engine, input, connections, store, deps };
@@ -201,7 +201,7 @@ describe("Google Chat shared claim flow", () => {
 
   it("concurrent pending and repeated claims converge across database sessions", async () => {
     const f = await fixture();
-    const refs = await Promise.all([1, 2, 3].map(() => parkGoogleChatSpace(f.source, f.space, "users/123456", "Test team space", true)));
+    const refs = await Promise.all([1, 2, 3].map(() => parkGoogleChatSpace(googleChatTransportApp(f.source), f.space, "users/123456", "Test team space", true)));
     expect(refs).toEqual([f.ref, f.ref, f.ref]);
     const results = await Promise.all([1, 2, 3].map(() => claimPendingConnection(f.provider, f.engine, f.input)));
     expect(results.every((result) => result.status === "ok")).toBe(true);
@@ -230,9 +230,9 @@ describe("Google Chat shared claim flow", () => {
     const source = { ...f.source, settings: { ...f.source.settings, previewMode: true } };
     await f.sql.begin((tx) => upsertChatConnectionProjection(tx, (value) => f.sql.json(value as any), source, f.owner.id, "byo"));
     await f.sql`UPDATE member SET role = 'member' WHERE "userId" = ${f.user.id} AND "organizationId" = ${f.owner.id}`;
-    const ref = await parkGoogleChatSpace(source, "spaces/test-hosted-space", "users/123456", "Test hosted space", false);
+    const ref = await parkGoogleChatSpace(googleChatTransportApp(source), "spaces/test-hosted-space", "users/123456", "Test hosted space", false);
     expect(await resolveClaimContext(f.provider, f.engine, { ...f.input, ref })).toEqual({ status: "not_authorized", code: "not_admin" });
-    expect(await parkGoogleChatSpace(source, "spaces/test-hosted-space", "users/123456", "Test hosted space", true)).toBe(ref);
+    expect(await parkGoogleChatSpace(googleChatTransportApp(source), "spaces/test-hosted-space", "users/123456", "Test hosted space", true)).toBe(ref);
     expect(await resolveClaimContext(f.provider, f.engine, { ...f.input, ref })).toMatchObject({ status: "ready" });
   });
 
@@ -240,7 +240,7 @@ describe("Google Chat shared claim flow", () => {
     const f = await fixture();
     expect(await claimPendingConnection(f.provider, f.engine, { ...f.input, ref: "gchatclaim-00000000-0000-0000-0000-000000000000" })).toEqual({ status: "no_pending" });
     expect(await claimPendingConnection(f.provider, f.engine, { ...f.input, organizationId: "test-foreign-org" })).toEqual({ status: "not_member_of_org" });
-    const ref = await parkGoogleChatSpace(f.source, f.space, "users/123456", "Test team space", true);
+    const ref = await parkGoogleChatSpace(googleChatTransportApp(f.source), f.space, "users/123456", "Test team space", true);
     await acceptGoogleChatWebhook(f.source, new Request("https://gateway.test", { method: "POST", body: JSON.stringify({ type: "REMOVED_FROM_SPACE", space: { name: f.space } }) }), f.deps);
     expect(await claimPendingConnection(f.provider, f.engine, { ...f.input, ref })).toEqual({ status: "no_pending" });
   });
@@ -249,7 +249,7 @@ describe("Google Chat shared claim flow", () => {
     const f = await fixture();
     const first = await claimPendingConnection(f.provider, f.engine, f.input);
     if (first.status !== "ok") throw new Error(JSON.stringify(first));
-    const ref = await parkGoogleChatSpace(f.source, f.space, "users/123456", "Test team space", true);
+    const ref = await parkGoogleChatSpace(googleChatTransportApp(f.source), f.space, "users/123456", "Test team space", true);
     const move = { ...f.input, ref, organizationId: f.third.slug };
     expect(await claimPendingConnection(f.provider, f.engine, move)).toMatchObject({ status: "already_connected_elsewhere", existing: { orgSlug: f.target.slug } });
     expect(await claimPendingConnection(f.provider, f.engine, { ...move, confirmMove: true })).toMatchObject({ status: "ok", orgSlug: f.third.slug });
@@ -260,7 +260,7 @@ describe("Google Chat shared claim flow", () => {
     const f = await fixture();
     const first = await claimPendingConnection(f.provider, f.engine, f.input);
     if (first.status !== "ok") throw new Error(JSON.stringify(first));
-    const ref = await parkGoogleChatSpace(f.source, f.space, "users/123456", "Test team space", true);
+    const ref = await parkGoogleChatSpace(googleChatTransportApp(f.source), f.space, "users/123456", "Test team space", true);
     const installed = (await f.connections.getConnection(first.bindingId))!;
     await acceptGoogleChatWebhook(installed, new Request("https://gateway.test", { method: "POST", body: JSON.stringify({ type: "REMOVED_FROM_SPACE", space: { name: f.space } }) }), f.deps);
     expect(await claimPendingConnection(f.provider, f.engine, { ...f.input, ref })).toEqual({ status: "no_pending" });
@@ -292,6 +292,7 @@ function configurePlatform(project: string | null = PLATFORM_PROJECT): void {
   vi.stubEnv("GOOGLE_CHAT_CREDENTIALS", project
     ? JSON.stringify({ client_email: "platform-bot@example.test", private_key: PLATFORM_KEY })
     : undefined);
+  resetHostedGoogleChatAppForTests();
 }
 
 async function platformFixture(sourceProject = PLATFORM_PROJECT) {
