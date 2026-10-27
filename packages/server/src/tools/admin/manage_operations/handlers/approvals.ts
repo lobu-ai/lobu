@@ -21,7 +21,7 @@ import { validateOperationInput } from "../../../../operations/input-validation"
 import { insertEvent } from "../../../../utils/insert-event";
 import { recordEntityWriteDenial } from "../../../../utils/entity-write-denial-audit";
 import logger from "../../../../utils/logger";
-import { isAdminOrOwnerRole } from "../../../access-control";
+import { isAdminOrOwnerRole, workspaceScopeDenialMessage } from "../../../access-control";
 import { ENTITY_CHANGE_ACTION_KEYS, runDeciderUserIdSql } from "../../run-decider";
 import type { ToolContext } from "../../../registry";
 import {
@@ -949,7 +949,7 @@ async function requireApprovalAuthority(
 		return;
 	}
 	throw new Error(
-		`This operation (${action}) requires admin or owner access. Ask an organization owner to grant elevated access.`,
+		await workspaceScopeDenialMessage(ctx, `manage_operations.${action}`, "admin"),
 	);
 }
 

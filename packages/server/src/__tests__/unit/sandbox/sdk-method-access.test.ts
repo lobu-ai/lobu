@@ -59,7 +59,7 @@ describe("SDK access guidance", () => {
 		// visibility and reporting. `connections.test` / `feeds.trigger` /
 		// `authProfiles.test` are external but admin-ENFORCED, so an mcp:write
 		// caller was told "operate (mcp:write)", retried, and hit a hard
-		// "requires an MCP session with admin access."
+		// admin-scope denial.
 		expect(
 			effectiveSdkRequiredTier({ access: "external", enforcedTier: "admin" }),
 		).toBe("administer");

@@ -335,7 +335,7 @@ describe("access-model cross-check", () => {
 				// from `enforcedTier`. It must state the enforced tier exactly:
 				// omitting it on an admin-enforced method reported "operate
 				// (mcp:write)" and sent an mcp:write caller to retry straight into
-				// "requires an MCP session with admin access."; stating the wrong tier
+				// a hard admin-scope denial; stating the wrong tier
 				// is the same bug with extra confidence.
 				if (meta.enforcedTier !== runtimeTier) {
 					mismatches.push(

@@ -3,7 +3,7 @@
  *
  * Regression contract for the prod-readiness finding: an MCP session was told
  * an operation was "ready/executable" (list_available) and then DENIED at
- * execute with "requires an MCP session with admin access." Three properties
+ * execute with a hard admin-scope denial. Three properties
  * must hold:
  *
  *  1. `execute` is member-write, not owner-admin — a member (or an owner whose

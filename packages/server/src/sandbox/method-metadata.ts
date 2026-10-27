@@ -13,8 +13,8 @@ export type MethodAccess = "read" | "write" | "external" | "admin";
  * trigger the progressive mcp:admin OAuth challenge by calling it — but the
  * tier REPORTED to callers must match what the delegated `manage_*` action
  * actually enforces, or an admin-enforced method advertises "operate
- * (mcp:write)" and sends an mcp:write caller to retry into a hard
- * "requires an MCP session with admin access." dead end.
+ * (mcp:write)" and sends an mcp:write caller to retry into a hard admin-scope
+ * denial.
  *
  * So `external` must pair with the tier `getRequiredAccessLevel` returns for
  * its underlying action, and a plain tier must not carry a contradictory

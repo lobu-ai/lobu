@@ -100,7 +100,10 @@ export function scopeDenialMessage(input: AccessDenialInput): string {
     const standing = memberRole
       ? `Your role${inWorkspace} is ${memberRole}`
       : `You are not a member${ofWorkspace}`;
-    return `${subject} requires admin or owner access${inWorkspace}. ${standing}, and reconnecting this app cannot change that. Ask an owner${ofWorkspace} to do it, or to give you the admin role.`;
+    // A web session has no connection to reconnect; only a token caller might
+    // think a higher consent level would help.
+    const noReconnect = tokenType === 'session' ? '' : ', and reconnecting this app cannot change that';
+    return `${subject} requires admin or owner access${inWorkspace}. ${standing}${noReconnect}. Ask an owner${ofWorkspace} to do it, or to give you the admin role.`;
   }
 
   if (tokenType === 'pat') {

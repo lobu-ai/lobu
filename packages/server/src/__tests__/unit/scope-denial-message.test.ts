@@ -29,6 +29,20 @@ describe("scopeDenialMessage", () => {
 		);
 	});
 
+	it("does not mention reconnecting to a member in a web session", () => {
+		expect(
+			scopeDenialMessage({
+				subject: "manage_operations.approve",
+				requiredAccess: "admin",
+				memberRole: "member",
+				tokenType: "session",
+				workspace: "example-org",
+			}),
+		).toBe(
+			"manage_operations.approve requires admin or owner access in example-org. Your role in example-org is member. Ask an owner of example-org to do it, or to give you the admin role.",
+		);
+	});
+
 	it("sends a read-only member to 'Read and make changes' only", () => {
 		const message = scopeDenialMessage({
 			subject: "save_memory",
