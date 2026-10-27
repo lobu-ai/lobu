@@ -16,7 +16,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DbClient } from '../../../db/client';
 import type { Env } from '../../../index';
 import { insertEvent, lockEventDedupIdentity } from '../../../utils/insert-event';
+import * as feedPageCommit from '../../../connectors/feed-page-commit';
 import * as eventWriter from '../../../utils/insert-event';
+import * as inlineAttachments from '../../../utils/inline-attachments';
 import logger from '../../../utils/logger';
 import { streamContent } from '../../../worker-api';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
@@ -180,6 +182,61 @@ describe('feed page commit', () => {
     expect(insert.mock.calls[2][1]?.sql).not.toBe(insert.mock.calls[0][1]?.sql);
     expect(logged).not.toHaveBeenCalled();
     expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it('does not replay a page whose connection dropped after the page was written', async () => {
+    const { connectionId, feedId, runId } = await seed();
+    const error = Object.assign(new Error('write CONNECTION_CLOSED pooler.example.test:5432'), {
+      code: 'CONNECTION_CLOSED',
+    });
+    const realCommit = feedPageCommit.withFeedPageTransaction;
+    // The commit lands, then the socket reports a drop: the shape of a close
+    // during COMMIT.
+    const commit = vi.spyOn(feedPageCommit, 'withFeedPageTransaction')
+      .mockImplementationOnce(async (...args) => {
+        await realCommit(...args);
+        throw error;
+      });
+    const insert = vi.spyOn(eventWriter, 'insertEvent');
+    const cleanup = vi.spyOn(inlineAttachments, 'deleteMaterializedArtifacts');
+    const { ctx, result } = mockWorkerCtx({
+      run_id: runId, worker_id: WORKER_ID, checkpoint: { cursor: 'page-1' },
+      items: [item('first'), item('second')],
+    });
+
+    await streamContent(ctx);
+
+    expect(result().status).toBe(500);
+    // The page may be durable, so its artifacts must not be deleted.
+    expect(cleanup).not.toHaveBeenCalled();
+    expect(commit).toHaveBeenCalledTimes(1);
+    expect(insert).toHaveBeenCalledTimes(2);
+    expect(await currentOriginIds(connectionId)).toEqual(['first', 'second']);
+    expect(await feedCheckpoint(feedId)).toEqual({ cursor: 'page-1' });
+  });
+
+  it('logs and counts the page retry', async () => {
+    const { runId } = await seed();
+    const error = Object.assign(new Error('write CONNECTION_CLOSED pooler.example.test:5432'), {
+      code: 'CONNECTION_CLOSED',
+    });
+    const realInsert = eventWriter.insertEvent;
+    vi.spyOn(eventWriter, 'insertEvent')
+      .mockImplementationOnce(realInsert)
+      .mockRejectedValueOnce(error);
+    const warned = vi.spyOn(logger, 'warn');
+    const { ctx, result } = mockWorkerCtx({
+      run_id: runId, worker_id: WORKER_ID, checkpoint: { cursor: 'page-1' },
+      items: [item('first'), item('second')],
+    });
+
+    await streamContent(ctx);
+
+    expect(result().status).toBe(200);
+    expect(warned).toHaveBeenCalledWith(
+      expect.objectContaining({ op: 'stream.page', attempt: 1 }),
+      expect.stringContaining('retrying query on a fresh connection')
+    );
   });
 
   it.each([
