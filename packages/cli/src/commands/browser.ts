@@ -39,7 +39,11 @@ import {
   persistDeviceCredential,
   requireInstallationLogin,
 } from "./_lib/device-credential.js";
-import { fetchRemoteDevices, type RemoteDevice } from "./_lib/device-wizard.js";
+import {
+  DeviceListError,
+  fetchRemoteDevices,
+  type RemoteDevice,
+} from "./_lib/device-wizard.js";
 import {
   encodeNativeMessage,
   readNativeMessage,
@@ -219,29 +223,55 @@ async function contextStillTargets(record: BrowserRecord): Promise<boolean> {
   );
 }
 
-async function bearerFor(record: BrowserRecord): Promise<string> {
-  // The cached child credential is bound to the browser's own gateway, so it
-  // stays usable after the context moves; the login does not.
-  const token = (await contextStillTargets(record))
-    ? await getContextToken(record.context)
-    : null;
-  if (token) return token;
+/**
+ * Bearers for device requests, best first: the context's login, only while the
+ * context still points at this browser's gateway, then the browser's own child
+ * credential, which is bound to that gateway and outlives a lapsed login.
+ */
+async function deviceBearers(record: BrowserRecord): Promise<string[]> {
+  const bearers: string[] = [];
+  if (await contextStillTargets(record)) {
+    const login = await getContextToken(record.context);
+    if (login) bearers.push(login);
+  }
   const cached = await loadDeviceState(
     record.context,
     credentialSlot(record.name)
   );
-  if (cached?.workerApiToken) return cached.workerApiToken;
-  throw new Error(
-    `Context "${record.context}" is not logged in. Run \`lobu login --context ${record.context}\`.`
-  );
+  if (cached?.workerId === record.workerId && cached.workerApiToken) {
+    bearers.push(cached.workerApiToken);
+  }
+  if (bearers.length === 0) {
+    throw new Error(
+      `Context "${record.context}" is not logged in. Run \`lobu login --context ${record.context}\`.`
+    );
+  }
+  return bearers;
 }
 
+/**
+ * This browser's device, looked up with the first bearer the gateway accepts.
+ * Returns that bearer too, so follow-up requests use a credential that works.
+ */
 async function findDevice(
-  record: BrowserRecord,
-  bearer: string
-): Promise<RemoteDevice | null> {
-  const devices = await fetchRemoteDevices(record.gatewayOrigin, bearer);
-  return devices.find((device) => device.worker_id === record.workerId) ?? null;
+  record: BrowserRecord
+): Promise<{ device: RemoteDevice | null; bearer: string }> {
+  let rejection: unknown;
+  for (const bearer of await deviceBearers(record)) {
+    try {
+      const devices = await fetchRemoteDevices(record.gatewayOrigin, bearer);
+      const device =
+        devices.find((entry) => entry.worker_id === record.workerId) ?? null;
+      return { device, bearer };
+    } catch (error) {
+      const rejected =
+        error instanceof DeviceListError &&
+        (error.status === 401 || error.status === 403);
+      if (!rejected) throw error;
+      rejection = error;
+    }
+  }
+  throw rejection;
 }
 
 /**
@@ -353,7 +383,7 @@ async function waitForFirstPoll(
 ): Promise<RemoteDevice> {
   const deadline = Date.now() + PAIR_TIMEOUT_MS;
   for (;;) {
-    const device = await findDevice(record, await bearerFor(record));
+    const { device } = await findDevice(record);
     // A poll stamps app_version; minting the credential only touches
     // last_seen_at, so a fresh device is not online until it has polled.
     if (
@@ -424,7 +454,7 @@ export async function browserStartCommand(
 
   const pid = await runningPid(name);
   if (pid) {
-    const device = await findDevice(record, await bearerFor(record));
+    const { device } = await findDevice(record);
     console.log(
       `Browser "${name}" is already running (pid ${pid}, device ${device?.online ? "online" : "offline"}).`
     );
@@ -432,7 +462,7 @@ export async function browserStartCommand(
   }
 
   const executable = await resolveBrowserExecutable();
-  const previous = await findDevice(record, await bearerFor(record));
+  const { device: previous } = await findDevice(record);
   const child = spawn(
     executable,
     [
@@ -501,7 +531,7 @@ export async function browserListCommand(options: {
     if (!record) continue;
     let device: (typeof rows)[number]["device"] = "unknown";
     try {
-      const found = await findDevice(record, await bearerFor(record));
+      const { device: found } = await findDevice(record);
       device = found ? (found.online ? "online" : "offline") : "missing";
     } catch {
       // Offline gateway or lapsed login: show the browser anyway.
@@ -535,8 +565,7 @@ export async function browserRemoveCommand(rawName: string): Promise<void> {
   const record = await requireRecord(name);
   if (await runningPid(name)) await browserStopCommand(name);
 
-  const bearer = await bearerFor(record);
-  const device = await findDevice(record, bearer);
+  const { device, bearer } = await findDevice(record);
   if (device) {
     const url = `${record.gatewayOrigin}/api/me/devices/${encodeURIComponent(device.id)}`;
     const res = await fetchWithRetry(url, {

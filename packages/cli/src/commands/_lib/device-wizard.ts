@@ -163,6 +163,17 @@ export async function deviceWizard(
   return { workerId, source };
 }
 
+/** `GET /api/me/devices` failed; `status` is the gateway's HTTP status. */
+export class DeviceListError extends Error {
+  constructor(
+    message: string,
+    readonly status: number
+  ) {
+    super(message);
+    this.name = "DeviceListError";
+  }
+}
+
 export async function fetchRemoteDevices(
   gatewayOrigin: string,
   token: string
@@ -176,7 +187,7 @@ export async function fetchRemoteDevices(
   })) as { devices?: unknown } | undefined;
   if (!res.ok) {
     const { message } = extractApiError(parsed, res.status, res.statusText);
-    throw new Error(`Could not list devices: ${message}`);
+    throw new DeviceListError(`Could not list devices: ${message}`, res.status);
   }
   if (!Array.isArray(parsed?.devices)) {
     throw new Error(

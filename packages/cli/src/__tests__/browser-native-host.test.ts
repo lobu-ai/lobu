@@ -17,6 +17,7 @@ import { join } from "node:path";
 import { readNativePairResponse } from "../../../owletto/apps/chrome/panel-session.js";
 import {
   browserListCommand,
+  browserRemoveCommand,
   browserStartCommand,
   browserStopCommand,
   nativeHostReply,
@@ -230,6 +231,77 @@ describe("native host pairing reply", () => {
       expect((init.headers as Record<string, string>).Authorization).toBe(
         "Bearer owl_pat_child"
       );
+    });
+  });
+
+  describe("with a stored login the gateway rejects", () => {
+    async function useRevokedLogin() {
+      useBrowserRecord();
+      await deviceCredential.persistDeviceCredential(
+        RECORD.context,
+        "chrome-extension-browser-work",
+        {
+          workerId: RECORD.workerId,
+          workerApiToken: "owl_pat_child",
+          expiresAt: Date.now() + 86_400_000,
+        }
+      );
+      spyOn(credentials, "getContextToken").mockResolvedValue("revoked-login");
+      spyOn(console, "log").mockImplementation(() => undefined);
+      return spyOn(globalThis, "fetch").mockImplementation((async (
+        _url: string,
+        init: RequestInit
+      ) => {
+        const auth = (init.headers as Record<string, string>).Authorization;
+        if (auth !== "Bearer owl_pat_child") {
+          return Response.json({ error: "Unauthorized" }, { status: 401 });
+        }
+        return init.method === "DELETE"
+          ? new Response(null, { status: 204 })
+          : Response.json({
+              devices: [
+                {
+                  id: "device-1",
+                  worker_id: RECORD.workerId,
+                  platform: "chrome-extension",
+                  online: true,
+                },
+              ],
+            });
+      }) as typeof fetch);
+    }
+
+    const bearersSent = (fetch: { mock: { calls: unknown[][] } }) =>
+      fetch.mock.calls.map(
+        ([, init]) =>
+          `${(init as RequestInit).method ?? "GET"} ${((init as RequestInit).headers as Record<string, string>).Authorization}`
+      );
+
+    test("list falls back to the browser's child credential", async () => {
+      const fetch = await useRevokedLogin();
+      const log = spyOn(console, "log").mockImplementation(() => undefined);
+
+      await browserListCommand({ json: true });
+
+      expect(bearersSent(fetch)).toEqual([
+        "GET Bearer revoked-login",
+        "GET Bearer owl_pat_child",
+      ]);
+      expect(
+        JSON.parse(String(log.mock.calls[0]?.[0])).browsers[0].device
+      ).toBe("online");
+    });
+
+    test("rm deletes the device with the credential the gateway accepted", async () => {
+      const fetch = await useRevokedLogin();
+
+      await browserRemoveCommand(RECORD.name);
+
+      expect(bearersSent(fetch)).toEqual([
+        "GET Bearer revoked-login",
+        "GET Bearer owl_pat_child",
+        "DELETE Bearer owl_pat_child",
+      ]);
     });
   });
 
