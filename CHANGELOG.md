@@ -1,5 +1,93 @@
 # Changelog
 
+## [24.2.0](https://github.com/lobu-ai/lobu/compare/lobu-v24.1.1...lobu-v24.2.0) (2026-10-27)
+
+
+### Features
+
+* **agent-turn:** continue the conversation when an approved operation finishes ([#4500](https://github.com/lobu-ai/lobu/issues/4500)) ([e6b4e20](https://github.com/lobu-ai/lobu/commit/e6b4e203b297afc143f03911fe80b111fbf4d9e7))
+* **agent-turn:** retry an interrupted turn with a note of what already ran ([#4508](https://github.com/lobu-ai/lobu/issues/4508)) ([84efa85](https://github.com/lobu-ai/lobu/commit/84efa85522d9094412665488ebb9d19c5a3121e1))
+* **agent-turn:** run a turn's delivery writes once per input message ([#4498](https://github.com/lobu-ai/lobu/issues/4498)) ([0baa049](https://github.com/lobu-ai/lobu/commit/0baa0493a8291e19f643a84e77a1041324dc295a))
+* **audit:** PAT calls name their token in the feed ([#4313](https://github.com/lobu-ai/lobu/issues/4313)) ([579c984](https://github.com/lobu-ai/lobu/commit/579c984671a905418a5af3e79d7157f3b30c687d))
+* **automations:** capture source references for independent MCP polling ([#4435](https://github.com/lobu-ai/lobu/issues/4435)) ([9860dc3](https://github.com/lobu-ai/lobu/commit/9860dc384ae69425766e2566934c3c3cf25eb0d6))
+* **cli:** add --json to lobu context list ([#4511](https://github.com/lobu-ai/lobu/issues/4511)) ([58a6b46](https://github.com/lobu-ai/lobu/commit/58a6b462965d91d0d6ff975a19d3e9948977816e))
+* **cli:** named browsers paired as devices with lobu browser ([#4554](https://github.com/lobu-ai/lobu/issues/4554)) ([db3d86d](https://github.com/lobu-ai/lobu/commit/db3d86de7e8a75fecf671ca2bb021edf1ac9ca32))
+* **cli:** titled lobu call SDK/SQL tools, MCP transport for run credentials, login --client-name ([#4311](https://github.com/lobu-ai/lobu/issues/4311)) ([04411a5](https://github.com/lobu-ai/lobu/commit/04411a5a54d65858c8e33dd368f864dd9c96e226))
+* **connector-sdk:** let connectors use hover, select and dialog browser operations ([#4340](https://github.com/lobu-ai/lobu/issues/4340)) ([0432153](https://github.com/lobu-ai/lobu/commit/0432153e1646e0641d6488297426aea2bc45253a))
+* **connectors:** capture Reddit inbox notification references ([#4426](https://github.com/lobu-ai/lobu/issues/4426)) ([a6ba5f4](https://github.com/lobu-ai/lobu/commit/a6ba5f483bfbad1af2d112e8c165c568e8d02081))
+* **connectors:** capture X notification references ([#4428](https://github.com/lobu-ai/lobu/issues/4428)) ([b67e7b9](https://github.com/lobu-ai/lobu/commit/b67e7b9d0e421dc68d5e8393d510faf5406f749e))
+* **device-connectors:** apple.computer_use 0.3.0 window control and selectors ([#4336](https://github.com/lobu-ai/lobu/issues/4336)) ([7c622f8](https://github.com/lobu-ai/lobu/commit/7c622f8b00ece256373a65edfdbb5c03beb26c74))
+* **examples:** add deterministic incremental identity maintenance ([#4536](https://github.com/lobu-ai/lobu/issues/4536)) ([0b574c0](https://github.com/lobu-ai/lobu/commit/0b574c0e4c93f6ed50f254cb473c1397551b9ee4))
+* **examples:** support personal identity bootstrap over MCP ([#4526](https://github.com/lobu-ai/lobu/issues/4526)) ([149e9f3](https://github.com/lobu-ai/lobu/commit/149e9f36f5fb51cc03847ba2ddab9d2f40fb3ff1))
+* **gmail:** capture source references without downloading mail ([#4484](https://github.com/lobu-ai/lobu/issues/4484)) ([0f18587](https://github.com/lobu-ai/lobu/commit/0f18587adc12272c44363888411ca04681dc3e9d))
+* link stored and source-backed entity records ([#4540](https://github.com/lobu-ai/lobu/issues/4540)) ([7b7d212](https://github.com/lobu-ai/lobu/commit/7b7d2125725f40bff3b060a90838317eb5b32387))
+* **mcp:** add restricted directory publication endpoint ([#4546](https://github.com/lobu-ai/lobu/issues/4546)) ([8427016](https://github.com/lobu-ai/lobu/commit/842701645f7643ca671ac13d8baf1c0e493b337c))
+* **mcp:** ask connected agents to title every SDK and SQL call ([#4309](https://github.com/lobu-ai/lobu/issues/4309)) ([48c8448](https://github.com/lobu-ai/lobu/commit/48c84482129dda78c26c097256493b1ccf7740eb))
+* **operations:** return what a failed run reported with its failure ([#4343](https://github.com/lobu-ai/lobu/issues/4343)) ([f7d0f92](https://github.com/lobu-ai/lobu/commit/f7d0f92ecb636be2d251ae0574a95831af762fa4))
+* **personal:** add reusable deterministic identity bootstrap ([#4509](https://github.com/lobu-ai/lobu/issues/4509)) ([fd6e7f7](https://github.com/lobu-ai/lobu/commit/fd6e7f7fd0e5c949429e37190335b369f732784a))
+* **review:** route make review/review-fix through visible BB child threads ([#4545](https://github.com/lobu-ai/lobu/issues/4545)) ([25c3f13](https://github.com/lobu-ai/lobu/commit/25c3f131736d9e9dfb9156d1ad3f63b064fcb0e2))
+* **views:** add authorized ChatGPT workspace picker ([#4541](https://github.com/lobu-ai/lobu/issues/4541)) ([7899054](https://github.com/lobu-ai/lobu/commit/7899054795bfb84504a23034870d1242b992992e))
+
+
+### Bug Fixes
+
+* **agent-turn:** re-run a turn whose worker died before any tool ran ([#4494](https://github.com/lobu-ai/lobu/issues/4494)) ([ca30f06](https://github.com/lobu-ai/lobu/commit/ca30f0630167bc1a0b4422eb6b197b75aa45dad2))
+* **agent-turn:** run a repeated write tool call once per input message ([#4496](https://github.com/lobu-ai/lobu/issues/4496)) ([b103f1e](https://github.com/lobu-ai/lobu/commit/b103f1efb5bd5c3b3f4ba1a138ef4da38961c29f))
+* **auth:** enforce OAuth grant ownership across binding and use ([#4542](https://github.com/lobu-ai/lobu/issues/4542)) ([5aea3c8](https://github.com/lobu-ai/lobu/commit/5aea3c8c029e84e6d6b531cb55c327715040b858))
+* **chat:** drain acked inbound webhook messages before shutdown ([#4524](https://github.com/lobu-ai/lobu/issues/4524)) ([b57fc00](https://github.com/lobu-ai/lobu/commit/b57fc005949cc2f64e73cb9a45cd0c4557cd7416))
+* **chat:** scope Chat SDK inbound claims and thread locks per connection ([#4528](https://github.com/lobu-ai/lobu/issues/4528)) ([056b063](https://github.com/lobu-ai/lobu/commit/056b063834d307c53b2b9d9a81ce21dc157f376b))
+* **ci:** guard private repository landing with explicit checks ([#4454](https://github.com/lobu-ai/lobu/issues/4454)) ([36f010a](https://github.com/lobu-ai/lobu/commit/36f010ae1763027323eb7be8e55f9ae0620933fa))
+* **cli:** show an installed local connector as an update in the plan ([#4305](https://github.com/lobu-ai/lobu/issues/4305)) ([dbe08fb](https://github.com/lobu-ai/lobu/commit/dbe08fb12298a5343fd3c93cadeef98157f70a32))
+* **connector-worker:** wait for stdout close before reading the Codex queue acknowledgement ([#4370](https://github.com/lobu-ai/lobu/issues/4370)) ([01d42ef](https://github.com/lobu-ai/lobu/commit/01d42ef87f8a7072b00292c4f905c6dd8ff1a190))
+* **connectors:** fail closed on Gmail person admission ([#4463](https://github.com/lobu-ai/lobu/issues/4463)) ([f1021d3](https://github.com/lobu-ai/lobu/commit/f1021d3b0c7c0d2b9c8949c252d6b9c3aa82ef88))
+* **connectors:** recover profile-less OAuth connections via the pending_auth contract ([#4502](https://github.com/lobu-ai/lobu/issues/4502)) ([32ca749](https://github.com/lobu-ai/lobu/commit/32ca749d647ed6ae141ff1d56b64172266c091fd))
+* **connectors:** recover read-only source queries within deadline ([#4402](https://github.com/lobu-ai/lobu/issues/4402)) ([59ca45e](https://github.com/lobu-ai/lobu/commit/59ca45e21ef1d35913c042936e55fc796112df11))
+* **devices:** accept legacy Mac audio manifests ([#4400](https://github.com/lobu-ai/lobu/issues/4400)) ([399c4de](https://github.com/lobu-ai/lobu/commit/399c4de1bf7654866bf90ceee8f63c63a9ada383))
+* **embeddings:** run local inference on a worker thread so /health answers during batches ([#4364](https://github.com/lobu-ai/lobu/issues/4364)) ([899ccac](https://github.com/lobu-ai/lobu/commit/899ccac311ebbc620ac69957d7028576b1d48711))
+* **entities:** preserve encoded record keys across URLs ([#4385](https://github.com/lobu-ai/lobu/issues/4385)) ([ba23a76](https://github.com/lobu-ai/lobu/commit/ba23a76208437470481ac4c7afaad3fa8971c132))
+* **followups:** run a follow-up turn as the sender who asked for it ([#4503](https://github.com/lobu-ai/lobu/issues/4503)) ([867637c](https://github.com/lobu-ai/lobu/commit/867637c338a612e5282b46d9d1b8cf46bc32638b))
+* **knowledge:** replay committed superseding saves reliably ([#4460](https://github.com/lobu-ai/lobu/issues/4460)) ([f5ead98](https://github.com/lobu-ai/lobu/commit/f5ead98ab565f70907ea9227864bf3cc2f8c473a))
+* **mcp:** remove separate directory endpoint ([#4548](https://github.com/lobu-ai/lobu/issues/4548)) ([9431109](https://github.com/lobu-ai/lobu/commit/94311097517a71df0a740f8b8cd41325d5cdbe75))
+* **media:** report a dispatched provider failure as 500, not 502 ([#4530](https://github.com/lobu-ai/lobu/issues/4530)) ([2a6656a](https://github.com/lobu-ai/lobu/commit/2a6656a6ebfa71b9be02b1c6b90fd70117216ad2))
+* **migrations:** never cast a slug view pin to bigint in the attach-by-page migration [migration-pending-only-fix] ([#4537](https://github.com/lobu-ai/lobu/issues/4537)) ([5626ee3](https://github.com/lobu-ai/lobu/commit/5626ee3c4f5ce21dc960d4c7fd94ca62ee1c7ef2))
+* **oauth:** /oauth/userinfo returns 401 invalid_token for expired or revoked tokens ([#4529](https://github.com/lobu-ai/lobu/issues/4529)) ([65a6ca1](https://github.com/lobu-ai/lobu/commit/65a6ca1a00cfd4143bb752f90484a769d44b2d8a))
+* **operations:** validate declared JSON Schema 2020-12 ([#4507](https://github.com/lobu-ai/lobu/issues/4507)) ([12d2fdb](https://github.com/lobu-ai/lobu/commit/12d2fdb4704f43c730fe85a5de57bb35c9b8cff0))
+* preserve deferred entity approvals across completion failures ([#4467](https://github.com/lobu-ai/lobu/issues/4467)) ([8f3ebef](https://github.com/lobu-ai/lobu/commit/8f3ebefe751beb1899359a41d449203108db0ad0))
+* **sdk:** keep an uncaught SDK action failure's details in run_sdk results ([#4359](https://github.com/lobu-ai/lobu/issues/4359)) ([9f86b22](https://github.com/lobu-ai/lobu/commit/9f86b22d95d367673a598c8b3071827aa5fc5330))
+* **search:** reuse hybrid scoring work per event ([#4403](https://github.com/lobu-ai/lobu/issues/4403)) ([b40333d](https://github.com/lobu-ai/lobu/commit/b40333d7ee554b5ee400419b798314eccd6cb2f5))
+* **server:** cap content reads and cancel abandoned queries ([#4378](https://github.com/lobu-ai/lobu/issues/4378)) ([f5c0a0d](https://github.com/lobu-ai/lobu/commit/f5c0a0d0309494c2b4d59bfb77e72256e54d6606))
+* **server:** diagnose OAuth account binding refusals ([#4539](https://github.com/lobu-ai/lobu/issues/4539)) ([9e1de88](https://github.com/lobu-ai/lobu/commit/9e1de8850b5f11b656a136264b9af59bf0cb3da8))
+* **server:** do not replay a stream page after writePage returned ([#4368](https://github.com/lobu-ai/lobu/issues/4368)) ([0ba8d5f](https://github.com/lobu-ai/lobu/commit/0ba8d5f1ab26c511c650b17c39c82ba86a651f6f))
+* **server:** keep delegated edits from claiming human ownership ([#4486](https://github.com/lobu-ai/lobu/issues/4486)) ([4ef0e9e](https://github.com/lobu-ai/lobu/commit/4ef0e9e9b86712aecb8ee41ae792b32dba116858))
+* **server:** log and count poll heartbeat retries; cover a commit-then-drop write ([#4369](https://github.com/lobu-ai/lobu/issues/4369)) ([05d91c6](https://github.com/lobu-ai/lobu/commit/05d91c6eea781b60a5be70a92104761f5acceb0e))
+* **server:** log whitelisted failure context at the executeTool boundary ([#4399](https://github.com/lobu-ai/lobu/issues/4399)) ([f527b14](https://github.com/lobu-ai/lobu/commit/f527b1467d11eee3e3d672b0d0944dda70f69be0))
+* **server:** respect runless reference capture in Automation health ([#4544](https://github.com/lobu-ai/lobu/issues/4544)) ([3e97cf6](https://github.com/lobu-ai/lobu/commit/3e97cf65df3a05aa8bd21c1daedceb4fdb9dc21d))
+* **server:** retry dropped worker poll heartbeats once ([#4330](https://github.com/lobu-ai/lobu/issues/4330)) ([3e891af](https://github.com/lobu-ai/lobu/commit/3e891af3c5fabd4b3c1a21b29b2f7f230407c7fe))
+* **server:** retry stream inserts after connection drops ([#4327](https://github.com/lobu-ai/lobu/issues/4327)) ([a312d37](https://github.com/lobu-ai/lobu/commit/a312d372c60051bd4c5faf53eb623493e6e51eba))
+* **server:** run the readiness probe on its own connection ([#4355](https://github.com/lobu-ai/lobu/issues/4355)) ([3269380](https://github.com/lobu-ai/lobu/commit/3269380fb8166e06cf1caa50235afb85d862ed98))
+* **server:** scrub source-read payloads atomically in device-action wait timeout ([#4442](https://github.com/lobu-ai/lobu/issues/4442)) ([a67b870](https://github.com/lobu-ai/lobu/commit/a67b87087d1d2e6ec23286b81e85d6f4fff05f92))
+* **server:** scrub source-read payloads atomically on claim failure and policy veto ([#4444](https://github.com/lobu-ai/lobu/issues/4444)) ([0bd0c4e](https://github.com/lobu-ai/lobu/commit/0bd0c4e0991fa365c6300247cc60b5910937f441))
+* **server:** select pinned device contracts before preflight ([#4535](https://github.com/lobu-ai/lobu/issues/4535)) ([1b6f39d](https://github.com/lobu-ai/lobu/commit/1b6f39d65326ded8df0715ea1a478338f2140cd7))
+* **server:** single-flight MCP tool discovery per org/connector/connection ([#4397](https://github.com/lobu-ai/lobu/issues/4397)) ([a589ef2](https://github.com/lobu-ai/lobu/commit/a589ef2fcbe022c5371b710b613a13d2e832c34b))
+* **test:** release leaked System V segments when reaping embedded-Postgres clusters ([#4551](https://github.com/lobu-ai/lobu/issues/4551)) ([e4041ce](https://github.com/lobu-ai/lobu/commit/e4041cea5c565d03dfacd6c333ae129a9e1d21b0))
+* **ui-review:** retry transient GitHub 5xx on read API calls ([#4363](https://github.com/lobu-ai/lobu/issues/4363)) ([038c600](https://github.com/lobu-ai/lobu/commit/038c600c228dc556bd06a70a38e299a11ed31b6e))
+* **ui:** hide empty record details ([#4424](https://github.com/lobu-ai/lobu/issues/4424)) ([a5c9c92](https://github.com/lobu-ai/lobu/commit/a5c9c92517b76847d9aaebca4136edef37d93456))
+* **ui:** preserve public records when member views are unavailable ([#4458](https://github.com/lobu-ai/lobu/issues/4458)) ([5530ea8](https://github.com/lobu-ai/lobu/commit/5530ea854c0ae6012fc3412f76225caff6cfa926))
+* **ui:** release directed Market relationships and private runner setup ([#4456](https://github.com/lobu-ai/lobu/issues/4456)) ([e27427e](https://github.com/lobu-ai/lobu/commit/e27427ec292631bc5947b38bfc9bd9db81da6e51))
+* **ui:** restore graphs for live source records ([#4415](https://github.com/lobu-ai/lobu/issues/4415)) ([d1c88bc](https://github.com/lobu-ai/lobu/commit/d1c88bc31f890679d312cbb81c8986c8f6964395))
+* **ui:** ship public-page background-tab handoff ([#4553](https://github.com/lobu-ai/lobu/issues/4553)) ([fd3ac4e](https://github.com/lobu-ai/lobu/commit/fd3ac4ee825a8e8e1eb40386d0e77cf2c08a99e6))
+* **ui:** ship stable entity controls and Memory counts ([#4384](https://github.com/lobu-ai/lobu/issues/4384)) ([257528a](https://github.com/lobu-ai/lobu/commit/257528a976125ca7705b4f2f0d3d31895fcf125d))
+* **views:** a live read waits for its in-flight request instead of stacking ([#4331](https://github.com/lobu-ai/lobu/issues/4331)) ([560cfff](https://github.com/lobu-ai/lobu/commit/560cfffc2e3659210385b732a6e82f4dd552baee))
+* **views:** fast mismatch probe in resolveEventViewSubject skips heavy exact-id read ([#4322](https://github.com/lobu-ai/lobu/issues/4322)) ([cef6f45](https://github.com/lobu-ai/lobu/commit/cef6f45f19dede8b7ec5204295b02eb4c57c463c))
+* **website:** retain page evidence beside consent banners ([#4461](https://github.com/lobu-ai/lobu/issues/4461)) ([67492f1](https://github.com/lobu-ai/lobu/commit/67492f1afadbf34faa72db6f5ea09e87492c01b8))
+* **whatsapp:** recover source references across local history changes ([#4445](https://github.com/lobu-ai/lobu/issues/4445)) ([8e9bbd3](https://github.com/lobu-ai/lobu/commit/8e9bbd3fc2127191ce02cc4c6f8a29dcb13ea69f))
+* **worker:** drain in-flight runs on deploy and roll workers ([#4493](https://github.com/lobu-ai/lobu/issues/4493)) ([69d5c01](https://github.com/lobu-ai/lobu/commit/69d5c0161613918dfeb908988fdaadb034dcb3ea))
+
+
+### Performance Improvements
+
+* **ci:** remove duplicate image builds and filter push suites ([#4532](https://github.com/lobu-ai/lobu/issues/4532)) ([cfb7604](https://github.com/lobu-ai/lobu/commit/cfb760467e0bbd31e37a4318f452b1ef65b4a9f6))
+
 ## [24.1.1](https://github.com/lobu-ai/lobu/compare/lobu-v24.1.0...lobu-v24.1.1) (2026-10-21)
 
 
