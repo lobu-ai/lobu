@@ -51,6 +51,19 @@ if (fs.existsSync(providersSrc)) {
 // runtime connector source/manifests ship — internal tests are filtered out.
 copyDirIfExists("../connectors/src", "dist/connectors", excludeTests);
 
+// `lobu browser` loads the Lobu Chrome extension into Chrome for Testing. Ship
+// its runtime files with the manifest `key` intact: the key pins the extension
+// id that the gateway's CORS allow-list and the pairing host both expect.
+copyDirIfExists(
+  "../owletto/apps/chrome",
+  "dist/chrome-extension",
+  (srcPath) =>
+    excludeTests(srcPath) &&
+    !["README.md", "build-info.json"].includes(path.basename(srcPath)) &&
+    !srcPath.endsWith(".sh") &&
+    !path.basename(srcPath).startsWith(".")
+);
+
 // npm does not apply Bun patches. Publish the patched Ora package itself so
 // every spinner gets the zero-width terminal fix, including Node-only installs.
 copyDirIfExists(path.dirname(require.resolve("ora")), "dist/vendor/ora");

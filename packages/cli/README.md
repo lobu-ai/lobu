@@ -165,6 +165,34 @@ impersonate the native Mac app. The first upgraded run creates a new Worker
 device; reselect that Worker for any connection or Automation pinned to the old
 CLI-created Mac device.
 
+## Named browsers
+
+`lobu browser start <name>` opens a separate Chrome for Testing window with the
+Lobu extension loaded and connects it as its own `chrome-extension` device,
+authorized by your CLI login. Each name has its own profile, so sites you sign
+into stay signed in across restarts; nothing is copied from your own Chrome.
+
+```bash
+lobu browser start work          # first run downloads Chrome for Testing
+lobu browser list                # running state and device status
+lobu browser stop work
+lobu browser rm work             # removes the device, its credential, and the profile
+```
+
+`start` returns once the browser has connected. Pass `--context <name>` to
+choose the installation for a new browser and `--headless` on a machine without
+a display. Branded Google Chrome no longer loads extensions from the command
+line, so the CLI keeps a Stable Chrome for Testing build under
+`~/.cache/lobu/chrome-for-testing` and checks for a newer one at most once a
+day; set `LOBU_BROWSER_PATH` to use an existing Chromium or Chrome for Testing
+binary instead. macOS and Linux only.
+
+The extension pairs through the profile's own native messaging host, which
+mints a worker-bound device credential from your login; no token is passed on
+the command line. If the browser later loses its pairing, open the Lobu side
+panel in that window to pair again. To run browser operations on it, pin a
+`chrome` connection to the new device.
+
 ## License
 
 Apache-2.0

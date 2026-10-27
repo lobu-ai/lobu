@@ -132,6 +132,18 @@ const cacheRoot = join(destination, "runtime");
 const env = { ...process.env, LOBU_RUNTIME_CACHE_DIR: cacheRoot };
 run("node", [cliPath, "--help"], destination, env);
 run("node", [cliPath, "daemon", "--help"], destination, env);
+run("node", [cliPath, "browser", "--help"], destination, env);
+// `lobu browser` loads this copy of the extension; a build without the owletto
+// checkout would publish the command broken.
+assert.ok(
+  existsSync(
+    join(
+      destination,
+      "node_modules/@lobu/cli/dist/chrome-extension/manifest.json"
+    )
+  ),
+  "the packed CLI is missing the Lobu Chrome extension"
+);
 assert.equal(existsSync(cacheRoot), false, "help must not install any runtime");
 
 // Exercise the packed dependency under Node, outside workspace resolution and

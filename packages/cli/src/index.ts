@@ -121,6 +121,7 @@ Cloud:
   clients <subcmd>         List / revoke connected clients (MCP, messaging)
   call [tool]              Invoke a tool by name (run_sdk/query_sdk/query_sql need --arg title=)
   token [create]           Print or mint personal access tokens
+  browser <subcmd>         Named browsers paired as devices (start, stop, list, rm)
 
 Memory:
   memory run [tool]        Invoke a memory MCP tool
@@ -1180,6 +1181,63 @@ Memory:
     .action(async (options) => {
       const { daemonCommand } = await loadDeviceCommand("daemon");
       await daemonCommand({ ...options, cliVersion: version });
+    });
+
+  // ─── browser ────────────────────────────────────────────────────────
+  const browser = program
+    .command("browser")
+    .description("Run named Chrome browsers paired to Lobu as devices");
+
+  browser
+    .command("start <name>")
+    .description(
+      "Open a named browser and connect it as a device (downloads Chrome for Testing on first use)"
+    )
+    .option("-c, --context <name>", "Use a named context for a new browser")
+    .option("--headless", "Run without a window (servers without a display)")
+    .action(
+      async (
+        name: string,
+        options: { context?: string; headless?: boolean }
+      ) => {
+        const { browserStartCommand } = await import("./commands/browser.js");
+        await browserStartCommand(name, options);
+      }
+    );
+
+  browser
+    .command("stop <name>")
+    .description("Close a named browser")
+    .action(async (name: string) => {
+      const { browserStopCommand } = await import("./commands/browser.js");
+      await browserStopCommand(name);
+    });
+
+  browser
+    .command("list")
+    .description("List named browsers and whether their devices are online")
+    .option("--json", "Print JSON")
+    .action(async (options: { json?: boolean }) => {
+      const { browserListCommand } = await import("./commands/browser.js");
+      await browserListCommand(options);
+    });
+
+  browser
+    .command("rm <name>")
+    .description("Remove a named browser, its device, and its profile")
+    .action(async (name: string) => {
+      const { browserRemoveCommand } = await import("./commands/browser.js");
+      await browserRemoveCommand(name);
+    });
+
+  browser
+    .command("native-host <name>", { hidden: true })
+    .description("Pair the Lobu extension in a named browser (run by Chrome)")
+    .action(async (name: string) => {
+      const { browserNativeHostCommand } = await import(
+        "./commands/browser.js"
+      );
+      await browserNativeHostCommand(name);
     });
 
   program
