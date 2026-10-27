@@ -3,9 +3,10 @@
  *
  * Killed test runs (SIGKILL / timeout / OOM / ENOSPC / `pkill`) skip teardown
  * and leak their `lobu-test-pg-*` data dir (~150-400 MB) to tmp; a session of
- * them once filled 65 GB. `startEmbeddedBackend()` calls this before creating
- * its first cluster in each test process, so old leaks are reclaimed by a later
- * run.
+ * them once filled 65 GB. They also leak the postmaster's System V shared-memory
+ * segment, which can exhaust macOS's default 32 slots. `startEmbeddedBackend()`
+ * calls this before creating its first cluster in each test process, so old
+ * leaks are reclaimed by a later run.
  *
  * Deliberately imports ONLY node:fs/path/child_process — no `embedded-postgres`
  * — so the no-database unit suite can import and test it without pulling the
@@ -31,6 +32,73 @@ function postmasterPid(dir: string): number | null {
     return null; // no pid file → cleanly stopped or never started
   }
   return Number.isInteger(pid) && pid > 0 ? pid : null;
+}
+
+/**
+ * System V segment recorded in `dir`'s postmaster.pid: line 7
+ * (LOCK_FILE_LINE_SHMEM_KEY) holds `<key> <shmid>` in decimal.
+ */
+function recordedSegment(dir: string): { key: number; id: number } | null {
+  let line: string | undefined;
+  try {
+    line = readFileSync(join(dir, 'postmaster.pid'), 'utf8').split('\n')[6];
+  } catch {
+    return null;
+  }
+  const fields = (line ?? '').split(' ').filter(Boolean);
+  if (fields.length !== 2) return null;
+  // PostgreSQL prints signed key_t as unsigned long, potentially sign-extended
+  // to 64 bits. ipcs prints the original 32-bit key; Number would lose bits.
+  let key: number;
+  try {
+    key = Number(BigInt.asUintN(32, BigInt(fields[0])));
+  } catch {
+    return null; // not a decimal integer
+  }
+  const id = Number(fields[1]);
+  // Key 0 is IPC_PRIVATE, which PostgreSQL never records.
+  return key > 0 && Number.isSafeInteger(id) && id >= 0 ? { key, id } : null;
+}
+
+/**
+ * Release the System V shared-memory segment a dead postmaster recorded.
+ *
+ * A killed postmaster leaves its segment behind, and deleting the data dir
+ * deletes the only record of it, so leaks accumulate until `shmget` fails with
+ * "No space left on device". Require the recorded ID and key and no remaining
+ * attachments: backends can outlive a dead postmaster. Return false on an
+ * attached segment or a failed inspection/removal so its pid file survives for
+ * the next reap. A missing segment or an ID reused under another key is safe.
+ */
+function releaseRecordedSegment(dir: string): boolean {
+  const segment = recordedSegment(dir);
+  if (!segment) return true;
+  const pid = postmasterPid(dir);
+  if (pid === null || pidIsLive(pid)) return false;
+  try {
+    const listing = spawnSync('ipcs', process.platform === 'darwin' ? ['-m', '-o'] : ['-m'], {
+      encoding: 'utf8', timeout: 1_000, env: { ...process.env, LC_ALL: 'C' },
+    });
+    if (listing.status !== 0 || typeof listing.stdout !== 'string') return false;
+    const rows = listing.stdout.split('\n').map((row) => row.replaceAll('\t', ' ').split(' ').filter(Boolean));
+    const headerIndex = rows.findIndex((row) => {
+      const columns = row.map((field) => field.toLowerCase());
+      return columns.includes('key') && columns.includes('nattch') &&
+        (columns.includes('id') || columns.includes('shmid'));
+    });
+    if (headerIndex < 0) return false;
+    const columns = rows[headerIndex].map((field) => field.toLowerCase());
+    const idColumn = columns.includes('shmid') ? columns.indexOf('shmid') : columns.indexOf('id');
+    const keyColumn = columns.indexOf('key');
+    const id = String(segment.id);
+    const row = rows.slice(headerIndex + 1).find((fields) =>
+      fields[idColumn] === id && Number(fields[keyColumn]) === segment.key);
+    if (!row) return true;
+    if (row[columns.indexOf('nattch')] !== '0') return false;
+    return spawnSync('ipcrm', ['-m', id], { timeout: 1_000 }).status === 0;
+  } catch {
+    return false;
+  }
 }
 
 /** True if `pid` is a live process, treating EPERM (not ours) as live. */
@@ -198,9 +266,14 @@ export function reapStaleClustersIn(dir: string, now: number, staleMs: number): 
         if (started === null || now - started <= staleMs) continue; // unknown/young → protect
         if (!stopOrphanedPostmaster(pid, path)) continue; // unconfirmed or still up
       } else if (now - statSync(path).mtimeMs <= staleMs) {
-        continue; // no live owner, but too young — maybe a run just starting
+        // A detached segment can be freed before the directory ages out.
+        releaseRecordedSegment(path);
+        continue; // too young — maybe a run just starting
       }
 
+      // A SIGKILLed orphan never released its segment, and the pid file that
+      // names it is about to be deleted.
+      if (!releaseRecordedSegment(path)) continue;
       rmSync(path, { recursive: true, force: true });
       removed++;
     } catch {
