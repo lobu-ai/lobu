@@ -27,6 +27,7 @@ import { parseApplyId } from '../utils/apply-context';
 import { assertDeploymentsNotPaused } from '../utils/deployment-pause';
 import { asReadTimeout } from '../utils/bounded-read';
 import { ToolNotRegisteredError, ToolUserError } from '../utils/errors';
+import { logToolCallFailure } from './tool-error-log';
 import { getConfiguredPublicOrigin } from '../utils/public-origin';
 import { enforcePublicReadLimit, getClientIP } from '../utils/rate-limiter';
 import { enforceRoleScopeAccess, requireWorkspaceContext } from './access-control';
@@ -465,6 +466,12 @@ export async function executeTool(
     if (error instanceof ToolError || error instanceof ToolUserError) {
       error.callId = callId;
     }
+    logToolCallFailure({
+      error,
+      toolName,
+      callId,
+      durationMs: Date.now() - startTime,
+    });
     await recordToolInvocationAudit({
       toolName,
       args,
