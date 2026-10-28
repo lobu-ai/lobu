@@ -416,6 +416,7 @@
         "cron-parser": "^5.6.1",
         "hono": "^4.10.4",
         "hono-pino": "^0.10.3",
+        "jose": "^6.2.3",
         "kysely": "^0.28.0",
         "kysely-postgres-js": "^2.0.0",
         "mdast-util-gfm": "^3.1.0",

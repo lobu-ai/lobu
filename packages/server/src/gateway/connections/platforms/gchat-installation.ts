@@ -12,29 +12,120 @@ import {
 } from "../../../lobu/stores/connections-projection.js";
 import type { AppInstallationStore } from "../../../lobu/stores/app-installation-store.js";
 import { lockOrganizationForRelationshipClaims } from "../../../utils/relationship-claims.js";
+import { appWebhookUrl } from "../../routes/public/app-webhook-url.js";
 import { googleChatEventSpace, GoogleChatScopeError } from "./gchat-scope.js";
 import type { ChatRuntimeConfig, ChatRuntimeDeps } from "./types.js";
 
 const PREFIX = "gchatinst-";
 const PROVIDER = "gchat";
 
-/** Only called after the Chat SDK has authenticated this provider delivery. */
-export async function parkGoogleChatSpace(source: StoredConnection, space: string, installer: string, label: string, added: boolean): Promise<string> {
-  if (!source.organizationId || !/^users\/\d+$/.test(installer)) throw new Error("Google Chat installer identity is missing");
+/**
+ * The Google Chat app a space belongs to, decided once where a delivery, setup
+ * reference or install enters, then passed down. A BYO app is served by its
+ * `source` bot connection and reaches only rows naming that source. The app
+ * Lobu hosts names no source: its key stays gateway-side, never projected or
+ * handed to a worker, and it serves its project through any transport.
+ */
+export type GoogleChatApp =
+  | { project: string; source: StoredConnection }
+  | { project: string; source: null; credentials: string };
+
+let hostedApp: GoogleChatApp | null | undefined;
+
+/**
+ * The hosted app, from the env names `@chat-adapter/gchat` already documents.
+ * Null when this deployment hosts none: every hosted path then fails closed.
+ */
+function hostedGoogleChatApp(): GoogleChatApp | null {
+  if (hostedApp === undefined) {
+    const project = process.env.GOOGLE_CHAT_PROJECT_NUMBER?.trim();
+    const credentials = process.env.GOOGLE_CHAT_CREDENTIALS?.trim();
+    hostedApp = project && /^\d+$/.test(project) && credentials ? { project, source: null, credentials } : null;
+  }
+  return hostedApp;
+}
+
+/** Test-only: re-read the hosted app's env after a test changes it. */
+export function resetHostedGoogleChatAppForTests(): void {
+  hostedApp = undefined;
+}
+
+/** A BYO transport serves its own project, unless that project is the hosted app's. */
+export function googleChatTransportApp(transport: StoredConnection): GoogleChatApp {
+  const project = String(transport.config.googleChatProjectNumber);
+  const hosted = hostedGoogleChatApp();
+  return hosted?.project === project ? hosted : { project, source: transport };
+}
+
+/**
+ * The app behind an install or setup reference: the hosted app owns its
+ * project outright; any other project needs the BYO source the row names,
+ * still active and still serving that project.
+ */
+export async function googleChatInstallApp(
+  project: string,
+  metadata: { source_connection_id?: unknown; source_organization_id?: unknown },
+  getConnection: (id: string) => Promise<StoredConnection | null>,
+): Promise<GoogleChatApp | null> {
+  const hosted = hostedGoogleChatApp();
+  if (hosted?.project === project) return hosted;
+  const sourceId = metadata.source_connection_id;
+  if (typeof sourceId !== "string" || sourceId.startsWith(PREFIX)) return null;
+  const source = await getConnection(sourceId);
+  if (!source || source.status !== "active" || source.platform !== PROVIDER || !source.organizationId ||
+    source.organizationId !== metadata.source_organization_id ||
+    source.config.googleChatProjectNumber !== project) return null;
+  return { project, source };
+}
+
+/** The source fields an install or setup reference records; the hosted app records none. */
+function sourceMetadata(app: GoogleChatApp) {
+  return app.source ? { source_connection_id: app.source.id, source_organization_id: app.source.organizationId } : {};
+}
+
+/**
+ * Park an unclaimed space behind a setup reference. Only called after Google's
+ * token was verified. Google proves who added the app on ADDED_TO_SPACE. For
+ * the hosted app a 1:1 bot DM is proof too (its only human is the installer),
+ * and a named-space message inherits the installer of that space's latest
+ * verified addition, or stays unverified (claimable by nobody).
+ * A pending reference never expires: it is not a bearer secret, because a claim
+ * still needs the claimant's linked Google account to be the verified installer
+ * (`gchat-claim.ts`), so an old link stays usable for the person who added the app.
+ */
+export async function parkGoogleChatSpace(app: GoogleChatApp, space: string, sender: string, label: string, added: boolean, direct = false): Promise<string> {
+  if ((app.source && !app.source.organizationId) || !/^users\/\d+$/.test(sender)) throw new Error("Google Chat installer identity is missing");
+  const sourceId = app.source?.id ?? null;
   const sql = getDb();
   return sql.begin(async (tx) => {
-    // Reuse the owner's row as a durable serialization point for pending refs.
-    await tx`SELECT id FROM organization WHERE id = ${source.organizationId!} FOR UPDATE`;
+    let installer = sender;
+    let verified = added;
+    if (app.source) {
+      // Reuse the owner's row as a durable serialization point for pending refs.
+      await tx`SELECT id FROM organization WHERE id = ${app.source.organizationId!} FOR UPDATE`;
+    } else {
+      // No owner org exists to lock: serialize on the provider tenant itself.
+      await tx.unsafe("SELECT pg_advisory_xact_lock(hashtext($1))", [`gchat-park:${app.project}:${space}`]);
+      const [covering] = added || direct ? [] : await tx`
+        SELECT metadata FROM app_installations WHERE provider = 'gchat' AND provider_instance = 'cloud'
+          AND provider_app_id = ${app.project} AND external_tenant_id = ${space}
+          AND metadata->>'verified_added' = 'true' AND metadata->>'installer_id' IS NOT NULL
+          AND metadata->>'removed' IS DISTINCT FROM 'true'
+        ORDER BY updated_at DESC, id DESC LIMIT 1
+      `;
+      if (covering) installer = covering.metadata.installer_id;
+      verified = added || direct || !!covering;
+    }
     const [pending] = await tx`
       SELECT metadata FROM app_installations WHERE provider = 'gchat' AND provider_instance = 'cloud'
-        AND provider_app_id = ${source.config.googleChatProjectNumber} AND external_tenant_id = ${space}
-        AND status = 'pending' AND metadata->>'source_connection_id' = ${source.id}
+        AND provider_app_id = ${app.project} AND external_tenant_id = ${space}
+        AND status = 'pending' AND (${sourceId}::text IS NULL OR metadata->>'source_connection_id' = ${sourceId})
         AND metadata->>'installer_id' = ${installer}
         AND metadata->>'claimed' IS DISTINCT FROM 'true' AND metadata->>'removed' IS DISTINCT FROM 'true'
-        AND updated_at > now() - interval '24 hours' LIMIT 1
+      ORDER BY updated_at DESC, id DESC LIMIT 1
     `;
     if (pending) {
-      if (added && !pending.metadata.verified_added) {
+      if (verified && !pending.metadata.verified_added) {
         await tx`UPDATE app_installations SET metadata = metadata || '{"verified_added":true}'::jsonb, updated_at = now()
           WHERE provider = 'gchat' AND metadata->>'external_id' = ${pending.metadata.external_id}`;
       }
@@ -43,15 +134,13 @@ export async function parkGoogleChatSpace(source: StoredConnection, space: strin
     const ref = `gchatclaim-${randomUUID()}`;
     await tx`
       INSERT INTO app_installations (provider, provider_instance, provider_app_id, external_tenant_id, status, metadata)
-      VALUES ('gchat', 'cloud', ${source.config.googleChatProjectNumber}, ${space}, 'pending', ${sql.json({
-        external_id: ref, source_connection_id: source.id, source_organization_id: source.organizationId,
-        installer_id: installer, space_name: label, verified_added: added,
+      VALUES ('gchat', 'cloud', ${app.project}, ${space}, 'pending', ${sql.json({
+        external_id: ref, ...sourceMetadata(app), installer_id: installer, space_name: label, verified_added: verified,
       })})
     `;
     return ref;
   });
 }
-
 
 /** Both projection and lookup use the same server-owned namespace. */
 export function googleChatInstallationId(org: string, project: string, space: string): string {
@@ -61,15 +150,15 @@ export function googleChatInstallationId(org: string, project: string, space: st
 /** The caller must verify the installer and chosen org before activation. */
 export async function activateGoogleChatSpace(
   store: AppInstallationStore,
-  source: StoredConnection,
+  app: GoogleChatApp,
   organizationId: string,
   spaceName: string,
   confirmMove = false,
   createdBy?: string,
 ): Promise<string> {
-  const project = (source.config as any).googleChatProjectNumber;
-  if (source.platform !== PROVIDER || source.status !== "active" || !source.organizationId ||
-    !/^\d+$/.test(project) || !/^spaces\/[\w-]+$/.test(spaceName) || source.id.startsWith(PREFIX)) {
+  const { project, source } = app;
+  if ((source && (source.platform !== PROVIDER || source.status !== "active" || !source.organizationId ||
+    source.id.startsWith(PREFIX))) || !/^\d+$/.test(project) || !/^spaces\/[\w-]+$/.test(spaceName)) {
     throw new GoogleChatScopeError();
   }
   const id = googleChatInstallationId(organizationId, project, spaceName);
@@ -77,7 +166,7 @@ export async function activateGoogleChatSpace(
     provider: PROVIDER, providerInstance: "cloud", providerAppId: project,
     externalTenantId: spaceName, organizationId, blockCrossOrgTransfer: !confirmMove,
     revokeConnectionsOnTransfer: { errorMessage: "Google Chat space moved to another organization" },
-    metadata: { external_id: id, source_connection_id: source.id, source_organization_id: source.organizationId },
+    metadata: { external_id: id, ...sourceMetadata(app) },
   });
   const projection: StoredConnection = {
     id, organizationId, createdBy, platform: PROVIDER, status: "active",
@@ -105,32 +194,42 @@ export async function activateGoogleChatSpace(
   return id;
 }
 
-export async function resolveGoogleChatRuntime(
-  connection: StoredConnection,
-  deps: ChatRuntimeDeps,
-): Promise<ChatRuntimeConfig | undefined> {
-  if (!connection.id.startsWith(PREFIX)) return undefined;
+/** The install behind a `gchatinst-` projection and its app, or a scope error. */
+async function resolveGoogleChatInstall(connection: StoredConnection, deps: ChatRuntimeDeps) {
   const install = await deps.getAppInstallationStore().resolveByExternalId(PROVIDER, connection.id);
   if (!install || connection.platform !== PROVIDER || install.status !== "active" || install.organizationId !== connection.organizationId ||
     connection.status === "stopped" || install.providerInstance !== "cloud" ||
     connection.id !== googleChatInstallationId(install.organizationId, install.providerAppId, install.externalTenantId) ||
     connection.metadata?.teamId !== install.externalTenantId) throw new GoogleChatScopeError();
-  const sourceId = install.metadata.source_connection_id;
-  if (typeof sourceId !== "string" || sourceId.startsWith(PREFIX)) throw new GoogleChatScopeError();
-  const source = await deps.getConnection(sourceId);
-  if (!source || source.status !== "active" || source.platform !== PROVIDER ||
-    source.organizationId !== install.metadata.source_organization_id || !source.organizationId ||
-    (source.config as any).googleChatProjectNumber !== install.providerAppId) throw new GoogleChatScopeError();
-  const config = { ...await deps.resolveSecrets(source), disableSignatureVerification: false } as any;
+  const app = await googleChatInstallApp(install.providerAppId, install.metadata, deps.getConnection);
+  if (!app) throw new GoogleChatScopeError();
+  return { install, app };
+}
+
+export async function resolveGoogleChatRuntime(
+  connection: StoredConnection,
+  deps: ChatRuntimeDeps,
+): Promise<ChatRuntimeConfig | undefined> {
+  if (!connection.id.startsWith(PREFIX)) return undefined;
+  const { install, app } = await resolveGoogleChatInstall(connection, deps);
+  const config = {
+    ...(app.source
+      ? await deps.resolveSecrets(app.source)
+      : { platform: PROVIDER, credentials: app.credentials, googleChatProjectNumber: app.project }),
+    disableSignatureVerification: false,
+  } as any;
   // Secret-only rotations need not bump the source row. Keep this opaque and
   // gateway-local; never log it or expose it in the connection projection.
   const revision = createHash("sha256").update(JSON.stringify([
-    connection.updatedAt, install.id, install.updatedAt, source.updatedAt, config,
+    connection.updatedAt, install.id, install.updatedAt, app.source?.updatedAt, config,
   ])).digest("hex");
+  // The hosted app's audience comes from the same generator the app-webhook
+  // router registers with; a BYO app keeps its source's own webhook URL.
+  const base = deps.publicGatewayUrl;
   return {
     config, revision, scope: install.externalTenantId, stateKey: connection.id,
-    webhookUrl: deps.publicGatewayUrl
-      ? `${deps.publicGatewayUrl}/api/v1/webhooks/${source.id}` : undefined,
+    webhookUrl: !base ? undefined
+      : app.source ? `${base}/api/v1/webhooks/${app.source.id}` : appWebhookUrl(base, PROVIDER),
   };
 }
 
@@ -161,12 +260,14 @@ export async function routeGoogleChatWebhook(
   `;
   const row = rows[0];
   if (!row) return undefined;
-  const body = await request.clone().json() as any;
   // Pending setup remains on the source's verified adapter, where dispatch is
   // gated. Reinstall lifecycle deliveries must also reach that verifier.
-  const added = body.type === "ADDED_TO_SPACE" || body.eventType === "ADDED_TO_SPACE" || body.chat?.addedToSpacePayload;
+  const { added } = googleChatLifecycle(await request.clone().json());
   if (row.status === "pending" && !row.metadata.removed || row.status !== "active" && added) return undefined;
-  if (row.status !== "active" || row.metadata.source_connection_id !== connection.id) {
+  // A hosted space names no source: any transport of the hosted project may
+  // carry it, and the installed adapter still verifies Google's token itself.
+  const { source } = googleChatTransportApp(connection);
+  if (row.status !== "active" || source && row.metadata.source_connection_id !== source.id) {
     return new Response("Google Chat installation is unavailable", { status: 403 });
   }
   const id = googleChatInstallationId(row.organization_id, project, space);
@@ -212,6 +313,9 @@ export async function releaseGoogleChatSource(
     WHERE provider = ${PROVIDER} AND provider_instance = 'cloud' AND status = 'active'
       AND metadata->>'source_connection_id' = ${source.id}
       AND metadata->>'source_organization_id' = ${source.organizationId}
+      -- Hosted spaces only ever passed through a legacy source; the hosted
+      -- app keeps serving them after that source is deleted.
+      AND provider_app_id IS DISTINCT FROM ${hostedGoogleChatApp()?.project ?? null}
   `;
   for (const space of spaces) {
     await releaseGoogleChatSpace(space.organization_id, space.provider_app_id, space.external_tenant_id, deps);
@@ -229,6 +333,14 @@ export async function revokeGoogleChatSpace(
   await store.revoke(install.id);
 }
 
+function googleChatLifecycle(body: any): { added: boolean; removed: boolean } {
+  const eventType = typeof body.type === "string" ? body.type : body.eventType;
+  return {
+    added: eventType === "ADDED_TO_SPACE" || !!body.chat?.addedToSpacePayload,
+    removed: eventType === "REMOVED_FROM_SPACE" || !!body.chat?.removedFromSpacePayload,
+  };
+}
+
 export async function acceptGoogleChatWebhook(
   connection: StoredConnection,
   request: Request,
@@ -238,53 +350,108 @@ export async function acceptGoogleChatWebhook(
   // Endpoint-authenticated transports do not own project-scoped installations.
   if (!scoped && !/^\d+$/.test(String(connection.config.googleChatProjectNumber))) return;
   const body = await request.json() as any;
-  const eventType = typeof body.type === "string" ? body.type : body.eventType;
-  const removed = eventType === "REMOVED_FROM_SPACE" || !!body.chat?.removedFromSpacePayload;
-  const added = eventType === "ADDED_TO_SPACE" || !!body.chat?.addedToSpacePayload;
+  const { added, removed } = googleChatLifecycle(body);
   const space = googleChatEventSpace(body);
   if (removed) {
-    const sql = getDb();
-    let project = connection.config.googleChatProjectNumber;
-    let sourceId = connection.id;
-    if (connection.id.startsWith(PREFIX)) {
-      await resolveGoogleChatRuntime(connection, deps);
-      const install = await deps.getAppInstallationStore().resolveByExternalId(PROVIDER, connection.id);
-      if (!install) throw new GoogleChatScopeError();
-      project = install.providerAppId;
-      sourceId = install.metadata.source_connection_id;
-    }
-    // Invalidate setup refs under the claim's row lock before finding the
-    // current active owner. A claim/move that wins first is revoked afterwards.
-    await sql`UPDATE app_installations SET metadata = metadata || '{"removed":true}'::jsonb, updated_at = now()
-      WHERE provider = 'gchat' AND provider_app_id = ${project} AND external_tenant_id = ${space}
-        AND metadata->>'source_connection_id' = ${sourceId} AND status = 'pending'`;
-    const [active] = await sql`SELECT organization_id, metadata FROM app_installations
-      WHERE provider = 'gchat' AND provider_instance = 'cloud' AND provider_app_id = ${project}
-        AND external_tenant_id = ${space} AND status = 'active'
-        AND metadata->>'source_connection_id' = ${sourceId} LIMIT 1`;
-    if (active) await releaseGoogleChatSpace(active.organization_id, project, space, deps);
+    const app = scoped ? (await resolveGoogleChatInstall(connection, deps)).app : googleChatTransportApp(connection);
+    await removeGoogleChatSpace(app, space, deps);
     return;
   }
-  if (!added && connection.agentId) return;
-  const linked = !added && await new AutomationSubscriptionService().channelHasMessageSubscription(
-    connection.id, `gchat:${space}`, connection.organizationId!, { crossOrganization: (connection.settings as ConnectionSettings).previewMode === true, teamId: space },
-  );
-  if (linked) return;
-  const spaceData = body.space ?? body.chat?.addedToSpacePayload?.space ?? body.chat?.messagePayload?.space;
-  let url: string;
   if (scoped) {
+    if (await alreadyServed(connection, space, added)) return;
     const [org] = await getDb()`SELECT slug FROM organization WHERE id = ${connection.organizationId!}`;
     if (!org) throw new GoogleChatScopeError();
-    const next = claimContinuation(org.slug, { platform: PROVIDER, connection: runtimeConnectionIdToSlug(connection.id), channelId: `gchat:${space}`, teamId: space, label: spaceData?.displayName || space });
-    url = new URL(next.nextUrl!, deps.publicGatewayUrl).toString();
-  } else {
-    const installer = body.user?.name ?? body.chat?.user?.name ?? body.message?.sender?.name ?? body.chat?.messagePayload?.message?.sender?.name;
-    if (typeof installer !== "string" || !/^users\/\d+$/.test(installer)) return new Response("Google Chat installer identity is missing", { status: 400 });
-    const ref = await parkGoogleChatSpace(connection, space, installer, spaceData?.displayName || space, added);
-    url = new URL(`/connector/gchat/connection?${new URLSearchParams({ ref })}`, deps.publicGatewayUrl).toString();
+    const next = claimContinuation(org.slug, { platform: PROVIDER, connection: runtimeConnectionIdToSlug(connection.id), channelId: `gchat:${space}`, teamId: space, label: googleChatEventSpaceData(body)?.displayName || space });
+    return googleChatSetupReply(body, new URL(next.nextUrl!, deps.publicGatewayUrl).toString());
   }
+  const app = googleChatTransportApp(connection);
+  // An unclaimed hosted space belongs to nobody yet: it never reaches the
+  // legacy transport's own agent or Automations, only the claim link.
+  if (app.source && await alreadyServed(connection, space, added)) return;
+  return setupGoogleChatSpace(app, body, added, deps);
+}
+
+/** A delivery the connection's own agent or a linked Automation serves needs no setup. */
+async function alreadyServed(connection: StoredConnection, space: string, added: boolean): Promise<boolean> {
+  if (added) return false;
+  if (connection.agentId) return true;
+  return new AutomationSubscriptionService().channelHasMessageSubscription(
+    connection.id, `gchat:${space}`, connection.organizationId!, { crossOrganization: (connection.settings as ConnectionSettings).previewMode === true, teamId: space },
+  );
+}
+
+/**
+ * Invalidate setup refs under the claim's row lock before finding the current
+ * active owner; a claim/move that wins first is revoked afterwards. A BYO app
+ * reaches only its own source's rows; the hosted app reaches all of them.
+ */
+async function removeGoogleChatSpace(app: GoogleChatApp, space: string, deps: ChatRuntimeDeps): Promise<void> {
+  const sql = getDb();
+  const sourceId = app.source?.id ?? null;
+  await sql`UPDATE app_installations SET metadata = metadata || '{"removed":true}'::jsonb, updated_at = now()
+    WHERE provider = 'gchat' AND provider_app_id = ${app.project} AND external_tenant_id = ${space}
+      AND (${sourceId}::text IS NULL OR metadata->>'source_connection_id' = ${sourceId}) AND status = 'pending'`;
+  const [active] = await sql`SELECT organization_id FROM app_installations
+    WHERE provider = 'gchat' AND provider_instance = 'cloud' AND provider_app_id = ${app.project}
+      AND external_tenant_id = ${space} AND status = 'active'
+      AND (${sourceId}::text IS NULL OR metadata->>'source_connection_id' = ${sourceId}) LIMIT 1`;
+  if (active) await releaseGoogleChatSpace(active.organization_id, app.project, space, deps);
+}
+
+function googleChatEventSpaceData(body: any): any {
+  return body.space ?? body.chat?.addedToSpacePayload?.space ?? body.chat?.messagePayload?.space ?? body.message?.space;
+}
+
+/** Park a verified unclaimed space and answer with its claim link. */
+async function setupGoogleChatSpace(app: GoogleChatApp, body: any, added: boolean, deps: ChatRuntimeDeps): Promise<Response> {
+  const space = googleChatEventSpace(body);
+  const spaceData = googleChatEventSpaceData(body);
+  const installer = body.user?.name ?? body.chat?.user?.name ?? body.message?.sender?.name ?? body.chat?.messagePayload?.message?.sender?.name;
+  if (typeof installer !== "string" || !/^users\/\d+$/.test(installer)) return new Response("Google Chat installer identity is missing", { status: 400 });
+  const direct = spaceData?.type === "DM" || spaceData?.spaceType === "DIRECT_MESSAGE";
+  const ref = await parkGoogleChatSpace(app, space, installer, spaceData?.displayName || space, added, direct);
+  return googleChatSetupReply(body, new URL(`/connector/gchat/connection?${new URLSearchParams({ ref })}`, deps.publicGatewayUrl).toString());
+}
+
+function googleChatSetupReply(body: any, url: string): Response {
   const message = { text: `Welcome! Choose the organization and agent for this conversation: ${url}\nUse /lobu help for commands.` };
   return body.chat
     ? Response.json({ hostAppDataAction: { chatDataAction: { createMessageAction: { message } } } })
     : Response.json(message);
+}
+
+/**
+ * Chat delivery for the hosted app's declared app webhook. The generic engine
+ * has already verified Google's token; this only routes by space. A claimed
+ * space goes to its own installation, whose adapter verifies again before it
+ * dispatches; any other space only ever gets the claim link.
+ */
+export async function handleGoogleChatAppWebhook(
+  request: Request,
+  deps: ChatRuntimeDeps,
+  deliver: (connectionId: string) => Promise<Response>,
+): Promise<Response> {
+  const app = hostedGoogleChatApp();
+  if (!app) return Response.json({ error: "Google Chat app is not configured" }, { status: 404 });
+  let body: any;
+  let space: string;
+  try {
+    body = await request.clone().json();
+    space = googleChatEventSpace(body);
+  } catch {
+    return new Response("Invalid Google Chat space", { status: 400 });
+  }
+  const [active] = await getDb()`
+    SELECT organization_id FROM app_installations
+    WHERE provider = ${PROVIDER} AND provider_instance = 'cloud'
+      AND provider_app_id = ${app.project} AND external_tenant_id = ${space} AND status = 'active'
+    LIMIT 1
+  `;
+  if (active) return deliver(googleChatInstallationId(active.organization_id, app.project, space));
+  const { added, removed } = googleChatLifecycle(body);
+  if (removed) {
+    await removeGoogleChatSpace(app, space, deps);
+    return Response.json({});
+  }
+  return setupGoogleChatSpace(app, body, added, deps);
 }

@@ -1,8 +1,8 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import type { StoredConnection } from "@lobu/core";
 import { orgContext, tryGetOrgId } from "../../../../lobu/stores/org-context.js";
 import { ChatInstanceManager } from "../../chat-instance-manager.js";
-import { googleChatInstallationId, resolveGoogleChatRuntime, routeGoogleChatWebhook } from "../gchat-installation.js";
+import { googleChatInstallationId, resetHostedGoogleChatAppForTests, resolveGoogleChatRuntime, routeGoogleChatWebhook } from "../gchat-installation.js";
 
 const project = "123456789";
 const space = "spaces/team-space";
@@ -117,5 +117,41 @@ describe("Google Chat runtime authority", () => {
       expect(manager.instances.has(f.target.id)).toBe(false);
     }
     expect(await managers[0].ensureConnectionRunning(f.target.id)).toBe(false);
+  });
+});
+
+describe("hosted Google Chat app runtime", () => {
+  const saved = { project: process.env.GOOGLE_CHAT_PROJECT_NUMBER, credentials: process.env.GOOGLE_CHAT_CREDENTIALS };
+  afterEach(() => {
+    for (const [key, value] of [["GOOGLE_CHAT_PROJECT_NUMBER", saved.project], ["GOOGLE_CHAT_CREDENTIALS", saved.credentials]] as const) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+    resetHostedGoogleChatAppForTests();
+  });
+  function hosted() {
+    const f = fixture();
+    // A hosted install names no source and must never open a tenant vault.
+    f.install.metadata = {};
+    f.manager.services.getSecretStore = () => { throw new Error("The hosted app never reads a tenant vault"); };
+    return f;
+  }
+  test("resolves the hosted key gateway-side with the app-webhook audience", async () => {
+    process.env.GOOGLE_CHAT_PROJECT_NUMBER = project;
+    process.env.GOOGLE_CHAT_CREDENTIALS = JSON.stringify({ client_email: "hosted-bot@example.test", private_key: "hosted-key" });
+    resetHostedGoogleChatAppForTests();
+    const f = hosted();
+    const resolved = await f.resolve();
+    expect((resolved!.config as any).credentials).toContain("hosted-key");
+    expect((resolved!.config as any).googleChatProjectNumber).toBe(project);
+    expect((resolved!.config as any).disableSignatureVerification).toBe(false);
+    expect(resolved!.webhookUrl).toBe("https://gateway.test/api/v1/app-webhooks/gchat");
+    expect(resolved!.scope).toBe(space);
+    expect(f.target.config).toEqual({ platform: "gchat" });
+  });
+  test("fails closed when the hosted app is not configured", async () => {
+    delete process.env.GOOGLE_CHAT_PROJECT_NUMBER;
+    delete process.env.GOOGLE_CHAT_CREDENTIALS;
+    resetHostedGoogleChatAppForTests();
+    await expect(hosted().resolve()).rejects.toThrow();
   });
 });
