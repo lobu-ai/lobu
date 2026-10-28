@@ -101,7 +101,7 @@ export async function runAutomationScriptTask(
       'ValidationError: Automation scripts must return an object or no value.';
   }
   if (!result.success || error) {
-    if (attempt >= 3 || reactionErrorIsNonTransient(error)) {
+    if (attempt >= 3 || reactionErrorIsNonTransient(error, result.retryable)) {
       if (
         await markAutomationRunFailed(
           sql,

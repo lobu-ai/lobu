@@ -38,14 +38,24 @@ interface ExecuteAutomationScriptOptions {
 export async function executeReaction(options: ExecuteAutomationScriptOptions): Promise<{
   success: boolean;
   error?: string;
+  /** The host's typed verdict, when the failure carries one (see `runScript`). */
+  retryable?: boolean;
 }> {
   const result = await executeAutomationScript({ ...options, executionKind: 'reaction' });
-  return result.success ? { success: true } : { success: false, error: result.error };
+  return result.success
+    ? { success: true }
+    : {
+        success: false,
+        error: result.error,
+        ...(result.retryable === undefined ? {} : { retryable: result.retryable }),
+      };
 }
 
 export async function executeAutomationScript(options: ExecuteAutomationScriptOptions): Promise<{
   success: boolean;
   error?: string;
+  /** The host's typed verdict, when the failure carries one (see `runScript`). */
+  retryable?: boolean;
   returnValue?: unknown;
   didReturnValue?: boolean;
 }> {
@@ -150,7 +160,11 @@ export async function executeAutomationScript(options: ExecuteAutomationScriptOp
       ? 'Reaction script execution failed'
       : 'Automation script execution failed'
   );
-  return { success: false, error: errorMessage };
+  return {
+    success: false,
+    error: errorMessage,
+    ...(result.error?.retryable === undefined ? {} : { retryable: result.error.retryable }),
+  };
 }
 
 /**

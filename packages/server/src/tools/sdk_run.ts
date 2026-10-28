@@ -398,7 +398,12 @@ export function classifySdkScriptError(error: {
   let code: ToolErrorCode;
   if (error.name === "ValidationError") {
     code = "VALIDATION";
-  } else if (error.name === "McpScopeRequiredError") {
+  } else if (
+    // McpScopeRequiredError is an AccessDeniedError; across the isolate only
+    // the name survives.
+    error.name === "AccessDeniedError" ||
+    error.name === "McpScopeRequiredError"
+  ) {
     code = "PERMISSION";
   } else {
     code = "INTERNAL";

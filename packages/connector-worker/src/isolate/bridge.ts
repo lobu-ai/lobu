@@ -19,8 +19,10 @@
  *  - `script.run({ timeout })` bounds only the synchronous part of the run; a
  *    loop entered after an `await` is not interrupted. The wall clock here
  *    disposes the isolate, which rejects the pending run.
- *  - Exceeding `memoryLimit` disposes the isolate automatically; the run
- *    rejects with "disposed during execution due to memory limit".
+ *  - Exceeding `memoryLimit` disposes the isolate automatically and rejects
+ *    the run. That is the only disposal the host does not perform itself, so
+ *    an isolate disposed without `dispose()` is how a memory kill is told
+ *    apart from a guest error whose text merely mentions a memory limit.
  *  - `dispose()` on a disposed isolate throws; guard with `isDisposed`.
  */
 
@@ -101,6 +103,8 @@ export class IsolateHost {
   private readonly sync: Record<string, HostSyncCapability>;
   private terminalState: IsolateTerminalState | null = null;
   private timedOut = false;
+  /** Set before every host disposal; a disposed isolate without it was disposed by V8. */
+  private disposedByHost = false;
 
   private constructor(isolate: IvmIsolate, context: { global: IvmReference }, options: IsolateHostOptions) {
     this.isolate = isolate;
@@ -252,19 +256,20 @@ export class IsolateHost {
         cause: error,
       });
     }
-    const message = error instanceof Error ? error.message : String(error);
-    if (/memory limit/i.test(message)) {
+    // Decided from the isolate's state, never the rejection's text: a guest's
+    // own error may say "memory limit" or "terminated" too.
+    if (!this.isolate.isDisposed) return error;
+    if (!this.disposedByHost) {
       this.terminalState = { name: 'MemoryLimitExceeded', message: `isolate exceeded its ${this.options.memoryMb} MB memory limit` };
       return new IsolateHostError('memory', this.terminalState.message, this.terminalState, { cause: error });
     }
-    if (/disposed|abandoned|terminated/i.test(message)) {
-      return new IsolateHostError('crash', `isolate ended unexpectedly: ${message}`, null, { cause: error });
-    }
-    return error;
+    const message = error instanceof Error ? error.message : String(error);
+    return new IsolateHostError('crash', `isolate ended unexpectedly: ${message}`, null, { cause: error });
   }
 
   dispose(): void {
     if (this.isolate.isDisposed) return;
+    this.disposedByHost = true;
     try {
       this.isolate.dispose();
     } catch {

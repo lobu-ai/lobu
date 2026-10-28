@@ -43,12 +43,16 @@ import type { AutomationReactionTaskPayload } from './reaction-enqueue';
  * recovery probability. Everything else — provider/network 5xx, transient SDK
  * failures — stays retryable.
  *
+ * A failure the host classified itself (a typed SDK error such as a role or
+ * scope denial) carries `retryable`; `false` is final whatever its name.
+ *
  * Moved here from `complete-window.ts` with the retry loop it guards.
  */
-export function reactionErrorIsNonTransient(error: string | undefined): boolean {
+export function reactionErrorIsNonTransient(error: string | undefined, retryable?: boolean): boolean {
+  if (retryable === false) return true;
   if (!error) return false;
   return (
-    /^(TimeoutError|CompileError|QuotaExceeded|OutputSizeExceeded|InvalidSleepDuration|SleepLimitExceeded|OutOfMemory|ValidationError|ClientSdkActionError|McpScopeRequiredError):/.test(
+    /^(TimeoutError|CompileError|QuotaExceeded|OutputSizeExceeded|InvalidSleepDuration|SleepLimitExceeded|OutOfMemory|ValidationError|ClientSdkActionError|AccessDeniedError|McpScopeRequiredError):/.test(
       error
     ) ||
     /^ScriptError: (?:Script must `export default` an async function|NamespaceNotAvailable:|CrossOrgAccessDenied:|InvalidSDKDispatchEnvelope|Unknown SDK method:)/.test(
@@ -212,7 +216,7 @@ export async function runAutomationReactionTask(
     return { status: 'success' };
   }
 
-  if (reactionErrorIsNonTransient(execResult.error)) {
+  if (reactionErrorIsNonTransient(execResult.error, execResult.retryable)) {
     logger.warn(
       { automation_id: automationId, run_id: sourceRunId, error: execResult.error },
       'Reaction script failed on a non-transient error; not retrying'
