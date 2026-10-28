@@ -55,10 +55,6 @@ import { slackClaimProvider } from "./gateway/connections/slack-claim";
 import { googleChatClaimProvider } from "./gateway/connections/gchat-claim";
 import { resolveClaimingUserSlackIdentities } from "./gateway/connections/slack-claim-identities";
 import { createSlackWebApi } from "./gateway/connections/slack-web";
-import {
-	getMaxReservedLocks,
-	getReservedLockCount,
-} from "./gateway/orchestration/deployment-manager";
 import { inputFileRoutes } from "./http/input-file-routes";
 import { REST_TOOL_GET_ROUTES } from "./http/rest-tool-routes";
 import { isExcludedSpaPath } from "./http/spa-route-filter";
@@ -513,30 +509,6 @@ app.get("/health/ready", async (c) => {
 			503,
 		);
 	}
-});
-
-/**
- * Orchestrator health / metric endpoint.
- *
- * Exposes the live count of `sql.reserve()` connections held by
- * `acquireConversationLock` (snapshot-mode per-conversation locks) so an
- * operator can spot pool pressure before it manifests as gateway query
- * starvation. Returns `near_cap: true` once the count crosses 80% of the
- * configured cap. Default cap is derived from DB_POOL_MAX so it can't
- * exceed available pool slots — operators override with
- * LOBU_MAX_RESERVED_LOCKS. The endpoint is cheap and dependency-free;
- * safe to scrape every few seconds.
- */
-app.get("/health/orchestrator", (c) => {
-	const count = getReservedLockCount();
-	const cap = getMaxReservedLocks();
-	const nearCap = cap > 0 && count >= Math.ceil(cap * 0.8);
-	return c.json({
-		status: "ok",
-		reserved_conversation_locks: count,
-		reserved_conversation_locks_cap: cap,
-		near_cap: nearCap,
-	});
 });
 
 /**

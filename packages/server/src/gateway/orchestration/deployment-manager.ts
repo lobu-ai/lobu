@@ -15,7 +15,6 @@ import type { CredentialLeaseRegistry } from "../agent-tooling/credential-lease.
 import { resolveAgentToolingDeclaration } from "../agent-tooling/resolver.js";
 import { getInternalGatewayUrl } from "../config/index.js";
 
-export { getMaxReservedLocks, getReservedLockCount } from "./conversation-locks.js";
 export { nixPackageAttrRef } from "./worker-invocation.js";
 export {
   buildCanonicalConversationKey,
