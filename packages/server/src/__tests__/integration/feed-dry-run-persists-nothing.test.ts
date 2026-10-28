@@ -674,7 +674,8 @@ describe('stream ingest bounds connector origin_id', () => {
     payload_type: 'text',
     occurred_at: new Date().toISOString(),
   });
-  // Mirrors the Chrome watch feed's `watch-input-${url}-${ts}-${field}` shape.
+  // A URL-bearing browser watch-style id. The Chrome extension now digests its
+  // ids, but the route must bound whatever a connector sends.
   const oversizedOriginId = () =>
     `watch-input-https://example.test/?q=${randomBytes(3000).toString('base64')}-2026-09-20T21:38:51.081Z-search`;
 

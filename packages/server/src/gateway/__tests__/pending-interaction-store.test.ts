@@ -363,7 +363,7 @@ describe("pending-interaction-store cleanup paths", () => {
       } as PostedQuestion;
       interactionService.emit("question:created", event);
 
-      // The handler is async (store → dynamic-import → post → fail →
+      // The handler is async (store → post → fail →
       // delete). Wait for `thread.post` to be called first, then poll
       // for the row to disappear.
       const start = Date.now();
@@ -393,7 +393,7 @@ describe("pending-interaction-store cleanup paths", () => {
   // Scoping invariant of deletePendingQuestion — same safety as claim.
   test("deletePendingQuestion is scoped by (org, connection, user) — leaked id alone cannot delete", async () => {
     const sql = getDb();
-    await seedOrg("org-b");
+    await seedOrg(ORG_B);
     const q = buildQuestion("q-scope");
     await storePendingQuestion(q.id, ORG_A, CONN_A, USER_A, { question: q });
 
