@@ -170,6 +170,13 @@ export const UpdateEntityAction = Type.Object({
         "[update] Metadata field names whose CURRENT value the human approves as-is. No value change, but each is marked human-owned so an Automation can't later overwrite it without an approval. The 'approve' half of the recap feedback loop.",
     })
   ),
+  // Asserted manual edit: a first-party backend records a person's own change
+  manual_edit: Type.Optional(
+    Type.Boolean({
+      description:
+        "[update] Assert that the signed-in person made this change themselves, so it is recorded as their manual edit: the fields it sets (and affirm_fields) become theirs, and Automations then queue an approval instead of updating them. A wrong assertion takes the field away from Automations. Honoured for a person's own web-session edit, or for a token minted with the entities:manual_edit scope by a person in the web app, with no agent, MCP session or Automation behind the call; otherwise the update fails with 403 MANUAL_EDIT_NOT_ALLOWED and nothing is written. Defaults to false.",
+    })
+  ),
   automation_source: Type.Optional(AutomationSource),
 });
 
@@ -559,6 +566,8 @@ export const ManageEntityResultSchema = Type.Union([
     approval_current: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
     /** Who proposed the blocked change: 'agent' | 'automation'. */
     approval_attribution: Type.Optional(ApprovalAttributionSchema),
+    /** True when a `manual_edit` assertion was honoured: the edit was recorded as the person's own. */
+    manual_edit_applied: Type.Optional(Type.Boolean()),
   }),
   Type.Object({
     action: Type.Literal("list"),

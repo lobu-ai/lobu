@@ -24,6 +24,7 @@ const ALL_CODES = Object.keys({
   NOT_FOUND: true,
   VALIDATION: true,
   PERMISSION: true,
+  MANUAL_EDIT_NOT_ALLOWED: true,
   RATE_LIMITED: true,
   UPSTREAM_TIMEOUT: true,
   UPSTREAM_5XX: true,
@@ -42,6 +43,7 @@ describe('toolErrorHttpStatus', () => {
   it('keeps the caller-actionable codes in the 4xx range', () => {
     expect(toolErrorHttpStatus('NOT_FOUND')).toBe(404);
     expect(toolErrorHttpStatus('PERMISSION')).toBe(403);
+    expect(toolErrorHttpStatus('MANUAL_EDIT_NOT_ALLOWED')).toBe(403);
     expect(toolErrorHttpStatus('RATE_LIMITED')).toBe(429);
     expect(toolErrorHttpStatus('VALIDATION')).toBe(400);
     // The CALLER's session is valid — only the connection's credentials are

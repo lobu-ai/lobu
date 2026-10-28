@@ -737,6 +737,9 @@ async function handleUpdate(
 	if (args.affirm_fields !== undefined)
 		updateData.affirm_fields = args.affirm_fields;
 
+	// Asserted manual edit: honoured or refused (403) inside updateEntity.
+	if (args.manual_edit !== undefined) updateData.manual_edit = args.manual_edit;
+
 	const updateActor = await actingPrincipalFor(args, ctx);
 	// Update approvals inherit the producing run as their causal parent.
 	const updateAttribution = await resolveAutomationAttribution(
@@ -878,6 +881,7 @@ async function handleUpdate(
 		approval_fields: approvalFields,
 		approval_current: approvalCurrent,
 		approval_attribution: deferred ? deferred.display.attribution : undefined,
+		manual_edit_applied: updatedEntity.manualEditApplied || undefined,
 	};
 }
 

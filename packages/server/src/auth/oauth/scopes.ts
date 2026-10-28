@@ -56,6 +56,17 @@ export const DEFAULT_SCOPES = ['mcp:read', 'mcp:write'] as const;
 export const POLICY_WRITE_SCOPE = 'policies:write';
 
 /**
+ * Human-minted authority for a first-party backend to assert that the signed-in
+ * person made an entity edit (`manage_entity update` `manual_edit: true`), so
+ * the edit claims field ownership like a web-session edit. Never an OAuth/MCP
+ * grant; only an owner/admin web session can mint a PAT carrying it.
+ */
+export const ENTITY_MANUAL_EDIT_SCOPE = 'entities:manual_edit';
+
+/** Scopes only a person in a web session may put on a PAT. */
+export const HUMAN_MINTED_PAT_SCOPES = [POLICY_WRITE_SCOPE, ENTITY_MANUAL_EDIT_SCOPE] as const;
+
+/**
  * Scopes a Personal Access Token may be minted with (POST /api/:orgSlug/tokens).
  *
  * `device_worker:run` is deliberately excluded — it is only granted via the
@@ -70,7 +81,7 @@ export const AVAILABLE_PAT_SCOPES = [
   'mcp:admin',
   'profile:read',
   'connections:token',
-  POLICY_WRITE_SCOPE,
+  ...HUMAN_MINTED_PAT_SCOPES,
 ] as const;
 
 /**

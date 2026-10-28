@@ -1193,6 +1193,10 @@ export type ManageEntityData = {
          */
         affirm_fields?: Array<string>;
         /**
+         * [update] Assert that the signed-in person made this change themselves, so it is recorded as their manual edit: the fields it sets (and affirm_fields) become theirs, and Automations then queue an approval instead of updating them. A wrong assertion takes the field away from Automations. Honoured for a person's own web-session edit, or for a token minted with the entities:manual_edit scope by a person in the web app, with no agent, MCP session or Automation behind the call; otherwise the update fails with 403 MANUAL_EDIT_NOT_ALLOWED and nothing is written. Defaults to false.
+         */
+        manual_edit?: boolean;
+        /**
          * Attribution source when mutation is triggered by an Automation reaction
          */
         automation_source?: {
@@ -1670,6 +1674,7 @@ export type ManageEntityResponses = {
           [key: string]: unknown;
         };
         approval_attribution?: "agent" | "automation";
+        manual_edit_applied?: boolean;
       }
     | {
         action: "list";

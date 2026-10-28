@@ -8,7 +8,7 @@
 
 import { deriveToolActorSource } from './apply-context';
 import { recordKey, recordKeyColumn } from '@lobu/core/contracts/entity-reference';
-import { isManualUserEdit } from '../auth/direct-user-context';
+import { isAssertedManualEdit, isManualUserEdit, type ManualEditRefusal, manualEditRefusal } from '../auth/direct-user-context';
 import type { EntityIdentity } from '@lobu/core/contracts/tools/manage-entity';
 import { attachEntityIdentities, identityMemberExistsSql, identityMemberIdsSql, identityRootSql } from './entity-identity';
 import { type EntityReadRestrictions, entityReadPolicySql, entityReadRestrictions, filterEntityReadRows } from '../authz/entity-read-policy';
@@ -307,6 +307,18 @@ interface EntityUpdateOptions {
 // Shared Helpers
 // ============================================
 
+const MANUAL_EDIT_REFUSAL_MESSAGES: Record<ManualEditRefusal, string> = {
+	missing_scope:
+		"manual_edit needs a token minted with the entities:manual_edit scope by a person in the Lobu web app, and this caller does not hold it. Nothing was written.",
+	delegated_caller:
+		"manual_edit cannot be asserted by an agent, MCP session, chat turn or Automation; only a person's own edit relayed by a first-party backend qualifies. Nothing was written.",
+};
+
+/** `manual_edit: true` that this caller may not assert (HTTP 403). */
+function manualEditNotAllowed(refusal: ManualEditRefusal): ToolUserError {
+	return new ToolUserError(MANUAL_EDIT_REFUSAL_MESSAGES[refusal], 403, "MANUAL_EDIT_NOT_ALLOWED");
+}
+
 /**
  * Convert a numeric embedding array to a PostgreSQL vector literal.
  */
@@ -354,6 +366,11 @@ export interface EntityData {
   // them without an approval. This is the "approve" half of the recap feedback
   // loop; "correct" is a normal metadata update. Ignored for agent/system writes.
   affirm_fields?: string[] | null;
+
+  // Asserted manual edit: a token minted with `entities:manual_edit` asserts the
+  // signed-in person made this change (isAssertedManualEdit). Refused with 403
+  // `MANUAL_EDIT_NOT_ALLOWED` when the caller may not assert it.
+  manual_edit?: boolean | null;
 }
 
 export interface CreatedEntity {
@@ -1054,7 +1071,12 @@ export async function updateEntity(
 	ctx: ToolContext,
 	opts?: EntityUpdateOptions,
 ): Promise<
-	CreatedEntity & { fieldMerge?: FieldMergeInfo; deferred?: DeferredMutation }
+	CreatedEntity & {
+		fieldMerge?: FieldMergeInfo;
+		deferred?: DeferredMutation;
+		/** A `manual_edit` assertion was honoured: this was recorded as a human edit. */
+		manualEditApplied: boolean;
+	}
 > {
 	const sql = opts?.sql ?? getDb();
 	if (opts?.derivedName && data.name !== undefined) {
@@ -1086,10 +1108,22 @@ export async function updateEntity(
 	// ownership-aware automation-source merge: unowned fields write, owned fields
 	// are blocked and surfaced to the caller for an approval. There is no
 	// plain-merge branch. A delegated client can carry the user's authority without
-	// being a manual edit, and verified Automation attribution prevents pinning
+	// being a manual edit unless it holds `entities:manual_edit` and asserts the
+	// edit (`manual_edit`), and verified Automation attribution prevents pinning
 	// when the calling context happens to carry a signed-in user.
-	const isHumanEdit = isManualUserEdit(ctx) &&
+	const isHumanEdit =
+		(isManualUserEdit(ctx) || isAssertedManualEdit(ctx, data)) &&
 		opts?.policyPrincipalKind !== "automation";
+	// An unhonoured assertion must fail, never quietly become a non-human write
+	// the caller believes is protected.
+	if (data.manual_edit === true && !isHumanEdit) {
+		// A null refusal here means verified Automation attribution made the
+		// write non-human, so that is the delegation to report.
+		throw manualEditNotAllowed(manualEditRefusal(ctx) ?? "delegated_caller");
+	}
+	const manualEditApplied = data.manual_edit === true && isHumanEdit;
+	// The audit trail of an assertion: which token client vouched for the person.
+	const assertedByClient = manualEditApplied ? (ctx.clientId ?? null) : null;
 	// affirm_fields claims ownership, which only a human may do. An agent must
 	// never silently claim a field — reject before touching the transaction.
 	if (!isHumanEdit && affirmFields.length > 0) {
@@ -1301,6 +1335,7 @@ export async function updateEntity(
 				note: isHumanEdit ? (data.field_note ?? null) : null,
 				nowIso: new Date().toISOString(),
 				affirm: isHumanEdit ? affirmFields : undefined,
+				assertedByClient,
 				requireApproval,
 			});
 			mergedMetadata = merge.nextMetadata;
@@ -1561,8 +1596,9 @@ export async function updateEntity(
 		deferEscalatedFields,
 		proposedFields,
 		proposedCurrent,
-		...entity
+		...persisted
 	} = result;
+	const entity = { ...persisted, manualEditApplied };
 
 	// Post-commit: package any blocked (human-owned or policy-gated) fields as a
 	// single deferred approval. The caller queues it AFTER its own tx + change

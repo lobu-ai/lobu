@@ -26,7 +26,7 @@ import {
   AVAILABLE_PAT_SCOPES,
   canMintWebSession,
   DEFAULT_SCOPES_STRING,
-  POLICY_WRITE_SCOPE,
+  HUMAN_MINTED_PAT_SCOPES,
 } from './oauth/scopes';
 import { PersonalAccessTokenService, recordAccessTokenEvent } from './tokens';
 
@@ -207,9 +207,13 @@ credentialRoutes.post('/:orgSlug/tokens', mcpAuth, async (c) => {
 
   try {
     const scope = normalizePatScope(body.scope);
-    if (scope?.split(' ').includes(POLICY_WRITE_SCOPE) &&
-      (c.get('authSource') !== 'session' || c.get('mcpAuthInfo'))) {
-      return c.json({ error: 'Granting policy management requires an owner/admin web session' }, 403);
+    if (c.get('authSource') !== 'session' || c.get('mcpAuthInfo')) {
+      const humanOnly = scope
+        ?.split(' ')
+        .find((s) => (HUMAN_MINTED_PAT_SCOPES as readonly string[]).includes(s));
+      if (humanOnly) {
+        return c.json({ error: `Granting ${humanOnly} requires an owner/admin web session` }, 403);
+      }
     }
     const token = await patService.create(authorized.user.id, authorized.organizationId, name, {
       ...(description ? { description } : {}),
