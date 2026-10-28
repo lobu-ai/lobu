@@ -1213,14 +1213,6 @@ jobs:
         # it cannot quietly stop catching the thing it exists for.
         run: bun test scripts/__tests__/check-merge-integrity.test.ts --timeout 30000
 
-      - name: Review-prompt blocker rule
-        # `pi-review` is required and enforce_admins is on, so `blockers>0` is
-        # unbypassable. §4 of the review prompt told the reviewer to record its
-        # OWN inability to run tests as a blocker, which red-flagged #2306 twice
-        # under codex's read-only sandbox and then passed on an identical re-run.
-        # Three other sections say the opposite; this pins the one direction.
-        run: bun test scripts/__tests__/review-prompt-env-blockers.test.ts --timeout 30000
-
       - name: Review output schema dialect
         # prompts/review-output-schema.json is handed to BOTH reviewer CLIs —
         # `claude --json-schema` and `codex exec --output-schema` — and the

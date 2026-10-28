@@ -105,7 +105,7 @@ function repoRoot(): string {
  * `up` makes the sandbox public once the seat is claimed, so this is the
  * fallback for a sandbox that is not public (yet) — see previewUrlFor.
  */
-export function authenticatedUrl(url: string, token?: string): string {
+function authenticatedUrl(url: string, token?: string): string {
   if (!token) return url;
   const separator = url.includes("?") ? "&" : "?";
   return `${url}${separator}DAYTONA_SANDBOX_AUTH_KEY=${encodeURIComponent(token)}`;
@@ -115,11 +115,7 @@ export function authenticatedUrl(url: string, token?: string): string {
  * A public preview needs no key in the URL, and a key in a link that gets
  * pasted around is a liability, so it is only added when it is actually needed.
  */
-export function previewUrlFor(
-  isPublic: boolean,
-  url: string,
-  token?: string
-): string {
+function previewUrlFor(isPublic: boolean, url: string, token?: string): string {
   return isPublic ? url : authenticatedUrl(url, token);
 }
 
@@ -611,7 +607,7 @@ export function lockfileEntries(root: string): Array<[string, string]> {
  * Non-fatal dirty-tree notice. Syncing uncommitted work is supported — that
  * is the point of the inner loop — but what gets verified should say so.
  */
-export function dirtyNotice(parent: string[], sub: string[]): string | null {
+function dirtyNotice(parent: string[], sub: string[]): string | null {
   if (parent.length === 0 && sub.length === 0) return null;
   const parts = [`${parent.length} file(s)`];
   if (sub.length > 0) parts.push(`${sub.length} in owletto`);
@@ -1224,7 +1220,7 @@ async function pushStage(
 }
 
 /** Both bearers below only have to be unguessable; each is compared verbatim. */
-export function generateBearerToken(): string {
+function generateBearerToken(): string {
   return randomBytes(32).toString("base64url");
 }
 
@@ -1380,7 +1376,7 @@ export function resolveOwnerEmail(
 }
 
 /** 24 base64url characters — well inside Better Auth's 128-character ceiling. */
-export function generatePassword(): string {
+function generatePassword(): string {
   return randomBytes(18).toString("base64url");
 }
 
@@ -1450,7 +1446,7 @@ export function sessionTokenFrom(output: string): string | undefined {
  * A link, not just a password, because the preview origin is long and the
  * exchange endpoint sets a first-party session cookie and redirects to the SPA.
  */
-export function loginLink(previewUrl: string, sessionToken: string): string {
+function loginLink(previewUrl: string, sessionToken: string): string {
   const base = previewUrl.replace(/\/+$/, "");
   return `${base}/api/exchange-token?token=${encodeURIComponent(sessionToken)}&next=%2F`;
 }

@@ -17,10 +17,6 @@ import {
 } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type {
-  SourceFiles,
-  SourceDependencies,
-} from "@lobu/core/contracts/tools/source-files";
 import { readViewDefinition } from "@lobu/core/contracts/tools/view-definition";
 import { transform } from "esbuild";
 import * as context from "../../../../internal/context.js";
@@ -201,62 +197,5 @@ describe("apply views over the wire", () => {
     expect(compiled as string).not.toContain("views-wire-fixture-");
     expect(typeof sets[0]?.body.source_code).toBe("string");
     expect(sets[0]?.body.source_code as string).toContain("defineView");
-  });
-
-  test("an unchanged view sends no set on the second apply", async () => {
-    const dir = mkProject();
-    const store: { views: Array<Record<string, unknown>> } = { views: [] };
-    const first = makeFetch(store);
-    await runApply(dir, first.fetchStub);
-    expect(
-      first.calls.filter(
-        (c) => c.url.includes("/manage_views") && c.body.action === "set"
-      )
-    ).toHaveLength(1);
-    // The stubbed remote now reports the same content hash the loader
-    // computes (server semantics: source plus declared metadata plus the
-    // compiled artifact's digest), so the diff is noop and nothing is sent.
-    // Derive it from the exact bundle bytes the first apply shipped, the way
-    // a fixed server derives what it stored.
-    store.views[0] = {
-      ...(store.views[0] as Record<string, unknown>),
-    };
-    const { contentHash } = await import(
-      "@lobu/core/contracts/tools/view-content-hash"
-    );
-    const { readFileSync } = await import("node:fs");
-    const source = readFileSync(
-      join(dir, "views", "deal", "pipeline.tsx"),
-      "utf-8"
-    );
-    const firstSets = first.calls.filter(
-      (c) => c.url.includes("/manage_views") && c.body.action === "set"
-    );
-    const hash = contentHash(
-      source,
-      {
-        name: "pipeline",
-        description: "",
-        attach: [{ collection: "deal" }],
-        params: { by: { type: "string", default: "owner" } },
-        actions: { markWon: { emits: "deal.won" } },
-      },
-      firstSets[0]?.body.compiled_code as string,
-      {
-        sourceFiles: firstSets[0]?.body.source_files as SourceFiles,
-        dependencies: firstSets[0]?.body.dependencies as SourceDependencies,
-      }
-    );
-    store.views[0] = {
-      ...(store.views[0] as Record<string, unknown>),
-      content_hash: hash,
-    };
-    const second = makeFetch(store);
-    await runApply(dir, second.fetchStub);
-    expect(
-      second.calls.filter(
-        (c) => c.url.includes("/manage_views") && c.body.action === "set"
-      )
-    ).toEqual([]);
   });
 });

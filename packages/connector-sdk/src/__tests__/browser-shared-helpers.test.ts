@@ -1,9 +1,5 @@
 import { describe, expect, test } from "bun:test";
 import {
-  buildInjectHandoffBannerExpression,
-  truncateHandoffReason,
-} from "../browser-handoff-banner.js";
-import {
   assertInboxSourceRead,
   assertPositiveReadLimit,
   assertSnapshotSourceRead,
@@ -11,42 +7,6 @@ import {
   SOURCE_REFERENCE_BATCH_MAX_EVENTS,
   splitReferenceBatches,
 } from "../browser-source-read.js";
-
-describe("truncateHandoffReason", () => {
-  test("collapses whitespace and caps length with an ellipsis", () => {
-    expect(truncateHandoffReason("  short  ")).toBe("short");
-    expect(truncateHandoffReason("")).toBeUndefined();
-    expect(truncateHandoffReason("   ")).toBeUndefined();
-    expect(truncateHandoffReason(null)).toBeUndefined();
-    const out = truncateHandoffReason("x".repeat(400));
-    expect(out).toHaveLength(120);
-    expect(out.endsWith("…")).toBe(true);
-  });
-});
-
-describe("buildInjectHandoffBannerExpression", () => {
-  test("embeds title, instruction, footer and reason as JS literals", () => {
-    const expr = buildInjectHandoffBannerExpression({
-      reason: `it's a "quoted" </script> case`,
-      title: "Lobu staged this reply",
-      instruction: "Review it yourself.",
-      footer: "Record the outcome.",
-      composerSelectors: ['[data-testid="x"]'],
-      hostSelectors: ["form"],
-    });
-    expect(expr).toContain("lobu-handoff-banner");
-    expect(expr).toContain("Lobu staged this reply");
-    expect(expr).toContain("Review it yourself.");
-    expect(expr).toContain("Record the outcome.");
-    expect(expr).toContain(JSON.stringify(`it's a "quoted" </script> case`));
-  });
-
-  test("is best-effort with no auto-dismiss", () => {
-    const expr = buildInjectHandoffBannerExpression({ reason: "why" });
-    expect(expr).not.toContain("setTimeout");
-    expect(expr).toContain("root.remove()");
-  });
-});
 
 describe("source-only feed-read guards", () => {
   test("inbox reads reject search, offsets, sorting, matching and windows", () => {

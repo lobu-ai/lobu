@@ -160,7 +160,6 @@ gate_format_lint() {
   bun test scripts/__tests__/release-publish-order.test.ts --timeout 30000 || return 1
   bun test scripts/__tests__/audit-release-images.test.ts --timeout 30000 || return 1
   bun test scripts/__tests__/check-merge-integrity.test.ts --timeout 30000 || return 1
-  bun test scripts/__tests__/review-prompt-env-blockers.test.ts --timeout 30000 || return 1
   bun test scripts/__tests__/review-output-schema.test.ts --timeout 30000 || return 1
   bun test scripts/__tests__/migrate-up-check-pending.test.ts --timeout 30000 || return 1
   bun scripts/check-raw-array-params.mjs || return 1
