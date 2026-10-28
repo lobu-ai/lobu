@@ -11,7 +11,7 @@ export const GATEWAY_DEFAULT_URL = "http://localhost:8787";
  * app.lobu.ai, community.lobu.ai) follows this layout: the org-scoped admin
  * REST API and OAuth live at the origin, the Agent API lives at `<origin>/lobu`.
  */
-export const GATEWAY_AGENT_API_PREFIX = "/lobu";
+const GATEWAY_AGENT_API_PREFIX = "/lobu";
 
 /**
  * Normalize a gateway URL (from `--gateway`, a context's apiUrl, or `.env`) to

@@ -21,7 +21,7 @@ import { getErrorMessage } from "@lobu/core";
  * stays diagnosable without paging or leaking to the Sentry alert feed. Genuine
  * handler faults log at `error`. Exported for direct unit testing.
  */
-export function errorLogLevel(error: unknown): 'warn' | 'error' {
+function errorLogLevel(error: unknown): 'warn' | 'error' {
   return error instanceof ToolUserError ? 'warn' : 'error';
 }
 

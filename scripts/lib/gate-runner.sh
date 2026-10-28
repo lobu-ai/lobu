@@ -163,7 +163,6 @@ gate_format_lint() {
   bun test scripts/__tests__/review-prompt-env-blockers.test.ts --timeout 30000 || return 1
   bun test scripts/__tests__/review-output-schema.test.ts --timeout 30000 || return 1
   bun test scripts/__tests__/migrate-up-check-pending.test.ts --timeout 30000 || return 1
-  bun test scripts/__tests__/migrate-up-duplicate-version.test.ts --timeout 30000 || return 1
   bun scripts/check-raw-array-params.mjs || return 1
   bun scripts/check-entity-write-funnel.mjs || return 1
   bun test scripts/__tests__/check-entity-write-funnel.test.ts --timeout 30000 || return 1

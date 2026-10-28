@@ -12,9 +12,11 @@
  *     NOT every device. `device_workers` is user-owned, so there is no sensible
  *     "all devices" answer; returning none is the fail-closed direction.
  *
- * Uses vi.doMock + vi.resetModules + dynamic import (NOT hoisted vi.mock), for
- * the reason documented in conversations-namespace.test.ts: the integration
- * suite shares a module registry across files.
+ * Uses vi.doMock + vi.resetModules + dynamic import (NOT hoisted vi.mock): the
+ * integration suite shares a module registry across files, where a hoisted
+ * vi.mock does not reliably replace the module — the namespace would then run
+ * the REAL query. doMock scoped per test + a fresh import registry keeps the
+ * mock hermetic.
  */
 
 import { afterEach, describe, expect, it, vi } from "vitest";

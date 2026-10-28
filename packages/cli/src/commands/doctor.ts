@@ -39,7 +39,7 @@ function checkBinaryExists(name: string): Check {
 
 const moduleRequire = createRequire(import.meta.url);
 
-export function checkInstalledNativeModule(
+function checkInstalledNativeModule(
   name: string,
   resolveModule: (id: string) => string = moduleRequire.resolve,
   loadModule: (id: string) => unknown = moduleRequire

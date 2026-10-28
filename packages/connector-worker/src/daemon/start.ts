@@ -96,7 +96,7 @@ export function resolveDaemonLaunchContext(
   };
 }
 
-export function resolveDaemonMaxConcurrentJobs(
+function resolveDaemonMaxConcurrentJobs(
   platform: string | undefined,
   env: NodeJS.ProcessEnv = process.env,
   hostThreads?: number

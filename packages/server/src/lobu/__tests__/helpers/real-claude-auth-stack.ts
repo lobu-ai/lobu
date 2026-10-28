@@ -10,9 +10,6 @@
  * lobu #1321). Running the genuine `AuthProfilesManager.upsertProfile` guard —
  * not a hand-mirrored copy of it — is the whole point: the test now breaks for
  * the same reason prod did.
- *
- * Mirrors the CoreServices wiring proven in
- * `gateway/__tests__/core-services-store-selection.test.ts`.
  */
 import type { SecretPutOptions, SecretRef } from "@lobu/core";
 import { InMemoryStateAdapter } from "../../../gateway/__tests__/fixtures/in-memory-state-adapter.js";
