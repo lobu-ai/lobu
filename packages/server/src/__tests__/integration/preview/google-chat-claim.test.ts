@@ -344,7 +344,7 @@ async function platformFixture(sourceProject = PLATFORM_PROJECT) {
 }
 
 describe("hosted Google Chat app claimed by an outside user", () => {
-  afterEach(() => { vi.unstubAllEnvs(); });
+  afterEach(() => { vi.unstubAllEnvs(); resetHostedGoogleChatAppForTests(); });
 
   it("the verified installer claims into their own org without belonging to the legacy source's org", async () => {
     configurePlatform();
@@ -464,7 +464,7 @@ const GCHAT_WEBHOOK_SCHEMA = new GoogleChatConnector().definition.webhook as Con
 let googleKeys: Promise<Awaited<ReturnType<typeof generateKeyPair>>[]> | undefined;
 
 describe("hosted Google Chat app through the declared app-webhook engine", () => {
-  afterEach(() => { vi.unstubAllEnvs(); vi.unstubAllGlobals(); });
+  afterEach(() => { vi.unstubAllEnvs(); vi.unstubAllGlobals(); resetHostedGoogleChatAppForTests(); });
 
   async function hostedRoute(options: { realInstallation?: boolean } = {}) {
     configurePlatform();

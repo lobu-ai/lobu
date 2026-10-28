@@ -25,6 +25,8 @@ export function googleChatClaimProvider(deps: {
   getConnection(id: string): Promise<StoredConnection | null>;
 }): ClaimProvider<PendingSpace> {
   const sql = getDb();
+  // No expiry on the reference: `authorize` below binds the claim to the verified
+  // installer's Google identity, so the ref alone grants nothing.
   const read = async (ref: string, tx: DbClient = sql): Promise<PendingSpace | null> => {
     if (!/^gchatclaim-[0-9a-f-]{36}$/.test(ref)) return null;
     const [row] = await tx`

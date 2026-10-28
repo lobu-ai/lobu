@@ -89,6 +89,9 @@ function sourceMetadata(app: GoogleChatApp) {
  * the hosted app a 1:1 bot DM is proof too (its only human is the installer),
  * and a named-space message inherits the installer of that space's latest
  * verified addition, or stays unverified (claimable by nobody).
+ * A pending reference never expires: it is not a bearer secret, because a claim
+ * still needs the claimant's linked Google account to be the verified installer
+ * (`gchat-claim.ts`), so an old link stays usable for the person who added the app.
  */
 export async function parkGoogleChatSpace(app: GoogleChatApp, space: string, sender: string, label: string, added: boolean, direct = false): Promise<string> {
   if ((app.source && !app.source.organizationId) || !/^users\/\d+$/.test(sender)) throw new Error("Google Chat installer identity is missing");

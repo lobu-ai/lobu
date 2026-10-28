@@ -138,6 +138,7 @@ describe("Google Chat installation ownership and dispatch", () => {
       }
     } finally {
       vi.unstubAllEnvs();
+      resetHostedGoogleChatAppForTests();
     }
   });
   it("observes a real vault rotation that does not change the source row", async () => {
