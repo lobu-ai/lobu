@@ -420,6 +420,99 @@ describe('ownership gate on agent entity writes', () => {
     expect((applied.field_controls as Record<string, unknown>).severity).toBeTruthy();
   });
 
+  describe('asserted manual edit (manual_edit + entities:manual_edit)', () => {
+    /** A first-party backend's PAT, explicitly minted with the assertion scope. */
+    function assertingCtx(orgId: string, userId: string): AuthContext {
+      return {
+        ...humanCtx(orgId, userId),
+        clientId: 'pat_task-board',
+        tokenType: 'pat',
+        scopes: ['mcp:read', 'mcp:write', 'entities:manual_edit'],
+      };
+    }
+
+    async function assertedUpdate(ctx: AuthContext, entityId: number, metadata: Record<string, unknown>, extra?: Record<string, unknown>) {
+      return executeTool(
+        'manage_entity',
+        { action: 'update', entity_id: entityId, metadata, manual_edit: true, ...extra },
+        TEST_ENV,
+        ctx
+      ) as Promise<{ manual_edit_applied?: boolean; applied_fields?: string[] }>;
+    }
+
+    it.each([
+      { label: 'agent', extra: { agentId: 'test-agent-1', requestedAgentId: 'test-agent-1' } },
+      { label: 'MCP session', extra: { mcpSessionId: 'test-mcp-session' } },
+      { label: 'chat turn', extra: { sourceContext: { platform: 'slack', source: 'test-chat-turn' } } },
+    ])('rejects the assertion from a $label caller even with the scope', async ({ extra }) => {
+      const ctx = { ...assertingCtx(workspace.org.id, workspace.users.owner.id), ...extra } as AuthContext;
+      await expect(assertedUpdate(ctx, entity.id, { severity: 'high' })).rejects.toMatchObject({
+        code: 'MANUAL_EDIT_NOT_ALLOWED',
+        httpStatus: 403,
+      });
+      const [row] = await getTestDb()`SELECT metadata, field_controls FROM entities WHERE id = ${entity.id}`;
+      expect(row.metadata.severity).toBeUndefined();
+      expect(row.field_controls).toEqual({});
+    });
+
+    it.each([
+      { label: 'automation_source attribution', reaction: false },
+      { label: 'Automation reaction session', reaction: true },
+    ])('rejects the assertion on a verified Automation write ($label) even with the scope', async ({ reaction }) => {
+      const seeded = await seedAutomationAndRun(workspace, reaction ? 'asserted-reaction' : 'asserted');
+      const ctx = reaction
+        ? { ...assertingCtx(workspace.org.id, workspace.users.owner.id), actingAutomationId: seeded.automationId }
+        : assertingCtx(workspace.org.id, workspace.users.owner.id);
+      const extra = reaction ? undefined : { automation_source: { automation_id: seeded.automationId, run_id: seeded.runId } };
+      await expect(assertedUpdate(ctx, seeded.entity.id, { severity: 'high' }, extra)).rejects.toMatchObject({
+        code: 'MANUAL_EDIT_NOT_ALLOWED',
+        httpStatus: 403,
+      });
+      const [row] = await getTestDb()`SELECT metadata, field_controls FROM entities WHERE id = ${seeded.entity.id}`;
+      expect(row.metadata.severity).toBeUndefined();
+      expect(row.field_controls).toEqual({});
+    });
+
+    it('protects an asserted field from a later Automation write while unowned fields apply', async () => {
+      const org = workspace.org.id;
+      const user = workspace.users.owner.id;
+      const seeded = await seedAutomationAndRun(workspace, 'asserted-owner');
+
+      const claimed = await assertedUpdate(assertingCtx(org, user), seeded.entity.id, { severity: 'high' });
+      expect(claimed.manual_edit_applied).toBe(true);
+      const [owned] = await getTestDb()`SELECT field_controls FROM entities WHERE id = ${seeded.entity.id}`;
+      expect(owned.field_controls.severity).toMatchObject({ set_by: user, asserted_by_client: 'pat_task-board' });
+
+      const result = await manageEntityUpdate(
+        agentCtx(org, user, seeded.agentId),
+        seeded.entity.id,
+        { severity: 'critical', notes: 'automation' },
+        { automation_source: { automation_id: seeded.automationId, run_id: seeded.runId } }
+      );
+      expect(result.blocked_fields).toEqual(['severity']);
+      expect(result.applied_fields).toEqual(['notes']);
+      expect(result.approval_queued).toBe(true);
+      expect(result.approval_attribution).toBe('automation');
+      const [row] = await getTestDb()`SELECT metadata FROM entities WHERE id = ${seeded.entity.id}`;
+      expect(row.metadata).toMatchObject({ severity: 'high', notes: 'automation' });
+    });
+
+    it('lets an honoured assertion affirm a field', async () => {
+      const org = workspace.org.id;
+      const user = workspace.users.owner.id;
+      await manageEntityUpdate(agentCtx(org, user), entity.id, { severity: 'high' });
+      const result = await executeTool(
+        'manage_entity',
+        { action: 'update', entity_id: entity.id, affirm_fields: ['severity'], manual_edit: true },
+        TEST_ENV,
+        assertingCtx(org, user)
+      ) as { manual_edit_applied?: boolean };
+      expect(result.manual_edit_applied).toBe(true);
+      const [row] = await getTestDb()`SELECT field_controls FROM entities WHERE id = ${entity.id}`;
+      expect(row.field_controls.severity).toMatchObject({ set_by: user, asserted_by_client: 'pat_task-board' });
+    });
+  });
+
   it('rejects affirm_fields from an agent context (an agent cannot claim ownership)', async () => {
     const org = workspace.org.id;
     const user = workspace.users.owner.id;

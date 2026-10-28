@@ -25,6 +25,22 @@ describe("computeFieldMerge", () => {
 		expect(r.blocked).toEqual({});
 	});
 
+	it("an asserted human edit records the asserting client on each claimed marker", () => {
+		const r = computeFieldMerge({
+			metadata: { status: "todo", owner: "ada" },
+			controls: {},
+			fields: { status: "done" },
+			source: "human",
+			actorId: "usr_1",
+			note: null,
+			nowIso: NOW,
+			affirm: ["owner"],
+			assertedByClient: "pat_7",
+		});
+		const marker = { note: null, set_by: "usr_1", set_at: NOW, asserted_by_client: "pat_7" };
+		expect(r.nextControls).toEqual({ status: marker, owner: marker });
+	});
+
 	it("human edit that does not change the value is a no-op", () => {
 		const r = computeFieldMerge({
 			metadata: { status: "done" },

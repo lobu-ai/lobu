@@ -727,4 +727,22 @@ describe("entity approval apply shares the terminal approval transaction", () =>
 					AND metadata->>'resource_id' = ${invitationId}`,
 		).toHaveLength(0);
 	}, 60_000);
+
+	it("does not report a manual_edit assertion as applied when the rule defers the whole write", async () => {
+		const { org, user, invoice } = await seed();
+		// A person's own edit, asserted; the rule escalates `amount`, so nothing commits.
+		const result = await updateEntity(
+			invoice.id,
+			{ metadata: { amount: 90000 }, manual_edit: true },
+			TEST_ENV,
+			ctxFor(org.id, { userId: user.id }),
+		);
+		expect(result.deferred).toBeTruthy();
+		expect(result.manualEditApplied).toBe(false);
+		expect((await readMetadata(invoice.id)).amount).toBe(1000);
+		const [row] = await getTestDb()<{ field_controls: unknown }[]>`
+      SELECT field_controls FROM entities WHERE id = ${invoice.id}
+    `;
+		expect(row.field_controls).toEqual({});
+	});
 });

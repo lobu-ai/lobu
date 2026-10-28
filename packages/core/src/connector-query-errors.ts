@@ -32,6 +32,12 @@ export type ToolErrorCode =
   | "VALIDATION"
   /** Denied by org-scope / cross-org visibility rules. */
   | "PERMISSION"
+  /**
+   * `manage_entity update` sent `manual_edit: true`, but the caller may not
+   * assert a person's edit: it lacks the `entities:manual_edit` scope, or an
+   * agent, MCP session or Automation is behind the call (HTTP 403).
+   */
+  | "MANUAL_EDIT_NOT_ALLOWED"
   // ── transient: the same call may succeed on retry ──
   /** Upstream throttled the request (HTTP 429 / too many requests). */
   | "RATE_LIMITED"
@@ -79,6 +85,11 @@ export const TOOL_ERRORS: Record<ToolErrorCode, ToolErrorSpec> = {
   PERMISSION: {
     retryable: false,
     message: "Not permitted in this organization scope.",
+  },
+  MANUAL_EDIT_NOT_ALLOWED: {
+    retryable: false,
+    message:
+      "This caller may not assert a manual edit; it needs the entities:manual_edit scope and no agent, MCP session or Automation behind it.",
   },
   RATE_LIMITED: {
     retryable: true,

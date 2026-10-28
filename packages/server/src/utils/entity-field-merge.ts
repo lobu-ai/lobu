@@ -21,6 +21,8 @@ export interface FieldControl {
 	note?: string | null;
 	set_by?: string | null;
 	set_at?: string;
+	/** The token client (`pat_<id>`) whose `manual_edit` assertion claimed the field. */
+	asserted_by_client?: string;
 }
 
 export interface AppliedChange {
@@ -93,6 +95,9 @@ export function computeFieldMerge(args: {
 	 *  feedback loop — affirming a value is NOT a no-op the way re-setting an
 	 *  unchanged value is. */
 	affirm?: string[];
+	/** source='human' only: the client whose `manual_edit` assertion made this a
+	 *  human edit, recorded on each ownership marker this merge writes. */
+	assertedByClient?: string | null;
 	/** Additional fields a non-human policy decision requires approval for, even
 	 * when the field is not already human-owned. */
 	requireApproval?: string[] | Set<string>;
@@ -107,7 +112,14 @@ export function computeFieldMerge(args: {
 		nowIso,
 		expectedCurrent,
 		affirm,
+		assertedByClient,
 	} = args;
+	const marker = (): FieldControl => ({
+		note,
+		set_by: actorId,
+		set_at: nowIso,
+		...(assertedByClient ? { asserted_by_client: assertedByClient } : {}),
+	});
 	const requireApproval = new Set(args.requireApproval ?? []);
 	const nextMetadata: Record<string, unknown> = { ...metadata };
 	const nextControls: Record<string, FieldControl> = { ...controls };
@@ -147,7 +159,7 @@ export function computeFieldMerge(args: {
 		nextMetadata[field] = value;
 		// A human edit claims ownership of the field it sets.
 		if (source === "human") {
-			nextControls[field] = { note, set_by: actorId, set_at: nowIso };
+			nextControls[field] = marker();
 		}
 	}
 
@@ -159,7 +171,7 @@ export function computeFieldMerge(args: {
 		for (const field of affirm) {
 			if (Object.hasOwn(applied, field)) continue;
 			if (!Object.hasOwn(metadata, field)) continue;
-			nextControls[field] = { note, set_by: actorId, set_at: nowIso };
+			nextControls[field] = marker();
 			affirmed.push(field);
 		}
 	}

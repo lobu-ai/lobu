@@ -6,7 +6,7 @@
  */
 
 import { describe, expect, test } from "vitest";
-import { AVAILABLE_PAT_SCOPES, DEFAULT_SCOPES, DISCOVERY_SCOPES, normalizeOAuthScopeRequest, POLICY_WRITE_SCOPE } from "../oauth/scopes";
+import { AVAILABLE_PAT_SCOPES, DEFAULT_SCOPES, DISCOVERY_SCOPES, ENTITY_MANUAL_EDIT_SCOPE, normalizeOAuthScopeRequest, POLICY_WRITE_SCOPE } from "../oauth/scopes";
 import {
   generatePAT,
   generateUserCode,
@@ -132,6 +132,14 @@ describe("parseScopes", () => {
     expect(normalizeOAuthScopeRequest(POLICY_WRITE_SCOPE)).toBeNull();
     expect(parseScopes(POLICY_WRITE_SCOPE)).toEqual([]);
     expect(parseScopes(POLICY_WRITE_SCOPE, AVAILABLE_PAT_SCOPES)).toEqual([POLICY_WRITE_SCOPE]);
+  });
+  test("manual-edit assertion is explicitly mintable on PATs, never on OAuth or default grants", () => {
+    expect(AVAILABLE_PAT_SCOPES).toContain(ENTITY_MANUAL_EDIT_SCOPE);
+    expect(DEFAULT_SCOPES).not.toContain(ENTITY_MANUAL_EDIT_SCOPE);
+    expect(DISCOVERY_SCOPES).not.toContain(ENTITY_MANUAL_EDIT_SCOPE);
+    expect(normalizeOAuthScopeRequest(ENTITY_MANUAL_EDIT_SCOPE)).toBeNull();
+    expect(parseScopes(ENTITY_MANUAL_EDIT_SCOPE)).toEqual([]);
+    expect(parseScopes(ENTITY_MANUAL_EDIT_SCOPE, AVAILABLE_PAT_SCOPES)).toEqual([ENTITY_MANUAL_EDIT_SCOPE]);
   });
   test("null/undefined → default scopes (at least one scope)", () => {
     const defaults = parseScopes(null);

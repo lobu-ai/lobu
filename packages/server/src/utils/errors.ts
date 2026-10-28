@@ -41,6 +41,7 @@ export function toolErrorHttpStatus(code: ToolErrorCode): number {
     case 'NOT_FOUND':
       return 404;
     case 'PERMISSION':
+    case 'MANUAL_EDIT_NOT_ALLOWED':
       return 403;
     case 'RATE_LIMITED':
       return 429;
