@@ -269,6 +269,43 @@ describe("Google Chat shared claim flow", () => {
     expect(await resolveClaimContext(f.provider, f.engine, f.input)).toEqual({ status: "no_pending" });
   });
 
+  it.each(["message", "added", "slash", "add-on"])("a claimed space first reached by %s sends its setup link once, then on commands or re-addition", async (firstEvent) => {
+    const f = await fixture();
+    const result = await claimPendingConnection(f.provider, f.engine, f.input);
+    if (result.status !== "ok") throw new Error(JSON.stringify(result));
+    const installed = (await f.connections.getConnection(result.bindingId))!;
+    const user = { name: "users/123456" };
+    const room = { name: f.space, type: "ROOM", displayName: "Test team space" };
+    const deliver = (body: Record<string, unknown>) => acceptGoogleChatWebhook(installed, new Request("https://gateway.test", { method: "POST", body: JSON.stringify(body) }), f.deps);
+    const message = (id: string, extra: Record<string, unknown> = {}) => ({ type: "MESSAGE", space: room, user, message: { name: `${f.space}/messages/${id}`, sender: user, space: room, text: "hello", ...extra } });
+    const text = async (reply: Response | void) => {
+      const body = await reply!.json();
+      return (body.text ?? body.hostAppDataAction?.chatDataAction?.createMessageAction?.message?.text) as string | undefined;
+    };
+    if (firstEvent !== "message") {
+      const first = firstEvent === "added" ? { type: "ADDED_TO_SPACE", space: room, user }
+        : firstEvent === "slash" ? message("first-slash", { text: "/lobu", slashCommand: { commandId: "1" } })
+        : { chat: { user, appCommandPayload: { space: room, appCommandMetadata: { appCommandId: 1, appCommandType: "SLASH_COMMAND" } } } };
+      expect(await text(await deliver(first))).toContain(`/${f.target.slug}/automations/new?`);
+    }
+    // Concurrent messages announce once, unless the preceding event already did.
+    const first = await Promise.all(["a", "b", "c"].map((id) => deliver(message(id))));
+    const texts = await Promise.all(first.map(text));
+    expect(texts.filter((value) => value?.includes(`/${f.target.slug}/automations/new?`))).toHaveLength(firstEvent === "message" ? 1 : 0);
+    // Later messages stay quiet and still never fall through to dispatch.
+    const quiet = await deliver(message("d"));
+    expect(quiet).toBeInstanceOf(Response);
+    expect(await quiet!.json()).toEqual({});
+    // An explicit command, or adding the app again, asks for setup again.
+    expect(await text(await deliver(message("slash", { text: "/lobu", slashCommand: { commandId: "1" } })))).toContain("/automations/new?");
+    expect(await text(await deliver({ type: "ADDED_TO_SPACE", space: room, user }))).toContain("/automations/new?");
+    // Once an Automation routes the space, its messages dispatch normally.
+    const agent = await createTestAgent({ organizationId: f.target.id, agentId: "test-pilot", ownerUserId: f.user.id });
+    const [row] = await f.sql`SELECT id FROM connections WHERE slug = ${runtimeConnectionIdToSlug(result.bindingId)}`;
+    await new AutomationSubscriptionService().createChatAutomation(agent.agentId, "gchat", `gchat:${f.space}`, undefined, { organizationId: f.target.id, configuredBy: f.user.id, connectionId: Number(row.id) });
+    expect(await deliver(message("routed"))).toBeUndefined();
+  });
+
   it("returns a provider-specific setup response for verified existing unbound spaces", async () => {
     const f = await fixture();
     const body = { type: "MESSAGE", space: { name: "spaces/test-other-space", displayName: "Other test space" }, user: { name: "users/123456" } };
