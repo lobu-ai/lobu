@@ -1,5 +1,4 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
-import { BaseFormatConverter, parseMarkdown, toPlainText } from "chat";
 import {
   type MatchingAutomationActivation,
   planAutomationActivations,
@@ -36,27 +35,16 @@ const linkedMemberActor = async () => ({ access: "member" as const, actorUserId:
 const cooldownClaims: number[] = [];
 const activationMarks: number[] = [];
 let cooldownAllows = true;
-let markZeroThrows = false;
 const automationCooldown = {
   claim: async (automationId: number) => {
     cooldownClaims.push(automationId);
     return cooldownAllows;
   },
   markZero: async (automationId: number) => {
-    if (markZeroThrows) throw new Error("activation stamp unavailable");
     activationMarks.push(automationId);
     return true;
   },
 };
-
-class PlainTextConverter extends BaseFormatConverter {
-  fromAst(ast: Parameters<typeof toPlainText>[0]): string {
-    return toPlainText(ast);
-  }
-  toAst(platformText: string) {
-    return parseMarkdown(platformText);
-  }
-}
 
 describe("buildAttachmentTranscriptText", () => {
   const file = (id: string, name: string, mimetype: string) => ({

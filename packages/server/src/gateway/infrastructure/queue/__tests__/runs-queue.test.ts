@@ -2,8 +2,8 @@
  * Unit tests for `RunsQueue` helpers and shape.
  *
  * The integration tests that exercise a real Postgres claim loop live in
- * `src/gateway/__tests__/integration/runs-queue.integration.test.ts` and are
- * gated on `DATABASE_URL`.
+ * `src/gateway/__tests__/runs-queue-integration.test.ts` and run against
+ * `DATABASE_URL` when set, else an embedded Postgres.
  */
 
 import { describe, expect, mock, test } from "bun:test";
