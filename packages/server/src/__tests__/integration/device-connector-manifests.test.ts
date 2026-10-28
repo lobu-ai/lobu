@@ -8,6 +8,7 @@ import { upsertEntityApprovalPolicy } from '../../authz/entity-policy';
 import { parsePgTextArray } from '../../db/client';
 import { isChromeNamespaceConnectorKey } from '../../utils/connector-execution-placement';
 import { reconcileDeviceCapabilities } from '../../worker-api/device-reconcile';
+import logger from '../../utils/logger';
 import { TestApiClient } from '../setup/test-mcp-client';
 import {
   deviceManifestHash,
@@ -20,6 +21,8 @@ import {
   createTestConnection,
   createTestConnectorDefinition,
   createTestEvent,
+  createTestOrganization,
+  createTestUser,
 } from '../setup/test-fixtures';
 import { post } from '../setup/test-helpers';
 import { DEVICE_MANIFESTS_BY_PLATFORM } from '@lobu/connector-worker/daemon/device-manifests';
@@ -2375,6 +2378,89 @@ describe('device connector manifests', () => {
       await sql.unsafe(`DROP FUNCTION IF EXISTS ${triggerFunction}()`);
     }
   });
+
+  // Team wiring only reuses a connection when `device_worker_id = <device>` AND
+  // `created_by = <polling user>`, but `idx_connections_org_connector_device_live`
+  // is on (org, connector, device) alone. A live row pinned to the same device by
+  // someone else (or with no owner) must stay the only live connection.
+  it.each(['other-user', 'null'] as const)(
+    'keeps a foreign pin as the only live connection on a team device (created_by=%s)',
+    async (otherOwner) => {
+      const sql = getTestDb();
+      const connectorKey = 'test.team_pin_collision';
+      const capability = 'test_team_pin_collision';
+      const teamManifest = {
+        key: connectorKey,
+        version: '1.0.0',
+        name: 'Team Pin Collision',
+        required_capability: capability,
+        runtime: { platforms: ['macos'] },
+        feeds_schema: {},
+      };
+      const owner = await createTestUser();
+      const other = await createTestUser();
+      const org = await createTestOrganization();
+      for (const [u, role] of [[owner.id, 'member'], [other.id, 'admin']] as const) {
+        await sql`
+          INSERT INTO member (id, "organizationId", "userId", role, "createdAt")
+          VALUES (${`mem_${u}`}, ${org.id}, ${u}, ${role}, NOW())
+        `;
+      }
+      const [dev] = (await sql`
+        INSERT INTO device_workers (
+          user_id, worker_id, platform, capabilities, label, organization_id,
+          last_seen_at, connector_manifests
+        ) VALUES (
+          ${owner.id}, ${`mac-${generateSecureToken(6)}`}, 'macos',
+          ${sql.json([capability])}, 'Mac mini', ${org.id}, NOW(),
+          ${sql.json({
+            [connectorKey]: {
+              manifest: teamManifest,
+              manifest_hash: deviceManifestHash(teamManifest as DeviceConnectorManifest),
+              received_at: new Date().toISOString(),
+            },
+          })}
+        ) RETURNING id
+      `) as unknown as Array<{ id: string }>;
+      const createdBy = otherOwner === 'null' ? null : other.id;
+      const [pinned] = (await sql`
+        INSERT INTO connections (
+          organization_id, connector_key, slug, display_name, status,
+          auth_profile_id, created_by, visibility, device_worker_id
+        ) VALUES (
+          ${org.id}, ${connectorKey}, 'preexisting-pin', 'Team Pin Collision', 'active',
+          NULL, ${createdBy}, 'private', ${dev.id}::uuid
+        ) RETURNING id
+      `) as unknown as Array<{ id: number }>;
+
+      // The collision is swallowed inside the wire (caught + logged), so the row
+      // count alone cannot tell a declined wire from a failed INSERT: assert the
+      // failure log stays silent.
+      const errors = vi.spyOn(logger, 'error');
+      try {
+        await reconcileDeviceCapabilities(owner.id);
+        const failures = errors.mock.calls.filter((c) =>
+          String(c[1] ?? '').includes('Failed to wire device connector')
+        );
+        expect(failures.map((c) => JSON.stringify(c[0]))).toEqual([]);
+      } finally {
+        errors.mockRestore();
+      }
+
+      const live = (await sql`
+        SELECT id, created_by, device_worker_id FROM connections
+        WHERE organization_id = ${org.id} AND connector_key = ${connectorKey}
+          AND deleted_at IS NULL
+      `) as unknown as Array<{ id: number; created_by: string | null; device_worker_id: string }>;
+      expect(live).toHaveLength(1);
+      expect(Number(live[0].id)).toBe(Number(pinned.id));
+      // Another member's row is never re-attributed to the polling user; an
+      // ownerless row is adopted by the user whose poll wired it.
+      expect(live[0].created_by).toBe(createdBy ?? owner.id);
+      expect(String(live[0].device_worker_id)).toBe(String(dev.id));
+    },
+    60_000,
+  );
 
   it('installs declared event-kind attributions from a manifest feeds_schema', async () => {
     const { orgId, workerId } = await seedDeviceOwner('chrome-extension');

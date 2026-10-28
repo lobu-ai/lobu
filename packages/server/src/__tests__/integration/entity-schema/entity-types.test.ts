@@ -5,9 +5,23 @@
  * uses TestApiClient (direct handler) so we exercise real DB writes without
  * paying the HTTP/sandbox round-trip on every assertion. The MCP wire path is
  * covered separately in `mcp-auth-wire.test.ts` and `sandbox-execute.test.ts`.
+ *
+ * The entity-type list also carries the platform event catalog in a dedicated
+ * `platform_event_kinds` field: `connection.deleted` and friends are declared by
+ * no entity type, so a trigger picker built from the union of
+ * `entity_types.event_kinds` could never list them. Dedicated rather than a
+ * synthetic `$platform` type, because the events tab builds its content-kind
+ * dropdown from the same list and must not offer platform events as savable
+ * content kinds.
+ *
+ * Relationship `is_symmetric` is create-only: it drives write-time edge
+ * canonicalization, so an update carrying it is rejected (pointing to recreate)
+ * instead of being silently dropped.
  */
 
 import { beforeAll, describe, expect, it } from 'vitest';
+import { platformEventKinds } from '../../../automations/platform-event-catalog';
+import { ensureMemberEntityType } from '../../../utils/member-entity-type';
 import {
   addUserToOrganization,
   createTestOrganization,
@@ -15,15 +29,17 @@ import {
   createTestUser,
 } from '../../setup/test-fixtures';
 import { TestApiClient, TestMcpClient } from '../../setup/test-mcp-client';
-import { cleanupTestDatabase } from '../../setup/test-db';
+import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 
 describe('entity schema CRUD', () => {
   let owner: TestApiClient;
   let wire: TestMcpClient;
+  let orgId: string;
 
   beforeAll(async () => {
     await cleanupTestDatabase();
     const org = await createTestOrganization({ name: 'Schema Test Org' });
+    orgId = org.id;
     const user = await createTestUser({ email: 'schema-owner@test.com' });
     await addUserToOrganization(user.id, org.id, 'owner');
     wire = new TestMcpClient({ token: (await createTestPAT(user.id, org.id, { scope: 'mcp:admin' })).token, orgSlug: org.slug });
@@ -423,6 +439,33 @@ describe('entity schema CRUD', () => {
 			);
 		});
 
+    it('lists the computed platform event catalog without leaking it into any entity type', async () => {
+      // Seed $member's built-in event_kinds so the leak guard inspects a real
+      // declared registry instead of an empty table.
+      await ensureMemberEntityType(orgId);
+      const result = (await owner.entity_schema.listTypes()) as {
+        platform_event_kinds?: Record<string, { description: string }>;
+        entity_types: Array<{ slug: string }>;
+      };
+      expect(result.platform_event_kinds).toEqual(platformEventKinds());
+      // A representative platform type no entity type declares.
+      expect(result.platform_event_kinds).toHaveProperty('connection.deleted');
+
+      const rows = (await getTestDb()`
+        SELECT slug, event_kinds FROM entity_types WHERE event_kinds IS NOT NULL
+      `) as unknown as Array<{ slug: string; event_kinds: Record<string, unknown> | null }>;
+      // Vacuity guard: the seeded $member registry must be here.
+      expect(rows.length).toBeGreaterThan(0);
+      const platformKeys = Object.keys(platformEventKinds());
+      for (const row of rows) {
+        for (const key of Object.keys(row.event_kinds ?? {})) {
+          expect(platformKeys).not.toContain(key);
+        }
+      }
+      // No synthetic pseudo type was injected into the list.
+      expect(result.entity_types.map((type) => type.slug)).not.toContain('$platform');
+    });
+
     it('round-trips a derived backing (sql) and reverts to stored', async () => {
       type Got = {
         entity_type?: {
@@ -605,6 +648,43 @@ describe('entity schema CRUD', () => {
         expect(e.httpStatus).toBe(409);
       }
       await owner.entity_schema.deleteRelType({ slug: 'race-rel' });
+    });
+
+    const isSymmetric = async (slug: string) =>
+      (
+        (await owner.entity_schema.getRelType(slug)) as {
+          relationship_type?: { is_symmetric?: boolean };
+        }
+      ).relationship_type?.is_symmetric;
+
+    it.each([
+      { slug: 'symmetric-then-flip', created: true, patch: { is_symmetric: false } },
+      // A valid patch field alongside must not let is_symmetric be silently dropped.
+      { slug: 'asymmetric-then-flip', created: false, patch: { name: 'Renamed', is_symmetric: true } },
+    ])('rejects an update carrying create-only is_symmetric ($slug)', async ({ slug, created, patch }) => {
+      await owner.entity_schema.createRelType({ slug, name: slug, is_symmetric: created });
+      await expect(
+        owner.entity_schema.manage({
+          schema_type: 'relationship_type',
+          action: 'update',
+          slug,
+          ...patch,
+        })
+      ).rejects.toThrow(/is_symmetric.*create|create.*is_symmetric|recreate/i);
+      // Unchanged — no silent partial apply.
+      expect(await isSymmetric(slug)).toBe(created);
+      await owner.entity_schema.deleteRelType({ slug });
+    });
+
+    it('applies a name-only update and leaves is_symmetric unchanged', async () => {
+      await owner.entity_schema.createRelType({ slug: 'rename-target', name: 'rename-target', is_symmetric: true });
+      const res = (await owner.entity_schema.updateRelType({
+        slug: 'rename-target',
+        name: 'Renamed Via Update',
+      })) as { relationship_type?: { name?: string } };
+      expect(res.relationship_type?.name).toBe('Renamed Via Update');
+      expect(await isSymmetric('rename-target')).toBe(true);
+      await owner.entity_schema.deleteRelType({ slug: 'rename-target' });
     });
   });
 

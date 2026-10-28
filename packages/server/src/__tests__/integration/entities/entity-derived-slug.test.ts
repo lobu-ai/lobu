@@ -2,6 +2,11 @@
  * `entities_slug_parent_unique` has no `deleted_at` predicate, so a tombstone
  * keeps its slug. A slug the platform DERIVES from a name must step past a
  * tombstone; an explicit slug, and a live namesake, must still fail loudly.
+ *
+ * `-` marks where a page path ends and a view begins
+ * (`/<org>/<type>/<slug>/-/views/<key>`), so a record stored under that slug
+ * would have a page the web host parses as a view path. Derived slugs never are
+ * one (slugify trims dashes); an explicit slug has to be refused.
  */
 
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -131,5 +136,32 @@ describe('derived entity slugs and tombstones', () => {
 
     const updated = await updateEntity(renamed.id, { name: 'Acme Corp' }, env, ctx);
     expect(updated.slug).toBe('acme-corp-2');
+  });
+
+  it("refuses the view path marker '-' as an explicit slug on create and rename", async () => {
+    const { org, user, ctx } = await seedOwnerContext({ orgName: 'Slug marker org' });
+    const record = await createTestEntity({ name: 'Launch', organization_id: org.id });
+    const sql = getTestDb();
+    const slugs = async () =>
+      (
+        await sql<{ slug: string }[]>`
+          SELECT slug FROM entities WHERE organization_id = ${org.id} ORDER BY id`
+      ).map((row) => row.slug);
+    const before = await slugs();
+
+    await expect(
+      createEntity({
+        entity_type: 'brand',
+        name: 'Dash',
+        slug: '-',
+        organization_id: org.id,
+        created_by: user.id,
+      })
+    ).rejects.toThrow(/Slug '-' is reserved/);
+    await expect(updateEntity(record.id, { slug: '-' }, env, ctx)).rejects.toThrow(
+      /Slug '-' is reserved/
+    );
+    // Neither call wrote anything: no new row, and the record keeps its slug.
+    expect(await slugs()).toEqual(before);
   });
 });

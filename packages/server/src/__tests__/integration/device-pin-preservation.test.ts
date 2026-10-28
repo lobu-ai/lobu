@@ -1,7 +1,9 @@
 /**
  * Reconciliation preserves device placement through upgrades, permission loss,
  * and offline intervals. Availability never authorizes another device to take
- * over an existing pin. Integration tests against real Postgres.
+ * over an existing pin. Initial binding of an unpinned connection respects
+ * `idx_connections_org_connector_device_live` (one live connection per
+ * org/connector/device). Integration tests against real Postgres.
  */
 
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
@@ -429,5 +431,35 @@ describe('device pin preservation', () => {
 
     expect(await pinOf(currentConn)).toBe(fresh);
     expect(await pinOf(revivedConn)).toBe(revived);
+  });
+
+  it('does not move an offline pin to the sole fresh device', async () => {
+    const staleDevice = await seedWorker(userId, orgId, false);
+    await seedWorker(userId, orgId, true);
+    const only = await seedConn(orgId, userId, staleDevice);
+
+    await reconcileDeviceCapabilities(userId);
+
+    expect(await pinOf(only)).toBe(staleDevice);
+  });
+
+  it('initially binds an unpinned connection to its sole advertiser', async () => {
+    const device = await seedWorker(userId, orgId, true);
+    const connection = await seedConn(orgId, userId, null);
+
+    await reconcileDeviceCapabilities(userId);
+
+    expect(await pinOf(connection)).toBe(device);
+  });
+
+  it('leaves an unpinned connection alone when a sibling owns the sole advertiser', async () => {
+    const device = await seedWorker(userId, orgId, true);
+    const unpinned = await seedConn(orgId, userId, null);
+    const owner = await seedConn(orgId, userId, device);
+
+    await reconcileDeviceCapabilities(userId);
+
+    expect(await pinOf(unpinned)).toBeNull();
+    expect(await pinOf(owner)).toBe(device);
   });
 });
