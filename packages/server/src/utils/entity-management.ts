@@ -1074,7 +1074,9 @@ export async function updateEntity(
 	CreatedEntity & {
 		fieldMerge?: FieldMergeInfo;
 		deferred?: DeferredMutation;
-		/** A `manual_edit` assertion was honoured: this was recorded as a human edit. */
+		/** A `manual_edit` assertion was honoured AND the edit committed as the
+		 *  person's own; false when a rule deferred the whole write and nothing
+		 *  was recorded. */
 		manualEditApplied: boolean;
 	}
 > {
@@ -1117,13 +1119,17 @@ export async function updateEntity(
 	// An unhonoured assertion must fail, never quietly become a non-human write
 	// the caller believes is protected.
 	if (data.manual_edit === true && !isHumanEdit) {
-		// A null refusal here means verified Automation attribution made the
-		// write non-human, so that is the delegation to report.
-		throw manualEditNotAllowed(manualEditRefusal(ctx) ?? "delegated_caller");
+		// Verified Automation attribution is a delegation in itself, whatever the
+		// caller's own token or session would otherwise allow.
+		throw manualEditNotAllowed(
+			opts?.policyPrincipalKind === "automation"
+				? "delegated_caller"
+				: (manualEditRefusal(ctx) ?? "delegated_caller"),
+		);
 	}
-	const manualEditApplied = data.manual_edit === true && isHumanEdit;
+	const manualEditHonoured = data.manual_edit === true && isHumanEdit;
 	// The audit trail of an assertion: which token client vouched for the person.
-	const assertedByClient = manualEditApplied ? (ctx.clientId ?? null) : null;
+	const assertedByClient = manualEditHonoured ? (ctx.clientId ?? null) : null;
 	// affirm_fields claims ownership, which only a human may do. An agent must
 	// never silently claim a field — reject before touching the transaction.
 	if (!isHumanEdit && affirmFields.length > 0) {
@@ -1598,7 +1604,11 @@ export async function updateEntity(
 		proposedCurrent,
 		...persisted
 	} = result;
-	const entity = { ...persisted, manualEditApplied };
+	// A whole-write deferral committed no marker, so the assertion was not applied.
+	const entity = {
+		...persisted,
+		manualEditApplied: manualEditHonoured && !deferWholeWrite,
+	};
 
 	// Post-commit: package any blocked (human-owned or policy-gated) fields as a
 	// single deferred approval. The caller queues it AFTER its own tx + change
