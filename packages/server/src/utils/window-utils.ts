@@ -223,7 +223,7 @@ export async function readPendingWindow(
  *
  * This is the only writer of the mark. The two completion sites that store
  * `action_output` — `complete-window.ts` and the unchanged-source skip in
- * `automations/automation.ts` — both call it inside their completion
+ * `automations/unchanged-window.ts` — both call it inside their completion
  * transaction; no trigger re-derives the mark from run history any more.
  *
  * Returns whether the mark moved.

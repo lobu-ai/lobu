@@ -18,6 +18,7 @@ import { handleAutomationMode } from '../../get_content/automation-mode';
 import type { ToolContext } from '../../registry';
 import type { ManageAutomationsArgs } from '../manage_automations';
 import { runLeaseFence } from '../../../runs/run-lease';
+import type { AutomationTrigger } from '../../../types/automations';
 import { advanceAutomationScheduleAfterSuccessfulWindow } from '../../../automations/schedule-cursor';
 import {
   completeSkippedAutomationRun,
@@ -121,7 +122,7 @@ export async function handleClaimNextWindow(
       executor_kind: string | null;
       next_run_at: string | Date | null;
       schedule_auto_paused_at: string | Date | null;
-      triggers: Array<Record<string, unknown>> | null;
+      triggers: AutomationTrigger[] | null;
     }>`
       SELECT organization_id, schedule, next_run_at, schedule_auto_paused_at, managed_agent_id, device_worker_id, agent_kind,
              triggers, execution_config->'executor'->>'kind' AS executor_kind

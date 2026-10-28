@@ -102,8 +102,8 @@ describe('external Automation activity', () => {
     const id = await createExternal({ triggers: SKIPPING_SCHEDULE });
     const committed = Promise.withResolvers<void>();
     const resume = Promise.withResolvers<void>();
-    // Pause after admission commits, before the first caller can book a no-op
-    // in another transaction. Another replica may claim at precisely this point.
+    // Pause right after the skip commits, where another replica's claim lands:
+    // it must find the schedule advanced, not a pending no-op to adopt.
     const observed = new Proxy(sql, {
       get(target, key) {
         if (key === 'begin') return async (callback: (tx: DbClient) => Promise<unknown>) => {

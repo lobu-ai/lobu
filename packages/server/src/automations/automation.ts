@@ -20,6 +20,7 @@ import {
 	createAutomationRunInTransaction,
 	type AutomationRunPayload,
 } from "../runs/queue-service";
+import type { AutomationTrigger } from "../types/automations";
 import { materializeDueItems } from "../scheduled/due-materializer";
 import { markStaleRunsAsTimeout } from "../scheduled/stale-run-sweeper";
 import { nextRunAt } from "../utils/cron";
@@ -73,7 +74,7 @@ interface DueAutomationRow {
 	device_worker_id?: string | null;
 	/** Preferred local agent kind on the pinned device (e.g. 'claude-code'). */
 	agent_kind?: string | null;
-	triggers?: Array<Record<string, unknown>>;
+	triggers?: AutomationTrigger[];
 	entity_ids?: unknown;
 	created_by?: string | null;
 	current_version_id?: number | string | null;
@@ -887,8 +888,11 @@ export async function materializeDueAutomationRuns(
 			const sourceFingerprint = unchangedWindow?.sourceFingerprint;
 			if (unchangedWindow?.unchanged) {
 				// Admit and complete a no-op in one transaction so no dispatcher can
-				// claim it between creation and cursor advancement.
+				// claim it between creation and cursor advancement. Lock the row
+				// first, in the same order as claim-next-window, so a concurrent
+				// claim cannot deadlock against the pending run's unique index.
 				await sql.begin(async (tx) => {
+					await tx`SELECT id FROM automations WHERE id = ${automation.id} FOR UPDATE`;
 					const skippedRun = await enqueueAutomationRunForRecord(
 						sql,
 						automation,

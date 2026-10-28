@@ -1,7 +1,9 @@
 import type { DbClient } from "../db/client";
 import { classifyRunOutcome } from "../runs/run-outcome";
 import { fingerprintAutomationSources } from "../tools/get_content/automation-mode";
+import type { AutomationTrigger } from "../types/automations";
 import { advanceAutomationArrivalMark } from "../utils/window-utils";
+import { scheduleTriggerOf } from "./schedule-overdue-grace";
 
 export interface UnchangedWindowState {
 	/** Fingerprint to persist on the run so the next window compares against it. */
@@ -12,13 +14,6 @@ export interface UnchangedWindowState {
 	unchanged: boolean;
 }
 
-function scheduleSkipsUnchanged(
-	triggers: ReadonlyArray<Record<string, unknown>> | null | undefined,
-): boolean {
-	const schedule = triggers?.find((trigger) => trigger.kind === "schedule");
-	return schedule?.skip_if_unchanged === true;
-}
-
 /**
  * Decide whether a due arrival window needs an agent at all. Returns null
  * when the schedule trigger does not opt in to `skip_if_unchanged`. Every
@@ -27,10 +22,10 @@ function scheduleSkipsUnchanged(
  */
 export async function inspectUnchangedWindow(
 	sql: DbClient,
-	automation: { id: number; triggers?: ReadonlyArray<Record<string, unknown>> | null },
+	automation: { id: number; triggers?: readonly AutomationTrigger[] | null },
 	window: { windowStart: Date; windowEnd: Date },
 ): Promise<UnchangedWindowState | null> {
-	if (!scheduleSkipsUnchanged(automation.triggers)) return null;
+	if (scheduleTriggerOf(automation.triggers)?.skip_if_unchanged !== true) return null;
 	const sourceState = await fingerprintAutomationSources({
 		sql,
 		automationId: automation.id,
