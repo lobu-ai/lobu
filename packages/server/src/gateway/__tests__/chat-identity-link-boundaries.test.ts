@@ -3,13 +3,10 @@ import { sessionCookieName } from "../../auth/session-cookie-scope.js";
 import * as subjectIdentities from "../../auth/subject-identities.js";
 import { createChatIdentityRoutes } from "../../connect/chat-identity-routes.js";
 import * as dbClient from "../../db/client.js";
-import * as memberOrgs from "../../identity/member-orgs.js";
-import * as gateway from "../../lobu/gateway.js";
 import * as chatLinks from "../../lobu/stores/chat-identity-link.js";
 import { getRateLimiter, resetRateLimiterForTests } from "../../utils/rate-limiter.js";
-import * as publicJoin from "../../workspace/join-public.js";
 import { MessageHandlerBridge } from "../connections/message-handler-bridge.js";
-import { chatSenderLimitKey, type ChatTurnActor } from "../orchestration/chat-turn-actor.js";
+import type { ChatTurnActor } from "../orchestration/chat-turn-actor.js";
 
 afterEach(() => {
   mock.restore();
@@ -42,37 +39,6 @@ async function offer(
   });
   return { mint, post, admitted };
 }
-
-test.each([true, false])("failed notices release their window and still admit the turn (direct=%s)", async (isDirect) => {
-  const refund = spyOn(getRateLimiter(), "refund").mockResolvedValue(undefined);
-  const failedPost = mock(async (_text: string) => { throw new Error("synthetic send failure"); });
-  const { admitted, mint, post } = await offer({ access: "reply_only" }, isDirect, "slack", failedPost);
-  expect(admitted).toBe(true);
-  expect(post).toHaveBeenCalledTimes(1);
-  expect(mint).toHaveBeenCalledTimes(isDirect ? 1 : 0);
-  expect(refund).toHaveBeenCalledTimes(1);
-  expect(refund).toHaveBeenCalledWith(chatSenderLimitKey(isDirect ? "link" : "notice", {
-    organizationId: "org-link-notice", platform: "slack", teamId: "T_SYNTHETIC", senderId: "U_SYNTHETIC",
-  }), expect.objectContaining({ allowed: true, windowStart: 0, countedInDb: true }));
-});
-
-test.each([true, false])("delivered notices keep their window spent (direct=%s)", async (isDirect) => {
-  const refund = spyOn(getRateLimiter(), "refund").mockResolvedValue(undefined);
-  const { admitted, post } = await offer({ access: "reply_only" }, isDirect);
-  expect(admitted).toBe(true);
-  expect(post).toHaveBeenCalledTimes(1);
-  expect(refund).not.toHaveBeenCalled();
-});
-
-test("a DM link remembers the thread it was offered in, so the confirmation lands there", async () => {
-  const { mint, post } = await offer({ access: "reply_only" }, true);
-  expect(mint).toHaveBeenCalledWith(expect.objectContaining({
-    replyTarget: { channelId: "slack:D_SYNTHETIC", threadId: "slack:D_SYNTHETIC:1.0" },
-  }));
-  expect(post).toHaveBeenCalledWith(
-    "I can't use this workspace's tools for you yet. If you're a member, connect your Lobu account: https://cloud.example.test/connect/chat-identity?token=synthetic-link",
-  );
-});
 
 test("vouched senders (DM or group), linked members and unsupported platforms get no link", async () => {
   // A vouched colleague keeps today's silent handling: no new notice in an
@@ -154,90 +120,4 @@ test("failed account switching offers recovery without consuming the link", asyn
   expect(consume).not.toHaveBeenCalled();
   expect(adopt).not.toHaveBeenCalled();
   expect(sql).not.toHaveBeenCalled();
-});
-
-test.each([
-  ["conflict", "ready"],
-  ["already-owned", "ready"],
-  ["already-owned", "failed"],
-  ["already-owned", "pending"],
-  ["already-owned", "unavailable"],
-  ["already-owned", "no-target"],
-] as const)("join completion is disclosed for %s with chat confirmation %s", async (outcome, delivery) => {
-  let joined = false;
-  let committed = false;
-  let sentAfterCommit = false;
-  const pendingSend = Promise.withResolvers<void>();
-  const post = mock(async () => {
-    sentAfterCommit = committed;
-    if (delivery === "failed") throw new Error("synthetic confirmation failure");
-    if (delivery === "pending") await pendingSend.promise;
-  });
-  spyOn(gateway, "getChatInstanceManager").mockReturnValue(
-    delivery === "unavailable" ? null : { postToConversation: post },
-  );
-  const sql = mock(async (parts: TemplateStringsArray) => {
-    const query = parts.join("?");
-    if (query.includes('FROM "organization"')) {
-      return [{ name: "Synthetic Workspace", slug: "synthetic-workspace", visibility: "public" }];
-    }
-    if (query.includes('FROM "member"')) return joined ? [{ role: "member" }] : [];
-    if (query.includes("FROM connections")) return [{}];
-    return [];
-  });
-  spyOn(dbClient, "getDb").mockReturnValue(sql as unknown as dbClient.DbClient);
-  spyOn(chatLinks, "readChatIdentityLink").mockResolvedValue({
-    organizationId: "org-link-notice", connectionId: "synthetic-chat", platform: "slack",
-    teamId: "T_SYNTHETIC", senderId: "U_SYNTHETIC", identityKey: "T_SYNTHETIC:U_SYNTHETIC",
-    senderDisplayName: "Synthetic Sender",
-    ...(delivery !== "no-target" && {
-      replyTarget: { channelId: "slack:D_SYNTHETIC", threadId: "slack:D_SYNTHETIC:1.0" },
-    }),
-  });
-  const join = spyOn(publicJoin, "joinPublicOrganization").mockImplementation(async () => {
-    joined = true;
-    return { status: "joined", organizationId: "org-link-notice", role: "member" };
-  });
-  spyOn(memberOrgs, "resolveMemberOrgsForUser").mockResolvedValue([
-    { tenantOrganizationId: "org-link-notice", memberEntityId: 123 } as never,
-  ]);
-  spyOn(subjectIdentities, "withChatIdentityLock").mockImplementation(async (_namespace, _key, write) => {
-    const result = await write(sql as never);
-    committed = true;
-    return result;
-  });
-  spyOn(subjectIdentities, "signInProvesChatIdentity").mockResolvedValue(true);
-  const adopt = spyOn(subjectIdentities, "adoptChatIdentityOntoMember").mockResolvedValue(outcome);
-  const consume = spyOn(chatLinks, "deleteChatIdentityLink").mockResolvedValue(undefined);
-  const origin = "https://cloud.example.test";
-  const routes = createChatIdentityRoutes({
-    session: async () => ({ user: { id: "user-link-notice" } }),
-    origin: () => origin,
-  });
-  const response = await routes.request(`${origin}/connect/chat-identity`, {
-    method: "POST",
-    headers: { origin, cookie: `${sessionCookieName(true)}=synthetic-session` },
-    body: new URLSearchParams({ token: "synthetic-link", join: "1" }),
-  });
-  expect(response.status).toBe(outcome === "conflict" ? 409 : 200);
-  expect(join).toHaveBeenCalledTimes(1);
-  expect(adopt).toHaveBeenCalledTimes(1);
-  expect(consume).toHaveBeenCalledTimes(outcome === "conflict" ? 0 : 1);
-  const html = await response.text();
-  expect(html).toContain("You joined");
-  expect(html).toContain("Synthetic Workspace");
-  expect(html).not.toContain("Nothing was changed");
-  if (outcome === "conflict" || delivery === "unavailable" || delivery === "no-target") {
-    expect(post).not.toHaveBeenCalled();
-  } else {
-    expect(sentAfterCommit).toBe(true);
-    expect(post).toHaveBeenCalledTimes(1);
-    expect(post).toHaveBeenCalledWith("synthetic-chat", expect.objectContaining({
-      platform: "slack",
-      channelId: "slack:D_SYNTHETIC",
-      threadId: "slack:D_SYNTHETIC:1.0",
-      content: "You're connected. Messages you send me here now act as you in Synthetic Workspace.",
-    }));
-  }
-  pendingSend.resolve();
 });

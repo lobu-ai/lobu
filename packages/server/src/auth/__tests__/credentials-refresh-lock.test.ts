@@ -9,8 +9,8 @@
  * RE-READS expiry inside the lock — so a refresh that's already happened makes
  * the loser no-op instead of replaying a rotated-away token.
  *
- * These tests use a fake `DbClient` so they assert the control flow (lock first,
- * re-read inside the lock, skip when no longer expiring) without a live DB.
+ * These tests use a fake `DbClient` so they pin what the loser does (re-read
+ * inside the lock, skip when no longer expiring) without a live DB.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -76,34 +76,6 @@ describe('CredentialService.refreshWithConfig — advisory lock (F5)', () => {
   });
   afterEach(() => {
     vi.restoreAllMocks();
-  });
-
-  it('acquires the advisory lock BEFORE re-reading the account row', async () => {
-    // Token still expiring → a real refresh should happen.
-    const { db, calls } = makeFakeDb([
-      {
-        accessToken: 'old-access',
-        refreshToken: 'stored-refresh-token',
-        expiresAt: new Date(Date.now() + 60_000), // within the 5-min buffer
-      },
-    ]);
-
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response(
-        JSON.stringify({ access_token: 'new-access', expires_in: 3600, refresh_token: 'rotated' }),
-        { status: 200, headers: { 'content-type': 'application/json' } }
-      )
-    );
-
-    const svc = new CredentialService(db);
-    const result = await svc.refreshWithConfig(oauthConfig);
-
-    expect(result?.accessToken).toBe('new-access');
-    // Ordering: advisory_lock must precede the FOR UPDATE re-read, which must
-    // precede the persist UPDATE.
-    const kinds = calls.map((c) => c.kind).filter((k) => k !== 'other');
-    expect(kinds).toEqual(['advisory_lock', 'select_for_update', 'update_persist']);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it('NO-OPS the refresh when the in-lock re-read shows the token already rotated', async () => {

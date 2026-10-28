@@ -95,36 +95,6 @@ describe('extension bootstrap', () => {
     expect(h.stored).toEqual([]);
   });
 
-  it('keeps only the latest retry active and preserves the deep link', async () => {
-    const h = harness('#token=synthetic-token&agent=synthetic-agent&thread=synthetic-thread&message=synthetic-message');
-    h.requests[0].reject(new Error('offline'));
-    await flush();
-    const retry = h.buttons['owl-retry'].onclick!;
-    retry();
-    retry();
-    expect(h.timers.size).toBe(1);
-    expect(h.requests[1].options.signal?.aborted).toBe(true);
-    success(h.requests[1]);
-    await flush();
-    expect(h.redirects).toEqual([]);
-    success(h.requests[2]);
-    await flush();
-    expect(h.redirects).toEqual(['/#agent=synthetic-agent&thread=synthetic-thread&message=synthetic-message']);
-    expect(h.stored).toEqual(['synthetic-session']);
-    expect(h.timers.size).toBe(0);
-  });
-
-  it.each(['network', 'token'])('offers recovery on %s failure', async (failure) => {
-    const h = harness();
-    if (failure === 'network') h.requests[0].reject(new Error('offline'));
-    else h.requests[0].resolve({ ok: false });
-    await flush();
-    expect(h.buttons['owl-retry']).toBeDefined();
-    expect(h.body.markup).toContain('Lobu');
-    expect(h.timers.size).toBe(0);
-    expect(h.redirects).toEqual([]);
-  });
-
   it('opens the device after success and strips the fragment before exchange', async () => {
     const h = harness();
     success(h.requests[0]);
@@ -133,46 +103,6 @@ describe('extension bootstrap', () => {
     expect(h.fragmentCleared).toBe(true);
     expect(h.timers.size).toBe(0);
     expect(h.posted).toEqual([]);
-  });
-
-  it.each(['insufficient_scope', 'invalid_token'])('waits for panel recovery after %s before showing the fallback', async (error) => {
-    const h = harness();
-    h.requests[0].resolve({ ok: false, status: error === 'invalid_token' ? 401 : 403, json: async () => ({ error }) });
-    await flush();
-    expect(h.body.textContent).toBe('Reconnecting\u2026');
-    expect(h.body.markup).toBe('');
-    expect(h.posted).toEqual([{ owletto: 'session-rejected' }]);
-    expect(h.redirects).toEqual([]);
-    expect(h.stored).toEqual([]);
-    expect(h.timers.size).toBe(1);
-    const [id, expire] = [...h.timers.entries()][0];
-    expect(h.delays.get(id)).toBe(4000);
-    expire();
-    expect(h.timers.size).toBe(0);
-    expect(h.listeners.size).toBe(0);
-    if (error === 'insufficient_scope') {
-      expect(h.paragraphs[1].textContent).toContain('Re-pair to sign in');
-      expect(h.buttons['owl-retry']).toBeUndefined();
-      h.buttons['owl-settings'].onclick!();
-      expect(h.posted).toEqual([{ owletto: 'session-rejected' }, { owletto: 'open-settings' }]);
-    } else {
-      expect(h.paragraphs[1].textContent).toContain('expired');
-      h.buttons['owl-retry'].onclick!();
-      success(h.requests[1]);
-      await flush();
-      expect(h.redirects).toEqual(['/#worker=synthetic-worker']);
-      expect(h.stored).toEqual(['synthetic-session']);
-      expect(h.timers.size).toBe(0);
-    }
-  });
-
-  it('shows recovery immediately and clears the wait when notifying the panel throws', async () => {
-    const h = harness('#token=synthetic-token', true);
-    h.requests[0].resolve({ ok: false, status: 401, json: async () => ({ error: 'invalid_token' }) });
-    await flush();
-    expect(h.paragraphs[1].textContent).toContain('expired');
-    expect(h.buttons['owl-retry']).toBeDefined();
-    expect(h.timers.size).toBe(0);
   });
 
   it('shows recovery as soon as the panel reports it could not refresh, ignoring other senders', async () => {

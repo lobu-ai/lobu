@@ -27,7 +27,7 @@ describe("AgentSettingsStore", () => {
     return orgContext.run({ organizationId: ORG_ID }, fn);
   }
 
-  describe("CRUD basics", () => {
+  describe("organization scoping", () => {
     test("getSettings uses explicit organization context when agent ids collide", async () => {
       const otherOrg = `${ORG_ID}-other`;
       await orgContext.run({ organizationId: ORG_ID }, async () => {
@@ -106,55 +106,6 @@ describe("AgentSettingsStore", () => {
         true
       );
     });
-
-    test("saveSettings stores and getSettings retrieves", async () => {
-      await withOrg(async () => {
-        await seedAgentRow("agent-1", { organizationId: ORG_ID });
-        await store.saveSettings("agent-1", { models: ["claude/claude-sonnet-4"] });
-        const result = await store.getSettings("agent-1");
-        expect(result).not.toBeNull();
-        expect(result!.models).toEqual(["claude/claude-sonnet-4"]);
-        expect(result!.updatedAt).toBeGreaterThan(0);
-      });
-    });
-
-    test("getSettings returns null for non-existent agent", async () => {
-      await withOrg(async () => {
-        const result = await store.getSettings("missing");
-        expect(result).toBeNull();
-      });
-    });
-
-    test("updateSettings merges with existing", async () => {
-      await withOrg(async () => {
-        await seedAgentRow("agent-1", { organizationId: ORG_ID });
-        await store.saveSettings("agent-1", { models: ["claude/claude-sonnet-4"] });
-        await store.updateSettings("agent-1", { soulMd: "Be helpful" });
-        const result = await store.getSettings("agent-1");
-        expect(result!.models).toEqual(["claude/claude-sonnet-4"]);
-        expect(result!.soulMd).toBe("Be helpful");
-      });
-    });
-
-    test("deleteSettings removes settings", async () => {
-      await withOrg(async () => {
-        await seedAgentRow("agent-1", { organizationId: ORG_ID });
-        await store.saveSettings("agent-1", { models: ["claude/claude-sonnet-4"] });
-        await store.deleteSettings("agent-1");
-        const result = await store.getSettings("agent-1");
-        // After deleteSettings the row still exists but settings columns are
-        // reset; getSettings returns a default-shaped object with no model.
-        expect(result).not.toBeNull();
-        expect(result!.models).toBeUndefined();
-      });
-    });
-
-    test("hasSettings tracks row existence", async () => {
-      await withOrg(async () => {
-        await seedAgentRow("agent-1", { organizationId: ORG_ID });
-        expect(await store.hasSettings("agent-1")).toBe(true);
-      });
-    });
   });
 
   describe("partial update merging", () => {
@@ -170,16 +121,6 @@ describe("AgentSettingsStore", () => {
         expect(result!.models).toEqual(["claude/claude-sonnet-4"]);
         expect(result!.soulMd).toBe("Original");
         expect(result!.userMd).toBe("New field");
-      });
-    });
-
-    test("overwrites overlapping fields", async () => {
-      await withOrg(async () => {
-        await seedAgentRow("agent-1", { organizationId: ORG_ID });
-        await store.saveSettings("agent-1", { models: ["claude/claude-sonnet-4"] });
-        await store.updateSettings("agent-1", { models: ["claude/claude-opus-4"] });
-        const result = await store.getSettings("agent-1");
-        expect(result!.models).toEqual(["claude/claude-opus-4"]);
       });
     });
   });

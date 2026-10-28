@@ -27,6 +27,21 @@ describe('validateCapabilityBlock', () => {
       ).toBeNull();
     });
 
+    it('accepts the root path "/"', () => {
+      expect(validateCapabilityBlock('text', { models_endpoint: '/' })).toBeNull();
+    });
+
+    it.each([
+      ['absolute URL', 'https://evil/models'],
+      ['no leading slash', 'models'],
+      ['tab-injected', '/\t//evil'],
+      ['space', '/a b'],
+    ])('rejects models_endpoint: %s', (_label, models_endpoint) => {
+      expect(
+        validateCapabilityBlock('text', { models_endpoint })
+      ).toBeTruthy();
+    });
+
     it('rejects a non-string models_endpoint', () => {
       expect(
         validateCapabilityBlock('text', {
@@ -61,6 +76,13 @@ describe('validateCapabilityBlock', () => {
       ).toBeTruthy();
     });
 
+    it.each([
+      ['not a URL', '://nope'],
+      ['empty string', ''],
+    ])('rejects base_url: %s', (_label, base_url) => {
+      expect(validateCapabilityBlock('text', { base_url })).toBeTruthy();
+    });
+
     it('accepts a clean https base_url', () => {
       expect(
         validateCapabilityBlock('text', {
@@ -79,6 +101,10 @@ describe('validateCapabilityBlock', () => {
 
     it('rejects an empty-string model', () => {
       expect(validateCapabilityBlock('text', { model: '' })).toBeTruthy();
+    });
+
+    it('rejects a whitespace-only model', () => {
+      expect(validateCapabilityBlock('text', { model: '  ' })).toBeTruthy();
     });
 
     it('accepts { model: "x" }', () => {

@@ -2,8 +2,8 @@
  * Unit tests for `RunsQueue` helpers and shape.
  *
  * The integration tests that exercise a real Postgres claim loop live in
- * `src/gateway/__tests__/integration/runs-queue.integration.test.ts` and are
- * gated on `DATABASE_URL`.
+ * `src/gateway/__tests__/runs-queue-integration.test.ts` and run against
+ * `DATABASE_URL` when set, else an embedded Postgres.
  */
 
 import { describe, expect, mock, test } from "bun:test";
@@ -42,6 +42,14 @@ describe("classifyQueue", () => {
     expect(classifyQueue("task")).toBe("task");
     expect(classifyQueue("task:cron-tick")).toBe("task");
   });
+  // RunsQueue claims by the classified run_type, so a connector-worker lane
+  // name must never pass through as itself (the automation-run race).
+  test("never emits a connector-worker lane", () => {
+    const connectorLanes = ["sync", "action", "embed_backfill", "automation", "auth"];
+    for (const name of [...connectorLanes, "automation:123", "automation_run"]) {
+      expect(connectorLanes).not.toContain(classifyQueue(name));
+    }
+  });
 });
 
 describe("backoffSeconds", () => {
@@ -56,6 +64,9 @@ describe("backoffSeconds", () => {
   });
   test("attempt 0 is 1s", () => {
     expect(backoffSeconds(0)).toBe(1);
+  });
+  test("negative attempt is treated as 0", () => {
+    expect(backoffSeconds(-1)).toBe(1);
   });
 });
 

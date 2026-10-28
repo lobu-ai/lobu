@@ -33,6 +33,8 @@ describe("PolicyStore.resolve", () => {
     expect(store.resolve("org-a", "agent-a","foo.example.com")).toBeDefined();
     expect(store.resolve("org-a", "agent-a","example.com")).toBeDefined();
     expect(store.resolve("org-a", "agent-a","unrelated.com")).toBeUndefined();
+    // Suffix match is on a label boundary, not a raw string suffix.
+    expect(store.resolve("org-a", "agent-a","notexample.com")).toBeUndefined();
   });
 
   test("exact match beats wildcard rule", () => {
@@ -168,6 +170,23 @@ describe("egressGuardrailsToPolicyBundle", () => {
       guardrail({ name: "default", domains: ["*.Example.COM"] }),
     ]);
     expect(bundle?.judgedDomains[0]?.domain).toBe(".example.com");
+  });
+
+  test("deduplicates equivalent domain patterns", () => {
+    const bundle = egressGuardrailsToPolicyBundle([
+      guardrail({ name: "j1", domains: ["*.example.com"] }),
+      guardrail({ name: "j2", domains: [".example.com"] }),
+    ]);
+    expect(bundle?.judgedDomains).toHaveLength(1);
+  });
+
+  test("skips empty domain entries", () => {
+    const bundle = egressGuardrailsToPolicyBundle([
+      guardrail({ name: "j", domains: ["", "api.example.com"] }),
+    ]);
+    expect(bundle?.judgedDomains.map((rule) => rule.domain)).toEqual([
+      "api.example.com",
+    ]);
   });
 });
 

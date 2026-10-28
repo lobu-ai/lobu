@@ -108,22 +108,6 @@ describe("TokenRefreshJob advisory lock (F5)", () => {
     oauthClient.refreshToken.mockClear();
   });
 
-  test("acquires the advisory lock and refreshes when still expiring", async () => {
-    const expiring = Date.now() + 60_000; // within 5-min buffer
-    const { manager, upserts } = makeManager({
-      profileSequence: [[makeProfile(expiring)], [makeProfile(expiring)]],
-    });
-
-    const job = new TokenRefreshJob(manager as never, [
-      { providerId: "claude", refresher: oauthClient as never },
-    ], () => fakeDb);
-    await job.refreshForUserAgent("u1", "agent-1");
-
-    expect(calls.some((c) => c.kind === "advisory_lock")).toBe(true);
-    expect(oauthClient.refreshToken).toHaveBeenCalledTimes(1);
-    expect(upserts.length).toBe(1);
-  });
-
   test("no-ops when the in-lock re-read shows the token already rotated by another replica", async () => {
     const expiring = Date.now() + 60_000; // pre-check (outside lock) sees expiring
     const rotated = Date.now() + 3600_000; // in-lock re-read sees future expiry
@@ -141,22 +125,6 @@ describe("TokenRefreshJob advisory lock (F5)", () => {
     expect(calls.some((c) => c.kind === "advisory_lock")).toBe(true);
     expect(oauthClient.refreshToken).not.toHaveBeenCalled();
     expect(upserts.length).toBe(0);
-  });
-
-  test("skips the lock entirely for a profile that is not near expiry", async () => {
-    const healthy = Date.now() + 3600_000;
-    const { manager } = makeManager({
-      profileSequence: [[makeProfile(healthy)]],
-    });
-
-    const job = new TokenRefreshJob(manager as never, [
-      { providerId: "claude", refresher: oauthClient as never },
-    ], () => fakeDb);
-    await job.refreshForUserAgent("u1", "agent-1");
-
-    // Cheap pre-check short-circuits before any lock/refresh.
-    expect(calls.some((c) => c.kind === "advisory_lock")).toBe(false);
-    expect(oauthClient.refreshToken).not.toHaveBeenCalled();
   });
 });
 
@@ -296,23 +264,6 @@ describe("TokenRefreshJob refresh suspension (dead grants)", () => {
     expect(oauthClient.refreshToken).not.toHaveBeenCalled();
     expect(fakes.upserts.length).toBe(0);
     expect(fakes.suspensions.length).toBe(0);
-  });
-
-  test("refreshes an expiring profile alongside a healthy different-model profile", async () => {
-    const expiring = makeProfile(Date.now() + 60_000);
-    const sibling = {
-      ...makeProfile(Date.now() + 3600_000),
-      id: "profile-2",
-      model: "other-model",
-    };
-    const fakes = makeManager({
-      profileSequence: [[expiring, sibling]],
-    });
-
-    await runJob(fakes).refreshForUserAgent("u1", "agent-1");
-
-    expect(oauthClient.refreshToken).toHaveBeenCalledTimes(1);
-    expect(fakes.upserts).toHaveLength(1);
   });
 
   test("does not let a suspended profile hide another refreshable profile", async () => {

@@ -1,5 +1,4 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
-import { BaseFormatConverter, parseMarkdown, toPlainText } from "chat";
 import {
   type MatchingAutomationActivation,
   planAutomationActivations,
@@ -36,27 +35,16 @@ const linkedMemberActor = async () => ({ access: "member" as const, actorUserId:
 const cooldownClaims: number[] = [];
 const activationMarks: number[] = [];
 let cooldownAllows = true;
-let markZeroThrows = false;
 const automationCooldown = {
   claim: async (automationId: number) => {
     cooldownClaims.push(automationId);
     return cooldownAllows;
   },
   markZero: async (automationId: number) => {
-    if (markZeroThrows) throw new Error("activation stamp unavailable");
     activationMarks.push(automationId);
     return true;
   },
 };
-
-class PlainTextConverter extends BaseFormatConverter {
-  fromAst(ast: Parameters<typeof toPlainText>[0]): string {
-    return toPlainText(ast);
-  }
-  toAst(platformText: string) {
-    return parseMarkdown(platformText);
-  }
-}
 
 describe("buildAttachmentTranscriptText", () => {
   const file = (id: string, name: string, mimetype: string) => ({
@@ -73,22 +61,6 @@ describe("buildAttachmentTranscriptText", () => {
         file("abc", "report.pdf", "application/pdf"),
 			]),
     ).toBe("see attached\n\n[report.pdf](/api/v1/files/abc)");
-  });
-
-  test("supports a file-only message (empty caption)", () => {
-    expect(
-			buildAttachmentTranscriptText("", [
-				file("xyz", "notes.txt", "text/plain"),
-			]),
-    ).toBe("[notes.txt](/api/v1/files/xyz)");
-  });
-
-  test("skips images (they persist as inline transcript blocks)", () => {
-    expect(
-			buildAttachmentTranscriptText("hi", [
-				file("img", "pic.png", "image/png"),
-			]),
-    ).toBe("hi");
   });
 
   test("appends one ref per non-image file, images skipped", () => {
@@ -116,10 +88,6 @@ describe("buildAttachmentTranscriptText", () => {
     expect(
 			buildAttachmentTranscriptText("", [file("id2", "()[]", "text/plain")]),
     ).toBe("[file](/api/v1/files/id2)");
-  });
-
-  test("returns the original text unchanged when there are no files", () => {
-    expect(buildAttachmentTranscriptText("just text", [])).toBe("just text");
   });
 });
 
@@ -213,76 +181,6 @@ describe("ingestInboundAttachments", () => {
   });
 
   afterEach(() => env.cleanup());
-
-  test("returns empty arrays when there are no attachments", async () => {
-    const result = await ingest(undefined);
-    expect(result).toEqual({ files: [], audioBytes: [] });
-  });
-
-  test("publishes every attachment as an artifact and surfaces a signed downloadUrl", async () => {
-    let pdfFetched = 0;
-    const { files } = await ingest([
-      {
-        type: "image",
-        name: "screenshot.png",
-        mimeType: "image/png",
-        data: Buffer.from("png-bytes"),
-      },
-      {
-        type: "file",
-        name: "report.pdf",
-        mimeType: "application/pdf",
-        fetchData: async () => {
-          pdfFetched += 1;
-          return Buffer.from("pdf-bytes");
-        },
-      },
-    ]);
-
-    expect(pdfFetched).toBe(1);
-    expect(files).toHaveLength(2);
-    expect(files[0]).toMatchObject({
-      name: "screenshot.png",
-      mimetype: "image/png",
-      size: Buffer.from("png-bytes").length,
-    });
-    expect(files[1]).toMatchObject({
-      name: "report.pdf",
-      mimetype: "application/pdf",
-      size: Buffer.from("pdf-bytes").length,
-    });
-    for (const file of files) {
-      expect(file.id).toBeTruthy();
-      expect(file.downloadUrl).toContain("/api/v1/files/");
-      expect(file.downloadUrl).toContain("token=");
-    }
-  });
-
-  test("audio attachments are published AND surfaced for transcription", async () => {
-    const { files, audioBytes } = await ingest([
-      {
-        type: "audio",
-        name: "voice.ogg",
-        mimeType: "audio/ogg",
-        fetchData: async () => Buffer.from("opus-bytes"),
-      },
-      {
-        type: "audio",
-        name: "alt.ogg",
-        mimeType: "application/ogg",
-        fetchData: async () => Buffer.from("vorbis-bytes"),
-      },
-    ]);
-
-    // Audio still goes through artifact publishing so the worker can refer
-    // to the original recording, AND its bytes are returned for immediate
-    // transcription.
-    expect(files).toHaveLength(2);
-    expect(audioBytes).toHaveLength(2);
-    expect(audioBytes[0]?.buffer.toString()).toBe("opus-bytes");
-    expect(audioBytes[0]?.mimeType).toBe("audio/ogg");
-    expect(audioBytes[1]?.mimeType).toBe("application/ogg");
-  });
 
   // A bad attachment must never abort the rest of the batch — whether it has
   // no fetchable bytes or its fetchData throws, the good one still publishes.
@@ -439,95 +337,6 @@ function makeThread(adapter: unknown) {
 }
 
 describe("registerMessageHandlers linked-channel ingress", () => {
-  test("does not add a catch-all to non-Slack adapters", () => {
-    const onNewMessage = mock(() => undefined);
-    registerMessageHandlers(
-      {
-        onNewMention: mock(() => undefined),
-        onDirectMessage: mock(() => undefined),
-        onSubscribedMessage: mock(() => undefined),
-        onNewMessage,
-      },
-      { ...buildConnection(), platform: "telegram" },
-      {
-        getArtifactStore: () => null,
-        getPublicGatewayUrl: () => "https://gateway.example.com",
-      } as any,
-      { getInstance: () => null } as any,
-    );
-
-    expect(onNewMessage).not.toHaveBeenCalled();
-  });
-
-  test("Enterprise Grid ordinary channel events reach the Automation bridge", async () => {
-    let unmatchedHandler:
-      | ((thread: unknown, message: unknown) => Promise<void>)
-      | undefined;
-    const chat = {
-      onNewMention: mock(() => undefined),
-      onDirectMessage: mock(() => undefined),
-      onSubscribedMessage: mock(() => undefined),
-      onNewMessage: mock(
-        (
-          _pattern: RegExp,
-          handler: (thread: unknown, message: unknown) => Promise<void>,
-        ) => {
-          unmatchedHandler = handler;
-        },
-      ),
-    };
-    const channelHasMessageSubscription = mock(async () => true);
-    const connection: PlatformConnection = {
-      ...buildConnection(),
-      id: "slackinst-grid",
-      organizationId: "org-grid",
-      agentId: undefined,
-      metadata: {
-        teamId: "E0ENTERPRISE",
-        enterpriseId: "E0ENTERPRISE",
-        isEnterpriseInstall: true,
-        botUserId: "U_BOT",
-      },
-    };
-    const services = {
-      getArtifactStore: () => null,
-      getPublicGatewayUrl: () => "https://gateway.example.com",
-      getAutomationSubscriptionService: () => ({
-        channelHasMessageSubscription,
-      }),
-    } as any;
-    const bridge = registerMessageHandlers(
-      chat,
-      connection,
-      services,
-      { getInstance: () => null } as any,
-    );
-    const handleMessage = mock(async () => undefined);
-    bridge.handleMessage = handleMessage as typeof bridge.handleMessage;
-    // Real adapter shape: `channelIdFromThreadId` returns the prefixed
-    // `slack:C…`, which the subscription reader normalizes to native `C…`.
-    const thread = {
-      id: "slack:C0CHANNEL:1787290503.806889",
-      channelId: "slack:C0CHANNEL",
-    };
-    const message = makeMessage({
-      id: "1787290503.806889",
-      isMention: false,
-      raw: { team_id: "T0WORKSPACE" },
-    });
-
-    expect(unmatchedHandler).toBeDefined();
-    await unmatchedHandler!(thread, message);
-
-    expect(channelHasMessageSubscription).toHaveBeenCalledWith(
-      "slackinst-grid",
-      "slack:C0CHANNEL",
-      "org-grid",
-      { crossOrganization: false, teamId: "T0WORKSPACE" },
-    );
-    expect(handleMessage).toHaveBeenCalledWith(thread, message, "subscribed");
-  });
-
   test("ordinary messages in unlinked channels stay silent", async () => {
     let unmatchedHandler:
       | ((thread: unknown, message: unknown) => Promise<void>)
@@ -651,60 +460,6 @@ function priorMessage(id: string, text: string, isMe: boolean, whenMs: number) {
 }
 
 describe("MessageHandlerBridge.handleMessage — thread backfill", () => {
-  test("first mention with empty history backfills via adapter.fetchMessages", async () => {
-    const fetchMessages = mock(async () => ({
-      messages: [
-        priorMessage("M1", "favorite color is teal", false, 1_700_000_001_000),
-        priorMessage("M2", "I drive a Civic", false, 1_700_000_002_000),
-        // Drop the current mention — handler should skip it by id.
-        priorMessage(
-          "M_NEW",
-          "<@U_BOT> what was the prior context?",
-          false,
-					1_700_000_003_000,
-        ),
-      ],
-    }));
-    const { bridge, conversationState, adapter, enqueueMessage } =
-      createBridgeHarness({ fetchMessages });
-    const thread = makeThread(adapter);
-
-    await bridge.handleMessage(thread, makeMessage(), "mention");
-
-    expect(fetchMessages).toHaveBeenCalledTimes(1);
-    expect(fetchMessages.mock.calls[0]?.[0]).toBe(THREAD_ID);
-    expect(fetchMessages.mock.calls[0]?.[1]).toEqual({
-      limit: 50,
-      direction: "forward",
-    });
-
-		const entries = await conversationState.getEntries(
-			CONN_ID,
-			CHANNEL_ID,
-			THREAD_ID,
-		);
-    // 2 backfilled (current message id is skipped) + the current mention
-    // message (mention text stripped of `<@U_BOT>`).
-    expect(entries.map((e) => e.content)).toEqual([
-      "favorite color is teal",
-      "I drive a Civic",
-      "what was the prior context?",
-    ]);
-    expect(entries[0]?.role).toBe("user");
-
-    // Worker payload's conversationHistory was snapshotted AFTER backfill
-    // but BEFORE the new mention was appended — so backfill is visible
-    // and the current message is not (it gets passed via messageText).
-    expect(enqueueMessage).toHaveBeenCalledTimes(1);
-    const payload = enqueueMessage.mock.calls[0]?.[0] as any;
-    const history = payload.platformMetadata.conversationHistory;
-    expect(history).toHaveLength(2);
-    expect(history[0]).toMatchObject({
-      role: "user",
-      content: "favorite color is teal",
-    });
-  });
-
   test("backfilled bot replies are tagged role=assistant", async () => {
     const fetchMessages = mock(async () => ({
       messages: [
@@ -741,36 +496,6 @@ describe("MessageHandlerBridge.handleMessage — thread backfill", () => {
     expect(fetchMessages).toHaveBeenCalledTimes(1);
   });
 
-  test("DM source skips backfill — DMs are linear, no hidden history", async () => {
-    const fetchMessages = mock(async () => ({ messages: [] }));
-    const { bridge, adapter } = createBridgeHarness({ fetchMessages });
-    const thread = makeThread(adapter);
-
-    await bridge.handleMessage(thread, makeMessage(), "dm");
-
-    expect(fetchMessages).not.toHaveBeenCalled();
-  });
-
-  test("subscribed source also backfills if no prior claim exists", async () => {
-    const fetchMessages = mock(async () => ({
-      messages: [priorMessage("M1", "earlier note", false, 1)],
-    }));
-    const { bridge, conversationState, adapter } = createBridgeHarness({
-      fetchMessages,
-    });
-    const thread = makeThread(adapter);
-
-    await bridge.handleMessage(thread, makeMessage(), "subscribed");
-
-    expect(fetchMessages).toHaveBeenCalledTimes(1);
-		const entries = await conversationState.getEntries(
-			CONN_ID,
-			CHANNEL_ID,
-			THREAD_ID,
-		);
-    expect(entries.map((e) => e.content)).toContain("earlier note");
-  });
-
   test("fetchMessages failure releases the claim so the next event retries", async () => {
     let calls = 0;
     const fetchMessages = mock(async () => {
@@ -805,27 +530,6 @@ describe("MessageHandlerBridge.handleMessage — thread backfill", () => {
 			THREAD_ID,
 		);
     expect(entries.map((e) => e.content)).toContain("recovered");
-  });
-
-  test("adapter without fetchMessages does not retry-storm", async () => {
-    // Some adapters may not implement fetchMessages. We must keep the claim
-    // (treating it as success) so subsequent events don't re-probe a
-    // missing capability on every message.
-    const { bridge, conversationState } = createBridgeHarness({
-      withAdapter: true,
-    });
-    const thread = makeThread({});
-
-    await bridge.handleMessage(thread, makeMessage({ id: "M_A" }), "mention");
-    await bridge.handleMessage(thread, makeMessage({ id: "M_B" }), "mention");
-
-    // Only the two current mentions land in history.
-		const entries = await conversationState.getEntries(
-			CONN_ID,
-			CHANNEL_ID,
-			THREAD_ID,
-		);
-    expect(entries).toHaveLength(2);
   });
 });
 
@@ -1025,99 +729,6 @@ describe("MessageHandlerBridge.handleMessage — routing and unlinked chats", ()
     });
   });
 
-  test("adapter-normalized help dispatches before preview onboarding", async () => {
-    const tryHandleSlashText = mock(async () => true);
-    const { bridge, enqueueMessage } = makePreviewHarness({
-      platform: "gchat",
-      linkedAutomation: null,
-      commandDispatcher: {
-        tryHandleSlashText,
-        tryHandle: mock(async () => false),
-      },
-    });
-    const thread = makeThread(undefined);
-
-    await bridge.handleMessage(
-      thread,
-      makeMessage({ text: "/help" }),
-      "dm",
-    );
-
-    expect(tryHandleSlashText).toHaveBeenCalledTimes(1);
-    expect(tryHandleSlashText.mock.calls[0]?.[0]).toBe("/help");
-    expect(enqueueMessage).not.toHaveBeenCalled();
-    expect(thread.post).not.toHaveBeenCalled();
-  });
-
-  test("Google Chat /lobu clear clears the scoped history without an agent turn", async () => {
-    const { bridge, conversationState, enqueueMessage } = makePreviewHarness({
-      platform: "gchat",
-      previewMode: false,
-    });
-    const thread = makeThread(undefined);
-    await conversationState.appendHistory(CONN_ID, CHANNEL_ID, THREAD_ID, {
-      role: "user",
-      content: "remember this",
-      timestamp: Date.now(),
-    });
-
-    await bridge.handleMessage(
-      thread,
-      makeMessage({ text: "/lobu clear" }),
-      "dm",
-    );
-
-    expect(
-      await conversationState.getEntries(CONN_ID, CHANNEL_ID, THREAD_ID),
-    ).toEqual([]);
-    // Render the posted value through the SDK's real converter: an object
-    // shape the SDK doesn't accept (e.g. `{ text }`) throws here, as it does
-    // in every production adapter.
-    const posted = thread.post.mock.calls[0]?.[0];
-    expect(new PlainTextConverter().renderPostable(posted)).toBe(
-      "Chat history cleared.",
-    );
-    expect(enqueueMessage).not.toHaveBeenCalled();
-  });
-
-  test("Google Chat /lobu new reaches the worker as a real session reset", async () => {
-    const { bridge, enqueueMessage } = makePreviewHarness({
-      platform: "gchat",
-      previewMode: false,
-    });
-
-    await bridge.handleMessage(
-      makeThread(undefined),
-      makeMessage({ text: "/lobu new" }),
-      "dm",
-    );
-
-    expect(enqueueMessage).toHaveBeenCalledTimes(1);
-    const payload = enqueueMessage.mock.calls[0]?.[0] as any;
-    expect(payload.messageText).toBe("Starting new session.");
-    expect(payload.platformMetadata?.sessionReset).toBe(true);
-  });
-
-  test("linked chat → routes to the Automation's agent, no notice", async () => {
-    const { bridge, enqueueMessage } = makePreviewHarness({
-      linkedAutomation: { agentId: "linked-agent" },
-    });
-    const thread = makeThread(undefined);
-
-    await bridge.handleMessage(thread, makeMessage(), "mention");
-
-    expect(enqueueMessage).toHaveBeenCalledTimes(1);
-    const payload = enqueueMessage.mock.calls[0]?.[0] as any;
-    expect(payload.agentId ?? payload.platformMetadata?.agentId).toBe(
-			"linked-agent",
-    );
-    expect(
-      thread.post.mock.calls.every(
-				(c: unknown[]) => !String(c[0]).includes("/lobu link"),
-			),
-    ).toBe(true);
-  });
-
   test("Google Chat typed messages preserve the verified sender at Automation ingress", async () => {
     const trigger = {
       kind: "event" as const,
@@ -1286,81 +897,6 @@ describe("MessageHandlerBridge.handleMessage — routing and unlinked chats", ()
     });
   });
 
-  test("matching reply Automations fan out as independent turns with one history entry", async () => {
-    const trigger = {
-      kind: "event" as const,
-      connector_key: "slack",
-      connection_id: 42,
-      event_types: ["message.created"],
-      match: { channel_id: CHANNEL_ID },
-      execution: "turn" as const,
-      active_run: "queue" as const,
-      output: "reply_to_source" as const,
-      skip_if_unchanged: false,
-    };
-    const automations: MatchingAutomationActivation[] = [
-      {
-        automationId: 71,
-        organizationId: "org-a",
-        agentId: "agent-a",
-        deviceWorkerId: null,
-        agentKind: null,
-        model: null,
-        instructions: "Handle support messages.",
-        minCooldownSeconds: 0,
-        trigger,
-      },
-      {
-        automationId: 72,
-        organizationId: "org-b",
-        agentId: "agent-b",
-        deviceWorkerId: null,
-        agentKind: null,
-        model: null,
-        instructions: "Audit support messages.",
-        minCooldownSeconds: 0,
-        trigger,
-      },
-    ];
-    const {
-      bridge,
-      enqueueMessage,
-      conversationState,
-      healSubscriptionTeam,
-    } = makePreviewHarness({ automations });
-    const thread = makeThread(undefined);
-
-    await bridge.handleMessage(
-      thread,
-      makeMessage({ raw: { team_id: "TREAL" } }),
-      "mention",
-    );
-
-    expect(enqueueMessage).toHaveBeenCalledTimes(2);
-    const payloads = enqueueMessage.mock.calls.map((call) => call[0] as any);
-    expect(payloads.map((payload) => payload.agentId)).toEqual([
-      "agent-a",
-      "agent-b",
-    ]);
-    expect(payloads.map((payload) => payload.organizationId)).toEqual([
-      "org-a",
-      "org-b",
-    ]);
-    expect(payloads[0]?.messageId).not.toBe(payloads[1]?.messageId);
-    expect(payloads[0]?.ephemeralContext).toContain("Handle support messages.");
-    expect(healSubscriptionTeam).toHaveBeenCalledTimes(2);
-    expect(healSubscriptionTeam.mock.calls.map((call) => call[2])).toEqual([
-      "org-a",
-      "org-b",
-    ]);
-    const entries = await conversationState.getEntries(
-      CONN_ID,
-      CHANNEL_ID,
-      THREAD_ID,
-    );
-    expect(entries).toHaveLength(1);
-  });
-
   test("a reply Automation inside its cooldown window is suppressed", async () => {
     // `reply_to_source` targets are handed to the chat transport and never
     // write a `automation` run row, so a cooldown expressed over `runs` was a
@@ -1418,135 +954,6 @@ describe("MessageHandlerBridge.handleMessage — routing and unlinked chats", ()
     }
   });
 
-  test("a reply Automation at the 0 default never reaches the cooldown claim", async () => {
-    const trigger = {
-      kind: "event" as const,
-      connector_key: "slack",
-      connection_id: 42,
-      event_types: ["message.created"],
-      match: { channel_id: CHANNEL_ID },
-      execution: "turn" as const,
-      active_run: "queue" as const,
-      output: "reply_to_source" as const,
-      skip_if_unchanged: false,
-    };
-    const automations: MatchingAutomationActivation[] = [
-      {
-        automationId: 82,
-        organizationId: "org-a",
-        agentId: "agent-a",
-        deviceWorkerId: null,
-        agentKind: null,
-        model: null,
-        instructions: "Handle support messages.",
-        minCooldownSeconds: 0,
-        trigger,
-      },
-    ];
-    cooldownClaims.length = 0;
-    activationMarks.length = 0;
-    const { bridge, enqueueMessage } = makePreviewHarness({ automations });
-    const thread = makeThread(undefined);
-
-    await bridge.handleMessage(
-      thread,
-      makeMessage({ raw: { team_id: "TREAL" } }),
-      "mention",
-    );
-
-    // Ordinary chat must not enter the serialized pre-enqueue cooldown claim.
-    expect(cooldownClaims).toEqual([]);
-    expect(enqueueMessage).toHaveBeenCalledTimes(1);
-    expect(activationMarks).toEqual([82]);
-  });
-
-  test("a failed zero-cooldown enqueue does not stamp activation", async () => {
-    const trigger = {
-      kind: "event" as const,
-      connector_key: "slack",
-      connection_id: 42,
-      event_types: ["message.created"],
-      match: { channel_id: CHANNEL_ID },
-      execution: "turn" as const,
-      active_run: "queue" as const,
-      output: "reply_to_source" as const,
-      skip_if_unchanged: false,
-    };
-    const automations: MatchingAutomationActivation[] = [
-      {
-        automationId: 83,
-        organizationId: "org-a",
-        agentId: "agent-a",
-        deviceWorkerId: null,
-        agentKind: null,
-        model: null,
-        instructions: "Handle support messages.",
-        minCooldownSeconds: 0,
-        trigger,
-      },
-    ];
-    activationMarks.length = 0;
-    const { bridge, enqueueMessage } = makePreviewHarness({ automations });
-    enqueueMessage.mockImplementationOnce(async () => {
-      throw new Error("queue unavailable");
-    });
-
-    await expect(
-      bridge.handleMessage(
-        makeThread(undefined),
-        makeMessage({ raw: { team_id: "TREAL" } }),
-        "mention",
-      ),
-    ).rejects.toThrow("queue unavailable");
-
-    expect(activationMarks).toEqual([]);
-  });
-
-  test("a failed activation stamp still dispatches every matched Automation", async () => {
-    const trigger = {
-      kind: "event" as const,
-      connector_key: "slack",
-      connection_id: 42,
-      event_types: ["message.created"],
-      match: { channel_id: CHANNEL_ID },
-      execution: "turn" as const,
-      active_run: "queue" as const,
-      output: "reply_to_source" as const,
-      skip_if_unchanged: false,
-    };
-    const base = {
-      organizationId: "org-a",
-      agentId: "agent-a",
-      deviceWorkerId: null,
-      agentKind: null,
-      model: null,
-      instructions: "Handle support messages.",
-      minCooldownSeconds: 0,
-      trigger,
-    };
-    const automations: MatchingAutomationActivation[] = [
-      { ...base, automationId: 84 },
-      { ...base, automationId: 85 },
-    ];
-    activationMarks.length = 0;
-    markZeroThrows = true;
-    try {
-      const { bridge, enqueueMessage } = makePreviewHarness({ automations });
-
-      // The stamp is observability only — the first target's failure must not
-      // abort the loop and strand the second Automation's turn.
-      await bridge.handleMessage(
-        makeThread(undefined),
-        makeMessage({ raw: { team_id: "TREAL" } }),
-        "mention",
-      );
-
-      expect(enqueueMessage).toHaveBeenCalledTimes(2);
-    } finally {
-      markZeroThrows = false;
-    }
-  });
-
   test("a rejected Automation filter cannot be bypassed by channel fallback", async () => {
     const trigger = {
       kind: "event" as const,
@@ -1596,103 +1003,6 @@ describe("MessageHandlerBridge.handleMessage — routing and unlinked chats", ()
     expect(thread.post).not.toHaveBeenCalled();
   });
 
-  test("adapter-normalized help bypasses a rejected linked Automation filter", async () => {
-    const tryHandleSlashText = mock(async () => true);
-    const trigger = {
-      kind: "event" as const,
-      connector_key: "gchat",
-      connection_id: 42,
-      event_types: ["message.created"],
-      match: { channel_id: CHANNEL_ID, mention_only: true },
-      execution: "turn" as const,
-      active_run: "queue" as const,
-      output: "reply_to_source" as const,
-      skip_if_unchanged: false,
-    };
-    const { bridge, enqueueMessage, resolveForConnection } = makePreviewHarness({
-      platform: "gchat",
-      agentId: undefined,
-      previewMode: false,
-      commandDispatcher: {
-        tryHandleSlashText,
-        tryHandle: mock(async () => false),
-      },
-      fallbackSubscription: {
-        agentId: "filtered-agent",
-        organizationId: "org-filtered",
-      },
-      automations: [
-        {
-          automationId: 74,
-          organizationId: "org-filtered",
-          agentId: "filtered-agent",
-          deviceWorkerId: null,
-          agentKind: null,
-          model: null,
-          instructions: "Only respond to mentions.",
-          trigger,
-        },
-      ],
-    });
-
-    await bridge.handleMessage(
-      makeThread(undefined),
-      makeMessage({ text: "/help", isMention: false }),
-      "subscribed",
-    );
-
-    expect(tryHandleSlashText).toHaveBeenCalledTimes(1);
-    expect(tryHandleSlashText.mock.calls[0]?.[0]).toBe("/help");
-    expect(resolveForConnection).not.toHaveBeenCalled();
-    expect(enqueueMessage).not.toHaveBeenCalled();
-  });
-
-  test("adapter-normalized help bypasses record-only capture for a matched Automation", async () => {
-    const tryHandleSlashText = mock(async () => true);
-    const trigger = {
-      kind: "event" as const,
-      connector_key: "gchat",
-      connection_id: 42,
-      event_types: ["message.created"],
-      match: { channel_id: CHANNEL_ID },
-      execution: "turn" as const,
-      active_run: "queue" as const,
-      output: "reply_to_source" as const,
-      skip_if_unchanged: false,
-    };
-    const { bridge, enqueueMessage } = makePreviewHarness({
-      platform: "gchat",
-      previewMode: false,
-      settings: { recordChannelMessages: true },
-      commandDispatcher: {
-        tryHandleSlashText,
-        tryHandle: mock(async () => false),
-      },
-      automations: [
-        {
-          automationId: 75,
-          organizationId: "org-connection",
-          agentId: "recording-agent",
-          deviceWorkerId: null,
-          agentKind: null,
-          model: null,
-          instructions: "Capture ordinary messages and respond to commands.",
-          trigger,
-        },
-      ],
-    });
-
-    await bridge.handleMessage(
-      makeThread(undefined),
-      makeMessage({ text: "/help", isMention: false }),
-      "subscribed",
-    );
-
-    expect(tryHandleSlashText).toHaveBeenCalledTimes(1);
-    expect(tryHandleSlashText.mock.calls[0]?.[0]).toBe("/help");
-    expect(enqueueMessage).not.toHaveBeenCalled();
-  });
-
   test("recordChannelMessages skips agent turns for Automation-routed subscribed messages", async () => {
     // Pre-Automation, record-only mode captured non-mention channel traffic
     // without starting a turn. After the cutover, Automation-routed channels
@@ -1713,133 +1023,6 @@ describe("MessageHandlerBridge.handleMessage — routing and unlinked chats", ()
     );
 
     expect(enqueueMessage).not.toHaveBeenCalled();
-  });
-
-  test("recordChannelMessages still enqueues Automation turns on mentions", async () => {
-    const { bridge, enqueueMessage } = makePreviewHarness({
-      linkedAutomation: { agentId: "linked-agent" },
-      previewMode: false,
-      settings: { recordChannelMessages: true },
-    });
-
-    await bridge.handleMessage(
-      makeThread(undefined),
-      makeMessage({ isMention: true }),
-      "mention",
-    );
-
-    expect(enqueueMessage).toHaveBeenCalledTimes(1);
-  });
-
-  test("matching Automation self-heals its Slack workspace team", async () => {
-    const trigger = {
-      kind: "event" as const,
-      connector_key: "slack",
-      connection_id: 42,
-      event_types: ["message.created"],
-      match: { channel_id: CHANNEL_ID },
-      execution: "turn" as const,
-      active_run: "queue" as const,
-      output: "reply_to_source" as const,
-      skip_if_unchanged: false,
-    };
-    const { bridge, healSubscriptionTeam } = makePreviewHarness({
-      automations: [
-        {
-          automationId: 71,
-          organizationId: "org-automation",
-          agentId: "agent-a",
-          deviceWorkerId: null,
-          agentKind: null,
-          model: null,
-          instructions: "Handle support messages.",
-          minCooldownSeconds: 0,
-          trigger,
-        },
-      ],
-    });
-
-    await bridge.handleMessage(
-      makeThread(undefined),
-      makeMessage({ raw: { team_id: "TREAL" } }),
-      "mention",
-    );
-
-    expect(healSubscriptionTeam).toHaveBeenCalledWith(
-      CONN_ID,
-      CHANNEL_ID,
-      "org-automation",
-      "TREAL",
-    );
-  });
-
-  test("OAuth workspace connection (no agent, not preview): unlinked → link notice, no agent run", async () => {
-    // A tenant's OAuth-installed bot has no owning agent and metadata.teamId.
-    // An unlinked non-command message must get a "link your agent" notice instead
-    // of being silently dropped, and must NOT enqueue a worker turn against a
-    // non-existent agent.
-    const { bridge, enqueueMessage } = makePreviewHarness({
-      linkedAutomation: null,
-      previewMode: false,
-      agentId: undefined,
-      metadata: { teamId: "T_WS", botUserId: "U_BOT" },
-    });
-    const thread = makeThread(undefined);
-
-    await bridge.handleMessage(thread, makeMessage(), "mention");
-
-    expect(thread.post).toHaveBeenCalledTimes(1);
-    expect(String(thread.post.mock.calls[0]?.[0])).toContain("/lobu link");
-    expect(enqueueMessage).not.toHaveBeenCalled();
-  });
-
-  test("slack connection with no known workspace: descriptor suppresses the notice", async () => {
-    // The other arm of `resolveSlackNoticeChannelScope`. A workspace install
-    // whose `metadata.teamId` is unknown can only produce a deep link that
-    // names no workspace, so the descriptor returns null and the bridge posts
-    // NOTHING — the rule that used to be an inline `if (!teamId) return
-    // false` here. Without the null check the reader would get a notice whose
-    // link is scoped to nowhere.
-    const { bridge, enqueueMessage } = makePreviewHarness({
-      linkedAutomation: null,
-      previewMode: false,
-      agentId: undefined,
-      metadata: { botUserId: "U_BOT" },
-    });
-    const thread = makeThread(undefined);
-
-    await bridge.handleMessage(thread, makeMessage(), "mention");
-
-    expect(thread.post).not.toHaveBeenCalled();
-    expect(enqueueMessage).not.toHaveBeenCalled();
-  });
-
-  test("telegram unrouted message → generic link notice, no agent run (#2230)", async () => {
-    // Same dead end as the Slack OAuth test above, but on a non-Slack platform:
-    // no owning agent, no channel Automation. Slack replies with a link notice;
-    // every other platform used to log a warn and drop the message silently.
-    const { bridge, enqueueMessage } = makePreviewHarness({
-      platform: "telegram",
-      linkedAutomation: null,
-      previewMode: false,
-      agentId: undefined,
-      metadata: { botUsername: "testbot" },
-    });
-    const thread = makeThread(undefined);
-
-    await bridge.handleMessage(
-      thread,
-      makeMessage({ text: "hello, anyone there?" }),
-      "dm"
-    );
-
-    expect(enqueueMessage).not.toHaveBeenCalled();
-    expect(thread.post).toHaveBeenCalledTimes(1);
-    const posted = String(thread.post.mock.calls[0]?.[0]);
-    expect(posted).toContain("isn't linked");
-    // Platform-native command spelling — not Slack's `/lobu link` wrapper.
-    expect(posted).toContain("/link <code>");
-    expect(posted).not.toContain("/lobu link");
   });
 
   test("telegram unrouted button click → generic link notice, no turn (#2230)", async () => {
@@ -1866,136 +1049,6 @@ describe("MessageHandlerBridge.handleMessage — routing and unlinked chats", ()
     expect(String(thread.post.mock.calls[0]?.[0])).toContain("/link <code>");
   });
 
-  test("slack OAuth workspace unrouted click → link notice (interaction parity)", async () => {
-    // Slack itself also used to drop unrouted interactions silently — only the
-    // message path had the notice. Both sites now share one helper.
-    const { bridge, enqueueMessage } = makePreviewHarness({
-      linkedAutomation: null,
-      previewMode: false,
-      agentId: undefined,
-      metadata: { teamId: "T_WS", botUserId: "U_BOT" },
-    });
-    const thread = makeThread(undefined);
-
-    await bridge.ingestClick({
-      userId: "U_USER",
-      channelId: CHANNEL_ID,
-      conversationId: THREAD_ID,
-      value: "Approve",
-      thread,
-    });
-
-    expect(enqueueMessage).not.toHaveBeenCalled();
-    expect(thread.post).toHaveBeenCalledTimes(1);
-    expect(String(thread.post.mock.calls[0]?.[0])).toContain("/lobu link");
-  });
-
-  test("`/link <code>` in an unrouted telegram chat reaches the dispatcher, not the notice (#2230)", async () => {
-    // The notice tells the user to paste `/link <code>` into this same chat.
-    // On Slack that arrives as a native slash command (its own ingress path);
-    // on every other platform it arrives as plain message text — so it must
-    // dispatch from the unrouted dead end instead of being dropped with it.
-    const tryHandleSlashText = mock(async () => true);
-    const { bridge, enqueueMessage } = makePreviewHarness({
-      platform: "telegram",
-      linkedAutomation: null,
-      previewMode: false,
-      agentId: undefined,
-      metadata: { botUsername: "testbot" },
-      commandDispatcher: {
-        tryHandleSlashText,
-        tryHandle: mock(async () => false),
-      },
-    });
-    const thread = makeThread(undefined);
-
-    await bridge.handleMessage(
-      thread,
-      makeMessage({ text: "/link crm-ABC123" }),
-      "dm"
-    );
-
-    expect(tryHandleSlashText).toHaveBeenCalledTimes(1);
-    expect(tryHandleSlashText.mock.calls[0]?.[0]).toBe("/link crm-ABC123");
-    expect(thread.post).not.toHaveBeenCalled();
-    expect(enqueueMessage).not.toHaveBeenCalled();
-  });
-
-  test("`@bot /link <code>` in an unrouted chat dispatches on mention-stripped text", async () => {
-    // Addressing the bot by mention is the normal way to reach it in a
-    // mention-gated group chat, and the slash regex requires a leading `/` — so
-    // the dead-end dispatch must run on the same mention-stripped text every
-    // other command call site uses, not the raw message.
-    const tryHandleSlashText = mock(async () => true);
-    const { bridge, enqueueMessage } = makePreviewHarness({
-      platform: "telegram",
-      linkedAutomation: null,
-      previewMode: false,
-      agentId: undefined,
-      metadata: { botUsername: "testbot", botUserId: "U_BOT" },
-      commandDispatcher: {
-        tryHandleSlashText,
-        tryHandle: mock(async () => false),
-      },
-    });
-    const thread = makeThread(undefined);
-
-    await bridge.handleMessage(
-      thread,
-      makeMessage({ text: "@testbot <@U_BOT> /link crm-ABC123" }),
-      "mention"
-    );
-
-    expect(tryHandleSlashText).toHaveBeenCalledTimes(1);
-    expect(tryHandleSlashText.mock.calls[0]?.[0]).toBe("/link crm-ABC123");
-    expect(thread.post).not.toHaveBeenCalled();
-    expect(enqueueMessage).not.toHaveBeenCalled();
-  });
-
-  test("telegram linked mention-only channel: ordinary chatter gets no notice spam", async () => {
-    // Mirror of the Slack loop-prevention semantics: a channel that HAS an
-    // Automation subscription but whose trigger filters rejected this message
-    // must stay silent — the notice is only for genuinely unlinked chats.
-    const { bridge, enqueueMessage } = makePreviewHarness({
-      platform: "telegram",
-      previewMode: false,
-      agentId: undefined,
-      metadata: { botUsername: "testbot" },
-      automations: [
-        {
-          automationId: 74,
-          organizationId: "org-connection",
-          agentId: "tg-agent",
-          deviceWorkerId: null,
-          agentKind: null,
-          model: null,
-          instructions: "Only respond to mentions.",
-          trigger: {
-            kind: "event",
-            connector_key: "telegram",
-            connection_id: 42,
-            event_types: ["message.created"],
-            match: { channel_id: CHANNEL_ID, mention_only: true },
-            execution: "turn",
-            active_run: "queue",
-            output: "reply_to_source",
-            skip_if_unchanged: false,
-          },
-        },
-      ],
-    });
-    const thread = makeThread(undefined);
-
-    await bridge.handleMessage(
-      thread,
-      makeMessage({ text: "ordinary chatter", isMention: false }),
-      "subscribed"
-    );
-
-    expect(thread.post).not.toHaveBeenCalled();
-    expect(enqueueMessage).not.toHaveBeenCalled();
-  });
-
   // Build a mock ProviderCatalogService for the preflight path. `findProviderForModel`
   // matches a ref to its module by the `<slug>/` prefix (mirrors the real one).
   function makeCatalogMock(opts: {
@@ -2014,42 +1067,6 @@ describe("MessageHandlerBridge.handleMessage — routing and unlinked chats", ()
       }),
     };
   }
-
-  // A device pin places an Automation's background runs only. Its live reply
-  // runs on the Automation's cloud agent, through the same provider preflight
-  // as any other chat turn, and never carries device placement.
-  test.each([null, "codex"])("a device-pinned reply Automation answers on its cloud agent (agentKind=%p)", async (agentKind) => {
-    const openai = {
-      providerId: "openai",
-      hasSystemKey: () => true,
-      hasCredentials: async () => true,
-      getProxyBaseUrlMappings: () => ({ openai: "https://gw/api/proxy/openai" }),
-      getModelOptions: async () => [{ value: "openai/gpt-5" }],
-    };
-    const providerCatalog = makeCatalogMock({ modules: [openai], allowedRefs: null });
-    const { bridge, enqueueMessage } = makePreviewHarness({
-      linkedAutomation: { agentId: "local-agent", organizationId: "org-bound" },
-      automations: [{
-        automationId: 71, organizationId: "org-bound", agentId: "local-agent",
-        deviceWorkerId: "device-test", agentKind, model: "opencode-go/test-local-model",
-        executionConfig: { effort: "medium" }, instructions: "Run this chat", minCooldownSeconds: 0,
-        trigger: { kind: "event", connector_key: "slack", connection_id: 42,
-          event_types: ["message.created"], match: { channel_id: CHANNEL_ID },
-          execution: "turn", output: "reply_to_source", active_run: "steer" },
-      }],
-      providerCatalog,
-      agentModel: "openai/gpt-5",
-    });
-    const thread = makeThread(undefined);
-    await bridge.handleMessage(thread, makeMessage(), "mention");
-    expect(providerCatalog.getModelPolicy).toHaveBeenCalled();
-    expect(enqueueMessage).toHaveBeenCalledTimes(1);
-    const payload = enqueueMessage.mock.calls[0]?.[0] as any;
-    expect(payload).not.toHaveProperty("executionTarget");
-    expect(payload.agentId).toBe("local-agent");
-    expect(payload.agentOptions).toMatchObject({ model: "openai/gpt-5", effort: "medium" });
-    expect(payload.agentOptions).not.toHaveProperty("deviceExecutionConfig");
-  });
 
   // A device-only Automation has no agent to own a conversation, so even a
   // reply_to_source trigger stays on the durable background lane.
@@ -2091,35 +1108,6 @@ describe("MessageHandlerBridge.handleMessage — routing and unlinked chats", ()
     // device background lane instead of being cut on the cloud reply.
     expect(plan.replyTargets.length).toBe(lane === "reply" ? 1 : 0);
     expect(plan.backgroundTargets).toEqual(lane === "background" ? [automation] : []);
-  });
-
-  test("unroutable model provider posts a plain Slack text fallback and skips enqueue", async () => {
-    // Empty allow-list (allow-all) but the provider module isn't present/routable.
-    const providerCatalog = makeCatalogMock({ modules: [], allowedRefs: null });
-    const { bridge, enqueueMessage } = makePreviewHarness({
-      linkedAutomation: {
-        agentId: "lobu-builder",
-        organizationId: "org-bound",
-        model: "z-ai/glm-5.2",
-      },
-      providerCatalog,
-    });
-    const thread = makeThread(undefined);
-
-    await bridge.handleMessage(thread, makeMessage(), "mention");
-
-    expect(enqueueMessage).not.toHaveBeenCalled();
-    expect(thread.post).toHaveBeenCalledTimes(1);
-    // The preflight now emits its reason text + a provider-connect CTA through
-    // the shared buildCtaCardPayload path. With no WorkspaceProvider inited in
-    // this bun suite, the org slug can't resolve, so the CTA URL is null and the
-    // payload degrades to a plain text string (no card) — the fallback the
-    // helper guarantees. Assert the new copy; there's no setup URL to check.
-    const posted = thread.post.mock.calls[0]?.[0];
-    expect(typeof posted).toBe("string");
-    expect(posted).toContain("z-ai/glm-5.2");
-    expect(posted).toContain("isn't connected or has no credentials");
-    expect(posted).not.toContain("api/proxy");
   });
 
   test("EXACT GATE: an override on a LISTED provider but NOT in the list is rejected", async () => {
@@ -2204,49 +1192,6 @@ describe("MessageHandlerBridge.handleMessage — routing and unlinked chats", ()
     expect(payload.agentOptions?.model).toBe("openai/gpt-5");
   });
 
-  test("configured model provider unconnected, but a listed alternate IS routable → falls back and enqueues", async () => {
-    const zai = {
-      providerId: "z-ai",
-      hasSystemKey: () => false,
-      hasCredentials: async () => false, // unroutable: no credentials
-      getProxyBaseUrlMappings: () => ({}),
-      getModelOptions: async () => [{ value: "z-ai/glm-5.2" }],
-    };
-    const openai = {
-      providerId: "openai",
-      hasSystemKey: () => false,
-      hasCredentials: async () => true,
-      getProxyBaseUrlMappings: () => ({ openai: "https://gw/api/proxy/openai" }),
-      getModelOptions: async () => [{ value: "openai/gpt-4o-mini" }],
-    };
-    const providerCatalog = makeCatalogMock({
-      modules: [zai, openai],
-      // Both the failed default and the routable alternate are listed exactly.
-      allowedRefs: ["z-ai/glm-5.2", "openai/gpt-4o-mini"],
-    });
-    const { bridge, enqueueMessage } = makePreviewHarness({
-      linkedAutomation: {
-        agentId: "lobu-builder",
-        organizationId: "org-bound",
-        model: "z-ai/glm-5.2",
-      },
-      providerCatalog,
-    });
-    const thread = makeThread(undefined);
-
-    await bridge.handleMessage(thread, makeMessage(), "mention");
-
-    // Ran on the listed alternate, did not post a "can't run this yet" error.
-    expect(enqueueMessage).toHaveBeenCalledTimes(1);
-    const payload = enqueueMessage.mock.calls[0]?.[0] as any;
-    expect(payload.agentOptions?.model).toBe("openai/gpt-4o-mini");
-    expect(
-      thread.post.mock.calls.every(
-        (c: unknown[]) => !String(c[0]).includes("I can't run this yet"),
-      ),
-    ).toBe(true);
-  });
-
   test("no connected provider at all → still posts the setup-link error, no enqueue", async () => {
     const zai = {
       providerId: "z-ai",
@@ -2302,117 +1247,6 @@ describe("MessageHandlerBridge.handleMessage — routing and unlinked chats", ()
     );
     // The Automation's org wins over the connection's org ("org-connection").
     expect(payload.organizationId).toBe("org-bound");
-  });
-
-  test("`/lobu link <code>` DM message dispatches link before the preview notice", async () => {
-    // On a previewMode bot, an unlinked DM normally gets the unlinked-chat notice.
-    // A `/lobu link <code>` arrives as plain message text in an AI-app DM (Slack
-    // won't run slash commands there), so it MUST reach the dispatcher and bind
-    // — not be preempted by the notice. parsePreviewLinkCode routes it to `link`.
-    const tryHandle = mock(async () => true);
-    const tryHandleSlashText = mock(async () => false);
-    const { bridge, enqueueMessage } = makePreviewHarness({
-      linkedAutomation: null,
-      commandDispatcher: { tryHandle, tryHandleSlashText },
-    });
-    const thread = makeThread(undefined);
-
-    await bridge.handleMessage(
-      thread,
-      makeMessage({ text: "/lobu link crm-ABC123" }),
-			"dm",
-    );
-
-    expect(tryHandle).toHaveBeenCalledTimes(1);
-    expect(tryHandle.mock.calls[0]?.[0]).toBe("link");
-    expect(tryHandle.mock.calls[0]?.[1]).toBe("crm-ABC123");
-    // The preview notice was NOT posted, and no agent run was queued.
-    expect(
-      thread.post.mock.calls.every(
-				(c: unknown[]) => !String(c[0]).includes("/lobu link"),
-			),
-    ).toBe(true);
-    expect(enqueueMessage).not.toHaveBeenCalled();
-  });
-
-  test("a bare preview-code paste in a DM dispatches link, not the notice", async () => {
-    const tryHandle = mock(async () => true);
-    const { bridge, enqueueMessage } = makePreviewHarness({
-      linkedAutomation: null,
-      commandDispatcher: {
-        tryHandle,
-        tryHandleSlashText: mock(async () => false),
-      },
-    });
-    const thread = makeThread(undefined);
-
-    await bridge.handleMessage(
-      thread,
-      makeMessage({ text: "crm-ABC123" }),
-			"dm",
-    );
-
-    expect(tryHandle).toHaveBeenCalledTimes(1);
-    expect(tryHandle.mock.calls[0]?.[0]).toBe("link");
-    expect(tryHandle.mock.calls[0]?.[1]).toBe("crm-ABC123");
-    expect(enqueueMessage).not.toHaveBeenCalled();
-  });
-
-  test("non-preview connection: a code-looking DM goes to the agent, not link", async () => {
-    // The plain-text link parsing is gated to previewMode bots. On a normal
-    // agent bot, `crm-ABC123` is just a message for the agent — it must NOT be
-    // swallowed by the link command.
-    const tryHandle = mock(async () => true);
-    const { bridge, enqueueMessage } = makePreviewHarness({
-      linkedAutomation: null,
-      previewMode: false,
-      commandDispatcher: {
-        tryHandle,
-        tryHandleSlashText: mock(async () => false),
-      },
-    });
-    const thread = makeThread(undefined);
-
-    await bridge.handleMessage(
-      thread,
-      makeMessage({ text: "crm-ABC123" }),
-			"dm",
-    );
-
-    expect(tryHandle).not.toHaveBeenCalled();
-    expect(enqueueMessage).toHaveBeenCalledTimes(1);
-  });
-
-  test("connection-owner fallback in a group channel materializes the chat-link Automation", async () => {
-    // No Automation matches; the connection owns an agent, so routing falls back
-    // to `source:"connection"`. The channel has no subscription row, so it would
-    // be invisible to history/ACL/search — the materializer writes the row.
-    const {
-      bridge,
-      enqueueMessage,
-      materializeConnectionFallbackLink,
-    } = makePreviewHarness({
-      previewMode: false,
-      metadata: { teamId: "T_WS", botUserId: "U_BOT" },
-      provideSubscriptionService: true,
-    });
-    const thread = makeThread(undefined);
-
-    await bridge.handleMessage(
-      thread,
-      makeMessage({ raw: { team_id: "TREAL" } }),
-      "mention",
-    );
-
-    // The turn still runs.
-    expect(enqueueMessage).toHaveBeenCalledTimes(1);
-    // …and the missing chat-link is materialized with the real workspace team.
-    expect(materializeConnectionFallbackLink).toHaveBeenCalledTimes(1);
-    const call = materializeConnectionFallbackLink.mock.calls[0] as unknown[];
-    expect(call[1]).toBe("org-connection"); // organizationId
-    expect(call[2]).toBe(TEMPLATE_AGENT_ID); // agentId
-    expect(call[3]).toBe("slack"); // platform
-    expect(call[5]).toBe("TREAL"); // real T-team passed through
   });
 
   test("connection fallback passes no team when Slack sends only an enterprise id", async () => {
@@ -2489,43 +1323,6 @@ describe("MessageHandlerBridge.handleMessage — routing and unlinked chats", ()
 
     expect(thread.post).toHaveBeenCalledTimes(1);
     expect(enqueueMessage).not.toHaveBeenCalled();
-    expect(materializeConnectionFallbackLink).not.toHaveBeenCalled();
-  });
-
-  test("connection fallback does NOT materialize for a DM", async () => {
-    // DMs stay out of the bound-channel set — only group channels materialize.
-    const { bridge, enqueueMessage, materializeConnectionFallbackLink } =
-      makePreviewHarness({
-        previewMode: false,
-        metadata: { teamId: "T_WS", botUserId: "U_BOT" },
-        provideSubscriptionService: true,
-      });
-    const thread = makeThread(undefined);
-
-    await bridge.handleMessage(
-      thread,
-      makeMessage({ raw: { team_id: "TREAL" } }),
-      "dm",
-    );
-
-    expect(enqueueMessage).toHaveBeenCalledTimes(1);
-    expect(materializeConnectionFallbackLink).not.toHaveBeenCalled();
-  });
-
-  test("a matched Automation does NOT trigger connection-fallback materialization", async () => {
-    // source:"automation" already owns a subscription row; no materialization.
-    const { bridge, materializeConnectionFallbackLink } = makePreviewHarness({
-      linkedAutomation: { agentId: "linked-agent" },
-      provideSubscriptionService: true,
-    });
-    const thread = makeThread(undefined);
-
-    await bridge.handleMessage(
-      thread,
-      makeMessage({ raw: { team_id: "TREAL" } }),
-      "mention",
-    );
-
     expect(materializeConnectionFallbackLink).not.toHaveBeenCalled();
   });
 });

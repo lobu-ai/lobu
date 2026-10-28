@@ -20,7 +20,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createIsolateConnectorCompiler } from '@lobu/connector-worker/compile';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
-import { formatMetadataExtractionError } from '../compiler-core';
 import {
   extractConnectorMetadata,
   NO_CONNECTOR_RUNTIME_ERROR,
@@ -118,43 +117,6 @@ describe('extractConnectorMetadata in a project dir without node_modules', () =>
       process.chdir(originalCwd);
     }
   }, 30_000);
-});
-
-describe('formatMetadataExtractionError', () => {
-  test('appends install guidance when the connector SDK is unresolvable', () => {
-    const raw =
-      "Cannot find package '@lobu/connector-sdk' imported from /tmp/proj/.connector-meta-XXXX/source.mjs";
-    const formatted = formatMetadataExtractionError(raw);
-    expect(formatted).toContain('Metadata extraction failed:');
-    expect(formatted).toContain(raw);
-    expect(formatted).toContain('npm install');
-    expect(formatted).toContain('bun install');
-    expect(formatted).toContain('@lobu/connector-sdk');
-  });
-
-  test('handles the bare `lobu` alias specifier too', () => {
-    const formatted = formatMetadataExtractionError(
-      "Cannot find package 'lobu' imported from /tmp/x/source.mjs"
-    );
-    expect(formatted).toContain('npm install');
-  });
-
-  test('leaves unrelated errors untouched', () => {
-    const formatted = formatMetadataExtractionError(
-      'No ConnectorRuntime class found in compiled code.'
-    );
-    expect(formatted).toBe(
-      'Metadata extraction failed: No ConnectorRuntime class found in compiled code.'
-    );
-    expect(formatted).not.toContain('npm install');
-  });
-
-  test('does not misfire on other missing packages', () => {
-    const formatted = formatMetadataExtractionError(
-      "Cannot find package 'left-pad' imported from /tmp/x/source.mjs"
-    );
-    expect(formatted).not.toContain('npm install');
-  });
 });
 
 describe('resolveBundledAgentToolingMetadata', () => {

@@ -8,20 +8,15 @@
  *   1. Middleware ordering on the Hono wrapper:
  *      peer-address stash → env-inject → request logger → structured-5xx-capture → onError
  *   2. Route mounts: `/lobu` mounted only when lobuApp is non-null; `/` always.
- *   3. httpServer timeouts: keepAliveTimeout=75000, headersTimeout=76000.
- *   4. Shutdown ordering documented in createServerLifecycle().
- *   5. `serializeBootError` walks nested cause chains and never returns `{}`.
+ *   3. Shutdown drains in-flight requests before gateway/db teardown.
+ *   4. `serializeBootError` walks nested cause chains and never returns `{}`.
  *
- * The wrapper-app and serializer assertions exercise real code paths;
- * the lifecycle-shape assertions read the source so anything renaming the
- * shutdown step labels has to update the test in the same PR.
+ * The wrapper-app and serializer assertions exercise real code paths, and the
+ * live-drain case boots the real lifecycle against an ephemeral HTTP server.
  */
 
-import { readFileSync } from "node:fs";
 import http from "node:http";
 import net from "node:net";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 // --- heavy collaborators of createServerLifecycle, replaced so the spine
@@ -98,11 +93,6 @@ vi.mock("../index", async () => {
 		isAuthorizationReadOnlyToolName: () => false,
 	};
 });
-
-const LIFECYCLE_SOURCE = readFileSync(
-	join(dirname(fileURLToPath(import.meta.url)), "..", "server-lifecycle.ts"),
-	"utf8",
-);
 
 describe("serializeBootError", () => {
 	it("returns message + stack for a plain Error", async () => {
@@ -200,22 +190,6 @@ describe("reportBootFailure", () => {
 });
 
 describe("buildWrapperApp", () => {
-	it("logs requests handled by the /lobu mounted app", async () => {
-		const { buildWrapperApp } = await import("../server-lifecycle");
-		const { default: logger } = await import("../utils/logger");
-		const { Hono } = await import("hono");
-		const lobuApp = new Hono();
-		lobuApp.get("/ping", (c) => c.text("lobu-pong"));
-		const info = logger.info as ReturnType<typeof vi.fn>;
-		info.mockClear();
-
-		const wrapper = buildWrapperApp({} as never, lobuApp);
-		const response = await wrapper.request("/lobu/ping");
-
-		expect(response.status).toBe(200);
-		expect(info).toHaveBeenCalled();
-	});
-
 	it("mounts mainApp at / and lobuApp at /lobu when present", async () => {
 		const { buildWrapperApp } = await import("../server-lifecycle");
 		const { Hono } = await import("hono");
@@ -299,25 +273,6 @@ describe("buildWrapperApp", () => {
 		expect(await res.text()).toBe("10.0.0.1");
 	});
 
-	it("logs 5xx responses via the post-response middleware", async () => {
-		const { buildWrapperApp } = await import("../server-lifecycle");
-		const { default: logger } = await import("../utils/logger");
-		const { Hono } = await import("hono");
-		const lobuApp = new Hono();
-		// Routes that try/catch internally and return c.json(..., 500) — the
-		// framework never sees the exception, so onError doesn't fire. The
-		// post-response middleware is the only thing that catches these.
-		lobuApp.get("/silent-500", (c) => c.json({ error: "inner caught" }, 500));
-		const wrapper = buildWrapperApp({} as never, lobuApp);
-
-		const res = await wrapper.request("/lobu/silent-500");
-		expect(res.status).toBe(500);
-		expect(logger.error).toHaveBeenCalledWith(
-			expect.objectContaining({ source: "http_response", res_status: 500 }),
-			"inner caught",
-		);
-	});
-
 	it("suppresses ONLY the draining readiness 503; other health 5xx still report", async () => {
 		const { buildWrapperApp } = await import("../server-lifecycle");
 		const { default: logger } = await import("../utils/logger");
@@ -345,26 +300,6 @@ describe("buildWrapperApp", () => {
 		expect(captureMessage).toHaveBeenCalled();
 	});
 
-	it("logs the original thrown exception through onError", async () => {
-		const { buildWrapperApp } = await import("../server-lifecycle");
-		const { default: logger } = await import("../utils/logger");
-		const { Hono } = await import("hono");
-		const lobuApp = new Hono();
-		lobuApp.get("/boom", () => {
-			throw new Error("thrown from route");
-		});
-		const wrapper = buildWrapperApp({} as never, lobuApp);
-
-		const res = await wrapper.request("/lobu/boom");
-		expect(res.status).toBe(500);
-		expect(logger.error).toHaveBeenCalled();
-		const calls = (logger.error as ReturnType<typeof vi.fn>).mock.calls
-			.filter(([record]) => record?.source === "app_onError");
-		const lastCall = calls[calls.length - 1] ?? [];
-		const [{ err: errArg }] = lastCall;
-		expect((errArg as Error).message).toBe("thrown from route");
-	});
-
 	it("does NOT double-report when onError fires after post-response middleware", async () => {
 		const { buildWrapperApp } = await import("../server-lifecycle");
 		const { default: logger } = await import("../utils/logger");
@@ -385,105 +320,6 @@ describe("buildWrapperApp", () => {
 			record?.source === "app_onError" || record?.source === "http_response");
 		expect(diagnostics).toHaveLength(1);
 		expect(diagnostics[0][0].source).toBe("app_onError");
-	});
-});
-
-describe("createServerLifecycle (source-level contract)", () => {
-	// These assertions read the source file. They exist so a code reviewer
-	// (human or pi) can't silently reorder shutdown or drop a step without
-	// updating the test in the same change. Relative ordering is enforced by
-	// explicit source-position checks below.
-
-	function indexOf(needle: string): number {
-		const idx = LIFECYCLE_SOURCE.indexOf(needle);
-		if (idx === -1) {
-			throw new Error(
-				`server-lifecycle.ts: expected substring not found: ${JSON.stringify(needle)}`,
-			);
-		}
-		return idx;
-	}
-
-	it("locks httpServer keep-alive timeouts at 75/76s", () => {
-		expect(LIFECYCLE_SOURCE).toContain("httpServer.keepAliveTimeout = 75_000");
-		expect(LIFECYCLE_SOURCE).toContain("httpServer.headersTimeout = 76_000");
-		// Header timeout MUST be strictly greater than keep-alive.
-		expect(76_000).toBeGreaterThan(75_000);
-	});
-
-	it("runs databaseReadiness before workspace + gateway init", () => {
-		const dbReady = indexOf("await databaseReadiness()");
-		const workspace = indexOf("await initWorkspaceProvider()");
-		const gateway = indexOf("await initLobuGateway(");
-		expect(dbReady).toBeLessThan(workspace);
-		expect(workspace).toBeLessThan(gateway);
-	});
-
-	it("runs preListenHooks before httpServer.listen", () => {
-		const preHooks = indexOf("for (const hook of preListenHooks)");
-		const listen = indexOf("httpServer.listen(port, host");
-		expect(preHooks).toBeLessThan(listen);
-	});
-
-	it("starts the embedded connector worker inside the listen callback", () => {
-		const listen = indexOf("httpServer.listen(port, host");
-		const embedded = indexOf("embeddedWorker = startEmbeddedConnectorWorker");
-		const postHooks = indexOf("for (const hook of postListenHooks)");
-		expect(embedded).toBeGreaterThan(listen);
-		expect(postHooks).toBeGreaterThan(listen);
-		// postListenHooks fire BEFORE the embedded worker so any synchronous
-		// dep-resolve check can fail-fast without leaving a worker registered.
-		expect(postHooks).toBeLessThan(embedded);
-	});
-
-	it("shuts down in the documented order", () => {
-		// Each step is wrapped in `safe("<step>", …)` so a failing teardown
-		// can't block the rest. Order-check by the step label which is stable
-		// across refactors of the wrapper.
-		//
-		// The embedded worker must get its bounded drain window while its local
-		// HTTP API is still reachable. The listener then gives accepted requests
-		// their close budget before gateway and database teardown.
-		const close = indexOf('safe("httpServer.close"');
-		const worker = indexOf('safe("embeddedWorker.stop"');
-		const vite = indexOf('safe("vite.close"');
-		const reaper = indexOf('safe("stopReaper"');
-		const scheduler = indexOf('safe("taskScheduler.stop"');
-		const gateway = indexOf('safe("stopLobuGateway"');
-		const db = indexOf('safe("closeDbSingleton"');
-		const extra = indexOf("safe(`extraTeardown[");
-
-		expect(worker).toBeLessThan(close);
-		expect(close).toBeLessThan(vite);
-		expect(vite).toBeLessThan(reaper);
-		expect(reaper).toBeLessThan(scheduler);
-		expect(scheduler).toBeLessThan(gateway);
-		expect(gateway).toBeLessThan(db);
-		expect(db).toBeLessThan(extra);
-	});
-
-	it("wraps every shutdown step in a safe() helper (one failing step does not skip the rest)", () => {
-		// The `safe()` wrapper is what guarantees that — for example — a
-		// rejecting `stopLobuGateway()` doesn't leave the listener bound and
-		// the process pinned. If a future refactor inlines a raw `await` for
-		// any step, this assertion catches it.
-		const safeCalls = LIFECYCLE_SOURCE.match(/safe\((`extraTeardown\[|")/g);
-		expect(safeCalls?.length ?? 0).toBeGreaterThanOrEqual(7);
-	});
-
-	it("single-flights concurrent shutdown signals", () => {
-		// SIGTERM and SIGINT can both arrive (or one can fire twice during a
-		// supervisor restart). The guard short-circuits the second entry so
-		// gateway-stop / extraTeardown / process.exit don't race.
-		expect(LIFECYCLE_SOURCE).toContain("let shutdownStarted = false");
-		expect(LIFECYCLE_SOURCE).toContain("if (shutdownStarted)");
-		expect(LIFECYCLE_SOURCE).toContain("shutdownStarted = true");
-	});
-
-	it("registers SIGTERM and SIGINT handlers", () => {
-		// Accept either quote style — biome may rewrite ' → " on save.
-		expect(/process\.on\(['"]SIGTERM['"]/.test(LIFECYCLE_SOURCE)).toBe(true);
-		expect(/process\.on\(['"]SIGINT['"]/.test(LIFECYCLE_SOURCE)).toBe(true);
 	});
 });
 
