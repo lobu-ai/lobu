@@ -282,124 +282,124 @@ describe('connections.test — auth-free connectors', () => {
 const DEVICE_CONNECTOR_KEY = "apple.computer_use";
 
 describe("connections.test device availability", () => {
-	let orgId: string;
-	let userId: string;
-	let ctx: ToolContext;
+  let orgId: string;
+  let userId: string;
+  let ctx: ToolContext;
 
-	beforeAll(async () => {
-		await cleanupTestDatabase();
-		await initWorkspaceProvider();
-		const {
-			org,
-			user,
-			ctx: ownerCtx,
-		} = await seedOwnerContext({
-			orgName: "Device Test Org",
-		});
-		orgId = org.id;
-		userId = user.id;
-		ctx = ownerCtx;
+  beforeAll(async () => {
+    await cleanupTestDatabase();
+    await initWorkspaceProvider();
+    const {
+      org,
+      user,
+      ctx: ownerCtx,
+    } = await seedOwnerContext({
+      orgName: "Device Test Org",
+    });
+    orgId = org.id;
+    userId = user.id;
+    ctx = ownerCtx;
 
-		// The real apple.computer_use connector declares the `none` auth method, so
-		// an active connector_definition with `auth_schema.methods: [{ type: "none" }]`
-		// must exist for this test to reproduce production: without it, the no-auth
-		// branch never fires and the device branch is falsely reachable regardless
-		// of ordering.
-		await createTestConnectorDefinition({
-			key: DEVICE_CONNECTOR_KEY,
-			name: "Apple Computer Use",
-			organization_id: orgId,
-			auth_schema: { methods: [{ type: "none" }] },
-		});
-	});
+    // The real apple.computer_use connector declares the `none` auth method, so
+    // an active connector_definition with `auth_schema.methods: [{ type: "none" }]`
+    // must exist for this test to reproduce production: without it, the no-auth
+    // branch never fires and the device branch is falsely reachable regardless
+    // of ordering.
+    await createTestConnectorDefinition({
+      key: DEVICE_CONNECTOR_KEY,
+      name: "Apple Computer Use",
+      organization_id: orgId,
+      auth_schema: { methods: [{ type: "none" }] },
+    });
+  });
 
-	async function seedDeviceConnection(online: boolean): Promise<number> {
-		const sql = getTestDb();
-		const lastSeen = online
-			? new Date().toISOString()
-			: new Date(Date.now() - 60 * 60 * 1000).toISOString(); // 1h ago = offline
-		const [dw] = (await sql`
-			INSERT INTO device_workers (
-				user_id, worker_id, platform, capabilities, label, organization_id, last_seen_at
-			) VALUES (
-				${userId}, ${`wk_${online ? "on" : "off"}_${Date.now()}`}, 'macos',
-				${sql.json([])}, ${online ? "My Mac (online)" : "My Mac (offline)"},
-				${orgId}, ${lastSeen}
-			)
-			RETURNING id
-		`) as unknown as Array<{ id: string }>;
+  async function seedDeviceConnection(online: boolean): Promise<number> {
+    const sql = getTestDb();
+    const lastSeen = online
+      ? new Date().toISOString()
+      : new Date(Date.now() - 60 * 60 * 1000).toISOString(); // 1h ago = offline
+    const [dw] = (await sql`
+      INSERT INTO device_workers (
+        user_id, worker_id, platform, capabilities, label, organization_id, last_seen_at
+      ) VALUES (
+        ${userId}, ${`wk_${online ? "on" : "off"}_${Date.now()}`}, 'macos',
+        ${sql.json([])}, ${online ? "My Mac (online)" : "My Mac (offline)"},
+        ${orgId}, ${lastSeen}
+      )
+      RETURNING id
+    `) as unknown as Array<{ id: string }>;
 
-		const conn = await createTestConnection({
-			organization_id: orgId,
-			connector_key: DEVICE_CONNECTOR_KEY,
-			created_by: userId,
-			createDefaultFeed: false,
-		});
-		// Attach the device; this auth-free connection carries no auth profile.
-		await sql`UPDATE connections SET device_worker_id = ${dw.id} WHERE id = ${conn.id}`;
-		return conn.id;
-	}
+    const conn = await createTestConnection({
+      organization_id: orgId,
+      connector_key: DEVICE_CONNECTOR_KEY,
+      created_by: userId,
+      createDefaultFeed: false,
+    });
+    // Attach the device; this auth-free connection carries no auth profile.
+    await sql`UPDATE connections SET device_worker_id = ${dw.id} WHERE id = ${conn.id}`;
+    return conn.id;
+  }
 
-	async function test(connectionId: number): Promise<Record<string, unknown>> {
-		return (await manageConnections(
-			{ action: "test", connection_id: connectionId },
-			{} as Env,
-			ctx,
-		)) as Record<string, unknown>;
-	}
+  async function test(connectionId: number): Promise<Record<string, unknown>> {
+    return (await manageConnections(
+      { action: "test", connection_id: connectionId },
+      {} as Env,
+      ctx,
+    )) as Record<string, unknown>;
+  }
 
-	it("reports ok for an online device instead of 'No auth profile configured'", async () => {
-		const id = await seedDeviceConnection(true);
-		const result = await test(id);
-		expect(result.status).toBe("ok");
-		expect(result.device_online).toBe(true);
-		expect(String(result.message)).not.toContain("No auth profile");
-		expect(String(result.message)).toMatch(/online/i);
-	});
+  it("reports ok for an online device instead of 'No auth profile configured'", async () => {
+    const id = await seedDeviceConnection(true);
+    const result = await test(id);
+    expect(result.status).toBe("ok");
+    expect(result.device_online).toBe(true);
+    expect(String(result.message)).not.toContain("No auth profile");
+    expect(String(result.message)).toMatch(/online/i);
+  });
 
-	it("reports a retryable warning for an offline device", async () => {
-		const id = await seedDeviceConnection(false);
-		const result = await test(id);
-		expect(result.status).toBe("warning");
-		expect(result.device_online).toBe(false);
-		expect(result.retryable).toBe(true);
-		expect(String(result.message)).toMatch(/offline/i);
-	});
+  it("reports a retryable warning for an offline device", async () => {
+    const id = await seedDeviceConnection(false);
+    const result = await test(id);
+    expect(result.status).toBe("warning");
+    expect(result.device_online).toBe(false);
+    expect(result.retryable).toBe(true);
+    expect(String(result.message)).toMatch(/offline/i);
+  });
 
-	it("does not let valid OAuth credentials mask an offline selected device", async () => {
-		const sql = getTestDb();
-		const accountId = `acct_hybrid_${Date.now()}`;
-		await sql`
-			INSERT INTO "account" (
-				id, "accountId", "providerId", "userId", "accessToken",
-				"refreshToken", "accessTokenExpiresAt", scope, "createdAt", "updatedAt"
-			) VALUES (
-				${accountId}, ${accountId}, 'x', ${userId}, 'valid-token',
-				'refresh-token', ${new Date(Date.now() + 60 * 60 * 1000).toISOString()},
-				'read', NOW(), NOW()
-			)
-		`;
-		const profile = await createAuthProfile({
-			organizationId: orgId,
-			connectorKey: DEVICE_CONNECTOR_KEY,
-			displayName: "X OAuth",
-			profileKind: "oauth_account",
-			provider: "x",
-			accountId,
-			createdBy: userId,
-		});
-		const id = await seedDeviceConnection(false);
-		await sql`
-			UPDATE connections
-			SET auth_profile_id = ${profile.id}, visibility = 'private'
-			WHERE id = ${id}
-		`;
+  it("does not let valid OAuth credentials mask an offline selected device", async () => {
+    const sql = getTestDb();
+    const accountId = `acct_hybrid_${Date.now()}`;
+    await sql`
+      INSERT INTO "account" (
+        id, "accountId", "providerId", "userId", "accessToken",
+        "refreshToken", "accessTokenExpiresAt", scope, "createdAt", "updatedAt"
+      ) VALUES (
+        ${accountId}, ${accountId}, 'x', ${userId}, 'valid-token',
+        'refresh-token', ${new Date(Date.now() + 60 * 60 * 1000).toISOString()},
+        'read', NOW(), NOW()
+      )
+    `;
+    const profile = await createAuthProfile({
+      organizationId: orgId,
+      connectorKey: DEVICE_CONNECTOR_KEY,
+      displayName: "X OAuth",
+      profileKind: "oauth_account",
+      provider: "x",
+      accountId,
+      createdBy: userId,
+    });
+    const id = await seedDeviceConnection(false);
+    await sql`
+      UPDATE connections
+      SET auth_profile_id = ${profile.id}, visibility = 'private'
+      WHERE id = ${id}
+    `;
 
-		const result = await test(id);
-		expect(result.status).toBe("warning");
-		expect(result.device_online).toBe(false);
-		expect(result.retryable).toBe(true);
-		expect(String(result.message)).toContain("Credentials valid");
-		expect(String(result.message)).toMatch(/offline/i);
-	});
+    const result = await test(id);
+    expect(result.status).toBe("warning");
+    expect(result.device_online).toBe(false);
+    expect(result.retryable).toBe(true);
+    expect(String(result.message)).toContain("Credentials valid");
+    expect(String(result.message)).toMatch(/offline/i);
+  });
 });

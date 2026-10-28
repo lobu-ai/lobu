@@ -8,6 +8,7 @@ import { upsertEntityApprovalPolicy } from '../../authz/entity-policy';
 import { parsePgTextArray } from '../../db/client';
 import { isChromeNamespaceConnectorKey } from '../../utils/connector-execution-placement';
 import { reconcileDeviceCapabilities } from '../../worker-api/device-reconcile';
+import logger from '../../utils/logger';
 import { TestApiClient } from '../setup/test-mcp-client';
 import {
   deviceManifestHash,
@@ -2432,7 +2433,19 @@ describe('device connector manifests', () => {
         ) RETURNING id
       `) as unknown as Array<{ id: number }>;
 
-      await reconcileDeviceCapabilities(owner.id);
+      // The collision is swallowed inside the wire (caught + logged), so the row
+      // count alone cannot tell a declined wire from a failed INSERT: assert the
+      // failure log stays silent.
+      const errors = vi.spyOn(logger, 'error');
+      try {
+        await reconcileDeviceCapabilities(owner.id);
+        const failures = errors.mock.calls.filter((c) =>
+          String(c[1] ?? '').includes('Failed to wire device connector')
+        );
+        expect(failures.map((c) => JSON.stringify(c[0]))).toEqual([]);
+      } finally {
+        errors.mockRestore();
+      }
 
       const live = (await sql`
         SELECT id, created_by, device_worker_id FROM connections
@@ -2441,8 +2454,9 @@ describe('device connector manifests', () => {
       `) as unknown as Array<{ id: number; created_by: string | null; device_worker_id: string }>;
       expect(live).toHaveLength(1);
       expect(Number(live[0].id)).toBe(Number(pinned.id));
-      // Another member's row is never re-attributed to the polling user.
-      if (createdBy) expect(live[0].created_by).toBe(createdBy);
+      // Another member's row is never re-attributed to the polling user; an
+      // ownerless row is adopted by the user whose poll wired it.
+      expect(live[0].created_by).toBe(createdBy ?? owner.id);
       expect(String(live[0].device_worker_id)).toBe(String(dev.id));
     },
     60_000,
