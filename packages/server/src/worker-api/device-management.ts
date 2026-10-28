@@ -13,7 +13,7 @@
 import { isKnownPlatform } from '@lobu/core';
 import type { Context } from 'hono';
 import { createAuth } from '../auth';
-import { canMintWebSession } from '../auth/oauth/scopes';
+import { canMintWebSession, TOKEN_DERIVED_SESSION_USER_AGENT } from '../auth/oauth/scopes';
 import { findExistingPersonalOrg } from '../auth/personal-org-provisioning';
 import {
   type AuditedAccessToken,
@@ -618,7 +618,10 @@ export async function mintDeviceChildToken(c: Context<{ Bindings: Env }>) {
       try {
         const auth = await createAuth(c.env, c.req.raw);
         const ctx = await auth.$context;
-        const session = await ctx.internalAdapter.createSession(userId);
+        // Minted from the caller's bearer, so it is not a person's sign-in.
+        const session = await ctx.internalAdapter.createSession(userId, undefined, {
+          userAgent: TOKEN_DERIVED_SESSION_USER_AGENT,
+        });
         sessionToken = session?.token ?? null;
       } catch (err) {
         // Session mint is best-effort — child PAT is the primary credential.

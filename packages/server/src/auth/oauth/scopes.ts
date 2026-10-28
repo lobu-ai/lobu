@@ -526,3 +526,25 @@ export function canMintWebSession(
     (authInfo.tokenType === 'pat' || authInfo.authorizationGrantType === 'device_code')
   );
 }
+
+/**
+ * `session.userAgent` of every web session minted from a bearer credential
+ * (the {@link canMintWebSession} exchanges, the Chrome sibling session, and a
+ * session re-exchanged from one of those) instead of an interactive sign-in.
+ * Better Auth writes `userAgent` only when it creates the row, and
+ * `/update-session` cannot set it (it accepts declared additional fields only),
+ * so the mark lasts for the session's life.
+ */
+export const TOKEN_DERIVED_SESSION_USER_AGENT = 'lobu-token-exchange';
+
+/**
+ * Whether a web session came from a bearer credential rather than a person
+ * signing in. Such a session may do what the credential's user can do in the
+ * browser, but may not mint {@link HUMAN_MINTED_PAT_SCOPES}: otherwise an agent
+ * holding an `mcp:admin` token reaches a human-only scope in two hops.
+ */
+export function isTokenDerivedSession(
+  session: { userAgent?: string | null } | null | undefined
+): boolean {
+  return session?.userAgent === TOKEN_DERIVED_SESSION_USER_AGENT;
+}
