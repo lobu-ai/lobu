@@ -27,10 +27,12 @@
  * run's completion move the cursor.
  */
 
+import { randomBytes } from 'node:crypto';
 import type { Context } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { Env } from '../../index';
 import { completeWorkerJob, streamContent } from '../../worker-api';
+import { MAX_ORIGIN_ID_BYTES } from '../../worker-api/run-lifecycle';
 import {
   IDENTITY_SCOPE_BY_NAMESPACE_METADATA_KEY,
 } from '../../identity/scope-projection';
@@ -653,6 +655,88 @@ describe('feed dry run persists nothing', () => {
  * operator would be told "2 items would be ingested" about data that can never
  * land. These tests pin the property that makes the answer trustworthy.
  */
+/**
+ * A connector-supplied origin_id is a btree key; past the row-size limit
+ * Postgres threw mid-page and /api/workers/stream answered an untyped 500. The
+ * route must reject the batch with the typed 422 batch_rejected contract before
+ * any event write or checkpoint advance. The oversized id is random base64:
+ * Postgres compresses index keys, so a repeated character would fit.
+ */
+describe('stream ingest bounds connector origin_id', () => {
+  beforeEach(async () => {
+    await cleanupTestDatabase();
+  });
+
+  const item = (id: string) => ({
+    id,
+    title: 'Typed in field',
+    payload_text: 'observation',
+    payload_type: 'text',
+    occurred_at: new Date().toISOString(),
+  });
+  // Mirrors the Chrome watch feed's `watch-input-${url}-${ts}-${field}` shape.
+  const oversizedOriginId = () =>
+    `watch-input-https://example.test/?q=${randomBytes(3000).toString('base64')}-2026-09-20T21:38:51.081Z-search`;
+
+  it.each([
+    { connectorKey: 'rss', label: 'long URL', makeId: oversizedOriginId },
+    { connectorKey: 'chrome', label: 'long URL', makeId: oversizedOriginId },
+    { connectorKey: 'rss', label: 'ASCII one byte over', makeId: () => 'x'.repeat(MAX_ORIGIN_ID_BYTES + 1) },
+    { connectorKey: 'rss', label: 'UTF-8 one byte over', makeId: () => `${'é'.repeat(MAX_ORIGIN_ID_BYTES / 2)}x` },
+  ])(
+    'rejects an oversized origin_id without ingesting or advancing ($connectorKey, $label)',
+    async ({ connectorKey, makeId }) => {
+      const sql = getTestDb();
+      const { orgId, feedId, runId } = await seed(false, connectorKey);
+      const longId = makeId();
+
+      const { ctx, result } = mockWorkerCtx({
+        run_id: runId,
+        worker_id: WORKER_ID,
+        checkpoint: { cursor: 'advanced-cursor' },
+        items: [item('ok-item'), item(longId)],
+      });
+      await streamContent(ctx);
+
+      const res = result();
+      expect(res.status).toBe(422);
+      expect(res.body).toMatchObject({
+        error: 'batch_rejected',
+        error_description: expect.stringContaining('Fix the reported item validation errors'),
+        rejected_items: [
+          { id: longId, errors: [expect.stringContaining(`exceeds ${MAX_ORIGIN_ID_BYTES} bytes`)] },
+        ],
+      });
+      expect(
+        (await sql`SELECT count(*)::int AS count FROM events WHERE organization_id = ${orgId}`)[0].count
+      ).toBe(0);
+      expect((await sql`SELECT checkpoint FROM feeds WHERE id = ${feedId}`)[0].checkpoint).toEqual(
+        FEED_CHECKPOINT
+      );
+      const [runRow] = await sql`SELECT checkpoint, error_message FROM runs WHERE id = ${runId}`;
+      expect(runRow.checkpoint).toBeNull();
+      expect(runRow.error_message).toMatch(/^422 batch_rejected: .*exceeds \d+ bytes/);
+    }
+  );
+
+  it.each(['ASCII', 'UTF-8'])('accepts a %s origin_id at exactly the byte bound', async (encoding) => {
+    const sql = getTestDb();
+    const { orgId, runId } = await seed(false);
+    const atBound =
+      encoding === 'UTF-8'
+        ? 'é'.repeat(MAX_ORIGIN_ID_BYTES / 2)
+        : randomBytes(MAX_ORIGIN_ID_BYTES).toString('base64').slice(0, MAX_ORIGIN_ID_BYTES);
+    expect(Buffer.byteLength(atBound, 'utf8')).toBe(MAX_ORIGIN_ID_BYTES);
+
+    const { ctx, result } = mockWorkerCtx({ run_id: runId, worker_id: WORKER_ID, items: [item(atBound)] });
+    await streamContent(ctx);
+
+    expect(result().status).toBe(200);
+    const rows = await sql`SELECT origin_id FROM events WHERE organization_id = ${orgId}`;
+    expect(rows.map((r) => r.origin_id)).toEqual([atBound]);
+  });
+});
+
 describe('dry run exercises the real write path', () => {
   it('surfaces a database-level failure instead of reporting success', async () => {
     const { runId } = await seed(true);

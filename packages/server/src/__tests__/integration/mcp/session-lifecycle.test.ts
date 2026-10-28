@@ -12,7 +12,12 @@ import { mcpSessionMap } from '../../../mcp-session-state';
 import { McpSessionStore, type PersistedMcpSession } from '../../../mcp-session-store';
 import { initWorkspaceProvider } from '../../../workspace';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
-import { createTestOrganization } from '../../setup/test-fixtures';
+import {
+  addUserToOrganization,
+  createTestOAuthClient,
+  createTestOrganization,
+  createTestUser,
+} from '../../setup/test-fixtures';
 import { post } from '../../setup/test-helpers';
 
 function deferred() {
@@ -176,6 +181,100 @@ describe('MCP expiry maintenance', () => {
     expect(await store.refreshActivity('delete-first')).toBe(false);
     expect(await store.getSession('refresh-first')).not.toBeNull();
     expect(await store.getSession('delete-first')).toBeNull();
+  });
+});
+
+/**
+ * A write for an established session must never CREATE a row: a revoke on any
+ * replica DELETEs the row, and an existence check followed by an upsert would
+ * silently undo a revoke that commits in between. `refreshSession` is
+ * update-only, so a deleted row stays deleted however the two interleave.
+ */
+describe('MCP refreshSession is update-only', () => {
+  let authed: PersistedMcpSession;
+
+  beforeEach(async () => {
+    const org = await createTestOrganization({ name: 'Refresh Org' });
+    const user = await createTestUser({ email: 'refresh@example.com' });
+    await addUserToOrganization(user.id, org.id, 'owner');
+    const client = await createTestOAuthClient();
+    authed = {
+      ...session('sess-refresh-1'),
+      userId: user.id,
+      clientId: client.client_id,
+      organizationId: org.id,
+      memberRole: 'owner',
+      isAuthenticated: true,
+      supportsMcpApps: true,
+      supportsAppSandboxDomain: true,
+    };
+  });
+
+  it('only upsertSession creates the row; refreshSession then updates it', async () => {
+    expect(await store.refreshSession(authed)).toBe(false);
+    expect(await store.getSession(authed.sessionId)).toBeNull();
+
+    await store.upsertSession(authed);
+    const bumped = { ...authed, lastAccessedAt: authed.lastAccessedAt + 60_000 };
+    expect(await store.refreshSession(bumped)).toBe(true);
+    const row = await store.getSession(authed.sessionId);
+    expect(row?.supportsMcpApps).toBe(true);
+    expect(row?.supportsAppSandboxDomain).toBe(true);
+  });
+
+  it('preserves MCP Apps domain metadata for a row written by the previous binary', async () => {
+    await getTestDb()`
+      INSERT INTO mcp_sessions (
+        session_id, user_id, client_id, organization_id, member_role,
+        requested_agent_id, is_authenticated, scoped_to_org, supports_mcp_apps,
+        last_accessed_at, expires_at
+      ) VALUES (
+        ${authed.sessionId}, ${authed.userId}, ${authed.clientId}, ${authed.organizationId},
+        ${authed.memberRole}, ${authed.requestedAgentId}, ${authed.isAuthenticated},
+        ${authed.scopedToOrg}, ${authed.supportsMcpApps},
+        ${new Date(authed.lastAccessedAt)}, ${new Date(authed.expiresAt)}
+      )
+    `;
+    const row = await store.getSession(authed.sessionId);
+    expect(row?.supportsMcpApps).toBe(true);
+    expect(row?.supportsAppSandboxDomain).toBe(true);
+  });
+
+  it('leaves the row unwritten when a refresh changes nothing it records', async () => {
+    // A changed xmin identifies a rewrite (each leaves a dead row behind).
+    const db = getTestDb();
+    const xmin = async () =>
+      (await db`SELECT xmin::text AS xmin FROM mcp_sessions WHERE session_id = ${authed.sessionId}`)[0].xmin;
+    await store.upsertSession(authed);
+    const written = await xmin();
+
+    const sameAuth = { ...authed, lastAccessedAt: authed.lastAccessedAt + 5_000, expiresAt: authed.expiresAt + 5_000 };
+    expect(await store.refreshSession(sameAuth)).toBe(true);
+    expect(await xmin()).toBe(written);
+
+    const promoted = { ...sameAuth, memberRole: 'admin' };
+    expect(await store.refreshSession(promoted)).toBe(true);
+    const roleChanged = await xmin();
+    expect(roleChanged).not.toBe(written);
+    expect((await store.getSession(authed.sessionId))?.memberRole).toBe('admin');
+
+    const later = { ...promoted, lastAccessedAt: promoted.lastAccessedAt + 120_000, expiresAt: promoted.expiresAt + 120_000 };
+    expect(await store.refreshSession(later)).toBe(true);
+    expect(await xmin()).not.toBe(roleChanged);
+    expect((await store.getSession(authed.sessionId))?.expiresAt).toBe(later.expiresAt);
+  });
+
+  it('does NOT resurrect a row deleted by a concurrent revoke', async () => {
+    await store.upsertSession(authed);
+    // The revoking replica commits its DELETE after this request decided the
+    // session looked valid.
+    await getTestDb()`DELETE FROM mcp_sessions WHERE session_id = ${authed.sessionId}`;
+
+    expect(await store.refreshSession(authed)).toBe(false);
+    const rows = await getTestDb()`
+      SELECT session_id FROM mcp_sessions WHERE session_id = ${authed.sessionId}
+    `;
+    expect(rows).toHaveLength(0);
   });
 });
 

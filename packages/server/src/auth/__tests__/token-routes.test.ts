@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
+import { hashToken } from '../oauth/utils';
 import { PersonalAccessTokenService } from '../tokens';
 import { getTestDb, cleanupTestDatabase } from '../../__tests__/setup/test-db';
 import {
@@ -46,6 +47,51 @@ describe('org-scoped token creation route', () => {
     expect(verified?.userId).toBe(user.id);
     expect(verified?.organizationId).toBe(org.id);
     expect(verified?.scopes).toEqual(['mcp:read', 'mcp:write']);
+  });
+
+  it('defaults an unscoped PAT to mcp scopes without connections:token and audits the mint', async () => {
+    // connections:token mints managed-connector tokens; a broad PAT created
+    // without an explicit scope must never carry it.
+    const org = await createTestOrganization({ slug: 'token-default-scope' });
+    const user = await createTestUser({ email: 'token-default@test.example.com' });
+    await addUserToOrganization(user.id, org.id, 'owner');
+    const client = await createTestOAuthClient();
+    const { token: oauthToken } = await createTestAccessToken(user.id, org.id, client.client_id, {
+      scope: 'mcp:read mcp:write mcp:admin',
+    });
+
+    const response = await post(`/api/${org.slug}/tokens`, {
+      token: oauthToken,
+      body: { name: 'default-scope-pat' },
+    });
+
+    expect(response.status).toBe(201);
+    const body = (await response.json()) as {
+      token: { id: number; token: string; scope: string | null };
+    };
+    expect((body.token.scope ?? '').split(' ')).not.toContain('connections:token');
+
+    // The STORED scope is what the connection-token endpoint introspects.
+    const sql = getTestDb();
+    const [row] = await sql<{ scope: string | null }[]>`
+      SELECT scope FROM personal_access_tokens
+      WHERE token_hash = ${hashToken(body.token.token)}
+    `;
+    const storedScopes = (row?.scope ?? '').split(' ').filter(Boolean);
+    expect(storedScopes).not.toContain('connections:token');
+    expect(storedScopes).toEqual(expect.arrayContaining(['mcp:read', 'mcp:write']));
+
+    // The mint lands in the workspace audit trail, attributed to its creator.
+    let audit: Array<{ organization_id: string; created_by: string | null }> = [];
+    for (let i = 0; i < 60 && audit.length === 0; i++) {
+      audit = (await sql`
+        SELECT organization_id, created_by FROM events
+        WHERE origin_type = 'access_token_created'
+          AND metadata->>'entity_id' = ${String(body.token.id)}
+      `) as unknown as typeof audit;
+      if (audit.length === 0) await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    expect(audit).toEqual([{ organization_id: org.id, created_by: user.id }]);
   });
 
   it('lets an org owner mint a connections:token PAT (managed-connector token fetch)', async () => {

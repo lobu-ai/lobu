@@ -12,6 +12,7 @@ import { metricSeries } from "../../../tools/admin/metric_series";
 import type { ToolContext } from "../../../tools/registry";
 import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
 import {
+	createTestConnection,
 	createTestEvent,
 	createTestOrganization,
 } from "../../setup/test-fixtures";
@@ -118,5 +119,55 @@ describe("metric_series — bounds + data quality (#2051)", () => {
 		expect(res.data_quality?.time_column).toBeNull();
 		expect(res.data_quality?.null_timestamps).toBe(0);
 		expect(res.data_quality?.out_of_range).toBe(0);
+	});
+});
+
+describe("metric_series — member read-tier safety", () => {
+	let orgId: string;
+
+	const memberCtx = (): ToolContext => ({
+		organizationId: orgId,
+		userId: "metric-member",
+		memberRole: "member",
+		isAuthenticated: true,
+		tokenType: "oauth",
+		scopedToOrg: false,
+		allowCrossOrg: false,
+	});
+
+	beforeAll(async () => {
+		const org = await createTestOrganization({ name: "Metric Column Safety" });
+		orgId = org.id;
+		const conn = await createTestConnection({
+			organization_id: orgId,
+			connector_key: "slack",
+		});
+		// A secret in the withheld column makes a leak unmistakable.
+		const db = getTestDb();
+		await db`UPDATE connections SET credentials = ${db.json({ access_token: "SECRET-TOKEN" })} WHERE id = ${conn.id}`;
+	});
+
+	it("does not expose the credentials column via `SELECT * FROM connections`", async () => {
+		const res = await metricSeries({ sql: "SELECT * FROM connections" }, {}, memberCtx());
+		expect(res.columns).not.toContain("credentials");
+		expect(JSON.stringify(res.rows)).not.toContain("SECRET-TOKEN");
+		// The scope worked rather than returning nothing.
+		expect(res.columns).toContain("connector_key");
+	});
+
+	it("refuses a data-modifying CTE (read-only transaction)", async () => {
+		// A data-modifying WITH passes the SELECT/WITH guard, so the read-only
+		// transaction is what must stop it.
+		const db = getTestDb();
+		const ev = await createTestEvent({ organization_id: orgId, content: "keep-me" });
+		await expect(
+			metricSeries(
+				{ sql: "WITH x AS (DELETE FROM events RETURNING id) SELECT count(*) AS n FROM x" },
+				{},
+				memberCtx(),
+			),
+		).rejects.toThrow(/read-only|read only|cannot execute/i);
+		const [row] = await db`SELECT id FROM events WHERE id = ${ev.id}`;
+		expect(row?.id).toBeDefined();
 	});
 });

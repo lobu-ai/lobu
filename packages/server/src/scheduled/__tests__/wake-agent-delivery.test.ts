@@ -12,7 +12,16 @@ import {
   enqueueAgentMessage,
 } from "../../gateway/services/agent-threads";
 import { runtimeConnectionIdToSlug } from "../../lobu/stores/connections-projection";
+import { createTestAutomationSubscription } from "../../__tests__/setup/automation-subscriptions";
+import {
+  addUserToOrganization,
+  createTestAgent,
+  createTestOrganization,
+  createTestUser,
+  insertChatConnectionRow,
+} from "../../__tests__/setup/test-fixtures";
 import { runWakeAgentTask, type WakeAgentTaskPayload } from "../jobs";
+import { validateDeliveryAuthorization } from "../scheduled-jobs-service";
 
 const ORG = "org-wake-delivery";
 const AGENT = "agent-wake-delivery";
@@ -426,4 +435,179 @@ test("#2: enqueueAgentMessage threads the session's organizationId to the TOP-LE
   // Top-level org (not just platformMetadata) so the gate resolves org-B, not
   // an id-only cross-org read.
   expect(enqueued[0].organizationId).toBe("org-B");
+});
+
+describe("validateDeliveryAuthorization team predicate", () => {
+  const CONN = "slackinst-delivery-authz";
+  const CHANNEL = "C-delivery-authz";
+  const delivery = (teamId: string | undefined) => ({
+    platform: "slack",
+    connectionId: CONN,
+    channelId: CHANNEL,
+    conversationId: `slack:${CHANNEL}:123`,
+    teamId,
+    userId: USER,
+  });
+  const subscribe = (teamId?: string) =>
+    createTestAutomationSubscription({
+      organizationId: ORG,
+      agentId: AGENT,
+      connectionSlug: runtimeConnectionIdToSlug(CONN),
+      platform: "slack",
+      channelId: CHANNEL,
+      ...(teamId ? { teamId } : {}),
+      configuredBy: USER,
+    });
+
+  beforeAll(async () => {
+    await ensureDbForGatewayTests();
+  }, 60_000);
+
+  beforeEach(async () => {
+    await resetTestDatabase();
+    await seedAgentRow(AGENT, { organizationId: ORG, ownerUserId: USER });
+    await getDb()`
+      INSERT INTO "user" (id, email, name, username, "emailVerified", "createdAt", "updatedAt")
+      VALUES (${USER}, 'wake-delivery@example.test', 'Wake User', 'wake-delivery', true, NOW(), NOW())
+    `;
+    await seedChatConnection({ id: CONN, agentId: null, externalTenantId: "T-workspace" });
+  }, 60_000);
+
+  test("authorizes a teamless delivery when only the connection supplies the team", async () => {
+    // automation_message_subscriptions.team_id is COALESCE(trigger team,
+    // connections.external_tenant_id, config teamId); a binding with no trigger
+    // team gets a non-null view team_id and must still authorize teamless
+    // deliveries.
+    await subscribe();
+    const [view] = await getDb()`
+      SELECT team_id, trigger_team_id FROM automation_message_subscriptions
+      WHERE organization_id = ${ORG} AND platform = 'slack' AND native_channel_id = ${CHANNEL}
+      LIMIT 1
+    `;
+    expect(view).toMatchObject({ trigger_team_id: null, team_id: "T-workspace" });
+
+    expect(
+      await validateDeliveryAuthorization({ organizationId: ORG, agentId: AGENT, delivery: delivery(undefined) })
+    ).toEqual({ authorized: true });
+  });
+
+  test.each([
+    ["T-workspace", { authorized: true }],
+    ["T-other", { authorized: false, reason: "channel-unbound" }],
+  ] as const)("a team-scoped binding with delivery teamId %s", async (teamId, expected) => {
+    await subscribe("T-workspace");
+    expect(
+      await validateDeliveryAuthorization({ organizationId: ORG, agentId: AGENT, delivery: delivery(teamId) })
+    ).toEqual(expected);
+  });
+});
+
+/**
+ * A wake replies in the conversation that asked, including one served by a
+ * hosted-preview connection that lives in a DIFFERENT organization. When that
+ * conversation can no longer be reached, the wake fails rather than opening
+ * an unrelated API thread.
+ */
+describe("wake delivery through a hosted-preview connection", () => {
+  const TEAM = "T_PREVIEW_WAKE";
+  const PREVIEW_CONNECTION = "preview-wake-conn";
+  const previewAgentId = "preview-wake-agent";
+  let tenantOrgId: string;
+
+  const previewDelivery = (channelId: string) => ({
+    platform: "slack",
+    connectionId: PREVIEW_CONNECTION,
+    channelId,
+    conversationId: `slack:${channelId}:1700000000.000200`,
+    teamId: TEAM,
+    userId: "U_PREVIEW_SENDER",
+    senderEvidence: { isDirectMessage: false, senderVouched: false },
+  });
+
+  beforeAll(async () => {
+    await ensureDbForGatewayTests();
+  }, 60_000);
+
+  beforeEach(async () => {
+    await resetTestDatabase();
+    const hostOrg = await createTestOrganization();
+    const tenantOrg = await createTestOrganization();
+    tenantOrgId = tenantOrg.id;
+    await createTestAgent({ organizationId: tenantOrg.id, agentId: previewAgentId });
+    // The connection lives in the HOST org; the binding belongs to the tenant.
+    await insertChatConnectionRow({
+      id: PREVIEW_CONNECTION,
+      organizationId: hostOrg.id,
+      agentId: "concierge",
+      platform: "slack",
+      status: "active",
+      settings: { previewMode: true },
+      metadata: {},
+    });
+    const configuredBy = await createTestUser();
+    await addUserToOrganization(configuredBy.id, tenantOrg.id, "owner");
+    await createTestAutomationSubscription({
+      organizationId: tenantOrg.id,
+      agentId: previewAgentId,
+      connectionSlug: `agentconn-${PREVIEW_CONNECTION}`,
+      platform: "slack",
+      channelId: "slack:C0PREVIEWWAKE",
+      teamId: TEAM,
+      configuredBy: configuredBy.id,
+    });
+  }, 60_000);
+
+  test("authorizes and replies in the original preview-served conversation", async () => {
+    expect(
+      await validateDeliveryAuthorization({
+        organizationId: tenantOrgId,
+        agentId: previewAgentId,
+        delivery: previewDelivery("C0PREVIEWWAKE"),
+      })
+    ).toEqual({ authorized: true });
+
+    const enqueued: MessagePayload[] = [];
+    await runWakeAgentTask(fakeCoreServices(enqueued), {
+      __organization_id: tenantOrgId,
+      __created_by_agent: previewAgentId,
+      __delivery_context: previewDelivery("C0PREVIEWWAKE"),
+      __message_id: "operation-outcome-7",
+      agent_id: previewAgentId,
+      prompt: "operation finished",
+    });
+    expect(enqueued).toHaveLength(1);
+    expect(enqueued[0]).toMatchObject({
+      platform: "slack",
+      channelId: "C0PREVIEWWAKE",
+      conversationId: "slack:C0PREVIEWWAKE:1700000000.000200",
+      userId: "U_PREVIEW_SENDER",
+      messageId: "operation-outcome-7",
+    });
+    expect(enqueued[0].platformMetadata).toMatchObject({
+      connectionId: PREVIEW_CONNECTION,
+      source: "followup",
+    });
+  });
+
+  test("fails instead of opening an API thread when the conversation is unreachable", async () => {
+    expect(
+      await validateDeliveryAuthorization({
+        organizationId: tenantOrgId,
+        agentId: previewAgentId,
+        delivery: previewDelivery("C0NOTBOUND"),
+      })
+    ).toEqual({ authorized: false, reason: "connection-missing" });
+
+    const enqueued: MessagePayload[] = [];
+    await expect(
+      runWakeAgentTask(fakeCoreServices(enqueued), {
+        __organization_id: tenantOrgId,
+        __created_by_agent: previewAgentId,
+        __delivery_context: previewDelivery("C0NOTBOUND"),
+        agent_id: previewAgentId,
+        prompt: "operation finished",
+      })
+    ).rejects.toThrow(/connection-missing/);
+    expect(enqueued).toHaveLength(0);
+  });
 });

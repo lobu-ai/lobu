@@ -2,8 +2,8 @@
  * Approval-run TRANSITION atomicity — a decision's `runs` write and its
  * superseding card event must commit together.
  *
- * #2033 fixed the QUEUE path (run + pending approval event in one tx, see
- * operations-approval-event-atomicity.test.ts). This covers the far end: when
+ * #2033 fixed the QUEUE path (run + pending approval event in one tx, pinned
+ * in the "connector execute queue path" block below). This also covers the far end: when
  * a human approves and the operation completes inline, the terminal
  * `runs.status='completed'` write and the 'completed' card supersede must be
  * atomic. Forced failure of the completed-event INSERT must roll the run's
@@ -869,6 +869,76 @@ describe("approval-run transition atomicity", () => {
 		expect((await currentApprovalCard(runId, orgId))?.interaction_status).toBe(
 			"failed",
 		);
+	});
+
+	describe("connector execute queue path (#2033 item 16)", () => {
+		const countRuns = async () =>
+			(await getTestDb()`SELECT count(*)::int AS n FROM runs WHERE organization_id = ${orgId} AND connector_key = ${CONNECTOR}`)[0].n;
+		const countApprovalCards = async () =>
+			(await getTestDb()`
+				SELECT count(*)::int AS n FROM events
+				WHERE organization_id = ${orgId} AND interaction_type = 'approval' AND connector_key = ${CONNECTOR}
+			`)[0].n;
+		const queue = (ctx: ToolContext = humanCtx) =>
+			manageOperations(
+				{ action: "execute", connection_id: connectionId, operation_key: "create_item", input: { body: {} } },
+				{} as Env,
+				ctx,
+			);
+
+		it("commits the pending run and its approval card together, readable by run id", async () => {
+			const sql = getTestDb();
+			const runsBefore = await countRuns();
+			const result = (await queue({ ...humanCtx, mcpSessionId: "session-approval-atomicity" })) as {
+				status: string; run_id: number; event_id: number; approval_url?: string;
+			};
+
+			expect(result.status).toBe("pending_approval");
+			expect(result.event_id).toBeGreaterThan(0);
+			expect(result.approval_url).toBeTruthy();
+			const [run] = await sql`
+				SELECT status, approval_status, created_by_user_id FROM runs
+				WHERE id = ${result.run_id} AND organization_id = ${orgId}
+			`;
+			expect(run).toMatchObject({ status: "pending", approval_status: "pending", created_by_user_id: userId });
+
+			// What the /memory?run_ids= page reads; a stranded run would have none.
+			const cards = await sql`
+				SELECT id, interaction_type, interaction_status, metadata FROM events
+				WHERE run_id = ${result.run_id} AND organization_id = ${orgId}
+			`;
+			expect(cards).toHaveLength(1);
+			expect(cards[0]).toMatchObject({
+				id: result.event_id,
+				interaction_type: "approval",
+				interaction_status: "pending",
+				metadata: {
+					mcp_session_id: "session-approval-atomicity",
+					initiator: { kind: "user", user_id: userId },
+				},
+			});
+			expect(await countRuns()).toBe(runsBefore + 1);
+		});
+
+		it.each([
+			["approval card", "NEW.interaction_type = 'approval' AND NEW.interaction_status = 'pending'"],
+			["admin inbox notification", "NEW.metadata->>'notification_type' = 'action_approval_needed'"],
+		])("a failed %s write rolls back the pending run and card", async (_label, condition) => {
+			const sql = getTestDb();
+			const runsBefore = await countRuns();
+			const cardsBefore = await countApprovalCards();
+
+			await sql.unsafe(
+				FAIL_PENDING_TRIGGER.replace(
+					"NEW.interaction_type = 'approval' AND NEW.interaction_status = 'pending'",
+					condition,
+				),
+			);
+			await expect(queue()).rejects.toThrow(/pending approval-event write failure/);
+
+			expect(await countRuns()).toBe(runsBefore);
+			expect(await countApprovalCards()).toBe(cardsBefore);
+		});
 	});
 
 	it("queueAgentAsk run + pending card commit atomically (card failure leaves no run)", async () => {

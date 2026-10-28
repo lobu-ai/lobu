@@ -24,10 +24,11 @@ import {
 	seedOwnerContext,
 } from "../setup/test-fixtures";
 import * as gateway from "../../lobu/gateway";
-import { ArtifactStore } from "../../gateway/files/artifact-store";
+import { ArtifactStore, runArtifactBinding } from "../../gateway/files/artifact-store";
 import { ingestInputFiles } from "../../gateway/files/input-files";
 
 const LOCAL = "demo.ops.backend.local";
+const INLINE_FILE_BYTES = Buffer.from("%PDF-1.4 inline attachment bytes");
 const MCP = "demo.ops.backend.mcp";
 const HTTP = "demo.ops.backend.http";
 const GOOGLE_CALENDAR_DELETE_ACTION = new GoogleCalendarConnector().definition
@@ -126,6 +127,11 @@ describe("operations.execute backend lifecycle", () => {
 					name: "Needs approval",
 					kind: "write",
 				},
+				download: {
+					name: "Download a file",
+					kind: "read",
+					input_schema: { type: "object", properties: {} },
+				},
 				delete_event: GOOGLE_CALENDAR_DELETE_ACTION,
 				stage_browser: {
 					name: "Stage browser",
@@ -150,6 +156,16 @@ describe("operations.execute backend lifecycle", () => {
 						}
 						if (ctx.input.value === 'nul-error') {
 							throw new Error('local\\u0000boom');
+						}
+						if (ctx.actionKey === 'download') {
+							return { success: true, output: {
+								name: 'report.pdf',
+								attachments: [{
+									filename: 'report.pdf',
+									mime_type: 'application/pdf',
+									data: '${INLINE_FILE_BYTES.toString("base64")}',
+								}],
+							} };
 						}
 						if (ctx.actionKey === 'stage_browser') {
 							await ctx.browser.dispatch('navigate', {
@@ -208,7 +224,7 @@ describe("operations.execute backend lifecycle", () => {
 		mcpConnectionId = mcp.id;
 		secondMcpConnectionId = secondMcp.id;
 		httpConnectionId = http.id;
-		for (const [connectorKey, keys] of [[LOCAL, ["echo", "stage_browser"]], [MCP, ["remote_echo"]], [HTTP, ["create_item"]]] as const) {
+		for (const [connectorKey, keys] of [[LOCAL, ["echo", "stage_browser", "download"]], [MCP, ["remote_echo"]], [HTTP, ["create_item"]]] as const) {
 			for (const operationKey of keys) await upsertEntityApprovalPolicy(orgId, {
 				resourceClass: "connector_action", operationKey: `${connectorKey}::${operationKey}`, effects: { execute: "auto" },
 			});
@@ -534,6 +550,44 @@ describe("operations.execute backend lifecycle", () => {
 				`^${BROWSER_GROUP_TITLE_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} · Check notifications · [a-f0-9]{12}$`,
 			),
 		);
+	});
+
+	it("publishes inline action file bytes as an artifact instead of returning base64", async () => {
+		// A server-executed action never touches /api/workers/complete-action, so
+		// the inline lane must publish attachment bytes itself.
+		const directory = await mkdtemp(join(tmpdir(), "lobu-inline-attachment-test-"));
+		const store = new ArtifactStore(directory);
+		const services = vi.spyOn(gateway, "getLobuCoreServices").mockReturnValue({ getArtifactStore: () => store });
+		try {
+			const result = (await manageOperations({
+				action: "execute", connection_id: localConnectionId, operation_key: "download", input: {},
+			}, {} as Env, ctx)) as { run_id: number; status: string; output: Record<string, unknown> };
+
+			expect(result.status).toBe("completed");
+			const [attachment] = result.output.attachments as Array<Record<string, unknown>>;
+			expect(attachment).toMatchObject({
+				kind: "file",
+				filename: "report.pdf",
+				mime_type: "application/pdf",
+				size_bytes: INLINE_FILE_BYTES.length,
+			});
+			expect(attachment.data).toBeUndefined();
+			expect(String(attachment.download_url)).toContain(String(attachment.artifact_id));
+
+			// Stored bytes are the connector's, bound to the producing run.
+			const stored = await store.read(String(attachment.artifact_id), {
+				binding: runArtifactBinding(result.run_id),
+			});
+			expect(stored?.bytes).toEqual(INLINE_FILE_BYTES);
+
+			// The durable row carries the reference, not the blob.
+			const [run] = await getTestDb()`SELECT action_output FROM runs WHERE id = ${result.run_id}`;
+			expect(JSON.stringify(run.action_output)).not.toContain(INLINE_FILE_BYTES.toString("base64"));
+			expect(run.action_output.attachments[0].artifact_id).toBe(attachment.artifact_id);
+		} finally {
+			services.mockRestore();
+			await rm(directory, { recursive: true, force: true });
+		}
 	});
 
 	it("replays a completed action instead of executing an idempotency key twice", async () => {

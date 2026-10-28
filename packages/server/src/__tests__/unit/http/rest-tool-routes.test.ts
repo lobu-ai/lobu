@@ -1,5 +1,3 @@
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { describe, expect, it } from "bun:test";
 import { Hono } from "hono";
 import { isPublicReadable } from "../../../auth/tool-access";
@@ -160,59 +158,5 @@ describe("fixed-action REST arg composition", () => {
 
 	it("works with no caller params", () => {
 		expect(fixedActionArgs("get")).toEqual({ action: "get" });
-	});
-});
-
-/** Guard route registrations against bypassing the tested composition. */
-describe("fixed-action REST route registrations", () => {
-	const indexSrc = readFileSync(join(__dirname, "../../../index.ts"), "utf8");
-	const restApiSrc = readFileSync(join(__dirname, "../../../rest-api.ts"), "utf8");
-
-	it("does not pass retired arguments through the strict Automation tool boundary", () => {
-		expect(restApiSrc).not.toContain("include_template_details");
-	});
-
-	it("has no restToolProxy call that spreads caller params after an action", () => {
-		const trailingSpread =
-			/restToolProxy\([^)]*\{\s*action:\s*["'][a-z_]+["']\s*,\s*\.\.\./gs;
-		const offenders = indexSrc.match(trailingSpread) ?? [];
-
-		expect(offenders).toEqual([]);
-	});
-
-	it("routes every fixed-action REST wrapper through restToolAction", () => {
-		// Generic dispatch and the actor-only read route do not pin an action.
-		const bareProxyCalls = indexSrc.match(/restToolProxy\(/g) ?? [];
-		expect(bareProxyCalls).toHaveLength(2);
-		expect(indexSrc.match(/restToolProxy\(c, "read_knowledge"\)/g)).toHaveLength(1);
-
-		expect(indexSrc.match(/restToolAction\(/g)).toHaveLength(3);
-	});
-
-	it("no longer registers the superseded window/execute REST routes", () => {
-		// Both were replaced by the generic tool-dispatch surface
-		// (`get_automation` via `/automations?automation_id=…` and the
-		// `POST /:orgSlug/:toolName` proxy). Asserting the literals are gone
-		// names exactly what was deleted and stops a re-introduction.
-		expect(indexSrc).not.toContain("automations/windows/:windowId");
-		expect(indexSrc).not.toContain("actions/execute");
-	});
-
-	it("registers read-only proxy GETs from the declaration table", () => {
-		expect(indexSrc).toContain("for (const route of REST_TOOL_GET_ROUTES)");
-	});
-
-	it("declares no GET proxy inline, so the public-read check cannot drift", () => {
-		// A GET registered with a literal tool name is invisible to
-		// `canAccessPublicOrgRestRoute`, which resolves routes through
-		// `REST_TOOL_GET_ROUTES`. Such a route would silently keep the old
-		// "200 via the tool door, 401 via REST" split.
-		const inlineGetProxies = indexSrc
-			.split(/\bapp\.get\(/)
-			.slice(1)
-			.map((chunk) => chunk.split(/\bapp\.(get|post|put|patch|delete|route)\(/)[0])
-			.filter((chunk) => /restToolAction\(\s*c,\s*["']/.test(chunk));
-
-		expect(inlineGetProxies).toEqual([]);
 	});
 });

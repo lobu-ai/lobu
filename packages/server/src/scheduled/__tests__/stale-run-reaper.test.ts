@@ -20,7 +20,11 @@ import {
 	ensureDbForGatewayTests,
 	resetTestDatabase,
 } from "../../gateway/__tests__/helpers/db-setup";
-import { reapStaleRuns } from "../check-stalled-executions";
+import type { Env } from "../../index";
+import {
+	checkStalledExecutions,
+	reapStaleRuns,
+} from "../check-stalled-executions";
 
 const ORG_ID = "reaper-org";
 const STALE_THRESHOLD_SECONDS = 60;
@@ -1350,5 +1354,33 @@ describe("agent turn lane", () => {
 		// The retry arm is sync-only: a turn is never re-run behind the user's
 		// back, it just ends.
 		expect(result.retriesCreated).toBe(0);
+	});
+});
+
+describe("checkStalledExecutions — no longer reaps (F15)", () => {
+	test("leaves a stale in-progress run running but still deletes runs past 30-day retention", async () => {
+		// The 30s reaper interval is the single reap cadence; the 5-minute cron
+		// keeps only its other housekeeping.
+		const stale = await seedRun({
+			status: "running",
+			lastHeartbeatAgoSeconds: STALE_THRESHOLD_SECONDS * 10,
+			claimedAtAgoSeconds: STALE_THRESHOLD_SECONDS * 10,
+			createdAtAgoSeconds: STALE_THRESHOLD_SECONDS * 10,
+		});
+		const oldRows = (await getDb().unsafe(
+			`INSERT INTO runs (
+         organization_id, run_type, status, approval_status, completed_at, created_at
+       ) VALUES (
+         $1, 'sync', 'completed', 'auto',
+         current_timestamp - interval '40 days', current_timestamp - interval '40 days'
+       )
+       RETURNING id`,
+			[ORG_ID],
+		)) as unknown as Array<{ id: number | string }>;
+
+		await checkStalledExecutions({} as Env);
+
+		expect(await statusOf(stale)).toBe("running");
+		expect(await statusOf(Number(oldRows[0].id))).toBe("missing");
 	});
 });

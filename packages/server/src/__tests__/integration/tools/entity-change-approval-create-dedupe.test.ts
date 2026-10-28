@@ -6,15 +6,26 @@
  * reuses the first pending create run.
  */
 
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import type { Env } from "../../../index";
 import {
+	applyEntityChangeProposal,
+	applyEntityFieldChangeProposal,
+	type EntityChangeProposal,
 	type EntityCreateProposal,
+	proposeEntityChange,
 	proposeEntityCreate,
 } from "../../../tools/admin/entity-field-approval";
 import type { ToolContext } from "../../../tools/registry";
+import { createEntity, updateEntity } from "../../../utils/entity-management";
 import { initWorkspaceProvider } from "../../../workspace";
 import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
-import { createTestOrganization } from "../../setup/test-fixtures";
+import {
+	addUserToOrganization,
+	createTestEntity,
+	createTestOrganization,
+	createTestUser,
+} from "../../setup/test-fixtures";
 
 function createProposal(name: string): Omit<EntityCreateProposal, "operation"> {
 	return {
@@ -107,5 +118,93 @@ describe("entity create approval dedupe", () => {
 				impact: { level: "normal" },
 			},
 		});
+	});
+});
+
+async function ownerFixture() {
+	const org = await createTestOrganization({ name: "Entity change approval" });
+	const user = await createTestUser();
+	await addUserToOrganization(user.id, org.id, "owner");
+	const from = await createTestEntity({ name: "Source", entity_type: "contact", organization_id: org.id, created_by: user.id });
+	const to = await createTestEntity({ name: "Target", entity_type: "contact", organization_id: org.id, created_by: user.id });
+	const ctx = { organizationId: org.id, userId: user.id, memberRole: "owner", isAuthenticated: true } as ToolContext;
+	// The stored shape of a retired physical-merge proposal.
+	const mergeProposal = {
+		operation: "merge", entity_id: from.id, entity_ids: [from.id], winner_entity_id: to.id,
+		current: { loser: { id: from.id, name: from.name }, winner: { id: to.id, name: to.name } },
+	} as unknown as EntityChangeProposal;
+	return { ctx, mergeProposal, from, to, user };
+}
+
+describe("entity change approval apply", () => {
+	beforeEach(cleanupTestDatabase);
+
+	it("fails closed on a stored physical merge proposal: neither applies nor queues", async () => {
+		const { ctx, mergeProposal, from, to } = await ownerFixture();
+		const db = getTestDb();
+		await expect(db.begin((tx) => applyEntityChangeProposal(mergeProposal, ctx, {} as Env, tx)))
+			.rejects.toThrow("Unsupported entity change operation");
+		const records = await db`SELECT id, deleted_at FROM entities WHERE id IN (${from.id}, ${to.id})`;
+		expect(records).toHaveLength(2);
+		expect(records.every((record) => record.deleted_at === null)).toBe(true);
+		expect(await db`SELECT id FROM entity_merge_operations WHERE organization_id = ${ctx.organizationId}`).toHaveLength(0);
+
+		await expect(proposeEntityChange(ctx, mergeProposal)).rejects.toThrow("Unsupported entity change operation");
+		expect(await db`SELECT id FROM runs WHERE organization_id = ${ctx.organizationId}`).toHaveLength(0);
+	});
+
+	it("treats schema metadata as the only field input on create and update", async () => {
+		const { ctx, from } = await ownerFixture();
+		const createMetadata = { domain: "", category: null, external_ids: { provider: "canonical" } };
+		const created = await createEntity({
+			entity_type: "contact", name: "Metadata authority", organization_id: ctx.organizationId,
+			created_by: ctx.userId, metadata: createMetadata,
+			domain: "legacy.example", category: "legacy", external_ids: { provider: "legacy" },
+		} as Parameters<typeof createEntity>[0]);
+		expect(created.metadata).toEqual(createMetadata);
+
+		await updateEntity(from.id, { metadata: { domain: "before.example" } }, {} as Env, ctx);
+		const updateMetadata = { domain: null, category: "", external_ids: { provider: "canonical" } };
+		const updated = await updateEntity(from.id, {
+			metadata: updateMetadata, domain: "legacy.example", category: "legacy", external_ids: { provider: "legacy" },
+		} as Parameters<typeof updateEntity>[1], {} as Env, ctx);
+		expect(updated.metadata).toEqual(updateMetadata);
+	});
+
+	it("applies approved metadata and $-attributes through one transaction without re-slugging", async () => {
+		const { ctx, user } = await ownerFixture();
+		const sql = getTestDb();
+		const parent = await createTestEntity({ name: "Approved parent", organization_id: ctx.organizationId, created_by: user.id });
+		const entity = await createTestEntity({ name: "Original name", organization_id: ctx.organizationId, created_by: user.id });
+		await sql`
+			UPDATE entities SET metadata = ${sql.json({ status: "pending" })}, content = 'draft'
+			WHERE id = ${entity.id}
+		`;
+
+		const result = await applyEntityFieldChangeProposal(
+			{
+				entity_id: entity.id,
+				fields: { status: "approved", $name: "Approved name", $parent_id: parent.id, $content: null },
+				current: { status: "pending", $name: "Original name", $parent_id: null, $content: "draft" },
+				reason: "Human approved the proposed entity changes",
+			},
+			{ userId: user.id },
+		);
+
+		expect(Object.keys(result.applied).sort()).toEqual(["$content", "$name", "$parent_id", "status"]);
+		const [row] = await sql<{
+			name: string; slug: string; parent_id: number; content: string | null;
+			metadata: Record<string, unknown>; field_controls: Record<string, { set_by?: string | null }>;
+		}>`
+			SELECT name, slug, parent_id, content, metadata, field_controls FROM entities WHERE id = ${entity.id}
+		`;
+		expect(row).toMatchObject({
+			name: "Approved name",
+			slug: "original-name",
+			parent_id: parent.id,
+			content: null,
+			metadata: { status: "approved" },
+		});
+		expect(row.field_controls.status?.set_by).toBe(user.id);
 	});
 });

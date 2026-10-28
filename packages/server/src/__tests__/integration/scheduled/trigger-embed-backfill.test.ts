@@ -179,6 +179,32 @@ describe('triggerEmbedBackfill query rewrite', () => {
     // Newest-first: the last-inserted unembedded row comes before the older one.
     expect(enqueued.indexOf(ids.unembeddedNew)).toBeLessThan(enqueued.indexOf(ids.unembeddedOld));
   });
+
+  it('does not stack a second run while one is active', async () => {
+    // The pending run from the previous case must serialize retries.
+    const result = await triggerEmbedBackfill({} as Env);
+    expect(result.runsCreated).toBe(0);
+  });
+
+  it('re-enqueues the still-unembedded backlog after its run failed', async () => {
+    // A failed run is terminal; it must not dead-end the backlog.
+    const sql = getTestDb();
+    await sql`
+      UPDATE runs SET status = 'failed'
+      WHERE organization_id = ${orgId} AND run_type = 'embed_backfill' AND status = 'pending'
+    `;
+    const result = await triggerEmbedBackfill({} as Env);
+    expect(result.runsCreated).toBe(1);
+
+    const rows = (await sql`
+      SELECT action_input FROM runs
+      WHERE organization_id = ${orgId} AND run_type = 'embed_backfill' AND status = 'pending'
+    `) as Array<{ action_input: { event_ids: number[] } }>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.action_input.event_ids).toEqual(
+      expect.arrayContaining([ids.unembeddedOld, ids.superseding, ids.unembeddedNew])
+    );
+  });
 });
 
 describe('triggerEmbedBackfill org-per-tick cap (serialize)', () => {

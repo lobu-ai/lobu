@@ -113,3 +113,45 @@ describe('truncateAllTables — blocked-lock timeout (#2818)', () => {
     expect(rows[0]?.n).toBe(0);
   });
 });
+
+/**
+ * Deadlock (40P01) retry accounting. Background DML from one test can overlap
+ * the next test's cleanup TRUNCATE in the shared-process bun lanes, and the
+ * opposite lock orders make Postgres pick the TRUNCATE as the victim. A real
+ * deadlock is not reproducible on demand, so a scripted transaction drives the
+ * retry loop; the lock-timeout cases above cover real lock waits.
+ */
+describe('truncateAllTables — deadlock retry accounting', () => {
+  function scriptedDb(script: string[]) {
+    let i = 0;
+    const db = {
+      attempts: 0,
+      async unsafe(_sql: string) {},
+      async begin(cb: (tx: { unsafe: (s: string) => Promise<void> }) => Promise<void>) {
+        db.attempts++;
+        await cb({ unsafe: async () => {} });
+        const code = script[Math.min(i++, script.length - 1)];
+        if (code !== 'ok') throw Object.assign(new Error(`pg error ${code}`), { code });
+      },
+    };
+    return db;
+  }
+
+  test.each([
+    { script: ['40P01', '40P01', 'ok'], rejects: null, attempts: 3, label: 'recovers after deadlocks' },
+    { script: ['42P01'], rejects: null, attempts: 1, label: 'tolerates a vanished table' },
+    { script: ['42501', 'ok'], rejects: '42501', attempts: 1, label: 'rethrows an unrelated error without retry' },
+  ])('$label', async ({ script, rejects, attempts }) => {
+    const db = scriptedDb(script);
+    const run = truncateAllTables(db as never, '"a"', true);
+    if (rejects) await expect(run).rejects.toMatchObject({ code: rejects });
+    else await expect(run).resolves.toBeUndefined();
+    expect(db.attempts).toBe(attempts);
+  });
+
+  test('rethrows the deadlock once retries are exhausted', async () => {
+    const db = scriptedDb(['40P01']);
+    await expect(truncateAllTables(db as never, '"a"', true)).rejects.toMatchObject({ code: '40P01' });
+    expect(db.attempts).toBeGreaterThan(1);
+  });
+});

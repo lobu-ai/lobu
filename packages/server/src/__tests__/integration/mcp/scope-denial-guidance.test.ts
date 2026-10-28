@@ -73,53 +73,26 @@ describe('MCP scope denial guidance', () => {
       connector_id: '__nonexistent__',
     });
 
-  it('tells an owner on a write-level connection how to get admin without promising the option', async () => {
+  // The remediation wording is pinned by unit/scope-denial-message.test.ts;
+  // this suite pins the wire shape over a real OAuth MCP session.
+  it('returns an insufficient_scope step-up challenge for mcp:admin on a nested admin SDK call', async () => {
     const result = await runAdminScript(await oauthToken(owner.id, 'mcp:read mcp:write'));
-    const message: string = result?.structuredContent?.error?.message ?? '';
 
     expect(result?.isError).toBe(true);
-    expect(message).toContain('manage_connections.install_connector needs admin access');
-    expect(message).toContain(`which this connection to ${ORG_SLUG} doesn't have`);
-    expect(message).toContain("tokens aren't upgraded on refresh");
-    expect(message).toContain(`As an owner of ${ORG_SLUG}, retry the action`);
-    expect(message).toContain("choose 'Administer workspaces' if the consent screen offers it");
-    expect(message).toContain('do this from the Lobu web app or CLI instead');
-    // The progressive step-up challenge is unchanged and still offered.
+    expect(result?.structuredContent?.error?.message).toContain('manage_connections.install_connector');
     const challenge = result?._meta?.['mcp/www_authenticate']?.[0];
     expect(challenge).toContain('error="insufficient_scope"');
     expect(challenge).toContain('mcp:admin');
   });
 
-  it('gives the same guidance when the admin tool is called directly', async () => {
-    const text = await installConnectorText(await oauthToken(owner.id, 'mcp:read mcp:write'));
-
-    expect(text).toContain('manage_connections.install_connector needs admin access');
-    expect(text).toContain(`As an owner of ${ORG_SLUG}, retry the action`);
-    expect(text).toContain("choose 'Administer workspaces' if the consent screen offers it");
-  });
-
-  it('tells a member that admin needs an owner/admin role, not a reconnect', async () => {
-    const text = await installConnectorText(await oauthToken(member.id, 'mcp:read mcp:write'));
-
-    expect(text).toContain(`manage_connections.install_connector requires admin or owner access in ${ORG_SLUG}`);
-    expect(text).toContain(`Your role in ${ORG_SLUG} is member`);
-    expect(text).toContain('reconnecting this app cannot change that');
-    expect(text).not.toContain('Administer workspaces');
-  });
-
-  it('tells a read-only member to reconnect and choose Read and make changes', async () => {
-    const text = await saveMemoryText(await oauthToken(member.id, 'mcp:read'));
-
-    expect(text).toContain('save_memory needs write access');
-    expect(text).toContain(`This connection to ${ORG_SLUG} was approved read-only`);
-    expect(text).toContain("choose 'Read and make changes' on the Lobu consent screen");
-    expect(text).not.toContain('Administer workspaces');
-  });
-
-  it('offers a read-only owner the admin level as well', async () => {
-    const text = await saveMemoryText(await oauthToken(owner.id, 'mcp:read'));
-
-    expect(text).toContain('save_memory needs write access');
-    expect(text).toContain("choose 'Read and make changes' (or 'Administer workspaces'");
+  it.each([
+    ['owner', 'mcp:read mcp:write', 'install_connector'],
+    ['member', 'mcp:read mcp:write', 'install_connector'],
+    ['member', 'mcp:read', 'save_memory'],
+    ['owner', 'mcp:read', 'save_memory'],
+  ] as const)('denies a direct call as a tool error (%s, %s, %s)', async (role, scope, tool) => {
+    const token = await oauthToken(role === 'owner' ? owner.id : member.id, scope);
+    const text = tool === 'save_memory' ? await saveMemoryText(token) : await installConnectorText(token);
+    expect(text).toContain(tool === 'save_memory' ? 'save_memory' : 'manage_connections.install_connector');
   });
 });
