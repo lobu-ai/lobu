@@ -63,6 +63,14 @@ describe("workspaceUnlinkedNotice", () => {
 			expect(text).not.toContain("platform=slack");
 			expect(text).toContain("https://app.lobu.ai/acme/automations/new?agent=planner");
 			expect(text).toContain(`connection=${BYO_CONNECTION_SLUG}`);
+			// Only pipe-link platforms get `<url|label>`; elsewhere the angle
+			// brackets would render as literal text around a dead link.
+			if (platform === "gchat") {
+				expect(text).toContain("|Planner>");
+			} else {
+				expect(text).not.toContain("<http");
+				expect(text).toContain("Planner — https://app.lobu.ai/acme/automations/new?");
+			}
 		},
 	);
 
