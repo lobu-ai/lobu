@@ -281,10 +281,10 @@ describe('MCP query_sdk / run_sdk tool surface', () => {
       headers: { 'mcp-session-id': sessionId! },
     });
     const body = await listRes.json();
-    const tools = (body.result?.tools as Array<{
+    const tools = (body.result?.tools ?? []) as Array<{
       name: string;
-      annotations?: Record<string, boolean>;
-    }>) ?? [];
+      annotations?: Record<string, unknown>;
+    }>;
     const names = tools.map((t) => t.name);
 
     // Public-readable tools survive: search_memory and search_sdk (SDK discovery).
@@ -308,18 +308,8 @@ describe('MCP query_sdk / run_sdk tool surface', () => {
     for (const toolName of ['search_memory', 'search_sdk']) {
       const expected = getTool(toolName)?.annotations;
       expect(expected, `${toolName} registry annotations`).toBeDefined();
-      const actual = listedByName.get(toolName)?.annotations;
-      expect(actual?.readOnlyHint, `${toolName}.readOnlyHint`).toBe(
-        expected?.readOnlyHint
-      );
-      expect(actual?.destructiveHint, `${toolName}.destructiveHint`).toBe(
-        expected?.destructiveHint
-      );
-      expect(actual?.openWorldHint, `${toolName}.openWorldHint`).toBe(
-        expected?.openWorldHint
-      );
-      expect(actual?.idempotentHint, `${toolName}.idempotentHint`).toBe(
-        expected?.idempotentHint
+      expect(listedByName.get(toolName)?.annotations, `${toolName}.annotations`).toEqual(
+        expected
       );
     }
   });
