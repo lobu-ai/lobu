@@ -25,6 +25,7 @@
  *     reading the response over MCP can include it in chat replies.
  *   - `classification_stats` only appears when the caller explicitly passes
  *     `include_classification: 'summary'`.
+ *   - `score` distinguishes an absent score (null) from a recorded zero.
  *
  * NOTE: vitest is not yet wired into CI for this package. Stream C will fix
  * that. Until then, these tests run locally against the dev Postgres.
@@ -32,8 +33,9 @@
 
 import { beforeAll, describe, expect, it } from 'vitest';
 import { getDb } from '../../../db/client';
-import { getContent } from '../../../tools/get_content';
+import { type ContentItem, getContent } from '../../../tools/get_content';
 import type { ToolContext } from '../../../tools/registry';
+import { insertEvent } from '../../../utils/insert-event';
 import {
   __resetPublicOriginCachesForTests,
   __setLocalFrontendForTests,
@@ -431,6 +433,35 @@ describe('getContent > response shape (view_url present, stats opt-in)', () => {
       ctx()
     );
     expect(withoutStats.classification_stats).toBeUndefined();
+  });
+
+  it('returns null for an unscored event and preserves numeric scores including zero', async () => {
+    const note = async (originId: string, score?: number) =>
+      (
+        await insertEvent({
+          entityIds: [emptyEntity.id],
+          organizationId: org.id,
+          originId,
+          title: originId,
+          content: `score probe ${originId}`,
+          semanticType: 'note',
+          ...(score === undefined ? {} : { score }),
+        })
+      ).id;
+    // No score supplied: insertEvent stores an explicit NULL.
+    const unscoredId = await note('score-unscored');
+    const scoredId = await note('score-scored', 4.5);
+    const zeroScoreId = await note('score-zero', 0);
+
+    const result = await getContent(
+      { content_ids: [unscoredId, scoredId, zeroScoreId], limit: 10 },
+      {} as never,
+      ctx()
+    );
+    const byId = new Map((result.content as ContentItem[]).map((c) => [Number(c.id), c]));
+    expect(byId.get(unscoredId)?.score).toBeNull();
+    expect(byId.get(scoredId)?.score).toBe(4.5);
+    expect(byId.get(zeroScoreId)?.score).toBe(0);
   });
 });
 

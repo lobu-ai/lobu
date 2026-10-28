@@ -16,6 +16,11 @@
  * capability check does: both are "can this device actually serve this
  * connector", and both are knowable at write time. Rejecting names the reason;
  * accepting silently does not.
+ *
+ * The other side of the same binding: a serverless create — `device_worker_id`
+ * explicitly null (what the UI sends) or omitted — must succeed with no device
+ * bound. The create schema once used a bare `Type.String` and rejected null with
+ * "/device_worker_id: Expected string" before any connection was created.
  */
 
 import { beforeAll, describe, expect, it } from "vitest";
@@ -302,5 +307,43 @@ describe("connections.update device pin freshness", () => {
 
 		expect(result.error).toBeUndefined();
 		expect(await pinOf(conn)).toBe(napping);
+	});
+});
+
+describe("manage_connections create without a device worker", () => {
+	const SERVERLESS_KEY = "demo.serverless";
+
+	it.each([
+		["null", { device_worker_id: null }],
+		["omitted", {}],
+	])("creates a serverless connection when device_worker_id is %s", async (label, binding) => {
+		const { org, ctx } = await seedOwnerContext({
+			orgName: `Serverless ${label} Org`,
+		});
+		await createTestConnectorDefinition({
+			key: SERVERLESS_KEY,
+			name: "Demo Serverless",
+			organization_id: org.id,
+			auth_schema: { methods: [{ type: "none" }] },
+			feeds_schema: { items: {} },
+		});
+
+		const res = await manageConnections(
+			{
+				action: "create",
+				connector_key: SERVERLESS_KEY,
+				slug: `serverless-${label}`,
+				display_name: `Serverless ${label}`,
+				...binding,
+			},
+			{} as Env,
+			ctx,
+		);
+
+		expect("error" in res ? res.error : undefined).toBeUndefined();
+		if (!("connection" in res)) throw new Error("expected a connection in result");
+		const connection = res.connection as { id: number; device_worker_id: unknown };
+		expect(connection.id).toBeGreaterThan(0);
+		expect(connection.device_worker_id ?? null).toBeNull();
 	});
 });

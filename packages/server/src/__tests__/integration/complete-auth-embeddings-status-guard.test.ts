@@ -21,6 +21,13 @@
  * effects are untouched, handler returns { success: false,
  * reason: 'already_finalized' }.
  *
+ * Also covers completeAuthRun's success side effects on the claimant path:
+ * linked paused feeds reactivate only below the failure pause threshold, and an
+ * `interactive` profile's structured SESSION STATE (e.g. Baileys creds) is
+ * stored verbatim — only flat bearer credentials (env, oauth_account) are
+ * wrapped in `secret://` refs, since secret-ref'ing session state would strip
+ * its non-string values and leave unresolvable refs on the worker.
+ *
  * Drives the REAL exported handlers against the embedded DB via a minimal Hono
  * Context (same approach as complete-worker-job-status-guard.test.ts). The mock
  * context has no workerAuthMode, so authorizeRunForWorker is a no-op — which
@@ -32,11 +39,12 @@
 import { parseSecretRef } from '@lobu/core';
 import type { Context } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
+import { feedBackoff } from '../../connectors/feed-backoff';
 import type { Env } from '../../index';
 import { resolveAuthCredentials } from '../../utils/auth-credential-secrets';
 import { completeAuthRun, completeEmbeddings } from '../../worker-api';
 import { cleanupTestDatabase, getTestDb } from '../setup/test-db';
-import { createTestOrganization } from '../setup/test-fixtures';
+import { createTestConnection, createTestOrganization } from '../setup/test-fixtures';
 
 const WORKER_ID = 'worker-late';
 
@@ -56,15 +64,36 @@ function mockWorkerCtx(body: unknown): {
   return { ctx, result: () => captured };
 }
 
-async function insertPendingAuthProfile(organizationId: string): Promise<number> {
+async function insertPendingAuthProfile(
+  organizationId: string,
+  opts: { connectorKey?: string; profileKind?: string } = {}
+): Promise<number> {
+  const connectorKey = opts.connectorKey ?? 'gmail';
   const sql = getTestDb();
   const rows = (await sql`
     INSERT INTO auth_profiles
       (organization_id, slug, display_name, connector_key, profile_kind, status,
        created_at, updated_at)
     VALUES
-      (${organizationId}, 'gmail-guard-test', 'Gmail Guard Test', 'gmail',
-       'oauth_account', 'pending_auth', NOW(), NOW())
+      (${organizationId}, ${`${connectorKey}-guard-test`}, 'Guard Test', ${connectorKey},
+       ${opts.profileKind ?? 'oauth_account'}, 'pending_auth', NOW(), NOW())
+    RETURNING id
+  `) as Array<{ id: number }>;
+  return rows[0].id;
+}
+
+async function insertRunningAuthRun(
+  organizationId: string,
+  authProfileId: number
+): Promise<number> {
+  const sql = getTestDb();
+  const rows = (await sql`
+    INSERT INTO runs
+      (organization_id, run_type, status, claimed_by, claimed_at,
+       auth_profile_id, created_at)
+    VALUES
+      (${organizationId}, 'auth', 'running', ${WORKER_ID}, NOW(),
+       ${authProfileId}, NOW())
     RETURNING id
   `) as Array<{ id: number }>;
   return rows[0].id;
@@ -341,5 +370,116 @@ describe('completeEmbeddings status guard (late-completion-after-timeout)', () =
     `) as Array<{ embedding_model: string }>;
     expect(embRows.length).toBe(1);
     expect(embRows[0].embedding_model).toBe('test-model');
+  });
+});
+
+describe('completeAuthRun feed reactivation', () => {
+  beforeEach(async () => {
+    await cleanupTestDatabase();
+  });
+
+  it.each([
+    { failures: 0, expectedStatus: 'active' },
+    { failures: feedBackoff.pauseThreshold - 1, expectedStatus: 'active' },
+    { failures: feedBackoff.pauseThreshold, expectedStatus: 'paused' },
+    { failures: feedBackoff.pauseThreshold + 1, expectedStatus: 'paused' },
+  ])('leaves a paused feed with $failures failures $expectedStatus after auth succeeds', async ({ failures, expectedStatus }) => {
+    const org = await createTestOrganization();
+    const profileId = await insertPendingAuthProfile(org.id, { connectorKey: 'github' });
+    const runId = await insertRunningAuthRun(org.id, profileId);
+    const connection = await createTestConnection({
+      organization_id: org.id,
+      connector_key: 'github',
+      status: 'paused',
+      visibility: 'private',
+    });
+    const sql = getTestDb();
+    await sql`
+      UPDATE connections SET auth_profile_id = ${profileId}, status = 'pending_auth'
+      WHERE id = ${connection.id}
+    `;
+    await sql`
+      UPDATE feeds
+      SET status = 'paused', schedule = '*/5 * * * *', next_run_at = NULL,
+          consecutive_failures = ${failures},
+          first_failure_at = ${failures > 0 ? new Date('2026-01-01T00:00:00Z') : null},
+          last_error = ${failures > 0 ? 'sync failed' : null}
+      WHERE connection_id = ${connection.id}
+    `;
+    const [before] = await sql`
+      SELECT status, next_run_at, consecutive_failures, first_failure_at, last_error
+      FROM feeds WHERE connection_id = ${connection.id}
+    `;
+
+    const { ctx, result } = mockWorkerCtx({
+      run_id: runId,
+      worker_id: WORKER_ID,
+      status: 'success',
+      credentials: { api_key: 'test-rotated-token' },
+    });
+    await completeAuthRun(ctx);
+    expect(result()).toEqual({ body: { success: true }, status: 200 });
+
+    const [profile] = await sql`SELECT status FROM auth_profiles WHERE id = ${profileId}`;
+    const [linkedConnection] = await sql`SELECT status FROM connections WHERE id = ${connection.id}`;
+    expect(profile.status).toBe('active');
+    expect(linkedConnection.status).toBe('active');
+
+    const [after] = await sql`
+      SELECT status, next_run_at, consecutive_failures, first_failure_at, last_error
+      FROM feeds WHERE connection_id = ${connection.id}
+    `;
+    expect(after.status).toBe(expectedStatus);
+    if (expectedStatus === 'paused') {
+      expect(after).toEqual(before);
+    } else {
+      expect(after.next_run_at).not.toBeNull();
+      expect(after).toEqual({ ...before, status: 'active', next_run_at: after.next_run_at });
+    }
+  });
+});
+
+describe('completeAuthRun session-state passthrough', () => {
+  beforeEach(async () => {
+    await cleanupTestDatabase();
+  });
+
+  it('stores interactive session state verbatim — no secret refs, nothing dropped', async () => {
+    const org = await createTestOrganization();
+    const profileId = await insertPendingAuthProfile(org.id, {
+      connectorKey: 'whatsapp',
+      profileKind: 'interactive',
+    });
+    const runId = await insertRunningAuthRun(org.id, profileId);
+    const sql = getTestDb();
+
+    // Baileys-style session state: nested objects + a flat string field. None
+    // of this is a bearer credential the execution path resolves as a ref.
+    const sessionState = {
+      creds: { noiseKey: { private: 'abc', public: 'def' }, registered: true },
+      account_id: '15551234567',
+    };
+
+    const { ctx, result } = mockWorkerCtx({
+      run_id: runId,
+      worker_id: WORKER_ID,
+      status: 'success',
+      credentials: sessionState,
+      metadata: { paired: true },
+    });
+    await completeAuthRun(ctx);
+
+    expect(result().body).toEqual({ success: true });
+
+    const profile = (await sql`
+      SELECT status, auth_data FROM auth_profiles WHERE id = ${profileId}
+    `) as Array<{ status: string; auth_data: Record<string, unknown> }>;
+
+    // Passthrough: the whole session state survives intact (nested objects
+    // preserved), and no value was converted into a secret:// ref.
+    expect(profile[0].status).toBe('active');
+    expect(profile[0].auth_data).toEqual(sessionState);
+    expect(JSON.stringify(profile[0].auth_data)).not.toContain('secret://');
+    expect(parseSecretRef(String(profile[0].auth_data.account_id))).toBeNull();
   });
 });
