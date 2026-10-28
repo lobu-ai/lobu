@@ -263,11 +263,13 @@ export async function handleClaimNextWindow(
       // A due external schedule honors `skip_if_unchanged` exactly like the
       // native materializer: a window with nothing new is booked as a no-op
       // run and the schedule advances, so the client is not handed a turn's
-      // worth of work to discover an empty window.
+      // worth of work to discover an empty window. The source read opens its
+      // own read-only transaction, so it takes the pool client; the row lock
+      // held here still serializes it against concurrent claims.
       const unchangedWindow =
         !queued && automation.executor_kind === 'external' && automation.schedule
           ? await inspectUnchangedWindow(
-              tx,
+              sql,
               { id: automationId, triggers: automation.triggers },
               { windowStart, windowEnd }
             )
