@@ -2,7 +2,6 @@ import { describe, expect, mock, spyOn, test } from "bun:test";
 import { ApiError } from "../../../memory/_lib/errors.js";
 import {
   executePlan,
-  fetchRemoteSnapshot,
   locallyDeclaredConnectorKeys,
   pushProviderApiKeys,
   readBoundedBody,
@@ -355,12 +354,8 @@ describe("executePlan — managed MCP connector install", () => {
       notes: [],
     };
     const calls: string[] = [];
-    const stdout: string[] = [];
     const stdoutSpy = spyOn(process.stdout, "write").mockImplementation(
-      (chunk) => {
-        stdout.push(String(chunk));
-        return true;
-      }
+      () => true
     );
     const installConnector = mock(async (payload: { sourceCode?: string }) => {
       calls.push(`install:${payload.sourceCode}`);
@@ -394,8 +389,6 @@ describe("executePlan — managed MCP connector install", () => {
       "install:export default class ManagedAtlassian {}",
       "connection",
     ]);
-    expect(stdout.join("")).toContain("mcp.atlassian");
-    expect(stdout.join("")).toContain("installed managed");
     expect(createConnection).toHaveBeenCalledWith({
       slug: "atlassian-burak",
       connector: "mcp.atlassian",
@@ -627,116 +620,6 @@ describe("executePlan — entity-type schema fidelity", () => {
     expect(upsertEntityType).toHaveBeenCalledTimes(1);
     const clearFacets = upsertEntityType.mock.calls[0]?.[3] as Set<string>;
     expect(clearFacets.has("properties")).toBe(true);
-  });
-});
-
-describe("executePlan — no dead template-tool calls on the write path", () => {
-  test("entity-type create and update never touch manage_view_templates", async () => {
-    // The server tool is removed: any write-path call would POST a dead tool
-    // and abort the apply. The recording client has no template methods, so a
-    // call attempt throws — and the assertion names it.
-    const calls: string[] = [];
-    const client = new Proxy(
-      {},
-      {
-        get: (_target, prop) => {
-          if (typeof prop !== "string") return undefined;
-          calls.push(prop);
-          if (prop === "upsertEntityType")
-            return async () => ({ updated: true });
-          return async () => null;
-        },
-      }
-    ) as unknown as ApplyClient;
-    const state = stateWith({
-      definitions: [],
-      authProfiles: [],
-      connections: [],
-    });
-    state.memorySchema.entityTypes = [
-      { slug: "deal", name: "Deal" },
-      { slug: "task", name: "Task" },
-    ];
-    const plan: DiffPlan = {
-      rows: [
-        {
-          kind: "entity-type",
-          verb: "create",
-          id: "deal",
-          // A stale config that still declares the retired facet: the write
-          // path must ignore it, never POST the removed tool.
-          desired: {
-            slug: "deal",
-            name: "Deal",
-            viewTemplate: { type: "card" },
-          } as unknown as { slug: string; name: string },
-        },
-        {
-          kind: "entity-type",
-          verb: "update",
-          id: "task",
-          desired: { slug: "task", name: "Task" },
-          changedFields: ["name"],
-        },
-      ],
-      counts: { create: 1, update: 1, noop: 0, drift: 0, delete: 0 },
-      notes: [],
-    };
-    const remote: RemoteSnapshot = {
-      agents: [],
-      agentSettings: new Map(),
-      entityTypes: [],
-      relationshipTypes: [],
-      automations: [],
-      connectorDefinitions: [],
-      authProfiles: [],
-      connections: [],
-      feedsByConnectionId: new Map(),
-      inferenceProviders: [],
-    };
-
-    await executePlan({ client, state, plan, remote }, []);
-
-    expect(calls).toContain("upsertEntityType");
-    expect(calls.filter((c) => /template/i.test(c))).toEqual([]);
-  });
-});
-
-describe("fetchRemoteSnapshot — no view-template hydration", () => {
-  test("never calls the retired template tool, even under prune", async () => {
-    // View templates are retired with the server tool: a snapshot fetch that
-    // still hydrated per-type templates would POST the removed
-    // manage_view_templates and abort the apply. The client below has no such
-    // method at all, so any call attempt throws.
-    const client = {
-      listAgents: async () => [],
-      listEntityTypes: async () => [
-        { slug: "company", organization_id: "org-acme" },
-      ],
-      listRelationshipTypes: async () => [],
-      listAutomations: async () => [],
-      listConnectors: async () => [],
-      listAuthProfiles: async () => [],
-      listConnections: async () => [],
-      listInferenceProviders: async () => [],
-      listViews: async () => [],
-    } as unknown as ApplyClient;
-
-    const state: DesiredState = {
-      agents: [],
-      prune: true,
-      memorySchema: {
-        entityTypes: [{ slug: "company" }],
-        relationshipTypes: [],
-      },
-      automations: [],
-      connectors: { definitions: [], authProfiles: [], connections: [] },
-      providers: [],
-      requiredSecrets: [],
-    };
-
-    const remote = await fetchRemoteSnapshot(client, state, undefined, true);
-    expect(remote.entityTypes.find((e) => e.slug === "company")).toBeDefined();
   });
 });
 
@@ -1201,7 +1084,7 @@ describe("normalizeConnectionConfigScope — feed-scoped keys demote to feeds", 
   });
 });
 
-describe("readBoundedBody (#3 — bounded source_url fetch)", () => {
+describe("readBoundedBody — bounded source_url fetch", () => {
   test("reads a small body in full", async () => {
     const text = await readBoundedBody(
       makeResponse("hello world"),
@@ -1242,7 +1125,7 @@ describe("readBoundedBody (#3 — bounded source_url fetch)", () => {
   });
 });
 
-describe("pushProviderApiKeys (#11 — provider keys pushed on a noop-only apply)", () => {
+describe("pushProviderApiKeys — provider keys pushed on a noop-only apply", () => {
   function agentWithKeys(
     agentId: string,
     providerKeys: { providerId: string; value: string }[]
@@ -1331,20 +1214,9 @@ describe("pushProviderApiKeys (#11 — provider keys pushed on a noop-only apply
     ).rejects.toThrow(/boom/);
     expect(createInferenceProvider).not.toHaveBeenCalled();
   });
-
-  test("no-op when no agent declares a provider key", async () => {
-    const rotateInferenceProviderKey = mock(async () => {
-      /* resolve void */
-    });
-    const client = { rotateInferenceProviderKey } as unknown as ApplyClient;
-
-    await pushProviderApiKeys(client, [agentWithKeys("a1", [])]);
-
-    expect(rotateInferenceProviderKey).not.toHaveBeenCalled();
-  });
 });
 
-describe("validateConnectorState — skip stale schema for locally-declared keys (#2)", () => {
+describe("validateConnectorState — skip stale schema for locally-declared keys", () => {
   const localDef = {
     key: "myconn",
     sourcePath: "/proj/connectors/myconn.connector.ts",

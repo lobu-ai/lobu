@@ -8,7 +8,7 @@
  *     headless args, flag mapping, MCP wiring). Adding a CLI is now one entry,
  *     not a ~140-line executor copy.
  *   - the Automation prompt builder — the completion contract the spawned CLI
- *     must satisfy, pinned by golden-string fixtures in device-automation.test.ts.
+ *     must satisfy.
  *
  * The connector-worker daemon consumes these from core. This module is pure
  * data + string building: it imports nothing above core.

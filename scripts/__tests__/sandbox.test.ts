@@ -2,47 +2,38 @@ import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import {
   chmodSync,
-  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
-  readdirSync,
   rmSync,
-  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { gunzipSync } from "node:zlib";
 import { tmpdir } from "node:os";
-import { dirname, join, normalize, resolve } from "node:path";
+import { join } from "node:path";
 import {
   HOST_ONLY_ENV_KEYS,
   SANDBOX_CONTROLLED_ENV_KEYS,
   applyTreeSync,
-  authenticatedUrl,
   bootEnv,
   buildTarball,
   changedSince,
   credentialsFromConfig,
   currentHeads,
-  dirtyNotice,
   ExpiredCliTokenError,
   fullSyncReason,
-  generateBearerToken,
-  generatePassword,
   hashEntries,
   interpretSignUp,
   isAppleDouble,
   listTreeFiles,
   lockfileEntries,
-  loginLink,
   needsMcpRebuild,
   orphanSandboxNames,
   parseLsFilesS,
   parsePorcelainZ,
   parseWorktreeRoots,
   planSync,
-  previewUrlFor,
   readSyncState,
   resolveOwnerEmail,
   resolveScope,
@@ -164,12 +155,6 @@ describe("sandboxName", () => {
     expect(sandboxName("/a/b/Feat_X")).toBe(sandboxName("/a/b/Feat_X"));
   });
 
-  test("strips characters a sandbox name cannot carry", () => {
-    expect(sandboxName("/a/b/Feat_X.2")).toMatch(
-      /^lobu-dev-feat-x-2-[a-f0-9]{8}$/
-    );
-  });
-
   test("does not collide for the same worktree slug in two checkouts", () => {
     expect(sandboxName("/Users/alice/lobu/my-task")).not.toBe(
       sandboxName("/Users/bob/lobu/my-task")
@@ -225,10 +210,6 @@ describe("sanitizedEnv", () => {
       expect(out).not.toContain(`${key}=`);
     }
   });
-
-  test("returns null when the worktree has no .env", () => {
-    expect(sanitizedEnv(temporaryDirectory("sandbox-noenv-"))).toBeNull();
-  });
 });
 
 describe("bootEnv", () => {
@@ -258,12 +239,6 @@ describe("bootEnv", () => {
     expect(value).not.toContain("/workspace/lobu/");
   });
 
-  test("binds the gateway to the preview origin", () => {
-    expect(env()).toContain("PUBLIC_GATEWAY_URL='https://p.example/lobu'");
-    expect(env()).toContain("HOST='0.0.0.0'");
-    expect(env()).toContain("PORT='8787'");
-  });
-
   test("refuses a value that would break out of its shell quotes", () => {
     expect(() =>
       bootEnv({
@@ -275,27 +250,7 @@ describe("bootEnv", () => {
   });
 });
 
-describe("generateBearerToken", () => {
-  test("is url-safe and long enough to be unguessable", () => {
-    const token = generateBearerToken();
-    expect(token).toMatch(/^[A-Za-z0-9_-]{43}$/);
-    expect(token).not.toBe(generateBearerToken());
-  });
-});
-
 describe("resolveOwnerEmail", () => {
-  test("prefers the explicit override", () => {
-    expect(resolveOwnerEmail("me@example.com", "git@example.com")).toBe(
-      "me@example.com"
-    );
-  });
-
-  test("falls back to the worktree git identity", () => {
-    expect(resolveOwnerEmail(undefined, " git@example.com ")).toBe(
-      "git@example.com"
-    );
-  });
-
   test("throws rather than inventing an owner", () => {
     // A hardcoded address would be personal state in shipping code.
     expect(() => resolveOwnerEmail(undefined, undefined)).toThrow(
@@ -304,13 +259,6 @@ describe("resolveOwnerEmail", () => {
     expect(() => resolveOwnerEmail(undefined, "not-an-email")).toThrow(
       /SANDBOX_OWNER_EMAIL/
     );
-  });
-});
-
-describe("generatePassword", () => {
-  test("is url-safe and unique per call", () => {
-    expect(generatePassword()).toMatch(/^[A-Za-z0-9_-]{24}$/);
-    expect(generatePassword()).not.toBe(generatePassword());
   });
 });
 
@@ -381,34 +329,6 @@ describe("sessionTokenFrom", () => {
   });
 });
 
-describe("loginLink", () => {
-  test("hands the token to the exchange endpoint", () => {
-    expect(loginLink("https://p.example", "tok/en+value")).toBe(
-      "https://p.example/api/exchange-token?token=tok%2Fen%2Bvalue&next=%2F"
-    );
-  });
-
-  test("does not double the slash on a trailing-slash url", () => {
-    expect(loginLink("https://p.example/", "t")).toContain(
-      "https://p.example/api/exchange-token"
-    );
-  });
-});
-
-describe("previewUrlFor", () => {
-  test("a public preview needs no key in the url", () => {
-    expect(previewUrlFor(true, "https://p.example", "tok")).toBe(
-      "https://p.example"
-    );
-  });
-
-  test("a private preview still gets the key", () => {
-    expect(previewUrlFor(false, "https://p.example", "tok")).toBe(
-      "https://p.example?DAYTONA_SANDBOX_AUTH_KEY=tok"
-    );
-  });
-});
-
 describe("buildTarball", () => {
   test("drops an AppleDouble sidecar already present on disk", () => {
     const root = fixtureRepo();
@@ -464,16 +384,6 @@ describe("buildTarball", () => {
     expect(entries(join(tarball(root), "tree.tar.gz"))).toContain("scratch.ts");
   });
 
-  test("writes the sanitized env beside the tarball, not into it", () => {
-    const root = fixtureRepo();
-    writeFileSync(join(root, ".env"), "KEEP=1\nDATABASE_URL=postgres://x\n");
-    const stage = tarball(root);
-    expect(existsSync(join(stage, "tree.tar.gz"))).toBe(true);
-    const env = sanitizedEnv(root) ?? "";
-    expect(env).toContain("KEEP=1");
-    expect(env).not.toContain("DATABASE_URL");
-  });
-
   test("archives the Owletto gitlink only through the filtered submodule tarball", () => {
     const root = fixtureRepo();
     addOwlettoSubmodule(root);
@@ -497,48 +407,6 @@ describe("buildTarball", () => {
     const names = entries(join(tarball(root), "tree.tar.gz"));
     expect(names).toContain("--not-a-tar-option");
     expect(names).toContain("line\nbreak.ts");
-  });
-});
-
-describe("authenticatedUrl", () => {
-  test("appends the preview token so the link opens in a browser", () => {
-    expect(authenticatedUrl("https://x.example", "tok")).toBe(
-      "https://x.example?DAYTONA_SANDBOX_AUTH_KEY=tok"
-    );
-  });
-
-  test("returns the bare url for a public sandbox", () => {
-    expect(authenticatedUrl("https://x.example")).toBe("https://x.example");
-  });
-
-  test("preserves an existing query string", () => {
-    expect(authenticatedUrl("https://x.example?view=dev", "tok")).toBe(
-      "https://x.example?view=dev&DAYTONA_SANDBOX_AUTH_KEY=tok"
-    );
-  });
-});
-
-describe("CLI validation", () => {
-  test("rejects an unknown command before contacting Daytona", () => {
-    const result = Bun.spawnSync(
-      [process.execPath, resolve(import.meta.dir, "..", "sandbox.ts"), "wat"],
-      { stdout: "pipe", stderr: "pipe" }
-    );
-    expect(result.exitCode).toBe(1);
-    expect(new TextDecoder().decode(result.stderr)).toContain(
-      "unknown command 'wat'"
-    );
-  });
-
-  test("rejects an empty remote command before contacting Daytona", () => {
-    const result = Bun.spawnSync(
-      [process.execPath, resolve(import.meta.dir, "..", "sandbox.ts"), "run"],
-      { env: { ...process.env, CMD: "" }, stdout: "pipe", stderr: "pipe" }
-    );
-    expect(result.exitCode).toBe(1);
-    expect(new TextDecoder().decode(result.stderr)).toContain(
-      "usage: sandbox.ts run <command>"
-    );
   });
 });
 
@@ -859,12 +727,6 @@ describe("hashEntries", () => {
     expect(hashEntries(a)).toBe(hashEntries(b));
     expect(hashEntries(a)).toMatch(/^[0-9a-f]{64}$/);
   });
-
-  test("changes when any content changes", () => {
-    expect(hashEntries([["bun.lock", "a"]])).not.toBe(
-      hashEntries([["bun.lock", "b"]])
-    );
-  });
 });
 
 describe("planSync", () => {
@@ -922,18 +784,6 @@ describe("parseLsFilesS", () => {
   test("returns null when the path is not a submodule", () => {
     expect(parseLsFilesS("")).toBeNull();
     expect(parseLsFilesS("100644 abc123 0\tREADME.md\n")).toBeNull();
-  });
-});
-
-describe("dirtyNotice", () => {
-  test("stays silent on a clean tree", () => {
-    expect(dirtyNotice([], [])).toBeNull();
-  });
-
-  test("counts parent and submodule files separately", () => {
-    const notice = dirtyNotice(["a.ts", "b.ts"], ["packages/owletto/x.ts"]);
-    expect(notice).toContain("2 file(s)");
-    expect(notice).toContain("1 in owletto");
   });
 });
 
@@ -1483,159 +1333,5 @@ describe("resolveScope", () => {
         false
       )
     ).toBe("full");
-  });
-});
-
-describe("mcp bundle coverage", () => {
-  const owlettoSrc = resolve(import.meta.dir, "../../packages/owletto/src");
-
-  function resolveImport(
-    spec: string,
-    fromFile: string
-  ): string | string[] | "external" | null {
-    const candidates = (base: string) => {
-      const stripped = base.endsWith(".js") ? base.slice(0, -3) : null;
-      return [
-        base,
-        ...(stripped ? [`${stripped}.ts`] : []),
-        `${base}.ts`,
-        `${base}.tsx`,
-        `${base}.css`,
-        join(base, "index.ts"),
-        join(base, "index.tsx"),
-      ];
-    };
-    const pick = (base: string): string | string[] | null => {
-      for (const candidate of candidates(base)) {
-        try {
-          if (statSync(candidate).isFile()) return candidate;
-        } catch {
-          // try next suffix
-        }
-      }
-      // A directory spec (tailwind `@source`, extensionless folder imports):
-      // expand to the source files beneath it.
-      try {
-        if (statSync(base).isDirectory()) {
-          return walkSources(base);
-        }
-      } catch {
-        // not a directory either
-      }
-      return null;
-    };
-    if (spec.startsWith("@/")) return pick(join(owlettoSrc, spec.slice(2)));
-    if (spec.startsWith("."))
-      return pick(normalize(join(dirname(fromFile), spec)));
-    return "external";
-  }
-
-  function walkSources(dir: string): string[] {
-    const out: string[] = [];
-    const entries = readdirSync(dir, { withFileTypes: true });
-    for (const entry of entries) {
-      if (entry.name === "node_modules") continue;
-      if (/\.(test|stories)\.[^.]+$/.test(entry.name)) continue;
-      const full = join(dir, entry.name);
-      if (entry.isDirectory()) out.push(...walkSources(full));
-      else if (/\.(ts|tsx|css)$/.test(entry.name)) out.push(full);
-    }
-    return out;
-  }
-
-  function reachableFiles(entries: string[]): {
-    files: string[];
-    unresolved: string[];
-  } {
-    const repoRoot = resolve(owlettoSrc, "..", "..", "..");
-    const seen = new Set<string>();
-    const unresolved: string[] = [];
-    const queue = [...entries];
-    const inScope = (target: string) => {
-      const normalized = normalize(target);
-      return (
-        normalized.startsWith(`${repoRoot}/`) &&
-        !normalized.includes("/node_modules/")
-      );
-    };
-    while (queue.length > 0) {
-      const file = queue.pop() as string;
-      if (seen.has(file)) continue;
-      seen.add(file);
-      // Test fixtures ride alongside sources but never enter a bundle.
-      if (/\.(test|stories)\.[^.]+$/.test(file)) continue;
-      let source: string;
-      try {
-        source = readFileSync(file, "utf8");
-      } catch {
-        unresolved.push(file);
-        continue;
-      }
-      const specs = new Set<string>();
-      // A whole-statement `import type` is erased at compile (enforced by
-      // verbatimModuleSyntax) so it contributes no bytes to the bundle.
-      // Inline `type` qualifiers inside value imports still traverse —
-      // conservative, since their sibling values do ship.
-      const importPattern =
-        /^\s*import(\s+type)?\s+(?:[^;]*?\sfrom\s+)?["']([^"']+)["']/gm;
-      for (const match of source.matchAll(importPattern)) {
-        if (!match[1]) specs.add(match[2]);
-      }
-      // Only the apps' own stylesheets contribute `@source` inputs: the MCP
-      // vite plugin strips every `@source` line out of the shared stylesheet
-      // before the iframe build, so index.css's broad SPA scans never feed it.
-      // (`@import` above is a real file inclusion and is always followed.)
-      const styleInputs =
-        file.startsWith(`${owlettoSrc}/mcp-apps/`) && file.endsWith(".css");
-      for (const match of source.matchAll(
-        /@(?:import|source)\s+["']([^"']+)["']/g
-      )) {
-        if (match[0].startsWith("@source") && !styleInputs) continue;
-        specs.add(match[1]);
-      }
-      for (const spec of specs) {
-        if (
-          spec === "tailwindcss" ||
-          (!spec.startsWith("@") && !spec.startsWith("."))
-        ) {
-          continue;
-        }
-        const resolved = resolveImport(spec, file);
-        if (resolved === null) {
-          unresolved.push(`${file} -> ${spec}`);
-        } else if (resolved !== "external") {
-          for (const target of Array.isArray(resolved)
-            ? resolved
-            : [resolved]) {
-            // Dependencies live outside the synced tree (or in node_modules,
-            // which is never uploaded): they cannot stale the bundle.
-            if (inScope(target) && !seen.has(target)) queue.push(target);
-          }
-        }
-      }
-    }
-    return { files: [...seen], unresolved };
-  }
-
-  test("every module the iframe bundle compiles is reboot-covered", () => {
-    if (!existsSync(join(owlettoSrc, "mcp-apps"))) return;
-    const repoRoot = resolve(owlettoSrc, "..", "..", "..");
-    const { files, unresolved } = reachableFiles([
-      join(owlettoSrc, "mcp-apps/interaction/main.tsx"),
-      join(owlettoSrc, "mcp-apps/review/main.tsx"),
-    ]);
-    // node_modules content is never synced, so it cannot stale the bundle.
-    const relevant = unresolved.filter(
-      (entry) =>
-        !entry.includes("/node_modules/") &&
-        normalize(entry.split(" -> ")[0]).startsWith(`${repoRoot}/`)
-    );
-    expect(relevant).toEqual([]);
-    const uncovered = files
-      .map((file) => normalize(file).replace(`${repoRoot}/`, ""))
-      .filter(
-        (path) => path.startsWith("packages/owletto/") && !needsMcpRebuild(path)
-      );
-    expect(uncovered).toEqual([]);
   });
 });

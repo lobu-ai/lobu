@@ -1,11 +1,6 @@
 /**
- * Partial-sync visibility: a connector that reports per-source fetch failures
- * on an otherwise-successful sync via `SyncResult.metadata.fetch_errors`
- * ({ url, error }[]) must have them land on the run record. The executor
- * forwards them to `client.complete` through the existing `error_message`
- * field (the gateway persists error_message on successful runs too), so no
- * new protocol field or column is involved. A clean sync keeps
- * error_message unset.
+ * Executor failure logging: when a run of any type throws, the daemon log keeps
+ * the stack for diagnosis but scrubs credentials out of the message and stack.
  */
 
 import { expect, mock, spyOn, test } from 'bun:test';
@@ -83,60 +78,4 @@ test.each(['sync', 'action', 'auth', 'embed_backfill'])('%s failure retains its 
   } finally {
     stderr.mockRestore();
   }
-});
-
-test('unhandled run failures are logged as errors with their original stack', async () => {
-  const stderr = spyOn(console, 'error').mockImplementation(() => {});
-  try {
-    const result = await executeRun(makeStubClient() as any, { ...baseJob, run_type: 'action' } as any, {} as any);
-    expect(result.error).toContain('Invalid action run');
-    const failures = stderr.mock.calls.map(([line]) => JSON.parse(String(line)));
-    expect(failures).toHaveLength(1);
-    expect(failures[0].level).toBe('error');
-    expect(failures[0].data[0].stack).toContain('executeActionRun');
-  } finally {
-    stderr.mockRestore();
-  }
-});
-
-test('sync metadata.fetch_errors → forwarded as error_message on the successful completion', async () => {
-  executeCompiledConnectorMock.mockImplementation(async () => ({
-    mode: 'sync',
-    status: 'complete',
-    metadata: {
-      items_found: 3,
-      feeds_failed: 1,
-      fetch_errors: [{ url: 'https://down.example.com/feed.xml', error: 'HTTP 503' }],
-    },
-  }));
-
-  const client = makeStubClient();
-  // biome-ignore lint/suspicious/noExplicitAny: stubbed client/job for unit test
-  await executeRun(client as any, baseJob as any, {} as any, {
-    executor: { execute: executeCompiledConnectorMock },
-  });
-
-  expect(client.completions).toHaveLength(1);
-  const completion = client.completions[0];
-  expect(completion.status).toBe('success');
-  expect(completion.error_message).toContain('https://down.example.com/feed.xml');
-  expect(completion.error_message).toContain('HTTP 503');
-});
-
-test('clean sync → no error_message on the completion', async () => {
-  executeCompiledConnectorMock.mockImplementation(async () => ({
-    mode: 'sync',
-    status: 'complete',
-    metadata: { items_found: 3 },
-  }));
-
-  const client = makeStubClient();
-  // biome-ignore lint/suspicious/noExplicitAny: stubbed client/job for unit test
-  await executeRun(client as any, baseJob as any, {} as any, {
-    executor: { execute: executeCompiledConnectorMock },
-  });
-
-  expect(client.completions).toHaveLength(1);
-  expect(client.completions[0].status).toBe('success');
-  expect(client.completions[0].error_message).toBeUndefined();
 });

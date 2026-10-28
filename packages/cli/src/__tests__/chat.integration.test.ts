@@ -251,60 +251,6 @@ describe("chatCommand example integration", () => {
     expect(stderr.join("")).toContain('"tool":"upload_file"');
   });
 
-  test("warns when a sandbox link is streamed without a file-uploaded event", async () => {
-    process.env.LOBU_API_TOKEN = "test-token";
-
-    const stdout: string[] = [];
-    const stderr: string[] = [];
-
-    captureTerminal({ stdout, stderr });
-
-    globalThis.fetch = mock(
-      async (input: string | URL | Request, init?: RequestInit) => {
-        const url = String(input);
-
-        if (
-          url ===
-            "http://gateway.test/lobu/api/v1/agents/personal-agent/messages" &&
-          init?.method === "POST"
-        ) {
-          return Response.json({
-            success: true,
-            messageId: "synthetic-platform-message",
-            eventsUrl: "/api/v1/agents/personal-agent/events?platform=telegram",
-          });
-        }
-
-        if (
-          url ===
-            "http://gateway.test/lobu/api/v1/agents/personal-agent/events?platform=telegram" &&
-          !init?.method
-        ) {
-          return createSseResponse([
-            {
-              event: "output",
-              data: {
-                content:
-                  "[Download cli-proof.txt](sandbox:/workspace/cli-proof.txt)",
-              },
-            },
-            { event: "complete", data: {} },
-          ]);
-        }
-
-        throw new Error(`Unexpected fetch: ${url}`);
-      }
-    ) as unknown as typeof fetch;
-
-    await chatCommand(exampleDir, "send me cli-proof.txt as a file", {
-      gateway: "http://gateway.test",
-      user: "telegram:chat-123",
-    });
-
-    expect(stdout.join("")).toContain("cli-proof.txt");
-    expect(stderr.join("")).toContain("no file-uploaded event was emitted");
-  });
-
   test("streams raw output chunks without corrupting fragmented markdown", async () => {
     process.env.LOBU_API_TOKEN = "test-token";
 

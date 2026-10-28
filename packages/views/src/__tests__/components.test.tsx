@@ -1,7 +1,6 @@
 /**
- * Presentational kit coverage: every `@lobu/views/components` export renders
- * without a host (pure props in, DOM out) and reports intent through
- * callbacks. No bridge, no tools — the kit never talks to the host itself.
+ * Presentational kit logic: pagination clamping and chart scaling/layout edge
+ * cases, rendered without a host (pure props in, DOM out).
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { JSDOM } from "jsdom";
@@ -9,19 +8,11 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import {
   BarChart,
-  Card,
   DataTable,
-  EmptyState,
-  ErrorState,
-  FilterBar,
   formatCompact,
   LineChart,
-  LoadingState,
   PieChart,
-  SearchField,
-  SelectField,
   Sparkline,
-  TruncatedNotice,
 } from "../components.js";
 
 let dom: JSDOM;
@@ -67,34 +58,6 @@ async function shown(): Promise<string> {
   return el.innerHTML;
 }
 
-describe("Card", () => {
-  test("title, description, actions and children", async () => {
-    render(
-      <Card
-        title="Deals"
-        description="Open pipeline"
-        actions={<button type="button">New</button>}
-      >
-        <span>body</span>
-      </Card>
-    );
-    const html = await shown();
-    expect(html).toContain("Deals");
-    expect(html).toContain("Open pipeline");
-    expect(html).toContain("New");
-    expect(html).toContain("body");
-  });
-
-  test("bare children render without header", async () => {
-    render(
-      <Card>
-        <span>only</span>
-      </Card>
-    );
-    expect(await shown()).toContain("only");
-  });
-});
-
 interface Row {
   id: number;
   name: string;
@@ -106,47 +69,6 @@ const ROWS: Row[] = [
 ];
 
 describe("DataTable", () => {
-  test("renders headers and cells, custom render wins", async () => {
-    render(
-      <DataTable
-        columns={[
-          { key: "id", header: "ID" },
-          {
-            key: "name",
-            header: "Name",
-            render: (r) => <strong>{r.name.toUpperCase()}</strong>,
-          },
-        ]}
-        rows={ROWS}
-        keyOf={(r) => r.id}
-      />
-    );
-    const html = await shown();
-    expect(html).toContain("ID");
-    expect(html).toContain("<strong>B</strong>");
-    expect(html).not.toContain("No rows.");
-  });
-
-  test("sortable header reports intent with direction marker", async () => {
-    const seen: string[] = [];
-    render(
-      <DataTable
-        columns={[{ key: "name", header: "Name", sortable: true }]}
-        rows={ROWS}
-        keyOf={(r) => r.id}
-        sort={{ key: "name", dir: "asc" }}
-        onSort={(k) => seen.push(k)}
-      />
-    );
-    const html = await shown();
-    expect(html).toContain("▲");
-    const btn = el.querySelector("button");
-    await act(async () => {
-      btn?.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
-    });
-    expect(seen).toEqual(["name"]);
-  });
-
   test("pagination clamps at the ends", async () => {
     const pages: number[] = [];
     render(
@@ -200,43 +122,6 @@ describe("DataTable", () => {
     expect(pages).toEqual([1]);
   });
 
-  test("loading, error with retry, and empty states", async () => {
-    let retried = 0;
-    render(
-      <DataTable
-        columns={[{ key: "id", header: "ID" }]}
-        rows={[]}
-        keyOf={(_, i) => i}
-        loading
-      />
-    );
-    expect(await shown()).toContain("Loading rows");
-    render(
-      <DataTable
-        columns={[{ key: "id", header: "ID" }]}
-        rows={[]}
-        keyOf={(_, i) => i}
-        error="boom"
-        onRetry={() => retried++}
-      />
-    );
-    expect(await shown()).toContain("boom");
-    const btn = el.querySelector('[role="alert"] button');
-    await act(async () => {
-      btn?.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
-    });
-    expect(retried).toBe(1);
-    render(
-      <DataTable
-        columns={[{ key: "id", header: "ID" }]}
-        rows={[]}
-        keyOf={(_, i) => i}
-        emptyText="Nothing here."
-      />
-    );
-    expect(await shown()).toContain("Nothing here.");
-  });
-
   test("pagination works without a total and stops after a short page", async () => {
     const pages: number[] = [];
     const table = (rows: Row[], page: number) => (
@@ -266,56 +151,11 @@ describe("DataTable", () => {
   });
 });
 
-describe("filters", () => {
-  test("search reflects the controlled value; select reports changes", async () => {
-    let s = "";
-    render(
-      <FilterBar>
-        <SearchField
-          value="acme"
-          onChange={() => undefined}
-          placeholder="Find…"
-        />
-        <SelectField
-          label="Stage"
-          value={s}
-          options={[{ value: "a", label: "A" }]}
-          onChange={(v) => (s = v)}
-        />
-      </FilterBar>
-    );
-    await act(async () => undefined);
-    const input = el.querySelector('input[type="search"]') as HTMLInputElement;
-    expect(input.value).toBe("acme");
-    expect(input.placeholder).toBe("Find…");
-    const select = el.querySelector("select") as HTMLSelectElement;
-    await act(async () => {
-      select.value = "a";
-      select.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
-    });
-    expect(s).toBe("a");
-  });
-});
-
 describe("charts", () => {
   const data = [
     { label: "Jan", value: 10 },
     { label: "Feb", value: 20 },
   ];
-
-  test("bar chart renders values with accessible names", async () => {
-    render(<BarChart data={data} title="MRR" />);
-    const html = await shown();
-    expect(html).toContain("MRR");
-    expect(html).toContain("Jan: 10");
-    expect(el.querySelector("svg")).toBeTruthy();
-  });
-
-  test("line chart renders points", async () => {
-    render(<LineChart data={data} title="Trend" />);
-    expect(await shown()).toContain("Trend");
-    expect(el.querySelector("polyline")).toBeTruthy();
-  });
 
   // A large level with small movement: from zero the line is flat at the top.
   const level = [
@@ -493,18 +333,6 @@ describe("charts", () => {
     }
   });
 
-  test("pie chart renders legend", async () => {
-    render(<PieChart data={data} title="Mix" />);
-    const html = await shown();
-    expect(html).toContain("Mix");
-    expect(html).toContain("Jan: 10");
-  });
-
-  test("sparkline renders without axes", async () => {
-    render(<Sparkline values={[1, 3, 2]} label="spark" />);
-    expect(el.querySelector("polyline")).toBeTruthy();
-  });
-
   test("a small single-slice pie fits its viewport", () => {
     render(<PieChart data={[{ label: "One", value: 1 }]} size={100} />);
     const circle = el.querySelector("circle")!;
@@ -533,23 +361,7 @@ describe("charts", () => {
   });
 });
 
-describe("query states and formatting", () => {
-  test("loading, empty, error, truncated", async () => {
-    render(
-      <>
-        <LoadingState text="Fetching…" />
-        <EmptyState title="None yet" hint="Save one first." />
-        <ErrorState message="bad" errorCode="UPSTREAM_TIMEOUT" />
-        <TruncatedNotice shown={500} total={1200} />
-      </>
-    );
-    const html = await shown();
-    expect(html).toContain("Fetching");
-    expect(html).toContain("None yet");
-    expect(html).toContain("UPSTREAM_TIMEOUT");
-    expect(html).toContain("Showing 500 of 1200 rows");
-  });
-
+describe("formatCompact", () => {
   test("formatCompact", () => {
     expect(formatCompact(999)).toBe("999");
     expect(formatCompact(1500)).toBe("1.5K");

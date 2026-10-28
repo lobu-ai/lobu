@@ -76,8 +76,14 @@ const config: KnipConfig = {
     "packages/views": {
       // The guest bundle entry: view modules import `@lobu/views` and the
       // server resolves it at view-compile time (views.ts), neither of which
-      // knip can see as a static import — treat the public entry as the API.
-      entry: ["src/index.ts", "src/**/*.test.ts", "src/**/__tests__/**/*.ts"],
+      // knip can see as a static import — treat the public entries (`.` and
+      // `./components`) as the API.
+      entry: [
+        "src/index.ts",
+        "src/components.tsx",
+        "src/**/*.test.ts",
+        "src/**/__tests__/**/*.ts",
+      ],
     },
     "packages/client": {
       // Generated openapi-ts client (ignored above) is the only consumer.
