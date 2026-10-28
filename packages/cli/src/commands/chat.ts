@@ -86,7 +86,7 @@ interface ChatOptions {
  * to the PAT-bound org / the user's default membership, preserving the
  * pre-flag semantics for callers that never pass `--org`.
  */
-export async function resolveChatOrg(
+async function resolveChatOrg(
   options: Pick<ChatOptions, "org" | "context">
 ): Promise<string | undefined> {
   if (options.org?.trim()) return options.org.trim();

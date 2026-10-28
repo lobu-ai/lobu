@@ -139,7 +139,7 @@ function loadDataRecords(dataPath: string): ParsedDataRecord[] {
   }));
 }
 
-export async function callTool(
+async function callTool(
   ctx: SeedContext,
   toolName: string,
   args: Record<string, unknown>

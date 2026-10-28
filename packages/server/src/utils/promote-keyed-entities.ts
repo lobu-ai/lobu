@@ -148,7 +148,7 @@ export interface PromoteKeyedEntitiesResult {
  * be edited upstream — a renamed author would orphan the entity and promote a
  * duplicate.
  */
-export function buildEntityName(
+function buildEntityName(
   entityRecord: Record<string, unknown>,
   output: EntityOutput,
   stableKey: string

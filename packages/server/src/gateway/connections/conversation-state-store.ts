@@ -67,11 +67,11 @@ export function historyIndexKey(connectionId: string): string {
   return `history_index:${connectionId}`;
 }
 
-export function sessionKey(sessionId: string): string {
+function sessionKey(sessionId: string): string {
   return `session:${sessionId}`;
 }
 
-export function threadIndexKey(channelId: string, threadTs: string): string {
+function threadIndexKey(channelId: string, threadTs: string): string {
   return `conversation_index:${channelId}:${threadTs}`;
 }
 

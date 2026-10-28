@@ -47,7 +47,7 @@ import { withoutDeploymentProviderKeys } from '../env.js';
  */
 type JobCodeResult = { ok: true; code: string } | { ok: false; error: string };
 
-export async function resolveJobCode(job: PollResponse): Promise<JobCodeResult> {
+async function resolveJobCode(job: PollResponse): Promise<JobCodeResult> {
   if (job.compiled_code) return { ok: true, code: job.compiled_code };
   // Inline compiled jobs must not load the optional compiler/SDK graph.
   const { compileConnectorForIsolateFromFile, findBundledConnectorFile } = await import(

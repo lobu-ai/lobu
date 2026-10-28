@@ -43,9 +43,9 @@ export function getMaxReservedLocks(): number {
  * In-process counter of currently-held reserved connections from
  * `acquireConversationLock`. Single-process JS is single-threaded so a plain
  * mutable number is "atomic enough" for increment/decrement against this
- * counter — there's no true parallelism inside the gateway event loop. The
- * functions below are exported so tests can assert the counter without
- * reaching into module internals.
+ * counter — there's no true parallelism inside the gateway event loop.
+ * `getReservedLockCount` is exported so the health report can read the
+ * counter without reaching into module internals.
  *
  * The counter is incremented BEFORE the `await sql.reserve()` call so the
  * cap check accounts for in-flight acquisitions; decremented in the release
@@ -59,21 +59,6 @@ let warnedNearCap = false;
 
 export function getReservedLockCount(): number {
   return reservedLockCount;
-}
-
-export function resetReservedLockCountForTests(): void {
-  reservedLockCount = 0;
-  warnedNearCap = false;
-}
-
-/**
- * Force the internal counter to a specific value. Test-only — production
- * code MUST go through `acquireConversationLock` so increment+decrement
- * pair via the canonical path. Used by the cap-enforcement test which
- * needs to stage the counter without actually consuming PG connections.
- */
-export function setReservedLockCountForTests(value: number): void {
-  reservedLockCount = Math.max(0, value);
 }
 
 /**

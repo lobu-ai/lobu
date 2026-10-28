@@ -207,7 +207,7 @@ export function bundledConnectorSourcePath(filePath: string): string {
 	return relative(resolve(filePath, ".."), filePath);
 }
 
-export function normalizeFileSourceUri(value: string): string | null {
+function normalizeFileSourceUri(value: string): string | null {
 	const trimmed = value.trim();
 	if (!trimmed) return null;
 

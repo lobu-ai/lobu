@@ -87,7 +87,7 @@ export {
   SearchSchema,
 } from '@lobu/core/contracts/tools/search-memory';
 
-export function resolveEntityLimit(args: SearchArgs): number {
+function resolveEntityLimit(args: SearchArgs): number {
   const defaultLimit = args.query_embedding?.length ? 20 : (args.fuzzy ?? true) ? 5 : 1;
   return Math.min(args.limit ?? defaultLimit, 100);
 }

@@ -12,9 +12,9 @@
  *   - a matching `model` resolves to that stamp;
  *   - an omitted `model` falls back to the worker's expectation.
  *
- * Part (b) — the stamp is mapped onto each streamed event — is asserted in
- * executor-batch-embed.test.ts; persistence onto event_embeddings is asserted
- * server-side in insert-event-embedding-model.test.ts.
+ * Part (b) — persistence of the stamp onto event_embeddings — is asserted
+ * server-side in packages/server/src/__tests__/integration/events/
+ * embedding-model-stamp.test.ts.
  */
 
 import { describe, expect, test } from 'bun:test';

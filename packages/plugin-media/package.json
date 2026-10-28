@@ -22,7 +22,6 @@
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "test": "bun test src",
     "clean": "rm -rf dist"
   },
   "dependencies": {
