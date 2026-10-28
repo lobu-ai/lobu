@@ -4,7 +4,7 @@
  * Replaces the deleted `manage_entity_schema` integration tests. Each scenario
  * uses TestApiClient (direct handler) so we exercise real DB writes without
  * paying the HTTP/sandbox round-trip on every assertion. The MCP wire path is
- * covered separately in `mcp-auth-wire.test.ts` and `sandbox-execute.test.ts`.
+ * covered separately in `mcp/auth.test.ts` and `sandbox/execute-wire.test.ts`.
  *
  * The entity-type list also carries the platform event catalog in a dedicated
  * `platform_event_kinds` field: `connection.deleted` and friends are declared by

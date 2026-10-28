@@ -15,6 +15,11 @@ import {
 	captureSideEffect,
 } from "../../../gateway/routes/internal/capture-mode";
 import type { WorkerContext } from "../../../gateway/routes/internal/types";
+import {
+	AUTOMATION_EVAL_RUN_TYPE,
+	executionModeForRunType,
+} from "../../../runs/run-types";
+import { createLegacyCapturedRun } from "../../setup/legacy-captured-run";
 import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
 import {
 	createTestOrganization,
@@ -259,5 +264,54 @@ describe("captureSideEffect — the record", () => {
 		);
 		const [entry] = (await sideEffectsOf(run)).entries;
 		expect(entry.details).toEqual({ command: "ls -la" });
+	});
+});
+
+describe("legacy captured runs stay out of Automation scheduling", () => {
+	// Predicates say `run_type = 'automation'`, so a stored capture never
+	// competes with or suppresses the Automation it replayed.
+	test("pending captures do not take the pending-per-automation slot", async () => {
+		const approvedInput = sql.json({
+			automation_id: automationId,
+			agent_id: "11111111-2222-3333-4444-555555555555",
+			window_start: "2026-08-01T00:00:00.000Z",
+			window_end: "2026-08-01T01:00:00.000Z",
+			dispatch_source: "scheduled",
+			version_id: 42,
+		});
+		const [source] = await sql<{ id: number }[]>`
+      INSERT INTO runs (
+        organization_id, run_type, automation_id, approval_status, status,
+        approved_input, completed_at, created_at
+      ) VALUES (
+        ${organizationId}, 'automation', ${automationId}, 'auto', 'completed',
+        ${approvedInput}, current_timestamp, current_timestamp
+      )
+      RETURNING id
+    `;
+		await createLegacyCapturedRun(source.id, sql as never);
+		await createLegacyCapturedRun(source.id, sql as never);
+
+		const [{ count }] = await sql<{ count: string }[]>`
+      SELECT count(*) AS count FROM runs
+      WHERE automation_id = ${automationId}
+        AND run_type = ${AUTOMATION_EVAL_RUN_TYPE}
+        AND status = 'pending'
+    `;
+		expect(Number(count)).toBe(2);
+		expect(executionModeForRunType(AUTOMATION_EVAL_RUN_TYPE)).toBe("capture");
+
+		// A real Automation run can still be queued alongside them.
+		const [live] = await sql<{ id: number }[]>`
+      INSERT INTO runs (
+        organization_id, run_type, automation_id, approval_status, status,
+        approved_input, created_at
+      ) VALUES (
+        ${organizationId}, 'automation', ${automationId}, 'auto', 'pending',
+        ${approvedInput}, current_timestamp
+      )
+      RETURNING id
+    `;
+		expect(live.id).toBeGreaterThan(0);
 	});
 });

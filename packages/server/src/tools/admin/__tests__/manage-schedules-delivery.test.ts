@@ -431,3 +431,67 @@ describe("manage_schedules wake_agent chat delivery", () => {
     expect(rows[0].cron).toBeNull();
   });
 });
+
+describe("manage_schedules send_notification recipients", () => {
+  const createNotification = (recipients: unknown) =>
+    manageSchedules(
+      {
+        action: "create",
+        description: "notify",
+        run_at: new Date(Date.now() + 60_000).toISOString(),
+        payload: { type: "send_notification", title: "hi", recipients },
+      } as any,
+      {} as any,
+      ctx()
+    ) as Promise<any>;
+
+  beforeAll(async () => {
+    await ensureDbForGatewayTests();
+  }, 60_000);
+
+  beforeEach(async () => {
+    await resetTestDatabase();
+    await seedAgentRow(AGENT, { organizationId: ORG, ownerUserId: USER });
+    await getDb()`
+      INSERT INTO "user" (id, email, name, username, "emailVerified", "createdAt", "updatedAt")
+      VALUES (${USER}, 'member@example.test', 'Member', 'member-user', true, NOW(), NOW())
+    `;
+    await getDb()`
+      INSERT INTO "member" (id, "organizationId", "userId", role, "createdAt")
+      VALUES ('m-sched-notify', ${ORG}, ${USER}, 'owner', NOW())
+    `;
+  }, 60_000);
+
+  test.each([
+    [["member@example.test"], "member@example.test"],
+    [[], "invalid_recipients"],
+  ])("refuses recipients %j and persists nothing", async (recipients, mention) => {
+    const res = await createNotification(recipients);
+    expect(String(res.error)).toContain("invalid_recipients");
+    expect(String(res.error)).toContain(mention);
+    expect(await getDb()`SELECT id FROM scheduled_jobs`).toHaveLength(0);
+  });
+
+  test("accepts a member user id and the admins/all keywords", async () => {
+    for (const recipients of [[USER], "admins", "all"]) {
+      const res = await createNotification(recipients);
+      expect(res.error).toBeUndefined();
+      expect(res.schedule).toBeDefined();
+    }
+  });
+
+  test("ticker records the spawned run id in last_fired_run_id", async () => {
+    const res = await createNotification([USER]);
+    const id = res.schedule.id;
+    await getDb()`UPDATE scheduled_jobs SET next_run_at = now() - interval '1 minute' WHERE id = ${id}`;
+    const handlers = new Map<string, (c: { payload: unknown; taskRunId: number }) => Promise<void>>();
+    registerScheduledJobsTicker({
+      register: (name: string, h: any) => handlers.set(name, h),
+      spawn: async () => "4242",
+    } as any);
+    await handlers.get("scheduled-jobs-tick")!({ payload: {}, taskRunId: 1 });
+    const [row] = await getDb()`SELECT last_fired_at, last_fired_run_id FROM scheduled_jobs WHERE id = ${id}`;
+    expect(row.last_fired_at).not.toBeNull();
+    expect(Number(row.last_fired_run_id)).toBe(4242);
+  });
+});

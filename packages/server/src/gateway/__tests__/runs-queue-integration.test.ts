@@ -18,6 +18,7 @@ import {
   test,
 } from "bun:test";
 import { RunsQueue } from "../infrastructure/queue/runs-queue.js";
+import type { QueueJob } from "../infrastructure/queue/types.js";
 import { getDb } from "../../db/client.js";
 import {
   ensureDbForGatewayTests,
@@ -226,6 +227,55 @@ describe("RunsQueue — deferral retries (isDeferralError contract)", () => {
     expect(status).toBe("failed");
     expect(calls).toBe(1);
   });
+});
+
+describe("RunsQueue — attempt budget reaches the handler", () => {
+  // The thread_response owner-gate throws to re-queue and relies on the budget
+  // the queue hands over to run its final-attempt fallback (which resolves the
+  // Automation run) on exactly the claim before runHandler dead-letters.
+  test("exposes attempt/maxAttempts and marks the pre-drop claim as final", async () => {
+    if (!queue) throw new Error("queue not started");
+    const seen: Array<{ attempt?: number; maxAttempts?: number }> = [];
+    const retryLimit = 3;
+    let settle!: () => void;
+    const exhausted = new Promise<void>((resolve) => {
+      settle = resolve;
+    });
+
+    await queue.work("thread_response", async (job: QueueJob<unknown>) => {
+      seen.push({ attempt: job.attempt, maxAttempts: job.maxAttempts });
+      if (seen.length >= retryLimit) settle();
+      throw new Error("no SSE owner on this replica");
+    });
+    const runId = await queue.send(
+      "thread_response",
+      { messageId: "m-budget-1", conversationId: "conv-budget-1" },
+      { retryLimit, retryDelay: 1 }
+    );
+
+    await exhausted;
+    // Let runHandler finish marking the last attempt failed.
+    await new Promise((r) => setTimeout(r, 750));
+
+    expect(seen.length).toBeGreaterThanOrEqual(retryLimit);
+    for (const s of seen) {
+      expect(s.maxAttempts).toBe(retryLimit);
+      expect(typeof s.attempt).toBe("number");
+    }
+    // Counting up from 0, so only the LAST claim satisfies the consumer's
+    // `attempt + 1 >= maxAttempts` test.
+    expect(seen[0]!.attempt).toBe(0);
+    const last = seen[retryLimit - 1]!;
+    expect(last.attempt! + 1).toBeGreaterThanOrEqual(last.maxAttempts!);
+    for (const s of seen.slice(0, retryLimit - 1)) {
+      expect(s.attempt! + 1).toBeLessThan(s.maxAttempts!);
+    }
+
+    const rows = await getDb()<{ status: string }>`
+      SELECT status FROM public.runs WHERE id = ${Number(runId)}
+    `;
+    expect(rows[0]?.status).toBe("failed");
+  }, 30_000);
 });
 
 describe("RunsQueue — action_input JSONB shape", () => {

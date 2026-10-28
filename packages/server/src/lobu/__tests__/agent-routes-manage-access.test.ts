@@ -405,3 +405,34 @@ describe("sandbox mutations — same org-credential role gate", () => {
     expect(res.status).toBe(200);
   });
 });
+
+describe("agent list wire keys", () => {
+  // Owletto declares `automationCount` on AgentItem but reads nothing from it
+  // today, so a key mismatch would surface as no type error and no broken
+  // screen; this server-side assertion is the only thing that catches it.
+  test("GET / exposes active automation rows as automationCount", async () => {
+    const { getDb } = await import("../../db/client.js");
+    // The archived row keeps `automationCount: 1` from passing on a mere
+    // "some rows exist" read.
+    await getDb()`
+      INSERT INTO automations (
+        id, organization_id, slug, name, managed_agent_id, created_by,
+        automation_group_id, status
+      ) VALUES (
+        9001, ${ORG}, 'counted-automation', 'Counted Automation', ${AGENT},
+        'u1', 9001, 'active'
+      ), (
+        9002, ${ORG}, 'archived-automation', 'Archived Automation', ${AGENT},
+        'u1', 9002, 'archived'
+      )
+    `;
+    const app = await importAgentRoutes();
+    const res = await app.request("/");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { agents: Array<Record<string, unknown>> };
+    expect(body.agents.find((item) => item.agentId === AGENT)).toMatchObject({
+      agentId: AGENT,
+      automationCount: 1,
+    });
+  });
+});

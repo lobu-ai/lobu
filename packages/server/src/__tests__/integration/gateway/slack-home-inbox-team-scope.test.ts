@@ -32,7 +32,10 @@
  */
 
 import { beforeEach, describe, expect, it } from 'vitest';
-import { resolveSlackHomeUserInbox } from '../../../gateway/connections/chat-instance-manager';
+import {
+  resolveSlackHomeContext,
+  resolveSlackHomeUserInbox,
+} from '../../../gateway/connections/chat-instance-manager';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import {
   addUserToOrganization,
@@ -158,5 +161,46 @@ describe('resolveSlackHomeUserInbox team_id scoping (cross-workspace isolation)'
     // Right Slack user, wrong workspace → no linked identity → setup prompt.
     const inbox = await resolveSlackHomeUserInbox(COLLIDING_SLACK_USER_ID, 'T_NONEXISTENT');
     expect(inbox).toBeNull();
+  });
+});
+
+describe('resolveSlackHomeContext > workspace-identity audit rows', () => {
+  beforeEach(async () => {
+    await cleanupTestDatabase();
+  });
+
+  it('excludes workspace audit rows from recent and capturedToday', async () => {
+    // App Home is org-scoped for any linked Slack user, so owner/admin-only
+    // workspace-identity audit rows must never surface there.
+    const org = await createTestOrganization({ name: 'Slack Home Audit Org' });
+    const normalTitle = `normal-home-event-${Date.now()}`;
+
+    const empty = await resolveSlackHomeContext(org.id);
+    expect(empty).not.toBeNull();
+    expect(empty!.capturedToday).toBe(0);
+    expect(empty!.recent).toHaveLength(0);
+
+    await createTestEvent({ organization_id: org.id, content: normalTitle, title: normalTitle });
+    const withNormal = await resolveSlackHomeContext(org.id);
+    expect(withNormal!.capturedToday).toBe(1);
+    expect(withNormal!.recent.some((r) => r.title.includes(normalTitle.slice(0, 20)))).toBe(true);
+
+    // Fails closed if the exclusion predicate is dropped.
+    await createTestEvent({
+      organization_id: org.id,
+      content: 'workspace audit lifecycle row',
+      title: 'Member "secret" added',
+      semantic_type: 'change',
+      metadata: {
+        category: 'workspace',
+        _lobu_workspace_audit: true,
+        resource_kind: 'member',
+        op: 'created',
+      },
+    });
+    const withAudit = await resolveSlackHomeContext(org.id);
+    expect(withAudit!.capturedToday).toBe(1);
+    expect(withAudit!.recent.some((r) => r.title.includes('secret'))).toBe(false);
+    expect(withAudit!.recent.some((r) => r.title.includes(normalTitle.slice(0, 20)))).toBe(true);
   });
 });

@@ -1,7 +1,10 @@
 import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import { Chat } from "chat";
 import { getDb } from "../../../db/client.js";
-import { createConnectedGatewayStateAdapter } from "../state-adapter.js";
+import {
+  createConnectedGatewayStateAdapter,
+  createGatewayStateAdapter,
+} from "../state-adapter.js";
 
 const hasDb = Boolean(process.env.DATABASE_URL);
 const suffix = `${process.pid}-${Date.now()}`;
@@ -178,4 +181,19 @@ describe("Chat SDK inbound dedupe over the Postgres adapter", () => {
       await chat.shutdown();
     },
   );
+});
+
+// chat-instance-manager builds fresh adapters for off-instance paths such as
+// removeConnection history cleanup; an unconnected one throws on the first
+// store op and aborts BYO chat delete before the row is soft-deleted.
+describe("state adapter connect gate", () => {
+  test.skipIf(!hasDb)("an unconnected adapter rejects store ops with a clear error", async () => {
+    const adapter = createGatewayStateAdapter();
+    await expect(adapter.get("any-key")).rejects.toThrow(/LobuStateAdapter is not connected/);
+  });
+
+  test.skipIf(!hasDb)("createConnectedGatewayStateAdapter passes the connect gate", async () => {
+    const adapter = await connect();
+    await expect(adapter.get(key("missing-after-connect"))).resolves.toBeNull();
+  });
 });

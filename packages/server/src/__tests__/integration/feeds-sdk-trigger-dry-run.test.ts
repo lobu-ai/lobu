@@ -15,6 +15,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { Env } from '../../index';
 import { buildFeedsNamespace } from '../../sandbox/namespaces/feeds';
+import { manageFeeds } from '../../tools/admin/manage_feeds';
 import { cleanupTestDatabase, getTestDb } from '../setup/test-db';
 import {
   createTestConnection,
@@ -25,6 +26,7 @@ import {
 async function seedFeed(
   slug: string,
   status: 'active' | 'paused' = 'active',
+  opts: { orgScopedDefinition?: boolean; operations?: Array<'sync' | 'read'> } = {},
 ): Promise<{
   feedId: number;
   ctx: Awaited<ReturnType<typeof seedOwnerContext>>['ctx'];
@@ -35,12 +37,13 @@ async function seedFeed(
   // Org-scoped, not the global catalog row: `resolveActiveConnectorVersion`
   // resolves on (connector_key, org), and a global-only definition makes
   // createSyncRun soft-delete the feed as an orphan and return null — which the
-  // handler then reports as "Sync already pending or running".
+  // handler then reports as "Sync already pending or running". The skip-reason
+  // cases opt into the global-only definition on purpose.
   await createTestConnectorDefinition({
     key: 'rss',
     name: 'RSS',
-    organization_id: org.id,
-    feeds_schema: { items: {} },
+    ...(opts.orgScopedDefinition === false ? {} : { organization_id: org.id }),
+    feeds_schema: { items: opts.operations ? { operations: opts.operations } : {} },
   });
   const conn = await createTestConnection({
     organization_id: org.id,
@@ -153,5 +156,55 @@ describe('client.feeds.trigger dry_run', () => {
       SELECT status FROM feeds WHERE id = ${feedId}
     `) as Array<{ status: string }>;
     expect(feed[0].status).toBe('active');
+  });
+});
+
+/**
+ * `createSyncRun` declines for several reasons, and the handler used to render
+ * every one of them as "Sync already pending or running", sending operators to
+ * wait for a run that would never exist. The skip must name its real cause and
+ * be readable as a skip (`triggered: false`) without parsing the sentence.
+ */
+describe('trigger_feed skip reasons', () => {
+  beforeEach(async () => {
+    await cleanupTestDatabase();
+  });
+
+  type TriggerResult = { message?: string; triggered?: boolean; reason?: string; error?: string };
+  const trigger = (feedId: number, ctx: Awaited<ReturnType<typeof seedOwnerContext>>['ctx']) =>
+    manageFeeds({ action: 'trigger_feed', feed_id: feedId }, {} as Env, ctx) as Promise<TriggerResult>;
+
+  it('does not claim a sync is pending when the connector is uninstalled', async () => {
+    // A global-only definition is invisible to resolveActiveConnectorVersion,
+    // which retires the feed as an orphan and declines.
+    const { feedId, ctx } = await seedFeed('rss-skip-orphan', 'active', { orgScopedDefinition: false });
+    const res = await trigger(feedId, ctx);
+    expect(res.triggered).toBe(false);
+    expect(res.reason).toBeTruthy();
+    expect(res.message).toContain('no longer installed');
+    expect(res.message).not.toContain('already pending');
+  });
+
+  it('still reports a genuine duplicate as already pending', async () => {
+    const { feedId, ctx } = await seedFeed('rss-skip-dup');
+    expect((await trigger(feedId, ctx)).triggered).toBe(true);
+
+    const second = await trigger(feedId, ctx);
+    expect(second.triggered).toBe(false);
+    expect(second.reason).toBeTruthy();
+    expect(second.message).toContain('already pending or running');
+  });
+
+  it('reports that a read-only feed does not support sync without retiring it', async () => {
+    const { feedId, ctx } = await seedFeed('rss-skip-read', 'active', { operations: ['read'] });
+    const res = await trigger(feedId, ctx);
+    // The ERROR variant carries no `triggered` at all.
+    expect(res.triggered).toBeUndefined();
+    expect(res.error).toContain('does not support sync');
+
+    const [feed] = await getTestDb()<Array<{ deleted_at: Date | null }>>`
+      SELECT deleted_at FROM feeds WHERE id = ${feedId}
+    `;
+    expect(feed?.deleted_at).toBeNull();
   });
 });

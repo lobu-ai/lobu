@@ -254,6 +254,63 @@ describe("GrantStore (PG-backed)", () => {
 });
 
 /**
+ * GrantStore org scoping fails closed. `agents_pkey` is (organization_id, id),
+ * so the same agent id legitimately exists in many orgs; an unscoped read would
+ * answer for every tenant and an unscoped revoke would delete every tenant's
+ * grant. Cross-org hasGrant/isDenied are pinned in
+ * multi-tenant-isolation-reproducers (finding 2).
+ */
+describe("GrantStore org scoping", () => {
+  const ORG_B = "test-org-b";
+  let store: GrantStore;
+
+  beforeAll(async () => {
+    await ensureDbForGatewayTests();
+  }, 30_000);
+
+  beforeEach(async () => {
+    await resetTestDatabase();
+    await seedAgentRow("agent-1");
+    await seedAgentRow("agent-1", { organizationId: ORG_B });
+    store = new GrantStore();
+  }, 30_000);
+
+  test("listGrants returns only the calling org's grants", async () => {
+    await store.grant("agent-1", "a.example.com", null, false, ORG_ID);
+    await store.grant("agent-1", "b.example.com", null, false, ORG_B);
+
+    const grants = await store.listGrants("agent-1", ORG_ID);
+    expect(grants.map((g) => g.pattern)).toEqual(["a.example.com"]);
+  });
+
+  test("revoke never deletes another org's grant", async () => {
+    await store.grant("agent-1", "shared.example.com", null, false, ORG_ID);
+    await store.grant("agent-1", "shared.example.com", null, false, ORG_B);
+
+    await store.revoke("agent-1", "shared.example.com", ORG_ID);
+
+    expect(await store.listGrants("agent-1", ORG_ID)).toHaveLength(0);
+    expect(await store.listGrants("agent-1", ORG_B)).toHaveLength(1);
+  });
+
+  test("throws rather than running unscoped when no org can be resolved", async () => {
+    // No orgContext and no explicit org: every method must refuse.
+    await expect(store.hasGrant("agent-1", "x.example.com")).rejects.toThrow(
+      /GrantStore\.hasGrant requires organizationId/
+    );
+    await expect(store.listGrants("agent-1")).rejects.toThrow(
+      /GrantStore\.listGrants requires organizationId/
+    );
+    await expect(store.isDenied("agent-1", "x.example.com")).rejects.toThrow(
+      /GrantStore\.isDenied requires organizationId/
+    );
+    await expect(store.revoke("agent-1", "x.example.com")).rejects.toThrow(
+      /GrantStore\.revoke requires organizationId/
+    );
+  });
+});
+
+/**
  * A judged domain must never receive an ALLOW grant, whoever writes it.
  *
  * An allow grant outranks the egress judge in `checkDomainAccess`, so granting
