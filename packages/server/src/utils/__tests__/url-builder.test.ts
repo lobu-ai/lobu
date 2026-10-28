@@ -14,7 +14,7 @@ import {
   __resetPublicOriginCachesForTests,
   __setLocalFrontendForTests,
 } from '../public-origin';
-import * as workspaceModule from '../../workspace';
+import * as organizationSlugModule from '../../workspace/organization-slug';
 
 /**
  * Contract for `getPublicWebUrl`:
@@ -84,14 +84,13 @@ describe('getPublicWebUrl', () => {
 // tenant resolution. A `vi.spyOn` in beforeEach (not a module-level `vi.mock`)
 // is required: the server vitest config runs `isolate: false`, so a module-mock
 // declared here does NOT apply once an earlier test file has loaded the real
-// `../../workspace` module into the shared registry — the spy re-applies on
-// every run regardless of load order.
+// `../../workspace/organization-slug` module into the shared registry — the
+// spy re-applies on every run regardless of load order.
 function stubOrgSlug(): void {
   beforeEach(() => {
-    vi.spyOn(workspaceModule, 'getWorkspaceProvider').mockReturnValue({
-      getOrgSlug: async (orgId: string) =>
-        orgId === 'org-1' ? 'acme' : orgId === 'org-special' ? 'acme/team' : null,
-    } as unknown as ReturnType<typeof workspaceModule.getWorkspaceProvider>);
+    vi.spyOn(organizationSlugModule, 'getLiveOrganizationSlug').mockImplementation(async (orgId: string) =>
+      orgId === 'org-1' ? 'acme' : orgId === 'org-special' ? 'acme/team' : null
+    );
   });
   afterEach(() => {
     vi.restoreAllMocks();

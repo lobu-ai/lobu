@@ -243,9 +243,11 @@ export async function routeGoogleChatWebhook(
   // Only explicitly configured projects can own space installations. Existing
   // endpoint-authenticated BYO connections continue through their own adapter.
   if (typeof project !== "string" || !/^\d+$/.test(project)) return undefined;
+  let body: any;
   let space: string;
   try {
-    space = googleChatEventSpace(await request.clone().json());
+    body = await request.clone().json();
+    space = googleChatEventSpace(body);
   } catch {
     return new Response("Invalid Google Chat space", { status: 400 });
   }
@@ -262,7 +264,7 @@ export async function routeGoogleChatWebhook(
   if (!row) return undefined;
   // Pending setup remains on the source's verified adapter, where dispatch is
   // gated. Reinstall lifecycle deliveries must also reach that verifier.
-  const { added } = googleChatLifecycle(await request.clone().json());
+  const { added } = googleChatLifecycle(body);
   if (row.status === "pending" && !row.metadata.removed || row.status !== "active" && added) return undefined;
   // A hosted space names no source: any transport of the hosted project may
   // carry it, and the installed adapter still verifies Google's token itself.

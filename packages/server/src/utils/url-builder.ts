@@ -10,7 +10,7 @@ import {
   type AgentErrorContext,
 } from '@lobu/core';
 import { INFERENCE_ROW_KEY_PREFIX } from '@lobu/core/reserved';
-import { getWorkspaceProvider } from '../workspace';
+import { getLiveOrganizationSlug } from '../workspace/organization-slug';
 import {
   getConfiguredPublicOrigin,
   HOSTED_UI_FALLBACK_ORIGIN,
@@ -74,7 +74,7 @@ export async function getOrganizationSlug(
   organizationId: string | null | undefined
 ): Promise<string | null> {
   if (!organizationId) return null;
-  return getWorkspaceProvider().getOrgSlug(organizationId);
+  return getLiveOrganizationSlug(organizationId);
 }
 
 /**
