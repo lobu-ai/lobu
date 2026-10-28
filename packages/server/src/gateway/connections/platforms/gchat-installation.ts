@@ -8,6 +8,7 @@ import {
   chatTenantAdvisoryLockKey,
   managedTenantAdvisoryLockKey,
   runtimeConnectionIdToSlug,
+  slugToRuntimeConnectionId,
   upsertChatConnectionProjection,
 } from "../../../lobu/stores/connections-projection.js";
 import type { AppInstallationStore } from "../../../lobu/stores/app-installation-store.js";
@@ -218,19 +219,40 @@ export async function resolveGoogleChatRuntime(
       : { platform: PROVIDER, credentials: app.credentials, googleChatProjectNumber: app.project }),
     disableSignatureVerification: false,
   } as any;
-  // Secret-only rotations need not bump the source row. Keep this opaque and
-  // gateway-local; never log it or expose it in the connection projection.
-  const revision = createHash("sha256").update(JSON.stringify([
-    connection.updatedAt, install.id, install.updatedAt, app.source?.updatedAt, config,
-  ])).digest("hex");
   // The hosted app's audience comes from the same generator the app-webhook
   // router registers with; a BYO app keeps its source's own webhook URL.
   const base = deps.publicGatewayUrl;
+  // Google signs each delivery for the URL it was sent to, and the hosted app
+  // serves its project through any transport: until its Chat app config is
+  // repointed, a claimed space still arrives through a legacy transport.
+  const alternateWebhookUrls = !base || app.source ? [] : await hostedTransportUrls(app.project, base);
+  // Secret-only rotations need not bump the source row. Keep this opaque and
+  // gateway-local; never log it or expose it in the connection projection.
+  const revision = createHash("sha256").update(JSON.stringify([
+    connection.updatedAt, install.id, install.updatedAt, app.source?.updatedAt, config, alternateWebhookUrls,
+  ])).digest("hex");
   return {
     config, revision, scope: install.externalTenantId, stateKey: connection.id,
     webhookUrl: !base ? undefined
-      : app.source ? `${base}/api/v1/webhooks/${app.source.id}` : appWebhookUrl(base, PROVIDER),
+      : app.source ? transportWebhookUrl(base, app.source.id) : appWebhookUrl(base, PROVIDER),
+    alternateWebhookUrls,
   };
+}
+
+function transportWebhookUrl(base: string, transportId: string): string {
+  return `${base}/api/v1/webhooks/${transportId}`;
+}
+
+/** Webhook URLs of the active bot connections that carry the hosted project. */
+async function hostedTransportUrls(project: string, base: string): Promise<string[]> {
+  const rows = await getDb()<{ slug: string }>`
+    SELECT slug FROM connections
+    WHERE connector_key = ${PROVIDER} AND credential_mode IS NOT NULL AND deleted_at IS NULL
+      AND status = 'active' AND config->>'googleChatProjectNumber' = ${project}
+      AND slug NOT LIKE ${`${runtimeConnectionIdToSlug(PREFIX)}%`}
+    ORDER BY slug
+  `;
+  return rows.map((row) => transportWebhookUrl(base, slugToRuntimeConnectionId(row.slug)));
 }
 
 export async function routeGoogleChatWebhook(

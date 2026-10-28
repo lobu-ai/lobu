@@ -519,7 +519,8 @@ function parseGoogleChatCredentials(
 
 async function createUnscopedAdapter(
   config: JsonObject,
-  context?: AdapterCreationContext
+  context?: AdapterCreationContext,
+  alternateWebhookUrls: readonly string[] = [],
 ): Promise<GoogleChatAdapter> {
   // Preserve the platform registry's existing lazy adapter boundary.
   const { createGoogleChatAdapter } = await import("@chat-adapter/gchat");
@@ -560,6 +561,20 @@ async function createUnscopedAdapter(
   const adapter = createGoogleChatAdapter(
     normalizedConfig as GoogleChatAdapterConfig
   );
+  if (alternateWebhookUrls.length > 0) {
+    // The SDK checks an endpoint token against `endpointUrl` alone. Widen only
+    // that audience, to URLs the runtime names; Pub/Sub keeps its own, and the
+    // signer and claim checks are unchanged.
+    const sdk = adapter as unknown as {
+      verifyBearerToken(request: Request, audience: string | string[], validate: unknown): Promise<boolean>;
+    };
+    const verifyBearerToken = sdk.verifyBearerToken.bind(adapter);
+    sdk.verifyBearerToken = (request, audience: string, validate) => verifyBearerToken(
+      request,
+      audience === adapterConfig.endpointUrl ? [audience, ...alternateWebhookUrls] : audience,
+      validate,
+    );
+  }
   // The SDK owns verification. Its dispatch methods run only after it accepts
   // the JWT; gate those methods so an unclaimed space never reaches an agent.
   // Request-local state keeps concurrent deliveries on retained adapters apart.
@@ -629,10 +644,10 @@ export const gchatPlatform: ChatPlatformDescriptor = {
   },
 
   createAdapter: async (config, context) => {
-    const adapter = await createUnscopedAdapter(config, context);
+    const adapter = await createUnscopedAdapter(config, context, context?.runtime?.alternateWebhookUrls);
     if (!context?.runtime) return adapter;
     return scopeGoogleChatAdapter(adapter, context.runtime, (runtime) =>
-      createUnscopedAdapter(runtime.config, { webhookUrl: runtime.webhookUrl, onWebhookAccepted: context.onWebhookAccepted }));
+      createUnscopedAdapter(runtime.config, { webhookUrl: runtime.webhookUrl, onWebhookAccepted: context.onWebhookAccepted }, runtime.alternateWebhookUrls));
   },
   resolveRuntimeConfig: resolveGoogleChatRuntime,
   routeWebhook: routeGoogleChatWebhook,

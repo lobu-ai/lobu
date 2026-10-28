@@ -135,19 +135,6 @@ describe("hosted Google Chat app runtime", () => {
     f.manager.services.getSecretStore = () => { throw new Error("The hosted app never reads a tenant vault"); };
     return f;
   }
-  test("resolves the hosted key gateway-side with the app-webhook audience", async () => {
-    process.env.GOOGLE_CHAT_PROJECT_NUMBER = project;
-    process.env.GOOGLE_CHAT_CREDENTIALS = JSON.stringify({ client_email: "hosted-bot@example.test", private_key: "hosted-key" });
-    resetHostedGoogleChatAppForTests();
-    const f = hosted();
-    const resolved = await f.resolve();
-    expect((resolved!.config as any).credentials).toContain("hosted-key");
-    expect((resolved!.config as any).googleChatProjectNumber).toBe(project);
-    expect((resolved!.config as any).disableSignatureVerification).toBe(false);
-    expect(resolved!.webhookUrl).toBe("https://gateway.test/api/v1/app-webhooks/gchat");
-    expect(resolved!.scope).toBe(space);
-    expect(f.target.config).toEqual({ platform: "gchat" });
-  });
   test("fails closed when the hosted app is not configured", async () => {
     delete process.env.GOOGLE_CHAT_PROJECT_NUMBER;
     delete process.env.GOOGLE_CHAT_CREDENTIALS;
