@@ -183,7 +183,7 @@ export const AutomationScheduleTriggerSchema = Type.Object(
       Type.Boolean({
         default: true,
         description:
-          "Native executors may skip unchanged source windows. External executors always receive due windows and decide whether to emit output.",
+          "Book a due window with no new or changed source content as a no-op run instead of dispatching an agent. Applies to native dispatch and to external claimNextWindow, which answers 409 for a skipped window.",
       })
     ),
   },

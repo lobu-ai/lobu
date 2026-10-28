@@ -223,7 +223,7 @@ export async function readPendingWindow(
  *
  * This is the only writer of the mark. The two completion sites that store
  * `action_output` — `complete-window.ts` and the unchanged-source skip in
- * `automations/automation.ts` — both call it inside their completion
+ * `automations/unchanged-window.ts` — both call it inside their completion
  * transaction; no trigger re-derives the mark from run history any more.
  *
  * Returns whether the mark moved.
@@ -242,10 +242,12 @@ export async function advanceAutomationArrivalMark(
   // which never clamped an agent-supplied `until`. Such a token can complete
   // after the migration and push the mark past `now`, and an Automation whose
   // mark is in the future claims nothing until the clock catches up, silently.
+  // Use the database's live clock: current_timestamp is frozen at transaction
+  // start and can precede a horizon inspected and completed in that transaction.
   // `LEAST` can only ever lower the value, so it cannot mask a real advance.
   const moved = await sql`
     UPDATE automations
-    SET next_window_start = LEAST(${end}::timestamptz, current_timestamp),
+    SET next_window_start = LEAST(${end}::timestamptz, clock_timestamp()),
         last_completed_window_start = GREATEST(
           last_completed_window_start,
           ${start}::timestamptz

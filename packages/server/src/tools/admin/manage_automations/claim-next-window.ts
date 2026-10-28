@@ -18,6 +18,12 @@ import { handleAutomationMode } from '../../get_content/automation-mode';
 import type { ToolContext } from '../../registry';
 import type { ManageAutomationsArgs } from '../manage_automations';
 import { runLeaseFence } from '../../../runs/run-lease';
+import type { AutomationTrigger } from '../../../types/automations';
+import { advanceAutomationScheduleAfterSuccessfulWindow } from '../../../automations/schedule-cursor';
+import {
+  completeSkippedAutomationRun,
+  inspectUnchangedWindow,
+} from '../../../automations/unchanged-window';
 
 const DEFAULT_LEASE_SECONDS = 900;
 const MIN_LEASE_SECONDS = 30;
@@ -116,9 +122,10 @@ export async function handleClaimNextWindow(
       executor_kind: string | null;
       next_run_at: string | Date | null;
       schedule_auto_paused_at: string | Date | null;
+      triggers: AutomationTrigger[] | null;
     }>`
       SELECT organization_id, schedule, next_run_at, schedule_auto_paused_at, managed_agent_id, device_worker_id, agent_kind,
-             execution_config->'executor'->>'kind' AS executor_kind
+             triggers, execution_config->'executor'->>'kind' AS executor_kind
       FROM automations
       WHERE id = ${automationId}
         AND organization_id = ${ctx.organizationId}
@@ -254,6 +261,43 @@ export async function handleClaimNextWindow(
         throw new ToolUserError('This external Automation is not due. Read its schedule and next_run_at before checking again.', 409);
       }
       if (queued) windowEnd = new Date(queued.window_end);
+      // A due external schedule honors `skip_if_unchanged` exactly like the
+      // native materializer: a window with nothing new is booked as a no-op
+      // run and the schedule advances, so the client is not handed a turn's
+      // worth of work to discover an empty window. The source read opens its
+      // own read-only transaction, so it takes the pool client; the row lock
+      // held here still serializes it against concurrent claims.
+      const unchangedWindow =
+        !queued && automation.executor_kind === 'external' && automation.schedule
+          ? await inspectUnchangedWindow(
+              sql,
+              { id: automationId, triggers: automation.triggers },
+              { windowStart, windowEnd }
+            )
+          : null;
+      const sourceFingerprint = unchangedWindow?.sourceFingerprint;
+      if (unchangedWindow?.unchanged) {
+        const skipped = await createAutomationRunInTransaction(
+          {
+            organizationId: automation.organization_id,
+            automationId,
+            agentId: automation.managed_agent_id,
+            windowStart: windowStart.toISOString(),
+            windowEnd: windowEnd.toISOString(),
+            dispatchSource: 'scheduled',
+            sourceFingerprint,
+          },
+          tx
+        );
+        if (!skipped.created) {
+          throw new ToolUserError(`Automation ${automationId} window was claimed concurrently.`, 409);
+        }
+        // Keep admission and completion under the same row lock. Publishing a
+        // pending no-op between transactions lets another replica claim it.
+        await completeSkippedAutomationRun(tx, automationId, windowStart, windowEnd, skipped.runId);
+        await advanceAutomationScheduleAfterSuccessfulWindow(tx, automationId);
+        return { skipped: true as const, runId: skipped.runId, windowStart, windowEnd };
+      }
       const run = queued
         ? { runId: Number(queued.id) }
         : await createAutomationRunInTransaction(
@@ -266,6 +310,7 @@ export async function handleClaimNextWindow(
               dispatchSource: 'manual',
               deviceWorkerId: automation.device_worker_id,
               agentKind: automation.agent_kind,
+              sourceFingerprint,
             },
             tx
           );
@@ -296,6 +341,7 @@ export async function handleClaimNextWindow(
     `;
 
     return {
+      skipped: false as const,
       runId,
       windowStart,
       windowEnd,
@@ -304,6 +350,16 @@ export async function handleClaimNextWindow(
         snapshot?.version_id == null ? null : Number(snapshot.version_id),
     };
   });
+
+  if (claimedWindow.skipped) {
+    throw new ToolUserError(
+      `Automation ${automationId} has nothing to process: the due window ` +
+        `[${claimedWindow.windowStart.toISOString()}, ${claimedWindow.windowEnd.toISOString()}) ` +
+        `has no new or changed source content, so it was completed as no-op run ${claimedWindow.runId} ` +
+        'and the schedule advanced. Refresh activity for the next due window.',
+      409
+    );
+  }
 
   try {
     const context = await handleAutomationMode(

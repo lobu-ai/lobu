@@ -20,9 +20,9 @@ import {
 	createAutomationRunInTransaction,
 	type AutomationRunPayload,
 } from "../runs/queue-service";
+import type { AutomationTrigger } from "../types/automations";
 import { materializeDueItems } from "../scheduled/due-materializer";
 import { markStaleRunsAsTimeout } from "../scheduled/stale-run-sweeper";
-import { fingerprintAutomationSources } from "../tools/get_content/automation-mode";
 import { nextRunAt } from "../utils/cron";
 import { DEVICE_ONLINE_WINDOW_SECONDS } from "../utils/device-liveness";
 import logger from "../utils/logger";
@@ -31,7 +31,6 @@ import { classifyRunOutcome } from "../runs/run-outcome";
 import { ACTIVE_RUN_STATUSES, runStatusLiteral } from "../utils/run-statuses";
 import {
 	automationArrivalSettleMs,
-	advanceAutomationArrivalMark,
 	computePendingWindow,
 } from "../utils/window-utils";
 import {
@@ -44,6 +43,7 @@ import {
 	reconcileAutomationScriptRuns,
 } from "./script-enqueue";
 import { recordScheduledExecutionFailure } from "./scheduled-failure-policy";
+import { completeSkippedAutomationRun, inspectUnchangedWindow } from "./unchanged-window";
 import { organizationIdLiveSql } from "../workspace/deletion-state";
 import {
 	resolveAutomationRunsByMessageIds,
@@ -74,7 +74,7 @@ interface DueAutomationRow {
 	device_worker_id?: string | null;
 	/** Preferred local agent kind on the pinned device (e.g. 'claude-code'). */
 	agent_kind?: string | null;
-	triggers?: Array<Record<string, unknown>>;
+	triggers?: AutomationTrigger[];
 	entity_ids?: unknown;
 	created_by?: string | null;
 	current_version_id?: number | string | null;
@@ -332,39 +332,6 @@ async function enqueueAutomationRunForRecord(
 		windowStart: new Date(recorded.window_start),
 		windowEnd: new Date(recorded.window_end),
 	};
-}
-
-async function completeSkippedAutomationRun(
-	sql: DbClient,
-	automationId: number,
-	windowStart: Date,
-	windowEnd: Date,
-	runId: number,
-): Promise<void> {
-	// A server-side skip has no child stdout. Preserve the historical `{}`
-	// action_output for consumers, while output_tail makes the terminal no-op
-	// intentional to humans and run_metadata remains the machine-readable signal.
-	await sql.begin(async (tx) => {
-		await tx`SELECT id FROM automations WHERE id = ${automationId} FOR UPDATE`;
-		const [completed] = await tx`
-			UPDATE runs
-			SET status = 'completed',
-			    outcome = ${classifyRunOutcome({ status: "completed" })},
-			    action_output = '{}'::jsonb,
-			    output_tail = 'No-op: scheduled source content is unchanged.',
-			    run_metadata = COALESCE(run_metadata, '{}'::jsonb)
-			      || '{"content_analyzed":0,"skipped_unchanged":true}'::jsonb,
-			    completed_at = current_timestamp
-			WHERE id = ${runId}
-			  AND automation_id = ${automationId}
-			  AND status = 'pending'
-			RETURNING id
-		`;
-		if (!completed) return;
-		// An unchanged window is still arrival progress: the mark moves so the
-		// next tick fingerprints what arrives next instead of the same range.
-		await advanceAutomationArrivalMark(tx, automationId, windowStart, windowEnd);
-	});
 }
 
 async function enqueueAutomationRunForAutomationWithClient(
@@ -910,9 +877,6 @@ export async function materializeDueAutomationRuns(
 			return dueAutomations;
 		},
 		createRun: async (automation) => {
-			const scheduleTrigger = automation.triggers?.find(
-				(trigger) => trigger.kind === "schedule"
-			);
 			// Nothing to hand out while the mark is younger than the settle budget
 			// (a just-created or just-seeded Automation). Leave next_run_at where
 			// it is: the horizon passes the mark within one settle window, so the
@@ -920,63 +884,41 @@ export async function materializeDueAutomationRuns(
 			// whole cron period.
 			const pending = await computePendingWindow(sql, automation.id);
 			if (pending.windowEnd <= pending.windowStart) return "skipped";
-			let sourceFingerprint: string | undefined;
-			if (scheduleTrigger?.skip_if_unchanged === true) {
-				const { windowStart, windowEnd } = pending;
-				const sourceState = await fingerprintAutomationSources({
-					sql,
-					automationId: automation.id,
-					windowStart: windowStart.toISOString(),
-					windowEnd: windowEnd.toISOString(),
-				});
-				sourceFingerprint = sourceState.fingerprint;
-				const previous = await sql`
-					SELECT approved_input->>'source_fingerprint' AS fingerprint
-					FROM runs
-					WHERE automation_id = ${automation.id}
-					  AND run_type = 'automation'
-					  AND status = 'completed'
-					  AND approved_input->>'source_fingerprint' IS NOT NULL
-					ORDER BY completed_at DESC NULLS LAST, id DESC
-					LIMIT 1
-				`;
-				if (
-					sourceState.empty ||
-					(sourceState.fingerprint !== undefined &&
-						previous[0]?.fingerprint === sourceState.fingerprint)
-				) {
+			const unchangedWindow = await inspectUnchangedWindow(sql, automation, pending);
+			const sourceFingerprint = unchangedWindow?.sourceFingerprint;
+			if (unchangedWindow?.unchanged) {
+				// Admit and complete a no-op in one transaction so no dispatcher can
+				// claim it between creation and cursor advancement. Lock the row
+				// first, in the same order as claim-next-window, so a concurrent
+				// claim cannot deadlock against the pending run's unique index.
+				await sql.begin(async (tx) => {
+					await tx`SELECT id FROM automations WHERE id = ${automation.id} FOR UPDATE`;
 					const skippedRun = await enqueueAutomationRunForRecord(
 						sql,
 						automation,
 						"scheduled",
 						sourceFingerprint,
-						undefined,
+						tx,
 						pending,
 					);
-					// `created: false` means this reused an already-active run that a
-					// concurrent replica materialized for real work. Completing that
-					// row as "skipped" would silently kill a live dispatch.
-					if (skippedRun.created) {
-						// Book only the range recorded by the queue, which may be shortened.
-						await completeSkippedAutomationRun(
-							sql,
-							automation.id,
-							skippedRun.windowStart,
-							skippedRun.windowEnd,
-							skippedRun.runId,
-						);
-					}
-					// A superseded observation means another completion already moved the
-					// arrival mark and owns schedule advancement for that window.
-					if (skippedRun.status !== "superseded") {
-						await advanceAutomationScheduleAfterSuccessfulWindow(sql, automation.id);
-					}
-					logger.info(
-						{ automationId: automation.id, empty: sourceState.empty },
-						"[automation] Skipped unchanged Automation sources before agent dispatch"
+					// A reused run belongs to its existing dispatcher. A superseded
+					// window belongs to the completion that already moved the mark.
+					if (!skippedRun.created) return;
+					// Script windows may have been shortened at admission.
+					const completed = await completeSkippedAutomationRun(
+						tx,
+						automation.id,
+						skippedRun.windowStart,
+						skippedRun.windowEnd,
+						skippedRun.runId,
 					);
-					return "skipped";
-				}
+					if (completed) await advanceAutomationScheduleAfterSuccessfulWindow(tx, automation.id);
+				});
+				logger.info(
+					{ automationId: automation.id, empty: unchangedWindow.empty },
+					"[automation] Skipped unchanged Automation sources before agent dispatch"
+				);
+				return "skipped";
 			}
 			const result = await enqueueAutomationRunForRecord(
 				sql,

@@ -15,6 +15,7 @@
 import type { AutomationTrigger } from '../types/automations';
 import { intervals } from '../config/intervals';
 import { referenceCaptureTriggers } from './event-trigger';
+import { scheduleOverdueGraceMs, scheduleTriggerOf } from './schedule-overdue-grace';
 
 export type AutomationHealthStatus = 'healthy' | 'degraded';
 
@@ -56,7 +57,11 @@ const FAILED_RUN_STATUSES = new Set(['failed', 'timeout']);
 export interface AutomationHealthInput {
   /** Automation `status` (only `active` automations can be degraded). */
   status: string | null | undefined;
-  /** External clients own polling; a due window is not a missed native dispatch. */
+  /**
+   * External clients own polling, so a due window is judged against the
+   * schedule's overdue grace (one missed interval, 1h–6h; the same threshold
+   * that notifies admins) instead of the native dispatch margin.
+   */
   externalExecutor?: boolean;
   /** `automations.next_run_at` — the scheduler cursor. */
   nextRunAt: string | Date | null | undefined;
@@ -184,9 +189,20 @@ export function computeAutomationHealth(
 
   // Missed firing: next_run_at is well in the past and nothing is dispatching.
   const nextRunMs = toMs(input.nextRunAt);
-  if (!input.externalExecutor && !runInFlight && nextRunMs != null && nextRunMs < now - missedFiringMarginMs()) {
-    const overdueMin = Math.round((now - nextRunMs) / 60_000);
-    reasons.push(`missed firing: next_run_at overdue by ~${overdueMin} min`);
+  if (!runInFlight && nextRunMs != null) {
+    if (input.externalExecutor) {
+      const schedule = scheduleTriggerOf(input.triggers);
+      const graceMs = schedule
+        ? scheduleOverdueGraceMs({ schedule: schedule.cron, timezone: schedule.timezone, nextRunAt: nextRunMs })
+        : null;
+      if (graceMs != null && nextRunMs < now - graceMs) {
+        const overdueMin = Math.round((now - nextRunMs) / 60_000);
+        reasons.push(`no external client claimed the due window: next_run_at overdue by ~${overdueMin} min`);
+      }
+    } else if (nextRunMs < now - missedFiringMarginMs()) {
+      const overdueMin = Math.round((now - nextRunMs) / 60_000);
+      reasons.push(`missed firing: next_run_at overdue by ~${overdueMin} min`);
+    }
   }
 
   // Stuck pending run: latest run is pending past the stale interval (the
