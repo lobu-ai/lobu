@@ -172,15 +172,16 @@ export class PersonalAccessTokenService {
   }
 
   /**
-   * List PATs for a user (no plaintext tokens)
+   * List a user's unrevoked PATs in one organization (no plaintext tokens)
    */
-  async list(userId: string): Promise<PATListItem[]> {
+  async list(userId: string, organizationId: string): Promise<PATListItem[]> {
     const result = await this.sql`
       SELECT
         id, token_prefix, name, description, scope,
         expires_at, last_used_at, created_at
       FROM personal_access_tokens
       WHERE user_id = ${userId}
+        AND organization_id = ${organizationId}
         AND revoked_at IS NULL
       ORDER BY created_at DESC
     `;
@@ -189,31 +190,35 @@ export class PersonalAccessTokenService {
   }
 
   /**
-   * Get a single PAT by ID (for user)
+   * Find an unrevoked PAT in an organization, with the owner the caller must
+   * be authorized against before revoking it.
    */
-  async get(id: number, userId: string): Promise<PATListItem | null> {
+  async findInOrganization(
+    id: number,
+    organizationId: string
+  ): Promise<(AuditedAccessToken & { user_id: string }) | null> {
     const result = await this.sql`
-      SELECT
-        id, token_prefix, name, description, scope,
-        expires_at, last_used_at, created_at
+      SELECT id, user_id, organization_id, name, worker_id
       FROM personal_access_tokens
       WHERE id = ${id}
-        AND user_id = ${userId}
+        AND organization_id = ${organizationId}
         AND revoked_at IS NULL
     `;
 
-    return result.length > 0 ? (result[0] as PATListItem) : null;
+    return result.length > 0 ? (result[0] as AuditedAccessToken & { user_id: string }) : null;
   }
 
   /**
-   * Revoke a PAT
+   * Revoke a PAT in an organization. Authorization is the caller's job.
+   * `verify` reads `revoked_at` on every request, so it takes effect at once
+   * on every replica.
    */
-  async revoke(id: number, userId: string): Promise<boolean> {
+  async revoke(id: number, organizationId: string): Promise<boolean> {
     const result = await this.sql`
       UPDATE personal_access_tokens
       SET revoked_at = NOW(), updated_at = NOW()
       WHERE id = ${id}
-        AND user_id = ${userId}
+        AND organization_id = ${organizationId}
         AND revoked_at IS NULL
       RETURNING id
     `;

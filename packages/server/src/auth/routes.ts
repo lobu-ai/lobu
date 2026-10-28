@@ -5,6 +5,8 @@
  * - GET /api/accounts - List user's linked OAuth accounts
  * - GET /api/agents - List OAuth agents (clients) for an organization
  * - POST /api/:orgSlug/tokens - Create org-scoped personal access tokens
+ * - GET /api/:orgSlug/tokens - List the caller's own tokens in the org
+ * - DELETE /api/:orgSlug/tokens/:id - Revoke a token in the org
  */
 
 import { createHmac } from 'node:crypto';
@@ -160,6 +162,18 @@ function authorizeTokenCreation(c: Context<{ Bindings: Env }>) {
   return { user, organizationId };
 }
 
+/**
+ * A person's own browser sign-in: not a PAT/OAuth bearer, not an MCP session,
+ * and not a web session minted from a token (`isTokenDerivedSession`).
+ */
+function isInteractiveWebSession(c: Context<{ Bindings: Env }>): boolean {
+  return (
+    c.get('authSource') === 'session' &&
+    !c.get('mcpAuthInfo') &&
+    !isTokenDerivedSession(c.get('session'))
+  );
+}
+
 function normalizePatScope(scope: unknown): string | undefined {
   if (scope === undefined || scope === null || scope === '') return DEFAULT_PAT_SCOPE;
   if (typeof scope !== 'string') {
@@ -209,11 +223,7 @@ credentialRoutes.post('/:orgSlug/tokens', mcpAuth, async (c) => {
 
   try {
     const scope = normalizePatScope(body.scope);
-    if (
-      c.get('authSource') !== 'session' ||
-      c.get('mcpAuthInfo') ||
-      isTokenDerivedSession(c.get('session'))
-    ) {
+    if (!isInteractiveWebSession(c)) {
       const humanOnly = scope
         ?.split(' ')
         .find((s) => (HUMAN_MINTED_PAT_SCOPES as readonly string[]).includes(s));
@@ -239,6 +249,63 @@ credentialRoutes.post('/:orgSlug/tokens', mcpAuth, async (c) => {
   } catch (error) {
     return c.json({ error: errorMessage(error) }, 400);
   }
+});
+
+/**
+ * List the caller's own unrevoked tokens in this org. Never the secret or hash.
+ */
+credentialRoutes.get('/:orgSlug/tokens', mcpAuth, async (c) => {
+  const user = c.get('user');
+  const organizationId = c.get('organizationId');
+  if (!user?.id || !organizationId) {
+    return c.json({ error: 'Unauthorized', message: 'Authentication required' }, 401);
+  }
+
+  const sql = createDbClientFromEnv(c.env);
+  const tokens = await new PersonalAccessTokenService(sql).list(user.id, organizationId);
+  return c.json({ tokens });
+});
+
+/**
+ * Revoke a token in this org. The token's owner may revoke it from any of
+ * their own credentials; an org owner/admin may revoke a member's token only
+ * from an interactive web session, never from a PAT/OAuth credential or a
+ * token-derived session.
+ */
+credentialRoutes.delete('/:orgSlug/tokens/:id', mcpAuth, async (c) => {
+  const user = c.get('user');
+  const organizationId = c.get('organizationId');
+  if (!user?.id || !organizationId) {
+    return c.json({ error: 'Unauthorized', message: 'Authentication required' }, 401);
+  }
+
+  const id = Number(c.req.param('id'));
+  if (!Number.isSafeInteger(id) || id < 1) {
+    return c.json({ error: 'Token not found' }, 404);
+  }
+
+  const sql = createDbClientFromEnv(c.env);
+  const patService = new PersonalAccessTokenService(sql);
+  const token = await patService.findInOrganization(id, organizationId);
+  if (!token) {
+    return c.json({ error: 'Token not found' }, 404);
+  }
+
+  if (token.user_id !== user.id) {
+    const role = c.get('memberRole');
+    if ((role !== 'owner' && role !== 'admin') || !isInteractiveWebSession(c)) {
+      return c.json(
+        { error: "Revoking another member's token requires an owner/admin web session" },
+        403
+      );
+    }
+  }
+
+  if (!(await patService.revoke(id, organizationId))) {
+    return c.json({ error: 'Token not found' }, 404);
+  }
+  recordAccessTokenEvent('deleted', token, user.id, 'api');
+  return c.json({ revoked: true, id: token.id });
 });
 
 /**

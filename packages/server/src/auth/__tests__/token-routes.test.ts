@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { hashToken } from '../oauth/utils';
 import { PersonalAccessTokenService } from '../tokens';
 import { getTestDb, cleanupTestDatabase } from '../../__tests__/setup/test-db';
@@ -8,9 +8,11 @@ import {
   createTestOAuthClient,
   createTestOrganization,
   createTestPAT,
+  createTestSession,
   createTestUser,
 } from '../../__tests__/setup/test-fixtures';
-import { post } from '../../__tests__/setup/test-helpers';
+import { del, get, post, postForm } from '../../__tests__/setup/test-helpers';
+import { clearAuthCacheForTests } from '../index';
 
 describe('org-scoped token creation route', () => {
   beforeEach(async () => {
@@ -150,5 +152,193 @@ describe('org-scoped token creation route', () => {
     expect(await response.json()).toMatchObject({
       error: 'Use `lobu login` with OAuth or a web session to create server tokens',
     });
+  });
+});
+
+describe('org-scoped token list and revoke routes', () => {
+  beforeEach(async () => {
+    clearAuthCacheForTests();
+    await cleanupTestDatabase();
+  });
+  afterEach(() => clearAuthCacheForTests());
+
+  type Member = { userId: string; cookie: string };
+  type Workspace = { orgId: string; slug: string; owner: Member; admin: Member; member: Member };
+
+  async function seedMember(orgId: string, slug: string, role: string): Promise<Member> {
+    const user = await createTestUser({ email: `${slug}-${role}@test.example.com` });
+    await addUserToOrganization(user.id, orgId, role);
+    const session = await createTestSession(user.id);
+    return { userId: user.id, cookie: session.cookieHeader };
+  }
+
+  async function seedWorkspace(slug: string): Promise<Workspace> {
+    const org = await createTestOrganization({ slug });
+    return {
+      orgId: org.id,
+      slug: org.slug,
+      owner: await seedMember(org.id, slug, 'owner'),
+      admin: await seedMember(org.id, slug, 'admin'),
+      member: await seedMember(org.id, slug, 'member'),
+    };
+  }
+
+  async function mint(userId: string, orgId: string, name: string, scope = 'mcp:read') {
+    const created = await new PersonalAccessTokenService(getTestDb()).create(userId, orgId, name, {
+      description: `${name} description`,
+      scope,
+    });
+    return { id: String(created.id), token: created.token };
+  }
+
+  async function revokedAt(id: string): Promise<Date | null> {
+    const rows = await getTestDb()`SELECT revoked_at FROM personal_access_tokens WHERE id = ${id}`;
+    return (rows[0]?.revoked_at as Date | null) ?? null;
+  }
+
+  async function revokedAuditRows(id: string): Promise<Array<{ created_by: string | null }>> {
+    // The lifecycle write is fire-and-forget; give it a moment to land.
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      const rows = (await getTestDb()`
+        SELECT created_by FROM events
+        WHERE origin_type = 'access_token_deleted' AND metadata->>'entity_id' = ${id}
+      `) as unknown as Array<{ created_by: string | null }>;
+      if (rows.length > 0) return rows;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    return [];
+  }
+
+  it('lists only the caller\'s own unrevoked tokens in this org, without the secret', async () => {
+    const ws = await seedWorkspace('pat-list-ws');
+    const other = await createTestOrganization({ slug: 'pat-list-other' });
+    await addUserToOrganization(ws.member.userId, other.id, 'member');
+
+    const mine = await mint(ws.member.userId, ws.orgId, 'mine');
+    const gone = await mint(ws.member.userId, ws.orgId, 'gone');
+    await getTestDb()`UPDATE personal_access_tokens SET revoked_at = NOW() WHERE id = ${gone.id}`;
+    await mint(ws.member.userId, other.id, 'other-org');
+    await mint(ws.admin.userId, ws.orgId, 'someone-else');
+
+    const res = await get(`/api/${ws.slug}/tokens`, { cookie: ws.member.cookie });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { tokens: Array<Record<string, unknown>> };
+    expect(body.tokens.map((t) => String(t.id))).toEqual([mine.id]);
+    expect(Object.keys(body.tokens[0] ?? {}).sort()).toEqual(
+      [
+        'created_at',
+        'description',
+        'expires_at',
+        'id',
+        'last_used_at',
+        'name',
+        'scope',
+        'token_prefix',
+      ].sort()
+    );
+    expect(body.tokens[0]).toMatchObject({ name: 'mine', scope: 'mcp:read' });
+    expect(JSON.stringify(body)).not.toContain(mine.token);
+
+    // A bearer lists the same set.
+    const viaBearer = await get(`/api/${ws.slug}/tokens`, { token: mine.token });
+    expect(viaBearer.status).toBe(200);
+    const bearerBody = (await viaBearer.json()) as { tokens: Array<{ id: unknown }> };
+    expect(bearerBody.tokens.map((t) => String(t.id))).toEqual([mine.id]);
+  });
+
+  it('lets the owner revoke their own token with a web session, and the token then gets 401', async () => {
+    const ws = await seedWorkspace('pat-revoke-session');
+    const pat = await mint(ws.member.userId, ws.orgId, 'cli');
+    expect((await get(`/api/${ws.slug}/tokens`, { token: pat.token })).status).toBe(200);
+
+    const res = await del(`/api/${ws.slug}/tokens/${pat.id}`, { cookie: ws.member.cookie });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { revoked: boolean; id: unknown };
+    expect(body.revoked).toBe(true);
+    expect(String(body.id)).toBe(pat.id);
+    expect(await revokedAt(pat.id)).not.toBeNull();
+    expect(await revokedAuditRows(pat.id)).toEqual([{ created_by: ws.member.userId }]);
+
+    expect((await get(`/api/${ws.slug}/tokens`, { token: pat.token })).status).toBe(401);
+  });
+
+  it('lets the owner revoke a token with any of their own bearer tokens, including itself', async () => {
+    const ws = await seedWorkspace('pat-revoke-bearer');
+    const keep = await mint(ws.member.userId, ws.orgId, 'keep');
+    const drop = await mint(ws.member.userId, ws.orgId, 'drop');
+
+    const viaOther = await del(`/api/${ws.slug}/tokens/${drop.id}`, { token: keep.token });
+    expect(viaOther.status).toBe(200);
+    expect(await revokedAt(drop.id)).not.toBeNull();
+
+    const viaSelf = await del(`/api/${ws.slug}/tokens/${keep.id}`, { token: keep.token });
+    expect(viaSelf.status).toBe(200);
+    expect(await revokedAt(keep.id)).not.toBeNull();
+    expect((await get(`/api/${ws.slug}/tokens`, { token: keep.token })).status).toBe(401);
+  });
+
+  it.each(['owner', 'admin'] as const)(
+    'lets an org %s web session revoke a member\'s token',
+    async (role) => {
+      const ws = await seedWorkspace(`pat-revoke-${role}`);
+      const pat = await mint(ws.member.userId, ws.orgId, 'member-token');
+
+      const res = await del(`/api/${ws.slug}/tokens/${pat.id}`, { cookie: ws[role].cookie });
+      expect(res.status).toBe(200);
+      expect(await revokedAt(pat.id)).not.toBeNull();
+      expect(await revokedAuditRows(pat.id)).toEqual([{ created_by: ws[role].userId }]);
+      expect((await get(`/api/${ws.slug}/tokens`, { token: pat.token })).status).toBe(401);
+    }
+  );
+
+  it('refuses a member revoking someone else\'s token', async () => {
+    const ws = await seedWorkspace('pat-revoke-peer');
+    const peer = await seedMember(ws.orgId, 'pat-revoke-peer-2', 'member');
+    const pat = await mint(peer.userId, ws.orgId, 'peer-token');
+
+    const res = await del(`/api/${ws.slug}/tokens/${pat.id}`, { cookie: ws.member.cookie });
+    expect(res.status).toBe(403);
+    expect(await revokedAt(pat.id)).toBeNull();
+  });
+
+  it('never treats an admin\'s bearer or token-derived session as an admin web session', async () => {
+    const ws = await seedWorkspace('pat-revoke-derived');
+    const target = await mint(ws.member.userId, ws.orgId, 'member-token');
+    const adminPat = await mint(ws.admin.userId, ws.orgId, 'admin-pat', 'mcp:admin profile:read');
+
+    const viaBearer = await del(`/api/${ws.slug}/tokens/${target.id}`, { token: adminPat.token });
+    expect(viaBearer.status).toBe(403);
+
+    const exchanged = await postForm('/api/extension-session', { token: adminPat.token });
+    expect(exchanged.status).toBe(200);
+    const sessionToken = ((await exchanged.json()) as { session_token?: string }).session_token;
+    expect(sessionToken).toBeTruthy();
+    const viaDerived = await del(`/api/${ws.slug}/tokens/${target.id}`, { token: sessionToken });
+    expect(viaDerived.status).toBe(403);
+
+    expect(await revokedAt(target.id)).toBeNull();
+
+    // The derived session still counts as the admin's own: it may revoke their token.
+    const own = await del(`/api/${ws.slug}/tokens/${adminPat.id}`, { token: sessionToken });
+    expect(own.status).toBe(200);
+  });
+
+  it('answers 404 for a token in another org, an unknown id, and a second revoke', async () => {
+    const ws = await seedWorkspace('pat-revoke-404');
+    const other = await createTestOrganization({ slug: 'pat-revoke-404-other' });
+    await addUserToOrganization(ws.owner.userId, other.id, 'owner');
+    const elsewhere = await mint(ws.owner.userId, other.id, 'elsewhere');
+
+    const crossOrg = await del(`/api/${ws.slug}/tokens/${elsewhere.id}`, { cookie: ws.owner.cookie });
+    expect(crossOrg.status).toBe(404);
+    expect(await revokedAt(elsewhere.id)).toBeNull();
+
+    expect((await del(`/api/${ws.slug}/tokens/999999999`, { cookie: ws.owner.cookie })).status).toBe(404);
+    expect((await del(`/api/${ws.slug}/tokens/not-a-number`, { cookie: ws.owner.cookie })).status).toBe(404);
+
+    const pat = await mint(ws.owner.userId, ws.orgId, 'twice');
+    expect((await del(`/api/${ws.slug}/tokens/${pat.id}`, { cookie: ws.owner.cookie })).status).toBe(200);
+    expect((await del(`/api/${ws.slug}/tokens/${pat.id}`, { cookie: ws.owner.cookie })).status).toBe(404);
+    expect(await revokedAuditRows(pat.id)).toHaveLength(1);
   });
 });
