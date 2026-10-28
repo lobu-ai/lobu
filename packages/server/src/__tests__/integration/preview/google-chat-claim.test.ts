@@ -54,7 +54,7 @@ async function fixture() {
     resolveOrgSlug: async (org) => { const [row] = await sql`SELECT slug FROM organization WHERE id = ${org}`; return row?.slug ?? null; },
   };
   const space = "spaces/test-team-space";
-  const ref = await parkGoogleChatSpace(googleChatTransportApp(source), space, "users/123456", "Test team space", true);
+  const { ref } = await parkGoogleChatSpace(googleChatTransportApp(source), space, "users/123456", "Test team space", true);
   const input = { userId: user.id, ref, organizationId: target.slug };
   const deps = { publicGatewayUrl: "https://gateway.test/lobu", getConnection: (id: string) => connections.getConnection(id), getAppInstallationStore: () => store, getSecretStore: () => { throw new Error("No secrets are needed to claim"); }, resolveSecrets: async (connection: StoredConnection) => connection.config };
   return { sql, owner, target, third, user, source, space, ref, provider, engine, input, connections, store, deps };
@@ -144,7 +144,9 @@ describe("Google Chat shared claim flow", () => {
       await Promise.all(tasks);
       return response;
     };
-    expect((await (await deliver("before-claim")).json()).text).toContain("/connector/gchat/connection?ref=");
+    // The fixture already announced this space's setup: the message is answered
+    // without a second welcome and dispatches to nobody.
+    expect(await (await deliver("before-claim")).json()).toEqual({});
     expect(received).toEqual([]);
     const result = await claimPendingConnection(f.provider, f.engine, f.input);
     if (result.status !== "ok") throw new Error(JSON.stringify(result));
@@ -201,7 +203,7 @@ describe("Google Chat shared claim flow", () => {
 
   it("concurrent pending and repeated claims converge across database sessions", async () => {
     const f = await fixture();
-    const refs = await Promise.all([1, 2, 3].map(() => parkGoogleChatSpace(googleChatTransportApp(f.source), f.space, "users/123456", "Test team space", true)));
+    const refs = await Promise.all([1, 2, 3].map(async () => (await parkGoogleChatSpace(googleChatTransportApp(f.source), f.space, "users/123456", "Test team space", true)).ref));
     expect(refs).toEqual([f.ref, f.ref, f.ref]);
     const results = await Promise.all([1, 2, 3].map(() => claimPendingConnection(f.provider, f.engine, f.input)));
     expect(results.every((result) => result.status === "ok")).toBe(true);
@@ -230,9 +232,9 @@ describe("Google Chat shared claim flow", () => {
     const source = { ...f.source, settings: { ...f.source.settings, previewMode: true } };
     await f.sql.begin((tx) => upsertChatConnectionProjection(tx, (value) => f.sql.json(value as any), source, f.owner.id, "byo"));
     await f.sql`UPDATE member SET role = 'member' WHERE "userId" = ${f.user.id} AND "organizationId" = ${f.owner.id}`;
-    const ref = await parkGoogleChatSpace(googleChatTransportApp(source), "spaces/test-hosted-space", "users/123456", "Test hosted space", false);
+    const { ref } = await parkGoogleChatSpace(googleChatTransportApp(source), "spaces/test-hosted-space", "users/123456", "Test hosted space", false);
     expect(await resolveClaimContext(f.provider, f.engine, { ...f.input, ref })).toEqual({ status: "not_authorized", code: "not_admin" });
-    expect(await parkGoogleChatSpace(googleChatTransportApp(source), "spaces/test-hosted-space", "users/123456", "Test hosted space", true)).toBe(ref);
+    expect(await parkGoogleChatSpace(googleChatTransportApp(source), "spaces/test-hosted-space", "users/123456", "Test hosted space", true)).toEqual({ ref, announce: true });
     expect(await resolveClaimContext(f.provider, f.engine, { ...f.input, ref })).toMatchObject({ status: "ready" });
   });
 
@@ -240,7 +242,7 @@ describe("Google Chat shared claim flow", () => {
     const f = await fixture();
     expect(await claimPendingConnection(f.provider, f.engine, { ...f.input, ref: "gchatclaim-00000000-0000-0000-0000-000000000000" })).toEqual({ status: "no_pending" });
     expect(await claimPendingConnection(f.provider, f.engine, { ...f.input, organizationId: "test-foreign-org" })).toEqual({ status: "not_member_of_org" });
-    const ref = await parkGoogleChatSpace(googleChatTransportApp(f.source), f.space, "users/123456", "Test team space", true);
+    const { ref } = await parkGoogleChatSpace(googleChatTransportApp(f.source), f.space, "users/123456", "Test team space", true);
     await acceptGoogleChatWebhook(f.source, new Request("https://gateway.test", { method: "POST", body: JSON.stringify({ type: "REMOVED_FROM_SPACE", space: { name: f.space } }) }), f.deps);
     expect(await claimPendingConnection(f.provider, f.engine, { ...f.input, ref })).toEqual({ status: "no_pending" });
   });
@@ -249,7 +251,7 @@ describe("Google Chat shared claim flow", () => {
     const f = await fixture();
     const first = await claimPendingConnection(f.provider, f.engine, f.input);
     if (first.status !== "ok") throw new Error(JSON.stringify(first));
-    const ref = await parkGoogleChatSpace(googleChatTransportApp(f.source), f.space, "users/123456", "Test team space", true);
+    const { ref } = await parkGoogleChatSpace(googleChatTransportApp(f.source), f.space, "users/123456", "Test team space", true);
     const move = { ...f.input, ref, organizationId: f.third.slug };
     expect(await claimPendingConnection(f.provider, f.engine, move)).toMatchObject({ status: "already_connected_elsewhere", existing: { orgSlug: f.target.slug } });
     expect(await claimPendingConnection(f.provider, f.engine, { ...move, confirmMove: true })).toMatchObject({ status: "ok", orgSlug: f.third.slug });
@@ -260,7 +262,7 @@ describe("Google Chat shared claim flow", () => {
     const f = await fixture();
     const first = await claimPendingConnection(f.provider, f.engine, f.input);
     if (first.status !== "ok") throw new Error(JSON.stringify(first));
-    const ref = await parkGoogleChatSpace(googleChatTransportApp(f.source), f.space, "users/123456", "Test team space", true);
+    const { ref } = await parkGoogleChatSpace(googleChatTransportApp(f.source), f.space, "users/123456", "Test team space", true);
     const installed = (await f.connections.getConnection(first.bindingId))!;
     await acceptGoogleChatWebhook(installed, new Request("https://gateway.test", { method: "POST", body: JSON.stringify({ type: "REMOVED_FROM_SPACE", space: { name: f.space } }) }), f.deps);
     expect(await claimPendingConnection(f.provider, f.engine, { ...f.input, ref })).toEqual({ status: "no_pending" });
@@ -355,8 +357,9 @@ describe("hosted Google Chat app claimed by an outside user", () => {
     const result = await claimPendingConnection(f.provider, f.engine, input);
     if (result.status !== "ok") throw new Error(JSON.stringify(result));
     expect(result.bindingId).toBe(googleChatInstallationId(f.own.id, PLATFORM_PROJECT, f.space));
-    const [row] = await f.sql`SELECT organization_id, created_by FROM connections WHERE slug = ${runtimeConnectionIdToSlug(result.bindingId)}`;
-    expect(row).toMatchObject({ organization_id: f.own.id, created_by: f.outsider.id });
+    const [row] = await f.sql`SELECT organization_id, created_by, display_name FROM connections WHERE slug = ${runtimeConnectionIdToSlug(result.bindingId)}`;
+    // The connection is named after the space, never its `spaces/…` resource id.
+    expect(row).toMatchObject({ organization_id: f.own.id, created_by: f.outsider.id, display_name: "Outsider space" });
     const [install] = await f.sql`SELECT metadata FROM app_installations WHERE provider = 'gchat' AND status = 'active' AND external_tenant_id = ${f.space}`;
     expect(install.metadata.source_connection_id).toBeUndefined();
     expect(install.metadata.source_organization_id).toBeUndefined();
@@ -408,8 +411,13 @@ describe("hosted Google Chat app claimed by an outside user", () => {
       .toMatchObject({ status: "not_authorized" });
     const covered = "spaces/test-covered-space";
     const ref = await f.refFrom(await acceptGoogleChatWebhook(f.source, f.added(covered), f.deps));
-    // Another member's message inherits the installer of the verified addition.
-    expect(await f.refFrom(await acceptGoogleChatWebhook(f.source, f.message(covered, "users/555555"), f.deps))).toBe(ref);
+    // Another member's message inherits the installer of the verified addition:
+    // the same pending setup, so its link is not announced a second time.
+    const message = { type: "MESSAGE", space: { name: covered, type: "ROOM" }, user: { name: "users/555555" }, message: { name: `${covered}/messages/test`, text: "hello" } };
+    expect(await (await acceptGoogleChatWebhook(f.source, f.delivery(message), f.deps))!.json()).toEqual({});
+    const rows = await f.sql`SELECT metadata FROM app_installations WHERE external_tenant_id = ${covered}`;
+    expect(rows).toHaveLength(1);
+    expect(rows[0].metadata.space_name).toBe("Outsider space");
     expect(await resolveClaimContext(f.provider, f.engine, { userId: f.outsider.id, ref, organizationId: f.own.slug }))
       .toMatchObject({ status: "ready" });
   });
@@ -420,6 +428,38 @@ describe("hosted Google Chat app claimed by an outside user", () => {
     const ref = await f.refFrom(await acceptGoogleChatWebhook(f.source, f.message("spaces/test-direct-space", "users/123456", true), f.deps));
     expect(await resolveClaimContext(f.provider, f.engine, { userId: f.outsider.id, ref, organizationId: f.own.slug }))
       .toMatchObject({ status: "ready" });
+  });
+
+  it("announces a pending space's claim link once, then on commands or re-addition", async () => {
+    configurePlatform();
+    const f = await platformFixture();
+    const dm = { name: "spaces/test-direct-space", type: "DM", spaceType: "DIRECT_MESSAGE", singleUserBotDm: true };
+    const user = { name: "users/123456" };
+    const ref = await f.refFrom(await acceptGoogleChatWebhook(f.source, f.delivery({ type: "ADDED_TO_SPACE", space: dm, user }), f.deps));
+    // References issued before friendly labels were introduced remain usable.
+    await f.sql`UPDATE app_installations SET metadata = metadata || ${f.sql.json({ space_name: dm.name })}
+      WHERE metadata->>'external_id' = ${ref}`;
+    // The person's first message right after adding the app must not repeat the
+    // welcome, and must still never fall through to the legacy source's agent.
+    const hi = await acceptGoogleChatWebhook(f.source, f.message(dm.name, user.name, true), f.deps);
+    expect(hi).toBeInstanceOf(Response);
+    expect(await hi!.json()).toEqual({});
+    // An explicit command, classic or add-on shaped, asks for setup again.
+    const slash = { type: "MESSAGE", space: dm, user, message: { name: `${dm.name}/messages/slash`, sender: user, space: dm, text: "/lobu", slashCommand: { commandId: "1" } } };
+    expect(await f.refFrom(await acceptGoogleChatWebhook(f.source, f.delivery(slash), f.deps))).toBe(ref);
+    const addOn = { chat: { user, appCommandPayload: { space: dm, appCommandMetadata: { appCommandId: 1, appCommandType: "SLASH_COMMAND" }, message: { name: `${dm.name}/messages/add-on`, sender: user, text: "/lobu" } } } };
+    const addOnReply = await (await acceptGoogleChatWebhook(f.source, f.delivery(addOn), f.deps))!.json();
+    expect(addOnReply.hostAppDataAction.chatDataAction.createMessageAction.message.text).toContain(`ref=${ref}`);
+    expect(await f.refFrom(await acceptGoogleChatWebhook(f.source, f.delivery({ type: "ADDED_TO_SPACE", space: dm, user }), f.deps))).toBe(ref);
+    const [row] = await f.sql`SELECT metadata FROM app_installations WHERE metadata->>'external_id' = ${ref}`;
+    expect(row.metadata.space_name).toBeTruthy();
+    expect(row.metadata.space_name).not.toBe(dm.name);
+    expect(await resolveClaimContext(f.provider, f.engine, { userId: f.outsider.id, ref, organizationId: f.own.slug }))
+      .toMatchObject({ status: "ready", subjectName: row.metadata.space_name });
+    // Concurrent first messages in a new DM announce exactly once.
+    const replies = await Promise.all([1, 2, 3].map(() => acceptGoogleChatWebhook(f.source, f.message("spaces/test-concurrent-space", user.name, true), f.deps)));
+    const bodies = await Promise.all(replies.map((reply) => reply!.json()));
+    expect(bodies.filter((body) => typeof body.text === "string")).toHaveLength(1);
   });
 
   it("a removed space has no pending setup, while an old reference never expires", async () => {
