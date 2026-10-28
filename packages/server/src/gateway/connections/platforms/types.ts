@@ -75,6 +75,8 @@ export interface ChatRuntimeConfig {
   config: PlatformAdapterConfig;
   revision: string;
   webhookUrl?: string;
+  /** Other public URLs the provider may still deliver (and sign) this runtime's webhooks for. */
+  alternateWebhookUrls?: string[];
   scope: string;
   stateKey: string;
 }

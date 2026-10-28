@@ -364,6 +364,11 @@ describe("hosted Google Chat app claimed by an outside user", () => {
     const runtime = await resolveGoogleChatRuntime((await f.connections.getConnection(result.bindingId))!, f.deps);
     expect((runtime!.config as any).credentials).toContain(PLATFORM_KEY);
     expect((runtime!.config as any).googleChatProjectNumber).toBe(PLATFORM_PROJECT);
+    expect((runtime!.config as any).disableSignatureVerification).toBe(false);
+    expect(runtime!.scope).toBe(f.space);
+    // Audience: the hosted app webhook, plus the legacy transport Google may still post to.
+    expect(runtime!.webhookUrl).toBe(appWebhookUrl(f.deps.publicGatewayUrl, "gchat"));
+    expect(runtime!.alternateWebhookUrls).toEqual([`${f.deps.publicGatewayUrl}/api/v1/webhooks/${f.source.id}`]);
     // A claimed hosted space routes to its own projection.
     expect(await routeGoogleChatWebhook(f.source, f.message(f.space, "users/123456"), f.deps)).toBe(result.bindingId);
     expect(await resolveClaimContext(f.provider, f.engine, input)).toMatchObject({ status: "already_connected", orgSlug: f.own.slug });
@@ -589,6 +594,15 @@ describe("hosted Google Chat app through the declared app-webhook engine", () =>
       expect((await r.post(message("project-token"), await r.projectToken())).status).toBe(200);
       expect((await r.post(message("endpoint-token"), await r.endpointToken())).status).toBe(200);
       expect(processed).toHaveLength(2);
+      // Until the Chat app config is repointed, Google still posts to the
+      // legacy transport and signs for that transport's own URL.
+      const legacy = `${r.f.deps.publicGatewayUrl}/api/v1/webhooks/${r.f.source.id}`;
+      const viaLegacy = async (token: string) => (await r.manager.handleWebhook(r.f.source.id, new Request(legacy, {
+        method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify(message("legacy")),
+      }))).status;
+      expect(await viaLegacy(await r.endpointToken(undefined, legacy))).toBe(200);
+      expect(processed).toHaveLength(3);
       // The installation does not trust its caller: a direct delivery with a
       // forged token, or one minted for another endpoint, is refused.
       const direct = async (token: string) => (await r.manager.handleWebhook(installation, new Request(appWebhookUrl(r.f.deps.publicGatewayUrl, "gchat"), {
@@ -597,7 +611,7 @@ describe("hosted Google Chat app through the declared app-webhook engine", () =>
       }))).status;
       expect(await direct(await r.projectToken(PLATFORM_PROJECT, r.forger.privateKey))).toBe(401);
       expect(await direct(await r.endpointToken(undefined, `${r.f.deps.publicGatewayUrl}/api/v1/webhooks/${installation}`))).toBe(401);
-      expect(processed).toHaveLength(2);
+      expect(processed).toHaveLength(3);
     } finally {
       oidcCerts.mockRestore();
       await r.manager.shutdown();
