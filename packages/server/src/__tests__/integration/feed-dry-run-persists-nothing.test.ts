@@ -645,17 +645,6 @@ describe('feed dry run persists nothing', () => {
 });
 
 /**
- * The reason the dry path runs the REAL inserts against a rolled-back
- * transaction rather than skipping them.
- *
- * A dry run exists to answer "would this sync work?". An implementation that
- * validated the items and then declined to insert them would answer that
- * question by not asking it: anything the database itself rejects — a
- * constraint, a trigger, a NOT NULL, a bad cast — would be invisible, and the
- * operator would be told "2 items would be ingested" about data that can never
- * land. These tests pin the property that makes the answer trustworthy.
- */
-/**
  * A connector-supplied origin_id is a btree key; past the row-size limit
  * Postgres threw mid-page and /api/workers/stream answered an untyped 500. The
  * route must reject the batch with the typed 422 batch_rejected contract before
@@ -738,6 +727,17 @@ describe('stream ingest bounds connector origin_id', () => {
   });
 });
 
+/**
+ * The reason the dry path runs the REAL inserts against a rolled-back
+ * transaction rather than skipping them.
+ *
+ * A dry run exists to answer "would this sync work?". An implementation that
+ * validated the items and then declined to insert them would answer that
+ * question by not asking it: anything the database itself rejects — a
+ * constraint, a trigger, a NOT NULL, a bad cast — would be invisible, and the
+ * operator would be told "2 items would be ingested" about data that can never
+ * land. These tests pin the property that makes the answer trustworthy.
+ */
 describe('dry run exercises the real write path', () => {
   it('surfaces a database-level failure instead of reporting success', async () => {
     const { runId } = await seed(true);
