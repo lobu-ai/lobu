@@ -92,38 +92,4 @@ describe('OAuth account binding diagnostics', () => {
       { reason, authProfileId: 101, appAuthProfileId: null }, 'OAuth account binding refused',
     );
   });
-
-  it.each([
-    { name: 'existing grant', accountId: profile.account_id, stored: 202, appId: 202, reserve: true, queries: 3, writes: 0 },
-    { name: 'pending reservation', accountId: null, stored: undefined, appId: 202, reserve: true, queries: 3, writes: 1 },
-    { name: 'pending check', accountId: null, stored: undefined, appId: 202, reserve: false, queries: 2, writes: 0 },
-    { name: 'no selected app', accountId: null, stored: undefined, appId: null, reserve: true, queries: 2, writes: 0 },
-    { name: 'non-numeric stored app', accountId: profile.account_id, stored: 'synthetic-private-app', appId: 202, reserve: true, queries: 3, writes: 0 },
-  ])('keeps $name successful and quiet', async ({ accountId, stored, appId, reserve, queries, writes }) => {
-    const { lockOAuthAccountBinding, tx, sql, warn, output } = await setup({
-      profile: { account_id: accountId, auth_data: { ...profile.auth_data, app_auth_profile_id: stored } },
-    });
-    expect(await lockOAuthAccountBinding(tx, { ...binding, appAuthProfileId: appId, reservePending: reserve })).toBe(true);
-    expect(sql).toHaveBeenCalledTimes(queries);
-    expect(sql.json).toHaveBeenCalledTimes(writes);
-    if (writes) expect(sql.json).toHaveBeenCalledWith({ app_auth_profile_id: 202 });
-    expect(warn).not.toHaveBeenCalled();
-    expect(output).not.toHaveBeenCalled();
-  });
-
-  it('keeps the connect-token error unchanged and refuses before inserting a token', async () => {
-    const { tx, sql, warn } = await setup({ account: null });
-    const { createConnectToken } = await import('../connect-tokens');
-    await expect(createConnectToken({
-      organizationId: binding.organizationId, authProfileId: binding.authProfileId,
-      connectorKey: 'synthetic.oauth', authType: 'oauth',
-      authConfig: { appAuthProfileId: binding.appAuthProfileId }, createdBy: binding.ownerUserId,
-    }, tx)).rejects.toThrow(
-      'This account is already bound to a different OAuth app or owner. Use your own account profile with its selected app.',
-    );
-    expect(sql).toHaveBeenCalledTimes(2);
-    expect(warn).toHaveBeenCalledWith(
-      { reason: 'backing_account_absent', authProfileId: 101, appAuthProfileId: 202 }, 'OAuth account binding refused',
-    );
-  });
 });

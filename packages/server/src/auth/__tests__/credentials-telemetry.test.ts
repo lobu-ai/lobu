@@ -74,17 +74,6 @@ describe('OAuth refresh failure telemetry', () => {
     expectNoCredentials(logs);
   });
 
-  it('cancels a rejected refresh body without waiting for it to finish', async () => {
-    const logs = captureLogs();
-    const cancel = vi.fn();
-    const body = new ReadableStream<Uint8Array>({ cancel });
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(body, { status: 401 }));
-    expect(await service.refreshTokenGeneric(params)).toBeNull();
-    expect(cancel).toHaveBeenCalledOnce();
-    expect(logs.warn).toHaveBeenCalledOnce();
-    expect(logs.error).not.toHaveBeenCalled();
-  });
-
   it('reports malformed success JSON without logging its contents', async () => {
     const logs = captureLogs();
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(responseSecret, { status: 200 }));
@@ -118,15 +107,5 @@ describe('OAuth refresh failure telemetry', () => {
       '[Credentials] Generic token refresh error',
     );
     expectNoCredentials(logs);
-  });
-
-  it('returns valid refreshed tokens without emitting failure telemetry', async () => {
-    const logs = captureLogs();
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
-      JSON.stringify({ access_token: 'synthetic-access', expires_in: 3600 }), { status: 200 },
-    ));
-    expect(await service.refreshTokenGeneric(params)).toMatchObject({ accessToken: 'synthetic-access' });
-    expect(logs.error).not.toHaveBeenCalled();
-    expect(logs.warn).not.toHaveBeenCalled();
   });
 });

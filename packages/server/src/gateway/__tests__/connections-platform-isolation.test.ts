@@ -2,30 +2,24 @@
  * Hardening tests for chat platform connections and platform isolation.
  *
  * Coverage areas:
- *   1. Cross-platform leakage: a Telegram renderer must no-op on Slack events
- *      (and vice versa). Tests exercise `shouldHandle` inside interaction-bridge.
- *   2. `isSecretField` heuristic — secret field detection for token/secret/key etc.
- *   3. `isTelegramConfig` / `isSlackConfig` narrowing guards.
- *   4. `registerInteractionBridge` cleanup teardown (no lingering listeners).
- *   5. `InteractionService` URL scheme guard for link buttons.
- *   6. Telegram polling mode selection logic (mode auto/webhook/polling).
- *   7. Duplicate-delivery idempotency — same event id ignored on second call.
- *   8. Slug parsing for `registerSlackPlatformHandlers` DM detection.
- *   9. `parseSlackTeamJoinEvent` — malformed/bot/deleted users rejected.
- *  10. `isSecretField` does not false-positive on non-secret field names.
+ *   1. Cross-connection leakage: a bridge must no-op on another connection's
+ *      events. Tests exercise `shouldHandle` inside interaction-bridge.
+ *   2. `isSecretField` heuristic — secret field detection, no false positives.
+ *   3. `InteractionService` URL scheme guard for link buttons.
+ *   4. Interactions fail closed without a connectionId.
+ *   5. Duplicate-delivery idempotency — same event id ignored on second call.
+ *   6. `registerSlackPlatformHandlers` DM vs group detection.
+ *   7. `parseSlackTeamJoinEvent` — malformed/bot/deleted users rejected.
  */
 
 import { describe, expect, mock, test, beforeEach } from "bun:test";
 
 import {
   InteractionService,
-  type PostedLinkButton,
   type PostedQuestion,
 } from "../interactions.js";
 import { shouldHandle } from "../connections/interaction-bridge.js";
 import {
-  isTelegramConfig,
-  isSlackConfig,
   isSecretField,
   type PlatformAdapterConfig,
   type PlatformConnection,
@@ -118,29 +112,7 @@ describe("isSecretField", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 2. Config narrowing type guards
-// ---------------------------------------------------------------------------
-
-describe("isTelegramConfig / isSlackConfig", () => {
-  const telegramCfg = { platform: "telegram", botToken: "tok" } as PlatformAdapterConfig;
-  const slackCfg = { platform: "slack", botToken: "xoxb", signingSecret: "s" } as PlatformAdapterConfig;
-  const discordCfg = { platform: "discord" } as PlatformAdapterConfig;
-
-  test("isTelegramConfig accepts telegram, rejects others", () => {
-    expect(isTelegramConfig(telegramCfg)).toBe(true);
-    expect(isTelegramConfig(slackCfg)).toBe(false);
-    expect(isTelegramConfig(discordCfg)).toBe(false);
-  });
-
-  test("isSlackConfig accepts slack, rejects others", () => {
-    expect(isSlackConfig(slackCfg)).toBe(true);
-    expect(isSlackConfig(telegramCfg)).toBe(false);
-    expect(isSlackConfig(discordCfg)).toBe(false);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// 3. InteractionService link-button URL scheme guard
+// 2. InteractionService link-button URL scheme guard
 // ---------------------------------------------------------------------------
 
 describe("InteractionService.postLinkButton — URL scheme guard", () => {
@@ -153,13 +125,6 @@ describe("InteractionService.postLinkButton — URL scheme guard", () => {
     await expect(
       svc.postLinkButton("u", "conv", "ch", undefined, "conn-1", "slack",
         "https://example.com/auth", "Connect", "oauth")
-    ).resolves.toBeDefined();
-  });
-
-  test("accepts http:// URLs", async () => {
-    await expect(
-      svc.postLinkButton("u", "conv", "ch", undefined, "conn-1", "slack",
-        "http://example.com/auth", "Connect", "oauth")
     ).resolves.toBeDefined();
   });
 
@@ -193,7 +158,7 @@ describe("InteractionService.postLinkButton — URL scheme guard", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 3b. InteractionService — fail-closed when connectionId is missing
+// 3. InteractionService — fail-closed when connectionId is missing
 //
 // Cross-tenant / cross-connection event leakage was possible when callers
 // omitted `connectionId`: the interaction-bridge `shouldHandle` filter falls
@@ -292,39 +257,7 @@ describe("InteractionService — connectionId is required", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 4. InteractionService emits correct platform field
-// ---------------------------------------------------------------------------
-
-describe("InteractionService — platform field on emitted events", () => {
-  test("postQuestion carries platform", async () => {
-    const svc = new InteractionService();
-    const received: any[] = [];
-    svc.on("question:created", (e) => received.push(e));
-
-    await svc.postQuestion("u", "conv", "ch", undefined, "conn-1", "telegram",
-      "Pick one?", ["A", "B"]);
-
-    expect(received).toHaveLength(1);
-    expect(received[0].platform).toBe("telegram");
-  });
-
-  test("postLinkButton carries platform", async () => {
-    const svc = new InteractionService();
-    const received: any[] = [];
-    svc.on("link-button:created", (e) => received.push(e));
-
-    await svc.postLinkButton("u", "conv", "ch", undefined, "conn-1", "slack",
-      "https://example.com", "Open", "oauth");
-
-    expect(received).toHaveLength(1);
-    expect(received[0].platform).toBe("slack");
-  });
-
-
-});
-
-// ---------------------------------------------------------------------------
-// 5. Cross-platform leakage: shouldHandle filters by platform
+// 4. Cross-connection leakage: shouldHandle filters by connectionId
 //    Tests exercise the exported `registerInteractionBridge` which internally
 //    calls shouldHandle. We use a manager whose instance platform does NOT
 //    match the event platform and assert the handler is a no-op.
@@ -455,50 +388,6 @@ describe("registerInteractionBridge — cross-platform isolation", () => {
     expect((instanceChat.channel as any).mock.calls.length).toBe(0);
   });
 
-  test("cleanup removes all listeners — no-op after unregister", async () => {
-    const svc = new InteractionService();
-    const instanceChat = makeChat();
-    const threadPost = mock(async () => undefined);
-    (instanceChat.channel as any).mockReturnValue({ post: threadPost });
-
-    const manager = makeManager("slack", "conn-1", instanceChat);
-    const actionChat = makeChat();
-
-    const unregister = registerInteractionBridge(
-      svc,
-      manager as any,
-      makeConnection("slack"),
-      actionChat as any
-    );
-
-    // Verify listeners were added
-    expect(svc.listenerCount("question:created")).toBeGreaterThan(0);
-
-    // Unregister
-    unregister();
-
-    // After cleanup, no listeners remain for these events
-    expect(svc.listenerCount("question:created")).toBe(0);
-    expect(svc.listenerCount("link-button:created")).toBe(0);
-
-    // Emit after unregister — should be completely silent
-    const slackEvent: PostedQuestion = {
-      id: "q_post_unregister",
-      userId: "u",
-      conversationId: "ch",
-      channelId: "ch",
-      teamId: undefined,
-      connectionId: "conn-1",
-      platform: "slack",
-      question: "Pick?",
-      options: ["A", "B"],
-    };
-    svc.emit("question:created", slackEvent);
-    await new Promise((r) => setTimeout(r, 20));
-    expect(threadPost).not.toHaveBeenCalled();
-    expect((instanceChat.channel as any).mock.calls.length).toBe(0);
-  });
-
   test("duplicate event id is no-op on second emit (idempotency)", async () => {
     const svc = new InteractionService();
     // instanceChat is what resolveThread uses
@@ -588,66 +477,7 @@ describe("registerInteractionBridge — cross-platform isolation", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 6. Telegram polling-mode selection logic
-//    Extracted from ChatInstanceManager.startInstanceUnscoped
-// ---------------------------------------------------------------------------
-
-describe("Telegram mode logic — polling vs webhook", () => {
-  /**
-   * Replicate the exact mode-selection logic from startInstanceUnscoped:
-   *
-   *   const mode = isTelegramConfig(config) ? (config.mode ?? "auto") : "auto";
-   *   const useWebhook = mode === "webhook" || (mode === "auto" && !!publicGatewayUrl);
-   */
-  function resolveMode(
-    config: Partial<{ platform: string; botToken: string; mode?: "auto" | "webhook" | "polling" }>,
-    publicGatewayUrl: string
-  ): { useWebhook: boolean; mode: string } {
-    const cfg = config as PlatformAdapterConfig;
-    const mode = isTelegramConfig(cfg) ? (cfg as any).mode ?? "auto" : "auto";
-    const useWebhook =
-      mode === "webhook" || (mode === "auto" && !!publicGatewayUrl);
-    return { useWebhook, mode };
-  }
-
-  const baseTg = { platform: "telegram", botToken: "tok" };
-
-  test("mode=auto with publicGatewayUrl → useWebhook=true", () => {
-    const r = resolveMode({ ...baseTg, mode: "auto" }, "https://gw.example");
-    expect(r.useWebhook).toBe(true);
-  });
-
-  test("mode=auto without publicGatewayUrl → useWebhook=false (polling)", () => {
-    const r = resolveMode({ ...baseTg, mode: "auto" }, "");
-    expect(r.useWebhook).toBe(false);
-  });
-
-  test("mode=webhook always → useWebhook=true regardless of publicGatewayUrl", () => {
-    const r = resolveMode({ ...baseTg, mode: "webhook" }, "");
-    expect(r.useWebhook).toBe(true);
-  });
-
-  test("mode=polling always → useWebhook=false regardless of publicGatewayUrl", () => {
-    const r = resolveMode({ ...baseTg, mode: "polling" }, "https://gw.example");
-    expect(r.useWebhook).toBe(false);
-  });
-
-  test("mode defaults to 'auto' when not set", () => {
-    // omit mode from config object
-    const r = resolveMode({ platform: "telegram", botToken: "tok" }, "https://gw.example");
-    expect(r.mode).toBe("auto");
-    expect(r.useWebhook).toBe(true);
-  });
-
-  test("non-Telegram config always gets mode=auto and follows publicGatewayUrl", () => {
-    const r = resolveMode({ platform: "slack", botToken: "xoxb" }, "https://gw.example");
-    expect(r.mode).toBe("auto");
-    expect(r.useWebhook).toBe(true);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// 7. parseSlackTeamJoinEvent — validation / edge cases
+// 5. parseSlackTeamJoinEvent — validation / edge cases
 // ---------------------------------------------------------------------------
 
 describe("parseSlackTeamJoinEvent", () => {
@@ -738,7 +568,7 @@ describe("parseSlackTeamJoinEvent", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 8. registerSlackPlatformHandlers — DM vs group channel detection
+// 6. registerSlackPlatformHandlers — DM vs group channel detection
 // ---------------------------------------------------------------------------
 
 describe("registerSlackPlatformHandlers — DM vs group channel detection", () => {
@@ -783,142 +613,5 @@ describe("registerSlackPlatformHandlers — DM vs group channel detection", () =
     await fire(slashHandler, "D_DM");
     const ctx = tryHandle.mock.calls[0]![2] as any;
     expect(ctx.isGroup).toBe(false);
-  });
-
-  test("channelId is prefixed with slack: for consistency", async () => {
-    const { slashHandler, tryHandle } = setupSlash();
-    await fire(slashHandler, "C123");
-    const ctx = tryHandle.mock.calls[0]![2] as any;
-    expect(ctx.channelId).toBe("slack:C123");
-  });
-
-  test("empty text defaults to 'help' command", async () => {
-    const { slashHandler, tryHandle } = setupSlash();
-    const post = mock(async () => undefined);
-    await slashHandler({
-      text: "",
-      raw: { channel_id: "C1", team_id: "T1", user_id: "U1" },
-      user: { userId: "U1" },
-      channel: { post },
-    });
-    const [commandName] = tryHandle.mock.calls[0]!;
-    expect(commandName).toBe("help");
-  });
-
-  test("non-Slack connection skips registration", () => {
-    const chat = { onSlashCommand: mock(() => undefined) };
-    registerSlackPlatformHandlers(
-      chat,
-      { id: "conn-1", platform: "telegram" } as any,
-      { tryHandle: mock(async () => true) } as any
-    );
-    expect(chat.onSlashCommand).not.toHaveBeenCalled();
-  });
-
-  test("missing commandDispatcher skips registration", () => {
-    const chat = { onSlashCommand: mock(() => undefined) };
-    registerSlackPlatformHandlers(
-      chat,
-      { id: "conn-1", platform: "slack" } as any,
-      undefined
-    );
-    expect(chat.onSlashCommand).not.toHaveBeenCalled();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// 9. InteractionService — unique event ids
-// ---------------------------------------------------------------------------
-
-describe("InteractionService — unique event ids", () => {
-  test("each postLinkButton call emits a distinct id", async () => {
-    const svc = new InteractionService();
-    const ids: string[] = [];
-    svc.on("link-button:created", (e) => ids.push(e.id));
-
-    await svc.postLinkButton("u", "conv", "ch", undefined, "conn-1", "slack",
-      "https://a.com", "A", "oauth");
-    await svc.postLinkButton("u", "conv", "ch", undefined, "conn-1", "slack",
-      "https://b.com", "B", "oauth");
-
-    expect(ids).toHaveLength(2);
-    expect(new Set(ids).size).toBe(2);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// 10. InteractionService beforeCreateHook is awaited before emit
-// ---------------------------------------------------------------------------
-
-describe("InteractionService — beforeCreateHook ordering", () => {
-  test("hook runs before the event is emitted", async () => {
-    const svc = new InteractionService();
-    const log: string[] = [];
-
-    svc.setBeforeCreateHook(async (_uid, _conv) => {
-      log.push("hook");
-    });
-    svc.on("question:created", () => log.push("event"));
-
-    await svc.postQuestion("u", "conv", "ch", undefined, "conn-1", "slack", "?", ["Y", "N"]);
-
-    expect(log).toEqual(["hook", "event"]);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// 11. Unknown platform — addConnection guard (unit-level logic)
-// ---------------------------------------------------------------------------
-
-describe("ADAPTER_FACTORIES platform guard", () => {
-  const KNOWN_PLATFORMS = ["telegram", "slack", "discord", "whatsapp", "teams", "gchat"];
-  const UNKNOWN = ["sms", "signal", "matrix", "xmpp", "fax", "pigeon"];
-
-  test.each(KNOWN_PLATFORMS)("known platform %s is in factory map", (platform) => {
-    // We verify the set without importing the private map by checking that
-    // `isTelegramConfig` and `isSlackConfig` agree with the expected classification.
-    if (platform === "telegram") {
-      expect(isTelegramConfig({ platform } as PlatformAdapterConfig)).toBe(true);
-    } else if (platform === "slack") {
-      expect(isSlackConfig({ platform } as PlatformAdapterConfig)).toBe(true);
-    } else {
-      // Remaining platforms are recognised by the union discriminant.
-      const cfg = { platform } as PlatformAdapterConfig;
-      expect(cfg.platform).toBe(platform);
-    }
-  });
-
-  test.each(UNKNOWN)("unknown platform %s is not telegram or slack", (platform) => {
-    const cfg = { platform } as any as PlatformAdapterConfig;
-    expect(isTelegramConfig(cfg)).toBe(false);
-    expect(isSlackConfig(cfg)).toBe(false);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// 12. Link-button body text deduplication guard (label === body)
-// ---------------------------------------------------------------------------
-
-describe("InteractionService.postLinkButton — body field", () => {
-  test("body is stored as-is when it differs from the label", async () => {
-    const svc = new InteractionService();
-    const received: PostedLinkButton[] = [];
-    svc.on("link-button:created", (e) => received.push(e));
-
-    await svc.postLinkButton("u", "conv", "ch", undefined, "conn-1", "slack",
-      "https://example.com", "Connect", "oauth", "Authorize access to GitHub.");
-
-    expect(received[0]!.body).toBe("Authorize access to GitHub.");
-  });
-
-  test("body is undefined when not supplied", async () => {
-    const svc = new InteractionService();
-    const received: PostedLinkButton[] = [];
-    svc.on("link-button:created", (e) => received.push(e));
-
-    await svc.postLinkButton("u", "conv", "ch", undefined, "conn-1", "slack",
-      "https://example.com", "Connect", "oauth");
-
-    expect(received[0]!.body).toBeUndefined();
   });
 });

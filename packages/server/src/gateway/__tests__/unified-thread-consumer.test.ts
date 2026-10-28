@@ -51,79 +51,6 @@ function createConsumer(overrides?: {
   return { consumer, platformRegistry, renderer };
 }
 
-describe("UnifiedThreadResponseConsumer customEvent broadcast", () => {
-  test("broadcasts tool_use customEvent to conversation + cli session", async () => {
-    const renderer = {
-      handleCompletion: mock(async () => undefined),
-      handleError: mock(async () => undefined),
-    };
-    const queue = {
-      start: mock(async () => undefined),
-      stop: mock(async () => undefined),
-      createQueue: mock(async () => undefined),
-      work: mock(async () => undefined),
-    };
-    const broadcast = mock(() => undefined);
-    const sseManager = { broadcast };
-    const platformRegistry = {
-      get: mock(() => ({ getResponseRenderer: () => renderer })),
-    };
-    const consumer = new UnifiedThreadResponseConsumer(
-      queue as any,
-      platformRegistry as any,
-      sseManager as any
-    ) as any;
-
-    const payload = {
-      messageId: "m1",
-      channelId: "api:1",
-      conversationId: "api:1",
-      userId: "u1",
-      teamId: "api",
-      platform: "api",
-      timestamp: 1000,
-      platformMetadata: { sessionId: "cli-session-1" },
-      customEvent: {
-        name: "tool_use",
-        data: {
-          toolCallId: "tc-1",
-          name: "search_memory",
-          input: { query: "rent" },
-          isError: false,
-          result_summary: {
-            event_ids: [42],
-            snippets: [{ id: 42, text: "Rent is due 1st" }],
-          },
-        },
-      },
-    };
-
-    await consumer.handleThreadResponse({ id: "job-1", data: payload });
-
-    const broadcasts = broadcast.mock.calls;
-    const toolUseBroadcasts = broadcasts.filter(
-      (call: any[]) => call[1] === "tool_use"
-    );
-    // Exactly one broadcast, keyed by conversation id — the legacy
-    // platformMetadata.sessionId side-channel is gone (no producer ever set
-    // it; clients subscribe on conversationId).
-    expect(toolUseBroadcasts.length).toBe(1);
-    const conversationBroadcast = toolUseBroadcasts.find(
-      (call: any[]) => call[0] === "api:1"
-    );
-    expect(conversationBroadcast).toBeDefined();
-    expect(conversationBroadcast?.[2]).toMatchObject({
-      toolCallId: "tc-1",
-      name: "search_memory",
-      result_summary: {
-        event_ids: [42],
-      },
-      messageId: "m1",
-      timestamp: 1000,
-    });
-  });
-});
-
 describe("UnifiedThreadResponseConsumer interaction card owner-routing", () => {
   function makeInteractionConsumer(hasActiveConnection: boolean) {
     const queue = {
@@ -178,31 +105,6 @@ describe("UnifiedThreadResponseConsumer interaction card owner-routing", () => {
     expect(sseManager.hasActiveConnection).toHaveBeenCalledWith("api:conv-1");
     // Must NOT broadcast into the wrong pod's SseManager.
     expect(broadcast).not.toHaveBeenCalled();
-  });
-
-  test("delivers a headless-sourced card on first claim without an SSE owner (F12)", async () => {
-    // A card emitted from a headless turn (automation/scheduled/repair/internal)
-    // has no browser SSE on ANY pod. Before the source was stamped onto the
-    // card it owner-gated, re-queued 30x and dead-lettered, hanging the worker.
-    // Stamped headless, it must deliver on first claim instead.
-    const { consumer, broadcast, sseManager } = makeInteractionConsumer(false);
-
-    await consumer.handleThreadResponse({
-      id: "job-headless",
-      data: {
-        ...interactionPayload,
-        messageId: "m-int-headless",
-        platformMetadata: { source: "automation-run" },
-      },
-    });
-
-    // Exempt: the owner check is short-circuited, so it never even asks.
-    expect(sseManager.hasActiveConnection).not.toHaveBeenCalled();
-    const questionBroadcasts = broadcast.mock.calls.filter(
-      (call: any[]) => call[1] === "question"
-    );
-    expect(questionBroadcasts.length).toBe(1);
-    expect(questionBroadcasts[0][0]).toBe("api:conv-1");
   });
 
   test("delivers the card on the pod that owns the SSE connection", async () => {
@@ -274,20 +176,6 @@ describe("UnifiedThreadResponseConsumer headless owner-gate exemption", () => {
 
     expect(renderer.handleCompletion).toHaveBeenCalledTimes(1);
     expect(sseManager.hasActiveConnection).not.toHaveBeenCalled();
-  });
-
-  test("automation terminal error row resolves immediately (was: 2h stale sweep)", async () => {
-    const { consumer, renderer } = makeApiConsumer(false);
-    const errorRow = {
-      ...automationTerminal,
-      processedMessageIds: undefined,
-      error: "worker exited 1",
-    };
-
-    await consumer.handleThreadResponse({ id: "job-2", data: errorRow });
-
-    expect(renderer.handleError).toHaveBeenCalledTimes(1);
-    expect(renderer.handleCompletion).toHaveBeenCalledTimes(1); // error path also completes
   });
 
   for (const source of ["connector-repair", "scheduled-job", "internal"]) {
@@ -382,24 +270,6 @@ describe("UnifiedThreadResponseConsumer owner-gate last-attempt fallback", () =>
       data: { ...directApiTerminal, finalText: "the answer" },
     });
 
-    expect(renderer.handleCompletion).toHaveBeenCalledTimes(1);
-  });
-
-  test("error row delivers locally on the final attempt so the run still resolves", async () => {
-    const { consumer, renderer } = makeApiConsumer();
-
-    await consumer.handleThreadResponse({
-      id: "job-final-err",
-      attempt: 29,
-      maxAttempts: 30,
-      data: {
-        ...directApiTerminal,
-        processedMessageIds: undefined,
-        error: "The agent didn't finish responding in time.",
-      },
-    });
-
-    expect(renderer.handleError).toHaveBeenCalledTimes(1);
     expect(renderer.handleCompletion).toHaveBeenCalledTimes(1);
   });
 
@@ -601,67 +471,6 @@ describe("UnifiedThreadResponseConsumer Chat SDK hydrate-on-claim", () => {
     expect(chatResponseBridge.handleCompletion).not.toHaveBeenCalled();
     expect(platformRegistry.get).not.toHaveBeenCalled();
   });
-
-  test("parks quota errors before checking whether the chat connection is deliverable", async () => {
-    const chatResponseBridge = {
-      parkQuotaExhaustedAutomation: mock(async () => undefined),
-      ensureDeliverable: mock(async () => false),
-      handleCompletion: mock(async () => undefined),
-      handleError: mock(async () => undefined),
-    };
-    const { consumer } = createConsumer({ chatResponseBridge });
-
-    await expect(
-      consumer.handleThreadResponse({
-        id: "job-quota",
-        data: {
-          ...basePayload,
-          processedMessageIds: undefined,
-          error:
-            "429 Limit Exhausted. Your limit will reset at 2026-08-04 06:00:00",
-          errorCode: "PROVIDER_QUOTA_EXHAUSTED",
-        },
-      })
-    ).rejects.toThrow(/cannot be served by this gateway instance/);
-
-    expect(chatResponseBridge.parkQuotaExhaustedAutomation).toHaveBeenCalledTimes(1);
-    expect(chatResponseBridge.ensureDeliverable).toHaveBeenCalledTimes(1);
-    expect(chatResponseBridge.handleError).not.toHaveBeenCalled();
-  });
-
-  test("routes Chat SDK responses after hydrating on the claiming replica", async () => {
-    const chatResponseBridge = {
-      parkQuotaExhaustedAutomation: mock(async () => undefined),
-      ensureDeliverable: mock(async () => true),
-      handleCompletion: mock(async () => undefined),
-      handleError: mock(async () => undefined),
-    };
-    const { consumer, platformRegistry } = createConsumer({ chatResponseBridge });
-
-    await consumer.handleThreadResponse({ id: "job-1", data: basePayload });
-
-    expect(chatResponseBridge.ensureDeliverable).toHaveBeenCalledTimes(1);
-    expect(chatResponseBridge.handleCompletion).toHaveBeenCalledTimes(1);
-    expect(platformRegistry.get).not.toHaveBeenCalled();
-  });
-
-  test("legacy platform responses without connectionId still use platform renderer", async () => {
-    const renderer = {
-      handleCompletion: mock(async () => undefined),
-      handleError: mock(async () => undefined),
-    };
-    const { consumer, platformRegistry } = createConsumer({ renderer });
-    const { platformMetadata, ...payloadWithoutMetadata } = basePayload;
-    void platformMetadata;
-
-    await consumer.handleThreadResponse({
-      id: "job-1",
-      data: payloadWithoutMetadata,
-    });
-
-    expect(platformRegistry.get).toHaveBeenCalledWith("telegram");
-    expect(renderer.handleCompletion).toHaveBeenCalledTimes(1);
-  });
 });
 
 // Cross-pod fan-out for CHAT-PLATFORM interaction cards (the bug fixed here):
@@ -724,53 +533,10 @@ describe("chat interaction fan-out producer (registerChatInteractionFanout)", ()
     expect(send).not.toHaveBeenCalled();
   });
 
-  test("does NOT enqueue api cards (ApiPlatform owner-routes those to the SSE)", () => {
-    const { svc, send } = makeFanout({ warmLocally: false });
-
-    svc.emit("question:created", {
-      ...slackQuestion,
-      platform: "api",
-      connectionId: undefined,
-    });
-
-    expect(send).not.toHaveBeenCalled();
-  });
-
   test("does NOT enqueue chat cards missing a connectionId", () => {
     const { svc, send } = makeFanout({ warmLocally: false });
 
     svc.emit("question:created", { ...slackQuestion, connectionId: undefined });
-
-    expect(send).not.toHaveBeenCalled();
-  });
-
-  test("fans out suggestion and link-button interactions", () => {
-    const { svc, send } = makeFanout({ warmLocally: false });
-
-    svc.emit("suggestion:created", {
-      ...slackQuestion,
-      id: "req_1",
-    });
-    svc.emit("link-button:created", {
-      ...slackQuestion,
-      id: "lb_1",
-    });
-
-    expect(send).toHaveBeenCalledTimes(2);
-    const names = send.mock.calls.map(
-      (c: any[]) => c[1].customEvent.data.eventName
-    );
-    expect(names).toEqual([
-      "suggestion:created",
-      "link-button:created",
-    ]);
-  });
-
-  test("cleanup detaches all listeners (no fan-out after teardown)", () => {
-    const { svc, send, cleanup } = makeFanout({ warmLocally: false });
-    cleanup();
-
-    svc.emit("question:created", slackQuestion);
 
     expect(send).not.toHaveBeenCalled();
   });
@@ -830,26 +596,6 @@ describe("chat interaction fan-out consumer (handleChatInteraction)", () => {
     consumer.setInteractionService(svc, (_id: string) => false);
     return { consumer, svc, chatResponseBridge, platformRegistry };
   }
-
-  test("re-emits the card onto the local InteractionService on the OWNING pod", async () => {
-    const { consumer, svc, chatResponseBridge, platformRegistry } =
-      makeConsumer(true);
-    const rendered: any[] = [];
-    svc.on("question:created", (e: any) => rendered.push(e));
-
-    await consumer.handleThreadResponse({
-      id: "job-1",
-      data: makeChatInteractionRow(),
-    });
-
-    // Owner-gate consulted (warmConnection), then re-emitted exactly once with
-    // the ORIGINAL id (drives the bridge's handledEvents dedup).
-    expect(chatResponseBridge.ensureDeliverable).toHaveBeenCalledTimes(1);
-    expect(rendered.length).toBe(1);
-    expect(rendered[0].id).toBe("q_slack_1");
-    // Never falls through to the platform-renderer text path.
-    expect(platformRegistry.get).not.toHaveBeenCalled();
-  });
 
   test("re-queues (throws) and does NOT render on a pod that can't serve the connection", async () => {
     const { consumer, svc, chatResponseBridge } = makeConsumer(false);

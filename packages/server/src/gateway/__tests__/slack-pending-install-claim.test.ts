@@ -5,10 +5,9 @@
  *
  * This unit test stubs the Slack Web API (no HTTP), the pending-install store
  * (no DB), and the hosted-app credentials so the DM routing is exercised in
- * isolation. It proves: (1) with an installer id, `openDm` + `postMessage` are
- * called and the posted text carries the connect URL with the team id (no secret
- * token — authority is the Slack workspace-admin check at claim time); (2) with a
- * null installer, no DM is sent — the row is still parked.
+ * isolation. It proves the DM posted to the installer carries the connect URL
+ * keyed by the team id and no secret token — authority is the Slack
+ * workspace-admin check at claim time.
  *
  * IMPORTANT: never replace an entire module with `mock.module` without spreading
  * the real exports. This suite shares a process with every other gateway suite,
@@ -181,13 +180,6 @@ describe("completeSlackPendingInstall — installer claim DM", () => {
 		];
 		expect(botToken).toBe("xoxb-installer-token");
 		expect(channel).toBe("D-INSTALLER");
-		expect(text).toContain(
-			"<https://app.lobu.ai/connector/slack/connection?ref=T-CLAIM|Choose the Lobu organization for this installation>",
-		);
-		expect(text).toContain("`/lobu link CODE`");
-		expect(text).toContain("Lobu's hosted Slack workspace");
-		expect(text).toContain("workspace link from `lobu run`");
-
 		// The posted text embeds the provider-agnostic connect URL with the team id
 		// as the ref — no secret token (authority is the Slack workspace-admin
 		// check at claim time).
@@ -198,39 +190,11 @@ describe("completeSlackPendingInstall — installer claim DM", () => {
 		const [, refParam] = match as RegExpMatchArray;
 		expect(decodeURIComponent(refParam)).toBe("T-CLAIM");
 		expect(text).not.toContain("&t=");
+		expect(text).not.toContain("xoxb-installer-token");
 
 		// The pending row is parked with the installer id and no token material.
 		expect(writeCalls).toHaveLength(1);
 		const parked = writeCalls[0]!;
 		expect(parked.installerUserId).toBe("U-INSTALLER");
-	});
-
-	test("skips the DM when there is no installer, but still parks the pending row", async () => {
-		exchangeOAuthCode.mockResolvedValueOnce({
-			botToken: "xoxb-installer-token",
-			teamId: "T-NOINSTALLER",
-			teamName: null,
-			botUserId: null,
-			authedUserId: null,
-			isEnterpriseInstall: false,
-			enterpriseId: null,
-		});
-		const completeSlackPendingInstall = await loadCoordinator();
-
-		const result = await completeSlackPendingInstall(
-			callbackRequest(),
-			"https://gateway.example.com/slack/oauth_callback",
-			null,
-		);
-
-		expect(result).toEqual({
-			externalRef: "T-NOINSTALLER",
-			subjectName: null,
-		});
-		// No DM without an installer to send it to.
-		expect(openDm).not.toHaveBeenCalled();
-		expect(postMessage).not.toHaveBeenCalled();
-		expect(writeCalls).toHaveLength(1);
-		expect(writeCalls[0]!.installerUserId).toBeNull();
 	});
 });

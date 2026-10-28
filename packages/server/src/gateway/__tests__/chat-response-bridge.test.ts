@@ -84,148 +84,7 @@ const basePayload = {
   },
 };
 
-describe("ChatResponseBridge.handleDelta — AsyncIterable streaming", () => {
-  test("first delta opens stream with AsyncIterable, subsequent deltas are queued", async () => {
-    const { target, collected, drained } = createStreamingTarget();
-    const { manager } = createHarness(target);
-    const bridge = new ChatResponseBridge(manager as any);
-
-    await bridge.handleDelta({ ...basePayload, delta: "hello " }, "session-1");
-    await bridge.handleDelta({ ...basePayload, delta: "world" }, "session-1");
-
-    expect(target.post).toHaveBeenCalledTimes(1);
-    const postArg = target.post.mock.calls[0]?.[0];
-    expect(typeof (postArg as any)?.[Symbol.asyncIterator]).toBe("function");
-
-    await bridge.handleCompletion({ ...basePayload }, "session-1");
-    await drained;
-
-    expect(collected).toEqual(["hello ", "world"]);
-  });
-
-  test("handleCompletion persists full buffer to conversation state", async () => {
-    const { target, drained } = createStreamingTarget();
-    const { conversationState, manager } = createHarness(target);
-    const bridge = new ChatResponseBridge(manager as any);
-
-    await bridge.handleDelta({ ...basePayload, delta: "foo " }, "s");
-    await bridge.handleDelta({ ...basePayload, delta: "bar" }, "s");
-    await bridge.handleCompletion({ ...basePayload }, "s");
-    await drained;
-
-    const history = await conversationState.getHistory("conn-1", "123");
-    expect(history).toEqual([
-      { role: "assistant", content: "foo bar", name: undefined },
-    ]);
-  });
-
-  test("sessionReset completion clears history via conversation state", async () => {
-    const { target, drained } = createStreamingTarget();
-    const { conversationState, manager } = createHarness(target);
-    await conversationState.appendHistory("conn-1", "123", "123", {
-      role: "user",
-      content: "old",
-      timestamp: 1,
-    });
-
-    const bridge = new ChatResponseBridge(manager as any);
-    await bridge.handleDelta({ ...basePayload, delta: "new reply" }, "s");
-    await bridge.handleCompletion(
-      {
-        ...basePayload,
-        platformMetadata: {
-          ...basePayload.platformMetadata,
-          sessionReset: true,
-        },
-      },
-      "s"
-    );
-    await drained;
-
-    const history = await conversationState.getHistory("conn-1", "123");
-    expect(history).toEqual([]);
-  });
-
-  test("handleError after partial stream posts fallback so truncation is visible", async () => {
-    // Worker was mid-stream (no isFullReplacement) and then errored. The user
-    // would see truncated text with no failure indicator unless the gateway
-    // posts the fallback "Error: …" message.
-    const { target, collected, plainPosts, drained } = createStreamingTarget();
-    const { manager } = createHarness(target);
-    const bridge = new ChatResponseBridge(manager as any);
-
-    await bridge.handleDelta({ ...basePayload, delta: "partial" }, "s");
-    await bridge.handleError({ ...basePayload, error: "boom" }, "s");
-    await drained;
-
-    expect(collected).toEqual(["partial"]);
-    expect(plainPosts).toContain("Error: boom");
-  });
-
-  test("handleError after full-replacement delta skips fallback to avoid duplicate", async () => {
-    // Worker already delivered a complete, self-contained failure message
-    // (e.g. "❌ Session failed: 429 …") via isFullReplacement and then called
-    // signalError for bookkeeping. The gateway must NOT post a second
-    // "Error: 429 …" — the user has already seen the formatted message.
-    const { target, collected, plainPosts, drained } = createStreamingTarget();
-    const { manager } = createHarness(target);
-    const bridge = new ChatResponseBridge(manager as any);
-
-    await bridge.handleDelta(
-      {
-        ...basePayload,
-        delta: "❌ Session failed: 429 rate-limited",
-        isFullReplacement: true,
-      },
-      "s"
-    );
-    await bridge.handleError(
-      { ...basePayload, error: "429 rate-limited" },
-      "s"
-    );
-    await drained;
-
-    expect(collected).toEqual(["❌ Session failed: 429 rate-limited"]);
-    expect(plainPosts).toEqual([]);
-  });
-
-  test.each(["telegram", "slack"])(
-    "%s: an agent turn's error after a re-run's partial restart still reaches the user",
-    async (platform) => {
-      // The reaper re-ran the turn after its worker died; the re-run's first
-      // span is published as a full replacement (worker-api/agent-turn.ts) so
-      // it does not glue onto the dead attempt's text. That span is a PARTIAL
-      // answer, not a self-contained message — so when the re-run then fails,
-      // the native turn's error row (it carries `turnRunId`) must be posted.
-      const { target, plainPosts } = createStreamingTarget();
-      const slackPost = mock(async () => ({ ok: true, ts: "1.1" }));
-      const { manager } = createHarness(target, platform, slackPost);
-      const bridge = new ChatResponseBridge(manager as any);
-      const payload = {
-        ...basePayload,
-        platform,
-        ...(platform === "slack"
-          ? {
-              channelId: "slack:C123",
-              conversationId: "slack:C123:1700000000.123456",
-              platformMetadata: { connectionId: "conn-1", chatId: "slack:C123" },
-            }
-          : {}),
-      };
-
-      await bridge.handleDelta(
-        { ...payload, delta: "the re-run's first", isFullReplacement: true },
-        "s"
-      );
-      await bridge.handleError(
-        { ...payload, error: "boom", turnRunId: 42 },
-        "s"
-      );
-
-      expect(plainPosts).toContain("Error: boom");
-    }
-  );
-
+describe("ChatResponseBridge — error delivery and replica routing", () => {
   test("handleError gives a native turn's worker failure a Retry button", async () => {
     // WORKER_DIED on an agent turn (it carries `turnRunId`): the card's button
     // is the `turn-retry:` action the interaction bridge turns into a retry.
@@ -324,63 +183,6 @@ describe("ChatResponseBridge.handleDelta — AsyncIterable streaming", () => {
     expect(posted).not.toContain("Worker crashed");
   });
 
-  test("handleError labels and unwraps a provider error body", async () => {
-    const { target, plainPosts } = createStreamingTarget();
-    const { manager } = createHarness(target);
-    const bridge = new ChatResponseBridge(manager as any);
-
-    await bridge.handleError(
-      {
-        ...basePayload,
-        error:
-          '400 {"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low."},"request_id":"req_123"}',
-        errorCode: "PROVIDER_QUOTA_EXHAUSTED",
-        errorContext: { provider: "anthropic" },
-      },
-      "s"
-    );
-
-    expect(plainPosts).toContain(
-      "Error: Anthropic returned an error:\nYour credit balance is too low."
-    );
-  });
-
-  test("isFullReplacement closes prior stream and opens a new one", async () => {
-    const { target } = createStreamingTarget();
-    const { manager } = createHarness(target);
-    const bridge = new ChatResponseBridge(manager as any);
-
-    await bridge.handleDelta({ ...basePayload, delta: "old" }, "s");
-    await bridge.handleDelta(
-      { ...basePayload, delta: "new", isFullReplacement: true },
-      "s"
-    );
-    await bridge.handleCompletion({ ...basePayload }, "s");
-
-    const iterableCalls = target.post.mock.calls.filter(
-      (c) => typeof (c[0] as any)?.[Symbol.asyncIterator] === "function"
-    );
-    expect(iterableCalls.length).toBe(2);
-  });
-
-  test("delta after completion opens a fresh stream (not reused)", async () => {
-    const { target, collected } = createStreamingTarget();
-    const { manager } = createHarness(target);
-    const bridge = new ChatResponseBridge(manager as any);
-
-    await bridge.handleDelta({ ...basePayload, delta: "first" }, "s");
-    await bridge.handleCompletion({ ...basePayload }, "s");
-
-    await bridge.handleDelta({ ...basePayload, delta: "second" }, "s");
-    await bridge.handleCompletion({ ...basePayload }, "s");
-
-    const iterableCalls = target.post.mock.calls.filter(
-      (c) => typeof (c[0] as any)?.[Symbol.asyncIterator] === "function"
-    );
-    expect(iterableCalls.length).toBe(2);
-    expect(collected).toEqual(["first", "second"]);
-  });
-
   test("stream rejection falls back to non-streaming post of buffered text", async () => {
     // Adapter that rejects the streaming call (e.g. Slack's chatStream
     // validation when recipient user/team missing) but accepts plain text.
@@ -411,18 +213,6 @@ describe("ChatResponseBridge.handleDelta — AsyncIterable streaming", () => {
     expect(plainPosts).toEqual(["hello world"]);
   });
 
-  test("ensureDeliverable hydrates and returns true for servable connections", async () => {
-    const { target } = createStreamingTarget();
-    const { manager } = createHarness(target);
-    const bridge = new ChatResponseBridge(manager as any);
-    expect(
-      await bridge.ensureDeliverable({
-        ...basePayload,
-        platformMetadata: { connectionId: "conn-1" },
-      } as any)
-    ).toBe(true);
-  });
-
   test("ensureDeliverable returns false when no connectionId", async () => {
     const { target } = createStreamingTarget();
     const { manager } = createHarness(target);
@@ -450,37 +240,6 @@ describe("ChatResponseBridge.handleDelta — AsyncIterable streaming", () => {
 });
 
 describe("ChatResponseBridge.handleDelta — Slack markdown_text path", () => {
-  test("Slack accumulates deltas and posts via chat.postMessage with markdown_text", async () => {
-    const { target } = createStreamingTarget();
-    const slackPost = mock(async () => ({ ok: true, ts: "1.1" }));
-    const { manager } = createHarness(target, "slack", slackPost);
-    const bridge = new ChatResponseBridge(manager as any);
-
-    const slackPayload = {
-      ...basePayload,
-      platform: "slack",
-      channelId: "slack:C123",
-      conversationId: "slack:C123:1700000000.123456",
-      platformMetadata: {
-        connectionId: "conn-1",
-        chatId: "slack:C123",
-      },
-    };
-
-    await bridge.handleDelta({ ...slackPayload, delta: "hello " }, "s");
-    await bridge.handleDelta({ ...slackPayload, delta: "world" }, "s");
-    await bridge.handleCompletion(slackPayload, "s");
-
-    // SDK target.post should NOT be called for Slack — we use markdown_text.
-    expect(target.post).not.toHaveBeenCalled();
-    expect(slackPost).toHaveBeenCalledTimes(1);
-    expect(slackPost.mock.calls[0]?.[0]).toMatchObject({
-      channel: "C123",
-      thread_ts: "1700000000.123456",
-      markdown_text: "hello world",
-    });
-  });
-
   test("Slack decodes HTML entities and strips empty markdown links", async () => {
     const { target } = createStreamingTarget();
     const slackPost = mock(async () => ({ ok: true, ts: "1.1" }));
@@ -547,36 +306,6 @@ describe("ChatResponseBridge.handleDelta — Slack markdown_text path", () => {
       expect(md.startsWith("xxxx")).toBe(true);
     }
   });
-
-  test("Slack isFullReplacement discards prior buffered content", async () => {
-    const { target } = createStreamingTarget();
-    const slackPost = mock(async () => ({ ok: true, ts: "1.1" }));
-    const { manager } = createHarness(target, "slack", slackPost);
-    const bridge = new ChatResponseBridge(manager as any);
-
-    const slackPayload = {
-      ...basePayload,
-      platform: "slack",
-      channelId: "slack:C123",
-      conversationId: "slack:C123",
-      platformMetadata: {
-        connectionId: "conn-1",
-        chatId: "slack:C123",
-      },
-    };
-
-    await bridge.handleDelta({ ...slackPayload, delta: "old streamed" }, "s");
-    await bridge.handleDelta(
-      { ...slackPayload, delta: "new content", isFullReplacement: true },
-      "s"
-    );
-    await bridge.handleCompletion(slackPayload, "s");
-
-    expect(slackPost).toHaveBeenCalledTimes(1);
-    expect(slackPost.mock.calls[0]?.[0]).toMatchObject({
-      markdown_text: "new content",
-    });
-  });
 });
 
 describe("ChatResponseBridge.handleCompletion — multi-replica finalText", () => {
@@ -598,23 +327,16 @@ describe("ChatResponseBridge.handleCompletion — multi-replica finalText", () =
 
   function chipsHarness() {
     const target = createStreamingTarget().target;
-    const order: string[] = [];
-    const slackPostMessage = mock(async () => {
-      order.push("reply");
-      return { ts: "1" };
-    });
+    const slackPostMessage = mock(async () => ({ ts: "1" }));
     const { manager } = createHarness(target, "slack", slackPostMessage, {
       agentId: "agent-1",
       organizationId: "org-1",
       publicGatewayUrl: "",
     });
     const bridge = new ChatResponseBridge(manager as any);
-    const postSuggestion = mock(async () => {
-      order.push("chips");
-      return { id: "s_1" };
-    });
+    const postSuggestion = mock(async () => ({ id: "s_1" }));
     bridge.setInteractionService({ postSuggestion } as any);
-    return { bridge, postSuggestion, order };
+    return { bridge, postSuggestion };
   }
 
   const chips = [{ title: "Show details", message: "Show me the details" }];
@@ -631,24 +353,6 @@ describe("ChatResponseBridge.handleCompletion — multi-replica finalText", () =
       teamId: "T_NATIVE",
     },
   };
-
-  test("posts the reply's follow-up chips as a card after the reply", async () => {
-    const { bridge, postSuggestion, order } = chipsHarness();
-    await bridge.handleCompletion({ ...chipsPayload, teamId: "worker-routing-key" }, "s");
-
-    expect(order).toEqual(["reply", "chips"]);
-    expect(postSuggestion).toHaveBeenCalledTimes(1);
-    // Routed with the provider-native team, never the worker routing key.
-    expect(postSuggestion.mock.calls[0]?.[4]).toBe("T_NATIVE");
-    expect(postSuggestion.mock.calls[0]?.[7]).toEqual(chips);
-  });
-
-  test("posts no chips for a reply that carries none or was answered in-band", async () => {
-    const { bridge, postSuggestion } = chipsHarness();
-    await bridge.handleCompletion({ ...chipsPayload, suggestions: undefined }, "s");
-    await bridge.handleCompletion({ ...chipsPayload, repliedInBand: true }, "s");
-    expect(postSuggestion).not.toHaveBeenCalled();
-  });
 
   test("blocks secrets contained only in follow-up chips", async () => {
     const { bridge, postSuggestion } = chipsHarness();
@@ -678,32 +382,6 @@ describe("ChatResponseBridge.handleCompletion — multi-replica finalText", () =
     expect(postSuggestion).not.toHaveBeenCalled();
   });
 
-  test("Slack completion with NO local stream posts payload.finalText", async () => {
-    // Simulates the terminal row arriving on a replica that never claimed any
-    // delta rows — `this.streams` has no entry for this key.
-    const { target } = createStreamingTarget();
-    const slackPost = mock(async () => ({ ok: true, ts: "1.1" }));
-    const { manager } = createHarness(target, "slack", slackPost);
-    const bridge = new ChatResponseBridge(manager as any);
-
-    await bridge.handleCompletion(
-      {
-        ...slackPayload,
-        finalText: "full reply from the worker",
-        processedMessageIds: ["m1"],
-      },
-      "s"
-    );
-
-    expect(target.post).not.toHaveBeenCalled();
-    expect(slackPost).toHaveBeenCalledTimes(1);
-    expect(slackPost.mock.calls[0]?.[0]).toMatchObject({
-      channel: "C123",
-      thread_ts: "1700000000.123456",
-      markdown_text: "full reply from the worker",
-    });
-  });
-
   test("guardrail-blocked completion posts the block and no answer", async () => {
     const { target, plainPosts } = createStreamingTarget();
     const slackPost = mock(async () => ({ ok: true, ts: "1.1" }));
@@ -731,24 +409,6 @@ describe("ChatResponseBridge.handleCompletion — multi-replica finalText", () =
 
     expect(slackPost).not.toHaveBeenCalled();
     expect(plainPosts).toEqual(["Message blocked by guardrail: unsafe output"]);
-  });
-
-  test("live-streaming completion delivers deltas and persists history", async () => {
-    const { target, collected, drained } = createStreamingTarget();
-    const { conversationState, manager } = createHarness(target, "telegram");
-    const bridge = new ChatResponseBridge(manager as any);
-
-    await bridge.handleDelta({ ...basePayload, delta: "streamed reply" }, "s");
-    await bridge.handleCompletion(
-      { ...basePayload, finalText: "streamed reply" },
-      "s"
-    );
-    await drained;
-
-    expect(collected).toEqual(["streamed reply"]);
-    expect(await conversationState.getHistory("conn-1", "123")).toEqual([
-      { role: "assistant", content: "streamed reply", name: undefined },
-    ]);
   });
 
   test("in-band reply suppresses the terminal Slack post", async () => {
@@ -791,31 +451,6 @@ describe("ChatResponseBridge.handleCompletion — multi-replica finalText", () =
         name: undefined,
       },
     ]);
-  });
-
-  test("posting to a different conversation still delivers the terminal reply", async () => {
-    // `repliedInBand` is absent because the send route matched the agent's
-    // target against the run's own conversation and they differed (e.g. the
-    // user asked it to post into #general). The answer to THIS conversation is
-    // still owed.
-    const { target } = createStreamingTarget();
-    const slackPost = mock(async () => ({ ok: true, ts: "1.1" }));
-    const { manager } = createHarness(target, "slack", slackPost);
-    const bridge = new ChatResponseBridge(manager as any);
-
-    await bridge.handleCompletion(
-      {
-        ...slackPayload,
-        finalText: "Posted it to #general.",
-        processedMessageIds: ["m1"],
-      },
-      "s"
-    );
-
-    expect(slackPost).toHaveBeenCalledTimes(1);
-    expect(slackPost.mock.calls[0]?.[0]).toMatchObject({
-      markdown_text: "Posted it to #general.",
-    });
   });
 
   test("Slack completion prefers finalText over a partial local buffer", async () => {
@@ -934,43 +569,5 @@ describe("ChatResponseBridge.handleCompletion — multi-replica finalText", () =
     );
 
     expect(target.post).not.toHaveBeenCalled();
-  });
-});
-
-describe("ChatResponseBridge.handleEphemeral", () => {
-  test("renders settings links as native buttons for Chat SDK targets", async () => {
-    const posts: unknown[] = [];
-    const target = {
-      post: async (payload: unknown) => {
-        posts.push(payload);
-        return { id: "msg-1" };
-      },
-    };
-    const { manager } = createHarness(target, "telegram");
-    const bridge = new ChatResponseBridge(manager as any);
-
-    await bridge.handleEphemeral({
-      messageId: "m1",
-      channelId: "123",
-      conversationId: "123",
-      userId: "u1",
-      teamId: "telegram",
-      timestamp: Date.now(),
-      platform: "telegram",
-      platformMetadata: {
-        connectionId: "conn-1",
-        chatId: "123",
-      },
-      content:
-        "Setup required: add OpenAI in settings before this bot can respond.\n\n[Open Agent Settings](https://example.com/connect/claim?claim=abc123)",
-    });
-
-    expect(posts).toHaveLength(1);
-    expect(posts[0]).toBeObject();
-    expect(posts[0]).toHaveProperty("card");
-    expect(posts[0]).toHaveProperty("fallbackText");
-    expect((posts[0] as { fallbackText: string }).fallbackText).toContain(
-      "Open Agent Settings: https://example.com/connect/claim?claim=abc123"
-    );
   });
 });

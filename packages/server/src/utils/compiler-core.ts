@@ -377,7 +377,7 @@ async function stageRuntimeProvidedPackages(tmpDir: string): Promise<void> {
  * environments where staging didn't cover resolution: a missing connector SDK
  * means the project's npm deps were never installed, so say exactly that.
  */
-export function formatMetadataExtractionError(rawError: string): string {
+function formatMetadataExtractionError(rawError: string): string {
   const base = `Metadata extraction failed: ${rawError}`;
   if (/Cannot find (?:package|module) '(?:@lobu\/connector-sdk|lobu)'/.test(rawError)) {
     return (

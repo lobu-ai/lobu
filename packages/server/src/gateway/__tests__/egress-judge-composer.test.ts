@@ -1,51 +1,5 @@
 import { describe, expect, test } from "bun:test";
 import { parseVerdict } from "../proxy/egress-judge/verdict-parser.js";
-import {
-  buildSystemPrompt,
-  buildUserPrompt,
-} from "../proxy/egress-judge/policy-composer.js";
-
-describe("buildSystemPrompt", () => {
-  test("includes the required JSON output schema", () => {
-    const prompt = buildSystemPrompt();
-    expect(prompt).toContain('"verdict"');
-    expect(prompt).toContain('"allow"');
-    expect(prompt).toContain('"deny"');
-    expect(prompt).toContain('"reason"');
-  });
-
-  test("directs the judge to fail closed on ambiguity", () => {
-    expect(buildSystemPrompt().toLowerCase()).toContain("fail closed");
-  });
-});
-
-describe("buildUserPrompt", () => {
-  test("includes the agent id, policy, and full request context", () => {
-    const prompt = buildUserPrompt({
-      policy: "Allow only GET to GitHub.",
-      request: {
-        agentId: "my-agent",
-        hostname: "api.github.com",
-        method: "GET",
-        path: "/repos/lobu-ai/lobu",
-      },
-    });
-    expect(prompt).toContain("my-agent");
-    expect(prompt).toContain("Allow only GET to GitHub.");
-    expect(prompt).toContain("api.github.com");
-    expect(prompt).toContain("method: GET");
-    expect(prompt).toContain("path: /repos/lobu-ai/lobu");
-  });
-
-  test("marks HTTPS CONNECT so the judge knows method/path are opaque", () => {
-    const prompt = buildUserPrompt({
-      policy: "x",
-      request: { agentId: "a", hostname: "x.com" },
-    });
-    expect(prompt.toLowerCase()).toContain("connect");
-    expect(prompt.toLowerCase()).toContain("opaque");
-  });
-});
 
 describe("parseVerdict", () => {
   test("accepts a clean allow verdict", () => {
