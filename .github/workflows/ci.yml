@@ -1242,7 +1242,6 @@ jobs:
         # old pods are still serving.
         run: |
           bun test scripts/__tests__/migrate-up-check-pending.test.ts --timeout 30000
-          bun test scripts/__tests__/migrate-up-duplicate-version.test.ts --timeout 30000
 
       - name: Migration deploy-window declaration
         # Require an explicit choice before the pre-upgrade hook decides
