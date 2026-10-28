@@ -93,8 +93,11 @@ function sourceMetadata(app: GoogleChatApp) {
  * A pending reference never expires: it is not a bearer secret, because a claim
  * still needs the claimant's linked Google account to be the verified installer
  * (`gchat-claim.ts`), so an old link stays usable for the person who added the app.
+ * `announce` is true when this call created the reference, made it claimable,
+ * or records a fresh addition of the app; the transaction lock decides it, so
+ * concurrent messages on any replica announce one link once.
  */
-export async function parkGoogleChatSpace(app: GoogleChatApp, space: string, sender: string, label: string, added: boolean, direct = false): Promise<string> {
+export async function parkGoogleChatSpace(app: GoogleChatApp, space: string, sender: string, label: string, added: boolean, direct = false): Promise<{ ref: string; announce: boolean }> {
   if ((app.source && !app.source.organizationId) || !/^users\/\d+$/.test(sender)) throw new Error("Google Chat installer identity is missing");
   const sourceId = app.source?.id ?? null;
   const sql = getDb();
@@ -126,11 +129,18 @@ export async function parkGoogleChatSpace(app: GoogleChatApp, space: string, sen
       ORDER BY updated_at DESC, id DESC LIMIT 1
     `;
     if (pending) {
-      if (verified && !pending.metadata.verified_added) {
-        await tx`UPDATE app_installations SET metadata = metadata || '{"verified_added":true}'::jsonb, updated_at = now()
+      const upgraded = verified && !pending.metadata.verified_added;
+      // Old references stored the resource ID; keep real room names when a
+      // later delivery omits displayName.
+      const relabeled = pending.metadata.space_name === space && label !== space;
+      if (upgraded || relabeled) {
+        await tx`UPDATE app_installations SET metadata = metadata || ${sql.json({
+          ...(upgraded ? { verified_added: true } : {}),
+          ...(relabeled ? { space_name: label } : {}),
+        })}, updated_at = now()
           WHERE provider = 'gchat' AND metadata->>'external_id' = ${pending.metadata.external_id}`;
       }
-      return pending.metadata.external_id;
+      return { ref: pending.metadata.external_id, announce: upgraded || added };
     }
     const ref = `gchatclaim-${randomUUID()}`;
     await tx`
@@ -139,7 +149,7 @@ export async function parkGoogleChatSpace(app: GoogleChatApp, space: string, sen
         external_id: ref, ...sourceMetadata(app), installer_id: installer, space_name: label, verified_added: verified,
       })})
     `;
-    return ref;
+    return { ref, announce: true };
   });
 }
 
@@ -148,7 +158,10 @@ export function googleChatInstallationId(org: string, project: string, space: st
   return PREFIX + createHash("sha256").update(JSON.stringify([org, project, space])).digest("hex");
 }
 
-/** The caller must verify the installer and chosen org before activation. */
+/**
+ * The caller must verify the installer and chosen org before activation.
+ * `label` is what people call the space; the projection's name shows it.
+ */
 export async function activateGoogleChatSpace(
   store: AppInstallationStore,
   app: GoogleChatApp,
@@ -156,6 +169,7 @@ export async function activateGoogleChatSpace(
   spaceName: string,
   confirmMove = false,
   createdBy?: string,
+  label = spaceName,
 ): Promise<string> {
   const { project, source } = app;
   if ((source && (source.platform !== PROVIDER || source.status !== "active" || !source.organizationId ||
@@ -172,7 +186,7 @@ export async function activateGoogleChatSpace(
   const projection: StoredConnection = {
     id, organizationId, createdBy, platform: PROVIDER, status: "active",
     config: { platform: PROVIDER, installation_ref: String(installation.id) }, settings: { allowGroups: true },
-    metadata: { teamId: spaceName, teamName: spaceName },
+    metadata: { teamId: spaceName, teamName: label },
     createdAt: installation.createdAt, updatedAt: installation.updatedAt,
   };
   const sql = getDb();
@@ -385,7 +399,7 @@ export async function acceptGoogleChatWebhook(
     if (await alreadyServed(connection, space, added)) return;
     const [org] = await getDb()`SELECT slug FROM organization WHERE id = ${connection.organizationId!}`;
     if (!org) throw new GoogleChatScopeError();
-    const next = claimContinuation(org.slug, { platform: PROVIDER, connection: runtimeConnectionIdToSlug(connection.id), channelId: `gchat:${space}`, teamId: space, label: googleChatEventSpaceData(body)?.displayName || space });
+    const next = claimContinuation(org.slug, { platform: PROVIDER, connection: runtimeConnectionIdToSlug(connection.id), channelId: `gchat:${space}`, teamId: space, label: googleChatSpaceLabel(googleChatEventSpaceData(body)) });
     return googleChatSetupReply(body, new URL(next.nextUrl!, deps.publicGatewayUrl).toString());
   }
   const app = googleChatTransportApp(connection);
@@ -423,17 +437,51 @@ async function removeGoogleChatSpace(app: GoogleChatApp, space: string, deps: Ch
 }
 
 function googleChatEventSpaceData(body: any): any {
-  return body.space ?? body.chat?.addedToSpacePayload?.space ?? body.chat?.messagePayload?.space ?? body.message?.space;
+  return body.space ?? body.chat?.addedToSpacePayload?.space ?? body.chat?.messagePayload?.space ??
+    body.chat?.appCommandPayload?.space ?? body.message?.space;
 }
 
-/** Park a verified unclaimed space and answer with its claim link. */
+function isGoogleChatDirectSpace(spaceData: any): boolean {
+  return spaceData?.type === "DM" || spaceData?.spaceType === "DIRECT_MESSAGE";
+}
+
+/**
+ * What a person calls the space: its own name, or for the app's 1:1 DM (which
+ * Google leaves unnamed) the conversation they are looking at. Never the raw
+ * `spaces/…` resource, which means nothing to them.
+ */
+function googleChatSpaceLabel(spaceData: any): string {
+  if (typeof spaceData?.displayName === "string" && spaceData.displayName.trim()) return spaceData.displayName.trim();
+  return isGoogleChatDirectSpace(spaceData) ? "your direct message with Lobu" : "your Google Chat conversation";
+}
+
+/**
+ * Whether the person explicitly invoked one of the app's commands, which in an
+ * unclaimed space means "show me setup again". Read off Google's structured
+ * command envelopes (classic slash command, annotation, or Workspace Add-on
+ * app command), never off the message text.
+ */
+function isGoogleChatCommand(body: any): boolean {
+  const message = body.message ?? body.chat?.messagePayload?.message;
+  return body.type === "APP_COMMAND" || body.eventType === "APP_COMMAND" || !!body.appCommandMetadata ||
+    !!body.chat?.appCommandPayload || !!message?.slashCommand ||
+    (Array.isArray(message?.annotations) && message.annotations.some((annotation: any) => annotation?.type === "SLASH_COMMAND"));
+}
+
+/**
+ * Park a verified unclaimed space and answer with its claim link — once per
+ * pending setup. Later messages (the "hi" right after adding the app) get an
+ * empty reply instead of a duplicate welcome; re-adding the app or invoking a
+ * command re-sends the same link.
+ */
 async function setupGoogleChatSpace(app: GoogleChatApp, body: any, added: boolean, deps: ChatRuntimeDeps): Promise<Response> {
   const space = googleChatEventSpace(body);
   const spaceData = googleChatEventSpaceData(body);
   const installer = body.user?.name ?? body.chat?.user?.name ?? body.message?.sender?.name ?? body.chat?.messagePayload?.message?.sender?.name;
   if (typeof installer !== "string" || !/^users\/\d+$/.test(installer)) return new Response("Google Chat installer identity is missing", { status: 400 });
-  const direct = spaceData?.type === "DM" || spaceData?.spaceType === "DIRECT_MESSAGE";
-  const ref = await parkGoogleChatSpace(app, space, installer, spaceData?.displayName || space, added, direct);
+  const { ref, announce } = await parkGoogleChatSpace(app, space, installer, googleChatSpaceLabel(spaceData), added, isGoogleChatDirectSpace(spaceData));
+  // A Response either way: an unclaimed space never falls through to a source's agent.
+  if (!announce && !isGoogleChatCommand(body)) return Response.json({});
   return googleChatSetupReply(body, new URL(`/connector/gchat/connection?${new URLSearchParams({ ref })}`, deps.publicGatewayUrl).toString());
 }
 
