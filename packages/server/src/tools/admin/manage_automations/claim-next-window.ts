@@ -291,6 +291,10 @@ export async function handleClaimNextWindow(
         if (!skipped.created) {
           throw new ToolUserError(`Automation ${automationId} window was claimed concurrently.`, 409);
         }
+        // Keep admission and completion under the same row lock. Publishing a
+        // pending no-op between transactions lets another replica claim it.
+        await completeSkippedAutomationRun(tx, automationId, windowStart, windowEnd, skipped.runId);
+        await advanceAutomationScheduleAfterSuccessfulWindow(tx, automationId);
         return { skipped: true as const, runId: skipped.runId, windowStart, windowEnd };
       }
       const run = queued
@@ -347,24 +351,6 @@ export async function handleClaimNextWindow(
   });
 
   if (claimedWindow.skipped) {
-    // Booked in its own transaction, like the native materializer: the window
-    // end sits one millisecond past the computing transaction's clock, and the
-    // mark clamp would pull it back if the same transaction booked it.
-    const booked = await sql.begin(async (tx) => {
-      await tx`SELECT id FROM automations WHERE id = ${automationId} FOR UPDATE`;
-      const completed = await completeSkippedAutomationRun(
-        tx,
-        automationId,
-        claimedWindow.windowStart,
-        claimedWindow.windowEnd,
-        claimedWindow.runId
-      );
-      if (completed) await advanceAutomationScheduleAfterSuccessfulWindow(tx, automationId);
-      return completed;
-    });
-    if (!booked) {
-      throw new ToolUserError(`Automation ${automationId} window was claimed concurrently.`, 409);
-    }
     throw new ToolUserError(
       `Automation ${automationId} has nothing to process: the due window ` +
         `[${claimedWindow.windowStart.toISOString()}, ${claimedWindow.windowEnd.toISOString()}) ` +

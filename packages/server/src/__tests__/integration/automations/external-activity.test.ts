@@ -1,4 +1,5 @@
-import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as database from '../../../db/client';
 import type { DbClient } from '../../../db/client';
 import type { ToolContext } from '../../../tools/registry';
 import { initWorkspaceProvider } from '../../../workspace';
@@ -97,6 +98,46 @@ describe('external Automation activity', () => {
     expect(await work()).toEqual([]);
   });
 
+  it('serializes concurrent empty-window claims without handing either client a no-op run', async () => {
+    const id = await createExternal({ triggers: SKIPPING_SCHEDULE });
+    const committed = Promise.withResolvers<void>();
+    const resume = Promise.withResolvers<void>();
+    // Pause after admission commits, before the first caller can book a no-op
+    // in another transaction. Another replica may claim at precisely this point.
+    const observed = new Proxy(sql, {
+      get(target, key) {
+        if (key === 'begin') return async (callback: (tx: DbClient) => Promise<unknown>) => {
+          const result = await target.begin(callback);
+          if (result && typeof result === 'object' && 'skipped' in result && result.skipped) {
+            committed.resolve();
+            await resume.promise;
+          }
+          return result;
+        };
+        return Reflect.get(target, key);
+      },
+    });
+    const spy = vi.spyOn(database, 'getDb').mockReturnValue(observed);
+    const first = handleClaimNextWindow({ action: 'claim_next_window', automation_id: id }, ENV, ctx);
+    let results: PromiseSettledResult<unknown>[];
+    try {
+      await committed.promise;
+      const second = await Promise.allSettled([
+        handleClaimNextWindow({ action: 'claim_next_window', automation_id: id }, ENV, { ...ctx, clientId: 'synthetic-other-client' }),
+      ]);
+      resume.resolve();
+      results = [...await Promise.allSettled([first]), ...second];
+    } finally {
+      resume.resolve();
+      spy.mockRestore();
+    }
+    expect(results.map(result => result.status)).toEqual(['rejected', 'rejected']);
+    const runs = await sql`SELECT status, run_metadata FROM runs WHERE automation_id = ${Number(id)}`;
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({ status: 'completed', run_metadata: { skipped_unchanged: true } });
+    expect(await work()).toEqual([]);
+  });
+
   it('hands out a window with new content, records its fingerprint, and skips the quiet window after it', async () => {
     const id = await createExternal({ triggers: SKIPPING_SCHEDULE, sources: CONTENT_SOURCE });
     await createTestEvent({ organization_id: ctx.organizationId!, content: 'Arrival inside the due window', created_at: new Date(Date.now() - 5_000) });
@@ -112,6 +153,32 @@ describe('external Automation activity', () => {
       COUNT(*) FILTER (WHERE run_metadata->>'skipped_unchanged' = 'true')::int AS skipped
       FROM runs WHERE automation_id = ${Number(id)}`;
     expect(counts).toEqual({ total: 2, skipped: 1 });
+  });
+
+  it('claims a late-arriving old event after a skipped window without losing arrival progress', async () => {
+    const id = await createExternal({ triggers: SKIPPING_SCHEDULE, sources: CONTENT_SOURCE });
+    await expect(api.automations.claimNextWindow({ automation_id: id })).rejects.toThrow(/nothing to process/);
+    const [skipped] = await sql`SELECT approved_input FROM runs WHERE automation_id = ${Number(id)}`;
+    await createTestEvent({ organization_id: ctx.organizationId!, content: 'Late source item', occurred_at: new Date('2000-01-01T00:00:00Z') });
+    await sql`UPDATE automations SET next_run_at = NOW() - INTERVAL '1 minute' WHERE id = ${Number(id)}`;
+    const claim = await api.automations.claimNextWindow({ automation_id: id });
+    expect(claim.context.window_start).toBe(skipped.approved_input.window_end);
+    expect(JSON.stringify(claim.context)).toContain('Late source item');
+    await api.automations.completeWindow({ automation_id: id, run_id: claim.run_id,
+      window_token: claim.context.window_token, extracted_data: { signals: [] } });
+    const [state] = await sql`SELECT next_window_start FROM automations WHERE id = ${Number(id)}`;
+    expect(new Date(state.next_window_start).toISOString()).toBe(claim.context.window_end);
+  });
+
+  it('leaves a failed source inspection due with no run or checkpoint advance', async () => {
+    const id = await createExternal({ triggers: SKIPPING_SCHEDULE, sources: [{ name: 'broken', query: 'SELECT id, 1 / (id - id) AS value FROM events' }] });
+    await createTestEvent({ organization_id: ctx.organizationId!, content: 'Source execution must fail', created_at: new Date(Date.now() - 5_000) });
+    const [before] = await sql`SELECT next_window_start, next_run_at FROM automations WHERE id = ${Number(id)}`;
+    await expect(api.automations.claimNextWindow({ automation_id: id })).rejects.toThrow();
+    const [after] = await sql`SELECT next_window_start, next_run_at FROM automations WHERE id = ${Number(id)}`;
+    expect(after).toEqual(before);
+    expect(await sql`SELECT id FROM runs WHERE automation_id = ${Number(id)}`).toHaveLength(0);
+    expect(await work()).toHaveLength(1);
   });
 
   it('allows an external schedule without a managed executor and returns nothing before it is due', async () => {

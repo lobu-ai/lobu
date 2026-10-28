@@ -886,35 +886,30 @@ export async function materializeDueAutomationRuns(
 			const unchangedWindow = await inspectUnchangedWindow(sql, automation, pending);
 			const sourceFingerprint = unchangedWindow?.sourceFingerprint;
 			if (unchangedWindow?.unchanged) {
-				const skippedRun = await enqueueAutomationRunForRecord(
-					sql,
-					automation,
-					"scheduled",
-					sourceFingerprint,
-					undefined,
-					pending,
-				);
-				// `created: false` means this reused an already-active run that a
-				// concurrent replica materialized for real work. Completing that
-				// row as "skipped" would silently kill a live dispatch.
-				if (skippedRun.created) {
-					await sql.begin(async (tx) => {
-						await tx`SELECT id FROM automations WHERE id = ${automation.id} FOR UPDATE`;
-						// Book only the range recorded by the queue, which may be shortened.
-						await completeSkippedAutomationRun(
-							tx,
-							automation.id,
-							skippedRun.windowStart,
-							skippedRun.windowEnd,
-							skippedRun.runId,
-						);
-					});
-				}
-				// A superseded observation means another completion already moved the
-				// arrival mark and owns schedule advancement for that window.
-				if (skippedRun.status !== "superseded") {
-					await advanceAutomationScheduleAfterSuccessfulWindow(sql, automation.id);
-				}
+				// Admit and complete a no-op in one transaction so no dispatcher can
+				// claim it between creation and cursor advancement.
+				await sql.begin(async (tx) => {
+					const skippedRun = await enqueueAutomationRunForRecord(
+						sql,
+						automation,
+						"scheduled",
+						sourceFingerprint,
+						tx,
+						pending,
+					);
+					// A reused run belongs to its existing dispatcher. A superseded
+					// window belongs to the completion that already moved the mark.
+					if (!skippedRun.created) return;
+					// Script windows may have been shortened at admission.
+					const completed = await completeSkippedAutomationRun(
+						tx,
+						automation.id,
+						skippedRun.windowStart,
+						skippedRun.windowEnd,
+						skippedRun.runId,
+					);
+					if (completed) await advanceAutomationScheduleAfterSuccessfulWindow(tx, automation.id);
+				});
 				logger.info(
 					{ automationId: automation.id, empty: unchangedWindow.empty },
 					"[automation] Skipped unchanged Automation sources before agent dispatch"

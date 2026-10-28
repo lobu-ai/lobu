@@ -63,6 +63,7 @@ describe("scheduled Automation unchanged gate", () => {
 
 		// A skip must book the exact database horizon inspected before source execution.
 		let inspectedHorizon: string | undefined;
+		const admittedStatuses: string[] = [];
 		const observe = (client: DbClient): DbClient => new Proxy(client, {
 			apply(target, self, args) {
 				const query = Reflect.apply(target, self, args);
@@ -77,14 +78,23 @@ describe("scheduled Automation unchanged gate", () => {
 						return rows;
 					});
 				}
+				if (text.includes('INSERT INTO runs')) {
+					return query.then(async (rows: Array<{ id: number }>) => {
+						const [run] = await sql`SELECT status FROM runs WHERE id = ${rows[0].id}`;
+						admittedStatuses.push(run?.status as string ?? 'uncommitted');
+						return rows;
+					});
+				}
 				return query;
 			},
 			get(target, key) {
-				if (key === 'begin') return (callback: (tx: DbClient) => Promise<unknown>) => target.begin((tx) => callback(observe(tx)));
+				if (key === 'begin' || key === 'savepoint') return (callback: (tx: DbClient) => Promise<unknown>) => target[key]((tx) => callback(observe(tx)));
 				return Reflect.get(target, key);
 			},
 		});
 		const result = await materializeDueAutomationRuns({} as Env, observe(sql));
+		// A dispatcher on another replica must never see a pending no-op.
+		expect(admittedStatuses).toEqual(['uncommitted']);
 
 		expect(result).toMatchObject({
 			dueAutomations: 1,
