@@ -102,8 +102,8 @@ app:
   # Persistent workspaces volume. A turn's durable transcript lives in
   # Postgres (`agent_transcript_snapshot`); the
   # rest of {WORKSPACE_DIR} (input/output/temp) is pod-local ephemeral
-  # — the runs queue's claim pins each run to one pod for the run
-  # lifetime. Disable by default so the deployment can roll across
+  # — a per-conversation advisory lock pins runs to one pod for the
+  # run lifetime. Disable by default so the deployment can roll across
   # replicas; flip to `true` only if you have a specific reason to
   # persist scratch files across restarts.
   workspaces:
