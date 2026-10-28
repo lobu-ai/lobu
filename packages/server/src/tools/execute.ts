@@ -31,7 +31,7 @@ import { ToolNotRegisteredError, ToolUserError } from '../utils/errors';
 import { logToolCallFailure } from './tool-error-log';
 import { getConfiguredPublicOrigin } from '../utils/public-origin';
 import { enforcePublicReadLimit, getClientIP } from '../utils/rate-limiter';
-import { enforceRoleScopeAccess, requireWorkspaceContext, scopeDenialMessage } from './access-control';
+import { AccessDeniedError, enforceRoleScopeAccess, requireWorkspaceContext, scopeDenialMessage } from './access-control';
 import { recordToolInvocationAudit, recordWorkspaceActivityAudit } from './audit';
 import { getAccountContent } from './get_content';
 import {
@@ -259,7 +259,7 @@ export async function checkToolAccess(
     adminAllowlist.length > 0 &&
     !adminAllowlist.includes(toolName)
   ) {
-    throw new Error(
+    throw new AccessDeniedError(
       `This agent run may not perform admin actions with ${toolName}. Allowed admin tools: ${adminAllowlist.join(', ')}.`
     );
   }
@@ -267,7 +267,7 @@ export async function checkToolAccess(
   if (accountScope && (authCtx.allowCrossOrg || !authCtx.organizationId || toolName === 'list_organizations')) {
     if (!authCtx.isAuthenticated || !authCtx.userId) throw new Error('Authentication required.');
     if (!hasRequiredMcpScope(requiredAccess, authCtx.scopes)) {
-      throw new Error(
+      throw new AccessDeniedError(
         scopeDenialMessage({
           subject: denialSubject(toolName, args),
           requiredAccess,
@@ -284,11 +284,11 @@ export async function checkToolAccess(
   if (!role) {
     if (!isPublicReadable(toolName, args)) {
       if (authCtx.userId) {
-        throw new Error(
+        throw new AccessDeniedError(
           'This public workspace is read-only for your account. Join the workspace to unlock write access.'
         );
       }
-      throw new Error(
+      throw new AccessDeniedError(
         'This public workspace is read-only for anonymous access. Sign in with an OAuth client that has write access.'
       );
     }

@@ -157,12 +157,27 @@ export async function workspaceScopeDenialMessage(
 }
 
 /**
+ * The caller is authenticated, but its workspace role or MCP scope does not
+ * reach the access level the requested operation needs. The class is the
+ * structure wire boundaries answer on (REST maps it to 403); the message only
+ * renders it. Deliberately not a ToolUserError: `logToolCallFailure` drops a
+ * sub-500 ToolUserError as an expected client fault, and a denial keeps the
+ * tool-failure-log visibility it always had.
+ */
+export class AccessDeniedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AccessDeniedError';
+  }
+}
+
+/**
  * A token has already passed the workspace-role check but lacks an MCP scope
  * needed for the requested operation. Keeping this distinct from a role denial
  * lets nested SDK calls request progressive OAuth authorization without ever
  * offering an admin grant to an ordinary member.
  */
-export class McpScopeRequiredError extends Error {
+export class McpScopeRequiredError extends AccessDeniedError {
   constructor(
     message: string,
     readonly requiredScope: 'mcp:admin'
@@ -194,16 +209,16 @@ export async function enforceRoleScopeAccess(
   writeRole?: string
 ): Promise<void> {
   if (requiredAccess === 'admin' && !isAdminOrOwnerRole(ctx.memberRole)) {
-    throw new Error(await workspaceScopeDenialMessage(ctx, subject, 'admin'));
+    throw new AccessDeniedError(await workspaceScopeDenialMessage(ctx, subject, 'admin'));
   }
 
   if (requiredAccess === 'write' && writeRole && !ctx.memberRole) {
-    throw new Error(writeRole);
+    throw new AccessDeniedError(writeRole);
   }
 
   if (!hasRequiredMcpScope(requiredAccess, ctx.scopes)) {
     const message = await workspaceScopeDenialMessage(ctx, subject, requiredAccess);
     if (requiredAccess === 'admin') throw new McpScopeRequiredError(message, 'mcp:admin');
-    throw new Error(message);
+    throw new AccessDeniedError(message);
   }
 }

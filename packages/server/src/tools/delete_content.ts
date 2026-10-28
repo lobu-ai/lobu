@@ -24,7 +24,7 @@ import type { Env } from '../index';
 import { insertEvent } from '../utils/insert-event';
 import logger from '../utils/logger';
 import { assertCanRemoveGuidance } from '../utils/org-guidance';
-import { isSystemContext, workspaceScopeDenialMessage } from './access-control';
+import { AccessDeniedError, isSystemContext, workspaceScopeDenialMessage } from './access-control';
 import { TOMBSTONE_SEMANTIC_TYPE } from './constants';
 import type { ToolContext } from './registry';
 import { withValidatedArgs } from './validate-args';
@@ -50,10 +50,10 @@ async function deleteContentImpl(
 ): Promise<DeleteContentResult> {
   if (!isSystemContext(ctx)) {
     if (!ctx.memberRole) {
-      throw new Error('delete_knowledge requires workspace membership with write access.');
+      throw new AccessDeniedError('delete_knowledge requires workspace membership with write access.');
     }
     if (!hasRequiredMcpScope('write', ctx.scopes)) {
-      throw new Error(await workspaceScopeDenialMessage(ctx, 'delete_knowledge', 'write'));
+      throw new AccessDeniedError(await workspaceScopeDenialMessage(ctx, 'delete_knowledge', 'write'));
     }
   }
 

@@ -57,7 +57,7 @@ import {
 import { MCP_SESSION_MAX_AGE_MS, McpSessionStore, type PersistedMcpSession } from './mcp-session-store';
 import { LOBU_SKILL_MARKDOWN } from './skills/lobu-skill.generated';
 import { mcpImagesForResourceLinks, readMcpAttachmentResource } from './mcp-media-resources';
-import { isAdminOrOwnerRole, workspaceScopeDenialMessage } from './tools/access-control';
+import { AccessDeniedError, isAdminOrOwnerRole, workspaceScopeDenialMessage } from './tools/access-control';
 import {
   type AuthContext,
   executeTool,
@@ -599,7 +599,7 @@ function createServerForContext(
         throw new Error('Authentication required to read views.');
       }
       if (!hasRequiredMcpScope('read', authCtx.scopes)) {
-        throw new Error(await workspaceScopeDenialMessage(authCtx, 'Reading views', 'read'));
+        throw new AccessDeniedError(await workspaceScopeDenialMessage(authCtx, 'Reading views', 'read'));
       }
       const viewOrganization = viewOrganizationFromResourceUri(uri);
       // An account session has no workspace of its own: the frame names the
@@ -612,7 +612,7 @@ function createServerForContext(
       const workspace = await resolveViewWorkspace(
         toAccountToolContext(forThisRequest(authCtx)), viewOrganization
       );
-      if (!workspace.memberRole) throw new Error('Workspace membership is required to read views.');
+      if (!workspace.memberRole) throw new AccessDeniedError('Workspace membership is required to read views.');
       const storedView = await getServedView(workspace.organizationId, viewKey);
       if (storedView) {
         const meta = viewResourceMeta(storedView);

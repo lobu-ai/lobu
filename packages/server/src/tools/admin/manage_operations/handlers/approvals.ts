@@ -21,7 +21,11 @@ import { validateOperationInput } from "../../../../operations/input-validation"
 import { insertEvent } from "../../../../utils/insert-event";
 import { recordEntityWriteDenial } from "../../../../utils/entity-write-denial-audit";
 import logger from "../../../../utils/logger";
-import { isAdminOrOwnerRole, workspaceScopeDenialMessage } from "../../../access-control";
+import {
+	AccessDeniedError,
+	isAdminOrOwnerRole,
+	workspaceScopeDenialMessage,
+} from "../../../access-control";
 import { ENTITY_CHANGE_ACTION_KEYS, runDeciderUserIdSql } from "../../run-decider";
 import type { ToolContext } from "../../../registry";
 import {
@@ -948,7 +952,7 @@ async function requireApprovalAuthority(
 	if (await isPendingRunDecider(runId, ctx.organizationId, ctx.userId)) {
 		return;
 	}
-	throw new Error(
+	throw new AccessDeniedError(
 		await workspaceScopeDenialMessage(ctx, `manage_operations.${action}`, "admin"),
 	);
 }

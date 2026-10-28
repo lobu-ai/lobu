@@ -171,7 +171,7 @@ describe('REST tool execution with an existing MCP session', () => {
     const sessionId = await session();
     const bearer = (await createTestAccessToken(user.id, org.id, client.client_id, { scope: 'mcp:read' })).token;
     const before = await runCount();
-    await expectRejected(await execute(sessionId, bearer), before, 400);
+    await expectRejected(await execute(sessionId, bearer), before, 403);
   });
 
   it('requires the OAuth bearer even when a PAT authenticates the same user', async () => {
