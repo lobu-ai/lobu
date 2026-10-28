@@ -8,7 +8,7 @@
  * the agent's own bad input.
  *
  * Email delivery is best-effort and offline here: testEnv sets no
- * RESEND_API_KEY, so the magic-link send callback throws *after* the
+ * CLOUDFLARE_EMAIL_API_TOKEN, so the magic-link send callback throws *after* the
  * verification value is persisted — the handler swallows that and still
  * returns the opaque 202.
  */

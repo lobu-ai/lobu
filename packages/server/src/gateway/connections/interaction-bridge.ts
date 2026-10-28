@@ -1031,8 +1031,9 @@ export function registerActionHandlers(
 				},
 			};
 			// Real process env, not {}: approving a create runs entity hooks that
-			// are env-gated (e.g. $member invite email needs RESEND_API_KEY) — an
-			// empty env silently skips them, diverging from web approvals.
+			// are env-gated (e.g. $member invite email needs
+			// CLOUDFLARE_EMAIL_API_TOKEN) — an empty env silently skips them,
+			// diverging from web approvals.
 			const result = await manageOperations(
 				decision === "approve"
 					? { action: "approve", run_id: runId }

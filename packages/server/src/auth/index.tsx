@@ -751,13 +751,13 @@ export async function createAuth(
 						});
 					}
 
-					if (!env.RESEND_API_KEY && runtimeNodeEnv !== "production") {
+					if ((!env.CLOUDFLARE_EMAIL_API_TOKEN || !env.CLOUDFLARE_EMAIL_ACCOUNT_ID) && runtimeNodeEnv !== "production") {
 						console.info(
 							{ email, url },
-							"[Auth] Development magic link generated (RESEND_API_KEY not configured)",
+							"[Auth] Development magic link generated (CLOUDFLARE_EMAIL_API_TOKEN not configured)",
 						);
 						throw new Error(
-							"Magic-link email delivery is not configured (RESEND_API_KEY missing). Check server logs for the generated link.",
+							"Magic-link email delivery is not configured (CLOUDFLARE_EMAIL_API_TOKEN missing). Check server logs for the generated link.",
 						);
 					}
 					// A magic link whose callbackURL targets the device consent page
@@ -930,15 +930,15 @@ export async function createAuth(
 							console.error("[Auth] Failed to provision personal org:", error);
 						}
 
-						if (!env.RESEND_API_KEY && runtimeNodeEnv !== "production") {
+						if ((!env.CLOUDFLARE_EMAIL_API_TOKEN || !env.CLOUDFLARE_EMAIL_ACCOUNT_ID) && runtimeNodeEnv !== "production") {
 							console.info(
 								{ email: user.email },
-								"[Auth] Development signup welcome email skipped (RESEND_API_KEY not configured)",
+								"[Auth] Development signup welcome email skipped (CLOUDFLARE_EMAIL_API_TOKEN not configured)",
 							);
 							return;
 						}
 						// Fire-and-forget: the welcome email hits an external API
-						// (Resend). Better Auth awaits user.create.after before
+						// (Cloudflare Email Sending). Better Auth awaits user.create.after before
 						// completing signup, so awaiting the send blocks the signup
 						// response on an external HTTP call. On a busy single node that
 						// blocked request contends with the SPA's immediate
@@ -1075,6 +1075,26 @@ export async function createAuth(
 						void persistLoginChatIdentity(accountSummary);
 					},
 				},
+			},
+		},
+
+		// Abuse guard for the email-emitting endpoints: Better Auth's built-in
+		// special rules only cap short bursts (sign-in 3/10s, password reset
+		// 3/60s), so a single IP could still trigger hundreds of transactional
+		// emails per hour. These hourly per-IP caps replace the built-in rule
+		// for the matched path: magic links match the 10/hour device-email
+		// precedent, password reset is tighter, invites stay generous for real
+		// onboarding (callers are already authenticated humans). Only paths
+		// this config actually serves are listed — there is no email
+		// verification sender, so /send-verification-email 400s before it can
+		// send. Enabled stays default (on in production). Note the store is
+		// in-memory: with N replicas the effective budget is N× — same posture
+		// as the rest of our limiters.
+		rateLimit: {
+			customRules: {
+				"/sign-in/magic-link": { window: 3600, max: 10 },
+				"/request-password-reset": { window: 3600, max: 5 },
+				"/organization/invite-member": { window: 3600, max: 20 },
 			},
 		},
 

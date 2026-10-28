@@ -107,7 +107,7 @@ async function sendMemberInvitationEmail(
   const { emailField } = await resolveMemberSchemaFields(ctx.organizationId);
   const meta = entity.metadata as Record<string, unknown> | null;
   const email = meta?.[emailField] as string | undefined;
-  if (!email || !ctx.env?.RESEND_API_KEY) return;
+  if (!email || !ctx.env?.CLOUDFLARE_EMAIL_API_TOKEN || !ctx.env?.CLOUDFLARE_EMAIL_ACCOUNT_ID) return;
 
   try {
     const sql = getDb();

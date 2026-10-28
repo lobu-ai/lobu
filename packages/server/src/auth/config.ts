@@ -599,14 +599,16 @@ export async function getAuthConfig(
 		}
 	}
 
-	// Magic-link requires actual email delivery. Without RESEND_API_KEY,
-	// Better Auth's plugin logs the magic URL to server stdout instead of
-	// emailing it — useful for debugging, useless to a real operator who's
-	// staring at their inbox. Hide the "Send me a magic link" affordance
-	// when delivery isn't configured. (Previously this also returned true
-	// in non-production, which made local dev render a dead button that
-	// appears to work then silently does nothing.)
-	const magicLink = hasValue(env.RESEND_API_KEY);
+	// Magic-link requires actual email delivery. Without
+	// CLOUDFLARE_EMAIL_API_TOKEN, Better Auth's plugin logs the magic URL to
+	// server stdout instead of emailing it — useful for debugging, useless
+	// to a real operator who's staring at their inbox. Hide the "Send me a
+	// magic link" affordance when delivery isn't configured. (Previously
+	// this also returned true in non-production, which made local dev render
+	// a dead button that appears to work then silently does nothing.)
+	const magicLink =
+		hasValue(env.CLOUDFLARE_EMAIL_API_TOKEN) &&
+		hasValue(env.CLOUDFLARE_EMAIL_ACCOUNT_ID);
 	const phone =
 		hasValue(env.TWILIO_SID) &&
 		hasValue(env.TWILIO_TOKEN) &&
