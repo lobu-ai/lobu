@@ -22,7 +22,7 @@ import {
 
 const EMBEDDING_DIM = 768;
 
-function axisVec(axis: 0 | 1): number[] {
+function axisVec(axis: 0 | 1 | 2): number[] {
   const v = new Array(EMBEDDING_DIM).fill(0);
   v[axis] = 1;
   return v;
@@ -244,5 +244,92 @@ describe('searchContentByText > exact org-wide score semantics', () => {
       approximate_candidate_search: true,
     });
     expect(result.content.map((c) => c.id)).toContain(strongest.id);
+  });
+
+  it('ranks by cosine when only query_embedding is supplied and never degenerates to match-all', async () => {
+    const { org, entity, connection } = await createOrgFixture('Embedding Only Search Org');
+    const ids: number[] = [];
+    for (const [axis, content] of [
+      [0, 'Quarterly revenue review and forecasts'],
+      [1, 'Totally unrelated topic about weather'],
+      [2, 'Another unrelated message'],
+    ] as const) {
+      const event = await createTestEvent({
+        entity_id: entity.id,
+        connection_id: connection.id,
+        content,
+        organization_id: org.id,
+        embedding: axisVec(axis),
+      });
+      ids.push(event.id);
+    }
+
+    // With an empty text query the LENGTH($1) > 0 guards must fire; otherwise
+    // ILIKE '%%' would match the orthogonal decoys too.
+    const result = await searchContentByText(null, {
+      organization_id: org.id,
+      limit: 10,
+      min_similarity: 0.3,
+      query_embedding: axisVec(0),
+      sort_by: 'score',
+    });
+    expect(result.content.map((c) => c.id)).toEqual([ids[0]]);
+    expect(result.content[0].similarity).toBeCloseTo(1, 5);
+  });
+
+  it('routes one- and two-character queries to ranked search, excluding non-matches', async () => {
+    // Short queries used to fall through to an unfiltered chronological
+    // listing; decoys share neither "zx" nor any "q".
+    const { org, entity, connection } = await createOrgFixture('Short Query Org');
+    const bigramMatch = await createTestEvent({
+      entity_id: entity.id,
+      connection_id: connection.id,
+      organization_id: org.id,
+      content: 'The zx probe fired at dawn over the calm water',
+    });
+    const singleMatch = await createTestEvent({
+      entity_id: entity.id,
+      connection_id: connection.id,
+      organization_id: org.id,
+      content: 'A quirky brown fox naps at noon',
+    });
+    for (const content of [
+      'Alpha beta gamma delta epsilon',
+      'Plain harbor morning summary',
+      'Nothing to note here today',
+    ]) {
+      await createTestEvent({
+        entity_id: entity.id,
+        connection_id: connection.id,
+        organization_id: org.id,
+        content,
+      });
+    }
+
+    const bigram = await searchContentByText('zx', { organization_id: org.id, limit: 50 });
+    expect(bigram.content.map((item) => item.id)).toEqual([bigramMatch.id]);
+    expect(bigram.total).toBe(1);
+
+    const single = await searchContentByText('q', { organization_id: org.id, limit: 50 });
+    expect(single.content.map((item) => item.id)).toEqual([singleMatch.id]);
+    expect(single.total).toBe(1);
+  });
+
+  it('lists everything when there is neither a text query nor an embedding', async () => {
+    const { org, entity, connection } = await createOrgFixture('Blank Query Org');
+    for (const content of ['First blank-listed row', 'Second blank-listed row']) {
+      await createTestEvent({
+        entity_id: entity.id,
+        connection_id: connection.id,
+        organization_id: org.id,
+        content,
+      });
+    }
+
+    for (const query of [null, '', '   ']) {
+      const result = await searchContentByText(query, { organization_id: org.id, limit: 50 });
+      expect(result.total).toBe(2);
+      expect(result.content).toHaveLength(2);
+    }
   });
 });

@@ -1,14 +1,9 @@
 import { getDb } from "../db/client";
 import { emit } from "../events/emitter";
 import { createNotificationForUsers } from "../notifications/service";
-import { nextRunAt as nextRunAtFromCron } from "../utils/cron";
 import logger from "../utils/logger";
 import { buildAutomationUrl } from "../utils/url-builder";
-
-/** Never report a schedule that is less than this far past its due time. */
-const MIN_OVERDUE_MS = 60 * 60 * 1000;
-/** A long cadence still gets reported within this much of a missed run. */
-const MAX_OVERDUE_GRACE_MS = 6 * 60 * 60 * 1000;
+import { MIN_SCHEDULE_OVERDUE_MS, scheduleOverdueGraceMs } from "./schedule-overdue-grace";
 
 interface OverdueAutomationRow {
 	id: number;
@@ -30,34 +25,14 @@ export function automationScheduleOverdueNotificationKey(
 }
 
 /**
- * How far past `next_run_at` a schedule may sit before it is reported: one
- * whole missed interval, clamped to [1h, 6h]. A 20-minute digest is reported
- * after an hour (three windows); a daily job within six hours of its miss.
- */
-function overdueGraceMs(row: OverdueAutomationRow): number | null {
-	const dueMs = new Date(row.next_run_at).getTime();
-	let intervalMs: number;
-	try {
-		intervalMs =
-			new Date(nextRunAtFromCron(row.schedule, new Date(dueMs), row.timezone)).getTime() -
-			dueMs;
-	} catch {
-		// An unparseable schedule is parked by the scheduler, not overdue.
-		return null;
-	}
-	return Math.min(MAX_OVERDUE_GRACE_MS, Math.max(MIN_OVERDUE_MS, intervalMs));
-}
-
-/**
  * Tell an org's admins when an active schedule stopped running.
  *
  * The case nothing else reports: an external-executor schedule no client
  * claims, or a schedule the dispatcher never materializes. No run fails, so
  * the failure counter and auto-pause never move; only `next_run_at` sits in
- * the past. `computeAutomationHealth` deliberately treats an unclaimed
- * external window as healthy on a read, because a client may be a few minutes
- * away — that is right for a status chip, but hours of silence means nobody is
- * doing the work.
+ * the past. `computeAutomationHealth` keeps an unclaimed external
+ * window healthy for the same grace, because a client may be a few minutes
+ * away; past it the chip degrades and this sweep tells the admins.
  *
  * The cursor is the episode: it does not move while nothing runs, so the
  * notification keyed on it fires once, and the next stall (a new cursor) is a
@@ -91,7 +66,7 @@ export async function runAutomationScheduleOverdueNotificationSweep(
     WHERE a.status = 'active'
       AND a.schedule IS NOT NULL
       AND a.schedule_auto_paused_at IS NULL
-      AND a.next_run_at < ${new Date(now - MIN_OVERDUE_MS)}::timestamptz
+      AND a.next_run_at < ${new Date(now - MIN_SCHEDULE_OVERDUE_MS)}::timestamptz
       AND NOT EXISTS (
         SELECT 1 FROM runs r
         WHERE r.automation_id = a.id
@@ -116,7 +91,11 @@ export async function runAutomationScheduleOverdueNotificationSweep(
 	let notified = 0;
 	let errors = 0;
 	for (const row of rows) {
-		const graceMs = overdueGraceMs(row);
+		const graceMs = scheduleOverdueGraceMs({
+			schedule: row.schedule,
+			timezone: row.timezone,
+			nextRunAt: row.next_run_at,
+		});
 		if (graceMs === null) continue;
 		const overdueMs = now - new Date(row.next_run_at).getTime();
 		if (overdueMs < graceMs) continue;

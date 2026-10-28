@@ -26,12 +26,14 @@ import type { AutomationTrigger } from "@lobu/core/contracts/tools/manage-automa
 import type { Env } from "../../../index";
 import type { AuthContext } from "../../../tools/execute";
 import { executeTool } from "../../../tools/execute";
+import { DEFAULT_AUTOMATION_SOURCE_QUERY } from "../../../automations/source-refs";
 import { initWorkspaceProvider } from "../../../workspace";
 import { createTestAutomationSubscription } from "../../setup/automation-subscriptions";
 import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
 import {
 	addUserToOrganization,
 	createTestAgent,
+	createTestEntity,
 	createTestOrganization,
 	createTestUser,
 	insertChatConnectionRow,
@@ -46,6 +48,23 @@ const TEST_ENV: Env = {
 	RATE_LIMIT_ENABLED: "false",
 };
 
+const baseCtx = (orgIdValue: string, userId: string): AuthContext => ({
+	organizationId: orgIdValue,
+	tokenOrganizationId: orgIdValue,
+	userId,
+	memberRole: "owner",
+	agentId: null,
+	requestedAgentId: null,
+	isAuthenticated: true,
+	clientId: null,
+	scopes: ["mcp:read", "mcp:write", "mcp:admin"],
+	tokenType: "oauth",
+	requestUrl: `http://localhost/api/${orgIdValue}`,
+	baseUrl: "",
+	scopedToOrg: true,
+	allowCrossOrg: false,
+});
+
 describe("manage_automations update — version-owned fields are not silently dropped", () => {
 	let orgId: string;
 	let ownerId: string;
@@ -55,23 +74,6 @@ describe("manage_automations update — version-owned fields are not silently dr
 	const previewConnectionId = "preview-update-version";
 	let previewUpdate: { automationId: string; triggers: AutomationTrigger[] };
 	let previewVersion: { automationId: string; triggers: AutomationTrigger[] };
-
-	const baseCtx = (orgIdValue: string, userId: string): AuthContext => ({
-		organizationId: orgIdValue,
-		tokenOrganizationId: orgIdValue,
-		userId,
-		memberRole: "owner",
-		agentId: null,
-		requestedAgentId: null,
-		isAuthenticated: true,
-		clientId: null,
-		scopes: ["mcp:read", "mcp:write", "mcp:admin"],
-		tokenType: "oauth",
-		requestUrl: `http://localhost/api/${orgIdValue}`,
-		baseUrl: "",
-		scopedToOrg: true,
-		allowCrossOrg: false,
-	});
 
 	beforeAll(async () => {
 		await cleanupTestDatabase();
@@ -347,23 +349,6 @@ describe("manage_automations create_version — source replacement semantics (#2
 	let ownerCtx: AuthContext;
 	let automationId: string;
 
-	const baseCtx = (orgIdValue: string, userId: string): AuthContext => ({
-		organizationId: orgIdValue,
-		tokenOrganizationId: orgIdValue,
-		userId,
-		memberRole: "owner",
-		agentId: null,
-		requestedAgentId: null,
-		isAuthenticated: true,
-		clientId: null,
-		scopes: ["mcp:read", "mcp:write", "mcp:admin"],
-		tokenType: "oauth",
-		requestUrl: `http://localhost/api/${orgIdValue}`,
-		baseUrl: "",
-		scopedToOrg: true,
-		allowCrossOrg: false,
-	});
-
 	// Sources live on the per-assignment automations.sources column.
 	async function fetchSources(): Promise<Array<{ name: string; query: string }>> {
 		const sql = getTestDb();
@@ -523,5 +508,96 @@ describe("manage_automations create_version — source replacement semantics (#2
 		expect(cleared.source_count).toBe(0);
 		expect(cleared.removed_sources).toEqual(["alpha"]);
 		expect(await fetchSources()).toEqual([]);
+	});
+});
+
+/**
+ * Sources are Automation-authored and per-assignment (#2320 must-fix 2), so
+ * version reads must report them from the assignment and resolve versions on
+ * the group root, or an assignment lists a version it then cannot fetch.
+ */
+describe("manage_automations — version reads report assignment-owned sources", () => {
+	let orgId: string;
+	let ownerCtx: AuthContext;
+	let agentId: string;
+	const RECENT_QUERY = "SELECT id FROM events ORDER BY occurred_at DESC";
+
+	const call = (args: Record<string, unknown>) =>
+		executeTool("manage_automations", args, TEST_ENV, ownerCtx);
+
+	async function createAutomation(slug: string): Promise<string> {
+		const created = (await call({
+			action: "create",
+			slug,
+			name: "Digest",
+			prompt: "Write the digest.",
+			managed_agent_id: agentId,
+		})) as { automation_id?: string };
+		return created.automation_id!;
+	}
+
+	async function expectEveryListedVersionResolves(automationId: string) {
+		const listed = (await call({ action: "get_versions", automation_id: automationId })) as {
+			versions: Array<{ version: number }>;
+		};
+		expect(listed.versions.length).toBeGreaterThan(0);
+		for (const { version } of listed.versions) {
+			const details = (await call({
+				action: "get_version_details",
+				automation_id: automationId,
+				version,
+			})) as { version: number };
+			expect(details.version).toBe(version);
+		}
+	}
+
+	beforeAll(async () => {
+		await cleanupTestDatabase();
+		await initWorkspaceProvider();
+		const org = await createTestOrganization({ name: "automation source honesty" });
+		orgId = org.id;
+		const owner = await createTestUser({ email: "bsh-owner@test.com" });
+		await addUserToOrganization(owner.id, org.id, "owner");
+		ownerCtx = baseCtx(org.id, owner.id);
+		agentId = (
+			await createTestAgent({ organizationId: org.id, agentId: "bsh-agent", ownerUserId: owner.id })
+		).agentId;
+	});
+
+	it("defaults to the content source and get_version_details reports the stored sources", async () => {
+		const automationId = await createAutomation("bsh-digest");
+		const [created] = await getTestDb()`SELECT sources FROM automations WHERE id = ${automationId}`;
+		expect(created.sources).toEqual([{ name: "content", query: DEFAULT_AUTOMATION_SOURCE_QUERY }]);
+
+		await call({
+			action: "create_version",
+			automation_id: automationId,
+			sources: [{ name: "recent", query: RECENT_QUERY }],
+		});
+		const details = (await call({ action: "get_version_details", automation_id: automationId })) as {
+			version: number;
+			sources: Array<{ name: string; query: string }>;
+		};
+		expect(details.version).toBeGreaterThan(1);
+		expect(details.sources).toEqual([{ name: "recent", query: RECENT_QUERY }]);
+		await expectEveryListedVersionResolves(automationId);
+	});
+
+	it("gets group-root versions through an assignment id", async () => {
+		const automationId = await createAutomation("bsh-assignment");
+		await call({ action: "create_version", automation_id: automationId, prompt: "Write the digest, briefly." });
+		const entity = await createTestEntity({ name: "Source Honesty Co", organization_id: orgId });
+		const [root] = await getTestDb()<{ current_version_id: number }>`
+			SELECT current_version_id FROM automations WHERE id = ${automationId}
+		`;
+		const assigned = (await call({
+			action: "create_from_version",
+			version_id: String(root.current_version_id),
+			entity_ids: [entity.id],
+		})) as { created: Array<{ automation_id: string }> };
+		const assignmentId = assigned.created[0].automation_id;
+		expect(assignmentId).not.toBe(automationId);
+
+		await expectEveryListedVersionResolves(assignmentId);
 	});
 });

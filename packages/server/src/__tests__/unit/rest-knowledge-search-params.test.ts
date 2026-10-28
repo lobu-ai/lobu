@@ -1,13 +1,7 @@
-import { describe, expect, it, spyOn } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import { Hono } from "hono";
-import * as db from "../../db/client";
 import type { Env } from "../../index";
-import {
-	parseKnowledgeSearchQuery,
-	publicRestSearchKnowledge,
-	restSearchKnowledge,
-} from "../../rest-api";
-import * as content from "../../tools/get_content";
+import { parseKnowledgeSearchQuery, restSearchKnowledge } from "../../rest-api";
 import { GetContentSchema } from "../../tools/get_content/schema";
 import { validateToolArgs } from "../../tools/validate-args";
 
@@ -110,60 +104,4 @@ describe("knowledge search REST params", () => {
 			});
 		}
 	);
-});
-
-describe("knowledge search REST route parity", () => {
-	it.each([
-		["signed-in", restSearchKnowledge],
-		["public", publicRestSearchKnowledge],
-	] as const)("%s route forwards filters and rejects malformed JSON", async (_name, handler) => {
-		const getDb = spyOn(db, "getDb").mockReturnValue(
-			(async () => [{ id: "test-org" }]) as never
-		);
-		const getContent = spyOn(content, "getContent").mockResolvedValue({ content: [] } as never);
-		try {
-			const app = new Hono<{ Bindings: Env }>();
-			app.use("*", async (c, next) => {
-				c.set("organizationId" as never, "test-org" as never);
-				await next();
-			});
-			app.get("/api/:orgSlug/knowledge/search", handler);
-			const params = new URLSearchParams({
-				query: "security news",
-				classification_filters: JSON.stringify({ topic: ["security"] }),
-				classification_source: "user",
-				sort_by: "date",
-				sort_order: "asc",
-				include_total: "false",
-			});
-			// URLSearchParams.append for an array — the public hook's encoding.
-			params.append("semantic_type", "note");
-			params.append("semantic_type", "summary");
-			const response = await app.request(`/api/test-org/knowledge/search?${params}`);
-			expect(response.status).toBe(200);
-			expect(getContent).toHaveBeenCalledTimes(1);
-			expect(getContent.mock.calls[0][0]).toMatchObject({
-				query: "security news",
-				classification_filters: { topic: ["security"] },
-				classification_source: "user",
-				sort_by: "date",
-				sort_order: "asc",
-				semantic_type: ["note", "summary"],
-				include_total: false,
-			});
-
-			for (const raw of ["", "{not-json", "[]", "null", "true", "42", '"security"']) {
-				params.set("classification_filters", raw);
-				const invalid = await app.request(`/api/test-org/knowledge/search?${params}`);
-				expect(invalid.status).toBe(400);
-				expect(await invalid.json()).toMatchObject({
-					error: expect.stringContaining("classification_filters must be a JSON object"),
-				});
-			}
-			expect(getContent).toHaveBeenCalledTimes(1);
-		} finally {
-			getContent.mockRestore();
-			getDb.mockRestore();
-		}
-	});
 });

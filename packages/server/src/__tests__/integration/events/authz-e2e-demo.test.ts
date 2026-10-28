@@ -8,7 +8,9 @@
  *
  * It prints a transcript so you can SEE the guarantee, and asserts it so it
  * can't rot: connection-sourced data never reaches a user beyond what that user
- * can access in the source system. Run with:
+ * can access in the source system. The same holds for the `connections` rows
+ * themselves (a private connection's display_name/account/config must not leak)
+ * and for `feeds`, which inherit their connection's visibility. Run with:
  *
  *   cd packages/server && npx vitest run src/__tests__/integration/events/authz-e2e-demo.test.ts
  */
@@ -62,6 +64,20 @@ async function payloadsSeenBy(ctx: ToolContext): Promise<string[]> {
   const res = await querySql({ sql: QUERY }, undefined, ctx);
   if (res.error) throw new Error(`query_sql failed: ${res.error}`);
   return res.rows.map((r) => String(r.payload_text)).sort();
+}
+
+/** Connection ids reachable through `connections` rows and through `feeds`. */
+async function connectionIdsSeenBy(ctx: ToolContext): Promise<{ connections: number[]; feeds: number[] }> {
+  const ids = async (sql: string, column: string) => {
+    const res = await querySql({ sql }, undefined, ctx);
+    if (res.error) throw new Error(`query_sql failed: ${res.error}`);
+    return res.rows.map((r) => Number(r[column]));
+  };
+  return {
+    connections: await ids('SELECT id FROM connections', 'id'),
+    // Each test connection auto-creates a default feed.
+    feeds: await ids('SELECT connection_id FROM feeds', 'connection_id'),
+  };
 }
 
 describe('END-TO-END: per-user connection visibility through the real query_sql handler', () => {
@@ -161,5 +177,23 @@ describe('END-TO-END: per-user connection visibility through the real query_sql 
 
     // Headless / service: org-visible only, private data fails closed.
     expect(headlessSees).toEqual([ORG_SHARED]);
+
+    // The connections and feeds rows follow the same per-user rule.
+    const expectIds = (seen: number[], visible: number[], hidden: number[]) => {
+      for (const id of visible) expect(seen).toContain(id);
+      for (const id of hidden) expect(seen).not.toContain(id);
+    };
+    const aliceRows = await connectionIdsSeenBy(memberCtx(org.id, alice.id));
+    const bobRows = await connectionIdsSeenBy(memberCtx(org.id, bob.id));
+    const headlessRows = await connectionIdsSeenBy(headlessCtx(org.id));
+    for (const seen of [aliceRows.connections, aliceRows.feeds]) {
+      expectIds(seen, [alicePrivate.id, orgShared.id], [bobPrivate.id]);
+    }
+    for (const seen of [bobRows.connections, bobRows.feeds]) {
+      expectIds(seen, [bobPrivate.id, orgShared.id], [alicePrivate.id]);
+    }
+    for (const seen of [headlessRows.connections, headlessRows.feeds]) {
+      expectIds(seen, [orgShared.id], [alicePrivate.id, bobPrivate.id]);
+    }
   });
 });

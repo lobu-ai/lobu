@@ -98,8 +98,12 @@ the normal schedule trigger. Lobu leaves due work on `next_run_at` until the
 client claims it; it never launches a hosted agent or device CLI for this mode.
 An optional `managed_agent_id` remains the permission and delivery principal.
 Ordinary event execution, device pins, and hosted/CLI settings are incompatible. Connector event triggers with explicit `capture: "references"` may instead authorize continuous reference capture by a declared source-only observer.
-The native `skip_if_unchanged` optimization does not apply: the external client
-examines each due window and decides whether it merits any output.
+`skip_if_unchanged` (the schedule default) applies here as it does natively:
+when a due window has no new or changed source content, `claimNextWindow`
+books it as a completed no-op run, advances the schedule, and answers 409
+instead of handing out a window. Treat that 409 like any other: refresh
+activity. Set `skip_if_unchanged: false` on the schedule trigger when the
+client must see every due window, empty or not.
 
 An authorized agent should query `operations.listActivity({ kinds:
 ["automation_due"] })` on startup, between tasks, and approximately every minute

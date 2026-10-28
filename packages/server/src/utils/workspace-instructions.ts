@@ -73,7 +73,7 @@ export const DIRECT_MCP_INSTRUCTIONS = [
   '',
   '### Staying up to date',
   '- When the user has authorized ongoing Automation processing, connected MCP agents (including agents running on a device) should read `operations.listActivity` on startup, between tasks, and roughly every 60 seconds while their own scheduler is awake. Select the intended workspace with `client.org(slug)` first.',
-  '- Use `kinds: ["automation_due"]` for due work and owned unfinished claims; read unfiltered activity for notifications. Follow each returned `next_action`, process bounded source pages, and always call `automations.completeWindow`, including quiet windows with empty output. A 409 means work changed or another client claimed it; refresh activity.',
+  '- Use `kinds: ["automation_due"]` for due work and owned unfinished claims; read unfiltered activity for notifications. Follow each returned `next_action`, process bounded source pages, and always call `automations.completeWindow`, including quiet windows with empty output. A 409 means work changed, another client claimed it, or the window had nothing new and was completed as a no-op; refresh activity.',
   '- The Automation schedule and timezone own cadence. Polling only discovers work: it does not acknowledge notifications, renew leases, or send messages. Refresh claims with `claimNextWindow` before their lease expires. Keep the same authenticated agent/client identity when resuming.',
   '- MCP does not wake a sleeping client. Arrange wakeups in your own scheduler; use bounded calls, not a sleep loop inside `run_sdk`. A paired device daemon token only serves its existing worker poll and is not permission to use workspace MCP tools.',
   '',

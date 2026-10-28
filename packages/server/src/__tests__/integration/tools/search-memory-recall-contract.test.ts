@@ -706,4 +706,33 @@ describe('search_memory > recall contract', () => {
     `;
     expect((row?.metadata as Record<string, unknown>)?.agent_id).toBeUndefined();
   });
+
+  it("coalesces a null platform on connectionless system rows to 'lobu'", async () => {
+    // `platform` is COALESCE(events.connector_key, connections.connector_key);
+    // system rows have neither, and a raw null broke the declared string
+    // contract (the command palette crashed on `.split()`). createTestEvent
+    // always sets connector_key, so insert the faithful shape directly.
+    const [row] = await getTestDb()`
+      INSERT INTO events (
+        organization_id, entity_ids, origin_id, title,
+        payload_type, payload_text, connector_key, connection_id,
+        author_name, source_url
+      ) VALUES (
+        ${org.id}, '{}'::bigint[], 'null-platform-probe-origin',
+        'Connection needs authorization',
+        'text', 'Ziraat null platform probe row',
+        NULL, NULL, NULL, NULL
+      )
+      RETURNING id
+    `;
+
+    const result = await search(
+      { query: 'Ziraat null platform probe', include_content: true, content_limit: 5, min_similarity: 0 },
+      env,
+      ctx
+    );
+    const item = (result.content ?? []).find((c) => c.id === Number(row.id));
+    expect(item).toBeDefined();
+    expect(item?.platform).toBe('lobu');
+  });
 });

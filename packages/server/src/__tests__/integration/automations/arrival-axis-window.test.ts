@@ -15,19 +15,41 @@
  * The frontier is `now() − AUTOMATION_ARRIVAL_SETTLE_MS`, capped at the oldest
  * open transaction. Both bounds come from the database clock, so an
  * uncommitted writer's rows stay in a later range.
+ *
+ * A window never closes over a row whose writer has not committed yet.
+ * `events.created_at` is `DEFAULT now()`: the writer's TRANSACTION START. The
+ * row only becomes visible at commit. A window whose end passes `created_at`
+ * while the writer is still open would complete without the row, the mark would
+ * move past it, and every later window would start after it — the row skipped
+ * for good, with no error anywhere. The settle budget only covers writers that
+ * commit inside it; the open-writer suite runs with the budget collapsed to
+ * zero (`vitest.config.ts`), so a writer held open across a claim is exactly
+ * the production case of an event insert inside a transaction open longer
+ * than 60s.
+ *
+ * Automation-mode `unprocessed_ranges` is a bounded histogram on the same
+ * axis: monthly buckets scan `created_at` and are bounded to the
+ * recent-arrival horizon, so events that arrived more than 90 days ago
+ * contribute no month and a backfilled event (old `occurred_at`, recent
+ * `created_at`) counts in its arrival month.
  */
 
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { materializeDueAutomationRuns } from '../../../automations/automation';
 import type { DbClient } from '../../../db/client';
 import type { Env } from '../../../index';
+import { insertEvent } from '../../../utils/insert-event';
 import { automationArrivalSettleMs } from '../../../utils/window-utils';
 import { initWorkspaceProvider } from '../../../workspace';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import {
+  addUserToOrganization,
   createTestAgent,
+  createTestConnection,
   createTestEntity,
   createTestEvent,
+  createTestOrganization,
+  createTestUser,
   seedOwnerContext,
 } from '../../setup/test-fixtures';
 import { TestApiClient } from '../../setup/test-mcp-client';
@@ -352,4 +374,226 @@ describe('Automation windows on the arrival axis', () => {
     expect(ids).toContain(Number(arrivedBefore.id));
   });
 
+});
+
+describe('an Automation window and a writer still open across it', () => {
+  let orgId: string;
+  let entityId: number;
+  let automationId: number;
+  let api: TestApiClient;
+
+  beforeEach(async () => {
+    await cleanupTestDatabase();
+    const seeded = await seedOwnerContext();
+    orgId = seeded.org.id;
+    const agent = await createTestAgent({
+      organizationId: orgId,
+      ownerUserId: seeded.user.id,
+      agentId: 'open-writer-agent',
+    });
+    const entity = await createTestEntity({
+      name: 'Open writer subject',
+      organization_id: orgId,
+      created_by: seeded.user.id,
+    });
+    entityId = entity.id;
+    api = await TestApiClient.for({
+      organizationId: orgId,
+      userId: seeded.user.id,
+      memberRole: 'owner',
+    });
+    const created = (await api.automations.create({
+      entity_id: entityId,
+      slug: 'open-writer',
+      name: 'Open writer',
+      prompt: 'Summarise everything that arrived since the last run.',
+      sources: [
+        {
+          name: 'content',
+          query:
+            "SELECT id, occurred_at, created_at, payload_text FROM events WHERE semantic_type = 'content' ORDER BY occurred_at DESC, id DESC",
+        },
+      ],
+      triggers: [{ kind: 'schedule', cron: '0 9 * * *' }],
+      outputs: { signals: { event: 'observation' } },
+      managed_agent_id: agent.agentId,
+    })) as { automation_id: string };
+    automationId = Number(created.automation_id);
+    await getTestDb()`
+      UPDATE automations
+      SET next_window_start = ${new Date(Date.now() - 10 * MINUTE_MS).toISOString()}::timestamptz
+      WHERE id = ${automationId}
+    `;
+  });
+
+  async function claim(): Promise<ClaimResult> {
+    return (await api.automations.claimNextWindow({
+      automation_id: String(automationId),
+    })) as ClaimResult;
+  }
+
+  async function complete(claimed: ClaimResult): Promise<void> {
+    await api.automations.completeWindow({
+      automation_id: String(automationId),
+      run_id: claimed.run_id,
+      window_token: claimed.context.window_token,
+      extracted_data: { signals: [] },
+    });
+  }
+
+  it('delivers a row whose transaction stays open across a claim and completion', async () => {
+    let inserted: (id: number) => void = () => {};
+    let insertFailed: (error: unknown) => void = () => {};
+    const insertedId = new Promise<number>((resolve, reject) => {
+      inserted = resolve;
+      insertFailed = reject;
+    });
+    let release: () => void = () => {};
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    // The real ingestion funnel, inside a caller's transaction that stays open
+    // after the insert — the shape of every `insertEvent(..., { sql: tx })` caller.
+    const writer = getTestDb().begin(async (tx) => {
+      const row = await insertEvent(
+        {
+          entityIds: [entityId],
+          organizationId: orgId,
+          originId: 'open-writer-row',
+          title: 'Written inside a long transaction',
+          content: 'stored by a writer that committed late',
+          semanticType: 'content',
+          occurredAt: new Date(),
+        },
+        { sql: tx as unknown as DbClient }
+      );
+      inserted(Number(row.id));
+      await released;
+    });
+    void writer.catch(insertFailed);
+
+    let rowId: number;
+    try {
+      rowId = await insertedId;
+      // Let the database clock move past the row's created_at.
+      await getTestDb()`SELECT pg_sleep(0.05)`;
+
+      const first = await claim();
+      // Not visible yet, so the first window cannot contain it...
+      expect(first.context.content.map((r) => r.id)).not.toContain(rowId);
+      await complete(first);
+      // pg_stat_activity can lag in exposing the open writer, briefly leaving
+      // the arrival horizon unclamped until the transaction becomes visible.
+      await vi.waitFor(
+        async () => {
+          await expect(claim()).rejects.toThrow(/nothing new to claim yet/);
+        },
+        { timeout: 2_500, interval: 50 }
+      );
+    } finally {
+      // Failed claims/assertions must not leave a writer blocking suite cleanup.
+      release();
+      await writer;
+    }
+
+    // ...which means some LATER window must. Every window starts at the mark the
+    // previous one left, so the mark must not have moved past the row.
+    const second = await claim();
+    expect(second.context.content.map((r) => r.id)).toContain(rowId);
+    await complete(second);
+  });
+});
+
+describe("automation-mode unprocessed_ranges arrival bound", () => {
+  let owner: TestApiClient;
+  let automationId: string;
+  let entityId: number;
+
+  beforeAll(async () => {
+    await cleanupTestDatabase();
+    const org = await createTestOrganization({ name: "Ranges Bound Org" });
+    const user = await createTestUser({ email: "ranges-bound@test.example.com" });
+    await addUserToOrganization(user.id, org.id, "owner");
+    owner = await TestApiClient.for({
+      organizationId: org.id,
+      userId: user.id,
+      memberRole: "owner",
+    });
+    const agent = await createTestAgent({
+      organizationId: org.id,
+      ownerUserId: user.id,
+    });
+    const entity = await createTestEntity({
+      name: "Ranges Bound Target",
+      entity_type: "company",
+      organization_id: org.id,
+      created_by: user.id,
+    });
+    entityId = Number(entity.id);
+    await createTestConnection({
+      organization_id: org.id,
+      connector_key: "test.connector",
+    });
+
+    const now = Date.now();
+    // Old arrival: outside the 90-day horizon on BOTH axes.
+    await createTestEvent({
+      entity_id: entityId,
+      organization_id: org.id,
+      content: "old arrival row",
+      occurred_at: new Date(now - 100 * DAY_MS),
+      created_at: new Date(now - 100 * DAY_MS),
+    });
+    // Backfill: source timestamp is ancient, but Lobu stored it this week.
+    await createTestEvent({
+      entity_id: entityId,
+      organization_id: org.id,
+      content: "backfilled row",
+      occurred_at: new Date(now - 200 * DAY_MS),
+      created_at: new Date(now - 5 * DAY_MS),
+    });
+    // Fresh on both axes.
+    await createTestEvent({
+      entity_id: entityId,
+      organization_id: org.id,
+      content: "fresh row",
+      occurred_at: new Date(now - DAY_MS),
+      created_at: new Date(now - DAY_MS),
+    });
+
+    const created = (await owner.automations.create({
+      entity_id: entityId,
+      slug: "ranges-bound",
+      name: "Ranges Bound",
+      prompt: "Summarize {{content}}.",
+      managed_agent_id: agent.agentId,
+      sources: [{ name: "content", query: "@feed:default" }],
+    })) as { automation_id: string };
+    automationId = created.automation_id;
+  });
+
+  it("excludes arrivals older than the horizon and buckets by created_at", async () => {
+    const result = (await owner.knowledge.read({
+      automation_id: automationId,
+    })) as {
+      unprocessed_ranges?: Array<{
+        month: string;
+        window_start: string;
+        total_content: number;
+        unprocessed_content: number;
+      }>;
+    };
+    const ranges = result.unprocessed_ranges ?? [];
+    const total = ranges.reduce((sum, r) => sum + r.total_content, 0);
+    // Three events seeded, but only two arrived inside the horizon: the
+    // 100-day-old arrival is excluded, while the backfill (occurred 200
+    // days ago, stored 5 days ago) counts via its created_at arrival.
+    // Bucketing by occurred_at would have dropped the backfill instead.
+    expect(total).toBe(2);
+    expect(ranges.length).toBeGreaterThan(0);
+    expect(ranges.every((r) => r.unprocessed_content === r.total_content)).toBe(true);
+    const horizon = new Date(Date.now() - 90 * DAY_MS).toISOString();
+    expect(ranges.every((r) => r.window_start >= horizon)).toBe(true);
+  });
 });

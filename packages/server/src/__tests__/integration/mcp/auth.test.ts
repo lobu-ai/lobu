@@ -30,6 +30,7 @@ import {
   seedSystemEntityTypes,
 } from '../../setup/test-fixtures';
 import { del, get, mcpListTools, mcpRequest, mcpToolsCall, post } from '../../setup/test-helpers';
+import { TestMcpClient } from '../../setup/test-mcp-client';
 
 async function verifyDeviceCode(userCode: string, cookie: string): Promise<void> {
   const response = await get(`/oauth/device/info?user_code=${encodeURIComponent(userCode)}`, {
@@ -2238,6 +2239,22 @@ describe('MCP Authentication', () => {
         { token, orgSlug: org.slug }
       );
       expect(Array.isArray(result.automations)).toBe(true);
+    });
+
+    it.each([false, true])('executes query_sdk and run_sdk over the wire with workspace pinning %s', async (pinned) => {
+      const token = pinned
+        ? (await createTestAccessToken(user.id, org.id, client.client_id)).token
+        : (await createAccountAccessToken(user.id, org.id, client.client_id)).token;
+      const mcp = new TestMcpClient({ token, orgSlug: pinned ? org.slug : undefined });
+      const listed = await mcp.raw('tools/list');
+      const names = listed.result.tools.map((tool: { name: string }) => tool.name);
+      expect(names).toEqual(expect.arrayContaining(['search_sdk', 'query_sdk', 'run_sdk', 'open_view']));
+      for (const result of [
+        await mcp.querySdk('export default async () => 7;'),
+        await mcp.runSdk('export default async () => 7;'),
+      ]) {
+        expect(result).toMatchObject({ success: true, return_value: 7 });
+      }
     });
 
     it('should include tool descriptions', async () => {

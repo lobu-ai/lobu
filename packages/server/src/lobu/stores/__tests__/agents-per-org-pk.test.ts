@@ -99,6 +99,47 @@ describe("agents per-org PK — same agent id in two orgs", () => {
 		expect(goneFromA).toBeNull();
 	});
 
+	it("org-less settings/metadata reads return null instead of an arbitrary tenant's row", async () => {
+		// The settings-cookie routes authenticate without a Better Auth user, so
+		// no orgContext is open. A bare `WHERE id = $agentId` read returned
+		// rows[0] from whichever tenant came first, leaking its config and
+		// letting its owner_* columns decide authorization.
+		const config = createPostgresAgentConfigStore();
+		for (const [orgId, label] of [
+			[orgA, "A"],
+			[orgB, "B"],
+		] as const) {
+			await orgContext.run({ organizationId: orgId }, async () => {
+				await config.saveMetadata(sharedAgentId, {
+					agentId: sharedAgentId,
+					name: `Builder ${label}`,
+					owner: { platform: "lobu", userId: `owner-${label}` },
+					createdAt: Date.now(),
+				});
+				await config.saveSettings(sharedAgentId, {
+					models: [`provider-${label}/model-${label}`],
+					soulMd: `secret soul for ${label}`,
+				});
+			});
+		}
+
+		expect(await config.getSettings(sharedAgentId)).toBeNull();
+		expect(await config.getMetadata(sharedAgentId)).toBeNull();
+
+		const settingsA = await orgContext.run({ organizationId: orgA }, () =>
+			config.getSettings(sharedAgentId),
+		);
+		const settingsB = await orgContext.run({ organizationId: orgB }, () =>
+			config.getSettings(sharedAgentId),
+		);
+		expect(settingsA).toMatchObject({ soulMd: "secret soul for A", models: ["provider-A/model-A"] });
+		expect(settingsB).toMatchObject({ soulMd: "secret soul for B", models: ["provider-B/model-B"] });
+		const metaB = await orgContext.run({ organizationId: orgB }, () =>
+			config.getMetadata(sharedAgentId),
+		);
+		expect(metaB).toMatchObject({ name: "Builder B", organizationId: orgB });
+	});
+
 	it("keeps grants and agent_users isolated per org for the same agent id", async () => {
 		const config = createPostgresAgentConfigStore();
 		const grantStore = new GrantStore();

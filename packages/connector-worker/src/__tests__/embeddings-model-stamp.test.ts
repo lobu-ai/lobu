@@ -14,7 +14,7 @@
  *
  * Part (b) — persistence of the stamp onto event_embeddings — is asserted
  * server-side in packages/server/src/__tests__/integration/events/
- * embedding-model-stamp.test.ts.
+ * embedding-model-swap-e2e.test.ts.
  */
 
 import { describe, expect, test } from 'bun:test';

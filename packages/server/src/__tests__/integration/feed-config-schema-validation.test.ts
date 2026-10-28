@@ -303,4 +303,50 @@ describe("manage_feeds config validation against connector configSchema", () => 
 		expect((error as ClientSdkActionError).message).toContain("no sync or read operation");
 	});
 
+	describe("schedule (manual default)", () => {
+		type FeedResult = {
+			error?: string;
+			feed?: { id: number; schedule: string | null; next_run_at: string | null };
+		};
+
+		it("create_feed without schedule persists schedule/next_run_at NULL; an explicit cron still schedules", async () => {
+			const manual = (await owner.feeds.create({
+				connection_id: noSchemaConnectionId,
+				feed_key: "default",
+				display_name: "manual",
+			})) as FeedResult;
+			expect(manual.error).toBeUndefined();
+			expect(manual.feed?.schedule).toBeNull();
+			expect(manual.feed?.next_run_at).toBeNull();
+
+			const scheduled = (await owner.feeds.create({
+				connection_id: noSchemaConnectionId,
+				feed_key: "default",
+				display_name: "daily",
+				schedule: "0 9 * * *",
+			})) as FeedResult;
+			expect(scheduled.error).toBeUndefined();
+			expect(scheduled.feed?.schedule).toBe("0 9 * * *");
+			expect(scheduled.feed?.next_run_at).toBeTruthy();
+		});
+
+		it("update_feed schedule null clears auto-poll", async () => {
+			const created = (await owner.feeds.create({
+				connection_id: noSchemaConnectionId,
+				feed_key: "default",
+				display_name: "twice daily",
+				schedule: "0 */12 * * *",
+			})) as FeedResult;
+			const feedId = Number(created.feed?.id);
+			expect(feedId).toBeGreaterThan(0);
+
+			const updated = (await owner.feeds.update({
+				feed_id: feedId,
+				schedule: null,
+			})) as FeedResult;
+			expect(updated.error).toBeUndefined();
+			expect(updated.feed?.schedule).toBeNull();
+			expect(updated.feed?.next_run_at).toBeNull();
+		});
+	});
 });

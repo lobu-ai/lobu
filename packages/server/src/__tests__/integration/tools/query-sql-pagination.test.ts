@@ -23,20 +23,25 @@ import { QUERY_SQL_RESULT_MAX_BYTES } from '../../../utils/content-read-bounds';
 import { cleanupTestDatabase } from '../../setup/test-db';
 import {
   addUserToOrganization,
+  createTestAccessToken,
   createTestEvent,
+  createTestOAuthClient,
   createTestOrganization,
   createTestUser,
   ownerToolContext,
 } from '../../setup/test-fixtures';
+import { post } from '../../setup/test-helpers';
 
 describe('query_sql internal-path pagination contract', () => {
   let orgId: string;
+  let orgSlug: string;
   let ownerCtx: ToolContext;
 
   beforeAll(async () => {
     await cleanupTestDatabase();
     const org = await createTestOrganization({ name: 'QuerySqlPagination' });
     orgId = org.id;
+    orgSlug = org.slug;
     const user = await createTestUser({ email: 'qsql-page@test.com' });
     await addUserToOrganization(user.id, org.id, 'owner');
     ownerCtx = ownerToolContext(orgId, user.id);
@@ -61,6 +66,9 @@ describe('query_sql internal-path pagination contract', () => {
     expect(res.total_count).toBe(5);
     expect(res.has_more).toBe(true);
     expect(res.omitted_rows).toBeUndefined();
+    // A successful query carries no error taxonomy.
+    expect(res.error_code).toBeUndefined();
+    expect(res.retryable).toBeUndefined();
     // The internal window column must never leak into rows or columns.
     expect(res.columns.map((c) => c.name)).not.toContain('__lobu_total_count__');
     expect(Object.keys(res.rows[0])).not.toContain('__lobu_total_count__');
@@ -237,5 +245,117 @@ describe('query_sql internal-path pagination contract', () => {
     // And the real total is still exact via the fallback COUNT.
     expect(res.total_count).toBe(5);
     expect(res.has_more).toBe(true);
+  });
+
+  describe('error taxonomy (lobu#2051 item 2)', () => {
+    it('tags a data-modifying CTE (read-only violation) as VALIDATION, not retryable', async () => {
+      const res = await querySql(
+        { sql: 'WITH x AS (DELETE FROM events RETURNING id) SELECT count(*) AS n FROM x' },
+        {},
+        ownerCtx
+      );
+      expect(res.error).toBeTruthy();
+      expect(res.error_code).toBe('VALIDATION');
+      expect(res.retryable).toBe(false);
+    });
+
+    it('tags a disallowed table reference as a non-retryable code', async () => {
+      const res = await querySql({ sql: 'SELECT access_token FROM oauth_tokens LIMIT 1' }, {}, ownerCtx);
+      expect(res.error).toBeTruthy();
+      expect(res.error_code).toBeTruthy();
+      expect(res.retryable).toBe(false);
+    });
+
+    it('marks an unknown-table result as an MCP error and renders the cause', async () => {
+      const user = await createTestUser({ email: 'qsql-mcp@test.com' });
+      await addUserToOrganization(user.id, orgId, 'owner');
+      const client = await createTestOAuthClient();
+      const { token } = await createTestAccessToken(user.id, orgId, client.client_id, {
+        scope: 'mcp:read profile:read',
+      });
+      const path = `/mcp/${orgSlug}`;
+      const init = await post(path, {
+        body: {
+          jsonrpc: '2.0',
+          id: '__test_init__',
+          method: 'initialize',
+          params: {
+            protocolVersion: '2025-03-26',
+            capabilities: {},
+            clientInfo: { name: 'lobu-test', version: '1.0' },
+          },
+        },
+        token,
+      });
+      const sessionId = init.headers.get('mcp-session-id');
+      expect(sessionId).toBeTruthy();
+      await post(path, {
+        body: { jsonrpc: '2.0', method: 'notifications/initialized' },
+        headers: { 'mcp-session-id': sessionId! },
+        token,
+      });
+
+      const response = await post(path, {
+        body: {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: { name: 'query_sql', arguments: { sql: 'SELECT platform FROM conversations' } },
+        },
+        headers: { 'mcp-session-id': sessionId! },
+        token,
+      });
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.result?.isError).toBe(true);
+      expect(body.result?.content?.[0]?.text).toContain('conversations');
+      expect(body.result?.content?.[0]?.text).toMatch(/queryable tables/i);
+      expect(body.result?.content?.[0]?.text).not.toContain('SQL Query Results');
+    });
+  });
+
+  describe('view read guardrails (`useQuery` calls query_sql with limit 500)', () => {
+    let memberCtx: ToolContext;
+
+    beforeAll(async () => {
+      const member = await createTestUser({ email: 'qsql-view-member@test.com' });
+      await addUserToOrganization(member.id, orgId, 'member');
+      memberCtx = {
+        organizationId: orgId,
+        userId: member.id,
+        memberRole: 'member',
+        agentId: null,
+        isAuthenticated: true,
+        clientId: null,
+        scopes: ['mcp:read'],
+        tokenType: 'oauth',
+        scopedToOrg: true,
+        allowCrossOrg: false,
+      } as unknown as ToolContext;
+    });
+
+    it('caps a large result at 500 rows and reports the rest as has_more', async () => {
+      const res = await querySql({ sql: 'SELECT generate_series(1, 1200) AS n', limit: 500 }, {}, memberCtx);
+      expect(res.error).toBeUndefined();
+      expect(res.rows).toHaveLength(500);
+      expect(res.has_more).toBe(true);
+      expect(res.total_count).toBe(1200);
+    });
+
+    it('stops an unbounded statement at the timeout with a typed retryable code', async () => {
+      const started = Date.now();
+      const res = await querySql(
+        {
+          sql: 'SELECT count(*) AS n FROM generate_series(1, 1000000) a CROSS JOIN generate_series(1, 1000000) b',
+          limit: 500,
+        },
+        {},
+        memberCtx
+      );
+      expect(Date.now() - started).toBeLessThan(15_000);
+      expect(res.rows).toEqual([]);
+      expect(res.error_code).toBe('UPSTREAM_TIMEOUT');
+      expect(res.retryable).toBe(true);
+    }, 30_000);
   });
 });

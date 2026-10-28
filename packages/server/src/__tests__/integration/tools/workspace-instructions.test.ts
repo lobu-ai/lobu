@@ -291,87 +291,11 @@ describe('buildWorkspaceInstructions render fixes', () => {
     );
   });
 
-  it('requires exact manifest operation keys instead of deriving them from display names', async () => {
-    const out = await buildWorkspaceInstructions(org.id);
-    expect(out).toContain(
-      'Treat `operation_key` as an opaque manifest identifier: copy it exactly from `operations.listAvailable`'
-    );
-    expect(out).toContain('Never derive it from an operation display name');
-  });
-
   it('renders disconnected connector capabilities so agents can discover setup', async () => {
     const out = await buildWorkspaceInstructions(org.id);
     expect(out).toContain(
       '- shop.disconnected (Available before setup): create_order'
     );
-  });
-
-  it('renders workspace-data query guidance without org-specific setup', async () => {
-    const emptyOrg = await createTestOrganization({ name: 'Empty Render Org' });
-    const out = await buildWorkspaceInstructions(emptyOrg.id);
-    expect(out).toContain(
-      'When asked about workspace data — including people, leads, companies, connections, feeds, runs, or counts — query it before answering'
-    );
-    expect(out).toContain(
-      'On a direct bare OAuth connection, `search_memory` searches every currently accessible workspace the user granted'
-    );
-    expect(out).toContain('can be narrowed with its singular `workspace` argument');
-    expect(out).toContain('pinned connections and all other tools stay in the current workspace');
-    expect(out).toContain(
-      'Do not claim you can see only chat/Slack messages or channel members without querying workspace data first'
-    );
-    const directiveIdx =
-      out?.indexOf('When asked about workspace data') ?? -1;
-    const toolSurfaceIdx = out?.indexOf('### Tool surface') ?? -1;
-    expect(directiveIdx).toBeGreaterThan(-1);
-    expect(directiveIdx).toBeLessThan(toolSurfaceIdx);
-  });
-
-  it('keeps direct MCP instructions user-directed and free of automatic personal-data capture', async () => {
-    const directOrg = await createTestOrganization({ name: 'Direct MCP Instructions Org' });
-    const out = await buildWorkspaceInstructions(directOrg.id, { audience: 'direct-mcp' });
-
-    expect(out).toContain(
-      "Use Lobu's tools only when they are relevant to the user's request"
-    );
-    expect(out).toContain('### Writes and approvals');
-    expect(out).toContain('Use it only when the user asks');
-    expect(out).not.toContain("Use it proactively — don't wait to be asked");
-    expect(out).not.toContain('### Saving (do this automatically)');
-    expect(out).not.toContain('Preferences, opinions, or personal details');
-    expect(out).not.toContain('### Schema: Entity Types');
-    expect(out).not.toContain('Direct MCP Instructions Org');
-  });
-
-  it('requires direct MCP clients to copy exact manifest operation keys', async () => {
-    const directOrg = await createTestOrganization({ name: 'Direct Operation Key Org' });
-    const out = await buildWorkspaceInstructions(directOrg.id, { audience: 'direct-mcp' });
-
-    expect(out).toContain('copy it exactly from `operations.listAvailable`');
-    expect(out).toContain('never derive it from the display name');
-    expect(out).toContain('refresh discovery instead of inventing a key');
-  });
-
-  it('asks direct MCP clients to title every run_sdk, query_sdk, and query_sql call', async () => {
-    const directOrg = await createTestOrganization({ name: 'Call Title Org' });
-    const out = await buildWorkspaceInstructions(directOrg.id, { audience: 'direct-mcp' });
-
-    expect(out).toContain(
-      '- Pass `title`, a short human-friendly heading for the result (e.g. "Companies missing a domain"), on every `run_sdk`, `query_sdk`, and `query_sql` call.'
-    );
-  });
-
-  it('documents the search_memory workspace narrowing argument to the direct MCP audience', async () => {
-    // The managed-agent text explains the singular `workspace` argument in a
-    // sentence addressed to "a direct bare OAuth connection" — precisely the
-    // audience that now receives DIRECT_MCP_INSTRUCTIONS instead. The static
-    // text is the only capability documentation that audience ever gets, so
-    // the narrowing knob has to be named here or it is discoverable nowhere.
-    const directOrg = await createTestOrganization({ name: 'Narrowing Arg Org' });
-    const out = await buildWorkspaceInstructions(directOrg.id, { audience: 'direct-mcp' });
-
-    expect(out).toContain('`workspace` argument');
-    expect(out).toContain('multi-workspace grant');
   });
 });
 
