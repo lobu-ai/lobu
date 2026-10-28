@@ -32,9 +32,23 @@ describe("computeAutomationHealth", () => {
 		}
 	});
 
-	it("does not mistake externally due work for a missed native dispatch, but surfaces failure", () => {
-		const input = { status: "active", nextRunAt: new Date(NOW - 3600_000), externalExecutor: true };
-		expect(computeAutomationHealth(input, NOW).health).toBe("healthy");
+	it("gives an external schedule the notification grace before calling its due window unclaimed", () => {
+		const every5m = { kind: "schedule" as const, cron: "*/5 * * * *", timezone: "UTC" };
+		const input = { status: "active", externalExecutor: true, triggers: [every5m],
+			nextRunAt: new Date(NOW - 30 * 60_000) };
+		// Thirty minutes late is six native margins, but a client may still be on its way.
+		expect(computeAutomationHealth(input, NOW)).toMatchObject({ health: "healthy", reasons: [] });
+		expect(computeAutomationHealth({ ...input, externalExecutor: false }, NOW).reasons.join(" "))
+			.toContain("missed firing");
+		// Past the hour nobody is doing the work; the reason names the external lane.
+		const twoHoursLate = { ...input, nextRunAt: new Date(NOW - 2 * 3600_000) };
+		expect(computeAutomationHealth(twoHoursLate, NOW).reasons)
+			.toEqual(["no external client claimed the due window: next_run_at overdue by ~120 min"]);
+		expect(computeAutomationHealth({ ...twoHoursLate, latestRunStatus: "running" }, NOW).health).toBe("healthy");
+		// A daily cadence gets the clamped six hours, not a whole day.
+		const daily = { ...input, triggers: [{ ...every5m, cron: "0 9 * * *" }] };
+		expect(computeAutomationHealth({ ...daily, nextRunAt: new Date(NOW - 5 * 3600_000) }, NOW).health).toBe("healthy");
+		expect(computeAutomationHealth({ ...daily, nextRunAt: new Date(NOW - 7 * 3600_000) }, NOW).health).toBe("degraded");
 		expect(computeAutomationHealth({ ...input, latestRunStatus: "failed" }, NOW).health).toBe("degraded");
 	});
 	it("puts the durable schedule auto-pause reason first", () => {

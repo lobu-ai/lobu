@@ -6,7 +6,7 @@ import { materializeDueAutomationRuns, dispatchPendingAutomationRuns } from '../
 import { handleListActivity } from '../../../tools/admin/manage_operations/handlers/runs';
 import { handleClaimNextWindow } from '../../../tools/admin/manage_automations/claim-next-window';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
-import { createTestAgent, seedOwnerContext } from '../../setup/test-fixtures';
+import { createTestAgent, createTestEvent, seedOwnerContext } from '../../setup/test-fixtures';
 import { TestApiClient } from '../../setup/test-mcp-client';
 import type { Env } from '../../../index';
 import { handleAutomationMode } from '../../../tools/get_content/automation-mode';
@@ -15,7 +15,12 @@ import { createAutomationRun } from '../../../runs/queue-service';
 
 const ENV = { JWT_SECRET: 'test-jwt-secret-for-testing-only' } as Env;
 const EXTERNAL = { executor: { kind: 'external' } };
-const SCHEDULE = [{ kind: 'schedule', cron: '*/5 * * * *', timezone: 'UTC' }];
+// The claim mechanics below run on an empty source. `skip_if_unchanged` (the
+// schedule default) would book such a window as a no-op before any claim, so
+// these suites opt out; the skip itself is covered by its own tests.
+const SCHEDULE = [{ kind: 'schedule', cron: '*/5 * * * *', timezone: 'UTC', skip_if_unchanged: false }];
+const SKIPPING_SCHEDULE = [{ kind: 'schedule', cron: '*/5 * * * *', timezone: 'UTC', skip_if_unchanged: true }];
+const CONTENT_SOURCE = [{ name: 'content', query: "SELECT id, occurred_at, payload_text FROM events WHERE semantic_type = 'content' ORDER BY occurred_at DESC, id DESC" }];
 
 describe('external Automation activity', () => {
   let sql: DbClient;
@@ -74,6 +79,39 @@ describe('external Automation activity', () => {
     const [state] = await sql`SELECT next_run_at > NOW() AS future, next_window_start FROM automations WHERE id = ${Number(id)}`;
     expect(state.future).toBe(true);
     expect(new Date(state.next_window_start).toISOString()).toBe(claim.context.window_end);
+  });
+
+  it('books a due window with nothing new as a no-op instead of handing it to the client', async () => {
+    const id = await createExternal({ triggers: SKIPPING_SCHEDULE });
+    expect(await work()).toHaveLength(1);
+    await expect(api.automations.claimNextWindow({ automation_id: id })).rejects.toThrow(/nothing to process/);
+    const runs = await sql`SELECT status, claimed_by, run_metadata, approved_input FROM runs WHERE automation_id = ${Number(id)}`;
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({ status: 'completed', claimed_by: null });
+    expect(runs[0].run_metadata).toMatchObject({ skipped_unchanged: true, content_analyzed: 0 });
+    expect(typeof runs[0].approved_input.source_fingerprint).toBe('string');
+    const [state] = await sql`SELECT next_run_at > NOW() AS future, next_window_start, last_completed_window_start FROM automations WHERE id = ${Number(id)}`;
+    expect(state.future).toBe(true);
+    expect(new Date(state.next_window_start).toISOString()).toBe(runs[0].approved_input.window_end);
+    expect(new Date(state.last_completed_window_start).toISOString()).toBe(runs[0].approved_input.window_start);
+    expect(await work()).toEqual([]);
+  });
+
+  it('hands out a window with new content, records its fingerprint, and skips the quiet window after it', async () => {
+    const id = await createExternal({ triggers: SKIPPING_SCHEDULE, sources: CONTENT_SOURCE });
+    await createTestEvent({ organization_id: ctx.organizationId!, content: 'Arrival inside the due window', created_at: new Date(Date.now() - 5_000) });
+    const claim = await api.automations.claimNextWindow({ automation_id: id });
+    const [claimed] = await sql`SELECT status, approved_input FROM runs WHERE id = ${claim.run_id}`;
+    expect(claimed.status).toBe('running');
+    expect(typeof claimed.approved_input.source_fingerprint).toBe('string');
+    await api.automations.completeWindow({ automation_id: id, run_id: claim.run_id,
+      window_token: claim.context.window_token, extracted_data: { signals: [] } });
+    await sql`UPDATE automations SET next_run_at = NOW() - INTERVAL '1 minute' WHERE id = ${Number(id)}`;
+    await expect(api.automations.claimNextWindow({ automation_id: id })).rejects.toThrow(/nothing to process/);
+    const [counts] = await sql`SELECT COUNT(*)::int AS total,
+      COUNT(*) FILTER (WHERE run_metadata->>'skipped_unchanged' = 'true')::int AS skipped
+      FROM runs WHERE automation_id = ${Number(id)}`;
+    expect(counts).toEqual({ total: 2, skipped: 1 });
   });
 
   it('allows an external schedule without a managed executor and returns nothing before it is due', async () => {
