@@ -130,9 +130,9 @@ export async function parkGoogleChatSpace(app: GoogleChatApp, space: string, sen
     `;
     if (pending) {
       const upgraded = verified && !pending.metadata.verified_added;
-      // Old references stored the resource ID; keep real room names when a
-      // later delivery omits displayName.
-      const relabeled = pending.metadata.space_name === space && label !== space;
+      // Only migrates legacy rows that stored the `spaces/…` resource id as
+      // their name; a stored real room name is kept.
+      const relabeled = pending.metadata.space_name === space;
       if (upgraded || relabeled) {
         await tx`UPDATE app_installations SET metadata = metadata || ${sql.json({
           ...(upgraded ? { verified_added: true } : {}),
@@ -397,6 +397,11 @@ export async function acceptGoogleChatWebhook(
   }
   if (scoped) {
     if (await alreadyServed(connection, space, added)) return;
+    // Until an Automation routes the space, its setup link is sent once; later
+    // messages get an empty reply, never dispatch. Re-adding the app or
+    // invoking a command sends it again, as for a pending space.
+    const firstAnnouncement = await firstContinuationAnnouncement(connection.id);
+    if (!firstAnnouncement && !added && !isGoogleChatCommand(body)) return Response.json({});
     const [org] = await getDb()`SELECT slug FROM organization WHERE id = ${connection.organizationId!}`;
     if (!org) throw new GoogleChatScopeError();
     const next = claimContinuation(org.slug, { platform: PROVIDER, connection: runtimeConnectionIdToSlug(connection.id), channelId: `gchat:${space}`, teamId: space, label: googleChatSpaceLabel(googleChatEventSpaceData(body)) });
@@ -416,6 +421,20 @@ async function alreadyServed(connection: StoredConnection, space: string, added:
   return new AutomationSubscriptionService().channelHasMessageSubscription(
     connection.id, `gchat:${space}`, connection.organizationId!, { crossOrganization: (connection.settings as ConnectionSettings).previewMode === true, teamId: space },
   );
+}
+
+/**
+ * Whether this delivery is the first to announce a claimed space's setup link.
+ * One conditional update under the install row's lock decides it, so concurrent
+ * messages on any replica announce it once. `updated_at` is left alone: it
+ * feeds the runtime revision, and this bookkeeping must not rebuild the adapter.
+ */
+async function firstContinuationAnnouncement(connectionId: string): Promise<boolean> {
+  const rows = await getDb()`UPDATE app_installations SET metadata = metadata || '{"continuation_announced":true}'::jsonb
+    WHERE provider = ${PROVIDER} AND metadata->>'external_id' = ${connectionId} AND status = 'active'
+      AND metadata->>'continuation_announced' IS DISTINCT FROM 'true'
+    RETURNING id`;
+  return rows.length > 0;
 }
 
 /**
