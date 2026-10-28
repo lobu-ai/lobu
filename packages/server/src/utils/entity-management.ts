@@ -1748,35 +1748,49 @@ export async function deleteEntity(
   // Validate write access (uses PG for auth tables)
 	await requireWriteAccess(sql, entityId, ctx);
 
-  // Resolve and run the hook only after the row rule has accepted the delete.
-  // Reloading the row inside the write transaction keeps hook cleanup aligned
-  // with the metadata version that is actually deleted.
-  const runBeforeDeleteHook =
+  // Every live entity the delete removes runs its type's hooks, not only the
+  // root: a tree delete must not be a way around a descendant's cleanup (a
+  // `$member` removal revokes access). `lockBeforeDelete` runs before any row
+  // lock; `beforeDelete` runs only after the row rule has accepted the delete,
+  // reloading each row in the write transaction so cleanup matches the
+  // metadata version that is actually deleted.
+  const deleteHooks =
     !opts?.skipHooks && !opts?.dryRun
-      ? async (tx: DbClient): Promise<void> => {
-          const [entityRow] = await tx<{
-            entity_type: string;
-            metadata: Record<string, unknown> | null;
-          }>`
-            SELECT et.slug AS entity_type, e.metadata
-            FROM entities e
-            JOIN entity_types et ON et.id = e.entity_type_id
-            WHERE e.id = ${entityId} AND e.deleted_at IS NULL
-          `;
-          if (!entityRow) return;
-          const beforeDelete = getEntityHooks(entityRow.entity_type)?.beforeDelete;
-          if (!beforeDelete) return;
-          await beforeDelete(
-            { id: entityId, ...entityRow },
-            {
-              organizationId: ctx.organizationId,
-              userId: ctx.userId,
-              sql: tx,
-              principal: ctx,
-              actorSource: deriveToolActorSource(ctx),
-            }
-          );
-        }
+      ? (() => {
+          const hookContext = (tx: DbClient): EntityTransactionHookContext => ({
+            organizationId: ctx.organizationId,
+            userId: ctx.userId,
+            sql: tx,
+            principal: ctx,
+            actorSource: deriveToolActorSource(ctx),
+          });
+          const liveRows = (tx: DbClient, ids: readonly number[]) =>
+            tx<{ id: number; entity_type: string; metadata: Record<string, unknown> | null }>`
+              SELECT e.id, et.slug AS entity_type, e.metadata
+              FROM entities e
+              JOIN entity_types et ON et.id = e.entity_type_id
+              WHERE e.id = ANY(${pgBigintArray([...ids])}::bigint[]) AND e.deleted_at IS NULL
+              ORDER BY e.id
+            `;
+          return {
+            async lock(tx: DbClient, ids: readonly number[]): Promise<void> {
+              const types = new Set((await liveRows(tx, ids)).map((row) => row.entity_type));
+              for (const type of types) {
+                await getEntityHooks(type)?.lockBeforeDelete?.(hookContext(tx));
+              }
+            },
+            async run(tx: DbClient, ids: readonly number[]): Promise<void> {
+              for (const row of await liveRows(tx, ids)) {
+                const beforeDelete = getEntityHooks(row.entity_type)?.beforeDelete;
+                if (!beforeDelete) continue;
+                await beforeDelete(
+                  { id: Number(row.id), entity_type: row.entity_type, metadata: row.metadata },
+                  hookContext(tx)
+                );
+              }
+            },
+          };
+        })()
       : null;
 
   // Check if entity has children
@@ -1877,6 +1891,7 @@ export async function deleteEntity(
       // org generation, the reverse of organization deletion's parent-then-
       // cascade order unless the org is claimed up front.
       await lockOrgForAclInvalidation(tx, ctx.organizationId);
+      if (deleteHooks) await deleteHooks.lock(tx, entityTreeIds);
       // A force delete answers to the same `$deleted` name a soft delete does.
       // Hard deletion is not a lesser destruction than a tombstone, so giving
       // `force` its own reserved name would turn every "this row cannot be
@@ -1902,7 +1917,7 @@ export async function deleteEntity(
         operation: "delete",
         approvedFields: opts?.approvedFields ?? [],
       });
-      if (runBeforeDeleteHook) await runBeforeDeleteHook(tx);
+      if (deleteHooks) await deleteHooks.run(tx, entityTreeIds);
       // Force-delete removes ACL edges along with everything else. That is
       // correct — the entity is gone, so its membership projection must go too —
       // but the `entity_relationships` trigger refuses authorization-bearing
@@ -2132,6 +2147,7 @@ export async function deleteEntity(
   // state into a legal one. An escalate throws too UNLESS this call is the
   // application of a delete a human already approved — see `approvedFields`.
   await withEntityWriteTransaction(sql, async (tx) => {
+    if (deleteHooks) await deleteHooks.lock(tx, [entityId]);
     // Lock first: the rule must judge the state that will actually be deleted.
     const locked = await tx<{ id: number }>`
       SELECT id FROM entities
@@ -2149,7 +2165,7 @@ export async function deleteEntity(
       operation: "delete",
       approvedFields: opts?.approvedFields ?? [],
     });
-    if (runBeforeDeleteHook) await runBeforeDeleteHook(tx);
+    if (deleteHooks) await deleteHooks.run(tx, [entityId]);
     await patchEntityRows({
       tx,
       ids: [entityId],

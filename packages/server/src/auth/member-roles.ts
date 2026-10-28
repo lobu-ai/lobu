@@ -3,12 +3,12 @@ import { ToolUserError } from '../utils/errors';
 import { APIError, type BetterAuthPlugin } from 'better-auth';
 import { createAuthMiddleware } from 'better-auth/api';
 import { type DbClient, getDb } from '../db/client';
-import { insertWorkspaceChangeEventInTransaction } from '../utils/insert-event';
+import { insertWorkspaceChangeEventInTransaction, recordLifecycleEvent } from '../utils/insert-event';
 import { updateMemberEntityAccess } from '../utils/member-entity';
 import { withEntityWriteTransaction } from '../utils/entity-management';
 
 import type { RequestSession } from './organization-delete';
-import { assertWorkspaceRetainsOwner, authorizeMemberRole, lockMemberRoleChanges, parseMemberRole, type MemberRole } from './member-role-policy';
+import { assertWorkspaceRetainsOwner, authorizeMemberRemoval, authorizeMemberRole, lockMemberRoleChanges, parseMemberRole, type MemberRole } from './member-role-policy';
 
 export async function changeMemberRoleInTransaction(
   sql: DbClient,
@@ -28,6 +28,36 @@ export async function changeMemberRoleInTransaction(
     changedFields: ['role'], actorSource: params.actorSource, createdBy: params.actorId,
   }, sql);
   return { ...member, role: params.role };
+}
+
+/**
+ * Delete the Better Auth membership in the caller's transaction, so the
+ * `$member` record and the access it represents go away together. Every
+ * request resolves its role from the `member` table (`getMembershipRole`), so
+ * the removed user loses access on their next request, on every replica.
+ */
+export async function removeMemberInTransaction(
+  sql: DbClient,
+  params: { organizationId: string; actorId: string | null; memberId: string; actorSource: ConfigActorSource },
+) {
+  const [member] = await sql`
+    SELECT m.id, m."userId", m.role, u.name FROM member m JOIN "user" u ON u.id = m."userId"
+    WHERE m.id = ${params.memberId} AND m."organizationId" = ${params.organizationId}
+    FOR UPDATE OF m
+  `;
+  if (!member) throw new ToolUserError('Workspace member not found', 404);
+  await authorizeMemberRemoval(sql, params.organizationId, params.actorId, member.role as string);
+  await sql`DELETE FROM member WHERE id = ${member.id} AND "organizationId" = ${params.organizationId}`;
+  const summary = `Member "${(member.name as string | null) || 'a member'}" removed`;
+  await insertWorkspaceChangeEventInTransaction({
+    organizationId: params.organizationId,
+    resourceKind: 'member', resourceId: member.id as string, op: 'deleted',
+    summary, state: null, actorSource: params.actorSource, createdBy: params.actorId,
+  }, sql);
+  await recordLifecycleEvent({
+    organizationId: params.organizationId, entityType: 'member', op: 'deleted',
+    entityId: member.userId as string, summary, createdBy: params.actorId,
+  }, sql);
 }
 
 const UPDATE_MEMBER_ROLE_PATH = '/organization/update-member-role';

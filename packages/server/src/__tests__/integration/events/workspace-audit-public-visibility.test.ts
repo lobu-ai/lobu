@@ -436,6 +436,7 @@ describe('workspace-identity audit events > public-read exclusion', () => {
         organizationId: org.id,
         userId: alice.id,
         principal: { userId: alice.id },
+        sql,
       }
     );
 
@@ -447,27 +448,19 @@ describe('workspace-identity audit events > public-read exclusion', () => {
     `) as unknown as Array<{ status: string }>;
     expect(cancelledRows[0]?.status).toBe('canceled');
 
-    // Poll for the fire-and-forget audit row.
-    const deadline = Date.now() + 2000;
-    let sawCancelled = false;
-    while (Date.now() < deadline) {
-      const audit = await sql`
-        SELECT 1 FROM events
-        WHERE organization_id = ${org.id}
-          AND semantic_type = 'change'
-          AND metadata->>'category' = 'workspace'
-          AND metadata->>'resource_kind' = 'invitation'
-          AND metadata->>'op' = 'updated'
-          AND metadata->>'resource_id' = ${invRows[0].id}
-        LIMIT 1
-      `;
-      if (audit.length > 0) {
-        sawCancelled = true;
-        break;
-      }
-      await new Promise((r) => setTimeout(r, 50));
-    }
-    expect(sawCancelled).toBe(true);
+    // The hook writes the audit row on the caller's client, so it is visible
+    // as soon as the hook returns.
+    const audit = await sql`
+      SELECT 1 FROM events
+      WHERE organization_id = ${org.id}
+        AND semantic_type = 'change'
+        AND metadata->>'category' = 'workspace'
+        AND metadata->>'resource_kind' = 'invitation'
+        AND metadata->>'op' = 'updated'
+        AND metadata->>'resource_id' = ${invRows[0].id}
+      LIMIT 1
+    `;
+    expect(audit).toHaveLength(1);
   });
 
   it('org-home bootstrap hides workspace audit rows from non-owner/admin', async () => {
