@@ -772,11 +772,6 @@ export class MessageConsumer {
   }
 
   /**
-   * Ensure worker deployment exists for a thread
-   * Uses shared retry utility with linear backoff + jitter
-   * Uses an advisory lock to prevent concurrent duplicate deployment creation
-   */
-  /**
    * Fold the org's connector-contributed packages and domains into the queue
    * payload, in place.
    *

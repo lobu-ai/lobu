@@ -14,9 +14,9 @@ export const TOKEN_EXPIRATION_MS = 24 * 60 * 60 * 1000;
  * Caller identity surfaced to handlers via `c.get("authContext")` after a
  * successful auth check. `organizationId` is the token-bound or personal-org
  * id when the auth path can resolve one (worker token payload, or
- * `/oauth/userinfo` org slug); otherwise undefined. `createAgent` uses it to
- * route no-agentId requests to the org's default agent so the cross-pod
- * conversation lock can be acquired (#1068 follow-up).
+ * `/oauth/userinfo` org slug); otherwise undefined. `createAgent` treats it as
+ * the caller's authoritative org for the tenant guard and as the session's
+ * org fallback.
  */
 interface ApiAuthContext {
   userId?: string;
