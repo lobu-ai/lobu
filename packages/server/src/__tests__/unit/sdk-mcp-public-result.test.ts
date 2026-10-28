@@ -13,6 +13,7 @@ import {
 import { ClientSdkActionError } from "../../sandbox/namespaces/action-call";
 import { withFailureCode } from "../../tools/admin/helpers/connection-helpers";
 import { ToolUserError } from "../../utils/errors";
+import { AccessDeniedError, McpScopeRequiredError } from "../../tools/access-control";
 import { validateToolResult } from "../../tools/validate-args";
 
 describe("SDK MCP public result", () => {
@@ -271,6 +272,15 @@ describe("SDK MCP public result", () => {
 	] as const)("preserves a structured ToolUserError code with HTTP %s", (status, code, retryable) => {
 		expect(classifySdkScriptError(new ToolUserError("opaque business failure", status, code)))
 			.toEqual({ code, retryable });
+	});
+
+	test("classifies a role or scope denial as a non-retryable permission error", () => {
+		const message = "manage_agents.delete requires admin or owner access in synthetic-org. Your role in synthetic-org is member.";
+		const permission = { code: "PERMISSION", retryable: false };
+		expect(classifySdkScriptError(new AccessDeniedError(message))).toEqual(permission);
+		// Across the isolate only the name survives.
+		expect(classifySdkScriptError({ name: "AccessDeniedError", message })).toEqual(permission);
+		expect(classifySdkScriptError(new McpScopeRequiredError(message, "mcp:admin"))).toEqual(permission);
 	});
 
 	test("keeps genuine unknown errors INTERNAL regardless of their message", () => {

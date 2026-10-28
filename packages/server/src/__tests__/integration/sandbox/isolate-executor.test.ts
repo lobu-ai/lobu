@@ -40,6 +40,7 @@ import { executeCompiledConnector } from "@lobu/connector-worker/executor/runtim
 import {
 	assertIsolateEligible,
 	IsolateHost,
+	IsolateHostError,
 	IsolateLaneIneligibleError,
 	type IsolatedVm,
 	loadIsolatedVm,
@@ -877,6 +878,32 @@ describe("isolate lane: fixture connector", () => {
 		expect(failure.exitReason).toBe("oom");
 		expect(failure.message).toMatch(/out of memory/i);
 		expect(failure.message).toContain("32 MB");
+	});
+
+	it.each([
+		"the vendor API exceeded its memory limit",
+		"upstream stream was disposed by the peer",
+		"request terminated by the remote server",
+	])("reports a guest throwing %j as the guest's own error, not an isolate failure", async (message) => {
+		const host = await IsolateHost.create({
+			ivm,
+			memoryMb: 64,
+			messageBytes: 1 << 20,
+			env: {},
+			sync: { log: () => undefined, fatal: () => undefined, fetchAbort: () => undefined },
+			async: {},
+		});
+		try {
+			const failure = await host.run(`throw new Error(${JSON.stringify(message)});`, { timeoutMs: 30_000 }).then(
+				() => null,
+				(error: unknown) => error,
+			);
+			expect(failure).toBeInstanceOf(Error);
+			expect(failure).not.toBeInstanceOf(IsolateHostError);
+			expect((failure as Error).message).toBe(message);
+		} finally {
+			host.dispose();
+		}
 	});
 
 	it("ends the run when a timer callback throws: the guest error arrives through `fatal` and keeps its name", async () => {

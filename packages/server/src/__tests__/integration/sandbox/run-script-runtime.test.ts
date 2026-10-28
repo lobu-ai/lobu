@@ -29,9 +29,11 @@ import {
 } from "../../../sandbox/run-script";
 import { createValidatedSdkMethod } from "../../../sandbox/sdk-preflight";
 import {
+  classifySdkScriptError,
   SdkScriptResultSchema,
   toMcpPublicSdkScriptResult,
 } from "../../../tools/sdk_run";
+import { AccessDeniedError, scopeDenialMessage } from "../../../tools/access-control";
 import {
   validateToolResult,
   withValidatedArgs,
@@ -1541,5 +1543,113 @@ describe("sandbox output budgets", () => {
 
     expect(result.success).toBe(true);
     expect(result.traceDropped).toBe(0);
+  });
+});
+
+describe("sandbox runtime failure classification", () => {
+  // Runtime failure names come from what the host observed (isolate disposal,
+  // the deadline, the quota counter), never from words in an error message:
+  // in a memory product "memory" is in ordinary copy and SDK errors.
+  it.each([
+    "no memory found for this person",
+    "allocation of the weekly budget failed",
+    "Isolate was disposed during execution due to memory limit",
+    "Script execution timed out while waiting for the vendor",
+    "QuotaExceeded: the vendor's quota",
+    "SleepLimitExceeded: copied from a log line",
+    "OutputSizeExceeded: copied from a log line",
+  ])("reports a script throwing %j as a ScriptError", async (message) => {
+    const result = await runScript({
+      source: `export default async () => { throw new Error(${JSON.stringify(message)}); };`,
+      sdk: stubSDK(),
+    });
+    expect(result.error).toMatchObject({ name: "ScriptError", message });
+  });
+
+  it("reports an untyped SDK error that mentions save_memory as a ScriptError", async () => {
+    const message = "save_memory rejected the note: memory allocation for this entity is closed";
+    const result = await runScript({
+      source: "export default async (_ctx, client) => client.entities.list();",
+      sdk: stubSDK({ entities: { list: async () => { throw new Error(message); } } as never }),
+    });
+    expect(result.error).toMatchObject({ name: "ScriptError", message });
+  });
+
+  it("does not trust a runtime failure name the script assigns itself", async () => {
+    const result = await runScript({
+      source: [
+        "export default async () => {",
+        "  const error = new Error('looks like a timeout');",
+        "  error.name = 'TimeoutError';",
+        "  throw error;",
+        "};",
+      ].join("\n"),
+      sdk: stubSDK(),
+    });
+    expect(result.error).toMatchObject({ name: "ScriptError", message: "looks like a timeout" });
+  });
+
+  it("reports a script that exhausts the isolate heap as OutOfMemory", async () => {
+    const result = await runScript({
+      source: [
+        "export default async () => {",
+        "  const hoard = [];",
+        "  for (;;) hoard.push(new Array(100_000).fill(Math.random()));",
+        "};",
+      ].join("\n"),
+      sdk: stubSDK(),
+      limits: { memoryMb: 8, timeoutMs: 30_000 },
+    });
+    expect(result.success).toBe(false);
+    expect(result.error?.name).toBe("OutOfMemory");
+    expect(result.error?.message).toContain("8 MB");
+  });
+
+  it("reports a synchronous loop past the deadline as TimeoutError", async () => {
+    const result = await runScript({
+      source: "export default async () => { for (;;) {} };",
+      sdk: stubSDK(),
+      limits: { timeoutMs: 200 },
+    });
+    expect(result.success).toBe(false);
+    expect(result.error?.name).toBe("TimeoutError");
+  });
+
+  it("keeps the sleep limit typed when the script does not catch it", async () => {
+    const result = await runScript({
+      source: "export default async (ctx) => ctx.sleep(30001);",
+      sdk: stubSDK(),
+    });
+    expect(result.error).toMatchObject({ name: "SleepLimitExceeded" });
+    const invalid = await runScript({
+      source: "export default async (ctx) => ctx.sleep(-1);",
+      sdk: stubSDK(),
+    });
+    expect(invalid.error).toMatchObject({ name: "InvalidSleepDuration" });
+  });
+});
+
+describe("sandbox access denials", () => {
+  it("reports a role denial from an SDK call as a non-retryable PERMISSION with its guidance", async () => {
+    const message = scopeDenialMessage({
+      subject: "manage_agents.delete",
+      requiredAccess: "admin",
+      memberRole: "member",
+      tokenType: "oauth",
+      workspace: "synthetic-org",
+    });
+    const result = await runScript({
+      source: "export default async (_ctx, client) => client.entities.list();",
+      sdk: stubSDK({ entities: { list: async () => { throw new AccessDeniedError(message); } } as never }),
+    });
+    expect(result.error).toMatchObject({
+      name: "AccessDeniedError",
+      code: "PERMISSION",
+      retryable: false,
+      message,
+    });
+    expect(result.error?.message).toContain("Ask an owner of synthetic-org");
+    expect(result.error).not.toHaveProperty("stack");
+    expect(classifySdkScriptError(result.error!)).toEqual({ code: "PERMISSION", retryable: false });
   });
 });

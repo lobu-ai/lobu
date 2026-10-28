@@ -30,7 +30,7 @@ import { ClientSdkActionError } from "./namespaces/action-call";
 import { METHOD_METADATA, type MethodAccess } from "./method-metadata";
 import type { ToolAccessLevel } from "../auth/tool-access";
 import { enumerateSDKManifest, type SDKMode } from "./sdk-manifest";
-import { McpScopeRequiredError } from "../tools/access-control";
+import { AccessDeniedError, McpScopeRequiredError } from "../tools/access-control";
 import { getSdkPreflight } from "./sdk-preflight";
 import { ToolUserError } from "../utils/errors";
 import { raceAbort } from "../utils/race-abort";
@@ -204,6 +204,33 @@ const MAX_ERROR_DETAILS_BYTES = 16_384;
 export const MAX_SCRIPT_ERROR_NAME_BYTES = 256;
 export const MAX_SCRIPT_ERROR_MESSAGE_BYTES = 16_384;
 export const MAX_SCRIPT_ERROR_STACK_BYTES = 32_768;
+
+/** Runtime failures of the sandbox itself, as opposed to the script's own throw. */
+type RuntimeFailureName =
+	| "TimeoutError"
+	| "AbortError"
+	| "QuotaExceeded"
+	| "OutputSizeExceeded"
+	| "OutOfMemory"
+	| "InvalidSleepDuration"
+	| "SleepLimitExceeded"
+	| "RuntimeUnavailable";
+
+/**
+ * A runtime failure the host determined from its own state: the deadline it
+ * enforces, the quota and size counters it keeps, the isolate it disposed or
+ * saw V8 dispose. Error text never decides one, because a script's own message
+ * ("no memory found for this person") is arbitrary.
+ */
+class SandboxRuntimeFailure extends Error {
+	constructor(
+		readonly reason: RuntimeFailureName,
+		message: string,
+	) {
+		super(message);
+		this.name = reason;
+	}
+}
 const SENSITIVE_TRACE_KEY =
 	/(api[_-]?key|apikey|auth[_-]?data|auth[_-]?values|authorization|cookie|credential|password|private[_-]?key|secret|token)/i;
 
@@ -391,19 +418,33 @@ function classifyClientSdkActionResult(
 	return classifyToolError({ message });
 }
 
+/**
+ * Host-minted verdicts a guest error may carry back by token. Only the host
+ * mints tokens, so a script cannot forge a classification by naming its error.
+ */
+type HostErrorTrust = {
+	classifications: ReadonlyMap<string, TrustedErrorClassification>;
+	runtimeFailures: ReadonlyMap<string, RuntimeFailureName>;
+};
+
 function trustedRuntimeClassification(
 	error: Record<string, unknown>,
-	trustedClassifications?: ReadonlyMap<string, TrustedErrorClassification>,
+	trust?: HostErrorTrust,
 ): TrustedErrorClassification | undefined {
 	const token = error.classificationToken;
 	return typeof token === "string"
-		? trustedClassifications?.get(token)
+		? trust?.classifications.get(token)
 		: undefined;
 }
 
+/**
+ * Classify an error the script surfaced: its uncaught throw, or a host error it
+ * let propagate. Typed host errors keep their trusted classification; anything
+ * else is a ScriptError, whatever its message says.
+ */
 function classifyRuntimeError(
 	error: unknown,
-	trustedClassifications?: ReadonlyMap<string, TrustedErrorClassification>,
+	trust?: HostErrorTrust,
 ): NonNullable<RunScriptResult["error"]> {
 	const record =
 		error !== null && typeof error === "object"
@@ -415,10 +456,7 @@ function classifyRuntimeError(
 		rawMessage,
 		MAX_SCRIPT_ERROR_MESSAGE_BYTES,
 	);
-	const classification = trustedRuntimeClassification(
-		record,
-		trustedClassifications,
-	);
+	const classification = trustedRuntimeClassification(record, trust);
 	// Expected user-input errors (bad SDK args, business-rule failures) must NOT
 	// leak a server-bundle stack to the client — the message already carries the
 	// actionable "Invalid arguments for client.x.y: …" guidance, and the full
@@ -427,6 +465,7 @@ function classifyRuntimeError(
 	const isExpectedUserError =
 		rawName === "ClientSdkActionError" ||
 		rawName === "McpScopeRequiredError" ||
+		rawName === "AccessDeniedError" ||
 		rawName === "ToolUserError" ||
 		rawMessage === "Script must `export default` an async function" ||
 		/^Invalid arguments for /.test(rawMessage);
@@ -442,6 +481,9 @@ function classifyRuntimeError(
 	}
 	if (rawName === "McpScopeRequiredError") {
 		return { name: "McpScopeRequiredError", message, ...classification };
+	}
+	if (rawName === "AccessDeniedError") {
+		return { name: "AccessDeniedError", message, ...classification };
 	}
 	if (rawName === "ToolUserError") {
 		return {
@@ -459,8 +501,7 @@ function classifyRuntimeError(
 	// A trusted classification is bound only to an error the host threw (a
 	// ToolUserError subclass with its own name, or a ToolError), so it is a
 	// typed tool failure, never an isolate runtime failure: its code is the
-	// classification and its message is never matched against the runtime
-	// patterns below ("Memory" in copy must not read as OutOfMemory).
+	// classification ("Memory" in copy must not read as OutOfMemory).
 	if (classification) {
 		return {
 			name: classification.code === "VALIDATION" ? "ValidationError" : rawName,
@@ -469,31 +510,17 @@ function classifyRuntimeError(
 		};
 	}
 
-	if (rawName === "TimeoutError" || rawName === "AbortError" || rawName === "RuntimeUnavailable") {
-		return { name: rawName, message };
-	}
+	const runtimeFailure =
+		typeof record.classificationToken === "string"
+			? trust?.runtimeFailures.get(record.classificationToken)
+			: undefined;
+	if (runtimeFailure) return { name: runtimeFailure, message };
 
-	const isTimeout = /script execution timed out|TimeoutError/i.test(rawMessage);
-	const isQuota = /QuotaExceeded/.test(rawMessage);
-	const isSleepLimit = /SleepLimitExceeded/.test(rawMessage);
-	const isInvalidSleep = /InvalidSleepDuration/.test(rawMessage);
-	const isOversize = /OutputSizeExceeded/.test(rawMessage);
-	const isOom = /memory|allocation|isolate was disposed/i.test(rawMessage);
-	const name = isTimeout
-		? "TimeoutError"
-		: isQuota
-			? "QuotaExceeded"
-			: isSleepLimit
-				? "SleepLimitExceeded"
-				: isInvalidSleep
-					? "InvalidSleepDuration"
-					: isOversize
-						? "OutputSizeExceeded"
-						: isOom
-							? "OutOfMemory"
-							: "ScriptError";
+	// Whatever the script itself threw. Its name and message are the script's
+	// own text, so neither can make it a runtime failure: those are decided
+	// from host state (see `SandboxRuntimeFailure`).
 	return {
-		name,
+		name: "ScriptError",
 		message,
 		...(record.stack != null
 			? {
@@ -503,6 +530,19 @@ function classifyRuntimeError(
 					),
 				}
 			: {}),
+	};
+}
+
+/** The public error for a runtime failure the host itself determined. */
+function runtimeFailureError(
+	failure: SandboxRuntimeFailure,
+): NonNullable<RunScriptResult["error"]> {
+	return {
+		name: failure.reason,
+		message: boundScriptErrorText(
+			failure.message,
+			MAX_SCRIPT_ERROR_MESSAGE_BYTES,
+		),
 	};
 }
 
@@ -566,12 +606,16 @@ function clampLimits(limits?: RunLimits): Required<RunLimits> {
 export function sleepAgainstAbort(ms: number, signal: AbortSignal): Promise<void> {
 	if (!Number.isFinite(ms) || !Number.isInteger(ms) || ms < 0) {
 		return Promise.reject(
-			new Error("InvalidSleepDuration: ctx.sleep(ms) requires a non-negative integer"),
+			new SandboxRuntimeFailure(
+				"InvalidSleepDuration",
+				"InvalidSleepDuration: ctx.sleep(ms) requires a non-negative integer",
+			),
 		);
 	}
 	if (ms > MAX_SLEEP_MS) {
 		return Promise.reject(
-			new Error(
+			new SandboxRuntimeFailure(
+				"SleepLimitExceeded",
 				`SleepLimitExceeded: ctx.sleep(ms) allows at most ${MAX_SLEEP_MS}ms per call`,
 			),
 		);
@@ -636,21 +680,9 @@ async function loadIsolatedVm(): Promise<IsolatedVmRuntime | null> {
 
 function guestPreamble(errorTokenReader: string): string {
 	return `
-const __ctxData = JSON.parse(__ctx_json);
-const ctx = Object.freeze({
-  ...__ctxData,
-  sleep: async (ms) => {
-    const result = await __sleep.apply(undefined, [ms], { result: { promise: true, copy: true } });
-    if (result) {
-      const envelope = JSON.parse(result);
-      const error = new Error(envelope.error.message);
-      error.name = envelope.error.name;
-      throw error;
-    }
-  },
-});
-const { client, takeErrorToken: ${errorTokenReader} } = (() => {
+const { client, ctx, takeErrorToken: ${errorTokenReader} } = (() => {
 const __hostSdkDispatch = __sdk_dispatch;
+const __hostSleep = __sleep;
 try {
   globalThis.__sdk_dispatch = undefined;
   delete globalThis.__sdk_dispatch;
@@ -765,6 +797,21 @@ function __makeClient(orgPath) {
 
 return {
   client: __makeClient([]),
+  ctx: Object.freeze({
+    ...__parseJson(__ctx_json),
+    sleep: async (ms) => {
+      const result = await __hostSleep.apply(undefined, [ms], { result: { promise: true, copy: true } });
+      if (result) {
+        const envelope = __parseJson(result);
+        const error = new Error(envelope.error.message);
+        error.name = envelope.error.name;
+        if (typeof envelope.error.classificationToken === 'string') {
+          __rememberTrustedError(error, envelope.error.classificationToken);
+        }
+        throw error;
+      }
+    },
+  }),
   takeErrorToken(error) {
     const trusted = __readTrustedError(error);
     __forgetTrustedError(error);
@@ -928,6 +975,16 @@ export async function runScript(
 		});
 		return token;
 	};
+	const trustedRuntimeFailures = new Map<string, RuntimeFailureName>();
+	const trustRuntimeFailure = (reason: RuntimeFailureName): string => {
+		const token = randomUUID();
+		trustedRuntimeFailures.set(token, reason);
+		return token;
+	};
+	const hostErrorTrust: HostErrorTrust = {
+		classifications: trustedErrorClassifications,
+		runtimeFailures: trustedRuntimeFailures,
+	};
 	let sdkCalls = 0;
 	// Total calls skipped under dry-run, independent of preview retention so a
 	// truncated preview never undercounts the dry-run surface.
@@ -939,12 +996,17 @@ export async function runScript(
 	// crossing traffic after a message, call, or log budget is exhausted.
 	// Hoisted because `isolate` is assigned inside the try block below.
 	let isolate: import("isolated-vm").Isolate | null = null;
-	const terminalState = { name: "", message: "" };
+	// Meaningful only once `terminated` is set.
+	const terminalState: { name: RuntimeFailureName; message: string } = {
+		name: "AbortError",
+		message: "",
+	};
 	let terminated = false;
 
 	const quotaMessage = `QuotaExceeded: SDK call quota of ${limits.sdkCallQuota} reached`;
 	const oversizeMessage = `OutputSizeExceeded: a single bridge message exceeded ${limits.messageBytes} bytes (SDK call payload/result or return value)`;
 	const consoleFloodMessage = `OutputSizeExceeded: console output continued after the ${limits.logBytes}-byte log cap`;
+	const outOfMemoryMessage = `OutOfMemory: script exceeded the ${limits.memoryMb} MB isolate memory limit`;
 	const terminalEnvelope = () =>
 		terminated
 			? JSON.stringify({
@@ -964,7 +1026,7 @@ export async function runScript(
 	 * not help — the guest can catch it and loop, and every loop iteration still
 	 * crosses a payload. Disposing the isolate makes the failure uncatchable.
 	 */
-	function terminateRun(name: string, message: string): void {
+	function terminateRun(name: RuntimeFailureName, message: string): void {
 		if (terminated) return;
 		terminalState.name = name;
 		terminalState.message = message;
@@ -984,8 +1046,8 @@ export async function runScript(
 		}
 	}
 
-	function terminalError(): Error {
-		return Object.assign(new Error(terminalState.message), { name: terminalState.name });
+	function terminalError(): SandboxRuntimeFailure {
+		return new SandboxRuntimeFailure(terminalState.name, terminalState.message);
 	}
 
 	function assertActive(): void {
@@ -1062,6 +1124,18 @@ export async function runScript(
 	// typed SDK errors in envelopes, including failures during workspace lookup.
 	function sdkErrorEnvelope(error: unknown): string | null {
 		if (terminated) return terminalEnvelope();
+		if (error instanceof SandboxRuntimeFailure) {
+			const json = JSON.stringify({
+				__lobu_sdk_dispatch: 1,
+				ok: false,
+				error: {
+					name: error.reason,
+					message: error.message,
+					classificationToken: trustRuntimeFailure(error.reason),
+				},
+			});
+			return guardMessage(json) ? json : terminalEnvelope();
+		}
 		if (error instanceof McpScopeRequiredError) {
 			requiredMcpScopes.add(error.requiredScope);
 			const json = JSON.stringify({
@@ -1072,6 +1146,20 @@ export async function runScript(
 					message: error.message,
 					classificationToken:
 						trustErrorClassification("PERMISSION"),
+				},
+			});
+			return guardMessage(json) ? json : terminalEnvelope();
+		}
+		// A role or scope gate refused the call: a permission denial, never
+		// retryable, whatever its rendered guidance says.
+		if (error instanceof AccessDeniedError) {
+			const json = JSON.stringify({
+				__lobu_sdk_dispatch: 1,
+				ok: false,
+				error: {
+					name: error.name,
+					message: error.message,
+					classificationToken: trustErrorClassification("PERMISSION"),
 				},
 			});
 			return guardMessage(json) ? json : terminalEnvelope();
@@ -1140,9 +1228,10 @@ export async function runScript(
 		ivm = await raceAbort(loadIsolatedVm(), abortController.signal);
 		assertActive();
 		if (!ivm) {
-			throw Object.assign(new Error(
+			throw new SandboxRuntimeFailure(
+				"RuntimeUnavailable",
 				"isolated-vm is not installed for this platform. Install with `bun install` on a supported Node version (22–24 with prebuilt binaries, or any version with python3 + build-essential available).",
-			), { name: "RuntimeUnavailable" });
+			);
 		}
 		// Deferred: `compiler-core` pulls in esbuild and resolves the connector
 		// SDK entry at module scope, neither of which a run-free process needs.
@@ -1216,8 +1305,8 @@ export async function runScript(
 		return {
 			success: false,
 			logs,
-			error: terminated || (err instanceof Error && err.name === "RuntimeUnavailable")
-				? classifyRuntimeError(err)
+			error: err instanceof SandboxRuntimeFailure
+				? runtimeFailureError(err)
 				: {
 				name: isSourceCompileFailure ? "ValidationError" : "CompileError",
 				message,
@@ -1488,7 +1577,8 @@ export async function runScript(
 			// `extractExport` reads a JSON Schema; a partially-cut schema would
 			// parse as a valid-but-wrong contract, so that path keeps hard-fail.
 			if (options.extractExport && envelopeBytes > limits.outputBytes) {
-				throw new Error(
+				throw new SandboxRuntimeFailure(
+					"OutputSizeExceeded",
 					`OutputSizeExceeded: extracted export exceeded ${limits.outputBytes} bytes`,
 				);
 			}
@@ -1496,7 +1586,7 @@ export async function runScript(
 			// previewing, so bound that copy BEFORE parsing: a huge return can
 			// otherwise force an arbitrarily large host JSON.parse.
 			if (!options.extractExport && envelopeBytes > limits.messageBytes) {
-				throw new Error(oversizeMessage);
+				throw new SandboxRuntimeFailure("OutputSizeExceeded", oversizeMessage);
 			}
 		}
 		const parsedResult = returnJson ? JSON.parse(returnJson) : null;
@@ -1521,10 +1611,7 @@ export async function runScript(
 				return {
 					success: false,
 					logs,
-					error: classifyRuntimeError(
-						scriptError ?? {},
-						trustedErrorClassifications,
-					),
+					error: classifyRuntimeError(scriptError ?? {}, hostErrorTrust),
 					durationMs: Date.now() - started,
 					sdkCalls,
 					skippedCalls,
@@ -1586,13 +1673,24 @@ export async function runScript(
 			sideEffectPreview,
 		};
 	} catch (err) {
-		// A terminal failure disposes the isolate, which rejects with a raw
-		// termination error — report the terminal reason instead.
-		const e = (terminated ? terminalError() : err) as Error;
+		// Name the runtime failure from host state, never from the rejection's
+		// text. Every host disposal sets `terminated` first (or `finished`,
+		// after this block), so an isolate disposed without it was disposed by
+		// V8, which happens only when it exceeds its memory limit. Past the
+		// deadline, the rejection is isolated-vm's own run timeout.
+		if (!terminated && isolate?.isDisposed) {
+			terminateRun("OutOfMemory", outOfMemoryMessage);
+		} else if (!terminated && Date.now() >= deadline) {
+			terminateRun("TimeoutError", timeoutMessage);
+		}
+		const e = terminated ? terminalError() : err;
 		return {
 			success: false,
 			logs,
-			error: classifyRuntimeError(e),
+			error:
+				e instanceof SandboxRuntimeFailure
+					? runtimeFailureError(e)
+					: classifyRuntimeError(e),
 			durationMs: Date.now() - started,
 			sdkCalls,
 			skippedCalls,

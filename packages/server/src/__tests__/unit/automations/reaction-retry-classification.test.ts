@@ -13,6 +13,15 @@ describe('reactionErrorIsNonTransient', () => {
     expect(reactionErrorIsNonTransient('ScriptError: CrossOrgAccessDenied: unavailable')).toBe(true);
   });
 
+  it('stops on a failure the host classified as not retryable, whatever its name', () => {
+    const denial =
+      'AccessDeniedError: manage_agents.delete requires admin or owner access in synthetic-org. Your role in synthetic-org is member.';
+    expect(reactionErrorIsNonTransient(denial, false)).toBe(true);
+    expect(reactionErrorIsNonTransient(denial)).toBe(true);
+    expect(reactionErrorIsNonTransient('ToolUserError: entity 7 was not found', false)).toBe(true);
+    expect(reactionErrorIsNonTransient('ToolError: upstream returned 503', true)).toBe(false);
+  });
+
   it('leaves transient errors retryable', () => {
     expect(reactionErrorIsNonTransient('Error: upstream returned 503')).toBe(false);
     expect(reactionErrorIsNonTransient('FetchError: network connection lost')).toBe(false);
