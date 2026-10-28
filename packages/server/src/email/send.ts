@@ -1,7 +1,6 @@
 import { render } from '@react-email/render';
 import type { Env } from '@lobu/connector-sdk';
 import type { ReactElement } from 'react';
-import { Resend } from 'resend';
 
 type EmailCategory = 'auth' | 'invite';
 
@@ -19,37 +18,57 @@ interface TransactionalEmailResult {
   id: string | null;
 }
 
-const DEV_FALLBACK_FROM = 'Lobu <onboarding@resend.dev>';
-
 function resolveFrom(env: Env, category: EmailCategory, override?: string): string | null {
   if (override) return override;
   const configured = category === 'auth' ? env.EMAIL_FROM_AUTH : env.EMAIL_FROM_INVITES;
   if (configured) return configured;
-  const runtimeNodeEnv = env.NODE_ENV || process.env.NODE_ENV || 'development';
-  if (runtimeNodeEnv !== 'production') return DEV_FALLBACK_FROM;
   return null;
 }
 
+interface CloudflareSendResult {
+  delivered: string[];
+  message_id: string;
+  permanent_bounces: string[];
+  queued: string[];
+  suppressed_recipients: string[];
+}
+
+interface CloudflareSendResponse {
+  success: boolean;
+  errors: Array<{ code: number; message: string }>;
+  messages: Array<{ code: number; message: string }>;
+  result: CloudflareSendResult | null;
+}
+
 /**
- * Send a transactional email via Resend with deliverability best practices:
+ * Send a transactional email via Cloudflare Email Sending with deliverability
+ * best practices:
  *  - React Email component rendered to multipart html + plain-text body
  *  - List-Unsubscribe + List-Unsubscribe-Post (one-click) when EMAIL_UNSUBSCRIBE is set
  *  - Reply-To pointing at a monitored inbox
- *  - Category tag for per-flow deliverability metrics
+ *
+ * Cloudflare has no equivalent of Resend's per-message tags, so the category
+ * is recorded in server logs only. Delivery is fail-closed: any API-level
+ * failure, or a definitive non-delivery of the recipient (hard bounce, or a
+ * suppression drop when the sending domain is set to drop suppressed
+ * recipients instead of rejecting the request), throws instead of returning
+ * a false id.
  */
 export async function sendTransactionalEmail(
   input: TransactionalEmailInput
 ): Promise<TransactionalEmailResult> {
   const { env, to, subject, react, category, fromOverride } = input;
 
-  if (!env.RESEND_API_KEY) {
-    throw new Error(`Email delivery is not configured (RESEND_API_KEY missing) for ${category}.`);
+  if (!env.CLOUDFLARE_EMAIL_API_TOKEN || !env.CLOUDFLARE_EMAIL_ACCOUNT_ID) {
+    throw new Error(
+      `Email delivery is not configured (CLOUDFLARE_EMAIL_API_TOKEN / CLOUDFLARE_EMAIL_ACCOUNT_ID missing) for ${category}.`
+    );
   }
 
   const from = resolveFrom(env, category, fromOverride);
   if (!from) {
     const requiredVar = category === 'auth' ? 'EMAIL_FROM_AUTH' : 'EMAIL_FROM_INVITES';
-    throw new Error(`${requiredVar} is required for ${category} email delivery in production.`);
+    throw new Error(`${requiredVar} is required for ${category} email delivery.`);
   }
 
   const [html, text] = await Promise.all([render(react), render(react, { plainText: true })]);
@@ -63,29 +82,79 @@ export async function sendTransactionalEmail(
     headers['List-Unsubscribe-Post'] = 'List-Unsubscribe=One-Click';
   }
 
-  const resend = new Resend(env.RESEND_API_KEY);
-  const { data, error } = await resend.emails.send({
-    from,
-    to,
-    subject,
-    html,
-    text,
-    ...(env.EMAIL_REPLY_TO ? { replyTo: env.EMAIL_REPLY_TO } : {}),
-    ...(Object.keys(headers).length > 0 ? { headers } : {}),
-    tags: [{ name: 'category', value: category }],
-  });
-
-  if (error) {
-    console.error(
-      { to, from, category, error },
-      '[Email] Resend failed to deliver transactional email'
+  let response: globalThis.Response;
+  try {
+    response = await fetch(
+      `https://api.cloudflare.com/client/v4/accounts/${env.CLOUDFLARE_EMAIL_ACCOUNT_ID}/email/sending/send`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${env.CLOUDFLARE_EMAIL_API_TOKEN}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          to,
+          from,
+          subject,
+          html,
+          text,
+          ...(env.EMAIL_REPLY_TO ? { reply_to: env.EMAIL_REPLY_TO } : {}),
+          ...(Object.keys(headers).length > 0 ? { headers } : {}),
+        }),
+        signal: AbortSignal.timeout(15_000),
+      }
     );
-    throw new Error(error.message || `${category} email delivery failed.`);
+  } catch (err) {
+    console.error(
+      { to, from, category, err },
+      '[Email] Cloudflare Email Sending request failed'
+    );
+    throw new Error(`${category} email delivery failed: request error.`);
+  }
+
+  let payload: CloudflareSendResponse;
+  try {
+    payload = (await response.json()) as CloudflareSendResponse;
+  } catch {
+    console.error(
+      { to, from, category, status: response.status },
+      '[Email] Cloudflare Email Sending returned non-JSON response'
+    );
+    throw new Error(`${category} email delivery failed (status ${response.status}).`);
+  }
+
+  if (!response.ok || !payload.success) {
+    const first = payload.errors?.[0];
+    console.error(
+      { to, from, category, status: response.status, error: first },
+      '[Email] Cloudflare Email Sending failed to deliver transactional email'
+    );
+    const detail = first ? ` (${first.code}: ${first.message})` : '';
+    throw new Error(`${category} email delivery failed${detail}.`);
+  }
+
+  const result = payload.result;
+  const id = result?.message_id ?? null;
+  if (
+    result &&
+    (result.permanent_bounces.includes(to) || result.suppressed_recipients.includes(to))
+  ) {
+    console.error(
+      { to, from, category, emailId: id, result },
+      '[Email] Cloudflare Email Sending accepted but did not deliver to recipient'
+    );
+    throw new Error(`${category} email was not delivered to recipient.`);
+  }
+  if (result && (result.permanent_bounces.length > 0 || result.suppressed_recipients.length > 0)) {
+    console.warn(
+      { to, from, category, emailId: id, result },
+      '[Email] Cloudflare Email Sending reported bounces or suppressions'
+    );
   }
 
   console.info(
-    { to, from, category, emailId: data?.id ?? null },
+    { to, from, category, emailId: id },
     '[Email] Transactional email queued'
   );
-  return { id: data?.id ?? null };
+  return { id };
 }

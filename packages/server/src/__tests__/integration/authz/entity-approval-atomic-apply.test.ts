@@ -643,7 +643,10 @@ describe("entity approval apply shares the terminal approval transaction", () =>
 			await approveWithTerminalFailure(
 				queued.runId,
 				ctxFor(org.id, { userId: user.id }),
-				{ RESEND_API_KEY: "re_test_atomicity" } as Env,
+				{
+					CLOUDFLARE_EMAIL_ACCOUNT_ID: "test_account",
+					CLOUDFLARE_EMAIL_API_TOKEN: "cf_test_atomicity",
+				} as Env,
 			);
 		} finally {
 			emailRequestCount = emailRequest.mock.calls.length;
