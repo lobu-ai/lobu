@@ -111,27 +111,6 @@ export class OrchestratorError extends BaseError {
   }
 }
 
-/**
- * Thrown when a worker spawn is declined because another replica already holds
- * the per-conversation lock for this turn — i.e. another pod legitimately OWNS
- * this conversation turn and is running it to completion.
- *
- * This is NOT a failure. It is the cross-pod "handled elsewhere" signal. Under
- * N>1 app replicas both pods drain the shared `thread_message` queue and race to
- * spawn the same per-conversation worker; exactly one wins the advisory lock.
- * The loser MUST drop silently — no user-facing error, no Critical log, no
- * retry (the winner holds the lock for the entire worker subprocess lifetime, so
- * retrying can never win). The winning pod discharges the shared turn-liveness
- * marker on its successful reply, so the user still receives the answer.
- *
- * Distinguished by type (not a magic message string) so the orchestrator can
- * tell "owned by another pod" apart from a genuine worker-startup failure (OOM,
- * spawn failure, bad config) which MUST still surface an error to the user.
- */
-export class ConversationOwnedElsewhereError extends BaseError {
-  readonly name = "ConversationOwnedElsewhereError";
-}
-
 export class ConfigError extends BaseError {
   readonly name = "ConfigError";
 }
