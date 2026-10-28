@@ -31,6 +31,8 @@ declare module 'hono' {
       token: string;
       expiresAt: Date;
       activeOrganizationId?: string | null;
+      /** Better Auth's creation-time column; see `isTokenDerivedSession`. */
+      userAgent?: string | null;
     } | null;
     organizationId: string | null;
     memberRole: string | null;
