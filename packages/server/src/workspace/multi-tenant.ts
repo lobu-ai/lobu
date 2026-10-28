@@ -38,6 +38,7 @@ import type {
 } from './types';
 import { listManagedAuthConnectorOffers } from './managed-auth-discovery';
 import { organizationIdLiveSql, organizationLiveSql } from './deletion-state';
+import { getLiveOrganizationSlug } from './organization-slug';
 import { resolveSession, sessionCookieCandidates } from '../auth/resolve-session';
 
 /**
@@ -869,11 +870,7 @@ export class MultiTenantProvider implements WorkspaceProvider {
   }
 
   async getOrgSlug(orgId: string): Promise<string | null> {
-    const sql = getDb();
-    const rows = await sql`
-      SELECT slug FROM "organization" WHERE id = ${orgId} AND ${sql.unsafe(organizationLiveSql('organization'))} LIMIT 1
-    `;
-    return rows[0] ? (rows[0].slug as string) : null;
+    return getLiveOrganizationSlug(orgId);
   }
 
   async getOrgSlugs(orgIds: string[]): Promise<Map<string, string>> {
