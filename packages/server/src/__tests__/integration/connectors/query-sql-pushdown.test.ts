@@ -165,7 +165,12 @@ describe('query_sql connection pushdown', () => {
     // table an agent could read as "no data" (#2042).
     await expect(
       querySql({ sql: 'SELECT id, name FROM qsp_ext LIMIT 1', connection: 'qsp-ext-db' }, {}, ctx)
-    ).rejects.toThrow(/top-level LIMIT/i);
+    ).rejects.toMatchObject({
+      message: expect.stringMatching(/top-level LIMIT/i),
+      code: 'VALIDATION',
+      httpStatus: 400,
+      retryable: false,
+    });
   }, 60_000);
 
   it('rejects duplicate output column names', async () => {

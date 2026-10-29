@@ -227,6 +227,10 @@ function hasTopLevelLimitOrOffset(sql: string): boolean {
   return false;
 }
 
+function queryValidationError(message: string) {
+  return Object.assign(new Error(message), { status: 400 });
+}
+
 /**
  * Shared read-only gate for both the memory feed (sync) and live query(). It is
  * a structural check, NOT a SQL parser: the HARD write seal is the read-only
@@ -248,20 +252,20 @@ function hasTopLevelLimitOrOffset(sql: string): boolean {
  */
 function validateReadOnlySelect(raw: string): string {
   const stripped = raw.trim().replace(/;\s*$/, '');
-  if (!stripped) throw new Error('query is empty');
+  if (!stripped) throw queryValidationError('query is empty');
   if (stripped.includes(';')) {
-    throw new Error('query must be a single statement (no embedded ";").');
+    throw queryValidationError('query must be a single statement (no embedded ";").');
   }
   if (/\$\d/.test(stripped) || /(^|[^:]):[A-Za-z_]/.test(stripped)) {
-    throw new Error('query must not contain bind parameters ($1, :name).');
+    throw queryValidationError('query must not contain bind parameters ($1, :name).');
   }
   // Allow a leading "(" for "(SELECT …) UNION …" / parenthesized selects.
   const head = stripped.replace(/^\s*\(+\s*/, '');
   if (!/^(select|with)\b/i.test(head)) {
-    throw new Error('query must be a single read-only SELECT (or WITH … SELECT).');
+    throw queryValidationError('query must be a single read-only SELECT (or WITH … SELECT).');
   }
   if (hasTopLevelLimitOrOffset(stripped)) {
-    throw new Error(
+    throw queryValidationError(
       'query must not include a top-level LIMIT/OFFSET — the connector adds pagination automatically (an inner LIMIT inside a subquery is fine).',
     );
   }
