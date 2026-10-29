@@ -10,11 +10,9 @@ import {
 } from "@lobu/core";
 import {
   DEFAULT_CONTEXT_NAME,
-  getCurrentContextName,
   LOBU_CONFIG_DIR,
   resolveContext,
   setActiveOrg,
-  setCurrentContext,
 } from "./context.js";
 import { refreshTokens } from "./oauth.js";
 
@@ -129,28 +127,18 @@ export async function getAgentApiToken(
   const token = await getCredentialsToken(contextName);
   if (!token) return null;
 
-  let creds = await loadCredentials(contextName);
-  if (!creds?.localWorkerToken && (await isLoopbackContext(contextName))) {
-    creds = await tryLocalInit(contextName);
-  }
+  const creds = await loadCredentials(contextName);
   return creds?.localWorkerToken ?? token;
 }
 
 async function getCredentialsToken(
   contextName?: string
 ): Promise<string | null> {
-  let creds = await loadCredentials(contextName);
-  if (!creds) {
-    creds = await tryLocalInit(contextName);
-  } else if (
-    !creds.localWorkerToken &&
-    (await isLoopbackContext(contextName))
-  ) {
-    // Heal credentials saved by older CLIs that stored only the local-init
-    // worker PAT as accessToken. Re-mint so admin REST/MCP get the session
-    // token while chat keeps the companion worker PAT.
-    creds = (await tryLocalInit(contextName)) ?? creds;
-  }
+  // Mint only when the context has no credential at all. A stored credential
+  // (an OAuth login, a `lobu login --token` PAT, or an earlier local-init) is
+  // the user's choice for this context; a token lookup must never replace it.
+  const creds =
+    (await loadCredentials(contextName)) ?? (await tryLocalInit(contextName));
   if (!creds) return null;
   if (!credentialNeedsRefresh(creds)) return creds.accessToken;
 
@@ -225,32 +213,14 @@ async function tryLocalInit(contextName?: string): Promise<Credentials | null> {
     if (orgSlug) {
       await setActiveOrg(orgSlug, target.name).catch(() => undefined);
     }
-    // Auto-switch the active context so subsequent `lobu apply` / `lobu chat`
-    // invocations (without `-c <name>`) hit the same loopback server. Without
-    // this, a user previously on the `lobu` cloud context who runs `lobu run`
-    // locally still sees cloud for every other command — and the fact that a
-    // local context exists is invisible. Announce on stderr so the change is
-    // visible but doesn't pollute stdout pipelines.
-    try {
-      const current = await getCurrentContextName();
-      if (current !== target.name) {
-        await setCurrentContext(target.name);
-        process.stderr.write(
-          `Switched active context to "${target.name}" (lobu run)\n`
-        );
-      }
-    } catch {
-      // Best-effort — a write failure here shouldn't break the auth flow.
-    }
+    // Never switch the global current context here: this runs inside token
+    // lookups such as `lobu whoami -c local`, and a lookup must not retarget
+    // every later `lobu` command. An interactive `lobu run` makes that switch
+    // itself (`announceLocalSignIn` in commands/dev.ts).
     return creds;
   } catch {
     return null;
   }
-}
-
-async function isLoopbackContext(contextName?: string): Promise<boolean> {
-  const target = await resolveContext(contextName);
-  return isLoopbackUrl(target.url);
 }
 
 function isLoopbackUrl(url: string): boolean {
