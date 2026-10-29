@@ -112,7 +112,10 @@ async function driveProxiedTurn(proxy: InstanceType<typeof SecretProxy>) {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        authorization: "Bearer worker-token-test",
+        authorization: `Bearer ${generateWorkerToken(
+          "synthetic-user", "synthetic-conversation", "synthetic-deployment",
+          { agentId: "agent-1", channelId: "synthetic-channel" }
+        )}`,
       },
       body: JSON.stringify({ model: "zai/glm-5.2", prompt: "hi" }),
     });
@@ -144,8 +147,8 @@ describe("secret proxy — inference-provider health writeback", () => {
   // A terminal provider answer must ALSO stop the wedged turn from renewing its
   // own liveness deadline. This half is easy to ship INERT: it only runs when
   // the request carries a SIGNED worker token, and the other tests in this file
-  // authenticate with an unsigned placeholder bearer, so they would pass
-  // whether or not the wiring exists. These drive a real signed token.
+  // authenticate without the turn's routing claims, so they would pass
+  // whether or not the wiring exists. These drive the signed turn credential.
   //
   // Every helper below builds its side the way PRODUCTION builds it, and that
   // is load-bearing rather than tidiness. The two sides come from two different

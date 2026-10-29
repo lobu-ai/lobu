@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { createBuiltinSecretRef, generateWorkerToken, moduleRegistry, SDK_COMPAT_PROTOCOLS, type ModuleInterface, type SdkCompat } from "@lobu/core";
 import bundledProviders from "../../../../../config/providers.json";
 import * as providerSecrets from "../../lobu/stores/provider-secrets.js";
@@ -27,8 +27,14 @@ const resolveInferenceProviderConfigSpy = spyOn(
 // (which imports the store) picks up the stub.
 const { SecretProxy, generatePlaceholder, __resetPlaceholderCacheForTests } = await import("../proxy/secret-proxy.js");
 
+const previousEncryptionKey = process.env.ENCRYPTION_KEY;
+beforeAll(() => {
+  process.env.ENCRYPTION_KEY = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+});
 afterAll(() => {
   resolveInferenceProviderConfigSpy.mockRestore();
+  if (previousEncryptionKey === undefined) delete process.env.ENCRYPTION_KEY;
+  else process.env.ENCRYPTION_KEY = previousEncryptionKey;
 });
 
 describe("SecretProxy — authenticated organization alias isolation", () => {
@@ -60,12 +66,6 @@ describe("SecretProxy — authenticated organization alias isolation", () => {
     profile = null;
     profileReads = 0;
     __resetPlaceholderCacheForTests();
-    const priorKey = process.env.ENCRYPTION_KEY;
-    process.env.ENCRYPTION_KEY = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-    restore.push(() => {
-      if (priorKey === undefined) delete process.env.ENCRYPTION_KEY;
-      else process.env.ENCRYPTION_KEY = priorKey;
-    });
     const registry = moduleRegistry as unknown as { modules: Map<string, ModuleInterface> };
     const priorModules = registry.modules;
     registry.modules = new Map();
@@ -298,7 +298,7 @@ describe("SecretProxy — org custom-upstream slug routing (URL invariant)", () 
     }) as typeof fetch;
     try {
       const res = await proxy.getApp().request("/api/proxy/openai-codex/a/agent-1/codex/responses", {
-        method: "POST", headers: { authorization: "Bearer worker-token-test", "content-type": "application/json",
+        method: "POST", headers: { authorization: `Bearer ${generateWorkerToken("synthetic-user", "synthetic-conversation", "synthetic-deployment", { agentId: "agent-1", organizationId: "org-1", channelId: "synthetic-channel" })}`, "content-type": "application/json",
           "ChatGPT-Account-Id": "attacker-account" }, body: JSON.stringify({ model: "gpt-5.6-luna", stream: true }),
       });
       expect(res.status).toBe(hasIdentity ? 200 : 401);
@@ -358,7 +358,7 @@ describe("SecretProxy — org custom-upstream slug routing (URL invariant)", () 
           method: "POST",
           headers: {
             "content-type": "application/json",
-            authorization: "Bearer worker-token-test",
+            authorization: `Bearer ${generateWorkerToken("synthetic-user", "synthetic-conversation", "synthetic-deployment", { agentId: "agent-1", organizationId: "org-1", channelId: "synthetic-channel" })}`,
           },
           body: JSON.stringify({ model: "myzai/glm-4.6", prompt: "hi" }),
         });
@@ -416,7 +416,7 @@ describe("SecretProxy — org custom-upstream slug routing (URL invariant)", () 
           method: "POST",
           headers: {
             "content-type": "application/json",
-            authorization: "Bearer worker-token-test",
+            authorization: `Bearer ${generateWorkerToken("synthetic-user", "synthetic-conversation", "synthetic-deployment", { agentId: "agent-1", organizationId: "org-1", channelId: "synthetic-channel" })}`,
           },
           body: JSON.stringify({ model: "glm-5.2", prompt: "hi" }),
         });

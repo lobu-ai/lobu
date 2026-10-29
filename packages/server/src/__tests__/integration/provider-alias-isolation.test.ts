@@ -1,6 +1,11 @@
 import type { AddressInfo } from 'node:net';
 import { serve } from '@hono/node-server';
 import { generateWorkerToken, moduleRegistry, type ModuleInterface } from '@lobu/core';
+import { Hono } from 'hono';
+import { createGatewayApp } from '../../gateway/cli/gateway';
+import { createLobuAuthBridge, createLobuOrgContextMiddleware } from '../../lobu/gateway';
+import { buildWrapperApp } from '../../server-lifecycle';
+import type { Env } from '../../index';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { ApiKeyProviderModule } from '../../gateway/auth/api-key-provider-module';
 import { ProviderCatalogService } from '../../gateway/auth/provider-catalog';
@@ -69,7 +74,13 @@ describe('provider alias isolation over HTTP and Postgres', () => {
       proxy.registerUpstream(module.getUpstreamConfig()!, module.providerId);
       proxy.setAuthProfilesManager(profiles as never);
       proxy.setSystemKeyResolver(() => ({ value: 'synthetic-operator-key', kind: 'api-key' }));
-      const server = serve({ fetch: proxy.getApp().fetch, port: 0, hostname: '127.0.0.1' });
+      const gateway = new Hono();
+      gateway.use('*', createLobuAuthBridge());
+      gateway.use('*', createLobuOrgContextMiddleware());
+      gateway.route('/', createGatewayApp({ secretProxy: proxy, workerGateway: null, mcpProxy: null }));
+      const wrapper = buildWrapperApp({ ENVIRONMENT: 'test', RATE_LIMIT_ENABLED: 'false',
+        BETTER_AUTH_SECRET: 'test-auth-secret-for-testing-only' } as Env, gateway);
+      const server = serve({ fetch: wrapper.fetch, port: 0, hostname: '127.0.0.1' });
       servers.push(server);
       if (!server.listening) await new Promise<void>(resolve => server.once('listening', resolve));
       origins.push(`http://127.0.0.1:${(server.address() as AddressInfo).port}`);
@@ -94,7 +105,7 @@ describe('provider alias isolation over HTTP and Postgres', () => {
   });
 
   async function request(replica: number, scope: typeof scopes[number], credential = scope.token) {
-    const response = await fetch(`${origins[replica]}/api/proxy/${slug}/a/${scope.agent}/o/${scope.org}/responses`, {
+    const response = await fetch(`${origins[replica]}/lobu/api/proxy/${slug}/a/${scope.agent}/o/${scope.org}/responses`, {
       method: 'POST', headers: { authorization: `Bearer ${credential}`, 'content-type': 'application/json' },
       body: JSON.stringify({ model: 'synthetic-model', stream: true }),
     });
@@ -124,5 +135,36 @@ describe('provider alias isolation over HTTP and Postgres', () => {
     expect(await request(1, b!)).toBe(401);
     expect(requests).toHaveLength(count);
     expect(profiles.getBestProfile).not.toHaveBeenCalled();
+  });
+  it('rejects unauthenticated static-provider requests before credential lookup or egress', async () => {
+    const a = scopes[0]!;
+    const stored = await createInferenceProvider({ organizationId: a.org, slug: 'openai', kind: 'openai',
+      apiKey: 'synthetic-static-key', capabilities: { text: { model: 'synthetic-model' } } });
+    expect('error' in stored).toBe(false);
+    const count = requests.length;
+    for (const credential of ['not-a-verifiable-worker-token', 'lobu-proxy', '']) {
+      const response = await fetch(`${origins[0]}/lobu/api/proxy/openai/a/${a.agent}/o/${a.org}/responses`, {
+        method: 'POST', headers: { authorization: `Bearer ${credential}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'synthetic-model', stream: true }),
+      });
+      await response.text();
+      expect(response.status).toBe(401);
+    }
+    expect(requests).toHaveLength(count);
+    const allowed = await fetch(`${origins[1]}/lobu/api/proxy/openai/a/${a.agent}/o/${a.org}/responses`, {
+      method: 'POST', headers: { authorization: `Bearer ${a.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'synthetic-model', stream: true }),
+    });
+    await allowed.text();
+    expect(allowed.status).toBe(200);
+    expect(requests.at(-1)!.authorization).toBe('Bearer synthetic-static-key');
+    const afterAllowed = requests.length;
+    const spoofed = await fetch(`${origins[0]}/lobu/api/proxy/openai/a/${a.agent}/o/${a.org}/u/synthetic-other-user/responses`, {
+      method: 'POST', headers: { authorization: `Bearer ${a.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'synthetic-model', stream: true }),
+    });
+    await spoofed.text();
+    expect(spoofed.status).toBe(403);
+    expect(requests).toHaveLength(afterAllowed);
   });
 });

@@ -1,5 +1,6 @@
-import { beforeEach, describe, expect, test } from "bun:test";
-import { createBuiltinSecretRef } from "@lobu/core";
+import { afterAll, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { createBuiltinSecretRef, generateWorkerToken } from "@lobu/core";
+import * as providerSecrets from "../../lobu/stores/provider-secrets.js";
 import {
   __resetPlaceholderCacheForTests,
   generatePlaceholder,
@@ -10,6 +11,15 @@ import {
   storeSecretMapping,
 } from "../proxy/secret-proxy.js";
 import type { SecretStore } from "../secrets/index.js";
+
+const previousEncryptionKey = process.env.ENCRYPTION_KEY;
+beforeAll(() => {
+  process.env.ENCRYPTION_KEY = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+});
+afterAll(() => {
+  if (previousEncryptionKey === undefined) delete process.env.ENCRYPTION_KEY;
+  else process.env.ENCRYPTION_KEY = previousEncryptionKey;
+});
 
 describe("storeSecretMapping (in-memory cache)", () => {
   beforeEach(() => {
@@ -169,7 +179,9 @@ describe("lookupPlaceholderMapping org scoping", () => {
 });
 
 describe("SecretProxy user-scoped provider routing", () => {
-  test("passes user context into provider credential lookup", async () => {
+  test.each(["matching", "spoofed", "conflicting-header"])("binds user context to the signed caller (%s)", async (mode) => {
+    const configSpy = spyOn(providerSecrets, "resolveInferenceProviderConfig")
+      .mockResolvedValue({ custom: false });
     const proxy = new SecretProxy(
       {
         defaultUpstreamUrl: "https://default.example.com",
@@ -227,15 +239,27 @@ describe("SecretProxy user-scoped provider routing", () => {
           method: "POST",
           headers: {
             "content-type": "application/json",
-            // Any bearer token satisfies the "URL names an agent → must carry
-            // auth" check added to defend against unauthenticated callers
-            // spending another agent's provider quota; it falls through the
-            // placeholder-swap path so user-scoped routing is still exercised.
-            authorization: "Bearer worker-token-test",
+            authorization: `Bearer ${generateWorkerToken(
+              mode === "matching" ? "user-42" : "synthetic-other-user",
+              "synthetic-conversation", "synthetic-deployment",
+              { agentId: "agent-1", organizationId: "org-1", channelId: "synthetic-channel" }
+            )}`,
+            ...(mode === "conflicting-header" ? {
+              "x-lobu-worker-token": generateWorkerToken(
+                "user-42", "synthetic-conversation", "synthetic-deployment",
+                { agentId: "agent-1", organizationId: "org-1", channelId: "synthetic-channel" }
+              ),
+            } : {}),
           },
           body: JSON.stringify({ prompt: "hello" }),
         });
 
+      if (mode !== "matching") {
+        expect(res.status).toBe(403);
+        expect(forwardedAuthHeader).toBeNull();
+        expect(calls).toEqual([]);
+        return;
+      }
       expect(res.status).toBe(200);
       expect(forwardedAuthHeader).toBe("Bearer sk-user-scoped");
       expect(calls).toEqual([
@@ -248,6 +272,7 @@ describe("SecretProxy user-scoped provider routing", () => {
       ]);
     } finally {
       globalThis.fetch = originalFetch;
+      configSpy.mockRestore();
     }
   });
 });
@@ -311,7 +336,10 @@ describe("SecretProxy API-key header scheme (Anthropic x-api-key vs Bearer)", ()
           method: "POST",
           headers: {
             "content-type": "application/json",
-            authorization: "Bearer worker-token-test",
+            authorization: `Bearer ${generateWorkerToken(
+              "synthetic-user", "synthetic-conversation", "synthetic-deployment",
+              { agentId: "agent-1", channelId: "synthetic-channel" }
+            )}`,
           },
           body: JSON.stringify({ prompt: "hi" }),
         });
