@@ -230,7 +230,9 @@ export async function resolveGoogleChatRuntime(
   const config = {
     ...(app.source
       ? await deps.resolveSecrets(app.source)
-      : { platform: PROVIDER, credentials: app.credentials, googleChatProjectNumber: app.project }),
+      // Lobu's published Chat app registers its /lobu wrapper as command 1.
+      // BYO projects keep the command mapping from their own source config.
+      : { platform: PROVIDER, credentials: app.credentials, googleChatProjectNumber: app.project, helpCommandId: "1" }),
     disableSignatureVerification: false,
   } as any;
   // The hosted app's audience comes from the same generator the app-webhook
