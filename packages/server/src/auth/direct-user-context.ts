@@ -16,12 +16,14 @@ export interface IdentityContext {
   /** Scopes of the authenticating token. A web session carries the
    *  not-applicable sentinel (tools/execute.ts), never a real grant. */
   scopes?: readonly string[] | null;
+  /** Preserved from the authenticated session, never caller input. */
+  tokenDerivedSession?: boolean;
 }
 
 /** Conversation attribution alone is not delegation: verified chat reviewers carry it too. */
 export function hasDelegatedIdentity(ctx: IdentityContext): boolean {
   return !!ctx.agentId || !!ctx.clientId || !!ctx.mcpSessionId ||
-    ctx.actingAutomationId != null;
+    ctx.actingAutomationId != null || !!ctx.tokenDerivedSession;
 }
 
 /**
@@ -55,7 +57,7 @@ export type ManualEditRefusal = 'missing_scope' | 'delegated_caller';
  * web session (auth/routes.ts).
  */
 export function manualEditRefusal(ctx: IdentityContext): ManualEditRefusal | null {
-  if (!!ctx.agentId || !!ctx.mcpSessionId || ctx.actingAutomationId != null || !!ctx.sourceContext) {
+  if (!!ctx.agentId || !!ctx.mcpSessionId || ctx.actingAutomationId != null || !!ctx.sourceContext || ctx.tokenDerivedSession) {
     return 'delegated_caller';
   }
   if (!ctx.userId || !ctx.scopes?.includes(ENTITY_MANUAL_EDIT_SCOPE)) return 'missing_scope';

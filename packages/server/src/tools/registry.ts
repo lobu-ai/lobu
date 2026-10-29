@@ -203,6 +203,8 @@ export interface ToolContext {
   isAuthenticated: boolean;
   /** OAuth client ID that created this request (null for session/anonymous) */
   clientId?: string | null;
+  /** Token-exchanged sessions retain delegated authority at human-only gates. */
+  tokenDerivedSession?: boolean;
   /** The personal access token's name on a PAT call; null otherwise. */
   tokenName?: string | null;
   /** OAuth scopes granted to this MCP/tool session, when applicable. */

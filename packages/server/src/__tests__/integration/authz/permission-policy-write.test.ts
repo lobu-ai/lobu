@@ -13,6 +13,7 @@ import type { Env } from "../../../index";
 import { qualifiedOperationKey } from "../../../tools/admin/manage_operations/handlers/shared";
 import { initWorkspaceProvider } from "../../../workspace";
 import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
+import { postForm } from "../../setup/test-helpers";
 import {
 	addUserToOrganization,
 	createTestAccessToken,
@@ -111,7 +112,7 @@ beforeEach(async () => {
 			scope: "mcp:read mcp:write mcp:admin",
 		})
 	).token;
-	pat = (await createTestPAT(user.id, org.id)).token;
+	pat = (await createTestPAT(user.id, org.id, { scope: "mcp:read mcp:write mcp:admin profile:read" })).token;
 	await createTestAgent({ organizationId: org.id, agentId });
 });
 
@@ -119,7 +120,10 @@ describe("permission policy HTTP writes", () => {
 	it("requires a human session for agent connector restriction writes and deletes", async () => {
 		const agent = agentId;
 		expect((await request("PUT", connectorPolicy, { agent })).status).toBe(200);
-		for (const token of [oauth, pat]) {
+		const exchange = await postForm('/api/extension-session', { token: pat });
+		expect(exchange.status).toBe(200);
+		const { session_token } = await exchange.json();
+		for (const token of [oauth, pat, session_token]) {
 			const headers = { Authorization: `Bearer ${token}` };
 			expect(
 				(

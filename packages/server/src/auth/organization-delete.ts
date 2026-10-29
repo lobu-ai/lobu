@@ -26,7 +26,7 @@ function organizationNotFound(): APIError {
 
 export interface RequestSession {
   user: { id: string };
-  session: { activeOrganizationId?: string | null };
+  session: { activeOrganizationId?: string | null; userAgent?: string | null };
 }
 
 /**

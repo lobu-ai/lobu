@@ -540,8 +540,9 @@ export const TOKEN_DERIVED_SESSION_USER_AGENT = 'lobu-token-exchange';
 /**
  * Whether a web session came from a bearer credential rather than a person
  * signing in. Such a session may do what the credential's user can do in the
- * browser, but may not mint {@link HUMAN_MINTED_PAT_SCOPES}: otherwise an agent
- * holding an `mcp:admin` token reaches a human-only scope in two hops.
+ * browser, but may not make human-only decisions or mint
+ * {@link HUMAN_MINTED_PAT_SCOPES}: exchanging a credential does not turn its
+ * holder into an interactive person.
  */
 export function isTokenDerivedSession(
   session: { userAgent?: string | null } | null | undefined

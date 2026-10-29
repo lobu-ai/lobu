@@ -8,6 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { captureEffect, type CaptureIdentity } from '../gateway/routes/internal/capture-mode';
 import type { AgentTurnIdentity } from './turn-write-idempotency';
 import type { ChatSenderReach } from '../auth/oauth/types';
+import { isTokenDerivedSession } from '../auth/oauth/scopes';
 import { resolveToolWorkspaceTarget } from '../sandbox/client-sdk';
 import { verifiedAutomationSource } from '../automations/automation-source';
 import { runWithActingAutomation } from '../utils/acting-automation-context';
@@ -64,6 +65,7 @@ export interface AuthContext {
   sourceContext?: ToolSourceContext | null;
   isAuthenticated: boolean;
   clientId: string | null;
+  tokenDerivedSession?: boolean;
   /** The personal access token's name on a PAT call; null otherwise. */
   tokenName?: string | null;
   /** Caller IP of the current HTTP request; unset for internal calls. */
@@ -177,6 +179,7 @@ export function extractAuthContext(c: Context<{ Bindings: Env }>): AuthContext {
     sourceContext: mcpAuthInfo?.sourceContext ?? null,
     isAuthenticated: c.var.mcpIsAuthenticated || false,
     clientId: mcpAuthInfo?.clientId ?? null,
+    tokenDerivedSession: isTokenDerivedSession(c.var.session),
     tokenName: mcpAuthInfo?.tokenName ?? null,
     clientIP: getClientIP(c.req.raw, c.var.peerRemoteAddress),
     // Token callers (oauth/pat) carry real MCP scopes — pass them straight
@@ -548,6 +551,7 @@ export function toAccountToolContext(authCtx: AuthContext): AccountToolContext {
     sourceContext: authCtx.sourceContext ?? null,
     isAuthenticated: authCtx.isAuthenticated,
     clientId: authCtx.clientId,
+    tokenDerivedSession: authCtx.tokenDerivedSession ?? false,
     tokenName: authCtx.tokenName ?? null,
     scopes: authCtx.scopes,
     tokenType: authCtx.tokenType,

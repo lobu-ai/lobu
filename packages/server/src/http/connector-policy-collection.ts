@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Context } from "hono";
-import { POLICY_WRITE_SCOPE } from "../auth/oauth/scopes";
+import { isTokenDerivedSession, POLICY_WRITE_SCOPE } from "../auth/oauth/scopes";
 import { canonicalConnectorPolicyScope } from "../authz/connector-policy";
 import {
   deleteEntityApprovalPolicy,
@@ -19,7 +19,7 @@ function authorize(c: Context) {
   if (!org || !c.get("user")?.id) return c.json({ error: "unauthorized" }, 401);
   if (!["owner", "admin"].includes(c.get("memberRole") ?? "")) return c.json({ error: "forbidden" }, 403);
   const auth = c.get("mcpAuthInfo");
-  if (c.get("authSource") === "session" && !auth) return null;
+  if (c.get("authSource") === "session" && !auth && !isTokenDerivedSession(c.get("session"))) return null;
   if (c.get("authSource") === "pat" && auth?.organizationId === org &&
     auth.scopes.includes(POLICY_WRITE_SCOPE) && !auth.agentId && !auth.workerId &&
     !auth.scopes.includes("device_worker:run")) return null;
