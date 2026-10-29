@@ -21,7 +21,7 @@ import { WorkerHttpError, type ContentItem, type ExecutorClient, type PollRespon
 import { attachedInteractiveSession, attachInteractiveSession } from './interactive-session.js';
 import { log } from './log.js';
 import { reportTerminalFailure } from './terminal-failure.js';
-import { completeActionOnce } from './terminal-delivery.js';
+import { completeActionOnce, completeSyncOnce } from './terminal-delivery.js';
 import type { SyncExecutor, ExecutorResult } from '../executor/interface.js';
 import { envelopeToContentItem } from '../executor/runtime.js';
 import { withoutDeploymentProviderKeys } from '../env.js';
@@ -329,6 +329,21 @@ async function executeSyncRun(
     throw new Error('Invalid run: missing run_id or connector_key');
   }
 
+  const deliver = async (payload: Parameters<ExecutorClient['complete']>[0], executionError?: string) => {
+    try {
+      await completeSyncOnce(client, payload);
+      if (payload.status === 'success') {
+        log.info(`[executor] Sync run ${run_id} completed: ${payload.items_collected ?? 0} items`);
+      }
+      return { itemsCollected: payload.items_collected ?? 0, ...(executionError ? { error: executionError } : {}) };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      log.error(`[executor] Sync run ${run_id} completion delivery failed:`, error);
+      return { itemsCollected: payload.items_collected ?? 0,
+        error: executionError ? `${executionError}; completion delivery failed: ${message}` : `Completion delivery failed: ${message}` };
+    }
+  };
+
   const execution = await resolveJobExecution(
     select,
     job,
@@ -338,14 +353,13 @@ async function executeSyncRun(
   if (!execution.ok) {
     const errorMessage = `Run ${run_id} (${connector_key}): ${execution.error}`;
     log.error('[executor]', errorMessage);
-    await client.complete({
+    return deliver({
       run_id,
       worker_id: client.id,
       status: 'failed',
       error_message: errorMessage,
       items_collected: 0,
-    });
-    return { itemsCollected: 0, error: errorMessage };
+    }, errorMessage);
   }
   const compiled_code = execution.code;
   const laneExecutor = execution.executor;
@@ -376,6 +390,8 @@ async function executeSyncRun(
   };
 
   startHeartbeat();
+  let terminalPayload: Parameters<ExecutorClient['complete']>[0];
+  let executionError: string | undefined;
 
   try {
     // The last checkpoint a commit made durable. Completion re-sends it so the
@@ -440,7 +456,7 @@ async function executeSyncRun(
 
     stopHeartbeat();
 
-    await client.complete({
+    terminalPayload = {
       run_id,
       worker_id: client.id,
       status: 'success',
@@ -449,10 +465,7 @@ async function executeSyncRun(
       ...(result.status === 'more' && cursorAdvanced(checkpoint, committedCheckpoint) ? { more: true } : {}),
       auth_update: result.auth_update ?? undefined,
       error_message: partialFetchFailureMessage(result.metadata),
-    });
-
-    log.info(`[executor] Sync run ${run_id} completed: ${itemsCollectedSoFar} items`);
-    return { itemsCollected: itemsCollectedSoFar };
+    };
   } catch (error) {
     stopHeartbeat();
 
@@ -461,17 +474,17 @@ async function executeSyncRun(
 
     const diag = extractExecutionDiagnostics(error);
 
-    await client.complete({
+    terminalPayload = {
       run_id,
       worker_id: client.id,
       status: 'failed',
       items_collected: itemsCollectedSoFar,
       error_message: errorMessage,
       ...(diag ?? {}),
-    });
-
-    return { itemsCollected: itemsCollectedSoFar, error: errorMessage };
+    };
+    executionError = errorMessage;
   }
+  return deliver(terminalPayload, executionError);
 }
 
 /**

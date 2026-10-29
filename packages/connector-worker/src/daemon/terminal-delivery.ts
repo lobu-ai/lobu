@@ -1,6 +1,6 @@
 /**
  * Bounded delivery of an immutable terminal outcome. Execution and failure
- * reporting share the retry loop; action and agent-turn budgets differ.
+ * reporting share the retry loop; sync/action and agent-turn budgets differ.
  * WorkerDecodeError identifies an unreadable response, not an execution
  * failure, and is surfaced without retrying.
  */
@@ -19,7 +19,7 @@ interface TerminalDeliveryPolicy {
   retriable: (error: unknown) => boolean;
 }
 
-/** Actions: two attempts in 15s, anything but an undecodable answer retried. */
+/** Syncs/actions: two attempts in 15s, anything but an undecodable answer retried. */
 const ACTION_DELIVERY: TerminalDeliveryPolicy = {
   deadlineMs: 15_000,
   attempts: 2,
@@ -74,10 +74,11 @@ async function withTerminalDeliveryTimeout<T>(
  * commonest transient failure, and abandoning it there would leave the rest of
  * the deadline unused. The timeout does not cancel the in-flight request, so a
  * retry can reach a gateway that already accepted the first one -- that is
- * safe because both terminal writes are fenced: an action's by
- * `status = 'running' AND claimed_by = worker_id` (a second delivery answers
- * `already_finalized`), an agent turn's by the run row lock plus its stored
- * completion hash (an exact retry is acknowledged, a divergent one 409s).
+ * safe because terminal writes are fenced: syncs and actions by
+ * `status = 'running' AND claimed_by = worker_id` (a duplicate cannot repeat
+ * the terminal write or its side effects), an agent turn's by the run row lock
+ * plus its stored completion hash (an exact retry is acknowledged, a divergent
+ * one 409s).
  */
 async function deliverTerminal<T>(
   send: () => Promise<T>,
@@ -106,6 +107,13 @@ async function deliverTerminal<T>(
     }
   }
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
+export async function completeSyncOnce(
+  client: ExecutorClient,
+  payload: Parameters<ExecutorClient['complete']>[0]
+): Promise<void> {
+  await deliverTerminal(() => client.complete(payload), ACTION_DELIVERY);
 }
 
 export async function completeActionOnce(
