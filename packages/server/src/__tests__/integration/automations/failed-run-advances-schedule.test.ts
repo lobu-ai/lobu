@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import type { DbClient } from "../../../db/client";
+import { claimPendingAutomationRun } from "../../../runs/queue-service";
 import { ApiResponseRenderer } from "../../../gateway/api/response-renderer";
 import { ChatResponseBridge } from "../../../gateway/connections/chat-response-bridge";
 import { materializeDueAutomationRuns } from "../../../automations/automation";
@@ -434,6 +436,42 @@ describe("a terminally failed Automation run advances next_run_at", () => {
       FROM automations WHERE id = ${automationId}
     `;
     expect(Number(automation.consecutive_scheduled_failures)).toBe(1);
+  });
+
+  it.each([true, false])("ignores an old message after the finalize retry is claimed (ok=%s)", async (ok) => {
+    const messageId = `synthetic-stale-reply-${ok}`;
+    const { sql, automationId, runId } = await createDueAutomationWithDispatchedRun({
+      slug: `stale-reply-${ok}`, messageId, nudgeCount: 0,
+    });
+    const snapshot = async () => ({
+      run: (await sql`SELECT status, claimed_by, claimed_at, dispatched_message_id, approved_input,
+        completed_at, error_message FROM runs WHERE id = ${runId}`)[0],
+      automation: (await sql`SELECT next_run_at, consecutive_scheduled_failures
+        FROM automations WHERE id = ${automationId}`)[0],
+    });
+    let replacement: Awaited<ReturnType<typeof snapshot>> | undefined;
+    const racingSql = new Proxy(sql, {
+      apply(target, thisArg, args) {
+        const query = Reflect.apply(target, thisArg, args);
+        if (!Array.isArray(args[0]) || !args[0].join("").includes("SELECT r.id, r.run_type")) return query;
+        return (async () => {
+          const selected = await query;
+          expect(await resolveAutomationRunsByMessageIds([messageId], { ok: true }, sql)).toMatchObject({ resolved: 1 });
+          expect(await sql.begin(tx => claimPendingAutomationRun(tx as unknown as DbClient, {
+            runId, automationId, claimedBy: "lobu-dispatcher", status: "claimed",
+          }))).toBe(true);
+          replacement = await snapshot();
+          expect(replacement.run).toMatchObject({ status: "claimed", claimed_by: "lobu-dispatcher",
+            dispatched_message_id: null, approved_input: { finalize_nudge_count: 1 } });
+          return selected;
+        })();
+      },
+    });
+    const result = await resolveAutomationRunsByMessageIds([messageId],
+      ok ? { ok: true } : { ok: false, error: "synthetic old turn failure" }, racingSql);
+    expect(replacement).toBeDefined();
+    expect(result.resolved).toBe(0);
+    expect(await snapshot()).toEqual(replacement);
   });
 
   it("advances the cursor when the agent turn returns an error", async () => {
