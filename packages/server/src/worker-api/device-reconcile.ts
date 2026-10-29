@@ -626,7 +626,7 @@ async function ensureDeviceConnectorWired(
         // different locks and run concurrently, so two connectors sharing a
         // display name compute the same free slug and the loser's INSERT trips
         // the constraint. Reproduced: see
-        // device-reconcile-slug-race.test.ts. Lock scope and
+        // device-reconcile.test.ts (slug race). Lock scope and
         // uniqueness scope simply are not the same scope.
         //
         // The retry lives OUTSIDE this transaction (at the wireOnce call

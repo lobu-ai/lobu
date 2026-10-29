@@ -5,11 +5,16 @@
  * API is the durable human-correction path for automation outputs, so it must
  * store field-level mutations transactionally, return scoped feedback, validate
  * malformed corrections, and block cross-org writes.
+ *
+ * Corrections live only on the events spine (semantic_type='correction'): the
+ * dedicated window-feedback table is retired, and the prompt summary future
+ * runs read is rendered from those events.
  */
 
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { manageAutomations } from '../../../tools/admin/manage_automations';
 import type { ToolContext } from '../../../tools/registry';
+import { getRecentFeedbackSummary } from '../../../utils/automation-feedback';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import { createAutomationResultRun, createTestAgent, createTestEntity } from '../../setup/test-fixtures';
 import { TestWorkspace } from '../../setup/test-mcp-client';
@@ -185,6 +190,59 @@ describe('automation feedback contract', () => {
     const fresh = feedback.feedback.find((f) => f.field_path === 'summary');
     expect(legacy?.id).toBe(424242);
     expect(fresh?.id).toBe(result.feedback_ids[0]);
+  });
+
+  it('submit -> get -> summary round-trips entirely through correction events (no table)', async () => {
+    const seeded = await seedAutomation(workspace, `summary-${Date.now()}`);
+    const sql = getTestDb();
+
+    const submitted = (await manageAutomations(
+      {
+        action: 'submit_feedback',
+        automation_id: seeded.automationId,
+        run_id: seeded.runId,
+        corrections: [
+          { field_path: 'a', mutation: 'set', value: 'v', note: 'n' },
+          { field_path: 'b', mutation: 'remove' },
+        ],
+      } as never,
+      {} as never,
+      ownerCtx(workspace)
+    )) as { feedback_ids: number[] };
+    expect(submitted.feedback_ids).toHaveLength(2);
+
+    // The table is retired — the submit went entirely to events. Match the
+    // structural name instead of naming the pre-cutover relation in live code.
+    const reg = (await sql`
+      SELECT c.relname
+      FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = 'public'
+        AND c.relkind IN ('r', 'p')
+        AND c.relname LIKE '%window%field%feedback%'
+    `) as Array<{ relname: string }>;
+    expect(reg).toEqual([]);
+
+    // get_feedback returns both, from events, with recovered ids + org scoping.
+    const got = (await manageAutomations(
+      { action: 'get_feedback', automation_id: seeded.automationId } as never,
+      {} as never,
+      ownerCtx(workspace)
+    )) as {
+      feedback: Array<{ id: number; field_path: string; mutation: string; created_by: string }>;
+    };
+    expect(got.feedback).toHaveLength(2);
+    expect(
+      got.feedback.every(
+        (f) => Number.isFinite(f.id) && f.created_by === workspace.users.owner.id
+      )
+    ).toBe(true);
+    expect(got.feedback.map((f) => f.field_path).sort()).toEqual(['a', 'b']);
+
+    // The prompt summary renders the latest-per-field corrections from events.
+    const summary = await getRecentFeedbackSummary(Number(seeded.automationId));
+    expect(summary).toContain('"a" → v');
+    expect(summary).toContain('drop "b"');
   });
 
   it('returns scoped feedback and honors run filters', async () => {

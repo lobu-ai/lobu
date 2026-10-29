@@ -1,3 +1,20 @@
+/**
+ * Identity-only social sign-in through the real Better Auth handler, for the
+ * connectors that declare a login: Reddit and X.
+ *
+ * Each provider's login comes from its real connector definition
+ * (`login_enabled` on the org's `connector_definitions` row), not a copied
+ * OAuth fixture. Signing in creates a session and an identity account, and
+ * never creates a source connection, an `oauth_account` profile or feeds.
+ *
+ * - Reddit reuses the workspace's `oauth_app` auth profile for its client
+ *   credentials and finishes at the shared connector callback
+ *   (`/connect/oauth/callback`), which must reject a missing, forged, expired
+ *   or replayed state, or a denied consent, before any token exchange.
+ * - X reads its client credentials from the environment and finishes at
+ *   Better Auth's own `/api/auth/callback/twitter` with PKCE, with and without
+ *   a confirmed email.
+ */
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import RedditConnector from "@lobu/connectors/reddit";
 import XConnector from "@lobu/connectors/x";

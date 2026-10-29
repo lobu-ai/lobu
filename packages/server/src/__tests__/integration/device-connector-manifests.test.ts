@@ -1300,7 +1300,7 @@ describe('device connector manifests', () => {
     // Promise.allSettled (the advisory lock is keyed on (userId, connectorKey),
     // not the slug), and the loser's INSERT trips connections_org_slug_unique.
     // ensureDeviceConnectorWired now retries that collision once — covered by
-    // device-reconcile-slug-race.test.ts — but the allowlist under test here
+    // device-reconcile.test.ts — but the allowlist under test here
     // has nothing to do with slugs, so the names stay distinct anyway.
     const shell = manifest({
       key: 'os.shell',
