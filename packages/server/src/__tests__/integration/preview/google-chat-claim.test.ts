@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EventEmitter } from "node:events";
-import type { StoredConnection } from "@lobu/core";
+import { CommandRegistry, type StoredConnection } from "@lobu/core";
 import { Chat } from "chat";
 import { InMemoryStateAdapter } from "../../../gateway/__tests__/fixtures/in-memory-state-adapter.js";
 import { gchatPlatform } from "../../../gateway/connections/platforms/gchat.js";
@@ -20,6 +20,7 @@ import type { ConnectorWebhookSchema } from "@lobu/connector-sdk";
 import GoogleChatConnector from "@lobu/connectors/gchat";
 import { createAppWebhookRoutes, createChatWebhookDelivery, createDeclaredAppWebhookProvider } from "../../../gateway/routes/public/app-webhooks.js";
 import { appWebhookUrl } from "../../../gateway/routes/public/app-webhook-url.js";
+import { registerBuiltInCommands } from "../../../gateway/commands/built-in-commands.js";
 import { cleanupTestDatabase } from "../../setup/test-db.js";
 import { addUserToOrganization, createTestAgent, createTestOrganization, createTestUser } from "../../setup/test-fixtures.js";
 
@@ -692,6 +693,75 @@ describe("hosted Google Chat app through the declared app-webhook engine", () =>
     } finally {
       oidcCerts.mockRestore();
       await r.manager.shutdown();
+    }
+  });
+
+  it("dispatches the hosted native /lobu command through the real command registry and replies in its space", async () => {
+    const r = await hostedRoute({ realInstallation: true });
+    const installation = await r.claim();
+    const subscriptions = new AutomationSubscriptionService();
+    const agent = await createTestAgent({ organizationId: r.f.own.id, agentId: "test-command-agent", ownerUserId: r.f.outsider.id });
+    const [row] = await r.f.sql`SELECT id FROM connections WHERE slug = ${runtimeConnectionIdToSlug(installation)}`;
+    await subscriptions.createChatAutomation(agent.agentId, "gchat", `gchat:${r.f.space}`, undefined, { organizationId: r.f.own.id, configuredBy: r.f.outsider.id, connectionId: Number(row.id) });
+    const registry = new CommandRegistry();
+    registerBuiltInCommands(registry, {
+      automationSubscriptionService: subscriptions,
+      agentSettingsStore: { getSettings: async () => ({}) } as never,
+    });
+    r.manager.services.getCommandRegistry = () => registry;
+    r.manager.services.getUserAgentsStore = () => undefined;
+    r.manager.services.getTranscriptionService = () => undefined;
+    const probe = await gchatPlatform.createAdapter({
+      credentials: { client_email: "platform-bot@example.test", private_key: PLATFORM_KEY },
+    }, {});
+    const prototype = Object.getPrototypeOf(probe);
+    const certs = vi.spyOn(Object.getPrototypeOf(probe.oauth2Client), "getFederatedSignonCertsAsync")
+      .mockResolvedValue({ certs: r.pemCerts, format: "PEM" } as never);
+    // Keep Google's serializer; replace only its outbound HTTP boundary.
+    const replies: Array<Record<string, any>> = [];
+    const postMessage = prototype.postMessage;
+    const post = vi.spyOn(prototype, "postMessage").mockImplementation(function (this: any, ...args: any[]) {
+      this.chatApi.spaces.messages.create = async (request: Record<string, any>) => {
+        replies.push(request);
+        return { data: { name: `${request.parent}/messages/bot-${replies.length}` } };
+      };
+      return postMessage.apply(this, args);
+    });
+    const history = vi.spyOn(prototype, "fetchMessages").mockResolvedValue({ messages: [] });
+    try {
+      expect(await r.manager.warmConnection(installation)).toBe(true);
+      const state = r.manager.getInstance(installation).conversationState;
+      const space = { name: r.f.space, type: "ROOM", spaceType: "SPACE" };
+      const thread = { name: `${r.f.space}/threads/test-command-thread` };
+      const conversationId = probe.encodeThreadId({ spaceName: r.f.space, threadName: thread.name });
+      const otherConversationId = probe.encodeThreadId({ spaceName: r.f.space, threadName: `${r.f.space}/threads/test-other-thread` });
+      const channelId = probe.channelIdFromThreadId(conversationId);
+      const entry = { role: "user", content: "Earlier conversation", timestamp: Date.now() };
+      await state.appendHistory(installation, channelId, conversationId, entry);
+      await state.appendHistory(installation, channelId, otherConversationId, entry);
+      const user = { name: "users/123456", type: "HUMAN" };
+      for (const [index, command] of ["/lobu", "/lobu help", "/lobu status", "/lobu link", "/lobu clear"].entries()) {
+        expect(await state.getEntries(installation, channelId, conversationId)).toEqual([entry]);
+        const body = { chat: { user, eventTime: "2026-01-01T00:00:00Z", appCommandPayload: {
+          appCommandMetadata: { appCommandId: "1", appCommandType: "SLASH_COMMAND" }, space,
+          message: { name: `${r.f.space}/messages/command-${index}`, sender: user, space, thread, text: command, argumentText: command, createTime: "2026-01-01T00:00:00Z" },
+        } } };
+        expect((await r.post(body, await r.endpointToken())).status).toBe(200);
+        await vi.waitFor(() => expect(replies).toHaveLength(index + 1));
+      }
+      for (const reply of replies) expect(reply.parent).toBe(r.f.space);
+      for (const reply of replies.slice(0, 2)) {
+        for (const command of ["help", "status", "new", "clear", "link"]) {
+          expect(reply.requestBody.text).toContain(`/lobu ${command}`);
+        }
+      }
+      expect(replies[2].requestBody.text).toContain(`Agent: ${agent.agentId}`);
+      expect(replies[3].requestBody.text).toContain("Usage:");
+      expect(await state.getEntries(installation, channelId, conversationId)).toEqual([]);
+      expect(await state.getEntries(installation, channelId, otherConversationId)).toEqual([entry]);
+    } finally {
+      await r.manager.shutdown();
+      history.mockRestore(); post.mockRestore(); certs.mockRestore();
     }
   });
 
