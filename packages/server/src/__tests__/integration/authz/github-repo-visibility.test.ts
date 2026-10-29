@@ -11,7 +11,7 @@
  *
  * Uses explicit embeddings + query_embedding so the recall candidate path is
  * deterministic without a live embedding service (mirrors
- * events/search-content-visibility.test.ts).
+ * authz/search-memory-visibility.test.ts).
  */
 
 import {
