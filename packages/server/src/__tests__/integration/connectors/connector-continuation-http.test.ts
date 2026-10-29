@@ -128,4 +128,77 @@ describe('connector continuation through worker HTTP and Postgres', () => {
     expect(await sql`SELECT status FROM runs WHERE feed_id = ${feed.id} ORDER BY id`)
       .toEqual([{ status: 'completed' }, { status: 'failed' }, { status: 'completed' }]);
   }, 60000);
+
+  it.each(['before-commit', 'after-commit', 'exhausted'] as const)(
+    'preserves a successful sync when completion delivery is %s', async fault => {
+    const fixture = cases[0]!;
+    const sql = getTestDb();
+    const owner = await seedOwnerContext();
+    await createTestConnectorDefinition({ key: fixture.key, name: 'Synthetic delivery fixture',
+      organization_id: owner.org.id, feeds_schema: { [fixture.feed]: {} } });
+    const source = fileURLToPath(new URL(`../../../../../connectors/src/${fixture.key}.ts`, import.meta.url));
+    const code = await createIsolateConnectorCompiler().compileConnectorForIsolateFromFile(source);
+    await sql`UPDATE connector_versions SET compiled_code = ${code} WHERE connector_key = ${fixture.key}`;
+    const connection = await createTestConnection({ organization_id: owner.org.id, connector_key: fixture.key,
+      config: fixture.config, created_by: owner.user.id, createDefaultFeed: false });
+    const [feed] = await sql`INSERT INTO feeds (organization_id, connection_id, feed_key, status, schedule, checkpoint)
+      VALUES (${owner.org.id}, ${connection.id}, ${fixture.feed}, 'active', '0 0 * * *', ${sql.json(fixture.checkpoint)}) RETURNING id`;
+    const completions: Record<string, unknown>[] = [];
+    globalThis.fetch = (async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      if (url.origin === baseUrl) {
+        if (url.pathname === '/api/workers/complete') {
+          const payload = JSON.parse(String(init?.body));
+          completions.push(payload);
+          if (payload.status === 'success' && (completions.length === 1 || fault === 'exhausted')) {
+            if (fault === 'after-commit') {
+              const response = await originalFetch(input, init);
+              expect(response.ok).toBe(true);
+              await response.arrayBuffer();
+            }
+            throw new TypeError('synthetic completion connection reset');
+          }
+        }
+        return originalFetch(input, init);
+      }
+      if (url.hostname !== fixture.host) throw new Error(`Unexpected test egress: ${url.origin}`);
+      return Response.json(fixture.page(url.searchParams.get(fixture.cursorParam)));
+    }) as typeof fetch;
+    expect((await createSyncRun(Number(feed.id), env)).ok).toBe(true);
+    const client = new WorkerClient({ apiUrl: baseUrl, workerId: 'synthetic-delivery-worker',
+      authToken: TOKEN, capabilities: {} });
+    const claimed = await client.poll(1);
+    expect(claimed.run_id).toBeTruthy();
+    const execute = (job: Awaited<ReturnType<WorkerClient['poll']>>) => executeRun(client,
+      { ...job, credentials: { provider: 'synthetic', accessToken: 'synthetic-provider-token' } }, {},
+      { generateEmbeddings: false, timeoutMs: 20000 });
+    const result = await execute(claimed);
+    expect(result.itemsCollected).toBe(fixture.first);
+    expect(completions).toHaveLength(2);
+    expect(completions[0]).toEqual(completions[1]);
+    expect(completions[0]).toMatchObject({ status: 'success', more: true, items_collected: fixture.first });
+    const [run] = await sql`SELECT status FROM runs WHERE id = ${claimed.run_id!}`;
+    const [storedFeed] = await sql`SELECT checkpoint, consecutive_failures, last_error FROM feeds WHERE id = ${feed.id}`;
+    expect(Number(storedFeed.consecutive_failures)).toBe(0);
+    expect(storedFeed.last_error).toBeNull();
+    expect(storedFeed.checkpoint.last_sync_at).toBe(old);
+    expect(await sql`SELECT origin_id FROM events WHERE connection_id = ${connection.id} AND superseded_by IS NULL`)
+      .toHaveLength(fixture.first);
+    if (fault === 'exhausted') {
+      expect(result.error).toContain('synthetic completion connection reset');
+      expect(run.status).toBe('running');
+      return;
+    }
+    expect(result.error).toBeUndefined();
+    expect(run.status).toBe('completed');
+    expect((await materializeDueFeeds(env, sql)).runsCreated).toBe(1);
+    const resumed = await client.poll(1);
+    expect(resumed.run_id).toBeTruthy();
+    expect((await execute(resumed)).error).toBeUndefined();
+    expect(await sql`SELECT origin_id FROM events WHERE connection_id = ${connection.id} AND superseded_by IS NULL`)
+      .toHaveLength(fixture.total);
+    expect((await sql`SELECT status FROM runs WHERE feed_id = ${feed.id} ORDER BY id`))
+      .toEqual([{ status: 'completed' }, { status: 'completed' }]);
+  }, 60000);
+
 });
