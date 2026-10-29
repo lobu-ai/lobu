@@ -29,7 +29,7 @@ import {
   createTestUser,
   seedSystemEntityTypes,
 } from '../../setup/test-fixtures';
-import { del, get, mcpListTools, mcpRequest, mcpToolsCall, post } from '../../setup/test-helpers';
+import { del, get, mcpListTools, mcpRequest, mcpToolsCall, post, testRequest } from '../../setup/test-helpers';
 import { TestMcpClient } from '../../setup/test-mcp-client';
 
 async function verifyDeviceCode(userCode: string, cookie: string): Promise<void> {
@@ -1706,6 +1706,112 @@ describe('MCP Authentication', () => {
       });
 
       expect(response.status).toBe(401);
+    });
+  });
+
+  describe('REST routes gated by auth source', () => {
+    // Admin-tier routes (`requireSessionOrAdminPat`) admit a web session as is
+    // and demand `mcp:admin` from a PAT or OAuth bearer; token minting and
+    // workspace visibility refuse a PAT outright. Every case here holds the
+    // caller's role fixed and varies only how it authenticated.
+    let sourceOrg: Awaited<ReturnType<typeof createTestOrganization>>;
+    let sourceOwner: Awaited<ReturnType<typeof createTestUser>>;
+    let sourceMember: Awaited<ReturnType<typeof createTestUser>>;
+
+    type Credential = { token?: string; cookie?: string };
+
+    const clearDeploymentPause = (org: { slug: string }, credential: Credential = {}) =>
+      del(`/api/${org.slug}/deployments/pause`, credential);
+    // Re-asserting the current visibility is a no-op write behind the full gate.
+    const keepWorkspacePrivate = (org: { slug: string }, credential: Credential = {}) =>
+      testRequest('PATCH', `/api/${org.slug}/organization/visibility`, {
+        body: { visibility: 'private' },
+        ...credential,
+      });
+
+    async function oauthBearer(userId: string, organizationId: string, scope: string) {
+      return (await createTestAccessToken(userId, organizationId, client.client_id, { scope })).token;
+    }
+
+    beforeAll(async () => {
+      sourceOrg = await createTestOrganization({ name: 'Auth Source Org' });
+      sourceOwner = await createTestUser({});
+      sourceMember = await createTestUser({});
+      await addUserToOrganization(sourceOwner.id, sourceOrg.id, 'owner');
+      await addUserToOrganization(sourceMember.id, sourceOrg.id, 'member');
+    });
+
+    it('admits a session on an admin-tier route and requires mcp:admin from a PAT or OAuth bearer', async () => {
+      expect((await clearDeploymentPause(sourceOrg)).status).toBe(401);
+
+      const session = await createTestSession(sourceMember.id);
+      expect((await clearDeploymentPause(sourceOrg, { cookie: session.cookieHeader })).status).toBe(200);
+
+      const bearers = {
+        pat: (await createTestPAT(sourceMember.id, sourceOrg.id, { scope: 'mcp:read mcp:write' })).token,
+        adminPat: (
+          await createTestPAT(sourceMember.id, sourceOrg.id, { scope: 'mcp:read mcp:write mcp:admin' })
+        ).token,
+        oauth: await oauthBearer(sourceMember.id, sourceOrg.id, 'mcp:read mcp:write'),
+        adminOauth: await oauthBearer(sourceMember.id, sourceOrg.id, 'mcp:read mcp:write mcp:admin'),
+      };
+      for (const token of [bearers.pat, bearers.oauth]) {
+        const refused = await clearDeploymentPause(sourceOrg, { token });
+        expect(refused.status).toBe(403);
+        expect(await refused.json()).toMatchObject({ error: 'forbidden' });
+      }
+      for (const token of [bearers.adminPat, bearers.adminOauth]) {
+        expect((await clearDeploymentPause(sourceOrg, { token })).status).toBe(200);
+      }
+    });
+
+    it('refuses a PAT where a route accepts only OAuth or a web session, even with mcp:admin', async () => {
+      const session = await createTestSession(sourceOwner.id);
+      const adminPat = (
+        await createTestPAT(sourceOwner.id, sourceOrg.id, { scope: 'mcp:read mcp:write mcp:admin' })
+      ).token;
+      const oauth = await oauthBearer(sourceOwner.id, sourceOrg.id, 'mcp:read mcp:write');
+      const adminOauth = await oauthBearer(sourceOwner.id, sourceOrg.id, 'mcp:read mcp:write mcp:admin');
+
+      expect((await keepWorkspacePrivate(sourceOrg, { cookie: session.cookieHeader })).status).toBe(200);
+      expect((await keepWorkspacePrivate(sourceOrg, { token: adminOauth })).status).toBe(200);
+      expect((await keepWorkspacePrivate(sourceOrg, { token: oauth })).status).toBe(403);
+      expect((await keepWorkspacePrivate(sourceOrg, { token: adminPat })).status).toBe(403);
+    });
+
+    it('applies a session deletion, role downgrade or membership removal on the very next request', async () => {
+      const sql = getTestDb();
+      const liveOrg = await createTestOrganization({ name: 'Auth Source Live Org' });
+      const liveOwner = await createTestUser({});
+      const ownerMemberId = await addUserToOrganization(liveOwner.id, liveOrg.id, 'owner');
+      const session = await createTestSession(liveOwner.id);
+      const cookie = { cookie: session.cookieHeader };
+      const adminPat = {
+        token: (await createTestPAT(liveOwner.id, liveOrg.id, { scope: 'mcp:read mcp:write mcp:admin' })).token,
+      };
+      const adminOauth = {
+        token: await oauthBearer(liveOwner.id, liveOrg.id, 'mcp:read mcp:write mcp:admin'),
+      };
+
+      expect((await keepWorkspacePrivate(liveOrg, cookie)).status).toBe(200);
+      await sql`UPDATE "member" SET role = 'member' WHERE id = ${ownerMemberId}`;
+      expect((await keepWorkspacePrivate(liveOrg, cookie)).status).toBe(403);
+      await sql`UPDATE "member" SET role = 'owner' WHERE id = ${ownerMemberId}`;
+      expect((await keepWorkspacePrivate(liveOrg, cookie)).status).toBe(200);
+
+      for (const credential of [adminPat, adminOauth]) {
+        expect((await clearDeploymentPause(liveOrg, credential)).status).toBe(200);
+      }
+      await sql`DELETE FROM "member" WHERE id = ${ownerMemberId}`;
+      for (const credential of [adminPat, adminOauth]) {
+        expect((await clearDeploymentPause(liveOrg, credential)).status).toBe(403);
+      }
+      expect((await clearDeploymentPause(liveOrg, cookie)).status).toBe(403);
+
+      await addUserToOrganization(liveOwner.id, liveOrg.id, 'owner');
+      expect((await clearDeploymentPause(liveOrg, cookie)).status).toBe(200);
+      await sql`DELETE FROM "session" WHERE id = ${session.sessionId}`;
+      expect((await clearDeploymentPause(liveOrg, cookie)).status).toBe(401);
     });
   });
 
