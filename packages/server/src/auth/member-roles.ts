@@ -8,6 +8,7 @@ import { updateMemberEntityAccess } from '../utils/member-entity';
 import { withEntityWriteTransaction } from '../utils/entity-management';
 
 import type { RequestSession } from './organization-delete';
+import { isTokenDerivedSession } from './oauth/scopes';
 import { assertWorkspaceRetainsOwner, authorizeMemberRemoval, authorizeMemberRole, lockMemberRoleChanges, parseMemberRole, type MemberRole } from './member-role-policy';
 
 export async function changeMemberRoleInTransaction(
@@ -61,6 +62,11 @@ export async function removeMemberInTransaction(
 }
 
 const UPDATE_MEMBER_ROLE_PATH = '/organization/update-member-role';
+const MEMBER_WRITE_PATHS = new Set([
+  UPDATE_MEMBER_ROLE_PATH, '/organization/invite-member', '/organization/cancel-invitation',
+  '/organization/remove-member', '/organization/accept-invitation',
+  '/organization/reject-invitation', '/organization/leave',
+]);
 
 // Preserve Better Auth's existing endpoint and session checks, while routing
 // the write through the same transactional operation as entity hooks. Origin /
@@ -70,6 +76,10 @@ const UPDATE_MEMBER_ROLE_PATH = '/organization/update-member-role';
 const memberRoleHook = (resolveRequestSession: (headers: Headers) => Promise<RequestSession | null>) => createAuthMiddleware(async (ctx) => {
   const session = ctx.headers ? await resolveRequestSession(ctx.headers) : null;
   if (!session) throw new APIError('UNAUTHORIZED', { message: 'Sign in to change member roles' });
+  if (isTokenDerivedSession(session.session)) {
+    throw new APIError('FORBIDDEN', { message: 'Changing workspace membership requires a human web session.' });
+  }
+  if (ctx.path !== UPDATE_MEMBER_ROLE_PATH) return;
   const body = ctx.body;
   const organizationId = body?.organizationId ?? session.session.activeOrganizationId;
   if (typeof organizationId !== 'string' || typeof body?.memberId !== 'string') {
@@ -102,7 +112,7 @@ export function memberRolePlugin(resolveRequestSession: (headers: Headers) => Pr
   return {
     id: 'member-roles',
     hooks: {
-      before: [{ matcher: (ctx) => ctx.path === UPDATE_MEMBER_ROLE_PATH, handler: memberRoleHook(resolveRequestSession) }],
+      before: [{ matcher: (ctx) => MEMBER_WRITE_PATHS.has(ctx.path ?? ""), handler: memberRoleHook(resolveRequestSession) }],
     },
   } satisfies BetterAuthPlugin;
 }

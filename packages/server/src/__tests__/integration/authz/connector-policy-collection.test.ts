@@ -6,6 +6,7 @@ import * as dbClient from "../../../db/client";
 import { app, type Env } from "../../../index";
 import { initWorkspaceProvider } from "../../../workspace";
 import { listEntityApprovalPolicies, resolveActingPrincipal, resolveConnectorPolicy, upsertEntityApprovalPolicy } from "../../../authz/entity-policy";
+import { postForm } from "../../setup/test-helpers";
 import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
 import { addUserToOrganization, createTestAccessToken, createTestAgent, createTestConnection, createTestConnectorDefinition, createTestOAuthClient, createTestOrganization, createTestPAT, createTestSession, createTestUser } from "../../setup/test-fixtures";
 
@@ -229,9 +230,14 @@ describe("connector policy collection", () => {
     const oauth = (await createTestAccessToken(owner.id, org.id, client.client_id, { scope: "mcp:admin" })).token;
     const ordinary = (await createTestPAT(owner.id, org.id, { scope: "mcp:admin" })).token;
     const before = await snapshot();
-    for (const token of [oauth, ordinary]) {
+    const exchange = await postForm("/api/extension-session", { token: ordinary });
+    expect(exchange.status).toBe(200);
+    const { session_token } = await exchange.json();
+    for (const token of [oauth, ordinary, session_token]) {
       expect((await request("PUT", path(), { revision: before.revision, rules: [] }, token)).status).toBe(403);
     }
+    expect(await snapshot()).toEqual(before);
+    expect((await request("GET", path(), undefined, session_token)).status).toBe(403);
     expect((await request("POST", `/api/${org.slug}/tokens`, { name: "policy-deploy", scope: "policies:write" }, oauth)).status).toBe(403);
     const minted = await request("POST", `/api/${org.slug}/tokens`, { name: "policy-deploy", scope: "policies:write" });
     expect(minted.status).toBe(201);

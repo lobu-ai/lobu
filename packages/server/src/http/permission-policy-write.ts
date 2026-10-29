@@ -1,4 +1,5 @@
 import type { Context } from "hono";
+import { isTokenDerivedSession } from "../auth/oauth/scopes";
 import { canonicalConnectorPolicyScope, CONNECTOR_POLICY_CATEGORIES, type ConnectorPolicyCategory } from "../authz/connector-policy";
 import {
 	deleteEntityApprovalPolicy,
@@ -237,7 +238,7 @@ export async function writePermissionPolicy(c: Context) {
 	// Only human administrators can change agent connector restrictions.
 	if (
 		policy.resourceClass === "connector_action" &&
-		(c.get("authSource") !== "session" || !c.get("user")?.id || c.get("mcpAuthInfo"))
+		(c.get("authSource") !== "session" || !c.get("user")?.id || c.get("mcpAuthInfo") || isTokenDerivedSession(c.get("session")))
 	) {
 		return c.json(
 			{

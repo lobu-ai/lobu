@@ -19,7 +19,7 @@ import {
   createTestSession,
   createTestUser,
 } from '../../setup/test-fixtures';
-import { mcpRequest, mcpToolsCall, post } from '../../setup/test-helpers';
+import { get, mcpRequest, mcpToolsCall, post, postForm } from '../../setup/test-helpers';
 
 const OUTSIDER_EMAIL = 'outsider@human-only.example.com';
 const HUMAN_ONLY = /Inviting members, changing roles and removing members can only be done by a person in the Lobu web app/;
@@ -122,6 +122,48 @@ describe('member changes need a human', () => {
     }
     expect(await pendingInvitations()).toHaveLength(0);
     expect(await memberRole()).toBe('member');
+  });
+
+  it.each(['bearer', 'cookie', 're-exchanged cookie'] as const)('denies human-only member writes through a token-derived %s session', async (kind) => {
+    const { token: pat } = await createTestPAT(owner.userId, org.id, { scope: 'mcp:read mcp:write mcp:admin profile:read' });
+    const exchange = await postForm('/api/extension-session', { token: pat });
+    expect(exchange.status).toBe(200);
+    const { session_token: sessionToken } = await exchange.json();
+    expect(typeof sessionToken).toBe('string');
+    let auth: { token: string } | { cookie: string } = { token: sessionToken };
+    if (kind !== 'bearer') {
+      const redirected = await get(`/api/exchange-token?token=${encodeURIComponent(kind === 'cookie' ? pat : sessionToken)}&next=/`);
+      expect(redirected.status).toBe(302);
+      auth = { cookie: (redirected.headers.get('set-cookie') ?? '').split(';', 1)[0] };
+    }
+    const before = await getTestDb()`SELECT id FROM events WHERE organization_id = ${org.id} AND origin_type = 'workspace_member_updated'`;
+    for (const [path, body] of [
+      ['update-member-role', { organizationId: org.id, memberId: member.memberId, role: 'admin' }],
+      ['invite-member', { organizationId: org.id, email: OUTSIDER_EMAIL, role: 'owner' }],
+      ['remove-member', { organizationId: org.id, memberIdOrEmail: member.memberId }],
+      ['cancel-invitation', { invitationId: 'synthetic-invitation' }],
+      ['accept-invitation', { invitationId: 'synthetic-invitation' }],
+      ['reject-invitation', { invitationId: 'synthetic-invitation' }],
+      ['leave', { organizationId: org.id }],
+    ] as const) {
+      const response = await post(`/api/auth/organization/${path}`, { ...auth, body });
+      expect(response.status).toBe(403);
+      expect((await response.json()).message).toContain('requires a human web session');
+    }
+    for (const body of [
+      inviteOutsiderAsOwner,
+      { action: 'update', entity_id: member.entityId, metadata: { role: 'admin' } },
+      { action: 'delete', entity_id: member.entityId },
+    ]) {
+      const response = await post(`/api/${org.slug}/manage_entity`, { ...auth, body });
+      expect(response.status).toBe(403);
+      expect(await response.text()).toMatch(HUMAN_ONLY);
+    }
+    expect(await memberRole()).toBe('member');
+    const [displayed] = await getTestDb()`SELECT metadata->>'role' AS role FROM entities WHERE id = ${member.entityId}`;
+    expect(displayed.role).toBe('member');
+    expect(await pendingInvitations()).toHaveLength(0);
+    expect(await getTestDb()`SELECT id FROM events WHERE organization_id = ${org.id} AND origin_type = 'workspace_member_updated'`).toEqual(before);
   });
 
   it('denies run_sdk from an owner MCP session with mcp:admin as a typed permission error', async () => {

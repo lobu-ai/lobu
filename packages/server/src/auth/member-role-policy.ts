@@ -84,8 +84,8 @@ class MemberChangeRequiresHumanError extends ToolUserError {
 /**
  * The gate every entity-layer membership write runs ($member create, role
  * update, delete): the same human-only rule as run approvals
- * (`isHumanDecision`). Better Auth's own organization endpoints accept only a
- * web session, so they already satisfy it. A prompt-injected agent holding
+ * (`isHumanDecision`). Better Auth's membership hook also rejects sessions
+ * derived from tokens. A prompt-injected agent holding
  * mcp:admin must not be able to invite an outsider as owner or promote one.
  * Fails closed: a write with no principal is not a person.
  */

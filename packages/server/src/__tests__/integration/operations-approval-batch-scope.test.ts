@@ -23,11 +23,12 @@ import {
 	addUserToOrganization,
 	createTestConnection,
 	createTestConnectorDefinition,
+	createTestPAT,
 	createTestSession,
 	createTestUser,
 	seedOwnerContext,
 } from "../setup/test-fixtures";
-import { post } from "../setup/test-helpers";
+import { post, postForm } from "../setup/test-helpers";
 
 const APPROVAL_CONNECTOR = "demo.batch.approval";
 
@@ -384,6 +385,7 @@ describe("manage_operations batch scope (connector-approval lane)", () => {
 		{ label: "OAuth", context: { clientId: "test-oauth-client", tokenType: "oauth" as const } },
 		{ label: "PAT", context: { clientId: "pat_test-client", tokenType: "pat" as const } },
 		{ label: "Automation", context: { actingAutomationId: 123 } },
+		{ label: "token-derived session", context: { tokenDerivedSession: true } },
 	])("rejects a $label context carrying a user's identity", async ({ context }) => {
 		const mcpCtx = {
 			...ownerCtx,
@@ -458,6 +460,22 @@ describe("manage_operations batch scope (connector-approval lane)", () => {
 			run_id: pending,
 		});
 		expect(await approvalStatusOf(pending)).toBe("approved");
+	});
+
+	it("does not turn an exchanged PAT into a human approval identity", async () => {
+		const pat = await createTestPAT(ownerCtx.userId!, orgId, { scope: "mcp:admin profile:read" });
+		const exchange = await postForm("/api/extension-session", { token: pat.token });
+		expect(exchange.status).toBe(200);
+		const { session_token } = await exchange.json();
+		for (const action of ["approve", "reject", "approve_batch", "reject_batch"] as const) {
+			const pending = await seedPendingAction({ connectionId: approvalConnectionId, connectorKey: APPROVAL_CONNECTOR, actionKey: "needs_approval" });
+			const response = await post(`/api/${orgSlug}/manage_operations`, {
+				token: session_token,
+				body: action.endsWith("_batch") ? { action, scope: { connector_key: APPROVAL_CONNECTOR } } : { action, run_id: pending },
+			});
+			expect(await response.text()).toContain("human web session");
+			expect(await approvalStatusOf(pending)).toBe("pending");
+		}
 	});
 
 	it("rejects a caller with no verified human identity", async () => {
