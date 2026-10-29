@@ -56,6 +56,7 @@
   },
   "patchedDependencies": {
     "ora@8.2.0": "patches/ora@8.2.0.patch",
-    "postgres@3.4.9": "patches/postgres@3.4.9.patch"
+    "postgres@3.4.9": "patches/postgres@3.4.9.patch",
+    "@better-auth/kysely-adapter@1.7.7": "patches/@better-auth%2Fkysely-adapter@1.7.7.patch"
   }
 }

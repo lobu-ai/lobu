@@ -377,4 +377,12 @@ describe('non-OIDC login provider config (PKCE / basic-auth / extra params)', ()
     // Blank names trim to nothing and fall through like an absent claim.
     expect(map({ sub: 's1', name: '   ', email: 'a@b.c' }).name).toBe('a');
   });
+
+  it('keeps the provider subject separate from mapped local user fields', () => {
+    const entry = buildGenericOAuthEntry(baseRow, 'cid', 'secret')!;
+    const profile = { sub: 'stable-subject', id: 'different-id', email: 'human@example.test' };
+    expect(entry.accountSubject({ profile })).toBe('stable-subject');
+    expect(entry.accountSubject({ profile: { id: 'different-id' } })).toBe('different-id');
+    expect(entry.mapProfileToUser(profile)).not.toHaveProperty('id');
+  });
 });

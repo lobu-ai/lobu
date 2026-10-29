@@ -4,6 +4,12 @@ import { getBuiltinProviderConfig } from "../connect/oauth-providers";
 
 const CONTEXT_KEY = "lobuOAuthContext";
 
+// Better Auth 1.7 stores OAuth state under this prefixed identifier
+// (`getAuthStateVerificationIdentifier`, which it does not export publicly).
+export function authStateVerificationIdentifier(state: string): string {
+  return `auth-state:${state}`;
+}
+
 function invalidState(): never {
   throw new HTTPException(400, {
     res: Response.json(
@@ -22,13 +28,11 @@ export function bindOAuthOrganization(
   const path = context?.path;
   const provider = path === "/sign-in/social" || path === "/link-social"
     ? context?.body?.provider
-    : path === "/sign-in/oauth2" || path === "/oauth2/link"
-      ? context?.body?.providerId
-      : undefined;
+    : undefined;
   if (!provider || typeof provider !== "string") return verification.value;
 
   const state = JSON.parse(verification.value);
-  if (!state || typeof state !== "object" || state.oauthState !== verification.identifier) {
+  if (!state || typeof state.oauthState !== "string" || authStateVerificationIdentifier(state.oauthState) !== verification.identifier) {
     throw new Error("OAuth verification payload is missing its state binding");
   }
   // Overwrite client additionalData, including when the selected scope is global.
@@ -89,7 +93,7 @@ async function readOAuthCallbackContext(
   const sql = getDb();
   const [verification] = await sql<{ value: string }>`
     SELECT value FROM verification
-    WHERE identifier = ${state} AND "expiresAt" > NOW()
+    WHERE identifier = ${authStateVerificationIdentifier(state)} AND "expiresAt" > NOW()
     ORDER BY "createdAt" DESC LIMIT 1
   `;
   if (!verification) return null;

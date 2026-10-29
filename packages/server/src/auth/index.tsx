@@ -1,9 +1,11 @@
 import { createHash } from "node:crypto";
+import { kyselyAdapter } from "@better-auth/kysely-adapter";
 import { passkey } from "@better-auth/passkey";
 import { APIError, betterAuth } from "better-auth";
 import { magicLink, organization, phoneNumber } from "better-auth/plugins";
 import { bearer } from "better-auth/plugins/bearer";
 import { genericOAuth } from "better-auth/plugins/generic-oauth";
+import { Kysely } from "kysely";
 import { getBuiltinProviderConfig, getSharedOAuthCallbackUrl } from "../connect/oauth-providers";
 import { getAuthDialect, getDb } from "../db/client";
 import { sendTransactionalEmail } from "../email/send";
@@ -48,6 +50,7 @@ import {
 	logUnhandledAuthEndpointError,
 	withAuthRequestScope,
 } from "./endpoint-error-log";
+import { withGenericOAuthRoutes } from "./generic-oauth-routes";
 import { memberRolePlugin } from "./member-roles";
 import { bindOAuthOrganization } from "./oauth-organization-context";
 import { workspaceDeletionPlugin } from "./organization-delete";
@@ -214,11 +217,14 @@ export async function createAuth(
 
 	const auth = betterAuth({
 		...(env.BETTER_AUTH_SECRET ? { secret: env.BETTER_AUTH_SECRET } : {}),
-		database: {
-			dialect: getAuthDialect(),
+		// Pass the adapter explicitly so the patched @better-auth/kysely-adapter is
+		// used in isolated component installs too. The patch makes its schema
+		// search-path query return JSON: the server's postgres.js client runs with
+		// `fetch_types: false`, which leaves the stock `text[]` result unparsed.
+		database: kyselyAdapter(new Kysely({ dialect: getAuthDialect() }), {
 			type: "postgres",
 			transaction: true,
-		},
+		}),
 		baseURL: resolveBaseUrl({ request }),
 		basePath: "/api/auth",
 
@@ -318,7 +324,10 @@ export async function createAuth(
 			// identity ingest), only the provider config comes from the connector
 			// declaration instead of Better Auth's built-in registry.
 			...(genericOAuthConfigs.length > 0
-				? [genericOAuth({ config: genericOAuthConfigs })]
+				? [genericOAuth({ config: genericOAuthConfigs.map((config) => ({
+					...config,
+					redirectURI: `${resolveBaseUrl({ request })}/api/auth/oauth2/callback/${encodeURIComponent(config.providerId)}`,
+				})) })]
 				: []),
 			// Accept the Better Auth session token as Authorization: Bearer too.
 			// Used by the macOS menu bar and the CLI's `local` context — both hold
@@ -1118,7 +1127,7 @@ export async function createAuth(
 		// only console-prints it; route it to the structured log with its request.
 		onAPIError: { onError: logUnhandledAuthEndpointError },
 	});
-	auth.handler = withAuthRequestScope(auth.handler);
+	auth.handler = withAuthRequestScope(withGenericOAuthRoutes(auth.handler));
 	sessionApi = auth;
 	// betterAuth's inferred return narrows generics per call site (socialProviders
 	// shape, required-vs-optional database/secret); the cache stores the general

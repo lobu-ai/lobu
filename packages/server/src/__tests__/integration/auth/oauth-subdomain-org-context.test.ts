@@ -1,6 +1,6 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { clearLoginProviderCachesForTests, getAuthConfig, resolveRequestOrganizationId } from "../../../auth/config";
-import { bindOAuthOrganization } from "../../../auth/oauth-organization-context";
+import { authStateVerificationIdentifier, bindOAuthOrganization } from "../../../auth/oauth-organization-context";
 import type { Env } from "../../../index";
 import { initWorkspaceProvider } from "../../../workspace";
 import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
@@ -123,13 +123,14 @@ describe("subdomain-aware auth org resolution", () => {
     const acme = await createTestOrganization({ name: "acme", slug: "acme", visibility: "public" });
     await createTestOrganization({ name: "other", slug: "other", visibility: "public" });
     const state = "synthetic-subdomain-state";
+    const identifier = authStateVerificationIdentifier(state);
     const bound = bindOAuthOrganization(
-      { identifier: state, value: JSON.stringify({ oauthState: state, expiresAt: Date.now() + 60_000 }) },
+      { identifier, value: JSON.stringify({ oauthState: state, expiresAt: Date.now() + 60_000 }) },
       acme.id,
       { path: "/sign-in/social", body: { provider: PROVIDER } },
     );
     await getTestDb()`INSERT INTO verification (id, identifier, value, "expiresAt", "createdAt")
-      VALUES (gen_random_uuid(), ${state}, ${bound}, now() + interval '5 minutes', now())`;
+      VALUES (gen_random_uuid(), ${identifier}, ${bound}, now() + interval '5 minutes', now())`;
     const request = new Request(`https://other.lobu.ai/api/auth/callback/${PROVIDER}?state=${state}&code=synthetic-code`);
     expect(await resolveRequestOrganizationId(request)).toBe(acme.id);
   });
