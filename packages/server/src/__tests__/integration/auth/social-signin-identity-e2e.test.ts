@@ -23,6 +23,7 @@ import { connectRoutes } from "../../../connect/routes";
 import { clearLoginProviderCachesForTests } from "../../../auth/config";
 import { normalizeScopeList } from "../../../auth/oauth/scopes";
 import { clearAuthCacheForTests, createAuth } from "../../../auth/index";
+import { authStateVerificationIdentifier } from "../../../auth/oauth-organization-context";
 import { createAuthProfile } from "../../../utils/auth-profiles";
 import { getEnvFromProcess } from "../../../utils/env";
 import { initWorkspaceProvider } from "../../../workspace";
@@ -153,12 +154,12 @@ describe("Reddit identity-only login through the real Better Auth handler", () =
     };
 
     const first = await signIn();
-    expect(first.user).toMatchObject({ email: "abc123@reddit.invalid", emailVerified: false });
+    expect(first.user).toMatchObject({ email: "abc123@reddit.placeholder.invalid", emailVerified: false });
     profileId = "def456";
     profileName = "synthetic_bob";
     const second = await signIn();
     expect(second.user.id).not.toBe(first.user.id);
-    expect(second.user).toMatchObject({ email: "def456@reddit.invalid", emailVerified: false });
+    expect(second.user).toMatchObject({ email: "def456@reddit.placeholder.invalid", emailVerified: false });
     profileId = "abc123";
     profileName = "synthetic_alice_changed";
     expect((await signIn()).user.id).toBe(first.user.id);
@@ -197,15 +198,15 @@ describe("Reddit identity-only login through the real Better Auth handler", () =
       callback.searchParams.set("code", "synthetic-code");
       if (kind === "missing") callback.searchParams.delete("state");
       if (kind === "unknown") callback.searchParams.set("state", "unknown-synthetic-state");
-      if (kind === "expired") await sql`UPDATE verification SET "expiresAt" = now() - interval '1 minute' WHERE identifier = ${state}`;
-      if (kind === "malformed") await sql`UPDATE verification SET value = 'not-json' WHERE identifier = ${state}`;
+      if (kind === "expired") await sql`UPDATE verification SET "expiresAt" = now() - interval '1 minute' WHERE identifier = ${authStateVerificationIdentifier(state)}`;
+      if (kind === "malformed") await sql`UPDATE verification SET value = 'not-json' WHERE identifier = ${authStateVerificationIdentifier(state)}`;
       if (["wrong-provider", "missing-org", "state-mismatch"].includes(kind)) {
-        const [row] = await sql`SELECT value FROM verification WHERE identifier = ${state}`;
+        const [row] = await sql`SELECT value FROM verification WHERE identifier = ${authStateVerificationIdentifier(state)}`;
         const value = JSON.parse(row.value);
         if (kind === "wrong-provider") value.lobuOAuthContext.provider = "google";
         if (kind === "missing-org") value.lobuOAuthContext.organizationId = "00000000-0000-4000-8000-000000000000";
         if (kind === "state-mismatch") value.oauthState = "different-synthetic-state";
-        await sql`UPDATE verification SET value = ${JSON.stringify(value)} WHERE identifier = ${state}`;
+        await sql`UPDATE verification SET value = ${JSON.stringify(value)} WHERE identifier = ${authStateVerificationIdentifier(state)}`;
       }
       if (kind === "duplicate") callback.searchParams.append("state", "another-synthetic-state");
       if (kind === "denied") {
@@ -317,7 +318,7 @@ describe("X identity-only login through the real Better Auth handler", () => {
     }));
     const session = await sessionResponse.json() as { user: { id: string; email: string; emailVerified: boolean } };
     expect(session.user).toMatchObject({
-      email: hasEmail ? "alice@acme.test" : "synthetic_x_user",
+      email: hasEmail ? "alice@acme.test" : `${X_ACCOUNT_ID}@twitter.placeholder.invalid`,
       emailVerified: hasEmail,
     });
     const [account] = await sql`SELECT "accountId", "userId", scope, "refreshToken"

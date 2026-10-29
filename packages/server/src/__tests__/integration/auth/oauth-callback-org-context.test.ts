@@ -6,6 +6,7 @@ import { app } from "../../../index";
 import { buildWrapperApp } from "../../../server-lifecycle";
 import { clearLoginProviderCachesForTests, resolveRequestOrganizationId } from "../../../auth/config";
 import { clearAuthCacheForTests, createAuth } from "../../../auth/index";
+import { authStateVerificationIdentifier } from "../../../auth/oauth-organization-context";
 import { getEnvFromProcess } from "../../../utils/env";
 import { initWorkspaceProvider } from "../../../workspace";
 import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
@@ -149,7 +150,7 @@ describe("organization-scoped OAuth callback routing", () => {
       const [connections] = await getTestDb()`SELECT count(*)::int AS count FROM connections WHERE organization_id = ${org.id}`;
       expect(connections.count).toBe(0);
       const state = flow.callback.searchParams.get("state")!;
-      expect(await getTestDb()`SELECT id FROM verification WHERE identifier = ${state}`).toHaveLength(0);
+      expect(await getTestDb()`SELECT id FROM verification WHERE identifier = ${authStateVerificationIdentifier(state)}`).toHaveLength(0);
     },
   );
 
@@ -225,11 +226,11 @@ describe("organization-scoped OAuth callback routing", () => {
       const flow = await start();
       const sql = getTestDb();
       const state = flow.callback.searchParams.get("state")!;
-      const [row] = await sql<{ value: string }[]>`SELECT value FROM verification WHERE identifier = ${state}`;
+      const [row] = await sql<{ value: string }[]>`SELECT value FROM verification WHERE identifier = ${authStateVerificationIdentifier(state)}`;
       const payload = JSON.parse(row.value);
       if (kind === "missing") flow.callback.searchParams.delete("state");
       if (kind === "unknown") flow.callback.searchParams.set("state", "unknown-synthetic-state");
-      if (kind === "expired-row") await sql`UPDATE verification SET "expiresAt" = now() - interval '1 minute' WHERE identifier = ${state}`;
+      if (kind === "expired-row") await sql`UPDATE verification SET "expiresAt" = now() - interval '1 minute' WHERE identifier = ${authStateVerificationIdentifier(state)}`;
       if (kind === "expired-payload") payload.expiresAt = Date.now() - 1;
       if (kind === "unbound") delete payload.lobuOAuthContext;
       if (kind === "state-mismatch") payload.oauthState = "wrong-state";
@@ -240,7 +241,7 @@ describe("organization-scoped OAuth callback routing", () => {
         flow.callback.pathname = `/api/auth/callback/${PROVIDER}`;
         flow.callback.searchParams.set("state", "");
       }
-      await sql`UPDATE verification SET value = ${kind === "malformed" ? "{" : JSON.stringify(payload)} WHERE identifier = ${state}`;
+      await sql`UPDATE verification SET value = ${kind === "malformed" ? "{" : JSON.stringify(payload)} WHERE identifier = ${authStateVerificationIdentifier(state)}`;
       const request = new Request(flow.callback, {
         headers: { cookie: flow.cookie, referer: `${ORIGIN}/acme`, ...(kind === "empty-query" ? { "content-type": "application/json" } : {}) },
         ...(kind === "empty-query" ? { method: "POST", body: JSON.stringify({ state, code: "synthetic-code" }) } : {}),

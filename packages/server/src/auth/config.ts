@@ -225,8 +225,8 @@ export interface GenericOAuthEntry {
 	pkce?: boolean;
 	authentication?: "basic" | "post";
 	authorizationUrlParams?: Record<string, string>;
+	accountSubject: (context: { profile: Record<string, unknown> }) => string;
 	mapProfileToUser: (profile: Record<string, unknown>) => {
-		id: string;
 		email?: string;
 		name?: string;
 		image?: string;
@@ -259,7 +259,6 @@ function mapOidcProfileToUser(profile: Record<string, unknown>) {
 			? nonempty(email.split("@")[0])
 			: undefined;
 	return {
-		id: String(profile.sub ?? ""),
 		email,
 		// AgentID permits inboxes with no display name, and Better Auth will
 		// not create a user without one (the callback fails with
@@ -304,6 +303,8 @@ export function buildGenericOAuthEntry(
 			Object.keys(row.authParams).length > 0 && {
 				authorizationUrlParams: row.authParams,
 			}),
+		// Better Auth 1.7 derives provider identity separately from local user fields.
+		accountSubject: ({ profile }) => String(profile.sub || profile.id || ""),
 		mapProfileToUser: mapOidcProfileToUser,
 	};
 }

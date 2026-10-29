@@ -1,0 +1,13 @@
+diff --git a/dist/index.mjs b/dist/index.mjs
+index dc6a67b8a7fb5d9f0958b3ed102b4ce31a75938b..d7dcd60957d9eadd2d1d7314f9a99f0f6f91d0f6 100644
+--- a/dist/index.mjs
++++ b/dist/index.mjs
+@@ -238,7 +238,7 @@ async function getMssqlSchema(db) {
+ }
+ async function schemaSearchPath(db, dbType) {
+ 	if (dbType === "postgres") return (await sql`
+-			SELECT pg_catalog.current_schemas(true)::text[] AS schemas
++			SELECT pg_catalog.to_json(pg_catalog.current_schemas(true)) AS schemas
+ 		`.execute(db.withoutPlugins())).rows[0]?.schemas ?? [];
+ 	if (dbType === "mssql") return [await getMssqlSchema(db), "dbo"];
+ }
