@@ -354,7 +354,10 @@ describe('reapStaleClustersIn', () => {
     // perl's shmget creates a real segment the way PostgreSQL does, so these
     // exercise the actual ipcs/ipcrm path the reaper relies on.
     const created = new Set<number>();
-    const canCreate = spawnSync('perl', ['-MIPC::SysV', '-e', '1']).status === 0;
+    // Sandboxes that block `ipcs`/`ipcrm` can still let perl `shmget`; creating
+    // segments there would leak every one past afterEach, so require both.
+    const canCreate = spawnSync('perl', ['-MIPC::SysV', '-e', '1']).status === 0 &&
+      spawnSync('ipcs', ['-m']).status === 0;
 
     function createSegment(key: number, bytes = 64): number {
       const signedKey = Number(BigInt.asIntN(32, BigInt(key)));
