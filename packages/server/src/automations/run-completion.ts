@@ -121,9 +121,8 @@ export async function bumpDeviceFinalizeNudge(
  * `fallbackModel` is the caller's assertion about the executor and is applied
  * ONLY over the placeholder or a NULL — a model the agent genuinely reported
  * always wins. Callers that cannot prove who executed the run must omit it
- * rather than guess: `reconcileAutomationRuns` sweeps active runs without
- * filtering on `dispatched_message_id`, so it can reach runs an external client
- * created, and stamping those would invert the very bug this fixes.
+ * rather than guess. Message-based completion also checks `expectedMessageId`
+ * in the UPDATE so a late reply cannot complete a replacement dispatch.
  *
  * (SQL comments are kept out of the template literal: a backtick inside one
  * terminates the string and fails the esbuild transform, not just at runtime.)
@@ -131,9 +130,10 @@ export async function bumpDeviceFinalizeNudge(
 export async function markAutomationRunCompleted(
 	sql: DbClient,
 	runId: number,
-	fallbackModel?: string
-): Promise<void> {
-	await sql`
+	fallbackModel?: string,
+	expectedMessageId?: string
+): Promise<boolean> {
+	const changed = await sql`
     UPDATE runs
     SET status = 'completed',
         outcome = ${classifyRunOutcome({ status: "completed" })},
@@ -145,8 +145,11 @@ export async function markAutomationRunCompleted(
           model_used
         )
     WHERE id = ${runId}
+      AND (${expectedMessageId ?? null}::text IS NULL OR dispatched_message_id = ${expectedMessageId ?? null})
       AND status = ANY(${runStatusLiteral(ACTIVE_RUN_STATUSES)}::text[])
+    RETURNING id
   `;
+	return changed.length > 0;
 }
 
 export async function markAutomationRunFailed(
@@ -154,7 +157,8 @@ export async function markAutomationRunFailed(
 	runId: number,
 	message: string,
 	notBefore?: Date | null,
-	errorCode?: string | null
+	errorCode?: string | null,
+	expectedMessageId?: string
 ): Promise<boolean> {
 	return sql.begin(async (tx) => {
 		const [failed] = await tx<{
@@ -168,6 +172,7 @@ export async function markAutomationRunFailed(
           completed_at = current_timestamp,
           error_message = ${message}
       WHERE id = ${runId}
+        AND (${expectedMessageId ?? null}::text IS NULL OR dispatched_message_id = ${expectedMessageId ?? null})
         AND status = ANY(${runStatusLiteral(ACTIVE_RUN_STATUSES)}::text[])
       RETURNING automation_id, run_type, approved_input->>'dispatch_source' AS dispatch_source
     `;
@@ -204,9 +209,10 @@ export async function markAutomationRunFailed(
 async function requeueAutomationRunForFinalizeNudge(
 	sql: DbClient,
 	runId: number,
-	nextNudgeCount: number
-): Promise<void> {
-	await sql`
+	nextNudgeCount: number,
+	expectedMessageId: string
+): Promise<boolean> {
+	const changed = await sql`
     UPDATE runs
     SET status = 'pending',
         claimed_by = NULL,
@@ -219,8 +225,11 @@ async function requeueAutomationRunForFinalizeNudge(
           to_jsonb(${nextNudgeCount}::int)
         )
     WHERE id = ${runId}
+      AND dispatched_message_id = ${expectedMessageId}
       AND status = ANY(${runStatusLiteral(ACTIVE_RUN_STATUSES)}::text[])
+    RETURNING id
   `;
+	return changed.length > 0;
 }
 
 export async function resolveAutomationRunsByMessageIds(
@@ -233,7 +242,7 @@ export async function resolveAutomationRunsByMessageIds(
 
 	const sql = db ?? getDb();
 	const rows = await sql`
-    SELECT r.id, r.run_type, r.automation_id, r.approved_input, w.execution_config
+    SELECT r.id, r.run_type, r.dispatched_message_id, r.automation_id, r.approved_input, w.execution_config
     FROM runs r
     LEFT JOIN automations w ON w.id = r.automation_id
     WHERE r.run_type = ANY(${AUTOMATION_RUN_TYPES_PG}::text[])
@@ -247,6 +256,7 @@ export async function resolveAutomationRunsByMessageIds(
 		const typedRow = row as {
 			id: unknown;
 			run_type: string;
+			dispatched_message_id: string;
 			automation_id: unknown;
 			approved_input: Record<string, unknown> | null;
 			execution_config: Record<string, unknown> | null;
@@ -254,9 +264,10 @@ export async function resolveAutomationRunsByMessageIds(
 		const runId = Number(typedRow.id);
 		if (!Number.isFinite(runId)) continue;
 		const automationId = Number(typedRow.automation_id);
-		if (typedRow.automation_id != null && Number.isFinite(automationId)) {
-			automationIds.add(automationId);
-		}
+		const recordResolution = () => {
+			resolved++;
+			if (typedRow.automation_id != null && Number.isFinite(automationId)) automationIds.add(automationId);
+		};
 
 		if (!result.ok) {
 			const notBefore = providerQuotaResetNotBefore(
@@ -269,24 +280,23 @@ export async function resolveAutomationRunsByMessageIds(
 					runId,
 					result.error,
 					notBefore,
-					result.errorCode
+					result.errorCode,
+					typedRow.dispatched_message_id
 				)
 			) {
-				resolved++;
+				recordResolution();
 			}
 			continue;
 		}
 
 		if (typedRow.approved_input?.trigger_execution === "turn") {
-			await markAutomationRunCompleted(sql, runId, "lobu-agent");
-			resolved++;
+			if (await markAutomationRunCompleted(sql, runId, "lobu-agent", typedRow.dispatched_message_id)) recordResolution();
 			continue;
 		}
 
 		// Capture-mode evals persist their preview instead of a live result.
 		if (typedRow.run_type === AUTOMATION_EVAL_RUN_TYPE) {
-			await markAutomationRunCompleted(sql, runId, "lobu-agent");
-			resolved++;
+			if (await markAutomationRunCompleted(sql, runId, "lobu-agent", typedRow.dispatched_message_id)) recordResolution();
 			continue;
 		}
 
@@ -297,22 +307,25 @@ export async function resolveAutomationRunsByMessageIds(
 			typedRow.approved_input?.finalize_nudge_count ?? 0
 		);
 		if (Number.isFinite(nudgeCount) && nudgeCount < budget) {
-			await requeueAutomationRunForFinalizeNudge(sql, runId, nudgeCount + 1);
+			if (!await requeueAutomationRunForFinalizeNudge(sql, runId, nudgeCount + 1, typedRow.dispatched_message_id)) continue;
 			logger.info(
 				{ run_id: runId, attempt: nudgeCount + 1, max: budget },
 				"[automations] Agent finished without complete_window — re-dispatching for finalize nudge"
 			);
-			resolved++;
+			recordResolution();
 			continue;
 		}
 		if (
 			await markAutomationRunFailed(
 				sql,
 				runId,
-				describeFinalizeMiss(budget)
+				describeFinalizeMiss(budget),
+				undefined,
+				undefined,
+				typedRow.dispatched_message_id
 			)
 		) {
-			resolved++;
+			recordResolution();
 		}
 	}
 
