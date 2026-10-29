@@ -22,7 +22,7 @@
  *
  * The agent owner is never substituted for a chat sender.
  */
-import type { ChatTurnAccess } from "@lobu/core";
+import type { ChatTurnAccess, WorkerTokenData } from "@lobu/core";
 import { getDb } from "../../db/client.js";
 import { resolveChatSenderMember } from "../../lobu/stores/chat-identity.js";
 
@@ -209,6 +209,16 @@ export function chatTurnAccessOf(claims: {
     return "reply_only";
   }
   return access;
+}
+
+/**
+ * Canonical user allowed to select a private provider profile. Chat userId is
+ * a platform sender, and an org-shared actor is attribution only. The producer
+ * and proxy derive the URL's user binding from the same verified claims.
+ */
+export function providerUserIdFromClaims(claims: WorkerTokenData): string | undefined {
+  const access = chatTurnAccessOf(claims);
+  return access === null ? claims.userId : access === "member" ? claims.actorUserId : undefined;
 }
 
 /**

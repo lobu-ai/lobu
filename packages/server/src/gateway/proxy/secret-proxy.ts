@@ -26,6 +26,7 @@ import {
   readOrgSharedProviderApiKey,
   resolveInferenceProviderCredential,
 } from "../../lobu/stores/provider-secrets.js";
+import { providerUserIdFromClaims } from "../orchestration/chat-turn-actor.js";
 import { turnMarkerDeploymentFromClaims } from "../orchestration/deployment-identity.js";
 import {
   clearTurnProviderFailed,
@@ -946,9 +947,10 @@ export class SecretProxy {
 
     // Per-user provider profiles need the signed user identity as well as the
     // agent/org binding. A URL segment cannot select another user's credential.
+    const signedUserId = signedBinding && providerUserIdFromClaims(signedBinding);
     if (providerContext?.userId &&
-        (!signedBinding?.userId || providerContext.userId !== signedBinding.userId ||
-          claims.some((claim) => claim.userId && claim.userId !== signedBinding.userId))) {
+        (!signedUserId || providerContext.userId !== signedUserId ||
+          claims.some((claim) => providerUserIdFromClaims(claim) !== signedUserId))) {
       return c.json({ error: "Forbidden" }, 403);
     }
 

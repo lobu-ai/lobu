@@ -112,7 +112,9 @@ describe('native capture over HTTP and Postgres', () => {
     const module = {
       providerId: 'capture-fixture-provider', sdkCompat: 'anthropic',
       getUpstreamConfig: () => ({ slug: 'anthropic', upstreamBaseUrl: `${origin}/upstream`, apiKeyHeader: 'x-api-key' }),
-      getProxyBaseUrlMappings: (url: string, agentId: string) => ({ ANTHROPIC_BASE_URL: `${url}/anthropic/a/${agentId}/o/${org.id}/u/${owner.id}` }),
+      getProxyBaseUrlMappings: (url: string, agentId: string, context: { userId?: string }) => ({
+        ANTHROPIC_BASE_URL: `${url}/anthropic/a/${agentId}/o/${org.id}${context.userId ? `/u/${context.userId}` : ""}`,
+      }),
       buildCredentialPlaceholder: (_agentId: string, context: { workerToken: string }) => context.workerToken,
     };
     const message = { userId: 'U0CAPTURE', conversationId: 'capture-conversation', messageId: 'capture-message', channelId: 'C_CAPTURE',

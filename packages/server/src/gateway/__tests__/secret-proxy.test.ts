@@ -179,7 +179,7 @@ describe("lookupPlaceholderMapping org scoping", () => {
 });
 
 describe("SecretProxy user-scoped provider routing", () => {
-  test.each(["matching", "spoofed", "conflicting-header"])("binds user context to the signed caller (%s)", async (mode) => {
+  test.each(["matching", "spoofed", "conflicting-header", "linked-member", "platform-sender", "group-actor", "unlinked-sender", "conflicting-actor"])("binds user context to the signed caller (%s)", async (mode) => {
     const configSpy = spyOn(providerSecrets, "resolveInferenceProviderConfig")
       .mockResolvedValue({ custom: false });
     const proxy = new SecretProxy(
@@ -240,21 +240,27 @@ describe("SecretProxy user-scoped provider routing", () => {
           headers: {
             "content-type": "application/json",
             authorization: `Bearer ${generateWorkerToken(
-              mode === "matching" ? "user-42" : "synthetic-other-user",
+              ["matching", "platform-sender", "unlinked-sender"].includes(mode) ? "user-42" : "synthetic-other-user",
               "synthetic-conversation", "synthetic-deployment",
-              { agentId: "agent-1", organizationId: "org-1", channelId: "synthetic-channel" }
+              { agentId: "agent-1", organizationId: "org-1", channelId: "synthetic-channel",
+                ...(["linked-member", "platform-sender", "conflicting-actor"].includes(mode) ? { platform: "slack", chatAccess: "member" as const, actorUserId: mode === "platform-sender" ? "synthetic-other-user" : "user-42" } : {}),
+                ...(mode === "group-actor" ? { platform: "slack", chatAccess: "org_shared" as const, actorUserId: "user-42" } : {}),
+                ...(mode === "unlinked-sender" ? { platform: "slack", chatAccess: "org_shared" as const } : {}),
+              }
             )}`,
-            ...(mode === "conflicting-header" ? {
+            ...(["conflicting-header", "conflicting-actor"].includes(mode) ? {
               "x-lobu-worker-token": generateWorkerToken(
                 "user-42", "synthetic-conversation", "synthetic-deployment",
-                { agentId: "agent-1", organizationId: "org-1", channelId: "synthetic-channel" }
+                { agentId: "agent-1", organizationId: "org-1", channelId: "synthetic-channel",
+                  ...(mode === "conflicting-actor" ? { platform: "slack", chatAccess: "member" as const, actorUserId: "synthetic-other-user" } : {}),
+                }
               ),
             } : {}),
           },
           body: JSON.stringify({ prompt: "hello" }),
         });
 
-      if (mode !== "matching") {
+      if (!["matching", "linked-member"].includes(mode)) {
         expect(res.status).toBe(403);
         expect(forwardedAuthHeader).toBeNull();
         expect(calls).toEqual([]);
