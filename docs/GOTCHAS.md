@@ -90,7 +90,7 @@ Rollback to a pre-cutover binary must also be quiesced and deploy its matching U
 
 **`ERR_RESOLVE_PACKAGE_ENTRY_FAIL` during integration global setup.** `@lobu/pgvector-embedded` is not built. `cd packages/pgvector-embedded && bun run build`.
 
-**`could not create shared memory segment: No space left on device` on macOS.** The SHMMNI limit, not disk. Reap detached segments: `ipcs -mob`, then `ipcrm -m <id>` for entries with `nattch=0` **only**.
+**`could not create shared memory segment: No space left on device` on macOS.** The SHMMNI limit (32), not disk. Each test process frees PostgreSQL segments with no attachments and a dead creator before its first embedded-Postgres start; `make clean-test-pg` does the same on demand. To reap by hand: `ipcs -mobp`, then `ipcrm -m <id>` only for your own entries with `nattch=0` and a dead `CPID`.
 
 **Integration suite prerequisites.** Node 22 is the repo default (`.node-version`); Lobu accepts Node 22–24 and 26+, while Node 25 boots without the SDK sandbox. Global setup uses `DATABASE_URL` if set, otherwise spawns an ephemeral embedded Postgres + pgvector.
 

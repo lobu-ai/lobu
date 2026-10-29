@@ -7,7 +7,7 @@
  * previous killed runs. This pins that logic.
  */
 
-import { spawn, spawnSync } from 'node:child_process';
+import { type ChildProcess, spawn, spawnSync } from 'node:child_process';
 import * as childProcess from 'node:child_process';
 import {
   existsSync,
@@ -31,7 +31,11 @@ function deadPid(): number {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import { reapStaleClustersIn, STALE_CLUSTER_MS } from '../setup/reap-stale-clusters';
+import {
+  reapStaleClustersIn,
+  releaseOrphanedPostgresSegments,
+  STALE_CLUSTER_MS,
+} from '../setup/reap-stale-clusters';
 
 describe('reapStaleClustersIn', () => {
   let root: string;
@@ -350,12 +354,15 @@ describe('reapStaleClustersIn', () => {
     // perl's shmget creates a real segment the way PostgreSQL does, so these
     // exercise the actual ipcs/ipcrm path the reaper relies on.
     const created = new Set<number>();
-    const canCreate = spawnSync('perl', ['-MIPC::SysV', '-e', '1']).status === 0;
+    // Sandboxes that block `ipcs`/`ipcrm` can still let perl `shmget`; creating
+    // segments there would leak every one past afterEach, so require both.
+    const canCreate = spawnSync('perl', ['-MIPC::SysV', '-e', '1']).status === 0 &&
+      spawnSync('ipcs', ['-m']).status === 0;
 
-    function createSegment(key: number): number {
+    function createSegment(key: number, bytes = 64): number {
       const signedKey = Number(BigInt.asIntN(32, BigInt(key)));
       const r = spawnSync('perl', ['-MIPC::SysV=IPC_CREAT,IPC_EXCL', '-e',
-        `my $id = shmget(${signedKey}, 64, IPC_CREAT | IPC_EXCL | 0600); defined $id or die "shmget: $!"; print $id`],
+        `my $id = shmget(${signedKey}, ${bytes}, IPC_CREAT | IPC_EXCL | 0600); defined $id or die "shmget: $!"; print $id`],
         { encoding: 'utf8' });
       if (r.status !== 0) throw new Error(`shmget failed: ${r.stderr}`);
       const id = Number(r.stdout);
@@ -371,10 +378,24 @@ describe('reapStaleClustersIn', () => {
       return r.status === 0;
     }
 
+    const holders: ChildProcess[] = [];
+
     afterEach(() => {
+      for (const holder of holders) holder.kill('SIGKILL');
+      holders.length = 0;
       for (const id of created) spawnSync('ipcrm', ['-m', String(id)]);
       created.clear();
     });
+
+    /** Run a perl script that stays alive after printing one line; resolve with that line. */
+    function holdWith(script: string): Promise<string> {
+      const holder = spawn('perl', ['-MIPC::SysV=IPC_CREAT,IPC_EXCL,shmat', '-e', `$| = 1; ${script}; sleep 60`]);
+      holders.push(holder);
+      return new Promise((resolve, reject) => {
+        holder.stdout.once('data', (chunk: Buffer) => resolve(chunk.toString().trim()));
+        holder.once('exit', (code) => reject(new Error(`holder exited ${code}`)));
+      });
+    }
 
     // A synthetic key in the range PostgreSQL derives keys from, unlikely to clash.
     function syntheticKey(): number {
@@ -447,6 +468,40 @@ describe('reapStaleClustersIn', () => {
 
       expect(segmentExists(id)).toBe(true);
       rmSync(dir, { recursive: true, force: true });
+    });
+
+    // PostgreSQL's System V segment holds only its 56-byte PGShmemHeader.
+    describe('segments no cluster dir records any more', () => {
+      it.skipIf(!canCreate)('releases an unattached PostgreSQL-sized segment whose creator is dead', () => {
+        const id = createSegment(syntheticKey(), 56); // perl has exited: creator dead
+
+        expect(releaseOrphanedPostgresSegments()).toBeGreaterThanOrEqual(1);
+        expect(segmentExists(id)).toBe(false);
+      });
+
+      it.skipIf(!canCreate)('never removes a segment whose creator is still running', async () => {
+        const key = Number(BigInt.asIntN(32, BigInt(syntheticKey())));
+        const id = Number(await holdWith(`my $id = shmget(${key}, 56, IPC_CREAT | IPC_EXCL | 0600); defined $id or die; print "$id\\n"`));
+        created.add(id);
+
+        releaseOrphanedPostgresSegments();
+        expect(segmentExists(id)).toBe(true);
+      });
+
+      it.skipIf(!canCreate)('never removes a segment a backend is still attached to', async () => {
+        const id = createSegment(syntheticKey(), 56); // creator dead, like a killed postmaster
+        await holdWith(`defined shmat(${id}, undef, 0) or die "shmat: $!"; print "attached\\n"`);
+
+        releaseOrphanedPostgresSegments();
+        expect(segmentExists(id)).toBe(true);
+      });
+
+      it.skipIf(!canCreate)('never removes a segment that is not PostgreSQL-sized', () => {
+        const id = createSegment(syntheticKey(), 64);
+
+        releaseOrphanedPostgresSegments();
+        expect(segmentExists(id)).toBe(true);
+      });
     });
   });
 });

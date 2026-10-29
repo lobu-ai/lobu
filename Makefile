@@ -276,6 +276,7 @@ clean-test-pg:
 		done; \
 		after=$$(df -m "$${TMPDIR:-/tmp}" 2>/dev/null | awk 'END{print $$4}'); \
 		echo "freed ~$$((after - before)) MB of leaked cluster dirs (live clusters skipped)"
+	@cd packages/server && bun -e "import { releaseOrphanedPostgresSegments } from './src/__tests__/setup/reap-stale-clusters'; console.log('released ' + releaseOrphanedPostgresSegments() + ' orphaned Postgres shm segments')"
 	@echo "shm segments now: $$(ipcs -m 2>/dev/null | awk '/^m/{c++} END{print c+0}') / 32"
 	@echo "✅ Test-PG clusters + dirs reaped"
 
