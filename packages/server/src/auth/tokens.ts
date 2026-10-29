@@ -172,7 +172,8 @@ export class PersonalAccessTokenService {
   }
 
   /**
-   * List a user's unrevoked PATs in one organization (no plaintext tokens)
+   * List a user's live (unrevoked, unexpired) PATs in one organization (no
+   * plaintext tokens). An expired token stays revocable by id.
    */
   async list(userId: string, organizationId: string): Promise<PATListItem[]> {
     const result = await this.sql`
@@ -183,6 +184,7 @@ export class PersonalAccessTokenService {
       WHERE user_id = ${userId}
         AND organization_id = ${organizationId}
         AND revoked_at IS NULL
+        AND (expires_at IS NULL OR expires_at > NOW())
       ORDER BY created_at DESC
     `;
 

@@ -246,6 +246,34 @@ describe('org-scoped token list and revoke routes', () => {
     expect(bearerBody.tokens.map((t) => String(t.id))).toEqual([mine.id]);
   });
 
+  it('omits expired tokens from the list but keeps never-expiring and future-expiring ones', async () => {
+    const ws = await seedWorkspace('pat-list-expiry');
+    const never = await mint(ws.member.userId, ws.orgId, 'never');
+    const future = await mint(ws.member.userId, ws.orgId, 'future');
+    const expired = await mint(ws.member.userId, ws.orgId, 'expired');
+    const sql = getTestDb();
+    await sql`UPDATE personal_access_tokens SET expires_at = NOW() + INTERVAL '1 day' WHERE id = ${future.id}`;
+    await sql`UPDATE personal_access_tokens SET expires_at = NOW() - INTERVAL '1 minute' WHERE id = ${expired.id}`;
+
+    const res = await get(`/api/${ws.slug}/tokens`, { cookie: ws.member.cookie });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { tokens: Array<{ id: unknown; expires_at: unknown }> };
+    const byId = new Map(body.tokens.map((t) => [String(t.id), t]));
+    expect([...byId.keys()].sort()).toEqual([never.id, future.id].sort());
+    expect(byId.get(never.id)?.expires_at).toBeNull();
+    expect(byId.get(future.id)?.expires_at).toBeTruthy();
+  });
+
+  it('still revokes an expired, unrevoked token by id', async () => {
+    const ws = await seedWorkspace('pat-revoke-expired');
+    const expired = await mint(ws.member.userId, ws.orgId, 'expired');
+    await getTestDb()`UPDATE personal_access_tokens SET expires_at = NOW() - INTERVAL '1 minute' WHERE id = ${expired.id}`;
+
+    const res = await del(`/api/${ws.slug}/tokens/${expired.id}`, { cookie: ws.member.cookie });
+    expect(res.status).toBe(200);
+    expect(await revokedAt(expired.id)).not.toBeNull();
+  });
+
   it('lets the owner revoke their own token with a web session, and the token then gets 401', async () => {
     const ws = await seedWorkspace('pat-revoke-session');
     const pat = await mint(ws.member.userId, ws.orgId, 'cli');

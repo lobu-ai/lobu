@@ -252,7 +252,8 @@ credentialRoutes.post('/:orgSlug/tokens', mcpAuth, async (c) => {
 });
 
 /**
- * List the caller's own unrevoked tokens in this org. Never the secret or hash.
+ * List the caller's own unrevoked, unexpired tokens in this org. Never the
+ * secret or hash.
  */
 credentialRoutes.get('/:orgSlug/tokens', mcpAuth, async (c) => {
   const user = c.get('user');
