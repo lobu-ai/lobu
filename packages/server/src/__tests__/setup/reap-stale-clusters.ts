@@ -15,6 +15,7 @@
 
 import { spawnSync } from 'node:child_process';
 import { readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { userInfo } from 'node:os';
 import { join } from 'node:path';
 
 /**
@@ -76,29 +77,102 @@ function releaseRecordedSegment(dir: string): boolean {
   const pid = postmasterPid(dir);
   if (pid === null || pidIsLive(pid)) return false;
   try {
-    const listing = spawnSync('ipcs', process.platform === 'darwin' ? ['-m', '-o'] : ['-m'], {
-      encoding: 'utf8', timeout: 1_000, env: { ...process.env, LC_ALL: 'C' },
-    });
-    if (listing.status !== 0 || typeof listing.stdout !== 'string') return false;
-    const rows = listing.stdout.split('\n').map((row) => row.replaceAll('\t', ' ').split(' ').filter(Boolean));
-    const headerIndex = rows.findIndex((row) => {
-      const columns = row.map((field) => field.toLowerCase());
-      return columns.includes('key') && columns.includes('nattch') &&
-        (columns.includes('id') || columns.includes('shmid'));
-    });
-    if (headerIndex < 0) return false;
-    const columns = rows[headerIndex].map((field) => field.toLowerCase());
-    const idColumn = columns.includes('shmid') ? columns.indexOf('shmid') : columns.indexOf('id');
-    const keyColumn = columns.indexOf('key');
+    const rows = ipcsTable(process.platform === 'darwin' ? ['-m', '-o'] : ['-m'], ['key', 'nattch']);
+    if (!rows) return false;
     const id = String(segment.id);
-    const row = rows.slice(headerIndex + 1).find((fields) =>
-      fields[idColumn] === id && Number(fields[keyColumn]) === segment.key);
+    const row = rows.find((fields) => segmentId(fields) === id && Number(fields.key) === segment.key);
     if (!row) return true;
-    if (row[columns.indexOf('nattch')] !== '0') return false;
+    if (row.nattch !== '0') return false;
     return spawnSync('ipcrm', ['-m', id], { timeout: 1_000 }).status === 0;
   } catch {
     return false;
   }
+}
+
+/**
+ * Parse one `ipcs` table into rows keyed by lowercase column name, or null when
+ * `ipcs` fails or prints no header with a segment ID and every `required`
+ * column. Trailing columns may be blank (Linux leaves `status` empty), so a
+ * missing field reads as undefined.
+ */
+function ipcsTable(args: string[], required: string[]): Record<string, string>[] | null {
+  const listing = spawnSync('ipcs', args, {
+    encoding: 'utf8', timeout: 1_000, env: { ...process.env, LC_ALL: 'C' },
+  });
+  if (listing.status !== 0 || typeof listing.stdout !== 'string') return null;
+  const rows = listing.stdout.split('\n').map((row) => row.replaceAll('\t', ' ').split(' ').filter(Boolean));
+  const headerIndex = rows.findIndex((row) => {
+    const columns = row.map((field) => field.toLowerCase());
+    return (columns.includes('id') || columns.includes('shmid')) &&
+      required.every((column) => columns.includes(column));
+  });
+  if (headerIndex < 0) return null;
+  const columns = rows[headerIndex].map((field) => field.toLowerCase());
+  return rows.slice(headerIndex + 1).map((fields) => Object.fromEntries(columns.map((column, i) => [column, fields[i]])));
+}
+
+/** Segment ID of an `ipcs` row: `ID` on macOS, `shmid` on Linux. */
+function segmentId(row: Record<string, string>): string | undefined {
+  return row.shmid ?? row.id;
+}
+
+/**
+ * Size of PostgreSQL's System V segment. With the default
+ * `shared_memory_type = mmap` (embedded-postgres never overrides it) the
+ * postmaster keeps only its `PGShmemHeader` in System V memory and the rest in
+ * anonymous mmap, so every 64-bit postmaster segment is exactly this size.
+ */
+const POSTGRES_SEGMENT_BYTES = '56';
+
+/**
+ * Release PostgreSQL segments that no cluster dir records any more.
+ *
+ * `releaseRecordedSegment` can only free a segment named by a surviving
+ * `postmaster.pid`. When the data dir is gone too (a run under a different
+ * TMPDIR, a wiped tmp dir, or a cluster deleted after its postmaster was
+ * SIGKILLed), nothing names the segment and it leaks until reboot. macOS allows
+ * only 32 segments (`kern.sysv.shmmni`), after which every `initdb` fails with
+ * "No space left on device".
+ *
+ * A segment is only removed when it is unused by construction: ours, nothing
+ * attached, and its creator dead, so no postmaster or backend can still need
+ * it. PostgreSQL itself treats such a segment as garbage on its next start.
+ * The size match keeps every non-PostgreSQL segment out of reach. Returns how
+ * many were released; any listing failure releases nothing.
+ */
+export function releaseOrphanedPostgresSegments(): number {
+  let released = 0;
+  try {
+    const segments = process.platform === 'darwin'
+      ? ipcsTable(['-m', '-o', '-b', '-p'], ['owner', 'nattch', 'segsz', 'cpid'])
+      : joinById(ipcsTable(['-m'], ['owner', 'nattch', 'bytes']), ipcsTable(['-m', '-p'], ['cpid']));
+    if (!segments) return 0;
+    const user = userInfo().username;
+    for (const row of segments) {
+      const id = segmentId(row);
+      const bytes = row.segsz ?? row.bytes;
+      const creator = Number(row.cpid);
+      if (!id || row.owner !== user || row.nattch !== '0' || bytes !== POSTGRES_SEGMENT_BYTES) continue;
+      if (!Number.isInteger(creator) || creator <= 0 || pidIsLive(creator)) continue;
+      if (spawnSync('ipcrm', ['-m', id], { timeout: 1_000 }).status === 0) released++;
+    }
+  } catch {
+    // Best effort: a failure here only costs slots the next run reconsiders.
+  }
+  return released;
+}
+
+/** Linux lists sizes and creator PIDs in two `ipcs` tables; join them on shmid. */
+function joinById(
+  sizes: Record<string, string>[] | null,
+  pids: Record<string, string>[] | null,
+): Record<string, string>[] | null {
+  if (!sizes || !pids) return null;
+  const pidsById = new Map(pids.map((row) => [segmentId(row), row]));
+  return sizes.flatMap((row) => {
+    const match = pidsById.get(segmentId(row));
+    return match ? [{ ...row, cpid: match.cpid }] : [];
+  });
 }
 
 /** True if `pid` is a live process, treating EPERM (not ours) as live. */

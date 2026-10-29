@@ -21,7 +21,11 @@ import {
 import exitHook from 'async-exit-hook';
 import EmbeddedPostgres from 'embedded-postgres';
 import { withFreePortRetry } from './free-port';
-import { reapStaleClustersIn, STALE_CLUSTER_MS } from './reap-stale-clusters';
+import {
+  reapStaleClustersIn,
+  releaseOrphanedPostgresSegments,
+  STALE_CLUSTER_MS,
+} from './reap-stale-clusters';
 
 // Importing `embedded-postgres` registers async-exit-hook, whose `beforeExit`
 // handler force-exits with code 0 (`process.nextTick(process.exit.bind(null, 0))`).
@@ -60,6 +64,8 @@ function reapStaleClusters(): void {
   if (reapedStaleClusters) return;
   reapedStaleClusters = true;
   reapStaleClustersIn(tmpdir(), Date.now(), STALE_CLUSTER_MS);
+  // After the dir sweep, which frees the segments its pid files still name.
+  releaseOrphanedPostgresSegments();
 }
 
 let activeStopImpl: (() => Promise<void>) | null = null;
