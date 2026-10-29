@@ -71,6 +71,7 @@ import {
   chatTurnSender,
   isConfinedChatTurn,
   resolveChatTurnActor,
+  providerUserIdFromClaims,
 } from "./chat-turn-actor.js";
 import { buildWorkerTokenClaims } from "./worker-token-claims.js";
 import { agentTurnTokenScope } from "./deployment-identity.js";
@@ -628,7 +629,7 @@ async function resolveTurnProvider(
   args: {
     agentId: string;
     organizationId: string;
-    userId: string;
+    userId?: string;
     modelRef: string;
     gatewayUrl: string;
     workerToken: string;
@@ -1004,7 +1005,7 @@ export async function enqueueAgentTurn(
     const provider = await resolveTurnProvider(module, {
       agentId: data.agentId,
       organizationId: data.organizationId,
-      userId: data.userId,
+      userId: providerUserIdFromClaims(turnClaims),
       modelRef,
       gatewayUrl,
       workerToken,

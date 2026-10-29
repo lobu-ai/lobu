@@ -96,7 +96,7 @@ function claudeModule(overrides: Partial<ModelProviderModule> = {}): ModelProvid
       agentId?: string,
       context?: { organizationId?: string; userId?: string }
     ) => ({
-      ANTHROPIC_BASE_URL: `${proxyUrl}/anthropic/a/${agentId}/o/${context?.organizationId}/u/${context?.userId}`,
+      ANTHROPIC_BASE_URL: `${proxyUrl}/anthropic/a/${agentId}/o/${context?.organizationId}${context?.userId ? `/u/${context.userId}` : ""}`,
     }),
     buildCredentialPlaceholder: (_agentId: string, context?: { workerToken?: string }) => context?.workerToken,
     ...overrides,
@@ -1375,7 +1375,8 @@ describe('agent turn producer', () => {
     });
 
     const [run] = await agentTurnRuns();
-    const envelope = run.action_input as { turn: { system_prompt: string }; credential: string };
+    const envelope = run.action_input as { turn: { system_prompt: string; provider: { base_url: string } }; credential: string };
+    expect(envelope.turn.provider.base_url).not.toContain('/u/');
     // A channel turn: the member is attribution only; the turn is org_shared.
     expect(verifyWorkerToken(envelope.credential)).toMatchObject({ userId: 'U0LINKED', actorUserId: member.id, chatAccess: 'org_shared' });
     expect(verifyWorkerToken(envelope.credential)?.chatSenderWorkspaces).toBeUndefined();
@@ -1407,6 +1408,9 @@ describe('agent turn producer', () => {
 
     const [run] = await agentTurnRuns();
     const envelope = run.action_input as { turn: { system_prompt: string; ephemeral_context?: string }; credential: string };
+    const provider = (run.action_input as { turn: { provider: { base_url: string } } }).turn.provider;
+    expect(provider.base_url).toContain(`/u/${member.id}`);
+    expect(provider.base_url).not.toContain('U0DMMEMBER');
     expect(verifyWorkerToken(envelope.credential)).toMatchObject({
       actorUserId: member.id, chatAccess: 'member', chatSenderWorkspaces: true,
     });

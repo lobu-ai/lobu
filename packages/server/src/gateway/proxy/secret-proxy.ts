@@ -26,6 +26,7 @@ import {
   readOrgSharedProviderApiKey,
   resolveInferenceProviderCredential,
 } from "../../lobu/stores/provider-secrets.js";
+import { providerUserIdFromClaims } from "../orchestration/chat-turn-actor.js";
 import { turnMarkerDeploymentFromClaims } from "../orchestration/deployment-identity.js";
 import {
   clearTurnProviderFailed,
@@ -902,12 +903,8 @@ export class SecretProxy {
       return c.json({ error: "Forbidden" }, 403);
     }
 
-    // Bind the calling worker (identified by its placeholder credential) to
-    // the agentId in the URL. Without this, anyone with network access to the
-    // gateway could harvest another agent's credentials by changing the URL
-    // segment. We accept that legacy callers without a placeholder are not
-    // bound (logged as a warning) but reject any request whose placeholder
-    // resolves to a different agent than the URL claims.
+    // URL routing is not authentication. Only a resolved placeholder or a
+    // verified worker credential may select an agent's provider credentials.
     if (urlAgentId) {
       if (callerToken?.includes(CREDENTIAL_PLACEHOLDER_PREFIX)) {
         const mapping = this.lookupPlaceholderMapping(
@@ -929,41 +926,12 @@ export class SecretProxy {
           return c.json({ error: "Forbidden" }, 403);
         }
       } else if (callerToken) {
-        // A non-placeholder caller authenticates with a worker JWT. Bind it to
-        // the URL agentId exactly like the placeholder path above: a worker
-        // minted for agent A must not spend agent B's provider credentials by
-        // rewriting the `/a/{agentId}/` URL segment (these requests reach the
-        // provider-credential path below, which injects the URL agent's real
-        // key). The token already carries the agentId it was minted for.
-        const workerTokenStr =
-          this.getWorkerTokenString(c) ||
-          (!callerToken.includes(CREDENTIAL_PLACEHOLDER_PREFIX)
-            ? callerToken
-            : undefined);
-        const tokenData = workerTokenStr
-          ? verifyWorkerToken(workerTokenStr)
-          : null;
-        // Bind ONLY when the token verifies AND carries an agentId. We do NOT
-        // reject a non-verifying token here: embedded/local worker→proxy auth
-        // legitimately reaches this branch with a token verifyWorkerToken can't
-        // decode (different credential shape), and rejecting it 401s real chat
-        // turns (caught by cli-smoke / sdk-e2e / integration). The provider
-        // credential lookup below is still org-scoped via expectedOrganizationId.
-        if (tokenData?.agentId && tokenData.agentId !== urlAgentId) {
-          logger.warn(
-            { urlAgentId, tokenAgentId: tokenData.agentId },
-            "Rejecting proxy request: worker token agentId does not match URL"
-          );
-          return c.json({ error: "Forbidden" }, 403);
+        const tokenData = claims.find((claim) => claim.agentId);
+        if (!tokenData) {
+          return c.json({ error: "Unauthorized" }, 401);
         }
-        if (!tokenData?.agentId) {
-          // Token didn't verify, or verified without an agentId (internal/
-          // preflight tokens minted before agent resolution) — agentId binding
-          // is skipped; org scoping still applies via expectedOrganizationId.
-          logger.debug(
-            { urlAgentId },
-            "Proxy request: non-placeholder token without bindable agentId; agentId binding skipped"
-          );
+        if (tokenData.agentId !== urlAgentId) {
+          return c.json({ error: "Forbidden" }, 403);
         }
       } else {
         // No auth header at all but the URL names an agent — refuse rather than
@@ -975,6 +943,15 @@ export class SecretProxy {
         );
         return c.json({ error: "Unauthorized" }, 401);
       }
+    }
+
+    // Per-user provider profiles need the signed user identity as well as the
+    // agent/org binding. A URL segment cannot select another user's credential.
+    const signedUserId = signedBinding && providerUserIdFromClaims(signedBinding);
+    if (providerContext?.userId &&
+        (!signedUserId || providerContext.userId !== signedUserId ||
+          claims.some((claim) => providerUserIdFromClaims(claim) !== signedUserId))) {
+      return c.json({ error: "Forbidden" }, 403);
     }
 
     // Build headers, swapping placeholder secrets in auth headers

@@ -316,14 +316,8 @@ describe("secret-proxy agentId binding", () => {
     expect(status).toBe(200);
   });
 
-  // REGRESSION GUARD (allow-path). The non-placeholder branch must NOT reject a
-  // bearer that fails verifyWorkerToken. Embedded/local worker→proxy auth
-  // legitimately reaches this branch with a token the proxy can't decode;
-  // 401'ing it broke real chat turns (cli-smoke / sdk-e2e / integration). The
-  // agentId binding applies ONLY when the token verifies AND carries an
-  // agentId. Do NOT "tighten" this branch to reject unverifiable tokens — that
-  // is the exact change this test exists to catch. See PR #1192 history.
-  test("ALLOW-PATH: a non-placeholder, non-verifying bearer still forwards (not 401)", async () => {
+  // Provider credentials require a verifiable caller even on a static route.
+  test("rejects a non-placeholder, non-verifying bearer before egress", async () => {
     const secretRef = createBuiltinSecretRef("agents/agent-ok/key");
     const secretStore = makeSecretStore({ [secretRef]: "real-key" });
 
@@ -373,8 +367,7 @@ describe("secret-proxy agentId binding", () => {
         status = res.status;
       }
     );
-    // Must proceed (200), NOT 401 — the binding is best-effort, not a gate.
-    expect(status).toBe(200);
+    expect(status).toBe(401);
   });
 });
 
