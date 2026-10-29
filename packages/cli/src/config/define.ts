@@ -98,7 +98,7 @@ export interface EntityEventKind {
    * Optional authored render template (render-DSL root node). When omitted,
    * events of this kind render a default field card built from `metadataSchema`.
    * It renders the event card only; build an interactive dashboard as a
-   * React view (`defineView`) attached with `{ event_kind }`.
+   * React view (`defineView`) attached with `{ event: "<kind>" }`.
    */
   jsonTemplate?: Record<string, unknown>;
   /**

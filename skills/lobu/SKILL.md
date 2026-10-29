@@ -236,6 +236,8 @@ Search before create to avoid duplicates. Prefer a read or dry run before mutati
 
 ## Custom Views
 
+When a user would benefit from exploring data, offer or build an interactive view: linked charts, searchable tables, filters, drilldowns, scenario controls, or a Canvas/SVG visualization. Prefer an existing view when it already answers the question. Views are ordinary React, so authors can compose their own components; the default components are a starting point.
+
 Views are custom React panels attached to entity types, records, events, or the workspace Data hub. They render in the web app and MCP hosts (Claude and other MCP Apps hosts); chat channels get links to views, not the views themselves. Author them in `views/<type>/<key>.tsx` and ship with `lobu apply` (list them via `viewFromFile` in `defineConfig`), or set single-file sources over MCP with `manage_views` (owner/admin only).
 
 Module shape (the server resolves React, React DOM, `@lobu/views` and `@lobu/views/components`; other dependencies need the CLI path with `node_modules` present):
@@ -293,6 +295,10 @@ export default function Pipeline() {
 `defineView` is the view's only declaration: `key`, optional `name` (defaults to the key) and `description`, `attach`, `params` and `actions` are read from it, never passed separately, so `manage_views` `set` takes just the source. Write it out as a literal (no variables, spreads or `${}` templates): the server reads it without running the module.
 
 `attach` lists the pages a view appears on, one per entry: `{ record: "deal" }` is a card on every deal's page above its activity (`{ record: "deal", id: 7 }` pins one record), `{ collection: "deal", when? }` a tab on the deal list page, `{ workspace: true }` a Data hub tab, `{ event: "deal.won", type? }` one event's page. One view can list several pages and branch on `useScope()` when it answers the same question at each scale. A record card renders with `useHost().displayMode === "inline"` inside `container.maxHeight` (the host clips past it): render a summary there with a "See all" that calls `requestDisplayMode("fullscreen")`, and the full view when `displayMode` is `"fullscreen"` (the peek, a full page, a tab).
+
+Workspace attachment does not render individual events. For an event presentation, attach to its specific `semantic_type` (event kind), optionally restricted to a linked entity type with `type`; a metadata schema name does not select the view. Avoid binding a specialized renderer to a generic kind such as `summary`. Register a dedicated kind in the workspace's event-kind registry and have its producer emit it. On event pages and event peeks, read `useScope().event` by exact ID and select that ID from the returned lineage; never substitute the latest event or let a URL date param change the subject. A shared workspace/event module should branch on `scope.event`, keeping history selection on its workspace surface. Preserve a readable stored body for fallback and evidence.
+
+Before reporting a view working, open each attached surface, including an event page and peek when declared. Exercise filtering, drilldown, keyboard navigation, and a narrow pane; check loading, missing/error, and truncated data states. Refresh and reopen an earlier event of the kind to verify the view stays on that event rather than jumping to the newest one. Views render in an iframe, so an empty parent-page DOM is not evidence the view is empty; inspect the frame through an authorized browser or accessibility surface. A successful compile proves only that the bundle was built.
 
 Rules that are load-bearing, not style:
 
