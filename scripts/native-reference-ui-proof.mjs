@@ -88,10 +88,14 @@ export async function runNativeReferenceProof({
     ["unavailable", "Unavailable"],
   ];
   const root = node("div", { className: "space-y-5" }, [
-    text("Synthetic native component report — no production data"),
-    text(
-      "Saved native event. Manual-only Automation, dormant Agent and catalog metadata; no external account is connected or operation executed."
-    ),
+    node("p", {}, [
+      text("Synthetic native component report — no production data"),
+    ]),
+    node("p", {}, [
+      text(
+        "Saved native event. Manual-only Automation, dormant Agent and catalog metadata; no external account is connected or operation executed."
+      ),
+    ]),
     node("tabs", { defaultValue: "current" }, [
       node(
         "tabs-list",
@@ -186,8 +190,8 @@ export async function runNativeReferenceProof({
     await tabs.getByRole("tab", { name, exact: true }).click();
     await page.getByRole("tabpanel").waitFor();
   };
-  const identities = async () => {
-    const panel = page.getByRole("tabpanel");
+  const identities = async (target = page) => {
+    const panel = target.getByRole("tabpanel");
     await panel.getByRole("link").filter({ hasText: automationName }).waitFor();
     await panel.getByText(agentName, { exact: true }).waitFor();
     await panel.getByText(connector.name, { exact: true }).waitFor();
@@ -244,12 +248,29 @@ export async function runNativeReferenceProof({
   await identities();
   await page.reload();
   await identities();
-  await page.setViewportSize({ width: 420, height: 900 });
-  await page.screenshot({
-    path: join(outputDir, "native-report-narrow.png"),
-    fullPage: true,
-  });
-  await page.setViewportSize({ width: 1440, height: 1400 });
+  // A fresh context receives no fixture cookies or tokens. Exercise the
+  // preview's existing single-user SPA sign-in, then wait for real rows at
+  // the narrow viewport (resizing a mounted page can race responsive remounts).
+  const freshPage = await page
+    .context()
+    .browser()
+    .newPage({
+      viewport: { width: 420, height: 900 },
+      colorScheme: "light",
+      deviceScaleFactor: 1,
+    });
+  try {
+    await freshPage.goto(new URL(path, baseUrl).toString(), {
+      waitUntil: "domcontentloaded",
+    });
+    await identities(freshPage);
+    await freshPage.screenshot({
+      path: join(outputDir, "native-report-narrow.png"),
+      fullPage: true,
+    });
+  } finally {
+    await freshPage.close();
+  }
   return {
     synthetic: true,
     path,
@@ -270,6 +291,8 @@ export async function runNativeReferenceProof({
       "repeat selection",
       "Back",
       "reload",
+      "fresh browser access via existing single-user preview sign-in",
+      "narrow viewport identities loaded",
     ],
     screenshots: [
       "native-report-current.png",
