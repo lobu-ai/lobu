@@ -12,7 +12,7 @@
     "drift:simulate": "bun scripts/simulate-drift.ts"
   },
   "devDependencies": {
-    "@lobu/cli": "^14.0.0",
+    "@lobu/cli": "^24.3.0",
     "postgres": "^3.4.7"
   }
 }

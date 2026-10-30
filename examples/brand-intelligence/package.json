@@ -7,8 +7,8 @@
     "turndown": "7.2.2"
   },
   "devDependencies": {
-    "@lobu/cli": "^13.3.0",
-    "@lobu/connector-sdk": "^13.3.0",
+    "@lobu/cli": "^24.3.0",
+    "@lobu/connector-sdk": "^24.3.0",
     "@types/turndown": "^5.0.5"
   }
 }
