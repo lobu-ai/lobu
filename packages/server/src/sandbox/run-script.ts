@@ -32,6 +32,7 @@ import type { ToolAccessLevel } from "../auth/tool-access";
 import { enumerateSDKManifest, type SDKMode } from "./sdk-manifest";
 import { AccessDeniedError, CrossOrgAccessDenied, McpScopeRequiredError } from "../tools/access-control";
 import { getSdkPreflight } from "./sdk-preflight";
+import type { SourceCompileDiagnostic } from "../utils/compiler-core";
 import { ToolUserError } from "../utils/errors";
 import { raceAbort } from "../utils/race-abort";
 
@@ -684,7 +685,53 @@ async function loadIsolatedVm(): Promise<IsolatedVmRuntime | null> {
 	}
 }
 
-function guestPreamble(errorTokenReader: string, crossOrgDenialToken: string): string {
+/**
+ * Thrown when a script reads a client key off `ctx`: the `(client, ctx)`
+ * parameter swap otherwise surfaces as an opaque "x is not a function".
+ */
+const CTX_IS_NOT_CLIENT_MESSAGE =
+	"This is ctx, not client — use `export default async (ctx, client) => …`";
+
+const BARE_SCRIPT_BODY_MESSAGE = [
+	"Top-level await/return is not allowed: wrap the script body in a default-exported async function.",
+	"Use:",
+	"export default async (ctx, client) => {",
+	"  const rows = await client.entities.list();",
+	"  return rows;",
+	"};",
+].join("\n");
+
+/**
+ * A compile diagnostic for a bare script body: top-level `await` or `return`.
+ * esbuild leaves `id` empty for these, so the structured signal is the source
+ * token at the diagnostic's location; the "Top-level" text only separates them
+ * from `await` inside a non-async function, which points at the same token.
+ */
+function isBareScriptBodyDiagnostic(
+	diagnostic: SourceCompileDiagnostic,
+): boolean {
+	const location = diagnostic.location;
+	if (
+		typeof location?.lineText !== "string" ||
+		typeof location.column !== "number" ||
+		typeof location.length !== "number"
+	) {
+		return false;
+	}
+	const token = Buffer.from(location.lineText, "utf8")
+		.subarray(location.column, location.column + location.length)
+		.toString("utf8");
+	return (
+		(token === "await" || token === "return") &&
+		diagnostic.text?.startsWith("Top-level ") === true
+	);
+}
+
+function guestPreamble(
+	errorTokenReader: string,
+	crossOrgDenialToken: string,
+	ctxMisuseToken: string,
+): string {
 	return `
 const { client, ctx, takeErrorToken: ${errorTokenReader} } = (() => {
 const __hostSdkDispatch = __sdk_dispatch;
@@ -699,6 +746,8 @@ const __rememberTrustedError = WeakMap.prototype.set.bind(__trustedErrors);
 const __readTrustedError = WeakMap.prototype.get.bind(__trustedErrors);
 const __forgetTrustedError = WeakMap.prototype.delete.bind(__trustedErrors);
 const __crossOrgDenialToken = ${JSON.stringify(crossOrgDenialToken)};
+const __ctxMisuseToken = ${JSON.stringify(ctxMisuseToken)};
+const __ctxMisuseMessage = ${JSON.stringify(CTX_IS_NOT_CLIENT_MESSAGE)};
 const __manifest = __parseJson(__sdk_manifest_json);
 const __namespaceMethods = __manifest.byNamespace;
 const __topLevelKeys = new Set(__manifest.topLevel);
@@ -807,9 +856,27 @@ function __makeClient(orgPath) {
   });
 }
 
+// Context data can share SDK names (e.g. reaction entities). Only missing
+// SDK keys indicate mistaken parameter order.
+function __makeCtx(values) {
+  return new Proxy(Object.freeze(values), {
+    get(target, key) {
+      if (__isReservedKey(key) || key in target) return target[key];
+      const k = String(key);
+      if (k === 'org' || __topLevelKeys.has(k) || __namespaceKeys.has(k) || __hiddenNamespaceKeys.has(k)) {
+        const error = new Error(__ctxMisuseMessage);
+        error.name = 'ValidationError';
+        __rememberTrustedError(error, __ctxMisuseToken);
+        throw error;
+      }
+      return undefined;
+    },
+  });
+}
+
 return {
   client: __makeClient([]),
-  ctx: Object.freeze({
+  ctx: __makeCtx({
     ...__parseJson(__ctx_json),
     sleep: async (ms) => {
       const result = await __hostSleep.apply(undefined, [ms], { result: { promise: true, copy: true } });
@@ -1318,11 +1385,18 @@ export async function runScript(
 		const isSourceCompileFailure =
 			SourceCompileErrorClass !== undefined &&
 			err instanceof SourceCompileErrorClass;
+		const bareBody = isSourceCompileFailure
+			? err.diagnostics.find(isBareScriptBodyDiagnostic)
+			: undefined;
 		const loc = isSourceCompileFailure
-			? err.diagnostics[0]?.location
+			? (bareBody ?? err.diagnostics[0])?.location
 			: undefined;
 		const message = boundScriptErrorText(
-			err instanceof Error ? err.message : err,
+			bareBody
+				? BARE_SCRIPT_BODY_MESSAGE
+				: err instanceof Error
+					? err.message
+					: err,
 			MAX_SCRIPT_ERROR_MESSAGE_BYTES,
 		);
 		return {
@@ -1583,8 +1657,18 @@ export async function runScript(
 
 		const errorTokenReader = `__lobu_take_error_token_${randomUUID().replaceAll("-", "")}`;
 		const script = await isolate.compileScript(
-			`${guestPreamble(errorTokenReader, trustErrorClassification("PERMISSION"))}\n${compiled}\n${options.extractExport ? EXTRACT_RUNNER : guestRunner(errorTokenReader)}`,
-		);
+			`${guestPreamble(errorTokenReader, trustErrorClassification("PERMISSION"), trustErrorClassification("VALIDATION"))}\n${compiled}\n${options.extractExport ? EXTRACT_RUNNER : guestRunner(errorTokenReader)}`,
+		).catch((error: unknown) => {
+			// Outside an ESM package, esbuild accepts a bare return as CommonJS.
+			// V8 rejects it at compilation and exposes no diagnostic code beyond
+			// SyntaxError. Match only here, before any guest code can throw one.
+			if (error instanceof SyntaxError && error.message.startsWith("Illegal return statement")) {
+				throw Object.assign(new Error(BARE_SCRIPT_BODY_MESSAGE), {
+					classificationToken: trustErrorClassification("VALIDATION"),
+				});
+			}
+			throw error;
+		});
 		assertActive();
 		const returnJson = await raceAbort(
 			script.run(context, {
@@ -1713,7 +1797,7 @@ export async function runScript(
 			error:
 				e instanceof SandboxRuntimeFailure
 					? runtimeFailureError(e)
-					: classifyRuntimeError(e),
+					: classifyRuntimeError(e, hostErrorTrust),
 			durationMs: Date.now() - started,
 			sdkCalls,
 			skippedCalls,

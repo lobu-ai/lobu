@@ -138,8 +138,18 @@ export interface CompileResult {
   compiledCodeHash: string;
 }
 
+/** The esbuild message fields callers read off a source diagnostic. */
 export interface SourceCompileDiagnostic {
-  location?: { file?: string; line?: number; column?: number } | null;
+  text?: string;
+  location?: {
+    file?: string;
+    line?: number;
+    /** 0-based, in UTF-8 bytes of `lineText`. */
+    column?: number;
+    /** In UTF-8 bytes of `lineText`. */
+    length?: number;
+    lineText?: string;
+  } | null;
 }
 
 /** A compiler failure tied to a location in the caller's source text. */
@@ -171,6 +181,8 @@ interface ExtractConfig {
   runnerCode: string;
 }
 
+const IMPORT_GUARD_PLUGIN_NAME = 'import-guard';
+
 /**
  * Reject imports that can never resolve for a single-file source compiled from
  * text (DB-stored connector source, run_sdk scripts, reaction scripts):
@@ -189,7 +201,7 @@ interface ExtractConfig {
  */
 function createImportGuardPlugin(entryPath: string, label: string): Plugin {
   return {
-    name: 'import-guard',
+    name: IMPORT_GUARD_PLUGIN_NAME,
     setup(b) {
       b.onResolve({ filter: /^(\.\.?(\/|$)|@\/|\/)/ }, (args) => {
         if (args.kind === 'entry-point') return undefined;
@@ -262,10 +274,20 @@ export async function compileSource(
       }
     } catch (error) {
       if (error instanceof Error) {
-        const message =
-          `${config.label} compilation failed: ${error.message}. ` +
-          'If this source imports local project modules, replace them with lobu or npm: imports.';
         const buildErrors = (error as { errors?: unknown }).errors;
+        // esbuild stamps plugin-raised errors with the plugin's name, so the
+        // local-imports hint follows only an import the guard rejected.
+        const rejectedLocalImport =
+          Array.isArray(buildErrors) &&
+          buildErrors.some(
+            (buildError) =>
+              (buildError as { pluginName?: unknown } | null)?.pluginName ===
+              IMPORT_GUARD_PLUGIN_NAME
+          );
+        const message = rejectedLocalImport
+          ? `${config.label} compilation failed: ${error.message}. ` +
+            'If this source imports local project modules, replace them with lobu or npm: imports.'
+          : `${config.label} compilation failed: ${error.message}`;
         const sourceDiagnostics = Array.isArray(buildErrors)
           ? buildErrors.filter(
               (diagnostic): diagnostic is SourceCompileDiagnostic =>
