@@ -157,13 +157,12 @@ export async function queryLokiLogs(
   const limit = input.limit ?? 100;
   if (!input.query?.trim() || input.query.length > 2000)
     throw new Error("Provide a LogQL query of at most 2000 characters");
-  if (
-    !Number.isFinite(start) ||
-    !Number.isFinite(end) ||
-    end <= start ||
-    end - start > 6 * 60 * 60 * 1000
-  )
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start)
     throw new Error("Provide a valid time range of at most 6 hours");
+  if (end - start > 6 * 60 * 60 * 1000)
+    throw new Error(
+      `The time range is ${Math.round((end - start) / 3_600_000)}h; split it into windows of at most 6 hours`
+    );
   if (!Number.isInteger(limit) || limit < 1 || limit > 200)
     throw new Error("limit must be between 1 and 200");
   const url = lokiUrl(config.LOKI_URL, "/loki/api/v1/query_range");
@@ -176,6 +175,12 @@ export async function queryLokiLogs(
     headers: { Accept: "application/json" },
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
+  if (response.status === 400) {
+    // Loki answers a malformed or over-budget query with a plain-text 400
+    // describing the query itself, which the caller needs to correct it.
+    const detail = (await response.text()).trim().slice(0, 300);
+    throw new Error(`Loki rejected the query (400): ${detail}`);
+  }
   if (!response.ok)
     throw new Error(`Loki query failed with ${response.status}`);
   const reader = response.body?.getReader();
@@ -188,7 +193,9 @@ export async function queryLokiLogs(
       if (part.done) break;
       bytes += part.value.byteLength;
       if (bytes > 2_000_000)
-        throw new Error("Loki response exceeds 2 MB; narrow the query");
+        throw new Error(
+          'Loki response exceeds 2 MB; lower limit or add a line filter such as |= "error"'
+        );
       chunks.push(part.value);
     }
   } finally {
@@ -460,7 +467,7 @@ export default class LokiActivityConnector extends ConnectorRuntime<
     name: "Kubernetes logs",
     description:
       "Collect error, warning, and HTTP failure counts plus recent samples from Lobu production Loki in aligned 20-minute windows.",
-    version: "1.2.0",
+    version: "1.2.1",
     authSchema: {
       methods: [
         {
