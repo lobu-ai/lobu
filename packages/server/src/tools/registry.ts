@@ -157,6 +157,13 @@ export interface ToolContext {
    * reference, so nested SDK calls record into the outer invocation.
    */
   workspaceActivity?: WorkspaceActivity;
+  /**
+   * Device-bound operation runs this invocation is waiting on, by run id, with
+   * the phase each wait is in. `run_sdk` creates one per script so a deadline
+   * can say which device work was still in flight; every context copy shares
+   * the reference, like {@link workspaceActivity}.
+   */
+  deviceWaits?: DeviceWaitActivity;
   /** True only for an MCP session that negotiated the standard Apps UI extension. */
   mcpAppsSupported?: boolean | null;
   /**
@@ -247,6 +254,9 @@ export interface ToolContext {
 }
 
 export type WorkspaceActivity = Map<string, Set<string>>;
+
+export type DeviceWaitPhase = 'waiting for claim' | 'executing';
+export type DeviceWaitActivity = Map<number, DeviceWaitPhase>;
 
 /** Account dispatch may have no execution workspace; leaf handlers remain workspace-bound. */
 export type AccountToolContext = Omit<ToolContext, 'organizationId'> & { organizationId: string | null };

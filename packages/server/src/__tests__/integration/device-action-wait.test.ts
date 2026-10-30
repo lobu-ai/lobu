@@ -231,6 +231,31 @@ describe('waitForDeviceActionRun', () => {
     expect(out.output).toMatchObject({ tab_id: 555 });
   });
 
+  it('reports the claim once, so a caller can tell waiting from executing', async () => {
+    const org = await createTestOrganization();
+    await insertChromeConnector(org.id);
+    const connId = await insertChromeConnection(org.id);
+    const runId = await insertPendingActionRun(org.id, connId, {});
+    let claimedReports = 0;
+    let turns = 0;
+
+    const out = await waitForDeviceActionRunWithOptions(runId, org.id, {
+      ...FAST_BUDGETS,
+      onClaimed: () => {
+        claimedReports += 1;
+      },
+      sleep: async () => {
+        turns += 1;
+        expect(claimedReports).toBe(turns === 1 ? 0 : 1);
+        if (turns === 1) await claim(runId, WORKER_ID);
+        if (turns === 3) await workerCompleteAction(runId, WORKER_ID, 'success', {});
+      },
+    });
+
+    expect(out.status).toBe('completed');
+    expect(claimedReports).toBe(1);
+  });
+
   it('surfaces worker-failed verdict', async () => {
     const org = await createTestOrganization();
     await insertChromeConnector(org.id);

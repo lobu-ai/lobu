@@ -4,7 +4,9 @@ import type { Env } from '../../index';
 import { upsertEntityApprovalPolicy } from '../../authz/entity-policy';
 import { createConnectorOperationRun, createSyncRun } from '../../runs/queue-service';
 import { manageOperations } from '../../tools/admin/manage_operations';
-import type { ToolContext } from '../../tools/registry';
+import '../../tools/registry';
+import { runSdkScript } from '../../tools/sdk_run';
+import type { DeviceWaitActivity, ToolContext } from '../../tools/registry';
 import {
   deviceManifestHash,
   type DeviceConnectorManifest,
@@ -271,6 +273,69 @@ describe('manifest-backed device pin admission', () => {
     } finally {
       clearTimeout(deadline);
     }
+  });
+
+  it('records an in-flight device wait and its phase for a script deadline to report', async () => {
+    const fixture = await seedFixture();
+    const deviceWaits: DeviceWaitActivity = new Map();
+    const controller = new AbortController();
+    let atDeadline: Array<[number, string]> = [];
+    controller.signal.addEventListener('abort', () => {
+      atDeadline = [...deviceWaits];
+    });
+    const until = async (condition: () => boolean) => {
+      for (let attempt = 0; attempt < 200 && !condition(); attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      expect(condition()).toBe(true);
+    };
+
+    const execution = manageOperations(
+      { action: 'execute', connection_id: fixture.connection.id, operation_key: 'echo', input: {} },
+      {} as Env,
+      { ...fixture.ctx, abortSignal: controller.signal, deviceWaits },
+    ) as Promise<{ status?: string; run_id?: number }>;
+
+    await until(() => deviceWaits.size === 1);
+    const [[runId, phase]] = [...deviceWaits];
+    expect(phase).toBe('waiting for claim');
+    expect((await pollDevice(fixture.device, fixture.selected)).run_id).toBe(runId);
+    await until(() => deviceWaits.get(runId) === 'executing');
+
+    controller.abort();
+    const result = await execution;
+
+    expect(atDeadline).toEqual([[runId, 'executing']]);
+    expect(result).toMatchObject({ status: 'timeout', run_id: runId });
+    expect(deviceWaits.size).toBe(0);
+  });
+
+  it('run_sdk names the device run a script deadline cut short and how to retry safely', async () => {
+    const fixture = await seedFixture();
+    const result = (await runSdkScript(
+      {
+        script: `export default async (_ctx, client) => client.operations.execute({
+          connection_id: ${fixture.connection.id}, operation_key: 'echo', input: {},
+        });`,
+        timeout_ms: 2_500,
+      },
+      {} as Env,
+      fixture.ctx,
+    )) as { success: boolean; error?: { name: string; message: string } };
+
+    const [run] = await getTestDb()<{ id: number; status: string }[]>`
+      SELECT id, status FROM runs WHERE connection_id = ${fixture.connection.id}
+    `;
+    expect(result.success).toBe(false);
+    expect(result.error?.name).toBe('TimeoutError');
+    expect(result.error?.message).toContain(
+      `operations.execute run ${run.id} reached the script deadline (phase: waiting for claim).`,
+    );
+    expect(result.error?.message).toContain('its output is discarded');
+    expect(result.error?.message).toContain(
+      `Don't rerun it blindly: read operations.getRun(${run.id}) first.`,
+    );
+    expect(result.error?.message).toContain('pass background: true and an idempotency_key');
   });
 
   it('returns a completed keyed result unchanged after its device goes offline', async () => {

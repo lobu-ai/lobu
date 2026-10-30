@@ -19,6 +19,7 @@ import {
   getRequiredAccessLevel,
   hasRequiredMcpScope,
   isPublicReadable,
+  ownerAdminActionAlternative,
   SCOPE_CHECK_NOT_APPLICABLE,
   type ToolAccessLevel,
 } from '../auth/tool-access';
@@ -300,7 +301,13 @@ export async function checkToolAccess(
 
   // No `writeRole` message: missing-membership writes are already rejected by
   // the public-readability branch above, matching the historical semantics.
-  await enforceRoleScopeAccess(requiredAccess, authCtx, denialSubject(toolName, args));
+  await enforceRoleScopeAccess(
+    requiredAccess,
+    authCtx,
+    denialSubject(toolName, args),
+    undefined,
+    ownerAdminActionAlternative(toolName, getAction(args))
+  );
   return requiredAccess;
 }
 

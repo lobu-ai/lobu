@@ -1104,11 +1104,20 @@ export async function handleExecute(
 					}
 				: replayExistingOperationRun(claim, operation.name, ctx);
 		}
-		const result = await waitForDeviceActionRun(
-			runId,
-			ctx.organizationId,
-			ctx.abortSignal,
-		);
+		// A script deadline that lands mid-wait reports this run and its phase
+		// (run_sdk reads ctx.deviceWaits at the deadline).
+		ctx.deviceWaits?.set(runId, "waiting for claim");
+		let result: Awaited<ReturnType<typeof waitForDeviceActionRun>>;
+		try {
+			result = await waitForDeviceActionRun(
+				runId,
+				ctx.organizationId,
+				ctx.abortSignal,
+				() => { ctx.deviceWaits?.set(runId, "executing"); },
+			);
+		} finally {
+			ctx.deviceWaits?.delete(runId);
+		}
 		await trackOperationReaction(runId);
 		if (result.status === "completed") {
 			return {

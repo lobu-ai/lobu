@@ -123,6 +123,12 @@ export interface RunScriptOptions {
 	 * normal run (top-level only, no handler), so it adds no attack surface.
 	 */
 	extractExport?: string;
+	/**
+	 * Read once, when the run times out (its own deadline or a caller's
+	 * TimeoutError), to append what host work the deadline cut short. Null, or
+	 * a throw, leaves the plain deadline message.
+	 */
+	describeTimeout?: () => string | null;
 }
 
 interface LogEntry {
@@ -1029,7 +1035,7 @@ export async function runScript(
 	function terminateRun(name: RuntimeFailureName, message: string): void {
 		if (terminated) return;
 		terminalState.name = name;
-		terminalState.message = message;
+		terminalState.message = name === "TimeoutError" ? withTimeoutContext(message) : message;
 		terminated = true;
 		abortController.abort(terminalError());
 		try {
@@ -1044,6 +1050,16 @@ export async function runScript(
 		} catch {
 			// Isolate already finished; the terminal state carries the failure.
 		}
+	}
+
+	function withTimeoutContext(message: string): string {
+		let context: string | null = null;
+		try {
+			context = options.describeTimeout?.() ?? null;
+		} catch {
+			// A diagnostic must never replace the failure it describes.
+		}
+		return context ? `${message}. ${context}` : message;
 	}
 
 	function terminalError(): SandboxRuntimeFailure {

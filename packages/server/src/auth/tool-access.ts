@@ -270,6 +270,29 @@ export function requiresOwnerAdmin(
 	return !readOnlyHint && !hasExplicitPolicy;
 }
 
+/**
+ * For an owner/admin action whose common goal has a lower-tier route, the
+ * sentence a denial appends to point there. Keyed like
+ * {@link OWNER_ADMIN_ACTIONS}; most admin actions have none.
+ */
+const OWNER_ADMIN_ACTION_ALTERNATIVES: Record<string, Record<string, string>> = {
+	manage_connections: {
+		install_connector:
+			"Bundled catalog connectors need no install: connections.connect({ connector_key }) installs one on first connect and needs only write access.",
+	},
+};
+
+export function ownerAdminActionAlternative(
+	toolName: string,
+	action: string | null | undefined,
+): string | null {
+	if (!action) return null;
+	const alternatives = OWNER_ADMIN_ACTION_ALTERNATIVES[toolName];
+	return alternatives && Object.hasOwn(alternatives, action)
+		? (alternatives[action] ?? null)
+		: null;
+}
+
 export function getRequiredAccessLevel(
 	toolName: string,
 	args: unknown,
