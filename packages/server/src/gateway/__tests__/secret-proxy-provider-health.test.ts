@@ -221,7 +221,7 @@ describe("secret proxy — inference-provider health writeback", () => {
   /** Read a marker field back by the deployment name it is addressable under. */
   async function markerField(
     deploymentName: string,
-    field: "providerFailed" | "providerFailedCode"
+    field: "providerFailed" | "providerFailedCode" | "providerFailedStatus"
   ): Promise<string | null> {
     const rows = (await getDb()`
       SELECT action_input->>${field} AS value
@@ -265,6 +265,11 @@ describe("secret proxy — inference-provider health writeback", () => {
     expect(await markerField(markerDeployment(), "providerFailedCode")).toBe(
       "PROVIDER_QUOTA_EXHAUSTED"
     );
+    // The completion route shows this status when the worker's own report is
+    // as bare as "Error".
+    expect(await markerField(markerDeployment(), "providerFailedStatus")).toBe(
+      "429"
+    );
   });
 
   test("TL2: a subsequent 2xx clears the flag so an SDK retry that recovers is not swept", async () => {
@@ -287,6 +292,7 @@ describe("secret proxy — inference-provider health writeback", () => {
       restore();
     }
     expect(await markerField(markerDeployment(), "providerFailed")).toBeNull();
+    expect(await markerField(markerDeployment(), "providerFailedStatus")).toBeNull();
   });
 
   test("TL3: the marker is NOT addressable under the token's own deployment claim", async () => {

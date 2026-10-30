@@ -37,7 +37,7 @@ import { createInteractionRoutes } from '../../gateway/routes/internal/interacti
 import { enqueueAgentTurn,
   cancelAgentTurn,
 } from '../../gateway/orchestration/agent-turn-producer';
-import { armTurnTimeout, failTurnIfPending, sweepExpiredTurns } from '../../gateway/orchestration/turn-liveness';
+import { armTurnTimeout, failTurnIfPending, markTurnProviderFailed, sweepExpiredTurns } from '../../gateway/orchestration/turn-liveness';
 import { generateDeploymentName } from '../../gateway/orchestration/deployment-identity';
 import { intervals } from '../../config/intervals';
 import { chatTurnAccessInstructions, chatTurnAccessOf, chatTurnSender, chatTurnSenderContext, chatTurnUnlinkedSenderContext } from '../../gateway/orchestration/chat-turn-actor';
@@ -4670,7 +4670,46 @@ describe('agent turn reaper', () => {
       deploymentName,
       organizationId: run!.organization_id,
     });
+    return deploymentName;
   }
+
+  /**
+   * Anthropic's subscription rate limit reaches the worker as the bare word
+   * "Error": the runtime keeps only the provider's message. The proxy still saw
+   * the 429 and recorded it on the turn's marker, so the completion route takes
+   * the code and status from there instead of charging the agent.
+   */
+  it('takes the provider failure the proxy recorded when the worker reports only "Error"', async () => {
+    const workerId = 'fleet-bare-provider-error';
+    const runId = await claimedTurnRun(workerId);
+    const deploymentName = await armMarkerFor(runId);
+    await markTurnProviderFailed(deploymentName, AgentErrorCode.PROVIDER_QUOTA_EXHAUSTED,
+      'claude: HTTP 429 — PROVIDER_QUOTA_EXHAUSTED', 429);
+
+    await postAsFleet('/api/workers/complete-agent-turn', { run_id: runId, worker_id: workerId, status: 'failed', error: 'Error' });
+
+    const replies = await threadResponses();
+    expect(replies).toHaveLength(1);
+    expect(replies[0].action_input).toMatchObject({
+      error: 'Error (HTTP 429)',
+      errorCode: AgentErrorCode.PROVIDER_QUOTA_EXHAUSTED,
+    });
+    expect(await runRow(runId)).toMatchObject({ error_message: 'Error (HTTP 429)', outcome: 'infra_error' });
+  });
+
+  it('leaves a bare worker error with the agent when the proxy recorded no provider failure', async () => {
+    const workerId = 'fleet-bare-agent-error';
+    const runId = await claimedTurnRun(workerId);
+    await armMarkerFor(runId);
+
+    await postAsFleet('/api/workers/complete-agent-turn', { run_id: runId, worker_id: workerId, status: 'failed', error: 'Error' });
+
+    const replies = await threadResponses();
+    expect(replies).toHaveLength(1);
+    expect(replies[0].action_input).toMatchObject({ error: 'Error' });
+    expect(replies[0].action_input.errorCode).toBeUndefined();
+    expect(await runRow(runId)).toMatchObject({ error_message: 'Error', outcome: 'agent_error' });
+  });
 
   async function markerSecondsLeft(): Promise<number | null> {
     const sql = getTestDb();

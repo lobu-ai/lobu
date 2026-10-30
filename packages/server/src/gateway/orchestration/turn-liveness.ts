@@ -308,7 +308,8 @@ export async function extendTurnDeadlines(
 export async function markTurnProviderFailed(
   deploymentName: string,
   code: AgentErrorCode,
-  reason: string
+  reason: string,
+  status: number
 ): Promise<void> {
   try {
     const sql = getDb();
@@ -319,7 +320,8 @@ export async function markTurnProviderFailed(
         || jsonb_build_object(
              'providerFailed', true,
              'providerFailedCode', ${code}::text,
-             'providerFailedReason', ${reason}::text
+             'providerFailedReason', ${reason}::text,
+             'providerFailedStatus', ${status}::int
            ),
         -- At most one execution window from now. An isolate turn's heartbeat
         -- holds its marker on the longer reaper-backstop deadline, and a
@@ -358,8 +360,8 @@ export async function clearTurnProviderFailed(
     const sql = getDb();
     await sql`
       UPDATE public.runs
-      SET action_input = ((action_input - 'providerFailed')
-        - 'providerFailedCode') - 'providerFailedReason'
+      SET action_input = action_input
+        - ARRAY['providerFailed', 'providerFailedCode', 'providerFailedReason', 'providerFailedStatus']
       WHERE status = 'pending'
         AND run_type = 'internal'
         AND queue_name = ${TURN_TIMEOUT_QUEUE}
@@ -376,6 +378,34 @@ export async function clearTurnProviderFailed(
       "Failed to clear turn provider-failed flag — a recovered turn may be failed by the sweep despite the provider working again"
     );
   }
+}
+
+/**
+ * The provider failure the proxy recorded on a turn's marker, read by the
+ * completion route before it discharges the marker.
+ *
+ * The worker runtime keeps only the provider's message, which can be as bare as
+ * "Error" (Anthropic's subscription rate limit), so the worker's report alone
+ * classifies to nothing. The proxy still saw the HTTP status. A later 2xx
+ * clears the marker, so a turn that recovered from a 429 is never charged to it.
+ */
+export async function readTurnProviderFailure(
+  tx: DbClient,
+  deploymentName: string,
+  messageId: string
+): Promise<{ code: AgentErrorCode; status: number | null } | null> {
+  const [marker] = await tx<{ action_input: TurnMarkerInput }>`
+    SELECT action_input FROM public.runs
+    WHERE idempotency_key = ${turnMarkerKey(deploymentName, messageId)}
+      AND status = 'pending'
+      AND queue_name = ${TURN_TIMEOUT_QUEUE}
+  `;
+  if (!marker) return null;
+  const code = providerFailureCode(marker.action_input);
+  if (!code) return null;
+  const status = (marker.action_input as Record<string, unknown>)
+    .providerFailedStatus;
+  return { code, status: typeof status === "number" ? status : null };
 }
 
 /**

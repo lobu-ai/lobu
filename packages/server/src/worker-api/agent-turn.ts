@@ -36,6 +36,7 @@ import type { TurnReply } from "../gateway/orchestration/agent-turn-producer";
 import {
 	insertThreadResponseRow,
 	notifyThreadResponse,
+	readTurnProviderFailure,
 } from "../gateway/orchestration/turn-liveness";
 import { MAX_SNAPSHOT_BYTES, transcriptText } from "../gateway/services/transcript-snapshot";
 import type { Env } from "../index";
@@ -43,7 +44,7 @@ import { incrementCounter } from "../gateway/metrics/prometheus";
 import { intervals } from "../config/intervals";
 import { runLeaseFence } from "../runs/run-lease";
 import { classifyRunOutcome } from "../runs/run-outcome";
-import { AGENT_TURN_MAX_REQUEUES, AGENT_TURN_TOOL_LOG_MAX, insertAgentTurnResponse, agentTurnClaimEligible, isStaleAgentTurnReport, lockAgentTurnRun, pendingAgentTurnInputs, releaseNextAgentTurn, resetAgentTurnAdmission, type NativeTurnRun } from "../runs/agent-turn-inputs";
+import { AGENT_TURN_MAX_REQUEUES, AGENT_TURN_TOOL_LOG_MAX, insertAgentTurnResponse, agentTurnClaimEligible, isStaleAgentTurnReport, lockAgentTurnRun, pendingAgentTurnInputs, releaseNextAgentTurn, resetAgentTurnAdmission, turnMarkerDeployment, type NativeTurnRun } from "../runs/agent-turn-inputs";
 import { errorMessage } from "../utils/errors";
 import { stripNul } from "../utils/strip-nul";
 import { authorizeRunForWorker } from "./shared";
@@ -939,14 +940,21 @@ export async function completeAgentTurnRun(c: Context<{ Bindings: Env }>) {
         }
       }
     }
-    const error = cancelling ? 'agent turn cancelled' : invalid ?? (typeof body.error === 'string' ? stripNul(body.error).trim() : '');
+    const reported = cancelling ? 'agent turn cancelled' : invalid ?? (typeof body.error === 'string' ? stripNul(body.error).trim() : '');
     const status = cancelling ? 'cancelled' : body.status === 'failed' || invalid ? 'failed' : 'completed';
     // Rendering needs the code; `classifyRunOutcome` deliberately does NOT get
-    // it. It derives the same code from the same message itself, but only
-    // AFTER checking the agent-protocol patterns — handing it an explicit code
-    // here would short-circuit that ordering and let a protocol violation whose
-    // tail quotes a provider limit excuse itself as infra.
-    const errorCode = status === 'failed' ? classifyErrorMessage(error) : undefined;
+    // the message-derived one. It derives the same code from the same message
+    // itself, but only AFTER checking the agent-protocol patterns — handing it
+    // an explicit code here would short-circuit that ordering and let a
+    // protocol violation whose tail quotes a provider limit excuse itself as infra.
+    const messageCode = status === 'failed' ? classifyErrorMessage(reported) : undefined;
+    // The worker keeps only the provider's message, which can be the bare word
+    // "Error". The proxy recorded the HTTP status on this turn's marker, so a
+    // report the catalog cannot place takes the proxy's code and status.
+    const deployment = status === 'failed' && !messageCode && !invalid ? turnMarkerDeployment(run) : null;
+    const providerFailure = deployment ? await readTurnProviderFailure(tx, deployment, envelope.reply.message_id) : null;
+    const errorCode = messageCode ?? providerFailure?.code;
+    const error = providerFailure?.status ? `${reported || 'agent turn failed'} (HTTP ${providerFailure.status})` : reported;
     const consumed = status === 'completed' ? body.consumed_inputs! : [];
     const conversationId = envelope.turn!.conversation_id;
     // What this turn leaves for the next one to hydrate — bounded once, here,
@@ -958,7 +966,7 @@ export async function completeAgentTurnRun(c: Context<{ Bindings: Env }>) {
     // (conflict) without ever writing a second terminal.
     const completionHash = agentTurnCompletionHash(body);
     await tx`UPDATE runs SET status = ${status}, completed_at = now(),
-      outcome = ${classifyRunOutcome({ status, errorMessage: error })},
+      outcome = ${classifyRunOutcome({ status, errorMessage: error, errorCode: providerFailure?.code })},
       error_message = ${status === 'completed' ? null : error || 'agent turn failed'},
       output_tail = ${text ? text.slice(-MAX_OUTPUT_TAIL) : null},
       exit_reason = ${cancelling ? 'cancelled' : invalid ? 'error_message' : body.exit_reason ?? (status === 'completed' ? 'ok' : 'error_message')},

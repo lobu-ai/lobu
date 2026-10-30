@@ -395,7 +395,7 @@ export async function pendingAgentTurnInputs(sql: DbClient, owner: NativeTurnRun
  * admission window — so none can drift from the arming site in
  * `MessageConsumer`.
  */
-function turnMarkerDeployment(run: Pick<NativeTurnRun, 'organization_id' | 'action_input'>): string | null {
+export function turnMarkerDeployment(run: Pick<NativeTurnRun, 'organization_id' | 'action_input'>): string | null {
   const envelope = run.action_input;
   const reply = envelope?.reply;
   if (!reply) return null;
