@@ -205,6 +205,39 @@ describe('validateOperationInput', () => {
       expect(error).toEndWith('… }');
     });
 
+    test('constraint-only union branches keep the object shape instead of rendering any', () => {
+      const descriptor = operation({
+        type: 'object',
+        required: ['body'],
+        properties: {
+          body: { type: 'string' },
+          post_url: { type: 'string' },
+          post_urn: { type: 'string' },
+        },
+        anyOf: [{ required: ['post_url'] }, { required: ['post_urn'] }],
+      });
+      expect(validateOperationInput(descriptor, { post_url: 'https://example.com/p/1' })).toBe(
+        'missing required field: body; expected { body: string, post_url?: string, post_urn?: string }'
+      );
+    });
+
+    test('a union of typed branches drops untyped ones', () => {
+      const descriptor = operation({
+        type: 'object',
+        properties: {
+          target: {
+            anyOf: [
+              { type: 'object', required: ['id'], properties: { id: { type: 'number' } } },
+              { not: { type: 'string' } },
+            ],
+          },
+        },
+      });
+      expect(validateOperationInput(descriptor, { target: 'x' })).toBe(
+        'target: must be object; expected target: { id: number }'
+      );
+    });
+
     test('recursive array and union schemas preserve the input validation error', () => {
       for (const value of [
         { type: 'array', items: { $ref: '#/properties/value' } },

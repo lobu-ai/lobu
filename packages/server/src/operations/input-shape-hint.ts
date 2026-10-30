@@ -138,13 +138,19 @@ function render(value: unknown, root: SchemaNode, depth: number, ancestors = new
     const shown = node.enum.slice(0, MAX_UNION_VALUES).map((option) => JSON.stringify(option));
     return node.enum.length > MAX_UNION_VALUES ? `${shown.join(' | ')} | …` : shown.join(' | ');
   }
-  const options = alternatives(node);
-  if (options.length > 0) {
-    const shown = options.slice(0, MAX_UNION_VALUES).map((option) => render(option, root, depth, next));
+  const types = declaredTypes(node);
+  if (types.length === 0) {
+    // Only a node with no shape of its own is described by its branches; on a
+    // typed node, anyOf/oneOf usually carries constraints (`required` sets)
+    // that would render as `any`. Branches with no shape add nothing.
+    const options = alternatives(node);
+    const shown = options
+      .slice(0, MAX_UNION_VALUES)
+      .map((option) => render(option, root, depth, next))
+      .filter((shape) => shape !== 'any');
+    if (shown.length === 0) return 'any';
     return options.length > MAX_UNION_VALUES ? `${shown.join(' | ')} | …` : shown.join(' | ');
   }
-  const types = declaredTypes(node);
-  if (types.length === 0) return 'any';
   return types
     .map((type) =>
       type === 'object'

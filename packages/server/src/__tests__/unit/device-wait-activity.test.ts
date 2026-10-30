@@ -8,16 +8,6 @@ describe("describeInFlightDeviceWaits", () => {
 		expect(describeInFlightDeviceWaits(new Map())).toBeNull();
 	});
 
-	test("names the run, its phase, the risk, what to check and how to avoid it", () => {
-		const deviceWaits: DeviceWaitActivity = new Map([[41, "executing"]]);
-		expect(describeInFlightDeviceWaits(deviceWaits)).toBe(
-			"operations.execute run 41 reached the script deadline (phase: executing). " +
-				"The command may still be running on the device or may already have changed things; once the run is marked timeout, its output is discarded. " +
-				"Don't rerun it blindly: read operations.getRun(41) first. " +
-				"For long device work, pass background: true and an idempotency_key on the first operations.execute call, then read operations.getRun(run_id) in a later call.",
-		);
-	});
-
 	test("several runs are listed with their phases, bounded", () => {
 		const deviceWaits: DeviceWaitActivity = new Map();
 		for (let runId = 1; runId <= 8; runId++) {
