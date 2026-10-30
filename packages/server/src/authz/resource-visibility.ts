@@ -189,8 +189,12 @@ export function compileResourceVisibility(
   // statement and the per-row test is two array overlaps. Keep it that way: a
   // correlated per-row subquery over `entity_ids` is parallel-restricted and
   // forces every events read that composes this gate onto a single-process
-  // scan. `EXCEPT` (not `NOT IN`) because `to_entity_id` is nullable for
-  // federated endpoints, and a NULL in a `NOT IN` list makes the test NULL.
+  // scan. `to_entity_id` is nullable since federated (source) endpoints, so
+  // the satisfied set may carry a NULL. `EXCEPT` is deliberately fail-closed
+  // there: a NULL never subtracts a resource, whereas `NOT (x IN (...))` turns
+  // NULL and reads as a grant. The `lobu_guard_source_relationships` trigger
+  // already rejects source endpoints on `member_of`; this keeps the gate safe
+  // without relying on it.
   //
   // `compileConnectionFkVisibility` is also composed at every read seam to
   // enforce connection visibility on stamped content and interaction events.
