@@ -1,3 +1,4 @@
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 // This exercises persisted synthetic Automation navigation first. Historical
@@ -37,6 +38,7 @@ export async function runAutomationNavigationProof({
     await page
       .getByRole("region", { name: "Runs history", exact: true })
       .waitFor();
+    await assertRunHistoryLayout(page, assert);
     const href = await page
       .getByRole("link", { name: "Open in Activity", exact: true })
       .getAttribute("href");
@@ -106,6 +108,28 @@ export async function runAutomationNavigationProof({
     "Actual editor did not show readable synthetic instructions"
   );
   await screenshot("automation-editor-instructions.png");
+  // Persist safe routes as soon as this real page is verified, so a later
+  // interrupted interaction cannot hide the useful editor review entry point.
+  const editorUrl = new URL(page.url());
+  await writeFile(
+    join(outputDir, "automation-editor-proof.json"),
+    JSON.stringify(
+      {
+        synthetic: true,
+        browser_verified: true,
+        editor_path: `${editorUrl.pathname}${editorUrl.search}`,
+        automation_list_path: listPath,
+        activity_path: `/${workspace}?tab=runs&automation_ids=${automationId}`,
+        connection_path: `/${workspace}/connectors/${encodeURIComponent(connectorKey)}/${connectionId}`,
+        connector_path: `/${workspace}/connectors/${encodeURIComponent(connectorKey)}`,
+        instructions_visible: true,
+        run_executed: false,
+        screenshot: "automation-editor-instructions.png",
+      },
+      null,
+      2
+    )
+  );
   const review = page.getByRole("region", {
     name: "Review instruction changes",
     exact: true,
@@ -114,10 +138,15 @@ export async function runAutomationNavigationProof({
     (await review.count()) === 0,
     "Pristine editor showed a duplicate comparison control"
   );
+  const renderedInstructions = await instructions.innerText();
+  const draftAddition =
+    " Draft-only addition: highlight unresolved questions first.";
   await instructions.click();
   await instructions.press("ControlOrMeta+End");
-  await page.keyboard.insertText(
-    " Draft-only addition: highlight unresolved questions first."
+  await page.keyboard.insertText(draftAddition);
+  assert(
+    (await instructions.innerText()) === renderedInstructions + draftAddition,
+    "Editing collapsed existing instruction paragraphs"
   );
   await review.waitFor();
   await review.getByRole("button", { name: "Show diff", exact: true }).click();
@@ -128,6 +157,10 @@ export async function runAutomationNavigationProof({
   await screenshot("automation-instruction-changes.png");
   await instructions.press("ControlOrMeta+z");
   await review.waitFor({ state: "hidden" });
+  assert(
+    (await instructions.innerText()) === renderedInstructions,
+    "Undo did not restore original instruction paragraphs"
+  );
   assertHost(detailPath);
   assert(
     new URL(page.url()).searchParams.get("view") === "definition",
@@ -266,6 +299,7 @@ export async function runAutomationNavigationProof({
 
   // The resource links and Activity page must expose the very same history and
   // filter contract, not separate per-resource lists or new backend APIs.
+  let combinedPeekPath;
   const verifySourceActivity = async (
     sourcePath,
     expected,
@@ -316,6 +350,10 @@ export async function runAutomationNavigationProof({
       );
     }
     const destination = await assertActivityDestination(selected);
+    if (combineSources) {
+      const current = new URL(page.url());
+      combinedPeekPath = `${current.pathname}${current.search}`;
+    }
     await screenshot(file);
     await page
       .getByRole("link", { name: "Open in Activity", exact: true })
@@ -471,8 +509,7 @@ export async function runAutomationNavigationProof({
   );
   assert(
     definition &&
-      String(definition.prompt).replace(/\s+/g, " ").trim() ===
-        automationInstructions.replace(/\s+/g, " ").trim() &&
+      definition.prompt === automationInstructions &&
       !definition.triggers?.length &&
       !definition.execution_config?.executor &&
       !definition.managed_agent_id &&
@@ -506,6 +543,7 @@ export async function runAutomationNavigationProof({
       "filtered global run peek",
       "read failure and Retry",
     ],
+    combined_peek_path: combinedPeekPath,
     historical_runs_persisted: false,
     run_executed: false,
     screenshots: [
@@ -520,6 +558,30 @@ export async function runAutomationNavigationProof({
       "browser-only-global-runs-peek.png",
     ],
   };
+}
+
+// Assert the actual shared filter controls stay visible in both desktop pane
+// and narrow sheet, without constraining the paginated table's own scroller.
+export async function assertRunHistoryLayout(page, assert) {
+  const region = page.getByRole("region", {
+    name: "Runs history",
+    exact: true,
+  });
+  const bounds = await region.boundingBox();
+  assert(bounds && bounds.width > 0, "Runs history has no visible bounds");
+  const controls = [
+    region.getByRole("search", { name: "Run filters" }),
+    ...(await region.locator("[data-filter-chip]").all()),
+  ];
+  for (const control of controls) {
+    const box = await control.boundingBox();
+    assert(
+      box &&
+        box.x >= bounds.x - 1 &&
+        box.x + box.width <= bounds.x + bounds.width + 1,
+      "Run filter control overflows its shared activity pane"
+    );
+  }
 }
 
 function installReadFixture({

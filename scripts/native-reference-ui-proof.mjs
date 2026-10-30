@@ -1,6 +1,9 @@
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { runAutomationNavigationProof } from "./automation-navigation-ui-proof.mjs";
+import {
+  assertRunHistoryLayout,
+  runAutomationNavigationProof,
+} from "./automation-navigation-ui-proof.mjs";
 
 // Called only by the existing opt-in preview proof, through its loopback
 // port-forward and local synthetic session. No tenant fixture or credentials.
@@ -358,6 +361,7 @@ export async function runNativeReferenceProof({
       .getByRole("dialog")
       .getByText("No runs match these filters.", { exact: true })
       .waitFor();
+    await assertRunHistoryLayout(freshPage, assert);
     await freshPage.screenshot({
       path: join(outputDir, "automation-activity-narrow.png"),
       fullPage: true,
@@ -370,6 +374,26 @@ export async function runNativeReferenceProof({
       (await freshPage.getByRole("dialog").count()) === 0,
       "Narrow activity sheet remained after Close"
     );
+    assert(
+      navigation.combined_peek_path,
+      "No verified combined-filter peek URL recorded"
+    );
+    await freshPage.goto(
+      new URL(navigation.combined_peek_path, baseUrl).toString()
+    );
+    await freshPage
+      .getByRole("region", { name: "Runs history", exact: true })
+      .getByText("No runs match these filters.", { exact: true })
+      .waitFor();
+    await assertRunHistoryLayout(freshPage, assert);
+    await freshPage.screenshot({
+      path: join(outputDir, "automation-combined-activity-narrow.png"),
+      fullPage: true,
+    });
+    await freshPage
+      .getByRole("button", { name: "Close preview", exact: true })
+      .click();
+    await freshPage.getByRole("dialog").waitFor({ state: "hidden" });
   } finally {
     await freshPage.close();
   }
@@ -413,6 +437,7 @@ export async function runNativeReferenceProof({
       "native-report-narrow.png",
       "automation-list-narrow.png",
       "automation-activity-narrow.png",
+      "automation-combined-activity-narrow.png",
       ...navigation.screenshots,
     ],
   };
