@@ -2,6 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join } from "node:path";
+import { runNativeReferenceProof } from "./native-reference-ui-proof.mjs";
 
 const require = createRequire(import.meta.url);
 const runtime = process.env.PLAYWRIGHT_RUNTIME;
@@ -271,6 +272,14 @@ try {
     sensitive_capabilities_acknowledged: true,
     token_scope: deviceScope,
   };
+
+  results.native_report = await runNativeReferenceProof({
+    page,
+    browserPost,
+    baseUrl,
+    outputDir,
+    assert,
+  });
 
   await writeFile(
     join(outputDir, "results.json"),
