@@ -410,6 +410,86 @@ describe('tool invocation audit coverage', () => {
     });
   });
 
+  it('keeps a redacted, capped error message on failed query_sdk rows', async () => {
+    const failing = (message: string) =>
+      `export default async () => { throw new Error(${JSON.stringify(message)}); };`;
+    const secret = 'sk-live-0123456789abcdef';
+
+    const result = (await executeTool(
+      'query_sdk',
+      { script: failing(`column nope_column does not exist; key=${secret}`) },
+      {} as Env,
+      authCtxFor('pat')
+    )) as { success: boolean; error: { name: string; code: string } };
+    expect(result.success).toBe(false);
+
+    const row = await latestAuditRow(orgId, 'query_sdk');
+    expect(row!.payload_data.success).toBe(false);
+    expect(row!.payload_data.error).toMatchObject({
+      name: result.error.name,
+      code: result.error.code,
+      message: expect.stringContaining('column nope_column does not exist'),
+    });
+    expect(JSON.stringify(row!.payload_data.error)).not.toContain(secret);
+
+    await executeTool('query_sdk', { script: failing('x'.repeat(2_000)) }, {} as Env, authCtxFor('pat'));
+    const capped = await latestAuditRow(orgId, 'query_sdk');
+    expect((capped!.payload_data.error as { message: string }).message).toHaveLength(500);
+  });
+
+  it.each(['password="', "password='", 'Digest username="', "Digest username='"])(
+    'redacts %s credentials even when the sandbox truncates the error',
+    async (prefix) => {
+      const message = `${prefix}${'sensitive-phrase '.repeat(1_100)}${prefix.at(-1)}`;
+      await executeTool(
+        'query_sdk',
+        { script: `export default async () => { throw new Error(${JSON.stringify(message)}); };` },
+        {} as Env,
+        authCtxFor('pat')
+      );
+
+      const row = await latestAuditRow(orgId, 'query_sdk');
+      expect(row!.payload_data.success).toBe(false);
+      expect((row!.payload_data.error as { message: string }).message).toContain('[redacted]');
+      expect(JSON.stringify(row!.payload_data.error)).not.toContain('sensitive-phrase');
+    }
+  );
+
+  it('preserves Unicode at the query_sdk audit message and token-name caps', async () => {
+    const before = await latestAuditRow(orgId, 'query_sdk');
+    const message = `${'x'.repeat(499)}😀more`;
+    await executeTool(
+      'query_sdk',
+      { script: `export default async () => { throw new Error(${JSON.stringify(message)}); };` },
+      {} as Env,
+      { ...authCtxFor('pat'), tokenName: `${'x'.repeat(119)}😀more` }
+    );
+
+    const row = await latestAuditRow(orgId, 'query_sdk');
+    expect(row!.id).not.toBe(before!.id);
+    expect(row!.payload_data.success).toBe(false);
+    expect((row!.payload_data.error as { message: string }).message).toBe(`${'x'.repeat(499)}😀`);
+    expect(row!.metadata.token_name).toBe(`${'x'.repeat(119)}😀`);
+  });
+
+  it('keeps query_sdk validation errors name-only when they echo caller-controlled keys', async () => {
+    const privateKey = 'opaque-private-credential-as-key';
+    await expect(
+      executeTool(
+        'query_sdk',
+        { script: 'export default async () => 1;', [privateKey]: true },
+        {} as Env,
+        authCtxFor('pat')
+      )
+    ).rejects.toThrow(privateKey);
+
+    const row = await latestAuditRow(orgId, 'query_sdk');
+    expect(row!.payload_data.success).toBe(false);
+    expect(row!.payload_data.error).toMatchObject({ name: 'ToolUserError' });
+    expect(row!.payload_data.error).not.toHaveProperty('message');
+    expect(JSON.stringify(row!.payload_data.error)).not.toContain(privateKey);
+  });
+
   it('audits a failed generic call with the error captured', async () => {
     await expect(
       executeTool(

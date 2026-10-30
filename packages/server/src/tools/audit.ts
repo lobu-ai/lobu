@@ -29,11 +29,12 @@ const HEADER_CREDENTIAL_RE =
 // Bare scheme credentials: Digest takes a comma-delimited key=value list
 // (quoted values included); token schemes take a single blob.
 const AUTH_SCHEME_RE =
-  /\b(bearer|basic|digest)\s+(?:[a-z0-9_-]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s,]+)(?:\s*,\s*[a-z0-9_-]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s,]+))*|[a-z0-9._~+/=:-]+)/gi;
+  /\b(bearer|basic|digest)\s+(?:[a-z0-9_-]+\s*=\s*(?:"[^"]*(?:"|$)|'[^']*(?:'|$)|[^\s,]+)(?:\s*,\s*[a-z0-9_-]+\s*=\s*(?:"[^"]*(?:"|$)|'[^']*(?:'|$)|[^\s,]+))*|[a-z0-9._~+/=:-]+)/gi;
 // Denylisted key assignments: a quoted string up to its closing quote (spaces
 // included), otherwise an unquoted run that does not stop at commas.
+// Treat EOF as a closing quote: the sandbox may already have capped the text.
 const SENSITIVE_ASSIGNMENT_RE =
-  /(api[_-]?key|credential|password|private[_-]?key|secret|token)\s*["']?\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s'"}]+)/gi;
+  /(api[_-]?key|credential|password|private[_-]?key|secret|token)\s*["']?\s*[:=]\s*(?:"[^"]*(?:"|$)|'[^']*(?:'|$)|[^\s'"}]+)/gi;
 
 interface ToolInvocationAuditParams {
   toolName: string;
@@ -85,10 +86,10 @@ function redactSensitiveText(value: string): string {
     .replace(KNOWN_SECRET_SHAPE_RE, '[redacted]');
 }
 
-function redactPreview(value: string): string {
-  // Redact BEFORE truncating: slicing first can split a quoted credential and
-  // the unbalanced quote defeats the pattern, leaking the visible fragment.
-  return redactSensitiveText(value).slice(0, MAX_PREVIEW_CHARS);
+function redactPreview(value: string, maxChars: number = MAX_PREVIEW_CHARS): string {
+  // Redact before truncating so a cap cannot hide a credential's identifying shape.
+  // Count code points so a split surrogate cannot make the audit JSON invalid.
+  return Array.from(redactSensitiveText(value)).slice(0, maxChars).join('');
 }
 
 function asObject(value: unknown): Record<string, unknown> {
@@ -133,6 +134,17 @@ function errorNameOnly(error: unknown, fallbackName: string): Record<string, unk
     : typeof record.name === 'string' ? record.name
     : fallbackName;
   return typeof record.code === 'string' ? { name, code: record.code } : { name };
+}
+
+/**
+ * Retain query_sdk's returned script error for diagnosis, like run_sdk and
+ * query_sql. Pre-handler throws keep the generic name-only policy: validation
+ * messages can echo arbitrary caller-controlled argument keys.
+ */
+function errorWithRedactedMessage(error: unknown, fallbackName: string): Record<string, unknown> | null {
+  const named = errorNameOnly(error, fallbackName);
+  const payload = errorPayload(error, fallbackName);
+  return named && payload ? { ...named, message: payload.message } : null;
 }
 
 function manageAutomationsIdentity(args: Record<string, unknown>): {
@@ -294,7 +306,8 @@ function buildPayload(params: ToolInvocationAuditParams): Record<string, unknown
     result.status === 'failed' ||
     result.status === 'error' ||
     result.status === 'timeout';
-  const softError = reportedFailure ? errorNameOnly(result.error, 'ToolError') ?? { name: 'ToolError' } : null;
+  const auditError = params.toolName === 'query_sdk' ? errorWithRedactedMessage : errorNameOnly;
+  const softError = reportedFailure ? auditError(result.error, 'ToolError') ?? { name: 'ToolError' } : null;
   const thrownError = errorNameOnly(params.error, 'Error');
   return {
     tool_name: params.toolName,
@@ -313,7 +326,7 @@ function patTokenNameMetadata(
   ctx: ToolInvocationAuditParams['ctx']
 ): { token_name: string } | Record<string, never> {
   if (ctx.tokenType !== 'pat' || !ctx.tokenName) return {};
-  const name = redactPreview(ctx.tokenName.trim()).slice(0, MAX_TOKEN_NAME_CHARS);
+  const name = redactPreview(ctx.tokenName.trim(), MAX_TOKEN_NAME_CHARS);
   return name ? { token_name: name } : {};
 }
 
