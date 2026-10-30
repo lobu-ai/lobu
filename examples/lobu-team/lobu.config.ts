@@ -73,6 +73,224 @@ const targetsRepository = defineRelationshipType({
   rules: [{ source: engineeringTask, target: "$resource" }],
 });
 
+// Schema for the organic acquisition review. Records are written by agents;
+// the review Automation itself is maintained in the workspace.
+const seoProject = defineEntityType({
+  key: "seo-project",
+  name: "SEO Project",
+  description:
+    "Shared goals, evidence rules and source readiness for organic acquisition.",
+  properties: {
+    scope: Type.Optional(
+      Type.Unsafe({
+        type: "array",
+        items: { type: "string" },
+        title: "Website scope",
+      })
+    ),
+    website: Type.Optional(
+      Type.Unsafe({
+        type: "string",
+        title: "Website",
+        format: "uri",
+        description: "Canonical public website",
+      })
+    ),
+    objective: Type.Optional(
+      Type.Unsafe({
+        type: "string",
+        title: "Objective",
+        description: "Outcome this work should improve",
+      })
+    ),
+    assumptions: Type.Optional(
+      Type.Unsafe({
+        type: "array",
+        items: { type: "string" },
+        title: "Assumptions",
+      })
+    ),
+    review_status: Type.Optional(
+      Type.Unsafe({
+        enum: ["baseline", "measuring", "blocked", "active"],
+        type: "string",
+        title: "Review status",
+      })
+    ),
+    last_review_at: Type.Optional(
+      Type.Unsafe({
+        type: "string",
+        title: "Setup baseline observed",
+        format: "date-time",
+        readOnly: true,
+        description:
+          "Timestamp of the setup baseline. Use the latest review and run history for current checks; the report-only automation does not update this field.",
+      })
+    ),
+    method_version: Type.Optional(
+      Type.Unsafe({ type: "string", title: "Method version", readOnly: true })
+    ),
+    primary_measure: Type.Optional(
+      Type.Unsafe({
+        type: "string",
+        title: "Primary measure",
+        description:
+          "Confirmed definition, or explicit hypothesis pending validation",
+      })
+    ),
+    source_readiness: Type.Optional(
+      Type.Unsafe({
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            detail: { type: "string", title: "What this means" },
+            source: { type: "string", title: "Source" },
+            status: {
+              enum: [
+                "verified",
+                "available_unverified",
+                "not_connected",
+                "blocked",
+                "excluded",
+              ],
+              type: "string",
+              title: "Status",
+            },
+          },
+        },
+        title: "Setup source readiness",
+        description:
+          "Baseline source observations. The latest review and run history carry the most recent checked coverage.",
+      })
+    ),
+    budget_usd_per_run: Type.Optional(
+      Type.Unsafe({
+        type: "number",
+        title: "External data budget per run (USD)",
+        minimum: 0,
+        description:
+          "Excludes existing agent inference costs. Paid provider calls require an explicit approved increase.",
+      })
+    ),
+  },
+  eventKinds: {
+    "seo.review": {
+      description:
+        "Dated SEO review with source coverage, evidence, hypotheses and follow-up actions.",
+      metadataSchema: {
+        type: "object",
+        required: [
+          "report_key",
+          "method_version",
+          "observed_at",
+          "source_coverage",
+          "paid_data_spend_usd",
+          "measurement_status",
+        ],
+        properties: {
+          report_key: { type: "string", maxLength: 256, minLength: 1 },
+          observed_at: { type: "string", format: "date-time" },
+          method_version: { type: "string", minLength: 1 },
+          source_coverage: { type: "string", minLength: 1 },
+          measurement_status: { type: "string", minLength: 1 },
+          paid_data_spend_usd: { type: "number", minimum: 0 },
+        },
+      },
+    },
+  },
+});
+
+const seoOpportunity = defineEntityType({
+  key: "seo-opportunity",
+  name: "SEO Opportunity",
+  description:
+    "Evidence-backed SEO and website activation work with reviewable actions and acceptance checks.",
+  properties: {
+    kind: Type.Optional(
+      Type.Unsafe({
+        enum: [
+          "onboarding",
+          "content",
+          "measurement",
+          "technical",
+          "search_demand",
+        ],
+        type: "string",
+        title: "Kind",
+      })
+    ),
+    status: Type.Optional(
+      Type.Unsafe({
+        enum: [
+          "proposed",
+          "in_progress",
+          "ready_for_review",
+          "done",
+          "deferred",
+        ],
+        type: "string",
+        title: "Status",
+        "x-lobu": { role: "workflowState" },
+        "x-facet": true,
+      })
+    ),
+    page_url: Type.Optional(
+      Type.Unsafe({ type: "string", title: "Target page", format: "uri" })
+    ),
+    priority: Type.Optional(
+      Type.Unsafe({
+        enum: ["high", "medium", "low"],
+        type: "string",
+        title: "Priority",
+        "x-facet": true,
+      })
+    ),
+    confidence: Type.Optional(
+      Type.Unsafe({
+        enum: ["verified", "hypothesis"],
+        type: "string",
+        title: "Evidence confidence",
+        description:
+          "Verified means the observation was verified; impact can remain unmeasured.",
+      })
+    ),
+    validation: Type.Optional(
+      Type.Unsafe({ type: "string", title: "Acceptance checks" })
+    ),
+    next_action: Type.Optional(
+      Type.Unsafe({ type: "string", title: "Next action" })
+    ),
+    observed_at: Type.Optional(
+      Type.Unsafe({ type: "string", title: "Observed at", format: "date-time" })
+    ),
+    project_slug: Type.Optional(
+      Type.Unsafe({ type: "string", title: "Project" })
+    ),
+    evidence_urls: Type.Optional(
+      Type.Unsafe({
+        type: "array",
+        items: { type: "string", format: "uri" },
+        title: "Evidence",
+      })
+    ),
+    evidence_basis: Type.Optional(
+      Type.Unsafe({
+        enum: ["public_content", "analytics", "mixed"],
+        type: "string",
+        title: "Evidence basis",
+      })
+    ),
+    measurement_status: Type.Optional(
+      Type.Unsafe({
+        enum: ["baseline_needed", "measured", "not_applicable"],
+        type: "string",
+        title: "Impact measurement",
+      })
+    ),
+  },
+});
+
 // This declaration owns only the existing agent's metadata. `lobu apply`
 // diffs a settings field only when the config declares it, so the live model
 // and skills stay unmanaged here.
@@ -81,6 +299,15 @@ const developer = defineAgent({
   name: "Developer",
   description:
     "A software development agent for Lobu repositories that works in the team Vercel sandbox, runs checks, creates pull requests, reviews previews, and coordinates approved merges.",
+});
+
+// Metadata only, like `developer`: the Automations this agent runs are
+// maintained outside this config.
+const productOps = defineAgent({
+  id: "product-ops",
+  name: "product-ops",
+  description:
+    "Summarizes Lobu production activity from organization-owned read-only feeds",
 });
 
 // Reuse the Lobu Team read-only database credentials already stored in Lobu.
@@ -266,6 +493,39 @@ const lobuTeamSlack = defineConnection({
   codeTtlMinutes: 15,
 });
 
+// Company accounts connected through the UI. Profiles and connections are
+// declared without credentials, so apply only checks the wiring; the grants
+// stay where the OAuth flow stored them.
+const cloudflareOAuthApp = defineAuthProfile({
+  slug: "mcp-mcp-cloudflare-com-mcp-mcp-cloudflare-com-app",
+  connector: "mcp.mcp-cloudflare-com",
+  authKind: "oauth_app",
+  name: "mcp.cloudflare.com OAuth App",
+});
+
+const companyCloudflareAccount = defineAuthProfile({
+  slug: "cloudflare-lobu-company",
+  connector: "mcp.mcp-cloudflare-com",
+  authKind: "oauth_account",
+  name: "Lobu company Cloudflare",
+});
+
+const companyCloudflare = defineConnection({
+  slug: "cloudflare-lobu-company",
+  connector: "mcp.mcp-cloudflare-com",
+  name: "Lobu company Cloudflare",
+  authProfile: companyCloudflareAccount,
+  appAuthProfile: cloudflareOAuthApp,
+});
+
+// The Google OAuth app behind the company Gmail and Search Console connections.
+const gmailOAuthApp = defineAuthProfile({
+  slug: "google-gmail-google-app",
+  connector: "google.gmail",
+  authKind: "oauth_app",
+  name: "Gmail Google App",
+});
+
 export default defineConfig({
   connectors: [
     connectorFromFile<typeof LokiActivityConnector>(
@@ -276,11 +536,22 @@ export default defineConfig({
   orgName: "Lobu Team",
   orgDescription: "Lobu Team agents and internal operations",
   organizationId: "UdNAH1bb3csC842vhOgxAHVcfX4tYU5A",
-  agents: [developer],
-  authProfiles: [productActivityDbAuth, productionLogsAuth],
-  entities: [engineeringTask],
+  agents: [developer, productOps],
+  authProfiles: [
+    productActivityDbAuth,
+    productionLogsAuth,
+    cloudflareOAuthApp,
+    companyCloudflareAccount,
+    gmailOAuthApp,
+  ],
+  entities: [engineeringTask, seoProject, seoOpportunity],
   relationships: [targetsRepository],
-  connections: [productActivityDb, productionLogs, lobuTeamSlack],
+  connections: [
+    productActivityDb,
+    productionLogs,
+    lobuTeamSlack,
+    companyCloudflare,
+  ],
   // The external digest is maintained by scripts/configure-product-activity.ts.
   // Apply without prune: preserve its existing delivery agent and manual Automation.
   automations: [],
