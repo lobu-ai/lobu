@@ -134,4 +134,62 @@ describe("resolveApiClient", () => {
       listOrganizations({ apiUrl: "https://unknown.lobu.ai/api/v1" })
     ).rejects.toThrow("Refusing to send stored context credentials");
   });
+
+  test.each([
+    "local-session-token",
+    "owl_pat_local",
+  ])("resolves workspaces via /oauth/userinfo for %s without stored OAuth discovery", async (token) => {
+    spyOn(context, "resolveContext").mockResolvedValue({
+      name: "local",
+      url: "http://127.0.0.1:8795/api/v1",
+      source: "config",
+    });
+    spyOn(context, "getActiveOrg").mockResolvedValue(undefined);
+    spyOn(credentials, "getToken").mockResolvedValue(token);
+    spyOn(credentials, "loadCredentials").mockResolvedValue({
+      accessToken: token,
+      localWorkerToken: "owl_pat_local",
+    });
+
+    const fetchMock = mock(
+      async (input: string | URL | Request, init?: RequestInit) => {
+        expect(String(input)).toBe("http://127.0.0.1:8795/oauth/userinfo");
+        expect(init?.headers).toMatchObject({
+          Authorization: `Bearer ${token}`,
+          Accept: "application/json",
+        });
+        return new Response(
+          JSON.stringify({
+            sub: "user_1",
+            email: "dev@example.com",
+            organization_slug: "local-personal",
+            personal_org_slug: "local-personal",
+            organizations: [
+              {
+                id: "org_1",
+                slug: "local-personal",
+                name: "Local Personal",
+                personal: true,
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+    ) as unknown as typeof fetch;
+
+    const orgs = await listOrganizations({
+      context: "local",
+      fetchImpl: fetchMock,
+    });
+    expect(orgs).toEqual([
+      { slug: "local-personal", name: "Local Personal", personal: true },
+    ]);
+
+    const resolved = await resolveApiClient({
+      context: "local",
+      fetchImpl: fetchMock,
+    });
+    expect(resolved.orgSlug).toBe("local-personal");
+  });
 });

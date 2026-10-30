@@ -53,6 +53,26 @@ import {
   verifyCodeChallenge,
 } from './utils';
 
+interface UserInfo {
+  sub: string;
+  email: string;
+  name: string | null;
+  picture: string | null;
+  organization_slug: string | null;
+  /**
+   * Personal workspace for device clients, or null when it is unprovisioned
+   * or outside the credential's live workspace grants.
+   */
+  personal_org_slug: string | null;
+  organizations: {
+    id: string;
+    slug: string;
+    name: string;
+    /** True for the user's personal org (matches personal_org_slug). */
+    personal: boolean;
+  }[];
+}
+
 class OAuthTransactionRollback extends Error {
   constructor(readonly response: OAuthError) {
     super(response.error_description ?? response.error);
@@ -550,38 +570,66 @@ export class OAuthProvider {
   // ============================================
 
   /**
-   * Get user info for a verified access token. Requires `profile:read`.
+   * Get user info for a verified access token or PAT. Requires `profile:read`.
    */
-  async getUserInfo(token: string): Promise<{
-    sub: string;
-    email: string;
-    name: string | null;
-    picture: string | null;
-    organization_slug: string | null;
-    /**
-     * The user's personal-org slug (the org marked
-     * `metadata.personal_org_for_user_id`). Device clients (Owletto Mac +
-     * Chrome) bind here regardless of the active/selected org, so the menubar
-     * and device-data uploads always land in the user's private workspace.
-     * Null only when provisioning hasn't completed.
-     */
-    personal_org_slug: string | null;
-    organizations: {
-      id: string;
-      slug: string;
-      name: string;
-      /** True for the user's personal org (matches {@link personal_org_slug}). */
-      personal: boolean;
-    }[];
-  } | 'invalid_token' | 'insufficient_scope'> {
+  async getUserInfo(token: string): Promise<UserInfo | 'invalid_token' | 'insufficient_scope'> {
     const authInfo = await this.verifyAccessToken(token);
     // An access token always names its user; only the worker lane is userless.
     if (!authInfo?.userId) return 'invalid_token';
-    const userId = authInfo.userId;
 
     if (!authInfo.scopes.includes('profile:read')) {
       return 'insufficient_scope';
     }
+
+    const isPat = authInfo.tokenType === 'pat';
+    const hasMcpCapability = authInfo.scopes.some((scope) => scope.startsWith('mcp:'));
+    const hasWorkspaceGrant = (authInfo.grantedOrganizationIds?.length ?? 0) > 0;
+    // PATs bind to `organization_id` (not `granted_organization_ids`), so an
+    // org-scoped PAT exposes only its live bound member workspace.
+    const restrictOrganizationInventory = isPat || hasMcpCapability || hasWorkspaceGrant;
+    const grantedOrganizationIds = isPat
+      ? authInfo.organizationId
+        ? [authInfo.organizationId]
+        : []
+      : (authInfo.grantedOrganizationIds ?? []);
+
+    return this.buildUserInfoForUser({
+      userId: authInfo.userId,
+      organizationId: authInfo.organizationId,
+      requireLiveBoundOrganization: isPat,
+      restrictOrganizationInventory,
+      grantedOrganizationIds,
+    });
+  }
+
+  /**
+   * Build the `/oauth/userinfo` payload for a verified Better Auth bearer
+   * session token (e.g. local CLI logins minted by `POST /api/local-init`).
+   */
+  async getUserInfoForSession(userId: string): Promise<UserInfo | 'invalid_token'> {
+    return this.buildUserInfoForUser({
+      userId,
+      organizationId: null,
+      requireLiveBoundOrganization: false,
+      restrictOrganizationInventory: false,
+      grantedOrganizationIds: [],
+    });
+  }
+
+  private async buildUserInfoForUser(params: {
+    userId: string;
+    organizationId: string | null;
+    requireLiveBoundOrganization: boolean;
+    restrictOrganizationInventory: boolean;
+    grantedOrganizationIds: string[];
+  }): Promise<UserInfo | 'invalid_token'> {
+    const {
+      userId,
+      organizationId,
+      requireLiveBoundOrganization,
+      restrictOrganizationInventory,
+      grantedOrganizationIds,
+    } = params;
 
     const result = await this.sql`
       SELECT id, email, name, image FROM "user" WHERE id = ${userId}
@@ -599,42 +647,49 @@ export class OAuthProvider {
     //     whatever org the token is bound to or the CLI has selected as active.
     const personalOrg = await findExistingPersonalOrg(userId, this.sql);
 
-    // Return the token-bound org (if any). For tokens with no org binding, fall
-    // back to the personal org.
-    let organizationSlug: string | null = null;
-    if (authInfo.organizationId) {
-      const orgResult = await this.sql`
-        SELECT slug FROM "organization" WHERE id = ${authInfo.organizationId} LIMIT 1
-      `;
-      organizationSlug = (orgResult[0]?.slug as string) ?? null;
-    } else {
-      organizationSlug = personalOrg?.slug ?? null;
-    }
-
     // Any token carrying MCP capabilities OR a nonempty workspace snapshot is
     // limited to that snapshot. Refresh downscoping may remove every `mcp:*`
     // scope while retaining the original workspace consent; it must not turn a
     // selected-workspace token into a full membership-directory credential.
     // Initial profile-only grants intentionally store an empty snapshot and
     // keep their existing account-inventory semantics.
-    const hasMcpCapability = authInfo.scopes.some((scope) => scope.startsWith('mcp:'));
-    const hasWorkspaceGrant = (authInfo.grantedOrganizationIds?.length ?? 0) > 0;
-    const restrictOrganizationInventory = hasMcpCapability || hasWorkspaceGrant;
     const grantedOrgs = restrictOrganizationInventory
       ? await listLiveGrantedMemberWorkspaces({
           sql: this.sql,
           userId,
-          grantedOrganizationIds: authInfo.grantedOrganizationIds ?? [],
+          grantedOrganizationIds,
         })
       : null;
-    const orgs = grantedOrgs ?? await this.sql`
+
+    // Return the token-bound org (if any). For tokens with no org binding, fall
+    // back to the personal org. PATs only expose `organization_slug` while the
+    // bound workspace remains live and the user is still a member.
+    let organizationSlug: string | null = null;
+    if (organizationId) {
+      if (requireLiveBoundOrganization) {
+        organizationSlug =
+          (grantedOrgs?.find((org) => org.id === organizationId)?.slug as string | undefined) ??
+          null;
+      } else {
+        const orgResult = await this.sql`
+          SELECT slug FROM "organization" WHERE id = ${organizationId} LIMIT 1
+        `;
+        organizationSlug = (orgResult[0]?.slug as string) ?? null;
+      }
+    } else {
+      organizationSlug = personalOrg?.slug ?? null;
+    }
+
+    const orgs =
+      grantedOrgs ??
+      (await this.sql`
       SELECT o.id, o.slug, o.name
       FROM "member" m
       JOIN "organization" o ON o.id = m."organizationId"
       WHERE m."userId" = ${userId}
         AND ${this.sql.unsafe(organizationLiveSql('o'))}
       ORDER BY o.name ASC
-    `;
+    `);
 
     const user = result[0] as {
       id: string;
