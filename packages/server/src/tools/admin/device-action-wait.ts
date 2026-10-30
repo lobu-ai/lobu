@@ -13,6 +13,7 @@ import { type DbClient, getDb } from '../../db/client';
 import { sourceReadScrubAssignments } from '../../lib/device-feed-read-protocol';
 import { classifyRunOutcome } from '../../runs/run-outcome';
 import { supersedeActionEvent } from './approval-events';
+import { clientUpdateHint } from '../../worker-api/client-version-floor';
 import {
   DEVICE_ONLINE_WINDOW_SECONDS,
   describeDeviceLastSeen,
@@ -36,6 +37,8 @@ interface RunDeviceDiagnostic {
  *
  * The blocking-run lookup reads the in-flight set only (`status` is indexed),
  * never history. A blocking run in another workspace is not named, only timed.
+ * A device below RECOMMENDED_CLIENT_VERSION gets an update clause: an outdated
+ * daemon is a cause the reader can act on, and nothing else names it.
  */
 export async function describeRunDevice(
   runId: number,
@@ -43,7 +46,7 @@ export async function describeRunDevice(
 ): Promise<RunDeviceDiagnostic> {
   try {
     const rows = (await getDb()`
-      SELECT dw.label, dw.last_seen_at,
+      SELECT dw.label, dw.last_seen_at, dw.platform, dw.app_version,
         dw.last_seen_at > now() - ${DEVICE_ONLINE_WINDOW_SECONDS}::int * interval '1 second' AS online,
         blocking.id AS blocking_run_id,
         blocking.organization_id = r.organization_id AS blocking_same_org,
@@ -65,6 +68,8 @@ export async function describeRunDevice(
     `) as Array<{
       label: string | null;
       last_seen_at: Date | string | null;
+      platform: string | null;
+      app_version: string | null;
       online: boolean | null;
       blocking_run_id: number | string | null;
       blocking_same_org: boolean | null;
@@ -73,15 +78,20 @@ export async function describeRunDevice(
     const row = rows[0];
     if (!row) return { busy: false, text: 'run has no paired device' };
     const device = row.label ? `device "${row.label}"` : 'device';
+    const updateHint = clientUpdateHint(row.platform, row.app_version);
+    const withUpdateHint = (text: string) => (updateHint ? `${text}; ${updateHint}` : text);
     if (row.online && row.blocking_run_id != null) {
       const blocking = row.blocking_same_org ? `run ${row.blocking_run_id}` : 'another run';
       const seconds = Math.max(0, Math.round(row.blocking_seconds ?? 0));
       return {
         busy: true,
-        text: `${device} is busy: ${blocking} has been running for ${seconds}s`,
+        text: withUpdateHint(`${device} is busy: ${blocking} has been running for ${seconds}s`),
       };
     }
-    return { busy: false, text: `${device} ${describeDeviceLastSeen(row.last_seen_at)}` };
+    return {
+      busy: false,
+      text: withUpdateHint(`${device} ${describeDeviceLastSeen(row.last_seen_at)}`),
+    };
   } catch {
     return { busy: false, text: 'device liveness unavailable' };
   }

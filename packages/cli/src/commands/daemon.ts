@@ -2,8 +2,13 @@ import {
   resolveDaemonLaunchContext,
   resolveDaemonWorkerId,
   startDaemonCommand,
+  WorkerUpgradeRequiredError,
 } from "@lobu/connector-worker/daemon";
 import { hostname } from "node:os";
+import {
+  CLI_DAEMON_UPGRADE_STEPS,
+  startCliUpdateNotifier,
+} from "../internal/cli-update-check.js";
 import {
   addContext,
   apiUrlToGatewayOrigin,
@@ -228,25 +233,41 @@ export async function daemonCommand(options: DaemonOptions): Promise<void> {
 
   const activeOrg = await getActiveOrg(contextName);
 
-  await startDaemonCommand({
-    apiUrl: target.gatewayOrigin,
-    version: options.cliVersion,
-    platform: sessionLane ? "headless" : requestedPlatform,
-    defaultPlatform,
-    workerId,
-    label: options.label?.trim() || undefined,
-    capabilities: (options.capabilities ?? "os.shell")
-      .split(",")
-      .map((entry) => entry.trim())
-      .filter(Boolean),
-    workerApiToken,
-    activeOrg,
-    ...(workerCredentialMaintenance ? { workerCredentialMaintenance } : {}),
-    debug: options.debug === true,
-    ...(options.interactiveSession === false
-      ? { interactiveSession: false as const }
-      : {}),
+  const stopUpdateCheck = startCliUpdateNotifier({
+    currentVersion: options.cliVersion,
   });
+  try {
+    await startDaemonCommand({
+      apiUrl: target.gatewayOrigin,
+      version: options.cliVersion,
+      platform: sessionLane ? "headless" : requestedPlatform,
+      defaultPlatform,
+      workerId,
+      label: options.label?.trim() || undefined,
+      capabilities: (options.capabilities ?? "os.shell")
+        .split(",")
+        .map((entry) => entry.trim())
+        .filter(Boolean),
+      workerApiToken,
+      activeOrg,
+      ...(workerCredentialMaintenance ? { workerCredentialMaintenance } : {}),
+      debug: options.debug === true,
+      ...(options.interactiveSession === false
+        ? { interactiveSession: false as const }
+        : {}),
+    });
+  } catch (error) {
+    // The server refused this version outright; retrying the same binary can
+    // only be refused again, so exit with the way out instead of a raw 409.
+    if (error instanceof WorkerUpgradeRequiredError) {
+      throw new Error(
+        `${error.description}. This daemon runs @lobu/cli ${options.cliVersion ?? "(unknown version)"}; to update, ${CLI_DAEMON_UPGRADE_STEPS}.`
+      );
+    }
+    throw error;
+  } finally {
+    stopUpdateCheck();
+  }
 }
 
 async function resolveDaemonTarget(

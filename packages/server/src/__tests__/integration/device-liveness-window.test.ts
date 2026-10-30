@@ -141,6 +141,48 @@ describe("device liveness window", () => {
 		);
 	});
 
+	it("tells the reader to update an outdated client below the recommended version", async () => {
+		const sql = getTestDb();
+		const saved = process.env.RECOMMENDED_CLIENT_VERSION;
+		process.env.RECOMMENDED_CLIENT_VERSION = "headless=24.0.0";
+		try {
+			const lastSeen = new Date(Date.now() - 18 * 60 * 1000).toISOString();
+			const [dw] = (await sql`
+				INSERT INTO device_workers (
+					user_id, worker_id, platform, app_version, capabilities, label, organization_id, last_seen_at
+				) VALUES (
+					${userId}, ${`wk_outdated_${Date.now()}`}, 'headless', '19.2.0',
+					${sql.json([])}, 'Old Box', ${orgId}, ${lastSeen}
+				)
+				RETURNING id
+			`) as unknown as Array<{ id: string }>;
+			const conn = await createTestConnection({
+				organization_id: orgId,
+				connector_key: CONNECTOR_KEY,
+				created_by: userId,
+				createDefaultFeed: false,
+			});
+			await sql`UPDATE connections SET device_worker_id = ${dw.id} WHERE id = ${conn.id}`;
+			const [run] = (await sql`
+				INSERT INTO runs (organization_id, connection_id, run_type, status, connector_key)
+				VALUES (${orgId}, ${conn.id}, 'action', 'pending', ${CONNECTOR_KEY})
+				RETURNING id
+			`) as unknown as Array<{ id: number }>;
+
+			expect((await describeRunDevice(Number(run.id), orgId)).text).toBe(
+				'device "Old Box" last polled 18m ago; device runs headless v19.2.0 (recommended v24.0.0 or newer); update @lobu/cli and restart `lobu daemon`',
+			);
+
+			delete process.env.RECOMMENDED_CLIENT_VERSION;
+			expect((await describeRunDevice(Number(run.id), orgId)).text).toBe(
+				'device "Old Box" last polled 18m ago',
+			);
+		} finally {
+			if (saved === undefined) delete process.env.RECOMMENDED_CLIENT_VERSION;
+			else process.env.RECOMMENDED_CLIENT_VERSION = saved;
+		}
+	});
+
 	it("degrades to a safe string when the run has no paired device", async () => {
 		const sql = getTestDb();
 		const conn = await createTestConnection({

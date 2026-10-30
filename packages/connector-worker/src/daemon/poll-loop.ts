@@ -7,7 +7,12 @@
  */
 
 import { WORKER_POLL_MAX_WAIT_SECONDS } from '@lobu/core/contracts/worker/protocol';
-import { type PollResponse, WorkerHttpError, type WorkerClient } from './client.js';
+import {
+  type PollResponse,
+  WorkerHttpError,
+  WorkerUpgradeRequiredError,
+  type WorkerClient,
+} from './client.js';
 import { log } from './log.js';
 
 export interface WorkerPollLoopOptions {
@@ -116,6 +121,10 @@ export class WorkerPollLoop {
         if (!this.running) break;
         // Server errors retain their retry backoff even if a slot opens.
         capacityVersion = undefined;
+        // Below the server's version floor, every retry sends the same version
+        // and is refused the same way: stop, so the launcher can say how to
+        // update instead of logging a poll error every interval forever.
+        if (err instanceof WorkerUpgradeRequiredError) throw err;
         if (
           this.failClosedOnPollAuthError &&
           err instanceof WorkerHttpError &&

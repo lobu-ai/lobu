@@ -209,11 +209,43 @@ export class WorkerHttpError extends Error {
   constructor(
     public readonly status: number,
     public readonly path: string,
-    body: string
+    body: string,
+    /** The raw response body, for callers that read its structured error code. */
+    public readonly responseBody?: string
   ) {
     super(`${path} failed: ${status} ${body.slice(0, 500)}`);
     this.name = 'WorkerHttpError';
   }
+}
+
+/**
+ * The server refused this worker's poll with 409 `upgrade_required`: its
+ * reported version is below the server's MIN_CLIENT_VERSION floor. Retrying
+ * cannot help — the same binary sends the same version — so the poll loop
+ * treats this as terminal and the launcher tells the user how to update.
+ */
+export class WorkerUpgradeRequiredError extends WorkerHttpError {
+  constructor(public readonly description: string) {
+    super(409, '/api/workers/poll', `upgrade_required: ${description}`);
+    this.name = 'WorkerUpgradeRequiredError';
+  }
+}
+
+/** The poll refusal's description when a 409 carries `upgrade_required`, else null. */
+function upgradeRequiredDescription(error: WorkerHttpError): string | null {
+  if (error.status !== 409 || !error.responseBody) return null;
+  let body: unknown;
+  try {
+    body = JSON.parse(error.responseBody);
+  } catch {
+    return null;
+  }
+  if (typeof body !== 'object' || body === null) return null;
+  const { error: code, error_description: description } = body as Record<string, unknown>;
+  if (code !== 'upgrade_required') return null;
+  return typeof description === 'string' && description.trim() !== ''
+    ? description
+    : 'This server requires a newer worker version';
 }
 
 /**
@@ -334,7 +366,7 @@ export class WorkerClient implements ExecutorClient {
     if (!response.ok) {
       const responseText = await response.text();
       const detail = `${response.statusText} ${responseText}`.trim();
-      throw new WorkerHttpError(response.status, path, detail);
+      throw new WorkerHttpError(response.status, path, detail, responseText);
     }
     return response;
   }
@@ -357,7 +389,7 @@ export class WorkerClient implements ExecutorClient {
       ? { ...this.advertisedCapabilities(), ...advertisement.capabilities }
       : this.advertisedCapabilities();
     const manifests = advertisement?.manifests ?? this.manifests;
-    return this.requestJson<PollResponse>('/api/workers/poll', {
+    const body = {
       worker_id: this.workerId,
       ...(options?.waitSeconds === undefined ? {} : { wait_seconds: options.waitSeconds }),
       capabilities,
@@ -382,7 +414,15 @@ export class WorkerClient implements ExecutorClient {
       ...(this.advertisementProvider || manifests.length > 0
         ? { connector_manifests: manifests }
         : {}),
-    }, options?.signal);
+    };
+    try {
+      return await this.requestJson<PollResponse>('/api/workers/poll', body, options?.signal);
+    } catch (error) {
+      const description =
+        error instanceof WorkerHttpError ? upgradeRequiredDescription(error) : null;
+      if (description != null) throw new WorkerUpgradeRequiredError(description);
+      throw error;
+    }
   }
 
   /**
