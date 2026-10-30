@@ -941,7 +941,7 @@ export default async (_ctx, client) => {
 		example: "const run = await client.operations.getRun(123);",
 	},
 	"operations.cancel": {
-		summary: "Cancel your connector operation, or any operation as a workspace administrator. Stops future claims/results and signals a running worker on its next heartbeat. Existing external effects are not undone.",
+		summary: "Cancel your connector operation or withdraw your pending approval proposal, or any of them as a workspace administrator. Stops future claims/results and signals a running worker on its next heartbeat. A withdrawn proposal settles as expired, never as a human rejection. Existing external effects are not undone.",
 		access: "write",
 		signature: "operations.cancel(run_id: number): Promise<unknown>",
 	},

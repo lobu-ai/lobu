@@ -20,9 +20,12 @@ import {
 	ApprovalAttribution,
 	type ApprovalAttribution as ApprovalAttributionType,
 } from "@lobu/core/contracts/interaction-envelope";
-import { resolveEntityApprovalPolicy } from "../../authz/entity-policy";
+import {
+	resolveActingPrincipal,
+	resolveEntityApprovalPolicy,
+} from "../../authz/entity-policy";
 import { resolveApprovalChatOrigin } from "./approval-delivery";
-import { type DbClient, getDb } from "../../db/client";
+import { type DbClient, getDb, pgTextArray } from "../../db/client";
 import type { Env } from "../../index";
 import {
 	currentMcpActivityAttribution,
@@ -391,6 +394,18 @@ export async function proposeEntityChange(
 		parentRunId,
 		proposal,
 	);
+	// One open question per record field set: a direct update (no producing
+	// Automation run) to fields that already await a direct decision reuses that
+	// card instead of stacking another, whatever the wording. Batched proposals
+	// keep their per-run card, which owns their batch decision and retry identity.
+	// These updates serialize on the field set so two wordings cannot both open.
+	const openFieldKeys =
+		updateProposal && parentRunId === null
+			? Object.keys(updateProposal.fields).sort()
+			: null;
+	const proposalLockKey = updateProposal && openFieldKeys
+		? `entity-change-fields:${ctx.organizationId}:${updateProposal.entity_id}:${JSON.stringify(openFieldKeys)}`
+		: idempotencyKey;
 	const initiatorColumns = resolveRunInitiator(ctx);
 
 	// Idempotency: complete_window is replay-safe (retries + concurrent replicas),
@@ -420,8 +435,9 @@ export async function proposeEntityChange(
     WHERE r.organization_id = ${ctx.organizationId}
       AND r.run_type = 'internal'
       AND r.action_key = ${actionKey}
-      AND (NOT ${includeSettled} OR r.parent_run_id = ${parentRunId})
-      AND (
+      AND ((
+        (NOT ${includeSettled} OR r.parent_run_id = ${parentRunId})
+        AND (
         (
           r.idempotency_key = ${idempotencyKey}
           AND (${includeSettled} OR r.status IN ('pending', 'claimed', 'running'))
@@ -449,7 +465,17 @@ export async function proposeEntityChange(
             OR r.action_input->'entity_data' = ${sql.json(createProposal?.entity_data ?? {})}::jsonb
           )
         )
-      )
+      ))
+      OR (
+        ${openFieldKeys !== null}
+        AND r.parent_run_id IS NULL
+        AND r.approval_status = 'pending'
+        AND r.status = 'pending'
+        AND COALESCE(r.action_input->>'operation', 'update') = 'update'
+        AND r.action_input->>'entity_id' = ${updateProposal ? String(updateProposal.entity_id) : ""}
+        AND (r.action_input->'fields') ?& ${pgTextArray(openFieldKeys ?? [])}::text[]
+        AND ((r.action_input->'fields') - ${pgTextArray(openFieldKeys ?? [])}::text[]) = '{}'::jsonb
+      ))
     ORDER BY (r.idempotency_key = ${idempotencyKey}) DESC, r.id DESC
     LIMIT 1
   `;
@@ -640,16 +666,25 @@ export async function proposeEntityChange(
 	// Commit the approval with its notification and delivery task when recipients
 	// exist, so a failed handoff cannot leave a card that retries mistake for delivered.
 	return sql.begin(async (tx) => {
-		await tx`SELECT pg_advisory_xact_lock(hashtextextended(${idempotencyKey}, 0))`;
+		await tx`SELECT pg_advisory_xact_lock(hashtextextended(${proposalLockKey}, 0))`;
 		const existing = await findExisting(tx);
 		let persisted: { runId: number; eventId: number; reused: boolean };
 		if (existing.length > 0) {
 			persisted = await reuseExisting(existing[0], tx);
 		} else {
+			// Recorded so the proposer can withdraw its own card (operations.cancel
+			// resolves the caller through the same function).
+			const proposer = await resolveActingPrincipal(tx, {
+				organizationId: ctx.organizationId,
+				userId: ctx.userId,
+				agentId: ctx.agentId,
+				sessionAutomationId: ctx.actingAutomationId,
+			});
 			const inserted = await tx<{ id: number }>`
 				INSERT INTO runs (
 					organization_id, run_type, action_key, action_input, parent_run_id,
 					automation_id, created_by_user_id, initiator_kind, initiator_ref,
+					policy_principal_kind, policy_principal_id,
 					approval_status, status, idempotency_key, created_at
 				) VALUES (
 					${ctx.organizationId}, 'internal', ${actionKey},
@@ -658,6 +693,7 @@ export async function proposeEntityChange(
 					${initiatorColumns.createdByUserId},
 					${initiatorColumns.initiatorKind},
 					${tx.json(initiatorColumns.initiatorRef)},
+					${proposer.kind}, ${proposer.id},
 					'pending', 'pending', ${idempotencyKey}, current_timestamp
 				)
 				ON CONFLICT DO NOTHING

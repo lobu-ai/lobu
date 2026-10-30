@@ -31,7 +31,7 @@ export async function handleCancel(
       SELECT status, approval_status, action_key, created_by_user_id,
         policy_principal_kind, policy_principal_id
       FROM runs WHERE id = ${args.run_id} AND organization_id = ${ctx.organizationId}
-        AND run_type = 'action'
+        AND (run_type = 'action' OR (run_type = 'internal' AND approval_status = 'pending'))
       FOR UPDATE
     `;
     if (!run) return withFailureCode({ error: 'Operation run not found' }, 'NOT_FOUND');
@@ -60,7 +60,8 @@ export async function handleCancel(
       withdrawnApproval ? 'rejected' : 'failed',
       `${run.action_key} — cancelled`, message,
       withdrawnApproval
-        ? { run_status: 'cancelled', approval_status: 'expired', expiry_reason: message }
+        ? { run_status: 'cancelled', approval_status: 'expired', expiry_reason: message,
+            withdrawn_by: { principal_kind: actor.kind, principal_id: actor.id, user_id: ctx.userId ?? null } }
         : { run_status: 'cancelled', error_message: message },
       null, tx);
     return { action: 'cancel', run_id: args.run_id, status: 'cancelled', cancelled: true };
