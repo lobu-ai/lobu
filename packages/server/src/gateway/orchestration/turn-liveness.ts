@@ -299,7 +299,8 @@ export async function extendTurnDeadlines(
  * terminal error carrying `code` — so the client is told the PROVIDER failed
  * (e.g. `PROVIDER_QUOTA_EXHAUSTED`, which resolves to a real CTA) rather than
  * the generic `WORKER_UNRESPONSIVE` it would get for a merely silent worker.
- * `reason` rides along on the marker (`providerFailedReason`) for diagnosis.
+ * `reason` rides along on the marker (`providerFailedReason`) for diagnosis,
+ * and `status` (`providerFailedStatus`) for {@link readTurnProviderFailure}.
  *
  * Best-effort and non-throwing, like `extendTurnDeadlines`: this must never fail
  * a user's inference call. Losing the write costs only the prompt failure — the

@@ -391,9 +391,9 @@ export async function pendingAgentTurnInputs(sql: DbClient, owner: NativeTurnRun
 /**
  * Derive the turn-liveness marker's deployment name from a native turn's
  * envelope. Single source for the sites that need it — the terminal discharge,
- * the heartbeat extension, and the queue handoff that re-arms the next turn's
- * admission window — so none can drift from the arming site in
- * `MessageConsumer`.
+ * the heartbeat extension, the queue handoff that re-arms the next turn's
+ * admission window, and the completion route's provider-failure read — so
+ * none can drift from the arming site in `MessageConsumer`.
  */
 export function turnMarkerDeployment(run: Pick<NativeTurnRun, 'organization_id' | 'action_input'>): string | null {
   const envelope = run.action_input;
