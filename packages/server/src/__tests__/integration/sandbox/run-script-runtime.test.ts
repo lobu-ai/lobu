@@ -16,6 +16,9 @@
  * `isolated-vm` so the regression cannot ship again.
  */
 
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { ToolError } from "@lobu/core";
 import { Type } from "@sinclair/typebox";
@@ -159,6 +162,169 @@ describe("sandbox runtime", () => {
       name: "ValidationError",
       message: "Script must `export default` an async function",
     });
+  });
+
+  it("classifies a bare IIFE as a missing default export", async () => {
+    const result = await runScript({
+      source:
+        "(async () => { const rows = await client.entities.list(); return rows; })();",
+      sdk: stubSDK(),
+      sdkMode: "read",
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatchObject({
+      name: "ValidationError",
+      message: "Script must `export default` an async function",
+    });
+    expect(classifySdkScriptError(result.error!).code).toBe("VALIDATION");
+  });
+
+  it("guides a bare top-level await/return body to the required wrapper", async () => {
+    const result = await runScript({
+      source:
+        "const rows = await client.entities.list();\nreturn rows;",
+      sdk: stubSDK(),
+      sdkMode: "read",
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatchObject({
+      name: "ValidationError",
+      code: "VALIDATION",
+      line: 1,
+    });
+    expect(result.error?.message).toContain(
+      "export default async (ctx, client) => {",
+    );
+    expect(result.error?.message).not.toContain("replace them with lobu");
+  });
+
+  it("guides a bare top-level return outside an ES-module package", async () => {
+    const previousCwd = process.cwd();
+    const cwd = await mkdtemp(join(tmpdir(), "lobu-script-return-"));
+    try {
+      process.chdir(cwd);
+      const result = await runScript({
+        source: "return 1 + 2;",
+        sdk: stubSDK(),
+        sdkMode: "read",
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toMatchObject({
+        name: "ValidationError",
+        code: "VALIDATION",
+        retryable: false,
+      });
+      expect(result.error?.message).toContain(
+        "export default async (ctx, client) => {",
+      );
+      expect(result.error?.stack).toBeUndefined();
+    } finally {
+      process.chdir(previousCwd);
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the local-imports hint on a rejected local import", async () => {
+    const result = await runScript({
+      source:
+        "import { helper } from './helper';\nexport default async () => helper();",
+      sdk: stubSDK(),
+      sdkMode: "read",
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error?.name).toBe("ValidationError");
+    expect(result.error?.message).toContain('Unsupported import "./helper"');
+    expect(result.error?.message).toContain("replace them with lobu");
+  });
+
+  it("names swapped (client, ctx) parameters as a validation error", async () => {
+    const swapped = await Promise.all(
+      [
+        "export default async (client, ctx) => client.entities.list();",
+        "export default async (client, ctx) => client.org('other').entities.list();",
+        "export default async (client, ctx) => client.query('SELECT 1');",
+      ].map((source) =>
+        runScript({ source, sdk: stubSDK(), sdkMode: "read" }),
+      ),
+    );
+
+    for (const result of swapped) {
+      expect(result.success).toBe(false);
+      expect(result.error).toMatchObject({
+        name: "ValidationError",
+        message:
+          "This is ctx, not client — use `export default async (ctx, client) => …`",
+        code: "VALIDATION",
+        retryable: false,
+      });
+      expect(result.error?.stack).toBeUndefined();
+    }
+  });
+
+  it("keeps ctx's own keys, await, and JSON.stringify working", async () => {
+    const result = await runScript({
+      source: `export default async (ctx) => {
+        const awaited = await ctx;
+        return {
+          entities: ctx.entities,
+          awaitedSame: awaited === ctx,
+          json: JSON.parse(JSON.stringify(ctx)),
+          unknown: ctx.somethingElse,
+          sleep: typeof ctx.sleep,
+        };
+      };`,
+      sdk: stubSDK(),
+      sdkMode: "read",
+      context: { entities: [{ id: 1 }] },
+    });
+
+    expect(result).toMatchObject({
+      success: true,
+      returnValue: {
+        entities: [{ id: 1 }],
+        awaitedSame: true,
+        json: { entities: [{ id: 1 }] },
+        sleep: "function",
+      },
+    });
+    expect(result.returnValue).not.toHaveProperty("unknown");
+  });
+
+  it.each([
+    `export default async () => {
+      throw new Error("This is ctx, not client — use \`export default async (ctx, client) => …\`");
+    };`,
+    'throw new SyntaxError("Illegal return statement");',
+    'export default async () => { throw new SyntaxError("Illegal return statement"); };',
+  ])("does not let a script forge shape validation: %s", async (source) => {
+    const result = await runScript({
+      source,
+      sdk: stubSDK(),
+      sdkMode: "read",
+    });
+
+    expect(result.error?.name).toBe("ScriptError");
+    expect(result.error?.code).toBeUndefined();
+  });
+
+  it("keeps await inside a non-async function distinct from a bare body", async () => {
+    const result = await runScript({
+      source: "export default () => { await client.entities.list(); };",
+      sdk: stubSDK(),
+      sdkMode: "read",
+    });
+
+    expect(result.error).toMatchObject({
+      name: "ValidationError",
+      code: "VALIDATION",
+      line: 1,
+    });
+    expect(result.error?.message).not.toContain("export default async (ctx, client) => {");
+    expect(result.error?.message).not.toContain("replace them with lobu");
   });
 
   it("normalizes non-string thrown fields without replacing the original error", async () => {
