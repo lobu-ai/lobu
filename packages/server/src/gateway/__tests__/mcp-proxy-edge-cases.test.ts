@@ -587,6 +587,116 @@ describe("SSE-framed JSON-RPC response", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Upstream HTTP refusal on the REST tool route
+// ---------------------------------------------------------------------------
+
+describe("upstream HTTP refusal on the REST tool route", () => {
+  async function callAgainst(upstream: Response, { cachedSession = true } = {}) {
+    const configSource = createConfigSource({
+      memory: { id: "memory", upstreamUrl: "http://memory.example.com/mcp" },
+    });
+    const proxy = new McpProxy(configSource, {});
+    if (cachedSession) seedRestSession(proxy, "memory");
+    globalThis.fetch = async () => upstream.clone();
+    return proxy.getApp().request("/memory/tools/save_memory", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${agent1Token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ content: "note" }),
+    });
+  }
+
+  // The embedded MCP's direct-auth gate answers a worker token whose agent no
+  // longer exists with this exact envelope. The upstream refused the caller;
+  // the gateway did not fail, so it must not read as a 502.
+  test("keeps an upstream 403 auth refusal and its description", async () => {
+    const res = await callAgainst(
+      new Response(
+        JSON.stringify({
+          error: "insufficient_scope",
+          error_description: "Worker token is not valid for this organization",
+        }),
+        { status: 403, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    expect(res.status).toBe(403);
+    const body = await res.json();
+    expect(body.isError).toBe(true);
+    expect(body.error).toBe(
+      "insufficient_scope: Worker token is not valid for this organization",
+    );
+  });
+
+  test("keeps a 403 refusal of the initialize handshake when no session is cached", async () => {
+    const res = await callAgainst(
+      new Response(
+        JSON.stringify({
+          error: "insufficient_scope",
+          error_description: "Worker token is not valid for this organization",
+        }),
+        { status: 403, headers: { "Content-Type": "application/json" } },
+      ),
+      { cachedSession: false },
+    );
+
+    expect(res.status).toBe(403);
+    expect((await res.json()).error).toBe(
+      "insufficient_scope: Worker token is not valid for this organization",
+    );
+  });
+
+  test("keeps an upstream 401 even when its body is not JSON", async () => {
+    const res = await callAgainst(
+      new Response("Unauthorized", {
+        status: 401,
+        headers: { "Content-Type": "text/plain" },
+      }),
+    );
+
+    expect(res.status).toBe(401);
+    const body = await res.json();
+    expect(body.isError).toBe(true);
+    expect(body.error).toContain("401");
+  });
+
+  test("an upstream 5xx is still a bad gateway", async () => {
+    const res = await callAgainst(
+      new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          error: { code: -32603, message: "Internal error" },
+        }),
+        { status: 500, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    expect(body.error).toBe("Internal error");
+  });
+
+  test("a JSON-RPC error on an HTTP 200 is still a bad gateway", async () => {
+    const res = await callAgainst(
+      new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          error: { code: -32601, message: "Method not found" },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    expect(res.status).toBe(502);
+    expect((await res.json()).error).toBe("Method not found");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // In-memory session TTL eviction
 // ---------------------------------------------------------------------------
 
