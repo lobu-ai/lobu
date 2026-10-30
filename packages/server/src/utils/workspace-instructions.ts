@@ -84,6 +84,9 @@ export const DIRECT_MCP_INSTRUCTIONS = [
   '- A policy-gated operation returns `status: "pending_approval"` and a `run_id`. Call `get_approval` with that run id to show the canonical review card. Treat a pending operation as waiting, not failed.',
   '- Do not infer permission to store conversation details, preferences, personal information, relationships, or files merely because they were mentioned.',
   '- Do not request, expose, or return authentication secrets.',
+  '',
+  '### Empty workspace',
+  '- If a read shows the workspace has no saved memories and no connections, offer the user one first step: save one preference they state, or connect one source (for example Gmail). Offer it once, and save or connect only after the user agrees.',
 ].join('\n');
 
 export async function buildWorkspaceInstructions(
