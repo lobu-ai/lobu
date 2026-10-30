@@ -9,9 +9,10 @@ import {
 } from "@lobu/cli/config";
 import type LokiActivityConnector from "./loki-activity.connector.ts";
 
-// One backlog type for every kind of team work. Records are written by people
-// and agents; the organic acquisition review Automation reads the `seo` kind
-// as its backlog and only reports on it.
+// One backlog type for every kind of team work, written by people and agents.
+// The organic acquisition review Automation (maintained in the workspace) reads
+// the `seo` kind as its backlog and links each `seo.review` report to the SEO
+// tasks it covers, so the report's event kind is declared here.
 const task = defineEntityType({
   key: "task",
   name: "Task",
@@ -117,112 +118,6 @@ const task = defineEntityType({
         enum: ["baseline_needed", "measured", "not_applicable"],
         type: "string",
         title: "Impact measurement",
-      })
-    ),
-  },
-});
-
-// The organic acquisition review Automation (maintained in the workspace) is
-// bound to this type's single record, and its `seo.review` output validates
-// against the event kind declared here. The project's goals and evidence rules
-// now live in the Automation prompt; the type stays until the Automation can be
-// rebound, because an Automation's bound entity cannot be changed in place.
-const seoProject = defineEntityType({
-  key: "seo-project",
-  name: "SEO Project",
-  description:
-    "Shared goals, evidence rules and source readiness for organic acquisition.",
-  properties: {
-    scope: Type.Optional(
-      Type.Unsafe({
-        type: "array",
-        items: { type: "string" },
-        title: "Website scope",
-      })
-    ),
-    website: Type.Optional(
-      Type.Unsafe({
-        type: "string",
-        title: "Website",
-        format: "uri",
-        description: "Canonical public website",
-      })
-    ),
-    objective: Type.Optional(
-      Type.Unsafe({
-        type: "string",
-        title: "Objective",
-        description: "Outcome this work should improve",
-      })
-    ),
-    assumptions: Type.Optional(
-      Type.Unsafe({
-        type: "array",
-        items: { type: "string" },
-        title: "Assumptions",
-      })
-    ),
-    review_status: Type.Optional(
-      Type.Unsafe({
-        enum: ["baseline", "measuring", "blocked", "active"],
-        type: "string",
-        title: "Review status",
-      })
-    ),
-    last_review_at: Type.Optional(
-      Type.Unsafe({
-        type: "string",
-        title: "Setup baseline observed",
-        format: "date-time",
-        readOnly: true,
-        description:
-          "Timestamp of the setup baseline. Use the latest review and run history for current checks; the report-only automation does not update this field.",
-      })
-    ),
-    method_version: Type.Optional(
-      Type.Unsafe({ type: "string", title: "Method version", readOnly: true })
-    ),
-    primary_measure: Type.Optional(
-      Type.Unsafe({
-        type: "string",
-        title: "Primary measure",
-        description:
-          "Confirmed definition, or explicit hypothesis pending validation",
-      })
-    ),
-    source_readiness: Type.Optional(
-      Type.Unsafe({
-        type: "array",
-        items: {
-          type: "object",
-          properties: {
-            detail: { type: "string", title: "What this means" },
-            source: { type: "string", title: "Source" },
-            status: {
-              enum: [
-                "verified",
-                "available_unverified",
-                "not_connected",
-                "blocked",
-                "excluded",
-              ],
-              type: "string",
-              title: "Status",
-            },
-          },
-        },
-        title: "Setup source readiness",
-        description:
-          "Baseline source observations. The latest review and run history carry the most recent checked coverage.",
-      })
-    ),
-    budget_usd_per_run: Type.Optional(
-      Type.Unsafe({
-        type: "number",
-        title: "External data budget per run (USD)",
-        minimum: 0,
-        description:
-          "Excludes existing agent inference costs. Paid provider calls require an explicit approved increase.",
       })
     ),
   },
@@ -506,7 +401,7 @@ export default defineConfig({
     companyCloudflareAccount,
     gmailOAuthApp,
   ],
-  entities: [task, seoProject],
+  entities: [task],
   connections: [
     productActivityDb,
     productionLogs,
