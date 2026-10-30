@@ -211,6 +211,27 @@ export function parseScopes(scope: string | null | undefined, allowedScopes: rea
 // ============================================
 
 /**
+ * Validate a client asset URL (logo_uri, client_uri) before it leaves the
+ * server for a browser. Must be an absolute HTTPS URL with no credentials;
+ * anything else is dropped (null) so the UI falls back to a letter tile or
+ * a domain favicon instead of rendering attacker-controlled markup.
+ */
+export function sanitizeClientAssetUrl(value: string | null | undefined): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  try {
+    const url = new URL(trimmed);
+    if (url.protocol !== 'https:') return null;
+    if (url.username || url.password) return null;
+    if (!url.hostname) return null;
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Validate a redirect URI
  * - Must be absolute HTTPS URL (or http://localhost for development)
  * - No fragments allowed

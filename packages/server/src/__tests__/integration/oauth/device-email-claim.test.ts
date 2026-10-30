@@ -136,6 +136,68 @@ describe('POST /oauth/device/email — agent account claim', () => {
     });
     expect(res.status).toBe(400);
   });
+
+  it('returns sanitized client branding in device info', async () => {
+    const branded = await post('/oauth/register', {
+      body: {
+        client_name: 'Branded Device Agent',
+        grant_types: [DEVICE_GRANT, 'refresh_token'],
+        token_endpoint_auth_method: 'none',
+        logo_uri: 'https://branded.example.com/logo.png',
+        client_uri: 'https://branded.example.com/',
+      },
+    });
+    expect(branded.status).toBe(201);
+    const brandedClient = (await branded.json()) as { client_id: string };
+    const brandedDevice = await post('/oauth/device_authorization', {
+      body: {
+        client_id: brandedClient.client_id,
+        scope: 'mcp:read',
+        resource: 'http://localhost/mcp',
+      },
+    });
+    expect(brandedDevice.status).toBe(200);
+    const brandedCode = ((await brandedDevice.json()) as { user_code: string }).user_code;
+
+    const junk = await post('/oauth/register', {
+      body: {
+        client_name: 'Junk Brand Device Agent',
+        grant_types: [DEVICE_GRANT, 'refresh_token'],
+        token_endpoint_auth_method: 'none',
+        logo_uri: 'javascript:alert(1)',
+        client_uri: 'http://insecure.example.com/',
+      },
+    });
+    expect(junk.status).toBe(201);
+    const junkClient = (await junk.json()) as { client_id: string };
+    const junkDevice = await post('/oauth/device_authorization', {
+      body: {
+        client_id: junkClient.client_id,
+        scope: 'mcp:read',
+        resource: 'http://localhost/mcp',
+      },
+    });
+    expect(junkDevice.status).toBe(200);
+    const junkCode = ((await junkDevice.json()) as { user_code: string }).user_code;
+
+    const user = await createTestUser({ name: 'Branding verifier' });
+    const session = await createTestSession(user.id);
+    const brandedInfo = await get(
+      `/oauth/device/info?user_code=${encodeURIComponent(brandedCode)}`,
+      { cookie: session.cookieHeader }
+    );
+    expect(brandedInfo.status).toBe(200);
+    expect(await brandedInfo.json()).toMatchObject({
+      logo_uri: 'https://branded.example.com/logo.png',
+      client_uri: 'https://branded.example.com/',
+    });
+
+    const junkInfo = await get(`/oauth/device/info?user_code=${encodeURIComponent(junkCode)}`, {
+      cookie: session.cookieHeader,
+    });
+    expect(junkInfo.status).toBe(200);
+    expect(await junkInfo.json()).toMatchObject({ logo_uri: null, client_uri: null });
+  });
 });
 
 describe('MagicLinkEmail authorization copy', () => {
