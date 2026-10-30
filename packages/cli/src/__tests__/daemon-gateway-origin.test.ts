@@ -8,6 +8,7 @@ import {
   test,
 } from "bun:test";
 import * as daemonModule from "@lobu/connector-worker/daemon";
+import { WorkerUpgradeRequiredError } from "@lobu/connector-worker/daemon";
 import { daemonCommand } from "../commands/daemon";
 import * as loginModule from "../commands/login";
 import { apiUrlToGatewayOrigin } from "../internal/context";
@@ -60,6 +61,7 @@ const SESSION_ENV_KEYS = [
   "CODEX_SESSION_ID",
   "OPENCODE_PID",
   "OPENCODE_SESSION_ID",
+  "LOBU_NO_UPDATE_CHECK",
 ] as const;
 
 describe("lobu daemon", () => {
@@ -135,6 +137,62 @@ describe("lobu daemon", () => {
       platform: "headless",
     });
     expect(start.mock.calls[0]?.[0]?.workerId).toMatch(/^headless:codex:/);
+  });
+
+  test("a poll refused below the server's version floor exits with the update steps", async () => {
+    spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ latest: "19.2.0" })
+    );
+    spyOn(daemonModule, "startDaemonCommand").mockRejectedValue(
+      new WorkerUpgradeRequiredError(
+        "Update the headless worker to continue (this server requires a newer version)"
+      )
+    );
+
+    const error = await daemonCommand({
+      apiUrl: "http://127.0.0.1:8787",
+      workerId: "headless:test-host",
+      cliVersion: "19.2.0",
+    }).catch((err: unknown) => err);
+
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(WorkerUpgradeRequiredError);
+    const message = (error as Error).message;
+    expect(message).toContain(
+      "Update the headless worker to continue (this server requires a newer version)"
+    );
+    expect(message).toContain("@lobu/cli 19.2.0");
+    expect(message).toContain("npx -y @lobu/cli@latest daemon");
+  });
+
+  test("a running daemon prints one line when a newer CLI is published", async () => {
+    const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ latest: "24.3.0" })
+    );
+    const lines: string[] = [];
+    spyOn(process.stderr, "write").mockImplementation(((chunk: unknown) => {
+      lines.push(String(chunk));
+      return true;
+    }) as never);
+    spyOn(daemonModule, "startDaemonCommand").mockImplementation(
+      // The check is fire-and-forget; let it land while the daemon "runs".
+      (async () => {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }) as never
+    );
+
+    await daemonCommand({
+      apiUrl: "http://127.0.0.1:8787",
+      workerId: "headless:test-host",
+      cliVersion: "19.2.0",
+    });
+
+    expect(fetchSpy.mock.calls[0]?.[0]).toBe(
+      "https://registry.npmjs.org/-/package/@lobu/cli/dist-tags"
+    );
+    const printed = lines.filter((line) => line.includes("Lobu CLI 24.3.0"));
+    expect(printed).toHaveLength(1);
+    expect(printed[0]).toContain("this daemon runs 19.2.0");
   });
 
   test("a stored installation login mints a worker-bound child PAT before daemon start", async () => {

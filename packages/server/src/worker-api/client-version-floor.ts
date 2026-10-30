@@ -33,6 +33,12 @@
  * components. Canaries are built from commits after that base release. The
  * per-feature page-activation gate runs on this comparator too, against a
  * fixed floor of its own rather than MIN_CLIENT_VERSION.
+ *
+ * RECOMMENDED_CLIENT_VERSION is the NUDGE beside that gate: same map format,
+ * same parser and comparison, but it never refuses a poll. A client below it
+ * keeps working and the server says so where a reader already looks (a device
+ * run's "never claimed" diagnostic), so an outdated daemon stops being a
+ * silent cause. Unset/empty means no nudge.
  */
 
 import { createLogger } from '@lobu/core';
@@ -43,18 +49,21 @@ const logger = createLogger('client-version-floor');
  * Parse `platform=version` pairs; malformed entries are ignored (permissive).
  *
  * Ignoring them silently is the dangerous half: a typo (`macos=19.2`, two
- * parts) drops that platform's floor while the variable still *looks* set. So
- * warn, naming the entries. Memoized on the raw string because this runs on
- * every device poll — that bounds the warn to once per value and still
- * re-parses the moment the env changes.
+ * parts) drops that platform's entry while the variable still *looks* set. So
+ * warn, naming the entries. Memoized per variable on the raw string because
+ * this runs on every device poll — that bounds the warn to once per value and
+ * still re-parses the moment the env changes.
  */
-let floorCache: { raw: string; floors: Map<string, string> } | null = null;
+type VersionMapEnv = 'MIN_CLIENT_VERSION' | 'RECOMMENDED_CLIENT_VERSION';
 
-function envFloors(): Map<string, string> {
-  const raw = process.env.MIN_CLIENT_VERSION ?? '';
-  if (floorCache?.raw === raw) return floorCache.floors;
+const versionMapCache = new Map<VersionMapEnv, { raw: string; versions: Map<string, string> }>();
 
-  const floors = new Map<string, string>();
+function envVersionMap(name: VersionMapEnv): Map<string, string> {
+  const raw = process.env[name] ?? '';
+  const cached = versionMapCache.get(name);
+  if (cached?.raw === raw) return cached.versions;
+
+  const versions = new Map<string, string>();
   const ignored: string[] = [];
   for (const entry of raw.split(',')) {
     const trimmed = entry.trim();
@@ -66,20 +75,22 @@ function envFloors(): Map<string, string> {
       ignored.push(trimmed);
       continue;
     }
-    floors.set(platform, version);
+    versions.set(platform, version);
   }
   if (ignored.length > 0) {
     // Which entries were ignored is the whole point of this warn: an operator
     // told that "some entry" dropped, but not which, is back at the silent
     // misconfiguration this exists to break.
-    logger.warn(
-      'MIN_CLIENT_VERSION: ignoring malformed entries — those platforms enforce NO floor',
-      { ignored, enforcing: [...floors.keys()] }
-    );
+    const consequence =
+      name === 'MIN_CLIENT_VERSION' ? 'those platforms enforce NO floor' : 'those platforms get NO update nudge';
+    logger.warn(`${name}: ignoring malformed entries — ${consequence}`, {
+      ignored,
+      configured: [...versions.keys()],
+    });
   }
 
-  floorCache = { raw, floors };
-  return floors;
+  versionMapCache.set(name, { raw, versions });
+  return versions;
 }
 
 /** Parse a release or published canary into its release components. */
@@ -102,7 +113,7 @@ function parseFloorVersion(value: unknown): [number, number, number] | null {
 export function meetsClientVersionFloor(
   platform: string | null | undefined,
   version: unknown,
-  floors: Map<string, string> = envFloors()
+  floors: Map<string, string> = envVersionMap('MIN_CLIENT_VERSION')
 ): boolean {
   const floor = (platform != null ? floors.get(platform) : undefined) ?? null;
   if (floor == null) return true;
@@ -132,4 +143,30 @@ export function clientFloorMessage(
           ? 'the headless worker'
           : 'your Lobu client';
   return `Update ${label} to continue (this server requires a newer version)`;
+}
+
+/**
+ * One clause telling the reader the device runs an outdated client and how to
+ * update it, or null when RECOMMENDED_CLIENT_VERSION has no entry for the
+ * platform, the client meets it, or the client reported no parseable version
+ * (naming a version it never sent would be a guess).
+ */
+export function clientUpdateHint(
+  platform: string | null | undefined,
+  version: unknown
+): string | null {
+  if (platform == null) return null;
+  const recommended = envVersionMap('RECOMMENDED_CLIENT_VERSION');
+  const target = recommended.get(platform);
+  if (target == null || parseClientVersion(version) == null) return null;
+  if (meetsClientVersionFloor(platform, version, recommended)) return null;
+  const step =
+    platform === 'headless'
+      ? 'update @lobu/cli and restart `lobu daemon`'
+      : platform === 'macos'
+        ? 'update the Lobu Mac app'
+        : platform === 'chrome-extension'
+          ? 'update the Chrome extension'
+          : 'update the Lobu client on that device';
+  return `device runs ${platform} v${String(version)} (recommended v${target} or newer); ${step}`;
 }

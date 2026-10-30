@@ -13,7 +13,11 @@ export type {
   WorkerAdvertisementSnapshot,
   WorkerCapabilities,
 } from './client.js';
-export { MutableWorkerAdvertisementProvider, WorkerClient } from './client.js';
+export {
+  MutableWorkerAdvertisementProvider,
+  WorkerClient,
+  WorkerUpgradeRequiredError,
+} from './client.js';
 export {
   NATIVE_BRIDGE_PROTOCOL,
   NATIVE_BRIDGE_PROTOCOL_VERSION,

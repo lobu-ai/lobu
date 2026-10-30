@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { canaryVersion } from "../../../../../scripts/canary-publish.mjs";
 import {
 	clientFloorMessage,
+	clientUpdateHint,
 	meetsClientVersionFloor,
 	parseClientVersion,
 } from "../../worker-api/client-version-floor";
@@ -138,7 +139,7 @@ describe("client version floor", () => {
 	});
 
 	test("a changed value takes effect immediately despite the parse cache", () => {
-		// envFloors() memoizes on the raw string because it runs on every device
+		// envVersionMap() memoizes on the raw string because it runs on every device
 		// poll. Keyed on anything coarser (a boolean "parsed once") a floor change
 		// would never take effect until restart.
 		process.env.MIN_CLIENT_VERSION = "macos=19.2.0";
@@ -157,5 +158,74 @@ describe("client version floor", () => {
 		expect(clientFloorMessage("headless")).toContain("headless worker");
 		expect(clientFloorMessage(null)).toContain("Lobu client");
 		expect(clientFloorMessage("something-new")).toContain("Lobu client");
+	});
+});
+
+describe("recommended client version", () => {
+	let saved: string | undefined;
+	let savedMinimum: string | undefined;
+	beforeEach(() => {
+		saved = process.env.RECOMMENDED_CLIENT_VERSION;
+		savedMinimum = process.env.MIN_CLIENT_VERSION;
+	});
+	afterEach(() => {
+		if (saved === undefined) delete process.env.RECOMMENDED_CLIENT_VERSION;
+		else process.env.RECOMMENDED_CLIENT_VERSION = saved;
+		if (savedMinimum === undefined) delete process.env.MIN_CLIENT_VERSION;
+		else process.env.MIN_CLIENT_VERSION = savedMinimum;
+	});
+
+	test("unset means no nudge for any client", () => {
+		delete process.env.RECOMMENDED_CLIENT_VERSION;
+		expect(clientUpdateHint("headless", "1.0.0")).toBeNull();
+		expect(clientUpdateHint("macos", null)).toBeNull();
+	});
+
+	test("names the running version and the per-platform update step", () => {
+		process.env.RECOMMENDED_CLIENT_VERSION =
+			"headless=24.0.0,macos=24.0.0,chrome-extension=0.9.0";
+		expect(clientUpdateHint("headless", "19.2.0")).toBe(
+			"device runs headless v19.2.0 (recommended v24.0.0 or newer); update @lobu/cli and restart `lobu daemon`",
+		);
+		expect(clientUpdateHint("macos", "23.1.0")).toContain("update the Lobu Mac app");
+		expect(clientUpdateHint("chrome-extension", "0.8.9")).toContain(
+			"update the Chrome extension",
+		);
+	});
+
+	test("a client at or above the recommendation, or with no entry, is not nudged", () => {
+		process.env.RECOMMENDED_CLIENT_VERSION = "headless=24.0.0";
+		expect(clientUpdateHint("headless", "24.0.0")).toBeNull();
+		expect(clientUpdateHint("headless", "24.2.1")).toBeNull();
+		expect(clientUpdateHint("macos", "1.0.0")).toBeNull();
+		expect(clientUpdateHint(null, "1.0.0")).toBeNull();
+	});
+
+	test("an unknown client version is not reported as a version it never sent", () => {
+		process.env.RECOMMENDED_CLIENT_VERSION = "headless=24.0.0";
+		expect(clientUpdateHint("headless", null)).toBeNull();
+		expect(clientUpdateHint("headless", "garbage")).toBeNull();
+	});
+
+	test("the recommendation never gates polls", () => {
+		delete process.env.MIN_CLIENT_VERSION;
+		process.env.RECOMMENDED_CLIENT_VERSION = "headless=24.0.0";
+		expect(meetsClientVersionFloor("headless", "19.2.0")).toBe(true);
+	});
+
+	test("malformed entries warn under the recommended variable's own name", () => {
+		const lines: string[] = [];
+		const spy = spyOn(console, "warn").mockImplementation((line: unknown) => {
+			lines.push(String(line));
+		});
+		try {
+			process.env.RECOMMENDED_CLIENT_VERSION = "headless=24.0,macos=24.0.0";
+			expect(clientUpdateHint("headless", "1.0.0")).toBeNull();
+		} finally {
+			spy.mockRestore();
+		}
+		const rendered = lines.join("\n");
+		expect(rendered).toContain("RECOMMENDED_CLIENT_VERSION");
+		expect(rendered).toContain("headless=24.0");
 	});
 });

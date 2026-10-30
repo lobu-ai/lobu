@@ -159,6 +159,12 @@ or OpenCode session, that session receives its own identity so interactive
 delivery does not replace the machine's durable device mapping; pass
 `--no-interactive-session` to opt out.
 
+A running daemon checks the published `@lobu/cli` version at start and about
+once a day, and prints one line when a newer release exists; set
+`LOBU_NO_UPDATE_CHECK=1` to turn the check off. When the server refuses the
+daemon's version outright (`409 upgrade_required`), the daemon exits non-zero
+with the update steps instead of retrying.
+
 Older CLI releases registered a terminal daemon as `macos` when run on a Mac.
 The terminal and Docker methods now register as `headless` so they cannot
 impersonate the native Mac app. The first upgraded run creates a new Worker
