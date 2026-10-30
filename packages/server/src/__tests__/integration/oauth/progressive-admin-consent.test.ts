@@ -1082,4 +1082,67 @@ describe('Progressive mcp:admin consent', () => {
     `;
     expect(parsePgTextArray(refreshedRows[0]?.granted_organization_ids as string)).toEqual([]);
   });
+
+  it('forwards sanitized client branding to the consent page', async () => {
+    const app = buildApp();
+    const challenge = createHash('sha256').update('branding-verifier').digest('base64url');
+    const branded = await call(app, 'POST', '/oauth/register', {
+      body: {
+        client_name: 'Branded Client',
+        redirect_uris: [`${ORIGIN}/branded-callback`],
+        grant_types: ['authorization_code', 'refresh_token'],
+        token_endpoint_auth_method: 'none',
+        logo_uri: 'https://branded.example.com/logo.png',
+        client_uri: 'https://branded.example.com/',
+      },
+    });
+    expect(branded.status).toBe(201);
+    const brandedClient = (await branded.json()) as { client_id: string };
+
+    const junk = await call(app, 'POST', '/oauth/register', {
+      body: {
+        client_name: 'Junk Brand Client',
+        redirect_uris: [`${ORIGIN}/junk-callback`],
+        grant_types: ['authorization_code', 'refresh_token'],
+        token_endpoint_auth_method: 'none',
+        logo_uri: 'javascript:alert(1)',
+        client_uri: 'http://insecure.example.com/',
+      },
+    });
+    expect(junk.status).toBe(201);
+    const junkClient = (await junk.json()) as { client_id: string };
+
+    const queryFor = (clientId: string, redirectUri: string) =>
+      new URLSearchParams({
+        client_id: clientId,
+        redirect_uri: redirectUri,
+        response_type: 'code',
+        scope: 'mcp:read',
+        code_challenge: challenge,
+        code_challenge_method: 'S256',
+        resource: `${ORIGIN}/mcp`,
+      });
+
+    const brandedUi = await call(
+      app,
+      'GET',
+      `/oauth/authorize?${queryFor(brandedClient.client_id, `${ORIGIN}/branded-callback`)}`
+    );
+    const brandedLocation = brandedUi.headers.get('location');
+    expect(brandedLocation).toBeTruthy();
+    const brandedSearch = new URL(brandedLocation as string).searchParams;
+    expect(brandedSearch.get('logo_uri')).toBe('https://branded.example.com/logo.png');
+    expect(brandedSearch.get('client_uri')).toBe('https://branded.example.com/');
+
+    const junkUi = await call(
+      app,
+      'GET',
+      `/oauth/authorize?${queryFor(junkClient.client_id, `${ORIGIN}/junk-callback`)}`
+    );
+    const junkLocation = junkUi.headers.get('location');
+    expect(junkLocation).toBeTruthy();
+    const junkSearch = new URL(junkLocation as string).searchParams;
+    expect(junkSearch.has('logo_uri')).toBe(false);
+    expect(junkSearch.has('client_uri')).toBe(false);
+  });
 });

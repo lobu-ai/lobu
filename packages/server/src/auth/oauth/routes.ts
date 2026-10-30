@@ -38,7 +38,7 @@ import {
   stripNonPublicOAuthScopes,
 } from './scopes';
 import type { AuthorizationParams, OAuthClientMetadata, TokenRequestParams } from './types';
-import { createOAuthError, deviceCodeCorrelationId, validateRedirectUri } from './utils';
+import { createOAuthError, deviceCodeCorrelationId, sanitizeClientAssetUrl, validateRedirectUri } from './utils';
 import {
   canonicalizeGrantedOrganizationIds,
   type GrantedMemberWorkspace,
@@ -692,6 +692,17 @@ oauthRoutes.get('/oauth/authorize', async (c) => {
     consentUrl.searchParams.set('workspace_grants', '1');
   }
   consentUrl.searchParams.set('client_name', client.client_name || client.client_id);
+  // Logo and homepage are display-only: only absolute HTTPS URLs survive, so
+  // the consent page can render the client's own icon (or a domain favicon)
+  // instead of a letter tile. Anything else is dropped, not echoed.
+  const logoUri = sanitizeClientAssetUrl(client.logo_uri);
+  if (logoUri) {
+    consentUrl.searchParams.set('logo_uri', logoUri);
+  }
+  const clientUri = sanitizeClientAssetUrl(client.client_uri);
+  if (clientUri) {
+    consentUrl.searchParams.set('client_uri', clientUri);
+  }
   consentUrl.searchParams.set('authorization_intent', authorizationIntent);
 
   return c.redirect(consentUrl.toString());
@@ -1163,6 +1174,8 @@ oauthRoutes.get('/oauth/device/info', requireAuth, async (c) => {
   return c.json({
     client_name: client?.client_name ?? null,
     client_id: deviceCode.client_id,
+    client_uri: sanitizeClientAssetUrl(client?.client_uri),
+    logo_uri: sanitizeClientAssetUrl(client?.logo_uri),
     scopes: (deviceCode.scope ?? '').split(' ').filter(Boolean),
     resource: deviceCode.resource,
     multi_workspace_grants_enabled: isMultiWorkspaceGrantIssuanceEnabled(c.env),

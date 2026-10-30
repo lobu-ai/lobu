@@ -30,3 +30,9 @@ If Lobu authentication is required, let the host complete OAuth in the user's br
 Local Automation delivery is a separate opt-in setup and is not enabled by installing Lobu here.
 
 Before requesting connector app credentials, discover `connections.setupOptions` with `search_sdk` and call it in the selected workspace. It returns verified managed OAuth, hosted cloud chat, and local setup choices. Follow the returned URL and instructions; an unavailable cloud lookup is not proof that no managed offer exists. On account-scoped MCP, select an authorized home workspace before calling `connections.connectManaged` against cloud; the provider org is its `managed_by_org` argument. Managed OAuth can support local execution. Hosted Slack chat targets a cloud agent and does not connect an independent embedded runtime.
+
+## Interactive views
+
+Before building UI, inspect available native entity/event pages, existing views with `views.list` / `views.get`, and project components and overrides. Honor explicit user designs and reuse what fits. Discover `views.set` or `@lobu/views/components` with `search_sdk`: the kit supplies defaults such as `Card`, `DataTable`, filters, charts and query states; custom React components remain supported.
+
+Read **Custom Views** in the connected runtime's full Lobu skill before authoring: the `skill://lobu` MCP resource or `<runtime-origin>/api/skill/lobu` ([Lobu Cloud](https://app.lobu.ai/api/skill/lobu)). It covers attachments, bounded reads, actions, bundling, and browser verification. Use the selected runtime's guide so the contract matches its deployment.

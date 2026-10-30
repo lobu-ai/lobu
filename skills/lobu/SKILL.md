@@ -236,9 +236,11 @@ Search before create to avoid duplicates. Prefer a read or dry run before mutati
 
 ## Custom Views
 
-When a user would benefit from exploring data, offer or build an interactive view: linked charts, searchable tables, filters, drilldowns, scenario controls, or a Canvas/SVG visualization. Prefer an existing view when it already answers the question. Views are ordinary React, so authors can compose their own components; the default components are a starting point.
+Before authoring UI, inspect available native entity/event pages, existing views (`client.views.list()` and `client.views.get({ key })`), and the project's shared components and overrides. Honor explicit user designs; reuse a suitable existing surface or component. When exploration benefits from linked charts, searchable tables, filters, drilldowns, scenario controls, or Canvas/SVG, build a React view. `@lobu/views/components` supplies theme-aware defaults such as `Card`, `DataTable`, filters, charts, links and query-state components. Compose, wrap or replace them when project components or specialized UX fit better.
 
-Views are custom React panels attached to entity types, records, events, or the workspace Data hub. They render in the web app and MCP hosts (Claude and other MCP Apps hosts); chat channels get links to views, not the views themselves. Author them in `views/<type>/<key>.tsx` and ship with `lobu apply` (list them via `viewFromFile` in `defineConfig`), or set single-file sources over MCP with `manage_views` (owner/admin only).
+Native JSON templates use the target renderer's registered component names and overrides; inspect what that host actually supplies. React views compose imported components in their own bundle, independently of that native renderer map.
+
+Views are custom React panels attached to entity types, records, events, or the workspace Data hub. They render in the web app and MCP hosts (Claude and other MCP Apps hosts); chat channels get links to views, not the views themselves. Author them in `views/<type>/<key>.tsx` and ship with `lobu apply` (list them via `viewFromFile` in `defineConfig`), or set sources over MCP with `client.views.set` (owner/admin only).
 
 Module shape (the server resolves React, React DOM, `@lobu/views` and `@lobu/views/components`; other dependencies need the CLI path with `node_modules` present):
 
@@ -292,7 +294,17 @@ export default function Pipeline() {
 }
 ```
 
-`defineView` is the view's only declaration: `key`, optional `name` (defaults to the key) and `description`, `attach`, `params` and `actions` are read from it, never passed separately, so `manage_views` `set` takes just the source. Write it out as a literal (no variables, spreads or `${}` templates): the server reads it without running the module.
+`defineView` is the view's only declaration: `key`, optional `name` (defaults to the key) and `description`, `attach`, `params` and `actions` are read from it, never passed separately. `views.set` always requires `source_code` containing the entrypoint module, including when retaining multiple files. Write `defineView` out as a literal (no variables, spreads or `${}` templates): the server reads it without running the module.
+
+For a multi-file view, `files` maps relative paths to complete source strings and `entrypoint` names the view module. Include all three inputs below; `source_code` must exactly equal `files[entrypoint]`:
+
+```ts
+await client.views.set({
+  source_code: files[entrypoint],
+  source_files: { entrypoint, files },
+  dependencies: {}, // Local files and the host-provided runtime need no extra packages.
+});
+```
 
 `attach` lists the pages a view appears on, one per entry: `{ record: "deal" }` is a card on every deal's page above its activity (`{ record: "deal", id: 7 }` pins one record), `{ collection: "deal", when? }` a tab on the deal list page, `{ workspace: true }` a Data hub tab, `{ event: "deal.won", type? }` one event's page. One view can list several pages and branch on `useScope()` when it answers the same question at each scale. A record card renders with `useHost().displayMode === "inline"` inside `container.maxHeight` (the host clips past it): render a summary there with a "See all" that calls `requestDisplayMode("fullscreen")`, and the full view when `displayMode` is `"fullscreen"` (the peek, a full page, a tab).
 
@@ -306,7 +318,7 @@ Rules that are load-bearing, not style:
 - Never aggregate history in a view: no `GROUP BY`, `DISTINCT ON`, per-row regexp, or leading-wildcard `LIKE` over `events` or other growing tables. For "latest state" views, have an Automation maintain keyed event outputs (each run supersedes the previous event with the same key) and read the current head with `read_knowledge`.
 - Writes go only through declared view actions (`useAction` → `invoke_view_action`), which emit the declared event kind and can activate workspace-triggered Automations. Action `value` payloads are capped at 4000 JSON chars — save content first, then pass the id. A subject shown from a superseded event rejects with 409; refetch and ask the user to re-confirm rather than retrying blindly.
 - Link with `Link` from `@lobu/views/components` (or `useHost().openLink`): `href="<type>/<slug>"` opens that record in the workspace, a full URL opens a new tab. A plain `<a href>` goes nowhere inside the sandboxed frame.
-- Views run in a sandboxed frame with no direct network: no fetch, no third-party calls at runtime. Bundle shared code via the CLI path; the MCP `manage_views` path compiles `react` + `@lobu/views` (+components) only.
+- Views run in a sandboxed frame with no direct network: no fetch, no third-party calls at runtime. Reuse local React components through relative imports and `source_files: { entrypoint, files }` plus `dependencies: {}` for local-only components with `views.set`, or use `viewFromFile` + `lobu apply`. Extra npm dependencies need the CLI-bundled `compiled_code`; listing `dependencies` alone does not install packages.
 - Never early-return the whole view on loading/error: each filter keystroke re-queries, so an early return unmounts the focused input mid-typing. Keep filters mounted and render query states inline in the results area.
 - Params sync to the URL on Lobu hosts only; elsewhere they stay frame-local. `refetch()` re-reads on demand; only Lobu hosts push live data-changed refreshes.
 

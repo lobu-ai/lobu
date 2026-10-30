@@ -37,12 +37,66 @@ describe("sdkSearch", () => {
 		expect(result.match_count).toBe(1);
 		expect(result.results[0]).toContain("automation_due");
 	});
+	it.each(["@lobu/views", "@lobu/views/components", "  @LOBU/VIEWS/COMPONENTS  "])(
+		"discovers the view authoring contract from %s",
+		async (query) => {
+			const result = await sdkSearch({ query }, stubEnv, adminCtx);
+			expect(result.query).toBe(query.trim());
+			expect(result.match_count).toBe(1);
+			expect(result.results[0]).toStartWith("views.set\n");
+			expect(result.results[0]).toContain("@lobu/views/components");
+			expect(result.results[0]).toContain("example:");
+		},
+	);
+
+	it("discovers the component kit by a component name", async () => {
+		const result = await sdkSearch({ query: "DataTable" }, stubEnv, adminCtx);
+		const view = result.results.find((entry) => entry.startsWith("views.set"));
+		expect(view).toContain("@lobu/views/components");
+	});
+
+	it("includes the component kit in direct view authoring discovery", async () => {
+		const result = await sdkSearch({ query: "views.set" }, stubEnv, adminCtx);
+		expect(result.results[0]).toContain("@lobu/views/components");
+		expect(result.results[0]).toContain("DataTable");
+	});
+
+	it("keeps package discovery subject to read mode and caller permissions", async () => {
+		const read = await sdkSearch(
+			{ query: "@lobu/views/components", mode: "read" },
+			stubEnv,
+			adminCtx,
+		);
+		expect(read.results).toEqual([]);
+		expect(read.notes).toContain("views.set");
+		expect(read.notes).toContain("requires run_sdk");
+
+		const member = await sdkSearch(
+			{ query: "@lobu/views/components" },
+			stubEnv,
+			writeCtx,
+		);
+		expect(member.results).toEqual([]);
+		expect(member.notes).toContain("views.set");
+		expect(member.notes).toMatch(/owner/i);
+
+		const owner = await sdkSearch(
+			{ query: "@lobu/views/components", limit: 1 },
+			stubEnv,
+			ownerWriteCtx,
+		);
+		expect(owner.results).toHaveLength(1);
+		expect(owner.results[0]).toStartWith("views.set\n");
+	});
+
 	it.each([
 		"agents",
 		"entitySchema",
 		"AUTHprofiles",
 		"client.feeds",
 		"feeds.create",
+		"@lobu/views",
+		"@lobu/views/components",
 	])("treats exact SDK query %s as method-only discovery", (query) => {
 		expect(isSdkOnlyDiscoveryQuery(query)).toBe(true);
 	});
@@ -51,6 +105,8 @@ describe("sdkSearch", () => {
 		"google.calendar",
 		"website",
 		"connections sync run",
+		"@acme/widgets",
+		"@lobu/views/unknown",
 	])("still allows connector discovery for %s", (query) => {
 		expect(isSdkOnlyDiscoveryQuery(query)).toBe(false);
 	});
