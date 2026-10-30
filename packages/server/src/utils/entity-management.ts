@@ -948,8 +948,11 @@ export async function createEntity(
 	assertSlugIsNotViewMarker(data.slug);
 	const sql = opts?.sql ?? getDb();
 
+	// Classify only the insert work. afterCreate can run after a pool-owned
+	// transaction has committed, so its errors are not pre-write refusals.
+	let created: InsertedEntityRow & { entity_type: string };
 	try {
-		const created = await withEntityWriteTransaction(sql, async (tx) => {
+		created = await withEntityWriteTransaction(sql, async (tx) => {
 			let createData = data;
 			if (!opts?.skipHooks && opts?.hookContext) {
 				const hooks = getEntityHooks(createData.entity_type);
@@ -1028,16 +1031,6 @@ export async function createEntity(
 					});
 			return { ...inserted, entity_type: createData.entity_type };
 		});
-
-		// Run afterCreate hook
-		if (!opts?.skipHooks && opts?.hookContext) {
-			const hooks = getEntityHooks(created.entity_type);
-			if (hooks?.afterCreate) {
-				await hooks.afterCreate(created, opts.hookContext);
-			}
-		}
-
-		return created;
 	} catch (error: unknown) {
 		// Database constraint violations, by SQLSTATE.
 		const pgCode = (error as { code?: unknown } | null)?.code;
@@ -1055,6 +1048,15 @@ export async function createEntity(
 		}
 		throw error;
 	}
+
+	if (!opts?.skipHooks && opts?.hookContext) {
+		const hooks = getEntityHooks(created.entity_type);
+		if (hooks?.afterCreate) {
+			await hooks.afterCreate(created, opts.hookContext);
+		}
+	}
+
+	return created;
 }
 
 /**

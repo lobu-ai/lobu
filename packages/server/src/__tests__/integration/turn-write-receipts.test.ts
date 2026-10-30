@@ -22,6 +22,7 @@ import { ImageGenerationService } from '../../gateway/services/image-generation-
 import { TranscriptionService } from '../../gateway/services/transcription-service';
 import { __setChatInstanceManagerForTests } from '../../lobu/gateway';
 import { pruneTurnWriteReceipts } from '../../tools/turn-write-idempotency';
+import * as entityHooks from '../../utils/entity-hooks';
 import { initWorkspaceProvider } from '../../workspace';
 import { __setLocalFrontendForTests } from '../../utils/public-origin';
 import { createTestAutomationSubscription } from '../setup/automation-subscriptions';
@@ -300,15 +301,33 @@ describe('turn write receipts on entity create', () => {
   });
 
   it('a thrown create error retains its claim because commit status is unknown', async () => {
-    await create('receipts-entity-4', 'Taken Co');
-    expect(await create('receipts-entity-5', 'Taken Co', true)).toContain('already exists');
-    expect(await create('receipts-entity-5', 'Taken Co', true)).toContain('already attempted');
+    // A constraint failure in a post-commit hook must not be classified as a
+    // refused insert: the entity already exists and its receipt must stay held.
+    const hooks = vi.spyOn(entityHooks, 'getEntityHooks').mockReturnValue({
+      afterCreate: async () => {
+        await getTestDb()`
+          INSERT INTO entity_types (organization_id, slug, name)
+          VALUES (${org.id}, 'company', 'Company')
+        `;
+      },
+    });
+    try {
+      expect(await create('receipts-entity-4', 'Committed Co', true)).toContain('duplicate key');
+      expect(await create('receipts-entity-4', 'Committed Co', true)).toContain('already attempted');
+    } finally {
+      hooks.mockRestore();
+    }
+    expect(await companies('Committed Co')).toHaveLength(1);
   });
 
-  it('a typed refusal releases its claim, so the retry is refused the same way', async () => {
-    const first = await create('receipts-entity-6', 'Typeless Co', true, 'no_such_type');
-    expect(first).toContain("Unknown entity type 'no_such_type'");
-    expect(await create('receipts-entity-6', 'Typeless Co', true, 'no_such_type')).toEqual(first);
+  it.each([
+    ['an unknown type', 'receipts-entity-6', 'Typeless Co', 'no_such_type', "Unknown entity type 'no_such_type'"],
+    ['a duplicate name', 'receipts-entity-5', 'Duplicate Co', 'company', 'already exists'],
+  ])('a typed refusal (%s) releases its claim, so the retry is refused the same way', async (_label, messageId, name, type, refusal) => {
+    if (type === 'company') await create(`${messageId}-seed`, name);
+    const first = await create(messageId, name, true, type);
+    expect(first).toContain(refusal);
+    expect(await create(messageId, name, true, type)).toEqual(first);
   });
 });
 
