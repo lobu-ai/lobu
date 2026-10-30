@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { runAutomationNavigationProof } from "./automation-navigation-ui-proof.mjs";
 
 // Called only by the existing opt-in preview proof, through its loopback
 // port-forward and local synthetic session. No tenant fixture or credentials.
@@ -52,11 +53,18 @@ export async function runNativeReferenceProof({
     "Synthetic agent must apply, not await approval"
   );
   const automationName = "Synthetic manual Automation";
+  const automationInstructions = [
+    "Preview exercise: review a synthetic weekly delivery summary.",
+    "1. Read the sample changes and explain what changed in plain language.",
+    "2. Group completed work, open questions, and next steps into short sections.",
+    "3. Keep every example fictional. Do not contact anyone, connect an account, or run an action.",
+    "This definition is for editing and navigation review only: no triggers, executor, or run is configured.",
+  ].join("\n\n");
   const automation = await call("manage_automations", {
     action: "create",
     slug: "native-preview-manual",
     name: automationName,
-    prompt: "Synthetic identity fixture. Do not run.",
+    prompt: automationInstructions,
     triggers: [],
   });
   assert(
@@ -70,9 +78,68 @@ export async function runNativeReferenceProof({
     include_catalog: true,
   });
   const connector = catalog.installed?.connectors?.items?.find(
-    (item) => typeof item.id === "string" && typeof item.name === "string"
+    (item) => item.id === "rss" && typeof item.name === "string"
   );
-  assert(connector, "Preview has no connector catalog identity to render");
+  assert(connector, "Preview has no built-in credential-free RSS connector");
+  // RSS has auth type none and no implicit feeds. This creates only a private,
+  // credential-free identity, then pauses it. No feed URL, auth or test action.
+  const createdConnection = await call("manage_connections", {
+    action: "create",
+    connector_key: connector.id,
+    display_name: "Synthetic dormant RSS connection",
+    slug: "synthetic-dormant-rss",
+    auth_profile_slug: null,
+    app_auth_profile_slug: null,
+    config: {},
+    device_worker_id: null,
+  });
+  const connectionId = Number(createdConnection.connection?.id);
+  assert(
+    Number.isSafeInteger(connectionId) && connectionId > 0,
+    "Dormant synthetic connection was not created"
+  );
+  const paused = await call("manage_connections", {
+    action: "update",
+    connection_id: connectionId,
+    status: "paused",
+  });
+  assert(
+    !paused.error &&
+      !paused.approval_queued &&
+      paused.status !== "pending_approval",
+    "Synthetic connection pause did not apply"
+  );
+  const connectionReadback = await call("manage_connections", {
+    action: "get",
+    connection_id: connectionId,
+  });
+  const savedConnection = connectionReadback.connection;
+  assert(
+    savedConnection?.status === "paused" &&
+      !savedConnection.auth_profile_id &&
+      !savedConnection.app_auth_profile_id &&
+      !savedConnection.device_worker_id,
+    "Synthetic connection has credentials, a worker, or is not paused"
+  );
+  const feeds = await call("manage_feeds", {
+    action: "list_feeds",
+    connection_id: connectionId,
+  });
+  const connectionRuns = await call("manage_operations", {
+    action: "list_runs",
+    connection_ids: [connectionId],
+    limit: 30,
+  });
+  assert(
+    Array.isArray(feeds.feeds) &&
+      feeds.feeds.length === 0 &&
+      Number(feeds.total) === 0,
+    "Synthetic connection unexpectedly has a feed"
+  );
+  assert(
+    Array.isArray(connectionRuns.runs) && connectionRuns.runs.length === 0,
+    "Synthetic connection unexpectedly has a run"
+  );
 
   const text = (content) => ({ type: "text", content });
   const node = (type, props, children) => ({
@@ -234,16 +301,22 @@ export async function runNativeReferenceProof({
   await select("Current definitions");
   await select("Current definitions");
   await identities();
-  await page
-    .getByRole("tabpanel")
-    .getByRole("link")
-    .filter({ hasText: automationName })
-    .click();
-  await page.waitForURL(
-    (url) =>
-      url.pathname === `/${workspace}/automations/${automation.automation_id}`
-  );
-  await page.goBack();
+  const navigation = await runAutomationNavigationProof({
+    page,
+    baseUrl,
+    outputDir,
+    workspace,
+    automationId: String(automation.automation_id),
+    automationName,
+    automationInstructions,
+    connectorKey: connector.id,
+    connectorName: connector.name,
+    connectionId,
+    storedEvent: stored,
+    call,
+    assert,
+  });
+  await page.goto(new URL(path, baseUrl).toString());
   await tabs.waitFor();
   await identities();
   await page.reload();
@@ -268,6 +341,35 @@ export async function runNativeReferenceProof({
       path: join(outputDir, "native-report-narrow.png"),
       fullPage: true,
     });
+    await freshPage.goto(
+      new URL(`/${workspace}/automations`, baseUrl).toString()
+    );
+    const activity = freshPage.getByRole("link", {
+      name: "View activity",
+      exact: true,
+    });
+    await activity.waitFor();
+    await freshPage.screenshot({
+      path: join(outputDir, "automation-list-narrow.png"),
+      fullPage: true,
+    });
+    await activity.click();
+    await freshPage
+      .getByRole("dialog")
+      .getByText("No runs match these filters.", { exact: true })
+      .waitFor();
+    await freshPage.screenshot({
+      path: join(outputDir, "automation-activity-narrow.png"),
+      fullPage: true,
+    });
+    await freshPage
+      .getByRole("button", { name: "Close preview", exact: true })
+      .click();
+    await freshPage.getByRole("dialog").waitFor({ state: "hidden" });
+    assert(
+      (await freshPage.getByRole("dialog").count()) === 0,
+      "Narrow activity sheet remained after Close"
+    );
   } finally {
     await freshPage.close();
   }
@@ -278,9 +380,20 @@ export async function runNativeReferenceProof({
     workspace,
     automation_id: String(automation.automation_id),
     automation_manual_only: true,
+    editor_path: `/${workspace}/automations/${automation.automation_id}?view=definition`,
+    automation_list_path: `/${workspace}/automations`,
+    activity_path: `/${workspace}?tab=runs&automation_ids=${automation.automation_id}`,
+    connector_path: `/${workspace}/connectors/${encodeURIComponent(connector.id)}`,
+    readable_instructions_saved: true,
     agent_id: agent.agent_id,
     connector_key: connector.id,
     connector_account_connected: false,
+    connection_id: connectionId,
+    connection_paused: true,
+    connection_path: `/${workspace}/connectors/${encodeURIComponent(connector.id)}/${connectionId}`,
+    connection_feeds: 0,
+    connection_runs: 0,
+    navigation,
     checked: [
       "saved event",
       "native identities",
@@ -298,6 +411,9 @@ export async function runNativeReferenceProof({
       "native-report-current.png",
       "native-report-diff.png",
       "native-report-narrow.png",
+      "automation-list-narrow.png",
+      "automation-activity-narrow.png",
+      ...navigation.screenshots,
     ],
   };
 }
