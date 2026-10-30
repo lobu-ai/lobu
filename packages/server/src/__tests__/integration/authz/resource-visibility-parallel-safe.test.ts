@@ -18,7 +18,10 @@ import { pgBigintArray } from '../../../db/client';
 import type { DbClient } from '../../../db/client';
 import { ensureRelationshipType, upsertEdges } from '../../../utils/edge-writes';
 import { buildConnectionVisibilityClause } from '../../../utils/content-search/visibility';
-import { MANUAL_RELATIONSHIP_CLAIM_KEY } from '../../../utils/relationship-claims';
+import {
+  MANUAL_RELATIONSHIP_CLAIM_KEY,
+  RELATIONSHIP_CLAIMS_METADATA_KEY,
+} from '../../../utils/relationship-claims';
 import { withAclEdgeWrite } from '../../../utils/relationship-validation';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import {
@@ -45,6 +48,8 @@ function flatten(node: PlanNode, out: PlanNode[] = []): PlanNode[] {
 let orgId = '';
 let readerId = '';
 let outsiderId = '';
+let withheldEventId = 0;
+let memberOfTypeId = 0;
 /** Event id → whether an org member WITH the reader's grants may see it. */
 const expectedForReader = new Map<number, boolean>();
 /** Event id → whether an org member with NO grants may see it. */
@@ -107,7 +112,7 @@ describe('resource visibility gate', () => {
     const granted = await createTestEntity({ name: 'granted-repo', entity_type: '$resource', organization_id: org.id });
     const withheld = await createTestEntity({ name: 'withheld-repo', entity_type: '$resource', organization_id: org.id });
     const plain = await createTestEntity({ name: 'plain-company', organization_id: org.id });
-    const memberOfTypeId = await ensureRelationshipType({
+    memberOfTypeId = await ensureRelationshipType({
       organizationId: org.id,
       slug: 'member_of',
       name: 'Member of',
@@ -142,6 +147,9 @@ describe('resource visibility gate', () => {
     ];
     for (const [entityIds, interactionType, reader_, outsider_] of cases) {
       const id = await insertEvent({ entityIds, interactionType });
+      if (interactionType === 'none' && entityIds?.length === 1 && entityIds[0] === withheld.id) {
+        withheldEventId = id;
+      }
       expectedForReader.set(id, reader_);
       expectedForOutsider.set(id, outsider_);
     }
@@ -170,6 +178,66 @@ describe('resource visibility gate', () => {
       const want = new Set([...expected].filter(([, ok]) => ok).map(([id]) => id));
       expect(visible).toEqual(want);
     }
+  });
+
+  it('fails closed for a reader whose only grant is a federated member_of edge', async () => {
+    const sql = getTestDb();
+    const fedReader = await createTestUser();
+    await addUserToOrganization(fedReader.id, orgId, 'member');
+    const fedMember = await createTestEntity({
+      name: 'federated-member',
+      entity_type: '$member',
+      organization_id: orgId,
+      created_by: fedReader.id,
+    });
+    await sql`
+      INSERT INTO entity_identities (organization_id, entity_id, namespace, identifier, source_connector)
+      VALUES (${orgId}, ${fedMember.id}, 'auth_user_id', ${fedReader.id}, 'auth:signup')
+    `;
+    const [sourceType] = await sql<{ id: string }[]>`
+      SELECT id FROM entity_types WHERE organization_id = ${orgId} AND slug = '$resource'
+    `;
+    // A live, manually claimed member_of edge whose target is a source
+    // endpoint, so `to_entity_id` is NULL. Unlike `NOT (x IN (...))`, the
+    // gate must not read a NULL in the caller's satisfied set as a grant.
+    const insertFederatedEdge = (tx: DbClient) =>
+      tx.unsafe(
+        `INSERT INTO entity_relationships (organization_id, from_entity_id, to_entity_id,
+           to_entity_type_id, to_source_key, relationship_type_id, metadata, source, confidence, created_by)
+         VALUES ($1, $2, NULL, $3, 'federated-repo', $4,
+           jsonb_build_object($5::text, jsonb_build_object($6::text, true)), 'manual', 1, $7)`,
+        [
+          orgId,
+          fedMember.id,
+          Number(sourceType.id),
+          memberOfTypeId,
+          RELATIONSHIP_CLAIMS_METADATA_KEY,
+          MANUAL_RELATIONSHIP_CLAIM_KEY,
+          fedReader.id,
+        ] as never[],
+      );
+
+    // The schema refuses the edge: authorization associations need stored endpoints.
+    await expect(
+      withAclEdgeWrite(sql as unknown as DbClient, insertFederatedEdge),
+    ).rejects.toThrow('Authorization and identity associations require stored endpoints');
+
+    // Defense in depth: if one ever lands, the read gate still fails closed.
+    await withAclEdgeWrite(sql as unknown as DbClient, async (tx) => {
+      await tx.unsafe('ALTER TABLE entity_relationships DISABLE TRIGGER lobu_guard_source_relationships');
+      await insertFederatedEdge(tx);
+      await tx.unsafe('ALTER TABLE entity_relationships ENABLE TRIGGER lobu_guard_source_relationships');
+    });
+
+    const { query, params } = gatedQuery(fedReader.id, 'f.id');
+    const rows = await sql.unsafe<{ id: string }[]>(query, params as never[]);
+    const visible = new Set(rows.map((r) => Number(r.id)));
+    const ungrantedReaderView = new Set(
+      [...expectedForOutsider].filter(([, ok]) => ok).map(([id]) => id),
+    );
+    expect(withheldEventId).toBeGreaterThan(0);
+    expect(visible.has(withheldEventId)).toBe(false);
+    expect(visible).toEqual(ungrantedReaderView);
   });
 
   it('keeps an events scan with the composed gate parallel-capable', async () => {
