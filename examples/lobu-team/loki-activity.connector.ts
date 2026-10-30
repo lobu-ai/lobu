@@ -1,16 +1,14 @@
-import { scrubDiagnosticValue } from "../../packages/core/src/utils/diagnostic-scrubber";
-import {
-  isSecretOutputKey,
-  redactOutput,
-} from "../../packages/connector-worker/src/executor/redact";
 import {
   type ActionContext,
   type ActionResult,
-  type RuntimeConnectorDefinition,
   ConnectorRuntime,
   type EventEnvelope,
+  isSecretOutputKey,
+  type RuntimeConnectorDefinition,
+  redactOutput,
   type SyncContext,
   type SyncResult,
+  scrubDiagnosticValue,
 } from "@lobu/connector-sdk";
 
 const WINDOW_MS = 20 * 60 * 1000;

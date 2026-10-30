@@ -55,7 +55,7 @@ import type {
   ExecutorResult,
   SyncExecutor,
 } from './interface.js';
-import { redactOutput } from './redact.js';
+import { redactOutput } from '@lobu/connector-sdk/redact';
 import { RingBuffer, ConnectorExecutionError } from './interface.js';
 
 export type IsolateLogLevel = 'log' | 'info' | 'debug' | 'warn' | 'error';

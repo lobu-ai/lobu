@@ -43,7 +43,7 @@ import type {
   PollResponse,
   WorkerExitReason,
 } from '@lobu/core/contracts/worker/protocol';
-import { redactOutput } from '../executor/redact.js';
+import { redactOutput } from '@lobu/connector-sdk/redact';
 import { locateBinary, searchDirs } from './agent-binaries.js';
 import {
   releaseSupervisor,

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { StreamRedactor, redactOutput } from '../executor/redact.js';
+import { StreamRedactor, redactOutput } from '../redact.js';
 
 describe('redactOutput', () => {
   test('redacts HTTP Authorization header', () => {
