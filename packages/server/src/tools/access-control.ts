@@ -172,6 +172,23 @@ export class AccessDeniedError extends Error {
 }
 
 /**
+ * A `client.org()` or workspace-argument target outside the caller's reach: not
+ * granted, not a member, or a session bound to its own workspace. A permission
+ * denial wherever it surfaces; `reason` lets the caller offer re-consent.
+ */
+export class CrossOrgAccessDenied extends Error {
+  readonly code = 'CrossOrgAccessDenied';
+  readonly reason: 'ungranted_member' | 'unavailable';
+  readonly workspaceSlug: string | null;
+  constructor(message: string, opts?: { reason?: CrossOrgAccessDenied['reason']; workspaceSlug?: string | null }) {
+    super(message);
+    this.name = 'CrossOrgAccessDenied';
+    this.reason = opts?.reason ?? 'unavailable';
+    this.workspaceSlug = opts?.workspaceSlug ?? null;
+  }
+}
+
+/**
  * A token has already passed the workspace-role check but lacks an MCP scope
  * needed for the requested operation. Keeping this distinct from a role denial
  * lets nested SDK calls request progressive OAuth authorization without ever

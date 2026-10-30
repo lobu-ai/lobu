@@ -8,7 +8,7 @@ import type { Env } from "../index";
 import { getDb } from "../db/client";
 import { validateAndScopeQuery } from "../utils/execute-data-sources";
 import { resolveWindowQueryContext } from "../automations/window-read-context";
-import { isAdminOrOwnerRole, isInProcessSystemCall, isSystemContext, requireWorkspaceContext } from "../tools/access-control";
+import { CrossOrgAccessDenied, isAdminOrOwnerRole, isInProcessSystemCall, isSystemContext, requireWorkspaceContext } from "../tools/access-control";
 import {
 	ADMIN_ONLY_QUERYABLE_TABLES,
 	SAFE_COLUMN_DEFS,
@@ -16,8 +16,8 @@ import {
 import type { AccountToolContext, ToolContext } from "../tools/registry";
 import type { ChatSenderReach } from "../auth/oauth/types";
 import { resolveGrantedWorkspaceTarget, findUngrantedMemberWorkspace, formatUngrantedMemberMessage } from "../auth/oauth/workspace-grants";
-import { boundedQuery } from "../utils/bounded-read";
-import { ToolUserError } from "../utils/errors";
+import { boundedQuery, classifyReadQueryFailure } from "../utils/bounded-read";
+import { ToolUserError, toolErrorHttpStatus } from "../utils/errors";
 import { getOrganizationSlug } from "../utils/url-builder";
 import { QUERY_SQL_STATEMENT_TIMEOUT_MS } from "../utils/content-read-bounds";
 import { METHOD_METADATA } from "./method-metadata";
@@ -101,25 +101,6 @@ export interface ClientSDK {
 	org(slugOrId: string): Promise<ClientSDK>;
 	query(sql: string, options?: { window_token?: string }): Promise<unknown[]>;
 	log(message: string, data?: Record<string, unknown>): void;
-}
-
-class SdkError extends Error {
-	readonly code: string;
-	constructor(code: string, message: string) {
-		super(message);
-		this.name = code;
-		this.code = code;
-	}
-}
-
-export class CrossOrgAccessDenied extends SdkError {
-	readonly reason: "ungranted_member" | "unavailable";
-	readonly workspaceSlug: string | null;
-	constructor(message: string, opts?: { reason?: CrossOrgAccessDenied["reason"]; workspaceSlug?: string | null }) {
-		super("CrossOrgAccessDenied", message);
-		this.reason = opts?.reason ?? "unavailable";
-		this.workspaceSlug = opts?.workspaceSlug ?? null;
-	}
 }
 
 /**
@@ -349,7 +330,7 @@ export function buildClientSDK(
 			if (options !== undefined && (options === null || typeof options !== "object" || Array.isArray(options) ||
 				Object.keys(options).some((key) => key !== "window_token") ||
 				(options.window_token !== undefined && (typeof options.window_token !== "string" || !options.window_token)))) {
-				throw new Error("client.query options must contain a non-empty window_token string.");
+				throw new ToolUserError("client.query options must contain a non-empty window_token string.", 400, "VALIDATION");
 			}
 			const window = options?.window_token
 				? await resolveWindowQueryContext(options.window_token, env, workspaceCtx, getDb())
@@ -372,11 +353,20 @@ export function buildClientSDK(
 			// Outer LIMIT caps rows at the source so a broad SELECT can't
 			// materialize an unbounded result set host-side.
 			const boundedSql = `SELECT * FROM (${scoped.sql.replace(/;\s*$/, "")}) AS __q LIMIT ${CLIENT_QUERY_MAX_ROWS}`;
-			const rows = await boundedQuery(getDb(), boundedSql, scoped.params as unknown[], {
-				signal: workspaceCtx.abortSignal,
-				statementTimeoutMs: QUERY_SQL_STATEMENT_TIMEOUT_MS,
-			});
-			return rows.map((r: Record<string, unknown>) => ({ ...r }));
+			let rows: Record<string, unknown>[];
+			try {
+				rows = await boundedQuery(getDb(), boundedSql, scoped.params as unknown[], {
+					signal: workspaceCtx.abortSignal,
+					statementTimeoutMs: QUERY_SQL_STATEMENT_TIMEOUT_MS,
+				});
+			} catch (error) {
+				// A caller that left keeps the abort reason `boundedQuery` threw.
+				if (workspaceCtx.abortSignal?.aborted) throw error;
+				// Same SQLSTATE mapping and message as `query_sql`.
+				const failure = classifyReadQueryFailure(error);
+				throw new ToolUserError(failure.message, toolErrorHttpStatus(failure.code), failure.code);
+			}
+			return rows.map((r) => ({ ...r }));
 		},
 
 		log(message, data) {

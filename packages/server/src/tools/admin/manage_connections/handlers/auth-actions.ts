@@ -22,7 +22,8 @@ import { ACTIVE_RUN_STATUSES, runStatusLiteral } from '../../../../utils/run-sta
 import type { ToolContext } from '../../../registry';
 import type { ManageConnectionsResult, ConnectionsArgs } from '../schemas';
 import { callerIsAdmin as resolveCallerIsAdmin } from '../../helpers/db-helpers';
-import { getOAuthMethods, issueOAuthReconnectLink, recoverPendingOAuthConnection, withFailureCode } from '../../helpers/connection-helpers';
+import { getOAuthMethods, issueOAuthReconnectLink, recoverPendingOAuthConnection } from '../../helpers/connection-helpers';
+import { withFailureCode } from '../../../../utils/errors';
 import { getScopedConnectorDefinition } from '../../../../catalog/connector-definitions';
 
 // ============================================
@@ -37,7 +38,7 @@ export async function handleReauthenticate(
   const { organizationId } = ctx;
 
   if (!ctx.userId) {
-    return { error: 'Authentication required to re-authenticate a connection' };
+    return withFailureCode({ error: 'Authentication required to re-authenticate a connection' }, 'PERMISSION');
   }
 
   const rows = await sql`
@@ -76,7 +77,7 @@ export async function handleReauthenticate(
   // member's personal credential flow.
   const callerIsAdmin = await resolveCallerIsAdmin(sql, { organizationId, userId: ctx.userId });
   if (!callerIsAdmin && row.connection_created_by !== ctx.userId) {
-    return { error: 'You can only re-authenticate connections you created.' };
+    return withFailureCode({ error: 'You can only re-authenticate connections you created.' }, 'PERMISSION');
   }
 
   if (!row.auth_profile_id) {
@@ -84,9 +85,9 @@ export async function handleReauthenticate(
     // reconnect. Reuse connect's pending-recovery path to retain its connection
     // and renew expired tokens.
     const connector = await getScopedConnectorDefinition({ organizationId, connectorKey: row.connector_key });
-    if (!connector) return { error: `Connector '${row.connector_key}' not found or not active` };
+    if (!connector) return withFailureCode({ error: `Connector '${row.connector_key}' not found or not active` }, 'NOT_FOUND');
     if (getOAuthMethods(connector.auth_schema).length === 0) {
-      return { error: `Connector '${row.connector_key}' does not support OAuth reauthentication` };
+      return withFailureCode({ error: `Connector '${row.connector_key}' does not support OAuth reauthentication` }, 'VALIDATION');
     }
     return recoverPendingOAuthConnection({
       connectionId: row.id,
@@ -99,7 +100,7 @@ export async function handleReauthenticate(
 
   if (row.profile_kind === 'oauth_account') {
     const authProfile = await getAuthProfileById(organizationId, row.auth_profile_id);
-    if (!authProfile) return { error: 'Connection auth profile not found' };
+    if (!authProfile) return withFailureCode({ error: 'Connection auth profile not found' }, 'NOT_FOUND');
     const reconnect = await issueOAuthReconnectLink({ authProfile, ctx, connectionId: row.id, requestedScopes: args.requested_scopes });
     if ('error' in reconnect) return reconnect;
     return {
@@ -112,9 +113,9 @@ export async function handleReauthenticate(
   }
 
   if (row.profile_kind !== 'interactive') {
-    return {
+    return withFailureCode({
       error: `Connection auth profile kind '${row.profile_kind ?? 'unknown'}' cannot be reauthenticated`,
-    };
+    }, 'VALIDATION');
   }
 
   const activeRuns = await sql`
@@ -130,9 +131,9 @@ export async function handleReauthenticate(
   if (activeRuns.length > 0) {
     const existing = activeRuns[0] as { id: unknown; created_by_user_id: string | null };
     if (existing.created_by_user_id && existing.created_by_user_id !== ctx.userId) {
-      return {
+      return withFailureCode({
         error: 'An authentication flow is already in progress for this profile by another user.',
-      };
+      }, 'VALIDATION');
     }
     return {
       action: 'reauthenticate',

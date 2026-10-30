@@ -30,7 +30,7 @@ import { ClientSdkActionError } from "./namespaces/action-call";
 import { METHOD_METADATA, type MethodAccess } from "./method-metadata";
 import type { ToolAccessLevel } from "../auth/tool-access";
 import { enumerateSDKManifest, type SDKMode } from "./sdk-manifest";
-import { AccessDeniedError, McpScopeRequiredError } from "../tools/access-control";
+import { AccessDeniedError, CrossOrgAccessDenied, McpScopeRequiredError } from "../tools/access-control";
 import { getSdkPreflight } from "./sdk-preflight";
 import { ToolUserError } from "../utils/errors";
 import { raceAbort } from "../utils/race-abort";
@@ -678,7 +678,7 @@ async function loadIsolatedVm(): Promise<IsolatedVmRuntime | null> {
 	}
 }
 
-function guestPreamble(errorTokenReader: string): string {
+function guestPreamble(errorTokenReader: string, crossOrgDenialToken: string): string {
 	return `
 const { client, ctx, takeErrorToken: ${errorTokenReader} } = (() => {
 const __hostSdkDispatch = __sdk_dispatch;
@@ -692,6 +692,7 @@ const __trustedErrors = new WeakMap();
 const __rememberTrustedError = WeakMap.prototype.set.bind(__trustedErrors);
 const __readTrustedError = WeakMap.prototype.get.bind(__trustedErrors);
 const __forgetTrustedError = WeakMap.prototype.delete.bind(__trustedErrors);
+const __crossOrgDenialToken = ${JSON.stringify(crossOrgDenialToken)};
 const __manifest = __parseJson(__sdk_manifest_json);
 const __namespaceMethods = __manifest.byNamespace;
 const __topLevelKeys = new Set(__manifest.topLevel);
@@ -781,7 +782,12 @@ function __makeClient(orgPath) {
       // literal; keep it free of backticks and dollar-brace sequences.)
       if (k === 'org') return __topLevelKeys.has('org')
         ? (slug) => __makeClient([...orgPath, String(slug)])
-        : () => { throw new Error('CrossOrgAccessDenied: cross-org access is not available on this connection. If the same identity already has access to the target workspace, invoke there directly via /mcp/{slug} (CLI: --context <context> --org <slug>) and use client directly. For cross-org calls, use the unscoped /mcp endpoint with an OAuth session authorized for the target workspace.'); };
+        : () => {
+          const error = new Error('CrossOrgAccessDenied: cross-org access is not available on this connection. If the same identity already has access to the target workspace, invoke there directly via /mcp/{slug} (CLI: --context <context> --org <slug>) and use client directly. For cross-org calls, use the unscoped /mcp endpoint with an OAuth session authorized for the target workspace.');
+          error.name = 'CrossOrgAccessDenied';
+          __rememberTrustedError(error, __crossOrgDenialToken);
+          throw error;
+        };
       if (__topLevelKeys.has(k)) return __dispatchCall(k, orgPath);
       if (__namespaceKeys.has(k)) return __makeNamespaceProxy(k, orgPath);
       if (__hiddenNamespaceKeys.has(k)) return __makeHiddenNamespaceProxy(k);
@@ -1150,9 +1156,10 @@ export async function runScript(
 			});
 			return guardMessage(json) ? json : terminalEnvelope();
 		}
-		// A role or scope gate refused the call: a permission denial, never
-		// retryable, whatever its rendered guidance says.
-		if (error instanceof AccessDeniedError) {
+		// A role or scope gate, or a `client.org()` target outside the caller's
+		// reach, refused the call: a permission denial, never retryable, whatever
+		// its rendered guidance says.
+		if (error instanceof AccessDeniedError || error instanceof CrossOrgAccessDenied) {
 			const json = JSON.stringify({
 				__lobu_sdk_dispatch: 1,
 				ok: false,
@@ -1365,7 +1372,7 @@ export async function runScript(
 					// Cross-org access is gated here too, not just by the manifest omitting
 					// `org` from `topLevel`.
 					if (!allowCrossOrg && orgPath.length > 0) {
-						throw new Error(
+						throw new CrossOrgAccessDenied(
 							"CrossOrgAccessDenied: cross-org access is not available here.",
 						);
 					}
@@ -1560,7 +1567,7 @@ export async function runScript(
 
 		const errorTokenReader = `__lobu_take_error_token_${randomUUID().replaceAll("-", "")}`;
 		const script = await isolate.compileScript(
-			`${guestPreamble(errorTokenReader)}\n${compiled}\n${options.extractExport ? EXTRACT_RUNNER : guestRunner(errorTokenReader)}`,
+			`${guestPreamble(errorTokenReader, trustErrorClassification("PERMISSION"))}\n${compiled}\n${options.extractExport ? EXTRACT_RUNNER : guestRunner(errorTokenReader)}`,
 		);
 		assertActive();
 		const returnJson = await raceAbort(

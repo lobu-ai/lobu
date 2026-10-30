@@ -79,10 +79,10 @@ function coerceJson(
     try {
       parsed = JSON.parse(value);
     } catch (error) {
-      if (opts.requireObject) throw new Error(opts.requireObject.parseError);
+      if (opts.requireObject) throw new ToolUserError(opts.requireObject.parseError, 400, 'VALIDATION');
       if (opts.onError === 'keep') return value;
       if (opts.onError === 'throw') {
-        throw new Error(`${opts.label} must be valid JSON: ${getErrorMessage(error)}`);
+        throw new ToolUserError(`${opts.label} must be valid JSON: ${getErrorMessage(error)}`, 400, 'VALIDATION');
       }
       if (opts.onError) return opts.onError.fallback;
       throw error;
@@ -102,7 +102,7 @@ function coerceJson(
 
   if (opts.requireObject) {
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      throw new Error(opts.requireObject.shapeError);
+      throw new ToolUserError(opts.requireObject.shapeError, 400, 'VALIDATION');
     }
   }
   return parsed;

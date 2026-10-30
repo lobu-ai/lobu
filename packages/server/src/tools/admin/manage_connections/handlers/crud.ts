@@ -44,7 +44,6 @@ import {
 } from "../../../../operations/connector-operations";
 import { denyOperatorOnlyChatSettings } from "./chat-settings-guard";
 import { projectConnectionForReader } from "../public-projection";
-import { withFailureCode } from "../../helpers/connection-helpers";
 import {
 	connectionFeedHealthLateralSql,
 	connectorHasAutoSyncableFeedsSql,
@@ -91,7 +90,7 @@ import {
 } from "../../../../utils/device-autowire-suppression";
 import logger from "../../../../utils/logger";
 import { lockOAuthAccountBinding, OAUTH_SCOPE_PAUSE_LAST_ERROR, syncOAuthConnectionsForAuthProfile } from "../../../../utils/oauth-connection-state";
-import { ToolUserError } from '../../../../utils/errors';
+import { ToolUserError, withFailureCode } from '../../../../utils/errors';
 import { CONNECT_TOKEN_EXPIRED_ERROR } from "../../../../utils/connect-tokens";
 import { OAUTH_ACCOUNT_BINDING_ERROR, oauthAccountOwnershipError } from '../../../../authz/oauth-account-ownership';
 import { compileConnectionRowVisibility } from "../../../../authz/connection-visibility";
@@ -760,7 +759,7 @@ export async function handleCreate(
 	ctx: ToolContext,
 ): Promise<ManageConnectionsResult> {
   if (hasDeviceAutowireSuppressionMarker(args.config)) {
-    return { error: DEVICE_AUTOWIRE_SUPPRESSION_ERROR };
+    return withFailureCode({ error: DEVICE_AUTOWIRE_SUPPRESSION_ERROR }, "VALIDATION");
   }
   const sql = getDb();
   const { organizationId, userId } = ctx;
@@ -780,7 +779,7 @@ export async function handleCreate(
   let effectiveCreatedBy = userId;
   if (args.created_by && args.created_by !== userId) {
     if (!callerIsAdmin) {
-			return { error: "Only admins can create connections for other users." };
+			return withFailureCode({ error: "Only admins can create connections for other users." }, "PERMISSION");
     }
     effectiveCreatedBy = args.created_by;
   }
@@ -794,17 +793,17 @@ export async function handleCreate(
 			args.app_auth_profile_slug,
 		);
 		if (!picked || picked.profile_kind !== "oauth_app") {
-			return {
+			return withFailureCode({
 				error: `App auth profile '${args.app_auth_profile_slug}' not found`,
-			};
+			}, "NOT_FOUND");
     }
     const pinnedAsDefault =
 			picked.is_default_for_connector &&
 			picked.connector_key === args.connector_key;
     if (!pinnedAsDefault) {
-      return {
+      return withFailureCode({
         error: `Only admins can override the OAuth app profile. Ask an admin to pin '${args.app_auth_profile_slug}' as the default for this connector, or omit app_auth_profile_slug to use the org default.`,
-      };
+      }, "PERMISSION");
     }
   }
 
@@ -821,9 +820,9 @@ export async function handleCreate(
   });
 
   if (!connector) {
-		return {
+		return withFailureCode({
 			error: `Connector '${args.connector_key}' not found or not active`,
-		};
+		}, "NOT_FOUND");
 	}
 	// Schema-declared secret config keys for this connector — used to redact the
 	// `RETURNING *` row before it is serialized back to the caller.
@@ -937,9 +936,9 @@ export async function handleCreate(
       LIMIT 1
     `) as unknown as Array<{ id: number }>;
     if (dup.length > 0) {
-      return {
+      return withFailureCode({
         error: `A ${connector.name} connection (id: ${dup[0].id}) is already assigned to that device in this org.`,
-      };
+      }, "VALIDATION");
     }
   }
 
@@ -963,9 +962,9 @@ export async function handleCreate(
       LIMIT 1
     `;
     if (existing.length > 0) {
-      return {
+      return withFailureCode({
         error: `This user already has a ${connector.name} connection (id: ${existing[0].id}). No-auth connectors are limited to one connection per user (unless pinned to different devices).`,
-      };
+      }, "VALIDATION");
     }
   }
 
@@ -975,7 +974,7 @@ export async function handleCreate(
 	const interactiveMethod =
 		explicitlyNoAuth ? null : getInteractiveMethods(connector.auth_schema)[0] ?? null;
 	if (interactiveMethod && !userId) {
-		return { error: "Interactive pairing requires an authenticated user." };
+		return withFailureCode({ error: "Interactive pairing requires an authenticated user." }, "PERMISSION");
 	}
 
   // A `managedBy` connection's OAuth grant lives in a cloud (public) org — the
@@ -1081,18 +1080,18 @@ export async function handleCreate(
 			authSelection.authProfile.profile_kind === "oauth_account"
     )
   ) {
-    return {
+    return withFailureCode({
       error: `Selected auth profile '${authSelection.authProfile.slug}' is ${authSelection.authProfile.status}${
 				authSelection.authProfile.profile_kind === "oauth_account"
 					? " — must be active or pending_auth"
 					: " — must be active"
       }.`,
-    };
+    }, "VALIDATION");
   }
 
   if (authSelection?.authProfile) {
     const ownershipError = oauthAccountOwnershipError(authSelection.authProfile, ctx.userId, effectiveCreatedBy);
-    if (ownershipError) return { error: ownershipError };
+    if (ownershipError) return withFailureCode({ error: ownershipError }, "PERMISSION");
   }
 
   // Non-admin members can only bind a connection to a runtime auth profile
@@ -1112,9 +1111,9 @@ export async function handleCreate(
 			profile.profile_kind === "browser_session" &&
       profile.created_by !== ctx.userId
     ) {
-      return {
+      return withFailureCode({
         error: `Auth profile '${profile.slug}' belongs to another user. Create your own profile (action: 'create_auth_profile') and use its slug instead.`,
-      };
+      }, "PERMISSION");
     }
   }
 
@@ -1155,9 +1154,9 @@ export async function handleCreate(
       };
     }
 		if (authSelection.appAuthProfile.status !== "active") {
-      return {
+      return withFailureCode({
         error: `Selected app auth profile '${authSelection.appAuthProfile.slug}' is not active.`,
-      };
+      }, "VALIDATION");
     }
     // Even when the slug is omitted, non-admins can only fall through to the
     // admin-pinned default for this exact connector. The resolver may
@@ -1168,9 +1167,9 @@ export async function handleCreate(
       (!authSelection.appAuthProfile.is_default_for_connector ||
         authSelection.appAuthProfile.connector_key !== args.connector_key)
     ) {
-      return {
+      return withFailureCode({
         error: `No default OAuth app configured for this connector. Ask an admin to pin a ${authSelection.oauthMethod?.provider ?? args.connector_key} app as the default under the connector's Setup tab (Connectors › ${args.connector_key}).`,
-      };
+      }, "VALIDATION");
     }
   }
 
@@ -1218,7 +1217,7 @@ export async function handleCreate(
 
   const explicitConfig = splitConfig.connectionConfig ?? {};
   if (explicitlyNoAuth && (explicitConfig.managedBy || explicitConfig.installation_ref || explicitConfig.consent_only)) {
-    return { error: 'No-auth selection cannot be combined with delegated or app-installation credentials. Create a separate connection.' };
+    return withFailureCode({ error: 'No-auth selection cannot be combined with delegated or app-installation credentials. Create a separate connection.' }, "VALIDATION");
   }
 
   // Managed-connector path (mirrors handleConnect): a member creating an OAuth
@@ -1258,9 +1257,9 @@ export async function handleCreate(
     if (!effectiveDeviceWorkerId) {
       effectiveDeviceWorkerId = profileDeviceWorkerId;
     } else if (effectiveDeviceWorkerId !== profileDeviceWorkerId) {
-      return {
+      return withFailureCode({
         error: `Auth profile '${authSelection!.authProfile!.slug}' lives on a different device than the one selected; pick that device or a different profile.`,
-      };
+      }, "VALIDATION");
     }
   }
   // Inheriting the device from the profile means we need to re-check the
@@ -1282,9 +1281,9 @@ export async function handleCreate(
       LIMIT 1
     `) as unknown as Array<{ id: number }>;
     if (dup.length > 0) {
-      return {
+      return withFailureCode({
         error: `A ${connector.name} connection (id: ${dup[0].id}) is already assigned to that device in this org.`,
-      };
+      }, "VALIDATION");
     }
   }
   const connectionStatus =
@@ -1301,7 +1300,8 @@ export async function handleCreate(
   try {
     await assertEntityIdsInOrg(sql, organizationId, args.entity_ids);
   } catch (err) {
-    return { error: getErrorMessage(err) };
+    const failure = { error: getErrorMessage(err) };
+    return err instanceof ToolUserError && err.code ? withFailureCode(failure, err.code) : failure;
   }
   const entityIdsValue =
 		args.entity_ids && args.entity_ids.length > 0
@@ -1314,7 +1314,7 @@ export async function handleCreate(
     explicitSlug: args.slug,
     displayName,
   });
-	if ("error" in slugResult) return { error: slugResult.error };
+	if ("error" in slugResult) return withFailureCode({ error: slugResult.error }, "VALIDATION");
 
 	const insertConnection = async (
 		db: DbClient,
@@ -1380,9 +1380,9 @@ export async function handleCreate(
 		interactiveAuthRunId = bundle.authRunId;
   } catch (err) {
 		if (err instanceof ConnectionSlugConflictError)
-			return { error: err.message };
+			return withFailureCode({ error: err.message }, "VALIDATION");
 		if (isPersonalCredVisibilityViolation(err))
-			return { error: PERSONAL_CRED_ORG_VISIBILITY_ERROR };
+			return withFailureCode({ error: PERSONAL_CRED_ORG_VISIBILITY_ERROR }, "VALIDATION");
     throw err;
   }
 
@@ -1461,7 +1461,7 @@ export async function handleApplyChatConnection(
 	ctx: ToolContext,
 ): Promise<ManageConnectionsResult> {
 	if (hasDeviceAutowireSuppressionMarker(args.config)) {
-		return { error: DEVICE_AUTOWIRE_SUPPRESSION_ERROR };
+		return withFailureCode({ error: DEVICE_AUTOWIRE_SUPPRESSION_ERROR }, "VALIDATION");
 	}
 	// `settings` bypasses `parseConfig` (which strips unknown keys) and is
 	// spread verbatim into the same column the runtime reads its operator flags
@@ -1476,7 +1476,7 @@ export async function handleApplyChatConnection(
       WHERE organization_id = ${organizationId} AND id = ${args.agent_id}
       LIMIT 1
     `;
-		if (agents.length === 0) return { error: "Agent not found" };
+		if (agents.length === 0) return withFailureCode({ error: "Agent not found" }, "NOT_FOUND");
 	}
 	try {
 		const result = await upsertByoChatConnection({
@@ -1515,7 +1515,7 @@ export async function handleUpdate(
 	ctx: ToolContext,
 ): Promise<ManageConnectionsResult> {
   if (hasDeviceAutowireSuppressionMarker(args.config)) {
-    return { error: DEVICE_AUTOWIRE_SUPPRESSION_ERROR };
+    return withFailureCode({ error: DEVICE_AUTOWIRE_SUPPRESSION_ERROR }, "VALIDATION");
   }
   const sql = getDb();
   const { organizationId } = ctx;
@@ -1574,9 +1574,9 @@ export async function handleUpdate(
 
   if (!callerIsAdmin) {
     if (!ctx.userId || existing.created_by !== ctx.userId) {
-      return {
+      return withFailureCode({
 				error: "You can only update connections you created.",
-      };
+      }, "PERMISSION");
     }
   }
 
@@ -1587,7 +1587,7 @@ export async function handleUpdate(
 	const hasVisibilityArg = args.visibility !== undefined;
 	if (hasVisibilityArg) {
 		if (args.visibility !== "org" && args.visibility !== "private") {
-			return { error: "visibility must be 'org' or 'private'." };
+			return withFailureCode({ error: "visibility must be 'org' or 'private'." }, "VALIDATION");
 		}
 		if (!ctx.userId || existing.created_by !== ctx.userId) {
 			return {
@@ -1624,7 +1624,7 @@ export async function handleUpdate(
 		// treated downstream as a destructive clear.
 		if (hasAgentIdArg) {
 			if (args.agent_id === "") {
-				return { error: "agent_id must be a non-empty agent id or null" };
+				return withFailureCode({ error: "agent_id must be a non-empty agent id or null" }, "VALIDATION");
 			}
 			if (typeof args.agent_id === "string") {
 				const agents = await sql`
@@ -1632,7 +1632,7 @@ export async function handleUpdate(
           WHERE organization_id = ${organizationId} AND id = ${args.agent_id}
           LIMIT 1
         `;
-				if (agents.length === 0) return { error: "Agent not found" };
+				if (agents.length === 0) return withFailureCode({ error: "Agent not found" }, "NOT_FOUND");
 			}
 		}
 		try {
@@ -1687,7 +1687,7 @@ export async function handleUpdate(
     (args.app_auth_profile_slug !== null || existing.app_auth_profile_id !== null)) {
     const slug = args.app_auth_profile_slug;
     if (!slug) {
-			return { error: "Only admins can clear the OAuth app profile." };
+			return withFailureCode({ error: "Only admins can clear the OAuth app profile." }, "PERMISSION");
     }
     const picked = await getAuthProfileBySlug(organizationId, slug);
     const pinned =
@@ -1695,9 +1695,9 @@ export async function handleUpdate(
       picked.is_default_for_connector &&
       picked.connector_key === existing.connector_key;
     if (!pinned) {
-      return {
+      return withFailureCode({
         error: `Only admins can override the OAuth app profile. Ask an admin to pin '${slug}' as the default for this connector, or omit app_auth_profile_slug to use the org default.`,
-      };
+      }, "PERMISSION");
     }
   }
 
@@ -1715,9 +1715,9 @@ export async function handleUpdate(
       connectorKey: existing.connector_key,
     });
     if (!connectorDef) {
-			return {
+			return withFailureCode({
 				error: `Connector '${existing.connector_key}' not found or not active`,
-			};
+			}, "NOT_FOUND");
     }
     const binding = await resolveDeviceBinding({
       organizationId,
@@ -1733,7 +1733,7 @@ export async function handleUpdate(
   const currentAuthProfile = await getAuthProfileById(organizationId, existing.auth_profile_id);
   if (currentAuthProfile && (hasAuthProfileArg || hasAppAuthProfileArg || hasDeviceWorkerArg || args.config !== undefined)) {
     const ownershipError = oauthAccountOwnershipError(currentAuthProfile, ctx.userId, existing.created_by);
-    if (ownershipError) return { error: ownershipError };
+    if (ownershipError) return withFailureCode({ error: ownershipError }, "PERMISSION");
   }
   const currentAppAuthProfile = await getAuthProfileById(organizationId, existing.app_auth_profile_id);
   const explicitlyNoAuth = isExplicitNoAuthSelection({
@@ -1743,7 +1743,7 @@ export async function handleUpdate(
   });
   const retainedConfig = parseJsonObject(existing.config);
   if (explicitlyNoAuth && (retainedConfig.managedBy || retainedConfig.installation_ref || retainedConfig.consent_only)) {
-    return { error: 'Delegated and app-installation connections cannot switch to no-auth. Create a separate connection.' };
+    return withFailureCode({ error: 'Delegated and app-installation connections cannot switch to no-auth. Create a separate connection.' }, "VALIDATION");
   }
   // Un-redact BEFORE anything reads the incoming config. Clients round-trip
   // what the (now redacted) read path gave them — the Owletto action-modes
@@ -1812,18 +1812,18 @@ export async function handleUpdate(
 
   if (args.auth_profile_slug === null && !explicitlyNoAuth &&
     (authSelection.oauthMethod || authSelection.envMethod || authSelection.browserMethod)) {
-    return { error: 'This connector requires an auth profile. Select a replacement profile, or explicitly select a declared no-auth method by clearing both profile fields.' };
+    return withFailureCode({ error: 'This connector requires an auth profile. Select a replacement profile, or explicitly select a declared no-auth method by clearing both profile fields.' }, "VALIDATION");
   }
 
   if (args.auth_profile_slug && !authSelection.authProfile) {
-		return {
+		return withFailureCode({
 			error: `Auth profile '${args.auth_profile_slug}' not found for this connector`,
-		};
+		}, "NOT_FOUND");
   }
   if (args.app_auth_profile_slug && !authSelection.appAuthProfile) {
-    return {
+    return withFailureCode({
       error: `App auth profile '${args.app_auth_profile_slug}' not found for this connector`,
-    };
+    }, "NOT_FOUND");
   }
   // Unhealthy retained credentials must not block name or policy edits.
   // Only a new binding needs to satisfy the selection status requirements.
@@ -1835,9 +1835,9 @@ export async function handleUpdate(
 		authSelection.authProfile.status !== "active" &&
 		authSelection.authProfile.status !== "pending_auth"
   ) {
-    return {
+    return withFailureCode({
       error: `Auth profile '${args.auth_profile_slug}' has status '${authSelection.authProfile.status}' — must be active or pending_auth`,
-    };
+    }, "VALIDATION");
   }
 	if (
     hasAppAuthProfileArg &&
@@ -1845,9 +1845,9 @@ export async function handleUpdate(
     authSelection.appAuthProfile.id !== existing.app_auth_profile_id &&
 		authSelection.appAuthProfile.status !== "active"
 	) {
-    return {
+    return withFailureCode({
       error: `App auth profile '${args.app_auth_profile_slug}' has status '${authSelection.appAuthProfile.status}' — must be active`,
-    };
+    }, "VALIDATION");
   }
 
   // Non-admins may only bind to a runtime profile they own. Mirrors the
@@ -1866,9 +1866,9 @@ export async function handleUpdate(
 			profile.profile_kind === "browser_session" &&
       profile.created_by !== ctx.userId
     ) {
-      return {
+      return withFailureCode({
         error: `Auth profile '${profile.slug}' belongs to another user. Create your own profile (action: 'create_auth_profile') and use its slug instead.`,
-      };
+      }, "PERMISSION");
     }
   }
 
@@ -1879,7 +1879,7 @@ export async function handleUpdate(
     : null);
   if ((hasAuthProfileArg || provisionedLiveBrowser) && selectedProfileOwner) {
     const ownershipError = oauthAccountOwnershipError(selectedProfileOwner, ctx.userId, existing.created_by);
-    if (ownershipError) return { error: ownershipError };
+    if (ownershipError) return withFailureCode({ error: ownershipError }, "PERMISSION");
   }
   const nextAuthProfileId = hasAuthProfileArg || provisionedLiveBrowser
     ? (authSelection.authProfile?.id ?? null)
@@ -1905,7 +1905,7 @@ export async function handleUpdate(
 					: currentAuthProfile?.profile_kind,
 			))
 	) {
-		return { error: PERSONAL_CRED_ORG_VISIBILITY_ERROR };
+		return withFailureCode({ error: PERSONAL_CRED_ORG_VISIBILITY_ERROR }, "VALIDATION");
 	}
   const nextAppAuthProfileId = hasAppAuthProfileArg
     ? (authSelection.appAuthProfile?.id ?? null)
@@ -1927,9 +1927,9 @@ export async function handleUpdate(
 			nextDeviceWorkerId &&
 			nextDeviceWorkerId !== updateProfileDeviceWorkerId
 		) {
-      return {
+      return withFailureCode({
         error: `Auth profile '${effectiveSelectedAuthProfile!.slug}' lives on a different device than the one selected; pick that device or a different profile.`,
-      };
+      }, "VALIDATION");
     } else if (!nextDeviceWorkerId) {
       nextDeviceWorkerId = updateProfileDeviceWorkerId;
     }
@@ -1959,16 +1959,16 @@ export async function handleUpdate(
   const browserRequirement = selectedBrowserRequirement(browserConnector?.browser, existing.auth_schema,
     authSelection.pendingLiveBrowser ? 'browser_session' : effectiveSelectedAuthProfile?.profile_kind, !!browserDeviceId, resultingConfig);
   if (browserRequirement && (hasDeviceWorkerArg || hasAuthProfileArg || args.config !== undefined || args.status === 'active')) {
-    if (!browserDeviceId) return { error: 'This connector requires a paired Chrome browser. The browser binding cannot be removed.' };
+    if (!browserDeviceId) return withFailureCode({ error: 'This connector requires a paired Chrome browser. The browser binding cannot be removed.' }, "VALIDATION");
     const binding = await resolveDeviceBinding({ organizationId, userId: ctx.userId, connector: browserConnector!,
       deviceWorkerId: browserDeviceId, currentDeviceWorkerId: existing.device_worker_id, browser: true });
     if ('error' in binding) return binding;
     if (browserRequirement.accountProbe && !authSelection.pendingLiveBrowser &&
       (effectiveSelectedAuthProfile?.auth_data?.mode !== 'live' || effectiveSelectedAuthProfile.device_worker_id !== browserDeviceId)) {
-      return { error: 'Choose a live browser account bound to this Chrome profile.' };
+      return withFailureCode({ error: 'Choose a live browser account bound to this Chrome profile.' }, "VALIDATION");
     }
     if (args.status === 'active' && browserRequirement.accountProbe && (effectiveSelectedAuthProfile?.status !== 'active' || !effectiveSelectedAuthProfile.auth_data?.account_id)) {
-      return { error: 'Verify this browser account with connections.test before activating the connection.' };
+      return withFailureCode({ error: 'Verify this browser account with connections.test before activating the connection.' }, "VALIDATION");
     }
   }
 	const willBeConsentOnly =
@@ -2004,7 +2004,8 @@ export async function handleUpdate(
     try {
       await assertEntityIdsInOrg(sql, organizationId, args.entity_ids);
     } catch (err) {
-      return { error: getErrorMessage(err) };
+      const failure = { error: getErrorMessage(err) };
+      return err instanceof ToolUserError && err.code ? withFailureCode(failure, err.code) : failure;
     }
   }
   // Tri-state, mirrors manage_feeds: undefined = leave unchanged (null → COALESCE
@@ -2024,7 +2025,7 @@ export async function handleUpdate(
   const updateExplicitSlug = args.slug?.trim();
   if (updateExplicitSlug) {
     const fmtErr = connectionSlugFormatError(updateExplicitSlug);
-    if (fmtErr) return { error: fmtErr };
+    if (fmtErr) return withFailureCode({ error: fmtErr }, "VALIDATION");
     if (
       await connectionSlugTaken({
         organizationId,
@@ -2032,9 +2033,9 @@ export async function handleUpdate(
         excludeId: args.connection_id,
       })
     ) {
-			return {
+			return withFailureCode({
 				error: `Connection slug '${updateExplicitSlug}' already exists for this organization.`,
-			};
+			}, "VALIDATION");
     }
     nextSlug = updateExplicitSlug;
   }
@@ -2056,9 +2057,9 @@ export async function handleUpdate(
         LIMIT 1
       `) as unknown as Array<{ id: number }>;
 		if (pinDup.length > 0) {
-			return {
+			return withFailureCode({
 				error: `A ${existing.connector_key} connection (id: ${pinDup[0].id}) is already assigned to that device in this org.`,
-			};
+			}, "VALIDATION");
 		}
 	}
 
@@ -2087,7 +2088,7 @@ export async function handleUpdate(
       if (validateOAuthBinding && !await lockOAuthAccountBinding(tx, {
         organizationId, authProfileId: nextAuthProfileId!, appAuthProfileId: nextAppAuthProfileId,
         ownerUserId: ctx.userId ?? null,
-      })) return { denial: { error: OAUTH_ACCOUNT_BINDING_ERROR } };
+      })) return { denial: withFailureCode({ error: OAUTH_ACCOUNT_BINDING_ERROR }, "VALIDATION") };
       const lockedRows = await tx`
         SELECT *
         FROM connections
@@ -2099,21 +2100,21 @@ export async function handleUpdate(
       if (lockedRows.length === 0) return { rows: [], previousStatus: null };
       if (lockedRows[0].auth_profile_id !== existing.auth_profile_id ||
         lockedRows[0].app_auth_profile_id !== existing.app_auth_profile_id) {
-        return { denial: { error: 'Connection authentication configuration changed during the update. Refresh and try again.' } };
+        return { denial: withFailureCode({ error: 'Connection authentication configuration changed during the update. Refresh and try again.' }, "VALIDATION") };
       }
       if (validateOAuthBinding && lockedRows[0].created_by !== ctx.userId) {
-        return { denial: { error: 'You can only manage OAuth account profiles you created, on your own connections. Ask the account owner to reconnect.' } };
+        return { denial: withFailureCode({ error: 'You can only manage OAuth account profiles you created, on your own connections. Ask the account owner to reconnect.' }, "PERMISSION") };
       }
       if (authSelection.pendingLiveBrowser || nextAuthProfileId !== lockedRows[0].auth_profile_id) {
         const retained = await tx`SELECT id FROM auth_profiles
           WHERE id = ${lockedRows[0].auth_profile_id} AND organization_id = ${organizationId}
             AND profile_kind = 'browser_session' AND auth_data->>'mode' = 'live'`;
         if (retained.length) {
-          return { denial: { error: 'A live browser account cannot be replaced on an existing connection. Create a separate connection to preserve the original source identity.' } };
+          return { denial: withFailureCode({ error: 'A live browser account cannot be replaced on an existing connection. Create a separate connection to preserve the original source identity.' }, "VALIDATION") };
         }
       }
       if (hasAppAuthProfileArg && !callerIsAdmin && args.app_auth_profile_slug === null && lockedRows[0].app_auth_profile_id !== null) {
-        return { denial: { error: 'Only admins can clear the OAuth app profile.' } };
+        return { denial: withFailureCode({ error: 'Only admins can clear the OAuth app profile.' }, "PERMISSION") };
       }
       const lockedConfig = parseJsonObject(
         (lockedRows[0] as { config: unknown }).config,
@@ -2144,11 +2145,11 @@ export async function handleUpdate(
           ? { ...lockedConfig, ...lockedConnectionConfig }
           : lockedConfig;
       if (explicitlyNoAuth && (lockedResultingConfig.managedBy || lockedResultingConfig.installation_ref || lockedResultingConfig.consent_only)) {
-        return { denial: { error: 'No-auth selection cannot retain delegated or app-installation credentials. Create a separate connection.' } };
+        return { denial: withFailureCode({ error: 'No-auth selection cannot retain delegated or app-installation credentials. Create a separate connection.' }, "VALIDATION") };
       }
 
       if (!!getManagedByOrg(lockedResultingConfig) !== !!getManagedByOrg(resultingConfig)) {
-        return { denial: { error: 'Connection authentication configuration changed during the update. Refresh and try again.' } };
+        return { denial: withFailureCode({ error: 'Connection authentication configuration changed during the update. Refresh and try again.' }, "VALIDATION") };
       }
 
       const liveBrowserProfile = authSelection.pendingLiveBrowser
@@ -2251,12 +2252,12 @@ export async function handleUpdate(
     previousConnectionStatus = updateOutcome.previousStatus;
   } catch (err) {
     if (isConnectionSlugUniqueViolation(err) && updateExplicitSlug) {
-			return {
+			return withFailureCode({
 				error: `Connection slug '${updateExplicitSlug}' already exists for this organization.`,
-			};
+			}, "VALIDATION");
     }
 		if (isPersonalCredVisibilityViolation(err))
-			return { error: PERSONAL_CRED_ORG_VISIBILITY_ERROR };
+			return withFailureCode({ error: PERSONAL_CRED_ORG_VISIBILITY_ERROR }, "VALIDATION");
 		// A replica won the device between our pre-flight and this write. The
 		// transaction aborted, so nothing was persisted — report the same readable
 		// collision the pre-flight would have.
@@ -2396,7 +2397,7 @@ export async function handleDelete(
 		LIMIT 1
 	`;
 	if (targets.length === 0) {
-		return { error: "Connection not found or already deleted" };
+		return withFailureCode({ error: "Connection not found or already deleted" }, "NOT_FOUND");
 	}
 	const target = targets[0] as DeviceAutowireIdentityRow & {
 		credential_mode: string | null;
@@ -2634,7 +2635,7 @@ export async function handleDelete(
 		return { tombstoned, expiredApprovalRunIds };
   });
   if (deleted === null) {
-    return { error: "Connection not found or already deleted" };
+    return withFailureCode({ error: "Connection not found or already deleted" }, "NOT_FOUND");
   }
 
 	queueApprovalNotificationCardRefresh(

@@ -48,7 +48,7 @@ import { getAuthProfileById } from "../../../../utils/auth-profiles";
 import { isCloudMode } from "../../../../utils/cloud-mode";
 import { findBundledConnectorFile } from "../../../../utils/connector-catalog";
 import { resolveConnectorCodeForKey } from "../../../../utils/ensure-connector-installed";
-import { ToolUserError } from "../../../../utils/errors";
+import { ToolUserError, withFailureCode } from "../../../../utils/errors";
 import { resolveExecutionAuth } from "../../../../utils/execution-context";
 import {
 	deleteMaterializedArtifacts,
@@ -637,9 +637,9 @@ export async function handleExecute(
 		[ctx.organizationId, args.connection_id],
 	);
 	if (visibleRows.length === 0) {
-		return {
+		return withFailureCode({
 			error: "Connection not found or not visible.",
-		};
+		}, "NOT_FOUND");
 	}
 	const resolved = await getOperationForConnection(
 		ctx.organizationId,
@@ -647,9 +647,9 @@ export async function handleExecute(
 		args.operation_key,
 	);
 	if (!resolved) {
-		return {
+		return withFailureCode({
 			error: `Invalid operation_key '${args.operation_key}' for this connection. Call operations.listAvailable({ connection_id: ${args.connection_id} }) and copy the returned operation_key exactly; do not derive it from the display name.`,
-		};
+		}, "VALIDATION");
 	}
 
 	const { connection, operation } = resolved;
@@ -661,10 +661,10 @@ export async function handleExecute(
 			!connection.device_worker_id ||
 			connection.device_platform === "chrome-extension")
 	) {
-		return { error: "Connector operations require a pinned native device connection. Use ctx.browser for browser operations." };
+		return withFailureCode({ error: "Connector operations require a pinned native device connection. Use ctx.browser for browser operations." }, "VALIDATION");
 	}
 	if (connection.status !== "active" && !(connection.status === "pending_auth" && operation.operation_key === BROWSER_VERIFY_OPERATION && await connectionBrowserGrant(ctx.organizationId, connection.id))) {
-		return { error: `Connection is ${connection.status}, must be active` };
+		return withFailureCode({ error: `Connection is ${connection.status}, must be active` }, "VALIDATION");
 	}
 
 	const requiredScopes = operation.required_scopes ?? [];
@@ -679,9 +679,9 @@ export async function handleExecute(
 			requiredScopes,
 		);
 		if (missingScopes.length > 0) {
-			return {
+			return withFailureCode({
 				error: `Operation '${operation.operation_key}' requires additional OAuth consent for scope(s): ${missingScopes.join(", ")}. Reauthorize the connection and complete consent, then retry operations.execute with the same arguments. The operation will not resume automatically.`,
-			};
+			}, "AUTH_INVALID");
 		}
 	}
 
@@ -708,9 +708,9 @@ export async function handleExecute(
 	};
 	const validationError = validateOperationInput(operation, input);
 	if (validationError) {
-		return {
+		return withFailureCode({
 			error: `Invalid input for operation '${operation.operation_key}': ${validationError}`,
-		};
+		}, "VALIDATION");
 	}
 
 	const actor = delegation?.actor ?? await resolveActingPrincipal(sql, {
@@ -728,7 +728,7 @@ export async function handleExecute(
 		sql,
 	});
 	if (policy.effect === "deny") {
-		return { error: `Policy blocks '${operation.operation_key}' for this principal.` };
+		return withFailureCode({ error: `Policy blocks '${operation.operation_key}' for this principal.` }, "PERMISSION");
 	}
 	// A device-pinned connection runs on one member's own machine
 	// (authz/device-access.ts). Block above still wins; `ask_owner` queues for
@@ -740,7 +740,7 @@ export async function handleExecute(
 		? decideDeviceAccess(chatAccessOfToolContext(ctx))
 		: "run";
 	if (deviceAccess === "refuse") {
-		return { error: DEVICE_ACCESS_REFUSED };
+		return withFailureCode({ error: DEVICE_ACCESS_REFUSED }, "PERMISSION");
 	}
 	const preparedFiles = await prepareOperationFiles(input, operation.input_schema, ctx);
 	input = preparedFiles.input;

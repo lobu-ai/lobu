@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
-import { buildClientSDK, CrossOrgAccessDenied } from "../../../sandbox/client-sdk";
+import { buildClientSDK } from "../../../sandbox/client-sdk";
+import { CrossOrgAccessDenied } from "../../../tools/access-control";
 import { ctx } from "./_helpers";
 
 const env = {} as never;

@@ -20,6 +20,8 @@
  * must carry `previewMode`.
  */
 
+import { withFailureCode } from "../../../../utils/errors";
+
 /**
  * Settings a tenant owns on their own chat connection: the non-privileged
  * members of `ConnectionSettings` (`gateway/connections/types.ts`). A member
@@ -49,12 +51,12 @@ export function denyOperatorOnlyChatSettings(
 	// reachable only through the prototype never lands in the row.
 	const rejected = Object.keys(settings).filter((key) => !ALLOWED.has(key));
 	if (rejected.length === 0) return null;
-	return {
+	return withFailureCode({
 		error:
 			`Connection settings not settable here: ${rejected.join(", ")}. ` +
 			`Chat connections accept ${TENANT_SETTABLE_CHAT_SETTINGS.join(", ")}. ` +
 			`Other settings are operator-owned — in particular 'previewMode', which ` +
 			`marks a connection as Lobu's shared hosted relay and controls ` +
 			`cross-organization message routing.`,
-	};
+	}, "VALIDATION");
 }

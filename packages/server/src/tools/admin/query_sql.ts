@@ -17,14 +17,14 @@ import { resolveWindowQueryContext } from '../../automations/window-read-context
 import { classifyPushdownFailure, runConnectorQuery } from '../../lib/connector-pushdown';
 import { validateAndScopeQuery } from '../../utils/execute-data-sources';
 import logger from '../../utils/logger';
-import { boundedRead, cancellable } from '../../utils/bounded-read';
+import { boundedRead, cancellable, classifyReadQueryFailure } from '../../utils/bounded-read';
 import { QUERY_SQL_STATEMENT_TIMEOUT_MS } from '../../utils/content-read-bounds';
 import { ADMIN_ONLY_QUERYABLE_TABLES, SAFE_COLUMN_DEFS } from '../../utils/table-schema';
 import type { ToolContext } from '../registry';
 import { withValidatedArgs } from '../validate-args';
 import { SortOrderField } from './schemas/common-fields';
 import { isAdminOrOwnerRole, isInProcessSystemCall } from '../access-control';
-import { classifyToolError, getErrorMessage, isRetryable, type ToolErrorCode } from "@lobu/core";
+import { getErrorMessage, isRetryable, type ToolErrorCode } from "@lobu/core";
 import { ToolUserError, toolErrorHttpStatus } from '../../utils/errors';
 import {
   QUERY_SQL_RESULT_MAX_BYTES,
@@ -506,7 +506,7 @@ export async function querySqlImpl(
     params = scoped.params;
     tableRefs = scoped.tableRefs;
   } catch (err) {
-    return fail(getErrorMessage(err));
+    return fail(getErrorMessage(err), err instanceof ToolUserError ? err.code : undefined);
   }
 
   // Build search + exact-match + attribute-filter WHERE clause. Collection
@@ -668,20 +668,12 @@ export async function querySqlImpl(
       options?.maxSerializedResultBytes
     );
   } catch (error) {
-    const msg = getErrorMessage(error);
     // A caller that left is not a query failure.
     if (!ctx.abortSignal?.aborted) logger.error({ error }, 'query_sql error');
 
-    // Classify via SQLSTATE where available (57014 = statement timeout), falling
-    // back to message matching. The `error_code`/`retryable` fields let the agent
-    // distinguish a transient timeout (worth retrying) from a permanent SQL fault.
-    const pgCode = (error as { code?: string } | null)?.code;
-    if (pgCode === '57014' || msg.includes('timeout') || msg.includes('statement timeout')) {
-      return fail('Query exceeded the 5 second timeout.', 'UPSTREAM_TIMEOUT');
-    }
-    if (msg.includes('read-only')) {
-      return fail('Only read-only queries are allowed.', 'VALIDATION');
-    }
-    return fail(msg, classifyToolError({ pgCode: pgCode ?? undefined, message: msg }));
+    // The `error_code`/`retryable` fields let the agent distinguish a transient
+    // timeout (worth retrying) from a permanent SQL fault.
+    const failure = classifyReadQueryFailure(error);
+    return fail(failure.message, failure.code);
   }
 }

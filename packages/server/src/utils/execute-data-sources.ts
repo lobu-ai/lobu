@@ -17,6 +17,7 @@
 
 import { Dialect, ast, parse as parseSql } from '@polyglot-sql/sdk';
 import { type DbClient, pgTextArray } from '../db/client';
+import { ToolUserError } from './errors';
 import logger from './logger';
 import { useLinkedOrgScope } from './linked-org-ids';
 import {
@@ -165,7 +166,7 @@ function assertNoForbiddenFunctions(root: unknown): void {
     const methodNode = record.method_call as Record<string, unknown> | undefined;
     const name = identName(functionNode?.name) ?? identName(methodNode?.method);
     if (name && isForbiddenQueryFunction(name)) {
-      throw new Error(`Function '${name}' is not allowed in read-only queries.`);
+      throw new ToolUserError(`Function '${name}' is not allowed in read-only queries.`, 400, 'VALIDATION');
     }
     for (const child of Object.values(record)) stack.push(child);
   }
@@ -339,13 +340,13 @@ function extractTableRefs(
 ): string[] {
   const res = parseSql(stripPlaceholders(query), Dialect.PostgreSQL);
   if (!res.success || !res.ast) {
-    throw new Error('Could not parse SQL query for table extraction');
+    throw new ToolUserError('Could not parse SQL query for table extraction', 400, 'VALIDATION');
   }
   // Reject multiple statements: org-scoping CTEs only wrap the FIRST statement,
   // so a trailing `; SELECT … FROM public.oauth_tokens` would run unscoped.
   const statements = Array.isArray(res.ast) ? res.ast : [res.ast];
   if (statements.length > 1) {
-    throw new Error('Multiple SQL statements are not allowed; provide a single query.');
+    throw new ToolUserError('Multiple SQL statements are not allowed; provide a single query.', 400, 'VALIDATION');
   }
   const root = statements[0] as SqlNode;
 
@@ -355,8 +356,10 @@ function extractTableRefs(
   // CTE bodies, UNION branches) — they bypass the org-scoping CTEs.
   const qualified = collectSchemaQualifiedTables(root);
   if (qualified.length > 0) {
-    throw new Error(
-      `Schema-qualified table references are not allowed: ${[...new Set(qualified)].join(', ')}`
+    throw new ToolUserError(
+      `Schema-qualified table references are not allowed: ${[...new Set(qualified)].join(', ')}`,
+      400,
+      'VALIDATION'
     );
   }
 
@@ -364,8 +367,10 @@ function extractTableRefs(
   // A CTE may not shadow a real/admin table name — see fail-closed note above.
   for (const cte of cteNames) {
     if (queryableTableNames.has(cte) || ADMIN_ONLY_QUERYABLE_TABLES.has(cte)) {
-      throw new Error(
-        `CTE name '${cte}' collides with a reserved table name; rename the CTE.`
+      throw new ToolUserError(
+        `CTE name '${cte}' collides with a reserved table name; rename the CTE.`,
+        400,
+        'VALIDATION'
       );
     }
   }
@@ -440,7 +445,7 @@ export function validateAndScopeQuery(
 ): { sql: string; params: unknown[]; tableRefs: string[] } {
   const trimmed = rawSql.trim();
   if (!trimmed) {
-    throw new Error('SQL query is required');
+    throw new ToolUserError('SQL query is required', 400, 'VALIDATION');
   }
 
   // Must be a read query. Rejects DML/DDL AND PostgreSQL's `TABLE <name>`
@@ -449,7 +454,7 @@ export function validateAndScopeQuery(
   // past the admin-table gate. The gate below is fail-closed regardless, but
   // rejecting the shorthand outright keeps the contract obvious.
   if (!isReadQuery(trimmed)) {
-    throw new Error('Only SELECT / WITH queries are allowed.');
+    throw new ToolUserError('Only SELECT / WITH queries are allowed.', 400, 'VALIDATION');
   }
 
   // Schema-level validation via SQL parser (rejects unknown tables/columns, mutations, etc.)
@@ -457,7 +462,7 @@ export function validateAndScopeQuery(
   const queryableTableNames = new Set(safeColumns.keys());
   const validation = validateTableQuery(trimmed, safeColumns);
   if (!validation.valid) {
-    throw new Error(validation.errors.join('; '));
+    throw new ToolUserError(validation.errors.join('; '), 400, 'VALIDATION');
   }
 
   // COMPLETE table extraction (union of getTableNames + raw walk, CTE names
@@ -466,15 +471,17 @@ export function validateAndScopeQuery(
   const tableRefs = extractTableRefs(trimmed, queryableTableNames);
   const unknown = tableRefs.filter((t) => !queryableTableNames.has(t));
   if (unknown.length > 0) {
-    throw new Error(formatUnknownTablesError(unknown, queryableTableNames));
+    throw new ToolUserError(formatUnknownTablesError(unknown, queryableTableNames), 400, 'VALIDATION');
   }
 
   if (options?.restrictedTables) {
     const blocked = tableRefs.filter((t) => options.restrictedTables?.has(t));
     if (blocked.length > 0) {
-      throw new Error(
+      throw new ToolUserError(
         `Table(s) '${[...new Set(blocked)].join("', '")}' require owner/admin access — ` +
-          `the query did not run. This is an error, not an empty result.`
+          `the query did not run. This is an error, not an empty result.`,
+        403,
+        'PERMISSION'
       );
     }
   }
@@ -570,11 +577,11 @@ export function buildScopedQuery(
 
   const remaining = processedQuery.match(/\{\{(\w+(?:\.\w+)?)\}\}/g);
   if (remaining) {
-    throw new Error(`Unknown context variables: ${remaining.join(', ')}`);
+    throw new ToolUserError(`Unknown context variables: ${remaining.join(', ')}`, 400, 'VALIDATION');
   }
 
   if (/\$\d+/.test(userQuery)) {
-    throw new Error('Positional parameters ($1, $2, ...) are not allowed in data source queries');
+    throw new ToolUserError('Positional parameters ($1, $2, ...) are not allowed in data source queries', 400, 'VALIDATION');
   }
 
   if (tableRefs.length === 0) return { sql: processedQuery, params };
@@ -1055,10 +1062,10 @@ export function queryProjectsIdColumn(query: string): boolean {
 export function validateDataSourceQuery(name: string, query: string, parse = false): void {
   const trimmed = query.trim();
   if (!/^(SELECT|WITH)\b/i.test(trimmed)) {
-    throw new Error(`Data source '${name}': query must start with SELECT or WITH`);
+    throw new ToolUserError(`Data source '${name}': query must start with SELECT or WITH`, 400, 'VALIDATION');
   }
   if (FORBIDDEN_OPS.test(trimmed)) {
-    throw new Error(`Data source '${name}': query contains forbidden operations`);
+    throw new ToolUserError(`Data source '${name}': query contains forbidden operations`, 400, 'VALIDATION');
   }
   if (parse) {
     try {
@@ -1077,7 +1084,7 @@ export function validateDataSourceQuery(name: string, query: string, parse = fal
         );
       }
     } catch (err) {
-      throw new Error(`Data source '${name}': ${getErrorMessage(err)}`);
+      throw new ToolUserError(`Data source '${name}': ${getErrorMessage(err)}`, 400, 'VALIDATION');
     }
   }
 }

@@ -1,5 +1,6 @@
 import { setManualChannelAboutEdges } from "../../../../authz/channel-about";
 import { getDb } from "../../../../db/client";
+import { withFailureCode } from "../../../../utils/errors";
 import { resolveSubscriptionTeam } from "../../../../gateway/channels/subscription-scope-resolver";
 import { assertEntityIdsInOrg } from "../../helpers/db-helpers";
 import type { ToolContext } from "../../../registry";
@@ -26,7 +27,7 @@ export async function handleSetChannelAbout(
 		LIMIT 1
 	`;
 	const connection = rows[0];
-	if (!connection) return { error: "Chat connection not found" };
+	if (!connection) return withFailureCode({ error: "Chat connection not found" }, "NOT_FOUND");
 
 	const subscribedTeam = await sql<{ team_id: string | null }>`
 		SELECT team_id

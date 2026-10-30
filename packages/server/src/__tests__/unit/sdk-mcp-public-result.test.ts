@@ -11,8 +11,7 @@ import {
 	toMcpPublicSdkScriptResult,
 } from "../../tools/sdk_run";
 import { ClientSdkActionError } from "../../sandbox/namespaces/action-call";
-import { withFailureCode } from "../../tools/admin/helpers/connection-helpers";
-import { ToolUserError } from "../../utils/errors";
+import { ToolUserError, withFailureCode } from "../../utils/errors";
 import { AccessDeniedError, McpScopeRequiredError } from "../../tools/access-control";
 import { validateToolResult } from "../../tools/validate-args";
 

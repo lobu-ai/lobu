@@ -94,6 +94,15 @@ export class ToolUserError extends Error {
   }
 }
 
+/**
+ * Classify in-process ClientSDK failures without changing the public JSON shape.
+ * ClientSdkActionError retains this object by reference; serialization omits the code.
+ */
+export function withFailureCode<T extends Record<string, unknown>>(record: T, code: ToolErrorCode): T {
+  Object.defineProperty(record, 'error_code', { value: code, enumerable: false });
+  return record;
+}
+
 export function parsePositiveIntegerId(value: string, fieldName: string): number {
   if (!/^[1-9]\d*$/.test(value)) {
     throw new ToolUserError(`${fieldName} must be a positive integer`, 400);
