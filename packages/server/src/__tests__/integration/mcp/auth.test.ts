@@ -1912,6 +1912,7 @@ describe('MCP Authentication', () => {
       expect(initBody.result?.instructions).toContain('client.org(');
       expect(initBody.result?.instructions).toContain('operations.listActivity');
       expect(initBody.result?.instructions).toContain('roughly every 60 seconds');
+      expect(initBody.result?.instructions).toContain('no saved memories and no connections');
       const attention = await mcpToolsCall<any>('query_sdk', {
         script: `export default async (_ctx, client) => {
           const target = await client.org(${JSON.stringify(singletonOrg.slug)});
