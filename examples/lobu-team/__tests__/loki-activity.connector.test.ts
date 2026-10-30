@@ -222,6 +222,53 @@ describe("Lobu Team Loki activity connector", () => {
     ).rejects.toThrow("503");
   });
 
+  it("tells the caller how to correct a rejected query", async () => {
+    const config = {
+      LOKI_URL: "https://loki.example.test",
+      namespace: "synthetic",
+    };
+    const input = {
+      query: '{namespace="synthetic"} |= "error" | json | level = error',
+      start: "2026-10-01T00:00:00Z",
+      end: "2026-10-01T01:00:00Z",
+    };
+    await expect(
+      queryLokiLogs(
+        config,
+        input,
+        async () =>
+          new Response(
+            "parse error at line 1, col 52: syntax error: unexpected IDENTIFIER",
+            { status: 400 }
+          )
+      )
+    ).rejects.toThrow(
+      "Loki rejected the query (400): parse error at line 1, col 52: syntax error: unexpected IDENTIFIER"
+    );
+    await expect(
+      queryLokiLogs(config, {
+        ...input,
+        end: "2026-10-01T12:00:00Z",
+      })
+    ).rejects.toThrow(
+      "The time range is 12h; split it into windows of at most 6 hours"
+    );
+    await expect(
+      queryLokiLogs(
+        config,
+        input,
+        async () => new Response("x".repeat(2000001))
+      )
+    ).rejects.toThrow("lower limit or add a line filter");
+    await expect(
+      queryLokiLogs(
+        config,
+        input,
+        async () => new Response("upstream detail", { status: 503 })
+      )
+    ).rejects.toThrow(/^Loki query failed with 503$/);
+  });
+
   it("keeps the endpoint in public config and declares only the HTTP credential", () => {
     const { definition } = new LokiActivityConnector();
     expect(definition.optionsSchema).toMatchObject({
