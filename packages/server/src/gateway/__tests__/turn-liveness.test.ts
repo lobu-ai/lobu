@@ -432,7 +432,8 @@ describe("turn-liveness", () => {
     await markTurnProviderFailed(
       "dep-pf1",
       AgentErrorCode.PROVIDER_QUOTA_EXHAUSTED,
-      "qwen: HTTP 429 — PROVIDER_QUOTA_EXHAUSTED"
+      "qwen: HTTP 429 — PROVIDER_QUOTA_EXHAUSTED",
+      429
     );
     await expireAllMarkers();
 
@@ -456,7 +457,8 @@ describe("turn-liveness", () => {
     await markTurnProviderFailed(
       "dep-pf2",
       AgentErrorCode.PROVIDER_QUOTA_EXHAUSTED,
-      "qwen: HTTP 429 — PROVIDER_QUOTA_EXHAUSTED"
+      "qwen: HTTP 429 — PROVIDER_QUOTA_EXHAUSTED",
+      429
     );
     await clearTurnProviderFailed("dep-pf2"); // next proxied 2xx
     await expireAllMarkers();
@@ -474,7 +476,8 @@ describe("turn-liveness", () => {
     await markTurnProviderFailed(
       "dep-pf3a",
       AgentErrorCode.PROVIDER_QUOTA_EXHAUSTED,
-      "qwen: HTTP 429 — PROVIDER_QUOTA_EXHAUSTED"
+      "qwen: HTTP 429 — PROVIDER_QUOTA_EXHAUSTED",
+      429
     );
     await expireAllMarkers();
 
@@ -492,7 +495,8 @@ describe("turn-liveness", () => {
     await markTurnProviderFailed(
       "dep-pf4",
       AgentErrorCode.PROVIDER_QUOTA_EXHAUSTED,
-      "qwen: HTTP 429 — PROVIDER_QUOTA_EXHAUSTED"
+      "qwen: HTTP 429 — PROVIDER_QUOTA_EXHAUSTED",
+      429
     );
 
     const rows = (await getDb()`
@@ -517,7 +521,8 @@ describe("turn-liveness", () => {
     await markTurnProviderFailed(
       "dep-pf5",
       AgentErrorCode.PROVIDER_QUOTA_EXHAUSTED,
-      "qwen: HTTP 429 — PROVIDER_QUOTA_EXHAUSTED"
+      "qwen: HTTP 429 — PROVIDER_QUOTA_EXHAUSTED",
+      429
     );
     const rows = (await getDb()`
       SELECT EXTRACT(EPOCH FROM (run_at - now()))::int AS left

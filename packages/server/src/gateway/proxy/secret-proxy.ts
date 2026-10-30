@@ -1351,7 +1351,8 @@ export class SecretProxy {
         await markTurnProviderFailed(
           deploymentName,
           code,
-          `${slug}: HTTP ${response.status} — ${code}`
+          `${slug}: HTTP ${response.status} — ${code}`,
+          response.status
         );
       }
     } catch (err) {
