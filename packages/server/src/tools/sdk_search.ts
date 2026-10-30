@@ -267,6 +267,10 @@ function renderDrillDown(path: string, meta: MethodMetadata): string {
 
 function normalizeQueryTerm(term: string): string {
 	const lower = term.toLowerCase();
+	// Package discovery uses the existing authoring method and its access checks.
+	if (lower === "@lobu/views" || lower === "@lobu/views/components") {
+		return "views.set";
+	}
 	return lower.startsWith("client.") ? lower.slice("client.".length) : lower;
 }
 
@@ -284,7 +288,7 @@ export function isSdkOnlyDiscoveryQuery(query: string): boolean {
 	return (
 		/^client\b/i.test(q) ||
 		isExactNamespace ||
-		(q.includes(".") && isSdkNamespace)
+		(normalized.includes(".") && isSdkNamespace)
 	);
 }
 
@@ -303,8 +307,8 @@ async function sdkSearchImpl(
 	// names a CONNECTOR, not an SDK method, so pure method search returns nothing
 	// useful. Search live connectors and surface them (+ lifecycle) ABOVE method
 	// docs. Skip the connector lookup ONLY for genuine SDK intent — a bare
-	// namespace, a `client.`-prefixed term, or a dotted path whose FIRST segment
-	// is a real SDK namespace (`feeds.create`). A dotted CONNECTOR id
+	// namespace, a known view package, a `client.`-prefixed term, or a dotted path
+	// whose FIRST segment is a real SDK namespace (`feeds.create`). A dotted CONNECTOR id
 	// (`google.calendar`) must still be searched: its first segment (`google`) is
 	// not an SDK namespace.
 	const q = args.query.trim();
