@@ -117,24 +117,31 @@ export function handleGetComponentReference(): {
         },
         {
           name: 'tabs',
+          category: 'Native report navigation',
           description: 'Native local report navigation. Only the active panel mounts. This is presentation state, not an automation action, route or permission grant.',
           props: { defaultValue: 'Required non-empty string, at most 128 characters; must match a tabs-trigger and tabs-content value.' },
           example: { type: 'tabs', props: { defaultValue: 'digest' }, children: [{ type: 'tabs-list', props: { label: 'Social views' }, children: [{ type: 'tabs-trigger', props: { value: 'digest' }, children: [{ type: 'text', content: 'Digest' }] }] }, { type: 'tabs-content', props: { value: 'digest' }, children: [{ type: 'text', content: 'Saved report content' }] }] },
         },
         {
           name: 'tabs-list',
+          category: 'Native report navigation',
           description: 'Accessible list of tabs-trigger children within tabs. Arrow keys, Home and End activate the focused tab.',
           props: { label: 'Optional accessible label, at most 200 characters; default Views.' },
+          example: { type: 'tabs-list', props: { label: 'Report views' }, children: [{ type: 'tabs-trigger', props: { value: 'digest' }, children: [{ type: 'text', content: 'Digest' }] }] },
         },
         {
           name: 'tabs-trigger',
+          category: 'Native report navigation',
           description: 'Native button-styled tab label; use text children. Its value identifies the matching tabs-content panel.',
           props: { value: 'Required non-empty string, at most 128 characters.' },
+          example: { type: 'tabs-trigger', props: { value: 'digest' }, children: [{ type: 'text', content: 'Digest' }] },
         },
         {
           name: 'tabs-content',
+          category: 'Native report navigation',
           description: 'Report panel rendered only when its value is selected in the enclosing tabs.',
           props: { value: 'Required non-empty string, at most 128 characters.' },
+          example: { type: 'tabs-content', props: { value: 'digest' }, children: [{ type: 'text', content: 'Saved report content' }] },
         },
       ],
       security_restrictions: [
