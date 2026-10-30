@@ -11,17 +11,6 @@
  * surface resolves components against its own registry.
  */
 
-export {
-  type AgentReferenceProps,
-  type AutomationReferenceProps,
-  type ConnectorReferenceProps,
-  type NativeReferenceKind,
-  type NativeReferenceProps,
-  parseNativeReference,
-  type ReferenceAppearance,
-  type ReferenceSnapshot,
-} from "./json-template-references";
-
 /**
  * Display-format directives a `data` binding (or a table column) can request.
  * Domain-agnostic on purpose — this knows how to format a currency/date/enum,
