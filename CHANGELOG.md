@@ -1,5 +1,56 @@
 # Changelog
 
+## [24.3.0](https://github.com/lobu-ai/lobu/compare/lobu-v24.2.0...lobu-v24.3.0) (2026-10-30)
+
+
+### Features
+
+* **auth:** list and revoke org-scoped personal access tokens ([#4582](https://github.com/lobu-ai/lobu/issues/4582)) ([218f73e](https://github.com/lobu-ai/lobu/commit/218f73e767d7a92b39f58e5e5bbeb2ef1ee84f46))
+* **auth:** support bearer session tokens and PAT bound workspaces on /oauth/userinfo ([#4608](https://github.com/lobu-ai/lobu/issues/4608)) ([79fbe40](https://github.com/lobu-ai/lobu/commit/79fbe40c99d063ede70c8bac3a48b1d12b3220af))
+* **connector-sdk:** export the output redaction catalog to connectors ([#4610](https://github.com/lobu-ai/lobu/issues/4610)) ([b5dd313](https://github.com/lobu-ai/lobu/commit/b5dd313ab2196adfd6b4f18b076289fecd4d8106))
+* **device:** make outdated device clients visible ([#4603](https://github.com/lobu-ai/lobu/issues/4603)) ([6c9f0d3](https://github.com/lobu-ai/lobu/commit/6c9f0d3248f10857ffb14d8b3225bc4afab6e8d2))
+* **email:** migrate transactional email to Cloudflare Email Sending ([#4569](https://github.com/lobu-ai/lobu/issues/4569)) ([093ba97](https://github.com/lobu-ai/lobu/commit/093ba97355613e7a3960d22c5446830d4c9daaa5))
+* **entities:** scoped manual_edit assertion on entity updates ([#4571](https://github.com/lobu-ai/lobu/issues/4571)) ([2d36d55](https://github.com/lobu-ai/lobu/commit/2d36d557dbce22b7a1bbddff0368b78104744094))
+* **mcp:** first-run guidance for empty workspaces and first prompts on Connect ([#4612](https://github.com/lobu-ai/lobu/issues/4612)) ([f99e439](https://github.com/lobu-ai/lobu/commit/f99e439d8b7880b415fa26cca95ae5bda8cf8388))
+
+
+### Bug Fixes
+
+* **approvals:** one open direct proposal per record field set; proposers can withdraw ([#4611](https://github.com/lobu-ai/lobu/issues/4611)) ([fa4164a](https://github.com/lobu-ai/lobu/commit/fa4164a4c65e41d34d81c7b6db5ec4f5a75e60af))
+* **audit:** keep a redacted error message on failed query_sdk rows ([#4607](https://github.com/lobu-ai/lobu/issues/4607)) ([1beb7e8](https://github.com/lobu-ai/lobu/commit/1beb7e8df352c0042417257e826662426b509578))
+* **auth:** hide expired tokens from the org token list ([#4588](https://github.com/lobu-ai/lobu/issues/4588)) ([467df8b](https://github.com/lobu-ai/lobu/commit/467df8b549259ccc82f337daf23a090986dacaf8))
+* **auth:** preserve token session provenance at human-only gates ([#4591](https://github.com/lobu-ai/lobu/issues/4591)) ([47f524a](https://github.com/lobu-ai/lobu/commit/47f524a08df525d3957e3b9241941afbb5acc43b))
+* **auth:** token-derived web sessions cannot mint human-only PAT scopes ([#4578](https://github.com/lobu-ai/lobu/issues/4578)) ([476fd8c](https://github.com/lobu-ai/lobu/commit/476fd8cefbf1b8e5676374cc0b15f6eecf3e57e7))
+* **authz:** deleting a $member record removes the workspace membership ([#4564](https://github.com/lobu-ai/lobu/issues/4564)) ([475868a](https://github.com/lobu-ai/lobu/commit/475868ac4a21ad6400633d6172fe3939901bd9f5))
+* **authz:** require a human to invite members or change roles ([#4561](https://github.com/lobu-ai/lobu/issues/4561)) ([3eb7fb5](https://github.com/lobu-ai/lobu/commit/3eb7fb54b3288561f6323feb129bff7db47ecb77))
+* **automations:** fence reply completion by dispatched message ([#4592](https://github.com/lobu-ai/lobu/issues/4592)) ([8803fcf](https://github.com/lobu-ai/lobu/commit/8803fcf0cdea61340f8d88e7ba7f0122b56d38c8))
+* **automations:** honor skip_if_unchanged on external claims and degrade stalled external schedules ([#4575](https://github.com/lobu-ai/lobu/issues/4575)) ([77182cd](https://github.com/lobu-ai/lobu/commit/77182cd001d9e73c65f0342afacc2743c9fb134d))
+* **cli:** stop token lookups from switching active context or overwriting credentials ([#4595](https://github.com/lobu-ai/lobu/issues/4595)) ([852dc77](https://github.com/lobu-ai/lobu/commit/852dc77ee8dd7e4e5dc53c5b6249ba46cfb926d7))
+* **connectors:** preserve Postgres SQL validation status ([#4555](https://github.com/lobu-ai/lobu/issues/4555)) ([ea3ee66](https://github.com/lobu-ai/lobu/commit/ea3ee66fb9624c421cee75a0b5bc7962a5ef8605))
+* **examples:** Loki query errors tell the agent how to correct the query ([#4602](https://github.com/lobu-ai/lobu/issues/4602)) ([6dc90f0](https://github.com/lobu-ai/lobu/commit/6dc90f0be65b4a805288b911709cac89df644bf2))
+* **examples:** make lobu-team apply runnable and stop it reviving an archived Automation ([#4604](https://github.com/lobu-ai/lobu/issues/4604)) ([46617e6](https://github.com/lobu-ai/lobu/commit/46617e6f8b897aaa3b0a2edc525bae7f98730bc2))
+* **gchat:** accept the legacy transport's audience for claimed hosted spaces ([#4577](https://github.com/lobu-ai/lobu/issues/4577)) ([06b2a5c](https://github.com/lobu-ai/lobu/commit/06b2a5c5d1b502cf3224d09daa7afeb2d6ddd30e))
+* **gchat:** dispatch hosted app commands ([#4590](https://github.com/lobu-ai/lobu/issues/4590)) ([212b72c](https://github.com/lobu-ai/lobu/commit/212b72c0cb37b391c4ad8d21dd43aa93e0768bda))
+* **gchat:** host the public Google Chat app at platform level ([#4558](https://github.com/lobu-ai/lobu/issues/4558)) ([53f8314](https://github.com/lobu-ai/lobu/commit/53f831439b5cc77eef696e152663c700cd135785))
+* **gchat:** one welcome per pending space, readable space names, claim and setup UI ([#4581](https://github.com/lobu-ai/lobu/issues/4581)) ([49a4668](https://github.com/lobu-ai/lobu/commit/49a466807ddbcc43f04a265ddb41b8c94249e762))
+* **gchat:** send a claimed space's setup link once ([#4584](https://github.com/lobu-ai/lobu/issues/4584)) ([291b4ca](https://github.com/lobu-ai/lobu/commit/291b4ca26fd00153b968340846381ebe97cfcc16))
+* **mcp:** accept the bound workspace as an explicit tool target ([#4563](https://github.com/lobu-ai/lobu/issues/4563)) ([ca2334d](https://github.com/lobu-ai/lobu/commit/ca2334d226f0af1d6507437d9812359be4e1ebff))
+* **mcp:** tell users exactly how to get the access a denied action needs ([#4559](https://github.com/lobu-ai/lobu/issues/4559)) ([3d45560](https://github.com/lobu-ai/lobu/commit/3d45560ce7c0a4f0e9fdac0c8355631cd2909d16))
+* **operations:** say what was expected and what to do in operation errors ([#4605](https://github.com/lobu-ai/lobu/issues/4605)) ([fc844ca](https://github.com/lobu-ai/lobu/commit/fc844ca1d3292ae04d150a0af489ee5df883e7df))
+* **proxy:** require authenticated provider caller bindings ([#4593](https://github.com/lobu-ai/lobu/issues/4593)) ([60ed3b2](https://github.com/lobu-ai/lobu/commit/60ed3b289524a8cb9999bfb59b84ec2112a54435))
+* **rest:** answer role and scope denials with 403, not 400 ([#4565](https://github.com/lobu-ai/lobu/issues/4565)) ([4f8c720](https://github.com/lobu-ai/lobu/commit/4f8c7200199f0be05754f1a62be607e14897174d))
+* **sandbox:** classify script failures on type, never on message text ([#4568](https://github.com/lobu-ai/lobu/issues/4568)) ([f99837a](https://github.com/lobu-ai/lobu/commit/f99837a4a7d53568562a4b5f7c37b4fcaf295d4e))
+* **sandbox:** give script-shape mistakes exact guidance ([#4613](https://github.com/lobu-ai/lobu/issues/4613)) ([b1b1b97](https://github.com/lobu-ai/lobu/commit/b1b1b97b394134875b66d521f58df0da5fb489fd))
+* **sdk:** type host user-input errors instead of reporting INTERNAL ([#4606](https://github.com/lobu-ai/lobu/issues/4606)) ([8b864c1](https://github.com/lobu-ai/lobu/commit/8b864c1acc4f3394c8c4ddb460017cfda971e700))
+* **server:** break the url-builder import cycle that left PLATFORM_REGISTRY.gchat undefined ([#4570](https://github.com/lobu-ai/lobu/issues/4570)) ([efbcb4a](https://github.com/lobu-ai/lobu/commit/efbcb4a40d91504f70e1415af07275a88971bbb2))
+* **test:** free orphaned Postgres shm segments no cluster dir records ([#4585](https://github.com/lobu-ai/lobu/issues/4585)) ([6b4f9f7](https://github.com/lobu-ai/lobu/commit/6b4f9f709c49b161ec3cc1cba27acb83d2a0dc19))
+* **worker:** retry immutable sync completion outcomes ([#4594](https://github.com/lobu-ai/lobu/issues/4594)) ([3331da9](https://github.com/lobu-ai/lobu/commit/3331da96b3b3a1057fbab7913d6e64e035965813))
+
+
+### Performance Improvements
+
+* **core:** make OpenTelemetry exporter chain optional peer deps ([#4556](https://github.com/lobu-ai/lobu/issues/4556)) ([5082cf7](https://github.com/lobu-ai/lobu/commit/5082cf7c12264ad2133a1e97560b894577e1de34))
+
 ## [24.2.0](https://github.com/lobu-ai/lobu/compare/lobu-v24.1.1...lobu-v24.2.0) (2026-10-27)
 
 
