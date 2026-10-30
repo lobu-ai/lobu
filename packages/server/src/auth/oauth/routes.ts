@@ -6,6 +6,7 @@
  * RFC 7591 (Dynamic Client Registration), and OAuth 2.1 core endpoints.
  */
 
+import { isAPIError } from 'better-auth/api';
 import { Hono } from 'hono';
 import { createDbClientFromEnv } from '../../db/client';
 import logger from '../../utils/logger';
@@ -1493,8 +1494,8 @@ oauthRoutes.post('/oauth/token', async (c) => {
 
 /**
  * GET /oauth/userinfo
- * Returns user profile for the authenticated access token.
- * Requires `profile:read` scope.
+ * Returns user profile for the authenticated access token, PAT, or Better Auth
+ * bearer session token. OAuth and PAT credentials require `profile:read` scope.
  */
 oauthRoutes.get('/oauth/userinfo', async (c) => {
   const provider = getProvider(c);
@@ -1506,6 +1507,25 @@ oauthRoutes.get('/oauth/userinfo', async (c) => {
 
   const token = authHeader.slice(7);
   const userInfo = await provider.getUserInfo(token);
+
+  if (userInfo === 'invalid_token' && !token.startsWith('owl_pat_')) {
+    // Fall back to Better Auth's bearer() session plugin using ONLY the
+    // Authorization header (never browser cookies), so CLI/local-init session
+    // tokens resolve uniformly through `/oauth/userinfo`.
+    const auth = await createAuth(c.env);
+    const session = await auth.api
+      .getSession({ headers: new Headers({ authorization: authHeader }) })
+      .catch((error: unknown) => {
+        if (isAPIError(error) && error.statusCode === 401) return null;
+        throw error;
+      });
+    if (session?.user?.id && session.session) {
+      const sessionUserInfo = await provider.getUserInfoForSession(session.user.id);
+      if (sessionUserInfo !== 'invalid_token') {
+        return c.json(sessionUserInfo);
+      }
+    }
+  }
 
   // Report invalid tokens as 401 so clients can attempt token renewal.
   if (userInfo === 'invalid_token') {
