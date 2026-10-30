@@ -5,172 +5,119 @@ import {
   defineConfig,
   defineConnection,
   defineEntityType,
-  defineRelationshipType,
   Type,
 } from "@lobu/cli/config";
 import type LokiActivityConnector from "./loki-activity.connector.ts";
 
-const engineeringTask = defineEntityType({
-  key: "engineering-task",
-  name: "Engineering Task",
+// One backlog type for every kind of team work, written by people and agents.
+// The organic acquisition review Automation (maintained in the workspace) reads
+// the `seo` kind as its backlog and links each `seo.review` report to the SEO
+// tasks it covers, so the report's event kind is declared here.
+const task = defineEntityType({
+  key: "task",
+  name: "Task",
   description:
-    "A durable unit of engineering work coordinated by Lobu agents and linked to code changes.",
+    "A unit of team work: a bug, feature, SEO, content or operations task with its status and what done means.",
   properties: {
-    branch: Type.Optional(Type.String()),
-    source: Type.Optional(Type.String()),
-    status: Type.Optional(
+    kind: Type.Unsafe({
+      enum: ["bug", "feature", "seo", "content", "ops"],
+      type: "string",
+      title: "Kind",
+      "x-facet": true,
+      "x-table-column": true,
+    }),
+    status: Type.Unsafe({
+      enum: ["open", "in_progress", "review", "done", "blocked", "deferred"],
+      type: "string",
+      title: "Status",
+      "x-lobu": { role: "workflowState" },
+      "x-facet": true,
+      "x-table-column": true,
+    }),
+    priority: Type.Optional(
       Type.Unsafe({
+        enum: ["high", "medium", "low"],
         type: "string",
-        enum: [
-          "open",
-          "implementing",
-          "review",
-          "verification",
-          "merged",
-          "done",
-          "blocked",
-        ],
+        title: "Priority",
+        "x-facet": true,
+        "x-table-column": true,
       })
     ),
-    github_pr: Type.Optional(Type.Integer()),
-    repository: Type.Optional(Type.String()),
-    github_issue: Type.Optional(Type.Integer()),
-    verification_level: Type.Optional(
+    summary: Type.Optional(
       Type.Unsafe({
         type: "string",
-        enum: ["none", "tests", "e2e", "ui", "production"],
+        title: "Summary",
+        description: "What the work is and why it matters",
       })
     ),
-    verification_status: Type.Optional(
+    acceptance: Type.Optional(
       Type.Unsafe({
         type: "string",
-        enum: ["pending", "passed", "failed"],
+        title: "Acceptance",
+        description: "What done means and how it is verified",
       })
     ),
-    verification_required: Type.Optional(Type.Boolean()),
-  },
-  eventKinds: {
-    "engineering-task.checkpoint": {
-      description:
-        "Durable implementation checkpoint with status, branch, PR, tests, verification, and blockers",
-    },
-    "engineering-task.decision": {
-      description: "Durable engineering decision and rationale",
-    },
-    "engineering-task.verification_completed": {
-      description: "Completed test or environment verification evidence",
-    },
-    "engineering-task.review_completed": {
-      description: "Completed code review outcome and remaining findings",
-    },
-  },
-});
-
-const targetsRepository = defineRelationshipType({
-  key: "targets_repository",
-  name: "Targets Repository",
-  description: "Engineering task targets a code repository resource.",
-  rules: [{ source: engineeringTask, target: "$resource" }],
-});
-
-// Schema for the organic acquisition review. Records are written by agents;
-// the review Automation itself is maintained in the workspace.
-const seoProject = defineEntityType({
-  key: "seo-project",
-  name: "SEO Project",
-  description:
-    "Shared goals, evidence rules and source readiness for organic acquisition.",
-  properties: {
-    scope: Type.Optional(
-      Type.Unsafe({
-        type: "array",
-        items: { type: "string" },
-        title: "Website scope",
-      })
+    next_action: Type.Optional(
+      Type.Unsafe({ type: "string", title: "Next action" })
     ),
-    website: Type.Optional(
+    area: Type.Optional(
       Type.Unsafe({
         type: "string",
-        title: "Website",
+        title: "Area",
+        description:
+          "Narrower area within the kind, such as onboarding or measurement for SEO work",
+      })
+    ),
+    github_issue: Type.Optional(
+      Type.Unsafe({ type: "integer", title: "GitHub issue", minimum: 1 })
+    ),
+    github_pr: Type.Optional(
+      Type.Unsafe({ type: "integer", title: "GitHub pull request", minimum: 1 })
+    ),
+    branch: Type.Optional(Type.Unsafe({ type: "string", title: "Branch" })),
+    url: Type.Optional(
+      Type.Unsafe({
+        type: "string",
+        title: "Link",
         format: "uri",
-        description: "Canonical public website",
+        description: "Primary page or resource the work targets",
       })
     ),
-    objective: Type.Optional(
-      Type.Unsafe({
-        type: "string",
-        title: "Objective",
-        description: "Outcome this work should improve",
-      })
-    ),
-    assumptions: Type.Optional(
+    evidence_urls: Type.Optional(
       Type.Unsafe({
         type: "array",
-        items: { type: "string" },
-        title: "Assumptions",
+        items: { type: "string", format: "uri" },
+        title: "Evidence",
       })
     ),
-    review_status: Type.Optional(
-      Type.Unsafe({
-        enum: ["baseline", "measuring", "blocked", "active"],
-        type: "string",
-        title: "Review status",
-      })
-    ),
-    last_review_at: Type.Optional(
+    observed_at: Type.Optional(
       Type.Unsafe({
         type: "string",
-        title: "Setup baseline observed",
+        title: "Last observed",
         format: "date-time",
-        readOnly: true,
-        description:
-          "Timestamp of the setup baseline. Use the latest review and run history for current checks; the report-only automation does not update this field.",
       })
     ),
-    method_version: Type.Optional(
-      Type.Unsafe({ type: "string", title: "Method version", readOnly: true })
-    ),
-    primary_measure: Type.Optional(
+    confidence: Type.Optional(
       Type.Unsafe({
+        enum: ["verified", "hypothesis"],
         type: "string",
-        title: "Primary measure",
+        title: "Evidence confidence",
         description:
-          "Confirmed definition, or explicit hypothesis pending validation",
+          "Verified means the observation was verified; impact can remain unmeasured.",
       })
     ),
-    source_readiness: Type.Optional(
+    evidence_basis: Type.Optional(
       Type.Unsafe({
-        type: "array",
-        items: {
-          type: "object",
-          properties: {
-            detail: { type: "string", title: "What this means" },
-            source: { type: "string", title: "Source" },
-            status: {
-              enum: [
-                "verified",
-                "available_unverified",
-                "not_connected",
-                "blocked",
-                "excluded",
-              ],
-              type: "string",
-              title: "Status",
-            },
-          },
-        },
-        title: "Setup source readiness",
-        description:
-          "Baseline source observations. The latest review and run history carry the most recent checked coverage.",
+        enum: ["public_content", "analytics", "mixed"],
+        type: "string",
+        title: "Evidence basis",
       })
     ),
-    budget_usd_per_run: Type.Optional(
+    measurement_status: Type.Optional(
       Type.Unsafe({
-        type: "number",
-        title: "External data budget per run (USD)",
-        minimum: 0,
-        description:
-          "Excludes existing agent inference costs. Paid provider calls require an explicit approved increase.",
+        enum: ["baseline_needed", "measured", "not_applicable"],
+        type: "string",
+        title: "Impact measurement",
       })
     ),
   },
@@ -198,96 +145,6 @@ const seoProject = defineEntityType({
         },
       },
     },
-  },
-});
-
-const seoOpportunity = defineEntityType({
-  key: "seo-opportunity",
-  name: "SEO Opportunity",
-  description:
-    "Evidence-backed SEO and website activation work with reviewable actions and acceptance checks.",
-  properties: {
-    kind: Type.Optional(
-      Type.Unsafe({
-        enum: [
-          "onboarding",
-          "content",
-          "measurement",
-          "technical",
-          "search_demand",
-        ],
-        type: "string",
-        title: "Kind",
-      })
-    ),
-    status: Type.Optional(
-      Type.Unsafe({
-        enum: [
-          "proposed",
-          "in_progress",
-          "ready_for_review",
-          "done",
-          "deferred",
-        ],
-        type: "string",
-        title: "Status",
-        "x-lobu": { role: "workflowState" },
-        "x-facet": true,
-      })
-    ),
-    page_url: Type.Optional(
-      Type.Unsafe({ type: "string", title: "Target page", format: "uri" })
-    ),
-    priority: Type.Optional(
-      Type.Unsafe({
-        enum: ["high", "medium", "low"],
-        type: "string",
-        title: "Priority",
-        "x-facet": true,
-      })
-    ),
-    confidence: Type.Optional(
-      Type.Unsafe({
-        enum: ["verified", "hypothesis"],
-        type: "string",
-        title: "Evidence confidence",
-        description:
-          "Verified means the observation was verified; impact can remain unmeasured.",
-      })
-    ),
-    validation: Type.Optional(
-      Type.Unsafe({ type: "string", title: "Acceptance checks" })
-    ),
-    next_action: Type.Optional(
-      Type.Unsafe({ type: "string", title: "Next action" })
-    ),
-    observed_at: Type.Optional(
-      Type.Unsafe({ type: "string", title: "Observed at", format: "date-time" })
-    ),
-    project_slug: Type.Optional(
-      Type.Unsafe({ type: "string", title: "Project" })
-    ),
-    evidence_urls: Type.Optional(
-      Type.Unsafe({
-        type: "array",
-        items: { type: "string", format: "uri" },
-        title: "Evidence",
-      })
-    ),
-    evidence_basis: Type.Optional(
-      Type.Unsafe({
-        enum: ["public_content", "analytics", "mixed"],
-        type: "string",
-        title: "Evidence basis",
-      })
-    ),
-    measurement_status: Type.Optional(
-      Type.Unsafe({
-        enum: ["baseline_needed", "measured", "not_applicable"],
-        type: "string",
-        title: "Impact measurement",
-      })
-    ),
   },
 });
 
@@ -544,8 +401,7 @@ export default defineConfig({
     companyCloudflareAccount,
     gmailOAuthApp,
   ],
-  entities: [engineeringTask, seoProject, seoOpportunity],
-  relationships: [targetsRepository],
+  entities: [task],
   connections: [
     productActivityDb,
     productionLogs,
