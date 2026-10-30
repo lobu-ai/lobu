@@ -13,7 +13,7 @@
   },
   "devDependencies": {
     "promptfoo": "^0.121.0",
-    "@lobu/cli": "^9.3.0",
-    "@lobu/connector-sdk": "^9.3.0"
+    "@lobu/cli": "^24.3.0",
+    "@lobu/connector-sdk": "^24.3.0"
   }
 }

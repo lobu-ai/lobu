@@ -10,8 +10,8 @@
     "build:identity-mcp": "bun scripts/build-identity-mcp.ts"
   },
   "devDependencies": {
-    "@lobu/cli": "^24.1.1",
-    "@lobu/connector-sdk": "^24.1.1",
+    "@lobu/cli": "^24.3.0",
+    "@lobu/connector-sdk": "^24.3.0",
     "@noble/hashes": "2.2.0"
   }
 }
