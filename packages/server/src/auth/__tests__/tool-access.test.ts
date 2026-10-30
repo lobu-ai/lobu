@@ -505,6 +505,26 @@ describe('routeAction per-action enforcement', () => {
     ).rejects.toThrow(/manage_connections\.install_connector needs admin access/i);
   });
 
+  it('points an install denial at connections.connect, which bundled connectors use', async () => {
+    for (const ctx of [memberWriteCtx, { ...memberWriteCtx, memberRole: 'admin' }]) {
+      await expect(
+        routeAction('manage_connections', 'install_connector', ctx, {
+          install_connector: async () => ({ ok: true }),
+        })
+      ).rejects.toThrow(
+        'Bundled catalog connectors need no install: connections.connect({ connector_key }) installs one on first connect and needs only write access.'
+      );
+    }
+  });
+
+  it('adds no connector hint to other admin denials', async () => {
+    await expect(
+      routeAction('manage_connections', 'uninstall_connector', memberWriteCtx, {
+        uninstall_connector: async () => ({ ok: true }),
+      })
+    ).rejects.not.toThrow(/connections\.connect/);
+  });
+
   it('preserves system reaction calls', async () => {
     await expect(
       routeAction(

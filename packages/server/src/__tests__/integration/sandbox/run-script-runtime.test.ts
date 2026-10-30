@@ -641,6 +641,39 @@ describe("sandbox runtime", () => {
     expect(Date.now() - started).toBeLessThan(150);
   });
 
+  it("appends what the host was waiting on when the script deadline hits", async () => {
+    const stubSdk = { log: () => undefined } as unknown as ClientSDK;
+    let described = 0;
+    const result = await runScript({
+      source: "export default async (ctx) => { await ctx.sleep(200); return 'late'; };",
+      sdk: stubSdk,
+      limits: { timeoutMs: 25 },
+      describeTimeout: () => {
+        described += 1;
+        return "operations.execute run 7 reached the script deadline (phase: executing).";
+      },
+    });
+
+    expect(result.error?.name).toBe("TimeoutError");
+    expect(result.error?.message).toBe(
+      "TimeoutError: script exceeded 25ms wall-clock budget. operations.execute run 7 reached the script deadline (phase: executing).",
+    );
+    expect(described).toBe(1);
+  });
+
+  it("keeps the plain deadline message when nothing was in flight or the describer fails", async () => {
+    const stubSdk = { log: () => undefined } as unknown as ClientSDK;
+    for (const describeTimeout of [() => null, () => { throw new Error("boom"); }]) {
+      const result = await runScript({
+        source: "export default async (ctx) => { await ctx.sleep(200); };",
+        sdk: stubSdk,
+        limits: { timeoutMs: 25 },
+        describeTimeout,
+      });
+      expect(result.error?.message).toBe("TimeoutError: script exceeded 25ms wall-clock budget");
+    }
+  });
+
   it.each(["read", "full"] as const)("guides scoped %s callers to invoke the target workspace directly", async (sdkMode) => {
     const org = vi.fn();
     const result = await runScript({

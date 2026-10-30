@@ -81,6 +81,8 @@ interface AccessDenialInput {
   workspace: string | null;
   /** An account-level call (no single workspace role): skip the role standing. */
   accountScope?: boolean;
+  /** A lower-tier route to the same goal, appended to an admin denial. */
+  alternative?: string | null;
 }
 
 /**
@@ -92,6 +94,13 @@ interface AccessDenialInput {
  * class stays the structure; this only renders it.
  */
 export function scopeDenialMessage(input: AccessDenialInput): string {
+  const message = baseScopeDenialMessage(input);
+  return input.requiredAccess === 'admin' && input.alternative
+    ? `${message} ${input.alternative}`
+    : message;
+}
+
+function baseScopeDenialMessage(input: AccessDenialInput): string {
   const { subject, requiredAccess, memberRole, tokenType, workspace, accountScope } = input;
   const inWorkspace = workspace ? ` in ${workspace}` : ' in this workspace';
   const ofWorkspace = workspace ? ` of ${workspace}` : ' of this workspace';
@@ -142,7 +151,8 @@ export async function workspaceScopeDenialMessage(
     tokenType?: TokenType | null;
   },
   subject: string,
-  requiredAccess: ToolAccessLevel
+  requiredAccess: ToolAccessLevel,
+  alternative?: string | null
 ): Promise<string> {
   // Only reached on the denial path, so a lookup per denial is fine; a failed
   // lookup only loses the workspace name, never the denial.
@@ -153,6 +163,7 @@ export async function workspaceScopeDenialMessage(
     memberRole: ctx.memberRole,
     tokenType: ctx.tokenType,
     workspace,
+    alternative,
   });
 }
 
@@ -206,10 +217,14 @@ export async function enforceRoleScopeAccess(
   requiredAccess: ToolAccessLevel,
   ctx: RoleScopeContext,
   subject: string,
-  writeRole?: string
+  writeRole?: string,
+  /** A lower-tier route to the same goal (`ownerAdminActionAlternative`); admin denials only. */
+  alternative?: string | null
 ): Promise<void> {
   if (requiredAccess === 'admin' && !isAdminOrOwnerRole(ctx.memberRole)) {
-    throw new AccessDeniedError(await workspaceScopeDenialMessage(ctx, subject, 'admin'));
+    throw new AccessDeniedError(
+      await workspaceScopeDenialMessage(ctx, subject, 'admin', alternative)
+    );
   }
 
   if (requiredAccess === 'write' && writeRole && !ctx.memberRole) {
@@ -217,7 +232,7 @@ export async function enforceRoleScopeAccess(
   }
 
   if (!hasRequiredMcpScope(requiredAccess, ctx.scopes)) {
-    const message = await workspaceScopeDenialMessage(ctx, subject, requiredAccess);
+    const message = await workspaceScopeDenialMessage(ctx, subject, requiredAccess, alternative);
     if (requiredAccess === 'admin') throw new McpScopeRequiredError(message, 'mcp:admin');
     throw new AccessDeniedError(message);
   }

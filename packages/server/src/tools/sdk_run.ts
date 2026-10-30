@@ -20,7 +20,8 @@ import {
   runScript,
   safeErrorDetails,
 } from "../sandbox/run-script";
-import type { AccountToolContext } from "./registry";
+import type { AccountToolContext, DeviceWaitActivity } from "./registry";
+import { describeInFlightDeviceWaits } from "../sandbox/device-wait-activity";
 import { withValidatedArgs } from "./validate-args";
 import { mcpResourceLinksForSdkReturnValue } from "../mcp-media-resources";
 import { attachMcpResultContent } from "./mcp-result-content";
@@ -460,8 +461,10 @@ async function runSandbox(
           : AbortSignal.timeout(timeoutMs),
       })
     : [];
+  const deviceWaits: DeviceWaitActivity = new Map();
   const sdkContext = {
     ...ctx,
+    deviceWaits,
     sdkBrowserInvocation: { nonce: randomUUID(), title: args.title ?? "" },
   };
   const result = await runScript({
@@ -488,6 +491,7 @@ async function runSandbox(
       files,
     },
     limits: { timeoutMs: Math.max(1, timeoutMs - (Date.now() - startedAt)) },
+    describeTimeout: () => describeInFlightDeviceWaits(deviceWaits),
   });
   if (ctx.executionMode === "capture" && result.skippedCalls > 0) {
     await captureEffect(ctx.captureIdentity, "sdk.run", {

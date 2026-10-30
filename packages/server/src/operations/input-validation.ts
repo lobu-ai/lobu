@@ -2,6 +2,7 @@ import type { Options, ValidateFunction } from 'ajv';
 import Ajv2020 from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 import { createAjv, formatAjvError } from '@lobu/core/ajv';
+import { expectedShapeHint } from './input-shape-hint';
 import type { OperationDescriptor } from './types';
 import { getErrorMessage } from '@lobu/core';
 
@@ -52,9 +53,10 @@ export function validateOperationInput(
     }
     if (validate(input)) return null;
     const firstError = validate.errors?.[0];
-    return firstError
-      ? formatAjvError(firstError)
-      : 'input does not match operation schema';
+    if (!firstError) return 'input does not match operation schema';
+    const message = formatAjvError(firstError);
+    const hint = expectedShapeHint(schema, firstError.instancePath);
+    return hint ? `${message}; ${hint}` : message;
   } catch (error) {
     return `operation input schema is invalid: ${getErrorMessage(error)}`;
   }

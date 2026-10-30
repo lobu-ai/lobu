@@ -1,4 +1,4 @@
-import { getRequiredAccessLevel } from '../../auth/tool-access';
+import { getRequiredAccessLevel, ownerAdminActionAlternative } from '../../auth/tool-access';
 import { ToolUserError } from '../../utils/errors';
 import logger from '../../utils/logger';
 import { enforceRoleScopeAccess, isSystemContext } from '../access-control';
@@ -36,7 +36,8 @@ async function enforceActionAccess(toolName: string, action: string, ctx: ToolCo
     requiredAccess,
     ctx,
     `${toolName}.${action}`,
-    `Action ${toolName}.${action} requires workspace membership with write access.`
+    `Action ${toolName}.${action} requires workspace membership with write access.`,
+    ownerAdminActionAlternative(toolName, action)
   );
 }
 

@@ -46,7 +46,9 @@ export function formatAjvError(error: ErrorObject): string {
     case "type":
       return `${field}: must be ${error.params.type}`;
     case "required":
-      return `missing required field: ${error.params.missingProperty}`;
+      // A nested object reports `required` at the object's own path; name the
+      // field from the root so `ref/backend_node_id` is not read as `backend_node_id`.
+      return `missing required field: ${error.instancePath ? `${field}/` : ""}${error.params.missingProperty}`;
     case "format":
       return `${field}: must be a valid ${error.params.format}`;
     case "minimum":

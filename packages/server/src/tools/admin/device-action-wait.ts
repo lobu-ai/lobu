@@ -251,6 +251,8 @@ interface WaitForDeviceActionRunOptions {
    */
   sleep?: (ms: number) => Promise<void>;
   abortSignal?: AbortSignal;
+  /** Called once, when the wait first observes a device claim on the run. */
+  onClaimed?: () => void;
 }
 
 export function waitForDeviceActionRun(
@@ -261,13 +263,15 @@ export function waitForDeviceActionRun(
    * On abort we stop polling and finalize the run as `timeout` so the orphaned
    * poll loop and any in-flight device work don't leak past the caller.
    */
-  abortSignal?: AbortSignal
+  abortSignal?: AbortSignal,
+  onClaimed?: () => void
 ): Promise<DeviceActionRunOutcome> {
   return waitForDeviceActionRunWithOptions(runId, organizationId, {
     queueMs: DEVICE_ACTION_QUEUE_BUDGET_MS,
     postClaimMs: POST_CLAIM_BUDGET_MS,
     pollMs: POLL_MS,
     abortSignal,
+    onClaimed,
   });
 }
 
@@ -341,6 +345,7 @@ export async function waitForDeviceActionRunWithOptions(
         row.claimed_at instanceof Date
           ? row.claimed_at.getTime()
           : new Date(row.claimed_at).getTime();
+      options.onClaimed?.();
     }
     // Caller aborted (e.g. reaction timeout) — stop polling and let the
     // timeout finalization below mark the run, so we don't leak this loop.
