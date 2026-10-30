@@ -186,12 +186,11 @@ export function compileResourceVisibility(
   // all-required envelope: no linked resource may be missing from the
   // satisfied set, i.e. the row links none of the caller's UNSATISFIED
   // resources. Both sets are uncorrelated ARRAYs, so each is one InitPlan per
-  // statement and the per-row test is two array overlaps. A correlated
-  // per-row subquery here (the previous `NOT EXISTS (... unnest(entity_ids)
-  // ...)` form) is parallel-restricted: it forced every events read that
-  // composes this gate onto a single-process scan and inflated its cost
-  // estimate by orders of magnitude. `EXCEPT` also keeps a NULL membership
-  // target from poisoning the set test the way `NOT (x IN (...))` would.
+  // statement and the per-row test is two array overlaps. Keep it that way: a
+  // correlated per-row subquery over `entity_ids` is parallel-restricted and
+  // forces every events read that composes this gate onto a single-process
+  // scan. `EXCEPT` (not `NOT IN`) because `to_entity_id` is nullable for
+  // federated endpoints, and a NULL in a `NOT IN` list makes the test NULL.
   //
   // `compileConnectionFkVisibility` is also composed at every read seam to
   // enforce connection visibility on stamped content and interaction events.

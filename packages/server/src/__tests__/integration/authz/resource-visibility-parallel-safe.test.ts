@@ -2,17 +2,15 @@
  * Resource-visibility gate: plan shape and result equivalence.
  *
  * Every events read seam (query_sql's `events` CTE, Automation sources,
- * read_knowledge, search recall) composes `compileResourceVisibility`. When
- * its all-required envelope test was a correlated per-row subquery, Postgres
- * treated the whole WHERE clause as parallel-restricted, so a large
- * organization's history scan ran in one process and its cost estimate grew by
- * orders of magnitude. In production, one full-history read went from 4.8s
- * without the gate to 8.3s with it, over the 5s query_sql budget.
+ * read_knowledge, search recall) composes `compileResourceVisibility`. A
+ * correlated per-row subquery in its all-required envelope test makes the
+ * whole WHERE clause parallel-restricted, so a large organization's history
+ * scan runs in one process and can exceed the 5s query_sql budget.
  *
  * The plan test forces the cheapest parallel plan and checks that the events
  * scan stays parallel-aware with the production predicate composed. The
  * equivalence test pins the gate's row-level answer against an independent
- * oracle for every envelope shape the rewrite touches.
+ * oracle for every envelope shape.
  */
 
 import { beforeAll, describe, expect, it } from 'vitest';
