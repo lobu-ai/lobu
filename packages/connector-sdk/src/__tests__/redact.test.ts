@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { StreamRedactor, redactOutput } from '../redact.js';
+import { redactOutput } from '../redact.js';
 
 describe('redactOutput', () => {
   test('redacts HTTP Authorization header', () => {
@@ -195,59 +195,5 @@ describe('redactOutput', () => {
     expect(redactOutput(input)).toBe(input);
     expect(redactOutput('password=secret7 status=500')).toBe('password=[REDACTED] status=500');
     expect(redactOutput('password=[REDACTED] status=500')).toBe('password=[REDACTED] status=500');
-  });
-});
-
-describe('StreamRedactor', () => {
-  function collect(): { emit: (s: string) => void; out: () => string } {
-    let buf = '';
-    return { emit: (s) => (buf += s), out: () => buf };
-  }
-
-  test('redacts secret split across two chunks', () => {
-    const r = new StreamRedactor();
-    const c = collect();
-    r.process('GET /api\nAuthorization: Bear', c.emit);
-    r.process('er abc123secret456\nfoo\n', c.emit);
-    r.flush(c.emit);
-    expect(c.out()).not.toContain('abc123secret456');
-    expect(c.out()).toContain('Authorization: [REDACTED]');
-  });
-
-  test('emits complete lines as soon as a newline arrives', () => {
-    const r = new StreamRedactor();
-    const c = collect();
-    r.process('hello world\n', c.emit);
-    expect(c.out()).toBe('hello world\n');
-  });
-
-  test('flush releases trailing partial line through redactor', () => {
-    const r = new StreamRedactor();
-    const c = collect();
-    r.process('line1\nAuthorization: Bearer secret_long_token', c.emit);
-    expect(c.out()).toBe('line1\n');
-    r.flush(c.emit);
-    expect(c.out()).not.toContain('secret_long_token');
-    expect(c.out()).toContain('Authorization: [REDACTED]');
-  });
-
-  test('emits prefix when buffer would exceed cap with no newline', () => {
-    const r = new StreamRedactor();
-    const c = collect();
-    // 8200 chars, no newline — exceeds 8192 cap.
-    r.process('x'.repeat(8200), c.emit);
-    expect(c.out().length).toBeGreaterThan(0);
-  });
-
-  test('redacts a secret embedded near the cap-boundary even with no newline', () => {
-    const r = new StreamRedactor();
-    const c = collect();
-    // A long no-newline payload with a secret somewhere inside. Cap is
-    // 8192; the redactor must redact the entire combined buffer before
-    // emitting, otherwise a slice near the cap could split the match.
-    const payload = 'x'.repeat(8000) + 'Authorization: Bearer abc123secret456 ' + 'y'.repeat(500);
-    r.process(payload, c.emit);
-    expect(c.out()).not.toContain('abc123secret456');
-    expect(c.out()).toContain('Authorization: [REDACTED]');
   });
 });

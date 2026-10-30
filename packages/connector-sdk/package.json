@@ -78,11 +78,13 @@
     },
     "./redact": {
       "types": "./dist/redact.d.ts",
+      "bun": "./src/redact.ts",
       "import": "./dist/redact.js"
     }
   },
   "files": [
     "dist",
+    "src/redact.ts",
     "!**/*.map"
   ],
   "sideEffects": false,
