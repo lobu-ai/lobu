@@ -180,12 +180,18 @@ export function compileResourceVisibility(
                 AND s.connection_id = ${aclConnectionIdSql('c')}
             )`;
 
-  const linkedIds = `unnest(COALESCE(${tableAlias}.entity_ids, '{}'::bigint[])) AS linked(id)`;
+  const linkedIds = `COALESCE(${tableAlias}.entity_ids, '{}'::bigint[])`;
 
   // Unstamped content follows its source visibility; stamped content faces the
   // all-required envelope: no linked resource may be missing from the
-  // satisfied set. ARRAY lets the stamped test build its resource set in an
-  // InitPlan, independently of the per-row unnest used by the all-required test.
+  // satisfied set, i.e. the row links none of the caller's UNSATISFIED
+  // resources. Both sets are uncorrelated ARRAYs, so each is one InitPlan per
+  // statement and the per-row test is two array overlaps. A correlated
+  // per-row subquery here (the previous `NOT EXISTS (... unnest(entity_ids)
+  // ...)` form) is parallel-restricted: it forced every events read that
+  // composes this gate onto a single-process scan and inflated its cost
+  // estimate by orders of magnitude. `EXCEPT` also keeps a NULL membership
+  // target from poisoning the set test the way `NOT (x IN (...))` would.
   //
   // `compileConnectionFkVisibility` is also composed at every read seam to
   // enforce connection visibility on stamped content and interaction events.
@@ -197,12 +203,9 @@ export function compileResourceVisibility(
         WHERE om."organizationId" = ${orgParam}
           AND om."userId" = ${userParam}
       ))
-      OR (CASE WHEN COALESCE(${tableAlias}.entity_ids, '{}'::bigint[]) && ARRAY(${resourceIds})
-        THEN NOT EXISTS (
-          SELECT 1 FROM ${linkedIds}
-          WHERE linked.id IN (${resourceIds})
-            AND NOT (linked.id IN (${satisfiedResourceIds}))
-        )
+      OR (CASE WHEN ${linkedIds} && ARRAY(${resourceIds})
+        THEN NOT (${linkedIds} && ARRAY(${resourceIds}
+          EXCEPT ${satisfiedResourceIds}))
         ELSE (${tableAlias}.connection_id IS NULL
           OR ${tableAlias}.connection_id IN (${unstampedVisibleConnectionIds}))
       END)
