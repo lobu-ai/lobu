@@ -10,9 +10,10 @@ import {
 import type LokiActivityConnector from "./loki-activity.connector.ts";
 
 // One backlog type for every kind of team work, written by people and agents.
-// The organic acquisition review Automation (maintained in the workspace) reads
-// the `seo` kind as its backlog and links each `seo.review` report to the SEO
-// tasks it covers, so the report's event kind is declared here.
+// The organic acquisition review Automation reads the `seo` kind as its backlog
+// and can link each report to the SEO tasks it covers. The Automation and its
+// `seo.review` report kind are maintained in the workspace: the Automation is
+// not bound to an entity, so the kind is declared on the workspace member type.
 const task = defineEntityType({
   key: "task",
   name: "Task",
@@ -120,31 +121,6 @@ const task = defineEntityType({
         title: "Impact measurement",
       })
     ),
-  },
-  eventKinds: {
-    "seo.review": {
-      description:
-        "Dated SEO review with source coverage, evidence, hypotheses and follow-up actions.",
-      metadataSchema: {
-        type: "object",
-        required: [
-          "report_key",
-          "method_version",
-          "observed_at",
-          "source_coverage",
-          "paid_data_spend_usd",
-          "measurement_status",
-        ],
-        properties: {
-          report_key: { type: "string", maxLength: 256, minLength: 1 },
-          observed_at: { type: "string", format: "date-time" },
-          method_version: { type: "string", minLength: 1 },
-          source_coverage: { type: "string", minLength: 1 },
-          measurement_status: { type: "string", minLength: 1 },
-          paid_data_spend_usd: { type: "number", minimum: 0 },
-        },
-      },
-    },
   },
 });
 
@@ -375,7 +351,7 @@ const companyCloudflare = defineConnection({
   appAuthProfile: cloudflareOAuthApp,
 });
 
-// The Google OAuth app behind the company Gmail and Search Console connections.
+// The Google OAuth app behind the company Gmail connection.
 const gmailOAuthApp = defineAuthProfile({
   slug: "google-gmail-google-app",
   connector: "google.gmail",
