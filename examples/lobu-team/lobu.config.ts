@@ -7,114 +7,9 @@ import {
   defineConnection,
   defineEntityType,
   defineRelationshipType,
-  defineSkill,
-  every,
-  field,
-  reactionFromFile,
-  secret,
-  skillFromFile,
   Type,
 } from "@lobu/cli/config";
-import type DeliverooConnector from "./deliveroo.connector.ts";
 import type LokiActivityConnector from "./loki-activity.connector.ts";
-import type lunchDeliverooReaction from "./lunch-deliveroo.reaction.ts";
-const lunchOpenSkill = defineSkill({
-  name: "lunch-open",
-  content:
-    "Open today's office lunch run (step 1 in your instructions):\n\n1. Check memory for a `lunch-run` entity dated today — if one exists and isn't\n   cancelled, stop (don't open a second one).\n2. Guess who's in from recent chat activity and past `lunch-run` entities.\n3. Post the lunch call in the channel: react 🍕 / \"+1\" to join, drop restaurant\n   recommendations, options coming ~11:35, targeting ~12:30 delivery. @-mention\n   the people you think are in, but make clear anyone can join or skip.\n4. Open a thread off that message.\n5. Save a `lunch-run` entity {date, channel, status: \"collecting\", thread_ref,\n   restaurant: null, items: []} and a `lunch:opened` event linked to it.\n\nThen end — the lobu-team-lunch-finalize Automation takes it from here. Keep it to one short\nmessage in the channel.\n",
-});
-
-const lunchFinalizeSkill = defineSkill({
-  name: "lunch-finalize",
-  content:
-    'Finalize today\'s office lunch run (step 2 in your instructions):\n\n1. Find today\'s `lunch-run` entity (status "collecting"). If there isn\'t one,\n   open one (step 1) and stop. If it\'s already "done"/"cancelled", do nothing.\n2. Read the run\'s thread — work out who\'s in (🍕 / "+1" / put in an order) and\n   any restaurant recommendations. If nobody\'s in: post a "skipping today 👋"\n   note, set the run to "cancelled", save a `lunch:cancelled` event, stop.\n3. Pick the restaurant (a clear thread recommendation, else a usual spot from\n   USER.md, biased away from the last couple of runs).\n4. Post the call for orders: name the restaurant and its Deliveroo page. You do\n   NOT scrape the menu yourself — a live menu shortlist with real prices is\n   fetched and posted automatically right after this turn (the deliveroo\n   connector reads it via the office\'s Owletto extension). Just set `restaurant`\n   so that reaction knows which one. Always accept free-text orders.\n5. Collect orders from replies + number reactions into items: [{person, item,\n   price?, notes}]. Ask directly about anything ambiguous — don\'t guess silently.\n6. Post the summary in the thread: restaurant; per-person list (@person — item\n   (notes)); subtotal + per-head (flag if well over budget); and the next action\n   — "@here someone place + pay on Deliveroo: <link>". The live menu + order link\n   arrive from the reaction; you never build a basket, log in, or touch payment.\n7. Update the `lunch-run` entity (status "done", restaurant, items, subtotal)\n   and save a `lunch:placed` event linked to it. Outcome is "manual" — a human\n   places + pays on Deliveroo.\n\nNever complete checkout or pay. A run is a success once the order list is\ncollected and handed off cleanly.\n',
-});
-
-const foodOrdering = defineAgent({
-  id: "food-ordering",
-  name: "food-ordering",
-  description:
-    "Runs the office lunch order — presence check, recommendations, options poll, order collection, Deliveroo basket handoff",
-  dir: ".",
-  skills: [
-    skillFromFile("./skills/deliveroo-order"),
-    lunchOpenSkill,
-    lunchFinalizeSkill,
-  ],
-  providers: [
-    {
-      id: "claude",
-      model: "claude-sonnet-5",
-      key: secret("ANTHROPIC_API_KEY"),
-    },
-  ],
-  network: {
-    // Deliveroo is a flat allow rather than LLM-judged: the egress judge needs
-    // an ANTHROPIC_API_KEY (OAuth tokens are rejected for direct API use), and
-    // the deliveroo-order skill's script has no checkout/payment path, so the
-    // per-request judge was defense-in-depth we opt out of here.
-    allowed: [
-      "registry.npmjs.org",
-      ".npmjs.org",
-      "playwright.azureedge.net",
-      "cdn.playwright.dev",
-      "deliveroo.co.uk",
-      ".deliveroo.co.uk",
-      "deliveroo.com",
-      ".deliveroo.com",
-    ],
-  },
-});
-
-const lunchRun = defineEntityType({
-  key: "lunch-run",
-  name: "Lunch run",
-  description:
-    "One day's office lunch order — who's in, what they ordered, the restaurant, the basket link, and where it ended up",
-  properties: {
-    date: field("Date", {
-      description: "ISO date of the run (one run per day)",
-    }),
-    channel: field("Channel", {
-      description: "The chat channel/conversation the run happened in",
-      column: false,
-    }),
-    status: field("Status", { enum: ["collecting", "done", "cancelled"] }),
-    restaurant: field("Restaurant", { optional: true }),
-    thread_ref: Type.Optional(
-      Type.Unsafe({
-        type: "string",
-
-        description:
-          "Reference to the thread/message where the run is happening — lunch-finalize uses this to find the conversation",
-      })
-    ),
-    items: Type.Optional(
-      Type.Unsafe({
-        type: "array",
-        description: "Per-person order lines",
-        items: {
-          type: "object",
-          properties: {
-            person: { type: "string" },
-            item: { type: "string" },
-            price: { type: "number" },
-            notes: { type: "string" },
-          },
-        },
-      })
-    ),
-    subtotal: Type.Optional(field(Type.Number(), "Subtotal")),
-    basket_url: Type.Optional(
-      Type.Unsafe({
-        type: "string",
-        description:
-          "Deliveroo group-order / basket link handed to a human, or null if placed manually",
-      })
-    ),
-    notes: Type.Optional(Type.Unsafe({ type: "string" })),
-  },
-});
 
 const engineeringTask = defineEntityType({
   key: "engineering-task",
@@ -177,51 +72,6 @@ const targetsRepository = defineRelationshipType({
   name: "Targets Repository",
   description: "Engineering task targets a code repository resource.",
   rules: [{ source: engineeringTask, target: "$resource" }],
-});
-
-// The office's Deliveroo connection. Feedless — it exposes only on-demand
-// actions (search_restaurants / read_menu) that the lobu-team-lunch-finalize reaction
-// drives through the paired Owletto Chrome extension. `restaurants_url` is the
-// office's delivery-location restaurants list (set it to your office postcode's
-// Deliveroo page — the geohash pins delivery to that address).
-const deliverooConn = defineConnection({
-  slug: "deliveroo-office",
-  connector: "deliveroo",
-  name: "Deliveroo — office",
-  config: {
-    restaurants_url:
-      "https://deliveroo.co.uk/restaurants/london/the-city?fulfillment_method=DELIVERY&geohash=gcpvjcnm9jsv",
-  },
-});
-
-const lunchOpen = defineAutomation({
-  agent: foodOrdering,
-  slug: "lobu-team-lunch-open",
-  name: "Open the lunch run",
-  triggers: [every("0 11 * * 1-5")],
-  tags: ["lunch", "daily"],
-  minCooldownSeconds: 600,
-  skills: ["lunch-open"],
-  // No inline schema: the run's state lives on the `lunch-run` entity (created
-  // above) — the one source of truth, editable + correctable like any entity.
-});
-
-const lunchFinalize = defineAutomation({
-  agent: foodOrdering,
-  slug: "lobu-team-lunch-finalize",
-  name: "Collect orders and hand off",
-  triggers: [every("35 11 * * 1-5")],
-  tags: ["lunch", "daily"],
-  minCooldownSeconds: 600,
-  reaction: reactionFromFile<typeof lunchDeliverooReaction>(
-    "./lunch-deliveroo.reaction.ts"
-  ),
-  reactionsGuidance:
-    "When the run ends in `placed` or `manual`, store the per-head cost back into a\n`lunch:placed` event on the lunch-run entity so the next day's lobu-team-lunch-open can\nread the most-recent restaurant.\n",
-  skills: ["lunch-finalize"],
-  // No inline schema: the reaction reads the run's outcome straight off the
-  // `lunch-run` entity this prompt updates (status "done" + restaurant), so the
-  // handoff contract is the entity, not an Automation-authored payload.
 });
 
 // This declaration owns only the existing agent's metadata. `lobu apply`
@@ -440,7 +290,6 @@ const lobuTeamSlack = defineConnection({
 
 export default defineConfig({
   connectors: [
-    connectorFromFile<typeof DeliverooConnector>("./deliveroo.connector.ts"),
     connectorFromFile<typeof LokiActivityConnector>(
       "./loki-activity.connector.ts"
     ),
@@ -449,17 +298,12 @@ export default defineConfig({
   orgName: "Lobu Team",
   orgDescription: "Lobu Team agents and internal operations",
   organizationId: "UdNAH1bb3csC842vhOgxAHVcfX4tYU5A",
-  agents: [foodOrdering, developer],
+  agents: [developer],
   authProfiles: [productActivityDbAuth],
-  entities: [lunchRun, engineeringTask],
+  entities: [engineeringTask],
   relationships: [targetsRepository],
-  connections: [
-    deliverooConn,
-    productActivityDb,
-    productionLogs,
-    lobuTeamSlack,
-  ],
+  connections: [productActivityDb, productionLogs, lobuTeamSlack],
   // The external digest is maintained by scripts/configure-product-activity.ts.
   // Apply without prune: preserve its existing delivery agent and manual Automation.
-  automations: [lunchOpen, lunchFinalize, engineeringTaskRunner],
+  automations: [engineeringTaskRunner],
 });
