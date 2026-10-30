@@ -1,4 +1,4 @@
-import { classifyToolError } from '@lobu/core';
+import { classifyToolError, getErrorMessage, type ToolErrorCode } from '@lobu/core';
 import type { DbClient, DbQuery } from '../db/client';
 import { ToolUserError, toolErrorHttpStatus } from './errors';
 import { isQueryCanceled } from './pg-errors';
@@ -75,6 +75,27 @@ export function boundedQuery<T = any>(
   options: BoundedReadOptions
 ): Promise<Awaited<DbQuery<T>>> {
   return boundedRead(sql, options, (tx) => cancellable(tx.unsafe<T>(query, params), options.signal));
+}
+
+/**
+ * Classify a failed member SQL read (`query_sql`, `client.query`) by SQLSTATE.
+ * Both readers run under `boundedRead`, so they share this one mapping and
+ * report the same code and message for the same statement.
+ */
+export function classifyReadQueryFailure(error: unknown): { code: ToolErrorCode; message: string } {
+  const pgCode = (error as { code?: unknown } | null)?.code;
+  if (pgCode === '57014') {
+    return { code: 'UPSTREAM_TIMEOUT', message: 'Query exceeded the 5 second timeout.' };
+  }
+  // read_only_sql_transaction: the statement tried to write.
+  if (pgCode === '25006') {
+    return { code: 'VALIDATION', message: 'Only read-only queries are allowed.' };
+  }
+  const message = getErrorMessage(error);
+  return {
+    code: classifyToolError({ pgCode: typeof pgCode === 'string' ? pgCode : undefined, message }),
+    message,
+  };
 }
 
 /**

@@ -9,7 +9,8 @@ import { getScopedConnectorDefinition, type ScopedConnectorDefinitionRow } from 
 import { oauthAccountOwnershipError } from '../../../authz/oauth-account-ownership';
 import { type DbClient, getDb } from '../../../db/client';
 import { withTransaction } from '../../../db/transaction';
-import { getErrorMessage, type ToolErrorCode } from '@lobu/core';
+import { getErrorMessage } from '@lobu/core';
+import { ToolUserError, withFailureCode } from '../../../utils/errors';
 import logger from '../../../utils/logger';
 import {
   type AuthProfileKind,
@@ -504,15 +505,15 @@ export async function resolveOAuthProfileApp(params: {
   const sql = getDb();
   const appIds = authProfile ? await oauthAppBindings(authProfile) : new Set<number>();
   if (appIds.size > 1) {
-    return { error: 'This account is linked to different OAuth apps. Use a separate account profile for each app before reconnecting.' };
+    return withFailureCode({ error: 'This account is linked to different OAuth apps. Use a separate account profile for each app before reconnecting.' }, 'VALIDATION');
   }
   const boundId = appIds.values().next().value;
   const selected = params.appAuthProfileSlug
     ? await getAuthProfileBySlug(ctx.organizationId, params.appAuthProfileSlug)
     : null;
-  if (params.appAuthProfileSlug && !selected) return { error: 'The selected OAuth app was not found in this workspace.' };
+  if (params.appAuthProfileSlug && !selected) return withFailureCode({ error: 'The selected OAuth app was not found in this workspace.' }, 'NOT_FOUND');
   if (boundId && selected && selected.id !== boundId) {
-    return { error: 'This account is already bound to a different OAuth app. Create a separate account profile to use another app; existing access has not changed.' };
+    return withFailureCode({ error: 'This account is already bound to a different OAuth app. Create a separate account profile to use another app; existing access has not changed.' }, 'VALIDATION');
   }
   let app = boundId ? await getAuthProfileById(ctx.organizationId, boundId) : selected;
   if (!app && !boundId) {
@@ -532,13 +533,13 @@ export async function resolveOAuthProfileApp(params: {
       });
     }
     if (!app && apps.length > 1) {
-      return { error: 'Multiple OAuth apps are available. Choose app_auth_profile_slug explicitly or ask an administrator to set the workspace default.' };
+      return withFailureCode({ error: 'Multiple OAuth apps are available. Choose app_auth_profile_slug explicitly or ask an administrator to set the workspace default.' }, 'VALIDATION');
     }
   }
   if (boundId || app) {
     if (!app || app.profile_kind !== 'oauth_app' || app.status !== 'active' ||
         app.provider?.toLowerCase() !== method.provider.toLowerCase()) {
-      return { error: 'The selected OAuth app is unavailable. Ask an administrator to restore that app configuration before reconnecting.' };
+      return withFailureCode({ error: 'The selected OAuth app is unavailable. Ask an administrator to restore that app configuration before reconnecting.' }, 'VALIDATION');
     }
     if (
       !boundId &&
@@ -546,19 +547,10 @@ export async function resolveOAuthProfileApp(params: {
       (!app.is_default_for_connector || app.connector_key !== connectorKey) &&
       !(await callerIsAdmin(sql, ctx))
     ) {
-      return { error: 'Members must use the workspace-default OAuth app. Ask an administrator to set the default before connecting your account.' };
+      return withFailureCode({ error: 'Members must use the workspace-default OAuth app. Ask an administrator to set the default before connecting your account.' }, 'PERMISSION');
     }
   }
   return { appAuthProfile: app };
-}
-
-/**
- * Classify in-process ClientSDK failures without changing the public JSON shape.
- * ClientSdkActionError retains this object by reference; serialization omits the code.
- */
-export function withFailureCode<T extends Record<string, unknown>>(record: T, code: ToolErrorCode): T {
-  Object.defineProperty(record, 'error_code', { value: code, enumerable: false });
-  return record;
 }
 
 /**
@@ -622,13 +614,13 @@ export async function recoverPendingOAuthConnection(params: {
     const [target] = await tx`SELECT * FROM connections
       WHERE id = ${connectionId} AND organization_id = ${organizationId} AND deleted_at IS NULL FOR UPDATE`;
     if (!target || target.auth_profile_id !== targetHint.auth_profile_id) {
-      return { error: 'Connection setup changed. Retry connecting this account.' };
+      return withFailureCode({ error: 'Connection setup changed. Retry connecting this account.' }, 'VALIDATION');
     }
-    if (!userId || target.created_by !== userId) return { error: 'You can only re-authenticate connections you created.' };
-    if (target.auth_profile_id && profile?.profile_kind !== 'oauth_account') return { error: 'The selected OAuth account profile is no longer available.' };
+    if (!userId || target.created_by !== userId) return withFailureCode({ error: 'You can only re-authenticate connections you created.' }, 'PERMISSION');
+    if (target.auth_profile_id && profile?.profile_kind !== 'oauth_account') return withFailureCode({ error: 'The selected OAuth account profile is no longer available.' }, 'NOT_FOUND');
     if (profile) {
       const ownershipError = oauthAccountOwnershipError(profile as { profile_kind: string; created_by: string | null }, userId, target.created_by);
-      if (ownershipError) return { error: ownershipError };
+      if (ownershipError) return withFailureCode({ error: ownershipError }, 'PERMISSION');
     }
     if (target.status === 'active') return { active: true as const, target };
     if (token.status === 'expired') {
@@ -638,24 +630,24 @@ export async function recoverPendingOAuthConnection(params: {
         WHERE connection_id = ${target.id} AND organization_id = ${organizationId}
           AND auth_type = 'oauth' AND status IN ('pending', 'expired')
         ORDER BY created_at DESC, id DESC LIMIT 1`;
-      if (latest?.id !== token.id) return { error: 'Connection setup changed. Retry connecting this account.' };
+      if (latest?.id !== token.id) return withFailureCode({ error: 'Connection setup changed. Retry connecting this account.' }, 'VALIDATION');
     }
     // A paused unfinished row is the same case as a reaped one: its feeds never started.
     if (target.status !== 'pending_auth' && !((target.status === 'revoked' || target.status === 'paused') &&
         !target.auth_profile_id && !target.account_id && target.error_message === CONNECT_TOKEN_EXPIRED_ERROR)) {
-      return { error: 'This connection is no longer awaiting OAuth setup. Review the connection before reconnecting.' };
+      return withFailureCode({ error: 'This connection is no longer awaiting OAuth setup. Review the connection before reconnecting.' }, 'VALIDATION');
     }
     const oldConfig = (token.auth_config ?? {}) as Record<string, unknown>;
     const appId = target.app_auth_profile_id ?? profile?.auth_data?.app_auth_profile_id ?? oldConfig.appAuthProfileId ?? null;
     const [app] = appId ? await tx`SELECT slug, provider FROM auth_profiles
       WHERE id = ${appId} AND organization_id = ${organizationId} AND profile_kind = 'oauth_app'` : [];
     if (params.appAuthProfileSlug && params.appAuthProfileSlug !== app?.slug) {
-      return { error: 'A pending account connection uses a different OAuth app. Select that app on the connection before retrying.' };
+      return withFailureCode({ error: 'A pending account connection uses a different OAuth app. Select that app on the connection before retrying.' }, 'VALIDATION');
     }
     const provider = String(profile?.provider ?? app?.provider ?? oldConfig.provider ?? '').toLowerCase();
     const oauthMethods = getOAuthMethods(connector.auth_schema);
     const method = oauthMethods.find((m) => m.provider.toLowerCase() === provider);
-    if (!method) return { error: 'The OAuth provider is no longer available. Review this connector’s app configuration.' };
+    if (!method) return withFailureCode({ error: 'The OAuth provider is no longer available. Review this connector’s app configuration.' }, 'NOT_FOUND');
     // Revalidate pending requests as well as grants against the active definition.
     const selection = selectReconnectOAuthScopes({
       method,
@@ -742,15 +734,15 @@ export async function issueOAuthReconnectLink(params: {
 > {
   const { authProfile, ctx } = params;
   const ownershipError = oauthAccountOwnershipError(authProfile, ctx.userId);
-  if (ownershipError) return { error: ownershipError };
+  if (ownershipError) return withFailureCode({ error: ownershipError }, 'PERMISSION');
   if (
     authProfile.profile_kind !== 'oauth_account' ||
     !authProfile.provider ||
     !authProfile.connector_key
   ) {
-    return {
+    return withFailureCode({
       error: `Auth profile '${authProfile.slug}' is not a reconnectable OAuth account profile`,
-    };
+    }, 'VALIDATION');
   }
 
   const connector = await getScopedConnectorDefinition({
@@ -758,9 +750,9 @@ export async function issueOAuthReconnectLink(params: {
     connectorKey: authProfile.connector_key,
   });
   if (!connector) {
-    return {
+    return withFailureCode({
       error: `Connector '${authProfile.connector_key}' not found or not active`,
-    };
+    }, 'NOT_FOUND');
   }
 
   const provider = authProfile.provider.toLowerCase();
@@ -768,9 +760,9 @@ export async function issueOAuthReconnectLink(params: {
     (method) => method.provider.toLowerCase() === provider
   );
   if (!oauthMethod) {
-    return {
+    return withFailureCode({
       error: `Connector '${authProfile.connector_key}' no longer supports OAuth provider '${authProfile.provider}'`,
-    };
+    }, 'VALIDATION');
   }
 
   const sql = params.transaction ?? getDb();
@@ -782,7 +774,7 @@ export async function issueOAuthReconnectLink(params: {
         AND created_by = ${ctx.userId}
     `;
     if (owned.length !== 1) {
-      return { error: 'Connection does not use this OAuth account profile.' };
+      return withFailureCode({ error: 'Connection does not use this OAuth account profile.' }, 'VALIDATION');
     }
   }
   const appSelection = await resolveOAuthProfileApp({ ctx, connectorKey: authProfile.connector_key,
@@ -1031,7 +1023,7 @@ export async function resolveConnectionAuthSelection(params: {
     : null;
 
   if (params.appAuthProfileSlug && explicitAppProfile?.profile_kind !== 'oauth_app') {
-    throw new Error('The selected OAuth app was not found for this connector.');
+    throw new ToolUserError('The selected OAuth app was not found for this connector.', 404, 'NOT_FOUND');
   }
 
   const liveBrowserSetup = browserMethod?.mode === 'live' && params.deviceWorkerId
@@ -1100,12 +1092,12 @@ export async function resolveConnectionAuthSelection(params: {
   const boundAppIds = authProfile.profile_kind === 'oauth_account'
     ? await oauthAppBindings(authProfile) : new Set<number>();
   if (boundAppIds.size > 1) {
-    throw new Error('This account is linked to different OAuth apps. Use a separate account profile for each app.');
+    throw new ToolUserError('This account is linked to different OAuth apps. Use a separate account profile for each app.', 400, 'VALIDATION');
   }
   const boundAppId = boundAppIds.values().next().value;
   if (typeof boundAppId === 'number') {
     if (explicitAppProfile && explicitAppProfile.id !== boundAppId) {
-      throw new Error('This account is already bound to a different OAuth app. Use a separate account profile for another app.');
+      throw new ToolUserError('This account is already bound to a different OAuth app. Use a separate account profile for another app.', 400, 'VALIDATION');
     }
     appAuthProfile = await getAuthProfileById(organizationId, boundAppId);
   }

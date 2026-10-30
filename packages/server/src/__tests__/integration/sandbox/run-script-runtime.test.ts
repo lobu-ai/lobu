@@ -684,7 +684,7 @@ describe("sandbox runtime", () => {
     });
 
     expect(result.success).toBe(false);
-    expect(result.error?.name).toBe("ScriptError");
+    expect(result.error).toMatchObject({ name: "CrossOrgAccessDenied", code: "PERMISSION", retryable: false });
     expect(result.error?.message).toMatch(/^CrossOrgAccessDenied:/);
     expect(result.error?.message).toContain("If the same identity already has access to the target workspace");
     expect(result.error?.message).toContain("invoke there directly via /mcp/{slug}");

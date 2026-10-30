@@ -3,6 +3,7 @@
  */
 
 import { getDb } from '../../../../db/client';
+import { withFailureCode } from '../../../../utils/errors';
 import { describeNonDeviceWorkerId } from '../../../../utils/device-worker-id';
 import { getPrimaryAuthProfileForKind } from '../../../../utils/auth-profiles';
 import {
@@ -89,15 +90,15 @@ export async function resolveDeviceBinding(params: {
 
   if (!deviceWorkerId) {
     if (requiredCapability) {
-      return {
+      return withFailureCode({
         error: `Connector '${params.connector.key}' runs on a device — pass device_worker_id for one of your devices attached to this workspace that advertises the '${requiredCapability}' permission.`,
-      };
+      }, 'VALIDATION');
     }
     return { deviceWorkerId: null };
   }
 
   const notADeviceId = await describeNonDeviceWorkerId(sql, deviceWorkerId, params.userId);
-  if (notADeviceId) return { error: notADeviceId };
+  if (notADeviceId) return withFailureCode({ error: notADeviceId }, 'VALIDATION');
 
   const rows = (await sql`
     SELECT dw.id, dw.user_id, dw.platform, dw.capabilities, dw.label, dw.organization_id,
@@ -121,26 +122,26 @@ export async function resolveDeviceBinding(params: {
   }>;
   const device = rows[0];
   if (!device) {
-    return { error: `Device worker '${deviceWorkerId}' not found.` };
+    return withFailureCode({ error: `Device worker '${deviceWorkerId}' not found.` }, 'NOT_FOUND');
   }
   if (!params.userId || device.user_id !== params.userId) {
-    return { error: `You can only pin a device you own.` };
+    return withFailureCode({ error: `You can only pin a device you own.` }, 'PERMISSION');
   }
   if (params.browser && device.platform !== 'chrome-extension') {
-    return { error: 'This connection requires a paired Chrome browser.' };
+    return withFailureCode({ error: 'This connection requires a paired Chrome browser.' }, 'VALIDATION');
   }
   if (device.organization_id !== params.organizationId) {
-    return {
+    return withFailureCode({
       error: `Device '${device.label ?? deviceWorkerId}' isn't attached to this workspace. Re-attach it from Connect › Runtime first.`,
-    };
+    }, 'VALIDATION');
   }
 
   if (requiredCapability) {
     const caps = Array.isArray(device.capabilities) ? (device.capabilities as string[]) : [];
     if (!caps.includes(requiredCapability)) {
-      return {
+      return withFailureCode({
         error: `Device '${device.label ?? deviceWorkerId}' hasn't granted the '${requiredCapability}' permission required by '${params.connector.key}'.`,
-      };
+      }, 'VALIDATION');
     }
   }
 
@@ -173,9 +174,9 @@ export async function resolveDeviceBinding(params: {
   const unchangedPin = device.id === (params.currentDeviceWorkerId ?? null);
   if (!device.fresh && !unchangedPin) {
     const dbNow = device.db_now instanceof Date ? device.db_now : new Date(device.db_now);
-    return {
+    return withFailureCode({
       error: `Device '${device.label ?? deviceWorkerId}' is offline — it ${describeDeviceLastSeen(device.last_seen_at, dbNow)} and hasn't been seen in the last ${DEVICE_WORKER_FRESH_INTERVAL}, so a run pinned to it would never be claimed. Bring it back online, or pin a device that has checked in within the last ${DEVICE_WORKER_FRESH_INTERVAL}.`,
-    };
+    }, 'VALIDATION');
   }
 
   // The canonical id, so the value echoed back matches the one stored.

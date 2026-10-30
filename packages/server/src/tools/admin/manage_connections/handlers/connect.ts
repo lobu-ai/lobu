@@ -8,7 +8,7 @@ import { checkBrowserConnectionSetup } from '../../helpers/browser-connection-se
 import { getDb, pgBigintArray, type DbClient } from "../../../../db/client";
 import { OAUTH_ACCOUNT_BINDING_ERROR, oauthAccountOwnershipError } from '../../../../authz/oauth-account-ownership';
 import { lockOAuthAccountBinding } from '../../../../utils/oauth-connection-state';
-import { ToolUserError } from '../../../../utils/errors';
+import { ToolUserError, withFailureCode } from '../../../../utils/errors';
 import { notifyConnectionPermissionRequest } from "../../../../notifications/triggers";
 import {
 	getPrimaryAuthProfileForKind,
@@ -101,7 +101,7 @@ async function handleConnectImpl(
 	requireManaged: boolean,
 ): Promise<ManageConnectionsResult> {
   if (hasDeviceAutowireSuppressionMarker(args.config)) {
-    return { error: DEVICE_AUTOWIRE_SUPPRESSION_ERROR };
+    return withFailureCode({ error: DEVICE_AUTOWIRE_SUPPRESSION_ERROR }, 'VALIDATION');
   }
   const sql = getDb();
   const { organizationId, userId } = ctx;
@@ -135,10 +135,10 @@ async function handleConnectImpl(
   });
 
   if (!connector) {
-    return {
+    return withFailureCode({
       error: `Connector '${args.connector_key}' not found. Install it first from the connections page.`,
       setup_url: buildSetupUrl({ install: args.connector_key }),
-    };
+    }, 'NOT_FOUND');
   }
 
   const setupUrl = buildSetupUrl({ connectorKey: args.connector_key });
@@ -213,9 +213,9 @@ async function handleConnectImpl(
       LIMIT 1
     `) as unknown as Array<{ id: number }>;
     if (dup.length > 0) {
-      return {
+      return withFailureCode({
         error: `A ${connector.name} connection (id: ${dup[0].id}) is already assigned to that device in this org.`,
-      };
+      }, 'VALIDATION');
     }
   }
 
@@ -223,7 +223,7 @@ async function handleConnectImpl(
   const explicitSlug = args.slug?.trim();
   if (explicitSlug) {
     const fmtErr = connectionSlugFormatError(explicitSlug);
-    if (fmtErr) return { error: fmtErr };
+    if (fmtErr) return withFailureCode({ error: fmtErr }, 'VALIDATION');
   }
 
   // Idempotent: reuse the existing OAuth connection for the same connector/user
@@ -319,14 +319,14 @@ async function handleConnectImpl(
 
   if (authSelection.authProfile) {
     const ownershipError = oauthAccountOwnershipError(authSelection.authProfile, userId);
-    if (ownershipError) return { error: ownershipError };
+    if (ownershipError) return withFailureCode({ error: ownershipError }, 'PERMISSION');
   }
 
   const isOwnLiveBrowser = (authSelection.pendingLiveBrowser && authSelection.pendingLiveBrowser.userId === userId) ||
     (authSelection.authProfile?.auth_data?.mode === 'live' && authSelection.authProfile.created_by === userId);
   if (!isAdmin && !isOwnLiveBrowser) {
     if (!isOAuthConnect || (authSelection.authProfile && authSelection.authProfile.created_by !== userId)) {
-      return { error: 'Members can only connect their own OAuth accounts. Ask an administrator to configure shared credentials.' };
+      return withFailureCode({ error: 'Members can only connect their own OAuth accounts. Ask an administrator to configure shared credentials.' }, 'PERMISSION');
     }
     const app = authSelection.appAuthProfile;
     const appIsWorkspaceDefault = app?.is_default_for_connector && app.connector_key === args.connector_key;
@@ -354,13 +354,13 @@ async function handleConnectImpl(
         ${deviceBinding.deviceWorkerId ? sql`AND device_worker_id = ${deviceBinding.deviceWorkerId}` : sql``}
       ORDER BY id LIMIT 2
     `;
-    if (existing.length > 1) return { error: 'This account has multiple connections. Select the existing connection by slug before retrying.' };
+    if (existing.length > 1) return withFailureCode({ error: 'This account has multiple connections. Select the existing connection by slug before retrying.' }, 'VALIDATION');
     if (existing.length === 1) {
       const bindingValid = await sql.begin(tx => lockOAuthAccountBinding(tx, {
         organizationId, authProfileId: authSelection.authProfile!.id,
         appAuthProfileId: authSelection.appAuthProfile?.id ?? null, ownerUserId: userId ?? null,
       }));
-      if (!bindingValid) return { error: OAUTH_ACCOUNT_BINDING_ERROR };
+      if (!bindingValid) return withFailureCode({ error: OAUTH_ACCOUNT_BINDING_ERROR }, 'VALIDATION');
       const target = existing[0];
       const needsAuthorization = target.status === 'pending_auth' || target.status === 'revoked' ||
         authSelection.authProfile.status !== 'active' || Boolean(args.requested_scopes?.length);
@@ -399,10 +399,10 @@ async function handleConnectImpl(
 		} else if (
 			effectiveDeviceWorkerIdConnect !== profileDeviceWorkerIdConnect
 		) {
-			return {
+			return withFailureCode({
 				error: `Auth profile '${authSelection.authProfile!.slug}' lives on a different device than the one selected; pick that device or a different profile.`,
 				setup_url: setupUrl,
-			};
+			}, 'VALIDATION');
 		}
 	}
 	// Same guard as create-path: when the profile contributed a device we
@@ -421,10 +421,10 @@ async function handleConnectImpl(
       LIMIT 1
     `) as unknown as Array<{ id: number }>;
     if (dup.length > 0) {
-      return {
+      return withFailureCode({
         error: `A ${connector.name} connection (id: ${dup[0].id}) is already assigned to that device in this org.`,
         setup_url: setupUrl,
-      };
+      }, 'VALIDATION');
     }
   }
   const browserProfileUsable =
@@ -470,10 +470,10 @@ async function handleConnectImpl(
 			: "active";
 
 	if (isInteractiveConnect && !userId) {
-    return {
+    return withFailureCode({
 			error: "Interactive pairing requires an authenticated user.",
       setup_url: setupUrl,
-    };
+    }, 'PERMISSION');
   }
 
 	if (
@@ -593,7 +593,8 @@ async function handleConnectImpl(
   try {
     await assertEntityIdsInOrg(sql, organizationId, args.entity_ids);
   } catch (err) {
-    return { error: getErrorMessage(err), setup_url: setupUrl };
+    const failure = { error: getErrorMessage(err), setup_url: setupUrl };
+    return err instanceof ToolUserError && err.code ? withFailureCode(failure, err.code) : failure;
   }
   const connectEntityIdsValue =
 		args.entity_ids && args.entity_ids.length > 0
@@ -607,7 +608,7 @@ async function handleConnectImpl(
     displayName: connectDisplayName,
   });
 	if ("error" in connectSlugResult)
-		return { error: connectSlugResult.error, setup_url: setupUrl };
+		return withFailureCode({ error: connectSlugResult.error, setup_url: setupUrl }, 'VALIDATION');
 
 	const insertConnection = async (
 		db: DbClient,
@@ -677,7 +678,7 @@ async function handleConnectImpl(
 		interactiveAuthRunId = bundle.authRunId;
   } catch (err) {
 		if (err instanceof ConnectionSlugConflictError)
-			return { error: err.message, setup_url: setupUrl };
+			return withFailureCode({ error: err.message, setup_url: setupUrl }, 'VALIDATION');
     throw err;
   }
 

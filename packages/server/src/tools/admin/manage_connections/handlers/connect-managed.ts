@@ -1,4 +1,5 @@
 import type { ToolContext } from '../../../registry';
+import { withFailureCode } from '../../../../utils/errors';
 import { joinPublicOrganization } from '../../../../workspace/join-public';
 import { resolveManagedAuthConnectorOffer } from '../../../../workspace/managed-auth-discovery';
 import type { ConnectionsArgs, ManageConnectionsResult } from '../schemas';
@@ -21,19 +22,19 @@ export async function handleConnectManaged(
 	ctx: ToolContext,
 ): Promise<ManageConnectionsResult> {
 	if (hasDeviceAutowireSuppressionMarker(args.config)) {
-		return { error: DEVICE_AUTOWIRE_SUPPRESSION_ERROR };
+		return withFailureCode({ error: DEVICE_AUTOWIRE_SUPPRESSION_ERROR }, 'VALIDATION');
 	}
 	if (!ctx.isAuthenticated || !ctx.userId) {
-		return { error: 'Lobu login is required before using managed auth.' };
+		return withFailureCode({ error: 'Lobu login is required before using managed auth.' }, 'PERMISSION');
 	}
 	const organizationSlug = await resolveManagedAuthConnectorOffer({
 		organizationSlug: args.managed_by_org,
 		connectorKey: args.connector_key,
 	});
 	if (!organizationSlug) {
-		return {
+		return withFailureCode({
 			error: `No active managed OAuth offer for connector '${args.connector_key}' was found in public org '${args.managed_by_org}'. Discover organizations.list again before retrying.`,
-		};
+		}, 'NOT_FOUND');
 	}
 
 	const membership = await joinPublicOrganization({
@@ -41,9 +42,9 @@ export async function handleConnectManaged(
 		orgSlug: organizationSlug,
 	});
 	if (membership.status === 'not_found' || membership.status === 'not_public') {
-		return {
+		return withFailureCode({
 			error: `Managed auth org '${args.managed_by_org}' is no longer available. Discover organizations.list again before retrying.`,
-		};
+		}, 'NOT_FOUND');
 	}
 
 	return handleRequiredManagedConnect(

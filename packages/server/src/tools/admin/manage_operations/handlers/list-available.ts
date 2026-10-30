@@ -29,6 +29,7 @@ import {
 	DEVICE_ONLINE_WINDOW_SECONDS,
 	describeDeviceLastSeen,
 } from "../../../../utils/device-liveness";
+import { withFailureCode } from "../../../../utils/errors";
 import { buildConnectionAuthUrl, buildConnectionsUrl } from "../../../../utils/url-builder";
 import {
 	DEVICE_CONNECTOR_MANIFEST_UNAVAILABLE,
@@ -698,7 +699,7 @@ export async function handleListAvailable(
 						visibilityUserId,
 					);
 		if (bareRows.length === 0) {
-			return { error: "Connection not found or not visible." };
+			return withFailureCode({ error: "Connection not found or not visible." }, "NOT_FOUND");
 		}
 		return {
 			action: "list_available",

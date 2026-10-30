@@ -6,6 +6,7 @@
  */
 
 import { type DbClient, pgBigintArray } from '../../../db/client';
+import { ToolUserError } from '../../../utils/errors';
 import { getWorkspaceRole } from '../../../utils/organization-access';
 import { isAdminOrOwnerRole } from '../../access-control';
 
@@ -65,7 +66,7 @@ export async function requireExists(
   const rows = await sql.unsafe(`SELECT id FROM ${table} WHERE id = $1 LIMIT 1`, [id]);
   if (rows.length === 0) {
     const displayLabel = label ?? table.replace(/_/g, ' ');
-    throw new Error(`${displayLabel} ${id} not found`);
+    throw new ToolUserError(`${displayLabel} ${id} not found`, 404, 'NOT_FOUND');
   }
 }
 
@@ -98,8 +99,10 @@ export async function assertEntityIdsInOrg(
   const found = new Set(rows.map((r) => Number(r.id)));
   const invalid = requested.filter((id) => !found.has(id));
   if (invalid.length > 0) {
-    throw new Error(
-      `entity_ids do not belong to this organization (or do not exist): ${invalid.join(', ')}`
+    throw new ToolUserError(
+      `entity_ids do not belong to this organization (or do not exist): ${invalid.join(', ')}`,
+      400,
+      'VALIDATION'
     );
   }
   return requested;

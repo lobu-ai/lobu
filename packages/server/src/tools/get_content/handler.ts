@@ -623,8 +623,10 @@ async function getContentImpl(
     if (args.include_superseded) {
       const validationErrors = getIncludeSupersededValidationErrors(args);
       if (validationErrors.length > 0) {
-        throw new Error(
-          `include_superseded is only supported for entity-scoped chronological listings: ${validationErrors.join('; ')}`
+        throw new ToolUserError(
+          `include_superseded is only supported for entity-scoped chronological listings: ${validationErrors.join('; ')}`,
+          400,
+          'VALIDATION'
         );
       }
     }

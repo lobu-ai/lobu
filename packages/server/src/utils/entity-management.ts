@@ -726,7 +726,7 @@ export async function mergeEntityFields(params: {
     FOR UPDATE
   `;
 	if (rows.length === 0) {
-		throw new Error(`Entity ${entityId} not found`);
+		throw new ToolUserError(`Entity ${entityId} not found`, 404, "NOT_FOUND");
 	}
 
 	const metadata = parseEntityJsonObject(rows[0].metadata);
@@ -866,7 +866,7 @@ async function preventEntityCycles(
 
   while (currentId !== null) {
     if ((entityId !== null && currentId === entityId) || ++depth >= MAX_DEPTH) {
-      throw new Error('Circular reference detected or hierarchy too deep (max 10 levels)');
+      throw new ToolUserError('Circular reference detected or hierarchy too deep (max 10 levels)', 400, 'VALIDATION');
     }
 
     const rows: Array<Record<string, unknown>> = await sql`
@@ -920,11 +920,11 @@ export async function createEntity(
 ): Promise<CreatedEntity> {
 	// Input validation
 	if (!data.name || data.name.trim().length === 0) {
-		throw new Error("Entity name is required");
+		throw new ToolUserError("Entity name is required", 400, "VALIDATION");
 	}
 
 	if (!data.entity_type || data.entity_type.trim().length === 0) {
-		throw new Error("Entity type is required");
+		throw new ToolUserError("Entity type is required", 400, "VALIDATION");
 	}
 
 	// Illegal type *names* that are not knowledge types (routes / product words).
@@ -934,8 +934,10 @@ export async function createEntity(
 			data.entity_type.toLowerCase(),
 		)
 	) {
-		throw new Error(
+		throw new ToolUserError(
 			`Cannot create entity with reserved type '${data.entity_type}'. Reserved: ${RESERVED_ENTITY_TYPE_SLUGS.join(", ")}`,
+			400,
+			"VALIDATION"
 		);
 	}
 
@@ -946,8 +948,11 @@ export async function createEntity(
 	assertSlugIsNotViewMarker(data.slug);
 	const sql = opts?.sql ?? getDb();
 
+	// Classify only the insert work. afterCreate can run after a pool-owned
+	// transaction has committed, so its errors are not pre-write refusals.
+	let created: InsertedEntityRow & { entity_type: string };
 	try {
-		const created = await withEntityWriteTransaction(sql, async (tx) => {
+		created = await withEntityWriteTransaction(sql, async (tx) => {
 			let createData = data;
 			if (!opts?.skipHooks && opts?.hookContext) {
 				const hooks = getEntityHooks(createData.entity_type);
@@ -1026,37 +1031,32 @@ export async function createEntity(
 					});
 			return { ...inserted, entity_type: createData.entity_type };
 		});
-
-		// Run afterCreate hook
-		if (!opts?.skipHooks && opts?.hookContext) {
-			const hooks = getEntityHooks(created.entity_type);
-			if (hooks?.afterCreate) {
-				await hooks.afterCreate(created, opts.hookContext);
-			}
+	} catch (error: unknown) {
+		// Database constraint violations, by SQLSTATE.
+		const pgCode = (error as { code?: unknown } | null)?.code;
+		if (pgCode === "23505") {
+			throw new ToolUserError("Entity already exists with this name or unique field", 400, "VALIDATION");
 		}
-
-		return created;
-	} catch (error: any) {
-		const msg = error.message ?? "";
-
-		// Handle database constraint violations
-		if (msg.includes("duplicate key") || msg.includes("unique constraint")) {
-			throw new Error("Entity already exists with this name or unique field");
-		}
-		if (msg.includes("foreign key")) {
+		if (pgCode === "23503") {
 			if (data.parent_id) {
-				throw new Error(`Parent entity ${data.parent_id} does not exist`);
+				throw new ToolUserError(`Parent entity ${data.parent_id} does not exist`, 400, "VALIDATION");
 			}
-			throw new Error(`Foreign key violation: ${msg}`);
+			throw new ToolUserError(`Foreign key violation: ${getErrorMessage(error)}`, 400, "VALIDATION");
 		}
-		if (msg.includes("check constraint")) {
-			throw new Error(`Invalid entity data: ${msg}`);
-		}
-		if (msg.includes("Circular reference")) {
-			throw new Error("Cannot create circular entity hierarchy");
+		if (pgCode === "23514") {
+			throw new ToolUserError(`Invalid entity data: ${getErrorMessage(error)}`, 400, "VALIDATION");
 		}
 		throw error;
 	}
+
+	if (!opts?.skipHooks && opts?.hookContext) {
+		const hooks = getEntityHooks(created.entity_type);
+		if (hooks?.afterCreate) {
+			await hooks.afterCreate(created, opts.hookContext);
+		}
+	}
+
+	return created;
 }
 
 /**
@@ -1082,7 +1082,7 @@ export async function updateEntity(
 > {
 	const sql = opts?.sql ?? getDb();
 	if (opts?.derivedName && data.name !== undefined) {
-		throw new Error("An explicit name cannot also be derived from metadata");
+		throw new ToolUserError("An explicit name cannot also be derived from metadata", 400, "VALIDATION");
 	}
 
 	// Validate write access (uses PG for auth tables)
@@ -1133,7 +1133,7 @@ export async function updateEntity(
 	// affirm_fields claims ownership, which only a human may do. An agent must
 	// never silently claim a field — reject before touching the transaction.
 	if (!isHumanEdit && affirmFields.length > 0) {
-		throw new Error("affirm_fields is only allowed for human edits");
+		throw new ToolUserError("affirm_fields is only allowed for human edits", 400, "VALIDATION");
 	}
 
 	const hasContent = data.content !== undefined;
@@ -1189,7 +1189,7 @@ export async function updateEntity(
       FOR UPDATE
     `;
 		if (current.length === 0) {
-			throw new Error(`Entity ${entityId} not found`);
+			throw new ToolUserError(`Entity ${entityId} not found`, 404, "NOT_FOUND");
 		}
 
 		const existing = (
@@ -1556,7 +1556,7 @@ export async function updateEntity(
       LIMIT 1
     `;
 		if (sel.length === 0) {
-			throw new Error(`Entity ${entityId} not found`);
+			throw new ToolUserError(`Entity ${entityId} not found`, 404, "NOT_FOUND");
 		}
 		const updated = {
 			...sel[0],
@@ -1850,8 +1850,10 @@ export async function deleteEntity(
 
     const childCount = Number(children[0]?.count || 0);
     if (childCount > 0) {
-      throw new Error(
-        `Cannot delete entity: it has ${childCount} child entities. Use force_delete_tree=true to delete the entire hierarchy.`
+      throw new ToolUserError(
+        `Cannot delete entity: it has ${childCount} child entities. Use force_delete_tree=true to delete the entire hierarchy.`,
+        400,
+        "VALIDATION"
       );
     }
   }

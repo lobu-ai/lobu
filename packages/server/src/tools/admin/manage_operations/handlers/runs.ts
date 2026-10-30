@@ -13,7 +13,7 @@ import {
 	pgTextArray,
 } from "../../../../db/client";
 import { describeNonDeviceWorkerId } from "../../../../utils/device-worker-id";
-import { ToolUserError } from "../../../../utils/errors";
+import { ToolUserError, withFailureCode } from "../../../../utils/errors";
 import type { ToolContext } from "../../../registry";
 import { listOrgActivity } from "../activity-feed";
 import { ENTITY_CHANGE_ACTION_KEYS } from "../../run-decider";
@@ -279,7 +279,7 @@ export async function handleGetRun(
       AND r.run_type <> ALL(${pgTextArray([...LIST_RUNS_DEFAULT_EXCLUDED_RUN_TYPES])}::text[])
     LIMIT 1
   `;
-	if (rows.length === 0) return { error: "Run not found" };
+	if (rows.length === 0) return withFailureCode({ error: "Run not found" }, "NOT_FOUND");
 	return {
 		action: "get_run",
 		run: publicRunRecord(rows[0] as Record<string, unknown>),

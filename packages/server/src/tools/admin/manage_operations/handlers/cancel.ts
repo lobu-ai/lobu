@@ -1,6 +1,7 @@
 import type { Static } from '@sinclair/typebox';
 import { resolveActingPrincipal } from '../../../../authz/entity-policy';
 import { getDb } from '../../../../db/client';
+import { withFailureCode } from '../../../../utils/errors';
 import type { ToolContext } from '../../../registry';
 import { supersedeActionEvent } from '../../approval-events';
 import { callerIsAdmin } from '../../helpers/db-helpers';
@@ -33,13 +34,13 @@ export async function handleCancel(
         AND run_type = 'action'
       FOR UPDATE
     `;
-    if (!run) return { error: 'Operation run not found' };
+    if (!run) return withFailureCode({ error: 'Operation run not found' }, 'NOT_FOUND');
     const ownsPrincipal = actor.ownerResolved && actor.id != null &&
       run.policy_principal_kind === actor.kind && run.policy_principal_id === actor.id;
     const ownsUserRun = human && run.created_by_user_id === ctx.userId &&
       (run.policy_principal_kind == null || run.policy_principal_kind === 'user');
     if (!admin && !ownsPrincipal && !ownsUserRun) {
-      return { error: 'Only the requester or a workspace administrator can cancel this operation.' };
+      return withFailureCode({ error: 'Only the requester or a workspace administrator can cancel this operation.' }, 'PERMISSION');
     }
     if (!['pending', 'claimed', 'running'].includes(run.status)) {
       return { action: 'cancel', run_id: args.run_id, status: run.status, cancelled: false };

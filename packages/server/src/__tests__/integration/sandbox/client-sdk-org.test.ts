@@ -8,10 +8,8 @@
 
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Env } from "../../../index";
-import {
-  buildClientSDK,
-  CrossOrgAccessDenied,
-} from "../../../sandbox/client-sdk";
+import { buildClientSDK } from "../../../sandbox/client-sdk";
+import { CrossOrgAccessDenied } from "../../../tools/access-control";
 import type { ToolContext } from "../../../tools/registry";
 import { type AuthContext, executeTool, toToolContext } from "../../../tools/execute";
 import { initWorkspaceProvider } from "../../../workspace";

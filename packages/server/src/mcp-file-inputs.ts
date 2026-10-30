@@ -1,6 +1,7 @@
 import { type Static, Type } from '@sinclair/typebox';
 import type { AccountToolContext } from './tools/registry';
-import { CrossOrgAccessDenied, resolveCrossOrgToolContext } from './sandbox/client-sdk';
+import { resolveCrossOrgToolContext } from './sandbox/client-sdk';
+import { CrossOrgAccessDenied } from './tools/access-control';
 import { resolveGrantedWorkspaceTarget, findUngrantedMemberWorkspace } from './auth/oauth/workspace-grants';
 import { getLobuCoreServices } from './lobu/gateway';
 import { attachmentFromUrl, ingestInputFiles, MAX_INPUT_FILES } from './gateway/files/input-files';

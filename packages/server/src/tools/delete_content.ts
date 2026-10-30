@@ -21,6 +21,7 @@ import { type DeleteContentArgs, DeleteContentSchema } from '@lobu/core/contract
 import { hasRequiredMcpScope } from '../auth/tool-access';
 import { getDb, pgBigintArray } from '../db/client';
 import type { Env } from '../index';
+import { ToolUserError } from '../utils/errors';
 import { insertEvent } from '../utils/insert-event';
 import logger from '../utils/logger';
 import { assertCanRemoveGuidance } from '../utils/org-guidance';
@@ -59,7 +60,7 @@ async function deleteContentImpl(
 
   const requested = collectIds(args);
   if (requested.length === 0) {
-    throw new Error('Provide content_id or a non-empty content_ids array');
+    throw new ToolUserError('Provide content_id or a non-empty content_ids array', 400, 'VALIDATION');
   }
 
   const sql = getDb();

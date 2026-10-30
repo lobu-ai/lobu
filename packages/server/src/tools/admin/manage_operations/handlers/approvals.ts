@@ -60,6 +60,7 @@ import {
 import { deviceManifestAdmissionError } from "../../../../runs/queue-service";
 import { isDelegatedBrowserAffinityConnector, selectedConnectorVersionArtifactSql } from "../../../../utils/connector-execution-placement";
 import { runLeaseFence } from "../../../../runs/run-lease";
+import { withFailureCode } from "../../../../utils/errors";
 import { executeOperationInline } from "./execute";
 /**
  * Durably persist a claimed run's apply/execution output in its OWN
@@ -154,10 +155,10 @@ async function tryReconcileTerminalization(
 		row.claimed_by,
 	);
 	if (eventId === null) {
-		return {
+		return withFailureCode({
 			error:
 				"The approval was already decided while this request was in flight. Refresh before acting.",
-		};
+		}, "VALIDATION");
 	}
 	return {
 		action: "approve",
@@ -481,10 +482,10 @@ async function failBuilderRun(
 		return cardId;
 	});
 	if (eventId === null) {
-		return {
+		return withFailureCode({
 			error:
 				"The approval was already decided while this request was in flight. Refresh before acting.",
-		};
+		}, "VALIDATION");
 	}
 	return {
 		action: "approve",
@@ -545,7 +546,7 @@ async function tryApproveBuilderRun(
 	// still pending. The read is non-locking and the claim below stays atomic;
 	// this only checks caller-supplied input, never shared state.
 	const refusal = await validateBuilderRunInput(args, ctx.organizationId);
-	if (refusal) return { error: refusal };
+	if (refusal) return withFailureCode({ error: refusal }, "VALIDATION");
 
 	const reviewer = await resolveReviewer(ctx);
 	const input = (args.input as Record<string, unknown> | undefined) ?? null;
@@ -664,10 +665,10 @@ async function tryApproveBuilderRun(
 			return failedEventId;
 		});
 		if (eventId === null) {
-			return {
+			return withFailureCode({
 				error:
 					"The approval was already decided while this request was in flight. Refresh before acting.",
-			};
+			}, "VALIDATION");
 		}
 		return {
 			error: `Failed to apply ${attempt.nounLabel.toLowerCase()}: ${message}. The approval is still pending.`,
@@ -757,10 +758,10 @@ async function tryApproveBuilderRun(
 		claimedBy,
 	);
 	if (eventId === null) {
-		return {
+		return withFailureCode({
 			error:
 				"The approval was already decided while this request was in flight. Refresh before acting.",
-		};
+		}, "VALIDATION");
 	}
 	return {
 		action: "approve",
@@ -926,13 +927,13 @@ function requireHumanApprovalContext(
 ): { error: string } | null {
 	if (isHumanDecision(ctx)) return null;
 	if (hasDelegatedIdentity(ctx)) {
-		return {
+		return withFailureCode({
 			error: `Operation ${verb === "approve" ? "approval" : "rejection"} requires a human web session. Agents cannot ${verb} operations.`,
-		};
+		}, "PERMISSION");
 	}
-	return {
+	return withFailureCode({
 		error: `Operation ${verb === "approve" ? "approval" : "rejection"} requires a signed-in user. This request has no verified human identity.`,
-	};
+	}, "PERMISSION");
 }
 
 /**
@@ -1309,7 +1310,7 @@ export async function handleApprove(
     LIMIT 1
   `;
 	if (pendingRows.length === 0) {
-		return { error: "Run not found or not pending approval" };
+		return withFailureCode({ error: "Run not found or not pending approval" }, "NOT_FOUND");
 	}
 
 	const pendingRun = pendingRows[0] as {
@@ -1332,9 +1333,9 @@ export async function handleApprove(
 		pendingRun.action_key,
 	);
 	if (!resolved) {
-		return {
+		return withFailureCode({
 			error: `Operation '${pendingRun.action_key}' is no longer available for this connection.`,
-		};
+		}, "NOT_FOUND");
 	}
 
 	// Approval must not reinterpret a pending run under a newer contract.
@@ -1348,14 +1349,14 @@ export async function handleApprove(
 			pendingRun.connector_artifact_hash !== pendingRun.pinned_artifact_hash ||
 			pendingRun.connector_key !== resolved.connection.connector_key
 		) {
-			return { error: "The connector contract changed since this run was queued. Re-run the operation before approving it." };
+			return withFailureCode({ error: "The connector contract changed since this run was queued. Re-run the operation before approving it." }, "VALIDATION");
 		}
 		const admissionError = await deviceManifestAdmissionError(
 			sql, ctx.organizationId, pendingRun.connection_id, pendingRun.connector_key,
 			pendingRun.connector_version, pendingRun.target_device_worker_id,
 			{ manifestBacked: true, manifestHash: pendingRun.connector_artifact_hash },
 		);
-		if (admissionError) return { error: admissionError };
+		if (admissionError) return withFailureCode({ error: admissionError }, "VALIDATION");
 	}
 
 	// Recheck the persisted requesting principal, not the human approver.
@@ -1396,12 +1397,12 @@ export async function handleApprove(
 			return true;
 		});
 		if (!cancelled) {
-			return {
+			return withFailureCode({
 				error:
 					"The approval was already decided while this request was in flight. Refresh before acting.",
-			};
+			}, "VALIDATION");
 		}
-		return { error: `${why} The approval was cancelled.` };
+		return withFailureCode({ error: `${why} The approval was cancelled.` }, "PERMISSION");
 	}
 
 	const approvedInput = args.input ?? pendingRun.action_input ?? {};
@@ -1410,9 +1411,9 @@ export async function handleApprove(
 		approvedInput,
 	);
 	if (validationError) {
-		return {
+		return withFailureCode({
 			error: `Invalid input for operation '${resolved.operation.operation_key}': ${validationError}`,
-		};
+		}, "VALIDATION");
 	}
 
 	// Phase 1 (atomic): claim the run (approval_status → approved) AND write the
@@ -1477,7 +1478,7 @@ export async function handleApprove(
 		requireApprovalCard(args.run_id, confirmedEventId, "confirmed");
 		return { runRows: rows, eventId: confirmedEventId };
 	});
-	if (!claimed) return { error: "Run not found or not pending approval" };
+	if (!claimed) return withFailureCode({ error: "Run not found or not pending approval" }, "NOT_FOUND");
 	const { runRows, eventId } = claimed;
 	const run = runRows[0] as {
 		id: number;
@@ -1514,7 +1515,7 @@ export async function handleApprove(
 	);
 
 	if (result.status === "pending_approval" || result.status === "blocked") {
-		return { error: "Policy or run state changed before execution. Refresh the run to review its current status." };
+		return withFailureCode({ error: "Policy or run state changed before execution. Refresh the run to review its current status." }, "VALIDATION");
 	}
 
 	if (result.status === "completed") {
@@ -1538,10 +1539,10 @@ export async function handleApprove(
 			inlineOwner,
 		);
 		if (terminalCardId === null) {
-			return {
+			return withFailureCode({
 				error:
 					"The approval was already decided while this request was in flight. Refresh before acting.",
-			};
+			}, "VALIDATION");
 		}
 		return {
 			action: "approve",
@@ -1584,10 +1585,10 @@ export async function handleApprove(
 		return true;
 	});
 	if (!failed) {
-		return {
+		return withFailureCode({
 			error:
 				"The approval was already decided while this request was in flight. Refresh before acting.",
-		};
+		}, "VALIDATION");
 	}
 	return {
 		action: "approve",
@@ -1646,7 +1647,7 @@ export async function handleReject(
 		return eventId;
 	});
 	if (outcome === null) {
-		return { error: "Run not found or not pending approval" };
+		return withFailureCode({ error: "Run not found or not pending approval" }, "NOT_FOUND");
 	}
 
 	return {
@@ -1695,10 +1696,10 @@ async function pendingActionRunIdsForScope(
 		scope.action_key !== undefined ||
 		scope.automation_id !== undefined;
 	if (!hasNarrowingFilter) {
-		return {
+		return withFailureCode({
 			error:
 				"A batch decision must be scoped: provide at least one of connection_id, connector_key, action_key, or automation_id. Approving every pending operation in the organization is not supported.",
-		};
+		}, "VALIDATION");
 	}
 
 	const sql = getDb();
@@ -1743,10 +1744,10 @@ async function resolveBatchRunIds(
 	organizationId: string,
 ): Promise<number[] | { error: string }> {
 	if (args.run_id !== undefined && args.scope !== undefined) {
-		return {
+		return withFailureCode({
 			error:
 				"Provide either run_id or scope, not both — the batch must have exactly one bounded target.",
-		};
+		}, "VALIDATION");
 	}
 	if (args.run_id !== undefined) {
 		return pendingChildRunIds(args.run_id, organizationId);
@@ -1754,10 +1755,10 @@ async function resolveBatchRunIds(
 	if (args.scope !== undefined) {
 		return pendingActionRunIdsForScope(args.scope, organizationId);
 	}
-	return {
+	return withFailureCode({
 		error:
 			"A batch decision requires a target: pass run_id (an Automation run's proposals) or scope (queued connector operations).",
-	};
+	}, "VALIDATION");
 }
 
 /** Fail-closed message when the pending set moved under the reviewer. Named per
@@ -1819,9 +1820,9 @@ export async function handleApproveBatch(
 	if (!Array.isArray(resolved)) return resolved;
 	const runIds = resolved;
 	if (batchRunSetChanged(runIds, args.run_ids)) {
-		return {
+		return withFailureCode({
 			error: batchSetChangedError(args.run_id !== undefined, "approving"),
-		};
+		}, "VALIDATION");
 	}
 	await requireBatchApprovalAuthority("approve", runIds, ctx);
 	if (runIds.length === 0) {
@@ -1910,9 +1911,9 @@ export async function handleRejectBatch(
 	if (!Array.isArray(resolved)) return resolved;
 	const runIds = resolved;
 	if (batchRunSetChanged(runIds, args.run_ids)) {
-		return {
+		return withFailureCode({
 			error: batchSetChangedError(args.run_id !== undefined, "rejecting"),
-		};
+		}, "VALIDATION");
 	}
 	await requireBatchApprovalAuthority("reject", runIds, ctx);
 	const reason = args.reason ?? "Rejected by user";

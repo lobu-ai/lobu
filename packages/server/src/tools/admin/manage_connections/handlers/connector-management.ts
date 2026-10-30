@@ -15,6 +15,7 @@ import {
 	DEVICE_AUTOWIRE_SUPPRESSION_ERROR,
 	hasDeviceAutowireSuppressionMarker,
 } from "../../../../utils/device-autowire-suppression";
+import { withFailureCode } from "../../../../utils/errors";
 import logger from "../../../../utils/logger";
 import type { ToolContext } from "../../../registry";
 import {
@@ -139,9 +140,9 @@ export async function handleUninstallConnector(
 			connectorKey: args.connector_key,
 		});
 		if (!archived) {
-			return {
+			return withFailureCode({
 				error: `Connector '${args.connector_key}' not found or already archived`,
-			};
+			}, "NOT_FOUND");
 		}
 	} catch (error) {
 		return { error: getErrorMessage(error) };
@@ -345,9 +346,9 @@ export async function handleToggleConnectorLogin(
 		});
 
 		if (!connector) {
-			return {
+			return withFailureCode({
 				error: `Connector '${args.connector_key}' not found for this organization. Install it first.`,
-			};
+			}, "NOT_FOUND");
 		}
 
 		logger.info(
@@ -391,7 +392,7 @@ export async function handleUpdateConnectorAuth(
 
 	const authValues = normalizeAuthValues(args.auth_values);
 	if (Object.keys(authValues).length === 0) {
-		return { error: "No auth values provided." };
+		return withFailureCode({ error: "No auth values provided." }, "VALIDATION");
 	}
 
 	const connectorRows = await sql`
@@ -402,9 +403,9 @@ export async function handleUpdateConnectorAuth(
     LIMIT 1
   `;
 	if (connectorRows.length === 0) {
-		return {
+		return withFailureCode({
 			error: `Connector '${args.connector_key}' not found for this organization.`,
-		};
+		}, "NOT_FOUND");
 	}
 
 	const connector = connectorRows[0] as {
@@ -458,7 +459,7 @@ export async function handleUpdateConnectorDefaultConfig(
 	// Auto-wire seeds these defaults into the connection rows it creates, so
 	// this is a config-write path for the reserved suppression marker too.
 	if (hasDeviceAutowireSuppressionMarker(args.default_connection_config)) {
-		return { error: DEVICE_AUTOWIRE_SUPPRESSION_ERROR };
+		return withFailureCode({ error: DEVICE_AUTOWIRE_SUPPRESSION_ERROR }, "VALIDATION");
 	}
 	// This is a full replacement, so removal is a modes change too. Compare and
 	// write under one row lock to preserve a concurrent human edit.
@@ -500,7 +501,7 @@ export async function handleUpdateConnectorDefaultConfig(
 	);
 
 	if (outcome === "not_found") {
-		return { error: `Connector '${args.connector_key}' not found` };
+		return withFailureCode({ error: `Connector '${args.connector_key}' not found` }, "NOT_FOUND");
 	}
 	if (outcome) return outcome;
 
