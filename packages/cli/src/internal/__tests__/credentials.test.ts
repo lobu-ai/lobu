@@ -269,45 +269,84 @@ describe("credentials", () => {
     expect(token).toBeNull();
   });
 
-  test("getToken local-init prefers the session token over the worker PAT", async () => {
+  function seedLoopbackStore(creds?: Credentials) {
+    const configPath = `${context.LOBU_CONFIG_DIR}/config.json`;
+    const credentialsPath = `${context.LOBU_CONFIG_DIR}/credentials.json`;
+    const files = new Map<string, string>([
+      [
+        configPath,
+        JSON.stringify({
+          currentContext: "lobu",
+          contexts: {
+            lobu: { url: "https://app.lobu.ai/api/v1" },
+            [currentContextName]: { url: "http://localhost:8787/api/v1" },
+          },
+        }),
+      ],
+    ]);
+    if (creds) {
+      files.set(
+        credentialsPath,
+        JSON.stringify({
+          version: 2,
+          contexts: { [currentContextName]: creds },
+        })
+      );
+    }
     spyOn(context, "resolveContext").mockResolvedValue({
       name: currentContextName,
       url: "http://localhost:8787/api/v1",
       source: "config",
     });
-    readFileSpy.mockRejectedValue(new Error("ENOENT"));
-    const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          device_token: "worker-pat",
-          session_token: "session-token",
-          user: { id: "user-1", email: "u@example.com", name: "User" },
-          organization: { id: "org-1", slug: "local-org", name: "Local" },
-        }),
-        { status: 200 }
-      )
+    readFileSpy.mockImplementation(async (path) => {
+      const contents = files.get(String(path));
+      if (contents === undefined) throw new Error("ENOENT");
+      return contents;
+    });
+    writeFileSpy.mockImplementation(async (path, contents) => {
+      files.set(String(path), String(contents));
+    });
+    spyOn(fs, "rename").mockImplementation(async (from, to) => {
+      files.set(String(to), files.get(String(from))!);
+      files.delete(String(from));
+    });
+    rmSpy.mockImplementation(async (path) => {
+      files.delete(String(path));
+    });
+    spyOn(globalThis, "fetch").mockImplementation(async (url, options) =>
+      url === "http://localhost:8787/api/local-init" &&
+      options?.method === "POST"
+        ? Response.json({
+            device_token: "worker-pat",
+            session_token: "session-token",
+            user: { id: "user-1", email: "u@example.com", name: "User" },
+            organization: { id: "org-1", slug: "local-org", name: "Local" },
+          })
+        : new Response(null, { status: 404 })
     );
-
-    const token = await getToken(currentContextName);
-
-    expect(token).toBe("session-token");
-    expect(fetchSpy).toHaveBeenCalledWith(
-      "http://localhost:8787/api/local-init",
-      {
-        method: "POST",
-        headers: { "X-Lobu-Client": "cli" },
-      }
-    );
-    const [, written] = writeFileSpy.mock.calls[0]!;
-    const persisted = JSON.parse(written as string) as {
-      contexts: Record<string, Credentials>;
+    return () => {
+      const contents = files.get(credentialsPath);
+      if (!contents) return undefined;
+      const store = JSON.parse(contents) as {
+        contexts: Record<string, Credentials>;
+      };
+      return store.contexts[currentContextName];
     };
-    expect(persisted.contexts[currentContextName]?.accessToken).toBe(
-      "session-token"
-    );
-    expect(persisted.contexts[currentContextName]?.localWorkerToken).toBe(
-      "worker-pat"
-    );
+  }
+
+  test("getToken local-init mints a session without switching the current context", async () => {
+    const storedCredential = seedLoopbackStore();
+
+    expect(await getToken(currentContextName)).toBe("session-token");
+    expect(storedCredential()).toMatchObject({
+      accessToken: "session-token",
+      localWorkerToken: "worker-pat",
+    });
+    expect(await context.getCurrentContextName()).toBe("lobu");
+    expect(
+      (await context.loadContextConfig()).contexts[currentContextName]
+        ?.activeOrg
+    ).toBe("local-org");
   });
 
   test("getAgentApiToken uses the local-init worker PAT when present", async () => {
@@ -327,42 +366,16 @@ describe("credentials", () => {
     expect(token).toBe("worker-pat");
   });
 
-  test("getToken heals stale local credentials that only stored the worker PAT", async () => {
-    spyOn(context, "resolveContext").mockResolvedValue({
-      name: currentContextName,
-      url: "http://localhost:8787/api/v1",
-      source: "config",
-    });
-    const store = {
-      version: 2,
-      contexts: {
-        [currentContextName]: buildCreds({ accessToken: "old-worker-pat" }),
-      },
-    };
-    readFileSpy.mockResolvedValue(JSON.stringify(store));
-    spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          device_token: "new-worker-pat",
-          session_token: "new-session-token",
-        }),
-        { status: 200 }
-      )
-    );
+  test.each([
+    { name: "PAT", creds: { accessToken: "owl_pat_stored" } },
+    { name: "OAuth login", creds: buildCreds({ accessToken: "oauth-access" }) },
+  ])("token lookups preserve a stored loopback $name", async ({ creds }) => {
+    const storedCredential = seedLoopbackStore(creds);
 
-    const token = await getToken(currentContextName);
-
-    expect(token).toBe("new-session-token");
-    const [, written] = writeFileSpy.mock.calls[0]!;
-    const persisted = JSON.parse(written as string) as {
-      contexts: Record<string, Credentials>;
-    };
-    expect(persisted.contexts[currentContextName]?.accessToken).toBe(
-      "new-session-token"
-    );
-    expect(persisted.contexts[currentContextName]?.localWorkerToken).toBe(
-      "new-worker-pat"
-    );
+    expect(await getToken(currentContextName)).toBe(creds.accessToken);
+    expect(await getAgentApiToken(currentContextName)).toBe(creds.accessToken);
+    expect(storedCredential()).toEqual(creds);
+    expect(await context.getCurrentContextName()).toBe("lobu");
   });
 
   test("getToken returns the stored access token when not expired", async () => {
