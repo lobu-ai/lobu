@@ -12,14 +12,14 @@
  */
 
 export {
-	type AgentReferenceProps,
-	type AutomationReferenceProps,
-	type ConnectorReferenceProps,
-	type NativeReferenceKind,
-	type NativeReferenceProps,
-	parseNativeReference,
-	type ReferenceAppearance,
-	type ReferenceSnapshot,
+  type AgentReferenceProps,
+  type AutomationReferenceProps,
+  type ConnectorReferenceProps,
+  type NativeReferenceKind,
+  type NativeReferenceProps,
+  parseNativeReference,
+  type ReferenceAppearance,
+  type ReferenceSnapshot,
 } from "./json-template-references";
 
 /**
