@@ -65,6 +65,21 @@ export async function runAutomationNavigationProof({
     });
   const screenshot = (file) =>
     page.screenshot({ path: join(outputDir, file), fullPage: true });
+  const checkpoint = async (stage) => {
+    const current = new URL(page.url());
+    await writeFile(
+      join(outputDir, "automation-navigation-progress.json"),
+      JSON.stringify(
+        {
+          synthetic: true,
+          stage,
+          path: `${current.pathname}${current.search}`,
+        },
+        null,
+        2
+      )
+    );
+  };
   const assertName = async (value) => {
     await name.waitFor();
     assert(
@@ -354,6 +369,7 @@ export async function runAutomationNavigationProof({
       const current = new URL(page.url());
       combinedPeekPath = `${current.pathname}${current.search}`;
     }
+    await emptyActivity();
     await screenshot(file);
     await page
       .getByRole("link", { name: "Open in Activity", exact: true })
@@ -407,6 +423,7 @@ export async function runAutomationNavigationProof({
     storedEvent,
   });
   await fixture.install();
+  await checkpoint("browser-only run fixture installed");
   try {
     await goto(detailPath);
     await assertName(automationName);
@@ -418,6 +435,7 @@ export async function runAutomationNavigationProof({
     await page.getByRole("region", { name: "Run outcome" }).waitFor();
     await assertRunDestination(fixture.runId);
     await screenshot("browser-only-automation-run-peek.png");
+    await checkpoint("nested run peek verified");
     await page.getByRole("button", { name: "Back", exact: true }).click();
     await run().waitFor();
     await close();
@@ -461,6 +479,7 @@ export async function runAutomationNavigationProof({
     await assertRunDestination(fixture.runId);
     assertHost(`/${workspace}`);
     await screenshot("browser-only-global-runs-peek.png");
+    await checkpoint("paginated global run peek verified; testing reload");
     await page.reload();
     await page.getByRole("region", { name: "Run outcome" }).waitFor();
     await assertRunDestination(fixture.runId);
@@ -470,6 +489,7 @@ export async function runAutomationNavigationProof({
       "Run peek reload lost filters"
     );
     await close();
+    await checkpoint("run peek reload verified; testing read failure");
     fixture.failList(true);
     await page.reload();
     await page.getByText("Failed to load runs.", { exact: false }).waitFor();
@@ -479,12 +499,17 @@ export async function runAutomationNavigationProof({
         .count()) === 0,
       "Read failure appeared as an empty result"
     );
+    await checkpoint("read failure visible; testing Retry");
     fixture.failList(false);
     await page.getByRole("button", { name: "Retry", exact: true }).click();
     await firstRun.waitFor();
+    await checkpoint("Retry recovered; draining browser-only fixture handlers");
   } finally {
     await fixture.remove();
   }
+  await checkpoint(
+    "browser-only fixture removed; checking persisted empty state"
+  );
   await goto(filteredUrl);
   await page
     .getByText("No runs match these filters.", { exact: true })
@@ -708,8 +733,9 @@ function installReadFixture({
     install: async () => {
       for (const url of urls) await page.route(url, handler);
     },
-    remove: async () => {
-      for (const url of urls) await page.unroute(url, handler);
-    },
+    // This dedicated page has only these two test routes. Wait for in-flight
+    // real reads before removing them; plain unroute can leave an async fulfill
+    // racing teardown and mask the original proof failure with an uncaught error.
+    remove: () => page.unrouteAll({ behavior: "wait" }),
   };
 }
