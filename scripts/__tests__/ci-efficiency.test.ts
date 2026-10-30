@@ -150,6 +150,18 @@ describe("CI executes the complete event diff", () => {
       { ...none, packages: "true", mac: "true", connector: "true" },
     ],
     [
+      "packages/connector-sdk/src/redact.ts",
+      { ...none, packages: "true", mac: "true", connector: "true" },
+    ],
+    [
+      "packages/connector-sdk/package.json",
+      { ...none, packages: "true", mac: "true", connector: "true" },
+    ],
+    [
+      "packages/connector-sdk/src/identity-normalize.ts",
+      { ...none, packages: "true", connector: "true" },
+    ],
+    [
       "packages/owletto",
       {
         ...none,

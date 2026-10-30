@@ -334,3 +334,8 @@ export type {
   SocketOptions,
 } from './net.js';
 export { assertFeedReadWindow, validateFeedReadWindow } from './feed-read-window.js';
+
+// The worker's output redaction catalog, shared so a connector that returns
+// third-party text (logs, messages) can scrub it with the same patterns.
+export { isSecretOutputKey, redactOutput } from './redact.js';
+export { scrubDiagnosticValue } from '@lobu/core/diagnostic-scrubber';

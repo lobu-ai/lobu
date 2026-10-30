@@ -36,8 +36,9 @@ also used by `@lobu/cli` and `@lobu/server`.
   (`interface.ts`). `select.ts` returns the only implementation there is:
   `isolate.ts`, which runs a self-contained pure-JS bundle inside a V8 isolate
   in-process. There is no fallback — without `isolated-vm` the run fails.
-  `redact.ts` removes recognized secret patterns from the output before it
-  reaches logs. The guest never holds the job's OAuth access token:
+  `@lobu/connector-sdk/redact` removes recognized secret patterns from the
+  output before it reaches logs. The guest never holds the job's OAuth access
+  token:
   `isolate.ts` hands it a per-run placeholder and resolves it at `fetch` (see
   `egress/credentials.ts`). `job.config`, `job.sessionState` and an
   `authenticate` run's `previousCredentials` are NOT behind that vault yet.

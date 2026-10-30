@@ -75,6 +75,12 @@
       "import": "./dist/utils/ajv.js",
       "require": "./dist/utils/ajv.js"
     },
+    "./diagnostic-scrubber": {
+      "types": "./dist/utils/diagnostic-scrubber.d.ts",
+      "bun": "./src/utils/diagnostic-scrubber.ts",
+      "import": "./dist/utils/diagnostic-scrubber.js",
+      "require": "./dist/utils/diagnostic-scrubber.js"
+    },
     "./contracts/tools/manage-connections": {
       "types": "./dist/contracts/tools/manage-connections.d.ts",
       "bun": "./src/contracts/tools/manage-connections.ts",

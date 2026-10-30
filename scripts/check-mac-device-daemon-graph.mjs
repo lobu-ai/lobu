@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 const FORBIDDEN_GRAPH_PATTERNS = [
   /packages\/connector-worker\/src\/(?:compile(?:-connector)?|embeddings(?:[-/]|\.))/,
   /packages\/embeddings\//,
-  /packages\/connector-worker\/src\/executor\/(?!redact(?:\.ts|\.js)?$)/,
+  /packages\/connector-worker\/src\/executor\//,
   /packages\/connector-worker\/src\/self-check\//,
   /node_modules\/(?:@lobu\/embeddings|@xenova\/transformers|onnxruntime(?:-[^/]+)?|playwright|patchright|sharp|jimp)(?:\/|$)/,
 ];

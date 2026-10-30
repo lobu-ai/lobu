@@ -75,10 +75,16 @@
     "./device-manifest-hash": {
       "types": "./dist/device-manifest-hash.d.ts",
       "import": "./dist/device-manifest-hash.js"
+    },
+    "./redact": {
+      "types": "./dist/redact.d.ts",
+      "bun": "./src/redact.ts",
+      "import": "./dist/redact.js"
     }
   },
   "files": [
     "dist",
+    "src/redact.ts",
     "!**/*.map"
   ],
   "sideEffects": false,
