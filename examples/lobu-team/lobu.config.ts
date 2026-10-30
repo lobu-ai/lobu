@@ -2,7 +2,6 @@ import {
   connectorFromFile,
   defineAgent,
   defineAuthProfile,
-  defineAutomation,
   defineConfig,
   defineConnection,
   defineEntityType,
@@ -82,35 +81,6 @@ const developer = defineAgent({
   name: "Developer",
   description:
     "A software development agent for Lobu repositories that works in the team Vercel sandbox, runs checks, creates pull requests, reviews previews, and coordinates approved merges.",
-});
-
-// Dogfood task 35364 is deliberately project-owned. The worker and local coding
-// agent are selected here, not embedded in Lobu's shared runtime. Change
-// `agentKind` to another daemon-supported CLI when switching agents.
-const engineeringTaskRunner = defineAutomation({
-  agent: "developer",
-  slug: "engineering-task-runner-dogfood-35364",
-  name: "Engineering Task Runner Dogfood 35364",
-  triggers: [],
-  tags: ["engineering-task", "dogfood"],
-  deviceWorkerId: "66af4f1d-13c5-4d2d-b848-5b6b5dde7b63",
-  agentKind: "opencode",
-  sources: {
-    task_history: `SELECT id, semantic_type, occurred_at, payload_text, metadata
-      FROM events
-      WHERE entity_ids @> ARRAY[35364]::bigint[]
-      ORDER BY occurred_at DESC
-      LIMIT 100`,
-  },
-  prompt: `Continue engineering task 35364.
-
-Before editing, read the task with client.entities.get({ entity_id: 35364 }) and its durable history with client.knowledge.read({ entity_id: 35364, limit: 100 }). The task metadata repository is authoritative.
-
-Never edit a shared checkout. Work only in a workspace owned by task 35364. If no isolated task workspace is available, another writer is active, or a required environment change needs approval, stop without editing and save a blocked checkpoint.
-
-Before completing the Automation run, append engineering-task.checkpoint linked to entity 35364 with the current status, workspace, branch, PR, tests, verification, and blockers. Persist important rationale as engineering-task.decision, test evidence as engineering-task.verification_completed, and review results as engineering-task.review_completed. Update the task metadata when its current status, branch, PR, or verification state changes.
-
-Use the existing GitHub connector and approval flow. Never bypass an approval or merge without the required review and verification evidence.`,
 });
 
 // Reuse the Lobu Team read-only database credentials already stored in Lobu.
@@ -258,12 +228,20 @@ const productActivityDb = defineConnection({
   ],
 });
 
+// Provisioned with an immutable HTTP binding through authProfiles.create.
+// Apply preserves the live secret because credentials are intentionally omitted.
+const productionLogsAuth = defineAuthProfile({
+  slug: "lobu-production-loki-http",
+  connector: "loki.activity",
+  authKind: "env",
+  name: "Lobu production Loki HTTP",
+});
+
 const productionLogs = defineConnection({
   slug: "lobu-production-logs",
   connector: "loki.activity",
   name: "Lobu production Kubernetes logs",
-  // Provisioned with an immutable HTTP binding through authProfiles.create.
-  authProfile: "lobu-production-loki-http",
+  authProfile: productionLogsAuth,
   config: {
     LOKI_URL: "https://loki.lobu.ai",
     namespace: "summaries-prod",
@@ -299,11 +277,11 @@ export default defineConfig({
   orgDescription: "Lobu Team agents and internal operations",
   organizationId: "UdNAH1bb3csC842vhOgxAHVcfX4tYU5A",
   agents: [developer],
-  authProfiles: [productActivityDbAuth],
+  authProfiles: [productActivityDbAuth, productionLogsAuth],
   entities: [engineeringTask],
   relationships: [targetsRepository],
   connections: [productActivityDb, productionLogs, lobuTeamSlack],
   // The external digest is maintained by scripts/configure-product-activity.ts.
   // Apply without prune: preserve its existing delivery agent and manual Automation.
-  automations: [engineeringTaskRunner],
+  automations: [],
 });
