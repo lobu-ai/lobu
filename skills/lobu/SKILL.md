@@ -294,7 +294,17 @@ export default function Pipeline() {
 }
 ```
 
-`defineView` is the view's only declaration: `key`, optional `name` (defaults to the key) and `description`, `attach`, `params` and `actions` are read from it, never passed separately, so `views.set` takes just the source. Write it out as a literal (no variables, spreads or `${}` templates): the server reads it without running the module.
+`defineView` is the view's only declaration: `key`, optional `name` (defaults to the key) and `description`, `attach`, `params` and `actions` are read from it, never passed separately. `views.set` always requires `source_code` containing the entrypoint module, including when retaining multiple files. Write `defineView` out as a literal (no variables, spreads or `${}` templates): the server reads it without running the module.
+
+For a multi-file view, `files` maps relative paths to complete source strings and `entrypoint` names the view module. Include all three inputs below; `source_code` must exactly equal `files[entrypoint]`:
+
+```ts
+await client.views.set({
+  source_code: files[entrypoint],
+  source_files: { entrypoint, files },
+  dependencies: {}, // Local files and the host-provided runtime need no extra packages.
+});
+```
 
 `attach` lists the pages a view appears on, one per entry: `{ record: "deal" }` is a card on every deal's page above its activity (`{ record: "deal", id: 7 }` pins one record), `{ collection: "deal", when? }` a tab on the deal list page, `{ workspace: true }` a Data hub tab, `{ event: "deal.won", type? }` one event's page. One view can list several pages and branch on `useScope()` when it answers the same question at each scale. A record card renders with `useHost().displayMode === "inline"` inside `container.maxHeight` (the host clips past it): render a summary there with a "See all" that calls `requestDisplayMode("fullscreen")`, and the full view when `displayMode` is `"fullscreen"` (the peek, a full page, a tab).
 
