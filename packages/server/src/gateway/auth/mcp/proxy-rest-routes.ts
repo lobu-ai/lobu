@@ -17,7 +17,12 @@ import {
 	runWithWorkerOrgContext,
 	upstreamJsonRpcRequest,
 } from "./proxy-shared.js";
-import { ssrfBlockResponse } from "./proxy-upstream.js";
+import {
+	McpUpstreamRefusal,
+	readUpstreamRefusal,
+	ssrfBlockResponse,
+	upstreamErrorMessage,
+} from "./proxy-upstream.js";
 import type { McpTool } from "./tool-cache.js";
 
 const logger = createLogger("mcp-proxy");
@@ -199,7 +204,7 @@ async function handleCallToolAuthenticated(
 					}
 				: undefined;
 
-		let response = await proxy.upstream.sendUpstreamRequest(
+		const response = await proxy.upstream.sendUpstreamRequest(
 			httpServer,
 			agentId,
 			mcpId,
@@ -212,12 +217,13 @@ async function handleCallToolAuthenticated(
 			false,
 		);
 
-		let data = (await parseJsonRpcResponse(response)) as JsonRpcResponse;
+		const refusal = await readUpstreamRefusal(response, mcpId);
+		if (refusal) throw refusal;
+
+		const data = (await parseJsonRpcResponse(response)) as JsonRpcResponse;
 
 		if (data?.error) {
-			const errorMsg =
-				data.error.message ||
-				(typeof data.error === "string" ? data.error : "Upstream error");
+			const errorMsg = upstreamErrorMessage(data) ?? "Upstream error";
 			logger.error("Upstream returned JSON-RPC error on tool call", {
 				mcpId,
 				toolName,
@@ -240,6 +246,22 @@ async function handleCallToolAuthenticated(
 			isError: result.isError || false,
 		});
 	} catch (error) {
+		// The upstream refused the caller or request (on the handshake or the
+		// call itself), so the gateway did not fail: keep the upstream status,
+		// as the JSON-RPC forward path does. 502 stays reserved for an upstream
+		// that failed or answered unusably.
+		if (error instanceof McpUpstreamRefusal) {
+			logger.warn("Upstream refused tool call", {
+				mcpId,
+				toolName,
+				status: error.status,
+				error: error.message,
+			});
+			return c.json(
+				{ content: [], isError: true, error: error.message },
+				error.status,
+			);
+		}
 		logger.error("Failed to call tool", { mcpId, toolName, error });
 		return c.json(
 			{

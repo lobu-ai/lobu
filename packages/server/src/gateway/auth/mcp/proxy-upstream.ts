@@ -1,4 +1,5 @@
 import { createLogger, MCP_PROTOCOL_VERSION } from "@lobu/core";
+import type { ContentfulStatusCode } from "hono/utils/http-status";
 import {
 	boundStreamingResponse,
 	createMcpAbortScope,
@@ -29,6 +30,66 @@ import {
 } from "./proxy-shared.js";
 
 const logger = createLogger("mcp-proxy");
+
+/**
+ * An MCP upstream's HTTP 4xx: the upstream refused this caller or request (an
+ * auth or scope refusal, such as a worker token whose agent was deleted
+ * mid-turn), so the gateway itself did not fail. Carries the upstream status
+ * for a REST caller to keep.
+ */
+export class McpUpstreamRefusal extends Error {
+	constructor(
+		readonly status: ContentfulStatusCode,
+		message: string,
+	) {
+		super(message);
+		this.name = "McpUpstreamRefusal";
+	}
+}
+
+/**
+ * The message of an upstream error body: a JSON-RPC `error` object, or the
+ * OAuth-style `{ error, error_description }` refusal an auth gate answers with.
+ */
+export function upstreamErrorMessage(body: unknown): string | null {
+	if (!body || typeof body !== "object") return null;
+	const { error, error_description: description } = body as {
+		error?: unknown;
+		error_description?: unknown;
+	};
+	if (typeof error === "string" && error) {
+		return typeof description === "string" && description
+			? `${error}: ${description}`
+			: error;
+	}
+	if (error && typeof error === "object") {
+		const message = (error as { message?: unknown }).message;
+		if (typeof message === "string" && message) return message;
+	}
+	return null;
+}
+
+/**
+ * Read an upstream 4xx into a refusal, consuming its body; null (body
+ * untouched) when the upstream did not refuse.
+ */
+export async function readUpstreamRefusal(
+	response: Response,
+	mcpId: string,
+): Promise<McpUpstreamRefusal | null> {
+	if (response.status < 400 || response.status >= 500) return null;
+	let body: unknown = null;
+	try {
+		body = await parseJsonRpcResponse(response);
+	} catch {
+		// A non-JSON refusal body (a plain-text 401) carries no message.
+	}
+	return new McpUpstreamRefusal(
+		response.status as ContentfulStatusCode,
+		upstreamErrorMessage(body) ??
+			`MCP '${mcpId}' refused the request (HTTP ${response.status})`,
+	);
+}
 
 type McpTerminalLogger = {
 	info: (message: unknown, ...args: unknown[]) => void;
@@ -304,6 +365,8 @@ export class McpUpstreamClient {
 		// unauthenticated catalog. Preserve the raw response so the caller can
 		// inspect its status instead of trying to parse a non-JSON challenge body.
 		if (response.status === 401) return response;
+		const refusal = await readUpstreamRefusal(response, mcpId);
+		if (refusal) throw refusal;
 		const parsed = (await parseJsonRpcResponse(response.clone())) as {
 			result?: { protocolVersion?: unknown };
 			error?: { message?: string };
