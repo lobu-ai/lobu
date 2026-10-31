@@ -64,6 +64,12 @@ export const UpdateAgentAction = Type.Object({
     description: "Patch agent fields (queued for approval).",
   }),
   agent_id: AgentId,
+  expected_revision: Type.Optional(
+    Type.String({
+      description:
+        "Required revision returned by the original agent read. A stale or missing revision rejects the write with REVISION_CONFLICT.",
+    })
+  ),
   name: Type.Optional(AgentFields.name),
   description: Type.Optional(AgentFields.description),
   identity_md: Type.Optional(AgentFields.identity_md),
@@ -75,6 +81,12 @@ export const DeleteAgentAction = Type.Object({
     description: "Delete an agent (queued for approval).",
   }),
   agent_id: AgentId,
+  expected_revision: Type.Optional(
+    Type.String({
+      description:
+        "Required revision returned by the original agent read. A stale or missing revision rejects the write with REVISION_CONFLICT.",
+    })
+  ),
 });
 
 export const ManageAgentsSchema = Type.Union([
@@ -92,12 +104,19 @@ export const ManageAgentsSchema = Type.Union([
 export type ManageAgentsArgs = Static<typeof ManageAgentsSchema>;
 
 export type AgentCreateInput = ActionInput<ManageAgentsArgs, "create">;
-export type AgentUpdateInput = ActionInput<ManageAgentsArgs, "update">;
+export type AgentUpdateInput = ActionInput<ManageAgentsArgs, "update"> & {
+  expected_revision: string;
+};
+export type AgentDeleteInput = ActionInput<ManageAgentsArgs, "delete"> & {
+  expected_revision: string;
+};
 
 export interface AgentRecord {
   id: string;
+  revision: string;
   name: string;
   description: string | null;
+  identity_md: string | null;
   owner_platform: string | null;
   owner_user_id: string | null;
   created_at: string;
@@ -136,6 +155,7 @@ export type ManageAgentsResult =
       action: "create";
       agent_id: string;
       created: boolean;
+      revision: string;
       /**
        * The agent's model after create. `not_runnable: true` is the actionable
        * signal that no runnable model resolved (no `default_model` given and
@@ -148,6 +168,7 @@ export type ManageAgentsResult =
       action: "update";
       agent_id: string;
       updated_fields: string[];
+      revision: string;
       /** Fields a stale approval skipped because another writer changed them first. */
       skipped_fields?: string[];
       /** The agent's model after update (present when the effective model is known). */
@@ -170,6 +191,7 @@ export type ManageAgentsResult =
 export interface ManageAgentsProposal {
   action: "create" | "update" | "delete";
   agent_id: string;
+  expected_revision?: string;
   name?: string;
   description?: string;
   identity_md?: string;

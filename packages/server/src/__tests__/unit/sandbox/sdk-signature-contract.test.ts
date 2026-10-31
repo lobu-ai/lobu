@@ -164,8 +164,8 @@ describe("ClientSDK object signature contract", () => {
 		await automations.claimNextWindow({ automation_id: "51", lease_seconds: 300 });
 		await automations.trigger({ automation_id: "52" });
 		await automations.delete({ automation_ids: ["53", "54"] });
-		await entitySchema.deleteType({ slug: "company" });
-		await entitySchema.deleteRelType({ slug: "works-at" });
+		await entitySchema.deleteType({ slug: "company", expected_revision: "fixture" });
+		await entitySchema.deleteRelType({ slug: "works-at", expected_revision: "fixture" });
 		await entitySchema.listRules({ slug: "works-at" });
 
 		expect(automationGets).toEqual([{ automation_id: "51" }]);
@@ -191,11 +191,11 @@ describe("ClientSDK object signature contract", () => {
 			{ action: "delete", input: { automation_ids: ["53", "54"] } },
 			{
 				action: "delete",
-				input: { schema_type: "entity_type", slug: "company" },
+				input: { schema_type: "entity_type", slug: "company", expected_revision: "fixture" },
 			},
 			{
 				action: "delete",
-				input: { schema_type: "relationship_type", slug: "works-at" },
+				input: { schema_type: "relationship_type", slug: "works-at", expected_revision: "fixture" },
 			},
 			{
 				action: "list_rules",

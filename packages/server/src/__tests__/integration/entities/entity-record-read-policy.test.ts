@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import { createTestAgent, createTestEntity, createTestEvent } from '../../setup/test-fixtures';
-import { TestWorkspace } from '../../setup/test-mcp-client';
+import { freshSchemaEditor, TestWorkspace } from '../../setup/test-mcp-client';
 import { upsertEntityApprovalPolicy } from '../../../authz/entity-policy';
 import { countEntitiesOfType, getEntityCountsByTypes } from '../../../utils/entity-management';
 import type { UnifiedSearchResult } from '../../../tools/search';
@@ -14,7 +14,7 @@ async function fixture() {
     'x-lobu-resolution': { rules: [{ fields: ['serial'], normalizer: 'exact', onMatch: 'review' }] },
   } });
   await human.entity_schema.createRelType({ slug: 'same_asset', name: 'Same asset', purpose: 'identity' });
-  await human.entity_schema.addRule({ slug: 'same_asset', source_entity_type_slug: 'asset', target_entity_type_slug: 'asset' });
+  await freshSchemaEditor(human.entity_schema).addRule({ slug: 'same_asset', source_entity_type_slug: 'asset', target_entity_type_slug: 'asset' });
   const principal = await createTestAgent({ organizationId: workspace.org.id, ownerUserId: workspace.users.owner.id });
   const agent = workspace.withAuth({ agentId: principal.agentId });
   const create = async (name: string, serial = 'shared') => {

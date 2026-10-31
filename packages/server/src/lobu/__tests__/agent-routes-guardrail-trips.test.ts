@@ -39,6 +39,10 @@ const OTHER_ORG = 'org-trips-other';
 const AGENT = 'trips-agent';
 const OTHER_AGENT = 'other-agent';
 
+async function readRevision(app: Awaited<ReturnType<typeof importAgentRoutes>>): Promise<string> {
+  return ((await (await app.request(`/${AGENT}/config`)).json()) as { revision: string }).revision;
+}
+
 beforeAll(async () => {
   await ensureDbForGatewayTests();
   process.env.ENCRYPTION_KEY = TEST_ENCRYPTION_KEY;
@@ -136,14 +140,14 @@ describe('custom guardrails persist through PATCH/GET /config', () => {
     const seedIdentity = await app.request(`/${AGENT}/config`, {
       method: 'PATCH',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ identityMd: 'You are a helpful agent.' }),
+      body: JSON.stringify({ expected_revision: await readRevision(app), identityMd: 'You are a helpful agent.' }),
     });
     expect(seedIdentity.status).toBe(200);
 
     const patch = await app.request(`/${AGENT}/config`, {
       method: 'PATCH',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ guardrailsInline: inline }),
+      body: JSON.stringify({ expected_revision: await readRevision(app), guardrailsInline: inline }),
     });
     expect(patch.status).toBe(200);
 
@@ -173,7 +177,7 @@ describe('custom guardrails persist through PATCH/GET /config', () => {
     await app.request(`/${AGENT}/config`, {
       method: 'PATCH',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ guardrailsInline: inline }),
+      body: JSON.stringify({ expected_revision: await readRevision(app), guardrailsInline: inline }),
     });
     const get = await app.request(`/${AGENT}/config`);
     const body = (await get.json()) as {
@@ -213,14 +217,14 @@ describe('custom guardrails persist through PATCH/GET /config', () => {
       const seed = await app.request(`/${AGENT}/config`, {
         method: 'PATCH',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ skillsConfig: good }),
+        body: JSON.stringify({ expected_revision: await readRevision(app), skillsConfig: good }),
       });
       expect(seed.status).toBe(200);
 
       const res = await app.request(`/${AGENT}/config`, {
         method: 'PATCH',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ skillsConfig }),
+        body: JSON.stringify({ expected_revision: await readRevision(app), skillsConfig }),
       });
       expect(res.status).toBe(400);
       const body = (await res.json()) as {
@@ -249,7 +253,7 @@ describe('custom guardrails persist through PATCH/GET /config', () => {
     const res = await app.request(`/${AGENT}/config`, {
       method: 'PATCH',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ skillsConfig }),
+      body: JSON.stringify({ expected_revision: await readRevision(app), skillsConfig }),
     });
     expect(res.status).toBe(200);
 
@@ -264,7 +268,7 @@ describe('custom guardrails persist through PATCH/GET /config', () => {
     const res = await app.request(`/${AGENT}/config`, {
       method: 'PATCH',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
+      body: JSON.stringify({ expected_revision: await readRevision(app),
         guardrailsInline: [
           { name: 'needs-model', enabled: true, stage: 'output', policy: 'deny' },
         ],
@@ -312,7 +316,7 @@ describe('custom guardrails persist through PATCH/GET /config', () => {
       const res = await app.request(`/${AGENT}/config`, {
         method: 'PATCH',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
+        body: JSON.stringify({ expected_revision: await readRevision(app),
           guardrailsInline: [
             {
               name: 'anthropic-judge',
@@ -350,7 +354,7 @@ describe('custom guardrails persist through PATCH/GET /config', () => {
       const saved = await app.request(`/${AGENT}/config`, {
         method: 'PATCH',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ guardrailsInline: inline }),
+        body: JSON.stringify({ expected_revision: await readRevision(app), guardrailsInline: inline }),
       });
       expect(saved.status).toBe(200);
 
@@ -363,7 +367,7 @@ describe('custom guardrails persist through PATCH/GET /config', () => {
       const again = await app.request(`/${AGENT}/config`, {
         method: 'PATCH',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ identityMd: 'edited', guardrailsInline: inline }),
+        body: JSON.stringify({ expected_revision: await readRevision(app), identityMd: 'edited', guardrailsInline: inline }),
       });
       expect(again.status).toBe(200);
 
@@ -372,7 +376,7 @@ describe('custom guardrails persist through PATCH/GET /config', () => {
       const changed = await app.request(`/${AGENT}/config`, {
         method: 'PATCH',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
+        body: JSON.stringify({ expected_revision: await readRevision(app),
           guardrailsInline: [
             { ...inline[0], model: 'claude/claude-haiku-4-5-20251001' },
           ],
@@ -394,7 +398,7 @@ describe('custom guardrails persist through PATCH/GET /config', () => {
         const res = await app.request(`/${AGENT}/config`, {
           method: 'PATCH',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({
+          body: JSON.stringify({ expected_revision: await readRevision(app),
             guardrailsInline: [
               { name: 'no-model', enabled: true, stage: 'output', policy: 'deny' },
             ],
@@ -416,7 +420,7 @@ describe('custom guardrails persist through PATCH/GET /config', () => {
       const res = await app.request(`/${AGENT}/config`, {
         method: 'PATCH',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
+        body: JSON.stringify({ expected_revision: await readRevision(app),
           guardrailsInline: [
             {
               name: 'openai-judge',

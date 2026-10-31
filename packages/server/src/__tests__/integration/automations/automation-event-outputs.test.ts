@@ -1,3 +1,4 @@
+import { readAutomationRevision } from './revision-fixture';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { activateWorkspaceEventTask } from '../../../automations/workspace-event';
 import { enqueueWorkspaceEventActivations } from '../../../automations/workspace-event-enqueue';
@@ -159,6 +160,7 @@ describe('Automation event outputs', () => {
     })) as { automation_id: string };
     const automationId = Number(created.automation_id);
     await api.automations.update({
+      expected_revision: await readAutomationRevision(api, String(automationId)),
       automation_id: String(automationId),
       triggers: [
         { kind: 'schedule', cron: '0 9 * * *' },

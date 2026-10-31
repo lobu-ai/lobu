@@ -3,6 +3,7 @@
  *   trigger, set_reaction_script
  */
 
+import { assertAutomationRevision, readAutomationConfiguration } from "./revision";
 import { transform } from "esbuild";
 import { getDb, type DbClient } from "../../../db/client";
 import type { Env } from "../../../index";
@@ -274,6 +275,7 @@ export async function handleSetReactionScript(
   ctx: ToolContext,
 ): Promise<{
   action: "set_reaction_script";
+  revision: string;
   automation_id: string;
   has_script: boolean;
   message: string;
@@ -310,6 +312,7 @@ export async function handleSetReactionScript(
     throw new ToolUserError(`Automation ${args.automation_id} not found`, 404);
   }
 
+  let committedRevision = "";
   const script = args.reaction_script;
   const beforeById = new Map<number, string | null>(
     groupRows.map((r) => [Number(r.id), (r.reaction_script as string | null) ?? null]),
@@ -319,6 +322,7 @@ export async function handleSetReactionScript(
     if ([...beforeById.values()].every((v) => v == null)) {
       return {
         action: "set_reaction_script",
+        revision: await assertAutomationRevision(args, ctx.organizationId),
         automation_id: String(args.automation_id),
         has_script: false,
         message: "Reaction script removed.",
@@ -364,6 +368,7 @@ export async function handleSetReactionScript(
         ORDER BY id
         FOR UPDATE
       `;
+      await assertAutomationRevision(args, ctx.organizationId, tx);
       const lockedBefore = new Map<number, string | null>(
         locked.map((r) => [Number(r.id), (r.reaction_script as string | null) ?? null]),
       );
@@ -403,9 +408,11 @@ export async function handleSetReactionScript(
           changedFields: ["reaction_script", "reaction_input_schema"],
         }, tx);
       }
+      committedRevision = (await readAutomationConfiguration(ctx.organizationId, args.automation_id!, tx))!.revision;
     });
     return {
       action: "set_reaction_script",
+      revision: committedRevision,
       automation_id: String(args.automation_id),
       has_script: false,
       message: "Reaction script removed.",
@@ -426,6 +433,7 @@ export async function handleSetReactionScript(
       ORDER BY id
       FOR UPDATE
     `;
+    await assertAutomationRevision(args, ctx.organizationId, tx);
     const targetSchema = reactionInputSchema ?? null;
     for (const row of locked) {
       const rowId = Number(row.id);
@@ -467,6 +475,7 @@ export async function handleSetReactionScript(
         changedFields: ["reaction_script", "reaction_input_schema"],
       }, tx);
     }
+    committedRevision = (await readAutomationConfiguration(ctx.organizationId, args.automation_id!, tx))!.revision;
   });
 
   logger.info(
@@ -475,6 +484,7 @@ export async function handleSetReactionScript(
 
   return {
     action: "set_reaction_script",
+    revision: committedRevision,
     automation_id: String(args.automation_id),
     has_script: true,
     message:

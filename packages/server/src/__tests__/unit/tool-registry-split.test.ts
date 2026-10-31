@@ -50,6 +50,7 @@ const ADMIN_TOOL_SDK_NAMESPACE: Record<
 	read_knowledge: "knowledge",
 	manage_classifiers: "classifiers",
 	manage_views: "views",
+	manage_navigation: "navigation",
 };
 
 const testEnv = { ENVIRONMENT: "test" } as Env;

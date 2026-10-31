@@ -19,6 +19,7 @@
  * Both are validated on create, update, and create_version.
  */
 
+import { readAutomationRevision } from './revision-fixture';
 import { beforeEach, describe, expect, it } from "vitest";
 import type { Env } from "../../../index";
 import type { AuthContext } from "../../../tools/execute";
@@ -153,6 +154,7 @@ describe("manage_automations reference validation", () => {
 			executeTool(
 				"manage_automations",
 				{
+					expected_revision: await readAutomationRevision(workspace.owner, created.automation_id),
 					action: "update",
 					automation_id: created.automation_id,
 					managed_agent_id: "agent-does-not-exist",
@@ -191,6 +193,7 @@ describe("manage_automations reference validation", () => {
 		const updated = (await executeTool(
 			"manage_automations",
 			{
+				expected_revision: await readAutomationRevision(workspace.owner, created.automation_id),
 				action: "update",
 				automation_id: created.automation_id,
 				managed_agent_id: second.agentId,
@@ -335,6 +338,7 @@ describe("manage_automations reference validation", () => {
 			executeTool(
 				"manage_automations",
 				{
+					expected_revision: await readAutomationRevision(workspace.owner, created.automation_id),
 					action: "create_version",
 					automation_id: created.automation_id,
 					prompt: "Track things differently.",
@@ -379,6 +383,7 @@ describe("manage_automations reference validation", () => {
 			executeTool(
 				"manage_automations",
 				{
+					expected_revision: await readAutomationRevision(workspace.owner, created.automation_id),
 					action: "create_version",
 					automation_id: created.automation_id,
 					outputs: { alerts: { event: "not_a_registered_kind" } },

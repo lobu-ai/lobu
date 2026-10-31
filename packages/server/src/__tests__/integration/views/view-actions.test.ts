@@ -18,6 +18,7 @@ import {
 } from "../../../interactions/template-event-actions";
 import { executeTool, type AuthContext } from "../../../tools/execute";
 import { ToolUserError } from "../../../utils/errors";
+import { getView } from "../../../views/views";
 import { ensureMemberEntityType } from "../../../utils/member-entity-type";
 import { primeMemberEventKinds } from "../../../utils/event-kind-validation";
 import { initWorkspaceProvider } from "../../../workspace";
@@ -78,6 +79,7 @@ describe("view actions", () => {
 			"manage_views",
 			{
 				action: "set",
+				expected_revision: (await getView(orgId, key))?.revision,
 				source_code: viewModule({ key, attach: [], actions }, source),
 			},
 			TEST_ENV,
@@ -388,11 +390,13 @@ describe("view actions", () => {
 		// Warm this pod's cache with the registry that lacks the new kind, as
 		// any earlier save or click in the org would.
 		await setView("poke-view", VIEW_SOURCE, { retry: { emits: "test.poked" } });
+		const currentSchema = await executeTool("manage_entity_schema", { schema_type: "entity_type", action: "get", slug: "$member" }, TEST_ENV, ownerCtx) as { entity_type: { revision: string } };
 		await executeTool(
 			"manage_entity_schema",
 			{
 				schema_type: "entity_type",
 				action: "update",
+				expected_revision: currentSchema.entity_type.revision,
 				slug: "$member",
 				event_kinds: {
 					"test.poked": { description: "A view action fired" },

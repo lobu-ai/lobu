@@ -4,6 +4,7 @@
 
 import type {
 	AgentCreateInput,
+	AgentDeleteInput,
 	AgentUpdateInput,
 } from "@lobu/core/contracts/tools/manage-agents";
 import type { Env } from "../../index";
@@ -17,7 +18,7 @@ export interface AgentsNamespace {
 	get(agent_id: string): Promise<unknown>;
 	create(input: AgentCreateInput): Promise<unknown>;
 	update(input: AgentUpdateInput): Promise<unknown>;
-	delete(agent_id: string): Promise<unknown>;
+	delete(input: AgentDeleteInput): Promise<unknown>;
 }
 
 export function buildAgentsNamespace(
@@ -36,10 +37,6 @@ export function buildAgentsNamespace(
 		}),
 		create: method("create"),
 		update: method("update"),
-		delete: method("delete", {
-			mapArgs: (agent_id) => ({
-				agent_id: idArg("agents.delete", "agent_id", agent_id, "string"),
-			}),
-		}),
+		delete: method("delete"),
 	};
 }

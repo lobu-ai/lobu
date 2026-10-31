@@ -1,3 +1,4 @@
+import { readAutomationRevision } from './revision-fixture';
 import { COMPILE_CONFIG_HASH } from '@lobu/connector-worker/compile';
 import { compileConnectorSource } from '../../../utils/connector-compiler';
 import { generateWindowToken, verifyWindowToken } from '../../../utils/jwt';
@@ -181,6 +182,7 @@ describe('Automation window claim and recovery', () => {
       feeds.push(Number(feed.id));
     }
     await api.automations.createVersion({
+      expected_revision: await readAutomationRevision(api, String(automationId)),
       automation_id: String(automationId), prompt: 'Extract signals using complete source windows.',
       sources: [
         { name: 'content', query: "SELECT id, occurred_at, payload_text FROM events WHERE semantic_type = 'content' ORDER BY occurred_at DESC, id DESC" },
@@ -623,6 +625,7 @@ describe('Automation window claim and recovery', () => {
     `;
 
     await api.automations.createVersion({
+      expected_revision: await readAutomationRevision(api, String(automationId)),
       automation_id: String(automationId),
       prompt: 'Extract a different contract from future periods.',
       outputs: { findings: { event: 'observation' } },
@@ -660,6 +663,7 @@ describe('Automation window claim and recovery', () => {
     const claimed = await claim();
 
     await api.automations.update({
+      expected_revision: await readAutomationRevision(api, String(automationId)),
       automation_id: String(automationId),
       triggers: [{ kind: 'schedule', cron: '0 9 * * 1' }],
     });
@@ -1002,6 +1006,7 @@ describe('Automation window claim and recovery', () => {
 
   it('completes empty source windows and keeps output/reaction execution idempotent', async () => {
     await api.automations.setReactionScript({
+      expected_revision: await readAutomationRevision(api, String(automationId)),
       automation_id: String(automationId),
       reaction_script: 'export default async function reaction() { return; }',
     });

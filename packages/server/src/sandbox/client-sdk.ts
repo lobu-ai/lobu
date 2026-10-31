@@ -54,6 +54,7 @@ import {
 	buildOrganizationsNamespace,
 	buildSchedulesNamespace,
 	buildViewsNamespace,
+	buildNavigationNamespace,
 } from "./namespaces";
 import type { AgentsNamespace } from "./namespaces/agents";
 import type { AuthProfilesNamespace } from "./namespaces/auth-profiles";
@@ -74,6 +75,7 @@ import type { NotificationsNamespace } from "./namespaces/notifications";
 import type { OperationsNamespace } from "./namespaces/operations";
 import type { OrganizationsNamespace } from "./namespaces/organizations";
 import type { ViewsNamespace } from "./namespaces/views";
+import type { NavigationNamespace } from "./namespaces/navigation";
 import type { SchedulesNamespace } from "./namespaces/schedules";
 import type { AutomationsNamespace } from "./namespaces/automations";
 import { authzScopeFromToolContext } from "../authz/scope";
@@ -91,6 +93,7 @@ export interface ClientSDK {
 	automations: AutomationsNamespace;
 	classifiers: ClassifiersNamespace;
 	views: ViewsNamespace;
+	navigation: NavigationNamespace;
 	knowledge: KnowledgeNamespace;
 	metrics: MetricsNamespace;
 	notifications: NotificationsNamespace;
@@ -293,6 +296,7 @@ export function buildClientSDK(
 		get automations() { return namespace("automations", buildAutomationsNamespace(requireWorkspaceContext(ctx), env)); },
 		get classifiers() { return namespace("classifiers", buildClassifiersNamespace(requireWorkspaceContext(ctx), env)); },
 		get views() { return namespace("views", buildViewsNamespace(requireWorkspaceContext(ctx), env)); },
+		get navigation() { return namespace("navigation", buildNavigationNamespace(requireWorkspaceContext(ctx), env)); },
 		get knowledge() { return namespace("knowledge", buildKnowledgeNamespace(requireWorkspaceContext(ctx), env)); },
 		get metrics() { return namespace("metrics", buildMetricsNamespace(requireWorkspaceContext(ctx), env)); },
 		get notifications() { return namespace("notifications", buildNotificationsNamespace(requireWorkspaceContext(ctx), env)); },

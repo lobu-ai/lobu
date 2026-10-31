@@ -332,6 +332,7 @@ describe("automation custom-SQL source validation", () => {
 				{
 					action: "create_version",
 					automation_id: automationId,
+					expected_revision: created.revision,
 					sources: [
 						{ name: "src", query: "SELECT id, this_is_not_a_column FROM events" },
 					],

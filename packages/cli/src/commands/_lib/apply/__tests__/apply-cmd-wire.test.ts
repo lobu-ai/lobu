@@ -90,9 +90,9 @@ interface WireCall {
 function makeFetch(remoteFeeds = [REMOTE_FEED]) {
   const calls: WireCall[] = [];
 
-  const json = (payload: unknown) =>
+  const json = (payload: unknown, status = 200) =>
     new Response(JSON.stringify(payload), {
-      status: 200,
+      status,
       headers: { "Content-Type": "application/json" },
     });
 
@@ -151,6 +151,10 @@ function makeFetch(remoteFeeds = [REMOTE_FEED]) {
       return json({ connections: [REMOTE_CONNECTION] });
     }
     if (urlStr.includes("/manage_entity_schema")) {
+      if (body.action === "create" || body.action === "update")
+        return json({
+          [String(body.schema_type)]: { revision: "schema-saved" },
+        });
       return json({ entity_types: [], relationship_types: [] });
     }
     if (urlStr.includes("/manage_automations"))
@@ -158,7 +162,13 @@ function makeFetch(remoteFeeds = [REMOTE_FEED]) {
     if (urlStr.includes("/manage_auth_profiles")) {
       return json({ auth_profiles: [] });
     }
-    if (urlStr.includes("/agents")) return json({ agents: [] });
+    if (urlStr.includes("/agents")) {
+      if (method === "POST")
+        return json({ ...body, created: true, revision: "agent-created" }, 201);
+      if (method === "PATCH")
+        return json({ success: true, revision: "agent-saved" });
+      return json({ agents: [] });
+    }
     return json({ success: true });
   };
 

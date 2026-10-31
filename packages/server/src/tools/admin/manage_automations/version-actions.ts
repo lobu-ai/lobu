@@ -3,6 +3,7 @@
  *   create_version, upgrade, get_versions, get_version_details
  */
 
+import { assertAutomationRevision, automationConfigRevision, readAutomationConfiguration } from './revision';
 import { getDb, parsePgNumberArray } from '../../../db/client';
 import { assertAutomationScriptExecutor } from '../../../automations/script-config';
 import { ToolUserError } from '../../../utils/errors';
@@ -49,6 +50,7 @@ export async function handleCreateVersion(
   ctx: ToolContext
 ): Promise<{
   action: 'create_version';
+  revision: string;
   automation_id: string;
   version_id: string;
   version: number;
@@ -318,6 +320,7 @@ export async function handleCreateVersion(
   const createdBy = ctx.userId ?? 'system';
   let versionId = 0;
   let lockedNextVersion = nextVersion;
+  let committedRevision = '';
   await sql.begin(async (tx) => {
     // Serialize concurrent create_version calls on the same group. The
     // unique (automation_id, version) index would otherwise reject one of two
@@ -341,6 +344,7 @@ export async function handleCreateVersion(
     const preimageRows = await tx`
       SELECT current_version_id FROM automations WHERE id = ${args.automation_id} LIMIT 1 FOR UPDATE
     `;
+    await assertAutomationRevision(args, ctx.organizationId, tx);
     const persistedCurrentVersionId =
       preimageRows.length > 0 && preimageRows[0].current_version_id != null
         ? Number(preimageRows[0].current_version_id)
@@ -477,6 +481,7 @@ export async function handleCreateVersion(
         ],
       }, tx);
     }
+    committedRevision = (await readAutomationConfiguration(ctx.organizationId, args.automation_id!, tx))!.revision;
   });
 
   if (versionOrganizationId && setAsCurrent && triggersChanged) {
@@ -499,6 +504,7 @@ export async function handleCreateVersion(
 
   return {
     action: 'create_version',
+    revision: committedRevision,
     automation_id: args.automation_id,
     version_id: String(versionId),
     version: lockedNextVersion,
@@ -615,7 +621,8 @@ export async function handleGetVersionDetails(
         v.id, v.version, v.name, v.description, v.prompt,
         v.version_sources, v.skills,
         v.outputs,
-        v.reactions_guidance
+        v.reactions_guidance,
+        to_jsonb(w) AS revision_configuration, to_jsonb(v) AS revision_definition
       FROM automation_versions v
       JOIN automations w ON v.id = w.current_version_id
       WHERE w.id = ${args.automation_id}
@@ -642,6 +649,7 @@ export async function handleGetVersionDetails(
 
   return {
     action: 'get_version_details',
+    ...(v.revision_configuration ? { revision: automationConfigRevision(v.revision_configuration as Record<string, unknown>, v.revision_definition as Record<string, unknown>) } : {}),
     automation_id: args.automation_id,
     version_id: String(v.id),
     version: Number(v.version),
@@ -656,7 +664,7 @@ export async function handleGetVersionDetails(
       versionSources.length > 0
         ? versionSources
         : normalizeStoredJsonField(
-            automationRows[0].sources,
+            (v.revision_configuration as Record<string, unknown> | undefined)?.sources ?? automationRows[0].sources,
             [] as Array<{ name: string; query: string }>
           ),
     outputs: normalizeStoredJsonField(v.outputs, undefined as unknown),

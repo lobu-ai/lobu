@@ -11,6 +11,7 @@
  *   - Trigger does NOT advance `automations.next_run_at`.
  */
 
+import { readAutomationRevision } from './revision-fixture';
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { DbClient } from '../../../db/client';
 import type { Env } from '../../../index';
@@ -485,6 +486,7 @@ describe('POST /api/workers/me/automations/:automation_id/trigger', () => {
     // different prompt. The already-queued run must NOT pick this up.
     const v2 = (await manageAutomations(
       {
+        expected_revision: await readAutomationRevision(ctx.workspace.owner, String(ctx.automationId)),
         action: 'create_version',
         automation_id: String(ctx.automationId),
         prompt: 'EDITED-AFTER-QUEUE prompt v2.',

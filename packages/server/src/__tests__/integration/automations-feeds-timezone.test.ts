@@ -108,7 +108,7 @@ describe('automations/feeds timezone-aware schedules', () => {
       prompt: 'Summarize {{entities}}.',
       triggers: [{ kind: 'schedule', cron: '0 9 * * *' }],
       managed_agent_id: 'tz-automation-agent',
-    })) as { automation_id: string };
+    })) as { automation_id: string; revision: string };
     const automationId = Number(created.automation_id);
 
     const sql = getTestDb();
@@ -117,7 +117,8 @@ describe('automations/feeds timezone-aware schedules', () => {
     expect(utcHour(before.next_run_at)).toBe(serverTimeNineAmUtcHour());
 
     await workspace.owner.automations.update({
-      automation_id: automationId,
+      automation_id: String(automationId),
+      expected_revision: created.revision,
       triggers: [
         { kind: 'schedule', cron: '0 9 * * *', timezone: 'Asia/Taipei' },
       ],

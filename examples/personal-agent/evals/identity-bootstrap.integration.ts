@@ -175,19 +175,22 @@ async function installIdentitySchema(sdk: ReturnType<typeof buildClientSDK>) {
     },
   });
   for (const type of identityRelationships) {
-    await sdk.entitySchema.createRelType({
+    const created = (await sdk.entitySchema.createRelType({
       slug: type.key,
       name: type.name!,
       ...(type.purpose ? { purpose: type.purpose } : {}),
-    });
+    })) as { relationship_type: { revision: string } };
+    let revision = created.relationship_type.revision;
     for (const rule of type.rules ?? []) {
-      await sdk.entitySchema.addRule({
+      const added = (await sdk.entitySchema.addRule({
         slug: type.key,
+        expected_revision: revision,
         source_entity_type_slug:
           typeof rule.source === "string" ? rule.source : rule.source.key,
         target_entity_type_slug:
           typeof rule.target === "string" ? rule.target : rule.target.key,
-      });
+      })) as { revision: string };
+      revision = added.revision;
     }
   }
 }

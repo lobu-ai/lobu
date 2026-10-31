@@ -16,6 +16,7 @@ import {
   type RemoteConnectorDefinition,
   type RemoteFeed,
   resolveApplyClient,
+  requireConfigRevision,
 } from "./client.js";
 import {
   type BaselineRecord,
@@ -355,7 +356,17 @@ export async function fetchRemoteSnapshot(
       remoteAgentIds.has(id)
     );
     for (const agentId of targetAgentIds) {
-      agentSettings.set(agentId, await client.getAgentSettings(agentId));
+      const settings = await client.getAgentSettings(agentId);
+      agentSettings.set(agentId, settings);
+      const agent = agents.find((entry) => entry.agentId === agentId);
+      // Metadata and settings share one authored revision. Keep this coherent
+      // read instead of pairing an older list row with a newer settings token.
+      if (agent && settings) {
+        if (settings.name !== undefined) agent.name = settings.name;
+        if (settings.description !== undefined)
+          agent.description = settings.description;
+        agent.revision = settings.revision;
+      }
     }
   }
 
@@ -802,7 +813,10 @@ export async function executePlan(
       },
       clearFacets,
       // Outside prune, keep UI-added property keys when rebuilding the schema.
-      !(ctx.state.prune ?? false)
+      !(ctx.state.prune ?? false),
+      row.verb === "update"
+        ? requireConfigRevision(row.remote?.revision, `entity type "${row.id}"`)
+        : undefined
     );
     printText(renderProgress(row.verb, "entity-type", row.id));
   }
@@ -813,7 +827,15 @@ export async function executePlan(
   for (const row of rowsByKind("relationship-type")) {
     if (row.kind !== "relationship-type") continue;
     if (!row.desired) continue;
-    await ctx.client.upsertRelationshipType(row.desired);
+    await ctx.client.upsertRelationshipType(
+      row.desired,
+      row.verb === "update"
+        ? requireConfigRevision(
+            row.remote?.revision,
+            `relationship type "${row.id}"`
+          )
+        : undefined
+    );
     printText(renderProgress(row.verb, "relationship-type", row.id));
   }
 
@@ -843,6 +865,14 @@ export async function executePlan(
     if (row.kind !== "view") continue;
     if (!row.desired) continue;
     const result = await ctx.client.setView({
+      ...(row.verb === "update"
+        ? {
+            expected_revision: requireConfigRevision(
+              row.remote?.revision,
+              `view "${row.id}"`
+            ),
+          }
+        : {}),
       source_code: row.desired.sourceCode,
       compiled_code: row.desired.compiledCode,
       source_files: row.desired.sourceFiles,
@@ -866,6 +896,11 @@ export async function executePlan(
     );
   }
 
+  // Only a successful own write may advance a token during a multi-step apply.
+  const agentRevisions = new Map(
+    ctx.remote.agents.map((agent) => [agent.agentId, agent.revision])
+  );
+
   // 3) Agents
   for (const row of rowsByKind("agent")) {
     if (row.kind !== "agent") continue;
@@ -873,12 +908,21 @@ export async function executePlan(
     const desired = ctx.state.agents.find((a) => a.metadata.agentId === row.id);
     if (!desired) continue;
     if (row.verb === "create") {
-      await ctx.client.upsertAgent(desired.metadata);
+      const created = await ctx.client.upsertAgent(desired.metadata);
+      agentRevisions.set(
+        row.id,
+        requireConfigRevision(created.revision, `agent "${row.id}"`)
+      );
     } else {
-      await ctx.client.patchAgentMetadata(row.id, {
-        name: desired.metadata.name,
-        description: desired.metadata.description,
-      });
+      const result = await ctx.client.patchAgentMetadata(
+        row.id,
+        {
+          name: desired.metadata.name,
+          description: desired.metadata.description,
+        },
+        requireConfigRevision(agentRevisions.get(row.id), `agent "${row.id}"`)
+      );
+      agentRevisions.set(row.id, result.revision);
     }
     printText(renderProgress(row.verb, "agent", row.id));
   }
@@ -888,7 +932,12 @@ export async function executePlan(
     if (row.kind !== "settings") continue;
     const desired = ctx.state.agents.find((a) => a.metadata.agentId === row.id);
     if (!desired) continue;
-    await ctx.client.patchAgentSettings(row.id, desired.settings);
+    const result = await ctx.client.patchAgentSettings(
+      row.id,
+      desired.settings,
+      requireConfigRevision(agentRevisions.get(row.id), `agent "${row.id}"`)
+    );
+    agentRevisions.set(row.id, result.revision);
     printText(
       renderProgress(
         row.verb,
@@ -956,6 +1005,10 @@ export async function executePlan(
             `update automation "${w.slug}" failed: remote row is missing automation_id (refetch may be stale)`
           );
         }
+        let revision = requireConfigRevision(
+          remote?.revision,
+          `Automation "${w.slug}"`
+        );
         const versionBound = new Set(row.versionBoundFields ?? []);
         const changed = new Set(row.changedFields ?? []);
         const scalarChanges = [...changed].filter(
@@ -979,44 +1032,50 @@ export async function executePlan(
         //    Removal (`reaction: null`) is handled in step (b2) below, after the
         //    executor install — never here.
         if (w.reactionScript) {
-          await ctx.client.setReactionScript(
-            automationId,
-            w.reactionScript.sourceCode
-          );
+          revision = (
+            await ctx.client.setReactionScript(
+              automationId,
+              w.reactionScript.sourceCode,
+              revision
+            )
+          ).revision;
         }
         // b) Scalar fields → manage_automations update
         if (scalarForUpdate.length > 0) {
-          await ctx.client.updateAutomation({
-            automation_id: automationId,
-            ...(scalarForUpdate.includes("triggers")
-              ? { triggers: w.triggers ?? [] }
-              : {}),
-            ...(scalarForUpdate.includes("managed_agent_id")
-              ? { managed_agent_id: w.agent }
-              : {}),
-            ...(scalarForUpdate.includes("device_worker_id")
-              ? { device_worker_id: w.deviceWorkerId ?? null }
-              : {}),
-            ...(scalarForUpdate.includes("min_cooldown_seconds") &&
-            w.minCooldownSeconds !== undefined
-              ? { min_cooldown_seconds: w.minCooldownSeconds }
-              : {}),
-            ...(scalarForUpdate.includes("tags") && w.tags
-              ? { tags: w.tags }
-              : {}),
-            ...(scalarForUpdate.includes("agent_kind")
-              ? { agent_kind: w.agentKind ?? null }
-              : {}),
-            ...(scalarForUpdate.includes("execution_config")
-              ? {
-                  execution_config: automationExecutionConfig(
-                    w.model,
-                    remote?.execution_config,
-                    w.executor
-                  ),
-                }
-              : {}),
-          });
+          revision = (
+            await ctx.client.updateAutomation({
+              automation_id: automationId,
+              expected_revision: revision,
+              ...(scalarForUpdate.includes("triggers")
+                ? { triggers: w.triggers ?? [] }
+                : {}),
+              ...(scalarForUpdate.includes("managed_agent_id")
+                ? { managed_agent_id: w.agent }
+                : {}),
+              ...(scalarForUpdate.includes("device_worker_id")
+                ? { device_worker_id: w.deviceWorkerId ?? null }
+                : {}),
+              ...(scalarForUpdate.includes("min_cooldown_seconds") &&
+              w.minCooldownSeconds !== undefined
+                ? { min_cooldown_seconds: w.minCooldownSeconds }
+                : {}),
+              ...(scalarForUpdate.includes("tags") && w.tags
+                ? { tags: w.tags }
+                : {}),
+              ...(scalarForUpdate.includes("agent_kind")
+                ? { agent_kind: w.agentKind ?? null }
+                : {}),
+              ...(scalarForUpdate.includes("execution_config")
+                ? {
+                    execution_config: automationExecutionConfig(
+                      w.model,
+                      remote?.execution_config,
+                      w.executor
+                    ),
+                  }
+                : {}),
+            })
+          ).revision;
         }
         // b2) Reaction removal — AFTER the scalar updates above so a stored
         //     script executor is installed first. An explicit `reaction: null`
@@ -1025,39 +1084,44 @@ export async function executePlan(
         //     Omitted reactions are never touched: the diff only reports
         //     `reaction_script` when declared.
         if (changed.has("reaction_script") && w.reactionScript === null) {
-          await ctx.client.setReactionScript(automationId, "");
+          revision = (
+            await ctx.client.setReactionScript(automationId, "", revision)
+          ).revision;
         }
         // c) Version-bound fields → manage_automations create_version (server
         //    inherits unset fields from the previous version row, but we always
         //    send the desired-side values for the changed keys). name/description
         //    are version-owned (update rejects them).
         if (row.versionBoundFields && row.versionBoundFields.length > 0) {
-          await ctx.client.createAutomationVersion({
-            automation_id: automationId,
-            ...(versionBound.has("name") && w.name !== undefined
-              ? { name: w.name }
-              : {}),
-            ...(versionBound.has("description")
-              ? { description: w.description ?? null }
-              : {}),
-            ...(versionBound.has("prompt") ? { prompt: w.prompt } : {}),
-            ...(versionBound.has("skills")
-              ? { skills: w.skillSnapshots ?? [] }
-              : {}),
-            ...(versionBound.has("sources") && w.sources !== undefined
-              ? { sources: w.sources }
-              : {}),
-            ...(versionBound.has("reactions_guidance") &&
-            w.reactionsGuidance !== undefined
-              ? { reactions_guidance: w.reactionsGuidance }
-              : {}),
-            ...(versionBound.has("outputs")
-              ? { outputs: w.outputs ?? null }
-              : {}),
-            ...(triggersWithVersionChange
-              ? { triggers: w.triggers ?? [] }
-              : {}),
-          });
+          revision = (
+            await ctx.client.createAutomationVersion({
+              automation_id: automationId,
+              expected_revision: revision,
+              ...(versionBound.has("name") && w.name !== undefined
+                ? { name: w.name }
+                : {}),
+              ...(versionBound.has("description")
+                ? { description: w.description ?? null }
+                : {}),
+              ...(versionBound.has("prompt") ? { prompt: w.prompt } : {}),
+              ...(versionBound.has("skills")
+                ? { skills: w.skillSnapshots ?? [] }
+                : {}),
+              ...(versionBound.has("sources") && w.sources !== undefined
+                ? { sources: w.sources }
+                : {}),
+              ...(versionBound.has("reactions_guidance") &&
+              w.reactionsGuidance !== undefined
+                ? { reactions_guidance: w.reactionsGuidance }
+                : {}),
+              ...(versionBound.has("outputs")
+                ? { outputs: w.outputs ?? null }
+                : {}),
+              ...(triggersWithVersionChange
+                ? { triggers: w.triggers ?? [] }
+                : {}),
+            })
+          ).revision;
         }
       }
       printText(
@@ -1269,33 +1333,65 @@ export async function executePlan(
  * on first failure (idempotent re-run).
  */
 async function deleteRemovedDefinitions(ctx: ApplyContext): Promise<void> {
-  const deletes = ctx.plan.rows.filter((r) => r.verb === "delete");
-  if (deletes.length === 0) return;
-  const automationIdBySlug = new Map(
-    ctx.remote.automations.map((w) => [w.slug, w.automation_id])
+  const deletes = ctx.plan.rows.filter(
+    (row): row is Exclude<DiffRow, { blocking: true }> & { verb: "delete" } =>
+      row.verb === "delete"
   );
-  const steps: Array<[DiffRow["kind"], (id: string) => Promise<void>]> = [
-    ["view", (id) => ctx.client.removeView(id)],
-    [
-      "automation",
-      async (id) => {
-        const wid = automationIdBySlug.get(id);
-        if (!wid) {
-          throw new ApiError(
-            `delete automation "${id}": remote automation_id missing`
-          );
-        }
-        await ctx.client.deleteAutomation(wid);
-      },
-    ],
-    ["relationship-type", (id) => ctx.client.deleteRelationshipType(id)],
-    ["entity-type", (id) => ctx.client.deleteEntityType(id)],
-    ["connector-definition", (id) => ctx.client.uninstallConnector(id)],
+  if (deletes.length === 0) return;
+  const order: DiffRow["kind"][] = [
+    "view",
+    "automation",
+    "relationship-type",
+    "entity-type",
+    "connector-definition",
   ];
-  for (const [kind, run] of steps) {
+  for (const kind of order) {
     for (const row of deletes) {
       if (row.kind !== kind) continue;
-      await run(row.id);
+      switch (row.kind) {
+        case "view":
+          await ctx.client.removeView(
+            row.id,
+            requireConfigRevision(row.remote?.revision, `view "${row.id}"`)
+          );
+          break;
+        case "automation": {
+          const automationId = row.remote?.automation_id;
+          if (!automationId)
+            throw new ApiError(
+              `delete Automation "${row.id}": remote automation_id missing`
+            );
+          await ctx.client.deleteAutomation(
+            automationId,
+            requireConfigRevision(
+              row.remote?.revision,
+              `Automation "${row.id}"`
+            )
+          );
+          break;
+        }
+        case "relationship-type":
+          await ctx.client.deleteRelationshipType(
+            row.id,
+            requireConfigRevision(
+              row.remote?.revision,
+              `relationship type "${row.id}"`
+            )
+          );
+          break;
+        case "entity-type":
+          await ctx.client.deleteEntityType(
+            row.id,
+            requireConfigRevision(
+              row.remote?.revision,
+              `entity type "${row.id}"`
+            )
+          );
+          break;
+        case "connector-definition":
+          await ctx.client.uninstallConnector(row.id);
+          break;
+      }
       printText(renderProgress("delete", kind, row.id));
     }
   }
@@ -1650,6 +1746,7 @@ async function applyProject(
       prune
     );
     if (opts.only === "memory" && baselineRecord) {
+      built.attribution.views = baselineRecord.attribution.views;
       built.owned = [
         ...built.owned,
         ...baselineRecord.owned.filter((k) =>

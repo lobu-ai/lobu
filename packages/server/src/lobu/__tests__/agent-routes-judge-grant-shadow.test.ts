@@ -75,10 +75,11 @@ async function storeSettings(settings: Record<string, unknown>): Promise<void> {
 
 async function patchConfig(body: unknown) {
   const { agentRoutes } = await import("../agent-routes.js");
+  const { revision } = await (await agentRoutes.request(`/${AGENT}/config`)).json() as { revision: string };
   return agentRoutes.request(`/${AGENT}/config`, {
     method: "PATCH",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
+    body: JSON.stringify({ ...(body as Record<string, unknown>), expected_revision: revision }),
   });
 }
 

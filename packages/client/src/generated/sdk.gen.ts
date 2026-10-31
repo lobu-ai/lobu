@@ -92,6 +92,9 @@ import type {
   ManageFeedsData,
   ManageFeedsErrors,
   ManageFeedsResponses,
+  ManageNavigationData,
+  ManageNavigationErrors,
+  ManageNavigationResponses,
   ManageOperationsData,
   ManageOperationsErrors,
   ManageOperationsResponses,
@@ -652,6 +655,31 @@ export const manageClassifiers = <ThrowOnError extends boolean = false>(
     ThrowOnError
   >({
     url: "/api/{orgSlug}/manage_classifiers",
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      ...options.headers,
+    },
+  });
+
+/**
+ * Read or conditionally replace workspace sidebar sections and hierarchical links
+ *
+ * Read or conditionally replace workspace sidebar sections and hierarchical links. SDK alternative: client.navigation.
+ */
+export const manageNavigation = <ThrowOnError extends boolean = false>(
+  options: Options<ManageNavigationData, ThrowOnError>,
+): RequestResult<
+  ManageNavigationResponses,
+  ManageNavigationErrors,
+  ThrowOnError
+> =>
+  (options.client ?? client).post<
+    ManageNavigationResponses,
+    ManageNavigationErrors,
+    ThrowOnError
+  >({
+    url: "/api/{orgSlug}/manage_navigation",
     ...options,
     headers: {
       "Content-Type": "application/json",

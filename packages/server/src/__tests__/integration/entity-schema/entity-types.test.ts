@@ -28,7 +28,7 @@ import {
   createTestPAT,
   createTestUser,
 } from '../../setup/test-fixtures';
-import { TestApiClient, TestMcpClient } from '../../setup/test-mcp-client';
+import { freshSchemaEditor, TestApiClient, TestMcpClient } from '../../setup/test-mcp-client';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 
 describe('entity schema CRUD', () => {
@@ -50,6 +50,52 @@ describe('entity schema CRUD', () => {
     });
   });
 
+  describe('revision guard', () => {
+    it('admits one competing schema save and rejects missing or stale tokens', async () => {
+      const created = await owner.entity_schema.createType({ slug: 'revision-race', name: 'Original' }) as { entity_type: { revision: string } };
+      const revision = created.entity_type.revision;
+      const outcomes = await Promise.allSettled([
+        owner.entity_schema.updateType({ slug: 'revision-race', name: 'First editor', expected_revision: revision }),
+        owner.entity_schema.updateType({ slug: 'revision-race', name: 'Second editor', expected_revision: revision }),
+      ]);
+      expect(outcomes.filter((outcome) => outcome.status === 'fulfilled')).toHaveLength(1);
+      const failure = outcomes.find((outcome) => outcome.status === 'rejected') as PromiseRejectedResult;
+      expect(failure.reason).toMatchObject({ code: 'REVISION_CONFLICT', httpStatus: 409, retryable: false });
+      await expect(owner.entity_schema.manage({ schema_type: 'entity_type', action: 'update', slug: 'revision-race', name: 'Missing token' }))
+        .rejects.toMatchObject({ code: 'REVISION_CONFLICT' });
+      const current = await owner.entity_schema.getType('revision-race') as { entity_type: { name: string; revision: string } };
+      expect(['First editor', 'Second editor']).toContain(current.entity_type.name);
+      expect(current.entity_type.revision).not.toBe(revision);
+    });
+
+    it('binds schema revisions to the actual incarnation across delete and recreate', async () => {
+      const created = await owner.entity_schema.createType({ slug: 'revision-recreated', name: 'Original' }) as { entity_type: { revision: string } };
+      const original = created.entity_type.revision;
+      await owner.entity_schema.deleteType({ slug: 'revision-recreated', expected_revision: original });
+      const recreated = await owner.entity_schema.createType({ slug: 'revision-recreated', name: 'Original' }) as { entity_type: { revision: string } };
+      expect(recreated.entity_type.revision).not.toBe(original);
+      await expect(owner.entity_schema.updateType({ slug: 'revision-recreated', name: 'Stale', expected_revision: original }))
+        .rejects.toMatchObject({ code: 'REVISION_CONFLICT' });
+      await expect(owner.entity_schema.deleteType({ slug: 'revision-recreated', expected_revision: original }))
+        .rejects.toMatchObject({ code: 'REVISION_CONFLICT' });
+    });
+
+    it('includes allowed rules in the parent revision and returns each own-write receipt', async () => {
+      await owner.entity_schema.createType({ slug: 'revision-rule-source', name: 'Rule source' });
+      await owner.entity_schema.createType({ slug: 'revision-rule-target', name: 'Rule target' });
+      const created = await owner.entity_schema.createRelType({ slug: 'revision_rules', name: 'Rules' }) as { relationship_type: { revision: string } };
+      const original = created.relationship_type.revision;
+      const added = await owner.entity_schema.addRule({ slug: 'revision_rules', source_entity_type_slug: 'revision-rule-source', target_entity_type_slug: 'revision-rule-target', expected_revision: original }) as { rule: { id: number }; revision: string };
+      expect(added.revision).not.toBe(original);
+      await expect(owner.entity_schema.updateRelType({ slug: 'revision_rules', name: 'Stale', expected_revision: original }))
+        .rejects.toMatchObject({ code: 'REVISION_CONFLICT' });
+      const removed = await owner.entity_schema.removeRule({ rule_id: added.rule.id, expected_revision: added.revision }) as { revision: string };
+      expect(removed.revision).not.toBe(added.revision);
+      await expect(owner.entity_schema.deleteRelType({ slug: 'revision_rules', expected_revision: added.revision }))
+        .rejects.toMatchObject({ code: 'REVISION_CONFLICT' });
+    });
+  });
+
   describe('entity_type', () => {
     it.each([
       { rules: [{ fields: ['email', 42], normalizer: 'email', onMatch: 'auto_link' }] },
@@ -66,14 +112,14 @@ describe('entity schema CRUD', () => {
       const original = { type: 'object', properties: { email: { type: 'string' } },
         'x-lobu-resolution': { rules: [{ fields: ['email'], normalizer: 'email', onMatch: 'review' }] } };
       await owner.entity_schema.createType({ slug, name: 'Valid rule', metadata_schema: original });
-      await expect(owner.entity_schema.updateType({ slug, metadata_schema: malformed }))
+      await expect(freshSchemaEditor(owner.entity_schema).updateType({ slug, metadata_schema: malformed }))
         .rejects.toThrow(/invalid_schema.*x-lobu-resolution/);
       expect(await owner.entity_schema.getType(slug)).toMatchObject({ entity_type: { metadata_schema: original } });
-      await owner.entity_schema.updateType({ slug, metadata_schema: { type: 'object', properties: original.properties } });
+      await freshSchemaEditor(owner.entity_schema).updateType({ slug, metadata_schema: { type: 'object', properties: original.properties } });
       expect(await owner.entity_schema.getType(slug)).toMatchObject({ entity_type: {
         metadata_schema: { type: 'object', properties: original.properties },
       } });
-      await owner.entity_schema.deleteType({ slug });
+      await freshSchemaEditor(owner.entity_schema).deleteType({ slug });
     });
 
     it('rejects malformed matching policy through the authenticated MCP SDK path', async () => {
@@ -100,7 +146,7 @@ describe('entity schema CRUD', () => {
       expect(got.entity_type?.name).toBe('Asset');
       expect(got.entity_type?.description).toBe('A trackable asset');
 
-      await owner.entity_schema.updateType({
+      await freshSchemaEditor(owner.entity_schema).updateType({
         slug: 'lifecycle-asset',
         name: 'Asset (renamed)',
       });
@@ -109,7 +155,7 @@ describe('entity schema CRUD', () => {
       };
       expect(after.entity_type?.name).toBe('Asset (renamed)');
 
-      await owner.entity_schema.deleteType({ slug: 'lifecycle-asset' });
+      await freshSchemaEditor(owner.entity_schema).deleteType({ slug: 'lifecycle-asset' });
       const tombstone = (await owner.entity_schema.getType('lifecycle-asset')) as {
         entity_type: null | unknown;
       };
@@ -133,7 +179,7 @@ describe('entity schema CRUD', () => {
       };
       expect(alias.entity_type?.slug).toBe('stock-movement');
 
-      await owner.entity_schema.updateType({
+      await freshSchemaEditor(owner.entity_schema).updateType({
         slug: 'stock_movement',
         name: 'Stok Fisi',
       });
@@ -149,7 +195,7 @@ describe('entity schema CRUD', () => {
         expect.arrayContaining(['create', 'update'])
       );
 
-      await owner.entity_schema.deleteType({ slug: 'stock_movement' });
+      await freshSchemaEditor(owner.entity_schema).deleteType({ slug: 'stock_movement' });
       const tombstone = (await owner.entity_schema.getType('stock-movement')) as {
         entity_type: null | unknown;
       };
@@ -191,7 +237,7 @@ describe('entity schema CRUD', () => {
       expect(got.entity_type?.event_kinds).toMatchObject({ valuation: { description: 'A snapshot' } });
 
       await expect(
-        owner.entity_schema.updateType({
+        freshSchemaEditor(owner.entity_schema).updateType({
           slug: 'deal-ek',
           event_kinds: {
             valuation: {
@@ -203,7 +249,7 @@ describe('entity schema CRUD', () => {
       ).rejects.toThrow(/must name another declared event kind/i);
 
       await expect(
-        owner.entity_schema.updateType({
+        freshSchemaEditor(owner.entity_schema).updateType({
           slug: 'deal-ek',
           event_kinds: {
             valuation: {
@@ -216,7 +262,7 @@ describe('entity schema CRUD', () => {
       ).rejects.toThrow(/no portable @refresh button\/select handler/i);
 
       await expect(
-        owner.entity_schema.updateType({
+        freshSchemaEditor(owner.entity_schema).updateType({
           slug: 'deal-ek',
           event_kinds: {
             valuation: {
@@ -228,7 +274,7 @@ describe('entity schema CRUD', () => {
       ).rejects.toThrow(/requires jsonTemplate/i);
 
       await expect(
-        owner.entity_schema.updateType({
+        freshSchemaEditor(owner.entity_schema).updateType({
           slug: 'deal-ek',
           event_kinds: {
             valuation: {
@@ -239,7 +285,7 @@ describe('entity schema CRUD', () => {
       ).rejects.toThrow(/interactions must declare every portable jsonTemplate action/i);
 
       await expect(
-        owner.entity_schema.updateType({
+        freshSchemaEditor(owner.entity_schema).updateType({
           slug: 'deal-ek',
           event_kinds: {
             valuation: {
@@ -258,7 +304,7 @@ describe('entity schema CRUD', () => {
       ).rejects.toThrow(/must declare portable @archive/i);
 
       await expect(
-        owner.entity_schema.updateType({
+        freshSchemaEditor(owner.entity_schema).updateType({
           slug: 'deal-ek',
           event_kinds: {
             valuation: {
@@ -270,13 +316,13 @@ describe('entity schema CRUD', () => {
       ).rejects.toThrow(/must name another declared event kind/i);
 
       // Clearing via null must validate and wipe the column.
-      await owner.entity_schema.updateType({ slug: 'deal-ek', event_kinds: null });
+      await freshSchemaEditor(owner.entity_schema).updateType({ slug: 'deal-ek', event_kinds: null });
       const cleared = (await owner.entity_schema.getType('deal-ek')) as {
         entity_type?: { event_kinds?: Record<string, unknown> | null };
       };
       expect(cleared.entity_type?.event_kinds ?? null).toBeNull();
 
-      await owner.entity_schema.deleteType({ slug: 'deal-ek' });
+      await freshSchemaEditor(owner.entity_schema).deleteType({ slug: 'deal-ek' });
     });
 
     it('rejects a duplicate slug create with a coded 409', async () => {
@@ -290,7 +336,7 @@ describe('entity schema CRUD', () => {
       expect(err).not.toBeNull();
       expect(err?.message).toMatch(/\[entity_type_exists\].*already exists/);
       expect(err?.httpStatus).toBe(409);
-      await owner.entity_schema.deleteType({ slug: 'dup-asset' });
+      await freshSchemaEditor(owner.entity_schema).deleteType({ slug: 'dup-asset' });
     });
 
     it('concurrent creates of the same slug: one wins, every loser gets the coded 409 (not raw 23505)', async () => {
@@ -317,7 +363,7 @@ describe('entity schema CRUD', () => {
         expect(e.message).not.toMatch(/23505|duplicate key value/);
         expect(e.httpStatus).toBe(409);
       }
-      await owner.entity_schema.deleteType({ slug: 'race-asset' });
+      await freshSchemaEditor(owner.entity_schema).deleteType({ slug: 'race-asset' });
     });
 
     it('surfaces a 422 schema-validation error with the real message (issue #1177)', async () => {
@@ -375,7 +421,7 @@ describe('entity schema CRUD', () => {
             'x-sidebar': true, 'x-enum-labels': { active: 'Active assets' } },
         } },
       });
-      await owner.entity_schema.deleteType({ slug: 'facet-asset' });
+      await freshSchemaEditor(owner.entity_schema).deleteType({ slug: 'facet-asset' });
     });
 
     it('validates collection presentation on both create and update', async () => {
@@ -385,10 +431,10 @@ describe('entity schema CRUD', () => {
       })).rejects.toThrow(/metadata_schema.x-lobu-collection/);
       const valid = { 'x-lobu-collection': { presets: [{ key: 'active', label: 'Active', selection: { filters: [{ field: 'status', op: 'eq', value: 'active' }] } }] } };
       await owner.entity_schema.createType({ slug: 'collection-asset', name: 'Collection asset', metadata_schema: valid });
-      await expect(owner.entity_schema.updateType({ slug: 'collection-asset', metadata_schema: invalid })).rejects.toThrow(/metadata_schema.x-lobu-collection/);
+      await expect(freshSchemaEditor(owner.entity_schema).updateType({ slug: 'collection-asset', metadata_schema: invalid })).rejects.toThrow(/metadata_schema.x-lobu-collection/);
       const saved = await owner.entity_schema.getType('collection-asset') as { entity_type: { metadata_schema: unknown } };
       expect(saved.entity_type.metadata_schema).toEqual(valid);
-      await owner.entity_schema.deleteType({ slug: 'collection-asset' });
+      await freshSchemaEditor(owner.entity_schema).deleteType({ slug: 'collection-asset' });
     });
 
     it('lists user-created types alongside system types', async () => {
@@ -398,7 +444,7 @@ describe('entity schema CRUD', () => {
       };
       const slugs = list.entity_types?.map((t) => t.slug) ?? [];
       expect(slugs).toContain('lst-asset');
-      await owner.entity_schema.deleteType({ slug: 'lst-asset' });
+      await freshSchemaEditor(owner.entity_schema).deleteType({ slug: 'lst-asset' });
     });
 
 		it('reports list scope and can restrict results to the bound organization', async () => {
@@ -494,7 +540,7 @@ describe('entity schema CRUD', () => {
       expect(props.total_spend).toBeUndefined();
 
       // update the view sql → backing_sql changes, measure_columns recompute
-      await owner.entity_schema.updateType({
+      await freshSchemaEditor(owner.entity_schema).updateType({
         slug: 'spend-by-vendor',
         backing: { sql: 'SELECT company_id, AVG(amount) AS avg_spend FROM events GROUP BY company_id' },
       });
@@ -503,12 +549,12 @@ describe('entity schema CRUD', () => {
       expect(updated.entity_type?.measure_columns).toEqual(['avg_spend']);
 
       // revert to stored: backing = null clears the view; no measure_columns.
-      await owner.entity_schema.updateType({ slug: 'spend-by-vendor', backing: null });
+      await freshSchemaEditor(owner.entity_schema).updateType({ slug: 'spend-by-vendor', backing: null });
       const reverted = (await owner.entity_schema.getType('spend-by-vendor')) as Got;
       expect(reverted.entity_type?.backing_sql ?? null).toBeNull();
       expect(reverted.entity_type?.measure_columns ?? []).toEqual([]);
 
-      await owner.entity_schema.deleteType({ slug: 'spend-by-vendor' });
+      await freshSchemaEditor(owner.entity_schema).deleteType({ slug: 'spend-by-vendor' });
     });
 
     it('round-trips declared metrics_config verbatim (create → get → update → clear)', async () => {
@@ -554,7 +600,7 @@ describe('entity schema CRUD', () => {
 
       // Update a measure → metrics_config changes.
       const updatedMetrics = { ...metrics, measures: { spend: { ...metrics.measures.spend, agg: 'count' } } };
-      await owner.entity_schema.updateType({
+      await freshSchemaEditor(owner.entity_schema).updateType({
         slug: 'metric-company',
         metrics_config: updatedMetrics,
       });
@@ -564,11 +610,11 @@ describe('entity schema CRUD', () => {
       );
 
       // Clear with null → no metrics.
-      await owner.entity_schema.updateType({ slug: 'metric-company', metrics_config: null });
+      await freshSchemaEditor(owner.entity_schema).updateType({ slug: 'metric-company', metrics_config: null });
       const cleared = (await owner.entity_schema.getType('metric-company')) as Got;
       expect(cleared.entity_type?.metrics_config ?? null).toBeNull();
 
-      await owner.entity_schema.deleteType({ slug: 'metric-company' });
+      await freshSchemaEditor(owner.entity_schema).deleteType({ slug: 'metric-company' });
     });
 
     it('a stored type carries no backing_sql', async () => {
@@ -577,7 +623,7 @@ describe('entity schema CRUD', () => {
         entity_type?: { backing_sql?: string | null };
       };
       expect(got.entity_type?.backing_sql ?? null).toBeNull();
-      await owner.entity_schema.deleteType({ slug: 'plain-thing' });
+      await freshSchemaEditor(owner.entity_schema).deleteType({ slug: 'plain-thing' });
     });
 
     it('rejects an empty / whitespace backing.sql (no corrupt derived type)', async () => {
@@ -612,7 +658,7 @@ describe('entity schema CRUD', () => {
       })) as { relationship_type?: { slug: string; status: string } };
       expect(result.relationship_type?.slug).toBe('collaborates-with');
       expect(result.relationship_type?.status).toBe('active');
-      await owner.entity_schema.deleteRelType({ slug: 'collaborates-with' });
+      await freshSchemaEditor(owner.entity_schema).deleteRelType({ slug: 'collaborates-with' });
     });
 
     it('rejects a duplicate relationship slug with a coded 409', async () => {
@@ -624,7 +670,7 @@ describe('entity schema CRUD', () => {
       expect(err).not.toBeNull();
       expect(err?.message).toMatch(/\[relationship_type_exists\].*already exists/);
       expect(err?.httpStatus).toBe(409);
-      await owner.entity_schema.deleteRelType({ slug: 'dup-rel' });
+      await freshSchemaEditor(owner.entity_schema).deleteRelType({ slug: 'dup-rel' });
     });
 
     it('concurrent creates of the same slug: one wins, every loser gets the coded 409 (not raw 23505)', async () => {
@@ -647,7 +693,7 @@ describe('entity schema CRUD', () => {
         expect(e.message).not.toMatch(/23505|duplicate key value/);
         expect(e.httpStatus).toBe(409);
       }
-      await owner.entity_schema.deleteRelType({ slug: 'race-rel' });
+      await freshSchemaEditor(owner.entity_schema).deleteRelType({ slug: 'race-rel' });
     });
 
     const isSymmetric = async (slug: string) =>
@@ -662,29 +708,30 @@ describe('entity schema CRUD', () => {
       // A valid patch field alongside must not let is_symmetric be silently dropped.
       { slug: 'asymmetric-then-flip', created: false, patch: { name: 'Renamed', is_symmetric: true } },
     ])('rejects an update carrying create-only is_symmetric ($slug)', async ({ slug, created, patch }) => {
-      await owner.entity_schema.createRelType({ slug, name: slug, is_symmetric: created });
+      const initial = await owner.entity_schema.createRelType({ slug, name: slug, is_symmetric: created }) as { relationship_type: { revision: string } };
       await expect(
         owner.entity_schema.manage({
           schema_type: 'relationship_type',
           action: 'update',
+          expected_revision: initial.relationship_type.revision,
           slug,
           ...patch,
         })
       ).rejects.toThrow(/is_symmetric.*create|create.*is_symmetric|recreate/i);
       // Unchanged — no silent partial apply.
       expect(await isSymmetric(slug)).toBe(created);
-      await owner.entity_schema.deleteRelType({ slug });
+      await freshSchemaEditor(owner.entity_schema).deleteRelType({ slug });
     });
 
     it('applies a name-only update and leaves is_symmetric unchanged', async () => {
       await owner.entity_schema.createRelType({ slug: 'rename-target', name: 'rename-target', is_symmetric: true });
-      const res = (await owner.entity_schema.updateRelType({
+      const res = (await freshSchemaEditor(owner.entity_schema).updateRelType({
         slug: 'rename-target',
         name: 'Renamed Via Update',
       })) as { relationship_type?: { name?: string } };
       expect(res.relationship_type?.name).toBe('Renamed Via Update');
       expect(await isSymmetric('rename-target')).toBe(true);
-      await owner.entity_schema.deleteRelType({ slug: 'rename-target' });
+      await freshSchemaEditor(owner.entity_schema).deleteRelType({ slug: 'rename-target' });
     });
   });
 

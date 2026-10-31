@@ -4,7 +4,7 @@ import { createAuthProfile } from '../../../utils/auth-profiles';
 import { resolvePath } from '../../../tools/resolve_path';
 import { querySqlImpl } from '../../../tools/admin/query_sql';
 import { ownerToolContext } from '../../setup/test-fixtures';
-import { TestWorkspace } from '../../setup/test-mcp-client';
+import { freshSchemaEditor, TestWorkspace } from '../../setup/test-mcp-client';
 import * as entityReferences from '../../../utils/entity-reference';
 import { ToolUserError } from '../../../utils/errors';
 
@@ -155,13 +155,13 @@ describe('typed references and authored source relationships', () => {
 
   it('guards source contracts and immutable endpoints without copying keys into audit events', async () => {
     const linked = await ws.owner.entities.link({ from_entity_id: stored, to_entity_id: 'A:1/path', to_entity_type: type, relationship_type_slug: 'related-item' }) as { relationship: { id: number } };
-    await expect(ws.owner.entity_schema.updateType({ slug: type, backing: { sql: "SELECT 'different' AS id" } })).rejects.toThrow(/live relationships/);
+    await expect(freshSchemaEditor(ws.owner.entity_schema).updateType({ slug: type, backing: { sql: "SELECT 'different' AS id" } })).rejects.toThrow(/live relationships/);
     await expect(getTestDb()`UPDATE entity_relationships SET to_entity_id = ${stored}, to_entity_type_id = NULL, to_source_key = NULL WHERE id = ${linked.relationship.id}`).rejects.toThrow(/immutable/);
     const events = await getTestDb()`SELECT metadata, entity_ids FROM events WHERE organization_id = ${ws.org.id} AND metadata->>'relationshipId' = ${String(linked.relationship.id)}`;
     expect(events.length).toBeGreaterThan(0);
     expect(JSON.stringify(events)).not.toContain('A:1/path');
     await ws.owner.entities.unlink({ relationship_id: linked.relationship.id });
-    await ws.owner.entity_schema.updateType({ slug: type, backing: { sql: sourceSql } });
+    await freshSchemaEditor(ws.owner.entity_schema).updateType({ slug: type, backing: { sql: sourceSql } });
   });
 
   it.each(['deleted', 'key-removed', 'backing-removed', 'slug-reused'])('withholds obsolete source history after its type is %s', async state => {
@@ -181,7 +181,7 @@ describe('typed references and authored source relationships', () => {
           metadata_schema: { type: 'object', 'x-lobu-record-key': 'id' } });
       }
     } else {
-      await ws.owner.entity_schema.updateType({ slug, ...(state === 'key-removed' ? { metadata_schema: { type: 'object' } } : { backing: null, metadata_schema: { type: 'object' } }) });
+      await freshSchemaEditor(ws.owner.entity_schema).updateType({ slug, ...(state === 'key-removed' ? { metadata_schema: { type: 'object' } } : { backing: null, metadata_schema: { type: 'object' } }) });
     }
     const history = await ws.owner.entities.listLinks({ entity_id: stored, include_deleted: true });
     expect(history.relationships.map(row => Number(row.id))).toContain(Number(healthy.relationship.id));
@@ -232,11 +232,11 @@ describe('typed references and authored source relationships', () => {
     expect(listed.relationships.map(r => Number(r.id))).toContain(Number(healthy.relationship.id));
     expect(listed.relationship_failures).toEqual([{ relationship_id: Number(edge.relationship.id), code: 'UPSTREAM_5XX' }]);
     expect(JSON.stringify(listed)).not.toContain('outage-key');
-    await expect(ws.owner.entity_schema.updateType({ slug: 'outage-items', backing: { sql: "SELECT 'replacement' AS id" } }))
+    await expect(freshSchemaEditor(ws.owner.entity_schema).updateType({ slug: 'outage-items', backing: { sql: "SELECT 'replacement' AS id" } }))
       .rejects.toMatchObject({ httpStatus: 409, message: expect.stringContaining(String(edge.relationship.id)) });
     await expect(ws.owner.entities.updateLink({ relationship_id: Number(edge.relationship.id), confidence: 0.5 })).rejects.toMatchObject({ code: 'UPSTREAM_5XX', httpStatus: 500 });
     await ws.owner.entities.unlink({ relationship_id: Number(edge.relationship.id) });
-    await ws.owner.entity_schema.updateType({ slug: 'outage-items', backing: { sql: "SELECT 'replacement' AS id" } });
+    await freshSchemaEditor(ws.owner.entity_schema).updateType({ slug: 'outage-items', backing: { sql: "SELECT 'replacement' AS id" } });
     await ws.owner.entities.unlink({ relationship_id: Number(healthy.relationship.id) });
   });
 

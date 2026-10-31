@@ -159,11 +159,12 @@ describe('worker MCP session agent identity', () => {
       created_by: user.id,
     });
     const human = buildClientSDK({ ...ownerToolContext(org.id, user.id), tokenType: 'session' }, {} as Env);
-    await human.entitySchema.updateType({ slug: 'person', metadata_schema: {
+    const personSchema = await human.entitySchema.getType('person') as { entity_type: { revision: string } };
+    await human.entitySchema.updateType({ slug: 'person', expected_revision: personSchema.entity_type.revision, metadata_schema: {
       'x-lobu-resolution': { rules: [{ fields: ['record_key'], normalizer: 'exact', onMatch: 'review' }] },
     } });
-    await human.entitySchema.createRelType({ slug: 'same_person', name: 'Same person', purpose: 'identity' });
-    await human.entitySchema.addRule({ slug: 'same_person', source_entity_type_slug: 'person', target_entity_type_slug: 'person' });
+    const createdIdentity = await human.entitySchema.createRelType({ slug: 'same_person', name: 'Same person', purpose: 'identity' }) as { relationship_type: { revision: string } };
+    await human.entitySchema.addRule({ slug: 'same_person', expected_revision: createdIdentity.relationship_type.revision, source_entity_type_slug: 'person', target_entity_type_slug: 'person' });
     const sql = getTestDb();
     await sql`UPDATE entities SET metadata = '{"record_key":"shared-fixture"}'::jsonb WHERE id IN (${member.id}, ${root.id})`;
     const before = await sql`SELECT id, name, metadata, deleted_at FROM entities WHERE id IN (${member.id}, ${root.id}) ORDER BY id`;

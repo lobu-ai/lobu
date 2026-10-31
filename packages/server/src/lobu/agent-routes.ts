@@ -49,6 +49,9 @@ import type { Env } from "../index";
 import { getApplyContext } from "../utils/apply-context";
 import { insertConfigChangeEventInTransaction } from "../utils/insert-event";
 import logger from "../utils/logger";
+import { ToolUserError } from "../utils/errors";
+import { assertExpectedRevision } from "../utils/config-revision";
+import { agentConfigRevision, readAgentConfigurationRow } from "./agent-config-revision";
 import { generateCodeVerifier } from "../utils/pkce";
 import { lockOrganizationForRelationshipClaims } from "../utils/relationship-claims";
 import { countRuntimeMessagingClientsByAgent } from "./client-routes";
@@ -57,6 +60,7 @@ import { orgContext } from "./stores/org-context";
 import {
 	AGENT_ID_PATTERN,
 	createPostgresAgentConfigStore,
+	getAgentConfigurationSnapshot,
 } from "./stores/postgres-stores";
 import { PostgresSecretStore } from "./stores/postgres-secret-store";
 import {
@@ -79,6 +83,18 @@ import {
 } from "./stores/provider-secrets";
 
 const routes = new Hono<{ Bindings: Env }>();
+
+async function agentConfigurationMutation(c: any, write: () => Promise<Response>): Promise<Response> {
+  try {
+    return await write();
+  } catch (error) {
+    if (error instanceof ToolUserError) {
+      return c.json({ error: error.message, code: error.code, retryable: error.retryable }, error.httpStatus);
+    }
+    throw error;
+  }
+}
+
 
 /**
  * Coerce an `array_agg` result into a real `string[]`. With the `::text` cast
@@ -379,7 +395,8 @@ function sanitizeAuthProfileForClient(profile: AuthProfile) {
 async function reconcileAgentAuthProfiles(
 	agentId: string,
 	userId: string,
-	desired: AuthProfile[]
+	desired: AuthProfile[],
+	transaction: DbClient
 ): Promise<void> {
 	const manager = getLobuCoreServices()?.getAuthProfilesManager?.();
 	if (!manager) {
@@ -387,7 +404,7 @@ async function reconcileAgentAuthProfiles(
 			"Auth profile store is not available — retry once startup completes"
 		);
 	}
-	const store = manager.getUserAuthProfileStore();
+	const store = new UserAuthProfileStore(new PostgresSecretStore(transaction), transaction);
 	for (const profile of desired) {
 		const credential =
 			typeof profile.credential === "string" ? profile.credential.trim() : "";
@@ -404,7 +421,7 @@ async function reconcileAgentAuthProfiles(
 			model: profile.model,
 			...(metadata ? { metadata } : {}),
 			makePrimary: true,
-		});
+		}, { userAuthProfiles: store });
 	}
 	const desiredIds = new Set(
 		desired.map((profile) => profile.id).filter(Boolean)
@@ -602,15 +619,17 @@ routes.post("/", async (c) => {
 		// Another writer (or a previous apply cycle) already owns this id in
 		// *this* org. Return idempotent 200 with the existing row's metadata.
 		// Cross-org collisions are no longer possible — the PK is per-org now.
-		const existing = await configStore.getMetadata(agentId);
+		const existing = await getAgentConfigurationSnapshot(orgId, agentId, tx);
 		if (!existing) {
 			return c.json({ error: "Agent metadata missing" }, 500);
 		}
 		return c.json(
 			{
 				agentId,
-				name: existing.name,
-				description: existing.description,
+				name: existing.metadata.name,
+				description: existing.metadata.description,
+				created: false,
+				revision: existing.revision,
 			},
 			200
 		);
@@ -625,7 +644,8 @@ routes.post("/", async (c) => {
 		state: { agentId, name, description: description ?? null },
 	}, tx);
 
-	return c.json({ agentId, name, description }, 201);
+	const revision = (await getAgentConfigurationSnapshot(orgId, agentId, tx))!.revision;
+	return c.json({ agentId, name, description, created: true, revision }, 201);
   });
 });
 
@@ -1393,10 +1413,9 @@ routes.delete("/inference-providers/:slug", async (c) => {
 
 routes.get("/:agentId", async (c) => {
 	const { agentId } = c.req.param();
-	const metadata = await configStore.getMetadata(agentId);
-	if (!metadata) return c.json({ error: "Agent not found" }, 404);
-
-	const settings = await configStore.getSettings(agentId);
+	const snapshot = await getAgentConfigurationSnapshot(c.get("organizationId") as string, agentId);
+	if (!snapshot) return c.json({ error: "Agent not found" }, 404);
+	const { metadata, settings } = snapshot;
 	const sql = getDb();
 	const organizationId = c.get("organizationId") as string;
 	const [connectionStats] = await sql`
@@ -1427,11 +1446,12 @@ routes.get("/:agentId", async (c) => {
 
 // ── Update agent metadata ────────────────────────────────────────────────────
 
-routes.patch("/:agentId", async (c) => {
+routes.patch("/:agentId", async (c) => agentConfigurationMutation(c, async () => {
 	const denied = requireManageAgentAccess(c);
 	if (denied) return denied;
 	const { agentId } = c.req.param();
-	const body = await c.req.json<{ name?: string; description?: string }>();
+	const body = await c.req.json<{ name?: string; description?: string; expected_revision?: string }>();
+	const { expected_revision, ...updates } = body;
 
 	if (!(await configStore.hasAgent(agentId))) {
 		return c.json({ error: "Agent not found" }, 404);
@@ -1440,11 +1460,12 @@ routes.patch("/:agentId", async (c) => {
   return getDb().begin(async (tx) => {
     const orgId = c.get("organizationId") as string;
     await lockOrganizationForRelationshipClaims(tx, orgId);
-    const locked = await tx`SELECT id FROM agents WHERE organization_id = ${orgId} AND id = ${agentId} FOR UPDATE`;
-    if (!locked.length) return c.json({ error: "Agent not found" }, 404);
+    const locked = await readAgentConfigurationRow(orgId, agentId, tx, true);
+    if (!locked) return c.json({ error: "Agent not found" }, 404);
+    assertExpectedRevision(expected_revision, agentConfigRevision(locked));
     const transactionStore = createPostgresAgentConfigStore(tx);
     const before = await transactionStore.getMetadata(agentId);
-	await transactionStore.updateMetadata(agentId, body);
+	await transactionStore.updateMetadata(agentId, updates);
 	// Snapshot the row as stored (post-merge), not the request body.
 	const metadata = await transactionStore.getMetadata(agentId);
 	await emitConfigChange(c, {
@@ -1454,18 +1475,19 @@ routes.patch("/:agentId", async (c) => {
 		op: "updated",
 		summary: `Agent '${metadata?.name ?? agentId}' metadata updated`,
 		state: metadata ? { ...metadata, agentId } : null,
-		changedFields: Object.keys(body),
+		changedFields: Object.keys(updates),
 	}, tx);
-	return c.json({ success: true });
+	return c.json({ success: true, revision: (await getAgentConfigurationSnapshot(orgId, agentId, tx))!.revision });
   });
-});
+}));
 
 // ── Delete agent ─────────────────────────────────────────────────────────────
 
-routes.delete("/:agentId", async (c) => {
+routes.delete("/:agentId", async (c) => agentConfigurationMutation(c, async () => {
 	const denied = requireManageAgentAccess(c);
 	if (denied) return denied;
 	const { agentId } = c.req.param();
+	const { expected_revision } = await c.req.json<{ expected_revision?: string }>().catch(() => ({} as { expected_revision?: string }));
 
 	if (!(await configStore.hasAgent(agentId))) {
 		return c.json({ error: "Agent not found" }, 404);
@@ -1474,8 +1496,9 @@ routes.delete("/:agentId", async (c) => {
   return getDb().begin(async (tx) => {
     const orgId = c.get("organizationId") as string;
     await lockOrganizationForRelationshipClaims(tx, orgId);
-    const locked = await tx`SELECT id FROM agents WHERE organization_id = ${orgId} AND id = ${agentId} FOR UPDATE`;
-    if (!locked.length) return c.json({ error: "Agent not found" }, 404);
+    const locked = await readAgentConfigurationRow(orgId, agentId, tx, true);
+    if (!locked) return c.json({ error: "Agent not found" }, 404);
+    assertExpectedRevision(expected_revision, agentConfigRevision(locked));
     const transactionStore = createPostgresAgentConfigStore(tx);
     const before = await transactionStore.getMetadata(agentId);
 	// Cascade handled by FK ON DELETE CASCADE
@@ -1490,14 +1513,15 @@ routes.delete("/:agentId", async (c) => {
 	}, tx);
 	return c.json({ success: true });
   });
-});
+}));
 
 // ── Get agent config (settings) ──────────────────────────────────────────────
 
 routes.get("/:agentId/config", async (c) => {
 	const { agentId } = c.req.param();
-	const settings = await configStore.getSettings(agentId);
-	if (!settings) return c.json({ error: "Agent not found" }, 404);
+	const snapshot = await getAgentConfigurationSnapshot(c.get("organizationId") as string, agentId);
+	if (!snapshot) return c.json({ error: "Agent not found" }, 404);
+	const { settings } = snapshot;
 
 	// `configStore` doesn't carry auth profiles (they live in
 	// `user_auth_profiles`, keyed by the requesting user). Merge the caller's
@@ -1514,7 +1538,7 @@ routes.get("/:agentId/config", async (c) => {
 				).map(sanitizeAuthProfileForClient)
 			: [];
 
-	return c.json({ ...settings, authProfiles });
+	return c.json({ ...settings, name: snapshot.metadata.name, description: snapshot.metadata.description ?? null, revision: snapshot.revision, authProfiles });
 });
 
 // ── Pending write-gate proposal (config-approval prefill) ────────────────────
@@ -1982,7 +2006,7 @@ export function validateSettingsPatch(updates: unknown): string | null {
 	return null;
 }
 
-routes.patch("/:agentId/config", async (c) => {
+routes.patch("/:agentId/config", async (c) => agentConfigurationMutation(c, async () => {
 	const denied = requireManageAgentAccess(c);
 	if (denied) return denied;
 	const { agentId } = c.req.param();
@@ -2044,7 +2068,9 @@ routes.patch("/:agentId/config", async (c) => {
 	// Read once and reuse: both the judge-model grandfathering below and the
 	// grant-shadowing check after it need the CURRENT settings, because a PATCH
 	// may carry only one of `guardrailsInline` / `networkConfig`.
-	const storedSettings = await configStore.getSettings(agentId);
+	const original = await getAgentConfigurationSnapshot(c.get("organizationId") as string, agentId);
+	if (!original) return c.json({ error: "Agent not found" }, 404);
+	const storedSettings = original.settings;
 
 	// Judge-kind custom guardrails need a model. With no org default provider
 	// model, every judge entry must carry its own `model` — otherwise it would
@@ -2214,7 +2240,8 @@ routes.patch("/:agentId/config", async (c) => {
 	// user-scoped and live in `user_auth_profiles` with secrets in the secret
 	// store. Pull them out of the settings patch and persist them through the
 	// proper path; otherwise an api-key typed into the UI is silently dropped.
-	const { authProfiles, ...settingsUpdates } = updates as {
+	const { authProfiles, expected_revision, ...settingsUpdates } = updates as {
+		expected_revision?: string;
 		authProfiles?: AuthProfile[];
 	} & Record<string, unknown>;
 
@@ -2274,6 +2301,13 @@ routes.patch("/:agentId/config", async (c) => {
 		);
 	}
 
+
+  return getDb().begin(async (tx) => {
+    const orgId = c.get("organizationId") as string;
+    await lockOrganizationForRelationshipClaims(tx, orgId);
+    const locked = await readAgentConfigurationRow(orgId, agentId, tx, true);
+    if (!locked) return c.json({ error: "Agent not found" }, 404);
+    assertExpectedRevision(expected_revision, agentConfigRevision(locked));
 	if (Array.isArray(authProfiles)) {
 		const user = c.get("user");
 		if (!user?.id) {
@@ -2287,26 +2321,16 @@ routes.patch("/:agentId/config", async (c) => {
 			}
 		} else {
 			try {
-				await reconcileAgentAuthProfiles(agentId, user.id, authProfiles);
+				await reconcileAgentAuthProfiles(agentId, user.id, authProfiles, tx);
 			} catch (error) {
-				return c.json(
-					{
-						error:
-							error instanceof Error
-								? error.message
-								: "Failed to persist auth profiles",
-					},
+				throw new ToolUserError(
+					error instanceof Error ? error.message : "Failed to persist auth profiles",
 					503
 				);
 			}
 		}
 	}
 
-  return getDb().begin(async (tx) => {
-    const orgId = c.get("organizationId") as string;
-    await lockOrganizationForRelationshipClaims(tx, orgId);
-    const locked = await tx`SELECT id FROM agents WHERE organization_id = ${orgId} AND id = ${agentId} FOR UPDATE`;
-    if (!locked.length) return c.json({ error: "Agent not found" }, 404);
     const transactionStore = createPostgresAgentConfigStore(tx);
     const before = await transactionStore.getSettings(agentId);
 	await transactionStore.updateSettings(agentId, settingsUpdates);
@@ -2322,9 +2346,9 @@ routes.patch("/:agentId/config", async (c) => {
 		state: merged ? { ...merged } : null,
 		changedFields: Object.keys(settingsUpdates),
 	}, tx);
-	return c.json({ success: true });
+	return c.json({ success: true, revision: (await getAgentConfigurationSnapshot(orgId, agentId, tx))!.revision });
   });
-});
+}));
 
 // ============================================================
 // ── Inference providers (org-owned per-modality custom upstreams) ─────────────

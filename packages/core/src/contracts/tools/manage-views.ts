@@ -179,6 +179,10 @@ export type ViewDefinitionDecl = Static<typeof ViewDefinitionSchema>;
 // Public projection of a stored view: metadata only, never the bundle. The
 // bundle travels over the view resource / shell route; the source over get.
 export const ViewRowSchema = Type.Object({
+  revision: Type.String({
+    description:
+      "Opaque authored-state revision; pass it as expected_revision when updating or removing this view.",
+  }),
   key: ViewKeySchema,
   name: Type.String(),
   description: Type.String(),
@@ -207,9 +211,17 @@ export type ViewRow = Static<typeof ViewRowSchema>;
 // variant must read true for every one of them.
 
 export const SetViewAction = Type.Object({
+  expected_revision: Type.Optional(
+    Type.String({
+      minLength: 1,
+      maxLength: 200,
+      description:
+        "[set] Revision returned by get/list. Required when the key already exists; omit only to create an absent key. A mismatch returns REVISION_CONFLICT.",
+    })
+  ),
   action: Type.Literal("set", {
     description:
-      "Store a view: read its key, name, description, attach, params and actions from the module's `export const view = defineView({...})`, compile it, and upsert by that key.",
+      "Store a view: read its key, name, description, attach, params and actions from the module's `export const view = defineView({...})`, compile it, and create that key or replace it with expected_revision from get/list.",
   }),
   source_code: Type.String({
     minLength: 1,
@@ -248,6 +260,12 @@ export const ListViewsAction = Type.Object({
 });
 
 export const RemoveViewAction = Type.Object({
+  expected_revision: Type.String({
+    minLength: 1,
+    maxLength: 200,
+    description:
+      "[remove] Revision returned by get/list. A mismatch returns REVISION_CONFLICT.",
+  }),
   action: Type.Literal("remove", {
     description: "Delete a view by key.",
   }),

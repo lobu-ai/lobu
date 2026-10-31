@@ -20,6 +20,7 @@
  * event does not fire this Automation.
  */
 
+import { readAutomationRevisionForContext } from './revision-fixture';
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
 	findMatchingAutomationActivations,
@@ -526,6 +527,7 @@ describe("min_cooldown_seconds debounces event-triggered Automations", () => {
 
 			await manageAutomations(
 				{
+					expected_revision: await readAutomationRevisionForContext(fixture.workspace.ctx, String(fixture.automationId)),
 					action: "update",
 					automation_id: String(fixture.automationId),
 					min_cooldown_seconds: 300,
@@ -554,6 +556,7 @@ describe("min_cooldown_seconds debounces event-triggered Automations", () => {
 
 			await manageAutomations(
 				{
+					expected_revision: await readAutomationRevisionForContext(fixture.workspace.ctx, String(fixture.automationId)),
 					action: "update",
 					automation_id: String(fixture.automationId),
 					min_cooldown_seconds: 600,

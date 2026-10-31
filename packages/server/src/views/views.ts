@@ -43,6 +43,7 @@ import {
 import { build, type Loader, type Plugin, transform, version as esbuildVersion } from 'esbuild';
 import { getDb } from '../db/client';
 import { ToolUserError } from '../utils/errors';
+import { assertExpectedRevision, configRevision } from '../utils/config-revision';
 import logger from '../utils/logger';
 
 export type { ViewAttachment };
@@ -120,6 +121,7 @@ export interface ViewActionDecl {
 }
 
 export interface StoredView {
+  revision: string;
   key: string;
   name: string;
   description: string;
@@ -139,6 +141,8 @@ export interface StoredView {
 }
 
 export interface SetViewInput {
+  /** Omit only to create a previously absent key. */
+  expected_revision?: string;
   key: string;
   name: string;
   description: string;
@@ -157,6 +161,7 @@ export interface SetViewInput {
 }
 
 interface ViewRow {
+  id: number;
   key: string;
   name: string;
   description: string;
@@ -176,6 +181,21 @@ interface ViewRow {
 
 function mapViewRow(row: ViewRow): StoredView {
   return {
+    revision: configRevision('view', row.id, {
+      key: row.key,
+      name: row.name,
+      description: row.description ?? '',
+      source_code: row.source_code,
+      source_files: row.source_files ?? null,
+      dependencies: row.dependencies ?? null,
+      source_complete: row.source_complete === true,
+      attach: row.attach ?? [],
+      params: row.params ?? {},
+      actions: row.actions ?? {},
+      // A caller-supplied bundle is authored state. Server compiler output is
+      // derived state and must not invalidate an open source editor.
+      supplied_bundle: row.compile_config_hash == null ? row.compiled_code : null,
+    }),
     key: String(row.key),
     name: String(row.name),
     description: String(row.description ?? ''),
@@ -203,7 +223,7 @@ export async function getView(
 ): Promise<StoredView | null> {
   const sql = getDb();
   const rows = await sql<ViewRow>`
-    SELECT key, name, description, source_code, compiled_code, content_hash,
+    SELECT id, key, name, description, source_code, compiled_code, content_hash,
       source_files, dependencies, source_complete, compile_config_hash,
       attach, params, actions, last_writer, updated_at
     FROM views
@@ -216,7 +236,7 @@ export async function getView(
 export async function listViews(organizationId: string): Promise<StoredView[]> {
   const sql = getDb();
   const rows = await sql<ViewRow>`
-    SELECT key, name, description, source_code, compiled_code, content_hash,
+    SELECT id, key, name, description, source_code, compiled_code, content_hash,
       source_files, dependencies, source_complete, compile_config_hash,
       attach, params, actions, last_writer, updated_at
     FROM views
@@ -227,71 +247,91 @@ export async function listViews(organizationId: string): Promise<StoredView[]> {
 }
 
 /**
- * Upsert by (organization_id, key). Same source hash AND same compiled bytes
- * means the row is already current and nothing is written (updated_at proves
- * it in tests). Returns whether a write happened.
+ * Create an absent key, or replace the exact authored snapshot the caller read.
+ * The row lock covers the revision check and write; a concurrent create is
+ * rejected by the unique key. Even no-op saves must carry a current revision.
  */
 export async function setView(
   organizationId: string,
   input: SetViewInput
 ): Promise<{ view: StoredView; written: boolean }> {
-  const sql = getDb();
-  const existing = await getView(organizationId, input.key);
-  if (
-    existing &&
-    existing.content_hash === input.content_hash &&
-    existing.compiled_code === input.compiled_code &&
-    existing.compile_config_hash === (input.compile_config_hash ?? null)
-  ) {
-    return { view: existing, written: false };
-  }
-  const rows = await sql<ViewRow>`
-    INSERT INTO views (
-      organization_id, key, name, description, source_code, compiled_code,
-      content_hash, source_files, dependencies, source_complete, compile_config_hash,
-      attach, params, actions, last_writer, updated_at
-    ) VALUES (
-      ${organizationId}, ${input.key}, ${input.name}, ${input.description},
-      ${input.source_code}, ${input.compiled_code}, ${input.content_hash},
-      ${input.source_files ? sql.json(input.source_files) : null},
-      ${input.dependencies ? sql.json(input.dependencies) : null}, ${input.source_complete ?? false},
-      ${input.compile_config_hash ?? null},
-      ${sql.json(input.attach)}, ${sql.json(input.params)},
-      ${sql.json(input.actions)}, ${input.last_writer}, NOW()
-    )
-    ON CONFLICT (organization_id, key) DO UPDATE SET
-      name = EXCLUDED.name,
-      description = EXCLUDED.description,
-      source_code = EXCLUDED.source_code,
-      compiled_code = EXCLUDED.compiled_code,
-      content_hash = EXCLUDED.content_hash,
-      source_files = EXCLUDED.source_files,
-      dependencies = EXCLUDED.dependencies,
-      source_complete = EXCLUDED.source_complete,
-      compile_config_hash = EXCLUDED.compile_config_hash,
-      attach = EXCLUDED.attach,
-      params = EXCLUDED.params,
-      actions = EXCLUDED.actions,
-      last_writer = EXCLUDED.last_writer,
-      updated_at = NOW()
-    RETURNING key, name, description, source_code, compiled_code, content_hash,
-      source_files, dependencies, source_complete, compile_config_hash,
-      attach, params, actions, last_writer, updated_at
-  `;
-  return { view: mapViewRow(rows[0]), written: true };
+  return getDb().begin(async (sql) => {
+    const current = await sql<ViewRow>`
+      SELECT * FROM views
+      WHERE organization_id = ${organizationId} AND key = ${input.key}
+      FOR UPDATE
+    `;
+    const existing = current[0] ? mapViewRow(current[0]) : null;
+    if (existing) {
+      assertExpectedRevision(input.expected_revision, existing.revision);
+    } else if (input.expected_revision !== undefined) {
+      throw new ToolUserError('This view no longer exists. Reload before saving.', 409, 'REVISION_CONFLICT');
+    }
+    if (
+      existing &&
+      existing.content_hash === input.content_hash &&
+      existing.compiled_code === input.compiled_code &&
+      existing.compile_config_hash === (input.compile_config_hash ?? null)
+    ) {
+      return { view: existing, written: false };
+    }
+    const rows = await sql<ViewRow>`
+      INSERT INTO views (
+        organization_id, key, name, description, source_code, compiled_code,
+        content_hash, source_files, dependencies, source_complete, compile_config_hash,
+        attach, params, actions, last_writer, updated_at
+      ) VALUES (
+        ${organizationId}, ${input.key}, ${input.name}, ${input.description},
+        ${input.source_code}, ${input.compiled_code}, ${input.content_hash},
+        ${input.source_files ? sql.json(input.source_files) : null},
+        ${input.dependencies ? sql.json(input.dependencies) : null}, ${input.source_complete ?? false},
+        ${input.compile_config_hash ?? null},
+        ${sql.json(input.attach)}, ${sql.json(input.params)},
+        ${sql.json(input.actions)}, ${input.last_writer}, NOW()
+      )
+      ON CONFLICT (organization_id, key) DO UPDATE SET
+        name = EXCLUDED.name,
+        description = EXCLUDED.description,
+        source_code = EXCLUDED.source_code,
+        compiled_code = EXCLUDED.compiled_code,
+        content_hash = EXCLUDED.content_hash,
+        source_files = EXCLUDED.source_files,
+        dependencies = EXCLUDED.dependencies,
+        source_complete = EXCLUDED.source_complete,
+        compile_config_hash = EXCLUDED.compile_config_hash,
+        attach = EXCLUDED.attach,
+        params = EXCLUDED.params,
+        actions = EXCLUDED.actions,
+        last_writer = EXCLUDED.last_writer,
+        updated_at = NOW()
+      WHERE views.id = ${current[0]?.id ?? null}
+      RETURNING id, key, name, description, source_code, compiled_code, content_hash,
+        source_files, dependencies, source_complete, compile_config_hash,
+        attach, params, actions, last_writer, updated_at
+    `;
+    if (rows.length === 0) {
+      throw new ToolUserError('This view was created by another writer. Read it before editing.', 409, 'REVISION_CONFLICT');
+    }
+    return { view: mapViewRow(rows[0]), written: true };
+  });
 }
 
 export async function removeView(
   organizationId: string,
-  key: string
+  key: string,
+  expectedRevision: string
 ): Promise<boolean> {
-  const sql = getDb();
-  const rows = await sql<{ id: number }>`
-    DELETE FROM views
-    WHERE organization_id = ${organizationId} AND key = ${key}
-    RETURNING id
-  `;
-  return rows.length > 0;
+  return getDb().begin(async (sql) => {
+    const rows = await sql<ViewRow>`
+      SELECT * FROM views
+      WHERE organization_id = ${organizationId} AND key = ${key}
+      FOR UPDATE
+    `;
+    if (!rows[0]) return false;
+    assertExpectedRevision(expectedRevision, mapViewRow(rows[0]).revision);
+    await sql`DELETE FROM views WHERE id = ${rows[0].id} AND organization_id = ${organizationId}`;
+    return true;
+  });
 }
 
 /**
@@ -699,7 +739,7 @@ async function rebuildView(
     WHERE organization_id = ${organizationId} AND key = ${view.key}
       AND content_hash = ${view.content_hash}
       AND compile_config_hash = ${view.compile_config_hash}
-    RETURNING key, name, description, source_code, compiled_code, content_hash,
+    RETURNING id, key, name, description, source_code, compiled_code, content_hash,
       source_files, dependencies, source_complete, compile_config_hash,
       attach, params, actions, last_writer, updated_at
   `;

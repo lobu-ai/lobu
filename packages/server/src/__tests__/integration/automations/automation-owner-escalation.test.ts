@@ -8,6 +8,7 @@
  * through B, side-stepping A's rules. Humans are ungoverned and may assign freely.
  */
 
+import { readAutomationRevision } from './revision-fixture';
 import { beforeEach, describe, expect, it } from "vitest";
 import type { Env } from "../../../index";
 import type { AuthContext } from "../../../tools/execute";
@@ -125,6 +126,7 @@ describe("manage_automations owner-escalation guard", () => {
 			executeTool(
 				"manage_automations",
 				{
+					expected_revision: await readAutomationRevision(workspace.owner, owned.automation_id),
 					action: "update",
 					automation_id: owned.automation_id,
 					managed_agent_id: null,
@@ -203,6 +205,7 @@ describe("manage_automations owner-escalation guard", () => {
 			executeTool(
 				"manage_automations",
 				{
+					expected_revision: await readAutomationRevision(workspace.owner, bAutomation.automation_id),
 					action: "update",
 					automation_id: bAutomation.automation_id,
 					triggers: [{ kind: "schedule", cron: "0 9 * * *" }],
@@ -282,6 +285,7 @@ describe("manage_automations owner-escalation guard", () => {
 			executeTool(
 				"manage_automations",
 				{
+					expected_revision: await readAutomationRevision(workspace.owner, wA.automation_id),
 					action: "set_reaction_script",
 					automation_id: wA.automation_id,
 					reaction_script: "export default async () => {};",

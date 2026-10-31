@@ -33,7 +33,7 @@ import {
   type ManageAutomationsResult,
 } from '@lobu/core/contracts/tools/manage-automations';
 import { resolveActingPrincipal, resolveWritePolicyDecision } from '../../authz/entity-policy';
-import { createDbClientFromEnv, getDb, withSessionAdvisoryLock } from '../../db/client';
+import { createDbClientFromEnv, getDb, pgTextArray, withSessionAdvisoryLock } from '../../db/client';
 import type { Env } from '../../index';
 import {
   currentMcpActivityAttribution,
@@ -65,6 +65,8 @@ import { withValidatedArgs } from '../validate-args';
 import { getOrgUrlContext } from '../view-urls';
 import { defineFlatActionTool, flatAction } from './action-tool';
 import { requireAutomationAccess } from './manage_automations/shared';
+import { assertAutomationRevision, readAutomationConfiguration } from './manage_automations/revision';
+import { assertExpectedRevision } from '../../utils/config-revision';
 import {
   handleCreate,
   handleUpdate,
@@ -253,7 +255,7 @@ async function resolveTargetAutomationGroupId(
   ) {
     if (args.automation_id == null) return null;
     const rows = await sql<{ automation_group_id: number | null }>`
-      SELECT automation_group_id FROM automations
+      SELECT COALESCE(automation_group_id, id) AS automation_group_id FROM automations
       WHERE id = ${Number(args.automation_id)} AND organization_id = ${ctx.organizationId}
       LIMIT 1
     `;
@@ -292,22 +294,28 @@ async function withAutomationGroupLock<T>(
   fn: () => Promise<T>
 ): Promise<T> {
   if (automationWriteAction(args.action) === null) return fn();
-  const groupId = await resolveTargetAutomationGroupId(args, ctx);
-  if (groupId == null) return fn();
-
+  let groupIds: number[];
+  if (args.action === 'delete') {
+    const sql = getDb();
+    const ids = (args.automation_ids ?? []).map((id) => parsePositiveIntegerId(id, 'automation_ids'));
+    const rows = ids.length ? await sql`
+      SELECT DISTINCT COALESCE(automation_group_id, id) AS group_id FROM automations
+      WHERE organization_id = ${ctx.organizationId} AND id = ANY(${pgTextArray(ids.map(String))}::bigint[])
+      ORDER BY group_id
+    ` : [];
+    groupIds = rows.map((row) => Number(row.group_id));
+  } else {
+    const groupId = await resolveTargetAutomationGroupId(args, ctx);
+    groupIds = groupId == null ? [] : [groupId];
+  }
   return withSessionAdvisoryLock(
-    { namespace: AUTOMATION_GROUP_LOCK_NS, value: groupId },
+    groupIds.map((value) => ({ namespace: AUTOMATION_GROUP_LOCK_NS, value })),
     fn,
     {
-      // lock_timeout expiry (55P03): another holder kept the group busy past
-      // the bound. We do NOT hold the lock — surface a clean retryable
-      // conflict instead of an unbounded stall.
-      onAcquireTimeout: () =>
-        new ToolUserError(
-          'Another change to this Automation group is in progress; retry shortly.',
-          409
-        ),
-    }
+      onAcquireTimeout: () => new ToolUserError(
+        'Another change to this Automation group is in progress; retry shortly.', 409,
+      ),
+    },
   );
 }
 
@@ -449,10 +457,9 @@ async function fetchCurrentAutomation(
  * for the gated write so a malformed proposal is rejected at request time, not
  * at approve time.
  *
- * Automation definition writes have no per-field pre-image; the proposal is the
- * full original args for a straight re-run on approve (a stale approval may
- * clobber a newer edit — acceptable for launch). Acting principal is persisted
- * so apply can re-run the foreign-owner guard against the original actor.
+ * The proposal retains the original args, including their revision baseline.
+ * Approval checks that same baseline under the group lock before dispatching.
+ * Acting principal is persisted so current authorization is rechecked too.
  */
 function buildAutomationProposal(
   args: ManageAutomationsArgs,
@@ -517,7 +524,7 @@ function buildAutomationProposal(
  * else present on the proposed args is a mutation input humans must be able to
  * review (reaction script, execution_config, explicit null clears, …).
  */
-const AUTOMATION_APPROVAL_ROUTING_KEYS = new Set(['action']);
+const AUTOMATION_APPROVAL_ROUTING_KEYS = new Set(['action', 'expected_revision', 'expected_revisions']);
 
 /** Display sentinel for an explicit null clear (field present, value null). */
 const AUTOMATION_APPROVAL_CLEARED = '(cleared)';
@@ -878,9 +885,8 @@ async function assertAutomationOwnersMatchActingAgent(
  * between queue and approve (e.g. group reassigned to another agent), the apply
  * fails closed — the approve handler supersedes the card to 'failed'.
  *
- * Automation definition writes have no per-field pre-image; this is a straight
- * re-run — a stale approval may clobber a newer edit (acceptable for launch)
- * when ownership is still valid.
+ * The original configuration revision is checked under that same lock. A
+ * legacy proposal without a baseline fails closed; approval never refreshes it.
  */
 export async function applyManageAutomationsProposal(
   proposal: ManageAutomationsProposal,
@@ -938,6 +944,14 @@ export async function applyManageAutomationsProposal(
             403
           );
         }
+      }
+    }
+    if (writeAction === 'update') {
+      await assertAutomationRevision(args, applyCtx.organizationId);
+    } else if (args.action === 'delete') {
+      for (const id of args.automation_ids ?? []) {
+        const snapshot = await readAutomationConfiguration(applyCtx.organizationId, id);
+        if (snapshot) assertExpectedRevision(args.expected_revisions?.[id], snapshot.revision);
       }
     }
     // The approval path already established the human's authority. Dispatch
@@ -1017,6 +1031,17 @@ async function gateAutomationWrite(
     ownerResolved: actor.ownerResolved,
     action,
   });
+  if (decision === 'deny') {
+    throw new ToolUserError(`Policy denies ${action} of Automations (agent config) for this principal.`, 403);
+  }
+    if (automationWriteAction(args.action) === 'update') {
+      await assertAutomationRevision(args, ctx.organizationId);
+    } else if (args.action === 'delete') {
+      for (const id of args.automation_ids ?? []) {
+        const snapshot = await readAutomationConfiguration(ctx.organizationId, id);
+        if (snapshot) assertExpectedRevision(args.expected_revisions?.[id], snapshot.revision);
+      }
+    }
   if (decision === 'allow') return null;
   if (decision === 'require_approval') {
     return queueAutomationWriteForApproval(args, ctx, {

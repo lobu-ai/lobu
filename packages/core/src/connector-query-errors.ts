@@ -38,6 +38,8 @@ export type ToolErrorCode =
    * agent, MCP session or Automation is behind the call (HTTP 403).
    */
   | "MANUAL_EDIT_NOT_ALLOWED"
+  /** Authored configuration changed since the caller read it (HTTP 409). */
+  | "REVISION_CONFLICT"
   // ── transient: the same call may succeed on retry ──
   /** Upstream throttled the request (HTTP 429 / too many requests). */
   | "RATE_LIMITED"
@@ -90,6 +92,11 @@ export const TOOL_ERRORS: Record<ToolErrorCode, ToolErrorSpec> = {
     retryable: false,
     message:
       "This caller may not assert a manual edit; it needs the entities:manual_edit scope and no agent, MCP session or Automation behind it.",
+  },
+  REVISION_CONFLICT: {
+    retryable: false,
+    message:
+      "This configuration changed. Reload it and reapply the intended edit.",
   },
   RATE_LIMITED: {
     retryable: true,

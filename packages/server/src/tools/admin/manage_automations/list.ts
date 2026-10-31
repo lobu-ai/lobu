@@ -7,6 +7,7 @@ import {
 	type ListAutomationsArgs,
 	type ListAutomationsResult,
 } from "@lobu/core/contracts/tools/manage-automations";
+import { automationConfigRevision } from "./revision";
 import { getDb } from "../../../db/client";
 import type { Env } from "../../../index";
 import { ToolUserError } from "../../../utils/errors";
@@ -50,6 +51,8 @@ export async function handleList(
 	let query = `
     SELECT
       i.id as automation_id,
+      to_jsonb(i) AS revision_configuration,
+      to_jsonb(cv) AS revision_definition,
       i.name,
       i.slug,
       i.status,
@@ -227,6 +230,8 @@ export async function handleList(
 		const {
 			organization_id: _orgId,
 			health_last_event_activation_at: lastEventActivationAt,
+			revision_configuration,
+			revision_definition,
 			...rest
 		} = automation;
 
@@ -271,6 +276,7 @@ export async function handleList(
 
 		return {
 			...rest,
+			revision: automationConfigRevision(revision_configuration, revision_definition),
 			organization_slug: orgSlug,
 			pending_content_count: countData.pending,
 			historical_content_count: countData.historical,

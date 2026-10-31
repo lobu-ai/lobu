@@ -19,7 +19,7 @@ import {
   createTestOrganization,
   createTestUser,
 } from '../setup/test-fixtures';
-import { TestApiClient } from '../setup/test-mcp-client';
+import { freshSchemaEditor, TestApiClient } from '../setup/test-mcp-client';
 
 describe('prune (server gate)', () => {
   let owner: TestApiClient;
@@ -46,7 +46,7 @@ describe('prune (server gate)', () => {
         slug: 'prune-empty',
         name: 'Empty',
       });
-      await owner.entity_schema.deleteType({ slug: 'prune-empty' });
+      await freshSchemaEditor(owner.entity_schema).deleteType({ slug: 'prune-empty' });
       const got = (await owner.entity_schema.getType('prune-empty')) as {
         entity_type: unknown;
       };
@@ -63,7 +63,7 @@ describe('prune (server gate)', () => {
         entity_type: 'prune-busy',
         organization_id: orgId,
       });
-      await expect(owner.entity_schema.deleteType({ slug: 'prune-busy' })).rejects.toThrow(
+      await expect(freshSchemaEditor(owner.entity_schema).deleteType({ slug: 'prune-busy' })).rejects.toThrow(
         /entities of this type exist|cannot delete/i
       );
     });
@@ -73,7 +73,7 @@ describe('prune (server gate)', () => {
         slug: 'prune-rel',
         name: 'Rel',
       });
-      await owner.entity_schema.deleteRelType({ slug: 'prune-rel' });
+      await freshSchemaEditor(owner.entity_schema).deleteRelType({ slug: 'prune-rel' });
       const list = (await owner.entity_schema.listTypes()) as {
         relationship_types?: Array<{ slug: string }>;
       };
@@ -107,7 +107,7 @@ describe('prune (server gate)', () => {
           (organization_id, from_entity_id, to_entity_id, relationship_type_id, created_by)
         VALUES (${orgId}, ${a.id}, ${b.id}, ${rt?.id}, ${userId})
       `;
-      await expect(owner.entity_schema.deleteRelType({ slug: 'prune-rel-busy' })).rejects.toThrow(
+      await expect(freshSchemaEditor(owner.entity_schema).deleteRelType({ slug: 'prune-rel-busy' })).rejects.toThrow(
         /relationships of this type exist|cannot delete/i
       );
     });
@@ -130,7 +130,7 @@ describe('prune (server gate)', () => {
       });
       // ...and DELETE resolves THIS org's own row (tenant-first), not the
       // foreign public one (which would otherwise raise access-denied).
-      await owner.entity_schema.deleteRelType({ slug: 'shared-rel' });
+      await freshSchemaEditor(owner.entity_schema).deleteRelType({ slug: 'shared-rel' });
       // The foreign public row is untouched.
       const [foreign] = await sql<{ deleted_at: string | null }[]>`
         SELECT deleted_at FROM entity_relationship_types
@@ -149,11 +149,11 @@ describe('prune (server gate)', () => {
       // The caller has no own 'foreign-only'. Write-mode lookup is org-scoped,
       // so it must report 'not found' — never 'access denied', which would leak
       // that the slug exists in another org.
-      await expect(owner.entity_schema.deleteRelType({ slug: 'foreign-only' })).rejects.toThrow(
+      await expect(freshSchemaEditor(owner.entity_schema).deleteRelType({ slug: 'foreign-only' })).rejects.toThrow(
         /not found/i
       );
       await expect(
-        owner.entity_schema.updateRelType({ slug: 'foreign-only', name: 'x' })
+        freshSchemaEditor(owner.entity_schema).updateRelType({ slug: 'foreign-only', name: 'x' })
       ).rejects.toThrow(/not found/i);
       // Foreign row untouched.
       const [foreign] = await sql<{ deleted_at: string | null; name: string }[]>`
@@ -170,11 +170,12 @@ describe('prune (server gate)', () => {
         slug: 'prune-automation',
         managed_agent_id: agent.agentId,
         prompt: 'Watch for things.',
-      })) as { automation_id?: string };
+      })) as { automation_id: string; revision: string };
       expect(created.automation_id).toBeTruthy();
 
       await owner.automations.delete({
-        automation_ids: [created.automation_id as string],
+        automation_ids: [created.automation_id],
+        expected_revisions: { [created.automation_id]: created.revision },
       });
       const list = (await owner.automations.list({})) as {
         automations?: Array<{ slug: string }>;
@@ -192,7 +193,7 @@ describe('prune (server gate)', () => {
         slug: 'prune-readd',
         name: 'First',
       });
-      await owner.entity_schema.deleteRelType({ slug: 'prune-readd' });
+      await freshSchemaEditor(owner.entity_schema).deleteRelType({ slug: 'prune-readd' });
       await owner.entity_schema.createRelType({
         slug: 'prune-readd',
         name: 'Second',

@@ -1,3 +1,4 @@
+import { pgTextArray } from "../../../db/client";
 /**
  * manage_automations — builder-gate approval queue (agent_config write class).
  *
@@ -62,6 +63,12 @@ describe("manage_automations — builder gate e2e", () => {
 	let agentCtx: AuthContext;
 	let agentId: string;
 	let otherAgentId: string;
+
+  async function automationRevision(automationId: string): Promise<string> {
+    const snapshot = await executeTool("get_automation", { automation_id: automationId }, TEST_ENV, ownerCtx) as { automation: { revision: string } };
+    return snapshot.automation.revision;
+  }
+
 
 	const baseCtx = (
 		orgIdValue: string,
@@ -294,6 +301,7 @@ describe("manage_automations — builder gate e2e", () => {
 			{
 				action: "update",
 				automation_id: automationId,
+				expected_revision: await automationRevision(automationId),
 				tags: ["routed"],
 			},
 			TEST_ENV,
@@ -488,6 +496,7 @@ describe("manage_automations — builder gate e2e", () => {
 			{
 				action: "update",
 				automation_id: automationId,
+				expected_revision: await automationRevision(automationId),
 				triggers: [
 					{
 						kind: "schedule",
@@ -570,7 +579,7 @@ describe("manage_automations — builder gate e2e", () => {
 		await expect(
 			executeTool(
 				"manage_automations",
-				{ action: "set_reaction_script", automation_id: automationId },
+				{ action: "set_reaction_script", automation_id: automationId, expected_revision: await automationRevision(automationId) },
 				TEST_ENV,
 				agentCtx
 			)
@@ -600,6 +609,7 @@ describe("manage_automations — builder gate e2e", () => {
 			{
 				action: "update",
 				automation_id: automationId,
+				expected_revision: await automationRevision(automationId),
 				triggers: [{ kind: "schedule", cron: "0 9 * * *" }],
 			},
 			TEST_ENV,
@@ -640,4 +650,60 @@ describe("manage_automations — builder gate e2e", () => {
 		`;
 		expect(runRows[0]?.status).toBe("failed");
 	});
+
+  it.each(["version", "runtime"] as const)("stale %s approval keeps the newer human configuration", async (kind) => {
+    const created = await executeTool("manage_automations", {
+      action: "create", slug: `revision-${kind}`, name: "Original", prompt: "Original prompt", managed_agent_id: agentId,
+    }, TEST_ENV, ownerCtx) as { automation_id: string; revision: string };
+    const original = await automationRevision(created.automation_id);
+    const mutation = kind === "version"
+      ? { action: "create_version", prompt: "Agent proposal" }
+      : { action: "update", min_cooldown_seconds: 17 };
+    const pending = await executeTool("manage_automations", {
+      ...mutation, automation_id: created.automation_id, expected_revision: original,
+    }, TEST_ENV, agentCtx) as PendingApproval;
+    expect(pending.status).toBe("pending_approval");
+    const human = await executeTool("manage_automations", {
+      ...(kind === "version" ? { action: "create_version", prompt: "Human prompt" } : { action: "update", min_cooldown_seconds: 29 }),
+      automation_id: created.automation_id, expected_revision: original,
+    }, TEST_ENV, ownerCtx) as { revision: string };
+    await executeTool("manage_operations", { action: "approve", run_id: pending.run_id }, TEST_ENV, ownerCtx);
+    const sql = getTestDb();
+    const [state] = await sql`
+      SELECT a.min_cooldown_seconds, v.prompt FROM automations a
+      JOIN automation_versions v ON v.id = a.current_version_id
+      WHERE a.id = ${created.automation_id} AND a.organization_id = ${orgId}
+    `;
+    if (kind === "version") expect(state.prompt).toBe("Human prompt");
+    else expect(state.min_cooldown_seconds).toBe(29);
+    expect(await automationRevision(created.automation_id)).toBe(human.revision);
+    const [run] = await sql`SELECT status, action_output FROM runs WHERE id = ${pending.run_id}`;
+    expect(run.status).toBe("failed");
+    expect(run.action_output).toMatchObject({ code: "REVISION_CONFLICT", retryable: false });
+  });
+
+  it("bulk delete locks more groups than the lock pool without starving and rejects a stale batch atomically", async () => {
+    const created: Array<{ automation_id: string; revision: string }> = [];
+    for (let i = 0; i < 6; i++) {
+      created.push(await executeTool("manage_automations", {
+        action: "create", slug: `revision-bulk-${i}`, prompt: "Bulk target", managed_agent_id: agentId,
+      }, TEST_ENV, ownerCtx) as { automation_id: string; revision: string });
+    }
+    const ids = created.map((a) => a.automation_id);
+    const expected = Object.fromEntries(created.map((a) => [a.automation_id, a.revision]));
+    const changed = await executeTool("manage_automations", {
+      action: "update", automation_id: ids[5], expected_revision: expected[ids[5]], min_cooldown_seconds: 23,
+    }, TEST_ENV, ownerCtx) as { revision: string };
+    await expect(executeTool("manage_automations", {
+      action: "delete", automation_ids: ids, expected_revisions: expected,
+    }, TEST_ENV, ownerCtx)).rejects.toMatchObject({ code: "REVISION_CONFLICT" });
+    const sql = getTestDb();
+    expect(await sql`SELECT 1 FROM automations WHERE id = ANY(${pgTextArray(ids)}::bigint[]) AND status = 'archived'`).toHaveLength(0);
+    expected[ids[5]] = changed.revision;
+    const result = await executeTool("manage_automations", {
+      action: "delete", automation_ids: ids.reverse(), expected_revisions: expected,
+    }, TEST_ENV, ownerCtx) as { summary: { successful: number; failed: number } };
+    expect(result.summary).toMatchObject({ successful: 6, failed: 0 });
+  }, 15000);
+
 });

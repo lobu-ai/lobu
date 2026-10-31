@@ -19,7 +19,7 @@ import {
   createTestOrganization,
   createTestUser,
 } from '../../setup/test-fixtures';
-import { TestApiClient } from '../../setup/test-mcp-client';
+import { freshSchemaEditor, TestApiClient } from '../../setup/test-mcp-client';
 
 describe('derived entity read path (reuse query_sql)', () => {
   let owner: TestApiClient;
@@ -104,7 +104,7 @@ describe('derived entity read path (reuse query_sql)', () => {
     await owner.entities.create({ entity_type: 'people', name: 'Ada' });
     // Would orphan Ada (the view ignores stored rows) — must be rejected.
     await expect(
-      owner.entity_schema.updateType({
+      freshSchemaEditor(owner.entity_schema).updateType({
         slug: 'people',
         backing: { sql: 'SELECT 1 AS x FROM events' },
       })
@@ -201,7 +201,7 @@ describe('derived entity read path (reuse query_sql)', () => {
              FROM entity_types et
              WHERE e.entity_type_id = et.id AND et.slug = 'fish' AND e.organization_id = ${orgAId}`;
     await expect(
-      owner.entity_schema.updateType({ slug: 'fish', backing: { sql: 'SELECT 1 AS x FROM events' } })
+      freshSchemaEditor(owner.entity_schema).updateType({ slug: 'fish', backing: { sql: 'SELECT 1 AS x FROM events' } })
     ).resolves.toBeDefined();
   });
 });

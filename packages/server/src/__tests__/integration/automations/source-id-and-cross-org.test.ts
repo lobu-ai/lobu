@@ -11,6 +11,7 @@
  *  in-org entity.
  */
 
+import { readAutomationRevision, readAutomationRevisions } from './revision-fixture';
 import { beforeAll, describe, expect, it } from "vitest";
 import type { Env } from "../../../index";
 import { verifyWindowToken } from "../../../utils/jwt";
@@ -205,6 +206,7 @@ describe("manage_automations source-id + cross-org guards", () => {
 
 		await expect(
 			owner.automations.createVersion({
+				expected_revision: await readAutomationRevision(owner, created.automation_id),
 				automation_id: created.automation_id,
 				prompt: "Track stuff v2.",
 				change_notes: "omit id",
@@ -384,7 +386,7 @@ describe("manage_automations source-id + cross-org guards", () => {
 		// and even if that gate were bypassed, the org-scoped archive UPDATE
 		// leaves the foreign row untouched.
 		await expect(
-			owner.automations.delete({ automation_ids: [foreignId] })
+			owner.automations.delete({ expected_revisions: await readAutomationRevisions(foreignClient, [foreignId]), automation_ids: [foreignId] })
 		).rejects.toMatchObject({ httpStatus: 403 });
 
 		// The foreign row is untouched — still active, not archived.

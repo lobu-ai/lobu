@@ -126,6 +126,7 @@ const AutomationRunSchema = Type.Object({
 });
 
 export const AutomationMetadataSchema = Type.Object({
+  revision: Type.Optional(Type.String({ description: "Opaque authored-config baseline. Omitted for historical version views." })),
   automation_id: Type.String(),
   automation_name: Type.String(),
   slug: Type.String(),

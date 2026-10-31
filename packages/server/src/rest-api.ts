@@ -5,7 +5,7 @@
  * for use with ChatGPT, Zapier, and other REST-based integrations
  */
 
-import { toJsonSafe } from "@lobu/core";
+import { toJsonSafe, toToolErrorCode } from "@lobu/core";
 import { Value } from "@sinclair/typebox/value";
 import { ViewActionScopeSchema } from "./tools/invoke_view_action";
 import type { Context } from "hono";
@@ -52,6 +52,7 @@ import {
 import {
 	errorMessage,
 	parsePositiveIntegerId,
+	toolErrorHttpStatus,
 	ToolNotRegisteredError,
 	ToolUserError,
 } from "./utils/errors";
@@ -359,6 +360,14 @@ export async function restToolProxy(
 		const args: Record<string, unknown> = explicitArgs ?? (await c.req.json());
 		const authCtx = await resolveRestToolAuthContext(c);
 		const result = await executeTool(toolName, args, c.env, authCtx, c.req.raw.signal);
+		// Builder approval failures keep their typed code nonenumerable in process.
+		// Classify them before JSON serialization drops that code.
+		if (result && typeof result === "object" && "error" in result && typeof result.error === "string") {
+			const code = toToolErrorCode("error_code" in result ? result.error_code : undefined);
+			if (code) {
+				throw new ToolUserError(result.error, toolErrorHttpStatus(code), code);
+			}
+		}
 		return c.json(toJsonSafe(toRestPublicToolResult(toolName, result)));
 	} catch (error) {
 		if (error instanceof ToolNotRegisteredError) {

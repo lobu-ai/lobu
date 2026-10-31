@@ -13,7 +13,7 @@ import { executeTool, type AuthContext } from '../../../tools/execute';
 import type { Env } from '../../../index';
 import { primeMemberEventKinds } from '../../../utils/event-kind-validation';
 import { ensureMemberEntityType } from '../../../utils/member-entity-type';
-import { LOBU_VIEWS_RESOURCE_URI, serverCompileStamp } from '../../../views/views';
+import { LOBU_VIEWS_RESOURCE_URI, serverCompileStamp, getView } from '../../../views/views';
 import { initWorkspaceProvider } from '../../../workspace';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import { viewModule } from './view-module';
@@ -298,7 +298,7 @@ describe('views resources + open_view + invoke_view_action', () => {
 		expect(result.structuredContent.picker.views.map((v: { key: string }) => v.key)).toContain('workspace-home');
 		expect(result.structuredContent.picker.views.map((v: { key: string }) => v.key)).not.toContain('board');
 		expect(JSON.stringify(result.structuredContent)).not.toContain('source_code');
-		await executeTool('manage_views', { action: 'remove', key: 'workspace-home' }, TEST_ENV, ownerCtx);
+		await executeTool('manage_views', { action: 'remove', key: 'workspace-home', expected_revision: (await getView(org.id, 'workspace-home'))!.revision }, TEST_ENV, ownerCtx);
 	});
 
 	it('account picker only lists live granted memberships and opens an explicitly selected workspace', async () => {
@@ -463,7 +463,7 @@ describe('views resources + open_view + invoke_view_action', () => {
 			await expect(executeTool('open_view', { key: 'large-accounts', scope }, TEST_ENV, ownerCtx)).rejects.toMatchObject({ httpStatus: 400 });
 		}
 		await expect(executeTool('manage_views', { action: 'set', source_code: viewModule({ ...declaration, params: { '$collection': { type: 'string' } } }, VIEW_SOURCE) }, TEST_ENV, ownerCtx)).rejects.toThrow(/reserved/);
-		await executeTool('manage_views', { action: 'remove', key: 'large-accounts' }, TEST_ENV, ownerCtx);
+		await executeTool('manage_views', { action: 'remove', key: 'large-accounts', expected_revision: (await getView(org.id, 'large-accounts'))!.revision }, TEST_ENV, ownerCtx);
 	});
 
 	it('open_view refuses an unscoped non-workspace view instead of inferring its type', async () => {
@@ -521,7 +521,7 @@ describe('views resources + open_view + invoke_view_action', () => {
 	}
 	afterEach(async () => {
 		for (const key of attachedViews.splice(0)) {
-			await executeTool('manage_views', { action: 'remove', key }, TEST_ENV, ownerCtx);
+			await executeTool('manage_views', { action: 'remove', key, expected_revision: (await getView(org.id, key))?.revision ?? 'already-absent-fixture' }, TEST_ENV, ownerCtx);
 		}
 	});
 

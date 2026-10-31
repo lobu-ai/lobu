@@ -36,7 +36,7 @@ import {
   resolveWritePolicyDecision,
 } from '../../authz/entity-policy';
 import type { WriteAction } from '../../authz/write-action-manifest';
-import { type DbClient, getDb } from '../../db/client';
+import { type DbClient, getDb, pgTextArray } from '../../db/client';
 import {
   currentMcpActivityAttribution,
   currentMcpActivityEventMetadata,
@@ -77,6 +77,8 @@ import {
 } from '../../utils/reserved';
 import { resolveUsernames } from '../../utils/resolve-usernames';
 import { ToolUserError } from '../../utils/errors';
+import { assertExpectedRevision, configRevision } from '../../utils/config-revision';
+import { notifyWorkspaceInvalidation } from '../../events/emitter';
 import { isUniqueViolation } from '../../utils/pg-errors';
 import { buildResourcePermalink } from '../../utils/url-builder';
 import { validateJsonTemplate } from '../../utils/validate-json-template';
@@ -398,7 +400,7 @@ function entitySchemaApprovalFields(
         ? 'Entity type'
         : 'Relationship type';
   const entries = Object.entries(proposal.args).filter(
-    ([key, value]) => key !== 'action' && key !== 'schema_type' && value !== undefined
+    ([key, value]) => key !== 'action' && key !== 'schema_type' && key !== 'expected_revision' && value !== undefined
   );
   const byKey = new Map(entries);
   const ordered: Array<[string, unknown]> = [['resource', resource]];
@@ -485,6 +487,7 @@ async function prepareEntitySchemaMutation(
 ): Promise<ManageEntitySchemaProposal> {
   const policyAction = entitySchemaPolicyAction(args);
   if (!policyAction) throw new ToolUserError('Unsupported entity schema mutation', 400);
+  if (args.action !== 'create') await assertSchemaRevision(args, ctx, sql);
   const normalizedArgs = {
     ...args,
     ...(args.slug && args.schema_type === 'entity_type'
@@ -621,7 +624,7 @@ async function assertPreparedEntitySchemaFresh(
       if (rows.length > 0) {
         throw new ToolUserError(
           'This schema approval is stale because the target now exists.',
-          409
+          409, 'REVISION_CONFLICT'
         );
       }
     } else {
@@ -642,7 +645,7 @@ async function assertPreparedEntitySchemaFresh(
     ) {
       throw new ToolUserError(
         'This schema approval is stale because the schema changed after it was proposed.',
-        409
+        409, 'REVISION_CONFLICT'
       );
     }
   }
@@ -663,7 +666,7 @@ async function assertPreparedEntitySchemaFresh(
     ) {
       throw new ToolUserError(
         'This schema approval is stale because its inverse relationship type changed after it was proposed.',
-        409
+        409, 'REVISION_CONFLICT'
       );
     }
   }
@@ -674,7 +677,7 @@ async function assertPreparedEntitySchemaFresh(
         AND target_entity_type_slug = ${args.target_entity_type_slug}
         AND deleted_at IS NULL`;
     if (duplicates.length > 0)
-      throw new ToolUserError('This schema approval is stale because the rule now exists.', 409);
+      throw new ToolUserError('This schema approval is stale because the rule now exists.', 409, 'REVISION_CONFLICT');
   }
 }
 
@@ -685,18 +688,22 @@ async function applyPreparedEntitySchemaMutation(
 ): Promise<ManageEntitySchemaResult> {
   await assertPreparedEntitySchemaFresh(proposal, ctx, sql);
   const args = proposal.args as ManageEntitySchemaArgs;
+  if (args.action !== 'create') await assertSchemaRevision(args, ctx, sql);
+  let result: ManageEntitySchemaResult | undefined;
   if (args.schema_type === 'entity_type') {
-    if (args.action === 'create') return etHandleCreate(args, ctx, sql);
-    if (args.action === 'update') return etHandleUpdate(args, ctx, sql);
-    if (args.action === 'delete') return etHandleDelete(args.slug, ctx, sql);
+    if (args.action === 'create') result = await etHandleCreate(args, ctx, sql);
+    if (args.action === 'update') result = await etHandleUpdate(args, ctx, sql);
+    if (args.action === 'delete') result = await etHandleDelete(args.slug, ctx, sql);
   } else {
-    if (args.action === 'create') return rtHandleCreate(args, ctx, sql);
-    if (args.action === 'update') return rtHandleUpdate(args, ctx, sql);
-    if (args.action === 'delete') return rtHandleDelete(args, ctx, sql);
-    if (args.action === 'add_rule') return rtHandleAddRule(args, ctx, sql);
-    if (args.action === 'remove_rule') return rtHandleRemoveRule(args, ctx, sql);
+    if (args.action === 'create') result = await rtHandleCreate(args, ctx, sql);
+    if (args.action === 'update') result = await rtHandleUpdate(args, ctx, sql);
+    if (args.action === 'delete') result = await rtHandleDelete(args, ctx, sql);
+    if (args.action === 'add_rule') result = await rtHandleAddRule(args, ctx, sql);
+    if (args.action === 'remove_rule') result = await rtHandleRemoveRule(args, ctx, sql);
   }
-  throw new ToolUserError('Unsupported prepared entity schema mutation', 400);
+  if (!result) throw new ToolUserError('Unsupported prepared entity schema mutation', 400);
+  await notifyWorkspaceInvalidation(sql, ctx.organizationId, ['workspace-navigation']);
+  return result;
 }
 
 async function governEntitySchemaMutation(
@@ -902,10 +909,99 @@ const ENTITY_TYPE_COLUMNS_WITH_ORG = `et.id, et.slug, et.name, et.description, e
   et.created_at, et.updated_at,
   o.slug AS organization_slug`;
 
+const ENTITY_AUTHORED_FIELDS = [
+  'slug', 'name', 'description', 'icon', 'color', 'metadata_schema',
+  'event_kinds', 'backing_sql', 'backing_source', 'metrics_config', 'rules_source',
+] as const;
+const RELATIONSHIP_AUTHORED_FIELDS = [
+  'slug', 'name', 'description', 'metadata_schema', 'metadata', 'is_symmetric',
+  'inverse_type_id', 'status', 'purpose',
+] as const;
+
+function authoredFields(row: Record<string, unknown>, fields: readonly string[]): Record<string, unknown> {
+  return Object.fromEntries(fields.map((field) => [field, row[field] ?? null]));
+}
+
+function entityTypeRevision(row: Record<string, unknown>): string {
+  return configRevision('entity_type', Number(row.id), authoredFields(row, ENTITY_AUTHORED_FIELDS));
+}
+
+/** Rules belong to the relationship type's authored document, not a separate revision. */
+async function relationshipRowsWithRevision(
+  sql: DbClient,
+  rows: Record<string, unknown>[],
+  lockRules = false
+): Promise<RelationshipTypeRow[]> {
+  if (rows.length === 0) return [];
+  const rules = await sql`
+    SELECT id, relationship_type_id, source_entity_type_slug, target_entity_type_slug
+    FROM entity_relationship_type_rules
+    WHERE relationship_type_id = ANY(${pgTextArray(rows.map((row) => String(row.id)))}::bigint[])
+      AND deleted_at IS NULL
+    ORDER BY id
+    ${lockRules ? sql.unsafe('FOR UPDATE') : sql.unsafe('')}
+  `;
+  return rows.map((row) => ({
+    ...(row as unknown as RelationshipTypeRow),
+    revision: configRevision('relationship_type', Number(row.id), {
+      ...authoredFields(row, RELATIONSHIP_AUTHORED_FIELDS),
+      rules: rules.filter((rule) => Number(rule.relationship_type_id) === Number(row.id)).map((rule) => ({
+        id: Number(rule.id),
+        source: rule.source_entity_type_slug,
+        target: rule.target_entity_type_slug,
+      })),
+    }),
+  }));
+}
+
+/** Runs both when proposing and when applying, under the schema transaction. */
+async function assertSchemaRevision(args: ManageEntitySchemaArgs, ctx: ToolContext, sql: DbClient): Promise<void> {
+  if (args.schema_type === 'entity_type') {
+    if (!args.slug) throw new ToolUserError('slug is required for this action', 400);
+    const rows = await sql`
+      SELECT * FROM entity_types
+      WHERE organization_id = ${ctx.organizationId}
+        AND slug = ${normalizeEntityTypeSlug(args.slug)} AND deleted_at IS NULL
+      FOR UPDATE
+    `;
+    if (!rows[0]) throw new ToolUserError(`Entity type '${args.slug}' no longer exists. Reload before editing.`, args.expected_revision ? 409 : 404, args.expected_revision ? 'REVISION_CONFLICT' : undefined);
+    assertExpectedRevision(args.expected_revision, entityTypeRevision(rows[0]));
+    return;
+  }
+  let rows: Record<string, unknown>[];
+  if (args.action === 'remove_rule') {
+    if (!args.rule_id) throw new ToolUserError('rule_id is required for remove_rule action', 400);
+    rows = await sql`
+      SELECT rt.* FROM entity_relationship_types rt
+      JOIN entity_relationship_type_rules r ON r.relationship_type_id = rt.id
+      WHERE rt.organization_id = ${ctx.organizationId} AND rt.deleted_at IS NULL
+        AND r.id = ${args.rule_id} AND r.deleted_at IS NULL
+      FOR UPDATE OF rt
+    `;
+  } else {
+    if (!args.slug) throw new ToolUserError('slug is required for this action', 400);
+    rows = await sql`
+      SELECT * FROM entity_relationship_types
+      WHERE organization_id = ${ctx.organizationId} AND slug = ${args.slug} AND deleted_at IS NULL
+      FOR UPDATE
+    `;
+  }
+  if (!rows[0]) throw new ToolUserError('Relationship type or rule no longer exists. Reload before editing.', args.expected_revision ? 409 : 404, args.expected_revision ? 'REVISION_CONFLICT' : undefined);
+  const [current] = await relationshipRowsWithRevision(sql, rows, true);
+  assertExpectedRevision(args.expected_revision, current.revision);
+}
+
+async function relationshipRevisionAfterWrite(sql: DbClient, typeId: number): Promise<string> {
+  const rows = await sql`SELECT * FROM entity_relationship_types WHERE id = ${typeId}`;
+  const [current] = await relationshipRowsWithRevision(sql, rows);
+  return current.revision;
+}
+
 function mapRowToEntityType(row: Record<string, unknown>): EntityTypeRow {
   const slug = typeof row.slug === 'string' ? row.slug : '';
   return {
     ...(row as unknown as EntityTypeRow),
+    revision: entityTypeRevision(row),
     // Sole platform signal: $ prefix ($member, $resource). Not created_by.
     is_system: slug.startsWith('$'),
     entity_count: Number(row.entity_count) || 0,
@@ -1902,8 +1998,8 @@ async function rtHandleList(
   return {
     schema_type: 'relationship_type',
     action: 'list',
-    relationship_types: resolvedRts.map((r) => ({
-      ...(r as unknown as RelationshipTypeRow),
+    relationship_types: (await relationshipRowsWithRevision(sql, resolvedRts)).map((r) => ({
+      ...r,
       relationship_count: Number(r.relationship_count) || 0,
     })),
 		list_scope: args.list_scope ?? 'accessible',
@@ -1943,7 +2039,7 @@ async function rtHandleGet(
   return {
     schema_type: 'relationship_type',
     action: 'get',
-    relationship_type: (resolvedRt as unknown as RelationshipTypeRow) ?? null,
+    relationship_type: resolvedRt ? (await relationshipRowsWithRevision(sql, [resolvedRt]))[0] : null,
   };
 }
 
@@ -2065,7 +2161,7 @@ async function rtHandleCreate(
     schema_type: 'relationship_type',
     action: 'create',
     status: 'applied',
-    relationship_type: created[0] as unknown as RelationshipTypeRow,
+    relationship_type: (await relationshipRowsWithRevision(sql, created))[0],
   };
 }
 
@@ -2170,7 +2266,7 @@ async function rtHandleUpdate(
     schema_type: 'relationship_type',
     action: 'update',
     status: 'applied',
-    relationship_type: updated[0] as unknown as RelationshipTypeRow,
+    relationship_type: (await relationshipRowsWithRevision(sql, updated))[0],
   };
 }
 
@@ -2306,6 +2402,7 @@ async function rtHandleAddRule(
     schema_type: 'relationship_type',
     action: 'add_rule',
     status: 'applied',
+    revision: await relationshipRevisionAfterWrite(sql, typeId),
     rule: created[0] as unknown as RelationshipTypeRuleRow,
   };
 }
@@ -2320,7 +2417,7 @@ async function rtHandleRemoveRule(
   const sql = db;
 
   const ruleRows = await sql`
-    SELECT r.id, rt.organization_id, rt.slug AS relationship_type_slug, rt.purpose
+    SELECT r.id, r.relationship_type_id, rt.organization_id, rt.slug AS relationship_type_slug, rt.purpose
     FROM entity_relationship_type_rules r
     JOIN entity_relationship_types rt ON r.relationship_type_id = rt.id
     WHERE r.id = ${args.rule_id} AND r.deleted_at IS NULL
@@ -2373,6 +2470,7 @@ async function rtHandleRemoveRule(
     schema_type: 'relationship_type',
     action: 'remove_rule',
     status: 'applied',
+    revision: await relationshipRevisionAfterWrite(sql, Number(ruleRows[0].relationship_type_id)),
     success: true,
     message: `Rule ${args.rule_id} removed`,
   };

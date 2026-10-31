@@ -1,3 +1,4 @@
+import { readAutomationRevision } from './revision-fixture';
 import type { AutomationTriggerResult } from '@lobu/core/contracts/tools/manage-automations';
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
@@ -112,6 +113,7 @@ describe('abandoned manual Automation run expiry', () => {
       name: 'Manual Expiry Schedule Agent',
     });
     await workspace.owner.automations.update({
+      expected_revision: await readAutomationRevision(workspace.owner, automationId),
       automation_id: automationId,
       managed_agent_id: agent.agentId,
       triggers: [

@@ -66,6 +66,7 @@ import {
 	ManageOperationsSchema,
 	manageOperations,
 } from "./manage_operations";
+import { ManageNavigationSchema, ManageNavigationResultSchema, manageNavigation } from "./manage_navigation";
 import { ManageSchedulesSchema, manageSchedules } from "./manage_schedules";
 import {
 	ManageViewsResultSchema,
@@ -260,6 +261,14 @@ const ENTRIES: AdminToolEntry[] = [
 		resultSchema: ManageClassifiersResultSchema,
 		handler: manageClassifiers,
 		annotations: DESTRUCTIVE_WITH_TITLE("Manage classifiers"),
+	},
+	{
+		name: "manage_navigation",
+		description: "Read or conditionally replace workspace sidebar sections and hierarchical links. SDK alternative: client.navigation.",
+		schema: ManageNavigationSchema,
+		resultSchema: ManageNavigationResultSchema,
+		handler: manageNavigation,
+		annotations: DESTRUCTIVE_WITH_TITLE("Manage navigation"),
 	},
 	{
 		name: "manage_views",

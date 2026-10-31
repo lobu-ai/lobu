@@ -1,3 +1,4 @@
+import { readAutomationRevision } from './revision-fixture';
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
   createAutomationRun,
@@ -107,6 +108,7 @@ describe('Automation script executor', () => {
     const { workspace, automationId } = await seedScriptAutomation();
     await expect(
       workspace.owner.automations.update({
+        expected_revision: await readAutomationRevision(workspace.owner, String(automationId)),
         automation_id: String(automationId),
         execution_config: null,
       })

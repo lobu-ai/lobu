@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { ApiError } from "../../../memory/_lib/errors.js";
-import { ApplyClient, isDuplicateError } from "../client.js";
+import { ApplyClient } from "../client.js";
 
 describe("ApplyClient", () => {
   test("listFeeds rejects an incomplete empty page instead of planning from partial state", async () => {
@@ -26,7 +25,14 @@ describe("ApplyClient", () => {
       { apiBaseUrl: "https://example.test", orgSlug: "acme", token: "tok" },
       (async (_url, init) => {
         bodies.push(JSON.parse(String(init?.body)));
-        return new Response(JSON.stringify({ success: true }), { status: 200 });
+        return new Response(
+          JSON.stringify({
+            success: true,
+            entity_type: { revision: "saved" },
+            relationship_type: { revision: "saved" },
+          }),
+          { status: 200 }
+        );
       }) as typeof fetch
     );
     const collection = {
@@ -99,7 +105,14 @@ describe("ApplyClient — entity schema merge", () => {
       { apiBaseUrl: "https://example.test", orgSlug: "acme", token: "tok" },
       (async (url, init) => {
         calls.push({ url: String(url), init });
-        return new Response(JSON.stringify({ success: true }), { status: 200 });
+        return new Response(
+          JSON.stringify({
+            success: true,
+            entity_type: { revision: "saved" },
+            relationship_type: { revision: "saved" },
+          }),
+          { status: 200 }
+        );
       }) as typeof fetch
     );
 
@@ -124,7 +137,14 @@ describe("ApplyClient — entity schema merge", () => {
       { apiBaseUrl: "https://example.test", orgSlug: "acme", token: "tok" },
       (async (url, init) => {
         calls.push({ url: String(url), init });
-        return new Response(JSON.stringify({ success: true }), { status: 200 });
+        return new Response(
+          JSON.stringify({
+            success: true,
+            entity_type: { revision: "saved" },
+            relationship_type: { revision: "saved" },
+          }),
+          { status: 200 }
+        );
       }) as typeof fetch
     );
 
@@ -148,7 +168,14 @@ describe("ApplyClient — entity schema merge", () => {
       { apiBaseUrl: "https://example.test", orgSlug: "acme", token: "tok" },
       (async (url, init) => {
         calls.push({ url: String(url), init });
-        return new Response(JSON.stringify({ success: true }), { status: 200 });
+        return new Response(
+          JSON.stringify({
+            success: true,
+            entity_type: { revision: "saved" },
+            relationship_type: { revision: "saved" },
+          }),
+          { status: 200 }
+        );
       }) as typeof fetch
     );
 
@@ -240,7 +267,14 @@ describe("ApplyClient — entity schema merge", () => {
             { status: 200 }
           );
         }
-        return new Response(JSON.stringify({ success: true }), { status: 200 });
+        return new Response(
+          JSON.stringify({
+            success: true,
+            entity_type: { revision: "saved" },
+            relationship_type: { revision: "saved" },
+          }),
+          { status: 200 }
+        );
       }) as typeof fetch
     );
 
@@ -281,7 +315,14 @@ describe("ApplyClient — entity schema merge", () => {
       { apiBaseUrl: "https://example.test", orgSlug: "acme", token: "tok" },
       (async (url, init) => {
         calls.push({ url: String(url), init });
-        return new Response(JSON.stringify({ success: true }), { status: 200 });
+        return new Response(
+          JSON.stringify({
+            success: true,
+            entity_type: { revision: "saved" },
+            relationship_type: { revision: "saved" },
+          }),
+          { status: 200 }
+        );
       }) as typeof fetch
     );
 
@@ -316,7 +357,14 @@ describe("ApplyClient — entity schema merge", () => {
       { apiBaseUrl: "https://example.test", orgSlug: "acme", token: "tok" },
       (async (url, init) => {
         calls.push({ url: String(url), init });
-        return new Response(JSON.stringify({ success: true }), { status: 200 });
+        return new Response(
+          JSON.stringify({
+            success: true,
+            entity_type: { revision: "saved" },
+            relationship_type: { revision: "saved" },
+          }),
+          { status: 200 }
+        );
       }) as typeof fetch
     );
 
@@ -342,7 +390,14 @@ describe("ApplyClient — entity schema merge", () => {
       { apiBaseUrl: "https://example.test", orgSlug: "acme", token: "tok" },
       (async (url, init) => {
         calls.push({ url: String(url), init });
-        return new Response(JSON.stringify({ success: true }), { status: 200 });
+        return new Response(
+          JSON.stringify({
+            success: true,
+            entity_type: { revision: "saved" },
+            relationship_type: { revision: "saved" },
+          }),
+          { status: 200 }
+        );
       }) as typeof fetch
     );
 
@@ -385,7 +440,14 @@ describe("ApplyClient — entity schema merge", () => {
       { apiBaseUrl: "https://example.test", orgSlug: "acme", token: "tok" },
       (async (url, init) => {
         calls.push({ url: String(url), init });
-        return new Response(JSON.stringify({ success: true }), { status: 200 });
+        return new Response(
+          JSON.stringify({
+            success: true,
+            entity_type: { revision: "saved" },
+            relationship_type: { revision: "saved" },
+          }),
+          { status: 200 }
+        );
       }) as typeof fetch
     );
 
@@ -417,7 +479,14 @@ describe("ApplyClient — entity schema merge", () => {
       { apiBaseUrl: "https://example.test", orgSlug: "acme", token: "tok" },
       (async (url, init) => {
         calls.push({ url: String(url), init });
-        return new Response(JSON.stringify({ success: true }), { status: 200 });
+        return new Response(
+          JSON.stringify({
+            success: true,
+            entity_type: { revision: "saved" },
+            relationship_type: { revision: "saved" },
+          }),
+          { status: 200 }
+        );
       }) as typeof fetch
     );
 
@@ -451,7 +520,14 @@ describe("ApplyClient — entity schema merge", () => {
       { apiBaseUrl: "https://example.test", orgSlug: "acme", token: "tok" },
       (async (url, init) => {
         calls.push({ url: String(url), init });
-        return new Response(JSON.stringify({ success: true }), { status: 200 });
+        return new Response(
+          JSON.stringify({
+            success: true,
+            entity_type: { revision: "saved" },
+            relationship_type: { revision: "saved" },
+          }),
+          { status: 200 }
+        );
       }) as typeof fetch
     );
 
@@ -482,7 +558,14 @@ describe("ApplyClient — entity schema merge", () => {
       { apiBaseUrl: "https://example.test", orgSlug: "acme", token: "tok" },
       (async (url, init) => {
         calls.push({ url: String(url), init });
-        return new Response(JSON.stringify({ success: true }), { status: 200 });
+        return new Response(
+          JSON.stringify({
+            success: true,
+            entity_type: { revision: "saved" },
+            relationship_type: { revision: "saved" },
+          }),
+          { status: 200 }
+        );
       }) as typeof fetch
     );
 
@@ -541,54 +624,8 @@ describe("ApplyClient — entity schema merge", () => {
   });
 });
 
-// Issue #1177: a 422 schema-validation error from `create` must NOT be
-// mistaken for "already exists" (which retried as `update` and buried the
-// real message under "Entity type not found").
-describe("isDuplicateError", () => {
-  test("coded duplicates are duplicates", () => {
-    for (const code of [
-      "entity_type_exists",
-      "relationship_type_exists",
-      "already_exists",
-    ]) {
-      expect(
-        isDuplicateError(
-          new ApiError(`POST /x failed: [${code}] thing already exists`, 409)
-        )
-      ).toBe(true);
-    }
-  });
-
-  test("bare 409 without a code is still a duplicate", () => {
-    expect(
-      isDuplicateError(new ApiError("POST /x failed: conflict", 409))
-    ).toBe(true);
-  });
-
-  test("422 validation error is NOT a duplicate", () => {
-    expect(
-      isDuplicateError(
-        new ApiError(
-          "POST /x failed: [invalid_schema] metadata_schema.properties.a.x-table-column must be a boolean",
-          422
-        )
-      )
-    ).toBe(false);
-  });
-
-  test("code-less 400 is NOT a duplicate", () => {
-    expect(
-      isDuplicateError(new ApiError("POST /x failed: slug is required", 400))
-    ).toBe(false);
-  });
-
-  test("missing status is NOT a duplicate", () => {
-    expect(isDuplicateError(new ApiError("Invalid JSON from /x"))).toBe(false);
-  });
-});
-
 describe("ApplyClient — upsert create/update flow", () => {
-  test("create → coded 409 duplicate → retries as update (idempotent)", async () => {
+  test("create → coded 409 duplicate stops without overwriting a concurrent creator", async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     const client = new ApplyClient(
       { apiBaseUrl: "https://example.test", orgSlug: "acme", token: "tok" },
@@ -604,18 +641,22 @@ describe("ApplyClient — upsert create/update flow", () => {
             { status: 409 }
           );
         }
-        return new Response(JSON.stringify({ success: true }), { status: 200 });
+        return new Response(
+          JSON.stringify({
+            success: true,
+            entity_type: { revision: "saved" },
+            relationship_type: { revision: "saved" },
+          }),
+          { status: 200 }
+        );
       }) as typeof fetch
     );
 
-    const result = await client.upsertEntityType({
-      slug: "task",
-      name: "Task",
-    });
-    expect(result).toEqual({ updated: true });
-    expect(calls).toHaveLength(2);
+    await expect(
+      client.upsertEntityType({ slug: "task", name: "Task" })
+    ).rejects.toThrow(/already exists/);
+    expect(calls).toHaveLength(1);
     expect(JSON.parse(String(calls[0]?.init?.body)).action).toBe("create");
-    expect(JSON.parse(String(calls[1]?.init?.body)).action).toBe("update");
   });
 
   test("create → 422 validation error surfaces verbatim, no update retry", async () => {
@@ -671,5 +712,60 @@ describe("ApplyClient — deployment baseline read", () => {
     );
 
     await expect(client.getLatestDeployment()).rejects.toThrow(/boom/);
+  });
+});
+
+describe("ApplyClient revision guard", () => {
+  test("a raced schema create never falls back to overwriting the winner", async () => {
+    const calls: Record<string, unknown>[] = [];
+    const client = new ApplyClient(
+      { apiBaseUrl: "https://example.test", orgSlug: "acme", token: "tok" },
+      (async (_url, init) => {
+        calls.push(JSON.parse(String(init?.body)));
+        if (calls.length === 1)
+          return new Response(
+            JSON.stringify({ error: "[entity_type_exists] already exists" }),
+            { status: 409 }
+          );
+        return new Response(
+          JSON.stringify({ entity_type: { revision: "new" } })
+        );
+      }) as typeof fetch
+    );
+    await expect(
+      client.upsertEntityType({ slug: "company", name: "Stale planned name" })
+    ).rejects.toThrow(/already exists/);
+    expect(calls.map((call) => call.action)).toEqual(["create"]);
+  });
+
+  test("planned schema revision reaches the single final update", async () => {
+    const calls: Record<string, unknown>[] = [];
+    const client = new ApplyClient(
+      { apiBaseUrl: "https://example.test", orgSlug: "acme", token: "tok" },
+      (async (_url, init) => {
+        calls.push(JSON.parse(String(init?.body)));
+        return new Response(
+          JSON.stringify({ entity_type: { revision: "saved" } })
+        );
+      }) as typeof fetch
+    );
+    const result = await client.upsertEntityType(
+      { slug: "company", name: "New" },
+      undefined,
+      undefined,
+      undefined,
+      true,
+      "planned"
+    );
+    expect(calls).toEqual([
+      {
+        schema_type: "entity_type",
+        action: "update",
+        slug: "company",
+        name: "New",
+        expected_revision: "planned",
+      },
+    ]);
+    expect(result.revision).toBe("saved");
   });
 });

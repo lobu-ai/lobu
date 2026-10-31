@@ -3,9 +3,11 @@
  *   create, update, delete, create_from_version
  */
 
-import { getDb, parsePgTextArray } from '../../../db/client';
+import { getDb, parsePgTextArray, pgTextArray } from '../../../db/client';
 import type { Env } from '../../../index';
 import { ToolUserError } from '../../../utils/errors';
+import { assertExpectedRevision } from '../../../utils/config-revision';
+import { assertAutomationRevision, readAutomationConfiguration } from './revision';
 import { isUniqueViolation } from '../../../utils/pg-errors';
 import { nextRunAt } from '../../../utils/cron';
 import { intervals } from '../../../config/intervals';
@@ -50,7 +52,6 @@ import {
   assertAutomationExecutorsResolve,
   resolveAutomationExecutor,
 } from './executors';
-import { getErrorMessage } from '@lobu/core';
 import { DEFAULT_AUTOMATION_SOURCE_QUERY, automationSourcesFromPrompt, mergePromptSources } from '../../../automations/source-refs';
 import {
   compileReactionScript,
@@ -143,6 +144,7 @@ export async function handleCreate(
 ): Promise<{
   action: 'create';
   automation_id: string;
+  revision: string;
   version: number;
   status: string;
   sources?: Array<{ name: string; query: string }>;
@@ -390,6 +392,7 @@ export async function handleCreate(
     reaction_input_schema: reactionInputSchema ?? null,
   });
 
+  let committedRevision = "";
   try {
     await sql.begin(async (tx) => {
       automationId = await getNextNumericId(tx, 'automations');
@@ -460,6 +463,8 @@ export async function handleCreate(
       SET current_version_id = ${versionId}
       WHERE id = ${automationId}
     `;
+
+      committedRevision = (await readAutomationConfiguration(organizationId, String(automationId), tx))!.revision;
 
       // 4. Immutable config audit shares the commit (#3664): a failed audit
       // rolls the create back rather than diverging from it.
@@ -546,6 +551,7 @@ export async function handleCreate(
   return {
     action: 'create',
     automation_id: String(automationId),
+    revision: committedRevision,
     version: 1,
     status: 'active',
     sources,
@@ -561,7 +567,7 @@ export async function handleUpdate(
   args: ManageAutomationsArgs,
   _env: Env,
   ctx: ToolContext
-): Promise<{ action: 'update'; automation_id: string; updated_fields: string[] }> {
+): Promise<{ action: 'update'; automation_id: string; revision: string; updated_fields: string[] }> {
   const sql = getDb();
 
   if (!args.automation_id) {
@@ -744,6 +750,7 @@ export async function handleUpdate(
       action: 'update',
       automation_id: args.automation_id,
       updated_fields: [],
+      revision: await assertAutomationRevision(args, ctx.organizationId),
     };
   }
 
@@ -769,6 +776,7 @@ export async function handleUpdate(
   let committedChangedFields: string[] = [];
   let committedRequestedFields: string[] = [];
   let committedNoOp = false;
+  let committedRevision = '';
   let committedOrgId = currentRow.organization_id;
   let committedBeforeTriggers = currentRow.triggers ?? [];
   await sql.begin(async (tx) => {
@@ -785,6 +793,7 @@ export async function handleUpdate(
     if (lockedRows.length === 0) {
       throw new ToolUserError(`Automation ${args.automation_id} not found`, 404);
     }
+    committedRevision = await assertAutomationRevision(args, ctx.organizationId, tx);
     const locked = lockedRows[0] as unknown as typeof currentRow;
     const lockedTriggersValueEqual =
       args.triggers === undefined ||
@@ -884,6 +893,7 @@ export async function handleUpdate(
     committedRequestedFields = committedChangedFields.filter((f) => requestedFields.includes(f));
     committedOrgId = (updatedRow?.organization_id as string | null) ?? locked.organization_id;
     committedBeforeTriggers = locked.triggers ?? [];
+    committedRevision = (await readAutomationConfiguration(ctx.organizationId, args.automation_id!, tx))!.revision;
   });
 
   if (committedNoOp) {
@@ -891,6 +901,7 @@ export async function handleUpdate(
       action: 'update',
       automation_id: args.automation_id,
       updated_fields: [],
+      revision: committedRevision,
     };
   }
 
@@ -907,6 +918,7 @@ export async function handleUpdate(
     action: 'update',
     automation_id: args.automation_id,
     updated_fields: committedRequestedFields,
+    revision: committedRevision,
   };
 }
 
@@ -929,61 +941,56 @@ export async function handleDelete(
   }
 
   const results: AutomationOperationResult[] = [];
-
-  for (const automationId of args.automation_ids) {
-    try {
-      // Org-scope the mutation: requireAutomationAccess now lets ids that aren't
-      // in-org at check time fall through to this aggregate, and automation ids are
-      // sequential integers — so a racing cross-tenant insert between check and
-      // write must not be archivable. organization_id fences that TOCTOU.
-      // The preimage SELECT lives INSIDE the mutation tx (FOR UPDATE) so the
-      // before snapshot, the archive write, and the audit share one commit.
-      let automation: Record<string, unknown> | null = null;
-      await sql.begin(async (tx) => {
-        const beforeRows = await tx`
-        SELECT id, name, status, organization_id, managed_agent_id, agent_kind,
-               device_worker_id::text AS device_worker_id, execution_config, model_config,
-               delivery_target, triggers, schedule, timezone, tags, min_cooldown_seconds,
-               consecutive_scheduled_failures, schedule_auto_paused_at, next_run_at,
-               reaction_script, entity_ids
-        FROM automations
+  const archived = new Map<string, Record<string, unknown>>();
+  const ids = [...new Set(args.automation_ids)].sort((a, b) => Number(a) - Number(b));
+  await sql.begin(async (tx) => {
+    // Lock every existing target before checking any baseline. A conflict on
+    // one item rolls back the whole archive batch and its immutable audits.
+    const beforeRows = await tx`
+      SELECT * FROM automations
+      WHERE organization_id = ${ctx.organizationId} AND id = ANY(${pgTextArray(ids)}::bigint[])
+      ORDER BY id FOR UPDATE
+    `;
+    for (const row of beforeRows) {
+      const id = String(row.id);
+      const snapshot = await readAutomationConfiguration(ctx.organizationId, id, tx);
+      assertExpectedRevision(args.expected_revisions?.[id], snapshot!.revision);
+    }
+    for (const beforeRow of beforeRows) {
+      if (beforeRow.status === 'archived') continue;
+      const automationId = String(beforeRow.id);
+      const updated = await tx`
+        UPDATE automations SET status = 'archived', updated_at = NOW()
         WHERE id = ${automationId} AND organization_id = ${ctx.organizationId}
-        LIMIT 1
-        FOR UPDATE
-      `;
-        const beforeRow = (beforeRows[0] ?? null) as Record<string, unknown> | null;
-        if (!beforeRow || beforeRow.status === 'archived') return;
-        const beforeSnapshot = automationAuditSnapshot(beforeRow);
-        const updated = await tx`
-        UPDATE automations
-        SET status = 'archived', updated_at = NOW()
-        WHERE id = ${automationId}
-          AND organization_id = ${ctx.organizationId}
           AND status != 'archived'
         RETURNING id, name, entity_ids, organization_id, triggers
       `;
-        if (updated.length === 0) return;
-        automation = updated[0] as Record<string, unknown>;
-        await insertToolConfigChange(ctx, {
-          organizationId: automation.organization_id as string,
-          resourceKind: 'automation',
-          resourceId: automationId,
-          op: 'deleted',
-          action: 'delete',
-          summary: `Automation '${automation.name || automationId}' archived`,
-          before: beforeSnapshot,
-          state: null,
-          changedFields: ['status'],
-        }, tx);
-      });
+      const automation = updated[0] as Record<string, unknown> | undefined;
+      if (!automation) continue;
+      archived.set(automationId, automation);
+      await insertToolConfigChange(ctx, {
+        organizationId: automation.organization_id as string,
+        resourceKind: 'automation',
+        resourceId: automationId,
+        op: 'deleted',
+        action: 'delete',
+        summary: `Automation '${automation.name || automationId}' archived`,
+        before: automationAuditSnapshot(beforeRow),
+        state: null,
+        changedFields: ['status'],
+      }, tx);
+    }
+  });
 
-      if (!automation) {
-        results.push({
-          automation_id: automationId,
-          success: false,
-          message: 'Automation not found or already archived',
-        });
-      } else {
+  for (const automationId of args.automation_ids) {
+    const automation = archived.get(automationId);
+    if (!automation) {
+      results.push({
+        automation_id: automationId,
+        success: false,
+        message: 'Automation not found or already archived',
+      });
+    } else {
         const entityIdsRaw = (automation as Record<string, unknown>).entity_ids;
         const entityIds = Array.isArray(entityIdsRaw) ? entityIdsRaw : [];
 
@@ -1026,13 +1033,7 @@ export async function handleDelete(
           success: true,
           message: 'Automation archived successfully',
         });
-      }
-    } catch (error) {
-      results.push({
-        automation_id: automationId,
-        success: false,
-        message: getErrorMessage(error),
-      });
+      archived.delete(automationId);
     }
   }
 
@@ -1053,7 +1054,7 @@ export async function handleCreateFromVersion(
   ctx: ToolContext
 ): Promise<{
   action: 'create_from_version';
-  created: Array<{ automation_id: string; entity_id: number; name: string }>;
+  created: Array<{ automation_id: string; entity_id: number; name: string; revision: string }>;
 }> {
   const sql = getDb();
 
@@ -1153,6 +1154,7 @@ export async function handleCreateFromVersion(
     automation_id: string;
     entity_id: number;
     name: string;
+    revision: string;
   }> = [];
   // Audit/lifecycle payloads are collected inside the transaction and emitted
   // only after it commits — a rollback must not leak "created" events for
@@ -1258,6 +1260,7 @@ export async function handleCreateFromVersion(
           automation_id: String(automationId),
           entity_id: entityId,
           name: automationName,
+          revision: (await readAutomationConfiguration(organizationId, String(automationId), tx))!.revision,
         });
         auditPayloads.push({
           entityId,

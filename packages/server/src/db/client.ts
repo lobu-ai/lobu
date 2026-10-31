@@ -469,51 +469,56 @@ type SessionAdvisoryLockOptions = {
  * dependency is one-directional and deadlock-free; excess requests queue FIFO.
  */
 export async function withSessionAdvisoryLock<T>(
-  key: AdvisoryLockKey,
+  key: AdvisoryLockKey | readonly AdvisoryLockKey[],
   fn: () => Promise<T>,
   options: SessionAdvisoryLockOptions = {}
 ): Promise<T> {
   const { timeout = '30s', onAcquireTimeout } = options;
+  // A bulk mutation reserves ONE session for every lock. Recursively reserving
+  // a connection per key exhausts the tiny lock pool before fn can run. Sorting
+  // all keys here also makes overlapping batches acquire in the same order.
+  const requestedKeys: readonly AdvisoryLockKey[] = Array.isArray(key) ? key : [key as AdvisoryLockKey];
+  const keys = [...new Map(requestedKeys
+    .map((item) => [JSON.stringify([item.namespace, !!item.hashValue, String(item.value)]), item] as const))]
+    .sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
+    .map(([, item]) => item);
+  if (keys.length === 0) return fn();
   const reserved = await getLockDb().reserve();
-  const keyValue = key.hashValue
-    ? reserved`hashtext(${String(key.value)})`
-    : reserved`${key.value}`;
-  let acquired = false;
+  const keyValue = (item: AdvisoryLockKey) => item.hashValue
+    ? reserved`hashtext(${String(item.value)})`
+    : reserved`${item.value}`;
+  const acquired: AdvisoryLockKey[] = [];
 
   try {
     await reserved`SELECT set_config('lock_timeout', ${timeout}, false)`;
-    try {
-      await reserved`SELECT pg_advisory_lock(hashtext(${key.namespace}), ${keyValue})`;
-    } catch (err) {
-      // We do NOT hold the lock here, so the reserved session is clean; the
-      // outer finally just releases it.
-      if (onAcquireTimeout && (err as { code?: string }).code === '55P03') {
-        throw onAcquireTimeout(err);
+    for (const item of keys) {
+      try {
+        await reserved`SELECT pg_advisory_lock(hashtext(${item.namespace}), ${keyValue(item)})`;
+        acquired.push(item);
+      } catch (err) {
+        if (onAcquireTimeout && (err as { code?: string }).code === '55P03') {
+          throw onAcquireTimeout(err);
+        }
+        throw err;
       }
-      throw err;
     }
-    acquired = true;
-    try {
-      return await fn();
-    } finally {
-      await reserved`SELECT pg_advisory_unlock(hashtext(${key.namespace}), ${keyValue})`;
-      acquired = false;
-    }
+    return await fn();
   } finally {
-    // A failed unlock leaves the session still owning the lock; returning it to
-    // the pool would leak the lock for the connection's whole lifetime, so kill
-    // the backend instead — Postgres drops session advisory locks on exit.
-    // Deliberately NOT released afterwards: postgres.js only reconnects a
-    // connection it holds in its `closed` queue, and `release()` would move the
-    // dead one into `open` (or hand it straight to a waiting reserve()), so the
-    // next borrower would get a destroyed socket. Skipping release lets the
-    // socket's own close handler requeue it for reconnect.
-    if (acquired) {
-      await reserved`SELECT pg_terminate_backend(pg_backend_pid())`.catch(
-        () => undefined
-      );
-    } else {
-      reserved.release();
+    try {
+      // Release earlier locks even when a later acquisition failed.
+      while (acquired.length) {
+        const item = acquired[acquired.length - 1];
+        await reserved`SELECT pg_advisory_unlock(hashtext(${item.namespace}), ${keyValue(item)})`;
+        acquired.pop();
+      }
+    } finally {
+      // A failed unlock must not leak a lock on a pooled session. Kill that
+      // backend and let its close handler requeue the connection for reconnect.
+      if (acquired.length) {
+        await reserved`SELECT pg_terminate_backend(pg_backend_pid())`.catch(() => undefined);
+      } else {
+        reserved.release();
+      }
     }
   }
 }

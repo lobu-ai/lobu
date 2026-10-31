@@ -15,6 +15,7 @@ import {
   createTestOrganization,
 } from '../../../__tests__/setup/test-fixtures';
 import { orgContext } from '../org-context';
+import { persistDefaultModel } from '../../model-config';
 import { createPostgresAgentConfigStore } from '../postgres-stores';
 
 describe('PostgresAgentConfigStore — apply-fields round-trip', () => {
@@ -130,4 +131,57 @@ describe('PostgresAgentConfigStore — apply-fields round-trip', () => {
       expect(loaded?.guardrails).toEqual([]);
     });
   });
+
+  it('preserves an unrelated edit committed while a settings patch waits for the row lock', async () => {
+    const store = createPostgresAgentConfigStore();
+    const sql = getTestDb();
+    await orgContext.run({ organizationId: orgId }, () => store.saveSettings(agentId, {
+      models: ['openai/old-model'], identityMd: 'original identity', updatedAt: Date.now(),
+    }));
+    let release!: () => void;
+    let ready!: () => void;
+    const unlocked = new Promise<void>((resolve) => { release = resolve; });
+    const locked = new Promise<void>((resolve) => { ready = resolve; });
+    let holderPid = 0;
+    const holder = sql.begin(async (tx) => {
+      holderPid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
+      await tx`UPDATE agents SET identity_md = 'new identity' WHERE organization_id = ${orgId} AND id = ${agentId}`;
+      ready();
+      await unlocked;
+    });
+    await locked;
+    const patch = orgContext.run({ organizationId: orgId }, () => store.updateSettings(agentId, {
+      models: ['openai/new-model'],
+    }));
+    try {
+      let waiting = false;
+      for (let attempt = 0; attempt < 200; attempt++) {
+        const rows = await sql`SELECT 1 FROM pg_stat_activity WHERE ${holderPid} = ANY(pg_blocking_pids(pid))`;
+        if (rows.length) { waiting = true; break; }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(waiting).toBe(true);
+    } finally {
+      release();
+      await Promise.all([holder, patch]);
+    }
+    const saved = await orgContext.run({ organizationId: orgId }, () => store.getSettings(agentId));
+    expect(saved?.models).toEqual(['openai/new-model']);
+    expect(saved?.identityMd).toBe('new identity');
+  });
+
+  it('compares a model approval pre-image atomically with the model write', async () => {
+    const store = createPostgresAgentConfigStore();
+    await orgContext.run({ organizationId: orgId }, () => store.saveSettings(agentId, {
+      models: ['openai/newer-model'], identityMd: 'preserve identity', updatedAt: Date.now(),
+    }));
+    const applied = await persistDefaultModel(agentId, orgId, 'openai/proposed-model', {
+      expectedCurrent: 'openai/older-model',
+    });
+    const saved = await orgContext.run({ organizationId: orgId }, () => store.getSettings(agentId));
+    expect(saved?.models).toEqual(['openai/newer-model']);
+    expect(saved?.identityMd).toBe('preserve identity');
+    expect(applied).toBe(false);
+  });
+
 });

@@ -18,6 +18,7 @@ import {
   loadDesiredStateFromConfig,
 } from "../desired-state.js";
 import { ApplyClient } from "../client.js";
+import { buildAttributionAndOwned, toBaseline } from "../deployment.js";
 
 const tempDirs: string[] = [];
 
@@ -305,6 +306,96 @@ describe("view diff rows", () => {
     expect(byId.get("same")).toBe("noop");
   });
 
+  test("revision guard blocks a human view edit since the last apply", () => {
+    const desired = stateWithViews([desiredView("pipeline", "local-new")]);
+    const remote = emptyRemote();
+    const prior = {
+      key: "pipeline",
+      name: "Pipeline",
+      revision: "original",
+      content_hash: "old",
+      attach: [],
+      last_writer: "apply:old",
+      updated_at: "t",
+    };
+    remote.views = [
+      { ...prior, revision: "human-edit", content_hash: "human-content" },
+    ];
+    const baseline = {
+      recorded: true,
+      attribution: {
+        entityTypes: [],
+        relationshipTypes: [],
+        automations: [],
+        views: [prior],
+      },
+      owned: new Set<string>(),
+    };
+    const plan = computeDiff(desired, remote, { baseline });
+    expect(plan.rows.find((row) => row.kind === "view")).toMatchObject({
+      verb: "drift",
+      blocking: true,
+    });
+    expect(plan.counts.update).toBe(0);
+    // Derived compiler/cache changes leave the authored token stable.
+    remote.views = [{ ...prior, content_hash: "new-compiler-artifact" }];
+    expect(
+      computeDiff(desired, remote, { baseline }).rows.find(
+        (row) => row.kind === "view"
+      )?.verb
+    ).toBe("update");
+    // A historical manifest with no per-view baseline cannot authorize replacing it.
+    expect(
+      computeDiff(desired, remote, {
+        baseline: {
+          ...baseline,
+          attribution: { ...baseline.attribution, views: undefined },
+        },
+      }).rows.find((row) => row.kind === "view")
+    ).toMatchObject({ verb: "drift", blocking: true });
+  });
+
+  test("revision guard does not adopt a human view edit from the post-apply refresh", () => {
+    const desired = stateWithViews([desiredView("pipeline", "our-artifact")]);
+    const postApply = emptyRemote();
+    postApply.views = [
+      {
+        key: "pipeline",
+        name: "Pipeline",
+        revision: "human-after-save",
+        content_hash: "human-artifact",
+        attach: [],
+        last_writer: "human",
+        updated_at: "t",
+      },
+    ];
+    const recorded = buildAttributionAndOwned(desired, postApply);
+    expect(recorded.attribution.views).toEqual([]);
+    expect(
+      computeDiff(desired, postApply, {
+        baseline: toBaseline(recorded),
+      }).rows.find((row) => row.kind === "view")
+    ).toMatchObject({ verb: "drift", blocking: true });
+
+    postApply.views = [
+      {
+        ...postApply.views[0]!,
+        revision: "our-save",
+        content_hash: "our-artifact",
+      },
+    ];
+    const converged = buildAttributionAndOwned(desired, postApply);
+    expect(converged.attribution.views).toEqual(postApply.views);
+    const next = stateWithViews([
+      desiredView("pipeline", "next-local-artifact"),
+    ]);
+    expect(
+      computeDiff(next, postApply, {
+        baseline: toBaseline(converged),
+      }).rows.find((row) => row.kind === "view")?.verb
+    ).toBe("update");
+  });
+
   test("remote-only views drift without prune and delete with it", () => {
     const desired = stateWithViews([]);
     const remote = emptyRemote();
@@ -356,13 +447,17 @@ describe("view client", () => {
   test("setView posts action:set with the module source and bundle", async () => {
     const { client, calls } = stubClient(() => ({
       written: true,
-      view: { content_hash: "aaaaaaaaaaaaaaaa" },
+      view: { content_hash: "aaaaaaaaaaaaaaaa", revision: "saved" },
     }));
     const result = await client.setView({
       source_code: VIEW_SOURCE,
       compiled_code: "bundle",
     });
-    expect(result).toEqual({ written: true, content_hash: "aaaaaaaaaaaaaaaa" });
+    expect(result).toEqual({
+      written: true,
+      content_hash: "aaaaaaaaaaaaaaaa",
+      revision: "saved",
+    });
     expect(calls).toHaveLength(1);
     expect(calls[0]?.path).toContain("/api/acme/manage_views");
     expect(calls[0]?.body).toEqual({
@@ -378,7 +473,11 @@ describe("view client", () => {
       return { removed: true };
     });
     expect(await client.listViews()).toEqual([{ key: "pipeline" }]);
-    await client.removeView("pipeline");
-    expect(calls[1]?.body).toMatchObject({ action: "remove", key: "pipeline" });
+    await client.removeView("pipeline", "original");
+    expect(calls[1]?.body).toMatchObject({
+      action: "remove",
+      key: "pipeline",
+      expected_revision: "original",
+    });
   });
 });

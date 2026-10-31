@@ -1,3 +1,4 @@
+import { readAutomationRevision } from './revision-fixture';
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DbClient } from '../../../db/client';
 import type { Env } from '../../../index';
@@ -182,7 +183,7 @@ describe('Automation window SQL event-version consistency', () => {
   it('pages event versions through a refresh, renews the lease and completes with every token', async () => {
     await sql`UPDATE runs SET status = 'failed' WHERE id = ${runId}`;
     const sources = [{ name: 'content', query: "SELECT id, occurred_at, payload_text FROM events WHERE semantic_type = 'window_fixture' ORDER BY occurred_at DESC, id DESC" }];
-    await api.automations.createVersion({ automation_id: String(automationId), prompt: 'Analyze each page.', sources });
+    await api.automations.createVersion({ expected_revision: await readAutomationRevision(api, String(automationId)), automation_id: String(automationId), prompt: 'Analyze each page.', sources });
     const older = await event('older', '2026-08-01T10:10:00.000Z');
     const newer = await event('newer', '2026-08-01T10:20:00.000Z');
     type Claim = { run_id: number; context: { window_token: string; window_end: string;

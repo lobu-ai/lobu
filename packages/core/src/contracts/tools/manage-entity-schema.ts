@@ -127,6 +127,15 @@ export const ManageEntitySchemaSchema = Type.Object({
     { description: "Action to perform" }
   ),
 
+  expected_revision: Type.Optional(
+    Type.String({
+      minLength: 1,
+      maxLength: 200,
+      description:
+        "[update/delete/add_rule/remove_rule] Required revision from get/list of the entity or relationship type. The original revision is retained through approval; a mismatch returns REVISION_CONFLICT.",
+    })
+  ),
+
   // Identification
   slug: Type.Optional(
     Type.String({
@@ -282,6 +291,7 @@ export const ViewTemplateTabSchema = Type.Object({
 export type ViewTemplateTab = Static<typeof ViewTemplateTabSchema>;
 
 export const EntityTypeRowSchema = Type.Object({
+  revision: Type.String(),
   id: Type.Integer(),
   slug: Type.String(),
   name: Type.String(),
@@ -349,6 +359,7 @@ export const AuditEntrySchema = Type.Object({
 export type AuditEntry = Static<typeof AuditEntrySchema>;
 
 export const RelationshipTypeRowSchema = Type.Object({
+  revision: Type.String(),
   id: Type.Integer(),
   slug: Type.String(),
   name: Type.String(),
@@ -600,12 +611,14 @@ export const ManageEntitySchemaResultSchema = Type.Union([
     schema_type: Type.Literal("relationship_type"),
     action: Type.Literal("add_rule"),
     status: Type.Literal("applied"),
+    revision: Type.String(),
     rule: RelationshipTypeRuleRowSchema,
   }),
   Type.Object({
     schema_type: Type.Literal("relationship_type"),
     action: Type.Literal("remove_rule"),
     status: Type.Literal("applied"),
+    revision: Type.String(),
     success: Type.Boolean(),
     message: Type.String(),
   }),

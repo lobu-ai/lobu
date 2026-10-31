@@ -38,8 +38,8 @@ export interface EntitySchemaNamespace {
 	listTypes(input?: Input<"list_scope">): Promise<unknown>;
 	getType(slug: string): Promise<unknown>;
 	createType(input: Input<EntityTypeFields, "slug" | "name">): Promise<unknown>;
-	updateType(input: Input<EntityTypeFields, "slug">): Promise<unknown>;
-	deleteType(input: Input<"slug", "slug">): Promise<unknown>;
+	updateType(input: Input<EntityTypeFields | "expected_revision", "slug" | "expected_revision">): Promise<unknown>;
+	deleteType(input: Input<"slug" | "expected_revision", "slug" | "expected_revision">): Promise<unknown>;
 	auditType(slug: string): Promise<unknown>;
 
 	listRelTypes(input?: Input<"list_scope" | "include_deleted">): Promise<unknown>;
@@ -47,16 +47,16 @@ export interface EntitySchemaNamespace {
 	createRelType(
 		input: Input<RelationshipTypeFields | "is_symmetric", "slug" | "name">,
 	): Promise<unknown>;
-	updateRelType(input: Input<RelationshipTypeFields, "slug">): Promise<unknown>;
-	deleteRelType(input: Input<"slug", "slug">): Promise<unknown>;
+	updateRelType(input: Input<RelationshipTypeFields | "expected_revision", "slug" | "expected_revision">): Promise<unknown>;
+	deleteRelType(input: Input<"slug" | "expected_revision", "slug" | "expected_revision">): Promise<unknown>;
 
 	addRule(
 		input: Input<
-			"slug" | "source_entity_type_slug" | "target_entity_type_slug",
-			"slug" | "source_entity_type_slug" | "target_entity_type_slug"
+			"slug" | "source_entity_type_slug" | "target_entity_type_slug" | "expected_revision",
+			"slug" | "source_entity_type_slug" | "target_entity_type_slug" | "expected_revision"
 		>,
 	): Promise<unknown>;
-	removeRule(input: Input<"slug" | "rule_id", "rule_id">): Promise<unknown>;
+	removeRule(input: Input<"slug" | "rule_id" | "expected_revision", "rule_id" | "expected_revision">): Promise<unknown>;
 	listRules(input: Input<"slug", "slug">): Promise<unknown>;
 }
 

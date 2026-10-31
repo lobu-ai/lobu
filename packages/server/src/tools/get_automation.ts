@@ -1,3 +1,4 @@
+import { automationConfigRevision } from "./admin/manage_automations/revision";
 import { identityMemberIdsSql } from '../utils/entity-identity';
 /**
  * Tool: get_automation (Incremental Time Windows)
@@ -191,6 +192,8 @@ interface ClassificationStatsRow {
 
 /** Row type for automation query */
 interface AutomationQueryRow {
+  revision_configuration: Record<string, unknown>;
+  revision_definition: Record<string, unknown> | null;
   automation_id: string;
   name: string | null;
   slug: string | null;
@@ -497,6 +500,8 @@ async function getAutomationImpl(
         `
       SELECT
         i.id as automation_id,
+        to_jsonb(i) AS revision_configuration,
+        to_jsonb(sv) AS revision_definition,
         i.name,
         i.slug,
         i.status,
@@ -755,6 +760,10 @@ async function getAutomationImpl(
 
     automationMetadata = {
       automation_id: String(automationRow.automation_id),
+      // Historical version views carry no editable current-state baseline.
+      ...(automationRow.sel_version_id === automationRow.current_version_id ? {
+        revision: automationConfigRevision(automationRow.revision_configuration, automationRow.revision_definition),
+      } : {}),
       automation_name: automationRow.name || (version?.name as string) || 'Automation',
       slug: automationRow.slug || '',
       status: automationRow.status as 'active' | 'archived',

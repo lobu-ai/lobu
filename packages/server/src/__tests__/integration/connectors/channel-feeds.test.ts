@@ -213,7 +213,7 @@ describe("channel feeds", () => {
       prompt: "Respond to channel messages.",
       managed_agent_id: agentId,
       triggers: [],
-    })) as { automation_id: string };
+    })) as { automation_id: string; revision: string };
     const messageTrigger = {
       kind: "event" as const,
       connector_key: "slack",
@@ -226,10 +226,11 @@ describe("channel feeds", () => {
       skip_if_unchanged: false,
     };
 
-    await workspace.owner.automations.createVersion({
+    const changed = await workspace.owner.automations.createVersion({
       automation_id: created.automation_id,
+      expected_revision: created.revision,
       triggers: [messageTrigger],
-    });
+    }) as { revision: string };
 
     const sql = getDb();
     const active = await sql`
@@ -242,6 +243,7 @@ describe("channel feeds", () => {
 
     await workspace.owner.automations.createVersion({
       automation_id: created.automation_id,
+      expected_revision: changed.revision,
       triggers: [],
     });
 

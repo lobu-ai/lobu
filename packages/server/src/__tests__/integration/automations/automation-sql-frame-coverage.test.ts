@@ -1,3 +1,4 @@
+import { readAutomationRevision } from './revision-fixture';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import {
@@ -171,6 +172,7 @@ describe('SQL frame Automation coverage', () => {
       outputs: { signals: { event: 'observation' } },
     }) as { automation_id: string };
     await api.automations.setReactionScript({
+      expected_revision: await readAutomationRevision(api, created.automation_id),
       automation_id: created.automation_id,
       reaction_script: 'export default async function reaction() { return; }',
     });
