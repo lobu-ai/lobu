@@ -112,6 +112,11 @@ describe('auth.md discovery surface', () => {
     expect(text).toContain('# auth.md');
     expect(text).toContain('/oauth/device/email');
     expect(text).toContain('user_claimed');
+    expect(text).toContain('tokens last 24 hours');
+    expect(text).toContain('Refresh tokens last 30 days');
+    expect(text).toContain('revokes the one you sent');
+    expect(text).toContain('secure storage that survives');
+    expect(text).toContain('atomically replace both tokens');
   });
 });
 

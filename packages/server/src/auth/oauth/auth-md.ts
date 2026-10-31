@@ -79,8 +79,23 @@ agent-attested (ID-JAG) zero-touch flow; do not attempt one.
 
 ## Use the credential
 
-Send \`Authorization: Bearer <access_token>\` to the API / MCP endpoint. Refresh
-with the standard \`refresh_token\` grant at \`${baseUrl}/oauth/token\`.
+Send \`Authorization: Bearer <access_token>\` to the API / MCP endpoint. Access
+tokens last 24 hours. Refresh tokens last 30 days; every successful refresh
+returns a new \`refresh_token\`, revokes the one you sent, and starts a new 30-day
+refresh-token lifetime.
+
+Persist \`client_id\`, \`client_secret\` (when returned), \`access_token\`,
+\`refresh_token\`, \`expires_in\`, and \`resource\` in secure storage that survives
+process restarts. Do not keep the credential only in memory, a temporary
+filesystem, or an ephemeral job container. If your runtime cannot retain it,
+tell the user before starting instead of asking for repeated approvals.
+
+Serialize refreshes for each stored credential. Reload it before refreshing,
+then atomically replace both tokens after a successful response. If refresh
+returns \`invalid_grant\`, reload once in case another process already refreshed;
+if it is still invalid, start a new device flow.
+
+Refresh with the standard \`refresh_token\` grant at \`${baseUrl}/oauth/token\`.
 
 ## Errors
 
