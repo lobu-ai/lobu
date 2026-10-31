@@ -53,8 +53,6 @@ const CONNECTOR_BUILTIN_IMPORTS: Record<string, string[]> = {
 	github: ["crypto"],
 	jira: ["crypto"],
 	linear: ["crypto"],
-	// Takeout row identity (stableId) hashes; `crypto` comes from the prelude.
-	linkedin: ["crypto"],
 	// Reaches its database over the isolate's Direct Sockets bridge, so it needs
 	// no transport builtin; what is left is all prelude-provided.
 	postgres: ["buffer", "events", "stream"],
@@ -245,33 +243,23 @@ describe("connector isolate lane", () => {
 });
 
 /**
- * The built-in LinkedIn connector declares LIVE
- * browser feeds and local Data Export (takeout) feeds under ONE connector key,
- * so a person met in the live feed and a person in the CSV export collapse onto
- * the same identity.
- *
- * That made it the case the bundled connectors above never cover: a single
- * `node:fs` import reached transitively by the takeout half rejected the WHOLE
- * bundle, so the LIVE feeds failed with "requires Node builtins [fs, path]"
- * before a browser was ever dispatched (Lobu#3392). Compiling here — with the
- * real build options, the real eligibility gate and a real isolate — is what
- * distinguishes "the parser split is tidy" from "the live lane actually loads".
- *
- * Only mixed live/takeout connectors are asserted eligible. A connector whose
- * every feed reads the filesystem (the twitter/instagram/google takeouts) is
- * legitimately ineligible and declares `requiredCapability: "os.files"`, which
- * no worker serves yet; pinning that here would freeze an unrelated decision.
+ * The built-in LinkedIn connector is the browser-only case the other bundled
+ * connectors above never cover: it must stay isolate-eligible with no Node
+ * filesystem builtins, because a single `node:fs` import once rejected the
+ * WHOLE bundle and live feeds failed before a browser was ever dispatched
+ * (Lobu#3392). Compiling here — with the real build options, the real
+ * eligibility gate and a real isolate — is what distinguishes "the source is
+ * tidy" from "the live lane actually loads".
  */
-describe("linkedin: mixed live/takeout connector", () => {
+describe("linkedin: live browser connector", () => {
 	const ENTRY = join(CONNECTORS_DIR, "linkedin.ts");
 
 	it("compiles to an isolate-eligible bundle so the live feeds can load", async () => {
 		const report = await bundle(ENTRY);
 		// The gate the runtime itself applies, not a restatement of it.
 		expect(findIsolateIneligibleBuiltins(report.code)).toEqual([]);
-		// `crypto` is prelude-provided (stableId hashes takeout row identity);
 		// `fs`/`path` appearing here is the regression this test exists for.
-		expect([...report.builtins.keys()].sort()).toEqual(["crypto"]);
+		expect([...report.builtins.keys()].sort()).toEqual([]);
 	});
 
 	it("loads and executes in a real isolate, exposing the connector's feeds", async () => {
@@ -288,7 +276,7 @@ describe("linkedin: mixed live/takeout connector", () => {
 	 * capability the isolate lacks, so this instantiates the connector and reads
 	 * the definition the platform reads, in the isolate.
 	 */
-	it("constructs in the isolate and still declares every live and takeout feed", async () => {
+	it("constructs in the isolate and declares every live feed", async () => {
 		const ivm = await loadIsolatedVm();
 		const report = await bundle(ENTRY);
 		const isolate = new ivm.Isolate({ memoryLimit: 256 });
@@ -312,26 +300,14 @@ describe("linkedin: mixed live/takeout connector", () => {
 			) as { key: string; feeds: string[]; actions: string[]; sources: Array<{ key: string; read: string; observe: string; sync: string }> };
 
 			expect(out.key).toBe("linkedin");
-			// The five live browser feeds plus the ten takeout feeds, pinned by key because a feed
-			// key is the persisted identity a feed row and its checkpoint key on.
-			// The split moved the takeout readers into another module, so this is
-			// what catches a feed dropped or renamed on the way out.
+			// Feed keys are the persisted identity a feed row and its checkpoint
+			// key on — pin them so a dropped or renamed feed fails this suite.
 			expect(out.feeds).toEqual([
-				"applied_jobs",
-				"companies",
 				"company_updates",
-				"connections",
-				"endorsements",
-				"events",
 				"home_feed",
-				"invitations",
 				"jobs",
-				"learning",
 				"live_messages",
-				"media",
-				"messages",
 				"notifications",
-				"profile",
 			]);
 			expect(out.actions).toContain("prepare_comment");
 			expect(out.actions).toContain("prepare_message");
@@ -343,50 +319,6 @@ describe("linkedin: mixed live/takeout connector", () => {
 				{ key: "notifications", read: "function", observe: "function", sync: "undefined" },
 				{ key: "live_messages", read: "function", observe: "function", sync: "undefined" },
 			]);
-		} finally {
-			isolate.dispose();
-		}
-	});
-
-	/**
-	 * The takeout half is preserved, not silently disabled. Inside the isolate
-	 * there is no filesystem, so a takeout feed must FAIL LOUDLY naming the
-	 * missing capability — never return zero events, which a scheduler would
-	 * record as a clean empty sync and advance right past.
-	 */
-	it("fails a takeout feed loudly in the isolate instead of syncing it empty", async () => {
-		const ivm = await loadIsolatedVm();
-		const report = await bundle(ENTRY);
-		const isolate = new ivm.Isolate({ memoryLimit: 256 });
-		try {
-			const context = await isolate.createContext();
-			await context.global.set("global", context.global.derefInto());
-			const okEnvelope = { __lobu: 1, ok: true, value: undefined };
-			await context.global.set("__host_sync", new ivm.Reference(() => okEnvelope));
-			await context.global.set("__host_async", new ivm.Reference(async () => okEnvelope));
-			await context.global.set("__host_env_json", "{}");
-			const runner = `
-(function () {
-  var Connector = module.exports.default;
-  var def = new Connector().definition;
-  return def.feeds.connections.sync({
-    feedKey: 'connections',
-    config: { takeout_dir: '/nonexistent/export' },
-    checkpoint: null,
-    credentials: null,
-    entityIds: [],
-  }).then(
-    function (r) { return JSON.stringify({ outcome: 'resolved', events: r.events.length }); },
-    function (e) { return JSON.stringify({ outcome: 'threw', message: String(e && e.message) }); }
-  );
-})()`;
-			const script = await isolate.compileScript(`${GUEST_PREAMBLE}\n${report.code}\n${runner}`);
-			const out = JSON.parse(
-				(await script.run(context, { timeout: 10_000, copy: true, promise: true })) as string,
-			) as { outcome: string; events?: number; message?: string };
-
-			expect(out.outcome).toBe("threw");
-			expect(out.message).toMatch(/filesystem/i);
 		} finally {
 			isolate.dispose();
 		}
