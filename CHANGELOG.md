@@ -1,5 +1,26 @@
 # Changelog
 
+## [24.4.0](https://github.com/lobu-ai/lobu/compare/lobu-v24.3.0...lobu-v24.4.0) (2026-10-31)
+
+
+### Features
+
+* **lobu-team:** one task entity type with a kind field ([#4626](https://github.com/lobu-ai/lobu/issues/4626)) ([25868c7](https://github.com/lobu-ai/lobu/commit/25868c74c551fbbb19731a2a0c869ca1e4ec2712))
+* **oauth:** forward client branding to consent pages ([#4624](https://github.com/lobu-ai/lobu/issues/4624)) ([06a497b](https://github.com/lobu-ai/lobu/commit/06a497beae6aaab8639759859de97ccf8bb0705c))
+
+
+### Bug Fixes
+
+* **agent-turn:** take the proxy's provider code when the worker reports a bare error ([#4620](https://github.com/lobu-ai/lobu/issues/4620)) ([21ad2ae](https://github.com/lobu-ai/lobu/commit/21ad2ae16d304e60e10b2b1b450f6a0c44f09dac))
+* keep private work off a public workspace, consolidated ([#4632](https://github.com/lobu-ai/lobu/issues/4632)) ([c5f259e](https://github.com/lobu-ai/lobu/commit/c5f259e7739c78e2b9c461331f4f0b6ad370ba93))
+* **mcp-proxy:** keep an upstream 4xx refusal on the REST tool route ([#4615](https://github.com/lobu-ai/lobu/issues/4615)) ([130693c](https://github.com/lobu-ai/lobu/commit/130693c13f97cac315a1f145280979258858cd56))
+* surface reusable view components in agent discovery ([#4628](https://github.com/lobu-ai/lobu/issues/4628)) ([bca5de8](https://github.com/lobu-ai/lobu/commit/bca5de867dc81abf6bc4d04cb51da27e51a6086f))
+
+
+### Performance Improvements
+
+* **authz:** make the resource-visibility gate parallel-safe ([#4616](https://github.com/lobu-ai/lobu/issues/4616)) ([eeb5011](https://github.com/lobu-ai/lobu/commit/eeb50113aeda2c7686ae6e19bfd62f64665a0ee6))
+
 ## [24.3.0](https://github.com/lobu-ai/lobu/compare/lobu-v24.2.0...lobu-v24.3.0) (2026-10-30)
 
 
