@@ -2,9 +2,11 @@
 """Disposable native OTLP -> ClickHouse -> Parquet -> fresh-server restore proof.
 
 Requires the two explicit, checksum-pinned downloads below. It only listens on
-loopback, emits synthetic telemetry, and removes its own temporary data. It does
-not contact R2, Kubernetes, Lobu, or a production collector. Successful output is
-a local proof, never an authorization to route live logs or expire source data.
+loopback, emits synthetic telemetry, and removes its own temporary data. The
+default command does not contact R2, Kubernetes, Lobu, or a production collector.
+An explicit operator-supplied transport callback can replace the archive with
+independently retrieved files before restore. Success never authorizes routing
+live logs or expiring source data.
 """
 
 import argparse
@@ -14,6 +16,7 @@ import html
 import json
 import os
 from pathlib import Path
+import platform
 import shutil
 import signal
 import socket
@@ -27,10 +30,33 @@ import urllib.parse
 import urllib.request
 
 
-CLICKHOUSE_VERSION = "26.8.34.13"
-CLICKHOUSE_SHA256 = "d1666bb409243aee970c6ea76d8b97e18cbcb6351d61d52dd3d88baab14d26db"
 COLLECTOR_VERSION = "0.164.0"
-COLLECTOR_ARCHIVE_SHA256 = "af6a0c56886e3cc36ccebe849fa167bad2bc47a97a48fd8497a0d6f93d0cf73a"
+# These pins identify downloaded artifacts, not a production deployment image.
+# Linux uses only the static executable from an official, immutable OCI layer;
+# it does not run the image or its entrypoint and does not require Docker.
+# Collector digests are published in the official v0.164.0 release assets.
+PLATFORM_PINS = {
+    ("Darwin", "arm64"): {
+        "clickhouse_version": "26.8.34.13", "clickhouse_format": "binary",
+        "clickhouse_sha256": "d1666bb409243aee970c6ea76d8b97e18cbcb6351d61d52dd3d88baab14d26db",
+        "clickhouse_provenance": {
+            "url": "https://github.com/ClickHouse/ClickHouse/releases/download/v26.8.34.13-lts/clickhouse-macos-aarch64",
+        },
+        "collector_archive_sha256": "af6a0c56886e3cc36ccebe849fa167bad2bc47a97a48fd8497a0d6f93d0cf73a",
+    },
+    ("Linux", "x86_64"): {
+        "clickhouse_version": "26.8.36.3", "clickhouse_format": "oci-layer",
+        "clickhouse_sha256": "5098fd94a80f8dce8c27be4e44a90850a20a7c3dfd9899b64c8de8c8a0db5e7f",
+        "clickhouse_member": "usr/bin/clickhouse",
+        "clickhouse_provenance": {
+            "image": "docker.io/clickhouse/clickhouse-server:26.8.36.3",
+            "index_digest": "sha256:d426d2f612e1e189c90f9a3f8dcd85a03c6851273833817a296bb327e63aa7a7",
+            "linux_amd64_manifest_digest": "sha256:0805f9f529673d2a68d1fb50dfef90f30f1710bb1b62d4c3f1d1a99d37459ecc",
+            "layer_digest": "sha256:5098fd94a80f8dce8c27be4e44a90850a20a7c3dfd9899b64c8de8c8a0db5e7f",
+        },
+        "collector_archive_sha256": "f0c1ce9f661399beb4a58b711924716e08ea70c3802db0715fcfde3cbbada2d4",
+    },
+}
 DATABASE = "otel_proof"
 TABLES = {"logs": "otel_logs", "traces": "otel_traces"}
 DAY = "2026-10-30"
@@ -143,6 +169,8 @@ class Server:
 <execution_time>0</execution_time></interval></default></quotas></clickhouse>""")
         config = self.directory / "config.xml"
         path = html.escape(str(data))
+        # The native Mac proof exceeded 512 MiB during startup; reserve modest
+        # headroom here. This ClickHouse setting is not an OS-enforced limit.
         config.write_text(f"""<clickhouse>
 <logger><level>warning</level><console>true</console></logger>
 <listen_host>127.0.0.1</listen_host><http_port>{self.http_port}</http_port>
@@ -151,7 +179,7 @@ class Server:
 <user_files_path>{path}/user_files/</user_files_path>
 <format_schema_path>{path}/format_schemas/</format_schema_path>
 <users_config>{html.escape(str(users))}</users_config>
-<max_server_memory_usage>536870912</max_server_memory_usage>
+<max_server_memory_usage>805306368</max_server_memory_usage>
 <max_concurrent_queries>4</max_concurrent_queries><max_thread_pool_size>64</max_thread_pool_size>
 <background_pool_size>2</background_pool_size>
 <background_merges_mutations_concurrency_ratio>1</background_merges_mutations_concurrency_ratio>
@@ -191,8 +219,8 @@ class Server:
         return [json.loads(line) for line in self.sql(query + " FORMAT JSONEachRow").splitlines()]
 
 
-def make_collector(root, source, archive):
-    require(file_digest(archive) == COLLECTOR_ARCHIVE_SHA256, "Collector archive checksum mismatch")
+def make_collector(root, source, archive, pins):
+    require(file_digest(archive) == pins["collector_archive_sha256"], "Collector archive checksum mismatch")
     binary = root / "otelcol-contrib"
     with tarfile.open(archive) as tar:
         matches = [member for member in tar.getmembers()
@@ -343,11 +371,11 @@ def verify_parquet(server, kind, data, expected_rows):
         server.sql(f"DROP TABLE {table}")
 
 
-def write_archive(server, directory, schema, mutate_first_file=None):
+def write_archive(server, directory, schema, pins, mutate_first_file=None):
     directory.mkdir()  # Reusing a committed revision is an error.
     manifest = {"format_version": 1, "scope": "local_synthetic_proof_only", "utc_day": DAY,
                 "start_unix_nano": str(START_NS), "end_unix_nano_exclusive": str(END_NS),
-                "clickhouse_version": CLICKHOUSE_VERSION, "collector_version": COLLECTOR_VERSION,
+                "clickhouse_version": pins["clickhouse_version"], "collector_version": COLLECTOR_VERSION,
                 "schema": schema, "tables": {},
                 "derived_trace_index_sha256": digest(canonical(trace_index(server)))}
     for kind, table in TABLES.items():
@@ -397,36 +425,55 @@ def expect_rejection(check, description, expected_error):
     raise RuntimeError(f"Failure gate accepted {description}")
 
 
-def run(args):
+def run(args, archive_transport=None):
+    host = (platform.system(), platform.machine())
+    require(host in PLATFORM_PINS, f"Unsupported proof platform: {host}")
+    pins = PLATFORM_PINS[host]
     download, collector_archive = args.clickhouse.resolve(), args.collector_archive.resolve()
-    require(download.is_file() and file_digest(download) == CLICKHOUSE_SHA256,
-            "ClickHouse binary checksum mismatch")
+    require(download.is_file() and file_digest(download) == pins["clickhouse_sha256"],
+            "ClickHouse artifact checksum mismatch")
+    require(collector_archive.is_file() and file_digest(collector_archive) == pins["collector_archive_sha256"],
+            "Collector archive checksum mismatch")
     require(shutil.disk_usage(tempfile.gettempdir()).free > 2 * 1024 ** 3, "Need 2 GiB free scratch space")
-    report = {"status": "running", "pins": {"clickhouse": CLICKHOUSE_VERSION,
-              "clickhouse_sha256": CLICKHOUSE_SHA256, "collector": COLLECTOR_VERSION,
-              "collector_archive_sha256": COLLECTOR_ARCHIVE_SHA256}, "checks": [],
+    report = {"status": "running", "platform": {"system": host[0], "machine": host[1]},
+              "pins": {"clickhouse": pins["clickhouse_version"],
+              "clickhouse_artifact_sha256": pins["clickhouse_sha256"],
+              "clickhouse_provenance": pins["clickhouse_provenance"],
+              "collector": COLLECTOR_VERSION,
+              "collector_archive_sha256": pins["collector_archive_sha256"]}, "checks": [],
               "not_tested": ["actual EEUR R2 upload/download, permissions and outage recovery",
                              "Linux cgroup limits, filesystem quotas and shared-RAID contention",
-                             "production Linux ClickHouse version selection and compatibility",
+                             "production deployment image selection and representative load",
                              "production log input, rotation, backpressure and 7–14 day parity",
                              "daily scheduler, arbitrary late arrivals and production retention/TTL"]}
+    if host[0] != "Linux":
+        report["not_tested"].append("Linux ClickHouse version compatibility")
     children = []
     with tempfile.TemporaryDirectory(prefix="lobu-observability-proof-") as temp:
         root = Path(temp)
         try:
-            # The official Mac binary expands itself IN PLACE on first launch.
-            # Execute an owned copy so the caller's pinned download stays intact.
+            # Official executables may expand themselves in place. Execute only
+            # an owned copy/extraction; preserve the caller's pinned artifact.
             binary = root / "clickhouse"
-            shutil.copyfile(download, binary)
-            require(file_digest(binary) == CLICKHOUSE_SHA256, "ClickHouse copy checksum mismatch")
+            if pins["clickhouse_format"] == "binary":
+                shutil.copyfile(download, binary)
+                require(file_digest(binary) == pins["clickhouse_sha256"], "ClickHouse copy checksum mismatch")
+            else:
+                member_name = pins["clickhouse_member"]
+                with tarfile.open(download) as tar:
+                    matches = [member for member in tar.getmembers()
+                               if member.isfile() and member.name == member_name]
+                    require(len(matches) == 1, "Expected one ClickHouse executable in the pinned archive")
+                    with tar.extractfile(matches[0]) as stream, binary.open("wb") as target:
+                        shutil.copyfileobj(stream, target)
             binary.chmod(0o700)
             source = Server(root, "source", binary)
             children.append(source.child)
             source.start()
             version = source.sql("SELECT version()").decode().strip()
-            require(version == CLICKHOUSE_VERSION, f"Unexpected ClickHouse version: {version}")
-            report["pins"]["clickhouse_expanded_sha256"] = file_digest(binary)
-            collector, port, collector_hash = make_collector(root, source, collector_archive)
+            require(version == pins["clickhouse_version"], f"Unexpected ClickHouse version: {version}")
+            report["pins"]["clickhouse_executable_sha256"] = file_digest(binary)
+            collector, port, collector_hash = make_collector(root, source, collector_archive, pins)
             children.append(collector)
             report["pins"]["collector_extracted_sha256"] = collector_hash
             collector.start()
@@ -505,13 +552,13 @@ def run(args):
             require(trace_index(source), "Trace lookup index is empty")
             archive = root / "archive"
             archive.mkdir()
-            first = write_archive(source, archive / "v1", schema)
-            repeat = write_archive(source, archive / "v2", schema)
+            first = write_archive(source, archive / "v1", schema, pins)
+            repeat = write_archive(source, archive / "v2", schema, pins)
             require(all(first["tables"][kind]["canonical_sha256"] == repeat["tables"][kind]["canonical_sha256"]
                         for kind in TABLES), "Repeated stable export changed logical rows")
             post_otlp(port, "logs", [log_record("late-arrival", 3_123456789)], "proof-worker")
             wait_record(source, "logs", "late-arrival")
-            manifest = write_archive(source, archive / "v3", schema)
+            manifest = write_archive(source, archive / "v3", schema, pins)
             require(manifest["tables"]["logs"]["rows"] == first["tables"]["logs"]["rows"] + 1,
                     "Late-arrival revision did not include the extra record")
             require((archive / "v1" / "manifest.json").read_text() == json.dumps(first, sort_keys=True, indent=2),
@@ -520,11 +567,11 @@ def run(args):
 
             broken = archive / "corrupt-probe"
             report["checks"].append(expect_rejection(
-                lambda: write_archive(source, broken, schema, lambda path: path.write_bytes(b"corrupt")),
+                lambda: write_archive(source, broken, schema, pins, lambda path: path.write_bytes(b"corrupt")),
                                                      "corrupt archive rejected", "Archive checksum mismatch"))
             missing = archive / "missing-probe"
             report["checks"].append(expect_rejection(
-                lambda: write_archive(source, missing, schema, lambda path: path.unlink()),
+                lambda: write_archive(source, missing, schema, pins, lambda path: path.unlink()),
                                                      "missing archive rejected", "Missing archive object"))
             require(not (broken / "manifest.json").exists() and not (missing / "manifest.json").exists(),
                     "Invalid revision acquired a completion marker")
@@ -533,13 +580,32 @@ def run(args):
             source.child.stop()
             shutil.rmtree(source.directory)
             require(not source.directory.exists(), "Original data still exists")
+            restore_directory = archive / "v3"
+            expected_manifest_sha256 = file_digest(restore_directory / "manifest.json")
+            if archive_transport is not None:
+                download_root = root / "r2-download"
+                restore_directory, transport_report = archive_transport(archive, download_root, "v3")
+                restore_directory = Path(restore_directory)
+                require(not download_root.is_symlink() and not restore_directory.is_symlink(),
+                        "Archive transport returned a symlink directory")
+                restore_directory = restore_directory.resolve()
+                require(download_root.resolve().is_relative_to(root.resolve()) and
+                        restore_directory.is_relative_to(download_root.resolve()),
+                        "Archive transport returned a directory outside its owned download root")
+                require(not archive.exists(), "Original local archives still exist after transport")
+                require(isinstance(transport_report, dict), "Archive transport report must be an object")
+                require(file_digest(restore_directory / "manifest.json") == expected_manifest_sha256,
+                        "Archive transport changed the verified manifest")
+                report["archive_transport"] = transport_report
+                report["not_tested"][0] = "storage-provider guarantees beyond the separate archive_transport report"
+            # Everything needed for the restore comes from the saved or retrieved
+            # archive, after the original database directory has been removed.
+            manifest_path = restore_directory / "manifest.json"
+            manifest = json.loads(manifest_path.read_text())
+            validate_archive(restore_directory, manifest)
             restored = Server(root, "restored", binary)
             children.append(restored.child)
             restored.start()
-            # Everything needed for the restore comes from the saved archive.
-            manifest_path = archive / "v3" / "manifest.json"
-            manifest = json.loads(manifest_path.read_text())
-            validate_archive(archive / "v3", manifest)
             restored.sql(f"CREATE DATABASE {DATABASE}")
             # Restore the original exporter schema; derived trace indexes are
             # rebuilt by their materialized views, never imported a second time.
@@ -548,7 +614,7 @@ def run(args):
             for kind, table in TABLES.items():
                 entry = manifest["tables"][kind]
                 restored.sql(f"INSERT INTO {DATABASE}.{table} FORMAT Parquet",
-                             (archive / "v3" / entry["file"]).read_bytes())
+                             (restore_directory / entry["file"]).read_bytes())
                 rows = restored.rows(f"SELECT * FROM {DATABASE}.{table}")
                 require(len(rows) == entry["rows"], f"Restore row count mismatch: {kind}")
                 require(digest(canonical(rows)) == entry["canonical_sha256"], f"Restore full-row mismatch: {kind}")
@@ -562,12 +628,16 @@ def run(args):
             report["archive"] = {"utc_day": DAY, "revision": "v3", "tables": manifest["tables"],
                                  "schema_sha256": digest(canonical(manifest["schema"])),
                                  "manifest_sha256": file_digest(manifest_path)}
-            report["configured_limits"] = {"clickhouse_server_bytes": 536870912,
+            report["configured_limits"] = {"clickhouse_server_bytes": 805306368,
                                              "clickhouse_query_bytes": 268435456, "clickhouse_threads": 2,
                                              "collector_limit_mib": 128, "collector_gomemlimit": "192MiB",
                                              "os_enforced": False}
-            report["status"] = "passed_local_only"
-            require(file_digest(download) == CLICKHOUSE_SHA256, "Caller's ClickHouse artifact changed")
+            report["status"] = ("passed_local_only" if archive_transport is None
+                                else "passed_archive_transport_restore")
+            require(file_digest(download) == pins["clickhouse_sha256"],
+                    "Caller's ClickHouse artifact changed")
+            require(file_digest(collector_archive) == pins["collector_archive_sha256"],
+                    "Caller's Collector artifact changed")
             return report
         except Exception:
             for path in root.glob("*.log"):
@@ -593,13 +663,13 @@ def socket_ready(port):
         return True
 
 
-def main():
+def main(argv=None, archive_transport=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--clickhouse", type=Path, required=True,
-                        help="Official clickhouse-macos-aarch64 from v26.8.34.13-lts")
+                        help="Pinned Mac arm64 binary (26.8.34.13) or Linux amd64 OCI binary layer (26.8.36.3)")
     parser.add_argument("--collector-archive", type=Path, required=True,
-                        help="Official otelcol-contrib_0.164.0_darwin_arm64.tar.gz")
-    args = parser.parse_args()
+                        help="Official otelcol-contrib_0.164.0_{darwin_arm64|linux_amd64}.tar.gz")
+    args = parser.parse_args(argv)
     interrupted = []
 
     def interrupt(signum, _frame):
@@ -612,7 +682,7 @@ def main():
     signal.signal(signal.SIGTERM, interrupt)
     signal.signal(signal.SIGINT, interrupt)
     try:
-        report = run(args)
+        report = run(args, archive_transport=archive_transport)
     except KeyboardInterrupt:
         print(json.dumps({"status": "failed", "error": "Interrupted; owned children cleaned up"}))
         return 128 + (interrupted[0] if interrupted else signal.SIGINT)
