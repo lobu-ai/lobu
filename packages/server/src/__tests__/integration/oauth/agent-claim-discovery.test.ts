@@ -117,6 +117,8 @@ describe('auth.md discovery surface', () => {
     expect(text).toContain('revokes the one you sent');
     expect(text).toContain('secure storage that survives');
     expect(text).toContain('atomically replace both tokens');
+    expect(text).toContain('include the exact `resource` from device');
+    expect(text).toContain('omitting it is rejected as `invalid_grant`');
   });
 });
 

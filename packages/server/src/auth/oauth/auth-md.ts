@@ -97,6 +97,16 @@ if it is still invalid, start a new device flow.
 
 Refresh with the standard \`refresh_token\` grant at \`${baseUrl}/oauth/token\`.
 
+For a resource-bound MCP credential, include the exact \`resource\` from device
+authorization again; omitting it is rejected as \`invalid_grant\`:
+
+\`\`\`http
+POST ${baseUrl}/oauth/token
+Content-Type: application/json
+
+{ "grant_type": "refresh_token", "refresh_token": "<current refresh_token>", "client_id": "<client_id>", "client_secret": "<client_secret>", "resource": "${baseUrl}/mcp" }
+\`\`\`
+
 ## Errors
 
 | error | where | meaning |

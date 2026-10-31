@@ -11,5 +11,7 @@ describe('auth.md credential guidance', () => {
     expect(doc).toContain('revokes the one you sent');
     expect(doc).toContain('secure storage that survives');
     expect(doc).toContain('atomically replace both tokens');
+    expect(doc).toContain('include the exact `resource` from device');
+    expect(doc).toContain('omitting it is rejected as `invalid_grant`');
   });
 });
