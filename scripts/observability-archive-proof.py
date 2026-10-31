@@ -116,6 +116,7 @@ class Child:
             try:
                 os.killpg(self.process.pid, signal.SIGKILL)
             except ProcessLookupError:
+                # The child exited before SIGKILL; still reap it below.
                 pass
             self.process.wait(timeout=5)
 
