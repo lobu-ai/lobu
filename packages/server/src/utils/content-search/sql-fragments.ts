@@ -45,6 +45,9 @@ export const INTERNAL_OPS_EXCLUSION_SQL = `(NOT (f.semantic_type = 'audit' AND C
  *     but keeps the event. Any event still addressed through
  *     `notification_targets` is excluded too. A member note that sets the key
  *     itself only hides that note, never exposes anything.
+ *   - automation receipts — `semantic_type 'change_set'`, the "applied N
+ *     entities" row a window writes about itself. It is run bookkeeping, not
+ *     something the workspace published.
  *
  * Unlike INTERNAL_OPS_EXCLUSION_SQL this is an access boundary: an explicit
  * semantic_type filter does not lift it.
@@ -54,6 +57,7 @@ export const INTERNAL_OPS_EXCLUSION_SQL = `(NOT (f.semantic_type = 'audit' AND C
 // and nested-looped the anti-join (64s for a 300k-event public list read).
 export function operationalTrailExclusionSql(alias: string): string {
   return `(${alias}.interaction_type = 'none'
+           AND ${alias}.semantic_type IS DISTINCT FROM 'change_set'
            AND jsonb_typeof(${alias}.metadata->'notification_type') IS DISTINCT FROM 'string'
            AND NOT EXISTS (SELECT 1 FROM notification_targets nt WHERE nt.event_id = ${alias}.id))`;
 }

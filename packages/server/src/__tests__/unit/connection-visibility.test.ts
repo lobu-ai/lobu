@@ -9,6 +9,7 @@ import { describe, expect, it } from 'bun:test';
 import { buildConnectionVisibilityClause } from '../../utils/content-search/visibility';
 import {
   compileConnectionFkVisibility,
+  compileConnectionFkVisibilityLiteral,
   compileConnectionRowVisibility,
 } from '../../authz/connection-visibility';
 import { authzScopeFromToolContext, headlessScope } from '../../authz/scope';
@@ -46,6 +47,10 @@ describe('connection-visibility compiler (M1 one-compiler)', () => {
     expect(compileConnectionRowVisibility(headlessScope('org_test'), 'cn')).toBe(
       "AND (cn.visibility = 'org')"
     );
+    const literal = compileConnectionFkVisibilityLiteral(headlessScope("o'rg"), 'r');
+    expect(literal).toContain("vc.organization_id = 'o''rg'");
+    expect(literal).toContain("r.connection_id IS NULL");
+    expect(literal).not.toContain('vc.created_by');
   });
 
   it('row and FK forms encode the same rule — no admin arm, no legacy IS NULL widening', () => {

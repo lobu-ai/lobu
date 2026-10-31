@@ -253,7 +253,9 @@ function sentenceCase(value: string): string {
     .replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
-function formatCountLabel(value: number, singular: string, plural = `${singular}s`): string {
+const COUNT_PLURALS: Record<string, string> = { entity: 'entities' };
+
+function formatCountLabel(value: number, singular: string, plural = COUNT_PLURALS[singular] ?? `${singular}s`): string {
   return `${value} ${value === 1 ? singular : plural}`;
 }
 
@@ -654,7 +656,7 @@ function buildEntityTypeModel(params: {
   const origin = getPublicOrigin(params.requestUrl);
   const canonicalPath = `/${params.organization.slug}/${params.entityType.slug}`;
   const canonicalUrl = absoluteUrl(canonicalPath, origin);
-  const countLabel = formatCountLabel(params.entityType.entity_count, 'entity');
+  const countLabel = formatCountLabel(params.entityType.entity_count, 'entity', 'entities');
   const description = truncateText(
     params.entityType.description?.trim() ||
       `${params.entityType.name} in ${params.organization.name}. ${countLabel} publicly visible in this workspace.`,
