@@ -6,6 +6,7 @@
  * injected so the device build does not import fleet connector machinery.
  */
 
+import { shutdownTracing } from '@lobu/core';
 import { WORKER_POLL_MAX_WAIT_SECONDS } from '@lobu/core/contracts/worker/protocol';
 import {
   type PollResponse,
@@ -272,6 +273,11 @@ export function createWorkerPollLoopShutdownHandler(
     log.info(`[daemon] Draining in-flight runs for up to ${drainTimeoutMs}ms`);
     const allDone = await loop.waitForActiveJobs(drainTimeoutMs);
     if (!allDone) log.info('[daemon] Forcing exit with active jobs still running');
+    try {
+      await shutdownTracing();
+    } catch (error) {
+      log.info('[daemon] Tracing shutdown failed:', error);
+    }
     exit(allDone && shutdownHookSucceeded ? 0 : 1);
   };
 }

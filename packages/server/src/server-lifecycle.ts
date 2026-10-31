@@ -34,6 +34,7 @@ import { bootTaskScheduler } from "./scheduled/jobs";
 import { startConnectorRecordWorker } from "./connectors/webhook-delivery";
 import { isErrorReported, markErrorReported } from "./diagnostics";
 import { BootConfigError } from "./utils/errors";
+import { shutdownTracing } from "@lobu/core";
 import logger from "./utils/logger";
 import { initWorkspaceProvider } from "./workspace";
 
@@ -460,6 +461,9 @@ export function createServerLifecycle(
 			for (let i = 0; i < extraTeardown.length; i++) {
 				await safe(`extraTeardown[${i}]`, extraTeardown[i]);
 			}
+			// Close the gRPC exporter after the rest of teardown. Spans already
+			// exported on end; this releases the client before exit.
+			await safe("shutdownTracing", () => shutdownTracing());
 			process.exit(0);
 		};
 		// Single-flight guard: SIGTERM+SIGINT or a double-tap on either must

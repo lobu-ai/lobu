@@ -8,6 +8,7 @@
  * and reporting the result.
  */
 
+import { createChildSpan, initTracing, runInSpanContext, traceparentHeader } from '@lobu/core';
 import {
   AGENT_TURN_BRIDGE_BYTES,
   AGENT_TURN_INPUT_MAX,
@@ -59,7 +60,40 @@ function isAgentTurnPayload(value: unknown): value is AgentTurnPollPayload {
   return !!value && typeof value === 'object' && 'turn' in value;
 }
 
+function ensureWorkerTracing(): void {
+  const otlpEndpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT?.trim();
+  if (!otlpEndpoint) return;
+  initTracing({
+    serviceName: 'lobu-worker',
+    serviceVersion: process.env.APP_GIT_SHA,
+    otlpEndpoint,
+  });
+}
+
 export async function executeAgentTurnRun(
+  client: ExecutorClient,
+  job: PollResponse,
+  env: Record<string, string | undefined>,
+  cfg: ExecutorConfig
+): Promise<{ itemsCollected: number; error?: string }> {
+  ensureWorkerTracing();
+  const traceparent = traceparentHeader(
+    (job as { traceparent?: unknown }).traceparent
+  );
+  const span = traceparent
+    ? createChildSpan('agent_turn', traceparent, {
+        'lobu.run_id': String(job.run_id ?? ''),
+      })
+    : null;
+  try {
+    if (span) return await runInSpanContext(span, () => runAgentTurn(client, job, env, cfg));
+    return await runAgentTurn(client, job, env, cfg);
+  } finally {
+    span?.end();
+  }
+}
+
+async function runAgentTurn(
   client: ExecutorClient,
   job: PollResponse,
   env: Record<string, string | undefined>,

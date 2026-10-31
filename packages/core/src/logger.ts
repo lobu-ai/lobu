@@ -14,6 +14,12 @@ export interface Logger {
   debug: (message: any, ...args: any[]) => void;
 }
 
+function activeTraceLogFields(): { trace_id?: string; span_id?: string } {
+  // otel.ts constructs its own logger while this module is still loading, so
+  // this stays a late require rather than a top-level import.
+  return require("./otel").currentTraceLogFields();
+}
+
 function safeStringify(value: unknown, space?: number): string {
   try {
     return JSON.stringify(scrubDiagnosticValue(value), null, space);
@@ -65,12 +71,15 @@ function createConsoleLogger(serviceName: string): Logger {
       msgStr = scrubDiagnosticValue(String(message)) as string;
     }
 
+    const traceFields = activeTraceLogFields();
+
     if (USE_JSON_FORMAT) {
       return safeStringify({
         timestamp,
         level: lvl,
         service: serviceName,
         release: process.env.APP_GIT_SHA,
+        ...traceFields,
         message: msgStr,
         ...(args.length > 0
           ? { data: args.length === 1 ? args[0] : args }
@@ -83,7 +92,10 @@ function createConsoleLogger(serviceName: string): Logger {
       msgStr += ` ${safeStringify(args.length === 1 ? args[0] : args)}`;
     }
 
-    return `[${timestamp.replace("T", " ").slice(0, 19)}] [${lvl}] [${serviceName}] ${msgStr}`;
+    const traced = traceFields.trace_id
+      ? ` trace_id=${traceFields.trace_id} span_id=${traceFields.span_id}`
+      : "";
+    return `[${timestamp.replace("T", " ").slice(0, 19)}] [${lvl}] [${serviceName}] ${msgStr}${traced}`;
   };
 
   return {
@@ -156,7 +168,11 @@ export function createLogger(serviceName: string): Logger {
       winston.format((info) => {
         // Preserve Winston's symbol fields while applying the same boundary
         // scrubbing as the default console transport.
-        return Object.assign(info, scrubDiagnosticValue(info));
+        return Object.assign(
+          info,
+          scrubDiagnosticValue(info),
+          activeTraceLogFields()
+        );
       })()
     ),
     defaultMeta: { service: serviceName, release: process.env.APP_GIT_SHA },

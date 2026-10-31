@@ -13,6 +13,7 @@ import type { resourceFromAttributes as resourceFromAttributesType } from "@open
 import type {
   NodeTracerProvider as NodeTracerProviderType,
   SimpleSpanProcessor as SimpleSpanProcessorType,
+  SpanProcessor,
 } from "@opentelemetry/sdk-trace-node";
 import type {
   ATTR_SERVICE_NAME as AttrServiceName,
@@ -30,6 +31,11 @@ export interface OtelConfig {
   serviceVersion?: string;
   otlpEndpoint?: string;
   enabled?: boolean;
+  /**
+   * Replaces the OTLP exporter. Tests pass an in-memory processor so init
+   * never constructs a gRPC client. Production leaves this unset.
+   */
+  spanProcessors?: SpanProcessor[];
 }
 
 export function initTracing(config: OtelConfig): void {
@@ -37,7 +43,10 @@ export function initTracing(config: OtelConfig): void {
     return;
   }
 
-  const enabled = config.enabled ?? !!config.otlpEndpoint;
+  const customProcessors = config.spanProcessors;
+  const useCustomProcessors = (customProcessors?.length ?? 0) > 0;
+  const enabled =
+    config.enabled ?? (!!config.otlpEndpoint || useCustomProcessors);
   if (!enabled) {
     logger.debug(
       "Tracing disabled (no OTEL_EXPORTER_OTLP_ENDPOINT configured)"
@@ -49,15 +58,17 @@ export function initTracing(config: OtelConfig): void {
   // require, bun provides one for src TS, and the server ESM bundle banner
   // defines `const require = __createRequire(import.meta.url)` for exactly
   // these calls — while __filename has no shim there and would throw.
-  let exporterCtor: typeof OTLPTraceExporter;
+  let exporterCtor: typeof OTLPTraceExporter | undefined;
   let resourceFromAttributes: typeof resourceFromAttributesType;
   let NodeTracerProvider: typeof NodeTracerProviderType;
   let SimpleSpanProcessor: typeof SimpleSpanProcessorType;
   let ATTR_SERVICE_NAME: typeof AttrServiceName;
   let ATTR_SERVICE_VERSION: typeof AttrServiceVersion;
   try {
-    exporterCtor =
-      require("@opentelemetry/exporter-trace-otlp-grpc").OTLPTraceExporter;
+    if (!useCustomProcessors) {
+      exporterCtor =
+        require("@opentelemetry/exporter-trace-otlp-grpc").OTLPTraceExporter;
+    }
     resourceFromAttributes =
       require("@opentelemetry/resources").resourceFromAttributes;
     ({
@@ -83,22 +94,41 @@ export function initTracing(config: OtelConfig): void {
     [ATTR_SERVICE_VERSION]: config.serviceVersion || "1.0.0",
   });
 
-  const exporter = new exporterCtor({
-    url: config.otlpEndpoint,
-    timeoutMillis: 30000,
-  });
+  // SimpleSpanProcessor exports on span end. A caller-supplied processor
+  // (tests) must not construct the gRPC exporter.
+  let spanProcessors: SpanProcessor[];
+  if (customProcessors && customProcessors.length > 0) {
+    spanProcessors = customProcessors;
+  } else if (exporterCtor) {
+    spanProcessors = [
+      new SimpleSpanProcessor(
+        new exporterCtor({
+          url: config.otlpEndpoint,
+          timeoutMillis: 30000,
+        })
+      ),
+    ];
+  } else {
+    throw new Error(
+      "Tracing is enabled but neither spanProcessors nor the OTLP exporter loaded."
+    );
+  }
 
-  // SimpleSpanProcessor exports immediately — workers are short-lived
   provider = new NodeTracerProvider({
     resource,
-    spanProcessors: [new SimpleSpanProcessor(exporter)],
+    spanProcessors,
   });
   provider.register();
 
-  tracer = trace.getTracer(config.serviceName, config.serviceVersion);
+  // Bind the tracer we just built. trace.getTracer() stays on the first
+  // globally registered provider, so a later init would otherwise export
+  // into a provider this call does not own.
+  tracer = provider.getTracer(config.serviceName, config.serviceVersion);
 
   logger.info(
-    `Tracing initialized: ${config.serviceName} -> ${config.otlpEndpoint}`
+    useCustomProcessors
+      ? `Tracing initialized: ${config.serviceName} (custom span processors)`
+      : `Tracing initialized: ${config.serviceName} -> ${config.otlpEndpoint}`
   );
 }
 
@@ -184,6 +214,8 @@ export function createRootSpan(
     return { span: null, traceparent: null };
   }
 
+  // Not the active context. Callers that want logs to see this span run
+  // the work through runInSpanContext.
   const span = tracer.startSpan(name, {
     kind: SpanKind.SERVER,
     attributes,
@@ -238,6 +270,25 @@ export async function withChildSpan<T>(
   attributes?: Record<string, string | number | boolean>
 ): Promise<T> {
   return runInSpan(createChildSpan(name, traceparent, attributes), fn);
+}
+
+const TRACEPARENT_RE = /^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$/;
+
+/** A W3C `traceparent` value, or null when the input is not one. */
+export function traceparentHeader(value: unknown): string | null {
+  return typeof value === "string" && TRACEPARENT_RE.test(value) ? value : null;
+}
+
+/** W3C ids of the active span. Empty when the log is outside a real span. */
+export function currentTraceLogFields(): {
+  trace_id?: string;
+  span_id?: string;
+} {
+  const spanContext = trace.getActiveSpan()?.spanContext();
+  if (!spanContext || !trace.isSpanContextValid(spanContext)) {
+    return {};
+  }
+  return { trace_id: spanContext.traceId, span_id: spanContext.spanId };
 }
 
 export function getTraceparent(span: Span | null): string | null {
