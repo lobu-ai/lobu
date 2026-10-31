@@ -2139,6 +2139,38 @@ describe('agent turn producer', () => {
     expect((await runRow(follower.id)).status).toBe('pending');
   });
 
+  it.each([
+    ['different traces', '00-11111111111111111111111111111111-1111111111111111-01', '00-22222222222222222222222222222222-2222222222222222-01'],
+    ['tracing enabled mid-turn', undefined, '00-22222222222222222222222222222222-2222222222222222-01'],
+    ['tracing disabled mid-turn', '00-11111111111111111111111111111111-1111111111111111-01', undefined],
+  ])('offers a compatible follow-up with %s', async (_case, ownerTraceparent, followerTraceparent) => {
+    const org = await createTestOrganization();
+    const routing = { connectionId: 'synthetic-steer-connection', chatId: 'synthetic-steer-channel' };
+    const first = { ...messageFor(org.id), platformMetadata: {
+      ...routing, ...(ownerTraceparent ? { traceparent: ownerTraceparent } : {}),
+    } };
+    const deps = { agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: GATEWAY_URL };
+    await enqueueMessage(first, deps);
+    const { run_id } = await (await pollFleet('fleet-traced-follow-up', { agent_turn: true })).json();
+    await enqueueMessage({ ...first, messageId: 'traced-follow-up', messageText: 'keep this input',
+      platformMetadata: { ...routing, ...(followerTraceparent ? { traceparent: followerTraceparent } : {}) },
+    }, deps);
+    const [owner, follower] = await agentTurnRuns();
+    expect((owner.action_input.reply as { platform_metadata: Record<string, unknown> }).platform_metadata.traceparent).toBe(ownerTraceparent);
+    expect((follower.action_input.reply as { platform_metadata: Record<string, unknown> }).platform_metadata.traceparent).toBe(followerTraceparent);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const response = await postAsFleet('/api/workers/heartbeat', { run_id, worker_id: 'fleet-traced-follow-up' });
+      expect(await response.json()).toMatchObject({ continue: true, steer: [
+        { run_id: follower.id, message_id: 'traced-follow-up', text: 'keep this input' },
+      ] });
+    }
+    // Comparing execution policy must not erase the persisted delivery context.
+    expect(((await agentTurnRuns())[1].action_input.reply as { platform_metadata: Record<string, unknown> }).platform_metadata).toEqual({
+      ...routing, ...(followerTraceparent ? { traceparent: followerTraceparent } : {}),
+    });
+    expect((await runRow(follower.id)).status).toBe('pending');
+  });
+
   it('offers a follow-up whose transient context differs, and carries that context', async () => {
     // The API route attaches a live workspace-attention block, and it changes
     // as runs appear, so two messages sent seconds apart almost never carry
@@ -2499,6 +2531,7 @@ describe('agent turn producer', () => {
     ['grants', { networkConfig: { allowedDomains: ['different.example'] } }],
     ['packages', { nixConfig: { packages: ['git'] } }],
     ['platform metadata', { platformMetadata: { opaqueRouting: 'different' } }],
+    ['traced routing', { platformMetadata: { connectionId: 'different-connection', traceparent: '00-22222222222222222222222222222222-2222222222222222-01' } }],
     ['attachment', { platformMetadata: { files: [{ name: 'notes.txt', mimetype: 'text/plain' }] } }],
     ['reset', { platformMetadata: { sessionReset: true } }],
     ['automation', { platformMetadata: { source: 'automation-run' } }],

@@ -335,8 +335,11 @@ function executionPolicy(run: NativeTurnRun) {
   // dropped on the way through, and excluding it here meant offering a message
   // whose context could not be delivered.
   const { message_id, message_text, message_images, message_files, session_jsonl, ephemeral_context, ...turn } = input.turn;
-  const { message_id: replyMessageId, ...reply } = input.reply;
-  return { scope, turn, reply };
+  const { message_id: replyMessageId, platform_metadata, ...reply } = input.reply;
+  // Trace context belongs to the individual delivery, not its execution policy.
+  // Preserve every routing/authority field and leave the persisted reply intact.
+  const { traceparent, ...routingMetadata } = platform_metadata ?? {};
+  return { scope, turn, reply: { ...reply, platform_metadata: routingMetadata } };
 }
 
 /** Repeatable offers: the pending rows are retired only by transcript completion. */
