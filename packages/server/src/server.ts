@@ -68,11 +68,16 @@ async function main(): Promise<void> {
 	// endpoint. Unset means initTracing is not called and no exporter is built.
 	const otlpEndpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT?.trim();
 	if (otlpEndpoint) {
-		initTracing({
-			serviceName: "lobu-server",
-			serviceVersion: process.env.APP_GIT_SHA,
-			otlpEndpoint,
-		});
+		try {
+			initTracing({
+				serviceName: "lobu-server",
+				serviceVersion: process.env.APP_GIT_SHA,
+				otlpEndpoint,
+			});
+		} catch (err) {
+			// Optional telemetry must never prevent the application from starting.
+			logger.warn({ err }, "Tracing initialization failed; continuing without tracing");
+		}
 	}
 
 	const raw = process.env.DATABASE_URL?.trim();
