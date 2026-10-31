@@ -272,11 +272,20 @@ export async function withChildSpan<T>(
   return runInSpan(createChildSpan(name, traceparent, attributes), fn);
 }
 
-const TRACEPARENT_RE = /^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$/;
+const TRACEPARENT_RE = /^00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/;
 
 /** A W3C `traceparent` value, or null when the input is not one. */
 export function traceparentHeader(value: unknown): string | null {
-  return typeof value === "string" && TRACEPARENT_RE.test(value) ? value : null;
+  if (typeof value !== "string") return null;
+  const match = TRACEPARENT_RE.exec(value);
+  return match &&
+    trace.isSpanContextValid({
+      traceId: match[1]!,
+      spanId: match[2]!,
+      traceFlags: Number.parseInt(match[3]!, 16),
+    })
+    ? value
+    : null;
 }
 
 /** W3C ids of the active span. Empty when the log is outside a real span. */

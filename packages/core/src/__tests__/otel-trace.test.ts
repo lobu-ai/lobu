@@ -4,13 +4,13 @@
  * API provider stays registered, so this file inits a processor once.
  */
 
+import { beforeEach, describe, expect, test } from "bun:test";
 import type { Context } from "@opentelemetry/api";
 import type {
   ReadableSpan,
   Span,
   SpanProcessor,
 } from "@opentelemetry/sdk-trace-node";
-import { beforeEach, describe, expect, test } from "bun:test";
 import { createLogger } from "../logger";
 import {
   createChildSpan,
@@ -64,6 +64,12 @@ describe("otel trace linkage", () => {
     expect(traceparentHeader(header)).toBe(header);
     expect(traceparentHeader("not-a-trace")).toBeNull();
     expect(traceparentHeader(undefined)).toBeNull();
+    expect(
+      traceparentHeader(`00-${"0".repeat(32)}-${"cd".repeat(8)}-01`)
+    ).toBeNull();
+    expect(
+      traceparentHeader(`00-${"ab".repeat(16)}-${"0".repeat(16)}-01`)
+    ).toBeNull();
   });
 
   test("initTracing without an endpoint does not throw or start a span", () => {
