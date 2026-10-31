@@ -11,6 +11,7 @@ import {
   createLogger,
   createRootSpan,
   generateTraceId,
+  runInSpanContext,
 } from "@lobu/core";
 import { runtimeConnectionIdToSlug } from "../../lobu/stores/connections-projection.js";
 import {
@@ -1459,6 +1460,9 @@ export class MessageHandlerBridge {
       "lobu.connection_id": this.connection.id,
     });
 
+    // createRootSpan does not make the span active. Logs inside this handler
+    // only see it when the body runs in the span context.
+    const traced = async (): Promise<void> => {
     try {
       // A per-Automation model override arrives on the resolved channel Automation
       // and wins the layered fallback; otherwise the agent/org
@@ -1600,6 +1604,12 @@ export class MessageHandlerBridge {
       }
     } finally {
       rootSpan?.end();
+    }
+    };
+    if (rootSpan) {
+      await runInSpanContext(rootSpan, traced);
+    } else {
+      await traced();
     }
   }
 

@@ -8,11 +8,13 @@
  * and reporting the result.
  */
 
+import { createChildSpan, initTracing, runInSpanContext, SpanStatusCode, traceparentHeader } from '@lobu/core';
 import {
   AGENT_TURN_BRIDGE_BYTES,
   AGENT_TURN_INPUT_MAX,
   type AgentTurnPollPayload,
   type AgentTurnToolEvent,
+  type CompleteAgentTurnResponse,
   type PollResponse,
   TURN_DELTA_MAX_CHARS,
   TURN_TOOL_EVENT_QUEUE_MAX,
@@ -59,12 +61,79 @@ function isAgentTurnPayload(value: unknown): value is AgentTurnPollPayload {
   return !!value && typeof value === 'object' && 'turn' in value;
 }
 
+function ensureWorkerTracing(): void {
+  const otlpEndpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT?.trim();
+  if (!otlpEndpoint) return;
+  initTracing({
+    serviceName: 'lobu-worker',
+    serviceVersion: process.env.APP_GIT_SHA,
+    otlpEndpoint,
+  });
+}
+
 export async function executeAgentTurnRun(
   client: ExecutorClient,
   job: PollResponse,
   env: Record<string, string | undefined>,
   cfg: ExecutorConfig
 ): Promise<{ itemsCollected: number; error?: string }> {
+  let span: ReturnType<typeof createChildSpan> = null;
+  try {
+    ensureWorkerTracing();
+    const traceparent = traceparentHeader(
+      (job as { traceparent?: unknown }).traceparent
+    );
+    if (traceparent) {
+      span = createChildSpan('agent_turn', traceparent, {
+        'lobu.run_id': String(job.run_id ?? ''),
+      });
+    }
+  } catch (error) {
+    // Telemetry is optional. A missing exporter must not fail a claimed turn.
+    log.info('[agent-turn] Tracing unavailable; continuing without a span:', error);
+  }
+
+  try {
+    const result = span
+      ? await runInSpanContext(span, () => runAgentTurn(client, job, env, cfg))
+      : await runAgentTurn(client, job, env, cfg);
+    // The gateway's typed receipt is authoritative, including a cancellation
+    // that raced the worker's completion. Keep this internal to tracing.
+    const { terminalStatus, ...outcome } = result;
+    const status = terminalStatus ?? (outcome.error ? 'failed' : 'completed');
+    span?.setAttribute('lobu.run_status', status);
+    if (status !== 'cancelled') {
+      span?.setStatus({
+        code: status === 'failed' ? SpanStatusCode.ERROR : SpanStatusCode.OK,
+        ...(outcome.error ? { message: outcome.error } : {}),
+      });
+    }
+    return outcome;
+  } catch (error) {
+    span?.setAttribute('lobu.run_status', 'failed');
+    span?.setStatus({
+      code: SpanStatusCode.ERROR,
+      message: error instanceof Error ? error.message : String(error),
+    });
+    span?.recordException(error instanceof Error ? error : new Error(String(error)));
+    throw error;
+  } finally {
+    span?.end();
+  }
+}
+
+interface AgentTurnExecutionResult {
+  itemsCollected: number;
+  error?: string;
+  terminalStatus?: CompleteAgentTurnResponse['status'];
+}
+
+async function runAgentTurn(
+  client: ExecutorClient,
+  job: PollResponse,
+  env: Record<string, string | undefined>,
+  cfg: ExecutorConfig
+): Promise<AgentTurnExecutionResult> {
   const runId = job.run_id;
   if (!runId) return { itemsCollected: 0, error: 'agent turn run missing its run id' };
 
@@ -86,7 +155,7 @@ export async function executeAgentTurnRun(
         ...(trailing?.length ? { turn_tool_events: trailing } : {}),
         exit_reason: 'error_message',
       });
-      return { itemsCollected: 0, ...(receipt.status === 'completed' ? {} : { error }) };
+      return { itemsCollected: 0, terminalStatus: receipt.status, ...(receipt.status === 'completed' ? {} : { error }) };
     } catch (deliveryError) {
       // The outer executor must not replace this failure's evidence with a
       // second terminal payload describing only the transport error.
@@ -637,7 +706,9 @@ export async function executeAgentTurnRun(
       ...(result.turn.suggestions ? { suggestions: result.turn.suggestions } : {}),
       exit_reason: 'ok',
     });
-    if (receipt.status !== 'completed') return { itemsCollected: 0, error: `agent turn ${receipt.status}` };
+    if (receipt.status !== 'completed') {
+      return { itemsCollected: 0, error: `agent turn ${receipt.status}`, terminalStatus: receipt.status };
+    }
     log.info(
       `[agent-turn] run ${runId} completed after ${deltaSequence} delta batches and ${toolCalls} tool calls`
     );

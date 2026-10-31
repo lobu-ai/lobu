@@ -6,6 +6,7 @@ import {
   createLogger,
   createRootSpan,
   generateWorkerToken,
+  runInSpanContext,
   type NetworkConfig,
   normalizeDomainPatterns,
   verifyWorkerToken,
@@ -1610,6 +1611,9 @@ export function createAgentApi(config: AgentApiConfig): Hono {
       "lobu.message_id": messageId,
     });
 
+    // createRootSpan does not make the span active. The pino mixin reads the
+    // active context, so the handler has to run inside it.
+    const dispatch = async () => {
     try {
       const channelId = session.channelId || `api_${session.userId}`;
 
@@ -1772,6 +1776,8 @@ export function createAgentApi(config: AgentApiConfig): Hono {
       rootSpan?.end();
       throw error;
     }
+    };
+    return rootSpan ? runInSpanContext(rootSpan, dispatch) : dispatch();
   });
 
   logger.debug("Hono Agent API routes registered");

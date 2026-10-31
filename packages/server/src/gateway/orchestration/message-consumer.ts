@@ -6,10 +6,12 @@ import {
 	generateTraceId,
 	generateWorkerToken,
 	getErrorMessage,
+	getTraceparent,
 	type GuardrailRegistry,
 	type MessagePayload,
 	OrchestratorError,
 	runGuardrailInstances,
+	runInSpanContext,
 	SpanStatusCode,
 } from "@lobu/core";
 import {
@@ -249,7 +251,19 @@ export class MessageConsumer {
       "Processing job with trace context"
     );
 
+    // createChildSpan does not make the span active. enqueueAgentTurn runs
+    // inside this function, so the server-side dispatch stays on the trace.
+    // The guest isolate has no span. The host continues from the traceparent
+    // stored on platformMetadata below.
+    const traced = async (): Promise<void> => {
     try {
+      // Children (the worker turn, response delivery) parent to this span.
+      // The HTTP handler already returned the root traceparent to the client.
+      const queueParent = getTraceparent(queueSpan);
+      if (queueParent && data.platformMetadata) {
+        data.platformMetadata.traceparent = queueParent;
+      }
+
       // The runs-queue claim sets `job.id = String(runId)` when it
       // dispatches into this handler. Stamp the runId onto the payload so
       // it survives the thread_message_{deployment} hop and reaches the
@@ -654,6 +668,12 @@ export class MessageConsumer {
         { jobId, data, error },
         true
       );
+    }
+    };
+    if (queueSpan) {
+      await runInSpanContext(queueSpan, traced);
+    } else {
+      await traced();
     }
   }
 

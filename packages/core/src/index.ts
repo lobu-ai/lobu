@@ -72,6 +72,7 @@ export {
   createChildSpan,
   createRootSpan,
   createSpan,
+  currentTraceLogFields,
   flushTracing,
   getCurrentSpan,
   getTraceparent,
@@ -81,6 +82,7 @@ export {
   SpanKind,
   SpanStatusCode,
   shutdownTracing,
+  traceparentHeader,
   withChildSpan,
   withSpan,
 } from "./otel";
