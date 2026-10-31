@@ -15,6 +15,7 @@ import {
 import { describeNonDeviceWorkerId } from "../../../../utils/device-worker-id";
 import { ToolUserError, withFailureCode } from "../../../../utils/errors";
 import type { ToolContext } from "../../../registry";
+import { isPublicReader } from "../../../access-control";
 import { listOrgActivity } from "../activity-feed";
 import { ENTITY_CHANGE_ACTION_KEYS } from "../../run-decider";
 export async function handleListActivity(
@@ -37,6 +38,7 @@ export async function handleListActivity(
 		kinds: args.kinds,
 		agentId: args.agent_id,
 		caller: ctx,
+		publicReader: isPublicReader(ctx),
 	});
 	return {
 		action: "list_activity",
