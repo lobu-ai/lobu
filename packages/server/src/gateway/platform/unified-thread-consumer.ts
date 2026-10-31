@@ -7,6 +7,8 @@
 import {
   createChildSpan,
   createLogger,
+  getCurrentSpan,
+  getTraceparent,
   runInSpanContext,
   type GuardrailRegistry,
   type SuggestedPrompt,
@@ -727,6 +729,8 @@ export function registerChatInteractionFanout(
       // whichever pod claims the job. Skip the cross-pod hop entirely.
       if (isConnectionWarmLocally(ev.connectionId)) return;
 
+      // Serialize the route's recovered turn context before leaving this pod.
+      const traceparent = getTraceparent(getCurrentSpan() ?? null);
       const envelope: ChatInteractionEnvelope = {
         eventName,
         event: ev as Record<string, unknown>,
@@ -741,7 +745,10 @@ export function registerChatInteractionFanout(
         timestamp: Date.now(),
         // connectionId on platformMetadata is what ensureDeliverable reads to
         // warm the owning replica's connection.
-        platformMetadata: { connectionId: ev.connectionId },
+        platformMetadata: {
+          connectionId: ev.connectionId,
+          ...(traceparent ? { traceparent } : {}),
+        },
         customEvent: {
           name: CHAT_INTERACTION_EVENT,
           data: envelope as unknown as Record<string, unknown>,
