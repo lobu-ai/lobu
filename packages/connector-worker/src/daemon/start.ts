@@ -96,16 +96,44 @@ export function resolveDaemonLaunchContext(
   };
 }
 
+function parseSlotCount(raw: string | undefined): number | undefined {
+  const configured = raw ? Math.max(1, Number.parseInt(raw, 10)) : undefined;
+  return configured !== undefined && Number.isFinite(configured) ? configured : undefined;
+}
+
+/**
+ * A device's one shared budget, or a fleet worker's connector-work budget
+ * (syncs, actions, auth, embedding backfills).
+ */
 function resolveDaemonMaxConcurrentJobs(
   platform: string | undefined,
   env: NodeJS.ProcessEnv = process.env,
   hostThreads?: number
 ): number | undefined {
-  const configured = env.WORKER_MAX_CONCURRENT_JOBS
-    ? Math.max(1, Number.parseInt(env.WORKER_MAX_CONCURRENT_JOBS, 10))
-    : undefined;
-  if (configured !== undefined && Number.isFinite(configured)) return configured;
+  const configured = parseSlotCount(env.WORKER_MAX_CONCURRENT_JOBS);
+  if (configured !== undefined) return configured;
   return platform ? defaultDeviceMaxConcurrentJobs(hostThreads) : undefined;
+}
+
+/**
+ * Agent-turn slots for an unconfigured fleet worker. A turn mostly waits on
+ * the model provider; the worst measured one (4 MB history, the cap) peaked at
+ * 133 MB worker RSS, so four stay near half a gigabyte beside the connector
+ * slot. The Helm chart sizes its own value from the pod's memory.
+ */
+const DEFAULT_FLEET_MAX_CONCURRENT_AGENT_TURNS = 4;
+
+/**
+ * A fleet worker budgets agent turns apart from connector work.
+ * Devices never run agent turns and keep their one shared budget.
+ */
+function resolveDaemonMaxConcurrentAgentTurns(
+  platform: string | undefined,
+  env: NodeJS.ProcessEnv = process.env
+): number | undefined {
+  if (platform) return undefined;
+  return parseSlotCount(env.WORKER_MAX_CONCURRENT_AGENT_TURNS)
+    ?? DEFAULT_FLEET_MAX_CONCURRENT_AGENT_TURNS;
 }
 
 /**
@@ -200,6 +228,7 @@ export async function startDaemonCommand(
   log.info(`[cli] Starting worker daemon (ID: ${workerId}, API: ${opts.apiUrl})`);
   const env = buildConnectorWorkerEnv();
   const maxConcurrentJobs = resolveDaemonMaxConcurrentJobs(platform);
+  const maxConcurrentAgentTurns = resolveDaemonMaxConcurrentAgentTurns(platform);
   if (platform) {
     log.info(
       `[cli] device mode: platform=${platform} capabilities=${capabilities.join(',') || '(none)'} max_concurrent_jobs=${maxConcurrentJobs}`
@@ -227,6 +256,7 @@ export async function startDaemonCommand(
     ...(label ? { label } : {}),
     ...(platform ? { manifests: DEVICE_MANIFESTS_BY_PLATFORM[platform] ?? [] } : {}),
     ...(maxConcurrentJobs ? { maxConcurrentJobs } : {}),
+    ...(maxConcurrentAgentTurns ? { maxConcurrentAgentTurns } : {}),
     backendCapacity,
     ...(opts.workerCredentialMaintenance
       ? { workerCredentialMaintenance: opts.workerCredentialMaintenance }
