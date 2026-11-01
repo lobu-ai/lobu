@@ -253,7 +253,10 @@ function sentenceCase(value: string): string {
     .replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
-function formatCountLabel(value: number, singular: string, plural = `${singular}s`): string {
+const COUNT_PLURALS: Record<string, string> = { entity: 'entities' };
+
+function formatCountLabel(value: number, singular: string): string {
+  const plural = COUNT_PLURALS[singular] ?? `${singular}s`;
   return `${value} ${value === 1 ? singular : plural}`;
 }
 

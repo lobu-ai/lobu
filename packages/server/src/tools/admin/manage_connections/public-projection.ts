@@ -1,4 +1,4 @@
-import { isSystemContext } from "../../access-control";
+import { isInProcessSystemCall } from "../../access-control";
 import type { ToolContext } from "../../registry";
 
 /**
@@ -28,36 +28,15 @@ const PUBLIC_CONNECTION_FIELDS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * True for an in-process system call — an automation reaction and friends, which
- * run with `userId: null` + `isAuthenticated: true` + `tokenType: 'session'`
- * (automations/reaction-executor.ts). Those keep operational metadata: they read
- * `credential_mode` / `error_message` / device fields to decide what to do,
- * and narrowing them would break reactions silently rather than loudly.
- *
- * `isSystemContext` alone is NOT sufficient as a data-exposure boundary. It
- * was written to bypass role/scope policy at the handler boundary, and its
- * shape (`isAuthenticated && !userId && !memberRole`) is also satisfied by a
- * TOKEN minted without a user — `multi-tenant.ts` passes
- * `userId: tokenData.userId || undefined`, and `AuthInfo.userId` is
- * `string | null | undefined`. Such a token, non-member, on a public org over
- * MCP would otherwise read as "system" and be handed the full row including a
- * live `connect_token`. Requiring `tokenType: 'session'` excludes every token
- * caller (`pat` / `access_token` / `Bearer`) and every anonymous one
- * (`anonymous`). A real browser session also carries `session`, but it has a
- * `userId`, so `isSystemContext` already excludes it.
- */
-function isInProcessSystemCall(ctx: ToolContext): boolean {
-	return isSystemContext(ctx) && ctx.tokenType === "session";
-}
-
-/**
  * Narrow one connection row to the public field set when the caller is not a
  * member of the org.
  *
  * Gated on `memberRole` rather than `isAuthenticated`: an authenticated
  * non-member on a public org is admitted with `memberRole: null`
  * (workspace/multi-tenant.ts), and has the same read entitlement as an
- * anonymous caller.
+ * anonymous caller. System-call detection is the canonical
+ * {@link isInProcessSystemCall} — a local copy here once drifted, so this
+ * seam imports it instead of re-deriving the shape.
  */
 export function projectConnectionForReader(
 	row: Record<string, unknown>,

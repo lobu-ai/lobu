@@ -435,6 +435,17 @@ export const RateLimitPresets = {
       'OAuth client registration rate limit exceeded. Maximum 10 registrations per hour.',
   } as RateLimitConfig,
 
+  /**
+   * Token grants: 600/minute per IP across both route mounts. Leave room for
+   * shared service egress and device polling while bounding unauthenticated
+   * database and client-secret work. Public client IDs are not limiter keys.
+   */
+  OAUTH_TOKEN_PER_IP_MINUTE: {
+    limit: 600,
+    windowSeconds: 60,
+    errorMessage: 'Too many token requests. Retry after the indicated delay.',
+  } as RateLimitConfig,
+
   /** Agent device-claim email: 10/hour per IP (sends a login email to a caller-supplied address) */
   DEVICE_EMAIL_PER_IP_HOUR: {
     limit: 10,

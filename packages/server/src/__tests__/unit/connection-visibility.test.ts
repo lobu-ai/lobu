@@ -9,6 +9,7 @@ import { describe, expect, it } from 'bun:test';
 import { buildConnectionVisibilityClause } from '../../utils/content-search/visibility';
 import {
   compileConnectionFkVisibility,
+  compileConnectionFkVisibilityLiteral,
   compileConnectionRowVisibility,
 } from '../../authz/connection-visibility';
 import { authzScopeFromToolContext, headlessScope } from '../../authz/scope';
@@ -62,6 +63,13 @@ describe('connection-visibility compiler (M1 one-compiler)', () => {
     // (`connection_id IS NULL`), never a `created_by` widening.
     expect(sql).not.toContain('created_by IS NULL');
     expect(params).toEqual(['org_test', 'user_a']);
+  });
+
+  it('literal FK form escapes values and keeps the NULL pass-through', () => {
+    const literal = compileConnectionFkVisibilityLiteral(headlessScope("o'rg"), 'r');
+    expect(literal).toContain("vc.organization_id = 'o''rg'");
+    expect(literal).toContain("r.connection_id IS NULL");
+    expect(literal).not.toContain('vc.created_by');
   });
 
   it('authzScopeFromToolContext maps ctx.userId → principal', () => {
