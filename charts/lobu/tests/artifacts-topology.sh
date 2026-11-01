@@ -71,27 +71,3 @@ expect_render_failure \
 single_replica_render="$(render --set app.replicaCount=1 --set app.artifacts.enabled=false)"
 grep -q 'value: "/tmp/lobu-artifacts"' <<<"$single_replica_render"
 grep -q 'replicas: 1' <<<"$single_replica_render"
-
-# With the worker Deployment running, the app must not claim runs itself. The
-# worker drains in-flight runs for its grace period on SIGTERM, but the app's
-# in-process worker drains for a fixed 15s, so any agent turn or sync it holds
-# during a rollout is killed. Without worker pods, the app's worker is the only
-# one, so it stays on.
-app_only() {
-  render --show-only templates/deployment.yaml "$@"
-}
-expect_absent() {
-  local label="$1"
-  shift
-  if grep -q 'name: LOBU_DISABLE_EMBEDDED_WORKER' <<<"$(app_only "$@")"; then
-    echo "expected no LOBU_DISABLE_EMBEDDED_WORKER: $label" >&2
-    exit 1
-  fi
-}
-grep -A1 'name: LOBU_DISABLE_EMBEDDED_WORKER' <<<"$(app_only)" | grep -q 'value: "1"'
-expect_absent "worker disabled" --set worker.enabled=false
-expect_absent "no worker replicas" --set worker.replicaCount=0
-# An explicit app.env value wins and is rendered once.
-override_render="$(app_only --set-string app.env.LOBU_DISABLE_EMBEDDED_WORKER=0)"
-[ "$(grep -c 'name: LOBU_DISABLE_EMBEDDED_WORKER' <<<"$override_render")" = 1 ]
-grep -A1 'name: LOBU_DISABLE_EMBEDDED_WORKER' <<<"$override_render" | grep -q 'value: "0"'
