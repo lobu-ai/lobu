@@ -81,6 +81,21 @@ function referenceDelivery() {
 describe('source feed notifications', () => {
   beforeEach(cleanupTestDatabase);
 
+  it('retains authorized source activity without starting an Automation', async () => {
+    const { sql, org, user, device, connection, notice, automationId } = await subscribedFixture();
+    await sql`UPDATE connections SET created_by = ${user.id} WHERE id = ${connection.id}`;
+    await sql`UPDATE automations SET status = 'archived' WHERE id = ${automationId}`;
+
+    const [receipt] = await receiveFeedNotifications(sql, [{ ...notice, subscription: referenceDelivery() }], device.id, [org.id]);
+
+    // Source capture must survive the absence of an analysis subscriber.
+    // An acknowledgement is valid only after its references are durable.
+    expect(receipt.active).toBe(true);
+    expect(receipt.ack).toBeDefined();
+    expect(await sql`SELECT id FROM events WHERE organization_id = ${org.id}`).toHaveLength(1);
+    expect(await sql`SELECT id FROM runs WHERE organization_id = ${org.id} AND run_type = 'automation'`).toHaveLength(0);
+  });
+
   it.each(['setup', 'reconciliation'])('backs off %s when subscription lookup fails before browser dispatch', async (stage) => {
     const { sql, notice, task, org, device } = await subscribedFixture();
     await sql`UPDATE feeds SET status = 'paused' WHERE organization_id = ${org.id} AND id <> ${notice.feed_id}`;
