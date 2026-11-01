@@ -122,6 +122,8 @@ export interface ToolContext {
   userId: string | null;
   /** Caller's role in the organization (null for non-members reading a public workspace). */
   memberRole: string | null;
+  /** Verified worker-token limit on admin-tier tools; retained by nested SDK calls. */
+  adminTools?: string[] | null;
   /** Durable Lobu/Lobu agent identity bound to this MCP session, when provided. */
   agentId?: string | null;
   /**

@@ -79,7 +79,8 @@ describe('inference provider org default', () => {
     const created = await sdk.inferenceProviders.create({ slug: 'custom', kind: 'openai', apiKey: 'synthetic-initial-key',
       capabilities: { text: { model: 'synthetic-model', base_url: 'https://inference.example/v1' } } });
     expect(created.provider.isDefault).toBe(true);
-    await sdk.inferenceProviders.update({ slug: 'custom', displayName: 'Renamed' });
+    const restricted = buildClientSDK(toToolContext({ ...auth, adminTools: ['manage_inference_providers'] }), env);
+    await restricted.inferenceProviders.update({ slug: 'custom', displayName: 'Renamed' });
     await sdk.inferenceProviders.setCapability({ slug: 'custom', modality: 'image', block: { model: 'synthetic-image' } });
     await sdk.inferenceProviders.rotateKey({ slug: 'custom', value: 'synthetic-rotated-key' });
     expect(await readOrgSharedProviderApiKey('custom', auth.organizationId!)).toBe('synthetic-rotated-key');
@@ -124,7 +125,7 @@ describe('inference provider org default', () => {
   it('provider administration enforces role/scope and rejects unknown or invalid mutations atomically', async () => {
     const { auth, env, sdk } = await providerClient();
     const input = { slug: 'rejected', kind: 'openai', apiKey: 'synthetic-key', capabilities: { text: { model: 'model' } } };
-    const deniedContexts: AuthContext[] = [ { ...auth, memberRole: 'member' }, { ...auth, scopes: ['mcp:read', 'mcp:write'] },
+    const deniedContexts: AuthContext[] = [ { ...auth, adminTools: ['manage_agents'] }, { ...auth, memberRole: 'member' }, { ...auth, scopes: ['mcp:read', 'mcp:write'] },
       { ...auth, userId: null, memberRole: null }, { ...auth, userId: null, memberRole: null, tokenType: 'session' } ];
     for (const denied of deniedContexts) {
       await expect(executeTool('manage_inference_providers', { action: 'create', ...input }, env, denied)).rejects.toThrow();
@@ -137,6 +138,8 @@ describe('inference provider org default', () => {
     expect(await getDb()`SELECT name FROM agent_secrets WHERE organization_id = ${auth.organizationId}`).toHaveLength(0);
     const reader = buildClientSDK(toToolContext({ ...auth, scopes: ['mcp:read'], memberRole: 'member' }), env, { mode: 'read' });
     expect(await reader.inferenceProviders.list()).toEqual({ providers: [] });
+    const restrictedReader = buildClientSDK(toToolContext({ ...auth, adminTools: ['manage_agents'] }), env);
+    expect(await restrictedReader.inferenceProviders.list()).toEqual({ providers: [] });
     expect(reader.inferenceProviders.create).toBeUndefined();
   });
 

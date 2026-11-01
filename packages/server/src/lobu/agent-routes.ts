@@ -577,8 +577,9 @@ async function inferenceProviderRequest(c: Context<{ Bindings: Env }>, schema: T
   if (typeof orgId !== "string") return orgId;
   try {
     let body: unknown = {};
-    if (c.req.raw.body) {
-      try { body = await c.req.json(); }
+    const rawBody = await c.req.text();
+    if (rawBody) {
+      try { body = JSON.parse(rawBody); }
       catch { throw new ToolUserError("Invalid or missing JSON body", 400); }
     }
     // URL selectors and action cannot be supplied or retargeted by the body.
