@@ -6883,6 +6883,9 @@ export type ManageClassifiersResponse =
 export type ManageNavigationData = {
   body:
     | {
+        /**
+         * Read the workspace sidebar document and its revision. Owner/admin reads preserve the editable document; other readers receive only reachable links. Use projection: 'display' to filter links for an editor too.
+         */
         action: "get";
         /**
          * Hide unavailable targets for rendering. Owner/admin reads otherwise preserve the editable document.
@@ -6890,6 +6893,9 @@ export type ManageNavigationData = {
         projection?: "display";
       }
     | {
+        /**
+         * Replace the workspace sidebar using expected_revision from the original read. Pass document: null to restore defaults. Requires owner/admin access; stale or missing revisions fail with REVISION_CONFLICT.
+         */
         action: "set";
         /**
          * Workspace sidebar sections and links. Null restores the default navigation.

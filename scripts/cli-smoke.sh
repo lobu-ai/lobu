@@ -364,9 +364,29 @@ expect_grep "lobu agent create -c local" "Created agent" "$PROJ" agent create sm
 expect_grep "lobu agent get -c local" "smoke-agent" "$PROJ" agent get smoke-agent -c local
 expect_grep "lobu agent update -c local" "Updated agent" "$PROJ" agent update smoke-agent -c local --name "Smoke Agent v2"
 expect_fail_grep "lobu agent update (no flags -> graceful)" "at least one" "$PROJ" agent update smoke-agent -c local
-# config get --output, then round-trip that config back through patch (always valid).
+# Exported configs retain the revision on which a later file edit was based.
 expect_grep "lobu agent config get --output -c local" "Wrote" "$PROJ" agent config get smoke-agent -c local --output "$RUN_DIR/agent-config.json"
+AGENT_SAVED_REVISION="$(node -e 'const c=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));if(typeof c.revision!=="string"||!c.revision)process.exit(1);process.stdout.write(c.revision)' "$RUN_DIR/agent-config.json")" || die "agent config export has no revision"
 expect_grep "lobu agent config patch -c local" "Updated config" "$PROJ" agent config patch smoke-agent -c local --file "$RUN_DIR/agent-config.json"
+# A one-shot partial patch has no prior draft baseline, so it reads once before
+# writing. That change must make every explicitly pinned old edit fail.
+printf '%s\n' '{"soulMd":"CLI smoke partial edit"}' > "$RUN_DIR/agent-partial.json"
+expect_grep "lobu agent config patch (one-shot partial)" "Updated config" "$PROJ" agent config patch smoke-agent -c local --file "$RUN_DIR/agent-partial.json"
+expect_fail_grep "lobu agent config patch (stale exported config)" "configuration changed" "$PROJ" agent config patch smoke-agent -c local --file "$RUN_DIR/agent-config.json"
+node -e 'require("fs").writeFileSync(process.argv[2],JSON.stringify({expected_revision:process.argv[1],soulMd:"Rejected stale edit"}))' "$AGENT_SAVED_REVISION" "$RUN_DIR/agent-stale-patch.json" || die "could not prepare stale agent patch"
+expect_fail_grep "lobu agent config patch (stale file token)" "configuration changed" "$PROJ" agent config patch smoke-agent -c local --file "$RUN_DIR/agent-stale-patch.json"
+expect_fail_grep "lobu agent update (stale flag token)" "configuration changed" "$PROJ" agent update smoke-agent -c local --name "Rejected stale name" --expected-revision "$AGENT_SAVED_REVISION"
+expect_fail_grep "lobu agent config patch (stale flag token)" "configuration changed" "$PROJ" agent config patch smoke-agent -c local --file "$RUN_DIR/agent-partial.json" --expected-revision "$AGENT_SAVED_REVISION"
+expect_fail_grep "lobu agent delete (stale flag token)" "configuration changed" "$PROJ" agent delete smoke-agent -c local --yes --expected-revision "$AGENT_SAVED_REVISION"
+expect_grep "lobu agent config get after rejected edits" "Wrote" "$PROJ" agent config get smoke-agent -c local --output "$RUN_DIR/agent-current.json"
+AGENT_CURRENT_REVISION="$(node -e 'const c=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));if(c.name!=="Smoke Agent v2"||c.soulMd!=="CLI smoke partial edit"||typeof c.revision!=="string"||!c.revision||c.revision===process.argv[2])process.exit(1);process.stdout.write(c.revision)' "$RUN_DIR/agent-current.json" "$AGENT_SAVED_REVISION")"
+if [ -n "$AGENT_CURRENT_REVISION" ]; then
+  pass "rejected stale agent edits preserve the newer config"
+  expect_fail_grep "lobu agent config patch (conflicting flag/file tokens)" "Conflicting revisions" "$PROJ" agent config patch smoke-agent -c local --file "$RUN_DIR/agent-config.json" --expected-revision "$AGENT_CURRENT_REVISION"
+  expect_grep "lobu agent update (current flag token)" "Updated agent" "$PROJ" agent update smoke-agent -c local --name "Smoke Agent pinned" --expected-revision "$AGENT_CURRENT_REVISION"
+else
+  softfail "rejected stale agent edits changed the config or removed its revision"
+fi
 expect_fail_grep "lobu agent delete (no --yes -> graceful)" "Refusing to delete" "$PROJ" agent delete smoke-agent -c local
 expect_grep "lobu agent delete --yes -c local" "Deleted agent" "$PROJ" agent delete smoke-agent -c local --yes
 
@@ -496,7 +516,7 @@ import {
   defineRelationshipType,
 } from "@lobu/cli/config";
 const note = defineEntityType({ key: "note", name: "Note" });
-const mentions = defineRelationshipType({ key: "mentions", name: "Mentions" });
+const mentions = defineRelationshipType({ key: "mentions", name: "Mentions", rules: [{ source: "note", target: "note" }] });
 const memberOf = defineRelationshipType({ key: "member_of", name: "Member of" });
 export default defineConfig({
   org: "$ORG",
@@ -509,6 +529,8 @@ expect_grep "lobu memory seed --dry-run" "Dry run" "$SEEDPROJ" memory seed --dry
 expect_grep_absent "lobu memory seed skips platform-owned member_of" \
   "relationship_type: mentions" "relationship_type: member_of" \
   "$SEEDPROJ" memory seed --dry-run -c local
+expect_grep "lobu memory seed creates guarded relationship rules" "Seed complete" "$SEEDPROJ" memory seed -c local
+expect_grep "lobu memory seed updates guarded relationships idempotently" "Seed complete" "$SEEDPROJ" memory seed -c local
 # call run_sdk -- run a trivial titled ClientSDK script; untitled is refused.
 expect_ok "lobu call run_sdk (ClientSDK script)" "$PROJ" call run_sdk \
   --arg "title=CLI smoke script" \

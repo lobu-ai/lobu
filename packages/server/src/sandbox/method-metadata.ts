@@ -1156,7 +1156,7 @@ export default async (_ctx, client) => {
 	},
 	"views.remove": {
 		summary:
-			"Delete a view by key. Params: { key }.",
+			"Delete a view by key using expected_revision from the original views.get/list read.",
 		access: "admin",
 		signature:
 			"views.remove(input: { key: string; expected_revision: string }): Promise<unknown>",

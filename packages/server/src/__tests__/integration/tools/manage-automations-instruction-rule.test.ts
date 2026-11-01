@@ -105,7 +105,7 @@ describe("manage_automations — instruction-presence rule", () => {
 			},
 			TEST_ENV,
 			ownerCtx
-		)) as { automation_id?: string };
+		)) as { automation_id?: string; revision: string };
 		expect(created.automation_id).toBeTruthy();
 	});
 
@@ -153,7 +153,7 @@ describe("manage_automations — instruction-presence rule", () => {
 			},
 			TEST_ENV,
 			ownerCtx
-		)) as { automation_id?: string };
+		)) as { automation_id?: string; revision: string };
 		expect(created.automation_id).toBeTruthy();
 
 		const sql = getTestDb();
@@ -176,6 +176,7 @@ describe("manage_automations — instruction-presence rule", () => {
 			{
 				action: "create_version",
 				automation_id: created.automation_id!,
+				expected_revision: created.revision,
 				name: "Skills-only renamed",
 				set_as_current: true,
 			},
@@ -217,7 +218,7 @@ export default async function reaction(ctx, client) {
 			},
 			TEST_ENV,
 			ownerCtx
-		)) as { automation_id?: string };
+		)) as { automation_id?: string; revision: string };
 		expect(created.automation_id).toBeTruthy();
 
 		const sql = getTestDb();
@@ -250,13 +251,14 @@ export default async function reaction(ctx, client) {
 			},
 			TEST_ENV,
 			ownerCtx
-		)) as { automation_id?: string };
+		)) as { automation_id?: string; revision: string };
 
 		const versioned = (await executeTool(
 			"manage_automations",
 			{
 				action: "create_version",
 				automation_id: created.automation_id!,
+				expected_revision: created.revision,
 				prompt: "",
 				set_as_current: true,
 			},
@@ -278,7 +280,7 @@ export default async function reaction(ctx, client) {
 			},
 			TEST_ENV,
 			ownerCtx
-		)) as { automation_id?: string };
+		)) as { automation_id?: string; revision: string };
 
 		await expect(
 			executeTool(
@@ -286,6 +288,7 @@ export default async function reaction(ctx, client) {
 				{
 					action: "update",
 					automation_id: created.automation_id!,
+					expected_revision: created.revision,
 					triggers: [{ kind: "schedule", cron: "0 9 * * *" }],
 				},
 				TEST_ENV,
@@ -317,7 +320,7 @@ export default async function reaction(ctx, client) {
 			},
 			TEST_ENV,
 			ownerCtx
-		)) as { automation_id?: string };
+		)) as { automation_id?: string; revision: string };
 
 		const sql = getTestDb();
 		const [root] = await sql`
@@ -355,7 +358,7 @@ export default async function reaction(ctx, client) {
 			},
 			TEST_ENV,
 			ownerCtx
-		)) as { automation_id?: string };
+		)) as { automation_id?: string; revision: string };
 
 		await expect(
 			executeTool(
@@ -363,6 +366,7 @@ export default async function reaction(ctx, client) {
 				{
 					action: "set_reaction_script",
 					automation_id: created.automation_id!,
+					expected_revision: created.revision,
 					reaction_script: "",
 				},
 				TEST_ENV,
@@ -392,13 +396,14 @@ export default async function reaction(ctx, client) {
 			},
 			TEST_ENV,
 			ownerCtx
-		)) as { automation_id?: string };
+		)) as { automation_id?: string; revision: string };
 
 		const cleared = (await executeTool(
 			"manage_automations",
 			{
 				action: "set_reaction_script",
 				automation_id: created.automation_id!,
+				expected_revision: created.revision,
 				reaction_script: "",
 			},
 			TEST_ENV,
@@ -427,7 +432,7 @@ export default async function reaction(ctx, client) {
 			},
 			TEST_ENV,
 			ownerCtx
-		)) as { automation_id?: string };
+		)) as { automation_id?: string; revision: string };
 		const automationId = created.automation_id!;
 
 		await expect(
@@ -436,6 +441,7 @@ export default async function reaction(ctx, client) {
 				{
 					action: "create_version",
 					automation_id: automationId,
+					expected_revision: created.revision,
 					prompt: "   ",
 					set_as_current: true,
 				},
@@ -449,6 +455,7 @@ export default async function reaction(ctx, client) {
 			{
 				action: "create_version",
 				automation_id: automationId,
+				expected_revision: created.revision,
 				prompt: "Updated digest instructions.",
 				set_as_current: true,
 			},
@@ -470,13 +477,14 @@ export default async function reaction(ctx, client) {
 			},
 			TEST_ENV,
 			ownerCtx
-		)) as { automation_id?: string };
+		)) as { automation_id?: string; revision: string };
 
 		const versioned = (await executeTool(
 			"manage_automations",
 			{
 				action: "create_version",
 				automation_id: created.automation_id!,
+				expected_revision: created.revision,
 				prompt: "",
 				set_as_current: true,
 			},
@@ -497,7 +505,7 @@ export default async function reaction(ctx, client) {
 			},
 			TEST_ENV,
 			ownerCtx
-		)) as { automation_id?: string };
+		)) as { automation_id?: string; revision: string };
 
 		await expect(
 			executeTool(
@@ -505,6 +513,7 @@ export default async function reaction(ctx, client) {
 				{
 					action: "update",
 					automation_id: created.automation_id!,
+					expected_revision: created.revision,
 					triggers: [{ kind: "schedule", cron: "0 9 * * *" }],
 				},
 				TEST_ENV,
@@ -524,7 +533,7 @@ export default async function reaction(ctx, client) {
 			},
 			TEST_ENV,
 			ownerCtx
-		)) as { automation_id?: string };
+		)) as { automation_id?: string; revision: string };
 
 		await expect(
 			executeTool(
@@ -532,6 +541,7 @@ export default async function reaction(ctx, client) {
 				{
 					action: "create_version",
 					automation_id: created.automation_id!,
+					expected_revision: created.revision,
 					triggers: [{ kind: "schedule", cron: "0 9 * * *" }],
 					set_as_current: true,
 				},
@@ -552,13 +562,14 @@ export default async function reaction(ctx, client) {
 			},
 			TEST_ENV,
 			ownerCtx
-		)) as { automation_id?: string };
+		)) as { automation_id?: string; revision: string };
 
 		const versioned = (await executeTool(
 			"manage_automations",
 			{
 				action: "create_version",
 				automation_id: created.automation_id!,
+				expected_revision: created.revision,
 				prompt: "Now scheduled digest instructions.",
 				triggers: [{ kind: "schedule", cron: "0 9 * * *" }],
 				set_as_current: true,
@@ -581,13 +592,14 @@ export default async function reaction(ctx, client) {
 			},
 			TEST_ENV,
 			ownerCtx
-		)) as { automation_id?: string };
+		)) as { automation_id?: string; revision: string };
 
 		const versioned = (await executeTool(
 			"manage_automations",
 			{
 				action: "create_version",
 				automation_id: created.automation_id!,
+				expected_revision: created.revision,
 				prompt: "",
 				triggers: [TURN_TRIGGER],
 				set_as_current: true,
@@ -625,7 +637,7 @@ export default async function reaction(ctx, client) {
 			},
 			TEST_ENV,
 			ownerCtx
-		)) as { automation_id?: string };
+		)) as { automation_id?: string; revision: string };
 		const rootId = root.automation_id!;
 
 		const [rootRow] = await sql`
@@ -664,6 +676,7 @@ export default async function reaction(ctx, client) {
 				{
 					action: "create_version",
 					automation_id: rootId,
+					expected_revision: root.revision,
 					prompt: "",
 					triggers: [TURN_TRIGGER],
 					set_as_current: true,

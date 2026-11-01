@@ -50,10 +50,10 @@ describe("manage_agents union contract", () => {
 		expect(list).toMatch(/valid arguments for action 'list' are: action$/);
 
 		const del = messageOf(() =>
-			validate({ action: "delete", agent_id: "researcher", name: "Researcher" }),
+			validate({ action: "delete", agent_id: "researcher", expected_revision: "original-agent-revision", name: "Researcher" }),
 		);
 		expect(del).toMatch(/unknown argument\(s\): name/);
-		expect(del).toMatch(/valid arguments for action 'delete' are: action, agent_id$/);
+		expect(del).toMatch(/valid arguments for action 'delete' are: action, agent_id, expected_revision$/);
 	});
 
 	it("accepts each action's full field set", () => {
@@ -73,11 +73,12 @@ describe("manage_agents union contract", () => {
 			}),
 		).toMatchObject({ name: "Researcher", default_model: "anthropic/claude-sonnet-5" });
 		expect(
-			validate({ action: "update", agent_id: "researcher", default_model: "" }),
-		).toEqual({ action: "update", agent_id: "researcher", default_model: "" });
-		expect(validate({ action: "delete", agent_id: "researcher" })).toEqual({
+			validate({ action: "update", agent_id: "researcher", expected_revision: "original-agent-revision", default_model: "" }),
+		).toEqual({ action: "update", agent_id: "researcher", expected_revision: "original-agent-revision", default_model: "" });
+		expect(validate({ action: "delete", agent_id: "researcher", expected_revision: "original-agent-revision" })).toEqual({
 			action: "delete",
 			agent_id: "researcher",
+			expected_revision: "original-agent-revision",
 		});
 	});
 

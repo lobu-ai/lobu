@@ -139,22 +139,32 @@ describe('prune (server gate)', () => {
       expect(foreign?.deleted_at).toBeNull();
     });
 
-    it("update/delete of a slug owned only by another PRIVATE org reports 'not found' (no existence leak)", async () => {
+    it('update/delete returns the same conflict for foreign-private and absent slugs (no existence leak)', async () => {
       const sql = getTestDb();
       const other = await createTestOrganization({ name: 'Private Owner Org' });
       await sql`
         INSERT INTO entity_relationship_types (organization_id, slug, name, status, created_at, updated_at)
         VALUES (${other.id}, ${'foreign-only'}, 'Foreign Only', 'active', NOW(), NOW())
       `;
-      // The caller has no own 'foreign-only'. Write-mode lookup is org-scoped,
-      // so it must report 'not found' — never 'access denied', which would leak
-      // that the slug exists in another org.
-      await expect(freshSchemaEditor(owner.entity_schema).deleteRelType({ slug: 'foreign-only' })).rejects.toThrow(
-        /not found/i
-      );
-      await expect(
-        freshSchemaEditor(owner.entity_schema).updateRelType({ slug: 'foreign-only', name: 'x' })
-      ).rejects.toThrow(/not found/i);
+      // A caller-supplied baseline cannot reveal whether the target belongs to
+      // another private org or is absent altogether.
+      for (const action of ['update', 'delete'] as const) {
+        const mutate = (slug: string) => owner.entity_schema.manage({
+          schema_type: 'relationship_type', action, slug,
+          ...(action === 'update' ? { name: 'x' } : {}),
+          expected_revision: 'unseen-original-revision',
+        }).catch((error: unknown) => error);
+        const foreignError = await mutate('foreign-only');
+        const absentError = await mutate('absent-everywhere');
+        expect(foreignError).toBeInstanceOf(Error);
+        expect(foreignError).toMatchObject({
+          httpStatus: 409, code: 'REVISION_CONFLICT', retryable: false,
+        });
+        expect(absentError).toMatchObject({
+          message: (foreignError as Error).message,
+          httpStatus: 409, code: 'REVISION_CONFLICT', retryable: false,
+        });
+      }
       // Foreign row untouched.
       const [foreign] = await sql<{ deleted_at: string | null; name: string }[]>`
         SELECT deleted_at, name FROM entity_relationship_types

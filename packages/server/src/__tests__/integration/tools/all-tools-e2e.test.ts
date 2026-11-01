@@ -213,6 +213,11 @@ describe("all agent MCP tools — registry-driven e2e (model-free)", () => {
 				coverage: "round-trip",
 				note: "lists the org's views metadata (empty when none saved)",
 			},
+			manage_navigation: {
+				args: { action: "get", projection: "display" },
+				coverage: "reachable",
+				note: "reads the display-safe workspace sidebar document and revision",
+			},
 			open_view: {
 				args: { key: "coverage-board" },
 				coverage: "round-trip",

@@ -174,7 +174,7 @@ describe('typed references and authored source relationships', () => {
     const healthy = await ws.owner.entities.link({ from_entity_id: stored, to_entity_id: Number(peer.entity.id), relationship_type_slug: 'related-item' });
     await ws.owner.entities.unlink({ relationship_id: Number(healthy.relationship.id) });
     if (state === 'deleted' || state === 'slug-reused') {
-      await ws.owner.entity_schema.manage({ schema_type: 'entity_type', action: 'delete', slug });
+      await freshSchemaEditor(ws.owner.entity_schema).deleteType({ slug });
       await expect(ws.owner.entities.get({ entity_id: 'historical-key', entity_type: slug })).rejects.toMatchObject({ httpStatus: 404 });
       if (state === 'slug-reused') {
         await ws.owner.entity_schema.createType({ slug, name: 'Different source', backing: { sql: "SELECT 'historical-key' AS id" },

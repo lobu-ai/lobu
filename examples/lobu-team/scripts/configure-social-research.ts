@@ -15,6 +15,7 @@ export async function configureSocialResearch(
     automation_id: automationId,
   })) as {
     automation: {
+      revision: string;
       slug: string;
       prompt: string;
       automation_run?: { status?: string };
@@ -50,16 +51,24 @@ export async function configureSocialResearch(
   )
     throw new Error("X reader shape changed; inspect it before updating");
   const expandedReader = expandXTimelineReader(receiptReader);
-  const check = (value: unknown) => {
+  const readRevision = (value: unknown): string => {
     if ((value as { status?: string })?.status === "pending_approval")
       throw new Error("Social configuration is awaiting policy approval");
+    const revision = (value as { revision?: unknown })?.revision;
+    if (typeof revision !== "string" || !revision)
+      throw new Error("Social configuration response is missing its revision");
+    return revision;
   };
-  check(
+  let revision = readRevision(automation);
+  revision = readRevision(
     await client.automations.update({
       automation_id: automationId,
+      expected_revision: revision,
       triggers: [],
     })
   );
+  // This read checks the active run; only our write receipt advances the edit
+  // baseline, so a concurrent configuration change still conflicts below.
   ({ automation } = (await client.automations.get({
     automation_id: automationId,
   })) as { automation: typeof automation });
@@ -69,15 +78,17 @@ export async function configureSocialResearch(
     )
   )
     throw new Error("Wait for the active social scan to finish");
-  check(
+  revision = readRevision(
     await client.automations.setReactionScript({
       automation_id: automationId,
+      expected_revision: revision,
       reaction_script: reactionScript,
     })
   );
-  check(
+  revision = readRevision(
     await client.automations.createVersion({
       automation_id: automationId,
+      expected_revision: revision,
       name: "Social research and engagement",
       description:
         "Read social inboxes and LinkedIn, X and TikTok posts individually, verify source evidence, and prepare replies for human submission.",
@@ -97,9 +108,10 @@ export async function configureSocialResearch(
       set_as_current: true,
     })
   );
-  check(
+  readRevision(
     await client.automations.update({
       automation_id: automationId,
+      expected_revision: revision,
       managed_agent_id: agentId,
       device_worker_id: null,
       agent_kind: null,

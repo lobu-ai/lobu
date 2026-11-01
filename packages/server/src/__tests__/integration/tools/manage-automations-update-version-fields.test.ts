@@ -65,6 +65,18 @@ const baseCtx = (orgIdValue: string, userId: string): AuthContext => ({
 	allowCrossOrg: false,
 });
 
+// Each test reads the shared fixture before planning its edit. Sequential writes
+// within one test advance only from their own successful mutation receipts.
+async function readRevision(automationId: string, ctx: AuthContext): Promise<string> {
+	const detail = await executeTool("get_automation", {
+		automation_id: automationId,
+	}, TEST_ENV, ctx) as { automation?: { revision?: unknown } };
+	if (typeof detail.automation?.revision !== "string") {
+		throw new Error("Automation fixture did not return its revision");
+	}
+	return detail.automation.revision;
+}
+
 describe("manage_automations update — version-owned fields are not silently dropped", () => {
 	let orgId: string;
 	let ownerId: string;
@@ -161,15 +173,15 @@ describe("manage_automations update — version-owned fields are not silently dr
 
 	it("returns saved execution settings in Automation detail and preserves an explicit clear", async () => {
 		const execution_config = { effort: "xhigh", timeout_seconds: 17 };
-		await executeTool("manage_automations", {
-			action: "update", automation_id: automationId, execution_config,
-		}, TEST_ENV, ownerCtx);
+		const updated = await executeTool("manage_automations", {
+			action: "update", automation_id: automationId, expected_revision: await readRevision(automationId, ownerCtx), execution_config,
+		}, TEST_ENV, ownerCtx) as { revision: string };
 		const detail = await executeTool("get_automation", {
 			automation_id: automationId,
 		}, TEST_ENV, ownerCtx) as { automation?: { execution_config?: unknown } };
 		expect(detail.automation?.execution_config).toEqual(execution_config);
 		await executeTool("manage_automations", {
-			action: "update", automation_id: automationId, execution_config: null,
+			action: "update", automation_id: automationId, expected_revision: updated.revision, execution_config: null,
 		}, TEST_ENV, ownerCtx);
 		const cleared = await executeTool("get_automation", {
 			automation_id: automationId,
@@ -181,7 +193,7 @@ describe("manage_automations update — version-owned fields are not silently dr
 		await expect(
 			executeTool(
 				"manage_automations",
-				{ action: "update", automation_id: automationId, name: "Renamed" },
+				{ action: "update", automation_id: automationId, expected_revision: await readRevision(automationId, ownerCtx), name: "Renamed" },
 				TEST_ENV,
 				ownerCtx
 			)
@@ -194,7 +206,7 @@ describe("manage_automations update — version-owned fields are not silently dr
 		await expect(
 			executeTool(
 				"manage_automations",
-				{ action: "update", automation_id: automationId, description: "New desc" },
+				{ action: "update", automation_id: automationId, expected_revision: await readRevision(automationId, ownerCtx), description: "New desc" },
 				TEST_ENV,
 				ownerCtx
 			)
@@ -205,7 +217,7 @@ describe("manage_automations update — version-owned fields are not silently dr
 		await expect(
 			executeTool(
 				"manage_automations",
-				{ action: "update", automation_id: automationId, prompt: "New prompt" },
+				{ action: "update", automation_id: automationId, expected_revision: await readRevision(automationId, ownerCtx), prompt: "New prompt" },
 				TEST_ENV,
 				ownerCtx
 			)
@@ -219,6 +231,7 @@ describe("manage_automations update — version-owned fields are not silently dr
 				{
 					action: "update",
 					automation_id: automationId,
+					expected_revision: await readRevision(automationId, ownerCtx),
 					sources: [{ name: "content", query: "SELECT id FROM events" }],
 				},
 				TEST_ENV,
@@ -237,6 +250,7 @@ describe("manage_automations update — version-owned fields are not silently dr
 				{
 					action: "update",
 					automation_id: automationId,
+					expected_revision: await readRevision(automationId, ownerCtx),
 					name: "Should Not Apply",
 					triggers: [{ kind: "schedule", cron: "0 9 * * *" }],
 				},
@@ -254,6 +268,7 @@ describe("manage_automations update — version-owned fields are not silently dr
 			{
 				action: "update",
 				automation_id: automationId,
+				expected_revision: await readRevision(automationId, ownerCtx),
 				triggers: [{ kind: "schedule", cron: "0 9 * * *" }],
 			},
 			TEST_ENV,
@@ -269,6 +284,7 @@ describe("manage_automations update — version-owned fields are not silently dr
 			{
 				action: "create_version",
 				automation_id: automationId,
+				expected_revision: await readRevision(automationId, ownerCtx),
 				name: "Renamed Via Version",
 				set_as_current: true,
 			},
@@ -284,12 +300,13 @@ describe("manage_automations update — version-owned fields are not silently dr
 			{
 				action: "update",
 				automation_id: previewUpdate.automationId,
+				expected_revision: await readRevision(previewUpdate.automationId, ownerCtx),
 				triggers: previewUpdate.triggers,
 				tags: ["system:chat-link", "edited"],
 			},
 			TEST_ENV,
 			ownerCtx,
-		)) as { updated_fields?: string[] };
+		)) as { updated_fields?: string[]; revision: string };
 		expect(result.updated_fields).toContain("tags");
 
 		const changedTriggers = previewUpdate.triggers.map((trigger) =>
@@ -306,6 +323,7 @@ describe("manage_automations update — version-owned fields are not silently dr
 				{
 					action: "update",
 					automation_id: previewUpdate.automationId,
+					expected_revision: result.revision,
 					triggers: changedTriggers,
 				},
 				TEST_ENV,
@@ -320,6 +338,7 @@ describe("manage_automations update — version-owned fields are not silently dr
 			{
 				action: "create_version",
 				automation_id: previewVersion.automationId,
+				expected_revision: await readRevision(previewVersion.automationId, ownerCtx),
 				prompt: "Updated preview response instructions.",
 			},
 			TEST_ENV,
@@ -401,6 +420,7 @@ describe("manage_automations create_version — source replacement semantics (#2
 			{
 				action: "create_version",
 				automation_id: automationId,
+				expected_revision: await readRevision(automationId, ownerCtx),
 				prompt: "Analyze the data concisely.",
 			},
 			TEST_ENV,
@@ -421,6 +441,7 @@ describe("manage_automations create_version — source replacement semantics (#2
 			{
 				action: "create_version",
 				automation_id: automationId,
+				expected_revision: await readRevision(automationId, ownerCtx),
 				change_notes: "metadata only",
 			},
 			TEST_ENV,
@@ -438,6 +459,7 @@ describe("manage_automations create_version — source replacement semantics (#2
 			{
 				action: "create_version",
 				automation_id: automationId,
+				expected_revision: await readRevision(automationId, ownerCtx),
 				sources: [{ name: "alpha", query: "SELECT id FROM events" }],
 			},
 			TEST_ENV,
@@ -455,6 +477,7 @@ describe("manage_automations create_version — source replacement semantics (#2
 			{
 				action: "create_version",
 				automation_id: automationId,
+				expected_revision: await readRevision(automationId, ownerCtx),
 				sources: [],
 			},
 			TEST_ENV,
@@ -469,28 +492,30 @@ describe("manage_automations create_version — source replacement semantics (#2
 	it("a chip in the prompt does not author sources — only `sources` does", async () => {
 		// `prompt` is compiled skill text since #2331 (issue #2320 must-fix 2).
 		// The block above left this Automation sourceless; give it one back.
-		await executeTool(
+		const restored = (await executeTool(
 			"manage_automations",
 			{
 				action: "create_version",
 				automation_id: automationId,
+				expected_revision: await readRevision(automationId, ownerCtx),
 				sources: [{ name: "alpha", query: "SELECT id FROM events" }],
 			},
 			TEST_ENV,
 			ownerCtx,
-		);
+		)) as { revision: string };
 
 		const chip = `@[sql:s1:Recent](#sql=${encodeURIComponent("SELECT id FROM events WHERE 1=0")})`;
-		await executeTool(
+		const reworded = (await executeTool(
 			"manage_automations",
 			{
 				action: "create_version",
 				automation_id: automationId,
+				expected_revision: restored.revision,
 				prompt: `Look at ${chip} closely.`,
 			},
 			TEST_ENV,
 			ownerCtx,
-		);
+		)) as { revision: string };
 		expect((await fetchSources()).map((s) => s.name)).toEqual(["alpha"]);
 
 		// Clearing is an explicit act, not a side effect of editing text.
@@ -499,6 +524,7 @@ describe("manage_automations create_version — source replacement semantics (#2
 			{
 				action: "create_version",
 				automation_id: automationId,
+				expected_revision: reworded.revision,
 				prompt: "Look at nothing in particular.",
 				sources: [],
 			},
@@ -525,15 +551,14 @@ describe("manage_automations — version reads report assignment-owned sources",
 	const call = (args: Record<string, unknown>) =>
 		executeTool("manage_automations", args, TEST_ENV, ownerCtx);
 
-	async function createAutomation(slug: string): Promise<string> {
-		const created = (await call({
+	async function createAutomation(slug: string): Promise<{ automation_id: string; revision: string }> {
+		return (await call({
 			action: "create",
 			slug,
 			name: "Digest",
 			prompt: "Write the digest.",
 			managed_agent_id: agentId,
-		})) as { automation_id?: string };
-		return created.automation_id!;
+		})) as { automation_id: string; revision: string };
 	}
 
 	async function expectEveryListedVersionResolves(automationId: string) {
@@ -565,13 +590,14 @@ describe("manage_automations — version reads report assignment-owned sources",
 	});
 
 	it("defaults to the content source and get_version_details reports the stored sources", async () => {
-		const automationId = await createAutomation("bsh-digest");
+		const { automation_id: automationId, revision } = await createAutomation("bsh-digest");
 		const [created] = await getTestDb()`SELECT sources FROM automations WHERE id = ${automationId}`;
 		expect(created.sources).toEqual([{ name: "content", query: DEFAULT_AUTOMATION_SOURCE_QUERY }]);
 
 		await call({
 			action: "create_version",
 			automation_id: automationId,
+			expected_revision: revision,
 			sources: [{ name: "recent", query: RECENT_QUERY }],
 		});
 		const details = (await call({ action: "get_version_details", automation_id: automationId })) as {
@@ -584,8 +610,8 @@ describe("manage_automations — version reads report assignment-owned sources",
 	});
 
 	it("gets group-root versions through an assignment id", async () => {
-		const automationId = await createAutomation("bsh-assignment");
-		await call({ action: "create_version", automation_id: automationId, prompt: "Write the digest, briefly." });
+		const { automation_id: automationId, revision } = await createAutomation("bsh-assignment");
+		await call({ action: "create_version", automation_id: automationId, expected_revision: revision, prompt: "Write the digest, briefly." });
 		const entity = await createTestEntity({ name: "Source Honesty Co", organization_id: orgId });
 		const [root] = await getTestDb()<{ current_version_id: number }>`
 			SELECT current_version_id FROM automations WHERE id = ${automationId}

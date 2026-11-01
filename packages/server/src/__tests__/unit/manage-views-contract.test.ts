@@ -40,10 +40,13 @@ describe("manage_views union contract", () => {
 		}
 	});
 
-	it("requires source_code for set and key for get/remove, at the schema", () => {
+	it("requires source_code for set, key for get/remove, and expected_revision for remove", () => {
 		expect(messageOf(() => validate({ action: "set" }))).toMatch(/source_code/);
 		expect(messageOf(() => validate({ action: "get" }))).toMatch(/key/);
 		expect(messageOf(() => validate({ action: "remove" }))).toMatch(/key/);
+		expect(messageOf(() => validate({ action: "remove", key: "pipeline" }))).toMatch(
+			/expected_revision/,
+		);
 	});
 
 	it("rejects a field another action takes instead of ignoring it", () => {
@@ -60,19 +63,29 @@ describe("manage_views union contract", () => {
 		expect(
 			validate({
 				action: "set",
+				expected_revision: "original-view-revision",
 				source_code: "export default function P() { return null; }",
 				compiled_code: "console.log(1);",
 				last_writer: "apply:1",
 			}),
-		).toMatchObject({ action: "set", last_writer: "apply:1" });
+		).toMatchObject({
+			action: "set",
+			expected_revision: "original-view-revision",
+			last_writer: "apply:1",
+		});
+		expect(validate({ action: "set", source_code: "export default () => null;" })).toEqual({
+			action: "set",
+			source_code: "export default () => null;",
+		});
 		expect(validate({ action: "get", key: "pipeline" })).toEqual({
 			action: "get",
 			key: "pipeline",
 		});
 		expect(validate({ action: "list" })).toEqual({ action: "list" });
-		expect(validate({ action: "remove", key: "pipeline" })).toEqual({
+		expect(validate({ action: "remove", key: "pipeline", expected_revision: "original-view-revision" })).toEqual({
 			action: "remove",
 			key: "pipeline",
+			expected_revision: "original-view-revision",
 		});
 	});
 });
@@ -109,6 +122,6 @@ describe("manage_views wire schema", () => {
 		expect(lineFor("set")).toContain("Required: source_code.");
 		expect(lineFor("get")).toContain("Required: key.");
 		expect(lineFor("list")).not.toContain("Required:");
-		expect(lineFor("remove")).toContain("Required: key.");
+		expect(lineFor("remove")).toContain("Required: expected_revision, key.");
 	});
 });

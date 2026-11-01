@@ -22,6 +22,7 @@ const scripts = await buildExternalSocial(policy);
 
 function fixture() {
   const automation = {
+    revision: "external-0",
     version: 3,
     automation_name: "Social",
     description: "Research",
@@ -36,16 +37,31 @@ function fixture() {
     reaction_script: "old",
     reactions_guidance: "Owner guidance: notify the owner.",
   };
+  let writes = 0;
+  const assertRevision = (expected: unknown) => {
+    if (expected !== automation.revision)
+      throw Object.assign(new Error("Configuration changed"), {
+        code: "REVISION_CONFLICT",
+      });
+  };
   const client = {
     automations: {
-      get: mock(async () => ({ automation })),
-      setReactionScript: mock(async ({ reaction_script }: any) => {
-        automation.reaction_script = reaction_script;
-        return { status: "completed" };
-      }),
+      get: mock(async () => ({ automation: structuredClone(automation) })),
+      setReactionScript: mock(
+        async ({ reaction_script, expected_revision }: any) => {
+          assertRevision(expected_revision);
+          automation.reaction_script = reaction_script;
+          automation.revision = `external-${++writes}`;
+          return { status: "completed", revision: automation.revision };
+        }
+      ),
       createVersion: mock(async (args: any) => {
-        Object.assign(automation, args, { version: automation.version + 1 });
-        return { status: "completed" };
+        assertRevision(args.expected_revision);
+        Object.assign(automation, args, {
+          version: automation.version + 1,
+          revision: `external-${++writes}`,
+        });
+        return { status: "completed", revision: automation.revision };
       }),
     },
   };
@@ -88,6 +104,23 @@ test("version drift and active windows stop updates before mutation", async () =
   h.automation.version = 4;
   await expect(h.run()).rejects.toThrow("changed");
   expect(h.client.automations.setReactionScript).not.toHaveBeenCalled();
+});
+test("a concurrent edit without a new version survives the status read", async () => {
+  const h = fixture();
+  let reads = 0;
+  h.client.automations.get.mockImplementation(async () => {
+    if (++reads === 2) {
+      h.automation.reaction_script = "Owner changed the reaction";
+      h.automation.revision = "external-concurrent";
+    }
+    return { automation: structuredClone(h.automation) };
+  });
+  await expect(h.run()).rejects.toMatchObject({ code: "REVISION_CONFLICT" });
+  expect(h.automation.reactions_guidance).toBe(
+    "Owner guidance: notify the owner."
+  );
+  expect(h.automation.version).toBe(3);
+  expect(h.automation.reaction_script).toBe("Owner changed the reaction");
 });
 test("prompt upgrade is idempotent and embeds executable functions without local paths", () => {
   const prompt = externalSocialPrompt("Existing instructions", scripts);

@@ -17,6 +17,7 @@ describe('Automation response byte budget', () => {
   let feedId: number;
   let agentId: string;
   let expectedIds: number[];
+  let readWindow: { since: string; until: string };
 
   beforeAll(async () => {
     await cleanupTestDatabase();
@@ -49,9 +50,15 @@ describe('Automation response byte budget', () => {
         'response-budget-' || n, 'Large Unicode event ' || n, 'text', repeat('😀', 4100),
         'content', 'test.connector', NOW() - (n + 120) * INTERVAL '1 second', NOW() - INTERVAL '2 minutes'
       FROM generate_series(1, ${ROW_COUNT}) n
-      RETURNING id
+      RETURNING id, occurred_at
     `;
     expectedIds = inserted.map(row => Number(row.id)).sort((a, b) => a - b);
+    // Anchor the byte-budget reads to the fixture, even when the suite crosses UTC midnight.
+    const timestamps = inserted.map(row => new Date(row.occurred_at).getTime());
+    readWindow = {
+      since: new Date(Math.min(...timestamps) - 1).toISOString(),
+      until: new Date(Math.max(...timestamps) + 1).toISOString(),
+    };
   });
 
   afterAll(async () => {
@@ -126,7 +133,7 @@ describe('Automation response byte budget', () => {
   it('bounds the complete UTF-8 envelope and advances from its last retained row', async () => {
     const created = await automation('response-budget-envelope');
     const result = await api.knowledge.read({
-      automation_id: Number(created.automation_id), since: 'today', until: 'today', limit: 500,
+      automation_id: Number(created.automation_id), ...readWindow, limit: 500,
     }) as {
       content: Array<{ id: number; payload_text: string; payload_truncated: boolean }>;
       sources: Record<string, Array<{ id: number; note?: string }>>;
@@ -161,7 +168,7 @@ describe('Automation response byte budget', () => {
       outputs: { signals: { event: 'observation' } },
     }) as { automation_id: string };
     const result = await api.knowledge.read({
-      automation_id: Number(created.automation_id), since: 'today', until: 'today', limit: 500,
+      automation_id: Number(created.automation_id), ...readWindow, limit: 500,
     }) as {
       content: Array<{ id: number }>;
       sources: Record<string, Array<{ id: number; note?: string }>>;
@@ -181,7 +188,7 @@ describe('Automation response byte budget', () => {
     const created = await automation(`response-budget-context-${contextBytes}`, contextBytes);
     const result = await wire.querySdk<{ success: boolean; error?: { message: string } }>(
       `export default async (_ctx, client) => {
-        const r = await client.knowledge.read({ automation_id: ${created.automation_id}, since: 'today', until: 'today', limit: 500 });
+        const r = await client.knowledge.read({ automation_id: ${created.automation_id}, ...${JSON.stringify(readWindow)}, limit: 500 });
         return { count: r.content.length };
       }`
     );

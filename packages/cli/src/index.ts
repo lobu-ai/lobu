@@ -739,12 +739,20 @@ Memory:
       .command("update <agentId>")
       .description("Update agent metadata")
       .option("--name <name>", "Display name")
-      .option("--description <text>", "Description"),
+      .option("--description <text>", "Description")
+      .option(
+        "--expected-revision <revision>",
+        "Original edit revision (otherwise read before saving)"
+      ),
     { org: true, json: true }
   ).action(
     async (
       agentId: string,
-      options: AgentCommandOptions & { name?: string; description?: string }
+      options: AgentCommandOptions & {
+        name?: string;
+        description?: string;
+        expectedRevision?: string;
+      }
     ) => {
       const { agentUpdateCommand } = await import("./commands/agent.js");
       await agentUpdateCommand(agentId, options);
@@ -755,12 +763,19 @@ Memory:
     agent
       .command("delete <agentId>")
       .description("Delete an agent")
-      .option("--yes", "Confirm deletion"),
+      .option("--yes", "Confirm deletion")
+      .option(
+        "--expected-revision <revision>",
+        "Original edit revision (otherwise read before deleting)"
+      ),
     { org: true }
   ).action(
     async (
       agentId: string,
-      options: AgentCommandOptions & { yes?: boolean }
+      options: AgentCommandOptions & {
+        yes?: boolean;
+        expectedRevision?: string;
+      }
     ) => {
       const { agentDeleteCommand } = await import("./commands/agent.js");
       await agentDeleteCommand(agentId, options);
@@ -774,7 +789,7 @@ Memory:
   withCommonOpts(
     agentConfig
       .command("get <agentId>")
-      .description("Print agent config JSON")
+      .description("Print agent config JSON with its revision")
       .option("--output <file>", "Write JSON to a file"),
     { org: true }
   ).action(
@@ -791,15 +806,16 @@ Memory:
     agentConfig
       .command("patch <agentId>")
       .description("Patch agent config from a JSON file")
-      .requiredOption(
-        "--file <file>",
-        "JSON file with config fields to update"
+      .requiredOption("--file <file>", "JSON file with config fields to update")
+      .option(
+        "--expected-revision <revision>",
+        "Original edit revision (also accepted as revision or expected_revision in the file)"
       ),
     { org: true, json: true }
   ).action(
     async (
       agentId: string,
-      options: AgentCommandOptions & { file: string }
+      options: AgentCommandOptions & { file: string; expectedRevision?: string }
     ) => {
       const { agentConfigPatchCommand } = await import("./commands/agent.js");
       await agentConfigPatchCommand(agentId, options);

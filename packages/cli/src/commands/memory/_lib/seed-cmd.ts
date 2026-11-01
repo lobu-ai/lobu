@@ -222,6 +222,28 @@ async function seedEntity(
   }
 }
 
+function requireRelationshipRevision(
+  result: Record<string, unknown>,
+  slug: string
+): string {
+  if (result.status === "pending_approval") {
+    throw new ApiError(
+      `Relationship type "${slug}" is waiting for approval. Review the proposal before seeding its rules.`
+    );
+  }
+  const relationship = result.relationship_type as
+    | { revision?: unknown }
+    | null
+    | undefined;
+  const revision = result.revision ?? relationship?.revision;
+  if (typeof revision !== "string" || revision.length === 0) {
+    throw new ApiError(
+      `The server did not return a configuration revision for relationship type "${slug}". Review the saved schema before continuing.`
+    );
+  }
+  return revision;
+}
+
 async function seedRelationshipType(
   rel: DesiredRelationshipType,
   ctx: SeedContext
@@ -244,44 +266,72 @@ async function seedRelationshipType(
     }
     return;
   }
-  try {
-    await callTool(ctx, "manage_entity_schema", {
-      ...createPayload,
-      action: "create",
+  const initial = await callTool(ctx, "manage_entity_schema", {
+    schema_type: "relationship_type",
+    action: "get",
+    slug,
+  });
+  const existing = initial.relationship_type as
+    | { organization_slug?: string }
+    | null
+    | undefined;
+  // A public catalog can have the same slug. Only our own row is an update;
+  // a concurrent creator after this read must not be adopted as our baseline.
+  const updating = existing?.organization_slug === ctx.orgSlug;
+  const ruleKey = (source: string, target: string) => `${source}\t${target}`;
+  const knownRules = new Set<string>();
+  if (updating) {
+    const result = await callTool(ctx, "manage_entity_schema", {
+      schema_type: "relationship_type",
+      action: "list_rules",
+      slug,
     });
-    printText(`  + relationship_type: ${slug}`);
-  } catch (e) {
-    if (e instanceof Error && e.message?.includes("already exists")) {
-      await callTool(ctx, "manage_entity_schema", {
-        ...createPayload,
-        action: "update",
-      });
-      printText(`  = relationship_type: ${slug} (updated)`);
-    } else {
-      throw e;
+    const existingRules = (result.rules ?? []) as Array<{
+      source_entity_type_slug: string;
+      target_entity_type_slug: string;
+    }>;
+    for (const rule of existingRules) {
+      knownRules.add(
+        ruleKey(rule.source_entity_type_slug, rule.target_entity_type_slug)
+      );
     }
   }
+  // Keep the parent revision from the original read. Its atomic update guard
+  // also validates the rule snapshot if anything changed between these reads.
+  const saved = await callTool(ctx, "manage_entity_schema", {
+    ...createPayload,
+    action: updating ? "update" : "create",
+    ...(updating
+      ? { expected_revision: requireRelationshipRevision(initial, slug) }
+      : {}),
+  });
+  let revision = requireRelationshipRevision(saved, slug);
+  printText(
+    updating
+      ? `  = relationship_type: ${slug} (updated)`
+      : `  + relationship_type: ${slug}`
+  );
 
   for (const rule of rules) {
     const source = String(rule.source ?? "");
     const target = String(rule.target ?? "");
     if (!source || !target) continue;
-    try {
-      await callTool(ctx, "manage_entity_schema", {
-        schema_type: "relationship_type",
-        action: "add_rule",
-        slug,
-        source_entity_type_slug: source,
-        target_entity_type_slug: target,
-      });
-      printText(`    + rule: ${source} -> ${target}`);
-    } catch (e) {
-      if (e instanceof Error && e.message?.includes("already exists")) {
-        printText(`    = rule: ${source} -> ${target} (exists)`);
-      } else {
-        throw e;
-      }
+    const key = ruleKey(source, target);
+    if (knownRules.has(key)) {
+      printText(`    = rule: ${source} -> ${target} (exists)`);
+      continue;
     }
+    const result = await callTool(ctx, "manage_entity_schema", {
+      schema_type: "relationship_type",
+      action: "add_rule",
+      slug,
+      source_entity_type_slug: source,
+      target_entity_type_slug: target,
+      expected_revision: revision,
+    });
+    revision = requireRelationshipRevision(result, slug);
+    knownRules.add(key);
+    printText(`    + rule: ${source} -> ${target}`);
   }
 }
 
@@ -526,10 +576,8 @@ export async function seedMemoryWorkspace(
     }
   }
 
-  // Platform-owned slugs are skipped for the same reason apply skips them: the
-  // create returns "already exists", the fallback issues an update, and the
-  // schema surface rejects that outright once the type is classified as
-  // authorization-bearing — aborting the whole seed for any config declaring one.
+  // Platform-owned slugs are skipped for the same reason apply skips them:
+  // their authorization-bearing schema cannot be changed through this surface.
   const seedableRelationshipTypes = relationshipTypes.filter(
     (rel) => !isPlatformOwnedRelationshipSlug(rel.slug)
   );

@@ -7,6 +7,7 @@ import {
 } from "node:fs/promises";
 import { join } from "node:path";
 import chalk from "chalk";
+import type { ApiClient } from "../internal/api-client.js";
 import { resolveApiClient } from "../internal/index.js";
 import { printJson } from "../internal/output.js";
 import { agentCountsText, fetchAgents } from "./_lib/agents-view.js";
@@ -14,6 +15,30 @@ import { agentCountsText, fetchAgents } from "./_lib/agents-view.js";
 import type { CloudCommandOptions as AgentCommandOptions } from "./_lib/cloud-options.js";
 
 export type { AgentCommandOptions };
+
+async function agentEditRevision(
+  client: ApiClient,
+  agentPath: string,
+  ...provided: unknown[]
+): Promise<string> {
+  const revisions = provided.filter((value) => value !== undefined);
+  if (revisions.length === 0) {
+    const current = await client.get<{ revision: string }>(
+      `${agentPath}/config`
+    );
+    revisions.push(current.revision);
+  }
+  const revision = revisions[0];
+  if (typeof revision !== "string" || revision.length === 0) {
+    throw new Error("An original, non-empty agent revision is required.");
+  }
+  if (revisions.some((value) => value !== revision)) {
+    throw new Error(
+      "Conflicting revisions in --expected-revision and the config file. Keep the revision used to prepare the edit."
+    );
+  }
+  return revision;
+}
 
 export async function agentListCommand(
   options: AgentCommandOptions = {}
@@ -76,7 +101,11 @@ export async function agentCreateCommand(
 
 export async function agentUpdateCommand(
   agentId: string,
-  options: AgentCommandOptions & { name?: string; description?: string } = {}
+  options: AgentCommandOptions & {
+    name?: string;
+    description?: string;
+    expectedRevision?: string;
+  } = {}
 ): Promise<void> {
   const updates: { name?: string; description?: string } = {};
   if (options.name !== undefined) updates.name = options.name;
@@ -90,10 +119,16 @@ export async function agentUpdateCommand(
   }
 
   const { client, orgSlug } = await resolveApiClient(options);
-  const result = await client.patch<unknown>(
-    `/api/${orgSlug}/agents/${encodeURIComponent(agentId)}`,
-    updates
+  const agentPath = `/api/${orgSlug}/agents/${encodeURIComponent(agentId)}`;
+  const expectedRevision = await agentEditRevision(
+    client,
+    agentPath,
+    options.expectedRevision
   );
+  const result = await client.patch<unknown>(agentPath, {
+    ...updates,
+    expected_revision: expectedRevision,
+  });
 
   if (options.json) {
     printJson(result);
@@ -104,14 +139,28 @@ export async function agentUpdateCommand(
 
 export async function agentDeleteCommand(
   agentId: string,
-  options: AgentCommandOptions & { yes?: boolean } = {}
+  options: AgentCommandOptions & {
+    yes?: boolean;
+    expectedRevision?: string;
+  } = {}
 ): Promise<void> {
   if (!options.yes) {
     console.error(chalk.red("\n  Refusing to delete without --yes.\n"));
     process.exit(1);
   }
   const { client, orgSlug } = await resolveApiClient(options);
-  await client.delete(`/api/${orgSlug}/agents/${encodeURIComponent(agentId)}`);
+  const agentPath = `/api/${orgSlug}/agents/${encodeURIComponent(agentId)}`;
+  const expectedRevision = await agentEditRevision(
+    client,
+    agentPath,
+    options.expectedRevision
+  );
+  await client.request(
+    "DELETE",
+    agentPath,
+    { expected_revision: expectedRevision },
+    { okStatuses: [200, 204] }
+  );
   console.log(chalk.green(`\n  Deleted agent ${agentId}.\n`));
 }
 
@@ -135,7 +184,11 @@ export async function agentConfigGetCommand(
 
 export async function agentConfigPatchCommand(
   agentId: string,
-  options: AgentCommandOptions & { file: string; json?: boolean }
+  options: AgentCommandOptions & {
+    file: string;
+    json?: boolean;
+    expectedRevision?: string;
+  }
 ): Promise<void> {
   if (!options.file) throw new Error("--file is required.");
   const raw = await readFile(options.file, "utf-8");
@@ -157,10 +210,24 @@ export async function agentConfigPatchCommand(
     process.exit(1);
   }
   const { client, orgSlug } = await resolveApiClient(options);
-  const result = await client.patch<unknown>(
-    `/api/${orgSlug}/agents/${encodeURIComponent(agentId)}/config`,
-    updates
+  const agentPath = `/api/${orgSlug}/agents/${encodeURIComponent(agentId)}`;
+  // Exported config files carry their read revision; keep that draft baseline
+  // instead of replacing it with a newer read when the file is patched later.
+  const { revision, expected_revision, ...fields } = updates as Record<
+    string,
+    unknown
+  >;
+  const expectedRevision = await agentEditRevision(
+    client,
+    agentPath,
+    options.expectedRevision,
+    expected_revision,
+    revision
   );
+  const result = await client.patch<unknown>(`${agentPath}/config`, {
+    ...fields,
+    expected_revision: expectedRevision,
+  });
 
   if (options.json) {
     printJson(result);

@@ -24,11 +24,15 @@ export async function configureExternalSocial(
     throw new Error("Expected an external Automation");
   if (["claimed", "pending", "running"].includes(a.automation_run?.status))
     throw new Error("Wait for the active external window");
-  const check = (result: any) => {
-    if (result?.status === "pending_approval")
+  const readRevision = (result: unknown): string => {
+    if ((result as { status?: string })?.status === "pending_approval")
       throw new Error("Configuration awaits policy approval");
-    return result;
+    const revision = (result as { revision?: unknown })?.revision;
+    if (typeof revision !== "string" || !revision)
+      throw new Error("Configuration response is missing its revision");
+    return revision;
   };
+  let revision = readRevision(a);
   const prompt = socialOwnerPrompt(a.prompt);
   // The claim response carries pinned reactions_guidance, but not prompt.
   // Keep generated code only there, alongside the owner instructions: a
@@ -39,12 +43,15 @@ export async function configureExternalSocial(
   // setReactionScript is a separate existing mutation. Retry reconciles both
   // values; no scheduled/external processing mode is disabled or replaced.
   if (a.reaction_script !== reaction)
-    check(
+    revision = readRevision(
       await client.automations.setReactionScript({
         automation_id: automationId,
+        expected_revision: revision,
         reaction_script: reaction,
       })
     );
+  // Check run/version drift without blessing our prepared edit with a newer
+  // revision. Subsequent writes keep the initial token or our own receipt.
   const { automation: fresh } = (await client.automations.get({
     automation_id: automationId,
   })) as { automation: any };
@@ -56,9 +63,10 @@ export async function configureExternalSocial(
       "Automation changed during configuration; reconcile before creating a version"
     );
   if (a.prompt !== prompt || a.reactions_guidance !== guidance)
-    check(
+    readRevision(
       await client.automations.createVersion({
         automation_id: automationId,
+        expected_revision: revision,
         name: a.automation_name,
         description: a.description,
         prompt,

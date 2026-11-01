@@ -125,7 +125,10 @@ export function navigationTargetIsActive(
 
 export const GetNavigationAction = Type.Object(
   {
-    action: Type.Literal("get"),
+    action: Type.Literal("get", {
+      description:
+        "Read the workspace sidebar document and its revision. Owner/admin reads preserve the editable document; other readers receive only reachable links. Use projection: 'display' to filter links for an editor too.",
+    }),
     projection: Type.Optional(
       Type.Literal("display", {
         description:
@@ -137,7 +140,10 @@ export const GetNavigationAction = Type.Object(
 );
 export const SetNavigationAction = Type.Object(
   {
-    action: Type.Literal("set"),
+    action: Type.Literal("set", {
+      description:
+        "Replace the workspace sidebar using expected_revision from the original read. Pass document: null to restore defaults. Requires owner/admin access; stale or missing revisions fail with REVISION_CONFLICT.",
+    }),
     document: Type.Union([NavigationDocumentSchema, Type.Null()], {
       description:
         "Workspace sidebar sections and links. Null restores the default navigation.",

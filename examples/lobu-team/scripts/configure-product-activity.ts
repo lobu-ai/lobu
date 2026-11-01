@@ -13,6 +13,18 @@ function needsApproval(result: unknown): boolean {
   );
 }
 
+function savedRevision(result: unknown): string {
+  if (
+    typeof result !== "object" ||
+    result === null ||
+    !("revision" in result) ||
+    typeof result.revision !== "string" ||
+    !result.revision
+  )
+    throw new Error("The saved Automation did not return its revision");
+  return result.revision;
+}
+
 /** Selected-workspace SDK setup. The Automation owns cadence; the external MCP client owns wakeups.
  * Keep this Automation out of broad `lobu apply --prune` operations.
  * Supply the raw sibling reaction source; no generated script is stored here.
@@ -25,12 +37,17 @@ export async function configureProductActivityDigest(
   const current = (await client.automations.get({
     automation_id: automationId,
   })) as {
-    automation: { slug: string; automation_run?: { status?: string } };
+    automation: {
+      slug: string;
+      revision: string;
+      automation_run?: { status?: string };
+    };
   };
   if (current.automation.slug !== "product-activity-digest")
     throw new Error("Expected the existing product-activity-digest Automation");
   const schedule = await client.automations.update({
     automation_id: automationId,
+    expected_revision: current.automation.revision,
     triggers: [],
   });
   if (needsApproval(schedule)) return schedule;
@@ -47,6 +64,7 @@ export async function configureProductActivityDigest(
     );
   const reaction = await client.automations.setReactionScript({
     automation_id: automationId,
+    expected_revision: savedRevision(schedule),
     reaction_script: reactionScript,
   });
   if (needsApproval(reaction)) return reaction;
@@ -54,6 +72,7 @@ export async function configureProductActivityDigest(
   // Keep cadence stopped until the version is installed; external mode prevents hosted dispatch.
   const executor = await client.automations.update({
     automation_id: automationId,
+    expected_revision: savedRevision(reaction),
     triggers: [],
     device_worker_id: null,
     agent_kind: null,
@@ -62,6 +81,7 @@ export async function configureProductActivityDigest(
   if (needsApproval(executor)) return executor;
   const version = await client.automations.createVersion({
     automation_id: automationId,
+    expected_revision: savedRevision(executor),
     prompt: productActivityPrompt,
     sources: productActivitySources,
     outputs: { digests: { event: "summary" } },
@@ -77,6 +97,7 @@ export async function configureProductActivityDigest(
   if (needsApproval(version)) return version;
   return client.automations.update({
     automation_id: automationId,
+    expected_revision: savedRevision(version),
     triggers: [
       {
         kind: "schedule",
