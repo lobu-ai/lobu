@@ -20,6 +20,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/review-bb.sh
 . "$SCRIPT_DIR/lib/review-bb.sh"
 
+# Checked in the caller's directory: the cd below would hide a submodule start.
+review_refuse_submodule || exit 2
 cd "$(dirname "$0")/.."
 
 review_fix_bb_cleanup() {
