@@ -1,11 +1,14 @@
 /**
- * Unit coverage for `validateModelsUpdate` / `LEGACY_MODEL_FIELDS`.
+ * Unit coverage for the route's `models` error envelope
+ * (`validateModelRefsAgainstOrg` → `modelValidationResponse`) and
+ * `LEGACY_MODEL_FIELDS`.
  *
  * Dynamic-import agent-routes AFTER route-test mocks so a static top-level
  * import cannot bind the real `mcpAuth` (and its getWorkspaceProvider call)
- * before mocks are installed — see agent-routes-guardrail-validation.test.ts.
+ * before mocks are installed.
  */
 import { beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { validateModelRefsAgainstOrg } from "../model-config.js";
 import { orgContext } from "../stores/org-context.js";
 import { createInferenceProvider } from "../stores/provider-secrets.js";
 import {
@@ -16,15 +19,15 @@ import {
 import { installRouteTestMocks } from "./helpers/route-test-mocks";
 
 installRouteTestMocks();
-const { LEGACY_MODEL_FIELDS, validateModelsUpdate } = await import(
+const { LEGACY_MODEL_FIELDS, modelValidationResponse } = await import(
   "../agent-routes.js"
 );
 
 const ORG = "test-org-models-validation";
 const AGENT = "models-agent";
 
-// A stub Hono context: validateModelsUpdate only reads c.req.url + c.req.param
-// to build the (informational) setup URLs in an error body.
+// A stub Hono context: modelValidationResponse only reads c.req.url +
+// c.req.param to build the (informational) setup URLs in an error body.
 const stubC = {
   req: {
     url: "https://gw.example.com/api/agents/models-agent/config",
@@ -33,17 +36,15 @@ const stubC = {
 } as any;
 
 async function validate(models: unknown) {
-  return orgContext.run({ organizationId: ORG }, () =>
-    validateModelsUpdate({
-      models,
-      organizationId: ORG,
-      agentId: AGENT,
-      c: stubC,
-    })
-  );
+  return orgContext.run({ organizationId: ORG }, async () => {
+    const error = await validateModelRefsAgainstOrg(models, ORG);
+    return error
+      ? modelValidationResponse(error, { c: stubC, agentId: AGENT })
+      : null;
+  });
 }
 
-describe("validateModelsUpdate (exact model refs)", () => {
+describe("models error envelope (exact model refs)", () => {
   beforeAll(async () => {
     await ensureDbForGatewayTests();
   }, 60_000);

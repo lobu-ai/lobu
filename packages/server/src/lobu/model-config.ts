@@ -3,11 +3,13 @@
  *
  * The web route (`PATCH /:agentId/config`) and the MCP `manage_agents` tool both
  * need to validate an agent's `models` allow-list against the org's providers
- * before persisting it. The route wrapper (`validateModelsUpdate`) enriches the
- * error with request-derived proxy/settings URLs; the MCP path has no HTTP
- * request, so it calls this core directly. Keeping ONE validator means an agent
- * created via MCP is gated by the same rules as one edited in the web UI —
- * closing the #2047 gap where `manage_agents` had no model-config path at all.
+ * before persisting it. Both reach `validateModelRefsAgainstOrg` through
+ * `validateAgentSettingsUpdate` (agent-settings.ts); the route then maps the
+ * structured error onto its JSON envelope (`modelValidationResponse`) with
+ * request-derived proxy/settings URLs, which the MCP path has no request to
+ * build. Keeping ONE validator means an agent created via MCP is gated by the
+ * same rules as one edited in the web UI — closing the #2047 gap where
+ * `manage_agents` had no model-config path at all.
  */
 
 import type { AgentModelInfo } from "@lobu/core/contracts/tools/manage-agents";
@@ -175,28 +177,6 @@ export async function resolveAgentModelInfo(
     source: agentModel ? "agent" : "org_default",
     not_runnable: resolution.kind === "error",
   };
-}
-
-/**
- * Persist an agent's default model (`models[0]`) through the SAME config store
- * the web route writes — no parallel SQL, no second column. An empty/blank ref
- * clears the list (`models = NULL`), so the agent falls back to the org default.
- * Org-scoped via `orgContext.run`, matching the store's own read path.
- *
- * The caller is responsible for having validated `modelRef` with
- * {@link validateModelRefsAgainstOrg} first; this only writes.
- */
-export async function persistDefaultModel(
-  agentId: string,
-  organizationId: string,
-  modelRef: string,
-): Promise<void> {
-  const trimmed = modelRef.trim();
-  await orgContext.run({ organizationId }, () =>
-    agentConfigStore.updateSettings(agentId, {
-      models: trimmed ? [trimmed] : undefined,
-    }),
-  );
 }
 
 /**

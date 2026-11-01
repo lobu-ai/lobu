@@ -5,6 +5,8 @@
 import type {
 	AgentCreateInput,
 	AgentUpdateInput,
+	ManageAgentsArgs,
+	ManageAgentsResult,
 } from "@lobu/core/contracts/tools/manage-agents";
 import type { Env } from "../../index";
 import { manageAgents } from "../../tools/admin/manage_agents";
@@ -12,11 +14,11 @@ import type { ToolContext } from "../../tools/registry";
 import { createActionCaller, idArg } from "./action-call";
 
 export interface AgentsNamespace {
-	manage(input: Record<string, unknown>): Promise<unknown>;
+	manage(input: ManageAgentsArgs): Promise<unknown>;
 	list(): Promise<unknown>;
-	get(agent_id: string): Promise<unknown>;
+	get(agent_id: string): Promise<Extract<ManageAgentsResult, { action: "get" }>>;
 	create(input: AgentCreateInput): Promise<unknown>;
-	update(input: AgentUpdateInput): Promise<unknown>;
+	update(input: AgentUpdateInput): Promise<ManageAgentsResult>;
 	delete(agent_id: string): Promise<unknown>;
 }
 

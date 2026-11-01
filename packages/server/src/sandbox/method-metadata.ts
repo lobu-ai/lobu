@@ -389,10 +389,10 @@ export default async (_ctx, client) => {
 	},
 	"agents.get": {
 		summary:
-			"Fetch one agent by id when agent_config read allows that target. Org-read gated via requireOrgReadAccess.",
+			"Fetch one agent, its persisted settings (including skills), and model routing when agent_config read allows that target. Org-read gated via requireOrgReadAccess.",
 		access: "read",
 		signature:
-			"agents.get(agent_id: string): Promise<unknown> // or agents.get({ agent_id })",
+			"agents.get(agent_id: string) // returns { action, agent, model, settings }; or agents.get({ agent_id })",
 		example: "const { agent } = await client.agents.get('builder');",
 	},
 	"agents.create": {
@@ -404,8 +404,9 @@ export default async (_ctx, client) => {
 	},
 	"agents.update": {
 		summary:
-			"Update agent fields (may queue for approval). Requires admin tier + agent_config update.",
+			"Patch agent fields and settings (may queue for approval). Omitted settings are unchanged; supplied settings objects/arrays replace that setting. Write identity via identity_md; updatedAt is read-only. Use settings.models for the full ordered model list, or default_model to change its first entry while preserving fallbacks (empty string clears the list). Do not send both. Requires admin tier + agent_config update.",
 		access: "admin",
+		example: "await client.agents.update({ agent_id: 'researcher', settings: { skillsConfig: { skills: [{ repo: 'example/skills', name: 'triage', enabled: true, content: 'Read the queue.' }] } } });",
 	},
 	"agents.delete": {
 		summary:

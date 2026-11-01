@@ -36,7 +36,8 @@ import {
 } from "../../../lobu/stores/provider-secrets";
 import { orgContext } from "../../../lobu/stores/org-context";
 import type { AuthContext } from "../../../tools/execute";
-import { executeTool } from "../../../tools/execute";
+import { executeTool, toToolContext } from "../../../tools/execute";
+import { buildAgentsNamespace } from "../../../sandbox/namespaces/agents";
 import { initWorkspaceProvider } from "../../../workspace";
 import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
 import {
@@ -136,6 +137,78 @@ describe("manage_agents — builder gate e2e", () => {
 		agentCtx.mcpSessionId = "session-manage-agents";
 		memberCtx = baseCtx(org.id, member.id, "member", ["mcp:read", "mcp:write"]);
 	});
+
+
+  it("SDK settings and identity round-trip through canonical storage; concurrent patches retain omitted fields", async () => {
+    const sdk = buildAgentsNamespace(toToolContext(ownerCtx), TEST_ENV);
+    await sdk.create({ agent_id: "settings-bot", name: "Settings" });
+    const skillsConfig = { skills: [{ repo: "example/skills", name: "triage", enabled: true, content: "Read the queue before acting." }] };
+    await sdk.update({ agent_id: "settings-bot", identity_md: "You triage.", settings: { skillsConfig } });
+    await Promise.all([
+      sdk.update({ agent_id: "settings-bot", settings: { soulMd: "Be concise." } }),
+      sdk.update({ agent_id: "settings-bot", settings: { userMd: "Prefer evidence." } }),
+    ]);
+    const got = await sdk.get("settings-bot");
+    expect(got.settings).toMatchObject({ skillsConfig, identityMd: "You triage.", soulMd: "Be concise.", userMd: "Prefer evidence." });
+    expect(got.settings.updatedAt).toBeTypeOf("number");
+    const sql = getTestDb();
+    const audit = await sql`SELECT payload_data FROM events WHERE organization_id = ${orgId}
+      AND metadata->>'resource_kind' = 'agent-settings' AND metadata->>'resource_id' = 'settings-bot' ORDER BY id DESC LIMIT 1`;
+    expect(audit[0]?.payload_data.state).toEqual(JSON.parse(JSON.stringify(got.settings)));
+  });
+
+  it("rejects malformed and ambiguous settings atomically", async () => {
+    const sdk = buildAgentsNamespace(toToolContext(ownerCtx), TEST_ENV);
+    await sdk.create({ agent_id: "invalid-settings-bot", name: "Original" });
+    const before = await sdk.get("invalid-settings-bot");
+    for (const settings of [
+      { invented: true }, { identityMd: "duplicate" }, { updatedAt: 0 },
+      { skillsConfig: { skills: [{ repo: "example", name: "bad", enabled: "yes" }] } },
+      { networkConfig: { allowedDomains: ["invalid host"] } },
+      { guardrailsInline: [{ name: "bad", enabled: true, stage: "input" }] },
+      { models: ["unconnected/model"] },
+    ]) {
+      await expect(executeTool("manage_agents", { action: "update", agent_id: "invalid-settings-bot", name: "Changed", settings }, TEST_ENV, ownerCtx)).rejects.toThrow();
+    }
+    await expect(sdk.update({ agent_id: "invalid-settings-bot", default_model: "", settings: { models: [] } })).rejects.toThrow(/either/);
+    await expect(executeTool("manage_agents", { action: "update", agent_id: "invalid-settings-bot", settings: { soulMd: "Denied" } }, TEST_ENV, memberCtx)).rejects.toThrow();
+    expect(await sdk.get("invalid-settings-bot")).toEqual(before);
+  });
+
+  it("settings follow approval policy and skip only settings changed since proposal", async () => {
+    const sdk = buildAgentsNamespace(toToolContext(ownerCtx), TEST_ENV);
+    const agentSdk = buildAgentsNamespace(toToolContext(agentCtx), TEST_ENV);
+    await sdk.create({ agent_id: "approved-settings-bot", name: "Settings" });
+    const proposedSkills = { skills: [{ repo: "example/skills", name: "proposed", enabled: true, content: "Proposed skill." }] };
+    const humanSkills = { skills: [{ repo: "example/skills", name: "human", enabled: true, content: "New human skill." }] };
+    const pending = await agentSdk.update({ agent_id: "approved-settings-bot", identity_md: "Approved identity", settings: { soulMd: "Proposed", userMd: "Approved preference", skillsConfig: proposedSkills } });
+    if (!("status" in pending) || pending.status !== "pending_approval") throw new Error("Expected approval");
+    expect((await sdk.get("approved-settings-bot")).settings.soulMd).not.toBe("Proposed");
+    await sdk.update({ agent_id: "approved-settings-bot", settings: { soulMd: "New human edit", skillsConfig: humanSkills } });
+    await executeTool("manage_operations", { action: "approve", run_id: pending.run_id }, TEST_ENV, ownerCtx);
+    expect((await sdk.get("approved-settings-bot")).settings).toMatchObject({ identityMd: "Approved identity", soulMd: "New human edit", userMd: "Approved preference", skillsConfig: humanSkills });
+    const sql = getTestDb();
+    const [run] = await sql`SELECT action_output FROM runs WHERE id = ${pending.run_id}`;
+    expect(run.action_output.skipped_fields).toContain("settings.soulMd");
+    expect(run.action_output.skipped_fields).toContain("settings.skillsConfig");
+    expect(run.action_output.updated_fields).toContain("settings.userMd");
+  });
+
+  it("audit failure rolls back identity, settings and metadata together", async () => {
+    const sdk = buildAgentsNamespace(toToolContext(ownerCtx), TEST_ENV);
+    await sdk.create({ agent_id: "audit-settings-bot", name: "Original" });
+    const before = await sdk.get("audit-settings-bot");
+    const sql = getTestDb();
+    await sql.unsafe("CREATE FUNCTION reject_settings_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.metadata->>'category' = 'config' AND NEW.metadata->>'resource_kind' = 'agent' THEN RAISE EXCEPTION 'synthetic settings audit failure'; END IF; RETURN NEW; END $$");
+    await sql.unsafe("CREATE TRIGGER reject_settings_audit BEFORE INSERT ON events FOR EACH ROW EXECUTE FUNCTION reject_settings_audit()");
+    try {
+      await expect(sdk.update({ agent_id: "audit-settings-bot", name: "Changed", identity_md: "Changed", settings: { soulMd: "Changed" } })).rejects.toThrow(/synthetic settings audit failure/);
+      expect(await sdk.get("audit-settings-bot")).toEqual(before);
+    } finally {
+      await sql.unsafe("DROP TRIGGER reject_settings_audit ON events");
+      await sql.unsafe("DROP FUNCTION reject_settings_audit()");
+    }
+  });
 
 	it("human owner: create applies immediately with no approval run", async () => {
 		const res = (await executeTool(
@@ -635,7 +708,7 @@ describe("manage_agents — builder gate e2e", () => {
 		`;
 		await sql`
 			INSERT INTO write_policy_action_effects (policy_id, action, effect)
-			VALUES (${policyRows[0].id}, 'read', 'deny')
+			VALUES (${policyRows[0].id}, 'read', 'deny'), (${policyRows[0].id}, 'update', 'deny')
 		`;
 
 		const list = (await executeTool(
@@ -656,6 +729,10 @@ describe("manage_agents — builder gate e2e", () => {
 				agentCtx,
 			),
 		).rejects.toThrow(/Policy denies reading agent/);
+
+    await expect(executeTool("manage_agents", {
+      action: "update", agent_id: "hidden-bot", settings: { soulMd: "Denied edit" },
+    }, TEST_ENV, agentCtx)).rejects.toThrow(/Policy denies update/);
 
 		const got = (await executeTool(
 			"manage_agents",
@@ -839,6 +916,9 @@ describe("manage_agents — model config (#2047)", () => {
 			TEST_ENV,
 			ownerCtx,
 		);
+		const sql = getTestDb();
+		await sql`UPDATE agents SET models = '["myco/old-primary", "myco/fallback"]'::jsonb
+			WHERE organization_id = ${orgId} AND id = 'model-only-bot'`;
 		const upd = (await executeTool(
 			"manage_agents",
 			{
@@ -852,6 +932,9 @@ describe("manage_agents — model config (#2047)", () => {
 		expect(upd.updated_fields).toContain("default_model");
 		expect(upd.model.effective_model).toBe("myco/myco-large");
 		expect(upd.model.source).toBe("agent");
+		const rows = await sql`SELECT models FROM agents
+			WHERE organization_id = ${orgId} AND id = 'model-only-bot'`;
+		expect(rows[0]?.models).toEqual(["myco/myco-large", "myco/fallback"]);
 	});
 
 	it("update clearing default_model ('') falls back to the org default", async () => {
