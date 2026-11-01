@@ -128,8 +128,11 @@ interface McpFixture {
   listed: Array<{ mcpId: string; agentId: string; token: string | undefined }>;
 }
 
-/** An MCP surface with one server publishing three tools and an instruction block. */
-function mcpFixture(options: { fail?: boolean; serverId?: string; empty?: boolean } = {}): McpFixture {
+/**
+ * An MCP surface with one server publishing three tools and an instruction
+ * block; `alsoPublish` adds one more tool by name.
+ */
+function mcpFixture(options: { fail?: boolean; serverId?: string; empty?: boolean; alsoPublish?: string } = {}): McpFixture {
   const listed: McpFixture['listed'] = [];
   const configService = {
     getMcpStatus: async () => [
@@ -146,6 +149,7 @@ function mcpFixture(options: { fail?: boolean; serverId?: string; empty?: boolea
           { name: 'query_sdk', description: 'Read data', inputSchema: { type: 'object', properties: { code: { type: 'string' } } } },
           { name: 'run_sdk', description: 'Write data', inputSchema: { type: 'object', properties: { code: { type: 'string' } } } },
           { name: 'query_sql', inputSchema: undefined },
+          ...(options.alsoPublish ? [{ name: options.alsoPublish, inputSchema: undefined }] : []),
         ],
       };
     },
@@ -282,12 +286,13 @@ async function postAsFleet(path: string, body: Record<string, unknown>) {
 }
 
 /** Enqueue a turn and claim it, as the fleet worker would. */
-async function claimedTurnRun(workerId: string, platform: 'api' | 'slack' = 'api', opts: { legacy?: boolean } = {}): Promise<number> {
+async function claimedTurnRun(workerId: string, platform: 'api' | 'slack' = 'api', opts: { legacy?: boolean; mcp?: McpFixture['mcp'] } = {}): Promise<number> {
   const org = await createTestOrganization();
   await enqueueMessage({ ...messageFor(org.id), platform }, {
     agentSettings: settingsStore,
     catalog: catalogFor(claudeModule()),
     gatewayUrl: GATEWAY_URL,
+    ...(opts.mcp ? { mcp: opts.mcp } : {}),
   });
   const response = await pollFleet(workerId, { agent_turn: true });
   const body = await response.json();
@@ -4829,12 +4834,19 @@ describe('agent turn reaper', () => {
     expect((await threadResponses()).at(-1)?.action_input).toMatchObject({ finalText: 'the whole answer' });
   });
 
-  it('terminalizes a dead turn that already ran a tool, as before', async () => {
+  // A trace is the only evidence for a call that reached no gateway route, so
+  // it still counts for anything the turn's stored catalog does not route
+  // through the gateway, even beside an MCP catalog of read-only tools.
+  it.each([
+    ['a tool the turn was not offered', 'search', undefined],
+    ['a workspace tool', 'write', undefined],
+    ['a workspace tool an MCP server also publishes', 'write', 'write'],
+  ])('terminalizes a dead turn that already ran %s, as before', async (_kind, tool, alsoPublish) => {
     const workerId = 'fleet-died-after-tool';
-    const runId = await claimedTurnRun(workerId);
+    const runId = await claimedTurnRun(workerId, 'api', { mcp: mcpFixture({ serverId: 'lobu', alsoPublish }).mcp });
     const beat = await postAsFleet('/api/workers/heartbeat', {
       run_id: runId, worker_id: workerId,
-      turn_tool_events: [{ tool_call_id: 'call-1', name: 'search', is_error: false, output: 'ok' }],
+      turn_tool_events: [{ tool_call_id: 'call-1', name: tool, is_error: false, output: 'ok' }],
     });
     expect(await beat.json()).toMatchObject({ turn_tool_ack: { received: 1 } });
     await loseHeartbeat(runId);
@@ -4943,16 +4955,44 @@ describe('agent turn reaper', () => {
     expect(reply!.action_input).toMatchObject({ errorCode: AgentErrorCode.WORKER_DIED });
   });
 
+  // A deploy restarting the worker mid-turn: every call so far was a read the
+  // gateway passed without stamping, and the worker reported each one as a
+  // trace on its heartbeat before it went away. The trace is not new evidence
+  // of an effect, so the reaper tick re-runs the turn and it completes.
   it.each([
-    ['a GET read', 'GET', '/lobu/internal/read'],
-    ['a read-only Lobu memory tool', 'POST', '/lobu/mcp/lobu/tools/search_memory'],
-  ] as const)('still re-runs an attempt that only made %s', async (_kind, method, path) => {
-    const runId = await claimedTurnRun('fleet-read-only');
+    ['a GET read', 'GET', '/lobu/internal/read', 'read_conversation'],
+    ['a read-only Lobu tool', 'POST', '/lobu/mcp/lobu/tools/query_sql', 'query_sql'],
+  ] as const)('still re-runs an attempt that only made %s', async (_kind, method, path, tool) => {
+    const workerId = 'fleet-read-only';
+    const runId = await claimedTurnRun(workerId, 'api', { mcp: mcpFixture({ serverId: 'lobu' }).mcp });
+    const credential = await credentialOf(runId);
     const { app } = gatewayRoutes();
-    await call(app, method, path, await credentialOf(runId));
+    await call(app, method, path, credential);
+    expect((await turnRow(runId)).run_metadata?.turn_tool_started).toBe(false);
+    const beat = await postAsFleet('/api/workers/heartbeat', {
+      run_id: runId, worker_id: workerId, turn_credential: credential,
+      turn_tool_events: [{ tool_call_id: 'call-read', name: tool, is_error: false, output: 'ok' }],
+    });
+    expect(await beat.json()).toMatchObject({ turn_tool_ack: { received: 1 } });
     expect((await turnRow(runId)).run_metadata?.turn_tool_started).toBe(false);
     await loseHeartbeat(runId);
-    expect(await sweepStaleAgentTurnRuns(STALE_THRESHOLD_SECONDS)).toEqual({ reaped: 0, delivered: 0, requeued: 1 });
+
+    // Through the real reaper tick: nothing is reaped, nothing is delivered.
+    expect(await reapStaleRuns()).toMatchObject({ acquired: true, reaped: 0 });
+    const requeued = await turnRow(runId);
+    expect(requeued.status).toBe('pending');
+    expect(requeued.run_metadata?.turn_requeue_count).toBe(1);
+    expect((await threadResponses()).filter((reply) => reply.action_input.error)).toEqual([]);
+
+    // The next worker claims the same turn and answers it.
+    const again = await (await pollFleet('fleet-after-deploy', { agent_turn: true })).json();
+    expect(again.run_id).toBe(runId);
+    const completed = await postAsFleet('/api/workers/complete-agent-turn', {
+      run_id: runId, worker_id: 'fleet-after-deploy', turn_credential: again.credentials.accessToken,
+      status: 'completed', session_jsonl: nativeSession(), text: 'the isolate answer',
+    });
+    expect(completed.status).toBe(200);
+    expect((await threadResponses()).at(-1)?.action_input).toMatchObject({ finalText: 'the isolate answer' });
   });
 
   it('refuses a side-effecting call from an attempt the reaper already re-queued', async () => {

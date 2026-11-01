@@ -624,9 +624,9 @@ export async function reapStaleRuns(): Promise<ReapStaleRunsResult> {
       // not their terminal semantics: a crashed fleet worker leaves a client
       // waiting on an authoritative turn's reply, so the sweep that times the
       // run out also publishes the thread_response the completion route would
-      // have. A stale turn without recorded tool activity is instead put back
-      // to `pending` once (logged and counted by the sweep itself, not here:
-      // it is not reaped). A shadow turn terminalizes silently.
+      // have. A stale turn without recorded side-effecting tool activity is
+      // instead put back to `pending` once (logged and counted by the sweep
+      // itself, not here: it is not reaped). A shadow turn terminalizes silently.
       let agentTurnsReaped = 0;
       let agentTurnErrorsDelivered = 0;
       try {
