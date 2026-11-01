@@ -86,8 +86,9 @@ refresh-token lifetime.
 
 Persist \`client_id\`, \`client_secret\` (when returned), \`access_token\`,
 \`refresh_token\`, \`resource\`, and an absolute \`expires_at\` computed when the
-token response arrives in secure storage that survives process restarts. Do not keep the credential only in memory, a temporary
-filesystem, or an ephemeral job container. If your runtime cannot retain it,
+token response arrives in secure storage that survives process restarts. Do not
+keep the credential only in memory, a temporary filesystem, or an ephemeral job
+container. If your runtime cannot retain it,
 tell the user before starting instead of asking for repeated approvals.
 
 Serialize refreshes for each stored credential. Reload it before refreshing,
@@ -104,8 +105,10 @@ authorization again; omitting it is rejected as \`invalid_grant\`:
 POST ${baseUrl}/oauth/token
 Content-Type: application/json
 
-{ "grant_type": "refresh_token", "refresh_token": "<current refresh_token>", "client_id": "<client_id>", "client_secret": "<client_secret>", "resource": "${baseUrl}/mcp" }
+{ "grant_type": "refresh_token", "refresh_token": "<current refresh_token>", "client_id": "<client_id>", "client_secret": "<client_secret>", "resource": "<exact resource from device authorization>" }
 \`\`\`
+
+For the standard MCP endpoint, that value is \`${baseUrl}/mcp\`.
 
 A Cloudflare 403 with code \`1010\` / \`browser_signature_banned\` is an edge block,
 not an app OAuth error. Keep the saved credential and surface the block; do not
