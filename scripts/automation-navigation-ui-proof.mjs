@@ -221,6 +221,7 @@ export async function runAutomationNavigationProof({
     await review
       .locator(".cm-editor")
       .getByText(field, { exact: false })
+      .first()
       .waitFor();
   }
   await screenshot("automation-cleared-fields-review.png");

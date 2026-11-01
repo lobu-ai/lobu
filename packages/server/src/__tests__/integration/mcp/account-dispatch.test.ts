@@ -1,9 +1,11 @@
 import { beforeAll, describe, expect, it } from 'vitest';
+import { createSpan, initTracing, MCP_PROTOCOL_VERSION, runInSpanContext, shutdownTracing, SpanKind, SpanStatusCode } from '@lobu/core';
+import { InMemorySpanExporter, SimpleSpanProcessor } from '@opentelemetry/sdk-trace-node';
 import { initWorkspaceProvider } from '../../../workspace';
 import { getDb } from '../../../db/client';
-import type { Env } from '../../../index';
+import { app, type Env } from '../../../index';
 import { type AuthContext, executeTool } from '../../../tools/execute';
-import { get, post, mcpRequest } from '../../setup/test-helpers';
+import { ensureMcpSession, get, post, mcpRequest } from '../../setup/test-helpers';
 import { cleanupTestDatabase } from '../../setup/test-db';
 import { addUserToOrganization, createTestAccessToken, createTestSession, createTestOAuthClient, createTestOrganization, createTestUser, seedSystemEntityTypes } from '../../setup/test-fixtures';
 
@@ -31,6 +33,87 @@ describe('account MCP dispatch', () => {
     };
   });
   const call = (tool: string, args: Record<string, unknown>, ctx = auth) => executeTool(tool, args, {} as Env, ctx) as Promise<any>;
+
+  it('traces each cached MCP call with its current parent, authorized workspace and result status', async () => {
+    const token = await createTestAccessToken(auth.userId!, null, auth.clientId!, {
+      grantedOrganizationIds: [first.id, second.id], scope: 'mcp:read mcp:write',
+    });
+    // Warm the real transport so later calls reuse a server session.
+    await mcpRequest('tools/list', {}, { token: token.token });
+    const exporter = new InMemorySpanExporter();
+    await shutdownTracing();
+    initTracing({ serviceName: 'mcp-dispatch-tracing-test', spanProcessors: [new SimpleSpanProcessor(exporter)] });
+    try {
+      const parents: string[] = [];
+      const tracedCall = async (name: string, args: Record<string, unknown>) => {
+        const parent = createSpan('request work');
+        parents.push(parent!.spanContext().spanId);
+        try { return await runInSpanContext(parent, () => mcpRequest('tools/call', { name, arguments: args }, { token: token.token })); }
+        finally { parent?.end(); }
+      };
+      const firstResult = await tracedCall('query_sql', { org_slug: first.slug, sql: 'SELECT 7 AS value' });
+      const secondResult = await tracedCall('query_sql', { org_slug: second.slug, sql: 'SELECT 8 AS value' });
+      expect(firstResult.result.structuredContent.rows).toEqual([{ value: 7 }]);
+      expect(secondResult.result.structuredContent.rows).toEqual([{ value: 8 }]);
+      const denied = await tracedCall('save_memory', { org_slug: 'private-unavailable-target', content: 'private-denied-body' });
+      expect(denied.result.isError).toBe(true);
+      const missing = await tracedCall('save_memory', { content: 'private-missing-target-body' });
+      expect(missing.result.isError).toBe(true);
+      const invalidSql = await tracedCall('query_sql', { org_slug: first.slug, sql: 'SELECT private_missing_column' });
+      expect(invalidSql.result.isError).toBe(true);
+      const scriptFailure = await tracedCall('query_sdk', { script: 'export default async () => { throw new Error("private-script-error"); };' });
+      expect(scriptFailure.result.isError ?? false).toBe(false);
+      expect(scriptFailure.result.structuredContent.success).toBe(false);
+      const spans = exporter.getFinishedSpans().filter((span) => span.attributes['lobu.tool_name']);
+      expect(spans).toHaveLength(6);
+      expect(spans.map((span) => span.parentSpanContext?.spanId)).toEqual(parents);
+      expect(spans.map((span) => span.attributes['lobu.org_id'])).toEqual([first.id, second.id, undefined, undefined, first.id, undefined]);
+      expect(spans.map((span) => span.attributes['user.id'])).toEqual(Array(6).fill(auth.userId));
+      expect(spans.map((span) => span.status.code)).toEqual([
+        SpanStatusCode.OK, SpanStatusCode.OK, SpanStatusCode.ERROR,
+        SpanStatusCode.ERROR, SpanStatusCode.ERROR, SpanStatusCode.OK,
+      ]);
+      expect(JSON.stringify(spans.map((span) => ({ name: span.name, attributes: span.attributes, events: span.events, status: span.status })))).not.toMatch(/private-|SELECT|org_slug|script/);
+
+      // Exercise the production wrapper too: the shared helper above mounts the
+      // bare app. A cached MCP server must use each HTTP request's active span.
+      const { buildWrapperApp } = await import('../../../server-lifecycle');
+      const wrapper = buildWrapperApp({
+        ENVIRONMENT: 'test', DATABASE_URL: process.env.DATABASE_URL,
+        JWT_SECRET: 'test-jwt-secret-for-testing-only', BETTER_AUTH_SECRET: 'test-auth-secret-for-testing-only',
+        RATE_LIMIT_ENABLED: 'false',
+      } as Env, null, app);
+      const sessionId = await ensureMcpSession({ token: token.token });
+      const cases = [
+        { traceId: '33333333333333333333333333333333', parentId: '4444444444444444', org: first, value: 9 },
+        { traceId: '55555555555555555555555555555555', parentId: '6666666666666666', org: second, value: 10 },
+      ];
+      const responses = await Promise.all(cases.map((item, index) => wrapper.request('/mcp', {
+        method: 'POST', headers: {
+          'content-type': 'application/json', accept: 'application/json, text/event-stream',
+          authorization: `Bearer ${token.token}`, 'mcp-session-id': sessionId,
+          'mcp-protocol-version': MCP_PROTOCOL_VERSION, traceparent: `00-${item.traceId}-${item.parentId}-01`,
+        },
+        body: JSON.stringify({ jsonrpc: '2.0', id: index + 10, method: 'tools/call', params: {
+          name: 'query_sql', arguments: { org_slug: item.org.slug, sql: `SELECT ${item.value} AS value` },
+        } }),
+      })));
+      for (const [index, item] of cases.entries()) {
+        expect(responses[index]!.status).toBe(200);
+        expect((await responses[index]!.json()).result.structuredContent.rows).toEqual([{ value: item.value }]);
+        const current = exporter.getFinishedSpans().filter((span) => span.spanContext().traceId === item.traceId);
+        const request = current.find((span) => span.kind === SpanKind.SERVER)!;
+        const tool = current.find((span) => span.attributes['lobu.tool_name'] === 'query_sql')!;
+        expect(request.parentSpanContext?.spanId).toBe(item.parentId);
+        expect(request.attributes['user.id']).toBe(auth.userId);
+        expect(request.attributes['lobu.org_id']).toBeUndefined();
+        expect(tool.parentSpanContext?.spanId).toBe(request.spanContext().spanId);
+        expect(tool.attributes['lobu.org_id']).toBe(item.org.id);
+      }
+    } finally {
+      await shutdownTracing();
+    }
+  });
 
   it('discovers SDK methods and runs account methods with no implicit workspace', async () => {
     const docs = await call('search_sdk', { query: 'organizations.list' });
