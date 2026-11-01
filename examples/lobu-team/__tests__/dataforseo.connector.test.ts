@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, setSystemTime } from "bun:test";
 import type { ActionContext } from "@lobu/connector-sdk";
 import DataForSeoConnector, {
   type RankTrackingCheckpoint,
@@ -13,12 +13,14 @@ const credentials = {
 
 /**
  * Fake DataForSEO Standard API: every posted keyword becomes a task, and a
- * task is reported ready only once the test marks its keyword ready.
+ * task is reported ready only once the test marks its keyword ready. A
+ * keyword in `failing` comes back from task_get as a task error.
  */
 function fakeStandardApi() {
   const posts: string[][] = [];
   const ready = new Set<string>();
   const outage = { tasksReady: false };
+  const failing = new Set<string>();
   const fetchImpl = async (
     input: string | URL | Request,
     init?: RequestInit
@@ -47,6 +49,12 @@ function fakeStandardApi() {
       });
     }
     const got = url.match(/\/task_get\/advanced\/task-(.+)$/);
+    if (got && failing.has(got[1])) {
+      return Response.json({
+        status_code: 20000,
+        tasks: [{ status_code: 40102, status_message: "No Search Results." }],
+      });
+    }
     if (got) {
       return Response.json({
         status_code: 20000,
@@ -81,7 +89,7 @@ function fakeStandardApi() {
     }
     throw new Error(`unexpected request ${url}`);
   };
-  return { posts, ready, outage, fetchImpl };
+  return { posts, ready, outage, failing, fetchImpl };
 }
 
 function rankConnector(fetchImpl: DataForSeoConnector["fetchImpl"]) {
@@ -149,7 +157,7 @@ describe("DataForSEO rank_tracking feed", () => {
         },
       })
     ).rejects.toThrow("HTTP 503");
-    expect(committed.checkpoint?.pending).toEqual([
+    expect(committed.checkpoint?.pending).toMatchObject([
       { keyword: "alpha", task_id: "task-alpha" },
     ]);
 
@@ -165,6 +173,78 @@ describe("DataForSEO rank_tracking feed", () => {
       "alpha",
     ]);
     expect(api.posts).toEqual([["alpha"]]);
+  });
+
+  describe("posts each keyword at most once per UTC day", () => {
+    afterEach(() => setSystemTime());
+
+    it("drops a task that never becomes ready instead of looping", async () => {
+      setSystemTime(new Date("2026-11-01T12:00:00Z"));
+      const api = fakeStandardApi();
+      const run = await runSync(rankConnector(api.fetchImpl), {
+        feedKey: "rank_tracking",
+        config: { ...credentials, keywords: ["alpha"] },
+        checkpoint: {
+          pending: [
+            {
+              keyword: "alpha",
+              task_id: "task-alpha",
+              posted_at: "2026-11-01T09:00:00Z",
+            },
+          ],
+        } satisfies RankTrackingCheckpoint,
+      });
+      expect(run.status).toBe("complete");
+      expect(run.metadata?.items_skipped).toBe(1);
+      expect((run.checkpoint as RankTrackingCheckpoint).pending).toEqual([]);
+      // Already billed today: the lost task is not re-posted.
+      expect(api.posts).toEqual([]);
+    });
+
+    it("does not re-post a keyword whose task failed", async () => {
+      setSystemTime(new Date("2026-11-01T12:00:00Z"));
+      const api = fakeStandardApi();
+      api.failing.add("alpha");
+      api.ready.add("alpha");
+      const connector = rankConnector(api.fetchImpl);
+      const config = { ...credentials, keywords: ["alpha"] };
+      const first = await runSync(connector, {
+        feedKey: "rank_tracking",
+        config,
+        checkpoint: null,
+      });
+      const second = await runSync(connector, {
+        feedKey: "rank_tracking",
+        config,
+        checkpoint: first.checkpoint,
+      });
+      expect(first.metadata?.items_skipped).toBe(1);
+      expect(second.events).toEqual([]);
+      expect(api.posts).toEqual([["alpha"]]);
+    });
+
+    it("checks a keyword again today when yesterday's task lands after midnight", async () => {
+      setSystemTime(new Date("2026-11-02T00:05:00Z"));
+      const api = fakeStandardApi();
+      api.ready.add("alpha");
+      const run = await runSync(rankConnector(api.fetchImpl), {
+        feedKey: "rank_tracking",
+        config: { ...credentials, keywords: ["alpha"] },
+        checkpoint: {
+          pending: [
+            {
+              keyword: "alpha",
+              task_id: "task-alpha",
+              posted_at: "2026-11-01T23:58:00Z",
+            },
+          ],
+          completed: { day: "2026-11-01", keywords: [] },
+        } satisfies RankTrackingCheckpoint,
+      });
+      // Yesterday's result is recorded and today's check is still posted.
+      expect(run.events[0]?.metadata?.keyword).toBe("alpha");
+      expect(api.posts).toEqual([["alpha"]]);
+    });
   });
 
   it("records the target's organic rank under a stable per-day origin_id", async () => {
