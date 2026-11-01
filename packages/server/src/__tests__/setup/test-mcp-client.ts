@@ -391,8 +391,8 @@ export function freshSchemaEditor(schema: ReturnType<typeof buildEntitySchemaNam
     }
     if (!slug) return schema[method]({ ...input, expected_revision: 'missing-fixture-target' } as never);
     const result = entity
-      ? await schema.getType(slug ?? '') as { entity_type?: { revision: string } | null }
-      : await schema.getRelType(slug ?? '') as { relationship_type?: { revision: string } | null };
+      ? await schema.getType(slug) as { entity_type?: { revision: string } | null }
+      : await schema.getRelType(slug) as { relationship_type?: { revision: string } | null };
     const revision = entity
       ? (result as { entity_type?: { revision: string } | null }).entity_type?.revision
       : (result as { relationship_type?: { revision: string } | null }).relationship_type?.revision;

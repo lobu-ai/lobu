@@ -1093,35 +1093,33 @@ export async function executePlan(
         //    send the desired-side values for the changed keys). name/description
         //    are version-owned (update rejects them).
         if (row.versionBoundFields && row.versionBoundFields.length > 0) {
-          revision = (
-            await ctx.client.createAutomationVersion({
-              automation_id: automationId,
-              expected_revision: revision,
-              ...(versionBound.has("name") && w.name !== undefined
-                ? { name: w.name }
-                : {}),
-              ...(versionBound.has("description")
-                ? { description: w.description ?? null }
-                : {}),
-              ...(versionBound.has("prompt") ? { prompt: w.prompt } : {}),
-              ...(versionBound.has("skills")
-                ? { skills: w.skillSnapshots ?? [] }
-                : {}),
-              ...(versionBound.has("sources") && w.sources !== undefined
-                ? { sources: w.sources }
-                : {}),
-              ...(versionBound.has("reactions_guidance") &&
-              w.reactionsGuidance !== undefined
-                ? { reactions_guidance: w.reactionsGuidance }
-                : {}),
-              ...(versionBound.has("outputs")
-                ? { outputs: w.outputs ?? null }
-                : {}),
-              ...(triggersWithVersionChange
-                ? { triggers: w.triggers ?? [] }
-                : {}),
-            })
-          ).revision;
+          await ctx.client.createAutomationVersion({
+            automation_id: automationId,
+            expected_revision: revision,
+            ...(versionBound.has("name") && w.name !== undefined
+              ? { name: w.name }
+              : {}),
+            ...(versionBound.has("description")
+              ? { description: w.description ?? null }
+              : {}),
+            ...(versionBound.has("prompt") ? { prompt: w.prompt } : {}),
+            ...(versionBound.has("skills")
+              ? { skills: w.skillSnapshots ?? [] }
+              : {}),
+            ...(versionBound.has("sources") && w.sources !== undefined
+              ? { sources: w.sources }
+              : {}),
+            ...(versionBound.has("reactions_guidance") &&
+            w.reactionsGuidance !== undefined
+              ? { reactions_guidance: w.reactionsGuidance }
+              : {}),
+            ...(versionBound.has("outputs")
+              ? { outputs: w.outputs ?? null }
+              : {}),
+            ...(triggersWithVersionChange
+              ? { triggers: w.triggers ?? [] }
+              : {}),
+          });
         }
       }
       printText(
