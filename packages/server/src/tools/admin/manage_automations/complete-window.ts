@@ -65,8 +65,6 @@ const CAPTURE_PREVIEW_CONTENT_CAP = 200;
 // This allows workers to add internal fields while still validating the core schema
 const ajv = new Ajv({ allErrors: true, strict: false, removeAdditional: true });
 addFormats(ajv);
-const nonMutatingAjv = new Ajv({ allErrors: true, strict: false });
-addFormats(nonMutatingAjv);
 
 function validateEntityOutputKeys(
   extractedData: Record<string, unknown>,
@@ -383,23 +381,22 @@ export async function handleCompleteWindow(
   // STEP 2.5: Validate extracted_data against the extraction schema.
   // The schema is composed from declared outputs and the optional reaction
   // input. Entity schemas still live on their entity types; event outputs use
-  // the standard event draft. The worker and completion share this helper.
+  // the standard event draft. Event metadata stays with the persistence
+  // validator so its alternatives and coercion semantics remain authoritative.
   // ============================================
   const extractionSchema: Record<string, any> | null = await deriveAutomationExtractionSchema(
     getDb(),
     automationOrgId,
     outputs,
-    automationId
+    automationId,
+    { includeEventMetadata: false }
   );
   if (extractionSchema) {
     const validate = ajv.compile(extractionSchema);
     // Validate a deep copy since removeAdditional:true mutates the data
     // This allows workers to include internal fields like 'embedding' that aren't in the schema
     const dataCopy = structuredClone(extractedData);
-    // removeAdditional can erase a later anyOf alternative's required fields
-    // while trying an earlier closed schema. Retry the original data before
-    // rejecting it, preserving the existing allowance for worker-only fields.
-    const isValid = validate(dataCopy) || nonMutatingAjv.compile(extractionSchema)(extractedData);
+    const isValid = validate(dataCopy);
 
     if (!isValid) {
       const errors = validate.errors || [];

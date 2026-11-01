@@ -211,15 +211,18 @@ function mergeObjectSchemas(
  *     JSON Schema `allOf`; reaction-only properties are added alongside it.
  *  3. Otherwise null — the worker runs the free-form `{ summary }` fallback.
  *
- * Both the worker payload and complete_window validation resolve through here,
- * so extraction and validation can never drift. `automationId` enables the reaction
- * lookup; omit it to skip step 2 (entity-typed-only callers).
+ * The worker receives event-kind metadata constraints as guidance. Completion
+ * leaves those constraints to the persistence validator, which also handles
+ * row linkage, metadata alternatives and type coercion. Entity and reaction
+ * validation remain shared. `automationId` enables the reaction lookup; omit
+ * it to skip step 2 (entity-typed-only callers).
  */
 export async function deriveAutomationExtractionSchema(
   sql: DbClient,
   organizationId: string,
   outputs: Outputs | null | undefined,
-  automationId?: string | number | null
+  automationId?: string | number | null,
+  options: { includeEventMetadata?: boolean } = {}
 ): Promise<Record<string, unknown> | null> {
   let reactionSchema: Record<string, unknown> | null = null;
   let entityIds: number[] = [];
@@ -260,7 +263,9 @@ export async function deriveAutomationExtractionSchema(
       outputProperties[name] = {
         type: 'array',
         maxItems: MAX_AUTOMATION_OUTPUT_ROWS,
-        items: await eventOutputRowSchema(registry, output.event, entityIds, metadataSchemas),
+        items: options.includeEventMetadata === false
+          ? AutomationEventDraftSchema
+          : await eventOutputRowSchema(registry, output.event, entityIds, metadataSchemas),
       };
     }
   }

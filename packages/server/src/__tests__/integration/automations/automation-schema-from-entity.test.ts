@@ -217,7 +217,7 @@ describe('complete_window derives its schema from the entity type', () => {
         run_id: runId,
         window_token: window.window_token,
         extracted_data: output({ status: 'candidate' }),
-      })).rejects.toThrow(/signals\/0\/metadata\/status/);
+      })).rejects.toThrow(/status/);
       const [unfinished] = await ctx.sql`SELECT action_output FROM runs WHERE id = ${runId}`;
       expect(unfinished.action_output).toBeNull();
 
@@ -286,12 +286,16 @@ describe('complete_window derives its schema from the entity type', () => {
     }
   );
 
-  it('completes a member metadata alternative after a closed bound-entity schema', async () => {
+  it.each([
+    { name: 'plain row', extras: {}, count: 42 },
+    { name: 'worker envelope fields', extras: { embedding: [0.1] }, count: 42 },
+    { name: 'coerced integer metadata', extras: {}, count: '42' },
+  ])('completes a member metadata alternative with $name', async ({ extras, count }) => {
     const ctx = await setupEntityTypedAutomation();
     await ensureMemberEntityType(ctx.workspace.org.id);
     const metadataSchema = {
       type: 'object',
-      properties: { member_status: { enum: ['reported'] } },
+      properties: { member_status: { enum: ['reported'] }, count: { type: 'integer' } },
       required: ['member_status'],
       additionalProperties: false,
     };
@@ -328,15 +332,15 @@ describe('complete_window derives its schema from the entity type', () => {
       run_id: runId,
       window_token: windowToken,
       extracted_data: {
-        signals: [{ content: 'A member notice.', metadata: { member_status: 'reported' } }],
+        signals: [{ content: 'A member notice.', ...extras, metadata: { member_status: 'reported', count } }],
         notices: [],
       },
     });
     const saved = await ctx.sql`
-      SELECT metadata->>'member_status' AS status FROM events
+      SELECT metadata->>'member_status' AS status, metadata->'count' AS count FROM events
       WHERE organization_id = ${ctx.workspace.org.id} AND semantic_type = 'extraction_notice'
     `;
-    expect(saved).toEqual([{ status: 'reported' }]);
+    expect(saved).toEqual([{ status: 'reported', count: 42 }]);
   });
 
   it('resolves a real entity type metadata_schema into an extraction schema', async () => {
