@@ -107,6 +107,13 @@ Content-Type: application/json
 { "grant_type": "refresh_token", "refresh_token": "<current refresh_token>", "client_id": "<client_id>", "client_secret": "<client_secret>", "resource": "${baseUrl}/mcp" }
 \`\`\`
 
+A Cloudflare 403 with code \`1010\` / \`browser_signature_banned\` is an edge block,
+not an app OAuth \`invalid_grant\`. Keep the saved credential and surface the
+block; do not start a new device flow, bypass the security check, or retry in a
+loop. Only an HTTP 400 JSON \`{ "error": "invalid_grant" }\` from
+\`${baseUrl}/oauth/token\` is a credential failure; reload once, then reauthorize
+if it is still invalid.
+
 ## Errors
 
 | error | where | meaning |

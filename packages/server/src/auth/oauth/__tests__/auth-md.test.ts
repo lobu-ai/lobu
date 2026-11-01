@@ -13,5 +13,10 @@ describe('auth.md credential guidance', () => {
     expect(doc).toContain('atomically replace both tokens');
     expect(doc).toContain('include the exact `resource` from device');
     expect(doc).toContain('omitting it is rejected as `invalid_grant`');
+    expect(doc).toContain('Cloudflare 403 with code `1010` / `browser_signature_banned` is an edge block');
+    expect(doc).toContain('not an app OAuth `invalid_grant`');
+    expect(doc).toContain('Keep the saved credential');
+    expect(doc).toContain('bypass the security check');
+    expect(doc).toContain('Only an HTTP 400 JSON `{ "error": "invalid_grant" }` from');
   });
 });

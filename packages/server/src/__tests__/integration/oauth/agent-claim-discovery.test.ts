@@ -119,6 +119,11 @@ describe('auth.md discovery surface', () => {
     expect(text).toContain('atomically replace both tokens');
     expect(text).toContain('include the exact `resource` from device');
     expect(text).toContain('omitting it is rejected as `invalid_grant`');
+    expect(text).toContain('Cloudflare 403 with code `1010` / `browser_signature_banned` is an edge block');
+    expect(text).toContain('not an app OAuth `invalid_grant`');
+    expect(text).toContain('Keep the saved credential');
+    expect(text).toContain('bypass the security check');
+    expect(text).toContain('Only an HTTP 400 JSON `{ "error": "invalid_grant" }` from');
   });
 });
 
