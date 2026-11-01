@@ -204,6 +204,12 @@ describe("manage_agents — builder gate e2e", () => {
     try {
       await expect(sdk.update({ agent_id: "audit-settings-bot", name: "Changed", identity_md: "Changed", settings: { soulMd: "Changed" } })).rejects.toThrow(/synthetic settings audit failure/);
       expect(await sdk.get("audit-settings-bot")).toEqual(before);
+      await expect(sdk.create({ agent_id: "audit-create-bot", name: "New" })).rejects.toThrow(/synthetic settings audit failure/);
+      expect(await agentExists(orgId, "audit-create-bot")).toBe(false);
+      const mapping = await sql`SELECT 1 FROM agent_users WHERE organization_id = ${orgId} AND agent_id = 'audit-create-bot'`;
+      expect(mapping).toHaveLength(0);
+      await expect(sdk.delete("audit-settings-bot")).rejects.toThrow(/synthetic settings audit failure/);
+      expect(await sdk.get("audit-settings-bot")).toEqual(before);
     } finally {
       await sql.unsafe("DROP TRIGGER reject_settings_audit ON events");
       await sql.unsafe("DROP FUNCTION reject_settings_audit()");

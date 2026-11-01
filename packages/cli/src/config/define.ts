@@ -10,6 +10,7 @@
  * config and references.
  */
 
+import type { ManageAutomationsArgs } from "@lobu/core/contracts/tools/manage-automations";
 import type {
   AutomationEventTrigger,
   AutomationScheduleTrigger,
@@ -828,8 +829,8 @@ export interface Automation {
   tags?: string[];
   /** LLM guidance for the Automation's downstream reaction agent. */
   reactionsGuidance?: string;
-  /** Agent-kind override for firings (e.g. "background", "notifier"). */
-  agentKind?: string;
+  /** Agent runtime override for firings. */
+  agentKind?: NonNullable<ManageAutomationsArgs["agent_kind"]>;
   /**
    * UUID pinning this Automation's runs to a specific device worker. Only
    * meaningful together with `agentKind` — the pinned device's local CLI

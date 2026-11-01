@@ -28,6 +28,9 @@ import { buildProviderCatalog } from "../gateway/auth/provider-catalog";
 import { createAuthProfileLabel } from "../gateway/auth/settings/auth-profiles-manager";
 import { orgBucketAgentId } from "../gateway/auth/settings/user-auth-profile-store";
 import {
+	deleteAgentConfig,
+	insertAgentConfig,
+	persistAgentMetadataPatch,
 	persistAgentSettingsPatch,
 	validateAgentSettingsUpdate,
 } from "./agent-settings";
@@ -564,31 +567,19 @@ routes.post("/", async (c) => {
 	const orgId = c.get("organizationId") as string;
 
 	const sql = getDb();
-	const now = new Date();
 	// Seed provisioning defaults in the INSERT so concurrent idempotent creates
 	// cannot observe a partially initialized row or overwrite operator settings.
 	const provisioning = await resolveNewAgentProvisioningDefaults(orgId);
 	return sql.begin(async (tx) => {
-	const inserted = await tx`
-    INSERT INTO agents (
-      id, organization_id, name, description, owner_platform, owner_user_id,
-      models, created_at, updated_at
-    )
-    VALUES (
-      ${agentId}, ${orgId}, ${name}, ${description ?? null},
-      'lobu', ${user.id},
-      ${tx.json(provisioning.models)},
-      ${now}, ${now}
-    )
-    ON CONFLICT (organization_id, id) DO NOTHING
-    RETURNING id
-  `;
+	const inserted = await insertAgentConfig(tx,
+		{ agent_id: agentId, name, description }, { platform: "lobu", userId: user.id },
+		provisioning.models, { organizationId: orgId, ...getApplyContext(c) });
 
-	if (inserted.length === 0) {
+	if (!inserted) {
 		// Another writer (or a previous apply cycle) already owns this id in
 		// *this* org. Return idempotent 200 with the existing row's metadata.
 		// Cross-org collisions are no longer possible — the PK is per-org now.
-		const existing = await configStore.getMetadata(agentId);
+		const existing = await createPostgresAgentConfigStore(tx).getMetadata(agentId);
 		if (!existing) {
 			return c.json({ error: "Agent metadata missing" }, 500);
 		}
@@ -601,15 +592,6 @@ routes.post("/", async (c) => {
 			200
 		);
 	}
-
-	await emitConfigChange(c, {
-    before: null,
-		resourceKind: "agent",
-		resourceId: agentId,
-		op: "created",
-		summary: `Agent '${name}' created`,
-		state: { agentId, name, description: description ?? null },
-	}, tx);
 
 	return c.json({ agentId, name, description }, 201);
   });
@@ -1428,20 +1410,9 @@ routes.patch("/:agentId", async (c) => {
     await lockOrganizationForRelationshipClaims(tx, orgId);
     const locked = await tx`SELECT id FROM agents WHERE organization_id = ${orgId} AND id = ${agentId} FOR UPDATE`;
     if (!locked.length) return c.json({ error: "Agent not found" }, 404);
-    const transactionStore = createPostgresAgentConfigStore(tx);
-    const before = await transactionStore.getMetadata(agentId);
-	await transactionStore.updateMetadata(agentId, body);
-	// Snapshot the row as stored (post-merge), not the request body.
-	const metadata = await transactionStore.getMetadata(agentId);
-	await emitConfigChange(c, {
-    before: before ? { ...before } : null,
-		resourceKind: "agent",
-		resourceId: agentId,
-		op: "updated",
-		summary: `Agent '${metadata?.name ?? agentId}' metadata updated`,
-		state: metadata ? { ...metadata, agentId } : null,
-		changedFields: Object.keys(body),
-	}, tx);
+    await persistAgentMetadataPatch(tx, agentId, body, {
+      organizationId: orgId, ...getApplyContext(c),
+    });
 	return c.json({ success: true });
   });
 });
@@ -1462,18 +1433,7 @@ routes.delete("/:agentId", async (c) => {
     await lockOrganizationForRelationshipClaims(tx, orgId);
     const locked = await tx`SELECT id FROM agents WHERE organization_id = ${orgId} AND id = ${agentId} FOR UPDATE`;
     if (!locked.length) return c.json({ error: "Agent not found" }, 404);
-    const transactionStore = createPostgresAgentConfigStore(tx);
-    const before = await transactionStore.getMetadata(agentId);
-	// Cascade handled by FK ON DELETE CASCADE
-	await transactionStore.deleteMetadata(agentId);
-	await emitConfigChange(c, {
-    before: before ? { ...before } : null,
-		resourceKind: "agent",
-		resourceId: agentId,
-		op: "deleted",
-		summary: `Agent '${agentId}' deleted`,
-		state: null,
-	}, tx);
+    await deleteAgentConfig(tx, agentId, { organizationId: orgId, ...getApplyContext(c) });
 	return c.json({ success: true });
   });
 });

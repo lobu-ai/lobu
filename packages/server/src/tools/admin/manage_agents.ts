@@ -58,13 +58,13 @@ import {
 import { getLobuCoreServices } from '../../lobu/gateway';
 import { createPostgresAgentConfigStore, isValidAgentId } from '../../lobu/stores/postgres-stores';
 import { orgContext } from '../../lobu/stores/org-context';
-import { persistAgentSettingsPatch, validateAgentSettingsUpdate } from '../../lobu/agent-settings';
+import { deleteAgentConfig, insertAgentConfig, persistAgentMetadataPatch, persistAgentSettingsPatch, validateAgentSettingsUpdate } from '../../lobu/agent-settings';
 import { deriveToolActorSource } from '../../utils/apply-context';
 import { lockOrganizationForRelationshipClaims } from '../../utils/relationship-claims';
 import { resolveActionOrigin } from '../../notifications/action-origin';
 import { notifyActionApprovalNeeded } from '../../notifications/triggers';
 import { resolveApprovalChatOrigin } from './approval-delivery';
-import { insertEvent, insertConfigChangeEventInTransaction } from '../../utils/insert-event';
+import { insertEvent } from '../../utils/insert-event';
 import {
   ApprovalKind,
   approvalContext,
@@ -316,6 +316,16 @@ async function handleGet(
   return { action: 'get', agent: rows[0] as unknown as AgentRecord, model, settings };
 }
 
+function agentConfigAudit(ctx: ToolContext) {
+  return {
+    organizationId: ctx.organizationId, applyId: ctx.applyId,
+    actorSource: deriveToolActorSource(ctx), createdBy: ctx.userId,
+    clientId: eventClientId(ctx), agentId: ctx.agentId,
+    actingAutomationId: ctx.actingAutomationId, actingRunId: ctx.actingRunId,
+    mcpSessionId: ctx.mcpSessionId, tokenType: ctx.tokenType,
+  };
+}
+
 /**
  * Insert the agent. Every caller runs the args through {@link buildProposal}
  * first — the immediate path right before dispatch, the queued path when the
@@ -354,34 +364,8 @@ export async function applyCreate(
   const seedModels = explicitModel !== undefined
     ? (explicitModel.trim() ? [explicitModel.trim()] : null)
     : provisioning.models;
-  // owner_platform='external' on the row AND an agent_users mapping, so the
-  // per-user ownership check (SPA cookie / PAT session) can reach the new agent.
-  // Without the agent_users row the agent is unreachable through chat,
-  // especially in non-default orgs. Column fields are seeded from args (with the
-  // insert defaults for those not supplied), including the validated model list.
-  const rows = await sql`
-    INSERT INTO agents (
-      id, organization_id, name, description, identity_md,
-      owner_platform, owner_user_id, models,
-      created_at, updated_at
-    )
-    VALUES (
-      ${args.agent_id}, ${ctx.organizationId}, ${args.name}, ${args.description ?? null},
-      ${args.identity_md ?? ''}, 'external', ${ownerUserId},
-      ${seedModels === null ? null : sql.json(seedModels)},
-      NOW(), NOW()
-    )
-    ON CONFLICT (organization_id, id) DO NOTHING
-    RETURNING id
-  `;
-  const created = rows.length > 0;
-  if (created) {
-    await sql`
-      INSERT INTO agent_users (organization_id, agent_id, platform, user_id, created_at)
-      VALUES (${ctx.organizationId}, ${args.agent_id}, 'external', ${ownerUserId}, NOW())
-      ON CONFLICT (organization_id, agent_id, platform, user_id) DO NOTHING
-    `;
-  }
+  const created = await sql.begin(tx => insertAgentConfig(tx, args,
+    { platform: 'external', userId: ownerUserId }, seedModels, agentConfigAudit(ctx)));
   const model = await agentModelInfo(ctx, args.agent_id);
   return { action: 'create', agent_id: args.agent_id, created, model };
 }
@@ -461,33 +445,12 @@ export async function applyUpdate(
         appliedFields.push(`settings.${key}`);
       }
       await assertSettingsValid(ctx, agentId, settings, before);
-      const audit = {
-        organizationId: ctx.organizationId,
-        applyId: ctx.applyId,
-        actorSource: deriveToolActorSource(ctx),
-        createdBy: ctx.userId,
-        clientId: eventClientId(ctx),
-        agentId: ctx.agentId,
-        actingAutomationId: ctx.actingAutomationId,
-        actingRunId: ctx.actingRunId,
-        mcpSessionId: ctx.mcpSessionId,
-        tokenType: ctx.tokenType,
-      };
+      const audit = agentConfigAudit(ctx);
       if (Object.keys(settings).length) {
         await persistAgentSettingsPatch(tx, agentId, settings, before, audit);
       }
       if (Object.keys(columns).length) {
-        const [after] = await tx`UPDATE agents SET
-          name = ${columns.name ?? row.name},
-          description = ${columns.description ?? row.description}, updated_at = NOW()
-          WHERE organization_id = ${ctx.organizationId} AND id = ${agentId}
-          RETURNING id, name, description`;
-        await insertConfigChangeEventInTransaction({
-          ...audit, resourceKind: 'agent', resourceId: agentId, op: 'updated',
-          summary: `Agent '${agentId}' updated`,
-          before: { id: row.id, name: row.name, description: row.description },
-          state: { ...after }, changedFields: Object.keys(columns),
-        }, tx);
+        await persistAgentMetadataPatch(tx, agentId, columns, audit);
       }
     }),
   );
@@ -519,16 +482,14 @@ export async function applyDelete(
   ctx: ToolContext,
   env: Env
 ): Promise<ManageAgentsResult> {
-  const sql = createDbClientFromEnv(env);
-  const rows = await sql`
-    DELETE FROM agents
-    WHERE organization_id = ${ctx.organizationId} AND id = ${args.agent_id}
-    RETURNING id
-  `;
-  // The agent's write-gate policy rows (principal_kind='agent') cascade via a DB
-  // trigger on `agents` (see 20260710140000) — covers this path AND the dashboard's
-  // configStore.deleteMetadata, so no app-level cleanup is duplicated here.
-  return { action: 'delete', agent_id: args.agent_id, deleted: rows.length > 0 };
+  const deleted = await orgContext.run({ organizationId: ctx.organizationId }, () =>
+    createDbClientFromEnv(env).begin(async tx => {
+      await lockOrganizationForRelationshipClaims(tx, ctx.organizationId);
+      await tx`SELECT id FROM agents WHERE organization_id = ${ctx.organizationId}
+        AND id = ${args.agent_id} FOR UPDATE`;
+      return deleteAgentConfig(tx, args.agent_id, agentConfigAudit(ctx));
+    }));
+  return { action: 'delete', agent_id: args.agent_id, deleted };
 }
 
 // ============================================

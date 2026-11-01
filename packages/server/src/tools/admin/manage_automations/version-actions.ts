@@ -10,6 +10,7 @@ import { insertToolConfigChange } from '../helpers/config-audit';
 import { nextRunAt } from '../../../utils/cron';
 import { resolveUsernames } from '../../../utils/resolve-usernames';
 import { getNextNumericId } from '../helpers/db-helpers';
+import { assertAutomationConfigVersionsUnchanged } from './config-state';
 import type { ToolContext } from '../../registry';
 import type { ManageAutomationsArgs, ManageAutomationsResult } from '../manage_automations';
 import {
@@ -46,7 +47,8 @@ import { syncAutomationChannelFeedsBestEffort } from '../../../automations/chann
 export async function handleCreateVersion(
   args: ManageAutomationsArgs,
   _env: unknown,
-  ctx: ToolContext
+  ctx: ToolContext,
+  base?: Record<string, string>
 ): Promise<{
   action: 'create_version';
   automation_id: string;
@@ -339,12 +341,15 @@ export async function handleCreateVersion(
     // automations row is untouched, so the audit must report the persisted
     // current_version_id rather than null/undefined.
     const preimageRows = await tx`
-      SELECT current_version_id FROM automations WHERE id = ${args.automation_id} LIMIT 1 FOR UPDATE
+      SELECT id, current_version_id FROM automations
+      WHERE automation_group_id = ${groupId} AND organization_id = ${ctx.organizationId}
+      ORDER BY id FOR UPDATE
     `;
-    const persistedCurrentVersionId =
-      preimageRows.length > 0 && preimageRows[0].current_version_id != null
-        ? Number(preimageRows[0].current_version_id)
-        : null;
+    if (base) await assertAutomationConfigVersionsUnchanged(args, ctx.organizationId, base, tx);
+    const preimage = preimageRows.find(row => Number(row.id) === Number(args.automation_id));
+    const persistedCurrentVersionId = preimage?.current_version_id != null
+      ? Number(preimage.current_version_id)
+      : null;
 
     // The new version row is owned by the group root, not the assignment
     // the caller named. Every automation in the group will later point at

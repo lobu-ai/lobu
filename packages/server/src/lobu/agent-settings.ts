@@ -1,11 +1,9 @@
 /**
- * Shared write boundary for persisted agent settings: the PATCH
- * `/:agentId/config` route and the MCP `manage_agents` tool both validate
- * through `validateAgentSettingsUpdate` and persist + audit through
- * `persistAgentSettingsPatch`, so a payload one path refuses the other cannot
- * store.
+ * Shared validation and persistence for agent configuration. REST and MCP
+ * retain their transport/access rules and use the same transactional writers.
  */
-import type { AgentSettings } from "@lobu/core";
+import type { AgentConfigStore, AgentMetadata, AgentSettings } from "@lobu/core";
+import type { AgentCreateInput } from "@lobu/core/contracts/tools/manage-agents";
 import { isUnrestrictedMode } from "@lobu/connector-sdk/egress-policy";
 import {
 	AgentSettingsStoredSchema,
@@ -273,8 +271,8 @@ export async function validateAgentSettingsUpdate(
 		};
 	}
 
-	// Structural check on skillsConfig — the settings spread below persists it
-	// verbatim, and the runtime reads it back as a trusted SkillConfig.
+	// Structural check on skillsConfig — the store persists the patch verbatim,
+	// and the runtime reads it back as a trusted SkillConfig.
 	const skillsConfigError = validateSkillsConfig(
 		(updates as { skillsConfig?: unknown }).skillsConfig
 	);
@@ -450,6 +448,20 @@ export async function validateAgentSettingsUpdate(
 	return null;
 }
 
+type AgentConfigAudit = Pick<
+	ConfigChangeEventParams,
+	| "organizationId"
+	| "applyId"
+	| "actorSource"
+	| "createdBy"
+	| "clientId"
+	| "agentId"
+	| "actingAutomationId"
+	| "actingRunId"
+	| "mcpSessionId"
+	| "tokenType"
+>;
+
 /**
  * Persist a validated settings patch and its config audit row in the caller's
  * transaction. The caller holds the org and agent row locks and passes the
@@ -461,19 +473,7 @@ export async function persistAgentSettingsPatch(
 	agentId: string,
 	updates: Partial<AgentSettings>,
 	before: AgentSettings | null,
-	audit: Pick<
-		ConfigChangeEventParams,
-		| "organizationId"
-		| "applyId"
-		| "actorSource"
-		| "createdBy"
-		| "clientId"
-		| "agentId"
-		| "actingAutomationId"
-		| "actingRunId"
-		| "mcpSessionId"
-		| "tokenType"
-	>
+	audit: AgentConfigAudit
 ): Promise<void> {
 	const store = createPostgresAgentConfigStore(tx);
 	await store.updateSettings(agentId, {
@@ -499,4 +499,68 @@ export async function persistAgentSettingsPatch(
 		},
 		tx
 	);
+}
+
+/** Idempotent insertion; an external ownership mapping commits with the agent. */
+export async function insertAgentConfig(
+	tx: DbClient,
+	args: Pick<AgentCreateInput, "agent_id" | "name" | "description" | "identity_md">,
+	owner: AgentMetadata["owner"],
+	models: AgentSettings["models"] | null,
+	audit: AgentConfigAudit
+): Promise<boolean> {
+	const rows = await tx`
+		INSERT INTO agents (id, organization_id, name, description, identity_md,
+			owner_platform, owner_user_id, models, created_at, updated_at)
+		VALUES (${args.agent_id}, ${audit.organizationId}, ${args.name}, ${args.description ?? null},
+			${args.identity_md ?? ""}, ${owner.platform}, ${owner.userId},
+			${models == null ? null : tx.json(models)}, NOW(), NOW())
+		ON CONFLICT (organization_id, id) DO NOTHING RETURNING id
+	`;
+	if (!rows.length) return false;
+	if (owner.platform === "external") {
+		await tx`INSERT INTO agent_users (organization_id, agent_id, platform, user_id, created_at)
+			VALUES (${audit.organizationId}, ${args.agent_id}, ${owner.platform}, ${owner.userId}, NOW())
+			ON CONFLICT (organization_id, agent_id, platform, user_id) DO NOTHING`;
+	}
+	await insertConfigChangeEventInTransaction({
+		...audit, resourceKind: "agent", resourceId: args.agent_id, op: "created",
+		summary: `Agent '${args.name}' created`, before: null,
+		state: { agentId: args.agent_id, name: args.name, description: args.description ?? null },
+	}, tx);
+	return true;
+}
+
+/** Caller holds the org and agent row locks, just as for settings patches. */
+export async function persistAgentMetadataPatch(
+	tx: DbClient,
+	agentId: string,
+	updates: Parameters<AgentConfigStore["updateMetadata"]>[1],
+	audit: AgentConfigAudit
+): Promise<void> {
+	const store = createPostgresAgentConfigStore(tx);
+	const before = await store.getMetadata(agentId);
+	await store.updateMetadata(agentId, updates);
+	const after = await store.getMetadata(agentId);
+	await insertConfigChangeEventInTransaction({
+		...audit, resourceKind: "agent", resourceId: agentId, op: "updated",
+		summary: `Agent '${after?.name ?? agentId}' metadata updated`,
+		before: before ? { ...before } : null, state: after ? { ...after } : null,
+		changedFields: Object.keys(updates),
+	}, tx);
+}
+
+/** Caller holds the org and agent row locks; FK cascades own dependent cleanup. */
+export async function deleteAgentConfig(
+	tx: DbClient, agentId: string, audit: AgentConfigAudit
+): Promise<boolean> {
+	const store = createPostgresAgentConfigStore(tx);
+	const before = await store.getMetadata(agentId);
+	if (!before) return false;
+	await store.deleteMetadata(agentId);
+	await insertConfigChangeEventInTransaction({
+		...audit, resourceKind: "agent", resourceId: agentId, op: "deleted",
+		summary: `Agent '${agentId}' deleted`, before: { ...before }, state: null,
+	}, tx);
+	return true;
 }

@@ -6,6 +6,7 @@
  */
 
 import type {
+	ManageFeedsArgs,
 	FeedCreateInput,
 	FeedDeleteInput,
 	FeedListInput,
@@ -21,7 +22,7 @@ import type { ToolContext } from "../../tools/registry";
 import { createActionCaller } from "./action-call";
 
 export interface FeedsNamespace {
-	manage(input: Record<string, unknown>): Promise<unknown>;
+	manage(input: ManageFeedsArgs): Promise<unknown>;
 	list(input?: FeedListInput): Promise<unknown>;
 	get(input: FeedReadInput): Promise<unknown>;
 	readMany(input: FeedReadManyInput): Promise<unknown>;

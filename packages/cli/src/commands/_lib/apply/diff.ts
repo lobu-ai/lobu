@@ -1730,16 +1730,15 @@ function diffConnectorDefinition(
   const id = connectorDefinitionId(desired);
   // The CLI can't compare source hashes (the server compiles, and the stored
   // hash is of the *compiled* output) — so we always emit a "sync" row;
-  // `install_connector` is idempotent and reports `updated:false` on apply
-  // when the code is byte-identical, so this never churns remote state.
+  // The server preserves identical retained versions and enforces version bumps
+  // for source changes. Installed definitions use the version-checked update.
   // Local files have no resolved key during planning; the static hint lets
   // the plan recognise an installed definition without compiling the source.
   const key = desired.key ?? desired.declaredKeyHint;
   const installedRemotely = key ? installedKeys.has(key) : false;
   return {
     kind: "connector-definition",
-    // "update" (re-push) when already installed; `install_connector` is
-    // idempotent and reports `updated:false` if the code is unchanged.
+    // Installed definitions reuse update_connector_source with the read version.
     verb: installedRemotely ? "update" : "create",
     id,
     desired,
