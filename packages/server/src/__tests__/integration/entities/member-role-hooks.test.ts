@@ -110,6 +110,81 @@ describe('member roles through generic entity edits', () => {
     expect(await denied.text()).toContain("You don't have permission to edit records in this workspace. Ask a workspace owner or admin.");
     expect((await post(`/api/${org.slug}/manage_entity`, { cookie: owner.cookie, body })).status).toBe(200);
   });
+  async function editMetadata(actor: typeof owner, entityId: number, metadata: Record<string, unknown>) {
+    return post(`/api/${org.slug}/manage_entity`, { cookie: actor.cookie, body: { action: 'update', entity_id: entityId, metadata } });
+  }
+  async function pendingInvite(email: string) {
+    const sql = getTestDb();
+    return (await sql`SELECT id, role, status FROM invitation WHERE "organizationId" = ${org.id} AND email = ${email} AND status = 'pending'`)[0];
+  }
+  it('invites when an email is added after the member record was created', async () => {
+    const created = await post(`/api/${org.slug}/manage_entity`, { cookie: owner.cookie, body: { action: 'create', entity_type: '$member', name: 'Late' } });
+    expect(created.status).toBe(200);
+    const entityId = Number((await created.json()).entity.id);
+    expect(await pendingInvite('late@roles.example.com')).toBeUndefined();
+    expect((await editMetadata(owner, entityId, { email: 'late@roles.example.com' })).status).toBe(200);
+    const invite = await pendingInvite('late@roles.example.com');
+    expect(invite).toMatchObject({ role: 'member', status: 'pending' });
+    const sql = getTestDb();
+    const [entity] = await sql`SELECT metadata->>'status' AS status, metadata->>'email' AS email FROM entities WHERE id = ${entityId}`;
+    expect(entity).toMatchObject({ status: 'invited', email: 'late@roles.example.com' });
+    const events = await sql`SELECT id FROM events WHERE organization_id = ${org.id} AND origin_type = 'workspace_invitation_created'`;
+    expect(events).toHaveLength(1);
+  });
+  it('cancels the stale invitation and invites the corrected email', async () => {
+    const created = await post(`/api/${org.slug}/manage_entity`, { cookie: owner.cookie, body: { action: 'create', entity_type: '$member', name: 'Typo', metadata: { email: 'wrong@roles.example.com' } } });
+    expect(created.status).toBe(200);
+    const entityId = Number((await created.json()).entity.id);
+    expect(await pendingInvite('wrong@roles.example.com')).toBeDefined();
+    expect((await editMetadata(owner, entityId, { email: 'right@roles.example.com' })).status).toBe(200);
+    expect(await pendingInvite('wrong@roles.example.com')).toBeUndefined();
+    const sql = getTestDb();
+    const canceled = await sql`SELECT id FROM invitation WHERE "organizationId" = ${org.id} AND email = 'wrong@roles.example.com' AND status = 'canceled'`;
+    expect(canceled).toHaveLength(1);
+    expect(await pendingInvite('right@roles.example.com')).toMatchObject({ role: 'member', status: 'pending' });
+    const pending = await sql`SELECT id FROM invitation WHERE "organizationId" = ${org.id} AND status = 'pending'`;
+    expect(pending).toHaveLength(1);
+  });
+  it('does not duplicate an invitation already pending for the new email', async () => {
+    const first = await post(`/api/${org.slug}/manage_entity`, { cookie: owner.cookie, body: { action: 'create', entity_type: '$member', name: 'First', metadata: { email: 'shared@roles.example.com' } } });
+    expect(first.status).toBe(200);
+    const second = await post(`/api/${org.slug}/manage_entity`, { cookie: owner.cookie, body: { action: 'create', entity_type: '$member', name: 'Second' } });
+    expect(second.status).toBe(200);
+    expect((await editMetadata(owner, Number((await second.json()).entity.id), { email: 'shared@roles.example.com' })).status).toBe(200);
+    const sql = getTestDb();
+    const pending = await sql`SELECT id FROM invitation WHERE "organizationId" = ${org.id} AND email = 'shared@roles.example.com' AND status = 'pending'`;
+    expect(pending).toHaveLength(1);
+  });
+  it('keeps email edits on active members invite-free', async () => {
+    expect((await editMetadata(owner, member.entityId, { email: 'member-corrected@roles.example.com' })).status).toBe(200);
+    const sql = getTestDb();
+    const [entity] = await sql`SELECT metadata->>'email' AS email FROM entities WHERE id = ${member.entityId}`;
+    expect(entity.email).toBe('member-corrected@roles.example.com');
+    expect(await pendingInvite('member-corrected@roles.example.com')).toBeUndefined();
+    expect(await roles(member)).toMatchObject({ role: 'member', displayed: 'member' });
+  });
+  it('rejects late-email invites from non-human callers', async () => {
+    const client = await createTestOAuthClient();
+    const { token } = await createTestAccessToken(owner.userId, org.id, client.client_id, { scope: 'mcp:write profile:read' });
+    const created = await post(`/api/${org.slug}/manage_entity`, { cookie: owner.cookie, body: { action: 'create', entity_type: '$member', name: 'Token' } });
+    expect(created.status).toBe(200);
+    const entityId = Number((await created.json()).entity.id);
+    const response = await post(`/api/${org.slug}/manage_entity`, { token, body: { action: 'update', entity_id: entityId, metadata: { email: 'token@roles.example.com' } } });
+    expect(response.status).toBe(403);
+    expect(await pendingInvite('token@roles.example.com')).toBeUndefined();
+  });
+  it('applies approved email additions through the same lifecycle', async () => {
+    const created = await post(`/api/${org.slug}/manage_entity`, { cookie: owner.cookie, body: { action: 'create', entity_type: '$member', name: 'Approved' } });
+    expect(created.status).toBe(200);
+    const entityId = Number((await created.json()).entity.id);
+    const postCommitEffects: Array<() => Promise<void>> = [];
+    await applyEntityFieldChangeProposal({ entity_id: entityId, fields: { email: 'approved@roles.example.com' }, current: {} }, { userId: owner.userId }, getTestDb(), postCommitEffects);
+    expect(await pendingInvite('approved@roles.example.com')).toMatchObject({ role: 'member', status: 'pending' });
+    // The invitation email reads the committed row, so it must be queued for
+    // after commit rather than sent inside the transaction.
+    expect(postCommitEffects).toHaveLength(1);
+    await expect(postCommitEffects[0]()).resolves.toBeUndefined();
+  });
   it('honors selected invitation roles and later edits', async () => {
     const response = await post(`/api/${org.slug}/manage_entity`, { cookie: owner.cookie, body: { action: 'create', entity_type: '$member', name: 'Invited', metadata: { email: 'invited@roles.example.com', role: 'admin' } } });
     expect(response.status).toBe(200);

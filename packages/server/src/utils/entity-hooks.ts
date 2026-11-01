@@ -29,6 +29,7 @@ import {
   type WorkspaceChangeEventParams,
 } from './insert-event';
 import type { CreatedEntity, EntityData } from './entity-management';
+import { markMemberInvitedInTransaction } from './entity-management';
 import logger from './logger';
 
 export interface EntityHookContext {
@@ -110,7 +111,7 @@ export function getEntityHooks(entityType: string): EntityLifecycleHooks | undef
 // ---------------------------------------------------------------------------
 
 async function sendMemberInvitationEmail(
-  entity: CreatedEntity,
+  entity: { metadata?: Record<string, unknown> | null },
   ctx: EntityHookContext
 ): Promise<void> {
   const { emailField } = await resolveMemberSchemaFields(ctx.organizationId);
@@ -149,6 +150,109 @@ async function sendMemberInvitationEmail(
     });
   } catch (err) {
     logger.error({ err }, '[Entity Hook] Failed to send invitation email');
+  }
+}
+
+interface MemberEmailChange {
+  entityId: number;
+  oldEmail: string | null;
+  newEmail: string | null;
+  metadata: Record<string, unknown> | null | undefined;
+}
+
+// An email added or corrected after the $member record was created must invite
+// like a create-with-email does: creating the record and filling in the email
+// later is the same administrative act, and leaving it invite-free strands the
+// invitee with a record but no access (the placeholder looks "added" while
+// organizations.list hides the workspace until an invitation is accepted).
+async function updateMemberInvitationForEmail(
+  sql: DbClient,
+  ctx: EntityTransactionHookContext,
+  change: MemberEmailChange
+): Promise<void> {
+  const { entityId, oldEmail, newEmail } = change;
+  // Target the membership by the authentication claim, never by the editable
+  // email, as the role edit below and beforeDelete do.
+  const members = await sql`
+    SELECT m.id FROM entity_identities ei JOIN member m
+      ON m."userId" = ei.identifier AND m."organizationId" = ei.organization_id
+    WHERE ei.organization_id = ${ctx.organizationId} AND ei.entity_id = ${entityId}
+      AND ei.namespace = 'auth_user_id' AND ei.source_connector = 'auth:signup'
+      AND ei.deleted_at IS NULL
+  `;
+  if (members.length > 1) {
+    throw new ToolUserError('Member has more than one authentication identity', 400);
+  }
+  // An established membership owns its access; an email edit there stays a
+  // pure profile edit and must not mint invitations.
+  if (members.length === 1) return;
+  assertHumanMemberChange(ctx.principal);
+  const role = parseMemberRole(change.metadata?.role ?? 'member');
+  await authorizeMemberRole(sql, ctx.organizationId, ctx.userId, role);
+  // A removed or replaced address must not keep a live invitation behind:
+  // cancel it the way deleting the record does.
+  if (oldEmail && oldEmail !== newEmail) {
+    const cancelled = (await sql`
+      UPDATE invitation SET status = 'canceled'
+      WHERE "organizationId" = ${ctx.organizationId} AND email = ${oldEmail} AND status = 'pending'
+      RETURNING id, role, status
+    `) as unknown as Array<{ id: string; role: string | null; status: string | null }>;
+    for (const inv of cancelled) {
+      await insertWorkspaceChangeEventInTransaction({
+        organizationId: ctx.organizationId, resourceKind: 'invitation',
+        resourceId: inv.id, op: 'updated', summary: 'Invitation cancelled',
+        state: { id: inv.id, role: inv.role ?? 'member', status: inv.status ?? 'canceled' },
+        changedFields: ['status'], actorSource: ctx.actorSource, createdBy: ctx.userId ?? null,
+      }, sql);
+    }
+  }
+  if (!newEmail) return;
+  // Never renew an existing pending invitation's expiry on edit (a role edit
+  // keeps expiry too); a mismatched role is resolved explicitly like on create.
+  const [pending] = await sql`SELECT role FROM invitation
+    WHERE "organizationId" = ${ctx.organizationId} AND email = ${newEmail} AND status = 'pending'`;
+  if (pending) {
+    if (pending.role !== role) {
+      throw new ToolUserError('A pending invitation already exists; edit its member record to change the role', 400);
+    }
+  } else {
+    // Insert a Better Auth invitation (skip if one already pending)
+    const inserted = (await sql`
+      INSERT INTO invitation (id, "organizationId", email, role, status, "expiresAt", "inviterId", "createdAt")
+      SELECT
+        gen_random_uuid()::text,
+        ${ctx.organizationId},
+        ${newEmail},
+        ${role},
+        'pending',
+        ${new Date(Date.now() + 48 * 60 * 60 * 1000)},
+        ${ctx.userId},
+        current_timestamp
+      WHERE NOT EXISTS (
+        SELECT 1 FROM invitation
+        WHERE "organizationId" = ${ctx.organizationId}
+          AND email = ${newEmail}
+          AND status = 'pending'
+      )
+      RETURNING id
+    `) as unknown as Array<{ id: string }>;
+    if (inserted.length > 0) {
+      await insertWorkspaceChangeEventInTransaction({
+        organizationId: ctx.organizationId, resourceKind: 'invitation',
+        resourceId: inserted[0].id, op: 'created', summary: 'Invitation sent',
+        state: { id: inserted[0].id, role, status: 'pending' },
+        changedFields: ['role', 'status'], actorSource: ctx.actorSource, createdBy: ctx.userId ?? null,
+      }, sql);
+    }
+  }
+  await markMemberInvitedInTransaction(sql, entityId);
+  // The invitation row commits with this transaction, so the email — which
+  // reads it back on a fresh connection — must run after commit.
+  if (ctx.deferAfterCommit) {
+    const metadata = { ...(change.metadata ?? {}), status: 'invited' };
+    ctx.deferAfterCommit(() => sendMemberInvitationEmail({ metadata }, ctx));
+  } else {
+    logger.error('[Entity Hook] No post-commit drain for $member invitation email; invitation created without email');
   }
 }
 
@@ -231,23 +335,42 @@ registerEntityHooks('$member', {
   },
 
   async beforeUpdate(fields, ctx) {
-    // Only a role write needs the org-wide serialization; taking it for every
-    // profile edit would block unrelated entity writes in the workspace.
-    if (!Object.hasOwn(fields, 'role')) return;
-    await lockMemberRoleChanges(ctx.sql, ctx.organizationId);
+    // A role write needs the org-wide serialization; an email write may mint
+    // an invitation in afterUpdate, so it claims the same lock. Other profile
+    // edits skip it so they never block unrelated entity writes.
+    if (Object.hasOwn(fields, 'role')) {
+      await lockMemberRoleChanges(ctx.sql, ctx.organizationId);
+      return;
+    }
+    const { emailField } = await resolveMemberSchemaFields(ctx.organizationId, ctx.sql);
+    if (Object.hasOwn(fields, emailField)) {
+      await lockMemberRoleChanges(ctx.sql, ctx.organizationId);
+    }
   },
 
   async afterUpdate(before, after, ctx) {
-    if (before.metadata?.role === after.metadata?.role) return;
-    assertHumanMemberChange(ctx.principal);
     const sql = ctx.sql;
     const { emailField } = await resolveMemberSchemaFields(ctx.organizationId, sql);
     const oldEmail = before.metadata?.[emailField];
     const newEmail = after.metadata?.[emailField];
+    const roleChanged = before.metadata?.role !== after.metadata?.role;
+    const emailChanged = oldEmail !== newEmail;
+    if (!roleChanged && !emailChanged) return;
     // An editable profile field must never retarget a permission mutation.
-    if (oldEmail !== newEmail) {
+    if (roleChanged && emailChanged) {
+      assertHumanMemberChange(ctx.principal);
       throw new ToolUserError('Change member email separately from its permission role', 400);
     }
+    if (emailChanged) {
+      await updateMemberInvitationForEmail(sql, ctx, {
+        entityId: before.id,
+        oldEmail: typeof oldEmail === 'string' && oldEmail !== '' ? oldEmail : null,
+        newEmail: typeof newEmail === 'string' && newEmail !== '' ? newEmail : null,
+        metadata: after.metadata,
+      });
+      return;
+    }
+    assertHumanMemberChange(ctx.principal);
     const role = parseMemberRole(after.metadata?.role);
     const members = await sql`
       SELECT m.id FROM entity_identities ei JOIN member m

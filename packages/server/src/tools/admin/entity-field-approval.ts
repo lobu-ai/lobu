@@ -813,6 +813,7 @@ export async function applyEntityFieldChangeProposal(
 	proposal: EntityFieldChangeProposal,
 	approver: IdentityContext,
 	db: DbClient = getDb(),
+	postCommitEffects?: Array<() => Promise<void>>,
 ): Promise<FieldMergeResult> {
 	const sql = db;
 	const approverUserId = approver.userId ?? null;
@@ -847,6 +848,9 @@ export async function applyEntityFieldChangeProposal(
 			sql: tx,
 			principal: approver,
 			actorSource: 'ui',
+			deferAfterCommit: postCommitEffects
+				? (effect) => postCommitEffects.push(effect)
+				: undefined,
 		};
 		await hooks?.beforeUpdate?.(metadataFields, hookContext);
 		await tx`
@@ -968,6 +972,7 @@ export async function applyEntityChangeProposal(
 			asUpdateProposal(proposal),
 			ctx,
 			db,
+			postCommitEffects,
 		);
 	}
 	if (operation === "create") {

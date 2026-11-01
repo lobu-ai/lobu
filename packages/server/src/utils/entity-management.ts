@@ -670,6 +670,19 @@ export async function patchEntityRows(params: {
 	return changed;
 }
 
+/**
+ * Flip a $member record's display status to invited on the caller's handle.
+ * Lifecycle hooks cannot write entity rows themselves (entity-write funnel
+ * gate), so the $member afterUpdate hook routes this badge flip through here
+ * after minting a late invitation. Invitation/member rows are untouched.
+ */
+export async function markMemberInvitedInTransaction(
+	tx: DbClient,
+	entityId: number,
+): Promise<void> {
+	await tx`UPDATE entities SET metadata = COALESCE(metadata, '{}'::jsonb) || '{"status":"invited"}'::jsonb WHERE id = ${entityId}`;
+}
+
 /** Hard-delete an explicit, bounded set of entity ids on the caller's handle. */
 export async function hardDeleteEntityRows(params: {
 	tx: DbClient;
@@ -1151,6 +1164,11 @@ export async function updateEntity(
 	// Lock the entity row, merge metadata, and write in ONE transaction: concurrent
 	// updates to the same entity serialize on the row lock, fixing the pre-existing
 	// non-transactional read-modify-write race on entities.metadata.
+	// Lifecycle hooks queue network-only side effects here (e.g. the $member
+	// invitation email, which reads back the committed invitation row); they run
+	// after commit so a failure can never roll back the write, mirroring the
+	// approval path's postCommitEffects drain.
+	const postCommitEffects: Array<() => Promise<void>> = [];
 	const result = await withEntityWriteTransaction(sql, async (tx) => {
 		// Resolve the type before any lock: `beforeUpdate` exists so a hook can
 		// claim a coarser lock (e.g. the organization row) ahead of the entity
@@ -1170,6 +1188,7 @@ export async function updateEntity(
 			sql: tx,
 			principal: ctx,
 			actorSource: deriveToolActorSource(ctx),
+			deferAfterCommit: (effect) => postCommitEffects.push(effect),
 		};
 		await hooks?.beforeUpdate?.(metadataUpdates, hookContext);
 		// Canonical change events take an organization FK lock before commit. Claim
@@ -1594,6 +1613,13 @@ export async function updateEntity(
 		);
 		return updated;
 	});
+	for (const effect of postCommitEffects) {
+		try {
+			await effect();
+		} catch (err) {
+			logger.error({ err }, 'Post-commit entity update effect failed');
+		}
+	}
 
 	// Split the deferral inputs off the returned row: they are this function's
 	// own bookkeeping, and every caller downstream reads `entity` as an entity.
