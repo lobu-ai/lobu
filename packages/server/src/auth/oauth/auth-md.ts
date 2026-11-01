@@ -85,8 +85,8 @@ returns a new \`refresh_token\`, revokes the one you sent, and starts a new 30-d
 refresh-token lifetime.
 
 Persist \`client_id\`, \`client_secret\` (when returned), \`access_token\`,
-\`refresh_token\`, \`expires_in\`, and \`resource\` in secure storage that survives
-process restarts. Do not keep the credential only in memory, a temporary
+\`refresh_token\`, \`resource\`, and an absolute \`expires_at\` computed when the
+token response arrives in secure storage that survives process restarts. Do not keep the credential only in memory, a temporary
 filesystem, or an ephemeral job container. If your runtime cannot retain it,
 tell the user before starting instead of asking for repeated approvals.
 
@@ -115,7 +115,7 @@ An app HTTP 400 JSON response from \`${baseUrl}/oauth/token\` is different:
 \`invalid_grant\` means the grant or refresh token is no longer valid;
 \`invalid_client\` means the client credentials are invalid. For \`invalid_grant\`,
 reload once, then reauthorize if it is still invalid. For \`invalid_client\`,
-register a new client.
+reload once, then register a new client and start a new device flow.
 
 ## Errors
 
@@ -124,7 +124,9 @@ register a new client.
 | \`authorization_pending\` | token poll | user has not approved yet; keep polling |
 | \`slow_down\` | token poll | poll less often |
 | \`expired_token\` | token poll | the device_code expired; start over |
-| \`invalid_grant\` | device/email, token | invalid code; device/email also rejects a \`user_code\` already claimed by a verifier |
+| \`invalid_grant\` | device/email, token | invalid code or grant; refresh also uses it for a rotated/expired token or missing original \`resource\` |
+| \`invalid_client\` | token | invalid client credentials; reload, then register a new client and start a new device flow |
+| Cloudflare 403 / \`1010\` | edge | \`browser_signature_banned\`; keep the saved credential and surface the edge block |
 | \`access_denied\` | token poll | the user denied the request |
 `;
 }
