@@ -198,6 +198,32 @@ export async function runAutomationNavigationProof({
 
   // Save only the existing inert definition and an explicit synthetic note.
   await name.fill(automationName);
+  const advanced = page.getByRole("button", {
+    name: "Advanced settings",
+    exact: true,
+  });
+  if ((await advanced.getAttribute("aria-expanded")) !== "true")
+    await advanced.click();
+  for (const id of [
+    "scratch-description",
+    "scratch-tags",
+    "scratch-reactions-guidance",
+  ]) {
+    const field = page.locator(`#${id}`);
+    assert(
+      (await field.inputValue()).length > 0,
+      `Missing saved clear-field fixture: ${id}`
+    );
+    await field.fill("");
+  }
+  await review.getByRole("button", { name: "Show diff", exact: true }).click();
+  for (const field of ["Description", "Tags", "Reactions guidance"]) {
+    await review
+      .locator(".cm-editor")
+      .getByText(field, { exact: false })
+      .waitFor();
+  }
+  await screenshot("automation-cleared-fields-review.png");
   await page
     .locator("#scratch-change-notes")
     .fill("Synthetic preview form verification; no execution.");
@@ -539,7 +565,10 @@ export async function runAutomationNavigationProof({
       !definition.execution_config?.executor &&
       !definition.managed_agent_id &&
       !definition.device_worker_id &&
-      !definition.reaction_script,
+      !definition.reaction_script &&
+      !definition.description &&
+      !definition.reactions_guidance &&
+      !definition.tags?.length,
     "Synthetic form save added an execution path"
   );
   return {
@@ -549,6 +578,7 @@ export async function runAutomationNavigationProof({
       "collapsed saved-vs-draft instruction diff and revert",
       "draft survives repeated activity peek",
       "Save stays in editor",
+      "cleared description, tags and reactions guidance persist",
       "Done returns list",
       "explicit activity link",
       "Activity Runs navigation",
@@ -574,6 +604,7 @@ export async function runAutomationNavigationProof({
     screenshots: [
       "automation-editor-instructions.png",
       "automation-instruction-changes.png",
+      "automation-cleared-fields-review.png",
       "automation-edit-activity.png",
       "automation-runs-empty.png",
       "automation-combined-activity.png",

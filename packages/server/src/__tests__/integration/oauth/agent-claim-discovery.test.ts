@@ -112,6 +112,10 @@ describe('auth.md discovery surface', () => {
     expect(text).toContain('# auth.md');
     expect(text).toContain('/oauth/device/email');
     expect(text).toContain('user_claimed');
+    expect(text).toContain('1010');
+    expect(text).toContain('browser_signature_banned');
+    expect(text).toContain('invalid_grant');
+    expect(text).toContain('invalid_client');
   });
 });
 

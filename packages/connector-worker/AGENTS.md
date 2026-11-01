@@ -10,8 +10,8 @@ also used by `@lobu/cli` and `@lobu/server`.
 - Connector code runs in a V8 isolate in-process (`isolated-vm`), with no
   filesystem, no module loader, and no socket of its own — the host dials on
   the guest's behalf. `IsolateExecutor` defaults to a 10-minute wall clock and
-  a 512 MB heap for every run; interactive auth disables the fixed timeout
-  while it waits for the user.
+  a 512 MB heap for every run (an agent turn caps its heap at 256 MB);
+  interactive auth disables the fixed timeout while it waits for the user.
 - The guest reaches the outside world only through the named host capabilities
   in `isolate/bridge.ts`; there is no ambient environment to inherit.
   Credentials and config belong in the typed job context; never expose

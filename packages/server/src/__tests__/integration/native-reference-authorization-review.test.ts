@@ -1,71 +1,210 @@
+/**
+ * Integration test: the REST reads behind the native event reference nodes
+ * (automation-ref, connector-ref, agent-ref and the connector catalog) obey
+ * the existing workspace permission contract. The frontend only supplies
+ * selectors; these reads must not resolve a foreign workspace's records or a
+ * private connection, and an archived Automation must stay resolvable through
+ * the explicit status filter the reference uses.
+ */
+
 import { beforeAll, describe, expect, it } from 'vitest';
 import { cleanupTestDatabase } from '../setup/test-db';
-import { addUserToOrganization, createTestAgent, createTestConnection, createTestConnectorDefinition, createTestOrganization, createTestUser, createTestOAuthClient, createTestAccessToken } from '../setup/test-fixtures';
-import { TestApiClient } from '../setup/test-mcp-client';
+import {
+  addUserToOrganization,
+  createTestAccessToken,
+  createTestAgent,
+  createTestConnection,
+  createTestConnectorDefinition,
+  createTestOAuthClient,
+  createTestOrganization,
+  createTestUser,
+} from '../setup/test-fixtures';
 import { post } from '../setup/test-helpers';
-describe('native reference actual REST authorization review', () => {
- let publicSlug:string, privateSlug:string, id:string, visibleId:number, hiddenId:number;
- let ownerApi: Awaited<ReturnType<typeof TestApiClient.for>>;
- let aToken:string,bToken:string;
- beforeAll(async () => {
-  await cleanupTestDatabase();
-  const pub=await createTestOrganization({name:'Reference public fixture',visibility:'public'});
-  const priv=await createTestOrganization({name:'Reference private fixture',visibility:'private'});
-  publicSlug=pub.slug; privateSlug=priv.slug;
-  const user=await createTestUser({email:'reference-authorization@example.test'});
-  await addUserToOrganization(user.id,pub.id,'owner');
-  const other=await createTestUser({email:'reference-other@example.test'});
-  await addUserToOrganization(other.id,priv.id,'owner');
-  const oauth=await createTestOAuthClient();
-  aToken=(await createTestAccessToken(user.id,pub.id,oauth.client_id,{scope:'mcp:read'})).token;
-  bToken=(await createTestAccessToken(other.id,priv.id,oauth.client_id,{scope:'mcp:read'})).token;
-  const agent=await createTestAgent({organizationId:pub.id,ownerUserId:user.id,agentId:'visible-reference-agent'});
-  await createTestConnectorDefinition({key:'reference.demo',name:'Reference fixture connector',organization_id:pub.id});
-  const visible=await createTestConnection({organization_id:pub.id,connector_key:'reference.demo',visibility:'org',created_by:user.id});
-  const hidden=await createTestConnection({organization_id:pub.id,connector_key:'reference.demo',visibility:'private',created_by:user.id});
-  visibleId=Number(visible.id);hiddenId=Number(hidden.id);
-  ownerApi=await TestApiClient.for({organizationId:pub.id,userId:user.id,memberRole:'owner'});
-  const created=await ownerApi.automations.create({slug:'reference-test',name:'Public reference',prompt:'Fixture',managed_agent_id:agent.agentId}) as {automation_id:string};
-  id=String(created.automation_id);
- });
- it('enforces real public/private scope for the selected reads', async () => {
-  const req=async (org:string,tool:string,body:object)=>post(`/api/${org}/${tool}`,{body});
-  const a=await req(publicSlug,'manage_automations',{action:'list',automation_id:id,status:'active',include_details:false,limit:1});
-  const aj=await a.json();expect(a.status).toBe(200);expect(aj.automations.map((x:{automation_id:string})=>String(x.automation_id))).toEqual([id]);
-  const c=await req(publicSlug,'manage_connections',{action:'list',connection_ids:[visibleId,hiddenId],connector_key:'reference.demo',limit:5});
-  const cj=await c.json();expect(c.status).toBe(200);expect(cj.connections.map((x:{id:number})=>Number(x.id))).toContain(visibleId);expect(cj.connections.map((x:{id:number})=>Number(x.id))).not.toContain(hiddenId);
-  const g=await req(publicSlug,'manage_agents',{action:'get',agent_id:'visible-reference-agent'});const gj=await g.json();expect(g.status).toBe(200);expect(gj.agent.id).toBe('visible-reference-agent');
-  const catalog=await req(publicSlug,'manage_catalog',{action:'list_installed',kinds:['connectors'],include_catalog:true});expect(catalog.status).toBe(200);
-  for(const [tool,body] of [['manage_automations',{action:'list',automation_id:id,status:'active',limit:1}],['manage_connections',{action:'list',connection_ids:[visibleId],connector_key:'reference.demo',limit:1}],['manage_agents',{action:'get',agent_id:'visible-reference-agent'}],['manage_catalog',{action:'list_installed',kinds:['connectors'],include_catalog:true}]] as const){const r=await req(privateSlug,tool,body);expect([401,403]).toContain(r.status);}
-  const absent=await req(publicSlug,'manage_automations',{action:'list',automation_id:'999999',status:'active',limit:1});expect((await absent.json()).automations).toEqual([]);
-  await ownerApi.automations.delete({automation_ids:[id]});
-  const defaultList = await req(publicSlug,'manage_automations',{action:'list',automation_id:id,limit:1});
-  expect((await defaultList.json()).automations).toEqual([]);
-  const activeList = await req(publicSlug,'manage_automations',{action:'list',automation_id:id,status:'active',limit:1});
-  expect((await activeList.json()).automations).toEqual([]);
-  const archivedList = await req(publicSlug,'manage_automations',{action:'list',automation_id:id,status:'archived',limit:1});
-  const archived = (await archivedList.json()).automations;
-  expect(archived.map((x:{automation_id:string})=>String(x.automation_id))).toEqual([id]);
-  expect(archived[0].status).toBe('archived');
- });
- it('denies an authenticated principal outside its workspace and does not resolve foreign IDs within its own workspace',async()=>{
-  const specs=[
-   ['manage_automations',{action:'list',automation_id:id,status:'archived',limit:1}],
-   ['manage_connections',{action:'list',connection_ids:[visibleId],connector_key:'reference.demo',limit:1}],
-   ['manage_agents',{action:'get',agent_id:'visible-reference-agent'}],
-   ['manage_catalog',{action:'list_installed',kinds:['connectors'],include_catalog:true}],
-  ] as const;
-  const cross=[];
-  for(const [tool,body] of specs){
-   const r=await post(`/api/${privateSlug}/${tool}`,{body,token:aToken});
-   cross.push(r.status);expect([401,403]).toContain(r.status);
-  }
-  const a=await post(`/api/${privateSlug}/manage_automations`,{token:bToken,body:specs[0][1]});
-  expect(a.status).toBe(200);expect((await a.json()).automations).toEqual([]);
-  const c=await post(`/api/${privateSlug}/manage_connections`,{token:bToken,body:specs[1][1]});
-  expect(c.status).toBe(200);expect((await c.json()).connections).toEqual([]);
-  const g=await post(`/api/${privateSlug}/manage_agents`,{token:bToken,body:specs[2][1]});
-  expect([403,404]).toContain(g.status);
- });
+import { TestApiClient } from '../setup/test-mcp-client';
 
+const AGENT_ID = 'visible-reference-agent';
+const CONNECTOR_KEY = 'reference.demo';
+
+describe('native reference REST authorization', () => {
+  let publicSlug: string;
+  let privateSlug: string;
+  let automationId: string;
+  let visibleConnectionId: number;
+  let hiddenConnectionId: number;
+  let ownerApi: TestApiClient;
+  let publicOwnerToken: string;
+  let privateOwnerToken: string;
+
+  const ids = (rows: Array<{ automation_id: string }>) =>
+    rows.map((row) => String(row.automation_id));
+
+  beforeAll(async () => {
+    await cleanupTestDatabase();
+    const publicOrg = await createTestOrganization({
+      name: 'Reference public fixture',
+      visibility: 'public',
+    });
+    const privateOrg = await createTestOrganization({
+      name: 'Reference private fixture',
+      visibility: 'private',
+    });
+    publicSlug = publicOrg.slug;
+    privateSlug = privateOrg.slug;
+
+    const publicOwner = await createTestUser({ email: 'reference-authorization@example.test' });
+    await addUserToOrganization(publicOwner.id, publicOrg.id, 'owner');
+    const privateOwner = await createTestUser({ email: 'reference-other@example.test' });
+    await addUserToOrganization(privateOwner.id, privateOrg.id, 'owner');
+
+    const oauthClient = await createTestOAuthClient();
+    publicOwnerToken = (
+      await createTestAccessToken(publicOwner.id, publicOrg.id, oauthClient.client_id, {
+        scope: 'mcp:read',
+      })
+    ).token;
+    privateOwnerToken = (
+      await createTestAccessToken(privateOwner.id, privateOrg.id, oauthClient.client_id, {
+        scope: 'mcp:read',
+      })
+    ).token;
+
+    await createTestAgent({
+      organizationId: publicOrg.id,
+      ownerUserId: publicOwner.id,
+      agentId: AGENT_ID,
+    });
+    await createTestConnectorDefinition({
+      key: CONNECTOR_KEY,
+      name: 'Reference fixture connector',
+      organization_id: publicOrg.id,
+    });
+    const visible = await createTestConnection({
+      organization_id: publicOrg.id,
+      connector_key: CONNECTOR_KEY,
+      visibility: 'org',
+      created_by: publicOwner.id,
+    });
+    const hidden = await createTestConnection({
+      organization_id: publicOrg.id,
+      connector_key: CONNECTOR_KEY,
+      visibility: 'private',
+      created_by: publicOwner.id,
+    });
+    visibleConnectionId = Number(visible.id);
+    hiddenConnectionId = Number(hidden.id);
+
+    ownerApi = await TestApiClient.for({
+      organizationId: publicOrg.id,
+      userId: publicOwner.id,
+      memberRole: 'owner',
+    });
+    const created = (await ownerApi.automations.create({
+      slug: 'reference-test',
+      name: 'Public reference',
+      prompt: 'Fixture',
+      managed_agent_id: AGENT_ID,
+    })) as { automation_id: string };
+    automationId = String(created.automation_id);
+  });
+
+  it('resolves public-workspace references anonymously and hides the private connection', async () => {
+    const list = await post(`/api/${publicSlug}/manage_automations`, {
+      body: { action: 'list', automation_id: automationId, status: 'active', include_details: false, limit: 1 },
+    });
+    expect(list.status).toBe(200);
+    expect(ids((await list.json()).automations)).toEqual([automationId]);
+
+    const connections = await post(`/api/${publicSlug}/manage_connections`, {
+      body: {
+        action: 'list',
+        connection_ids: [visibleConnectionId, hiddenConnectionId],
+        connector_key: CONNECTOR_KEY,
+        limit: 5,
+      },
+    });
+    expect(connections.status).toBe(200);
+    const connectionIds = (await connections.json()).connections.map((row: { id: number }) => Number(row.id));
+    expect(connectionIds).toContain(visibleConnectionId);
+    expect(connectionIds).not.toContain(hiddenConnectionId);
+
+    const agent = await post(`/api/${publicSlug}/manage_agents`, {
+      body: { action: 'get', agent_id: AGENT_ID },
+    });
+    expect(agent.status).toBe(200);
+    expect((await agent.json()).agent.id).toBe(AGENT_ID);
+
+    const catalog = await post(`/api/${publicSlug}/manage_catalog`, {
+      body: { action: 'list_installed', kinds: ['connectors'], include_catalog: true },
+    });
+    expect(catalog.status).toBe(200);
+
+    const absent = await post(`/api/${publicSlug}/manage_automations`, {
+      body: { action: 'list', automation_id: '999999', status: 'active', limit: 1 },
+    });
+    expect((await absent.json()).automations).toEqual([]);
+  });
+
+  it('refuses anonymous reads of the private workspace', async () => {
+    const reads: Array<[string, Record<string, unknown>]> = [
+      ['manage_automations', { action: 'list', automation_id: automationId, status: 'active', limit: 1 }],
+      ['manage_connections', { action: 'list', connection_ids: [visibleConnectionId], connector_key: CONNECTOR_KEY, limit: 1 }],
+      ['manage_agents', { action: 'get', agent_id: AGENT_ID }],
+      ['manage_catalog', { action: 'list_installed', kinds: ['connectors'], include_catalog: true }],
+    ];
+    for (const [tool, body] of reads) {
+      const response = await post(`/api/${privateSlug}/${tool}`, { body });
+      expect([401, 403]).toContain(response.status);
+    }
+  });
+
+  it('keeps an archived Automation resolvable only through the explicit archived filter', async () => {
+    await ownerApi.automations.delete({ automation_ids: [automationId] });
+
+    for (const status of [undefined, 'active']) {
+      const response = await post(`/api/${publicSlug}/manage_automations`, {
+        body: { action: 'list', automation_id: automationId, limit: 1, ...(status ? { status } : {}) },
+      });
+      expect((await response.json()).automations).toEqual([]);
+    }
+
+    const archived = await post(`/api/${publicSlug}/manage_automations`, {
+      body: { action: 'list', automation_id: automationId, status: 'archived', limit: 1 },
+    });
+    const rows = (await archived.json()).automations;
+    expect(ids(rows)).toEqual([automationId]);
+    expect(rows[0].status).toBe('archived');
+  });
+
+  it('denies a public-workspace token outside its workspace and does not resolve foreign IDs inside the private one', async () => {
+    const reads: Array<[string, Record<string, unknown>]> = [
+      ['manage_automations', { action: 'list', automation_id: automationId, status: 'archived', limit: 1 }],
+      ['manage_connections', { action: 'list', connection_ids: [visibleConnectionId], connector_key: CONNECTOR_KEY, limit: 1 }],
+      ['manage_agents', { action: 'get', agent_id: AGENT_ID }],
+      ['manage_catalog', { action: 'list_installed', kinds: ['connectors'], include_catalog: true }],
+    ];
+    for (const [tool, body] of reads) {
+      const response = await post(`/api/${privateSlug}/${tool}`, { body, token: publicOwnerToken });
+      expect([401, 403]).toContain(response.status);
+    }
+
+    const automations = await post(`/api/${privateSlug}/manage_automations`, {
+      body: reads[0][1],
+      token: privateOwnerToken,
+    });
+    expect(automations.status).toBe(200);
+    expect((await automations.json()).automations).toEqual([]);
+
+    const connections = await post(`/api/${privateSlug}/manage_connections`, {
+      body: reads[1][1],
+      token: privateOwnerToken,
+    });
+    expect(connections.status).toBe(200);
+    expect((await connections.json()).connections).toEqual([]);
+
+    const agent = await post(`/api/${privateSlug}/manage_agents`, {
+      body: reads[2][1],
+      token: privateOwnerToken,
+    });
+    expect([403, 404]).toContain(agent.status);
+  });
 });

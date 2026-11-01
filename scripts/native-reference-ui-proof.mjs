@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import {
   assertRunHistoryLayout,
@@ -19,7 +20,10 @@ export async function runNativeReferenceProof({
     "Native report seeding requires the preview's loopback port-forward"
   );
   await page.goto(new URL("/api/health", baseUrl).toString());
-  const workspace = "native-ui-proof";
+  // A proof rerun must not reset or overwrite a previous reviewer's saved edits.
+  // Keep each fixture private and publish its actual paths in results.json.
+  // The preview namespace (including its PVC) is removed when the PR closes.
+  const workspace = `native-ui-proof-${randomUUID().slice(0, 8)}`;
   const organization = await browserPost(
     page,
     "/api/auth/organization/create",
@@ -68,6 +72,10 @@ export async function runNativeReferenceProof({
     slug: "native-preview-manual",
     name: automationName,
     prompt: automationInstructions,
+    description: "Synthetic description to clear in the editor.",
+    tags: ["synthetic-preview"],
+    reactions_guidance:
+      "Synthetic guidance to clear; never execute this fixture.",
     triggers: [],
   });
   assert(

@@ -1,6 +1,5 @@
 import { IdentityAssociationStaleError, rememberIdentityRejection } from "../../../../utils/identity-association";
 import { lockIdentityOrganization } from "../../../../utils/relationship-validation";
-import { randomUUID } from "node:crypto";
 import { hasDelegatedIdentity, isHumanDecision } from "../../../../auth/direct-user-context";
 
 import {
@@ -59,7 +58,7 @@ import {
 } from "../../manage_entity_schema";
 import { deviceManifestAdmissionError } from "../../../../runs/queue-service";
 import { isDelegatedBrowserAffinityConnector, selectedConnectorVersionArtifactSql } from "../../../../utils/connector-execution-placement";
-import { runLeaseFence } from "../../../../runs/run-lease";
+import { newGatewayInlineOwner, runLeaseFence } from "../../../../runs/run-lease";
 import { withFailureCode } from "../../../../utils/errors";
 import { executeOperationInline } from "./execute";
 /**
@@ -399,7 +398,7 @@ async function claimBuilderRun(
 	// same statement that approves it — an approved, running, unowned row is
 	// what the reaper and a second approve both grab. The reject branch is
 	// terminal in one statement and has no such window.
-	const claimedBy = `gateway-inline-${randomUUID()}`;
+	const claimedBy = newGatewayInlineOwner();
 	const rows =
 		decision === "approved"
 			? await sql`
@@ -1433,7 +1432,7 @@ export async function handleApprove(
 	// Minted unconditionally so the fence value is never nullable. Only a run
 	// that actually flips to `running` records it as its owner; a `local_action`
 	// run stays unclaimed and returns before any fenced write.
-	const inlineOwner = `gateway-inline-${randomUUID()}`;
+	const inlineOwner = newGatewayInlineOwner();
 	const claimed = await sql.begin(async (tx) => {
 		// The lease is taken in the same statement that flips the run to
 		// `running`: an approved, running, unowned row is exactly the window the

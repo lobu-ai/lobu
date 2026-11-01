@@ -60,6 +60,9 @@ jobs:
         get|resourcequotas|@PREVIEW_NS
         create|resourcequotas|@PREVIEW_NS
         patch|resourcequotas|@PREVIEW_NS
+        get|persistentvolumeclaims|@PREVIEW_NS
+        create|persistentvolumeclaims|@PREVIEW_NS
+        patch|persistentvolumeclaims|@PREVIEW_NS
         get|secrets|@PREVIEW_NS
         create|secrets|@PREVIEW_NS
         get|deployments.apps|@PREVIEW_NS
@@ -145,13 +148,28 @@ jobs:
 
       - name: Provision encryption key
         run: |
-          # Stable per-namespace key so a redeploy (or mid-life pod restart) can
-          # still read secrets written by the previous pod. The data volume is
-          # emptyDir, so nothing survives a redeploy itself.
+          # Keep the key alongside the persistent preview database so pod
+          # replacements can still read secrets written by the previous pod.
           if ! kubectl -n "$PREVIEW_NS" get secret preview-encryption >/dev/null 2>&1; then
             kubectl -n "$PREVIEW_NS" create secret generic preview-encryption \
               --from-literal=key="$(openssl rand -base64 32)"
           fi
+
+      - name: Preserve preview data across pod replacements
+        run: |
+          cat <<EOF | kubectl apply -f -
+          apiVersion: v1
+          kind: PersistentVolumeClaim
+          metadata:
+            name: preview-data
+            namespace: $PREVIEW_NS
+          spec:
+            accessModes: [ReadWriteOnce]
+            storageClassName: local-path
+            resources:
+              requests:
+                storage: 1Gi
+          EOF
 
       - name: Deploy preview
         run: |
@@ -251,7 +269,7 @@ jobs:
                       - { name: data, mountPath: /var/lib/lobu/data }
                 volumes:
                   - name: data
-                    emptyDir: {}
+                    persistentVolumeClaim: { claimName: preview-data }
           EOF
 
           kubectl expose deployment "$PREVIEW_NAME" \

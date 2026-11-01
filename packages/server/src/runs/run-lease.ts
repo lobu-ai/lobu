@@ -18,9 +18,21 @@
  * forgets is exactly the one that clobbers another owner's run.
  */
 
+import { randomUUID } from "node:crypto";
 import { intervals } from "../config/intervals";
 import { type DbClient, getDb } from "../db/client";
 import logger from "../utils/logger";
+
+/**
+ * Every inline holder's `claimed_by` starts with this. The gateway runs those
+ * in its own process, so they hold no worker slot.
+ */
+export const GATEWAY_INLINE_OWNER_PREFIX = "gateway-inline-";
+
+/** A fresh owner token for a run the gateway executes inline. */
+export function newGatewayInlineOwner(): string {
+	return `${GATEWAY_INLINE_OWNER_PREFIX}${randomUUID()}`;
+}
 
 /**
  * Reported when a fenced terminal write matches no row: the run was cancelled,

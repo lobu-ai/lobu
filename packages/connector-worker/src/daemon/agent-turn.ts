@@ -48,6 +48,14 @@ import { completeAgentTurnOnce } from './terminal-delivery.js';
 const TURN_DELTA_FLUSH_MS = 400;
 
 /**
+ * Heap cap for one agent turn's isolate. The fleet runs many turns beside each
+ * other, so the connector default (512 MB) would let a few runaway turns take
+ * the whole pod. The worst measured turn (history at its 4 MB cap) peaked at a
+ * 63 MB heap; a light one at 15 MB. 256 MB is four times that worst case.
+ */
+const AGENT_TURN_ISOLATE_MEMORY_MB = 256;
+
+/**
  * How many batches the pre-completion drain will push before giving up.
  *
  * A bound, not a budget for the whole reply: the terminal `finalText` is
@@ -434,6 +442,7 @@ async function runAgentTurn(
         // attachment payload and stored history separately; the connector
         // default is sized for a connector payload, not for that.
         messageBytes: AGENT_TURN_BRIDGE_BYTES,
+        memoryMb: AGENT_TURN_ISOLATE_MEMORY_MB,
       }));
     const result = await executor.execute(
       guestCode,

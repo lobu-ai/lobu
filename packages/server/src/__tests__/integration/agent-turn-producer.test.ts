@@ -53,6 +53,7 @@ import { manageSchedules } from '../../tools/admin/manage_schedules';
 import { reapStaleRuns } from '../../scheduled/check-stalled-executions';
 import { sweepStaleAgentTurnRuns } from '../../worker-api/agent-turn';
 import { failClaimedWorkerRun } from '../../worker-api/poll';
+import { newGatewayInlineOwner } from '../../runs/run-lease';
 import { Hono } from 'hono';
 import { authenticateWorker } from '../../gateway/routes/internal/middleware';
 import { McpProxy } from '../../gateway/auth/mcp/proxy';
@@ -66,6 +67,7 @@ import {
   addUserToOrganization,
   createTestAgent,
   createTestConnection,
+  createTestConnectorDefinition,
   createTestOrganization,
   createTestPAT,
   createTestUser,
@@ -5808,5 +5810,163 @@ describe('chat follow-up turns run as the sender who asked', () => {
     expect(claims.source).toBe('scheduled-job');
     expect(claims.chatAccess).toBeUndefined();
     expect(chatTurnAccessOf(claims)).toBeNull();
+  });
+});
+
+describe('fleet claim order', () => {
+  beforeEach(async () => {
+    await cleanupTestDatabase();
+    delete process.env.WORKER_API_TOKEN;
+  });
+
+  /** The run a fleet worker that also runs agent turns claims next. */
+  async function claimNext(workerId: string): Promise<number | undefined> {
+    const response = await pollFleet(workerId, { agent_turn: true });
+    expect(response.status).toBe(200);
+    return (await response.json()).run_id;
+  }
+
+  /** A fleet connector source; each call to the result queues one pending sync. */
+  async function syncSource(organizationId: string) {
+    const sql = getTestDb();
+    const connectorKey = `synthetic.claim-order-${organizationId.slice(0, 8)}`;
+    await createTestConnectorDefinition({ key: connectorKey, name: 'Claim order source', organization_id: organizationId });
+    const connection = await createTestConnection({ organization_id: organizationId, connector_key: connectorKey, createDefaultFeed: false });
+    return async (ageSeconds: number): Promise<number> => {
+      const [run] = await sql`
+        INSERT INTO runs (organization_id, run_type, connection_id, connector_key, connector_version,
+          approval_status, status, created_at)
+        VALUES (${organizationId}, 'sync', ${connection.id}, ${connectorKey}, '1.0.0', 'auto', 'pending',
+          now() - make_interval(secs => ${ageSeconds}))
+        RETURNING id
+      `;
+      return Number(run.id);
+    };
+  }
+
+  async function queueEmbed(organizationId: string, ageSeconds: number): Promise<number> {
+    const [run] = await getTestDb()`
+      INSERT INTO runs (organization_id, run_type, status, approval_status, created_at)
+      VALUES (${organizationId}, 'embed_backfill', 'pending', 'auto', now() - make_interval(secs => ${ageSeconds}))
+      RETURNING id
+    `;
+    return Number(run.id);
+  }
+
+  async function queueTurn(organizationId: string): Promise<number> {
+    await enqueueMessage(messageFor(organizationId), {
+      agentSettings: settingsStore,
+      catalog: catalogFor(claudeModule()),
+      gatewayUrl: GATEWAY_URL,
+    });
+    const turns = await agentTurnRuns();
+    return turns.find((turn) => turn.organization_id === organizationId)!.id;
+  }
+
+  it('claims a waiting chat turn ahead of a recent connector backlog in another organization', async () => {
+    const backlogOrg = await createTestOrganization();
+    const chatOrg = await createTestOrganization();
+    // Background embedding older than the backlog, still inside its setback.
+    const embed = await queueEmbed(backlogOrg.id, 180);
+    const queueSync = await syncSource(backlogOrg.id);
+    const backlog: number[] = [];
+    for (let age = 85; age > 60; age--) backlog.push(await queueSync(age));
+    const turn = await queueTurn(chatOrg.id);
+
+    // A person is waiting on the turn; the backlog is not waiting on anyone.
+    expect(await claimNext('fleet-claim-order')).toBe(turn);
+    // Connector work drains oldest first, still ahead of the older embedding.
+    expect(await claimNext('fleet-claim-order')).toBe(backlog[0]);
+    const [embedRow] = await getTestDb()`SELECT status FROM runs WHERE id = ${embed}`;
+    expect(embedRow.status).toBe('pending');
+  });
+
+  it('lets old enough scheduled and background work go ahead of fresh work instead of starving', async () => {
+    const org = await createTestOrganization();
+    const queueSync = await syncSource(org.id);
+    const staleEmbed = await queueEmbed(org.id, 11 * 60);
+    const staleSync = await queueSync(6 * 60);
+    const turn = await queueTurn(org.id);
+    const freshSync = await queueSync(0);
+
+    // A sync queued longer ago than the interactive head start beats a fresh turn.
+    expect(await claimNext('fleet-aging')).toBe(staleSync);
+    expect(await claimNext('fleet-aging')).toBe(turn);
+    // An embedding queued longer ago than its setback beats a fresh sync.
+    expect(await claimNext('fleet-aging')).toBe(staleEmbed);
+    expect(await claimNext('fleet-aging')).toBe(freshSync);
+  });
+
+  it('prefers the organization with less running work over a slightly older backlog', async () => {
+    const busyOrg = await createTestOrganization();
+    const quietOrg = await createTestOrganization();
+    const queueBusy = await syncSource(busyOrg.id);
+    // Queued one load penalty before the quiet organization's run: inside
+    // the two penalties the busy organization pays once it holds two slots.
+    const busy = [await queueBusy(62), await queueBusy(61), await queueBusy(60)];
+    // The busy organization takes the first two slots while it is alone.
+    expect(await claimNext('fleet-fair-a')).toBe(busy[0]);
+    expect(await claimNext('fleet-fair-b')).toBe(busy[1]);
+
+    // A newer run from an organization with nothing running goes next, ahead
+    // of the busy organization's older remaining run.
+    const quiet = await (await syncSource(quietOrg.id))(0);
+    expect(await claimNext('fleet-fair-c')).toBe(quiet);
+    expect(await claimNext('fleet-fair-d')).toBe(busy[2]);
+  });
+
+  it('keeps a chat turn ahead of quiet organizations\' recent syncs while its own organization has a run in flight', async () => {
+    const chatOrg = await createTestOrganization();
+    // The chat organization already holds a fleet slot.
+    const inFlight = await (await syncSource(chatOrg.id))(30);
+    expect(await claimNext('fleet-busy-turn-a')).toBe(inFlight);
+
+    // Three organizations with nothing running, one sync each: one queued
+    // before the turn's remaining head start (300s less one 60s load
+    // penalty, so 240s), two inside it.
+    const [stale, recent, newest] = [
+      await (await syncSource((await createTestOrganization()).id))(300),
+      await (await syncSource((await createTestOrganization()).id))(180),
+      await (await syncSource((await createTestOrganization()).id))(100),
+    ];
+    const turn = await queueTurn(chatOrg.id);
+
+    expect(await claimNext('fleet-busy-turn-b')).toBe(stale);
+    expect(await claimNext('fleet-busy-turn-c')).toBe(turn);
+    expect(await claimNext('fleet-busy-turn-d')).toBe(recent);
+    expect(await claimNext('fleet-busy-turn-e')).toBe(newest);
+  });
+
+  it('does not count device or gateway-inline runs against an organization fleet share', async () => {
+    const sql = getTestDb();
+    const fleetOrg = await createTestOrganization();
+    const deviceOrg = await createTestOrganization();
+    const queueFleet = await syncSource(fleetOrg.id);
+    // Queued just before the other organization's run, so the one load
+    // penalty this organization pays puts it a minute behind.
+    const fleetRuns = [await queueFleet(5), await queueFleet(0)];
+    // One of the fleet organization's runs holds a fleet slot.
+    expect(await claimNext('fleet-share-a')).toBe(fleetRuns[0]);
+
+    // The other organization has plenty in flight, none of it on the fleet:
+    // operations its devices execute, and operations the gateway runs inline.
+    await sql`
+      INSERT INTO runs (organization_id, run_type, status, approval_status, created_at, claimed_at,
+        claimed_by, executed_by_device_worker_id, target_device_worker_id)
+      SELECT ${deviceOrg.id}, 'action', 'running', 'auto', now(), now(), 'device-share-worker', device, device
+      FROM (SELECT gen_random_uuid() AS device FROM generate_series(1, 5)) devices
+    `;
+    for (let index = 0; index < 2; index++) {
+      await sql`
+        INSERT INTO runs (organization_id, run_type, status, approval_status, created_at, claimed_at, claimed_by)
+        VALUES (${deviceOrg.id}, 'action', 'running', 'auto', now(), now(), ${newGatewayInlineOwner()})
+      `;
+    }
+    const deviceOrgSync = await (await syncSource(deviceOrg.id))(0);
+
+    // Its fleet share is still zero, so its newer sync goes before the fleet
+    // organization's older one.
+    expect(await claimNext('fleet-share-b')).toBe(deviceOrgSync);
+    expect(await claimNext('fleet-share-c')).toBe(fleetRuns[1]);
   });
 });

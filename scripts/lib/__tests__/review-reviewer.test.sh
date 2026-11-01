@@ -142,8 +142,6 @@ if grep -Fq 'command -v codex >/dev/null' "$review_fix_script"; then
   fail "review-fix.sh must not gate every run on codex being installed"
 fi
 
-echo "review reviewer selection tests passed"
-
 # --- pi-review gate matrix -------------------------------------------------
 # Extract the verdict→status block from review.sh and evaluate it directly, so
 # the gate SET is asserted semantically rather than by grepping for a line.
@@ -194,3 +192,49 @@ assert_gate_fails "high slop"      "$(run_gate 88 0 20 95 true none 0)" "slop>15
 assert_gate_fails "low simplicity" "$(run_gate 88 0 0 50 true none 0)"  "simplicity<70"
 assert_gate_fails "blockers"       "$(run_gate 88 0 0 95 true none 2)"  "blockers>0"
 assert_gate_fails "tests"          "$(run_gate 88 0 0 95 false none 0)" "tests inadequate"
+
+# Submodule guard (review_refuse_submodule): both scripts must refuse a start
+# inside a submodule checkout before touching GitHub or a reviewer CLI.
+submodule_tmp="$(mktemp -d "${TMPDIR:-/tmp}/lobu-review-submodule-test.XXXXXX")"
+trap 'rm -rf "$submodule_tmp"' EXIT
+new_repo() {
+  git init -q "$1"
+  git -C "$1" config user.email t@t.t
+  git -C "$1" config user.name t
+  git -C "$1" commit -q --allow-empty -m base
+}
+new_repo "$submodule_tmp/child"
+new_repo "$submodule_tmp/super"
+git -C "$submodule_tmp/super" -c protocol.file.allow=always \
+  submodule add -q "$submodule_tmp/child" packages/child
+submodule_dir="$submodule_tmp/super/packages/child"
+
+(cd "$submodule_tmp/super" && review_refuse_submodule) ||
+  fail "a superproject checkout must be reviewable"
+set +e
+(cd "$submodule_dir" && review_refuse_submodule 2>/dev/null)
+status=$?
+set -e
+[ "$status" -eq 2 ] || fail "a submodule checkout must be refused (exit $status)"
+
+# Stub every external the scripts could reach, so a regressed guard fails this
+# test instead of posting to GitHub or starting a reviewer.
+stub_bin="$submodule_tmp/bin"
+mkdir -p "$stub_bin"
+for cmd in gh codex claude bb; do
+  printf '#!/bin/sh\nexit 97\n' > "$stub_bin/$cmd"
+  chmod +x "$stub_bin/$cmd"
+done
+for script in review.sh review-fix.sh; do
+  set +e
+  output="$(cd "$submodule_dir" && PATH="$stub_bin:$PATH" bash "$repo_root/scripts/$script" 2>&1)"
+  status=$?
+  set -e
+  [ "$status" -eq 2 ] || fail "$script inside a submodule must exit 2 (got $status: $output)"
+  case "$output" in
+    *"inside submodule"*) ;;
+    *) fail "$script must say it refused a submodule (got: $output)" ;;
+  esac
+done
+
+echo "review reviewer selection tests passed"

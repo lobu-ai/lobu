@@ -114,10 +114,13 @@ try {
     "Local preview bootstrap did not return a workspace"
   );
 
-  for (const [name, slug] of [
+  // Preserve earlier review fixtures when the preview keeps its database.
+  const fixtureId = randomBytes(4).toString("hex");
+  for (const [name, prefix] of [
     ["Engineering", "oauth-proof-engineering"],
     ["Customer operations", "oauth-proof-customer-operations"],
   ]) {
+    const slug = `${prefix}-${fixtureId}`;
     const organization = await browserPost(
       page,
       "/api/auth/organization/create",
@@ -125,6 +128,13 @@ try {
     );
     results.workspaces_created.push({ id: organization?.id, name, slug });
   }
+  const membershipResponse = await page.request.get(
+    new URL("/api/organizations", baseUrl).toString()
+  );
+  assert(membershipResponse.ok(), "Read synthetic preview memberships failed");
+  const memberships = await membershipResponse.json();
+  const workspaceCount = memberships.organizations?.length;
+  assert(workspaceCount >= 3, "Preview memberships are missing fixtures");
 
   const redirectUri = "http://localhost:8787/oauth-proof/callback";
   const consentClient = await postJson("/oauth/register", {
@@ -158,9 +168,13 @@ try {
 
   await page.goto(authorizeUrl.toString(), { waitUntil: "domcontentloaded" });
   await page.getByRole("heading", { name: "Authorize application" }).waitFor();
-  await page.getByText("0 of 3 workspaces selected.").waitFor();
-  await page.getByRole("button", { name: "Select all 3" }).click();
-  await page.getByText("3 of 3 workspaces selected.").waitFor();
+  await page.getByText(`0 of ${workspaceCount} workspaces selected.`).waitFor();
+  await page
+    .getByRole("button", { name: `Select all ${workspaceCount}` })
+    .click();
+  await page
+    .getByText(`${workspaceCount} of ${workspaceCount} workspaces selected.`)
+    .waitFor();
   await page.getByLabel("Read only").check();
   await page.screenshot({
     path: join(outputDir, "oauth-consent-review.png"),
@@ -234,9 +248,13 @@ try {
   });
   await page.getByRole("heading", { name: "Authorize application" }).waitFor();
   await page.getByText("Device capabilities").waitFor();
-  await page.getByText("1 of 3 workspaces selected.").waitFor();
-  await page.getByRole("button", { name: "Select all 3" }).click();
-  await page.getByText("3 of 3 workspaces selected.").waitFor();
+  await page.getByText(`1 of ${workspaceCount} workspaces selected.`).waitFor();
+  await page
+    .getByRole("button", { name: `Select all ${workspaceCount}` })
+    .click();
+  await page
+    .getByText(`${workspaceCount} of ${workspaceCount} workspaces selected.`)
+    .waitFor();
   await page
     .getByLabel(
       "I initiated this request and confirmed that the device code matches."

@@ -21,7 +21,22 @@ including headless and interactive-session devices) admit **half the host's
 threads, clamped to 2-8, active runs by default**, shared across shell actions,
 native connector work, and local agent runs. Set `--max-concurrent-jobs <n>`
 (macOS daemon) or `WORKER_MAX_CONCURRENT_JOBS` to override it; the CLI flag
-takes precedence. Fleet workers without a platform default to one active run.
+takes precedence. Fleet workers without a platform keep two budgets: agent
+turns (`WORKER_MAX_CONCURRENT_AGENT_TURNS`, default 4) and connector work
+(`WORKER_MAX_CONCURRENT_JOBS`, default 1: syncs, actions, auth and embedding
+backfills), so a sync does not consume a turn slot. An embedding backfill
+can arrive while only turn slots are free and then borrows one.
+Standalone fleet workers also gate claims on local resources. The two counts
+are ceilings: starts are spaced by 500 ms, and new claims pause above 80% CPU
+or when memory working set plus a reserve would exceed 80% of the memory
+limit. The reserve is the smaller of 512 MiB and 20% of the limit. Recovery
+uses lower thresholds (60% CPU, 70% memory including the reserve) to avoid
+oscillation. Linux cgroup v1/v2 counters include tool child processes and
+honor visible ancestor limits; inactive file cache is excluded from memory
+working set. Without container limits host available memory and process CPU are
+used. Unreadable bounded usage pauses admission. Existing claims finish,
+and resources are rechecked locally without increasing heartbeat traffic.
+Embedded workers and device daemons retain their existing fixed budgets.
 This is a per-device limit, not a setting for each connection, and does not
 change device pinning. A busy device still polls with
 zero available capacity; being online is not a promise that a slot is free.
@@ -44,7 +59,8 @@ API_URL=http://localhost:8787 bun run daemon
 | `API_URL` | Backend API URL | Yes |
 | `WORKER_ID` | Worker identifier (auto-generated if unset) | No |
 | `WORKER_API_TOKEN` | Bearer token for backend auth | No |
-| `WORKER_MAX_CONCURRENT_JOBS` | Maximum active runs (device default: half the host threads, 2-8; fleet default: 1); overridden by `--max-concurrent-jobs` | No |
+| `WORKER_MAX_CONCURRENT_JOBS` | Maximum active runs on a device (default: half the host threads, 2-8), or active connector runs on a fleet worker (default: 1); overridden by `--max-concurrent-jobs` | No |
+| `WORKER_MAX_CONCURRENT_AGENT_TURNS` | Active agent turns on a fleet worker (default: 4); ignored by devices, which never run agent turns | No |
 | `WORKER_SHUTDOWN_GRACE_SECONDS` | Seconds until the supervisor force-kills after SIGTERM (the Helm chart sets it from `worker.terminationGracePeriodSeconds`); in-flight runs drain for this minus 15s. Unset: 30s drain | No |
 | `EMBEDDINGS_MODEL` | Override local embedding model | No |
 | `EMBEDDINGS_SERVICE_URL` | Use a remote embedding service instead of local | No |

@@ -381,13 +381,15 @@ export async function handleCompleteWindow(
   // STEP 2.5: Validate extracted_data against the extraction schema.
   // The schema is composed from declared outputs and the optional reaction
   // input. Entity schemas still live on their entity types; event outputs use
-  // the standard event draft. The worker and completion share this helper.
+  // the standard event draft. Event metadata stays with the persistence
+  // validator so its alternatives and coercion semantics remain authoritative.
   // ============================================
   const extractionSchema: Record<string, any> | null = await deriveAutomationExtractionSchema(
     getDb(),
     automationOrgId,
     outputs,
-    automationId
+    automationId,
+    { includeEventMetadata: false }
   );
   if (extractionSchema) {
     const validate = ajv.compile(extractionSchema);

@@ -55,10 +55,10 @@ export function handleGetComponentReference(): {
           description:
             'Render the native Automation identity row or inline reference from a currently authorized record. Live mode resolves canonical identity and navigation; authored labels/statuses/links cannot impersonate live state. For a static proposal, compose ordinary card, badge and text nodes instead of a live reference.',
           props: {
-            mode: 'Required: live. No implicit default.',
-            workspace: 'Live only: workspace slug, 1–128 characters.',
-            automationId: 'Live only: positive safe integer represented as a string, 1–128 characters.',
-            appearance: 'Live only: inline | row; defaults to row.',
+            mode: 'Required; live is the only mode.',
+            workspace: 'workspace slug, 1–128 characters.',
+            automationId: 'positive safe integer represented as a string, 1–128 characters.',
+            appearance: 'inline | row; defaults to row.',
           },
           example: {
             type: 'automation-ref',
@@ -71,11 +71,11 @@ export function handleGetComponentReference(): {
           description:
             'Reuse the native connector display. A connector catalog entry is not proof of a connected account; supply connectionId only for a specific authorized connection.',
           props: {
-            mode: 'Required: live.',
-            workspace: 'Live only: workspace slug, 1–128 characters.',
-            connectorKey: 'Live only: connector key, 1–128 characters.',
-            connectionId: 'Live only: optional positive safe integer connection ID.',
-            appearance: 'Live only: inline | row; defaults to row.',
+            mode: 'Required; live is the only mode.',
+            workspace: 'workspace slug, 1–128 characters.',
+            connectorKey: 'connector key, 1–128 characters.',
+            connectionId: 'optional positive safe integer connection ID.',
+            appearance: 'inline | row; defaults to row.',
           },
           example: {
             type: 'connector-ref',
@@ -88,10 +88,10 @@ export function handleGetComponentReference(): {
           description:
             'Reuse the native Agent row from current authorized identity. An agent reference is not a device reference or permission to delegate work.',
           props: {
-            mode: 'Required: live.',
-            workspace: 'Live only: workspace slug, 1–128 characters.',
-            agentId: 'Live only: agent identifier, 1–128 characters.',
-            appearance: 'Live only: inline | row; defaults to row.',
+            mode: 'Required; live is the only mode.',
+            workspace: 'workspace slug, 1–128 characters.',
+            agentId: 'agent identifier, 1–128 characters.',
+            appearance: 'inline | row; defaults to row.',
           },
           example: {
             type: 'agent-ref',
@@ -142,7 +142,7 @@ export function handleGetComponentReference(): {
         'Native reference selectors never grant access. Server permissions govern reads and navigation; invalid, missing or refused records render an unavailable state rather than trusting authored identity. Live means a resolved saved resource, not a continuous status stream. References revalidate on mount, focus, reconnect and existing app invalidations; there is no interval polling. Changes and access revocation are reflected on the next completed read, not promised instantaneously. Visitor preview is conservatively unavailable; normal anonymous access still follows server permissions.',
         'Exact {{path}} prop bindings preserve value types; mixed text interpolates to a string. Resolve bindings before reference validation. Use strings for automationId and numbers for connectionId.',
         'Reference nodes do not expose enable, run, send, publish or approval callbacks. Existing declared event interactions remain a separate authorization path; do not invent actions or bypass an approval through a reference.',
-        'Snapshot mode accepts only label, description and capturedAt. It is explicitly static and has no ID, URL, current status or executable action. Do not make a proposal look like a live record.',
+        'Snapshots and proposals use ordinary card, badge and text nodes labelled Snapshot / proposal. Native reference nodes accept live mode only. Do not give static proposals IDs, current status, links or executable controls that imply a resolved live record.',
         'Native event JSON rendering is separate from the sandboxed React view runtime. Do not import AutomationReference, ConnectorReference, AgentReference or JsonDiff from @lobu/views/components on the strength of this reference.',
       ],
       complete_examples: [
