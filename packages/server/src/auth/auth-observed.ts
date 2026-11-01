@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import logger from "../utils/logger";
+import { cloudflareRayId } from "../utils/cloudflare-ray";
 
 /**
  * `auth.observed`: one structured log line per successful Better Auth sign-in,
@@ -22,18 +23,12 @@ interface SignInScope {
 
 const signInScope = new AsyncLocalStorage<SignInScope>();
 
-/** `a53b9d57c926253b-LHR` → `a53b9d57c926253b`. */
-function rayId(header: string | null): string | null {
-	const id = header?.split("-", 1)[0]?.trim();
-	return id || null;
-}
-
 export function withSignInScope(
 	handler: (request: Request) => Promise<Response>,
 ): (request: Request) => Promise<Response> {
 	return (request) =>
 		signInScope.run(
-			{ cfRay: rayId(request.headers.get("cf-ray")), createdUser: null },
+			{ cfRay: cloudflareRayId(request.headers.get("cf-ray")), createdUser: null },
 			() => handler(request),
 		);
 }
