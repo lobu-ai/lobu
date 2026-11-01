@@ -15,6 +15,16 @@ export async function enqueueAutomationScript(
   payload: AutomationScriptTaskPayload
 ): Promise<boolean> {
   return sql.begin(async (tx) => {
+    // The child task's automation_id FK needs a key-share lock on its parent.
+    // Take that dependency before locking the source run, matching manual
+    // trigger/completion's Automation -> run order. Otherwise the FK check
+    // deadlocks with a trigger that owns the Automation and is reading this run.
+    const [automation] = await tx`
+      SELECT id FROM automations
+      WHERE id = ${payload.automationId} AND organization_id = ${payload.organizationId}
+      FOR KEY SHARE
+    `;
+    if (!automation) return false;
     const [run] = await tx`
       UPDATE runs SET status = 'running', claimed_by = 'automation-script', last_heartbeat_at = claimed_at
       WHERE id = ${payload.sourceRunId} AND organization_id = ${payload.organizationId}
