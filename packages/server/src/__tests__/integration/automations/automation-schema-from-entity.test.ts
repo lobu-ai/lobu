@@ -13,12 +13,14 @@
  */
 
 import { beforeEach, describe, expect, it } from 'vitest';
+import Ajv from 'ajv';
 import type { DbClient } from '../../../db/client';
 import { createAutomationRun } from '../../../runs/queue-service';
 import {
   deriveAutomationExtractionSchema,
 } from '../../../utils/automation-extraction-schema';
 import { computePendingWindow } from '../../../utils/window-utils';
+import { ensureMemberEntityType } from '../../../utils/member-entity-type';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import { createTestAgent, createTestEntity, createTestEvent } from '../../setup/test-fixtures';
 import { TestApiClient, TestWorkspace } from '../../setup/test-mcp-client';
@@ -149,6 +151,196 @@ async function readWindowToken(ctx: Ctx, runId: number): Promise<string> {
 describe('complete_window derives its schema from the entity type', () => {
   beforeEach(async () => {
     await cleanupTestDatabase();
+  });
+
+  it.each(['member', 'bound entity'])(
+    'exposes and enforces the %s event kind metadata contract',
+    async (location) => {
+      const ctx = await setupEntityTypedAutomation();
+      await ensureMemberEntityType(ctx.workspace.org.id);
+      const kinds = {
+        extraction_notice: {
+          metadataSchema: {
+            type: 'object',
+            properties: { status: { $ref: '#/$defs/status' } },
+            $defs: { status: { enum: ['reported', 'retracted'] } },
+            required: ['status'],
+          },
+        },
+      };
+      if (location === 'member') {
+        await ctx.sql`
+          UPDATE entity_types SET event_kinds = event_kinds || ${ctx.sql.json(kinds)}
+          WHERE organization_id = ${ctx.workspace.org.id} AND slug = '$member'
+        `;
+      } else {
+        await ctx.sql`
+          UPDATE entity_types SET event_kinds = ${ctx.sql.json(kinds)}
+          WHERE id = (SELECT entity_type_id FROM entities WHERE id = ${ctx.parentEntityId})
+        `;
+      }
+      const created = (await ctx.api.automations.create({
+        entity_id: ctx.parentEntityId,
+        slug: 'event-schema-automation',
+        prompt: 'Extract notices.',
+        triggers: [{ kind: 'schedule', cron: '0 9 * * *' }],
+        managed_agent_id: ctx.agent.agentId,
+        outputs: { signals: { event: 'extraction_notice' } },
+      })) as { automation_id: string };
+      ctx.automationId = Number(created.automation_id);
+      await ctx.sql`UPDATE automations SET next_run_at = NOW() - INTERVAL '10 minutes' WHERE id = ${ctx.automationId}`;
+      await createTestEvent({
+        entity_id: ctx.parentEntityId,
+        organization_id: ctx.workspace.org.id,
+        content: 'A notice to extract.',
+        occurred_at: new Date(Date.now() - 60 * 60 * 1000),
+      });
+      const runId = await queueRunningRun(ctx);
+      const window = (await ctx.api.knowledge.read({
+        automation_id: ctx.automationId,
+        run_id: runId,
+      })) as { window_token: string; extraction_schema: Record<string, unknown> };
+      const ajv = new Ajv({ strict: false, formats: { 'date-time': true } });
+      const validate = ajv.compile(window.extraction_schema);
+      const output = (metadata?: Record<string, unknown>) => ({
+        signals: [{ content: 'Extracted notice.', ...(metadata ? { metadata } : {}) }],
+      });
+      expect(validate(output({ status: 'candidate' }))).toBe(false);
+      expect(validate(output({ unrelated: true }))).toBe(false);
+      expect(validate(output({ status: 'reported' }))).toBe(true);
+      // The save path deliberately permits absent and empty metadata.
+      expect(validate(output())).toBe(true);
+      expect(validate(output({}))).toBe(true);
+
+      await expect(ctx.api.automations.completeWindow({
+        automation_id: String(ctx.automationId),
+        run_id: runId,
+        window_token: window.window_token,
+        extracted_data: output({ status: 'candidate' }),
+      })).rejects.toThrow(/status/);
+      const [unfinished] = await ctx.sql`SELECT action_output FROM runs WHERE id = ${runId}`;
+      expect(unfinished.action_output).toBeNull();
+
+      const alternative = await createTestEntity({
+        name: 'Alternative event subject',
+        entity_type: 'alternative-extraction-type',
+        organization_id: ctx.workspace.org.id,
+        created_by: ctx.workspace.users.owner.id,
+      });
+      await ctx.sql`
+        UPDATE entity_types SET event_kinds = ${ctx.sql.json({
+          extraction_notice: {
+            metadataSchema: {
+              type: 'object',
+              properties: { status: { enum: ['reviewed'] } },
+              required: ['status'],
+            },
+          },
+        })}
+        WHERE id = (SELECT entity_type_id FROM entities WHERE id = ${alternative.id})
+      `;
+      const explicitOutput = {
+        content: 'Notice linked to an alternative subject.',
+        entity_ids: [alternative.id],
+        metadata: { status: 'reviewed' },
+      };
+      // Row linkage selects its own schema at persistence, not the bound one.
+      expect(validate({ signals: [explicitOutput] })).toBe(true);
+
+      await ctx.api.automations.completeWindow({
+        automation_id: String(ctx.automationId),
+        run_id: runId,
+        window_token: window.window_token,
+        extracted_data: { signals: [...output({ status: 'reported' }).signals, explicitOutput] },
+      });
+      const saved = await ctx.sql`
+        SELECT metadata->>'status' AS status FROM events
+        WHERE organization_id = ${ctx.workspace.org.id} AND semantic_type = 'extraction_notice'
+        ORDER BY status
+      `;
+      expect(saved).toEqual([{ status: 'reported' }, { status: 'reviewed' }]);
+
+      const tightened = {
+        extraction_notice: {
+          metadataSchema: {
+            type: 'object',
+            properties: { status: { enum: ['retracted'] } },
+          },
+        },
+      };
+      await ctx.sql`
+        UPDATE entity_types SET event_kinds = event_kinds || ${ctx.sql.json(tightened)}
+        WHERE organization_id = ${ctx.workspace.org.id}
+          AND id = ${location === 'member'
+            ? (await ctx.sql`SELECT id FROM entity_types WHERE organization_id = ${ctx.workspace.org.id} AND slug = '$member'`)[0].id
+            : (await ctx.sql`SELECT entity_type_id AS id FROM entities WHERE id = ${ctx.parentEntityId}`)[0].id}
+      `;
+      const nextRunId = await queueRunningRun(ctx);
+      const nextWindow = (await ctx.api.knowledge.read({
+        automation_id: ctx.automationId,
+        run_id: nextRunId,
+      })) as { extraction_schema: Record<string, unknown> };
+      const validateNext = ajv.compile(nextWindow.extraction_schema);
+      expect(validateNext(output({ status: 'reported' }))).toBe(false);
+      expect(validateNext(output({ status: 'retracted' }))).toBe(true);
+    }
+  );
+
+  it.each([
+    { name: 'plain row', extras: {}, count: 42 },
+    { name: 'worker envelope fields', extras: { embedding: [0.1] }, count: 42 },
+    { name: 'coerced integer metadata', extras: {}, count: '42' },
+  ])('completes a member metadata alternative with $name', async ({ extras, count }) => {
+    const ctx = await setupEntityTypedAutomation();
+    await ensureMemberEntityType(ctx.workspace.org.id);
+    const metadataSchema = {
+      type: 'object',
+      properties: { member_status: { enum: ['reported'] }, count: { type: 'integer' } },
+      required: ['member_status'],
+      additionalProperties: false,
+    };
+    await ctx.sql`
+      UPDATE entity_types SET event_kinds = event_kinds || ${ctx.sql.json({
+        extraction_notice: { metadataSchema },
+      })}
+      WHERE organization_id = ${ctx.workspace.org.id} AND slug = '$member'
+    `;
+    await ctx.sql`
+      UPDATE entity_types SET event_kinds = ${ctx.sql.json({
+        extraction_notice: { metadataSchema: {
+          ...metadataSchema,
+          properties: { entity_status: { enum: ['reviewed'] } },
+          required: ['entity_status'],
+        } },
+      })}
+      WHERE id = (SELECT entity_type_id FROM entities WHERE id = ${ctx.parentEntityId})
+    `;
+    const created = (await ctx.api.automations.create({
+      entity_id: ctx.parentEntityId,
+      slug: 'alternative-event-schema',
+      prompt: 'Extract notices.',
+      triggers: [{ kind: 'schedule', cron: '0 9 * * *' }],
+      managed_agent_id: ctx.agent.agentId,
+      outputs: { signals: { event: 'extraction_notice' }, notices: { event: 'extraction_notice' } },
+    })) as { automation_id: string };
+    ctx.automationId = Number(created.automation_id);
+    await ctx.sql`UPDATE automations SET next_run_at = NOW() - INTERVAL '10 minutes' WHERE id = ${ctx.automationId}`;
+    const runId = await queueRunningRun(ctx);
+    const windowToken = await readWindowToken(ctx, runId);
+    await ctx.api.automations.completeWindow({
+      automation_id: String(ctx.automationId),
+      run_id: runId,
+      window_token: windowToken,
+      extracted_data: {
+        signals: [{ content: 'A member notice.', ...extras, metadata: { member_status: 'reported', count } }],
+        notices: [],
+      },
+    });
+    const saved = await ctx.sql`
+      SELECT metadata->>'member_status' AS status, metadata->'count' AS count FROM events
+      WHERE organization_id = ${ctx.workspace.org.id} AND semantic_type = 'extraction_notice'
+    `;
+    expect(saved).toEqual([{ status: 'reported', count: 42 }]);
   });
 
   it('resolves a real entity type metadata_schema into an extraction schema', async () => {
