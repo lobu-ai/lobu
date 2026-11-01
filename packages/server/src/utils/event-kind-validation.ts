@@ -157,16 +157,6 @@ async function getMemberEventKinds(
 }
 
 /**
- * Re-read an org's $member event_kinds from the DB and overwrite this pod's
- * cached copy. For writes that must validate against committed registry state
- * (a kind registered on another replica, or seconds ago on this one) rather
- * than a copy up to the TTL old.
- */
-export async function refreshMemberEventKinds(orgId: string): Promise<void> {
-  primeMemberEventKinds(orgId, await loadMemberEventKinds(orgId));
-}
-
-/**
  * Fetch event_kinds for the entity type of a given entity.
  * Returns null if entity not found or entity type has no custom event_kinds.
  */
@@ -316,16 +306,22 @@ export async function validateSaveContentSemanticType(
   semanticType: string,
   metadata: Record<string, unknown> | undefined | null,
   orgId: string,
-  entityIds?: number[]
+  entityIds?: number[],
+  db?: DbClient
 ): Promise<KindValidationResult> {
-  const memberKinds = await getMemberEventKinds(orgId);
+  // This gates writes and authoring (saves, view actions, notifications,
+  // Automation outputs), so it always reads authoritative registry state: the
+  // per-pod cache can lag a kind added, removed or tightened on another replica.
+  // A caller's transaction is read as-is and never published to the render cache.
+  const registryDb = db ?? getDb();
+  const memberKinds = await getMemberEventKinds(orgId, registryDb);
 
   // An event can be linked to several entity types. Accept a custom kind when
   // any linked type declares it; array order must not change authorability.
   let declaredMismatch: KindValidationResult | null = null;
   if (entityIds && entityIds.length > 0) {
     for (const entityId of entityIds) {
-      const entityTypeKinds = await getEntityTypeEventKinds(orgId, entityId);
+      const entityTypeKinds = await getEntityTypeEventKinds(orgId, entityId, registryDb);
       if (!entityTypeKinds) continue;
       // Try entity type kinds first (more specific)
       const entityResult = validateKindAgainstDefinitions(semanticType, metadata, entityTypeKinds);
