@@ -159,6 +159,12 @@
       "import": "./dist/contracts/tools/view-content-hash.js",
       "require": "./dist/contracts/tools/view-content-hash.js"
     },
+    "./contracts/tools/manage-inference-providers": {
+      "types": "./dist/contracts/tools/manage-inference-providers.d.ts",
+      "bun": "./src/contracts/tools/manage-inference-providers.ts",
+      "import": "./dist/contracts/tools/manage-inference-providers.js",
+      "require": "./dist/contracts/tools/manage-inference-providers.js"
+    },
     "./contracts/tools/manage-auth-profiles": {
       "types": "./dist/contracts/tools/manage-auth-profiles.d.ts",
       "bun": "./src/contracts/tools/manage-auth-profiles.ts",

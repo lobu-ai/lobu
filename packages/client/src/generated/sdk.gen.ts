@@ -92,6 +92,9 @@ import type {
   ManageFeedsData,
   ManageFeedsErrors,
   ManageFeedsResponses,
+  ManageInferenceProvidersData,
+  ManageInferenceProvidersErrors,
+  ManageInferenceProvidersResponses,
   ManageOperationsData,
   ManageOperationsErrors,
   ManageOperationsResponses,
@@ -468,6 +471,31 @@ export const manageFeeds = <ThrowOnError extends boolean = false>(
     ThrowOnError
   >({
     url: "/api/{orgSlug}/manage_feeds",
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      ...options.headers,
+    },
+  });
+
+/**
+ * Organization inference-provider management
+ *
+ * Organization inference-provider management. SDK alternative: client.inferenceProviders. API keys stay in the existing credential vault; OAuth sign-in remains interactive.
+ */
+export const manageInferenceProviders = <ThrowOnError extends boolean = false>(
+  options: Options<ManageInferenceProvidersData, ThrowOnError>,
+): RequestResult<
+  ManageInferenceProvidersResponses,
+  ManageInferenceProvidersErrors,
+  ThrowOnError
+> =>
+  (options.client ?? client).post<
+    ManageInferenceProvidersResponses,
+    ManageInferenceProvidersErrors,
+    ThrowOnError
+  >({
+    url: "/api/{orgSlug}/manage_inference_providers",
     ...options,
     headers: {
       "Content-Type": "application/json",

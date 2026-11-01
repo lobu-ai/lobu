@@ -21,15 +21,16 @@ import type {
 } from "@lobu/core/contracts/tools/manage-connections";
 import type { ManageEntitySchemaArgs } from "@lobu/core/contracts/tools/manage-entity-schema";
 import type {
+  InferenceProviderCreateInput,
+  InferenceCapabilityBlock,
+  InferenceModality,
+} from "@lobu/core/contracts/tools/manage-inference-providers";
+import type {
   FeedCreateInput,
   FeedUpdateInput,
   ManageFeedsArgs,
 } from "@lobu/core/contracts/tools/manage-feeds";
 import type { ViewSetInput } from "@lobu/core/contracts/tools/manage-views";
-import type {
-  InferenceCapabilityBlock,
-  InferenceModality,
-} from "../../../config/define.js";
 import { ApiClient, type HttpMethod } from "../../../internal/api-client.js";
 import { resolveApiClient } from "../../../internal/index.js";
 import { ApiError } from "../../memory/_lib/errors.js";
@@ -688,13 +689,9 @@ export class ApplyClient {
   }
 
   /** Create an org inference provider. 409 (surfaced as ApiError) on slug conflict. */
-  async createInferenceProvider(body: {
-    slug: string;
-    kind: string;
-    displayName?: string;
-    apiKey: string;
-    capabilities?: Partial<Record<InferenceModality, InferenceCapabilityBlock>>;
-  }): Promise<RemoteInferenceProvider> {
+  async createInferenceProvider(
+    body: InferenceProviderCreateInput
+  ): Promise<RemoteInferenceProvider> {
     const { body: res } = await this.request<{
       provider: RemoteInferenceProvider;
     }>("POST", `/api/${this.orgSlug}/agents/inference-providers`, body);

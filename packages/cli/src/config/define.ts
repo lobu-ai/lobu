@@ -10,7 +10,6 @@
  * config and references.
  */
 
-import type { ManageAutomationsArgs } from "@lobu/core/contracts/tools/manage-automations";
 import type {
   AutomationEventTrigger,
   AutomationScheduleTrigger,
@@ -830,7 +829,7 @@ export interface Automation {
   /** LLM guidance for the Automation's downstream reaction agent. */
   reactionsGuidance?: string;
   /** Agent runtime override for firings. */
-  agentKind?: NonNullable<ManageAutomationsArgs["agent_kind"]>;
+  agentKind?: string;
   /**
    * UUID pinning this Automation's runs to a specific device worker. Only
    * meaningful together with `agentKind` — the pinned device's local CLI
@@ -971,7 +970,7 @@ export interface ProviderConfig {
 }
 
 /** Modalities an org inference provider may declare a capability block for. */
-export type InferenceModality = "text" | "image" | "stt" | "tts" | "embedding";
+export type InferenceModality = "text" | "image" | "stt" | "tts";
 
 /**
  * Per-modality upstream override for an {@link OrgProvider}. Omit a modality

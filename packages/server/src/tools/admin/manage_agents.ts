@@ -42,7 +42,6 @@ import {
   resolveWritePolicyDecision,
   type ActingPrincipal,
 } from '../../authz/entity-policy';
-import { resolveNewAgentProvisioningDefaults } from '../../auth/system-provider-resolution';
 
 import { createDbClientFromEnv, getDb, type DbClient } from '../../db/client';
 import type { Env } from '../../index';
@@ -353,17 +352,10 @@ export async function applyCreate(
   }
   const sql = createDbClientFromEnv(env);
   const ownerUserId = ctx.userId;
-  // Fresh-agent provisioning defaults, from the SAME helper every other create
-  // path uses (see `resolveNewAgentProvisioningDefaults` for the full rationale
-  // and the org-default ordering). Seeded ONLY when the caller did not pin an
-  // explicit `default_model` — that takes precedence in the insert below.
-  const provisioning = await resolveNewAgentProvisioningDefaults(
-    ctx.organizationId
-  );
   const explicitModel = argValue(args, 'default_model');
   const seedModels = explicitModel !== undefined
     ? (explicitModel.trim() ? [explicitModel.trim()] : null)
-    : provisioning.models;
+    : undefined;
   const created = await sql.begin(tx => insertAgentConfig(tx, args,
     { platform: 'external', userId: ownerUserId }, seedModels, agentConfigAudit(ctx)));
   const model = await agentModelInfo(ctx, args.agent_id);

@@ -843,13 +843,28 @@ describe("mapProjectToDesiredState", () => {
       slug: "w",
       skills: ["s"],
       reactionsGuidance: "Notify the account owner.",
-      agentKind: "notifier",
+      agentKind: "pi",
     });
     const dw = mapProjectToDesiredState(
       defineConfig({ agents: [crm], automations: [automation] })
     ).automations[0];
     expect(dw?.reactionsGuidance).toBe("Notify the account owner.");
-    expect(dw?.agentKind).toBe("notifier");
+    expect(dw?.agentKind).toBe("pi");
+  });
+
+  test("rejects an Automation runtime the server cannot execute", () => {
+    const crm = defineAgent({ id: "crm" });
+    const automation = defineAutomation({
+      agent: crm,
+      slug: "invalid-runtime",
+      prompt: "run",
+      agentKind: "notifier",
+    });
+    expect(() =>
+      mapProjectToDesiredState(
+        defineConfig({ agents: [crm], automations: [automation] })
+      )
+    ).toThrow(/invalid agentKind/);
   });
 
   test("maps automation deviceWorkerId + model for device-pinned runs", () => {
