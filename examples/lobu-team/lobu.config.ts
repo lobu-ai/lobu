@@ -7,6 +7,7 @@ import {
   defineEntityType,
   Type,
 } from "@lobu/cli/config";
+import type DataForSeoConnector from "./dataforseo.connector.ts";
 import type LokiActivityConnector from "./loki-activity.connector.ts";
 
 // One backlog type for every kind of team work, written by people and agents.
@@ -361,6 +362,7 @@ const gmailOAuthApp = defineAuthProfile({
 
 export default defineConfig({
   connectors: [
+    connectorFromFile<typeof DataForSeoConnector>("./dataforseo.connector.ts"),
     connectorFromFile<typeof LokiActivityConnector>(
       "./loki-activity.connector.ts"
     ),

@@ -138,6 +138,7 @@ import type {
   PollResponse,
   StreamBatch,
 } from "@lobu/core/contracts/worker/protocol";
+import { traceparentHeader } from "@lobu/core";
 import type { ConnectorOperationResult } from "@lobu/core/contracts/tools/manage-operations";
 import type { AgentKind } from "@lobu/core/contracts/worker/device-automation";
 import { resolveRunnableAgentKinds } from "./agent-binaries.js";
@@ -416,7 +417,11 @@ export class WorkerClient implements ExecutorClient {
         : {}),
     };
     try {
-      return await this.requestJson<PollResponse>('/api/workers/poll', body, options?.signal);
+      const response = await this.post('/api/workers/poll', body, options?.signal);
+      const job = (await response.json()) as PollResponse & { traceparent?: string };
+      const traceparent = traceparentHeader(response.headers.get('traceparent'));
+      if (traceparent) job.traceparent = traceparent;
+      return job;
     } catch (error) {
       const description =
         error instanceof WorkerHttpError ? upgradeRequiredDescription(error) : null;

@@ -8,7 +8,7 @@
 import { validateRecoveryDispatch } from '../lib/browser-recovery';
 import { sourceReadScrubAssignments } from '../lib/device-feed-read-protocol';
 import { BROWSER_ACCOUNT_PROBE_METADATA_KEY, connectionBrowserGrant } from '../connectors/browser-resource';
-import { authorizeCapabilities, isKnownPlatform } from '@lobu/core';
+import { authorizeCapabilities, isKnownPlatform, traceparentHeader } from '@lobu/core';
 import { Value } from '@sinclair/typebox/value';
 import {
   CONNECTOR_HTTP_AUTH_CAPABILITY,
@@ -1386,6 +1386,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
     const envelope = (row.action_input ?? {}) as {
       turn?: Record<string, unknown>;
       credential?: unknown;
+      reply?: { platform_metadata?: { traceparent?: unknown } };
     };
     const turn = envelope.turn;
     const credential = envelope.credential;
@@ -1406,6 +1407,13 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
         ...pollMetadata,
       });
     }
+    // The JSON envelope stays the turn and the credential. The trace parent
+    // rides the standard header so the worker continues the server span
+    // without a new poll field.
+    const traceparent = traceparentHeader(
+      envelope.reply?.platform_metadata?.traceparent
+    );
+    if (traceparent) c.header('traceparent', traceparent);
     return c.json({
       ...pollMetadata,
       run_id: row.run_id,
