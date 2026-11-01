@@ -814,6 +814,7 @@ export async function applyEntityFieldChangeProposal(
 	approver: IdentityContext,
 	db: DbClient = getDb(),
 	postCommitEffects?: Array<() => Promise<void>>,
+	env?: Env,
 ): Promise<FieldMergeResult> {
 	const sql = db;
 	const approverUserId = approver.userId ?? null;
@@ -845,6 +846,7 @@ export async function applyEntityFieldChangeProposal(
 		const hookContext: EntityTransactionHookContext = {
 			organizationId: scope.organization_id,
 			userId: approverUserId,
+			env,
 			sql: tx,
 			principal: approver,
 			actorSource: 'ui',
@@ -973,6 +975,7 @@ export async function applyEntityChangeProposal(
 			ctx,
 			db,
 			postCommitEffects,
+			env,
 		);
 	}
 	if (operation === "create") {

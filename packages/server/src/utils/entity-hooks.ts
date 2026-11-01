@@ -29,7 +29,8 @@ import {
   type WorkspaceChangeEventParams,
 } from './insert-event';
 import type { CreatedEntity, EntityData } from './entity-management';
-import { markMemberInvitedInTransaction } from './entity-management';
+import { patchEntityRows } from './entity-management';
+import { validateEntityRowPatch } from '../authz/entity-row-validation';
 import logger from './logger';
 
 export interface EntityHookContext {
@@ -153,10 +154,134 @@ async function sendMemberInvitationEmail(
   }
 }
 
+/**
+ * The membership a $member record stands for, found by its authentication
+ * claim, never by the editable email. Null when the record has no membership
+ * (a placeholder or an invitee).
+ */
+async function linkedMemberId(
+  sql: DbClient,
+  organizationId: string,
+  entityId: number
+): Promise<string | null> {
+  const members = await sql`
+    SELECT m.id FROM entity_identities ei JOIN member m
+      ON m."userId" = ei.identifier AND m."organizationId" = ei.organization_id
+    WHERE ei.organization_id = ${organizationId} AND ei.entity_id = ${entityId}
+      AND ei.namespace = 'auth_user_id' AND ei.source_connector = 'auth:signup'
+      AND ei.deleted_at IS NULL
+  `;
+  if (members.length > 1) {
+    throw new ToolUserError('Member has more than one authentication identity', 400);
+  }
+  return members.length === 1 ? (members[0].id as string) : null;
+}
+
+/**
+ * Insert a Better Auth invitation unless one is already pending for the email.
+ * A pending invitation for another role is a conflict, resolved by editing the
+ * record that owns it rather than silently keeping either role.
+ */
+async function ensurePendingInvitation(
+  sql: DbClient,
+  ctx: EntityHookContext,
+  email: string,
+  role: string
+): Promise<void> {
+  const inserted = (await sql`
+    INSERT INTO invitation (id, "organizationId", email, role, status, "expiresAt", "inviterId", "createdAt")
+    SELECT
+      gen_random_uuid()::text,
+      ${ctx.organizationId},
+      ${email},
+      ${role},
+      'pending',
+      ${new Date(Date.now() + 48 * 60 * 60 * 1000)},
+      ${ctx.userId},
+      current_timestamp
+    WHERE NOT EXISTS (
+      SELECT 1 FROM invitation
+      WHERE "organizationId" = ${ctx.organizationId}
+        AND email = ${email}
+        AND status = 'pending'
+    )
+    RETURNING id
+  `) as unknown as Array<{ id: string }>;
+  if (inserted.length === 0) {
+    const [pending] = await sql`SELECT role FROM invitation
+      WHERE "organizationId" = ${ctx.organizationId} AND email = ${email} AND status = 'pending'`;
+    if (!pending || pending.role !== role) {
+      throw new ToolUserError('A pending invitation already exists; edit its member record to change the role', 400);
+    }
+    return;
+  }
+  const event: WorkspaceChangeEventParams = {
+    organizationId: ctx.organizationId,
+    resourceKind: 'invitation',
+    resourceId: inserted[0].id,
+    op: 'created',
+    summary: 'Invitation sent',
+    state: {
+      id: inserted[0].id,
+      role,
+      status: 'pending',
+    },
+    changedFields: ['role', 'status'],
+    actorSource: ctx.actorSource,
+    createdBy: ctx.userId ?? null,
+  };
+  if (ctx.sql) {
+    await insertWorkspaceChangeEventInTransaction(event, sql);
+  } else {
+    recordWorkspaceChangeEvent(event);
+  }
+}
+
+/**
+ * Cancel every pending invitation for an email, recording each cancellation
+ * so the invitation lifecycle audit (sent → cancelled) stays complete.
+ */
+async function cancelPendingInvitations(
+  sql: DbClient,
+  ctx: EntityTransactionHookContext,
+  email: string
+): Promise<void> {
+  const cancelled = (await sql`
+    UPDATE invitation
+    SET status = 'canceled'
+    WHERE "organizationId" = ${ctx.organizationId}
+      AND email = ${email}
+      AND status = 'pending'
+    RETURNING id, role, status
+  `) as unknown as Array<{
+    id: string;
+    role: string | null;
+    status: string | null;
+  }>;
+  for (const inv of cancelled) {
+    await insertWorkspaceChangeEventInTransaction({
+      organizationId: ctx.organizationId,
+      resourceKind: 'invitation',
+      resourceId: inv.id,
+      op: 'updated',
+      summary: 'Invitation cancelled',
+      state: {
+        id: inv.id,
+        role: inv.role ?? 'member',
+        status: inv.status ?? 'canceled',
+      },
+      changedFields: ['status'],
+      actorSource: ctx.actorSource,
+      createdBy: ctx.userId ?? null,
+    }, sql);
+  }
+}
+
 interface MemberEmailChange {
   entityId: number;
   oldEmail: string | null;
   newEmail: string | null;
+  /** The record's full metadata after the edit. */
   metadata: Record<string, unknown> | null | undefined;
 }
 
@@ -171,85 +296,29 @@ async function updateMemberInvitationForEmail(
   change: MemberEmailChange
 ): Promise<void> {
   const { entityId, oldEmail, newEmail } = change;
-  // Target the membership by the authentication claim, never by the editable
-  // email, as the role edit below and beforeDelete do.
-  const members = await sql`
-    SELECT m.id FROM entity_identities ei JOIN member m
-      ON m."userId" = ei.identifier AND m."organizationId" = ei.organization_id
-    WHERE ei.organization_id = ${ctx.organizationId} AND ei.entity_id = ${entityId}
-      AND ei.namespace = 'auth_user_id' AND ei.source_connector = 'auth:signup'
-      AND ei.deleted_at IS NULL
-  `;
-  if (members.length > 1) {
-    throw new ToolUserError('Member has more than one authentication identity', 400);
-  }
   // An established membership owns its access; an email edit there stays a
   // pure profile edit and must not mint invitations.
-  if (members.length === 1) return;
+  if (await linkedMemberId(sql, ctx.organizationId, entityId)) return;
   assertHumanMemberChange(ctx.principal);
   const role = parseMemberRole(change.metadata?.role ?? 'member');
   await authorizeMemberRole(sql, ctx.organizationId, ctx.userId, role);
   // A removed or replaced address must not keep a live invitation behind:
   // cancel it the way deleting the record does.
-  if (oldEmail && oldEmail !== newEmail) {
-    const cancelled = (await sql`
-      UPDATE invitation SET status = 'canceled'
-      WHERE "organizationId" = ${ctx.organizationId} AND email = ${oldEmail} AND status = 'pending'
-      RETURNING id, role, status
-    `) as unknown as Array<{ id: string; role: string | null; status: string | null }>;
-    for (const inv of cancelled) {
-      await insertWorkspaceChangeEventInTransaction({
-        organizationId: ctx.organizationId, resourceKind: 'invitation',
-        resourceId: inv.id, op: 'updated', summary: 'Invitation cancelled',
-        state: { id: inv.id, role: inv.role ?? 'member', status: inv.status ?? 'canceled' },
-        changedFields: ['status'], actorSource: ctx.actorSource, createdBy: ctx.userId ?? null,
-      }, sql);
-    }
-  }
+  if (oldEmail) await cancelPendingInvitations(sql, ctx, oldEmail);
   if (!newEmail) return;
-  // Never renew an existing pending invitation's expiry on edit (a role edit
-  // keeps expiry too); a mismatched role is resolved explicitly like on create.
-  const [pending] = await sql`SELECT role FROM invitation
-    WHERE "organizationId" = ${ctx.organizationId} AND email = ${newEmail} AND status = 'pending'`;
-  if (pending) {
-    if (pending.role !== role) {
-      throw new ToolUserError('A pending invitation already exists; edit its member record to change the role', 400);
-    }
-  } else {
-    // Insert a Better Auth invitation (skip if one already pending)
-    const inserted = (await sql`
-      INSERT INTO invitation (id, "organizationId", email, role, status, "expiresAt", "inviterId", "createdAt")
-      SELECT
-        gen_random_uuid()::text,
-        ${ctx.organizationId},
-        ${newEmail},
-        ${role},
-        'pending',
-        ${new Date(Date.now() + 48 * 60 * 60 * 1000)},
-        ${ctx.userId},
-        current_timestamp
-      WHERE NOT EXISTS (
-        SELECT 1 FROM invitation
-        WHERE "organizationId" = ${ctx.organizationId}
-          AND email = ${newEmail}
-          AND status = 'pending'
-      )
-      RETURNING id
-    `) as unknown as Array<{ id: string }>;
-    if (inserted.length > 0) {
-      await insertWorkspaceChangeEventInTransaction({
-        organizationId: ctx.organizationId, resourceKind: 'invitation',
-        resourceId: inserted[0].id, op: 'created', summary: 'Invitation sent',
-        state: { id: inserted[0].id, role, status: 'pending' },
-        changedFields: ['role', 'status'], actorSource: ctx.actorSource, createdBy: ctx.userId ?? null,
-      }, sql);
-    }
-  }
-  await markMemberInvitedInTransaction(sql, entityId);
+  await ensurePendingInvitation(sql, ctx, newEmail, role);
+  // Hooks cannot write entity rows directly (entity-write funnel), so the
+  // status badge flips through the validated patch like member-entity's
+  // role/status projections do.
+  const metadata = { ...(change.metadata ?? {}), status: 'invited' };
+  await patchEntityRows({
+    tx: sql,
+    ids: [entityId],
+    patch: await validateEntityRowPatch({ tx: sql, ids: [entityId], patch: { metadata } }),
+  });
   // The invitation row commits with this transaction, so the email — which
   // reads it back on a fresh connection — must run after commit.
   if (ctx.deferAfterCommit) {
-    const metadata = { ...(change.metadata ?? {}), status: 'invited' };
     ctx.deferAfterCommit(() => sendMemberInvitationEmail({ metadata }, ctx));
   } else {
     logger.error('[Entity Hook] No post-commit drain for $member invitation email; invitation created without email');
@@ -269,55 +338,7 @@ registerEntityHooks('$member', {
     const email = meta[emailField] as string | undefined;
 
     if (email) {
-      // Insert a Better Auth invitation (skip if one already pending)
-      const inserted = (await sql`
-        INSERT INTO invitation (id, "organizationId", email, role, status, "expiresAt", "inviterId", "createdAt")
-        SELECT
-          gen_random_uuid()::text,
-          ${ctx.organizationId},
-          ${email},
-          ${role},
-          'pending',
-          ${new Date(Date.now() + 48 * 60 * 60 * 1000)},
-          ${ctx.userId},
-          current_timestamp
-        WHERE NOT EXISTS (
-          SELECT 1 FROM invitation
-          WHERE "organizationId" = ${ctx.organizationId}
-            AND email = ${email}
-            AND status = 'pending'
-        )
-        RETURNING id
-      `) as unknown as Array<{ id: string }>;
-      if (inserted.length === 0) {
-        const [pending] = await sql`SELECT role FROM invitation
-          WHERE "organizationId" = ${ctx.organizationId} AND email = ${email} AND status = 'pending'`;
-        if (!pending || pending.role !== role) {
-          throw new ToolUserError('A pending invitation already exists; edit its member record to change the role', 400);
-        }
-      }
-      if (inserted.length > 0) {
-        const event: WorkspaceChangeEventParams = {
-          organizationId: ctx.organizationId,
-          resourceKind: 'invitation',
-          resourceId: inserted[0].id,
-          op: 'created',
-          summary: 'Invitation sent',
-          state: {
-            id: inserted[0].id,
-            role,
-            status: 'pending',
-          },
-          changedFields: ['role', 'status'],
-          actorSource: ctx.actorSource,
-          createdBy: ctx.userId ?? null,
-        };
-        if (ctx.sql) {
-          await insertWorkspaceChangeEventInTransaction(event, sql);
-        } else {
-          recordWorkspaceChangeEvent(event);
-        }
-      }
+      await ensurePendingInvitation(sql, ctx, email, role);
       meta.status = 'invited';
     } else {
       meta.status = meta.status ?? 'active';
@@ -372,22 +393,13 @@ registerEntityHooks('$member', {
     }
     assertHumanMemberChange(ctx.principal);
     const role = parseMemberRole(after.metadata?.role);
-    const members = await sql`
-      SELECT m.id FROM entity_identities ei JOIN member m
-        ON m."userId" = ei.identifier AND m."organizationId" = ei.organization_id
-      WHERE ei.organization_id = ${ctx.organizationId} AND ei.entity_id = ${before.id}
-        AND ei.namespace = 'auth_user_id' AND ei.source_connector = 'auth:signup'
-        AND ei.deleted_at IS NULL
-    `;
-    if (members.length === 1) {
+    const memberId = await linkedMemberId(sql, ctx.organizationId, before.id);
+    if (memberId) {
       await changeMemberRoleInTransaction(sql, {
         organizationId: ctx.organizationId, actorId: ctx.userId,
-        memberId: members[0].id as string, role, actorSource: ctx.actorSource ?? 'api',
+        memberId, role, actorSource: ctx.actorSource ?? 'api',
       });
       return;
-    }
-    if (members.length > 1) {
-      throw new ToolUserError('Member has more than one authentication identity', 400);
     }
     if (typeof oldEmail !== 'string') {
       throw new ToolUserError('Member has no active membership or pending invitation', 400);
@@ -425,22 +437,11 @@ registerEntityHooks('$member', {
     const { emailField } = await resolveMemberSchemaFields(ctx.organizationId, sql);
     const email = entity.metadata?.[emailField] as string | undefined;
 
-    // Target the membership by the authentication claim, never by the editable
-    // email, as the role edit in `afterUpdate` does.
-    const members = await sql`
-      SELECT m.id FROM entity_identities ei JOIN member m
-        ON m."userId" = ei.identifier AND m."organizationId" = ei.organization_id
-      WHERE ei.organization_id = ${ctx.organizationId} AND ei.entity_id = ${entity.id}
-        AND ei.namespace = 'auth_user_id' AND ei.source_connector = 'auth:signup'
-        AND ei.deleted_at IS NULL
-    `;
-    if (members.length > 1) {
-      throw new ToolUserError('Member has more than one authentication identity', 400);
-    }
-    if (members.length === 1) {
+    const memberId = await linkedMemberId(sql, ctx.organizationId, entity.id);
+    if (memberId) {
       await removeMemberInTransaction(sql, {
         organizationId: ctx.organizationId, actorId: ctx.userId,
-        memberId: members[0].id as string, actorSource: ctx.actorSource ?? 'api',
+        memberId, actorSource: ctx.actorSource ?? 'api',
       });
     } else if (email) {
       // A record that lost its claim cannot be tied to a membership safely, but
@@ -457,40 +458,6 @@ registerEntityHooks('$member', {
         );
       }
     }
-    if (!email) return;
-
-    // Cancel any pending invitation for this email
-    const cancelled = (await sql`
-      UPDATE invitation
-      SET status = 'canceled'
-      WHERE "organizationId" = ${ctx.organizationId}
-        AND email = ${email}
-        AND status = 'pending'
-      RETURNING id, role, status
-    `) as unknown as Array<{
-      id: string;
-      role: string | null;
-      status: string | null;
-    }>;
-    // The $member delete cancels every pending invite; record each
-    // cancellation so the invitation lifecycle audit (send → canceled) stays
-    // complete.
-    for (const inv of cancelled) {
-      await insertWorkspaceChangeEventInTransaction({
-        organizationId: ctx.organizationId,
-        resourceKind: 'invitation',
-        resourceId: inv.id,
-        op: 'updated',
-        summary: 'Invitation cancelled',
-        state: {
-          id: inv.id,
-          role: inv.role ?? 'member',
-          status: inv.status ?? 'canceled',
-        },
-        changedFields: ['status'],
-        actorSource: ctx.actorSource,
-        createdBy: ctx.userId ?? null,
-      }, sql);
-    }
+    if (email) await cancelPendingInvitations(sql, ctx, email);
   },
 });

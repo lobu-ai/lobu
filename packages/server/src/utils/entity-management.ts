@@ -670,19 +670,6 @@ export async function patchEntityRows(params: {
 	return changed;
 }
 
-/**
- * Flip a $member record's display status to invited on the caller's handle.
- * Lifecycle hooks cannot write entity rows themselves (entity-write funnel
- * gate), so the $member afterUpdate hook routes this badge flip through here
- * after minting a late invitation. Invitation/member rows are untouched.
- */
-export async function markMemberInvitedInTransaction(
-	tx: DbClient,
-	entityId: number,
-): Promise<void> {
-	await tx`UPDATE entities SET metadata = COALESCE(metadata, '{}'::jsonb) || '{"status":"invited"}'::jsonb WHERE id = ${entityId}`;
-}
-
 /** Hard-delete an explicit, bounded set of entity ids on the caller's handle. */
 export async function hardDeleteEntityRows(params: {
 	tx: DbClient;
