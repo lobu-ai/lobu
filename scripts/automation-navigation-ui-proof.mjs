@@ -146,7 +146,7 @@ export async function runAutomationNavigationProof({
     )
   );
   const review = page.getByRole("region", {
-    name: "Review instruction changes",
+    name: "Review changes",
     exact: true,
   });
   assert(
