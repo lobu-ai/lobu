@@ -1,12 +1,18 @@
 /**
- * DataForSEO Connector (lob-team project-owned) — on-demand SEO reads.
+ * DataForSEO Connector (lobu-team project-owned) — SEO reads.
  *
- * Three read-only actions against the Live endpoints (single POST returns
- * data; no task_post/tasks_ready/task_get orchestration in v1):
+ * Three read-only actions, each a single request:
  *
- *   - `serp_live({ keyword, ... })` → Google Organic SERP items.
- *   - `keyword_search_volume({ keywords, ... })` → Google Ads search volume.
- *   - `account_balance()` → free `appendix/user_data` balance check (no charge).
+ *   - `serp_live({ keyword, ... })` → Google Organic SERP items (Live POST).
+ *   - `keyword_search_volume({ keywords, ... })` → Google Ads search volume
+ *     (Live POST).
+ *   - `account_balance()` → free `appendix/user_data` balance check (GET, no
+ *     charge).
+ *
+ * One `rank_tracking` feed on the cheaper Standard method
+ * (task_post → tasks_ready → task_get): one event per keyword per UTC day.
+ * Posted task ids are committed to the checkpoint before polling, so a failed
+ * poll never re-posts (re-bills) tasks that were already paid for.
  *
  * Auth is `env_keys` DATAFORSEO_LOGIN / DATAFORSEO_PASSWORD, sent as
  * `Authorization: Basic base64(login:password)` per request (same isolate-safe
@@ -22,7 +28,7 @@
 import {
   type ActionContext,
   type ActionResult,
-  type ConnectorDefinition,
+  type RuntimeConnectorDefinition,
   ConnectorRuntime,
   type EventEnvelope,
   sleep,
@@ -44,7 +50,7 @@ const MAX_SERP_DEPTH = 100;
 const MAX_KEYWORDS_PER_CALL = 20;
 const MAX_SNIPPET_CHARS = 500;
 // Standard-method bounds (cheap bulk path; Live stays for on-demand reads).
-const MAX_TASKS_PER_POST = 100;
+// 100 is task_post's per-call cap, so one post covers a whole feed.
 const MAX_TRACKED_KEYWORDS = 100;
 const MAX_READY_POLLS = 5;
 const READY_POLL_INTERVAL_MS = 30_000; // tasks_ready allows 20 calls/min
@@ -68,8 +74,8 @@ interface DataForSeoEnvelope {
   tasks?: DataForSeoTask[];
 }
 
-/** Build the Basic auth header value. Pure — unit-tested, never logged. */
-export function basicAuthHeader(login: string, password: string): string {
+/** Build the Basic auth header value. Pure, never logged. */
+function basicAuthHeader(login: string, password: string): string {
   return `Basic ${btoa(`${login}:${password}`)}`;
 }
 
@@ -87,6 +93,30 @@ function readCredentials(config: Record<string, unknown>): {
   return { login, password };
 }
 
+/**
+ * Classify a DataForSEO HTTP response by status code; returns only when ok.
+ * 403 is NOT a credential error: DataForSEO documents only 401/402/404/500 as
+ * its own HTTP codes, so a 403 comes from an intermediary (egress proxy or
+ * upstream WAF). Keep the body — it identifies which.
+ */
+async function assertHttpOk(response: Response, label: string): Promise<void> {
+  if (response.ok) return;
+  if (response.status === 401) {
+    throw new Error(
+      "DataForSEO authentication failed (HTTP 401) — check DATAFORSEO_LOGIN and DATAFORSEO_PASSWORD."
+    );
+  }
+  const text = await response.text().catch(() => "");
+  if (response.status === 403) {
+    throw new Error(
+      `DataForSEO ${label} refused (HTTP 403, not a credential error): ${text.slice(0, 300)}`
+    );
+  }
+  throw new Error(
+    `DataForSEO ${label} failed (HTTP ${response.status}): ${text.slice(0, 300)}`
+  );
+}
+
 async function postLive<T>(
   path: string,
   login: string,
@@ -102,26 +132,7 @@ async function postLive<T>(
     },
     body: JSON.stringify(body),
   });
-  if (response.status === 401) {
-    throw new Error(
-      "DataForSEO authentication failed (HTTP 401) — check DATAFORSEO_LOGIN and DATAFORSEO_PASSWORD."
-    );
-  }
-  if (response.status === 403) {
-    // 403 is NOT a credential error: DataForSEO documents only 401/402/404/500
-    // as its own HTTP codes, so a 403 comes from an intermediary (egress proxy
-    // or upstream WAF). Keep the body — it identifies which.
-    const text = await response.text().catch(() => "");
-    throw new Error(
-      `DataForSEO request refused (HTTP 403, not a credential error): ${text.slice(0, 300)}`
-    );
-  }
-  if (!response.ok) {
-    const text = await response.text().catch(() => "");
-    throw new Error(
-      `DataForSEO request failed (HTTP ${response.status}): ${text.slice(0, 300)}`
-    );
-  }
+  await assertHttpOk(response, "request");
   const envelope = (await response.json()) as DataForSeoEnvelope;
   // Classify on the numeric status codes, never on message text.
   if (envelope.status_code !== 20000) {
@@ -138,38 +149,9 @@ async function postLive<T>(
   return { payload: task.result as T, cost: task.cost ?? 0 };
 }
 
-async function getUserData(
-  login: string,
-  password: string,
-  fetchImpl: FetchLike = fetch
-): Promise<DataForSeoEnvelope> {
-  const response = await fetchImpl(`${API_BASE}${USER_DATA_PATH}`, {
-    method: "GET",
-    headers: { Authorization: basicAuthHeader(login, password) },
-  });
-  if (response.status === 401) {
-    throw new Error(
-      "DataForSEO authentication failed (HTTP 401) — check DATAFORSEO_LOGIN and DATAFORSEO_PASSWORD."
-    );
-  }
-  if (response.status === 403) {
-    // 403 is NOT a credential error: DataForSEO documents only 401/402/404/500
-    // as its own HTTP codes, so a 403 comes from an intermediary (egress proxy
-    // or upstream WAF). Keep the body — it identifies which.
-    const text = await response.text().catch(() => "");
-    throw new Error(
-      `DataForSEO request refused (HTTP 403, not a credential error): ${text.slice(0, 300)}`
-    );
-  }
-  if (!response.ok) {
-    throw new Error(`DataForSEO request failed (HTTP ${response.status})`);
-  }
-  return (await response.json()) as DataForSeoEnvelope;
-}
-
 // ── SERP live ─────────────────────────────────────────────────────────────
 
-export interface SerpLiveInput {
+interface SerpLiveInput {
   keyword?: string;
   location_code?: number;
   location_name?: string;
@@ -179,7 +161,7 @@ export interface SerpLiveInput {
   device?: string;
 }
 
-export interface SerpOrganicItem {
+interface SerpOrganicItem {
   rank_group: number;
   rank_absolute: number;
   domain: string;
@@ -205,7 +187,7 @@ function asString(value: unknown): string | undefined {
 }
 
 /** Curate one SERP live result into organic items + a type histogram. Pure. */
-export function parseSerpResult(result: unknown): {
+function parseSerpResult(result: unknown): {
   items: SerpOrganicItem[];
   result_types: Record<string, number>;
   check_url?: string;
@@ -247,7 +229,7 @@ export function parseSerpResult(result: unknown): {
 
 // ── Search volume live ────────────────────────────────────────────────────
 
-export interface KeywordVolume {
+interface KeywordVolume {
   keyword: string;
   search_volume?: number;
   cpc?: number;
@@ -256,7 +238,7 @@ export interface KeywordVolume {
 }
 
 /** Curate search-volume rows; unknown shapes are skipped, never crash. Pure. */
-export function parseVolumeResult(result: unknown): KeywordVolume[] {
+function parseVolumeResult(result: unknown): KeywordVolume[] {
   const rows = Array.isArray(result) ? result : [];
   const out: KeywordVolume[] = [];
   for (const raw of rows) {
@@ -305,7 +287,7 @@ const languageProps = {
 // Cheap bulk path: task_post (≤100/call) → tasks_ready poll → task_get.
 // One event per keyword per day; resyncs supersede via the stable origin_id.
 
-export interface RankTrackingConfig {
+interface RankTrackingConfig {
   keywords?: string[];
   target_domain?: string;
   location_code?: number;
@@ -317,19 +299,24 @@ export interface RankTrackingConfig {
   priority?: number;
 }
 
-export interface PendingRankTask {
-  tag: string;
+interface PendingRankTask {
   keyword: string;
   task_id: string;
 }
 
 export interface RankTrackingCheckpoint {
   pending?: PendingRankTask[];
+  /**
+   * Keywords already recorded on `day` (UTC). A `more` continuation re-runs
+   * immediately; without this it would re-post — and re-bill — every keyword
+   * the previous run already finished.
+   */
+  completed?: { day: string; keywords: string[] };
   last_sync_at?: string;
 }
 
 /** URL/host-safe slug for origin_id. Pure. */
-export function slugifyKeyword(keyword: string): string {
+function slugifyKeyword(keyword: string): string {
   return keyword
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
@@ -343,7 +330,7 @@ export function rankEventId(keyword: string, day: string): string {
 }
 
 /** Best organic hit on the target domain (exact or subdomain). Pure. */
-export function findTargetHit(
+function findTargetHit(
   items: SerpOrganicItem[],
   targetDomain: string
 ): SerpOrganicItem | undefined {
@@ -354,8 +341,11 @@ export function findTargetHit(
   );
 }
 
-/** One Standard task per keyword; tag (≤255 chars) maps results back. Pure. */
-export function buildRankTasks(
+/**
+ * One Standard task per keyword. Results are matched back by task id; the
+ * tag (≤255 chars) only labels the task in DataForSEO's own task list. Pure.
+ */
+function buildRankTasks(
   keywords: string[],
   opts: {
     location_code?: number;
@@ -367,14 +357,14 @@ export function buildRankTasks(
     priority?: number;
   }
 ): Array<Record<string, unknown>> {
-  return keywords.map((keyword, index) => {
+  return keywords.map((keyword) => {
     const task: Record<string, unknown> = {
       keyword,
       location_code: opts.location_code ?? DEFAULT_LOCATION_CODE,
       language_code: opts.language_code ?? DEFAULT_LANGUAGE_CODE,
       depth: opts.depth,
       device: opts.device,
-      tag: `${index}:${keyword}`.slice(0, 255),
+      tag: keyword.slice(0, 255),
     };
     if (opts.location_name) {
       delete task.location_code;
@@ -399,7 +389,7 @@ const rankTrackingConfigSchema = {
       minItems: 1,
       maxItems: MAX_TRACKED_KEYWORDS,
       items: { type: "string", minLength: 1 },
-      description: `Keywords to track (max ${MAX_TRACKED_KEYWORDS}; posted in batches of ${MAX_TASKS_PER_POST}).`,
+      description: `Keywords to track (max ${MAX_TRACKED_KEYWORDS}, the task_post per-call cap).`,
     },
     target_domain: {
       type: "string",
@@ -440,26 +430,7 @@ async function getJson<T>(
     method: "GET",
     headers: { Authorization: basicAuthHeader(login, password) },
   });
-  if (response.status === 401) {
-    throw new Error(
-      "DataForSEO authentication failed (HTTP 401) — check DATAFORSEO_LOGIN and DATAFORSEO_PASSWORD."
-    );
-  }
-  if (response.status === 403) {
-    // 403 is NOT a credential error: DataForSEO documents only 401/402/404/500
-    // as its own HTTP codes, so a 403 comes from an intermediary (egress proxy
-    // or upstream WAF). Keep the body — it identifies which.
-    const text = await response.text().catch(() => "");
-    throw new Error(
-      `DataForSEO request refused (HTTP 403, not a credential error): ${text.slice(0, 300)}`
-    );
-  }
-  if (!response.ok) {
-    const text = await response.text().catch(() => "");
-    throw new Error(
-      `DataForSEO request failed (HTTP ${response.status}): ${text.slice(0, 300)}`
-    );
-  }
+  await assertHttpOk(response, "request");
   return (await response.json()) as T;
 }
 
@@ -482,26 +453,7 @@ async function postRankTasks(
     },
     body: JSON.stringify(tasks),
   });
-  if (response.status === 401) {
-    throw new Error(
-      "DataForSEO authentication failed (HTTP 401) — check DATAFORSEO_LOGIN and DATAFORSEO_PASSWORD."
-    );
-  }
-  if (response.status === 403) {
-    // 403 is NOT a credential error: DataForSEO documents only 401/402/404/500
-    // as its own HTTP codes, so a 403 comes from an intermediary (egress proxy
-    // or upstream WAF). Keep the body — it identifies which.
-    const text = await response.text().catch(() => "");
-    throw new Error(
-      `DataForSEO request refused (HTTP 403, not a credential error): ${text.slice(0, 300)}`
-    );
-  }
-  if (!response.ok) {
-    const text = await response.text().catch(() => "");
-    throw new Error(
-      `DataForSEO task_post failed (HTTP ${response.status}): ${text.slice(0, 300)}`
-    );
-  }
+  await assertHttpOk(response, "task_post");
   const envelope = (await response.json()) as DataForSeoEnvelope;
   if (envelope.status_code !== 20000 || !Array.isArray(envelope.tasks)) {
     throw new Error(
@@ -514,7 +466,6 @@ async function postRankTasks(
     const requested = tasks[index] ?? {};
     if (task.status_code === 20100 && task.id) {
       created.push({
-        tag: String(requested.tag ?? ""),
         keyword: String(requested.keyword ?? ""),
         task_id: task.id,
       });
@@ -574,7 +525,7 @@ const searchVolumeInputSchema = {
 // ── Connector ─────────────────────────────────────────────────────────────
 
 export default class DataForSeoConnector extends ConnectorRuntime {
-  readonly definition: ConnectorDefinition = {
+  readonly definition: RuntimeConnectorDefinition = {
     key: "dataforseo",
     name: "DataForSEO",
     description:
@@ -783,7 +734,12 @@ export default class DataForSeoConnector extends ConnectorRuntime {
 
   private async accountBalance(ctx: ActionContext): Promise<ActionResult> {
     const { login, password } = readCredentials(ctx.config);
-    const envelope = await getUserData(login, password, this.fetchImpl);
+    const envelope = await getJson<DataForSeoEnvelope>(
+      USER_DATA_PATH,
+      login,
+      password,
+      this.fetchImpl
+    );
     const taskResult = envelope.tasks?.[0]?.result;
     const result = asRecord(
       Array.isArray(taskResult) ? taskResult[0] : undefined
@@ -855,9 +811,24 @@ export default class DataForSeoConnector extends ConnectorRuntime {
     const device = config.device ?? "desktop";
     const targetDomain = config.target_domain?.trim() || undefined;
     const checkpoint = (ctx.checkpoint ?? {}) as RankTrackingCheckpoint;
+    const today = new Date().toISOString().slice(0, 10);
     let pending = [...(checkpoint.pending ?? [])];
-    const events: EventEnvelope[] = [];
+    const doneKeywords = new Set(
+      checkpoint.completed?.day === today ? checkpoint.completed.keywords : []
+    );
+    let uncommitted: EventEnvelope[] = [];
+    let found = 0;
     let skipped = 0;
+
+    const commit = async (): Promise<void> => {
+      const batch = uncommitted;
+      uncommitted = [];
+      await ctx.commit(batch, {
+        pending,
+        completed: { day: today, keywords: [...doneKeywords] },
+        last_sync_at: new Date().toISOString(),
+      } satisfies RankTrackingCheckpoint);
+    };
 
     const collectReady = async (): Promise<void> => {
       if (pending.length === 0) return;
@@ -889,50 +860,46 @@ export default class DataForSeoConnector extends ConnectorRuntime {
           skipped += 1;
           continue;
         }
-        const parsed = parseSerpResult(first);
-        events.push(
+        uncommitted.push(
           this.rankEvent(
             task.keyword,
             targetDomain,
-            parsed,
+            parseSerpResult(first),
             completed.cost ?? 0
           )
         );
+        doneKeywords.add(task.keyword);
+        found += 1;
       }
       pending = stillPending;
     };
 
     await collectReady();
 
-    const doneKeywords = new Set(
-      events.map((event) => event.metadata?.keyword as string)
-    );
     const pendingKeywords = new Set(pending.map((task) => task.keyword));
     const fresh = keywords.filter(
       (keyword) => !doneKeywords.has(keyword) && !pendingKeywords.has(keyword)
     );
-    const taskOpts = {
-      location_code: config.location_code,
-      location_name: config.location_name,
-      language_code: config.language_code,
-      language_name: config.language_name,
-      depth,
-      device,
-      priority: config.priority,
-    };
-    for (let i = 0; i < fresh.length; i += MAX_TASKS_PER_POST) {
-      const batch = buildRankTasks(
-        fresh.slice(i, i + MAX_TASKS_PER_POST),
-        taskOpts
-      );
+    if (fresh.length > 0) {
       const { created, rejected } = await postRankTasks(
-        batch,
+        buildRankTasks(fresh, {
+          location_code: config.location_code,
+          location_name: config.location_name,
+          language_code: config.language_code,
+          language_name: config.language_name,
+          depth,
+          device,
+          priority: config.priority,
+        }),
         login,
         password,
         this.fetchImpl
       );
       pending.push(...created);
       skipped += rejected;
+      // task_post is billed on creation: persist the ids before polling so a
+      // failed poll cannot make the next run re-post (re-bill) them.
+      await commit();
     }
 
     for (let poll = 0; poll < this.maxPolls && pending.length > 0; poll++) {
@@ -940,14 +907,11 @@ export default class DataForSeoConnector extends ConnectorRuntime {
       await collectReady();
     }
 
-    await ctx.commit(events, {
-      pending,
-      last_sync_at: new Date().toISOString(),
-    } as Record<string, unknown>);
+    await commit();
     return {
       status: pending.length > 0 ? "more" : "complete",
       metadata: {
-        items_found: events.length,
+        items_found: found,
         items_skipped: skipped,
         pending: pending.length,
       },
