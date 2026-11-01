@@ -345,6 +345,7 @@ jobs:
           CHROME_PATH="$chrome_path" node scripts/oauth-authorization-ui-proof.mjs \
             | tee "$PROOF_OUTPUT_DIR/proof.log"
           echo "native_report_path=$(node -p 'JSON.parse(require("fs").readFileSync(process.env.PROOF_OUTPUT_DIR + "/results.json", "utf8")).native_report.path')" >> "$GITHUB_OUTPUT"
+          echo "native_editor_path=$(node -p 'JSON.parse(require("fs").readFileSync(process.env.PROOF_OUTPUT_DIR + "/results.json", "utf8")).native_report.editor_path')" >> "$GITHUB_OUTPUT"
 
       - name: Upload authorization UI proof
         id: oauth-ui-proof-upload
@@ -403,6 +404,7 @@ jobs:
             const previewUrl = `https://lobu-pr-${prNumber}.${{ vars.TAILNET_DOMAIN }}`;
             const proofUrl = `${{ steps.oauth-ui-proof-upload.outputs.artifact-url || '' }}`;
             const nativeReportPath = `${{ steps.oauth-ui-proof.outputs.native_report_path || '' }}`;
+            const nativeEditorPath = `${{ steps.oauth-ui-proof.outputs.native_editor_path || '' }}`;
 
             // Paginate: listComments defaults to 30 per page, and busy PRs
             // (review bots post here) routinely exceed that - the existing
@@ -427,6 +429,7 @@ jobs:
               `| **Namespace** | \`lobu-preview-${prNumber}\` |`,
               "| **Status** | Running |",
               ...(nativeReportPath ? [`| **Synthetic native report** | [Open saved report](${previewUrl}${nativeReportPath}) |`] : []),
+              ...(nativeEditorPath ? [`| **Automation editor** | [Open verified fixture](${previewUrl}${nativeEditorPath}) |`] : []),
               ...(proofUrl ? [`| **OAuth UI proof** | [Download screenshots](${proofUrl}) |`] : []),
               "",
               "_This preview is deleted when the PR closes or when the `preview` label is removed._",

@@ -184,12 +184,13 @@ export async function runNativeReferenceProof({
         node("json-diff", { before: "{{before}}", after: "{{after}}" }),
       ]),
       node("tabs-content", { value: "proposal" }, [
-        node("automation-ref", {
-          mode: "snapshot",
-          label: "Proposed weekly review",
-          description:
-            "A static proposal, not a registered Automation or action.",
-        }),
+        node("card", {}, [
+          node("badge", { variant: "outline" }, [text("Snapshot / proposal")]),
+          node("p", {}, [text("Proposed weekly review")]),
+          node("p", {}, [
+            text("A static proposal, not a registered Automation or action."),
+          ]),
+        ]),
       ]),
       node("tabs-content", { value: "unavailable" }, [
         node("automation-ref", { ...live, automationId: "invalid-selector" }),

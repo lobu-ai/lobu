@@ -53,15 +53,12 @@ export function handleGetComponentReference(): {
           name: 'automation-ref',
           category: 'Native Lobu references',
           description:
-            'Render the native Automation identity row or inline reference from a currently authorized record. Live mode resolves canonical identity and navigation; authored labels/statuses/links cannot impersonate live state. Snapshot mode is visibly labeled static content, never fetched or actionable.',
+            'Render the native Automation identity row or inline reference from a currently authorized record. Live mode resolves canonical identity and navigation; authored labels/statuses/links cannot impersonate live state. For a static proposal, compose ordinary card, badge and text nodes instead of a live reference.',
           props: {
-            mode: 'Required: live | snapshot. No implicit default.',
+            mode: 'Required: live. No implicit default.',
             workspace: 'Live only: workspace slug, 1–128 characters.',
             automationId: 'Live only: positive safe integer represented as a string, 1–128 characters.',
             appearance: 'Live only: inline | row; defaults to row.',
-            label: 'Snapshot only: required static label, 1–256 characters.',
-            description: 'Snapshot only: optional static description, 1–2000 characters.',
-            capturedAt: 'Snapshot only: optional capture label, 1–128 characters.',
           },
           example: {
             type: 'automation-ref',
@@ -72,16 +69,13 @@ export function handleGetComponentReference(): {
           name: 'connector-ref',
           category: 'Native Lobu references',
           description:
-            'Reuse the native connector display. A connector catalog entry is not proof of a connected account; supply connectionId only for a specific authorized connection. Snapshot mode uses the same static label/description/capturedAt contract as automation-ref.',
+            'Reuse the native connector display. A connector catalog entry is not proof of a connected account; supply connectionId only for a specific authorized connection.',
           props: {
-            mode: 'Required: live | snapshot.',
+            mode: 'Required: live.',
             workspace: 'Live only: workspace slug, 1–128 characters.',
             connectorKey: 'Live only: connector key, 1–128 characters.',
             connectionId: 'Live only: optional positive safe integer connection ID.',
             appearance: 'Live only: inline | row; defaults to row.',
-            label: 'Snapshot only: required static label, 1–256 characters.',
-            description: 'Snapshot only: optional static description, 1–2000 characters.',
-            capturedAt: 'Snapshot only: optional capture label, 1–128 characters.',
           },
           example: {
             type: 'connector-ref',
@@ -92,19 +86,16 @@ export function handleGetComponentReference(): {
           name: 'agent-ref',
           category: 'Native Lobu references',
           description:
-            'Reuse the native Agent row from current authorized identity. An agent reference is not a device reference or permission to delegate work. Snapshot mode has no identity selector, URL, live badge or action.',
+            'Reuse the native Agent row from current authorized identity. An agent reference is not a device reference or permission to delegate work.',
           props: {
-            mode: 'Required: live | snapshot.',
+            mode: 'Required: live.',
             workspace: 'Live only: workspace slug, 1–128 characters.',
             agentId: 'Live only: agent identifier, 1–128 characters.',
             appearance: 'Live only: inline | row; defaults to row.',
-            label: 'Snapshot only: required static label, 1–256 characters.',
-            description: 'Snapshot only: optional static description, 1–2000 characters.',
-            capturedAt: 'Snapshot only: optional capture label, 1–128 characters.',
           },
           example: {
             type: 'agent-ref',
-            props: { mode: 'snapshot', label: 'Proposed research specialist', description: 'Design only; no agent was created.' },
+            props: { mode: 'live', workspace: '{{item.workspace}}', agentId: '{{item.agentId}}' },
           },
         },
         {
