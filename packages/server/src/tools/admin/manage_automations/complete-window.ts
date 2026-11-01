@@ -65,6 +65,8 @@ const CAPTURE_PREVIEW_CONTENT_CAP = 200;
 // This allows workers to add internal fields while still validating the core schema
 const ajv = new Ajv({ allErrors: true, strict: false, removeAdditional: true });
 addFormats(ajv);
+const nonMutatingAjv = new Ajv({ allErrors: true, strict: false });
+addFormats(nonMutatingAjv);
 
 function validateEntityOutputKeys(
   extractedData: Record<string, unknown>,
@@ -394,7 +396,10 @@ export async function handleCompleteWindow(
     // Validate a deep copy since removeAdditional:true mutates the data
     // This allows workers to include internal fields like 'embedding' that aren't in the schema
     const dataCopy = structuredClone(extractedData);
-    const isValid = validate(dataCopy);
+    // removeAdditional can erase a later anyOf alternative's required fields
+    // while trying an earlier closed schema. Retry the original data before
+    // rejecting it, preserving the existing allowance for worker-only fields.
+    const isValid = validate(dataCopy) || nonMutatingAjv.compile(extractionSchema)(extractedData);
 
     if (!isValid) {
       const errors = validate.errors || [];

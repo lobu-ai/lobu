@@ -4,7 +4,8 @@
  *
  * Entity output rows derive from their entity type's `metadata_schema`, so the
  * same schema governs manual writes and Automation promotion. Event output rows
- * use one standard event-draft envelope. Output names are top-level arrays.
+ * use the standard event-draft envelope with their declared metadata schema.
+ * Output names are top-level arrays.
  *
  * Both the worker payload (poll.ts / get_content — ships the contract to the
  * device) and window completion (complete-window.ts — validates the returned
@@ -14,8 +15,10 @@
  * callers then use the worker's free-form `{ summary }` fallback.
  */
 
-import type { DbClient } from '../db/client';
+import { createHash } from 'node:crypto';
+import { type DbClient, parsePgNumberArray } from '../db/client';
 import type { Outputs } from '../types/automations';
+import { readEventKindRegistry, type EventKindRegistry } from './event-kind-validation';
 import {
   MAX_STABLE_KEY_COMPONENT_BYTES,
 } from './stable-keys';
@@ -117,6 +120,50 @@ export const AutomationEventDraftSchema: Record<string, unknown> = {
   additionalProperties: false,
 };
 
+async function eventOutputRowSchema(
+  registry: EventKindRegistry,
+  kind: string,
+  entityIds: number[],
+  metadataSchemas: Record<string, unknown>
+): Promise<Record<string, unknown>> {
+  const memberKinds = await registry.member();
+  // A missing member registry permits any metadata on the write path.
+  if (!memberKinds) return AutomationEventDraftSchema;
+  const kinds = await Promise.all(entityIds.map((id) => registry.entityType(id)));
+  const definitions = [...kinds, memberKinds].flatMap((registry) =>
+    registry?.[kind] ? [registry[kind]] : []
+  );
+  if (!definitions.length || definitions.some((definition) => !definition.metadataSchema)) {
+    return AutomationEventDraftSchema;
+  }
+  return {
+    ...AutomationEventDraftSchema,
+    allOf: [{
+      // Explicit row linkage can select a different entity type's kind. Its
+      // authorization and metadata still validate in the persistence path.
+      if: { not: { required: ['entity_ids'] } },
+      then: {
+        properties: {
+          metadata: {
+            anyOf: [
+              // Save validation deliberately accepts empty metadata.
+              { type: 'object', maxProperties: 0 },
+              ...definitions.map((definition) => {
+                const schema = definition.metadataSchema!;
+                const key = `event_${createHash('sha256').update(JSON.stringify(schema)).digest('hex')}`;
+                // Each standalone schema needs its own reference scope. Store it
+                // once so repeated outputs don't register duplicate $id values.
+                metadataSchemas[key] = { $id: `urn:lobu:${key}`, ...schema };
+                return { $ref: `#/$defs/${key}` };
+              }),
+            ],
+          },
+        },
+      },
+    }],
+  };
+}
+
 function mergeObjectSchemas(
   reaction: Record<string, unknown> | null,
   outputProperties: Record<string, unknown>,
@@ -157,7 +204,7 @@ function mergeObjectSchemas(
 
 /**
  * Derive an automation's extraction schema. Precedence:
- *  1. Named outputs → entity metadata schemas or the standard event draft.
+ *  1. Named outputs → entity schemas or event drafts with event-kind metadata.
  *  2. Reaction Automation → the reaction's exported `input` schema, cached on
  *     `automations.reaction_input_schema` when the automation is created or its script
  *     is set. A property that is also a declared output refines that output via
@@ -174,6 +221,28 @@ export async function deriveAutomationExtractionSchema(
   outputs: Outputs | null | undefined,
   automationId?: string | number | null
 ): Promise<Record<string, unknown> | null> {
+  let reactionSchema: Record<string, unknown> | null = null;
+  let entityIds: number[] = [];
+  if (automationId != null && automationId !== '') {
+    const rows = await sql<{
+      reaction_input_schema: Record<string, unknown> | string | null;
+      entity_ids: unknown;
+    }>`
+      SELECT reaction_input_schema, entity_ids FROM automations
+      WHERE id = ${automationId} AND organization_id = ${organizationId}
+      LIMIT 1
+    `;
+    entityIds = parsePgNumberArray(rows[0]?.entity_ids);
+    const raw = rows[0]?.reaction_input_schema ?? null;
+    if (raw != null) {
+      const schema = typeof raw === 'string' ? safeParse(raw) : raw;
+      if (schema && typeof schema === 'object' && Object.keys(schema).length > 0) {
+        reactionSchema = schema as Record<string, unknown>;
+      }
+    }
+  }
+  const registry = readEventKindRegistry(organizationId, sql);
+  const metadataSchemas: Record<string, unknown> = {};
   const outputProperties: Record<string, unknown> = {};
   for (const [name, output] of Object.entries(outputs ?? {})) {
     if ('entity' in output) {
@@ -191,29 +260,18 @@ export async function deriveAutomationExtractionSchema(
       outputProperties[name] = {
         type: 'array',
         maxItems: MAX_AUTOMATION_OUTPUT_ROWS,
-        items: AutomationEventDraftSchema,
+        items: await eventOutputRowSchema(registry, output.event, entityIds, metadataSchemas),
       };
     }
   }
 
-  let reactionSchema: Record<string, unknown> | null = null;
-  if (automationId != null && automationId !== '') {
-    const rows = await sql<{ reaction_input_schema: Record<string, unknown> | string | null }>`
-      SELECT reaction_input_schema FROM automations
-      WHERE id = ${automationId} AND organization_id = ${organizationId}
-      LIMIT 1
-    `;
-    const raw = rows[0]?.reaction_input_schema ?? null;
-    if (raw != null) {
-      const schema = typeof raw === 'string' ? safeParse(raw) : raw;
-      if (schema && typeof schema === 'object' && Object.keys(schema).length > 0) {
-        reactionSchema = schema as Record<string, unknown>;
-      }
-    }
-  }
   const outputNames = Object.keys(outputProperties);
   if (outputNames.length > 0) {
-    return mergeObjectSchemas(reactionSchema, outputProperties, outputNames);
+    const schema = mergeObjectSchemas(reactionSchema, outputProperties, outputNames);
+    if (Object.keys(metadataSchemas).length > 0) {
+      schema.$defs = { ...schema.$defs as Record<string, unknown>, ...metadataSchemas };
+    }
+    return schema;
   }
   return reactionSchema;
 }
