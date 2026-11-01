@@ -3782,7 +3782,7 @@ export type ManageAgentsData = {
          */
         identity_md?: string;
         /**
-         * [create/update] Default model as an explicit "<provider>/<model>" ref (e.g. "anthropic/claude-sonnet-5"). Validated against the org's connected providers. Without it the agent inherits the org default model; if the org has none the agent is not runnable. Pass an empty string to clear it and fall back to the org default.
+         * [create/update] Default model (updates preserve the existing fallback entries) as an explicit "<provider>/<model>" ref (e.g. "anthropic/claude-sonnet-5"). Validated against the org's connected providers. Without it the agent inherits the org default model; if the org has none the agent is not runnable. Pass an empty string to clear it and fall back to the org default.
          */
         default_model?: string;
       }
@@ -3808,9 +3808,53 @@ export type ManageAgentsData = {
          */
         identity_md?: string;
         /**
-         * [create/update] Default model as an explicit "<provider>/<model>" ref (e.g. "anthropic/claude-sonnet-5"). Validated against the org's connected providers. Without it the agent inherits the org default model; if the org has none the agent is not runnable. Pass an empty string to clear it and fall back to the org default.
+         * [create/update] Default model (updates preserve the existing fallback entries) as an explicit "<provider>/<model>" ref (e.g. "anthropic/claude-sonnet-5"). Validated against the org's connected providers. Without it the agent inherits the org default model; if the org has none the agent is not runnable. Pass an empty string to clear it and fall back to the org default.
          */
         default_model?: string;
+        settings?: {
+          models?: Array<string>;
+          networkConfig?: {
+            allowedDomains?: Array<string>;
+            deniedDomains?: Array<string>;
+          };
+          nixConfig?: {
+            flakeUrl?: string;
+            packages?: Array<string>;
+          };
+          soulMd?: string;
+          userMd?: string;
+          skillsConfig?: {
+            skills: Array<{
+              repo: string;
+              name: string;
+              description?: string;
+              instructions?: string;
+              enabled: boolean;
+              system?: boolean;
+              content?: string;
+              modelPreference?: string;
+              thinkingLevel?: "off" | "low" | "medium" | "high";
+            }>;
+          };
+          guardrails?: Array<string>;
+          guardrailsInline?: Array<{
+            name: string;
+            enabled: boolean;
+            stage: "input" | "output" | "pre-tool" | "egress";
+            kind?: "judge" | "require-tool";
+            policy?: string;
+            model?: string;
+            tools?: Array<string>;
+            domains?: Array<string>;
+          }>;
+          sandboxId?: string;
+          verboseLogging?: boolean;
+          showToolCalls?: boolean;
+          starters?: Array<{
+            title: string;
+            message: string;
+          }>;
+        };
       }
     | {
         /**
