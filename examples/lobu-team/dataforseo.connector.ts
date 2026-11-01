@@ -54,6 +54,10 @@ const MAX_SNIPPET_CHARS = 500;
 const MAX_TRACKED_KEYWORDS = 100;
 const MAX_READY_POLLS = 5;
 const READY_POLL_INTERVAL_MS = 30_000; // tasks_ready allows 20 calls/min
+// Normal-priority Standard tasks finish in minutes. One that has not shown up
+// in tasks_ready after this long is treated as lost, so a stuck task cannot
+// keep the feed in an endless `more` loop.
+const MAX_PENDING_AGE_MS = 2 * 60 * 60 * 1000;
 
 type FetchLike = (
   input: string | URL | Request,
@@ -302,14 +306,16 @@ interface RankTrackingConfig {
 interface PendingRankTask {
   keyword: string;
   task_id: string;
+  /** ISO time of the task_post that created (and billed) the task. */
+  posted_at: string;
 }
 
 export interface RankTrackingCheckpoint {
   pending?: PendingRankTask[];
   /**
-   * Keywords already recorded on `day` (UTC). A `more` continuation re-runs
-   * immediately; without this it would re-post — and re-bill — every keyword
-   * the previous run already finished.
+   * Keywords whose task posted on `day` (UTC) is settled: recorded, failed, or
+   * expired. Each keyword is posted (billed) at most once per day; a `more`
+   * continuation re-runs immediately and must not re-post them.
    */
   completed?: { day: string; keywords: string[] };
   last_sync_at?: string;
@@ -461,6 +467,7 @@ async function postRankTasks(
     );
   }
   const created: PendingRankTask[] = [];
+  const postedAt = new Date().toISOString();
   let rejected = 0;
   envelope.tasks.forEach((task, index) => {
     const requested = tasks[index] ?? {};
@@ -468,6 +475,7 @@ async function postRankTasks(
       created.push({
         keyword: String(requested.keyword ?? ""),
         task_id: task.id,
+        posted_at: postedAt,
       });
     } else {
       rejected += 1;
@@ -812,13 +820,27 @@ export default class DataForSeoConnector extends ConnectorRuntime {
     const targetDomain = config.target_domain?.trim() || undefined;
     const checkpoint = (ctx.checkpoint ?? {}) as RankTrackingCheckpoint;
     const today = new Date().toISOString().slice(0, 10);
-    let pending = [...(checkpoint.pending ?? [])];
     const doneKeywords = new Set(
       checkpoint.completed?.day === today ? checkpoint.completed.keywords : []
     );
+    // A task settles the day it was posted; one posted yesterday never
+    // blocks today's check of the same keyword.
+    const settle = (task: PendingRankTask): void => {
+      if (task.posted_at.slice(0, 10) === today) doneKeywords.add(task.keyword);
+    };
     let uncommitted: EventEnvelope[] = [];
     let found = 0;
     let skipped = 0;
+    const now = Date.now();
+    let pending: PendingRankTask[] = [];
+    for (const task of checkpoint.pending ?? []) {
+      if (now - Date.parse(task.posted_at) <= MAX_PENDING_AGE_MS) {
+        pending.push(task);
+      } else {
+        settle(task);
+        skipped += 1;
+      }
+    }
 
     const commit = async (): Promise<void> => {
       const batch = uncommitted;
@@ -855,8 +877,9 @@ export default class DataForSeoConnector extends ConnectorRuntime {
         const completed = got.tasks?.[0];
         const result = completed?.result;
         const first = Array.isArray(result) ? result[0] : result;
+        settle(task);
         if (completed?.status_code !== 20000 || first == null) {
-          // Counted, not retried: the next scheduled run re-posts fresh.
+          // Counted, not retried today: re-posting would bill again.
           skipped += 1;
           continue;
         }
@@ -868,7 +891,6 @@ export default class DataForSeoConnector extends ConnectorRuntime {
             completed.cost ?? 0
           )
         );
-        doneKeywords.add(task.keyword);
         found += 1;
       }
       pending = stillPending;
