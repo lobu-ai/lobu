@@ -100,16 +100,6 @@ const revolutConnection = defineConnection({
   ],
 });
 
-// LinkedIn is also a browser connector. Unlike takeout-only connections, never
-// synthesize a local path for it: a browser-only deployment must not provision
-// CSV feeds that can only fail forever. Opt in with either an explicit LinkedIn
-// directory or an explicitly configured shared takeout root.
-const linkedinTakeoutDir =
-  process.env.LINKEDIN_TAKEOUT_DIR ??
-  (process.env.LOCAL_TAKEOUT_ROOT
-    ? `${process.env.LOCAL_TAKEOUT_ROOT}/linkedin`
-    : null);
-
 const takeoutConnection = defineConnection({
   slug: "google-takeout-buremba",
   connector: "google.takeout",
@@ -220,21 +210,6 @@ const linkedinConnection = defineConnection({
     // Apply never prunes feeds. Clear the old schedule explicitly so live
     // reads do not leave the previous periodic ingestion running.
     { feed: "home_feed", schedule: null },
-    // Local Data Export (CSV) feeds.
-    ...(linkedinTakeoutDir
-      ? [
-          "messages",
-          "connections",
-          "invitations",
-          "applied_jobs",
-          "profile",
-          "companies",
-          "learning",
-          "events",
-          "endorsements",
-          "media",
-        ].map((feed) => ({ feed, config: { takeout_dir: linkedinTakeoutDir } }))
-      : []),
   ],
 });
 
