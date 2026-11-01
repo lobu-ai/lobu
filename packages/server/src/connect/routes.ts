@@ -1192,7 +1192,6 @@ async function handleOAuthCallback(
     await registerConnectorWebhook({
       organizationId: tokenRow.organization_id,
       connectionId: tokenRow.connection_id,
-      request: c.req.raw,
     });
   }
 

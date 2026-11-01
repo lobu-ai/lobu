@@ -21,8 +21,8 @@ import { getDb } from '../db/client';
 import { PostgresSecretStore } from '../lobu/stores/postgres-secret-store';
 import { orgContext } from '../lobu/stores/org-context';
 import { persistSecretValue } from '../gateway/secrets/index';
-import { resolveBaseUrl } from '../auth/base-url';
 import { isCloudMode } from '../utils/cloud-mode';
+import { resolvePublicGatewayUrl } from '../utils/public-origin';
 import { findBundledConnectorFile } from '../utils/connector-catalog';
 import { resolveConnectorCodeForKey } from '../utils/ensure-connector-installed';
 import { mergeExecutionConfig, resolveExecutionAuth } from '../utils/execution-context';
@@ -60,6 +60,17 @@ function toNumberOrNull(value: number | string | null): number | null {
   if (value === null) return null;
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Public URL a provider must call for this connection's webhook. Derived from
+ * the gateway base (`PUBLIC_GATEWAY_URL`, normalized to include its `/lobu`
+ * mount) rather than the bare origin: the ingest route is mounted under the
+ * gateway base, so an origin-only URL 404s at the web app.
+ */
+export function connectorWebhookCallbackUrl(connectionId: number): string {
+  const baseUrl = resolvePublicGatewayUrl().replace(/\/+$/, '');
+  return `${baseUrl}/api/v1/webhooks/${connectionId}`;
 }
 
 /**
@@ -130,8 +141,6 @@ export function connectionWantsWebhook(
 export async function registerConnectorWebhook(params: {
   organizationId: string;
   connectionId: number;
-  /** When this connector doesn't declare a webhook block, callers can skip. */
-  request?: Request | null;
 }): Promise<void> {
   const { organizationId, connectionId } = params;
   try {
@@ -159,8 +168,7 @@ export async function registerConnectorWebhook(params: {
         logMessage: 'Failed to resolve webhook registration credentials',
       });
 
-      const baseUrl = resolveBaseUrl({ request: params.request ?? null }).replace(/\/+$/, '');
-      const callbackUrl = `${baseUrl}/api/v1/webhooks/${connectionId}`;
+      const callbackUrl = connectorWebhookCallbackUrl(connectionId);
 
       const envStrings = connectorRunEnv({
         organizationSupplied: findBundledConnectorFile(connection.connector_key) === null,
