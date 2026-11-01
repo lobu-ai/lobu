@@ -196,6 +196,11 @@ describe("POST /inference-providers seeds a routable text model", () => {
       body: JSON.stringify({ slug: "other", displayName: "Rejected" }) });
     expect(retarget.status).toBe(400);
     expect((await sdk.inferenceProviders.list()).providers[0]?.displayName).toBe("Shared");
+    const madeDefault = await app.request(`${url}/parity/default`, { method: "PUT", body: "" });
+    expect(madeDefault.status).toBe(200);
+    const removed = await app.request(`${url}/parity`, { method: "DELETE", body: "" });
+    expect(removed.status).toBe(200);
+    expect((await sdk.inferenceProviders.list()).providers).toEqual([]);
   });
 
 	test("Codex runtime support does not allow subscription credentials through API-key creation", async () => {

@@ -1,7 +1,7 @@
 import { getRequiredAccessLevel, ownerAdminActionAlternative } from '../../auth/tool-access';
 import { ToolUserError } from '../../utils/errors';
 import logger from '../../utils/logger';
-import { enforceRoleScopeAccess, isSystemContext } from '../access-control';
+import { enforceAdminToolAllowlist, enforceRoleScopeAccess, isSystemContext } from '../access-control';
 import type { ToolContext } from '../registry';
 import { getErrorMessage } from "@lobu/core";
 
@@ -26,12 +26,13 @@ function errorLogLevel(error: unknown): 'warn' | 'error' {
 }
 
 async function enforceActionAccess(toolName: string, action: string, ctx: ToolContext): Promise<void> {
+  const requiredAccess = getRequiredAccessLevel(toolName, { action }, false);
+  enforceAdminToolAllowlist(requiredAccess, toolName, ctx.adminTools);
   // Automation reactions and other in-process system calls historically run with
   // userId=null + isAuthenticated=true. Preserve that path while enforcing the
   // policy table for real user/OAuth sessions that reach handlers via run / query.
   if (isSystemContext(ctx)) return;
 
-  const requiredAccess = getRequiredAccessLevel(toolName, { action }, false);
   await enforceRoleScopeAccess(
     requiredAccess,
     ctx,
