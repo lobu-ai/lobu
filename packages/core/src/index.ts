@@ -84,6 +84,7 @@ export {
   withChildSpan,
   withSpan,
 } from "./otel";
+export { currentTraceLogFields, traceparentHeader } from "./trace-context";
 // Config-driven provider types
 export type {
   ProviderConfigEntry,

@@ -38,7 +38,18 @@
  * still the owed hard gate per AGENTS.md.
  */
 
-import { beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
+import {
+  createChildSpan,
+  createRootSpan,
+  generateWorkerToken,
+  getTraceparent,
+  initTracing,
+  shutdownTracing,
+} from "@lobu/core";
+import type { ReadableSpan, SpanProcessor } from "@opentelemetry/sdk-trace-node";
+import { agentTurnTokenScope } from "../orchestration/deployment-identity.js";
+import { createInteractionRoutes } from "../routes/internal/interactions.js";
 import { getDb } from "../../db/client.js";
 import { registerInteractionBridge } from "../connections/interaction-bridge.js";
 import type { PlatformConnection } from "../connections/types.js";
@@ -182,13 +193,63 @@ describe("chat interaction card cross-pod fan-out (faithful seam, real bridge + 
     await seedOrg(ORG);
   });
 
-  test("card posted on a COLD replica is delivered exactly once by the REAL bridge on the WARM replica", async () => {
+  afterEach(async () => {
+    await shutdownTracing();
+  });
+
+  test("authenticated card crosses replicas once and keeps its stored turn trace", async () => {
+    await shutdownTracing();
+    const finished: ReadableSpan[] = [];
+    const processor: SpanProcessor = {
+      onStart() {},
+      onEnd(span) { finished.push(span); },
+      forceFlush: async () => {},
+      shutdown: async () => {},
+    };
+    initTracing({ serviceName: "interaction-fanout-test", spanProcessors: [processor] });
+    const root = createRootSpan("message_received");
+    const queueSpan = createChildSpan("queue_processing", root.traceparent);
+    const traceparent = getTraceparent(queueSpan);
+    expect(root.span).not.toBeNull();
+    expect(queueSpan).not.toBeNull();
+    const traceId = root.span!.spanContext().traceId;
+    root.span!.end();
+    queueSpan!.end();
+
+    const sql = getDb();
+    const [allocated] = await sql<{ id: number }>`
+      SELECT nextval(pg_get_serial_sequence('runs', 'id')) AS id
+    `;
+    const runId = Number(allocated!.id);
+    const messageId = "message-traced-fanout";
+    const agentId = "agent-traced-fanout";
+    const credential = generateWorkerToken(USER, CHANNEL, agentTurnTokenScope(messageId), {
+      organizationId: ORG,
+      agentId,
+      platform: "slack",
+      channelId: CHANNEL,
+      connectionId: CONN,
+      teamId: "T1",
+      messageId,
+      runId,
+    });
+    await sql`
+      INSERT INTO runs (id, organization_id, run_type, status, action_input)
+      VALUES (${runId}, ${ORG}, 'agent_turn', 'running', ${sql.json({
+        credential,
+        turn: { agent_id: agentId, conversation_id: CHANNEL, message_id: messageId },
+        reply: {
+          message_id: messageId, channel_id: CHANNEL, user_id: USER, platform: "slack",
+          platform_metadata: { connectionId: CONN, traceparent },
+        },
+      })})
+    `;
     // --- COLD replica: producer enqueues instead of rendering ----------------
     const coldSvc = new InteractionService();
     const enqueued: any[] = [];
     const coldQueue = {
       send: mock(async (_name: string, data: any) => {
-        enqueued.push(data);
+        enqueued.push(JSON.parse(JSON.stringify(data)));
         return "job-id";
       }),
     } as any;
@@ -199,9 +260,20 @@ describe("chat interaction card cross-pod fan-out (faithful seam, real bridge + 
       (_id: string) => false
     );
 
-    coldSvc.emit("question:created", slackQuestion);
-
-    expect(coldQueue.send).toHaveBeenCalledTimes(1);
+    const router = createInteractionRoutes(coldSvc);
+    const response = await router.request("/internal/interactions/create", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${credential}`,
+        "content-type": "application/json",
+        // The caller's header must never choose the originating turn's trace.
+        traceparent: `00-${"ff".repeat(16)}-${"ee".repeat(8)}-01`,
+      },
+      body: JSON.stringify({ question: slackQuestion.question, options: slackQuestion.options }),
+    });
+    expect(response.status).toBe(200);
+    const posted = await response.json() as { id: string };
+    expect(posted.id).toBeTruthy();
     expect(enqueued.length).toBe(1);
     const row = enqueued[0];
     expect(row.platformMetadata.connectionId).toBe(CONN);
@@ -251,10 +323,9 @@ describe("chat interaction card cross-pod fan-out (faithful seam, real bridge + 
     // Exactly ONE pending_interactions row written (real DB). The bridge
     // persists the row before posting, so once the post is observed the row is
     // already durable; poll defensively to absorb any commit lag.
-    const sql = getDb();
     const countPendingRows = async (): Promise<number> => {
       const rows = await sql<{ id: string }>`
-        SELECT id FROM pending_interactions WHERE id = ${slackQuestion.id}
+        SELECT id FROM pending_interactions WHERE id = ${posted.id}
       `;
       return rows.length;
     };
@@ -275,6 +346,17 @@ describe("chat interaction card cross-pod fan-out (faithful seam, real bridge + 
       "card post count stays at 1 after queue re-claim"
     );
     expect(await countPendingRows()).toBe(1);
+
+    const deliveries = finished.filter((span) =>
+      span.name === "response_delivery" && span.attributes["lobu.message_id"] === posted.id
+    );
+    expect(deliveries).toHaveLength(2);
+    expect(deliveries.map((span) => span.spanContext().traceId)).toEqual([traceId, traceId]);
+    const queuedParent = row.platformMetadata.traceparent as string;
+    expect(queuedParent).toMatch(/^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/);
+    expect(deliveries.map((span) => span.parentSpanContext?.spanId)).toEqual([
+      queuedParent.split("-")[2], queuedParent.split("-")[2],
+    ]);
 
     coldCleanup();
     bridgeCleanup();
