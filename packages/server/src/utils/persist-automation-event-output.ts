@@ -4,7 +4,7 @@ import type { EventOutput } from '../types/automations';
 import { errorMessage, ToolUserError } from './errors';
 import { insertEvent, type InsertedEvent } from './insert-event';
 import { isUniqueViolation } from './pg-errors';
-import { validateSaveContentSemanticType } from './event-kind-validation';
+import { readEventKindRegistry, validateSaveContentSemanticType } from './event-kind-validation';
 import { requireWriteAccess } from './organization-access';
 import {
   AUTOMATION_EVENT_IDENTITY_NS,
@@ -170,6 +170,8 @@ export async function persistAutomationEventOutput(
   }
   const inserted: InsertedEvent[] = [];
   const producer = `run:${params.runId}`;
+  // Read each event-kind registry once per completion, inside its transaction.
+  const kindRegistry = readEventKindRegistry(params.organizationId, params.tx);
 
   for (let index = 0; index < params.rows.length; index++) {
     const draft = params.rows[index] as EventDraft;
@@ -237,7 +239,7 @@ export async function persistAutomationEventOutput(
       metadata,
       params.organizationId,
       entityIds.length > 0 ? entityIds : undefined,
-      params.tx
+      kindRegistry
     );
     if (!kindValidation.valid) {
       throw new ToolUserError(
