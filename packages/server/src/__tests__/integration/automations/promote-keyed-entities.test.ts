@@ -16,7 +16,8 @@
  */
 
 import { slugify } from '@lobu/core';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import * as fieldApproval from '../../../tools/admin/entity-field-approval';
 import type { DbClient } from '../../../db/client';
 import type { Env } from '../../../index';
 import type { AuthContext } from '../../../tools/execute';
@@ -1060,6 +1061,57 @@ describe('complete_window promotes keyed rows into entities (P2 phase 1)', () =>
       `;
       expect(finalCard.action_input.fields).toEqual({ name: 'Monitor the deployed fix', $name: 'Monitor the deployed fix' });
     }
+  });
+
+  it('recovers an owned-field proposal when approval delivery fails after completion', async () => {
+    const ctx = await setupKeyedAutomation();
+    const first = await nextCompletion(ctx);
+    await completeWithToken(ctx, first.token, first.runId, {
+      problems: [{ category: 'Stability', name: 'App Crashes', severity: 'low' }],
+    });
+    const identity = topicIdentity(ctx.automationId, APP_CRASHES_KEY);
+    const [created] = await ctx.sql`
+      SELECT entity_id FROM entity_identities
+      WHERE organization_id = ${ctx.workspace.org.id}
+        AND namespace = 'automation_key' AND identifier = ${identity}
+    `;
+    const entityId = Number(created.entity_id);
+    await ctx.workspace.owner.entities.update({
+      entity_id: entityId,
+      metadata: { severity: 'high' },
+      field_note: 'synthetic human correction',
+    });
+    const next = await nextCompletion(ctx);
+    const args = {
+      automation_id: String(ctx.automationId),
+      run_id: next.runId,
+      window_token: next.token,
+      extracted_data: {
+        problems: [{ category: 'Stability', name: 'App Crashes', severity: 'critical' }],
+      },
+    };
+    const failApproval = vi.spyOn(fieldApproval, 'proposeEntityFieldChange')
+      .mockRejectedValueOnce(new Error('synthetic approval delivery unavailable'));
+    try {
+      const committed = await ctx.api.automations.completeWindow(args);
+      expect(committed.completed_now).toBe(true);
+      expect(failApproval).toHaveBeenCalledTimes(1);
+    } finally {
+      failApproval.mockRestore();
+    }
+    const [run] = await ctx.sql`SELECT status FROM runs WHERE id = ${next.runId}`;
+    expect(run.status).toBe('completed');
+    const [held] = await ctx.sql`SELECT metadata FROM entities WHERE id = ${entityId}`;
+    expect(held.metadata.severity).toBe('high');
+
+    const replayed = await ctx.api.automations.completeWindow(args);
+    expect(replayed.completed_now).toBe(false);
+    const proposals = await ctx.sql`
+      SELECT id FROM runs
+      WHERE organization_id = ${ctx.workspace.org.id}
+        AND action_key = 'entity_field_change' AND approval_status = 'pending'
+    `;
+    expect(proposals).toHaveLength(1);
   });
 
   it('syncs extracted fields into entities and respects a human-owned field on re-run, queuing an approval', async () => {

@@ -176,4 +176,27 @@ describe('saveContent > supersession robustness', () => {
     expect((err as ToolUserError).httpStatus).toBe(404);
     expect((err as ToolUserError).message).toMatch(/not found/i);
   });
+
+  it('replays a superseding save after its successful response was lost', async () => {
+    const target = await createTestEvent({
+      organization_id: org.id,
+      content: 'synthetic fact v1',
+      semantic_type: 'content',
+    });
+    const args = {
+      content: 'synthetic fact v2',
+      semantic_type: 'content',
+      metadata: {},
+      supersedes_event_id: target.id,
+      idempotency_key: 'synthetic-supersede-lost-response',
+    };
+    const committed = await saveContent(args as never, {} as never, ctx);
+    const replayed = await saveContent(args as never, {} as never, ctx);
+    expect(replayed.id).toBe(committed.id);
+    const sql = getTestDb();
+    const successors = await sql`
+      SELECT id FROM events WHERE supersedes_event_id = ${target.id}
+    `;
+    expect(successors).toHaveLength(1);
+  });
 });
