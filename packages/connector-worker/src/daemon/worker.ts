@@ -13,6 +13,7 @@ import {
   attachInteractiveSession,
 } from './interactive-session.js';
 import { installWorkerPollLoopSignals, WorkerPollLoop } from './poll-loop.js';
+import { ResourceAdmission } from './resource-admission.js';
 
 export interface DaemonConfig {
   apiUrl: string;
@@ -21,6 +22,8 @@ export interface DaemonConfig {
   capabilities?: WorkerCapabilities;
   pollIntervalMs?: number;
   maxConcurrentJobs?: number;
+  /** Separate agent-turn budget; see `WorkerPollLoopOptions`. */
+  maxConcurrentAgentTurns?: number;
   executor?: Partial<ExecutorConfig>;
   version?: string;
   /** Set only for a device worker; cloud-fleet daemons leave this undefined. */
@@ -87,6 +90,9 @@ export class WorkerDaemon {
       client: this.client,
       pollIntervalMs: daemonConfig.pollIntervalMs,
       maxConcurrentJobs: daemonConfig.maxConcurrentJobs,
+      maxConcurrentAgentTurns: daemonConfig.maxConcurrentAgentTurns,
+      resourceAdmission: !daemonConfig.platform && daemonConfig.maxConcurrentAgentTurns !== undefined
+        ? new ResourceAdmission() : undefined,
       execute: (job) => executeRun(this.client, job, this.env, this.config.executor),
       ...(credentialMaintenance
         ? {

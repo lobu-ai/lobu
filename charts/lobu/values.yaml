@@ -193,20 +193,45 @@ worker:
     seccompProfile:
       type: RuntimeDefault
 
+  # Sized for the two budgets below: 32 agent turns plus 2 connector runs.
+  # Measured per run (Linux, Node 22, one core, with MALLOC_ARENA_MAX=2):
+  # a light turn adds 22-25 MB of worker RSS, a turn with 1 MB of history
+  # (above prod's p99 of 777 kB) adds 50 MB, a slow sync about 28 MB, and the
+  # idle worker settles near 800 MB after a burst.
   resources:
     requests:
-      cpu: 500m
-      memory: 2Gi
+      # Starts are paced by resource admission; once running, turns mostly
+      # wait on the model provider.
+      cpu: 1000m
+      # 800 MB idle + 32 turns at 50 MB (every slot heavy) + 2 syncs is about
+      # 2.5 GB; all-light turns come to about 1.7 GB.
+      memory: 3Gi
     limits:
+      # Headroom for isolate compilation and execution beside active turns.
       cpu: 2000m
+      # Room above the request for the rare outlier: a turn at the 4 MB history
+      # cap (133 MB without the arena cap; its isolate heap stops at 256 MB)
+      # or a sync growing toward its 512 MB isolate heap. Crossing it
+      # OOM-kills every run in the pod.
       memory: 4Gi
 
   env:
     POLL_INTERVAL_MS: "10000"
-    # Let independent agent turns and connector reads overlap: the poll loop
-    # defaults to ONE slot, so a long Automation holds up every other run on
-    # the fleet worker until it finishes. Two leaves headroom for the Node
-    # host beyond the two 512MB isolate heaps, even at the 2Gi request floor.
+    # Isolates compile and run on background threads, and glibc grows a malloc
+    # arena per contending thread (up to 8 per core), each holding freed memory
+    # it rarely returns. Two arenas cut peak memory per turn by 30-36% and kept
+    # idle memory after a burst near 800 MB instead of 1.6 GB, at the same CPU
+    # per turn.
+    MALLOC_ARENA_MAX: "2"
+    # Syncs and agent turns do not consume one another's concurrency slots.
+    # These counts are ceilings. Resource-aware admission pauses new claims
+    # under CPU or memory pressure and spaces starts to observe their cost.
+    # 32 light turns add ~0.8 GB, 32 heavy ones ~1.6 GB (see resources).
+    WORKER_MAX_CONCURRENT_AGENT_TURNS: "32"
+    # Connector work: syncs, actions, auth and embedding backfills. Compiled
+    # connectors have a 512 MB isolate heap cap; backfills run in the host.
+    # A backfill that arrives while both connector slots are busy borrows a
+    # free turn slot instead (the gateway cannot hold it back per budget).
     WORKER_MAX_CONCURRENT_JOBS: "2"
     # Label worker and embedding diagnostics as production.
     ENVIRONMENT: production

@@ -22,7 +22,7 @@ export function trimTrailingSlashes(value: string): string {
  */
 export interface ExecutorClient {
   readonly id: string;
-  poll(capacityAvailable?: number, options?: { waitSeconds?: number; signal?: AbortSignal }): Promise<PollResponse>;
+  poll(capacityAvailable?: number, options?: WorkerPollOptions): Promise<PollResponse>;
   /**
    * Beat, and read what the gateway says back. The response is the only channel
    * into a run this worker already holds: `continue: false` means stop.
@@ -139,12 +139,34 @@ import type {
   StreamBatch,
 } from "@lobu/core/contracts/worker/protocol";
 import { traceparentHeader } from "@lobu/core";
+import {
+  defaultBackendCapacity,
+  EXECUTION_BACKENDS,
+} from "@lobu/core/contracts/worker/protocol";
 import type { ConnectorOperationResult } from "@lobu/core/contracts/tools/manage-operations";
 import type { AgentKind } from "@lobu/core/contracts/worker/device-automation";
 import { resolveRunnableAgentKinds } from "./agent-binaries.js";
 
 /** Capability strings the worker advertises, keyed by name (e.g. `browser.debugger`). */
 export type WorkerCapabilities = Record<string, boolean>;
+
+/**
+ * Free slots per budget, for a worker that budgets agent turns apart from
+ * connector work. The poll body already says this without a new field:
+ * `agent_turn` is withdrawn while no turn slot is free, and the free connector
+ * slots are the compiled-connector backend capacity, which is what every fleet
+ * sync, action and auth claim requires.
+ */
+export interface PollLaneCapacity {
+  agentTurns: number;
+  connectorJobs: number;
+}
+
+export interface WorkerPollOptions {
+  waitSeconds?: number;
+  signal?: AbortSignal;
+  lanes?: PollLaneCapacity;
+}
 
 export interface WorkerAdvertisementSnapshot {
   capabilities: WorkerCapabilities;
@@ -382,13 +404,35 @@ export class WorkerClient implements ExecutorClient {
   }
 
   /**
+   * Report free connector slots as compiled-connector capacity, but only for a
+   * backend that is ready: a closed backend stays at zero. A worker that sends
+   * no map is read by the gateway as `defaultBackendCapacity()`, so start from
+   * that.
+   */
+  private laneBackendCapacity(connectorJobs: number): Record<string, number> {
+    const compiled = EXECUTION_BACKENDS.compiledConnector;
+    const base = Object.keys(this.backendCapacity).length > 0
+      ? this.backendCapacity
+      : defaultBackendCapacity();
+    return { ...base, [compiled]: (base[compiled] ?? 0) > 0 ? connectorJobs : 0 };
+  }
+
+  /**
    * Poll for available runs
    */
-  async poll(capacityAvailable?: number, options?: { waitSeconds?: number; signal?: AbortSignal }): Promise<PollResponse> {
+  async poll(capacityAvailable?: number, options?: WorkerPollOptions): Promise<PollResponse> {
     const advertisement = this.advertisementProvider?.snapshot();
-    const capabilities = advertisement
+    const advertised = advertisement
       ? { ...this.advertisedCapabilities(), ...advertisement.capabilities }
       : this.advertisedCapabilities();
+    const lanes = options?.lanes;
+    // Budgets only ever withdraw what was advertised; they never open a lane.
+    const capabilities = lanes && advertised.agent_turn === true && lanes.agentTurns === 0
+      ? { ...advertised, agent_turn: false }
+      : advertised;
+    const backendCapacity = lanes
+      ? this.laneBackendCapacity(lanes.connectorJobs)
+      : this.backendCapacity;
     const manifests = advertisement?.manifests ?? this.manifests;
     const body = {
       worker_id: this.workerId,
@@ -398,8 +442,8 @@ export class WorkerClient implements ExecutorClient {
       ...(capacityAvailable === undefined
         ? {}
         : { capacity_available: capacityAvailable }),
-      ...(Object.keys(this.backendCapacity).length > 0
-        ? { backend_capacity: this.backendCapacity }
+      ...(Object.keys(backendCapacity).length > 0
+        ? { backend_capacity: backendCapacity }
         : {}),
       // app_version belongs to the device registration fields, so omit both for
       // fleet workers rather than sending empty values. A device worker also
