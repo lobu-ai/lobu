@@ -13,7 +13,7 @@ import { resolveToolWorkspaceTarget } from '../sandbox/client-sdk';
 import { verifiedAutomationSource } from '../automations/automation-source';
 import { runWithActingAutomation } from '../utils/acting-automation-context';
 import type { Context } from 'hono';
-import { isToolError, retryWithBackoff, ToolError } from '@lobu/core';
+import { createSpan, isToolError, retryWithBackoff, runInSpanContext, SpanStatusCode, ToolError, type Span } from '@lobu/core';
 import {
   getAction,
   getRequiredAccessLevel,
@@ -332,6 +332,37 @@ export async function executeTool(
   authCtx: AuthContext,
   callerSignal?: AbortSignal
 ): Promise<unknown> {
+  // Use the registered name, never a caller-supplied unknown name or arguments.
+  const name = getTool(toolName)?.name ?? 'unregistered';
+  const span = createSpan(`tool ${name}`, {
+    'lobu.tool_name': name,
+    ...(authCtx.userId ? { 'user.id': authCtx.userId } : {}),
+    ...(authCtx.organizationId ? { 'lobu.org_id': authCtx.organizationId } : {}),
+  });
+  return runInSpanContext(span, async () => {
+    try {
+      const result = await executeToolInSpan(toolName, args, env, authCtx, callerSignal, span);
+      span?.setStatus({ code: isSoftErrorResult(result) ? SpanStatusCode.ERROR : SpanStatusCode.OK });
+      return result;
+    } catch (error) {
+      // Errors/arguments can contain credentials or source data. Status alone
+      // records failure; the existing correlated audit owns its diagnostic.
+      span?.setStatus({ code: SpanStatusCode.ERROR });
+      throw error;
+    } finally {
+      span?.end();
+    }
+  });
+}
+
+async function executeToolInSpan(
+  toolName: string,
+  args: Record<string, unknown>,
+  env: Env,
+  authCtx: AuthContext,
+  callerSignal: AbortSignal | undefined,
+  span: Span | null,
+): Promise<unknown> {
   const startTime = Date.now();
 
   // Per-invocation correlation id (lobu#2051 Item 2). Distinct from the
@@ -367,6 +398,8 @@ export async function executeTool(
       };
     }
     const requiredAccess = await checkToolAccess(toolName, args, authCtx);
+    // A requested target becomes trace identity only after access succeeds.
+    if (authCtx.organizationId) span?.setAttribute('lobu.org_id', authCtx.organizationId);
     toolContext = {
       ...toAccountToolContext(authCtx),
       workspaceActivity,

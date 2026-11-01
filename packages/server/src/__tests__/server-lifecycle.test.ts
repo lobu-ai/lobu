@@ -6,7 +6,7 @@
  * #948 + the #943 7-hygiene catch-up):
  *
  *   1. Middleware ordering on the Hono wrapper:
- *      peer-address stash → env-inject → request logger → structured-5xx-capture → onError
+ *      peer-address stash → env-inject → HTTP span → request logger → structured-5xx-capture → onError
  *   2. Route mounts: `/lobu` mounted only when lobuApp is non-null; `/` always.
  *   3. Shutdown drains in-flight requests before gateway/db teardown.
  *   4. `serializeBootError` walks nested cause chains and never returns `{}`.
@@ -17,7 +17,14 @@
 
 import http from "node:http";
 import net from "node:net";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
+import { createSpan, currentTraceLogFields, initTracing, runInSpanContext, shutdownTracing, SpanKind, SpanStatusCode } from "@lobu/core";
+import { InMemorySpanExporter, SimpleSpanProcessor } from "@opentelemetry/sdk-trace-node";
+
+// This suite replaces the wrapper's collaborators. Other integration suites
+// import the real wrapper, so its cached module must not cross this boundary.
+vi.hoisted(() => vi.resetModules());
+afterAll(() => vi.resetModules());
 
 // --- heavy collaborators of createServerLifecycle, replaced so the spine
 // --- boots in-process against a real ephemeral HTTP server.
@@ -190,6 +197,114 @@ describe("reportBootFailure", () => {
 });
 
 describe("buildWrapperApp", () => {
+	it("isolates concurrent HTTP traces, parents async work, and exports only normalized request attributes", async () => {
+		const { buildWrapperApp } = await import("../server-lifecycle");
+		const { Hono } = await import("hono");
+		const exporter = new InMemorySpanExporter();
+		await shutdownTracing();
+		initTracing({ serviceName: "wrapper-tracing-test", spanProcessors: [new SimpleSpanProcessor(exporter)] });
+		try {
+			const app = new Hono();
+			app.get("/records/:id", async (c) => {
+				const id = c.req.param("id");
+				c.set("user", { id, email: "private@example.test", name: "Private", emailVerified: true });
+				c.set("organizationId", `org-${id}`);
+				await new Promise((resolve) => setTimeout(resolve, 2));
+				const child = createSpan("async child");
+				child?.end();
+				return c.json(currentTraceLogFields());
+			});
+			const wrapper = buildWrapperApp({} as never, app, app as never);
+			const ambient = createSpan("unrelated ambient work");
+			const [first, second] = await runInSpanContext(ambient, () => Promise.all([
+				wrapper.request("/lobu/records/synthetic-one?token=private-query", { headers: {
+					traceparent: "00-11111111111111111111111111111111-2222222222222222-01",
+					"cf-ray": "a53b9d57c926253b-LHR", authorization: "Bearer private-token",
+				} }),
+				wrapper.request("/records/synthetic-two?email=private@example.test", { headers: {
+					traceparent: "invalid-private-header", "cf-ray": "private@example.test",
+				} }),
+			]));
+			ambient?.end();
+			expect(first.status).toBe(200);
+			expect(second.status).toBe(200);
+			const spans = exporter.getFinishedSpans();
+			const requests = spans.filter((span) => span.kind === SpanKind.SERVER);
+			expect(requests).toHaveLength(2);
+			for (const [id, response, route] of [["synthetic-one", first, "/lobu/records/:id"], ["synthetic-two", second, "/records/:id"]] as const) {
+				const request = requests.find((span) => span.attributes["user.id"] === id)!;
+				expect(request.attributes).toMatchObject({ "http.request.method": "GET", "http.route": route, "http.response.status_code": 200, "lobu.org_id": `org-${id}` });
+				expect((await response.json()).trace_id).toBe(request.spanContext().traceId);
+				expect(request.spanContext().traceId).not.toBe(ambient?.spanContext().traceId);
+				expect(spans.filter((span) => span.name === "async child" && span.parentSpanContext?.spanId === request.spanContext().spanId)).toHaveLength(1);
+				if (id === "synthetic-one") {
+					expect(request.spanContext().traceId).toBe("11111111111111111111111111111111");
+					expect(request.parentSpanContext?.spanId).toBe("2222222222222222");
+					expect(request.attributes.cf_ray).toBe("a53b9d57c926253b");
+				} else {
+					expect(request.parentSpanContext).toBeUndefined();
+					expect(request.attributes.cf_ray).toBeUndefined();
+				}
+			}
+			expect(JSON.stringify(requests.map((span) => ({ attributes: span.attributes, events: span.events, status: span.status })))).not.toMatch(/private-query|private-token|private@example|invalid-private-header/);
+		} finally {
+			await shutdownTracing();
+		}
+	});
+
+	it("ends HTTP error spans for returned and thrown failures without exporting error text", async () => {
+		const { buildWrapperApp } = await import("../server-lifecycle");
+		const { Hono } = await import("hono");
+		const exporter = new InMemorySpanExporter();
+		await shutdownTracing();
+		initTracing({ serviceName: "wrapper-failure-test", spanProcessors: [new SimpleSpanProcessor(exporter)] });
+		try {
+			const app = new Hono();
+			app.get("/returned", (c) => c.json({ error: "private-returned-error" }, 500));
+			app.get("/thrown", () => { throw new Error("private-thrown-error"); });
+			const wrapper = buildWrapperApp({} as never, app);
+			for (const path of ["returned", "thrown"]) expect((await wrapper.request(`/lobu/${path}`)).status).toBe(500);
+			expect((await wrapper.request("/private-unmatched-path?token=private-query")).status).toBe(404);
+			expect((await wrapper.request("/unknown", { method: "PRIVATE_METHOD" })).status).toBe(404);
+			const requests = exporter.getFinishedSpans().filter((span) => span.kind === SpanKind.SERVER);
+			expect(requests).toHaveLength(4);
+			expect(requests.filter((span) => span.attributes["http.response.status_code"] === 500).map((span) => span.status.code)).toEqual([SpanStatusCode.ERROR, SpanStatusCode.ERROR]);
+			expect(requests.find((span) => span.attributes["http.response.status_code"] === 404)?.attributes["http.route"]).toBe("unmatched");
+			expect(requests.at(-1)?.attributes["http.request.method"]).toBe("_OTHER");
+			expect(JSON.stringify(requests.map((span) => ({ name: span.name, attributes: span.attributes, events: span.events, status: span.status })))).not.toMatch(/private-returned|private-thrown|private-unmatched|private-query|PRIVATE_METHOD/);
+		} finally {
+			await shutdownTracing();
+		}
+	});
+
+	it("attributes verified settings callers without treating worker agent ids as users", async () => {
+		const { buildWrapperApp } = await import("../server-lifecycle");
+		const { Hono } = await import("hono");
+		const exporter = new InMemorySpanExporter();
+		await shutdownTracing();
+		initTracing({ serviceName: "wrapper-principal-test", spanProcessors: [new SimpleSpanProcessor(exporter)] });
+		try {
+			const app = new Hono();
+			app.get("/worker", (c) => {
+				c.set("authContext", { via: "worker_token", userId: "synthetic-agent", organizationId: "synthetic-worker-org" });
+				return c.text("ok");
+			});
+			app.get("/settings", (c) => {
+				c.set("authContext", { via: "settings_session", userId: "synthetic-user", organizationId: "synthetic-settings-org" });
+				return c.text("ok");
+			});
+			const wrapper = buildWrapperApp({} as never, app);
+			await wrapper.request("/lobu/worker");
+			await wrapper.request("/lobu/settings");
+			const requests = exporter.getFinishedSpans();
+			expect(requests.map((span) => span.attributes["user.id"])).toEqual([undefined, "synthetic-user"]);
+			expect(requests.map((span) => span.attributes["lobu.org_id"])).toEqual(["synthetic-worker-org", "synthetic-settings-org"]);
+		} finally {
+			await shutdownTracing();
+		}
+		expect((await buildWrapperApp({} as never, null).request("/health")).status).toBe(200);
+	});
+
 	it("mounts mainApp at / and lobuApp at /lobu when present", async () => {
 		const { buildWrapperApp } = await import("../server-lifecycle");
 		const { Hono } = await import("hono");
