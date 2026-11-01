@@ -410,6 +410,23 @@ describe('search_memory > recall contract', () => {
     expect(err).toContain('min_similarity');
   });
 
+  // Source setup (`feeds.create`) is admin-tier in the entity's own workspace;
+  // an entity hit must not hand those steps to anyone who would be denied.
+  it.each([
+    ['an admin of the entity workspace', {}, 'own', true],
+    ['an anonymous visitor', { userId: null, memberRole: null, tokenType: 'anonymous', isAuthenticated: false }, 'own', false],
+    ['a read-only owner token', { scopes: ['mcp:read'] }, 'own', false],
+    ['a member', { memberRole: 'member', scopes: ['mcp:write'] }, 'own', false],
+    ['an admin elsewhere reading a public workspace', {}, 'public', false],
+  ] as const)('offers source setup on an entity hit only to %s', async (label, overrides, home, offered) => {
+    const owner =
+      home === 'own' ? org : await createTestOrganization({ name: 'Public reference library', visibility: 'public' });
+    const entity = await createTestEntity({ name: `Setup Boundary ${label}`, organization_id: owner.id });
+    const result = await search({ entity_id: entity.id, include_content: false }, env, { ...ctx, ...overrides } as ToolContext);
+    expect(result.entity?.id).toBe(entity.id);
+    expect(result.suggestion?.includes('feeds.create')).toBe(offered);
+  });
+
   // ── Actionable read guidance on empty results ───────────────────────────
   it('provides actionable read steps in suggestion when search finds no results', async () => {
     const result = await search(
