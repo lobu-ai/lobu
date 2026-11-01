@@ -3,6 +3,7 @@ import { serve } from '@hono/node-server';
 import type { Server } from 'node:http';
 import { WorkerClient } from '../../../../connector-worker/src/daemon/client';
 import { WorkerPollLoop } from '../../../../connector-worker/src/daemon/poll-loop';
+import { ResourceAdmission } from '../../../../connector-worker/src/daemon/resource-admission';
 import { app } from '../../index';
 import { requestFeedSync } from '../../runs/feed-notifications';
 import { cleanupTestDatabase, getTestDb } from '../setup/test-db';
@@ -187,6 +188,50 @@ describe('worker dispatch latency', () => {
       expect(started).toEqual([sync, turn, waitingSync, queuedTurn]);
     } finally {
       for (const done of finish.values()) done();
+    }
+  });
+
+  it('leaves work pending under resource pressure and recovers while the first turn stays resident', async () => {
+    process.env.WORKER_HOLD_RECHECK_MS = '100';
+    const sql = getTestDb();
+    const org = await createTestOrganization();
+    const enqueue = async (conversation: string) => Number((await sql`
+      INSERT INTO runs (organization_id, run_type, action_input, approval_status, status, run_at)
+      VALUES (${org.id}, 'agent_turn', ${sql.json({
+        turn: { agent_id: 'synthetic-agent', conversation_id: conversation },
+        credential: 'synthetic-credential',
+      })}, 'auto', 'pending', now()) RETURNING id
+    `)[0].id);
+    const first = await enqueue('synthetic-resident-turn');
+    const second = await enqueue('synthetic-queued-turn');
+    let usedBytes = 100;
+    const admission = new ResourceAdmission(() => ({
+      memory: [{ usedBytes, limitBytes: 1000 }], cpu: [],
+    }));
+    const started: number[] = [];
+    const finish: Array<() => void> = [];
+    const client = new WorkerClient({
+      apiUrl: await serveWorkerApi(), workerId: 'synthetic-resource-worker', authToken: token,
+      capabilities: { agent_turn: true }, backendCapacity: { compiled_connector: 0 },
+    });
+    loop = new WorkerPollLoop({
+      client, resourceAdmission: admission, maxConcurrentJobs: 1, maxConcurrentAgentTurns: 8,
+      execute: job => new Promise<void>(resolve => {
+        started.push(Number(job.run_id)); finish.push(resolve); usedBytes = 900;
+      }),
+    });
+    running = loop.start();
+    try {
+      await vi.waitFor(() => expect(started).toEqual([first]), { timeout: 3000 });
+      await new Promise(resolve => setTimeout(resolve, 1200));
+      expect(started).toEqual([first]);
+      expect((await sql`SELECT status, claimed_by FROM runs WHERE id = ${second}`)[0]).toMatchObject({ status: 'pending', claimed_by: null });
+      usedBytes = 100;
+      await vi.waitFor(() => expect(started).toEqual([first, second]), { timeout: 1500 });
+      expect((await sql`SELECT claimed_by FROM runs WHERE id = ${second}`)[0].claimed_by).toBe('synthetic-resource-worker');
+    } finally {
+      loop.stop(); for (const done of finish) done();
+      await loop.waitForActiveJobs(1000, 1);
     }
   });
 });

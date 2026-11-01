@@ -16,6 +16,7 @@ import {
   type WorkerClient,
 } from './client.js';
 import { log } from './log.js';
+import { type ResourceAdmission, RESOURCE_ADMISSION_INTERVAL_MS } from './resource-admission.js';
 
 export interface WorkerPollLoopOptions {
   client: WorkerClient;
@@ -29,11 +30,12 @@ export interface WorkerPollLoopOptions {
   maxConcurrentJobs?: number;
   /**
    * Give agent turns their own budget. `maxConcurrentJobs` then budgets only
-   * connector work (syncs, actions, auth, embedding backfills), so neither
-   * kind can starve the other. Unset keeps the single shared budget that
-   * device daemons and the embedded worker use.
+   * connector work (syncs, actions, auth, embedding backfills). Unset keeps
+   * the single shared budget that device daemons and the embedded worker use.
    */
   maxConcurrentAgentTurns?: number;
+  /** Fleet-local resource gate; omitted for device and embedded workers. */
+  resourceAdmission?: ResourceAdmission;
   execute: (job: PollResponse) => Promise<unknown>;
   beforeIdlePoll?: () => Promise<void>;
   /** Persisted device credentials treat poll-time revocation as terminal. */
@@ -89,6 +91,7 @@ export class WorkerPollLoop {
   private readonly maxIdleDelayMs?: number;
   private readonly maxConcurrentJobs: number;
   private readonly maxConcurrentAgentTurns?: number;
+  private readonly resourceAdmission?: ResourceAdmission;
   private readonly execute: (job: PollResponse) => Promise<unknown>;
   private readonly beforeIdlePoll?: () => Promise<void>;
   private readonly failClosedOnPollAuthError: boolean;
@@ -101,6 +104,7 @@ export class WorkerPollLoop {
   private capacityVersion = 0;
   private wakePoll?: (capacityReleased?: boolean) => void;
   private pendingPoll?: AbortController;
+  private lastPollAt = -Infinity;
 
   constructor(options: WorkerPollLoopOptions) {
     this.client = options.client;
@@ -113,6 +117,7 @@ export class WorkerPollLoop {
       ? undefined
       : Math.max(1, options.maxConcurrentAgentTurns);
     this.execute = options.execute;
+    this.resourceAdmission = options.resourceAdmission;
     this.beforeIdlePoll = options.beforeIdlePoll;
     this.failClosedOnPollAuthError = options.failClosedOnPollAuthError === true;
     this.onActiveJobsChange = options.onActiveJobsChange;
@@ -219,12 +224,23 @@ export class WorkerPollLoop {
 
   private async pollAndExecute(): Promise<number | undefined> {
     if (!this.admittingJobs) return undefined;
-    const lanes = this.laneCapacity();
-    const capacityAvailable = this.freeSlots(lanes);
+    const budgetLanes = this.laneCapacity();
+    const resourceCapacity = this.resourceAdmission?.capacity();
+    // Recheck local pressure frequently without turning that cadence into
+    // gateway heartbeats. A recovered worker can claim immediately; a paused
+    // one still reports liveness at the normal polling interval.
+    if (resourceCapacity === 0 && performance.now() - this.lastPollAt < this.pollIntervalMs) {
+      return RESOURCE_ADMISSION_INTERVAL_MS;
+    }
+    const lanes = resourceCapacity === 0 && budgetLanes
+      ? { agentTurns: 0, connectorJobs: 0 }
+      : budgetLanes;
+    const capacityAvailable = Math.min(this.freeSlots(lanes), resourceCapacity ?? Infinity);
     const controller = new AbortController();
     this.pendingPoll = controller;
     let job: PollResponse;
     try {
+      this.lastPollAt = performance.now();
       job = await this.client.poll(capacityAvailable, {
         // A worker with no free slot must not hold the request: it cannot take
         // the run the hold would return. Nor may one whose turn budget is full:
@@ -249,7 +265,10 @@ export class WorkerPollLoop {
       if (!this.admittingJobs) return undefined;
       const nextPoll = job.next_poll_seconds ?? 30;
       log.debug(`[daemon] No runs available, next poll in ${nextPoll}s`);
-      return Number.isFinite(nextPoll) && nextPoll >= 0 ? nextPoll * 1000 : 1000;
+      const delay = Number.isFinite(nextPoll) && nextPoll >= 0 ? nextPoll * 1000 : 1000;
+      // Resource pressure can recover while every turn is still waiting on a
+      // provider. Recheck locally instead of sleeping through the server hint.
+      return resourceCapacity === 0 ? Math.min(delay, RESOURCE_ADMISSION_INTERVAL_MS) : delay;
     }
 
     // A zero-capacity response should be impossible: the server must not enter
@@ -274,6 +293,9 @@ export class WorkerPollLoop {
         : lanes.connectorJobs === 0
     );
     this.activeJobs++;
+    // Honour an admitted held claim even if pressure rose during the HTTP
+    // request: the server may already own its lease. Only future claims pause.
+    this.resourceAdmission?.started();
     if (chargedToTurns) this.activeAgentTurns++;
     this.onActiveJobsChange?.(this.activeJobs);
     Promise.resolve()
@@ -290,7 +312,9 @@ export class WorkerPollLoop {
       });
     // Fill remaining slots while the queue has work, then wait for capacity
     // or the normal heartbeat instead of delaying every successful claim.
-    return this.freeSlots(this.laneCapacity()) > 0 ? 0 : undefined;
+    return this.resourceAdmission
+      ? RESOURCE_ADMISSION_INTERVAL_MS
+      : this.freeSlots(this.laneCapacity()) > 0 ? 0 : undefined;
   }
 
   private waitForNextPoll(ms: number, capacityVersion: number | undefined): Promise<void> {

@@ -13,6 +13,7 @@ import {
   attachInteractiveSession,
 } from './interactive-session.js';
 import { installWorkerPollLoopSignals, WorkerPollLoop } from './poll-loop.js';
+import { ResourceAdmission } from './resource-admission.js';
 
 export interface DaemonConfig {
   apiUrl: string;
@@ -90,6 +91,8 @@ export class WorkerDaemon {
       pollIntervalMs: daemonConfig.pollIntervalMs,
       maxConcurrentJobs: daemonConfig.maxConcurrentJobs,
       maxConcurrentAgentTurns: daemonConfig.maxConcurrentAgentTurns,
+      resourceAdmission: !daemonConfig.platform && daemonConfig.maxConcurrentAgentTurns !== undefined
+        ? new ResourceAdmission() : undefined,
       execute: (job) => executeRun(this.client, job, this.env, this.config.executor),
       ...(credentialMaintenance
         ? {

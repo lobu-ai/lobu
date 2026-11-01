@@ -124,8 +124,7 @@ function resolveDaemonMaxConcurrentJobs(
 const DEFAULT_FLEET_MAX_CONCURRENT_AGENT_TURNS = 4;
 
 /**
- * A fleet worker budgets agent turns apart from connector work, so a long sync
- * cannot hold up a chat reply and a burst of turns cannot hold up syncs.
+ * A fleet worker budgets agent turns apart from connector work.
  * Devices never run agent turns and keep their one shared budget.
  */
 function resolveDaemonMaxConcurrentAgentTurns(

@@ -24,8 +24,19 @@ native connector work, and local agent runs. Set `--max-concurrent-jobs <n>`
 takes precedence. Fleet workers without a platform keep two budgets: agent
 turns (`WORKER_MAX_CONCURRENT_AGENT_TURNS`, default 4) and connector work
 (`WORKER_MAX_CONCURRENT_JOBS`, default 1: syncs, actions, auth and embedding
-backfills), so a long sync never holds up a chat reply. An embedding backfill
+backfills), so a sync does not consume a turn slot. An embedding backfill
 can arrive while only turn slots are free and then borrows one.
+Standalone fleet workers also gate claims on local resources. The two counts
+are ceilings: starts are spaced by 500 ms, and new claims pause above 80% CPU
+or when memory working set plus a reserve would exceed 80% of the memory
+limit. The reserve is the smaller of 512 MiB and 20% of the limit. Recovery
+uses lower thresholds (60% CPU, 70% memory including the reserve) to avoid
+oscillation. Linux cgroup v1/v2 counters include tool child processes and
+honor visible ancestor limits; inactive file cache is excluded from memory
+working set. Without container limits the host memory and process CPU are
+used. Unreadable bounded usage pauses admission. Existing claims finish,
+and resources are rechecked locally without increasing heartbeat traffic.
+Embedded workers and device daemons retain their existing fixed budgets.
 This is a per-device limit, not a setting for each connection, and does not
 change device pinning. A busy device still polls with
 zero available capacity; being online is not a promise that a slot is free.

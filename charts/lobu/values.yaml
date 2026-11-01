@@ -200,17 +200,14 @@ worker:
   # idle worker settles near 800 MB after a burst.
   resources:
     requests:
-      # A burst is CPU-bound: each queued turn costs ~0.18 CPU-s to start
-      # (110 ms of it compiling the 5 MB guest bundle), so 32 at once is
-      # ~5.8 CPU-s. One guaranteed core starts the last of them ~6 s late;
-      # once running, turns mostly wait on the model provider.
+      # Starts are paced by resource admission; once running, turns mostly
+      # wait on the model provider.
       cpu: 1000m
       # 800 MB idle + 32 turns at 50 MB (every slot heavy) + 2 syncs is about
       # 2.5 GB; all-light turns come to about 1.7 GB.
       memory: 3Gi
     limits:
-      # Isolates compile and run off the main thread, so a second core should
-      # roughly halve the burst start (~3 s). Measured on one core only.
+      # Headroom for isolate compilation and execution beside active turns.
       cpu: 2000m
       # Room above the request for the rare outlier: a turn at the 4 MB history
       # cap (133 MB without the arena cap; its isolate heap stops at 256 MB)
@@ -226,13 +223,13 @@ worker:
     # idle memory after a burst near 800 MB instead of 1.6 GB, at the same CPU
     # per turn.
     MALLOC_ARENA_MAX: "2"
-    # Agent turns and connector work have separate budgets, so a long sync
-    # cannot hold up a chat reply and a burst of replies cannot hold up syncs.
-    # A turn mostly waits on the provider; memory is what bounds the count
-    # (see resources). 32 light turns add ~0.8 GB, 32 heavy ones ~1.6 GB.
+    # Syncs and agent turns do not consume one another's concurrency slots.
+    # These counts are ceilings. Resource-aware admission pauses new claims
+    # under CPU or memory pressure and spaces starts to observe their cost.
+    # 32 light turns add ~0.8 GB, 32 heavy ones ~1.6 GB (see resources).
     WORKER_MAX_CONCURRENT_AGENT_TURNS: "32"
-    # Connector work: syncs, actions, auth and embedding backfills. Each runs
-    # in an isolate with a 512 MB heap cap, so two leave room beside the turns.
+    # Connector work: syncs, actions, auth and embedding backfills. Compiled
+    # connectors have a 512 MB isolate heap cap; backfills run in the host.
     # A backfill that arrives while both connector slots are busy borrows a
     # free turn slot instead (the gateway cannot hold it back per budget).
     WORKER_MAX_CONCURRENT_JOBS: "2"
