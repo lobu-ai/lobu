@@ -89,7 +89,7 @@ import {
   runScopedBrowserActionContext,
   trustedChromeActionInput,
 } from './browser-action-context';
-import { runLeaseFence } from '../runs/run-lease';
+import { GATEWAY_INLINE_OWNER_PREFIX, runLeaseFence } from '../runs/run-lease';
 import { isShuttingDown } from '../lifecycle-state';
 import { waitForWorkerWork } from '../runs/worker-wakeup';
 import { insertAgentTurnResponse, agentTurnClaimEligible, agentTurnLockKey, lockAgentTurnRun, nativeSessionBase, releaseNextAgentTurn } from '../runs/agent-turn-inputs';
@@ -100,6 +100,24 @@ import { insertAgentTurnResponse, agentTurnClaimEligible, agentTurnLockKey, lock
 const DISPATCH_FAILURE_OUTCOME: RunOutcome = 'infra_error';
 
 const DUE_FEEDS_LOCK_KEY = 71001;
+
+// Fleet claim virtual time. Each run competes at `created_at` minus its head
+// start plus its organization's load penalty, so newer interactive work goes
+// ahead of older scheduled work and busy organizations drift back, each by a
+// bounded amount: no run waits unboundedly behind work queued after it.
+//
+// A chat turn or a fleet operation has a caller blocked on the result, and a
+// turn still unclaimed after the reaper's 120s start window fails the user's
+// reply; 5 minutes covers that window with margin while a sync, which only
+// delays a refresh, waits at most 5 minutes behind newer interactive work.
+const INTERACTIVE_CLAIM_HEAD_START_SECONDS = 5 * 60;
+// Embedding backfill is background catch-up: it yields to work queued up to
+// 10 minutes after it, then takes its turn instead of starving behind syncs.
+const BACKGROUND_CLAIM_SETBACK_SECONDS = 10 * 60;
+// Each fleet slot an organization already holds moves its queued work a
+// minute later: a turn from an organization with one run in flight keeps 240s
+// of its head start, one with five loses all of it.
+const FLEET_LOAD_PENALTY_SECONDS = 60;
 
 /**
  * Fail a run that this worker already claimed. Approval-gated actions also
@@ -804,12 +822,50 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
 
   const claimNextPendingRun = async () =>
     sql.begin(async (tx) => {
+      // Fleet slots are shared by every organization. Among already-eligible
+      // rows the fleet takes auth first (it unblocks a connection), then the
+      // earliest virtual time: enqueue time shifted by run type and by the
+      // organization's fleet load (see the constants above). One bounded key
+      // instead of load-then-age tiers, so a busy organization's chat turn
+      // still beats other organizations' recent syncs. A device serves only
+      // its own scope and keeps the plain age order.
+      //
+      // The load counts in-flight rows in the fleet lanes (whether or not this
+      // worker advertises each one) that actually hold a fleet slot: not ones
+      // a device executes, and not ones the gateway runs inline. It keys on
+      // the executor, not the target: a browser-affinity sync targets a device
+      // but runs on the fleet. Only claimed/running rows are read (through the
+      // status index), never history.
+      const fleetOrgLoad = isUserScopedWorker ? tx`` : tx`
+        LEFT JOIN (
+          SELECT active.organization_id, count(*) AS active_runs
+          FROM runs active
+          WHERE active.status IN ('claimed', 'running')
+            AND active.run_type IN ('auth', 'action', 'sync', 'agent_turn', 'embed_backfill')
+            AND active.executed_by_device_worker_id IS NULL
+            AND NOT starts_with(COALESCE(active.claimed_by, ''), ${GATEWAY_INLINE_OWNER_PREFIX})
+          GROUP BY active.organization_id
+        ) org_load ON org_load.organization_id = r.organization_id`;
+      const claimOrder = isUserScopedWorker
+        ? tx`CASE WHEN r.run_type = 'auth' THEN 0 ELSE 1 END, r.created_at ASC`
+        : tx`
+          CASE WHEN r.run_type = 'auth' THEN 0 ELSE 1 END,
+          r.created_at - CASE
+            WHEN r.run_type IN ('agent_turn', 'action')
+              THEN ${INTERACTIVE_CLAIM_HEAD_START_SECONDS}::int * interval '1 second'
+            WHEN r.run_type = 'embed_backfill'
+              THEN ${-BACKGROUND_CLAIM_SETBACK_SECONDS}::int * interval '1 second'
+            ELSE interval '0'
+          END
+            + COALESCE(org_load.active_runs, 0) * ${FLEET_LOAD_PENALTY_SECONDS}::int * interval '1 second',
+          r.id ASC`;
       const candidates = await tx`
       WITH next_run AS (
         SELECT r.id, r.run_type, r.automation_id, r.organization_id,
           r.action_input->'turn'->>'agent_id' AS turn_agent_id,
           r.action_input->'turn'->>'conversation_id' AS turn_conversation_id
         FROM runs r
+        ${fleetOrgLoad}
         LEFT JOIN connections con ON con.id = r.connection_id
         LEFT JOIN auth_profiles http_ap
           ON http_ap.id = con.auth_profile_id AND http_ap.organization_id = r.organization_id
@@ -967,9 +1023,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
               )
             )
           )
-        ORDER BY
-          CASE WHEN r.run_type = 'auth' THEN 0 ELSE 1 END,
-          r.created_at ASC
+        ORDER BY ${claimOrder}
         FOR UPDATE OF r SKIP LOCKED
         LIMIT 1
       )
