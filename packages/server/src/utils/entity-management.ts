@@ -380,6 +380,7 @@ export interface CreatedEntity {
   identity?: EntityIdentity;
   /** Internal ownership projection used to avoid cross-org audit anchors. */
   organization_id?: string;
+  entity_type_id?: number;
   entity_type: string;
   name: string;
   slug: string;
@@ -1702,7 +1703,7 @@ export async function getEntity(
   const childReadPredicate = entityReadPolicySql(restrictions, 'c', params);
   const result = await sql.unsafe<CreatedEntity>(`
     SELECT
-      e.id, e.organization_id, et.slug AS entity_type, e.name, e.slug, pe.id AS parent_id, e.metadata, e.created_at,
+      e.id, e.organization_id, e.entity_type_id::int AS entity_type_id, et.slug AS entity_type, e.name, e.slug, pe.id AS parent_id, e.metadata, e.created_at,
       pe.name as parent_name, pe.slug as parent_slug, pet.slug as parent_entity_type,
       (
         SELECT COUNT(*) FROM current_event_records ev

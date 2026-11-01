@@ -13,6 +13,7 @@ import { findUngrantedMemberWorkspace, formatUngrantedMemberMessage, resolveGran
 import { getDb } from '../db/client';
 import type { Env } from '../index';
 import { feedLinkedToBusinessEntitySql } from '../authz/channel-about';
+import { publicBrowseContext } from '../authz/public-browse-context';
 import { entityLinkMatchSql } from '../utils/content-search';
 import { internalOpsExclusionSql, operationalTrailExclusionSql } from '../utils/content-search/sql-fragments';
 import { ToolUserError, toolErrorHttpStatus } from '../utils/errors';
@@ -405,14 +406,7 @@ async function _resolvePath(
       // Cross-workspace public browse is intentionally readable, but never
       // inherits the caller's role or grant capabilities from the URL-bound
       // workspace.
-      resolvedCtx = {
-        ...ctx,
-        organizationId: workspace.id,
-        memberRole: null,
-        allowCrossOrg: false,
-        grantedOrganizationIds: ctx.tokenType === 'oauth' ? [] : null,
-        directSearchFederation: false,
-      };
+      resolvedCtx = publicBrowseContext(ctx, workspace.id);
     }
   }
 
