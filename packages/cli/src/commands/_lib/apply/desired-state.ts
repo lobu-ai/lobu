@@ -1,3 +1,4 @@
+import type { ManageAutomationsArgs } from "@lobu/core/contracts/tools/manage-automations";
 import { existsSync, readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -158,8 +159,8 @@ export interface DesiredAutomation {
   minCooldownSeconds?: number;
   /** Free-form tags for filtering. */
   tags?: string[];
-  /** Optional agent-kind override (e.g. "background", "notifier"). */
-  agentKind?: string;
+  /** Optional agent runtime override. */
+  agentKind?: NonNullable<ManageAutomationsArgs["agent_kind"]>;
   /** Named durable outputs; explicit null clears existing declarations. */
   outputs?: Record<string, unknown> | null;
 }

@@ -210,6 +210,62 @@ async function runApply(
 }
 
 describe("apply wire payloads: undeclared fields are never sent", () => {
+  test("authored connector updates carry the catalog version through the shared source-update action", async () => {
+    const dir =
+      mkProject(`import { defineConfig, connectorFromFile } from "@lobu/cli/config";
+export default defineConfig({ agents: [], connectors: [connectorFromFile("./fixture.connector.ts")] });`);
+    writeFileSync(
+      join(dir, "fixture.connector.ts"),
+      `export default class Fixture {
+      definition = { key: "zz.applyfixture", name: "Fixture", version: "2.0.0" };
+      async execute() { return { success: true }; }
+    }`
+    );
+    const { fetchStub, calls } = makeFetch();
+    let version = "1.0.0";
+    const connectorCalls: Record<string, unknown>[] = [];
+    const fetchConnector = (async (url, init) => {
+      const body = typeof init?.body === "string" ? JSON.parse(init.body) : {};
+      if (String(url).includes("/manage_catalog"))
+        return Response.json({
+          installed: {
+            connectors: {
+              items: [
+                {
+                  id: "zz.applyfixture",
+                  name: "Fixture",
+                  detail: { installed: true, version },
+                },
+              ],
+            },
+          },
+        });
+      if (
+        String(url).includes("/manage_connections") &&
+        body.action === "update_connector_source"
+      ) {
+        connectorCalls.push(body);
+        version = "2.0.0";
+        return Response.json({
+          success: true,
+          connector_key: "zz.applyfixture",
+          version,
+        });
+      }
+      return fetchStub(url, init);
+    }) as typeof fetch;
+    await runApply(dir, fetchConnector);
+    expect(connectorCalls).toHaveLength(1);
+    expect(connectorCalls[0]).toMatchObject({
+      connector_key: "zz.applyfixture",
+      expected_version: "1.0.0",
+      source_code: expect.stringContaining('version: "2.0.0"'),
+    });
+    expect(calls.some((call) => call.body.action === "install_connector")).toBe(
+      false
+    );
+  });
+
   test("a persona edit leaves undeclared skills and model fallbacks unmanaged", async () => {
     const dir = mkProject(configWithFeed(`{ feed: "threads" }`));
     writeFileSync(join(dir, "agents", "triage", "SOUL.md"), "Updated persona");

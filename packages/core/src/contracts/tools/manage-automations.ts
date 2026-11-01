@@ -1293,11 +1293,13 @@ export type ManageAutomationsResult = Static<
  * human approver). Without this, a group reassigned between queue and approve
  * would let A's pending mutation land on B-owned automation.
  *
- * Automation definition writes have no per-field pre-image (unlike manage_agents
- * update `base`); a straight re-run is the launch path — a stale approval may
- * clobber a newer edit (ownership re-check still rejects foreign owners).
+ * Existing-target writes also pin configuration revisions; runtime execution
+ * bookkeeping does not invalidate them. These are internal approval metadata,
+ * never caller-supplied mutation fields.
  */
 export interface ManageAutomationsProposal {
+  /** Target configuration revisions; absent only on legacy proposals and creates. */
+  base?: Record<string, string>;
   args: ManageAutomationsArgs;
   /** Resolved `actor.ownerAgentId ?? actor.id` at queue time; null for humans. */
   actingAgentId: string | null;
