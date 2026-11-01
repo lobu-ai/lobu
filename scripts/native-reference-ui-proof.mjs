@@ -185,7 +185,9 @@ export async function runNativeReferenceProof({
       ]),
       node("tabs-content", { value: "proposal" }, [
         node("card", {}, [
-          node("badge", { variant: "outline" }, [text("Snapshot / proposal")]),
+          node("badge", { variant: "outline" }, [
+            node("span", {}, [text("Snapshot / proposal")]),
+          ]),
           node("p", {}, [text("Proposed weekly review")]),
           node("p", {}, [
             text("A static proposal, not a registered Automation or action."),
