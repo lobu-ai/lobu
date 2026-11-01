@@ -1,5 +1,16 @@
 import { type Static, Type } from "@sinclair/typebox";
+import {
+  AgentSettingsStoredSchema,
+  type AgentSettingsStored,
+} from "../agent-settings";
 import type { ActionInput } from "./action-input";
+
+// Identity keeps its existing identity_md write spelling. updatedAt is store-owned.
+const AgentSettingsUpdateSchema = Type.Omit(
+  AgentSettingsStoredSchema,
+  ["identityMd", "updatedAt"],
+  { additionalProperties: false }
+);
 
 // ============================================
 // Typebox Schema (union of per-action variants)
@@ -34,7 +45,7 @@ const AgentFields = {
   }),
   default_model: Type.String({
     description:
-      '[create/update] Default model as an explicit "<provider>/<model>" ref (e.g. "anthropic/claude-sonnet-5"). Validated against the org\'s connected providers. Without it the agent inherits the org default model; if the org has none the agent is not runnable. Pass an empty string to clear it and fall back to the org default.',
+      '[create/update] Default model (updates preserve the existing fallback entries) as an explicit "<provider>/<model>" ref (e.g. "anthropic/claude-sonnet-5"). Validated against the org\'s connected providers. Without it the agent inherits the org default model; if the org has none the agent is not runnable. Pass an empty string to clear it and fall back to the org default.',
     "x-lobu-field": { store: "model", emptyClears: true },
   }),
 };
@@ -68,6 +79,7 @@ export const UpdateAgentAction = Type.Object({
   description: Type.Optional(AgentFields.description),
   identity_md: Type.Optional(AgentFields.identity_md),
   default_model: Type.Optional(AgentFields.default_model),
+  settings: Type.Optional(AgentSettingsUpdateSchema),
 });
 
 export const DeleteAgentAction = Type.Object({
@@ -131,7 +143,12 @@ export interface AgentModelInfo {
 
 export type ManageAgentsResult =
   | { action: "list"; agents: AgentRecord[] }
-  | { action: "get"; agent: AgentRecord; model: AgentModelInfo }
+  | {
+      action: "get";
+      agent: AgentRecord;
+      model: AgentModelInfo;
+      settings: AgentSettingsStored;
+    }
   | {
       action: "create";
       agent_id: string;
@@ -179,6 +196,7 @@ export interface ManageAgentsProposal {
    * so an unapprovable proposal is rejected before the card is shown.
    */
   default_model?: string;
+  settings?: AgentUpdateInput["settings"];
   /**
    * Pre-image of the fields this update proposes to change, captured when the
    * update was queued. On approve, applyUpdate only overwrites a field whose
@@ -191,5 +209,10 @@ export interface ManageAgentsProposal {
     identity_md?: string | null;
     /** Pre-image of `models[0]` (the default model ref), or null when unset. */
     default_model?: string | null;
+    settings?: {
+      [K in keyof NonNullable<AgentUpdateInput["settings"]>]?:
+        | NonNullable<AgentUpdateInput["settings"]>[K]
+        | null;
+    };
   };
 }

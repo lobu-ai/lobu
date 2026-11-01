@@ -210,6 +210,44 @@ async function runApply(
 }
 
 describe("apply wire payloads: undeclared fields are never sent", () => {
+  test("a persona edit leaves undeclared skills and model fallbacks unmanaged", async () => {
+    const dir = mkProject(configWithFeed(`{ feed: "threads" }`));
+    writeFileSync(join(dir, "agents", "triage", "SOUL.md"), "Updated persona");
+    const { fetchStub, calls } = makeFetch();
+    const fetchExistingAgent = (async (url, init) => {
+      if ((init?.method ?? "GET") === "GET") {
+        if (String(url).endsWith("/agents")) {
+          return Response.json({
+            agents: [{ agentId: "triage", name: "Triage" }],
+          });
+        }
+        if (String(url).endsWith("/agents/triage/config")) {
+          return Response.json({
+            soulMd: "Old persona",
+            models: ["synthetic/primary", "synthetic/fallback"],
+            skillsConfig: {
+              skills: [
+                {
+                  repo: "example/skills",
+                  name: "triage",
+                  enabled: true,
+                  content: "Existing skill",
+                },
+              ],
+            },
+          });
+        }
+      }
+      return fetchStub(url, init);
+    }) as typeof fetch;
+    await runApply(dir, fetchExistingAgent, "agents");
+    const writes = calls.filter((call) =>
+      call.url.endsWith("/agents/triage/config")
+    );
+    expect(writes).toHaveLength(1);
+    expect(writes[0]?.body).toEqual({ soulMd: "Updated persona" });
+  });
+
   test.each([
     "original-first",
     "duplicate-first",
