@@ -10,6 +10,7 @@ import {
 	SkillsConfigSchema,
 } from "@lobu/core/contracts/agent-settings";
 import { Value } from "@sinclair/typebox/value";
+import { resolveNewAgentProvisioningDefaults } from "../auth/system-provider-resolution";
 import type { DbClient } from "../db/client";
 import { loadAllowedDomains } from "../gateway/config/network-allowlist";
 import { resolveSystemJudgeTarget } from "../gateway/inference/system-judge-target";
@@ -506,15 +507,18 @@ export async function insertAgentConfig(
 	tx: DbClient,
 	args: Pick<AgentCreateInput, "agent_id" | "name" | "description" | "identity_md">,
 	owner: AgentMetadata["owner"],
-	models: AgentSettings["models"] | null,
+	models: AgentSettings["models"] | null | undefined,
 	audit: AgentConfigAudit
 ): Promise<boolean> {
+	const seedModels = models === undefined
+		? (await resolveNewAgentProvisioningDefaults(audit.organizationId)).models
+		: models;
 	const rows = await tx`
 		INSERT INTO agents (id, organization_id, name, description, identity_md,
 			owner_platform, owner_user_id, models, created_at, updated_at)
 		VALUES (${args.agent_id}, ${audit.organizationId}, ${args.name}, ${args.description ?? null},
 			${args.identity_md ?? ""}, ${owner.platform}, ${owner.userId},
-			${models == null ? null : tx.json(models)}, NOW(), NOW())
+			${seedModels == null ? null : tx.json(seedModels)}, NOW(), NOW())
 		ON CONFLICT (organization_id, id) DO NOTHING RETURNING id
 	`;
 	if (!rows.length) return false;

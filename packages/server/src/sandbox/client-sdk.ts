@@ -38,6 +38,7 @@ export { enumerateSDKManifest, type SDKMode } from "./sdk-manifest";
 import {
 	buildAgentsNamespace,
 	buildAuthProfilesNamespace,
+	buildInferenceProvidersNamespace,
 	buildAutomationsNamespace,
 	buildCatalogNamespace,
 	buildClassifiersNamespace,
@@ -56,6 +57,7 @@ import {
 	buildViewsNamespace,
 } from "./namespaces";
 import type { AgentsNamespace } from "./namespaces/agents";
+import type { InferenceProvidersNamespace } from "./namespaces/inference-providers";
 import type { AuthProfilesNamespace } from "./namespaces/auth-profiles";
 import type { CatalogNamespace } from "./namespaces/catalog";
 import type { ClassifiersNamespace } from "./namespaces/classifiers";
@@ -87,6 +89,7 @@ export interface ClientSDK {
 	conversations: ConversationsNamespace;
 	feeds: FeedsNamespace;
 	authProfiles: AuthProfilesNamespace;
+	inferenceProviders: InferenceProvidersNamespace;
 	operations: OperationsNamespace;
 	automations: AutomationsNamespace;
 	classifiers: ClassifiersNamespace;
@@ -289,6 +292,7 @@ export function buildClientSDK(
 		get connections() { return namespace("connections", buildConnectionsNamespace(requireWorkspaceContext(ctx), env)); },
 		get feeds() { return namespace("feeds", buildFeedsNamespace(requireWorkspaceContext(ctx), env)); },
 		get authProfiles() { return namespace("authProfiles", buildAuthProfilesNamespace(requireWorkspaceContext(ctx), env)); },
+		get inferenceProviders() { return namespace("inferenceProviders", buildInferenceProvidersNamespace(requireWorkspaceContext(ctx), env)); },
 		get operations() { return namespace("operations", buildOperationsNamespace(requireWorkspaceContext(ctx), env)); },
 		get automations() { return namespace("automations", buildAutomationsNamespace(requireWorkspaceContext(ctx), env)); },
 		get classifiers() { return namespace("classifiers", buildClassifiersNamespace(requireWorkspaceContext(ctx), env)); },

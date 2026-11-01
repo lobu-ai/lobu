@@ -74,6 +74,8 @@ export function installRouteTestMocks(): void {
   mock.module('../../../auth/middleware', () => ({
     mcpAuth: async (c: any, next: any) => {
       c.set('user', authStash.user);
+      c.set('session', authStash.authSource === 'session' && authStash.user ? { userId: authStash.user.id } : null);
+      c.set('mcpIsAuthenticated', authStash.authSource !== null);
       c.set('organizationId', authStash.organizationId);
       c.set('authSource', authStash.authSource);
       c.set('mcpAuthInfo', authStash.mcpAuthInfo);

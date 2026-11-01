@@ -678,6 +678,26 @@ describe("manage_automations — builder gate e2e", () => {
 		},
 	);
 
+	it("applies an approved delete whose target configuration is unchanged", async () => {
+		await upsertEntityApprovalPolicy(orgId, {
+			resourceClass: "agent_config", principalKind: "agent", principalId: agentId,
+			effects: { delete: "approval" },
+		});
+		const created = await executeTool("manage_automations", {
+			action: "create", slug: "approved-delete", prompt: "Original", managed_agent_id: agentId,
+		}, TEST_ENV, ownerCtx) as { automation_id: string };
+		const pending = await executeTool("manage_automations", {
+			action: "delete", automation_ids: [created.automation_id],
+		}, TEST_ENV, agentCtx) as PendingApproval;
+		expect(pending.status).toBe("pending_approval");
+		await executeTool("manage_operations", { action: "approve", run_id: pending.run_id }, TEST_ENV, ownerCtx);
+		const sql = getTestDb();
+		const [run] = await sql`SELECT status FROM runs WHERE id = ${pending.run_id}`;
+		expect(run.status).toBe("completed");
+		const [row] = await sql`SELECT status FROM automations WHERE id = ${created.automation_id}`;
+		expect(row.status).toBe("archived");
+	});
+
 	it.each(["unrelated target IDs", "non-current version", "legacy proposal"])(
 		"rejects an approval with %s instead of overwriting unseen configuration",
 		async (scenario) => {
