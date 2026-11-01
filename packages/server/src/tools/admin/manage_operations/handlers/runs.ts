@@ -12,6 +12,7 @@ import {
 	pgBigintArray,
 	pgTextArray,
 } from "../../../../db/client";
+import { GATEWAY_INLINE_OWNER_PREFIX } from "../../../../runs/run-lease";
 import { describeNonDeviceWorkerId } from "../../../../utils/device-worker-id";
 import { ToolUserError, withFailureCode } from "../../../../utils/errors";
 import type { ToolContext } from "../../../registry";
@@ -115,7 +116,7 @@ function publicRunRecord(
 function runDeviceAttribution(sql: ReturnType<typeof getDb>) {
   return sql`
     CASE
-      WHEN r.claimed_by LIKE 'gateway-inline-%' THEN NULL
+      WHEN starts_with(r.claimed_by, ${GATEWAY_INLINE_OWNER_PREFIX}) THEN NULL
       ELSE COALESCE(r.executed_by_device_worker_id, r.target_device_worker_id)
     END`;
 }

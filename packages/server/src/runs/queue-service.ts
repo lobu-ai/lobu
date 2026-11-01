@@ -9,7 +9,6 @@
 
 import { feedDefinitionSelection } from '../connectors/feed-definition-selection';
 import { browserBindingSnapshot, connectionBrowserResource } from '../connectors/browser-resource';
-import { randomUUID } from 'node:crypto';
 import type { BrowserActionContext } from '../worker-api/browser-action-context';
 
 import { type DbClient, parsePgTextArray, pgTextArray } from '../db/client';
@@ -56,6 +55,7 @@ import logger from '../utils/logger';
 import { isUniqueViolation } from '../utils/pg-errors';
 import { ACTIVE_RUN_STATUSES, runStatusLiteral } from '../utils/run-statuses';
 import { normalizePageActivationUrls } from './page-activation';
+import { newGatewayInlineOwner } from './run-lease';
 import { AUTOMATION_RUN_TYPES_PG } from "./run-types.js";
 
 import { notifyWorkerWork } from './worker-wakeup';
@@ -1369,7 +1369,7 @@ export async function createConnectorOperationRun(params: {
     params.activation || params.approvalMode !== 'inline' ? 'pending' : 'running';
   const inlineOwner =
     params.approvalMode === 'inline' && !params.activation
-      ? `gateway-inline-${randomUUID()}`
+      ? newGatewayInlineOwner()
       : null;
 
   // Ephemeral device/browser/shell action runs get a bounded claim horizon:
