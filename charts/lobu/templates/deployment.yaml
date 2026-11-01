@@ -81,6 +81,13 @@ spec:
             - name: LOBU_ARTIFACTS_DIR
               value: {{ ternary .Values.app.artifacts.mountPath "/tmp/lobu-artifacts" .Values.app.artifacts.enabled | quote }}
             {{- end }}
+            {{- if and .Values.worker.enabled (gt (int .Values.worker.replicaCount) 0) (not (hasKey (default dict .Values.app.env) "LOBU_DISABLE_EMBEDDED_WORKER")) }}
+            # Worker pods claim every run and drain in-flight runs for their
+            # grace period on SIGTERM. The app's in-process worker drains for a
+            # fixed 15s, so a rollout would kill whatever it holds.
+            - name: LOBU_DISABLE_EMBEDDED_WORKER
+              value: "1"
+            {{- end }}
             {{- if .Values.ingress.hosts }}
             - name: BASE_URL
               value: {{ printf "https://%s" (first .Values.ingress.hosts) | quote }}

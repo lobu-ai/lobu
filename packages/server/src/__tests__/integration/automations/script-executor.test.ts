@@ -12,7 +12,7 @@ import {
 import { TestWorkspace } from '../../setup/test-mcp-client';
 import { dispatchPendingAutomationRuns } from '../../../automations/automation';
 import { runAutomationScriptTask } from '../../../automations/script-task';
-import { reconcileAutomationScriptRuns } from '../../../automations/script-enqueue';
+import { enqueueAutomationScript, reconcileAutomationScriptRuns } from '../../../automations/script-enqueue';
 import type { Env } from '../../../index';
 import { RunsQueue } from '../../../gateway/infrastructure/queue/runs-queue';
 import { TaskScheduler } from '../../../scheduled/task-scheduler';
@@ -252,6 +252,55 @@ describe('Automation script executor', () => {
       status: 'running',
       claimed_by: 'automation-script',
     });
+  });
+
+  it('hands off a script without reversing the Automation-before-run lock order', async () => {
+    const { workspace, automationId, agentId } = await seedScriptAutomation();
+    const sql = getTestDb();
+    const queued = await createAutomationRun({
+      organizationId: workspace.org.id, automationId, agentId,
+      windowStart: '2026-01-01T00:00:00.000Z',
+      windowEnd: '2026-01-01T00:20:00.000Z', dispatchSource: 'event',
+    });
+    await sql`UPDATE runs SET status = 'claimed', claimed_by = 'lobu-dispatcher', claimed_at = now() WHERE id = ${queued.runId}`;
+    let handoff: Promise<{ value?: boolean; error?: unknown }> | undefined;
+    let manualError: unknown;
+    try {
+      await sql.begin(async (tx) => {
+        const [holder] = await tx`SELECT pg_backend_pid() AS pid`;
+        // Manual trigger owns the Automation row before inspecting its active run.
+        await tx`SELECT id FROM automations WHERE id = ${automationId} FOR UPDATE`;
+        handoff = enqueueAutomationScript(sql as never, {
+          organizationId: workspace.org.id, automationId, sourceRunId: queued.runId,
+        }).then(value => ({ value }), error => ({ error }));
+        // Observe actual database contention, not a timing-dependent promise race.
+        const deadline = Date.now() + 5_000;
+        let blocked = false;
+        while (Date.now() < deadline) {
+          const waiting = await sql`SELECT pid FROM pg_stat_activity
+            WHERE datname = current_database() AND wait_event_type = 'Lock'
+              AND ${Number(holder.pid)}::integer = ANY(pg_blocking_pids(pid))`;
+          if (waiting.length) { blocked = true; break; }
+          await new Promise(resolve => setTimeout(resolve, 10));
+        }
+        expect(blocked).toBe(true);
+        await tx`SET LOCAL lock_timeout = '3s'`;
+        // Before the fix dispatch owns the run and waits for our Automation FK.
+        // Reading the run now closes the lock cycle and PostgreSQL aborts a peer.
+        const [run] = await tx`SELECT status FROM runs WHERE id = ${queued.runId} FOR UPDATE`;
+        expect(run.status).toBe('claimed');
+      });
+    } catch (error) { manualError = error; }
+    const result = await handoff;
+    if (manualError) throw manualError;
+    if (result?.error) throw result.error;
+    expect(result?.value).toBe(true);
+    const tasks = await sql`SELECT id FROM runs WHERE parent_run_id = ${queued.runId} AND action_key = 'automation-script'`;
+    expect(tasks).toHaveLength(1);
+    const [run] = await sql`SELECT status, claimed_by, run_metadata FROM runs WHERE id = ${queued.runId}`;
+    expect(run.status).toBe('running');
+    expect(run.claimed_by).toBe('automation-script');
+    expect(Number(run.run_metadata.executor_task_run_id)).toBe(Number(tasks[0].id));
   });
 
   it('rejects agent-only settings when updating a script job', async () => {

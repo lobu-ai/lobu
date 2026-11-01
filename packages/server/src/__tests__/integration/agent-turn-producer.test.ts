@@ -19,9 +19,14 @@ import {
   AgentTurnPollPayloadSchema,
   PollResponseSchema,
 } from '@lobu/core/contracts/worker/protocol';
-import { AGENT_ERRORS, AgentErrorCode, mintGatewayMcpToken, parseSessionEntries, type MessagePayload, type ThreadResponsePayload, renderBaselineAgentPolicy, verifyWorkerToken } from '@lobu/core';
+import { AGENT_ERRORS, AgentErrorCode, flushTracing, initTracing, mintGatewayMcpToken, parseSessionEntries, type MessagePayload, type ThreadResponsePayload, renderBaselineAgentPolicy, shutdownTracing, verifyWorkerToken } from '@lobu/core';
 import { FOLLOW_UP_SUGGESTIONS_PROMPT } from '@lobu/core/agent-tooling';
 import { Value } from '@sinclair/typebox/value';
+import { InMemorySpanExporter, SimpleSpanProcessor } from '@opentelemetry/sdk-trace-node';
+import { MessageConsumer } from '../../gateway/orchestration/message-consumer';
+import { RunsQueue } from '../../gateway/infrastructure/queue/runs-queue';
+import { UnifiedThreadResponseConsumer } from '../../gateway/platform/unified-thread-consumer';
+import { startOtelWorker, startTestCollector, unusedLoopbackPort, type TransportSpan } from '../setup/otel-transport';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as db from '../../db/client';
 import { ApiKeyProviderModule } from '../../gateway/auth/api-key-provider-module';
@@ -32,6 +37,7 @@ import { createConnectedGatewayStateAdapter } from '../../gateway/connections/st
 import type { PlatformConnection } from '../../gateway/connections/types';
 import { type AssembledChatBridge, startAssembledChatBridge, waitFor } from '../../gateway/__tests__/helpers/chat-bridge-harness';
 import { resetRateLimiterForTests } from '../../utils/rate-limiter';
+import { __resetPublicOriginCachesForTests } from '../../utils/public-origin';
 import { createTestAutomationSubscription } from '../setup/automation-subscriptions';
 import { createInteractionRoutes } from '../../gateway/routes/internal/interactions';
 import { enqueueAgentTurn,
@@ -122,8 +128,11 @@ interface McpFixture {
   listed: Array<{ mcpId: string; agentId: string; token: string | undefined }>;
 }
 
-/** An MCP surface with one server publishing three tools and an instruction block. */
-function mcpFixture(options: { fail?: boolean; serverId?: string; empty?: boolean } = {}): McpFixture {
+/**
+ * An MCP surface with one server publishing three tools and an instruction
+ * block; `alsoPublish` adds one more tool by name.
+ */
+function mcpFixture(options: { fail?: boolean; serverId?: string; empty?: boolean; alsoPublish?: string } = {}): McpFixture {
   const listed: McpFixture['listed'] = [];
   const configService = {
     getMcpStatus: async () => [
@@ -140,6 +149,7 @@ function mcpFixture(options: { fail?: boolean; serverId?: string; empty?: boolea
           { name: 'query_sdk', description: 'Read data', inputSchema: { type: 'object', properties: { code: { type: 'string' } } } },
           { name: 'run_sdk', description: 'Write data', inputSchema: { type: 'object', properties: { code: { type: 'string' } } } },
           { name: 'query_sql', inputSchema: undefined },
+          ...(options.alsoPublish ? [{ name: options.alsoPublish, inputSchema: undefined }] : []),
         ],
       };
     },
@@ -276,12 +286,13 @@ async function postAsFleet(path: string, body: Record<string, unknown>) {
 }
 
 /** Enqueue a turn and claim it, as the fleet worker would. */
-async function claimedTurnRun(workerId: string, platform: 'api' | 'slack' = 'api', opts: { legacy?: boolean } = {}): Promise<number> {
+async function claimedTurnRun(workerId: string, platform: 'api' | 'slack' = 'api', opts: { legacy?: boolean; mcp?: McpFixture['mcp'] } = {}): Promise<number> {
   const org = await createTestOrganization();
   await enqueueMessage({ ...messageFor(org.id), platform }, {
     agentSettings: settingsStore,
     catalog: catalogFor(claudeModule()),
     gatewayUrl: GATEWAY_URL,
+    ...(opts.mcp ? { mcp: opts.mcp } : {}),
   });
   const response = await pollFleet(workerId, { agent_turn: true });
   const body = await response.json();
@@ -2139,6 +2150,38 @@ describe('agent turn producer', () => {
     expect((await runRow(follower.id)).status).toBe('pending');
   });
 
+  it.each([
+    ['different traces', '00-11111111111111111111111111111111-1111111111111111-01', '00-22222222222222222222222222222222-2222222222222222-01'],
+    ['tracing enabled mid-turn', undefined, '00-22222222222222222222222222222222-2222222222222222-01'],
+    ['tracing disabled mid-turn', '00-11111111111111111111111111111111-1111111111111111-01', undefined],
+  ])('offers a compatible follow-up with %s', async (_case, ownerTraceparent, followerTraceparent) => {
+    const org = await createTestOrganization();
+    const routing = { connectionId: 'synthetic-steer-connection', chatId: 'synthetic-steer-channel' };
+    const first = { ...messageFor(org.id), platformMetadata: {
+      ...routing, ...(ownerTraceparent ? { traceparent: ownerTraceparent } : {}),
+    } };
+    const deps = { agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: GATEWAY_URL };
+    await enqueueMessage(first, deps);
+    const { run_id } = await (await pollFleet('fleet-traced-follow-up', { agent_turn: true })).json();
+    await enqueueMessage({ ...first, messageId: 'traced-follow-up', messageText: 'keep this input',
+      platformMetadata: { ...routing, ...(followerTraceparent ? { traceparent: followerTraceparent } : {}) },
+    }, deps);
+    const [owner, follower] = await agentTurnRuns();
+    expect((owner.action_input.reply as { platform_metadata: Record<string, unknown> }).platform_metadata.traceparent).toBe(ownerTraceparent);
+    expect((follower.action_input.reply as { platform_metadata: Record<string, unknown> }).platform_metadata.traceparent).toBe(followerTraceparent);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const response = await postAsFleet('/api/workers/heartbeat', { run_id, worker_id: 'fleet-traced-follow-up' });
+      expect(await response.json()).toMatchObject({ continue: true, steer: [
+        { run_id: follower.id, message_id: 'traced-follow-up', text: 'keep this input' },
+      ] });
+    }
+    // Comparing execution policy must not erase the persisted delivery context.
+    expect(((await agentTurnRuns())[1].action_input.reply as { platform_metadata: Record<string, unknown> }).platform_metadata).toEqual({
+      ...routing, ...(followerTraceparent ? { traceparent: followerTraceparent } : {}),
+    });
+    expect((await runRow(follower.id)).status).toBe('pending');
+  });
+
   it('offers a follow-up whose transient context differs, and carries that context', async () => {
     // The API route attaches a live workspace-attention block, and it changes
     // as runs appear, so two messages sent seconds apart almost never carry
@@ -2499,6 +2542,7 @@ describe('agent turn producer', () => {
     ['grants', { networkConfig: { allowedDomains: ['different.example'] } }],
     ['packages', { nixConfig: { packages: ['git'] } }],
     ['platform metadata', { platformMetadata: { opaqueRouting: 'different' } }],
+    ['traced routing', { platformMetadata: { connectionId: 'different-connection', traceparent: '00-22222222222222222222222222222222-2222222222222222-01' } }],
     ['attachment', { platformMetadata: { files: [{ name: 'notes.txt', mimetype: 'text/plain' }] } }],
     ['reset', { platformMetadata: { sessionReset: true } }],
     ['automation', { platformMetadata: { source: 'automation-run' } }],
@@ -4790,12 +4834,19 @@ describe('agent turn reaper', () => {
     expect((await threadResponses()).at(-1)?.action_input).toMatchObject({ finalText: 'the whole answer' });
   });
 
-  it('terminalizes a dead turn that already ran a tool, as before', async () => {
+  // A trace is the only evidence for a call that reached no gateway route, so
+  // it still counts for anything the turn's stored catalog does not route
+  // through the gateway, even beside an MCP catalog of read-only tools.
+  it.each([
+    ['a tool the turn was not offered', 'search', undefined],
+    ['a workspace tool', 'write', undefined],
+    ['a workspace tool an MCP server also publishes', 'write', 'write'],
+  ])('terminalizes a dead turn that already ran %s, as before', async (_kind, tool, alsoPublish) => {
     const workerId = 'fleet-died-after-tool';
-    const runId = await claimedTurnRun(workerId);
+    const runId = await claimedTurnRun(workerId, 'api', { mcp: mcpFixture({ serverId: 'lobu', alsoPublish }).mcp });
     const beat = await postAsFleet('/api/workers/heartbeat', {
       run_id: runId, worker_id: workerId,
-      turn_tool_events: [{ tool_call_id: 'call-1', name: 'search', is_error: false, output: 'ok' }],
+      turn_tool_events: [{ tool_call_id: 'call-1', name: tool, is_error: false, output: 'ok' }],
     });
     expect(await beat.json()).toMatchObject({ turn_tool_ack: { received: 1 } });
     await loseHeartbeat(runId);
@@ -4904,16 +4955,44 @@ describe('agent turn reaper', () => {
     expect(reply!.action_input).toMatchObject({ errorCode: AgentErrorCode.WORKER_DIED });
   });
 
+  // A deploy restarting the worker mid-turn: every call so far was a read the
+  // gateway passed without stamping, and the worker reported each one as a
+  // trace on its heartbeat before it went away. The trace is not new evidence
+  // of an effect, so the reaper tick re-runs the turn and it completes.
   it.each([
-    ['a GET read', 'GET', '/lobu/internal/read'],
-    ['a read-only Lobu memory tool', 'POST', '/lobu/mcp/lobu/tools/search_memory'],
-  ] as const)('still re-runs an attempt that only made %s', async (_kind, method, path) => {
-    const runId = await claimedTurnRun('fleet-read-only');
+    ['a GET read', 'GET', '/lobu/internal/read', 'read_conversation'],
+    ['a read-only Lobu tool', 'POST', '/lobu/mcp/lobu/tools/query_sql', 'query_sql'],
+  ] as const)('still re-runs an attempt that only made %s', async (_kind, method, path, tool) => {
+    const workerId = 'fleet-read-only';
+    const runId = await claimedTurnRun(workerId, 'api', { mcp: mcpFixture({ serverId: 'lobu' }).mcp });
+    const credential = await credentialOf(runId);
     const { app } = gatewayRoutes();
-    await call(app, method, path, await credentialOf(runId));
+    await call(app, method, path, credential);
+    expect((await turnRow(runId)).run_metadata?.turn_tool_started).toBe(false);
+    const beat = await postAsFleet('/api/workers/heartbeat', {
+      run_id: runId, worker_id: workerId, turn_credential: credential,
+      turn_tool_events: [{ tool_call_id: 'call-read', name: tool, is_error: false, output: 'ok' }],
+    });
+    expect(await beat.json()).toMatchObject({ turn_tool_ack: { received: 1 } });
     expect((await turnRow(runId)).run_metadata?.turn_tool_started).toBe(false);
     await loseHeartbeat(runId);
-    expect(await sweepStaleAgentTurnRuns(STALE_THRESHOLD_SECONDS)).toEqual({ reaped: 0, delivered: 0, requeued: 1 });
+
+    // Through the real reaper tick: nothing is reaped, nothing is delivered.
+    expect(await reapStaleRuns()).toMatchObject({ acquired: true, reaped: 0 });
+    const requeued = await turnRow(runId);
+    expect(requeued.status).toBe('pending');
+    expect(requeued.run_metadata?.turn_requeue_count).toBe(1);
+    expect((await threadResponses()).filter((reply) => reply.action_input.error)).toEqual([]);
+
+    // The next worker claims the same turn and answers it.
+    const again = await (await pollFleet('fleet-after-deploy', { agent_turn: true })).json();
+    expect(again.run_id).toBe(runId);
+    const completed = await postAsFleet('/api/workers/complete-agent-turn', {
+      run_id: runId, worker_id: 'fleet-after-deploy', turn_credential: again.credentials.accessToken,
+      status: 'completed', session_jsonl: nativeSession(), text: 'the isolate answer',
+    });
+    expect(completed.status).toBe(200);
+    expect((await threadResponses()).at(-1)?.action_input).toMatchObject({ finalText: 'the isolate answer' });
   });
 
   it('refuses a side-effecting call from an attempt the reaper already re-queued', async () => {
@@ -5162,7 +5241,7 @@ describe('existing team bot replay (single-workspace Slack, unlinked channel sen
     };
   }
 
-  async function startTeamBot() {
+  async function startTeamBot(model?: string) {
     const org = await createTestOrganization();
     const owner = await createTestUser({ email: 'team-bot-owner@example.test' });
     await addUserToOrganization(owner.id, org.id, 'owner');
@@ -5173,7 +5252,7 @@ describe('existing team bot replay (single-workspace Slack, unlinked channel sen
       SELECT id FROM connections WHERE organization_id = ${org.id} AND connector_key = 'slack'
     `;
     await createTestAutomationSubscription({
-      organizationId: org.id, agentId: AGENT_ID, connectionId: Number(row.id), platform: 'slack', channelId: CHANNEL, teamId: TEAM,
+      organizationId: org.id, agentId: AGENT_ID, connectionId: Number(row.id), platform: 'slack', channelId: CHANNEL, teamId: TEAM, model,
     });
     await createTestConnection({
       organization_id: org.id, connector_key: 'github', display_name: 'Team shared conn', visibility: 'org', created_by: owner.id,
@@ -5185,8 +5264,11 @@ describe('existing team bot replay (single-workspace Slack, unlinked channel sen
     const adapter = createSlackAdapter({ signingSecret: SIGNING_SECRET, botToken: 'xoxb-synthetic', botUserId: BOT_USER, userName: 'lobu' });
     const posts = vi.fn(async () => ({ ts: '1787292000.999999' }));
     (adapter as any).fetchMessages = async () => ({ messages: [] });
+    (adapter as any).lookupUser = async (userId: string) => ({ userId, userName: 'synthetic-user', fullName: 'Synthetic User', isBot: false, isMe: false });
     (adapter as any).startTyping = async () => undefined;
     (adapter as any).postMessage = posts;
+    (adapter as any).client.chat.postMessage = posts;
+    (adapter as any).client.apiCall = async () => { throw new Error('Unexpected external Slack API in test'); };
     const state = await createConnectedGatewayStateAdapter();
     const chat = new Chat({ userName: 'lobu', adapters: { slack: adapter }, state, logger: 'silent' });
     const connection: PlatformConnection = {
@@ -5216,6 +5298,199 @@ describe('existing team bot replay (single-workspace Slack, unlinked channel sen
     `;
     return rows.map((r) => r.action_input);
   }
+
+  type TraceTransportMode = 'memory' | 'collector' | 'disabled' | 'unavailable';
+
+  async function runTracedChatTurn(mode: TraceTransportMode, providerFails: boolean) {
+    const collectorBinary = process.env.LOBU_OTEL_COLLECTOR_BINARY;
+    const collector = mode === 'collector' ? await startTestCollector(collectorBinary!) : undefined;
+    const endpoint = collector?.endpoint ?? (mode === 'unavailable'
+      ? `http://127.0.0.1:${await unusedLoopbackPort()}` : undefined);
+    const previousEnv = {
+      endpoint: process.env.OTEL_EXPORTER_OTLP_ENDPOINT,
+      gateway: process.env.PUBLIC_GATEWAY_URL,
+    };
+    const exporter = new InMemorySpanExporter();
+    const serverErrors: string[] = [];
+    let pollBody: unknown;
+    let pollTraceparent: string | null = null;
+    let worker: ReturnType<typeof startOtelWorker> | undefined;
+    let consumer: MessageConsumer | undefined;
+    let responses: UnifiedThreadResponseConsumer | undefined;
+    const server = createServer(async (req, res) => {
+      try {
+        const chunks = [];
+        for await (const chunk of req) chunks.push(Buffer.from(chunk));
+        const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        const path = new URL(req.url!, 'http://localhost').pathname;
+        if (path.startsWith('/lobu/api/proxy/compatible/')) {
+          if (providerFails) {
+            res.writeHead(400, { 'content-type': 'application/json' });
+            res.end(JSON.stringify({ error: { message: 'synthetic provider failure' } }));
+            return;
+          }
+          const text = isFollowUpChipsRequest(body) ? '[]' : 'OTLP pipeline verified.';
+          res.writeHead(200, { 'content-type': 'text/event-stream' });
+          res.end(`data: ${JSON.stringify({ id: 'synthetic-otel-completion', object: 'chat.completion.chunk', created: 1,
+            model: 'compatible-model', choices: [{ index: 0, delta: { role: 'assistant', content: text }, finish_reason: 'stop' }],
+            usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } })}\n\ndata: [DONE]\n\n`);
+          return;
+        }
+        const response = await post(path, { body, headers: { authorization: req.headers.authorization ?? '' },
+          env: { WORKER_API_TOKEN: 'synthetic-otel-fleet' } });
+        const responseText = await response.text();
+        if (path.endsWith('/poll')) {
+          pollBody = JSON.parse(responseText);
+          pollTraceparent = response.headers.get('traceparent');
+        }
+        // The actual poll header crosses HTTP. Reconstructing it from the job
+        // would mask a broken header/body boundary.
+        res.writeHead(response.status, Object.fromEntries(response.headers));
+        res.end(responseText);
+      } catch (error) {
+        serverErrors.push(String(error));
+        res.writeHead(500).end();
+      }
+    });
+    try {
+      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+      const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      process.env.PUBLIC_GATEWAY_URL = `${origin}/lobu`;
+      __resetPublicOriginCachesForTests();
+      if (endpoint) process.env.OTEL_EXPORTER_OTLP_ENDPOINT = endpoint;
+      else delete process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+      await shutdownTracing();
+      initTracing({
+        serviceName: 'lobu-server', otlpEndpoint: endpoint,
+        ...(mode === 'memory' ? { spanProcessors: [new SimpleSpanProcessor(exporter)] } : {}),
+      });
+      const provider = new ApiKeyProviderModule({
+        providerId: 'compatible', providerDisplayName: 'Synthetic OTLP provider', providerIconUrl: '',
+        envVarName: 'SYNTHETIC_PROVIDER_API_KEY', sdkCompat: 'openai',
+        upstreamBaseUrl: 'https://provider.example.test/v1',
+      });
+      const catalog = { ...catalogFor(provider), resolveDispatchModel: async () => ({ replaced: false }) };
+      consumer = new MessageConsumer({
+        getProviderCatalogService: () => catalog,
+        syncNetworkConfigGrants: async () => {},
+      } as never);
+      consumer.setGuardrails(undefined, settingsStore);
+      await consumer.start();
+      const { deliver, posts } = await startTeamBot('compatible/compatible-model');
+      responses = new UnifiedThreadResponseConsumer(new RunsQueue(), {} as never, {} as never);
+      responses.setChatResponseBridge(new ChatResponseBridge(bridge!.manager as never));
+      await responses.start();
+
+      const started = Date.now();
+      expect(await deliver(channelMessage('Ev0OTELSMOKE', '1787292000.000701', 'U0TEAMMATE'))).toBe(200);
+      let run: Awaited<ReturnType<typeof agentTurnRuns>>[number] | undefined;
+      await waitFor(async () => {
+        [run] = await agentTurnRuns();
+        expect(run?.status).toBe('pending');
+      });
+      worker = startOtelWorker({ apiUrl: origin, authToken: 'synthetic-otel-fleet', runId: Number(run!.id), mode, endpoint });
+      const completed = await worker.completed.catch(error => {
+        throw new Error(`${String(error)}; gateway fixture errors: ${serverErrors.join('; ')}`);
+      });
+      const expectedText = providerFails ? 'synthetic provider failure' : 'OTLP pipeline verified.';
+      expect(completed.runId).toBe(Number(run!.id));
+      expect(completed.tracingEnabled).toBe(mode !== 'disabled');
+      if (providerFails) expect(completed.error).toContain(expectedText);
+      else expect(completed.error).toBeUndefined();
+      expect((await runRow(Number(run!.id))).status).toBe(providerFails ? 'failed' : 'completed');
+      await waitFor(async () => {
+        const terminal = await getTestDb()`
+          SELECT status, action_input FROM runs WHERE queue_name = 'thread_response'
+            AND action_input->>'turnRunId' = ${String(run!.id)}
+            AND (action_input ? 'finalText' OR action_input ? 'error') ORDER BY id DESC LIMIT 1
+        `;
+        expect(terminal[0]?.status).toBe('completed');
+        expect(JSON.stringify(posts.mock.calls)).toContain(expectedText);
+      }, 10_000);
+      // A failed exporter must never make the user wait its 30s RPC timeout.
+      if (mode === 'unavailable') {
+        expect(completed.elapsedMs).toBeLessThan(20_000);
+        expect(Date.now() - started).toBeLessThan(20_000);
+      }
+      expect(serverErrors).toEqual([]);
+      expect(Value.Check(PollResponseSchema, pollBody)).toBe(true);
+      expect(pollBody).not.toHaveProperty('traceparent');
+      expect(pollBody).not.toHaveProperty('payload.traceparent');
+      expect(pollBody).not.toHaveProperty('payload.turn.traceparent');
+
+      if (mode === 'disabled') {
+        expect(pollTraceparent).toBeNull();
+        expect(completed.spans).toEqual([]);
+        expect(exporter.getFinishedSpans()).toEqual([]);
+        return;
+      }
+      expect(pollTraceparent).toMatch(/^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/);
+      if (mode === 'unavailable') return;
+      await flushTracing();
+      const memorySpans = (): TransportSpan[] => exporter.getFinishedSpans().map(span => ({
+        name: span.name, traceId: span.spanContext().traceId, spanId: span.spanContext().spanId,
+        parentSpanId: span.parentSpanContext?.spanId,
+        serviceName: String(span.resource.attributes['service.name']), status: span.status.code,
+      }));
+      await waitFor(async () => {
+        const spans = collector ? await collector.spans() : [...memorySpans(), ...completed.spans];
+        const roots = spans.filter(span => span.name === 'message_received');
+        const queues = spans.filter(span => span.name === 'queue_processing');
+        const turns = spans.filter(span => span.name === 'agent_turn');
+        const deliveries = spans.filter(span => span.name === 'response_delivery');
+        expect(roots).toHaveLength(1);
+        expect(queues).toHaveLength(1);
+        expect(turns).toHaveLength(1);
+        expect(deliveries.length).toBeGreaterThanOrEqual(1);
+        const [root] = roots;
+        const [queue] = queues;
+        const [turn] = turns;
+        expect(new Set(spans.map(span => span.traceId))).toEqual(new Set([root.traceId]));
+        expect(queue.parentSpanId).toBe(root.spanId);
+        expect(turn.parentSpanId).toBe(queue.spanId);
+        expect(deliveries.every(span => span.parentSpanId === queue.spanId)).toBe(true);
+        expect(pollTraceparent).toBe(`00-${queue.traceId}-${queue.spanId}-01`);
+        expect(root.serviceName).toBe('lobu-server');
+        expect(queue.serviceName).toBe('lobu-server');
+        expect(turn.serviceName).toBe('lobu-worker');
+        expect(deliveries.every(span => span.serviceName === 'lobu-server')).toBe(true);
+        expect(turn.status).toBe(providerFails ? 2 : 1);
+      }, 10_000);
+    } finally {
+      const cleanupErrors: unknown[] = [];
+      for (const dispose of [
+        () => consumer?.stop(), () => responses?.stop(), () => worker?.stop(),
+        // The final batch cannot reach an unavailable collector; production
+        // callers log that rejection, and so does nothing here.
+        () => mode === 'unavailable' ? shutdownTracing().catch(() => undefined) : shutdownTracing(),
+        () => collector?.stop(),
+        async () => {
+          server.closeAllConnections();
+          await new Promise<void>(resolve => server.close(() => resolve()));
+        },
+      ]) {
+        try { await dispose(); } catch (error) { cleanupErrors.push(error); }
+      }
+      for (const [name, value] of [
+        ['OTEL_EXPORTER_OTLP_ENDPOINT', previousEnv.endpoint],
+        ['PUBLIC_GATEWAY_URL', previousEnv.gateway],
+      ] as const) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+      __resetPublicOriginCachesForTests();
+      if (cleanupErrors.length) throw new AggregateError(cleanupErrors, 'Tracing smoke cleanup failed');
+    }
+  }
+
+  const traceTransportCases: Array<[TraceTransportMode, boolean]> = [
+    ['memory', false], ['memory', true], ['disabled', false], ['unavailable', false],
+    ...(process.env.LOBU_OTEL_COLLECTOR_BINARY
+      ? [['collector', false], ['collector', true]] as Array<[TraceTransportMode, boolean]> : []),
+  ];
+  it.each(traceTransportCases)('tracing pipeline via %s (provider failure: %s)', async (mode, providerFails) => {
+    await runTracedChatTurn(mode, providerFails);
+  }, 65_000);
 
   it('a same-team unlinked sender gets a turn with org-shared tools, no extra post, no reply-only prompt', async () => {
     const { org, deliver, posts } = await startTeamBot();

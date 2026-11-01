@@ -380,6 +380,7 @@ export interface CreatedEntity {
   identity?: EntityIdentity;
   /** Internal ownership projection used to avoid cross-org audit anchors. */
   organization_id?: string;
+  entity_type_id?: number;
   entity_type: string;
   name: string;
   slug: string;
@@ -1151,6 +1152,11 @@ export async function updateEntity(
 	// Lock the entity row, merge metadata, and write in ONE transaction: concurrent
 	// updates to the same entity serialize on the row lock, fixing the pre-existing
 	// non-transactional read-modify-write race on entities.metadata.
+	// Lifecycle hooks queue network-only side effects here (e.g. the $member
+	// invitation email, which reads back the committed invitation row); they run
+	// after commit so a failure can never roll back the write, mirroring the
+	// approval path's postCommitEffects drain.
+	const postCommitEffects: Array<() => Promise<void>> = [];
 	const result = await withEntityWriteTransaction(sql, async (tx) => {
 		// Resolve the type before any lock: `beforeUpdate` exists so a hook can
 		// claim a coarser lock (e.g. the organization row) ahead of the entity
@@ -1170,6 +1176,7 @@ export async function updateEntity(
 			sql: tx,
 			principal: ctx,
 			actorSource: deriveToolActorSource(ctx),
+			deferAfterCommit: (effect) => postCommitEffects.push(effect),
 		};
 		await hooks?.beforeUpdate?.(metadataUpdates, hookContext);
 		// Canonical change events take an organization FK lock before commit. Claim
@@ -1594,6 +1601,13 @@ export async function updateEntity(
 		);
 		return updated;
 	});
+	for (const effect of postCommitEffects) {
+		try {
+			await effect();
+		} catch (err) {
+			logger.error({ err }, 'Post-commit entity update effect failed');
+		}
+	}
 
 	// Split the deferral inputs off the returned row: they are this function's
 	// own bookkeeping, and every caller downstream reads `entity` as an entity.
@@ -1689,7 +1703,7 @@ export async function getEntity(
   const childReadPredicate = entityReadPolicySql(restrictions, 'c', params);
   const result = await sql.unsafe<CreatedEntity>(`
     SELECT
-      e.id, e.organization_id, et.slug AS entity_type, e.name, e.slug, pe.id AS parent_id, e.metadata, e.created_at,
+      e.id, e.organization_id, e.entity_type_id::int AS entity_type_id, et.slug AS entity_type, e.name, e.slug, pe.id AS parent_id, e.metadata, e.created_at,
       pe.name as parent_name, pe.slug as parent_slug, pet.slug as parent_entity_type,
       (
         SELECT COUNT(*) FROM current_event_records ev

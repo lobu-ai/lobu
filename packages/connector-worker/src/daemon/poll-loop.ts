@@ -6,6 +6,7 @@
  * injected so the device build does not import fleet connector machinery.
  */
 
+import { shutdownTracing } from '@lobu/core';
 import { WORKER_POLL_MAX_WAIT_SECONDS } from '@lobu/core/contracts/worker/protocol';
 import {
   type PollResponse,
@@ -44,16 +45,23 @@ const DEFAULT_SHUTDOWN_DRAIN_MS = 30_000;
 const SHUTDOWN_EXIT_MARGIN_MS = 15_000;
 
 /**
- * How long SIGTERM waits for in-flight runs. A fleet pod is SIGKILLed
+ * The pod's whole grace period after SIGTERM. A fleet pod is SIGKILLed
  * `terminationGracePeriodSeconds` after SIGTERM; the chart passes that same
- * value as `WORKER_SHUTDOWN_GRACE_SECONDS`, so the drain uses all of it except
- * the exit margin. Anything else keeps the fixed default.
+ * value as `WORKER_SHUTDOWN_GRACE_SECONDS`. Anything else keeps the fixed
+ * default drain plus the exit margin.
  */
-function resolveWorkerShutdownDrainMs(env: NodeJS.ProcessEnv = process.env): number {
+function resolveWorkerShutdownGraceMs(env: NodeJS.ProcessEnv = process.env): number {
   const raw = env.WORKER_SHUTDOWN_GRACE_SECONDS?.trim();
   const seconds = raw ? Number(raw) : Number.NaN;
-  if (!Number.isInteger(seconds) || seconds < 0) return DEFAULT_SHUTDOWN_DRAIN_MS;
-  return Math.max(0, seconds * 1000 - SHUTDOWN_EXIT_MARGIN_MS);
+  if (!Number.isInteger(seconds) || seconds < 0) {
+    return DEFAULT_SHUTDOWN_DRAIN_MS + SHUTDOWN_EXIT_MARGIN_MS;
+  }
+  return seconds * 1000;
+}
+
+/** How long SIGTERM waits for in-flight runs: the grace minus the exit margin. */
+function resolveWorkerShutdownDrainMs(env: NodeJS.ProcessEnv = process.env): number {
+  return Math.max(0, resolveWorkerShutdownGraceMs(env) - SHUTDOWN_EXIT_MARGIN_MS);
 }
 
 export interface WorkerPollLoopSignalOptions {
@@ -253,6 +261,7 @@ export function createWorkerPollLoopShutdownHandler(
   exit: WorkerPollLoopExit = process.exit
 ): (signal: string) => Promise<void> {
   const drainTimeoutMs = resolveWorkerShutdownDrainMs();
+  const shutdownGraceMs = resolveWorkerShutdownGraceMs();
   let shuttingDown = false;
   return async (signal: string) => {
     if (shuttingDown) {
@@ -261,6 +270,7 @@ export function createWorkerPollLoopShutdownHandler(
       return;
     }
     shuttingDown = true;
+    const shutdownDeadline = Date.now() + shutdownGraceMs;
     log.info(`\n[daemon] Received ${signal}, shutting down...`);
     let shutdownHookSucceeded = true;
     try {
@@ -272,6 +282,19 @@ export function createWorkerPollLoopShutdownHandler(
     log.info(`[daemon] Draining in-flight runs for up to ${drainTimeoutMs}ms`);
     const allDone = await loop.waitForActiveJobs(drainTimeoutMs);
     if (!allDone) log.info('[daemon] Forcing exit with active jobs still running');
+    // Exporters can still be waiting on a collector. Spend only the grace
+    // left after hooks/draining, cap telemetry at 5s, and retain 1s to exit.
+    const tracingTimeoutMs = Math.min(
+      5_000,
+      Math.max(0, shutdownDeadline - Date.now() - 1_000)
+    );
+    if (tracingTimeoutMs > 0) {
+      try {
+        await shutdownTracing(tracingTimeoutMs);
+      } catch (error) {
+        log.info('[daemon] Tracing shutdown failed:', error);
+      }
+    }
     exit(allDone && shutdownHookSucceeded ? 0 : 1);
   };
 }

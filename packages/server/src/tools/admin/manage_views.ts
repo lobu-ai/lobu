@@ -33,7 +33,7 @@ import { isEventAttachment } from '@lobu/core/contracts/tools/view-attach';
 import type { ViewDefinitionRecord } from '@lobu/core/contracts/tools/view-definition';
 import { ToolUserError } from '../../utils/errors';
 import {
-  refreshMemberEventKinds,
+  readEventKindRegistry,
   validateSaveContentSemanticType,
 } from '../../utils/event-kind-validation';
 import {
@@ -168,7 +168,6 @@ async function assertActionKindsRegistered(
   attach: SetViewInput['attach'],
 ): Promise<void> {
   if (Object.keys(actions).length === 0) return;
-  await refreshMemberEventKinds(organizationId);
   const qualifiedTypes = attach.length > 0 &&
     attach.every((entry) => isEventAttachment(entry) && entry.type)
       ? [...new Set(attach.flatMap((entry) =>
@@ -182,8 +181,15 @@ async function assertActionKindsRegistered(
       AND slug = ANY(${pgTextArray(qualifiedTypes)}::text[])
       AND deleted_at IS NULL
   `;
+  const kindRegistry = readEventKindRegistry(organizationId);
   for (const [name, decl] of Object.entries(actions)) {
-    const global = await validateSaveContentSemanticType(decl.emits, null, organizationId, []);
+    const global = await validateSaveContentSemanticType(
+      decl.emits,
+      null,
+      organizationId,
+      [],
+      kindRegistry
+    );
     if (global.valid) continue;
     if (qualifiedTypes.length > 0 && registries.length === qualifiedTypes.length &&
       registries.every((row) => row.event_kinds && Object.hasOwn(row.event_kinds, decl.emits))) continue;

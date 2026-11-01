@@ -46,6 +46,7 @@ import {
 	startEmbeddings,
 } from "./embedded-runtime";
 import { externalDbBootstrapHooks } from "./local-bootstrap";
+import { initTracing } from "@lobu/core";
 import { getEnvFromProcess } from "./utils/env";
 import { deriveJwtSecret } from "./utils/jwt";
 import logger from "./utils/logger";
@@ -63,6 +64,22 @@ function isExternal(databaseUrl: string | undefined): boolean {
 }
 
 async function main(): Promise<void> {
+	// After applyUserServerConfigToEnv(), so a user config file can set the
+	// endpoint. Unset means initTracing is not called and no exporter is built.
+	const otlpEndpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT?.trim();
+	if (otlpEndpoint) {
+		try {
+			initTracing({
+				serviceName: "lobu-server",
+				serviceVersion: process.env.APP_GIT_SHA,
+				otlpEndpoint,
+			});
+		} catch (err) {
+			// Optional telemetry must never prevent the application from starting.
+			logger.warn({ err }, "Tracing initialization failed; continuing without tracing");
+		}
+	}
+
 	const raw = process.env.DATABASE_URL?.trim();
 	const external = isExternal(raw);
 

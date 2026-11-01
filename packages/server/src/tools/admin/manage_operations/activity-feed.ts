@@ -7,6 +7,8 @@
  */
 
 import type { NotificationDelivery } from "@lobu/core/contracts/tools/manage-operations";
+import { compileConnectionFkVisibilityLiteral } from "../../../authz/connection-visibility";
+import { authzScopeFromToolContext } from "../../../authz/scope";
 import { getDb, pgTextArray } from "../../../db/client";
 import { listNotifications } from "../../../notifications/service";
 import { buildResourcePermalink } from "../../../utils/url-builder";
@@ -531,6 +533,12 @@ export async function listOrgActivity(opts: {
 	agentId?: string;
 	/** Trusted caller identity, independent of the agent display filter. */
 	caller?: ExternalActivityCaller;
+	/**
+	 * A reader outside the workspace. Their feed keeps runs on org-visible
+	 * connections and runs with no connection. Private device connections
+	 * (a paired browser, a team chat account) stay off the public home.
+	 */
+	publicReader?: boolean;
 }): Promise<{ items: ActivityCard[]; total: number; limit: number }> {
 	const limit = Math.min(Math.max(opts.limit ?? 24, 1), 50);
 	// Notifications are not agent-attributable, so an agent-scoped feed omits
@@ -572,6 +580,20 @@ export async function listOrgActivity(opts: {
 			const agentFilter = opts.agentId
 				? sql`AND w.managed_agent_id = ${opts.agentId}`
 				: sql``;
+			// Same FK predicate as every other connection-sourced read. NULL
+			// connection_id stays visible. The literal form is safe here: both
+			// values come from the server-derived caller, and the compiler escapes them.
+			const connectionFilter = opts.publicReader
+				? sql.unsafe(
+						compileConnectionFkVisibilityLiteral(
+							authzScopeFromToolContext({
+								organizationId: opts.organizationId,
+								userId: opts.userId,
+							}),
+							"r",
+						),
+					)
+				: sql``;
 			const rows = (await sql`
         SELECT r.id, r.run_type, r.automation_id, r.connection_id, r.feed_id,
                r.connector_key, r.action_key AS operation_key,
@@ -587,6 +609,7 @@ export async function listOrgActivity(opts: {
         WHERE r.organization_id = ${opts.organizationId}
           AND r.run_type = ANY(${pgTextArray(runKinds)}::text[])
           ${agentFilter}
+          ${connectionFilter}
         ORDER BY r.created_at DESC, r.id DESC
         LIMIT 60
       `) as unknown as Array<{

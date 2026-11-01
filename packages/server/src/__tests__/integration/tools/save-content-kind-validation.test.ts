@@ -3,8 +3,12 @@
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   primeMemberEventKinds,
+  readEventKindRegistry,
+  resolveEventKindDefinition,
+  type EventKindDefinition,
   validateSaveContentSemanticType,
 } from '../../../utils/event-kind-validation';
+import { ensureMemberEntityType } from '../../../utils/member-entity-type';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import { createTestEntity, createTestOrganization } from '../../setup/test-fixtures';
 
@@ -23,6 +27,7 @@ describe('validateSaveContentSemanticType > entity-type kinds', () => {
   beforeAll(async () => {
     await cleanupTestDatabase();
     org = await createTestOrganization({ name: 'Kind Validation Org' });
+    await ensureMemberEntityType(org.id);
     entity = await createTestEntity({ name: 'Kind Validation Topic', organization_id: org.id });
     alternative = await createTestEntity({
       name: 'Alternative Kind Validation Topic',
@@ -63,8 +68,18 @@ describe('validateSaveContentSemanticType > entity-type kinds', () => {
     `;
   });
 
-  beforeEach(() => {
-    primeMemberEventKinds(org.id, { note: { description: 'A note' } });
+  async function setMemberKinds(kinds: Record<string, EventKindDefinition> | null) {
+    // Write the actual schema: authoring no longer treats a cache as DB truth.
+    await sql`
+      UPDATE entity_types
+      SET event_kinds = ${kinds === null ? null : JSON.stringify(kinds)}::jsonb
+      WHERE organization_id = ${org.id} AND slug = '$member'
+    `;
+    primeMemberEventKinds(org.id, kinds);
+  }
+
+  beforeEach(async () => {
+    await setMemberKinds({ note: { description: 'A note' } });
   });
 
   it('accepts metadata that matches the declared kind', async () => {
@@ -121,7 +136,7 @@ describe('validateSaveContentSemanticType > entity-type kinds', () => {
   });
 
   it('accepts a matching $member kind after a linked metadata mismatch', async () => {
-    primeMemberEventKinds(org.id, { source_item: { description: 'An unrestricted item' } });
+    await setMemberKinds({ source_item: { description: 'An unrestricted item' } });
     const result = await validateSaveContentSemanticType(
       'source_item',
       { item: 'reply' },
@@ -133,7 +148,7 @@ describe('validateSaveContentSemanticType > entity-type kinds', () => {
 
   it('preserves the $member metadata error when it also declares the kind', async () => {
     const memberSchema = { type: 'object', required: ['member_item'] };
-    primeMemberEventKinds(org.id, { source_item: { metadataSchema: memberSchema } });
+    await setMemberKinds({ source_item: { metadataSchema: memberSchema } });
     const result = await validateSaveContentSemanticType(
       'source_item',
       { item: 'reply' },
@@ -146,7 +161,7 @@ describe('validateSaveContentSemanticType > entity-type kinds', () => {
   });
 
   it('preserves permissive validation when there is no $member registry', async () => {
-    primeMemberEventKinds(org.id, null);
+    await setMemberKinds(null);
     const result = await validateSaveContentSemanticType(
       'source_item',
       { item: 'reply' },
@@ -160,5 +175,99 @@ describe('validateSaveContentSemanticType > entity-type kinds', () => {
     const result = await validateSaveContentSemanticType('missing_kind', {}, org.id, [entity.id]);
     expect(result.valid).toBe(false);
     expect(result.errors[0]).toMatch(/Invalid kind 'missing_kind'/);
+  });
+});
+
+// Another replica changes the registry while this pod's 60s cache is warm. Write
+// validation must read committed (or the caller's transaction) state, never the
+// cached copy; rendering may keep using the cache.
+describe('validateSaveContentSemanticType > stale per-pod cache', () => {
+  let org: Awaited<ReturnType<typeof createTestOrganization>>;
+  let entity: Awaited<ReturnType<typeof createTestEntity>>;
+  const sql = getTestDb();
+
+  beforeAll(async () => {
+    org = await createTestOrganization({ name: 'Kind Freshness Org' });
+    await ensureMemberEntityType(org.id);
+    entity = await createTestEntity({
+      name: 'Kind Freshness Topic',
+      entity_type: 'freshness-kind',
+      organization_id: org.id,
+    });
+  });
+
+  async function writeMemberKinds(kinds: Record<string, EventKindDefinition>) {
+    await sql`
+      UPDATE entity_types SET event_kinds = ${sql.json(kinds)}
+      WHERE organization_id = ${org.id} AND slug = '$member'
+    `;
+  }
+
+  it('accepts a kind registered after the cache warmed', async () => {
+    await writeMemberKinds({ note: {}, new_kind: {} });
+    primeMemberEventKinds(org.id, { note: {} });
+    expect((await validateSaveContentSemanticType('new_kind', {}, org.id)).valid).toBe(true);
+  });
+
+  it('rejects a removed kind that the cache still holds', async () => {
+    await writeMemberKinds({ note: {} });
+    primeMemberEventKinds(org.id, { note: {}, retired: {} });
+    expect((await validateSaveContentSemanticType('retired', {}, org.id)).valid).toBe(false);
+  });
+
+  it('enforces a tightened metadata schema over the loose cached one', async () => {
+    await writeMemberKinds({
+      report: {
+        metadataSchema: {
+          type: 'object',
+          required: ['source_revision'],
+          properties: { source_revision: { type: 'integer' } },
+        },
+      },
+    });
+    primeMemberEventKinds(org.id, { report: {} });
+    const result = await validateSaveContentSemanticType('report', { text: 'x' }, org.id);
+    expect(result.valid).toBe(false);
+    expect(result.errors.join(' ')).toContain('source_revision');
+  });
+
+  it('bypasses the linked entity-type cache too', async () => {
+    const setEntityKinds = (kinds: Record<string, EventKindDefinition>) => sql`
+      UPDATE entity_types SET event_kinds = ${sql.json(kinds)}
+      WHERE id = (SELECT entity_type_id FROM entities WHERE id = ${entity.id})
+    `;
+    await writeMemberKinds({ note: {} });
+    await setEntityKinds({ old_kind: {} });
+    // Warm the render cache for this entity, then change the type underneath it.
+    expect(await resolveEventKindDefinition('old_kind', org.id, [entity.id])).toEqual({});
+    await setEntityKinds({ new_entity_kind: {} });
+    const result = await validateSaveContentSemanticType('new_entity_kind', {}, org.id, [entity.id]);
+    expect(result.valid).toBe(true);
+  });
+
+  it('validates against the caller transaction without leaking it into the render cache', async () => {
+    await writeMemberKinds({ note: {} });
+    primeMemberEventKinds(org.id, { note: {} });
+    await sql
+      .begin(async (tx) => {
+        await tx`
+          UPDATE entity_types SET event_kinds = ${tx.json({ note: {}, uncommitted: {} })}
+          WHERE organization_id = ${org.id} AND slug = '$member'
+        `;
+        const result = await validateSaveContentSemanticType(
+          'uncommitted',
+          {},
+          org.id,
+          undefined,
+          readEventKindRegistry(org.id, tx)
+        );
+        expect(result.valid).toBe(true);
+        throw new Error('rollback');
+      })
+      .catch((error: Error) => {
+        if (error.message !== 'rollback') throw error;
+      });
+    expect(await resolveEventKindDefinition('uncommitted', org.id)).toBeNull();
+    expect((await validateSaveContentSemanticType('uncommitted', {}, org.id)).valid).toBe(false);
   });
 });

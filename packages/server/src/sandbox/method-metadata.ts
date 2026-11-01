@@ -110,10 +110,10 @@ export default async (_ctx, client) => {
 };`,
 	},
 	"entities.get": {
-		summary: "Fetch a single entity by id.",
+		summary: "Fetch a stored entity or typed source key. entity_type accepts a local slug or a discovered numeric type ID; the latter identifies its owner without switching execution workspaces. Foreign type IDs are read only through the public visitor projection, never with local owner/source credentials.",
 		access: "read",
 		signature:
-			"entities.get(input: { entity_id: number | string; entity_type?: string; include_deleted?: boolean }): Promise<unknown>",
+			"entities.get(input: { entity_id: number | string; entity_type?: string | number; include_deleted?: boolean }): Promise<unknown>",
 		throws: ["EntityNotFound"],
 		example: "const entity = await client.entities.get({ entity_id: 42 });",
 		usageExample: `export default async (_ctx, client) => {
@@ -169,7 +169,7 @@ export default async (_ctx, client) => {
 			"Create a relationship between two entities. Identity-purpose relationships associate retained records; applied, queued approval, suppressed, and preview results are distinct. Needs the two entity IDs AND a relationship TYPE that already exists — if the relationship type is new, call `entitySchema.createRelType` first; list existing ones with `entitySchema.listRelTypes()`. (`entitySchema.addRule` does NOT create a type; it restricts the allowed source/target entity-type pairs on a type that already exists.)",
 		access: "write",
 		signature:
-			"entities.link(input: { from_entity_id: number | string; from_entity_type?: string; to_entity_id: number | string; to_entity_type?: string; relationship_type_slug: string; source?: 'ui' | 'llm' | 'feed' | 'api'; confidence?: number; metadata?: object; dry_run?: boolean }): Promise<unknown>",
+			"entities.link(input: { from_entity_id: number | string; from_entity_type?: string | number; to_entity_id: number | string; to_entity_type?: string | number; relationship_type_slug: string; source?: 'ui' | 'llm' | 'feed' | 'api'; confidence?: number; metadata?: object; dry_run?: boolean }): Promise<unknown>",
 		example:
 			"await client.entities.link({ from_entity_id: 42, to_entity_id: 43, relationship_type_slug: 'customer_of' });",
 		usageExample: `// Two-hop: the relationship TYPE must exist before linking. Ensure it
@@ -204,10 +204,10 @@ export default async (_ctx, client) => {
 		access: "write",
 	},
 	"entities.listLinks": {
-		summary: "List relationships for a stored entity or source-backed record; record reads accept cursor: null then next_cursor.",
+		summary: "List relationships for a stored entity or source-backed record. entity_type accepts a local slug or discovered numeric type ID. Authored links stay scoped to this workspace; foreign source-native links use only the public visitor projection. Record reads accept cursor: null then next_cursor.",
 		access: "read",
 		signature:
-			"entities.listLinks(input: { entity_id?: number | string; entity_type?: string; record?: { type: string; key: string }; cursor?: string | null; direction?: 'outbound' | 'inbound' | 'both'; relationship_type_slug?: string; source?: 'ui' | 'llm' | 'feed' | 'api'; confidence_min?: number; include_deleted?: boolean; limit?: number; offset?: number }): Promise<unknown>",
+			"entities.listLinks(input: { entity_id?: number | string; entity_type?: string | number; record?: { type: string; key: string }; cursor?: string | null; direction?: 'outbound' | 'inbound' | 'both'; relationship_type_slug?: string; source?: 'ui' | 'llm' | 'feed' | 'api'; confidence_min?: number; include_deleted?: boolean; limit?: number; offset?: number }): Promise<unknown>",
 	},
 
 	// entitySchema

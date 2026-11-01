@@ -45,6 +45,23 @@ must advertise both `queryCapabilities.exactMatch` and `queryCapabilities.verbat
 unsupported sources reject the lookup before executing it. Legacy view slugs
 retain trimmed matching.
 
+Reference selectors also accept a discovered numeric entity-type ID. A string
+type slug resolves only in the current workspace; a numeric type ID identifies
+one exact schema and derives its owner. Private authored relationships may
+target public source-backed types, with live reads limited to the target's
+public visitor projection: no workspace role, no private connection, and no
+paired device. The caller's agent read restrictions still apply, and this
+grants no permission to switch execution workspaces. An edge belongs to the
+workspace that authored it: `listLinks` on another workspace's public record
+returns only the caller's own edges, and rows link foreign endpoints to their
+owner's page (`from_entity_url`/`to_entity_url`). Persisted references retain
+type IDs, not re-resolved names; retiring a type cannot retarget old edges to a
+reused slug. A publisher may delete or rewrite the backing of a type other
+workspaces cite (their edges are then withheld or read the new rows), but its
+record key cannot change while any live edge names it: create a new type
+instead. A numeric type ID is specific to one database: a portable
+`lobu.config` names types by slug, and a caller discovers IDs at runtime.
+
 `get` and `listLinks` accept either reference. `link`, `unlink`, and `updateLink`
 accept `from_entity_id`/`to_entity_id`, with `from_entity_type`/`to_entity_type`
 required for strings. Ordinary relationships support every stored/source pair.

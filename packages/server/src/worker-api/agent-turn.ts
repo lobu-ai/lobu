@@ -8,9 +8,9 @@ import { logRunFailure } from "../runs/log-run-failure";
  * terminal transition.
  *
  * `sweepStaleAgentTurnRuns` covers the path that never reaches this route: a
- * worker that crashes mid-turn is re-run once if it recorded no tool activity,
- * otherwise terminalized by the reaper, which delivers the error the
- * completion route would have.
+ * worker that crashes mid-turn is re-run once if it recorded no side-effecting
+ * tool activity, otherwise terminalized by the reaper, which delivers the error
+ * the completion route would have.
  */
 import {
 	AGENT_ERRORS,
@@ -44,7 +44,7 @@ import { incrementCounter } from "../gateway/metrics/prometheus";
 import { intervals } from "../config/intervals";
 import { runLeaseFence } from "../runs/run-lease";
 import { classifyRunOutcome } from "../runs/run-outcome";
-import { AGENT_TURN_MAX_REQUEUES, AGENT_TURN_TOOL_LOG_MAX, insertAgentTurnResponse, agentTurnClaimEligible, isStaleAgentTurnReport, lockAgentTurnRun, pendingAgentTurnInputs, releaseNextAgentTurn, resetAgentTurnAdmission, turnMarkerDeployment, type NativeTurnRun } from "../runs/agent-turn-inputs";
+import { AGENT_TURN_MAX_REQUEUES, AGENT_TURN_TOOL_LOG_MAX, agentTurnTraceMayHaveActed, insertAgentTurnResponse, agentTurnClaimEligible, isStaleAgentTurnReport, lockAgentTurnRun, pendingAgentTurnInputs, releaseNextAgentTurn, resetAgentTurnAdmission, turnMarkerDeployment, type NativeTurnRun } from "../runs/agent-turn-inputs";
 import { errorMessage } from "../utils/errors";
 import { stripNul } from "../utils/strip-nul";
 import { authorizeRunForWorker } from "./shared";
@@ -388,18 +388,22 @@ async function publishTurnToolEvents(
 		});
 		// Committed with the traces. The gateway already stamped this for any
 		// side-effecting call (`markAgentTurnToolStarted`); a stored trace is
-		// the same evidence for a tool that reached no gateway route. The owner
-		// input's trace ids are kept too, so a Retry of this turn can read the
-		// stored traces back by key (`buildInterruptedTurnNote`).
+		// the same evidence only for a tool that reached no gateway route
+		// (`agentTurnTraceMayHaveActed`). A read the gateway passed unstamped
+		// stays re-runnable. The owner input's trace ids are kept either way,
+		// so a Retry of this turn can read the stored traces back by key
+		// (`buildInterruptedTurnNote`).
 		const known = owner.run_metadata?.turn_tool_call_ids ?? [];
 		const callIds = [...new Set([
 			...known,
 			...events.slice(0, stored).filter((event) => event.input_run_id === undefined).map((event) => event.tool_call_id),
 		])].slice(0, AGENT_TURN_TOOL_LOG_MAX);
-		if (stored > 0 && (owner.run_metadata?.turn_tool_started !== true || callIds.length !== known.length)) {
+		const acted = owner.run_metadata?.turn_tool_started !== true
+			&& events.slice(0, stored).some((event) => agentTurnTraceMayHaveActed(owner.action_input?.turn, event.name));
+		if (acted || callIds.length !== known.length) {
 			await tx`UPDATE public.runs
         SET run_metadata = COALESCE(run_metadata, '{}'::jsonb)
-          || ${tx.json({ turn_tool_started: true, turn_tool_call_ids: callIds })}::jsonb
+          || ${tx.json({ ...(acted ? { turn_tool_started: true } : {}), turn_tool_call_ids: callIds })}::jsonb
         WHERE id = ${runId}`;
 		}
 		return stored;
@@ -1110,11 +1114,12 @@ export async function completeAgentTurnRun(c: Context<{ Bindings: Env }>) {
  *    staleness threshold ends `timeout` / WORKER_UNRESPONSIVE. The worker's beat is a
  *    host interval that keeps firing when the turn itself is wedged, so
  *    heartbeat age alone never ends such a turn. This path is terminal;
- *  - a lost heartbeat marks the worker stale. If that attempt recorded no tool
- *    activity and the turn has not been re-run yet, it goes back to `pending`
- *    for one fresh attempt instead of an error, starting from the same stored
- *    snapshot. Gateway side-effect admission and worker receipts both count. Otherwise
- *    `timeout` / WORKER_DIED as before.
+ *  - a lost heartbeat marks the worker stale. If that attempt recorded no
+ *    side-effecting tool activity and the turn has not been re-run yet, it goes
+ *    back to `pending` for one fresh attempt instead of an error, starting from
+ *    the same stored snapshot. Gateway side-effect admission counts, and so does
+ *    a worker receipt for a tool that reached no gateway route; a read the
+ *    gateway passed does not. Otherwise `timeout` / WORKER_DIED as before.
  */
 export async function sweepStaleAgentTurnRuns(thresholdSeconds: number): Promise<{ reaped: number; delivered: number; requeued: number }> {
   const sql = getDb();
@@ -1148,7 +1153,8 @@ export async function sweepStaleAgentTurnRuns(thresholdSeconds: number): Promise
       const wedged = !cancelled && !neverClaimed && state.wedged;
       const claims = run.action_input?.credential ? verifyWorkerToken(run.action_input.credential) : null;
       // The flag is stamped `false` at claim and `true` by the gateway before
-      // any side-effecting call this attempt made, and by a stored trace. An
+      // any side-effecting call this attempt made, and by a stored trace of a
+      // tool that reached no gateway route (`agentTurnTraceMayHaveActed`). An
       // absent flag (claimed before it existed) is unknown and terminal.
       // A worker that never sent its `turn_credential` (an older binary) cannot
       // be fenced from the attempt that would replace it, so it is not re-run.
@@ -1195,7 +1201,7 @@ export async function sweepStaleAgentTurnRuns(thresholdSeconds: number): Promise
     if (result === 'requeued') {
       requeued++;
       incrementCounter('lobu_agent_turn_requeued_total');
-      logger.warn({ runId: Number(candidate.id) }, 'Agent turn heartbeat lost without recorded tool activity; re-running the turn');
+      logger.warn({ runId: Number(candidate.id) }, 'Agent turn heartbeat lost without recorded side-effecting tool activity; re-running the turn');
       continue;
     }
     reaped++;

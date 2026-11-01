@@ -36,10 +36,12 @@ const KNOWN: Record<string, string> = {
   'tools/admin/manage_operations/handlers/execute.ts -> decideDeviceAccess': 'that tier, for a device-pinned connection',
   'lib/connector-pushdown.ts -> decideDeviceAccess': 'SourceReadScope.chatAccess, for a device-backed feed',
   'lib/connector-pushdown.ts -> readDeviceFeed': 'after the gate above',
+  'utils/entity-reference.ts -> chatAccessOfToolContext': 'the source read ToolContext (public visitor for a foreign type)',
+  'utils/entity-reference.ts -> decideDeviceAccess': 'that tier, for a device-pinned backing_source connection',
   // Tool entry points: the caller's own ToolContext.
   'tools/admin/manage_feeds.ts -> sourceReadScopeFromToolContext': 'read_feeds ToolContext',
   'tools/admin/manage_feeds.ts -> readSourceFeedPage': 'that scope',
-  'utils/relationship-reads.ts -> sourceReadScopeFromToolContext': 'record links ToolContext forwarded unchanged by manage_entity',
+  'utils/relationship-reads.ts -> sourceReadScopeFromToolContext': 'record links ToolContext from manage_entity (public visitor for a foreign anchor)',
   'utils/relationship-reads.ts -> readSourceRecordLinks': 'that scope, preserving tokenType and sourceContext',
   'tools/get_content/handler.ts -> sourceReadScopeFromToolContext': 'record activity ToolContext',
   'tools/get_content/handler.ts -> readSourceRecordActivity': 'that scope',

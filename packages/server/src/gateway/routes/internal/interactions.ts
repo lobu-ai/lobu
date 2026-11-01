@@ -1,12 +1,21 @@
 #!/usr/bin/env bun
 
-import { createLogger, getErrorMessage } from "@lobu/core";
+import {
+  createLogger,
+  getErrorMessage,
+  getTracer,
+  runInSpanContext,
+  traceparentHeader,
+  withChildSpan,
+  type WorkerTokenData,
+} from "@lobu/core";
 import {
 	isApprovalAttribution,
 	isInteractionResourceKind,
 } from "@lobu/core/contracts/interaction-envelope";
 import { Hono } from "hono";
 import { getDb } from "../../../db/client.js";
+import { agentTurnIdentityFromClaims } from "../../../tools/turn-write-idempotency.js";
 import type { InteractionService } from "../../interactions.js";
 import { CHAT_SENDER_NOT_LINKED, isConfinedChatTurn } from "../../orchestration/chat-turn-actor.js";
 import { errorResponse, getVerifiedWorker } from "../shared/helpers.js";
@@ -16,6 +25,42 @@ import { captureSideEffect } from "./capture-mode.js";
 import { sendOncePerTurnInput } from "./turn-write-once.js";
 
 const logger = createLogger("internal-interaction-routes");
+
+/** Recover the originating trace from the authenticated turn, across worker HTTP. */
+async function withInteractionTrace<T>(
+  worker: WorkerTokenData,
+  post: () => Promise<T>
+): Promise<T> {
+  const turn = agentTurnIdentityFromClaims(worker);
+  if (!getTracer() || !turn) return post();
+
+  let parent: string | null = null;
+  try {
+    const [stored] = await getDb()<{ traceparent: string | null }>`
+      SELECT action_input->'reply'->'platform_metadata'->>'traceparent' AS traceparent
+      FROM runs
+      WHERE id = ${turn.runId} AND run_type = 'agent_turn'
+        AND organization_id = ${turn.organizationId}
+        AND action_input->'turn'->>'agent_id' = ${turn.agentId}
+        AND action_input->'turn'->>'conversation_id' = ${turn.conversationId}
+        AND action_input->'turn'->>'message_id' = ${turn.messageId}
+        AND action_input->'reply'->>'user_id' = ${worker.userId}
+    `;
+    parent = traceparentHeader(stored?.traceparent);
+  } catch (error) {
+    // Observability must not block an otherwise authorized card. Only the
+    // lookup is best-effort; never retry a post whose outcome is uncertain.
+    logger.warn("Unable to recover interaction trace", { error: getErrorMessage(error) });
+  }
+  if (!parent) return post();
+
+  return withChildSpan(
+    "interaction_post",
+    parent,
+    (span) => runInSpanContext(span, post),
+    { "lobu.run_id": turn.runId }
+  );
+}
 
 /**
  * Create internal interaction routes (Hono)
@@ -78,7 +123,7 @@ export function createInteractionRoutes(
           worker,
           "interactions.create",
           { conversationId, channelId, body },
-          async () => {
+          () => withInteractionTrace(worker, async () => {
             if (interactionType === "link_button") {
               const posted = await interactionService.postLinkButton(
                 userId,
@@ -157,7 +202,7 @@ export function createInteractionRoutes(
             );
 
             return c.json({ id: posted.id, status: "posted" });
-          }
+          })
         );
       } catch (error) {
         // Serialize the message + stack explicitly. The console logger

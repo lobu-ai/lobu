@@ -19,12 +19,21 @@ import { MEMBER_ENTITY_TYPE_SLUG } from '../tools/constants';
 import type { ToolContext } from '../tools/registry';
 import { type EntityEndpoint, type ResolvedEntityReference, resolveEntityReference } from './entity-reference';
 import { ToolUserError } from './errors';
+import { buildEntityViewUrl } from '../tools/view-urls';
 import { canSeeMemberList } from './member-entity-type';
 import { RELATIONSHIP_CLAIMS_METADATA_KEY } from './relationship-claims';
 import { ACL_MANAGED_TYPE_SQL } from './relationship-validation';
 import { readSourceRecordLinks } from './source-record-reads';
 
 type ListLinksArgs = Static<typeof ListLinksAction>;
+interface StoredEndpointRow {
+  id: number;
+  organization_id: string;
+  slug: string;
+  entity_type: string;
+  parent_slug: string | null;
+  parent_entity_type: string | null;
+}
 type NativeRelationshipPage = Awaited<ReturnType<typeof readSourceRecordLinks>>;
 
 export const RELATIONSHIP_SELECT = `
@@ -39,9 +48,11 @@ export const RELATIONSHIP_SELECT = `
   ${ACL_MANAGED_TYPE_SQL} as acl_managed,
   COALESCE(fe.name, r.from_source_key) as from_entity_name,
   fet.slug as from_entity_type,
+  fet.id as from_entity_type_id,
   COALESCE(fe.slug, r.from_source_key) as from_entity_slug,
   COALESCE(te.name, r.to_source_key) as to_entity_name,
   tet.slug as to_entity_type,
+  tet.id as to_entity_type_id,
   COALESCE(te.slug, r.to_source_key) as to_entity_slug,
   NULLIF(r.metadata - '${RELATIONSHIP_CLAIMS_METADATA_KEY}', '{}'::jsonb) AS metadata,
   r.confidence,
@@ -136,15 +147,37 @@ export async function readableRelationships(
     if (typeof row.from_entity_id === 'number') storedIds.add(row.from_entity_id);
     if (typeof row.to_entity_id === 'number') storedIds.add(row.to_entity_id);
   }
-  const stored = storedIds.size ? await sql<{ id: number }>`
-    SELECT e.id FROM entities e JOIN organization o ON o.id = e.organization_id
+  const stored = storedIds.size ? await sql<StoredEndpointRow>`
+    SELECT e.id, e.organization_id, e.slug, et.slug AS entity_type, pe.slug AS parent_slug, pet.slug AS parent_entity_type
+    FROM entities e JOIN organization o ON o.id = e.organization_id
+    JOIN entity_types et ON et.id = e.entity_type_id
+    LEFT JOIN entities pe ON pe.id = e.parent_id AND pe.deleted_at IS NULL
+    LEFT JOIN entity_types pet ON pet.id = pe.entity_type_id
     WHERE e.id = ANY(${pgBigintArray([...storedIds])}::bigint[]) AND e.deleted_at IS NULL
       AND (e.organization_id = ${ctx.organizationId} OR o.visibility = 'public')
   ` : [];
-  const allowed = new Set((await filterEntityReadRows(sql, stored, restrictions)).map(row => Number(row.id)));
+  const allowed = new Map((await filterEntityReadRows(sql, stored, restrictions)).map(row => [Number(row.id), row]));
+  // Foreign endpoints link to their owner's page; same-workspace peeks are unchanged.
+  const foreignUrls = new Map<string, Promise<string | undefined>>();
+  function foreignUrl(endpoint: { organizationId: string; entity_type: string; slug: string;
+    parent_entity_type?: string | null; parent_slug?: string | null }): Promise<string | undefined> | undefined {
+    if (endpoint.organizationId === ctx.organizationId) return undefined;
+    const key = JSON.stringify([endpoint.organizationId, endpoint.parent_entity_type, endpoint.parent_slug, endpoint.entity_type, endpoint.slug]);
+    let url = foreignUrls.get(key);
+    if (!url) {
+      url = buildEntityViewUrl({ ...ctx, organizationId: endpoint.organizationId }, endpoint);
+      foreignUrls.set(key, url);
+    }
+    return url;
+  }
+  function endpointUrl(id: RelationshipRow['from_entity_id'], resolved: ResolvedEntityReference | null) {
+    if (resolved) return foreignUrl({ organizationId: resolved.organizationId, entity_type: resolved.entityType, slug: resolved.slug });
+    const row = typeof id === 'number' ? allowed.get(id) : undefined;
+    return row ? foreignUrl({ ...row, organizationId: String(row.organization_id) }) : undefined;
+  }
   const pending = new Map<string, Promise<ResolvedEntityReference>>();
 
-  function resolveSource(id: string, type: string | undefined) {
+  function resolveSource(id: string, type: string | number | undefined) {
     const key = JSON.stringify([type, id]);
     let result = pending.get(key);
     if (!result) {
@@ -160,8 +193,8 @@ export async function readableRelationships(
     const touchesMember = row.from_entity_type === MEMBER_ENTITY_TYPE_SLUG || row.to_entity_type === MEMBER_ENTITY_TYPE_SLUG;
     if (hiddenStoredEndpoint || (touchesMember && !canSeeMemberList(ctx.memberRole))) return null;
     const outcomes = await Promise.allSettled([
-      typeof row.from_entity_id === 'string' ? resolveSource(row.from_entity_id, row.from_entity_type) : null,
-      typeof row.to_entity_id === 'string' ? resolveSource(row.to_entity_id, row.to_entity_type) : null,
+      typeof row.from_entity_id === 'string' ? resolveSource(row.from_entity_id, row.from_entity_type_id ?? row.from_entity_type) : null,
+      typeof row.to_entity_id === 'string' ? resolveSource(row.to_entity_id, row.to_entity_type_id ?? row.to_entity_type) : null,
     ]);
     const rejected = outcomes.filter((outcome): outcome is PromiseRejectedResult => outcome.status === 'rejected');
     // Hidden endpoints suppress failure IDs even when another read fails first.
@@ -177,10 +210,13 @@ export async function readableRelationships(
       throw error;
     }
     const [from, to] = outcomes.map(outcome => outcome.status === 'fulfilled' ? outcome.value : null);
+    const [fromUrl, toUrl] = await Promise.all([endpointUrl(row.from_entity_id, from), endpointUrl(row.to_entity_id, to)]);
     return {
       ...row,
       ...(from ? { from_entity_name: from.name } : {}),
       ...(to ? { to_entity_name: to.name } : {}),
+      ...(fromUrl ? { from_entity_url: fromUrl } : {}),
+      ...(toUrl ? { to_entity_url: toUrl } : {}),
     };
   }
 

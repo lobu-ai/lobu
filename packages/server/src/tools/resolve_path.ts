@@ -13,8 +13,9 @@ import { findUngrantedMemberWorkspace, formatUngrantedMemberMessage, resolveGran
 import { getDb } from '../db/client';
 import type { Env } from '../index';
 import { feedLinkedToBusinessEntitySql } from '../authz/channel-about';
+import { publicBrowseContext } from '../authz/public-browse-context';
 import { entityLinkMatchSql } from '../utils/content-search';
-import { operationalTrailExclusionSql } from '../utils/content-search/sql-fragments';
+import { internalOpsExclusionSql, operationalTrailExclusionSql } from '../utils/content-search/sql-fragments';
 import { ToolUserError, toolErrorHttpStatus } from '../utils/errors';
 import { resolveMemberSchemaFieldsFromSchema } from '../utils/member-entity-type';
 import {
@@ -405,14 +406,7 @@ async function _resolvePath(
       // Cross-workspace public browse is intentionally readable, but never
       // inherits the caller's role or grant capabilities from the URL-bound
       // workspace.
-      resolvedCtx = {
-        ...ctx,
-        organizationId: workspace.id,
-        memberRole: null,
-        allowCrossOrg: false,
-        grantedOrganizationIds: ctx.tokenType === 'oauth' ? [] : null,
-        directSearchFederation: false,
-      };
+      resolvedCtx = publicBrowseContext(ctx, workspace.id);
     }
   }
 
@@ -1052,8 +1046,7 @@ function readBoundarySql(boundary: EventReadBoundary): string {
   const clauses: string[] = [];
   if (boundary.excludeWorkspaceAudit) {
     clauses.push(
-      `NOT (ev.semantic_type = 'audit' AND COALESCE(ev.origin_type, '') = 'tool_invocation')`,
-      `NOT (ev.semantic_type = 'change' AND COALESCE(ev.metadata->>'category', '') IN ('config', 'lifecycle'))`,
+      internalOpsExclusionSql('ev'),
       `NOT (ev.metadata ? '_lobu_workspace_audit')`
     );
   }

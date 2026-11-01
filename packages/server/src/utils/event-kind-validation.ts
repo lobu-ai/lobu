@@ -107,14 +107,11 @@ const eventKindsCache = new TtlCache<Record<string, EventKindDefinition> | null>
 
 /**
  * Overwrite this pod's cached $member event_kinds for an org with a
- * DB-authoritative value. ensureMemberEntityType calls this on EVERY invocation
- * with the event_kinds it just read/wrote, so a later validation in the same
- * request (and the 60s TTL window after) resolves against current DB truth — not
- * a stale copy. This closes a cross-replica gap: if another replica performed the
- * `guidance` backfill, this pod would otherwise take ensureMemberEntityType's
- * no-op path and keep serving a pre-guidance cache, rejecting guidance saves for
- * up to the TTL. `null` means "no $member registry" (accept-any), matching the
- * loader's own null semantics.
+ * DB-authoritative value. ensureMemberEntityType calls this on every invocation
+ * with the event_kinds it just read or wrote, so rendering
+ * (resolveEventKindDefinition) sees current kinds without waiting out the TTL.
+ * Write validation never reads this cache. `null` means "no $member registry"
+ * (accept-any), matching the loader's own null semantics.
  */
 export function primeMemberEventKinds(
   orgId: string,
@@ -156,14 +153,28 @@ async function getMemberEventKinds(
   return eventKindsCache.getOrSet(`${orgId}:$member`, () => loadMemberEventKinds(orgId));
 }
 
-/**
- * Re-read an org's $member event_kinds from the DB and overwrite this pod's
- * cached copy. For writes that must validate against committed registry state
- * (a kind registered on another replica, or seconds ago on this one) rather
- * than a copy up to the TTL old.
- */
-export async function refreshMemberEventKinds(orgId: string): Promise<void> {
-  primeMemberEventKinds(orgId, await loadMemberEventKinds(orgId));
+async function loadEntityTypeEventKinds(
+  orgId: string,
+  entityId: number,
+  sql: DbClient = getDb()
+): Promise<Record<string, EventKindDefinition> | null> {
+  const rows = await sql`
+    SELECT et.event_kinds
+    FROM entities e
+    JOIN entity_types et ON et.id = e.entity_type_id
+    WHERE e.id = ${entityId}
+      AND e.organization_id = ${orgId}
+      AND e.deleted_at IS NULL
+      AND et.deleted_at IS NULL
+    LIMIT 1
+  `;
+  if (rows.length > 0) {
+    const eventKinds = rows[0].event_kinds;
+    if (eventKinds && typeof eventKinds === 'object') {
+      return eventKinds as Record<string, EventKindDefinition>;
+    }
+  }
+  return null;
 }
 
 /**
@@ -175,27 +186,43 @@ async function getEntityTypeEventKinds(
   entityId: number,
   db?: DbClient
 ): Promise<Record<string, EventKindDefinition> | null> {
-  const load = async () => {
-    const sql = db ?? getDb();
-    const rows = await sql`
-      SELECT et.event_kinds
-      FROM entities e
-      JOIN entity_types et ON et.id = e.entity_type_id
-      WHERE e.id = ${entityId}
-        AND e.organization_id = ${orgId}
-        AND e.deleted_at IS NULL
-        AND et.deleted_at IS NULL
-      LIMIT 1
-    `;
-    if (rows.length > 0) {
-      const eventKinds = rows[0].event_kinds;
-      if (eventKinds && typeof eventKinds === 'object') {
-        return eventKinds as Record<string, EventKindDefinition>;
+  if (db) return loadEntityTypeEventKinds(orgId, entityId, db);
+  return eventKindsCache.getOrSet(`${orgId}:entity:${entityId}`, () =>
+    loadEntityTypeEventKinds(orgId, entityId)
+  );
+}
+
+/** Authoritative event-kind registry reads for one write. */
+export interface EventKindRegistry {
+  member(): Promise<Record<string, EventKindDefinition> | null>;
+  entityType(entityId: number): Promise<Record<string, EventKindDefinition> | null>;
+}
+
+/**
+ * Read an org's registry from the database (or the caller's transaction) for
+ * one write, loading $member and each linked entity once and reusing them for
+ * every row that write validates. Never consults or populates the per-pod
+ * render cache, so a kind changed on another replica is seen immediately and
+ * transaction-local definitions never leak. Create one per write; do not
+ * hold it across writes.
+ */
+export function readEventKindRegistry(orgId: string, db: DbClient = getDb()): EventKindRegistry {
+  let member: Promise<Record<string, EventKindDefinition> | null> | undefined;
+  const entities = new Map<number, Promise<Record<string, EventKindDefinition> | null>>();
+  return {
+    member: () => {
+      member ??= loadMemberEventKinds(orgId, db);
+      return member;
+    },
+    entityType: (entityId) => {
+      let kinds = entities.get(entityId);
+      if (!kinds) {
+        kinds = loadEntityTypeEventKinds(orgId, entityId, db);
+        entities.set(entityId, kinds);
       }
-    }
-    return null;
+      return kinds;
+    },
   };
-  return db ? load() : eventKindsCache.getOrSet(`${orgId}:entity:${entityId}`, load);
 }
 
 /**
@@ -316,16 +343,21 @@ export async function validateSaveContentSemanticType(
   semanticType: string,
   metadata: Record<string, unknown> | undefined | null,
   orgId: string,
-  entityIds?: number[]
+  entityIds?: number[],
+  registry: EventKindRegistry = readEventKindRegistry(orgId)
 ): Promise<KindValidationResult> {
-  const memberKinds = await getMemberEventKinds(orgId);
+  // This gates writes and authoring (saves, view actions, notifications,
+  // Automation outputs), so it reads authoritative registry state, never the
+  // per-pod cache, which can lag a kind added, removed or tightened on another
+  // replica. Multi-row writes pass one registry so each type is read once.
+  const memberKinds = await registry.member();
 
   // An event can be linked to several entity types. Accept a custom kind when
   // any linked type declares it; array order must not change authorability.
   let declaredMismatch: KindValidationResult | null = null;
   if (entityIds && entityIds.length > 0) {
     for (const entityId of entityIds) {
-      const entityTypeKinds = await getEntityTypeEventKinds(orgId, entityId);
+      const entityTypeKinds = await registry.entityType(entityId);
       if (!entityTypeKinds) continue;
       // Try entity type kinds first (more specific)
       const entityResult = validateKindAgainstDefinitions(semanticType, metadata, entityTypeKinds);
