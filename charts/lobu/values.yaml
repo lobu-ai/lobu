@@ -154,7 +154,8 @@ app:
     maxSkew: 1
     whenUnsatisfiable: ScheduleAnyway
 
-# Worker deployment settings
+# Worker deployment settings. While worker pods run (enabled, replicaCount > 0)
+# the app gets LOBU_DISABLE_EMBEDDED_WORKER=1, so only worker pods claim runs.
 worker:
   enabled: true
   replicaCount: 1
