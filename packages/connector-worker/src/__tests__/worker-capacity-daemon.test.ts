@@ -14,6 +14,35 @@ function deferred<T = void>() {
 }
 
 describe("resource-aware worker admission", () => {
+  test("bare-metal admission uses available memory, including reclaimable cache", () => {
+    const unavailable = () => { throw new Error('no cgroup files'); };
+    for (const [availableBytes, expectedUsed] of [[300, 700], [1000, 0], [1200, 0]] as const) {
+      const sample = createResourceSampler(unavailable, 'darwin', () => ({ limitBytes: 1000, availableBytes }))();
+      expect(sample?.memory).toEqual([{ usedBytes: expectedUsed, limitBytes: 1000 }]);
+    }
+    expect(createResourceSampler(unavailable, 'linux', () => ({ limitBytes: 1000, availableBytes: Number.NaN }))()).toBeNull();
+  });
+
+  test("an unbounded cgroup v2 root falls back to host resources", () => {
+    const files: Record<string, string> = {
+      '/proc/self/cgroup': '0::/\n',
+      '/proc/self/mountinfo': '1 0 0:1 / /sys/fs/cgroup rw - cgroup2 cgroup rw\n',
+    };
+    // The unified root has no memory.max; a controller that is not enabled
+    // for a child likewise exposes no limit file.
+    const sample = createResourceSampler(path => {
+      if (!(path in files)) throw Object.assign(new Error('unavailable'), { code: 'ENOENT' });
+      return files[path]!;
+    }, 'linux', () => ({ limitBytes: 1000, availableBytes: 800 }))();
+    expect(sample?.memory).toEqual([{ usedBytes: 200, limitBytes: 1000 }]);
+    expect(sample?.cpu[0]?.key).toBe('process');
+    const unreadable = createResourceSampler(path => {
+      if (!(path in files)) throw Object.assign(new Error('denied'), { code: 'EACCES' });
+      return files[path]!;
+    }, 'linux', () => ({ limitBytes: 1000, availableBytes: 800 }));
+    expect(unreadable()).toBeNull();
+  });
+
   test("native isolates respect resource admission through the real HTTP client", async () => {
     const fixture = fileURLToPath(new URL('./fixtures/resource-admission.fixture.ts', import.meta.url));
     const child = Bun.spawn(['node', '--import', 'tsx', '--test', fixture], {
@@ -116,19 +145,19 @@ describe("resource-aware worker admission", () => {
       '/sys/fs/cgroup/tenant/cpu.stat': 'usage_usec 125000\n',
     };
     const sample = createResourceSampler(path => {
-      if (!(path in files)) throw new Error('unavailable');
+      if (!(path in files)) throw Object.assign(new Error('unavailable'), { code: 'ENOENT' });
       return files[path]!;
     }, 'linux')();
     expect(sample?.memory).toContainEqual({ usedBytes: 700, limitBytes: 1000 });
     expect(sample?.cpu).toContainEqual({ key: '/sys/fs/cgroup/tenant', usageMicros: 125000, cores: 0.5 });
     files['/sys/fs/cgroup/tenant/memory.stat'] = 'inactive_file 600\n';
     expect(createResourceSampler(path => {
-      if (!(path in files)) throw new Error('unavailable');
+      if (!(path in files)) throw Object.assign(new Error('unavailable'), { code: 'ENOENT' });
       return files[path]!;
     }, 'linux')()?.memory).toContainEqual({ usedBytes: 100, limitBytes: 1000 });
     delete files['/sys/fs/cgroup/tenant/memory.current'];
     expect(createResourceSampler(path => {
-      if (!(path in files)) throw new Error('unavailable');
+      if (!(path in files)) throw Object.assign(new Error('unavailable'), { code: 'ENOENT' });
       return files[path]!;
     }, 'linux')()).toBeNull();
   });
@@ -152,7 +181,7 @@ describe("resource-aware worker admission", () => {
       '/cg/acct/cpuacct.usage': '125000000',
     };
     const read = (path: string) => {
-      if (!(path in files)) throw new Error('unavailable');
+      if (!(path in files)) throw Object.assign(new Error('unavailable'), { code: 'ENOENT' });
       return files[path]!;
     };
     const sample = createResourceSampler(read, 'linux')();

@@ -33,7 +33,7 @@ limit. The reserve is the smaller of 512 MiB and 20% of the limit. Recovery
 uses lower thresholds (60% CPU, 70% memory including the reserve) to avoid
 oscillation. Linux cgroup v1/v2 counters include tool child processes and
 honor visible ancestor limits; inactive file cache is excluded from memory
-working set. Without container limits the host memory and process CPU are
+working set. Without container limits host available memory and process CPU are
 used. Unreadable bounded usage pauses admission. Existing claims finish,
 and resources are rechecked locally without increasing heartbeat traffic.
 Embedded workers and device daemons retain their existing fixed budgets.

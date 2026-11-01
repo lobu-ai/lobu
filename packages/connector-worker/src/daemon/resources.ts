@@ -10,6 +10,13 @@ export interface ResourceSample {
 type Read = (path: string) => string;
 interface Group { root: string; leaf: string; v2: boolean; }
 
+function hostMemory(): { limitBytes: number; availableBytes: number } {
+  const runtime = process as typeof process & { availableMemory?: () => number };
+  // Available memory includes reclaimable host cache; free memory alone can
+  // leave an otherwise healthy bare-metal worker permanently paused.
+  return { limitBytes: totalmem(), availableBytes: runtime.availableMemory?.() ?? freemem() };
+}
+
 function optional(read: Read, path: string): string | undefined {
   try { return read(path).trim(); } catch { return undefined; }
 }
@@ -76,23 +83,28 @@ function ancestors(group: Group): string[] {
 /** Container-wide counters include isolate threads and spawned tool children. */
 export function createResourceSampler(
   read: Read = path => readFileSync(path, 'utf8'),
-  platform: string = process.platform
+  platform: string = process.platform,
+  readHostMemory: typeof hostMemory = hostMemory
 ): () => ResourceSample | null {
   const discovered = platform === 'linux' ? groups(read) : {};
   return () => {
     const memory: ResourceSample['memory'] = [];
     const cpu: ResourceSample['cpu'] = [];
-    const hostMemory = totalmem();
+    const host = readHostMemory();
+    if (!Number.isFinite(host.limitBytes) || host.limitBytes <= 0 || !Number.isFinite(host.availableBytes) || host.availableBytes < 0) return null;
     if (discovered.memory) {
-      let readable = false;
       for (const path of ancestors(discovered.memory)) {
-        const raw = optional(read, join(path, discovered.memory.v2 ? 'memory.max' : 'memory.limit_in_bytes'));
-        if (raw === undefined) continue;
-        readable = true;
+        let raw: string;
+        try {
+          raw = read(join(path, discovered.memory.v2 ? 'memory.max' : 'memory.limit_in_bytes')).trim();
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') return null;
+          continue;
+        }
         const limit = positive(raw);
         if (raw !== 'max' && limit === undefined) return null;
         // v2 `max` and v1's huge unlimited sentinel use the host bound.
-        if (!limit || limit >= hostMemory) continue;
+        if (!limit || limit >= host.limitBytes) continue;
         const usage = optional(read, join(path, discovered.memory.v2 ? 'memory.current' : 'memory.usage_in_bytes'));
         const used = usage === undefined ? Number.NaN : Number(usage);
         if (!Number.isFinite(used) || used < 0) return null;
@@ -104,9 +116,10 @@ export function createResourceSampler(
         // large source read, even when resident job memory is small.
         memory.push({ usedBytes: Math.max(0, used - inactive), limitBytes: limit });
       }
-      if (!readable) return null;
     }
-    if (memory.length === 0) memory.push({ usedBytes: hostMemory - freemem(), limitBytes: hostMemory });
+    // The unified root (or a hierarchy without the memory controller) has
+    // no limit file. Only a discovered bound requires a readable usage counter.
+    if (memory.length === 0) memory.push({ usedBytes: Math.max(0, host.limitBytes - host.availableBytes), limitBytes: host.limitBytes });
 
     if (discovered.cpu) {
       for (const path of ancestors(discovered.cpu)) {
