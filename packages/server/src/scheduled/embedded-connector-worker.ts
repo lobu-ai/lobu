@@ -14,8 +14,9 @@
  * LOCKED LIMIT 1` + `claimed_by = worker_id`), so an embedded daemon and
  * any external fleet worker co-exist without double-execution.
  *
- * Opt-out: set `LOBU_DISABLE_EMBEDDED_WORKER=1` (prod deployments with a
- * separate connector-worker pod).
+ * Opt-out: set `LOBU_DISABLE_EMBEDDED_WORKER=1`. The Helm chart sets it on the
+ * app whenever worker pods run, so a rollout never kills runs this in-process
+ * worker holds (it drains for 15s; worker pods drain for their grace period).
  */
 
 import { hostname } from 'node:os';

@@ -36,7 +36,8 @@ export interface NativeTurnRun {
      * Whether the current attempt may have caused a side effect. Stamped
      * `false` at claim, and `true` by the gateway BEFORE it executes any
      * side-effecting call made with the turn's credential
-     * ({@link markAgentTurnToolStarted}) and with the first stored tool trace.
+     * ({@link markAgentTurnToolStarted}) and with the first stored trace of a
+     * tool that reached no gateway route ({@link agentTurnTraceMayHaveActed}).
      * Absent means unknown, which is never re-run.
      */
     turn_tool_started?: boolean;
@@ -188,6 +189,27 @@ export async function markAgentTurnToolStarted(
           ELSE run_metadata->'turn_started_tools' END)
       WHERE id = ${runId}`;
   });
+}
+
+/**
+ * Whether a stored trace of `toolName` is evidence on its own that the attempt
+ * may have acted, read against the tool catalog the gateway stored on the run
+ * (never the worker's body).
+ *
+ * A tool the catalog routes through the gateway (an MCP definition, or a
+ * gateway or media tool) was already judged by that route before it ran:
+ * {@link markAgentTurnToolStarted} stamps every call that may act, and only
+ * GET routes and read-only Lobu tools pass unstamped. Its trace must not
+ * overrule that verdict, or a turn that only read can never be re-run after
+ * its worker dies. Anything else (a workspace tool, a name the catalog does
+ * not offer, or one shared with a workspace tool) reached no gateway route,
+ * so its trace counts.
+ */
+export function agentTurnTraceMayHaveActed(turn: AgentTurnPollPayload['turn'] | undefined, toolName: string): boolean {
+  const tools = turn?.tools;
+  if (!tools || tools.builtin?.some((name) => name === toolName)) return true;
+  return !(tools.definitions.some((tool) => tool.name === toolName)
+    || tools.gateway?.includes(toolName) || tools.media?.includes(toolName));
 }
 
 /** One namespace for admission, claims and terminal queue handoff across replicas. */
