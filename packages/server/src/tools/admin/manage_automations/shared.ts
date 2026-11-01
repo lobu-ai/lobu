@@ -17,7 +17,10 @@ import {
   resolveAutomationSourcesForSave,
   skillNamesFromPrompt,
 } from '../../../automations/source-refs';
-import { validateSaveContentSemanticType } from '../../../utils/event-kind-validation';
+import {
+  readEventKindRegistry,
+  validateSaveContentSemanticType,
+} from '../../../utils/event-kind-validation';
 import type { ToolContext } from '../../registry';
 import { Value } from '@sinclair/typebox/value';
 import {
@@ -536,6 +539,7 @@ export async function assertOutputEventTypesExist(
   entityIds: number[] = []
 ): Promise<void> {
   if (!outputs) return;
+  const registry = readEventKindRegistry(organizationId);
   for (const [name, raw] of Object.entries(outputs)) {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
     const event = (raw as Record<string, unknown>).event;
@@ -544,7 +548,8 @@ export async function assertOutputEventTypesExist(
       event.trim(),
       {},
       organizationId,
-      entityIds.length > 0 ? entityIds : undefined
+      entityIds.length > 0 ? entityIds : undefined,
+      registry
     );
     if (!validation.valid) {
       throw new ToolUserError(

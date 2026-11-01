@@ -3,6 +3,7 @@
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   primeMemberEventKinds,
+  readEventKindRegistry,
   resolveEventKindDefinition,
   type EventKindDefinition,
   validateSaveContentSemanticType,
@@ -253,7 +254,13 @@ describe('validateSaveContentSemanticType > stale per-pod cache', () => {
           UPDATE entity_types SET event_kinds = ${tx.json({ note: {}, uncommitted: {} })}
           WHERE organization_id = ${org.id} AND slug = '$member'
         `;
-        const result = await validateSaveContentSemanticType('uncommitted', {}, org.id, undefined, tx);
+        const result = await validateSaveContentSemanticType(
+          'uncommitted',
+          {},
+          org.id,
+          undefined,
+          readEventKindRegistry(org.id, tx)
+        );
         expect(result.valid).toBe(true);
         throw new Error('rollback');
       })
