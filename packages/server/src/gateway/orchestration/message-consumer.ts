@@ -670,11 +670,7 @@ export class MessageConsumer {
       );
     }
     };
-    if (queueSpan) {
-      await runInSpanContext(queueSpan, traced);
-    } else {
-      await traced();
-    }
+    await runInSpanContext(queueSpan, traced);
   }
 
   /**

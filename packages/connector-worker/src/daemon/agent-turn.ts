@@ -94,9 +94,7 @@ export async function executeAgentTurnRun(
   }
 
   try {
-    const result = span
-      ? await runInSpanContext(span, () => runAgentTurn(client, job, env, cfg))
-      : await runAgentTurn(client, job, env, cfg);
+    const result = await runInSpanContext(span, () => runAgentTurn(client, job, env, cfg));
     // The gateway's typed receipt is authoritative, including a cancellation
     // that raced the worker's completion. Keep this internal to tracing.
     const { terminalStatus, ...outcome } = result;

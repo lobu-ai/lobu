@@ -57,7 +57,7 @@ async function withInteractionTrace<T>(
   return withChildSpan(
     "interaction_post",
     parent,
-    (span) => span ? runInSpanContext(span, post) : post(),
+    (span) => runInSpanContext(span, post),
     { "lobu.run_id": turn.runId }
   );
 }

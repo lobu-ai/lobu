@@ -463,22 +463,7 @@ export function createServerLifecycle(
 			}
 			// Telemetry may still be waiting on an unavailable collector. Give it
 			// a bounded flush after application teardown, then let the process exit.
-			await safe("shutdownTracing", async () => {
-				let timer: ReturnType<typeof setTimeout> | undefined;
-				try {
-					await Promise.race([
-						shutdownTracing(),
-						new Promise<void>((_, reject) => {
-							timer = setTimeout(
-								() => reject(new Error("Tracing shutdown exceeded its 5-second budget")),
-								5_000,
-							);
-						}),
-					]);
-				} finally {
-					if (timer !== undefined) clearTimeout(timer);
-				}
-			});
+			await safe("shutdownTracing", () => shutdownTracing(5_000));
 			process.exit(0);
 		};
 		// Single-flight guard: SIGTERM+SIGINT or a double-tap on either must

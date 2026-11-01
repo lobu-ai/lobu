@@ -11,8 +11,8 @@ import { context, SpanKind, SpanStatusCode, trace } from "@opentelemetry/api";
 import type { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-grpc";
 import type { resourceFromAttributes as resourceFromAttributesType } from "@opentelemetry/resources";
 import type {
+  BatchSpanProcessor as BatchSpanProcessorType,
   NodeTracerProvider as NodeTracerProviderType,
-  SimpleSpanProcessor as SimpleSpanProcessorType,
   SpanProcessor,
 } from "@opentelemetry/sdk-trace-node";
 import type {
@@ -20,6 +20,7 @@ import type {
   ATTR_SERVICE_VERSION as AttrServiceVersion,
 } from "@opentelemetry/semantic-conventions";
 import { createLogger } from "./logger";
+import { formatTraceparent, parseTraceparent } from "./trace-context";
 
 const logger = createLogger("otel");
 
@@ -58,27 +59,41 @@ export function initTracing(config: OtelConfig): void {
   // require, bun provides one for src TS, and the server ESM bundle banner
   // defines `const require = __createRequire(import.meta.url)` for exactly
   // these calls — while __filename has no shim there and would throw.
-  let exporterCtor: typeof OTLPTraceExporter | undefined;
   let resourceFromAttributes: typeof resourceFromAttributesType;
   let NodeTracerProvider: typeof NodeTracerProviderType;
-  let SimpleSpanProcessor: typeof SimpleSpanProcessorType;
   let ATTR_SERVICE_NAME: typeof AttrServiceName;
   let ATTR_SERVICE_VERSION: typeof AttrServiceVersion;
+  let spanProcessors: SpanProcessor[];
   try {
-    if (!useCustomProcessors) {
-      exporterCtor =
-        require("@opentelemetry/exporter-trace-otlp-grpc").OTLPTraceExporter;
-    }
     resourceFromAttributes =
       require("@opentelemetry/resources").resourceFromAttributes;
+    let BatchSpanProcessor: typeof BatchSpanProcessorType;
     ({
+      BatchSpanProcessor,
       NodeTracerProvider,
-      SimpleSpanProcessor,
     } = require("@opentelemetry/sdk-trace-node"));
     ({
       ATTR_SERVICE_NAME,
       ATTR_SERVICE_VERSION,
     } = require("@opentelemetry/semantic-conventions"));
+    if (customProcessors?.length) {
+      // A caller-supplied processor (tests) never loads the gRPC exporter.
+      spanProcessors = customProcessors;
+    } else {
+      // The server is long-lived: a batch keeps export off the request path
+      // and bounds memory with a drop-on-full queue while a collector is
+      // down. shutdownTracing flushes it.
+      const exporterCtor: typeof OTLPTraceExporter =
+        require("@opentelemetry/exporter-trace-otlp-grpc").OTLPTraceExporter;
+      spanProcessors = [
+        new BatchSpanProcessor(
+          new exporterCtor({
+            url: config.otlpEndpoint,
+            timeoutMillis: 30000,
+          })
+        ),
+      ];
+    }
   } catch (err) {
     // Only a missing module means the optional peers aren't installed. A
     // genuine load failure inside an installed OTel module (e.g. grpc native
@@ -93,26 +108,6 @@ export function initTracing(config: OtelConfig): void {
     [ATTR_SERVICE_NAME]: config.serviceName,
     [ATTR_SERVICE_VERSION]: config.serviceVersion || "1.0.0",
   });
-
-  // SimpleSpanProcessor exports on span end. A caller-supplied processor
-  // (tests) must not construct the gRPC exporter.
-  let spanProcessors: SpanProcessor[];
-  if (customProcessors && customProcessors.length > 0) {
-    spanProcessors = customProcessors;
-  } else if (exporterCtor) {
-    spanProcessors = [
-      new SimpleSpanProcessor(
-        new exporterCtor({
-          url: config.otlpEndpoint,
-          timeoutMillis: 30000,
-        })
-      ),
-    ];
-  } else {
-    throw new Error(
-      "Tracing is enabled but neither spanProcessors nor the OTLP exporter loaded."
-    );
-  }
 
   provider = new NodeTracerProvider({
     resource,
@@ -136,11 +131,35 @@ export function getTracer(): Tracer | null {
   return tracer;
 }
 
-export async function shutdownTracing(): Promise<void> {
-  if (provider) {
-    await provider.shutdown();
-    provider = null;
-    tracer = null;
+/**
+ * Flush and stop tracing. With `timeoutMs`, an unreachable collector cannot
+ * hold up process exit past that budget; the timeout rejects.
+ */
+export async function shutdownTracing(timeoutMs?: number): Promise<void> {
+  if (!provider) return;
+  const shutdown = provider.shutdown();
+  provider = null;
+  tracer = null;
+  if (timeoutMs === undefined) {
+    await shutdown;
+    return;
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      shutdown,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () =>
+            reject(
+              new Error(`Tracing shutdown exceeded its ${timeoutMs}ms budget`)
+            ),
+          timeoutMs
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -201,9 +220,10 @@ export function getCurrentSpan(): Span | undefined {
   return trace.getActiveSpan();
 }
 
-export function runInSpanContext<T>(span: Span, fn: () => T): T {
-  const ctx = trace.setSpan(context.active(), span);
-  return context.with(ctx, fn);
+/** Run `fn` with `span` active, or plainly when tracing produced no span. */
+export function runInSpanContext<T>(span: Span | null, fn: () => T): T {
+  if (!span) return fn();
+  return context.with(trace.setSpan(context.active(), span), fn);
 }
 
 export function createRootSpan(
@@ -221,10 +241,7 @@ export function createRootSpan(
     attributes,
   });
 
-  const spanContext = span.spanContext();
-  const traceparent = `00-${spanContext.traceId}-${spanContext.spanId}-01`;
-
-  return { span, traceparent };
+  return { span, traceparent: formatTraceparent(span.spanContext()) };
 }
 
 export function createChildSpan(
@@ -236,30 +253,15 @@ export function createChildSpan(
     return null;
   }
 
-  if (!traceparent) {
+  const parent = parseTraceparent(traceparent);
+  if (!parent) {
     return createSpan(name, attributes);
   }
-
-  // W3C traceparent: 00-traceId-parentSpanId-flags
-  const parts = traceparent.split("-");
-  if (parts.length !== 4) {
-    return createSpan(name, attributes);
-  }
-
-  const traceId = parts[1]!;
-  const parentSpanId = parts[2]!;
-
-  const parentContext = trace.setSpanContext(context.active(), {
-    traceId,
-    spanId: parentSpanId,
-    traceFlags: 1,
-    isRemote: true,
-  });
 
   return tracer.startSpan(
     name,
     { kind: SpanKind.INTERNAL, attributes },
-    parentContext
+    trace.setSpanContext(context.active(), parent)
   );
 }
 
@@ -272,38 +274,9 @@ export async function withChildSpan<T>(
   return runInSpan(createChildSpan(name, traceparent, attributes), fn);
 }
 
-const TRACEPARENT_RE = /^00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/;
-
-/** A W3C `traceparent` value, or null when the input is not one. */
-export function traceparentHeader(value: unknown): string | null {
-  if (typeof value !== "string") return null;
-  const match = TRACEPARENT_RE.exec(value);
-  return match &&
-    trace.isSpanContextValid({
-      traceId: match[1]!,
-      spanId: match[2]!,
-      traceFlags: Number.parseInt(match[3]!, 16),
-    })
-    ? value
-    : null;
-}
-
-/** W3C ids of the active span. Empty when the log is outside a real span. */
-export function currentTraceLogFields(): {
-  trace_id?: string;
-  span_id?: string;
-} {
-  const spanContext = trace.getActiveSpan()?.spanContext();
-  if (!spanContext || !trace.isSpanContextValid(spanContext)) {
-    return {};
-  }
-  return { trace_id: spanContext.traceId, span_id: spanContext.spanId };
-}
-
 export function getTraceparent(span: Span | null): string | null {
   if (!span) return null;
-  const ctx = span.spanContext();
-  return `00-${ctx.traceId}-${ctx.spanId}-01`;
+  return formatTraceparent(span.spanContext());
 }
 
 export type { Span, Tracer };

@@ -1,7 +1,8 @@
 /**
  * Phase 1 trace linkage. The processor is in-memory so this never constructs
- * the gRPC exporter. shutdownTracing resets the module singleton; the global
- * API provider stays registered, so this file inits a processor once.
+ * the gRPC exporter. shutdownTracing resets the module singleton before each
+ * test; the global API registration from the first init stays, so initTracing
+ * binds its tracer to the provider it built rather than the global one.
  */
 
 import { beforeEach, describe, expect, test } from "bun:test";
@@ -15,14 +16,13 @@ import { createLogger } from "../logger";
 import {
   createChildSpan,
   createRootSpan,
-  currentTraceLogFields,
   flushTracing,
   getTraceparent,
   initTracing,
   runInSpanContext,
   shutdownTracing,
-  traceparentHeader,
 } from "../otel";
+import { currentTraceLogFields, traceparentHeader } from "../trace-context";
 
 class MemorySpanProcessor implements SpanProcessor {
   readonly finished: Array<{ name: string; traceId: string }> = [];
@@ -70,6 +70,18 @@ describe("otel trace linkage", () => {
     expect(
       traceparentHeader(`00-${"ab".repeat(16)}-${"0".repeat(16)}-01`)
     ).toBeNull();
+    const ids = `${"ab".repeat(16)}-${"cd".repeat(8)}`;
+    expect(traceparentHeader(`00-${ids}-00`)).toBe(`00-${ids}-00`);
+    for (const invalid of [
+      `00-${ids.toUpperCase()}-01`,
+      `00-${ids}-zz`,
+      `00-${ids}--1`,
+      `00-${ids}-1`,
+      `01-${ids}-01`,
+      `00-${ids}-01-extra`,
+    ]) {
+      expect(traceparentHeader(invalid)).toBeNull();
+    }
   });
 
   test("initTracing without an endpoint does not throw or start a span", () => {

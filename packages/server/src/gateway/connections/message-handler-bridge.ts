@@ -1606,11 +1606,7 @@ export class MessageHandlerBridge {
       rootSpan?.end();
     }
     };
-    if (rootSpan) {
-      await runInSpanContext(rootSpan, traced);
-    } else {
-      await traced();
-    }
+    await runInSpanContext(rootSpan, traced);
   }
 
   /**

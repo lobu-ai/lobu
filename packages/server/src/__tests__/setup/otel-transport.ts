@@ -44,10 +44,11 @@ async function stopChild(child: ChildProcess): Promise<void> {
 
 /**
  * Opt-in real OTLP receiver. Tests never download or install a collector:
- * supply the checksum-verified otelcol-contrib 0.164.0 executable through
- * LOBU_OTEL_COLLECTOR_BINARY and run the agent-turn-producer integration file
- * with -t 'tracing pipeline'. Only loopback and this fixture's temporary file
- * are configured; no ClickHouse, production data, or persistent service.
+ * supply an otelcol-contrib 0.164.0 executable through
+ * LOBU_OTEL_COLLECTOR_BINARY (only its reported version is checked) and run
+ * the agent-turn-producer integration file with -t 'tracing pipeline'. Only
+ * loopback and this fixture's temporary file are configured; no ClickHouse,
+ * production data, or persistent service.
  */
 export async function startTestCollector(binary: string) {
   const version = await promisify(execFile)(binary, ['--version'], { timeout: 5_000 });

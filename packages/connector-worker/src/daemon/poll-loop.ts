@@ -45,10 +45,10 @@ const DEFAULT_SHUTDOWN_DRAIN_MS = 30_000;
 const SHUTDOWN_EXIT_MARGIN_MS = 15_000;
 
 /**
- * How long SIGTERM waits for in-flight runs. A fleet pod is SIGKILLed
+ * The pod's whole grace period after SIGTERM. A fleet pod is SIGKILLed
  * `terminationGracePeriodSeconds` after SIGTERM; the chart passes that same
- * value as `WORKER_SHUTDOWN_GRACE_SECONDS`, so the drain uses all of it except
- * the exit margin. Anything else keeps the fixed default.
+ * value as `WORKER_SHUTDOWN_GRACE_SECONDS`. Anything else keeps the fixed
+ * default drain plus the exit margin.
  */
 function resolveWorkerShutdownGraceMs(env: NodeJS.ProcessEnv = process.env): number {
   const raw = env.WORKER_SHUTDOWN_GRACE_SECONDS?.trim();
@@ -59,6 +59,7 @@ function resolveWorkerShutdownGraceMs(env: NodeJS.ProcessEnv = process.env): num
   return seconds * 1000;
 }
 
+/** How long SIGTERM waits for in-flight runs: the grace minus the exit margin. */
 function resolveWorkerShutdownDrainMs(env: NodeJS.ProcessEnv = process.env): number {
   return Math.max(0, resolveWorkerShutdownGraceMs(env) - SHUTDOWN_EXIT_MARGIN_MS);
 }
@@ -288,21 +289,10 @@ export function createWorkerPollLoopShutdownHandler(
       Math.max(0, shutdownDeadline - Date.now() - 1_000)
     );
     if (tracingTimeoutMs > 0) {
-      let timer: ReturnType<typeof setTimeout> | undefined;
       try {
-        await Promise.race([
-          shutdownTracing(),
-          new Promise<void>((_, reject) => {
-            timer = setTimeout(
-              () => reject(new Error('Tracing shutdown exceeded its exit budget')),
-              tracingTimeoutMs
-            );
-          }),
-        ]);
+        await shutdownTracing(tracingTimeoutMs);
       } catch (error) {
         log.info('[daemon] Tracing shutdown failed:', error);
-      } finally {
-        if (timer !== undefined) clearTimeout(timer);
       }
     }
     exit(allDone && shutdownHookSucceeded ? 0 : 1);

@@ -241,11 +241,7 @@ export class UnifiedThreadResponseConsumer {
         spanAttributes
       );
       try {
-        if (span) {
-          await runInSpanContext(span, () => this.handleChatInteraction(data));
-        } else {
-          await this.handleChatInteraction(data);
-        }
+        await runInSpanContext(span, () => this.handleChatInteraction(data));
       } finally {
         span?.end();
       }
@@ -330,8 +326,7 @@ export class UnifiedThreadResponseConsumer {
       span?.end();
     }
     };
-    if (span) await runInSpanContext(span, traced);
-    else await traced();
+    await runInSpanContext(span, traced);
   }
 
   /**

@@ -19,10 +19,9 @@ import {
   AgentTurnPollPayloadSchema,
   PollResponseSchema,
 } from '@lobu/core/contracts/worker/protocol';
-import { AGENT_ERRORS, AgentErrorCode, mintGatewayMcpToken, parseSessionEntries, type MessagePayload, type ThreadResponsePayload, renderBaselineAgentPolicy, verifyWorkerToken } from '@lobu/core';
+import { AGENT_ERRORS, AgentErrorCode, flushTracing, initTracing, mintGatewayMcpToken, parseSessionEntries, type MessagePayload, type ThreadResponsePayload, renderBaselineAgentPolicy, shutdownTracing, verifyWorkerToken } from '@lobu/core';
 import { FOLLOW_UP_SUGGESTIONS_PROMPT } from '@lobu/core/agent-tooling';
 import { Value } from '@sinclair/typebox/value';
-import { initTracing, shutdownTracing, flushTracing } from '@lobu/core';
 import { InMemorySpanExporter, SimpleSpanProcessor } from '@opentelemetry/sdk-trace-node';
 import { MessageConsumer } from '../../gateway/orchestration/message-consumer';
 import { RunsQueue } from '../../gateway/infrastructure/queue/runs-queue';
@@ -5421,7 +5420,10 @@ describe('existing team bot replay (single-workspace Slack, unlinked channel sen
       const cleanupErrors: unknown[] = [];
       for (const dispose of [
         () => consumer?.stop(), () => responses?.stop(), () => worker?.stop(),
-        () => shutdownTracing(), () => collector?.stop(),
+        // The final batch cannot reach an unavailable collector; production
+        // callers log that rejection, and so does nothing here.
+        () => mode === 'unavailable' ? shutdownTracing().catch(() => undefined) : shutdownTracing(),
+        () => collector?.stop(),
         async () => {
           server.closeAllConnections();
           await new Promise<void>(resolve => server.close(() => resolve()));
@@ -5442,9 +5444,9 @@ describe('existing team bot replay (single-workspace Slack, unlinked channel sen
   }
 
   const traceTransportCases: Array<[TraceTransportMode, boolean]> = [
-    ['memory', false], ['memory', true], ['disabled', false],
+    ['memory', false], ['memory', true], ['disabled', false], ['unavailable', false],
     ...(process.env.LOBU_OTEL_COLLECTOR_BINARY
-      ? [['collector', false], ['collector', true], ['unavailable', false]] as Array<[TraceTransportMode, boolean]> : []),
+      ? [['collector', false], ['collector', true]] as Array<[TraceTransportMode, boolean]> : []),
   ];
   it.each(traceTransportCases)('tracing pipeline via %s (provider failure: %s)', async (mode, providerFails) => {
     await runTracedChatTurn(mode, providerFails);

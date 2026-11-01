@@ -5,6 +5,7 @@ const USE_WINSTON_LOGGER = process.env.USE_WINSTON_LOGGER === "true";
 const USE_JSON_FORMAT = process.env.LOG_FORMAT === "json";
 
 import winston from "winston";
+import { currentTraceLogFields } from "./trace-context";
 import { scrubDiagnosticValue } from "./utils/diagnostic-scrubber";
 
 export interface Logger {
@@ -12,12 +13,6 @@ export interface Logger {
   warn: (message: any, ...args: any[]) => void;
   info: (message: any, ...args: any[]) => void;
   debug: (message: any, ...args: any[]) => void;
-}
-
-function activeTraceLogFields(): { trace_id?: string; span_id?: string } {
-  // otel.ts constructs its own logger while this module is still loading, so
-  // this stays a late require rather than a top-level import.
-  return require("./otel").currentTraceLogFields();
 }
 
 function safeStringify(value: unknown, space?: number): string {
@@ -71,7 +66,7 @@ function createConsoleLogger(serviceName: string): Logger {
       msgStr = scrubDiagnosticValue(String(message)) as string;
     }
 
-    const traceFields = activeTraceLogFields();
+    const traceFields = currentTraceLogFields();
 
     if (USE_JSON_FORMAT) {
       return safeStringify({
@@ -171,7 +166,7 @@ export function createLogger(serviceName: string): Logger {
         return Object.assign(
           info,
           scrubDiagnosticValue(info),
-          activeTraceLogFields()
+          currentTraceLogFields()
         );
       })()
     ),

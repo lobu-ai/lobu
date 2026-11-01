@@ -72,7 +72,6 @@ export {
   createChildSpan,
   createRootSpan,
   createSpan,
-  currentTraceLogFields,
   flushTracing,
   getCurrentSpan,
   getTraceparent,
@@ -82,10 +81,10 @@ export {
   SpanKind,
   SpanStatusCode,
   shutdownTracing,
-  traceparentHeader,
   withChildSpan,
   withSpan,
 } from "./otel";
+export { currentTraceLogFields, traceparentHeader } from "./trace-context";
 // Config-driven provider types
 export type {
   ProviderConfigEntry,
