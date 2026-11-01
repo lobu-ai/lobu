@@ -86,6 +86,106 @@ async function parseRequestBody(c: {
   }
 }
 
+
+const MAX_TOKEN_REQUEST_BYTES = 32 * 1024;
+const MAX_TOKEN_AUTHORIZATION_BYTES = 8 * 1024;
+const TOKEN_PARAMETER_LIMITS = new Map<string, number>([
+  ['grant_type', 256],
+  ['client_id', 1024],
+  ['client_secret', 4096],
+  ['code', 4096],
+  ['code_verifier', 128],
+  ['refresh_token', 4096],
+  ['device_code', 4096],
+  ['redirect_uri', 8192],
+  ['resource', 8192],
+  ['scope', 8192],
+]);
+
+function invalidTokenRequest(message: string, status: 400 | 413 = 400): Response {
+  return new Response(JSON.stringify(createOAuthError('invalid_request', message)), {
+    status,
+    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', Pragma: 'no-cache' },
+  });
+}
+
+/**
+ * Bound the original stream before any JSON/form decoding or credential work.
+ * Content-Length is only an early rejection hint: chunked and understated
+ * requests must pass the same byte count. Do not clone/tee an unbounded body.
+ */
+async function parseTokenRequestBody(request: Request): Promise<Record<string, unknown> | Response> {
+  if (Number(request.headers.get('content-length')) > MAX_TOKEN_REQUEST_BYTES) {
+    void request.body?.cancel().catch(() => {});
+    return invalidTokenRequest('Token request body is too large', 413);
+  }
+
+  const reader = request.body?.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    if (reader) {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        size += value.byteLength;
+        if (size > MAX_TOKEN_REQUEST_BYTES) {
+          // Cancellation is best-effort; an underlying source must not delay
+          // the error response while it finishes shutting down.
+          void reader.cancel().catch(() => {});
+          return invalidTokenRequest('Token request body is too large', 413);
+        }
+        chunks.push(value);
+      }
+    }
+  } catch {
+    return invalidTokenRequest('Invalid request body');
+  } finally {
+    reader?.releaseLock();
+  }
+
+  const text = Buffer.concat(chunks, size).toString('utf8');
+  const contentType = request.headers.get('content-type')?.split(';')[0].trim().toLowerCase();
+  let parsed: unknown;
+  if (contentType === 'application/x-www-form-urlencoded') {
+    const params: Record<string, string> = Object.create(null);
+    for (const [name, value] of new URLSearchParams(text)) {
+      if (Object.prototype.hasOwnProperty.call(params, name)) {
+        return invalidTokenRequest('Token request parameters must not be repeated');
+      }
+      params[name] = value;
+    }
+    parsed = params;
+  } else {
+    // Retain JSON support (including callers without a content-type header).
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      return invalidTokenRequest('Invalid request body');
+    }
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return invalidTokenRequest('Token request body must be an object');
+  }
+  return parsed as Record<string, unknown>;
+}
+
+function validateTokenRequestParameters(params: Record<string, unknown>): Response | null {
+  for (const [name, value] of Object.entries(params)) {
+    const maxBytes = TOKEN_PARAMETER_LIMITS.get(name);
+    // Unknown JSON extensions were historically ignored. The raw body cap
+    // bounds their cost while preserving extension compatibility.
+    if (maxBytes === undefined) continue;
+    if (typeof value !== 'string') {
+      return invalidTokenRequest('Token request parameters must be strings');
+    }
+    if (Buffer.byteLength(value, 'utf8') > maxBytes) {
+      return invalidTokenRequest('Token request parameter is too long');
+    }
+  }
+  return null;
+}
+
 /**
  * Helper to get API base URL from a Hono-style context.
  * Delegates to the shared `resolveBaseUrl()` utility.
@@ -1431,15 +1531,35 @@ oauthRoutes.post('/oauth/device/approve', requireAuth, async (c) => {
  * Exchange authorization code for tokens, or refresh tokens.
  */
 oauthRoutes.post('/oauth/token', async (c) => {
-  const provider = getProvider(c);
+  c.header('Cache-Control', 'no-store');
+  c.header('Pragma', 'no-cache');
 
-  // Parse body (application/x-www-form-urlencoded or JSON)
-  const parsed = await parseRequestBody(c);
+  // This router is mounted at both / and /mcp. One IP budget covers all
+  // token grants and both paths, before parsing or expensive secret checks.
+  // getClientIP honors the configured proxy hops and socket peer; forwarded
+  // headers must be sanitized by the trusted ingress, as for other auth routes.
+  if (c.env.RATE_LIMIT_ENABLED !== 'false') {
+    const clientIP = getClientIP(c.req.raw, c.var.peerRemoteAddress);
+    const rateLimit = await getRateLimiter().consume(
+      `rate:oauth:token:${clientIP}`,
+      RateLimitPresets.OAUTH_TOKEN_PER_IP_MINUTE
+    );
+    if (!rateLimit.allowed) {
+      c.header('Retry-After', String(Math.max(1, rateLimit.resetInSeconds)));
+      c.header('Cache-Control', 'no-store');
+      return c.json(createOAuthError('temporarily_unavailable', rateLimit.errorMessage), 429);
+    }
+  }
+
+  const authHeader = c.req.header('authorization');
+  if (authHeader && Buffer.byteLength(authHeader, 'utf8') > MAX_TOKEN_AUTHORIZATION_BYTES) {
+    return invalidTokenRequest('Token authorization header is too large');
+  }
+  const parsed = await parseTokenRequestBody(c.req.raw);
   if (parsed instanceof Response) return parsed;
   const params = parsed as unknown as TokenRequestParams;
 
-  // Check for Basic auth header
-  const authHeader = c.req.header('authorization');
+  // Support Basic auth for client credentials
   if (authHeader?.startsWith('Basic ')) {
     const decoded = Buffer.from(authHeader.slice(6), 'base64').toString();
     const [clientId, clientSecret] = decoded.split(':');
@@ -1450,6 +1570,9 @@ oauthRoutes.post('/oauth/token', async (c) => {
       params.client_secret = clientSecret;
     }
   }
+
+  const parameterError = validateTokenRequestParameters(parsed);
+  if (parameterError) return parameterError;
 
   // Validate required params
   if (!params.grant_type) {
@@ -1472,6 +1595,7 @@ oauthRoutes.post('/oauth/token', async (c) => {
   }
 
   // Handle different grant types
+  const provider = getProvider(c);
   let result: Awaited<ReturnType<OAuthProvider['exchangeAuthorizationCode']>>;
 
   switch (params.grant_type) {

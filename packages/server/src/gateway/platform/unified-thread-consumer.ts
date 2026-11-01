@@ -7,6 +7,9 @@
 import {
   createChildSpan,
   createLogger,
+  getCurrentSpan,
+  getTraceparent,
+  runInSpanContext,
   type GuardrailRegistry,
   type SuggestedPrompt,
 } from "@lobu/core";
@@ -222,21 +225,33 @@ export class UnifiedThreadResponseConsumer {
     // because these rows also carry a `connectionId` and would otherwise be
     // mis-routed through the chat-response-bridge text path. See
     // CHAT_INTERACTION_EVENT for the cross-pod rationale.
+    const traceparent = data.platformMetadata?.traceparent as
+      | string
+      | undefined;
+    const spanAttributes = {
+      "lobu.message_id": data.messageId,
+      "lobu.user_id": data.userId,
+      "lobu.platform": data.platform || data.teamId || "unknown",
+    };
+
     if (data.customEvent?.name === CHAT_INTERACTION_EVENT) {
-      await this.handleChatInteraction(data);
+      const span = createChildSpan(
+        "response_delivery",
+        traceparent,
+        spanAttributes
+      );
+      try {
+        await runInSpanContext(span, () => this.handleChatInteraction(data));
+      } finally {
+        span?.end();
+      }
       return;
     }
 
     // Create child span for response processing (linked to original trace)
-    const traceparent = data.platformMetadata?.traceparent as
-      | string
-      | undefined;
-    const span = createChildSpan("response_delivery", traceparent, {
-      "lobu.message_id": data.messageId,
-      "lobu.user_id": data.userId,
-      "lobu.platform": data.platform || data.teamId || "unknown",
-    });
+    const span = createChildSpan("response_delivery", traceparent, spanAttributes);
 
+    const traced = async (): Promise<void> => {
     try {
       // Check if this response belongs to a Chat SDK connection — handle before legacy routing.
       // ensureDeliverable hydrates the connection from its row, so ANY replica that claims this
@@ -310,6 +325,8 @@ export class UnifiedThreadResponseConsumer {
     } finally {
       span?.end();
     }
+    };
+    await runInSpanContext(span, traced);
   }
 
   /**
@@ -707,6 +724,8 @@ export function registerChatInteractionFanout(
       // whichever pod claims the job. Skip the cross-pod hop entirely.
       if (isConnectionWarmLocally(ev.connectionId)) return;
 
+      // Serialize the route's recovered turn context before leaving this pod.
+      const traceparent = getTraceparent(getCurrentSpan() ?? null);
       const envelope: ChatInteractionEnvelope = {
         eventName,
         event: ev as Record<string, unknown>,
@@ -721,7 +740,10 @@ export function registerChatInteractionFanout(
         timestamp: Date.now(),
         // connectionId on platformMetadata is what ensureDeliverable reads to
         // warm the owning replica's connection.
-        platformMetadata: { connectionId: ev.connectionId },
+        platformMetadata: {
+          connectionId: ev.connectionId,
+          ...(traceparent ? { traceparent } : {}),
+        },
         customEvent: {
           name: CHAT_INTERACTION_EVENT,
           data: envelope as unknown as Record<string, unknown>,

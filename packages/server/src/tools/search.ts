@@ -2287,7 +2287,10 @@ async function formatEntityResult(
     }));
   }
 
-  // Generate helpful suggestion based on connection status
+  // Generate helpful suggestion based on connection status. Source setup is
+  // admin-tier (`feeds.create`) and belongs to the entity's own workspace, so
+  // only that caller gets the steps; anyone else is told who can do it.
+  const canManageSources = primaryIsCallerOrg && guidanceAccessTier(ctx) === 'admin';
   let suggestion: string;
   if (matches.length === 1) {
     const activeConnections =
@@ -2296,9 +2299,13 @@ async function formatEntityResult(
     const pausedConnections = connections?.filter((c) => c.status === 'paused').length || 0;
 
     if (activeConnections === 0 && pausedConnections === 0) {
-      suggestion = `Entity "${primaryEntity.name}" found with no connections. Use search_sdk to choose a connector and feed, then run_sdk with client.connections.connect({ connector_key: '<connector_key>' }), client.feeds.create({ connection_id: <connection_id>, feed_key: '<feed_key>', entity_ids: [${primaryEntity.id}], config: {} }) to target this entity, and client.feeds.trigger({ feed_id: <feed_id> }) to collect now.`;
+      suggestion = canManageSources
+        ? `Entity "${primaryEntity.name}" found with no connections. Use search_sdk to choose a connector and feed, then run_sdk with client.connections.connect({ connector_key: '<connector_key>' }), client.feeds.create({ connection_id: <connection_id>, feed_key: '<feed_key>', entity_ids: [${primaryEntity.id}], config: {} }) to target this entity, and client.feeds.trigger({ feed_id: <feed_id> }) to collect now.`
+        : `Entity "${primaryEntity.name}" found with no connections. A workspace admin can connect a source to collect more about it.`;
     } else if (activeConnections === 0 && pausedConnections > 0) {
-      suggestion = `Entity "${primaryEntity.name}" has ${pausedConnections} paused connection(s). Reactivate a connection to resume collection.`;
+      suggestion = canManageSources
+        ? `Entity "${primaryEntity.name}" has ${pausedConnections} paused connection(s). Reactivate a connection to resume collection.`
+        : `Entity "${primaryEntity.name}" has ${pausedConnections} paused connection(s). A workspace admin can resume collection.`;
     } else {
       suggestion = `Entity "${primaryEntity.name}" found with ${activeConnections} active connection(s).`;
     }
