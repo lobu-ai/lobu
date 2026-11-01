@@ -193,20 +193,48 @@ worker:
     seccompProfile:
       type: RuntimeDefault
 
+  # Sized for the two budgets below: 32 agent turns plus 2 connector runs.
+  # Measured per run (Linux, Node 22, one core, with MALLOC_ARENA_MAX=2):
+  # a light turn adds 22-25 MB of worker RSS, a turn with 1 MB of history
+  # (above prod's p99 of 777 kB) adds 50 MB, a slow sync about 28 MB, and the
+  # idle worker settles near 800 MB after a burst.
   resources:
     requests:
-      cpu: 500m
-      memory: 2Gi
+      # A burst is CPU-bound: each queued turn costs ~0.18 CPU-s to start
+      # (110 ms of it compiling the 5 MB guest bundle), so 32 at once is
+      # ~5.8 CPU-s. One guaranteed core starts the last of them ~6 s late;
+      # once running, turns mostly wait on the model provider.
+      cpu: 1000m
+      # 800 MB idle + 32 turns at 50 MB (every slot heavy) + 2 syncs is about
+      # 2.5 GB; all-light turns come to about 1.7 GB.
+      memory: 3Gi
     limits:
+      # Isolates compile and run off the main thread, so a second core should
+      # roughly halve the burst start (~3 s). Measured on one core only.
       cpu: 2000m
+      # Room above the request for the rare outlier: a turn at the 4 MB history
+      # cap (133 MB without the arena cap; its isolate heap stops at 256 MB)
+      # or a sync growing toward its 512 MB isolate heap. Crossing it
+      # OOM-kills every run in the pod.
       memory: 4Gi
 
   env:
     POLL_INTERVAL_MS: "10000"
-    # Let independent agent turns and connector reads overlap: the poll loop
-    # defaults to ONE slot, so a long Automation holds up every other run on
-    # the fleet worker until it finishes. Two leaves headroom for the Node
-    # host beyond the two 512MB isolate heaps, even at the 2Gi request floor.
+    # Isolates compile and run on background threads, and glibc grows a malloc
+    # arena per contending thread (up to 8 per core), each holding freed memory
+    # it rarely returns. Two arenas cut peak memory per turn by 30-36% and kept
+    # idle memory after a burst near 800 MB instead of 1.6 GB, at the same CPU
+    # per turn.
+    MALLOC_ARENA_MAX: "2"
+    # Agent turns and connector work have separate budgets, so a long sync
+    # cannot hold up a chat reply and a burst of replies cannot hold up syncs.
+    # A turn mostly waits on the provider; memory is what bounds the count
+    # (see resources). 32 light turns add ~0.8 GB, 32 heavy ones ~1.6 GB.
+    WORKER_MAX_CONCURRENT_AGENT_TURNS: "32"
+    # Connector work: syncs, actions, auth and embedding backfills. Each runs
+    # in an isolate with a 512 MB heap cap, so two leave room beside the turns.
+    # A backfill that arrives while both connector slots are busy borrows a
+    # free turn slot instead (the gateway cannot hold it back per budget).
     WORKER_MAX_CONCURRENT_JOBS: "2"
     # Label worker and embedding diagnostics as production.
     ENVIRONMENT: production

@@ -357,6 +357,54 @@ describe("worker daemon capacity polling", () => {
     expect(polls).toBe(3);
   });
 
+  test("budgets agent turns apart from connector work; a backfill borrows a free turn slot", async () => {
+    const polls: Array<{ capacity: number; wait?: number; lanes?: unknown }> = [];
+    // The gateway gates turns and connector runs per lane, but an embedding
+    // backfill only on free capacity, so it can arrive while the connector
+    // budget is full.
+    const answers: Array<{ run_id?: number; run_type?: string; next_poll_seconds?: number }> = [
+      { run_id: 1, run_type: "sync" },
+      { run_id: 2, run_type: "embed_backfill" },
+    ];
+    const finish = new Map<number, () => void>();
+    const loop = new WorkerPollLoop({
+      client: {
+        healthCheck: async () => true,
+        poll: async (capacity: number, options: { waitSeconds?: number; lanes?: unknown }) => {
+          polls.push({ capacity, wait: options.waitSeconds, lanes: options.lanes });
+          return answers.shift() ?? { next_poll_seconds: 1 };
+        },
+      } as never,
+      maxConcurrentJobs: 1,
+      maxConcurrentAgentTurns: 1,
+      pollIntervalMs: 10,
+      execute: (job) => new Promise<void>((resolve) => { finish.set(Number(job.run_id), resolve); }),
+    });
+    const running = loop.start();
+    try {
+      await Bun.sleep(50);
+      // Freeing the sync's connector slot does not reopen the borrowed turn
+      // slot, so the poll still withdraws turns and does not hold.
+      finish.get(1)!();
+      await Bun.sleep(50);
+      // The backfill hands its turn slot back.
+      finish.get(2)!();
+      await Bun.sleep(50);
+      expect(polls).toEqual([
+        { capacity: 2, wait: WORKER_POLL_MAX_WAIT_SECONDS, lanes: { agentTurns: 1, connectorJobs: 1 } },
+        { capacity: 1, wait: WORKER_POLL_MAX_WAIT_SECONDS, lanes: { agentTurns: 1, connectorJobs: 0 } },
+        { capacity: 0, wait: 0, lanes: { agentTurns: 0, connectorJobs: 0 } },
+        { capacity: 1, wait: 0, lanes: { agentTurns: 0, connectorJobs: 1 } },
+        { capacity: 2, wait: WORKER_POLL_MAX_WAIT_SECONDS, lanes: { agentTurns: 1, connectorJobs: 1 } },
+      ]);
+    } finally {
+      loop.stop();
+      for (const done of finish.values()) done();
+      await running;
+      await loop.waitForActiveJobs(1000, 1);
+    }
+  });
+
   test("polls at capacity with zero and does not execute a returned job", async () => {
     const calls: number[] = [];
     let executed = 0;
