@@ -213,16 +213,16 @@ describe("manage_entity wire schema", () => {
 
 	it("filters the action enum by the caller's access tier", () => {
 		expect(listedFor("read")?.inputSchema.properties.action.enum).toEqual([
-			"list",
 			"get",
+			"list",
 			"list_links",
 			"discover_duplicates",
 		]);
 		expect(listedFor("write")?.inputSchema.properties.action.enum).toEqual([
+			"get",
 			"create",
 			"update",
 			"list",
-			"get",
 			"link",
 			"unlink",
 			"update_link",
@@ -230,10 +230,10 @@ describe("manage_entity wire schema", () => {
 			"discover_duplicates",
 		]);
 		expect(listedFor("admin")?.inputSchema.properties.action.enum).toEqual([
+			"get",
 			"create",
 			"update",
 			"list",
-			"get",
 			"delete",
 			"link",
 			"unlink",

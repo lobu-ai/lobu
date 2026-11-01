@@ -1106,6 +1106,24 @@ export type ManageEntityData = {
   body:
     | {
         /**
+         * Fetch one entity.
+         */
+        action: "get";
+        /**
+         * A stored integer ID, or a source key. String IDs require the accompanying entity_type; keys are case-sensitive and never coerced to integers.
+         */
+        entity_id: number | string;
+        /**
+         * [get/list_links and relationship endpoints] A local type slug or discovered numeric type ID. Other actions require a slug. Foreign IDs allow only public-record reads, not workspace access.
+         */
+        entity_type?: string | number;
+        /**
+         * [get] Return the entity even if it is soft-deleted (deleted_at set). [list_links] Include soft-deleted relationships.
+         */
+        include_deleted?: boolean;
+      }
+    | {
+        /**
          * Create an entity of a given type.
          */
         action: "create";
@@ -1275,24 +1293,6 @@ export type ManageEntityData = {
       }
     | {
         /**
-         * Fetch one entity.
-         */
-        action: "get";
-        /**
-         * A stored integer ID, or a source key. String IDs require the accompanying entity_type; keys are case-sensitive and never coerced to integers.
-         */
-        entity_id: number | string;
-        /**
-         * Entity type as defined in your workspace
-         */
-        entity_type?: string;
-        /**
-         * [get] Return the entity even if it is soft-deleted (deleted_at set). [list_links] Include soft-deleted relationships.
-         */
-        include_deleted?: boolean;
-      }
-    | {
-        /**
          * Delete an entity (force_delete_tree for cascading).
          */
         action: "delete";
@@ -1344,13 +1344,13 @@ export type ManageEntityData = {
          */
         to_entity_id: number | string;
         /**
-         * Entity type as defined in your workspace
+         * [get/list_links and relationship endpoints] A local type slug or discovered numeric type ID. Other actions require a slug. Foreign IDs allow only public-record reads, not workspace access.
          */
-        from_entity_type?: string;
+        from_entity_type?: string | number;
         /**
-         * Entity type as defined in your workspace
+         * [get/list_links and relationship endpoints] A local type slug or discovered numeric type ID. Other actions require a slug. Foreign IDs allow only public-record reads, not workspace access.
          */
-        to_entity_type?: string;
+        to_entity_type?: string | number;
         /**
          * [link/unlink/update_link/list_links] Relationship type slug
          */
@@ -1418,13 +1418,13 @@ export type ManageEntityData = {
          */
         to_entity_id?: number | string;
         /**
-         * Entity type as defined in your workspace
+         * [get/list_links and relationship endpoints] A local type slug or discovered numeric type ID. Other actions require a slug. Foreign IDs allow only public-record reads, not workspace access.
          */
-        from_entity_type?: string;
+        from_entity_type?: string | number;
         /**
-         * Entity type as defined in your workspace
+         * [get/list_links and relationship endpoints] A local type slug or discovered numeric type ID. Other actions require a slug. Foreign IDs allow only public-record reads, not workspace access.
          */
-        to_entity_type?: string;
+        to_entity_type?: string | number;
         /**
          * [link/unlink/update_link/list_links] Relationship type slug
          */
@@ -1448,13 +1448,13 @@ export type ManageEntityData = {
          */
         to_entity_id?: number | string;
         /**
-         * Entity type as defined in your workspace
+         * [get/list_links and relationship endpoints] A local type slug or discovered numeric type ID. Other actions require a slug. Foreign IDs allow only public-record reads, not workspace access.
          */
-        from_entity_type?: string;
+        from_entity_type?: string | number;
         /**
-         * Entity type as defined in your workspace
+         * [get/list_links and relationship endpoints] A local type slug or discovered numeric type ID. Other actions require a slug. Foreign IDs allow only public-record reads, not workspace access.
          */
-        to_entity_type?: string;
+        to_entity_type?: string | number;
         /**
          * [link/unlink/update_link/list_links] Relationship type slug
          */
@@ -1484,9 +1484,9 @@ export type ManageEntityData = {
          */
         entity_id?: number | string;
         /**
-         * Entity type as defined in your workspace
+         * [get/list_links and relationship endpoints] A local type slug or discovered numeric type ID. Other actions require a slug. Foreign IDs allow only public-record reads, not workspace access.
          */
-        entity_type?: string;
+        entity_type?: string | number;
         /**
          * [list_links] A record of a source-backed entity type, instead of entity_id. Its relationships are read live from the event kinds that declare them; stores nothing.
          */
@@ -1604,6 +1604,7 @@ export type ManageEntityResponses = {
             root_id: number;
             member_ids: Array<number>;
           };
+          entity_type_id?: number;
           entity_type: string;
           name: string;
           slug: string;
@@ -1644,6 +1645,7 @@ export type ManageEntityResponses = {
             root_id: number;
             member_ids: Array<number>;
           };
+          entity_type_id?: number;
           entity_type: string;
           name: string;
           slug: string;
@@ -1684,6 +1686,7 @@ export type ManageEntityResponses = {
             root_id: number;
             member_ids: Array<number>;
           };
+          entity_type_id?: number;
           entity_type: string;
           name: string;
           slug: string;
@@ -1734,6 +1737,7 @@ export type ManageEntityResponses = {
             root_id: number;
             member_ids: Array<number>;
           };
+          entity_type_id?: number;
           entity_type: string;
           name: string;
           slug: string;
@@ -1817,6 +1821,10 @@ export type ManageEntityResponses = {
           relationship_type_name: string;
           is_symmetric: boolean;
           acl_managed: boolean;
+          from_entity_type_id?: number;
+          to_entity_type_id?: number;
+          from_entity_url?: string;
+          to_entity_url?: string;
           from_entity_name?: string;
           from_entity_slug?: string;
           from_entity_type?: string;
@@ -1853,6 +1861,10 @@ export type ManageEntityResponses = {
           relationship_type_name: string;
           is_symmetric: boolean;
           acl_managed: boolean;
+          from_entity_type_id?: number;
+          to_entity_type_id?: number;
+          from_entity_url?: string;
+          to_entity_url?: string;
           from_entity_name?: string;
           from_entity_slug?: string;
           from_entity_type?: string;
@@ -1913,6 +1925,10 @@ export type ManageEntityResponses = {
           relationship_type_name: string;
           is_symmetric: boolean;
           acl_managed: boolean;
+          from_entity_type_id?: number;
+          to_entity_type_id?: number;
+          from_entity_url?: string;
+          to_entity_url?: string;
           from_entity_name?: string;
           from_entity_slug?: string;
           from_entity_type?: string;
@@ -1978,6 +1994,10 @@ export type ManageEntityResponses = {
           relationship_type_name: string;
           is_symmetric: boolean;
           acl_managed: boolean;
+          from_entity_type_id?: number;
+          to_entity_type_id?: number;
+          from_entity_url?: string;
+          to_entity_url?: string;
           from_entity_name?: string;
           from_entity_slug?: string;
           from_entity_type?: string;

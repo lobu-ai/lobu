@@ -1,4 +1,4 @@
-import { SCOPE_CHECK_NOT_APPLICABLE } from './auth/tool-access';
+import { publicVisitorContext } from './authz/public-browse-context';
 import { getDb } from './db/client';
 import type { Env } from './index';
 import type { ToolContext } from './tools/registry';
@@ -198,25 +198,7 @@ async function resolvePublicPath(
 }
 
 function buildToolContext(requestUrl: string, organizationId: string): ToolContext {
-  return {
-    organizationId,
-    // No chat turn behind this call (authz/device-access.ts).
-    sourceContext: null,
-    userId: null,
-    memberRole: null,
-    isAuthenticated: false,
-    tokenType: 'anonymous',
-    // Anonymous public readers carry no MCP scope dimension — they're gated by
-    // org-scoping + public-readability filters, not by mcp:read. Pass the
-    // not-applicable sentinel so the read-scope guard doesn't fail closed.
-    scopes: [...SCOPE_CHECK_NOT_APPLICABLE],
-    scopedToOrg: true,
-    allowCrossOrg: false,
-    grantedOrganizationIds: null,
-    directSearchFederation: false,
-    requestUrl,
-    baseUrl: getPublicOrigin(requestUrl),
-  };
+  return publicVisitorContext(organizationId, { requestUrl, baseUrl: getPublicOrigin(requestUrl) });
 }
 
 function escapeAttribute(value: string): string {

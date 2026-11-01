@@ -89,7 +89,7 @@ import {
   RELATIONSHIP_JOINS,
   RELATIONSHIP_SELECT,
 } from "../../utils/relationship-reads";
-import { compareEntityEndpoints, lockEndpointTypes, resolveEntityReference } from "../../utils/entity-reference";
+import { compareEntityEndpoints, lockEndpointTypes, resolveEntityReference, sourceReferenceReadContext } from "../../utils/entity-reference";
 import {
 	EntityPolicyDenialError,
 	type EntityWriteDenialDescription,
@@ -280,6 +280,9 @@ type Handler<A> = (
 // `ManageEntitySchema`. Each handler receives its own variant's args; the
 // per-action access tiers are enforced by `routeAction` before dispatch.
 const manageEntityTool = defineActionTool("manage_entity", {
+	get: action(GetEntityAction, (args, ctx, env) =>
+		handleGet(args.entity_id, env, ctx, args.include_deleted ?? false, args.entity_type),
+	),
 	create: action(
 		CreateEntityAction,
 		oncePerTurnInput(
@@ -293,9 +296,6 @@ const manageEntityTool = defineActionTool("manage_entity", {
 	),
 	list: action(ListEntitiesAction, (args, ctx, env) =>
 		handleList(args, env, ctx),
-	),
-	get: action(GetEntityAction, (args, ctx, env) =>
-		handleGet(args.entity_id, env, ctx, args.include_deleted ?? false, args.entity_type),
 	),
 	delete: action(DeleteEntityAction, (args, ctx, env) =>
 		handleDelete(args, env, ctx),
@@ -1153,13 +1153,15 @@ async function handleGet(
 	env: Env,
 	ctx: ToolContext,
 	includeDeleted = false,
-	entityType?: string,
+	entityType?: string | number,
 ): Promise<ManageEntityResult> {
 	if (typeof entityId === 'string') {
 		if (includeDeleted) throw new ToolUserError('include_deleted is not supported by this source', 400);
 		const entity = await resolveEntityReference(entityId, entityType, ctx);
-		return { action: 'get', entity: { id: entity.id, entity_type: entity.entityType,
-			name: entity.name, slug: entity.slug, metadata: entity.metadata } };
+		return { action: 'get', entity: { id: entity.id, entity_type: entity.entityType, entity_type_id: entity.typeId,
+			name: entity.name, slug: entity.slug, metadata: entity.metadata,
+			view_url: await buildEntityViewUrl({ ...ctx, organizationId: entity.organizationId },
+				{ entity_type: entity.entityType, slug: entity.slug }) } };
 	}
 	const readRestrictions = await entityReadRestrictions(getDb(), ctx);
 	const entity = await getEntity(entityId, env, ctx, { includeDeleted, readRestrictions });
@@ -1167,7 +1169,9 @@ async function handleGet(
 	if (!entity) {
 		throw new ToolUserError(`Entity with ID ${entityId} not found`, 404);
 	}
-	if (entityType !== undefined && entity.entity_type !== normalizeEntityTypeSlug(entityType)) {
+	if (entityType !== undefined && (typeof entityType === 'number'
+		? entity.entity_type_id !== entityType
+		: entity.entity_type !== normalizeEntityTypeSlug(entityType))) {
 		throw new ToolUserError('entity_type does not match entity_id', 400);
 	}
 
@@ -1183,7 +1187,8 @@ async function handleGet(
 		);
 	}
 
-	const viewUrl = await buildEntityViewUrl(ctx, entity);
+	// A public record from another workspace links to its owner's page.
+	const viewUrl = await buildEntityViewUrl({ ...ctx, organizationId: entity.organization_id ?? ctx.organizationId }, entity);
 
 	let metadata = entity.metadata ?? {};
 	if (
@@ -1206,6 +1211,7 @@ async function handleGet(
     entity: {
       id: entity.id,
       ...(entity.identity ? { identity: entity.identity } : {}),
+      entity_type_id: entity.entity_type_id,
       entity_type: entity.entity_type,
       name: entity.name,
       slug: entity.slug,
@@ -1851,16 +1857,16 @@ async function handleListLinks(
   }
   const principal = await actingPrincipalFor(args, ctx);
   const restrictions = await entityReadRestrictions(sql, ctx, principal);
+  // A public record from another workspace lists only this workspace's own
+  // edges to it: listing is always scoped to ctx.organizationId below.
   const endpoint = await resolveEntityReference(entityId, entityType, ctx, { restrictions });
-  if (endpoint.organizationId !== ctx.organizationId) {
-    throw new ToolUserError('Entity not found in this workspace', 404);
-  }
   const binding = JSON.stringify([
     ctx.organizationId,
     ctx.userId,
     ctx.agentId,
     ctx.actingAutomationId,
-    entityType,
+    endpoint.typeId,
+    endpoint.organizationId,
     entityId,
     args.direction,
     args.relationship_type_slug,
@@ -1886,11 +1892,12 @@ async function handleListLinks(
   const native = cursor.sourceDone
     ? { links: [], failures: [], next_cursor: undefined }
     : await readNativeRelationshipPage(
-      args, { type: endpoint.entityType, key: String(entityId) }, ctx, authored.limit, cursor.sourceCursor,
+      args, { type: endpoint.entityType, key: String(entityId) }, sourceReferenceReadContext(endpoint, ctx), authored.limit, cursor.sourceCursor,
     );
   return {
     ...result,
-    record_links: native.links,
+    record_links: native.links.filter(link => !restrictions.some(rule => rule.entity_id === null
+      && (rule.entity_type_slug === null || rule.entity_type_slug === link.entity_type))),
     record_failures: native.failures,
     next_cursor: nextRelationshipCursor(cursor, authored, native),
   };
