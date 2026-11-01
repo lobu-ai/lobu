@@ -1,5 +1,40 @@
 # Changelog
 
+## [24.4.0](https://github.com/lobu-ai/lobu/compare/lobu-v24.3.0...lobu-v24.4.0) (2026-11-01)
+
+
+### Features
+
+* **entities:** address public source types by immutable type ID ([#4649](https://github.com/lobu-ai/lobu/issues/4649)) ([1df210f](https://github.com/lobu-ai/lobu/commit/1df210f8e2a1d87dad24a47f6057b393a3160885))
+* **lobu-team:** commit the DataForSEO connector that runs in prod ([#4644](https://github.com/lobu-ai/lobu/issues/4644)) ([416bda0](https://github.com/lobu-ai/lobu/commit/416bda055c079bb5661262d33e7f881ae63e98d6))
+* **lobu-team:** one task entity type with a kind field ([#4626](https://github.com/lobu-ai/lobu/issues/4626)) ([25868c7](https://github.com/lobu-ai/lobu/commit/25868c74c551fbbb19731a2a0c869ca1e4ec2712))
+* **oauth:** forward client branding to consent pages ([#4624](https://github.com/lobu-ai/lobu/issues/4624)) ([06a497b](https://github.com/lobu-ai/lobu/commit/06a497beae6aaab8639759859de97ccf8bb0705c))
+* **otel:** phase 1 trace propagation HTTP-&gt;queue-&gt;worker-&gt;delivery ([#4631](https://github.com/lobu-ai/lobu/issues/4631)) ([8af0dd7](https://github.com/lobu-ai/lobu/commit/8af0dd7c16e8b0f938e9308bcb27819466394bef))
+
+
+### Bug Fixes
+
+* **activity:** bring the page in front back to Home ([#4640](https://github.com/lobu-ai/lobu/issues/4640)) ([c4787f6](https://github.com/lobu-ai/lobu/commit/c4787f6dd9dc1e8de2a1edb07c266a2947ea5144))
+* **agent-turn:** re-run a deploy-killed turn that only read ([#4645](https://github.com/lobu-ai/lobu/issues/4645)) ([7d887c3](https://github.com/lobu-ai/lobu/commit/7d887c3c387e66c246866fc99383039f92e6b84a))
+* **agent-turn:** take the proxy's provider code when the worker reports a bare error ([#4620](https://github.com/lobu-ai/lobu/issues/4620)) ([21ad2ae](https://github.com/lobu-ai/lobu/commit/21ad2ae16d304e60e10b2b1b450f6a0c44f09dac))
+* **chart:** turn off the app's in-process worker when worker pods run ([#4648](https://github.com/lobu-ai/lobu/issues/4648)) ([938ebfa](https://github.com/lobu-ai/lobu/commit/938ebfa9a39c1109125c87d33239f01a672d9253))
+* keep private work off a public workspace, consolidated ([#4632](https://github.com/lobu-ai/lobu/issues/4632)) ([c5f259e](https://github.com/lobu-ai/lobu/commit/c5f259e7739c78e2b9c461331f4f0b6ad370ba93))
+* **lobu-team:** expire stuck DataForSEO rank tasks and post each keyword once a day ([#4647](https://github.com/lobu-ai/lobu/issues/4647)) ([32110fd](https://github.com/lobu-ai/lobu/commit/32110fdd7ac27429c0a0a685fd717a397c82d873))
+* **mcp-proxy:** keep an upstream 4xx refusal on the REST tool route ([#4615](https://github.com/lobu-ai/lobu/issues/4615)) ([130693c](https://github.com/lobu-ai/lobu/commit/130693c13f97cac315a1f145280979258858cd56))
+* **oauth:** bound and rate-limit token requests ([#4638](https://github.com/lobu-ai/lobu/issues/4638)) ([962cf46](https://github.com/lobu-ai/lobu/commit/962cf4637e5e1877343c276d290df9928decd9d2))
+* prevent script dispatch deadlock with manual triggers ([#4636](https://github.com/lobu-ai/lobu/issues/4636)) ([b52b3c6](https://github.com/lobu-ai/lobu/commit/b52b3c6ba9a997f0d626417cd2451070c7e12dc3))
+* **search:** only offer source setup steps to admins of the entity's workspace ([#4642](https://github.com/lobu-ai/lobu/issues/4642)) ([1da80e4](https://github.com/lobu-ai/lobu/commit/1da80e4c353e45daf967daec5abd7e1c67ed1580))
+* **server:** invite when a member email is added or corrected after creation ([#4641](https://github.com/lobu-ai/lobu/issues/4641)) ([306c55e](https://github.com/lobu-ai/lobu/commit/306c55e815d71f39a548f672bb5a6cf9b42aed10))
+* **server:** read each event-kind registry once per write ([#4650](https://github.com/lobu-ai/lobu/issues/4650)) ([25ec918](https://github.com/lobu-ai/lobu/commit/25ec9189b8228812f170e657118f8805f27d967a))
+* **server:** validate event kinds against the authoritative registry ([#4646](https://github.com/lobu-ai/lobu/issues/4646)) ([d58952e](https://github.com/lobu-ai/lobu/commit/d58952e5cc19991fa4bf3d535a13362e61918227))
+* surface reusable view components in agent discovery ([#4628](https://github.com/lobu-ai/lobu/issues/4628)) ([bca5de8](https://github.com/lobu-ai/lobu/commit/bca5de867dc81abf6bc4d04cb51da27e51a6086f))
+* terminate memory detection at a namespaced cgroup root ([#4635](https://github.com/lobu-ai/lobu/issues/4635)) ([4d09d51](https://github.com/lobu-ai/lobu/commit/4d09d51651673bd9c77f2b60208e33c5c2dc3331))
+
+
+### Performance Improvements
+
+* **authz:** make the resource-visibility gate parallel-safe ([#4616](https://github.com/lobu-ai/lobu/issues/4616)) ([eeb5011](https://github.com/lobu-ai/lobu/commit/eeb50113aeda2c7686ae6e19bfd62f64665a0ee6))
+
 ## [24.3.0](https://github.com/lobu-ai/lobu/compare/lobu-v24.2.0...lobu-v24.3.0) (2026-10-30)
 
 
