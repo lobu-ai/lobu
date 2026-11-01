@@ -1,5 +1,22 @@
 # Changelog
 
+## [24.5.0](https://github.com/lobu-ai/lobu/compare/lobu-v24.4.0...lobu-v24.5.0) (2026-11-01)
+
+
+### Features
+
+* **observability:** trace HTTP requests and tool dispatch ([#4665](https://github.com/lobu-ai/lobu/issues/4665)) ([1ecd5eb](https://github.com/lobu-ai/lobu/commit/1ecd5eb8cd6960b92cbb98fdbfe21fc4125390d2))
+* **server:** log auth.observed and tag spans with user and org ids ([#4654](https://github.com/lobu-ai/lobu/issues/4654)) ([3dd2199](https://github.com/lobu-ai/lobu/commit/3dd219953e7f031b9646944bcbc9834f58789f60))
+* **worker:** adapt fleet admission to CPU and memory pressure ([#4659](https://github.com/lobu-ai/lobu/issues/4659)) ([11f602e](https://github.com/lobu-ai/lobu/commit/11f602e1efd091ea360fd1012e5ba0884da58296))
+
+
+### Bug Fixes
+
+* **automations:** expose event kind metadata in extraction schemas ([#4658](https://github.com/lobu-ai/lobu/issues/4658)) ([b4f4faa](https://github.com/lobu-ai/lobu/commit/b4f4faa52e9ef7edb572514cf17b942f2be887e0))
+* **deploy:** synchronize trusted worker auth configuration ([#4664](https://github.com/lobu-ai/lobu/issues/4664)) ([20ca2a3](https://github.com/lobu-ai/lobu/commit/20ca2a3930af6460c7cfe0626c800b5dabd556d7))
+* **review:** refuse to review from inside a submodule ([#4656](https://github.com/lobu-ai/lobu/issues/4656)) ([8546a0b](https://github.com/lobu-ai/lobu/commit/8546a0beefd41c726b8676cc0eda19babb8e44a6))
+* **worker-api:** fair, interactive-first fleet job claims ([#4652](https://github.com/lobu-ai/lobu/issues/4652)) ([8dd598b](https://github.com/lobu-ai/lobu/commit/8dd598b57db12969393c079f65513f2ab25cea54))
+
 ## [24.4.0](https://github.com/lobu-ai/lobu/compare/lobu-v24.3.0...lobu-v24.4.0) (2026-11-01)
 
 
