@@ -60,6 +60,7 @@ for cmd in jq git node perl python3; do
   command -v "$cmd" >/dev/null 2>&1 || { echo "$cmd not found on PATH." >&2; exit 2; }
 done
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "Not inside a git work tree." >&2; exit 2; }
+review_refuse_submodule || exit 2
 
 GH_AVAILABLE=1
 if ! command -v gh >/dev/null 2>&1 || ! gh auth status >/dev/null 2>&1; then
