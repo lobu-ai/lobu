@@ -16,7 +16,7 @@
 
 import { createLogger, decrypt, encrypt, getErrorMessage } from "@lobu/core";
 import {
-  InferenceCapabilityBlockSchema, InferenceModalitySchema, InferenceProviderSlugSchema,
+  InferenceCapabilityBlockSchema, InferenceModalitySchema,
   type InferenceCapabilities, type InferenceCapabilityBlock, type InferenceModality,
   type InferenceProviderListItem,
 } from "@lobu/core/contracts/tools/manage-inference-providers";
@@ -47,20 +47,6 @@ export const INFERENCE_MODALITIES: ReadonlySet<InferenceModality> = new Set(
 /** Type guard: is `m` a known inference modality? */
 export function isInferenceModality(m: string): m is InferenceModality {
 	return INFERENCE_MODALITIES.has(m as InferenceModality);
-}
-
-/**
- * Canonical provider-slug shape. MUST match the DB CHECK
- * (`inference_providers_slug_format`) and the CLI (map-config
- * ORG_PROVIDER_SLUG_PATTERN) EXACTLY: lowercase alphanumeric + hyphen, 1-63
- * chars, no leading/trailing hyphen. Validated server-side so a bad slug is a
- * clean 400 instead of a raw DB CHECK-violation 500.
- */
-export const INFERENCE_PROVIDER_SLUG_PATTERN = new RegExp(InferenceProviderSlugSchema.pattern!);
-
-/** Is `slug` a valid inference-provider slug (see INFERENCE_PROVIDER_SLUG_PATTERN)? */
-export function isValidInferenceProviderSlug(slug: string): boolean {
-	return INFERENCE_PROVIDER_SLUG_PATTERN.test(slug);
 }
 
 const ALLOWED_CAPABILITY_KEYS: ReadonlySet<string> = new Set(

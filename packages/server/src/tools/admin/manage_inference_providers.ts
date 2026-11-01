@@ -43,16 +43,39 @@ const tool = defineActionTool('manage_inference_providers', {
 export const manageInferenceProviders = tool.run;
 
 function summary(row: InferenceProviderRow) {
-  return { id: row.id, slug: row.slug, kind: row.kind, displayName: row.displayName,
-    capabilities: row.capabilities, hasCustomUpstream: row.hasCustomUpstream,
-    status: row.status, createdAt: row.createdAt };
+  return {
+    id: row.id,
+    slug: row.slug,
+    kind: row.kind,
+    displayName: row.displayName,
+    capabilities: row.capabilities,
+    hasCustomUpstream: row.hasCustomUpstream,
+    status: row.status,
+    createdAt: row.createdAt,
+  };
 }
 
-function providerAuditState(row: Pick<NonNullable<Awaited<ReturnType<typeof getInferenceProviderBySlug>>>, "slug" | "kind" | "displayName" | "capabilities" | "hasCustomUpstream" | "status" | "isDefault"> | null): Record<string, unknown> | null {
-  return row ? { slug: row.slug, kind: row.kind, displayName: row.displayName, capabilities: row.capabilities, hasCustomUpstream: row.hasCustomUpstream, status: row.status, isDefault: row.isDefault } : null;
+function providerAuditState(
+  row: Pick<InferenceProviderRow,
+    'slug' | 'kind' | 'displayName' | 'capabilities' | 'hasCustomUpstream' | 'status' | 'isDefault'
+  > | null,
+): Record<string, unknown> | null {
+  return row ? {
+    slug: row.slug,
+    kind: row.kind,
+    displayName: row.displayName,
+    capabilities: row.capabilities,
+    hasCustomUpstream: row.hasCustomUpstream,
+    status: row.status,
+    isDefault: row.isDefault,
+  } : null;
 }
 
-export async function providerAuditTransaction<T>(ctx: ToolContext, slug: string, mutate: (tx: DbClient, before: Record<string, unknown> | null) => Promise<T>): Promise<T> {
+export async function providerAuditTransaction<T>(
+  ctx: ToolContext,
+  slug: string,
+  mutate: (tx: DbClient, before: Record<string, unknown> | null) => Promise<T>,
+): Promise<T> {
   // Org-shared credentials never inherit the action router's userless system bypass.
   await enforceRoleScopeAccess('admin', ctx, 'Inference-provider management');
   const orgId = ctx.organizationId;
@@ -67,9 +90,13 @@ export async function providerAuditTransaction<T>(ctx: ToolContext, slug: string
       const next = providersAfter.find(provider => provider.slug === previous.slug);
       if (!next || previous.isDefault === next.isDefault) continue;
       await insertToolConfigChange(ctx, {
-        resourceKind: 'inference-provider', resourceId: next.slug, op: 'updated',
+        resourceKind: 'inference-provider',
+        resourceId: next.slug,
+        op: 'updated',
         summary: `Inference provider '${next.slug}' ${next.isDefault ? 'promoted to' : 'cleared as'} org default`,
-        before: providerAuditState(previous), state: providerAuditState(next), changedFields: ['isDefault'],
+        before: providerAuditState(previous),
+        state: providerAuditState(next),
+        changedFields: ['isDefault'],
       }, tx);
     }
     return result;
@@ -113,8 +140,12 @@ async function create(body: InferenceProviderCreateInput, ctx: ToolContext) {
   const slug = body.slug.trim();
   const kind = body.kind.trim();
   const apiKey = body.apiKey.trim();
-  if (!kind) throw new ToolUserError('Body must include a `kind` string', 400);
-  if (!apiKey) throw new ToolUserError('Body must include a non-empty `apiKey` string', 400);
+  if (!kind) {
+    throw new ToolUserError('Body must include a `kind` string', 400);
+  }
+  if (!apiKey) {
+    throw new ToolUserError('Body must include a non-empty `apiKey` string', 400);
+  }
   for (const [modality, block] of Object.entries(body.capabilities ?? {})) {
     const error = validateCapabilityBlock(modality, block);
     if (error) throw new ToolUserError(error, 400);
@@ -221,12 +252,26 @@ async function create(body: InferenceProviderCreateInput, ctx: ToolContext) {
   }
 
   return providerAuditTransaction(ctx, slug, async (tx, before) => {
-    const result = await createInferenceProvider({ organizationId: orgId, slug, kind,
-      displayName: body.displayName ?? null, apiKey, capabilities, createdBy: ctx.userId }, tx);
-    if ('error' in result) throw new ToolUserError(`A provider with slug '${result.slug}' already exists`, 409);
-    await insertToolConfigChange(ctx, { before, resourceKind: 'inference-provider',
-      resourceId: result.slug, op: 'created', summary: `Inference provider '${result.slug}' created`,
-      state: providerAuditState(result) }, tx);
+    const result = await createInferenceProvider({
+      organizationId: orgId,
+      slug,
+      kind,
+      displayName: body.displayName ?? null,
+      apiKey,
+      capabilities,
+      createdBy: ctx.userId,
+    }, tx);
+    if ('error' in result) {
+      throw new ToolUserError(`A provider with slug '${result.slug}' already exists`, 409);
+    }
+    await insertToolConfigChange(ctx, {
+      before,
+      resourceKind: 'inference-provider',
+      resourceId: result.slug,
+      op: 'created',
+      summary: `Inference provider '${result.slug}' created`,
+      state: providerAuditState(result),
+    }, tx);
     return { provider: { ...summary(result), isDefault: result.isDefault } };
   });
 }
@@ -234,12 +279,24 @@ async function create(body: InferenceProviderCreateInput, ctx: ToolContext) {
 async function update(args: InferenceProviderUpdateInput, ctx: ToolContext) {
   return providerAuditTransaction(ctx, args.slug, async (tx, before) => {
     // A blank name leaves the stored name unchanged, as the REST route always did.
-    const result = await updateInferenceProviderCoreFields(ctx.organizationId, args.slug,
-      { displayName: args.displayName?.trim() || undefined }, tx);
-    if (!result) throw new ToolUserError('Provider not found', 404);
-    await insertToolConfigChange(ctx, { before, resourceKind: 'inference-provider', resourceId: result.slug,
-      op: 'updated', summary: `Inference provider '${result.slug}' renamed`, state: providerAuditState(result),
-      changedFields: ['displayName'] }, tx);
+    const result = await updateInferenceProviderCoreFields(
+      ctx.organizationId,
+      args.slug,
+      { displayName: args.displayName?.trim() || undefined },
+      tx,
+    );
+    if (!result) {
+      throw new ToolUserError('Provider not found', 404);
+    }
+    await insertToolConfigChange(ctx, {
+      before,
+      resourceKind: 'inference-provider',
+      resourceId: result.slug,
+      op: 'updated',
+      summary: `Inference provider '${result.slug}' renamed`,
+      state: providerAuditState(result),
+      changedFields: ['displayName'],
+    }, tx);
     return { provider: summary(result) };
   });
 }
@@ -248,14 +305,30 @@ async function setDefault(args: InferenceProviderSetDefaultInput, ctx: ToolConte
   const { slug } = args;
   return providerAuditTransaction(ctx, slug, async (tx, before) => {
     const result = await setInferenceProviderDefault(ctx.organizationId, slug, tx);
-    if (result === 'not_found') throw new ToolUserError('Provider not found', 404);
-    if (result === 'no_text_model') throw new ToolUserError(
-      `Provider '${slug}' has no text model configured, so it cannot be the org default. Set one with: lobu providers set-capability ${slug} text --model <model>`, 400);
-    if (result === 'oauth_provider') throw new ToolUserError(
-      `Provider '${slug}' is signed in with OAuth, so its credential belongs to one user. An org default is inherited by every member and by headless Automation runs, which cannot read that token. Use a provider added with an API key instead.`, 400);
-    await insertToolConfigChange(ctx, { before, resourceKind: 'inference-provider', resourceId: slug,
-      op: 'updated', summary: `Inference provider '${slug}' set as org default`,
-      state: providerAuditState(await getInferenceProviderBySlug(ctx.organizationId, slug, tx)), changedFields: ['isDefault'] }, tx);
+    if (result === 'not_found') {
+      throw new ToolUserError('Provider not found', 404);
+    }
+    if (result === 'no_text_model') {
+      throw new ToolUserError(
+        `Provider '${slug}' has no text model configured, so it cannot be the org default. Set one with: lobu providers set-capability ${slug} text --model <model>`,
+        400,
+      );
+    }
+    if (result === 'oauth_provider') {
+      throw new ToolUserError(
+        `Provider '${slug}' is signed in with OAuth, so its credential belongs to one user. An org default is inherited by every member and by headless Automation runs, which cannot read that token. Use a provider added with an API key instead.`,
+        400,
+      );
+    }
+    await insertToolConfigChange(ctx, {
+      before,
+      resourceKind: 'inference-provider',
+      resourceId: slug,
+      op: 'updated',
+      summary: `Inference provider '${slug}' set as org default`,
+      state: providerAuditState(await getInferenceProviderBySlug(ctx.organizationId, slug, tx)),
+      changedFields: ['isDefault'],
+    }, tx);
     return { success: true as const, slug, isDefault: true as const };
   });
 }
@@ -264,34 +337,67 @@ async function setCapability(args: InferenceProviderSetCapabilityInput, ctx: Too
   const error = validateCapabilityBlock(args.modality, args.block);
   if (error) throw new ToolUserError(error, 400);
   return providerAuditTransaction(ctx, args.slug, async (tx, before) => {
-    const result = await updateInferenceProviderCapabilities(ctx.organizationId, args.slug, args.modality, args.block, tx);
-    if (!result) throw new ToolUserError('Provider not found', 404);
-    await insertToolConfigChange(ctx, { before, resourceKind: 'inference-provider', resourceId: result.slug,
-      op: 'updated', summary: `Inference provider '${result.slug}' ${args.modality} capabilities updated`,
-      state: providerAuditState(result), changedFields: [`capabilities.${args.modality}`] }, tx);
+    const result = await updateInferenceProviderCapabilities(
+      ctx.organizationId, args.slug, args.modality, args.block, tx,
+    );
+    if (!result) {
+      throw new ToolUserError('Provider not found', 404);
+    }
+    await insertToolConfigChange(ctx, {
+      before,
+      resourceKind: 'inference-provider',
+      resourceId: result.slug,
+      op: 'updated',
+      summary: `Inference provider '${result.slug}' ${args.modality} capabilities updated`,
+      state: providerAuditState(result),
+      changedFields: [`capabilities.${args.modality}`],
+    }, tx);
     return { provider: summary(result) };
   });
 }
 
 async function rotateKey(args: InferenceProviderRotateKeyInput, ctx: ToolContext) {
   const value = args.value.trim();
-  if (!value) throw new ToolUserError('Body must include a non-empty `value` string', 400);
+  if (!value) {
+    throw new ToolUserError('Body must include a non-empty `value` string', 400);
+  }
   return providerAuditTransaction(ctx, args.slug, async (tx, before) => {
     const result = await rotateInferenceProviderKey(ctx.organizationId, args.slug, value, tx);
-    if (result === 'not_found') throw new ToolUserError('Provider not found', 404);
-    if (result === 'oauth_provider') throw new ToolUserError(`Provider '${args.slug}' signs in via OAuth — it has no API key to rotate`, 400);
-    await insertToolConfigChange(ctx, { before, resourceKind: 'inference-provider', resourceId: args.slug,
-      op: 'updated', summary: `Inference provider '${args.slug}' API key rotated`,
-      state: providerAuditState(await getInferenceProviderBySlug(ctx.organizationId, args.slug, tx)), changedFields: ['apiKey'] }, tx);
+    if (result === 'not_found') {
+      throw new ToolUserError('Provider not found', 404);
+    }
+    if (result === 'oauth_provider') {
+      throw new ToolUserError(
+        `Provider '${args.slug}' signs in via OAuth — it has no API key to rotate`,
+        400,
+      );
+    }
+    await insertToolConfigChange(ctx, {
+      before,
+      resourceKind: 'inference-provider',
+      resourceId: args.slug,
+      op: 'updated',
+      summary: `Inference provider '${args.slug}' API key rotated`,
+      state: providerAuditState(await getInferenceProviderBySlug(ctx.organizationId, args.slug, tx)),
+      changedFields: ['apiKey'],
+    }, tx);
     return { success: true as const };
   });
 }
 
 async function remove(args: InferenceProviderDeleteInput, ctx: ToolContext) {
   await providerAuditTransaction(ctx, args.slug, async (tx, before) => {
-    if (!await softDeleteInferenceProvider(ctx.organizationId, args.slug, tx)) throw new ToolUserError('Provider not found', 404);
-    await insertToolConfigChange(ctx, { before, resourceKind: 'inference-provider', resourceId: args.slug,
-      op: 'deleted', summary: `Inference provider '${args.slug}' deleted`, state: null }, tx);
+    if (!await softDeleteInferenceProvider(ctx.organizationId, args.slug, tx)) {
+      throw new ToolUserError('Provider not found', 404);
+    }
+    await insertToolConfigChange(ctx, {
+      before,
+      resourceKind: 'inference-provider',
+      resourceId: args.slug,
+      op: 'deleted',
+      summary: `Inference provider '${args.slug}' deleted`,
+      state: null,
+    }, tx);
   });
   // Only the interactive session may revoke its own subscription profile.
   const config = getOAuthProviderConfig(args.slug);
