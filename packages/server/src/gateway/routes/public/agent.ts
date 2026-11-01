@@ -1606,9 +1606,20 @@ export function createAgentApi(config: AgentApiConfig): Hono {
 
     const realAgentId = session.agentId || agentId;
 
+    // Ids only. The principal is the Lobu user the auth bridge resolved from a
+    // session or PAT, else the user the agent API's own auth check resolved
+    // from a settings session or external OAuth token. A worker token names
+    // an agent, not a user, so a worker-token caller has none. The org is the
+    // tenant the turn was authorized under, not the caller's default org.
+    const apiAuth = c.get("authContext");
+    const principalUserId =
+      (c.get("user") as { id?: string } | null | undefined)?.id ??
+      (apiAuth?.via === "worker_token" ? undefined : apiAuth?.userId);
     const { span: rootSpan, traceparent } = createRootSpan("message_received", {
       "lobu.agent_id": realAgentId,
       "lobu.message_id": messageId,
+      "lobu.org_id": messageOrganizationId,
+      ...(principalUserId ? { "user.id": principalUserId } : {}),
     });
 
     // createRootSpan does not make the span active. The logger reads trace ids

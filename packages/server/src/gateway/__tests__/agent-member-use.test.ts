@@ -27,6 +27,11 @@ import {
   expect,
   test,
 } from "bun:test";
+import { generateWorkerToken, initTracing, shutdownTracing } from "@lobu/core";
+import {
+  InMemorySpanExporter,
+  SimpleSpanProcessor,
+} from "@opentelemetry/sdk-trace-node";
 import { Hono } from "hono";
 import { AgentMetadataStore } from "../auth/agent-metadata-store.js";
 import type { SettingsTokenPayload } from "../auth/settings/token-service.js";
@@ -278,6 +283,81 @@ describe("POST /api/v1/agents — org member using an agent they don't own", () 
       expect(enqueued[0]).not.toHaveProperty("preApprovedTools");
       expect(enqueued[0]?.agentOptions).not.toHaveProperty("preApprovedTools");
       expect(enqueued[0]?.organizationId).toBe(AGENT_ORG);
+    });
+  }
+
+  // A worker token names an agent, not a user, so it adds no `user.id`.
+  for (const caller of ["auth bridge", "settings session", "worker token"] as const) {
+    test(`the message_received span names the principal and the agent's org (${caller})`, async () => {
+      const exporter = new InMemorySpanExporter();
+      await shutdownTracing();
+      initTracing({
+        serviceName: "lobu-server-test",
+        spanProcessors: [new SimpleSpanProcessor(exporter)],
+      });
+      try {
+        setAuthProvider(() => sessionFor(MEMBER_ID));
+        const { app, sessions } = makeApp(
+          userAgentsStore,
+          agentMetadataStore,
+          CALLER_DEFAULT_ORG,
+          makeSessionManager(),
+          { enqueueMessage: async () => "span-job" } as never,
+          { getSettings: async () => ({ models: ["test-provider/test-model"] }) } as never,
+        );
+        const created = await postCreate(app, { thread: "span-thread" }, {
+          "x-lobu-org": AGENT_ORG,
+        });
+        expect(created.status).toBe(201);
+        const session = sessions.getStored();
+        if (!session) throw new Error("Missing span session");
+
+        // "auth bridge": the principal production's `createLobuAuthBridge`
+        // sets. "settings session": only the agent API's own auth check
+        // (`authContext`) knows the caller.
+        const authenticated = new Hono();
+        authenticated.use("*", async (c, next) => {
+          if (caller === "auth bridge") {
+            c.set("user", {
+              id: MEMBER_ID,
+              name: "Member",
+              email: "member@agent-use.test",
+              emailVerified: true,
+            });
+          }
+          return next();
+        });
+        authenticated.route("/", app);
+        const headers: Record<string, string> = {
+          "content-type": "application/json",
+          "x-lobu-org": AGENT_ORG,
+        };
+        if (caller === "worker token") {
+          setAuthProvider(null);
+          headers.authorization = `Bearer ${generateWorkerToken(
+            AGENT_ID,
+            session.conversationId,
+            "span-deployment",
+            { channelId: "api", agentId: AGENT_ID, organizationId: AGENT_ORG, platform: "api" },
+          )}`;
+        }
+        const sent = await authenticated.request(
+          `/api/v1/agents/${encodeURIComponent(session.conversationId)}/messages`,
+          { method: "POST", headers, body: JSON.stringify({ content: "hello" }) },
+        );
+        expect(sent.status).toBe(200);
+        const spans = exporter
+          .getFinishedSpans()
+          .filter((span) => span.name === "message_received");
+        expect(spans).toHaveLength(1);
+        // The caller's ambient default org is not the tenant the turn runs in.
+        expect(spans[0]?.attributes["lobu.org_id"]).toBe(AGENT_ORG);
+        expect(spans[0]?.attributes["user.id"]).toBe(
+          caller === "worker token" ? undefined : MEMBER_ID,
+        );
+      } finally {
+        await shutdownTracing();
+      }
     });
   }
 
