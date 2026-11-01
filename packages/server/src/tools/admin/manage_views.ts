@@ -33,7 +33,6 @@ import { isEventAttachment } from '@lobu/core/contracts/tools/view-attach';
 import type { ViewDefinitionRecord } from '@lobu/core/contracts/tools/view-definition';
 import { ToolUserError } from '../../utils/errors';
 import {
-  refreshMemberEventKinds,
   validateSaveContentSemanticType,
 } from '../../utils/event-kind-validation';
 import {
@@ -168,7 +167,6 @@ async function assertActionKindsRegistered(
   attach: SetViewInput['attach'],
 ): Promise<void> {
   if (Object.keys(actions).length === 0) return;
-  await refreshMemberEventKinds(organizationId);
   const qualifiedTypes = attach.length > 0 &&
     attach.every((entry) => isEventAttachment(entry) && entry.type)
       ? [...new Set(attach.flatMap((entry) =>

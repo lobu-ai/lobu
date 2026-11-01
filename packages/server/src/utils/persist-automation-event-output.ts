@@ -236,7 +236,8 @@ export async function persistAutomationEventOutput(
       params.output.event,
       metadata,
       params.organizationId,
-      entityIds.length > 0 ? entityIds : undefined
+      entityIds.length > 0 ? entityIds : undefined,
+      params.tx
     );
     if (!kindValidation.valid) {
       throw new ToolUserError(
