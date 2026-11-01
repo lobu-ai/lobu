@@ -90,7 +90,7 @@ describe('device management deletion', () => {
       triggers: [{ kind: 'schedule', cron: '0 9 * * *' }],
       managed_agent_id: agentId,
       device_worker_id: deviceId,
-    })) as { automation_id: string };
+    })) as { automation_id: string; revision: string };
     const automationId = created.automation_id;
 
     const conflict = await deleteDeviceWorker(deleteContext(userId, deviceId));
@@ -147,7 +147,7 @@ describe('device management deletion', () => {
 
     // The public delete action is the existing archival semantic: the row is
     // retained and scheduling stops. It must no longer block its device.
-    await owner.automations.delete({ automation_ids: [automationId] });
+    await owner.automations.delete({ automation_ids: [automationId], expected_revisions: { [automationId]: created.revision } });
 
     const deleted = await deleteDeviceWorker(deleteContext(userId, deviceId));
     expect(deleted.status).toBe(200);

@@ -202,7 +202,7 @@ describe("ClientSDK business failure boundary", () => {
 
 	it("throws when automations.delete returns an all-failed aggregate", async () => {
 		await expect(
-			workspace.owner.automations.delete({ automation_ids: ["999999"] })
+			workspace.owner.automations.delete({ automation_ids: ["999999"], expected_revisions: {} })
 		).rejects.toMatchObject({
 			name: "ClientSdkActionError",
 			action: "delete",

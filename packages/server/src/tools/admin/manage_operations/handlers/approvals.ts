@@ -60,7 +60,7 @@ import {
 import { deviceManifestAdmissionError } from "../../../../runs/queue-service";
 import { isDelegatedBrowserAffinityConnector, selectedConnectorVersionArtifactSql } from "../../../../utils/connector-execution-placement";
 import { runLeaseFence } from "../../../../runs/run-lease";
-import { withFailureCode } from "../../../../utils/errors";
+import { ToolUserError, withFailureCode } from "../../../../utils/errors";
 import { executeOperationInline } from "./execute";
 /**
  * Durably persist a claimed run's apply/execution output in its OWN
@@ -450,6 +450,7 @@ async function failBuilderRun(
 	errorMessage: string,
 	reviewer: ApprovalReviewer | null,
 	claimedBy: string,
+	failure?: ToolUserError,
 ): Promise<ManageOperationsResult> {
 	// Atomic: the failed runs write and the 'failed' card supersede commit
 	// together. The card guard runs INSIDE the transaction, so a missing card
@@ -462,7 +463,8 @@ async function failBuilderRun(
 	// 'failed' on a run that is no longer ours.
 	const eventId = await getDb().begin(async (tx) => {
 		const rows = await tx`
-			UPDATE runs SET status = 'failed', completed_at = NOW(), error_message = ${errorMessage}
+			UPDATE runs SET status = 'failed', completed_at = NOW(), error_message = ${errorMessage},
+			  action_output = ${tx.json({ error: errorMessage, ...(failure?.code ? { code: failure.code, retryable: failure.retryable } : {}) })}
 			WHERE id = ${runId} AND organization_id = ${organizationId}
 			${runLeaseFence(tx, claimedBy)}
 			RETURNING id
@@ -474,7 +476,7 @@ async function failBuilderRun(
 			"failed",
 			`${handler.nounLabel}: ${desc} — failed`,
 			`Builder action failed: ${desc} — ${errorMessage}`,
-			{ error_message: errorMessage },
+			{ error_message: errorMessage, ...(failure?.code ? { error_code: failure.code, retryable: failure.retryable } : {}) },
 			reviewer,
 			tx,
 		);
@@ -487,13 +489,14 @@ async function failBuilderRun(
 				"The approval was already decided while this request was in flight. Refresh before acting.",
 		}, "VALIDATION");
 	}
-	return {
-		action: "approve",
-		approved: true,
+	const result = {
+		action: "approve" as const,
+		approved: true as const,
 		run_id: runId,
 		event_id: eventId,
 		message: `${handler.nounLabel} ${desc} approved but failed: ${errorMessage}`,
 	};
+	return failure?.code ? withFailureCode({ ...result, error: result.message }, failure.code) : result;
 }
 
 /**
@@ -641,11 +644,13 @@ async function tryApproveBuilderRun(
 		const attempt = transaction.attempt;
 		if (!attempt) throw error;
 		const message = error instanceof Error ? error.message : String(error);
+		const failure = error instanceof ToolUserError ? error : undefined;
 		const eventId = await getDb().begin(async (tx) => {
 			await lockOrganizationForApproval(tx, ctx.organizationId);
 			const reset = await tx`
 				UPDATE runs SET approval_status = 'pending', status = 'pending',
-				  error_message = ${message}
+				  error_message = ${message},
+				  action_output = ${tx.json({ error: message, ...(failure?.code ? { code: failure.code, retryable: failure.retryable } : {}) })}
 				WHERE id = ${args.run_id} AND organization_id = ${ctx.organizationId}
 				  AND approval_status = 'pending' AND status = 'pending'
 				RETURNING id
@@ -657,7 +662,7 @@ async function tryApproveBuilderRun(
 				"apply_failed",
 				`${attempt.nounLabel}: ${attempt.desc} — apply failed, still pending`,
 				`Applying the approved mutation failed: ${message}`,
-				{ error_message: message },
+				{ error_message: message, ...(failure?.code ? { error_code: failure.code, retryable: failure.retryable } : {}) },
 				reviewer,
 				tx,
 			);
@@ -670,10 +675,11 @@ async function tryApproveBuilderRun(
 					"The approval was already decided while this request was in flight. Refresh before acting.",
 			}, "VALIDATION");
 		}
-		return {
+		const result = {
 			error: `Failed to apply ${attempt.nounLabel.toLowerCase()}: ${message}. The approval is still pending.`,
 			event_id: eventId,
 		};
+		return failure?.code ? withFailureCode(result, failure.code) : result;
 	}
 	if (!phaseOne) return null;
 	if (phaseOne.kind === "completed") return phaseOne.result;
@@ -726,6 +732,7 @@ async function tryApproveBuilderRun(
 			errorMessage,
 			reviewer,
 			claimedBy,
+			error instanceof ToolUserError ? error : undefined,
 		);
 	}
 

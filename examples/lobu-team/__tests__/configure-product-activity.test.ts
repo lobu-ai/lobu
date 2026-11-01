@@ -4,15 +4,23 @@ import { configureProductActivityDigest } from "../scripts/configure-product-act
 function harness(pendingAt?: number, status = "completed") {
   const calls: string[] = [];
   const pending = { status: "pending_approval", run_id: 123 };
+  let revision = "digest-original";
   const mutation = (name: string) =>
-    mock(async () => {
+    mock(async (input: Record<string, unknown>) => {
+      if (input.expected_revision !== revision)
+        throw Object.assign(new Error("Configuration changed"), {
+          code: "REVISION_CONFLICT",
+        });
       calls.push(name);
-      return calls.length === pendingAt ? pending : { action: name };
+      if (calls.length === pendingAt) return pending;
+      revision = `digest-saved-${calls.length}`;
+      return { action: name, revision };
     });
   const automations = {
     get: mock(async () => ({
       automation: {
         slug: "product-activity-digest",
+        revision,
         automation_run: { status },
       },
     })),
@@ -64,6 +72,7 @@ describe("external production digest configuration", () => {
     ]);
     expect(h.automations.update).toHaveBeenNthCalledWith(2, {
       automation_id: "42",
+      expected_revision: "digest-saved-2",
       triggers: [],
       device_worker_id: null,
       agent_kind: null,
@@ -71,6 +80,7 @@ describe("external production digest configuration", () => {
     });
     expect(h.automations.update).toHaveBeenLastCalledWith({
       automation_id: "42",
+      expected_revision: "digest-saved-4",
       triggers: [
         {
           kind: "schedule",

@@ -43,6 +43,8 @@ export function toolErrorHttpStatus(code: ToolErrorCode): number {
     case 'PERMISSION':
     case 'MANUAL_EDIT_NOT_ALLOWED':
       return 403;
+    case 'REVISION_CONFLICT':
+      return 409;
     case 'RATE_LIMITED':
       return 429;
     case 'VALIDATION':

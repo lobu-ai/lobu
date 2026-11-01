@@ -177,6 +177,7 @@ describe("method-metadata", () => {
 			"feeds.trigger",
 			"feeds.delete",
 			"classifiers.delete",
+			"agents.delete",
 			"schedules.cancel",
 			"automations.get",
 			"automations.claimNextWindow",
@@ -373,7 +374,6 @@ describe("method-metadata", () => {
 			["connections.delete", "connection_id"],
 			["connections.reauthenticate", "connection_id"],
 			["agents.get", "agent_id"],
-			["agents.delete", "agent_id"],
 			["entitySchema.getType", "slug"],
 			["entitySchema.getRelType", "slug"],
 			["entitySchema.auditType", "slug"],
@@ -391,13 +391,24 @@ describe("method-metadata", () => {
 		}
 	});
 
+	it("documents required original revision inputs for agent and view deletion", () => {
+		for (const path of ["agents.delete", "views.remove"]) {
+			const meta = METHOD_METADATA[path];
+			expect(meta.signature, path).toStartWith(`${path}(input: {`);
+			expect(meta.signature, path).toContain("expected_revision: string");
+			expect(meta.example ?? "", path).toContain("expected_revision:");
+			expect(meta.example ?? "", path).toContain(".revision");
+		}
+	});
+
 	it("documents the exact runtime field names for the #2046 wrong-field mismatches", () => {
 		const expectations: Array<[string, string[]]> = [
 			["schedules.update", ["id: string"]],
 			["schedules.pause", ["id: string"]],
 			["schedules.cancel", ["id: string"]],
-			["views.remove", ["key: string"]],
-			["automations.setReactionScript", ["reaction_script: string"]],
+			["agents.delete", ["agent_id: string", "expected_revision: string"]],
+			["views.remove", ["key: string", "expected_revision: string"]],
+			["automations.setReactionScript", ["reaction_script: string", "expected_revision: string"]],
 			[
 				"notifications.send",
 				[

@@ -248,7 +248,7 @@ describe("ApplyClient x-lobu-apply-id threading", () => {
     let seen: Headers | null = null;
     const fetchImpl = (async (_input: any, init?: RequestInit) => {
       seen = new Headers(init?.headers as HeadersInit);
-      return new Response(JSON.stringify({}), {
+      return new Response(JSON.stringify({ revision: "saved" }), {
         status: 200,
         headers: { "content-type": "application/json" },
       });
@@ -266,7 +266,7 @@ describe("ApplyClient x-lobu-apply-id threading", () => {
       },
       fetchImpl
     );
-    await client.patchAgentSettings("a1", {});
+    await client.patchAgentSettings("a1", {}, "planned");
 
     expect(seen?.get("x-lobu-apply-id")).toBe(applyId);
     expect(seen?.get("x-lobu-rollback-of")).toBe(rollbackOf);

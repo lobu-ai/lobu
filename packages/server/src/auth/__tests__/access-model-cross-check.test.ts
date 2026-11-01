@@ -52,6 +52,7 @@ const TIERED_NAMESPACES = [
 	["automations", "manage_automations", "../../tools/admin/manage_automations", "manageAutomations"],
 	["classifiers", "manage_classifiers", "../../tools/admin/manage_classifiers", "manageClassifiers"],
 	["views", "manage_views", "../../tools/admin/manage_views", "manageViews"],
+	["navigation", "manage_navigation", "../../tools/admin/manage_navigation", "manageNavigation"],
 	["catalog", "manage_catalog", "../../tools/admin/manage_catalog", "manageCatalog"],
 	["agents", "manage_agents", "../../tools/admin/manage_agents", "manageAgents"],
 	["schedules", "manage_schedules", "../../tools/admin/manage_schedules", "manageSchedules"],

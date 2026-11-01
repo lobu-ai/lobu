@@ -28,6 +28,7 @@
  * `readSandboxSecret` from it.
  */
 
+import { readAutomationRevision } from './revision-fixture';
 import { moduleRegistry } from '@lobu/core';
 import { beforeAll, describe, expect, it } from 'vitest';
 import {
@@ -161,6 +162,7 @@ describe('execution_config.model namespace guard', () => {
 
     await expect(
       owner.automations.update({
+        expected_revision: await readAutomationRevision(owner, created.automation_id),
         automation_id: created.automation_id,
         execution_config: { model: 'opencode-go/deepseek-v4-flash' },
       })

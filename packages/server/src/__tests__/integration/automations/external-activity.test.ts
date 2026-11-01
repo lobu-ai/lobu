@@ -1,3 +1,4 @@
+import { readAutomationRevision } from './revision-fixture';
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as database from '../../../db/client';
 import type { DbClient } from '../../../db/client';
@@ -250,7 +251,7 @@ describe('external Automation activity', () => {
   it('keeps a frozen external claim resumable after live config changes to hosted', async () => {
     const id = await createExternal();
     const claim = await api.automations.claimNextWindow({ automation_id: id });
-    await api.automations.update({ automation_id: id, execution_config: null });
+    await api.automations.update({ expected_revision: await readAutomationRevision(api, id), automation_id: id, execution_config: null });
     expect((await work())[0]).toMatchObject({ status: 'running', run_id: claim.run_id });
     const continued = await api.automations.claimNextWindow({ automation_id: id, run_id: claim.run_id });
     await api.automations.completeWindow({ automation_id: id, run_id: claim.run_id,
@@ -263,7 +264,7 @@ describe('external Automation activity', () => {
     const run = await createAutomationRun({ organizationId: ctx.organizationId!, automationId: Number(id),
       agentId, dispatchSource: 'manual', windowStart: new Date(Date.now() - 3600_000).toISOString(),
       windowEnd: new Date(Date.now() - 60_000).toISOString() }, sql);
-    await api.automations.update({ automation_id: id, execution_config: EXTERNAL } as never);
+    await api.automations.update({ expected_revision: await readAutomationRevision(api, id), automation_id: id, execution_config: EXTERNAL } as never);
     expect(await work()).toEqual([]);
     const [snapshot] = await sql`SELECT approved_input FROM runs WHERE id = ${run.runId}`;
     expect(snapshot.approved_input.executor).toBeUndefined();
@@ -273,7 +274,7 @@ describe('external Automation activity', () => {
     const id = await createExternal({ triggers: [] });
     const run = await api.automations.trigger({ automation_id: id });
     const replacement = await createTestAgent({ organizationId: ctx.organizationId!, ownerUserId: ctx.userId! });
-    await api.automations.update({ automation_id: id, managed_agent_id: replacement.agentId,
+    await api.automations.update({ expected_revision: await readAutomationRevision(api, id), automation_id: id, managed_agent_id: replacement.agentId,
       execution_config: executionConfig } as never);
     const original = { ...ctx, agentId };
     const other = { ...ctx, agentId: replacement.agentId };
@@ -292,7 +293,7 @@ describe('external Automation activity', () => {
   it('keeps a pending ownerless snapshot open after assigning a live owner', async () => {
     const id = await createExternal({ triggers: [], managed_agent_id: null });
     const run = await api.automations.trigger({ automation_id: id });
-    await api.automations.update({ automation_id: id, managed_agent_id: agentId });
+    await api.automations.update({ expected_revision: await readAutomationRevision(api, id), automation_id: id, managed_agent_id: agentId });
     const other = { ...ctx, agentId: 'synthetic-other-agent' };
     expect((await work(other))[0]).toMatchObject({ run_id: run.run_id, status: 'due' });
     const claim = await handleClaimNextWindow({ action: 'claim_next_window', automation_id: id } as never,
@@ -315,8 +316,8 @@ describe('external Automation activity', () => {
   it('validates updates and versioned trigger changes against the external executor', async () => {
     const id = await createExternal();
     const triggers = [{ kind: 'event', source: 'workspace', event_types: ['connection.deleted'] }];
-    await expect(api.automations.update({ automation_id: id, agent_kind: 'codex' })).rejects.toThrow(/external/);
-    await expect(api.automations.createVersion({ automation_id: id, triggers } as never)).rejects.toThrow(/external/);
+    await expect(api.automations.update({ expected_revision: await readAutomationRevision(api, id), automation_id: id, agent_kind: 'codex' })).rejects.toThrow(/external/);
+    await expect(api.automations.createVersion({ expected_revision: await readAutomationRevision(api, id), automation_id: id, triggers } as never)).rejects.toThrow(/external/);
     const [row] = await sql`SELECT execution_config, triggers FROM automations WHERE id = ${Number(id)}`;
     expect(row.execution_config).toEqual(EXTERNAL);
     expect(row.triggers[0].kind).toBe('schedule');

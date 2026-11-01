@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
-import { TestWorkspace } from '../../setup/test-mcp-client';
+import { freshSchemaEditor, TestWorkspace } from '../../setup/test-mcp-client';
 import { createTestAgent, createTestConnection, createTestEvent } from '../../setup/test-fixtures';
 import { upsertEntityApprovalPolicy } from '../../../authz/entity-policy';
 import { reconcileConnectorRelationshipClaims } from '../../../utils/relationship-claims';
@@ -67,7 +67,7 @@ describe('governed stored identity associations', () => {
     const { sql, human, ids: [a, b], link } = await graph();
     const id = linked(await link(b, a));
     await human.entities.unlink({ relationship_id: id });
-    await human.entity_schema.deleteRelType({ slug: 'same_record' });
+    await freshSchemaEditor(human.entity_schema).deleteRelType({ slug: 'same_record' });
     await sql.begin(async tx => {
       await tx`ALTER TABLE entity_relationships DISABLE TRIGGER lobu_guard_identity_edges`;
       await tx`UPDATE entity_relationships SET metadata = metadata #- '{_lobu_identity_decision,member_support}' WHERE id = ${id}`;
@@ -154,15 +154,15 @@ describe('governed stored identity associations', () => {
 
   it.each([false, true])('deletes an unlinked scoped identity type and preserves history (archived: %s)', async (archiveFirst) => {
     const { human, sql, workspace, ids: [a, b], link, typeId } = await graph(2);
-    await human.entity_schema.addRule({ slug: 'same_record', source_entity_type_slug: 'contact-record', target_entity_type_slug: 'contact-record' });
+    await freshSchemaEditor(human.entity_schema).addRule({ slug: 'same_record', source_entity_type_slug: 'contact-record', target_entity_type_slug: 'contact-record' });
     const relationshipId = linked(await link(a, b));
     const typeBefore = await sql`SELECT * FROM entity_relationship_types WHERE id = ${typeId}`;
-    await expect(human.entity_schema.deleteRelType({ slug: 'same_record' })).rejects.toThrow(/relationships of this type exist/);
+    await expect(freshSchemaEditor(human.entity_schema).deleteRelType({ slug: 'same_record' })).rejects.toThrow(/relationships of this type exist/);
     expect(await sql`SELECT * FROM entity_relationship_types WHERE id = ${typeId}`).toEqual(typeBefore);
 
     await human.entities.unlink({ relationship_id: relationshipId });
     if (archiveFirst) {
-      expect(await human.entity_schema.updateRelType({ slug: 'same_record', status: 'archived' })).toMatchObject({ status: 'applied' });
+      expect(await freshSchemaEditor(human.entity_schema).updateRelType({ slug: 'same_record', status: 'archived' })).toMatchObject({ status: 'applied' });
     }
     const rulesBefore = await sql`SELECT * FROM entity_relationship_type_rules WHERE relationship_type_id = ${typeId} ORDER BY id`;
     const edgeBefore = await sql`SELECT * FROM entity_relationships WHERE id = ${relationshipId}`;
@@ -173,7 +173,7 @@ describe('governed stored identity associations', () => {
     expect(edgeBefore[0].deleted_at).not.toBeNull();
     expect(eventsBefore.map(row => row.metadata.op).sort()).toEqual(['link', 'unlink']);
 
-    expect(await human.entity_schema.deleteRelType({ slug: 'same_record' })).toMatchObject({ status: 'applied', success: true });
+    expect(await freshSchemaEditor(human.entity_schema).deleteRelType({ slug: 'same_record' })).toMatchObject({ status: 'applied', success: true });
     expect(await human.entity_schema.getRelType('same_record')).toMatchObject({ relationship_type: null });
     const [retiredType] = await sql`SELECT purpose, status, deleted_at FROM entity_relationship_types WHERE id = ${typeId}`;
     expect(retiredType).toMatchObject({ purpose: 'identity', status: 'archived' });
@@ -187,8 +187,8 @@ describe('governed stored identity associations', () => {
   it('still retires ordinary relationship rules when deleting their type', async () => {
     const { human, sql, workspace } = await graph(0);
     await human.entity_schema.createRelType({ slug: 'related', name: 'Related' });
-    await human.entity_schema.addRule({ slug: 'related', source_entity_type_slug: 'contact-record', target_entity_type_slug: 'contact-record' });
-    expect(await human.entity_schema.deleteRelType({ slug: 'related' })).toMatchObject({ status: 'applied', success: true });
+    await freshSchemaEditor(human.entity_schema).addRule({ slug: 'related', source_entity_type_slug: 'contact-record', target_entity_type_slug: 'contact-record' });
+    expect(await freshSchemaEditor(human.entity_schema).deleteRelType({ slug: 'related' })).toMatchObject({ status: 'applied', success: true });
     const rules = await sql`SELECT r.deleted_at FROM entity_relationship_type_rules r
       JOIN entity_relationship_types t ON t.id = r.relationship_type_id
       WHERE t.organization_id = ${workspace.org.id} AND t.slug = 'related'`;
@@ -278,9 +278,9 @@ describe('governed stored identity associations', () => {
   it('refuses symmetric identity types, reserved endpoints, and populated purpose/rule edits', async () => {
     const { human, sql, workspace, ids: [a, b], link } = await graph();
     await expect(human.entity_schema.createRelType({ slug: 'symmetric', name: 'Symmetric', purpose: 'identity', is_symmetric: true })).rejects.toThrow(/directional/);
-    await human.entity_schema.addRule({ slug: 'same_record', source_entity_type_slug: 'contact-record', target_entity_type_slug: 'contact-record' });
+    await freshSchemaEditor(human.entity_schema).addRule({ slug: 'same_record', source_entity_type_slug: 'contact-record', target_entity_type_slug: 'contact-record' });
     await link(a, b);
-    await expect(human.entity_schema.addRule({ slug: 'same_record', source_entity_type_slug: 'other', target_entity_type_slug: 'other' })).rejects.toThrow(/immutable/);
+    await expect(freshSchemaEditor(human.entity_schema).addRule({ slug: 'same_record', source_entity_type_slug: 'other', target_entity_type_slug: 'other' })).rejects.toThrow(/immutable/);
     await expect(sql.begin(async tx => {
       await lockIdentityOrganization(tx, workspace.org.id);
       await tx`UPDATE entity_relationship_types SET purpose = NULL WHERE organization_id = ${workspace.org.id} AND slug = 'same_record'`;
@@ -441,7 +441,7 @@ describe('governed stored identity associations', () => {
     await human.entities.link({ from_entity_id: a, to_entity_id: b, relationship_type_slug: 'ordinary' });
     // Ordinary relationships are still arbitrary directed graphs.
     await human.entities.link({ from_entity_id: b, to_entity_id: a, relationship_type_slug: 'ordinary' });
-    await expect(human.entity_schema.updateRelType({ slug: 'ordinary', purpose: 'identity' })).rejects.toThrow(/immutable/);
+    await expect(freshSchemaEditor(human.entity_schema).updateRelType({ slug: 'ordinary', purpose: 'identity' })).rejects.toThrow(/immutable/);
     expect(await human.entity_schema.getRelType('ordinary')).toMatchObject({ relationship_type: { purpose: null } });
   });
 
@@ -463,7 +463,7 @@ describe('governed stored identity associations', () => {
     await human.operations.reject({ run_id: runId(second) });
     for (const id of [a, b]) await human.entities.update({ entity_id: id, metadata: { emails: ['shared@example.test'] } });
     expect(await agent.entities.link(input)).toMatchObject({ approval_suppressed: true });
-    await human.entity_schema.updateType({ slug: 'contact-record', metadata_schema: {
+    await freshSchemaEditor(human.entity_schema).updateType({ slug: 'contact-record', metadata_schema: {
       'x-lobu-resolution': { rules: [{ fields: ['emails'], normalizer: 'email', onMatch: 'auto_link' }] },
     } });
     // A new policy permits reconsideration, but never silently undoes rejection.
@@ -568,7 +568,7 @@ describe('governed stored identity associations', () => {
     const relationshipId = linked(await link(a, b));
     await human.entities.unlink({ relationship_id: relationshipId });
     const auditBefore = await sql`SELECT id FROM events WHERE organization_id = ${workspace.org.id} AND metadata->>'relationshipId' = ${String(relationshipId)} ORDER BY id`;
-    await human.entity_schema.updateRelType({ slug: 'same_record', status: 'archived' });
+    await freshSchemaEditor(human.entity_schema).updateRelType({ slug: 'same_record', status: 'archived' });
     await human.entities.delete({ entity_id: a, force_delete_tree: true });
     expect(await sql`SELECT id FROM entities WHERE id = ${a}`).toHaveLength(0);
     expect(await sql`SELECT id FROM events WHERE organization_id = ${workspace.org.id} AND metadata->>'relationshipId' = ${String(relationshipId)} ORDER BY id`).toEqual(auditBefore);
@@ -624,7 +624,7 @@ describe('governed stored identity associations', () => {
     await human.operations.reject({ run_id: runId(original) });
     await link(a, b);
     await link(c, d);
-    await human.entity_schema.updateType({ slug: 'contact-record', metadata_schema: {
+    await freshSchemaEditor(human.entity_schema).updateType({ slug: 'contact-record', metadata_schema: {
       'x-lobu-resolution': { rules: [
         { fields: ['emails'], normalizer: 'email', onMatch: 'review' },
         { fields: ['phone'], normalizer: 'phone', onMatch: 'review' },
@@ -632,7 +632,7 @@ describe('governed stored identity associations', () => {
     } });
     const input = { from_entity_id: b, to_entity_id: d, relationship_type_slug: 'same_record' };
     await human.operations.reject({ run_id: runId(await agent.entities.link(input)) });
-    await human.entity_schema.updateType({ slug: 'contact-record', metadata_schema: metadataSchema });
+    await freshSchemaEditor(human.entity_schema).updateType({ slug: 'contact-record', metadata_schema: metadataSchema });
     expect(await agent.entities.link(input)).toMatchObject({ approval_suppressed: true });
   });
 
@@ -648,7 +648,7 @@ describe('governed stored identity associations', () => {
   it('does not overwrite a newer policy rejection when an older proposal is rejected last', async () => {
     const { human, agent, input } = await graph(2, 'review');
     const first = await agent.entities.link(input);
-    await human.entity_schema.updateType({ slug: 'contact-record', metadata_schema: {
+    await freshSchemaEditor(human.entity_schema).updateType({ slug: 'contact-record', metadata_schema: {
       'x-lobu-resolution': { rules: [
         { fields: ['emails'], normalizer: 'email', onMatch: 'review' },
         { fields: ['phone'], normalizer: 'phone', onMatch: 'review' },

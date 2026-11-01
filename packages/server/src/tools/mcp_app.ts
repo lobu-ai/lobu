@@ -1,5 +1,6 @@
 import {
   deepRedactSecrets,
+  toToolErrorCode,
   isSecretKey,
   REDACTED_SENTINEL,
 } from '@lobu/core';
@@ -13,7 +14,7 @@ import {
   formatUtc,
 } from '../notifications/action-card-state';
 import { resolveInteractionActionOrigin } from '../notifications/action-origin';
-import { ToolUserError } from '../utils/errors';
+import { ToolUserError, toolErrorHttpStatus } from '../utils/errors';
 import {
   ApprovalKind,
   highApprovalImpact,
@@ -980,7 +981,8 @@ const resolveApprovalImpl = async (
     humanContext
   );
   if ('error' in result && typeof result.error === 'string') {
-    throw new ToolUserError(result.error, 409);
+    const code = toToolErrorCode((result as Record<string, unknown>).error_code);
+    throw new ToolUserError(result.error, code ? toolErrorHttpStatus(code) : 409, code);
   }
   recordWorkspaceActivity(ctx, approvalCtx.organizationId, 'resolve_approval');
   return buildApprovalView(args.run_id, env, approvalCtx);

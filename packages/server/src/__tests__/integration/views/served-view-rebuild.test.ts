@@ -14,6 +14,7 @@ import {
 	compileView,
 	getServedView,
 	getView,
+	readViewModule,
 	serverCompileStamp,
 	servedContentHash,
 } from "../../../views/views";
@@ -75,7 +76,9 @@ describe("getServedView", () => {
 	});
 
 	async function set(args: Record<string, unknown>) {
-		await executeTool("manage_views", { action: "set", ...args }, TEST_ENV, ctx);
+		const definition = await readViewModule(String(args.source_code));
+		const current = await getView(orgId, definition.key);
+		await executeTool("manage_views", { action: "set", expected_revision: current?.revision, ...args }, TEST_ENV, ctx);
 	}
 
 	/** Make the stored bundle look like an older server compiler built it. */

@@ -69,6 +69,11 @@ describe("authorization-bearing relationship types are not caller-writable", () 
 		).id;
 	});
 
+	async function revision(slug: string): Promise<string> {
+		const result = await manageEntitySchema({ schema_type: "relationship_type", action: "get", slug }, env, ctx(orgId, userId));
+		return result.relationship_type!.revision;
+	}
+
 	/**
 	 * Seeds the edge the way the ACL sync does — under the write flag. A raw
 	 * INSERT is now rejected by the database trigger, which is the point: the
@@ -166,7 +171,7 @@ describe("authorization-bearing relationship types are not caller-writable", () 
 			{
 				schema_type: "relationship_type",
 				action: "update",
-				slug: "member_of",
+				slug: "member_of", expected_revision: await revision("member_of"),
 				description: "declared by config",
 			} as never,
 			env,
@@ -191,7 +196,7 @@ describe("authorization-bearing relationship types are not caller-writable", () 
 	it("refuses to ARCHIVE an authorization type — that revokes an org wholesale", async () => {
 		await expect(
 			manageEntitySchema(
-				{ schema_type: "relationship_type", action: "delete", slug: "member_of" },
+				{ schema_type: "relationship_type", action: "delete", slug: "member_of", expected_revision: await revision("member_of"), },
 				env,
 				ctx(orgId, userId),
 			),
@@ -217,7 +222,7 @@ describe("authorization-bearing relationship types are not caller-writable", () 
 				{
 					schema_type: "relationship_type",
 					action: "update",
-					slug: "member_of",
+					slug: "member_of", expected_revision: await revision("member_of"),
 					status: "archived",
 				},
 				env,
@@ -282,6 +287,7 @@ describe("authorization-bearing relationship types are not caller-writable", () 
 			manageEntitySchema({
 				schema_type: "relationship_type",
 				action: "remove_rule",
+				expected_revision: await revision("member_of"),
 				rule_id: Number(rule[0].id),
 			} as never, env, ctx(orgId, userId)),
 		).rejects.toThrow(/authorization-bearing/);
@@ -390,7 +396,7 @@ describe("authorization-bearing relationship types are not caller-writable", () 
 			{
 				schema_type: "relationship_type",
 				action: "update",
-				slug: "mentions",
+				slug: "mentions", expected_revision: await revision("mentions"),
 				name: "Mentioned in",
 			},
 			env,

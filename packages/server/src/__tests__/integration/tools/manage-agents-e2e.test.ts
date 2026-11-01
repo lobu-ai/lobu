@@ -69,12 +69,19 @@ async function agentExists(orgId: string, agentId: string): Promise<boolean> {
 	return rows.length > 0;
 }
 
+async function agentRevision(ctx: AuthContext, agentId: string): Promise<string> {
+  const snapshot = await executeTool("manage_agents", { action: "get", agent_id: agentId }, TEST_ENV, ctx) as { agent: { revision: string } };
+  return snapshot.agent.revision;
+}
+
 describe("manage_agents — builder gate e2e", () => {
 	let orgId: string;
 	let ownerId: string;
 	let ownerCtx: AuthContext;
 	let agentCtx: AuthContext;
 	let memberCtx: AuthContext;
+
+
 
 	const baseCtx = (
 		orgIdValue: string,
@@ -167,7 +174,7 @@ describe("manage_agents — builder gate e2e", () => {
 		);
 		const upd = (await executeTool(
 			"manage_agents",
-			{ action: "update", agent_id: "human-edit-bot", name: "v2" },
+			{ action: "update", agent_id: "human-edit-bot", expected_revision: await agentRevision(ownerCtx, "human-edit-bot"), name: "v2" },
 			TEST_ENV,
 			ownerCtx,
 		)) as { action: string; updated_fields?: string[]; status?: string };
@@ -181,7 +188,7 @@ describe("manage_agents — builder gate e2e", () => {
 
 		const del = (await executeTool(
 			"manage_agents",
-			{ action: "delete", agent_id: "human-edit-bot" },
+			{ action: "delete", agent_id: "human-edit-bot", expected_revision: await agentRevision(ownerCtx, "human-edit-bot") },
 			TEST_ENV,
 			ownerCtx,
 		)) as { action: string; deleted?: boolean; status?: string };
@@ -211,7 +218,7 @@ describe("manage_agents — builder gate e2e", () => {
 
 		await executeTool(
 			"manage_agents",
-			{ action: "delete", agent_id: "policy-bot" },
+			{ action: "delete", agent_id: "policy-bot", expected_revision: await agentRevision(ownerCtx, "policy-bot") },
 			TEST_ENV,
 			ownerCtx,
 		);
@@ -242,7 +249,7 @@ describe("manage_agents — builder gate e2e", () => {
 
 		await executeTool(
 			"manage_agents",
-			{ action: "delete", agent_id: "ghost-bot" },
+			{ action: "delete", agent_id: "ghost-bot", expected_revision: await agentRevision(ownerCtx, "ghost-bot") },
 			TEST_ENV,
 			ownerCtx,
 		);
@@ -453,7 +460,7 @@ describe("manage_agents — builder gate e2e", () => {
 		// An agent-driven update is gated.
 		const upd = (await executeTool(
 			"manage_agents",
-			{ action: "update", agent_id: "editable-bot", name: "Editable Bot v2" },
+			{ action: "update", agent_id: "editable-bot", expected_revision: await agentRevision(ownerCtx, "editable-bot"), name: "Editable Bot v2" },
 			TEST_ENV,
 			agentCtx,
 		)) as PendingApproval;
@@ -478,7 +485,7 @@ describe("manage_agents — builder gate e2e", () => {
 		expect(nameRows[0]?.name).toBe("Editable Bot v2");
 	});
 
-	it("a stale approval skips a field another writer already changed", async () => {
+	it("a stale approval rejects the entire configuration after a newer edit", async () => {
 		await executeTool(
 			"manage_agents",
 			{ action: "create", agent_id: "raced-bot", name: "Original" },
@@ -488,7 +495,7 @@ describe("manage_agents — builder gate e2e", () => {
 		// Agent proposes name → "Agent Name" (pre-image captured: "Original").
 		const upd = (await executeTool(
 			"manage_agents",
-			{ action: "update", agent_id: "raced-bot", name: "Agent Name" },
+			{ action: "update", agent_id: "raced-bot", expected_revision: await agentRevision(ownerCtx, "raced-bot"), name: "Agent Name" },
 			TEST_ENV,
 			agentCtx,
 		)) as PendingApproval;
@@ -497,7 +504,7 @@ describe("manage_agents — builder gate e2e", () => {
 		// Meanwhile a human renames it — pre-image no longer matches.
 		await executeTool(
 			"manage_agents",
-			{ action: "update", agent_id: "raced-bot", name: "Human Name" },
+			{ action: "update", agent_id: "raced-bot", expected_revision: await agentRevision(ownerCtx, "raced-bot"), name: "Human Name" },
 			TEST_ENV,
 			ownerCtx,
 		);
@@ -528,7 +535,7 @@ describe("manage_agents — builder gate e2e", () => {
 		);
 		const upd = (await executeTool(
 			"manage_agents",
-			{ action: "update", agent_id: "legacy-bot", name: "Agent Name" },
+			{ action: "update", agent_id: "legacy-bot", expected_revision: await agentRevision(ownerCtx, "legacy-bot"), name: "Agent Name" },
 			TEST_ENV,
 			agentCtx,
 		)) as PendingApproval;
@@ -537,14 +544,14 @@ describe("manage_agents — builder gate e2e", () => {
 		// Strip `base` from the queued proposal to mimic a pre-branch legacy run.
 		await sql`
 			UPDATE runs
-			SET action_input = (action_input - 'base')
+			SET action_input = (action_input - 'base' - 'expected_revision')
 			WHERE id = ${upd.run_id} AND organization_id = ${orgId}
 		`;
 
 		// A human renames it after the (now base-less) proposal was queued.
 		await executeTool(
 			"manage_agents",
-			{ action: "update", agent_id: "legacy-bot", name: "Human Name" },
+			{ action: "update", agent_id: "legacy-bot", expected_revision: await agentRevision(ownerCtx, "legacy-bot"), name: "Human Name" },
 			TEST_ENV,
 			ownerCtx,
 		);
@@ -587,7 +594,7 @@ describe("manage_agents — builder gate e2e", () => {
 		// Land an agent immediately as the human owner.
 		await executeTool(
 			"manage_agents",
-			{ action: "create", agent_id: "system-bot", name: "System Bot" },
+			{ action: "create", agent_id: "system-bot", name: "System Bot", identity_md: "Keep the authored identity." },
 			TEST_ENV,
 			ownerCtx,
 		);
@@ -597,8 +604,9 @@ describe("manage_agents — builder gate e2e", () => {
 			{ action: "get", agent_id: "system-bot" },
 			TEST_ENV,
 			ownerCtx,
-		)) as { agent?: { id: string } };
+		)) as { agent?: { id: string; identity_md: string | null } };
 		expect(got.agent?.id).toBe("system-bot");
+		expect(got.agent?.identity_md).toBe("Keep the authored identity.");
 
 		const list = (await executeTool(
 			"manage_agents",
@@ -608,6 +616,10 @@ describe("manage_agents — builder gate e2e", () => {
 		)) as { agents: Array<{ id: string }> };
 		const row = list.agents.find((a) => a.id === "system-bot");
 		expect(row?.id).toBe("system-bot");
+    const sql = getTestDb();
+    await sql`UPDATE agents SET identity_md = NULL WHERE organization_id = ${orgId} AND id = 'system-bot'`;
+    const cleared = await executeTool("manage_agents", { action: "get", agent_id: "system-bot" }, TEST_ENV, ownerCtx) as { agent: { identity_md: string | null } };
+    expect(cleared.agent.identity_md).toBeNull();
 	});
 
 	it("agent principal: agent_config read deny filters list and blocks get", async () => {
@@ -844,6 +856,7 @@ describe("manage_agents — model config (#2047)", () => {
 			{
 				action: "update",
 				agent_id: "model-only-bot",
+				expected_revision: await agentRevision(ownerCtx, "model-only-bot"),
 				default_model: "myco/myco-large",
 			},
 			TEST_ENV,
@@ -872,7 +885,7 @@ describe("manage_agents — model config (#2047)", () => {
 		);
 		const upd = (await executeTool(
 			"manage_agents",
-			{ action: "update", agent_id: "clearable-bot", default_model: "" },
+			{ action: "update", agent_id: "clearable-bot", expected_revision: await agentRevision(ownerCtx, "clearable-bot"), default_model: "" },
 			TEST_ENV,
 			ownerCtx,
 		)) as { updated_fields: string[]; model: ModelInfo };

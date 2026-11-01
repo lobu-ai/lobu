@@ -132,6 +132,71 @@ test("external cutover preserves bound Slack delivery and the checkpoint", async
   expect(after.items).toEqual([]);
 });
 
+test("external cutover preserves a concurrent edit instead of adopting a refreshed revision", async () => {
+  const workspace = await TestWorkspace.create({
+    name: "Synthetic digest conflict",
+  });
+  const agent = await createTestAgent({
+    organizationId: workspace.org.id,
+    ownerUserId: workspace.users.owner.id,
+    agentId: "synthetic-digest-conflict",
+  });
+  const created = await workspace.owner.automations.create({
+    slug: "product-activity-digest",
+    name: "Before cutover",
+    managed_agent_id: agent.agentId,
+    prompt: "Review synthetic activity.",
+    triggers: [{ kind: "schedule", cron: "*/20 * * * *" }],
+  });
+  const automationId = String(created.automation_id);
+  const automations = workspace.owner.automations;
+  let reads = 0;
+  const client = {
+    automations: {
+      ...automations,
+      get: async (input: Parameters<typeof automations.get>[0]) => {
+        reads++;
+        if (reads === 2) {
+          const current = (await automations.get(input)) as {
+            automation: { revision: string };
+          };
+          await automations.createVersion({
+            automation_id: automationId,
+            expected_revision: current.automation.revision,
+            name: "Concurrent edit",
+            set_as_current: true,
+          });
+        }
+        return automations.get(input);
+      },
+    },
+  };
+
+  await expect(
+    configureProductActivityDigest(
+      client,
+      automationId,
+      "export default async () => {};"
+    )
+  ).rejects.toMatchObject({
+    httpStatus: 409,
+    code: "REVISION_CONFLICT",
+    retryable: false,
+  });
+  const { automation } = (await automations.get({
+    automation_id: automationId,
+  })) as {
+    automation: {
+      automation_name: string;
+      triggers: unknown[];
+      reaction_script?: string;
+    };
+  };
+  expect(automation.automation_name).toBe("Concurrent edit");
+  expect(automation.triggers).toEqual([]);
+  expect(automation.reaction_script).toBeUndefined();
+});
+
 test("hands off log counts without samples while preserving activity and pageable checkpoints", async () => {
   const workspace = await TestWorkspace.create({
     name: "Synthetic query digest",

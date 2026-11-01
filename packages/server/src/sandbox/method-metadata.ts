@@ -217,14 +217,14 @@ export default async (_ctx, client) => {
 	},
 	"entitySchema.listTypes": {
 		summary:
-			"List entity types. Defaults to accessible (current org plus public schemas); pass list_scope: 'organization' for only the bound org.",
+			"List entity types with authored revision tokens. Defaults to accessible (current org plus public schemas); pass list_scope: 'organization' for only the bound org.",
 		access: "read",
 		signature:
 			"entitySchema.listTypes(input?: { list_scope?: 'accessible' | 'organization' }): Promise<unknown>",
 	},
 	"entitySchema.getType": {
 		summary:
-			"Get an entity type by slug. A missing type resolves rather than throwing: check the nullable `entity_type` field to determine whether the type exists — do not truth-test the wrapper, which is always present.",
+			"Get an entity type by slug with its revision token. A missing type resolves rather than throwing: check the nullable `entity_type` field to determine whether the type exists — do not truth-test the wrapper, which is always present.",
 		access: "read",
 		signature:
 			"entitySchema.getType(slug: string): Promise<unknown> // or entitySchema.getType({ slug })",
@@ -270,13 +270,13 @@ export default async (_ctx, client) => {
 };`,
 	},
 	"entitySchema.updateType": {
-		summary: `Update an entity type. An event_kinds object replaces the entire registry; call getType and read-merge-write to preserve existing kinds. Use null to clear or omit to leave unchanged. ${METADATA_SCHEMA_FORM_GUIDANCE}`,
+		summary: `Update an entity type using expected_revision from the original getType/listTypes read. A stale or missing token returns REVISION_CONFLICT; reload and reapply the intended edit instead of retrying a stale replacement. An event_kinds object replaces the entire registry; call getType and read-merge-write to preserve existing kinds. Use null to clear or omit to leave unchanged. ${METADATA_SCHEMA_FORM_GUIDANCE}`,
 		access: "admin",
 	},
 	"entitySchema.deleteType": {
-		summary: "Delete an entity type.",
+		summary: "Delete an entity type using its original expected_revision token.",
 		access: "admin",
-		example: "await client.entitySchema.deleteType({ slug: 'widget' });",
+		example: "const { entity_type } = await client.entitySchema.getType('widget'); if (entity_type) await client.entitySchema.deleteType({ slug: 'widget', expected_revision: entity_type.revision });",
 	},
 	"entitySchema.auditType": {
 		summary: "List historical changes to an entity type.",
@@ -287,14 +287,14 @@ export default async (_ctx, client) => {
 	},
 	"entitySchema.listRelTypes": {
 		summary:
-			"List relationship types. Defaults to accessible (current org plus public schemas); pass list_scope: 'organization' for only the bound org.",
+			"List relationship types with authored revision tokens covering their allowed rules. Defaults to accessible (current org plus public schemas); pass list_scope: 'organization' for only the bound org.",
 		access: "read",
 		signature:
 			"entitySchema.listRelTypes(input?: { list_scope?: 'accessible' | 'organization' }): Promise<unknown>",
 	},
 	"entitySchema.getRelType": {
 		summary:
-			"Get a relationship type by slug. A missing type resolves rather than throwing: check the nullable `relationship_type` field to determine whether the type exists — do not truth-test the wrapper, which is always present.",
+			"Get a relationship type by slug with its revision token. A missing type resolves rather than throwing: check the nullable `relationship_type` field to determine whether the type exists — do not truth-test the wrapper, which is always present.",
 		access: "read",
 		signature:
 			"entitySchema.getRelType(slug: string): Promise<unknown> // or entitySchema.getRelType({ slug })",
@@ -306,21 +306,21 @@ export default async (_ctx, client) => {
 		access: "admin",
 	},
 	"entitySchema.updateRelType": {
-		summary: "Update a relationship type.",
+		summary: "Update a relationship type with expected_revision from the original read; stale tokens return REVISION_CONFLICT.",
 		access: "admin",
 	},
 	"entitySchema.deleteRelType": {
-		summary: "Delete a relationship type.",
+		summary: "Delete a relationship type using its original expected_revision token.",
 		access: "admin",
-		example: "await client.entitySchema.deleteRelType({ slug: 'works-at' });",
+		example: "const { relationship_type } = await client.entitySchema.getRelType('works-at'); if (relationship_type) await client.entitySchema.deleteRelType({ slug: 'works-at', expected_revision: relationship_type.revision });",
 	},
 	"entitySchema.addRule": {
 		summary:
-			"Add an allowed source/target entity-type rule to a relationship type.",
+			"Add an allowed source/target entity-type rule using the relationship type's original expected_revision. Returns revision for a subsequent edit.",
 		access: "admin",
 	},
 	"entitySchema.removeRule": {
-		summary: "Remove a rule from a relationship type.",
+		summary: "Remove a rule using the parent relationship type's original expected_revision. Returns revision for a subsequent edit.",
 		access: "admin",
 	},
 	"entitySchema.listRules": {
@@ -404,7 +404,7 @@ export default async (_ctx, client) => {
 	},
 	"agents.update": {
 		summary:
-			"Update agent fields (may queue for approval). Requires admin tier + agent_config update.",
+			"Update agent fields with expected_revision from the original agents.get/list snapshot (may queue for approval). Returns the saved revision; stale or missing baselines fail with REVISION_CONFLICT. Requires admin tier + agent_config update.",
 		access: "admin",
 	},
 	"agents.delete": {
@@ -412,8 +412,8 @@ export default async (_ctx, client) => {
 			"Delete an agent (may queue for approval). Requires admin tier + agent_config delete.",
 		access: "admin",
 		signature:
-			"agents.delete(agent_id: string): Promise<unknown> // or agents.delete({ agent_id })",
-		example: "await client.agents.delete('researcher');",
+			"agents.delete(input: { agent_id: string; expected_revision: string }): Promise<unknown>",
+		example: "const { agent } = await client.agents.get('researcher'); await client.agents.delete({ agent_id: agent.id, expected_revision: agent.revision });",
 	},
 
 	// conversations — an agent's durable threads (history + pinned sandbox realm).
@@ -627,12 +627,12 @@ export default async (_ctx, client) => {
 	},
 	"automations.update": {
 		summary:
-			"Update runtime config only: triggers, managed_agent_id, model_config, execution_config, device_worker_id, agent_kind, delivery_target, min_cooldown_seconds, tags. delivery_target is a strict bound chat destination `{ connection_id, channel_id }`; null clears it. Version-owned fields (name, description, prompt, sources) are immutable here — use createVersion. Status is not patchable here (an Automation is retired via delete → archived).",
+			"Update runtime config with expected_revision from the original automation read; success returns revision and stale/missing baselines fail with REVISION_CONFLICT. Editable fields: triggers, managed_agent_id, model_config, execution_config, device_worker_id, agent_kind, delivery_target, min_cooldown_seconds, tags. delivery_target is a strict bound chat destination `{ connection_id, channel_id }`; null clears it. Version-owned fields (name, description, prompt, sources) are immutable here — use createVersion. Status is not patchable here (an Automation is retired via delete → archived).",
 		access: "admin",
 	},
 	"automations.createVersion": {
 		summary:
-			"Create a new Automation version. Version-owned fields include name, description, prompt, skills, sources, outputs, and reactions guidance. Outputs use the same entity/event contract as create and require window execution.",
+			"Create a new Automation version with expected_revision from the original automation read; success returns the saved revision for any following write. Version-owned fields include name, description, prompt, skills, sources, outputs, and reactions guidance. Outputs use the same entity/event contract as create and require window execution.",
 		access: "admin",
 	},
 	"automations.trigger": {
@@ -666,16 +666,16 @@ export default async (_ctx, client) => {
 		summary:
 			"Archive one or more Automations (soft delete): sets status='archived' and stops scheduling. The row and its versions are retained; there is no hard delete.",
 		access: "admin",
-		example: "await client.automations.delete({ automation_ids: ['42'] });",
+		example: "const { automation } = await client.automations.get({ automation_id: '42' }); await client.automations.delete({ automation_ids: ['42'], expected_revisions: { '42': automation.revision } });",
 	},
 	"automations.setReactionScript": {
 		summary:
 			"Attach a raw TS reaction script (fires on window completion). The source goes in `reaction_script`; empty string removes it.",
 		access: "admin",
 		signature:
-			"automations.setReactionScript(input: { automation_id: string; reaction_script: string }): Promise<unknown>",
+			"automations.setReactionScript(input: { automation_id: string; expected_revision: string; reaction_script: string }): Promise<unknown>",
 		example:
-			"await client.automations.setReactionScript({ automation_id: '42', reaction_script: 'export default async (ctx, client) => { /* … */ };' });",
+			"const { automation } = await client.automations.get({ automation_id: '42' }); await client.automations.setReactionScript({ automation_id: '42', expected_revision: automation.revision, reaction_script: 'export default async (ctx, client) => { /* … */ };' });",
 		throws: ["CompileError"],
 	},
 	"automations.completeWindow": {
@@ -1107,6 +1107,21 @@ export default async (_ctx, client) => {
 			"await client.classifiers.classify({ classifier_slug: 'sentiment', classifications: [{ content_id: 101, value: 'positive', confidence: 0.9 }] });",
 	},
 
+	// navigation
+	"navigation.get": {
+		summary: "Read the workspace sidebar document and its revision. Null document uses default navigation. Optional projection: 'display' prunes unavailable links even for editors. Visitors always receive only reachable public collection links; custom views remain member-only.",
+		access: "read",
+		signature: "navigation.get(input?: { projection?: 'display' }): Promise<{ action: 'get'; document: NavigationDocument | null; revision: string }>",
+		example: "const current = await client.navigation.get();",
+	},
+	"navigation.set": {
+		summary: "Replace the workspace sidebar using the original read revision. Requires owner/admin access. One document contains up to 16 sections and 256 links, with at most two clickable levels. Each section has id, optional label, and items. Items have unique id, label, target and optional children (leaf items). Targets are { type: 'collection', entity_type, preset? } or { type: 'view', key, entity_type?, preset? }. View targets need the matching workspace or collection attachment. Null document restores defaults. A stale expected_revision fails with REVISION_CONFLICT; reload and reconcile the intended edit before retrying.",
+		access: "admin",
+		signature: "navigation.set(input: { document: NavigationDocument | null; expected_revision: string }): Promise<{ action: 'set'; document: NavigationDocument | null; revision: string; written: boolean }>",
+		throws: ["REVISION_CONFLICT"],
+		example: "const current = await client.navigation.get(); await client.navigation.set({ document: { sections: [] }, expected_revision: current.revision });",
+	},
+
 	// views
 	"views.manage": {
 		summary: "Raw manage_views action wrapper. Prefer named methods.",
@@ -1123,10 +1138,10 @@ export default async (_ctx, client) => {
 	},
 	"views.set": {
 		summary:
-			"Store a view, the authored surface for interactive pages and dashboards: a React module (@lobu/views) upserted by the key it declares. Inspect available native entity/event pages, views.list/get and project components first; honor user designs and existing overrides, and reuse what fits. The runtime kit @lobu/views/components provides Card, DataTable, FilterBar, SearchField, SelectField, BarChart, LineChart, PieChart, Sparkline, Link, LoadingState, EmptyState, ErrorState, TruncatedNotice and formatCompact. These are defaults: compose, wrap or replace them with custom React components for specialized UX. Read Custom Views in skill://lobu (or /api/skill/lobu on the selected runtime) for the full contract. Use views when exploration helps: linked charts, filters, drilldowns and Canvas/SVG; bundle extra npm libraries through the CLI, with no runtime CDN or fetch. Compiles source_code server-side unless compiled_code is supplied. Params: { source_code, compiled_code?, source_files?, dependencies?, last_writer? }. Supply source_files and dependencies together (use {} for local-only files); source_code is still required and must equal source_files.files[source_files.entrypoint]. The module is the only declaration: it must `export const view = defineView({ key, name?, description?, attach, params?, actions? })` written out as a literal (no variables, spreads or ${} templates; the server reads it without running the module) and default-export the component. attach lists the pages the view appears on, one per entry: { record: '<type>', id? } is a card on each record page of the type (or one pinned record) that opens fullscreen in the peek, { collection: '<type>', when? } a tab on the type's list page, { workspace: true } a Data hub tab, and { event: '<kind>', type? } one event's page at /events/<id>/-/views/<key> and its peek (read it with read_knowledge({ content_ids: [scope.event] }) and select that exact ID from the returned lineage). Workspace attachment alone does not render events. Event attachments match semantic_type, not metadata schema names; use a dedicated registered kind rather than generic summary. One view may list several pages and branch on useScope(); event scope must stay on scope.event, never fall back to the latest event or a date param. The view reads useHost().displayMode ('inline' card or 'fullscreen') to choose a summary or the full rendering; params are typed URL params ({ type, default?, filter? }; a param with filter: { label, options? } is offered in the host's filter bar above the view and shows its value as a chip), read with `const [params, setParams] = useParams()`. actions map names to the event kind each emits. Preserve readable fallback content and verify each attached page/peek, narrow sizing, interactions, errors and truncation; compilation alone is not UI proof. Identical content (source, declaration, compiled bundle, retained files and dependencies) is a no-op (written:false).",
+			"Store a view, the authored surface for interactive pages and dashboards: a React module (@lobu/views) identified by the key it declares. Omit expected_revision only to create an absent key; to edit an existing view, pass view.revision from the original views.get/list read. Stale saves return REVISION_CONFLICT. Compiler/cache changes do not invalidate this authored token. Inspect available native entity/event pages, views.list/get and project components first; honor user designs and existing overrides, and reuse what fits. The runtime kit @lobu/views/components provides Card, DataTable, FilterBar, SearchField, SelectField, BarChart, LineChart, PieChart, Sparkline, Link, LoadingState, EmptyState, ErrorState, TruncatedNotice and formatCompact. These are defaults: compose, wrap or replace them with custom React components for specialized UX. Read Custom Views in skill://lobu (or /api/skill/lobu on the selected runtime) for the full contract. Use views when exploration helps: linked charts, filters, drilldowns and Canvas/SVG; bundle extra npm libraries through the CLI, with no runtime CDN or fetch. Compiles source_code server-side unless compiled_code is supplied. Params: { source_code, compiled_code?, source_files?, dependencies?, last_writer?, expected_revision? }. Supply source_files and dependencies together (use {} for local-only files); source_code is still required and must equal source_files.files[source_files.entrypoint]. The module is the only declaration: it must `export const view = defineView({ key, name?, description?, attach, params?, actions? })` written out as a literal (no variables, spreads or ${} templates; the server reads it without running the module) and default-export the component. attach lists the pages the view appears on, one per entry: { record: '<type>', id? } is a card on each record page of the type (or one pinned record) that opens fullscreen in the peek, { collection: '<type>', when? } a tab on the type's list page, { workspace: true } a Data hub tab, and { event: '<kind>', type? } one event's page at /events/<id>/-/views/<key> and its peek (read it with read_knowledge({ content_ids: [scope.event] }) and select that exact ID from the returned lineage). Workspace attachment alone does not render events. Event attachments match semantic_type, not metadata schema names; use a dedicated registered kind rather than generic summary. One view may list several pages and branch on useScope(); event scope must stay on scope.event, never fall back to the latest event or a date param. The view reads useHost().displayMode ('inline' card or 'fullscreen') to choose a summary or the full rendering; params are typed URL params ({ type, default?, filter? }; a param with filter: { label, options? } is offered in the host's filter bar above the view and shows its value as a chip), read with `const [params, setParams] = useParams()`. actions map names to the event kind each emits. Preserve readable fallback content and verify each attached page/peek, narrow sizing, interactions, errors and truncation; compilation alone is not UI proof. Identical content (source, declaration, compiled bundle, retained files and dependencies) is a no-op (written:false).",
 		access: "admin",
 		signature:
-			"views.set(input: { source_code: string; compiled_code?: string; source_files?: { entrypoint: string; files: Record<string, string> }; dependencies?: Record<string, string> }): Promise<unknown>",
+			"views.set(input: { source_code: string; expected_revision?: string; compiled_code?: string; source_files?: { entrypoint: string; files: Record<string, string> }; dependencies?: Record<string, string> }): Promise<unknown>",
 		example:
 			"await client.views.set({ source_code: `import { defineView, sql, useParams, useQuery } from '@lobu/views';\nimport { Card, DataTable, TruncatedNotice } from '@lobu/views/components';\nexport const view = defineView({ key: 'pipeline', name: 'Pipeline', attach: [{ collection: 'deal' }], params: { stage: { type: 'string', default: 'open', filter: { label: 'Stage', options: [{ value: 'open', label: 'Open' }, { value: 'won', label: 'Won' }] } } } });\nexport default function Pipeline() {\n  const [{ stage }] = useParams();\n  const deals = useQuery<Array<{ id: string; title: string }>>(sql\\`SELECT id, title FROM deal WHERE stage = \\${stage} ORDER BY id LIMIT 100\\`);\n  const rows = deals.data ?? [];\n  return <Card title=\"Pipeline\"><DataTable columns={[{ key: 'title', header: 'Title' }]} rows={rows} keyOf={(r) => r.id} loading={deals.loading} error={deals.error} onRetry={deals.refetch} emptyText=\"No deals in this stage.\" caption=\"First 100 deals in this stage\" />{deals.truncated && <TruncatedNotice shown={rows.length} />}</Card>;\n}` });",
 	},
@@ -1141,12 +1156,12 @@ export default async (_ctx, client) => {
 	},
 	"views.remove": {
 		summary:
-			"Delete a view by key. Params: { key }.",
+			"Delete a view by key using expected_revision from the original views.get/list read.",
 		access: "admin",
 		signature:
-			"views.remove(input: { key: string }): Promise<unknown>",
+			"views.remove(input: { key: string; expected_revision: string }): Promise<unknown>",
 		example:
-			"await client.views.remove({ key: 'pipeline' });",
+			"const { view } = await client.views.get({ key: 'pipeline' }); await client.views.remove({ key: 'pipeline', expected_revision: view.revision });",
 	},
 
 	// metrics — governed measures (prefer over client.query / query_sql)

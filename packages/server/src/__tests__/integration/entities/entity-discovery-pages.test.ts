@@ -6,7 +6,7 @@ import { runScript } from "../../../sandbox/run-script";
 import type { Env } from "../../../index";
 import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
 import { createTestAccessToken, createTestAgent, createTestEntity, createTestOAuthClient, ownerToolContext } from "../../setup/test-fixtures";
-import { TestMcpClient, TestWorkspace } from "../../setup/test-mcp-client";
+import { freshSchemaEditor, TestMcpClient, TestWorkspace } from "../../setup/test-mcp-client";
 
 import { registerMutationInterceptor, __resetMutationGateForTests } from "../../../authz/entity-mutation-gate";
 import { lockIdentityOrganization } from "../../../utils/relationship-validation";
@@ -25,7 +25,7 @@ async function setup() {
   })} WHERE id = ${type.entity_type_id}`;
   const human = workspace.withAuth({ tokenType: "session" });
   await human.entity_schema.createRelType({ slug: "same_asset", name: "Same asset", purpose: "identity" });
-  await human.entity_schema.addRule({ slug: "same_asset", source_entity_type_slug: "asset", target_entity_type_slug: "asset" });
+  await freshSchemaEditor(human.entity_schema).addRule({ slug: "same_asset", source_entity_type_slug: "asset", target_entity_type_slug: "asset" });
   const context = ownerToolContext(workspace.org.id, workspace.users.owner.id);
   const sdk = buildClientSDK(context, {} as Env);
   let sequence = 0;

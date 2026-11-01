@@ -79,8 +79,12 @@ describe("relationships preset", () => {
       },
       "x-lobu-resolution": { rules: [] },
     };
+    const current = (await entitySchema.getType("person")) as {
+      entity_type: { revision: string };
+    };
     await entitySchema.updateType({
       slug: "person",
+      expected_revision: current.entity_type.revision,
       name: "My contacts",
       metadata_schema: customized,
     });

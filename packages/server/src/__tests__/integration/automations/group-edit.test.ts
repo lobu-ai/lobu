@@ -15,6 +15,7 @@
  *     doesn't wipe the version chain out from under the group.
  */
 
+import { readAutomationRevision } from './revision-fixture';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { transform } from 'esbuild';
 import { compileReactionScript, validateReactionDefaultExport } from '../../../automations/reaction-executor';
@@ -141,6 +142,7 @@ describe('automation group edit contract', () => {
 
     await manageAutomations(
       {
+        expected_revision: await readAutomationRevision(workspace.owner, String(rootId)),
         action: 'set_reaction_script',
         automation_id: String(rootId),
         // Declares an `input` contract → reaction_input_schema is populated. A
@@ -187,6 +189,7 @@ describe('automation group edit contract', () => {
 
     await manageAutomations(
       {
+        expected_revision: await readAutomationRevision(workspace.owner, String(rootId)),
         action: 'set_reaction_script',
         automation_id: String(rootId),
         // `input` is a PLAIN JSON Schema (no typebox — it breaks the isolate
@@ -210,6 +213,7 @@ describe('automation group edit contract', () => {
     // Clearing the script wipes the cached schema too.
     await manageAutomations(
       {
+        expected_revision: await readAutomationRevision(workspace.owner, String(rootId)),
         action: 'set_reaction_script',
         automation_id: String(rootId),
         reaction_script: '',
@@ -254,6 +258,7 @@ describe('automation group edit contract', () => {
     // Edit through the SIBLING — group cascade should still apply, not just to the sibling.
     const result = (await manageAutomations(
       {
+        expected_revision: await readAutomationRevision(workspace.owner, String(sibling1Id)),
         action: 'create_version',
         automation_id: String(sibling1Id),
         prompt: 'Cascaded prompt v2.',
@@ -314,6 +319,7 @@ describe('automation group edit contract', () => {
     await expect(
       manageAutomations(
         {
+          expected_revision: await readAutomationRevision(workspace.owner, String(rootId)),
           action: 'create_version',
           automation_id: String(rootId),
           outputs: { alerts: { event: 'brand_signal' } },
@@ -336,6 +342,7 @@ describe('automation group edit contract', () => {
     `;
     const version = (await manageAutomations(
       {
+        expected_revision: await readAutomationRevision(workspace.owner, String(rootId)),
         action: 'create_version',
         automation_id: String(rootId),
         outputs: { alerts: { event: 'brand_signal' } },
@@ -388,6 +395,7 @@ describe('automation group edit contract', () => {
 
     await manageAutomations(
       {
+        expected_revision: await readAutomationRevision(workspace.owner, String(rootId)),
         action: 'set_reaction_script',
         automation_id: String(rootId),
         reaction_script: 'export default async function reaction() { /* v1 */ }',
@@ -405,6 +413,7 @@ describe('automation group edit contract', () => {
     // Calling through the sibling (not the root) — should still cascade.
     await manageAutomations(
       {
+        expected_revision: await readAutomationRevision(workspace.owner, String(siblingId)),
         action: 'set_reaction_script',
         automation_id: String(siblingId),
         reaction_script: '',
@@ -439,7 +448,7 @@ describe('automation group edit contract', () => {
     );
     const script = 'export default async function reaction() { return; }';
     await manageAutomations(
-      { action: 'set_reaction_script', automation_id: String(rootId), reaction_script: script } as never,
+      { expected_revision: await readAutomationRevision(workspace.owner, String(rootId)), action: 'set_reaction_script', automation_id: String(rootId), reaction_script: script } as never,
       {} as Env,
       ownerCtx(workspace)
     );
@@ -450,7 +459,7 @@ describe('automation group edit contract', () => {
         AND metadata->>'resource_id' IN (${String(rootId)}, ${String(siblingId)})
     `;
     await manageAutomations(
-      { action: 'set_reaction_script', automation_id: String(siblingId), reaction_script: script } as never,
+      { expected_revision: await readAutomationRevision(workspace.owner, String(siblingId)), action: 'set_reaction_script', automation_id: String(siblingId), reaction_script: script } as never,
       {} as Env,
       ownerCtx(workspace)
     );
@@ -469,7 +478,7 @@ describe('automation group edit contract', () => {
     const { automationId } = await seedRootAutomation(workspace, 'schema-noop');
     const script = 'export const input = { type: "object", properties: { item: { type: "object", properties: { a: { type: "string" }, b: { type: "number" } } } } }; export default async function reaction() { return; }';
     await manageAutomations(
-      { action: 'set_reaction_script', automation_id: String(automationId), reaction_script: script } as never,
+      { expected_revision: await readAutomationRevision(workspace.owner, String(automationId)), action: 'set_reaction_script', automation_id: String(automationId), reaction_script: script } as never,
       {} as Env,
       ownerCtx(workspace)
     );
@@ -487,7 +496,7 @@ describe('automation group edit contract', () => {
         AND metadata->>'resource_id' = ${String(automationId)}
     `;
     await manageAutomations(
-      { action: 'set_reaction_script', automation_id: String(automationId), reaction_script: script } as never,
+      { expected_revision: await readAutomationRevision(workspace.owner, String(automationId)), action: 'set_reaction_script', automation_id: String(automationId), reaction_script: script } as never,
       {} as Env,
       ownerCtx(workspace)
     );
@@ -508,8 +517,8 @@ describe('automation group edit contract', () => {
     const entity = await createTestEntity({ name: 'Repair Sibling', organization_id: workspace.org.id, created_by: workspace.users.owner.id });
     const siblingId = await assignToEntity(workspace, Number(root.current_version_id), entity.id);
     const script = 'export const input = { type: "object", properties: { summary: { type: "string" } } }; export default async () => ({ summary: "CURRENT" });';
-    const save = () => manageAutomations(
-      { action: 'set_reaction_script', automation_id: String(rootId), reaction_script: script } as never,
+    const save = async () => manageAutomations(
+      { expected_revision: await readAutomationRevision(workspace.owner, String(rootId)), action: 'set_reaction_script', automation_id: String(rootId), reaction_script: script } as never,
       {} as Env, ownerCtx(workspace),
     );
     await save();
@@ -579,6 +588,7 @@ describe('automation group edit contract', () => {
     // to v2 on the automations row, but the run's payload still holds v1.
     await manageAutomations(
       {
+        expected_revision: await readAutomationRevision(workspace.owner, String(rootId)),
         action: 'create_version',
         automation_id: String(rootId),
         prompt: 'Post-run edit.',
@@ -656,6 +666,7 @@ describe('automation group edit contract', () => {
     // it must NOT pick up A's v1 snapshot.
     await manageAutomations(
       {
+        expected_revision: await readAutomationRevision(workspace.owner, String(aId)),
         action: 'create_version',
         automation_id: String(aId),
         prompt: "A's v2",
@@ -682,48 +693,59 @@ describe('automation group edit contract', () => {
     expect(Number(scopedToA.version_id)).toBeGreaterThan(0);
   });
 
-  it('serializes concurrent create_version calls on the same group', async () => {
+  it('rejects a concurrent edit from the same original group revision without creating an extra version', async () => {
     const sql = getTestDb();
     const workspace = await TestWorkspace.create({
       name: 'Concurrent Edit Org',
     });
     const { automationId: rootId } = await seedRootAutomation(workspace, 'concurrent');
+    const originalRevision = await readAutomationRevision(workspace.owner, String(rootId));
 
-    // Fire two create_version calls in parallel. The advisory lock should
-    // serialize them; one ends up at v2, the other at v3 — neither errors,
-    // neither collides on (automation_id, version) unique index.
-    const [r1, r2] = await Promise.all([
-      manageAutomations(
-        {
-          action: 'create_version',
-          automation_id: String(rootId),
-          prompt: 'edit A',
-          change_notes: 'A',
-        } as never,
-        {} as Env,
-        ownerCtx(workspace)
-      ),
-      manageAutomations(
-        {
-          action: 'create_version',
-          automation_id: String(rootId),
-          prompt: 'edit B',
-          change_notes: 'B',
-        } as never,
-        {} as Env,
-        ownerCtx(workspace)
-      ),
-    ]);
-
-    const versions = [r1, r2]
-      .map((r) => Number((r as { version: number }).version))
-      .sort((a, b) => a - b);
-    expect(versions).toEqual([2, 3]);
+    // Both editors opened the same snapshot. The group lock serializes the
+    // writes; the loser must reject its stale snapshot before creating history.
+    const results = await Promise.allSettled(['A', 'B'].map((edit) => manageAutomations(
+      {
+        expected_revision: originalRevision,
+        action: 'create_version',
+        automation_id: String(rootId),
+        prompt: `edit ${edit}`,
+        change_notes: edit,
+      } as never,
+      {} as Env,
+      ownerCtx(workspace)
+    )));
+    const fulfilled = results.filter((result) => result.status === 'fulfilled');
+    const rejected = results.filter((result) => result.status === 'rejected');
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect(Number((fulfilled[0] as PromiseFulfilledResult<{ version: number }>).value.version)).toBe(2);
+    expect((rejected[0] as PromiseRejectedResult).reason).toMatchObject({
+      httpStatus: 409,
+      code: 'REVISION_CONFLICT',
+    });
 
     const versionRows = await sql`
       SELECT version FROM automation_versions WHERE automation_id = ${rootId} ORDER BY version
     `;
-    const stored = versionRows.map((r) => Number(r.version));
-    expect(stored).toEqual([1, 2, 3]);
+    expect(versionRows.map((row) => Number(row.version))).toEqual([1, 2]);
+
+    // A separate edit after explicitly reading the winner can create v3.
+    const nextRevision = await readAutomationRevision(workspace.owner, String(rootId));
+    const next = await manageAutomations(
+      {
+        expected_revision: nextRevision,
+        action: 'create_version',
+        automation_id: String(rootId),
+        prompt: 'Merged after reviewing the winner',
+        change_notes: 'Reviewed edit',
+      } as never,
+      {} as Env,
+      ownerCtx(workspace)
+    );
+    expect(Number((next as { version: number }).version)).toBe(3);
+    const finalRows = await sql`
+      SELECT version FROM automation_versions WHERE automation_id = ${rootId} ORDER BY version
+    `;
+    expect(finalRows.map((row) => Number(row.version))).toEqual([1, 2, 3]);
   });
 });

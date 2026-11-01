@@ -33,10 +33,12 @@ const SERVER_SRC = path.resolve(
  * `packages/server/src`.
  */
 const SANCTIONED_INSERT_SITES = [
-	// The shared UPSERT — reached by AgentMetadataStore.createAgent, i.e. the
-	// POST /api/v1/agents route. Also the UPDATE path, so its DO UPDATE SET
-	// clause deliberately omits models.
+	// The shared internal metadata UPSERT deliberately omits models from
+	// DO UPDATE SET, preserving the settings of an existing agent.
 	"lobu/stores/postgres-stores.ts",
+	// Session POST /api/v1/agents inserts defaults atomically and refuses
+	// duplicate creation, so it cannot overwrite an existing agent's settings.
+	"gateway/routes/public/agents.ts",
 	// The web UI create route (POST /agents).
 	"lobu/agent-routes.ts",
 	// The manage_agents create tool (MCP + REST proxy).

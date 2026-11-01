@@ -6,6 +6,7 @@
  * together, and the next window starts where the previous one stopped.
  */
 
+import { readAutomationRevision } from './revision-fixture';
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { AutomationSource } from '@lobu/core/contracts/tools/manage-automations';
 import { dispatchPendingAutomationRuns, materializeDueAutomationRuns } from '../../../automations/automation';
@@ -164,6 +165,7 @@ describe('script executor window bound', () => {
     const sql = getTestDb();
     const [before] = await sql`SELECT approved_input FROM runs WHERE id = ${first.runId}`;
     await seed.workspace.owner.automations.createVersion({
+      expected_revision: await readAutomationRevision(seed.workspace.owner, String(seed.automationId)),
       automation_id: String(seed.automationId),
       sources: [{ name: 'arrivals', query: 'SELECT id FROM events' }],
     });
@@ -189,6 +191,7 @@ describe('script executor window bound', () => {
       metadata_schema: { type: 'object', properties: {} },
     });
     await seed.workspace.owner.automations.createVersion({
+      expected_revision: await readAutomationRevision(seed.workspace.owner, String(seed.automationId)),
       automation_id: String(seed.automationId),
       sources: [{ name: 'state', query: '@entity:synthetic-state' }],
     });

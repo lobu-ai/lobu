@@ -598,6 +598,18 @@ export const ManageAutomationsSchema = Type.Object(
     ),
 
     // Automation identity (the persisted DB column is automation_id)
+    expected_revision: Type.Optional(
+      Type.String({
+        description:
+          "[update/create_version/set_reaction_script] Required revision from the original configuration read. Stale writes fail with REVISION_CONFLICT.",
+      })
+    ),
+    expected_revisions: Type.Optional(
+      Type.Record(Type.String(), Type.String(), {
+        description:
+          "[delete] Required original revision for each automation_ids entry, keyed by Automation ID.",
+      })
+    ),
     automation_id: Type.Optional(
       Type.String({
         description:
@@ -1163,6 +1175,7 @@ export const ManageAutomationsResultSchema = Type.Union([
   Type.Object({
     action: Type.Literal("create"),
     automation_id: Type.String(),
+    revision: Type.String(),
     version: Type.Integer(),
     status: Type.String(),
     sources: Type.Optional(Type.Array(AutomationSourceSchema)),
@@ -1171,11 +1184,13 @@ export const ManageAutomationsResultSchema = Type.Union([
   Type.Object({
     action: Type.Literal("update"),
     automation_id: Type.String(),
+    revision: Type.String(),
     updated_fields: Type.Array(Type.String()),
   }),
   Type.Object({
     action: Type.Literal("create_version"),
     automation_id: Type.String(),
+    revision: Type.String(),
     version_id: Type.String(),
     version: Type.Integer(),
     previous_version: Type.Integer(),
@@ -1202,6 +1217,7 @@ export const ManageAutomationsResultSchema = Type.Union([
   Type.Object({
     action: Type.Literal("set_reaction_script"),
     automation_id: Type.String(),
+    revision: Type.String(),
     has_script: Type.Boolean(),
     message: Type.String(),
   }),
@@ -1218,6 +1234,7 @@ export const ManageAutomationsResultSchema = Type.Union([
   Type.Intersect([
     Type.Object({
       action: Type.Literal("get_version_details"),
+      revision: Type.Optional(Type.String()),
       automation_id: Type.String(),
     }),
     Type.Record(Type.String(), Type.Unknown()),
@@ -1250,6 +1267,7 @@ export const ManageAutomationsResultSchema = Type.Union([
     created: Type.Array(
       Type.Object({
         automation_id: Type.String(),
+        revision: Type.String(),
         entity_id: Type.Integer(),
         name: Type.String(),
       })

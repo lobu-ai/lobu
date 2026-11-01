@@ -1,3 +1,4 @@
+import { readAutomationRevision } from './revision-fixture';
 import type {
 	AutomationClaimNextWindowResult,
 	AutomationTriggerResult,
@@ -130,6 +131,7 @@ describe("Automation trigger execution contract", () => {
 			agentId: "external-retarget-agent",
 		});
 		await workspace.owner.automations.update({
+			expected_revision: await readAutomationRevision(workspace.owner, automation.automation_id),
 			automation_id: automation.automation_id,
 			managed_agent_id: retargetAgent.agentId,
 		});
@@ -233,6 +235,7 @@ describe("Automation trigger execution contract", () => {
       WHERE id = ${first.run_id}
     `;
 		await workspace.owner.automations.update({
+			expected_revision: await readAutomationRevision(workspace.owner, automation.automation_id),
 			automation_id: automation.automation_id,
 			managed_agent_id: retargetAgent.agentId,
 			device_worker_id: null,
@@ -303,6 +306,7 @@ describe("Automation trigger execution contract", () => {
       WHERE id = ${queued.runId}
     `;
 		await workspace.owner.automations.update({
+			expected_revision: await readAutomationRevision(workspace.owner, automation.automation_id),
 			automation_id: automation.automation_id,
 			managed_agent_id: null,
 		});

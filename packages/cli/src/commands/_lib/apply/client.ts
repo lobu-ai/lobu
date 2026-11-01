@@ -28,6 +28,8 @@ import {
 // ── Wire types ─────────────────────────────────────────────────────────────
 
 export interface RemoteAgent {
+  /** Authored snapshot token. Older stored manifests may omit it. */
+  revision?: string;
   agentId: string;
   name: string;
   description?: string;
@@ -53,6 +55,7 @@ export interface RemoteDeployment {
       entityTypes: unknown[];
       relationshipTypes: unknown[];
       automations: unknown[];
+      views?: unknown[];
     };
     /** Kind-qualified incarnation identities this config applied. */
     owned?: string[];
@@ -73,6 +76,8 @@ export interface DeploymentPauseState {
 }
 
 export interface RemoteEntityType {
+  /** Authored snapshot token. Older stored manifests may omit it. */
+  revision?: string;
   /** Persistent incarnation id (`entity_types.id`) — the `owned` identity for deletes. */
   id?: number;
   slug: string;
@@ -113,6 +118,8 @@ export interface RemoteEntityType {
 }
 
 export interface RemoteRelationshipType {
+  /** Authored snapshot token. Older stored manifests may omit it. */
+  revision?: string;
   purpose?: string | null;
   /** Persistent incarnation id (`entity_relationship_types.id`) — the `owned` identity for deletes. */
   id?: number;
@@ -144,6 +151,8 @@ export interface RemoteInferenceProvider {
 
 /** An applied view as `manage_views list` reports it (metadata, never bundles). */
 export interface RemoteView {
+  /** Authored snapshot token. Older stored manifests may omit it. */
+  revision?: string;
   key: string;
   name: string;
   content_hash: string;
@@ -153,6 +162,7 @@ export interface RemoteView {
 }
 
 export interface SetViewPayload {
+  expected_revision?: string;
   source_code: string;
   compiled_code?: string;
   source_files?: SourceFiles;
@@ -160,6 +170,8 @@ export interface SetViewPayload {
 }
 
 export interface RemoteAutomation {
+  /** Authored snapshot token. Older stored manifests may omit it. */
+  revision?: string;
   slug: string;
   name?: string;
   automation_id?: string;
@@ -187,6 +199,7 @@ export interface RemoteAutomation {
 }
 
 interface UpsertEntityTypeResult {
+  revision: string;
   created?: boolean;
   updated?: boolean;
   noop?: boolean;
@@ -352,6 +365,7 @@ function hoistEntityTypeSchema(
   const out: RemoteEntityType = {
     ...(row.id !== undefined ? { id: row.id } : {}),
     slug: row.slug,
+    ...(row.revision !== undefined ? { revision: row.revision } : {}),
     ...(row.name !== undefined ? { name: row.name } : {}),
     ...(row.description !== undefined ? { description: row.description } : {}),
     // Preserve owning org so prune can skip public types from other orgs.
@@ -406,6 +420,25 @@ function hoistEntityTypeSchema(
   }
   return out;
 }
+
+/** Require an actual read/write receipt; fetching a fresh token would bless stale intent. */
+export function requireConfigRevision(
+  revision: unknown,
+  resource: string
+): string {
+  if (typeof revision !== "string" || revision.length === 0) {
+    throw new ApiError(
+      `Cannot save ${resource}: the server did not return a configuration revision. Refresh the plan with a server that supports conditional saves.`
+    );
+  }
+  return revision;
+}
+
+export type RemoteAgentSettings = AgentSettings & {
+  name?: string;
+  description?: string;
+  revision?: string;
+};
 
 // ── Client ─────────────────────────────────────────────────────────────────
 
@@ -529,15 +562,11 @@ export class ApplyClient {
     return body.agents ?? [];
   }
 
-  /**
-   * Idempotent create: PR-2 makes `POST /` return 200 with the existing
-   * payload when an agent of the same ID already exists in the same org.
-   * Cross-org collision still surfaces as 409 with a clear `error.code` —
-   * we re-throw verbatim so `lobu apply` can show the operator the link
-   * to the org-scoped IDs issue.
-   */
+  /** Create an absent agent. A concurrent same-id create must be a conflict. */
   async upsertAgent(agent: DesiredAgentMetadata): Promise<RemoteAgent> {
-    const { body } = await this.request<RemoteAgent>(
+    const { status, body } = await this.request<
+      RemoteAgent & { created?: boolean }
+    >(
       "POST",
       // No trailing slash — Hono matches `routes.post('/', ...)` mounted at
       // `/api/:orgSlug/agents` against `/api/dev/agents`, not `/api/dev/agents/`.
@@ -545,23 +574,33 @@ export class ApplyClient {
       agent,
       [200, 201]
     );
+    if (status !== 201 || body.created === false) {
+      throw new ApiError(
+        `Agent "${agent.agentId}" was created after this plan. Refresh the plan before applying settings.`,
+        409
+      );
+    }
     return body;
   }
 
   async patchAgentMetadata(
     agentId: string,
-    agent: { name?: string; description?: string }
-  ): Promise<void> {
-    await this.request(
+    agent: { name?: string; description?: string },
+    expectedRevision: string
+  ): Promise<{ revision: string }> {
+    const { body } = await this.request<{ revision: string }>(
       "PATCH",
       `/api/${this.orgSlug}/agents/${encodeURIComponent(agentId)}`,
-      agent
+      { ...agent, expected_revision: expectedRevision }
     );
+    return {
+      revision: requireConfigRevision(body.revision, `agent "${agentId}"`),
+    };
   }
 
-  async getAgentSettings(agentId: string): Promise<AgentSettings | null> {
+  async getAgentSettings(agentId: string): Promise<RemoteAgentSettings | null> {
     try {
-      const { body } = await this.request<AgentSettings>(
+      const { body } = await this.request<RemoteAgentSettings>(
         "GET",
         `/api/${this.orgSlug}/agents/${encodeURIComponent(agentId)}/config`
       );
@@ -574,13 +613,17 @@ export class ApplyClient {
 
   async patchAgentSettings(
     agentId: string,
-    settings: Partial<AgentSettings>
-  ): Promise<void> {
-    await this.request(
+    settings: Partial<AgentSettings>,
+    expectedRevision: string
+  ): Promise<{ revision: string }> {
+    const { body } = await this.request<{ revision: string }>(
       "PATCH",
       `/api/${this.orgSlug}/agents/${encodeURIComponent(agentId)}/config`,
-      settings
+      { ...settings, expected_revision: expectedRevision }
     );
+    return {
+      revision: requireConfigRevision(body.revision, `agent "${agentId}"`),
+    };
   }
 
   /**
@@ -730,10 +773,10 @@ export class ApplyClient {
    */
   async setView(
     payload: SetViewPayload
-  ): Promise<{ written: boolean; content_hash: string }> {
+  ): Promise<{ written: boolean; content_hash: string; revision: string }> {
     const { body } = await this.request<{
       written?: boolean;
-      view?: { content_hash?: string };
+      view?: { content_hash?: string; revision?: string };
     }>("POST", `/api/${this.orgSlug}/manage_views`, {
       action: "set",
       ...payload,
@@ -741,14 +784,16 @@ export class ApplyClient {
     return {
       written: body.written ?? false,
       content_hash: body.view?.content_hash ?? "",
+      revision: requireConfigRevision(body.view?.revision, "view"),
     };
   }
 
   /** Delete an applied view by key (prune-gated removal). */
-  async removeView(key: string): Promise<void> {
+  async removeView(key: string, expectedRevision: string): Promise<void> {
     await this.request("POST", `/api/${this.orgSlug}/manage_views`, {
       action: "remove",
       key,
+      expected_revision: expectedRevision,
     });
   }
 
@@ -776,38 +821,32 @@ export class ApplyClient {
     );
   }
 
-  /**
-   * The `manage_entity_schema` admin tool exposes separate `create` / `update`
-   * actions and surfaces duplicates as a coded 409 (`[entity_type_exists]` /
-   * `[relationship_type_exists]`). Probe with `create`; on that explicit
-   * duplicate signal retry with `update`. Any other error (e.g. a 422
-   * `[invalid_schema]` validation failure) propagates verbatim — retrying it
-   * as an update used to mask the real message behind "Entity type not
-   * found" (issue #1177).
-   */
+  /** The plan decides create versus update; a raced create never becomes an overwrite. */
   private async upsertSchemaResource(
     schemaType: "entity_type" | "relationship_type",
-    payload: Record<string, unknown>
+    payload: Record<string, unknown>,
+    expectedRevision?: string
   ): Promise<UpsertEntityTypeResult> {
-    const url = `/api/${this.orgSlug}/manage_entity_schema`;
-    try {
-      await this.request("POST", url, {
+    const action = expectedRevision === undefined ? "create" : "update";
+    const { body } = await this.request<Record<string, { revision?: string }>>(
+      "POST",
+      `/api/${this.orgSlug}/manage_entity_schema`,
+      {
         schema_type: schemaType,
-        action: "create",
+        action,
         ...payload,
-      });
-      return { created: true };
-    } catch (err) {
-      if (err instanceof ApiError && isDuplicateError(err)) {
-        await this.request("POST", url, {
-          schema_type: schemaType,
-          action: "update",
-          ...payload,
-        });
-        return { updated: true };
+        ...(expectedRevision !== undefined
+          ? { expected_revision: expectedRevision }
+          : {}),
       }
-      throw err;
-    }
+    );
+    return {
+      ...(action === "create" ? { created: true } : { updated: true }),
+      revision: requireConfigRevision(
+        body[schemaType]?.revision,
+        `${schemaType} "${payload.slug}"`
+      ),
+    };
   }
 
   async upsertEntityType(
@@ -847,7 +886,8 @@ export class ApplyClient {
      * silently erase a UI-added property. When false (prune on), declared
      * properties alone are the full schema.
      */
-    preserveRemoteOnlyProperties = true
+    preserveRemoteOnlyProperties = true,
+    expectedRevision?: string
   ): Promise<UpsertEntityTypeResult> {
     // The server stores per-type fields as a single `metadata_schema` JSON
     // Schema (`{ type, properties, required }`) — it does NOT read top-level
@@ -968,7 +1008,7 @@ export class ApplyClient {
     if (rulesSource !== undefined || clearFacets?.has("rules")) {
       payload.rules_source = rulesSource?.sourceCode ?? null;
     }
-    return this.upsertSchemaResource("entity_type", payload);
+    return this.upsertSchemaResource("entity_type", payload, expectedRevision);
   }
 
   async listRelationshipTypes(): Promise<RemoteRelationshipType[]> {
@@ -1016,12 +1056,14 @@ export class ApplyClient {
 
   async upsertRelationshipType(
     // `metadata` is authoring-only — never sent (see DesiredRelationshipType).
-    rel: Omit<DesiredRelationshipType, "metadata">
+    rel: Omit<DesiredRelationshipType, "metadata">,
+    expectedRevision?: string
   ): Promise<UpsertEntityTypeResult> {
     const { rules, ...payload } = rel;
     const result = await this.upsertSchemaResource(
       "relationship_type",
-      payload
+      payload,
+      expectedRevision
     );
 
     // Reconcile rules to exactly the desired set so config is the source of
@@ -1036,31 +1078,40 @@ export class ApplyClient {
 
     for (const rule of desired) {
       if (remoteKeys.has(ruleKey(rule))) continue;
-      try {
-        await this.request(
-          "POST",
-          `/api/${this.orgSlug}/manage_entity_schema`,
-          {
-            schema_type: "relationship_type",
-            action: "add_rule",
-            slug: rel.slug,
-            source_entity_type_slug: rule.source,
-            target_entity_type_slug: rule.target,
-          }
-        );
-      } catch (err) {
-        if (err instanceof ApiError && isDuplicateError(err)) continue;
-        throw err;
-      }
+      const { body } = await this.request<{ revision: string }>(
+        "POST",
+        `/api/${this.orgSlug}/manage_entity_schema`,
+        {
+          schema_type: "relationship_type",
+          action: "add_rule",
+          slug: rel.slug,
+          source_entity_type_slug: rule.source,
+          target_entity_type_slug: rule.target,
+          expected_revision: result.revision,
+        }
+      );
+      result.revision = requireConfigRevision(
+        body.revision,
+        `relationship type "${rel.slug}"`
+      );
     }
     for (const rule of remote) {
       if (desiredKeys.has(ruleKey(rule))) continue;
-      await this.request("POST", `/api/${this.orgSlug}/manage_entity_schema`, {
-        schema_type: "relationship_type",
-        action: "remove_rule",
-        slug: rel.slug,
-        rule_id: rule.id,
-      });
+      const { body } = await this.request<{ revision: string }>(
+        "POST",
+        `/api/${this.orgSlug}/manage_entity_schema`,
+        {
+          schema_type: "relationship_type",
+          action: "remove_rule",
+          slug: rel.slug,
+          rule_id: rule.id,
+          expected_revision: result.revision,
+        }
+      );
+      result.revision = requireConfigRevision(
+        body.revision,
+        `relationship type "${rel.slug}"`
+      );
     }
     return result;
   }
@@ -1070,20 +1121,28 @@ export class ApplyClient {
    * REFUSES if instances of the type still exist — the data is exempt from
    * prune, so that surfaces as a clear error rather than cascading.
    */
-  async deleteEntityType(slug: string): Promise<void> {
+  async deleteEntityType(
+    slug: string,
+    expectedRevision: string
+  ): Promise<void> {
     await this.request("POST", `/api/${this.orgSlug}/manage_entity_schema`, {
       schema_type: "entity_type",
       action: "delete",
       slug,
+      expected_revision: expectedRevision,
     });
   }
 
   /** Delete a relationship type (code-managed prune). */
-  async deleteRelationshipType(slug: string): Promise<void> {
+  async deleteRelationshipType(
+    slug: string,
+    expectedRevision: string
+  ): Promise<void> {
     await this.request("POST", `/api/${this.orgSlug}/manage_entity_schema`, {
       schema_type: "relationship_type",
       action: "delete",
       slug,
+      expected_revision: expectedRevision,
     });
   }
 
@@ -1127,8 +1186,7 @@ export class ApplyClient {
   }
 
   /**
-   * Create an Automation owned by `agentId`. Duplicate-slug surfaces as a
-   * structured error the caller swallows for idempotency.
+   * Create an absent Automation owned by `agentId`; concurrent creates conflict.
    */
   async createAutomation(payload: {
     slug: string;
@@ -1147,46 +1205,47 @@ export class ApplyClient {
     agent_kind?: string;
     execution_config?: Record<string, unknown> | null;
     outputs?: Record<string, unknown> | null;
-  }): Promise<{ automation_id?: string }> {
-    const { body } = await this.request<{ automation_id?: string }>(
-      "POST",
-      `/api/${this.orgSlug}/manage_automations`,
-      {
-        action: "create",
-        slug: payload.slug,
-        managed_agent_id: payload.agentId,
-        ...(payload.name ? { name: payload.name } : {}),
-        ...(payload.description ? { description: payload.description } : {}),
-        prompt: payload.prompt,
-        ...(payload.skills?.length ? { skills: payload.skills } : {}),
-        ...(payload.reaction_script !== undefined
-          ? { reaction_script: payload.reaction_script }
-          : {}),
-        ...(payload.triggers !== undefined
-          ? { triggers: payload.triggers }
-          : {}),
-        ...(payload.sources?.length ? { sources: payload.sources } : {}),
-        ...(payload.reactions_guidance !== undefined
-          ? { reactions_guidance: payload.reactions_guidance }
-          : {}),
-        ...(payload.device_worker_id !== undefined
-          ? { device_worker_id: payload.device_worker_id }
-          : {}),
-        ...(payload.min_cooldown_seconds !== undefined
-          ? { min_cooldown_seconds: payload.min_cooldown_seconds }
-          : {}),
-        ...(payload.tags?.length ? { tags: payload.tags } : {}),
-        ...(payload.agent_kind !== undefined
-          ? { agent_kind: payload.agent_kind }
-          : {}),
-        ...(payload.execution_config !== undefined
-          ? { execution_config: payload.execution_config }
-          : {}),
-        ...(payload.outputs !== undefined ? { outputs: payload.outputs } : {}),
-      }
-    );
+  }): Promise<{ automation_id?: string; revision: string }> {
+    const { body } = await this.request<{
+      automation_id?: string;
+      revision: string;
+    }>("POST", `/api/${this.orgSlug}/manage_automations`, {
+      action: "create",
+      slug: payload.slug,
+      managed_agent_id: payload.agentId,
+      ...(payload.name ? { name: payload.name } : {}),
+      ...(payload.description ? { description: payload.description } : {}),
+      prompt: payload.prompt,
+      ...(payload.skills?.length ? { skills: payload.skills } : {}),
+      ...(payload.reaction_script !== undefined
+        ? { reaction_script: payload.reaction_script }
+        : {}),
+      ...(payload.triggers !== undefined ? { triggers: payload.triggers } : {}),
+      ...(payload.sources?.length ? { sources: payload.sources } : {}),
+      ...(payload.reactions_guidance !== undefined
+        ? { reactions_guidance: payload.reactions_guidance }
+        : {}),
+      ...(payload.device_worker_id !== undefined
+        ? { device_worker_id: payload.device_worker_id }
+        : {}),
+      ...(payload.min_cooldown_seconds !== undefined
+        ? { min_cooldown_seconds: payload.min_cooldown_seconds }
+        : {}),
+      ...(payload.tags?.length ? { tags: payload.tags } : {}),
+      ...(payload.agent_kind !== undefined
+        ? { agent_kind: payload.agent_kind }
+        : {}),
+      ...(payload.execution_config !== undefined
+        ? { execution_config: payload.execution_config }
+        : {}),
+      ...(payload.outputs !== undefined ? { outputs: payload.outputs } : {}),
+    });
     return {
       ...(body.automation_id ? { automation_id: body.automation_id } : {}),
+      revision: requireConfigRevision(
+        body.revision,
+        `Automation "${payload.slug}"`
+      ),
     };
   }
 
@@ -1201,6 +1260,7 @@ export class ApplyClient {
    */
   async updateAutomation(payload: {
     automation_id: string;
+    expected_revision: string;
     triggers?: import("@lobu/core/contracts/tools/manage-automations").AutomationTrigger[];
     managed_agent_id?: string;
     device_worker_id?: string | null;
@@ -1208,28 +1268,41 @@ export class ApplyClient {
     tags?: string[];
     agent_kind?: string | null;
     execution_config?: Record<string, unknown> | null;
-  }): Promise<void> {
-    await this.request("POST", `/api/${this.orgSlug}/manage_automations`, {
-      action: "update",
-      automation_id: payload.automation_id,
-      ...(payload.triggers !== undefined ? { triggers: payload.triggers } : {}),
-      ...(payload.managed_agent_id !== undefined
-        ? { managed_agent_id: payload.managed_agent_id }
-        : {}),
-      ...(payload.device_worker_id !== undefined
-        ? { device_worker_id: payload.device_worker_id }
-        : {}),
-      ...(payload.min_cooldown_seconds !== undefined
-        ? { min_cooldown_seconds: payload.min_cooldown_seconds }
-        : {}),
-      ...(payload.tags !== undefined ? { tags: payload.tags } : {}),
-      ...(payload.agent_kind !== undefined
-        ? { agent_kind: payload.agent_kind }
-        : {}),
-      ...(payload.execution_config !== undefined
-        ? { execution_config: payload.execution_config }
-        : {}),
-    });
+  }): Promise<{ revision: string }> {
+    const { body } = await this.request<{ revision: string }>(
+      "POST",
+      `/api/${this.orgSlug}/manage_automations`,
+      {
+        action: "update",
+        expected_revision: payload.expected_revision,
+        automation_id: payload.automation_id,
+        ...(payload.triggers !== undefined
+          ? { triggers: payload.triggers }
+          : {}),
+        ...(payload.managed_agent_id !== undefined
+          ? { managed_agent_id: payload.managed_agent_id }
+          : {}),
+        ...(payload.device_worker_id !== undefined
+          ? { device_worker_id: payload.device_worker_id }
+          : {}),
+        ...(payload.min_cooldown_seconds !== undefined
+          ? { min_cooldown_seconds: payload.min_cooldown_seconds }
+          : {}),
+        ...(payload.tags !== undefined ? { tags: payload.tags } : {}),
+        ...(payload.agent_kind !== undefined
+          ? { agent_kind: payload.agent_kind }
+          : {}),
+        ...(payload.execution_config !== undefined
+          ? { execution_config: payload.execution_config }
+          : {}),
+      }
+    );
+    return {
+      revision: requireConfigRevision(
+        body.revision,
+        `Automation "${payload.automation_id}"`
+      ),
+    };
   }
 
   /**
@@ -1240,6 +1313,7 @@ export class ApplyClient {
    */
   async createAutomationVersion(payload: {
     automation_id: string;
+    expected_revision: string;
     name?: string;
     description?: string | null;
     prompt?: string;
@@ -1250,12 +1324,13 @@ export class ApplyClient {
     change_notes?: string;
     /** When set, written atomically with the new version (set_as_current). */
     triggers?: import("@lobu/core/contracts/tools/manage-automations").AutomationTrigger[];
-  }): Promise<{ version?: number }> {
-    const { body } = await this.request<{ version?: number }>(
+  }): Promise<{ version?: number; revision: string }> {
+    const { body } = await this.request<{ version?: number; revision: string }>(
       "POST",
       `/api/${this.orgSlug}/manage_automations`,
       {
         action: "create_version",
+        expected_revision: payload.expected_revision,
         automation_id: payload.automation_id,
         set_as_current: true,
         ...(payload.name !== undefined ? { name: payload.name } : {}),
@@ -1277,7 +1352,13 @@ export class ApplyClient {
           : { change_notes: "lobu apply" }),
       }
     );
-    return body.version !== undefined ? { version: body.version } : {};
+    return {
+      ...(body.version !== undefined ? { version: body.version } : {}),
+      revision: requireConfigRevision(
+        body.revision,
+        `Automation "${payload.automation_id}"`
+      ),
+    };
   }
 
   /**
@@ -1286,13 +1367,25 @@ export class ApplyClient {
    */
   async setReactionScript(
     automationId: string,
-    reactionScript: string
-  ): Promise<void> {
-    await this.request("POST", `/api/${this.orgSlug}/manage_automations`, {
-      action: "set_reaction_script",
-      automation_id: automationId,
-      reaction_script: reactionScript,
-    });
+    reactionScript: string,
+    expectedRevision: string
+  ): Promise<{ revision: string }> {
+    const { body } = await this.request<{ revision: string }>(
+      "POST",
+      `/api/${this.orgSlug}/manage_automations`,
+      {
+        action: "set_reaction_script",
+        expected_revision: expectedRevision,
+        automation_id: automationId,
+        reaction_script: reactionScript,
+      }
+    );
+    return {
+      revision: requireConfigRevision(
+        body.revision,
+        `Automation "${automationId}"`
+      ),
+    };
   }
 
   /**
@@ -1300,10 +1393,14 @@ export class ApplyClient {
    * admin tool takes an array; we delete one slug's Automation at a time so a
    * failure is attributable.
    */
-  async deleteAutomation(automationId: string): Promise<void> {
+  async deleteAutomation(
+    automationId: string,
+    expectedRevision: string
+  ): Promise<void> {
     await this.request("POST", `/api/${this.orgSlug}/manage_automations`, {
       action: "delete",
       automation_ids: [automationId],
+      expected_revisions: { [automationId]: expectedRevision },
     });
   }
 
@@ -1769,33 +1866,6 @@ function mapConnectorDefinitionItem(item: {
         ? (detail.mcp_config as Record<string, unknown>)
         : null,
   };
-}
-
-/**
- * Recognise duplicate-name errors from the admin tools without substring
- * matching the user-facing message. The server stamps a bracketed code into
- * the error message of every duplicate path `apply` upserts through
- * (`manage_entity_schema` create / add_rule → `[entity_type_exists]`,
- * `[relationship_type_exists]`, `[already_exists]`, all httpStatus 409).
- *
- * Anything else is NOT a duplicate. In particular a 422 schema-validation
- * error (`[invalid_schema]`, e.g. ">4 x-table-column fields") must surface
- * verbatim — the old status-only fallback treated any 4xx as "already
- * exists", retried with `action: update`, and buried the real message under
- * a misleading "Entity type not found" (issue #1177). The 409 fallback stays
- * as a belt-and-braces signal for duplicate paths that predate the codes.
- */
-export function isDuplicateError(err: ApiError): boolean {
-  if (typeof err.status !== "number") return false;
-  const message = err.message.toLowerCase();
-  if (
-    message.includes("[entity_type_exists]") ||
-    message.includes("[relationship_type_exists]") ||
-    message.includes("[already_exists]")
-  ) {
-    return true;
-  }
-  return err.status === 409;
 }
 
 // ── Top-level resolver ─────────────────────────────────────────────────────

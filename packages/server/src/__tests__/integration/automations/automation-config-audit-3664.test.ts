@@ -6,6 +6,7 @@
  * approval run; system auto-pause/reset are system-attributed.
  */
 
+import { readAutomationRevision, readAutomationRevisions } from './revision-fixture';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { parsePositiveIntegerId } from '../../../utils/errors';
 import { redactConfigState } from '../../../utils/config-redaction';
@@ -139,6 +140,7 @@ describe('automation config audit #3664', () => {
     const beforeCount = (await configEvents(orgId, created.automation_id)).length;
 
     await owner.automations.update({
+      expected_revision: await readAutomationRevision(owner, created.automation_id),
       automation_id: created.automation_id,
       tags: ['audit-tag'],
     });
@@ -153,6 +155,7 @@ describe('automation config audit #3664', () => {
 
     // No-op: same value again → no new config event.
     await owner.automations.update({
+      expected_revision: await readAutomationRevision(owner, created.automation_id),
       automation_id: created.automation_id,
       tags: ['audit-tag'],
     });
@@ -174,6 +177,7 @@ describe('automation config audit #3664', () => {
 
     // Same values, reversed key order at both levels → no new config event.
     const res = (await owner.automations.update({
+      expected_revision: await readAutomationRevision(owner, created.automation_id),
       automation_id: created.automation_id,
       model_config: { m: 2, a: { c: 3, d: 4 }, z: 1 } as any,
       execution_config: { max_budget_usd: 1.5, timeout_seconds: 60 } as any,
@@ -204,6 +208,7 @@ describe('automation config audit #3664', () => {
     })) as { automation_id: string };
     const beforeCount = (await configEvents(orgId, created.automation_id)).length;
     await owner.automations.setReactionScript({
+      expected_revision: await readAutomationRevision(owner, created.automation_id),
       automation_id: created.automation_id,
       reaction_script: 'export default async () => ({ summary: "hi" });',
     });
@@ -229,11 +234,13 @@ describe('automation config audit #3664', () => {
       managed_agent_id: agentId,
     })) as { automation_id: string };
     await owner.automations.setReactionScript({
+      expected_revision: await readAutomationRevision(owner, created.automation_id),
       automation_id: created.automation_id,
       reaction_script: 'export const input = { type: "object" }; export default async () => ({ summary: "hi" });',
     });
     const beforeClear = (await configEvents(orgId, created.automation_id)).length;
     await owner.automations.setReactionScript({
+      expected_revision: await readAutomationRevision(owner, created.automation_id),
       automation_id: created.automation_id,
       reaction_script: '',
     });
@@ -262,6 +269,7 @@ describe('automation config audit #3664', () => {
       tags: ['cfv-tag'],
     })) as { automation_id: string };
     await owner.automations.setReactionScript({
+      expected_revision: await readAutomationRevision(owner, source.automation_id),
       automation_id: source.automation_id,
       reaction_script: 'export default async () => ({ summary: "cfv" });',
     });
@@ -311,6 +319,7 @@ describe('automation config audit #3664', () => {
     const ownCount = (await configEvents(orgId, created.automation_id)).length;
     await expect(
       crossOrgCaller.automations.setReactionScript({
+        expected_revision: await readAutomationRevision(owner, created.automation_id),
         automation_id: created.automation_id,
         reaction_script: 'export default async () => ({ summary: "evil" });',
       })
@@ -333,6 +342,7 @@ describe('automation config audit #3664', () => {
     const ownCount = (await configEvents(orgId, created.automation_id)).length;
     await expect(
       crossOrgCaller.automations.update({
+        expected_revision: await readAutomationRevision(owner, created.automation_id),
         automation_id: created.automation_id,
         tags: ['evil-tag'],
       })
@@ -350,6 +360,7 @@ describe('automation config audit #3664', () => {
     })) as { automation_id: string };
     const beforeCount = (await configEvents(orgId, created.automation_id)).length;
     await owner.automations.createVersion({
+      expected_revision: await readAutomationRevision(owner, created.automation_id),
       automation_id: created.automation_id,
       prompt: 'v2 prompt',
     });
@@ -371,6 +382,7 @@ describe('automation config audit #3664', () => {
       managed_agent_id: agentId,
     })) as { automation_id: string };
     await owner.automations.createVersion({
+      expected_revision: await readAutomationRevision(owner, created.automation_id),
       automation_id: created.automation_id,
       name: 'Renamed Automation',
       prompt: 'v2 prompt',
@@ -396,6 +408,7 @@ describe('automation config audit #3664', () => {
       triggers: [cadence], managed_agent_id: agentId,
     })) as { automation_id: string };
     await owner.automations.createVersion({
+      expected_revision: await readAutomationRevision(owner, created.automation_id),
       automation_id: created.automation_id, prompt: 'v2 prompt',
       ...(propose ? { triggers: [proposed] } : {}), set_as_current: publish,
     });
@@ -477,7 +490,7 @@ describe('automation config audit #3664', () => {
       triggers: [],
       managed_agent_id: agentId,
     })) as { automation_id: string };
-    await owner.automations.delete({ automation_ids: [created.automation_id] });
+    await owner.automations.delete({ expected_revisions: await readAutomationRevisions(owner, [created.automation_id]), automation_ids: [created.automation_id] });
     const rows = await configEvents(orgId, created.automation_id);
     const last = rows[rows.length - 1];
     expect(last.metadata.op).toBe('deleted');
@@ -495,6 +508,7 @@ describe('automation config audit #3664', () => {
       managed_agent_id: agentId,
     })) as { automation_id: string };
     await patCaller.automations.update({
+      expected_revision: await readAutomationRevision(patCaller, created.automation_id),
       automation_id: created.automation_id,
       tags: ['session-pat-tag'],
     });
@@ -593,7 +607,7 @@ describe('automation config audit #3664', () => {
     })) as { automation_id: string };
     const beforeCount = (await configEvents(orgId, created.automation_id)).length;
     await expect(
-      owner.automations.update({ automation_id: created.automation_id, prompt: 'v2' } as any)
+      owner.automations.update({ expected_revision: await readAutomationRevision(owner, created.automation_id), automation_id: created.automation_id, prompt: 'v2' } as any)
     ).rejects.toThrow();
     const rows = await configEvents(orgId, created.automation_id);
     expect(rows.length).toBe(beforeCount);
@@ -668,7 +682,7 @@ describe('automation config audit #3664', () => {
     agentCtx.mcpSessionId = 'session-approval-3664';
     const pending = (await executeTool(
       'manage_automations',
-      { action: 'update', automation_id: created.automation_id, tags: ['queued-tag'] },
+      { expected_revision: await readAutomationRevision(owner, created.automation_id), action: 'update', automation_id: created.automation_id, tags: ['queued-tag'] },
       TEST_ENV,
       agentCtx
     )) as { status: string; run_id: number };

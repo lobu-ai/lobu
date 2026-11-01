@@ -15,7 +15,7 @@ import {
   createTestConnection,
   createTestConnectorDefinition,
 } from '../../setup/test-fixtures';
-import { TestWorkspace } from '../../setup/test-mcp-client';
+import { freshSchemaEditor, TestWorkspace } from '../../setup/test-mcp-client';
 
 const CONNECTOR_KEY = 'erp-crm-relationships';
 const FEED_KEY = 'invoices';
@@ -35,7 +35,7 @@ describe('connector-declared relationships', () => {
       slug: 'invoice_customer',
       name: 'Invoice Customer',
     });
-    await workspace.owner.entity_schema.addRule({
+    await freshSchemaEditor(workspace.owner.entity_schema).addRule({
       slug: 'invoice_customer',
       source_entity_type_slug: 'invoice',
       target_entity_type_slug: 'customer',

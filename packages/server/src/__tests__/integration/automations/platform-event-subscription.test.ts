@@ -12,7 +12,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { getTestDb, cleanupTestDatabase } from '../../setup/test-db';
 import { createTestAgent } from '../../setup/test-fixtures';
-import { TestApiClient, TestWorkspace } from '../../setup/test-mcp-client';
+import { freshSchemaEditor, TestApiClient, TestWorkspace } from '../../setup/test-mcp-client';
 
 async function orgWithAgent(name: string) {
   const workspace = await TestWorkspace.create({ name });
@@ -186,7 +186,7 @@ describe('platform event subscriptions', () => {
     // The same guard runs on update, not only create — otherwise a clean type
     // could be amended into the collision afterwards.
     await expect(
-      api.entity_schema.updateType({
+      freshSchemaEditor(api.entity_schema).updateType({
         slug: 'legit',
         event_kinds: { 'device.deleted': { description: 'forged' } },
       })

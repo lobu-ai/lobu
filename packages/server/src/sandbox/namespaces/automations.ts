@@ -82,6 +82,7 @@ export type AutomationCreateInput = Input<
  */
 export type AutomationUpdateInput = Input<
 	| "automation_id"
+	| "expected_revision"
 	| "triggers"
 	| "managed_agent_id"
 	| "device_worker_id"
@@ -91,7 +92,7 @@ export type AutomationUpdateInput = Input<
 	| "model_config"
 	| "execution_config"
 	| "tags",
-	"automation_id"
+	"automation_id" | "expected_revision"
 >;
 
 export type AutomationCompleteWindowInput = Input<
@@ -121,6 +122,7 @@ export type AutomationClaimNextWindowInput = Input<
 
 export interface AutomationCreateVersionInput extends AutomationActionInput {
 	automation_id: AutomationId;
+	expected_revision: string;
 }
 
 export type AutomationVersionDetailsInput = Input<
@@ -155,9 +157,10 @@ export interface AutomationsNamespace {
 	claimNextWindow(input: AutomationClaimNextWindowInput): Promise<AutomationClaimNextWindowResult>;
 	trigger(input: { automation_id: AutomationId }): Promise<AutomationTriggerResult>;
 	/** Delete one or more Automations. */
-	delete(input: { automation_ids: AutomationId[] }): Promise<unknown>;
+	delete(input: { automation_ids: AutomationId[]; expected_revisions: Record<string, string> }): Promise<unknown>;
 	setReactionScript(input: {
 		automation_id: AutomationId;
+		expected_revision: string;
 		/** TypeScript source. Empty string removes it. */
 		reaction_script: string;
 	}): Promise<unknown>;

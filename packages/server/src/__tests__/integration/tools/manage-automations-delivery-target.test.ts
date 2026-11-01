@@ -110,7 +110,7 @@ describe("manage_automations delivery_target", () => {
 			},
 			TEST_ENV,
 			ownerCtx,
-		)) as { automation_id: string };
+		)) as { automation_id: string; revision: string };
 
 		const sql = getTestDb();
 		const [stored] = await sql<{ delivery_target: Record<string, unknown> }>`
@@ -137,6 +137,7 @@ describe("manage_automations delivery_target", () => {
 				{
 					action: "update",
 					automation_id: created.automation_id,
+					expected_revision: created.revision,
 					delivery_target: {
 						connection_id: connectionId,
 						channel_id: "slack:C_FINANCE",
@@ -153,6 +154,7 @@ describe("manage_automations delivery_target", () => {
 				{
 					action: "update",
 					automation_id: created.automation_id,
+					expected_revision: created.revision,
 					managed_agent_id: otherAgentId,
 				},
 				TEST_ENV,
@@ -177,6 +179,7 @@ describe("manage_automations delivery_target", () => {
 			{
 				action: "update",
 				automation_id: created.automation_id,
+				expected_revision: created.revision,
 				delivery_target: null,
 			},
 			TEST_ENV,

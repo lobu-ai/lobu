@@ -21,6 +21,8 @@ import {
 import { getOrgId, tryGetOrgId } from "./org-context";
 import { organizationIdLiveSql } from "../../workspace/deletion-state";
 
+import { agentConfigRevision, readAgentConfigurationRow } from "../agent-config-revision";
+
 const logger = createLogger("postgres-stores");
 
 export const AGENT_ID_PATTERN = /^[a-z][a-z0-9-]{2,59}$/;
@@ -100,8 +102,9 @@ function rowToSettings(row: Record<string, any>): AgentSettings {
 	};
 }
 
-function rowToMetadata(row: Record<string, any>): AgentMetadata {
+function rowToMetadata(row: Record<string, any>): AgentMetadata & { revision: string } {
 	return {
+		revision: agentConfigRevision(row),
 		agentId: row.id,
 		name: row.name,
 		description: row.description ?? undefined,
@@ -126,6 +129,20 @@ function isRedactedSecretValue(value: unknown): value is string {
 	return typeof value === "string" && value.startsWith("***");
 }
 
+/** Metadata, settings and edit token from one database snapshot. */
+export async function getAgentConfigurationSnapshot(
+	organizationId: string,
+	agentId: string,
+	transaction?: DbClient,
+) {
+	const row = await readAgentConfigurationRow(organizationId, agentId, transaction);
+	return row ? {
+		metadata: rowToMetadata(row),
+		settings: rowToSettings(row),
+		revision: agentConfigRevision(row),
+	} : null;
+}
+
 export function createPostgresAgentConfigStore(transaction?: DbClient): AgentConfigStore {
 	const store: AgentConfigStore = {
 		async getSettings(agentId) {
@@ -146,19 +163,8 @@ export function createPostgresAgentConfigStore(transaction?: DbClient): AgentCon
 				);
 				return null;
 			}
-			const rows = await sql`
-          SELECT models,
-                 network_config, nix_config,
-                 soul_md, user_md, identity_md,
-                 skills_config,
-                 verbose_logging, show_tool_calls, starters,
-                 guardrails, guardrails_inline,
-                 sandbox_id, updated_at
-          FROM agents
-          WHERE id = ${agentId} AND organization_id = ${orgId}
-        `;
-			if (rows.length === 0) return null;
-			return rowToSettings(rows[0]);
+			const row = await readAgentConfigurationRow(orgId, agentId, sql);
+			return row ? rowToSettings(row) : null;
 		},
 		async saveSettings(agentId, settings) {
 			const sql = transaction ?? getDb();
@@ -184,13 +190,30 @@ export function createPostgresAgentConfigStore(transaction?: DbClient): AgentCon
       `;
 		},
 		async updateSettings(agentId, updates) {
-			const existing = await store.getSettings(agentId);
-			if (!existing) return;
-			await store.saveSettings(agentId, {
-				...existing,
-				...updates,
-				updatedAt: Date.now(),
-			});
+			const sql = transaction ?? getDb();
+			const orgId = getOrgId();
+			const has = (key: keyof AgentSettings) => Object.hasOwn(updates, key);
+			// Patch against the current row in one statement. Reading settings and
+			// saving a merged snapshot loses unrelated concurrent edits. Presence,
+			// rather than truthiness, distinguishes omitted fields from a clear.
+			await sql`
+        UPDATE agents SET
+          models = CASE WHEN ${has("models")} THEN ${updates.models ? sql.json(updates.models) : null} ELSE models END,
+          network_config = CASE WHEN ${has("networkConfig")} THEN ${sql.json(updates.networkConfig ?? {})} ELSE network_config END,
+          nix_config = CASE WHEN ${has("nixConfig")} THEN ${sql.json(updates.nixConfig ?? {})} ELSE nix_config END,
+          soul_md = CASE WHEN ${has("soulMd")} THEN ${updates.soulMd ?? ""} ELSE soul_md END,
+          user_md = CASE WHEN ${has("userMd")} THEN ${updates.userMd ?? ""} ELSE user_md END,
+          identity_md = CASE WHEN ${has("identityMd")} THEN ${updates.identityMd ?? ""} ELSE identity_md END,
+          skills_config = CASE WHEN ${has("skillsConfig")} THEN ${sql.json(updates.skillsConfig ?? { skills: [] })} ELSE skills_config END,
+          verbose_logging = CASE WHEN ${has("verboseLogging")} THEN ${updates.verboseLogging ?? false} ELSE verbose_logging END,
+          show_tool_calls = CASE WHEN ${has("showToolCalls")} THEN ${updates.showToolCalls ?? false} ELSE show_tool_calls END,
+          starters = CASE WHEN ${has("starters")} THEN ${sql.json(updates.starters ?? [])} ELSE starters END,
+          guardrails = CASE WHEN ${has("guardrails")} THEN ${sql.json(updates.guardrails ?? [])} ELSE guardrails END,
+          guardrails_inline = CASE WHEN ${has("guardrailsInline")} THEN ${sql.json(updates.guardrailsInline ?? [])} ELSE guardrails_inline END,
+          sandbox_id = CASE WHEN ${has("sandboxId")} THEN ${updates.sandboxId ?? null} ELSE sandbox_id END,
+          updated_at = NOW()
+        WHERE id = ${agentId} AND organization_id = ${orgId}
+      `;
 		},
 		async deleteSettings(agentId) {
 			const sql = transaction ?? getDb();
@@ -227,14 +250,8 @@ export function createPostgresAgentConfigStore(transaction?: DbClient): AgentCon
 				);
 				return null;
 			}
-			const rows = await sql`
-          SELECT id, organization_id, name, description, owner_platform, owner_user_id,
-                 created_at, last_used_at
-          FROM agents
-          WHERE id = ${agentId} AND organization_id = ${orgId}
-        `;
-			if (rows.length === 0) return null;
-			return rowToMetadata(rows[0]);
+			const row = await readAgentConfigurationRow(orgId, agentId, sql);
+			return row ? rowToMetadata(row) : null;
 		},
 		async saveMetadata(agentId, metadata) {
 			const sql = transaction ?? getDb();
@@ -345,13 +362,12 @@ export function createPostgresAgentConfigStore(transaction?: DbClient): AgentCon
 			const sql = transaction ?? getDb();
 			const orgId = getOrgId();
 			const rows = await sql`
-        SELECT id, organization_id, name, description, owner_platform, owner_user_id,
-               created_at, last_used_at
-        FROM agents
+        SELECT to_jsonb(a) AS configuration
+        FROM agents a
         WHERE organization_id = ${orgId}
         ORDER BY created_at DESC
       `;
-			return rows.map(rowToMetadata);
+			return rows.map((row) => rowToMetadata(row.configuration));
 		},
 	};
 	return store;

@@ -182,9 +182,11 @@ export const OWNER_ADMIN_ACTIONS: Record<string, Set<string>> = {
 		"classify",
 	]),
 	manage_views: new Set(["set", "remove"]),
+	manage_navigation: new Set(["set"]),
 };
 
 export const PUBLIC_READ_ACTIONS: Record<string, Set<string> | null> = {
+	manage_navigation: new Set(["get"]),
 	resolve_path: null,
 	search_memory: null,
 	// SDK method discovery — safe to expose; surfaces no data.

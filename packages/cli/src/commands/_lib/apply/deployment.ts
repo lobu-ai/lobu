@@ -124,6 +124,7 @@ export interface DeploymentManifest {
     entityTypes: unknown[];
     relationshipTypes: unknown[];
     automations: unknown[];
+    views?: unknown[];
   };
   /**
    * Kind-qualified definition incarnation identities (`entity-type:12`,
@@ -137,6 +138,7 @@ export interface BaselineRecord {
     entityTypes: unknown[];
     relationshipTypes: unknown[];
     automations: unknown[];
+    views?: unknown[];
   };
   owned: string[];
   /** Connector key → version from the deployment's post-apply pins. */
@@ -171,6 +173,7 @@ export function loadBaselineFromManifest(
       entityTypes: attribution.entityTypes,
       relationshipTypes: attribution.relationshipTypes,
       automations: attribution.automations,
+      ...(Array.isArray(attribution.views) ? { views: attribution.views } : {}),
     },
     owned: manifest.owned,
     ...(manifest.connector_versions
@@ -298,6 +301,15 @@ export function buildAttributionAndOwned(
       outputs: p.outputs,
     };
   });
+  const desiredViewByKey = new Map(
+    (state.views ?? []).map((view) => [view.key, view])
+  );
+  // The post-apply read may already include another writer's edit. Record only
+  // a converged artifact; adopting a different hash here would bless that edit
+  // as our baseline and let the next apply overwrite it without a drift block.
+  const views = (remote.views ?? []).filter(
+    (view) => desiredViewByKey.get(view.key)?.contentHash === view.content_hash
+  );
   const owned: string[] = [];
   for (const e of state.memorySchema.entityTypes) {
     const id = remoteEntityBySlug.get(e.slug)?.id;
@@ -330,7 +342,12 @@ export function buildAttributionAndOwned(
     }
   }
   return {
-    attribution: { entityTypes, relationshipTypes, automations },
+    attribution: {
+      entityTypes,
+      relationshipTypes,
+      automations,
+      ...(remote.views === undefined ? {} : { views }),
+    },
     owned,
   };
 }

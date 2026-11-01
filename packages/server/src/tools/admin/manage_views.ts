@@ -7,7 +7,7 @@
  * history of definitions, and removing a view is `remove`.
  *
  * `set` compiles `source_code` server-side with esbuild (browser IIFE) and
- * upserts by (organization_id, key). Same executable artifact (source,
+ * creates an absent key or conditionally replaces its authored revision. Same artifact (source,
  * declared metadata AND compiled bundle digest) means the same content hash
  * and no write. The server never executes view code.
  */
@@ -248,16 +248,8 @@ async function handleSet(
   // Only a bundle this server compiled may be rebuilt later; a supplied one
   // is the caller's and stays as sent.
   const compileConfigHash = args.compiled_code ? null : serverCompileStamp(compiled);
-  // Same source AND same metadata AND same executable bundle AND same
-  // compiler provenance: no write. A legacy row (source/metadata-only hash)
-  // never matches, so it refreshes exactly once on the next set and is a
-  // no-op after that.
-  const current = await getView(ctx.organizationId, key);
-  if (current && current.content_hash === hash && current.compile_config_hash === compileConfigHash) {
-    return { action: 'set', view: projectView(current), written: false };
-  }
-
   const { view, written } = await setView(ctx.organizationId, {
+    expected_revision: args.expected_revision,
     key,
     name,
     description,
@@ -278,7 +270,7 @@ async function handleSet(
   // phase 1, and `last_writer` (apply_id | user) carries the provenance.
   // A no-op set changes nothing, so it invalidates nothing.
   if (written) {
-    emit(ctx.organizationId, { keys: [`view:${key}`] });
+    emit(ctx.organizationId, { keys: [`view:${key}`, 'workspace-navigation'] });
   }
 
   return { action: 'set', view: projectView(view), written };
@@ -345,9 +337,9 @@ async function handleRemove(
   ctx: ToolContext
 ): Promise<ManageViewsResult> {
   requireWriter(ctx);
-  const removed = await removeView(ctx.organizationId, args.key);
+  const removed = await removeView(ctx.organizationId, args.key, args.expected_revision);
   if (removed) {
-    emit(ctx.organizationId, { keys: [`view:${args.key}`] });
+    emit(ctx.organizationId, { keys: [`view:${args.key}`, 'workspace-navigation'] });
   }
   return { action: 'remove', key: args.key, removed };
 }

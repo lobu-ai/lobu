@@ -24,6 +24,7 @@ function emptyState(): DesiredState {
 }
 
 function snapshot(automation: RemoteAutomation): RemoteSnapshot {
+  automation.revision ??= "fixture";
   return {
     agents: [],
     agentSettings: new Map(),
@@ -73,9 +74,11 @@ describe("Automation execution config", () => {
     const calls: string[] = [];
     const updateAutomation = mock(async () => {
       calls.push("executor");
+      return { revision: "after-executor" };
     });
     const setReactionScript = mock(async () => {
       calls.push("reaction");
+      return { revision: "after-reaction" };
     });
     await executePlan(
       {
@@ -91,9 +94,10 @@ describe("Automation execution config", () => {
     );
     expect(updateAutomation).toHaveBeenCalledWith({
       automation_id: "42",
+      expected_revision: "fixture",
       execution_config: { executor },
     });
-    expect(setReactionScript).toHaveBeenCalledWith("42", "");
+    expect(setReactionScript).toHaveBeenCalledWith("42", "", "after-executor");
     expect(calls).toEqual(["executor", "reaction"]);
   });
 
@@ -115,14 +119,14 @@ describe("Automation execution config", () => {
           row.verb === "noop" || !row.changedFields?.includes("reaction_script")
       )
     ).toBe(true);
-    const setReactionScript = mock(async () => undefined);
+    const setReactionScript = mock(async () => ({ revision: "saved" }));
     await executePlan(
       {
         state,
         remote,
         plan,
         client: {
-          updateAutomation: mock(async () => undefined),
+          updateAutomation: mock(async () => ({ revision: "saved" })),
           setReactionScript,
         } as unknown as ApplyClient,
       },
@@ -149,7 +153,7 @@ describe("Automation execution config", () => {
       execution_config: { model: "old/model" },
     });
     const plan = computeDiff(state, remote);
-    const updateAutomation = mock(async () => undefined);
+    const updateAutomation = mock(async () => ({ revision: "saved" }));
     await executePlan(
       {
         state,
@@ -161,6 +165,7 @@ describe("Automation execution config", () => {
     );
     expect(updateAutomation).toHaveBeenCalledWith({
       automation_id: "42",
+      expected_revision: "fixture",
       execution_config: { executor },
     });
     const recorded = buildAttributionAndOwned(state, remote);
@@ -273,7 +278,7 @@ describe("Automation execution config", () => {
     );
     const plan = computeDiff(state, remote, { baseline });
     expect(plan.rows.some((row) => row.verb === "drift")).toBe(false);
-    const updateAutomation = mock(async () => undefined);
+    const updateAutomation = mock(async () => ({ revision: "saved" }));
     await executePlan(
       {
         state,
@@ -285,6 +290,7 @@ describe("Automation execution config", () => {
     );
     expect(updateAutomation).toHaveBeenCalledWith({
       automation_id: "42",
+      expected_revision: "fixture",
       execution_config: expected,
     });
 
@@ -320,7 +326,7 @@ describe("Automation execution config", () => {
       },
       (async (_url: unknown, init?: RequestInit) => {
         requests.push(JSON.parse(String(init?.body)));
-        return Response.json({ automation_id: "42" });
+        return Response.json({ automation_id: "42", revision: "created" });
       }) as typeof fetch
     );
     await executePlan(

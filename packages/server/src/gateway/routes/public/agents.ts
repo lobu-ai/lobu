@@ -10,14 +10,21 @@
 
 import { createLogger } from "@lobu/core";
 import { Hono } from "hono";
+import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { AgentMetadataStore } from "../../auth/agent-metadata-store.js";
 import type {
-  AgentSettings,
   AgentSettingsStore,
 } from "../../auth/settings/agent-settings-store.js";
 import type { SettingsTokenPayload } from "../../auth/settings/token-service.js";
 import type { UserAgentsStore } from "../../auth/user-agents-store.js";
-import { orgContext } from "../../../lobu/stores/org-context.js";
+import { getOrgId, orgContext, tryGetOrgId } from "../../../lobu/stores/org-context.js";
+import { getDb } from "../../../db/client.js";
+import { agentConfigRevision, readAgentConfigurationRow } from "../../../lobu/agent-config-revision.js";
+import { createPostgresAgentConfigStore, getAgentConfigurationSnapshot } from "../../../lobu/stores/postgres-stores.js";
+import { resolveNewAgentProvisioningDefaults } from "../../../auth/system-provider-resolution.js";
+import { assertExpectedRevision } from "../../../utils/config-revision.js";
+import { ToolUserError } from "../../../utils/errors.js";
+import { recordLifecycleEvent } from "../../../utils/insert-event.js";
 import { resolveSettingsLookupUserId } from "../shared/agent-ownership.js";
 import {
   errorResponse,
@@ -144,25 +151,29 @@ export function createAgentRoutes(config: AgentRoutesConfig): Hono {
         }
       }
 
-      // Create metadata
-      await config.agentMetadataStore.createAgent(
-        agentId,
-        body.name,
-        payload.platform,
-        lookupUserId,
-        { description: body.description }
-      );
-
-      // Create empty settings row.
-      const defaultSettings: Omit<AgentSettings, "updatedAt"> = {};
-      await config.agentSettingsStore.saveSettings(agentId, defaultSettings);
-
-      // Associate with user
-      await config.userAgentsStore.addAgent(
-        payload.platform,
-        lookupUserId,
-        agentId
-      );
+      // Creation is absent-only, and defaults are inserted with the row. A
+      // racing create must not upsert metadata or erase initialized settings.
+      const organizationId = getOrgId();
+      const provisioning = await resolveNewAgentProvisioningDefaults(organizationId);
+      const revision = await getDb().begin(async (tx) => {
+        const inserted = await tx`
+          INSERT INTO agents (id, organization_id, name, description, owner_platform, owner_user_id, models, created_at)
+          VALUES (${agentId}, ${organizationId}, ${body.name}, ${body.description ?? null},
+            ${payload.platform}, ${lookupUserId}, ${tx.json(provisioning.models)}, NOW())
+          ON CONFLICT (organization_id, id) DO NOTHING RETURNING id
+        `;
+        if (!inserted.length) throw new ToolUserError("An agent with this ID already exists", 409);
+        await tx`
+          INSERT INTO agent_users (organization_id, agent_id, platform, user_id, created_at)
+          VALUES (${organizationId}, ${agentId}, ${payload.platform}, ${lookupUserId}, NOW())
+          ON CONFLICT (organization_id, agent_id, platform, user_id) DO NOTHING
+        `;
+        await recordLifecycleEvent({
+          organizationId, entityType: "agent", op: "created", entityId: agentId,
+          summary: `Agent "${body.name}" created`,
+        }, tx);
+        return (await getAgentConfigurationSnapshot(organizationId, agentId, tx))!.revision;
+      });
 
       logger.info(
         `Created agent ${agentId} for user ${payload.platform}/${payload.userId}`
@@ -171,9 +182,12 @@ export function createAgentRoutes(config: AgentRoutesConfig): Hono {
       return c.json({
         agentId,
         name: body.name,
+        revision,
+        created: true,
         settingsUrl: `/api/v1/agents/${encodeURIComponent(agentId)}/config`,
       });
     } catch (error) {
+      if (error instanceof ToolUserError) return c.json({ error: error.message, code: error.code, retryable: error.retryable }, error.httpStatus as ContentfulStatusCode);
       logger.error("Failed to create agent", { error });
       return errorResponse(c, "Internal server error", 500);
     }
@@ -199,6 +213,7 @@ export function createAgentRoutes(config: AgentRoutesConfig): Hono {
         if (!metadata) continue;
         agents.push({
           agentId,
+          revision: (metadata as typeof metadata & { revision?: string }).revision,
           name: metadata.name,
           description: metadata.description,
           createdAt: metadata.createdAt,
@@ -227,10 +242,11 @@ export function createAgentRoutes(config: AgentRoutesConfig): Hono {
         errorLabel: "Failed to update agent",
         logger,
       },
-      async ({ agentId }) => {
+      async ({ agentId, access }) => {
         const body = await c.req.json<{
           name?: string;
           description?: string;
+          expected_revision?: string;
         }>();
         const updates: { name?: string; description?: string } = {};
 
@@ -258,9 +274,22 @@ export function createAgentRoutes(config: AgentRoutesConfig): Hono {
           return errorResponse(c, "No fields to update", 400);
         }
 
-        await config.agentMetadataStore.updateMetadata(agentId, updates);
-        logger.info(`Updated agent identity for ${agentId}`);
-        return c.json({ success: true });
+        const organizationId = access.organizationId ?? tryGetOrgId();
+        if (!organizationId) return errorResponse(c, "Organization context required", 400);
+        try {
+          const revision = await orgContext.run({ organizationId }, () => getDb().begin(async (tx) => {
+            const current = await readAgentConfigurationRow(organizationId, agentId, tx, true);
+            if (!current) throw new ToolUserError("Agent not found", 404);
+            assertExpectedRevision(body.expected_revision, agentConfigRevision(current));
+            await createPostgresAgentConfigStore(tx).updateMetadata(agentId, updates);
+            return (await getAgentConfigurationSnapshot(organizationId, agentId, tx))!.revision;
+          }));
+          logger.info(`Updated agent identity for ${agentId}`);
+          return c.json({ success: true, revision });
+        } catch (error) {
+          if (error instanceof ToolUserError) return c.json({ error: error.message, code: error.code, retryable: error.retryable }, error.httpStatus as ContentfulStatusCode);
+          throw error;
+        }
       }
     )
   );

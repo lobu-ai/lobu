@@ -2004,6 +2004,7 @@ describe('MCP Authentication', () => {
             const target = await client.org(${JSON.stringify(targetOrg.slug)});
             return target.automations.update({
               automation_id: ${JSON.stringify(result.return_value.automation_id)},
+              expected_revision: ${JSON.stringify(result.return_value.revision)},
               agent_kind: 'codex'
             });
           };`,

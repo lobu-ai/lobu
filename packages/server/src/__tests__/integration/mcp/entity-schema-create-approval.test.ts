@@ -23,11 +23,12 @@ import {
 	createTestAccessToken,
 	createTestOAuthClient,
 	createTestOrganization,
+	createTestSession,
 	createTestUser,
 } from "../../setup/test-fixtures";
 import { cleanupTestDatabase } from "../../setup/test-db";
-import { mcpRequest, mcpToolsCall } from "../../setup/test-helpers";
-import { TestApiClient } from "../../setup/test-mcp-client";
+import { mcpRequest, mcpToolsCall, post } from "../../setup/test-helpers";
+import { freshSchemaEditor, TestApiClient } from "../../setup/test-mcp-client";
 
 type PendingCreate = {
 	schema_type: "entity_type";
@@ -305,6 +306,7 @@ describe("MCP entitySchema.createType approval", () => {
 					schema_type: "entity_type",
 					action: "update",
 					slug: "reaction-source-type",
+					expected_revision: (await manageEntitySchema({ schema_type: "entity_type", action: "get", slug: "reaction-source-type" }, env, reactionCtx)).entity_type!.revision,
 					name: "Reaction source updated",
 				},
 				env,
@@ -329,6 +331,7 @@ describe("MCP entitySchema.createType approval", () => {
 					schema_type: "relationship_type",
 					action: "add_rule",
 					slug: "reaction-related-type",
+					expected_revision: (await manageEntitySchema({ schema_type: "relationship_type", action: "get", slug: "reaction-related-type" }, env, reactionCtx)).relationship_type!.revision,
 					source_entity_type_slug: "reaction-source-type",
 					target_entity_type_slug: "reaction-target-type",
 				},
@@ -846,7 +849,7 @@ describe("MCP entitySchema.createType approval", () => {
 			"run_sdk",
 			{
 				script:
-					"export default async (_ctx, client) => client.entitySchema.updateType({ slug: 'stale-update-type', name: 'Approved old name' });",
+					"export default async (_ctx, client) => { const { entity_type } = await client.entitySchema.getType('stale-update-type'); return client.entitySchema.updateType({ slug: 'stale-update-type', name: 'Approved old name', expected_revision: entity_type.revision }); };",
 			},
 			{ token: ownerAdminToken, orgSlug: org.slug },
 		);
@@ -866,6 +869,7 @@ describe("MCP entitySchema.createType approval", () => {
 				AND interaction_type = 'approval'
 				AND interaction_status = 'pending'
 		`;
+		expect(interaction.interaction_input.expected_revision).toMatch(/^cr1_/);
 		expect(interaction.interaction_input).toMatchObject({
 			name: "Approved old name",
 			slug: "stale-update-type",
@@ -927,7 +931,22 @@ describe("MCP entitySchema.createType approval", () => {
 			],
 		});
 		expect(response.result?.isError).toBe(true);
+		expect(response.result?.structuredContent?.error).toMatchObject({ code: "REVISION_CONFLICT", retryable: false });
 		expect(response.result?.content?.[0]?.text).toMatch(/stale/i);
+
+		// The failed schema approval remains pending. The human REST approval
+		// route must expose the same conflict without losing its in-process code.
+		const session = await createTestSession(owner.id);
+		const restResponse = await post(`/api/${org.slug}/manage_operations`, {
+			cookie: session.cookieHeader,
+			body: { action: "approve", run_id: proposed.return_value.run_id },
+		});
+		expect(restResponse.status).toBe(409);
+		expect(await restResponse.json()).toMatchObject({
+			error: expect.stringMatching(/stale/i),
+			code: "REVISION_CONFLICT",
+			retryable: false,
+		});
 		const [row] = await getDb()<[{ name: string }]>`
 			SELECT name FROM entity_types
 			WHERE organization_id = ${org.id} AND slug = 'stale-update-type' AND deleted_at IS NULL
@@ -1032,7 +1051,7 @@ describe("MCP entitySchema.createType approval", () => {
 			{ token: ownerAdminToken, orgSlug: org.slug },
 		);
 		expect(proposed.return_value.status).toBe("pending_approval");
-		await direct.entity_schema.updateRelType({
+		await freshSchemaEditor(direct.entity_schema).updateRelType({
 			slug: "inverse-before",
 			name: "Inverse changed",
 		});
@@ -1131,12 +1150,12 @@ describe("MCP entitySchema.createType approval", () => {
 			"run_sdk",
 			{
 				script:
-					"export default async (_ctx, client) => client.entitySchema.updateRelType({ slug: 'held-update-rel', inverse_type_slug: 'update-inverse-before' });",
+					"export default async (_ctx, client) => { const { relationship_type } = await client.entitySchema.getRelType('held-update-rel'); return client.entitySchema.updateRelType({ slug: 'held-update-rel', inverse_type_slug: 'update-inverse-before', expected_revision: relationship_type.revision }); };",
 			},
 			{ token: ownerAdminToken, orgSlug: org.slug },
 		);
 		expect(proposed.return_value.status).toBe("pending_approval");
-		await direct.entity_schema.updateRelType({
+		await freshSchemaEditor(direct.entity_schema).updateRelType({
 			slug: "update-inverse-before",
 			name: "Update inverse changed",
 		});
@@ -1189,7 +1208,7 @@ describe("MCP entitySchema.createType approval", () => {
 			"run_sdk",
 			{
 				script:
-					"export default async (_ctx, client) => client.entitySchema.addRule({ slug: 'ruled-rel', source_entity_type_slug: 'rule-source', target_entity_type_slug: 'rule-target' });",
+					"export default async (_ctx, client) => { const { relationship_type } = await client.entitySchema.getRelType('ruled-rel'); return client.entitySchema.addRule({ slug: 'ruled-rel', source_entity_type_slug: 'rule-source', target_entity_type_slug: 'rule-target', expected_revision: relationship_type.revision }); };",
 			},
 			{ token: ownerAdminToken, orgSlug: org.slug },
 		);

@@ -11,6 +11,8 @@
  */
 
 import type { AgentModelInfo } from "@lobu/core/contracts/tools/manage-agents";
+import type { DbClient } from "../db/client";
+import { withTransaction } from "../db/transaction";
 import { isUnresolvedModelRef } from "../gateway/auth/model-sentinel";
 import { resolveModelProvider } from "../gateway/auth/model-runnability";
 import type { ProviderCatalogService } from "../gateway/auth/provider-catalog";
@@ -190,13 +192,30 @@ export async function persistDefaultModel(
   agentId: string,
   organizationId: string,
   modelRef: string,
-): Promise<void> {
+  options: { expectedCurrent?: string | null; transaction?: DbClient } = {},
+): Promise<boolean> {
   const trimmed = modelRef.trim();
-  await orgContext.run({ organizationId }, () =>
-    agentConfigStore.updateSettings(agentId, {
-      models: trimmed ? [trimmed] : undefined,
-    }),
-  );
+  return withTransaction(options.transaction, async (sql) => {
+    const rows = await sql`
+      SELECT models FROM agents
+      WHERE organization_id = ${organizationId} AND id = ${agentId}
+      FOR UPDATE
+    `;
+    if (rows.length === 0) return false;
+    // Use the same model-selection semantics as the proposal's read, with the
+    // row locked until the narrow write commits. A separate check then save
+    // lets a newer model change slip between those two operations.
+    const current = resolveEffectiveModelRef({ models: rows[0].models ?? undefined }) ?? null;
+    if (options.expectedCurrent !== undefined && current !== options.expectedCurrent) {
+      return false;
+    }
+    await orgContext.run({ organizationId }, () =>
+      createPostgresAgentConfigStore(sql).updateSettings(agentId, {
+        models: trimmed ? [trimmed] : undefined,
+      }),
+    );
+    return true;
+  });
 }
 
 /**

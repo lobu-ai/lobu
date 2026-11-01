@@ -234,6 +234,44 @@ The normal MCP surface is intentionally small. Flat administrative tools are not
 
 Search before create to avoid duplicates. Prefer a read or dry run before mutations, never fabricate returned URLs or identifiers, and never delete from `events`; supersede or tombstone instead.
 
+## Editing Configuration
+
+Read configuration before editing and keep its opaque `revision` with the draft. Pass that original token as `expected_revision` when updating or deleting views, entity/relationship schemas, agents, Automations, or workspace navigation. For bulk Automation deletion, send an `expected_revisions` map keyed by Automation ID. Relationship rules and collection presets belong to their parent schema revision. Use the revision returned by a successful write for the next edit in the same sequence. On `REVISION_CONFLICT`, reload, compare, and reapply the intended change; never fetch a fresh token just to retry a stale replacement. A queued approval retains the original token and can also conflict when applied.
+
+```ts
+const { entity_type } = await client.entitySchema.getType("deal");
+if (!entity_type) throw new Error("Create the deal schema first.");
+await client.entitySchema.updateType({
+  slug: "deal",
+  expected_revision: entity_type.revision,
+  description: "Sales opportunities",
+});
+```
+
+## Workspace Sidebar
+
+Use `client.navigation.get()` and `client.navigation.set({ document, expected_revision })` to edit one workspace sidebar document. Define section headers and at most two levels of clickable links. Discover existing entity types, collection presets, and attached views first; targets reference those definitions instead of copying their queries or content. Set `document: null` with the current revision to restore default navigation. Use a collection target's `preset` for a saved selection, or a view target's `key` plus optional `entity_type` to choose its host page. A missing or inaccessible target is omitted from the displayed sidebar without granting access.
+
+```ts
+const current = await client.navigation.get();
+await client.navigation.set({
+  expected_revision: current.revision,
+  document: {
+    sections: [{
+      id: "sales", label: "Sales",
+      items: [{
+        id: "deals", label: "Deals",
+        target: { type: "collection", entity_type: "deal" },
+        children: [{
+          id: "active-deals", label: "Active",
+          target: { type: "collection", entity_type: "deal", preset: "active" },
+        }],
+      }],
+    }],
+  },
+});
+```
+
 ## Custom Views
 
 Before authoring UI, inspect available native entity/event pages, existing views (`client.views.list()` and `client.views.get({ key })`), and the project's shared components and overrides. Honor explicit user designs; reuse a suitable existing surface or component. When exploration benefits from linked charts, searchable tables, filters, drilldowns, scenario controls, or Canvas/SVG, build a React view. `@lobu/views/components` supplies theme-aware defaults such as `Card`, `DataTable`, filters, charts, links and query-state components. Compose, wrap or replace them when project components or specialized UX fit better.
@@ -296,7 +334,7 @@ export default function Pipeline() {
 
 `defineView` is the view's only declaration: `key`, optional `name` (defaults to the key) and `description`, `attach`, `params` and `actions` are read from it, never passed separately. `views.set` always requires `source_code` containing the entrypoint module, including when retaining multiple files. Write `defineView` out as a literal (no variables, spreads or `${}` templates): the server reads it without running the module.
 
-For a multi-file view, `files` maps relative paths to complete source strings and `entrypoint` names the view module. Include all three inputs below; `source_code` must exactly equal `files[entrypoint]`:
+For a new multi-file view, `files` maps relative paths to complete source strings and `entrypoint` names the view module. Include all three inputs below; `source_code` must exactly equal `files[entrypoint]`:
 
 ```ts
 await client.views.set({
@@ -305,6 +343,8 @@ await client.views.set({
   dependencies: {}, // Local files and the host-provided runtime need no extra packages.
 });
 ```
+
+To edit an existing view, first call `client.views.get({ key })`, retain `result.view.revision` while preparing the changed source, and include `expected_revision: result.view.revision` in `views.set`. Omitting the token creates only an absent key; it cannot overwrite an existing view. Use the same original token for `views.remove({ key, expected_revision })`. Compiler/cache rebuilds do not change this authored revision.
 
 `attach` lists the pages a view appears on, one per entry: `{ record: "deal" }` is a card on every deal's page above its activity (`{ record: "deal", id: 7 }` pins one record), `{ collection: "deal", when? }` a tab on the deal list page, `{ workspace: true }` a Data hub tab, `{ event: "deal.won", type? }` one event's page. One view can list several pages and branch on `useScope()` when it answers the same question at each scale. A record card renders with `useHost().displayMode === "inline"` inside `container.maxHeight` (the host clips past it): render a summary there with a "See all" that calls `requestDisplayMode("fullscreen")`, and the full view when `displayMode` is `"fullscreen"` (the peek, a full page, a tab).
 

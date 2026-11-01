@@ -409,22 +409,48 @@ describe("agent CRUD: access control and input validation", () => {
     expect(response.status).toBe(409);
   });
 
-  test("admin session can PATCH another user's agent", async () => {
+  test("admin session can PATCH another user's agent but cannot reuse a stale revision", async () => {
+    const app = buildApp();
+    setAuthProvider(() => makeSession({ userId: "owner", oauthUserId: "owner" }));
+    const listed = await orgContext.run({ organizationId: ORG_A }, () =>
+      app.request("/")
+    );
+    expect(listed.status).toBe(200);
+    const { agents } = (await listed.json()) as {
+      agents: Array<{ agentId: string; revision: string }>;
+    };
+    const originalRevision = agents.find((agent) => agent.agentId === "my-agent")?.revision;
+    expect(typeof originalRevision).toBe("string");
+
     setAuthProvider(() =>
       makeSession({ userId: "admin-user", isAdmin: true })
     );
-
-    const response = await orgContext.run({ organizationId: ORG_A }, () =>
-      buildApp().request("/my-agent", {
+    const patch = (name: string) => orgContext.run({ organizationId: ORG_A }, () =>
+      app.request("/my-agent", {
         method: "PATCH",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ name: "Admin Renamed" }),
+        body: JSON.stringify({ name, expected_revision: originalRevision }),
       })
     );
-    // Admin bypasses ownership — should succeed
+
+    // Admin bypasses ownership, while preserving the same revision guard.
+    const response = await patch("Admin Renamed");
     expect(response.status).toBe(200);
-    const data = (await response.json()) as any;
+    const data = (await response.json()) as { success: boolean; revision: string };
     expect(data.success).toBe(true);
+    expect(typeof data.revision).toBe("string");
+    expect(data.revision).not.toBe(originalRevision);
+
+    const stale = await patch("Stale Admin Rename");
+    expect(stale.status).toBe(409);
+    expect(await stale.json()).toMatchObject({
+      code: "REVISION_CONFLICT",
+      retryable: false,
+    });
+    const saved = await orgContext.run({ organizationId: ORG_A }, () =>
+      agentMetadataStore.getMetadata("my-agent")
+    );
+    expect(saved?.name).toBe("Admin Renamed");
   });
 
   test("non-owner cannot PATCH another user's agent (404)", async () => {

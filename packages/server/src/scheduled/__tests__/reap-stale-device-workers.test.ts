@@ -26,6 +26,7 @@ import {
   resetTestDatabase,
 } from '../../gateway/__tests__/helpers/db-setup';
 import { handleDelete } from '../../tools/admin/manage_automations/crud';
+import { readAutomationConfiguration } from '../../tools/admin/manage_automations/revision';
 import { reapStaleDeviceWorkers } from '../reap-stale-device-workers';
 
 const ORG_ID = 'device-pin-reaper-org';
@@ -64,7 +65,7 @@ async function seedStaleDevice(workerId: string): Promise<string> {
 async function seedAutomationPinnedTo(
   deviceWorkerId: string,
   name: string
-): Promise<number> {
+): Promise<{ id: number; revision: string }> {
   const sql = getDb();
   const [row] = (await sql`
     WITH next_id AS (SELECT nextval('automations_id_seq')::integer AS id)
@@ -75,12 +76,16 @@ async function seedAutomationPinnedTo(
     FROM next_id
     RETURNING id
   `) as unknown as Array<{ id: number }>;
-  return Number(row.id);
+  const snapshot = await readAutomationConfiguration(ORG_ID, String(row.id));
+  if (!snapshot) throw new Error('Seeded Automation configuration was not found');
+  return { id: Number(row.id), revision: snapshot.revision };
 }
 
-async function archive(automationId: number): Promise<void> {
+// Archive from the original seed snapshot; no read can refresh a stale intent.
+async function archive(automation: { id: number; revision: string }): Promise<void> {
+  const id = String(automation.id);
   const result = await handleDelete(
-    { action: 'delete', automation_ids: [String(automationId)] } as never,
+    { action: 'delete', automation_ids: [id], expected_revisions: { [id]: automation.revision } } as never,
     { organizationId: ORG_ID, userId: USER_ID } as never
   );
   expect(result.summary.successful).toBe(1);
@@ -127,28 +132,28 @@ async function tokenRevoked(name: string): Promise<boolean> {
 describe('stale device-worker reaper', () => {
   test('reaps a device whose only pin is an archived Automation', async () => {
     const deviceId = await seedStaleDevice('worker-archived-pin');
-    const automationId = await seedAutomationPinnedTo(deviceId, 'stale-envelope');
+    const automation = await seedAutomationPinnedTo(deviceId, 'stale-envelope');
 
     // Blocked while the Automation is live.
     const blocked = await reapStaleDeviceWorkers();
     expect(blocked.reaped).toBe(0);
     expect(await deviceExists(deviceId)).toBe(true);
 
-    await archive(automationId);
+    await archive(automation);
 
     // Archival is a soft delete: the pin is retained as history, NOT cleared
     // eagerly. Releasing it is the reaper's job, at the moment it deletes.
-    expect(await pinOf(automationId)).toBe(deviceId);
+    expect(await pinOf(automation.id)).toBe(deviceId);
 
     const after = await reapStaleDeviceWorkers();
     expect(after.reaped).toBe(1);
     expect(await deviceExists(deviceId)).toBe(false);
-    expect(await pinOf(automationId)).toBeNull();
+    expect(await pinOf(automation.id)).toBeNull();
   });
 
   test('a live pin still blocks its device and is never cleared', async () => {
     const deviceId = await seedStaleDevice('worker-live-pin');
-    const automationId = await seedAutomationPinnedTo(deviceId, 'still-active');
+    const automation = await seedAutomationPinnedTo(deviceId, 'still-active');
 
     const result = await reapStaleDeviceWorkers();
 
@@ -156,21 +161,21 @@ describe('stale device-worker reaper', () => {
     expect(await deviceExists(deviceId)).toBe(true);
     // The release must be scoped to archived rows — a runnable Automation must
     // not be silently un-pinned by a reaper pass that spared its device.
-    expect(await pinOf(automationId)).toBe(deviceId);
+    expect(await pinOf(automation.id)).toBe(deviceId);
   });
 
   test('one live pin protects the device even alongside archived ones', async () => {
     const deviceId = await seedStaleDevice('worker-mixed-pins');
-    const archivedId = await seedAutomationPinnedTo(deviceId, 'mixed-archived');
-    const liveId = await seedAutomationPinnedTo(deviceId, 'mixed-live');
-    await archive(archivedId);
+    const archivedAutomation = await seedAutomationPinnedTo(deviceId, 'mixed-archived');
+    const liveAutomation = await seedAutomationPinnedTo(deviceId, 'mixed-live');
+    await archive(archivedAutomation);
 
     const result = await reapStaleDeviceWorkers();
 
     expect(result.reaped).toBe(0);
     expect(await deviceExists(deviceId)).toBe(true);
-    expect(await pinOf(liveId)).toBe(deviceId);
-    expect(await pinOf(archivedId)).toBe(deviceId);
+    expect(await pinOf(liveAutomation.id)).toBe(deviceId);
+    expect(await pinOf(archivedAutomation.id)).toBe(deviceId);
   });
 
   /**
@@ -189,8 +194,8 @@ describe('stale device-worker reaper', () => {
   test('releases a pin only if the device is actually deleted', async () => {
     const sql = getDb();
     const deviceId = await seedStaleDevice('worker-revived-midflight');
-    const automationId = await seedAutomationPinnedTo(deviceId, 'revived-envelope');
-    await archive(automationId);
+    const automation = await seedAutomationPinnedTo(deviceId, 'revived-envelope');
+    await archive(automation);
 
     await sql`
       CREATE OR REPLACE FUNCTION test_revive_device_on_unpin() RETURNS trigger
@@ -217,7 +222,7 @@ describe('stale device-worker reaper', () => {
     }
 
     const stillThere = await deviceExists(deviceId);
-    const pinReleased = (await pinOf(automationId)) === null;
+    const pinReleased = (await pinOf(automation.id)) === null;
 
     // Either both happened or neither did. The failure this guards is
     // pinReleased === true while stillThere === true: history destroyed for a
@@ -251,11 +256,11 @@ describe('stale device-worker reaper', () => {
 
     expect(result.reaped).toBe(1);
     expect(await deviceExists(doomedId)).toBe(false);
-    expect(await pinOf(doomedAutomation)).toBeNull();
+    expect(await pinOf(doomedAutomation.id)).toBeNull();
 
     // The spared device keeps both its row and its Automation's record of it.
     expect(await deviceExists(sparedId)).toBe(true);
-    expect(await pinOf(sparedAutomation)).toBe(sparedId);
+    expect(await pinOf(sparedAutomation.id)).toBe(sparedId);
   });
 
   /**
@@ -346,17 +351,17 @@ describe('stale device-worker reaper', () => {
 
     // The revived device keeps its row AND its Automation's record of it.
     expect(await deviceExists(revivedId)).toBe(true);
-    expect(await pinOf(revivedAutomation)).toBe(revivedId);
+    expect(await pinOf(revivedAutomation.id)).toBe(revivedId);
 
     // The uncontended one is still collected normally.
     expect(await deviceExists(doomedId)).toBe(false);
-    expect(await pinOf(doomedAutomation)).toBeNull();
+    expect(await pinOf(doomedAutomation.id)).toBeNull();
   }, 30_000);
 
   test("revokes the reaped device's child token", async () => {
     const deviceId = await seedStaleDevice('worker-pat-reaped');
-    const automationId = await seedAutomationPinnedTo(deviceId, 'pat-reaped');
-    await archive(automationId);
+    const automation = await seedAutomationPinnedTo(deviceId, 'pat-reaped');
+    await archive(automation);
     await seedChildToken('worker-pat-reaped', 'pat-reaped');
 
     const result = await reapStaleDeviceWorkers();
@@ -431,7 +436,7 @@ describe('stale device-worker reaper', () => {
     expect(await deviceExists(doomedId)).toBe(false);
 
     expect(await deviceExists(guardedId)).toBe(true);
-    expect(await pinOf(guardedAutomation)).toBe(guardedId);
+    expect(await pinOf(guardedAutomation.id)).toBe(guardedId);
     const profiles = (await sql`
       SELECT 1 FROM auth_profiles WHERE device_worker_id = ${guardedId}
     `) as unknown as Array<unknown>;

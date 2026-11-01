@@ -77,10 +77,14 @@ async function storedRules(
 	return rows[0];
 }
 
-function manageEntityType(
+async function manageEntityType(
 	ctx: AuthContext,
 	args: Record<string, unknown>,
 ): Promise<unknown> {
+	if (args.action === "update" && !Object.hasOwn(args, "expected_revision")) {
+		const current = await executeTool("manage_entity_schema", { schema_type: "entity_type", action: "get", slug: args.slug }, TEST_ENV, ctx) as { entity_type: { revision: string } };
+		args = { ...args, expected_revision: current.entity_type.revision };
+	}
 	return executeTool(
 		"manage_entity_schema",
 		{ schema_type: "entity_type", ...args },

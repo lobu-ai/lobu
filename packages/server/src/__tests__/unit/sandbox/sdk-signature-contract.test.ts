@@ -143,6 +143,7 @@ describe("ClientSDK object signature contract", () => {
 		const classifiers = builders.classifiers(ctx, env);
 		const schedules = builders.schedules(ctx, env);
 		const automations = builders.automations(ctx, env);
+		const agents = builders.agents(ctx, env);
 		type ClaimResult = Awaited<ReturnType<typeof automations.claimNextWindow>>;
 		const assertTypedClaim = (claim: ClaimResult) => {
 			const windowToken: string = claim.context.window_token;
@@ -163,9 +164,13 @@ describe("ClientSDK object signature contract", () => {
 		await automations.get({ automation_id: "51" });
 		await automations.claimNextWindow({ automation_id: "51", lease_seconds: 300 });
 		await automations.trigger({ automation_id: "52" });
-		await automations.delete({ automation_ids: ["53", "54"] });
-		await entitySchema.deleteType({ slug: "company" });
-		await entitySchema.deleteRelType({ slug: "works-at" });
+		await automations.delete({
+			automation_ids: ["53", "54"],
+			expected_revisions: { "53": "original-53-revision", "54": "original-54-revision" },
+		});
+		await agents.delete({ agent_id: "builder", expected_revision: "original-agent-revision" });
+		await entitySchema.deleteType({ slug: "company", expected_revision: "fixture" });
+		await entitySchema.deleteRelType({ slug: "works-at", expected_revision: "fixture" });
 		await entitySchema.listRules({ slug: "works-at" });
 
 		expect(automationGets).toEqual([{ automation_id: "51" }]);
@@ -188,14 +193,21 @@ describe("ClientSDK object signature contract", () => {
 				input: { automation_id: "51", lease_seconds: 300 },
 			},
 			{ action: "trigger", input: { automation_id: "52" } },
-			{ action: "delete", input: { automation_ids: ["53", "54"] } },
 			{
 				action: "delete",
-				input: { schema_type: "entity_type", slug: "company" },
+				input: {
+					automation_ids: ["53", "54"],
+					expected_revisions: { "53": "original-53-revision", "54": "original-54-revision" },
+				},
+			},
+			{ action: "delete", input: { agent_id: "builder", expected_revision: "original-agent-revision" } },
+			{
+				action: "delete",
+				input: { schema_type: "entity_type", slug: "company", expected_revision: "fixture" },
 			},
 			{
 				action: "delete",
-				input: { schema_type: "relationship_type", slug: "works-at" },
+				input: { schema_type: "relationship_type", slug: "works-at", expected_revision: "fixture" },
 			},
 			{
 				action: "list_rules",
@@ -260,6 +272,7 @@ describe("ClientSDK object signature contract", () => {
 		await schedules.cancel({ schedule_id: "s-3" } as never);
 		await automations.setReactionScript({
 			automation_id: "42",
+			expected_revision: "original-automation-revision",
 			script: "export default async () => {};",
 		} as never);
 		await connections.update({ connection_id: 9, name: "Renamed" } as never);
@@ -274,6 +287,7 @@ describe("ClientSDK object signature contract", () => {
 				action: "set_reaction_script",
 				input: {
 					automation_id: "42",
+					expected_revision: "original-automation-revision",
 					reaction_script: "export default async () => {};",
 				},
 			},
@@ -302,7 +316,6 @@ describe("ClientSDK object signature contract", () => {
 		await connections.reauthenticate({ connection_id: 421 } as never);
 		await authProfiles.get({ auth_profile_slug: "acct" } as never);
 		await agents.get({ agent_id: "builder" } as never);
-		await agents.delete({ agent_id: "builder" } as never);
 		await entitySchema.getType({ slug: "company" } as never);
 		await entitySchema.getRelType({ slug: "works-at" } as never);
 		await entitySchema.auditType({ slug: "company" } as never);
@@ -316,7 +329,6 @@ describe("ClientSDK object signature contract", () => {
 			{ action: "reauthenticate", input: { connection_id: 421 } },
 			{ action: "get_auth_profile", input: { auth_profile_slug: "acct" } },
 			{ action: "get", input: { agent_id: "builder" } },
-			{ action: "delete", input: { agent_id: "builder" } },
 			{ action: "get", input: { schema_type: "entity_type", slug: "company" } },
 			{
 				action: "get",

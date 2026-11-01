@@ -1,3 +1,4 @@
+import { readAutomationRevision } from './revision-fixture';
 import type { AutomationTriggerResult } from '@lobu/core/contracts/tools/manage-automations';
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { Env } from '../../../index';
@@ -162,6 +163,7 @@ describe('external manual Automation execution', () => {
     // cadence after the run is queued. The run-bound read must keep the
     // original version, schema, and weekly period semantics.
     await workspace.owner.automations.createVersion({
+      expected_revision: await readAutomationRevision(workspace.owner, created.automation_id),
       automation_id: created.automation_id,
       prompt: 'Extract findings instead.',
       outputs: EDITED_OUTPUTS,
@@ -171,6 +173,7 @@ describe('external manual Automation execution', () => {
       ownerUserId: workspace.users.owner.id,
     });
     await workspace.owner.automations.update({
+      expected_revision: await readAutomationRevision(workspace.owner, created.automation_id),
       automation_id: created.automation_id,
       managed_agent_id: liveAgent.agentId,
       triggers: [{ kind: 'schedule', cron: '0 9 * * *' }],

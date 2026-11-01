@@ -10,6 +10,7 @@
  * window — plus the rehydration and retry classification the inline loop used to own.
  */
 
+import { readAutomationRevision } from './revision-fixture';
 import { beforeEach, describe, expect, it } from "vitest";
 import {
 	automationReactionIdempotencyKey,
@@ -73,6 +74,7 @@ async function seedRunnableWindow(reactionScript: string) {
 		memberRole: "owner",
 	});
 	await api.automations.setReactionScript({
+		expected_revision: await readAutomationRevision(api, String(automationId)),
 		automation_id: String(automationId),
 		reaction_script: reactionScript,
 	});
@@ -293,6 +295,7 @@ describe("automation reaction crash safety", () => {
 			script(0),
 		);
 		await api.automations.setReactionScript({
+			expected_revision: await readAutomationRevision(api, String(automationId)),
 			automation_id: String(automationId),
 			reaction_script: script(entity.id),
 		});

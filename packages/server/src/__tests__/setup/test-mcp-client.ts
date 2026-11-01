@@ -366,3 +366,42 @@ export class TestWorkspace {
     };
   }
 }
+
+
+/**
+ * Sequential test-fixture edits read a current baseline explicitly. The raw
+ * TestApiClient namespace stays unchanged for missing/stale-token regressions.
+ */
+export function freshSchemaEditor(schema: ReturnType<typeof buildEntitySchemaNamespace>) {
+  type Mutation = 'updateType' | 'deleteType' | 'updateRelType' | 'deleteRelType' | 'addRule' | 'removeRule';
+  type Input<M extends Mutation> = Omit<Parameters<typeof schema[M]>[0], 'expected_revision'> & { expected_revision?: string };
+  const mutation = <M extends Mutation>(method: M) => async (input: Input<M>): Promise<unknown> => {
+    if (Object.hasOwn(input, 'expected_revision')) return schema[method](input as never);
+    const entity = method === 'updateType' || method === 'deleteType';
+    let slug = (input as { slug?: string }).slug;
+    if (!slug && method === 'removeRule') {
+      const listed = await schema.listRelTypes({ list_scope: 'organization' }) as { relationship_types: Array<{ slug: string }> };
+      for (const type of listed.relationship_types) {
+        const rules = await schema.listRules({ slug: type.slug }) as { rules: Array<{ id: number }> };
+        if (rules.rules.some((rule) => Number(rule.id) === Number((input as { rule_id: number }).rule_id))) {
+          slug = type.slug;
+          break;
+        }
+      }
+    }
+    if (!slug) return schema[method]({ ...input, expected_revision: 'missing-fixture-target' } as never);
+    const result = entity
+      ? await schema.getType(slug) as { entity_type?: { revision: string } | null }
+      : await schema.getRelType(slug) as { relationship_type?: { revision: string } | null };
+    const revision = entity
+      ? (result as { entity_type?: { revision: string } | null }).entity_type?.revision
+      : (result as { relationship_type?: { revision: string } | null }).relationship_type?.revision;
+    return schema[method]({ ...input, expected_revision: revision ?? 'missing-fixture-target' } as never);
+  };
+  return {
+    ...schema,
+    updateType: mutation('updateType'), deleteType: mutation('deleteType'),
+    updateRelType: mutation('updateRelType'), deleteRelType: mutation('deleteRelType'),
+    addRule: mutation('addRule'), removeRule: mutation('removeRule'),
+  };
+}

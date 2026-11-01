@@ -71,9 +71,9 @@ interface WireCall {
 /** Remote store the stubbed `manage_views` reads/writes against. */
 function makeFetch(store: { views: Array<Record<string, unknown>> }) {
   const calls: WireCall[] = [];
-  const json = (payload: unknown) =>
+  const json = (payload: unknown, status = 200) =>
     new Response(JSON.stringify(payload), {
-      status: 200,
+      status,
       headers: { "Content-Type": "application/json" },
     });
   const fetchStub = async (
@@ -111,6 +111,7 @@ function makeFetch(store: { views: Array<Record<string, unknown>> }) {
         );
         const row = {
           key: def.key,
+          revision: "view-saved",
           name: def.name,
           description: def.description,
           content_hash: "aaaaaaaaaaaaaaaa",
@@ -141,7 +142,13 @@ function makeFetch(store: { views: Array<Record<string, unknown>> }) {
       return json({ auth_profiles: [] });
     if (urlStr.includes("/manage_catalog"))
       return json({ installed: { connectors: { items: [] } } });
-    if (urlStr.includes("/agents")) return json({ agents: [] });
+    if (urlStr.includes("/agents")) {
+      if (method === "POST")
+        return json({ ...body, created: true, revision: "agent-created" }, 201);
+      if (method === "PATCH")
+        return json({ success: true, revision: "agent-saved" });
+      return json({ agents: [] });
+    }
     return json({ success: true });
   };
   return { fetchStub: fetchStub as typeof fetch, calls };

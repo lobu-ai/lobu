@@ -147,10 +147,11 @@ describe("agent management mutations — role gate", () => {
   test("owner: PATCH /:agentId (metadata) succeeds", async () => {
     authStash.memberRole = "owner";
     const app = await importAgentRoutes();
+    const { revision } = await (await app.request(`/${AGENT}/config`)).json() as { revision: string };
     const res = await app.request(`/${AGENT}`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name: "Renamed" }),
+      body: JSON.stringify({ name: "Renamed", expected_revision: revision }),
     });
     expect(res.status).toBe(200);
   });

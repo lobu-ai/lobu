@@ -5,6 +5,7 @@
  * attached to an entity, plus access-control around the destructive actions.
  */
 
+import { readAutomationRevision, readAutomationRevisions } from './revision-fixture';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { AUTOMATION_CATALOG_TEMPLATES } from '../../../catalog/automation-templates';
 import { executeReaction } from '../../../automations/reaction-executor';
@@ -16,7 +17,7 @@ import {
   createTestOrganization,
   createTestUser,
 } from '../../setup/test-fixtures';
-import { TestApiClient } from '../../setup/test-mcp-client';
+import { freshSchemaEditor, TestApiClient } from '../../setup/test-mcp-client';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 
 describe('automation CRUD', () => {
@@ -97,6 +98,7 @@ describe('automation CRUD', () => {
     expect(got.automation?.automation_name).toBe('Lifecycle Automation');
 
     await owner.automations.update({
+      expected_revision: await readAutomationRevision(owner, automationId),
       automation_id: automationId,
       triggers: [{ kind: 'schedule', cron: '0 10 * * *' }],
     });
@@ -115,7 +117,7 @@ describe('automation CRUD', () => {
     expect(listedAutomation).not.toHaveProperty('schedule');
     expect(listedAutomation?.triggers).toEqual(after.automation?.triggers);
 
-    await owner.automations.delete({ automation_ids: [automationId] });
+    await owner.automations.delete({ expected_revisions: await readAutomationRevisions(owner, [automationId]), automation_ids: [automationId] });
     const list = (await owner.automations.list({ entity_id: entityId })) as {
       automations?: Array<{ automation_id: string }>;
     };
@@ -145,6 +147,7 @@ describe('automation CRUD', () => {
     `;
 
     await owner.automations.update({
+      expected_revision: await readAutomationRevision(owner, created.automation_id),
       automation_id: created.automation_id,
       triggers: [{ kind: 'schedule', cron: '0 9 * * 1' }],
     });
@@ -165,6 +168,7 @@ describe('automation CRUD', () => {
 
     // A new version with yet another cadence leaves it alone too.
     await owner.automations.createVersion({
+      expected_revision: await readAutomationRevision(owner, created.automation_id),
       automation_id: created.automation_id,
       prompt: 'Track each daily scheduled period.',
       triggers: [{ kind: 'schedule', cron: '0 10 * * *' }],
@@ -204,6 +208,7 @@ describe('automation CRUD', () => {
     // Resending byte-identical triggers may still re-anchor the legacy cursor,
     // but it is not operator recovery and must not clear the circuit breaker.
     await owner.automations.update({
+      expected_revision: await readAutomationRevision(owner, created.automation_id),
       automation_id: created.automation_id,
       triggers: [{ kind: 'schedule', cron: '0 9 * * *' }],
     });
@@ -219,6 +224,7 @@ describe('automation CRUD', () => {
 
     // A prompt-only version is definition history, not schedule recovery.
     await owner.automations.createVersion({
+      expected_revision: await readAutomationRevision(owner, created.automation_id),
       automation_id: created.automation_id,
       prompt: 'Track the scheduled period with clearer instructions.',
     });
@@ -233,6 +239,7 @@ describe('automation CRUD', () => {
     );
 
     await owner.automations.update({
+      expected_revision: await readAutomationRevision(owner, created.automation_id),
       automation_id: created.automation_id,
       triggers: [{ kind: 'schedule', cron: '0 10 * * *' }],
     });
@@ -251,6 +258,7 @@ describe('automation CRUD', () => {
       WHERE id = ${created.automation_id}
     `;
     await owner.automations.createVersion({
+      expected_revision: await readAutomationRevision(owner, created.automation_id),
       automation_id: created.automation_id,
       prompt: 'Track the rescheduled period.',
       triggers: [{ kind: 'schedule', cron: '0 11 * * *' }],
@@ -298,7 +306,7 @@ describe('automation CRUD', () => {
     // Three records form one evidence component; only one root pair is proposed.
     await owner.entity_schema.createType({ slug: 'contact-record', name: 'Contact record' });
     await owner.entity_schema.createRelType({ slug: 'same_record', name: 'Same record', purpose: 'identity' });
-    await owner.entity_schema.addRule({ slug: 'same_record', source_entity_type_slug: 'contact-record', target_entity_type_slug: 'contact-record' });
+    await freshSchemaEditor(owner.entity_schema).addRule({ slug: 'same_record', source_entity_type_slug: 'contact-record', target_entity_type_slug: 'contact-record' });
     const winner = await createTestEntity({
       name: 'Reaction Identity Winner',
       entity_type: 'contact-record',
@@ -438,7 +446,7 @@ describe('automation CRUD', () => {
     expect(duplicateRows.every((row) => row.deleted_at === null)).toBe(true);
     expect(await sql`SELECT id FROM entity_relationships WHERE organization_id = ${ownerOrgId} AND deleted_at IS NULL`).toEqual([]);
 
-    await owner.automations.delete({ automation_ids: [created.automation_id] });
+    await owner.automations.delete({ expected_revisions: await readAutomationRevisions(owner, [created.automation_id]), automation_ids: [created.automation_id] });
   });
 
   it('does not create an automation when its reaction fails compilation', async () => {
@@ -484,7 +492,7 @@ describe('automation CRUD', () => {
       expect(e.httpStatus).toBe(409);
     }
     const winner = (fulfilled[0] as PromiseFulfilledResult<{ automation_id: string }>).value;
-    await owner.automations.delete({ automation_ids: [winner.automation_id] });
+    await owner.automations.delete({ expected_revisions: await readAutomationRevisions(owner, [winner.automation_id]), automation_ids: [winner.automation_id] });
   });
 
   it('concurrent creates of DISTINCT slugs all succeed with unique ids (no PK collision)', async () => {
@@ -506,7 +514,7 @@ describe('automation CRUD', () => {
     const ids = results.map((r) => (r as { automation_id: string }).automation_id);
     expect(ids.length).toBe(N);
     expect(new Set(ids).size).toBe(N); // all unique — no PK collision
-    await owner.automations.delete({ automation_ids: ids });
+    await owner.automations.delete({ expected_revisions: await readAutomationRevisions(owner, ids), automation_ids: ids });
   });
 
   it('concurrent group-locked writes on DISTINCT groups do not exhaust the pool (holder starvation)', async () => {
@@ -562,7 +570,7 @@ describe('automation CRUD', () => {
     );
     expect(createdIds.length).toBe(N);
     expect(new Set(createdIds).size).toBe(N); // all unique — the cross-group id race
-    await owner.automations.delete({ automation_ids: [...baseIds, ...createdIds] });
+    await owner.automations.delete({ expected_revisions: await readAutomationRevisions(owner, [...baseIds, ...createdIds]), automation_ids: [...baseIds, ...createdIds] });
   });
 
   it('concurrent create_from_version fan-outs allocate unique ids (no PK collision)', async () => {
@@ -610,6 +618,7 @@ describe('automation CRUD', () => {
     expect(createdIds.length).toBe(N);
     expect(new Set(createdIds).size).toBe(N); // all unique — no PK collision
     await owner.automations.delete({
+      expected_revisions: await readAutomationRevisions(owner, [base.automation_id, ...createdIds]),
       automation_ids: [base.automation_id, ...createdIds],
     });
   });
@@ -663,6 +672,7 @@ describe('automation CRUD', () => {
       }>
     ).value.created.map((c) => c.automation_id);
     await owner.automations.delete({
+      expected_revisions: await readAutomationRevisions(owner, [base.automation_id, ...winnerIds]),
       automation_ids: [base.automation_id, ...winnerIds],
     });
   });
@@ -721,6 +731,7 @@ describe('automation CRUD', () => {
     expect(leaked.length).toBe(0);
 
     await owner.automations.delete({
+      expected_revisions: await readAutomationRevisions(owner, [base.automation_id, ...seed.created.map((c) => c.automation_id)]),
       automation_ids: [base.automation_id, ...seed.created.map((c) => c.automation_id)],
     });
   });
@@ -771,7 +782,7 @@ describe('automation CRUD', () => {
     };
     expect(got.automation?.sources).toEqual([{ name: 'recent_events', query }]);
 
-    await owner.automations.delete({ automation_ids: [created.automation_id] });
+    await owner.automations.delete({ expected_revisions: await readAutomationRevisions(owner, [created.automation_id]), automation_ids: [created.automation_id] });
   });
 
   it('a version bump does not re-derive sources from the prompt — the caller sends them', async () => {
@@ -804,6 +815,7 @@ describe('automation CRUD', () => {
 
     // A new prompt naming a different query leaves the stored source alone.
     await owner.automations.createVersion({
+      expected_revision: await readAutomationRevision(owner, created.automation_id),
       automation_id: created.automation_id,
       prompt: `Watch @[sql:recent:Recent](${enc(newQuery)}).`,
       change_notes: 'edit sql',
@@ -813,13 +825,14 @@ describe('automation CRUD', () => {
     // Sending `sources` replaces wholesale — no stranded old query, no
     // suffixed `recent_2`.
     await owner.automations.createVersion({
+      expected_revision: await readAutomationRevision(owner, created.automation_id),
       automation_id: created.automation_id,
       sources: [{ name: 'recent', query: newQuery }],
       change_notes: 'repoint source',
     });
     expect(await readSources()).toEqual([{ name: 'recent', query: newQuery }]);
 
-    await owner.automations.delete({ automation_ids: [created.automation_id] });
+    await owner.automations.delete({ expected_revisions: await readAutomationRevisions(owner, [created.automation_id]), automation_ids: [created.automation_id] });
   });
 
   it('removing every @-mention chip does not clear sources — `sources: []` does', async () => {
@@ -847,6 +860,7 @@ describe('automation CRUD', () => {
     };
 
     await owner.automations.createVersion({
+      expected_revision: await readAutomationRevision(owner, created.automation_id),
       automation_id: created.automation_id,
       prompt: 'Just watch everything, no specific source.',
       change_notes: 'remove chip',
@@ -854,13 +868,14 @@ describe('automation CRUD', () => {
     expect(await readSources()).toEqual([{ name: 'recent', query }]);
 
     await owner.automations.createVersion({
+      expected_revision: await readAutomationRevision(owner, created.automation_id),
       automation_id: created.automation_id,
       sources: [],
       change_notes: 'clear sources',
     });
     expect(await readSources()).toEqual([]);
 
-    await owner.automations.delete({ automation_ids: [created.automation_id] });
+    await owner.automations.delete({ expected_revisions: await readAutomationRevisions(owner, [created.automation_id]), automation_ids: [created.automation_id] });
   });
 
   it('clears durable outputs when create_version receives outputs: null', async () => {
@@ -876,6 +891,7 @@ describe('automation CRUD', () => {
     })) as { automation_id: string };
 
     await owner.automations.createVersion({
+      expected_revision: await readAutomationRevision(owner, created.automation_id),
       automation_id: created.automation_id,
       outputs: null,
       change_notes: 'switch to reaction-only output',
@@ -890,7 +906,7 @@ describe('automation CRUD', () => {
     `;
     expect(row.version_outputs).toBeNull();
 
-    await owner.automations.delete({ automation_ids: [created.automation_id] });
+    await owner.automations.delete({ expected_revisions: await readAutomationRevisions(owner, [created.automation_id]), automation_ids: [created.automation_id] });
   });
 
   it('clears durable outputs when create_version receives serialized null', async () => {
@@ -906,6 +922,7 @@ describe('automation CRUD', () => {
     })) as { automation_id: string };
 
     await owner.automations.createVersion({
+      expected_revision: await readAutomationRevision(owner, created.automation_id),
       automation_id: created.automation_id,
       outputs: 'null',
       change_notes: 'switch to reaction-only output',
@@ -920,7 +937,7 @@ describe('automation CRUD', () => {
     `;
     expect(row.version_outputs).toBeNull();
 
-    await owner.automations.delete({ automation_ids: [created.automation_id] });
+    await owner.automations.delete({ expected_revisions: await readAutomationRevisions(owner, [created.automation_id]), automation_ids: [created.automation_id] });
   });
 
   it('round-trips execution_config through create → list → update', async () => {
@@ -966,6 +983,7 @@ describe('automation CRUD', () => {
 
     // Update replaces the whole jsonb; a partial object is stored verbatim.
     await owner.automations.update({
+      expected_revision: await readAutomationRevision(owner, automationId),
       automation_id: automationId,
       execution_config: { timeout_seconds: 300 },
     });
@@ -981,6 +999,7 @@ describe('automation CRUD', () => {
 
     // Passing null clears the saved config back to NULL/defaults.
     await owner.automations.update({
+      expected_revision: await readAutomationRevision(owner, automationId),
       automation_id: automationId,
       execution_config: null,
     });
@@ -992,7 +1011,7 @@ describe('automation CRUD', () => {
     };
     expect(findRow(cleared, automationId)?.execution_config ?? null).toBeNull();
 
-    await owner.automations.delete({ automation_ids: [automationId] });
+    await owner.automations.delete({ expected_revisions: await readAutomationRevisions(owner, [automationId]), automation_ids: [automationId] });
   });
 
   it('leaves execution_config null when unset', async () => {
@@ -1014,7 +1033,7 @@ describe('automation CRUD', () => {
     expect(row).toBeDefined();
     expect(row?.execution_config ?? null).toBeNull();
 
-    await owner.automations.delete({ automation_ids: [created.automation_id] });
+    await owner.automations.delete({ expected_revisions: await readAutomationRevisions(owner, [created.automation_id]), automation_ids: [created.automation_id] });
   });
 
   it('rejects an invalid execution_config (type/range/unknown-key)', async () => {
@@ -1076,7 +1095,7 @@ describe('automation CRUD', () => {
     };
     expect(got.automation?.entity_ids ?? []).toEqual([]);
 
-    await owner.automations.delete({ automation_ids: [created.automation_id] });
+    await owner.automations.delete({ expected_revisions: await readAutomationRevisions(owner, [created.automation_id]), automation_ids: [created.automation_id] });
   });
 
   it('rejects an org-scoped automation when there is no organization context', async () => {
@@ -1104,11 +1123,12 @@ describe('automation CRUD', () => {
     );
     await expect(
       intruder.automations.update({
+        expected_revision: await readAutomationRevision(owner, created.automation_id),
         automation_id: created.automation_id,
         triggers: [{ kind: 'schedule', cron: '0 11 * * *' }],
       })
     ).rejects.toThrow(/access|organization/i);
-    await expect(intruder.automations.delete({ automation_ids: [created.automation_id] })).rejects.toThrow(
+    await expect(intruder.automations.delete({ expected_revisions: await readAutomationRevisions(owner, [created.automation_id]), automation_ids: [created.automation_id] })).rejects.toThrow(
       /access|organization/i
     );
 
@@ -1119,7 +1139,7 @@ describe('automation CRUD', () => {
     };
     expect(got.automation?.triggers).toEqual([]);
 
-    await owner.automations.delete({ automation_ids: [created.automation_id] });
+    await owner.automations.delete({ expected_revisions: await readAutomationRevisions(owner, [created.automation_id]), automation_ids: [created.automation_id] });
   });
 
   it('blocks a member from deleting automations (admin-only)', async () => {
@@ -1132,7 +1152,7 @@ describe('automation CRUD', () => {
     })) as { automation_id: string };
 
     const member = owner.withAuth({ memberRole: 'member' });
-    await expect(member.automations.delete({ automation_ids: [created.automation_id] })).rejects.toThrow(
+    await expect(member.automations.delete({ expected_revisions: await readAutomationRevisions(owner, [created.automation_id]), automation_ids: [created.automation_id] })).rejects.toThrow(
       /admin|owner|access/i
     );
   });
@@ -1182,7 +1202,7 @@ describe('automation CRUD', () => {
         automation?: { device_worker_id?: string | null };
       };
       expect(got.automation?.device_worker_id).toBe(deviceId);
-      await owner.automations.delete({ automation_ids: [created.automation_id] });
+      await owner.automations.delete({ expected_revisions: await readAutomationRevisions(owner, [created.automation_id]), automation_ids: [created.automation_id] });
     });
 
     it('rejects pinning to a device in another org (create)', async () => {
@@ -1257,13 +1277,14 @@ describe('automation CRUD', () => {
       });
       await expect(
         owner.automations.manage({
+          expected_revision: await readAutomationRevision(owner, created.automation_id),
           action: 'update',
           automation_id: created.automation_id,
           device_worker_id: foreignDeviceId,
         })
       ).rejects.toThrow(/device you own|not found or not accessible/i);
 
-      await owner.automations.delete({ automation_ids: [created.automation_id] });
+      await owner.automations.delete({ expected_revisions: await readAutomationRevisions(owner, [created.automation_id]), automation_ids: [created.automation_id] });
     });
   });
 
@@ -1327,6 +1348,7 @@ describe('automation CRUD', () => {
       expect(clone.triggers).toMatch(/schedule/);
 
       await owner.automations.delete({
+        expected_revisions: await readAutomationRevisions(owner, [base.automation_id, cloneId]),
         automation_ids: [base.automation_id, cloneId],
       });
     });
@@ -1388,6 +1410,7 @@ describe('automation CRUD', () => {
       expect(fetched.view_url).toContain(`/automations/${base.automation_id}`);
 
       await owner.automations.delete({
+        expected_revisions: await readAutomationRevisions(owner, [base.automation_id, cloneId]),
         automation_ids: [base.automation_id, cloneId],
       });
     });
@@ -1424,7 +1447,7 @@ describe('automation CRUD', () => {
       expect(row?.organization_slug).toBeTruthy();
       expect(row?.view_url).toContain(`/automations/${base.automation_id}`);
 
-      await owner.automations.delete({ automation_ids: [base.automation_id] });
+      await owner.automations.delete({ expected_revisions: await readAutomationRevisions(owner, [base.automation_id]), automation_ids: [base.automation_id] });
     });
   });
 });

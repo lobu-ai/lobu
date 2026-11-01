@@ -180,3 +180,12 @@ export async function notifyEventContentChanged(sql: DbClient, eventId: number):
     WHERE o.org IS NOT NULL
   `;
 }
+
+/** Publish only when the configuration transaction commits. */
+export async function notifyWorkspaceInvalidation(
+  sql: DbClient,
+  organizationId: string,
+  keys: string[]
+): Promise<void> {
+  await sql`SELECT pg_notify(${CHANNEL}, ${JSON.stringify({ org: organizationId, keys })})`;
+}

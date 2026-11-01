@@ -55,7 +55,9 @@ import {
   validateModelRefsAgainstOrg,
 } from '../../lobu/model-config';
 import { getLobuCoreServices } from '../../lobu/gateway';
-import { isValidAgentId } from '../../lobu/stores/postgres-stores';
+import { isValidAgentId, getAgentConfigurationSnapshot } from '../../lobu/stores/postgres-stores';
+import { agentConfigRevision, readAgentConfigurationRow } from '../../lobu/agent-config-revision';
+import { assertExpectedRevision } from '../../utils/config-revision';
 import { resolveActionOrigin } from '../../notifications/action-origin';
 import { notifyActionApprovalNeeded } from '../../notifications/triggers';
 import { resolveApprovalChatOrigin } from './approval-delivery';
@@ -129,8 +131,9 @@ async function actingPrincipalFor(ctx: ToolContext): Promise<ActingPrincipal> {
 async function agentModelInfo(
   ctx: ToolContext,
   agentId: string,
+  snapshot?: { models?: string[] },
 ): Promise<AgentModelInfo> {
-  const models = await readAgentModels(agentId, ctx.organizationId);
+  const models = snapshot ? snapshot.models : await readAgentModels(agentId, ctx.organizationId);
   const coreServices = getLobuCoreServices();
   return resolveAgentModelInfo(models, ctx.organizationId, {
     agentId,
@@ -197,7 +200,7 @@ async function liveFieldValue(
     return (agentRow?.[field.key] as string | null) ?? null;
   }
   // store === 'model'
-  const info = await agentModelInfo(ctx, agentId);
+  const info = await agentModelInfo(ctx, agentId, agentRow ? { models: agentRow.models as string[] | undefined } : undefined);
   return info.source === 'agent' ? (info.effective_model ?? null) : null;
 }
 
@@ -218,10 +221,13 @@ async function writeNonColumnField(
   agentId: string,
   field: LobuField,
   value: string,
-): Promise<void> {
+  expectedCurrent?: string | null,
+  transaction?: DbClient,
+): Promise<boolean> {
   if (field.meta.store === 'model') {
-    await persistDefaultModel(agentId, ctx.organizationId, value);
+    return persistDefaultModel(agentId, ctx.organizationId, value, { expectedCurrent, transaction });
   }
+  return false;
 }
 
 /**
@@ -284,15 +290,19 @@ async function handleList(
       a.id,
       a.name,
       a.description,
+      a.identity_md,
       a.owner_platform,
       a.owner_user_id,
       a.created_at,
-      a.last_used_at
+      a.last_used_at,
+      to_jsonb(a) AS configuration
     FROM agents a
     WHERE a.organization_id = ${ctx.organizationId}
     ORDER BY a.created_at ASC
   `;
-  const agents = rows as unknown as AgentRecord[];
+  const agents = rows.map(({ configuration, ...row }) => ({
+    ...row, revision: agentConfigRevision(configuration),
+  })) as unknown as AgentRecord[];
   const actor = await actingPrincipalFor(ctx);
   if (actor.kind === "user") {
     return { action: "list", agents };
@@ -326,10 +336,12 @@ async function handleGet(
       a.id,
       a.name,
       a.description,
+      a.identity_md,
       a.owner_platform,
       a.owner_user_id,
       a.created_at,
-      a.last_used_at
+      a.last_used_at,
+      to_jsonb(a) AS configuration
     FROM agents a
     WHERE a.organization_id = ${ctx.organizationId} AND a.id = ${args.agent_id}
   `;
@@ -337,8 +349,9 @@ async function handleGet(
     throw new ToolUserError(`Agent "${args.agent_id}" not found`, 404);
   }
   await assertAgentConfigReadAllowed(ctx, args.agent_id.trim());
-  const model = await agentModelInfo(ctx, args.agent_id);
-  return { action: 'get', agent: rows[0] as unknown as AgentRecord, model };
+  const { configuration, ...row } = rows[0];
+  const model = await agentModelInfo(ctx, args.agent_id, { models: configuration.models ?? undefined });
+  return { action: 'get', agent: { ...row, revision: agentConfigRevision(configuration) } as unknown as AgentRecord, model };
 }
 
 /**
@@ -386,7 +399,8 @@ export async function applyCreate(
   // Without the agent_users row the agent is unreachable through chat,
   // especially in non-default orgs. Column fields are seeded from args (with the
   // insert defaults for those not supplied); non-column fields are set after.
-  const rows = await sql`
+  const saved = await sql.begin(async (tx) => {
+  const rows = await tx`
     INSERT INTO agents (
       id, organization_id, name, description, identity_md,
       owner_platform, owner_user_id, models,
@@ -395,7 +409,7 @@ export async function applyCreate(
     VALUES (
       ${args.agent_id}, ${ctx.organizationId}, ${args.name}, ${args.description ?? null},
       ${args.identity_md ?? ''}, 'external', ${ownerUserId},
-      ${seedModels === null ? null : sql.json(seedModels)},
+      ${seedModels === null ? null : tx.json(seedModels)},
       NOW(), NOW()
     )
     ON CONFLICT (organization_id, id) DO NOTHING
@@ -403,7 +417,7 @@ export async function applyCreate(
   `;
   const created = rows.length > 0;
   if (created) {
-    await sql`
+    await tx`
       INSERT INTO agent_users (organization_id, agent_id, platform, user_id, created_at)
       VALUES (${ctx.organizationId}, ${args.agent_id}, 'external', ${ownerUserId}, NOW())
       ON CONFLICT (organization_id, agent_id, platform, user_id) DO NOTHING
@@ -415,12 +429,17 @@ export async function applyCreate(
       if (field.meta.store === 'column') continue;
       const value = argValue(args, field.key);
       if (value !== undefined) {
-        await writeNonColumnField(ctx, args.agent_id, field, value);
+        await writeNonColumnField(ctx, args.agent_id, field, value, undefined, tx);
       }
     }
   }
-  const model = await agentModelInfo(ctx, args.agent_id);
-  return { action: 'create', agent_id: args.agent_id, created, model };
+  const snapshot = (await getAgentConfigurationSnapshot(ctx.organizationId, args.agent_id, tx))!;
+  return { created, snapshot };
+  });
+  // Resolve provider/owner state only after the row is committed. The receipt
+  // keeps the settings and revision captured in the write transaction.
+  const model = await agentModelInfo(ctx, args.agent_id, saved.snapshot.settings);
+  return { action: 'create', agent_id: args.agent_id, created: saved.created, model, revision: saved.snapshot.revision };
 }
 
 export async function applyUpdate(
@@ -431,7 +450,7 @@ export async function applyUpdate(
    * Pre-image captured when a queued update was proposed. When present, a field
    * is written only if its live value still equals its pre-image — a stale
    * approval skips (and reports) fields another writer has since changed. Absent
-   * for immediate (human) applies, which overwrite unconditionally.
+   * for immediate (human) applies; every path also checks the original config revision.
    */
   base?: ManageAgentsProposal['base'],
   /**
@@ -442,7 +461,7 @@ export async function applyUpdate(
    * flag a missing base read as "overwrite unconditionally" and silently
    * clobbered the newer value (sol review #8). With it set, a field lacking a
    * pre-image FAILS CLOSED: the field is skipped and reported, never written on
-   * blind faith. Immediate (human) applies leave this false and overwrite.
+   * blind faith. Immediate applies still require their original config revision.
    */
   requireBase = false
 ): Promise<ManageAgentsResult> {
@@ -484,7 +503,11 @@ export async function applyUpdate(
       return [f.key, { write, guard }];
     })
   ) as Record<string, { write: boolean; guard: boolean }>;
-  const rows = await sql<{
+  const saved = await sql.begin(async (tx) => {
+  const current = await readAgentConfigurationRow(ctx.organizationId, agentId, tx, true);
+  if (!current) throw new ToolUserError(`Agent "${agentId}" not found`, 404);
+  assertExpectedRevision(args.expected_revision, agentConfigRevision(current));
+  const rows = await tx<{
     id: string;
     name: string | null;
     description: string | null;
@@ -526,28 +549,29 @@ export async function applyUpdate(
       }
       continue;
     }
-    // Non-column (model): re-check the pre-image against the live value, then
-    // persist. `writable` already dropped it if unbacked on a queued apply.
-    let stale = false;
-    if (base?.[field.key as keyof typeof base] !== undefined) {
-      const live = await liveFieldValue(ctx, agentId, field, null);
-      stale = live !== (base[field.key as keyof typeof base] ?? null);
-    }
-    if (!stale) {
-      await writeNonColumnField(ctx, agentId, field, value);
-      appliedFields.push(field.key);
-    }
+    // The model store compares the proposal's pre-image while holding the
+    // row lock through its narrow write. `writable` already excludes missing
+    // pre-images on queued approvals.
+    const applied = await writeNonColumnField(
+      ctx, agentId, field, value,
+      base?.[field.key as keyof typeof base], tx,
+    );
+    if (applied) appliedFields.push(field.key);
   }
 
   const skippedFields = requested
     .map((f) => f.key)
     .filter((k) => !appliedFields.includes(k));
-  const model = await agentModelInfo(ctx, agentId);
+  const snapshot = (await getAgentConfigurationSnapshot(ctx.organizationId, agentId, tx))!;
+  return { snapshot, appliedFields, skippedFields };
+  });
+  const model = await agentModelInfo(ctx, agentId, saved.snapshot.settings);
   return {
     action: 'update',
     agent_id: agentId,
-    updated_fields: appliedFields,
-    ...(skippedFields.length > 0 ? { skipped_fields: skippedFields } : {}),
+    updated_fields: saved.appliedFields,
+    revision: saved.snapshot.revision,
+    ...(saved.skippedFields.length > 0 ? { skipped_fields: saved.skippedFields } : {}),
     model,
   };
 }
@@ -558,7 +582,11 @@ export async function applyDelete(
   env: Env
 ): Promise<ManageAgentsResult> {
   const sql = createDbClientFromEnv(env);
-  const rows = await sql`
+  return sql.begin(async (tx) => {
+  const current = await readAgentConfigurationRow(ctx.organizationId, args.agent_id, tx, true);
+  if (!current) return { action: 'delete' as const, agent_id: args.agent_id, deleted: false };
+  assertExpectedRevision(args.expected_revision, agentConfigRevision(current));
+  const rows = await tx`
     DELETE FROM agents
     WHERE organization_id = ${ctx.organizationId} AND id = ${args.agent_id}
     RETURNING id
@@ -567,6 +595,7 @@ export async function applyDelete(
   // trigger on `agents` (see 20260710140000) — covers this path AND the dashboard's
   // configStore.deleteMetadata, so no app-level cleanup is duplicated here.
   return { action: 'delete', agent_id: args.agent_id, deleted: rows.length > 0 };
+  });
 }
 
 // ============================================
@@ -579,14 +608,11 @@ async function fetchCurrentAgent(
   agentId: string,
   env: Env
 ): Promise<Record<string, unknown> | null> {
-  const sql = createDbClientFromEnv(env);
-  const rows = await sql`
-    SELECT id, name, description, identity_md
-    FROM agents
-    WHERE organization_id = ${organizationId} AND id = ${agentId}
-    LIMIT 1
-  `;
-  return (rows[0] as Record<string, unknown> | undefined) ?? null;
+  const row = await readAgentConfigurationRow(organizationId, agentId, createDbClientFromEnv(env));
+  return row ? {
+    id: row.id, name: row.name, description: row.description, identity_md: row.identity_md,
+    models: row.models, revision: agentConfigRevision(row),
+  } : null;
 }
 
 /** Human label for each gated action, used in card titles + notifications. */
@@ -630,7 +656,9 @@ function buildProposal(args: WriteArgs): ManageAgentsProposal {
   }
   // Copy every requested editable field onto the proposal, loop-driven off the
   // schema — a new field flows through without editing this block.
-  const proposal: ManageAgentsProposal = { action, agent_id: args.agent_id };
+  const proposal: ManageAgentsProposal = { action, agent_id: args.agent_id,
+    ...(args.action !== 'create' ? { expected_revision: args.expected_revision } : {}),
+  };
   for (const field of AGENT_FIELDS) {
     const value = argValue(args, field.key);
     if (value !== undefined) {
@@ -678,6 +706,10 @@ async function queueWriteForApproval(
   }
   if (proposal.action !== 'create' && !current) {
     throw new ToolUserError(`Agent "${proposal.agent_id}" not found`, 404);
+  }
+
+  if (proposal.action !== 'create' && current) {
+    assertExpectedRevision(proposal.expected_revision, current.revision as string);
   }
 
   // Capture the pre-image of each field this update touches, so the eventual
@@ -835,6 +867,7 @@ export async function applyManageAgentsProposal(
   const fields: Record<string, unknown> = {
     action: proposal.action,
     agent_id: proposal.agent_id,
+    ...(proposal.action !== 'create' ? { expected_revision: proposal.expected_revision } : {}),
   };
   for (const field of AGENT_FIELDS) {
     const value = (proposal as unknown as Record<string, unknown>)[field.key];

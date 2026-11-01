@@ -7,6 +7,7 @@
  * a running queued run.
  */
 
+import { readAutomationRevision } from './revision-fixture';
 import { randomUUID } from "node:crypto";
 import { beforeEach, describe, expect, it } from "vitest";
 import { generateSecureToken, hashToken } from "../../../auth/oauth/utils";
@@ -748,6 +749,7 @@ describe("automation contract", () => {
 			const { sql, dbClient, workspace, api, automationId, agent } =
 				await createAutomatedAutomation();
 			await api.automations.setReactionScript({
+				expected_revision: await readAutomationRevision(api, String(automationId)),
 				automation_id: String(automationId),
 				reaction_script: "export default async function reaction() { return; }",
 			});

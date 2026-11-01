@@ -458,7 +458,7 @@ export type SaveMemoryResponse = SaveMemoryResponses[keyof SaveMemoryResponses];
 export type SearchSdkData = {
   body: {
     /**
-     * SDK method or runtime-helper discovery query. Use a namespace (e.g. 'automations'), one or more dotted paths separated by whitespace (e.g. 'automations.create ctx.sleep'), an optional client. prefix, or free text. Pass mode='read' for query_sdk-safe methods only; omit mode for your full run_sdk tier. Namespaces: agents, authProfiles, automations, catalog, classifiers, connections, conversations, ctx, devices, entities, entitySchema, feeds, knowledge, metrics, notifications, operations, organizations, schedules, views.
+     * SDK method or runtime-helper discovery query. Use a namespace (e.g. 'automations'), one or more dotted paths separated by whitespace (e.g. 'automations.create ctx.sleep'), an optional client. prefix, or free text. Pass mode='read' for query_sdk-safe methods only; omit mode for your full run_sdk tier. Namespaces: agents, authProfiles, automations, catalog, classifiers, connections, conversations, ctx, devices, entities, entitySchema, feeds, knowledge, metrics, navigation, notifications, operations, organizations, schedules, views.
      */
     query: string;
     /**
@@ -2057,6 +2057,10 @@ export type ManageEntitySchemaData = {
       | "remove_rule"
       | "list_rules";
     /**
+     * [update/delete/add_rule/remove_rule] Required revision from get/list of the entity or relationship type. The original revision is retained through approval; a mismatch returns REVISION_CONFLICT.
+     */
+    expected_revision?: string;
+    /**
      * [get/create/update/delete/audit/add_rule/remove_rule/list_rules] Type slug
      */
     slug?: string;
@@ -2208,6 +2212,7 @@ export type ManageEntitySchemaResponses = {
         schema_type: "entity_type";
         action: "list";
         entity_types: Array<{
+          revision: string;
           id: number;
           slug: string;
           name: string;
@@ -2261,6 +2266,7 @@ export type ManageEntitySchemaResponses = {
         schema_type: "entity_type";
         action: "get";
         entity_type: {
+          revision: string;
           id: number;
           slug: string;
           name: string;
@@ -2306,6 +2312,7 @@ export type ManageEntitySchemaResponses = {
         action: "create";
         status: "applied";
         entity_type: {
+          revision: string;
           id: number;
           slug: string;
           name: string;
@@ -2408,6 +2415,7 @@ export type ManageEntitySchemaResponses = {
         action: "update";
         status: "applied";
         entity_type: {
+          revision: string;
           id: number;
           slug: string;
           name: string;
@@ -2476,6 +2484,7 @@ export type ManageEntitySchemaResponses = {
         schema_type: "relationship_type";
         action: "list";
         relationship_types: Array<{
+          revision: string;
           id: number;
           slug: string;
           name: string;
@@ -2506,6 +2515,7 @@ export type ManageEntitySchemaResponses = {
         schema_type: "relationship_type";
         action: "get";
         relationship_type: {
+          revision: string;
           id: number;
           slug: string;
           name: string;
@@ -2535,6 +2545,7 @@ export type ManageEntitySchemaResponses = {
         action: "create";
         status: "applied";
         relationship_type: {
+          revision: string;
           id: number;
           slug: string;
           name: string;
@@ -2564,6 +2575,7 @@ export type ManageEntitySchemaResponses = {
         action: "update";
         status: "applied";
         relationship_type: {
+          revision: string;
           id: number;
           slug: string;
           name: string;
@@ -2599,6 +2611,7 @@ export type ManageEntitySchemaResponses = {
         schema_type: "relationship_type";
         action: "add_rule";
         status: "applied";
+        revision: string;
         rule: {
           id: number;
           relationship_type_id: number;
@@ -2611,6 +2624,7 @@ export type ManageEntitySchemaResponses = {
         schema_type: "relationship_type";
         action: "remove_rule";
         status: "applied";
+        revision: string;
         success: boolean;
         message: string;
       }
@@ -3776,6 +3790,10 @@ export type ManageAgentsData = {
          */
         agent_id: string;
         /**
+         * Required revision returned by the original agent read. A stale or missing revision rejects the write with REVISION_CONFLICT.
+         */
+        expected_revision?: string;
+        /**
          * [create/update] Display name for the agent.
          */
         name?: string;
@@ -3801,6 +3819,10 @@ export type ManageAgentsData = {
          * Agent ID (lowercase slug, e.g. "support").
          */
         agent_id: string;
+        /**
+         * Required revision returned by the original agent read. A stale or missing revision rejects the write with REVISION_CONFLICT.
+         */
+        expected_revision?: string;
       };
   path: {
     /**
@@ -5331,6 +5353,16 @@ export type ManageAutomationsData = {
      */
     before_id?: number;
     /**
+     * [update/create_version/set_reaction_script] Required revision from the original configuration read. Stale writes fail with REVISION_CONFLICT.
+     */
+    expected_revision?: string;
+    /**
+     * [delete] Required original revision for each automation_ids entry, keyed by Automation ID.
+     */
+    expected_revisions?: {
+      [key: string]: unknown | string;
+    };
+    /**
      * [list/update/upgrade/get_versions/get_version_details/set_reaction_script/trigger] Automation ID (numeric string)
      */
     automation_id?: string;
@@ -5743,6 +5775,7 @@ export type ManageAutomationsResponses = {
     | {
         action: "create";
         automation_id: string;
+        revision: string;
         version: number;
         status: string;
         sources?: Array<{
@@ -5755,11 +5788,13 @@ export type ManageAutomationsResponses = {
     | {
         action: "update";
         automation_id: string;
+        revision: string;
         updated_fields: Array<string>;
       }
     | {
         action: "create_version";
         automation_id: string;
+        revision: string;
         version_id: string;
         version: number;
         previous_version: number;
@@ -5887,6 +5922,7 @@ export type ManageAutomationsResponses = {
     | {
         action: "set_reaction_script";
         automation_id: string;
+        revision: string;
         has_script: boolean;
         message: string;
       }
@@ -5897,6 +5933,7 @@ export type ManageAutomationsResponses = {
       }
     | ({
         action: "get_version_details";
+        revision?: string;
         automation_id: string;
       } & {
         [key: string]: unknown;
@@ -5948,6 +5985,7 @@ export type ManageAutomationsResponses = {
         action: "create_from_version";
         created: Array<{
           automation_id: string;
+          revision: string;
           entity_id: number;
           name: string;
         }>;
@@ -6101,6 +6139,10 @@ export type GetAutomationResponses = {
       }>;
     }>;
     automation?: {
+      /**
+       * Opaque authored-config baseline. Omitted for historical version views.
+       */
+      revision?: string;
       automation_id: string;
       automation_name: string;
       slug: string;
@@ -6838,11 +6880,176 @@ export type ManageClassifiersResponses = {
 export type ManageClassifiersResponse =
   ManageClassifiersResponses[keyof ManageClassifiersResponses];
 
+export type ManageNavigationData = {
+  body:
+    | {
+        /**
+         * Read the workspace sidebar document and its revision. Owner/admin reads preserve the editable document; other readers receive only reachable links. Use projection: 'display' to filter links for an editor too.
+         */
+        action: "get";
+        /**
+         * Hide unavailable targets for rendering. Owner/admin reads otherwise preserve the editable document.
+         */
+        projection?: "display";
+      }
+    | {
+        /**
+         * Replace the workspace sidebar using expected_revision from the original read. Pass document: null to restore defaults. Requires owner/admin access; stale or missing revisions fail with REVISION_CONFLICT.
+         */
+        action: "set";
+        /**
+         * Workspace sidebar sections and links. Null restores the default navigation.
+         */
+        document: {
+          sections: Array<{
+            id: string;
+            label?: string;
+            items: Array<{
+              id: string;
+              label: string;
+              target:
+                | {
+                    type: "collection";
+                    entity_type: string;
+                    preset?: string;
+                  }
+                | {
+                    type: "view";
+                    /**
+                     * View key, e.g. 'pipeline'.
+                     */
+                    key: string;
+                    entity_type?: string;
+                    preset?: string;
+                  };
+              children?: Array<{
+                id: string;
+                label: string;
+                target:
+                  | {
+                      type: "collection";
+                      entity_type: string;
+                      preset?: string;
+                    }
+                  | {
+                      type: "view";
+                      /**
+                       * View key, e.g. 'pipeline'.
+                       */
+                      key: string;
+                      entity_type?: string;
+                      preset?: string;
+                    };
+              }>;
+            }>;
+          }>;
+        } | null;
+        /**
+         * The revision returned by the read used to prepare this edit.
+         */
+        expected_revision?: string;
+      };
+  path: {
+    /**
+     * Organization slug (workspace identifier)
+     */
+    orgSlug: string;
+  };
+  query?: never;
+  url: "/api/{orgSlug}/manage_navigation";
+};
+
+export type ManageNavigationErrors = {
+  /**
+   * Bad request - invalid parameters
+   */
+  400: {
+    error?: string;
+  };
+  /**
+   * Forbidden - your role or token scope does not allow this action
+   */
+  403: {
+    error?: string;
+  };
+  /**
+   * Tool not found
+   */
+  404: {
+    error?: string;
+  };
+};
+
+export type ManageNavigationError =
+  ManageNavigationErrors[keyof ManageNavigationErrors];
+
+export type ManageNavigationResponses = {
+  /**
+   * Successful response
+   */
+  200: {
+    action: "get" | "set";
+    document: {
+      sections: Array<{
+        id: string;
+        label?: string;
+        items: Array<{
+          id: string;
+          label: string;
+          target:
+            | {
+                type: "collection";
+                entity_type: string;
+                preset?: string;
+              }
+            | {
+                type: "view";
+                /**
+                 * View key, e.g. 'pipeline'.
+                 */
+                key: string;
+                entity_type?: string;
+                preset?: string;
+              };
+          children?: Array<{
+            id: string;
+            label: string;
+            target:
+              | {
+                  type: "collection";
+                  entity_type: string;
+                  preset?: string;
+                }
+              | {
+                  type: "view";
+                  /**
+                   * View key, e.g. 'pipeline'.
+                   */
+                  key: string;
+                  entity_type?: string;
+                  preset?: string;
+                };
+          }>;
+        }>;
+      }>;
+    } | null;
+    revision: string;
+    written?: boolean;
+  };
+};
+
+export type ManageNavigationResponse =
+  ManageNavigationResponses[keyof ManageNavigationResponses];
+
 export type ManageViewsData = {
   body:
     | {
         /**
-         * Store a view: read its key, name, description, attach, params and actions from the module's `export const view = defineView({...})`, compile it, and upsert by that key.
+         * [set] Revision returned by get/list. Required when the key already exists; omit only to create an absent key. A mismatch returns REVISION_CONFLICT.
+         */
+        expected_revision?: string;
+        /**
+         * Store a view: read its key, name, description, attach, params and actions from the module's `export const view = defineView({...})`, compile it, and create that key or replace it with expected_revision from get/list.
          */
         action: "set";
         /**
@@ -6890,6 +7097,10 @@ export type ManageViewsData = {
         action: "list";
       }
     | {
+        /**
+         * [remove] Revision returned by get/list. A mismatch returns REVISION_CONFLICT.
+         */
+        expected_revision: string;
         /**
          * Delete a view by key.
          */
@@ -6940,6 +7151,10 @@ export type ManageViewsResponses = {
     | {
         action: "set";
         view: {
+          /**
+           * Opaque authored-state revision; pass it as expected_revision when updating or removing this view.
+           */
+          revision: string;
           /**
            * View key, e.g. 'pipeline'.
            */
@@ -7041,6 +7256,10 @@ export type ManageViewsResponses = {
     | {
         action: "get";
         view: {
+          /**
+           * Opaque authored-state revision; pass it as expected_revision when updating or removing this view.
+           */
+          revision: string;
           /**
            * View key, e.g. 'pipeline'.
            */
@@ -7149,6 +7368,10 @@ export type ManageViewsResponses = {
     | {
         action: "list";
         views: Array<{
+          /**
+           * Opaque authored-state revision; pass it as expected_revision when updating or removing this view.
+           */
+          revision: string;
           /**
            * View key, e.g. 'pipeline'.
            */

@@ -126,6 +126,11 @@ describe("manage_views", () => {
 		for (const [key, value] of Object.entries(extra)) {
 			(DECLARED.has(key) ? def : args)[key] = value;
 		}
+		// These sequential fixtures read before editing; explicit stale tokens remain intact.
+		if (!Object.hasOwn(args, "expected_revision")) {
+			const current = await getView(ctx.organizationId!, String(def.key));
+			if (current) args.expected_revision = current.revision;
+		}
 		return (await executeTool(
 			"manage_views",
 			{ action: "set", source_code: viewModule(def, body), ...args },
@@ -333,6 +338,57 @@ mountView(view, V);
 		expect((big as ToolUserError).httpStatus).toBe(422);
 	});
 
+	it("revision guard admits one competing save and rejects the stale editor", async () => {
+		const initial = await setView(SIMPLE_SOURCE);
+		const revision = initial.view.revision;
+		const results = await Promise.allSettled([
+			setView(`${SIMPLE_SOURCE}\n// editor one`, { expected_revision: revision }),
+			setView(`${SIMPLE_SOURCE}\n// editor two`, { expected_revision: revision }),
+		]);
+		expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+		const failed = results.find((r) => r.status === "rejected") as PromiseRejectedResult;
+		expect(failed.reason).toMatchObject({ code: "REVISION_CONFLICT", httpStatus: 409, retryable: false });
+		const current = await getView(orgId, "pipeline");
+		expect(current?.source_code).toMatch(/editor (one|two)/);
+		await expect(executeTool("manage_views", {
+			action: "set", source_code: SIMPLE_MODULE,
+		}, TEST_ENV, ownerCtx)).rejects.toMatchObject({ code: "REVISION_CONFLICT" });
+	});
+
+	it("revision guard binds a view incarnation across delete and recreate", async () => {
+		const initial = await setView(SIMPLE_SOURCE);
+		const staleRevision = initial.view.revision;
+		await executeTool("manage_views", {
+			action: "remove", key: "pipeline", expected_revision: staleRevision,
+		}, TEST_ENV, ownerCtx);
+		const recreated = await setView(SIMPLE_SOURCE);
+		expect(recreated.view.revision).not.toBe(staleRevision);
+		await expect(setView(`${SIMPLE_SOURCE}\n// stale`, {
+			expected_revision: staleRevision,
+		})).rejects.toMatchObject({ code: "REVISION_CONFLICT" });
+		await expect(executeTool("manage_views", {
+			action: "remove", key: "pipeline", expected_revision: staleRevision,
+		}, TEST_ENV, ownerCtx)).rejects.toMatchObject({ code: "REVISION_CONFLICT" });
+		expect(await getView(orgId, "pipeline")).not.toBeNull();
+	});
+
+	it("revision guard ignores compiler bookkeeping and covers supplied bundle edits", async () => {
+		const initial = await setView(SIMPLE_SOURCE);
+		const sql = getTestDb();
+		await sql`UPDATE views SET compiled_code = 'compiler rebuild',
+			compile_config_hash = 'another compiler', content_hash = 'another cache key'
+			WHERE organization_id = ${orgId} AND key = 'pipeline'`;
+		const afterCompile = await getView(orgId, "pipeline");
+		expect(afterCompile?.revision).toBe(initial.view.revision);
+		const authored = await setView(SIMPLE_SOURCE, {
+			compiled_code: 'console.log("authored bundle")', expected_revision: initial.view.revision,
+		});
+		expect(authored.view.revision).not.toBe(initial.view.revision);
+		await expect(setView(SIMPLE_SOURCE, {
+			compiled_code: 'console.log("different authored bundle")', expected_revision: initial.view.revision,
+		})).rejects.toMatchObject({ code: "REVISION_CONFLICT" });
+	});
+
 	it("same source is a no-write with updated_at untouched", async () => {
 		await setView(SIMPLE_SOURCE);
 		const sql = getTestDb();
@@ -405,17 +461,17 @@ mountView(view, V);
 	});
 
 	it("remove deletes; second remove reports removed:false; get 404s", async () => {
-		await setView(SIMPLE_SOURCE);
+		const saved = await setView(SIMPLE_SOURCE);
 		const removed = (await executeTool(
 			"manage_views",
-			{ action: "remove", key: "pipeline" },
+			{ action: "remove", key: "pipeline", expected_revision: saved.view.revision },
 			TEST_ENV,
 			ownerCtx
 		)) as { removed: boolean };
 		expect(removed.removed).toBe(true);
 		const again = (await executeTool(
 			"manage_views",
-			{ action: "remove", key: "pipeline" },
+			{ action: "remove", key: "pipeline", expected_revision: saved.view.revision },
 			TEST_ENV,
 			ownerCtx
 		)) as { removed: boolean };

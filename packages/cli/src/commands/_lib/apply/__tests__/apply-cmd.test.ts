@@ -33,6 +33,24 @@ function stateWith(connectors: DesiredState["connectors"]): DesiredState {
   };
 }
 
+/** Supply read/write revisions in sequential fixtures that do not exercise revision conflicts. */
+async function executeFixturePlan(...args: Parameters<typeof executePlan>) {
+  const [{ remote, plan }] = args;
+  for (const row of [
+    ...remote.agents,
+    ...remote.entityTypes,
+    ...remote.relationshipTypes,
+    ...remote.automations,
+    ...(remote.views ?? []),
+  ])
+    row.revision ??= "fixture";
+  for (const row of plan.rows) {
+    if ("remote" in row && row.remote && !("revision" in row.remote))
+      Object.assign(row.remote, { revision: "fixture" });
+  }
+  return executePlan(...args);
+}
+
 function makeResponse(body: string): Response {
   // Use the real Web Response so it exposes a streaming `body`.
   return new Response(body, { headers: { "content-type": "text/plain" } });
@@ -269,7 +287,7 @@ describe("executePlan — BYO chat connection dependencies", () => {
       createAutomation,
     } as unknown as ApplyClient;
 
-    await executePlan({ client, state, plan, remote }, []);
+    await executeFixturePlan({ client, state, plan, remote }, []);
 
     expect(applyChatConnection).toHaveBeenCalledTimes(1);
     expect(createAutomation).toHaveBeenCalledTimes(1);
@@ -377,7 +395,7 @@ describe("executePlan — managed MCP connector install", () => {
     } as unknown as ApplyClient;
 
     try {
-      await executePlan({ client, state, plan, remote }, []);
+      await executeFixturePlan({ client, state, plan, remote }, []);
     } finally {
       stdoutSpy.mockRestore();
     }
@@ -482,7 +500,7 @@ describe("executePlan — connector relationship schema ordering", () => {
       ]),
     } as unknown as ApplyClient;
 
-    await executePlan({ client, state, plan, remote }, []);
+    await executeFixturePlan({ client, state, plan, remote }, []);
 
     expect(calls).toEqual(["relationship-type", "connector"]);
   });
@@ -559,7 +577,7 @@ describe("executePlan — entity-type schema fidelity", () => {
     const upsertEntityType = mock(async () => ({ updated: true }));
     const client = { upsertEntityType } as unknown as ApplyClient;
 
-    await executePlan({ client, state, plan, remote }, []);
+    await executeFixturePlan({ client, state, plan, remote }, []);
 
     expect(upsertEntityType).toHaveBeenCalledTimes(1);
     expect(upsertEntityType.mock.calls[0]?.[1]).toEqual(schemaExtras);
@@ -615,7 +633,7 @@ describe("executePlan — entity-type schema fidelity", () => {
     const upsertEntityType = mock(async () => ({ updated: true }));
     const client = { upsertEntityType } as unknown as ApplyClient;
 
-    await executePlan({ client, state, plan, remote }, []);
+    await executeFixturePlan({ client, state, plan, remote }, []);
 
     expect(upsertEntityType).toHaveBeenCalledTimes(1);
     const clearFacets = upsertEntityType.mock.calls[0]?.[3] as Set<string>;
@@ -678,14 +696,17 @@ describe("executePlan — atomic Automation triggers+prompt update", () => {
       feedsByConnectionId: new Map(),
       inferenceProviders: [],
     };
-    const updateAutomation = mock(async () => ({}));
-    const createAutomationVersion = mock(async () => ({ version: 2 }));
+    const updateAutomation = mock(async () => ({ revision: "saved" }));
+    const createAutomationVersion = mock(async () => ({
+      version: 2,
+      revision: "saved",
+    }));
     const client = {
       updateAutomation,
       createAutomationVersion,
     } as unknown as ApplyClient;
 
-    await executePlan({ client, state, plan, remote }, []);
+    await executeFixturePlan({ client, state, plan, remote }, []);
 
     // Must not split triggers onto update (would fail the instruction rule
     // against the empty current prompt before create_version lands).
@@ -756,14 +777,17 @@ describe("executePlan — atomic Automation triggers+prompt update", () => {
       feedsByConnectionId: new Map(),
       inferenceProviders: [],
     };
-    const updateAutomation = mock(async () => ({}));
-    const createAutomationVersion = mock(async () => ({ version: 2 }));
+    const updateAutomation = mock(async () => ({ revision: "saved" }));
+    const createAutomationVersion = mock(async () => ({
+      version: 2,
+      revision: "saved",
+    }));
     const client = {
       updateAutomation,
       createAutomationVersion,
     } as unknown as ApplyClient;
 
-    await executePlan({ client, state, plan, remote }, []);
+    await executeFixturePlan({ client, state, plan, remote }, []);
 
     expect(updateAutomation).not.toHaveBeenCalled();
     expect(createAutomationVersion).toHaveBeenCalledTimes(1);
@@ -822,13 +846,16 @@ describe("executePlan — atomic Automation triggers+prompt update", () => {
       feedsByConnectionId: new Map(),
       inferenceProviders: [],
     };
-    const createAutomationVersion = mock(async () => ({ version: 2 }));
+    const createAutomationVersion = mock(async () => ({
+      version: 2,
+      revision: "saved",
+    }));
     const client = {
-      updateAutomation: mock(async () => ({})),
+      updateAutomation: mock(async () => ({ revision: "saved" })),
       createAutomationVersion,
     } as unknown as ApplyClient;
 
-    await executePlan({ client, state, plan, remote }, []);
+    await executeFixturePlan({ client, state, plan, remote }, []);
 
     expect(createAutomationVersion).toHaveBeenCalledTimes(1);
     expect(createAutomationVersion.mock.calls[0]?.[0]).toMatchObject({
@@ -895,13 +922,16 @@ describe("executePlan — atomic Automation triggers+prompt update", () => {
     const updateAutomation = mock(async () => {
       throw new ApiError("turn execution cannot retain durable outputs");
     });
-    const createAutomationVersion = mock(async () => ({ version: 2 }));
+    const createAutomationVersion = mock(async () => ({
+      version: 2,
+      revision: "saved",
+    }));
     const client = {
       updateAutomation,
       createAutomationVersion,
     } as unknown as ApplyClient;
 
-    await executePlan({ client, state, plan, remote }, []);
+    await executeFixturePlan({ client, state, plan, remote }, []);
 
     expect(updateAutomation).not.toHaveBeenCalled();
     expect(createAutomationVersion).toHaveBeenCalledTimes(1);
@@ -971,22 +1001,28 @@ describe("executePlan — atomic Automation triggers+prompt update", () => {
     const callOrder: string[] = [];
     const setReactionScript = mock(async () => {
       callOrder.push("setReactionScript");
+      return { revision: "after-reaction" };
     });
     const updateAutomation = mock(async () => {
       callOrder.push("updateAutomation");
+      return { revision: "after-update" };
     });
     const client = {
       setReactionScript,
       updateAutomation,
-      createAutomationVersion: mock(async () => ({})),
+      createAutomationVersion: mock(async () => ({ revision: "saved" })),
     } as unknown as ApplyClient;
 
-    await executePlan({ client, state, plan, remote }, []);
+    await executeFixturePlan({ client, state, plan, remote }, []);
 
     // Reaction must be installed before the scalar update so the server's
     // instruction rule sees the reaction when validating the trigger change.
     expect(setReactionScript).toHaveBeenCalledTimes(1);
-    expect(setReactionScript).toHaveBeenCalledWith("50", reactionSource);
+    expect(setReactionScript).toHaveBeenCalledWith(
+      "50",
+      reactionSource,
+      "fixture"
+    );
     expect(updateAutomation).toHaveBeenCalledTimes(1);
     expect(callOrder).toEqual(["setReactionScript", "updateAutomation"]);
   });
@@ -1141,7 +1177,7 @@ describe("pushProviderApiKeys — provider keys pushed on a noop-only apply", ()
     const rotateInferenceProviderKey = mock(async () => {
       /* resolve void */
     });
-    const createInferenceProvider = mock(async () => ({}));
+    const createInferenceProvider = mock(async () => ({ revision: "saved" }));
     const client = {
       rotateInferenceProviderKey,
       createInferenceProvider,
@@ -1179,7 +1215,7 @@ describe("pushProviderApiKeys — provider keys pushed on a noop-only apply", ()
     const rotateInferenceProviderKey = mock(async () => {
       throw new ApiError("PUT .../key failed: Provider not found", 404);
     });
-    const createInferenceProvider = mock(async () => ({}));
+    const createInferenceProvider = mock(async () => ({ revision: "saved" }));
     const client = {
       rotateInferenceProviderKey,
       createInferenceProvider,
@@ -1201,7 +1237,7 @@ describe("pushProviderApiKeys — provider keys pushed on a noop-only apply", ()
     const rotateInferenceProviderKey = mock(async () => {
       throw new ApiError("PUT .../key failed: boom", 500);
     });
-    const createInferenceProvider = mock(async () => ({}));
+    const createInferenceProvider = mock(async () => ({ revision: "saved" }));
     const client = {
       rotateInferenceProviderKey,
       createInferenceProvider,
@@ -1535,7 +1571,7 @@ describe("executePlan — an update writes only the fields the diff flagged", ()
       connections: [gmailConnection],
     });
 
-    await executePlan(
+    await executeFixturePlan(
       {
         client,
         state,
@@ -1572,7 +1608,7 @@ describe("executePlan — an update writes only the fields the diff flagged", ()
       change === "reordered" ? [{ ...feeds[0]!, id: 10 }, ...feeds] : []
     );
 
-    await executePlan({ client, state, plan, remote }, []);
+    await executeFixturePlan({ client, state, plan, remote }, []);
 
     expect(updateFeed.mock.calls).toEqual([[9, { name: "Threads" }]]);
   });
@@ -1606,7 +1642,7 @@ describe("executePlan — an update writes only the fields the diff flagged", ()
       connections: [gmailConnection],
     });
 
-    await executePlan(
+    await executeFixturePlan(
       {
         client,
         state,
@@ -1672,13 +1708,135 @@ describe("executePlan — entity-type properties on a no-baseline diff (rollback
       { apiBaseUrl: "https://example.test", orgSlug: "acme", token: "tok" },
       (async (_url: unknown, init?: RequestInit) => {
         bodies.push(JSON.parse(String(init?.body)));
-        return new Response(JSON.stringify({ success: true }), { status: 200 });
+        return new Response(
+          JSON.stringify({ entity_type: { revision: "saved" } }),
+          { status: 200 }
+        );
       }) as typeof fetch
     );
 
-    await executePlan({ client, state, plan, remote }, []);
+    await executeFixturePlan({ client, state, plan, remote }, []);
 
     const write = bodies.find((b) => b.slug === "qa-item");
     expect(write?.metadata_schema?.properties).toEqual(declared);
+  });
+});
+
+describe("executePlan revision guard", () => {
+  test("agent metadata and settings use the planned token then the own-write receipt", async () => {
+    const state = stateWith({
+      definitions: [],
+      authProfiles: [],
+      connections: [],
+    });
+    state.agents = [
+      {
+        metadata: { agentId: "triage", name: "Renamed" },
+        settings: { systemPrompt: "New prompt" },
+        providerKeys: [],
+      },
+    ] as unknown as DesiredAgent[];
+    const remote: RemoteSnapshot = {
+      agents: [{ agentId: "triage", name: "Old", revision: "planned" }],
+      agentSettings: new Map(),
+      entityTypes: [],
+      relationshipTypes: [],
+      automations: [],
+      connectorDefinitions: [],
+      authProfiles: [],
+      connections: [],
+      feedsByConnectionId: new Map(),
+      inferenceProviders: [],
+    };
+    const plan: DiffPlan = {
+      rows: [
+        {
+          kind: "agent",
+          id: "triage",
+          verb: "update",
+          desired: state.agents[0]!.metadata,
+          remote: remote.agents[0],
+        },
+        { kind: "settings", id: "triage", verb: "update" },
+      ],
+      counts: { create: 0, update: 2, noop: 0, drift: 0, delete: 0 },
+      notes: [],
+    };
+    const received: unknown[] = [];
+    const client = {
+      patchAgentMetadata: mock(async (_id, _patch, token) => {
+        received.push(token);
+        return { revision: "after-metadata" };
+      }),
+      patchAgentSettings: mock(async (_id, _patch, token) => {
+        received.push(token);
+        return { revision: "after-settings" };
+      }),
+    } as unknown as ApplyClient;
+    await executePlan({ client, state, plan, remote }, []);
+    expect(received).toEqual(["planned", "after-metadata"]);
+  });
+
+  test("Automation reaction, scalars and version chain receipts without refreshing", async () => {
+    const state = stateWith({
+      definitions: [],
+      authProfiles: [],
+      connections: [],
+    });
+    state.automations = [
+      {
+        slug: "digest",
+        agent: "triage",
+        prompt: "New prompt",
+        tags: ["new"],
+        reactionScript: { sourceCode: "export default () => {}" },
+      },
+    ];
+    const remote: RemoteSnapshot = {
+      agents: [],
+      agentSettings: new Map(),
+      entityTypes: [],
+      relationshipTypes: [],
+      automations: [
+        { slug: "digest", automation_id: "52", revision: "planned" },
+      ],
+      connectorDefinitions: [],
+      authProfiles: [],
+      connections: [],
+      feedsByConnectionId: new Map(),
+      inferenceProviders: [],
+    };
+    const plan: DiffPlan = {
+      rows: [
+        {
+          kind: "automation",
+          id: "digest",
+          verb: "update",
+          desired: state.automations[0],
+          remote: remote.automations[0],
+          changedFields: ["reaction_script", "tags", "prompt"],
+          versionBoundFields: ["prompt"],
+        },
+      ],
+      counts: { create: 0, update: 1, noop: 0, drift: 0, delete: 0 },
+      notes: [],
+    };
+    const received: unknown[] = [];
+    const client = {
+      setReactionScript: mock(async (_id, _source, token) => {
+        received.push(token);
+        return { revision: "after-reaction" };
+      }),
+      updateAutomation: mock(async (patch) => {
+        received.push(patch.expected_revision);
+        return { revision: "after-scalars" };
+      }),
+      createAutomationVersion: mock(async (patch) => {
+        received.push(patch.expected_revision);
+        return { revision: "after-version" };
+      }),
+    } as unknown as ApplyClient;
+    await executePlan({ client, state, plan, remote }, []);
+    expect(received).toEqual(["planned", "after-reaction", "after-scalars"]);
   });
 });

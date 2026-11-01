@@ -4,20 +4,27 @@ import { configureSocialResearch } from "../scripts/configure-social-research";
 const reader = `const keys=['navigate','evaluate','close_tab']; let identity; if(identity?.profile!=='/synthetic') throw new Error('identity'); let data; const r = await read({connection_id:11,expression:"({timeline:['Following'],posts:[]})"}); data=r.output?.value; return {account:data.account, posts:data.posts,coverage:'First loaded page only; no scrolling'};`;
 function harness(pendingAt?: number, status = "completed", script = reader) {
   const calls: string[] = [];
+  let writes = 0;
   const mutate = (name: string) =>
-    mock(async (_input: Record<string, any>) => {
+    mock(async ({ expected_revision, ...input }: Record<string, any>) => {
+      if (expected_revision !== automation.revision)
+        throw Object.assign(new Error("Configuration changed"), {
+          code: "REVISION_CONFLICT",
+        });
       calls.push(name);
-      return calls.length === pendingAt
-        ? { status: "pending_approval" }
-        : { status: "completed" };
+      if (calls.length === pendingAt) return { status: "pending_approval" };
+      Object.assign(automation, input, { revision: `social-${++writes}` });
+      return { status: "completed", revision: automation.revision };
     });
   const automation = {
+    revision: "social-0",
     slug: "x-market-scan",
     prompt: `Reader\n\`\`\`typescript\n${script}\n\`\`\``,
+    reaction_script: "original reaction",
     automation_run: { status },
   };
   const automations = {
-    get: mock(async () => ({ automation })),
+    get: mock(async () => ({ automation: structuredClone(automation) })),
     update: mutate("update"),
     setReactionScript: mutate("reaction"),
     createVersion: mutate("version"),
@@ -78,6 +85,21 @@ test("stops at policy approval and waits for active runs after disabling the sch
     await expect(h.run()).rejects.toThrow("active social scan");
     expect(h.calls).toEqual(["update"]);
   }
+});
+
+test("a concurrent edit observed by the run check is not overwritten", async () => {
+  const h = harness();
+  let reads = 0;
+  h.automations.get.mockImplementation(async () => {
+    if (++reads === 2) {
+      h.automation.prompt = "Owner changed the source reader";
+      h.automation.revision = "social-concurrent";
+    }
+    return { automation: structuredClone(h.automation) };
+  });
+  await expect(h.run()).rejects.toMatchObject({ code: "REVISION_CONFLICT" });
+  expect(h.automation.prompt).toBe("Owner changed the source reader");
+  expect(h.automation.reaction_script).toBe("original reaction");
 });
 
 test("a changed or missing source reader fails before configuration changes", async () => {

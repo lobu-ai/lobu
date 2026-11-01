@@ -384,6 +384,10 @@ describe('GET /deployments/changes/:eventId', () => {
 describe('x-lobu-apply-id end-to-end through a real mutation', () => {
   test('agent settings PATCH stamps the config event with the apply id', async () => {
     const agentApp = await importAgentRoutes();
+    const config = await agentApp.request(`/${AGENT}/config`);
+    expect(config.status).toBe(200);
+    const original = await config.json() as { revision: string };
+    expect(typeof original.revision).toBe('string');
 
     const patch = await agentApp.request(`/${AGENT}/config`, {
       method: 'PATCH',
@@ -391,9 +395,11 @@ describe('x-lobu-apply-id end-to-end through a real mutation', () => {
         'content-type': 'application/json',
         'x-lobu-apply-id': APPLY_ID,
       },
-      body: JSON.stringify({ identityMd: 'Deployed identity.' }),
+      body: JSON.stringify({ identityMd: 'Deployed identity.', expected_revision: original.revision }),
     });
     expect(patch.status).toBe(200);
+    const saved = await patch.json() as { revision: string };
+    expect(typeof saved.revision).toBe('string');
 
     const events = await waitForConfigEvents(ORG, 1);
     const metadata = events[events.length - 1].metadata as Record<string, unknown>;
@@ -408,7 +414,7 @@ describe('x-lobu-apply-id end-to-end through a real mutation', () => {
         'content-type': 'application/json',
         'x-lobu-apply-id': 'garbage !!',
       },
-      body: JSON.stringify({ identityMd: 'Second write.' }),
+      body: JSON.stringify({ identityMd: 'Second write.', expected_revision: saved.revision }),
     });
     expect(patch2.status).toBe(200);
     const events2 = await waitForConfigEvents(ORG, 2);

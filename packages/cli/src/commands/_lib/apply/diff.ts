@@ -190,7 +190,7 @@ export interface BlockingDriftRow extends BaseRow {
   verb: "drift";
   /** Always true — distinguishes blocking drift from legacy non-blocking drift. */
   blocking: true;
-  kind: "entity-type" | "relationship-type" | "automation";
+  kind: "entity-type" | "relationship-type" | "automation" | "view";
   id: string;
   /** The moved field; absent for a whole remote-only definition. */
   field?: string;
@@ -209,6 +209,8 @@ export interface AttributionSnapshot {
   entityTypes: RemoteEntityType[];
   relationshipTypes: RemoteRelationshipType[];
   automations: RemoteAutomation[];
+  /** Optional for manifests written before views joined the attribution baseline. */
+  views?: RemoteView[];
 }
 
 export interface Baseline {
@@ -2486,6 +2488,26 @@ export function computeDiff(
     const desiredViewKeys = new Set(desiredViews.map((v) => v.key));
     for (const view of desiredViews) {
       const r = remoteViewByKey.get(view.key);
+      const previous = baseline?.attribution.views?.find(
+        (entry) => entry.key === view.key
+      );
+      if (
+        r &&
+        r.content_hash !== view.contentHash &&
+        baseline?.recorded &&
+        (!previous?.revision || !r.revision || previous.revision !== r.revision)
+      ) {
+        rows.push({
+          kind: "view",
+          verb: "drift",
+          id: view.key,
+          blocking: true,
+          field: "source",
+          remoteChange: { content_hash: r.content_hash, revision: r.revision },
+          desiredChange: { content_hash: view.contentHash },
+        });
+        continue;
+      }
       rows.push({
         kind: "view",
         id: view.key,

@@ -15,6 +15,7 @@
  *      creates NO duplicate entities.
  */
 
+import { readAutomationRevision } from './revision-fixture';
 import { slugify } from '@lobu/core';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fieldApproval from '../../../tools/admin/entity-field-approval';
@@ -418,6 +419,7 @@ describe('complete_window promotes keyed rows into entities (P2 phase 1)', () =>
     await completeWithToken(ctx, token, runId, extracted);
 
     await ctx.api.automations.createVersion({
+      expected_revision: await readAutomationRevision(ctx.api, String(ctx.automationId)),
       automation_id: String(ctx.automationId),
       outputs: { problems: { entity: 'issue', key: ['category', 'name'] } },
     });
