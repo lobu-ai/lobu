@@ -378,7 +378,13 @@ export function createMacDeviceDaemon(
       sessionMeta: {
         claudeCode: {
           options: {
-            allowedTools: ['mcp__lobu__query_sdk', 'mcp__lobu__run_sdk'],
+            // Discovery is read-only and must work before a run can use the SDK.
+            // Keep in sync with the headless `--allowedTools` list in core's DEVICE_AGENT_SPECS.
+            allowedTools: [
+              'mcp__lobu__search_sdk',
+              'mcp__lobu__query_sdk',
+              'mcp__lobu__run_sdk',
+            ],
             settingSources: [],
           },
         },
