@@ -1320,7 +1320,7 @@ export async function enqueueAgentTurn(
 
     const rows = await sql.begin(async (tx) => {
       await lockAgentTurnConversation(tx, data.organizationId!, data.agentId!, data.conversationId);
-      const [source] = await tx`SELECT id FROM runs
+      const [source] = await tx`SELECT id, initiator_kind, initiator_ref, created_by_user_id FROM runs
         WHERE id = ${data.runId!} AND organization_id = ${data.organizationId!}
           AND run_type = 'chat_message' AND queue_name = 'messages'
           AND action_input->>'messageId' = ${data.messageId} FOR UPDATE`;
@@ -1328,12 +1328,19 @@ export async function enqueueAgentTurn(
       const existing = await tx<{ id: number }>`SELECT id FROM runs WHERE parent_run_id = ${data.runId!}
         AND organization_id = ${data.organizationId!} AND run_type = 'agent_turn' LIMIT 1`;
       if (existing.length) return existing;
+      // Attribution crosses the exact durable admission, not the request
+      // payload or a session's creator. This does not change the turn token.
+      const admittedHumanId = !automationIntent && source.initiator_kind === "user" ? source.created_by_user_id : null;
+      const admittedInitiator = admittedHumanId ? resolveRunInitiator({
+        agentId: turnClaims.agentId, userId: admittedHumanId,
+        sourceContext: { platform: turnClaims.platform, conversationId: turnClaims.conversationId },
+      }) : initiator;
       return tx<{ id: number }>`INSERT INTO runs (
         id, organization_id, run_type, status, approval_status, action_input, created_at, run_at, parent_run_id,
         initiator_kind, initiator_ref, created_by_user_id
       ) VALUES (${runId}, ${data.organizationId!}, 'agent_turn', 'pending', 'auto',
         ${tx.json({ turn, credential: provider.credential, reply })}, now(), now(), ${data.runId!},
-        ${initiator.initiatorKind}, ${tx.json(initiator.initiatorRef)}, ${initiator.createdByUserId}) RETURNING id`;
+        ${admittedInitiator.initiatorKind}, ${tx.json(admittedInitiator.initiatorRef)}, ${admittedInitiator.createdByUserId}) RETURNING id`;
     });
 
     logger.info(

@@ -24,7 +24,8 @@ import { FOLLOW_UP_SUGGESTIONS_PROMPT } from '@lobu/core/agent-tooling';
 import { Value } from '@sinclair/typebox/value';
 import { InMemorySpanExporter, SimpleSpanProcessor } from '@opentelemetry/sdk-trace-node';
 import { MessageConsumer } from '../../gateway/orchestration/message-consumer';
-import { RunsQueue } from '../../gateway/infrastructure/queue/runs-queue';
+import { RunsQueue, insertQueueJob } from '../../gateway/infrastructure/queue/runs-queue';
+import { resolveRunInitiator } from '../../tools/initiator';
 import { UnifiedThreadResponseConsumer } from '../../gateway/platform/unified-thread-consumer';
 import { startOtelWorker, startTestCollector, unusedLoopbackPort, type TransportSpan } from '../setup/otel-transport';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -363,6 +364,26 @@ describe('agent turn producer', () => {
   });
 
   afterEach(() => {
+  });
+
+  it('inherits an admitted API human without granting the turn a human principal', async () => {
+    const org = await createTestOrganization();
+    const actor = await createTestUser();
+    const message = { ...messageFor(org.id), platformMetadata: { source: 'direct-api' } };
+    const options = { singletonKey: 'api-human-message', initiator: resolveRunInitiator({ userId: actor.id }) };
+    const sql = getTestDb();
+    const id = await sql.begin((tx) => insertQueueJob(tx as never, 'messages', message, options));
+    await enqueueAgentTurn({ ...message, runId: Number(id) }, {
+      agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: GATEWAY_URL,
+    });
+    const [run] = await agentTurnRuns();
+    expect(run).toMatchObject({
+      initiator_kind: 'agent_session', created_by_user_id: actor.id,
+      initiator_ref: { agent_id: AGENT_ID, user_id: actor.id },
+    });
+    const claims = verifyWorkerToken(run.action_input.credential);
+    expect(chatTurnAccessOf(claims!)).toBeNull();
+    expect(claims).not.toHaveProperty('actorUserId');
   });
 
   it('EXECUTES a real HTTP interaction live with the producer-minted turn credential', async () => {
@@ -1155,12 +1176,17 @@ describe('agent turn producer', () => {
       }),
     } as unknown as AgentSettingsStore;
 
-    await enqueueMessage(
-      {
-        ...messageFor(org.id),
-        // The canonical correlation the resolver scopes its query by.
-        conversationId: `${AGENT_ID}_automation_${automationId}_run_${Number(runRow!.id)}`,
-      },
+    const message = {
+      ...messageFor(org.id),
+      // The canonical correlation the resolver scopes its query by.
+      conversationId: `${AGENT_ID}_automation_${automationId}_run_${Number(runRow!.id)}`,
+    };
+    // Even a human-admitted kickoff remains an Automation execution.
+    const inputId = await sql.begin((tx) => insertQueueJob(tx as never, 'messages', message, {
+      initiator: resolveRunInitiator({ userId: author.id }),
+    }));
+    await enqueueAgentTurn(
+      { ...message, runId: Number(inputId) },
       { agentSettings: liveSettings, catalog: catalogFor(claudeModule()), mcp: mcpFixture().mcp, gatewayUrl: GATEWAY_URL },
     );
 

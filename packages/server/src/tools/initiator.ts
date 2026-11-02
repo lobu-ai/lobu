@@ -17,7 +17,7 @@ type InitiatorSource = Partial<
 	>
 >;
 
-type RunInitiatorColumns = {
+export type RunInitiatorColumns = {
 	initiatorKind: "user" | "automation" | "agent_session" | "system";
 	initiatorRef: Record<string, unknown>;
 	createdByUserId: string | null;
