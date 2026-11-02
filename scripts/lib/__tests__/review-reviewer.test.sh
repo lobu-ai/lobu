@@ -81,16 +81,59 @@ case "$failure_message" in
 esac
 
 review_script="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/review.sh"
-grep -Fq 'CLAUDE_REVIEW_MODEL="${CLAUDE_REVIEW_MODEL:-fable}"' "$review_script" ||
-  fail "Claude reviewer must default to the Fable model"
-
-grep -Fq 'CODEX_REVIEW_MODEL="${CODEX_REVIEW_MODEL:-gpt-6-astra}"' "$review_script" ||
-  fail "Codex reviewer must default to the gpt-6-astra model"
+# Model configuration is dotenv data, with explicit shell values taking priority.
+config_dir="$(mktemp -d /tmp/lobu-review-config.XXXXXX)"
+trap 'rm -rf "$config_dir"' EXIT
+cat > "$config_dir/.env" <<'ENV'
+CLAUDE_REVIEW_MODEL=fable
+CODEX_REVIEW_MODEL=old-model
+CLAUDE_REVIEW_EFFORT=high
+UNRELATED_REVIEW_SECRET=never-export-this
+ENV
+cat > "$config_dir/.env.local" <<'ENV'
+export CLAUDE_REVIEW_MODEL="claude-opus-5-5" # local override
+CODEX_REVIEW_MODEL='gpt-6.1-sol'
+CODEX_REVIEW_EFFORT=xhigh
+REVIEWER_CLI=codex
+ENV
+(
+  unset CLAUDE_REVIEW_MODEL CODEX_REVIEW_MODEL CLAUDE_REVIEW_EFFORT CODEX_REVIEW_EFFORT REVIEWER_CLI
+  review_load_config "$config_dir"
+  [ "$CLAUDE_REVIEW_MODEL" = claude-opus-5-5 ] || fail "local Claude model did not win"
+  [ "$CODEX_REVIEW_MODEL" = gpt-6.1-sol ] || fail "local Codex model did not win"
+  [ "$CLAUDE_REVIEW_EFFORT" = high ] || fail "base effort did not load"
+  [ "$REVIEWER_CLI" = codex ] || fail "reviewer selection did not load"
+  [ -z "${UNRELATED_REVIEW_SECRET+x}" ] || fail "unrelated secrets must not load"
+  export CODEX_REVIEW_MODEL=shell-model CLAUDE_REVIEW_MODEL=opus
+  review_load_config "$config_dir"
+  [ "$CODEX_REVIEW_MODEL" = shell-model ] || fail "exported Codex value was overridden"
+  [ "$CLAUDE_REVIEW_MODEL" = opus ] || fail "exported Claude value was overridden"
+  export CODEX_REVIEW_MODEL=''
+  review_load_config "$config_dir"
+  review_require_model codex >/dev/null 2>&1 && fail "explicit empty model must fail closed"
+  true
+)
+printf 'CODEX_REVIEW_MODEL=$(touch %s/executed)\n' "$config_dir" > "$config_dir/.env.local"
+(
+  unset CODEX_REVIEW_MODEL
+  review_load_config "$config_dir"
+  [ ! -e "$config_dir/executed" ] || fail "dotenv must not execute shell code"
+)
+rm -f "$config_dir/.env" "$config_dir/.env.local"
+(
+  unset CODEX_REVIEW_MODEL CLAUDE_REVIEW_MODEL
+  review_load_config "$config_dir"
+  review_require_model codex >/dev/null 2>&1 && fail "missing Codex configuration must fail closed"
+  review_require_model claude >/dev/null 2>&1 && fail "missing Claude configuration must fail closed"
+  true
+)
+rm -rf "$config_dir"
+trap - EXIT
 
 grep -Fq 'CODEX_REVIEW_EFFORT="${CODEX_REVIEW_EFFORT:-xhigh}"' "$review_script" ||
   fail "Codex reviewer must default to xhigh reasoning effort"
 
-grep -Fq 'review_validate_claude_model "$CLAUDE_REVIEW_MODEL"' "$review_script" ||
+grep -Fq 'review_require_model "$REVIEWER_CLI_SELECTED"' "$review_script" ||
   fail "review.sh must fail closed on disallowed Claude reviewer models"
 
 schema_arg_count="$(grep -F -- '--json-schema "$(cat "$SCHEMA_FILE")"' "$review_script" | wc -l | tr -d ' ')"
@@ -127,7 +170,7 @@ grep -Fq 'review_classify_diff "$BASE_BRANCH" worktree' "$review_fix_script" ||
   fail "review-fix.sh must skip safe worktree diffs before selecting a reviewer"
 grep -Fq 'FIXER_CLI="$(review_select_reviewer' "$review_fix_script" ||
   fail "review-fix.sh must pick its CLI through review_select_reviewer"
-grep -Fq 'review_validate_claude_model "$CLAUDE_REVIEW_MODEL"' "$review_fix_script" ||
+grep -Fq 'review_require_model "$FIXER_CLI"' "$review_fix_script" ||
   fail "review-fix.sh must fail closed on disallowed Claude fixer models"
 grep -Fq 'codex exec' "$review_fix_script" ||
   fail "review-fix.sh must keep its codex invocation arm"

@@ -62,3 +62,60 @@ review_refuse_submodule() {
   echo "Review submodule changes in the submodule's own repository; run this from the lobu checkout for lobu changes." >&2
   return 2
 }
+
+# Parse dotenv as data, never shell code; load only review settings. Shell
+# values win (including explicit empty values), then .env.local, then .env.
+review_load_config() {
+  local root="$1" settings key value
+  settings="$(node - "$root" <<'JS'
+const fs = require('node:fs');
+const { parseEnv } = require('node:util');
+const path = require('node:path');
+const root = process.argv[2];
+const values = {};
+for (const file of ['.env', '.env.local']) {
+  const name = path.join(root, file);
+  if (fs.existsSync(name)) Object.assign(values, parseEnv(fs.readFileSync(name, 'utf8')));
+}
+const keys = ['CLAUDE_REVIEW_MODEL', 'CODEX_REVIEW_MODEL', 'CLAUDE_REVIEW_EFFORT',
+  'CODEX_REVIEW_EFFORT', 'REVIEWER_CLI', 'REVIEW_MAX_AUTOFIX_PASSES'];
+for (const key of keys) {
+  if (Object.hasOwn(values, key)) console.log(key + '=' + JSON.stringify(values[key]));
+}
+JS
+)" || return 2
+  while IFS='=' read -r key value; do
+    [ -n "$key" ] || continue
+    if [ -z "${!key+x}" ]; then
+      value="$(printf '%s' "$value" | jq -r .)" || return 2
+      printf -v "$key" '%s' "$value"
+      export "$key"
+    fi
+  done <<< "$settings"
+}
+
+review_require_model() {
+  local reviewer="$1" model
+  if [ "$reviewer" = claude ]; then
+    model="${CLAUDE_REVIEW_MODEL:-}"
+    review_validate_claude_model "$model" || return $?
+  else
+    model="${CODEX_REVIEW_MODEL:-}"
+    if [ -z "$model" ]; then
+      echo 'Set CODEX_REVIEW_MODEL in .env, .env.local, or the exported environment.' >&2
+      return 2
+    fi
+  fi
+}
+
+# Internal write-phase result, separate from the stable read-only verdict.
+review_validate_fix_result() {
+  jq -e '
+    (.summary | type == "string") and
+    (.decisions | type == "array" and all(.[];
+      (.kind | IN("product", "architecture", "credentials", "verification")) and
+      (.finding | type == "string") and (.question | type == "string"))) and
+    (.tests | type == "array" and all(.[];
+      (.command | type == "string" and length > 0) and (.passed | type == "boolean")))
+  ' "$1" >/dev/null 2>&1
+}

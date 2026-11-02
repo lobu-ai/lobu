@@ -24,10 +24,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONTEXT_FILE="${1:?usage: ui-review-agent.sh <context-file> <out-file>}"
 OUT_FILE="${2:?usage: ui-review-agent.sh <context-file> <out-file>}"
 
+review_load_config "$SCRIPT_DIR/.."
 REVIEWER_CLI="${REVIEWER_CLI:-auto}"
-CLAUDE_REVIEW_MODEL="${CLAUDE_REVIEW_MODEL:-fable}"
+CLAUDE_REVIEW_MODEL="${CLAUDE_REVIEW_MODEL:-}"
 CLAUDE_REVIEW_EFFORT="${CLAUDE_REVIEW_EFFORT:-high}"
-CODEX_REVIEW_MODEL="${CODEX_REVIEW_MODEL:-gpt-6-astra}"
+CODEX_REVIEW_MODEL="${CODEX_REVIEW_MODEL:-}"
 CODEX_REVIEW_EFFORT="${CODEX_REVIEW_EFFORT:-xhigh}"
 SCHEMA_FILE="$SCRIPT_DIR/../prompts/ui-review-agent-output-schema.json"
 PROMPT_FILE="$SCRIPT_DIR/../prompts/ui-review-agent-prompt.md"
@@ -37,9 +38,7 @@ SCHEMA_JQ='(.has_ui_surface | type == "boolean") and (.reasoning | type == "stri
 [ -f "$PROMPT_FILE" ] || { echo "prompt not found: $PROMPT_FILE" >&2; exit 2; }
 
 REVIEWER_CLI_SELECTED="$(review_select_reviewer "$REVIEWER_CLI")"
-if [ "$REVIEWER_CLI_SELECTED" = "claude" ]; then
-  review_validate_claude_model "$CLAUDE_REVIEW_MODEL" || exit $?
-fi
+review_require_model "$REVIEWER_CLI_SELECTED" || exit $?
 command -v "$REVIEWER_CLI_SELECTED" >/dev/null 2>&1 || {
   review_fail_closed_message "$REVIEWER_CLI_SELECTED" "command not found on PATH" >&2
   exit 2

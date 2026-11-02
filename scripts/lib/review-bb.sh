@@ -10,8 +10,8 @@
 # Rules this lib enforces:
 # - BB routing is explicit: provider, model, and reasoning effort are selected
 #   from the live BB catalog (no invented APIs/options), and the exact
-#   reviewed worktree is attached by absolute path rather than blindly
-#   inheriting BB_ENVIRONMENT_ID (the parent BB environment can point at main
+#   reviewed worktree is attached by a verified BB_ENVIRONMENT_ID, falling
+#   back to its absolute path (the parent BB environment can point at main
 #   while shell work happens in a task worktree).
 # - Inside BB, any creation/auth/provider/context failure fails explicitly.
 #   There is deliberately NO silent fallback to the invisible CLI.
@@ -233,6 +233,23 @@ review_bb_spawn() {
   echo ">> visible BB child: @thread:$child_id" >&2
 }
 
+# review_bb_environment_arg <worktree>: --environment value for a reviewer.
+# Reuse a BB-owned directory only when the advertised environment resolves to
+# this worktree. A parent thread can still be attached to another checkout.
+review_bb_environment_arg() {
+  local worktree="$1" env_path
+  if [ -n "${BB_ENVIRONMENT_ID:-}" ]; then
+    env_path="$(review_bb_cli_invoke environment show "$BB_ENVIRONMENT_ID" --json 2>/dev/null |
+      jq -r '.path // empty' 2>/dev/null || true)"
+    if [ -n "$env_path" ] && [ -d "$env_path" ] &&
+       [ "$(cd "$env_path" && pwd -P)" = "$worktree" ]; then
+      printf '%s\n' "$BB_ENVIRONMENT_ID"
+      return
+    fi
+  fi
+  printf '%s\n' "$worktree"
+}
+
 # review_bb_env_path <child-id>: absolute workspace path of a child thread.
 review_bb_env_path() {
   review_bb_cli_invoke thread show "$1" --json 2>/dev/null |
@@ -297,7 +314,8 @@ The driver owns every step you do not: do NOT run \`make review\`,
 \`make review-fix\`, or \`make land\`, do NOT spawn, message, or wait on other
 threads, and do NOT retry or re-dispatch this review.
 
-- You are reviewing EXACTLY commit $head_sha against base $base_branch.
+- The driver HEAD is $head_sha; review the target tree specified in the prompt
+  against base $base_branch (including any specified uncommitted edits).
   Validate with \`git rev-parse HEAD\` before scoring; if HEAD differs, say so
   in your verdict notes and score what is actually checked out.
 - Read-only: do NOT edit, commit, push, or post statuses or comments. The
@@ -313,7 +331,7 @@ EOF
 The read-only rule above is replaced for this fixer pass: you MAY edit files
 in your own worktree, but you still must NOT commit, push, post statuses, run
 `make review` / `make review-fix` / `make land`, or spawn other threads. End
-with the plain-text summary the fixer prompt specifies.
+with the output format the fixer prompt specifies.
 EOF
   fi
   printf '%s\n' "$augmented"
@@ -347,7 +365,7 @@ review_bb_pr_number() {
 }
 
 # review_bb_run_reviewer <prompt-file> <head-sha> <base-branch> <diff-hash>
-#   <reviewer> <model> <effort> <schema-jq> <ci-checks-file>
+#   <reviewer> <model> <effort> <schema-jq> <ci-checks-file> [<verify-key>]
 # Full visible-child review. Always returns 0; sets RAW (child output text)
 # and REVIEWER_EXIT (0 on a settled child, 1 on any BB failure) so the
 # caller's existing schema validation fails closed exactly like the direct
@@ -378,7 +396,9 @@ review_bb_run_reviewer() {
 
   pr="$(review_bb_pr_number)"
   worktree="$(pwd -P)"
-  title="$(review_bb_review_title "$(git branch --show-current 2>/dev/null || printf '%s' "$base_branch")" "$head_sha" "$reviewer" "$model" "$effort" "$diff_hash" "$pr")"
+  title="$(review_bb_review_title "$(git branch --show-current 2>/dev/null || printf '%s' "$base_branch")" "$head_sha" "$reviewer" "$model" "$effort" "$diff_hash" "$pr") $(printf '%s' "$worktree" | sha1sum | cut -c1-12)"
+
+  if [ -n "${10:-}" ]; then title="$title verify-${10}"; fi
 
   # Dedup: reuse or adopt an existing child bound to these exact inputs.
   child="$(review_bb_find_child "$title")"
@@ -422,7 +442,7 @@ review_bb_run_reviewer() {
     # `bun test`, and accept-edits stops each one on a human approval prompt,
     # which an unattended review waits out until it times out and fails closed.
     review_bb_spawn "$bb_prompt" "$title" "$provider" "$bb_model" "$effort" \
-      auto --environment "$worktree" || {
+      auto --environment "$(review_bb_environment_arg "$worktree")" || {
       RAW="review_bb: failed to spawn a visible BB child; refusing silent fallback to the invisible CLI"
       rm -f "$bb_prompt"
       return 0
@@ -522,6 +542,14 @@ review_bb_input_patch() (
   git diff --cached --binary --no-ext-diff --no-textconv HEAD
 )
 
+review_worktree_tree() (
+  local patch
+  patch="$(mktemp /tmp/lobu-review-tree.XXXXXX)" || return 1
+  trap 'rm -f "$patch"' EXIT
+  review_bb_input_patch > "$patch" || return 1
+  review_bb_patch_tree HEAD "$patch"
+)
+
 # Compare reproduced content as Git trees, independent of diff presentation.
 review_bb_patch_tree() (
   local snapshot_index
@@ -542,12 +570,12 @@ review_bb_diff() {
     then .diff.diff else error("BB diff unavailable or truncated") end'
 }
 
-# review_bb_run_fixer <base-branch>: full isolated-worktree fixer pass.
+# review_bb_run_fixer <base-branch> [<prompt-file>]: full isolated-worktree fixer pass.
 # Exit 0 when the fixer's reviewed changes were transferred (or there were
 # none); exit 1 on any BB failure, concurrent-edit conflict, or patch conflict.
 # Never overwrites, stashes, or discards driver/user changes.
 review_bb_run_fixer() {
-  local base_branch="$1"
+  local base_branch="$1" prompt_source="${2:-prompts/review-fix-prompt.md}"
   local head_sha branch input_patch untracked_list fixer_prompt title pr child
   local child_env child_path fixer_patch committed_patch pending summary
   if ! review_bb_active; then
@@ -577,7 +605,7 @@ review_bb_run_fixer() {
   } > "$input_desc"
 
   fixer_prompt=""
-  if ! fixer_prompt="$(review_bb_inline_prompt prompts/review-fix-prompt.md "$head_sha" "$base_branch" "" fixer)"; then
+  if ! fixer_prompt="$(review_bb_inline_prompt "$prompt_source" "$head_sha" "$base_branch" "" fixer)"; then
     echo "review_bb: could not build the BB fixer prompt" >&2
     rm -f "$input_desc" "$input_patch"
     return 1
@@ -613,14 +641,14 @@ review_bb_run_fixer() {
     return 1
   }
   if [ "$fixer_cli" = "claude" ]; then
-    bb_model="$(review_bb_model_for claude "${CLAUDE_REVIEW_MODEL:-fable}")" || {
+    bb_model="$(review_bb_model_for claude "${CLAUDE_REVIEW_MODEL:-}")" || {
       echo "review_bb: could not resolve Claude fixer model; refusing silent fallback" >&2
       rm -f "$fixer_prompt" "$input_desc" "$input_patch"
       return 1
     }
     effort="${CLAUDE_REVIEW_EFFORT:-high}"
   else
-    bb_model="${CODEX_REVIEW_MODEL:-gpt-6-astra}"
+    bb_model="${CODEX_REVIEW_MODEL:-}"
     effort="${CODEX_REVIEW_EFFORT:-xhigh}"
   fi
   review_bb_check_effort "$provider" "$bb_model" "$effort" || {
@@ -735,6 +763,15 @@ review_bb_run_fixer() {
     echo "review_bb: fixer child @thread:$child produced no summary; NOT transferring" >&2
     rm -f "$input_patch"
     return 1
+  fi
+
+  if [ -n "${REVIEW_FIX_RESULT_FILE:-}" ]; then
+    printf '%s\n' "$summary" > "$REVIEW_FIX_RESULT_FILE"
+    if ! review_validate_fix_result "$REVIEW_FIX_RESULT_FILE"; then
+      echo "review_bb: malformed write-phase result; NOT transferring" >&2
+      rm -f "$input_patch" "$REVIEW_FIX_RESULT_FILE"
+      return 1
+    fi
   fi
 
   # Fetch the fixer's reviewed changes as a patch. An empty diff means the

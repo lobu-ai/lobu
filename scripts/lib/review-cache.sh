@@ -36,13 +36,13 @@ review_sha256() {
 
 review_diff_hash() {
   local base="$1"
-  git diff "$base"...HEAD 2>/dev/null | review_sha256 | cut -d' ' -f1
+  git diff --binary --no-ext-diff --no-textconv "$(git merge-base "$base" HEAD)" "${2:-HEAD}" | review_sha256 | cut -d' ' -f1
 }
 
 # A verdict is only reusable for the same reviewer identity. Any knob that can
 # change the verdict — CLI, model, effort, provider — must be in the signature.
 review_reviewer_signature() {
-  printf '%s|%s|%s|%s|%s\n' \
+  printf 'bounded-v1|%s|%s|%s|%s|%s\n' \
     "${REVIEWER_CLI_SELECTED:-}" \
     "${CLAUDE_REVIEW_MODEL:-}" \
     "${CLAUDE_REVIEW_EFFORT:-}" \

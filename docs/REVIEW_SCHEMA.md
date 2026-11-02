@@ -4,18 +4,23 @@ After making changes on a feature branch, the agent pushes and runs
 `make review` locally. The deterministic test suites run in GitHub CI as
 their own required status checks — `scripts/review.sh` does NOT run them.
 It snapshots the head commit's CI check state for reviewer context, invokes
-an independent CLI reviewer against `git diff <base>...HEAD` (base defaults
+an independent CLI reviewer against the exact tree diff from the merge base
+(committed changes plus any write-phase edits) (base defaults
 to `origin/main` when available, override with `BASE=<branch>` or
-`--base <branch>`), and prints a JSON verdict matching this schema. Because
-nothing runs locally besides the reviewer, reviews of different commits
-execute concurrently with no host-wide lock; a duplicate run of the same
-commit is refused so the `pi-review` status has exactly one owner per sha. Codex harnesses use Claude; other
+`--base <branch>`), and prints a JSON verdict matching this schema. The
+writer may run focused tests. Reviews of different commits execute concurrently
+with no host-wide lock; a duplicate run of the same commit is refused so the
+`pi-review` status has exactly one owner per sha. Codex harnesses use Claude; other
 environments, including Claude Code, use Codex. Set
 `REVIEWER_CLI=codex|claude` to override automatic selection. The script
-also accepts `CLAUDE_REVIEW_MODEL` (default `fable`),
-`CLAUDE_REVIEW_EFFORT` (default `high`), and `CODEX_REVIEW_MODEL`
-(default `gpt-6-astra` at `model_reasoning_effort=xhigh`). Claude reviews
-fail closed unless
+loads review settings from `.env` and `.env.local` as dotenv data (no shell
+execution). Already-exported values win, then `.env.local`, then `.env`.
+Set `CLAUDE_REVIEW_MODEL=claude-opus-5-5` (or `opus`) and
+`CODEX_REVIEW_MODEL=gpt-6.1-sol` in those files; models have no hardcoded
+fallback. A missing/empty selected model fails closed when a fresh reviewer
+is needed. `CLAUDE_REVIEW_EFFORT` defaults to `high` and
+`CODEX_REVIEW_EFFORT` to `xhigh`; both can also come from env files.
+Claude reviews fail closed unless
 `CLAUDE_REVIEW_MODEL` is `fable`, `opus`, or a full `claude-opus-*` model ID;
 Sonnet, Haiku, empty, and arbitrary model values are rejected before the
 review starts. It posts a `pi-review` commit status
@@ -230,8 +235,8 @@ exceptions, use an explicit env override or admin merge.
 Specific actionable suggestions. Each object has `file`, `line`, `change`.
 Empty array if none.
 
-These are read by the local coding agent and applied between review
-iterations — not by the reviewer itself. Be specific (file path + line +
+These are passed to the internal write phase when the verdict fails. The
+read-only reviewer never edits or approves its own fixes. Be specific (file path + line +
 concrete change). Vibe suggestions ("consider refactoring", "this could be cleaner")
 don't belong here — the agent can't act on them; surface those as `notes`
 instead.
@@ -267,12 +272,48 @@ nuanced gates later.
 
 ## Local gate flow
 
-Today's flow: agent finishes a change → opens a PR → runs `make review` from
-the branch's worktree → the cross-harness reviewer prints the JSON verdict →
-the script posts/updates the `pi-review` commit status and PR comment. Branch
-protection can require `pi-review`, so a new commit remains unmergeable until the local
-review runs and passes for that exact SHA. Human/admin merge remains the
-explicit escape hatch for intentional exceptions.
+`make review` owns one bounded cycle; agents do not alternate review and
+review-fix commands:
+
+1. An independent read-only reviewer emits the verdict JSON below. The driver
+   saves it as `pass-N/findings.json` under its printed `/tmp/lobu-review.*`
+   run directory.
+2. A clean verdict for the unchanged committed tree posts `pi-review` success.
+3. A failed verdict feeds the safe findings into `review-fix.sh` with write
+   access. Inside BB the existing isolated-worktree patch transfer is used.
+   The fixer runs focused tests and emits an internal result with `summary`,
+   `tests: [{command, passed}]`, and
+   `decisions: [{kind, finding, question}]`. Decision kinds are `product`,
+   `architecture`, `credentials`, or `verification`. Decisions stop the cycle
+   and return to the parent; the fixer must not resolve them itself.
+4. With no decisions and passing focused tests, a **fresh** read-only review
+   inspects the new tree. Neither cached verdicts nor the writer's summary
+   can approve that verification pass.
+5. `REVIEW_MAX_AUTOFIX_PASSES` defaults to 2 and accepts only 0, 1, or 2.
+   Remaining findings, failed/missing tests, malformed output, or tool errors
+   fail closed. A failed verdict exits nonzero. The driver writes a structural
+   `handoff.json` with `status: "needs_parent"`, `reason`, `head`, `tree`,
+   `reviewed_tree`, `autofix_passes`, `decisions`, and the last read-only
+   `findings`. `tree` is the current working tree; `reviewed_tree` identifies
+   the snapshot those findings describe.
+
+Autofix edits remain uncommitted for the parent to inspect. If independent
+verification passes for that dirty tree, the handoff reason is `needs_commit`
+and the old commit's status stays failed. Commit and push those edits, wait
+for CI, then run `make review` to post success for that commit. The exact
+verified diff can reuse its cached verdict; no manual review/fix loop is
+needed. A passing working-tree verdict is never posted as approval of an
+older commit. Concurrent edits or a moved HEAD invalidate a review.
+
+`make review-fix` remains the standalone pre-review write phase; it posts no
+status and commits nothing. `make review` calls it internally with findings
+and a structured result path. CI still owns the full deterministic suites;
+the write phase runs only focused tests.
+
+Inside BB, review children attach with `BB_ENVIRONMENT_ID` only after
+`bb environment show <id> --json` resolves to the reviewed worktree's
+canonical path. Otherwise the driver passes the worktree path. It still
+checks the child's actual environment before accepting any output.
 
 ## Safe-class skip, verdict cache, and shadow sampling
 
@@ -293,7 +334,8 @@ marker so the skip is auditable; CI suites remain required checks either way.
 `./scripts/review.sh --full` forces the corresponding LLM pass.
 
 The verdict is cached keyed on the exact diff content + reviewer identity, so
-an unchanged diff is never re-reviewed: the reviewer is non-deterministic, and
+an unchanged initial diff can reuse a verdict (post-fix verification always
+starts a fresh reviewer): the reviewer is non-deterministic, and
 a passed diff can flip to fail on a re-run, spawning a phantom fix cycle.
 `REVIEWER_SHADOW=1` runs the full reviewer on a would-be-skipped diff and
 appends the skip decision + real verdict to `<git-common-dir>/lobu-review-cache/shadow-audit.jsonl`,

@@ -2,16 +2,11 @@
 # Local review runner: an independent CLI reviewer over the diff against the
 # base branch. Prints a JSON verdict on the last line.
 #
-# The deterministic suites (typecheck / unit / integration / migrations /
-# frontend) run in GitHub CI, NOT here — they are separate required status
-# checks on main, so auto-merge already blocks on them. This script's job is
-# only the agent verdict: it snapshots the head commit's CI check state for
-# the reviewer's context, runs the reviewer on the diff, and posts the
-# verdict. Because nothing here boots Postgres or binds ports, reviews of
-# different commits execute concurrently — there is no host-wide lock. The
-# one serialization left is per commit: every run posts the same pi-review
-# status for its HEAD sha, so a duplicate run of the SAME commit is refused
-# rather than allowed to race the owner's status posts.
+# Full deterministic suites run in GitHub CI as separate required checks.
+# This command owns a bounded review -> safe write -> independent verification
+# cycle. The internal write phase runs focused tests, never commits or posts.
+# Verified edits return to the parent for commit; only the committed tree can
+# receive pi-review success. A per-commit lock keeps one status owner per SHA.
 #
 # Usage:
 #   ./scripts/review.sh                 # base = origin/main when available
@@ -61,6 +56,7 @@ for cmd in jq git node perl python3; do
 done
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "Not inside a git work tree." >&2; exit 2; }
 review_refuse_submodule || exit 2
+review_load_config "$(git rev-parse --show-toplevel)"
 
 GH_AVAILABLE=1
 if ! command -v gh >/dev/null 2>&1 || ! gh auth status >/dev/null 2>&1; then
@@ -80,9 +76,9 @@ elif git show-ref --verify --quiet refs/remotes/origin/main; then
 else
   BASE_BRANCH="main"
 fi
-CLAUDE_REVIEW_MODEL="${CLAUDE_REVIEW_MODEL:-fable}"
+CLAUDE_REVIEW_MODEL="${CLAUDE_REVIEW_MODEL:-}"
 CLAUDE_REVIEW_EFFORT="${CLAUDE_REVIEW_EFFORT:-high}"
-CODEX_REVIEW_MODEL="${CODEX_REVIEW_MODEL:-gpt-6-astra}"
+CODEX_REVIEW_MODEL="${CODEX_REVIEW_MODEL:-}"
 CODEX_REVIEW_EFFORT="${CODEX_REVIEW_EFFORT:-xhigh}"
 REVIEWER_CLI="${REVIEWER_CLI:-auto}"
 # light (default): skip the cross-harness reviewer for small safe-class diffs
@@ -110,6 +106,11 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+REVIEW_MAX_AUTOFIX_PASSES="${REVIEW_MAX_AUTOFIX_PASSES:-2}"
+case "$REVIEW_MAX_AUTOFIX_PASSES" in
+  0|1|2) ;;
+  *) echo "REVIEW_MAX_AUTOFIX_PASSES must be 0, 1, or 2" >&2; exit 2 ;;
+esac
 REVIEWER_CLI_SELECTED="$(review_select_reviewer "$REVIEWER_CLI")"
 
 # Only the actual review run needs the reviewer CLI. A skip-eligible diff
@@ -117,9 +118,6 @@ REVIEWER_CLI_SELECTED="$(review_select_reviewer "$REVIEWER_CLI")"
 # availability check is deferred into the run path below instead of failing the
 # preflight.
 review_require_reviewer() {
-  if [ "$REVIEWER_CLI_SELECTED" = "claude" ]; then
-    review_validate_claude_model "$CLAUDE_REVIEW_MODEL" || exit $?
-  fi
   command -v "$REVIEWER_CLI_SELECTED" >/dev/null 2>&1 || {
     review_fail_closed_message "$REVIEWER_CLI_SELECTED" "command not found on PATH" >&2
     exit 2
@@ -170,6 +168,12 @@ finalize_review_status() {
   if [ "$GH_AVAILABLE" = "1" ] &&
      ! review_assert_head_is_current "$HEAD_SHA" "$PI_REVIEW_STATUS_CONTEXT"; then
     # Suppress the EXIT trap's fallback error status on the same stale commit.
+    REVIEW_STATUS_FINALIZED=1
+    return 2
+  fi
+  if [ "$(git rev-parse HEAD)" != "$HEAD_SHA" ] ||
+     { [ "$1" = success ] && [ -n "$(git status --porcelain)" ]; }; then
+    post_review_status error "HEAD or working tree changed before final status"
     REVIEW_STATUS_FINALIZED=1
     return 2
   fi
@@ -231,7 +235,7 @@ run_reviewer_inline() {
       "$REVIEWER_CLI_SELECTED" \
       "$(if [ "$REVIEWER_CLI_SELECTED" = "claude" ]; then printf '%s' "$CLAUDE_REVIEW_MODEL"; else printf '%s' "$CODEX_REVIEW_MODEL"; fi)" \
       "$(if [ "$REVIEWER_CLI_SELECTED" = "claude" ]; then printf '%s' "$CLAUDE_REVIEW_EFFORT"; else printf '%s' "$CODEX_REVIEW_EFFORT"; fi)" \
-      "$SCHEMA_JQ" "$CI_CHECKS_FILE"
+      "$SCHEMA_JQ" "$CI_CHECKS_FILE" "$(if [ "$AUTOFIX_PASSES" -gt 0 ]; then printf '%s-%s' "${REVIEW_ROOT_DIR##*/}" "$AUTOFIX_PASSES"; fi)"
     return
   fi
   raw_file="$(mktemp /tmp/lobu-review-"${REVIEWER_CLI_SELECTED}"-inline.XXXXXX)"
@@ -398,6 +402,7 @@ trap 'exit 129' HUP
 acquire_commit_review_lock "$HEAD_SHA"
 
 REVIEW_RUN_DIR="$(mktemp -d /tmp/lobu-review.XXXXXX)"
+echo ">> review run: $REVIEW_RUN_DIR"
 
 # --- safe-class skip ---------------------------------------------------------
 # REVIEWER_MODE=light (default) skips the cross-harness reviewer for small
@@ -411,7 +416,7 @@ REVIEW_RUN_DIR="$(mktemp -d /tmp/lobu-review.XXXXXX)"
 # leaves the ESCALATION reason in it, so eligibility gets its own flag.
 REVIEW_SKIP_REASON=""
 REVIEW_SKIP_ELIGIBLE=0
-if [ "$REVIEWER_MODE" != "full" ] && review_classify_diff "$BASE_BRANCH"; then
+if [ -z "$(git status --porcelain)" ] && [ "$REVIEWER_MODE" != "full" ] && review_classify_diff "$BASE_BRANCH"; then
   REVIEW_SKIP_ELIGIBLE=1
   if [ "$REVIEWER_SHADOW" != "1" ]; then
     SKIP_DESCRIPTION="Skipped cross-harness review: $REVIEW_SKIP_REASON"
@@ -428,15 +433,26 @@ if [ "$REVIEWER_MODE" != "full" ] && review_classify_diff "$BASE_BRANCH"; then
   echo ">> REVIEWER_SHADOW=1: running full review despite skip eligibility ($REVIEW_SKIP_REASON)"
 fi
 
+REVIEW_ROOT_DIR="$REVIEW_RUN_DIR"
+AUTOFIX_PASSES=0
+HANDOFF_REASON=""
+FIX_DECISIONS='[]'
+while :; do
+REVIEW_RUN_DIR="$REVIEW_ROOT_DIR/pass-$AUTOFIX_PASSES"
+mkdir -p "$REVIEW_RUN_DIR"
+REVIEW_TREE="$(review_worktree_tree)" || exit 2
+
 # --- diff-hash verdict cache -------------------------------------------------
 # The reviewer is non-deterministic, so an unchanged diff must not be
 # re-reviewed: a passed diff can flip to fail and spawn a phantom fix cycle.
 # Cache the verdict on the exact diff content + reviewer identity, and reuse it
 # whenever the diff hash matches a previously issued verdict.
-DIFF_HASH="$(review_diff_hash "$BASE_BRANCH")"
+DIFF_HASH="$(review_diff_hash "$BASE_BRANCH" "$REVIEW_TREE")"
 REVIEWER_SIG="$(review_reviewer_signature)"
 CACHE_FILE="$(review_cache_lookup "$DIFF_HASH" "$REVIEWER_SIG" || true)"
 CACHE_HIT=0
+REVIEWER_EXIT=0
+if [ "$AUTOFIX_PASSES" -gt 0 ]; then CACHE_FILE=""; fi
 if [ -n "$CACHE_FILE" ]; then
   # SCHEMA_JQ validates a verdict object; the cache file wraps it in .verdict,
   # so pipe the wrapper field into the same predicate used at store time.
@@ -476,15 +492,15 @@ GITHUB_CI_GREEN=0
 if [ -z "$(git status --porcelain)" ] && ci_run_green_for_head "$HEAD_SHA"; then
   GITHUB_CI_GREEN=1
 fi
-if [ "$GITHUB_CI_GREEN" != "1" ] && [ "$CACHE_HIT" != "1" ] && [ "$REVIEW_ALLOW_LOCAL_BUILD" != "1" ]; then
+if [ "$GITHUB_CI_GREEN" != "1" ] && [ "$CACHE_HIT" != "1" ] && [ "$REVIEW_ALLOW_LOCAL_BUILD" != "1" ] && [ "$AUTOFIX_PASSES" -eq 0 ]; then
   echo "make review requires GitHub CI (workflow ci.yml) to have passed for $HEAD_SHA." >&2
   echo "Push the commit and wait for the PR's CI to finish, then re-run." >&2
   echo "Override only when CI cannot run: REVIEW_ALLOW_LOCAL_BUILD=1 make review" >&2
   exit 2
 fi
 
-REVIEW_STATUS_STARTED=0
 if [ "$CACHE_HIT" != "1" ]; then
+  review_require_model "$REVIEWER_CLI_SELECTED" || exit $?
   if review_bb_wants_run; then
     echo ">> BB context detected ($BB_THREAD_ID): routing the review through a visible BB child thread"
   else
@@ -527,11 +543,12 @@ sed 's/^/>>   /' "$CI_CHECKS_FILE"
 # otherwise rebuild locally so a stale or missing dist cannot create noise.
 
 BUILD_LOG="$REVIEW_RUN_DIR/build.log"
-if [ "$GITHUB_CI_GREEN" = "1" ]; then
-  echo ">> GitHub CI already passed for $HEAD_SHA; skipping duplicate local package build"
-  printf 'Skipped: GitHub CI passed for %s\n' "$HEAD_SHA" > "$BUILD_LOG"
+if [ "$GITHUB_CI_GREEN" = "1" ] || [ "${REVIEW_BUILD_ATTEMPTED:-0}" = "1" ]; then
+  echo ">> reusing package build; focused tests cover write-phase edits"
+  printf 'Reused build for %s (write pass %s)\n' "$HEAD_SHA" "$AUTOFIX_PASSES" > "$BUILD_LOG"
   BUILD_EXIT=0
 else
+  REVIEW_BUILD_ATTEMPTED=1
   echo ">> make build-packages → $BUILD_LOG"
   set +e
   run_review_child make build-packages > "$BUILD_LOG" 2>&1
@@ -555,7 +572,18 @@ SCHEMA_FILE="$(pwd)/prompts/review-output-schema.json"
 
 echo ">> invoking $REVIEWER_CLI_SELECTED review"
 REVIEW_PROMPT_FILE="$(mktemp /tmp/lobu-review-prompt.XXXXXX)"
-cat "$PROMPT_FILE" > "$REVIEW_PROMPT_FILE"
+# Render the exact snapshot into every diff command. HEAD remains the parent
+# commit while the write phase leaves its edits uncommitted for inspection.
+# The quoted range must lose its quotes: `git diff "<base> <tree>"` is one
+# unknown revision, not two.
+REVIEW_TREE="$REVIEW_TREE" MERGE_BASE="$MERGE_BASE" node - "$PROMPT_FILE" > "$REVIEW_PROMPT_FILE" <<'JS'
+const fs = require('node:fs');
+const target = process.env.MERGE_BASE + ' ' + process.env.REVIEW_TREE;
+process.stdout.write(fs.readFileSync(process.argv[2], 'utf8')
+  .replaceAll('"$BASE_BRANCH...HEAD"', target)
+  .replaceAll('$BASE_BRANCH...HEAD', target));
+JS
+printf '\nReview target tree: %s (driver HEAD %s). Inspect uncommitted edits too.\n' "$REVIEW_TREE" "$HEAD_SHA" >> "$REVIEW_PROMPT_FILE"
 printf '\n\nReview the diff. Emit only the JSON verdict.\n' >> "$REVIEW_PROMPT_FILE"
 run_reviewer "$REVIEW_PROMPT_FILE"
 rm -f "$REVIEW_PROMPT_FILE"
@@ -564,10 +592,10 @@ VERDICT="$RAW"
 VERDICT="$(extract_json_verdict "$VERDICT")"
 fi
 
-# On the cache-hit path REVIEWER_EXIT/BUILD_LOG were never set (the verdict
-# already passed this exact predicate at lookup, so this branch is unreachable
-# there); default them so `set -u` cannot turn a future edit into a crash.
-if ! echo "$VERDICT" | jq -e "$SCHEMA_JQ" >/dev/null 2>&1; then
+# On the cache-hit path BUILD_LOG was never set and REVIEWER_EXIT stays 0 (the
+# verdict already passed this exact predicate at lookup, so this branch is
+# unreachable there); default them so `set -u` cannot turn a future edit into a crash.
+if [ "${REVIEWER_EXIT:-0}" -ne 0 ] || ! echo "$VERDICT" | jq -e "$SCHEMA_JQ" >/dev/null 2>&1; then
   if [ "${REVIEWER_EXIT:-0}" -ne 0 ]; then
     REVIEW_FAILURE_DETAIL="reviewer process exited with status $REVIEWER_EXIT"
   else
@@ -580,6 +608,14 @@ if ! echo "$VERDICT" | jq -e "$SCHEMA_JQ" >/dev/null 2>&1; then
   echo "reviewer diagnostics: $REVIEW_RUN_DIR/reviewer-output.stderr" >&2
   exit 1
 fi
+
+if [ "$(git rev-parse HEAD)" != "$HEAD_SHA" ] ||
+   [ "$(review_worktree_tree)" != "$REVIEW_TREE" ]; then
+  finalize_review_status error "Tree changed during independent review; verdict discarded"
+  echo "Review target moved; refusing stale verdict" >&2
+  exit 1
+fi
+printf '%s\n' "$VERDICT" > "$REVIEW_RUN_DIR/findings.json"
 
 # Only schema-valid fresh verdicts are cached; a cached verdict is re-validated
 # on read with the same predicate, so a tampered or stale entry self-heals.
@@ -633,6 +669,53 @@ else
   STATUS_DESCRIPTION="$HEADLINE"
 fi
 
+if [ "$STATUS_STATE" = success ]; then
+  if [ -n "$(git status --porcelain)" ]; then
+    HANDOFF_REASON="needs_commit"
+    STATUS_STATE="failure"
+    STATUS_DESCRIPTION="Verified working tree; commit, push, and rerun make review for pi-review"
+  fi
+  break
+fi
+if [ "$AUTOFIX_PASSES" -ge "$REVIEW_MAX_AUTOFIX_PASSES" ]; then
+  HANDOFF_REASON="autofix_limit"
+  break
+fi
+AUTOFIX_PASSES=$((AUTOFIX_PASSES + 1))
+FIX_RESULT="$REVIEW_ROOT_DIR/fix-$AUTOFIX_PASSES.json"
+echo ">> write phase $AUTOFIX_PASSES/$REVIEW_MAX_AUTOFIX_PASSES; findings: $REVIEW_RUN_DIR/findings.json"
+if ! run_review_child bash "$SCRIPT_DIR/review-fix.sh" --base "$BASE_BRANCH" \
+    --findings "$REVIEW_RUN_DIR/findings.json" --result "$FIX_RESULT"; then
+  HANDOFF_REASON="fixer_failed"
+  break
+fi
+if ! review_validate_fix_result "$FIX_RESULT"; then
+  HANDOFF_REASON="invalid_fixer_result"
+  break
+fi
+FIX_DECISIONS="$(jq -c .decisions "$FIX_RESULT")"
+if [ "$(jq '.decisions | length' "$FIX_RESULT")" -gt 0 ]; then
+  HANDOFF_REASON="needs_decision"
+  break
+fi
+if ! jq -e '(.tests | length > 0) and all(.tests[]; .passed)' "$FIX_RESULT" >/dev/null; then
+  HANDOFF_REASON="focused_tests_failed_or_missing"
+  break
+fi
+# Loop into a NEW read-only review. The writer's summary cannot approve it.
+done
+
+if [ -n "$HANDOFF_REASON" ]; then
+  STATUS_STATE="failure"
+  STATUS_DESCRIPTION="$HANDOFF_REASON; $STATUS_DESCRIPTION"
+  jq -n --arg reason "$HANDOFF_REASON" --arg head "$HEAD_SHA" \
+    --arg tree "$(review_worktree_tree)" --arg reviewed_tree "$REVIEW_TREE" --argjson passes "$AUTOFIX_PASSES" \
+    --argjson decisions "$FIX_DECISIONS" --argjson findings "$VERDICT" \
+    '{status:"needs_parent",reason:$reason,head:$head,tree:$tree,reviewed_tree:$reviewed_tree,autofix_passes:$passes,decisions:$decisions,findings:$findings}' \
+    > "$REVIEW_ROOT_DIR/handoff.json"
+  echo ">> structured parent handoff: $REVIEW_ROOT_DIR/handoff.json"
+fi
+
 echo ""
 echo "=========================================="
 echo "verdict: $HEADLINE"
@@ -658,6 +741,7 @@ else
   # verdict stale even though branch protection correctly blocks the new head.
   review_assert_head_is_current "$HEAD_SHA" "$PI_REVIEW_STATUS_CONTEXT" || exit 2
   NOTES="$(echo "$VERDICT" | jq -r '.notes // ""')"
+  if [ -n "$HANDOFF_REASON" ]; then NOTES="Driver handoff: $HANDOFF_REASON. $NOTES"; fi
   PRETTY="$(echo "$VERDICT" | jq .)"
   SUGGESTIONS_TABLE="$(echo "$VERDICT" | jq -r '
     if (.suggested_fixes // []) | length == 0 then ""
@@ -688,3 +772,5 @@ fi
 
 # Last line: machine-readable verdict for $(make review) capture.
 echo "$VERDICT" | jq -c .
+
+[ "$STATUS_STATE" = success ] || exit 1

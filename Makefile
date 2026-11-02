@@ -281,9 +281,9 @@ clean-test-pg:
 	@echo "✅ Test-PG clusters + dirs reaped"
 
 # --- Local AI review gate ---------------------------------------------------
-# Local-only: runs the deterministic suites in cwd, then invokes the reviewer
-# from the model family opposite the current harness against
-# `git diff <BASE>...HEAD` (BASE defaults to origin/main when available;
+# Local-only: deterministic suites run in GitHub CI. Invokes the reviewer
+# from the model family opposite the current harness against the
+# exact tree diff from the merge base (BASE defaults to origin/main when available;
 # override with BASE=<branch> env or `--base <branch>` arg). Prints a JSON
 # verdict on the last line. If
 # GitHub auth is available, posts a pi-review commit status; if the current
@@ -295,11 +295,10 @@ clean-test-pg:
 review:
 	@./scripts/review.sh $(if $(BASE),--base $(BASE),)
 
-# Pre-review fixer: the reviewer CLI with WRITE access + the review rubrics,
-# fixing review-grade findings (bugs, slop, stale claims) in the working tree
-# BEFORE `make review` posts a status. Uses the same safe-class skip as review;
-# otherwise posts nothing and commits nothing — inspect its diff, commit, then
-# run `make review` once on the settled HEAD.
+# Standalone/manual write phase. `make review` invokes it internally on
+# findings and verifies the edits with a
+# fresh read-only reviewer, at most twice.
+# Writes never commit or post a passing status for uncommitted content.
 review-fix:
 	@./scripts/review-fix.sh $(if $(BASE),--base $(BASE),)
 

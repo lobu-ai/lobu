@@ -29,6 +29,8 @@ FAKE_STATE="$TEST_DIR/state"
 mkdir -p "$FAKE_BIN" "$FAKE_STATE"
 export BB_CLI="$FAKE_BIN/bb"
 export BB_THREAD_ID="thr_parent1"
+unset BB_ENVIRONMENT_ID
+export CODEX_REVIEW_MODEL=gpt-6-astra CLAUDE_REVIEW_MODEL=fable
 
 cleanup() {
   rm -rf "$TEST_DIR"
@@ -58,6 +60,7 @@ case "$1 $2" in
       cat "$state/show-queue/$first"; rm -f "$state/show-queue/$first"
     else cat "$state/child-show.json"; fi
     ;;
+  "environment show") cat "$state/environment.json" ;;
   "provider models") cat "$state/models-$3.json" ;;
   "thread list") cat "$state/list.json" ;;
   "thread spawn")
@@ -225,6 +228,30 @@ grep -q -- '--project proj_TEST' "$FAKE_STATE/calls.log" || fail "spawn must use
 [ "$(spawn_calls)" = "1" ] || fail "exactly one spawn expected, got $(spawn_calls)"
 [ -z "$REVIEW_BB_CHILD_ID" ] || fail "settled child ownership must be cleared"
 
+# A BB-owned path must be attached by its matching environment id.
+export BB_ENVIRONMENT_ID=env_review_test
+jq -n --arg p "$SCRATCH" '{id:"env_review_test",path:$p}' > "$FAKE_STATE/environment.json"
+reset_calls
+review_bb_run_reviewer "$PROMPT" "$HEAD_SHA_SCRATCH" "origin/main" "env-id-case" \
+  codex gpt-6-astra xhigh '(.ok == true)' "/tmp/ci.txt" >/dev/null 2>&1
+[ "$REVIEWER_EXIT" = 0 ] || fail "matching environment review failed: $RAW"
+grep -q -- '--environment env_review_test' "$FAKE_STATE/calls.log" || fail "matching BB environment id must replace the owned path"
+# Foreign, missing and unreadable ids must fall back to the reviewed path.
+for env_path in /tmp/foreign-worktree ''; do
+  jq -n --arg p "$env_path" '{id:"env_review_test",path:$p}' > "$FAKE_STATE/environment.json"
+  reset_calls
+  review_bb_run_reviewer "$PROMPT" "$HEAD_SHA_SCRATCH" "origin/main" "fallback-case" \
+    codex gpt-6-astra xhigh '(.ok == true)' "/tmp/ci.txt" >/dev/null 2>&1
+  grep -q -- "--environment $SCRATCH" "$FAKE_STATE/calls.log" || fail "foreign/missing environment must use path"
+done
+printf 'invalid json' > "$FAKE_STATE/environment.json"
+[ "$(review_bb_environment_arg "$SCRATCH")" = "$SCRATCH" ] || fail "unreadable environment must use path"
+# Canonical paths match even when BB reports a symlink.
+ln -s "$SCRATCH" "$TEST_DIR/worktree-link"
+jq -n --arg p "$TEST_DIR/worktree-link" '{id:"env_review_test",path:$p}' > "$FAKE_STATE/environment.json"
+[ "$(review_bb_environment_arg "$SCRATCH")" = env_review_test ] || fail "canonical paths must match"
+unset BB_ENVIRONMENT_ID
+
 # 6. Malformed child output is returned unsettled-neutral; the caller's schema
 #    validation (mirrored here exactly as review.sh runs it) must reject it —
 #    malformed output never becomes green.
@@ -279,7 +306,7 @@ unset REVIEW_BB_PRE_ACCEPT_HOOK_FOR_TESTS
 HEAD_SHA_SCRATCH="$(git -C "$SCRATCH" rev-parse HEAD)"
 
 # 10. Dedup: idle child with a valid verdict is reused (no new spawn).
-TITLE_FOR_REUSE="$(review_bb_review_title "$(git branch --show-current)" "$HEAD_SHA_SCRATCH" codex gpt-6-astra xhigh abcdef123456 "")"
+TITLE_FOR_REUSE="$(review_bb_review_title "$(git branch --show-current)" "$HEAD_SHA_SCRATCH" codex gpt-6-astra xhigh abcdef123456 "") $(printf '%s' "$SCRATCH" | sha1sum | cut -c1-12)"
 jq -n --arg t "$TITLE_FOR_REUSE" '[{id:"thr_old9",title:$t,status:"idle",updatedAt:2}]' > "$FAKE_STATE/list.json"
 jq -n --arg p "$SCRATCH" '{thread:{id:"thr_old9",projectId:"proj_TEST",status:"idle"},environment:{id:"env_old",path:$p}}' > "$FAKE_STATE/child-show.json"
 printf '{"ok":true,"note":"reused"}\n' > "$FAKE_STATE/output.txt"
@@ -293,6 +320,13 @@ case "$RAW" in *reused*) ;; *) fail "must reuse the existing child output, got: 
 jq -n --arg p "$SCRATCH" '{thread:{id:"thr_child9",projectId:"proj_TEST",status:"idle"},environment:{id:"env_child9",path:$p}}' > "$FAKE_STATE/child-show.json"
 printf '[]\n' > "$FAKE_STATE/list.json"
 
+# Post-write verification must spawn a new reviewer even with identical input.
+jq -n --arg t "$TITLE_FOR_REUSE" '[{id:"thr_old9",title:$t,status:"idle",updatedAt:2}]' > "$FAKE_STATE/list.json"
+reset_calls
+review_bb_run_reviewer "$PROMPT" "$HEAD_SHA_SCRATCH" "origin/main" "abcdef123456" \
+  codex gpt-6-astra xhigh '(.ok == true)' "/tmp/ci.txt" "fresh-verification" >/dev/null 2>&1
+[ "$REVIEWER_EXIT" = 0 ] && [ "$(spawn_calls)" = 1 ] || fail "verification must not adopt a previous reviewer"
+
 # Reuse must not skip the checked-out HEAD or environment checks.
 jq -n --arg t "$TITLE_FOR_REUSE" '[{id:"thr_old9",title:$t,status:"idle",updatedAt:2}]' > "$FAKE_STATE/list.json"
 jq -n '{thread:{id:"thr_old9",status:"idle"},environment:{path:"/tmp/wrong-worktree"}}' > "$FAKE_STATE/child-show.json"
@@ -303,7 +337,7 @@ jq -n --arg p "$SCRATCH" '{thread:{id:"thr_child9",status:"idle"},environment:{p
 printf '[]\n' > "$FAKE_STATE/list.json"
 
 # 11. Dedup: a running child for identical inputs is adopted, not duplicated.
-TITLE_RUNNING="$(review_bb_review_title "$(git branch --show-current)" "$HEAD_SHA_SCRATCH" codex gpt-6-astra xhigh abcdef123456 "")"
+TITLE_RUNNING="$(review_bb_review_title "$(git branch --show-current)" "$HEAD_SHA_SCRATCH" codex gpt-6-astra xhigh abcdef123456 "") $(printf '%s' "$SCRATCH" | sha1sum | cut -c1-12)"
 jq -n --arg t "$TITLE_RUNNING" '[{id:"thr_live9",title:$t,status:"active",updatedAt:3}]' > "$FAKE_STATE/list.json"
 printf '{"ok":true,"note":"adopted"}\n' > "$FAKE_STATE/output.txt"
 reset_calls
@@ -430,6 +464,20 @@ grep -q '^thread archive thr_fix9' "$FAKE_STATE/calls.log" || fail "successful f
 printf 'one\n' > file.txt
 git -C "$FIXSCRATCH" diff --quiet || git -C "$FIXSCRATCH" commit -qam restore-14 >/dev/null 2>&1 || true
 
+# Internal bounded write results are validated before any patch is transferred.
+fixer_env_ready
+export REVIEW_FIX_RESULT_FILE="$TEST_DIR/fix-result.json"
+printf 'not json\n' > "$FAKE_STATE/output.txt"
+review_bb_run_fixer "origin/main" >/dev/null 2>&1 && fail "malformed internal result must not transfer"
+[ "$(cat file.txt)" = one ] || fail "malformed result changed parent files"
+fixer_env_ready
+printf '%s\n' '{"summary":"safe fix","decisions":[],"tests":[{"command":"focused test","passed":true}]}' > "$FAKE_STATE/output.txt"
+review_bb_run_fixer "origin/main" >/dev/null 2>&1 || fail "valid structured result must transfer"
+[ "$(cat file.txt)" = two ] || fail "valid result patch missing"
+review_validate_fix_result "$REVIEW_FIX_RESULT_FILE" || fail "structured parent result missing"
+unset REVIEW_FIX_RESULT_FILE
+printf 'one\n' > file.txt
+
 # 14b. Async worktree provisioning: env absent pre-wait is verified post-settle.
 fixer_env_ready
 mkdir -p "$FAKE_STATE/show-queue"
@@ -451,7 +499,8 @@ review_bb_run_fixer "origin/main" >/dev/null 2>&1 && fail "committed-stack misma
 fixer_env_ready
 export FIXER_CLI=claude CLAUDE_REVIEW_MODEL=claude-sonnet-5-5
 review_bb_run_fixer "origin/main" >/dev/null 2>&1 && fail "disallowed fixer model must fail closed"
-unset FIXER_CLI CLAUDE_REVIEW_MODEL
+unset FIXER_CLI
+export CLAUDE_REVIEW_MODEL=fable
 [ "$(spawn_calls)" = "0" ] || fail "disallowed fixer model must never spawn"
 [ "$(cat file.txt)" = "one" ] || fail "disallowed fixer model must leave the tree untouched"
 
