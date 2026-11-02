@@ -9,7 +9,6 @@ import {
 } from "@lobu/cli/config";
 import type ClickHouseAnalyticsConnector from "./clickhouse-analytics.connector.ts";
 import type DataForSeoConnector from "./dataforseo.connector.ts";
-import type LokiActivityConnector from "./loki-activity.connector.ts";
 
 // One backlog type for every kind of team work, written by people and agents.
 // The organic acquisition review Automation reads the `seo` kind as its backlog
@@ -292,36 +291,6 @@ const productActivityDb = defineConnection({
 
 // Provisioned with an immutable HTTP binding through authProfiles.create.
 // Apply preserves the live secret because credentials are intentionally omitted.
-const productionLogsAuth = defineAuthProfile({
-  slug: "lobu-production-loki-http",
-  connector: "loki.activity",
-  authKind: "env",
-  name: "Lobu production Loki HTTP",
-});
-
-const productionLogs = defineConnection({
-  slug: "lobu-production-logs",
-  connector: "loki.activity",
-  name: "Lobu production Kubernetes logs",
-  authProfile: productionLogsAuth,
-  config: {
-    LOKI_URL: "https://loki.lobu.ai",
-    namespace: "summaries-prod",
-    grafana_url:
-      "https://monitoring-kube-prometheus-stack-grafana.brill-kanyu.ts.net",
-  },
-  feeds: [
-    {
-      feed: "activity",
-      name: "Lobu production log activity",
-      schedule: "3,23,43 * * * *",
-      config: {},
-    },
-  ],
-});
-
-// Provisioned like productionLogsAuth: an immutable HTTP binding whose secret
-// apply never touches, because credentials are intentionally omitted here.
 const analyticsAuth = defineAuthProfile({
   slug: "lobu-clickhouse-analytics-http",
   connector: "clickhouse.analytics",
@@ -383,9 +352,6 @@ export default defineConfig({
       "./clickhouse-analytics.connector.ts"
     ),
     connectorFromFile<typeof DataForSeoConnector>("./dataforseo.connector.ts"),
-    connectorFromFile<typeof LokiActivityConnector>(
-      "./loki-activity.connector.ts"
-    ),
   ],
   org: "lobu-team",
   orgName: "Lobu Team",
@@ -395,19 +361,12 @@ export default defineConfig({
   authProfiles: [
     analyticsAuth,
     productActivityDbAuth,
-    productionLogsAuth,
     cloudflareOAuthApp,
     companyCloudflareAccount,
     gmailOAuthApp,
   ],
   entities: [task],
-  connections: [
-    analytics,
-    productActivityDb,
-    productionLogs,
-    lobuTeamSlack,
-    companyCloudflare,
-  ],
+  connections: [analytics, productActivityDb, lobuTeamSlack, companyCloudflare],
   // The external digest is maintained by scripts/configure-product-activity.ts.
   // Apply without prune: preserve its existing delivery agent and manual Automation.
   automations: [],
