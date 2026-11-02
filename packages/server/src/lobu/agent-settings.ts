@@ -278,7 +278,10 @@ export async function validateAgentSettingsUpdate(
 		(updates as { skillsConfig?: unknown }).skillsConfig
 	);
 	if (skillsConfigError) {
-		return { error: "invalid_skills_config", error_description: skillsConfigError };
+		return {
+			error: "invalid_skills_config",
+			error_description: skillsConfigError,
+		};
 	}
 
 	const patch = updates as Partial<AgentSettings>;
@@ -288,9 +291,7 @@ export async function validateAgentSettingsUpdate(
 	// fail closed at runtime with no model to call. require-tool entries never
 	// call a model.
 	const judgeDefault = (
-		await getOrgDefaultModel(organizationId).catch(
-			() => null
-		)
+		await getOrgDefaultModel(organizationId).catch(() => null)
 	)?.trim();
 	const inline = patch.guardrailsInline;
 	if (Array.isArray(inline)) {
@@ -505,14 +506,18 @@ export async function persistAgentSettingsPatch(
 /** Idempotent insertion; an external ownership mapping commits with the agent. */
 export async function insertAgentConfig(
 	tx: DbClient,
-	args: Pick<AgentCreateInput, "agent_id" | "name" | "description" | "identity_md">,
+	args: Pick<
+		AgentCreateInput,
+		"agent_id" | "name" | "description" | "identity_md"
+	>,
 	owner: AgentMetadata["owner"],
 	models: AgentSettings["models"] | null | undefined,
 	audit: AgentConfigAudit
 ): Promise<boolean> {
-	const seedModels = models === undefined
-		? (await resolveNewAgentProvisioningDefaults(audit.organizationId)).models
-		: models;
+	const seedModels =
+		models === undefined
+			? (await resolveNewAgentProvisioningDefaults(audit.organizationId)).models
+			: models;
 	const rows = await tx`
 		INSERT INTO agents (id, organization_id, name, description, identity_md,
 			owner_platform, owner_user_id, models, created_at, updated_at)
@@ -527,11 +532,22 @@ export async function insertAgentConfig(
 			VALUES (${audit.organizationId}, ${args.agent_id}, ${owner.platform}, ${owner.userId}, NOW())
 			ON CONFLICT (organization_id, agent_id, platform, user_id) DO NOTHING`;
 	}
-	await insertConfigChangeEventInTransaction({
-		...audit, resourceKind: "agent", resourceId: args.agent_id, op: "created",
-		summary: `Agent '${args.name}' created`, before: null,
-		state: { agentId: args.agent_id, name: args.name, description: args.description ?? null },
-	}, tx);
+	await insertConfigChangeEventInTransaction(
+		{
+			...audit,
+			resourceKind: "agent",
+			resourceId: args.agent_id,
+			op: "created",
+			summary: `Agent '${args.name}' created`,
+			before: null,
+			state: {
+				agentId: args.agent_id,
+				name: args.name,
+				description: args.description ?? null,
+			},
+		},
+		tx
+	);
 	return true;
 }
 
@@ -546,25 +562,42 @@ export async function persistAgentMetadataPatch(
 	const before = await store.getMetadata(agentId);
 	await store.updateMetadata(agentId, updates);
 	const after = await store.getMetadata(agentId);
-	await insertConfigChangeEventInTransaction({
-		...audit, resourceKind: "agent", resourceId: agentId, op: "updated",
-		summary: `Agent '${after?.name ?? agentId}' metadata updated`,
-		before: before ? { ...before } : null, state: after ? { ...after } : null,
-		changedFields: Object.keys(updates),
-	}, tx);
+	await insertConfigChangeEventInTransaction(
+		{
+			...audit,
+			resourceKind: "agent",
+			resourceId: agentId,
+			op: "updated",
+			summary: `Agent '${after?.name ?? agentId}' metadata updated`,
+			before: before ? { ...before } : null,
+			state: after ? { ...after } : null,
+			changedFields: Object.keys(updates),
+		},
+		tx
+	);
 }
 
 /** Caller holds the org and agent row locks; FK cascades own dependent cleanup. */
 export async function deleteAgentConfig(
-	tx: DbClient, agentId: string, audit: AgentConfigAudit
+	tx: DbClient,
+	agentId: string,
+	audit: AgentConfigAudit
 ): Promise<boolean> {
 	const store = createPostgresAgentConfigStore(tx);
 	const before = await store.getMetadata(agentId);
 	if (!before) return false;
 	await store.deleteMetadata(agentId);
-	await insertConfigChangeEventInTransaction({
-		...audit, resourceKind: "agent", resourceId: agentId, op: "deleted",
-		summary: `Agent '${agentId}' deleted`, before: { ...before }, state: null,
-	}, tx);
+	await insertConfigChangeEventInTransaction(
+		{
+			...audit,
+			resourceKind: "agent",
+			resourceId: agentId,
+			op: "deleted",
+			summary: `Agent '${agentId}' deleted`,
+			before: { ...before },
+			state: null,
+		},
+		tx
+	);
 	return true;
 }

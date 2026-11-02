@@ -13,12 +13,19 @@ import { Hono, type Context } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { Type, type TObject } from "@sinclair/typebox";
 import {
-  CreateInferenceProviderAction, DeleteInferenceProviderAction, ListInferenceProvidersAction,
-  RotateInferenceProviderKeyAction, SetDefaultInferenceProviderAction,
-  SetInferenceProviderCapabilityAction, UpdateInferenceProviderAction,
-  type ManageInferenceProvidersArgs,
+	CreateInferenceProviderAction,
+	DeleteInferenceProviderAction,
+	ListInferenceProvidersAction,
+	type ManageInferenceProvidersArgs,
+	RotateInferenceProviderKeyAction,
+	SetDefaultInferenceProviderAction,
+	SetInferenceProviderCapabilityAction,
+	UpdateInferenceProviderAction,
 } from "@lobu/core/contracts/tools/manage-inference-providers";
-import { manageInferenceProviders, providerAuditTransaction } from "../tools/admin/manage_inference_providers";
+import {
+	manageInferenceProviders,
+	providerAuditTransaction,
+} from "../tools/admin/manage_inference_providers";
 import { AccessDeniedError } from "../tools/access-control";
 import { extractAuthContext, toToolContext } from "../tools/execute";
 import { validateToolArgs } from "../tools/validate-args";
@@ -61,7 +68,10 @@ import {
 	createPostgresAgentConfigStore,
 } from "./stores/postgres-stores";
 import { PostgresSecretStore } from "./stores/postgres-secret-store";
-import { ensureOAuthInferenceProvider, getOrgDefaultModel } from "./stores/provider-secrets";
+import {
+	ensureOAuthInferenceProvider,
+	getOrgDefaultModel,
+} from "./stores/provider-secrets";
 
 const routes = new Hono<{ Bindings: Env }>();
 
@@ -536,30 +546,35 @@ routes.post("/", async (c) => {
 	// Seed provisioning defaults in the INSERT so concurrent idempotent creates
 	// cannot observe a partially initialized row or overwrite operator settings.
 	return sql.begin(async (tx) => {
-	const inserted = await insertAgentConfig(tx,
-		{ agent_id: agentId, name, description }, { platform: "lobu", userId: user.id },
-		undefined, { organizationId: orgId, ...getApplyContext(c) });
-
-	if (!inserted) {
-		// Another writer (or a previous apply cycle) already owns this id in
-		// *this* org. Return idempotent 200 with the existing row's metadata.
-		// Cross-org collisions are no longer possible — the PK is per-org now.
-		const existing = await createPostgresAgentConfigStore(tx).getMetadata(agentId);
-		if (!existing) {
-			return c.json({ error: "Agent metadata missing" }, 500);
-		}
-		return c.json(
-			{
-				agentId,
-				name: existing.name,
-				description: existing.description,
-			},
-			200
+		const inserted = await insertAgentConfig(
+			tx,
+			{ agent_id: agentId, name, description },
+			{ platform: "lobu", userId: user.id },
+			undefined,
+			{ organizationId: orgId, ...getApplyContext(c) }
 		);
-	}
 
-	return c.json({ agentId, name, description }, 201);
-  });
+		if (!inserted) {
+			// Another writer (or a previous apply cycle) already owns this id in
+			// *this* org. Return idempotent 200 with the existing row's metadata.
+			// Cross-org collisions are no longer possible — the PK is per-org now.
+			const existing =
+				await createPostgresAgentConfigStore(tx).getMetadata(agentId);
+			if (!existing) {
+				return c.json({ error: "Agent metadata missing" }, 500);
+			}
+			return c.json(
+				{
+					agentId,
+					name: existing.name,
+					description: existing.description,
+				},
+				200
+			);
+		}
+
+		return c.json({ agentId, name, description }, 201);
+	});
 });
 
 // ── Org-scoped inference-provider routes ─────────────────────────────────────
@@ -569,33 +584,61 @@ routes.post("/", async (c) => {
 // defined lower in this file.
 
 /** Adapt the existing REST shapes to the same validated action runner as MCP/SDK. */
-async function inferenceProviderRequest(c: Context<{ Bindings: Env }>, schema: TObject, params: Record<string, string> = {}) {
-  if (schema.properties.action.const !== "list") {
-    const denied = requireManageAgentAccess(c);
-    if (denied) return denied;
-  }
-  const orgId = requireOrgId(c);
-  if (typeof orgId !== "string") return orgId;
-  try {
-    let body: unknown = {};
-    const rawBody = await c.req.text();
-    if (rawBody) {
-      try { body = JSON.parse(rawBody); }
-      catch { throw new ToolUserError("Invalid or missing JSON body", 400); }
-    }
-    // URL selectors and action cannot be supplied or retargeted by the body.
-    const validated = validateToolArgs("manage_inference_providers", Type.Omit(schema, ["action", ...Object.keys(params)]), body) as object;
-    const args = { ...validated, ...params, action: schema.properties.action.const } as ManageInferenceProvidersArgs;
-    const result = await manageInferenceProviders(args, c.env, toToolContext(extractAuthContext(c)));
-    return c.json(result, args.action === "create" ? 201 : 200);
-  } catch (error) {
-    if (error instanceof ToolUserError) return c.json({ error: error.message }, error.httpStatus as ContentfulStatusCode);
-    if (error instanceof AccessDeniedError) return c.json({ error: error.message }, 403);
-    throw error;
-  }
+async function inferenceProviderRequest(
+	c: Context<{ Bindings: Env }>,
+	schema: TObject,
+	params: Record<string, string> = {}
+) {
+	if (schema.properties.action.const !== "list") {
+		const denied = requireManageAgentAccess(c);
+		if (denied) return denied;
+	}
+	const orgId = requireOrgId(c);
+	if (typeof orgId !== "string") return orgId;
+	try {
+		let body: unknown = {};
+		const rawBody = await c.req.text();
+		if (rawBody) {
+			try {
+				body = JSON.parse(rawBody);
+			} catch {
+				throw new ToolUserError("Invalid or missing JSON body", 400);
+			}
+		}
+		// URL selectors and action cannot be supplied or retargeted by the body.
+		const validated = validateToolArgs(
+			"manage_inference_providers",
+			Type.Omit(schema, ["action", ...Object.keys(params)]),
+			body
+		) as object;
+		const args = {
+			...validated,
+			...params,
+			action: schema.properties.action.const,
+		} as ManageInferenceProvidersArgs;
+		const result = await manageInferenceProviders(
+			args,
+			c.env,
+			toToolContext(extractAuthContext(c))
+		);
+		return c.json(result, args.action === "create" ? 201 : 200);
+	} catch (error) {
+		if (error instanceof ToolUserError) {
+			return c.json(
+				{ error: error.message },
+				error.httpStatus as ContentfulStatusCode
+			);
+		}
+		if (error instanceof AccessDeniedError) {
+			return c.json({ error: error.message }, 403);
+		}
+		throw error;
+	}
 }
 
-routes.get("/inference-providers", c => inferenceProviderRequest(c, ListInferenceProvidersAction));
+routes.get("/inference-providers", (c) =>
+	inferenceProviderRequest(c, ListInferenceProvidersAction)
+);
 
 // Bundled provider catalog (PUBLIC metadata only — no secrets). Renders the
 // default "Available" add-cards on the inference-providers page; each entry
@@ -861,12 +904,35 @@ async function readProviderId(c: any): Promise<unknown> {
 	return body.providerId;
 }
 
-routes.post("/inference-providers", c => inferenceProviderRequest(c, CreateInferenceProviderAction));
-routes.put("/inference-providers/:slug", c => inferenceProviderRequest(c, UpdateInferenceProviderAction, { slug: c.req.param("slug") }));
-routes.put("/inference-providers/:slug/default", c => inferenceProviderRequest(c, SetDefaultInferenceProviderAction, { slug: c.req.param("slug") }));
-routes.put("/inference-providers/:slug/capabilities/:modality", c => inferenceProviderRequest(c, SetInferenceProviderCapabilityAction, { slug: c.req.param("slug"), modality: c.req.param("modality") }));
-routes.put("/inference-providers/:slug/key", c => inferenceProviderRequest(c, RotateInferenceProviderKeyAction, { slug: c.req.param("slug") }));
-routes.delete("/inference-providers/:slug", c => inferenceProviderRequest(c, DeleteInferenceProviderAction, { slug: c.req.param("slug") }));
+routes.post("/inference-providers", (c) =>
+	inferenceProviderRequest(c, CreateInferenceProviderAction)
+);
+routes.put("/inference-providers/:slug", (c) =>
+	inferenceProviderRequest(c, UpdateInferenceProviderAction, {
+		slug: c.req.param("slug"),
+	})
+);
+routes.put("/inference-providers/:slug/default", (c) =>
+	inferenceProviderRequest(c, SetDefaultInferenceProviderAction, {
+		slug: c.req.param("slug"),
+	})
+);
+routes.put("/inference-providers/:slug/capabilities/:modality", (c) =>
+	inferenceProviderRequest(c, SetInferenceProviderCapabilityAction, {
+		slug: c.req.param("slug"),
+		modality: c.req.param("modality"),
+	})
+);
+routes.put("/inference-providers/:slug/key", (c) =>
+	inferenceProviderRequest(c, RotateInferenceProviderKeyAction, {
+		slug: c.req.param("slug"),
+	})
+);
+routes.delete("/inference-providers/:slug", (c) =>
+	inferenceProviderRequest(c, DeleteInferenceProviderAction, {
+		slug: c.req.param("slug"),
+	})
+);
 
 // ── Get agent detail ─────────────────────────────────────────────────────────
 
@@ -916,16 +982,17 @@ routes.patch("/:agentId", async (c) => {
 		return c.json({ error: "Agent not found" }, 404);
 	}
 
-  return getDb().begin(async (tx) => {
-    const orgId = c.get("organizationId") as string;
-    await lockOrganizationForRelationshipClaims(tx, orgId);
-    const locked = await tx`SELECT id FROM agents WHERE organization_id = ${orgId} AND id = ${agentId} FOR UPDATE`;
-    if (!locked.length) return c.json({ error: "Agent not found" }, 404);
-    await persistAgentMetadataPatch(tx, agentId, body, {
-      organizationId: orgId, ...getApplyContext(c),
-    });
-	return c.json({ success: true });
-  });
+	return getDb().begin(async (tx) => {
+		const orgId = c.get("organizationId") as string;
+		await lockOrganizationForRelationshipClaims(tx, orgId);
+		const locked = await tx`SELECT id FROM agents WHERE organization_id = ${orgId} AND id = ${agentId} FOR UPDATE`;
+		if (!locked.length) return c.json({ error: "Agent not found" }, 404);
+		await persistAgentMetadataPatch(tx, agentId, body, {
+			organizationId: orgId,
+			...getApplyContext(c),
+		});
+		return c.json({ success: true });
+	});
 });
 
 // ── Delete agent ─────────────────────────────────────────────────────────────
@@ -939,14 +1006,17 @@ routes.delete("/:agentId", async (c) => {
 		return c.json({ error: "Agent not found" }, 404);
 	}
 
-  return getDb().begin(async (tx) => {
-    const orgId = c.get("organizationId") as string;
-    await lockOrganizationForRelationshipClaims(tx, orgId);
-    const locked = await tx`SELECT id FROM agents WHERE organization_id = ${orgId} AND id = ${agentId} FOR UPDATE`;
-    if (!locked.length) return c.json({ error: "Agent not found" }, 404);
-    await deleteAgentConfig(tx, agentId, { organizationId: orgId, ...getApplyContext(c) });
-	return c.json({ success: true });
-  });
+	return getDb().begin(async (tx) => {
+		const orgId = c.get("organizationId") as string;
+		await lockOrganizationForRelationshipClaims(tx, orgId);
+		const locked = await tx`SELECT id FROM agents WHERE organization_id = ${orgId} AND id = ${agentId} FOR UPDATE`;
+		if (!locked.length) return c.json({ error: "Agent not found" }, 404);
+		await deleteAgentConfig(tx, agentId, {
+			organizationId: orgId,
+			...getApplyContext(c),
+		});
+		return c.json({ success: true });
+	});
 });
 
 // ── Get agent config (settings) ──────────────────────────────────────────────
@@ -1257,80 +1327,94 @@ routes.patch("/:agentId/config", async (c) => {
 		return c.json({ error: "Agent not found" }, 404);
 	}
 
-  return getDb().begin(async (tx) => {
-    const orgId = c.get("organizationId") as string;
-    await lockOrganizationForRelationshipClaims(tx, orgId);
-    const locked = await tx`SELECT id FROM agents WHERE organization_id = ${orgId} AND id = ${agentId} FOR UPDATE`;
-    if (!locked.length) return c.json({ error: "Agent not found" }, 404);
-    const transactionStore = createPostgresAgentConfigStore(tx);
-    const before = await transactionStore.getSettings(agentId);
-    const validationError = await validateAgentSettingsUpdate(updates, before, orgId, agentId);
-    if (validationError) {
-      if ("modelError" in validationError) {
-        return c.json(modelValidationResponse(validationError.modelError, { c, agentId }), 400);
-      }
-      return c.json(validationError, validationError.error === "models_validation_failed" ? 503 : 400);
-    }
-
-	// Auth profiles aren't part of the agent settings row — they're
-	// user-scoped and live in `user_auth_profiles` with secrets in the secret
-	// store. Pull them out of the settings patch and persist them through the
-	// proper path; otherwise an api-key typed into the UI is silently dropped.
-	const { authProfiles, ...settingsUpdates } = updates as {
-		authProfiles?: AuthProfile[];
-	} & Record<string, unknown>;
-
-	// Atomic cutover: the legacy model fields are GONE. An old client (pre-PR4
-	// CLI, stale web build) that still sends them would have its restricted
-	// declaration silently dropped to `models = NULL` = allow-all — a silent
-	// access widening. Reject loudly so the operator upgrades instead.
-	for (const legacyField of LEGACY_MODEL_FIELDS) {
-		if (legacyField in settingsUpdates) {
+	return getDb().begin(async (tx) => {
+		const orgId = c.get("organizationId") as string;
+		await lockOrganizationForRelationshipClaims(tx, orgId);
+		const locked = await tx`SELECT id FROM agents WHERE organization_id = ${orgId} AND id = ${agentId} FOR UPDATE`;
+		if (!locked.length) return c.json({ error: "Agent not found" }, 404);
+		const transactionStore = createPostgresAgentConfigStore(tx);
+		const before = await transactionStore.getSettings(agentId);
+		const validationError = await validateAgentSettingsUpdate(
+			updates,
+			before,
+			orgId,
+			agentId
+		);
+		if (validationError) {
+			if ("modelError" in validationError) {
+				return c.json(
+					modelValidationResponse(validationError.modelError, {
+						c,
+						agentId,
+					}),
+					400
+				);
+			}
 			return c.json(
-				{
-					error: "legacy_model_field",
-					error_description: `This server no longer accepts "${legacyField}". The agent's model configuration is now a single ordered "models" list of explicit "<provider>/<model>" refs. Upgrade your client (CLI / web) and send "models" instead.`,
-					field: legacyField,
-				},
-				400
+				validationError,
+				validationError.error === "models_validation_failed" ? 503 : 400
 			);
 		}
-	}
 
-	if (Array.isArray(authProfiles)) {
-		const user = c.get("user");
-		if (!user?.id) {
-			// Admin-PAT callers (`lobu apply`) manage declared-agent credentials
-			// out of band; reject only if they actually tried to set one here.
-			if (hasFreshCredential(authProfiles)) {
-				return c.json(
-					{ error: "Setting agent auth profiles requires a web session" },
-					403
-				);
-			}
-		} else {
-			try {
-				await reconcileAgentAuthProfiles(agentId, user.id, authProfiles);
-			} catch (error) {
+		// Auth profiles aren't part of the agent settings row — they're
+		// user-scoped and live in `user_auth_profiles` with secrets in the secret
+		// store. Pull them out of the settings patch and persist them through the
+		// proper path; otherwise an api-key typed into the UI is silently dropped.
+		const { authProfiles, ...settingsUpdates } = updates as {
+			authProfiles?: AuthProfile[];
+		} & Record<string, unknown>;
+
+		// Atomic cutover: the legacy model fields are GONE. An old client (pre-PR4
+		// CLI, stale web build) that still sends them would have its restricted
+		// declaration silently dropped to `models = NULL` = allow-all — a silent
+		// access widening. Reject loudly so the operator upgrades instead.
+		for (const legacyField of LEGACY_MODEL_FIELDS) {
+			if (legacyField in settingsUpdates) {
 				return c.json(
 					{
-						error:
-							error instanceof Error
-								? error.message
-								: "Failed to persist auth profiles",
+						error: "legacy_model_field",
+						error_description: `This server no longer accepts "${legacyField}". The agent's model configuration is now a single ordered "models" list of explicit "<provider>/<model>" refs. Upgrade your client (CLI / web) and send "models" instead.`,
+						field: legacyField,
 					},
-					503
+					400
 				);
 			}
 		}
-	}
 
-  await persistAgentSettingsPatch(tx, agentId, settingsUpdates, before, {
-    organizationId: orgId,
-    ...getApplyContext(c),
-  });
-	return c.json({ success: true });
-  });
+		if (Array.isArray(authProfiles)) {
+			const user = c.get("user");
+			if (!user?.id) {
+				// Admin-PAT callers (`lobu apply`) manage declared-agent credentials
+				// out of band; reject only if they actually tried to set one here.
+				if (hasFreshCredential(authProfiles)) {
+					return c.json(
+						{ error: "Setting agent auth profiles requires a web session" },
+						403
+					);
+				}
+			} else {
+				try {
+					await reconcileAgentAuthProfiles(agentId, user.id, authProfiles);
+				} catch (error) {
+					return c.json(
+						{
+							error:
+								error instanceof Error
+									? error.message
+									: "Failed to persist auth profiles",
+						},
+						503
+					);
+				}
+			}
+		}
+
+	await persistAgentSettingsPatch(tx, agentId, settingsUpdates, before, {
+		organizationId: orgId,
+		...getApplyContext(c),
+	});
+		return c.json({ success: true });
+	});
 });
 
 // ============================================================
