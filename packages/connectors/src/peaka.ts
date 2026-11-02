@@ -174,10 +174,21 @@ function normalise(value: unknown): string {
 
 /** Stable tie-break for rows that share the checkpoint timestamp. */
 function compareIds(a: string, b: string): number {
-	const na = Number(a);
-	const nb = Number(b);
-	if (Number.isFinite(na) && Number.isFinite(nb)) return na - nb;
+	if (/^-?\d+$/.test(a) && /^-?\d+$/.test(b)) {
+		const left = BigInt(a);
+		const right = BigInt(b);
+		if (left < right) return -1;
+		if (left > right) return 1;
+		return 0;
+	}
 	return a.localeCompare(b);
+}
+
+function compareValues(a: unknown, b: unknown): number {
+	const left = Number(a);
+	const right = Number(b);
+	if (Number.isFinite(left) && Number.isFinite(right)) return left - right;
+	return normalise(a).localeCompare(normalise(b));
 }
 
 function sameRecord(
@@ -447,13 +458,21 @@ export default class PeakaConnector extends ConnectorRuntime<PeakaCheckpoint, Pe
 			ctx.config as unknown as Record<string, unknown>,
 			ctx.query,
 		);
-		const rows = asRows(response);
-		const limited =
-			typeof ctx.limit === "number" && ctx.limit > 0 ? rows.slice(0, ctx.limit) : rows;
+		const rows = [...asRows(response)];
+		if (ctx.sort?.column) {
+			const { column, order } = ctx.sort;
+			rows.sort((a, b) => {
+				const result = compareValues(a[column], b[column]);
+				return order === "desc" ? -result : result;
+			});
+		}
+		const offset = typeof ctx.offset === "number" && ctx.offset > 0 ? ctx.offset : 0;
+		const end =
+			typeof ctx.limit === "number" && ctx.limit > 0 ? offset + ctx.limit : rows.length;
 		return {
-			rows: limited,
+			rows: rows.slice(offset, end),
 			columns: columnNames(response).map((name) => ({ name, type: "unknown" })),
-			total: limited.length,
+			total: rows.length,
 		};
 	}
 
@@ -490,6 +509,7 @@ export default class PeakaConnector extends ConnectorRuntime<PeakaCheckpoint, Pe
 		const checkpoint = ctx.checkpoint ?? {};
 		const cutoff = checkpoint.last_timestamp ? Date.parse(checkpoint.last_timestamp) : null;
 		const lastId = checkpoint.last_id ?? null;
+		const feedScope = ctx.feedId ? String(ctx.feedId) : ctx.feedKey;
 		const eligible = parsed.filter(({ id, occurredMs }) => {
 			if (cutoff === null || Number.isNaN(cutoff)) return true;
 			if (occurredMs > cutoff) return true;
@@ -499,7 +519,7 @@ export default class PeakaConnector extends ConnectorRuntime<PeakaCheckpoint, Pe
 		const page = eligible.slice(0, maxRows);
 
 		const events: EventEnvelope[] = page.map(({ row, id, occurredMs }) => ({
-			origin_id: `peaka-call:${projectId(config)}:${id}`,
+			origin_id: `peaka-call:${projectId(config)}:${feedScope}:${id}`,
 			origin_type: "call",
 			payload_type: "text",
 			title: `Call ${id}`,
@@ -671,7 +691,13 @@ export default class PeakaConnector extends ConnectorRuntime<PeakaCheckpoint, Pe
 		});
 		const sql = `SELECT * FROM "peaka"."table".${quoteIdentifier(table)} WHERE ${predicates.join(" AND ")} LIMIT 2`;
 		const response = await this.executeSql(config, sql);
-		return asRows(response)[0] ?? null;
+		const rows = asRows(response);
+		if (rows.length > 1) {
+			throw new Error(
+				`Peaka returned multiple rows for key (${keys.join(", ")}); refusing an ambiguous keyed write`,
+			);
+		}
+		return rows[0] ?? null;
 	}
 
 	private async importRow(

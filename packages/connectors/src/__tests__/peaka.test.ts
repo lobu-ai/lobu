@@ -283,6 +283,39 @@ describe("Peaka actions", () => {
 		expect(captured).toHaveLength(1);
 	});
 
+	test("query applies sort, offset and limit while reporting the full match count", async () => {
+		const connector = new PeakaConnector();
+		const { http } = stubHttp({
+			post: async () => ({
+				columns: [{ columnName: "id" }],
+				data: [{ id: "1" }, { id: "2" }, { id: "3" }],
+			}),
+		});
+		// biome-ignore lint/suspicious/noExplicitAny: private seam replaced for the unit test
+		(connector as any).http = () => http;
+
+		const result = await connector.query({
+			query: "SELECT id FROM x",
+			config,
+			limit: 1,
+			offset: 1,
+			sort: { column: "id", order: "desc" },
+		});
+		expect(result.rows).toEqual([{ id: "2" }]);
+		expect(result.total).toBe(3);
+	});
+
+	test("upsert_record rejects an ambiguous duplicate key instead of treating the first row as canonical", async () => {
+		const row = { idempotency_key: "dup", raw_transcript: "x" };
+		const { result } = await invoke(
+			"upsert_record",
+			{ table: "call_transcripts", record: row },
+			{ post: async () => ({ data: [row, { ...row, raw_transcript: "other" }] }) },
+		);
+		expect(result.success).toBe(false);
+		expect(result.error).toMatch(/multiple rows/);
+	});
+
 	test("invoke_flow posts to the configured Peaka host with the configured token", async () => {
 		const requests: Array<{ url: string; init?: RequestInit }> = [];
 		const originalFetch = globalThis.fetch;
@@ -358,7 +391,7 @@ describe("Peaka calls feed", () => {
 		expect(first.status).toBe("complete");
 		expect(committed[0]?.events).toHaveLength(1);
 		expect((committed[0]?.events[0] as Record<string, unknown>).origin_id).toBe(
-			"peaka-call:LePnbVBt:2070470",
+			"peaka-call:LePnbVBt:calls:2070470",
 		);
 		expect(committed[0]?.checkpoint).toMatchObject({
 			last_timestamp: "2026-10-31T11:04:14.000Z",
@@ -416,6 +449,77 @@ describe("Peaka calls feed", () => {
 		expect(committed[2]?.events).toHaveLength(0);
 	});
 
+	test("pages adjacent 64-bit ids without collapsing them through Number", async () => {
+		const rows = [
+			{ id: "9007199254740992", createdon: "2026-11-01T10:00:00Z", status: "a" },
+			{ id: "9007199254740993", createdon: "2026-11-01T10:00:00Z", status: "b" },
+		];
+		const connector = new PeakaConnector();
+		const { http } = stubHttp({ post: async () => ({ data: rows }) });
+		// biome-ignore lint/suspicious/noExplicitAny: private seam replaced for the unit test
+		(connector as any).http = () => http;
+
+		const committed: Array<{ events: Array<Record<string, unknown>>; checkpoint: unknown }> = [];
+		const base = {
+			feedId: 42,
+			feedKey: "calls",
+			config: {
+				...config,
+				query: "SELECT id, createdon, status FROM servicetitan.telecom.calls",
+				max_rows: 1,
+			},
+			commit: async (events: unknown[], checkpoint: unknown) => {
+				committed.push({ events: events as Array<Record<string, unknown>>, checkpoint });
+			},
+		};
+
+		await connector.sync({ ...base, checkpoint: null });
+		const second = await connector.sync({ ...base, checkpoint: committed[0]?.checkpoint });
+		expect(second.status).toBe("complete");
+		expect(committed[1]?.events.map((event) => event.metadata)).toMatchObject([
+			{ call_id: "9007199254740993" },
+		]);
+		expect(committed[1]?.events[0]?.origin_id).toBe(
+			"peaka-call:LePnbVBt:42:9007199254740993",
+		);
+	});
+
+	test("namespaces origin ids by feed instance", async () => {
+		const connector = new PeakaConnector();
+		const { http } = stubHttp({
+			post: async () => ({
+				data: [{ id: "7", createdon: "2026-11-01T10:00:00Z", status: "a" }],
+			}),
+		});
+		// biome-ignore lint/suspicious/noExplicitAny: private seam replaced for the unit test
+		(connector as any).http = () => http;
+
+		const origins: string[] = [];
+		const run = async (feedId: number) => {
+			const committed: Array<Array<Record<string, unknown>>> = [];
+			const ctx = {
+				feedId,
+				feedKey: "calls",
+				config: {
+					...config,
+					query: "SELECT id, createdon, status FROM servicetitan.telecom.calls",
+				},
+				checkpoint: null,
+				commit: async (events: unknown[]) => {
+					committed.push(events as Array<Record<string, unknown>>);
+				},
+			};
+			await connector.sync(ctx);
+			origins.push(String(committed[0]?.[0]?.origin_id));
+		};
+		await run(1);
+		await run(2);
+		expect(origins).toEqual([
+			"peaka-call:LePnbVBt:1:7",
+			"peaka-call:LePnbVBt:2:7",
+		]);
+	});
+
 	test("emits a changed row when the activity timestamp advances", async () => {
 		const connector = new PeakaConnector();
 		let rows = [{ id: "7", createdon: "2026-11-01T10:00:00Z", status: "Ringing" }];
@@ -442,7 +546,7 @@ describe("Peaka calls feed", () => {
 		expect(update.status).toBe("complete");
 		expect(committed[1]?.events).toHaveLength(1);
 		expect(committed[1]?.events[0]).toMatchObject({
-			origin_id: "peaka-call:LePnbVBt:7",
+			origin_id: "peaka-call:LePnbVBt:calls:7",
 			metadata: { call_id: "7", status: "Completed" },
 		});
 	});
