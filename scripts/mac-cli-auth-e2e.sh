@@ -17,7 +17,8 @@ RUN_LOG="$RUN_DIR/run.log"
 MOCK_LOG="$RUN_DIR/mock.log"
 OUT="$RUN_DIR/out.txt"
 
-if [ -x /opt/homebrew/opt/node@22/bin/node ] && ! node --version 2>/dev/null | grep -qE '^v(22|23|24)\.'; then
+NODE_MAJOR="$(node -p 'Number(process.versions.node.split(".")[0])' 2>/dev/null || echo 0)"
+if [ -x /opt/homebrew/opt/node@22/bin/node ] && { [ "$NODE_MAJOR" -lt 22 ] || [ "$NODE_MAJOR" -eq 25 ]; }; then
   export PATH="/opt/homebrew/opt/node@22/bin:$PATH"
 fi
 
@@ -257,7 +258,6 @@ frame = struct.pack('<I', len(req)) + req
 env = os.environ.copy()
 env['LOBU_CLI_DEV_PATH'] = '$LOBU_BIN'
 env['HOME'] = '$HOME'
-env['PATH'] = '/opt/homebrew/opt/node@22/bin:/opt/homebrew/bin:' + env.get('PATH','')
 proc = subprocess.run(
   ['$OWLETTO_BIN', 'chrome-extension://e2e-test-extension/'],
   input=frame, capture_output=True, env=env, timeout=30)
