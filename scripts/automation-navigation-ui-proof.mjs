@@ -77,9 +77,12 @@ export async function runAutomationNavigationProof({
       "Peek navigated the host page"
     );
   const assertRunPeek = async (runId) => {
-    await page.getByRole("region", { name: "Run outcome" }).waitFor();
-    await page
-      .getByText("No matching events from this run yet.", { exact: true })
+    const outcome = page.getByRole("region", { name: "Run outcome" });
+    await outcome.getByText("completed", { exact: true }).waitFor();
+    await outcome
+      .getByText("Browser-only fixture — not persisted or executed", {
+        exact: true,
+      })
       .waitFor();
     const href = await page
       .getByRole("link", { name: "Open full page", exact: true })
