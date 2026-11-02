@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { REDACTED_SENTINEL } from '@lobu/core';
 import { currentMcpActivityEventMetadata } from '../lobu/stores/mcp-client-conversations';
+import { getDb } from '../db/client';
 import { parsePositiveIntegerId } from '../utils/errors';
-import { insertEvent } from '../utils/insert-event';
+import { insertEvent, type InsertEventParams } from '../utils/insert-event';
 import logger from '../utils/logger';
 import { sanitizeAuditArgs } from './audit-args';
 import { AUDIT_SEMANTIC_TYPE } from './constants';
@@ -43,7 +44,25 @@ interface ToolInvocationAuditParams {
   error?: unknown;
   durationMs: number;
   ctx: Pick<ToolContext, 'userId' | 'tokenType' | 'clientId' | 'tokenName' | 'agentId' |
-    'mcpSessionId' | 'mcpConversationId'> & { organizationId: string | null };
+    'mcpSessionId' | 'mcpConversationId'> &
+    Partial<Pick<ToolContext, 'sourceContext' | 'actingRunId'>> & { organizationId: string | null };
+}
+
+async function insertToolAuditEvent(params: InsertEventParams, ctx: ToolInvocationAuditParams['ctx']) {
+  // This is server-verified execution context, never a tool argument or MCP
+  // client metadata. The native execution run wins over its Automation ancestor.
+  // Reads must not invalidate content: a refetch would itself append an audit.
+  const runId = ctx.sourceContext?.turnRunId ?? ctx.actingRunId;
+  if (runId == null || !params.organizationId) {
+    return insertEvent(params, { notifyContentChange: false });
+  }
+  return getDb().begin(async (sql) => {
+    // Keep the FK alive until the append commits. A pruned or foreign-workspace
+    // run stays unknown without dropping the read's audit or linking tenants.
+    const [run] = await sql`SELECT id FROM runs WHERE id = ${runId}
+      AND organization_id = ${params.organizationId} FOR KEY SHARE`;
+    return insertEvent({ ...params, runId: run ? Number(run.id) : null }, { sql, notifyContentChange: false });
+  });
 }
 
 function captureRequest(params: ToolInvocationAuditParams): Record<string, unknown> | null {
@@ -350,7 +369,7 @@ export async function recordToolInvocationAudit(
       params.toolName === 'manage_automations'
         ? manageAutomationsIdentity(params.args as Record<string, unknown>)
         : null;
-    await insertEvent({
+    await insertToolAuditEvent({
       entityIds: [],
       organizationId: params.ctx.organizationId,
       originId: `tool_invocation:${params.toolName}:${Date.now()}:${randomUUID()}`,
@@ -373,11 +392,7 @@ export async function recordToolInvocationAudit(
       },
       createdBy: params.ctx.userId ?? null,
       clientId: eventClientId(params.ctx),
-    }, {
-      // Reads are tool calls too; invalidating content for their audit row
-      // would make each client refetch trigger the next one.
-      notifyContentChange: false,
-    });
+    }, params.ctx);
   } catch (auditError) {
     logger.warn(
       { err: auditError, toolName: params.toolName },
