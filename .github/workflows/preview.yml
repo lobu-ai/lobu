@@ -60,6 +60,9 @@ jobs:
         get|resourcequotas|@PREVIEW_NS
         create|resourcequotas|@PREVIEW_NS
         patch|resourcequotas|@PREVIEW_NS
+        get|persistentvolumeclaims|@PREVIEW_NS
+        create|persistentvolumeclaims|@PREVIEW_NS
+        patch|persistentvolumeclaims|@PREVIEW_NS
         get|secrets|@PREVIEW_NS
         create|secrets|@PREVIEW_NS
         get|deployments.apps|@PREVIEW_NS
@@ -145,13 +148,28 @@ jobs:
 
       - name: Provision encryption key
         run: |
-          # Stable per-namespace key so a redeploy (or mid-life pod restart) can
-          # still read secrets written by the previous pod. The data volume is
-          # emptyDir, so nothing survives a redeploy itself.
+          # Keep the key alongside the persistent preview database so pod
+          # replacements can still read secrets written by the previous pod.
           if ! kubectl -n "$PREVIEW_NS" get secret preview-encryption >/dev/null 2>&1; then
             kubectl -n "$PREVIEW_NS" create secret generic preview-encryption \
               --from-literal=key="$(openssl rand -base64 32)"
           fi
+
+      - name: Preserve preview data across pod replacements
+        run: |
+          cat <<EOF | kubectl apply -f -
+          apiVersion: v1
+          kind: PersistentVolumeClaim
+          metadata:
+            name: preview-data
+            namespace: $PREVIEW_NS
+          spec:
+            accessModes: [ReadWriteOnce]
+            storageClassName: local-path
+            resources:
+              requests:
+                storage: 1Gi
+          EOF
 
       - name: Deploy preview
         run: |
@@ -251,7 +269,7 @@ jobs:
                       - { name: data, mountPath: /var/lib/lobu/data }
                 volumes:
                   - name: data
-                    emptyDir: {}
+                    persistentVolumeClaim: { claimName: preview-data }
           EOF
 
           kubectl expose deployment "$PREVIEW_NAME" \
@@ -344,6 +362,8 @@ jobs:
 
           CHROME_PATH="$chrome_path" node scripts/oauth-authorization-ui-proof.mjs \
             | tee "$PROOF_OUTPUT_DIR/proof.log"
+          echo "native_report_path=$(node -p 'JSON.parse(require("fs").readFileSync(process.env.PROOF_OUTPUT_DIR + "/results.json", "utf8")).native_report.path')" >> "$GITHUB_OUTPUT"
+          echo "native_editor_path=$(node -p 'JSON.parse(require("fs").readFileSync(process.env.PROOF_OUTPUT_DIR + "/results.json", "utf8")).native_report.editor_path')" >> "$GITHUB_OUTPUT"
 
       - name: Upload authorization UI proof
         id: oauth-ui-proof-upload
@@ -401,6 +421,8 @@ jobs:
             const prNumber = context.payload.pull_request?.number ?? Number(process.env.PR_NUMBER);
             const previewUrl = `https://lobu-pr-${prNumber}.${{ vars.TAILNET_DOMAIN }}`;
             const proofUrl = `${{ steps.oauth-ui-proof-upload.outputs.artifact-url || '' }}`;
+            const nativeReportPath = `${{ steps.oauth-ui-proof.outputs.native_report_path || '' }}`;
+            const nativeEditorPath = `${{ steps.oauth-ui-proof.outputs.native_editor_path || '' }}`;
 
             // Paginate: listComments defaults to 30 per page, and busy PRs
             // (review bots post here) routinely exceed that - the existing
@@ -424,6 +446,8 @@ jobs:
               `| **URL** | [${previewUrl}](${previewUrl}) |`,
               `| **Namespace** | \`lobu-preview-${prNumber}\` |`,
               "| **Status** | Running |",
+              ...(nativeReportPath ? [`| **Synthetic native report** | [Open saved report](${previewUrl}${nativeReportPath}) |`] : []),
+              ...(nativeEditorPath ? [`| **Automation editor** | [Open verified fixture](${previewUrl}${nativeEditorPath}) |`] : []),
               ...(proofUrl ? [`| **OAuth UI proof** | [Download screenshots](${proofUrl}) |`] : []),
               "",
               "_This preview is deleted when the PR closes or when the `preview` label is removed._",
