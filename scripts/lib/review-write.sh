@@ -69,7 +69,9 @@ run review drivers, spawn agents, commit, push, or post statuses.
 Emit exactly one JSON object, without fences or prose:
 {"summary":"what changed","decisions":[{"kind":"product|architecture|credentials|verification","finding":"unresolved finding","question":"decision needed from parent"}],"tests":[{"command":"focused command run","passed":true}]}
 Use empty arrays when appropriate. If tests cannot run, include a verification
-decision. A summary is never a passing review; the independent read-only reviewer will
+decision. The tests array records final checks against the fixed tree only;
+describe an expected failing reproduction before the fix in summary instead.
+A summary is never a passing review; the independent read-only reviewer will
 inspect the changed tree independently.
 
 Findings:

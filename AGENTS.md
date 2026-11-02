@@ -6,7 +6,7 @@
 - Read the nearest package `AGENTS.md` before editing that package; grep `docs/GOTCHAS.md` when something looks inexplicable.
 
 ## Unrecoverable — never do these
-- **Never write to `~/Code/lobu` directly.** Run `make task-setup NAME=<slug>` first, and never `git switch` in the main checkout — other sessions share it. For a pure submodule-pointer bump, `make bump SUBMODULE=packages/owletto` is the lightweight isolated-worktree exception; it also posts the required statuses.
+- **Never write to `~/Code/lobu` directly.** Run `make task-setup NAME=<slug>` first, and never `git switch` in the main checkout — other sessions share it. For a pure submodule-pointer bump, `make bump SUBMODULE=packages/owletto` is the lightweight isolated-worktree exception; it records UI proof and enables auto-merge, and trusted CI posts its safe-class `pi-review`.
 - **Stage by explicit path** (`git add -- <paths>`, never `-A`). A commit is a snapshot, so a stale file copy left by earlier work in the same worktree silently reverts merged PRs. After commit/rebase, `git diff --name-only origin/main...HEAD` must equal your intended file list; extras = stop.
 - **`events` is append-only.** Never `DELETE FROM events`; tombstone or supersede instead.
 - **Never bulk-delete prod `organization` rows**, including zero-activity ones — empty-looking orgs are usually real signups. Surface them one at a time for confirmation.

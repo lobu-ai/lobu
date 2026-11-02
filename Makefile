@@ -145,7 +145,8 @@ e2e-browser:
 
 # Lightweight shortcut for "trivial submodule pointer bump" work. Creates a
 # minimal worktree (no bun install, no .env copy, no port allocation), advances
-# the submodule, posts both required local statuses, and opens an auto-merge PR.
+# the submodule, records UI proof, and opens an auto-merge PR (trusted CI posts
+# the safe-class pi-review).
 # For agent work that also touches submodule *code*, use `make task-setup`
 # instead — it sets up the full env.
 bump:

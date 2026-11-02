@@ -18,8 +18,10 @@
 #   - Lobu CLI context       (nothing to talk to)
 #
 # It creates a worktree off origin/main, advances the submodule pointer,
-# commits, pushes, opens a PR, posts the safe-class review status, records UI
-# proof when reusable/provided, and enables auto-merge.
+# commits, pushes, opens a PR, records UI proof when reusable/provided, and
+# enables auto-merge. The trusted Review Policy workflow posts the safe-class
+# pi-review status after exact-HEAD CI passes, so no local review runs here:
+# CI cannot have finished seconds after the push.
 #
 # Why this exists: the convention is `~/Code/lobu` is read-only for agents
 # (see AGENTS.md "Scope discipline"). Without this shortcut, agents reach
@@ -142,12 +144,6 @@ After:  $SHORT_AFTER
 Picks up: $TARGET_SUBJECT" 2>&1 | tail -1)
     echo "  $PR_URL"
 
-    echo "→ posting required review status"
-    if ! (cd "$WT" && make review); then
-        echo "error: pi-review failed; PR remains open at $PR_URL" >&2
-        exit 1
-    fi
-
     echo "→ recording Owletto UI review"
     if [[ -n "${ARTIFACT:-}" ]]; then
         if ! (cd "$WT" && make ui-review ARTIFACT="$ARTIFACT"); then
@@ -166,7 +162,7 @@ Picks up: $TARGET_SUBJECT" 2>&1 | tail -1)
         exit 1
     fi
 else
-    echo "error: gh CLI is required to open the PR and post its required statuses" >&2
+    echo "error: gh CLI is required to open the PR and post its UI review status" >&2
     echo "branch $BRANCH was pushed and remains available" >&2
     exit 1
 fi
