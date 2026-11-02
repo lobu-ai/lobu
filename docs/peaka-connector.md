@@ -63,6 +63,14 @@ The flow is Peaka-owned: its "Update a record" node selects by the key and
 updates the columns. This keeps Peaka's native write semantics in Peaka and
 avoids duplicating them in Lobu.
 
+Concurrency caveat: Peaka accepted the `isUnique` flag on the key column but
+reported it as `false`, and CSV import does not enforce a unique constraint. Two
+concurrent writers that both observe an absent row can therefore append
+duplicates. The runner serialises one recording/one key locally; multi-writer
+dedupe needs a Peaka-side unique constraint or the upsert flow to own the
+check-and-insert atomically.
+
+
 Reproducer for the gap (no secrets):
 
 ```bash
