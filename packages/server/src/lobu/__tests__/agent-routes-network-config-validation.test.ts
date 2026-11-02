@@ -3,10 +3,7 @@
  * any domain grammar and are refused at the PATCH write boundary.
  */
 import { describe, expect, test } from "bun:test";
-import { installRouteTestMocks } from "./helpers/route-test-mocks";
-
-installRouteTestMocks();
-const { validateNetworkConfig } = await import("../agent-routes");
+import { validateNetworkConfig } from "../agent-settings";
 
 describe("validateNetworkConfig", () => {
   test("accepts absent, null and well-formed lists", () => {

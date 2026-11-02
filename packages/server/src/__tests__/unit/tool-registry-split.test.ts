@@ -42,6 +42,7 @@ const ADMIN_TOOL_SDK_NAMESPACE: Record<
 	manage_conversations: "conversations",
 	manage_feeds: "feeds",
 	manage_auth_profiles: "authProfiles",
+	manage_inference_providers: "inferenceProviders",
 	manage_operations: "operations",
 	notify: "notifications",
 	manage_schedules: "schedules",

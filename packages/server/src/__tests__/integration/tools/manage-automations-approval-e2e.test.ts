@@ -17,6 +17,7 @@
  */
 
 import { beforeAll, describe, expect, it } from "vitest";
+import { upsertEntityApprovalPolicy } from "../../../authz/entity-policy";
 import type { Env } from "../../../index";
 import type { AuthContext } from "../../../tools/execute";
 import { executeTool } from "../../../tools/execute";
@@ -640,4 +641,183 @@ describe("manage_automations — builder gate e2e", () => {
 		`;
 		expect(runRows[0]?.status).toBe("failed");
 	});
+	it.each(["update", "create_version", "set_reaction_script", "delete"] as const)(
+		"rejects stale %s approval after a same-owner configuration edit",
+		async (action) => {
+			if (action === "delete") await upsertEntityApprovalPolicy(orgId, {
+				resourceClass: "agent_config", principalKind: "agent", principalId: agentId,
+				effects: { delete: "approval" },
+			});
+			const created = await executeTool("manage_automations", {
+				action: "create", slug: `stale-${action}`, name: "Before",
+				prompt: "Original prompt", managed_agent_id: agentId,
+			}, TEST_ENV, ownerCtx) as { automation_id: string };
+			const automationId = created.automation_id;
+			const pending = await executeTool("manage_automations", {
+				action,
+				...(action === "delete" ? { automation_ids: [automationId] } : { automation_id: automationId }),
+				...(action === "update" ? { tags: ["proposed"] } : {}),
+				...(action === "create_version" ? { prompt: "Proposed prompt", set_as_current: true } : {}),
+				...(action === "set_reaction_script" ? { reaction_script: "export default async () => {};" } : {}),
+			}, TEST_ENV, agentCtx) as PendingApproval;
+			expect(pending.status).toBe("pending_approval");
+			await executeTool("manage_automations", {
+				action: "update", automation_id: automationId, tags: ["newer"],
+			}, TEST_ENV, ownerCtx);
+			await executeTool("manage_operations", { action: "approve", run_id: pending.run_id }, TEST_ENV, ownerCtx);
+			const sql = getTestDb();
+			const [run] = await sql`SELECT status FROM runs WHERE id = ${pending.run_id}`;
+			expect(run.status).toBe("failed");
+			const [row] = await sql`SELECT status, reaction_script, to_jsonb(tags) AS tags,
+				(SELECT prompt FROM automation_versions WHERE id = a.current_version_id) AS prompt
+				FROM automations a WHERE id = ${automationId} AND organization_id = ${orgId}`;
+			expect(row.status).not.toBe("archived");
+			expect(row.tags).toEqual(["newer"]);
+			expect(row.prompt).toBe("Original prompt");
+			expect(row.reaction_script).toBeNull();
+		},
+	);
+
+	it("applies an approved delete whose target configuration is unchanged", async () => {
+		await upsertEntityApprovalPolicy(orgId, {
+			resourceClass: "agent_config", principalKind: "agent", principalId: agentId,
+			effects: { delete: "approval" },
+		});
+		const created = await executeTool("manage_automations", {
+			action: "create", slug: "approved-delete", prompt: "Original", managed_agent_id: agentId,
+		}, TEST_ENV, ownerCtx) as { automation_id: string };
+		const pending = await executeTool("manage_automations", {
+			action: "delete", automation_ids: [created.automation_id],
+		}, TEST_ENV, agentCtx) as PendingApproval;
+		expect(pending.status).toBe("pending_approval");
+		await executeTool("manage_operations", { action: "approve", run_id: pending.run_id }, TEST_ENV, ownerCtx);
+		const sql = getTestDb();
+		const [run] = await sql`SELECT status FROM runs WHERE id = ${pending.run_id}`;
+		expect(run.status).toBe("completed");
+		const [row] = await sql`SELECT status FROM automations WHERE id = ${created.automation_id}`;
+		expect(row.status).toBe("archived");
+	});
+
+	it.each(["unrelated target IDs", "non-current version", "legacy proposal"])(
+		"rejects an approval with %s instead of overwriting unseen configuration",
+		async (scenario) => {
+			const created = await executeTool("manage_automations", {
+				action: "create", slug: `approval-base-${scenario.replaceAll(" ", "-")}`,
+				prompt: "Original", managed_agent_id: agentId,
+			}, TEST_ENV, ownerCtx) as { automation_id: string };
+			const other = await executeTool("manage_automations", {
+				action: "create", slug: `approval-other-${scenario.replaceAll(" ", "-")}`,
+				prompt: "Other", managed_agent_id: agentId,
+			}, TEST_ENV, ownerCtx) as { automation_id: string };
+			const pending = await executeTool("manage_automations", {
+				action: scenario === "non-current version" ? "create_version" : "update",
+				automation_id: created.automation_id,
+				...(scenario === "unrelated target IDs" ? { automation_ids: [other.automation_id] } : {}),
+				...(scenario === "non-current version" ? { name: "Proposed" } : { tags: ["proposed"] }),
+			}, TEST_ENV, agentCtx) as PendingApproval;
+			expect(pending.status).toBe("pending_approval");
+			const sql = getTestDb();
+			if (scenario === "legacy proposal") {
+				await sql`UPDATE runs SET action_input = action_input - 'base' WHERE id = ${pending.run_id}`;
+			} else if (scenario === "non-current version") {
+				await executeTool("manage_automations", {
+					action: "create_version", automation_id: created.automation_id,
+					prompt: "Unseen draft", set_as_current: false,
+				}, TEST_ENV, ownerCtx);
+			} else {
+				await executeTool("manage_automations", {
+					action: "update", automation_id: created.automation_id, tags: ["newer"],
+				}, TEST_ENV, ownerCtx);
+			}
+			await executeTool("manage_operations", { action: "approve", run_id: pending.run_id }, TEST_ENV, ownerCtx);
+			const [run] = await sql`SELECT status FROM runs WHERE id = ${pending.run_id}`;
+			expect(run.status).toBe("failed");
+			const [row] = await sql`SELECT to_jsonb(tags) AS tags,
+				(SELECT prompt FROM automation_versions WHERE id = a.current_version_id) AS prompt
+				FROM automations a WHERE id = ${created.automation_id}`;
+			expect(row.tags).not.toContain("proposed");
+			expect(row.prompt).toBe("Original");
+		},
+	);
+
+	it.each([
+		{ action: "update", label: "runtime update", patch: { tags: ["proposed"] } },
+		{ action: "create_version", label: "version", patch: { prompt: "Proposed" } },
+		{ action: "create_version", label: "version sibling", patch: { prompt: "Proposed" } },
+		{ action: "set_reaction_script", label: "reaction", patch: { reaction_script: "export default async () => {};" } },
+		{ action: "set_reaction_script", label: "reaction clear", patch: { reaction_script: "" } },
+	])("rechecks $label after waiting for a concurrent archive's row lock", async ({ action, label, patch }) => {
+		const created = await executeTool("manage_automations", {
+			action: "create", slug: `row-lock-${label.replaceAll(" ", "-")}`,
+			prompt: "Original", managed_agent_id: agentId,
+		}, TEST_ENV, ownerCtx) as { automation_id: string };
+		const sql = getTestDb();
+		let lockedId = created.automation_id;
+		const originalReaction = label === "reaction clear" ? "export default async () => {};" : null;
+		if (originalReaction) await executeTool("manage_automations", {
+			action: "set_reaction_script", automation_id: created.automation_id, reaction_script: originalReaction,
+		}, TEST_ENV, ownerCtx);
+		if (label === "version sibling") {
+			const sibling = await executeTool("manage_automations", {
+				action: "create", slug: "row-lock-sibling", prompt: "Original", managed_agent_id: agentId,
+			}, TEST_ENV, ownerCtx) as { automation_id: string };
+			lockedId = sibling.automation_id;
+			await sql`UPDATE automations SET automation_group_id = ${created.automation_id},
+				current_version_id = (SELECT current_version_id FROM automations WHERE id = ${created.automation_id})
+				WHERE id = ${lockedId}`;
+		}
+		const pending = await executeTool("manage_automations", {
+			action, automation_id: created.automation_id, ...patch,
+		}, TEST_ENV, agentCtx) as PendingApproval;
+		expect(pending.status).toBe("pending_approval");
+		let approval: Promise<unknown> | undefined;
+		try {
+			await sql.begin(async (tx) => {
+				await tx`SELECT id FROM automations WHERE id = ${lockedId} FOR UPDATE`;
+				const [holder] = await tx`SELECT pg_backend_pid() AS pid`;
+				approval = executeTool("manage_operations", { action: "approve", run_id: pending.run_id }, TEST_ENV, ownerCtx);
+				let blocked = false;
+				for (let i = 0; i < 250; i++) {
+					const waiters = await sql`SELECT 1 FROM pg_stat_activity
+						WHERE ${Number(holder.pid)}::integer = ANY(pg_blocking_pids(pid))
+						AND query ILIKE '%automations%' LIMIT 1`;
+					if (waiters.length) { blocked = true; break; }
+					await new Promise(resolve => setTimeout(resolve, 20));
+				}
+				expect(blocked).toBe(true);
+				// Commit the competing archive only AFTER approval reached its mutation lock.
+				await tx`UPDATE automations SET status = 'archived' WHERE id = ${lockedId}`;
+			});
+		} finally {
+			await approval;
+		}
+		const [run] = await sql`SELECT status FROM runs WHERE id = ${pending.run_id}`;
+		expect(run.status).toBe("failed");
+		const [row] = await sql`SELECT status, reaction_script, to_jsonb(tags) AS tags,
+			(SELECT prompt FROM automation_versions WHERE id = a.current_version_id) AS prompt
+			FROM automations a WHERE id = ${created.automation_id}`;
+		expect(row.status).toBe(label === "version sibling" ? "active" : "archived");
+		expect(row.tags).not.toContain("proposed");
+		expect(row.prompt).toBe("Original");
+		expect(row.reaction_script).toBe(originalReaction);
+	});
+
+	it("execution bookkeeping does not invalidate a pending configuration edit", async () => {
+		const created = await executeTool("manage_automations", {
+			action: "create", slug: "approval-runtime-bookkeeping", prompt: "Original",
+			managed_agent_id: agentId,
+		}, TEST_ENV, ownerCtx) as { automation_id: string };
+		const pending = await executeTool("manage_automations", {
+			action: "update", automation_id: created.automation_id, tags: ["approved"],
+		}, TEST_ENV, agentCtx) as PendingApproval;
+		const sql = getTestDb();
+		await sql`UPDATE automations SET next_run_at = NOW(), consecutive_scheduled_failures = 1,
+			updated_at = NOW() WHERE id = ${created.automation_id} AND organization_id = ${orgId}`;
+		await executeTool("manage_operations", { action: "approve", run_id: pending.run_id }, TEST_ENV, ownerCtx);
+		const [run] = await sql`SELECT status FROM runs WHERE id = ${pending.run_id}`;
+		expect(run.status).toBe("completed");
+		const [row] = await sql`SELECT to_jsonb(tags) AS tags FROM automations WHERE id = ${created.automation_id}`;
+		expect(row.tags).toEqual(["approved"]);
+	});
+
 });

@@ -186,6 +186,11 @@ describe("all agent MCP tools — registry-driven e2e (model-free)", () => {
 				coverage: "reachable",
 				note: "lists feeds for the org",
 			},
+			manage_inference_providers: {
+				args: { action: "list" },
+				coverage: "reachable",
+				note: "lists provider metadata for the org",
+			},
 			manage_auth_profiles: {
 				args: { action: "list_auth_profiles" },
 				coverage: "reachable",

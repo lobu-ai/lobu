@@ -3,22 +3,15 @@
  * that protects the guardrail aggregator from malformed `guardrailsInline` rows.
  * An entry with an invalid `stage` (or missing name/policy) would otherwise be
  * persisted verbatim and then crash the aggregator mid-message when it indexes
- * `seen[stage]`. The PATCH `/:agentId/config` route rejects such payloads (400).
- *
- * Dynamic-import agent-routes AFTER route-test mocks: a static top-level import
- * of agent-routes binds the real `mcpAuth` (which calls getWorkspaceProvider)
- * permanently for this process — and when bun evaluates test files, that can
- * land before another file's installRouteTestMocks(), so later route tests get
- * 500 WorkspaceProvider-not-initialized instead of the mocked auth path.
+ * `seen[stage]`. The PATCH `/:agentId/config` route and the `manage_agents`
+ * tool both reject such payloads.
  */
 
 import { describe, expect, test } from "bun:test";
-import { installRouteTestMocks } from "./helpers/route-test-mocks";
-
-installRouteTestMocks();
-const { validateGuardrailsInline, validateSkillsConfig } = await import(
-  "../agent-routes.js"
-);
+import {
+  validateGuardrailsInline,
+  validateSkillsConfig,
+} from "../agent-settings";
 
 describe("validateGuardrailsInline", () => {
   test("returns null for an absent payload", () => {

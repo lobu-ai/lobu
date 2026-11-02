@@ -72,10 +72,11 @@ void _stageCheck;
  * `tools` are optional here even though each variant requires one of them.
  * Narrowing the shape would force every one of the ~37 read sites to discriminate
  * before touching a field, for no safety gain: `guardrailsInline` is only ever
- * written through `validateGuardrailsInline` (server/src/lobu/agent-routes.ts),
+ * written through `validateGuardrailsInline` (server/src/lobu/agent-settings.ts),
  * which rejects a judge with no policy AND a require-tool with no tools before
- * anything is persisted. Keep that validator as the enforcement point; if a
- * second write path is ever added, it must call the same validator.
+ * anything is persisted. Both write paths (the PATCH config route and the
+ * `manage_agents` tool) reach it through `validateAgentSettingsUpdate`; a new
+ * write path must do the same.
  */
 export const AgentInlineGuardrailSchema = Type.Object({
   name: Type.String(),

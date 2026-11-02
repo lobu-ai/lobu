@@ -182,6 +182,19 @@ export class AccessDeniedError extends Error {
   }
 }
 
+/** Apply the same worker-token admin limit at direct and nested SDK dispatch. */
+export function enforceAdminToolAllowlist(
+  requiredAccess: ToolAccessLevel,
+  toolName: string,
+  adminTools: readonly string[] | null | undefined,
+): void {
+  if (requiredAccess === 'admin' && adminTools?.length && !adminTools.includes(toolName)) {
+    throw new AccessDeniedError(
+      `This agent run may not perform admin actions with ${toolName}. Allowed admin tools: ${adminTools.join(', ')}.`
+    );
+  }
+}
+
 /**
  * A `client.org()` or workspace-argument target outside the caller's reach: not
  * granted, not a member, or a session bound to its own workspace. A permission

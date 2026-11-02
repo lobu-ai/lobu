@@ -483,25 +483,48 @@ async function installConnectorDefinitions(
     if (row.verb === "noop" || row.verb === "drift") continue;
     const def = row.desired;
     if (!def) continue;
+    const key = def.key ?? def.declaredKeyHint;
+    const remote = catalog.find(
+      (entry) => entry.installed && entry.key === key
+    );
+    if (row.verb === "update" && !remote?.version) {
+      throw new ApiError(
+        `Cannot safely update connector '${key}': its active version is missing. Refresh the catalog and retry.`
+      );
+    }
+    const target =
+      row.verb === "update" && remote?.version
+        ? { connector_key: remote.key, expected_version: remote.version }
+        : undefined;
     let result: Awaited<ReturnType<typeof client.installConnector>>;
     if (def.sourcePath) {
       const artifact = def.compiledArtifact;
       if (!artifact) {
         throw new Error(`Local connector was not prepared: ${def.sourcePath}`);
       }
-      result = await client.installConnector({
-        sourceCode: artifact.sourceFiles.files[artifact.sourceFiles.entrypoint],
-        compiledCode: artifact.compiledCode,
-        sourceFiles: artifact.sourceFiles,
-        dependencies: artifact.dependencies,
-      });
+      result = await client.installConnector(
+        {
+          sourceCode:
+            artifact.sourceFiles.files[artifact.sourceFiles.entrypoint],
+          compiledCode: artifact.compiledCode,
+          sourceFiles: artifact.sourceFiles,
+          dependencies: artifact.dependencies,
+        },
+        target
+      );
     } else if (def.sourceCode !== undefined) {
       // `source_url` connector: source was fetched into `sourceCode` and has no
       // local project/node_modules to bundle against — upload it raw and let
       // the gateway compile it (the pre-existing path).
-      result = await client.installConnector({ sourceCode: def.sourceCode });
+      result = await client.installConnector(
+        { sourceCode: def.sourceCode },
+        target
+      );
     } else {
-      result = await client.installConnector({ sourceUrl: def.sourceUrl });
+      result = await client.installConnector(
+        { sourceUrl: def.sourceUrl },
+        target
+      );
     }
     if (result.connectorKey) {
       locallySuppliedKeys.add(result.connectorKey);
@@ -1038,7 +1061,7 @@ export async function executePlan(
               ? { name: w.name }
               : {}),
             ...(versionBound.has("description")
-              ? { description: w.description ?? null }
+              ? { description: w.description ?? "" }
               : {}),
             ...(versionBound.has("prompt") ? { prompt: w.prompt } : {}),
             ...(versionBound.has("skills")
