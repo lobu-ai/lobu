@@ -102,7 +102,7 @@ export function handleGetComponentReference(): {
           name: 'json-diff',
           category: 'Native Lobu details',
           description:
-            'Reuse the native collapsible JSON change viewer. Both object sides render a before/after diff; one object side renders a static snapshot. Missing or non-object sides are treated as absent. This is a display, not an approval or mutation.',
+            'Reuse the native collapsible JSON change viewer. Both object sides render a before/after diff; one object side renders a static snapshot. Missing or non-object sides are treated as absent, and nothing renders when both are absent. This is a display, not an approval or mutation.',
           props: { before: 'Object or null.', after: 'Object or null.' },
           example: { type: 'json-diff', props: { before: '{{change.before}}', after: '{{change.after}}' } },
         },

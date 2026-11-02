@@ -180,7 +180,8 @@ jobs:
           # redeploys exhaust it and the host goes dark until the limit resets).
           # Apply updates the ingress in place; PR close deletes the namespace,
           # which removes the ingress and lets the operator reap the proxy.
-          kubectl -n "$PREVIEW_NS" delete deployment "$PREVIEW_NAME" --ignore-not-found
+          # Wait for dependent pods before reusing the embedded database volume.
+          kubectl -n "$PREVIEW_NS" delete deployment "$PREVIEW_NAME" --ignore-not-found --cascade=foreground --wait=true --timeout=120s
           kubectl -n "$PREVIEW_NS" delete svc "$PREVIEW_NAME" --ignore-not-found
 
           # Read the label here rather than from the event payload so a
