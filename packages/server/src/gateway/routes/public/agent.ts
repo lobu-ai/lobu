@@ -63,7 +63,7 @@ import {
   isRestrictedOrgAgentMember,
 } from "../shared/org-agent-access.js";
 import { errorResponses } from "../shared/openapi-responses.js";
-import { verifySettingsSessionOrToken } from "./settings-auth.js";
+import { verifySettingsSession, verifySettingsSessionOrToken } from "./settings-auth.js";
 import {
   formatActivityAttentionBlock,
   listOrgActivity,
@@ -1743,7 +1743,7 @@ export function createAgentApi(config: AgentApiConfig): Hono {
       // Legacy OAuth subjects and platform ids are different namespaces;
       // Bearer and Automation requests retain their existing unknown actor.
       const humanSession = !tokenFromHeader(c) && session.intent?.kind !== "automation_run"
-        ? await verifySettingsSessionOrToken(c, "token") : null;
+        ? await verifySettingsSession(c) : null;
       const humanMember = humanSession?.platform === "external" && !humanSession.oauthUserId
         && !humanSession.agentId && msgAccess.callerUserId
         ? await authorizeOrgAgentMemberInProvenOrg({

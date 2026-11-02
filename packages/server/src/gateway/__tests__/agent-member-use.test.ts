@@ -232,8 +232,37 @@ describe("POST /api/v1/agents — org member using an agent they don't own", () 
     expect(sessions.store.get(expectedKey)).toBe(stored);
   });
 
-  for (const caller of ["member", "admin", "owner", "unmapped owner", "legacy OAuth session", "SSE ticket", "bearer with cookie", "agent session", "worker", "automation"] as const) {
-    test(`message admission freezes the current human only (${caller})`, async () => {
+  type AdmissionRequest = { session: ThreadSession; headers: Record<string, string>; url: string };
+  type AdmissionCase = {
+    caller: string;
+    auth: (() => SettingsTokenPayload) | null;
+    expectedStatus: number;
+    expectedUser: string | null;
+    setup?: (request: AdmissionRequest) => unknown;
+    repeatAs?: string;
+  };
+  const workerAuthorization = (session: ThreadSession) => `Bearer ${generateWorkerToken(AGENT_ID, session.conversationId, "initiator-deployment", {
+    channelId: "api", agentId: AGENT_ID, organizationId: AGENT_ORG, platform: "api",
+  })}`;
+  const admissionCases: AdmissionCase[] = [
+    { caller: "member", auth: () => sessionFor(MEMBER_ID), expectedStatus: 200, expectedUser: MEMBER_ID },
+    { caller: "admin", auth: () => sessionFor(ADMIN_ID), expectedStatus: 200, expectedUser: ADMIN_ID, repeatAs: AGENT_OWNER_ID },
+    { caller: "owner", auth: () => sessionFor(AGENT_OWNER_ID), expectedStatus: 200, expectedUser: AGENT_OWNER_ID },
+    { caller: "unmapped owner", auth: () => sessionFor("legacy-provider-subject"), expectedStatus: 200, expectedUser: null,
+      setup: () => orgContext.run({ organizationId: AGENT_ORG }, () => userAgentsStore.addAgent("external", "legacy-provider-subject", AGENT_ID)) },
+    { caller: "legacy OAuth session", auth: () => ({ ...sessionFor(AGENT_OWNER_ID), oauthUserId: AGENT_OWNER_ID }), expectedStatus: 200, expectedUser: null },
+    { caller: "SSE ticket", auth: null, expectedStatus: 401, expectedUser: null,
+      setup: (request) => { request.url += `?token=${encodeURIComponent(encrypt(JSON.stringify(sessionFor(AGENT_OWNER_ID))))}`; } },
+    { caller: "bearer with cookie", auth: () => sessionFor(AGENT_OWNER_ID), expectedStatus: 403, expectedUser: null,
+      setup: ({ session, headers }) => { headers.authorization = workerAuthorization(session); } },
+    { caller: "agent session", auth: () => ({ ...sessionFor(AGENT_OWNER_ID), agentId: AGENT_ID }), expectedStatus: 200, expectedUser: null },
+    { caller: "worker", auth: null, expectedStatus: 200, expectedUser: null,
+      setup: ({ session, headers }) => { headers.authorization = workerAuthorization(session); } },
+    { caller: "automation", auth: () => sessionFor(AGENT_OWNER_ID), expectedStatus: 200, expectedUser: null,
+      setup: ({ session }) => { session.intent = { kind: "automation_run", runId: 123, automationId: 456 }; } },
+  ];
+  for (const caller of admissionCases) {
+    test(`message admission freezes the current human only (${caller.caller})`, async () => {
       const queue = new RunsQueue();
       await queue.start();
       const producer = new QueueProducer(queue);
@@ -248,43 +277,24 @@ describe("POST /api/v1/agents — org member using an agent they don't own", () 
         expect((await postCreate(app, { thread: "initiator", userId: "routing-only" }, { "x-lobu-org": AGENT_ORG })).status).toBe(201);
         const session = sessions.getStored();
         if (!session) throw new Error("Missing initiator session");
-        const headers: Record<string, string> = { "content-type": "application/json", "x-lobu-org": AGENT_ORG };
-        setAuthProvider(() => sessionFor(caller === "admin" ? ADMIN_ID : caller === "member" ? MEMBER_ID : AGENT_OWNER_ID));
-        if (caller === "unmapped owner") {
-          await orgContext.run({ organizationId: AGENT_ORG }, () => userAgentsStore.addAgent("external", "legacy-provider-subject", AGENT_ID));
-          setAuthProvider(() => sessionFor("legacy-provider-subject"));
-        }
-        if (caller === "legacy OAuth session") setAuthProvider(() => ({ ...sessionFor(AGENT_OWNER_ID), oauthUserId: AGENT_OWNER_ID }));
-        if (caller === "bearer with cookie") headers.authorization = `Bearer ${generateWorkerToken(AGENT_ID, session.conversationId, "cookie-deployment", {
-          channelId: "api", agentId: AGENT_ID, organizationId: AGENT_ORG, platform: "api",
-        })}`;
-        if (caller === "agent session") setAuthProvider(() => ({ ...sessionFor(AGENT_OWNER_ID), agentId: AGENT_ID }));
-        if (caller === "worker") {
-          setAuthProvider(null);
-          headers.authorization = `Bearer ${generateWorkerToken(AGENT_ID, session.conversationId, "initiator-deployment", {
-            channelId: "api", agentId: AGENT_ID, organizationId: AGENT_ORG, platform: "api",
-          })}`;
-        }
-        if (caller === "automation") session.intent = { kind: "automation_run", runId: 123, automationId: 456 };
-        let url = `/api/v1/agents/${encodeURIComponent(session.conversationId)}/messages`;
-        if (caller === "SSE ticket") {
-          // /api/sse-ticket also accepts PATs: its user-shaped ticket is not human initiation.
-          setAuthProvider(null);
-          url += `?token=${encodeURIComponent(encrypt(JSON.stringify(sessionFor(AGENT_OWNER_ID))))}`;
-        }
-        const send = () => app.request(url, {
-          method: "POST", headers,
+        const request = {
+          session,
+          headers: { "content-type": "application/json", "x-lobu-org": AGENT_ORG } as Record<string, string>,
+          url: `/api/v1/agents/${encodeURIComponent(session.conversationId)}/messages`,
+        };
+        setAuthProvider(caller.auth);
+        await caller.setup?.(request);
+        const send = () => app.request(request.url, {
+          method: "POST", headers: request.headers,
           body: JSON.stringify({ content: "hello", messageId: "frozen-actor", actorUserId: MEMBER_ID }),
         });
         const sent = await send();
-        if (caller === "bearer with cookie" || caller === "SSE ticket") {
-          // Preserve existing denials; neither credential can borrow a human session.
-          expect(sent.status).toBe(caller === "SSE ticket" ? 401 : 403);
+        expect(sent.status).toBe(caller.expectedStatus);
+        if (caller.expectedStatus !== 200) {
           expect(await getDb()`SELECT id FROM runs WHERE queue_name = 'messages'`).toHaveLength(0);
           return;
         }
-        expect(sent.status).toBe(200);
-        const expectedUser = caller === "admin" ? ADMIN_ID : caller === "owner" ? AGENT_OWNER_ID : caller === "member" ? MEMBER_ID : null;
+        const expectedUser = caller.expectedUser;
         const sql = getDb();
         const read = () => sql`SELECT id, initiator_kind, initiator_ref, created_by_user_id FROM runs
           WHERE organization_id = ${AGENT_ORG} AND queue_name = 'messages' AND action_input->>'messageId' = 'frozen-actor'`;
@@ -292,9 +302,10 @@ describe("POST /api/v1/agents — org member using an agent they don't own", () 
         expect(admitted).toMatchObject(expectedUser ? {
           initiator_kind: "user", initiator_ref: { user_id: expectedUser }, created_by_user_id: expectedUser,
         } : { initiator_kind: null, initiator_ref: null, created_by_user_id: null });
-        if (caller === "admin") {
+        const repeatAs = caller.repeatAs;
+        if (repeatAs) {
           // A later duplicate from another authorized person cannot retag the first admission.
-          setAuthProvider(() => sessionFor(AGENT_OWNER_ID));
+          setAuthProvider(() => sessionFor(repeatAs));
           expect((await send()).status).toBe(200);
           expect(await read()).toEqual([admitted]);
         }
