@@ -561,6 +561,9 @@ function scanCanonicalVocabulary(violations: Violation[]): void {
         // timestamped filename. The filename is history, not a live contract.
         const canonicalLine = line
           .replace(/\b20\d{12}_[A-Za-z0-9_-]+\.sql\b/g, "")
+          // Playwright route teardown waits for in-flight handlers. Keep this
+          // exception tied to the API call, not arbitrary owned option objects.
+          .replace(/\.unrouteAll\(\{\s*behavior:\s*(["'])wait\1\s*\}\)/g, "")
           // External platform APIs use this standards-shaped property name.
           // Strip only exact known option values; owned contracts use canonical
           // vocabulary and remain fully scanned.
