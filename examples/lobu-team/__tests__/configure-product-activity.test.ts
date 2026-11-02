@@ -1,4 +1,5 @@
 import { describe, expect, mock, test } from "bun:test";
+import { productActivityConfiguration } from "../product-activity-digest.prompt";
 import { configureProductActivityDigest } from "../scripts/configure-product-activity";
 
 function harness(pendingAt?: number, status = "completed") {
@@ -30,12 +31,53 @@ function harness(pendingAt?: number, status = "completed") {
           typeof configureProductActivityDigest
         >[0],
         "42",
-        "export default async () => {};"
+        "export default async () => {};",
+        {
+          namespace: "synthetic-production",
+          logStart: "2026-10-01T00:00:00.000Z",
+        }
       ),
   };
 }
 
 describe("external production digest configuration", () => {
+  test("rejects unsafe selectors and ambiguous bootstrap timestamps before configuration", () => {
+    const settings = {
+      namespace: "synthetic-production",
+      logStart: "2026-10-01T00:00:00.000Z",
+    };
+    for (const id of [
+      "0",
+      "-1",
+      "1 OR 1=1",
+      "42; SELECT 1",
+      "9007199254740992",
+      "42.0",
+    ])
+      expect(() => productActivityConfiguration(id, settings)).toThrow();
+    for (const namespace of [
+      "x' OR 1=1 --",
+      "x\\'",
+      "UPPER",
+      "-start",
+      "end-",
+      "x".repeat(64),
+    ])
+      expect(() =>
+        productActivityConfiguration("42", { ...settings, namespace })
+      ).toThrow();
+    for (const logStart of [
+      "invalid",
+      "2026-10-01T00:01:00.000Z",
+      "2026-10-01T00:00:00+01:00",
+      "2026-10-01",
+    ])
+      expect(() =>
+        productActivityConfiguration("42", { ...settings, logStart })
+      ).toThrow();
+    expect(() => productActivityConfiguration("42", settings)).not.toThrow();
+  });
+
   test("stops at each approval before attempting dependent mutations", async () => {
     for (const pendingAt of [1, 2, 3, 4, 5]) {
       const h = harness(pendingAt);

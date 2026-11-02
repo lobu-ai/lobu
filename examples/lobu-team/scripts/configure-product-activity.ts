@@ -1,8 +1,5 @@
 import type { ClientSDK } from "../../../packages/server/src/sandbox/client-sdk";
-import {
-  productActivityPrompt,
-  productActivitySources,
-} from "../product-activity-digest.prompt";
+import { productActivityConfiguration } from "../product-activity-digest.prompt";
 
 function needsApproval(result: unknown): boolean {
   return (
@@ -20,8 +17,10 @@ function needsApproval(result: unknown): boolean {
 export async function configureProductActivityDigest(
   client: Pick<ClientSDK, "automations">,
   automationId: string,
-  reactionScript: string
+  reactionScript: string,
+  settings: Parameters<typeof productActivityConfiguration>[1]
 ) {
+  const configuration = productActivityConfiguration(automationId, settings);
   const current = (await client.automations.get({
     automation_id: automationId,
   })) as {
@@ -62,16 +61,14 @@ export async function configureProductActivityDigest(
   if (needsApproval(executor)) return executor;
   const version = await client.automations.createVersion({
     automation_id: automationId,
-    prompt: productActivityPrompt,
-    sources: productActivitySources,
-    outputs: { digests: { event: "summary" } },
+    ...configuration,
     name: "Lobu production activity digest",
     description:
-      "External MCP analysis of product activity with ClickHouse log evidence and Loki comparison; notify only meaningful changes.",
+      "External MCP analysis of product activity and ClickHouse logs with independent durable log progress; notify only meaningful changes.",
     reactions_guidance:
-      "Complete every window. Return digests: [] when nothing materially changed; otherwise one concise evidence-backed summary. The reaction owns delivery.",
+      "Complete every product window with digests and log_progress arrays. Only verified contiguous ClickHouse windows advance log progress; quiet progress does not notify. The reaction owns delivery.",
     change_notes:
-      "Compare ClickHouse counters with retained Loki windows and investigate through ClickHouse; preserve checkpoint, sources and delivery destination.",
+      "Use ClickHouse as the primary log source with keyed durable progress and bounded late-arrival rechecks; preserve the product arrival checkpoint and delivery destination.",
     set_as_current: true,
   });
   if (needsApproval(version)) return version;

@@ -1,8 +1,66 @@
 import type { ReactionClient, ReactionContext } from "@lobu/connector-sdk";
 
+// Completion validates this refinement before persisting either output or
+// advancing the product arrival checkpoint. Counts stay lossless UInt64 strings.
+const counter = { type: "string", pattern: "^(0|[1-9][0-9]*)$", maxLength: 20 };
+const timestamp = { type: "string", format: "date-time", maxLength: 24 };
+
 export const input = {
   type: "object",
   properties: {
+    log_progress: {
+      type: "array",
+      maxItems: 1,
+      items: {
+        type: "object",
+        properties: {
+          content: { type: "string", minLength: 1, maxLength: 240 },
+          metadata: {
+            type: "object",
+            properties: {
+              checkpoint_key: { type: "string", minLength: 1, maxLength: 160 },
+              namespace: { type: "string", minLength: 1, maxLength: 63 },
+              window_end: timestamp,
+              recent_windows: {
+                type: "array",
+                maxItems: 6,
+                items: {
+                  type: "object",
+                  properties: {
+                    window_start: timestamp,
+                    window_end: timestamp,
+                    parsed_records: counter,
+                    errors: counter,
+                    warnings: counter,
+                    http_client_errors: counter,
+                    http_server_errors: counter,
+                  },
+                  required: [
+                    "window_start",
+                    "window_end",
+                    "parsed_records",
+                    "errors",
+                    "warnings",
+                    "http_client_errors",
+                    "http_server_errors",
+                  ],
+                  additionalProperties: false,
+                },
+              },
+            },
+            required: [
+              "checkpoint_key",
+              "namespace",
+              "window_end",
+              "recent_windows",
+            ],
+            additionalProperties: false,
+          },
+        },
+        required: ["content", "metadata"],
+        additionalProperties: false,
+      },
+    },
     digests: {
       type: "array",
       maxItems: 1,

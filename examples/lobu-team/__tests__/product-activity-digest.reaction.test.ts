@@ -1,6 +1,7 @@
 import { describe, expect, mock, test } from "bun:test";
 import type { ReactionClient, ReactionContext } from "@lobu/connector-sdk";
 import Ajv from "ajv";
+import addFormats from "ajv-formats";
 import { notify } from "../../../packages/server/src/tools/admin/notify";
 import { getArgsValidator } from "../../../packages/server/src/tools/validate-args";
 import reaction, { input } from "../product-activity-digest.reaction";
@@ -22,7 +23,20 @@ function harness(
     notifications: { send },
   } as unknown as ReactionClient;
   const ctx = {
-    extracted_data: { digests },
+    extracted_data: {
+      digests,
+      log_progress: [
+        {
+          content: "Checked the next quiet log window",
+          metadata: {
+            checkpoint_key: "product-activity-digest:42:synthetic-production",
+            namespace: "synthetic-production",
+            window_end: "2026-10-01T00:20:00.000Z",
+            recent_windows: [],
+          },
+        },
+      ],
+    },
     window: { automation_id: 42, run_id: 77 },
   } as unknown as ReactionContext;
   return { send, query, run: () => reaction(ctx, client) };
@@ -76,7 +90,7 @@ describe("production digest delivery", () => {
   });
 
   test("every accepted boundary body passes the real notification validator", async () => {
-    const validate = new Ajv().compile(input);
+    const validate = addFormats(new Ajv()).compile(input);
     for (const content of [
       "x".repeat(1000),
       "x".repeat(1001),
@@ -91,7 +105,9 @@ describe("production digest delivery", () => {
 
   test("accepted Unicode titles pass the real notification validator", async () => {
     const digest = { title: "😀".repeat(160), content: "A meaningful update." };
-    expect(new Ajv().compile(input)({ digests: [digest] })).toBe(true);
+    expect(addFormats(new Ajv()).compile(input)({ digests: [digest] })).toBe(
+      true
+    );
     await harness([digest]).run();
   });
 
@@ -109,7 +125,7 @@ describe("production digest delivery", () => {
   });
 
   test("the declared output rejects multiple digests, empty bodies, and raw-sized payloads", () => {
-    const validate = new Ajv().compile(input);
+    const validate = addFormats(new Ajv()).compile(input);
     expect(validate({ digests: [] })).toBe(true);
     for (const digests of [
       [{ content: "" }],
