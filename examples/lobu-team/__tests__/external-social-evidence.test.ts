@@ -14,10 +14,14 @@ const policy = {
 const scripts = await buildExternalSocial(policy);
 // All receipt paths execute the bundled handoff after sandbox recompilation,
 // without imports or a host URL global.
-const { verifySocialEvidence, timelineReaderSource } = runInNewContext(
+const {
+  verifySocialEvidence,
+  verifySocialEvidenceForRetention,
+  timelineReaderSource,
+} = runInNewContext(
   `${new Bun.Transpiler({ loader: "ts", minifyWhitespace: true }).transformSync(
     scripts.preflight
-  )}\n({verifySocialEvidence, timelineReaderSource});`
+  )}\n({verifySocialEvidence, verifySocialEvidenceForRetention, timelineReaderSource});`
 );
 
 const post = {
@@ -112,6 +116,242 @@ function fixture() {
     run: () => verifySocialEvidence(client, policy, 10, data),
   };
 }
+
+const retentionPolicy = {
+  ...policy,
+  personal_retention: {
+    workspace: policy.workspace,
+    sources: {
+      x: [
+        {
+          connection_id: 7,
+          connector_key: "chrome",
+          device_worker_id: "synthetic-mini",
+        },
+      ],
+    },
+  },
+};
+
+function retentionFixture() {
+  const h = fixture();
+  Object.assign(h.source, {
+    connection_id: 7,
+    connector_key: "chrome",
+    target_device_worker_id: "synthetic-mini",
+    executed_by_device_worker_id: "synthetic-mini",
+  });
+  return h;
+}
+
+test("opt-in retention returns full verified source bodies separately from the briefing", async () => {
+  const h = retentionFixture();
+  h.source.output.value.posts[0] = {
+    ...post,
+    text: post.text + " 🙂".repeat(3000),
+  };
+  const result = await verifySocialEvidenceForRetention(
+    h.client,
+    retentionPolicy,
+    10,
+    h.data
+  );
+  expect(result.source_pages).toHaveLength(1);
+  expect(result.source_pages[0]).toMatchObject({
+    connection_id: 7,
+    connector_key: "chrome",
+    device_attestation: "recorded",
+    posts: [h.source.output.value.posts[0]],
+  });
+  expect(JSON.stringify(result.verified)).not.toContain(post.text);
+  expect(
+    result.verified.briefings[0].metadata.evidence_verification
+      .verified_findings
+  ).toBe(1);
+});
+
+test.each([
+  { connection_id: 8 },
+  { connector_key: "foreign" },
+  { executed_by_device_worker_id: "foreign-device" },
+  { target_device_worker_id: "foreign-device" },
+])("retention rejects a valid body outside the pinned source binding: %j", async (change) => {
+  const h = retentionFixture();
+  Object.assign(h.source, change);
+  await expect(
+    verifySocialEvidenceForRetention(h.client, retentionPolicy, 10, h.data)
+  ).rejects.toThrow("Retention source");
+});
+
+test("retention fails closed without owner configuration or for company/cross-workspace policy", async () => {
+  for (const configured of [
+    policy,
+    {
+      ...retentionPolicy,
+      company_linkedin_path: "/company/synthetic/admin/feed/",
+    },
+    { ...retentionPolicy, receipt_workspaces: { x: ["foreign"] } },
+    {
+      ...retentionPolicy,
+      personal_retention: {
+        ...retentionPolicy.personal_retention,
+        workspace: "foreign",
+      },
+    },
+  ]) {
+    const h = retentionFixture();
+    await expect(
+      verifySocialEvidenceForRetention(h.client, configured, 10, h.data)
+    ).rejects.toThrow("Personal source-owner retention is not configured");
+  }
+});
+
+test("missing device attestation requires an explicit owner binding exception", async () => {
+  const h = retentionFixture();
+  Object.assign(h.source, {
+    target_device_worker_id: null,
+    executed_by_device_worker_id: null,
+  });
+  await expect(
+    verifySocialEvidenceForRetention(h.client, retentionPolicy, 10, h.data)
+  ).rejects.toThrow("Retention source device mismatch");
+  const configured = {
+    ...retentionPolicy,
+    personal_retention: {
+      workspace: policy.workspace,
+      sources: {
+        x: [
+          {
+            ...retentionPolicy.personal_retention.sources.x[0],
+            allow_missing_device_receipt: true,
+          },
+        ],
+      },
+    },
+  };
+  const result = await verifySocialEvidenceForRetention(
+    h.client,
+    configured,
+    10,
+    h.data
+  );
+  expect(result.source_pages[0].device_attestation).toBe("unavailable");
+});
+
+test("retention excludes unapproved fields from retained browser posts", async () => {
+  const h = retentionFixture();
+  h.source.output.value.posts[0] = {
+    ...post,
+    unrelated_private_data: "must not be copied",
+    execution_input: { token: "synthetic-secret" },
+  };
+  const result = await verifySocialEvidenceForRetention(
+    h.client,
+    retentionPolicy,
+    10,
+    h.data
+  );
+  expect(result.source_pages[0].posts[0].text).toBe(post.text);
+  expect(JSON.stringify(result.source_pages)).not.toContain("synthetic-secret");
+  expect(JSON.stringify(result.source_pages)).not.toContain(
+    "unrelated_private_data"
+  );
+});
+
+test("a blocked source stays diagnostic without becoming an archive requirement", async () => {
+  const h = retentionFixture();
+  h.source.status = "failed";
+  h.data.findings = [];
+  const result = await verifySocialEvidenceForRetention(
+    h.client,
+    retentionPolicy,
+    10,
+    h.data
+  );
+  expect(result.source_pages).toEqual([]);
+  expect(result.verified.briefings[0].metadata.coverage[0]).toMatchObject({
+    status: "blocked",
+    posts_read: 0,
+  });
+  expect(
+    result.verified.briefings[0].metadata.evidence_verification.issues.length
+  ).toBeGreaterThan(0);
+});
+
+test("retention keeps valid bodies when coverage includes a failed read", async () => {
+  const h = retentionFixture();
+  h.data.briefings[0].metadata.coverage[0].read_receipts.push({
+    workspace: policy.workspace,
+    run_id: 21,
+  });
+  const getRun = h.client.org;
+  h.client.org = async (workspace) => {
+    const org = await getRun(workspace);
+    const original = org.operations.getRun;
+    org.operations.getRun = async (id) =>
+      id === 21 ? { run: { ...h.source, status: "failed" } } : original(id);
+    return org;
+  };
+  const result = await verifySocialEvidenceForRetention(
+    h.client,
+    retentionPolicy,
+    10,
+    h.data
+  );
+  expect(result.source_pages).toHaveLength(1);
+  expect(result.verified.briefings[0].metadata.coverage[0]).toMatchObject({
+    status: "partial",
+    posts_read: 1,
+  });
+});
+
+test("retention bounds receipt input before any source read", async () => {
+  const h = retentionFixture();
+  h.data.findings = [];
+  h.data.briefings[0].metadata.coverage[0].read_receipts = Array.from(
+    { length: 33 },
+    (_, index) => ({ workspace: policy.workspace, run_id: index + 20 })
+  );
+  let reads = 0;
+  const org = h.client.org;
+  h.client.org = async (workspace) => {
+    reads++;
+    return org(workspace);
+  };
+  await expect(
+    verifySocialEvidenceForRetention(h.client, retentionPolicy, 10, h.data)
+  ).rejects.toThrow("Retention receipt bound exceeded");
+  expect(reads).toBe(0);
+});
+
+test("retention uses the same verified source snapshot instead of reading its body twice", async () => {
+  const h = retentionFixture();
+  const getOrg = h.client.org;
+  let sourceReads = 0;
+  h.client.org = async (workspace) => {
+    const org = await getOrg(workspace);
+    const getRun = org.operations.getRun;
+    org.operations.getRun = async (id) => {
+      if (id === 20 && ++sourceReads > 1)
+        return {
+          run: {
+            ...h.source,
+            output: { value: { ...h.source.output.value, posts: [] } },
+          },
+        };
+      return getRun(id);
+    };
+    return org;
+  };
+  const result = await verifySocialEvidenceForRetention(
+    h.client,
+    retentionPolicy,
+    10,
+    h.data
+  );
+  expect(result.source_pages[0].posts[0].text).toBe(post.text);
+  expect(result.verified.briefings[0].metadata.coverage[0].posts_read).toBe(1);
+});
 
 test("derives actual unique counts and verifies exact-source finding before completion", async () => {
   const h = fixture();
@@ -827,12 +1067,14 @@ test("a media-only post leaves its page verified but partial", async () => {
   });
 });
 
-test("stored HN posts may be read in later windows while exact identity and partial coverage remain enforced", async () => {
+async function storedFixture() {
   const h = fixture();
   const event = {
     id: 33,
     origin_id: "synthetic-hn-123",
     connector_key: "hackernews",
+    connection_id: 55,
+    semantic_type: "story",
     payload_text: post.text,
     title: "Synthetic HN post",
     source_url: "https://news.ycombinator.com/item?id=123",
@@ -869,25 +1111,99 @@ test("stored HN posts may be read in later windows while exact identity and part
     ...policy,
     platforms: ["hackernews"],
     receipt_workspaces: { hackernews: [policy.workspace] },
+    stored_sources: {
+      hackernews: {
+        connection_id: 55,
+        connector_key: "hackernews",
+        semantic_types: ["story"],
+      },
+    },
   };
-  await verifySocialEvidence(client, hnPolicy, 10, h.data);
+  return { ...h, client, event, receipt, coverage, finding, hnPolicy };
+}
+
+test("stored HN posts may be read in later windows while exact identity and partial coverage remain enforced", async () => {
+  const { data, client, receipt, coverage, finding, hnPolicy } =
+    await storedFixture();
+  await verifySocialEvidence(client, hnPolicy, 10, data);
   expect(coverage).toMatchObject({
     posts_read: 1,
     recent_posts_read: 1,
     status: "partial",
   });
   expect(
-    h.data.briefings[0]!.metadata.evidence_verification.verified_findings
+    data.briefings[0]!.metadata.evidence_verification.verified_findings
   ).toBe(1);
   finding.metadata.read_receipts = [
     { ...receipt, origin_id: "wrong-source-identity" },
   ];
   await expect(
-    verifySocialEvidence(client, hnPolicy, 10, h.data)
+    verifySocialEvidence(client, hnPolicy, 10, data)
   ).rejects.toThrow("Stored source identity mismatch");
   finding.metadata.read_receipts = [receipt];
   receipt.origin_id = "wrong-source-identity";
   await expect(
-    verifySocialEvidence(client, hnPolicy, 10, h.data)
+    verifySocialEvidence(client, hnPolicy, 10, data)
   ).rejects.toThrow("Stored source identity mismatch");
+});
+
+test.each([
+  { connection_id: 56 },
+  { semantic_type: "comment" },
+  { connector_key: "foreign" },
+])("stored evidence rejects a source outside its binding: %j", async (change) => {
+  const h = await storedFixture();
+  Object.assign(h.event, change);
+  await expect(
+    verifySocialEvidence(h.client, h.hnPolicy, 10, h.data)
+  ).rejects.toThrow("Stored source identity mismatch");
+});
+
+test("stored titles cannot inflate body coverage", async () => {
+  const h = await storedFixture();
+  h.event.payload_text = "";
+  h.data.findings = [];
+  await verifySocialEvidence(h.client, h.hnPolicy, 10, h.data);
+  expect(h.coverage).toMatchObject({
+    posts_read: 0,
+    recent_posts_read: 0,
+    status: "partial",
+  });
+});
+
+test("stored Reddit evidence keeps its connection, kind and permalink identity", async () => {
+  const h = await storedFixture();
+  Object.assign(h.event, {
+    connector_key: "reddit",
+    semantic_type: "post",
+    origin_id: "reddit_post_t3_abc123",
+    source_url: "https://www.reddit.com/r/example/comments/abc123/title/",
+  });
+  h.receipt.origin_id = h.event.origin_id;
+  h.coverage.platform = "reddit";
+  Object.assign(h.finding, { source_url: h.event.source_url });
+  Object.assign(h.finding.metadata, {
+    platform: "reddit",
+    source_url: h.event.source_url,
+    origin_id: h.event.origin_id,
+  });
+  const redditPolicy = {
+    ...h.hnPolicy,
+    platforms: ["reddit"],
+    receipt_workspaces: { reddit: [policy.workspace] },
+    stored_sources: {
+      reddit: {
+        connection_id: 55,
+        connector_key: "reddit",
+        semantic_types: ["post"],
+      },
+    },
+  };
+  await verifySocialEvidence(h.client, redditPolicy, 10, h.data);
+  expect(h.coverage).toMatchObject({ posts_read: 1, status: "partial" });
+  h.event.source_url =
+    "https://www.reddit.com/r/example/comments/foreign/title/";
+  await expect(
+    verifySocialEvidence(h.client, redditPolicy, 10, h.data)
+  ).rejects.toThrow("Stored Reddit permalink identity mismatch");
 });

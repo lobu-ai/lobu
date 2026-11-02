@@ -171,7 +171,7 @@ export async function runNativeReferenceProof({
     ]),
     node("p", {}, [
       text(
-        "Saved native event. Manual-only Automation, dormant Agent and catalog metadata; no external account is connected or operation executed."
+        "Saved native event. Definition fixtures, dormant Agent and catalog metadata; no external account is connected or operation executed."
       ),
     ]),
     node("tabs", { defaultValue: "current" }, [
@@ -542,7 +542,79 @@ export async function runNativeReferenceProof({
     path: join(outputDir, "external-executor-editor-saved.png"),
     fullPage: true,
   });
+  // The private fixture has no Slack connection and cannot receive a message.
+  // Reply chat turns create no Automation-window run, so neither completion
+  // stamp on the Automation records their activity.
+  const replyName = "Synthetic event reply Automation";
+  const reply = await call("manage_automations", {
+    action: "create",
+    slug: "native-preview-reply",
+    name: replyName,
+    managed_agent_id: agent.agent_id,
+    triggers: [
+      {
+        kind: "event",
+        source: "connector",
+        connector_key: "slack",
+        event_types: ["message.created"],
+        execution: "turn",
+        output: "reply_to_source",
+        active_run: "queue",
+      },
+    ],
+  });
+  assert(
+    reply.automation_id && !reply.approval_queued,
+    "Reply fixture did not apply"
+  );
+  const replyReport = await call("save_memory", {
+    entity_ids: [Number(entity.entity.id)],
+    semantic_type: "native_preview_report",
+    payload_type: "empty",
+    title: "Synthetic reply activity review",
+    payload_data: { ...data, automationId: String(reply.automation_id) },
+    idempotency_key: "native-preview-reply-report-v1",
+  });
+  assert(replyReport.id, "Reply report did not apply");
+  const replyPath = `/${workspace}/events/${replyReport.id}`;
+  const assertReplyIdentity = async () => {
+    const row = page.getByRole("link").filter({ hasText: replyName });
+    await row
+      .getByText("Replies to incoming messages", { exact: true })
+      .waitFor();
+    assert(
+      (await row.getByText("Never run", { exact: true }).count()) === 0,
+      "Reply identity claimed that its untracked chat history never ran"
+    );
+  };
+  await page.goto(new URL(replyPath, baseUrl).toString());
+  await assertReplyIdentity();
+  await page.screenshot({
+    path: join(outputDir, "reply-native-reference.png"),
+    fullPage: true,
+  });
+  await page.goto(new URL(`/${workspace}/automations`, baseUrl).toString());
+  await assertReplyIdentity();
+  await page.screenshot({
+    path: join(outputDir, "reply-automation-list.png"),
+    fullPage: true,
+  });
+  const replyRuns = await call("manage_operations", {
+    action: "list_runs",
+    automation_ids: [Number(reply.automation_id)],
+    limit: 10,
+  });
+  assert(
+    replyRuns.runs.length === 0,
+    "Synthetic reply fixture unexpectedly ran"
+  );
+
   return {
+    reply_activity: {
+      path: replyPath,
+      automation_id: reply.automation_id,
+      runs: replyRuns.runs.length,
+    },
     external_editor: {
       path: externalPath,
       automation_id: external.automation_id,
@@ -579,6 +651,7 @@ export async function runNativeReferenceProof({
       "fresh browser access via existing single-user preview sign-in",
       "narrow viewport identities loaded",
       "external executor editor save keeps executor and owning agent",
+      "reply identities describe the reply setup without inventing run history",
     ],
     screenshots: [
       "native-report-current.png",
@@ -589,6 +662,8 @@ export async function runNativeReferenceProof({
       "automation-combined-activity-narrow.png",
       "external-executor-editor.png",
       "external-executor-editor-saved.png",
+      "reply-native-reference.png",
+      "reply-automation-list.png",
       ...navigation.screenshots,
     ],
   };
