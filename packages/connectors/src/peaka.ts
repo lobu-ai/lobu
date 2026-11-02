@@ -265,17 +265,27 @@ function compareIds(a: string, b: string): number {
 }
 
 function compareValues(a: unknown, b: unknown): number {
-	const left = Number(a);
-	const right = Number(b);
-	if (Number.isFinite(left) && Number.isFinite(right)) return left - right;
-	return normalise(a).localeCompare(normalise(b));
+	const left = normalise(a);
+	const right = normalise(b);
+	if (/^-?\d+$/.test(left) && /^-?\d+$/.test(right)) {
+		return compareIds(left, right);
+	}
+	return left.localeCompare(right);
 }
 
 function sameRecord(
 	existing: Record<string, unknown>,
 	record: Record<string, unknown>,
 ): boolean {
-	return Object.entries(record).every(([key, value]) => normalise(existing[key]) === normalise(value));
+	return Object.entries(record).every(([key, value]) => {
+		if (!Object.prototype.hasOwnProperty.call(existing, key)) return false;
+		const current = existing[key];
+		if (value === null || value === undefined) {
+			return current === null || current === undefined;
+		}
+		if (current === null || current === undefined) return false;
+		return normalise(current) === normalise(value);
+	});
 }
 
 function requireTable(input: Record<string, unknown>): string {

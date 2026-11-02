@@ -211,6 +211,18 @@ describe("Peaka actions", () => {
 		expect(String(captured[0]?.body?.statement)).toContain("'a;b'");
 	});
 
+	test("does not treat null and empty string as the same stored value", async () => {
+		const existing = { idempotency_key: "k-null", note: null };
+		const { result } = await invoke(
+			"upsert_record",
+			{ table: "call_transcripts", record: { idempotency_key: "k-null", note: "" } },
+			{ post: async () => ({ data: [existing] }) },
+		);
+
+		expect(result.output.action).not.toBe("noop");
+		expect(result.output.code).toBe("peaka_upsert_requires_flow");
+	});
+
 	test("upsert_record fails closed without a flow because Peaka has no unique constraint", async () => {
 		const row = { idempotency_key: "k2", call_id: "2070470", raw_transcript: "hello" };
 		const { result, captured } = await invoke(
@@ -326,6 +338,27 @@ describe("Peaka actions", () => {
 		});
 		expect(result.rows).toEqual([{ id: "2" }]);
 		expect(result.total).toBe(3);
+	});
+
+	test("query sorts adjacent 64-bit ids without Number collapse", async () => {
+		const connector = new PeakaConnector();
+		const { http } = stubHttp({
+			post: async () => ({
+				columns: [{ columnName: "id" }],
+				data: [{ id: "9007199254740992" }, { id: "9007199254740993" }],
+			}),
+		});
+		// biome-ignore lint/suspicious/noExplicitAny: private seam replaced for the unit test
+		(connector as any).http = () => http;
+
+		const result = await connector.query({
+			query: "SELECT id FROM x",
+			config,
+			limit: 1,
+			offset: 0,
+			sort: { column: "id", order: "desc" },
+		});
+		expect(result.rows).toEqual([{ id: "9007199254740993" }]);
 	});
 
 	test("upsert_record rejects an ambiguous duplicate key instead of treating the first row as canonical", async () => {
