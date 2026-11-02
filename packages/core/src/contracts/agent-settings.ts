@@ -20,9 +20,9 @@
  *    — a superset of stored, matching the existing interface every consumer
  *    already uses, so this is a drop-in replacement.
  *
- * `Patch` (PATCH body, null=clear vs undefined=unchanged) and `Response`
- * (sanitized GET, redacted secrets + merged authProfiles) are follow-on
- * schemas built on top of Stored; they belong with the route that owns them.
+ * `AgentSettingsPatchSchema` omits store-owned updatedAt for declarative writes;
+ * `manage_agents` update further omits identityMd (written as identity_md).
+ * REST PATCH bodies and sanitized GET responses stay with the route that owns them.
  */
 import { type Static, Type } from "@sinclair/typebox";
 import type { GuardrailStage } from "../guardrails/types";
@@ -172,3 +172,11 @@ export const AgentSettingsStoredSchema = Type.Object({
   updatedAt: Type.Number(),
 });
 export type AgentSettingsStored = Static<typeof AgentSettingsStoredSchema>;
+
+/** Writable stored settings; timestamps are always assigned by the store. */
+export const AgentSettingsPatchSchema = Type.Omit(
+  AgentSettingsStoredSchema,
+  ["updatedAt"],
+  { additionalProperties: false }
+);
+export type AgentSettingsPatch = Static<typeof AgentSettingsPatchSchema>;

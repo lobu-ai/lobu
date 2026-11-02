@@ -14,12 +14,12 @@ import type { ToolContext } from "../../tools/registry";
 import { createActionCaller, idArg } from "./action-call";
 
 export interface AgentsNamespace {
-	manage(input: ManageAgentsArgs): Promise<unknown>;
-	list(): Promise<unknown>;
+	manage(input: ManageAgentsArgs): Promise<ManageAgentsResult>;
+	list(): Promise<Extract<ManageAgentsResult, { action: "list" }>>;
 	get(agent_id: string): Promise<Extract<ManageAgentsResult, { action: "get" }>>;
-	create(input: AgentCreateInput): Promise<unknown>;
+	create(input: AgentCreateInput): Promise<ManageAgentsResult>;
 	update(input: AgentUpdateInput): Promise<ManageAgentsResult>;
-	delete(agent_id: string): Promise<unknown>;
+	delete(agent_id: string): Promise<ManageAgentsResult>;
 }
 
 export function buildAgentsNamespace(
@@ -29,7 +29,7 @@ export function buildAgentsNamespace(
 	const { manage, method } = createActionCaller(manageAgents, env, ctx, "agents");
 
 	return {
-		manage,
+		manage: (input) => manage(input) as Promise<ManageAgentsResult>,
 		list: method("list"),
 		get: method("get", {
 			mapArgs: (agent_id) => ({

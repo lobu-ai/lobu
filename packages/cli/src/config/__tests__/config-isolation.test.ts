@@ -6,8 +6,8 @@ import { join } from "node:path";
 // `lobu apply` time. It MUST stay dependency-light: importing any heavy CLI
 // internal (the server bundle, embedded-postgres, the chat adapters, esbuild,
 // playwright, …) would drag that whole graph into a user's `lobu.config.ts`
-// load + typecheck. The only allowed imports are relative siblings, the
-// connector authoring subpath, and TypeBox.
+// load + typecheck. The only allowed runtime imports are relative siblings,
+// the connector authoring subpath, and TypeBox; `import type` is erased.
 const ALLOWED_BARE = new Set([
   "@lobu/connector-sdk",
   "@lobu/connector-sdk/define-connector",
@@ -37,7 +37,10 @@ describe("@lobu/cli/config isolation", () => {
 
     const offenders: string[] = [];
     for (const file of files) {
-      const source = readFileSync(join(configDir, file), "utf-8");
+      const source = readFileSync(join(configDir, file), "utf-8").replace(
+        /import type[\s\S]*?from\s*["'][^"']+["'];/g,
+        ""
+      );
       for (const spec of importSpecifiers(source)) {
         const isRelative = spec.startsWith(".");
         if (!isRelative && !ALLOWED_BARE.has(spec)) {

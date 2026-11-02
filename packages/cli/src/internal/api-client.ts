@@ -35,6 +35,7 @@ interface OrganizationInfo {
 export type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
 export interface RequestWithStatusOptions {
+  headers?: Record<string, string>;
   okStatuses?: number[];
   /** Send `Accept: application/json` (default). Off matches the apply client. */
   sendAccept?: boolean;
@@ -65,10 +66,11 @@ export class ApiClient {
     path: string,
     body?: unknown,
     options: RequestWithStatusOptions = {}
-  ): Promise<{ status: number; body: T }> {
+  ): Promise<{ status: number; body: T; headers: Headers }> {
     const url = path.startsWith("http") ? path : `${this.apiBaseUrl}${path}`;
     const headers: Record<string, string> = {
       ...this.extraHeaders,
+      ...options.headers,
       Authorization: `Bearer ${this.token}`,
     };
     if (options.sendAccept !== false) headers.Accept = "application/json";
@@ -99,7 +101,11 @@ export class ApiClient {
         code
       );
     }
-    return { status: response.status, body: parsed as T };
+    return {
+      status: response.status,
+      body: parsed as T,
+      headers: response.headers,
+    };
   }
 
   async request<T>(

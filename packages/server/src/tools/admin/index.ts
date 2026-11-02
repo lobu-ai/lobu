@@ -21,7 +21,11 @@ import {
 	getAutomation,
 } from "../get_automation";
 import type { ToolAnnotations, ToolContext, ToolDefinition } from "../registry";
-import { ManageAgentsSchema, manageAgents } from "./manage_agents";
+import {
+	ManageAgentsSchema,
+	ManageAgentsResultSchema,
+	manageAgents,
+} from "./manage_agents";
 import {
 	ManageConversationsSchema,
 	manageConversations,
@@ -171,6 +175,7 @@ const ENTRIES: AdminToolEntry[] = [
 		description:
 			"Agent management. SDK alternative: client.agents.",
 		schema: ManageAgentsSchema,
+		resultSchema: ManageAgentsResultSchema,
 		handler: manageAgents,
 		annotations: DESTRUCTIVE_WITH_TITLE("Manage agents"),
 	},

@@ -14,10 +14,11 @@ import {
   isChatPlatform,
   normalizeEntityTypeSlug,
 } from "@lobu/core";
-import type { AgentSettingsStored } from "@lobu/core/contracts/agent-settings";
+import { AgentSettingsPatchSchema } from "@lobu/core/contracts/agent-settings";
 import { parseCollectionPresentation } from "@lobu/core/contracts/tools/collection-presentation";
 import {
   ManageAutomationsSchema,
+  AutomationExecutionConfigSchema,
   normalizeWorkspaceEventTrigger,
   resolvedEventExecution,
 } from "@lobu/core/contracts/tools/manage-automations";
@@ -30,50 +31,6 @@ import {
   InferenceProviderSlugSchema,
 } from "@lobu/core/contracts/tools/manage-inference-providers";
 import { Value } from "@sinclair/typebox/value";
-
-/**
- * Exhaustiveness projection over the stored AgentSettings shape. Every key is
- * REQUIRED (the `-?` removes optionality) so a new field added to the schema
- * that this mapper doesn't handle is a compile error, not a silent drop.
- *
- * `authProfiles` is excluded (separate-store, merged on GET).
- * `updatedAt` is excluded (store-owned, set by the DB).
- *
- * This is the compile-time drift guarantee: the declarative mapper cannot
- * forget a field.
- */
-type AgentSettingsProjection = {
-  [K in Exclude<keyof AgentSettingsStored, "updatedAt" | "authProfiles">]-?:
-    | AgentSettingsStored[K]
-    | undefined;
-};
-
-/**
- * Marker for each stored field's declarative status. Also exhaustive over the
- * same key set, so a new field with no policy entry also fails to compile.
- * - "mapped": produced by this converter
- * - "unsupported": not declarable in lobu.config.ts (intentional)
- * - "post-load": filled later by mergeAgentDirArtifacts
- */
-const AGENT_SETTINGS_FIELD_POLICY = {
-  models: "mapped",
-  networkConfig: "mapped",
-  nixConfig: "mapped",
-  soulMd: "post-load",
-  userMd: "post-load",
-  identityMd: "post-load",
-  skillsConfig: "post-load",
-  guardrails: "mapped",
-  guardrailsInline: "unsupported",
-  sandboxId: "unsupported",
-  verboseLogging: "unsupported",
-  showToolCalls: "unsupported",
-  starters: "mapped",
-} as const satisfies Record<
-  Exclude<keyof AgentSettingsStored, "updatedAt" | "authProfiles">,
-  "mapped" | "post-load" | "unsupported"
->;
-void AGENT_SETTINGS_FIELD_POLICY;
 
 import { CronExpressionParser } from "cron-parser";
 import type {
@@ -291,13 +248,23 @@ export interface AgentMarkdown {
 export function mergeAgentDirArtifacts(
   settings: Partial<AgentSettings>,
   markdown: AgentMarkdown,
-  localSkills: LocalSkills
+  localSkills?: LocalSkills
 ): void {
-  if (markdown.soulMd) settings.soulMd = markdown.soulMd;
-  if (markdown.identityMd) settings.identityMd = markdown.identityMd;
-  if (markdown.userMd) settings.userMd = markdown.userMd;
-
-  if (localSkills.length > 0) {
+  for (const key of ["soulMd", "identityMd", "userMd"] as const) {
+    if (markdown[key] === undefined) continue;
+    if (settings[key] !== undefined) {
+      throw new ValidationError(
+        `Declare ${key} either in settings or in its Markdown file, not both`
+      );
+    }
+    settings[key] = markdown[key];
+  }
+  if (localSkills !== undefined) {
+    if (settings.skillsConfig !== undefined) {
+      throw new ValidationError(
+        "Declare either skills or settings.skillsConfig, not both"
+      );
+    }
     settings.skillsConfig = { skills: localSkills };
   }
 }
@@ -307,9 +274,35 @@ function mapAgent(
   env: NodeJS.ProcessEnv,
   required: Set<string>
 ): DesiredAgent {
-  const settings: Partial<AgentSettings> = {};
+  if (
+    agent.settings !== undefined &&
+    !Value.Check(AgentSettingsPatchSchema, agent.settings)
+  ) {
+    const error = Value.Errors(
+      AgentSettingsPatchSchema,
+      agent.settings
+    ).First();
+    throw new ValidationError(
+      `Agent "${agent.id}" settings${error?.path ?? ""}: ${error?.message ?? "invalid settings"}`
+    );
+  }
+  const settings: Partial<AgentSettings> = { ...agent.settings };
+  for (const [helper, key] of [
+    ["providers", "models"],
+    ["network", "networkConfig"],
+    ["nixPackages", "nixConfig"],
+    ["guardrails", "guardrails"],
+    ["starters", "starters"],
+    ["skills", "skillsConfig"],
+  ] as const) {
+    if (agent[helper] !== undefined && settings[key] !== undefined) {
+      throw new ValidationError(
+        `Agent "${agent.id}" must declare either ${helper} or settings.${key}, not both`
+      );
+    }
+  }
 
-  if (agent.providers?.length) {
+  if (agent.providers !== undefined) {
     // Each declared provider becomes one explicit ref in the ordered `models`
     // list (index 0 = the primary/default). A provider WITH a concrete model
     // emits `<providerId>/<model>` (never `<providerId>/auto` — auto is gone);
@@ -335,20 +328,21 @@ function mapAgent(
     });
   }
 
-  const allowed = agent.network?.allowed ?? [];
-  const denied = agent.network?.denied ?? [];
-  if (allowed.length > 0 || denied.length > 0) {
+  if (agent.network !== undefined) {
+    const { allowed, denied } = agent.network;
     settings.networkConfig = {
-      ...(allowed.length > 0 ? { allowedDomains: [...new Set(allowed)] } : {}),
-      ...(denied.length > 0 ? { deniedDomains: [...new Set(denied)] } : {}),
+      ...(allowed !== undefined
+        ? { allowedDomains: [...new Set(allowed)] }
+        : {}),
+      ...(denied !== undefined ? { deniedDomains: [...new Set(denied)] } : {}),
     };
   }
 
-  if (agent.guardrails?.length) {
+  if (agent.guardrails !== undefined) {
     settings.guardrails = [...new Set(agent.guardrails)];
   }
 
-  if (agent.nixPackages?.length) {
+  if (agent.nixPackages !== undefined) {
     settings.nixConfig = { packages: [...new Set(agent.nixPackages)] };
   }
 
@@ -385,32 +379,7 @@ function mapAgent(
     agentId: agent.id,
     name: agent.name ?? agent.id,
   };
-  if (agent.description) metadata.description = agent.description;
-
-  // Exhaustiveness guard (compile-time): construct a projection object that
-  // includes EVERY stored key (mapped → the computed value, unsupported/post-
-  // load → undefined) and assert it satisfies AgentSettingsProjection. If a
-  // field is added to AgentSettingsStoredSchema without an entry here, tsc
-  // fails with "Property X is missing". This makes "declarative layer forgot
-  // to wire a field" a compile error — the whole point of the schema. The
-  // projection object is discarded; the real `settings` (Partial, only the
-  // non-undefined fields) is what flows to apply.
-  const _exhaustive: AgentSettingsProjection = {
-    models: settings.models,
-    networkConfig: settings.networkConfig,
-    nixConfig: settings.nixConfig,
-    soulMd: settings.soulMd,
-    userMd: settings.userMd,
-    identityMd: settings.identityMd,
-    skillsConfig: settings.skillsConfig,
-    guardrails: settings.guardrails,
-    guardrailsInline: settings.guardrailsInline,
-    sandboxId: settings.sandboxId,
-    verboseLogging: settings.verboseLogging,
-    showToolCalls: settings.showToolCalls,
-    starters: settings.starters,
-  };
-  void _exhaustive;
+  if (agent.description !== undefined) metadata.description = agent.description;
 
   return { metadata, settings, providerKeys };
 }
@@ -615,6 +584,26 @@ function assertAutomationSkills(
 }
 
 function mapAutomation(automation: Automation): DesiredAutomation {
+  if (automation.executionConfig !== undefined) {
+    if (automation.model !== undefined || automation.executor !== undefined) {
+      throw new ValidationError(
+        `Automation "${automation.slug}" must declare either executionConfig or model/executor helpers, not both`
+      );
+    }
+    if (
+      automation.executionConfig !== null &&
+      !Value.Check(AutomationExecutionConfigSchema, automation.executionConfig)
+    ) {
+      const error = Value.Errors(
+        AutomationExecutionConfigSchema,
+        automation.executionConfig
+      ).First();
+      throw new ValidationError(
+        `Automation "${automation.slug}" executionConfig${error?.path ?? ""}: ${error?.message ?? "invalid execution options"}`
+      );
+    }
+  }
+
   let agentKind: DesiredAutomation["agentKind"];
   if (automation.agentKind !== undefined) {
     if (
@@ -739,6 +728,9 @@ function mapAutomation(automation: Automation): DesiredAutomation {
       ? { deviceWorkerId: automation.deviceWorkerId }
       : {}),
     ...(automation.model !== undefined ? { model: automation.model } : {}),
+    ...(automation.executionConfig !== undefined
+      ? { executionConfig: automation.executionConfig }
+      : {}),
   };
 }
 
@@ -1005,6 +997,7 @@ export function mapProjectToDesiredState(
       automation,
       (project.automations?.[i]?.reaction !== undefined &&
         project.automations?.[i]?.reaction !== null) ||
+        project.automations?.[i]?.executionConfig?.executor !== undefined ||
         (project.automations?.[i]?.executor !== undefined &&
           project.automations?.[i]?.executor !== "agent")
     );

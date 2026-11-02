@@ -30,6 +30,7 @@ import {
   GetAgentAction,
   ListAgentsAction,
   ManageAgentsSchema,
+  ManageAgentsResultSchema,
   UpdateAgentAction,
   type AgentModelInfo,
   type AgentRecord,
@@ -66,6 +67,8 @@ import {
   persistAgentMetadataPatch,
   persistAgentSettingsPatch,
   validateAgentSettingsUpdate,
+  agentConfigRevision,
+  validateAgentConfigRevision,
 } from '../../lobu/agent-settings';
 import { deriveToolActorSource } from '../../utils/apply-context';
 import { lockOrganizationForRelationshipClaims } from '../../utils/relationship-claims';
@@ -93,7 +96,7 @@ import { getOrgUrlContext } from '../view-urls';
 import { action, defineActionTool } from './action-tool';
 import { eventClientId } from '../../auth/event-client-id';
 
-export { ManageAgentsSchema };
+export { ManageAgentsSchema, ManageAgentsResultSchema };
 export type { ManageAgentsProposal };
 
 type ListArgs = Static<typeof ListAgentsAction>;
@@ -332,36 +335,23 @@ async function handleGet(
   // "forbidden" via timing alone more than a 404 would — we still 403 on deny
   // after confirming org membership of the id when found; missing stays 404.
   const sql = createDbClientFromEnv(env);
-  const rows = await sql`
-    SELECT
-      a.id,
-      a.name,
-      a.description,
-      a.owner_platform,
-      a.owner_user_id,
-      a.created_at,
-      a.last_used_at
-    FROM agents a
-    WHERE a.organization_id = ${ctx.organizationId} AND a.id = ${args.agent_id}
-  `;
-  if (rows.length === 0) {
-    throw new ToolUserError(`Agent "${args.agent_id}" not found`, 404);
-  }
-  await assertAgentConfigReadAllowed(ctx, args.agent_id.trim());
-  const settings = await orgContext.run(
-    { organizationId: ctx.organizationId },
-    () => createPostgresAgentConfigStore().getSettings(args.agent_id),
+  const snapshot = await orgContext.run({ organizationId: ctx.organizationId }, () =>
+    sql.begin(async (tx) => {
+      const [row] = await tx`
+        SELECT id, name, description, owner_platform, owner_user_id, created_at, last_used_at
+        FROM agents
+        WHERE organization_id = ${ctx.organizationId} AND id = ${args.agent_id}
+        FOR SHARE
+      `;
+      if (!row) throw new ToolUserError(`Agent "${args.agent_id}" not found`, 404);
+      await assertAgentConfigReadAllowed(ctx, args.agent_id.trim());
+      const settings = (await createPostgresAgentConfigStore(tx).getSettings(args.agent_id))!;
+      const revision = await agentConfigRevision(tx, ctx.organizationId, args.agent_id, settings);
+      return { agent: row as unknown as AgentRecord, settings, revision };
+    }),
   );
-  if (!settings) {
-    throw new ToolUserError(`Agent "${args.agent_id}" not found`, 404);
-  }
-  const model = await agentModelInfo(ctx, args.agent_id, settings);
-  return {
-    action: 'get',
-    agent: rows[0] as unknown as AgentRecord,
-    model,
-    settings,
-  };
+  const model = await agentModelInfo(ctx, args.agent_id, snapshot.settings);
+  return { action: 'get', ...snapshot, model };
 }
 
 function agentConfigAudit(ctx: ToolContext) {
@@ -468,6 +458,13 @@ export async function applyUpdate(
       const before = (await createPostgresAgentConfigStore(tx).getSettings(
         agentId,
       ))!;
+      const conflict = validateAgentConfigRevision(
+        args.expected_revision,
+        await agentConfigRevision(tx, ctx.organizationId, agentId, before),
+      );
+      if (conflict) {
+        throw new ToolUserError(conflict.error_description, conflict.status);
+      }
       const settings: Partial<AgentSettings> = {};
       const metadata: Pick<UpdateArgs, 'name' | 'description'> = {};
 
@@ -638,8 +635,7 @@ function buildProposal(args: WriteArgs): ManageAgentsProposal {
       Object.keys(args.settings ?? {}).length > 0 ||
       AGENT_FIELDS.some((f) => argValue(args, f.key) !== undefined);
     if (!hasField) {
-      const names = AGENT_FIELDS.map((f) => f.key).join(', ');
-      throw new ToolUserError(`update requires at least one of: ${names}`);
+      throw new ToolUserError('update requires at least one editable field or setting');
     }
   }
   // Copy every requested editable field onto the proposal, loop-driven off the
@@ -697,60 +693,63 @@ async function queueWriteForApproval(
     throw new ToolUserError(`Agent "${proposal.agent_id}" not found`, 404);
   }
 
-  if (proposal.action === 'update' && current) {
-    // Capture the pre-image of every field and setting this update touches,
-    // under the same row lock applyUpdate compares it under, so the eventual
-    // approve writes only what nobody has changed since.
-    await orgContext.run({ organizationId: ctx.organizationId }, () =>
-      sql.begin(async (tx) => {
-        await lockOrganizationForRelationshipClaims(tx, ctx.organizationId);
-        const [row] = await tx`
-          SELECT name, description, identity_md
-          FROM agents
-          WHERE organization_id = ${ctx.organizationId}
-            AND id = ${proposal.agent_id}
-          FOR UPDATE
-        `;
-        if (!row) {
-          throw new ToolUserError(`Agent "${proposal.agent_id}" not found`, 404);
-        }
-        const settings = (await createPostgresAgentConfigStore(tx).getSettings(
-          proposal.agent_id,
-        ))!;
-        await assertSettingsValid(
-          ctx,
-          proposal.agent_id,
-          { ...proposal.settings },
-          settings,
-        );
-        const base: NonNullable<ManageAgentsProposal['base']> = {};
-        for (const field of AGENT_FIELDS) {
-          if (argValue(args, field.key) === undefined) continue;
-          Object.assign(base, {
-            [field.key]: liveFieldValue(field, row, settings),
-          });
-        }
-        if (proposal.settings) {
-          base.settings = {};
-          for (const key of Object.keys(proposal.settings) as Array<
-            keyof typeof proposal.settings
-          >) {
-            Object.assign(base.settings, { [key]: settings[key] ?? null });
-          }
-        }
-        proposal.base = base;
-        Object.assign(current, row, base.settings && { settings: base.settings });
-      }),
-    );
-  }
-
   const initiatorColumns = resolveRunInitiator(ctx);
   const label = actionLabel(proposal.action, proposal.agent_id);
   // Atomic: the pending run and its approval card commit together. If the card
   // INSERT fails, the run must not exist — otherwise the proposal is durably
   // pending but the events-only approval surface shows nothing (the #2033
   // divergence, same as the connector queue path).
-  const { runId, eventId } = await sql.begin(async (tx) => {
+  const { runId, eventId } = await orgContext.run({ organizationId: ctx.organizationId }, () => sql.begin(async (tx) => {
+    if (proposal.action === 'update' && current) {
+      // Capture the pre-image of every field and setting this update touches,
+      // under the same row lock applyUpdate compares it under, so the eventual
+      // approve writes only what nobody has changed since.
+      await lockOrganizationForRelationshipClaims(tx, ctx.organizationId);
+      const [row] = await tx`
+        SELECT name, description, identity_md
+        FROM agents
+        WHERE organization_id = ${ctx.organizationId}
+          AND id = ${proposal.agent_id}
+        FOR UPDATE
+      `;
+      if (!row) {
+        throw new ToolUserError(`Agent "${proposal.agent_id}" not found`, 404);
+      }
+      const settings = (await createPostgresAgentConfigStore(tx).getSettings(
+        proposal.agent_id,
+      ))!;
+      const conflict = validateAgentConfigRevision(
+        args.action === 'update' ? args.expected_revision : undefined,
+        await agentConfigRevision(tx, ctx.organizationId, proposal.agent_id, settings),
+      );
+      if (conflict) {
+        throw new ToolUserError(conflict.error_description, conflict.status);
+      }
+      await assertSettingsValid(
+        ctx,
+        proposal.agent_id,
+        { ...proposal.settings },
+        settings,
+      );
+      const base: NonNullable<ManageAgentsProposal['base']> = {};
+      for (const field of AGENT_FIELDS) {
+        if (argValue(args, field.key) === undefined) continue;
+        Object.assign(base, {
+          [field.key]: liveFieldValue(field, row, settings),
+        });
+      }
+      if (proposal.settings) {
+        base.settings = {};
+        for (const key of Object.keys(proposal.settings) as Array<
+          keyof typeof proposal.settings
+        >) {
+          Object.assign(base.settings, { [key]: settings[key] ?? null });
+        }
+      }
+      proposal.base = base;
+      Object.assign(current, row, base.settings && { settings: base.settings });
+    }
+
     const inserted = await tx`
       INSERT INTO runs (
         organization_id, run_type, action_key, action_input,
@@ -806,7 +805,7 @@ async function queueWriteForApproval(
       { sql: tx },
     );
     return { runId, eventId: Number(event.id) };
-  });
+  }));
 
   const { ownerSlug, baseUrl } = await getOrgUrlContext(ctx);
   // An `update` proposal is config-shaped (name/description/identity), so its

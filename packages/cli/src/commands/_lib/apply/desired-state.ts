@@ -21,6 +21,7 @@ import type { RetainedSource } from "@lobu/core/contracts/tools/source-files";
 import type Ajv from "ajv";
 import type {
   ConnectorSource,
+  Automation,
   InferenceCapabilityBlock,
   InferenceModality,
   Project,
@@ -109,6 +110,7 @@ export interface DesiredRelationshipType {
 
 export interface DesiredAutomation {
   slug: string;
+  executionConfig?: Automation["executionConfig"];
   /** Owning agent id. Every automation belongs to exactly one agent. */
   agent: string;
   executor?: {
@@ -572,7 +574,7 @@ async function readMarkdown(agentDir: string): Promise<AgentMarkdown> {
   for (const [key, filename] of files) {
     try {
       const content = await readFile(join(agentDir, filename), "utf-8");
-      if (content.trim()) result[key] = content.trim();
+      result[key] = content.trim();
     } catch {
       // missing file is fine
     }
@@ -1310,12 +1312,12 @@ export async function loadDesiredStateFromConfig(
       if (!settings) return;
       const agentDir = resolve(opts.cwd, agent.dir ?? join("agents", agent.id));
       const markdown = await readMarkdown(agentDir);
-      const localSkills = await resolveAgentSkills(
-        agent.skills ?? [],
-        opts.cwd
-      );
+      const localSkills =
+        agent.skills === undefined
+          ? undefined
+          : await resolveAgentSkills(agent.skills, opts.cwd);
       mergeAgentDirArtifacts(settings, markdown, localSkills);
-      skillsByAgentId.set(agent.id, localSkills);
+      skillsByAgentId.set(agent.id, settings.skillsConfig?.skills ?? []);
     })
   );
 

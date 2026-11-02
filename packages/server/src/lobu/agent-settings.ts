@@ -2,8 +2,13 @@
  * Shared validation and persistence for agent configuration. REST and MCP
  * retain their transport/access rules and use the same transactional writers.
  */
+import { createHash } from "node:crypto";
 import type { AgentConfigStore, AgentMetadata, AgentSettings } from "@lobu/core";
-import type { AgentCreateInput } from "@lobu/core/contracts/tools/manage-agents";
+import {
+	AgentConfigRevisionSchema,
+	type AgentCreateInput,
+} from "@lobu/core/contracts/tools/manage-agents";
+import { stableStringify } from "@lobu/core/contracts/tools/view-content-hash";
 import { isUnrestrictedMode } from "@lobu/connector-sdk/egress-policy";
 import {
 	AgentSettingsStoredSchema,
@@ -29,6 +34,54 @@ import {
 } from "./model-config";
 import { createPostgresAgentConfigStore } from "./stores/postgres-stores";
 import { getOrgDefaultModel } from "./stores/provider-secrets";
+
+/** Caller holds a shared/read or update lock on this agent for a consistent snapshot. */
+export async function agentConfigRevision(
+	tx: DbClient,
+	organizationId: string,
+	agentId: string,
+	settings: AgentSettings,
+): Promise<string> {
+	const metadata = await createPostgresAgentConfigStore(tx).getMetadata(agentId);
+	const { updatedAt: _updatedAt, authProfiles: _authProfiles, ...stored } = settings;
+	return createHash("sha256")
+		.update(stableStringify({
+			organizationId,
+			agentId,
+			createdAt: metadata?.createdAt,
+			name: metadata?.name,
+			description: metadata?.description ?? null,
+			settings: stored,
+		}))
+		.digest("hex");
+}
+
+/** Shared by HTTP If-Match and the MCP/SDK expected_revision precondition. */
+export function validateAgentConfigRevision(expected: string | undefined, actual: string): {
+	status: 400 | 409;
+	error: string;
+	error_description: string;
+} | null {
+	if (expected === undefined) return null;
+	const revision = expected.startsWith('"') && expected.endsWith('"')
+		? expected.slice(1, -1)
+		: expected;
+	if (!Value.Check(AgentConfigRevisionSchema, revision)) {
+		return {
+			status: 400,
+			error: "invalid_agent_config_revision",
+			error_description: "Use the revision returned by agents.get or the ETag from an agent read.",
+		};
+	}
+	if (revision !== actual) {
+		return {
+			status: 409,
+			error: "agent_config_conflict",
+			error_description: "Agent configuration changed. Reload and review it before applying this change.",
+		};
+	}
+	return null;
+}
 
 const GUARDRAIL_STAGES = new Set(["input", "output", "pre-tool", "egress"]);
 

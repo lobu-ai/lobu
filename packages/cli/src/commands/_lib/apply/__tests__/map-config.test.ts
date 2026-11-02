@@ -40,6 +40,88 @@ describe("mapProjectToDesiredState", () => {
     });
   });
 
+  test("canonical settings preserve false and empty values and reject duplicate sources", () => {
+    const settings = {
+      showToolCalls: false,
+      starters: [],
+      identityMd: "",
+      skillsConfig: { skills: [] },
+    };
+    const state = mapProjectToDesiredState(
+      defineConfig({ agents: [defineAgent({ id: "support", settings })] })
+    );
+    expect(state.agents[0]?.settings).toEqual(settings);
+    for (const agent of [
+      { id: "support", settings: { models: [] }, providers: [] },
+      { id: "support", settings: { skillsConfig: {} }, skills: [] },
+      { id: "support", settings: { showToolCalls: "false" } },
+      { id: "support", settings: { updatedAt: 123 } },
+      { id: "support", settings: { unknownSetting: true } },
+    ]) {
+      // JavaScript configs reach runtime validation without TypeScript checking.
+      expect(() =>
+        mapProjectToDesiredState(
+          defineConfig({ agents: [agent as Parameters<typeof defineAgent>[0]] })
+        )
+      ).toThrow();
+    }
+    expect(() =>
+      mergeAgentDirArtifacts(
+        { identityMd: "canonical" },
+        { identityMd: "file" }
+      )
+    ).toThrow();
+    expect(() =>
+      mergeAgentDirArtifacts({ skillsConfig: { skills: [] } }, {}, [])
+    ).toThrow();
+  });
+
+  test("canonical execution options use existing bounds and cannot overlap helpers", () => {
+    const options = {
+      timeout_seconds: 120,
+      finalize_nudges: 0,
+      max_budget_usd: 0,
+    };
+    const state = mapProjectToDesiredState(
+      defineConfig({
+        agents: [defineAgent({ id: "support" })],
+        automations: [
+          defineAutomation({
+            slug: "digest",
+            agent: "support",
+            prompt: "Summarize updates",
+            executionConfig: options,
+          }),
+        ],
+      })
+    );
+    expect(state.automations[0]?.executionConfig).toEqual(options);
+    for (const extra of [
+      { executionConfig: { timeout_seconds: 0 } },
+      { executionConfig: { finalize_nudges: 6 } },
+      { executionConfig: { max_budget_usd: -1 } },
+      { executionConfig: { unknownOption: true } },
+      { executionConfig: {}, model: "custom/model" },
+      { executionConfig: null, executor: "agent" },
+    ]) {
+      expect(() =>
+        mapProjectToDesiredState(
+          defineConfig({
+            agents: [defineAgent({ id: "support" })],
+            automations: [
+              {
+                slug: "digest",
+                agent: "support",
+                prompt: "Summarize updates",
+                ...extra,
+              } as Parameters<typeof defineAutomation>[0],
+            ],
+          })
+        )
+      ).toThrow();
+    }
+  });
+
   test("maps agents: providers, network (deduped), resolved provider keys", () => {
     const crm = defineAgent({
       id: "crm",
@@ -1710,7 +1792,7 @@ describe("mergeAgentDirArtifacts", () => {
 
   test("no markdown / no skills leaves settings untouched", () => {
     const settings: Partial<AgentSettings> = {};
-    mergeAgentDirArtifacts(settings, {}, []);
+    mergeAgentDirArtifacts(settings, {});
     expect(settings).toEqual({});
   });
 });

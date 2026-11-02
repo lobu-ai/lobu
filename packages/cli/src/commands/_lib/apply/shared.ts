@@ -1,3 +1,5 @@
+import type { AutomationExecutionConfig } from "@lobu/core/contracts/tools/manage-automations";
+
 /**
  * Shared structural types + tiny helpers used across the apply pipeline
  * (desired-state IR, wire client, diff, apply-cmd).
@@ -40,13 +42,11 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
 /** Apply declared model/executor fields while preserving unmanaged execution options. */
 export function automationExecutionConfig(
   model: string | null | undefined,
-  remote?: Record<string, unknown> | null,
-  executor?: {
-    kind: "script";
-    source: string;
-    params?: Record<string, unknown>;
-  } | null
-): Record<string, unknown> | null {
+  remote?: AutomationExecutionConfig | null,
+  executor?: AutomationExecutionConfig["executor"] | null,
+  declared?: AutomationExecutionConfig | null
+): AutomationExecutionConfig | null {
+  if (declared !== undefined) return declared;
   if (executor) {
     if (model != null)
       throw new Error("Script Automations do not use a model override.");

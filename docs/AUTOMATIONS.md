@@ -90,6 +90,22 @@ the periodic Automation tick is the recovery path when immediate event dispatch
 fails. Moving feed admission into the global clock would add a second placement
 queue without removing any existing mechanism.
 
+## Declarative execution options
+
+`defineAutomation({ executionConfig })` accepts the canonical
+`AutomationExecutionConfig` used by the API's `execution_config` and ClientSDK.
+It covers `executor`, `model`, `timeout_seconds` (1–86400), `max_budget_usd`
+(nonnegative), `permission_mode`, `effort`, and `finalize_nudges` (0–5).
+Existing executor compatibility and authorization checks still apply.
+
+Omit `executionConfig` to preserve remote execution settings. Supply an object
+to replace the whole execution config, or `null` to clear it. Do not combine it
+with the older `model` or `executor` helpers; those helpers remain available for
+existing definitions. For example, an external client can declare
+`executionConfig: { executor: { kind: "external" } }` without a new sandbox API.
+Agent-level skills remain in the agent's `settings.skillsConfig`; an Automation's
+`skills` continue to be versioned snapshots owned by that Automation.
+
 ## External execution and activity discovery
 
 Set `execution_config: { executor: { kind: "external" } }` for manual or

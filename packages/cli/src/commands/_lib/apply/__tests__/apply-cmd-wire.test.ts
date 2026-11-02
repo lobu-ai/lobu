@@ -87,7 +87,14 @@ interface WireCall {
   body: Record<string, unknown>;
 }
 
-function makeFetch(remoteFeeds = [REMOTE_FEED]) {
+function makeFetch(
+  remoteFeeds = [REMOTE_FEED],
+  remoteConnection: typeof REMOTE_CONNECTION & {
+    auth_profile_slug?: string;
+    app_auth_profile_slug?: string;
+    device_worker_id?: string;
+  } = REMOTE_CONNECTION
+) {
   const calls: WireCall[] = [];
 
   const json = (payload: unknown) =>
@@ -146,9 +153,9 @@ function makeFetch(remoteFeeds = [REMOTE_FEED]) {
     }
     if (urlStr.includes("/manage_connections")) {
       if (body.action === "update") {
-        return json({ connection: REMOTE_CONNECTION });
+        return json({ connection: remoteConnection });
       }
-      return json({ connections: [REMOTE_CONNECTION] });
+      return json({ connections: [remoteConnection] });
     }
     if (urlStr.includes("/manage_entity_schema")) {
       return json({ entity_types: [], relationship_types: [] });
@@ -277,19 +284,22 @@ export default defineConfig({ agents: [], connectors: [connectorFromFile("./fixt
             agents: [{ agentId: "triage", name: "Triage" }],
           });
         }
-        if (String(url).endsWith("/agents/triage/config")) {
+        if (String(url).endsWith("/agents/triage")) {
           return Response.json({
-            soulMd: "Old persona",
-            models: ["synthetic/primary", "synthetic/fallback"],
-            skillsConfig: {
-              skills: [
-                {
-                  repo: "example/skills",
-                  name: "triage",
-                  enabled: true,
-                  content: "Existing skill",
-                },
-              ],
+            name: "Triage",
+            settings: {
+              soulMd: "Old persona",
+              models: ["synthetic/primary", "synthetic/fallback"],
+              skillsConfig: {
+                skills: [
+                  {
+                    repo: "example/skills",
+                    name: "triage",
+                    enabled: true,
+                    content: "Existing skill",
+                  },
+                ],
+              },
             },
           });
         }
@@ -302,6 +312,77 @@ export default defineConfig({ agents: [], connectors: [connectorFromFile("./fixt
     );
     expect(writes).toHaveLength(1);
     expect(writes[0]?.body).toEqual({ soulMd: "Updated persona" });
+  });
+
+  test("explicit empty agent settings clear stored values and reapply without drift", async () => {
+    const dir =
+      mkProject(`import { defineConfig, defineAgent } from "@lobu/cli/config";
+export default defineConfig({ agents: [defineAgent({
+  id: "triage", name: "Triage", providers: [], skills: [],
+  network: { allowed: [], denied: [] }, guardrails: [], nixPackages: [],
+})] });`);
+    for (const filename of ["SOUL.md", "IDENTITY.md", "USER.md"]) {
+      writeFileSync(join(dir, "agents", "triage", filename), " \n");
+    }
+    const remote: Record<string, unknown> = {
+      models: ["synthetic/primary", "synthetic/fallback"],
+      skillsConfig: {
+        skills: [
+          {
+            repo: "inline/triage",
+            name: "triage",
+            enabled: true,
+            content: "Old skill",
+          },
+        ],
+      },
+      networkConfig: {
+        allowedDomains: ["example.com"],
+        deniedDomains: ["blocked.example.com"],
+      },
+      guardrails: ["old-guardrail"],
+      nixConfig: { packages: ["ffmpeg"] },
+      soulMd: "Old soul",
+      identityMd: "Old identity",
+      userMd: "Old user",
+    };
+    const { fetchStub, calls } = makeFetch();
+    const fetchExistingAgent = (async (url, init) => {
+      const urlString = String(url);
+      if ((init?.method ?? "GET") === "GET") {
+        if (urlString.endsWith("/agents")) {
+          return Response.json({
+            agents: [{ agentId: "triage", name: "Triage" }],
+          });
+        }
+        if (urlString.endsWith("/agents/triage"))
+          return Response.json({ name: "Triage", settings: remote });
+      } else if (urlString.endsWith("/agents/triage/config")) {
+        Object.assign(remote, JSON.parse(String(init?.body)));
+      }
+      return fetchStub(url, init);
+    }) as typeof fetch;
+    await runApply(dir, fetchExistingAgent, "agents");
+    const writes = calls.filter((call) =>
+      call.url.endsWith("/agents/triage/config")
+    );
+    expect(writes.map((write) => write.body)).toEqual([
+      {
+        models: [],
+        skillsConfig: { skills: [] },
+        networkConfig: { allowedDomains: [], deniedDomains: [] },
+        guardrails: [],
+        nixConfig: { packages: [] },
+        soulMd: "",
+        identityMd: "",
+        userMd: "",
+      },
+    ]);
+    calls.length = 0;
+    await runApply(dir, fetchExistingAgent, "agents");
+    expect(
+      calls.filter((call) => call.url.endsWith("/agents/triage/config"))
+    ).toEqual([]);
   });
 
   test.each([
@@ -435,13 +516,18 @@ export default defineConfig({ agents: [], connectors: [connectorFromFile("./fixt
     expect(writes[0]).not.toHaveProperty("schedule");
   });
 
-  test("an update triggered by another field never carries an undeclared connection config", async () => {
+  test("a name update preserves undeclared connection settings, auth and device pins", async () => {
     // The remote connection's name is "gmail-main"; declaring a different one
     // forces an update_connection so the assertion is not vacuous.
     const dir = mkProject(
       configWithFeed(`{ feed: "threads" }`, `\n      name: "Gmail (work)",`)
     );
-    const { fetchStub, calls } = makeFetch();
+    const { fetchStub, calls } = makeFetch(undefined, {
+      ...REMOTE_CONNECTION,
+      auth_profile_slug: "saved-account",
+      app_auth_profile_slug: "saved-app",
+      device_worker_id: "00000000-0000-4000-8000-000000000021",
+    });
 
     await runApply(dir, fetchStub);
 
@@ -454,6 +540,9 @@ export default defineConfig({ agents: [], connectors: [connectorFromFile("./fixt
     });
     expect(writes[0]).not.toHaveProperty("config");
     expect(writes[0]).not.toHaveProperty("replace_config");
+    expect(writes[0]).not.toHaveProperty("auth_profile_slug");
+    expect(writes[0]).not.toHaveProperty("app_auth_profile_slug");
+    expect(writes[0]).not.toHaveProperty("device_worker_id");
   });
 });
 
@@ -530,9 +619,12 @@ export default defineConfig({
             agents: [{ agentId: "triage", name: "Triage" }],
           });
         }
-        if (String(url).endsWith("/agents/triage/config")) {
+        if (String(url).endsWith("/agents/triage")) {
           return Response.json({
-            models: ["synthetic-provider/synthetic-model"],
+            name: "Triage",
+            settings: {
+              models: ["synthetic-provider/synthetic-model"],
+            },
           });
         }
       }
