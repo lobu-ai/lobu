@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { beforeEach, expect, test } from "vitest";
+import { buildClientSDK } from "../../../packages/server/src/sandbox/client-sdk";
 import { createTestAutomationSubscription } from "../../../packages/server/src/__tests__/setup/automation-subscriptions";
 import {
   cleanupTestDatabase,
@@ -10,12 +11,9 @@ import {
   createTestConnection,
   createTestEvent,
   insertChatConnectionRow,
+  ownerToolContext,
 } from "../../../packages/server/src/__tests__/setup/test-fixtures";
 import { TestWorkspace } from "../../../packages/server/src/__tests__/setup/test-mcp-client";
-import {
-  productActivityPrompt,
-  productActivitySources,
-} from "../product-activity-digest.prompt";
 import { configureProductActivityDigest } from "../scripts/configure-product-activity";
 
 beforeEach(cleanupTestDatabase);
@@ -67,6 +65,8 @@ test("external cutover preserves bound Slack delivery and the checkpoint", async
       { name: "reaction_window", query: "SELECT * FROM events WHERE FALSE" },
     ],
   });
+  if (!("automation_id" in created))
+    throw new Error("Expected the synthetic Automation to be created");
   const id = String(created.automation_id);
   const checkpoint = new Date(Date.now() - 60_000).toISOString();
   await sql`UPDATE automations SET next_window_start = ${checkpoint} WHERE id = ${id}`;
@@ -75,7 +75,10 @@ test("external cutover preserves bound Slack delivery and the checkpoint", async
     "utf8"
   );
 
-  await configureProductActivityDigest(workspace.owner, id, reaction);
+  await configureProductActivityDigest(workspace.owner, id, reaction, {
+    namespace: "synthetic-production",
+    logStart: "2026-10-01T00:00:00.000Z",
+  });
 
   const [stored] = await sql`
     SELECT managed_agent_id, delivery_target, triggers, execution_config,
@@ -117,9 +120,28 @@ test("external cutover preserves bound Slack delivery and the checkpoint", async
     automation_id: id,
     run_id: claimed.run_id,
     window_token: claimed.context.window_token,
-    extracted_data: { digests: [] },
+    extracted_data: {
+      digests: [],
+      log_progress: [
+        {
+          content: "Checked synthetic-production through 00:20 UTC",
+          metadata: {
+            checkpoint_key: `product-activity-digest:${id}:synthetic-production`,
+            namespace: "synthetic-production",
+            window_end: "2026-10-01T00:20:00.000Z",
+            recent_windows: [],
+          },
+        },
+      ],
+    },
     client_id: "synthetic-external-client",
   });
+  const progress = await sql`
+    SELECT metadata FROM events WHERE automation_id = ${id}
+      AND metadata->>'automation_output' = 'log_progress'
+  `;
+  expect(progress).toHaveLength(1);
+  expect(progress[0].metadata.window_end).toBe("2026-10-01T00:20:00.000Z");
   const [advanced] =
     await sql`SELECT next_window_start, next_run_at FROM automations WHERE id = ${id}`;
   expect(new Date(advanced.next_window_start).toISOString()).toBe(
@@ -132,9 +154,9 @@ test("external cutover preserves bound Slack delivery and the checkpoint", async
   expect(after.items).toEqual([]);
 });
 
-test("hands off log counts without samples while preserving activity and pageable checkpoints", async () => {
+test("ClickHouse progress survives completion retries and product pagination without a legacy feed", async () => {
   const workspace = await TestWorkspace.create({
-    name: "Synthetic query digest",
+    name: "Synthetic primary digest",
   });
   const sql = getTestDb();
   const agent = await createTestAgent({
@@ -143,37 +165,32 @@ test("hands off log counts without samples while preserving activity and pageabl
     agentId: "synthetic-query-digest",
   });
   const created = await workspace.owner.automations.create({
-    slug: "synthetic-query-digest",
+    slug: "product-activity-digest",
     name: "Synthetic query digest",
+    prompt: "Synthetic pre-cutover processor",
     managed_agent_id: agent.agentId,
-    prompt: productActivityPrompt,
-    sources: productActivitySources,
-    outputs: { digests: { event: "summary" } },
+    sources: [{ name: "content", query: "SELECT * FROM events WHERE FALSE" }],
   });
+  if (!("automation_id" in created))
+    throw new Error("Expected the synthetic Automation to be created");
   const id = String(created.automation_id);
+  await configureProductActivityDigest(
+    workspace.owner,
+    id,
+    readFileSync(
+      new URL("../product-activity-digest.reaction.ts", import.meta.url),
+      "utf8"
+    ),
+    { namespace: "synthetic-production", logStart: "2026-10-01T00:00:00.000Z" }
+  );
   const start = new Date(Date.now() - 60_000);
-  await sql`UPDATE automations SET next_window_start = ${start} WHERE id = ${id}`;
-  const summary = {
-    errors: 2,
-    warnings: 30,
-    http_client_errors: 1,
-    http_server_errors: 0,
-    namespace: "synthetic-production",
-    window_start: start.toISOString(),
-    window_end: new Date(start.getTime() + 20_000).toISOString(),
-  };
-  for (const [slug, metadata] of [
+  await sql`UPDATE automations SET next_window_start = ${start}, next_run_at = NOW() - INTERVAL '1 second' WHERE id = ${id}`;
+  for (const [slug, contents] of [
+    ["lobu-production-logs", ["Legacy log summary must not be consumed"]],
     [
-      "lobu-production-logs",
-      {
-        ...summary,
-        error_samples: ["synthetic-raw-error"],
-        warning_samples: ["synthetic-raw-warning"],
-        http_samples: ["synthetic-raw-http"],
-        future_diagnostic: "synthetic-raw-future-field",
-      },
+      "lobu-product-activity-db",
+      ["Synthetic signup", "Synthetic source connected"],
     ],
-    ["lobu-product-activity-db", { user_name: "Synthetic New User" }],
   ] as const) {
     const connection = await createTestConnection({
       organization_id: workspace.org.id,
@@ -182,16 +199,14 @@ test("hands off log counts without samples while preserving activity and pageabl
       slug,
       created_by: workspace.users.owner.id,
     });
-    await createTestEvent({
-      organization_id: workspace.org.id,
-      connection_id: connection.id,
-      content:
-        slug === "lobu-production-logs"
-          ? "2 errors, 30 warnings"
-          : "Synthetic signup",
-      metadata,
-      created_at: new Date(start.getTime() + 30_000),
-    });
+    for (const content of contents)
+      await createTestEvent({
+        organization_id: workspace.org.id,
+        connection_id: connection.id,
+        content,
+        metadata: { source: slug },
+        created_at: new Date(start.getTime() + 30_000),
+      });
   }
   const first = await workspace.owner.automations.claimNextWindow({
     automation_id: id,
@@ -199,7 +214,7 @@ test("hands off log counts without samples while preserving activity and pageabl
   });
   expect(first.context.page.has_more).toBe(true);
   const cursor = first.context.page.next_cursor;
-  if (!cursor) throw new Error("Expected a second content page");
+  if (!cursor) throw new Error("Expected a second product page");
   const second = await workspace.owner.automations.claimNextWindow({
     automation_id: id,
     run_id: first.run_id,
@@ -208,26 +223,127 @@ test("hands off log counts without samples while preserving activity and pageabl
     before_id: cursor.id,
   });
   expect(second.context.page.has_more).toBe(false);
-  const rows = [...first.context.content, ...second.context.content];
-  expect(rows).toHaveLength(2);
   expect(
-    rows.find((row) => row.payload_text === "2 errors, 30 warnings")?.metadata
-  ).toEqual(summary);
-  expect(
-    rows.find((row) => row.payload_text === "Synthetic signup")?.metadata
-  ).toEqual({ user_name: "Synthetic New User" });
-  expect(JSON.stringify([first.context, second.context])).not.toContain(
-    "synthetic-raw-"
-  );
-  await workspace.owner.automations.completeWindow({
+    [...first.context.content, ...second.context.content]
+      .map((row) => (row as { payload_text: string }).payload_text)
+      .sort()
+  ).toEqual(["Synthetic signup", "Synthetic source connected"]);
+  const completion = {
     automation_id: id,
     run_id: first.run_id,
     window_tokens: [first.context.window_token, second.context.window_token],
-    extracted_data: { digests: [] },
+  };
+  const snapshot = {
+    window_start: "2026-10-01T00:00:00.000Z",
+    window_end: "2026-10-01T00:20:00.000Z",
+    parsed_records: "9007199254740993",
+    errors: "1",
+    warnings: "0",
+    http_client_errors: "0",
+    http_server_errors: "0",
+  };
+  const progress = {
+    content: "Checked the first production log window",
+    metadata: {
+      checkpoint_key: `product-activity-digest:${id}:synthetic-production`,
+      namespace: "synthetic-production",
+      window_end: snapshot.window_end,
+      recent_windows: [snapshot],
+    },
+  };
+  await expect(
+    workspace.owner.automations.completeWindow({
+      ...completion,
+      extracted_data: {
+        digests: [],
+        log_progress: [
+          {
+            ...progress,
+            metadata: {
+              ...progress.metadata,
+              recent_windows: [{ ...snapshot, errors: "-1" }],
+            },
+          },
+        ],
+      },
+    })
+  ).rejects.toThrow("extraction contract");
+  const [unchanged] =
+    await sql`SELECT next_window_start FROM automations WHERE id = ${id}`;
+  expect(new Date(unchanged.next_window_start).toISOString()).toBe(
+    start.toISOString()
+  );
+  expect(
+    await sql`SELECT id FROM events WHERE automation_id = ${id}`
+  ).toHaveLength(0);
+
+  await workspace.owner.automations.completeWindow({
+    ...completion,
+    extracted_data: { digests: [], log_progress: [progress] },
   });
+  const reader = buildClientSDK(
+    ownerToolContext(workspace.org.id, workspace.users.owner.id),
+    { ENVIRONMENT: "test" }
+  );
+  const readProgress = () =>
+    reader.query(`
+    SELECT id, metadata FROM events WHERE automation_id = ${Number(id)}
+      AND semantic_type = 'summary' AND metadata->>'automation_output' = 'log_progress'
+    ORDER BY created_at DESC, id DESC LIMIT 1
+  `) as Promise<Array<{ id: number; metadata: typeof progress.metadata }>>;
+  expect((await readProgress())[0].metadata).toMatchObject(progress.metadata);
+
+  // A new processor uses persisted state, not the old claim's local variables.
+  // ClickHouse failure is represented by no new progress, while product arrival
+  // processing can still complete. The old log cursor must survive unchanged.
+  await sql`UPDATE automations SET next_run_at = NOW() - INTERVAL '1 second' WHERE id = ${id}`;
+  const resumed = await workspace.owner.automations.claimNextWindow({
+    automation_id: id,
+  });
+  expect(resumed.context.window_start).toBe(first.context.window_end);
+  expect(resumed.context.content).toEqual([]);
+  const old = (await readProgress())[0];
+  await workspace.owner.automations.completeWindow({
+    automation_id: id,
+    run_id: resumed.run_id,
+    window_token: resumed.context.window_token,
+    extracted_data: { digests: [], log_progress: [] },
+  });
+  expect(await readProgress()).toEqual([old]);
+
+  // Rechecked late arrivals replace the keyed current head without erasing
+  // history, and without moving the event-time cursor forward.
+  await sql`UPDATE automations SET next_run_at = NOW() - INTERVAL '1 second' WHERE id = ${id}`;
+  const recheck = await workspace.owner.automations.claimNextWindow({
+    automation_id: id,
+  });
+  await workspace.owner.automations.completeWindow({
+    automation_id: id,
+    run_id: recheck.run_id,
+    window_token: recheck.context.window_token,
+    extracted_data: {
+      digests: [],
+      log_progress: [
+        {
+          ...progress,
+          metadata: {
+            ...progress.metadata,
+            recent_windows: [{ ...snapshot, errors: "2" }],
+          },
+        },
+      ],
+    },
+  });
+  const latest = (await readProgress())[0];
+  expect(latest.id).not.toBe(old.id);
+  expect(latest.metadata.window_end).toBe(old.metadata.window_end);
+  expect(latest.metadata.recent_windows[0].errors).toBe("2");
+  const history =
+    await sql`SELECT superseded_by FROM events WHERE id = ${old.id}`;
+  expect(Number(history[0].superseded_by)).toBe(Number(latest.id));
   const [advanced] =
     await sql`SELECT next_window_start FROM automations WHERE id = ${id}`;
   expect(new Date(advanced.next_window_start).toISOString()).toBe(
-    first.context.window_end
+    recheck.context.window_end
   );
 });
