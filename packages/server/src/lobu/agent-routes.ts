@@ -959,6 +959,8 @@ routes.get("/:agentId", async (c) => {
 	const snapshot = await readAgentSnapshot(c.get("organizationId") as string, agentId);
 	if (!snapshot) return c.json({ error: "Agent not found" }, 404);
 	const { settings, revision } = snapshot;
+	// Compression weakens ETags; these revisions must round-trip through If-Match.
+	c.header("Cache-Control", "private, no-store, no-transform");
 	c.header("ETag", `"${revision}"`);
 	const sql = getDb();
 	const organizationId = c.get("organizationId") as string;
@@ -1012,6 +1014,7 @@ routes.patch("/:agentId", async (c) => {
 			organizationId: orgId,
 			...getApplyContext(c),
 		});
+		c.header("Cache-Control", "private, no-store, no-transform");
 		c.header("ETag", `"${await agentConfigRevision(tx, orgId, agentId, before)}"`);
 		return c.json({ success: true });
 	});
@@ -1048,6 +1051,7 @@ routes.get("/:agentId/config", async (c) => {
 	const snapshot = await readAgentSnapshot(c.get("organizationId") as string, agentId);
 	if (!snapshot) return c.json({ error: "Agent not found" }, 404);
 	const { settings, revision } = snapshot;
+	c.header("Cache-Control", "private, no-store, no-transform");
 	c.header("ETag", `"${revision}"`);
 
 	// `configStore` doesn't carry auth profiles (they live in

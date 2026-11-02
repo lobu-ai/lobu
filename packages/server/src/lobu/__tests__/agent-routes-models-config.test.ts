@@ -11,6 +11,8 @@
  */
 
 import { beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { Hono } from "hono";
+import { compress } from "hono/compress";
 import { buildAgentsNamespace } from "../../sandbox/namespaces/agents";
 import { ApplyClient } from "../../../../cli/src/commands/_lib/apply/client";
 import type { ToolContext } from "../../tools/registry";
@@ -74,7 +76,7 @@ beforeEach(async () => {
 
 describe("agent PATCH/GET /config — models surface", () => {
   test("apply, REST and SDK use the same revision and reject stale writes before side effects", async () => {
-    const app = await importAgentRoutes();
+    const app = new Hono().use("*", compress({ threshold: 1024 })).route("/", await importAgentRoutes());
     const ctx: ToolContext = {
       organizationId: ORG, userId: "u1", memberRole: "owner", agentId: null,
       sourceContext: null, isAuthenticated: true, tokenType: "session",
@@ -83,10 +85,21 @@ describe("agent PATCH/GET /config — models surface", () => {
     };
     const sdk = buildAgentsNamespace(ctx, {});
     const before = await sdk.get(AGENT);
-    const get = await app.request(`/${AGENT}/config`);
-    expect(get.headers.get("etag")).toBe(`"${before.revision}"`);
+    for (const path of [`/${AGENT}`, `/${AGENT}/config`]) {
+      const get = await app.request(path, { headers: { "Accept-Encoding": "gzip" } });
+      expect(get.headers.get("etag")).toBe(`"${before.revision}"`);
+      expect(get.headers.get("content-encoding")).toBeNull();
+    }
     const client = new ApplyClient({ apiBaseUrl: "https://synthetic.test", orgSlug: ORG, token: "synthetic-token" },
-      ((url, init) => app.request(String(url).replace(`https://synthetic.test/api/${ORG}/agents`, ""), init)) as typeof fetch);
+      (async (url, init) => {
+        const headers = new Headers(init?.headers);
+        headers.set("Accept-Encoding", "gzip");
+        const response = await app.request(String(url).replace(`https://synthetic.test/api/${ORG}/agents`, ""), { ...init, headers });
+        // app.request lacks the automatic decompression performed by fetch.
+        return response.headers.get("content-encoding") === "gzip" && response.body
+          ? new Response(response.body.pipeThrough(new DecompressionStream("gzip")), response)
+          : response;
+      }) as typeof fetch);
     await client.getAgentSettings(AGENT, { agentId: AGENT, name: "Old list snapshot" });
     await client.patchAgentMetadata(AGENT, { name: "Apply renamed" });
     await client.patchAgentSettings(AGENT, { soulMd: "Apply persona", skillsConfig: { skills: [] } });

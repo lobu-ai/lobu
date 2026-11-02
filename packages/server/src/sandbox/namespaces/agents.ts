@@ -29,7 +29,7 @@ export function buildAgentsNamespace(
 	const { manage, method } = createActionCaller(manageAgents, env, ctx, "agents");
 
 	return {
-		manage: (input) => manage(input) as Promise<ManageAgentsResult>,
+		manage: manage as AgentsNamespace["manage"],
 		list: method("list"),
 		get: method("get", {
 			mapArgs: (agent_id) => ({
