@@ -157,6 +157,9 @@ jobs:
 
       - name: Preserve preview data across pod replacements
         run: |
+          # Use the cluster's dynamic local-path class for the namespace-owned
+          # preview claim; production's lobu-local-retain is a separate Retain
+          # policy. The rollout wait below verifies that this claim can bind.
           cat <<EOF | kubectl apply -f -
           apiVersion: v1
           kind: PersistentVolumeClaim
@@ -452,6 +455,7 @@ jobs:
               ...(proofUrl ? [`| **OAuth UI proof** | [Download screenshots](${proofUrl}) |`] : []),
               "",
               "_This preview is deleted when the PR closes or when the `preview` label is removed._",
+              "_After an incompatible migration, reset the persisted preview by removing `preview`, waiting for the cleanup job to finish, then re-adding it. This erases all saved preview data and edits._",
             ].join("\n");
 
             if (botComment) {

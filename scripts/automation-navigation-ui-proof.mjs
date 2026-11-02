@@ -15,7 +15,6 @@ export async function runAutomationNavigationProof({
   connectorKey,
   connectorName,
   connectionId,
-  storedEvent,
   call,
   assert,
 }) {
@@ -65,20 +64,6 @@ export async function runAutomationNavigationProof({
     });
   const screenshot = (file) =>
     page.screenshot({ path: join(outputDir, file), fullPage: true });
-  const checkpoint = async (stage) => {
-    const current = new URL(page.url());
-    await writeFile(
-      join(outputDir, "automation-navigation-progress.json"),
-      JSON.stringify(
-        {
-          stage,
-          path: `${current.pathname}${current.search}`,
-        },
-        null,
-        2
-      )
-    );
-  };
   const assertName = async (value) => {
     await name.waitFor();
     assert(
@@ -91,7 +76,11 @@ export async function runAutomationNavigationProof({
       new URL(page.url()).pathname === path,
       "Peek navigated the host page"
     );
-  const assertRunDestination = async (runId) => {
+  const assertRunPeek = async (runId) => {
+    await page.getByRole("region", { name: "Run outcome" }).waitFor();
+    await page
+      .getByText("No matching events from this run yet.", { exact: true })
+      .waitFor();
     const href = await page
       .getByRole("link", { name: "Open full page", exact: true })
       .getAttribute("href");
@@ -442,10 +431,8 @@ export async function runAutomationNavigationProof({
     baseUrl,
     workspace,
     automationId,
-    storedEvent,
   });
   await fixture.install();
-  await checkpoint("browser-only run fixture installed");
   try {
     await goto(detailPath);
     await assertName(automationName);
@@ -454,10 +441,8 @@ export async function runAutomationNavigationProof({
     const run = () =>
       page.getByRole("link", { name: `Run #${fixture.runId}`, exact: true });
     await run().click();
-    await page.getByRole("region", { name: "Run outcome" }).waitFor();
-    await assertRunDestination(fixture.runId);
+    await assertRunPeek(fixture.runId);
     await screenshot("browser-only-automation-run-peek.png");
-    await checkpoint("nested run peek verified");
     await page.getByRole("button", { name: "Back", exact: true }).click();
     await run().waitFor();
     await close();
@@ -497,22 +482,18 @@ export async function runAutomationNavigationProof({
       "Global Runs did not request the existing pagination cursor"
     );
     await firstRun.click();
-    await page.getByRole("region", { name: "Run outcome" }).waitFor();
-    await assertRunDestination(fixture.runId);
+    await assertRunPeek(fixture.runId);
     // Home views have their own paths; the peek must keep its filtered host.
     assertHost(new URL(filteredUrl).pathname);
     await screenshot("browser-only-global-runs-peek.png");
-    await checkpoint("paginated global run peek verified; testing reload");
     await page.reload();
-    await page.getByRole("region", { name: "Run outcome" }).waitFor();
-    await assertRunDestination(fixture.runId);
+    await assertRunPeek(fixture.runId);
     assert(
       new URL(page.url()).searchParams.get("automation_ids") ===
         String(automationId),
       "Run peek reload lost filters"
     );
     await close();
-    await checkpoint("run peek reload verified; testing read failure");
     fixture.failList(true);
     await page.reload();
     await page.getByText("Failed to load runs.", { exact: false }).waitFor();
@@ -522,17 +503,12 @@ export async function runAutomationNavigationProof({
         .count()) === 0,
       "Read failure appeared as an empty result"
     );
-    await checkpoint("read failure visible; testing Retry");
     fixture.failList(false);
     await page.getByRole("button", { name: "Retry", exact: true }).click();
     await firstRun.waitFor();
-    await checkpoint("Retry recovered; draining browser-only fixture handlers");
   } finally {
     await fixture.remove();
   }
-  await checkpoint(
-    "browser-only fixture removed; checking persisted empty state"
-  );
   await goto(filteredUrl);
   await page
     .getByText("No runs match these filters.", { exact: true })
@@ -635,13 +611,7 @@ export async function assertRunHistoryLayout(page, assert) {
   }
 }
 
-function installReadFixture({
-  page,
-  baseUrl,
-  workspace,
-  automationId,
-  storedEvent,
-}) {
+function installReadFixture({ page, baseUrl, workspace, automationId }) {
   const runId = 920001;
   const createdAt = "2026-10-01T12:00:00.000Z";
   const run = {
@@ -651,7 +621,7 @@ function installReadFixture({
     status: "completed",
     created_at: createdAt,
     completed_at: createdAt,
-    items_collected: 1,
+    items_collected: 0,
     error_message: null,
     checkpoint: null,
     connector_version: null,
@@ -668,34 +638,20 @@ function installReadFixture({
     initiator_ref: {},
     created_by_user_id: null,
   };
-  const event = {
-    ...storedEvent,
-    run_id: runId,
-    automation_id: Number(automationId),
-    title:
-      "Browser-only synthetic historical output — not persisted or executed",
-    metadata: {
-      ...storedEvent.metadata,
-      source_run_id: runId,
-      browser_only_fixture: true,
-    },
-  };
   let fail = false;
   let cursor = false;
-  const urls = ["manage_operations", "read_knowledge"].map((tool) =>
-    new URL(`/api/${workspace}/${tool}`, baseUrl).toString()
-  );
+  const url = new URL(
+    `/api/${workspace}/manage_operations`,
+    baseUrl
+  ).toString();
   const handler = async (route) => {
     const request = route.request();
     if (request.method() !== "POST") return route.continue();
     const input = request.postDataJSON();
-    const operations = request.url() === urls[0];
-    const matching = operations
-      ? input.action === "list_runs" ||
-        (input.action === "get_run" &&
-          [runId, runId - 1].includes(Number(input.run_id)))
-      : Number(input.produced_by_automation_id) === Number(automationId) ||
-        input.run_ids?.map(Number).includes(runId);
+    const matching =
+      input.action === "list_runs" ||
+      (input.action === "get_run" &&
+        [runId, runId - 1].includes(Number(input.run_id)));
     if (!matching) return route.continue();
     // First perform the real scoped READ. Never turn an auth refusal into a
     // fixture success; the synthetic context still needs normal app access.
@@ -703,26 +659,9 @@ function installReadFixture({
     if (!actual.ok()) return route.fulfill({ response: actual });
     const body = await actual.json();
     const missingFixtureRun =
-      operations &&
-      input.action === "get_run" &&
-      body.error === "Run not found";
+      input.action === "get_run" && body.error === "Run not found";
     if (body.error && !missingFixtureRun)
       return route.fulfill({ response: actual });
-    if (!operations)
-      return route.fulfill({
-        json: {
-          content: [event],
-          total: 1,
-          classification_stats: {},
-          page: {
-            limit: 50,
-            offset: 0,
-            has_more: false,
-            has_older: false,
-            has_newer: false,
-          },
-        },
-      });
     if (input.action === "get_run")
       return route.fulfill({
         json: { action: "get_run", run: { ...run, id: Number(input.run_id) } },
@@ -756,12 +695,8 @@ function installReadFixture({
       fail = value;
     },
     sawCursor: () => cursor,
-    install: async () => {
-      for (const url of urls) await page.route(url, handler);
-    },
-    // This dedicated page has only these two test routes. Wait for in-flight
-    // real reads before removing them; plain unroute can leave an async fulfill
-    // racing teardown and mask the original proof failure with an uncaught error.
+    install: () => page.route(url, handler),
+    // Drain real reads so an async fulfill cannot race handler teardown.
     remove: () => page.unrouteAll({ behavior: "wait" }),
   };
 }

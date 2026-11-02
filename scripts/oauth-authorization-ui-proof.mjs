@@ -169,12 +169,12 @@ try {
   await page.goto(authorizeUrl.toString(), { waitUntil: "domcontentloaded" });
   await page.getByRole("heading", { name: "Authorize application" }).waitFor();
   await page.getByText(`0 of ${workspaceCount} workspaces selected.`).waitFor();
-  await page
-    .getByRole("button", { name: `Select all ${workspaceCount}` })
-    .click();
-  await page
-    .getByText(`${workspaceCount} of ${workspaceCount} workspaces selected.`)
-    .waitFor();
+  // A persistent preview accumulates review fixtures. Grant only this run's
+  // two workspaces so reruns cannot exceed the 50-workspace OAuth bound.
+  for (const workspace of results.workspaces_created) {
+    await page.locator(`[id$="-workspace-${workspace.id}"]`).check();
+  }
+  await page.getByText(`2 of ${workspaceCount} workspaces selected.`).waitFor();
   await page.getByLabel("Read only").check();
   await page.screenshot({
     path: join(outputDir, "oauth-consent-review.png"),
@@ -217,7 +217,7 @@ try {
     screenshot: "oauth-consent-review.png",
     requested_access: "admin",
     approved_access: "read",
-    workspace_access: "all_current",
+    workspace_ids: results.workspaces_created.map(({ id }) => id),
     token_scope: consentScope,
   };
 
@@ -249,12 +249,11 @@ try {
   await page.getByRole("heading", { name: "Authorize application" }).waitFor();
   await page.getByText("Device capabilities").waitFor();
   await page.getByText(`1 of ${workspaceCount} workspaces selected.`).waitFor();
-  await page
-    .getByRole("button", { name: `Select all ${workspaceCount}` })
-    .click();
-  await page
-    .getByText(`${workspaceCount} of ${workspaceCount} workspaces selected.`)
-    .waitFor();
+  for (const workspace of results.workspaces_created) {
+    await page.locator(`[id$="-workspace-${workspace.id}"]`).check();
+  }
+  // The required home workspace is preselected; this run adds its two fixtures.
+  await page.getByText(`3 of ${workspaceCount} workspaces selected.`).waitFor();
   await page
     .getByLabel(
       "I initiated this request and confirmed that the device code matches."
@@ -286,7 +285,6 @@ try {
   results.device = {
     screenshot: "oauth-device-review.png",
     approved_access: "admin",
-    workspace_access: "all_current",
     token_scope: deviceScope,
   };
 

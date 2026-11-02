@@ -326,7 +326,6 @@ export async function runNativeReferenceProof({
     connectorKey: connector.id,
     connectorName: connector.name,
     connectionId,
-    storedEvent: stored,
     call,
     assert,
   });
@@ -346,11 +345,49 @@ export async function runNativeReferenceProof({
       colorScheme: "light",
       deviceScaleFactor: 1,
     });
+  // Keep the real anonymous denial in flight until an authenticated resolve
+  // succeeds. This exercises the first-load sign-in race without fabricating
+  // auth responses, identities or workspace data.
+  let releaseLocalInit;
+  let releaseAnonymousResolve;
+  const anonymousResponseReady = new Promise((resolve) => {
+    releaseLocalInit = resolve;
+  });
+  const authenticatedResponseReady = new Promise((resolve) => {
+    releaseAnonymousResolve = resolve;
+  });
+  const firstLoadAuthentication = {};
+  await freshPage.route("**/api/local-init", async (route) => {
+    await anonymousResponseReady;
+    await route.continue();
+  });
+  await freshPage.route(`**/api/${workspace}/resolve_path`, async (route) => {
+    const response = await route.fetch();
+    const status = response.status();
+    if (
+      firstLoadAuthentication.anonymous_status === undefined &&
+      (status === 401 || status === 403)
+    ) {
+      firstLoadAuthentication.anonymous_status = status;
+      releaseLocalInit();
+      await authenticatedResponseReady;
+    } else if (status === 200) {
+      firstLoadAuthentication.authenticated_status = status;
+      releaseAnonymousResolve();
+    }
+    await route.fulfill({ response });
+  });
   try {
     await freshPage.goto(new URL(path, baseUrl).toString(), {
       waitUntil: "domcontentloaded",
     });
     await identities(freshPage);
+    assert(
+      [401, 403].includes(firstLoadAuthentication.anonymous_status) &&
+        firstLoadAuthentication.authenticated_status === 200,
+      "Fresh private deep link did not recover from its pending anonymous denial"
+    );
+    await freshPage.unrouteAll({ behavior: "wait" });
     await freshPage.screenshot({
       path: join(outputDir, "native-report-narrow.png"),
       fullPage: true,
@@ -406,9 +443,13 @@ export async function runNativeReferenceProof({
       .click();
     await freshPage.getByRole("dialog").waitFor({ state: "hidden" });
   } finally {
+    releaseLocalInit();
+    releaseAnonymousResolve();
+    await freshPage.unrouteAll({ behavior: "wait" });
     await freshPage.close();
   }
   return {
+    first_load_authentication: firstLoadAuthentication,
     path,
     event_id: eventId,
     workspace,
