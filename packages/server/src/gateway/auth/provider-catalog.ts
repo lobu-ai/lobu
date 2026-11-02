@@ -5,7 +5,7 @@ import {
   SDK_COMPAT_PROTOCOLS,
   type SdkCompat,
 } from "@lobu/core";
-import type { InferenceProviderListItem } from "../../lobu/stores/provider-secrets.js";
+import type { InferenceProviderListItem } from "@lobu/core/contracts/tools/manage-inference-providers";
 import {
   getModelProviderModules,
   type ModelProviderModule,

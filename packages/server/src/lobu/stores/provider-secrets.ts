@@ -20,7 +20,6 @@ import {
   type InferenceCapabilities, type InferenceCapabilityBlock, type InferenceModality,
   type InferenceProviderListItem,
 } from "@lobu/core/contracts/tools/manage-inference-providers";
-export type { InferenceCapabilities, InferenceCapabilityBlock, InferenceModality, InferenceProviderListItem } from "@lobu/core/contracts/tools/manage-inference-providers";
 import { getDb, type DbClient } from "../../db/client.js";
 import { isUniqueViolation } from "../../utils/pg-errors";
 import { withTransaction } from "../../db/transaction.js";

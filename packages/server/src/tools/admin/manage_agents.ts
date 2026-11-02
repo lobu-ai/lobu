@@ -618,7 +618,7 @@ async function queueWriteForApproval(
         }
       }
       proposal.base = base;
-      Object.assign(current, row, { settings });
+      Object.assign(current, row, base.settings && { settings: base.settings });
     }));
   }
 

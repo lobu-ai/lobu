@@ -4,7 +4,7 @@ import {
   moduleRegistry,
   type SdkCompat,
 } from "@lobu/core";
-import type { InferenceProviderListItem } from "../../../lobu/stores/provider-secrets.js";
+import type { InferenceProviderListItem } from "@lobu/core/contracts/tools/manage-inference-providers";
 import {
   ApiKeyProviderModule as ApiKeyProviderModuleImpl,
   type ApiKeyProviderModule,

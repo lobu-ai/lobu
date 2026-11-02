@@ -179,15 +179,19 @@ describe("manage_agents — builder gate e2e", () => {
     const sdk = buildAgentsNamespace(toToolContext(ownerCtx), TEST_ENV);
     const agentSdk = buildAgentsNamespace(toToolContext(agentCtx), TEST_ENV);
     await sdk.create({ agent_id: "approved-settings-bot", name: "Settings" });
+    await sdk.update({ agent_id: "approved-settings-bot", settings: { soulMd: "Original", userMd: "Original preference", networkConfig: { allowedDomains: ["example.com"] } } });
     const proposedSkills = { skills: [{ repo: "example/skills", name: "proposed", enabled: true, content: "Proposed skill." }] };
     const humanSkills = { skills: [{ repo: "example/skills", name: "human", enabled: true, content: "New human skill." }] };
     const pending = await agentSdk.update({ agent_id: "approved-settings-bot", identity_md: "Approved identity", settings: { soulMd: "Proposed", userMd: "Approved preference", skillsConfig: proposedSkills } });
     if (!("status" in pending) || pending.status !== "pending_approval") throw new Error("Expected approval");
+    const sql = getTestDb();
+    const [approval] = await sql`SELECT metadata FROM events WHERE organization_id = ${orgId}
+      AND run_id = ${pending.run_id} AND interaction_type = 'approval'`;
+    expect(approval.metadata.current.settings).toEqual({ soulMd: "Original", userMd: "Original preference", skillsConfig: { skills: [] } });
     expect((await sdk.get("approved-settings-bot")).settings.soulMd).not.toBe("Proposed");
     await sdk.update({ agent_id: "approved-settings-bot", settings: { soulMd: "New human edit", skillsConfig: humanSkills } });
     await executeTool("manage_operations", { action: "approve", run_id: pending.run_id }, TEST_ENV, ownerCtx);
     expect((await sdk.get("approved-settings-bot")).settings).toMatchObject({ identityMd: "Approved identity", soulMd: "New human edit", userMd: "Approved preference", skillsConfig: humanSkills });
-    const sql = getTestDb();
     const [run] = await sql`SELECT action_output FROM runs WHERE id = ${pending.run_id}`;
     expect(run.action_output.skipped_fields).toContain("settings.soulMd");
     expect(run.action_output.skipped_fields).toContain("settings.skillsConfig");
