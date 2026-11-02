@@ -448,7 +448,109 @@ export async function runNativeReferenceProof({
     await freshPage.unrouteAll({ behavior: "wait" });
     await freshPage.close();
   }
+  // A permission-owning agent does not turn an explicit external executor into
+  // a hosted agent. Exercise a real editor save against the preview API, while
+  // keeping this second fixture inert: no triggers and no run invocation.
+  const external = await call("manage_automations", {
+    action: "create",
+    slug: "native-preview-external",
+    name: "Synthetic external Automation",
+    prompt: "Synthetic editor review only. Do not execute any action.",
+    managed_agent_id: agent.agent_id,
+    execution_config: { executor: { kind: "external" } },
+    triggers: [],
+  });
+  assert(external.automation_id, "External editor fixture was not created");
+  const externalPath = `/${workspace}/automations/${external.automation_id}?view=definition`;
+  await page.goto(new URL(externalPath, baseUrl).toString());
+  await page.getByText("External executor", { exact: true }).waitFor();
+  await page.getByText("Owning agent", { exact: true }).waitFor();
+  assert(
+    (await page
+      .locator(
+        "#scratch-runs-on, #scratch-device-id, #scratch-timeout, #scratch-permission-mode"
+      )
+      .count()) === 0,
+    "External editor offered an incompatible executor or runtime setting"
+  );
+  await page.screenshot({
+    path: join(outputDir, "external-executor-editor.png"),
+    fullPage: true,
+  });
+  await page
+    .locator("#scratch-description")
+    .fill("Synthetic unrelated description edit.");
+  const externalSaved = Promise.all(
+    ["create_version", "update"].map((action) =>
+      page.waitForResponse(
+        (response) =>
+          new URL(response.url()).pathname ===
+            `/api/${workspace}/manage_automations` &&
+          response.request().postDataJSON()?.action === action
+      )
+    )
+  );
+  await page
+    .getByRole("button", { name: "Save Automation", exact: true })
+    .click();
+  for (const response of await externalSaved) {
+    const result = await response.json();
+    assert(
+      response.ok() &&
+        !result.error &&
+        !result.approval_queued &&
+        result.status !== "pending_approval",
+      "External editor save did not apply"
+    );
+  }
+  const externalDefinitions = await call("manage_automations", {
+    action: "list",
+    automation_id: String(external.automation_id),
+    include_details: true,
+    limit: 1,
+  });
+  const externalReadback = externalDefinitions.automations?.find(
+    (item) => String(item.automation_id) === String(external.automation_id)
+  );
+  assert(
+    externalReadback?.description === "Synthetic unrelated description edit." &&
+      externalReadback.managed_agent_id === agent.agent_id &&
+      isDeepStrictEqual(externalReadback.execution_config, {
+        executor: { kind: "external" },
+      }) &&
+      externalReadback.triggers.length === 0 &&
+      !externalReadback.device_worker_id,
+    "Unrelated save changed the external executor, owning agent, or trigger state"
+  );
+  const externalRuns = await call("manage_operations", {
+    action: "list_runs",
+    automation_ids: [Number(external.automation_id)],
+    limit: 1,
+  });
+  assert(
+    externalRuns.runs?.length === 0,
+    "Inert external editor fixture unexpectedly ran"
+  );
+  await page.reload();
+  await page.getByText("External executor", { exact: true }).waitFor();
+  assert(
+    (await page.locator("#scratch-description").inputValue()) ===
+      externalReadback.description,
+    "External editor reload lost the saved description"
+  );
+  await page.screenshot({
+    path: join(outputDir, "external-executor-editor-saved.png"),
+    fullPage: true,
+  });
   return {
+    external_editor: {
+      path: externalPath,
+      automation_id: external.automation_id,
+      version: externalReadback.version,
+      owning_agent: externalReadback.managed_agent_id,
+      executor: externalReadback.execution_config.executor,
+      runs: externalRuns.runs.length,
+    },
     first_load_authentication: firstLoadAuthentication,
     path,
     event_id: eventId,
@@ -476,6 +578,7 @@ export async function runNativeReferenceProof({
       "reload",
       "fresh browser access via existing single-user preview sign-in",
       "narrow viewport identities loaded",
+      "external executor editor save keeps executor and owning agent",
     ],
     screenshots: [
       "native-report-current.png",
@@ -484,6 +587,8 @@ export async function runNativeReferenceProof({
       "automation-list-narrow.png",
       "automation-activity-narrow.png",
       "automation-combined-activity-narrow.png",
+      "external-executor-editor.png",
+      "external-executor-editor-saved.png",
       ...navigation.screenshots,
     ],
   };
