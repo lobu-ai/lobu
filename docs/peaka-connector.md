@@ -64,7 +64,9 @@ provider-owned flow:
 
 Without that flow the action returns
 `output.code = "peaka_upsert_requires_flow"`; it never falls back to an
-unsafe append. `add_record` remains the explicit append primitive.
+unsafe append. `add_record` remains the explicit append primitive and fails
+with `output.code = "peaka_import_failed"` unless the import job reports
+`COMPLETED` with at least one processed row.
 
 The flow is Peaka-owned: its insert/update nodes select by the key and own the
 atomic decision. This keeps Peaka's native write semantics in Peaka and avoids

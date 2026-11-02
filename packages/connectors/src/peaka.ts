@@ -252,52 +252,72 @@ function normalise(value: unknown): string {
 	return String(value);
 }
 
-/** Stable tie-break for rows that share the checkpoint timestamp. */
 /** Deterministic code-point ordering, independent of locale. */
 function compareText(a: string, b: string): number {
 	if (a === b) return 0;
 	return a < b ? -1 : 1;
 }
 
-function isIntegerString(value: string): boolean {
-	return /^-?\d+$/.test(value);
+interface DecimalValue {
+	sign: -1 | 0 | 1;
+	coefficient: bigint;
+	exponent: number;
+}
+
+/** Parse an integer/decimal/exponent string into an exact BigInt value. */
+function parseDecimal(value: string): DecimalValue | null {
+	const match = /^([+-]?)(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/.exec(value.trim());
+	if (!match) return null;
+	const fraction = match[3] ?? "";
+	const exponent = Number(match[4] ?? "0");
+	if (!Number.isSafeInteger(exponent) || Math.abs(exponent) > 10_000) return null;
+	const coefficient = BigInt(`${match[2]}${fraction}`.replace(/^0+(?=\d)/, "") || "0");
+	if (coefficient === 0n) return { sign: 0, coefficient: 0n, exponent: 0 };
+	return {
+		sign: match[1] === "-" ? -1 : 1,
+		coefficient,
+		exponent: exponent - fraction.length,
+	};
+}
+
+function compareDecimals(a: DecimalValue, b: DecimalValue): number {
+	if (a.sign !== b.sign) return a.sign < b.sign ? -1 : 1;
+	if (a.sign === 0) return 0;
+	let left = a.coefficient;
+	let right = b.coefficient;
+	if (a.exponent > b.exponent) {
+		left *= 10n ** BigInt(a.exponent - b.exponent);
+	} else if (b.exponent > a.exponent) {
+		right *= 10n ** BigInt(b.exponent - a.exponent);
+	}
+	const result = left < right ? -1 : left > right ? 1 : 0;
+	return a.sign === -1 ? -result : result;
 }
 
 /**
- * Strict total order over source ids. Integer ids sort before text ids; within
- * integers the BigInt value wins and numerically equal strings ('01' vs '1')
- * break ties on the original text. Mixing the two classes with string compare
- * alone is non-transitive and can make a checkpoint skip rows.
+ * Strict total order over source ids and query values. Numeric strings sort
+ * before text; numerics compare exactly (BigInt-scaled), and equal numerics
+ * break ties on the original text ('01' vs '1'). This is transitive for mixed
+ * integer, decimal, exponent, and text values.
  */
-function compareIds(a: string, b: string): number {
-	const aNumeric = isIntegerString(a);
-	const bNumeric = isIntegerString(b);
-	if (aNumeric !== bNumeric) return aNumeric ? -1 : 1;
-	if (aNumeric) {
-		const left = BigInt(a);
-		const right = BigInt(b);
-		if (left < right) return -1;
-		if (left > right) return 1;
+function compareNumericOrText(a: string, b: string): number {
+	const left = parseDecimal(a);
+	const right = parseDecimal(b);
+	if (left && right) {
+		const result = compareDecimals(left, right);
+		return result === 0 ? compareText(a, b) : result;
 	}
+	if (left) return -1;
+	if (right) return 1;
 	return compareText(a, b);
 }
 
+function compareIds(a: string, b: string): number {
+	return compareNumericOrText(a, b);
+}
+
 function compareValues(a: unknown, b: unknown): number {
-	const left = normalise(a);
-	const right = normalise(b);
-	if (isIntegerString(left) && isIntegerString(right)) {
-		return compareIds(left, right);
-	}
-	const leftNumber = left === "" ? Number.NaN : Number(left);
-	const rightNumber = right === "" ? Number.NaN : Number(right);
-	const leftNumeric = Number.isFinite(leftNumber);
-	const rightNumeric = Number.isFinite(rightNumber);
-	if (leftNumeric !== rightNumeric) return leftNumeric ? -1 : 1;
-	if (leftNumeric && rightNumeric) {
-		const result = leftNumber - rightNumber;
-		if (result !== 0) return result;
-	}
-	return compareText(left, right);
+	return compareNumericOrText(normalise(a), normalise(b));
 }
 
 function sameRecord(
@@ -737,6 +757,14 @@ export default class PeakaConnector extends ConnectorRuntime<PeakaCheckpoint, Pe
 			throw new Error("`record` must be an object");
 		}
 		const job = await this.importRow(config, table, record as Record<string, unknown>);
+		const processed = job.result?.processed ?? 0;
+		if (job.status !== "COMPLETED" || processed < 1) {
+			return {
+				success: false,
+				error: `Peaka import did not complete successfully (status=${job.status ?? "unknown"}, processed=${processed})`,
+				output: { code: "peaka_import_failed", table, job },
+			};
+		}
 		return { success: true, output: { action: "added", table, job } };
 	}
 

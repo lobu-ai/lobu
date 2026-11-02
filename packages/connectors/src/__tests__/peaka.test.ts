@@ -340,6 +340,52 @@ describe("Peaka actions", () => {
 		expect(result.total).toBe(3);
 	});
 
+	test("add_record reports a failed or zero-row import as failure", async () => {
+		for (const job of [
+			{ status: "FAILED", result: { processed: 0 } },
+			{ status: "COMPLETED", result: { processed: 0 } },
+		]) {
+			const { result } = await invoke(
+				"add_record",
+				{ table: "call_transcripts", record: { idempotency_key: "k" } },
+				{
+					request: async () =>
+						new Response(JSON.stringify(job), {
+							status: 200,
+							headers: { "content-type": "application/json" },
+						}),
+				},
+			);
+			expect(result.success).toBe(false);
+			expect(result.output.code).toBe("peaka_import_failed");
+		}
+	});
+
+	test("query sorts integer, exponent, and decimal forms transitively", async () => {
+		const connector = new PeakaConnector();
+		const { http } = stubHttp({
+			post: async () => ({
+				columns: [{ columnName: "amount" }],
+				data: [
+					{ amount: "10000000000000000" },
+					{ amount: "1e16" },
+					{ amount: "9999999999999999" },
+				],
+			}),
+		});
+		// biome-ignore lint/suspicious/noExplicitAny: private seam replaced for the unit test
+		(connector as any).http = () => http;
+
+		const first = await connector.query({
+			query: "SELECT amount FROM x",
+			config,
+			limit: 1,
+			offset: 0,
+			sort: { column: "amount", order: "asc" },
+		});
+		expect(first.rows).toEqual([{ amount: "9999999999999999" }]);
+	});
+
 	test("query sorts adjacent 64-bit ids without Number collapse", async () => {
 		const connector = new PeakaConnector();
 		const { http } = stubHttp({
