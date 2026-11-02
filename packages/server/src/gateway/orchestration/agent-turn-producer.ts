@@ -46,6 +46,7 @@ import { getModel, type Model } from "@mariozechner/pi-ai";
 import { SettingsManager } from "@mariozechner/pi-coding-agent";
 import { getDb } from "../../db/client.js";
 import { insertAgentTurnResponse, lockAgentTurnConversation, lockAgentTurnRun, releaseNextAgentTurn } from "../../runs/agent-turn-inputs.js";
+import { resolveRunInitiator } from "../../tools/initiator.js";
 import { isHeadlessSource, resolveAutomationRunContext } from "../automation-run-session.js";
 import { parseAutomationRunConversationId } from "../permissions/automation-run-intent.js";
 import type { AgentRuntimeSelection } from "../../lobu/stores/sandbox-store.js";
@@ -1028,13 +1029,32 @@ export async function enqueueAgentTurn(
     let mcpInstructions: string[] = [];
     // Resolve the durable correlation once: turn triggers have no completion
     // handshake, while windows must be able to read and complete their bounds.
-    const automationContext = parseAutomationRunConversationId(data.conversationId)
+    const automationIntent = parseAutomationRunConversationId(data.conversationId);
+    const automationContext = automationIntent
       ? await resolveAutomationRunContext({
           conversationId: data.conversationId,
           organizationId: data.organizationId,
           agentId: data.agentId,
         })
       : null;
+    // Freeze the verified chat sender, never the agent owner or a headless
+    // credential's user. API authority alone does not prove human initiation.
+    // The Automation resolver above throws unless the org/agent/run scope holds.
+    const initiator = resolveRunInitiator({
+      agentId: turnClaims.agentId,
+      userId: chatAccess === "member" ? turnClaims.actorUserId : null,
+      actingAutomationId: automationIntent?.automationId ?? null,
+      actingRunId: automationIntent?.runId ?? null,
+      sourceContext: {
+        platform: turnClaims.platform,
+        conversationId: turnClaims.conversationId,
+        ...(chatAccess ? {
+          userId: turnClaims.userId,
+          teamId: turnClaims.teamId,
+          memberUserId: chatAccess === "org_shared" ? turnClaims.actorUserId : undefined,
+        } : {}),
+      },
+    });
     let failedServers: string[] = [];
     if (replyOnly) {
       // No Lobu tools and no memory hooks: the MCP lane refuses this token, so
@@ -1110,7 +1130,7 @@ export async function enqueueAgentTurn(
       },
       // Follow-up chips only where a person is waiting on this reply: never an
       // Automation run or another server-dispatched (headless) turn.
-      ...(!parseAutomationRunConversationId(data.conversationId) &&
+      ...(!automationIntent &&
       !isHeadlessSource(data.platformMetadata?.source)
         ? { follow_ups: true as const }
         : {}),
@@ -1300,7 +1320,7 @@ export async function enqueueAgentTurn(
 
     const rows = await sql.begin(async (tx) => {
       await lockAgentTurnConversation(tx, data.organizationId!, data.agentId!, data.conversationId);
-      const [source] = await tx`SELECT id FROM runs
+      const [source] = await tx`SELECT id, initiator_kind, initiator_ref, created_by_user_id FROM runs
         WHERE id = ${data.runId!} AND organization_id = ${data.organizationId!}
           AND run_type = 'chat_message' AND queue_name = 'messages'
           AND action_input->>'messageId' = ${data.messageId} FOR UPDATE`;
@@ -1308,10 +1328,19 @@ export async function enqueueAgentTurn(
       const existing = await tx<{ id: number }>`SELECT id FROM runs WHERE parent_run_id = ${data.runId!}
         AND organization_id = ${data.organizationId!} AND run_type = 'agent_turn' LIMIT 1`;
       if (existing.length) return existing;
+      // Attribution crosses the exact durable admission, not the request
+      // payload or a session's creator. This does not change the turn token.
+      const admittedHumanId = !automationIntent && source.initiator_kind === "user" ? source.created_by_user_id : null;
+      const admittedInitiator = admittedHumanId ? resolveRunInitiator({
+        agentId: turnClaims.agentId, userId: admittedHumanId,
+        sourceContext: { platform: turnClaims.platform, conversationId: turnClaims.conversationId },
+      }) : initiator;
       return tx<{ id: number }>`INSERT INTO runs (
-        id, organization_id, run_type, status, approval_status, action_input, created_at, run_at, parent_run_id
+        id, organization_id, run_type, status, approval_status, action_input, created_at, run_at, parent_run_id,
+        initiator_kind, initiator_ref, created_by_user_id
       ) VALUES (${runId}, ${data.organizationId!}, 'agent_turn', 'pending', 'auto',
-        ${tx.json({ turn, credential: provider.credential, reply })}, now(), now(), ${data.runId!}) RETURNING id`;
+        ${tx.json({ turn, credential: provider.credential, reply })}, now(), now(), ${data.runId!},
+        ${admittedInitiator.initiatorKind}, ${tx.json(admittedInitiator.initiatorRef)}, ${admittedInitiator.createdByUserId}) RETURNING id`;
     });
 
     logger.info(

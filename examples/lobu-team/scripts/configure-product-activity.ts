@@ -67,11 +67,11 @@ export async function configureProductActivityDigest(
     outputs: { digests: { event: "summary" } },
     name: "Lobu production activity digest",
     description:
-      "External MCP analysis of product activity and production logs; notify only meaningful changes.",
+      "External MCP analysis of product activity with ClickHouse log evidence and Loki comparison; notify only meaningful changes.",
     reactions_guidance:
       "Complete every window. Return digests: [] when nothing materially changed; otherwise one concise evidence-backed summary. The reaction owns delivery.",
     change_notes:
-      "External MCP only; preserve checkpoint and delivery destination, remove unconditional script delivery.",
+      "Compare ClickHouse counters with retained Loki windows and investigate through ClickHouse; preserve checkpoint, sources and delivery destination.",
     set_as_current: true,
   });
   if (needsApproval(version)) return version;

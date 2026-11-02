@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import type { ContentItem } from '@lobu/connector-sdk';
-import { REDACTED_SENTINEL } from '@lobu/core';
+import { mintGatewayMcpToken, REDACTED_SENTINEL } from '@lobu/core';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { SCOPE_CHECK_NOT_APPLICABLE } from '../../../auth/tool-access';
 import { recordToolInvocationAudit } from '../../../tools/audit';
@@ -10,18 +10,21 @@ import type { Env } from '../../../index';
 import { type AuthContext, executeTool } from '../../../tools/execute';
 import { hydrateToolInvocationRequests } from '../../../tools/get_content/render';
 import { cleanupTestDatabase } from '../../setup/test-db';
+import { mintTurnToken } from '../../../gateway/orchestration/agent-turn-producer';
 import {
   addUserToOrganization,
   createTestAccessToken,
+  createTestAgent,
   createTestOAuthClient,
   createTestOrganization,
   createTestUser,
   seedSystemEntityTypes,
 } from '../../setup/test-fixtures';
-import { ensureMcpSession, mcpToolsCall } from '../../setup/test-helpers';
+import { ensureMcpSession, mcpToolsCall, post } from '../../setup/test-helpers';
 
 interface AuditRow {
   id: string | number;
+  run_id: string | number | null;
   payload_data: Record<string, unknown>;
   metadata: Record<string, unknown>;
 }
@@ -29,7 +32,7 @@ interface AuditRow {
 async function latestAuditRow(orgId: string, toolName: string): Promise<AuditRow | null> {
   const sql = getDb();
   const rows = await sql<AuditRow[]>`
-    SELECT id, payload_data, metadata
+    SELECT id, run_id, payload_data, metadata
     FROM events
     WHERE organization_id = ${orgId}
       AND semantic_type = 'audit'
@@ -125,6 +128,53 @@ describe('tool invocation audit coverage', () => {
     expect(row!.metadata.mcp_session_id).toBe(sessionId);
   });
 
+  it('links a source-read audit to the current verified native turn across a reused MCP session', async () => {
+    const sql = getDb();
+    const agent = await createTestAgent({ agentId: 'audit-native-agent', organizationId: orgId, ownerUserId: ownerId });
+    const turns = await sql`INSERT INTO runs (organization_id, run_type, status)
+      VALUES (${orgId}, 'agent_turn', 'running'), (${orgId}, 'agent_turn', 'running') RETURNING id`;
+    const workerTokens = await Promise.all(turns.map(async (turn, index) => {
+      const raw = await mintTurnToken({
+        userId: ownerId, conversationId: 'audit-native-conversation', channelId: 'audit-native-channel',
+        teamId: 'api', platform: 'api', messageId: `audit-input-${index}`, messageText: 'Read source data',
+        agentId: agent.agentId, organizationId: orgId, platformMetadata: { source: 'direct-api' },
+      }, Number(turn.id));
+      return mintGatewayMcpToken(raw)!;
+    }));
+    async function request(method: string, params: Record<string, unknown>, workerToken: string, sessionId?: string) {
+      const response = await post(`/mcp/${orgSlug}`, {
+        token: workerToken,
+        headers: { 'X-Lobu-Memory-Direct-Auth': '1', 'X-MCP-Format': 'json',
+          ...(sessionId ? { 'mcp-session-id': sessionId } : {}) },
+        body: { jsonrpc: '2.0', id: 1, method, params },
+      });
+      const body = await response.json();
+      expect(response.status, JSON.stringify(body)).toBe(200);
+      return { headers: response.headers, body };
+    }
+    const initialized = await request('initialize', {
+      protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'audit-native-worker', version: '1' },
+    }, workerTokens[0]!);
+    const sessionId = initialized.headers.get('mcp-session-id');
+    expect(sessionId).toBeTruthy();
+    for (const [index, workerToken] of workerTokens.entries()) {
+      const response = await request('tools/call', { name: 'query_sql', arguments: {
+        sql: 'SELECT 1 AS useful_value', limit: 1,
+      }, _meta: { turnRunId: Number(turns[1 - index]!.id) } }, workerToken, sessionId!);
+      const body = response.body;
+      expect(body.result?.isError).not.toBe(true);
+      const row = await latestAuditRow(orgId, 'query_sql');
+      expect(row!.payload_data).toMatchObject({ success: true, row_count: 1 });
+      expect(Number(row!.run_id)).toBe(Number(turns[index]!.id));
+    }
+    // A signed but pruned run must not drop a successful read's audit on its FK.
+    await sql`DELETE FROM runs WHERE id = ${turns[1]!.id}`;
+    await request('tools/call', { name: 'query_sql', arguments: { sql: 'SELECT 1', limit: 1 } }, workerTokens[1]!, sessionId!);
+    const stale = await latestAuditRow(orgId, 'query_sql');
+    expect(stale!.payload_data.success).toBe(true);
+    expect(stale!.run_id).toBeNull();
+  });
+
   it('records the requested org_slug on query_sql audit rows', async () => {
     const result = (await executeTool(
       'query_sql',
@@ -146,6 +196,7 @@ describe('tool invocation audit coverage', () => {
     });
     expect(row!.payload_data).not.toHaveProperty('response');
     expect(row!.metadata).toHaveProperty('mcp_session_id', null);
+    expect(row!.run_id).toBeNull();
 
     expect(await readAuditEvent(row!.id, authCtxFor('session'))).toMatchObject({
       request_status: 'complete',
@@ -156,6 +207,24 @@ describe('tool invocation audit coverage', () => {
         org_slug: orgSlug,
       },
     });
+  });
+
+  it('uses an existing same-workspace reaction run and leaves foreign run claims unattributed', async () => {
+    const sql = getDb();
+    const foreignOrg = await createTestOrganization({ name: 'Foreign Audit Run Org' });
+    const [reaction] = await sql`INSERT INTO runs (organization_id, run_type, status)
+      VALUES (${orgId}, 'automation', 'running') RETURNING id`;
+    const [foreign] = await sql`INSERT INTO runs (organization_id, run_type, status)
+      VALUES (${foreignOrg.id}, 'agent_turn', 'running') RETURNING id`;
+    for (const [context, expected] of [
+      [{ ...authCtxFor('session'), actingRunId: Number(reaction.id) }, Number(reaction.id)],
+      [{ ...authCtxFor('session'), sourceContext: { turnRunId: Number(foreign.id) } }, null],
+    ] as const) {
+      await executeTool('query_sql', { sql: 'SELECT 1', limit: 1 }, {} as Env, context);
+      const row = await latestAuditRow(orgId, 'query_sql');
+      expect(row!.payload_data).toMatchObject({ success: true, row_count: 1 });
+      expect(row!.run_id == null ? null : Number(row!.run_id)).toBe(expected);
+    }
   });
 
   it('keeps the request on the event but exposes it only through the authorized event read path', async () => {

@@ -7,6 +7,7 @@ import {
   defineEntityType,
   Type,
 } from "@lobu/cli/config";
+import type ClickHouseAnalyticsConnector from "./clickhouse-analytics.connector.ts";
 import type DataForSeoConnector from "./dataforseo.connector.ts";
 import type LokiActivityConnector from "./loki-activity.connector.ts";
 
@@ -319,6 +320,22 @@ const productionLogs = defineConnection({
   ],
 });
 
+// Provisioned like productionLogsAuth: an immutable HTTP binding whose secret
+// apply never touches, because credentials are intentionally omitted here.
+const analyticsAuth = defineAuthProfile({
+  slug: "lobu-clickhouse-analytics-http",
+  connector: "clickhouse.analytics",
+  authKind: "env",
+  name: "Lobu ClickHouse analytics HTTP",
+});
+const analytics = defineConnection({
+  slug: "lobu-analytics",
+  connector: "clickhouse.analytics",
+  name: "Lobu analytics",
+  authProfile: analyticsAuth,
+  config: { CLICKHOUSE_URL: "https://clickhouse.lobu.ai" },
+});
+
 const lobuTeamSlack = defineConnection({
   slug: "lobu-team-slack",
   connector: "slack",
@@ -362,6 +379,9 @@ const gmailOAuthApp = defineAuthProfile({
 
 export default defineConfig({
   connectors: [
+    connectorFromFile<typeof ClickHouseAnalyticsConnector>(
+      "./clickhouse-analytics.connector.ts"
+    ),
     connectorFromFile<typeof DataForSeoConnector>("./dataforseo.connector.ts"),
     connectorFromFile<typeof LokiActivityConnector>(
       "./loki-activity.connector.ts"
@@ -373,6 +393,7 @@ export default defineConfig({
   organizationId: "UdNAH1bb3csC842vhOgxAHVcfX4tYU5A",
   agents: [developer, productOps],
   authProfiles: [
+    analyticsAuth,
     productActivityDbAuth,
     productionLogsAuth,
     cloudflareOAuthApp,
@@ -381,6 +402,7 @@ export default defineConfig({
   ],
   entities: [task],
   connections: [
+    analytics,
     productActivityDb,
     productionLogs,
     lobuTeamSlack,

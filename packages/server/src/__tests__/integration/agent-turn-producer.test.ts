@@ -24,7 +24,8 @@ import { FOLLOW_UP_SUGGESTIONS_PROMPT } from '@lobu/core/agent-tooling';
 import { Value } from '@sinclair/typebox/value';
 import { InMemorySpanExporter, SimpleSpanProcessor } from '@opentelemetry/sdk-trace-node';
 import { MessageConsumer } from '../../gateway/orchestration/message-consumer';
-import { RunsQueue } from '../../gateway/infrastructure/queue/runs-queue';
+import { RunsQueue, insertQueueJob } from '../../gateway/infrastructure/queue/runs-queue';
+import { resolveRunInitiator } from '../../tools/initiator';
 import { UnifiedThreadResponseConsumer } from '../../gateway/platform/unified-thread-consumer';
 import { startOtelWorker, startTestCollector, unusedLoopbackPort, type TransportSpan } from '../setup/otel-transport';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -257,7 +258,8 @@ async function threadResponsesGlobal(): Promise<Array<Record<string, unknown>>> 
 async function agentTurnRuns() {
   const sql = getTestDb();
   return (await sql`
-    SELECT id, run_type, status, approval_status, organization_id, action_input, parent_run_id
+    SELECT id, run_type, status, approval_status, organization_id, action_input, parent_run_id,
+           initiator_kind, initiator_ref, created_by_user_id
     FROM runs
     WHERE run_type = 'agent_turn'
     ORDER BY id
@@ -269,6 +271,9 @@ async function agentTurnRuns() {
     organization_id: string;
     action_input: Record<string, unknown>;
     parent_run_id: number | null;
+    initiator_kind: string | null;
+    initiator_ref: Record<string, unknown> | null;
+    created_by_user_id: string | null;
   }>;
 }
 
@@ -361,6 +366,26 @@ describe('agent turn producer', () => {
   afterEach(() => {
   });
 
+  it('inherits an admitted API human without granting the turn a human principal', async () => {
+    const org = await createTestOrganization();
+    const actor = await createTestUser();
+    const message = { ...messageFor(org.id), platformMetadata: { source: 'direct-api' } };
+    const options = { singletonKey: 'api-human-message', initiator: resolveRunInitiator({ userId: actor.id }) };
+    const sql = getTestDb();
+    const id = await sql.begin((tx) => insertQueueJob(tx as never, 'messages', message, options));
+    await enqueueAgentTurn({ ...message, runId: Number(id) }, {
+      agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: GATEWAY_URL,
+    });
+    const [run] = await agentTurnRuns();
+    expect(run).toMatchObject({
+      initiator_kind: 'agent_session', created_by_user_id: actor.id,
+      initiator_ref: { agent_id: AGENT_ID, user_id: actor.id },
+    });
+    const claims = verifyWorkerToken(run.action_input.credential);
+    expect(chatTurnAccessOf(claims!)).toBeNull();
+    expect(claims).not.toHaveProperty('actorUserId');
+  });
+
   it('EXECUTES a real HTTP interaction live with the producer-minted turn credential', async () => {
     const org = await createTestOrganization();
     await enqueueMessage(messageFor(org.id), {
@@ -373,6 +398,9 @@ describe('agent turn producer', () => {
     expect((await pollFleet('fleet-interaction', { agent_turn: true })).status).toBe(200);
     const [run] = await agentTurnRuns();
     const postLinkButton = vi.fn(async () => ({ id: 'synthetic-post' }));
+    // An API credential authorizes this turn; it does not establish a human sender.
+    expect(run).toMatchObject({ initiator_kind: 'agent_session', created_by_user_id: null, initiator_ref: { user_id: null } });
+    expect(run.initiator_ref).not.toHaveProperty('platform_user_id');
     const app = createInteractionRoutes({ postLinkButton } as never);
     const server = serve({ fetch: app.fetch, port: 0, hostname: '127.0.0.1' });
     try {
@@ -1148,18 +1176,28 @@ describe('agent turn producer', () => {
       }),
     } as unknown as AgentSettingsStore;
 
-    await enqueueMessage(
-      {
-        ...messageFor(org.id),
-        // The canonical correlation the resolver scopes its query by.
-        conversationId: `${AGENT_ID}_automation_${automationId}_run_${Number(runRow!.id)}`,
-      },
+    const message = {
+      ...messageFor(org.id),
+      // The canonical correlation the resolver scopes its query by.
+      conversationId: `${AGENT_ID}_automation_${automationId}_run_${Number(runRow!.id)}`,
+    };
+    // Even a human-admitted kickoff remains an Automation execution.
+    const inputId = await sql.begin((tx) => insertQueueJob(tx as never, 'messages', message, {
+      initiator: resolveRunInitiator({ userId: author.id }),
+    }));
+    await enqueueAgentTurn(
+      { ...message, runId: Number(inputId) },
       { agentSettings: liveSettings, catalog: catalogFor(claudeModule()), mcp: mcpFixture().mcp, gatewayUrl: GATEWAY_URL },
     );
 
     const runs = await agentTurnRuns();
     const turn = runs[runs.length - 1]!.action_input.turn as { skills?: Array<{ name: string; content: string }> };
     expect(turn.skills).toEqual([{ name: 'frozen', content: 'Frozen instructions.' }]);
+    expect(runs.at(-1)).toMatchObject({
+      initiator_kind: 'automation',
+      initiator_ref: { automation_id: automationId, run_id: Number(runRow!.id) },
+      created_by_user_id: null,
+    });
   });
 
   it('advertises seeded inputs with the standard workspace tools', async () => {
@@ -1281,6 +1319,11 @@ describe('agent turn producer', () => {
     expect(envelope.turn.memory).toBeUndefined();
     expect(envelope.turn.system_prompt).toContain(chatTurnAccessInstructions('reply_only'));
     expect(verifyWorkerToken(envelope.credential)?.chatAccess).toBe('reply_only');
+    expect(run).toMatchObject({
+      initiator_kind: 'agent_session', created_by_user_id: null,
+      initiator_ref: { agent_id: AGENT_ID, user_id: null, platform_user_id: 'U0UNLINKED', platform_team_id: 'T0REPLYONLY' },
+    });
+    expect(run.initiator_ref).not.toHaveProperty('member_user_id');
   });
 
   it('runs a vouched unlinked sender with org-shared tools and the org-shared access section', async () => {
@@ -1401,6 +1444,10 @@ describe('agent turn producer', () => {
     expect(fixture.listed).toEqual([{ mcpId: 'lobu-memory', agentId: AGENT_ID, token: envelope.credential }]);
     expect(envelope.turn.system_prompt).toContain(chatTurnAccessInstructions('org_shared'));
     expect(envelope.turn.system_prompt).not.toContain('workspace by default');
+    expect(run).toMatchObject({
+      initiator_kind: 'agent_session', created_by_user_id: null,
+      initiator_ref: { agent_id: AGENT_ID, user_id: null, member_user_id: member.id, platform_user_id: 'U0LINKED', platform_team_id: 'T0LINKED' },
+    });
   });
 
   it('tells a linked DM member turn who is speaking and that its tools act as them', async () => {
@@ -1439,6 +1486,13 @@ describe('agent turn producer', () => {
     // The sender is conversation-scoped, so it rides the per-turn context, never the cached prompt.
     expect(envelope.turn.system_prompt).not.toContain('Synthetic Member');
     expect(envelope.turn.ephemeral_context).toBe(chatTurnSenderContext({ name: 'Synthetic Member', role: 'member' }));
+    expect(run).toMatchObject({
+      initiator_kind: 'agent_session', created_by_user_id: member.id,
+      initiator_ref: { agent_id: AGENT_ID, user_id: member.id, platform_user_id: 'U0DMMEMBER', platform_team_id: 'T0DMMEMBER' },
+    });
+    // Attribution is frozen even if today's membership changes later.
+    await getTestDb()`DELETE FROM member WHERE "userId" = ${member.id} AND "organizationId" = ${org.id}`;
+    expect((await agentTurnRuns())[0]).toMatchObject({ created_by_user_id: member.id, initiator_ref: { user_id: member.id } });
   });
 
   it.each([
@@ -1690,6 +1744,8 @@ describe('agent turn producer', () => {
     const [run] = await agentTurnRuns();
     const turn = run.action_input.turn as { tools?: { follow_ups?: true } };
     expect(turn.tools?.follow_ups).toBeUndefined();
+    expect(run).toMatchObject({ initiator_kind: 'agent_session', created_by_user_id: null, initiator_ref: { user_id: null } });
+    expect(run.initiator_ref).not.toHaveProperty('member_user_id');
   });
 
   it('retains workspace tools when MCP is unavailable', async () => {

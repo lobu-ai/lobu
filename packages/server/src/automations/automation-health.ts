@@ -71,7 +71,7 @@ export interface AutomationHealthInput {
   scheduleAutoPausedAt?: string | Date | null;
   /** Latest run status (from buildLatestAutomationRunJoinSql). */
   latestRunStatus?: string | null;
-  /** Latest run `created_at`, used to age a stuck pending run. */
+  /** Latest run `created_at`, used to age a stuck nonterminal run. */
   latestRunCreatedAt?: string | Date | null;
   /** Latest run `error_message`, surfaced as `last_scheduling_error`. */
   latestRunError?: string | null;
@@ -120,9 +120,9 @@ function toMs(value: string | Date | null | undefined): number | null {
  *   - its `next_run_at` is in the past by more than the missed-firing margin
  *     (a missed firing), UNLESS a run is currently in flight (claimed/running)
  *     — an active dispatch is healthy, we don't false-degrade mid-tick; or
- *   - its latest run is `pending` and older than the run stale interval
- *     (AUTOMATION_RUN_STALE_INTERVAL) — a stuck pending run the reaper hasn't
- *     timed out yet.
+ *   - its latest run is pending, claimed or running past the run stale interval
+ *     (AUTOMATION_RUN_STALE_INTERVAL). A renewed lease does not prove that an
+ *     old run is making progress.
  * Otherwise `healthy`.
  */
 export function computeAutomationHealth(
@@ -205,14 +205,14 @@ export function computeAutomationHealth(
     }
   }
 
-  // Stuck pending run: latest run is pending past the stale interval (the
-  // reaper should have timed it out; if it hasn't, the automation is wedged).
-  if (input.latestRunStatus === 'pending') {
+  // In-flight runs suppress missed-firing noise while they are recent, but
+  // cannot hide an uncompleted window indefinitely by renewing its lease.
+  if (input.latestRunStatus === 'pending' || runInFlight) {
     const runCreatedMs = toMs(input.latestRunCreatedAt);
     const staleMs = pgIntervalToMs(intervals.automationRunStaleInterval);
     if (runCreatedMs != null && runCreatedMs < now - staleMs) {
       const stuckMin = Math.round((now - runCreatedMs) / 60_000);
-      reasons.push(`stuck pending run: pending for ~${stuckMin} min`);
+      reasons.push(`stuck ${input.latestRunStatus} run: ${input.latestRunStatus} for ~${stuckMin} min`);
     }
   }
 
