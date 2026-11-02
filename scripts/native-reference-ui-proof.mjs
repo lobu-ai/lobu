@@ -409,25 +409,20 @@ export async function runNativeReferenceProof({
     await freshPage.close();
   }
   return {
-    synthetic: true,
     path,
     event_id: eventId,
     workspace,
     automation_id: String(automation.automation_id),
-    automation_manual_only: true,
     editor_path: `/${workspace}/automations/${automation.automation_id}?view=definition`,
     automation_list_path: `/${workspace}/automations`,
     activity_path: `/${workspace}?tab=runs&automation_ids=${automation.automation_id}`,
     connector_path: `/${workspace}/connectors/${encodeURIComponent(connector.id)}`,
-    readable_instructions_saved: true,
     agent_id: agent.agent_id,
     connector_key: connector.id,
-    connector_account_connected: false,
     connection_id: connectionId,
-    connection_paused: true,
     connection_path: `/${workspace}/connectors/${encodeURIComponent(connector.id)}/${connectionId}`,
-    connection_feeds: 0,
-    connection_runs: 0,
+    connection_feeds: feeds.feeds.length,
+    connection_runs: connectionRuns.runs.length,
     navigation,
     checked: [
       "saved event",

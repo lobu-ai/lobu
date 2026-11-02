@@ -71,7 +71,6 @@ export async function runAutomationNavigationProof({
       join(outputDir, "automation-navigation-progress.json"),
       JSON.stringify(
         {
-          synthetic: true,
           stage,
           path: `${current.pathname}${current.search}`,
         },
@@ -130,15 +129,11 @@ export async function runAutomationNavigationProof({
     join(outputDir, "automation-editor-proof.json"),
     JSON.stringify(
       {
-        synthetic: true,
-        browser_verified: true,
         editor_path: `${editorUrl.pathname}${editorUrl.search}`,
         automation_list_path: listPath,
         activity_path: `/${workspace}?tab=runs&automation_ids=${automationId}`,
         connection_path: `/${workspace}/connectors/${encodeURIComponent(connectorKey)}/${connectionId}`,
         connector_path: `/${workspace}/connectors/${encodeURIComponent(connectorKey)}`,
-        instructions_visible: true,
-        run_executed: false,
         screenshot: "automation-editor-instructions.png",
       },
       null,
@@ -600,8 +595,6 @@ export async function runAutomationNavigationProof({
       "read failure and Retry",
     ],
     combined_peek_path: combinedPeekPath,
-    historical_runs_persisted: false,
-    run_executed: false,
     screenshots: [
       "automation-editor-instructions.png",
       "automation-instruction-changes.png",

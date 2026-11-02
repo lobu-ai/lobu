@@ -287,7 +287,6 @@ try {
     screenshot: "oauth-device-review.png",
     approved_access: "admin",
     workspace_access: "all_current",
-    sensitive_capabilities_acknowledged: true,
     token_scope: deviceScope,
   };
 
