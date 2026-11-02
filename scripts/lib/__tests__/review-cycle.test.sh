@@ -24,7 +24,7 @@ cat > "$tmp/bin/gh" <<'CLI'
 case "$1 $2" in
   'auth status') exit 0 ;;
   'repo view') echo test/repo ;;
-  'run list') echo true ;;
+  'run list') echo "${TEST_CI_GREEN:-true}" ;;
   'pr view') exit 1 ;;
   'api -X') printf '%s\n' "$*" >> "$TEST_STATE/statuses" ;;
   'api '*) echo 'unit: completed success' ;;
@@ -139,6 +139,11 @@ handoff needs_commit
 # The exact verified content is reusable after commit, without another paid pass.
 git add -- app.txt
 git commit -qm fixed
+cache_ci_rc=0
+TEST_CI_GREEN=false bash scripts/review.sh > "$tmp/output" 2>&1 || cache_ci_rc=$?
+sed -n 's/^>> review run: //p' "$tmp/output" >> "$tmp/roots"
+[ "$cache_ci_rc" = 2 ] || fail 'cached verdict must still wait for CI on the new commit'
+no_success
 bash scripts/review.sh > "$tmp/output" 2>&1 || fail 'committed verified tree should pass'
 sed -n 's/^>> review run: //p' "$tmp/output" >> "$tmp/roots"
 [ "$(count reads)" = 2 ] || fail 'identical verified diff should reuse cache'

@@ -438,271 +438,271 @@ AUTOFIX_PASSES=0
 HANDOFF_REASON=""
 FIX_DECISIONS='[]'
 while :; do
-REVIEW_RUN_DIR="$REVIEW_ROOT_DIR/pass-$AUTOFIX_PASSES"
-mkdir -p "$REVIEW_RUN_DIR"
-REVIEW_TREE="$(review_worktree_tree)" || exit 2
+  REVIEW_RUN_DIR="$REVIEW_ROOT_DIR/pass-$AUTOFIX_PASSES"
+  mkdir -p "$REVIEW_RUN_DIR"
+  REVIEW_TREE="$(review_worktree_tree)" || exit 2
 
-# --- diff-hash verdict cache -------------------------------------------------
-# The reviewer is non-deterministic, so an unchanged diff must not be
-# re-reviewed: a passed diff can flip to fail and spawn a phantom fix cycle.
-# Cache the verdict on the exact diff content + reviewer identity, and reuse it
-# whenever the diff hash matches a previously issued verdict.
-DIFF_HASH="$(review_diff_hash "$BASE_BRANCH" "$REVIEW_TREE")"
-REVIEWER_SIG="$(review_reviewer_signature)"
-CACHE_FILE="$(review_cache_lookup "$DIFF_HASH" "$REVIEWER_SIG" || true)"
-CACHE_HIT=0
-REVIEWER_EXIT=0
-if [ "$AUTOFIX_PASSES" -gt 0 ]; then CACHE_FILE=""; fi
-if [ -n "$CACHE_FILE" ]; then
-  # SCHEMA_JQ validates a verdict object; the cache file wraps it in .verdict,
-  # so pipe the wrapper field into the same predicate used at store time.
-  if jq -e ".verdict | $SCHEMA_JQ" "$CACHE_FILE" >/dev/null 2>&1; then
-    echo ">> reusing cached $REVIEWER_CLI_SELECTED verdict for diff $DIFF_HASH"
-    VERDICT="$(jq -c .verdict "$CACHE_FILE")"
-    CACHE_HIT=1
-    CI_CHECKS_FILE="(reused cached verdict)"
+  # --- diff-hash verdict cache -------------------------------------------------
+  # The reviewer is non-deterministic, so an unchanged diff must not be
+  # re-reviewed: a passed diff can flip to fail and spawn a phantom fix cycle.
+  # Cache the verdict on the exact diff content + reviewer identity, and reuse it
+  # whenever the diff hash matches a previously issued verdict.
+  DIFF_HASH="$(review_diff_hash "$BASE_BRANCH" "$REVIEW_TREE")"
+  REVIEWER_SIG="$(review_reviewer_signature)"
+  CACHE_FILE="$(review_cache_lookup "$DIFF_HASH" "$REVIEWER_SIG" || true)"
+  CACHE_HIT=0
+  REVIEWER_EXIT=0
+  if [ "$AUTOFIX_PASSES" -gt 0 ]; then CACHE_FILE=""; fi
+  if [ -n "$CACHE_FILE" ]; then
+    # SCHEMA_JQ validates a verdict object; the cache file wraps it in .verdict,
+    # so pipe the wrapper field into the same predicate used at store time.
+    if jq -e ".verdict | $SCHEMA_JQ" "$CACHE_FILE" >/dev/null 2>&1; then
+      echo ">> reusing cached $REVIEWER_CLI_SELECTED verdict for diff $DIFF_HASH"
+      VERDICT="$(jq -c .verdict "$CACHE_FILE")"
+      CACHE_HIT=1
+      CI_CHECKS_FILE="(reused cached verdict)"
+    else
+      echo ">> cached verdict for diff $DIFF_HASH is invalid; removing and re-reviewing" >&2
+      rm -f "$CACHE_FILE"
+      CACHE_FILE=""
+    fi
+  fi
+
+  # True when a completed ci.yml run for the exact commit passed.
+  # ci.yml triggers on pull_request events, so runs are found by head sha.
+  #
+  # Asks across every run for the sha rather than the single newest one: a push
+  # can dispatch two runs in the same second, the concurrency group cancels the
+  # duplicate, and both then carry an identical `createdAt`. `--limit 1` orders
+  # by that timestamp, so it returns the cancelled twin about half the time and
+  # the gate rejects a commit whose CI is green. Any completed success for this
+  # sha validated this exact tree, which is what the gate needs to establish.
+  ci_run_green_for_head() {
+    local sha="$1"
+    gh run list --workflow=ci.yml --commit "$sha" --limit 20 \
+      --json status,conclusion \
+      --jq 'any(.[]; .status == "completed" and .conclusion == "success")' \
+      2>/dev/null | grep -qx true
+  }
+
+  # A fresh full review must reuse the exact committed tree that GitHub CI
+  # validated. Refuse to surprise the operator with a CPU-heavy local package
+  # build; the explicit override is for when CI cannot run for this HEAD.
+  GITHUB_CI_GREEN=0
+  if [ -z "$(git status --porcelain)" ] && ci_run_green_for_head "$HEAD_SHA"; then
+    GITHUB_CI_GREEN=1
+  fi
+  if [ "$GITHUB_CI_GREEN" != "1" ] && [ "$REVIEW_ALLOW_LOCAL_BUILD" != "1" ] && [ "$AUTOFIX_PASSES" -eq 0 ]; then
+    echo "make review requires GitHub CI (workflow ci.yml) to have passed for $HEAD_SHA." >&2
+    echo "Push the commit and wait for the PR's CI to finish, then re-run." >&2
+    echo "Override only when CI cannot run: REVIEW_ALLOW_LOCAL_BUILD=1 make review" >&2
+    exit 2
+  fi
+
+  if [ "$CACHE_HIT" != "1" ]; then
+    review_require_model "$REVIEWER_CLI_SELECTED" || exit $?
+    if review_bb_wants_run; then
+      echo ">> BB context detected ($BB_THREAD_ID): routing the review through a visible BB child thread"
+    else
+      review_require_reviewer
+    fi
+    REVIEW_STATUS_STARTED=1
+    post_review_status pending "$REVIEWER_CLI_SELECTED review running"
+  fi
+
+  # --- run path: snapshot, build, reviewer ------------------------------------
+  # Only reached when there is no usable cached verdict. Snapshotting CI, the
+  # build, and the reviewer session are all only useful for a fresh review.
+  if [ "$CACHE_HIT" != "1" ]; then
+
+  # --- CI check snapshot -------------------------------------------------------
+  # The deterministic suites run in GitHub CI as their own required status
+  # checks; branch protection enforces them independently of this verdict. The
+  # snapshot is context for the reviewer (correlate failures with the diff), not
+  # a gate — pending checks must not block or degrade the agent review.
+
+  CI_CHECKS_FILE="$REVIEW_RUN_DIR/ci-checks.txt"
+  CI_SNAPSHOT_OK=0
+  if [ "$GH_AVAILABLE" = "1" ]; then
+    REPO_NWO="$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)"
+    if [ -n "$REPO_NWO" ] && gh api "repos/$REPO_NWO/commits/$HEAD_SHA/check-runs" --paginate \
+        -q '.check_runs[] | "\(.name): \(.status)\(if .conclusion != null then " " + .conclusion else "" end)"' \
+        2>/dev/null | sort -u > "$CI_CHECKS_FILE" && [ -s "$CI_CHECKS_FILE" ]; then
+      CI_SNAPSHOT_OK=1
+    fi
+  fi
+  if [ "$CI_SNAPSHOT_OK" != "1" ]; then
+    echo "CI state unknown: no check runs found for $HEAD_SHA (unpushed commit, CI not started, or gh unavailable)" > "$CI_CHECKS_FILE"
+  fi
+  echo ">> CI check snapshot → $CI_CHECKS_FILE"
+  sed 's/^/>>   /' "$CI_CHECKS_FILE"
+
+  # --- build ------------------------------------------------------------------
+  # The reviewer's exploratory probes (targeted bun test runs, CLI invocations)
+  # need workspace packages built. Reuse the clean tree GitHub CI already built;
+  # otherwise rebuild locally so a stale or missing dist cannot create noise.
+
+  BUILD_LOG="$REVIEW_RUN_DIR/build.log"
+  if [ "$GITHUB_CI_GREEN" = "1" ] || [ "${REVIEW_BUILD_ATTEMPTED:-0}" = "1" ]; then
+    REVIEW_BUILD_ATTEMPTED=1
+    echo ">> reusing package build; focused tests cover write-phase edits"
+    printf 'Reused build for %s (write pass %s)\n' "$HEAD_SHA" "$AUTOFIX_PASSES" > "$BUILD_LOG"
+    BUILD_EXIT=0
   else
-    echo ">> cached verdict for diff $DIFF_HASH is invalid; removing and re-reviewing" >&2
-    rm -f "$CACHE_FILE"
-    CACHE_FILE=""
+    REVIEW_BUILD_ATTEMPTED=1
+    echo ">> make build-packages → $BUILD_LOG"
+    set +e
+    run_review_child make build-packages > "$BUILD_LOG" 2>&1
+    BUILD_EXIT=$?
+    set -e
+    if [ $BUILD_EXIT -ne 0 ]; then
+      echo "!! build failed (exit $BUILD_EXIT) — proceeding so $REVIEWER_CLI_SELECTED can review the diff, but exploratory probes may fail" >&2
+    fi
   fi
-fi
 
-# True when a completed ci.yml run for the exact commit passed.
-# ci.yml triggers on pull_request events, so runs are found by head sha.
-#
-# Asks across every run for the sha rather than the single newest one: a push
-# can dispatch two runs in the same second, the concurrency group cancels the
-# duplicate, and both then carry an identical `createdAt`. `--limit 1` orders
-# by that timestamp, so it returns the cancelled twin about half the time and
-# the gate rejects a commit whose CI is green. Any completed success for this
-# sha validated this exact tree, which is what the gate needs to establish.
-ci_run_green_for_head() {
-  local sha="$1"
-  gh run list --workflow=ci.yml --commit "$sha" --limit 20 \
-    --json status,conclusion \
-    --jq 'any(.[]; .status == "completed" and .conclusion == "success")' \
-    2>/dev/null | grep -qx true
-}
+  # --- agent review -----------------------------------------------------------
 
-# A fresh full review must reuse the exact committed tree that GitHub CI
-# validated. Refuse to surprise the operator with a CPU-heavy local package
-# build; the explicit override is for when CI cannot run for this HEAD.
-GITHUB_CI_GREEN=0
-if [ -z "$(git status --porcelain)" ] && ci_run_green_for_head "$HEAD_SHA"; then
-  GITHUB_CI_GREEN=1
-fi
-if [ "$GITHUB_CI_GREEN" != "1" ] && [ "$CACHE_HIT" != "1" ] && [ "$REVIEW_ALLOW_LOCAL_BUILD" != "1" ] && [ "$AUTOFIX_PASSES" -eq 0 ]; then
-  echo "make review requires GitHub CI (workflow ci.yml) to have passed for $HEAD_SHA." >&2
-  echo "Push the commit and wait for the PR's CI to finish, then re-run." >&2
-  echo "Override only when CI cannot run: REVIEW_ALLOW_LOCAL_BUILD=1 make review" >&2
-  exit 2
-fi
+  PROMPT_FILE="$(pwd)/prompts/review-prompt.md"
+  # Shared by both reviewer CLIs below, which do NOT accept the same dialect:
+  # `claude --json-schema` refuses a `$schema` meta-reference outright ("no
+  # schema with key or ref …") while codex ignores it. The schema therefore
+  # declares no dialect — see scripts/__tests__/review-output-schema.test.ts.
+  SCHEMA_FILE="$(pwd)/prompts/review-output-schema.json"
+  [ -f "$PROMPT_FILE" ] || { echo "prompt not found: $PROMPT_FILE" >&2; exit 2; }
+  [ -f "$SCHEMA_FILE" ] || { echo "schema not found: $SCHEMA_FILE" >&2; exit 2; }
 
-if [ "$CACHE_HIT" != "1" ]; then
-  review_require_model "$REVIEWER_CLI_SELECTED" || exit $?
-  if review_bb_wants_run; then
-    echo ">> BB context detected ($BB_THREAD_ID): routing the review through a visible BB child thread"
-  else
-    review_require_reviewer
-  fi
-  REVIEW_STATUS_STARTED=1
-  post_review_status pending "$REVIEWER_CLI_SELECTED review running"
-fi
-
-# --- run path: snapshot, build, reviewer ------------------------------------
-# Only reached when there is no usable cached verdict. Snapshotting CI, the
-# build, and the reviewer session are all only useful for a fresh review.
-if [ "$CACHE_HIT" != "1" ]; then
-
-# --- CI check snapshot -------------------------------------------------------
-# The deterministic suites run in GitHub CI as their own required status
-# checks; branch protection enforces them independently of this verdict. The
-# snapshot is context for the reviewer (correlate failures with the diff), not
-# a gate — pending checks must not block or degrade the agent review.
-
-CI_CHECKS_FILE="$REVIEW_RUN_DIR/ci-checks.txt"
-CI_SNAPSHOT_OK=0
-if [ "$GH_AVAILABLE" = "1" ]; then
-  REPO_NWO="$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)"
-  if [ -n "$REPO_NWO" ] && gh api "repos/$REPO_NWO/commits/$HEAD_SHA/check-runs" --paginate \
-      -q '.check_runs[] | "\(.name): \(.status)\(if .conclusion != null then " " + .conclusion else "" end)"' \
-      2>/dev/null | sort -u > "$CI_CHECKS_FILE" && [ -s "$CI_CHECKS_FILE" ]; then
-    CI_SNAPSHOT_OK=1
-  fi
-fi
-if [ "$CI_SNAPSHOT_OK" != "1" ]; then
-  echo "CI state unknown: no check runs found for $HEAD_SHA (unpushed commit, CI not started, or gh unavailable)" > "$CI_CHECKS_FILE"
-fi
-echo ">> CI check snapshot → $CI_CHECKS_FILE"
-sed 's/^/>>   /' "$CI_CHECKS_FILE"
-
-# --- build ------------------------------------------------------------------
-# The reviewer's exploratory probes (targeted bun test runs, CLI invocations)
-# need workspace packages built. Reuse the clean tree GitHub CI already built;
-# otherwise rebuild locally so a stale or missing dist cannot create noise.
-
-BUILD_LOG="$REVIEW_RUN_DIR/build.log"
-if [ "$GITHUB_CI_GREEN" = "1" ] || [ "${REVIEW_BUILD_ATTEMPTED:-0}" = "1" ]; then
-  echo ">> reusing package build; focused tests cover write-phase edits"
-  printf 'Reused build for %s (write pass %s)\n' "$HEAD_SHA" "$AUTOFIX_PASSES" > "$BUILD_LOG"
-  BUILD_EXIT=0
-else
-  REVIEW_BUILD_ATTEMPTED=1
-  echo ">> make build-packages → $BUILD_LOG"
-  set +e
-  run_review_child make build-packages > "$BUILD_LOG" 2>&1
-  BUILD_EXIT=$?
-  set -e
-  if [ $BUILD_EXIT -ne 0 ]; then
-    echo "!! build failed (exit $BUILD_EXIT) — proceeding so $REVIEWER_CLI_SELECTED can review the diff, but exploratory probes may fail" >&2
-  fi
-fi
-
-# --- agent review -----------------------------------------------------------
-
-PROMPT_FILE="$(pwd)/prompts/review-prompt.md"
-# Shared by both reviewer CLIs below, which do NOT accept the same dialect:
-# `claude --json-schema` refuses a `$schema` meta-reference outright ("no
-# schema with key or ref …") while codex ignores it. The schema therefore
-# declares no dialect — see scripts/__tests__/review-output-schema.test.ts.
-SCHEMA_FILE="$(pwd)/prompts/review-output-schema.json"
-[ -f "$PROMPT_FILE" ] || { echo "prompt not found: $PROMPT_FILE" >&2; exit 2; }
-[ -f "$SCHEMA_FILE" ] || { echo "schema not found: $SCHEMA_FILE" >&2; exit 2; }
-
-echo ">> invoking $REVIEWER_CLI_SELECTED review"
-REVIEW_PROMPT_FILE="$(mktemp /tmp/lobu-review-prompt.XXXXXX)"
-# Render the exact snapshot into every diff command. HEAD remains the parent
-# commit while the write phase leaves its edits uncommitted for inspection.
-# The quoted range must lose its quotes: `git diff "<base> <tree>"` is one
-# unknown revision, not two.
-REVIEW_TREE="$REVIEW_TREE" MERGE_BASE="$MERGE_BASE" node - "$PROMPT_FILE" > "$REVIEW_PROMPT_FILE" <<'JS'
+  echo ">> invoking $REVIEWER_CLI_SELECTED review"
+  REVIEW_PROMPT_FILE="$(mktemp /tmp/lobu-review-prompt.XXXXXX)"
+  # Render the exact snapshot into every diff command. HEAD remains the parent
+  # commit while the write phase leaves its edits uncommitted for inspection.
+  # The quoted range must lose its quotes: `git diff "<base> <tree>"` is one
+  # unknown revision, not two.
+  REVIEW_TREE="$REVIEW_TREE" MERGE_BASE="$MERGE_BASE" node - "$PROMPT_FILE" > "$REVIEW_PROMPT_FILE" <<'JS'
 const fs = require('node:fs');
 const target = process.env.MERGE_BASE + ' ' + process.env.REVIEW_TREE;
 process.stdout.write(fs.readFileSync(process.argv[2], 'utf8')
   .replaceAll('"$BASE_BRANCH...HEAD"', target)
   .replaceAll('$BASE_BRANCH...HEAD', target));
 JS
-printf '\nReview target tree: %s (driver HEAD %s). Inspect uncommitted edits too.\n' "$REVIEW_TREE" "$HEAD_SHA" >> "$REVIEW_PROMPT_FILE"
-printf '\n\nReview the diff. Emit only the JSON verdict.\n' >> "$REVIEW_PROMPT_FILE"
-run_reviewer "$REVIEW_PROMPT_FILE"
-rm -f "$REVIEW_PROMPT_FILE"
+  printf '\nReview target tree: %s (driver HEAD %s). Inspect uncommitted edits too.\n' "$REVIEW_TREE" "$HEAD_SHA" >> "$REVIEW_PROMPT_FILE"
+  printf '\n\nReview the diff. Emit only the JSON verdict.\n' >> "$REVIEW_PROMPT_FILE"
+  run_reviewer "$REVIEW_PROMPT_FILE"
+  rm -f "$REVIEW_PROMPT_FILE"
 
-VERDICT="$RAW"
-VERDICT="$(extract_json_verdict "$VERDICT")"
-fi
-
-# On the cache-hit path BUILD_LOG was never set and REVIEWER_EXIT stays 0 (the
-# verdict already passed this exact predicate at lookup, so this branch is
-# unreachable there); default them so `set -u` cannot turn a future edit into a crash.
-if [ "${REVIEWER_EXIT:-0}" -ne 0 ] || ! echo "$VERDICT" | jq -e "$SCHEMA_JQ" >/dev/null 2>&1; then
-  if [ "${REVIEWER_EXIT:-0}" -ne 0 ]; then
-    REVIEW_FAILURE_DETAIL="reviewer process exited with status $REVIEWER_EXIT"
-  else
-    REVIEW_FAILURE_DETAIL="reviewer returned no schema-valid JSON verdict"
+  VERDICT="$RAW"
+  VERDICT="$(extract_json_verdict "$VERDICT")"
   fi
-  finalize_review_status error "Independent $REVIEWER_CLI_SELECTED review could not be completed"
-  review_fail_closed_message "$REVIEWER_CLI_SELECTED" "$REVIEW_FAILURE_DETAIL" >&2
-  echo "logs: ${BUILD_LOG:-} $CI_CHECKS_FILE" >&2
-  echo "full reviewer output: $REVIEW_RUN_DIR/reviewer-output.log" >&2
-  echo "reviewer diagnostics: $REVIEW_RUN_DIR/reviewer-output.stderr" >&2
-  exit 1
-fi
 
-if [ "$(git rev-parse HEAD)" != "$HEAD_SHA" ] ||
-   [ "$(review_worktree_tree)" != "$REVIEW_TREE" ]; then
-  finalize_review_status error "Tree changed during independent review; verdict discarded"
-  echo "Review target moved; refusing stale verdict" >&2
-  exit 1
-fi
-printf '%s\n' "$VERDICT" > "$REVIEW_RUN_DIR/findings.json"
+  # A cache hit skips the reviewer, so REVIEWER_EXIT stays 0 and its verdict
+  # already passed this predicate at lookup.
+  if [ "$REVIEWER_EXIT" -ne 0 ] || ! echo "$VERDICT" | jq -e "$SCHEMA_JQ" >/dev/null 2>&1; then
+    if [ "$REVIEWER_EXIT" -ne 0 ]; then
+      REVIEW_FAILURE_DETAIL="reviewer process exited with status $REVIEWER_EXIT"
+    else
+      REVIEW_FAILURE_DETAIL="reviewer returned no schema-valid JSON verdict"
+    fi
+    finalize_review_status error "Independent $REVIEWER_CLI_SELECTED review could not be completed"
+    review_fail_closed_message "$REVIEWER_CLI_SELECTED" "$REVIEW_FAILURE_DETAIL" >&2
+    echo "logs: ${BUILD_LOG:-} $CI_CHECKS_FILE" >&2
+    echo "full reviewer output: $REVIEW_RUN_DIR/reviewer-output.log" >&2
+    echo "reviewer diagnostics: $REVIEW_RUN_DIR/reviewer-output.stderr" >&2
+    exit 1
+  fi
 
-# Only schema-valid fresh verdicts are cached; a cached verdict is re-validated
-# on read with the same predicate, so a tampered or stale entry self-heals.
-if [ "$CACHE_HIT" != "1" ]; then
-  review_cache_store "$DIFF_HASH" "$REVIEWER_SIG" "$BASE_BRANCH" "$HEAD_SHA" "$VERDICT"
-fi
+  if [ "$(git rev-parse HEAD)" != "$HEAD_SHA" ] ||
+     [ "$(review_worktree_tree)" != "$REVIEW_TREE" ]; then
+    finalize_review_status error "Tree changed during independent review; verdict discarded"
+    echo "Review target moved; refusing stale verdict" >&2
+    exit 1
+  fi
+  printf '%s\n' "$VERDICT" > "$REVIEW_RUN_DIR/findings.json"
 
-# REVIEWER_SHADOW measurement: the skip classifier said "safe" but the full
-# review ran anyway. Record both so the false-skip rate can be measured instead
-# of asserted. Only logged for skip-eligible diffs (the population the rule is
-# trusted on); non-eligible diffs are the baseline, not a skip bet. Only fresh
-# verdicts are recorded — a cache-hit rerun of the same diff would just
-# duplicate a row and inflate the sample.
-if [ "$REVIEWER_SHADOW" = "1" ] && [ "$REVIEW_SKIP_ELIGIBLE" = "1" ] && [ "$CACHE_HIT" != "1" ]; then
-  mkdir -p "$(review_cache_root)"
-  jq -n --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg base "$BASE_BRANCH" --arg head "$HEAD_SHA" \
-    --arg hash "$DIFF_HASH" --arg reason "$REVIEW_SKIP_REASON" --argjson verdict "$VERDICT" \
-    '{ts:$ts,base:$base,head:$head,diff_hash:$hash,skip_reason:$reason,verdict:$verdict}' \
-    >> "$(review_cache_root)/shadow-audit.jsonl"
-  echo ">> shadow audit: skip-eligible diff reviewed; recorded at $(review_cache_root)/shadow-audit.jsonl"
-fi
+  # Only schema-valid fresh verdicts are cached; a cached verdict is re-validated
+  # on read with the same predicate, so a tampered or stale entry self-heals.
+  if [ "$CACHE_HIT" != "1" ]; then
+    review_cache_store "$DIFF_HASH" "$REVIEWER_SIG" "$BASE_BRANCH" "$HEAD_SHA" "$VERDICT"
+  fi
 
-BUG_FREE="$(echo "$VERDICT" | jq -r .bug_free_confidence)"
-BUGS="$(echo "$VERDICT" | jq -r .bugs)"
-SLOP="$(echo "$VERDICT" | jq -r .slop)"
-SIMPLICITY="$(echo "$VERDICT" | jq -r .simplicity)"
-TESTS_ADEQUATE="$(echo "$VERDICT" | jq -r .tests_adequate)"
-RISK="$(echo "$VERDICT" | jq -r .runtime_change_risk)"
-BLOCKER_COUNT="$(echo "$VERDICT" | jq -r '.blockers|length')"
-HEADLINE="bug_free $BUG_FREE, simplicity $SIMPLICITY, slop $SLOP, bugs $BUGS, $BLOCKER_COUNT blockers, risk $RISK"
-STATUS_STATE="success"
-STATUS_REASONS=()
-[ "$BUG_FREE" -ge "$PI_REVIEW_MIN_BUG_FREE" ] || STATUS_REASONS+=("bug_free<$PI_REVIEW_MIN_BUG_FREE")
-[ "$BUGS" -eq 0 ] || STATUS_REASONS+=("bugs>0")
-[ "$SLOP" -le "$PI_REVIEW_MAX_SLOP" ] || STATUS_REASONS+=("slop>$PI_REVIEW_MAX_SLOP")
-[ "$SIMPLICITY" -ge "$PI_REVIEW_MIN_SIMPLICITY" ] || STATUS_REASONS+=("simplicity<$PI_REVIEW_MIN_SIMPLICITY")
-[ "$BLOCKER_COUNT" -eq 0 ] || STATUS_REASONS+=("blockers>0")
-[ "$TESTS_ADEQUATE" = "true" ] || STATUS_REASONS+=("tests inadequate")
-# `runtime_change_risk` is REPORTED in the headline (see HEADLINE above) but
-# never gates. The check exists so the reviewer catches DEFECTS before a merge,
-# and bugs/blockers already cover those; a self-reported tier is not a defect.
-# Its rubric (docs/REVIEW_SCHEMA.md) classifies any queue/scheduler/retry change
-# as "high", so gating on it blocked routine fixes at 0 bugs and 0 blockers, and
-# the only way past was disabling enforce_admins on main — strictly worse than
-# merging the change under review. Gate matrix is tested in
-# scripts/lib/__tests__/review-reviewer.test.sh.
-if [ "${#STATUS_REASONS[@]}" -gt 0 ]; then
-  STATUS_STATE="failure"
-  STATUS_DESCRIPTION="$HEADLINE; $(IFS=', '; echo "${STATUS_REASONS[*]}")"
-else
-  STATUS_DESCRIPTION="$HEADLINE"
-fi
+  # REVIEWER_SHADOW measurement: the skip classifier said "safe" but the full
+  # review ran anyway. Record both so the false-skip rate can be measured instead
+  # of asserted. Only logged for skip-eligible diffs (the population the rule is
+  # trusted on); non-eligible diffs are the baseline, not a skip bet. Only fresh
+  # verdicts are recorded — a cache-hit rerun of the same diff would just
+  # duplicate a row and inflate the sample.
+  if [ "$REVIEWER_SHADOW" = "1" ] && [ "$REVIEW_SKIP_ELIGIBLE" = "1" ] && [ "$CACHE_HIT" != "1" ]; then
+    mkdir -p "$(review_cache_root)"
+    jq -n --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg base "$BASE_BRANCH" --arg head "$HEAD_SHA" \
+      --arg hash "$DIFF_HASH" --arg reason "$REVIEW_SKIP_REASON" --argjson verdict "$VERDICT" \
+      '{ts:$ts,base:$base,head:$head,diff_hash:$hash,skip_reason:$reason,verdict:$verdict}' \
+      >> "$(review_cache_root)/shadow-audit.jsonl"
+    echo ">> shadow audit: skip-eligible diff reviewed; recorded at $(review_cache_root)/shadow-audit.jsonl"
+  fi
 
-if [ "$STATUS_STATE" = success ]; then
-  if [ -n "$(git status --porcelain)" ]; then
-    HANDOFF_REASON="needs_commit"
+  BUG_FREE="$(echo "$VERDICT" | jq -r .bug_free_confidence)"
+  BUGS="$(echo "$VERDICT" | jq -r .bugs)"
+  SLOP="$(echo "$VERDICT" | jq -r .slop)"
+  SIMPLICITY="$(echo "$VERDICT" | jq -r .simplicity)"
+  TESTS_ADEQUATE="$(echo "$VERDICT" | jq -r .tests_adequate)"
+  RISK="$(echo "$VERDICT" | jq -r .runtime_change_risk)"
+  BLOCKER_COUNT="$(echo "$VERDICT" | jq -r '.blockers|length')"
+  HEADLINE="bug_free $BUG_FREE, simplicity $SIMPLICITY, slop $SLOP, bugs $BUGS, $BLOCKER_COUNT blockers, risk $RISK"
+  STATUS_STATE="success"
+  STATUS_REASONS=()
+  [ "$BUG_FREE" -ge "$PI_REVIEW_MIN_BUG_FREE" ] || STATUS_REASONS+=("bug_free<$PI_REVIEW_MIN_BUG_FREE")
+  [ "$BUGS" -eq 0 ] || STATUS_REASONS+=("bugs>0")
+  [ "$SLOP" -le "$PI_REVIEW_MAX_SLOP" ] || STATUS_REASONS+=("slop>$PI_REVIEW_MAX_SLOP")
+  [ "$SIMPLICITY" -ge "$PI_REVIEW_MIN_SIMPLICITY" ] || STATUS_REASONS+=("simplicity<$PI_REVIEW_MIN_SIMPLICITY")
+  [ "$BLOCKER_COUNT" -eq 0 ] || STATUS_REASONS+=("blockers>0")
+  [ "$TESTS_ADEQUATE" = "true" ] || STATUS_REASONS+=("tests inadequate")
+  # `runtime_change_risk` is REPORTED in the headline (see HEADLINE above) but
+  # never gates. The check exists so the reviewer catches DEFECTS before a merge,
+  # and bugs/blockers already cover those; a self-reported tier is not a defect.
+  # Its rubric (docs/REVIEW_SCHEMA.md) classifies any queue/scheduler/retry change
+  # as "high", so gating on it blocked routine fixes at 0 bugs and 0 blockers, and
+  # the only way past was disabling enforce_admins on main — strictly worse than
+  # merging the change under review. Gate matrix is tested in
+  # scripts/lib/__tests__/review-reviewer.test.sh.
+  if [ "${#STATUS_REASONS[@]}" -gt 0 ]; then
     STATUS_STATE="failure"
-    STATUS_DESCRIPTION="Verified working tree; commit, push, and rerun make review for pi-review"
+    STATUS_DESCRIPTION="$HEADLINE; $(IFS=', '; echo "${STATUS_REASONS[*]}")"
+  else
+    STATUS_DESCRIPTION="$HEADLINE"
   fi
-  break
-fi
-if [ "$AUTOFIX_PASSES" -ge "$REVIEW_MAX_AUTOFIX_PASSES" ]; then
-  HANDOFF_REASON="autofix_limit"
-  break
-fi
-AUTOFIX_PASSES=$((AUTOFIX_PASSES + 1))
-FIX_RESULT="$REVIEW_ROOT_DIR/fix-$AUTOFIX_PASSES.json"
-echo ">> write phase $AUTOFIX_PASSES/$REVIEW_MAX_AUTOFIX_PASSES; findings: $REVIEW_RUN_DIR/findings.json"
-if ! run_review_child bash "$SCRIPT_DIR/review-fix.sh" --base "$BASE_BRANCH" \
-    --findings "$REVIEW_RUN_DIR/findings.json" --result "$FIX_RESULT"; then
-  HANDOFF_REASON="fixer_failed"
-  break
-fi
-if ! review_validate_fix_result "$FIX_RESULT"; then
-  HANDOFF_REASON="invalid_fixer_result"
-  break
-fi
-FIX_DECISIONS="$(jq -c .decisions "$FIX_RESULT")"
-if [ "$(jq '.decisions | length' "$FIX_RESULT")" -gt 0 ]; then
-  HANDOFF_REASON="needs_decision"
-  break
-fi
-if ! jq -e '(.tests | length > 0) and all(.tests[]; .passed)' "$FIX_RESULT" >/dev/null; then
-  HANDOFF_REASON="focused_tests_failed_or_missing"
-  break
-fi
-# Loop into a NEW read-only review. The writer's summary cannot approve it.
+
+  if [ "$STATUS_STATE" = success ]; then
+    if [ -n "$(git status --porcelain)" ]; then
+      HANDOFF_REASON="needs_commit"
+      STATUS_STATE="failure"
+      STATUS_DESCRIPTION="Verified working tree; commit, push, and rerun make review for pi-review"
+    fi
+    break
+  fi
+  if [ "$AUTOFIX_PASSES" -ge "$REVIEW_MAX_AUTOFIX_PASSES" ]; then
+    HANDOFF_REASON="autofix_limit"
+    break
+  fi
+  AUTOFIX_PASSES=$((AUTOFIX_PASSES + 1))
+  FIX_RESULT="$REVIEW_ROOT_DIR/fix-$AUTOFIX_PASSES.json"
+  echo ">> write phase $AUTOFIX_PASSES/$REVIEW_MAX_AUTOFIX_PASSES; findings: $REVIEW_RUN_DIR/findings.json"
+  if ! run_review_child bash "$SCRIPT_DIR/review-fix.sh" --base "$BASE_BRANCH" \
+      --findings "$REVIEW_RUN_DIR/findings.json" --result "$FIX_RESULT"; then
+    HANDOFF_REASON="fixer_failed"
+    break
+  fi
+  if ! review_validate_fix_result "$FIX_RESULT"; then
+    HANDOFF_REASON="invalid_fixer_result"
+    break
+  fi
+  FIX_DECISIONS="$(jq -c .decisions "$FIX_RESULT")"
+  if [ "$(jq '.decisions | length' "$FIX_RESULT")" -gt 0 ]; then
+    HANDOFF_REASON="needs_decision"
+    break
+  fi
+  if ! jq -e '(.tests | length > 0) and all(.tests[]; .passed)' "$FIX_RESULT" >/dev/null; then
+    HANDOFF_REASON="focused_tests_failed_or_missing"
+    break
+  fi
+  # Loop into a NEW read-only review. The writer's summary cannot approve it.
 done
 
 if [ -n "$HANDOFF_REASON" ]; then

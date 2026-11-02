@@ -35,6 +35,9 @@
 #
 # shellcheck shell=bash
 
+# shellcheck source=scripts/lib/review-cache.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/review-cache.sh"
+
 # Owned BB child for cancellation. Set on spawn, cleared on settle.
 REVIEW_BB_CHILD_ID=""
 REVIEW_BB_WAIT_PID=""
@@ -396,7 +399,7 @@ review_bb_run_reviewer() {
 
   pr="$(review_bb_pr_number)"
   worktree="$(pwd -P)"
-  title="$(review_bb_review_title "$(git branch --show-current 2>/dev/null || printf '%s' "$base_branch")" "$head_sha" "$reviewer" "$model" "$effort" "$diff_hash" "$pr") $(printf '%s' "$worktree" | sha1sum | cut -c1-12)"
+  title="$(review_bb_review_title "$(git branch --show-current 2>/dev/null || printf '%s' "$base_branch")" "$head_sha" "$reviewer" "$model" "$effort" "$diff_hash" "$pr") $(printf '%s' "$worktree" | review_sha256 | cut -c1-12)"
 
   if [ -n "${10:-}" ]; then title="$title verify-${10}"; fi
 
@@ -656,7 +659,7 @@ review_bb_run_fixer() {
     return 1
   }
   title="$(review_bb_fix_title "$branch" "$head_sha" "$fixer_cli" "$pr") $(
-    { printf '%s\n' "$(pwd -P)" "$base_branch" "$bb_model" "$effort"; cat "$input_patch"; } | sha1sum | cut -d' ' -f1
+    { printf '%s\n' "$(pwd -P)" "$base_branch" "$bb_model" "$effort"; cat "$prompt_source" "$input_patch"; } | review_sha256 | cut -d' ' -f1
   )"
   # Fixer dedup: an idle fixer child with this exact title already transferred
   # or superseded is not rerun blindly; adopt a live one, else spawn.
@@ -803,8 +806,8 @@ review_bb_run_fixer() {
     return 1
   fi
   local current_input_hash snapshot_input_hash current_untracked
-  current_input_hash="$(review_bb_input_patch | sha1sum | cut -d' ' -f1)" || return 1
-  snapshot_input_hash="$(sha1sum "$input_patch" | cut -d' ' -f1)"
+  current_input_hash="$(review_bb_input_patch | review_sha256 | cut -d' ' -f1)" || return 1
+  snapshot_input_hash="$(review_sha256 < "$input_patch" | cut -d' ' -f1)"
   current_untracked="$(git ls-files --others --exclude-standard || true)"
   if [ "$current_input_hash" != "$snapshot_input_hash" ] || [ "$current_untracked" != "$untracked_list" ]; then
     echo "review_bb: working tree changed during the fixer run (concurrent edits); NOT applying. Patch preserved at $fixer_patch; fixer at @thread:$child" >&2

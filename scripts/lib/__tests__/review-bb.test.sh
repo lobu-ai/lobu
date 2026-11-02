@@ -66,6 +66,7 @@ case "$1 $2" in
   "thread spawn")
     args=("$@")
     for ((i=0; i<${#args[@]}; i++)); do
+      if [ "${args[$i]}" = --title ]; then printf '%s\n' "${args[$((i+1))]}" > "$state/title.txt"; fi
       if [ "${args[$i]}" = --prompt-file ]; then cp "${args[$((i+1))]}" "$state/prompt.txt"; fi
     done
     cat "$state/spawn.json" ;;
@@ -131,6 +132,9 @@ review_persist_inline_output() {
 
 reset_calls() { : > "$FAKE_STATE/calls.log"; }
 spawn_calls() { grep -c '^thread spawn' "$FAKE_STATE/calls.log" || true; }
+
+# Exercise all BB hashing without the optional GNU SHA-1 command.
+sha1sum() { fail "BB review must use the portable SHA-256 helper"; }
 
 # --- routing ----------------------------------------------------------------
 
@@ -306,7 +310,7 @@ unset REVIEW_BB_PRE_ACCEPT_HOOK_FOR_TESTS
 HEAD_SHA_SCRATCH="$(git -C "$SCRATCH" rev-parse HEAD)"
 
 # 10. Dedup: idle child with a valid verdict is reused (no new spawn).
-TITLE_FOR_REUSE="$(review_bb_review_title "$(git branch --show-current)" "$HEAD_SHA_SCRATCH" codex gpt-6-astra xhigh abcdef123456 "") $(printf '%s' "$SCRATCH" | sha1sum | cut -c1-12)"
+TITLE_FOR_REUSE="$(review_bb_review_title "$(git branch --show-current)" "$HEAD_SHA_SCRATCH" codex gpt-6-astra xhigh abcdef123456 "") $(printf '%s' "$SCRATCH" | review_sha256 | cut -c1-12)"
 jq -n --arg t "$TITLE_FOR_REUSE" '[{id:"thr_old9",title:$t,status:"idle",updatedAt:2}]' > "$FAKE_STATE/list.json"
 jq -n --arg p "$SCRATCH" '{thread:{id:"thr_old9",projectId:"proj_TEST",status:"idle"},environment:{id:"env_old",path:$p}}' > "$FAKE_STATE/child-show.json"
 printf '{"ok":true,"note":"reused"}\n' > "$FAKE_STATE/output.txt"
@@ -337,7 +341,7 @@ jq -n --arg p "$SCRATCH" '{thread:{id:"thr_child9",status:"idle"},environment:{p
 printf '[]\n' > "$FAKE_STATE/list.json"
 
 # 11. Dedup: a running child for identical inputs is adopted, not duplicated.
-TITLE_RUNNING="$(review_bb_review_title "$(git branch --show-current)" "$HEAD_SHA_SCRATCH" codex gpt-6-astra xhigh abcdef123456 "") $(printf '%s' "$SCRATCH" | sha1sum | cut -c1-12)"
+TITLE_RUNNING="$(review_bb_review_title "$(git branch --show-current)" "$HEAD_SHA_SCRATCH" codex gpt-6-astra xhigh abcdef123456 "") $(printf '%s' "$SCRATCH" | review_sha256 | cut -c1-12)"
 jq -n --arg t "$TITLE_RUNNING" '[{id:"thr_live9",title:$t,status:"active",updatedAt:3}]' > "$FAKE_STATE/list.json"
 printf '{"ok":true,"note":"adopted"}\n' > "$FAKE_STATE/output.txt"
 reset_calls
@@ -427,9 +431,9 @@ printf 'staged\n' > staged.txt
 git add -- staged.txt
 printf '\0binary\377' > 'new file.bin'
 printf 'excluded\n' > credentials.txt
-index_before="$(git diff --cached | sha1sum)"
+index_before="$(git diff --cached | review_sha256)"
 review_bb_input_patch > "$TEST_DIR/input.patch"
-[ "$(git diff --cached | sha1sum)" = "$index_before" ] || fail "snapshot must not mutate the real index"
+[ "$(git diff --cached | review_sha256)" = "$index_before" ] || fail "snapshot must not mutate the real index"
 ! grep -q credentials.txt "$TEST_DIR/input.patch" || fail "secret-looking files must be excluded"
 grep -q 'new file.bin' "$TEST_DIR/input.patch" || fail "spaces and binary new files must be snapshotted"
 review_bb_patch_tree HEAD "$TEST_DIR/input.patch" >/dev/null || fail "binary input must reproduce cleanly"
@@ -463,6 +467,17 @@ grep -q -- "--environment $FIXSCRATCH" "$FAKE_STATE/calls.log" && fail "fixer mu
 grep -q '^thread archive thr_fix9' "$FAKE_STATE/calls.log" || fail "successful fixer child must be archived (cleanup ownership)"
 printf 'one\n' > file.txt
 git -C "$FIXSCRATCH" diff --quiet || git -C "$FIXSCRATCH" commit -qam restore-14 >/dev/null 2>&1 || true
+
+# Same source tree with different findings must not adopt an active legacy fixer.
+legacy_title="$(cat "$FAKE_STATE/title.txt")"
+fixer_env_ready
+jq -n --arg t "$legacy_title" '[{id:"thr_legacy",title:$t,status:"active",updatedAt:2}]' > "$FAKE_STATE/list.json"
+custom_prompt="$TEST_DIR/bounded-prompt.md"
+cat prompts/review-fix-prompt.md > "$custom_prompt"
+printf '\nBounded findings: fix only the supplied JSON.\n' >> "$custom_prompt"
+review_bb_run_fixer "origin/main" "$custom_prompt" >/dev/null 2>&1 || fail "bounded prompt fixer failed"
+[ "$(spawn_calls)" = 1 ] || fail "different findings must spawn a new fixer"
+printf 'one\n' > file.txt
 
 # Internal bounded write results are validated before any patch is transferred.
 fixer_env_ready

@@ -301,8 +301,9 @@ Autofix edits remain uncommitted for the parent to inspect. If independent
 verification passes for that dirty tree, the handoff reason is `needs_commit`
 and the old commit's status stays failed. Commit and push those edits, wait
 for CI, then run `make review` to post success for that commit. The exact
-verified diff can reuse its cached verdict; no manual review/fix loop is
-needed. A passing working-tree verdict is never posted as approval of an
+verified diff can reuse its cached verdict once CI is green for the new
+commit; the cache never bypasses that prerequisite. No manual review/fix loop
+is needed. A passing working-tree verdict is never posted as approval of an
 older commit. Concurrent edits or a moved HEAD invalidate a review.
 
 `make review-fix` remains the standalone pre-review write phase; it posts no

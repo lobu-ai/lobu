@@ -190,7 +190,7 @@ fi
 # the gate SET is asserted semantically rather than by grepping for a line.
 # runtime_change_risk is reported in the headline but must never fail the
 # status; every defect/quality axis must still fail it.
-gate_block="$(sed -n '/^HEADLINE="bug_free /,/^fi$/p' "$review_script")"
+gate_block="$(sed -n '/^[[:space:]]*HEADLINE="bug_free /,/^[[:space:]]*fi$/p' "$review_script")"
 [ -n "$gate_block" ] ||
   fail "could not extract the pi-review gate block from review.sh"
 
