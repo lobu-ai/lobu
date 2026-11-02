@@ -253,31 +253,51 @@ function normalise(value: unknown): string {
 }
 
 /** Stable tie-break for rows that share the checkpoint timestamp. */
+/** Deterministic code-point ordering, independent of locale. */
+function compareText(a: string, b: string): number {
+	if (a === b) return 0;
+	return a < b ? -1 : 1;
+}
+
+function isIntegerString(value: string): boolean {
+	return /^-?\d+$/.test(value);
+}
+
+/**
+ * Strict total order over source ids. Integer ids sort before text ids; within
+ * integers the BigInt value wins and numerically equal strings ('01' vs '1')
+ * break ties on the original text. Mixing the two classes with string compare
+ * alone is non-transitive and can make a checkpoint skip rows.
+ */
 function compareIds(a: string, b: string): number {
-	if (/^-?\d+$/.test(a) && /^-?\d+$/.test(b)) {
+	const aNumeric = isIntegerString(a);
+	const bNumeric = isIntegerString(b);
+	if (aNumeric !== bNumeric) return aNumeric ? -1 : 1;
+	if (aNumeric) {
 		const left = BigInt(a);
 		const right = BigInt(b);
 		if (left < right) return -1;
 		if (left > right) return 1;
-		// Distinct source ids can share a numeric value ('01' vs '1'); keep a
-		// total order so the checkpoint can advance past both.
-		return a === b ? 0 : a.localeCompare(b);
 	}
-	return a.localeCompare(b);
+	return compareText(a, b);
 }
 
 function compareValues(a: unknown, b: unknown): number {
 	const left = normalise(a);
 	const right = normalise(b);
-	if (/^-?\d+$/.test(left) && /^-?\d+$/.test(right)) {
+	if (isIntegerString(left) && isIntegerString(right)) {
 		return compareIds(left, right);
 	}
-	const leftNumber = Number(left);
-	const rightNumber = Number(right);
-	if (left !== "" && right !== "" && Number.isFinite(leftNumber) && Number.isFinite(rightNumber)) {
-		return leftNumber - rightNumber;
+	const leftNumber = left === "" ? Number.NaN : Number(left);
+	const rightNumber = right === "" ? Number.NaN : Number(right);
+	const leftNumeric = Number.isFinite(leftNumber);
+	const rightNumeric = Number.isFinite(rightNumber);
+	if (leftNumeric !== rightNumeric) return leftNumeric ? -1 : 1;
+	if (leftNumeric && rightNumeric) {
+		const result = leftNumber - rightNumber;
+		if (result !== 0) return result;
 	}
-	return left.localeCompare(right);
+	return compareText(left, right);
 }
 
 function sameRecord(

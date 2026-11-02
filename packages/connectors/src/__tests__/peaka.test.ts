@@ -660,6 +660,43 @@ describe("Peaka calls feed", () => {
 		]);
 	});
 
+	test("orders mixed numeric/text ids transitively so none are skipped", async () => {
+		const rows = [
+			{ id: "2", createdon: "2026-11-01T10:00:00Z", status: "a" },
+			{ id: "10", createdon: "2026-11-01T10:00:00Z", status: "b" },
+			{ id: "1a", createdon: "2026-11-01T10:00:00Z", status: "c" },
+		];
+		const connector = new PeakaConnector();
+		const { http } = stubHttp({ post: async () => ({ data: rows }) });
+		// biome-ignore lint/suspicious/noExplicitAny: private seam replaced for the unit test
+		(connector as any).http = () => http;
+
+		const committed: Array<{ events: Array<Record<string, unknown>>; checkpoint: unknown }> = [];
+		const base = {
+			feedKey: "calls",
+			config: {
+				...config,
+				query: "SELECT id, createdon, status FROM servicetitan.telecom.calls",
+				max_rows: 1,
+			},
+			commit: async (events: unknown[], checkpoint: unknown) => {
+				committed.push({ events: events as Array<Record<string, unknown>>, checkpoint });
+			},
+		};
+
+		await connector.sync({ ...base, checkpoint: null });
+		await connector.sync({ ...base, checkpoint: committed[0]?.checkpoint });
+		await connector.sync({ ...base, checkpoint: committed[1]?.checkpoint });
+		expect(committed.map((entry) => entry.events[0]?.metadata)).toMatchObject([
+			{ call_id: "2" },
+			{ call_id: "10" },
+			{ call_id: "1a" },
+		]);
+		const done = await connector.sync({ ...base, checkpoint: committed[2]?.checkpoint });
+		expect(done.status).toBe("complete");
+		expect(committed[3]?.events).toHaveLength(0);
+	});
+
 	test("rejects rows without a valid activity timestamp instead of advancing to wall-clock time", async () => {
 		const connector = new PeakaConnector();
 		const { http } = stubHttp({
