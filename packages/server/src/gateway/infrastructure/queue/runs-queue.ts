@@ -186,9 +186,12 @@ export async function insertQueueJob<T>(
       expires_at,
       retry_delay_seconds,
       organization_id,
-      connection_id
+      connection_id,
+      initiator_kind,
+      initiator_ref,
+      created_by_user_id
     ) VALUES (
-      $1, $2, $3, $4, $5, $6, 0, 'pending', ${runAtSql}, $7, ${expiresAtSql}, $8, $9, $10
+      $1, $2, $3, $4, $5, $6, 0, 'pending', ${runAtSql}, $7, ${expiresAtSql}, $8, $9, $10, $11, $12, $13
     )
     ON CONFLICT (idempotency_key)
       WHERE idempotency_key IS NOT NULL
@@ -206,6 +209,9 @@ export async function insertQueueJob<T>(
       retryDelaySeconds,
       organizationIdFromPayload,
       options?.connectionId ?? null,
+      options?.initiator?.initiatorKind ?? null,
+      options?.initiator ? tx.json(options.initiator.initiatorRef) : null,
+      options?.initiator?.createdByUserId ?? null,
     ],
   );
 

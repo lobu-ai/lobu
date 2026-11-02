@@ -15,6 +15,7 @@ import { type Context, Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { bindRequestAbortToStream } from "../../../events/sse-abort-bridge.js";
 import { isAdminOrOwnerRole } from "../../../tools/access-control.js";
+import { resolveRunInitiator } from "../../../tools/initiator.js";
 import {
   defineRoute,
   getValidated,
@@ -1737,6 +1738,21 @@ export function createAgentApi(config: AgentApiConfig): Hono {
         ingestedFiles
       );
 
+      // Ownership and routing ids are not human initiation. Freeze only a
+      // current first-party settings-session member in this proven workspace.
+      // Legacy OAuth subjects and platform ids are different namespaces;
+      // Bearer and Automation requests retain their existing unknown actor.
+      const humanSession = !tokenFromHeader(c) && session.intent?.kind !== "automation_run"
+        ? await verifySettingsSessionOrToken(c, "token") : null;
+      const humanMember = humanSession?.platform === "external" && !humanSession.oauthUserId
+        && !humanSession.agentId && msgAccess.callerUserId
+        ? await authorizeOrgAgentMemberInProvenOrg({
+            organizationId: messageOrganizationId,
+            agentId: realAgentId,
+            userId: msgAccess.callerUserId,
+          })
+        : null;
+
       const jobId = await queueProducer.enqueueMessage({
         userId: session.userId,
         conversationId: session.conversationId || agentId,
@@ -1772,7 +1788,7 @@ export function createAgentApi(config: AgentApiConfig): Hono {
         networkConfig: session.networkConfig || settingsNetwork,
         guardrailsInline: settingsGuardrailsInline,
         nixConfig: resolvedNixConfig,
-      });
+      }, humanMember ? { initiator: resolveRunInitiator({ userId: humanMember.userId }) } : undefined);
 
       rootSpan?.end();
 

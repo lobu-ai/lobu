@@ -27,7 +27,7 @@ import {
   expect,
   test,
 } from "bun:test";
-import { generateWorkerToken, initTracing, shutdownTracing } from "@lobu/core";
+import { encrypt, generateWorkerToken, initTracing, shutdownTracing } from "@lobu/core";
 import {
   InMemorySpanExporter,
   SimpleSpanProcessor,
@@ -40,6 +40,8 @@ import { getDb } from "../../db/client.js";
 import { createPostgresAgentConfigStore } from "../../lobu/stores/postgres-stores.js";
 import { orgContext } from "../../lobu/stores/org-context.js";
 import { buildApiConversationId } from "../services/api-conversation-id.js";
+import { QueueProducer } from "../infrastructure/queue/queue-producer.js";
+import { RunsQueue } from "../infrastructure/queue/runs-queue.js";
 import { createAgentApi } from "../routes/public/agent.js";
 import { setAuthProvider } from "../routes/public/settings-auth.js";
 import type { ThreadSession } from "../session.js";
@@ -229,6 +231,79 @@ describe("POST /api/v1/agents — org member using an agent they don't own", () 
     expect(stored?.conversationId).toBe(expectedKey);
     expect(sessions.store.get(expectedKey)).toBe(stored);
   });
+
+  for (const caller of ["member", "admin", "owner", "unmapped owner", "legacy OAuth session", "SSE ticket", "bearer with cookie", "agent session", "worker", "automation"] as const) {
+    test(`message admission freezes the current human only (${caller})`, async () => {
+      const queue = new RunsQueue();
+      await queue.start();
+      const producer = new QueueProducer(queue);
+      await producer.start();
+      try {
+        setAuthProvider(() => sessionFor(MEMBER_ID));
+        const { app, sessions } = makeApp(
+          userAgentsStore, agentMetadataStore, CALLER_DEFAULT_ORG,
+          makeSessionManager(), producer as never,
+          { getSettings: async () => ({ models: ["test-provider/test-model"] }) } as never,
+        );
+        expect((await postCreate(app, { thread: "initiator", userId: "routing-only" }, { "x-lobu-org": AGENT_ORG })).status).toBe(201);
+        const session = sessions.getStored();
+        if (!session) throw new Error("Missing initiator session");
+        const headers: Record<string, string> = { "content-type": "application/json", "x-lobu-org": AGENT_ORG };
+        setAuthProvider(() => sessionFor(caller === "admin" ? ADMIN_ID : caller === "member" ? MEMBER_ID : AGENT_OWNER_ID));
+        if (caller === "unmapped owner") {
+          await orgContext.run({ organizationId: AGENT_ORG }, () => userAgentsStore.addAgent("external", "legacy-provider-subject", AGENT_ID));
+          setAuthProvider(() => sessionFor("legacy-provider-subject"));
+        }
+        if (caller === "legacy OAuth session") setAuthProvider(() => ({ ...sessionFor(AGENT_OWNER_ID), oauthUserId: AGENT_OWNER_ID }));
+        if (caller === "bearer with cookie") headers.authorization = `Bearer ${generateWorkerToken(AGENT_ID, session.conversationId, "cookie-deployment", {
+          channelId: "api", agentId: AGENT_ID, organizationId: AGENT_ORG, platform: "api",
+        })}`;
+        if (caller === "agent session") setAuthProvider(() => ({ ...sessionFor(AGENT_OWNER_ID), agentId: AGENT_ID }));
+        if (caller === "worker") {
+          setAuthProvider(null);
+          headers.authorization = `Bearer ${generateWorkerToken(AGENT_ID, session.conversationId, "initiator-deployment", {
+            channelId: "api", agentId: AGENT_ID, organizationId: AGENT_ORG, platform: "api",
+          })}`;
+        }
+        if (caller === "automation") session.intent = { kind: "automation_run", runId: 123, automationId: 456 };
+        let url = `/api/v1/agents/${encodeURIComponent(session.conversationId)}/messages`;
+        if (caller === "SSE ticket") {
+          // /api/sse-ticket also accepts PATs: its user-shaped ticket is not human initiation.
+          setAuthProvider(null);
+          url += `?token=${encodeURIComponent(encrypt(JSON.stringify(sessionFor(AGENT_OWNER_ID))))}`;
+        }
+        const send = () => app.request(url, {
+          method: "POST", headers,
+          body: JSON.stringify({ content: "hello", messageId: "frozen-actor", actorUserId: MEMBER_ID }),
+        });
+        const sent = await send();
+        if (caller === "bearer with cookie" || caller === "SSE ticket") {
+          // Preserve existing denials; neither credential can borrow a human session.
+          expect(sent.status).toBe(caller === "SSE ticket" ? 401 : 403);
+          expect(await getDb()`SELECT id FROM runs WHERE queue_name = 'messages'`).toHaveLength(0);
+          return;
+        }
+        expect(sent.status).toBe(200);
+        const expectedUser = caller === "admin" ? ADMIN_ID : caller === "owner" ? AGENT_OWNER_ID : caller === "member" ? MEMBER_ID : null;
+        const sql = getDb();
+        const read = () => sql`SELECT id, initiator_kind, initiator_ref, created_by_user_id FROM runs
+          WHERE organization_id = ${AGENT_ORG} AND queue_name = 'messages' AND action_input->>'messageId' = 'frozen-actor'`;
+        const [admitted] = await read();
+        expect(admitted).toMatchObject(expectedUser ? {
+          initiator_kind: "user", initiator_ref: { user_id: expectedUser }, created_by_user_id: expectedUser,
+        } : { initiator_kind: null, initiator_ref: null, created_by_user_id: null });
+        if (caller === "admin") {
+          // A later duplicate from another authorized person cannot retag the first admission.
+          setAuthProvider(() => sessionFor(AGENT_OWNER_ID));
+          expect((await send()).status).toBe(200);
+          expect(await read()).toEqual([admitted]);
+        }
+      } finally {
+        await producer.stop();
+        await queue.stop();
+      }
+    });
+  }
 
   for (const source of ["direct-api", "automation_run"] as const) {
     test(`${source} preserves org-scoped settings without forwarding MCP grants`, async () => {
