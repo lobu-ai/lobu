@@ -2,12 +2,13 @@ import { createHash, randomUUID } from 'node:crypto';
 import { REDACTED_SENTINEL } from '@lobu/core';
 import { currentMcpActivityEventMetadata } from '../lobu/stores/mcp-client-conversations';
 import { getDb } from '../db/client';
-import { parsePositiveIntegerId } from '../utils/errors';
+import { parsePositiveIntegerId, ToolUserError } from '../utils/errors';
 import { insertEvent, type InsertEventParams } from '../utils/insert-event';
 import logger from '../utils/logger';
 import { sanitizeAuditArgs } from './audit-args';
 import { AUDIT_SEMANTIC_TYPE } from './constants';
 import { getTool, type ToolContext } from './registry';
+import { resolveTurnInitiatingInput } from './turn-write-idempotency';
 import { eventClientId } from '../auth/event-client-id';
 
 const MAX_PREVIEW_CHARS = 500;
@@ -45,21 +46,34 @@ interface ToolInvocationAuditParams {
   durationMs: number;
   ctx: Pick<ToolContext, 'userId' | 'tokenType' | 'clientId' | 'tokenName' | 'agentId' |
     'mcpSessionId' | 'mcpConversationId'> &
-    Partial<Pick<ToolContext, 'sourceContext' | 'actingRunId'>> & { organizationId: string | null };
+    Partial<Pick<ToolContext, 'sourceContext' | 'actingRunId' | 'agentTurn'>> & { organizationId: string | null };
 }
 
 async function insertToolAuditEvent(params: InsertEventParams, ctx: ToolInvocationAuditParams['ctx']) {
-  // This is server-verified execution context, never a tool argument or MCP
-  // client metadata. The native execution run wins over its Automation ancestor.
+  // Start with server-verified execution context, never a tool argument or MCP
+  // client metadata. The native run wins over its Automation ancestor.
   // Reads must not invalidate content: a refetch would itself append an audit.
   const runId = ctx.sourceContext?.turnRunId ?? ctx.actingRunId;
   if (runId == null || !params.organizationId) {
     return insertEvent(params, { notifyContentChange: false });
   }
   return getDb().begin(async (sql) => {
+    let initiatingRunId: number | null = runId;
+    const turn = ctx.agentTurn;
+    if (turn?.inputRunId !== undefined && turn.inputRunId !== turn.runId) {
+      // The isolate's header is advisory until the write validator proves this
+      // turn owns the offered or consumed input.
+      try {
+        initiatingRunId = (await resolveTurnInitiatingInput(turn, sql)).runId;
+      } catch (error) {
+        if (!(error instanceof ToolUserError)) throw error;
+        // A refused input must not become owner attribution or lose the audit.
+        initiatingRunId = null;
+      }
+    }
     // Keep the FK alive until the append commits. A pruned or foreign-workspace
     // run stays unknown without dropping the read's audit or linking tenants.
-    const [run] = await sql`SELECT id FROM runs WHERE id = ${runId}
+    const [run] = await sql`SELECT id FROM runs WHERE id = ${initiatingRunId}
       AND organization_id = ${params.organizationId} FOR KEY SHARE`;
     return insertEvent({ ...params, runId: run ? Number(run.id) : null }, { sql, notifyContentChange: false });
   });

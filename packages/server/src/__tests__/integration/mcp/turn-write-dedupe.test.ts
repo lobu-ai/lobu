@@ -336,6 +336,42 @@ describe('a repeated turn write runs once per input message', () => {
     expect(await actionRuns()).toHaveLength(2);
   });
 
+  it('attributes source-read audits to the validated per-call input across a reused MCP session', async () => {
+    const { token, ownerRunId, followUpRunId } = await steeredTurn('m-read-owner', 'm-read-follow');
+    const sessionId = await openSession(org.slug, token);
+    const sql = getTestDb();
+    async function read(input: string | undefined, expectedRunId: number | null) {
+      const result = await callTool(org.slug, token, 'query_sql', { sql: 'SELECT 1 AS value', limit: 1 }, {
+        sessionId, headers: { ...DIRECT_AUTH, ...(input === undefined ? {} : { [TURN_INPUT_RUN_HEADER]: input }) },
+      });
+      expect(result.rows).toHaveLength(1);
+      const [audit] = await sql`SELECT run_id, payload_data FROM events
+        WHERE organization_id = ${org.id} AND origin_type = 'tool_invocation'
+          AND payload_data->>'tool_name' = 'query_sql' ORDER BY id DESC LIMIT 1`;
+      expect(audit.payload_data).toMatchObject({ success: true, row_count: 1 });
+      expect(audit.run_id == null ? null : Number(audit.run_id)).toBe(expectedRunId);
+    }
+    await read(undefined, ownerRunId);
+    await read(String(followUpRunId), followUpRunId);
+    // A completed input remains attributable after it leaves the pending offer.
+    await sql`UPDATE runs SET status = 'completed', run_metadata = COALESCE(run_metadata, '{}'::jsonb)
+      || ${sql.json({ consumed_by_run_id: ownerRunId })}::jsonb WHERE id = ${followUpRunId}`;
+    await read(String(followUpRunId), followUpRunId);
+    const stranger = await insertAgentTurnRun({
+      organizationId: org.id, agentId: AGENT_ID, conversationId: 'slack:C0OTHER:1', messageId: 'm-unowned-read',
+    });
+    await read(String(stranger), null);
+    const foreignOrg = await createTestOrganization({ name: 'Foreign Input Audit Org' });
+    const foreign = await insertAgentTurnRun({
+      organizationId: foreignOrg.id, agentId: AGENT_ID, conversationId: CONVERSATION_ID, messageId: 'm-foreign-read',
+    });
+    await read(String(foreign), null);
+    await read('not-a-run', null);
+    await sql`DELETE FROM runs WHERE id = ${followUpRunId}`;
+    await read(String(followUpRunId), null);
+    await read(undefined, ownerRunId);
+  });
+
   it('refuses a call naming an input the turn does not own', async () => {
     const { token } = await steeredTurn('m-1', 'm-follow');
     const strangerRunId = await insertAgentTurnRun({

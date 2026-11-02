@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { WorkerTokenData } from '@lobu/core';
-import { getDb } from '../db/client';
+import { getDb, type DbClient } from '../db/client';
 import { pendingAgentTurnInputs, type NativeTurnRun } from '../runs/agent-turn-inputs';
 import { ToolUserError } from '../utils/errors';
 import { stableJson } from '../utils/insert-event';
@@ -19,8 +19,8 @@ export interface AgentTurnIdentity {
   messageId: string;
   /**
    * The steered input run this call answers, as the isolate named it
-   * (`TURN_INPUT_RUN_HEADER`). Unverified until a write resolves it against
-   * the turn's stored inputs; absent means the owner input.
+   * (`TURN_INPUT_RUN_HEADER`). Unverified until `resolveTurnInitiatingInput`
+   * checks it against the turn's stored inputs; absent means the owner input.
    */
   inputRunId?: number;
 }
@@ -64,7 +64,19 @@ async function turnWriteIdempotencyKey(
   args: unknown
 ): Promise<string | null> {
   if (!turn) return null;
-  const sql = getDb();
+  const { messageId } = await resolveTurnInitiatingInput(turn);
+  // JSON round-trip first: an `undefined`-valued key is absent from the
+  // stored request, so it must be absent from the key too.
+  const canonicalArgs = stableJson(JSON.parse(JSON.stringify(args ?? null)));
+  const tuple = JSON.stringify([turn.organizationId, turn.agentId, turn.conversationId, messageId, surface, canonicalArgs]);
+  return `turn-write:v1:${createHash('sha256').update(tuple).digest('hex')}`;
+}
+
+/** Resolve a per-call input from the same stored evidence writes already use. */
+export async function resolveTurnInitiatingInput(
+  turn: AgentTurnIdentity,
+  sql: DbClient = getDb()
+): Promise<{ runId: number; messageId: string }> {
   const [owner] = await sql<NativeTurnRun>`
     SELECT id, organization_id, parent_run_id, status, claimed_by, action_input, run_metadata
     FROM runs
@@ -77,12 +89,7 @@ async function turnWriteIdempotencyKey(
       409
     );
   }
-  const messageId = await initiatingInputMessage(owner, turn);
-  // JSON round-trip first: an `undefined`-valued key is absent from the
-  // stored request, so it must be absent from the key too.
-  const canonicalArgs = stableJson(JSON.parse(JSON.stringify(args ?? null)));
-  const tuple = JSON.stringify([turn.organizationId, turn.agentId, turn.conversationId, messageId, surface, canonicalArgs]);
-  return `turn-write:v1:${createHash('sha256').update(tuple).digest('hex')}`;
+  return initiatingInput(owner, turn, sql);
 }
 
 /**
@@ -91,13 +98,13 @@ async function turnWriteIdempotencyKey(
  * (`pendingAgentTurnInputs`, the same derivation the heartbeat steer offer and
  * tool-trace routing use) or already consumed by it at completion.
  */
-async function initiatingInputMessage(owner: NativeTurnRun, turn: AgentTurnIdentity): Promise<string> {
-  if (turn.inputRunId === undefined || turn.inputRunId === turn.runId) return turn.messageId;
+async function initiatingInput(owner: NativeTurnRun, turn: AgentTurnIdentity, sql: DbClient): Promise<{ runId: number; messageId: string }> {
+  if (turn.inputRunId === undefined || turn.inputRunId === turn.runId) return { runId: turn.runId, messageId: turn.messageId };
   // A plain read, deliberately not `lockAgentTurnRun`: this runs on a tool
   // call, and the offer is a pure function of the stored rows.
-  const offered = (await pendingAgentTurnInputs(getDb(), owner)).find((input) => input.run_id === turn.inputRunId);
-  if (offered) return offered.message_id;
-  const [consumed] = await getDb()<{ message_id: string | null }>`
+  const offered = (await pendingAgentTurnInputs(sql, owner)).find((input) => input.run_id === turn.inputRunId);
+  if (offered) return { runId: offered.run_id, messageId: offered.message_id };
+  const [consumed] = await sql<{ message_id: string | null }>`
     SELECT action_input->'turn'->>'message_id' AS message_id
     FROM runs
     WHERE id = ${turn.inputRunId} AND run_type = 'agent_turn' AND organization_id = ${turn.organizationId}
@@ -105,7 +112,7 @@ async function initiatingInputMessage(owner: NativeTurnRun, turn: AgentTurnIdent
       AND action_input->'turn'->>'conversation_id' = ${turn.conversationId}
       AND (run_metadata->>'consumed_by_run_id')::bigint = ${turn.runId}
   `;
-  if (consumed?.message_id) return consumed.message_id;
+  if (consumed?.message_id) return { runId: turn.inputRunId, messageId: consumed.message_id };
   throw new ToolUserError(
     'Cannot derive a write idempotency key: this turn does not own the input the call names.',
     409
@@ -129,9 +136,10 @@ export async function withTurnIdempotencyKey<T extends { idempotency_key?: strin
 
 /**
  * The steered input a turn's call names (`TURN_INPUT_RUN_HEADER`), attached
- * for verification by the write that keys on it. A malformed value is kept as
- * an id no stored input can have, so the write fails closed instead of
- * silently keying on the owner.
+ * for verification by the write that keys on it and the audit that links it.
+ * A malformed value is kept as an id no stored input can have, so the write
+ * fails closed and the audit links no run, instead of either falling back to
+ * the owner.
  */
 export function withTurnInputRun(
   agentTurn: AgentTurnIdentity | null,
