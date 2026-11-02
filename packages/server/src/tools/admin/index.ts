@@ -67,7 +67,11 @@ import {
 	manageOperations,
 } from "./manage_operations";
 import { ManageSchedulesSchema, manageSchedules } from "./manage_schedules";
-import { ManageInferenceProvidersSchema, ManageInferenceProvidersResultSchema, manageInferenceProviders } from "./manage_inference_providers";
+import {
+	ManageInferenceProvidersResultSchema,
+	ManageInferenceProvidersSchema,
+	manageInferenceProviders,
+} from "./manage_inference_providers";
 import {
 	ManageViewsResultSchema,
 	ManageViewsSchema,
@@ -188,13 +192,14 @@ const ENTRIES: AdminToolEntry[] = [
 		annotations: DESTRUCTIVE_WITH_TITLE("Manage feeds"),
 	},
 	{
-    name: "manage_inference_providers",
-    description: "Organization inference-provider management. SDK alternative: client.inferenceProviders. API keys stay in the existing credential vault; OAuth sign-in remains interactive.",
-    schema: ManageInferenceProvidersSchema,
-    resultSchema: ManageInferenceProvidersResultSchema,
-    handler: manageInferenceProviders,
-    annotations: DESTRUCTIVE_WITH_TITLE("Manage inference providers"),
-  },
+		name: "manage_inference_providers",
+		description:
+			"Organization inference-provider management. SDK alternative: client.inferenceProviders. API keys stay in the existing credential vault; OAuth sign-in remains interactive.",
+		schema: ManageInferenceProvidersSchema,
+		resultSchema: ManageInferenceProvidersResultSchema,
+		handler: manageInferenceProviders,
+		annotations: DESTRUCTIVE_WITH_TITLE("Manage inference providers"),
+	},
 	{
 		name: "manage_auth_profiles",
 		description:

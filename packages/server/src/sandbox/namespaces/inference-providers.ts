@@ -1,10 +1,16 @@
 /** ClientSDK inference-provider management delegates to the shared action runner. */
 import type {
-  InferenceProviderCreateInput, InferenceProviderUpdateInput,
-  InferenceProviderSetDefaultInput, InferenceProviderSetCapabilityInput,
-  InferenceProviderRotateKeyInput, InferenceProviderDeleteInput,
-  InferenceProviderListResult, InferenceProviderCreateResult,
-  InferenceProviderUpdateResult, InferenceProviderDefaultResult, InferenceProviderSuccess,
+  InferenceProviderCreateInput,
+  InferenceProviderUpdateInput,
+  InferenceProviderSetDefaultInput,
+  InferenceProviderSetCapabilityInput,
+  InferenceProviderRotateKeyInput,
+  InferenceProviderDeleteInput,
+  InferenceProviderListResult,
+  InferenceProviderCreateResult,
+  InferenceProviderUpdateResult,
+  InferenceProviderDefaultResult,
+  InferenceProviderSuccess,
 } from '@lobu/core/contracts/tools/manage-inference-providers';
 import type { Env } from '../../index';
 import type { ToolContext } from '../../tools/registry';

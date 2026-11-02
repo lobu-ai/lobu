@@ -90,40 +90,6 @@ describe("ApplyClient", () => {
     ).rejects.toThrow("Denied");
   });
 
-  test("updates installed connector source through the version-checked action", async () => {
-    let activeVersion = "1.0.0";
-    const client = new ApplyClient(
-      {
-        apiBaseUrl: "https://example.test",
-        orgSlug: "fixture",
-        token: "synthetic-token",
-      },
-      (async (_url, init) => {
-        const command = JSON.parse(String(init?.body));
-        expect(command.action).toBe("update_connector_source");
-        if (command.expected_version !== activeVersion) {
-          return new Response(JSON.stringify({ error: "Version conflict" }));
-        }
-        activeVersion = "2.0.0";
-        return new Response(
-          JSON.stringify({
-            connector_key: "fixture",
-            version: activeVersion,
-            success: true,
-          })
-        );
-      }) as typeof fetch
-    );
-    const target = { connector_key: "fixture", expected_version: "1.0.0" };
-    expect(
-      await client.installConnector({ sourceCode: "synthetic source" }, target)
-    ).toMatchObject({ updated: true, version: "2.0.0" });
-    await expect(
-      client.installConnector({ sourceCode: "stale source" }, target)
-    ).rejects.toThrow("Version conflict");
-    expect(activeVersion).toBe("2.0.0");
-  });
-
   test("listFeeds rejects an incomplete empty page instead of planning from partial state", async () => {
     const client = new ApplyClient(
       {

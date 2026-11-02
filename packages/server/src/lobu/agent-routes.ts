@@ -19,6 +19,7 @@ import {
   type ManageInferenceProvidersArgs,
 } from "@lobu/core/contracts/tools/manage-inference-providers";
 import { manageInferenceProviders, providerAuditTransaction } from "../tools/admin/manage_inference_providers";
+import { AccessDeniedError } from "../tools/access-control";
 import { extractAuthContext, toToolContext } from "../tools/execute";
 import { validateToolArgs } from "../tools/validate-args";
 import { ToolUserError } from "../utils/errors";
@@ -589,6 +590,7 @@ async function inferenceProviderRequest(c: Context<{ Bindings: Env }>, schema: T
     return c.json(result, args.action === "create" ? 201 : 200);
   } catch (error) {
     if (error instanceof ToolUserError) return c.json({ error: error.message }, error.httpStatus as ContentfulStatusCode);
+    if (error instanceof AccessDeniedError) return c.json({ error: error.message }, 403);
     throw error;
   }
 }

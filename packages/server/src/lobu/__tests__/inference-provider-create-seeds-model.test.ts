@@ -203,6 +203,19 @@ describe("POST /inference-providers seeds a routable text model", () => {
     expect((await sdk.inferenceProviders.list()).providers).toEqual([]);
   });
 
+	test("provider reads enforce PAT scopes with a JSON forbidden response", async () => {
+		const { agentRoutes } = await import("../agent-routes.js");
+		authStash.authSource = "pat";
+		authStash.mcpAuthInfo = { scopes: [] };
+		const denied = await agentRoutes.request("/inference-providers");
+		expect(denied.status).toBe(403);
+		expect(await denied.json()).toEqual({ error: expect.any(String) });
+		authStash.mcpAuthInfo = { scopes: ["mcp:read"] };
+		const allowed = await agentRoutes.request("/inference-providers");
+		expect(allowed.status).toBe(200);
+		expect(await allowed.json()).toEqual({ providers: [] });
+	});
+
 	test("Codex runtime support does not allow subscription credentials through API-key creation", async () => {
 		const res = await createProvider({ slug: "chatgpt", kind: "chatgpt", apiKey: "synthetic-not-a-subscription" });
 		expect(res.status).toBe(400);
