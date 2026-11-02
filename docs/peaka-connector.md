@@ -12,7 +12,7 @@ documented Partner API; it never receives a ServiceTitan credential.
 | Read-only SQL | `query` | `POST /data/projects/:project/queries/execute?format=SIMPLE` |
 | Metadata | `list_tables` | internal-table or catalog/schema table listing |
 | Append one row | `add_record` | CSV import (`/table/:table/import`) |
-| Idempotent write | `upsert_record` | read by key → no-op / CSV import / configured flow |
+| Atomic write | `upsert_record` | read by key → no-op / configured Peaka upsert flow + read-back |
 | Invoke a flow | `invoke_flow` | `POST` to a configured `*.peaka.studio` API & Webhook URL |
 | Scheduled rows | `calls` feed | user-authored read-only SELECT + checkpoint |
 | Inbound webhook | `registerWebhook` | manual setup descriptor + signing secret |
@@ -48,27 +48,26 @@ not allowed`), so this is defence in depth, not the write seal.
 
 Peaka's documented Partner API can create an internal table, add columns, and
 import CSV. It has **no row-update or row-delete endpoint**, and CSV import
-appends. `upsert_record` therefore:
+appends. Peaka Tables also ignore the `isUnique` flag (verified: two imports of
+the same key produced two rows), so a connector-side read-then-append is not
+safe across replicas. `upsert_record` therefore fails closed without a
+provider-owned flow:
 
 1. reads the row by `key_columns` (default `["idempotency_key"]`);
 2. returns `action: "noop"` when every supplied field already matches;
-3. imports one CSV row when absent and reads it back to verify;
-4. when a row exists with different values, calls `PEAKA_UPSERT_FLOW_URL`
-   with `{action:"update", table, key_columns, record, existing}`;
-5. without that flow, returns
-   `output.code = "peaka_update_unsupported"` rather than appending a
-   duplicate.
+3. calls `PEAKA_UPSERT_FLOW_URL` with
+   `{action:"insert"|"update", table, key_columns, record, existing}` when the
+   row is absent or changed;
+4. reads the row back and only reports success when every supplied field
+   matches (`output.code = "peaka_readback_failed"` otherwise).
 
-The flow is Peaka-owned: its "Update a record" node selects by the key and
-updates the columns. This keeps Peaka's native write semantics in Peaka and
-avoids duplicating them in Lobu.
+Without that flow the action returns
+`output.code = "peaka_upsert_requires_flow"`; it never falls back to an
+unsafe append. `add_record` remains the explicit append primitive.
 
-Concurrency caveat: Peaka accepted the `isUnique` flag on the key column but
-reported it as `false`, and CSV import does not enforce a unique constraint. Two
-concurrent writers that both observe an absent row can therefore append
-duplicates. The runner serialises one recording/one key locally; multi-writer
-dedupe needs a Peaka-side unique constraint or the upsert flow to own the
-check-and-insert atomically.
+The flow is Peaka-owned: its insert/update nodes select by the key and own the
+atomic decision. This keeps Peaka's native write semantics in Peaka and avoids
+duplicating them in Lobu.
 
 
 Reproducer for the gap (no secrets):
@@ -76,7 +75,7 @@ Reproducer for the gap (no secrets):
 ```bash
 # 1. write a row through the connector (insert path)
 # 2. change one value for the same idempotency_key and write again
-# expected: success=false, output.code=peaka_update_unsupported
+# expected: success=false, output.code=peaka_upsert_requires_flow
 ```
 
 ## Webhooks and feeds
@@ -188,9 +187,10 @@ cached transcript; re-running the write returns `noop`.
 | Check | Status |
 |---|---|
 | Real Peaka read (`servicetitan.telecom.calls`, test call) | proven via installed connector |
-| CSV insert + exact read-back, including quotes/newlines | proven via installed connector |
-| Repeat write is a no-op | proven |
-| Changed-row update | intentionally blocked until `PEAKA_UPSERT_FLOW_URL` points at a working Peaka flow |
+| CSV insert + exact read-back, including quotes/newlines | proven via `add_record` on the installed connector |
+| Repeat write is a no-op | proven for an unchanged row |
+| Changed-row / absent-row atomic write | blocked until `PEAKA_UPSERT_FLOW_URL` points at a working Peaka flow; the connector fails closed rather than appending |
+| Feed paging + changed rows | paged by `(timestamp, id)` cursor; changed rows with a newer activity timestamp re-emit |
 | Feed sync, checkpoint, no duplicate events | proven (5 events, second run emitted 0) |
 | Local Whisper transcription + cache | proven on a public sample (11s audio, ~2.2s cached run) |
 | Real ServiceTitan recording bytes | **blocked** by the Peaka binary/credential gap above |

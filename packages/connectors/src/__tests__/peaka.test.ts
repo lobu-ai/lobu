@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, describe, expect, mock, test } from "bun:test";
+import { beforeAll, describe, expect, mock, test } from "bun:test";
 import { connectorSdkMock } from "./connector-sdk.mock";
 
 mock.module("@lobu/connector-sdk", connectorSdkMock);
@@ -188,32 +188,88 @@ describe("Peaka actions", () => {
 		expect(String(captured[0]?.body && JSON.stringify(captured[0].body))).toContain("idempotency_key");
 	});
 
-	test("upsert_record inserts when absent and verifies the read-back", async () => {
+	test("upsert_record fails closed without a flow because Peaka has no unique constraint", async () => {
 		const row = { idempotency_key: "k2", call_id: "2070470", raw_transcript: "hello" };
-		let reads = 0;
 		const { result, captured } = await invoke(
 			"upsert_record",
 			{ table: "call_transcripts", record: row },
-			{
-				post: async () => {
-					reads += 1;
-					return { data: reads === 1 ? [] : [row] };
-				},
-				request: async () =>
-					new Response(JSON.stringify({ status: "COMPLETED", result: { processed: 1 } }), {
-						status: 200,
-						headers: { "content-type": "application/json" },
-					}),
-			},
+			{ post: async () => ({ data: [] }) },
 		);
 
-		expect(result.success).toBe(true);
-		expect(result.output.action).toBe("inserted");
-		expect(captured).toHaveLength(3);
-		expect(captured[1]?.url).toContain("/table/call_transcripts/import");
+		expect(result.success).toBe(false);
+		expect(result.output.code).toBe("peaka_upsert_requires_flow");
+		expect(result.error).toMatch(/unique constraints/);
+		expect(captured).toHaveLength(1);
 	});
 
-	test("upsert_record reports Peaka's update gap instead of appending a duplicate", async () => {
+	test("upsert_record calls the flow and verifies the read-back", async () => {
+		const row = { idempotency_key: "k2", call_id: "2070470", raw_transcript: "hello" };
+		let reads = 0;
+		const flowRequests: Array<{ url: string; body?: unknown }> = [];
+		const originalFetch = globalThis.fetch;
+		globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+			flowRequests.push({ url: String(url), body: init?.body });
+			return new Response(JSON.stringify({ ok: true }), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			});
+		}) as typeof fetch;
+		try {
+			const { result, captured } = await invoke(
+				"upsert_record",
+				{ table: "call_transcripts", record: row },
+				{
+					post: async () => {
+						reads += 1;
+						return { data: reads === 1 ? [] : [row] };
+					},
+				},
+				{
+					...config,
+					PEAKA_UPSERT_FLOW_URL: "https://lobu-6qun.api.peaka.studio/upsert",
+				},
+			);
+
+			expect(result.success).toBe(true);
+			expect(result.output.action).toBe("inserted");
+			expect(captured).toHaveLength(2);
+			expect(flowRequests).toHaveLength(1);
+			expect(JSON.parse(String(flowRequests[0]?.body))).toMatchObject({
+				action: "insert",
+				table: "call_transcripts",
+			});
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	});
+
+	test("upsert_record rejects a flow whose write does not read back", async () => {
+		const existing = { idempotency_key: "k3", raw_transcript: "old" };
+		const originalFetch = globalThis.fetch;
+		globalThis.fetch = (async () =>
+			new Response(JSON.stringify({ ok: true }), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			})) as typeof fetch;
+		try {
+			const { result } = await invoke(
+				"upsert_record",
+				{ table: "call_transcripts", record: { ...existing, raw_transcript: "new" } },
+				{ post: async () => ({ data: [existing] }) },
+				{
+					...config,
+					PEAKA_UPSERT_FLOW_URL: "https://lobu-6qun.api.peaka.studio/upsert",
+				},
+			);
+
+			expect(result.success).toBe(false);
+			expect(result.output.code).toBe("peaka_readback_failed");
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	});
+
+	test("upsert_record reports the flow requirement instead of appending a duplicate", async () => {
 		const existing = { idempotency_key: "k3", raw_transcript: "old" };
 		const { result, captured } = await invoke(
 			"upsert_record",
@@ -222,7 +278,7 @@ describe("Peaka actions", () => {
 		);
 
 		expect(result.success).toBe(false);
-		expect(result.output.code).toBe("peaka_update_unsupported");
+		expect(result.output.code).toBe("peaka_upsert_requires_flow");
 		expect(result.error).toMatch(/PEAKA_UPSERT_FLOW_URL/);
 		expect(captured).toHaveLength(1);
 	});
@@ -315,6 +371,81 @@ describe("Peaka calls feed", () => {
 		expect(second.status).toBe("complete");
 		expect(committed[1]?.events).toHaveLength(0);
 	});
+
+	test("pages by timestamp and id instead of slicing the query result", async () => {
+		const rows = [
+			{ id: "1", createdon: "2026-11-01T10:00:00Z", status: "a" },
+			{ id: "2", createdon: "2026-11-01T11:00:00Z", status: "b" },
+			{ id: "3", createdon: "2026-11-01T12:00:00Z", status: "c" },
+		];
+		const connector = new PeakaConnector();
+		const { http } = stubHttp({ post: async () => ({ data: rows }) });
+		// biome-ignore lint/suspicious/noExplicitAny: private seam replaced for the unit test
+		(connector as any).http = () => http;
+
+		const committed: Array<{ events: Array<Record<string, unknown>>; checkpoint: unknown }> = [];
+		const base = {
+			feedKey: "calls",
+			config: {
+				...config,
+				query: "SELECT id, createdon, status FROM servicetitan.telecom.calls",
+				max_rows: 2,
+			},
+			commit: async (events: unknown[], checkpoint: unknown) => {
+				committed.push({ events: events as Array<Record<string, unknown>>, checkpoint });
+			},
+		};
+
+		const first = await connector.sync({ ...base, checkpoint: null });
+		expect(first.status).toBe("more");
+		expect(committed[0]?.events.map((event) => event.metadata)).toMatchObject([
+			{ call_id: "1" },
+			{ call_id: "2" },
+		]);
+		expect(committed[0]?.checkpoint).toMatchObject({
+			last_timestamp: "2026-11-01T11:00:00.000Z",
+			last_id: "2",
+		});
+
+		const second = await connector.sync({ ...base, checkpoint: committed[0]?.checkpoint });
+		expect(second.status).toBe("complete");
+		expect(committed[1]?.events.map((event) => event.metadata)).toMatchObject([{ call_id: "3" }]);
+
+		const third = await connector.sync({ ...base, checkpoint: committed[1]?.checkpoint });
+		expect(third.status).toBe("complete");
+		expect(committed[2]?.events).toHaveLength(0);
+	});
+
+	test("emits a changed row when the activity timestamp advances", async () => {
+		const connector = new PeakaConnector();
+		let rows = [{ id: "7", createdon: "2026-11-01T10:00:00Z", status: "Ringing" }];
+		const { http } = stubHttp({ post: async () => ({ data: rows }) });
+		// biome-ignore lint/suspicious/noExplicitAny: private seam replaced for the unit test
+		(connector as any).http = () => http;
+
+		const committed: Array<{ events: Array<Record<string, unknown>>; checkpoint: unknown }> = [];
+		const base = {
+			feedKey: "calls",
+			config: {
+				...config,
+				query: "SELECT id, createdon, status FROM servicetitan.telecom.calls",
+			},
+			commit: async (events: unknown[], checkpoint: unknown) => {
+				committed.push({ events: events as Array<Record<string, unknown>>, checkpoint });
+			},
+		};
+
+		await connector.sync({ ...base, checkpoint: null });
+		rows = [{ id: "7", createdon: "2026-11-01T11:00:00Z", status: "Completed" }];
+		const update = await connector.sync({ ...base, checkpoint: committed[0]?.checkpoint });
+
+		expect(update.status).toBe("complete");
+		expect(committed[1]?.events).toHaveLength(1);
+		expect(committed[1]?.events[0]).toMatchObject({
+			origin_id: "peaka-call:LePnbVBt:7",
+			metadata: { call_id: "7", status: "Completed" },
+		});
+	});
 });
 
 describe("Peaka webhook lifecycle", () => {
@@ -338,8 +469,4 @@ describe("Peaka webhook lifecycle", () => {
 			}),
 		).resolves.toBeUndefined();
 	});
-});
-
-afterEach(() => {
-	// The SDK mock is process-global; nothing else to reset here.
 });

@@ -47,11 +47,12 @@ import {
 const DEFAULT_BASE_URL = "https://partner.peaka.studio/api/v1";
 const DEFAULT_MAX_ROWS = 200;
 const MAX_ROWS = 1000;
+const MAX_FETCHED_ROWS = 10_000;
 const MAX_IDENTIFIER = 120;
 
 interface PeakaCheckpoint {
 	last_timestamp?: string;
-	seen_ids?: string[];
+	last_id?: string;
 }
 
 interface PeakaFeedConfig {
@@ -169,6 +170,14 @@ function normalise(value: unknown): string {
 	if (value === null || value === undefined) return "";
 	if (typeof value === "object") return JSON.stringify(value);
 	return String(value);
+}
+
+/** Stable tie-break for rows that share the checkpoint timestamp. */
+function compareIds(a: string, b: string): number {
+	const na = Number(a);
+	const nb = Number(b);
+	if (Number.isFinite(na) && Number.isFinite(nb)) return na - nb;
+	return a.localeCompare(b);
 }
 
 function sameRecord(
@@ -377,9 +386,9 @@ export default class PeakaConnector extends ConnectorRuntime<PeakaCheckpoint, Pe
 				key: "upsert_record",
 				name: "Upsert record",
 				description:
-					"Idempotently write one row: read by key, no-op when unchanged, append when absent, or call the configured Peaka upsert flow when an existing row changed.",
+					"Write one row through the configured Peaka upsert flow: no-op when unchanged, otherwise call the flow and verify the read-back. Peaka Tables have no enforced uniqueness, so the flow owns atomic insert-or-update.",
 				kind: "write",
-				annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+				annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
 				inputSchema: {
 					type: "object",
 					required: ["table", "record"],
@@ -457,56 +466,72 @@ export default class PeakaConnector extends ConnectorRuntime<PeakaCheckpoint, Pe
 		const maxRows = Math.min(Math.max(Number(config.max_rows) || DEFAULT_MAX_ROWS, 1), MAX_ROWS);
 
 		const response = await this.executeSql(config, rawQuery);
-		const rows = asRows(response).slice(0, maxRows);
-		const checkpoint = ctx.checkpoint ?? {};
-		const cutoff = checkpoint.last_timestamp ? Date.parse(checkpoint.last_timestamp) : null;
-		const seen = new Set(checkpoint.seen_ids ?? []);
-
-		const events: EventEnvelope[] = [];
-		let newest = cutoff;
-		for (const row of rows) {
-			const id = normalise(row[idColumn]);
-			if (!id) continue;
-			const occurredAtRaw = normalise(row[timestampColumn]);
-			const occurredAt = occurredAtRaw ? new Date(occurredAtRaw) : new Date();
-			const occurredMs = Number.isNaN(occurredAt.getTime()) ? Date.now() : occurredAt.getTime();
-			const originId = `peaka-call:${projectId(config)}:${id}`;
-			if (seen.has(originId)) continue;
-			if (cutoff !== null && occurredMs < cutoff) continue;
-			newest = newest === null ? occurredMs : Math.max(newest, occurredMs);
-			events.push({
-				origin_id: originId,
-				origin_type: "call",
-				payload_type: "text",
-				title: `Call ${id}`,
-				payload_text: [
-					`Peaka call ${id}`,
-					row.duration ? `duration ${normalise(row.duration)}` : undefined,
-					row.status ? `status ${normalise(row.status)}` : undefined,
-					row.recordingurl ? `recording ${normalise(row.recordingurl)}` : undefined,
-				]
-					.filter(Boolean)
-					.join(" · "),
-				occurred_at: new Date(occurredMs),
-				semantic_type: "call",
-				metadata: {
-					call_id: id,
-					duration: normalise(row.duration) || undefined,
-					status: normalise(row.status) || undefined,
-					recording_url: normalise(row.recordingurl) || undefined,
-					project_id: projectId(config),
-				},
-			});
+		const allRows = asRows(response);
+		if (allRows.length > MAX_FETCHED_ROWS) {
+			throw new Error(
+				`Peaka feed query returned ${allRows.length} rows; add ORDER BY + LIMIT (max ${MAX_FETCHED_ROWS}) so the checkpoint can page deterministically`,
+			);
 		}
 
-		const nextSeen = [...seen, ...events.map((event) => event.origin_id)].slice(-MAX_ROWS);
+		const parsed = allRows
+			.map((row) => {
+				const id = normalise(row[idColumn]);
+				if (!id) return null;
+				const occurredAtRaw = normalise(row[timestampColumn]);
+				const occurredAt = occurredAtRaw ? new Date(occurredAtRaw) : new Date();
+				const occurredMs = Number.isNaN(occurredAt.getTime()) ? Date.now() : occurredAt.getTime();
+				return { row, id, occurredMs };
+			})
+			.filter((entry): entry is { row: Record<string, unknown>; id: string; occurredMs: number } =>
+				entry !== null,
+			)
+			.sort((a, b) => a.occurredMs - b.occurredMs || compareIds(a.id, b.id));
+
+		const checkpoint = ctx.checkpoint ?? {};
+		const cutoff = checkpoint.last_timestamp ? Date.parse(checkpoint.last_timestamp) : null;
+		const lastId = checkpoint.last_id ?? null;
+		const eligible = parsed.filter(({ id, occurredMs }) => {
+			if (cutoff === null || Number.isNaN(cutoff)) return true;
+			if (occurredMs > cutoff) return true;
+			if (occurredMs < cutoff) return false;
+			return lastId !== null && compareIds(id, lastId) > 0;
+		});
+		const page = eligible.slice(0, maxRows);
+
+		const events: EventEnvelope[] = page.map(({ row, id, occurredMs }) => ({
+			origin_id: `peaka-call:${projectId(config)}:${id}`,
+			origin_type: "call",
+			payload_type: "text",
+			title: `Call ${id}`,
+			payload_text: [
+				`Peaka call ${id}`,
+				row.duration ? `duration ${normalise(row.duration)}` : undefined,
+				row.status ? `status ${normalise(row.status)}` : undefined,
+				row.recordingurl ? `recording ${normalise(row.recordingurl)}` : undefined,
+			]
+				.filter(Boolean)
+				.join(" · "),
+			occurred_at: new Date(occurredMs),
+			semantic_type: "call",
+			metadata: {
+				call_id: id,
+				duration: normalise(row.duration) || undefined,
+				status: normalise(row.status) || undefined,
+				recording_url: normalise(row.recordingurl) || undefined,
+				project_id: projectId(config),
+			},
+		}));
+
+		const last = page.at(-1);
 		const nextCheckpoint: PeakaCheckpoint = {
-			last_timestamp:
-				newest !== null && newest !== undefined ? new Date(newest).toISOString() : undefined,
-			seen_ids: nextSeen,
+			last_timestamp: last ? new Date(last.occurredMs).toISOString() : checkpoint.last_timestamp,
+			last_id: last ? last.id : checkpoint.last_id,
 		};
 		await ctx.commit(events, nextCheckpoint);
-		return { status: "complete", metadata: { items_found: events.length } };
+		return {
+			status: eligible.length > page.length ? "more" : "complete",
+			metadata: { items_found: events.length, items_pending: eligible.length - page.length },
+		};
 	}
 
 	async execute(ctx: ActionContext): Promise<ActionResult> {
@@ -587,48 +612,47 @@ export default class PeakaConnector extends ConnectorRuntime<PeakaCheckpoint, Pe
 		const row = record as Record<string, unknown>;
 		const keys = keyColumns(input);
 		const existing = await this.findByKey(config, table, keys, row);
-		if (existing) {
-			if (sameRecord(existing, row)) {
-				return {
-					success: true,
-					output: { action: "noop", table, key_columns: keys, row: existing },
-				};
-			}
-			const flowUrl = configString(config, "PEAKA_UPSERT_FLOW_URL");
-			if (!flowUrl) {
-				return {
-					success: false,
-					error:
-						"Peaka's documented API cannot update an existing row. Configure PEAKA_UPSERT_FLOW_URL with a Peaka API & Webhook flow that updates by key, or delete the row in Peaka first.",
-					output: { code: "peaka_update_unsupported", table, key_columns: keys },
-				};
-			}
-			const flowResult = await this.callFlow(config, flowUrl, {
-				action: "update",
-				table,
-				key_columns: keys,
-				record: row,
-				existing,
-			});
-			const verified = await this.findByKey(config, table, keys, row);
+		if (existing && sameRecord(existing, row)) {
 			return {
 				success: true,
-				output: { action: "updated", table, key_columns: keys, flow: flowResult, row: verified },
+				output: { action: "noop", table, key_columns: keys, row: existing },
 			};
 		}
 
-		const job = await this.importRow(config, table, row);
-		const verified = await this.findByKey(config, table, keys, row);
-		if (!verified) {
+		const flowUrl = configString(config, "PEAKA_UPSERT_FLOW_URL");
+		if (!flowUrl) {
 			return {
 				success: false,
-				error: `Peaka import completed but the row was not readable back by ${keys.join(", ")}`,
-				output: { code: "peaka_readback_failed", table, job },
+				error:
+					"Peaka Tables do not enforce unique constraints, so the connector cannot make a read-then-insert upsert safe across replicas. Configure PEAKA_UPSERT_FLOW_URL with a Peaka flow that owns the atomic insert-or-update by key.",
+				output: { code: "peaka_upsert_requires_flow", table, key_columns: keys },
+			};
+		}
+
+		const flowResult = await this.callFlow(config, flowUrl, {
+			action: existing ? "update" : "insert",
+			table,
+			key_columns: keys,
+			record: row,
+			existing,
+		});
+		const verified = await this.findByKey(config, table, keys, row);
+		if (!verified || !sameRecord(verified, row)) {
+			return {
+				success: false,
+				error: `Peaka flow completed but the row did not read back with the written values (${keys.join(", ")})`,
+				output: { code: "peaka_readback_failed", table, flow: flowResult, row: verified },
 			};
 		}
 		return {
 			success: true,
-			output: { action: "inserted", table, key_columns: keys, job, row: verified },
+			output: {
+				action: existing ? "updated" : "inserted",
+				table,
+				key_columns: keys,
+				flow: flowResult,
+				row: verified,
+			},
 		};
 	}
 
