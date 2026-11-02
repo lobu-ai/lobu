@@ -127,6 +127,10 @@ function quoteLiteral(value: string): string {
 /**
  * Structural read-only SQL guard. Peaka itself rejects DML, but an agent-facing
  * action should fail before sending anything that is not a query.
+ *
+ * Statement separators are detected with a quote/comment-aware scan, so a
+ * semicolon inside `'a;b'`, a quoted identifier, or a comment is not mistaken
+ * for a second statement.
  */
 export function assertReadOnlySql(sql: string): string {
 	const trimmed = sql
@@ -135,9 +139,85 @@ export function assertReadOnlySql(sql: string): string {
 	if (!/^(select|with|show|describe|explain)\b/i.test(trimmed)) {
 		throw new Error("Peaka connector only runs read-only SQL (SELECT/WITH/SHOW/DESCRIBE/EXPLAIN)");
 	}
-	const single = trimmed.replace(/;\s*$/, "");
-	if (single.includes(";")) throw new Error("Peaka connector accepts one statement per call");
-	return single;
+	if (hasExtraStatement(trimmed)) {
+		throw new Error("Peaka connector accepts one statement per call");
+	}
+	return trimmed
+		.replace(/;\s*(?:(?:--[^\n]*)|(?:\/\*[\s\S]*?\*\/))*\s*$/, "")
+		.trim();
+}
+
+function hasNonCommentContent(sql: string): boolean {
+	let index = 0;
+	while (index < sql.length) {
+		const char = sql[index];
+		const next = sql[index + 1];
+		if (/\s/.test(char)) {
+			index += 1;
+			continue;
+		}
+		if (char === "-" && next === "-") {
+			const end = sql.indexOf("\n", index + 2);
+			if (end === -1) return false;
+			index = end + 1;
+			continue;
+		}
+		if (char === "/" && next === "*") {
+			const end = sql.indexOf("*/", index + 2);
+			if (end === -1) return false;
+			index = end + 2;
+			continue;
+		}
+		return true;
+	}
+	return false;
+}
+
+function hasExtraStatement(sql: string): boolean {
+	let index = 0;
+	while (index < sql.length) {
+		const char = sql[index];
+		const next = sql[index + 1];
+		if (char === "'") {
+			index += 1;
+			while (index < sql.length) {
+				if (sql[index] === "'") {
+					if (sql[index + 1] === "'") {
+						index += 2;
+						continue;
+					}
+					break;
+				}
+				index += 1;
+			}
+		} else if (char === '"') {
+			index += 1;
+			while (index < sql.length) {
+				if (sql[index] === '"') {
+					if (sql[index + 1] === '"') {
+						index += 2;
+						continue;
+					}
+					break;
+				}
+				index += 1;
+			}
+		} else if (char === "-" && next === "-") {
+			const end = sql.indexOf("\n", index + 2);
+			if (end === -1) return false;
+			index = end + 1;
+			continue;
+		} else if (char === "/" && next === "*") {
+			const end = sql.indexOf("*/", index + 2);
+			if (end === -1) return false;
+			index = end + 2;
+			continue;
+		} else if (char === ";") {
+			return hasNonCommentContent(sql.slice(index + 1));
+		}
+		index += 1;
+	}
+	return false;
 }
 
 function csvCell(value: unknown): string {
@@ -497,9 +577,13 @@ export default class PeakaConnector extends ConnectorRuntime<PeakaCheckpoint, Pe
 				const id = normalise(row[idColumn]);
 				if (!id) return null;
 				const occurredAtRaw = normalise(row[timestampColumn]);
-				const occurredAt = occurredAtRaw ? new Date(occurredAtRaw) : new Date();
-				const occurredMs = Number.isNaN(occurredAt.getTime()) ? Date.now() : occurredAt.getTime();
-				return { row, id, occurredMs };
+				const occurredAt = occurredAtRaw ? new Date(occurredAtRaw) : null;
+				if (!occurredAt || Number.isNaN(occurredAt.getTime())) {
+					throw new Error(
+						`Peaka feed row ${id} has no valid '${timestampColumn}' timestamp; fix the query or timestamp_column (the checkpoint cannot advance without it)`,
+					);
+				}
+				return { row, id, occurredMs: occurredAt.getTime() };
 			})
 			.filter((entry): entry is { row: Record<string, unknown>; id: string; occurredMs: number } =>
 				entry !== null,

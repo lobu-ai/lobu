@@ -82,6 +82,16 @@ describe("Peaka read-only SQL guard", () => {
 		expect(() => assertReadOnlySql("UPDATE t SET x = 1")).toThrow(/read-only/);
 		expect(() => assertReadOnlySql("SELECT 1; DELETE FROM t")).toThrow(/one statement/);
 	});
+
+	test("does not treat semicolons inside literals, identifiers, or comments as statements", () => {
+		expect(assertReadOnlySql("SELECT 'a;b' AS v")).toBe("SELECT 'a;b' AS v");
+		expect(assertReadOnlySql('SELECT "a;b" FROM t')).toBe('SELECT "a;b" FROM t');
+		expect(assertReadOnlySql("SELECT 1 -- ; not a statement")).toBe(
+			"SELECT 1 -- ; not a statement",
+		);
+		expect(assertReadOnlySql("SELECT 1 /* ; */")).toBe("SELECT 1 /* ; */");
+		expect(assertReadOnlySql("SELECT 1; -- trailing comment")).toBe("SELECT 1");
+	});
 });
 
 describe("Peaka CSV writer", () => {
@@ -186,6 +196,19 @@ describe("Peaka actions", () => {
 		expect(result.output.action).toBe("noop");
 		expect(captured).toHaveLength(1);
 		expect(String(captured[0]?.body && JSON.stringify(captured[0].body))).toContain("idempotency_key");
+	});
+
+	test("a key containing a semicolon still builds one valid SELECT", async () => {
+		const row = { idempotency_key: "a;b", raw_transcript: "hello" };
+		const { result, captured } = await invoke(
+			"upsert_record",
+			{ table: "call_transcripts", record: row },
+			{ post: async () => ({ data: [row] }) },
+		);
+
+		expect(result.success).toBe(true);
+		expect(result.output.action).toBe("noop");
+		expect(String(captured[0]?.body?.statement)).toContain("'a;b'");
 	});
 
 	test("upsert_record fails closed without a flow because Peaka has no unique constraint", async () => {
@@ -549,6 +572,35 @@ describe("Peaka calls feed", () => {
 			origin_id: "peaka-call:LePnbVBt:calls:7",
 			metadata: { call_id: "7", status: "Completed" },
 		});
+	});
+
+	test("rejects rows without a valid activity timestamp instead of advancing to wall-clock time", async () => {
+		const connector = new PeakaConnector();
+		const { http } = stubHttp({
+			post: async () => ({
+				data: [
+					{ id: "1", createdon: "", status: "a" },
+					{ id: "2", createdon: "not-a-date", status: "b" },
+				],
+			}),
+		});
+		// biome-ignore lint/suspicious/noExplicitAny: private seam replaced for the unit test
+		(connector as any).http = () => http;
+
+		const commit = mock(async () => undefined);
+		await expect(
+			connector.sync({
+				feedKey: "calls",
+				config: {
+					...config,
+					query: "SELECT id, createdon, status FROM servicetitan.telecom.calls",
+					max_rows: 1,
+				},
+				checkpoint: null,
+				commit,
+			}),
+		).rejects.toThrow(/no valid 'createdon' timestamp/);
+		expect(commit).not.toHaveBeenCalled();
 	});
 });
 

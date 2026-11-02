@@ -40,9 +40,10 @@ project; the project comes from the connection.
 ## Read boundary
 
 `query` accepts exactly one statement starting with `SELECT`, `WITH`, `SHOW`,
-`DESCRIBE`, or `EXPLAIN`. Additional statements are rejected before a request.
-Peaka's query engine independently rejects DML (`Statement type 'Update' is
-not allowed`), so this is defence in depth, not the write seal.
+`DESCRIBE`, or `EXPLAIN`. Statement separators are detected with a
+quote/comment-aware scan, so `'a;b'`, a quoted identifier, or a comment does not
+count as a second statement. Peaka's query engine independently rejects DML
+(`Statement type 'Update' is not allowed`), so this is defence in depth.
 
 ## Write path and the row-update gap
 
@@ -77,6 +78,11 @@ Reproducer for the gap (no secrets):
 # 2. change one value for the same idempotency_key and write again
 # expected: success=false, output.code=peaka_upsert_requires_flow
 ```
+
+The `calls` feed pages by `(timestamp_column, id_column)` and reports `more`
+until the page is drained. Every row must have a valid activity timestamp;
+missing or unparseable values fail the sync before the checkpoint moves, rather
+than substituting wall-clock time and starving later rows.
 
 ## Webhooks and feeds
 
