@@ -2,8 +2,9 @@
  * Automation health surfacing (item 3, #2033).
  *
  * 3.1: manage_automations `list` returns a computed `health` field —
- *   `degraded` for an active automation that missed a firing, has a stale pending
- *   run, or whose latest run failed/timed out; `healthy` otherwise.
+ *   `degraded` for an active automation that missed a firing, has a stale
+ *   pending/claimed/running run, or whose latest run failed/timed out;
+ *   `healthy` otherwise.
  *
  * 3.2: getSchedulerHealth (the /health/scheduler alarm path) surfaces overdue
  *   active automations and stuck-pending automation runs in `issues[]` — previously
@@ -209,6 +210,46 @@ describe("automation health surfacing (#2033)", () => {
     expect(row?.health).toBe("degraded");
     expect(row?.last_scheduling_error).toBe("No model is configured");
   });
+
+  it.each(["claimed", "running"])(
+    "surfaces an old %s run as degraded in list and detail",
+    async (status) => {
+      const { automationId, ctx } = await createScheduledAutomation();
+      const sql = getTestDb();
+      await sql`
+        UPDATE automations
+        SET execution_config = ${sql.json({ executor: { kind: "external" } })},
+            next_run_at = current_timestamp - interval '20 hours'
+        WHERE id = ${automationId}
+      `;
+      const [run] = await sql`
+        INSERT INTO runs
+          (organization_id, run_type, automation_id, status, approval_status, created_at)
+        VALUES
+          (${ctx.organizationId}, 'automation', ${automationId}, ${status}, 'auto',
+           current_timestamp - interval '20 hours')
+        RETURNING id
+      `;
+
+      const result = await manageAutomations({ action: "list" }, {} as Env, ctx);
+      if (result.action !== "list") throw new Error("expected list result");
+      const row = result.automations.find(
+        (b) => String((b as { automation_id?: unknown }).automation_id) === String(automationId),
+      ) as { health?: string; health_reasons?: string[] } | undefined;
+      expect(row?.health).toBe("degraded");
+      expect(
+        row?.health_reasons?.some((reason) => reason.includes(`stuck ${status} run`)),
+      ).toBe(true);
+
+      const detail = await getAutomation({ automation_id: String(automationId) }, {} as Env, ctx);
+      expect(detail.automation?.health).toBe("degraded");
+
+      // A newly dispatched run still suppresses the stale schedule cursor.
+      await sql`UPDATE runs SET created_at = current_timestamp WHERE id = ${run.id}`;
+      const fresh = await getAutomation({ automation_id: String(automationId) }, {} as Env, ctx);
+      expect(fresh.automation?.health).toBe("healthy");
+    },
+  );
 
   it("3.1 (integration): an unstamped event automation without runs is unverified", async () => {
     const { automationId, ctx } = await createScheduledAutomation();

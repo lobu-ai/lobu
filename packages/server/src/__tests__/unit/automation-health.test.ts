@@ -248,4 +248,22 @@ describe("computeAutomationHealth", () => {
 		);
 		expect(result.health).toBe("healthy");
 	});
+
+	it("degrades stale nonterminal runs without mistaking a recent dispatch for a stall", () => {
+		for (const latestRunStatus of ["pending", "claimed", "running"]) {
+			const input = { status: "active", nextRunAt: null, latestRunStatus };
+			expect(
+				computeAutomationHealth(
+					{ ...input, latestRunCreatedAt: new Date(NOW - 20 * 3600_000) },
+					NOW,
+				).health,
+			).toBe("degraded");
+			expect(
+				computeAutomationHealth(
+					{ ...input, latestRunCreatedAt: new Date(NOW - 60_000) },
+					NOW,
+				).health,
+			).toBe("healthy");
+		}
+	});
 });
