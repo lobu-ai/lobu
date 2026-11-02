@@ -534,7 +534,7 @@ describe("Peaka calls feed", () => {
 			"peaka-call:LePnbVBt:calls:2070470",
 		);
 		expect(committed[0]?.checkpoint).toMatchObject({
-			last_timestamp: "2026-10-31T11:04:14.000Z",
+			last_timestamp: "2026-10-31T11:04:14.000000000Z",
 		});
 
 		const second = await connector.sync({
@@ -576,7 +576,7 @@ describe("Peaka calls feed", () => {
 			{ call_id: "2" },
 		]);
 		expect(committed[0]?.checkpoint).toMatchObject({
-			last_timestamp: "2026-11-01T11:00:00.000Z",
+			last_timestamp: "2026-11-01T11:00:00.000000000Z",
 			last_id: "2",
 		});
 
@@ -688,6 +688,37 @@ describe("Peaka calls feed", () => {
 		expect(committed[1]?.events[0]).toMatchObject({
 			origin_id: "peaka-call:LePnbVBt:calls:7",
 			metadata: { call_id: "7", status: "Completed" },
+		});
+	});
+
+	test("keeps sub-millisecond timestamp precision for activity updates", async () => {
+		const connector = new PeakaConnector();
+		let rows = [{ id: "7", createdon: "2026-11-01T10:00:00.000100Z", status: "Ringing" }];
+		const { http } = stubHttp({ post: async () => ({ data: rows }) });
+		// biome-ignore lint/suspicious/noExplicitAny: private seam replaced for the unit test
+		(connector as any).http = () => http;
+
+		const committed: Array<{ events: Array<Record<string, unknown>>; checkpoint: unknown }> = [];
+		const base = {
+			feedKey: "calls",
+			config: {
+				...config,
+				query: "SELECT id, createdon, status FROM servicetitan.telecom.calls",
+			},
+			commit: async (events: unknown[], checkpoint: unknown) => {
+				committed.push({ events: events as Array<Record<string, unknown>>, checkpoint });
+			},
+		};
+
+		await connector.sync({ ...base, checkpoint: null });
+		rows = [{ id: "7", createdon: "2026-11-01T10:00:00.000200Z", status: "Completed" }];
+		const update = await connector.sync({ ...base, checkpoint: committed[0]?.checkpoint });
+
+		expect(update.status).toBe("complete");
+		expect(committed[1]?.events).toHaveLength(1);
+		expect(committed[1]?.events[0]).toMatchObject({
+			origin_id: "peaka-call:LePnbVBt:calls:7",
+			metadata: { status: "Completed" },
 		});
 	});
 

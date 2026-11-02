@@ -9,11 +9,11 @@
  *    (`POST /data/projects/:project/queries/execute?format=SIMPLE`). The
  *    connector refuses anything that is not a single read-only statement; the
  *    API itself rejects DML as well.
- *  - Inserts go through `POST /data/projects/:project/table/:table/import`
- *    (CSV multipart). Peaka appends, so `upsert_record` reads the key first and
- *    only imports when the row is absent; an existing row is a no-op when its
- *    values match, and otherwise needs a user-configured Peaka API/Webhook flow
- *    because the documented API has no row-update primitive.
+ *  - `add_record` appends through `POST /data/projects/:project/table/:table/import`
+ *    (CSV multipart) and validates the import job. `upsert_record` never
+ *    imports directly: Peaka Tables do not enforce uniqueness, so an absent or
+ *    changed row requires the configured Peaka API/Webhook flow; an unchanged
+ *    row is a no-op.
  *  - `invoke_flow` POSTs to a configured Peaka API & Webhook endpoint. The URL
  *    is configuration (never action input) and must be a `*.peaka.studio` host,
  *    so an agent cannot turn this connector into an SSRF primitive.
@@ -139,15 +139,16 @@ export function assertReadOnlySql(sql: string): string {
 	if (!/^(select|with|show|describe|explain)\b/i.test(trimmed)) {
 		throw new Error("Peaka connector only runs read-only SQL (SELECT/WITH/SHOW/DESCRIBE/EXPLAIN)");
 	}
-	if (hasExtraStatement(trimmed)) {
+	const scan = scanStatements(trimmed);
+	if (scan.extra) {
 		throw new Error("Peaka connector accepts one statement per call");
 	}
-	const separator = findTrailingSeparator(trimmed);
-	return separator === null ? trimmed : trimmed.slice(0, separator).trimEnd();
+	return scan.trailing === null ? trimmed : trimmed.slice(0, scan.trailing).trimEnd();
 }
 
-function findTrailingSeparator(sql: string): number | null {
+function scanStatements(sql: string): { extra: boolean; trailing: number | null } {
 	let index = 0;
+	let trailing: number | null = null;
 	while (index < sql.length) {
 		const char = sql[index];
 		const next = sql[index + 1];
@@ -177,20 +178,23 @@ function findTrailingSeparator(sql: string): number | null {
 			}
 		} else if (char === "-" && next === "-") {
 			const end = sql.indexOf("\n", index + 2);
-			if (end === -1) return null;
+			if (end === -1) break;
 			index = end + 1;
 			continue;
 		} else if (char === "/" && next === "*") {
 			const end = sql.indexOf("*/", index + 2);
-			if (end === -1) return null;
+			if (end === -1) break;
 			index = end + 2;
 			continue;
 		} else if (char === ";") {
-			if (!hasNonCommentContent(sql.slice(index + 1))) return index;
+			if (hasNonCommentContent(sql.slice(index + 1))) {
+				return { extra: true, trailing: null };
+			}
+			if (trailing === null) trailing = index;
 		}
 		index += 1;
 	}
-	return null;
+	return { extra: false, trailing };
 }
 
 function hasNonCommentContent(sql: string): boolean {
@@ -215,53 +219,6 @@ function hasNonCommentContent(sql: string): boolean {
 			continue;
 		}
 		return true;
-	}
-	return false;
-}
-
-function hasExtraStatement(sql: string): boolean {
-	let index = 0;
-	while (index < sql.length) {
-		const char = sql[index];
-		const next = sql[index + 1];
-		if (char === "'") {
-			index += 1;
-			while (index < sql.length) {
-				if (sql[index] === "'") {
-					if (sql[index + 1] === "'") {
-						index += 2;
-						continue;
-					}
-					break;
-				}
-				index += 1;
-			}
-		} else if (char === '"') {
-			index += 1;
-			while (index < sql.length) {
-				if (sql[index] === '"') {
-					if (sql[index + 1] === '"') {
-						index += 2;
-						continue;
-					}
-					break;
-				}
-				index += 1;
-			}
-		} else if (char === "-" && next === "-") {
-			const end = sql.indexOf("\n", index + 2);
-			if (end === -1) return false;
-			index = end + 1;
-			continue;
-		} else if (char === "/" && next === "*") {
-			const end = sql.indexOf("*/", index + 2);
-			if (end === -1) return false;
-			index = end + 2;
-			continue;
-		} else if (char === ";") {
-			return hasNonCommentContent(sql.slice(index + 1));
-		}
-		index += 1;
 	}
 	return false;
 }
@@ -364,6 +321,49 @@ function compareIds(a: string, b: string): number {
 
 function compareValues(a: unknown, b: unknown): number {
 	return compareNumericOrText(normalise(a), normalise(b));
+}
+
+interface ParsedTimestamp {
+	/** Exact epoch nanoseconds, preserving sub-millisecond source precision. */
+	nanos: bigint;
+	/** Canonical UTC ISO string with nine fractional digits, for the checkpoint. */
+	iso: string;
+}
+
+const TIMESTAMP_PATTERN =
+	/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:?\d{2})?$/;
+
+function parseTimestamp(value: string): ParsedTimestamp | null {
+	const trimmed = value.trim();
+	const match = TIMESTAMP_PATTERN.exec(trimmed);
+	if (!match) {
+		const parsed = new Date(trimmed);
+		if (Number.isNaN(parsed.getTime())) return null;
+		const millis = parsed.getTime();
+		return { nanos: BigInt(millis) * 1_000_000n, iso: parsed.toISOString() };
+	}
+	const [, year, month, day, hour, minute, second, fraction = "", zone] = match;
+	const base = Date.UTC(
+		Number(year),
+		Number(month) - 1,
+		Number(day),
+		Number(hour),
+		Number(minute),
+		Number(second),
+	);
+	let offsetMinutes = 0;
+	if (zone && zone !== "Z") {
+		const sign = zone.startsWith("-") ? -1 : 1;
+		const digits = zone.slice(1).replace(":", "");
+		offsetMinutes = sign * (Number(digits.slice(0, 2)) * 60 + Number(digits.slice(2, 4)));
+	}
+	const millis = base - offsetMinutes * 60_000;
+	const fractionNanos = fraction.padEnd(9, "0").slice(0, 9);
+	const iso = `${new Date(millis).toISOString().slice(0, 19)}.${fractionNanos}Z`;
+	return {
+		nanos: BigInt(millis) * 1_000_000n + BigInt(fractionNanos),
+		iso,
+	};
 }
 
 function sameRecord(
@@ -678,33 +678,44 @@ export default class PeakaConnector extends ConnectorRuntime<PeakaCheckpoint, Pe
 			.map((row) => {
 				const id = normalise(row[idColumn]);
 				if (!id) return null;
-				const occurredAtRaw = normalise(row[timestampColumn]);
-				const occurredAt = occurredAtRaw ? new Date(occurredAtRaw) : null;
-				if (!occurredAt || Number.isNaN(occurredAt.getTime())) {
+				const timestamp = parseTimestamp(normalise(row[timestampColumn]));
+				if (!timestamp) {
 					throw new Error(
 						`Peaka feed row ${id} has no valid '${timestampColumn}' timestamp; fix the query or timestamp_column (the checkpoint cannot advance without it)`,
 					);
 				}
-				return { row, id, occurredMs: occurredAt.getTime() };
+				return { row, id, timestamp };
 			})
-			.filter((entry): entry is { row: Record<string, unknown>; id: string; occurredMs: number } =>
-				entry !== null,
+			.filter(
+				(
+					entry,
+				): entry is { row: Record<string, unknown>; id: string; timestamp: ParsedTimestamp } =>
+					entry !== null,
 			)
-			.sort((a, b) => a.occurredMs - b.occurredMs || compareIds(a.id, b.id));
+			.sort((a, b) => {
+				if (a.timestamp.nanos < b.timestamp.nanos) return -1;
+				if (a.timestamp.nanos > b.timestamp.nanos) return 1;
+				return compareIds(a.id, b.id);
+			});
 
 		const checkpoint = ctx.checkpoint ?? {};
-		const cutoff = checkpoint.last_timestamp ? Date.parse(checkpoint.last_timestamp) : null;
+		const cutoff = checkpoint.last_timestamp ? parseTimestamp(checkpoint.last_timestamp) : null;
+		if (checkpoint.last_timestamp && !cutoff) {
+			throw new Error(
+				`Peaka feed checkpoint '${checkpoint.last_timestamp}' is not a valid timestamp; reset the feed checkpoint`,
+			);
+		}
 		const lastId = checkpoint.last_id ?? null;
 		const feedScope = ctx.feedId ? String(ctx.feedId) : ctx.feedKey;
-		const eligible = parsed.filter(({ id, occurredMs }) => {
-			if (cutoff === null || Number.isNaN(cutoff)) return true;
-			if (occurredMs > cutoff) return true;
-			if (occurredMs < cutoff) return false;
+		const eligible = parsed.filter(({ id, timestamp }) => {
+			if (!cutoff) return true;
+			if (timestamp.nanos > cutoff.nanos) return true;
+			if (timestamp.nanos < cutoff.nanos) return false;
 			return lastId !== null && compareIds(id, lastId) > 0;
 		});
 		const page = eligible.slice(0, maxRows);
 
-		const events: EventEnvelope[] = page.map(({ row, id, occurredMs }) => ({
+		const events: EventEnvelope[] = page.map(({ row, id, timestamp }) => ({
 			origin_id: `peaka-call:${projectId(config)}:${feedScope}:${id}`,
 			origin_type: "call",
 			payload_type: "text",
@@ -717,7 +728,7 @@ export default class PeakaConnector extends ConnectorRuntime<PeakaCheckpoint, Pe
 			]
 				.filter(Boolean)
 				.join(" · "),
-			occurred_at: new Date(occurredMs),
+			occurred_at: new Date(Number(timestamp.nanos / 1_000_000n)),
 			semantic_type: "call",
 			metadata: {
 				call_id: id,
@@ -730,7 +741,7 @@ export default class PeakaConnector extends ConnectorRuntime<PeakaCheckpoint, Pe
 
 		const last = page.at(-1);
 		const nextCheckpoint: PeakaCheckpoint = {
-			last_timestamp: last ? new Date(last.occurredMs).toISOString() : checkpoint.last_timestamp,
+			last_timestamp: last ? last.timestamp.iso : checkpoint.last_timestamp,
 			last_id: last ? last.id : checkpoint.last_id,
 		};
 		await ctx.commit(events, nextCheckpoint);

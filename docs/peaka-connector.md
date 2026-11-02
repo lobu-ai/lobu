@@ -84,7 +84,9 @@ Reproducer for the gap (no secrets):
 The `calls` feed pages by `(timestamp_column, id_column)` and reports `more`
 until the page is drained. Every row must have a valid activity timestamp;
 missing or unparseable values fail the sync before the checkpoint moves, rather
-than substituting wall-clock time and starving later rows.
+than substituting wall-clock time and starving later rows. Timestamp precision
+is preserved exactly (nanoseconds in the checkpoint; `Date` only in the event
+envelope), so a sub-millisecond activity change re-emits the row.
 
 ## Webhooks and feeds
 
