@@ -86,6 +86,8 @@ describe("Peaka read-only SQL guard", () => {
 	test("does not treat semicolons inside literals, identifiers, or comments as statements", () => {
 		expect(assertReadOnlySql("SELECT 'a;b' AS v")).toBe("SELECT 'a;b' AS v");
 		expect(assertReadOnlySql('SELECT "a;b" FROM t')).toBe('SELECT "a;b" FROM t');
+		expect(assertReadOnlySql("SELECT 'a; -- b' AS v")).toBe("SELECT 'a; -- b' AS v");
+		expect(assertReadOnlySql('SELECT "a; -- b" FROM t')).toBe('SELECT "a; -- b" FROM t');
 		expect(assertReadOnlySql("SELECT 1 -- ; not a statement")).toBe(
 			"SELECT 1 -- ; not a statement",
 		);
@@ -209,6 +211,20 @@ describe("Peaka actions", () => {
 		expect(result.success).toBe(true);
 		expect(result.output.action).toBe("noop");
 		expect(String(captured[0]?.body?.statement)).toContain("'a;b'");
+	});
+
+	test("a key containing quote-like comment text is not truncated", async () => {
+		const key = "a; -- b";
+		const row = { idempotency_key: key, raw_transcript: "hello" };
+		const { result, captured } = await invoke(
+			"upsert_record",
+			{ table: "call_transcripts", record: row },
+			{ post: async () => ({ data: [row] }) },
+		);
+
+		expect(result.success).toBe(true);
+		expect(result.output.action).toBe("noop");
+		expect(String(captured[0]?.body?.statement)).toContain(`'${key}'`);
 	});
 
 	test("does not treat null and empty string as the same stored value", async () => {

@@ -142,9 +142,55 @@ export function assertReadOnlySql(sql: string): string {
 	if (hasExtraStatement(trimmed)) {
 		throw new Error("Peaka connector accepts one statement per call");
 	}
-	return trimmed
-		.replace(/;\s*(?:(?:--[^\n]*)|(?:\/\*[\s\S]*?\*\/))*\s*$/, "")
-		.trim();
+	const separator = findTrailingSeparator(trimmed);
+	return separator === null ? trimmed : trimmed.slice(0, separator).trimEnd();
+}
+
+function findTrailingSeparator(sql: string): number | null {
+	let index = 0;
+	while (index < sql.length) {
+		const char = sql[index];
+		const next = sql[index + 1];
+		if (char === "'") {
+			index += 1;
+			while (index < sql.length) {
+				if (sql[index] === "'") {
+					if (sql[index + 1] === "'") {
+						index += 2;
+						continue;
+					}
+					break;
+				}
+				index += 1;
+			}
+		} else if (char === '"') {
+			index += 1;
+			while (index < sql.length) {
+				if (sql[index] === '"') {
+					if (sql[index + 1] === '"') {
+						index += 2;
+						continue;
+					}
+					break;
+				}
+				index += 1;
+			}
+		} else if (char === "-" && next === "-") {
+			const end = sql.indexOf("\n", index + 2);
+			if (end === -1) return null;
+			index = end + 1;
+			continue;
+		} else if (char === "/" && next === "*") {
+			const end = sql.indexOf("*/", index + 2);
+			if (end === -1) return null;
+			index = end + 2;
+			continue;
+		} else if (char === ";") {
+			if (!hasNonCommentContent(sql.slice(index + 1))) return index;
+		}
+		index += 1;
+	}
+	return null;
 }
 
 function hasNonCommentContent(sql: string): boolean {
