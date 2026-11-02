@@ -272,14 +272,13 @@ nuanced gates later.
 
 ## Local gate flow
 
-`make review` owns one bounded cycle; agents do not alternate review and
-review-fix commands:
+`make review` owns one bounded cycle:
 
 1. An independent read-only reviewer emits the verdict JSON below. The driver
    saves it as `pass-N/findings.json` under its printed `/tmp/lobu-review.*`
    run directory.
 2. A clean verdict for the unchanged committed tree posts `pi-review` success.
-3. A failed verdict feeds the safe findings into `review-fix.sh` with write
+3. A failed verdict feeds the safe findings into the internal writer with write
    access. Inside BB the existing isolated-worktree patch transfer is used.
    The fixer runs focused tests and emits an internal result with `summary`,
    `tests: [{command, passed}]`, and
@@ -306,10 +305,21 @@ commit; the cache never bypasses that prerequisite. No manual review/fix loop
 is needed. A passing working-tree verdict is never posted as approval of an
 older commit. Concurrent edits or a moved HEAD invalidate a review.
 
-`make review-fix` remains the standalone pre-review write phase; it posts no
-status and commits nothing. `make review` calls it internally with findings
-and a structured result path. CI still owns the full deterministic suites;
-the write phase runs only focused tests.
+When the driver returns a decision or unresolved findings, the driving agent
+can supply its resolution in a text file and run:
+
+```bash
+make review RESUME=/tmp/lobu-review.example/handoff.json INSTRUCTIONS=/tmp/resolution.txt
+```
+
+Resume continues from the saved findings, includes the prior decisions and
+explicit instructions in the write phase, and requires fresh independent
+verification after edits. It rejects a changed worktree, HEAD, merge base,
+or tree before running a provider. Each explicit resume allows up to the same
+two write passes; it does not silently extend a running cycle. A `needs_commit`
+handoff is completed by committing/pushing and running `make review` after CI,
+not by resuming the write phase. Instructions never authorize gate bypasses or
+credential disclosure. CI still owns the full deterministic suites.
 
 Inside BB, review children attach with `BB_ENVIRONMENT_ID` only after
 `bb environment show <id> --json` resolves to the reviewed worktree's
@@ -318,7 +328,7 @@ checks the child's actual environment before accepting any output.
 
 ## Safe-class skip, verdict cache, and shadow sampling
 
-`make review-fix` and `make review` skip their cross-harness LLM pass for diffs
+`make review` skips its cross-harness LLM cycle for diffs
 that are small (<100 lines) **and** confined to classes where it adds near-zero
 signal: docs, CI-verified generated output, the root `bun.lock`, snapshots,
 exact renames between safe-class paths, additive-only tests, exact `model:`
@@ -331,7 +341,7 @@ The skip is deterministic and path-gated: the driving agent may only escalate,
 never skip on self-assessed confidence. A skipped `make review` posts the same
 `pi-review` status as green under a distinct `<!-- pi-review-skipped -->` PR
 marker so the skip is auditable; CI suites remain required checks either way.
-`REVIEWER_MODE=full make review-fix`, `REVIEWER_MODE=full make review`, or
+`REVIEWER_MODE=full make review` or
 `./scripts/review.sh --full` forces the corresponding LLM pass.
 
 The verdict is cached keyed on the exact diff content + reviewer identity, so

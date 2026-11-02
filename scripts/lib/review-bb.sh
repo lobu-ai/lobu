@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# review-bb.sh — visible BB child sessions for `make review` / `make review-fix`.
+# review-bb.sh — visible BB child sessions for `make review`.
 #
 # When the driver runs inside a BB thread (BB_THREAD_ID names a live BB
 # context), the reviewer/fixer must run as a VISIBLE BB child thread under the
@@ -16,7 +16,7 @@
 # - Inside BB, any creation/auth/provider/context failure fails explicitly.
 #   There is deliberately NO silent fallback to the invisible CLI.
 # - The review child is read-only and independent: its prompt forbids
-#   `make review`, `make review-fix`, `make land`, and spawning further
+#   `make review`, `make land`, and spawning further
 #   reviewers/threads. The driver owns those steps.
 # - A successful idle child alone is never a passing review: the final output
 #   must extract to exactly one schema-valid JSON verdict bound to the
@@ -161,7 +161,7 @@ review_bb_review_title() {
 
 review_bb_fix_title() {
   local branch="$1" head="$2" fixer="$3" pr="${4:-}" base
-  base="review-fix $branch@$(review_bb_short_sha "$head") $fixer"
+  base="review-write $branch@$(review_bb_short_sha "$head") $fixer"
   if [ -n "$pr" ]; then
     base="$base PR#$pr"
   fi
@@ -314,7 +314,7 @@ review_bb_guardrail_append() {
 
 You are running as a VISIBLE BB child thread spawned by the review driver.
 The driver owns every step you do not: do NOT run \`make review\`,
-\`make review-fix\`, or \`make land\`, do NOT spawn, message, or wait on other
+\`make land\`, do NOT spawn, message, or wait on other
 threads, and do NOT retry or re-dispatch this review.
 
 - The driver HEAD is $head_sha; review the target tree specified in the prompt
@@ -333,7 +333,7 @@ EOF
 
 The read-only rule above is replaced for this fixer pass: you MAY edit files
 in your own worktree, but you still must NOT commit, push, post statuses, run
-`make review` / `make review-fix` / `make land`, or spawn other threads. End
+`make review` / `make land`, or spawn other threads. End
 with the output format the fixer prompt specifies.
 EOF
   fi
@@ -517,7 +517,7 @@ review_bb_persist_output() {
   REVIEW_INLINE_RAW_FILE=""
 }
 
-# --- fixer flow (consumed by scripts/review-fix.sh) --------------------------
+# --- fixer flow (consumed by scripts/lib/review-write.sh) --------------------------
 
 # Secret-looking basenames are never transferred into the fixer worktree.
 review_bb_secret_basename() {
@@ -578,7 +578,7 @@ review_bb_diff() {
 # none); exit 1 on any BB failure, concurrent-edit conflict, or patch conflict.
 # Never overwrites, stashes, or discards driver/user changes.
 review_bb_run_fixer() {
-  local base_branch="$1" prompt_source="${2:-prompts/review-fix-prompt.md}"
+  local base_branch="$1" prompt_source="$2"
   local head_sha branch input_patch untracked_list fixer_prompt title pr child
   local child_env child_path fixer_patch committed_patch pending summary
   if ! review_bb_active; then
@@ -592,7 +592,7 @@ review_bb_run_fixer() {
     echo "review_bb: detached HEAD is not supported for the isolated fixer (no branch to base the worktree on)" >&2
     return 1
   fi
-  input_patch="$(mktemp /tmp/lobu-review-fix-bb-input.XXXXXX)"
+  input_patch="$(mktemp /tmp/lobu-review-write-bb-input.XXXXXX)"
   review_bb_input_patch > "$input_patch" || { rm -f "$input_patch"; return 1; }
   untracked_list="$(git ls-files --others --exclude-standard || true)"
 
@@ -779,7 +779,7 @@ review_bb_run_fixer() {
 
   # Fetch the fixer's reviewed changes as a patch. An empty diff means the
   # fixer found nothing to change — a legitimate no-op, not a failure.
-  fixer_patch="$(mktemp /tmp/lobu-review-fix-bb.XXXXXX)"
+  fixer_patch="$(mktemp /tmp/lobu-review-write-bb.XXXXXX)"
   if ! review_bb_diff "$child_env" --target uncommitted > "$fixer_patch" 2>/dev/null; then
     echo "review_bb: could not read fixer diff from env $child_env; leaving child @thread:$child for inspection" >&2
     rm -f "$fixer_patch"

@@ -42,17 +42,15 @@ Run focused tests while iterating, then the settled-diff gates in this order:
 
 ```bash
 bun test <path>                     # focused local iteration
-make pr-fast                       # broad required graph; Daytona sandbox, else local
-make review-fix                     # unposted fixer pass; inspect its edits
 git add -- <paths>                  # explicit paths only, never -A
-make pr-full                       # full staged Linux graph; Daytona sandbox, else local
+make pre-pr                        # fast local gates before commit/push
 git commit -m '<type>(<scope>): <summary>'
 git diff --name-only origin/main...HEAD
 git push -u origin <branch>
 gh pr create
-make review                         # once, on settled HEAD
-gh pr checks <number> --required
-gh pr merge <number> --squash --admin
+make review                         # bounded review/fix/independent verification
+make ui-review
+make land N=<number>
 ```
 
 GitHub CI (`ci.yml`) is the canonical gate: free on this public repo, full Linux graph in ~5–7 min per PR. `make pre-pr` runs the fast local gates (typecheck, knip, lint, naming) before push; `make review` requires CI green for HEAD. `make pr-full` (Daytona ephemeral sandbox, else local) is optional tooling, not part of the required loop. Stage every intended new file explicitly before pushing.

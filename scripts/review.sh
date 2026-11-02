@@ -12,6 +12,7 @@
 #   ./scripts/review.sh                 # base = origin/main when available
 #   ./scripts/review.sh --base develop  # override base
 #   BASE=develop ./scripts/review.sh    # env-var override
+#   ./scripts/review.sh --resume <handoff.json> --instructions <text-file>
 #   ./scripts/review.sh --full          # force the cross-harness review
 #                                       # (same as REVIEWER_MODE=full)
 #
@@ -98,13 +99,30 @@ SCHEMA_JQ='(.bug_free_confidence | type == "number" and floor == . and . >= 0 an
 PI_REVIEW_MIN_BUG_FREE="${PI_REVIEW_MIN_BUG_FREE:-80}"
 PI_REVIEW_MAX_SLOP="${PI_REVIEW_MAX_SLOP:-15}"
 PI_REVIEW_MIN_SIMPLICITY="${PI_REVIEW_MIN_SIMPLICITY:-70}"
+RESUME_FILE=""
+INSTRUCTIONS_FILE=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --base) BASE_BRANCH="$2"; shift 2 ;;
+    --base) [ $# -ge 2 ] || exit 2; BASE_BRANCH="$2"; shift 2 ;;
+    --resume) [ $# -ge 2 ] || exit 2; RESUME_FILE="$2"; shift 2 ;;
+    --instructions) [ $# -ge 2 ] || exit 2; INSTRUCTIONS_FILE="$2"; shift 2 ;;
     --full) REVIEWER_MODE="full"; shift 1 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
+
+if [ -n "$RESUME_FILE" ] || [ -n "$INSTRUCTIONS_FILE" ]; then
+  if [ -z "$RESUME_FILE" ] || [ ! -s "$INSTRUCTIONS_FILE" ]; then
+    echo '--resume <handoff.json> requires --instructions <nonempty text file>' >&2
+    exit 2
+  fi
+  # Read instructions as data once; later edits to the file cannot change scope.
+  PARENT_INSTRUCTIONS="$(cat "$INSTRUCTIONS_FILE")"
+  if [ -z "$(printf '%s' "$PARENT_INSTRUCTIONS" | tr -d '[:space:]')" ]; then
+    echo 'Resume instructions must not be blank' >&2
+    exit 2
+  fi
+fi
 
 REVIEW_MAX_AUTOFIX_PASSES="${REVIEW_MAX_AUTOFIX_PASSES:-2}"
 case "$REVIEW_MAX_AUTOFIX_PASSES" in
@@ -129,6 +147,23 @@ MERGE_BASE="$(git merge-base HEAD "$BASE_BRANCH" 2>/dev/null || true)"
 if [ -z "$MERGE_BASE" ]; then
   echo "could not find merge-base of HEAD and $BASE_BRANCH" >&2
   exit 2
+fi
+
+if [ -n "$RESUME_FILE" ]; then
+  # Resume continues supplied findings; it never treats them as a new verdict.
+  RESUME_CONTEXT="$(jq -cse 'if length == 1 and (.[0] | type == "object")
+    then .[0] else error("Resume requires one JSON object") end' "$RESUME_FILE")" || exit 2
+  if ! printf '%s\n' "$RESUME_CONTEXT" | jq -e \
+      --arg head "$HEAD_SHA" --arg tree "$(review_worktree_tree)" \
+      --arg worktree "$(pwd -P)" --arg base "$MERGE_BASE" \
+      '.status == "needs_parent" and .head == $head and .tree == $tree and
+       .worktree == $worktree and .merge_base == $base and
+       (.reason | IN("needs_decision", "autofix_limit", "fixer_failed",
+         "invalid_fixer_result", "focused_tests_failed_or_missing"))' >/dev/null ||
+     ! printf '%s\n' "$RESUME_CONTEXT" | jq -e ".findings | $SCHEMA_JQ" >/dev/null; then
+    echo 'Resume handoff is invalid or stale; run make review for the current tree' >&2
+    exit 2
+  fi
 fi
 
 echo ">> cwd:  $(pwd)"
@@ -416,7 +451,7 @@ echo ">> review run: $REVIEW_RUN_DIR"
 # leaves the ESCALATION reason in it, so eligibility gets its own flag.
 REVIEW_SKIP_REASON=""
 REVIEW_SKIP_ELIGIBLE=0
-if [ -z "$(git status --porcelain)" ] && [ "$REVIEWER_MODE" != "full" ] && review_classify_diff "$BASE_BRANCH"; then
+if [ -z "$RESUME_FILE" ] && [ -z "$(git status --porcelain)" ] && [ "$REVIEWER_MODE" != "full" ] && review_classify_diff "$BASE_BRANCH"; then
   REVIEW_SKIP_ELIGIBLE=1
   if [ "$REVIEWER_SHADOW" != "1" ]; then
     SKIP_DESCRIPTION="Skipped cross-harness review: $REVIEW_SKIP_REASON"
@@ -468,6 +503,17 @@ while :; do
     fi
   fi
 
+  if [ -n "$RESUME_FILE" ] && [ "$AUTOFIX_PASSES" -eq 0 ]; then
+    if [ "$REVIEW_TREE" != "$(printf '%s\n' "$RESUME_CONTEXT" | jq -r .tree)" ]; then
+      echo 'Tree changed after resume validation; refusing stale findings' >&2
+      exit 2
+    fi
+    VERDICT="$(printf '%s\n' "$RESUME_CONTEXT" | jq -c .findings)"
+    CACHE_HIT=1
+    CI_CHECKS_FILE="(resuming prior findings)"
+    echo ">> resuming findings with explicit parent instructions"
+  fi
+
   # True when a completed ci.yml run for the exact commit passed.
   # ci.yml triggers on pull_request events, so runs are found by head sha.
   #
@@ -489,7 +535,7 @@ while :; do
   # validated. Refuse to surprise the operator with a CPU-heavy local package
   # build; the explicit override is for when CI cannot run for this HEAD.
   GITHUB_CI_GREEN=0
-  if [ -z "$(git status --porcelain)" ] && ci_run_green_for_head "$HEAD_SHA"; then
+  if { [ -z "$(git status --porcelain)" ] || [ -n "$RESUME_FILE" ]; } && ci_run_green_for_head "$HEAD_SHA"; then
     GITHUB_CI_GREEN=1
   fi
   if [ "$GITHUB_CI_GREEN" != "1" ] && [ "$REVIEW_ALLOW_LOCAL_BUILD" != "1" ] && [ "$AUTOFIX_PASSES" -eq 0 ]; then
@@ -684,8 +730,15 @@ JS
   AUTOFIX_PASSES=$((AUTOFIX_PASSES + 1))
   FIX_RESULT="$REVIEW_ROOT_DIR/fix-$AUTOFIX_PASSES.json"
   echo ">> write phase $AUTOFIX_PASSES/$REVIEW_MAX_AUTOFIX_PASSES; findings: $REVIEW_RUN_DIR/findings.json"
-  if ! run_review_child bash "$SCRIPT_DIR/review-fix.sh" --base "$BASE_BRANCH" \
-      --findings "$REVIEW_RUN_DIR/findings.json" --result "$FIX_RESULT"; then
+  WRITE_FINDINGS="$REVIEW_RUN_DIR/findings.json"
+  if [ -n "$RESUME_FILE" ]; then
+    WRITE_FINDINGS="$REVIEW_RUN_DIR/write-context.json"
+    jq -n --argjson findings "$VERDICT" --argjson prior "$RESUME_CONTEXT" \
+      --arg instructions "$PARENT_INSTRUCTIONS" \
+      '{findings:$findings,prior_decisions:$prior.decisions,parent_instructions:$instructions}' > "$WRITE_FINDINGS"
+  fi
+  if ! run_review_child bash "$SCRIPT_DIR/lib/review-write.sh" --base "$BASE_BRANCH" \
+      --findings "$WRITE_FINDINGS" --result "$FIX_RESULT"; then
     HANDOFF_REASON="fixer_failed"
     break
   fi
@@ -711,9 +764,13 @@ if [ -n "$HANDOFF_REASON" ]; then
   jq -n --arg reason "$HANDOFF_REASON" --arg head "$HEAD_SHA" \
     --arg tree "$(review_worktree_tree)" --arg reviewed_tree "$REVIEW_TREE" --argjson passes "$AUTOFIX_PASSES" \
     --argjson decisions "$FIX_DECISIONS" --argjson findings "$VERDICT" \
-    '{status:"needs_parent",reason:$reason,head:$head,tree:$tree,reviewed_tree:$reviewed_tree,autofix_passes:$passes,decisions:$decisions,findings:$findings}' \
+    --arg worktree "$(pwd -P)" --arg base "$MERGE_BASE" \
+    '{status:"needs_parent",reason:$reason,head:$head,tree:$tree,reviewed_tree:$reviewed_tree,autofix_passes:$passes,decisions:$decisions,findings:$findings,worktree:$worktree,merge_base:$base}' \
     > "$REVIEW_ROOT_DIR/handoff.json"
   echo ">> structured parent handoff: $REVIEW_ROOT_DIR/handoff.json"
+  if [ "$HANDOFF_REASON" != needs_commit ]; then
+    echo ">> resolve decisions in a text file, then: make review RESUME=$REVIEW_ROOT_DIR/handoff.json INSTRUCTIONS=<file>"
+  fi
 fi
 
 echo ""

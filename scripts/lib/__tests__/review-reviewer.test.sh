@@ -154,37 +154,6 @@ if grep -Eiq 'herdr|CLAUDE_REVIEW_HERDR' "$review_script"; then
   fail "review.sh must not reference Herdr (inline-only reviewer)"
 fi
 
-# review-fix.sh is the selector's other consumer (step 5 of "Ship a change").
-# Unlike review.sh it posts no status, so when it was hard-wired to codex
-# (`command -v codex || exit 1`) a codex outage silently skipped the whole
-# fixer pass, with nothing anywhere to record that a quality pass never ran.
-# Pin the structure that regressed: the shared selector, an invocation arm per
-# CLI, the model allowlist, and the write tools that make the claude arm a
-# fixer rather than a review whose findings go nowhere.
-review_fix_script="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/review-fix.sh"
-grep -Fq '. "$SCRIPT_DIR/lib/review-reviewer.sh"' "$review_fix_script" ||
-  fail "review-fix.sh must source the shared reviewer lib"
-grep -Fq '. "$SCRIPT_DIR/lib/review-skip.sh"' "$review_fix_script" ||
-  fail "review-fix.sh must source the shared skip classifier"
-grep -Fq 'review_classify_diff "$BASE_BRANCH" worktree' "$review_fix_script" ||
-  fail "review-fix.sh must skip safe worktree diffs before selecting a reviewer"
-grep -Fq 'FIXER_CLI="$(review_select_reviewer' "$review_fix_script" ||
-  fail "review-fix.sh must pick its CLI through review_select_reviewer"
-grep -Fq 'review_require_model "$FIXER_CLI"' "$review_fix_script" ||
-  fail "review-fix.sh must fail closed on disallowed Claude fixer models"
-grep -Fq 'codex exec' "$review_fix_script" ||
-  fail "review-fix.sh must keep its codex invocation arm"
-grep -Fq 'claude -p' "$review_fix_script" ||
-  fail "review-fix.sh must keep its claude invocation arm"
-grep -Eq -- '--tools [^[:space:]]*Edit[^[:space:]]*Write' "$review_fix_script" ||
-  fail "review-fix.sh claude arm must carry the Edit/Write tools that make it a fixer"
-if grep -Eq 'pi -p|PI_REVIEW_MODEL|PI_REVIEW_PROVIDER' "$review_fix_script"; then
-  fail "pi reviewer must not reappear in review-fix.sh"
-fi
-if grep -Fq 'command -v codex >/dev/null' "$review_fix_script"; then
-  fail "review-fix.sh must not gate every run on codex being installed"
-fi
-
 # --- pi-review gate matrix -------------------------------------------------
 # Extract the verdict→status block from review.sh and evaluate it directly, so
 # the gate SET is asserted semantically rather than by grepping for a line.
@@ -268,7 +237,7 @@ for cmd in gh codex claude bb; do
   printf '#!/bin/sh\nexit 97\n' > "$stub_bin/$cmd"
   chmod +x "$stub_bin/$cmd"
 done
-for script in review.sh review-fix.sh; do
+for script in review.sh lib/review-write.sh; do
   set +e
   output="$(cd "$submodule_dir" && PATH="$stub_bin:$PATH" bash "$repo_root/scripts/$script" 2>&1)"
   status=$?

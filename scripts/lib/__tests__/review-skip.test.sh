@@ -305,7 +305,7 @@ write_change examples/personal-agent/lobu.config.ts $'export default {\n  model:
 commit_all
 assert_review "model plus runtime config" "lobu.config.ts"
 
-# review-fix runs before commit, so the same classifier must include tracked
+# Worktree classification must include tracked
 # staged/unstaged changes. Untracked paths fail closed instead of disappearing.
 new_repo
 write_change examples/personal-agent/lobu.config.ts $'export default {\n  model: "qwen/old",\n};'

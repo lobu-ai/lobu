@@ -1,6 +1,6 @@
 # Development Makefile for Lobu
 
-.PHONY: help setup build test clean ctx land sandbox sandbox-sync sandbox-url sandbox-logs sandbox-run sandbox-stop sandbox-ls dev dev-db dev-embedded build-packages ensure-submodule clean-workers clean-test-pg test-unit test-integration test-e2e-sdk test-e2e-agent-turn test-e2e-cli test-providers-live typecheck task-setup task-clean dev-recover clean-merged e2e-browser bump review review-fix ui-review pre-pr pr-fast pr-full owletto-mac owletto-mac-e2e
+.PHONY: help setup build test clean ctx land sandbox sandbox-sync sandbox-url sandbox-logs sandbox-run sandbox-stop sandbox-ls dev dev-db dev-embedded build-packages ensure-submodule clean-workers clean-test-pg test-unit test-integration test-e2e-sdk test-e2e-agent-turn test-e2e-cli test-providers-live typecheck task-setup task-clean dev-recover clean-merged e2e-browser bump review ui-review pre-pr pr-fast pr-full owletto-mac owletto-mac-e2e
 
 # Default target
 help:
@@ -25,8 +25,7 @@ help:
 	@echo "  make task-clean NAME=<name> [FORCE=1]      - Remove the worktree, both branches, and the Lobu context (refuses if there's uncommitted/unpushed work unless FORCE=1)"
 	@echo "  make e2e-browser [RESTART=1]               - Open/reuse this worktree's Chrome e2e browser (lobu browser, auto-paired to the local gateway)"
 	@echo "  make bump SUBMODULE=<path> [TARGET=<ref>] [ARTIFACT=<url>] - Lightweight pointer PR + required statuses (skips bun install, .env, ports)"
-	@echo "  make review [BASE=<branch>]                - Run the cross-harness LLM reviewer against the local diff (deterministic suites run in CI); posts pi-review status and PR comment"
-	@echo "  make review-fix [BASE=<branch>]            - Standalone write phase (make review also runs it on findings): fixes review-grade findings in the tree; posts nothing"
+	@echo "  make review [BASE=<branch>]                - Review, safely fix, and independently verify; RESUME=<handoff.json> INSTRUCTIONS=<file> continues after a decision"
 	@echo "  make ui-review [ARTIFACT=<https-url>]       - Record Owletto UI proof; complete forward pointer diffs touching no hosted surface pass as not applicable; OPEN=1 opens the merged PR"
 	@echo "  make sandbox                                - Boot/refresh this worktree's remote Daytona dev stack (server + its own Postgres) and print the preview URL (incremental by default; FRESH=1 forces full sync, install, boot)"
 	@echo "  make sandbox-sync                           - Push the working tree to the sandbox; keep a healthy app running, recover it otherwise"
@@ -293,14 +292,7 @@ clean-test-pg:
 # forces them.
 
 review:
-	@./scripts/review.sh $(if $(BASE),--base $(BASE),)
-
-# Standalone/manual write phase. `make review` invokes it internally on
-# findings and verifies the edits with a
-# fresh read-only reviewer, at most twice.
-# Writes never commit or post a passing status for uncommitted content.
-review-fix:
-	@./scripts/review-fix.sh $(if $(BASE),--base $(BASE),)
+	@./scripts/review.sh $(if $(BASE),--base "$(BASE)",) $(if $(RESUME),--resume "$(RESUME)",) $(if $(INSTRUCTIONS),--instructions "$(INSTRUCTIONS)",)
 
 # Visual counterpart to `make review`: non-Owletto PRs and complete,
 # forward-only pointer diffs confined to deploy/ pass as not applicable. Other

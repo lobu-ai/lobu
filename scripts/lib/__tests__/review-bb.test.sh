@@ -407,8 +407,8 @@ git -C "$FIXSCRATCH" config user.email t@t.t
 git -C "$FIXSCRATCH" config user.name t
 printf 'one\n' > "$FIXSCRATCH/file.txt"
 mkdir -p "$FIXSCRATCH/prompts"
-cp "$repo_root/prompts/review-fix-prompt.md" "$FIXSCRATCH/prompts/review-fix-prompt.md"
-git -C "$FIXSCRATCH" add -- file.txt prompts/review-fix-prompt.md
+printf "Fix supplied findings only.\n" > "$FIXSCRATCH/prompts/write-prompt.txt"
+git -C "$FIXSCRATCH" add -- file.txt prompts/write-prompt.txt
 git -C "$FIXSCRATCH" commit -qm init
 pushd "$FIXSCRATCH" >/dev/null
 
@@ -449,7 +449,7 @@ for failure in error empty interactions truncated; do
     interactions) printf 'invalid\n' > "$FAKE_STATE/interactions.json" ;;
     truncated) export BB_FAKE_TRUNCATED=true ;;
   esac
-  review_bb_run_fixer "origin/main" >/dev/null 2>&1 && fail "$failure fixer must fail closed"
+  review_bb_run_fixer "origin/main" "prompts/write-prompt.txt" >/dev/null 2>&1 && fail "$failure fixer must fail closed"
   unset BB_FAKE_TRUNCATED
   [ "$(cat file.txt)" = one ] || fail "$failure fixer must preserve parent content"
 done
@@ -458,7 +458,7 @@ done
 #     reviewed patch is transferred.
 fixer_env_ready
 export BB_FAKE_ASSERT_OWNER=1 BB_FAKE_EXPECT_OWNER=thr_fix9
-review_bb_run_fixer "origin/main" >/dev/null 2>&1 || fail "fixer run must succeed"
+review_bb_run_fixer "origin/main" "prompts/write-prompt.txt" >/dev/null 2>&1 || fail "fixer run must succeed"
 unset BB_FAKE_ASSERT_OWNER BB_FAKE_EXPECT_OWNER
 grep -q -- "--base-branch $(git rev-parse HEAD)" "$FAKE_STATE/calls.log" || fail "fixer must branch at the pinned commit"
 [ "$(cat file.txt)" = "two" ] || fail "fixer patch must be applied"
@@ -473,7 +473,7 @@ legacy_title="$(cat "$FAKE_STATE/title.txt")"
 fixer_env_ready
 jq -n --arg t "$legacy_title" '[{id:"thr_legacy",title:$t,status:"active",updatedAt:2}]' > "$FAKE_STATE/list.json"
 custom_prompt="$TEST_DIR/bounded-prompt.md"
-cat prompts/review-fix-prompt.md > "$custom_prompt"
+cat prompts/write-prompt.txt > "$custom_prompt"
 printf '\nBounded findings: fix only the supplied JSON.\n' >> "$custom_prompt"
 review_bb_run_fixer "origin/main" "$custom_prompt" >/dev/null 2>&1 || fail "bounded prompt fixer failed"
 [ "$(spawn_calls)" = 1 ] || fail "different findings must spawn a new fixer"
@@ -483,11 +483,11 @@ printf 'one\n' > file.txt
 fixer_env_ready
 export REVIEW_FIX_RESULT_FILE="$TEST_DIR/fix-result.json"
 printf 'not json\n' > "$FAKE_STATE/output.txt"
-review_bb_run_fixer "origin/main" >/dev/null 2>&1 && fail "malformed internal result must not transfer"
+review_bb_run_fixer "origin/main" "prompts/write-prompt.txt" >/dev/null 2>&1 && fail "malformed internal result must not transfer"
 [ "$(cat file.txt)" = one ] || fail "malformed result changed parent files"
 fixer_env_ready
 printf '%s\n' '{"summary":"safe fix","decisions":[],"tests":[{"command":"focused test","passed":true}]}' > "$FAKE_STATE/output.txt"
-review_bb_run_fixer "origin/main" >/dev/null 2>&1 || fail "valid structured result must transfer"
+review_bb_run_fixer "origin/main" "prompts/write-prompt.txt" >/dev/null 2>&1 || fail "valid structured result must transfer"
 [ "$(cat file.txt)" = two ] || fail "valid result patch missing"
 review_validate_fix_result "$REVIEW_FIX_RESULT_FILE" || fail "structured parent result missing"
 unset REVIEW_FIX_RESULT_FILE
@@ -497,7 +497,7 @@ printf 'one\n' > file.txt
 fixer_env_ready
 mkdir -p "$FAKE_STATE/show-queue"
 printf '{"thread":{"id":"thr_fix9","projectId":"proj_TEST","status":"starting"},"environment":null}\n' > "$FAKE_STATE/show-queue/01-pending.json"
-review_bb_run_fixer "origin/main" >/dev/null 2>&1 || fail "fixer must tolerate async env provisioning"
+review_bb_run_fixer "origin/main" "prompts/write-prompt.txt" >/dev/null 2>&1 || fail "fixer must tolerate async env provisioning"
 [ "$(cat file.txt)" = "two" ] || fail "fixer patch must apply after async provisioning"
 rm -rf "$FAKE_STATE/show-queue"
 printf 'one\n' > "$FIXSCRATCH/file.txt"
@@ -506,14 +506,14 @@ git -C "$FIXSCRATCH" diff --quiet || git -C "$FIXSCRATCH" commit -qam restore-14
 # 14d. A committed stack that does not match the driver input is rejected.
 fixer_env_ready
 printf 'diff --git a/other.txt b/other.txt\n--- /dev/null\n+++ b/other.txt\n@@ -0,0 +1 @@\n+sneaky commit\n' > "$FAKE_STATE/committed.patch"
-review_bb_run_fixer "origin/main" >/dev/null 2>&1 && fail "committed-stack mismatch must fail explicitly"
+review_bb_run_fixer "origin/main" "prompts/write-prompt.txt" >/dev/null 2>&1 && fail "committed-stack mismatch must fail explicitly"
 [ "$(cat file.txt)" = "one" ] || fail "committed-stack mismatch must leave the tree untouched"
 
 # 14e. A disallowed Claude fixer model fails before any spawn (fixer flow
 # shares the same resolver choke point as the reviewer flow).
 fixer_env_ready
 export FIXER_CLI=claude CLAUDE_REVIEW_MODEL=claude-sonnet-5-5
-review_bb_run_fixer "origin/main" >/dev/null 2>&1 && fail "disallowed fixer model must fail closed"
+review_bb_run_fixer "origin/main" "prompts/write-prompt.txt" >/dev/null 2>&1 && fail "disallowed fixer model must fail closed"
 unset FIXER_CLI
 export CLAUDE_REVIEW_MODEL=fable
 [ "$(spawn_calls)" = "0" ] || fail "disallowed fixer model must never spawn"
@@ -524,7 +524,7 @@ printf 'one\n' > file.txt
 git -C "$FIXSCRATCH" commit -qam restore-after-14 >/dev/null 2>&1 || true
 fixer_env_ready
 export REVIEW_BB_PRE_RECONCILE_HOOK_FOR_TESTS="printf 'concurrent\n' > '$FIXSCRATCH/file.txt'"
-review_bb_run_fixer "origin/main" >/dev/null 2>&1 && fail "concurrent edits must abort the transfer"
+review_bb_run_fixer "origin/main" "prompts/write-prompt.txt" >/dev/null 2>&1 && fail "concurrent edits must abort the transfer"
 unset REVIEW_BB_PRE_RECONCILE_HOOK_FOR_TESTS
 [ "$(cat file.txt)" = "concurrent" ] || fail "concurrent driver content must be preserved verbatim"
 printf 'one\n' > file.txt
@@ -533,13 +533,13 @@ git -C "$FIXSCRATCH" diff --quiet || git -C "$FIXSCRATCH" commit -qam restore
 # 16. A patch that does not apply is preserved, never forced.
 fixer_env_ready
 printf 'diff --git a/file.txt b/file.txt\n--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-NOPE\n+two\n' > "$FAKE_STATE/fixer.patch"
-review_bb_run_fixer "origin/main" >/dev/null 2>&1 && fail "unapplicable patch must fail"
+review_bb_run_fixer "origin/main" "prompts/write-prompt.txt" >/dev/null 2>&1 && fail "unapplicable patch must fail"
 [ "$(cat file.txt)" = "one" ] || fail "failed patch must leave the tree untouched"
 
 # 16b. A non-empty but unrecognized fixer diff is never silently dropped.
 fixer_env_ready
 printf 'SOME UNRECOGNIZED FORMAT\n' > "$FAKE_STATE/fixer.patch"
-review_bb_run_fixer "origin/main" >/dev/null 2>&1 && fail "unrecognized fixer diff must fail explicitly"
+review_bb_run_fixer "origin/main" "prompts/write-prompt.txt" >/dev/null 2>&1 && fail "unrecognized fixer diff must fail explicitly"
 [ "$(cat file.txt)" = "one" ] || fail "unrecognized diff must leave the tree untouched"
 
 # 17. Secret-looking untracked files never enter the fixer input.
@@ -547,14 +547,14 @@ fixer_env_ready
 printf 'AKIAEXAMPLE\n' > "$FIXSCRATCH/.env"
 printf 'notes\n' > "$FIXSCRATCH/todo.txt"
 git diff --no-index -- /dev/null todo.txt > "$FAKE_STATE/committed.patch" || [ "$?" = 1 ]
-review_bb_run_fixer "origin/main" >/dev/null 2>&1 || fail "fixer with untracked files must succeed"
+review_bb_run_fixer "origin/main" "prompts/write-prompt.txt" >/dev/null 2>&1 || fail "fixer with untracked files must succeed"
 [ -f "$FIXSCRATCH/.env" ] || fail "untracked files must be left alone in the driver tree"
 [ "$(cat file.txt)" = "two" ] || fail "fixer patch must still apply with untracked files present"
 printf 'one\n' > file.txt
 fixer_env_ready
 git diff --no-index -- /dev/null todo.txt > "$FAKE_STATE/committed.patch" || [ "$?" = 1 ]
 export REVIEW_BB_PRE_RECONCILE_HOOK_FOR_TESTS="printf 'changed\n' > '$FIXSCRATCH/todo.txt'"
-review_bb_run_fixer "origin/main" >/dev/null 2>&1 && fail "untracked content changes must abort transfer"
+review_bb_run_fixer "origin/main" "prompts/write-prompt.txt" >/dev/null 2>&1 && fail "untracked content changes must abort transfer"
 unset REVIEW_BB_PRE_RECONCILE_HOOK_FOR_TESTS
 [ "$(cat file.txt)" = one ] || fail "untracked conflict must preserve tracked files"
 [ "$(cat todo.txt)" = changed ] || fail "untracked conflict must preserve new content"
@@ -562,35 +562,5 @@ rm -f "$FIXSCRATCH/.env" "$FIXSCRATCH/todo.txt"
 git -C "$FIXSCRATCH" checkout -q -- file.txt 2>/dev/null || printf 'one\n' > "$FIXSCRATCH/file.txt"
 
 popd >/dev/null
-
-# --- wiring pins (review.sh / review-fix.sh must route through this lib) ------
-
-REVIEW_SH="$repo_root/scripts/review.sh"
-REVIEW_FIX_SH="$repo_root/scripts/review-fix.sh"
-
-grep -Fq '. "$SCRIPT_DIR/lib/review-bb.sh"' "$REVIEW_SH" ||
-  fail "review.sh must source review-bb.sh"
-grep -Fq 'review_bb_wants_run' "$REVIEW_SH" ||
-  fail "review.sh must branch on BB context"
-grep -Fq 'review_bb_run_reviewer' "$REVIEW_SH" ||
-  fail "review.sh must run the reviewer through the visible BB child"
-grep -Fq 'review_bb_cancel_owned' "$REVIEW_SH" ||
-  fail "review.sh must cancel the owned BB child on exit"
-# The BB branch must precede any direct local spawn inside run_reviewer_inline.
-bb_branch_line="$(grep -n 'review_bb_run_reviewer' "$REVIEW_SH" | head -n1 | cut -d: -f1)"
-direct_spawn_line="$(grep -n 'run_review_child' "$REVIEW_SH" | head -n1 | cut -d: -f1)"
-[ -n "$bb_branch_line" ] && [ -n "$direct_spawn_line" ] && [ "$bb_branch_line" -lt "$direct_spawn_line" ] ||
-  fail "the BB child branch must precede the direct local spawn"
-
-grep -Fq '. "$SCRIPT_DIR/lib/review-bb.sh"' "$REVIEW_FIX_SH" ||
-  fail "review-fix.sh must source review-bb.sh"
-grep -Fq 'review_bb_run_fixer' "$REVIEW_FIX_SH" ||
-  fail "review-fix.sh must route through the isolated BB fixer"
-grep -Fq 'review_bb_cancel_owned' "$REVIEW_FIX_SH" ||
-  fail "review-fix.sh must cancel the owned BB child on exit"
-# The BB fixer owns isolation; the direct path must not gain a second writer.
-if grep -Eq 'codex exec --sandbox workspace-write' "$REVIEW_SH"; then
-  fail "review.sh must stay read-only; the writer belongs to review-fix.sh"
-fi
 
 echo "review bb tests passed"

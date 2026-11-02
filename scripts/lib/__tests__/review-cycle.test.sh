@@ -17,7 +17,8 @@ fail() { echo "FAIL: $*" >&2; cat "$tmp/output" >&2; exit 1; }
 mkdir -p "$tmp/repo/scripts/lib" "$tmp/repo/prompts" "$tmp/bin" "$tmp/state"
 cp "$repo_root"/scripts/lib/review-*.sh "$tmp/repo/scripts/lib/"
 cp "$repo_root/scripts/lib/review-process-supervisor.py" "$tmp/repo/scripts/lib/"
-cp "$repo_root/scripts/review.sh" "$repo_root/scripts/review-fix.sh" "$repo_root/scripts/ui-review-agent.sh" "$tmp/repo/scripts/"
+cp "$repo_root/Makefile" "$tmp/repo/"
+cp "$repo_root/scripts/review.sh" "$repo_root/scripts/ui-review-agent.sh" "$tmp/repo/scripts/"
 cp "$repo_root"/prompts/review-* "$repo_root"/prompts/ui-review-agent-* "$tmp/repo/prompts/"
 cat > "$tmp/bin/gh" <<'CLI'
 #!/usr/bin/env bash
@@ -53,6 +54,9 @@ if [ "$mode" = workspace-write ]; then
   case "$SCENARIO" in
     decision)
       printf '%s\n' '{"summary":"needs architecture decision","decisions":[{"kind":"architecture","finding":"contract change","question":"which contract?"}],"tests":[]}' > "$out"; exit ;;
+    resume)
+      [[ "$prompt" == *'Resolve the contract question using the existing contract.'* ]] || exit 9
+      printf 'fixed\n' > app.txt ;;
     malformed) echo invalid > "$out"; exit ;;
     cap) printf 'fixed-%s\n' "$(wc -l < "$TEST_STATE/writes" | tr -d ' ')" > app.txt ;;
     *) printf 'fixed\n' > app.txt ;;
@@ -93,7 +97,7 @@ git config user.email test@example.invalid
 printf '.env*\n' > .gitignore
 printf 'base\n' > app.txt
 printf '#!/bin/bash\n[[ "$(cat app.txt)" == fixed* ]]\n' > focused-test.sh
-git add -- .gitignore app.txt focused-test.sh scripts prompts
+git add -- .gitignore app.txt focused-test.sh Makefile scripts prompts
 git commit -qm base
 git switch -qc task
 printf 'broken\n' > app.txt
@@ -155,7 +159,42 @@ handoff autofix_limit
 run_case decision
 [ "$rc" = 1 ] && [ "$(count writes)" = 1 ] || fail 'decision did not stop writing'
 no_success
-handoff needs_decision
+# Resume must carry the parent's explicit decision into the write phase.
+resume_handoff="$(sed -n 's/^>> structured parent handoff: //p' "$tmp/output")"
+printf 'Resolve the contract question using the existing contract.\n' > "$tmp/instructions"
+export SCENARIO=resume
+before="$(count writes)"
+resume_rc=0
+bash scripts/review.sh --resume "$resume_handoff" > "$tmp/output" 2>&1 || resume_rc=$?
+[ "$resume_rc" = 2 ] && [ "$(count writes)" = "$before" ] || fail 'resume requires explicit instructions'
+resume_rc=0
+TEST_CI_GREEN=false bash scripts/review.sh --resume "$resume_handoff" --instructions "$tmp/instructions" > "$tmp/output" 2>&1 || resume_rc=$?
+[ "$resume_rc" = 2 ] && [ "$(count writes)" = "$before" ] || fail 'resume must not bypass CI on the input commit'
+sed -n 's/^>> review run: //p' "$tmp/output" >> "$tmp/roots"
+resume_rc=0
+bash scripts/review.sh --base HEAD --resume "$resume_handoff" --instructions "$tmp/instructions" > "$tmp/output" 2>&1 || resume_rc=$?
+[ "$resume_rc" = 2 ] && [ "$(count writes)" = "$before" ] || fail 'resume must reject a different merge base'
+git commit --allow-empty -qm concurrent-head
+resume_rc=0
+bash scripts/review.sh --resume "$resume_handoff" --instructions "$tmp/instructions" > "$tmp/output" 2>&1 || resume_rc=$?
+[ "$resume_rc" = 2 ] && [ "$(count writes)" = "$before" ] || fail 'resume must reject a different HEAD'
+git reset --hard -q "$head"
+make review RESUME="$resume_handoff" INSTRUCTIONS="$tmp/instructions" > "$tmp/output" 2>&1 && fail 'resume must leave verified edits uncommitted'
+sed -n 's/^>> review run: //p' "$tmp/output" >> "$tmp/roots"
+[ "$(cat app.txt)" = fixed ] && [ "$(count writes)" = 2 ] && [ "$(count reads)" = 2 ] || fail 'resume must write from supplied findings then independently verify'
+no_success
+# Committing and rerunning is the only completion for a verified dirty tree.
+verified_handoff="$(sed -n 's/^>> structured parent handoff: //p' "$tmp/output")"
+resume_rc=0
+bash scripts/review.sh --resume "$verified_handoff" --instructions "$tmp/instructions" > "$tmp/rejected" 2>&1 || resume_rc=$?
+[ "$resume_rc" = 2 ] || fail 'needs_commit cannot resume a write'
+handoff needs_commit
+# A stale handoff cannot authorize a write against a different tree.
+echo concurrent > app.txt
+before="$(count writes)"
+resume_rc=0
+bash scripts/review.sh --resume "$resume_handoff" --instructions "$tmp/instructions" > "$tmp/output" 2>&1 || resume_rc=$?
+[ "$resume_rc" = 2 ] && [ "$(count writes)" = "$before" ] || fail 'stale resume must fail before writing'
 run_case malformed
 [ "$rc" = 1 ] && [ "$(count reads)" = 1 ] || fail 'malformed fixer output accepted'
 no_success

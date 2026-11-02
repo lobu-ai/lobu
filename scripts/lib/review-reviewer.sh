@@ -47,11 +47,11 @@ review_fail_closed_message() {
     "$reviewer" "$detail"
 }
 
-# review_refuse_submodule: both review scripts review lobu itself. Started
+# review_refuse_submodule: the review driver and writer review lobu itself. Started
 # inside a submodule checkout (packages/owletto), review.sh takes HEAD, the
 # diff and `gh pr view` from the submodule but posts the PR comment to the
 # hard-coded lobu-ai/lobu repo, so the verdict lands on the same-numbered
-# lobu PR; review-fix.sh cd's to the superproject and silently fixes lobu
+# lobu PR; review-write.sh cd's to the superproject and silently fixes lobu
 # instead. The submodule's repository owns its content review; a pure
 # pointer bump in lobu is a safe class.
 review_refuse_submodule() {
