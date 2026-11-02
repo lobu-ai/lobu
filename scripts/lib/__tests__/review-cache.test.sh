@@ -22,7 +22,7 @@ export CODEX_REVIEW_MODEL=gpt-5.6-sol CODEX_REVIEW_EFFORT=xhigh
 sig="$(review_reviewer_signature)"
 [ -n "$sig" ] || fail "empty reviewer signature"
 
-verdict='{"bug_free_confidence":88,"bugs":0,"slop":0,"simplicity":92,"blockers":[],"change_type":"fix","runtime_change_risk":"low","tests_adequate":true,"suggested_fixes":[],"notes":"ok","categories":{"src":5}}'
+verdict='{"decision":"pass","findings":[],"verification":{"tree":"0000000000000000000000000000000000000000","checked":["fixture"],"missing":[]}}'
 
 review_cache_store "hash-a" "$sig" "origin/main" "deadbeef" "$verdict"
 

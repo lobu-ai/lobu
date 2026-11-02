@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# review-bb.sh — visible BB child sessions for `make review` / `make review-fix`.
+# review-bb.sh — visible BB child sessions for `make review`.
 #
 # When the driver runs inside a BB thread (BB_THREAD_ID names a live BB
 # context), the reviewer/fixer must run as a VISIBLE BB child thread under the
@@ -10,13 +10,13 @@
 # Rules this lib enforces:
 # - BB routing is explicit: provider, model, and reasoning effort are selected
 #   from the live BB catalog (no invented APIs/options), and the exact
-#   reviewed worktree is attached by absolute path rather than blindly
-#   inheriting BB_ENVIRONMENT_ID (the parent BB environment can point at main
+#   reviewed worktree is attached by a verified BB_ENVIRONMENT_ID, falling
+#   back to its absolute path (the parent BB environment can point at main
 #   while shell work happens in a task worktree).
 # - Inside BB, any creation/auth/provider/context failure fails explicitly.
 #   There is deliberately NO silent fallback to the invisible CLI.
 # - The review child is read-only and independent: its prompt forbids
-#   `make review`, `make review-fix`, `make land`, and spawning further
+#   `make review`, `make land`, and spawning further
 #   reviewers/threads. The driver owns those steps.
 # - A successful idle child alone is never a passing review: the final output
 #   must extract to exactly one schema-valid JSON verdict bound to the
@@ -34,6 +34,9 @@
 # `bb` earlier on PATH or export BB_CLI pointing at a shim.
 #
 # shellcheck shell=bash
+
+# shellcheck source=scripts/lib/review-cache.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/review-cache.sh"
 
 # Owned BB child for cancellation. Set on spawn, cleared on settle.
 REVIEW_BB_CHILD_ID=""
@@ -158,7 +161,7 @@ review_bb_review_title() {
 
 review_bb_fix_title() {
   local branch="$1" head="$2" fixer="$3" pr="${4:-}" base
-  base="review-fix $branch@$(review_bb_short_sha "$head") $fixer"
+  base="review-write $branch@$(review_bb_short_sha "$head") $fixer"
   if [ -n "$pr" ]; then
     base="$base PR#$pr"
   fi
@@ -172,7 +175,7 @@ review_bb_find_child() {
   list_json="$(review_bb_cli_invoke thread list --parent-thread "$BB_THREAD_ID" --include-hidden --json 2>/dev/null)" || return 0
   row="$(printf '%s\n' "$list_json" | jq -r --arg t "$title" '
     (if type == "array" then . else (.threads // .items // []) end)
-    | map(select(.title == $t))
+    | map(select(.title == $t or .title == ($t + " (format-repair)")))
     | sort_by(.updatedAt // .createdAt // 0)
     | last // empty
     | "\(.id) \(.status)"' 2>/dev/null || true)"
@@ -231,6 +234,23 @@ review_bb_spawn() {
   fi
   review_bb_register_child "$child_id"
   echo ">> visible BB child: @thread:$child_id" >&2
+}
+
+# review_bb_environment_arg <worktree>: --environment value for a reviewer.
+# Reuse a BB-owned directory only when the advertised environment resolves to
+# this worktree. A parent thread can still be attached to another checkout.
+review_bb_environment_arg() {
+  local worktree="$1" env_path
+  if [ -n "${BB_ENVIRONMENT_ID:-}" ]; then
+    env_path="$(review_bb_cli_invoke environment show "$BB_ENVIRONMENT_ID" --json 2>/dev/null |
+      jq -r '.path // empty' 2>/dev/null || true)"
+    if [ -n "$env_path" ] && [ -d "$env_path" ] &&
+       [ "$(cd "$env_path" && pwd -P)" = "$worktree" ]; then
+      printf '%s\n' "$BB_ENVIRONMENT_ID"
+      return
+    fi
+  fi
+  printf '%s\n' "$worktree"
 }
 
 # review_bb_env_path <child-id>: absolute workspace path of a child thread.
@@ -294,12 +314,13 @@ review_bb_guardrail_append() {
 
 You are running as a VISIBLE BB child thread spawned by the review driver.
 The driver owns every step you do not: do NOT run \`make review\`,
-\`make review-fix\`, or \`make land\`, do NOT spawn, message, or wait on other
+\`make land\`, do NOT spawn, message, or wait on other
 threads, and do NOT retry or re-dispatch this review.
 
-- You are reviewing EXACTLY commit $head_sha against base $base_branch.
-  Validate with \`git rev-parse HEAD\` before scoring; if HEAD differs, say so
-  in your verdict notes and score what is actually checked out.
+- The driver HEAD is $head_sha; review the target tree specified in the prompt
+  against base $base_branch (including any specified uncommitted edits).
+  Validate with \`git rev-parse HEAD\` before reviewing; if HEAD differs, say so
+  as a verification gap. Do not approve a different tree.
 - Read-only: do NOT edit, commit, push, or post statuses or comments. The
   driver posts the verdict.
 - Emit ONLY the JSON verdict object the review prompt specifies. No prose,
@@ -312,8 +333,8 @@ EOF
 
 The read-only rule above is replaced for this fixer pass: you MAY edit files
 in your own worktree, but you still must NOT commit, push, post statuses, run
-`make review` / `make review-fix` / `make land`, or spawn other threads. End
-with the plain-text summary the fixer prompt specifies.
+`make review` / `make land`, or spawn other threads. End
+with the output format the fixer prompt specifies.
 EOF
   fi
   printf '%s\n' "$augmented"
@@ -347,7 +368,7 @@ review_bb_pr_number() {
 }
 
 # review_bb_run_reviewer <prompt-file> <head-sha> <base-branch> <diff-hash>
-#   <reviewer> <model> <effort> <schema-jq> <ci-checks-file>
+#   <reviewer> <model> <effort> <schema-jq> <ci-checks-file> [<verify-key>]
 # Full visible-child review. Always returns 0; sets RAW (child output text)
 # and REVIEWER_EXIT (0 on a settled child, 1 on any BB failure) so the
 # caller's existing schema validation fails closed exactly like the direct
@@ -378,7 +399,9 @@ review_bb_run_reviewer() {
 
   pr="$(review_bb_pr_number)"
   worktree="$(pwd -P)"
-  title="$(review_bb_review_title "$(git branch --show-current 2>/dev/null || printf '%s' "$base_branch")" "$head_sha" "$reviewer" "$model" "$effort" "$diff_hash" "$pr")"
+  title="$(review_bb_review_title "$(git branch --show-current 2>/dev/null || printf '%s' "$base_branch")" "$head_sha" "$reviewer" "$model" "$effort" "$diff_hash" "$pr") $(printf '%s' "$worktree" | review_sha256 | cut -c1-12)"
+
+  if [ -n "${10:-}" ]; then title="$title $(printf '%s' "${10}" | review_sha256 | cut -c1-12)"; fi
 
   # Dedup: reuse or adopt an existing child bound to these exact inputs.
   child="$(review_bb_find_child "$title")"
@@ -390,14 +413,36 @@ review_bb_run_reviewer() {
         pending="$(review_bb_pending_interaction "$existing_id")" || pending=unknown
         out="$(review_bb_child_output "$existing_id")"
         verdict="$(extract_json_verdict "$out" 2>/dev/null || true)"
+        if [ -n "${REVIEW_TREE:-}" ] && printf '%s\n' "$verdict" | jq -e \
+            --arg tree "$REVIEW_TREE" '.verification.tree != null and .verification.tree != $tree' >/dev/null 2>&1; then
+          RAW="review_bb: existing output belongs to another tree; refusing to relabel stale evidence"
+          return 0
+        fi
         if [ "$pending" = "0" ] && [ -n "$verdict" ] &&
            printf '%s\n' "$verdict" | jq -e "$schema_jq" >/dev/null 2>&1; then
           echo ">> reusing visible BB child @thread:$existing_id for identical review inputs" >&2
           child="$existing_id"
+        elif [ "$pending" = 0 ] && [ -n "$out" ] &&
+             [ "$(review_bb_env_path "$existing_id")" = "$worktree" ] &&
+             [ "$(review_bb_cli_invoke thread show "$existing_id" --json | jq -r '.thread.title // ""')" != "$title (format-repair)" ]; then
+          # Repair formatting once in the same session; never repeat the audit
+          # because the provider wrapped a completed verdict in prose.
+          bb_prompt="$(mktemp /tmp/lobu-review-format.XXXXXX)"
+          printf 'Return your completed review as exactly one JSON object matching this schema. Do not inspect code or run checks again. The target tree is %s.\n' "${REVIEW_TREE:-$head_sha}" > "$bb_prompt"
+          cat "$(git rev-parse --show-toplevel)/prompts/review-output-schema.json" >> "$bb_prompt"
+          review_bb_register_child "$existing_id"
+          if ! review_bb_cli_invoke thread tell "$existing_id" --message-file "$bb_prompt" --mode auto --json |
+              jq -e '.delivery == "sent"' >/dev/null; then
+            rm -f "$bb_prompt"
+            RAW="review_bb: could not request corrected output from @thread:$existing_id"
+            return 0
+          fi
+          rm -f "$bb_prompt"
+          review_bb_cli_invoke thread update "$existing_id" --title "$title (format-repair)" --json >/dev/null || return 0
+          child="$existing_id"
         else
-          echo ">> existing child @thread:$existing_id is idle but has no valid verdict; spawning a retry" >&2
-          title="$title (retry $(date +%s))"
-          child=""
+          RAW="review_bb: existing reviewer @thread:$existing_id has no usable verdict or needs attention; refusing a fresh paid review"
+          return 0
         fi
         ;;
       active|starting|stopping|pending)
@@ -406,11 +451,37 @@ review_bb_run_reviewer() {
         child="$existing_id"
         ;;
       *)
-        echo ">> existing child @thread:$existing_id is $status; spawning a fresh child" >&2
-        title="$title (retry $(date +%s))"
-        child=""
+        RAW="review_bb: existing reviewer @thread:$existing_id is $status; inspect its quota/auth/error before resuming"
+        return 0
         ;;
     esac
+  fi
+
+  # Continue the independent read-only reviewer after a separate writer.
+  # An exact-request child above wins on a retry. The output predicate includes
+  # verification.tree, so an old turn can never approve the new target.
+  if [ -z "${child:-}" ] && [ -n "${REVIEW_PREVIOUS_THREAD:-}" ]; then
+    local previous="$REVIEW_PREVIOUS_THREAD" delivery
+    if [ "$(review_bb_env_path "$previous")" = "$worktree" ] &&
+       review_bb_child_settled_idle "$previous" &&
+       [ "$(review_bb_pending_interaction "$previous")" = 0 ]; then
+      bb_prompt="$(review_bb_inline_prompt "$prompt_file" "$head_sha" "$base_branch" "$ci_file" review)" || return 0
+      review_bb_register_child "$previous"
+      if ! delivery="$(review_bb_cli_invoke thread tell "$previous" --message-file "$bb_prompt" \
+          --mode auto --model "$bb_model" --reasoning-level "$effort" --json)" ||
+         ! printf '%s\n' "$delivery" | jq -e '.delivery == "sent"' >/dev/null; then
+        RAW="review_bb: reviewer continuation was not dispatched; inspect @thread:$previous"
+        rm -f "$bb_prompt"
+        return 0
+      fi
+      rm -f "$bb_prompt"
+      review_bb_cli_invoke thread update "$previous" --title "$title" --json >/dev/null || return 0
+      echo ">> continuing independent reviewer @thread:$previous for the fix delta" >&2
+      child="$previous"
+    else
+      RAW="review_bb: prior reviewer @thread:$previous is unavailable or blocked; refusing a fresh review loop"
+      return 0
+    fi
   fi
 
   if [ -z "${child:-}" ]; then
@@ -422,7 +493,7 @@ review_bb_run_reviewer() {
     # `bun test`, and accept-edits stops each one on a human approval prompt,
     # which an unattended review waits out until it times out and fails closed.
     review_bb_spawn "$bb_prompt" "$title" "$provider" "$bb_model" "$effort" \
-      auto --environment "$worktree" || {
+      auto --environment "$(review_bb_environment_arg "$worktree")" || {
       RAW="review_bb: failed to spawn a visible BB child; refusing silent fallback to the invisible CLI"
       rm -f "$bb_prompt"
       return 0
@@ -479,6 +550,7 @@ review_bb_run_reviewer() {
   fi
   RAW="$out"
   REVIEWER_EXIT=0
+  REVIEW_PREVIOUS_THREAD="$child"
   review_bb_persist_output "$out"
   return 0
 }
@@ -494,7 +566,7 @@ review_bb_persist_output() {
   REVIEW_INLINE_RAW_FILE=""
 }
 
-# --- fixer flow (consumed by scripts/review-fix.sh) --------------------------
+# --- fixer flow (consumed by scripts/lib/review-write.sh) --------------------------
 
 # Secret-looking basenames are never transferred into the fixer worktree.
 review_bb_secret_basename() {
@@ -522,6 +594,14 @@ review_bb_input_patch() (
   git diff --cached --binary --no-ext-diff --no-textconv HEAD
 )
 
+review_worktree_tree() (
+  local patch
+  patch="$(mktemp /tmp/lobu-review-tree.XXXXXX)" || return 1
+  trap 'rm -f "$patch"' EXIT
+  review_bb_input_patch > "$patch" || return 1
+  review_bb_patch_tree HEAD "$patch"
+)
+
 # Compare reproduced content as Git trees, independent of diff presentation.
 review_bb_patch_tree() (
   local snapshot_index
@@ -542,12 +622,12 @@ review_bb_diff() {
     then .diff.diff else error("BB diff unavailable or truncated") end'
 }
 
-# review_bb_run_fixer <base-branch>: full isolated-worktree fixer pass.
+# review_bb_run_fixer <base-branch> [<prompt-file>]: full isolated-worktree fixer pass.
 # Exit 0 when the fixer's reviewed changes were transferred (or there were
 # none); exit 1 on any BB failure, concurrent-edit conflict, or patch conflict.
 # Never overwrites, stashes, or discards driver/user changes.
 review_bb_run_fixer() {
-  local base_branch="$1"
+  local base_branch="$1" prompt_source="$2"
   local head_sha branch input_patch untracked_list fixer_prompt title pr child
   local child_env child_path fixer_patch committed_patch pending summary
   if ! review_bb_active; then
@@ -561,7 +641,7 @@ review_bb_run_fixer() {
     echo "review_bb: detached HEAD is not supported for the isolated fixer (no branch to base the worktree on)" >&2
     return 1
   fi
-  input_patch="$(mktemp /tmp/lobu-review-fix-bb-input.XXXXXX)"
+  input_patch="$(mktemp /tmp/lobu-review-write-bb-input.XXXXXX)"
   review_bb_input_patch > "$input_patch" || { rm -f "$input_patch"; return 1; }
   untracked_list="$(git ls-files --others --exclude-standard || true)"
 
@@ -577,7 +657,7 @@ review_bb_run_fixer() {
   } > "$input_desc"
 
   fixer_prompt=""
-  if ! fixer_prompt="$(review_bb_inline_prompt prompts/review-fix-prompt.md "$head_sha" "$base_branch" "" fixer)"; then
+  if ! fixer_prompt="$(review_bb_inline_prompt "$prompt_source" "$head_sha" "$base_branch" "" fixer)"; then
     echo "review_bb: could not build the BB fixer prompt" >&2
     rm -f "$input_desc" "$input_patch"
     return 1
@@ -613,14 +693,14 @@ review_bb_run_fixer() {
     return 1
   }
   if [ "$fixer_cli" = "claude" ]; then
-    bb_model="$(review_bb_model_for claude "${CLAUDE_REVIEW_MODEL:-fable}")" || {
+    bb_model="$(review_bb_model_for claude "${CLAUDE_REVIEW_MODEL:-}")" || {
       echo "review_bb: could not resolve Claude fixer model; refusing silent fallback" >&2
       rm -f "$fixer_prompt" "$input_desc" "$input_patch"
       return 1
     }
     effort="${CLAUDE_REVIEW_EFFORT:-high}"
   else
-    bb_model="${CODEX_REVIEW_MODEL:-gpt-6-astra}"
+    bb_model="${CODEX_REVIEW_MODEL:-}"
     effort="${CODEX_REVIEW_EFFORT:-xhigh}"
   fi
   review_bb_check_effort "$provider" "$bb_model" "$effort" || {
@@ -628,7 +708,7 @@ review_bb_run_fixer() {
     return 1
   }
   title="$(review_bb_fix_title "$branch" "$head_sha" "$fixer_cli" "$pr") $(
-    { printf '%s\n' "$(pwd -P)" "$base_branch" "$bb_model" "$effort"; cat "$input_patch"; } | sha1sum | cut -d' ' -f1
+    { printf '%s\n' "$(pwd -P)" "$base_branch" "$bb_model" "$effort"; cat "$prompt_source" "$input_patch"; } | review_sha256 | cut -d' ' -f1
   )"
   # Fixer dedup: an idle fixer child with this exact title already transferred
   # or superseded is not rerun blindly; adopt a live one, else spawn.
@@ -737,9 +817,18 @@ review_bb_run_fixer() {
     return 1
   fi
 
+  if [ -n "${REVIEW_FIX_RESULT_FILE:-}" ]; then
+    printf '%s\n' "$summary" > "$REVIEW_FIX_RESULT_FILE"
+    if ! review_validate_fix_result "$REVIEW_FIX_RESULT_FILE"; then
+      echo "review_bb: malformed write-phase result; NOT transferring" >&2
+      rm -f "$input_patch" "$REVIEW_FIX_RESULT_FILE"
+      return 1
+    fi
+  fi
+
   # Fetch the fixer's reviewed changes as a patch. An empty diff means the
   # fixer found nothing to change — a legitimate no-op, not a failure.
-  fixer_patch="$(mktemp /tmp/lobu-review-fix-bb.XXXXXX)"
+  fixer_patch="$(mktemp /tmp/lobu-review-write-bb.XXXXXX)"
   if ! review_bb_diff "$child_env" --target uncommitted > "$fixer_patch" 2>/dev/null; then
     echo "review_bb: could not read fixer diff from env $child_env; leaving child @thread:$child for inspection" >&2
     rm -f "$fixer_patch"
@@ -766,8 +855,8 @@ review_bb_run_fixer() {
     return 1
   fi
   local current_input_hash snapshot_input_hash current_untracked
-  current_input_hash="$(review_bb_input_patch | sha1sum | cut -d' ' -f1)" || return 1
-  snapshot_input_hash="$(sha1sum "$input_patch" | cut -d' ' -f1)"
+  current_input_hash="$(review_bb_input_patch | review_sha256 | cut -d' ' -f1)" || return 1
+  snapshot_input_hash="$(review_sha256 < "$input_patch" | cut -d' ' -f1)"
   current_untracked="$(git ls-files --others --exclude-standard || true)"
   if [ "$current_input_hash" != "$snapshot_input_hash" ] || [ "$current_untracked" != "$untracked_list" ]; then
     echo "review_bb: working tree changed during the fixer run (concurrent edits); NOT applying. Patch preserved at $fixer_patch; fixer at @thread:$child" >&2

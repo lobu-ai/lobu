@@ -162,7 +162,7 @@ What changed:
 - `isolated-vm` ABI: Node 22 to 24 (`isolated-vm@6`) or 26+ (`isolated-vm-next`); Node 25 and Bun
   cannot host it. Worker image is Node 22. Local Bun dev falls back to the fork lane for trusted
   code; name that as the accepted parity gap.
-- One branch, one concern; each PR lands through `make pre-pr`, `make review-fix`, `make review`,
+- One branch, one concern; each PR lands through `make pre-pr`, `make review`,
   `make ui-review` (not applicable), `make land`.
 
 ## Open decisions for the owner

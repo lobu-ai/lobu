@@ -1,6 +1,6 @@
 # Development Makefile for Lobu
 
-.PHONY: help setup build test clean ctx land sandbox sandbox-sync sandbox-url sandbox-logs sandbox-run sandbox-stop sandbox-ls dev dev-db dev-embedded build-packages ensure-submodule clean-workers clean-test-pg test-unit test-integration test-e2e-sdk test-e2e-agent-turn test-e2e-cli test-providers-live typecheck task-setup task-clean dev-recover clean-merged e2e-browser bump review review-fix ui-review pre-pr pr-fast pr-full owletto-mac owletto-mac-e2e
+.PHONY: help setup build test clean ctx land sandbox sandbox-sync sandbox-url sandbox-logs sandbox-run sandbox-stop sandbox-ls dev dev-db dev-embedded build-packages ensure-submodule clean-workers clean-test-pg test-unit test-integration test-e2e-sdk test-e2e-agent-turn test-e2e-cli test-providers-live typecheck task-setup task-clean dev-recover clean-merged e2e-browser bump review ui-review pre-pr pr-fast pr-full owletto-mac owletto-mac-e2e
 
 # Default target
 help:
@@ -25,8 +25,7 @@ help:
 	@echo "  make task-clean NAME=<name> [FORCE=1]      - Remove the worktree, both branches, and the Lobu context (refuses if there's uncommitted/unpushed work unless FORCE=1)"
 	@echo "  make e2e-browser [RESTART=1]               - Open/reuse this worktree's Chrome e2e browser (lobu browser, auto-paired to the local gateway)"
 	@echo "  make bump SUBMODULE=<path> [TARGET=<ref>] [ARTIFACT=<url>] - Lightweight pointer PR + required statuses (skips bun install, .env, ports)"
-	@echo "  make review [BASE=<branch>]                - Run the cross-harness LLM reviewer against the local diff (deterministic suites run in CI); posts pi-review status and PR comment"
-	@echo "  make review-fix [BASE=<branch>]            - Pre-review fixer: reviewer CLI with write access fixes review-grade findings in the tree; posts nothing"
+	@echo "  make review [BASE=<branch>]                - Review, safely fix, and independently verify; RESUME=<handoff.json> INSTRUCTIONS=<file> continues after a decision"
 	@echo "  make ui-review [ARTIFACT=<https-url>]       - Record Owletto UI proof; complete forward pointer diffs touching no hosted surface pass as not applicable; OPEN=1 opens the merged PR"
 	@echo "  make sandbox                                - Boot/refresh this worktree's remote Daytona dev stack (server + its own Postgres) and print the preview URL (incremental by default; FRESH=1 forces full sync, install, boot)"
 	@echo "  make sandbox-sync                           - Push the working tree to the sandbox; keep a healthy app running, recover it otherwise"
@@ -146,7 +145,8 @@ e2e-browser:
 
 # Lightweight shortcut for "trivial submodule pointer bump" work. Creates a
 # minimal worktree (no bun install, no .env copy, no port allocation), advances
-# the submodule, posts both required local statuses, and opens an auto-merge PR.
+# the submodule, records UI proof, and opens an auto-merge PR (trusted CI posts
+# the safe-class pi-review).
 # For agent work that also touches submodule *code*, use `make task-setup`
 # instead — it sets up the full env.
 bump:
@@ -281,27 +281,19 @@ clean-test-pg:
 	@echo "✅ Test-PG clusters + dirs reaped"
 
 # --- Local AI review gate ---------------------------------------------------
-# Local-only: runs the deterministic suites in cwd, then invokes the reviewer
-# from the model family opposite the current harness against
-# `git diff <BASE>...HEAD` (BASE defaults to origin/main when available;
+# Local-only: deterministic suites run in GitHub CI. Invokes the reviewer
+# from the model family opposite the current harness against the
+# exact tree diff from the merge base (BASE defaults to origin/main when available;
 # override with BASE=<branch> env or `--base <branch>` arg). Prints a JSON
 # verdict on the last line. If
 # GitHub auth is available, posts a pi-review commit status; if the current
 # branch has an open PR, also posts/updates a PR comment. See docs/REVIEW_SCHEMA.md.
-# Small path/content-gated safe-class diffs skip both LLM passes by default while
-# still posting pi-review and running deterministic CI. REVIEWER_MODE=full
-# forces them.
+# Trusted CI automatically satisfies safe-class changes after exact-HEAD CI.
+# Other changes use review/fix/independent verification with two write attempts
+# per branch. REVIEWER_MODE=full forces model review locally.
 
 review:
-	@./scripts/review.sh $(if $(BASE),--base $(BASE),)
-
-# Pre-review fixer: the reviewer CLI with WRITE access + the review rubrics,
-# fixing review-grade findings (bugs, slop, stale claims) in the working tree
-# BEFORE `make review` posts a status. Uses the same safe-class skip as review;
-# otherwise posts nothing and commits nothing — inspect its diff, commit, then
-# run `make review` once on the settled HEAD.
-review-fix:
-	@./scripts/review-fix.sh $(if $(BASE),--base $(BASE),)
+	@./scripts/review.sh $(if $(BASE),--base "$(BASE)",) $(if $(RESUME),--resume "$(RESUME)",) $(if $(INSTRUCTIONS),--instructions "$(INSTRUCTIONS)",)
 
 # Visual counterpart to `make review`: non-Owletto PRs and complete,
 # forward-only pointer diffs confined to deploy/ pass as not applicable. Other

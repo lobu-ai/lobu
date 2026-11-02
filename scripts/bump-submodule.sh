@@ -18,8 +18,10 @@
 #   - Lobu CLI context       (nothing to talk to)
 #
 # It creates a worktree off origin/main, advances the submodule pointer,
-# commits, pushes, opens a PR, posts the safe-class review status, records UI
-# proof when reusable/provided, and enables auto-merge.
+# commits, pushes, opens a PR, records UI proof when reusable/provided, and
+# enables auto-merge. The trusted Review Policy workflow posts the safe-class
+# pi-review status after exact-HEAD CI passes, so no local review runs here:
+# CI cannot have finished seconds after the push.
 #
 # Why this exists: the convention is `~/Code/lobu` is read-only for agents
 # (see AGENTS.md "Scope discipline"). Without this shortcut, agents reach
@@ -102,24 +104,17 @@ TARGET_SUBJECT=$(git -C "$WT/$SUBMODULE" log -1 --format='%s' "$TARGET_SHA")
 echo "→ advancing $SUBMODULE: $SHORT_BEFORE → $SHORT_AFTER"
 git -C "$WT/$SUBMODULE" checkout --detach "$TARGET_SHA" >/dev/null 2>&1
 
-echo "→ checking the safe-class pre-review fixer"
-if ! (cd "$WT" && make review-fix); then
-    echo "error: review-fix failed; inspect the retained worktree at $WT" >&2
-    exit 1
-fi
-
-# The fixer runs before the snapshot. Never let an unexpected parent edit or
-# nested submodule edit turn this pointer-only shortcut into a mixed commit.
+# Before the snapshot, refuse unexpected parent or nested submodule edits.
 CHANGED_PATHS=$(git -C "$WT" diff --name-only HEAD)
 UNTRACKED_PATHS=$(git -C "$WT" ls-files --others --exclude-standard)
 if [[ "$CHANGED_PATHS" != "$SUBMODULE" || -n "$UNTRACKED_PATHS" ]]; then
-    echo "error: review-fix left changes beyond the $SUBMODULE pointer; inspect $WT" >&2
+    echo "error: Pointer bump left changes beyond the $SUBMODULE pointer; inspect $WT" >&2
     git -C "$WT" status --short >&2
     exit 1
 fi
 if [[ -n "$(git -C "$WT/$SUBMODULE" status --porcelain)" ]] \
     || [[ "$(git -C "$WT/$SUBMODULE" rev-parse HEAD)" != "$TARGET_SHA" ]]; then
-    echo "error: review-fix changed $SUBMODULE contents or target; inspect $WT" >&2
+    echo "error: Pointer bump changed $SUBMODULE contents or target; inspect $WT" >&2
     exit 1
 fi
 
@@ -149,12 +144,6 @@ After:  $SHORT_AFTER
 Picks up: $TARGET_SUBJECT" 2>&1 | tail -1)
     echo "  $PR_URL"
 
-    echo "→ posting required review status"
-    if ! (cd "$WT" && make review); then
-        echo "error: pi-review failed; PR remains open at $PR_URL" >&2
-        exit 1
-    fi
-
     echo "→ recording Owletto UI review"
     if [[ -n "${ARTIFACT:-}" ]]; then
         if ! (cd "$WT" && make ui-review ARTIFACT="$ARTIFACT"); then
@@ -173,7 +162,7 @@ Picks up: $TARGET_SUBJECT" 2>&1 | tail -1)
         exit 1
     fi
 else
-    echo "error: gh CLI is required to open the PR and post its required statuses" >&2
+    echo "error: gh CLI is required to open the PR and post its UI review status" >&2
     echo "branch $BRANCH was pushed and remains available" >&2
     exit 1
 fi
