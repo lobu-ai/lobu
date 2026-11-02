@@ -16,6 +16,7 @@ const EXPECTED_BUNDLED_CONNECTORS = [
 	"linkedin",
 	"market.quotes",
 	"microsoft.outlook",
+	"peaka",
 	"postgres",
 	"producthunt",
 	"reddit",
@@ -90,6 +91,8 @@ describe("bundled connector lifecycle matrix", () => {
 			herdr: 12,
 			linkedin: 9,
 			"market.quotes": 1,
+			// query + list_tables + add_record + upsert_record + invoke_flow.
+			peaka: 5,
 			// outlook's first actions: list_attachments + download_attachment.
 			"microsoft.outlook": 2,
 			// Browser-backed connectors also expose the gateway's verification action.
