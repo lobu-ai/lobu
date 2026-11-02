@@ -1319,7 +1319,7 @@ describe('MCP App resources — ui:// serving (host-authored view)', () => {
     );
   });
 
-  it('keeps an approval mutation text-only and resolves it only with the hidden app capability', async () => {
+  it('returns approval data without UI and resolves it only with the hidden app capability', async () => {
     const creationSessionId = await initSession(`/mcp/${org.slug}`, {
       agentId: actingAgent.agentId,
     });
@@ -1349,8 +1349,12 @@ describe('MCP App resources — ui:// serving (host-authored view)', () => {
     // The mutating tool is not coupled to UI. A separate read-only call authors
     // the review view, so text-only clients still receive the pending result.
     expect(body.result?._meta?.ui).toBeUndefined();
-    expect(body.result?.structuredContent).toBeUndefined();
     expect(typeof body.result?.content?.[0]?.text).toBe('string');
+    expect(body.result.structuredContent).toMatchObject({
+      action: 'create',
+      status: 'pending_approval',
+      proposal: { agent_id: 'mcp-app-approval-agent' },
+    });
 
     const [approval] = await getDb()<{ run_id: number }>`
       SELECT run_id
@@ -1363,6 +1367,7 @@ describe('MCP App resources — ui:// serving (host-authored view)', () => {
     `;
     const runId = Number(approval?.run_id);
     expect(runId).toBeGreaterThan(0);
+    expect(body.result.structuredContent.run_id).toBe(runId);
     await getDb()`
       UPDATE mcp_client_conversations
       SET title = 'Release approval E2E'

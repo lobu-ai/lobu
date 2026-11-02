@@ -175,6 +175,35 @@ describe("manage_agents — builder gate e2e", () => {
     expect(await sdk.get("invalid-settings-bot")).toEqual(before);
   });
 
+  it("one concurrent conditional write wins; stale direct and queued writes leave no audit or approval", async () => {
+    const sdk = buildAgentsNamespace(toToolContext(ownerCtx), TEST_ENV);
+    await sdk.create({ agent_id: "revision-bot", name: "Revision" });
+    const before = await sdk.get("revision-bot");
+    const writes = await Promise.allSettled(["First", "Second"].map((soulMd) => sdk.update({
+      agent_id: "revision-bot", expected_revision: before.revision, settings: { soulMd },
+    })));
+    expect(writes.filter((write) => write.status === "fulfilled")).toHaveLength(1);
+    expect(writes.find((write) => write.status === "rejected")).toMatchObject({ reason: { httpStatus: 409 } });
+    const after = await sdk.get("revision-bot");
+    expect(after.revision).not.toBe(before.revision);
+    const sql = getTestDb();
+    const countState = async () => (await sql`SELECT
+      (SELECT count(*)::int FROM events WHERE organization_id = ${orgId}) AS events,
+      (SELECT count(*)::int FROM runs WHERE organization_id = ${orgId}) AS runs`)[0];
+    const counts = await countState();
+    const agentSdk = buildAgentsNamespace(toToolContext(agentCtx), TEST_ENV);
+    await expect(agentSdk.update({ agent_id: "revision-bot", expected_revision: before.revision, settings: { soulMd: "Stale" } })).rejects.toMatchObject({ httpStatus: 409 });
+    expect(await countState()).toEqual(counts);
+    expect(await sdk.get("revision-bot")).toEqual(after);
+    await sdk.create({ agent_id: "recreated-bot", name: "Recreated" });
+    const original = await sdk.get("recreated-bot");
+    await sdk.delete("recreated-bot");
+    await sdk.create({ agent_id: "recreated-bot", name: "Recreated" });
+    const recreated = await sdk.get("recreated-bot");
+    expect(recreated.revision).not.toBe(original.revision);
+    await expect(sdk.update({ agent_id: "recreated-bot", expected_revision: original.revision, name: "Stale" })).rejects.toMatchObject({ httpStatus: 409 });
+  });
+
   it("settings follow approval policy and skip only settings changed since proposal", async () => {
     const sdk = buildAgentsNamespace(toToolContext(ownerCtx), TEST_ENV);
     const agentSdk = buildAgentsNamespace(toToolContext(agentCtx), TEST_ENV);

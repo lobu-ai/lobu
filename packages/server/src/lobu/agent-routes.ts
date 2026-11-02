@@ -48,6 +48,8 @@ import {
 	persistAgentMetadataPatch,
 	persistAgentSettingsPatch,
 	validateAgentSettingsUpdate,
+	agentConfigRevision,
+	validateAgentConfigRevision,
 } from "./agent-settings";
 import type { ModelValidationError } from "./model-config";
 import {
@@ -936,12 +938,30 @@ routes.delete("/inference-providers/:slug", (c) =>
 
 // ── Get agent detail ─────────────────────────────────────────────────────────
 
+async function readAgentSnapshot(organizationId: string, agentId: string) {
+	return getDb().begin(async (tx) => {
+		const locked = await tx`
+			SELECT id FROM agents
+			WHERE organization_id = ${organizationId} AND id = ${agentId}
+			FOR SHARE
+		`;
+		if (!locked.length) return null;
+		const store = createPostgresAgentConfigStore(tx);
+		const settings = (await store.getSettings(agentId))!;
+		const metadata = await store.getMetadata(agentId);
+		const revision = await agentConfigRevision(tx, organizationId, agentId, settings);
+		return { settings, revision, metadata };
+	});
+}
+
 routes.get("/:agentId", async (c) => {
 	const { agentId } = c.req.param();
-	const metadata = await configStore.getMetadata(agentId);
-	if (!metadata) return c.json({ error: "Agent not found" }, 404);
-
-	const settings = await configStore.getSettings(agentId);
+	const snapshot = await readAgentSnapshot(c.get("organizationId") as string, agentId);
+	if (!snapshot) return c.json({ error: "Agent not found" }, 404);
+	const { settings, revision } = snapshot;
+	// Compression weakens ETags; these revisions must round-trip through If-Match.
+	c.header("Cache-Control", "private, no-store, no-transform");
+	c.header("ETag", `"${revision}"`);
 	const sql = getDb();
 	const organizationId = c.get("organizationId") as string;
 	const [connectionStats] = await sql`
@@ -960,7 +980,7 @@ routes.get("/:agentId", async (c) => {
 	}
 
 	return c.json({
-		...metadata,
+		...snapshot.metadata,
 		settings,
 		connectionCount: connectionStats?.connection_count ?? 0,
 		activeConnectionCount: connectionStats?.active_connection_count ?? 0,
@@ -987,10 +1007,15 @@ routes.patch("/:agentId", async (c) => {
 		await lockOrganizationForRelationshipClaims(tx, orgId);
 		const locked = await tx`SELECT id FROM agents WHERE organization_id = ${orgId} AND id = ${agentId} FOR UPDATE`;
 		if (!locked.length) return c.json({ error: "Agent not found" }, 404);
+		const before = (await createPostgresAgentConfigStore(tx).getSettings(agentId))!;
+		const conflict = validateAgentConfigRevision(c.req.header("If-Match"), await agentConfigRevision(tx, orgId, agentId, before));
+		if (conflict) return c.json(conflict, conflict.status);
 		await persistAgentMetadataPatch(tx, agentId, body, {
 			organizationId: orgId,
 			...getApplyContext(c),
 		});
+		c.header("Cache-Control", "private, no-store, no-transform");
+		c.header("ETag", `"${await agentConfigRevision(tx, orgId, agentId, before)}"`);
 		return c.json({ success: true });
 	});
 });
@@ -1023,8 +1048,11 @@ routes.delete("/:agentId", async (c) => {
 
 routes.get("/:agentId/config", async (c) => {
 	const { agentId } = c.req.param();
-	const settings = await configStore.getSettings(agentId);
-	if (!settings) return c.json({ error: "Agent not found" }, 404);
+	const snapshot = await readAgentSnapshot(c.get("organizationId") as string, agentId);
+	if (!snapshot) return c.json({ error: "Agent not found" }, 404);
+	const { settings, revision } = snapshot;
+	c.header("Cache-Control", "private, no-store, no-transform");
+	c.header("ETag", `"${revision}"`);
 
 	// `configStore` doesn't carry auth profiles (they live in
 	// `user_auth_profiles`, keyed by the requesting user). Merge the caller's
@@ -1334,6 +1362,8 @@ routes.patch("/:agentId/config", async (c) => {
 		if (!locked.length) return c.json({ error: "Agent not found" }, 404);
 		const transactionStore = createPostgresAgentConfigStore(tx);
 		const before = await transactionStore.getSettings(agentId);
+		const conflict = validateAgentConfigRevision(c.req.header("If-Match"), await agentConfigRevision(tx, orgId, agentId, before!));
+		if (conflict) return c.json(conflict, conflict.status);
 		const validationError = await validateAgentSettingsUpdate(
 			updates,
 			before,
@@ -1409,10 +1439,10 @@ routes.patch("/:agentId/config", async (c) => {
 			}
 		}
 
-	await persistAgentSettingsPatch(tx, agentId, settingsUpdates, before, {
-		organizationId: orgId,
-		...getApplyContext(c),
-	});
+		await persistAgentSettingsPatch(tx, agentId, settingsUpdates, before, {
+			organizationId: orgId,
+			...getApplyContext(c),
+		});
 		return c.json({ success: true });
 	});
 });

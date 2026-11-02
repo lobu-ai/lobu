@@ -56,6 +56,87 @@ docker run -d --name lobu-pg -p 5432:5432 \
 # DATABASE_URL=postgresql://postgres:lobu@localhost:5432/postgres
 ```
 
+## Declarative settings and conditional updates
+
+`defineAgent` accepts `settings: Omit<AgentSettingsStored, "updatedAt">`, derived
+from the canonical settings schema. The existing `providers`, `skills`, `network`,
+`guardrails`, `nixPackages`, and `starters` helpers remain supported. Choose one
+source for each setting: apply rejects overlaps between `settings`, a helper,
+or a prompt file such as `IDENTITY.md`.
+
+```ts
+const support = defineAgent({
+  id: "support",
+  settings: {
+    showToolCalls: false,
+    models: ["custom/primary", "custom/fallback"],
+    skillsConfig: { skills: [{
+      repo: "example/skills", name: "triage", enabled: true,
+      content: "# Triage\n\nUse the support checklist.",
+    }] },
+  },
+});
+const digest = defineAutomation({
+  slug: "digest", agent: support, prompt: "Summarize today's updates.",
+  executionConfig: { timeout_seconds: 120, max_budget_usd: 1 },
+});
+```
+
+Omitted settings stay unmanaged. Supplied nested objects and arrays replace
+that top-level setting; valid empty strings, arrays, and objects clear it.
+An empty prompt file explicitly clears that prompt. Automation `executionConfig`
+is also unmanaged when omitted, replaces the whole execution config when supplied,
+and clears with `null`. It cannot be combined with the `model` or `executor` helpers.
+Server validation, access rules, approvals, and audit apply to every write.
+
+`agents.get(id)` returns `{ action: "get", agent, model, settings, revision }`.
+Pass that opaque revision back to prevent overwriting a concurrent edit:
+
+```ts
+const before = await client.agents.get("support");
+await client.agents.update({
+  agent_id: "support", expected_revision: before.revision,
+  identity_md: "Support assistant", settings: { showToolCalls: true },
+});
+```
+
+MCP uses the same fields on `manage_agents` actions `get` and `update`. Identity
+keeps the existing `identity_md` spelling for MCP/ClientSDK writes; settings there
+exclude `identityMd` and server-owned `updatedAt`. Agent REST reads expose the
+same revision as `ETag`; PATCH accepts it in `If-Match`. Malformed preconditions
+return 400; stale ones return 409 before a write or approval is queued. Omit the
+precondition for existing unconditional callers. `lobu apply` sends the ETag from
+its snapshot, advances it after a metadata write, and stops on conflict. Reload
+and review the new state before retrying. Pending approvals retain the existing
+per-setting stale checks when approved.
+
+### Configuration coverage and remaining boundaries
+
+Apply reconciles project declarations through the existing REST/action handlers;
+MCP and ClientSDK invoke the same action handlers. Runtime actions and human
+administration have separate authorization requirements. This is the current
+coverage, including fields that remain outside declarative apply:
+
+| Resource | Declarative controls | Existing operational controls / remaining gaps |
+|---|---|---|
+| Agents | Name, description, all canonical stored settings except `updatedAt`, including full skill configs, network/Nix options and `sandboxId`; prompt files and legacy helpers remain available | MCP/ClientSDK `agents` and agent REST share validation, persistence and audit. Auth profiles are separate resources; connections and policies are not agent settings. |
+| Automations | Agent, name/description, triggers, prompt, skill snapshots, sources, outputs, reaction scripts/guidance, cooldown, tags, device pin, agent kind, full `executionConfig` | Claim/renew/complete, trigger, archive, upgrade and version inspection remain runtime actions. Entity bindings, `delivery_target` and legacy `model_config` are not declarative fields. |
+| Connectors | Authored source/files/dependencies and explicit definitions | Catalog install/discovery and source validation/update use existing tools. Apply uses `expected_version` for installed source updates; source changes require the connector version to advance. |
+| Connections | Connector, slug/name, config, auth/app profiles, device pin, managed grant descriptor; supported chat credential modes | Status, visibility, entity bindings and operational reconnect/pairing remain SDK/API operations. BYO/hosted chat rejects unsupported auth-profile, device and feed declarations. Omitted auth/device pins stay unmanaged; declarative null-unpinning is not exposed. |
+| Feeds | Connection/feed key, name, config and cron (`null` clears cron) | Timezone, entity bindings and pause/resume are not declarative fields. Read, sync, trigger and health remain SDK/API operations. |
+| Auth profiles | Connector, slug/name, kind and noninteractive credential references | OAuth/browser consent is interactive. HTTP/auth-data options, app-profile links, scopes, reconnect/status and org-default selection remain existing SDK/API operations. |
+| Entity/relationship schemas | Properties, required fields, collection presentation, event kinds, backing, metrics, resolution rules, relationship rules/purpose | Icons/colors, explicit status, symmetry/inverse metadata and operational rule administration are outside these authoring helpers. |
+| Views | Bundled view module, retained source files and dependencies | Rendering/inspection uses the existing view API; writer provenance is recorded by the server. |
+| Inference providers | Slug, kind, display name, base URL, capabilities, default and API-key references | `inferenceProviders` exposes list/create/update/setDefault/setCapability/rotateKey/delete through the shared provider writer. OAuth consent remains interactive. |
+| External runtimes | Agent assignment through `settings.sandboxId` | Provider lifecycle/credentials remain the existing sandbox REST/CLI surface; there is no declarative sandbox resource or MCP/ClientSDK lifecycle namespace. Built-in V8 execution needs no external runtime provider. |
+| Access policy | Existing human administration | Connector policy changes require owner/admin sessions or explicitly human-minted `policies:write` PATs; agent restrictions and approval decisions remain human-session-only. Agents cannot grant themselves access through settings. |
+
+The canonical contracts live in `@lobu/core/contracts/agent-settings` and
+`@lobu/core/contracts/tools/*`. The generated HTTP client derives request and
+response types from those schemas. A packed local client test does not establish
+that a new version has been published to npm; releases follow the protected
+versioned release pipeline.
+
 ## Entity resolution
 
 Entity types may declare `resolutionPolicy.rules` in `lobu.config.ts`. Each rule

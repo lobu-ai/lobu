@@ -1,15 +1,19 @@
 import { type Static, Type } from "@sinclair/typebox";
 import {
   AgentSettingsStoredSchema,
-  type AgentSettingsStored,
+  AgentSettingsPatchSchema,
 } from "../agent-settings";
 import type { ActionInput } from "./action-input";
 
 // Identity keeps its existing identity_md write spelling. updatedAt is store-owned.
 const AgentSettingsUpdateSchema = Type.Omit(
-  AgentSettingsStoredSchema,
-  ["identityMd", "updatedAt"],
-  { additionalProperties: false }
+  AgentSettingsPatchSchema,
+  ["identityMd"],
+  {
+    additionalProperties: false,
+    description:
+      "Canonical agent settings patch. Omitted keys preserve stored values; supplied settings replace that top-level value. Empty strings/arrays/objects clear where allowed. Identity is written through identity_md.",
+  }
 );
 
 // ============================================
@@ -70,6 +74,12 @@ export const CreateAgentAction = Type.Object({
   default_model: Type.Optional(AgentFields.default_model),
 });
 
+export const AgentConfigRevisionSchema = Type.String({
+  pattern: "^[a-f0-9]{64}$",
+  description:
+    "Opaque agent configuration revision returned by agents.get. A stale expected_revision rejects the entire update with 409 before any write or approval is queued. Omit for an unconditional update.",
+});
+
 export const UpdateAgentAction = Type.Object({
   action: Type.Literal("update", {
     description: "Patch agent fields (queued for approval).",
@@ -80,6 +90,7 @@ export const UpdateAgentAction = Type.Object({
   identity_md: Type.Optional(AgentFields.identity_md),
   default_model: Type.Optional(AgentFields.default_model),
   settings: Type.Optional(AgentSettingsUpdateSchema),
+  expected_revision: Type.Optional(AgentConfigRevisionSchema),
 });
 
 export const DeleteAgentAction = Type.Object({
@@ -106,113 +117,124 @@ export type ManageAgentsArgs = Static<typeof ManageAgentsSchema>;
 export type AgentCreateInput = ActionInput<ManageAgentsArgs, "create">;
 export type AgentUpdateInput = ActionInput<ManageAgentsArgs, "update">;
 
-export interface AgentRecord {
-  id: string;
-  name: string;
-  description: string | null;
-  owner_platform: string | null;
-  owner_user_id: string | null;
-  created_at: string;
-  last_used_at: string | null;
-}
+export const AgentRecordSchema = Type.Object({
+  id: Type.String(),
+  name: Type.String(),
+  description: Type.Union([Type.String(), Type.Null()]),
+  owner_platform: Type.Union([Type.String(), Type.Null()]),
+  owner_user_id: Type.Union([Type.String(), Type.Null()]),
+  created_at: Type.String(),
+  last_used_at: Type.Union([Type.String(), Type.Null()]),
+});
+export type AgentRecord = Static<typeof AgentRecordSchema>;
 
-/**
- * Where an agent's effective model came from, so a caller can tell a runnable
- * agent from one that only works because the org happens to have a default
- * (and would break if that default changed). Returned by `get`.
- *
- *   - `agent`: the agent pins its own `default_model` (`models[0]`).
- *   - `org_default`: the agent pins nothing; it inherits the org default model.
- *   - `none`: the agent pins nothing AND the org has no default — NOT runnable.
- */
-export type ModelSource = "agent" | "org_default" | "none";
+export const AgentModelInfoSchema = Type.Object({
+  effective_model: Type.Union([Type.String(), Type.Null()], {
+    description:
+      "Configured model ref before provider fallback, or null when none resolves.",
+  }),
+  source: Type.Union([
+    Type.Literal("agent"),
+    Type.Literal("org_default"),
+    Type.Literal("none"),
+  ]),
+  not_runnable: Type.Boolean({
+    description:
+      "No model resolves or provider preflight rejects every candidate. False does not guarantee a successful run or describe device-local execution.",
+  }),
+});
+export type AgentModelInfo = Static<typeof AgentModelInfoSchema>;
+export type ModelSource = AgentModelInfo["source"];
 
-export interface AgentModelInfo {
-  /** The configured model ref before provider fallback, or null when none resolves. */
-  effective_model: string | null;
-  /** Which layer supplied `effective_model`. */
-  source: ModelSource;
-  /**
-   * True when no model resolves or the cloud provider preflight rejects every
-   * listed candidate using the agent owner's credentials. Provider checks run
-   * when the gateway catalog is available; false does not guarantee a
-   * successful run or describe device-local execution.
-   */
-  not_runnable: boolean;
-}
+const SettingsPreimageSchema = Type.Mapped(
+  Type.KeyOf(AgentSettingsUpdateSchema),
+  (key) =>
+    Type.Optional(
+      Type.Union([Type.Index(AgentSettingsUpdateSchema, key), Type.Null()])
+    )
+);
+const AgentPreimageSchema = Type.Partial(
+  Type.Object({
+    name: Type.Union([AgentFields.name, Type.Null()]),
+    description: Type.Union([AgentFields.description, Type.Null()]),
+    identity_md: Type.Union([AgentFields.identity_md, Type.Null()]),
+    default_model: Type.Union([AgentFields.default_model, Type.Null()]),
+    settings: SettingsPreimageSchema,
+  })
+);
 
-export type ManageAgentsResult =
-  | { action: "list"; agents: AgentRecord[] }
-  | {
-      action: "get";
-      agent: AgentRecord;
-      model: AgentModelInfo;
-      settings: AgentSettingsStored;
-    }
-  | {
-      action: "create";
-      agent_id: string;
-      created: boolean;
-      /**
-       * The agent's model after create. `not_runnable: true` is the actionable
-       * signal that no runnable model resolved (no `default_model` given and
-       * no org default, or the model's provider is not connected) — set a
-       * routable `default_model` on create/update or connect its provider.
-       */
-      model: AgentModelInfo;
-    }
-  | {
-      action: "update";
-      agent_id: string;
-      updated_fields: string[];
-      /** Fields a stale approval skipped because another writer changed them first. */
-      skipped_fields?: string[];
-      /** The agent's model after update (present when the effective model is known). */
-      model?: AgentModelInfo;
-    }
-  | { action: "delete"; agent_id: string; deleted: boolean }
-  | {
-      action: "create" | "update" | "delete";
-      run_id: number;
-      event_id?: number;
-      status: "pending_approval";
-      message: string;
-      // The proposed change + current agent row, so the worker can forward an
-      // approval card (run_id + diff) into the chat without a second fetch.
-      proposal: ManageAgentsProposal;
-      current: Record<string, unknown> | null;
-    };
+/** Proposed mutation held on an approval run. Only touched keys have pre-images. */
+export const ManageAgentsProposalSchema = Type.Composite([
+  Type.Omit(UpdateAgentAction, ["action", "expected_revision"]),
+  Type.Object({
+    action: Type.Union([
+      Type.Literal("create"),
+      Type.Literal("update"),
+      Type.Literal("delete"),
+    ]),
+    base: Type.Optional(AgentPreimageSchema),
+  }),
+]);
+export type ManageAgentsProposal = Static<typeof ManageAgentsProposalSchema>;
 
-/** Proposed mutation held in `runs.action_input` for a builder-gate run. */
-export interface ManageAgentsProposal {
-  action: "create" | "update" | "delete";
-  agent_id: string;
-  name?: string;
-  description?: string;
-  identity_md?: string;
-  /**
-   * Default model ref for the agent (`models[0]`). Empty string clears it back
-   * to the org default. Validated at request time against the org's providers,
-   * so an unapprovable proposal is rejected before the card is shown.
-   */
-  default_model?: string;
-  settings?: AgentUpdateInput["settings"];
-  /**
-   * Pre-image of the fields this update proposes to change, captured when the
-   * update was queued. On approve, applyUpdate only overwrites a field whose
-   * live value still equals its pre-image — so a stale approval never clobbers a
-   * newer human edit to that field. Present only for queued `update` proposals.
-   */
-  base?: {
-    name?: string | null;
-    description?: string | null;
-    identity_md?: string | null;
-    /** Pre-image of `models[0]` (the default model ref), or null when unset. */
-    default_model?: string | null;
-    settings?: {
-      [K in keyof NonNullable<AgentUpdateInput["settings"]>]?:
-        | NonNullable<AgentUpdateInput["settings"]>[K]
-        | null;
-    };
-  };
-}
+export const ManageAgentsResultSchema = Type.Union([
+  Type.Object({
+    action: Type.Literal("list"),
+    agents: Type.Array(AgentRecordSchema),
+  }),
+  Type.Object({
+    action: Type.Literal("get"),
+    agent: AgentRecordSchema,
+    model: AgentModelInfoSchema,
+    settings: AgentSettingsStoredSchema,
+    revision: AgentConfigRevisionSchema,
+  }),
+  Type.Object({
+    action: Type.Literal("create"),
+    agent_id: AgentId,
+    created: Type.Boolean(),
+    model: AgentModelInfoSchema,
+  }),
+  Type.Object({
+    action: Type.Literal("update"),
+    agent_id: AgentId,
+    updated_fields: Type.Array(Type.String()),
+    skipped_fields: Type.Optional(
+      Type.Array(Type.String(), {
+        description:
+          "Fields skipped because they changed since approval was requested.",
+      })
+    ),
+    model: Type.Optional(AgentModelInfoSchema),
+  }),
+  Type.Object({
+    action: Type.Literal("delete"),
+    agent_id: AgentId,
+    deleted: Type.Boolean(),
+  }),
+  Type.Object({
+    action: Type.Union([
+      Type.Literal("create"),
+      Type.Literal("update"),
+      Type.Literal("delete"),
+    ]),
+    run_id: Type.Number(),
+    event_id: Type.Optional(Type.Number()),
+    status: Type.Literal("pending_approval"),
+    message: Type.String(),
+    proposal: ManageAgentsProposalSchema,
+    current: Type.Union([
+      Type.Partial(
+        Type.Composite([
+          AgentRecordSchema,
+          Type.Object({
+            identity_md: Type.Union([Type.String(), Type.Null()]),
+            settings: SettingsPreimageSchema,
+          }),
+        ])
+      ),
+      Type.Null(),
+    ]),
+  }),
+]);
+export type ManageAgentsResult = Static<typeof ManageAgentsResultSchema>;

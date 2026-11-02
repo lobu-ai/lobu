@@ -1,6 +1,7 @@
 import type { EntityMetrics } from "@lobu/connector-sdk";
 import {
   type AgentSettings,
+  type AgentMetadata,
   getToolResultFailure,
   isPendingToolApproval,
 } from "@lobu/core";
@@ -10,7 +11,10 @@ import type {
   AuthProfileUpdateInput,
   ManageAuthProfilesArgs,
 } from "@lobu/core/contracts/tools/manage-auth-profiles";
-import type { ManageAutomationsArgs } from "@lobu/core/contracts/tools/manage-automations";
+import type {
+  AutomationExecutionConfig,
+  ManageAutomationsArgs,
+} from "@lobu/core/contracts/tools/manage-automations";
 import type { ManageCatalogArgs } from "@lobu/core/contracts/tools/manage-catalog";
 import type {
   ConnectionCreateInput,
@@ -185,7 +189,7 @@ export interface RemoteAutomation {
   device_worker_id?: string | null;
   goal_id?: number | null;
   agent_kind?: ManageAutomationsArgs["agent_kind"];
-  execution_config?: Record<string, unknown> | null;
+  execution_config?: AutomationExecutionConfig | null;
   min_cooldown_seconds?: number | null;
   tags?: string[] | null;
   sources?: AutomationSource[] | null;
@@ -453,6 +457,7 @@ interface ApplyClientConfig {
 export class ApplyClient {
   private readonly orgSlug: string;
   private readonly http: ApiClient;
+  private readonly agentRevisions = new Map<string, string>();
 
   constructor(cfg: ApplyClientConfig, fetchImpl: typeof fetch = fetch) {
     this.orgSlug = cfg.orgSlug;
@@ -477,14 +482,19 @@ export class ApplyClient {
     method: HttpMethod,
     path: string,
     body?: unknown,
-    okStatuses: number[] = [200, 201, 204]
-  ): Promise<{ status: number; body: T }> {
-    const { status, body: raw } = await this.http.requestWithStatus<unknown>(
-      method,
-      path,
-      body,
-      { okStatuses, sendAccept: false, alwaysJsonContentType: true }
-    );
+    okStatuses: number[] = [200, 201, 204],
+    headers?: Record<string, string>
+  ): Promise<{ status: number; body: T; headers: Headers }> {
+    const {
+      status,
+      body: raw,
+      headers: responseHeaders,
+    } = await this.http.requestWithStatus<unknown>(method, path, body, {
+      okStatuses,
+      sendAccept: false,
+      alwaysJsonContentType: true,
+      headers,
+    });
 
     let parsed: Record<string, unknown>;
     if (raw === undefined) {
@@ -511,7 +521,7 @@ export class ApplyClient {
       );
     }
 
-    return { status, body: parsed as T };
+    return { status, body: parsed as T, headers: responseHeaders };
   }
 
   // ── Organization ──────────────────────────────────────────────────────────
@@ -575,21 +585,44 @@ export class ApplyClient {
 
   async patchAgentMetadata(
     agentId: string,
-    agent: { name?: string; description?: string }
+    updates: Partial<DesiredAgentMetadata>
   ): Promise<void> {
-    await this.request(
+    const revision = this.agentRevisions.get(agentId);
+    const { headers } = await this.request(
       "PATCH",
       `/api/${this.orgSlug}/agents/${encodeURIComponent(agentId)}`,
-      agent
+      updates,
+      undefined,
+      revision ? { "If-Match": revision } : undefined
     );
+    const next = headers.get("etag");
+    if (next) this.agentRevisions.set(agentId, next);
   }
 
-  async getAgentSettings(agentId: string): Promise<AgentSettings | null> {
+  async getAgentSettings(
+    agentId: string,
+    metadata?: RemoteAgent
+  ): Promise<AgentSettings | null> {
     try {
-      const { body } = await this.request<AgentSettings>(
+      // Apply needs metadata and settings from one revision. Bootstrap callers
+      // that only read settings retain the smaller /config response.
+      const path = `/api/${this.orgSlug}/agents/${encodeURIComponent(agentId)}`;
+      if (metadata) {
+        const { body, headers } = await this.request<
+          AgentMetadata & { settings: AgentSettings }
+        >("GET", path);
+        const revision = headers.get("etag");
+        if (revision) this.agentRevisions.set(agentId, revision);
+        metadata.name = body.name;
+        metadata.description = body.description;
+        return body.settings;
+      }
+      const { body, headers } = await this.request<AgentSettings>(
         "GET",
-        `/api/${this.orgSlug}/agents/${encodeURIComponent(agentId)}/config`
+        `${path}/config`
       );
+      const revision = headers.get("etag");
+      if (revision) this.agentRevisions.set(agentId, revision);
       return body;
     } catch (err) {
       if (err instanceof ApiError && err.status === 404) return null;
@@ -601,10 +634,13 @@ export class ApplyClient {
     agentId: string,
     settings: Partial<AgentSettings>
   ): Promise<void> {
+    const revision = this.agentRevisions.get(agentId);
     await this.request(
       "PATCH",
       `/api/${this.orgSlug}/agents/${encodeURIComponent(agentId)}/config`,
-      settings
+      settings,
+      undefined,
+      revision ? { "If-Match": revision } : undefined
     );
   }
 

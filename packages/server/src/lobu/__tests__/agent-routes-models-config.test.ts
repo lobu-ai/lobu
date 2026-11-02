@@ -11,7 +11,10 @@
  */
 
 import { beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { Hono } from "hono";
+import { compress } from "hono/compress";
 import { buildAgentsNamespace } from "../../sandbox/namespaces/agents";
+import { ApplyClient } from "../../../../cli/src/commands/_lib/apply/client";
 import type { ToolContext } from "../../tools/registry";
 import {
   ensureDbForGatewayTests,
@@ -72,6 +75,56 @@ beforeEach(async () => {
 }, 30_000);
 
 describe("agent PATCH/GET /config — models surface", () => {
+  test("apply, REST and SDK use the same revision and reject stale writes before side effects", async () => {
+    const app = new Hono().use("*", compress({ threshold: 1024 })).route("/", await importAgentRoutes());
+    const ctx: ToolContext = {
+      organizationId: ORG, userId: "u1", memberRole: "owner", agentId: null,
+      sourceContext: null, isAuthenticated: true, tokenType: "session",
+      scopedToOrg: true, allowCrossOrg: false, grantedOrganizationIds: null,
+      directSearchFederation: false, scopes: ["mcp:read", "mcp:write", "mcp:admin"],
+    };
+    const sdk = buildAgentsNamespace(ctx, {});
+    const before = await sdk.get(AGENT);
+    for (const path of [`/${AGENT}`, `/${AGENT}/config`]) {
+      const get = await app.request(path, { headers: { "Accept-Encoding": "gzip" } });
+      expect(get.headers.get("etag")).toBe(`"${before.revision}"`);
+      expect(get.headers.get("content-encoding")).toBeNull();
+    }
+    const client = new ApplyClient({ apiBaseUrl: "https://synthetic.test", orgSlug: ORG, token: "synthetic-token" },
+      (async (url, init) => {
+        const headers = new Headers(init?.headers);
+        headers.set("Accept-Encoding", "gzip");
+        const response = await app.request(String(url).replace(`https://synthetic.test/api/${ORG}/agents`, ""), { ...init, headers });
+        // app.request lacks the automatic decompression performed by fetch.
+        return response.headers.get("content-encoding") === "gzip" && response.body
+          ? new Response(response.body.pipeThrough(new DecompressionStream("gzip")), response)
+          : response;
+      }) as typeof fetch);
+    await client.getAgentSettings(AGENT, { agentId: AGENT, name: "Old list snapshot" });
+    await client.patchAgentMetadata(AGENT, { name: "Apply renamed" });
+    await client.patchAgentSettings(AGENT, { soulMd: "Apply persona", skillsConfig: { skills: [] } });
+    const after = await sdk.get(AGENT);
+    expect(after.agent.name).toBe("Apply renamed");
+    expect(after.settings).toMatchObject({ soulMd: "Apply persona", skillsConfig: { skills: [] } });
+    expect(after.revision).not.toBe(before.revision);
+    const stale = await app.request(`/${AGENT}/config`, {
+      method: "PATCH", headers: { "content-type": "application/json", "If-Match": `"${before.revision}"` },
+      body: JSON.stringify({ soulMd: "Stale persona" }),
+    });
+    expect(stale.status).toBe(409);
+    expect(await stale.json()).toMatchObject({ error: "agent_config_conflict" });
+    await expect(sdk.update({ agent_id: AGENT, expected_revision: before.revision, name: "Stale name" })).rejects.toMatchObject({ httpStatus: 409 });
+    expect(await sdk.get(AGENT)).toEqual(after);
+    // Runtime activity never changes a configuration revision.
+    const { getDb } = await import("../../db/client.js");
+    await getDb()`UPDATE agents SET last_used_at = now(), updated_at = now() WHERE organization_id = ${ORG} AND id = ${AGENT}`;
+    expect((await sdk.get(AGENT)).revision).toBe(after.revision);
+    const invalid = await app.request(`/${AGENT}/config`, {
+      method: "PATCH", headers: { "content-type": "application/json", "If-Match": "invalid" }, body: JSON.stringify({ soulMd: "Invalid" }),
+    });
+    expect(invalid.status).toBe(400);
+  });
+
   test("REST and SDK share settings validation, storage and audit", async () => {
     const app = await importAgentRoutes();
     const ctx: ToolContext = {

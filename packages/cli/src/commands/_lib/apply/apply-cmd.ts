@@ -355,7 +355,13 @@ export async function fetchRemoteSnapshot(
       remoteAgentIds.has(id)
     );
     for (const agentId of targetAgentIds) {
-      agentSettings.set(agentId, await client.getAgentSettings(agentId));
+      agentSettings.set(
+        agentId,
+        await client.getAgentSettings(
+          agentId,
+          agents.find((agent) => agent.agentId === agentId)
+        )
+      );
     }
   }
 
@@ -965,8 +971,15 @@ export async function executePlan(
           tags: w.tags,
           agent_kind: w.agentKind,
           execution_config:
-            w.model !== undefined || w.executor !== undefined
-              ? automationExecutionConfig(w.model, undefined, w.executor)
+            w.executionConfig !== undefined ||
+            w.model !== undefined ||
+            w.executor !== undefined
+              ? automationExecutionConfig(
+                  w.model,
+                  undefined,
+                  w.executor,
+                  w.executionConfig
+                )
               : undefined,
           outputs: w.outputs,
         });
@@ -1035,7 +1048,8 @@ export async function executePlan(
                   execution_config: automationExecutionConfig(
                     w.model,
                     remote?.execution_config,
-                    w.executor
+                    w.executor,
+                    w.executionConfig
                   ),
                 }
               : {}),
