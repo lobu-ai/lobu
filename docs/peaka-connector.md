@@ -111,6 +111,27 @@ does **not** fetch audio. The demo's audio step needs one of:
 
 Neither path is claimed as working in this change.
 
+### Smallest upstream request for Peaka
+
+A project-scoped file primitive is enough to unblock the demo without Lobu
+holding ServiceTitan credentials:
+
+```
+POST /data/projects/{projectId}/files
+{ "connectionId": "<service-titan connection>", "path": "/telecom/v2/tenant/<tenant>/calls/<id>/recording" }
+-> 200
+   content-type: audio/mpeg
+   content-length: <bytes>
+   x-content-sha256: <hex>
+   <bytes>
+```
+
+(or an `exports` variant with `format: "binary"` that returns a presigned,
+short-lived URL). The endpoint must inject the connection's `ST-App-Key` and
+authorization server-side and must reject HTML/JSON error bodies with a typed
+error, not a 200.
+
+
 ## Demo runbook
 
 Prerequisites: the universal connector-callback fix (registered webhooks must
