@@ -166,63 +166,91 @@ function escapeLike(term: string): string {
   return term.replace(/[\\%_]/g, (c) => `\\${c}`);
 }
 
+/** Opening `$$` / `$tag$` of a dollar-quoted string, matched at `lastIndex`. */
+const DOLLAR_QUOTE_RE = /\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/y;
+
 /**
- * True if `sql` has a `LIMIT`/`OFFSET` keyword at paren-depth 0 (a TOP-level
- * one), scanning past string literals, quoted identifiers, and comments so a
- * `'limit'` literal or a `"limit"` column never false-matches. An inner LIMIT
- * inside a subquery sits at depth > 0 and is allowed. Works without the AST, so
- * it gates both the parseable and the token-fallback paths identically.
+ * Blank out string literals, quoted identifiers, dollar-quoted strings and
+ * comments (same length, so positions survive) so the structural checks only
+ * see executable tokens — a `';'`, `':name'`, `'$1'` or `"limit"` inside a
+ * literal must never trip them. Unterminated literals/comments mask to the end;
+ * Postgres reports those itself.
  */
-function hasTopLevelLimitOrOffset(sql: string): boolean {
+function executableSql(sql: string): string {
   const n = sql.length;
-  let depth = 0;
+  let result = '';
   let i = 0;
   while (i < n) {
+    const start = i;
     const c = sql[i];
-    if (c === "'") {
+    if (c === "'" || c === '"') {
+      // E'…' strings escape with backslash; plain ones only double the quote.
+      const backslashEscapes =
+        c === "'" &&
+        /[eE]/.test(sql[i - 1] ?? '') &&
+        !/[A-Za-z0-9_$]/.test(sql[i - 2] ?? '');
       i++;
-      while (i < n && sql[i] !== "'") i++;
-      i++;
-      continue;
-    }
-    if (c === '"') {
-      i++;
-      while (i < n && sql[i] !== '"') i++;
-      i++;
-      continue;
-    }
-    if (c === '-' && sql[i + 1] === '-') {
-      i += 2;
-      while (i < n && sql[i] !== '\n') i++;
-      continue;
-    }
-    if (c === '/' && sql[i + 1] === '*') {
-      i += 2;
-      while (i < n && !(sql[i] === '*' && sql[i + 1] === '/')) i++;
-      i += 2;
-      continue;
-    }
-    if (c === '(') {
-      depth++;
-      i++;
-      continue;
-    }
-    if (c === ')') {
-      if (depth > 0) depth--;
-      i++;
-      continue;
-    }
-    if (/[A-Za-z_]/.test(c)) {
-      let j = i + 1;
-      while (j < n && /[A-Za-z0-9_$]/.test(sql[j])) j++;
-      if (depth === 0) {
-        const word = sql.slice(i, j).toLowerCase();
-        if (word === 'limit' || word === 'offset') return true;
+      while (i < n) {
+        if (backslashEscapes && sql[i] === '\\') {
+          i += 2;
+          continue;
+        }
+        if (sql[i++] === c) {
+          if (sql[i] !== c) break;
+          i++;
+        }
       }
-      i = j;
+    } else if (c === '$' && !/[A-Za-z0-9_$]/.test(sql[i - 1] ?? '')) {
+      DOLLAR_QUOTE_RE.lastIndex = i;
+      const delimiter = DOLLAR_QUOTE_RE.exec(sql)?.[0];
+      if (!delimiter) {
+        result += c;
+        i++;
+        continue;
+      }
+      const end = sql.indexOf(delimiter, i + delimiter.length);
+      i = end < 0 ? n : end + delimiter.length;
+    } else if (c === '-' && sql[i + 1] === '-') {
+      while (i < n && sql[i] !== '\n') i++;
+    } else if (c === '/' && sql[i + 1] === '*') {
+      let depth = 1;
+      i += 2;
+      while (i < n && depth > 0) {
+        if (sql[i] === '/' && sql[i + 1] === '*') {
+          depth++;
+          i += 2;
+        } else if (sql[i] === '*' && sql[i + 1] === '/') {
+          depth--;
+          i += 2;
+        } else {
+          i++;
+        }
+      }
+    } else {
+      result += c;
+      i++;
       continue;
     }
-    i++;
+    result += ' '.repeat(Math.min(i, n) - start);
+  }
+  return result;
+}
+
+/**
+ * True if `sql` (already masked by executableSql) has a LIMIT/OFFSET keyword
+ * at paren-depth 0. An inner LIMIT inside a subquery sits at depth > 0 and is
+ * allowed.
+ */
+function hasTopLevelLimitOrOffset(sql: string): boolean {
+  let depth = 0;
+  for (const [token] of sql.matchAll(/[A-Za-z_][A-Za-z0-9_$]*|[()]/g)) {
+    if (token === '(') {
+      depth++;
+    } else if (token === ')') {
+      depth = Math.max(0, depth - 1);
+    } else if (depth === 0 && /^(limit|offset)$/i.test(token)) {
+      return true;
+    }
   }
   return false;
 }
@@ -253,18 +281,19 @@ function queryValidationError(message: string) {
 function validateReadOnlySelect(raw: string): string {
   const stripped = raw.trim().replace(/;\s*$/, '');
   if (!stripped) throw queryValidationError('query is empty');
-  if (stripped.includes(';')) {
+  const executable = executableSql(stripped);
+  if (executable.includes(';')) {
     throw queryValidationError('query must be a single statement (no embedded ";").');
   }
-  if (/\$\d/.test(stripped) || /(^|[^:]):[A-Za-z_]/.test(stripped)) {
+  if (/\$\d/.test(executable) || /(^|[^:]):[A-Za-z_]/.test(executable)) {
     throw queryValidationError('query must not contain bind parameters ($1, :name).');
   }
   // Allow a leading "(" for "(SELECT …) UNION …" / parenthesized selects.
-  const head = stripped.replace(/^\s*\(+\s*/, '');
+  const head = executable.replace(/^\s*\(+\s*/, '').trimStart();
   if (!/^(select|with)\b/i.test(head)) {
     throw queryValidationError('query must be a single read-only SELECT (or WITH … SELECT).');
   }
-  if (hasTopLevelLimitOrOffset(stripped)) {
+  if (hasTopLevelLimitOrOffset(executable)) {
     throw queryValidationError(
       'query must not include a top-level LIMIT/OFFSET — the connector adds pagination automatically (an inner LIMIT inside a subquery is fine).',
     );
