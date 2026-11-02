@@ -361,6 +361,28 @@ describe("Peaka actions", () => {
 		expect(result.rows).toEqual([{ id: "9007199254740993" }]);
 	});
 
+	test("query sorts decimal amounts numerically", async () => {
+		const connector = new PeakaConnector();
+		const { http } = stubHttp({
+			post: async () => ({
+				columns: [{ columnName: "amount" }],
+				data: [{ amount: "10.5" }, { amount: "2.5" }],
+			}),
+		});
+		// biome-ignore lint/suspicious/noExplicitAny: private seam replaced for the unit test
+		(connector as any).http = () => http;
+
+		const first = await connector.query({
+			query: "SELECT amount FROM x",
+			config,
+			limit: 1,
+			offset: 0,
+			sort: { column: "amount", order: "asc" },
+		});
+		expect(first.rows).toEqual([{ amount: "2.5" }]);
+		expect(first.total).toBe(2);
+	});
+
 	test("upsert_record rejects an ambiguous duplicate key instead of treating the first row as canonical", async () => {
 		const row = { idempotency_key: "dup", raw_transcript: "x" };
 		const { result } = await invoke(
@@ -605,6 +627,37 @@ describe("Peaka calls feed", () => {
 			origin_id: "peaka-call:LePnbVBt:calls:7",
 			metadata: { call_id: "7", status: "Completed" },
 		});
+	});
+
+	test("does not collapse distinct ids that share a numeric value", async () => {
+		const rows = [
+			{ id: "01", createdon: "2026-11-01T10:00:00Z", status: "a" },
+			{ id: "1", createdon: "2026-11-01T10:00:00Z", status: "b" },
+		];
+		const connector = new PeakaConnector();
+		const { http } = stubHttp({ post: async () => ({ data: rows }) });
+		// biome-ignore lint/suspicious/noExplicitAny: private seam replaced for the unit test
+		(connector as any).http = () => http;
+
+		const committed: Array<{ events: Array<Record<string, unknown>>; checkpoint: unknown }> = [];
+		const base = {
+			feedKey: "calls",
+			config: {
+				...config,
+				query: "SELECT id, createdon, status FROM servicetitan.telecom.calls",
+				max_rows: 1,
+			},
+			commit: async (events: unknown[], checkpoint: unknown) => {
+				committed.push({ events: events as Array<Record<string, unknown>>, checkpoint });
+			},
+		};
+
+		await connector.sync({ ...base, checkpoint: null });
+		const second = await connector.sync({ ...base, checkpoint: committed[0]?.checkpoint });
+		expect(second.status).toBe("complete");
+		expect(committed[1]?.events.map((event) => event.metadata)).toMatchObject([
+			{ call_id: "1" },
+		]);
 	});
 
 	test("rejects rows without a valid activity timestamp instead of advancing to wall-clock time", async () => {

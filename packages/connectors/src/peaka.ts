@@ -259,7 +259,9 @@ function compareIds(a: string, b: string): number {
 		const right = BigInt(b);
 		if (left < right) return -1;
 		if (left > right) return 1;
-		return 0;
+		// Distinct source ids can share a numeric value ('01' vs '1'); keep a
+		// total order so the checkpoint can advance past both.
+		return a === b ? 0 : a.localeCompare(b);
 	}
 	return a.localeCompare(b);
 }
@@ -269,6 +271,11 @@ function compareValues(a: unknown, b: unknown): number {
 	const right = normalise(b);
 	if (/^-?\d+$/.test(left) && /^-?\d+$/.test(right)) {
 		return compareIds(left, right);
+	}
+	const leftNumber = Number(left);
+	const rightNumber = Number(right);
+	if (left !== "" && right !== "" && Number.isFinite(leftNumber) && Number.isFinite(rightNumber)) {
+		return leftNumber - rightNumber;
 	}
 	return left.localeCompare(right);
 }
@@ -534,11 +541,10 @@ export default class PeakaConnector extends ConnectorRuntime<PeakaCheckpoint, Pe
 	private async executeSql(
 		config: Record<string, unknown>,
 		sql: string,
-		format: "SIMPLE" | "CELL_TYPED" = "SIMPLE",
 	): Promise<QueryResponse> {
 		const statement = assertReadOnlySql(sql);
 		return this.http(config).post<QueryResponse>(
-			`${baseUrl(config)}/data/projects/${encodeURIComponent(projectId(config))}/queries/execute?format=${format}`,
+			`${baseUrl(config)}/data/projects/${encodeURIComponent(projectId(config))}/queries/execute?format=SIMPLE`,
 			{ statement },
 		);
 	}
