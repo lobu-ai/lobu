@@ -16,10 +16,6 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 # shellcheck source=scripts/lib/review-bb.sh
 . "$repo_root/scripts/lib/review-bb.sh"
 
-# extract_json_verdict lives in review.sh (which cannot be sourced — it runs
-# on source). Extract the single-source function instead of duplicating it.
-eval "$(sed -n '/^extract_json_verdict()/,/^review_exit_cleanup()/p' "$repo_root/scripts/review.sh" | sed '$d')"
-
 TEST_DIR="$(mktemp -d /tmp/lobu-review-bb-test.XXXXXX)"
 TEST_DIR="$(cd "$TEST_DIR" && pwd -P)"
 # Keep library temp files under the test's cleanup trap.
@@ -70,6 +66,14 @@ case "$1 $2" in
       if [ "${args[$i]}" = --prompt-file ]; then cp "${args[$((i+1))]}" "$state/prompt.txt"; fi
     done
     cat "$state/spawn.json" ;;
+  "thread tell")
+    cp "$5" "$state/continuation.txt"
+    if [ -n "${BB_FAKE_REPAIRED_OUTPUT:-}" ]; then printf '%s\n' "$BB_FAKE_REPAIRED_OUTPUT" > "$state/output.txt"; fi
+    printf '{"delivery":"sent"}\n' ;;
+  "thread update")
+    "$BB_FAKE_JQ" --arg title "$5" '.thread.title=$title' "$state/child-show.json" > "$state/show.tmp"
+    mv "$state/show.tmp" "$state/child-show.json"
+    printf '{"ok":true}\n' ;;
   "thread wait")
     if [ "${BB_FAKE_WAIT_SIGNAL:-0}" = 1 ]; then
       kill -TERM "$PPID"
@@ -130,7 +134,7 @@ review_persist_inline_output() {
   cp "$1" "$TEST_DIR/persisted.log"
 }
 
-reset_calls() { : > "$FAKE_STATE/calls.log"; }
+reset_calls() { : > "$FAKE_STATE/calls.log"; unset REVIEW_PREVIOUS_THREAD; }
 spawn_calls() { grep -c '^thread spawn' "$FAKE_STATE/calls.log" || true; }
 
 # Exercise all BB hashing without the optional GNU SHA-1 command.
@@ -195,7 +199,10 @@ SCRATCH="$TEST_DIR/scratch"
 git init -qb main "$SCRATCH"
 git -C "$SCRATCH" config user.email t@t.t
 git -C "$SCRATCH" config user.name t
-git -C "$SCRATCH" -c init.defaultBranch=main commit -q --allow-empty -m init
+mkdir -p "$SCRATCH/prompts"
+cp "$repo_root/prompts/review-output-schema.json" "$SCRATCH/prompts/"
+git -C "$SCRATCH" add -- prompts/review-output-schema.json
+git -C "$SCRATCH" -c init.defaultBranch=main commit -q -m init
 HEAD_SHA_SCRATCH="$(git -C "$SCRATCH" rev-parse HEAD)"
 pushd "$SCRATCH" >/dev/null
 
@@ -231,6 +238,23 @@ grep -q -- '--visibility visible' "$FAKE_STATE/calls.log" || fail "review child 
 grep -q -- '--project proj_TEST' "$FAKE_STATE/calls.log" || fail "spawn must use the parent project"
 [ "$(spawn_calls)" = "1" ] || fail "exactly one spawn expected, got $(spawn_calls)"
 [ -z "$REVIEW_BB_CHILD_ID" ] || fail "settled child ownership must be cleared"
+
+# A fix verification continues the same reviewer instead of spawning again.
+reset_calls
+REVIEW_PREVIOUS_THREAD=thr_child9
+review_bb_run_reviewer "$PROMPT" "$HEAD_SHA_SCRATCH" "origin/main" "fix-delta" \
+  codex gpt-6-astra xhigh '(.ok == true)' "/tmp/ci.txt" >/dev/null 2>&1
+[ "$REVIEWER_EXIT" = 0 ] && [ "$(spawn_calls)" = 0 ] || fail 'fix verification spawned another reviewer'
+grep -q '^thread tell thr_child9 ' "$FAKE_STATE/calls.log" || fail 'reviewer was not resumed'
+# Unavailable/blocked prior reviewers return control instead of another loop.
+reset_calls
+REVIEW_PREVIOUS_THREAD=thr_child9
+printf '[{"kind":"approval"}]\n' > "$FAKE_STATE/interactions.json"
+review_bb_run_reviewer "$PROMPT" "$HEAD_SHA_SCRATCH" "origin/main" "blocked-delta" \
+  codex gpt-6-astra xhigh '(.ok == true)' "/tmp/ci.txt" >/dev/null 2>&1
+[ "$REVIEWER_EXIT" = 1 ] && [ "$(spawn_calls)" = 0 ] || fail 'blocked continuation started another reviewer'
+printf '[]\n' > "$FAKE_STATE/interactions.json"
+unset REVIEW_PREVIOUS_THREAD
 
 # A BB-owned path must be attached by its matching environment id.
 export BB_ENVIRONMENT_ID=env_review_test
@@ -324,12 +348,26 @@ case "$RAW" in *reused*) ;; *) fail "must reuse the existing child output, got: 
 jq -n --arg p "$SCRATCH" '{thread:{id:"thr_child9",projectId:"proj_TEST",status:"idle"},environment:{id:"env_child9",path:$p}}' > "$FAKE_STATE/child-show.json"
 printf '[]\n' > "$FAKE_STATE/list.json"
 
-# Post-write verification must spawn a new reviewer even with identical input.
+# Formatting failures recover in the existing session, at most once.
 jq -n --arg t "$TITLE_FOR_REUSE" '[{id:"thr_old9",title:$t,status:"idle",updatedAt:2}]' > "$FAKE_STATE/list.json"
+jq -n --arg p "$SCRATCH" --arg t "$TITLE_FOR_REUSE" '{thread:{id:"thr_old9",title:$t,status:"idle"},environment:{path:$p}}' > "$FAKE_STATE/child-show.json"
+printf 'unfinished JSON\n' > "$FAKE_STATE/output.txt"
+reset_calls
+export BB_FAKE_REPAIRED_OUTPUT='{"ok":true}'
+review_bb_run_reviewer "$PROMPT" "$HEAD_SHA_SCRATCH" "origin/main" "abcdef123456" \
+  codex gpt-6-astra xhigh '(.ok == true)' "/tmp/ci.txt" >/dev/null 2>&1
+unset BB_FAKE_REPAIRED_OUTPUT
+[ "$REVIEWER_EXIT" = 0 ] && [ "$(spawn_calls)" = 0 ] || fail 'format repair spawned another review'
+grep -q '^thread tell thr_old9 ' "$FAKE_STATE/calls.log" || fail 'format repair did not continue the original thread'
+# If the correction still failed, another invocation returns control.
+printf 'still invalid\n' > "$FAKE_STATE/output.txt"
+jq -n --arg t "$TITLE_FOR_REUSE (format-repair)" '[{id:"thr_old9",title:$t,status:"idle",updatedAt:2}]' > "$FAKE_STATE/list.json"
 reset_calls
 review_bb_run_reviewer "$PROMPT" "$HEAD_SHA_SCRATCH" "origin/main" "abcdef123456" \
-  codex gpt-6-astra xhigh '(.ok == true)' "/tmp/ci.txt" "fresh-verification" >/dev/null 2>&1
-[ "$REVIEWER_EXIT" = 0 ] && [ "$(spawn_calls)" = 1 ] || fail "verification must not adopt a previous reviewer"
+  codex gpt-6-astra xhigh '(.ok == true)' "/tmp/ci.txt" >/dev/null 2>&1
+[ "$REVIEWER_EXIT" = 1 ] && [ "$(spawn_calls)" = 0 ] || fail 'format repair budget was reset'
+if grep -q '^thread tell ' "$FAKE_STATE/calls.log"; then fail 'repeated a failed format repair'; fi
+printf '{"ok":true}\n' > "$FAKE_STATE/output.txt"
 
 # Reuse must not skip the checked-out HEAD or environment checks.
 jq -n --arg t "$TITLE_FOR_REUSE" '[{id:"thr_old9",title:$t,status:"idle",updatedAt:2}]' > "$FAKE_STATE/list.json"

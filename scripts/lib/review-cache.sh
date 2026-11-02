@@ -9,8 +9,10 @@
 # spawning another reviewer session.
 #
 # The cache is per-repo (git-common-dir, shared across worktrees) and lives
-# outside the working tree, so it never dirties `git status`. /tmp and reboot
-# clear it; losing the cache only means a re-review, never a wrong verdict.
+# outside the working tree, so it never dirties `git status`. Losing a verdict
+# cache entry requires review again; never clear the branch budget to retry.
+
+REVIEW_CACHE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 review_cache_root() {
   local common
@@ -36,18 +38,21 @@ review_sha256() {
 
 review_diff_hash() {
   local base="$1"
-  git diff --binary --no-ext-diff --no-textconv "$(git merge-base "$base" HEAD)" "${2:-HEAD}" | review_sha256 | cut -d' ' -f1
+  { git merge-base "$base" HEAD
+    git diff --binary --no-ext-diff --no-textconv "$(git merge-base "$base" HEAD)" "${2:-HEAD}"
+  } | review_sha256 | cut -d' ' -f1
 }
 
 # A verdict is only reusable for the same reviewer identity. Any knob that can
 # change the verdict — CLI, model, effort, provider — must be in the signature.
 review_reviewer_signature() {
-  printf 'bounded-v1|%s|%s|%s|%s|%s\n' \
+  printf 'evidence-v2|%s|%s|%s|%s|%s|%s\n' \
     "${REVIEWER_CLI_SELECTED:-}" \
     "${CLAUDE_REVIEW_MODEL:-}" \
     "${CLAUDE_REVIEW_EFFORT:-}" \
     "${CODEX_REVIEW_MODEL:-}" \
-    "${CODEX_REVIEW_EFFORT:-}"
+    "${CODEX_REVIEW_EFFORT:-}" \
+    "$(cat "$REVIEW_CACHE_LIB_DIR/../../prompts/review-prompt.md" "$REVIEW_CACHE_LIB_DIR/../../prompts/review-output-schema.json" | review_sha256 | cut -d' ' -f1)"
 }
 
 # review_cache_lookup <hash> <signature>
@@ -61,10 +66,46 @@ review_cache_lookup() {
 }
 
 review_cache_store() {
-  local hash="$1" sig="$2" base="$3" head="$4" verdict="$5"
+  local hash="$1" sig="$2" base="$3" head="$4" verdict="$5" temporary
   mkdir -p "$(review_cache_root)"
+  temporary="$(mktemp "$(review_cache_root)/verdict.XXXXXX")"
   jq -n --arg hash "$hash" --arg sig "$sig" --arg base "$base" --arg head "$head" \
      --argjson verdict "$verdict" \
      '{diff_hash:$hash, reviewer_sig:$sig, base:$base, head:$head, ts:now, verdict:$verdict}' \
-     > "$(review_cache_root)/$hash.json"
+     > "$temporary"
+  mv "$temporary" "$(review_cache_root)/$hash.json"
+}
+
+# One branch owns a cycle. Commits, rebases, model changes and resume
+# commands cannot reset its automatic-write budget. New branches start fresh.
+review_cycle_file() {
+  local key
+  key="$(git symbolic-ref --short HEAD 2>/dev/null || git rev-parse HEAD)"
+  key="$(printf '%s\n' "$key" | review_sha256 | cut -d' ' -f1)"
+  printf '%s/cycles/%s.json\n' "$(review_cache_root)" "$key"
+}
+
+review_cycle_save() {
+  local file temporary
+  file="$(review_cycle_file)"
+  mkdir -p "$(dirname "$file")"
+  temporary="$(mktemp "$(dirname "$file")/cycle.XXXXXX")"
+  jq -n --argjson passes "$AUTOFIX_PASSES" --arg sig "$REVIEWER_SIG" \
+    --arg tree "${REVIEW_PREVIOUS_TREE:-}" --arg base "${REVIEW_PREVIOUS_BASE:-}" \
+    --arg thread "${REVIEW_PREVIOUS_THREAD:-}" --argjson verdict "${REVIEW_PREVIOUS_VERDICT:-null}" \
+    '{passes:$passes,reviewer_sig:$sig,tree:$tree,base:$base,thread:$thread,verdict:$verdict}' > "$temporary"
+  mv "$temporary" "$file"
+}
+
+# Different HEADs of the same branch share the budget and must not race it.
+acquire_review_cycle_lock() {
+  local file
+  file="$(review_cycle_file).lock"
+  mkdir -p "$(dirname "$file")"
+  exec 8>>"$file"
+  if ! perl -MFcntl=:flock -e 'exit(flock(STDIN, LOCK_EX | LOCK_NB) ? 0 : 1)' <&8; then
+    echo 'Another review owns this branch cycle; duplicate refused' >&2
+    exec 8>&-
+    return 2
+  fi
 }

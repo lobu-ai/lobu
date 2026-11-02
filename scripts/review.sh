@@ -83,22 +83,18 @@ CODEX_REVIEW_MODEL="${CODEX_REVIEW_MODEL:-}"
 CODEX_REVIEW_EFFORT="${CODEX_REVIEW_EFFORT:-xhigh}"
 REVIEWER_CLI="${REVIEWER_CLI:-auto}"
 # light (default): skip the cross-harness reviewer for small safe-class diffs
-# (docs/renames/generated/root bun.lock/snapshots/additive-tests, exact model
-# route swaps, or a pure Owletto pointer bump; <100 lines). full: always run it.
+# (inert docs, small snapshots/additive-tests/exact model swaps, or a pure
+# Owletto pointer bump). full: always run the model review locally.
 # REVIEWER_SHADOW=1 runs the full reviewer on a would-be-skipped diff and logs
 # the skip decision alongside the real verdict for measuring the false-skip rate.
 REVIEWER_MODE="${REVIEWER_MODE:-light}"
 REVIEWER_SHADOW="${REVIEWER_SHADOW:-0}"
-REVIEW_ALLOW_LOCAL_BUILD="${REVIEW_ALLOW_LOCAL_BUILD:-0}"
 PI_REVIEW_STATUS_CONTEXT="${PI_REVIEW_STATUS_CONTEXT:-pi-review}"
 
 # Verdict shape both the fresh-review validation and the cache-hit check rely
 # on. Shared so a cached verdict is validated with the exact same predicate
 # that validated it at store time.
-SCHEMA_JQ='(.bug_free_confidence | type == "number" and floor == . and . >= 0 and . <= 100) and (.bugs | type == "number" and floor == . and . >= 0) and (.slop | type == "number" and floor == . and . >= 0 and . <= 100) and (.simplicity | type == "number" and floor == . and . >= 0 and . <= 100) and (.blockers | type == "array") and (.change_type | IN("feat", "fix", "refactor", "docs", "chore", "test", "deps")) and (.runtime_change_risk | IN("none", "low", "medium", "high")) and (.tests_adequate | type == "boolean") and (.suggested_fixes | type == "array") and (.notes | type == "string") and (.categories | type == "object")'
-PI_REVIEW_MIN_BUG_FREE="${PI_REVIEW_MIN_BUG_FREE:-80}"
-PI_REVIEW_MAX_SLOP="${PI_REVIEW_MAX_SLOP:-15}"
-PI_REVIEW_MIN_SIMPLICITY="${PI_REVIEW_MIN_SIMPLICITY:-70}"
+SCHEMA_JQ="$(review_verdict_predicate)"
 RESUME_FILE=""
 INSTRUCTIONS_FILE=""
 while [ $# -gt 0 ]; do
@@ -158,8 +154,9 @@ if [ -n "$RESUME_FILE" ]; then
       --arg worktree "$(pwd -P)" --arg base "$MERGE_BASE" \
       '.status == "needs_parent" and .head == $head and .tree == $tree and
        .worktree == $worktree and .merge_base == $base and
+       .findings.verification.tree == .reviewed_tree and
        (.reason | IN("needs_decision", "autofix_limit", "fixer_failed",
-         "invalid_fixer_result", "focused_tests_failed_or_missing"))' >/dev/null ||
+         "invalid_fixer_result", "focused_tests_failed_or_missing", "verification_blocked"))' >/dev/null ||
      ! printf '%s\n' "$RESUME_CONTEXT" | jq -e ".findings | $SCHEMA_JQ" >/dev/null; then
     echo 'Resume handoff is invalid or stale; run make review for the current tree' >&2
     exit 2
@@ -172,7 +169,7 @@ echo ">> head: $HEAD_SHA"
 echo ">> reviewer: $REVIEWER_CLI_SELECTED"
 
 # Before spending a reviewer run, make sure the verdict can actually land on
-# the PR head. Runs ahead of the build and the commit lock so a superseded
+# the PR head. Runs ahead of the commit lock so a superseded
 # HEAD costs nothing.
 review_assert_head_is_current "$HEAD_SHA" "$PI_REVIEW_STATUS_CONTEXT" || exit 2
 
@@ -192,7 +189,7 @@ post_review_status() {
     args+=(-f "target_url=$target_url")
   fi
   gh api -X POST "repos/$repo/statuses/$HEAD_SHA" "${args[@]}" >/dev/null 2>&1 \
-    || echo ">> warning: failed to post GitHub commit status '$PI_REVIEW_STATUS_CONTEXT'" >&2
+    || { echo ">> could not post '$PI_REVIEW_STATUS_CONTEXT'; rerun to publish the saved verdict" >&2; return 1; }
 }
 
 REVIEW_STATUS_STARTED=0
@@ -244,8 +241,18 @@ The deterministic CI suites remain required checks and still gate the merge. Run
 # Schema-shaped verdict so `make review` capture stays machine-readable; the
 # honest "skipped" marker and status wording carry the audit trail.
 skip_verdict_json() {
-  jq -n --arg reason "$1" \
-    '{bug_free_confidence:100,bugs:0,slop:0,simplicity:100,blockers:[],change_type:"chore",runtime_change_risk:"none",tests_adequate:true,suggested_fixes:[],notes:("Cross-harness review skipped: " + $reason + ". Pass REVIEWER_MODE=full to force an independent review."),categories:{},skipped_cross_harness:true}'
+  jq -n --arg reason "$1" --arg tree "$(git rev-parse "HEAD^{tree}")" \
+    '{decision:"pass",findings:[],verification:{tree:$tree,checked:[("Trusted safe-class policy: " + $reason)],missing:[]}}'
+}
+
+# Review can run alongside CI, but only green CI for the exact committed HEAD
+# can publish success. Infrastructure retries reuse the cached semantic verdict.
+ci_run_green_for_head() {
+  [ "$GH_AVAILABLE" = 1 ] || return 1
+  gh run list --workflow=ci.yml --commit "$HEAD_SHA" --limit 20 \
+    --json status,conclusion \
+    --jq 'any(.[]; .status == "completed" and .conclusion == "success")' \
+    2>/dev/null | grep -qx true
 }
 
 # --- reviewer output persistence ---------------------------------------------
@@ -270,7 +277,7 @@ run_reviewer_inline() {
       "$REVIEWER_CLI_SELECTED" \
       "$(if [ "$REVIEWER_CLI_SELECTED" = "claude" ]; then printf '%s' "$CLAUDE_REVIEW_MODEL"; else printf '%s' "$CODEX_REVIEW_MODEL"; fi)" \
       "$(if [ "$REVIEWER_CLI_SELECTED" = "claude" ]; then printf '%s' "$CLAUDE_REVIEW_EFFORT"; else printf '%s' "$CODEX_REVIEW_EFFORT"; fi)" \
-      "$SCHEMA_JQ" "$CI_CHECKS_FILE" "$(if [ "$AUTOFIX_PASSES" -gt 0 ]; then printf '%s-%s' "${REVIEW_ROOT_DIR##*/}" "$AUTOFIX_PASSES"; fi)"
+      "$SCHEMA_JQ and .verification.tree == \"$REVIEW_TREE\"" "$CI_CHECKS_FILE" "$REVIEWER_SIG|$(printf '%s' "${PARENT_INSTRUCTIONS:-}" | review_sha256 | cut -d' ' -f1)"
     return
   fi
   raw_file="$(mktemp /tmp/lobu-review-"${REVIEWER_CLI_SELECTED}"-inline.XXXXXX)"
@@ -334,84 +341,6 @@ run_reviewer() {
   run_reviewer_inline "$prompt_file"
 }
 
-extract_json_verdict() {
-  local raw="$1"
-  local fenced object
-  fenced="$(
-    printf '%s\n' "$raw" | awk '
-      /^[[:space:]]*```json[[:space:]]*$/ { in_json = 1; next }
-      /^[[:space:]]*```[[:space:]]*$/ && in_json { exit }
-      in_json { print }
-    '
-  )"
-  if [ -n "$fenced" ] && printf '%s\n' "$fenced" | jq -e . >/dev/null 2>&1; then
-    printf '%s\n' "$fenced"
-    return
-  fi
-
-  if command -v node >/dev/null 2>&1; then
-    object="$(
-      printf '%s\n' "$raw" | node -e '
-const fs = require("fs");
-const raw = fs.readFileSync(0, "utf8");
-
-function candidateFrom(start) {
-  let depth = 0;
-  let inString = false;
-  let escaped = false;
-
-  for (let i = start; i < raw.length; i += 1) {
-    const ch = raw[i];
-    if (inString) {
-      if (escaped) {
-        escaped = false;
-      } else if (ch === "\\\\") {
-        escaped = true;
-      } else if (ch === "\"") {
-        inString = false;
-      }
-      continue;
-    }
-
-    if (ch === "\"") {
-      inString = true;
-    } else if (ch === "{") {
-      depth += 1;
-    } else if (ch === "}") {
-      depth -= 1;
-      if (depth === 0) {
-        return raw.slice(start, i + 1);
-      }
-    }
-  }
-
-  return null;
-}
-
-for (let i = 0; i < raw.length; i += 1) {
-  if (raw[i] !== "{") continue;
-  const candidate = candidateFrom(i);
-  if (!candidate) continue;
-  try {
-    JSON.parse(candidate);
-    process.stdout.write(candidate);
-    process.exit(0);
-  } catch {
-  }
-}
-
-process.exit(1);
-' 2>/dev/null || true
-    )"
-    if [ -n "$object" ] && printf '%s\n' "$object" | jq -e . >/dev/null 2>&1; then
-      printf '%s\n' "$object"
-      return
-    fi
-  fi
-
-  printf '%s\n' "$raw" | sed -e 's/^```json//' -e 's/^```//' -e 's/```$//'
-}
-
 review_exit_cleanup() {
   local ec=$? post_failure_status=0
   trap - EXIT INT TERM HUP
@@ -435,6 +364,7 @@ trap 'exit 129' HUP
 # Refuse duplicate reviews of this exact commit BEFORE posting any status:
 # a non-owner must never touch the owner's pi-review status lifecycle.
 acquire_commit_review_lock "$HEAD_SHA"
+acquire_review_cycle_lock
 
 REVIEW_RUN_DIR="$(mktemp -d /tmp/lobu-review.XXXXXX)"
 echo ">> review run: $REVIEW_RUN_DIR"
@@ -460,6 +390,11 @@ if [ -z "$RESUME_FILE" ] && [ -z "$(git status --porcelain)" ] && [ "$REVIEWER_M
     echo "verdict: $SKIP_DESCRIPTION"
     echo "  (pass REVIEWER_MODE=full to force the cross-harness review)"
     echo "=========================================="
+    if ! ci_run_green_for_head; then
+      finalize_review_status pending "Safe-class change; waiting for CI on $HEAD_SHA"
+      skip_verdict_json "$REVIEW_SKIP_REASON" | jq -c .
+      exit 2
+    fi
     finalize_review_status success "$SKIP_DESCRIPTION (REVIEWER_MODE=full to force)"
     post_skip_comment "$SKIP_DESCRIPTION"
     skip_verdict_json "$REVIEW_SKIP_REASON" | jq -c .
@@ -470,8 +405,32 @@ fi
 
 REVIEW_ROOT_DIR="$REVIEW_RUN_DIR"
 AUTOFIX_PASSES=0
+REVIEWER_SIG="$(review_reviewer_signature)"
+REVIEW_PREVIOUS_TREE=""
+REVIEW_PREVIOUS_BASE=""
+REVIEW_PREVIOUS_THREAD=""
+REVIEW_PREVIOUS_VERDICT=null
+CYCLE_FILE="$(review_cycle_file)"
+if [ -f "$CYCLE_FILE" ]; then
+  jq -e '(.passes | type == "number" and floor == . and . >= 0 and . <= 2)' "$CYCLE_FILE" >/dev/null || {
+    echo "Invalid review cycle state: $CYCLE_FILE" >&2; exit 2;
+  }
+  AUTOFIX_PASSES="$(jq -r .passes "$CYCLE_FILE")"
+  if jq -e --arg sig "$REVIEWER_SIG" '.reviewer_sig == $sig' "$CYCLE_FILE" >/dev/null; then
+    REVIEW_PREVIOUS_TREE="$(jq -r '.tree // ""' "$CYCLE_FILE")"
+    REVIEW_PREVIOUS_BASE="$(jq -r '.base // ""' "$CYCLE_FILE")"
+    REVIEW_PREVIOUS_THREAD="$(jq -r '.thread // ""' "$CYCLE_FILE")"
+    REVIEW_PREVIOUS_VERDICT="$(jq -c '.verdict // null' "$CYCLE_FILE")"
+  fi
+fi
+if [ -n "$RESUME_FILE" ]; then
+  resume_passes="$(printf '%s\n' "$RESUME_CONTEXT" | jq -er '.autofix_passes | select(type == "number" and floor == . and . >= 0 and . <= 2)')" || exit 2
+  if [ "$resume_passes" -gt "$AUTOFIX_PASSES" ]; then AUTOFIX_PASSES="$resume_passes"; fi
+fi
 HANDOFF_REASON=""
 FIX_DECISIONS='[]'
+RESUME_PENDING=0
+[ -z "$RESUME_FILE" ] || RESUME_PENDING=1
 while :; do
   REVIEW_RUN_DIR="$REVIEW_ROOT_DIR/pass-$AUTOFIX_PASSES"
   mkdir -p "$REVIEW_RUN_DIR"
@@ -487,7 +446,6 @@ while :; do
   CACHE_FILE="$(review_cache_lookup "$DIFF_HASH" "$REVIEWER_SIG" || true)"
   CACHE_HIT=0
   REVIEWER_EXIT=0
-  if [ "$AUTOFIX_PASSES" -gt 0 ]; then CACHE_FILE=""; fi
   if [ -n "$CACHE_FILE" ]; then
     # SCHEMA_JQ validates a verdict object; the cache file wraps it in .verdict,
     # so pipe the wrapper field into the same predicate used at store time.
@@ -503,46 +461,23 @@ while :; do
     fi
   fi
 
-  if [ -n "$RESUME_FILE" ] && [ "$AUTOFIX_PASSES" -eq 0 ]; then
+  if [ "$RESUME_PENDING" = 1 ]; then
+    RESUME_PENDING=0
     if [ "$REVIEW_TREE" != "$(printf '%s\n' "$RESUME_CONTEXT" | jq -r .tree)" ]; then
       echo 'Tree changed after resume validation; refusing stale findings' >&2
       exit 2
     fi
-    VERDICT="$(printf '%s\n' "$RESUME_CONTEXT" | jq -c .findings)"
-    CACHE_HIT=1
-    CI_CHECKS_FILE="(resuming prior findings)"
-    echo ">> resuming findings with explicit parent instructions"
-  fi
-
-  # True when a completed ci.yml run for the exact commit passed.
-  # ci.yml triggers on pull_request events, so runs are found by head sha.
-  #
-  # Asks across every run for the sha rather than the single newest one: a push
-  # can dispatch two runs in the same second, the concurrency group cancels the
-  # duplicate, and both then carry an identical `createdAt`. `--limit 1` orders
-  # by that timestamp, so it returns the cancelled twin about half the time and
-  # the gate rejects a commit whose CI is green. Any completed success for this
-  # sha validated this exact tree, which is what the gate needs to establish.
-  ci_run_green_for_head() {
-    local sha="$1"
-    gh run list --workflow=ci.yml --commit "$sha" --limit 20 \
-      --json status,conclusion \
-      --jq 'any(.[]; .status == "completed" and .conclusion == "success")' \
-      2>/dev/null | grep -qx true
-  }
-
-  # A fresh full review must reuse the exact committed tree that GitHub CI
-  # validated. Refuse to surprise the operator with a CPU-heavy local package
-  # build; the explicit override is for when CI cannot run for this HEAD.
-  GITHUB_CI_GREEN=0
-  if { [ -z "$(git status --porcelain)" ] || [ -n "$RESUME_FILE" ]; } && ci_run_green_for_head "$HEAD_SHA"; then
-    GITHUB_CI_GREEN=1
-  fi
-  if [ "$GITHUB_CI_GREEN" != "1" ] && [ "$REVIEW_ALLOW_LOCAL_BUILD" != "1" ] && [ "$AUTOFIX_PASSES" -eq 0 ]; then
-    echo "make review requires GitHub CI (workflow ci.yml) to have passed for $HEAD_SHA." >&2
-    echo "Push the commit and wait for the PR's CI to finish, then re-run." >&2
-    echo "Override only when CI cannot run: REVIEW_ALLOW_LOCAL_BUILD=1 make review" >&2
-    exit 2
+    if printf '%s\n' "$RESUME_CONTEXT" | jq -e --arg tree "$REVIEW_TREE" \
+        '.reviewed_tree == $tree and .findings.decision != "verification_blocked"' >/dev/null; then
+      VERDICT="$(printf '%s\n' "$RESUME_CONTEXT" | jq -c .findings)"
+      CACHE_HIT=1
+      CI_CHECKS_FILE="(resuming prior findings)"
+      echo ">> resuming findings with explicit parent instructions"
+    else
+      # A partial writer tree or newly available verification requires a fresh
+      # read-only turn, even if the old blocked verdict was cached.
+      CACHE_HIT=0
+    fi
   fi
 
   if [ "$CACHE_HIT" != "1" ]; then
@@ -556,9 +491,8 @@ while :; do
     post_review_status pending "$REVIEWER_CLI_SELECTED review running"
   fi
 
-  # --- run path: snapshot, build, reviewer ------------------------------------
-  # Only reached when there is no usable cached verdict. Snapshotting CI, the
-  # build, and the reviewer session are all only useful for a fresh review.
+  # --- run path: snapshot and reviewer ------------------------------------
+  # Only reached when there is no usable cached verdict.
   if [ "$CACHE_HIT" != "1" ]; then
 
   # --- CI check snapshot -------------------------------------------------------
@@ -582,29 +516,6 @@ while :; do
   fi
   echo ">> CI check snapshot → $CI_CHECKS_FILE"
   sed 's/^/>>   /' "$CI_CHECKS_FILE"
-
-  # --- build ------------------------------------------------------------------
-  # The reviewer's exploratory probes (targeted bun test runs, CLI invocations)
-  # need workspace packages built. Reuse the clean tree GitHub CI already built;
-  # otherwise rebuild locally so a stale or missing dist cannot create noise.
-
-  BUILD_LOG="$REVIEW_RUN_DIR/build.log"
-  if [ "$GITHUB_CI_GREEN" = "1" ] || [ "${REVIEW_BUILD_ATTEMPTED:-0}" = "1" ]; then
-    REVIEW_BUILD_ATTEMPTED=1
-    echo ">> reusing package build; focused tests cover write-phase edits"
-    printf 'Reused build for %s (write pass %s)\n' "$HEAD_SHA" "$AUTOFIX_PASSES" > "$BUILD_LOG"
-    BUILD_EXIT=0
-  else
-    REVIEW_BUILD_ATTEMPTED=1
-    echo ">> make build-packages → $BUILD_LOG"
-    set +e
-    run_review_child make build-packages > "$BUILD_LOG" 2>&1
-    BUILD_EXIT=$?
-    set -e
-    if [ $BUILD_EXIT -ne 0 ]; then
-      echo "!! build failed (exit $BUILD_EXIT) — proceeding so $REVIEWER_CLI_SELECTED can review the diff, but exploratory probes may fail" >&2
-    fi
-  fi
 
   # --- agent review -----------------------------------------------------------
 
@@ -631,7 +542,22 @@ process.stdout.write(fs.readFileSync(process.argv[2], 'utf8')
   .replaceAll('$BASE_BRANCH...HEAD', target));
 JS
   printf '\nReview target tree: %s (driver HEAD %s). Inspect uncommitted edits too.\n' "$REVIEW_TREE" "$HEAD_SHA" >> "$REVIEW_PROMPT_FILE"
-  printf '\n\nReview the diff. Emit only the JSON verdict.\n' >> "$REVIEW_PROMPT_FILE"
+  if [ -n "$REVIEW_PREVIOUS_TREE" ] && git cat-file -e "$REVIEW_PREVIOUS_TREE^{tree}" 2>/dev/null; then
+    {
+      printf '\nPrevious reviewed tree: %s\n' "$REVIEW_PREVIOUS_TREE"
+      printf 'Previous verdict: %s\n' "$REVIEW_PREVIOUS_VERDICT"
+      printf 'Fix delta: git diff %s %s\n' "$REVIEW_PREVIOUS_TREE" "$REVIEW_TREE"
+      if [ "$REVIEW_PREVIOUS_BASE" = "$MERGE_BASE" ]; then
+        printf 'Verify prior blocking findings and inspect the delta plus affected callers for regressions. Expand to a full review if scope or risk expanded. Do not reopen optional suggestions without new evidence.\n'
+      else
+        printf 'The merge base changed. Perform a full review against the new base.\n'
+      fi
+    } >> "$REVIEW_PROMPT_FILE"
+  fi
+  if [ -n "$RESUME_FILE" ]; then
+    printf '\nDriving agent instructions: %s\n' "$PARENT_INSTRUCTIONS" >> "$REVIEW_PROMPT_FILE"
+  fi
+  printf '\n\nEmit only the JSON verdict, binding verification.tree to %s.\n' "$REVIEW_TREE" >> "$REVIEW_PROMPT_FILE"
   run_reviewer "$REVIEW_PROMPT_FILE"
   rm -f "$REVIEW_PROMPT_FILE"
 
@@ -641,7 +567,7 @@ JS
 
   # A cache hit skips the reviewer, so REVIEWER_EXIT stays 0 and its verdict
   # already passed this predicate at lookup.
-  if [ "$REVIEWER_EXIT" -ne 0 ] || ! echo "$VERDICT" | jq -e "$SCHEMA_JQ" >/dev/null 2>&1; then
+  if [ "$REVIEWER_EXIT" -ne 0 ] || ! echo "$VERDICT" | jq -e "$SCHEMA_JQ and .verification.tree == \"$REVIEW_TREE\"" >/dev/null 2>&1; then
     if [ "$REVIEWER_EXIT" -ne 0 ]; then
       REVIEW_FAILURE_DETAIL="reviewer process exited with status $REVIEWER_EXIT"
     else
@@ -669,6 +595,11 @@ JS
     review_cache_store "$DIFF_HASH" "$REVIEWER_SIG" "$BASE_BRANCH" "$HEAD_SHA" "$VERDICT"
   fi
 
+  REVIEW_PREVIOUS_TREE="$REVIEW_TREE"
+  REVIEW_PREVIOUS_BASE="$MERGE_BASE"
+  REVIEW_PREVIOUS_VERDICT="$VERDICT"
+  review_cycle_save
+
   # REVIEWER_SHADOW measurement: the skip classifier said "safe" but the full
   # review ran anyway. Record both so the false-skip rate can be measured instead
   # of asserted. Only logged for skip-eligible diffs (the population the rule is
@@ -684,35 +615,15 @@ JS
     echo ">> shadow audit: skip-eligible diff reviewed; recorded at $(review_cache_root)/shadow-audit.jsonl"
   fi
 
-  BUG_FREE="$(echo "$VERDICT" | jq -r .bug_free_confidence)"
-  BUGS="$(echo "$VERDICT" | jq -r .bugs)"
-  SLOP="$(echo "$VERDICT" | jq -r .slop)"
-  SIMPLICITY="$(echo "$VERDICT" | jq -r .simplicity)"
-  TESTS_ADEQUATE="$(echo "$VERDICT" | jq -r .tests_adequate)"
-  RISK="$(echo "$VERDICT" | jq -r .runtime_change_risk)"
-  BLOCKER_COUNT="$(echo "$VERDICT" | jq -r '.blockers|length')"
-  HEADLINE="bug_free $BUG_FREE, simplicity $SIMPLICITY, slop $SLOP, bugs $BUGS, $BLOCKER_COUNT blockers, risk $RISK"
-  STATUS_STATE="success"
-  STATUS_REASONS=()
-  [ "$BUG_FREE" -ge "$PI_REVIEW_MIN_BUG_FREE" ] || STATUS_REASONS+=("bug_free<$PI_REVIEW_MIN_BUG_FREE")
-  [ "$BUGS" -eq 0 ] || STATUS_REASONS+=("bugs>0")
-  [ "$SLOP" -le "$PI_REVIEW_MAX_SLOP" ] || STATUS_REASONS+=("slop>$PI_REVIEW_MAX_SLOP")
-  [ "$SIMPLICITY" -ge "$PI_REVIEW_MIN_SIMPLICITY" ] || STATUS_REASONS+=("simplicity<$PI_REVIEW_MIN_SIMPLICITY")
-  [ "$BLOCKER_COUNT" -eq 0 ] || STATUS_REASONS+=("blockers>0")
-  [ "$TESTS_ADEQUATE" = "true" ] || STATUS_REASONS+=("tests inadequate")
-  # `runtime_change_risk` is REPORTED in the headline (see HEADLINE above) but
-  # never gates. The check exists so the reviewer catches DEFECTS before a merge,
-  # and bugs/blockers already cover those; a self-reported tier is not a defect.
-  # Its rubric (docs/REVIEW_SCHEMA.md) classifies any queue/scheduler/retry change
-  # as "high", so gating on it blocked routine fixes at 0 bugs and 0 blockers, and
-  # the only way past was disabling enforce_admins on main — strictly worse than
-  # merging the change under review. Gate matrix is tested in
-  # scripts/lib/__tests__/review-reviewer.test.sh.
-  if [ "${#STATUS_REASONS[@]}" -gt 0 ]; then
-    STATUS_STATE="failure"
-    STATUS_DESCRIPTION="$HEADLINE; $(IFS=', '; echo "${STATUS_REASONS[*]}")"
-  else
-    STATUS_DESCRIPTION="$HEADLINE"
+  DECISION="$(echo "$VERDICT" | jq -r .decision)"
+  BLOCKER_COUNT="$(echo "$VERDICT" | jq '[.findings[] | select(.blocking)] | length')"
+  HEADLINE="$DECISION; $BLOCKER_COUNT blocking findings"
+  STATUS_STATE=failure
+  STATUS_DESCRIPTION="$HEADLINE"
+  if [ "$DECISION" = pass ]; then STATUS_STATE=success; fi
+  if [ "$DECISION" = verification_blocked ]; then
+    HANDOFF_REASON=verification_blocked
+    break
   fi
 
   if [ "$STATUS_STATE" = success ]; then
@@ -727,20 +638,28 @@ JS
     HANDOFF_REASON="autofix_limit"
     break
   fi
+  if [ "$(git rev-parse HEAD)" != "$HEAD_SHA" ] || [ "$(review_worktree_tree)" != "$REVIEW_TREE" ]; then
+    echo 'Tree moved before the write phase; refusing stale fixes' >&2
+    exit 1
+  fi
   AUTOFIX_PASSES=$((AUTOFIX_PASSES + 1))
+  # Consume the slot before dispatch, including failures/interruption. Resume
+  # or a plain rerun cannot silently buy another two automatic writes.
+  review_cycle_save
   FIX_RESULT="$REVIEW_ROOT_DIR/fix-$AUTOFIX_PASSES.json"
   echo ">> write phase $AUTOFIX_PASSES/$REVIEW_MAX_AUTOFIX_PASSES; findings: $REVIEW_RUN_DIR/findings.json"
-  WRITE_FINDINGS="$REVIEW_RUN_DIR/findings.json"
-  if [ -n "$RESUME_FILE" ]; then
-    WRITE_FINDINGS="$REVIEW_RUN_DIR/write-context.json"
-    jq -n --argjson findings "$VERDICT" --argjson prior "$RESUME_CONTEXT" \
-      --arg instructions "$PARENT_INSTRUCTIONS" \
-      '{findings:$findings,prior_decisions:$prior.decisions,parent_instructions:$instructions}' > "$WRITE_FINDINGS"
-  fi
+  WRITE_FINDINGS="$REVIEW_RUN_DIR/write-context.json"
+  jq -n --argjson verdict "$VERDICT" --argjson prior "${RESUME_CONTEXT:-null}" \
+    --arg instructions "${PARENT_INSTRUCTIONS:-}" \
+    '{findings:[$verdict.findings[] | select(.blocking)],prior_decisions:($prior.decisions // []),parent_instructions:$instructions}' > "$WRITE_FINDINGS"
   if ! run_review_child bash "$SCRIPT_DIR/lib/review-write.sh" --base "$BASE_BRANCH" \
       --findings "$WRITE_FINDINGS" --result "$FIX_RESULT"; then
     HANDOFF_REASON="fixer_failed"
     break
+  fi
+  if [ "$(git rev-parse HEAD)" != "$HEAD_SHA" ]; then
+    echo 'Writer changed HEAD; refusing its result' >&2
+    exit 1
   fi
   if ! review_validate_fix_result "$FIX_RESULT"; then
     HANDOFF_REASON="invalid_fixer_result"
@@ -755,7 +674,8 @@ JS
     HANDOFF_REASON="focused_tests_failed_or_missing"
     break
   fi
-  # Loop into a NEW read-only review. The writer's summary cannot approve it.
+  # Resume the independent read-only reviewer. Its output must name the new
+  # tree; the writer's summary cannot approve its own fixes.
 done
 
 if [ -n "$HANDOFF_REASON" ]; then
@@ -789,6 +709,11 @@ if [ "$GH_AVAILABLE" = "1" ]; then
   PR_URL="$(echo "$PR_JSON" | jq -r '.url // empty' 2>/dev/null || true)"
 fi
 
+if [ "$STATUS_STATE" = success ] && ! ci_run_green_for_head; then
+  STATUS_STATE=pending
+  STATUS_DESCRIPTION="Review passed; waiting for CI on $HEAD_SHA"
+  echo ">> semantic verdict saved; rerun after CI without another model review"
+fi
 finalize_review_status "$STATUS_STATE" "$STATUS_DESCRIPTION" "$PR_URL"
 
 if [ -z "$PR_NUMBER" ]; then
@@ -797,21 +722,10 @@ else
   # A push between the final status and this comment would make the displayed
   # verdict stale even though branch protection correctly blocks the new head.
   review_assert_head_is_current "$HEAD_SHA" "$PI_REVIEW_STATUS_CONTEXT" || exit 2
-  NOTES="$(echo "$VERDICT" | jq -r '.notes // ""')"
-  if [ -n "$HANDOFF_REASON" ]; then NOTES="Driver handoff: $HANDOFF_REASON. $NOTES"; fi
   PRETTY="$(echo "$VERDICT" | jq .)"
-  SUGGESTIONS_TABLE="$(echo "$VERDICT" | jq -r '
-    if (.suggested_fixes // []) | length == 0 then ""
-    else "\n\n### Suggested fixes\n\n| File | Line | Change |\n| --- | --- | --- |\n" +
-      ((.suggested_fixes // []) | map("| `\(.file)` | \(.line // "") | \(.change) |") | join("\n"))
-    end')"
-  BLOCKERS_LIST="$(echo "$VERDICT" | jq -r '
-    if (.blockers // []) | length == 0 then ""
-    else "\n\n### Blockers\n\n" + ((.blockers // []) | map("- " + .) | join("\n"))
-    end')"
-  # shellcheck disable=SC2016
-  SUMMARY="$(printf '**%s**\n\n%s%s%s\n\n<details><summary>Full verdict JSON</summary>\n\n```json\n%s\n```\n\n</details>\n\n_Local review gate — branch protection can require the `pi-review` commit status. See `docs/REVIEW_SCHEMA.md`._' \
-    "$HEADLINE" "$NOTES" "$BLOCKERS_LIST" "$SUGGESTIONS_TABLE" "$PRETTY")"
+  FINDINGS_LIST="$(echo "$VERDICT" | jq -r '.findings | map("- " + (if .blocking then "**Blocking** " else "Optional: " end) + "`" + .file + ":" + ((.line // "") | tostring) + "`: " + .issue + " Evidence: " + .evidence) | join("\n")')"
+  # shellcheck disable=SC2016 # Markdown fences are literal.
+  SUMMARY="$(printf '**%s**\n\n%s\n\n<details><summary>Verification and full verdict</summary>\n\n```json\n%s\n```\n\n</details>' "$STATUS_DESCRIPTION" "$FINDINGS_LIST" "$PRETTY")"
 
   MARKER="<!-- pi-review-marker -->"
   COMMENT_BODY="$MARKER
@@ -830,4 +744,5 @@ fi
 # Last line: machine-readable verdict for $(make review) capture.
 echo "$VERDICT" | jq -c .
 
+[ "$STATUS_STATE" != pending ] || exit 2
 [ "$STATUS_STATE" = success ] || exit 1

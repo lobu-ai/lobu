@@ -119,3 +119,53 @@ review_validate_fix_result() {
       (.command | type == "string" and length > 0) and (.passed | type == "boolean")))
   ' "$1" >/dev/null 2>&1
 }
+
+# Validate the closed verdict plus the decision/findings relationship. The tree
+# binds an output to this request even when a BB session has older verdicts.
+review_verdict_predicate() {
+  cat <<'JQ'
+def text: type == "string" and length > 0;
+def strings: type == "array" and all(.[]; text);
+(type == "object" and (keys == ["decision","findings","verification"])) and
+(.decision | IN("pass","changes_needed","verification_blocked")) and
+(.findings | type == "array" and all(.[];
+  type == "object" and (keys == ["blocking","evidence","file","issue","line"]) and
+  (.file | text) and (.issue | text) and (.evidence | text) and
+  (.blocking | type == "boolean") and
+  (.line == null or (.line | type == "number" and floor == . and . >= 1)))) and
+(.verification | type == "object" and (keys == ["checked","missing","tree"]) and
+  (.tree | type == "string" and test("^[0-9a-f]{40,64}$")) and
+  (.checked | strings) and (.missing | strings)) and
+(if .decision == "pass" then
+  all(.findings[]; .blocking == false) and (.verification.missing | length == 0)
+elif .decision == "changes_needed" then any(.findings[]; .blocking)
+else (.verification.missing | length > 0) end)
+JQ
+}
+
+# Accept one JSON object with optional surrounding prose/fences. Never choose
+# arbitrarily between multiple verdicts. json's decoder handles escaped quotes
+# and braces in evidence strings, which hand-written brace scanners got wrong.
+extract_json_verdict() {
+  printf '%s\n' "$1" | python3 -c '
+import json, sys
+raw = sys.stdin.read()
+decoder = json.JSONDecoder()
+objects = []
+i = 0
+while i < len(raw):
+    if raw[i] != "{":
+        i += 1
+        continue
+    try:
+        value, end = decoder.raw_decode(raw, i)
+    except ValueError:
+        i += 1
+        continue
+    objects.append(value)
+    i = end
+if len(objects) != 1:
+    sys.exit(1)
+print(json.dumps(objects[0]))
+'
+}

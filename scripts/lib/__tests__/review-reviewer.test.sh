@@ -130,80 +130,16 @@ rm -f "$config_dir/.env" "$config_dir/.env.local"
 rm -rf "$config_dir"
 trap - EXIT
 
-grep -Fq 'CODEX_REVIEW_EFFORT="${CODEX_REVIEW_EFFORT:-xhigh}"' "$review_script" ||
-  fail "Codex reviewer must default to xhigh reasoning effort"
-
-grep -Fq 'review_require_model "$REVIEWER_CLI_SELECTED"' "$review_script" ||
-  fail "review.sh must fail closed on disallowed Claude reviewer models"
-
-schema_arg_count="$(grep -F -- '--json-schema "$(cat "$SCHEMA_FILE")"' "$review_script" | wc -l | tr -d ' ')"
-[ "$schema_arg_count" -eq 1 ] ||
-  fail "Claude reviewer must receive the verdict schema exactly once (inline path)"
-
-grep -Fq '2> "$diagnostic_file"' "$review_script" ||
-  fail "inline Codex reviewer stderr must be retained for fail-closed diagnostics"
-
-# pi was removed from the review gate: no pi invocation or pi-specific model
-# knobs may reappear in review.sh. The `pi-review` STATUS CONTEXT name is
-# unrelated — branch protection requires that exact status label.
-if grep -Eq 'pi -p|PI_REVIEW_MODEL|PI_REVIEW_PROVIDER' "$review_script"; then
-  fail "pi reviewer must not reappear in review.sh"
-fi
-
-if grep -Eiq 'herdr|CLAUDE_REVIEW_HERDR' "$review_script"; then
-  fail "review.sh must not reference Herdr (inline-only reviewer)"
-fi
-
-# --- pi-review gate matrix -------------------------------------------------
-# Extract the verdict→status block from review.sh and evaluate it directly, so
-# the gate SET is asserted semantically rather than by grepping for a line.
-# runtime_change_risk is reported in the headline but must never fail the
-# status; every defect/quality axis must still fail it.
-gate_block="$(sed -n '/^[[:space:]]*HEADLINE="bug_free /,/^[[:space:]]*fi$/p' "$review_script")"
-[ -n "$gate_block" ] ||
-  fail "could not extract the pi-review gate block from review.sh"
-
-# usage: run_gate BUG_FREE BUGS SLOP SIMPLICITY TESTS_ADEQUATE RISK BLOCKERS
-run_gate() {
-  BUG_FREE="$1" BUGS="$2" SLOP="$3" SIMPLICITY="$4" TESTS_ADEQUATE="$5" \
-  RISK="$6" BLOCKER_COUNT="$7" \
-  PI_REVIEW_MIN_BUG_FREE=80 PI_REVIEW_MAX_SLOP=15 PI_REVIEW_MIN_SIMPLICITY=70 \
-  bash -c "$gate_block"'
-printf "%s|%s\n" "$STATUS_STATE" "$STATUS_DESCRIPTION"'
-}
-
-# A high-risk verdict that is otherwise clean must SUCCEED, and must still
-# surface the tier in the description so a human can weigh it.
-clean_high_risk="$(run_gate 88 0 0 95 true high 0)"
-case "$clean_high_risk" in
-  success\|*) ;;
-  *) fail "high risk must not fail the status (got: $clean_high_risk)" ;;
-esac
-case "$clean_high_risk" in
-  *"risk high"*) ;;
-  *) fail "headline must report the risk tier (got: $clean_high_risk)" ;;
-esac
-
-# Every defect/quality axis must still gate. Guards the removal from widening
-# past runtime_change_risk.
-assert_gate_fails() {
-  local label="$1" result="$2" expected="$3"
-  case "$result" in
-    failure\|*) ;;
-    *) fail "$label must fail the status (got: $result)" ;;
-  esac
-  case "$result" in
-    *"$expected"*) ;;
-    *) fail "$label must report '$expected' (got: $result)" ;;
-  esac
-}
-
-assert_gate_fails "low bug_free"   "$(run_gate 70 0 0 95 true none 0)"  "bug_free<80"
-assert_gate_fails "bugs>0"         "$(run_gate 88 1 0 95 true none 0)"  "bugs>0"
-assert_gate_fails "high slop"      "$(run_gate 88 0 20 95 true none 0)" "slop>15"
-assert_gate_fails "low simplicity" "$(run_gate 88 0 0 50 true none 0)"  "simplicity<70"
-assert_gate_fails "blockers"       "$(run_gate 88 0 0 95 true none 2)"  "blockers>0"
-assert_gate_fails "tests"          "$(run_gate 88 0 0 95 false none 0)" "tests inadequate"
+# Recover a completed verdict wrapped in prose/fences, including escaped quotes
+# and braces inside evidence. Ambiguous multiple objects must fail closed.
+parser_input='{"decision":"pass","evidence":"a \"quoted\" {value} and \\ path"}'
+parsed="$(extract_json_verdict "Completed review:
+\`\`\`json
+$parser_input
+\`\`\`")" || fail 'wrapped verdict was not recovered'
+[ "$(printf '%s' "$parsed" | jq -c .)" = "$(printf '%s' "$parser_input" | jq -c .)" ] || fail 'escaped evidence was altered'
+if extract_json_verdict '{} {}' >/dev/null 2>&1; then fail 'ambiguous verdicts accepted'; fi
+if extract_json_verdict 'unfinished {' >/dev/null 2>&1; then fail 'malformed verdict accepted'; fi
 
 # Submodule guard (review_refuse_submodule): both scripts must refuse a start
 # inside a submodule checkout before touching GitHub or a reviewer CLI.

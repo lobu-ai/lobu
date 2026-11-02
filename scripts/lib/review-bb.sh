@@ -175,7 +175,7 @@ review_bb_find_child() {
   list_json="$(review_bb_cli_invoke thread list --parent-thread "$BB_THREAD_ID" --include-hidden --json 2>/dev/null)" || return 0
   row="$(printf '%s\n' "$list_json" | jq -r --arg t "$title" '
     (if type == "array" then . else (.threads // .items // []) end)
-    | map(select(.title == $t))
+    | map(select(.title == $t or .title == ($t + " (format-repair)")))
     | sort_by(.updatedAt // .createdAt // 0)
     | last // empty
     | "\(.id) \(.status)"' 2>/dev/null || true)"
@@ -319,8 +319,8 @@ threads, and do NOT retry or re-dispatch this review.
 
 - The driver HEAD is $head_sha; review the target tree specified in the prompt
   against base $base_branch (including any specified uncommitted edits).
-  Validate with \`git rev-parse HEAD\` before scoring; if HEAD differs, say so
-  in your verdict notes and score what is actually checked out.
+  Validate with \`git rev-parse HEAD\` before reviewing; if HEAD differs, say so
+  as a verification gap. Do not approve a different tree.
 - Read-only: do NOT edit, commit, push, or post statuses or comments. The
   driver posts the verdict.
 - Emit ONLY the JSON verdict object the review prompt specifies. No prose,
@@ -401,7 +401,7 @@ review_bb_run_reviewer() {
   worktree="$(pwd -P)"
   title="$(review_bb_review_title "$(git branch --show-current 2>/dev/null || printf '%s' "$base_branch")" "$head_sha" "$reviewer" "$model" "$effort" "$diff_hash" "$pr") $(printf '%s' "$worktree" | review_sha256 | cut -c1-12)"
 
-  if [ -n "${10:-}" ]; then title="$title verify-${10}"; fi
+  if [ -n "${10:-}" ]; then title="$title $(printf '%s' "${10}" | review_sha256 | cut -c1-12)"; fi
 
   # Dedup: reuse or adopt an existing child bound to these exact inputs.
   child="$(review_bb_find_child "$title")"
@@ -413,14 +413,36 @@ review_bb_run_reviewer() {
         pending="$(review_bb_pending_interaction "$existing_id")" || pending=unknown
         out="$(review_bb_child_output "$existing_id")"
         verdict="$(extract_json_verdict "$out" 2>/dev/null || true)"
+        if [ -n "${REVIEW_TREE:-}" ] && printf '%s\n' "$verdict" | jq -e \
+            --arg tree "$REVIEW_TREE" '.verification.tree != null and .verification.tree != $tree' >/dev/null 2>&1; then
+          RAW="review_bb: existing output belongs to another tree; refusing to relabel stale evidence"
+          return 0
+        fi
         if [ "$pending" = "0" ] && [ -n "$verdict" ] &&
            printf '%s\n' "$verdict" | jq -e "$schema_jq" >/dev/null 2>&1; then
           echo ">> reusing visible BB child @thread:$existing_id for identical review inputs" >&2
           child="$existing_id"
+        elif [ "$pending" = 0 ] && [ -n "$out" ] &&
+             [ "$(review_bb_env_path "$existing_id")" = "$worktree" ] &&
+             [ "$(review_bb_cli_invoke thread show "$existing_id" --json | jq -r '.thread.title // ""')" != "$title (format-repair)" ]; then
+          # Repair formatting once in the same session; never repeat the audit
+          # because the provider wrapped a completed verdict in prose.
+          bb_prompt="$(mktemp /tmp/lobu-review-format.XXXXXX)"
+          printf 'Return your completed review as exactly one JSON object matching this schema. Do not inspect code or run checks again. The target tree is %s.\n' "${REVIEW_TREE:-$head_sha}" > "$bb_prompt"
+          cat "$(git rev-parse --show-toplevel)/prompts/review-output-schema.json" >> "$bb_prompt"
+          review_bb_register_child "$existing_id"
+          if ! review_bb_cli_invoke thread tell "$existing_id" --message-file "$bb_prompt" --mode auto --json |
+              jq -e '.delivery == "sent"' >/dev/null; then
+            rm -f "$bb_prompt"
+            RAW="review_bb: could not request corrected output from @thread:$existing_id"
+            return 0
+          fi
+          rm -f "$bb_prompt"
+          review_bb_cli_invoke thread update "$existing_id" --title "$title (format-repair)" --json >/dev/null || return 0
+          child="$existing_id"
         else
-          echo ">> existing child @thread:$existing_id is idle but has no valid verdict; spawning a retry" >&2
-          title="$title (retry $(date +%s))"
-          child=""
+          RAW="review_bb: existing reviewer @thread:$existing_id has no usable verdict or needs attention; refusing a fresh paid review"
+          return 0
         fi
         ;;
       active|starting|stopping|pending)
@@ -429,11 +451,37 @@ review_bb_run_reviewer() {
         child="$existing_id"
         ;;
       *)
-        echo ">> existing child @thread:$existing_id is $status; spawning a fresh child" >&2
-        title="$title (retry $(date +%s))"
-        child=""
+        RAW="review_bb: existing reviewer @thread:$existing_id is $status; inspect its quota/auth/error before resuming"
+        return 0
         ;;
     esac
+  fi
+
+  # Continue the independent read-only reviewer after a separate writer.
+  # An exact-request child above wins on a retry. The output predicate includes
+  # verification.tree, so an old turn can never approve the new target.
+  if [ -z "${child:-}" ] && [ -n "${REVIEW_PREVIOUS_THREAD:-}" ]; then
+    local previous="$REVIEW_PREVIOUS_THREAD" delivery
+    if [ "$(review_bb_env_path "$previous")" = "$worktree" ] &&
+       review_bb_child_settled_idle "$previous" &&
+       [ "$(review_bb_pending_interaction "$previous")" = 0 ]; then
+      bb_prompt="$(review_bb_inline_prompt "$prompt_file" "$head_sha" "$base_branch" "$ci_file" review)" || return 0
+      review_bb_register_child "$previous"
+      if ! delivery="$(review_bb_cli_invoke thread tell "$previous" --message-file "$bb_prompt" \
+          --mode auto --model "$bb_model" --reasoning-level "$effort" --json)" ||
+         ! printf '%s\n' "$delivery" | jq -e '.delivery == "sent"' >/dev/null; then
+        RAW="review_bb: reviewer continuation was not dispatched; inspect @thread:$previous"
+        rm -f "$bb_prompt"
+        return 0
+      fi
+      rm -f "$bb_prompt"
+      review_bb_cli_invoke thread update "$previous" --title "$title" --json >/dev/null || return 0
+      echo ">> continuing independent reviewer @thread:$previous for the fix delta" >&2
+      child="$previous"
+    else
+      RAW="review_bb: prior reviewer @thread:$previous is unavailable or blocked; refusing a fresh review loop"
+      return 0
+    fi
   fi
 
   if [ -z "${child:-}" ]; then
@@ -502,6 +550,7 @@ review_bb_run_reviewer() {
   fi
   RAW="$out"
   REVIEWER_EXIT=0
+  REVIEW_PREVIOUS_THREAD="$child"
   review_bb_persist_output "$out"
   return 0
 }

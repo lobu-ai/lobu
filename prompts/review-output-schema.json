@@ -1,100 +1,64 @@
 {
   "type": "object",
-  "description": "Lobu merge-review verdict. Judge the diff against the requested base and report concrete changed-path defects only.",
   "additionalProperties": false,
-  "required": [
-    "bug_free_confidence",
-    "bugs",
-    "slop",
-    "simplicity",
-    "blockers",
-    "change_type",
-    "runtime_change_risk",
-    "tests_adequate",
-    "suggested_fixes",
-    "notes",
-    "categories"
-  ],
+  "required": ["decision", "findings", "verification"],
   "properties": {
-    "bug_free_confidence": {
-      "type": "integer",
-      "minimum": 0,
-      "maximum": 100,
-      "description": "Confidence that the diff is bug-free; 90 or more requires strong verification."
-    },
-    "bugs": {
-      "type": "integer",
-      "minimum": 0,
-      "description": "Count of concrete defects caused by the diff."
-    },
-    "slop": {
-      "type": "integer",
-      "minimum": 0,
-      "maximum": 100,
-      "description": "Amount of unnecessary or generated waste; lower is better."
-    },
-    "simplicity": {
-      "type": "integer",
-      "minimum": 0,
-      "maximum": 100,
-      "description": "How simple and maintainable the change is; higher is better."
-    },
-    "blockers": {
-      "type": "array",
-      "description": "Merge-blocking defects caused by the diff.",
-      "items": { "type": "string" }
-    },
-    "change_type": {
+    "decision": {
       "type": "string",
-      "enum": ["feat", "fix", "refactor", "docs", "chore", "test", "deps"]
+      "enum": ["pass", "changes_needed", "verification_blocked"]
     },
-    "runtime_change_risk": {
-      "type": "string",
-      "enum": ["none", "low", "medium", "high"]
-    },
-    "tests_adequate": {
-      "type": "boolean",
-      "description": "Whether runtime changes have adequate automated coverage."
-    },
-    "suggested_fixes": {
+    "findings": {
       "type": "array",
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["file", "line", "change"],
+        "required": ["file", "line", "blocking", "issue", "evidence"],
         "properties": {
-          "file": { "type": "string" },
-          "line": { "type": ["integer", "null"], "minimum": 1 },
-          "change": { "type": "string" }
+          "file": {
+            "type": "string",
+            "minLength": 1
+          },
+          "line": {
+            "type": ["integer", "null"],
+            "minimum": 1
+          },
+          "blocking": {
+            "type": "boolean"
+          },
+          "issue": {
+            "type": "string",
+            "minLength": 1
+          },
+          "evidence": {
+            "type": "string",
+            "minLength": 1
+          }
         }
       }
     },
-    "notes": {
-      "type": "string",
-      "description": "Concise review summary, including any non-blocking or environmental observations."
-    },
-    "categories": {
+    "verification": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "src",
-        "tests",
-        "docs",
-        "config",
-        "deps",
-        "migrations",
-        "ci",
-        "generated"
-      ],
+      "required": ["tree", "checked", "missing"],
       "properties": {
-        "src": { "type": "integer", "minimum": 0 },
-        "tests": { "type": "integer", "minimum": 0 },
-        "docs": { "type": "integer", "minimum": 0 },
-        "config": { "type": "integer", "minimum": 0 },
-        "deps": { "type": "integer", "minimum": 0 },
-        "migrations": { "type": "integer", "minimum": 0 },
-        "ci": { "type": "integer", "minimum": 0 },
-        "generated": { "type": "integer", "minimum": 0 }
+        "tree": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40,64}$"
+        },
+        "checked": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "missing": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
       }
     }
   }

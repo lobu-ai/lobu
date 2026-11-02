@@ -27,7 +27,9 @@ case "$1 $2" in
   'repo view') echo test/repo ;;
   'run list') echo "${TEST_CI_GREEN:-true}" ;;
   'pr view') exit 1 ;;
-  'api -X') printf '%s\n' "$*" >> "$TEST_STATE/statuses" ;;
+  'api -X')
+    if [ "${TEST_STATUS_FAIL:-false}" = true ] && [[ "$*" == *state=success* ]]; then exit 1; fi
+    printf '%s\n' "$*" >> "$TEST_STATE/statuses" ;;
   'api '*) echo 'unit: completed success' ;;
 esac
 CLI
@@ -52,7 +54,8 @@ printf '%s\n' "$mode" >> "$TEST_STATE/phases"
 if [ "$mode" = workspace-write ]; then
   printf 'write\n' >> "$TEST_STATE/writes"
   case "$SCENARIO" in
-    decision)
+    decision|partial-decision)
+      if [ "$SCENARIO" = partial-decision ]; then printf 'partial\n' > app.txt; fi
       printf '%s\n' '{"summary":"needs architecture decision","decisions":[{"kind":"architecture","finding":"contract change","question":"which contract?"}],"tests":[]}' > "$out"; exit ;;
     resume)
       [[ "$prompt" == *'Resolve the contract question using the existing contract.'* ]] || exit 9
@@ -78,9 +81,13 @@ git diff --stat $range | grep -q app.txt
 value="$(git show "$tree:app.txt")"
 [ "$value" = "$(cat app.txt)" ]
 bugs=0
-if [ "$SCENARIO" = cap ] || { [ "$SCENARIO" != clean ] && [ "$value" = broken ]; }; then bugs=1; fi
-jq -n --argjson bugs "$bugs" '{bug_free_confidence:90,bugs:$bugs,slop:0,simplicity:90,blockers:[],change_type:"fix",runtime_change_risk:"low",tests_adequate:true,suggested_fixes:[],notes:"fixture evidence",categories:{}}' > "$out"
+if [ "$SCENARIO" = cap ] || { [ "$SCENARIO" != clean ] && [ "$SCENARIO" != optional ] && [ "$SCENARIO" != blocked ] && [[ "$value" != fixed* ]]; }; then bugs=1; fi
+jq -n --argjson bugs "$bugs" --arg tree "$tree" '{decision:(if $bugs == 0 then "pass" else "changes_needed" end),findings:(if $bugs == 0 then [] else [{file:"app.txt",line:1,blocking:true,issue:"broken execution",evidence:"focused-test.sh fails on broken input"}] end),verification:{tree:$tree,checked:["fixture entrypoint"],missing:[]}}' > "$out"
 case "$SCENARIO" in
+  optional) jq '.findings=[{file:"app.txt",line:1,blocking:false,issue:"wording preference",evidence:"optional copy cleanup"}]' "$out" > "$out.tmp"; mv "$out.tmp" "$out" ;;
+  blocked) jq '.decision="verification_blocked" | .verification.missing=["required focused probe unavailable"]' "$out" > "$out.tmp"; mv "$out.tmp" "$out" ;;
+  stale) jq '.verification.tree="0000000000000000000000000000000000000000"' "$out" > "$out.tmp"; mv "$out.tmp" "$out" ;;
+  contradictory) jq '.decision="pass"' "$out" > "$out.tmp"; mv "$out.tmp" "$out.tmp2"; mv "$out.tmp2" "$out" ;;
   reviewer-error) exit 7 ;;
   concurrent) echo concurrent > app.txt ;;
 esac
@@ -132,6 +139,30 @@ bash scripts/ui-review-agent.sh "$tmp/context" "$tmp/ui.json" > "$tmp/output" 2>
 jq -e '.reviewer == "codex" and .has_ui_surface == false' "$tmp/ui.json" >/dev/null || fail 'UI reviewer did not return a verdict'
 EXPECTED_REVIEW_MODEL=exported-sol CODEX_REVIEW_MODEL=exported-sol \
   bash scripts/ui-review-agent.sh "$tmp/context" "$tmp/ui.json" > "$tmp/output" 2>&1 || fail 'UI reviewer exported model was overridden'
+# Semantic review starts before CI, and publication retries spend no tokens.
+TEST_CI_GREEN=false run_case clean
+[ "$rc" = 2 ] && [ "$(count reads)" = 1 ] && [ "$(count writes)" = 0 ] || fail 'review should run alongside CI'
+no_success
+bash scripts/review.sh > "$tmp/output" 2>&1 || fail 'saved review should publish after CI'
+sed -n 's/^>> review run: //p' "$tmp/output" >> "$tmp/roots"
+[ "$(count reads)" = 1 ] || fail 'CI publication retried the model'
+TEST_STATUS_FAIL=true run_case clean
+[ "$rc" = 1 ] && [ "$(count reads)" = 1 ] || fail 'status failure should retain the completed verdict'
+no_success
+bash scripts/review.sh > "$tmp/output" 2>&1 || fail 'status retry failed'
+sed -n 's/^>> review run: //p' "$tmp/output" >> "$tmp/roots"
+[ "$(count reads)" = 1 ] || fail 'status posting failure reran the model'
+run_case optional
+[ "$rc" = 0 ] && [ "$(count writes)" = 0 ] || fail 'optional suggestions must not reopen a passing review'
+run_case blocked
+[ "$rc" = 1 ] && [ "$(count writes)" = 0 ] || fail 'missing verification must hand off without speculative edits'
+blocked_handoff="$(sed -n 's/^>> structured parent handoff: //p' "$tmp/output")"
+printf 'The required probe is available now; verify the evidence again.\n' > "$tmp/instructions"
+export SCENARIO=clean
+blocked_rc=0
+bash scripts/review.sh --resume "$blocked_handoff" --instructions "$tmp/instructions" > "$tmp/output" 2>&1 || blocked_rc=$?
+sed -n 's/^>> review run: //p' "$tmp/output" >> "$tmp/roots"
+[ "$blocked_rc" = 0 ] && [ "$(count reads)" = 2 ] && [ "$(count writes)" = 0 ] || fail 'new verification evidence reused the old blocked verdict'
 run_case clean
 [ "$rc" = 0 ] && [ "$(count reads)" = 1 ] && [ "$(count writes)" = 0 ] || fail 'clean review failed'
 grep -q 'state=success' "$TEST_STATE/statuses" || fail 'clean status not posted'
@@ -155,6 +186,19 @@ grep -q 'state=success' "$TEST_STATE/statuses" || fail 'verified commit status m
 run_case cap
 [ "$rc" = 1 ] && [ "$(count reads)" = 3 ] && [ "$(count writes)" = 2 ] || fail 'autofix did not stop at two writes'
 no_success
+# The budget survives both explicit resume and a plain new invocation.
+cap_handoff="$(sed -n 's/^>> structured parent handoff: //p' "$tmp/output")"
+printf 'Only fix the reported issue.\n' > "$tmp/instructions"
+for args in plain resume; do
+  retry_rc=0
+  if [ "$args" = resume ]; then
+    bash scripts/review.sh --resume "$cap_handoff" --instructions "$tmp/instructions" > "$tmp/retry" 2>&1 || retry_rc=$?
+  else
+    bash scripts/review.sh > "$tmp/retry" 2>&1 || retry_rc=$?
+  fi
+  sed -n 's/^>> review run: //p' "$tmp/retry" >> "$tmp/roots"
+  [ "$retry_rc" = 1 ] && [ "$(count writes)" = 2 ] && [ "$(count reads)" = 3 ] || fail 'rerun/resume reset the budget or repeated the same review'
+done
 handoff autofix_limit
 run_case decision
 [ "$rc" = 1 ] && [ "$(count writes)" = 1 ] || fail 'decision did not stop writing'
@@ -167,10 +211,6 @@ before="$(count writes)"
 resume_rc=0
 bash scripts/review.sh --resume "$resume_handoff" > "$tmp/output" 2>&1 || resume_rc=$?
 [ "$resume_rc" = 2 ] && [ "$(count writes)" = "$before" ] || fail 'resume requires explicit instructions'
-resume_rc=0
-TEST_CI_GREEN=false bash scripts/review.sh --resume "$resume_handoff" --instructions "$tmp/instructions" > "$tmp/output" 2>&1 || resume_rc=$?
-[ "$resume_rc" = 2 ] && [ "$(count writes)" = "$before" ] || fail 'resume must not bypass CI on the input commit'
-sed -n 's/^>> review run: //p' "$tmp/output" >> "$tmp/roots"
 resume_rc=0
 bash scripts/review.sh --base HEAD --resume "$resume_handoff" --instructions "$tmp/instructions" > "$tmp/output" 2>&1 || resume_rc=$?
 [ "$resume_rc" = 2 ] && [ "$(count writes)" = "$before" ] || fail 'resume must reject a different merge base'
@@ -195,6 +235,18 @@ before="$(count writes)"
 resume_rc=0
 bash scripts/review.sh --resume "$resume_handoff" --instructions "$tmp/instructions" > "$tmp/output" 2>&1 || resume_rc=$?
 [ "$resume_rc" = 2 ] && [ "$(count writes)" = "$before" ] || fail 'stale resume must fail before writing'
+# A writer may leave partial edits before returning a decision. Resume must
+# review that tree, then verify the completed fix instead of relabeling the
+# old findings as a verdict on the partial tree.
+run_case partial-decision
+[ "$rc" = 1 ] && [ "$(cat app.txt)" = partial ] || fail 'partial decision fixture failed'
+partial_handoff="$(sed -n 's/^>> structured parent handoff: //p' "$tmp/output")"
+export SCENARIO=resume
+partial_rc=0
+bash scripts/review.sh --resume "$partial_handoff" --instructions "$tmp/instructions" > "$tmp/output" 2>&1 || partial_rc=$?
+sed -n 's/^>> review run: //p' "$tmp/output" >> "$tmp/roots"
+[ "$partial_rc" = 1 ] && [ "$(cat app.txt)" = fixed ] && [ "$(count reads)" = 3 ] && [ "$(count writes)" = 2 ] || fail 'partial decision resume did not verify both snapshots'
+handoff needs_commit
 run_case malformed
 [ "$rc" = 1 ] && [ "$(count reads)" = 1 ] || fail 'malformed fixer output accepted'
 no_success
@@ -203,7 +255,7 @@ run_case tests-fail
 [ "$rc" = 1 ] && [ "$(count reads)" = 1 ] || fail 'failed tests must stop verification'
 no_success
 handoff focused_tests_failed_or_missing
-for scenario in reviewer-error concurrent; do
+for scenario in reviewer-error concurrent stale contradictory; do
   run_case "$scenario"
   [ "$rc" = 1 ] && [ "$(count writes)" = 0 ] || fail "$scenario must reject verdict"
   no_success

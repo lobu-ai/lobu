@@ -59,7 +59,7 @@ cat > "$bounded_prompt" <<'PROMPT'
 
 You are the internal write phase of make review. Follow repository instructions.
 
-Fix ONLY findings whose correction is clear and supported by evidence. If uncertain,
+Fix ONLY supplied blocking findings whose correction is clear and supported by evidence. If uncertain,
 return a decision instead of guessing. The JSON may include explicit parent
 instructions resolving prior decisions; follow them within repository rules.
 Run focused tests for edits. Do not make product, architecture, API/SDK/DB,
@@ -69,7 +69,7 @@ run review drivers, spawn agents, commit, push, or post statuses.
 Emit exactly one JSON object, without fences or prose:
 {"summary":"what changed","decisions":[{"kind":"product|architecture|credentials|verification","finding":"unresolved finding","question":"decision needed from parent"}],"tests":[{"command":"focused command run","passed":true}]}
 Use empty arrays when appropriate. If tests cannot run, include a verification
-decision. A summary is never a passing review; a new read-only reviewer will
+decision. A summary is never a passing review; the independent read-only reviewer will
 inspect the changed tree independently.
 
 Findings:

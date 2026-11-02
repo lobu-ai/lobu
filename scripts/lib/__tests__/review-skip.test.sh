@@ -14,7 +14,8 @@ fail() {
 
 tmp_repo="$(mktemp -d /tmp/lobu-review-skip.XXXXXX)"
 sub_repo="${tmp_repo}.sub"
-trap 'rm -rf "$tmp_repo" "$sub_repo"' EXIT
+workflow_tmp="${tmp_repo}.workflow"
+trap 'rm -rf "$tmp_repo" "$sub_repo" "$workflow_tmp"' EXIT
 
 new_repo() {
   rm -rf "$tmp_repo" "$sub_repo"
@@ -222,7 +223,7 @@ assert_review "submodule bump + src change" "mixed with other changes"
 new_repo
 write_change bun.lock "{}"
 commit_all
-assert_skip "lockfile-only"
+assert_review "lockfile-only" "bun.lock"
 
 # Foreign and arbitrary *.lock files are not consumed by this Bun workspace's
 # dependency gates, so a suffix alone must not suppress review.
@@ -449,7 +450,7 @@ git -C "$tmp_repo" add -A
 git -C "$tmp_repo" commit -q -m move-and-weaken
 assert_review "renamed-and-weakened test" "mv"
 
-# diff over 100 lines → full review even for docs
+# Large inert documentation does not need a model because of its line count.
 new_repo
 {
   for i in $(seq 1 120); do
@@ -457,7 +458,7 @@ new_repo
   done
 } > "$tmp_repo/README.md"
 commit_all
-assert_review "large docs diff" "diff too large"
+assert_skip "large docs diff"
 
 # binary/unknown file → full review
 new_repo
@@ -466,4 +467,88 @@ git -C "$tmp_repo" add -A
 git -C "$tmp_repo" commit -q -m binary
 assert_review "binary file" "blob.bin"
 
-echo "review skip classifier tests passed"
+# The trusted CLI still rejects a PR that replaces its own classifier with an
+# unconditional success, even when its companion source change is one line.
+new_repo
+write_change scripts/lib/review-skip.sh 'exit 0'
+write_change packages/foo/src/runtime.ts 'export const unsafe = true;'
+commit_all
+if (cd "$tmp_repo" && bash "$repo_root/scripts/lib/review-skip.sh" main >/dev/null 2>&1); then
+  fail 'PR-supplied classifier bypassed the trusted entrypoint'
+fi
+for path in AGENTS.md skills/example/SKILL.md prompts/product.md docs/run.sh; do
+  new_repo
+  write_change "$path" 'changed instruction or executable content'
+  commit_all
+  assert_review "instructions/scripts require review" "$path"
+done
+new_repo
+ln -s /etc/passwd "$tmp_repo/leak.md"
+commit_all
+assert_review 'docs-looking symlink' 'leak.md'
+new_repo
+printf '\x00\x01' > "$tmp_repo/README.md"
+commit_all
+assert_review 'binary docs' 'README.md'
+
+# Execute the actual privileged workflow body against local Git/API fixtures.
+# This checks outcomes, including PR-supplied shell code never executing.
+mkdir -p "$workflow_tmp/bin" "$workflow_tmp/runner"
+bun -e 'const w=Bun.YAML.parse(await Bun.file(process.argv[1]).text());process.stdout.write(w.jobs["safe-change"].steps[1].run)' \
+  "$repo_root/.github/workflows/review-policy.yml" > "$workflow_tmp/run.sh"
+cat > "$workflow_tmp/bin/gh" <<'SHIM'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  *commits/*/pulls*) printf '1\n' ;;
+  *statuses/*) printf 'posted\n' >> "$POLICY_STATE/posts" ;;
+  *actions/workflows/*) printf '%s\n' "$POLICY_GREEN" ;;
+  *'--jq .head.sha'*) printf '%s\n' "${POLICY_LATEST_HEAD:-$POLICY_HEAD}" ;;
+  *) jq -n --arg h "$POLICY_HEAD" --arg b "$POLICY_BASE" '{state:"open",head:{sha:$h},base:{ref:"main",sha:$b}}' ;;
+esac
+SHIM
+chmod +x "$workflow_tmp/bin/gh"
+export POLICY_STATE="$workflow_tmp"
+for scenario in docs pending runtime self-exempt superseded workflow-run workflow-run-empty; do
+  new_repo
+  mkdir -p "$tmp_repo/scripts/lib"
+  cp "$repo_root/scripts/lib/review-skip.sh" "$tmp_repo/scripts/lib/"
+  commit_all
+  git -C "$tmp_repo" branch -f main
+  export POLICY_BASE="$(git -C "$tmp_repo" rev-parse HEAD)"
+  write_change README.md 'safe documentation'
+  case "$scenario" in
+    runtime|self-exempt) write_change src/runtime.ts 'export const changed = true;' ;;
+  esac
+  if [ "$scenario" = self-exempt ]; then
+    write_change scripts/lib/review-skip.sh 'touch "$POLICY_STATE/executed-pr-code"; exit 0'
+  fi
+  commit_all
+  export POLICY_HEAD="$(git -C "$tmp_repo" rev-parse HEAD)"
+  export POLICY_GREEN=true
+  unset POLICY_LATEST_HEAD
+  [ "$scenario" != pending ] || POLICY_GREEN=false
+  [ "$scenario" != superseded ] || export POLICY_LATEST_HEAD="$POLICY_BASE"
+  if [[ "$scenario" == workflow-run* ]]; then
+    jq -n --arg h "$POLICY_HEAD" --arg scenario "$scenario" '{workflow_run:{head_sha:$h,pull_requests:(if $scenario == "workflow-run-empty" then [] else [{number:1}] end)}}' > "$workflow_tmp/event.json"
+  else
+    jq -n --arg h "$POLICY_HEAD" '{pull_request:{number:1,head:{sha:$h}}}' > "$workflow_tmp/event.json"
+  fi
+  git -C "$tmp_repo" remote add origin "$tmp_repo"
+  git -C "$tmp_repo" checkout -q --detach main
+  : > "$workflow_tmp/posts"
+  (cd "$tmp_repo" && PATH="$workflow_tmp/bin:$PATH" \
+    GITHUB_EVENT_PATH="$workflow_tmp/event.json" RUNNER_TEMP="$workflow_tmp/runner" \
+    GITHUB_SERVER_URL=https://example.invalid GITHUB_RUN_ID=1 REPO=test/repo \
+    bash "$workflow_tmp/run.sh") > "$workflow_tmp/output" 2>&1 || {
+      cat "$workflow_tmp/output" >&2; fail "policy workflow failed: $scenario";
+    }
+  if [ "$scenario" = docs ] || [[ "$scenario" == workflow-run* ]]; then
+    [ "$(wc -l < "$workflow_tmp/posts" | tr -d ' ')" = 1 ] || fail "safe CI-green diff did not auto-pass: $scenario"
+  else
+    [ ! -s "$workflow_tmp/posts" ] || fail "unsafe, stale or CI-pending diff auto-passed: $scenario"
+  fi
+  [ ! -e "$workflow_tmp/executed-pr-code" ] || fail 'privileged workflow executed PR code'
+done
+
+echo "review skip classifier and trusted workflow tests passed"

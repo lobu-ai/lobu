@@ -53,7 +53,7 @@ make ui-review
 make land N=<number>
 ```
 
-GitHub CI (`ci.yml`) is the canonical gate: free on this public repo, full Linux graph in ~5–7 min per PR. `make pre-pr` runs the fast local gates (typecheck, knip, lint, naming) before push; `make review` requires CI green for HEAD. `make pr-full` (Daytona ephemeral sandbox, else local) is optional tooling, not part of the required loop. Stage every intended new file explicitly before pushing.
+GitHub CI (`ci.yml`) is the canonical gate: free on this public repo, full Linux graph in ~5–7 min per PR. `make pre-pr` runs the fast local gates (typecheck, knip, lint, naming) before push; `make review` can run alongside CI and publishes success only after exact-HEAD CI passes. Optional findings never reopen a pass; the branch has two automatic write attempts across all invocations/resumes. `make pr-full` (Daytona ephemeral sandbox, else local) is optional tooling, not part of the required loop. Stage every intended new file explicitly before pushing.
 
 Never bypass a check that has not reported. For a production-visible change, wait for deployment and prove the PR's squash merge commit is an ancestor of the deployed SHA before running the live check. Clean up the task worktree with `make task-clean` after merge.
 

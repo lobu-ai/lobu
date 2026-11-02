@@ -287,9 +287,9 @@ clean-test-pg:
 # verdict on the last line. If
 # GitHub auth is available, posts a pi-review commit status; if the current
 # branch has an open PR, also posts/updates a PR comment. See docs/REVIEW_SCHEMA.md.
-# Small path/content-gated safe-class diffs skip both LLM passes by default while
-# still posting pi-review and running deterministic CI. REVIEWER_MODE=full
-# forces them.
+# Trusted CI automatically satisfies safe-class changes after exact-HEAD CI.
+# Other changes use review/fix/independent verification with two write attempts
+# per branch. REVIEWER_MODE=full forces model review locally.
 
 review:
 	@./scripts/review.sh $(if $(BASE),--base "$(BASE)",) $(if $(RESUME),--resume "$(RESUME)",) $(if $(INSTRUCTIONS),--instructions "$(INSTRUCTIONS)",)
