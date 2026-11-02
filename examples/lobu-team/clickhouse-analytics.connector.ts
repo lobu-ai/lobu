@@ -163,17 +163,18 @@ export async function queryAnalytics(
   )
     invalid("CLICKHOUSE_URL must be an HTTPS origin");
   const sql = readOnlyQuery(ctx.query);
-  const limit = ctx.limit ?? 50;
+  // Metric pushdown requests 5000 rows and uses total to detect truncation.
+  const requestedLimit = ctx.limit ?? 50;
+  const limit = Math.min(requestedLimit, 500);
   const offset = ctx.offset ?? 0;
   if (
-    !Number.isInteger(limit) ||
-    limit < 1 ||
-    limit > 500 ||
+    !Number.isInteger(requestedLimit) ||
+    requestedLimit < 1 ||
     !Number.isInteger(offset) ||
     offset < 0 ||
     offset > 10000
   )
-    invalid("Pagination requires limit 1–500 and offset 0–10000");
+    invalid("Pagination requires a positive integer limit and offset 0–10000");
   let order = "";
   if (ctx.sort) {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(ctx.sort.column))

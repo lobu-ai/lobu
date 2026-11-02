@@ -140,6 +140,22 @@ describe("ClickHouse query HTTP boundary", () => {
     ).rejects.toThrow("inconsistent");
   });
 
+  it("clamps metric-sized pages to 500 rows and keeps the source total", async () => {
+    let statement = "";
+    const result = await queryAnalytics(
+      { ...context("SELECT 1"), limit: 5000 },
+      async (_url, init) => {
+        statement = String(init?.body);
+        return Response.json({
+          meta: [{ name: total, type: "UInt64" }],
+          data: [{ [total]: "2000" }],
+        });
+      }
+    );
+    expect(statement).toContain("LIMIT 500 OFFSET 0");
+    expect(result.total).toBe(2000);
+  });
+
   it("rejects unsupported routing, sort and pagination before source access", async () => {
     const fail = async (): Promise<Response> => {
       throw new Error("unexpected source access");
@@ -160,6 +176,11 @@ describe("ClickHouse query HTTP boundary", () => {
     await expect(
       queryAnalytics({ ...context("SELECT 1"), offset: 10001 }, fail)
     ).rejects.toThrow("Pagination");
+    for (const limit of [0, -1, 1.5, 5000.5, Infinity, NaN]) {
+      await expect(
+        queryAnalytics({ ...context("SELECT 1"), limit }, fail)
+      ).rejects.toThrow("Pagination");
+    }
     await expect(
       queryAnalytics(
         { ...context("SELECT 1"), sort: { column: "id; DROP", order: "asc" } },
