@@ -74,9 +74,9 @@ if [ -n "${DATABASE_URL:-}" ]; then
   exit 2
 fi
 
-# Node 22-24 is required (the worker uses isolated-vm). Prefer a Homebrew
-# node@22 locally; CI provides node via actions/setup-node.
-if [ -x /opt/homebrew/opt/node@22/bin/node ] && ! node --version 2>/dev/null | grep -qE '^v(22|23|24)\.'; then
+# Keep supported Node 22-24 and 26+ on their matching native addon, as sdk-e2e does.
+NODE_MAJOR="$(node -p 'Number(process.versions.node.split(".")[0])' 2>/dev/null || echo 0)"
+if [ -x /opt/homebrew/opt/node@22/bin/node ] && { [ "$NODE_MAJOR" -lt 22 ] || [ "$NODE_MAJOR" -eq 25 ]; }; then
   export PATH="/opt/homebrew/opt/node@22/bin:$PATH"
 fi
 

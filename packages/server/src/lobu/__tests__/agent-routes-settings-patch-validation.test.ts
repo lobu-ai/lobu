@@ -5,10 +5,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { installRouteTestMocks } from "./helpers/route-test-mocks";
-
-installRouteTestMocks();
-const { validateSettingsPatch } = await import("../agent-routes.js");
+import { validateSettingsPatch } from "../agent-settings";
 
 describe("validateSettingsPatch", () => {
   test.each([{}, null, { strictMode: true }, { allowedTools: ["query_sdk"] }])("rejects removed tool settings (%j)", (toolsConfig) => {

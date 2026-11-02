@@ -26,8 +26,8 @@ cd "$REPO_ROOT"
 
 command -v bun >/dev/null || { echo "bun is required: curl -fsSL https://bun.sh/install | bash"; exit 1; }
 
-# Lobu's SDK sandbox (query_sdk / run_sdk) depends on isolated-vm@6, which has
-# not shipped Node 25+ support yet (upstream: laverdet/isolated-vm#553). The
+# Lobu's SDK sandbox supports Node 22-24 via isolated-vm@6 and Node 26+ via
+# isolated-vm-next. Node 25 has no matching native build. The
 # call-site gate in packages/server/src/sandbox/run-script.ts only surfaces
 # this when an agent invokes the sandbox; we fail fast here so `make dev`
 # itself refuses to boot under an unsupported Node major.
@@ -36,7 +36,7 @@ node_supported() {
   [ -x "$bin" ] || return 1
   local major
   major=$("$bin" -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo "")
-  [ -n "$major" ] && [ "$major" -ge 22 ] && [ "$major" -lt 25 ]
+  [ -n "$major" ] && [ "$major" -ge 22 ] && [ "$major" -ne 25 ]
 }
 
 if ! node_supported "$(command -v node || true)"; then
@@ -51,8 +51,7 @@ fi
 
 if ! node_supported "$(command -v node || true)"; then
   current=$(node -v 2>/dev/null || echo 'unknown')
-  echo "❌ Unsupported Node.js runtime: $current (required: 22.x–24.x)"
-  echo "   isolated-vm has no Node 25+ build yet — see https://github.com/laverdet/isolated-vm/issues/553"
+  echo "❌ Unsupported Node.js runtime: $current (required: 22.x–24.x or 26+)"
   echo "   Quick fix on macOS: brew install node@22 (this script auto-detects Homebrew node@22-24)"
   echo "   Or use a version manager (nvm, fnm, mise, asdf, volta) that honours .nvmrc / .node-version."
   exit 1

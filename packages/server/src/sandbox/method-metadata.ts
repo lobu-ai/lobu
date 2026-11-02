@@ -389,10 +389,10 @@ export default async (_ctx, client) => {
 	},
 	"agents.get": {
 		summary:
-			"Fetch one agent by id when agent_config read allows that target. Org-read gated via requireOrgReadAccess.",
+			"Fetch one agent, its persisted settings (including skills), and model routing when agent_config read allows that target. Org-read gated via requireOrgReadAccess.",
 		access: "read",
 		signature:
-			"agents.get(agent_id: string): Promise<unknown> // or agents.get({ agent_id })",
+			"agents.get(agent_id: string) // returns { action, agent, model, settings }; or agents.get({ agent_id })",
 		example: "const { agent } = await client.agents.get('builder');",
 	},
 	"agents.create": {
@@ -404,8 +404,9 @@ export default async (_ctx, client) => {
 	},
 	"agents.update": {
 		summary:
-			"Update agent fields (may queue for approval). Requires admin tier + agent_config update.",
+			"Patch agent fields and settings (may queue for approval). Omitted settings are unchanged; supplied settings objects/arrays replace that setting. Write identity via identity_md; updatedAt is read-only. Use settings.models for the full ordered model list, or default_model to change its first entry while preserving fallbacks (empty string clears the list). Do not send both. Requires admin tier + agent_config update.",
 		access: "admin",
+		example: "await client.agents.update({ agent_id: 'researcher', settings: { skillsConfig: { skills: [{ repo: 'example/skills', name: 'triage', enabled: true, content: 'Read the queue.' }] } } });",
 	},
 	"agents.delete": {
 		summary:
@@ -1022,6 +1023,36 @@ export default async (_ctx, client) => {
 		example:
 			"await client.feeds.recollect({ feed_id: 42 });\nawait client.feeds.trigger({ feed_id: 42 });",
 	},
+
+  // inferenceProviders
+  "inferenceProviders.list": {
+    summary: "List this workspace's inference providers and health metadata, without credentials.", access: "read",
+    signature: "inferenceProviders.list(): Promise<{ providers: InferenceProviderListItem[] }>",
+  },
+  "inferenceProviders.create": {
+    summary: "Create an org-shared API-key inference provider. Uses catalog model defaults; the first runnable provider becomes the org default. OAuth sign-in stays on the interactive settings page.", access: "admin",
+    signature: "inferenceProviders.create(input: { slug: string; kind: string; apiKey: string; displayName?: string; capabilities?: InferenceCapabilities }): Promise<{ provider: InferenceProviderSummary & { isDefault: boolean } }>",
+  },
+  "inferenceProviders.update": {
+    summary: "Rename a provider. Omitted or blank displayName preserves its name; slug and kind are immutable.", access: "admin",
+    signature: "inferenceProviders.update(input: { slug: string; displayName?: string }): Promise<{ provider: InferenceProviderSummary }>",
+  },
+  "inferenceProviders.setDefault": {
+    summary: "Select the org default. Requires a configured text model and an org-shared API key; personal OAuth providers cannot become the org default.", access: "admin",
+    signature: "inferenceProviders.setDefault(input: { slug: string }): Promise<{ success: true; slug: string; isDefault: true }>",
+  },
+  "inferenceProviders.setCapability": {
+    summary: "Replace one text, image, stt or tts capability block; other modalities are preserved. Blocks accept base_url, model and models_endpoint. An empty block clears that modality's configuration.", access: "admin",
+    signature: "inferenceProviders.setCapability(input: { slug: string; modality: 'text' | 'image' | 'stt' | 'tts'; block: InferenceCapabilityBlock }): Promise<{ provider: InferenceProviderSummary }>",
+  },
+  "inferenceProviders.rotateKey": {
+    summary: "Rotate a provider's API key in the existing vault. Never returns or audits the key value; OAuth credentials require interactive sign-in.", access: "admin",
+    signature: "inferenceProviders.rotateKey(input: { slug: string; value: string }): Promise<{ success: true }>",
+  },
+  "inferenceProviders.delete": {
+    summary: "Soft-delete an inference provider and promote the oldest surviving runnable provider if it was the default. Does not revoke a personal OAuth grant from a headless call.", access: "admin",
+    signature: "inferenceProviders.delete(input: { slug: string }): Promise<{ success: true }>",
+  },
 
 	// authProfiles
 	"authProfiles.manage": {

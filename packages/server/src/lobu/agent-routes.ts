@@ -4,43 +4,44 @@
  * All routes are org-scoped via mcpAuth middleware and orgContext.
  */
 
-import {
-	type AgentInlineGuardrail,
-	type AuthProfile,
-	isSdkCompat,
-} from "@lobu/core";
-import {
-	AgentSettingsStoredSchema,
-	SkillsConfigSchema,
-} from "@lobu/core/contracts/agent-settings";
+import type { AuthProfile } from "@lobu/core";
 import {
 	type ManageAutomationsArgs,
 	normalizeAutomationUpdatePatch,
 } from "@lobu/core/contracts/tools/manage-automations";
-import { Value } from "@sinclair/typebox/value";
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
+import type { ContentfulStatusCode } from "hono/utils/http-status";
+import { Type, type TObject } from "@sinclair/typebox";
+import {
+  CreateInferenceProviderAction, DeleteInferenceProviderAction, ListInferenceProvidersAction,
+  RotateInferenceProviderKeyAction, SetDefaultInferenceProviderAction,
+  SetInferenceProviderCapabilityAction, UpdateInferenceProviderAction,
+  type ManageInferenceProvidersArgs,
+} from "@lobu/core/contracts/tools/manage-inference-providers";
+import { manageInferenceProviders, providerAuditTransaction } from "../tools/admin/manage_inference_providers";
+import { extractAuthContext, toToolContext } from "../tools/execute";
+import { validateToolArgs } from "../tools/validate-args";
+import { ToolUserError } from "../utils/errors";
 import { mcpAuth } from "../auth/middleware";
-import { resolveNewAgentProvisioningDefaults } from "../auth/system-provider-resolution";
 import { resolveAutomationTriggerWrite } from "../automations/triggers";
 import { type DbClient, getDb } from "../db/client";
 import { grantStrategyFor } from "../gateway/auth/oauth/grant-strategy";
 import { UserAuthProfileStore } from "../gateway/auth/settings/user-auth-profile-store";
 import {
 	getOAuthProviderConfig,
-	getOAuthProviderConfigs,
 	type OAuthProviderConfig,
 } from "../gateway/auth/oauth/providers";
 import { buildProviderCatalog } from "../gateway/auth/provider-catalog";
-import { resolveSystemJudgeTarget } from "../gateway/inference/system-judge-target";
-import {
-	egressGuardrailsToPolicyBundle,
-	findSuppressedJudgedDomains,
-} from "../gateway/permissions/policy-store";
-import { isUnrestrictedMode } from "@lobu/connector-sdk/egress-policy";
-import { loadAllowedDomains } from "../gateway/config/network-allowlist";
 import { createAuthProfileLabel } from "../gateway/auth/settings/auth-profiles-manager";
 import { orgBucketAgentId } from "../gateway/auth/settings/user-auth-profile-store";
-import { validateModelRefsAgainstOrg } from "./model-config";
+import {
+	deleteAgentConfig,
+	insertAgentConfig,
+	persistAgentMetadataPatch,
+	persistAgentSettingsPatch,
+	validateAgentSettingsUpdate,
+} from "./agent-settings";
+import type { ModelValidationError } from "./model-config";
 import {
 	ProviderRegistryService,
 	resolveProviderRegistryPath,
@@ -59,24 +60,7 @@ import {
 	createPostgresAgentConfigStore,
 } from "./stores/postgres-stores";
 import { PostgresSecretStore } from "./stores/postgres-secret-store";
-import {
-	createInferenceProvider,
-	getInferenceProviderBySlug,
-	lockInferenceProviderDefaults,
-	ensureOAuthInferenceProvider,
-	type InferenceCapabilities,
-	type InferenceCapabilityBlock,
-	isInferenceModality,
-	isValidInferenceProviderSlug,
-	listInferenceProviders,
-	rotateInferenceProviderKey,
-	setInferenceProviderDefault,
-	getOrgDefaultModel,
-	softDeleteInferenceProvider,
-	updateInferenceProviderCapabilities,
-	updateInferenceProviderCoreFields,
-	validateCapabilityBlock,
-} from "./stores/provider-secrets";
+import { ensureOAuthInferenceProvider, getOrgDefaultModel } from "./stores/provider-secrets";
 
 const routes = new Hono<{ Bindings: Env }>();
 
@@ -136,21 +120,16 @@ export const LEGACY_MODEL_FIELDS = [
 	"installedProviders",
 ] as const;
 
-export async function validateModelsUpdate(params: {
-	models: unknown;
-	organizationId: string;
-	agentId: string;
-	c: any;
-}): Promise<Record<string, unknown> | null> {
-	// The shape/slug validation is shared with the MCP `manage_agents` path via
-	// the context-free core; this wrapper only maps the structured error onto the
-	// route's JSON envelope and enriches the not-connected case with request-
-	// derived proxy/settings URLs (which need the Hono context).
-	const error = await validateModelRefsAgainstOrg(
-		params.models,
-		params.organizationId
-	);
-	if (!error) return null;
+/**
+ * Map a structured `models` validation error onto the route's JSON envelope.
+ * The shape/slug validation itself is shared with the MCP `manage_agents` path
+ * (`validateAgentSettingsUpdate`); this only enriches the not-connected case
+ * with request-derived proxy/settings URLs, which need the Hono context.
+ */
+export function modelValidationResponse(
+	error: ModelValidationError,
+	params: { c: any; agentId: string }
+) {
 	if (error.kind === "invalid_models") {
 		return { error: "invalid_models", error_description: error.message };
 	}
@@ -297,31 +276,6 @@ function emitConfigChange(
 		clientId: applyCtx.clientId,
 	};
   return insertConfigChangeEventInTransaction(event, transaction);
-}
-
-function providerAuditState(row: Pick<NonNullable<Awaited<ReturnType<typeof getInferenceProviderBySlug>>>, "slug" | "kind" | "displayName" | "capabilities" | "hasCustomUpstream" | "status" | "isDefault"> | null): Record<string, unknown> | null {
-  return row ? { slug: row.slug, kind: row.kind, displayName: row.displayName, capabilities: row.capabilities, hasCustomUpstream: row.hasCustomUpstream, status: row.status, isDefault: row.isDefault } : null;
-}
-
-function providerAuditTransaction<T>(c: any, orgId: string, slug: string, mutate: (tx: DbClient, before: Record<string, unknown> | null) => Promise<T>): Promise<T> {
-  return getDb().begin(async (tx) => {
-    await lockInferenceProviderDefaults(tx, orgId);
-    const before = providerAuditState(await getInferenceProviderBySlug(orgId, slug, tx));
-    const providersBefore = await listInferenceProviders(orgId, tx);
-    const result = await mutate(tx, before);
-    const providersAfter = await listInferenceProviders(orgId, tx);
-    for (const previous of providersBefore) {
-      if (previous.slug === slug) continue;
-      const next = providersAfter.find(provider => provider.slug === previous.slug);
-      if (!next || previous.isDefault === next.isDefault) continue;
-      await emitConfigChange(c, {
-        resourceKind: 'inference-provider', resourceId: next.slug, op: 'updated',
-        summary: `Inference provider '${next.slug}' ${next.isDefault ? 'promoted to' : 'cleared as'} org default`,
-        before: providerAuditState(previous), state: providerAuditState(next), changedFields: ['isDefault'],
-      }, tx);
-    }
-    return result;
-  });
 }
 
 /** Whitelist profile metadata down to the non-secret fields (email, expiresAt, accountId). */
@@ -578,31 +532,18 @@ routes.post("/", async (c) => {
 	const orgId = c.get("organizationId") as string;
 
 	const sql = getDb();
-	const now = new Date();
 	// Seed provisioning defaults in the INSERT so concurrent idempotent creates
 	// cannot observe a partially initialized row or overwrite operator settings.
-	const provisioning = await resolveNewAgentProvisioningDefaults(orgId);
 	return sql.begin(async (tx) => {
-	const inserted = await tx`
-    INSERT INTO agents (
-      id, organization_id, name, description, owner_platform, owner_user_id,
-      models, created_at, updated_at
-    )
-    VALUES (
-      ${agentId}, ${orgId}, ${name}, ${description ?? null},
-      'lobu', ${user.id},
-      ${tx.json(provisioning.models)},
-      ${now}, ${now}
-    )
-    ON CONFLICT (organization_id, id) DO NOTHING
-    RETURNING id
-  `;
+	const inserted = await insertAgentConfig(tx,
+		{ agent_id: agentId, name, description }, { platform: "lobu", userId: user.id },
+		undefined, { organizationId: orgId, ...getApplyContext(c) });
 
-	if (inserted.length === 0) {
+	if (!inserted) {
 		// Another writer (or a previous apply cycle) already owns this id in
 		// *this* org. Return idempotent 200 with the existing row's metadata.
 		// Cross-org collisions are no longer possible — the PK is per-org now.
-		const existing = await configStore.getMetadata(agentId);
+		const existing = await createPostgresAgentConfigStore(tx).getMetadata(agentId);
 		if (!existing) {
 			return c.json({ error: "Agent metadata missing" }, 500);
 		}
@@ -616,15 +557,6 @@ routes.post("/", async (c) => {
 		);
 	}
 
-	await emitConfigChange(c, {
-    before: null,
-		resourceKind: "agent",
-		resourceId: agentId,
-		op: "created",
-		summary: `Agent '${name}' created`,
-		state: { agentId, name, description: description ?? null },
-	}, tx);
-
 	return c.json({ agentId, name, description }, 201);
   });
 });
@@ -632,16 +564,36 @@ routes.post("/", async (c) => {
 // ── Org-scoped inference-provider routes ─────────────────────────────────────
 // Registered BEFORE any `/:agentId` route so these literal paths win the match
 // (Hono would otherwise treat 'inference-providers' as an :agentId → 404).
-// Helpers (requireOrgId, validateCapabilitiesMap) are hoisted fn declarations
+// The requireOrgId helper is a hoisted function declaration
 // defined lower in this file.
 
-routes.get("/inference-providers", async (c) => {
-	const orgId = requireOrgId(c);
-	if (typeof orgId !== "string") return orgId;
-	await ensureVisibleOAuthProvidersForUser(c, orgId);
-	const providers = await listInferenceProviders(orgId);
-	return c.json({ providers });
-});
+/** Adapt the existing REST shapes to the same validated action runner as MCP/SDK. */
+async function inferenceProviderRequest(c: Context<{ Bindings: Env }>, schema: TObject, params: Record<string, string> = {}) {
+  if (schema.properties.action.const !== "list") {
+    const denied = requireManageAgentAccess(c);
+    if (denied) return denied;
+  }
+  const orgId = requireOrgId(c);
+  if (typeof orgId !== "string") return orgId;
+  try {
+    let body: unknown = {};
+    const rawBody = await c.req.text();
+    if (rawBody) {
+      try { body = JSON.parse(rawBody); }
+      catch { throw new ToolUserError("Invalid or missing JSON body", 400); }
+    }
+    // URL selectors and action cannot be supplied or retargeted by the body.
+    const validated = validateToolArgs("manage_inference_providers", Type.Omit(schema, ["action", ...Object.keys(params)]), body) as object;
+    const args = { ...validated, ...params, action: schema.properties.action.const } as ManageInferenceProvidersArgs;
+    const result = await manageInferenceProviders(args, c.env, toToolContext(extractAuthContext(c)));
+    return c.json(result, args.action === "create" ? 201 : 200);
+  } catch (error) {
+    if (error instanceof ToolUserError) return c.json({ error: error.message }, error.httpStatus as ContentfulStatusCode);
+    throw error;
+  }
+}
+
+routes.get("/inference-providers", c => inferenceProviderRequest(c, ListInferenceProvidersAction));
 
 // Bundled provider catalog (PUBLIC metadata only — no secrets). Renders the
 // default "Available" add-cards on the inference-providers page; each entry
@@ -672,35 +624,6 @@ routes.get("/inference-providers/catalog", async (c) => {
 // grantStrategyFor.
 //
 // Auth: interactive session only.
-
-async function ensureVisibleOAuthProvidersForUser(
-	c: any,
-	orgId: string
-): Promise<void> {
-	const user = c.get("user") as { id: string } | undefined;
-	if (!user?.id) return;
-	const authProfilesManager = getLobuCoreServices()?.getAuthProfilesManager?.();
-	if (!authProfilesManager) return;
-
-	for (const config of Object.values(getOAuthProviderConfigs())) {
-		const profiles = await orgContext.run({ organizationId: orgId }, () =>
-			authProfilesManager.getProviderProfiles(
-				orgBucketAgentId(orgId),
-				config.id,
-				user.id
-			)
-		);
-		if (profiles.length === 0) continue;
-		await ensureOAuthInferenceProvider({
-			organizationId: orgId,
-			slug: config.id,
-			kind: config.id,
-			displayName: config.name,
-			defaultModel: config.defaultModel,
-			createdBy: user.id,
-		});
-	}
-}
 
 /** Resolve the OAuth provider config, or a 400 Response if unknown. */
 function resolveOAuthProvider(
@@ -869,7 +792,7 @@ routes.post("/inference-providers/oauth/complete", async (c) => {
 		// tokens refreshing (scanAllOAuth COALESCE + refreshForUserAgent branch);
 		// the profile's providerId must be the config id so the refresh job's
 		// `doRefresh` matches it to the right refresher.
-		await providerAuditTransaction(c, orgId, config.id, async (tx, before) => {
+		await providerAuditTransaction(toToolContext(extractAuthContext(c)), config.id, async (tx, before) => {
 		await authProfilesManager.upsertProfile({
 			agentId: bucketAgentId,
 			userId: user.id,
@@ -936,458 +859,12 @@ async function readProviderId(c: any): Promise<unknown> {
 	return body.providerId;
 }
 
-routes.post("/inference-providers", async (c) => {
-	const denied = requireManageAgentAccess(c);
-	if (denied) return denied;
-	const orgId = requireOrgId(c);
-	if (typeof orgId !== "string") return orgId;
-
-	let body: {
-		slug?: unknown;
-		kind?: unknown;
-		displayName?: unknown;
-		apiKey?: unknown;
-		capabilities?: unknown;
-	};
-	try {
-		body = await c.req.json();
-	} catch {
-		return c.json({ error: "Invalid or missing JSON body" }, 400);
-	}
-
-	const slug = typeof body.slug === "string" ? body.slug.trim() : "";
-	const kind = typeof body.kind === "string" ? body.kind.trim() : "";
-	const apiKey = typeof body.apiKey === "string" ? body.apiKey.trim() : "";
-	if (!slug) return c.json({ error: "Body must include a `slug` string" }, 400);
-	if (!isValidInferenceProviderSlug(slug)) {
-		return c.json(
-			{
-				error:
-					"`slug` must be lowercase alphanumeric + hyphen, 1-63 chars, no leading/trailing hyphen",
-			},
-			400
-		);
-	}
-	if (!kind) return c.json({ error: "Body must include a `kind` string" }, 400);
-	if (!apiKey) {
-		return c.json(
-			{ error: "Body must include a non-empty `apiKey` string" },
-			400
-		);
-	}
-	const capErr = validateCapabilitiesMap(body.capabilities);
-	if (capErr) return c.json({ error: capErr }, 400);
-
-	// Known catalog kinds must accept API keys AND speak a routable wire
-	// protocol — a subscription kind can speak one and still have nothing an API
-	// key may reach. Unknown kinds pass because custom endpoints are synthesized
-	// as OpenAI-compatible providers. Read the default from configs because the
-	// catalog contains only provider modules registered in this process.
-	let catalogDefaultModel: string | undefined;
-	// The upstream this `kind` already resolves to. An alias row (slug !== kind)
-	// with no base_url of its own is synthesized against it, so its presence is
-	// what decides whether such a row will route.
-	let catalogBaseUrl: string | undefined;
-	try {
-		const registry = new ProviderRegistryService(resolveProviderRegistryPath());
-		const configs = await registry.getProviderConfigs();
-		const catalog = buildProviderCatalog(configs);
-		const entry = catalog.find((e) => e.slug === kind);
-		if (
-			entry &&
-			(!entry.supportedAuthTypes.includes("api-key") ||
-				!isSdkCompat(entry.sdkCompat))
-		) {
-			return c.json(
-				{
-					error: `Provider '${kind}' can't be added with an API key — it signs in instead.`,
-				},
-				400
-			);
-		}
-		catalogDefaultModel = configs[kind]?.defaultModel ?? undefined;
-		// The EXACT expression `getModelPolicy` evaluates — argless
-		// `buildProviderCatalog()`, then the same auth-method and `sdkCompat`
-		// gates. These two must agree: a text model is what
-		// `promoteOldestRunnableProvider` keys on, so a row seeded as routable and
-		// then dropped at routing becomes the org DEFAULT and breaks every
-		// allow-all agent in the org.
-		//
-		// `configs[kind].upstreamBaseUrl` looks equivalent and is not. It gives
-		// `claude` a URL, but claude registers as an OAuth module rather than an
-		// ApiKeyProviderModule, so the catalog reports "" and synthesis refuses
-		// it — trusting providers.json would seed exactly that unroutable row.
-		const catalogEntry = buildProviderCatalog().find((e) => e.slug === kind);
-		catalogBaseUrl =
-			catalogEntry?.supportedAuthTypes.includes("api-key") &&
-			isSdkCompat(catalogEntry.sdkCompat)
-				? catalogEntry.baseUrl || undefined
-				: undefined;
-	} catch (err) {
-		// Fail open on catalog-load errors: don't block creation on a metadata
-		// read. The synthesize path still gates routing downstream.
-		logger.warn(
-			{ err: err instanceof Error ? err.message : String(err) },
-			"[inference-providers POST] catalog gate check failed; allowing"
-		);
-	}
-
-	const createdBy = c.get("user")?.id ?? null;
-
-	// Seed the curated model so each API caller need not duplicate catalog
-	// defaults — and so a row cannot be born unroutable.
-	//
-	// `resolveInferenceProviderConfig` selects `capabilities -> <modality>` and
-	// returns null when the block is absent, so `resolveUrlInvariant` answers
-	// `no-custom-upstream` and the row's own org key is NEVER read. With no
-	// deployment env key that resolves to no credential at all: the provider is
-	// dropped from routing and the model goes upstream with its slug prefix
-	// intact, surfacing as an opaque "400 invalid model ID".
-	//
-	// Merge into the caller's text block rather than replacing it — dropping a
-	// tenant `base_url` would silently re-point the org at the catalog URL.
-	//
-	// Seed ONLY a row that will actually route. A text model is also the
-	// predicate `promoteOldestRunnableProvider` uses to choose the org default,
-	// so seeding an unroutable row would promote it to default and break every
-	// allow-all agent in the org. `getModelPolicy` keys its module map by the
-	// row's SLUG, so the row resolves to a module only when one of:
-	//   - slug === kind    → the catalog's own static module answers to it,
-	//   - a text base_url  → `synthesizeOrgProviderModule` routes there, or
-	//   - the kind has a catalog upstream → synthesis falls back to it, which is
-	//     what makes an alias slug (slug=my-gemini, kind=gemini) routable.
-	// Only a kind the catalog does not know at all matches none of these; such a
-	// row is dropped by the policy and must not look configured.
-	const requestedCapabilities =
-		(body.capabilities as InferenceCapabilities) ?? {};
-	const hasTextModel = !!requestedCapabilities.text?.model?.trim();
-	const wouldRoute =
-		slug === kind ||
-		!!requestedCapabilities.text?.base_url?.trim() ||
-		!!catalogBaseUrl;
-	const capabilities =
-		hasTextModel || !catalogDefaultModel || !wouldRoute
-			? requestedCapabilities
-			: {
-					...requestedCapabilities,
-					text: {
-						...requestedCapabilities.text,
-						model: catalogDefaultModel,
-					},
-				};
-	if (!capabilities.text?.model) {
-		// Nothing seeded: unknown kind, no catalog default, or a kind with no
-		// upstream to fall back to. Say so at creation — otherwise the row's only
-		// symptom is a far-away 400 naming a different provider.
-		logger.warn(
-			{ slug, kind, wouldRoute },
-			"[inference-providers POST] created with no text model — this provider will not route until `capabilities.text.model` is set (a row whose `kind` is not in the catalog also needs `capabilities.text.base_url`)"
-		);
-	}
-
-	return providerAuditTransaction(c, orgId, slug, async (tx, before) => {
-	const result = await createInferenceProvider({
-		organizationId: orgId,
-		slug,
-		kind,
-		displayName: typeof body.displayName === "string" ? body.displayName : null,
-		apiKey,
-		capabilities,
-		createdBy,
-	}, tx);
-	if ("error" in result) {
-		return c.json(
-			{ error: `A provider with slug '${result.slug}' already exists` },
-			409
-		);
-	}
-	await emitConfigChange(c, {
-    before,
-		resourceKind: "inference-provider",
-		resourceId: result.slug,
-		op: "created",
-		summary: `Inference provider '${result.slug}' created`,
-		state: {
-			slug: result.slug,
-			kind: result.kind,
-			displayName: result.displayName,
-			capabilities: result.capabilities,
-			hasCustomUpstream: result.hasCustomUpstream,
-			status: result.status,
-			isDefault: result.isDefault,
-		},
-	}, tx);
-
-	// Never echo the key or the api_key_ref back to the caller.
-	// `isDefault` is load-bearing: the first runnable provider is auto-promoted,
-	// so a caller cannot infer it from its own request.
-	return c.json(
-		{
-			provider: {
-				id: result.id,
-				slug: result.slug,
-				kind: result.kind,
-				displayName: result.displayName,
-				capabilities: result.capabilities,
-				hasCustomUpstream: result.hasCustomUpstream,
-				status: result.status,
-				createdAt: result.createdAt,
-				isDefault: result.isDefault,
-			},
-		},
-		201
-	);
-  });
-});
-
-// Edit a provider's core fields. Only displayName is mutable — slug (agents
-// reference it) and kind (catalog linkage) are immutable. Key rotation and
-// per-modality capability edits keep their dedicated routes below; the Edit UI
-// calls whichever it needs.
-routes.put("/inference-providers/:slug", async (c) => {
-	const denied = requireManageAgentAccess(c);
-	if (denied) return denied;
-	const orgId = requireOrgId(c);
-	if (typeof orgId !== "string") return orgId;
-	const { slug } = c.req.param();
-
-	let body: { displayName?: unknown };
-	try {
-		body = await c.req.json();
-	} catch {
-		return c.json({ error: "Invalid or missing JSON body" }, 400);
-	}
-
-	// Empty / whitespace-only name means "leave unchanged" (pass undefined).
-	const rawName = typeof body.displayName === "string" ? body.displayName : "";
-	const displayName = rawName.trim() ? rawName.trim() : undefined;
-
-	return providerAuditTransaction(c, orgId, slug, async (tx, before) => {
-	const updated = await updateInferenceProviderCoreFields(orgId, slug, {
-		displayName,
-	}, tx);
-	if (!updated) return c.json({ error: "Provider not found" }, 404);
-	await emitConfigChange(c, {
-    before,
-		resourceKind: "inference-provider",
-		resourceId: updated.slug,
-		op: "updated",
-		summary: `Inference provider '${updated.slug}' renamed`,
-		state: providerAuditState(updated),
-		changedFields: ["displayName"],
-	}, tx);
-	return c.json({
-		provider: {
-			id: updated.id,
-			slug: updated.slug,
-			kind: updated.kind,
-			displayName: updated.displayName,
-			capabilities: updated.capabilities,
-			hasCustomUpstream: updated.hasCustomUpstream,
-			status: updated.status,
-			createdAt: updated.createdAt,
-		},
-	});
-  });
-});
-
-// Mark one org inference provider as THE org default. Its `capabilities.text.model`
-// becomes the org-default model — the tail of the layered fallback
-// (automation → agent → org default). Exactly one live default per org (enforced
-// by a partial unique index); setting a new one clears the prior in one txn.
-routes.put("/inference-providers/:slug/default", async (c) => {
-	const denied = requireManageAgentAccess(c);
-	if (denied) return denied;
-	const orgId = requireOrgId(c);
-	if (typeof orgId !== "string") return orgId;
-	const { slug } = c.req.param();
-
-	return providerAuditTransaction(c, orgId, slug, async (tx, before) => {
-	const result = await setInferenceProviderDefault(orgId, slug, tx);
-	if (result === "not_found") {
-		return c.json({ error: "Provider not found" }, 404);
-	}
-	// Both rejections mean "this row cannot hold the org default", but for
-	// different reasons — and the fix differs, so the message must too.
-	if (result === "no_text_model") {
-		return c.json(
-			{
-				error:
-					`Provider '${slug}' has no text model configured, so it cannot be ` +
-					`the org default. Set one with: lobu providers set-capability ` +
-					`${slug} text --model <model>`,
-			},
-			400
-		);
-	}
-	if (result === "oauth_provider") {
-		return c.json(
-			{
-				error:
-					`Provider '${slug}' is signed in with OAuth, so its credential ` +
-					`belongs to one user. An org default is inherited by every member ` +
-					`and by headless Automation runs, which cannot read that token. Use ` +
-					`a provider added with an API key instead.`,
-			},
-			400
-		);
-	}
-	await emitConfigChange(c, {
-    before,
-		resourceKind: "inference-provider",
-		resourceId: slug,
-		op: "updated",
-		summary: `Inference provider '${slug}' set as org default`,
-		state: providerAuditState(await getInferenceProviderBySlug(orgId, slug, tx)),
-		changedFields: ["isDefault"],
-	}, tx);
-	return c.json({ success: true, slug, isDefault: true });
-  });
-});
-
-routes.put("/inference-providers/:slug/capabilities/:modality", async (c) => {
-	const denied = requireManageAgentAccess(c);
-	if (denied) return denied;
-	const orgId = requireOrgId(c);
-	if (typeof orgId !== "string") return orgId;
-	const { slug, modality } = c.req.param();
-
-	if (!isInferenceModality(modality)) {
-		return c.json(
-			{ error: "modality must be one of: text, image, stt, tts" },
-			400
-		);
-	}
-
-	let body: { block?: unknown };
-	try {
-		body = await c.req.json();
-	} catch {
-		return c.json({ error: "Invalid or missing JSON body" }, 400);
-	}
-	const block = body.block;
-	const err = validateCapabilityBlock(modality, block);
-	if (err) return c.json({ error: err }, 400);
-
-	return providerAuditTransaction(c, orgId, slug, async (tx, before) => {
-	const updated = await updateInferenceProviderCapabilities(
-		orgId,
-		slug,
-		modality,
-		block as InferenceCapabilityBlock, tx
-	);
-	if (!updated) return c.json({ error: "Provider not found" }, 404);
-	await emitConfigChange(c, {
-    before,
-		resourceKind: "inference-provider",
-		resourceId: updated.slug,
-		op: "updated",
-		summary: `Inference provider '${updated.slug}' ${modality} capabilities updated`,
-		state: providerAuditState(updated),
-		changedFields: [`capabilities.${modality}`],
-	}, tx);
-	return c.json({
-		provider: {
-			id: updated.id,
-			slug: updated.slug,
-			kind: updated.kind,
-			displayName: updated.displayName,
-			capabilities: updated.capabilities,
-			hasCustomUpstream: updated.hasCustomUpstream,
-			status: updated.status,
-			createdAt: updated.createdAt,
-		},
-	});
-  });
-});
-
-routes.put("/inference-providers/:slug/key", async (c) => {
-	const denied = requireManageAgentAccess(c);
-	if (denied) return denied;
-	const orgId = requireOrgId(c);
-	if (typeof orgId !== "string") return orgId;
-	const { slug } = c.req.param();
-
-	let body: { value?: unknown };
-	try {
-		body = await c.req.json();
-	} catch {
-		return c.json({ error: "Invalid or missing JSON body" }, 400);
-	}
-	const value = typeof body.value === "string" ? body.value.trim() : "";
-	if (!value) {
-		return c.json(
-			{ error: "Body must include a non-empty `value` string" },
-			400
-		);
-	}
-
-	return providerAuditTransaction(c, orgId, slug, async (tx, before) => {
-	const outcome = await rotateInferenceProviderKey(orgId, slug, value, tx);
-	if (outcome === "not_found") {
-		return c.json({ error: "Provider not found" }, 404);
-	}
-	if (outcome === "oauth_provider") {
-		return c.json(
-			{
-				error: `Provider '${slug}' signs in via OAuth — it has no API key to rotate`,
-			},
-			400
-		);
-	}
-	// Metadata-only: key rotations are audited but the value is never snapshotted.
-	await emitConfigChange(c, {
-    before,
-		resourceKind: "inference-provider",
-		resourceId: slug,
-		op: "updated",
-		summary: `Inference provider '${slug}' API key rotated`,
-		state: providerAuditState(await getInferenceProviderBySlug(orgId, slug, tx)),
-		changedFields: ["apiKey"],
-	}, tx);
-	return c.json({ success: true });
-  });
-});
-
-routes.delete("/inference-providers/:slug", async (c) => {
-	const denied = requireManageAgentAccess(c);
-	if (denied) return denied;
-	const orgId = requireOrgId(c);
-	if (typeof orgId !== "string") return orgId;
-	const { slug } = c.req.param();
-
-	const deleted = await providerAuditTransaction(c, orgId, slug, async (tx, before) => {
-	const ok = await softDeleteInferenceProvider(orgId, slug, tx);
-	if (!ok) return false;
-	await emitConfigChange(c, {
-    before,
-		resourceKind: "inference-provider",
-		resourceId: slug,
-		op: "deleted",
-		summary: `Inference provider '${slug}' deleted`,
-		state: null,
-	}, tx);
-	return true;
-  });
-  if (!deleted) return c.json({ error: "Provider not found" }, 404);
-	const user = c.get("user") as { id: string } | undefined;
-	const oauthConfig = getOAuthProviderConfig(slug);
-	const authProfilesManager = getLobuCoreServices()?.getAuthProfilesManager?.();
-	// Only an interactive user can revoke their org-bucket OAuth profile. Admin
-	// PAT callers may tombstone the visible row, but must not delete another
-	// user's subscription credential.
-	if (user?.id && oauthConfig && authProfilesManager) {
-		await orgContext.run({ organizationId: orgId }, () =>
-			authProfilesManager.deleteProviderProfiles(
-				orgBucketAgentId(orgId),
-				oauthConfig.id,
-				{ userId: user.id }
-			)
-		);
-	}
-
-  return c.json({ success: true });
-});
+routes.post("/inference-providers", c => inferenceProviderRequest(c, CreateInferenceProviderAction));
+routes.put("/inference-providers/:slug", c => inferenceProviderRequest(c, UpdateInferenceProviderAction, { slug: c.req.param("slug") }));
+routes.put("/inference-providers/:slug/default", c => inferenceProviderRequest(c, SetDefaultInferenceProviderAction, { slug: c.req.param("slug") }));
+routes.put("/inference-providers/:slug/capabilities/:modality", c => inferenceProviderRequest(c, SetInferenceProviderCapabilityAction, { slug: c.req.param("slug"), modality: c.req.param("modality") }));
+routes.put("/inference-providers/:slug/key", c => inferenceProviderRequest(c, RotateInferenceProviderKeyAction, { slug: c.req.param("slug") }));
+routes.delete("/inference-providers/:slug", c => inferenceProviderRequest(c, DeleteInferenceProviderAction, { slug: c.req.param("slug") }));
 
 // ── Get agent detail ─────────────────────────────────────────────────────────
 
@@ -1442,20 +919,9 @@ routes.patch("/:agentId", async (c) => {
     await lockOrganizationForRelationshipClaims(tx, orgId);
     const locked = await tx`SELECT id FROM agents WHERE organization_id = ${orgId} AND id = ${agentId} FOR UPDATE`;
     if (!locked.length) return c.json({ error: "Agent not found" }, 404);
-    const transactionStore = createPostgresAgentConfigStore(tx);
-    const before = await transactionStore.getMetadata(agentId);
-	await transactionStore.updateMetadata(agentId, body);
-	// Snapshot the row as stored (post-merge), not the request body.
-	const metadata = await transactionStore.getMetadata(agentId);
-	await emitConfigChange(c, {
-    before: before ? { ...before } : null,
-		resourceKind: "agent",
-		resourceId: agentId,
-		op: "updated",
-		summary: `Agent '${metadata?.name ?? agentId}' metadata updated`,
-		state: metadata ? { ...metadata, agentId } : null,
-		changedFields: Object.keys(body),
-	}, tx);
+    await persistAgentMetadataPatch(tx, agentId, body, {
+      organizationId: orgId, ...getApplyContext(c),
+    });
 	return c.json({ success: true });
   });
 });
@@ -1476,18 +942,7 @@ routes.delete("/:agentId", async (c) => {
     await lockOrganizationForRelationshipClaims(tx, orgId);
     const locked = await tx`SELECT id FROM agents WHERE organization_id = ${orgId} AND id = ${agentId} FOR UPDATE`;
     if (!locked.length) return c.json({ error: "Agent not found" }, 404);
-    const transactionStore = createPostgresAgentConfigStore(tx);
-    const before = await transactionStore.getMetadata(agentId);
-	// Cascade handled by FK ON DELETE CASCADE
-	await transactionStore.deleteMetadata(agentId);
-	await emitConfigChange(c, {
-    before: before ? { ...before } : null,
-		resourceKind: "agent",
-		resourceId: agentId,
-		op: "deleted",
-		summary: `Agent '${agentId}' deleted`,
-		state: null,
-	}, tx);
+    await deleteAgentConfig(tx, agentId, { organizationId: orgId, ...getApplyContext(c) });
 	return c.json({ success: true });
   });
 });
@@ -1790,198 +1245,6 @@ routes.get("/:agentId/guardrail-judge-default", async (c) => {
 
 // ── Update agent config (settings) ───────────────────────────────────────────
 
-const GUARDRAIL_STAGES = new Set(["input", "output", "pre-tool", "egress"]);
-
-/**
- * Validate a `guardrailsInline` payload before it is persisted to agent
- * settings. Returns a human-readable error string on the first invalid entry,
- * or `null` when the payload is absent or fully valid. Persisting an entry with
- * an invalid `stage` would crash the guardrail aggregator at message time, so
- * we reject malformed input at the write boundary instead.
- */
-export function validateGuardrailsInline(value: unknown): string | null {
-	if (value === undefined) return null;
-	if (!Array.isArray(value)) return "guardrailsInline must be an array";
-	for (let i = 0; i < value.length; i++) {
-		const entry = value[i];
-		if (typeof entry !== "object" || entry === null) {
-			return `guardrailsInline[${i}] must be an object`;
-		}
-		const g = entry as Record<string, unknown>;
-		if (typeof g.name !== "string" || g.name.trim() === "") {
-			return `guardrailsInline[${i}].name must be a non-empty string`;
-		}
-		if (typeof g.enabled !== "boolean") {
-			return `guardrailsInline[${i}].enabled must be a boolean`;
-		}
-		if (typeof g.stage !== "string" || !GUARDRAIL_STAGES.has(g.stage)) {
-			return `guardrailsInline[${i}].stage must be one of: input, output, pre-tool, egress`;
-		}
-		// Only `undefined` defaults to "judge" (backward compatible with rows
-		// written before `kind` existed). `null` is not a valid value in the
-		// Core `AgentInlineGuardrailSchema`, so reject it rather than coercing.
-		if (
-			g.kind !== undefined &&
-			g.kind !== "judge" &&
-			g.kind !== "require-tool"
-		) {
-			return `guardrailsInline[${i}].kind must be "judge" or "require-tool"`;
-		}
-		const kind = g.kind === undefined ? "judge" : g.kind;
-		// Common optional fields are typed the same way for every kind in the
-		// Core schema, so validate them whenever present regardless of kind.
-		// Otherwise a malformed `require-tool` row (e.g. `model: 42`) would be
-		// persisted here yet rejected by `AgentInlineGuardrailSchema`.
-		if (g.model !== undefined && typeof g.model !== "string") {
-			return `guardrailsInline[${i}].model must be a string`;
-		}
-		if (
-			g.domains !== undefined &&
-			(!Array.isArray(g.domains) ||
-				g.domains.some((d) => typeof d !== "string"))
-		) {
-			return `guardrailsInline[${i}].domains must be an array of strings`;
-		}
-		if (kind === "require-tool") {
-			if (g.stage !== "output") {
-				return `guardrailsInline[${i}]: require-tool only supports stage "output"`;
-			}
-			if (
-				!Array.isArray(g.tools) ||
-				g.tools.length === 0 ||
-				g.tools.some((t) => typeof t !== "string" || t.trim() === "")
-			) {
-				return `guardrailsInline[${i}].tools must be a non-empty array of tool names for require-tool`;
-			}
-			// `policy` is ignored for require-tool, but must still match the
-			// schema's type when the operator supplies it.
-			if (g.policy !== undefined && typeof g.policy !== "string") {
-				return `guardrailsInline[${i}].policy must be a string`;
-			}
-		} else {
-			// judge (default)
-			if (typeof g.policy !== "string" || g.policy.trim() === "") {
-				return `guardrailsInline[${i}].policy must be a non-empty string`;
-			}
-			if (
-				g.tools !== undefined &&
-				(!Array.isArray(g.tools) || g.tools.some((t) => typeof t !== "string"))
-			) {
-				return `guardrailsInline[${i}].tools must be an array of strings`;
-			}
-		}
-	}
-	return null;
-}
-
-/**
- * Write-boundary check for `networkConfig` domain lists. Agent network settings
- * are deliberately looser than connector declarations (an operator may list
- * hosts a third party could not), so this does NOT apply the strict domain
- * grammar. It refuses only entries that can never name a host under any
- * grammar: non-strings, empty or whitespace-only strings, and strings containing
- * whitespace. They were previously persisted verbatim and then silently matched
- * nothing.
- */
-export function validateNetworkConfig(updates: unknown): string | null {
-	const config = (updates as { networkConfig?: unknown } | null)?.networkConfig;
-	if (config === undefined || config === null) return null;
-	if (typeof config !== "object" || Array.isArray(config)) {
-		return "networkConfig must be an object";
-	}
-	for (const key of ["allowedDomains", "deniedDomains"] as const) {
-		const list = (config as Record<string, unknown>)[key];
-		if (list === undefined || list === null) continue;
-		if (!Array.isArray(list)) return `networkConfig.${key} must be an array`;
-		for (const [i, entry] of list.entries()) {
-			if (typeof entry !== "string") {
-				return `networkConfig.${key}/${i} must be a string`;
-			}
-			if (entry.trim() === "") {
-				return `networkConfig.${key}/${i} must not be empty`;
-			}
-			if (/\s/.test(entry)) {
-				return `networkConfig.${key}/${i} must not contain whitespace`;
-			}
-		}
-	}
-	return null;
-}
-
-/**
- * Write-boundary validation for `skillsConfig`, the sibling of
- * {@link validateGuardrailsInline}.
- *
- * The PATCH route spreads settings through untouched, so without this a
- * malformed payload persists and is then read back as a trusted `SkillConfig`.
- * Two concrete failures: a non-array `skills` throws at the first `.filter()`
- * downstream, and a non-boolean `enabled` diverges from the runtime, which
- * gates on truthiness (`s.enabled && …`) — so `"yes"` would enable a skill that
- * no write-time check ever saw as enabled.
- *
- * Checked against `SkillsConfigSchema` in core rather than a hand-rolled shape,
- * so the write boundary cannot drift from the type the readers rely on. The
- * schema is the only definition of a skill entry; it no longer carries
- * guardrails (those are operator-owned and live on `guardrailsInline`), so this
- * validates the current contract without reintroducing skill-declared ones.
- *
- * `Type.Object` admits unknown keys by design: rows written before a field was
- * dropped still round-trip through the editor's `_original` spread, and
- * rejecting them would fail a payload the server simply ignores.
- */
-export function validateSkillsConfig(value: unknown): string | null {
-	if (value === undefined) return null;
-	if (Value.Check(SkillsConfigSchema, value)) return null;
-	const first = Value.Errors(SkillsConfigSchema, value).First();
-	if (!first) return "skillsConfig is invalid";
-	return `skillsConfig${first.path}: ${first.message}`;
-}
-
-/**
- * Write-boundary type check for the settings fields a PATCH may carry.
- *
- * Without it a wrongly-typed value (`{"verboseLogging":"not-a-boolean"}`) was
- * handed to the store, which coerced or ignored it, and the route still answered
- * `{ success: true }` - the caller could not tell the write had not applied.
- * Each key the stored-settings schema knows is checked against its own property
- * schema, so this cannot drift from the type the readers rely on. Unknown keys
- * (`authProfiles`, legacy model fields, which have their own handling below) and
- * `null` (an explicit clear) keep their existing handling. `models` is skipped
- * here, as are `guardrailsInline` and `skillsConfig`: each has a stricter validator
- * of its own with its own error code.
- */
-const OWN_VALIDATED_SETTINGS_KEYS = new Set([
-	"models",
-	"guardrailsInline",
-	"skillsConfig",
-]);
-
-export function validateSettingsPatch(updates: unknown): string | null {
-	if (updates === null || typeof updates !== "object" || Array.isArray(updates)) {
-		return "request body must be a JSON object";
-	}
-	if (Object.hasOwn(updates, "toolsConfig")) {
-		return "toolsConfig was removed. Configure action permissions in Settings → Policies.";
-	}
-	const properties = AgentSettingsStoredSchema.properties as Record<
-		string,
-		Parameters<typeof Value.Check>[0]
-	>;
-	for (const [key, value] of Object.entries(updates)) {
-		if (key === "updatedAt" || OWN_VALIDATED_SETTINGS_KEYS.has(key)) continue;
-		// Own keys only: a body key such as "constructor" or "toString" would
-		// otherwise resolve to an inherited Object.prototype member and make
-		// Value.Check throw instead of being treated as an unknown key.
-		if (!Object.hasOwn(properties, key)) continue;
-		const schema = properties[key];
-		if (!schema || value === null) continue;
-		if (Value.Check(schema, value)) continue;
-		const first = Value.Errors(schema, value).First();
-		return `${key}${first?.path ?? ""}: ${first?.message ?? "invalid value"}`;
-	}
-	return null;
-}
-
 routes.patch("/:agentId/config", async (c) => {
 	const denied = requireManageAgentAccess(c);
 	if (denied) return denied;
@@ -1992,223 +1255,20 @@ routes.patch("/:agentId/config", async (c) => {
 		return c.json({ error: "Agent not found" }, 404);
 	}
 
-	// Type-check every known settings field before anything is persisted, so a
-	// wrongly-typed value is refused atomically instead of reported as success.
-	const settingsPatchError = validateSettingsPatch(updates);
-	if (settingsPatchError) {
-		return c.json(
-			{
-				error: "invalid_settings",
-				error_description: settingsPatchError,
-			},
-			400
-		);
-	}
-
-	// Validate inline guardrail shape before it is persisted. An invalid `stage`
-	// (or missing name/policy) would otherwise be written verbatim and then crash
-	// the guardrail aggregator mid-message (it indexes `seen[stage]`).
-	const guardrailError = validateGuardrailsInline(
-		(updates as { guardrailsInline?: unknown }).guardrailsInline
-	);
-	if (guardrailError) {
-		return c.json(
-			{ error: "invalid_guardrail", error_description: guardrailError },
-			400
-		);
-	}
-
-	const networkConfigError = validateNetworkConfig(updates);
-	if (networkConfigError) {
-		return c.json(
-			{
-				error: "invalid_network_config",
-				error_description: networkConfigError,
-			},
-			400
-		);
-	}
-
-	// Structural check on skillsConfig — the settings spread below persists it
-	// verbatim, and the runtime reads it back as a trusted SkillConfig.
-	const skillsConfigError = validateSkillsConfig(
-		(updates as { skillsConfig?: unknown }).skillsConfig
-	);
-	if (skillsConfigError) {
-		return c.json(
-			{ error: "invalid_skills_config", error_description: skillsConfigError },
-			400
-		);
-	}
-
-	// Read once and reuse: both the judge-model grandfathering below and the
-	// grant-shadowing check after it need the CURRENT settings, because a PATCH
-	// may carry only one of `guardrailsInline` / `networkConfig`.
-	const storedSettings = await configStore.getSettings(agentId);
-
-	// Judge-kind custom guardrails need a model. With no org default provider
-	// model, every judge entry must carry its own `model` — otherwise it would
-	// fail closed at runtime with no model to call. require-tool entries never
-	// call a model.
-	const judgeDefault = (
-		await getOrgDefaultModel(c.get("organizationId") as string).catch(
-			() => null
-		)
-	)?.trim();
-	if (
-		Array.isArray((updates as { guardrailsInline?: unknown }).guardrailsInline)
-	) {
-		const inline = (
-			updates as {
-				guardrailsInline: Array<{
-					name?: string;
-					model?: string;
-					kind?: string;
-				}>;
-			}
-		).guardrailsInline;
-		if (!judgeDefault) {
-			const missing = inline.find((g) => {
-				if (g?.kind === "require-tool") return false;
-				return typeof g?.model !== "string" || g.model.trim() === "";
-			});
-			if (missing) {
-				return c.json(
-					{
-						error: "guardrail_model_required",
-						error_description: `Custom guardrail "${missing.name ?? "(unnamed)"}" needs a model: this organization has no default provider model.`,
-					},
-					400
-				);
-			}
-		}
-
-		// A judge model that cannot resolve is worse than a missing one: the
-		// guardrail SAVES, then denies every request it covers at runtime with
-		// only a log line to say why. Resolve it here, through the exact
-		// function the judge uses, so write-time acceptance and runtime
-		// resolution cannot drift. Applies whether or not a default exists —
-		// an explicitly named bad model is bad either way.
-		//
-		// Only NEW or CHANGED models are checked. Rejecting an already-stored
-		// value would lock the agent out of its own config: every PATCH carries
-		// the full `guardrailsInline` array, so an agent holding a
-		// now-unrunnable model could not be edited at all — not even to remove
-		// the offending guardrail. Grandfathering the stored value keeps the
-		// repair path open while still refusing to accept a new bad one.
-		const storedModels = new Map<string, string>();
-		const storedInline = (storedSettings as {
-			guardrailsInline?: Array<{
-				name?: string;
-				model?: string;
-				kind?: string;
-			}>;
-		} | null)?.guardrailsInline;
-		if (Array.isArray(storedInline)) {
-			for (const g of storedInline) {
-				// require-tool entries never ran a judge, so they grandfather nothing:
-				// converting one into a model-less judge is a NEW judge to validate.
-				if (g?.kind === "require-tool") continue;
-				if (g?.name) storedModels.set(g.name, (g.model ?? "").trim());
-			}
-		}
-
-		for (const g of inline) {
-			if (g?.kind === "require-tool") continue;
-			const ownModel = g?.model?.trim();
-			// A model-less guardrail runs on the org default, so that default must
-			// be runnable by the judge too (a deployment system key, OpenAI-compatible
-			// protocol). Otherwise it would save and then deny every covered request.
-			const model = ownModel || judgeDefault;
-			if (!model) continue;
-			if (g?.name && storedModels.get(g.name) === (ownModel ?? "")) continue;
-			const resolved = await resolveSystemJudgeTarget(model);
-			if (!resolved.ok) {
-				return c.json(
-					{
-						error: "guardrail_model_unresolvable",
-						error_description: `Custom guardrail "${g?.name ?? "(unnamed)"}" ${ownModel ? `names judge model "${model}"` : `has no model, so it uses this organization's default model "${model}"`}, which this deployment cannot run: ${resolved.detail}. Use a "<provider>/<model>" ref whose provider has a system key and speaks the OpenAI-compatible protocol.`,
-					},
-					400
-				);
-			}
-		}
-	}
-
-	// An allow grant BEATS the egress judge. `checkDomainAccess` (proxy/
-	// http-proxy.ts) checks per-agent allow grants (step 4) before consulting
-	// the judge (step 5), so a domain that is both judged and allow-granted
-	// returns `source: "grant"` and its judge never runs. That failure is
-	// invisible from the outside — the request succeeds, just for the wrong
-	// reason — so refuse the config instead of saving a control that cannot fire.
-	//
-	// Validate the MERGE, not the patch: a PATCH may carry `guardrailsInline`
-	// alone, `networkConfig` alone, or both, and the hole only exists in the
-	// combination. Only run when the patch actually touches one of them, so an
-	// unrelated edit to an agent that is already in this state still saves (and
-	// so removing either side is always a valid repair).
-	const touchesGuardrails = "guardrailsInline" in (updates as object);
-	const touchesNetwork = "networkConfig" in (updates as object);
-	if (touchesGuardrails || touchesNetwork) {
-		const stored = storedSettings as {
-			guardrailsInline?: AgentInlineGuardrail[];
-			networkConfig?: { allowedDomains?: string[] };
-		} | null;
-		const effectiveGuardrails = touchesGuardrails
-			? ((updates as { guardrailsInline?: AgentInlineGuardrail[] })
-					.guardrailsInline ?? [])
-			: (stored?.guardrailsInline ?? []);
-		const effectiveAllowed = touchesNetwork
-			? ((updates as { networkConfig?: { allowedDomains?: string[] } })
-					.networkConfig?.allowedDomains ?? [])
-			: (stored?.networkConfig?.allowedDomains ?? []);
-
-		const shadowed = findSuppressedJudgedDomains(
-			effectiveGuardrails,
-			effectiveAllowed
-		);
-		if (shadowed[0]) {
-			const { domain, judge, grant } = shadowed[0];
-			return c.json(
-				{
-					error: "guardrail_domain_shadowed_by_grant",
-					error_description: `Guardrail "${judge}" judges "${domain}", but this agent's networkConfig.allowedDomains grants "${grant}", which the proxy matches FIRST — the judge would never run. A judged domain must not be allow-listed: remove "${grant}" from allowedDomains (a judged domain is reachable through its judge, so it needs no grant), or drop "${domain}" from the guardrail.`,
-				},
-				400
-			);
-		}
-
-		// The GLOBAL allowlist shadows judges the same way (`checkDomainAccess`
-		// step 3), but it is `WORKER_ALLOWED_DOMAINS` — operator config the
-		// tenant editing this agent cannot fix. Warn rather than reject, so
-		// the signal reaches whoever can act on it without blocking a save
-		// nobody in this request can make valid. Only consult the allowlist
-		// when there is a judge to shadow: `loadAllowedDomains` logs on every
-		// call in isolation mode.
-		const judgedCount =
-			egressGuardrailsToPolicyBundle(effectiveGuardrails)?.judgedDomains
-				.length ?? 0;
-		if (judgedCount > 0) {
-			const globalAllowed = loadAllowedDomains();
-			const unrestricted = isUnrestrictedMode(globalAllowed);
-			// Unrestricted mode allows every host, so it shadows every judged
-			// domain without any of them appearing in a list to match against.
-			// The global matcher's `.suffix` also covers the root host, unlike a
-			// per-agent grant.
-			if (
-				unrestricted ||
-				findSuppressedJudgedDomains(effectiveGuardrails, globalAllowed, {
-					wildcardCoversRoot: true,
-				}).length > 0
-			) {
-				logger.warn(
-					`[agent-config] agent "${agentId}" has egress judge guardrails whose domains are covered by WORKER_ALLOWED_DOMAINS${
-						unrestricted ? " (unrestricted, '*')" : ""
-					}. The global allowlist is matched before the judge, so those judges will not run.`
-				);
-			}
-		}
-	}
+  return getDb().begin(async (tx) => {
+    const orgId = c.get("organizationId") as string;
+    await lockOrganizationForRelationshipClaims(tx, orgId);
+    const locked = await tx`SELECT id FROM agents WHERE organization_id = ${orgId} AND id = ${agentId} FOR UPDATE`;
+    if (!locked.length) return c.json({ error: "Agent not found" }, 404);
+    const transactionStore = createPostgresAgentConfigStore(tx);
+    const before = await transactionStore.getSettings(agentId);
+    const validationError = await validateAgentSettingsUpdate(updates, before, orgId, agentId);
+    if (validationError) {
+      if ("modelError" in validationError) {
+        return c.json(modelValidationResponse(validationError.modelError, { c, agentId }), 400);
+      }
+      return c.json(validationError, validationError.error === "models_validation_failed" ? 503 : 400);
+    }
 
 	// Auth profiles aren't part of the agent settings row — they're
 	// user-scoped and live in `user_auth_profiles` with secrets in the secret
@@ -2233,45 +1293,6 @@ routes.patch("/:agentId/config", async (c) => {
 				400
 			);
 		}
-	}
-
-	// ATOMICITY (#7): validate the `models` allow-list BEFORE mutating anything
-	// else (auth profiles, settings row). A models-validation failure must leave
-	// the PATCH a true no-op — reconciling auth profiles first and THEN 503-ing
-	// on models would persist a credential change while claiming "nothing saved".
-	if (settingsUpdates.models !== undefined) {
-		const organizationId = c.get("organizationId") as string;
-		let error: Record<string, unknown> | null;
-		try {
-			error = await validateModelsUpdate({
-				models: settingsUpdates.models,
-				organizationId,
-				agentId,
-				c,
-			});
-		} catch (err) {
-			// FAIL CLOSED: the `models` list is an access gate, so a lookup/infra
-			// failure while validating it must REJECT the write — never persist an
-			// unvalidated allow-list (that could silently widen or misconfigure
-			// access). Nothing has been mutated yet, so this is a true no-op.
-			logger.warn(
-				{ agentId, err },
-				"Failed to validate models list before saving agent settings — rejecting"
-			);
-			return c.json(
-				{
-					error: "models_validation_failed",
-					error_description:
-						"Could not validate the models list against the organization's providers. No change was saved; please retry.",
-				},
-				503
-			);
-		}
-		if (error) return c.json(error, 400);
-		// Persist the trimmed refs, not the raw client payload.
-		settingsUpdates.models = (settingsUpdates.models as string[]).map((m) =>
-			m.trim()
-		);
 	}
 
 	if (Array.isArray(authProfiles)) {
@@ -2302,26 +1323,10 @@ routes.patch("/:agentId/config", async (c) => {
 		}
 	}
 
-  return getDb().begin(async (tx) => {
-    const orgId = c.get("organizationId") as string;
-    await lockOrganizationForRelationshipClaims(tx, orgId);
-    const locked = await tx`SELECT id FROM agents WHERE organization_id = ${orgId} AND id = ${agentId} FOR UPDATE`;
-    if (!locked.length) return c.json({ error: "Agent not found" }, 404);
-    const transactionStore = createPostgresAgentConfigStore(tx);
-    const before = await transactionStore.getSettings(agentId);
-	await transactionStore.updateSettings(agentId, settingsUpdates);
-	// Snapshot the merged settings row as stored (the store merges partial
-	// patches server-side), so the audit state reflects what took effect.
-	const merged = await transactionStore.getSettings(agentId);
-	await emitConfigChange(c, {
-    before: before ? { ...before } : null,
-		resourceKind: "agent-settings",
-		resourceId: agentId,
-		op: "updated",
-		summary: `Agent '${agentId}' settings updated`,
-		state: merged ? { ...merged } : null,
-		changedFields: Object.keys(settingsUpdates),
-	}, tx);
+  await persistAgentSettingsPatch(tx, agentId, settingsUpdates, before, {
+    organizationId: orgId,
+    ...getApplyContext(c),
+  });
 	return c.json({ success: true });
   });
 });
@@ -2342,22 +1347,6 @@ function requireOrgId(c: any): string | Response {
 	if (!orgId)
 		return c.json({ error: "Organization context not available" }, 500);
 	return orgId;
-}
-
-/**
- * Validate a full `capabilities` map ({ modality: block, … }). Returns an
- * error string on the first invalid modality/block, or null when valid.
- */
-function validateCapabilitiesMap(value: unknown): string | null {
-	if (value === undefined) return null;
-	if (typeof value !== "object" || value === null || Array.isArray(value)) {
-		return "capabilities must be an object";
-	}
-	for (const [modality, block] of Object.entries(value)) {
-		const err = validateCapabilityBlock(modality, block);
-		if (err) return err;
-	}
-	return null;
 }
 
 export { routes as agentRoutes };

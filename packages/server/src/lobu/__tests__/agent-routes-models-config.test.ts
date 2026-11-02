@@ -11,6 +11,8 @@
  */
 
 import { beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { buildAgentsNamespace } from "../../sandbox/namespaces/agents";
+import type { ToolContext } from "../../tools/registry";
 import {
   ensureDbForGatewayTests,
   resetTestDatabase,
@@ -70,6 +72,43 @@ beforeEach(async () => {
 }, 30_000);
 
 describe("agent PATCH/GET /config — models surface", () => {
+  test("REST and SDK share settings validation, storage and audit", async () => {
+    const app = await importAgentRoutes();
+    const ctx: ToolContext = {
+      organizationId: ORG, userId: "u1", memberRole: "owner", agentId: null,
+      sourceContext: null, isAuthenticated: true, tokenType: "session",
+      scopedToOrg: true, allowCrossOrg: false, grantedOrganizationIds: null,
+      directSearchFederation: false, scopes: ["mcp:read", "mcp:write", "mcp:admin"],
+    };
+    const sdk = buildAgentsNamespace(ctx, {});
+    const skillsConfig = { skills: [{ repo: "example/skills", name: "triage", enabled: true, content: "Inspect the queue." }] };
+    await sdk.update({ agent_id: AGENT, identity_md: "Triage identity", settings: { skillsConfig, showToolCalls: true } });
+    const get = await app.request(`/${AGENT}/config`);
+    expect(get.status).toBe(200);
+    expect(await get.json()).toMatchObject({ skillsConfig, identityMd: "Triage identity", showToolCalls: true });
+    const patch = await app.request(`/${AGENT}/config`, {
+      method: "PATCH", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ soulMd: "REST persona" }),
+    });
+    expect(patch.status).toBe(200);
+    expect((await sdk.get(AGENT)).settings).toMatchObject({ skillsConfig, soulMd: "REST persona" });
+    for (const settings of [
+      { networkConfig: { allowedDomains: ["invalid host"] } },
+      { guardrailsInline: [{ name: "missing-policy", enabled: true, stage: "input" }] },
+      { skillsConfig: { skills: "bad" } },
+      { models: ["unknown-provider/model"] },
+    ]) {
+      const before = await sdk.get(AGENT);
+      const response = await app.request(`/${AGENT}/config`, {
+        method: "PATCH", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ...settings, soulMd: "Must not persist" }),
+      });
+      expect(response.status).toBe(400);
+      await expect(sdk.manage({ action: "update", agent_id: AGENT, settings } as never)).rejects.toThrow();
+      expect(await sdk.get(AGENT)).toEqual(before);
+    }
+  });
+
   test("failed audit rolls back settings, metadata and deletion together with lifecycle events", async () => {
     const app = await importAgentRoutes();
     const { getDb } = await import("../../db/client.js");

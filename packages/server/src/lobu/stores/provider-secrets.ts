@@ -15,6 +15,12 @@
  */
 
 import { createLogger, decrypt, encrypt, getErrorMessage } from "@lobu/core";
+import {
+  InferenceCapabilityBlockSchema, InferenceModalitySchema,
+  type InferenceCapabilities, type InferenceCapabilityBlock, type InferenceModality,
+  type InferenceProviderListItem,
+} from "@lobu/core/contracts/tools/manage-inference-providers";
+export type { InferenceCapabilities, InferenceCapabilityBlock, InferenceModality, InferenceProviderListItem } from "@lobu/core/contracts/tools/manage-inference-providers";
 import { getDb, type DbClient } from "../../db/client.js";
 import { isUniqueViolation } from "../../utils/pg-errors";
 import { withTransaction } from "../../db/transaction.js";
@@ -34,40 +40,18 @@ const logger = createLogger("provider-secrets");
 // soft-delete→recreate never inherits a deleted row's ciphertext (the TOTAL
 // keyref unique index keeps the name reserved even after soft-delete).
 
-export type InferenceModality = "text" | "image" | "stt" | "tts";
-
-export const INFERENCE_MODALITIES: ReadonlySet<InferenceModality> = new Set([
-	"text",
-	"image",
-	"stt",
-	"tts",
-]);
+export const INFERENCE_MODALITIES: ReadonlySet<InferenceModality> = new Set(
+  InferenceModalitySchema.anyOf.map(modality => modality.const),
+);
 
 /** Type guard: is `m` a known inference modality? */
 export function isInferenceModality(m: string): m is InferenceModality {
 	return INFERENCE_MODALITIES.has(m as InferenceModality);
 }
 
-/**
- * Canonical provider-slug shape. MUST match the DB CHECK
- * (`inference_providers_slug_format`) and the CLI (map-config
- * ORG_PROVIDER_SLUG_PATTERN) EXACTLY: lowercase alphanumeric + hyphen, 1-63
- * chars, no leading/trailing hyphen. Validated server-side so a bad slug is a
- * clean 400 instead of a raw DB CHECK-violation 500.
- */
-export const INFERENCE_PROVIDER_SLUG_PATTERN =
-	/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
-
-/** Is `slug` a valid inference-provider slug (see INFERENCE_PROVIDER_SLUG_PATTERN)? */
-export function isValidInferenceProviderSlug(slug: string): boolean {
-	return INFERENCE_PROVIDER_SLUG_PATTERN.test(slug);
-}
-
-const ALLOWED_CAPABILITY_KEYS: ReadonlySet<string> = new Set([
-	"base_url",
-	"model",
-	"models_endpoint",
-]);
+const ALLOWED_CAPABILITY_KEYS: ReadonlySet<string> = new Set(
+  Object.keys(InferenceCapabilityBlockSchema.properties),
+);
 
 /**
  * Row-unique vault name for one inference-provider credential:
@@ -81,39 +65,6 @@ export function inferenceProviderSecretName(
 	id: number | string,
 ): string {
 	return `${slug}-${id}`;
-}
-
-export interface InferenceCapabilityBlock {
-	base_url?: string;
-	model?: string;
-	models_endpoint?: string;
-}
-
-export type InferenceCapabilities = Partial<
-	Record<InferenceModality, InferenceCapabilityBlock>
->;
-
-export interface InferenceProviderListItem {
-	id: number;
-	slug: string;
-	kind: string;
-	displayName: string | null;
-	capabilities: InferenceCapabilities;
-	hasCustomUpstream: boolean;
-	status: string;
-	/**
-	 * Why the provider last failed terminally, when `status = 'error'`. Written
-	 * by `markInferenceProviderUnhealthy` with the failure the caller observed
-	 * (currently the proxy's upstream HTTP status), so a workspace whose
-	 * Automations went quiet can read the cause here instead of seeing a row that
-	 * still says `active`.
-	 */
-	errorMessage: string | null;
-	createdAt: string;
-	/** When the row (including its health) last changed — dates the error above. */
-	updatedAt: string;
-	/** This row is the org's default inference provider (the model-resolution tail). */
-	isDefault: boolean;
 }
 
 export interface InferenceProviderRow {

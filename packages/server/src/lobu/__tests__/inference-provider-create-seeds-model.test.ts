@@ -164,10 +164,44 @@ describe("POST /inference-providers seeds a routable text model", () => {
 		};
 		authStash.organizationId = ORG;
 		authStash.authSource = "session";
+    authStash.memberRole = "owner";
 		authStash.mcpAuthInfo = null;
 	});
 
 	afterEach(() => restoreModules());
+
+  test("REST, SDK and MCP share provider state under the mounted org route", async () => {
+    const { Hono } = await import("hono");
+    const { agentRoutes } = await import("../agent-routes.js");
+    const { buildClientSDK } = await import("../../sandbox/client-sdk");
+    const { extractAuthContext, toToolContext, executeTool } = await import("../../tools/execute");
+    let auth: ReturnType<typeof extractAuthContext> | undefined;
+    const app = new Hono();
+    app.use("*", async (c, next) => { await next(); auth = extractAuthContext(c); });
+    app.route("/api/:orgSlug/agents", agentRoutes);
+    const url = `/api/${ORG}/agents/inference-providers`;
+    const created = await app.request(url, { method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ slug: "parity", kind: "gemini", apiKey: "synthetic-parity-key" }) });
+    expect(created.status).toBe(201);
+    expect(auth).toBeDefined();
+    const sdk = buildClientSDK(toToolContext(auth!), {});
+    await sdk.inferenceProviders.update({ slug: "parity", displayName: "Shared" });
+    await sdk.inferenceProviders.setCapability({ slug: "parity", modality: "image", block: { model: "image-model" } });
+    const rest = await app.request(url);
+    expect(rest.status).toBe(200);
+    const listed = await rest.json();
+    expect(listed).toEqual(await sdk.inferenceProviders.list());
+    expect(listed).toEqual(await executeTool("manage_inference_providers", { action: "list" }, {}, auth!));
+    const retarget = await app.request(`${url}/parity`, { method: "PUT", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ slug: "other", displayName: "Rejected" }) });
+    expect(retarget.status).toBe(400);
+    expect((await sdk.inferenceProviders.list()).providers[0]?.displayName).toBe("Shared");
+    const madeDefault = await app.request(`${url}/parity/default`, { method: "PUT", body: "" });
+    expect(madeDefault.status).toBe(200);
+    const removed = await app.request(`${url}/parity`, { method: "DELETE", body: "" });
+    expect(removed.status).toBe(200);
+    expect((await sdk.inferenceProviders.list()).providers).toEqual([]);
+  });
 
 	test("Codex runtime support does not allow subscription credentials through API-key creation", async () => {
 		const res = await createProvider({ slug: "chatgpt", kind: "chatgpt", apiKey: "synthetic-not-a-subscription" });

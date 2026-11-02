@@ -33,7 +33,7 @@ import { ToolNotRegisteredError, ToolUserError } from '../utils/errors';
 import { logToolCallFailure } from './tool-error-log';
 import { getConfiguredPublicOrigin } from '../utils/public-origin';
 import { enforcePublicReadLimit, getClientIP } from '../utils/rate-limiter';
-import { AccessDeniedError, enforceRoleScopeAccess, requireWorkspaceContext, scopeDenialMessage } from './access-control';
+import { AccessDeniedError, enforceAdminToolAllowlist, enforceRoleScopeAccess, requireWorkspaceContext, scopeDenialMessage } from './access-control';
 import { recordToolInvocationAudit, recordWorkspaceActivityAudit } from './audit';
 import { getAccountContent } from './get_content';
 import {
@@ -253,20 +253,7 @@ export async function checkToolAccess(
   const role = authCtx.memberRole;
   const requiredAccess = getRequiredAccessLevel(toolName, args, isReadOnly);
 
-  // Admin-tools run: the per-turn allowlist is a LIMIT on which
-  // tools may exercise ADMIN-tier actions. Read/write-tier actions follow the
-  // uniform role × scope model like every other caller.
-  const adminAllowlist = authCtx.adminTools;
-  if (
-    requiredAccess === 'admin' &&
-    adminAllowlist &&
-    adminAllowlist.length > 0 &&
-    !adminAllowlist.includes(toolName)
-  ) {
-    throw new AccessDeniedError(
-      `This agent run may not perform admin actions with ${toolName}. Allowed admin tools: ${adminAllowlist.join(', ')}.`
-    );
-  }
+  enforceAdminToolAllowlist(requiredAccess, toolName, authCtx.adminTools);
 
   if (accountScope && (authCtx.allowCrossOrg || !authCtx.organizationId || toolName === 'list_organizations')) {
     if (!authCtx.isAuthenticated || !authCtx.userId) throw new Error('Authentication required.');
@@ -585,6 +572,7 @@ export function toAccountToolContext(authCtx: AuthContext): AccountToolContext {
     organizationId: authCtx.organizationId,
     userId: authCtx.userId,
     memberRole: authCtx.memberRole,
+    adminTools: authCtx.adminTools ?? null,
     agentId: authCtx.agentId,
     actingAutomationId: authCtx.actingAutomationId ?? null,
     actingRunId: authCtx.actingRunId ?? null,

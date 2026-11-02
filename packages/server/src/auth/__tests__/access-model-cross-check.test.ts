@@ -43,6 +43,7 @@ import { withValidatedArgs } from "../../tools/validate-args";
  * metrics, ctx, notifications) are intentionally omitted.
  */
 const TIERED_NAMESPACES = [
+  ["inferenceProviders", "manage_inference_providers", "../../tools/admin/manage_inference_providers", "manageInferenceProviders"],
 	["entities", "manage_entity", "../../tools/admin/manage_entity", "manageEntity"],
 	["entitySchema", "manage_entity_schema", "../../tools/admin/manage_entity_schema", "manageEntitySchema"],
 	["connections", "manage_connections", "../../tools/admin/manage_connections", "manageConnections"],
@@ -189,7 +190,8 @@ function declaredRuntimeTier(
 	// beside manage_entity in tool-access.ts, never PUBLIC_READ_ACTIONS.
 	const authenticatedDuplicateDiscoveryRead = tool === "manage_entity" &&
 		action === "discover_duplicates";
-	const isExplicitlyDeclared = authenticatedConversationRead ||
+	const authenticatedProvidersRead = tool === "manage_inference_providers" && action === "list";
+	const isExplicitlyDeclared = authenticatedProvidersRead || authenticatedConversationRead ||
 		authenticatedViewsRead || authenticatedDuplicateDiscoveryRead ||
 		OWNER_ADMIN_ACTIONS[tool]?.has(action) ||
 		MEMBER_WRITE_ACTIONS[tool]?.has(action) ||

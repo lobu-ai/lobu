@@ -90,6 +90,14 @@ export const MEMBER_WRITE_ACTIONS: Record<string, Set<string> | null> = {
 };
 
 export const OWNER_ADMIN_ACTIONS: Record<string, Set<string>> = {
+	manage_inference_providers: new Set([
+		"create",
+		"update",
+		"set_default",
+		"set_capability",
+		"rotate_key",
+		"delete",
+	]),
 	// manage_catalog is READ-ONLY (both actions list — no writes exist). An empty
 	// admin set gives it an explicit policy entry so its actions fall through to
 	// READ tier; without it, `requiresOwnerAdmin`'s no-policy fallback classified

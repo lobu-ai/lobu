@@ -7,6 +7,7 @@
  */
 
 import type {
+	ManageViewsArgs,
 	ViewGetInput,
 	ViewListInput,
 	ViewRemoveInput,
@@ -18,7 +19,7 @@ import type { ToolContext } from "../../tools/registry";
 import { createActionCaller } from "./action-call";
 
 export interface ViewsNamespace {
-	manage(input: Record<string, unknown>): Promise<unknown>;
+	manage(input: ManageViewsArgs): Promise<unknown>;
 	get(input: ViewGetInput): Promise<unknown>;
 	set(input: ViewSetInput): Promise<unknown>;
 	list(input: ViewListInput): Promise<unknown>;

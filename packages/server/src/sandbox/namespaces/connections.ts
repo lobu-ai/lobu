@@ -10,6 +10,7 @@
  */
 
 import type {
+	ConnectionsArgs,
 	ConnectionReauthenticateOptions,
 	ConnectionSetupOptionsInput,
 	ConnectionConnectInput,
@@ -33,7 +34,7 @@ import { createActionCaller, idArg } from "./action-call";
 
 export interface ConnectionsNamespace {
 	/** Raw escape hatch for any manage_connections action. Prefer named methods. */
-	manage(input: Record<string, unknown>): Promise<unknown>;
+	manage(input: ConnectionsArgs): Promise<unknown>;
 	list(input?: ConnectionListInput): Promise<unknown>;
 	get(connection_id: number): Promise<unknown>;
 	create(input: ConnectionCreateInput): Promise<unknown>;

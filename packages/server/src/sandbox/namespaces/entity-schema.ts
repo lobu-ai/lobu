@@ -34,7 +34,7 @@ type EntityTypeFields =
 type RelationshipTypeFields = TypeFields | "inverse_type_slug" | "status" | "purpose";
 
 export interface EntitySchemaNamespace {
-	manage(input: Record<string, unknown>): Promise<unknown>;
+	manage(input: ManageEntitySchemaArgs): Promise<unknown>;
 	listTypes(input?: Input<"list_scope">): Promise<unknown>;
 	getType(slug: string): Promise<unknown>;
 	createType(input: Input<EntityTypeFields, "slug" | "name">): Promise<unknown>;

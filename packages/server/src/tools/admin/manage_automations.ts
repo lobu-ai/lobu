@@ -86,6 +86,10 @@ import {
 } from './manage_automations/feedback';
 import { handleGetComponentReference } from './manage_automations/reference';
 import { handleList } from './manage_automations/list';
+import {
+  assertAutomationConfigVersionsUnchanged,
+  readAutomationConfigVersions,
+} from './manage_automations/config-state';
 import { eventClientId } from '../../auth/event-client-id';
 
 export {
@@ -449,10 +453,8 @@ async function fetchCurrentAutomation(
  * for the gated write so a malformed proposal is rejected at request time, not
  * at approve time.
  *
- * Automation definition writes have no per-field pre-image; the proposal is the
- * full original args for a straight re-run on approve (a stale approval may
- * clobber a newer edit — acceptable for launch). Acting principal is persisted
- * so apply can re-run the foreign-owner guard against the original actor.
+ * Captures the requested args and original acting principal. Queueing also pins
+ * the target configuration revisions so approval cannot overwrite a newer edit.
  */
 function buildAutomationProposal(
   args: ManageAutomationsArgs,
@@ -698,6 +700,9 @@ async function queueAutomationWriteForApproval(
   acting: { actingAgentId: string | null; actingAutomationId: string | null }
 ): Promise<ManageAutomationsResult> {
   const proposal = buildAutomationProposal(args, acting);
+  if (args.action !== 'create' && args.action !== 'create_from_version') {
+    proposal.base = await readAutomationConfigVersions(args, ctx.organizationId);
+  }
   const writeAction = automationWriteAction(args.action)!;
 
   // create attributes ownership via created_by — fail at request time rather
@@ -878,9 +883,10 @@ async function assertAutomationOwnersMatchActingAgent(
  * between queue and approve (e.g. group reassigned to another agent), the apply
  * fails closed — the approve handler supersedes the card to 'failed'.
  *
- * Automation definition writes have no per-field pre-image; this is a straight
- * re-run — a stale approval may clobber a newer edit (acceptable for launch)
- * when ownership is still valid.
+ * Configuration revisions are rechecked under the existing group lock before
+ * dispatch and again by each handler under its own FOR UPDATE row locks, since
+ * a delete serializes only on the row lock. Legacy proposals without a
+ * revision fail closed.
  */
 export async function applyManageAutomationsProposal(
   proposal: ManageAutomationsProposal,
@@ -940,6 +946,9 @@ export async function applyManageAutomationsProposal(
         }
       }
     }
+    if (args.action !== 'create' && args.action !== 'create_from_version') {
+      await assertAutomationConfigVersionsUnchanged(args, applyCtx.organizationId, proposal.base);
+    }
     // The approval path already established the human's authority. Dispatch
     // directly so this server-side continuation does not re-enter routeAction's
     // fresh-call mcp:admin gate; resolve_approval intentionally requires only
@@ -948,15 +957,15 @@ export async function applyManageAutomationsProposal(
       case 'create':
         return handleCreate(args, env, applyCtx);
       case 'update':
-        return handleUpdate(args, env, applyCtx);
+        return handleUpdate(args, env, applyCtx, proposal.base);
       case 'create_version':
-        return handleCreateVersion(args, env, applyCtx);
+        return handleCreateVersion(args, env, applyCtx, proposal.base);
       case 'create_from_version':
         return handleCreateFromVersion(args, env, applyCtx);
       case 'set_reaction_script':
-        return handleSetReactionScript(args, env, applyCtx);
+        return handleSetReactionScript(args, env, applyCtx, proposal.base);
       case 'delete':
-        return handleDelete(args, applyCtx);
+        return handleDelete(args, applyCtx, proposal.base);
       default:
         // Only write actions queue (automationWriteAction gates the queue path);
         // a held proposal with any other action is corrupt — fail the apply.

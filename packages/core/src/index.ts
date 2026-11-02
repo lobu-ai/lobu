@@ -4,6 +4,7 @@
 
 export * from "./agent-policy";
 export * from "./tool-trace-summary";
+export * from "./tool-result";
 export * from "./shell-safety";
 export * from "./turn-control";
 export * from "./memory-flush";

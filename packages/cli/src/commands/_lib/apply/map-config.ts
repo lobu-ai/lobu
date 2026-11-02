@@ -17,6 +17,7 @@ import {
 import type { AgentSettingsStored } from "@lobu/core/contracts/agent-settings";
 import { parseCollectionPresentation } from "@lobu/core/contracts/tools/collection-presentation";
 import {
+  ManageAutomationsSchema,
   normalizeWorkspaceEventTrigger,
   resolvedEventExecution,
 } from "@lobu/core/contracts/tools/manage-automations";
@@ -24,6 +25,11 @@ import {
   InvalidEntityResolutionPolicyError,
   parseEntityResolutionPolicy,
 } from "@lobu/core/contracts/tools/manage-entity-schema";
+import {
+  InferenceModalitySchema,
+  InferenceProviderSlugSchema,
+} from "@lobu/core/contracts/tools/manage-inference-providers";
+import { Value } from "@sinclair/typebox/value";
 
 /**
  * Exhaustiveness projection over the stored AgentSettings shape. Every key is
@@ -151,23 +157,15 @@ function providerId(provider: ProviderConfig): string {
   return (provider.id ?? "").trim();
 }
 
-/**
- * Org-provider slug rules — MUST match the DB CHECK in the inference_providers
- * migration exactly (`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`): lowercase
- * alphanumeric + hyphen, 1-63 chars, no leading/trailing hyphen. Kept in lockstep
- * so `lobu apply` rejects a bad slug up front instead of the server 500ing on the
- * CHECK. Single-char slugs are allowed; a trailing hyphen (`myvllm-`) is not.
- */
-const ORG_PROVIDER_SLUG_PATTERN = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
+/** Use the same provider-slug bounds as REST and MCP. */
+const ORG_PROVIDER_SLUG_PATTERN = new RegExp(
+  InferenceProviderSlugSchema.pattern!
+);
 
 /** Modalities the server accepts for an inference-provider capability block. */
-const INFERENCE_MODALITIES = new Set([
-  "text",
-  "image",
-  "stt",
-  "tts",
-  "embedding",
-]);
+const INFERENCE_MODALITIES: ReadonlySet<string> = new Set(
+  InferenceModalitySchema.anyOf.map((modality) => modality.const)
+);
 
 /**
  * Map an org-owned inference provider (`defineConfig({ providers })`) to its
@@ -198,7 +196,7 @@ function mapOrgProvider(
   for (const [modality, block] of Object.entries(provider.capabilities ?? {})) {
     if (!INFERENCE_MODALITIES.has(modality)) {
       throw new ValidationError(
-        `provider "${provider.slug}" declares unknown modality "${modality}" (expected text|image|stt|tts|embedding)`
+        `provider "${provider.slug}" declares unknown modality "${modality}" (expected ${[...INFERENCE_MODALITIES].join("|")})`
       );
     }
     if (block) capabilities[modality] = block;
@@ -617,6 +615,20 @@ function assertAutomationSkills(
 }
 
 function mapAutomation(automation: Automation): DesiredAutomation {
+  let agentKind: DesiredAutomation["agentKind"];
+  if (automation.agentKind !== undefined) {
+    if (
+      !Value.Check(
+        ManageAutomationsSchema.properties.agent_kind,
+        automation.agentKind
+      )
+    ) {
+      throw new ValidationError(
+        `Automation "${automation.slug}" has an invalid agentKind: ${automation.agentKind}`
+      );
+    }
+    agentKind = automation.agentKind;
+  }
   const sources = automation.sources
     ? Object.entries(automation.sources).map(([name, value]) => {
         if (typeof value === "string") return { name, query: value };
@@ -722,7 +734,7 @@ function mapAutomation(automation: Automation): DesiredAutomation {
     ...(automation.reactionsGuidance
       ? { reactionsGuidance: automation.reactionsGuidance }
       : {}),
-    ...(automation.agentKind ? { agentKind: automation.agentKind } : {}),
+    ...(agentKind ? { agentKind } : {}),
     ...(automation.deviceWorkerId !== undefined
       ? { deviceWorkerId: automation.deviceWorkerId }
       : {}),

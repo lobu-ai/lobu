@@ -4,6 +4,11 @@
  */
 
 import { getDb, parsePgTextArray } from '../../../db/client';
+import {
+  assertAutomationConfigVersion,
+  assertAutomationConfigVersionsUnchanged,
+  automationAuditSnapshot,
+} from './config-state';
 import type { Env } from '../../../index';
 import { ToolUserError } from '../../../utils/errors';
 import { isUniqueViolation } from '../../../utils/pg-errors';
@@ -106,30 +111,6 @@ function canonicalizeJson(value: unknown): unknown {
 
 function stableJson(value: unknown): string {
   return JSON.stringify(canonicalizeJson(value ?? null));
-}
-
-function automationAuditSnapshot(row: Record<string, unknown> | null): Record<string, unknown> | null {
-  if (!row) return null;
-  const pick = (k: string) => (k in row ? row[k] : null);
-  return {
-    id: pick('id'),
-    agent_kind: pick('agent_kind'),
-    device_worker_id: pick('device_worker_id'),
-    managed_agent_id: pick('managed_agent_id'),
-    execution_config: pick('execution_config'),
-    model_config: pick('model_config'),
-    delivery_target: pick('delivery_target'),
-    triggers: pick('triggers'),
-    schedule: pick('schedule'),
-    timezone: pick('timezone'),
-    tags: pick('tags'),
-    min_cooldown_seconds: pick('min_cooldown_seconds'),
-    status: pick('status'),
-    reaction_script: pick('reaction_script'),
-    consecutive_scheduled_failures: pick('consecutive_scheduled_failures'),
-    schedule_auto_paused_at: pick('schedule_auto_paused_at'),
-    next_run_at: pick('next_run_at'),
-  };
 }
 
 // ============================================
@@ -560,7 +541,8 @@ export async function handleCreate(
 export async function handleUpdate(
   args: ManageAutomationsArgs,
   _env: Env,
-  ctx: ToolContext
+  ctx: ToolContext,
+  base?: Record<string, string>
 ): Promise<{ action: 'update'; automation_id: string; updated_fields: string[] }> {
   const sql = getDb();
 
@@ -785,6 +767,7 @@ export async function handleUpdate(
     if (lockedRows.length === 0) {
       throw new ToolUserError(`Automation ${args.automation_id} not found`, 404);
     }
+    if (base) await assertAutomationConfigVersionsUnchanged(args, ctx.organizationId, base, tx);
     const locked = lockedRows[0] as unknown as typeof currentRow;
     const lockedTriggersValueEqual =
       args.triggers === undefined ||
@@ -916,7 +899,8 @@ export async function handleUpdate(
 
 export async function handleDelete(
   args: ManageAutomationsArgs,
-  ctx: ToolContext
+  ctx: ToolContext,
+  base?: Record<string, string>
 ): Promise<{
   action: 'delete';
   results: AutomationOperationResult[];
@@ -945,7 +929,7 @@ export async function handleDelete(
                device_worker_id::text AS device_worker_id, execution_config, model_config,
                delivery_target, triggers, schedule, timezone, tags, min_cooldown_seconds,
                consecutive_scheduled_failures, schedule_auto_paused_at, next_run_at,
-               reaction_script, entity_ids
+               reaction_script, entity_ids, slug, description, current_version_id, automation_group_id
         FROM automations
         WHERE id = ${automationId} AND organization_id = ${ctx.organizationId}
         LIMIT 1
@@ -953,6 +937,7 @@ export async function handleDelete(
       `;
         const beforeRow = (beforeRows[0] ?? null) as Record<string, unknown> | null;
         if (!beforeRow || beforeRow.status === 'archived') return;
+        if (base) assertAutomationConfigVersion(beforeRow, base);
         const beforeSnapshot = automationAuditSnapshot(beforeRow);
         const updated = await tx`
         UPDATE automations
