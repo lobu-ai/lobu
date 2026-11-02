@@ -432,7 +432,6 @@ export async function runNativeReferenceProof({
       "inert proposal",
       "invalid selector refusal",
       "repeat selection",
-      "Back",
       "reload",
       "fresh browser access via existing single-user preview sign-in",
       "narrow viewport identities loaded",

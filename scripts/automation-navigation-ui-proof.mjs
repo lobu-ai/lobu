@@ -499,7 +499,8 @@ export async function runAutomationNavigationProof({
     await firstRun.click();
     await page.getByRole("region", { name: "Run outcome" }).waitFor();
     await assertRunDestination(fixture.runId);
-    assertHost(`/${workspace}`);
+    // Home views have their own paths; the peek must keep its filtered host.
+    assertHost(new URL(filteredUrl).pathname);
     await screenshot("browser-only-global-runs-peek.png");
     await checkpoint("paginated global run peek verified; testing reload");
     await page.reload();
