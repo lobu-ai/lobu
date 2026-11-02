@@ -58,7 +58,9 @@ import { Hono } from 'hono';
 import { authenticateWorker } from '../../gateway/routes/internal/middleware';
 import { McpProxy } from '../../gateway/auth/mcp/proxy';
 import { isAuthorizationReadOnlyToolName } from '../../tools/registry';
-import type { AgentSettingsStore } from '../../gateway/auth/settings/agent-settings-store';
+import { AgentSettingsStore } from '../../gateway/auth/settings/agent-settings-store';
+import { createPostgresAgentConfigStore } from '../../lobu/stores/postgres-stores';
+import { buildAgentsNamespace } from '../../sandbox/namespaces/agents';
 import type { ProviderCatalogService } from '../../gateway/auth/provider-catalog';
 import type { McpConfigService } from '../../gateway/auth/mcp/config-service';
 import type { ModelProviderModule } from '../../gateway/modules/module-system';
@@ -1076,23 +1078,26 @@ describe('agent turn producer', () => {
   it('seeds only valid bounded skill files and names their directory in the prompt', async () => {
     const org = await createTestOrganization();
     const content = 'x'.repeat(64_000);
-    const agentSettings = {
-      getSettings: async () => ({
-        identityMd: '',
-        soulMd: '',
-        userMd: '',
-        skillsConfig: {
-          skills: [
-            { repo: 'owner', name: 'owner/triage', enabled: true, content },
-            { repo: 'owner', name: 'bad skill', enabled: true, content: 'skip' },
-            { repo: 'owner', name: '..', enabled: true, content: 'skip' },
-            { repo: 'owner', name: 'x'.repeat(129), enabled: true, content: 'skip' },
-            { repo: 'owner', name: 'oversized', enabled: true, content: 'x'.repeat(64_001) },
-            { repo: 'owner', name: 'disabled', enabled: false, content: 'skip' },
-          ],
-        },
-      }),
-    } as unknown as AgentSettingsStore;
+    const owner = await createTestUser();
+    await addUserToOrganization(owner.id, org.id, 'owner');
+    const sdk = buildAgentsNamespace({
+      organizationId: org.id, userId: owner.id, memberRole: 'owner', agentId: null,
+      sourceContext: null, isAuthenticated: true, tokenType: 'session',
+      scopedToOrg: true, allowCrossOrg: false, grantedOrganizationIds: null,
+      directSearchFederation: false, scopes: ["mcp:read", "mcp:write", "mcp:admin"],
+    }, {});
+    await sdk.create({ agent_id: AGENT_ID, name: 'Skill execution' });
+    await sdk.update({ agent_id: AGENT_ID, settings: {
+      skillsConfig: { skills: [
+        { repo: 'owner', name: 'owner/triage', enabled: true, content },
+        { repo: 'owner', name: 'bad skill', enabled: true, content: 'skip' },
+        { repo: 'owner', name: '..', enabled: true, content: 'skip' },
+        { repo: 'owner', name: 'x'.repeat(129), enabled: true, content: 'skip' },
+        { repo: 'owner', name: 'oversized', enabled: true, content: 'x'.repeat(64_001) },
+        { repo: 'owner', name: 'disabled', enabled: false, content: 'skip' },
+      ] },
+    } });
+    const agentSettings = new AgentSettingsStore(createPostgresAgentConfigStore());
     await enqueueMessage(messageFor(org.id), {
       agentSettings,
       catalog: catalogFor(claudeModule()),

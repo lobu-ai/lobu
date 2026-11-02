@@ -37,10 +37,8 @@ const SANCTIONED_INSERT_SITES = [
 	// POST /api/v1/agents route. Also the UPDATE path, so its DO UPDATE SET
 	// clause deliberately omits models.
 	"lobu/stores/postgres-stores.ts",
-	// The web UI create route (POST /agents).
-	"lobu/agent-routes.ts",
-	// The manage_agents create tool (MCP + REST proxy).
-	"tools/admin/manage_agents.ts",
+	// Shared web UI / manage_agents create transaction.
+	"lobu/agent-settings.ts",
 ].sort();
 
 const PROVISIONING_HELPER = "resolveNewAgentProvisioningDefaults";

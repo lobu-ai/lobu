@@ -1,14 +1,40 @@
 import type { EntityMetrics } from "@lobu/connector-sdk";
-import type { AgentSettings } from "@lobu/core";
-import type { InstallConnectorInput } from "@lobu/core/contracts/tools/manage-connections";
+import {
+  type AgentSettings,
+  type AgentMetadata,
+  getToolResultFailure,
+  isPendingToolApproval,
+} from "@lobu/core";
+import type { FlatActionInput } from "@lobu/core/contracts/tools/action-input";
 import type {
-  SourceDependencies,
-  SourceFiles,
-} from "@lobu/core/contracts/tools/source-files";
+  AuthProfileCreateInput,
+  AuthProfileUpdateInput,
+  ManageAuthProfilesArgs,
+} from "@lobu/core/contracts/tools/manage-auth-profiles";
 import type {
+  AutomationExecutionConfig,
+  ManageAutomationsArgs,
+} from "@lobu/core/contracts/tools/manage-automations";
+import type { ManageCatalogArgs } from "@lobu/core/contracts/tools/manage-catalog";
+import type {
+  ConnectionCreateInput,
+  ConnectionsArgs,
+  ConnectionUpdateInput,
+  InstallConnectorInput,
+  UpdateConnectorSourceInput,
+} from "@lobu/core/contracts/tools/manage-connections";
+import type { ManageEntitySchemaArgs } from "@lobu/core/contracts/tools/manage-entity-schema";
+import type {
+  InferenceProviderCreateInput,
   InferenceCapabilityBlock,
   InferenceModality,
-} from "../../../config/define.js";
+} from "@lobu/core/contracts/tools/manage-inference-providers";
+import type {
+  FeedCreateInput,
+  FeedUpdateInput,
+  ManageFeedsArgs,
+} from "@lobu/core/contracts/tools/manage-feeds";
+import type { ViewSetInput } from "@lobu/core/contracts/tools/manage-views";
 import { ApiClient, type HttpMethod } from "../../../internal/api-client.js";
 import { resolveApiClient } from "../../../internal/index.js";
 import { ApiError } from "../../memory/_lib/errors.js";
@@ -152,12 +178,7 @@ export interface RemoteView {
   updated_at: string;
 }
 
-export interface SetViewPayload {
-  source_code: string;
-  compiled_code?: string;
-  source_files?: SourceFiles;
-  dependencies?: SourceDependencies;
-}
+export type SetViewPayload = ViewSetInput;
 
 export interface RemoteAutomation {
   slug: string;
@@ -167,8 +188,8 @@ export interface RemoteAutomation {
   triggers?: import("@lobu/core/contracts/tools/manage-automations").AutomationTrigger[];
   device_worker_id?: string | null;
   goal_id?: number | null;
-  agent_kind?: string | null;
-  execution_config?: Record<string, unknown> | null;
+  agent_kind?: ManageAutomationsArgs["agent_kind"];
+  execution_config?: AutomationExecutionConfig | null;
   min_cooldown_seconds?: number | null;
   tags?: string[] | null;
   sources?: AutomationSource[] | null;
@@ -256,19 +277,18 @@ export interface RemoteFeed {
  * diff's changed-field list rather than listing every field unconditionally.
  */
 export interface UpdateConnectionPayload {
-  name?: string;
-  authProfileSlug?: string | null;
-  appAuthProfileSlug?: string | null;
-  config?: Record<string, unknown>;
-  deviceWorkerId?: string | null;
+  name?: ConnectionUpdateInput["display_name"];
+  authProfileSlug?: ConnectionUpdateInput["auth_profile_slug"];
+  appAuthProfileSlug?: ConnectionUpdateInput["app_auth_profile_slug"];
+  config?: NonNullable<ConnectionUpdateInput["config"]>;
+  deviceWorkerId?: ConnectionUpdateInput["device_worker_id"];
 }
 
 /** The mutable fields of a feed update — same absent-means-unwritten rule. */
 export interface UpdateFeedPayload {
-  name?: string;
-  /** Cron string, or null to clear (manual-only). */
-  schedule?: string | null;
-  config?: Record<string, unknown>;
+  name?: FeedUpdateInput["display_name"];
+  schedule?: FeedUpdateInput["schedule"];
+  config?: NonNullable<FeedUpdateInput["config"]>;
 }
 
 interface InstallConnectorResult {
@@ -437,6 +457,7 @@ interface ApplyClientConfig {
 export class ApplyClient {
   private readonly orgSlug: string;
   private readonly http: ApiClient;
+  private readonly agentRevisions = new Map<string, string>();
 
   constructor(cfg: ApplyClientConfig, fetchImpl: typeof fetch = fetch) {
     this.orgSlug = cfg.orgSlug;
@@ -461,14 +482,19 @@ export class ApplyClient {
     method: HttpMethod,
     path: string,
     body?: unknown,
-    okStatuses: number[] = [200, 201, 204]
-  ): Promise<{ status: number; body: T }> {
-    const { status, body: raw } = await this.http.requestWithStatus<unknown>(
-      method,
-      path,
-      body,
-      { okStatuses, sendAccept: false, alwaysJsonContentType: true }
-    );
+    okStatuses: number[] = [200, 201, 204],
+    headers?: Record<string, string>
+  ): Promise<{ status: number; body: T; headers: Headers }> {
+    const {
+      status,
+      body: raw,
+      headers: responseHeaders,
+    } = await this.http.requestWithStatus<unknown>(method, path, body, {
+      okStatuses,
+      sendAccept: false,
+      alwaysJsonContentType: true,
+      headers,
+    });
 
     let parsed: Record<string, unknown>;
     if (raw === undefined) {
@@ -479,14 +505,23 @@ export class ApplyClient {
       parsed = { value: raw };
     }
 
-    if (typeof parsed.error === "string" && parsed.error.length > 0) {
+    if (isPendingToolApproval(parsed)) {
+      const run = parsed.run_id != null ? ` (run ${parsed.run_id})` : "";
       throw new ApiError(
-        `${method} ${path} returned error: ${parsed.error}`,
+        `Configuration change requires approval${run}. This apply is incomplete; approve the pending change before retrying.`,
+        status,
+        "approval_pending"
+      );
+    }
+    const failure = getToolResultFailure(`${method} ${path}`, parsed);
+    if (failure) {
+      throw new ApiError(
+        `${method} ${path} returned error: ${failure.message}`,
         status
       );
     }
 
-    return { status, body: parsed as T };
+    return { status, body: parsed as T, headers: responseHeaders };
   }
 
   // ── Organization ──────────────────────────────────────────────────────────
@@ -550,21 +585,44 @@ export class ApplyClient {
 
   async patchAgentMetadata(
     agentId: string,
-    agent: { name?: string; description?: string }
+    updates: Partial<DesiredAgentMetadata>
   ): Promise<void> {
-    await this.request(
+    const revision = this.agentRevisions.get(agentId);
+    const { headers } = await this.request(
       "PATCH",
       `/api/${this.orgSlug}/agents/${encodeURIComponent(agentId)}`,
-      agent
+      updates,
+      undefined,
+      revision ? { "If-Match": revision } : undefined
     );
+    const next = headers.get("etag");
+    if (next) this.agentRevisions.set(agentId, next);
   }
 
-  async getAgentSettings(agentId: string): Promise<AgentSettings | null> {
+  async getAgentSettings(
+    agentId: string,
+    metadata?: RemoteAgent
+  ): Promise<AgentSettings | null> {
     try {
-      const { body } = await this.request<AgentSettings>(
+      // Apply needs metadata and settings from one revision. Bootstrap callers
+      // that only read settings retain the smaller /config response.
+      const path = `/api/${this.orgSlug}/agents/${encodeURIComponent(agentId)}`;
+      if (metadata) {
+        const { body, headers } = await this.request<
+          AgentMetadata & { settings: AgentSettings }
+        >("GET", path);
+        const revision = headers.get("etag");
+        if (revision) this.agentRevisions.set(agentId, revision);
+        metadata.name = body.name;
+        metadata.description = body.description;
+        return body.settings;
+      }
+      const { body, headers } = await this.request<AgentSettings>(
         "GET",
-        `/api/${this.orgSlug}/agents/${encodeURIComponent(agentId)}/config`
+        `${path}/config`
       );
+      const revision = headers.get("etag");
+      if (revision) this.agentRevisions.set(agentId, revision);
       return body;
     } catch (err) {
       if (err instanceof ApiError && err.status === 404) return null;
@@ -576,10 +634,13 @@ export class ApplyClient {
     agentId: string,
     settings: Partial<AgentSettings>
   ): Promise<void> {
+    const revision = this.agentRevisions.get(agentId);
     await this.request(
       "PATCH",
       `/api/${this.orgSlug}/agents/${encodeURIComponent(agentId)}/config`,
-      settings
+      settings,
+      undefined,
+      revision ? { "If-Match": revision } : undefined
     );
   }
 
@@ -664,13 +725,9 @@ export class ApplyClient {
   }
 
   /** Create an org inference provider. 409 (surfaced as ApiError) on slug conflict. */
-  async createInferenceProvider(body: {
-    slug: string;
-    kind: string;
-    displayName?: string;
-    apiKey: string;
-    capabilities?: Partial<Record<InferenceModality, InferenceCapabilityBlock>>;
-  }): Promise<RemoteInferenceProvider> {
+  async createInferenceProvider(
+    body: InferenceProviderCreateInput
+  ): Promise<RemoteInferenceProvider> {
     const { body: res } = await this.request<{
       provider: RemoteInferenceProvider;
     }>("POST", `/api/${this.orgSlug}/agents/inference-providers`, body);
@@ -787,7 +844,7 @@ export class ApplyClient {
    */
   private async upsertSchemaResource(
     schemaType: "entity_type" | "relationship_type",
-    payload: Record<string, unknown>
+    payload: Omit<ManageEntitySchemaArgs, "action" | "schema_type">
   ): Promise<UpsertEntityTypeResult> {
     const url = `/api/${this.orgSlug}/manage_entity_schema`;
     try {
@@ -1130,24 +1187,27 @@ export class ApplyClient {
    * Create an Automation owned by `agentId`. Duplicate-slug surfaces as a
    * structured error the caller swallows for idempotency.
    */
-  async createAutomation(payload: {
-    slug: string;
-    agentId: string;
-    name?: string;
-    description?: string;
-    prompt: string;
-    skills?: Array<{ name: string; content: string }>;
-    reaction_script?: string;
-    triggers?: import("@lobu/core/contracts/tools/manage-automations").AutomationTrigger[];
-    sources?: AutomationSource[];
-    reactions_guidance?: string;
-    device_worker_id?: string;
-    min_cooldown_seconds?: number;
-    tags?: string[];
-    agent_kind?: string;
-    execution_config?: Record<string, unknown> | null;
-    outputs?: Record<string, unknown> | null;
-  }): Promise<{ automation_id?: string }> {
+  async createAutomation(
+    payload: FlatActionInput<
+      ManageAutomationsArgs,
+      | "slug"
+      | "name"
+      | "description"
+      | "prompt"
+      | "skills"
+      | "reaction_script"
+      | "triggers"
+      | "sources"
+      | "reactions_guidance"
+      | "device_worker_id"
+      | "min_cooldown_seconds"
+      | "tags"
+      | "agent_kind"
+      | "execution_config"
+      | "outputs",
+      "slug" | "prompt"
+    > & { agentId: NonNullable<ManageAutomationsArgs["managed_agent_id"]> }
+  ): Promise<{ automation_id?: string }> {
     const { body } = await this.request<{ automation_id?: string }>(
       "POST",
       `/api/${this.orgSlug}/manage_automations`,
@@ -1199,16 +1259,20 @@ export class ApplyClient {
    * `null` clears nullable fields (device_worker_id, agent_kind) per the
    * server contract.
    */
-  async updateAutomation(payload: {
-    automation_id: string;
-    triggers?: import("@lobu/core/contracts/tools/manage-automations").AutomationTrigger[];
-    managed_agent_id?: string;
-    device_worker_id?: string | null;
-    min_cooldown_seconds?: number;
-    tags?: string[];
-    agent_kind?: string | null;
-    execution_config?: Record<string, unknown> | null;
-  }): Promise<void> {
+  async updateAutomation(
+    payload: FlatActionInput<
+      ManageAutomationsArgs,
+      | "automation_id"
+      | "triggers"
+      | "managed_agent_id"
+      | "device_worker_id"
+      | "min_cooldown_seconds"
+      | "tags"
+      | "agent_kind"
+      | "execution_config",
+      "automation_id"
+    >
+  ): Promise<void> {
     await this.request("POST", `/api/${this.orgSlug}/manage_automations`, {
       action: "update",
       automation_id: payload.automation_id,
@@ -1238,19 +1302,22 @@ export class ApplyClient {
    * inherits unset fields from the previous version row.
    * name/description/prompt/sources are version-owned (update rejects them).
    */
-  async createAutomationVersion(payload: {
-    automation_id: string;
-    name?: string;
-    description?: string | null;
-    prompt?: string;
-    skills?: Array<{ name: string; content: string }>;
-    sources?: AutomationSource[];
-    outputs?: Record<string, unknown> | null;
-    reactions_guidance?: string;
-    change_notes?: string;
-    /** When set, written atomically with the new version (set_as_current). */
-    triggers?: import("@lobu/core/contracts/tools/manage-automations").AutomationTrigger[];
-  }): Promise<{ version?: number }> {
+  async createAutomationVersion(
+    payload: FlatActionInput<
+      ManageAutomationsArgs,
+      | "automation_id"
+      | "name"
+      | "description"
+      | "prompt"
+      | "skills"
+      | "sources"
+      | "outputs"
+      | "reactions_guidance"
+      | "change_notes"
+      | "triggers",
+      "automation_id"
+    >
+  ): Promise<{ version?: number }> {
     const { body } = await this.request<{ version?: number }>(
       "POST",
       `/api/${this.orgSlug}/manage_automations`,
@@ -1309,7 +1376,7 @@ export class ApplyClient {
 
   // ── Connector definitions ─────────────────────────────────────────────────
 
-  private async connectionsTool<T>(body: Record<string, unknown>): Promise<T> {
+  private async connectionsTool<T>(body: ConnectionsArgs): Promise<T> {
     const { body: parsed } = await this.request<T>(
       "POST",
       `/api/${this.orgSlug}/manage_connections`,
@@ -1318,7 +1385,7 @@ export class ApplyClient {
     return parsed;
   }
 
-  private async feedsTool<T>(body: Record<string, unknown>): Promise<T> {
+  private async feedsTool<T>(body: ManageFeedsArgs): Promise<T> {
     const { body: parsed } = await this.request<T>(
       "POST",
       `/api/${this.orgSlug}/manage_feeds`,
@@ -1327,7 +1394,7 @@ export class ApplyClient {
     return parsed;
   }
 
-  private async authProfilesTool<T>(body: Record<string, unknown>): Promise<T> {
+  private async authProfilesTool<T>(body: ManageAuthProfilesArgs): Promise<T> {
     const { body: parsed } = await this.request<T>(
       "POST",
       `/api/${this.orgSlug}/manage_auth_profiles`,
@@ -1336,7 +1403,7 @@ export class ApplyClient {
     return parsed;
   }
 
-  private async catalogTool<T>(body: Record<string, unknown>): Promise<T> {
+  private async catalogTool<T>(body: ManageCatalogArgs): Promise<T> {
     const { body: parsed } = await this.request<T>(
       "POST",
       `/api/${this.orgSlug}/manage_catalog`,
@@ -1374,31 +1441,55 @@ export class ApplyClient {
    * connectorKey plus updated.
    */
   async installConnector(
-    payload: CliInstallConnectorPayload
+    payload: CliInstallConnectorPayload,
+    target?: Required<
+      Pick<UpdateConnectorSourceInput, "connector_key" | "expected_version">
+    >
   ): Promise<InstallConnectorResult> {
+    if (target && payload.sourceCode === undefined) {
+      throw new ApiError(
+        "Updating an installed connector requires its prepared source code."
+      );
+    }
+    const artifact = {
+      compiled: payload.compiled ?? false,
+      compiled_code: payload.compiledCode,
+      source_files: payload.sourceFiles,
+      dependencies: payload.dependencies,
+    };
     const body = await this.connectionsTool<{
       installed?: boolean;
       connector_key?: string;
       version?: string;
       updated?: boolean;
-    }>({
-      action: "install_connector",
-      ...(payload.connectorId ? { connector_id: payload.connectorId } : {}),
-      ...(payload.sourceCode !== undefined
+    }>(
+      target
         ? {
-            source_code: payload.sourceCode,
-            compiled: payload.compiled ?? false,
-            compiled_code: payload.compiledCode,
-            source_files: payload.sourceFiles,
-            dependencies: payload.dependencies,
+            action: "update_connector_source",
+            ...target,
+            source_code: payload.sourceCode!,
+            ...artifact,
           }
-        : {}),
-      ...(payload.sourceUrl ? { source_url: payload.sourceUrl } : {}),
-      ...(payload.sourceUri ? { source_uri: payload.sourceUri } : {}),
-    });
+        : {
+            action: "install_connector",
+            ...(payload.connectorId
+              ? { connector_id: payload.connectorId }
+              : {}),
+            ...(payload.sourceCode !== undefined
+              ? {
+                  source_code: payload.sourceCode,
+                  ...artifact,
+                }
+              : {}),
+            ...(payload.sourceUrl ? { source_url: payload.sourceUrl } : {}),
+            ...(payload.sourceUri ? { source_uri: payload.sourceUri } : {}),
+          }
+    );
     return {
       connectorKey: body.connector_key ?? "",
-      updated: body.updated ?? false,
+      updated: target
+        ? body.version !== target.expected_version
+        : (body.updated ?? false),
       ...(body.version ? { version: body.version } : {}),
     };
   }
@@ -1448,11 +1539,11 @@ export class ApplyClient {
   }
 
   async createAuthProfile(payload: {
-    slug: string;
-    connector: string;
-    kind: string;
-    name?: string;
-    credentials?: Record<string, string>;
+    slug: NonNullable<AuthProfileCreateInput["slug"]>;
+    connector: AuthProfileCreateInput["connector_key"];
+    kind: AuthProfileCreateInput["profile_kind"];
+    name?: AuthProfileCreateInput["display_name"];
+    credentials?: AuthProfileCreateInput["credentials"];
   }): Promise<EnsureAuthProfileResult> {
     const body = await this.authProfilesTool<{
       auth_profile?: { status?: string };
@@ -1478,9 +1569,9 @@ export class ApplyClient {
   }
 
   async updateAuthProfile(payload: {
-    slug: string;
-    name?: string;
-    credentials?: Record<string, string>;
+    slug: AuthProfileUpdateInput["auth_profile_slug"];
+    name?: AuthProfileUpdateInput["display_name"];
+    credentials?: AuthProfileUpdateInput["credentials"];
   }): Promise<EnsureAuthProfileResult> {
     const body = await this.authProfilesTool<{
       auth_profile?: { status?: string };
@@ -1591,13 +1682,13 @@ export class ApplyClient {
   }
 
   async createConnection(payload: {
-    slug: string;
-    connector: string;
-    name?: string;
-    authProfileSlug?: string;
-    appAuthProfileSlug?: string;
-    config?: Record<string, unknown>;
-    deviceWorkerId?: string;
+    slug: NonNullable<ConnectionCreateInput["slug"]>;
+    connector: ConnectionCreateInput["connector_key"];
+    name?: ConnectionCreateInput["display_name"];
+    authProfileSlug?: ConnectionCreateInput["auth_profile_slug"];
+    appAuthProfileSlug?: ConnectionCreateInput["app_auth_profile_slug"];
+    config?: ConnectionCreateInput["config"];
+    deviceWorkerId?: ConnectionCreateInput["device_worker_id"];
   }): Promise<RemoteConnection> {
     const body = await this.connectionsTool<{ connection?: RemoteConnection }>({
       action: "create",
@@ -1681,12 +1772,12 @@ export class ApplyClient {
   }
 
   async createFeed(payload: {
-    connectionId: number;
-    feedKey: string;
-    name?: string;
+    connectionId: FeedCreateInput["connection_id"];
+    feedKey: FeedCreateInput["feed_key"];
+    name?: FeedCreateInput["display_name"];
     /** Cron string, or null for manual-only. */
-    schedule?: string | null;
-    config?: Record<string, unknown>;
+    schedule?: FeedCreateInput["schedule"];
+    config?: FeedCreateInput["config"];
   }): Promise<RemoteFeed> {
     const body = await this.feedsTool<{ feed?: RemoteFeed }>({
       action: "create_feed",

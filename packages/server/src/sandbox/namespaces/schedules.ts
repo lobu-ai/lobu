@@ -3,6 +3,7 @@
  */
 
 import type {
+	ManageSchedulesArgs,
 	ScheduleCancelInput,
 	ScheduleCreateInput,
 	ScheduleListInput,
@@ -15,7 +16,7 @@ import type { ToolContext } from "../../tools/registry";
 import { createActionCaller } from "./action-call";
 
 export interface SchedulesNamespace {
-	manage(input: Record<string, unknown>): Promise<unknown>;
+	manage(input: ManageSchedulesArgs): Promise<unknown>;
 	list(input?: ScheduleListInput): Promise<unknown>;
 	create(input: ScheduleCreateInput): Promise<unknown>;
 	update(input: ScheduleUpdateInput): Promise<unknown>;

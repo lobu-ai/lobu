@@ -29,6 +29,7 @@ import type {
 } from "@lobu/core/contracts/tools/manage-automations";
 import type { ToolContext } from "../../registry";
 import { insertToolConfigChange } from "../helpers/config-audit";
+import { assertAutomationConfigVersionsUnchanged } from "./config-state";
 import type { ManageAutomationsArgs } from "../manage_automations";
 import {
   encodeExternalAutomationClaimOwner,
@@ -272,6 +273,7 @@ export async function handleSetReactionScript(
   args: ManageAutomationsArgs,
   _env: Env,
   ctx: ToolContext,
+  base?: Record<string, string>,
 ): Promise<{
   action: "set_reaction_script";
   automation_id: string;
@@ -364,6 +366,7 @@ export async function handleSetReactionScript(
         ORDER BY id
         FOR UPDATE
       `;
+      if (base) await assertAutomationConfigVersionsUnchanged(args, ctx.organizationId, base, tx);
       const lockedBefore = new Map<number, string | null>(
         locked.map((r) => [Number(r.id), (r.reaction_script as string | null) ?? null]),
       );
@@ -426,6 +429,7 @@ export async function handleSetReactionScript(
       ORDER BY id
       FOR UPDATE
     `;
+    if (base) await assertAutomationConfigVersionsUnchanged(args, ctx.organizationId, base, tx);
     const targetSchema = reactionInputSchema ?? null;
     for (const row of locked) {
       const rowId = Number(row.id);

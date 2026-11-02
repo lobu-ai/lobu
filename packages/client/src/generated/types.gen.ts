@@ -458,7 +458,7 @@ export type SaveMemoryResponse = SaveMemoryResponses[keyof SaveMemoryResponses];
 export type SearchSdkData = {
   body: {
     /**
-     * SDK method or runtime-helper discovery query. Use a namespace (e.g. 'automations'), one or more dotted paths separated by whitespace (e.g. 'automations.create ctx.sleep'), an optional client. prefix, or free text. Pass mode='read' for query_sdk-safe methods only; omit mode for your full run_sdk tier. Namespaces: agents, authProfiles, automations, catalog, classifiers, connections, conversations, ctx, devices, entities, entitySchema, feeds, knowledge, metrics, notifications, operations, organizations, schedules, views.
+     * SDK method or runtime-helper discovery query. Use a namespace (e.g. 'automations'), one or more dotted paths separated by whitespace (e.g. 'automations.create ctx.sleep'), an optional client. prefix, or free text. Pass mode='read' for query_sdk-safe methods only; omit mode for your full run_sdk tier. Namespaces: agents, authProfiles, automations, catalog, classifiers, connections, conversations, ctx, devices, entities, entitySchema, feeds, inferenceProviders, knowledge, metrics, notifications, operations, organizations, schedules, views.
      */
     query: string;
     /**
@@ -3743,28 +3743,25 @@ export type ManageCatalogResponse =
   ManageCatalogResponses[keyof ManageCatalogResponses];
 
 export type ManageAgentsData = {
-  body:
-    | {
+    body: {
         /**
          * List org agents.
          */
-        action: "list";
-      }
-    | {
+        action: 'list';
+    } | {
         /**
          * Fetch one agent.
          */
-        action: "get";
+        action: 'get';
         /**
          * Agent ID (lowercase slug, e.g. "support").
          */
         agent_id: string;
-      }
-    | {
+    } | {
         /**
          * Create an agent owned by the caller (queued for approval).
          */
-        action: "create";
+        action: 'create';
         /**
          * Agent ID (lowercase slug, e.g. "support").
          */
@@ -3782,15 +3779,14 @@ export type ManageAgentsData = {
          */
         identity_md?: string;
         /**
-         * [create/update] Default model as an explicit "<provider>/<model>" ref (e.g. "anthropic/claude-sonnet-5"). Validated against the org's connected providers. Without it the agent inherits the org default model; if the org has none the agent is not runnable. Pass an empty string to clear it and fall back to the org default.
+         * [create/update] Default model (updates preserve the existing fallback entries) as an explicit "<provider>/<model>" ref (e.g. "anthropic/claude-sonnet-5"). Validated against the org's connected providers. Without it the agent inherits the org default model; if the org has none the agent is not runnable. Pass an empty string to clear it and fall back to the org default.
          */
         default_model?: string;
-      }
-    | {
+    } | {
         /**
          * Patch agent fields (queued for approval).
          */
-        action: "update";
+        action: 'update';
         /**
          * Agent ID (lowercase slug, e.g. "support").
          */
@@ -3808,60 +3804,418 @@ export type ManageAgentsData = {
          */
         identity_md?: string;
         /**
-         * [create/update] Default model as an explicit "<provider>/<model>" ref (e.g. "anthropic/claude-sonnet-5"). Validated against the org's connected providers. Without it the agent inherits the org default model; if the org has none the agent is not runnable. Pass an empty string to clear it and fall back to the org default.
+         * [create/update] Default model (updates preserve the existing fallback entries) as an explicit "<provider>/<model>" ref (e.g. "anthropic/claude-sonnet-5"). Validated against the org's connected providers. Without it the agent inherits the org default model; if the org has none the agent is not runnable. Pass an empty string to clear it and fall back to the org default.
          */
         default_model?: string;
-      }
-    | {
+        /**
+         * Canonical agent settings patch. Omitted keys preserve stored values; supplied settings replace that top-level value. Empty strings/arrays/objects clear where allowed. Identity is written through identity_md.
+         */
+        settings?: {
+            models?: Array<string>;
+            networkConfig?: {
+                allowedDomains?: Array<string>;
+                deniedDomains?: Array<string>;
+            };
+            nixConfig?: {
+                flakeUrl?: string;
+                packages?: Array<string>;
+            };
+            soulMd?: string;
+            userMd?: string;
+            skillsConfig?: {
+                skills: Array<{
+                    repo: string;
+                    name: string;
+                    description?: string;
+                    instructions?: string;
+                    enabled: boolean;
+                    system?: boolean;
+                    content?: string;
+                    modelPreference?: string;
+                    thinkingLevel?: 'off' | 'low' | 'medium' | 'high';
+                }>;
+            };
+            guardrails?: Array<string>;
+            guardrailsInline?: Array<{
+                name: string;
+                enabled: boolean;
+                stage: 'input' | 'output' | 'pre-tool' | 'egress';
+                kind?: 'judge' | 'require-tool';
+                policy?: string;
+                model?: string;
+                tools?: Array<string>;
+                domains?: Array<string>;
+            }>;
+            sandboxId?: string;
+            verboseLogging?: boolean;
+            showToolCalls?: boolean;
+            starters?: Array<{
+                title: string;
+                message: string;
+            }>;
+        };
+        /**
+         * Opaque agent configuration revision returned by agents.get. A stale expected_revision rejects the entire update with 409 before any write or approval is queued. Omit for an unconditional update.
+         */
+        expected_revision?: string;
+    } | {
         /**
          * Delete an agent (queued for approval).
          */
-        action: "delete";
+        action: 'delete';
         /**
          * Agent ID (lowercase slug, e.g. "support").
          */
         agent_id: string;
-      };
-  path: {
-    /**
-     * Organization slug (workspace identifier)
-     */
-    orgSlug: string;
-  };
-  query?: never;
-  url: "/api/{orgSlug}/manage_agents";
+    };
+    path: {
+        /**
+         * Organization slug (workspace identifier)
+         */
+        orgSlug: string;
+    };
+    query?: never;
+    url: '/api/{orgSlug}/manage_agents';
 };
 
 export type ManageAgentsErrors = {
-  /**
-   * Bad request - invalid parameters
-   */
-  400: {
-    error?: string;
-  };
-  /**
-   * Forbidden - your role or token scope does not allow this action
-   */
-  403: {
-    error?: string;
-  };
-  /**
-   * Tool not found
-   */
-  404: {
-    error?: string;
-  };
+    /**
+     * Bad request - invalid parameters
+     */
+    400: {
+        error?: string;
+    };
+    /**
+     * Forbidden - your role or token scope does not allow this action
+     */
+    403: {
+        error?: string;
+    };
+    /**
+     * Tool not found
+     */
+    404: {
+        error?: string;
+    };
 };
 
 export type ManageAgentsError = ManageAgentsErrors[keyof ManageAgentsErrors];
 
 export type ManageAgentsResponses = {
-  /**
-   * Successful response
-   */
-  200: {
-    [key: string]: unknown;
-  };
+    /**
+     * Successful response
+     */
+    200: {
+        action: 'list';
+        agents: Array<{
+            id: string;
+            name: string;
+            description: string | null;
+            owner_platform: string | null;
+            owner_user_id: string | null;
+            created_at: string;
+            last_used_at: string | null;
+        }>;
+    } | {
+        action: 'get';
+        agent: {
+            id: string;
+            name: string;
+            description: string | null;
+            owner_platform: string | null;
+            owner_user_id: string | null;
+            created_at: string;
+            last_used_at: string | null;
+        };
+        model: {
+            /**
+             * Configured model ref before provider fallback, or null when none resolves.
+             */
+            effective_model: string | null;
+            source: 'agent' | 'org_default' | 'none';
+            /**
+             * No model resolves or provider preflight rejects every candidate. False does not guarantee a successful run or describe device-local execution.
+             */
+            not_runnable: boolean;
+        };
+        settings: {
+            models?: Array<string>;
+            networkConfig?: {
+                allowedDomains?: Array<string>;
+                deniedDomains?: Array<string>;
+            };
+            nixConfig?: {
+                flakeUrl?: string;
+                packages?: Array<string>;
+            };
+            soulMd?: string;
+            userMd?: string;
+            identityMd?: string;
+            skillsConfig?: {
+                skills: Array<{
+                    repo: string;
+                    name: string;
+                    description?: string;
+                    instructions?: string;
+                    enabled: boolean;
+                    system?: boolean;
+                    content?: string;
+                    modelPreference?: string;
+                    thinkingLevel?: 'off' | 'low' | 'medium' | 'high';
+                }>;
+            };
+            guardrails?: Array<string>;
+            guardrailsInline?: Array<{
+                name: string;
+                enabled: boolean;
+                stage: 'input' | 'output' | 'pre-tool' | 'egress';
+                kind?: 'judge' | 'require-tool';
+                policy?: string;
+                model?: string;
+                tools?: Array<string>;
+                domains?: Array<string>;
+            }>;
+            sandboxId?: string;
+            verboseLogging?: boolean;
+            showToolCalls?: boolean;
+            starters?: Array<{
+                title: string;
+                message: string;
+            }>;
+            updatedAt: number;
+        };
+        /**
+         * Opaque agent configuration revision returned by agents.get. A stale expected_revision rejects the entire update with 409 before any write or approval is queued. Omit for an unconditional update.
+         */
+        revision: string;
+    } | {
+        action: 'create';
+        /**
+         * Agent ID (lowercase slug, e.g. "support").
+         */
+        agent_id: string;
+        created: boolean;
+        model: {
+            /**
+             * Configured model ref before provider fallback, or null when none resolves.
+             */
+            effective_model: string | null;
+            source: 'agent' | 'org_default' | 'none';
+            /**
+             * No model resolves or provider preflight rejects every candidate. False does not guarantee a successful run or describe device-local execution.
+             */
+            not_runnable: boolean;
+        };
+    } | {
+        action: 'update';
+        /**
+         * Agent ID (lowercase slug, e.g. "support").
+         */
+        agent_id: string;
+        updated_fields: Array<string>;
+        /**
+         * Fields skipped because they changed since approval was requested.
+         */
+        skipped_fields?: Array<string>;
+        model?: {
+            /**
+             * Configured model ref before provider fallback, or null when none resolves.
+             */
+            effective_model: string | null;
+            source: 'agent' | 'org_default' | 'none';
+            /**
+             * No model resolves or provider preflight rejects every candidate. False does not guarantee a successful run or describe device-local execution.
+             */
+            not_runnable: boolean;
+        };
+    } | {
+        action: 'delete';
+        /**
+         * Agent ID (lowercase slug, e.g. "support").
+         */
+        agent_id: string;
+        deleted: boolean;
+    } | {
+        action: 'create' | 'update' | 'delete';
+        run_id: number;
+        event_id?: number;
+        status: 'pending_approval';
+        message: string;
+        proposal: {
+            /**
+             * Agent ID (lowercase slug, e.g. "support").
+             */
+            agent_id: string;
+            /**
+             * [create/update] Display name for the agent.
+             */
+            name?: string;
+            /**
+             * [create/update] Agent description.
+             */
+            description?: string;
+            /**
+             * [create/update] Agent identity / system prompt (Markdown).
+             */
+            identity_md?: string;
+            /**
+             * [create/update] Default model (updates preserve the existing fallback entries) as an explicit "<provider>/<model>" ref (e.g. "anthropic/claude-sonnet-5"). Validated against the org's connected providers. Without it the agent inherits the org default model; if the org has none the agent is not runnable. Pass an empty string to clear it and fall back to the org default.
+             */
+            default_model?: string;
+            /**
+             * Canonical agent settings patch. Omitted keys preserve stored values; supplied settings replace that top-level value. Empty strings/arrays/objects clear where allowed. Identity is written through identity_md.
+             */
+            settings?: {
+                models?: Array<string>;
+                networkConfig?: {
+                    allowedDomains?: Array<string>;
+                    deniedDomains?: Array<string>;
+                };
+                nixConfig?: {
+                    flakeUrl?: string;
+                    packages?: Array<string>;
+                };
+                soulMd?: string;
+                userMd?: string;
+                skillsConfig?: {
+                    skills: Array<{
+                        repo: string;
+                        name: string;
+                        description?: string;
+                        instructions?: string;
+                        enabled: boolean;
+                        system?: boolean;
+                        content?: string;
+                        modelPreference?: string;
+                        thinkingLevel?: 'off' | 'low' | 'medium' | 'high';
+                    }>;
+                };
+                guardrails?: Array<string>;
+                guardrailsInline?: Array<{
+                    name: string;
+                    enabled: boolean;
+                    stage: 'input' | 'output' | 'pre-tool' | 'egress';
+                    kind?: 'judge' | 'require-tool';
+                    policy?: string;
+                    model?: string;
+                    tools?: Array<string>;
+                    domains?: Array<string>;
+                }>;
+                sandboxId?: string;
+                verboseLogging?: boolean;
+                showToolCalls?: boolean;
+                starters?: Array<{
+                    title: string;
+                    message: string;
+                }>;
+            };
+            action: 'create' | 'update' | 'delete';
+            base?: {
+                name?: string | null;
+                description?: string | null;
+                identity_md?: string | null;
+                default_model?: string | null;
+                settings?: {
+                    models?: Array<string> | null;
+                    networkConfig?: {
+                        allowedDomains?: Array<string>;
+                        deniedDomains?: Array<string>;
+                    } | null;
+                    nixConfig?: {
+                        flakeUrl?: string;
+                        packages?: Array<string>;
+                    } | null;
+                    soulMd?: string | null;
+                    userMd?: string | null;
+                    skillsConfig?: {
+                        skills: Array<{
+                            repo: string;
+                            name: string;
+                            description?: string;
+                            instructions?: string;
+                            enabled: boolean;
+                            system?: boolean;
+                            content?: string;
+                            modelPreference?: string;
+                            thinkingLevel?: 'off' | 'low' | 'medium' | 'high';
+                        }>;
+                    } | null;
+                    guardrails?: Array<string> | null;
+                    guardrailsInline?: Array<{
+                        name: string;
+                        enabled: boolean;
+                        stage: 'input' | 'output' | 'pre-tool' | 'egress';
+                        kind?: 'judge' | 'require-tool';
+                        policy?: string;
+                        model?: string;
+                        tools?: Array<string>;
+                        domains?: Array<string>;
+                    }> | null;
+                    sandboxId?: string | null;
+                    verboseLogging?: boolean | null;
+                    showToolCalls?: boolean | null;
+                    starters?: Array<{
+                        title: string;
+                        message: string;
+                    }> | null;
+                };
+            };
+        };
+        current: {
+            id?: string;
+            name?: string;
+            description?: string | null;
+            owner_platform?: string | null;
+            owner_user_id?: string | null;
+            created_at?: string;
+            last_used_at?: string | null;
+            identity_md?: string | null;
+            settings?: {
+                models?: Array<string> | null;
+                networkConfig?: {
+                    allowedDomains?: Array<string>;
+                    deniedDomains?: Array<string>;
+                } | null;
+                nixConfig?: {
+                    flakeUrl?: string;
+                    packages?: Array<string>;
+                } | null;
+                soulMd?: string | null;
+                userMd?: string | null;
+                skillsConfig?: {
+                    skills: Array<{
+                        repo: string;
+                        name: string;
+                        description?: string;
+                        instructions?: string;
+                        enabled: boolean;
+                        system?: boolean;
+                        content?: string;
+                        modelPreference?: string;
+                        thinkingLevel?: 'off' | 'low' | 'medium' | 'high';
+                    }>;
+                } | null;
+                guardrails?: Array<string> | null;
+                guardrailsInline?: Array<{
+                    name: string;
+                    enabled: boolean;
+                    stage: 'input' | 'output' | 'pre-tool' | 'egress';
+                    kind?: 'judge' | 'require-tool';
+                    policy?: string;
+                    model?: string;
+                    tools?: Array<string>;
+                    domains?: Array<string>;
+                }> | null;
+                sandboxId?: string | null;
+                verboseLogging?: boolean | null;
+                showToolCalls?: boolean | null;
+                starters?: Array<{
+                    title: string;
+                    message: string;
+                }> | null;
+            };
+        } | null;
+    };
 };
 
 export type ManageAgentsResponse =
@@ -4297,6 +4651,271 @@ export type ManageFeedsResponses = {
 
 export type ManageFeedsResponse =
   ManageFeedsResponses[keyof ManageFeedsResponses];
+
+export type ManageInferenceProvidersData = {
+  body:
+    | {
+        /**
+         * List this organization's inference providers with health metadata; credentials are never returned.
+         */
+        action: "list";
+      }
+    | {
+        /**
+         * Add an org-shared API-key provider; the key is stored in the credential vault. OAuth providers sign in interactively instead.
+         */
+        action: "create";
+        /**
+         * Provider slug: 1–63 lowercase letters, digits or hyphens; no leading/trailing hyphen.
+         */
+        slug: string;
+        kind: string;
+        displayName?: string;
+        apiKey: string;
+        capabilities?: {
+          text?: {
+            base_url?: string;
+            model?: string;
+            models_endpoint?: string;
+          };
+          image?: {
+            base_url?: string;
+            model?: string;
+            models_endpoint?: string;
+          };
+          stt?: {
+            base_url?: string;
+            model?: string;
+            models_endpoint?: string;
+          };
+          tts?: {
+            base_url?: string;
+            model?: string;
+            models_endpoint?: string;
+          };
+        };
+      }
+    | {
+        /**
+         * Rename a provider; slug and kind are immutable.
+         */
+        action: "update";
+        /**
+         * Provider slug: 1–63 lowercase letters, digits or hyphens; no leading/trailing hyphen.
+         */
+        slug: string;
+        displayName?: string;
+      }
+    | {
+        /**
+         * Make this provider the organization default model source; it needs a text model and an org-shared API key.
+         */
+        action: "set_default";
+        /**
+         * Provider slug: 1–63 lowercase letters, digits or hyphens; no leading/trailing hyphen.
+         */
+        slug: string;
+      }
+    | {
+        /**
+         * Replace one modality's capability block (base_url, model, models_endpoint); other modalities are kept.
+         */
+        action: "set_capability";
+        /**
+         * Provider slug: 1–63 lowercase letters, digits or hyphens; no leading/trailing hyphen.
+         */
+        slug: string;
+        modality: "text" | "image" | "stt" | "tts";
+        block: {
+          base_url?: string;
+          model?: string;
+          models_endpoint?: string;
+        };
+      }
+    | {
+        /**
+         * Replace the provider's API key in the vault; the value is never echoed or audited.
+         */
+        action: "rotate_key";
+        /**
+         * Provider slug: 1–63 lowercase letters, digits or hyphens; no leading/trailing hyphen.
+         */
+        slug: string;
+        value: string;
+      }
+    | {
+        /**
+         * Soft-delete a provider; if it was the default, the oldest remaining runnable provider is promoted.
+         */
+        action: "delete";
+        /**
+         * Provider slug: 1–63 lowercase letters, digits or hyphens; no leading/trailing hyphen.
+         */
+        slug: string;
+      };
+  path: {
+    /**
+     * Organization slug (workspace identifier)
+     */
+    orgSlug: string;
+  };
+  query?: never;
+  url: "/api/{orgSlug}/manage_inference_providers";
+};
+
+export type ManageInferenceProvidersErrors = {
+  /**
+   * Bad request - invalid parameters
+   */
+  400: {
+    error?: string;
+  };
+  /**
+   * Forbidden - your role or token scope does not allow this action
+   */
+  403: {
+    error?: string;
+  };
+  /**
+   * Tool not found
+   */
+  404: {
+    error?: string;
+  };
+};
+
+export type ManageInferenceProvidersError =
+  ManageInferenceProvidersErrors[keyof ManageInferenceProvidersErrors];
+
+export type ManageInferenceProvidersResponses = {
+  /**
+   * Successful response
+   */
+  200:
+    | {
+        providers: Array<{
+          id: number;
+          slug: string;
+          kind: string;
+          displayName: string | null;
+          capabilities: {
+            text?: {
+              base_url?: string;
+              model?: string;
+              models_endpoint?: string;
+            };
+            image?: {
+              base_url?: string;
+              model?: string;
+              models_endpoint?: string;
+            };
+            stt?: {
+              base_url?: string;
+              model?: string;
+              models_endpoint?: string;
+            };
+            tts?: {
+              base_url?: string;
+              model?: string;
+              models_endpoint?: string;
+            };
+          };
+          hasCustomUpstream: boolean;
+          status: string;
+          createdAt: string;
+          /**
+           * Most recent terminal provider failure, or null.
+           */
+          errorMessage: string | null;
+          /**
+           * When provider configuration or health last changed.
+           */
+          updatedAt: string;
+          /**
+           * Whether this row supplies the organization default model.
+           */
+          isDefault: boolean;
+        }>;
+      }
+    | {
+        provider: {
+          id: number;
+          slug: string;
+          kind: string;
+          displayName: string | null;
+          capabilities: {
+            text?: {
+              base_url?: string;
+              model?: string;
+              models_endpoint?: string;
+            };
+            image?: {
+              base_url?: string;
+              model?: string;
+              models_endpoint?: string;
+            };
+            stt?: {
+              base_url?: string;
+              model?: string;
+              models_endpoint?: string;
+            };
+            tts?: {
+              base_url?: string;
+              model?: string;
+              models_endpoint?: string;
+            };
+          };
+          hasCustomUpstream: boolean;
+          status: string;
+          createdAt: string;
+          isDefault: boolean;
+        };
+      }
+    | {
+        provider: {
+          id: number;
+          slug: string;
+          kind: string;
+          displayName: string | null;
+          capabilities: {
+            text?: {
+              base_url?: string;
+              model?: string;
+              models_endpoint?: string;
+            };
+            image?: {
+              base_url?: string;
+              model?: string;
+              models_endpoint?: string;
+            };
+            stt?: {
+              base_url?: string;
+              model?: string;
+              models_endpoint?: string;
+            };
+            tts?: {
+              base_url?: string;
+              model?: string;
+              models_endpoint?: string;
+            };
+          };
+          hasCustomUpstream: boolean;
+          status: string;
+          createdAt: string;
+        };
+      }
+    | {
+        success: true;
+        slug: string;
+        isDefault: true;
+      }
+    | {
+        success: true;
+      };
+};
+
+export type ManageInferenceProvidersResponse =
+  ManageInferenceProvidersResponses[keyof ManageInferenceProvidersResponses];
 
 export type ManageAuthProfilesData = {
   body:

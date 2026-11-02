@@ -3,6 +3,93 @@ import { ApiError } from "../../../memory/_lib/errors.js";
 import { ApplyClient, isDuplicateError } from "../client.js";
 
 describe("ApplyClient", () => {
+  const writes: Array<[string, (client: ApplyClient) => Promise<unknown>]> = [
+    [
+      "agent",
+      (client) =>
+        client.patchAgentSettings("fixture", { identityMd: "Updated" }),
+    ],
+    [
+      "Automation",
+      (client) => client.updateAutomation({ automation_id: "7", tags: [] }),
+    ],
+    [
+      "Automation version",
+      (client) =>
+        client.createAutomationVersion({
+          automation_id: "7",
+          prompt: "Updated",
+        }),
+    ],
+    [
+      "connector",
+      (client) => client.installConnector({ connectorId: "fixture" }),
+    ],
+    ["connection", (client) => client.updateConnection(7, { name: "Updated" })],
+    ["feed", (client) => client.updateFeed(7, { schedule: null })],
+    [
+      "auth profile",
+      (client) =>
+        client.createAuthProfile({
+          slug: "fixture",
+          connector: "fixture",
+          kind: "env",
+        }),
+    ],
+    [
+      "schema",
+      (client) => client.upsertEntityType({ slug: "fixture", name: "Fixture" }),
+    ],
+    ["view", (client) => client.setView({ source_code: "fixture" })],
+    [
+      "inference provider",
+      (client) => client.rotateInferenceProviderKey("fixture", "synthetic-key"),
+    ],
+  ];
+
+  test.each(
+    writes
+  )("%s cannot report a queued approval as applied", async (_name, write) => {
+    for (const pending of [
+      { status: "pending_approval", run_id: 123 },
+      { success: false, approval_queued: true, run_id: 123 },
+    ]) {
+      const client = new ApplyClient(
+        {
+          apiBaseUrl: "https://example.test",
+          orgSlug: "fixture",
+          token: "synthetic-token",
+        },
+        (async () => new Response(JSON.stringify(pending))) as typeof fetch
+      );
+      await expect(write(client)).rejects.toMatchObject({
+        code: "approval_pending",
+      });
+    }
+  });
+
+  test.each([
+    { success: false, reason: "Denied" },
+    { ok: false, message: "Denied" },
+    { status: "failed", message: "Denied" },
+    {
+      summary: { failed: 1, successful: 0 },
+      results: [{ success: false, error: "Denied" }],
+    },
+  ])("rejects a structured write failure: %j", async (result) => {
+    const client = new ApplyClient(
+      {
+        apiBaseUrl: "https://example.test",
+        orgSlug: "fixture",
+        token: "synthetic-token",
+      },
+      (async () => new Response(JSON.stringify(result))) as typeof fetch
+    );
+    await expect(
+      client.updateAutomation({ automation_id: "7", tags: [] })
+    ).rejects.toThrow("Denied");
+  });
+
   test("listFeeds rejects an incomplete empty page instead of planning from partial state", async () => {
     const client = new ApplyClient(
       {

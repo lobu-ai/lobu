@@ -37,7 +37,8 @@ RUN_LOG="$RUN_DIR/run.log"
 MOCK_LOG="$RUN_DIR/mock.log"
 CHAT_OUT="$RUN_DIR/chat.out"
 
-if [ -x /opt/homebrew/opt/node@22/bin/node ] && ! node --version 2>/dev/null | grep -qE '^v(22|23|24)\.'; then
+NODE_MAJOR="$(node -p 'Number(process.versions.node.split(".")[0])' 2>/dev/null || echo 0)"
+if [ -x /opt/homebrew/opt/node@22/bin/node ] && { [ "$NODE_MAJOR" -lt 22 ] || [ "$NODE_MAJOR" -eq 25 ]; }; then
   export PATH="/opt/homebrew/opt/node@22/bin:$PATH"
 fi
 

@@ -17,12 +17,16 @@ import {
   setInferenceProviderDefault,
   softDeleteInferenceProvider,
   updateInferenceProviderCapabilities,
+  readOrgSharedProviderApiKey,
 } from '../../lobu/stores/provider-secrets';
 import { resolveCompletionTarget } from '../../gateway/inference/gateway-completion';
 import { getDb } from '../../db/client';
 import { initWorkspaceProvider } from '../../workspace';
 import { cleanupTestDatabase } from '../setup/test-db';
-import { createTestOrganization } from '../setup/test-fixtures';
+import { createTestOrganization, createTestUser, addUserToOrganization } from '../setup/test-fixtures';
+import { buildClientSDK } from '../../sandbox/client-sdk';
+import { executeTool, toToolContext, type AuthContext } from '../../tools/execute';
+import type { Env } from '../../index';
 
 let originalEncryptionKey: string | undefined;
 
@@ -56,6 +60,50 @@ async function defaultSlug(organizationId: string): Promise<string | null> {
 }
 
 describe('inference provider org default', () => {
+  async function providerClient(scopes = ['mcp:read', 'mcp:write', 'mcp:admin']) {
+    const org = await newOrg();
+    const user = await createTestUser();
+    await addUserToOrganization(user.id, org.id, 'owner');
+    const auth: AuthContext = {
+      organizationId: org.id, tokenOrganizationId: org.id, userId: user.id,
+      memberRole: 'owner', agentId: null, requestedAgentId: null, isAuthenticated: true,
+      clientId: null, scopes, tokenType: 'pat', requestUrl: 'http://localhost/api/provider-test',
+      baseUrl: '', scopedToOrg: true, allowCrossOrg: false,
+    };
+    const env: Env = { ENVIRONMENT: 'test', RATE_LIMIT_ENABLED: 'false' };
+    return { auth, env, sdk: buildClientSDK(toToolContext(auth), env, { mode: 'full' }) };
+  }
+
+  it('SDK and MCP share provider writes, omitted capabilities and redacted responses', async () => {
+    const { auth, env, sdk } = await providerClient();
+    const created = await sdk.inferenceProviders.create({ slug: 'custom', kind: 'openai', apiKey: 'synthetic-initial-key',
+      capabilities: { text: { model: 'synthetic-model', base_url: 'https://inference.example/v1' } } });
+    expect(created.provider.isDefault).toBe(true);
+    const restricted = buildClientSDK(toToolContext({ ...auth, adminTools: ['manage_inference_providers'] }), env);
+    await restricted.inferenceProviders.update({ slug: 'custom', displayName: 'Renamed' });
+    await sdk.inferenceProviders.setCapability({ slug: 'custom', modality: 'image', block: { model: 'synthetic-image' } });
+    await sdk.inferenceProviders.rotateKey({ slug: 'custom', value: 'synthetic-rotated-key' });
+    expect(await readOrgSharedProviderApiKey('custom', auth.organizationId!)).toBe('synthetic-rotated-key');
+    const rotated = await executeTool('manage_inference_providers',
+      { action: 'rotate_key', slug: 'custom', value: 'synthetic-mcp-key' }, env, auth);
+    expect(rotated).toEqual({ success: true });
+    expect(await sdk.inferenceProviders.setDefault({ slug: 'custom' })).toEqual({ success: true, slug: 'custom', isDefault: true });
+    const listed = await executeTool('manage_inference_providers', { action: 'list' }, env, auth);
+    expect(listed).toEqual(await sdk.inferenceProviders.list());
+    expect(listed).toMatchObject({ providers: [{ slug: 'custom', displayName: 'Renamed', capabilities: {
+      text: { model: 'synthetic-model', base_url: 'https://inference.example/v1' }, image: { model: 'synthetic-image' },
+    } }] });
+    expect(await readOrgSharedProviderApiKey('custom', auth.organizationId!)).toBe('synthetic-mcp-key');
+    const audits = await getDb()`SELECT metadata, payload_data FROM events WHERE organization_id = ${auth.organizationId}`;
+    const serialized = JSON.stringify([created, rotated, listed, audits]);
+    expect(serialized).not.toContain('synthetic-initial-key');
+    expect(serialized).not.toContain('synthetic-rotated-key');
+    expect(serialized).not.toContain('synthetic-mcp-key');
+    expect(serialized).not.toContain('api_key_ref');
+    expect(await sdk.inferenceProviders.delete({ slug: 'custom' })).toEqual({ success: true });
+    expect(await sdk.inferenceProviders.list()).toEqual({ providers: [] });
+  });
+
   beforeAll(async () => {
     originalEncryptionKey = process.env.ENCRYPTION_KEY;
     process.env.ENCRYPTION_KEY =
@@ -72,6 +120,42 @@ describe('inference provider org default', () => {
       delete process.env.ENCRYPTION_KEY;
     }
     __resetEncryptionKeyCacheForTests();
+  });
+
+  it('provider administration enforces role/scope and rejects unknown or invalid mutations atomically', async () => {
+    const { auth, env, sdk } = await providerClient();
+    const input = { slug: 'rejected', kind: 'openai', apiKey: 'synthetic-key', capabilities: { text: { model: 'model' } } };
+    const deniedContexts: AuthContext[] = [ { ...auth, adminTools: ['manage_agents'] }, { ...auth, memberRole: 'member' }, { ...auth, scopes: ['mcp:read', 'mcp:write'] },
+      { ...auth, userId: null, memberRole: null }, { ...auth, userId: null, memberRole: null, tokenType: 'session' } ];
+    for (const denied of deniedContexts) {
+      await expect(executeTool('manage_inference_providers', { action: 'create', ...input }, env, denied)).rejects.toThrow();
+      await expect(buildClientSDK(toToolContext(denied), env).inferenceProviders.create(input)).rejects.toThrow();
+    }
+    await expect(sdk.inferenceProviders.create({ ...input, extra: true } as never)).rejects.toThrow(/unknown/i);
+    await expect(sdk.inferenceProviders.create({ ...input, capabilities: { text: { model: 'model', extra: true } } } as never)).rejects.toThrow();
+    await expect(sdk.inferenceProviders.create({ ...input, capabilities: { text: { base_url: 'http://inference.example' } } })).rejects.toThrow(/https/);
+    expect(await sdk.inferenceProviders.list()).toEqual({ providers: [] });
+    expect(await getDb()`SELECT name FROM agent_secrets WHERE organization_id = ${auth.organizationId}`).toHaveLength(0);
+    const reader = buildClientSDK(toToolContext({ ...auth, scopes: ['mcp:read'], memberRole: 'member' }), env, { mode: 'read' });
+    expect(await reader.inferenceProviders.list()).toEqual({ providers: [] });
+    const restrictedReader = buildClientSDK(toToolContext({ ...auth, adminTools: ['manage_agents'] }), env);
+    expect(await restrictedReader.inferenceProviders.list()).toEqual({ providers: [] });
+    expect(reader.inferenceProviders.create).toBeUndefined();
+  });
+
+  it('SDK provider mutations roll back vault and config when transactional audit fails', async () => {
+    const { auth, sdk } = await providerClient();
+    const sql = getDb();
+    await sql.unsafe("CREATE FUNCTION reject_sdk_provider_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.metadata->>'category' = 'config' THEN RAISE EXCEPTION 'synthetic audit rejection'; END IF; RETURN NEW; END $$");
+    await sql.unsafe("CREATE TRIGGER reject_sdk_provider_audit BEFORE INSERT ON events FOR EACH ROW EXECUTE FUNCTION reject_sdk_provider_audit()");
+    try {
+      await expect(sdk.inferenceProviders.create({ slug: 'rollback', kind: 'openai', apiKey: 'synthetic-key' })).rejects.toThrow(/synthetic audit rejection/);
+      expect(await sdk.inferenceProviders.list()).toEqual({ providers: [] });
+      expect(await sql`SELECT name FROM agent_secrets WHERE organization_id = ${auth.organizationId}`).toHaveLength(0);
+    } finally {
+      await sql.unsafe('DROP TRIGGER reject_sdk_provider_audit ON events');
+      await sql.unsafe('DROP FUNCTION reject_sdk_provider_audit()');
+    }
   });
 
   it('(a) the first runnable provider an org creates becomes its default', async () => {

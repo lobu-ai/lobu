@@ -12,6 +12,7 @@
  */
 
 import type {
+	ManageAuthProfilesArgs,
 	AuthProfileCreateInput,
 	AuthProfileDeleteInput,
 	AuthProfileListInput,
@@ -23,7 +24,7 @@ import type { ToolContext } from "../../tools/registry";
 import { createActionCaller, idArg } from "./action-call";
 
 export interface AuthProfilesNamespace {
-	manage(input: Record<string, unknown>): Promise<unknown>;
+	manage(input: ManageAuthProfilesArgs): Promise<unknown>;
 	list(input?: AuthProfileListInput): Promise<unknown>;
 	get(auth_profile_slug: string): Promise<unknown>;
 	test(auth_profile_slug: string): Promise<unknown>;

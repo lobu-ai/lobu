@@ -390,20 +390,21 @@ const CONNECTION_FIELDS = defineFieldTable<
   // payload (`apply_chat_connection` only persists slug/connector/name/config),
   // and a BYO chat declaration can't even set them (map-config rejects them).
   // Never diff them for BYO, or a remote row carrying a stray value would
-  // report a perpetual "update" that apply can't clear.
+  // report a perpetual "update" that apply can't clear. Undeclared is not a
+  // difference, same rule as `name` and `config`: an omitted pin is unmanaged.
   auth: {
     changed: (d, r) =>
-      d.credentialMode === "byo"
-        ? false
-        : (d.authProfileSlug ?? null) !== (r.auth_profile_slug ?? null),
-    payload: (d) => ({ authProfileSlug: d.authProfileSlug ?? null }),
+      d.credentialMode !== "byo" &&
+      d.authProfileSlug !== undefined &&
+      d.authProfileSlug !== (r.auth_profile_slug ?? null),
+    payload: (d) => ({ authProfileSlug: d.authProfileSlug }),
   },
   app_auth: {
     changed: (d, r) =>
-      d.credentialMode === "byo"
-        ? false
-        : (d.appAuthProfileSlug ?? null) !== (r.app_auth_profile_slug ?? null),
-    payload: (d) => ({ appAuthProfileSlug: d.appAuthProfileSlug ?? null }),
+      d.credentialMode !== "byo" &&
+      d.appAuthProfileSlug !== undefined &&
+      d.appAuthProfileSlug !== (r.app_auth_profile_slug ?? null),
+    payload: (d) => ({ appAuthProfileSlug: d.appAuthProfileSlug }),
   },
   config: {
     // A BYO chat connection's config holds a resolved secret (plaintext) on the
@@ -426,11 +427,11 @@ const CONNECTION_FIELDS = defineFieldTable<
   },
   device_worker_id: {
     changed: (d, r) =>
-      d.credentialMode === "byo"
-        ? false
-        : (d.deviceWorkerId ?? null) !== (r.device_worker_id ?? null),
-    // null unpins to the server, a uuid moves it to that device.
-    payload: (d) => ({ deviceWorkerId: d.deviceWorkerId ?? null }),
+      d.credentialMode !== "byo" &&
+      d.deviceWorkerId !== undefined &&
+      d.deviceWorkerId !== (r.device_worker_id ?? null),
+    // A declared uuid moves the connection to that device.
+    payload: (d) => ({ deviceWorkerId: d.deviceWorkerId }),
   },
 });
 
@@ -1386,6 +1387,7 @@ function remoteOnlyDefinitionRow(
 // remote-moved drift and permanently block re-apply.
 
 interface AutomationProjection {
+  executionConfig?: DesiredAutomation["executionConfig"];
   executor?: unknown;
   agent?: string | null;
   name?: string | null;
@@ -1414,10 +1416,16 @@ export const projectDesiredAutomation = (
   d: DesiredAutomation,
   remote?: RemoteAutomation
 ): AutomationProjection => ({
+  executionConfig:
+    d.executionConfig !== undefined
+      ? d.executionConfig
+      : (remote?.execution_config ?? null),
   executor:
-    d.executor !== undefined
-      ? d.executor
-      : (remote?.execution_config?.executor ?? null),
+    d.executionConfig !== undefined
+      ? (d.executionConfig?.executor ?? null)
+      : d.executor !== undefined
+        ? d.executor
+        : (remote?.execution_config?.executor ?? null),
   agent: d.agent ?? null,
   // Name/description are optional in config; the server defaults name to the
   // slug. Inherit live remote when omitted so a second apply does not
@@ -1441,11 +1449,13 @@ export const projectDesiredAutomation = (
       ? d.deviceWorkerId
       : (remote?.device_worker_id ?? null),
   model:
-    d.model !== undefined
-      ? d.model
-      : typeof remote?.execution_config?.model === "string"
-        ? (remote.execution_config.model as string)
-        : null,
+    d.executionConfig !== undefined
+      ? (d.executionConfig?.model ?? null)
+      : d.model !== undefined
+        ? d.model
+        : typeof remote?.execution_config?.model === "string"
+          ? (remote.execution_config.model as string)
+          : null,
   minCooldownSeconds:
     d.minCooldownSeconds !== undefined
       ? d.minCooldownSeconds
@@ -1460,6 +1470,7 @@ export const projectDesiredAutomation = (
 const projectRemoteAutomation = (
   w: RemoteAutomation
 ): AutomationProjection => ({
+  executionConfig: w.execution_config ?? null,
   executor: w.execution_config?.executor ?? null,
   agent: w.managed_agent_id ?? null,
   // `?? null` mirrors projectDesiredAutomation: an unnamed remote Automation must
@@ -1633,6 +1644,8 @@ function diffAutomation(
     scalar.push("agent_kind");
   }
   if (
+    (desired.executionConfig !== undefined &&
+      !deepEqual(desired.executionConfig, remote.execution_config ?? null)) ||
     (desired.model !== undefined &&
       desired.model !== (remote.execution_config?.model ?? null)) ||
     (desired.executor !== undefined &&
@@ -1730,16 +1743,15 @@ function diffConnectorDefinition(
   const id = connectorDefinitionId(desired);
   // The CLI can't compare source hashes (the server compiles, and the stored
   // hash is of the *compiled* output) — so we always emit a "sync" row;
-  // `install_connector` is idempotent and reports `updated:false` on apply
-  // when the code is byte-identical, so this never churns remote state.
+  // The server preserves identical retained versions and enforces version bumps
+  // for source changes. Installed definitions use the version-checked update.
   // Local files have no resolved key during planning; the static hint lets
   // the plan recognise an installed definition without compiling the source.
   const key = desired.key ?? desired.declaredKeyHint;
   const installedRemotely = key ? installedKeys.has(key) : false;
   return {
     kind: "connector-definition",
-    // "update" (re-push) when already installed; `install_connector` is
-    // idempotent and reports `updated:false` if the code is unchanged.
+    // Installed definitions reuse update_connector_source with the read version.
     verb: installedRemotely ? "update" : "create",
     id,
     desired,
@@ -1772,7 +1784,11 @@ function diffAuthProfile(
     );
   }
   const changed: string[] = [];
-  if ((desired.name ?? "") !== (remote.display_name ?? "")) {
+  // An omitted name is unmanaged; apply never sends it.
+  if (
+    desired.name !== undefined &&
+    desired.name !== (remote.display_name ?? "")
+  ) {
     changed.push("name");
   }
   // Credentials can't be read back from the server (write-only secrets). For

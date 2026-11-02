@@ -35,6 +35,8 @@ import {
   type TString,
 } from "@sinclair/typebox";
 import type { SecretRef } from "./secret.js";
+import type { AgentSettingsPatch } from "@lobu/core/contracts/agent-settings";
+import type { AutomationExecutionConfig } from "@lobu/core/contracts/tools/manage-automations";
 
 /** A connector referenced by its key, or by the class produced by `defineConnector`. */
 export type ConnectorRef = string | ConnectorClass;
@@ -775,6 +777,8 @@ export interface Automation {
   agent: Agent | string;
   /** Script job or agent execution. Omitted preserves the stored executor; "agent" clears a script executor. */
   executor?: ScriptSource | "agent";
+  /** Canonical execution options. Omit to preserve; null clears. Cannot overlap model/executor helpers. */
+  executionConfig?: AutomationExecutionConfig | null;
   name?: string;
   description?: string;
   /**
@@ -828,7 +832,7 @@ export interface Automation {
   tags?: string[];
   /** LLM guidance for the Automation's downstream reaction agent. */
   reactionsGuidance?: string;
-  /** Agent-kind override for firings (e.g. "background", "notifier"). */
+  /** Agent runtime override for firings. */
   agentKind?: string;
   /**
    * UUID pinning this Automation's runs to a specific device worker. Only
@@ -970,7 +974,7 @@ export interface ProviderConfig {
 }
 
 /** Modalities an org inference provider may declare a capability block for. */
-export type InferenceModality = "text" | "image" | "stt" | "tts" | "embedding";
+export type InferenceModality = "text" | "image" | "stt" | "tts";
 
 /**
  * Per-modality upstream override for an {@link OrgProvider}. Omit a modality
@@ -1020,6 +1024,8 @@ export interface Agent {
   id: string;
   name?: string;
   description?: string;
+  /** Canonical settings. Omitted keys stay unmanaged; supplied settings replace their stored value. */
+  settings?: AgentSettingsPatch;
   /**
    * Agent directory holding `SOUL.md` / `IDENTITY.md` / `USER.md`. Relative to
    * the config file; defaults to `./agents/<id>`. (Skills are referenced
