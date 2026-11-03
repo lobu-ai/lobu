@@ -325,7 +325,9 @@ export async function installConnectorFromMcpUrl(params: {
 						resource: probed.oauth.resource,
 						description:
 							"Authorize Lobu to use this remote MCP server on your behalf.",
-						setupInstructions: probed.oauth.registrationUrl
+						setupInstructions:
+							probed.oauth.registrationUrl ||
+							probed.oauth.clientIdMetadataDocumentSupported
 							? "Lobu registers the OAuth client automatically; connect an account to continue."
 							: "Configure an OAuth client for this MCP server, then connect an account.",
 					},

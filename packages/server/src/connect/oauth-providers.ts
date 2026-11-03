@@ -88,6 +88,33 @@ export function getSharedOAuthCallbackUrl(baseUrl: string): string {
   return `${baseUrl}/connect/oauth/callback`;
 }
 
+/**
+ * The URL this install publishes as its OAuth client ID for authorization
+ * servers that accept a client metadata document instead of registration.
+ */
+export function getClientMetadataDocumentUrl(baseUrl: string): string {
+  return `${baseUrl}/connect/oauth/client-metadata.json`;
+}
+
+/**
+ * The public client metadata document served at
+ * `getClientMetadataDocumentUrl`. Its `client_id` must equal that URL, and its
+ * only redirect is the shared callback, so a server holding this ID can only
+ * return codes to this install.
+ */
+export function buildClientMetadataDocument(baseUrl: string): Record<string, unknown> {
+  return {
+    client_id: getClientMetadataDocumentUrl(baseUrl),
+    client_name: 'Lobu',
+    client_uri: baseUrl,
+    application_type: 'web',
+    redirect_uris: [getSharedOAuthCallbackUrl(baseUrl)],
+    grant_types: ['authorization_code', 'refresh_token'],
+    response_types: ['code'],
+    token_endpoint_auth_method: 'none',
+  };
+}
+
 function resolveProviderConfig(params: {
   provider: string;
   authorizationUrl?: string;

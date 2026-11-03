@@ -822,6 +822,8 @@ async function discoverMcpOAuthMetadata(
     authorizationUrl,
     tokenUrl,
     ...(registrationUrl ? { registrationUrl } : {}),
+    clientIdMetadataDocumentSupported:
+      authorizationMetadata.client_id_metadata_document_supported === true,
     ...(challengeScopes.length > 0
       ? { challengeScopes }
       : {}),
@@ -841,13 +843,19 @@ export function getMcpOAuthRequestedScopes(metadata: McpOAuthMetadata): string[]
     : metadata.scopesSupported;
 }
 
+/** The server accepts a secretless client that proves itself with PKCE S256. */
+export function supportsPublicMcpOAuthClient(metadata: McpOAuthMetadata): boolean {
+  return (
+    metadata.tokenEndpointAuthMethodsSupported.includes('none') &&
+    metadata.codeChallengeMethodsSupported.includes('S256')
+  );
+}
+
 export function selectMcpOAuthClientAuthMethod(
   metadata: McpOAuthMetadata
 ): McpOAuthClientRegistration['tokenEndpointAuthMethod'] {
   const methods = metadata.tokenEndpointAuthMethodsSupported;
-  if (methods.includes('none') && metadata.codeChallengeMethodsSupported.includes('S256')) {
-    return 'none';
-  }
+  if (supportsPublicMcpOAuthClient(metadata)) return 'none';
   if (methods.includes('client_secret_basic')) return 'client_secret_basic';
   if (methods.includes('client_secret_post')) return 'client_secret_post';
   // RFC 8414 defaults an omitted token_endpoint_auth_methods_supported to
