@@ -433,12 +433,48 @@ export async function restInvokeEventAction(c: Context<{ Bindings: Env }>) {
 }
 
 /**
+ * Render one view shell into the response. Shared by the member route and the
+ * public-org projection so the two can never serve different bytes or headers
+ * for the same view.
+ *
+ * text/plain plus nosniff is what keeps a directly navigated shell from
+ * executing the authored bundle in the application's origin; the web host
+ * fetches `response.text()` into its sandboxed `srcdoc` frame instead.
+ */
+async function respondWithViewShell(
+	c: Context<{ Bindings: Env }>,
+	organizationId: string,
+	key: string
+) {
+	if (!isValidViewKey(key)) {
+		throw new ToolUserError("Invalid view key", 400);
+	}
+	const view = await getServedView(organizationId, key);
+	if (!view) {
+		throw new ToolUserError(`Unknown view: ${key}`, 404);
+	}
+	const html = renderViewShell(
+		view,
+		await viewWorkspaceUrl(organizationId, c.req.url),
+		await viewRuntimeScript()
+	);
+	c.header("Content-Type", "text/plain; charset=utf-8");
+	c.header("Cache-Control", "no-store");
+	c.header("X-Lobu-View-Hash", view.content_hash);
+	c.header(
+		"X-Lobu-View-Bytes",
+		String(Buffer.byteLength(view.compiled_code, "utf8"))
+	);
+	return c.body(html);
+}
+
+/**
  * GET /api/:orgSlug/views/:key/shell
  *
- * One view's HTML shell with the compiled bundle inlined. Authenticated like
- * every other org route — the web host fetches it with the session and mounts
- * it `srcdoc` into the sandboxed frame, so there is deliberately no public
- * (unauthenticated) shell route.
+ * One view's HTML shell with the compiled bundle inlined, for a member of the
+ * workspace. The web host fetches it with the session and mounts it `srcdoc`
+ * into the sandboxed frame. A visitor outside the workspace reads the
+ * public-org projection below instead.
  */
 export async function restGetViewShell(c: Context<{ Bindings: Env }>) {
 	try {
@@ -452,27 +488,47 @@ export async function restGetViewShell(c: Context<{ Bindings: Env }>) {
 		if (!hasRequiredMcpScope("read", ctx.scopes)) {
 			throw new ToolUserError("Reading views requires read access.", 403);
 		}
-		const key = c.req.param("key") ?? "";
-		if (!isValidViewKey(key)) {
-			throw new ToolUserError("Invalid view key", 400);
-		}
-		const view = await getServedView(ctx.organizationId, key);
-		if (!view) {
-			throw new ToolUserError(`Unknown view: ${key}`, 404);
-		}
-		const html = renderViewShell(
-			view,
-			await viewWorkspaceUrl(ctx.organizationId, c.req.url),
-			await viewRuntimeScript()
+		return await respondWithViewShell(
+			c,
+			ctx.organizationId,
+			c.req.param("key") ?? ""
 		);
-		c.header("Content-Type", "text/plain; charset=utf-8");
-		c.header("Cache-Control", "no-store");
-		c.header("X-Lobu-View-Hash", view.content_hash);
-		c.header(
-			"X-Lobu-View-Bytes",
-			String(Buffer.byteLength(view.compiled_code, "utf8"))
+	} catch (error) {
+		return restErrorResponse(c, error);
+	}
+}
+
+/**
+ * GET /api/:orgSlug/public/views/:key/shell
+ *
+ * The public-org projection of one view: the same compiled bundle a member
+ * receives, for a workspace whose `visibility` is `public`. It never reads
+ * `manage_views get`, so source code and retained source files stay inside the
+ * workspace — a public reader gets exactly what the rendered frame needs.
+ *
+ * Mounted outside `mcpAuth` like the other `/public/*` projections, and
+ * metered per IP by the public-read limiter: a shell is a few hundred KB, and
+ * this route has no session to key on.
+ */
+export async function publicRestGetViewShell(c: Context<{ Bindings: Env }>) {
+	try {
+		const orgSlug = c.req.param("orgSlug");
+		if (!orgSlug) {
+			return c.json({ error: "Organization slug is required" }, 400);
+		}
+		enforcePublicReadLimit({
+			userId: null,
+			clientIP: getClientIP(c.req.raw, c.var.peerRemoteAddress),
+		});
+		const organizationId = await resolvePublicOrganizationId(orgSlug);
+		if (!organizationId) {
+			return c.json({ error: "Not found" }, 404);
+		}
+		return await respondWithViewShell(
+			c,
+			organizationId,
+			c.req.param("key") ?? ""
 		);
-		return c.body(html);
 	} catch (error) {
 		return restErrorResponse(c, error);
 	}
