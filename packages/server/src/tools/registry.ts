@@ -840,17 +840,23 @@ type ListedToolOptions = {
  */
 export function getMcpTools(options?: ListedToolOptions) {
   const tools = getListedTools(ALL_MCP_TOOLS, options);
-  if (!options?.requireWorkspaceTarget) return tools;
   // Never mutate cached schemas: a bound connection may list immediately after
   // an account connection in the same process.
   return tools.map((tool) => {
-    const field = getTool(tool.name)?.workspaceTarget;
-    if (!field) return tool;
+    const required = [...(tool.inputSchema.required ?? [])];
+    // Ask MCP callers for readable activity headings without rejecting older
+    // callers: dispatch still validates the original, title-optional schema.
+    if (tool.name === 'run_sdk' || tool.name === 'query_sdk' || tool.name === 'query_sql') {
+      required.push('title');
+    }
+    const field = options?.requireWorkspaceTarget ? getTool(tool.name)?.workspaceTarget : undefined;
+    if (field) required.push(field);
+    if (required.length === (tool.inputSchema.required ?? []).length) return tool;
     return {
       ...tool,
       inputSchema: {
         ...tool.inputSchema,
-        required: [...new Set([...(tool.inputSchema.required ?? []), field])],
+        required: [...new Set(required)],
       },
     };
   });
