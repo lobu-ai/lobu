@@ -112,6 +112,18 @@ describe("bin/lobu.js Node gate", () => {
     expect(out).not.toContain("Node.js 26.x");
     expect(proc.status).toBe(0);
   });
+
+  test("bootstraps the backend command from a Bun host onto Node 26", () => {
+    // The macOS app still starts `lobu run` under an older Node; a Bun-hosted
+    // launch must likewise hand the backend to a real Node 26 binary.
+    const proc = spawnSync(process.execPath, [binEntry, "run", "--help"], {
+      env: { ...process.env },
+      encoding: "utf8",
+    });
+    const out = (proc.stdout ?? "") + (proc.stderr ?? "");
+    expect(out).toContain("Usage: lobu run|dev");
+    expect(proc.status).toBe(0);
+  });
 });
 
 describe("lobu run Node gate", () => {
