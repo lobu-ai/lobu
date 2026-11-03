@@ -450,12 +450,13 @@ export async function runNativeReferenceProof({
   }
   // New authoring uses one module. Keep this code-only fixture inert while
   // exercising a real editor save: no triggers and no run invocation.
+  const codeModuleSource = "export default async () => ({ total: 42 });";
   const codeModule = await call("manage_automations", {
     action: "create",
     slug: "native-preview-code-module",
     name: "Synthetic code module Automation",
     managed_agent_id: agent.agent_id,
-    reaction_script: "export default async () => ({ total: 42 });",
+    reaction_script: codeModuleSource,
     triggers: [],
   });
   assert(
@@ -495,21 +496,17 @@ export async function runNativeReferenceProof({
       "Code module editor save did not apply"
     );
   }
-  const codeModuleDefinitions = await call("manage_automations", {
-    action: "list",
+  const codeModuleDetails = await call("get_automation", {
     automation_id: String(codeModule.automation_id),
-    include_details: true,
-    limit: 1,
+    page_size: 1,
   });
-  const codeModuleReadback = codeModuleDefinitions.automations?.find(
-    (item) => String(item.automation_id) === String(codeModule.automation_id)
-  );
+  const codeModuleReadback = codeModuleDetails.automation;
   assert(
     codeModuleReadback?.description ===
       "Synthetic unrelated description edit." &&
       codeModuleReadback.managed_agent_id === agent.agent_id &&
       !codeModuleReadback.execution_config?.executor &&
-      codeModuleReadback.reaction_script?.includes("total: 42") &&
+      codeModuleReadback.reaction_script === codeModuleSource &&
       codeModuleReadback.triggers.length === 0 &&
       !codeModuleReadback.device_worker_id,
     "Unrelated save changed the code module, owning agent, or trigger state"

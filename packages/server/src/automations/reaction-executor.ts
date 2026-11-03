@@ -132,7 +132,9 @@ export async function executeAutomationScript(options: ExecuteAutomationScriptOp
     limits: { timeoutMs },
   });
 
-  if (approvalPending) {
+  // Completion reactions may queue human work after their source run completed.
+  // Preparation and code jobs must not advance past an unfulfilled approval.
+  if (approvalPending && executionKind === 'executor') {
     return {
       success: false,
       retryable: false,
