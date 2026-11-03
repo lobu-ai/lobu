@@ -11,6 +11,7 @@ import {
 	getMcpOAuthRequestedScopes,
 	probeMcpServer,
 	selectMcpOAuthClientAuthMethod,
+	supportsPublicMcpOAuthClient,
 } from "../mcp-proxy/client";
 import { computeCodeHash } from "../utils/compiler-core";
 import { isCloudMode } from "../utils/cloud-mode";
@@ -325,11 +326,12 @@ export async function installConnectorFromMcpUrl(params: {
 						resource: probed.oauth.resource,
 						description:
 							"Authorize Lobu to use this remote MCP server on your behalf.",
-						setupInstructions:
-							probed.oauth.registrationUrl ||
-							probed.oauth.clientIdMetadataDocumentSupported
+						setupInstructions: probed.oauth.registrationUrl
 							? "Lobu registers the OAuth client automatically; connect an account to continue."
-							: "Configure an OAuth client for this MCP server, then connect an account.",
+							: probed.oauth.clientIdMetadataDocumentSupported &&
+									supportsPublicMcpOAuthClient(probed.oauth)
+								? "On a public HTTPS install, Lobu uses its published client metadata document as the OAuth client; connect an account to continue. Otherwise configure an OAuth client first."
+								: "Configure an OAuth client for this MCP server, then connect an account.",
 					},
 					...(probed.anonymousAccess ? [{ type: "none" }] : []),
 				],
