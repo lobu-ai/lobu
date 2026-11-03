@@ -2077,7 +2077,7 @@ export type ManageEntitySchemaData = {
       | "remove_rule"
       | "list_rules";
     /**
-     * [get/create/update/delete/audit/add_rule/remove_rule/list_rules] Type slug
+     * [get/create/update/delete/audit/add_rule/remove_rule/list_rules] Type slug. `list_rules` also accepts none, which returns every rule the caller can see.
      */
     slug?: string;
     /**
@@ -6836,17 +6836,6 @@ export type GetAutomationResponses = {
       device_worker_id?: string | null;
       agent_kind?: string | null;
       execution_config?: {
-        executor?:
-          | {
-              kind: "script";
-              source: string;
-              params?: {
-                [key: string]: unknown;
-              };
-            }
-          | {
-              kind: "external";
-            };
         /**
          * Wall-clock cap in seconds for the device-worker CLI run (default 600).
          */
@@ -6877,6 +6866,17 @@ export type GetAutomationResponses = {
          * How many extra times to re-dispatch a server-side Automation run that finished WITHOUT calling complete_window before failing it. 0 disables; omitted = global default.
          */
         finalize_nudges?: number;
+        executor?:
+          | {
+              kind: "script";
+              source: string;
+              params?: {
+                [key: string]: unknown;
+              };
+            }
+          | {
+              kind: "external";
+            };
       } | null;
       version: number;
       sources: Array<{
@@ -7665,9 +7665,9 @@ export type ManageViewsResponses = {
                 };
           };
           /**
-           * apply:<apply_id> | <user_id> | migration:view-templates
+           * apply:<apply_id> | <user_id> | migration:view-templates. Omitted for readers outside the workspace.
            */
-          last_writer: string;
+          last_writer?: string;
           updated_at: string;
           compiled_bytes: number;
           source_bytes: number;
@@ -7766,9 +7766,9 @@ export type ManageViewsResponses = {
                 };
           };
           /**
-           * apply:<apply_id> | <user_id> | migration:view-templates
+           * apply:<apply_id> | <user_id> | migration:view-templates. Omitted for readers outside the workspace.
            */
-          last_writer: string;
+          last_writer?: string;
           updated_at: string;
           compiled_bytes: number;
           source_bytes: number;
@@ -7874,9 +7874,9 @@ export type ManageViewsResponses = {
                 };
           };
           /**
-           * apply:<apply_id> | <user_id> | migration:view-templates
+           * apply:<apply_id> | <user_id> | migration:view-templates. Omitted for readers outside the workspace.
            */
-          last_writer: string;
+          last_writer?: string;
           updated_at: string;
           compiled_bytes: number;
           source_bytes: number;
