@@ -852,7 +852,7 @@ export const ManageAutomationsSchema = Type.Object(
     reaction_script: Type.Optional(
       Type.String({
         description:
-          "[create/set_reaction_script] TypeScript source for an automated reaction. On create, it is compiled before the Automation and its reaction fields are stored in one transaction. Pass an empty string to set_reaction_script to remove an existing script.",
+          "[create/set_reaction_script] TypeScript module exporting prepare(ctx, client) before native agent execution and/or a default handler after completion. prepare returns named arrays of records (32 names, 16384 JSON bytes maximum), saved per run and read through knowledge.read(...).sources. Native window execution only for prepare; external/script executors and reply turns are unsupported. Existing default-only reactions retain their lifecycle. Compiled and validated before saving; an empty string removes the module.",
       })
     ),
 

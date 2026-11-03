@@ -25,6 +25,17 @@ import {
   inspectUnchangedWindow,
 } from '../../../automations/unchanged-window';
 
+/** Preparation belongs to native execution, including after its result is saved. */
+async function assertNoPreparationClaim(sql: DbClient, runId: number): Promise<void> {
+  const [run] = await sql`
+    SELECT approved_input->'automation_script'->>'has_prepare' AS has_prepare
+    FROM runs WHERE id = ${runId}
+  `;
+  if (run?.has_prepare === 'true') {
+    throw new ToolUserError('Automations with prepare execute through the native runtime and cannot be claimed by an external processor.', 409);
+  }
+}
+
 const DEFAULT_LEASE_SECONDS = 900;
 const MIN_LEASE_SECONDS = 30;
 const MAX_LEASE_SECONDS = 3600;
@@ -172,6 +183,7 @@ export async function handleClaimNextWindow(
         throw new ToolUserError(SCRIPT_EXTERNAL_CLAIM_ERROR, 409);
       }
       runId = Number(continuation.id);
+      await assertNoPreparationClaim(tx, runId);
       windowStart = new Date(continuation.window_start);
       windowEnd = new Date(continuation.window_end);
       leaseExpiresAt = new Date(now.getTime() + leaseSeconds * 1000);
@@ -315,6 +327,7 @@ export async function handleClaimNextWindow(
             tx
           );
       runId = run.runId;
+      await assertNoPreparationClaim(tx, runId);
       leaseExpiresAt = new Date(now.getTime() + leaseSeconds * 1000);
       const claimed = await claimPendingAutomationRun(tx, {
         runId,

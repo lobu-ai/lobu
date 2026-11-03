@@ -17,6 +17,28 @@ describe("scheduled Automation unchanged gate", () => {
 		await cleanupTestDatabase();
 	});
 
+	it("prepares scheduled runs even when configured sources are empty", async () => {
+		const { org, user, ctx } = await seedOwnerContext();
+		const agent = await createTestAgent({ organizationId: org.id, ownerUserId: user.id });
+		const created = await manageAutomations({
+			action: "create",
+			slug: "scheduled-preparation",
+			name: "Scheduled preparation",
+			prompt: "Read the saved calculated source.",
+			managed_agent_id: agent.agentId,
+			reaction_script: "export async function prepare() { return { calculated: [{ total: 42 }] }; }",
+			triggers: [{ kind: "schedule", cron: "* * * * *", execution: "window", active_run: "coalesce", skip_if_unchanged: true }],
+		}, {} as Env, ctx) as { automation_id: string };
+		const sql = getTestDb();
+		await sql`UPDATE automations SET next_run_at = now() - interval '1 hour' WHERE id = ${created.automation_id}`;
+		expect(await materializeDueAutomationRuns({} as Env, sql as unknown as DbClient)).toMatchObject({ runsCreated: 1, skipped: 0 });
+		const runs = await sql`SELECT id, status FROM runs WHERE automation_id = ${created.automation_id} AND run_type = 'automation'`;
+		expect(runs).toHaveLength(1);
+		expect(runs[0].status).toBe("pending");
+		const tasks = await sql`SELECT id FROM runs WHERE parent_run_id = ${runs[0].id} AND action_key = 'automation-preparation'`;
+		expect(tasks).toHaveLength(1);
+	});
+
 	it("persists an empty-window cursor so the next period can dispatch new data", async () => {
 		const { org, user, ctx } = await seedOwnerContext();
 		const agent = await createTestAgent({

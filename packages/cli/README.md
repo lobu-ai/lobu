@@ -89,6 +89,43 @@ is also unmanaged when omitted, replaces the whole execution config when supplie
 and clears with `null`. It cannot be combined with the `model` or `executor` helpers.
 Server validation, access rules, approvals, and audit apply to every write.
 
+An Automation can prepare data before its native agent starts, using the same
+module as its optional completion reaction:
+
+```ts
+// lobu.config.ts
+import { defineAutomation, reactionFromFile } from "@lobu/cli/config";
+
+const review = defineAutomation({
+  slug: "weekly-review", agent: support,
+  prompt: "Read the saved snapshot source and explain the result.",
+  reaction: reactionFromFile("./weekly-review.ts"),
+});
+
+// weekly-review.ts
+export async function prepare(ctx, client) {
+  const rows = await client.query("SELECT 19 + 23 AS total");
+  return { snapshot: rows };
+}
+// Optional: export default async function reaction(ctx, client) { ... }
+```
+
+The agent reads `knowledge.read({ automation_id, run_id }).sources.snapshot`.
+Preparation is durable: it commits before hosted or device agent execution,
+and successful results are reused for that run. The module and its input schema
+are pinned when the run is created; its optional completion handler receives the
+same saved data as `ctx.sources`. Default-only modules keep their existing lifecycle.
+Each returned source must be an array of records, with at most 32 source names
+and 16384 UTF-8 JSON bytes total. Names cannot replace configured sources; large
+results should use summaries or stored content references. Reads use the existing
+`sources_page` cursors and text/JSON cell bounds. Failed or approval-held
+preparation starts no agent and advances no arrival mark. Transient failures have
+at most three 60-second attempts; external writes must use run-derived idempotency
+keys. `prepare` supports native agent windows, including device execution; external
+and script executors, reply turns and captured evaluation runs are unsupported.
+Enable preparation modules only after all server replicas have the supporting
+release; older replicas do not implement the admission gate.
+
 `agents.get(id)` returns `{ action: "get", agent, model, settings, revision }`.
 Pass that opaque revision back to prevent overwriting a concurrent edit:
 

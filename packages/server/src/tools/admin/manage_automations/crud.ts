@@ -3,6 +3,7 @@
  *   create, update, delete, create_from_version
  */
 
+import { assertPreparationConfiguration } from '../../../automations/preparation';
 import { getDb, parsePgTextArray } from '../../../db/client';
 import {
   assertAutomationConfigVersion,
@@ -60,7 +61,7 @@ import { DEFAULT_AUTOMATION_SOURCE_QUERY, automationSourcesFromPrompt, mergeProm
 import {
   compileReactionScript,
   extractReactionInputSchema,
-  validateReactionDefaultExport,
+  inspectAutomationScriptExports,
 } from '../../../automations/reaction-executor';
 import {
   assertAutomationInstructions,
@@ -328,7 +329,8 @@ export async function handleCreate(
     ? await compileReactionScript(reactionScript)
     : null;
   if (reactionScriptCompiled) {
-    await validateReactionDefaultExport(reactionScriptCompiled);
+    const scriptExports = await inspectAutomationScriptExports(reactionScriptCompiled);
+    if (scriptExports.has_prepare) assertPreparationConfiguration(args);
   }
   const reactionInputSchema = reactionScript
     ? await extractReactionInputSchema(reactionScript)
@@ -757,7 +759,7 @@ export async function handleUpdate(
     const lockedRows = await tx`
       SELECT id, name, status, organization_id, managed_agent_id, schedule, timezone, triggers,
              device_worker_id::text AS device_worker_id, agent_kind,
-             delivery_target, reaction_script, execution_config, model_config, tags,
+             delivery_target, reaction_script, reaction_script_compiled, execution_config, model_config, tags,
              min_cooldown_seconds, consecutive_scheduled_failures, schedule_auto_paused_at, next_run_at
       FROM automations
       WHERE id = ${args.automation_id} AND organization_id = ${ctx.organizationId}
@@ -769,6 +771,15 @@ export async function handleUpdate(
     }
     if (base) await assertAutomationConfigVersionsUnchanged(args, ctx.organizationId, base, tx);
     const locked = lockedRows[0] as unknown as typeof currentRow;
+    if (lockedRows[0].reaction_script_compiled &&
+        (await inspectAutomationScriptExports(lockedRows[0].reaction_script_compiled)).has_prepare) {
+      assertPreparationConfiguration({
+        execution_config: args.execution_config !== undefined ? args.execution_config : locked.execution_config,
+        managed_agent_id: args.managed_agent_id !== undefined ? args.managed_agent_id : locked.managed_agent_id,
+        device_worker_id: args.device_worker_id !== undefined ? args.device_worker_id : locked.device_worker_id,
+        triggers: args.triggers !== undefined ? triggerWrite.triggers : locked.triggers,
+      });
+    }
     const lockedTriggersValueEqual =
       args.triggers === undefined ||
       automationTriggersEqual(locked.triggers ?? [], triggerWrite.triggers);

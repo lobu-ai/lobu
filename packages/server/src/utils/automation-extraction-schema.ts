@@ -222,11 +222,17 @@ export async function deriveAutomationExtractionSchema(
   organizationId: string,
   outputs: Outputs | null | undefined,
   automationId?: string | number | null,
-  options: { includeEventMetadata?: boolean } = {}
+  options: {
+    includeEventMetadata?: boolean;
+    scriptSnapshot?: { input_schema: Record<string, unknown> | null; entities: number[] };
+  } = {}
 ): Promise<Record<string, unknown> | null> {
   let reactionSchema: Record<string, unknown> | null = null;
   let entityIds: number[] = [];
-  if (automationId != null && automationId !== '') {
+  if (options.scriptSnapshot) {
+    reactionSchema = options.scriptSnapshot.input_schema;
+    entityIds = options.scriptSnapshot.entities;
+  } else if (automationId != null && automationId !== '') {
     const rows = await sql<{
       reaction_input_schema: Record<string, unknown> | string | null;
       entity_ids: unknown;

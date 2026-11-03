@@ -668,6 +668,12 @@ export type ReactionHandler = (
   params?: Record<string, unknown>
 ) => Promise<unknown>;
 
+/** Optional preparation export in an Automation reaction module. */
+export type PreparationHandler = (
+  ctx: AutomationScriptContext,
+  client: ReactionClient
+) => Promise<Record<string, Record<string, unknown>[]>>;
+
 export type AutomationScriptHandler = (
   ctx: AutomationScriptContext,
   client: ReactionClient,
@@ -688,8 +694,8 @@ export function scriptFromFile<
 }
 
 /**
- * A local reaction source file to compile + run in a sandboxed isolate when the
- * Automation fires. Built with {@link reactionFromFile} and set on
+ * A local lifecycle module: optional `prepare` before the native agent and/or
+ * a default completion reaction, both run in the shared sandbox. Built with {@link reactionFromFile} and set on
  * {@link Automation.reaction}. Like {@link ConnectorSource}, this carries only the
  * path as plain data — the handler module is NOT imported at config-eval time;
  * `lobu apply` reads the raw source and the server compiles it.
@@ -701,7 +707,10 @@ export interface ReactionSource {
 }
 
 /**
- * Reference a local reaction source file to compile + ship at apply time.
+ * Reference a local lifecycle module to compile + ship at apply time.
+ * A preparation-only module needs no generic: `reactionFromFile("./prepare.ts")`.
+ * Its `prepare` export returns named arrays of records, saved per run and read
+ * by the agent through `knowledge.read({ automation_id, run_id }).sources`.
  *
  * Pass the handler's module type via the generic for go-to-def / rename and a
  * `tsc` error if the module's default export drifts from {@link ReactionHandler}:

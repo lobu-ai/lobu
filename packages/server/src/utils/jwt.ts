@@ -44,6 +44,8 @@ interface WindowTokenPayload {
   lease_expires_at?: string;
   required_sources?: Array<{ name: string; feed_id: number }>;
   source_pages?: SourceWindowPage[];
+  /** Offsets into immutable preparation sources, bound to the same signed run. */
+  preparation_offsets?: Record<string, number>;
   iat: number; // issued at - returned to caller for staleness detection
   exp: number; // expiration
 }

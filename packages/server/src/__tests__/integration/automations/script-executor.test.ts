@@ -11,14 +11,17 @@ import {
 } from '../../setup/test-fixtures';
 import { TestWorkspace } from '../../setup/test-mcp-client';
 import { dispatchPendingAutomationRuns } from '../../../automations/automation';
+import { runAutomationReactionTask } from '../../../automations/reaction-task';
 import { runAutomationScriptTask } from '../../../automations/script-task';
 import { enqueueAutomationScript, reconcileAutomationScriptRuns } from '../../../automations/script-enqueue';
 import type { Env } from '../../../index';
 import { RunsQueue } from '../../../gateway/infrastructure/queue/runs-queue';
 import { TaskScheduler } from '../../../scheduled/task-scheduler';
-import { AUTOMATION_SCRIPT_TASK } from '../../../scheduled/task-definitions';
+import { AUTOMATION_PREPARATION_TASK, AUTOMATION_SCRIPT_TASK } from '../../../scheduled/task-definitions';
 import type { AutomationScriptTaskPayload } from '../../../automations/script-enqueue';
 import { assertAutomationScriptExecutor } from '../../../automations/script-config';
+import { runAutomationPreparationTask, reconcileAutomationPreparationRuns } from '../../../automations/preparation-task';
+import { claimPendingAutomationRun } from '../../../runs/queue-service';
 
 const SOURCE =
   'export default async (ctx) => ({ run_id: ctx.window.run_id, result: "script result" });';
@@ -87,10 +90,195 @@ const TEST_ENV = {
   DATABASE_URL: process.env.DATABASE_URL,
 } as Env;
 
+async function seedPreparedAutomation(source: string) {
+  const workspace = await TestWorkspace.create({ name: 'Preparation Org' });
+  const agent = await createTestAgent({ organizationId: workspace.org.id, ownerUserId: workspace.users.owner.id, agentId: 'prepared-owner', name: 'Prepared Owner' });
+  const created = await workspace.owner.automations.create({
+    slug: 'prepared-agent', name: 'Prepared Agent', prompt: 'Analyze the saved finance_snapshot source.',
+    managed_agent_id: agent.agentId, reaction_script: source,
+  } as never) as { automation_id: string };
+  const automationId = Number(created.automation_id);
+  const run = await createAutomationRun({ organizationId: workspace.org.id, automationId, agentId: agent.agentId, windowStart: '2026-01-01T00:00:00.000Z', windowEnd: '2026-01-01T00:20:00.000Z', dispatchSource: 'manual' });
+  const sql = getTestDb();
+  const [task] = await sql`SELECT id FROM runs WHERE parent_run_id = ${run.runId} AND action_key = 'automation-preparation'`;
+  const taskRunId = Number(task?.id);
+  const payload = { organizationId: workspace.org.id, automationId, sourceRunId: run.runId };
+  const prepare = async (attempt = 1) => {
+    await sql`UPDATE runs SET status = 'claimed', claimed_by = 'preparation-fixture', claimed_at = now() WHERE id = ${taskRunId}`;
+    await runAutomationPreparationTask(payload, TEST_ENV, taskRunId, attempt);
+  };
+  return { workspace, automationId, runId: run.runId, taskRunId, sql, prepare, payload };
+}
+
 describe('Automation script executor', () => {
   beforeEach(async () => {
     await cleanupTestDatabase();
   });
+
+  it('accepts a preparation-only module on a native agent Automation', async () => {
+    const { workspace, agentId } = await seedScriptAutomation();
+    const created = await workspace.owner.automations.create({
+      slug: 'prepared-agent',
+      name: 'Prepared Agent',
+      prompt: 'Read the saved finance_snapshot source and summarize it.',
+      managed_agent_id: agentId,
+      reaction_script: 'export async function prepare(ctx) { return { finance_snapshot: [{ run_id: ctx.window.run_id, total: 42 }] }; }',
+    } as never) as { automation_id: string };
+    expect(Number(created.automation_id)).toBeGreaterThan(0);
+  });
+
+  it('gates native execution, saves calculated sources and pages the frozen result', async () => {
+    const seed = await seedPreparedAutomation(`export async function prepare(ctx, client) {
+      const rows = await client.query('SELECT 19 + 23 AS total');
+      return { finance_snapshot: [{ ...rows[0], run_id: ctx.window.run_id }, { total: 84 }, { total: 126 }] };
+    }`);
+    const claim = () => seed.sql.begin(tx => claimPendingAutomationRun(tx, { runId: seed.runId, automationId: seed.automationId, claimedBy: 'native-fixture', status: 'running' }));
+    expect(await claim()).toBe(false);
+    await expect(seed.workspace.owner.knowledge.read({ automation_id: seed.automationId, run_id: seed.runId })).rejects.toThrow('preparation is not ready');
+    await seed.prepare();
+    await expect(seed.workspace.owner.automations.claimNextWindow({ automation_id: String(seed.automationId) })).rejects.toThrow('cannot be claimed by an external processor');
+    expect(await claim()).toBe(true);
+    const first = await seed.workspace.owner.knowledge.read({ automation_id: seed.automationId, run_id: seed.runId, limit: 1 }) as any;
+    expect(first.sources.finance_snapshot).toEqual([{ total: 42, run_id: seed.runId }]);
+    expect(first.sources_page.finance_snapshot).toMatchObject({ returned: 1, has_more: true });
+    const next = await seed.workspace.owner.knowledge.read({ automation_id: seed.automationId, run_id: seed.runId, limit: 1, source_name: 'finance_snapshot', source_cursor: first.sources_page.finance_snapshot.next_cursor }) as any;
+    expect(next.sources.finance_snapshot).toEqual([{ total: 84 }]);
+    const last = await seed.workspace.owner.knowledge.read({ automation_id: seed.automationId, run_id: seed.runId, limit: 1, source_name: 'finance_snapshot', source_cursor: next.sources_page.finance_snapshot.next_cursor }) as any;
+    expect(last.sources.finance_snapshot).toEqual([{ total: 126 }]);
+    expect(last.sources_page.finance_snapshot.has_more).toBe(false);
+    await expect(seed.workspace.owner.knowledge.read({ automation_id: seed.automationId, run_id: seed.runId + 1000, source_name: 'finance_snapshot', source_cursor: first.sources_page.finance_snapshot.next_cursor })).rejects.toThrow();
+  });
+
+  it('freezes preparation code at activation and reuses successful preparation', async () => {
+    const seed = await seedPreparedAutomation('export async function prepare() { return { finance_snapshot: [{ total: 42 }] }; }');
+    await seed.workspace.owner.automations.setReactionScript({ automation_id: String(seed.automationId), reaction_script: 'export async function prepare() { throw new Error("replacement must not run"); }' });
+    await seed.prepare();
+    await seed.prepare();
+    const [run] = await seed.sql`SELECT status, run_metadata FROM runs WHERE id = ${seed.runId}`;
+    expect(run.status).toBe('pending');
+    expect(run.run_metadata.preparation_sources).toEqual({ finance_snapshot: [{ total: 42 }] });
+    await seed.workspace.owner.automations.setReactionScript({ automation_id: String(seed.automationId), reaction_script: '' });
+    const read = await seed.workspace.owner.knowledge.read({ automation_id: seed.automationId, run_id: seed.runId }) as any;
+    expect(read.sources.finance_snapshot).toEqual([{ total: 42 }]);
+  });
+
+  it.each(['null', '[]', '{ content: [] }', '{ finance_snapshot: [1] }', '{ finance_snapshot: [{ text: "x".repeat(20000) }] }', '{ finance_snapshot: [{ payload_text: "x".repeat(5000), content_length: 1 }] }'])(
+    'fails preparation closed for invalid or colliding result %s', async (result) => {
+      const seed = await seedPreparedAutomation(`export async function prepare() { return ${result}; }`);
+      await seed.prepare();
+      const [run] = await seed.sql`SELECT status, run_metadata FROM runs WHERE id = ${seed.runId}`;
+      expect(run.status).toBe('failed');
+      expect(run.run_metadata.preparation_sources).toBeUndefined();
+    },
+  );
+
+  it('reconciles an exhausted preparation task without advancing arrival progress', async () => {
+    const seed = await seedPreparedAutomation('export async function prepare() { return {}; }');
+    const [before] = await seed.sql`SELECT next_window_start FROM automations WHERE id = ${seed.automationId}`;
+    await seed.sql`UPDATE runs SET status = 'failed', error_message = 'preparation fixture exhausted' WHERE id = ${seed.taskRunId}`;
+    await reconcileAutomationPreparationRuns(seed.sql);
+    const [run] = await seed.sql`SELECT status, error_message FROM runs WHERE id = ${seed.runId}`;
+    expect(run).toMatchObject({ status: 'failed', error_message: 'preparation fixture exhausted' });
+    const [after] = await seed.sql`SELECT next_window_start FROM automations WHERE id = ${seed.automationId}`;
+    expect(after.next_window_start).toEqual(before.next_window_start);
+  });
+
+  it('completes a preparation-only window without queuing a reaction', async () => {
+    const seed = await seedPreparedAutomation('export async function prepare() { return { finance_snapshot: [{ total: 42 }] }; }');
+    await seed.prepare();
+    expect(await seed.sql.begin(tx => claimPendingAutomationRun(tx, { runId: seed.runId, automationId: seed.automationId, claimedBy: 'native-fixture', status: 'running' }))).toBe(true);
+    const read = await seed.workspace.owner.knowledge.read({ automation_id: seed.automationId, run_id: seed.runId }) as { window_token: string };
+    await seed.workspace.owner.automations.completeWindow({ automation_id: String(seed.automationId), run_id: seed.runId, window_token: read.window_token, extracted_data: { summary: 'Verified total: 42' }, run_metadata: { preparation_sources: { forged: [] } } });
+    const [run] = await seed.sql`SELECT status, run_metadata, action_output FROM runs WHERE id = ${seed.runId}`;
+    expect(run.status).toBe('completed');
+    expect(run.action_output).toEqual({ summary: 'Verified total: 42' });
+    expect(run.run_metadata.preparation_sources).toEqual({ finance_snapshot: [{ total: 42 }] });
+    expect(await seed.sql`SELECT id FROM runs WHERE parent_run_id = ${seed.runId} AND action_key = 'automation-reaction'`).toEqual([]);
+  });
+
+  it('uses the frozen schema and completion handler with the same saved sources', async () => {
+    const seed = await seedPreparedAutomation(`
+      export const input = { type: 'object', properties: { answer: { type: 'number' } }, required: ['answer'] };
+      export async function prepare() { return { finance_snapshot: [{ total: 42 }] }; }
+      export default async function reaction(ctx, client) {
+        await client.knowledge.save({ semantic_type: 'note', title: 'preparation-echo', content: JSON.stringify({ sources: ctx.sources, answer: ctx.extracted_data.answer, version: ctx.automation.version }) });
+      }
+    `);
+    await seed.prepare();
+    await seed.workspace.owner.automations.setReactionScript({ automation_id: String(seed.automationId), reaction_script: `export const input = { type: 'object', properties: { replacement: { type: 'string' } }, required: ['replacement'] }; export default async function reaction() { throw new Error('replacement must not execute'); }` });
+    await seed.workspace.owner.automations.createVersion({ automation_id: String(seed.automationId), prompt: 'Edited instructions', set_as_current: true });
+    expect(await seed.sql.begin(tx => claimPendingAutomationRun(tx, { runId: seed.runId, automationId: seed.automationId, claimedBy: 'native-fixture', status: 'running' }))).toBe(true);
+    const read = await seed.workspace.owner.knowledge.read({ automation_id: seed.automationId, run_id: seed.runId }) as { window_token: string; extraction_schema: { required: string[] } };
+    expect(read.extraction_schema.required).toContain('answer');
+    await seed.workspace.owner.automations.completeWindow({ automation_id: String(seed.automationId), run_id: seed.runId, window_token: read.window_token, extracted_data: { answer: 42 } });
+    const [task] = await seed.sql`SELECT id FROM runs WHERE parent_run_id = ${seed.runId} AND action_key = 'automation-reaction'`;
+    expect(await runAutomationReactionTask(seed.payload, TEST_ENV, Number(task.id))).toEqual({ status: 'success' });
+    const [echo] = await seed.sql`SELECT payload_text FROM events WHERE organization_id = ${seed.workspace.org.id} AND title = 'preparation-echo'`;
+    expect(JSON.parse(echo.payload_text)).toEqual({ sources: { finance_snapshot: [{ total: 42 }] }, answer: 42, version: 1 });
+  });
+
+  it('does not start analysis when a preparation write awaits approval', async () => {
+    const seed = await seedPreparedAutomation(`export async function prepare(ctx, client) {
+      await client.automations.update({ automation_id: String(ctx.automation.id), tags: ['approval-fixture'] });
+      return { finance_snapshot: [{ total: 42 }] };
+    }`);
+    await seed.prepare();
+    const [run] = await seed.sql`SELECT status, error_message, run_metadata FROM runs WHERE id = ${seed.runId}`;
+    expect(run.status).toBe('failed');
+    expect(run.error_message).toContain('awaits approval');
+    expect(run.run_metadata.preparation_sources).toBeUndefined();
+    const approvals = await seed.sql`SELECT id FROM runs WHERE organization_id = ${seed.workspace.org.id} AND approval_status = 'pending' AND status = 'pending'`;
+    expect(approvals.length).toBeGreaterThan(0);
+  });
+
+  it('rejects switching preparation to a reply turn or external executor', async () => {
+    const seed = await seedPreparedAutomation('export async function prepare() { return {}; }');
+    await expect(seed.workspace.owner.automations.update({ automation_id: String(seed.automationId), execution_config: { executor: { kind: 'external' } } } as never)).rejects.toThrow('Preparation requires a native agent');
+    await expect(seed.workspace.owner.automations.createVersion({ automation_id: String(seed.automationId), triggers: [{ kind: 'event', source: 'connector', connector_key: 'slack', event_types: ['message.created'], execution: 'turn', output: 'reply_to_source' }], set_as_current: true } as never)).rejects.toThrow('Preparation requires a native agent');
+  });
+
+  it('freezes coalesced event inputs when preparation starts', async () => {
+    const seed = await seedPreparedAutomation('export async function prepare(ctx) { return { signals: [{ count: ctx.trigger_signals.length, end: ctx.window.window_end }] }; }');
+    const trigger = { kind: 'event' as const, connector_key: 'github', event_types: ['pull_request.created'], execution: 'window' as const, output: 'silent' as const, active_run: 'coalesce' as const };
+    const activate = (index: number) => createAutomationEventRun({ organizationId: seed.workspace.org.id, automationId: seed.automationId, agentId: 'prepared-owner', trigger, signal: { connector_key: 'github', event_type: 'pull_request.created', delivery_id: `synthetic-preparation-${index}`, occurred_at: `2026-01-01T00:00:0${index}.000Z`, labels: {} } });
+    const first = await activate(1);
+    const second = await activate(2);
+    expect(second).toMatchObject({ runId: first.runId, disposition: 'coalesced' });
+    const [task] = await seed.sql`SELECT id FROM runs WHERE parent_run_id = ${first.runId} AND action_key = 'automation-preparation'`;
+    await seed.sql`UPDATE runs SET status = 'claimed', claimed_at = now(), claimed_by = 'preparation-fixture' WHERE id = ${task.id}`;
+    await runAutomationPreparationTask({ ...seed.payload, sourceRunId: first.runId! }, TEST_ENV, Number(task.id));
+    const third = await activate(3);
+    expect(third.runId).not.toBe(first.runId);
+    const [run] = await seed.sql`SELECT approved_input, run_metadata FROM runs WHERE id = ${first.runId}`;
+    expect(run.approved_input.trigger_signals).toHaveLength(2);
+    expect(run.run_metadata.preparation_sources.signals).toEqual([{ count: 2, end: run.approved_input.window_end }]);
+  });
+
+  it('rejects captured preparation before any hosted agent starts', async () => {
+    const seed = await seedPreparedAutomation('export async function prepare() { return {}; }');
+    await seed.prepare();
+    await seed.sql`UPDATE runs SET run_type = 'automation_eval' WHERE id = ${seed.runId}`;
+    await expect(seed.workspace.owner.knowledge.read({ automation_id: seed.automationId, run_id: seed.runId })).rejects.toThrow('not supported for captured');
+    expect(await dispatchPendingAutomationRuns({ runIds: [seed.runId] })).toMatchObject({ failed: 1, dispatched: 0 });
+  });
+
+  it('keeps saved preparation sources scoped to their workspace', async () => {
+    const seed = await seedPreparedAutomation('export async function prepare() { return { private_context: [{ value: "private-fixture" }] }; }');
+    await seed.prepare();
+    const foreign = await TestWorkspace.create({ name: 'Unrelated Preparation Org' });
+    await expect(foreign.owner.knowledge.read({ automation_id: seed.automationId, run_id: seed.runId })).rejects.toThrow();
+    const read = await seed.workspace.owner.knowledge.read({ automation_id: seed.automationId, run_id: seed.runId }) as { sources: Record<string, unknown[]> };
+    expect(read.sources.private_context).toEqual([{ value: 'private-fixture' }]);
+  });
+
+  it.each(['export const prepare = 1; export default async () => {};', 'export const defaultHandler = 1;', 'export async function prepare() { return {}; } export default 1;'])(
+    'rejects invalid lifecycle exports without replacing the saved module: %s', async (source) => {
+      const seed = await seedPreparedAutomation('export async function prepare() { return { snapshot: [{ value: 42 }] }; }');
+      await expect(seed.workspace.owner.automations.setReactionScript({ automation_id: String(seed.automationId), reaction_script: source })).rejects.toThrow('must export prepare or a default async function');
+      const [automation] = await seed.sql`SELECT reaction_script FROM automations WHERE id = ${seed.automationId}`;
+      expect(automation.reaction_script).toContain('value: 42');
+    },
+  );
 
   it('accepts a script as the complete job without a model prompt or reaction', async () => {
     const { automationId } = await seedScriptAutomation();
@@ -527,6 +715,27 @@ describe('Automation script executor', () => {
       error_message:
         'ValidationError: Automation scripts must return an object or no value.',
     });
+  });
+
+  it('runs preparation through the real durable task queue before admitting analysis', async () => {
+    const seed = await seedPreparedAutomation('export async function prepare(ctx, client) { return { calculated: await client.query("SELECT 19 + 23 AS total") }; }');
+    const queue = new RunsQueue();
+    const scheduler = new TaskScheduler(queue);
+    scheduler.register(AUTOMATION_PREPARATION_TASK, async (ctx) => {
+      await runAutomationPreparationTask(ctx.payload as AutomationScriptTaskPayload, TEST_ENV, ctx.taskRunId, ctx.attempt);
+    });
+    try {
+      await queue.start();
+      await scheduler.start();
+      await expect.poll(async () => (await seed.sql`SELECT status FROM runs WHERE id = ${seed.taskRunId}`)[0]?.status, { timeout: 5000 }).toBe('completed');
+      const [run] = await seed.sql`SELECT status, run_metadata FROM runs WHERE id = ${seed.runId}`;
+      expect(run.status).toBe('pending');
+      expect(run.run_metadata.preparation_sources).toEqual({ calculated: [{ total: 42 }] });
+      expect(await seed.sql.begin(tx => claimPendingAutomationRun(tx, { runId: seed.runId, automationId: seed.automationId, claimedBy: 'native-fixture', status: 'running' }))).toBe(true);
+    } finally {
+      scheduler.stop();
+      await queue.stop();
+    }
   });
 
   it('is claimed and settled by the real durable task queue', async () => {

@@ -3,6 +3,7 @@
  *   trigger, set_reaction_script
  */
 
+import { assertPreparationConfiguration } from "../../../automations/preparation";
 import { transform } from "esbuild";
 import { getDb, type DbClient } from "../../../db/client";
 import type { Env } from "../../../index";
@@ -19,7 +20,7 @@ import {
 import {
   compileReactionScript,
   extractReactionInputSchema,
-  validateReactionDefaultExport,
+  inspectAutomationScriptExports,
 } from "../../../automations/reaction-executor";
 import { assertAutomationInstructions } from "../../../automations/triggers";
 import type {
@@ -416,7 +417,7 @@ export async function handleSetReactionScript(
   }
 
   const compiledCode = await compileReactionScript(script);
-  await validateReactionDefaultExport(compiledCode);
+  const scriptExports = await inspectAutomationScriptExports(compiledCode);
   const targetCode = await comparableReactionCode(compiledCode);
   // Derive the reaction's extraction contract from its exported `input` schema,
   // so the worker is told the exact shape the reaction will Value.Parse. NULL
@@ -424,12 +425,16 @@ export async function handleSetReactionScript(
   const reactionInputSchema = await extractReactionInputSchema(script);
   await sql.begin(async (tx) => {
     const locked = await tx`
-      SELECT id, reaction_script, reaction_script_compiled, reaction_input_schema FROM automations
+      SELECT id, reaction_script, reaction_script_compiled, reaction_input_schema,
+             execution_config, managed_agent_id, device_worker_id, triggers FROM automations
       WHERE automation_group_id = ${groupId} AND organization_id = ${ctx.organizationId}
       ORDER BY id
       FOR UPDATE
     `;
     if (base) await assertAutomationConfigVersionsUnchanged(args, ctx.organizationId, base, tx);
+    if (scriptExports.has_prepare) {
+      for (const row of locked) assertPreparationConfiguration(row);
+    }
     const targetSchema = reactionInputSchema ?? null;
     for (const row of locked) {
       const rowId = Number(row.id);
@@ -482,6 +487,6 @@ export async function handleSetReactionScript(
     automation_id: String(args.automation_id),
     has_script: true,
     message:
-      "Reaction script compiled and saved. It will auto-execute on future complete_window calls.",
+      "Automation script compiled and saved. prepare runs before native analysis; the default handler runs after completion.",
   };
 }

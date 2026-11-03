@@ -1,3 +1,4 @@
+import { inspectAutomationScriptExports } from "./reaction-executor";
 import type { DbClient } from "../db/client";
 import { classifyRunOutcome } from "../runs/run-outcome";
 import { fingerprintAutomationSources } from "../tools/get_content/automation-mode";
@@ -26,6 +27,10 @@ export async function inspectUnchangedWindow(
 	window: { windowStart: Date; windowEnd: Date },
 ): Promise<UnchangedWindowState | null> {
 	if (scheduleTriggerOf(automation.triggers)?.skip_if_unchanged !== true) return null;
+	// Preparation may derive fresh context from SDK reads beyond configured sources.
+	// The source fingerprint cannot prove that work unchanged.
+	const [module] = await sql`SELECT reaction_script_compiled FROM automations WHERE id = ${automation.id}`;
+	if (module?.reaction_script_compiled && (await inspectAutomationScriptExports(module.reaction_script_compiled)).has_prepare) return null;
 	const sourceState = await fingerprintAutomationSources({
 		sql,
 		automationId: automation.id,
