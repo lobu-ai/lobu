@@ -1,8 +1,5 @@
 import { runSync } from "./sync-harness";
 import { beforeAll, describe, expect, mock, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import path from "node:path";
 import { JSDOM } from "jsdom";
 import { connectorSdkMock } from "./connector-sdk.mock";
 import { constrainBrowserInput } from "@lobu/connector-sdk/browser-requirement";
@@ -39,9 +36,6 @@ let verifyLinkedInStagedComment: any;
 let genericScrape: (
   config: Record<string, unknown>
 ) => Promise<Record<string, unknown>>;
-let readConnections: any;
-let readJobs: any;
-let parseCsv: any;
 
 // Most tests below exercise author, engagement, media, or noise parsing rather
 // than post identity recovery. Give those synthetic rows a durable URN derived
@@ -105,10 +99,6 @@ beforeAll(async () => {
   genericScrape = (
     await import("../../../owletto/apps/chrome/tools.js")
   ).genericScrape;
-  const takeoutMod = await import("../linkedin-takeout");
-  readConnections = takeoutMod.readConnections;
-  readJobs = takeoutMod.readJobs;
-  parseCsv = (await import("../takeout-utils")).parseCsv;
   const identityMod = await import("../linkedin-identity");
   normalizeLinkedInSlug = identityMod.normalizeLinkedInSlug;
   normalizeLinkedInMemberId = identityMod.normalizeLinkedInMemberId;
@@ -2884,7 +2874,7 @@ describe("normalizeLinkedInSlug", () => {
   });
 });
 
-describe("LinkedInConnector takeout identity attributions", () => {
+describe("LinkedInConnector feed dispatch", () => {
   test.each([
     "constructor",
     "toString",
@@ -2896,118 +2886,15 @@ describe("LinkedInConnector takeout identity attributions", () => {
     ).rejects.toThrow("Unknown LinkedIn feed");
   });
 
-  test("connections feed mints a person keyed on linkedin_slug + email, neither primary", () => {
+  test("declares only live browser feeds", () => {
     const def = new LinkedInConnector().definition;
-    const attr = def.feeds.connections.eventKinds.connection.attributions?.[0];
-    expect(attr).toBeDefined();
-    expect(attr.autoCreate).toBe(true);
-    expect(attr.target.entityType).toBe("person");
-    expect(attr.target.titlePath).toBe("author_name");
-
-    const identities = attr.target.identities;
-    const slug = identities.find(
-      (i: { namespace: string }) => i.namespace === LINKEDIN_IDENTITY.SLUG
-    );
-    expect(slug).toMatchObject({
-      namespace: "linkedin_slug",
-      eventPath: "metadata.linkedin_slug",
-    });
-    // Equal-weight cross-channel matching: no primary until the live connector.
-    expect(slug.primary).toBeUndefined();
-
-    const email = identities.find(
-      (i: { namespace: string }) => i.namespace === "email"
-    );
-    expect(email).toMatchObject({
-      namespace: "email",
-      eventPath: "metadata.email",
-    });
-    expect(email.primary).toBeUndefined();
-
-    // The full URL survives only as a display trait, never as an identity.
-    expect(
-      identities.some(
-        (i: { namespace: string }) => i.namespace === "linkedin_url"
-      )
-    ).toBe(false);
-    expect(attr.traits.linkedin_url).toMatchObject({
-      eventPath: "metadata.linkedin_url",
-      mergeStrategy: "prefer_non_empty",
-    });
-  });
-
-  test("messages feed attributes the sender via their profile-url slug", () => {
-    const def = new LinkedInConnector().definition;
-    const attr = def.feeds.messages.eventKinds.message.attributions?.[0];
-    expect(attr).toBeDefined();
-    expect(attr.autoCreate).toBe(true);
-    expect(attr.role).toBe("authored_by");
-    expect(attr.target.identities).toEqual([
-      {
-        namespace: "linkedin_slug",
-        eventPath: "metadata.sender_linkedin_slug",
-      },
+    expect(Object.keys(def.feeds).sort()).toEqual([
+      "company_updates",
+      "home_feed",
+      "jobs",
+      "live_messages",
+      "notifications",
     ]);
-  });
-
-  test("a real connections row emits the metadata the slug identity resolves", () => {
-    const dir = mkdtempSync(path.join(tmpdir(), "li-takeout-"));
-    writeFileSync(
-      path.join(dir, "Connections.csv"),
-      [
-        "First Name,Last Name,URL,Email Address,Company,Position,Connected On",
-        "Jane,Doe,https://www.LinkedIn.com/in/Jane-Doe/,jane@acme.com,Acme,CEO,01 Jan 2024",
-      ].join("\n")
-    );
-
-    const connector = new LinkedInConnector();
-    // The reader is injected, not imported: `linkedin-takeout.ts` must stay
-    // filesystem-free so the live feeds' bundle loads in the isolate. Here the
-    // real on-disk reader supplies the capability, so this still exercises the
-    // genuine CSV -> event path against a genuine file.
-    const events = readConnections((file: string) =>
-      parseCsv(readFileSync(path.join(dir, file), "utf8"))
-    );
-    expect(events).toHaveLength(1);
-    const [event] = events;
-    expect(event.origin_type).toBe("connection");
-    expect(event.author_name).toBe("Jane Doe");
-
-    // The connection attribution's identity specs point at exactly these keys.
-    const attr =
-      connector.definition.feeds.connections.eventKinds.connection
-        .attributions[0];
-    for (const identity of attr.target.identities) {
-      const value = resolvePath(event, identity.eventPath);
-      expect(value).toBeTruthy();
-    }
-    // Full URL survives as a display trait...
-    expect(resolvePath(event, "metadata.linkedin_url")).toBe(
-      "https://www.LinkedIn.com/in/Jane-Doe/"
-    );
-    expect(resolvePath(event, "metadata.email")).toBe("jane@acme.com");
-    // ...but the connector emits the ALREADY-canonical slug the identity keys
-    // on, since the server won't run this example connector's normalizer. The
-    // case-variant URL collapses to `jane-doe` at emit time.
-    const slugSpec = attr.target.identities.find(
-      (i: { namespace: string }) => i.namespace === "linkedin_slug"
-    );
-    expect(slugSpec.eventPath).toBe("metadata.linkedin_slug");
-    expect(resolvePath(event, "metadata.linkedin_slug")).toBe("jane-doe");
-  });
-
-  test("applied_jobs feed reads the user's own job postings CSV", () => {
-    const rows = parseCsv(
-      "Title,Company Name,Create Date\nEngineer,Example,2024-01-01"
-    );
-    const connector = new LinkedInConnector();
-    // readJobs is source-agnostic; the applied_jobs feedKey routes here.
-    const events = readJobs(() => rows);
-    expect(events).toHaveLength(1);
-    expect(events[0].title).toBe("Engineer");
-    // The definition exposes the renamed feed key, not the old "jobs" takeout.
-    expect(connector.definition.feeds.applied_jobs).toBeDefined();
-    expect(connector.definition.feeds.applied_jobs.name).toBe("Applied Jobs");
   });
 });
 
@@ -3035,12 +2922,11 @@ describe("LinkedInConnector automation events", () => {
 });
 
 describe("LinkedInConnector auth schema", () => {
-  test("keeps browser and local export authentication independent of sign-in", () => {
+  test("keeps browser authentication independent of sign-in", () => {
     const def = new LinkedInConnector().definition;
     const methods = def.authSchema.methods;
     expect(methods.map((method: { type: string }) => method.type)).toEqual([
       "browser",
-      "none",
       "oauth",
     ]);
     expect(methods[0]).toMatchObject({ type: "browser", mode: "live" });
@@ -3054,7 +2940,7 @@ describe("LinkedInConnector auth schema", () => {
         getSelectableMethods(def.authSchema, configuredKeys).map(
           (method) => method.type
         )
-      ).toEqual(["browser", "none"]);
+      ).toEqual(["browser"]);
     }
   });
 
@@ -3182,8 +3068,7 @@ describe("LinkedInConnector live post author identity (member id)", () => {
     expect(attr).toBeDefined();
     expect(attr.role).toBe("authored_by");
     expect(attr.autoCreate).toBe(true);
-    // NO createWhen gate: a member_id-primary mint-gate would fork the existing
-    // slug-keyed takeout person. Equal-weight union binds them instead.
+    // NO createWhen gate: equal-weight member_id + slug union onto one person.
     expect(attr.target.createWhen).toBeUndefined();
 
     const memberId = attr.target.identities.find(
@@ -3193,8 +3078,7 @@ describe("LinkedInConnector live post author identity (member id)", () => {
       namespace: "linkedin_member_id",
       eventPath: "metadata.author_member_id",
     });
-    // CRITICAL: member_id is NOT primary — a primary that misses would mint a
-    // new person and fork the takeout-first slug person.
+    // member_id is NOT primary — a miss must not mint past an existing slug hit.
     expect(memberId.primary).toBeUndefined();
 
     const slug = attr.target.identities.find(
@@ -3236,10 +3120,6 @@ describe("LinkedInConnector live post author identity (member id)", () => {
     expect(post.authorMemberId).toBe("ACoAABbareXYZ");
   });
 });
-
-function resolvePath(obj: any, dotPath: string): unknown {
-  return dotPath.split(".").reduce((acc, key) => acc?.[key], obj);
-}
 
 describe("prepare_comment helpers", () => {
   test("normalizeLinkedInPostUrl accepts urls, urns, and bare ids", () => {
@@ -3405,7 +3285,7 @@ describe("prepare_comment helpers", () => {
     expect(action?.inputSchema?.properties).not.toHaveProperty(
       "browser_connection_id"
     );
-    expect(c.definition.version).toBe("3.20.2");
+    expect(c.definition.version).toBe("3.21.0");
     expect(String(action?.description ?? "")).toMatch(
       /NEVER opens a tab or submits/i
     );

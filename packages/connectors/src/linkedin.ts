@@ -1,27 +1,15 @@
 /**
  * LinkedIn Connector
  *
- * Built-in connector spanning live browser feeds and local export readers:
- *
- *   • LIVE feeds (home_feed, company_updates, jobs) — scraped via the paired
- *     Owletto Chrome extension's network-intercept / content-script primitives.
- *     The extension runs inside the user's real Chrome session — no Playwright,
- *     no cookie cache, no `--remote-debugging-port` plumbing. We attach the CDP
- *     Network domain in the user's signed-in tab, drive scroll pagination, and
- *     parse the Voyager API responses the page emits. Auth is implicit: the user
- *     is already signed into linkedin.com in the paired Chrome. If no online
- *     Owletto extension is reachable in the connection's org, these syncs fail
- *     fast with a clear "no paired Owletto extension" error.
- *
- *   • TAKEOUT feeds (connections, messages, invitations, applied_jobs, profile,
- *     companies, learning, events, endorsements, media) — read from the user's
- *     local LinkedIn Data Export CSV files through an injected reader. The
- *     platform does not currently supply that reader; those feeds fail with
- *     a missing-capability error until a filesystem-capable caller supplies it.
- *
- * Folding both into ONE connector (key "linkedin") means a single connection
- * dedups all people on the shared `linkedin_slug`/`email` identity: a person met
- * live and a person in the CSV export collapse to the same entity.
+ * Live browser feeds (home_feed, company_updates, jobs) scraped via the paired
+ * Owletto Chrome extension's network-intercept / content-script primitives.
+ * The extension runs inside the user's real Chrome session — no Playwright,
+ * no cookie cache, no `--remote-debugging-port` plumbing. We attach the CDP
+ * Network domain in the user's signed-in tab, drive scroll pagination, and
+ * parse the Voyager API responses the page emits. Auth is implicit: the user
+ * is already signed into linkedin.com in the paired Chrome. If no online
+ * Owletto extension is reachable in the connection's org, these syncs fail
+ * fast with a clear "no paired Owletto extension" error.
  *
  * Write handoff: `prepare_comment` waits for the user to open the exact post,
  * fills that page's comment composer, and stops. The human clicks Post
@@ -46,7 +34,6 @@ import {
   type EventEnvelope,
   extensionDomScrape,
   extensionNetworkSync,
-  IDENTITY,
   type SyncContext,
   type SyncResult,
 } from "@lobu/connector-sdk";
@@ -56,25 +43,6 @@ import {
   normalizeLinkedInSlug,
 } from "./linkedin-identity.js";
 import { setLinkedInLike } from "./linkedin-like.js";
-import {
-  readCompanyFollows,
-  readConnections,
-  readEndorsements,
-  readEvents,
-  readInvitations,
-  readJobs,
-  readLearning,
-  readMessages,
-  readProfile,
-  readRichMedia,
-  type TakeoutCsvReader,
-} from "./linkedin-takeout.js";
-import {
-  batchSize,
-  type LocalTakeoutConfig,
-  maxEventCursor,
-  takeBatch,
-} from "./takeout-utils.js";
 import {
   observeLinkedInInbox,
   readLinkedInInbox,
@@ -86,38 +54,14 @@ import { LINKEDIN_HOME_URL } from "./linkedin-browser-script.js";
 
 // ── Types ──────────────────────────────────────────────────────
 
-/**
- * Merged checkpoint. Carries the live cursor fields (last_post_id / last_job_id
- * / last_timestamp) AND every takeout feed's `last_*_timestamp` cursor. The
- * takeout `jobs` feed was renamed to `applied_jobs`, so its cursor is
- * `last_applied_jobs_timestamp` (no ambiguity with the live `jobs` feed, which
- * checkpoints on last_job_id/last_timestamp). No production checkpoint exists,
- * so the rename is safe.
- */
+/** Live feed cursors (last_post_id / last_job_id / last_timestamp). */
 interface LinkedInCheckpoint extends LinkedInInboxCheckpoint {
-  // Live feed cursors.
   last_post_id?: string;
   last_job_id?: string;
   last_timestamp?: string;
-  // Takeout feed cursors.
-  last_messages_timestamp?: string;
-  last_connections_timestamp?: string;
-  last_invitations_timestamp?: string;
-  last_applied_jobs_timestamp?: string;
-  last_profile_timestamp?: string;
-  last_companies_timestamp?: string;
-  last_learning_timestamp?: string;
-  last_events_timestamp?: string;
-  last_endorsements_timestamp?: string;
-  last_media_timestamp?: string;
 }
 
-/**
- * Merged config. Permissive superset of the live config (company_url,
- * max_scrolls) and the takeout config (takeout_dir, batch_size). A given feed
- * only reads the keys relevant to its source.
- */
-interface LinkedInConfig extends LocalTakeoutConfig {
+interface LinkedInConfig {
   company_url?: string;
   max_scrolls?: number;
   min_scrolls?: number;
@@ -130,7 +74,7 @@ interface LinkedInPost {
   authorHeadline?: string;
   /** Immutable `urn:li:fsd_profile:<id>` tail — primary identity when present. */
   authorMemberId?: string;
-  /** Canonical `/in/<slug>` vanity id — soft identity, bridges to takeout. */
+  /** Canonical `/in/<slug>` vanity id — soft identity alongside member id. */
   authorSlug?: string;
   likes: number;
   comments: number;
@@ -157,92 +101,11 @@ function normalizeCheckpointPostId(postId?: string): string | undefined {
 // ── Identity attributions ──────────────────────────────────────
 
 /**
- * Link a `connection` event to the connected person via their canonical
- * `linkedin_slug` (extracted from the profile URL) plus their `email`. Neither
- * is `primary` — they match equal-weight cross-channel until a stable primary
- * id arrives from the live connector. The full URL is kept as a display trait,
- * not an identity (case/URL noise would fork the entity). Connections ARE the
- * user's network, so we mint (`autoCreate`) a person per row.
- */
-const LINKEDIN_CONNECTION_ATTRIBUTIONS: EventAttributionRule[] = [
-  {
-    role: "about",
-    autoCreate: true,
-    target: {
-      entityType: "person",
-      titlePath: "author_name",
-      identities: [
-        {
-          namespace: LINKEDIN_IDENTITY.SLUG,
-          eventPath: "metadata.linkedin_slug",
-        },
-        { namespace: IDENTITY.EMAIL, eventPath: "metadata.email" },
-      ],
-    },
-    traits: {
-      linkedin_url: {
-        eventPath: "metadata.linkedin_url",
-        mergeStrategy: "prefer_non_empty",
-      },
-      company: {
-        eventPath: "metadata.company",
-        mergeStrategy: "prefer_non_empty",
-      },
-      position: {
-        eventPath: "metadata.position",
-        mergeStrategy: "prefer_non_empty",
-      },
-    },
-  },
-];
-
-/**
- * Link a `message` event to its sender (the counterparty) via the
- * `linkedin_slug` extracted from their profile URL, plus display name. Real
- * counterparties, so mint on no match.
- */
-const LINKEDIN_MESSAGE_ATTRIBUTIONS: EventAttributionRule[] = [
-  {
-    role: "authored_by",
-    autoCreate: true,
-    target: {
-      entityType: "person",
-      titlePath: "metadata.from",
-      identities: [
-        {
-          namespace: LINKEDIN_IDENTITY.SLUG,
-          eventPath: "metadata.sender_linkedin_slug",
-        },
-      ],
-    },
-    traits: {
-      linkedin_url: {
-        eventPath: "metadata.sender_profile_url",
-        mergeStrategy: "prefer_non_empty",
-      },
-      last_linkedin_message_at: {
-        eventPath: "occurred_at",
-        mergeStrategy: "overwrite",
-      },
-    },
-  },
-];
-
-/**
  * Link a live `post` to its author. The Voyager feed (company_updates) exposes
  * the actor's immutable `urn:li:fsd_profile:<id>` as `author_member_id` plus the
  * `/in/<slug>`. Both are identities; NEITHER is `primary` — they match
- * EQUAL-WEIGHT (same as the connections/messages attributions).
- *
- * Why not primary member_id: takeout-ingested people already exist keyed on
- * `linkedin_slug` (no member id — the export has none). A `primary` member_id
- * would be authoritative: on a live post it would find no member-id match, mint
- * a NEW person, and fork the existing slug-person (the resolver does not fall
- * back to a secondary slug hit when a primary is present). Equal-weight instead
- * UNIONS the hits: the live post matches the existing person by slug AND
- * accretes the member_id onto them. Durability still holds — once the member_id
- * is on the person, a later vanity-URL change still resolves via that member_id
- * in the equal-weight union. Real authors, so mint on no match.
+ * EQUAL-WEIGHT so a slug-only person and a later member-id sighting union onto
+ * one entity instead of forking. Real authors, so mint on no match.
  */
 const LINKEDIN_POST_AUTHOR_ATTRIBUTIONS: EventAttributionRule[] = [
   {
@@ -2773,22 +2636,6 @@ const jobsConfigSchema = {
   },
 };
 
-function localTakeoutSchema(description: string): Record<string, unknown> {
-  return {
-    type: "object",
-    properties: {
-      takeout_dir: { type: "string", description },
-      batch_size: {
-        type: "integer",
-        minimum: 1,
-        maximum: 5000,
-        default: 1000,
-        description: "Maximum events to emit per sync run.",
-      },
-    },
-  };
-}
-
 // ── Connector ─────────────────────────────────────────────────
 
 /**
@@ -2850,51 +2697,6 @@ function notActionableMissingPostId(postUrlRaw: string): ActionResult {
   };
 }
 
-/**
- * The ten LinkedIn Data Export feeds: checkpoint cursor and pure reader per
- * feed key. This table replaces a chain of ten near-identical `if (feedKey ===
- * …)` blocks; the mapping it encodes is unchanged.
- *
- * Feed keys and cursor names are the persisted contract — a feed row keys on
- * the feed key and a checkpoint on the cursor name — so both are copied over
- * verbatim rather than tidied (see {@link LinkedInCheckpoint} on why the
- * takeout `jobs` cursor is `last_applied_jobs_timestamp`).
- */
-const LINKEDIN_TAKEOUT_FEEDS: Record<
-  string,
-  {
-    cursor: Exclude<keyof LinkedInCheckpoint, "linkedin_inbox">;
-    read: (readCsv: TakeoutCsvReader) => EventEnvelope[];
-  }
-> = {
-  messages: { cursor: "last_messages_timestamp", read: readMessages },
-  connections: { cursor: "last_connections_timestamp", read: readConnections },
-  invitations: { cursor: "last_invitations_timestamp", read: readInvitations },
-  applied_jobs: { cursor: "last_applied_jobs_timestamp", read: readJobs },
-  profile: { cursor: "last_profile_timestamp", read: readProfile },
-  companies: { cursor: "last_companies_timestamp", read: readCompanyFollows },
-  learning: { cursor: "last_learning_timestamp", read: readLearning },
-  events: { cursor: "last_events_timestamp", read: readEvents },
-  endorsements: {
-    cursor: "last_endorsements_timestamp",
-    read: readEndorsements,
-  },
-  media: { cursor: "last_media_timestamp", read: readRichMedia },
-};
-
-/**
- * The configured export directory, or a thrown error naming what is missing.
- *
- * Only checks that the value is SET; it cannot stat the path, because this runs
- * inside the isolate, which has no filesystem. An injected host reader must
- * validate its directory before reading; the platform does not provide one.
- */
-function assertTakeoutDir(config: LinkedInConfig): string {
-  const dir = config.takeout_dir;
-  if (!dir) throw new Error("Missing takeout_dir for LinkedIn.");
-  return dir;
-}
-
 /** One sync pass's output; `syncFeed` commits it as a single page. */
 interface LinkedInSyncPage {
   events: EventEnvelope[];
@@ -2907,22 +2709,10 @@ export default class LinkedInConnector extends ConnectorRuntime<
   LinkedInConfig
 > {
   private readonly fetchImpl: typeof fetch;
-  /**
-   * Builds a CSV reader rooted at the export directory, or `undefined` when the
-   * host has no filesystem — which is the case in the isolate every platform
-   * run uses. Supplying it is how a Node-hosted caller (or a future worker that
-   * advertises a local-file capability) turns the takeout feeds on, WITHOUT
-   * putting `node:fs` into the bundle the live browser feeds must load.
-   */
-  private readonly csvReader?: (takeoutDir: string) => TakeoutCsvReader;
 
-  constructor(
-    fetchImpl: typeof fetch = fetch,
-    csvReader?: (takeoutDir: string) => TakeoutCsvReader
-  ) {
+  constructor(fetchImpl: typeof fetch = fetch) {
     super();
     this.fetchImpl = fetchImpl;
-    this.csvReader = csvReader;
   }
 
   readonly definition: RuntimeConnectorDefinition<
@@ -2932,10 +2722,10 @@ export default class LinkedInConnector extends ConnectorRuntime<
     key: "linkedin",
     name: "LinkedIn",
     description:
-      "Read LinkedIn feeds, notifications, and recent inbox messages through paired Chrome. Subscribe to source changes, answer direct messages, and prepare message, post, or comment drafts for human submission. Also supports local LinkedIn Data Export CSV files.",
-    version: "3.20.2",
+      "Read LinkedIn feeds, notifications, and recent inbox messages through paired Chrome. Subscribe to source changes, answer direct messages, and prepare message, post, or comment drafts for human submission.",
+    version: "3.21.0",
     faviconDomain: "linkedin.com",
-    // Live feeds bind a signed-in Chrome account. Local takeout imports need no browser.
+    // Live feeds bind a signed-in Chrome account.
     browser: {
       authMethods: ["browser"],
       origins: ["https://www.linkedin.com"],
@@ -2964,7 +2754,6 @@ export default class LinkedInConnector extends ConnectorRuntime<
           type: "browser",
           mode: "live",
         },
-        { type: "none", label: "Local data export" },
         // Keep browser first: connection setup uses the first authenticated
         // method, while sign-in independently discovers OAuth loginScopes.
         {
@@ -2980,7 +2769,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
           clientIdKey: "LINKEDIN_CLIENT_ID",
           clientSecretKey: "LINKEDIN_CLIENT_SECRET",
           description:
-            "Identity-only LinkedIn sign-in. Feeds use the browser or local exports.",
+            "Identity-only LinkedIn sign-in. Feeds use the paired browser.",
           setupInstructions:
             "Enable Sign In with LinkedIn using OpenID Connect in your LinkedIn app. Register /api/auth/oauth2/callback/linkedin on your Lobu origin for sign-in, then enter the client ID and client secret.",
         },
@@ -3013,8 +2802,6 @@ export default class LinkedInConnector extends ConnectorRuntime<
       { key: "post", label: "Post" },
       { key: "comment", label: "Comment" },
       { key: "job_posting", label: "Job Posting" },
-      { key: "message", label: "Message" },
-      { key: "connection", label: "Connection" },
     ],
     feeds: {
       // ── Live (Chrome-extension) feeds ──────────────────────────
@@ -3163,101 +2950,6 @@ export default class LinkedInConnector extends ConnectorRuntime<
             },
           },
         },
-      },
-      // ── Takeout (local CSV) feeds ──────────────────────────────
-      messages: {
-        sync: (ctx) => this.syncFeed(ctx),
-        key: "messages",
-        name: "Messages",
-        configSchema: localTakeoutSchema(
-          "Path to the LinkedIn Data Export folder."
-        ),
-        eventKinds: {
-          message: {
-            description: "A LinkedIn direct message",
-            attributions: LINKEDIN_MESSAGE_ATTRIBUTIONS,
-          },
-        },
-      },
-      connections: {
-        sync: (ctx) => this.syncFeed(ctx),
-        key: "connections",
-        name: "Connections",
-        configSchema: localTakeoutSchema(
-          "Path to the LinkedIn Data Export folder."
-        ),
-        eventKinds: {
-          connection: {
-            description: "A first-degree LinkedIn connection",
-            attributions: LINKEDIN_CONNECTION_ATTRIBUTIONS,
-          },
-        },
-      },
-      invitations: {
-        sync: (ctx) => this.syncFeed(ctx),
-        key: "invitations",
-        name: "Invitations",
-        configSchema: localTakeoutSchema(
-          "Path to the LinkedIn Data Export folder."
-        ),
-      },
-      applied_jobs: {
-        sync: (ctx) => this.syncFeed(ctx),
-        key: "applied_jobs",
-        name: "Applied Jobs",
-        description:
-          "Your own applied/saved job postings from the LinkedIn Data Export.",
-        configSchema: localTakeoutSchema(
-          "Path to the LinkedIn Data Export folder."
-        ),
-      },
-      profile: {
-        sync: (ctx) => this.syncFeed(ctx),
-        key: "profile",
-        name: "Profile",
-        configSchema: localTakeoutSchema(
-          "Path to the LinkedIn Data Export folder."
-        ),
-      },
-      companies: {
-        sync: (ctx) => this.syncFeed(ctx),
-        key: "companies",
-        name: "Company Follows",
-        configSchema: localTakeoutSchema(
-          "Path to the LinkedIn Data Export folder."
-        ),
-      },
-      learning: {
-        sync: (ctx) => this.syncFeed(ctx),
-        key: "learning",
-        name: "Learning",
-        configSchema: localTakeoutSchema(
-          "Path to the LinkedIn Data Export folder."
-        ),
-      },
-      events: {
-        sync: (ctx) => this.syncFeed(ctx),
-        key: "events",
-        name: "Events",
-        configSchema: localTakeoutSchema(
-          "Path to the LinkedIn Data Export folder."
-        ),
-      },
-      endorsements: {
-        sync: (ctx) => this.syncFeed(ctx),
-        key: "endorsements",
-        name: "Endorsements and Recommendations",
-        configSchema: localTakeoutSchema(
-          "Path to the LinkedIn Data Export folder."
-        ),
-      },
-      media: {
-        sync: (ctx) => this.syncFeed(ctx),
-        key: "media",
-        name: "Rich Media",
-        configSchema: localTakeoutSchema(
-          "Path to the LinkedIn Data Export folder."
-        ),
       },
     },
     actions: {
@@ -3692,8 +3384,6 @@ export default class LinkedInConnector extends ConnectorRuntime<
     ctx: SyncContext<LinkedInCheckpoint, LinkedInConfig>
   ): Promise<LinkedInSyncPage> {
     const feedKey = ctx.feedKey;
-
-    // ── Live (Chrome-extension) feeds ────────────────────────────
     if (
       feedKey === "home_feed" ||
       feedKey === "company_updates" ||
@@ -3701,35 +3391,6 @@ export default class LinkedInConnector extends ConnectorRuntime<
     ) {
       return this.syncLive(ctx);
     }
-
-    // ── Takeout (local CSV) feeds ────────────────────────────────
-    // Parsing lives in `linkedin-takeout.ts` and is filesystem-free; the
-    // capability to actually READ the export is supplied here. Injecting it
-    // (rather than importing `node:fs` alongside the live feeds) is what keeps
-    // the whole bundle isolate-eligible — see this class's header.
-    const takeout = Object.hasOwn(LINKEDIN_TAKEOUT_FEEDS, feedKey)
-      ? LINKEDIN_TAKEOUT_FEEDS[feedKey]
-      : undefined;
-    if (takeout) {
-      const readCsv = this.csvReader;
-      if (!readCsv) {
-        throw new Error(
-          "LinkedIn feed '" +
-            feedKey +
-            "' reads the local LinkedIn Data Export, " +
-            "and this runtime provides no filesystem access. This invocation has no CSV reader; " +
-            "browser-backed live feeds do not require one. For a local import, construct " +
-            "the connector with an explicit reader in a filesystem-capable host."
-        );
-      }
-      return this.result(
-        ctx,
-        takeout.cursor,
-        takeout.read(readCsv(assertTakeoutDir(ctx.config))),
-        batchSize(ctx.config)
-      );
-    }
-
     throw new Error(`Unknown LinkedIn feed: ${feedKey}`);
   }
 
@@ -3905,7 +3566,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
       metadata: {
         author_headline: post.authorHeadline,
         // Author identity for the `post` attribution. member_id (primary) when
-        // Voyager exposed the actor's fsd_profile urn; slug bridges to takeout.
+        // Voyager exposed the actor's fsd_profile urn; slug is the soft identity.
         author_member_id: post.authorMemberId,
         author_linkedin_slug: post.authorSlug,
         likes: post.likes,
@@ -3993,24 +3654,6 @@ export default class LinkedInConnector extends ConnectorRuntime<
         items_found: events.length,
         api_calls: result.apiCallCount,
         backend: "extension",
-      },
-    };
-  }
-
-  // ── Takeout (local CSV) readers ──────────────────────────────
-
-  private result(
-    ctx: SyncContext<LinkedInCheckpoint, LinkedInConfig>,
-    key: Exclude<keyof LinkedInCheckpoint, "linkedin_inbox">,
-    allEvents: EventEnvelope[],
-    max: number
-  ): LinkedInSyncPage {
-    const events = takeBatch(allEvents, ctx.checkpoint?.[key], max);
-    return {
-      events,
-      checkpoint: {
-        ...ctx.checkpoint,
-        [key]: maxEventCursor(events, ctx.checkpoint?.[key]),
       },
     };
   }
