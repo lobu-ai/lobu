@@ -43,12 +43,15 @@ describe('external Automation activity', () => {
     const created = await api.automations.create({
       slug: 'synthetic-external-attention', name: 'Synthetic external attention',
       prompt: 'Review the window and complete it.',
-      managed_agent_id: agentId,
-      execution_config: EXTERNAL, triggers: SCHEDULE,
+      triggers: SCHEDULE,
       sources: [{ name: 'content', query: 'SELECT id, occurred_at FROM events WHERE FALSE ORDER BY occurred_at DESC, id DESC' }],
       outputs: { signals: { event: 'observation' } },
       ...overrides,
+      managed_agent_id: agentId, execution_config: null,
     } as never) as { automation_id: string };
+    const config = Object.hasOwn(overrides, 'execution_config') ? overrides.execution_config : EXTERNAL;
+    const owner = Object.hasOwn(overrides, 'managed_agent_id') ? overrides.managed_agent_id : agentId;
+    await sql`UPDATE automations SET execution_config = ${config == null ? null : sql.json(config)}, managed_agent_id = ${owner as string | null} WHERE id = ${Number(created.automation_id)}`;
     await sql`UPDATE automations SET next_run_at = NOW() - INTERVAL '1 minute', next_window_start = NOW() - INTERVAL '1 hour' WHERE id = ${Number(created.automation_id)}`;
     return created.automation_id;
   }
@@ -215,7 +218,7 @@ describe('external Automation activity', () => {
     { execution_config: { ...EXTERNAL, model: 'auto' } },
     { triggers: [{ kind: 'event', source: 'workspace', event_types: ['connection.deleted'] }] },
   ])('rejects incompatible external settings %j', async (overrides) => {
-    await expect(createExternal(overrides)).rejects.toThrow();
+    await expect(api.automations.create({ slug: 'retired-write', name: 'Retired write', managed_agent_id: agentId, prompt: 'Review.', execution_config: EXTERNAL, ...overrides } as never)).rejects.toThrow();
   });
 
   it('returns due work through read-only activity despite newer completed history', async () => {
@@ -263,7 +266,7 @@ describe('external Automation activity', () => {
     const run = await createAutomationRun({ organizationId: ctx.organizationId!, automationId: Number(id),
       agentId, dispatchSource: 'manual', windowStart: new Date(Date.now() - 3600_000).toISOString(),
       windowEnd: new Date(Date.now() - 60_000).toISOString() }, sql);
-    await api.automations.update({ automation_id: id, execution_config: EXTERNAL } as never);
+    await sql`UPDATE automations SET execution_config = ${sql.json(EXTERNAL)} WHERE id = ${Number(id)}`;
     expect(await work()).toEqual([]);
     const [snapshot] = await sql`SELECT approved_input FROM runs WHERE id = ${run.runId}`;
     expect(snapshot.approved_input.executor).toBeUndefined();
@@ -274,7 +277,7 @@ describe('external Automation activity', () => {
     const run = await api.automations.trigger({ automation_id: id });
     const replacement = await createTestAgent({ organizationId: ctx.organizationId!, ownerUserId: ctx.userId! });
     await api.automations.update({ automation_id: id, managed_agent_id: replacement.agentId,
-      execution_config: executionConfig } as never);
+      ...(executionConfig === null ? { execution_config: null } : {}) } as never);
     const original = { ...ctx, agentId };
     const other = { ...ctx, agentId: replacement.agentId };
     expect((await work(original))[0]).toMatchObject({ run_id: run.run_id, status: 'due' });

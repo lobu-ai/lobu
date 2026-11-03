@@ -47,8 +47,12 @@ async function seedScriptAutomation(source = SOURCE) {
         skip_if_unchanged: false,
       },
     ],
-    execution_config: { executor: { kind: 'script', source } },
+    prompt: 'Legacy fixture',
   } as never)) as { automation_id: string };
+  await assertAutomationScriptExecutor({ executionConfig: { executor: { kind: 'script', source } }, agentId: agent.agentId });
+  const sql = getTestDb();
+  await sql`UPDATE automations SET execution_config = ${sql.json({ executor: { kind: 'script', source } })} WHERE id = ${Number(created.automation_id)}`;
+  await sql`UPDATE automation_versions SET prompt = '' WHERE automation_id = ${Number(created.automation_id)}`;
   return {
     workspace,
     agentId: agent.agentId,
@@ -113,6 +117,58 @@ async function seedPreparedAutomation(source: string) {
 describe('Automation script executor', () => {
   beforeEach(async () => {
     await cleanupTestDatabase();
+  });
+
+  it.each([
+    ['default', 'export default async (ctx) => ({ result: "code only", saved: ctx.sources ?? {} });'],
+    ['prepare', 'export async function prepare() { return { snapshot: [{ total: 42 }] }; }'],
+    ['both', 'export async function prepare() { return { snapshot: [{ total: 42 }] }; } export default async (ctx) => ({ total: ctx.sources.snapshot[0].total });'],
+  ])('runs a %s module without admitting a model or invoking default twice', async (slug, source) => {
+    const { workspace, agentId } = await seedScriptAutomation();
+    const created = await workspace.owner.automations.create({
+      slug: `module-${slug}`, name: 'Code Module', managed_agent_id: agentId,
+      reaction_script: source,
+    } as never) as { automation_id: string };
+    const automationId = Number(created.automation_id);
+    await getTestDb()`UPDATE automations SET next_window_start = '2026-01-01'::timestamptz WHERE id = ${automationId}`;
+    await expect(workspace.owner.automations.claimNextWindow({ automation_id: String(automationId) })).rejects.toThrow('cannot be claimed by an external processor');
+    expect(await getTestDb()`SELECT id FROM runs WHERE automation_id = ${automationId}`).toEqual([]);
+    const run = await createAutomationRun({ organizationId: workspace.org.id, automationId, agentId, windowStart: '2026-01-01T00:00:00.000Z', windowEnd: '2026-01-01T00:20:00.000Z', dispatchSource: 'manual' });
+    const sql = getTestDb();
+    const payload = { organizationId: workspace.org.id, automationId, sourceRunId: run.runId };
+    if (slug !== 'default') {
+      const [prep] = await sql`SELECT id FROM runs WHERE parent_run_id = ${run.runId} AND action_key = 'automation-preparation'`;
+      await sql`UPDATE runs SET status = 'claimed' WHERE id = ${prep!.id}`;
+      await runAutomationPreparationTask(payload, TEST_ENV, Number(prep!.id));
+    }
+    expect(await dispatchPendingAutomationRuns({ runIds: [run.runId] })).toMatchObject({ dispatched: 1, failed: 0 });
+    const [task] = await sql`SELECT id FROM runs WHERE parent_run_id = ${run.runId} AND action_key = 'automation-script'`;
+    expect(task).toBeDefined();
+    await sql`UPDATE runs SET status = 'claimed' WHERE id = ${task!.id}`;
+    await runAutomationScriptTask(payload, TEST_ENV, Number(task!.id));
+    await runAutomationScriptTask(payload, TEST_ENV, Number(task!.id));
+    const [stored] = await sql`SELECT status, model_used, action_output, run_metadata FROM runs WHERE id = ${run.runId}`;
+    expect(stored).toMatchObject({ status: 'completed', model_used: 'script' });
+    if (slug === 'both') expect(stored!.action_output).toEqual({ total: 42 });
+    if (slug !== 'default') expect(stored!.run_metadata.preparation_sources).toEqual({ snapshot: [{ total: 42 }] });
+    expect(await sql`SELECT id FROM runs WHERE parent_run_id = ${run.runId} AND action_key = 'automation-reaction'`).toEqual([]);
+  });
+
+  it.each(['script', 'external'])('rejects retired %s authoring atomically with 422', async (kind) => {
+    const { workspace, automationId, agentId } = await seedScriptAutomation();
+    const executor = kind === 'script' ? { kind, source: SOURCE } : { kind };
+    await expect(workspace.owner.automations.create({ slug: 'retired', name: 'Retired', managed_agent_id: agentId, execution_config: { executor } } as never)).rejects.toMatchObject({ httpStatus: 422 });
+    await expect(workspace.owner.automations.update({ automation_id: String(automationId), execution_config: { executor } } as never)).rejects.toMatchObject({ httpStatus: 422 });
+    expect(await getTestDb()`SELECT id FROM automations WHERE slug = 'retired'`).toEqual([]);
+  });
+
+  it.each([{ model: 'auto' }, { timeout_seconds: 120 }, { permission_mode: 'default' }])('rejects agent-only options on code modules at create and update (%j)', async (executionConfig) => {
+    const { workspace, agentId } = await seedScriptAutomation();
+    await expect(workspace.owner.automations.create({ slug: 'invalid-code', name: 'Invalid', managed_agent_id: agentId, reaction_script: SOURCE, execution_config: executionConfig } as never)).rejects.toMatchObject({ httpStatus: 422 });
+    const created = await workspace.owner.automations.create({ slug: 'valid-code', name: 'Valid', managed_agent_id: agentId, reaction_script: SOURCE } as never) as { automation_id: string };
+    await expect(workspace.owner.automations.update({ automation_id: created.automation_id, execution_config: executionConfig } as never)).rejects.toMatchObject({ httpStatus: 422 });
+    const [stored] = await getTestDb()`SELECT execution_config FROM automations WHERE id = ${Number(created.automation_id)}`;
+    expect(stored!.execution_config).toBeNull();
   });
 
   it('accepts a preparation-only module on a native agent Automation', async () => {
@@ -233,8 +289,8 @@ describe('Automation script executor', () => {
 
   it('rejects switching preparation to a reply turn or external executor', async () => {
     const seed = await seedPreparedAutomation('export async function prepare() { return {}; }');
-    await expect(seed.workspace.owner.automations.update({ automation_id: String(seed.automationId), execution_config: { executor: { kind: 'external' } } } as never)).rejects.toThrow('Preparation requires a native agent');
-    await expect(seed.workspace.owner.automations.createVersion({ automation_id: String(seed.automationId), triggers: [{ kind: 'event', source: 'connector', connector_key: 'slack', event_types: ['message.created'], execution: 'turn', output: 'reply_to_source' }], set_as_current: true } as never)).rejects.toThrow('Preparation requires a native agent');
+    await expect(seed.workspace.owner.automations.update({ automation_id: String(seed.automationId), execution_config: { executor: { kind: 'external' } } } as never)).rejects.toThrow('execution_config.executor is retired');
+    await expect(seed.workspace.owner.automations.createVersion({ automation_id: String(seed.automationId), triggers: [{ kind: 'event', source: 'connector', connector_key: 'slack', event_types: ['message.created'], execution: 'turn', output: 'reply_to_source' }], set_as_current: true } as never)).rejects.toThrow('requires an owning native agent');
   });
 
   it('freezes coalesced event inputs when preparation starts', async () => {

@@ -328,10 +328,13 @@ describe("governed import, verification and replay", () => {
     await runIdentityChunk(s.client, c, false);
     expect(s.links).toHaveLength(1);
   });
-  test("capture config is external, silent and explicitly scoped, with no schedule", () => {
+  test("updates a discovered legacy capture binding without reauthoring its executor", () => {
     const definition = captureDefinition({
-      slug: "synthetic-reference-capture",
-      principal: "synthetic-owner",
+      existing: {
+        automation_id: "42",
+        managed_agent_id: "synthetic-owner",
+        execution_config: { executor: { kind: "external" } },
+      },
       subscriptions: [
         {
           connector_key: "synthetic.connector",
@@ -340,9 +343,7 @@ describe("governed import, verification and replay", () => {
         },
       ],
     });
-    expect(definition.execution_config).toEqual({
-      executor: { kind: "external" },
-    });
+    expect(definition).not.toHaveProperty("execution_config");
     expect(definition.triggers).toEqual([
       {
         kind: "event",

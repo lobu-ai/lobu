@@ -18,7 +18,7 @@ import {
   resolvedEventExecution,
   type AutomationEventTrigger,
   type AutomationWorkspaceEventTrigger,
-  type AutomationExecutor,
+  type LegacyAutomationExecutor,
   type AutomationSource,
 } from '@lobu/core/contracts/tools/manage-automations';
 import { normalizeAutomationSources } from '../automations/source-refs';
@@ -73,7 +73,7 @@ export type AutomationActivationSignal =
 export interface AutomationRunPayload {
   automation_script?: import('../automations/preparation').AutomationScriptSnapshot;
   /** Executor selection and script code are pinned with the run, never reloaded on retry. */
-  executor?: AutomationExecutor;
+  executor?: LegacyAutomationExecutor;
   automation_id: number;
   /**
    * The managed agent executing this run, or the external executor's optional
@@ -741,7 +741,10 @@ async function createAutomationRunWithClient(
       ? Number(versionRows[0].current_version_id)
       : null;
 
-  const executor = versionRows[0]?.executor as AutomationRunPayload['executor'] | undefined;
+  const automationScript = await snapshotAutomationScript(sql, params.automationId, params.organizationId);
+  const executor = automationScript?.has_analysis === false
+    ? { kind: 'script' as const, source: automationScript.source }
+    : versionRows[0]?.executor as AutomationRunPayload['executor'] | undefined;
   let windowEnd = params.windowEnd;
   if (executor?.kind === 'script' && params.dispatchSource !== 'event') {
     // Match source reads: a nonempty version source list wins; otherwise use
@@ -769,7 +772,6 @@ async function createAutomationRunWithClient(
       ? params.agentKind.trim()
       : null;
 
-  const automationScript = await snapshotAutomationScript(sql, params.automationId, params.organizationId);
   const payload: AutomationRunPayload = {
     ...(automationScript ? { automation_script: automationScript } : {}),
     automation_id: params.automationId,
@@ -1164,7 +1166,9 @@ export async function createAutomationEventRun(
       window_end: signalWindowEnd,
       dispatch_source: 'event',
       version_id: versionId,
-      ...(versionRows[0]?.executor ? { executor: versionRows[0].executor as AutomationRunPayload['executor'] } : {}),
+      ...(automationScript?.has_analysis === false
+        ? { executor: { kind: 'script' as const, source: automationScript.source } }
+        : versionRows[0]?.executor ? { executor: versionRows[0].executor as AutomationRunPayload['executor'] } : {}),
       device_worker_id: params.deviceWorkerId ?? null,
       agent_kind: params.agentKind ?? null,
       trigger_signal: params.signal,

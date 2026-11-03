@@ -5,7 +5,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import type { AutomationExecutionConfig } from "@lobu/core/contracts/tools/manage-automations";
+import type { LegacyAutomationExecutionConfig } from "@lobu/core/contracts/tools/manage-automations";
 
 import {
   createLogger,
@@ -1379,7 +1379,7 @@ export class MessageHandlerBridge {
      */
     model?: string;
     /** The reply Automation's saved run settings; only `effort` is read here. */
-    executionConfig?: AutomationExecutionConfig;
+    executionConfig?: LegacyAutomationExecutionConfig;
     ephemeralContext?: string;
     senderUsername?: string;
     senderDisplayName?: string;

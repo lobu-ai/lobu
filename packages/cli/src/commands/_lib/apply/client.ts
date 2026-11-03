@@ -12,7 +12,7 @@ import type {
   ManageAuthProfilesArgs,
 } from "@lobu/core/contracts/tools/manage-auth-profiles";
 import type {
-  AutomationExecutionConfig,
+  LegacyAutomationExecutionConfig,
   ManageAutomationsArgs,
 } from "@lobu/core/contracts/tools/manage-automations";
 import type { ManageCatalogArgs } from "@lobu/core/contracts/tools/manage-catalog";
@@ -189,7 +189,7 @@ export interface RemoteAutomation {
   device_worker_id?: string | null;
   goal_id?: number | null;
   agent_kind?: ManageAutomationsArgs["agent_kind"];
-  execution_config?: AutomationExecutionConfig | null;
+  execution_config?: LegacyAutomationExecutionConfig | null;
   min_cooldown_seconds?: number | null;
   tags?: string[] | null;
   sources?: AutomationSource[] | null;

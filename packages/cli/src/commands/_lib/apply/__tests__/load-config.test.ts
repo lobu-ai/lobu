@@ -353,7 +353,7 @@ describe("loadDesiredStateFromConfig", () => {
     );
   });
 
-  test("loads a script executor without importing or executing the job", async () => {
+  test("loads a code module without importing or executing the job", async () => {
     dir = mkdtempSync(join(import.meta.dir, "script-"));
     const source =
       'throw new Error("must not execute at apply time"); export default async () => ({ ok: true });';
@@ -361,15 +361,15 @@ describe("loadDesiredStateFromConfig", () => {
     writeFileSync(
       join(dir, "lobu.config.ts"),
       `
-      import { defineAgent, defineConfig, defineAutomation, scriptFromFile } from "@lobu/cli/config";
+      import { defineAgent, defineConfig, defineAutomation, reactionFromFile } from "@lobu/cli/config";
       const agent = defineAgent({ id: "script-owner" });
       export default defineConfig({ agents: [agent], automations: [defineAutomation({
-        agent, slug: "script-job", executor: scriptFromFile("./job.ts")
+        agent, slug: "script-job", reaction: reactionFromFile("./job.ts")
       })] });
     `
     );
     const { state } = await loadDesiredStateFromConfig({ cwd: dir });
-    expect(state.automations[0]?.executor).toEqual({ kind: "script", source });
+    expect(state.automations[0]?.reactionScript?.sourceCode).toBe(source);
     expect(state.automations[0]?.prompt).toBe("");
   });
 
@@ -386,38 +386,20 @@ describe("loadDesiredStateFromConfig", () => {
     `
     );
     await expect(loadDesiredStateFromConfig({ cwd: dir })).rejects.toThrow(
-      /scriptFromFile/
+      /executor is retired/
     );
   });
 
-  test("rejects non-object script executor params", async () => {
-    dir = mkdtempSync(join(import.meta.dir, "badscriptparams-"));
-    writeFileSync(join(dir, "job.ts"), "export default async () => {};\n");
-    writeFileSync(
-      join(dir, "lobu.config.ts"),
-      `
-      import { defineAgent, defineConfig, defineAutomation, scriptFromFile } from "@lobu/cli/config";
-      const agent = defineAgent({ id: "script-owner" });
-      export default defineConfig({ agents: [agent], automations: [defineAutomation({
-        agent, slug: "script-job", executor: scriptFromFile("./job.ts", [])
-      })] });
-    `
-    );
-    await expect(loadDesiredStateFromConfig({ cwd: dir })).rejects.toThrow(
-      /params must be an object, not an array/
-    );
-  });
-
-  test("loads an explicit reaction removal alongside a script executor", async () => {
+  test("loads an explicit module removal with agent instructions", async () => {
     dir = mkdtempSync(join(import.meta.dir, "reaction-null-"));
     writeFileSync(join(dir, "job.ts"), "export default async () => ({});\n");
     writeFileSync(
       join(dir, "lobu.config.ts"),
       `
-      import { defineAgent, defineConfig, defineAutomation, scriptFromFile } from "@lobu/cli/config";
+      import { defineAgent, defineConfig, defineAutomation, reactionFromFile } from "@lobu/cli/config";
       const agent = defineAgent({ id: "script-owner" });
       export default defineConfig({ agents: [agent], automations: [defineAutomation({
-        agent, slug: "script-job", executor: scriptFromFile("./job.ts"), reaction: null
+        agent, slug: "script-job", prompt: "Summarize.", reaction: null
       })] });
     `
     );

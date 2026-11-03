@@ -3,7 +3,7 @@
  *   trigger, set_reaction_script
  */
 
-import { assertPreparationConfiguration } from "../../../automations/preparation";
+import { assertAutomationModuleConfiguration } from "../../../automations/preparation";
 import { transform } from "esbuild";
 import { getDb, type DbClient } from "../../../db/client";
 import type { Env } from "../../../index";
@@ -426,15 +426,16 @@ export async function handleSetReactionScript(
   await sql.begin(async (tx) => {
     const locked = await tx`
       SELECT id, reaction_script, reaction_script_compiled, reaction_input_schema,
-             execution_config, managed_agent_id, device_worker_id, triggers FROM automations
+             execution_config, managed_agent_id, device_worker_id, agent_kind, triggers,
+             (SELECT prompt FROM automation_versions WHERE id = current_version_id) AS prompt,
+             (SELECT skills FROM automation_versions WHERE id = current_version_id) AS skills,
+             (SELECT outputs FROM automation_versions WHERE id = current_version_id) AS outputs FROM automations
       WHERE automation_group_id = ${groupId} AND organization_id = ${ctx.organizationId}
       ORDER BY id
       FOR UPDATE
     `;
     if (base) await assertAutomationConfigVersionsUnchanged(args, ctx.organizationId, base, tx);
-    if (scriptExports.has_prepare) {
-      for (const row of locked) assertPreparationConfiguration(row);
-    }
+    for (const row of locked) assertAutomationModuleConfiguration({ ...row, reaction_input_schema: reactionInputSchema }, scriptExports);
     const targetSchema = reactionInputSchema ?? null;
     for (const row of locked) {
       const rowId = Number(row.id);

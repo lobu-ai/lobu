@@ -293,7 +293,6 @@ export function buildAttributionAndOwned(
       execution_config: automationExecutionConfig(
         d.model,
         r?.execution_config,
-        d.executor,
         d.executionConfig
       ),
       outputs: p.outputs,

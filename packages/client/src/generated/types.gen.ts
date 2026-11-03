@@ -3743,25 +3743,28 @@ export type ManageCatalogResponse =
   ManageCatalogResponses[keyof ManageCatalogResponses];
 
 export type ManageAgentsData = {
-    body: {
+  body:
+    | {
         /**
          * List org agents.
          */
-        action: 'list';
-    } | {
+        action: "list";
+      }
+    | {
         /**
          * Fetch one agent.
          */
-        action: 'get';
+        action: "get";
         /**
          * Agent ID (lowercase slug, e.g. "support").
          */
         agent_id: string;
-    } | {
+      }
+    | {
         /**
          * Create an agent owned by the caller (queued for approval).
          */
-        action: 'create';
+        action: "create";
         /**
          * Agent ID (lowercase slug, e.g. "support").
          */
@@ -3782,11 +3785,12 @@ export type ManageAgentsData = {
          * [create/update] Default model (updates preserve the existing fallback entries) as an explicit "<provider>/<model>" ref (e.g. "anthropic/claude-sonnet-5"). Validated against the org's connected providers. Without it the agent inherits the org default model; if the org has none the agent is not runnable. Pass an empty string to clear it and fall back to the org default.
          */
         default_model?: string;
-    } | {
+      }
+    | {
         /**
          * Patch agent fields (queued for approval).
          */
-        action: 'update';
+        action: "update";
         /**
          * Agent ID (lowercase slug, e.g. "support").
          */
@@ -3811,203 +3815,208 @@ export type ManageAgentsData = {
          * Canonical agent settings patch. Omitted keys preserve stored values; supplied settings replace that top-level value. Empty strings/arrays/objects clear where allowed. Identity is written through identity_md.
          */
         settings?: {
-            models?: Array<string>;
-            networkConfig?: {
-                allowedDomains?: Array<string>;
-                deniedDomains?: Array<string>;
-            };
-            nixConfig?: {
-                flakeUrl?: string;
-                packages?: Array<string>;
-            };
-            soulMd?: string;
-            userMd?: string;
-            skillsConfig?: {
-                skills: Array<{
-                    repo: string;
-                    name: string;
-                    description?: string;
-                    instructions?: string;
-                    enabled: boolean;
-                    system?: boolean;
-                    content?: string;
-                    modelPreference?: string;
-                    thinkingLevel?: 'off' | 'low' | 'medium' | 'high';
-                }>;
-            };
-            guardrails?: Array<string>;
-            guardrailsInline?: Array<{
-                name: string;
-                enabled: boolean;
-                stage: 'input' | 'output' | 'pre-tool' | 'egress';
-                kind?: 'judge' | 'require-tool';
-                policy?: string;
-                model?: string;
-                tools?: Array<string>;
-                domains?: Array<string>;
+          models?: Array<string>;
+          networkConfig?: {
+            allowedDomains?: Array<string>;
+            deniedDomains?: Array<string>;
+          };
+          nixConfig?: {
+            flakeUrl?: string;
+            packages?: Array<string>;
+          };
+          soulMd?: string;
+          userMd?: string;
+          skillsConfig?: {
+            skills: Array<{
+              repo: string;
+              name: string;
+              description?: string;
+              instructions?: string;
+              enabled: boolean;
+              system?: boolean;
+              content?: string;
+              modelPreference?: string;
+              thinkingLevel?: "off" | "low" | "medium" | "high";
             }>;
-            sandboxId?: string;
-            verboseLogging?: boolean;
-            showToolCalls?: boolean;
-            starters?: Array<{
-                title: string;
-                message: string;
-            }>;
+          };
+          guardrails?: Array<string>;
+          guardrailsInline?: Array<{
+            name: string;
+            enabled: boolean;
+            stage: "input" | "output" | "pre-tool" | "egress";
+            kind?: "judge" | "require-tool";
+            policy?: string;
+            model?: string;
+            tools?: Array<string>;
+            domains?: Array<string>;
+          }>;
+          sandboxId?: string;
+          verboseLogging?: boolean;
+          showToolCalls?: boolean;
+          starters?: Array<{
+            title: string;
+            message: string;
+          }>;
         };
         /**
          * Opaque agent configuration revision returned by agents.get. A stale expected_revision rejects the entire update with 409 before any write or approval is queued. Omit for an unconditional update.
          */
         expected_revision?: string;
-    } | {
+      }
+    | {
         /**
          * Delete an agent (queued for approval).
          */
-        action: 'delete';
+        action: "delete";
         /**
          * Agent ID (lowercase slug, e.g. "support").
          */
         agent_id: string;
-    };
-    path: {
-        /**
-         * Organization slug (workspace identifier)
-         */
-        orgSlug: string;
-    };
-    query?: never;
-    url: '/api/{orgSlug}/manage_agents';
+      };
+  path: {
+    /**
+     * Organization slug (workspace identifier)
+     */
+    orgSlug: string;
+  };
+  query?: never;
+  url: "/api/{orgSlug}/manage_agents";
 };
 
 export type ManageAgentsErrors = {
-    /**
-     * Bad request - invalid parameters
-     */
-    400: {
-        error?: string;
-    };
-    /**
-     * Forbidden - your role or token scope does not allow this action
-     */
-    403: {
-        error?: string;
-    };
-    /**
-     * Tool not found
-     */
-    404: {
-        error?: string;
-    };
+  /**
+   * Bad request - invalid parameters
+   */
+  400: {
+    error?: string;
+  };
+  /**
+   * Forbidden - your role or token scope does not allow this action
+   */
+  403: {
+    error?: string;
+  };
+  /**
+   * Tool not found
+   */
+  404: {
+    error?: string;
+  };
 };
 
 export type ManageAgentsError = ManageAgentsErrors[keyof ManageAgentsErrors];
 
 export type ManageAgentsResponses = {
-    /**
-     * Successful response
-     */
-    200: {
-        action: 'list';
+  /**
+   * Successful response
+   */
+  200:
+    | {
+        action: "list";
         agents: Array<{
-            id: string;
-            name: string;
-            description: string | null;
-            owner_platform: string | null;
-            owner_user_id: string | null;
-            created_at: string;
-            last_used_at: string | null;
+          id: string;
+          name: string;
+          description: string | null;
+          owner_platform: string | null;
+          owner_user_id: string | null;
+          created_at: string;
+          last_used_at: string | null;
         }>;
-    } | {
-        action: 'get';
+      }
+    | {
+        action: "get";
         agent: {
-            id: string;
-            name: string;
-            description: string | null;
-            owner_platform: string | null;
-            owner_user_id: string | null;
-            created_at: string;
-            last_used_at: string | null;
+          id: string;
+          name: string;
+          description: string | null;
+          owner_platform: string | null;
+          owner_user_id: string | null;
+          created_at: string;
+          last_used_at: string | null;
         };
         model: {
-            /**
-             * Configured model ref before provider fallback, or null when none resolves.
-             */
-            effective_model: string | null;
-            source: 'agent' | 'org_default' | 'none';
-            /**
-             * No model resolves or provider preflight rejects every candidate. False does not guarantee a successful run or describe device-local execution.
-             */
-            not_runnable: boolean;
+          /**
+           * Configured model ref before provider fallback, or null when none resolves.
+           */
+          effective_model: string | null;
+          source: "agent" | "org_default" | "none";
+          /**
+           * No model resolves or provider preflight rejects every candidate. False does not guarantee a successful run or describe device-local execution.
+           */
+          not_runnable: boolean;
         };
         settings: {
-            models?: Array<string>;
-            networkConfig?: {
-                allowedDomains?: Array<string>;
-                deniedDomains?: Array<string>;
-            };
-            nixConfig?: {
-                flakeUrl?: string;
-                packages?: Array<string>;
-            };
-            soulMd?: string;
-            userMd?: string;
-            identityMd?: string;
-            skillsConfig?: {
-                skills: Array<{
-                    repo: string;
-                    name: string;
-                    description?: string;
-                    instructions?: string;
-                    enabled: boolean;
-                    system?: boolean;
-                    content?: string;
-                    modelPreference?: string;
-                    thinkingLevel?: 'off' | 'low' | 'medium' | 'high';
-                }>;
-            };
-            guardrails?: Array<string>;
-            guardrailsInline?: Array<{
-                name: string;
-                enabled: boolean;
-                stage: 'input' | 'output' | 'pre-tool' | 'egress';
-                kind?: 'judge' | 'require-tool';
-                policy?: string;
-                model?: string;
-                tools?: Array<string>;
-                domains?: Array<string>;
+          models?: Array<string>;
+          networkConfig?: {
+            allowedDomains?: Array<string>;
+            deniedDomains?: Array<string>;
+          };
+          nixConfig?: {
+            flakeUrl?: string;
+            packages?: Array<string>;
+          };
+          soulMd?: string;
+          userMd?: string;
+          identityMd?: string;
+          skillsConfig?: {
+            skills: Array<{
+              repo: string;
+              name: string;
+              description?: string;
+              instructions?: string;
+              enabled: boolean;
+              system?: boolean;
+              content?: string;
+              modelPreference?: string;
+              thinkingLevel?: "off" | "low" | "medium" | "high";
             }>;
-            sandboxId?: string;
-            verboseLogging?: boolean;
-            showToolCalls?: boolean;
-            starters?: Array<{
-                title: string;
-                message: string;
-            }>;
-            updatedAt: number;
+          };
+          guardrails?: Array<string>;
+          guardrailsInline?: Array<{
+            name: string;
+            enabled: boolean;
+            stage: "input" | "output" | "pre-tool" | "egress";
+            kind?: "judge" | "require-tool";
+            policy?: string;
+            model?: string;
+            tools?: Array<string>;
+            domains?: Array<string>;
+          }>;
+          sandboxId?: string;
+          verboseLogging?: boolean;
+          showToolCalls?: boolean;
+          starters?: Array<{
+            title: string;
+            message: string;
+          }>;
+          updatedAt: number;
         };
         /**
          * Opaque agent configuration revision returned by agents.get. A stale expected_revision rejects the entire update with 409 before any write or approval is queued. Omit for an unconditional update.
          */
         revision: string;
-    } | {
-        action: 'create';
+      }
+    | {
+        action: "create";
         /**
          * Agent ID (lowercase slug, e.g. "support").
          */
         agent_id: string;
         created: boolean;
         model: {
-            /**
-             * Configured model ref before provider fallback, or null when none resolves.
-             */
-            effective_model: string | null;
-            source: 'agent' | 'org_default' | 'none';
-            /**
-             * No model resolves or provider preflight rejects every candidate. False does not guarantee a successful run or describe device-local execution.
-             */
-            not_runnable: boolean;
+          /**
+           * Configured model ref before provider fallback, or null when none resolves.
+           */
+          effective_model: string | null;
+          source: "agent" | "org_default" | "none";
+          /**
+           * No model resolves or provider preflight rejects every candidate. False does not guarantee a successful run or describe device-local execution.
+           */
+          not_runnable: boolean;
         };
-    } | {
-        action: 'update';
+      }
+    | {
+        action: "update";
         /**
          * Agent ID (lowercase slug, e.g. "support").
          */
@@ -4018,204 +4027,206 @@ export type ManageAgentsResponses = {
          */
         skipped_fields?: Array<string>;
         model?: {
-            /**
-             * Configured model ref before provider fallback, or null when none resolves.
-             */
-            effective_model: string | null;
-            source: 'agent' | 'org_default' | 'none';
-            /**
-             * No model resolves or provider preflight rejects every candidate. False does not guarantee a successful run or describe device-local execution.
-             */
-            not_runnable: boolean;
+          /**
+           * Configured model ref before provider fallback, or null when none resolves.
+           */
+          effective_model: string | null;
+          source: "agent" | "org_default" | "none";
+          /**
+           * No model resolves or provider preflight rejects every candidate. False does not guarantee a successful run or describe device-local execution.
+           */
+          not_runnable: boolean;
         };
-    } | {
-        action: 'delete';
+      }
+    | {
+        action: "delete";
         /**
          * Agent ID (lowercase slug, e.g. "support").
          */
         agent_id: string;
         deleted: boolean;
-    } | {
-        action: 'create' | 'update' | 'delete';
+      }
+    | {
+        action: "create" | "update" | "delete";
         run_id: number;
         event_id?: number;
-        status: 'pending_approval';
+        status: "pending_approval";
         message: string;
         proposal: {
-            /**
-             * Agent ID (lowercase slug, e.g. "support").
-             */
-            agent_id: string;
-            /**
-             * [create/update] Display name for the agent.
-             */
-            name?: string;
-            /**
-             * [create/update] Agent description.
-             */
-            description?: string;
-            /**
-             * [create/update] Agent identity / system prompt (Markdown).
-             */
-            identity_md?: string;
-            /**
-             * [create/update] Default model (updates preserve the existing fallback entries) as an explicit "<provider>/<model>" ref (e.g. "anthropic/claude-sonnet-5"). Validated against the org's connected providers. Without it the agent inherits the org default model; if the org has none the agent is not runnable. Pass an empty string to clear it and fall back to the org default.
-             */
-            default_model?: string;
-            /**
-             * Canonical agent settings patch. Omitted keys preserve stored values; supplied settings replace that top-level value. Empty strings/arrays/objects clear where allowed. Identity is written through identity_md.
-             */
+          /**
+           * Agent ID (lowercase slug, e.g. "support").
+           */
+          agent_id: string;
+          /**
+           * [create/update] Display name for the agent.
+           */
+          name?: string;
+          /**
+           * [create/update] Agent description.
+           */
+          description?: string;
+          /**
+           * [create/update] Agent identity / system prompt (Markdown).
+           */
+          identity_md?: string;
+          /**
+           * [create/update] Default model (updates preserve the existing fallback entries) as an explicit "<provider>/<model>" ref (e.g. "anthropic/claude-sonnet-5"). Validated against the org's connected providers. Without it the agent inherits the org default model; if the org has none the agent is not runnable. Pass an empty string to clear it and fall back to the org default.
+           */
+          default_model?: string;
+          /**
+           * Canonical agent settings patch. Omitted keys preserve stored values; supplied settings replace that top-level value. Empty strings/arrays/objects clear where allowed. Identity is written through identity_md.
+           */
+          settings?: {
+            models?: Array<string>;
+            networkConfig?: {
+              allowedDomains?: Array<string>;
+              deniedDomains?: Array<string>;
+            };
+            nixConfig?: {
+              flakeUrl?: string;
+              packages?: Array<string>;
+            };
+            soulMd?: string;
+            userMd?: string;
+            skillsConfig?: {
+              skills: Array<{
+                repo: string;
+                name: string;
+                description?: string;
+                instructions?: string;
+                enabled: boolean;
+                system?: boolean;
+                content?: string;
+                modelPreference?: string;
+                thinkingLevel?: "off" | "low" | "medium" | "high";
+              }>;
+            };
+            guardrails?: Array<string>;
+            guardrailsInline?: Array<{
+              name: string;
+              enabled: boolean;
+              stage: "input" | "output" | "pre-tool" | "egress";
+              kind?: "judge" | "require-tool";
+              policy?: string;
+              model?: string;
+              tools?: Array<string>;
+              domains?: Array<string>;
+            }>;
+            sandboxId?: string;
+            verboseLogging?: boolean;
+            showToolCalls?: boolean;
+            starters?: Array<{
+              title: string;
+              message: string;
+            }>;
+          };
+          action: "create" | "update" | "delete";
+          base?: {
+            name?: string | null;
+            description?: string | null;
+            identity_md?: string | null;
+            default_model?: string | null;
             settings?: {
-                models?: Array<string>;
-                networkConfig?: {
-                    allowedDomains?: Array<string>;
-                    deniedDomains?: Array<string>;
-                };
-                nixConfig?: {
-                    flakeUrl?: string;
-                    packages?: Array<string>;
-                };
-                soulMd?: string;
-                userMd?: string;
-                skillsConfig?: {
-                    skills: Array<{
-                        repo: string;
-                        name: string;
-                        description?: string;
-                        instructions?: string;
-                        enabled: boolean;
-                        system?: boolean;
-                        content?: string;
-                        modelPreference?: string;
-                        thinkingLevel?: 'off' | 'low' | 'medium' | 'high';
-                    }>;
-                };
-                guardrails?: Array<string>;
-                guardrailsInline?: Array<{
-                    name: string;
-                    enabled: boolean;
-                    stage: 'input' | 'output' | 'pre-tool' | 'egress';
-                    kind?: 'judge' | 'require-tool';
-                    policy?: string;
-                    model?: string;
-                    tools?: Array<string>;
-                    domains?: Array<string>;
+              models?: Array<string> | null;
+              networkConfig?: {
+                allowedDomains?: Array<string>;
+                deniedDomains?: Array<string>;
+              } | null;
+              nixConfig?: {
+                flakeUrl?: string;
+                packages?: Array<string>;
+              } | null;
+              soulMd?: string | null;
+              userMd?: string | null;
+              skillsConfig?: {
+                skills: Array<{
+                  repo: string;
+                  name: string;
+                  description?: string;
+                  instructions?: string;
+                  enabled: boolean;
+                  system?: boolean;
+                  content?: string;
+                  modelPreference?: string;
+                  thinkingLevel?: "off" | "low" | "medium" | "high";
                 }>;
-                sandboxId?: string;
-                verboseLogging?: boolean;
-                showToolCalls?: boolean;
-                starters?: Array<{
-                    title: string;
-                    message: string;
-                }>;
+              } | null;
+              guardrails?: Array<string> | null;
+              guardrailsInline?: Array<{
+                name: string;
+                enabled: boolean;
+                stage: "input" | "output" | "pre-tool" | "egress";
+                kind?: "judge" | "require-tool";
+                policy?: string;
+                model?: string;
+                tools?: Array<string>;
+                domains?: Array<string>;
+              }> | null;
+              sandboxId?: string | null;
+              verboseLogging?: boolean | null;
+              showToolCalls?: boolean | null;
+              starters?: Array<{
+                title: string;
+                message: string;
+              }> | null;
             };
-            action: 'create' | 'update' | 'delete';
-            base?: {
-                name?: string | null;
-                description?: string | null;
-                identity_md?: string | null;
-                default_model?: string | null;
-                settings?: {
-                    models?: Array<string> | null;
-                    networkConfig?: {
-                        allowedDomains?: Array<string>;
-                        deniedDomains?: Array<string>;
-                    } | null;
-                    nixConfig?: {
-                        flakeUrl?: string;
-                        packages?: Array<string>;
-                    } | null;
-                    soulMd?: string | null;
-                    userMd?: string | null;
-                    skillsConfig?: {
-                        skills: Array<{
-                            repo: string;
-                            name: string;
-                            description?: string;
-                            instructions?: string;
-                            enabled: boolean;
-                            system?: boolean;
-                            content?: string;
-                            modelPreference?: string;
-                            thinkingLevel?: 'off' | 'low' | 'medium' | 'high';
-                        }>;
-                    } | null;
-                    guardrails?: Array<string> | null;
-                    guardrailsInline?: Array<{
-                        name: string;
-                        enabled: boolean;
-                        stage: 'input' | 'output' | 'pre-tool' | 'egress';
-                        kind?: 'judge' | 'require-tool';
-                        policy?: string;
-                        model?: string;
-                        tools?: Array<string>;
-                        domains?: Array<string>;
-                    }> | null;
-                    sandboxId?: string | null;
-                    verboseLogging?: boolean | null;
-                    showToolCalls?: boolean | null;
-                    starters?: Array<{
-                        title: string;
-                        message: string;
-                    }> | null;
-                };
-            };
+          };
         };
         current: {
-            id?: string;
-            name?: string;
-            description?: string | null;
-            owner_platform?: string | null;
-            owner_user_id?: string | null;
-            created_at?: string;
-            last_used_at?: string | null;
-            identity_md?: string | null;
-            settings?: {
-                models?: Array<string> | null;
-                networkConfig?: {
-                    allowedDomains?: Array<string>;
-                    deniedDomains?: Array<string>;
-                } | null;
-                nixConfig?: {
-                    flakeUrl?: string;
-                    packages?: Array<string>;
-                } | null;
-                soulMd?: string | null;
-                userMd?: string | null;
-                skillsConfig?: {
-                    skills: Array<{
-                        repo: string;
-                        name: string;
-                        description?: string;
-                        instructions?: string;
-                        enabled: boolean;
-                        system?: boolean;
-                        content?: string;
-                        modelPreference?: string;
-                        thinkingLevel?: 'off' | 'low' | 'medium' | 'high';
-                    }>;
-                } | null;
-                guardrails?: Array<string> | null;
-                guardrailsInline?: Array<{
-                    name: string;
-                    enabled: boolean;
-                    stage: 'input' | 'output' | 'pre-tool' | 'egress';
-                    kind?: 'judge' | 'require-tool';
-                    policy?: string;
-                    model?: string;
-                    tools?: Array<string>;
-                    domains?: Array<string>;
-                }> | null;
-                sandboxId?: string | null;
-                verboseLogging?: boolean | null;
-                showToolCalls?: boolean | null;
-                starters?: Array<{
-                    title: string;
-                    message: string;
-                }> | null;
-            };
+          id?: string;
+          name?: string;
+          description?: string | null;
+          owner_platform?: string | null;
+          owner_user_id?: string | null;
+          created_at?: string;
+          last_used_at?: string | null;
+          identity_md?: string | null;
+          settings?: {
+            models?: Array<string> | null;
+            networkConfig?: {
+              allowedDomains?: Array<string>;
+              deniedDomains?: Array<string>;
+            } | null;
+            nixConfig?: {
+              flakeUrl?: string;
+              packages?: Array<string>;
+            } | null;
+            soulMd?: string | null;
+            userMd?: string | null;
+            skillsConfig?: {
+              skills: Array<{
+                repo: string;
+                name: string;
+                description?: string;
+                instructions?: string;
+                enabled: boolean;
+                system?: boolean;
+                content?: string;
+                modelPreference?: string;
+                thinkingLevel?: "off" | "low" | "medium" | "high";
+              }>;
+            } | null;
+            guardrails?: Array<string> | null;
+            guardrailsInline?: Array<{
+              name: string;
+              enabled: boolean;
+              stage: "input" | "output" | "pre-tool" | "egress";
+              kind?: "judge" | "require-tool";
+              policy?: string;
+              model?: string;
+              tools?: Array<string>;
+              domains?: Array<string>;
+            }> | null;
+            sandboxId?: string | null;
+            verboseLogging?: boolean | null;
+            showToolCalls?: boolean | null;
+            starters?: Array<{
+              title: string;
+              message: string;
+            }> | null;
+          };
         } | null;
-    };
+      };
 };
 
 export type ManageAgentsResponse =
@@ -6006,7 +6017,7 @@ export type ManageAutomationsData = {
      */
     name_pattern?: string;
     /**
-     * [create/create_version] Literal LLM instruction text for the Automation — the task statement, frozen into the version. No template expansion happens: the text is delivered to the agent verbatim, and the window's data (content, sources, entities, extraction_schema) arrives alongside it in the knowledge-read payload. Reusable know-how belongs in `skills` instead, which is delivered as readable files rather than pasted in here. A schedule trigger, an event trigger with execution 'window', and an Automation with no triggers each need an instruction source — supply `prompt`, `skills`, a reaction script, or a script executor; an event trigger with execution 'turn' may omit all instruction sources and use the built-in default.
+     * [create/create_version] Literal LLM instruction text for the Automation — the task statement, frozen into the version. No template expansion happens: the text is delivered to the agent verbatim, and the window's data (content, sources, entities, extraction_schema) arrives alongside it in the knowledge-read payload. Reusable know-how belongs in `skills` instead, which is delivered as readable files rather than pasted in here. A schedule trigger, an event trigger with execution 'window', and an Automation with no triggers each need an instruction source — supply `prompt`, `skills`, or a code module; an event trigger with execution 'turn' may omit all instruction sources and use the built-in default.
      */
     prompt?: string;
     /**
@@ -6151,7 +6162,7 @@ export type ManageAutomationsData = {
         }
     >;
     /**
-     * [create/update] Optional managed agent that owns this Automation. Normally executes its runs; an explicit external executor retains the agent only as the permission and delivery principal. Null clears the assignment. Without a managed agent, device pin, or external executor, an Automation is manual-only. [list] Optional owner filter.
+     * [create/update] Optional managed agent that owns this Automation and supplies its SDK permissions. Prompt, skills, input schema or outputs invoke agent analysis; a module alone runs code. Null clears the assignment. Without a managed agent or device pin, an Automation is manual-only. [list] Optional owner filter.
      */
     managed_agent_id?: string | null;
     /**
@@ -6204,17 +6215,6 @@ export type ManageAutomationsData = {
      */
     model_config?: unknown;
     execution_config?: null | {
-      executor?:
-        | {
-            kind: "script";
-            source: string;
-            params?: {
-              [key: string]: unknown;
-            };
-          }
-        | {
-            kind: "external";
-          };
       /**
        * Wall-clock cap in seconds for the device-worker CLI run (default 600).
        */
@@ -6301,7 +6301,7 @@ export type ManageAutomationsData = {
      */
     template_version_id?: number;
     /**
-     * [create/set_reaction_script] TypeScript module exporting prepare(ctx, client) before native agent execution and/or a default handler after completion. prepare returns named arrays of records (32 names, 16384 JSON bytes maximum), saved per run and read through knowledge.read(...).sources. Native window execution only for prepare; external/script executors and reply turns are unsupported. Existing default-only reactions retain their lifecycle. Compiled and validated before saving; an empty string removes the module.
+     * [create/set_reaction_script] TypeScript lifecycle module. Without prompt, skills, exported input or declared outputs, runs code without an LLM: prepare then default when present. With analysis inputs, prepare runs before the native agent and default follows completion. prepare returns named arrays of records (32 names, 16384 JSON bytes maximum), saved per run and read through knowledge.read(...).sources. Preparation requires native windows; legacy executors and reply turns are unsupported. Compiled and validated before saving; an empty string removes the module.
      */
     reaction_script?: string;
     /**

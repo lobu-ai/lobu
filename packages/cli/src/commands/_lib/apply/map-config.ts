@@ -519,7 +519,7 @@ const MAX_AUTOMATION_SKILLS = 5;
  * content (the incoming message/event), so it may run with zero instructions on
  * the built-in default. Everything else — schedule triggers, event triggers with
  * execution "window", and Automations with no triggers at all (manual runs) —
- * needs a prompt, at least one skill, a reaction script, or a script executor.
+ * needs a prompt, at least one skill, a code module.
  *
  * This CLI preflight mirrors the server rule, catching the error against the
  * config file (naming the slug) rather than as a 422 mid-apply. When both
@@ -566,7 +566,7 @@ function assertAutomationSkills(
   // Any instruction source satisfies the rule. An Automation
   // whose whole job is "run this skill" has no task statement to write, one
   // that spells its task out inline needs no skill, and one that runs entirely
-  // as a reaction or executor script needs neither — demanding two would be
+  // as a code module needs neither — demanding two would be
   // stricter than the server and would reject configs the API accepts. The
   // mapper runs BEFORE the loader reads either file, so this boolean is the
   // config marker; the loader validates the file and the server enforces the
@@ -578,16 +578,21 @@ function assertAutomationSkills(
     !instructionSourceDeclared
   ) {
     throw new ValidationError(
-      `Automation "${automation.slug}" needs instructions: schedule triggers, event triggers with execution "window", and Automations with no triggers run on stored instructions alone, so give it a "prompt", at least one skill, a reaction script, or a script executor. Only event triggers with execution "turn" may omit all instruction sources.`
+      `Automation "${automation.slug}" needs instructions: schedule triggers, event triggers with execution "window", and Automations with no triggers run on stored instructions alone, so give it a "prompt", at least one skill, a code module. Only event triggers with execution "turn" may omit all instruction sources.`
     );
   }
 }
 
 function mapAutomation(automation: Automation): DesiredAutomation {
+  if (Object.hasOwn(automation, "executor")) {
+    throw new ValidationError(
+      `Automation "${automation.slug}": executor is retired; use reactionFromFile("./job.ts") and clear a legacy configuration explicitly with executionConfig: null.`
+    );
+  }
   if (automation.executionConfig !== undefined) {
-    if (automation.model !== undefined || automation.executor !== undefined) {
+    if (automation.model !== undefined) {
       throw new ValidationError(
-        `Automation "${automation.slug}" must declare either executionConfig or model/executor helpers, not both`
+        `Automation "${automation.slug}" must declare either executionConfig or the model helper, not both`
       );
     }
     if (
@@ -696,7 +701,6 @@ function mapAutomation(automation: Automation): DesiredAutomation {
   return {
     slug: automation.slug,
     agent: agentId(automation.agent),
-    ...(automation.executor === "agent" ? { executor: null } : {}),
     // The author's task statement, carried straight through. Skill BODIES are
     // no longer folded in here — the loader resolves them into `skillSnapshots`
     // (see `resolveAutomationSkills` in desired-state.ts), because the mapper is
@@ -995,11 +999,8 @@ export function mapProjectToDesiredState(
     // `reaction: null` is a removal, not an instruction source.
     assertAutomationSkills(
       automation,
-      (project.automations?.[i]?.reaction !== undefined &&
-        project.automations?.[i]?.reaction !== null) ||
-        project.automations?.[i]?.executionConfig?.executor !== undefined ||
-        (project.automations?.[i]?.executor !== undefined &&
-          project.automations?.[i]?.executor !== "agent")
+      project.automations?.[i]?.reaction !== undefined &&
+        project.automations?.[i]?.reaction !== null
     );
     for (const trigger of automation.triggers ?? []) {
       if (

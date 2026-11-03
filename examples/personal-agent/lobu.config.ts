@@ -10,7 +10,6 @@ import {
   defineSkill,
   every,
   reactionFromFile,
-  scriptFromFile,
 } from "@lobu/cli/config";
 import { duplicateCandidateQuery } from "./duplicate-report.reaction.ts";
 import type DuplicateReportReaction from "./duplicate-report.reaction.ts";
@@ -407,9 +406,9 @@ const midasNetWorth = defineAutomation({
   // Keep the existing slug: it is the Automation's durable identity. Renaming it
   // would delete/recreate the Automation and discard its cooldown/history.
   slug: "midas-net-worth",
-  name: "Weekly net worth",
+  name: "Weekly finances",
   description:
-    "Consolidates connector positions and current balance-sheet observations into one immutable weekly GBP snapshot with exact change attribution.",
+    "Calculates one immutable weekly GBP balance sheet before the agent reviews portfolio changes, coverage and questions, then sends one private briefing.",
   triggers: [
     every("0 9 * * 1", {
       timezone: "Europe/London",
@@ -424,8 +423,16 @@ const midasNetWorth = defineAutomation({
   sources: {
     valuation_clock: context("SELECT CURRENT_TIMESTAMP AS observed_at"),
   },
-  executor: scriptFromFile<typeof NetWorthScript>("./net-worth.reaction.ts"),
-  reaction: null,
+  // Replace a previously installed script executor when adopting this config.
+  executionConfig: {},
+  reaction: reactionFromFile<typeof NetWorthScript>("./net-worth.reaction.ts"),
+  prompt:
+    "Review this run's saved net_worth source for a single weekly finances briefing. " +
+    "Preparation already calculated and persisted the authoritative balance sheet; do not rerun calculations or change its totals. " +
+    "Use knowledge.read with content_ids:[snapshot_event_id] from that source when the stored position book is needed. " +
+    "Explain weekly portfolio changes, attribution, missing or stale coverage, and questions supported by the saved evidence. " +
+    "Record the concise review in weekly_review; the completion reaction sends the existing private briefing. " +
+    "Do not open or refresh broker accounts, trade, transfer money, change connections or send a separate notification.",
 });
 
 const taskCollaborator = defineAutomation({
@@ -498,10 +505,10 @@ const sahibindenAlerts = defineAutomation({
   sources: {
     run_clock: context("SELECT CURRENT_TIMESTAMP AS observed_at"),
   },
-  executor: scriptFromFile<typeof SahibindenAlertsScript>(
+  executionConfig: null,
+  reaction: reactionFromFile<typeof SahibindenAlertsScript>(
     "./sahibinden-alerts.script.ts"
   ),
-  reaction: null,
 });
 
 // The review requests image attachments through fetch_photos.

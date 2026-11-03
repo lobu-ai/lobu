@@ -404,7 +404,8 @@ interface BrandedHandler {
 export function withValidatedArgs<A, R extends unknown[], T>(
   toolName: string,
   schema: TSchema,
-  handler: (args: A, ...rest: R) => Promise<T>
+  handler: (args: A, ...rest: R) => Promise<T>,
+  beforeValidate?: (args: unknown) => void,
 ): (args: A, ...rest: R) => Promise<T> {
   for (const s of unionVariants(schema) ?? [schema]) {
     compileSchema(s);
@@ -413,10 +414,14 @@ export function withValidatedArgs<A, R extends unknown[], T>(
   // throwing synchronously — callers (`await`, `.rejects`, .catch chains)
   // treat tool handlers as promise-returning and a sync throw would escape
   // them.
+  const validate = (args: unknown): A => {
+    beforeValidate?.(args);
+    return validateToolArgs(toolName, schema, args) as A;
+  };
   const wrapped = async (args: A, ...rest: R): Promise<T> =>
-    handler(validateToolArgs(toolName, schema, args) as A, ...rest);
+    handler(validate(args), ...rest);
   Object.defineProperty(wrapped, VALIDATE_ARGS, {
-    value: (args: unknown) => validateToolArgs(toolName, schema, args),
+    value: validate,
     enumerable: false,
   });
   (wrapped as BrandedHandler)[VALIDATED_BRAND] = toolName;

@@ -113,14 +113,14 @@ export async function executeAutomationScript(options: ExecuteAutomationScriptOp
 
   let approvalPending = false;
   const result = await runScript({
-    onSdkResult: entryExport ? (_path, value) => {
+    onSdkResult: (_path, value) => {
       if (value && typeof value === 'object') {
         const result = value as Record<string, unknown>;
         if (result.approval_queued === true || result.status === 'pending_approval') {
           approvalPending = true;
         }
       }
-    } : undefined,
+    },
     source: entryExport
       ? `${compiledScript}\nmodule.exports = { default: module.exports.prepare };`
       : compiledScript,
@@ -136,7 +136,7 @@ export async function executeAutomationScript(options: ExecuteAutomationScriptOp
     return {
       success: false,
       retryable: false,
-      error: 'AccessDeniedError: Automation preparation awaits approval; no agent was started.',
+      error: 'AccessDeniedError: Automation code awaits approval; the run cannot advance.',
     };
   }
   if (result.success && result.returnTruncated && executionKind === 'executor') {

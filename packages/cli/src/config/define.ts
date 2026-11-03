@@ -674,25 +674,6 @@ export type PreparationHandler = (
   client: ReactionClient
 ) => Promise<Record<string, Record<string, unknown>[]>>;
 
-export type AutomationScriptHandler = (
-  ctx: AutomationScriptContext,
-  client: ReactionClient,
-  params?: Record<string, unknown>
-) => Promise<unknown>;
-
-export interface ScriptSource {
-  readonly kind: "scriptSource";
-  path: string;
-  params?: Record<string, unknown>;
-}
-
-/** Execute a local TypeScript job directly, with the owning agent's SDK permissions. */
-export function scriptFromFile<
-  _Handler extends AutomationScriptHandler = AutomationScriptHandler,
->(path: string, params?: Record<string, unknown>): ScriptSource {
-  return { kind: "scriptSource", path, ...(params ? { params } : {}) };
-}
-
 /**
  * A local lifecycle module: optional `prepare` before the native agent and/or
  * a default completion reaction, both run in the shared sandbox. Built with {@link reactionFromFile} and set on
@@ -724,7 +705,7 @@ export interface ReactionSource {
  * so the handler module is never imported during config eval.
  */
 export function reactionFromFile<
-  _Handler extends ReactionHandler = ReactionHandler,
+  _Handler extends (...args: never[]) => Promise<unknown> = ReactionHandler,
 >(path: string): ReactionSource {
   return { kind: "reactionSource", path };
 }
@@ -784,9 +765,7 @@ export interface Automation {
   slug: string;
   /** Owning agent (handle or id). Every Automation belongs to exactly one agent. */
   agent: Agent | string;
-  /** Script job or agent execution. Omitted preserves the stored executor; "agent" clears a script executor. */
-  executor?: ScriptSource | "agent";
-  /** Canonical execution options. Omit to preserve; null clears. Cannot overlap model/executor helpers. */
+  /** Canonical execution options. Omit to preserve; null clears. Cannot overlap the model helper. */
   executionConfig?: AutomationExecutionConfig | null;
   name?: string;
   description?: string;
@@ -815,7 +794,7 @@ export interface Automation {
    * action for a declarative project.
    *
    * Supply {@link Automation.prompt}, `skills`, a {@link Automation.reaction}
-   * script, or an {@link Automation.executor} script. Any one is required for schedule triggers, event
+   * script. Any one is required for schedule triggers, event
    * triggers with execution `"window"`, and Automations with no triggers
    * (manual runs); an event trigger with execution `"turn"` may omit all
    * instruction sources, since the incoming event is the content and a built-in
@@ -855,16 +834,14 @@ export interface Automation {
    */
   model?: string | null;
   /**
-   * A sibling `.ts` reaction script (`./reactions/foo.reaction.ts`) compiled +
-   * run in a sandboxed isolate when the Automation fires, built with
-   * {@link reactionFromFile}. The script must `export default async (ctx,
-   * client, params?) => …` ({@link ReactionHandler}). Kept in its own file (not
-   * inline) so your IDE type-checks it; the path must stay under the config
-   * directory.
+   * A sibling TypeScript module, built with {@link reactionFromFile}. Export
+   * `prepare` to save named sources before analysis and/or a default handler
+   * for completion. Without prompt, skills, input schema or declared outputs,
+   * the module runs as code without a model. The path stays under the config
+   * directory so it can be typechecked and bundled portably.
    *
    * Omit to preserve a previously installed reaction. Set explicitly to `null`
-   * to remove it — required when switching a reaction-driven Automation to a
-   * script executor so the same work is not performed twice.
+   * to remove it after the remaining definition has its required instructions.
    */
   reaction?: ReactionSource | null;
 }

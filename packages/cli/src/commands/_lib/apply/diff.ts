@@ -1387,8 +1387,7 @@ function remoteOnlyDefinitionRow(
 // remote-moved drift and permanently block re-apply.
 
 interface AutomationProjection {
-  executionConfig?: DesiredAutomation["executionConfig"];
-  executor?: unknown;
+  executionConfig?: RemoteAutomation["execution_config"];
   agent?: string | null;
   name?: string | null;
   description?: string | null;
@@ -1420,12 +1419,6 @@ export const projectDesiredAutomation = (
     d.executionConfig !== undefined
       ? d.executionConfig
       : (remote?.execution_config ?? null),
-  executor:
-    d.executionConfig !== undefined
-      ? (d.executionConfig?.executor ?? null)
-      : d.executor !== undefined
-        ? d.executor
-        : (remote?.execution_config?.executor ?? null),
   agent: d.agent ?? null,
   // Name/description are optional in config; the server defaults name to the
   // slug. Inherit live remote when omitted so a second apply does not
@@ -1471,7 +1464,6 @@ const projectRemoteAutomation = (
   w: RemoteAutomation
 ): AutomationProjection => ({
   executionConfig: w.execution_config ?? null,
-  executor: w.execution_config?.executor ?? null,
   agent: w.managed_agent_id ?? null,
   // `?? null` mirrors projectDesiredAutomation: an unnamed remote Automation must
   // compare EQUAL to the desired side that inherited it, or deepEqual(null,
@@ -1647,9 +1639,7 @@ function diffAutomation(
     (desired.executionConfig !== undefined &&
       !deepEqual(desired.executionConfig, remote.execution_config ?? null)) ||
     (desired.model !== undefined &&
-      desired.model !== (remote.execution_config?.model ?? null)) ||
-    (desired.executor !== undefined &&
-      !deepEqual(desired.executor, remote.execution_config?.executor ?? null))
+      desired.model !== (remote.execution_config?.model ?? null))
   ) {
     scalar.push("execution_config");
   }

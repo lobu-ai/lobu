@@ -319,7 +319,7 @@ export const AutomationOutputsSchema = Type.Object(
 // value contract to TypeScript consumers.
 export type AutomationOutputs = Record<string, AutomationOutput>;
 
-export const AutomationScriptExecutorSchema = Type.Object(
+export const LegacyAutomationScriptExecutorSchema = Type.Object(
   {
     kind: Type.Literal("script"),
     source: Type.String({ minLength: 1, maxLength: 131072 }),
@@ -331,11 +331,11 @@ export const AutomationScriptExecutorSchema = Type.Object(
       "Run this TypeScript module directly in the Automation sandbox. Export default async (ctx, client). The runtime pins the script and window at activation and completes the run only after success. SDK writes retain the owning agent's permissions. Use ctx.window.run_id for retry idempotency.",
   }
 );
-export type AutomationScriptExecutor = Static<
-  typeof AutomationScriptExecutorSchema
+export type LegacyAutomationScriptExecutor = Static<
+  typeof LegacyAutomationScriptExecutorSchema
 >;
 
-export const AutomationExternalExecutorSchema = Type.Object(
+export const LegacyAutomationExternalExecutorSchema = Type.Object(
   { kind: Type.Literal("external") },
   {
     additionalProperties: false,
@@ -343,18 +343,12 @@ export const AutomationExternalExecutorSchema = Type.Object(
       "An authorized external MCP client claims and completes this Automation. Manual and schedule window activations only. The schedule remains authoritative; Lobu does not start a hosted agent or device CLI. managed_agent_id may retain the owning delivery principal.",
   }
 );
-export type AutomationExecutor =
-  | AutomationScriptExecutor
-  | Static<typeof AutomationExternalExecutorSchema>;
+export type LegacyAutomationExecutor =
+  | LegacyAutomationScriptExecutor
+  | Static<typeof LegacyAutomationExternalExecutorSchema>;
 
 export const AutomationExecutionConfigSchema = Type.Object(
   {
-    executor: Type.Optional(
-      Type.Union([
-        AutomationScriptExecutorSchema,
-        AutomationExternalExecutorSchema,
-      ])
-    ),
     timeout_seconds: Type.Optional(
       Type.Integer({
         minimum: 1,
@@ -408,11 +402,28 @@ export const AutomationExecutionConfigSchema = Type.Object(
   {
     additionalProperties: false,
     description:
-      "[create/update] Per-Automation execution settings: an external MCP client, a sandboxed script executor, device-worker CLI flags, or the server-side finalize-nudge budget. Omitted fields fall back to dispatcher/CLI/global defaults; pass null to clear.",
+      "[create/update] Per-Automation agent execution settings. Code-only modules use sandbox limits and do not accept these options. Omitted fields fall back to dispatcher/CLI/global defaults; pass null to clear.",
   }
 );
 export type AutomationExecutionConfig = Static<
   typeof AutomationExecutionConfigSchema
+>;
+
+/** Read-only compatibility shape for installed definitions and frozen runs. */
+export const LegacyAutomationExecutionConfigSchema = Type.Object(
+  {
+    ...AutomationExecutionConfigSchema.properties,
+    executor: Type.Optional(
+      Type.Union([
+        LegacyAutomationScriptExecutorSchema,
+        LegacyAutomationExternalExecutorSchema,
+      ])
+    ),
+  },
+  { additionalProperties: false }
+);
+export type LegacyAutomationExecutionConfig = Static<
+  typeof LegacyAutomationExecutionConfigSchema
 >;
 
 export const AutomationDeliveryTargetSchema = Type.Object(
@@ -651,7 +662,7 @@ export const ManageAutomationsSchema = Type.Object(
     prompt: Type.Optional(
       Type.String({
         description:
-          "[create/create_version] Literal LLM instruction text for the Automation — the task statement, frozen into the version. No template expansion happens: the text is delivered to the agent verbatim, and the window's data (content, sources, entities, extraction_schema) arrives alongside it in the knowledge-read payload. Reusable know-how belongs in `skills` instead, which is delivered as readable files rather than pasted in here. A schedule trigger, an event trigger with execution 'window', and an Automation with no triggers each need an instruction source — supply `prompt`, `skills`, a reaction script, or a script executor; an event trigger with execution 'turn' may omit all instruction sources and use the built-in default.",
+          "[create/create_version] Literal LLM instruction text for the Automation — the task statement, frozen into the version. No template expansion happens: the text is delivered to the agent verbatim, and the window's data (content, sources, entities, extraction_schema) arrives alongside it in the knowledge-read payload. Reusable know-how belongs in `skills` instead, which is delivered as readable files rather than pasted in here. A schedule trigger, an event trigger with execution 'window', and an Automation with no triggers each need an instruction source — supply `prompt`, `skills`, or a code module; an event trigger with execution 'turn' may omit all instruction sources and use the built-in default.",
       })
     ),
     skills: Type.Optional(
@@ -693,7 +704,7 @@ export const ManageAutomationsSchema = Type.Object(
     managed_agent_id: Type.Optional(
       Type.Union([Type.String({ minLength: 1 }), Type.Null()], {
         description:
-          "[create/update] Optional managed agent that owns this Automation. Normally executes its runs; an explicit external executor retains the agent only as the permission and delivery principal. Null clears the assignment. Without a managed agent, device pin, or external executor, an Automation is manual-only. [list] Optional owner filter.",
+          "[create/update] Optional managed agent that owns this Automation and supplies its SDK permissions. Prompt, skills, input schema or outputs invoke agent analysis; a module alone runs code. Null clears the assignment. Without a managed agent or device pin, an Automation is manual-only. [list] Optional owner filter.",
       })
     ),
     status: Type.Optional(
@@ -852,7 +863,7 @@ export const ManageAutomationsSchema = Type.Object(
     reaction_script: Type.Optional(
       Type.String({
         description:
-          "[create/set_reaction_script] TypeScript module exporting prepare(ctx, client) before native agent execution and/or a default handler after completion. prepare returns named arrays of records (32 names, 16384 JSON bytes maximum), saved per run and read through knowledge.read(...).sources. Native window execution only for prepare; external/script executors and reply turns are unsupported. Existing default-only reactions retain their lifecycle. Compiled and validated before saving; an empty string removes the module.",
+          "[create/set_reaction_script] TypeScript lifecycle module. Without prompt, skills, exported input or declared outputs, runs code without an LLM: prepare then default when present. With analysis inputs, prepare runs before the native agent and default follows completion. prepare returns named arrays of records (32 names, 16384 JSON bytes maximum), saved per run and read through knowledge.read(...).sources. Preparation requires native windows; legacy executors and reply turns are unsupported. Compiled and validated before saving; an empty string removes the module.",
       })
     ),
 

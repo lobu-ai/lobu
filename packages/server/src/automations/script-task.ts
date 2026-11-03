@@ -22,7 +22,7 @@ export async function runAutomationScriptTask(
 ): Promise<void> {
   const sql = getDb();
   const [run] = await sql`
-    SELECT r.approved_input, r.status, to_jsonb(a.entity_ids) AS entity_ids, a.slug,
+    SELECT r.approved_input, r.status, r.run_metadata, to_jsonb(a.entity_ids) AS entity_ids, a.slug,
            v.name, v.version, o.slug AS organization_slug
     FROM runs r
     JOIN runs task ON task.id = ${taskRunId} AND task.parent_run_id = r.id
@@ -49,7 +49,11 @@ export async function runAutomationScriptTask(
   ) {
     throw new Error('Automation script snapshot is missing');
   }
-  const ids = Array.isArray(run.entity_ids) ? run.entity_ids.map(Number) : [];
+  const module = input.automation_script?.has_analysis === false ? input.automation_script : null;
+  if (module?.has_prepare && run.run_metadata?.preparation_sources === undefined) {
+    throw new Error('Automation preparation has not succeeded');
+  }
+  const ids = module?.entities ?? (Array.isArray(run.entity_ids) ? run.entity_ids.map(Number) : []);
   const entities =
     ids.length > 0
       ? await sql`
@@ -58,7 +62,8 @@ export async function runAutomationScriptTask(
     WHERE e.id = ANY(${pgBigintArray(ids)}::bigint[]) AND e.organization_id = ${payload.organizationId}
   `
       : [];
-  const context: AutomationScriptContext = {
+  const context: AutomationScriptContext & { sources?: Record<string, Record<string, unknown>[]>; extracted_data?: Record<string, unknown> } = {
+    ...(module ? { sources: run.run_metadata?.preparation_sources ?? {}, extracted_data: {} } : {}),
     window: {
       run_id: payload.sourceRunId,
       automation_id: payload.automationId,
@@ -83,7 +88,7 @@ export async function runAutomationScriptTask(
     organization_id: payload.organizationId,
     organization_slug: String(run.organization_slug),
   };
-  const result = await executeAutomationScript({
+  const result = module && !module.has_reaction ? { success: true, returnValue: {} } : await executeAutomationScript({
     compiledScript: input.executor.source,
     params: input.executor.params,
     context,
@@ -160,7 +165,7 @@ export async function runAutomationScriptTask(
         expedited = due.length > 0;
       }
     }
-    if (automation?.reaction_script_compiled) {
+    if (!module && automation?.reaction_script_compiled) {
       await enqueueAutomationReaction(
         tx,
         payload,
