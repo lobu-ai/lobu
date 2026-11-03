@@ -289,6 +289,7 @@ test("ClickHouse progress survives completion retries and product pagination wit
   const start = new Date(Date.now() - 60_000);
   await sql`UPDATE automations SET next_window_start = ${start}, next_run_at = NOW() - INTERVAL '1 second' WHERE id = ${id}`;
   for (const [slug, contents] of [
+    ["synthetic-unlisted-connection", ["Unlisted source must not be consumed"]],
     [
       "lobu-product-activity-db",
       ["Synthetic signup", "Synthetic source connected"],
