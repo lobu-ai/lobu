@@ -17,7 +17,7 @@
 // (`lobu doctor`) and packages/server's assert-node-version.ts.
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
@@ -130,26 +130,43 @@ if (isBun() || majorOf(process.versions.node) !== REQUIRED_NODE_MAJOR) {
   const target = findNode26();
   if (!target) fail(current);
 
-  const child = spawnSync(
-    target,
-    [
-      "--no-node-snapshot",
-      fileURLToPath(import.meta.url),
-      ...process.argv.slice(2),
-    ],
-    {
-      stdio: "inherit",
-      env: { ...process.env, [BOOTSTRAP_ENV]: "1" },
+  const env = { ...process.env, [BOOTSTRAP_ENV]: "1" };
+  const args = [
+    "--no-node-snapshot",
+    fileURLToPath(import.meta.url),
+    ...process.argv.slice(2),
+  ];
+
+  // Replace this process image when the platform supports it. The PID stays
+  // the same, so the Mac app's SIGTERM reaches the inner CLI and its own
+  // shutdown handler can stop the gateway/worker child cleanly.
+  if (typeof process.execve === "function") {
+    try {
+      process.execve(target, [target, ...args], env);
+    } catch {
+      // Fall through to the supervised child on platforms without execve.
     }
-  );
-  if (child.error) {
+  }
+
+  // Portable fallback: keep the launcher alive, forward termination signals
+  // to the Node 26 child, and wait for it to finish. Exiting immediately here
+  // would orphan the server when the Mac app stops the runner.
+  const child = spawn(target, args, { stdio: "inherit", env });
+  const forward = (signal) => {
+    if (child.exitCode === null && child.signalCode === null)
+      child.kill(signal);
+  };
+  process.on("SIGINT", () => forward("SIGINT"));
+  process.on("SIGTERM", () => forward("SIGTERM"));
+  child.on("error", (error) => {
     process.stderr.write(
-      `\n  Lobu found Node 26 at ${target} but could not start it: ${child.error.message}\n\n`
+      `\n  Lobu found Node 26 at ${target} but could not start it: ${error.message}\n\n`
     );
     process.exit(1);
-  }
-  if (child.signal) process.kill(process.pid, child.signal);
-  process.exit(child.status ?? 1);
+  });
+  child.on("exit", (code) => {
+    process.exit(code ?? 1);
+  });
 }
 
 // Dynamic import (not a static top-level `import`) is REQUIRED for the bundle:
