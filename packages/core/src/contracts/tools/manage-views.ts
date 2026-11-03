@@ -189,9 +189,14 @@ export const ViewRowSchema = Type.Object({
   attach: Type.Array(ViewAttachmentSchema),
   params: Type.Record(Type.String(), ViewParamDeclSchema),
   actions: Type.Record(Type.String(), ViewActionDeclSchema),
-  last_writer: Type.String({
-    description: "apply:<apply_id> | <user_id> | migration:view-templates",
-  }),
+  // Optional because a reader outside the workspace (a public workspace's
+  // visitor) gets the list without anyone's user id in it.
+  last_writer: Type.Optional(
+    Type.String({
+      description:
+        "apply:<apply_id> | <user_id> | migration:view-templates. Omitted for readers outside the workspace.",
+    })
+  ),
   updated_at: Type.String(),
   compiled_bytes: Type.Integer(),
   source_bytes: Type.Integer(),

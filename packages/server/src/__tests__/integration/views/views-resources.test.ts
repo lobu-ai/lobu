@@ -1051,6 +1051,8 @@ describe('views on a public org publish the list, never the source', () => {
 		expect(body).not.toContain('export default');
 		expect(body).not.toContain('source_code');
 		expect(body).not.toContain('compiled_code');
+		// Nobody's author identity goes to a visitor.
+		expect(body).not.toContain('last_writer');
 	});
 
 	it('anonymous REST reads the view shell of a public org', async () => {
