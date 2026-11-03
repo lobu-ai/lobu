@@ -211,11 +211,13 @@ describe("access-model cross-check", () => {
 		}
 	});
 
-	it("keeps view reads authenticated while reporting read tier", () => {
-		for (const action of ["list", "get"]) {
-			expect(getRequiredAccessLevel("manage_views", { action }, false)).toBe("read");
-			expect(isPublicReadable("manage_views", { action })).toBe(false);
-		}
+	it("keeps view source authenticated while publishing the listing", () => {
+		// A public org publishes its views: the listing is metadata a visitor may
+		// read, while `get` returns the compiled source and stays member-only.
+		expect(getRequiredAccessLevel("manage_views", { action: "list" }, false)).toBe("read");
+		expect(isPublicReadable("manage_views", { action: "list" })).toBe(true);
+		expect(getRequiredAccessLevel("manage_views", { action: "get" }, false)).toBe("read");
+		expect(isPublicReadable("manage_views", { action: "get" })).toBe(false);
 	});
 
 	it("keeps duplicate discovery authenticated while reporting read tier", () => {

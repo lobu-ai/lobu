@@ -343,7 +343,19 @@ async function handleList(
   ctx: ToolContext
 ): Promise<ManageViewsResult> {
   const views = await listViews(ctx.organizationId);
-  return { action: 'list', views: views.map(projectView) };
+  return {
+    action: 'list',
+    // A public workspace's visitor reads this list too, and `last_writer` is an
+    // internal apply id or user id. Members keep it (it is how the web host
+    // distinguishes a config-owned row from a chat-authored one); readers
+    // outside the workspace get every other field and no author identity.
+    views: views.map((view) => {
+      const row = projectView(view);
+      if (ctx.memberRole) return row;
+      const { last_writer: _author, ...publicRow } = row;
+      return publicRow as typeof row;
+    }),
+  };
 }
 
 async function handleRemove(

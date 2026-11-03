@@ -223,12 +223,16 @@ export const PUBLIC_READ_ACTIONS: Record<string, Set<string> | null> = {
 		"get_feedback",
 	]),
 	manage_classifiers: new Set(["list"]),
-	// manage_views is deliberately absent: views carry owner-authored
-	// executable source, so reads stay signed-in-only in phase 1 (the public
-	// anonymous bridge arrives in phase 2 with its own design).
-	// `list`/`get` are org-read-gated in the handler (requireOrgReadAccess);
-	// their METHOD_METADATA tier is `read` so query_sdk read mode surfaces them.
+	// A public workspace publishes its views too: the Data hub's tabs and the
+	// rendered view are part of what a visitor came to see, and gating them
+	// behind membership made a shared demo link render an empty pane.
+	//
+	// Only the METADATA is public here. `get` returns `source_code` and the
+	// retained source files, so it stays member-only; a public reader reaches a
+	// view's compiled bundle through the tiles-and-bundle projection at
+	// `GET /api/:orgSlug/public/views/:key/shell`, never through its source.
 	// The mutating siblings stay owner-admin (OWNER_ADMIN_ACTIONS).
+	manage_views: new Set(["list"]),
 	manage_agents: new Set(["list", "get"]),
 };
 

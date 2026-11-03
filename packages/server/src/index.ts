@@ -99,6 +99,7 @@ import {
 	publicRestGetAutomations,
 	publicRestListClassifiers,
 	publicRestListConnectors,
+	publicRestGetViewShell,
 	publicRestSearchKnowledge,
 	restGetAutomations,
 	restGetViewShell,
@@ -1037,6 +1038,10 @@ app.post(
 	restInvokeEventAction,
 );
 app.get("/api/:orgSlug/views/:key/shell", mcpAuth, restGetViewShell);
+app.get(
+	"/api/:orgSlug/public/views/:key/shell",
+	publicRestGetViewShell,
+);
 app.post(
 	"/api/:orgSlug/views/:key/actions/:action",
 	mcpAuth,

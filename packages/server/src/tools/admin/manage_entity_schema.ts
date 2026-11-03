@@ -2382,6 +2382,30 @@ async function rtHandleListRules(
   args: ManageEntitySchemaArgs,
   ctx: ToolContext
 ): Promise<ManageEntitySchemaResult> {
+  // No slug: every rule this caller can see, in one read. The Data hub's schema
+  // map needs the rules for every relationship type at once, so the per-type
+  // form cost one request per type — ~16 metered public reads on a cold load of
+  // a large workspace, against a 60/minute anonymous budget.
+  if (!args.slug) {
+    const sql = getDb();
+    const rules = await sql`
+      SELECT r.id, r.relationship_type_id, r.source_entity_type_slug,
+             r.target_entity_type_slug, r.created_at
+      FROM entity_relationship_type_rules r
+      JOIN entity_relationship_types rt ON rt.id = r.relationship_type_id
+      LEFT JOIN organization o ON o.id = rt.organization_id
+      WHERE r.deleted_at IS NULL
+        AND rt.deleted_at IS NULL
+        AND (rt.organization_id = ${ctx.organizationId} OR o.visibility = 'public')
+      ORDER BY r.id ASC
+    `;
+    return {
+      schema_type: 'relationship_type',
+      action: 'list_rules',
+      rules: rules as unknown as RelationshipTypeRuleRow[],
+    };
+  }
+
   const { typeId, sql } = await requireRelationshipType(args.slug, 'list_rules', ctx, 'read');
 
   const rules = await sql`

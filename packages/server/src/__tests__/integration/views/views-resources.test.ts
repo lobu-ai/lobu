@@ -4,8 +4,8 @@
  * structured (non-text-only) reads views depend on.
  *
  * Covers §10(b) one tool binds one stable resource, §10(c) outputSchema on
- * read tools instead of query_sql/isolated-vm, §10(d) the authenticated shell
- * route with no public counterpart, and §10(h) entity URL resolution.
+ * read tools instead of query_sql/isolated-vm, §10(d) the member-only shell
+ * route plus its public-org projection, and §10(h) entity URL resolution.
  */
 import { MCP_PROTOCOL_VERSION } from '@lobu/core';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
@@ -933,7 +933,12 @@ describe('views resources + open_view + invoke_view_action', () => {
 	});
 });
 
-describe('views on a public org stay signed-in-only', () => {
+/**
+ * A public workspace publishes its view LIST and the compiled bundle a visitor
+ * needs to render one. It never publishes source: `manage_views get` and the
+ * MCP resource that carries the module stay signed-in-only.
+ */
+describe('views on a public org publish the list, never the source', () => {
 	let publicSlug: string;
 
 	async function anonymousRpc(method: string, params: unknown) {
@@ -1022,12 +1027,57 @@ describe('views on a public org stay signed-in-only', () => {
 		expect(await res.text()).not.toContain('export default');
 	});
 
-	it('anonymous tools/list hides manage_views', async () => {
+	it('anonymous tools/list stays scope-filtered to search', async () => {
 		const json = await anonymousRpc('tools/list', {});
 		const names = (json.result?.tools as Array<{ name: string }>).map(
 			(t) => t.name
 		);
+		// `list` being public admits the REST call below, not the MCP tool: an
+		// anonymous session still has no read scope, so admin-tier tools stay
+		// off the listing just as manage_entity does.
 		expect(names).not.toContain('manage_views');
+	});
+
+	it('anonymous REST lists views on a public org without their source', async () => {
+		const res = await post(`/api/${publicSlug}/manage_views`, {
+			body: { action: 'list' },
+		});
+		expect(res.status).toBe(200);
+		const json = (await res.json()) as {
+			views: Array<Record<string, unknown>>;
+		};
+		expect(json.views.map((v) => v.key)).toEqual(['board']);
+		const body = JSON.stringify(json);
+		expect(body).not.toContain('export default');
+		expect(body).not.toContain('source_code');
+		expect(body).not.toContain('compiled_code');
+		// Nobody's author identity goes to a visitor.
+		expect(body).not.toContain('last_writer');
+	});
+
+	it('anonymous REST reads the view shell of a public org', async () => {
+		const res = await get(`/api/${publicSlug}/public/views/board/shell`);
+		expect(res.status).toBe(200);
+		expect(res.headers.get('content-type')).toContain('text/plain');
+		expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+		expect(res.headers.get('x-lobu-view-hash')).toMatch(/^[0-9a-f]{16}$/);
+		const html = await res.text();
+		expect(html).toContain('name="lobu-view" content="board"');
+		// The bundle is inlined; the authored module is not.
+		expect(html).not.toContain('export default');
+
+		const missing = await get(`/api/${publicSlug}/public/views/gone/shell`);
+		expect(missing.status).toBe(404);
+	});
+
+	it('anonymous public shell 404s for a private workspace', async () => {
+		const privateOrg = await createTestOrganization({
+			name: 'Views Private Org',
+			slug: 'views-private-org',
+		});
+		const res = await get(`/api/${privateOrg.slug}/public/views/board/shell`);
+		expect(res.status).toBe(404);
+		expect(await res.text()).not.toContain('lobu-view');
 	});
 
 	it('signed-in OAuth nonmember cannot read per-view bundles on a public org', async () => {
