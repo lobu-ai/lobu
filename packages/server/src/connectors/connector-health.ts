@@ -12,7 +12,7 @@
  * This module is a periodic, read-only scan over `connections` + `feeds` that
  * classifies each active connection as healthy or unhealthy by clear rules and
  * emits a structured `logger.error` for each NEWLY-unhealthy connection, which
- * lands in the hosted log pipeline (Loki). Because no log reaches the org's own
+ * lands in the hosted log pipeline (ClickHouse). Because no log reaches the org's own
  * admins, the same transition also sends them an in-product notification when
  * a connection that was collecting has stopped.
  *

@@ -296,7 +296,7 @@ function finalizeQuerySqlResult(
 // Cost-attribution ledger: a single expensive user/derived query is how an org
 // degrades the shared DB for everyone (precedent: the 3.5s subscription view).
 // Anything at or above this gets an alertable, structured entry so expensive
-// queries can be rolled up per org in Loki and cross-referenced against
+// queries can be rolled up per org in ClickHouse and cross-referenced against
 // pg_stat_statements for the normalized SQL.
 const SLOW_QUERY_COST_MS = 500;
 

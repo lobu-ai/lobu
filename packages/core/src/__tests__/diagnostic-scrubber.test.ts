@@ -354,8 +354,8 @@ describe("diagnostic credential scrubber", () => {
 
   it("recurses into credential maps instead of collapsing them", () => {
     // A structured value beneath a credential container recurses, so
-    // pre-redacted leaves and surviving key names pass through (the Loki
-    // connector relies on this per-key treatment) — but raw scalar leaves
+    // pre-redacted leaves and surviving key names pass through (connectors
+    // that pre-redact rely on this per-key treatment) — but raw scalar leaves
     // beneath one are credential-adjacent and collapse, including provider
     // names the key rules alone would miss (`credentialsByName.github`).
     const result = scrubDiagnosticValue({
