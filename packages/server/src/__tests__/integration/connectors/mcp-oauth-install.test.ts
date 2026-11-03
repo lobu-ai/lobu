@@ -409,6 +409,110 @@ describe('OAuth-protected MCP connector installation', () => {
     ).toBe(true);
   });
 
+  it.each([
+    ['https://gateway.test', true],
+    ['http://localhost:8787', false],
+  ] as const)(
+    'uses the published client metadata document as the client ID when the server cannot register clients (base %s)',
+    async (baseUrl, expectsMetadataClient) => {
+      const metadataServerUrl = 'https://mcp.example.com/metadata-client';
+      globalThis.fetch = vi.fn(async (url: string | URL | Request) => {
+        const href = String(url);
+        if (href === metadataServerUrl) {
+          return new Response(JSON.stringify({ error: 'invalid_token' }), {
+            status: 401,
+            headers: {
+              'Content-Type': 'application/json',
+              'WWW-Authenticate': `Bearer resource_metadata="${resourceMetadataUrl}"`,
+            },
+          });
+        }
+        if (href === resourceMetadataUrl) {
+          return jsonResponse({
+            resource: metadataServerUrl,
+            authorization_servers: [authorizationServer],
+            scopes_supported: ['text_to_speech'],
+          });
+        }
+        if (href === authorizationMetadataUrl) {
+          return jsonResponse({
+            issuer: authorizationServer,
+            authorization_endpoint: 'https://auth.example.com/authorize',
+            token_endpoint: 'https://auth.example.com/token',
+            client_id_metadata_document_supported: true,
+            token_endpoint_auth_methods_supported: ['none', 'private_key_jwt'],
+            code_challenge_methods_supported: ['S256'],
+          });
+        }
+        throw new Error(`Unexpected fetch: ${href}`);
+      }) as typeof fetch;
+
+      const { org, ctx } = await seedOwnerContext({
+        orgName: 'Metadata Client MCP Org',
+        userName: 'Metadata Client MCP Owner',
+      });
+      process.env.PUBLIC_GATEWAY_URL = baseUrl;
+      __resetPublicOriginCachesForTests();
+      ctx.baseUrl = baseUrl;
+
+      const installed = await manageConnections(
+        { action: 'install_connector', mcp_url: metadataServerUrl },
+        TEST_ENV,
+        ctx
+      );
+      expect(installed).toMatchObject({
+        action: 'install_connector',
+        installed: true,
+        connector_key: 'mcp.mcp-example-com',
+      });
+
+      const sql = getTestDb();
+      const appProfiles = (await sql`
+        SELECT auth_data
+        FROM auth_profiles
+        WHERE organization_id = ${org.id}
+          AND connector_key = 'mcp.mcp-example-com'
+          AND profile_kind = 'oauth_app'
+          AND status = 'active'
+      `) as Array<{ auth_data: Record<string, unknown> }>;
+      if (!expectsMetadataClient) {
+        // The authorization server could not fetch a document from a private origin.
+        expect(appProfiles).toHaveLength(0);
+        return;
+      }
+      expect(appProfiles).toHaveLength(1);
+      expect(Object.keys(appProfiles[0].auth_data)).toEqual(['MCP_CLIENT_ID']);
+
+      const connected = await manageConnections(
+        { action: 'connect', connector_key: 'mcp.mcp-example-com' },
+        TEST_ENV,
+        ctx
+      );
+      expect(connected).toMatchObject({ status: 'pending_auth', auth_type: 'oauth' });
+      const startResponse = await connectRoutes.request(
+        `/${String((connected as { connect_token: string }).connect_token)}/oauth/start`
+      );
+      expect(startResponse.status).toBe(302);
+      const authorizeUrl = new URL(startResponse.headers.get('location')!);
+      const clientId = authorizeUrl.searchParams.get('client_id');
+      const redirectUri = authorizeUrl.searchParams.get('redirect_uri');
+      expect(clientId).toBe('https://gateway.test/connect/oauth/client-metadata.json');
+      expect(authorizeUrl.searchParams.get('code_challenge_method')).toBe('S256');
+
+      // The authorization server fetches the client ID and requires the
+      // document to name itself and the redirect the authorize request used.
+      const documentResponse = await connectRoutes.request(
+        new URL(clientId!).pathname.replace(/^\/connect/, '')
+      );
+      expect(documentResponse.status).toBe(200);
+      expect(documentResponse.headers.get('content-type')).toContain('application/json');
+      const document = (await documentResponse.json()) as Record<string, unknown>;
+      expect(document.client_id).toBe(clientId);
+      expect(document.redirect_uris).toEqual([redirectUri]);
+      expect(document.token_endpoint_auth_method).toBe('none');
+    }
+  );
+
   it.each([false, true])('keeps anonymous connections when optional OAuth registration fails=%s', async (registrationFails) => {
     const optionalUrl = 'https://mcp.example.com/mcp';
     let registrationCount = 0;

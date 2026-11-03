@@ -22,6 +22,8 @@ export interface McpOAuthMetadata {
   authorizationUrl: string;
   tokenUrl: string;
   registrationUrl?: string;
+  /** The server accepts a client metadata document URL as `client_id`. */
+  clientIdMetadataDocumentSupported: boolean;
   /** Scopes requested by the initial WWW-Authenticate challenge, when present. */
   challengeScopes?: string[];
   scopesSupported: string[];

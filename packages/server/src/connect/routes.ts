@@ -11,6 +11,7 @@
  * - POST /connect/:token/cancel       → reset credentials and cancel validation
  * - GET  /connect/:token/oauth/start    → redirect to OAuth provider
  * - GET  /connect/oauth/callback        → stable OAuth callback (token from ?state=)
+ * - GET  /connect/oauth/client-metadata.json → public OAuth client metadata document
  */
 
 import { type Context, Hono } from 'hono';
@@ -62,6 +63,7 @@ import {
 } from './atlassian-resources';
 import {
   buildAuthorizationUrl,
+  buildClientMetadataDocument,
   exchangeCodeForTokens,
   fetchUserInfoWithRaw,
   normalizeUserInfo,
@@ -693,6 +695,16 @@ connectRoutes.get('/:token/oauth/start', requireConnectToken, async (c) => {
   }
 
   return c.redirect(authUrl);
+});
+
+/**
+ * GET /connect/oauth/client-metadata.json
+ * Public OAuth client metadata document. Authorization servers without dynamic
+ * registration fetch it when this URL is sent as `client_id`.
+ */
+connectRoutes.get('/oauth/client-metadata.json', (c) => {
+  c.header('Cache-Control', 'public, max-age=3600');
+  return c.json(buildClientMetadataDocument(getBaseUrl(c)));
 });
 
 /**

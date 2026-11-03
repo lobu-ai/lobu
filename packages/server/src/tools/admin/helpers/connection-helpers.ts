@@ -40,7 +40,14 @@ import { buildConnectionsUrl } from '../../../utils/url-builder';
 import type { ToolContext } from '../../registry';
 import { getOrgUrlContext } from '../../view-urls';
 import { isAdminOrOwnerRole } from '../../access-control';
-import { registerMcpOAuthClient } from '../../../mcp-proxy/client';
+import {
+  getClientMetadataDocumentUrl,
+  getSharedOAuthCallbackUrl,
+} from '../../../connect/oauth-providers';
+import {
+  registerMcpOAuthClient,
+  supportsPublicMcpOAuthClient,
+} from '../../../mcp-proxy/client';
 import type { McpOAuthMetadata } from '../../../mcp-proxy/types';
 
 // ============================================
@@ -1183,18 +1190,28 @@ export async function maybeUpsertAuthAfterInstall(
   }
 
   const oauthMetadata = installed.mcpOAuth;
-  if (!oauthMetadata?.registrationUrl) return;
+  if (!oauthMetadata) return;
+  const callbackBase = getConnectBaseUrl(ctx);
+  // Without dynamic registration, a server that accepts a client metadata
+  // document can use this install's published document URL as the client ID.
+  // The server must fetch that URL, so it needs a public HTTPS origin, and the
+  // document declares a secretless client.
+  const usesMetadataDocument =
+    !oauthMetadata.registrationUrl &&
+    oauthMetadata.clientIdMetadataDocumentSupported &&
+    callbackBase.startsWith('https://') &&
+    supportsPublicMcpOAuthClient(oauthMetadata);
+  if (!oauthMetadata.registrationUrl && !usesMetadataDocument) return;
 
   const oauthMethod = getOAuthMethods(installed.authSchema)[0];
   if (!oauthMethod) {
     throw new Error('OAuth-protected MCP connector is missing its OAuth auth method');
   }
 
-  const callbackBase = getConnectBaseUrl(ctx);
   if (!callbackBase) {
     throw new Error('A public Lobu callback URL is required to register the MCP OAuth client');
   }
-  const redirectUri = `${callbackBase}/connect/oauth/callback`;
+  const redirectUri = getSharedOAuthCallbackUrl(callbackBase);
   const { clientIdKey, clientSecretKey } = getOAuthCredentialKeys(oauthMethod);
   const provider = oauthMethod.provider.toLowerCase();
 
@@ -1226,21 +1243,24 @@ export async function maybeUpsertAuthAfterInstall(
     `;
     if (existingRows.length > 0) return;
 
-    const registration = await registerMcpOAuthClient({
-      metadata: oauthMetadata,
-      redirectUris: [redirectUri],
-      clientName: `Lobu - ${installed.name}`,
-    }).catch((error) => {
-      if (!getAuthMethods(installed.authSchema).some((method) => method.type === 'none')) {
-        throw error;
-      }
-      // Optional sign-in setup must not prevent an otherwise usable anonymous install.
-      logger.warn(
-        { connector_key: installed.connectorKey, error: getErrorMessage(error) },
-        'Optional MCP OAuth registration failed; configure an OAuth app or retry installation to sign in'
-      );
-      return null;
-    });
+    const registration: { clientId: string; clientSecret?: string } | null =
+      usesMetadataDocument
+        ? { clientId: getClientMetadataDocumentUrl(callbackBase) }
+        : await registerMcpOAuthClient({
+            metadata: oauthMetadata,
+            redirectUris: [redirectUri],
+            clientName: `Lobu - ${installed.name}`,
+          }).catch((error) => {
+            if (!getAuthMethods(installed.authSchema).some((method) => method.type === 'none')) {
+              throw error;
+            }
+            // Optional sign-in setup must not prevent an otherwise usable anonymous install.
+            logger.warn(
+              { connector_key: installed.connectorKey, error: getErrorMessage(error) },
+              'Optional MCP OAuth registration failed; configure an OAuth app or retry installation to sign in'
+            );
+            return null;
+          });
     if (!registration) return;
 
     await createAuthProfile(
