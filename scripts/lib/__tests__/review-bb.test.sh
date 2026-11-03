@@ -294,6 +294,45 @@ if printf '%s\n' "$MALFORMED_VERDICT" | jq -e '(.ok == true)' >/dev/null 2>&1; t
   fail "malformed output must fail the caller's schema validation"
 fi
 
+# A freshly completed verdict can parse yet contradict the decision rules.
+# Reproduce the saved pass-with-missing-check failure without machine paths.
+jq -n --arg p "$SCRATCH" '{thread:{id:"thr_child9",status:"idle"},environment:{path:$p}}' > "$FAKE_STATE/child-show.json"
+contradictory=$(jq -nc --arg tree "$(git rev-parse 'HEAD^{tree}')" '{decision:"pass",findings:[],verification:{tree:$tree,checked:["focused tests passed"],missing:["integration check unavailable"]}}')
+printf '%s\n' "$contradictory" > "$FAKE_STATE/output.txt"
+predicate="$(review_verdict_predicate)"
+if printf '%s\n' "$contradictory" | jq -e "$predicate" >/dev/null; then
+  fail 'pass with a missing check must remain invalid'
+fi
+export BB_FAKE_REPAIRED_OUTPUT="$(printf '%s' "$contradictory" | jq -c '.decision="verification_blocked"')"
+reset_calls
+review_bb_run_reviewer "$PROMPT" "$HEAD_SHA_SCRATCH" "origin/main" "abcdef123456" \
+  codex gpt-6-astra xhigh "$predicate" "/tmp/ci.txt" >/dev/null 2>&1
+unset BB_FAKE_REPAIRED_OUTPUT
+printf '%s\n' "$RAW" | jq -e "$predicate" >/dev/null || fail 'fresh inconsistent verdict was not reconciled'
+[ "$(printf '%s' "$RAW" | jq -r .decision)" = verification_blocked ] || fail 'missing verification must never become a pass'
+[ "$(grep -c '^thread tell ' "$FAKE_STATE/calls.log" || true)" = 1 ] || fail 'must correct once in the same reviewer session'
+[ "$(spawn_calls)" = 1 ] || fail 'correction must not spawn a second review'
+# A failed correction remains invalid and cannot consume another correction.
+jq -n --arg p "$SCRATCH" '{thread:{id:"thr_child9",status:"idle"},environment:{path:$p}}' > "$FAKE_STATE/child-show.json"
+printf '%s\n' "$contradictory" > "$FAKE_STATE/output.txt"
+reset_calls
+review_bb_run_reviewer "$PROMPT" "$HEAD_SHA_SCRATCH" "origin/main" "abcdef123456" \
+  codex gpt-6-astra xhigh "$predicate" "/tmp/ci.txt" >/dev/null 2>&1
+if printf '%s\n' "$RAW" | jq -e "$predicate" >/dev/null; then fail 'uncorrected contradiction became green'; fi
+[ "$(grep -c '^thread tell ' "$FAKE_STATE/calls.log" || true)" = 1 ] || fail 'fresh correction exceeded its budget'
+# A stale tree must be rejected rather than relabeled by a correction.
+jq -n --arg p "$SCRATCH" '{thread:{id:"thr_child9",status:"idle"},environment:{path:$p}}' > "$FAKE_STATE/child-show.json"
+printf '%s\n' "$contradictory" > "$FAKE_STATE/output.txt"
+export REVIEW_TREE=0000000000000000000000000000000000000000
+reset_calls
+review_bb_run_reviewer "$PROMPT" "$HEAD_SHA_SCRATCH" "origin/main" "abcdef123456" \
+  codex gpt-6-astra xhigh "$predicate" "/tmp/ci.txt" >/dev/null 2>&1
+unset REVIEW_TREE
+[ "$REVIEWER_EXIT" = 1 ] || fail 'stale evidence was accepted'
+if grep -q '^thread tell ' "$FAKE_STATE/calls.log"; then fail 'requested correction of stale evidence'; fi
+# Restore a normal child for the remaining isolation cases.
+jq -n --arg p "$SCRATCH" '{thread:{id:"thr_child9",projectId:"proj_TEST",status:"idle"},environment:{path:$p}}' > "$FAKE_STATE/child-show.json"
+
 # 7. Error-status child fails closed and is not reused.
 jq -n --arg p "$SCRATCH" '{thread:{id:"thr_child9",projectId:"proj_TEST",status:"error"},environment:{id:"env_child9",path:$p}}' > "$FAKE_STATE/child-show.json"
 printf '{"ok":true}\n' > "$FAKE_STATE/output.txt"

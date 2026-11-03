@@ -14,6 +14,7 @@ import {
   createTestAccessToken,
   createTestOAuthClient,
   createTestOrganization,
+  createTestPAT,
   createTestUser,
   seedSystemEntityTypes,
 } from '../../setup/test-fixtures';
@@ -102,6 +103,47 @@ describe('MCP query_sdk / run_sdk tool surface', () => {
     expect(byName.has('search')).toBe(false);
     expect(byName.has('query')).toBe(false);
     expect(byName.has('run')).toBe(false);
+  });
+
+  it.each(['run_sdk', 'query_sdk', 'query_sql'])('advertises a required title for %s on scoped and account MCP', async (name) => {
+    const account = await createTestAccessToken(ownerUserId, null, oauthClientId, {
+      scope: 'mcp:read mcp:write mcp:admin', grantedOrganizationIds: [ownerOrgId],
+    });
+    for (const options of [{ token, orgSlug: ownerSlug }, { token: account.token }]) {
+      const result = await mcpListTools(options);
+      const tool = result.tools.find((tool) => tool.name === name) as any;
+      expect(tool?.inputSchema?.required, `${name}.required`).toContain('title');
+      expect(tool?.inputSchema?.properties?.title).toMatchObject({ type: 'string', maxLength: 200 });
+      expect(tool?.inputSchema?.properties?.title.description).toEqual(expect.any(String));
+    }
+  });
+
+  it('accepts and audits untitled SDK and SQL calls from OAuth and PAT clients', async () => {
+    const pat = await createTestPAT(ownerUserId, ownerOrgId, {
+      scope: 'mcp:read mcp:write mcp:admin',
+    });
+    const db = getDb();
+    for (const callerToken of [token, pat.token]) {
+      for (const name of ['run_sdk', 'query_sdk', 'query_sql']) {
+        const args = name === 'query_sql'
+          ? { sql: 'SELECT 42 AS answer' }
+          : { script: 'export default async (_ctx, client) => client.query("SELECT 42 AS answer")' };
+        const result = await mcpToolsCall(name, args, { token: callerToken, orgSlug: ownerSlug });
+        if (name === 'query_sql') expect(result.rows).toEqual([{ answer: 42 }]);
+        else expect(result.return_value).toEqual([{ answer: 42 }]);
+        const rows = await db<Array<{ payload_data: Record<string, unknown> }>>`
+          SELECT payload_data FROM events
+          WHERE organization_id = ${ownerOrgId}
+            AND semantic_type = 'audit'
+            AND origin_type = 'tool_invocation'
+            AND payload_data->>'tool_name' = ${name}
+          ORDER BY id DESC LIMIT 1
+        `;
+        expect(rows).toHaveLength(1);
+        expect(rows[0].payload_data.success).toBe(true);
+        expect(rows[0].payload_data.title).toBeNull();
+      }
+    }
   });
 
   // Authorization is explicitly pinned separately from host-facing safety

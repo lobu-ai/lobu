@@ -367,6 +367,26 @@ review_bb_pr_number() {
   gh pr view --json number --jq '.number // empty' 2>/dev/null || true
 }
 
+# Correct representation/decision inconsistencies in the completed review only.
+# Never discard missing evidence or rerun the audit to manufacture a pass.
+review_bb_request_correction() {
+  local child="$1" title="$2" schema_jq="$3" prompt
+  prompt="$(mktemp /tmp/lobu-review-format.XXXXXX)"
+  {
+    printf 'Reconcile your completed verdict as exactly one JSON object. Do not inspect code or run checks again. Preserve all material missing checks: a pass requires an empty verification.missing; use verification_blocked when a material check is unavailable. Put optional context in verification.checked. Never remove a material gap to obtain pass. Target tree: %s.\n' "${REVIEW_TREE:-$(git rev-parse 'HEAD^{tree}')}"
+    cat "$(git rev-parse --show-toplevel)/prompts/review-output-schema.json"
+    printf '\nThe verdict must also satisfy this validation predicate:\n%s\n' "$schema_jq"
+  } > "$prompt"
+  review_bb_register_child "$child"
+  if ! review_bb_cli_invoke thread tell "$child" --message-file "$prompt" --mode auto --json |
+      jq -e '.delivery == "sent"' >/dev/null; then
+    rm -f "$prompt"
+    return 1
+  fi
+  rm -f "$prompt"
+  review_bb_cli_invoke thread update "$child" --title "$title (format-repair)" --json >/dev/null
+}
+
 # review_bb_run_reviewer <prompt-file> <head-sha> <base-branch> <diff-hash>
 #   <reviewer> <model> <effort> <schema-jq> <ci-checks-file> [<verify-key>]
 # Full visible-child review. Always returns 0; sets RAW (child output text)
@@ -427,18 +447,10 @@ review_bb_run_reviewer() {
              [ "$(review_bb_cli_invoke thread show "$existing_id" --json | jq -r '.thread.title // ""')" != "$title (format-repair)" ]; then
           # Repair formatting once in the same session; never repeat the audit
           # because the provider wrapped a completed verdict in prose.
-          bb_prompt="$(mktemp /tmp/lobu-review-format.XXXXXX)"
-          printf 'Return your completed review as exactly one JSON object matching this schema. Do not inspect code or run checks again. The target tree is %s.\n' "${REVIEW_TREE:-$head_sha}" > "$bb_prompt"
-          cat "$(git rev-parse --show-toplevel)/prompts/review-output-schema.json" >> "$bb_prompt"
-          review_bb_register_child "$existing_id"
-          if ! review_bb_cli_invoke thread tell "$existing_id" --message-file "$bb_prompt" --mode auto --json |
-              jq -e '.delivery == "sent"' >/dev/null; then
-            rm -f "$bb_prompt"
+          review_bb_request_correction "$existing_id" "$title" "$schema_jq" || {
             RAW="review_bb: could not request corrected output from @thread:$existing_id"
             return 0
-          fi
-          rm -f "$bb_prompt"
-          review_bb_cli_invoke thread update "$existing_id" --title "$title (format-repair)" --json >/dev/null || return 0
+          }
           child="$existing_id"
         else
           RAW="review_bb: existing reviewer @thread:$existing_id has no usable verdict or needs attention; refusing a fresh paid review"
@@ -511,43 +523,65 @@ review_bb_run_reviewer() {
     fi
   fi
 
-  if ! review_bb_wait_idle "$child" "${BB_REVIEW_WAIT_TIMEOUT:-20m}"; then
-    RAW="review_bb: child @thread:$child did not settle (owned child stopped)"
-    return 0
-  fi
-  review_bb_clear_child
+  local correction_attempt
+  for correction_attempt in 0 1; do
+    if ! review_bb_wait_idle "$child" "${BB_REVIEW_WAIT_TIMEOUT:-20m}"; then
+      RAW="review_bb: child @thread:$child did not settle (owned child stopped)"
+      return 0
+    fi
+    review_bb_clear_child
 
-  # Test seam (mirrors REVIEW_PROCESS_CONTROL_ROOT_FOR_TESTS): executed after
-  # the child settles and before the HEAD/pinning checks accept its output.
-  if [ -n "${REVIEW_BB_PRE_ACCEPT_HOOK_FOR_TESTS:-}" ]; then
-    bash -c "$REVIEW_BB_PRE_ACCEPT_HOOK_FOR_TESTS" || true
-  fi
+    # Test seam (mirrors REVIEW_PROCESS_CONTROL_ROOT_FOR_TESTS): executed after
+    # the child settles and before the HEAD/pinning checks accept its output.
+    if [ -n "${REVIEW_BB_PRE_ACCEPT_HOOK_FOR_TESTS:-}" ]; then
+      bash -c "$REVIEW_BB_PRE_ACCEPT_HOOK_FOR_TESTS" || true
+    fi
 
-  # Bind the verdict to the exact reviewed head/tree: the driver may have been
-  # superseded while the child ran (the caller re-checks before posting, but
-  # never accept a verdict for a moved HEAD here either).
-  if [ "$(git rev-parse HEAD 2>/dev/null || true)" != "$head_sha" ]; then
-    RAW="review_bb: HEAD moved during child review (was $head_sha); discarding child output"
-    return 0
-  fi
-  if [ "$(review_bb_env_path "$child")" != "$worktree" ]; then
-    RAW="review_bb: child @thread:$child is not attached to the reviewed worktree"
-    return 0
-  fi
-  if ! review_bb_child_settled_idle "$child"; then
-    RAW="review_bb: child @thread:$child is not idle after wait"
-    return 0
-  fi
-  pending="$(review_bb_pending_interaction "$child")" || pending=unknown
-  if [ "$pending" != "0" ]; then
-    RAW="review_bb: child @thread:$child has a pending approval/interaction or unreadable interaction state; a blocked session is never a passing review"
-    return 0
-  fi
-  out="$(review_bb_child_output "$child")"
-  if [ -z "$(printf '%s' "$out" | tr -d '[:space:]')" ]; then
-    RAW="review_bb: child @thread:$child produced no output"
-    return 0
-  fi
+    # Bind the verdict to the exact reviewed head/tree: the driver may have been
+    # superseded while the child ran (the caller re-checks before posting, but
+    # never accept a verdict for a moved HEAD here either).
+    if [ "$(git rev-parse HEAD 2>/dev/null || true)" != "$head_sha" ]; then
+      RAW="review_bb: HEAD moved during child review (was $head_sha); discarding child output"
+      return 0
+    fi
+    if [ "$(review_bb_env_path "$child")" != "$worktree" ]; then
+      RAW="review_bb: child @thread:$child is not attached to the reviewed worktree"
+      return 0
+    fi
+    if ! review_bb_child_settled_idle "$child"; then
+      RAW="review_bb: child @thread:$child is not idle after wait"
+      return 0
+    fi
+    pending="$(review_bb_pending_interaction "$child")" || pending=unknown
+    if [ "$pending" != "0" ]; then
+      RAW="review_bb: child @thread:$child has a pending approval/interaction or unreadable interaction state; a blocked session is never a passing review"
+      return 0
+    fi
+    out="$(review_bb_child_output "$child")"
+    if [ -z "$(printf '%s' "$out" | tr -d '[:space:]')" ]; then
+      RAW="review_bb: child @thread:$child produced no output"
+      return 0
+    fi
+    verdict="$(extract_json_verdict "$out" 2>/dev/null || true)"
+    if [ -n "$verdict" ] && printf '%s\n' "$verdict" | jq -e "$schema_jq" >/dev/null 2>&1; then
+      break
+    fi
+    if [ -n "${REVIEW_TREE:-}" ] && printf '%s\n' "$verdict" | jq -e \
+        --arg tree "$REVIEW_TREE" '.verification.tree != null and .verification.tree != $tree' >/dev/null 2>&1; then
+      RAW="review_bb: output belongs to another tree; refusing to relabel stale evidence"
+      return 0
+    fi
+    # An earlier dedup correction consumes the same budget as a fresh one.
+    if [ "$correction_attempt" = 1 ] ||
+       [ "$(review_bb_cli_invoke thread show "$child" --json | jq -r '.thread.title // ""')" = "$title (format-repair)" ]; then
+      break
+    fi
+    echo ">> reviewer output failed verdict validation; requesting one correction in @thread:$child" >&2
+    review_bb_request_correction "$child" "$title" "$schema_jq" || {
+      RAW="review_bb: could not request corrected output from @thread:$child"
+      return 0
+    }
+  done
   RAW="$out"
   REVIEWER_EXIT=0
   REVIEW_PREVIOUS_THREAD="$child"
