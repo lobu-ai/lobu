@@ -6,8 +6,8 @@
  * intent, collect metrics from the agent event stream, then run the
  * deterministic state check + (for read tasks) the reply check.
  *
- * MUST run under node@22 (isolated-vm loads there, not under Bun). Use run.sh,
- * which sources GEMINI_API_KEY from the repo .env and invokes node@22 + tsx.
+ * MUST run under node@26 (isolated-vm loads there, not under Bun). Use run.sh,
+ * which sources GEMINI_API_KEY from the repo .env and invokes node@26 + tsx.
  *
  * Usage (via run.sh):
  *   ./run.sh [--trials N] [--tasks id,id]

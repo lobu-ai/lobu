@@ -5,8 +5,8 @@
  * the SDK directly): this exercises the wire path — JSON-RPC → tool dispatch
  * → isolated-vm → SDK call → response shape.
  *
- * Skipped automatically if isolated-vm cannot load (e.g. local Node 25 without
- * matching prebuilds); CI pins Node 22 where the abi127 prebuild ships.
+ * Skipped automatically if isolated-vm cannot load (e.g. an unsupported local
+ * Node major); CI pins Node 26 where the abi147 prebuild ships.
  */
 
 import { existsSync } from 'node:fs';
@@ -25,18 +25,12 @@ import { TestApiClient, TestMcpClient } from '../../setup/test-mcp-client';
 import { cleanupTestDatabase } from '../../setup/test-db';
 
 function isolatedVmAvailable(): boolean {
-  // isolated-vm ships prebuilds for abi127 (Node 22), abi137 (Node 24), and
-  // isolated-vm-next for Node 26+. We can't actually try `new Isolate()` to
-  // detect — on a wrong ABI it segfaults. Gate on ABI + the package being on
-  // disk (bun install optional dep).
-  const abi = process.versions.modules;
-  const abiOk = abi === '127' || abi === '137' || abi === '147';
-  if (!abiOk) return false;
+  // isolated-vm 7 ships an abi147 (Node 26) prebuild. We can't actually try
+  // `new Isolate()` to detect — on a wrong ABI it segfaults. Gate on ABI + the
+  // package being on disk (bun install optional dep).
+  if (process.versions.modules !== '147') return false;
   const root = fileURLToPath(new URL('../../../../../../', import.meta.url));
-  return (
-    existsSync(join(root, 'node_modules/isolated-vm')) ||
-    existsSync(join(root, 'node_modules/isolated-vm-next'))
-  );
+  return existsSync(join(root, 'node_modules/isolated-vm'));
 }
 
 describe('sandbox run (wire)', () => {

@@ -307,7 +307,7 @@ gate_connector_parity_smoke() {
   gate_require_docker || return 77
   docker build -f docker/worker/Dockerfile -t lobu-worker:parity-smoke . || return 1
   local self_check rc=0
-  self_check=$(docker run --rm --network=none lobu-worker:parity-smoke node dist/bin.js self-check --json) || rc=$?
+  self_check=$(docker run --rm --network=none lobu-worker:parity-smoke node --no-node-snapshot dist/bin.js self-check --json) || rc=$?
   printf '%s\n' "$self_check"
   [ "$rc" -eq 0 ] || return 1
   # Mirrors ci.yml / build-images.yml: the image runs under Node so the isolate

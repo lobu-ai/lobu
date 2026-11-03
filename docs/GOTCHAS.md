@@ -92,7 +92,7 @@ Rollback to a pre-cutover binary must also be quiesced and deploy its matching U
 
 **`could not create shared memory segment: No space left on device` on macOS.** The SHMMNI limit (32), not disk. Each test process frees PostgreSQL segments with no attachments and a dead creator before its first embedded-Postgres start; `make clean-test-pg` does the same on demand. To reap by hand: `ipcs -mobp`, then `ipcrm -m <id>` only for your own entries with `nattch=0` and a dead `CPID`.
 
-**Integration suite prerequisites.** Node 22 is the repo default (`.node-version`); Lobu accepts Node 22–24 and 26+, while Node 25 boots without the SDK sandbox. Global setup uses `DATABASE_URL` if set, otherwise spawns an ephemeral embedded Postgres + pgvector.
+**Integration suite prerequisites.** Node 26 is the repo default (`.node-version`) and the only supported runtime: the gateway and worker load the Node-26-only `isolated-vm` native build. Global setup uses `DATABASE_URL` if set, otherwise spawns an ephemeral embedded Postgres + pgvector.
 
 **Vitest `list --shard=N/M` prints every file (3.2.6 and 4.1.11 alike), even though `run --shard=N/M` partitions correctly.** Do not use `vitest list` to prove shard coverage. Run each shard with the JSON reporter and compare `testResults`: the three shards are disjoint and complete at execution time, but not equal-sized — `packages/server/src/__tests__/setup/shard-sequencer.ts` packs files by measured duration (`shard-timings.json`), so per-shard file counts differ.
 

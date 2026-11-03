@@ -166,7 +166,7 @@ jobs:
         run: |
           set -o pipefail
           docker run --rm --network=none "${REGISTRY}/${IMAGE_NAME_WORKER}@${{ needs.build-worker.outputs.digest }}" \
-            node dist/bin.js self-check --json | tee worker-self-check.json
+            node --no-node-snapshot dist/bin.js self-check --json | tee worker-self-check.json
           jq -e '.isolate_lane.available == true' worker-self-check.json >/dev/null || {
             echo "::error::worker image cannot load isolated-vm: $(jq -c .isolate_lane worker-self-check.json)"
             exit 1
@@ -281,11 +281,11 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.3.5
+          bun-version: 1.4.4
 
       - uses: actions/setup-node@v7
         with:
-          node-version: "22"
+          node-version: "26"
 
       # Isolated exact-version browser driver; no workspace install or secrets.
       # Ubuntu's runner image supplies Google Chrome.

@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 
 const MIB = 1024 ** 2;
 
-/** Node 22/libuv can miss a cgroup v2 limit on a parent of init.scope. */
+/** Node/libuv can miss a cgroup v2 limit on a parent of init.scope. */
 export function memoryLimit(
   read = (path) => readFileSync(path, "utf8"),
   hostMemory = totalmem()

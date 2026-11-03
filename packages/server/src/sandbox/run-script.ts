@@ -664,24 +664,15 @@ function unwrapIsolatedVm(mod: unknown): IsolatedVmRuntime {
 }
 
 async function loadIsolatedVm(): Promise<IsolatedVmRuntime | null> {
-	// isolated-vm's native addon is ABI-bound per Node line. We ship two builds via
-	// optionalDependencies: isolated-vm@6 (Node 22–24) and the aliased
-	// `isolated-vm-next` = isolated-vm@7 (Node 26+). Node 25 is an EOL non-LTS line
-	// upstream skipped (issue #553), so it has no build → no sandbox. Pick by Node
-	// major and fail closed if the chosen build can't load (e.g. native build was
-	// skipped on this platform) rather than taking down the MCP server.
+	// isolated-vm's native addon is ABI-bound per Node major. This repo ships a
+	// single isolated-vm@7 optionalDependency and targets Node 26, so there is
+	// no version branch: fail closed if the addon cannot load (e.g. the native
+	// build was skipped on this platform) rather than taking down the MCP server.
 	const nodeMajor = Number(process.versions.node?.split(".")[0] ?? 0);
-	if (!Number.isFinite(nodeMajor)) return null;
+	if (nodeMajor !== 26) return null;
 
 	try {
-		if (nodeMajor >= 22 && nodeMajor < 25) {
-			return unwrapIsolatedVm(await import("isolated-vm"));
-		}
-		if (nodeMajor >= 26) {
-			// Aliased to isolated-vm@7 in package.json optionalDependencies.
-			return unwrapIsolatedVm(await import("isolated-vm-next"));
-		}
-		return null;
+		return unwrapIsolatedVm(await import("isolated-vm"));
 	} catch {
 		return null;
 	}
@@ -1322,7 +1313,7 @@ export async function runScript(
 		if (!ivm) {
 			throw new SandboxRuntimeFailure(
 				"RuntimeUnavailable",
-				"isolated-vm is not installed for this platform. Install with `bun install` on a supported Node version (22–24 with prebuilt binaries, or any version with python3 + build-essential available).",
+				"isolated-vm is not installed for this platform. Install with `bun install` on Node 26 (prebuilt binaries are available for supported platforms; otherwise python3 + build-essential is required).",
 			);
 		}
 		// Deferred: `compiler-core` pulls in esbuild and resolves the connector

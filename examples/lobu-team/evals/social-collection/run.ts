@@ -1,7 +1,7 @@
 /**
  * Opt-in collection eval: actual social prompt, real model and production script
  * sandbox; SDK responses are synthetic. No live source, DB or social writes.
- * Requires built workspace packages, Node 22 and OPENAI_API_KEY:
+ * Requires built workspace packages, Node 26 and OPENAI_API_KEY:
  * TSX_TSCONFIG_PATH=examples/lobu-team/evals/social-collection/tsconfig.json \
  * node --env-file=.env --import tsx examples/lobu-team/evals/social-collection/run.ts
  * Optional: --trials 2 --model gpt-5.4 --prompt-file /tmp/baseline-prompt.txt

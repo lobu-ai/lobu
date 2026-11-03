@@ -3,8 +3,7 @@
  *
  * Kept separate from the module's own typings so no public worker type
  * depends on `isolated-vm` being installed: `loadIsolatedVm()` narrows the
- * dynamically imported module to this shape at the load boundary, and both
- * `isolated-vm@6` and `isolated-vm@7` satisfy it.
+ * dynamically imported module to this shape at the load boundary.
  */
 
 export interface IvmReferenceApplyOptions {

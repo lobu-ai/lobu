@@ -19,7 +19,7 @@ for (const adapter of ['claude', 'codex']) {
     bundle: true,
     platform: 'node',
     format: 'esm',
-    target: 'node22',
+    target: 'node26',
     metafile: true,
     // Upstream prebundled CJS dependencies can require Node builtins from ESM.
     banner: { js: "import { createRequire as lobuCreateRequire } from 'node:module'; const require = lobuCreateRequire(import.meta.url);" },

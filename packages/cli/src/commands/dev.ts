@@ -20,6 +20,7 @@ import {
 import { type Credentials, saveCredentials } from "../internal/credentials.js";
 import { agentApiBase } from "../internal/gateway-url.js";
 import { parseEnvContent } from "../internal/index.js";
+import { resolveNode26Binary } from "../internal/node-binary.js";
 import { checkNodeSupport } from "../internal/node-version.js";
 import { loadProjectLink } from "../internal/project-link.js";
 import { prepareRuntime } from "../internal/runtime-components.js";
@@ -174,21 +175,22 @@ export async function devCommand(
 ): Promise<void> {
   const spinner = ora("Validating environment...").start();
 
-  // The server also warns on Node 25, but only after the CLI's boot output.
-  // Surface the sandbox limitation before validation so it is hard to miss.
+  // The backend loads isolated-vm, whose native build is Node-26-only. Fail
+  // before validation so an unsupported (or Bun-hosted) launch is obvious.
   const nodeSupport = checkNodeSupport();
-  if (nodeSupport.ok && !nodeSupport.sandbox) {
-    spinner.warn(
-      chalk.yellow(
-        `Node ${process.versions.node}: the agent-code sandbox (query_sdk / run_sdk) is unavailable.`
-      )
+  if (!nodeSupport.ok) {
+    spinner.fail(chalk.red(nodeSupport.reason));
+    console.error(chalk.dim(`  ${nodeSupport.why}\n`));
+    process.exit(1);
+  }
+  let nodeBinary: string;
+  try {
+    nodeBinary = resolveNode26Binary();
+  } catch (error) {
+    spinner.fail(
+      chalk.red(error instanceof Error ? error.message : String(error))
     );
-    console.warn(
-      chalk.dim(
-        "  isolated-vm has no Node 25 build. Use Node 24 (LTS) or 26+ to enable the sandbox.\n"
-      )
-    );
-    spinner.start("Validating environment...");
+    process.exit(1);
   }
 
   const envPath = join(cwd, ".env");
@@ -405,7 +407,12 @@ export async function devCommand(
     ...(logLevel ? { LOG_LEVEL: logLevel } : {}),
   };
 
-  const child = spawn(process.execPath, [bundlePath], {
+  // Never `process.execPath`: when the CLI itself was launched through Bun,
+  // that is Bun, which cannot dlopen the V8 isolated-vm addon. `nodeBinary`
+  // is a verified Node 26 binary (the current process when it already is one).
+  // `--no-node-snapshot` is isolated-vm's upstream launch requirement on
+  // Node 20+.
+  const child = spawn(nodeBinary, ["--no-node-snapshot", bundlePath], {
     cwd,
     env: childEnv,
     stdio: "inherit",

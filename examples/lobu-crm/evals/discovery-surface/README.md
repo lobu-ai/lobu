@@ -29,10 +29,10 @@ the tool descriptions, then execute it via `run_sdk` / `query_sdk` / `query_sql`
   Read/question tasks additionally score the final reply text for the right
   real facts (`replyCheck`).
 
-## Why node@22 (not Bun)
+## Why node@26 (not Bun)
 
 `run_sdk` / `query_sdk` need isolated-vm, whose native addon only loads under
-Node 22–24 — not under Bun. So this harness runs under **`node@22` + tsx**. The
+Node 26 — not under Bun. So this harness runs under **`node@26` + tsx**. The
 local `tsconfig.json` resolves built workspace packages, matching the server
 integration harness and preserving Node module interoperability. Build them
 with `make build-packages` before running `run.sh`.
@@ -50,11 +50,11 @@ DATABASE_URL=postgresql://localhost:5432/lobu_mcp_discovery_test \
 #   token `lobu token create` mints; admin-gated actions (connect, Automations,
 #   operations.execute, schedules) are blocked for it. Use to measure scope
 #   sensitivity (e.g. PR #1955's connector-discovery visibility fix).
-# optional overrides: NODE22_BIN=/path/to/node22  GEMINI_MODEL_ID=gemini-3-flash-preview
+# optional overrides: NODE26_BIN=/path/to/node22  GEMINI_MODEL_ID=gemini-3-flash-preview
 ```
 
-Requirements: a reachable Postgres with `vector` + `pg_trgm`; a Node 22–24 binary
-with isolated-vm prebuilds (default `/opt/homebrew/opt/node@22/bin/node`); a
+Requirements: a reachable Postgres with `vector` + `pg_trgm`; a Node 26.x binary
+with isolated-vm prebuilds (default `/opt/homebrew/opt/node@26/bin/node`); a
 Gemini API key in `.env`.
 
 ## Tasks
@@ -88,4 +88,4 @@ Bare-intent discovery tasks spanning the MCP surface — see `tasks.ts`:
 - `driver.ts` — builds the Gemini discovery session (the ~6 MCP tools as pi tools).
 - `tasks.ts` — the discovery tasks + seeds + state/reply checks.
 - `run.ts` — the runner; collects metrics, prints the tables.
-- `run.sh` — launcher (sources `.env`, invokes node@22 + tsx).
+- `run.sh` — launcher (sources `.env`, invokes node@26 + tsx).

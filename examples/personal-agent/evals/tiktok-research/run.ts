@@ -1,8 +1,8 @@
 /**
  * Opt-in full-prompt eval: real configured model, actual prompt and isolated-vm scripts,
- * synthetic SDK only. Requires built workspace packages, Node 22 and an
+ * synthetic SDK only. Requires built workspace packages, Node 26 and an
  * OPENAI_API_KEY. No database, browser, inbox or social writes are possible.
- * From repo root (use a Node 22 binary on PATH):
+ * From repo root (use a Node 26.x binary on PATH):
  * TSX_TSCONFIG_PATH=examples/personal-agent/evals/tiktok-research/tsconfig.json \
  * node --env-file=.env --import tsx examples/personal-agent/evals/tiktok-research/run.ts
  * Optional: --trials 2 --model gpt-4.1 --effort off. Emits JSON evidence per case.

@@ -26,17 +26,17 @@ gate_provision() {
   # the GitHub runner image ships these, the bare ubuntu base does not.
   $SUDO apt-get install -y --no-install-recommends     curl ca-certificates xz-utils unzip git jq make gcc g++ python3 >/dev/null
 
-  echo ">> [provision] bun 1.3.5..."
-  if ! command -v bun >/dev/null 2>&1 || ! bun --version 2>/dev/null | grep -q '^1.3.5'; then
-    curl -fsSL https://bun.sh/install | bash -s "bun-v1.3.5"
+  echo ">> [provision] bun 1.4.4..."
+  if ! command -v bun >/dev/null 2>&1 || ! bun --version 2>/dev/null | grep -q '^1.4.4'; then
+    curl -fsSL https://bun.sh/install | bash -s "bun-v1.4.4"
   fi
   export BUN_INSTALL="${BUN_INSTALL:-$HOME/.bun}"
   export PATH="$BUN_INSTALL/bin:$PATH"
   bun --version
 
-  echo ">> [provision] node 22 (apt node is too old)..."
-  if ! command -v node >/dev/null 2>&1 || [ "$(node -p 'process.versions.node.split(".")[0]')" -lt 22 ]; then
-    curl -fsSL -o /tmp/node.tar.xz https://nodejs.org/dist/v22.16.0/node-v22.16.0-linux-x64.tar.xz
+  echo ">> [provision] node 26 (apt node is too old)..."
+  if ! command -v node >/dev/null 2>&1 || [ "$(node -p 'process.versions.node.split(".")[0]')" -ne 26 ]; then
+    curl -fsSL -o /tmp/node.tar.xz https://nodejs.org/dist/v26.7.0/node-v26.7.0-linux-x64.tar.xz
     $SUDO tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1
     rm -f /tmp/node.tar.xz
   fi

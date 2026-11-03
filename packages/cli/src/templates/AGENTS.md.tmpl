@@ -44,8 +44,8 @@ or public domain from a personal email address.
 
 ## Prerequisites
 
-Before `lobu run`, the host needs Node 22-24 or 26+ (only Node 25 is unsupported —
-`isolated-vm` skips that EOL non-LTS line) and one LLM provider credential in
+Before `lobu run`, the host needs Node 26.x — the gateway and worker load the
+Node-26-only `isolated-vm` native build — and one LLM provider credential in
 `.env`.
 Postgres is built in: `lobu run`
 starts an embedded PostgreSQL (with `pgvector`); set `DATABASE_URL` only to use an

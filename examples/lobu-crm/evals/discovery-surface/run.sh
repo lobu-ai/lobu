@@ -2,7 +2,7 @@
 # Discovery-surface eval launcher.
 #
 # The eval runs the REAL isolated-vm sandbox (run_sdk / query_sdk), whose native
-# addon only loads under Node 22–24 — NOT under Bun. So this harness runs under
+# addon only loads under Node 26 — NOT under Bun. So this harness runs under
 # Node + tsx. Use the built workspace packages, as the server integration
 # harness does: forcing CommonJS packages to source through tsx breaks named
 # exports when an ESM dependency imports them. Run `make build-packages` first.
@@ -20,10 +20,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # repo root = four levels up from examples/lobu-crm/evals/discovery-surface
 ROOT="$(cd "$HERE/../../../.." && pwd)"
 
-# Node 22 (isolated-vm prebuilt ABI). Override with NODE22_BIN if elsewhere.
-NODE22_BIN="${NODE22_BIN:-/opt/homebrew/opt/node@22/bin/node}"
-if [ ! -x "$NODE22_BIN" ]; then
-  echo "node@22 not found at $NODE22_BIN — set NODE22_BIN to a Node 22–24 binary (isolated-vm needs it)." >&2
+# Node 26 (isolated-vm prebuilt ABI). Override with NODE26_BIN if elsewhere.
+NODE26_BIN="${NODE26_BIN:-/opt/homebrew/opt/node@26/bin/node}"
+if [ ! -x "$NODE26_BIN" ]; then
+  echo "node@26 not found at $NODE26_BIN — set NODE26_BIN to a Node 26.x binary (isolated-vm needs it)." >&2
   exit 1
 fi
 
@@ -39,6 +39,6 @@ export TSX_TSCONFIG_PATH="$HERE/tsconfig.json"
 # DATABASE_URL. Keep the no-file branch compatible with macOS Bash 3.2, where
 # expanding an empty array with `set -u` fails before Node can start.
 if [ -f "$ROOT/.env" ]; then
-  exec "$NODE22_BIN" "--env-file=$ROOT/.env" --import "$ROOT/node_modules/tsx/dist/loader.mjs" "$HERE/run.ts" "$@"
+  exec "$NODE26_BIN" --no-node-snapshot "--env-file=$ROOT/.env" --import "$ROOT/node_modules/tsx/dist/loader.mjs" "$HERE/run.ts" "$@"
 fi
-exec "$NODE22_BIN" --import "$ROOT/node_modules/tsx/dist/loader.mjs" "$HERE/run.ts" "$@"
+exec "$NODE26_BIN" --no-node-snapshot --import "$ROOT/node_modules/tsx/dist/loader.mjs" "$HERE/run.ts" "$@"

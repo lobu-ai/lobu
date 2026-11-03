@@ -44,6 +44,8 @@ if (!artifact.compiledCode || artifact.sourceFiles.files[artifact.sourceFiles.en
       "playwright",
       "playwright-vanilla",
       "isolated-vm",
+      // The retired Node 22–24 alias must never reappear; the runtime has one
+      // isolated-vm build on Node 26.
       "isolated-vm-next",
       "sharp",
       "jimp",

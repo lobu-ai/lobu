@@ -354,6 +354,7 @@ describe("image and artifact gates", () => {
       "--network=none",
       `registry.example.test/synthetic/worker@${digest}`,
       "node",
+      "--no-node-snapshot",
       "dist/bin.js",
       "self-check",
       "--json",

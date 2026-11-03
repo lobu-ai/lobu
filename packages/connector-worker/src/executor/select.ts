@@ -30,7 +30,7 @@ export interface ExecutorSelection {
  * Build the executor for a job. There is exactly one: connector code runs in a
  * hardened V8 isolate, which IS the security boundary for organization-supplied
  * code. Nothing about the job selects it, so a host that cannot load
- * `isolated-vm` (Bun, Node 25, or a failed native build) rejects with
+ * `isolated-vm` (Bun, a non-26 Node, or a failed native build) rejects with
  * `IsolateRuntimeUnavailableError` rather than falling back to anything.
  */
 export async function selectExecutor(selection: ExecutorSelection = {}): Promise<SyncExecutor> {
