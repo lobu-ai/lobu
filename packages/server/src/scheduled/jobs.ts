@@ -34,6 +34,7 @@ import { runAutomationReactionTask } from '../automations/reaction-task';
 import type { AutomationDigestTaskPayload } from '../automations/digest-enqueue';
 import { runAutomationDigestTask } from '../automations/digest-task';
 import type { AutomationScriptTaskPayload } from '../automations/script-enqueue';
+import { runAutomationPreparationTask } from '../automations/preparation-task';
 import { runAutomationScriptTask } from '../automations/script-task';
 import { runSourceFeedListener, type SourceFeedListenerTask } from '../runs/source-feed-listener';
 import { checkStalledExecutions } from './check-stalled-executions';
@@ -52,6 +53,7 @@ import {
   AUTOMATION_REACTION_TASK,
   AUTOMATION_DIGEST_TASK,
   AUTOMATION_SCRIPT_TASK,
+  AUTOMATION_PREPARATION_TASK,
   SOURCE_FEED_LISTENER_TASK,
   NOTIFICATION_DELIVERY_TASK,
   INTERACTIVE_EVENT_CARD_REFRESH_TASK,
@@ -499,8 +501,12 @@ function registerMaintenanceTasks(
     );
   });
 
-  // Executor scripts own the parent Automation run, so the child task carries
-  // the durable handoff that resumes it after a scheduler restart.
+  // Preparation commits its inputs before either native agent lane can claim.
+  scheduler.register(AUTOMATION_PREPARATION_TASK, async (ctx) => {
+    await runAutomationPreparationTask(ctx.payload as AutomationScriptTaskPayload, env, ctx.taskRunId, ctx.attempt);
+  });
+
+  // Executor scripts own the parent Automation run; the child task survives restart.
   scheduler.register(AUTOMATION_SCRIPT_TASK, async (ctx) => {
     await runAutomationScriptTask(
       ctx.payload as AutomationScriptTaskPayload,

@@ -25,7 +25,7 @@
  */
 import type {
   AutomationEventTrigger,
-  AutomationExecutionConfig,
+  LegacyAutomationExecutionConfig,
   AutomationScheduleTrigger,
   AutomationWorkspaceEventTrigger,
 } from "@lobu/core/contracts/tools/manage-automations";
@@ -65,7 +65,7 @@ export type ResolvedExecutor =
 export function resolveAutomationExecutor(
   defaults: AutomationExecutorDefaults
 ): ResolvedExecutor | null {
-  if ((defaults.executionConfig as AutomationExecutionConfig | null)?.executor?.kind === "external") {
+  if ((defaults.executionConfig as LegacyAutomationExecutionConfig | null)?.executor?.kind === "external") {
     return { kind: "external" };
   }
   if (defaults.deviceWorkerId) {
@@ -100,7 +100,7 @@ export function assertAutomationExecutorsResolve(
     }
   }
   if (resolveAutomationExecutor(defaults)?.kind === "external") {
-    const config = defaults.executionConfig as AutomationExecutionConfig;
+    const config = defaults.executionConfig as LegacyAutomationExecutionConfig;
     if (defaults.deviceWorkerId || defaults.agentKind ||
         (triggers ?? []).some((trigger) => trigger.kind !== "schedule" &&
           !(trigger.kind === 'event' && trigger.source !== 'workspace' && trigger.capture === 'references')) ||
@@ -124,7 +124,7 @@ export function assertAutomationExecutorsResolve(
   if (!automated) return;
   if (!resolveAutomationExecutor(defaults)) {
     throw new ToolUserError(
-      "Automated Automations need an executor: set managed_agent_id (managed agent), device_worker_id (device), or execution_config.executor.kind=external (MCP client). Manual-only Automations (no triggers) may omit both."
+      "Automated Automations need an owning managed_agent_id or a device_worker_id. Manual-only Automations without a code module may omit both."
     );
   }
 }

@@ -7,6 +7,8 @@
  * - JSON utilities for duplicate detection
  */
 
+import { snapshotAutomationScript } from '../automations/preparation';
+import { enqueueAutomationPreparation } from '../automations/preparation-enqueue';
 import { feedDefinitionSelection } from '../connectors/feed-definition-selection';
 import { browserBindingSnapshot, connectionBrowserResource } from '../connectors/browser-resource';
 import type { BrowserActionContext } from '../worker-api/browser-action-context';
@@ -16,7 +18,7 @@ import {
   resolvedEventExecution,
   type AutomationEventTrigger,
   type AutomationWorkspaceEventTrigger,
-  type AutomationExecutor,
+  type LegacyAutomationExecutor,
   type AutomationSource,
 } from '@lobu/core/contracts/tools/manage-automations';
 import { normalizeAutomationSources } from '../automations/source-refs';
@@ -69,8 +71,9 @@ export type AutomationActivationSignal =
   | WorkspaceEventTriggerSignal;
 
 export interface AutomationRunPayload {
+  automation_script?: import('../automations/preparation').AutomationScriptSnapshot;
   /** Executor selection and script code are pinned with the run, never reloaded on retry. */
-  executor?: AutomationExecutor;
+  executor?: LegacyAutomationExecutor;
   automation_id: number;
   /**
    * The managed agent executing this run, or the external executor's optional
@@ -187,6 +190,8 @@ export async function claimPendingAutomationRun(
           AND r.automation_id = ${params.automationId}
           AND r.run_type = ANY(${AUTOMATION_RUN_TYPES_PG}::text[])
           AND r.status = 'pending'
+          AND (r.approved_input->'automation_script'->>'has_prepare' IS DISTINCT FROM 'true'
+               OR r.run_metadata ? 'preparation_sources')
           -- Same-type guard, deliberately not widened to both run types: one
           -- Automation at a time per Automation, and one eval at a time per
           -- Automation, but an eval replay must never be blocked by (or block)
@@ -719,7 +724,7 @@ async function createAutomationRunWithClient(
     FROM automations a
     LEFT JOIN automation_versions v ON v.id = a.current_version_id
     WHERE a.id = ${params.automationId}
-    ${params.expectedWindowStart ? sql`FOR UPDATE OF a` : sql`LIMIT 1`}
+    ${params.expectedWindowStart ? sql`FOR UPDATE OF a` : sql`FOR SHARE OF a`}
   `;
   const currentWindowStart = versionRows[0]?.next_window_start == null
     ? null
@@ -736,7 +741,10 @@ async function createAutomationRunWithClient(
       ? Number(versionRows[0].current_version_id)
       : null;
 
-  const executor = versionRows[0]?.executor as AutomationRunPayload['executor'] | undefined;
+  const automationScript = await snapshotAutomationScript(sql, params.automationId, params.organizationId);
+  const executor = automationScript?.has_analysis === false
+    ? { kind: 'script' as const, source: automationScript.source }
+    : versionRows[0]?.executor as AutomationRunPayload['executor'] | undefined;
   let windowEnd = params.windowEnd;
   if (executor?.kind === 'script' && params.dispatchSource !== 'event') {
     // Match source reads: a nonempty version source list wins; otherwise use
@@ -765,6 +773,7 @@ async function createAutomationRunWithClient(
       : null;
 
   const payload: AutomationRunPayload = {
+    ...(automationScript ? { automation_script: automationScript } : {}),
     automation_id: params.automationId,
     agent_id: params.agentId ?? undefined,
     window_start: params.windowStart,
@@ -818,6 +827,7 @@ async function createAutomationRunWithClient(
     `[queue] Created automation run ${runId} for automation ${params.automationId} (${params.dispatchSource})`
   );
 
+  if (automationScript?.has_prepare) await enqueueAutomationPreparation(sql, { organizationId: params.organizationId, automationId: params.automationId, sourceRunId: runId });
   await notifyWorkerWork(sql);
   return { runId, status, created: true };
 }
@@ -1044,6 +1054,7 @@ export async function createAutomationEventRun(
           AND status = 'pending'
           AND approved_input->>'dispatch_source' = 'event'
           AND approved_input->>'trigger_key' = ${triggerKey}
+          AND NOT (COALESCE(run_metadata, '{}'::jsonb) ? 'preparation_started_at')
           AND CASE
             WHEN jsonb_typeof(approved_input->'delivery_ids') = 'array'
               THEN jsonb_array_length(approved_input->'delivery_ids')
@@ -1140,20 +1151,24 @@ export async function createAutomationEventRun(
     const versionRows = await tx`
       SELECT current_version_id, execution_config->'executor' AS executor
       FROM automations
-      WHERE id = ${params.automationId}
-      LIMIT 1
+      WHERE id = ${params.automationId} AND organization_id = ${params.organizationId}
+      FOR SHARE
     `;
     const versionId = versionRows[0]?.current_version_id == null
       ? null
       : Number(versionRows[0]?.current_version_id);
+    const automationScript = await snapshotAutomationScript(tx, params.automationId, params.organizationId);
     const payload: AutomationRunPayload = {
+      ...(automationScript ? { automation_script: automationScript } : {}),
       automation_id: params.automationId,
       agent_id: params.agentId ?? undefined,
       window_start: signalWindowStart,
       window_end: signalWindowEnd,
       dispatch_source: 'event',
       version_id: versionId,
-      ...(versionRows[0]?.executor ? { executor: versionRows[0].executor as AutomationRunPayload['executor'] } : {}),
+      ...(automationScript?.has_analysis === false
+        ? { executor: { kind: 'script' as const, source: automationScript.source } }
+        : versionRows[0]?.executor ? { executor: versionRows[0].executor as AutomationRunPayload['executor'] } : {}),
       device_worker_id: params.deviceWorkerId ?? null,
       agent_kind: params.agentKind ?? null,
       trigger_signal: params.signal,
@@ -1178,6 +1193,7 @@ export async function createAutomationEventRun(
       )
       RETURNING id, status
     `;
+    if (automationScript?.has_prepare) await enqueueAutomationPreparation(tx, { organizationId: params.organizationId, automationId: params.automationId, sourceRunId: Number(inserted[0]?.id) });
     await notifyWorkerWork(tx);
     return {
       runId: Number(inserted[0]?.id),

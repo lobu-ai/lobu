@@ -12,7 +12,8 @@ jobs:
 | Primitive | What it decides | What it does not decide |
 |---|---|---|
 | Trigger | When a run starts | What durable context the run may read |
-| Executor | Whether a managed agent, device CLI, sandboxed script, or external MCP client runs the job | When it starts |
+| Agent assignment | Which managed agent or device runs analysis | When it starts |
+| Code module | Deterministic work alone, or preparation and completion around analysis | Scheduling or permissions |
 | Prompt and skills | What the agent should do | When it starts |
 | Sources | What additional governed data a window reads | Whether new data activates it |
 | Outputs | Which entity rows or append-only events a completed window persists | External side effects |
@@ -25,51 +26,124 @@ escape hatch by declaring SQL. Persisted changes go through declared outputs,
 the ClientSDK, reactions, connector actions, and their existing ACL or approval
 rails.
 
-## Script execution
+## Code before and after analysis
 
-A deterministic job can use `executor: scriptFromFile("./digest.script.ts", params)`
-in `defineAutomation`. The API form is
-`execution_config: { executor: { kind: "script", source, params? } }`.
-`managed_agent_id` remains the owning agent for SDK permissions. No model turn,
-MCP completion handshake, or dummy extraction object is required.
+Use the existing reaction module for deterministic work around a native agent:
 
-The module exports `default async (ctx, client, params?)`. `ctx.window` contains
-its durable run ID and pinned bounds; scheduled and manual windows use arrival
-time (`events.created_at`), while event activations carry their signal bounds
-and `ctx.trigger_signals`. The script owns its SDK reads and writes and may
-return a JSON object for the run result, or return no value.
+```ts
+defineAutomation({
+  agent: personalAgent,
+  slug: "weekly-review",
+  prompt: "Review this run's saved snapshot source.",
+  reaction: reactionFromFile("./weekly-review.ts"),
+});
+```
 
-Activation freezes the code, parameters, version, and window on the run. A durable
-sandbox task executes it with the same scoped SDK and autonomous approval rules
-as a reaction. The sandbox has a 60-second attempt limit and up to three attempts;
-classified deterministic failures stop immediately. A successful script commits
-its result and advances a scheduled/manual arrival window. Failure never advances
-the arrival mark. Task exhaustion is reconciled into a failed Automation run.
-External effects are at-least-once: use `ctx.window.run_id` in idempotency keys.
-Scripts must handle gated or pending SDK results before returning success.
+The module may export either or both handlers:
 
-Script jobs cannot use device pins, agent skills, extraction outputs, or model/
-CLI settings; those require agent execution. Scripted capture execution is
-unsupported and fails explicitly. An optional reaction still runs after the
-script's successful completion, through the existing durable reaction queue.
-For agent Automations, completion still precedes their reaction.
-Event scripts use silent triggers and send any desired replies through the SDK;
-`reply_to_source` is reserved for agent responses.
+```ts
+export async function prepare(ctx, client) {
+  const rows = await client.query("SELECT 42 AS total");
+  return { snapshot: rows };
+}
 
-Evaluation fixtures and assertions belong to the owning project in
-`examples/<project>/evals/`. Run deterministic scenarios through the SDK and
-real handlers against a disposable test database; use the Agent API and
-`packages/promptfoo-provider` for model-driven sessions. The discovery-surface
-harness in `examples/lobu-crm/evals/` exercises real models with the SDK sandbox.
-These paths do not require workspace eval-case entities, suite endpoints, or a
-background scorer. Historical captured runs retain their side-effect guards;
-their stored run type is compatibility state, not a case-management API.
+export default async function reaction(ctx, client) {
+  // Runs after successful completion; ctx.sources contains the saved arrays.
+}
+```
 
-`lobu apply` preserves an omitted executor; `executor: "agent"` explicitly removes
-a stored script executor. Switching an existing reaction-driven job requires
-removing its old reaction so the same work is not performed twice: declare
-`reaction: null` and apply clears it via `set_reaction_script` after installing
-the executor. Omitting `reaction` preserves whatever is installed.
+The runtime detects the exports when saving the module. On activation it freezes
+the code and input schema with the run, executes preparation through the durable
+task queue, and saves the result before admitting a hosted or device agent. The
+agent reads it through `knowledge.read({ automation_id, run_id }).sources`.
+Agent retries and pagination reuse the saved result. A later edit cannot change
+an active run's preparation or completion handler. No executor or kind setting is
+needed for this pattern.
+
+Preparation returns at most 32 named arrays of records and 16384 serialized UTF-8
+JSON bytes. Names must be 1–100 characters and cannot replace configured sources,
+prototype properties, or truncation sidecar fields. Store larger artifacts through
+the existing SDK and return bounded summaries or content references. Reads use
+the normal source pagination and cell limits. Reading before preparation succeeds
+returns 409; unbound reads never execute preparation.
+
+Preparation has at most three queue attempts, each with a 60-second sandbox
+limit. Failure or a pending SDK approval starts no agent and advances no arrival
+mark. SDK effects remain at-least-once: use run-derived idempotency keys. Existing
+permissions and connection approval policy apply. A preparation-only module queues
+no completion reaction; a default-only module with analysis keeps its existing
+completion lifecycle.
+The `input` export still describes the agent's extraction, not preparation output.
+
+Enable this configuration only after every server replica supports preparation.
+It supports native agent windows, including device agents. Reply turns, capture,
+external clients, and direct script executors reject preparation explicitly.
+
+The personal-agent weekly-finances example uses this path: preparation saves an
+immutable balance sheet and returns a compact source with its content ID; the
+agent reviews that evidence; the completion reaction sends one deduplicated
+private briefing. Calculations stay in the owner module. No Python processor,
+broker refresh, or second finance Automation is needed for that definition. The
+example is declarative configuration; deploying the platform does not apply it
+to a live workspace or replace an installed owner processor.
+
+## Code without an agent turn
+
+Use the same module with no prompt, skills, exported `input` schema or declared
+outputs to run deterministic code without invoking an LLM:
+
+```ts
+defineAutomation({
+  agent: owner,
+  slug: "daily-calculation",
+  reaction: reactionFromFile("./daily-calculation.ts"),
+});
+// daily-calculation.ts
+export default async function calculate(ctx, client) {
+  return { total: 42 };
+}
+```
+
+The owning agent remains the SDK permission principal. A prepare-only module
+saves its named sources then completes; a default-only module runs its default
+handler as the job; a module with both runs preparation then its default handler
+with the saved `ctx.sources`. The default handler runs once per successful task
+attempt, without a second completion reaction. It returns a JSON object or no
+value. Modules own parameters as ordinary code or governed source data.
+
+Code-only jobs use the existing durable sandbox task, three attempts of at most
+60 seconds, frozen code/version/window and run-scoped idempotency. Successful
+completion commits the result and advances progress. Failed or approval-held
+writes cannot advance the arrival mark. SDK effects are at-least-once: use
+`ctx.window.run_id` in idempotency keys. Configured-source fingerprints cannot
+skip code that may read additional SDK data. Device pins and model/CLI settings
+are rejected for code-only jobs.
+
+Adding a prompt, skills, exported extraction `input` or declared outputs enables
+agent analysis: preparation precedes the agent, and the default handler follows
+successful completion. Reply turns keep their completion semantics and cannot
+use preparation.
+
+### Installed legacy definitions
+
+New create/update requests reject `execution_config.executor` with 422.
+`scriptFromFile` and the CLI `executor` helper are retired. Reads and history
+still show stored script/external configuration truthfully. Their dispatch,
+claims, renewals, completion, frozen parameters and in-flight runs remain
+compatible until the owner explicitly migrates them. Omitted execution options
+remain unmanaged; `executionConfig: null` explicitly clears legacy settings.
+Do not copy a read-only legacy executor back into a write.
+
+Migrate deterministic jobs to `reactionFromFile`. Move external analysis only
+after choosing and verifying its owning native agent/device. Preserve prompts,
+sources, outputs, cadence, permissions, privacy holds and delivery idempotency;
+refuse active claims or baseline drift. Deploy to every replica before applying
+owner migrations. Installing a platform release does not replace an owner
+processor or authorize private delivery.
+
+Project evaluations belong in `examples/<project>/evals/` and drive real SDK
+handlers against disposable Postgres. Model-driven evaluations use the existing
+Agent API and `packages/promptfoo-provider`.
 
 ## Scheduling and admission
 
@@ -94,22 +168,21 @@ queue without removing any existing mechanism.
 
 `defineAutomation({ executionConfig })` accepts the canonical
 `AutomationExecutionConfig` used by the API's `execution_config` and ClientSDK.
-It covers `executor`, `model`, `timeout_seconds` (1–86400), `max_budget_usd`
+It covers `model`, `timeout_seconds` (1–86400), `max_budget_usd`
 (nonnegative), `permission_mode`, `effort`, and `finalize_nudges` (0–5).
-Existing executor compatibility and authorization checks still apply.
+Existing authorization checks still apply.
 
 Omit `executionConfig` to preserve remote execution settings. Supply an object
 to replace the whole execution config, or `null` to clear it. Do not combine it
-with the older `model` or `executor` helpers; those helpers remain available for
-existing definitions. For example, an external client can declare
-`executionConfig: { executor: { kind: "external" } }` without a new sandbox API.
+with the `model` helper. Legacy executor data is read-only compatibility state;
+new definitions use the module lifecycle.
 Agent-level skills remain in the agent's `settings.skillsConfig`; an Automation's
 `skills` continue to be versioned snapshots owned by that Automation.
 
-## External execution and activity discovery
+## Legacy external execution and activity discovery
 
-Set `execution_config: { executor: { kind: "external" } }` for manual or
-scheduled processing by an external MCP client. Keep cadence and timezone on
+Already-installed external definitions retain manual and scheduled processing
+by their authorized MCP client. New authoring uses native modules and agents. Keep cadence and timezone on
 the normal schedule trigger. Lobu leaves due work on `next_run_at` until the
 client claims it; it never launches a hosted agent or device CLI for this mode.
 An optional `managed_agent_id` remains the permission and delivery principal.
@@ -140,17 +213,10 @@ whether completion should send a notification.
 
 ### Source capture and independent polling
 
-An external executor can own an active connector subscription without starting
-an agent or creating an Automation run. Observer setup still uses queued tasks:
-
-```ts
-await workspace.automations.create({
-  slug: "source-monitor", name: "Source monitor",
-  execution_config: { executor: { kind: "external" } },
-  triggers: [{ kind: "event", connector_key: connectorKey,
-    connection_id: connectionId, event_types: [eventType], capture: "references" }],
-});
-```
+Already-installed external subscriptions retain source reference capture without
+agent execution. This is compatibility state; do not reinstall the retired
+executor field. Owner migration must preserve the capture consent and verify
+that no model is admitted before enabling a replacement.
 
 Capture is explicit consent to retain metadata-only references, independent of
 body retention or execution. It supports declared source-only observer events

@@ -2,7 +2,7 @@ import type { ConnectorTriggerSignal } from "@lobu/connector-sdk";
 import {
   resolvedEventExecution,
   type AutomationEventTrigger,
-  type AutomationExecutionConfig,
+  type LegacyAutomationExecutionConfig,
   type AutomationTrigger,
 } from "@lobu/core/contracts/tools/manage-automations";
 import type { DbClient } from "../db/client";
@@ -33,7 +33,7 @@ export interface MatchingAutomationActivation {
   deviceWorkerId: string | null;
   agentKind: string | null;
   model: string | null;
-  executionConfig: AutomationExecutionConfig | null;
+  executionConfig: LegacyAutomationExecutionConfig | null;
   instructions: string;
   /**
    * The Automation's `min_cooldown_seconds`. Carried on the match so a caller can
@@ -234,7 +234,7 @@ export async function findMatchingAutomationActivations(
     });
     if (!executor) continue;
     const executionConfig =
-      (row.execution_config as AutomationExecutionConfig | null) ?? null;
+      (row.execution_config as LegacyAutomationExecutionConfig | null) ?? null;
     matches.push({
       automationId: Number(row.id),
       organizationId: String(row.organization_id),

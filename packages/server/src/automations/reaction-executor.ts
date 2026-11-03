@@ -2,8 +2,8 @@
  * Automation Script Executor
  *
  * Executes compiled Automation reaction and executor scripts inside the shared
- * `runScript` isolate runner over the typed `ClientSDK`. Stored scripts MUST
- * export `default async (ctx, client, params?) => ...`.
+ * `runScript` isolate runner over the typed `ClientSDK`. Lifecycle modules may
+ * export `prepare` before the agent and/or a default handler after completion.
  *
  * Scripts run with `userId: null` + `isAuthenticated: true` so handler-level
  * access checks treat them as system calls.
@@ -18,6 +18,7 @@ import { buildClientSDK } from '../sandbox/client-sdk';
 import { runScript } from '../sandbox/run-script';
 import { compileSource } from '../utils/compiler-core';
 import logger from '../utils/logger';
+import { ToolUserError } from '../utils/errors';
 
 const REACTION_TIMEOUT_MS = 60_000;
 
@@ -29,6 +30,7 @@ interface ExecuteAutomationScriptOptions {
   params?: Record<string, unknown>;
   timeoutMs?: number;
   executionKind?: 'reaction' | 'executor';
+  entryExport?: 'prepare';
 }
 
 /**
@@ -66,6 +68,7 @@ export async function executeAutomationScript(options: ExecuteAutomationScriptOp
     params,
     timeoutMs = REACTION_TIMEOUT_MS,
     executionKind = 'executor',
+    entryExport,
   } = options;
 
   // Scripts are scoped to the Automation's own workspace — they have no user
@@ -108,8 +111,19 @@ export async function executeAutomationScript(options: ExecuteAutomationScriptOp
     sourceContext: { source: 'automation-run' as const },
   };
 
+  let approvalPending = false;
   const result = await runScript({
-    source: compiledScript,
+    onSdkResult: (_path, value) => {
+      if (value && typeof value === 'object') {
+        const result = value as Record<string, unknown>;
+        if (result.approval_queued === true || result.status === 'pending_approval') {
+          approvalPending = true;
+        }
+      }
+    },
+    source: entryExport
+      ? `${compiledScript}\nmodule.exports = { default: module.exports.prepare };`
+      : compiledScript,
     sdk: (abortSignal) =>
       buildClientSDK(scriptCtx, env as Env, { allowCrossOrg: false, abortSignal }),
     allowCrossOrg: false,
@@ -118,6 +132,15 @@ export async function executeAutomationScript(options: ExecuteAutomationScriptOp
     limits: { timeoutMs },
   });
 
+  // Completion reactions may queue human work after their source run completed.
+  // Preparation and code jobs must not advance past an unfulfilled approval.
+  if (approvalPending && executionKind === 'executor') {
+    return {
+      success: false,
+      retryable: false,
+      error: 'AccessDeniedError: Automation code awaits approval; the run cannot advance.',
+    };
+  }
   if (result.success && result.returnTruncated && executionKind === 'executor') {
     return {
       success: false,
@@ -164,6 +187,49 @@ export async function executeAutomationScript(options: ExecuteAutomationScriptOp
     success: false,
     error: errorMessage,
     ...(result.error?.retryable === undefined ? {} : { retryable: result.error.retryable }),
+  };
+}
+
+export interface AutomationScriptExports {
+  has_prepare: boolean;
+  has_reaction: boolean;
+}
+
+/** Inspect exported functions without invoking either lifecycle handler or SDK. */
+export async function inspectAutomationScriptExports(
+  compiledScript: string,
+): Promise<AutomationScriptExports> {
+  const result = await runScript({
+    source: `${compiledScript}\nmodule.exports = { default: (() => {
+      const prepare = typeof module.exports.prepare;
+      const reaction = typeof module.exports.default;
+      return async () => ({ prepare, reaction });
+    })() };`,
+    sdk: {} as unknown as Parameters<typeof runScript>[0]['sdk'],
+    allowCrossOrg: false,
+    context: {},
+    limits: { timeoutMs: 5_000 },
+  });
+  if (!result.success) {
+    throw new ToolUserError(
+      result.error?.message ?? 'Cannot inspect Automation script exports.', 422,
+    );
+  }
+  const exports = result.returnValue as { prepare?: string; reaction?: string };
+  if (
+    !exports ||
+    !['undefined', 'function'].includes(exports.prepare ?? '') ||
+    !['undefined', 'function'].includes(exports.reaction ?? '') ||
+    (exports.prepare !== 'function' && exports.reaction !== 'function')
+  ) {
+    throw new ToolUserError(
+      'Automation script must export prepare or a default async function; each present handler must be a function.',
+      422,
+    );
+  }
+  return {
+    has_prepare: exports.prepare === 'function',
+    has_reaction: exports.reaction === 'function',
   };
 }
 

@@ -18,7 +18,20 @@ import { configureProductActivityDigest } from "../scripts/configure-product-act
 
 beforeEach(cleanupTestDatabase);
 
-test("external cutover preserves bound Slack delivery and the checkpoint", async () => {
+async function migrationBaseline(client: TestWorkspace["owner"], id: string) {
+  const { automation } = await client.automations.get({ automation_id: id });
+  return {
+    version: automation.version,
+    execution_config: automation.execution_config ?? null,
+    reaction_script: automation.reaction_script ?? null,
+    triggers: automation.triggers,
+    delivery_target: automation.delivery_target ?? null,
+    device_worker_id: automation.device_worker_id ?? null,
+    agent_kind: automation.agent_kind ?? null,
+  };
+}
+
+test("native cutover preserves bound Slack delivery and the checkpoint", async () => {
   const workspace = await TestWorkspace.create({
     name: "Synthetic digest cutover",
   });
@@ -58,9 +71,7 @@ test("external cutover preserves bound Slack delivery and the checkpoint", async
     managed_agent_id: agent.agentId,
     delivery_target: delivery,
     triggers: [{ kind: "schedule", cron: "*/20 * * * *" }],
-    execution_config: {
-      executor: { kind: "script", source: "export default async () => {};" },
-    },
+    prompt: "Synthetic legacy job.",
     sources: [
       { name: "reaction_window", query: "SELECT * FROM events WHERE FALSE" },
     ],
@@ -69,16 +80,55 @@ test("external cutover preserves bound Slack delivery and the checkpoint", async
     throw new Error("Expected the synthetic Automation to be created");
   const id = String(created.automation_id);
   const checkpoint = new Date(Date.now() - 60_000).toISOString();
-  await sql`UPDATE automations SET next_window_start = ${checkpoint} WHERE id = ${id}`;
+  await sql`UPDATE automations SET next_window_start = ${checkpoint}, execution_config = ${sql.json({ executor: { kind: "external" } })} WHERE id = ${id}`;
   const reaction = readFileSync(
     new URL("../product-activity-digest.reaction.ts", import.meta.url),
     "utf8"
   );
 
-  await configureProductActivityDigest(workspace.owner, id, reaction, {
-    namespace: "synthetic-production",
-    logStart: "2026-10-01T00:00:00.000Z",
-  });
+  const reviewed = await migrationBaseline(workspace.owner, id);
+  await expect(
+    configureProductActivityDigest(
+      workspace.owner,
+      id,
+      reaction,
+      {
+        namespace: "synthetic-production",
+        logStart: "2026-10-01T00:00:00.000Z",
+      },
+      {
+        managedAgentId: agent.agentId,
+        baseline: { ...reviewed, version: reviewed.version + 1 },
+      }
+    )
+  ).rejects.toThrow("configuration changed");
+  await expect(
+    configureProductActivityDigest(
+      workspace.owner,
+      id,
+      reaction,
+      {
+        namespace: "synthetic-production",
+        logStart: "2026-10-01T00:00:00.000Z",
+      },
+      { managedAgentId: "synthetic-other-owner", baseline: reviewed }
+    )
+  ).rejects.toThrow("preserve the existing owning agent");
+  expect(await migrationBaseline(workspace.owner, id)).toEqual(reviewed);
+
+  await configureProductActivityDigest(
+    workspace.owner,
+    id,
+    reaction,
+    {
+      namespace: "synthetic-production",
+      logStart: "2026-10-01T00:00:00.000Z",
+    },
+    {
+      managedAgentId: agent.agentId,
+      baseline: await migrationBaseline(workspace.owner, id),
+    }
+  );
 
   const [stored] = await sql`
     SELECT managed_agent_id, delivery_target, triggers, execution_config,
@@ -96,7 +146,7 @@ test("external cutover preserves bound Slack delivery and the checkpoint", async
         skip_if_unchanged: false,
       },
     ],
-    execution_config: { executor: { kind: "external" } },
+    execution_config: null,
     schedule: "*/20 * * * *",
   });
   expect(new Date(stored.next_window_start).toISOString()).toBe(checkpoint);
@@ -106,11 +156,11 @@ test("external cutover preserves bound Slack delivery and the checkpoint", async
   const activity = (await workspace.owner.operations.listActivity({
     kinds: ["automation_due"],
   })) as { items: Array<{ automation_id: number }> };
-  expect(activity.items.map((item) => item.automation_id)).toContain(
+  expect(activity.items.map((item) => item.automation_id)).not.toContain(
     Number(id)
   );
 
-  // Keeping the delivery principal must still permit the external MCP lifecycle.
+  // The same owner completes the native window through the existing completion contract.
   const claimed = await workspace.owner.automations.claimNextWindow({
     automation_id: id,
   });
@@ -154,6 +204,55 @@ test("external cutover preserves bound Slack delivery and the checkpoint", async
   expect(after.items).toEqual([]);
 });
 
+test("native migration pauses cadence without changing a claimed definition", async () => {
+  const workspace = await TestWorkspace.create({
+    name: "Synthetic active digest",
+  });
+  const sql = getTestDb();
+  const agent = await createTestAgent({
+    organizationId: workspace.org.id,
+    ownerUserId: workspace.users.owner.id,
+    agentId: "synthetic-active-digest",
+  });
+  const created = await workspace.owner.automations.create({
+    slug: "product-activity-digest",
+    name: "Synthetic digest",
+    managed_agent_id: agent.agentId,
+    prompt: "Synthetic legacy digest",
+    triggers: [
+      { kind: "schedule", cron: "*/20 * * * *", skip_if_unchanged: false },
+    ],
+  });
+  if (!("automation_id" in created))
+    throw new Error("Expected a created Automation");
+  const id = String(created.automation_id);
+  await sql`UPDATE automations SET execution_config = ${sql.json({ executor: { kind: "external" } })}, next_run_at = NOW() - INTERVAL '1 second', next_window_start = NOW() - INTERVAL '1 minute' WHERE id = ${id}`;
+  const claimed = await workspace.owner.automations.claimNextWindow({
+    automation_id: id,
+  });
+  const baseline = await migrationBaseline(workspace.owner, id);
+  await expect(
+    configureProductActivityDigest(
+      workspace.owner,
+      id,
+      readFileSync(
+        new URL("../product-activity-digest.reaction.ts", import.meta.url),
+        "utf8"
+      ),
+      {
+        namespace: "synthetic-production",
+        logStart: "2026-10-01T00:00:00.000Z",
+      },
+      { managedAgentId: agent.agentId, baseline }
+    )
+  ).rejects.toThrow("wait for the active digest run");
+  const after = await migrationBaseline(workspace.owner, id);
+  expect(after).toEqual({ ...baseline, triggers: [] });
+  const [run] =
+    await sql`SELECT status FROM runs WHERE id = ${Number(claimed.run_id)}`;
+  expect(run.status).toBe("running");
+});
+
 test("ClickHouse progress survives completion retries and product pagination without a legacy feed", async () => {
   const workspace = await TestWorkspace.create({
     name: "Synthetic primary digest",
@@ -181,7 +280,11 @@ test("ClickHouse progress survives completion retries and product pagination wit
       new URL("../product-activity-digest.reaction.ts", import.meta.url),
       "utf8"
     ),
-    { namespace: "synthetic-production", logStart: "2026-10-01T00:00:00.000Z" }
+    { namespace: "synthetic-production", logStart: "2026-10-01T00:00:00.000Z" },
+    {
+      managedAgentId: agent.agentId,
+      baseline: await migrationBaseline(workspace.owner, id),
+    }
   );
   const start = new Date(Date.now() - 60_000);
   await sql`UPDATE automations SET next_window_start = ${start}, next_run_at = NOW() - INTERVAL '1 second' WHERE id = ${id}`;

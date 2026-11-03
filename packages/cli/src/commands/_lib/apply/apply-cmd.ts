@@ -971,15 +971,8 @@ export async function executePlan(
           tags: w.tags,
           agent_kind: w.agentKind,
           execution_config:
-            w.executionConfig !== undefined ||
-            w.model !== undefined ||
-            w.executor !== undefined
-              ? automationExecutionConfig(
-                  w.model,
-                  undefined,
-                  w.executor,
-                  w.executionConfig
-                )
+            w.executionConfig !== undefined || w.model !== undefined
+              ? automationExecutionConfig(w.model, undefined, w.executionConfig)
               : undefined,
           outputs: w.outputs,
         });
@@ -1013,7 +1006,7 @@ export async function executePlan(
         //    update reaches the server. Push first (idempotent, no drift signal
         //    because it's not returned by Automation lists) so the rule sees it.
         //    Removal (`reaction: null`) is handled in step (b2) below, after the
-        //    executor install — never here.
+        //    scalar updates — never here.
         if (w.reactionScript) {
           await ctx.client.setReactionScript(
             automationId,
@@ -1048,17 +1041,15 @@ export async function executePlan(
                   execution_config: automationExecutionConfig(
                     w.model,
                     remote?.execution_config,
-                    w.executor,
                     w.executionConfig
                   ),
                 }
               : {}),
           });
         }
-        // b2) Reaction removal — AFTER the scalar updates above so a stored
-        //     script executor is installed first. An explicit `reaction: null`
-        //     clears the row via set_reaction_script(""), so a reaction-driven
-        //     job switching to a script executor never runs both paths.
+        // b2) Explicit module removal follows scalar updates so the remaining
+        //     definition is validated with its final owner and execution settings.
+        //     `reaction: null` clears the row via set_reaction_script("").
         //     Omitted reactions are never touched: the diff only reports
         //     `reaction_script` when declared.
         if (changed.has("reaction_script") && w.reactionScript === null) {

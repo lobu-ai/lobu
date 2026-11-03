@@ -992,6 +992,8 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
               ${isUserScopedWorker}
               AND r.run_type = 'automation'
               AND r.approved_input->'executor'->>'kind' IS DISTINCT FROM 'external'
+              AND (r.approved_input->'automation_script'->>'has_prepare' IS DISTINCT FROM 'true'
+                   OR r.run_metadata ? 'preparation_sources')
               AND ${deviceWorkerId}::uuid IS NOT NULL
               AND (
                 r.target_device_worker_id = ${deviceWorkerId}::uuid
@@ -1515,7 +1517,8 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
       getDb(),
       row.organization_id,
       parseClaimJson(row.automation_outputs) as Outputs | null,
-      row.automation_id
+      row.automation_id,
+      { scriptSnapshot: approved.automation_script as import('../automations/preparation').AutomationScriptSnapshot | undefined }
     );
     let automationInstructions: string | null;
     try {

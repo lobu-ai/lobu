@@ -117,7 +117,15 @@ export const MANAGE_AUTOMATIONS_ACTION_KEY = 'manage_automations';
 export const manageAutomations = withValidatedArgs(
   'manage_automations',
   ManageAutomationsSchema,
-  manageAutomationsImpl
+  manageAutomationsImpl,
+  (value) => {
+    const args = value as { action?: unknown; execution_config?: unknown } | null;
+    if ((args?.action === 'create' || args?.action === 'update') &&
+        args.execution_config && typeof args.execution_config === 'object' &&
+        Object.hasOwn(args.execution_config, 'executor')) {
+      throw new ToolUserError('execution_config.executor is retired. Use reaction_script alone for code-only jobs, or add agent instructions for analysis. Installed legacy jobs remain readable until migrated.', 422);
+    }
+  }
 );
 
 async function manageAutomationsImpl(
@@ -474,9 +482,8 @@ function buildAutomationProposal(
       args.prompt,
       args.skills,
       args.reaction_script,
-      args.execution_config?.executor?.kind === 'script' ? args.execution_config.executor.source : undefined,
     );
-    if (!args.managed_agent_id && args.execution_config?.executor?.kind !== 'external') {
+    if (!args.managed_agent_id) {
       throw new ToolUserError(
         'managed_agent_id is required to create an Automation (the agent that executes it).'
       );

@@ -12,6 +12,19 @@ import type {
   ReactionClient,
 } from "@lobu/connector-sdk";
 
+export const input = {
+  type: "object",
+  properties: {
+    weekly_review: { type: "string", minLength: 1, maxLength: 4_000 },
+  },
+  required: ["weekly_review"],
+};
+
+type FinanceContext = Omit<AutomationScriptContext, "trigger_signals"> & {
+  trigger_signals?: unknown[];
+  extracted_data?: Record<string, unknown>;
+};
+
 const PAGE_SIZE = 1_000;
 const QUOTE_BATCH_SIZE = 50;
 const SNAPSHOT_SCHEMA = "net-worth-snapshot/v4";
@@ -1187,7 +1200,7 @@ function snapshotDigest(snapshot: FinancialSnapshot): string {
 }
 
 async function notifyNeedsAttention(
-  ctx: AutomationScriptContext,
+  ctx: FinanceContext,
   client: ReactionClient,
   reason: string
 ): Promise<void> {
@@ -1202,10 +1215,11 @@ async function notifyNeedsAttention(
   });
 }
 
-export default async function runNetWorthSnapshot(
-  ctx: AutomationScriptContext,
-  client: ReactionClient
-): Promise<void> {
+async function calculateAndSaveSnapshot(
+  ctx: FinanceContext,
+  client: ReactionClient,
+  notifyFailures: boolean
+): Promise<{ event_id: number; snapshot: FinancialSnapshot } | undefined> {
   const calculatedAt = isoTimestamp(ctx.window.window_end, "window_end");
   const week = isoWeekInTimeZone(calculatedAt, "Europe/London");
   const eventColumns =
@@ -1267,12 +1281,13 @@ export default async function runNetWorthSnapshot(
     revolutBalanceRows.length === 0 &&
     componentRows.length === 0
   ) {
-    await notifyNeedsAttention(
-      ctx,
-      client,
-      "No current balance-sheet data is available. Sync connectors or record a net-worth component and retry."
-    );
-    return;
+    const reason =
+      "No current balance-sheet data is available. Sync connectors or record a net-worth component and retry.";
+    if (notifyFailures) {
+      await notifyNeedsAttention(ctx, client, reason);
+      return;
+    }
+    throw new Error(reason);
   }
 
   const previousRows = (await client.query(
@@ -1364,11 +1379,13 @@ export default async function runNetWorthSnapshot(
       calculatedAt,
     });
   } catch (error) {
-    await notifyNeedsAttention(
-      ctx,
-      client,
-      error instanceof Error ? error.message : String(error)
-    );
+    if (notifyFailures) {
+      await notifyNeedsAttention(
+        ctx,
+        client,
+        error instanceof Error ? error.message : String(error)
+      );
+    }
     throw error;
   }
   const saved = await client.knowledge.save({
@@ -1387,9 +1404,68 @@ export default async function runNetWorthSnapshot(
   const persistedSnapshot = saved.created
     ? snapshot
     : (saved.metadata as unknown as FinancialSnapshot);
+  return { event_id: Number(saved.id), snapshot: persistedSnapshot };
+}
+
+/** Calculate once before analysis; keep the full position book in its saved event. */
+export async function prepare(
+  ctx: AutomationScriptContext,
+  client: ReactionClient
+): Promise<Record<string, Record<string, unknown>[]>> {
+  const saved = await calculateAndSaveSnapshot(ctx, client, false);
+  if (!saved) throw new Error("Net worth preparation produced no snapshot.");
+  const snapshot = saved.snapshot;
+  return {
+    net_worth: [
+      {
+        snapshot_event_id: saved.event_id,
+        week: snapshot.week,
+        calculated_at: snapshot.calculated_at,
+        base_currency: snapshot.base_currency,
+        net_worth_gbp: snapshot.net_worth_gbp,
+        net_worth_range_gbp: snapshot.net_worth_range_gbp,
+        previous: snapshot.previous,
+        attribution: snapshot.attribution,
+        sources: snapshot.sources,
+        summary: snapshotDigest(snapshot),
+      },
+    ],
+  };
+}
+
+/** Native completion uses its saved preparation; old script jobs remain replayable. */
+export default async function runNetWorthSnapshot(
+  ctx: FinanceContext,
+  client: ReactionClient
+): Promise<void> {
+  let week: string;
+  let body: string;
+  if (ctx.sources !== undefined) {
+    const saved = ctx.sources.net_worth?.[0] as
+      | Record<string, unknown>
+      | undefined;
+    const review = ctx.extracted_data?.weekly_review;
+    if (
+      typeof saved?.week !== "string" ||
+      typeof saved.summary !== "string" ||
+      typeof review !== "string" ||
+      !review.trim()
+    ) {
+      throw new Error(
+        "Weekly finances require the saved net_worth source and completed review."
+      );
+    }
+    week = saved.week;
+    body = `${saved.summary}\n\n${review}`;
+  } else {
+    const saved = await calculateAndSaveSnapshot(ctx, client, true);
+    if (!saved) return;
+    week = saved.snapshot.week;
+    body = snapshotDigest(saved.snapshot);
+  }
   await client.notifications.send({
     title: "Net worth updated",
-    body: snapshotDigest(persistedSnapshot).slice(0, 1_000),
+    body: body.slice(0, 1_000),
     idempotency_key: `${IDEMPOTENCY_PREFIX}:notification:week:${week}`,
     automation_source: {
       automation_id: ctx.automation.id,

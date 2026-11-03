@@ -75,6 +75,8 @@ export function isSkippedUnderDryRun(args: {
 }
 
 export interface RunScriptOptions {
+	/** Host-only observation of a dispatched SDK result; never exposed to guest code. */
+	onSdkResult?: (path: string, result: unknown) => void;
 	source: string;
 	context?: Record<string, unknown>;
 	/** Host cancellation, kept outside the guest context and combined with the deadline. */
@@ -1591,7 +1593,10 @@ export async function runScript(
 
 					const result = await raceAbort(dispatchPromise, abortController.signal);
 					assertActive();
-					if (dispatched) recordWorkspaceSdkCall(target, path);
+					if (dispatched) {
+						recordWorkspaceSdkCall(target, path);
+						options.onSdkResult?.(path, result);
+					}
 					const json = JSON.stringify({
 						__lobu_sdk_dispatch: 1,
 						ok: true,

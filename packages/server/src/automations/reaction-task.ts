@@ -133,6 +133,9 @@ export async function runAutomationReactionTask(
     return { status: 'skipped', reason: 'reaction script snapshot not found' };
   }
 
+  const approvedInput = asRecord(run.approved_input);
+  const script = approvedInput.automation_script as import('./preparation').AutomationScriptSnapshot | undefined;
+  const versionId = script ? Number(approvedInput.version_id) : null;
   const [automation] = await sql<AutomationRow>`
     SELECT w.entity_ids,
            COALESCE(wv.name, 'automation-' || w.id) AS name,
@@ -141,15 +144,15 @@ export async function runAutomationReactionTask(
            wv.version AS automation_version
     FROM automations w
     JOIN organization o ON o.id = w.organization_id
-    LEFT JOIN automation_versions wv ON w.current_version_id = wv.id
+    LEFT JOIN automation_versions wv ON COALESCE(${versionId}::bigint, w.current_version_id) = wv.id
     WHERE w.id = ${automationId}
       AND w.organization_id = ${organizationId}
   `;
   if (!automation) return { status: 'skipped', reason: 'automation not found' };
 
-  const entityIds = Array.isArray(automation.entity_ids)
+  const entityIds = script?.entities ?? (Array.isArray(automation.entity_ids)
     ? automation.entity_ids.map(Number)
-    : [];
+    : []);
   const entityRows =
     entityIds.length > 0
       ? await sql<{
@@ -162,13 +165,14 @@ export async function runAutomationReactionTask(
           FROM entities e
           JOIN entity_types et ON et.id = e.entity_type_id
           WHERE e.id = ANY(${pgBigintArray(entityIds)}::bigint[])
+            AND e.organization_id = ${organizationId}
         `
       : [];
 
-  const approvedInput = asRecord(run.approved_input);
   const runMetadata = asRecord(run.run_metadata);
   const context: ReactionContext = {
     extracted_data: asRecord(run.action_output),
+    sources: asRecord(run.run_metadata).preparation_sources as Record<string, unknown[]> | undefined,
     entities: entityRows.map((e) => ({
       id: Number(e.id),
       name: e.name,

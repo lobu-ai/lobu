@@ -3,6 +3,8 @@
  *   create_version, upgrade, get_versions, get_version_details
  */
 
+import { assertAutomationModuleConfiguration } from '../../../automations/preparation';
+import { inspectAutomationScriptExports } from '../../../automations/reaction-executor';
 import { getDb, parsePgNumberArray } from '../../../db/client';
 import { assertAutomationScriptExecutor } from '../../../automations/script-config';
 import { ToolUserError } from '../../../utils/errors';
@@ -341,12 +343,21 @@ export async function handleCreateVersion(
     // automations row is untouched, so the audit must report the persisted
     // current_version_id rather than null/undefined.
     const preimageRows = await tx`
-      SELECT id, current_version_id FROM automations
+      SELECT id, current_version_id, reaction_script_compiled, reaction_input_schema, execution_config, agent_kind,
+             managed_agent_id, device_worker_id, triggers FROM automations
       WHERE automation_group_id = ${groupId} AND organization_id = ${ctx.organizationId}
       ORDER BY id FOR UPDATE
     `;
     if (base) await assertAutomationConfigVersionsUnchanged(args, ctx.organizationId, base, tx);
     const preimage = preimageRows.find(row => Number(row.id) === Number(args.automation_id));
+    if (setAsCurrent) {
+      for (const row of preimageRows) {
+        if (row.reaction_script_compiled) assertAutomationModuleConfiguration({
+          ...row, prompt, skills, outputs,
+          triggers: args.triggers !== undefined ? triggerWrite.triggers : row.triggers,
+        }, await inspectAutomationScriptExports(row.reaction_script_compiled));
+      }
+    }
     const persistedCurrentVersionId = preimage?.current_version_id != null
       ? Number(preimage.current_version_id)
       : null;

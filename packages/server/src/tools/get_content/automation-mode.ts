@@ -14,7 +14,7 @@ import type { ContentItem } from '@lobu/connector-sdk';
 import {
   MAX_COALESCED_AUTOMATION_EVENT_INPUTS,
 } from '../../automations/workspace-event-contract';
-import { type DbClient, parsePgNumberArray } from '../../db/client';
+import { type DbClient, parsePgNumberArray, pgBigintArray } from '../../db/client';
 import type { Env } from '../../index';
 import type { Outputs, UnprocessedRange, AutomationSource } from '../../types/automations';
 import { ToolUserError } from '../../utils/errors';
@@ -682,7 +682,7 @@ export async function handleAutomationMode(
       cv.outputs as template_outputs,
       cv.reactions_guidance,
       cv.version_sources,
-      (SELECT COALESCE(json_agg(json_build_object('id', e.id, 'name', e.name, 'type', et.slug, 'metadata', e.metadata, 'field_controls', e.field_controls)), '[]'::json) FROM entities e JOIN entity_types et ON et.id = e.entity_type_id WHERE e.id = ANY(i.entity_ids)) as entities
+      (SELECT COALESCE(json_agg(json_build_object('id', e.id, 'name', e.name, 'type', et.slug, 'metadata', e.metadata, 'field_controls', e.field_controls)), '[]'::json) FROM entities e JOIN entity_types et ON et.id = e.entity_type_id WHERE e.id = ANY(${boundRun?.automationScript ? sql`${pgBigintArray(boundRun.entityIds)}::bigint[]` : sql`i.entity_ids`})) as entities
     FROM automations i
     LEFT JOIN automation_versions cv
       ON cv.id = COALESCE(${pinnedVersionId}::bigint, i.current_version_id)
@@ -700,17 +700,19 @@ export async function handleAutomationMode(
 
   const versionSources = parseJson(automation.version_sources) || [];
   const automationSources =
-    versionSources.length > 0 ? versionSources : parseJson(automation.sources) || [];
+    boundRun?.automationScript?.sources ??
+    (versionSources.length > 0 ? versionSources : parseJson(automation.sources) || []);
   // The extraction contract is composed from versioned outputs and the
   // optional reaction input contract.
   const templateExtractionSchema = await deriveAutomationExtractionSchema(
     sql,
     automation.organization_id as string,
     parseJson(automation.template_outputs) as Outputs | null,
-    automationId
+    automationId,
+    { scriptSnapshot: boundRun?.automationScript }
   );
 
-  const automationEntityIds = parsePgNumberArray(automation.entity_ids);
+  const automationEntityIds = boundRun?.entityIds ?? parsePgNumberArray(automation.entity_ids);
   let sources: AutomationSource[];
   if (automationSources.length > 0) {
     sources = automationSources;
@@ -845,6 +847,9 @@ export async function handleAutomationMode(
   // reads keep the verified caller's own connection visibility.
   const visibilityUserId = context.userId ?? (automation.created_by as string);
 
+  const preparationSources = boundRun?.preparationSources ?? {};
+  const preparationOffsets: Record<string, number> = {};
+  let preparationOffset: number | undefined;
   let sourceContinuation: SourceWindowPage | undefined;
   if (args.source_cursor || args.source_name) {
     if (!args.source_cursor || !args.source_name || args.before_occurred_at || args.before_id) {
@@ -856,13 +861,20 @@ export async function handleAutomationMode(
         cursor.window_start !== windowStartIso || cursor.window_end !== windowEndIso) {
       throw new ToolUserError('Source cursor does not belong to this Automation run/window.', 409);
     }
-    sourceContinuation = cursor.source_pages?.find((page) => page.name === args.source_name);
-    if (!sourceContinuation?.next_cursor) throw new ToolUserError('Source cursor has no next page for this source.', 409);
+    if (Object.hasOwn(preparationSources, args.source_name)) {
+      preparationOffset = cursor.preparation_offsets?.[args.source_name];
+      if (!Number.isSafeInteger(preparationOffset) || preparationOffset! < 1 || preparationOffset! >= preparationSources[args.source_name].length) {
+        throw new ToolUserError('Source cursor has no next page for this preparation source.', 409);
+      }
+    } else {
+      sourceContinuation = cursor.source_pages?.find((page) => page.name === args.source_name);
+      if (!sourceContinuation?.next_cursor) throw new ToolUserError('Source cursor has no next page for this source.', 409);
+    }
   }
 
   // Run content query and total stats in parallel
   const contentData = await queryContentData(sql, {
-    sources,
+    sources: preparationOffset !== undefined ? [] : sources,
     sourcePage: sourceContinuation,
     window_start: windowStartIso,
     window_end: windowEndIso,
@@ -903,6 +915,20 @@ export async function handleAutomationMode(
     sourcesPage,
   } = contentData;
 
+  for (const [name, rows] of Object.entries(preparationSources)) {
+    if (args.source_name && args.source_name !== name) continue;
+    if (Object.hasOwn(sourcesContent, name) || sources.some((source) => source.name === name)) {
+      throw new ToolUserError(`Preparation source name is already configured: ${name}`, 409);
+    }
+    const offset = args.source_name === name ? preparationOffset ?? 0 : 0;
+    const page = rows.slice(offset, offset + contentLimit);
+    const finalized = finalizeDynamicQueryRows(page);
+    if (finalized.sidecarCollisions.length) throw new ToolUserError(`Preparation source ${name} conflicts with truncation metadata.`, 422);
+    sourcesContent[name] = finalized.rows as unknown as ContentItem[];
+    sourcesPage[name] = { returned: page.length, limit: contentLimit, has_more: offset + page.length < rows.length };
+    if (sourcesPage[name].has_more) preparationOffsets[name] = offset + page.length;
+  }
+
   let contentIds = allContent
     .map((item) => Number((item as Record<string, unknown>).id))
     .filter((id) => Number.isFinite(id) && id > 0)
@@ -934,10 +960,12 @@ export async function handleAutomationMode(
         : {}),
       required_sources: contentData.requiredSources,
       source_pages: contentData.sourcePages,
+      ...(Object.keys(preparationOffsets).length ? { preparation_offsets: preparationOffsets } : {}),
     },
     env
   );
   let windowToken = await signWindow();
+  for (const name of Object.keys(preparationOffsets)) sourcesPage[name].next_cursor = windowToken;
   const setSourceCursors = () => {
     for (const receipt of contentData.sourcePages) {
       if (receipt.next_cursor) sourcesPage[receipt.name].next_cursor = windowToken;
@@ -1146,6 +1174,7 @@ export async function handleAutomationMode(
   };
   // Sign precisely the retained IDs and cursor, never the byte-omitted suffix.
   windowToken = await signWindow();
+  for (const name of Object.keys(preparationOffsets)) sourcesPage[name].next_cursor = windowToken;
   setSourceCursors();
   const bounded = response();
   if (serializedBytes(bounded) > AUTOMATION_READ_MAX_BYTES) throw cannotFit();

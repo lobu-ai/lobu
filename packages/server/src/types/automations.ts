@@ -9,7 +9,7 @@
 
 import { type Static, Type } from '@sinclair/typebox';
 import {
-  AutomationExecutionConfigSchema,
+  LegacyAutomationExecutionConfigSchema,
   AutomationTriggerSchema,
   type AutomationTrigger,
   AutomationDeliveryTargetSchema,
@@ -148,7 +148,7 @@ export const AutomationMetadataSchema = Type.Object({
   /** Preferred local agent runtime on the pinned device; null = device default. */
   agent_kind: Type.Optional(Type.Union([Type.String(), Type.Null()])),
   execution_config: Type.Optional(
-    Type.Union([AutomationExecutionConfigSchema, Type.Null()])
+    Type.Union([LegacyAutomationExecutionConfigSchema, Type.Null()])
   ),
   version: Type.Integer(),
   sources: Type.Array(AutomationSourceSchema),

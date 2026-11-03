@@ -3,6 +3,7 @@
  *   create, update, delete, create_from_version
  */
 
+import { assertAutomationModuleConfiguration } from '../../../automations/preparation';
 import { getDb, parsePgTextArray } from '../../../db/client';
 import {
   assertAutomationConfigVersion,
@@ -60,7 +61,7 @@ import { DEFAULT_AUTOMATION_SOURCE_QUERY, automationSourcesFromPrompt, mergeProm
 import {
   compileReactionScript,
   extractReactionInputSchema,
-  validateReactionDefaultExport,
+  inspectAutomationScriptExports,
 } from '../../../automations/reaction-executor';
 import {
   assertAutomationInstructions,
@@ -327,12 +328,13 @@ export async function handleCreate(
   const reactionScriptCompiled = reactionScript
     ? await compileReactionScript(reactionScript)
     : null;
-  if (reactionScriptCompiled) {
-    await validateReactionDefaultExport(reactionScriptCompiled);
-  }
   const reactionInputSchema = reactionScript
     ? await extractReactionInputSchema(reactionScript)
     : null;
+
+  if (reactionScriptCompiled) {
+    assertAutomationModuleConfiguration({ ...args, outputs, reaction_input_schema: reactionInputSchema }, await inspectAutomationScriptExports(reactionScriptCompiled));
+  }
 
   const createdBy = ctx.userId ?? 'system';
 
@@ -757,7 +759,10 @@ export async function handleUpdate(
     const lockedRows = await tx`
       SELECT id, name, status, organization_id, managed_agent_id, schedule, timezone, triggers,
              device_worker_id::text AS device_worker_id, agent_kind,
-             delivery_target, reaction_script, execution_config, model_config, tags,
+             delivery_target, reaction_script, reaction_script_compiled, reaction_input_schema, execution_config, model_config, tags,
+             (SELECT prompt FROM automation_versions WHERE id = current_version_id) AS prompt,
+             (SELECT skills FROM automation_versions WHERE id = current_version_id) AS skills,
+             (SELECT outputs FROM automation_versions WHERE id = current_version_id) AS outputs,
              min_cooldown_seconds, consecutive_scheduled_failures, schedule_auto_paused_at, next_run_at
       FROM automations
       WHERE id = ${args.automation_id} AND organization_id = ${ctx.organizationId}
@@ -769,6 +774,16 @@ export async function handleUpdate(
     }
     if (base) await assertAutomationConfigVersionsUnchanged(args, ctx.organizationId, base, tx);
     const locked = lockedRows[0] as unknown as typeof currentRow;
+    if (lockedRows[0].reaction_script_compiled) {
+      assertAutomationModuleConfiguration({
+        ...lockedRows[0],
+        execution_config: args.execution_config !== undefined ? args.execution_config : locked.execution_config,
+        managed_agent_id: args.managed_agent_id !== undefined ? args.managed_agent_id : locked.managed_agent_id,
+        device_worker_id: args.device_worker_id !== undefined ? args.device_worker_id : locked.device_worker_id,
+        agent_kind: args.agent_kind !== undefined ? args.agent_kind : locked.agent_kind,
+        triggers: args.triggers !== undefined ? triggerWrite.triggers : locked.triggers,
+      }, await inspectAutomationScriptExports(lockedRows[0].reaction_script_compiled));
+    }
     const lockedTriggersValueEqual =
       args.triggers === undefined ||
       automationTriggersEqual(locked.triggers ?? [], triggerWrite.triggers);
@@ -1203,6 +1218,13 @@ export async function handleCreateFromVersion(
           (Array.isArray(cloneTriggers) ? cloneTriggers : []) as AutomationTrigger[],
           clonedOutputs
         );
+        if ((version.execution_config as { executor?: unknown } | null)?.executor) {
+          throw new ToolUserError('Migrate the legacy executor before creating another Automation from this version.', 422);
+        }
+        if (version.reaction_script_compiled) assertAutomationModuleConfiguration({
+          ...version, prompt: version.prompt as string | null, skills: version.skills as unknown[] | null,
+          outputs: clonedOutputs, triggers: cloneTriggers as AutomationTrigger[],
+        }, await inspectAutomationScriptExports(String(version.reaction_script_compiled)));
         await assertAutomationScriptExecutor({ executionConfig: version.execution_config, ...cloneDefaults,
           triggers: cloneTriggers as AutomationTrigger[], skills: version.skills as unknown[] | null,
           outputs: clonedOutputs, validateSource: false });

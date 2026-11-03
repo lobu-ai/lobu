@@ -20,6 +20,8 @@
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { randomBytes } from 'node:crypto';
+import { runAutomationPreparationTask } from '../../../automations/preparation-task';
+import type { Env } from '../../../index';
 import { verifyWorkerToken } from '@lobu/core';
 import type { DbClient } from '../../../db/client';
 import { generateSecureToken, hashToken } from '../../../auth/oauth/utils';
@@ -124,6 +126,28 @@ describe('headless Automation claim gate (automations.execute)', () => {
   beforeEach(async () => {
     await cleanupTestDatabase();
   });
+
+  it('withholds the device job until preparation commits and exposes its saved source', async () => {
+    const ctx = await setupDevicePinnedAutomation({ workerId: 'prepared-device', platform: 'headless', capabilities: { 'automations.execute': true } });
+    await ctx.workspace.owner.automations.setReactionScript({ automation_id: String(ctx.automationId), reaction_script: 'export async function prepare(ctx, client) { const rows = await client.query("SELECT 19 + 23 AS total"); return { calculated: rows }; }' });
+    const { token } = await createWorkerBoundPat(ctx.workspace.users.owner.id, ctx.workspace.org.id, 'prepared-device');
+    const trigger = await post(`/api/workers/me/automations/${ctx.automationId}/trigger`, { token });
+    expect(trigger.status).toBe(200);
+    const { run_id } = await trigger.json() as { run_id: number };
+    const poll = () => post('/api/workers/poll', { token, body: { worker_id: 'prepared-device', capabilities: { 'automations.execute': true } } });
+    const waiting = await poll();
+    expect(waiting.status).toBe(200);
+    expect((await waiting.json() as { run_id?: number }).run_id).toBeUndefined();
+    const [task] = await ctx.sql`SELECT id FROM runs WHERE parent_run_id = ${run_id} AND action_key = 'automation-preparation'`;
+    await ctx.sql`UPDATE runs SET status = 'claimed', claimed_at = now(), claimed_by = 'preparation-fixture' WHERE id = ${task.id}`;
+    await runAutomationPreparationTask({ organizationId: ctx.workspace.org.id, automationId: ctx.automationId, sourceRunId: run_id }, {} as Env, Number(task.id));
+    const ready = await poll();
+    expect(ready.status).toBe(200);
+    expect((await ready.json() as { run_id: number }).run_id).toBe(run_id);
+    const read = await ctx.workspace.owner.knowledge.read({ automation_id: ctx.automationId, run_id }) as { sources: Record<string, unknown[]> };
+    expect(read.sources.calculated).toEqual([{ total: 42 }]);
+    expect((await (await poll()).json() as { run_id?: number }).run_id).toBeUndefined();
+  }, 60_000);
 
   it('never lets a paired device claim a frozen external snapshot', async () => {
     const ctx = await setupDevicePinnedAutomation({

@@ -110,15 +110,10 @@ async function externalFixture() {
 describe('source feed notifications', () => {
   beforeEach(cleanupTestDatabase);
 
-  it('creates the subscription through the SDK and polls it through authenticated MCP without creating an Automation run', async () => {
-    const { sql, org, user, device, notice, automationId } = await subscribedFixture();
-    await sql`UPDATE automations SET status = 'archived' WHERE id = ${automationId}`;
+  it('polls an installed legacy subscription through authenticated MCP without creating an Automation run', async () => {
+    const { sql, org, user, device, notice, automationId } = await externalFixture();
     const api = await TestApiClient.for({ organizationId: org.id, userId: user.id, memberRole: 'owner' });
-    const created = await api.automations.create({ slug: 'synthetic-sdk-source', name: 'SDK source',
-      execution_config: { executor: { kind: 'external' } },
-      triggers: [{ kind: 'event', connector_key: 'synthetic.source', connection_id: notice.connection_id,
-        event_types: ['message.created'], capture: 'references' }],
-    }) as { automation_id: string };
+    const created = { automation_id: String(automationId) };
     const client = await createTestOAuthClient();
     const { token } = await createTestAccessToken(user.id, org.id, client.client_id, { scope: 'mcp:read' });
     const mcp = new TestMcpClient({ token, orgSlug: org.slug });

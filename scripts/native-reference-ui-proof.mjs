@@ -448,39 +448,32 @@ export async function runNativeReferenceProof({
     await freshPage.unrouteAll({ behavior: "wait" });
     await freshPage.close();
   }
-  // A permission-owning agent does not turn an explicit external executor into
-  // a hosted agent. Exercise a real editor save against the preview API, while
-  // keeping this second fixture inert: no triggers and no run invocation.
-  const external = await call("manage_automations", {
+  // New authoring uses one module. Keep this code-only fixture inert while
+  // exercising a real editor save: no triggers and no run invocation.
+  const codeModuleSource = "export default async () => ({ total: 42 });";
+  const codeModule = await call("manage_automations", {
     action: "create",
-    slug: "native-preview-external",
-    name: "Synthetic external Automation",
-    prompt: "Synthetic editor review only. Do not execute any action.",
+    slug: "native-preview-code-module",
+    name: "Synthetic code module Automation",
     managed_agent_id: agent.agent_id,
-    execution_config: { executor: { kind: "external" } },
+    reaction_script: codeModuleSource,
     triggers: [],
   });
-  assert(external.automation_id, "External editor fixture was not created");
-  const externalPath = `/${workspace}/automations/${external.automation_id}?view=definition`;
-  await page.goto(new URL(externalPath, baseUrl).toString());
-  await page.getByText("External executor", { exact: true }).waitFor();
-  await page.getByText("Owning agent", { exact: true }).waitFor();
   assert(
-    (await page
-      .locator(
-        "#scratch-runs-on, #scratch-device-id, #scratch-timeout, #scratch-permission-mode"
-      )
-      .count()) === 0,
-    "External editor offered an incompatible executor or runtime setting"
+    codeModule.automation_id,
+    "Code module editor fixture was not created"
   );
+  const codeModulePath = `/${workspace}/automations/${codeModule.automation_id}?view=definition`;
+  await page.goto(new URL(codeModulePath, baseUrl).toString());
+  await page.locator("#scratch-name").waitFor();
   await page.screenshot({
-    path: join(outputDir, "external-executor-editor.png"),
+    path: join(outputDir, "code-module-editor.png"),
     fullPage: true,
   });
   await page
     .locator("#scratch-description")
     .fill("Synthetic unrelated description edit.");
-  const externalSaved = Promise.all(
+  const codeModuleSaved = Promise.all(
     ["create_version", "update"].map((action) =>
       page.waitForResponse(
         (response) =>
@@ -493,53 +486,49 @@ export async function runNativeReferenceProof({
   await page
     .getByRole("button", { name: "Save Automation", exact: true })
     .click();
-  for (const response of await externalSaved) {
+  for (const response of await codeModuleSaved) {
     const result = await response.json();
     assert(
       response.ok() &&
         !result.error &&
         !result.approval_queued &&
         result.status !== "pending_approval",
-      "External editor save did not apply"
+      "Code module editor save did not apply"
     );
   }
-  const externalDefinitions = await call("manage_automations", {
-    action: "list",
-    automation_id: String(external.automation_id),
-    include_details: true,
-    limit: 1,
+  const codeModuleDetails = await call("get_automation", {
+    automation_id: String(codeModule.automation_id),
+    page_size: 1,
   });
-  const externalReadback = externalDefinitions.automations?.find(
-    (item) => String(item.automation_id) === String(external.automation_id)
-  );
+  const codeModuleReadback = codeModuleDetails.automation;
   assert(
-    externalReadback?.description === "Synthetic unrelated description edit." &&
-      externalReadback.managed_agent_id === agent.agent_id &&
-      isDeepStrictEqual(externalReadback.execution_config, {
-        executor: { kind: "external" },
-      }) &&
-      externalReadback.triggers.length === 0 &&
-      !externalReadback.device_worker_id,
-    "Unrelated save changed the external executor, owning agent, or trigger state"
+    codeModuleReadback?.description ===
+      "Synthetic unrelated description edit." &&
+      codeModuleReadback.managed_agent_id === agent.agent_id &&
+      !codeModuleReadback.execution_config?.executor &&
+      codeModuleReadback.reaction_script === codeModuleSource &&
+      codeModuleReadback.triggers.length === 0 &&
+      !codeModuleReadback.device_worker_id,
+    "Unrelated save changed the code module, owning agent, or trigger state"
   );
-  const externalRuns = await call("manage_operations", {
+  const codeModuleRuns = await call("manage_operations", {
     action: "list_runs",
-    automation_ids: [Number(external.automation_id)],
+    automation_ids: [Number(codeModule.automation_id)],
     limit: 1,
   });
   assert(
-    externalRuns.runs?.length === 0,
-    "Inert external editor fixture unexpectedly ran"
+    codeModuleRuns.runs?.length === 0,
+    "Inert code module editor fixture unexpectedly ran"
   );
   await page.reload();
-  await page.getByText("External executor", { exact: true }).waitFor();
+  await page.locator("#scratch-name").waitFor();
   assert(
     (await page.locator("#scratch-description").inputValue()) ===
-      externalReadback.description,
-    "External editor reload lost the saved description"
+      codeModuleReadback.description,
+    "Code module editor reload lost the saved description"
   );
   await page.screenshot({
-    path: join(outputDir, "external-executor-editor-saved.png"),
+    path: join(outputDir, "code-module-editor-saved.png"),
     fullPage: true,
   });
   // The private fixture has no Slack connection and cannot receive a message.
@@ -615,13 +604,12 @@ export async function runNativeReferenceProof({
       automation_id: reply.automation_id,
       runs: replyRuns.runs.length,
     },
-    external_editor: {
-      path: externalPath,
-      automation_id: external.automation_id,
-      version: externalReadback.version,
-      owning_agent: externalReadback.managed_agent_id,
-      executor: externalReadback.execution_config.executor,
-      runs: externalRuns.runs.length,
+    code_module_editor: {
+      path: codeModulePath,
+      automation_id: codeModule.automation_id,
+      version: codeModuleReadback.version,
+      owning_agent: codeModuleReadback.managed_agent_id,
+      runs: codeModuleRuns.runs.length,
     },
     first_load_authentication: firstLoadAuthentication,
     path,
@@ -650,7 +638,7 @@ export async function runNativeReferenceProof({
       "reload",
       "fresh browser access via existing single-user preview sign-in",
       "narrow viewport identities loaded",
-      "external executor editor save keeps executor and owning agent",
+      "code module editor save preserves the module and owning agent",
       "reply identities describe the reply setup without inventing run history",
     ],
     screenshots: [
@@ -660,8 +648,8 @@ export async function runNativeReferenceProof({
       "automation-list-narrow.png",
       "automation-activity-narrow.png",
       "automation-combined-activity-narrow.png",
-      "external-executor-editor.png",
-      "external-executor-editor-saved.png",
+      "code-module-editor.png",
+      "code-module-editor-saved.png",
       "reply-native-reference.png",
       "reply-automation-list.png",
       ...navigation.screenshots,
