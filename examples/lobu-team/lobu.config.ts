@@ -9,6 +9,7 @@ import {
 } from "@lobu/cli/config";
 import type ClickHouseAnalyticsConnector from "./clickhouse-analytics.connector.ts";
 import type DataForSeoConnector from "./dataforseo.connector.ts";
+import type ElevenLabsConnector from "./elevenlabs.connector.ts";
 
 // One backlog type for every kind of team work, written by people and agents.
 // The organic acquisition review Automation reads the `seo` kind as its backlog
@@ -352,6 +353,7 @@ export default defineConfig({
       "./clickhouse-analytics.connector.ts"
     ),
     connectorFromFile<typeof DataForSeoConnector>("./dataforseo.connector.ts"),
+    connectorFromFile<typeof ElevenLabsConnector>("./elevenlabs.connector.ts"),
   ],
   org: "lobu-team",
   orgName: "Lobu Team",
