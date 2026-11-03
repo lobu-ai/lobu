@@ -1,7 +1,7 @@
 // Use simple console.log-based logger by default (unbuffered, 12-factor compliant)
 // Set USE_WINSTON_LOGGER=true only if you need Winston features (file rotation, multiple transports)
 const USE_WINSTON_LOGGER = process.env.USE_WINSTON_LOGGER === "true";
-// Use JSON format for structured logging (better for Loki parsing in production)
+// Use JSON format for structured logging (parsed by the production log pipeline)
 const USE_JSON_FORMAT = process.env.LOG_FORMAT === "json";
 
 import winston from "winston";
@@ -130,7 +130,7 @@ export function createLogger(serviceName: string): Logger {
   const isProduction = process.env.NODE_ENV === "production";
   const level = process.env.LOG_LEVEL || "info";
 
-  // JSON format for structured logging (better for Loki/Grafana parsing)
+  // JSON format for structured logging (parsed by the production log pipeline)
   const jsonFormat = winston.format.combine(
     winston.format.timestamp({ format: "YYYY-MM-DDTHH:mm:ss.SSSZ" }),
     winston.format.json()
