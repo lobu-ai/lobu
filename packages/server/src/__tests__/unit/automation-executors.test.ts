@@ -58,11 +58,11 @@ describe("assertAutomationExecutorsResolve", () => {
 
 	test("automated automations require an executor", () => {
 		expect(() => assertAutomationExecutorsResolve([eventTrigger()], {})).toThrow(
-			/executor/,
+			ToolUserError,
 		);
 		expect(() =>
 			assertAutomationExecutorsResolve([scheduleTrigger()], {}),
-		).toThrow(/executor/);
+		).toThrow(ToolUserError);
 	});
 
 	test("an agent satisfies automated triggers", () => {
@@ -99,7 +99,7 @@ describe('reference capture executors', () => {
   });
   test('serves the capture and change-read fields through the real tool schemas', () => {
     const create = validateToolArgs('manage_automations', getTool('manage_automations')!.inputSchema, {
-      action: 'create', slug: 'synthetic-source', name: 'Synthetic source', execution_config: external.executionConfig,
+      action: 'create', slug: 'synthetic-source', name: 'Synthetic source', managed_agent_id: 'synthetic-owner',
       triggers: [capture()],
     });
     expect((create as any).triggers[0].capture).toBe('references');
