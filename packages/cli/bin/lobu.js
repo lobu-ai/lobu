@@ -152,21 +152,26 @@ if (isBun() || majorOf(process.versions.node) !== REQUIRED_NODE_MAJOR) {
   // to the Node 26 child, and wait for it to finish. Exiting immediately here
   // would orphan the server when the Mac app stops the runner.
   const child = spawn(target, args, { stdio: "inherit", env });
-  const forward = (signal) => {
-    if (child.exitCode === null && child.signalCode === null)
-      child.kill(signal);
-  };
-  process.on("SIGINT", () => forward("SIGINT"));
-  process.on("SIGTERM", () => forward("SIGTERM"));
-  child.on("error", (error) => {
+  const forwarders = ["SIGINT", "SIGTERM", "SIGHUP"].map((signal) => {
+    const forward = () => child.kill(signal);
+    process.on(signal, forward);
+    return [signal, forward];
+  });
+  const result = await new Promise((resolve) => {
+    child.once("error", (error) => resolve({ error }));
+    child.once("close", (status, signal) => resolve({ status, signal }));
+  });
+  for (const [signal, forward] of forwarders) {
+    process.removeListener(signal, forward);
+  }
+  if (result.error) {
     process.stderr.write(
-      `\n  Lobu found Node 26 at ${target} but could not start it: ${error.message}\n\n`
+      `\n  Lobu found Node 26 at ${target} but could not start it: ${result.error.message}\n\n`
     );
     process.exit(1);
-  });
-  child.on("exit", (code) => {
-    process.exit(code ?? 1);
-  });
+  }
+  if (result.signal) process.kill(process.pid, result.signal);
+  process.exit(result.status ?? 1);
 }
 
 // Dynamic import (not a static top-level `import`) is REQUIRED for the bundle:

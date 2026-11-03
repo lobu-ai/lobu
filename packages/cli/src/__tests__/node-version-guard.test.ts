@@ -1,5 +1,13 @@
-import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -124,6 +132,145 @@ describe("bin/lobu.js Node gate", () => {
     expect(out).toContain("Usage: lobu run|dev");
     expect(proc.status).toBe(0);
   });
+});
+
+describe("bin/lobu.js bootstrap supervision", () => {
+  const binEntry = join(import.meta.dir, "..", "..", "bin", "lobu.js");
+
+  async function waitForFile(file: string) {
+    const deadline = Date.now() + 5_000;
+    while (!existsSync(file)) {
+      if (Date.now() >= deadline)
+        throw new Error(`Timed out waiting for ${file}`);
+      await Bun.sleep(10);
+    }
+  }
+
+  function startFixture(host: readonly [string, ...string[]], body: string) {
+    const dir = mkdtempSync(join(tmpdir(), "lobu-bootstrap-"));
+    temporaryDirs.push(dir);
+    mkdirSync(join(dir, "bin"));
+    mkdirSync(join(dir, "dist"));
+    copyFileSync(binEntry, join(dir, "bin", "lobu.js"));
+    writeFileSync(join(dir, "package.json"), '{"type":"module"}');
+    writeFileSync(
+      join(dir, "dist", "index.js"),
+      `import { existsSync, writeFileSync } from "node:fs";
+       import { join } from "node:path";
+       export async function runCli() {
+         const dir = process.argv[3];
+         writeFileSync(join(dir, "ready"), JSON.stringify({
+           pid: process.pid, node: process.versions.node,
+           bun: process.versions.bun ?? null
+         }));
+         ${body}
+       }`
+    );
+    const [binary, ...args] = host;
+    const launcher = spawn(
+      binary,
+      [...args, join(dir, "bin", "lobu.js"), "run", dir],
+      {
+        env: { ...process.env, LOBU_NODE26_BOOTSTRAP: "" },
+        stdio: "ignore",
+      }
+    );
+    const closed = new Promise<{ code: number | null; signal: string | null }>(
+      (resolve, reject) => {
+        launcher.once("error", reject);
+        launcher.once("close", (code, signal) => resolve({ code, signal }));
+      }
+    );
+    return {
+      dir,
+      launcher,
+      closed,
+      async cleanup() {
+        if (existsSync(join(dir, "ready"))) {
+          const { pid } = JSON.parse(readFileSync(join(dir, "ready"), "utf8"));
+          try {
+            process.kill(pid, "SIGKILL");
+          } catch {
+            // The fixture already exited.
+          }
+        }
+        launcher.kill("SIGKILL");
+        await closed;
+      },
+    };
+  }
+
+  const hosts = [
+    { name: "Bun", command: [process.execPath] },
+    {
+      name: "older Node",
+      command: [NODE, "--require", spoofPreload("22.0.0")],
+    },
+  ] as const;
+  for (const host of hosts) {
+    test.each([
+      "SIGTERM",
+      "SIGINT",
+      "SIGHUP",
+    ] as const)(`${host.name} forwards %s and waits for cleanup`, async (signal) => {
+      const fixture = startFixture(
+        host.command,
+        `
+          process.once(${JSON.stringify(signal)}, () => {
+            writeFileSync(join(dir, "received"), ${JSON.stringify(signal)});
+            setInterval(() => {
+              if (!existsSync(join(dir, "finish"))) return;
+              writeFileSync(join(dir, "cleaned"), "done");
+              process.exit(23);
+            }, 10);
+          });
+          setInterval(() => {}, 1_000);
+        `
+      );
+      try {
+        await waitForFile(join(fixture.dir, "ready"));
+        const runtime = JSON.parse(
+          readFileSync(join(fixture.dir, "ready"), "utf8")
+        );
+        expect(runtime.node).toMatch(/^26\./);
+        expect(runtime.bun).toBeNull();
+        fixture.launcher.kill(signal);
+        await waitForFile(join(fixture.dir, "received"));
+        expect(readFileSync(join(fixture.dir, "received"), "utf8")).toBe(
+          signal
+        );
+        expect(fixture.launcher.exitCode).toBeNull();
+        expect(fixture.launcher.signalCode).toBeNull();
+        writeFileSync(join(fixture.dir, "finish"), "continue");
+        expect(await fixture.closed).toEqual({ code: 23, signal: null });
+        expect(existsSync(join(fixture.dir, "cleaned"))).toBe(true);
+        expect(() => process.kill(runtime.pid, 0)).toThrow();
+      } finally {
+        await fixture.cleanup();
+      }
+    }, 10_000);
+
+    test.each([0, 23])(`${host.name} preserves exit code %i`, async (code) => {
+      const fixture = startFixture(host.command, `process.exit(${code});`);
+      try {
+        expect(await fixture.closed).toEqual({ code, signal: null });
+      } finally {
+        await fixture.cleanup();
+      }
+    });
+
+    test(`${host.name} preserves a child's termination signal`, async () => {
+      const fixture = startFixture(
+        host.command,
+        'process.kill(process.pid, "SIGTERM");'
+      );
+      try {
+        expect(await fixture.closed).toEqual({ code: null, signal: "SIGTERM" });
+      } finally {
+        await fixture.cleanup();
+      }
+    });
+  }
 });
 
 describe("lobu run Node gate", () => {
