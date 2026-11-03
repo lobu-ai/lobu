@@ -269,7 +269,7 @@ interface ToolDefinitionMetadata {
   inputSchema: any; // JSON Schema
   /** Explicit workspace selector shared by discovery and dispatch. */
   workspaceTarget?: string;
-  /** Require an activity heading in MCP discovery while accepting legacy calls. */
+  /** Require an activity heading in advertised schemas while accepting legacy calls. */
   requestTitle?: boolean;
   /**
    * Narrower schema advertised on `tools/list` when the tool accepts fields

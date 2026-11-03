@@ -7,6 +7,20 @@ import {
 } from "../../../utils/openapi-generator";
 
 describe("generateOpenAPISpec", () => {
+	it.each(["run_sdk", "query_sdk", "query_sql"])(
+		"requests an activity title for %s in Actions while keeping the typed client optional",
+		(toolName) => {
+			const spec = generateOpenAPISpec("https://example.test");
+			const path = `/api/{orgSlug}/${toolName}`;
+			const actions = spec.paths[path].post.requestBody.content["application/json"].schema;
+			const typed = generateStrictToolPaths()[path].post.requestBody.content["application/json"].schema;
+			expect(actions.required).toContain("title");
+			expect(actions.properties.title).toMatchObject({ type: "string", maxLength: 200 });
+			expect(typed.required).not.toContain("title");
+			expect(typed.properties.title).toMatchObject({ type: "string", maxLength: 200 });
+		},
+	);
+
 	it("uses public Automation terminology throughout ChatGPT metadata", () => {
 		const spec = generateOpenAPISpec("https://example.test");
 		// MCP App tools are never REST-dispatched, so they get no OpenAPI path.
