@@ -74,6 +74,12 @@ export class ToolUserError extends Error {
   readonly httpStatus: number;
   readonly code?: ToolErrorCode;
   readonly retryable: boolean;
+  /**
+   * Seconds until the caller may retry. Carried structurally (not only inside
+   * the message) so HTTP boundaries can emit `Retry-After` and a client can
+   * render a countdown without parsing prose.
+   */
+  retryAfterSeconds?: number;
   callId?: string;
 
   constructor(message: string, httpStatus = 400, code?: ToolErrorCode) {

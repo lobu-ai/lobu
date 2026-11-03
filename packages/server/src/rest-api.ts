@@ -188,6 +188,11 @@ function restErrorResponse(
 ): Response {
 	const error = asReadTimeout(thrown);
 	if (error instanceof ToolUserError) {
+		// Standard HTTP field for the structured wait, so a client (and any
+		// proxy) reads the delay instead of parsing "Try again in 26s".
+		if (error.httpStatus === 429 && error.retryAfterSeconds !== undefined) {
+			c.header("Retry-After", String(error.retryAfterSeconds));
+		}
 		return c.json(
 			toolUserErrorBody(error),
 			error.httpStatus as ContentfulStatusCode
@@ -444,7 +449,9 @@ export async function restInvokeEventAction(c: Context<{ Bindings: Env }>) {
 async function respondWithViewShell(
 	c: Context<{ Bindings: Env }>,
 	organizationId: string,
-	key: string
+	key: string,
+	/** Public reads cache at the edge; a member's session-scoped read never does. */
+	cacheControl = "no-store"
 ) {
 	if (!isValidViewKey(key)) {
 		throw new ToolUserError("Invalid view key", 400);
@@ -459,7 +466,7 @@ async function respondWithViewShell(
 		await viewRuntimeScript()
 	);
 	c.header("Content-Type", "text/plain; charset=utf-8");
-	c.header("Cache-Control", "no-store");
+	c.header("Cache-Control", cacheControl);
 	c.header("X-Lobu-View-Hash", view.content_hash);
 	c.header(
 		"X-Lobu-View-Bytes",
@@ -524,10 +531,15 @@ export async function publicRestGetViewShell(c: Context<{ Bindings: Env }>) {
 		if (!organizationId) {
 			return c.json({ error: "Not found" }, 404);
 		}
+		// Same shape as the app shell: a public view's bytes do not depend on who
+		// asks, so let the edge absorb repeat visits instead of paying for a
+		// few hundred KB of origin render each time. Clients still key on the
+		// content hash, so a re-saved view is picked up as soon as the list is.
 		return await respondWithViewShell(
 			c,
 			organizationId,
-			c.req.param("key") ?? ""
+			c.req.param("key") ?? "",
+			"public, max-age=0, s-maxage=60, stale-while-revalidate=300"
 		);
 	} catch (error) {
 		return restErrorResponse(c, error);

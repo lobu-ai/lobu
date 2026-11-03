@@ -509,11 +509,16 @@ export function enforcePublicReadLimit(caller: {
         RateLimitPresets.PUBLIC_READ_PER_IP_MINUTE
       );
   if (!result.allowed) {
-    throw new ToolUserError(
-      `${result.errorMessage} Try again in ${Math.max(1, result.resetInSeconds)}s.`,
+    const retryAfterSeconds = Math.max(1, result.resetInSeconds);
+    const error = new ToolUserError(
+      `${result.errorMessage} Try again in ${retryAfterSeconds}s.`,
       429,
       'RATE_LIMITED'
     );
+    // Machine-readable alongside the prose: the HTTP boundary turns this into
+    // `Retry-After`, and the web host renders the wait without parsing text.
+    error.retryAfterSeconds = retryAfterSeconds;
+    throw error;
   }
 }
 

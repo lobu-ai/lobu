@@ -185,6 +185,27 @@ describe('public read rate limit', () => {
     expect(await publicRest('203.0.113.8')).toBe(200);
   });
 
+  it('answers a limited public read with Retry-After and a structured code', async () => {
+    // The wait is a field, not prose: the web host renders a countdown from it
+    // and the error classifies on `code`, so neither parses the message.
+    for (let i = 0; i < 60; i++) await publicRest('203.0.113.9');
+    const response = await get(
+      `/api/${org.slug}/public/knowledge/search?query=rents`,
+      { headers: fromIP('203.0.113.9') }
+    );
+    expect(response.status).toBe(429);
+    const retryAfter = Number(response.headers.get('retry-after'));
+    expect(retryAfter).toBeGreaterThan(0);
+    expect(retryAfter).toBeLessThanOrEqual(60);
+
+    const body = (await response.json()) as {
+      code?: string;
+      retryable?: boolean;
+    };
+    expect(body.code).toBe('RATE_LIMITED');
+    expect(body.retryable).toBe(true);
+  });
+
   it('charges an anonymous MCP session to the IP of each request, not the one it opened from', async () => {
     const sessionId = await anonymousSession('198.51.100.1');
     expect(await anonymousSearchError(sessionId, '198.51.100.1')).toBeNull();
