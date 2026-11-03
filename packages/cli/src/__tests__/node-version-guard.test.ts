@@ -4,10 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterAll, describe, expect, test } from "bun:test";
-import {
-  checkNodeSupport,
-  sandboxAvailableForNode,
-} from "../internal/node-version.js";
+import { resolveNode26Binary } from "../internal/node-binary.js";
+import { checkNodeSupport } from "../internal/node-version.js";
 
 // bin/lobu.js runs under Node in production (its shebang is `#!/usr/bin/env
 // node`). `process.execPath` here is Bun, so invoke `node` through PATH.
@@ -34,19 +32,50 @@ afterAll(() => {
 });
 
 describe("checkNodeSupport", () => {
-  test("classifies the running Node as supported (tests run on >=22)", () => {
+  test("classifies the running Node as supported (tests run on 26.x)", () => {
     const support = checkNodeSupport();
     expect(support.ok).toBe(true);
   });
+});
 
-  test("sandbox availability follows the isolated-vm build matrix", () => {
-    // isolated-vm@6 → 22–24; nothing on 25; isolated-vm@7 → 26+.
-    expect(sandboxAvailableForNode(22)).toBe(true);
-    expect(sandboxAvailableForNode(24)).toBe(true);
-    expect(sandboxAvailableForNode(25)).toBe(false);
-    expect(sandboxAvailableForNode(26)).toBe(true);
-    // Below the floor is not "sandbox unavailable", it's unsupported entirely.
-    expect(sandboxAvailableForNode(18)).toBe(false);
+describe("resolveNode26Binary", () => {
+  const base = {
+    execPath: "/usr/local/bin/bun",
+    versions: { node: "26.7.0", bun: "1.4.4" },
+    platform: "linux" as const,
+    env: { PATH: "/fake/bin" },
+  };
+
+  test("skips a Bun execPath and uses a verified Node 26 on PATH", () => {
+    const binary = resolveNode26Binary({
+      ...base,
+      run: (command) =>
+        command === "/fake/bin/node"
+          ? '{"node":"26.7.0","bun":null}'
+          : '{"node":"26.3.0","bun":"1.4.4"}',
+    });
+    expect(binary).toBe("/fake/bin/node");
+  });
+
+  test("returns the current process when it is genuinely Node 26", () => {
+    const binary = resolveNode26Binary({
+      ...base,
+      execPath: "/opt/node26/bin/node",
+      versions: { node: "26.7.0" },
+      run: () => {
+        throw new Error("must not probe PATH");
+      },
+    });
+    expect(binary).toBe("/opt/node26/bin/node");
+  });
+
+  test("fails fast when PATH has no Node 26 binary", () => {
+    expect(() =>
+      resolveNode26Binary({
+        ...base,
+        run: () => '{"node":"24.11.0","bun":null}',
+      })
+    ).toThrow(/must run on Node\.js 26\.x/);
   });
 });
 
@@ -56,38 +85,37 @@ describe("bin/lobu.js Node gate", () => {
   // installed. defineProperty is required — process.versions.node is read-only.
   const binEntry = join(import.meta.dir, "..", "..", "bin", "lobu.js");
 
-  test("exits non-zero with an explicit message on Node 18", () => {
+  test("exits non-zero with an explicit message on Node 25", () => {
     const proc = spawnSync(NODE, [binEntry, "--version"], {
       env: {
         ...process.env,
-        NODE_OPTIONS: `--require ${spoofPreload("18.19.1")}`,
+        NODE_OPTIONS: `--require ${spoofPreload("25.9.0")}`,
       },
       encoding: "utf8",
     });
     const out = (proc.stdout ?? "") + (proc.stderr ?? "");
 
     // The explicit, actionable message — NOT the raw undici crash.
-    expect(out).toContain("Node.js 22 or newer");
-    expect(out).toContain("18.19.1");
+    expect(out).toContain("Node.js 26.x");
+    expect(out).toContain("25.9.0");
     expect(out).not.toContain("File is not defined");
     expect(proc.status).not.toBe(0);
   });
 
-  test("does not fire on a supported Node (real runtime, >=22)", () => {
-    // No spoof: the guard must let a supported Node through to normal CLI
-    // handling. `--version` prints and exits 0.
+  test("does not fire on a supported Node (real runtime, 26.x)", () => {
+    // No spoof: the guard must let Node 26 through to normal CLI handling.
     const proc = spawnSync(NODE, [binEntry, "--version"], {
       env: { ...process.env },
       encoding: "utf8",
     });
     const out = (proc.stdout ?? "") + (proc.stderr ?? "");
-    expect(out).not.toContain("Node.js 22 or newer");
+    expect(out).not.toContain("Node.js 26.x");
     expect(proc.status).toBe(0);
   });
 });
 
-describe("lobu run Node warning", () => {
-  test("warns before environment validation fails on Node 25", () => {
+describe("lobu run Node gate", () => {
+  test("refuses on Node 25 before environment validation", () => {
     const cwd = mkdtempSync(join(tmpdir(), "lobu-node25-run-"));
     temporaryDirs.push(cwd);
     const devModule = pathToFileURL(
@@ -100,8 +128,8 @@ describe("lobu run Node warning", () => {
       `await devCommand(${JSON.stringify(cwd)});`,
     ].join("\n");
 
-    // A shared shell DATABASE_URL makes devCommand stop after its initial
-    // validation, without starting the embedded server.
+    // A shared shell DATABASE_URL would stop devCommand after its initial
+    // validation; the Node gate must fire before that point.
     const proc = spawnSync(process.execPath, ["--eval", script], {
       env: {
         ...process.env,
@@ -111,16 +139,14 @@ describe("lobu run Node warning", () => {
       encoding: "utf8",
     });
     const out = (proc.stdout ?? "") + (proc.stderr ?? "");
-    const warning = out.indexOf(
-      "the agent-code sandbox (query_sdk / run_sdk) is unavailable"
-    );
+    const gateFailure = out.indexOf("Lobu needs Node.js 26.x");
     const validationFailure = out.indexOf(
       "DATABASE_URL inherited from shell points at a shared DB"
     );
 
     expect(proc.status).toBe(1);
-    expect(warning).toBeGreaterThanOrEqual(0);
-    expect(validationFailure).toBeGreaterThan(warning);
+    expect(gateFailure).toBeGreaterThanOrEqual(0);
+    expect(validationFailure).toBe(-1);
   });
 });
 
@@ -129,13 +155,7 @@ describe("server.bundle.mjs Node gate (direct `node bundle` path)", () => {
   // bin/lobu.js. The build (build-server-bundle.mjs) makes server.bundle.mjs a
   // tiny gate entry that checks the Node version, then dynamically imports the
   // real graph (server-main.bundle.mjs). The split is required: an in-file
-  // guard can't beat ESM hoisting of the graph's undici import,
-  // which crashes old Node with `ReferenceError: File is not defined`.
-  //
-  // NOTE: on this Node 26 host, spoofing only the version STRING can't trigger
-  // the real undici crash (the `File` global is genuinely present), so this
-  // asserts the version-gate message + clean exit. The gate-runs-before-undici
-  // guarantee comes from the two-bundle split, not from this spoof.
+  // guard can't beat ESM hoisting of the graph's undici import.
   const bundlePath = join(
     import.meta.dir,
     "..",
@@ -146,18 +166,18 @@ describe("server.bundle.mjs Node gate (direct `node bundle` path)", () => {
   const built = existsSync(bundlePath);
 
   test.skipIf(!built)(
-    "bundle rejects Node 18 with an explicit message, no undici crash",
+    "bundle rejects Node 25 with an explicit message, no undici crash",
     () => {
       const proc = spawnSync(NODE, [bundlePath], {
         env: {
           ...process.env,
-          NODE_OPTIONS: `--require ${spoofPreload("18.19.1")}`,
+          NODE_OPTIONS: `--require ${spoofPreload("25.9.0")}`,
           DATABASE_URL: join(tmpdir(), "lobu-guard-test-nonexistent"),
         },
         encoding: "utf8",
       });
       const out = (proc.stdout ?? "") + (proc.stderr ?? "");
-      expect(out).toContain("Node.js 22 or newer");
+      expect(out).toContain("Node.js 26.x");
       expect(out).not.toContain("File is not defined");
       expect(proc.status).toBe(1);
     }

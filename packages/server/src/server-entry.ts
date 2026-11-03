@@ -6,20 +6,20 @@
  * dependency evaluation, so unsupported Node versions get an actionable error.
  * The build emits server-main.bundle.mjs separately to prevent import hoisting.
  *
- * Keep the threshold in sync with ./utils/assert-node-version.ts and the CLI's
+ * Keep the major in sync with ./utils/assert-node-version.ts and the CLI's
  * internal/node-version.ts + bin/lobu.js.
  */
 
-const MIN_NODE_MAJOR = 22;
+const REQUIRED_NODE_MAJOR = 26;
 
 function assertNodeOrExit(): void {
   const current = process.versions.node;
   const major = Number.parseInt((current ?? "").split(".")[0] ?? "", 10);
-  if (!Number.isFinite(major) || major < MIN_NODE_MAJOR) {
+  if (!Number.isFinite(major) || major !== REQUIRED_NODE_MAJOR) {
     process.stderr.write(
-      `\n  Lobu needs Node.js ${MIN_NODE_MAJOR} or newer — you're on Node ${current}.\n` +
-        `  (The isolated-vm sandbox only has native builds for Node ${MIN_NODE_MAJOR}–24 and 26+.)\n` +
-        `  Install Node ${MIN_NODE_MAJOR}+ (nvm/fnm/brew) and re-run.\n\n`,
+      `\n  Lobu needs Node.js ${REQUIRED_NODE_MAJOR}.x — you're on Node ${current}.\n` +
+        `  (The isolated-vm sandbox has a native build for Node ${REQUIRED_NODE_MAJOR}.x only.)\n` +
+        `  Install Node ${REQUIRED_NODE_MAJOR} (nvm/fnm/brew) and re-run.\n\n`,
     );
     process.exit(1);
   }

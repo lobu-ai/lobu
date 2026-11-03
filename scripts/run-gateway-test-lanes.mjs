@@ -7,8 +7,8 @@ import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
 /**
- * Per-test/per-hook ceiling for the gateway lanes. Must be a CLI flag: bun
- * 1.3.5 silently ignores `[test].timeout` in bunfig — these lanes carried
+ * Per-test/per-hook ceiling for the gateway lanes. Must be a CLI flag: Bun's
+ * bunfig `[test].timeout` has been unreliable — these lanes carried
  * `timeout = 10000` for a long time and still died at exactly 5000ms, which is
  * why the flake survived every previous encounter looking already-handled.
  *

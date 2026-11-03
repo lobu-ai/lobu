@@ -212,9 +212,9 @@ describe("published runtime readiness", () => {
     ) as any;
     const cells = workflow.jobs.smoke.strategy.matrix.include;
     expect(cells.filter((cell: any) => !cell.bun)).toHaveLength(4);
-    expect(cells.find((cell: any) => cell.bun === "1.4.0")).toMatchObject({
+    expect(cells.find((cell: any) => cell.bun === "1.4.4")).toMatchObject({
       as_root: false,
-      image: "node:22-bookworm-slim",
+      image: "node:26-bookworm-slim",
     });
     const steps = workflow.jobs.smoke.steps;
     expect(

@@ -66,10 +66,15 @@ DATA_LOG="$RUN_DIR/mock-data.log"
 CLOUD_DB="postgresql://postgres:postgres@127.0.0.1:$CLOUD_PG_PORT/postgres?sslmode=disable"
 LOCAL_DB="postgresql://postgres:postgres@127.0.0.1:$LOCAL_PG_PORT/postgres?sslmode=disable"
 
-# Keep supported Node 22-24 and 26+ on their matching native addon.
+# The isolate lane has one isolated-vm build and requires Node 26.x.
 NODE_MAJOR="$(node -p 'Number(process.versions.node.split(".")[0])' 2>/dev/null || echo 0)"
-if [ -x /opt/homebrew/opt/node@22/bin/node ] && { [ "$NODE_MAJOR" -lt 22 ] || [ "$NODE_MAJOR" -eq 25 ]; }; then
-  export PATH="/opt/homebrew/opt/node@22/bin:$PATH"
+if [ -x /opt/homebrew/opt/node@26/bin/node ] && [ "$NODE_MAJOR" -ne 26 ]; then
+  export PATH="/opt/homebrew/opt/node@26/bin:$PATH"
+  NODE_MAJOR=26
+fi
+if [ "$NODE_MAJOR" -ne 26 ]; then
+  echo "❌ Node 26.x is required (found $(node -v 2>/dev/null || echo missing))." >&2
+  exit 1
 fi
 
 MOCK_PID=""; DATA_PID=""; CLOUD_PID=""; LOCAL_PID=""

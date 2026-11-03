@@ -10,7 +10,7 @@ Read root `AGENTS.md` first. This package is the `lobu` binary users install fro
 
 ## Package-specific traps
 - **The dynamic import in `bin/lobu.js` is required — do not "fix" it to a static import.** A static import is hoisted and evaluated before the Node-version gate runs, so an unsupported Node would load the bundle and throw a cryptic error instead of the friendly message. This is a deliberate, documented exception to the repo's static-import rule.
-- Node support is 22–24 and 26+ (25 boots without the SDK sandbox, because isolated-vm@6 covers 22–24 and @7 covers 26+). This policy is expressed in several places that must stay in sync: `bin/lobu.js` (minimum only), `src/internal/node-version.ts` (the full classifier), `packages/server/src/utils/assert-node-version.ts`, and the package `engines` fields. Change them together, not in prose.
+- Node support is 26.x only. The gateway and worker load the Node-26-only `isolated-vm` native build, and `lobu run` resolves a verified Node 26 binary rather than reusing whatever executable launched the CLI (Bun reports a Node-compatible version but cannot load the addon). This policy is expressed in several places that must stay in sync: `bin/lobu.js`, `src/internal/node-version.ts`, `src/internal/node-binary.ts`, `packages/server/src/utils/assert-node-version.ts`, and the package `engines` fields. Change them together, not in prose.
 - This package **is** biome-formatted — use `bun run check:fix` from the repo root.
 - `packages/cli` builds last in every build list because it bundles the others; a new workspace package it depends on must be added *before* it. See `docs/GOTCHAS.md`, "Build & typecheck".
 

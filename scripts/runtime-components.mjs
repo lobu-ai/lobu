@@ -112,7 +112,7 @@ export function runtimeVerificationSource(key, component) {
   else verify.push("const nativeRequire = require;");
   if (key === "server" || key === "device")
     verify.push(
-      'const major = Number(process.versions.node.split(".")[0]); if (major !== 25) { const ivm = nativeRequire(major >= 26 ? "isolated-vm-next" : "isolated-vm"); const isolate = new ivm.Isolate({ memoryLimit: 8 }); isolate.dispose(); }'
+      'const ivm = nativeRequire("isolated-vm"); const isolate = new ivm.Isolate({ memoryLimit: 8 }); isolate.dispose();'
     );
   return `${verify.join("\n")}\n`;
 }
@@ -160,7 +160,7 @@ export async function bundleCompiler() {
     bundle: true,
     platform: "node",
     format: "esm",
-    target: "node22",
+    target: "node26",
     plugins: [externalNonWorkspace],
   });
 }
@@ -241,7 +241,7 @@ export async function buildRuntimeComponents() {
         bundle: true,
         platform: "node",
         format: "esm",
-        target: "node22",
+        target: "node26",
         packages: "external",
       });
     } else if (key === "device") {
@@ -284,7 +284,7 @@ export async function buildRuntimeComponents() {
         bundle: true,
         platform: "node",
         format: "esm",
-        target: "node22",
+        target: "node26",
         plugins: [externalNonWorkspace],
       });
     } else if (key === "postgres") {

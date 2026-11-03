@@ -205,11 +205,9 @@ function findCredentialTriples(text) {
 /**
  * Walk for `.ts`/`.tsx` under `dir`.
  *
- * Hand-rolled rather than `fs.globSync`: that landed in Node 22.0 as
- * experimental and this repo's CI pins Node 22, where importing it throws
- * `does not provide an export named 'globSync'` — the gate then fails every
- * run for a reason that has nothing to do with the code it guards. `readdirSync`
- * with `withFileTypes` is stable across every version we support.
+ * Hand-rolled rather than `fs.globSync`: keeping the gate independent of a
+ * newly added glob API avoids failing every run for a reason unrelated to the
+ * code it guards. `readdirSync` with `withFileTypes` is stable.
  */
 function collectSourceFiles(dir) {
   const out = [];

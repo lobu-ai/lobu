@@ -1,5 +1,5 @@
 [test]
 preload = ["./src/__tests__/setup/bun-test-teardown.ts"]
 coverageDir = "coverage"
-# Match root bunfig: text reporter crashes bun 1.3.5 on large suites (WriteFailed).
+# Match root bunfig: the text reporter has crashed Bun on large suites (WriteFailed).
 coverageReporter = ["lcov"]

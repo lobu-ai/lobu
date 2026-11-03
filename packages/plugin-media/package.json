@@ -35,7 +35,7 @@
     "typescript": "^5.8.3"
   },
   "engines": {
-    "node": ">=22 <25 || >=26"
+    "node": ">=26 <27"
   },
   "license": "Apache-2.0"
 }

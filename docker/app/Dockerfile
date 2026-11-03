@@ -5,9 +5,9 @@
 
 # Keep container builds on the same Bun version as the workflow lanes instead
 # of resolving a different `latest` release when a layer must be rebuilt.
-ARG BUN_VERSION=1.3.5
+ARG BUN_VERSION=1.4.4
 
-FROM node:22-slim AS builder
+FROM node:26-slim AS builder
 ARG BUN_VERSION
 # 1 keeps the embedded-postgres + pgvector runtime (preview envs use
 # DATABASE_URL=file://); 0 (default, prod) prunes them after the build.
@@ -182,7 +182,7 @@ RUN node scripts/image-browser-tooling.mjs --prune /app
 # ===========================================
 # Runtime
 # ===========================================
-FROM node:22-slim AS runtime
+FROM node:26-slim AS runtime
 ARG BUN_VERSION
 
 WORKDIR /app
@@ -205,6 +205,11 @@ ENV PATH="/usr/local/bin:${PATH}"
 # Copy installed deps + source from builder
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/package.json ./
+
+# Prove this exact final image — its Node 26 ABI and its copied native build —
+# can load and construct an isolated-vm Isolate. A builder-only check would
+# miss a runtime-base ABI/glibc mismatch.
+RUN node --no-node-snapshot -e "const ivm = require('isolated-vm'); const isolate = new ivm.Isolate({ memoryLimit: 8 }); isolate.dispose(); console.log('isolated-vm ok on Node ' + process.versions.node)"
 COPY --from=builder /app/tsconfig.json ./
 COPY --from=builder /app/config ./config
 COPY --from=builder /app/packages/core ./packages/core
@@ -241,6 +246,9 @@ ARG APP_GIT_SHA=unknown
 ARG APP_BUILD_TIME=unknown
 ENV NODE_ENV=production
 ENV LOG_FORMAT=json
+# isolated-vm's upstream launch requirement on Node 20+; also covers
+# `docker exec ... lobu ...` and any child Node processes.
+ENV NODE_OPTIONS=--no-node-snapshot
 ENV APP_GIT_SHA=${APP_GIT_SHA}
 ENV APP_BUILD_TIME=${APP_BUILD_TIME}
 

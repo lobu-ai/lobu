@@ -79,6 +79,6 @@
     "!dist/commands/connector.js"
   ],
   "engines": {
-    "node": ">=22 <25 || >=26"
+    "node": ">=26 <27"
   }
 }

@@ -13,7 +13,7 @@
  * Unlike tool-surface (which stubbed the sandbox tools), this harness runs the
  * REAL isolated-vm sandbox — so `run_sdk` / `query_sdk` actually compile and run
  * the model's TypeScript against the live ClientSDK + Postgres. isolated-vm's
- * native addon only loads under Node 22–24 (not Bun), so this whole harness runs
+ * native addon only loads under Node 26 (not Bun), so this whole harness runs
  * under Node + tsx (see run.sh), resolving the built workspace packages.
  *
  * DB setup + org/user fixtures use the server test harness directly.

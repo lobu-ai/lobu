@@ -8,9 +8,9 @@
 # is a build tool here (workspace install + tsc); the runtime stage is Node
 # only, because the connector isolate lane's `isolated-vm` is a V8 native
 # addon Bun cannot dlopen.
-ARG BUN_VERSION=1.3.5
+ARG BUN_VERSION=1.4.4
 
-FROM node:22-bookworm AS builder
+FROM node:26-bookworm AS builder
 ARG BUN_VERSION
 
 WORKDIR /app
@@ -100,7 +100,7 @@ RUN node scripts/image-browser-tooling.mjs --prune /app
 # ===========================================
 # Runtime
 # ===========================================
-FROM node:22-bookworm-slim AS runtime
+FROM node:26-bookworm-slim AS runtime
 
 WORKDIR /app
 
@@ -138,13 +138,19 @@ USER 1001
 
 ENV NODE_ENV=production
 ENV LOG_FORMAT=json
+# isolated-vm's upstream launch requirement on Node 20+.
+ENV NODE_OPTIONS=--no-node-snapshot
 ENV TRANSFORMERS_CACHE=/app/.cache/transformers
 
 WORKDIR /app/packages/connector-worker
 
-# Node, not Bun: the isolate lane loads the isolated-vm addon (built by
-# node-gyp in the builder when no prebuild matches), which Bun cannot dlopen.
-# CI runs `node dist/bin.js self-check --json` in this image and asserts
-# `isolate_lane.available`. The chart's liveness probe greps "daemon" from
-# PID 1's cmdline, so keep that argument.
-CMD ["node", "dist/bin.js", "daemon"]
+# Prove the non-root production user can load and construct an isolated-vm
+# Isolate on this exact final image (Node 26 ABI + copied native build).
+RUN node --no-node-snapshot -e "const ivm = require('isolated-vm'); const isolate = new ivm.Isolate({ memoryLimit: 8 }); isolate.dispose(); console.log('isolated-vm ok on Node ' + process.versions.node)"
+
+# Node, not Bun: the isolate lane loads the isolated-vm addon, which Bun cannot
+# dlopen. `--no-node-snapshot` is isolated-vm's upstream launch requirement on
+# Node 20+. CI runs `node --no-node-snapshot dist/bin.js self-check --json` in
+# this image and asserts `isolate_lane.available`. The chart's liveness probe
+# greps "daemon" from PID 1's cmdline, so keep that argument.
+CMD ["node", "--no-node-snapshot", "dist/bin.js", "daemon"]

@@ -1774,9 +1774,10 @@ async function main() {
         image: Image.base("ubuntu:24.04")
           .runCommands(
             "apt-get update -qq && apt-get install -y -qq bash curl unzip xz-utils git ca-certificates python3 make build-essential",
-            // isolated-vm has no Node 25+ build, and the runtime hard-refuses
-            // anything outside 22.x-24.x, so pin to this repo's Node major.
-            "curl -fsSL https://nodejs.org/dist/v22.23.2/node-v22.23.2-linux-x64.tar.xz | tar -xJ -C /usr/local --strip-components=1",
+            // The isolate lane has one isolated-vm build and the runtime
+            // hard-refuses anything outside Node 26.x, so pin to this repo's
+            // Node major.
+            "curl -fsSL https://nodejs.org/dist/v26.7.0/node-v26.7.0-linux-x64.tar.xz | tar -xJ -C /usr/local --strip-components=1",
             "curl -fsSL https://bun.sh/install | bash",
             "ln -sf /root/.bun/bin/bun /usr/local/bin/bun"
           )

@@ -122,7 +122,7 @@ test.each([
       await file(join(worker, "dist/daemon.mjs"), "export {};");
       await file(join(worker, "dist/executor.mjs"), "export {};");
       // Keep native verification healthy so only the selected entry can fail.
-      for (const name of ["isolated-vm", "isolated-vm-next"]) {
+      for (const name of ["isolated-vm"]) {
         await file(
           join(directory, "node_modules", name, "package.json"),
           '{"main":"index.cjs"}'
