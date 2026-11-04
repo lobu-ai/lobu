@@ -51,8 +51,17 @@ it("creates, refreshes and regresses one issue per fingerprint without touching 
   });
 
   let clickhouse = [occurrenceRow(new Date().toISOString())];
+  let failNextAlert = false;
   const client = {
     ...sdk,
+    notifications: {
+      ...sdk.notifications,
+      send: (input: Parameters<typeof sdk.notifications.send>[0]) => {
+        if (!failNextAlert) return sdk.notifications.send(input);
+        failNextAlert = false;
+        return Promise.reject(new Error("delivery unavailable"));
+      },
+    },
     query: (sql: string, options?: { connection?: string }) =>
       options?.connection === "lobu-analytics"
         ? Promise.resolve(clickhouse)
@@ -107,8 +116,12 @@ it("creates, refreshes and regresses one issue per fingerprint without touching 
   clickhouse = [occurrenceRow(new Date(Date.now() - 120_000).toISOString())];
   expect(await run(false)).toMatchObject({ created: 0, updated: 1, alerts: 0 });
 
-  // Seen again after the resolution: regressed, triage kept, still one record.
+  // Seen again after the resolution. A failed alert leaves the status alone,
+  // so the retry still alerts; then: regressed, triage kept, one record.
   clickhouse = [occurrenceRow(new Date().toISOString(), ["rel-a", "rel-b"])];
+  failNextAlert = true;
+  await expect(run(false)).rejects.toThrow(/delivery unavailable/);
+  expect((await issues())[0].metadata.status).toBe("resolved");
   expect(await run(false)).toMatchObject({ created: 0, updated: 1, alerts: 1 });
   const after = await issues();
   expect(after).toHaveLength(1);
