@@ -3,7 +3,7 @@ import type { ReactionClient, ReactionContext } from "@lobu/connector-sdk";
 // Match against the complete live population before the caller adds keyset
 // pagination. A person may belong to several groups; no CASE priority drops
 // their other evidence. Associated records retain their own evidence here; this
-// report preserves the broader name-only evidence. Identity proposals below
+// report preserves the broader name-only evidence. Identity decisions below
 // use the schema's resolution rules, never these report groups.
 export const duplicateCandidateQuery = `
 WITH people AS (
@@ -72,7 +72,7 @@ function canonical(value: unknown): string {
   return JSON.stringify(value) ?? "null";
 }
 
-async function queueReviews(ctx: ReactionContext, client: ReactionClient) {
+async function resolveDuplicates(ctx: ReactionContext, client: ReactionClient) {
   const pending = await client.operations.listRuns({
     automation_ids: [ctx.automation.id],
     operation_key: "entity_change",
@@ -82,7 +82,8 @@ async function queueReviews(ctx: ReactionContext, client: ReactionClient) {
   // Keep the review queue small. Existing approvals remain actionable across
   // runs; do not fill the inbox with the same candidates every week.
   let available = Math.max(0, 20 - pending.runs.length);
-  if (!available || pending.has_more) return 0;
+  if (!available || pending.has_more)
+    return { approval_count: 0, linked_count: 0 };
   const pairKey = (a: number, b: number) =>
     [a, b].sort((a, b) => a - b).join(":");
   const openPairs = new Set(
@@ -94,6 +95,7 @@ async function queueReviews(ctx: ReactionContext, client: ReactionClient) {
     })
   );
   let queued = 0;
+  let linked = 0;
   let cursor: string | undefined;
   // Bound preflight work as well as writes within the reaction SDK budget.
   // Restart against current state next run; pending/rejected pairs are skipped.
@@ -118,16 +120,24 @@ async function queueReviews(ctx: ReactionContext, client: ReactionClient) {
           ...proposal,
           dry_run: true,
         });
-        // Even a policy-authorized automatic match remains untouched by this
-        // review-only Automation. The write rechecks policy and current evidence.
-        if (!("preview" in preview) || preview.preview.outcome !== "review")
+        // Submit both automatic and approval-required matches through the same
+        // write boundary, which rechecks current evidence and policies.
+        if (
+          !("preview" in preview) ||
+          (preview.preview.outcome !== "review" &&
+            preview.preview.outcome !== "apply")
+        )
           continue;
         const result = await client.entities.link(proposal);
         if ("approval_queued" in result && result.approval_queued) {
           queued++;
-          available--;
-          openPairs.add(key);
+        } else if ("relationship" in result && result.relationship) {
+          linked++;
+        } else {
+          continue;
         }
+        available--;
+        openPairs.add(key);
         if (!available) break;
       }
       if (!available) break;
@@ -137,7 +147,7 @@ async function queueReviews(ctx: ReactionContext, client: ReactionClient) {
       throw new Error("Duplicate review pagination did not advance");
     cursor = page.next_cursor;
   }
-  return queued;
+  return { approval_count: queued, linked_count: linked };
 }
 
 export default async function reportDuplicates(
@@ -147,6 +157,7 @@ export default async function reportDuplicates(
   group_count: number;
   candidate_count: number;
   approval_count: number;
+  linked_count: number;
 }> {
   const candidates: Candidate[] = [];
   let after = 0;
@@ -193,7 +204,7 @@ export default async function reportDuplicates(
   const fingerprint = hash.digest;
   const summary = [
     `Duplicate candidate groups: ${groups.size} (candidates: ${candidates.length}).`,
-    "Candidates need review; this report does not associate contacts.",
+    "Candidate evidence is preserved here; identity links follow configured resolution rules and write policies.",
     ...orderedGroups
       .slice(0, 12)
       .map(
@@ -237,10 +248,10 @@ export default async function reportDuplicates(
     idempotency_key: `${key}:notify`,
     automation_source,
   });
-  const approval_count = await queueReviews(ctx, client);
+  const resolution = await resolveDuplicates(ctx, client);
   return {
     group_count: groups.size,
     candidate_count: candidates.length,
-    approval_count,
+    ...resolution,
   };
 }

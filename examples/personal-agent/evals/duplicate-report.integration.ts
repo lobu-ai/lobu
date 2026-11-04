@@ -165,6 +165,69 @@ async function setup() {
 }
 
 describe("duplicate report reaction", () => {
+  it("applies policy-authorized links within the work bound and preserves records", async () => {
+    const h = await setup();
+    await h.workspace
+      .withAuth({ tokenType: "session" })
+      .entity_schema.updateType({
+        slug: "person",
+        metadata_schema: {
+          type: "object",
+          "x-lobu-resolution": {
+            rules: [
+              { fields: ["email"], normalizer: "email", onMatch: "auto_link" },
+            ],
+          },
+        },
+      });
+    const nameOnly = [await h.person("Name only"), await h.person("Name only")];
+    const pairs: number[][] = [];
+    for (let i = 0; i < 25; i++) {
+      pairs.push([
+        await h.person(`First ${i}`, {
+          email: `automatic-${i}@sample.invalid`,
+        }),
+        await h.person(`Second ${i}`, {
+          email: `automatic-${i}@sample.invalid`,
+        }),
+      ]);
+    }
+    const records = () =>
+      h.sql`SELECT id, name, metadata, deleted_at FROM entities WHERE organization_id = ${h.workspace.org.id} ORDER BY id`;
+    const links = () =>
+      h.sql`SELECT from_entity_id, to_entity_id FROM entity_relationships WHERE organization_id = ${h.workspace.org.id} AND deleted_at IS NULL`;
+    const before = await records();
+    const first = await h.react();
+    expect(await links()).toHaveLength(20);
+    expect(first, first.error).toMatchObject({
+      success: true,
+      returnValue: { approval_count: 0, linked_count: 20 },
+    });
+    expect(await h.react(true)).toMatchObject({
+      success: true,
+      returnValue: { approval_count: 0, linked_count: 5 },
+    });
+    const applied = await links();
+    expect(applied).toHaveLength(25);
+    const pairKey = (ids: number[]) => [...ids].sort((a, b) => a - b).join(":");
+    expect(
+      new Set(
+        applied.map((link) => pairKey([link.from_entity_id, link.to_entity_id]))
+      )
+    ).toEqual(new Set(pairs.map(pairKey)));
+    expect(
+      applied.flatMap((link) => [link.from_entity_id, link.to_entity_id])
+    ).not.toEqual(expect.arrayContaining(nameOnly));
+    expect(await h.react(true)).toMatchObject({
+      success: true,
+      returnValue: { approval_count: 0, linked_count: 0 },
+    });
+    expect(await records()).toEqual(before);
+    expect(
+      await h.sql`SELECT id FROM runs WHERE organization_id = ${h.workspace.org.id} AND action_key = 'entity_change' AND approval_status = 'pending'`
+    ).toHaveLength(0);
+  });
+
   it("queues attributed reviews, preserves records, bounds the backlog, and respects rejection", async () => {
     const h = await setup();
     const human = h.workspace.withAuth({ tokenType: "session" });
