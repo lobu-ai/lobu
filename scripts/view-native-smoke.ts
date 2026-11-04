@@ -98,7 +98,8 @@ const server = createServer(async (request, response) => {
     </script></body></html>`);
   } catch (error) {
     response.statusCode = 500;
-    response.end(String(error));
+    console.error("Native view smoke server failed", error);
+    response.end("Native view smoke server failed");
   }
 });
 await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));

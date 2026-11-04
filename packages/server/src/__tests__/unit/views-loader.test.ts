@@ -402,8 +402,11 @@ describe("view shell runtime", () => {
     const context = createContext({});
     // Execute inline runtime and mount code. The separately served native
     // component script is exercised by the real-browser smoke suite.
-    const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)]
-      .map((match) => match[1]);
+    const scripts: string[] = [];
+    await new HTMLRewriter().on("script:not([src])", {
+      element() { scripts.push(""); },
+      text(chunk) { scripts[scripts.length - 1] += chunk.text; },
+    }).transform(new Response(html)).text();
     expect(scripts).toHaveLength(2);
     for (const code of scripts) runInContext(code, context);
     const modules = context.__lobuViews;
