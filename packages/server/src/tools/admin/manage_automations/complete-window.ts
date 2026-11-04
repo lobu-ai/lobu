@@ -852,6 +852,9 @@ export async function handleCompleteWindow(
       }
     }
 
+    // With no model named, the executor comes from how the run was dispatched:
+    // a run pinned to a device ran on that device's CLI, whose own completion
+    // report may never arrive to correct a placeholder.
     const [completedRun] = await tx`
       UPDATE runs
       SET status = 'completed',
@@ -866,6 +869,11 @@ export async function handleCompleteWindow(
             NULLIF(model_used, 'external-client'),
             CASE
               WHEN dispatched_message_id IS NOT NULL THEN 'lobu-agent'
+              WHEN approved_input->>'device_worker_id' IS NOT NULL
+                THEN 'device-cli' || COALESCE(
+                  ':' || NULLIF(btrim(approved_input->>'agent_kind'), ''),
+                  ''
+                )
               ELSE 'external-client'
             END
           ),
