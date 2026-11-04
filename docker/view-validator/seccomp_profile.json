@@ -32,8 +32,8 @@
   ],
   "syscalls": [
     {
-      "comment": "Allow create user namespaces",
-      "names": ["clone", "setns", "unshare"],
+      "comment": "Allow create user namespaces. Lobu addition: chroot, which Chromium's namespace sandbox calls inside its own user namespace. Upstream gates chroot on outer CAP_SYS_CHROOT, which cap_drop ALL removes; the kernel still requires CAP_SYS_CHROOT in the caller's user namespace.",
+      "names": ["clone", "setns", "unshare", "chroot"],
       "action": "SCMP_ACT_ALLOW",
       "args": [],
       "includes": {},
