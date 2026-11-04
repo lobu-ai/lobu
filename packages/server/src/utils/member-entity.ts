@@ -6,6 +6,7 @@
  * (auth hook → ensureMemberEntity → createEntity → beforeCreate hook → invitation insert).
  */
 
+import { randomUUID } from 'node:crypto';
 import { unvalidatedEntityRowPatch, validateEntityRowPatch } from "../authz/entity-row-validation";
 import { type DbClient, getDb } from '../db/client';
 import {
@@ -117,6 +118,9 @@ export async function ensureMemberEntity(params: EnsureMemberEntityParams): Prom
     const entityData: EntityData = {
       entity_type: '$member',
       name: params.name.trim(),
+      // Membership identity is the verified email/claim, not a display name.
+      // A namesake record or another member may already own the name's slug.
+      slug: `member-${randomUUID()}`,
       organization_id: params.organizationId,
       metadata,
     };

@@ -10,6 +10,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { generateSecureToken } from "../../../auth/oauth/utils";
 import { ensurePersonalOrganization } from "../../../auth/personal-org-provisioning";
 import { joinPublicOrganization } from "../../../workspace/join-public";
+import { createTestEntity } from "../../setup/test-fixtures";
 import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
 
 async function seedUser(name: string): Promise<{ id: string; email: string }> {
@@ -70,6 +71,13 @@ describe("public workspace join audit events", () => {
     `;
 
 		const joiner = await seedUser("Joiner");
+		// A workspace record with the user's display name is not their login
+		// identity and must neither prevent the join projection nor receive it.
+		const namesake = await createTestEntity({
+			organization_id: org.organizationId,
+			entity_type: "fixture-profile",
+			name: "Joiner",
+		});
 		const first = await joinPublicOrganization({
 			userId: joiner.id,
 			orgSlug: org.slug,
@@ -82,6 +90,18 @@ describe("public workspace join audit events", () => {
 			orgSlug: org.slug,
 		});
 		expect(second.status).toBe("already_member");
+		const claims = await sql`
+      SELECT e.id, et.slug FROM entity_identities ei
+      JOIN entities e ON e.id = ei.entity_id
+      JOIN entity_types et ON et.id = e.entity_type_id
+      WHERE ei.organization_id = ${org.organizationId}
+        AND ei.namespace = 'auth_user_id' AND ei.identifier = ${joiner.id}
+        AND ei.source_connector = 'auth:signup' AND ei.scope_key IS NULL
+        AND ei.deleted_at IS NULL AND e.deleted_at IS NULL
+    `;
+		expect(claims).toHaveLength(1);
+		expect(claims[0].slug).toBe("$member");
+		expect(Number(claims[0].id)).not.toBe(namesake.id);
 
 		// Audit writers are fire-and-forget — poll until the joiner's
 		// member-created row lands.
