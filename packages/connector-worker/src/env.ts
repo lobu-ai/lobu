@@ -62,6 +62,23 @@ export function connectorRunEnv(opts: {
   return { ...(opts.cloud && opts.organizationSupplied ? withoutDeploymentProviderKeys(env) : env) };
 }
 
+/**
+ * The operator's `LOBU_HTTP_EGRESS_ALLOW_HOSTS`: comma-separated EXACT hosts a
+ * connector's `fetch` may reach even though they resolve into private space
+ * (another container on a self-hosted Docker network). Read here, from this
+ * process's env, by every producer of a connector run's `job.env` -- this
+ * whitelist (worker daemon, in-gateway runs) and the gateway's source-read,
+ * pushdown and listener paths. The isolate host is the one place that honours
+ * it, and only for a run whose `LOBU_DB_EGRESS_POLICY` is `allow-private`, so
+ * under Cloud (block-private, which the gateway's poll response forces onto any
+ * worker) it is inert. Never the DB socket list: that is
+ * `LOBU_DB_EGRESS_ALLOW_HOSTS`, a separate boundary.
+ */
+export function httpEgressAllowHostsEnv(): { LOBU_HTTP_EGRESS_ALLOW_HOSTS?: string } {
+  const hosts = process.env.LOBU_HTTP_EGRESS_ALLOW_HOSTS;
+  return hosts ? { LOBU_HTTP_EGRESS_ALLOW_HOSTS: hosts } : {};
+}
+
 export function buildConnectorWorkerEnv(): Env {
   return {
     ENVIRONMENT: process.env.ENVIRONMENT || 'production',
@@ -86,5 +103,6 @@ export function buildConnectorWorkerEnv(): Env {
     // for a DB socket under block-private (`socketOpen` in `executor/isolate.ts`);
     // self-hosted (allow-private) reaches its own private DB.
     LOBU_DB_EGRESS_POLICY: cloudModeOn() ? 'block-private' : 'allow-private',
+    ...httpEgressAllowHostsEnv(),
   };
 }

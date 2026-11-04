@@ -10,6 +10,7 @@
 
 import { BrowserInterruptionError } from '@lobu/core';
 import { connectionBrowserGrant } from '../connectors/browser-resource';
+import { httpEgressAllowHostsEnv } from '@lobu/connector-worker/env';
 import { executeCompiledConnector } from '@lobu/connector-worker/executor/runtime';
 import { assertFeedReadWindow, validateFeedReadWindow, type FeedReadMatch, type FeedReadWindow, type FeedReadWindowCoverage, type QueryContext } from '@lobu/connector-sdk';
 import { createHash } from 'node:crypto';
@@ -178,7 +179,7 @@ export async function runConnectorQuery(p: ConnectorQueryParams): Promise<Connec
           ...mergeExecutionConfig(conn.config, connectionCredentials, p.config),
           ...dbEgressConfig(),
         },
-        env: dbEgressConfig(),
+        env: { ...dbEgressConfig(), ...httpEgressAllowHostsEnv() },
         sessionState,
         credentials,
         httpAuth,
@@ -692,7 +693,7 @@ async function readSourceFeedWithinDeadline(
         cursor: p.cursor,
         window: p.window,
         config,
-        env: dbEgressConfig(),
+        env: { ...dbEgressConfig(), ...httpEgressAllowHostsEnv() },
         sessionState,
         browser: await connectionBrowserGrant(p.scope.organizationId, feed.connection_id, feed.pinned_version ?? feed.definition_version),
         credentials,

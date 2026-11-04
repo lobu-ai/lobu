@@ -74,3 +74,33 @@ describe('cloud path — gateway list reaches the connector config', () => {
     expect(config.LOBU_DB_EGRESS_POLICY).toBe('block-private');
   });
 });
+
+/**
+ * The HTTP allow-host list is the worker OPERATOR's (its own env, through the
+ * whitelist the daemon hands every run), not the gateway's — but the isolate
+ * honours it only under `allow-private`, so the gateway's authoritative
+ * block-private must still win over a worker that carries one.
+ */
+describe('daemon path — LOBU_HTTP_EGRESS_ALLOW_HOSTS', () => {
+  const pollJob = (policy?: 'block-private' | 'allow-private'): PollResponse =>
+    ({ run_id: 1, run_type: 'sync', connector_key: 'http-source', db_egress_policy: policy }) as PollResponse;
+
+  test('rides from the worker env into the run env, and a block-private gateway neutralizes it', () => {
+    const saved = { hosts: process.env.LOBU_HTTP_EGRESS_ALLOW_HOSTS, cloud: process.env.LOBU_CLOUD_MODE };
+    process.env.LOBU_HTTP_EGRESS_ALLOW_HOSTS = 'inventory-api';
+    delete process.env.LOBU_CLOUD_MODE;
+    try {
+      const selfHosted = resolveEffectiveEnv(buildConnectorWorkerEnv(), pollJob('allow-private')) as Record<string, unknown>;
+      expect(selfHosted.LOBU_HTTP_EGRESS_ALLOW_HOSTS).toBe('inventory-api');
+      expect(selfHosted.LOBU_DB_EGRESS_POLICY).toBe('allow-private');
+
+      const cloud = resolveEffectiveEnv(buildConnectorWorkerEnv(), pollJob('block-private')) as Record<string, unknown>;
+      expect(cloud.LOBU_DB_EGRESS_POLICY).toBe('block-private');
+    } finally {
+      for (const [key, value] of [['LOBU_HTTP_EGRESS_ALLOW_HOSTS', saved.hosts], ['LOBU_CLOUD_MODE', saved.cloud]] as const) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+});
