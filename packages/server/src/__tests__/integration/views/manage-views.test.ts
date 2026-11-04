@@ -151,6 +151,12 @@ describe("manage_views", () => {
       await expect(setView(REACT_SOURCE + '\n// candidate')).rejects.toMatchObject({ httpStatus: status });
       expect(await getView(orgId, 'pipeline')).toEqual(before);
     }
+    // Nine distinct record scopes exceed the eight-scope cap: rejected before
+    // any runner request, so an unavailable runner still yields 422, not 503.
+    validatorControl.mode = 'unavailable';
+    const overLimit = Array.from({ length: 9 }, (_, index) => ({ record: `fixture_${index + 1}` }));
+    await expect(setView(REACT_SOURCE + '\n// candidate', { attach: overLimit, actions: {} })).rejects.toMatchObject({ httpStatus: 422 });
+    expect(await getView(orgId, 'pipeline')).toEqual(before);
     validatorControl.mode = 'pass';
     const oldUrl = TEST_ENV.VIEW_VALIDATOR_URL;
     delete TEST_ENV.VIEW_VALIDATOR_URL;

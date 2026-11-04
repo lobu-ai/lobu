@@ -415,6 +415,10 @@ function inertResolveDir(): string {
   return dir;
 }
 
+/** Distinct attached scopes one save may validate. Each scope is its own bounded
+ * runner request on a single-flight runner, so the aggregate must stay finite. */
+const VALIDATION_MAX_SCOPES = 8;
+
 let runtimeScript: Promise<string> | null = null;
 let nativeAssetVersions: { js: string; css: string } | null = null;
 
@@ -439,6 +443,7 @@ export async function validateViewCandidate(view: StoredView, runnerUrl: string 
   });
   if (scopes.length === 0) scopes.push({});
   const uniqueScopes = [...new Map(scopes.map(scope => [JSON.stringify(scope), scope])).values()];
+  if (uniqueScopes.length > VALIDATION_MAX_SCOPES) throw new ToolUserError(`Browser validation supports at most ${VALIDATION_MAX_SCOPES} distinct attached scopes per view; split the view into smaller modules`, 422, 'VALIDATION');
   const params = Object.fromEntries(Object.entries(view.params).flatMap(([key, decl]) =>
     decl.default === undefined ? [] : [[key, decl.default]]));
   const artifact = { html: renderViewShell(view, 'https://view-validation.invalid/validation-workspace/', runtime), runtime, assets };
