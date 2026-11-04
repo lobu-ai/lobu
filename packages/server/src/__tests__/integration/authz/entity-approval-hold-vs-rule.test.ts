@@ -328,14 +328,14 @@ describe("approval hold vs a frozen-state rule", () => {
 		if (extraField) expect(stored.note).toBe('Ready');
 	}, 60_000);
 
-	it.each([null, "result_event_id", "assignment_id"])("binds native approval to the reviewed result and assignment (changed: %s)", async (changed) => {
+	it.each([null, "result_event_id", "assignment_id", "result_artifact_id"])("binds native approval to the reviewed result and assignment (changed: %s)", async (changed) => {
 		const compiled = await compileEntityRule(`export default row => {
   if (row.next.status !== 'posted') return;
   const next = row.next;
-  if (!next.result_event_id || !next.assignment_id || next.accepted_result_event_id !== next.result_event_id || next.accepted_assignment_id !== next.assignment_id) {
+  if (!next.result_event_id || !next.assignment_id || !next.result_artifact_id) {
     row.deny('Approval must match the current result and assignment');
   }
-  if (row.committed.status === 'posted' && ['result_event_id', 'assignment_id', 'accepted_result_event_id', 'accepted_assignment_id'].some(field => row.changed(field))) {
+  if (row.committed.status === 'posted' && ['result_event_id', 'assignment_id', 'result_artifact_id'].some(field => row.changed(field))) {
     row.deny('Reopen before replacing accepted work');
   }
   if (row.changed('status')) row.escalate(['status'], 'Posting needs review');
@@ -351,9 +351,9 @@ describe("approval hold vs a frozen-state rule", () => {
 		const humanAuth = { cookie: session.cookieHeader };
 		const update = (metadata: Record<string, unknown>, auth: { cookie?: string; token?: string } = agentAuth) =>
 			call('manage_entity', { action: 'update', entity_id: invoice.id, metadata }, auth);
-		expect((await update({ result_event_id: 1001, assignment_id: 'assignment-a' })).status).toBe(200);
+		expect((await update({ result_event_id: 1001, assignment_id: 'assignment-a', result_artifact_id: 501 })).status).toBe(200);
 		expect((await update({ status: 'issued' }, humanAuth)).status).toBe(200);
-		const proposed = await update({ status: 'posted', accepted_result_event_id: 1001, accepted_assignment_id: 'assignment-a' });
+		const proposed = await update({ status: 'posted', result_event_id: 1001, assignment_id: 'assignment-a', result_artifact_id: 501 });
 		expect(proposed.body.approval_queued, JSON.stringify(proposed)).toBe(true);
 		const [run] = await getTestDb()`
       SELECT id FROM runs WHERE organization_id = ${org.id} AND approval_status = 'pending'
@@ -363,21 +363,20 @@ describe("approval hold vs a frozen-state rule", () => {
 			call('manage_operations', { action: 'approve', run_id: Number(run.id) }, auth);
 		expect((await approve(agentAuth)).body.approved).not.toBe(true);
 		if (changed) {
-			const replacement = await update(changed === 'result_event_id' ? { result_event_id: 1002 } : { assignment_id: 'assignment-b' });
+			const replacement = await update({ [changed]: changed === 'assignment_id' ? 'assignment-b' : changed === 'result_event_id' ? 1002 : 502 });
 			expect(replacement.status, JSON.stringify(replacement)).toBe(200);
 		}
 		const decision = await approve(humanAuth);
 		const stored = await readMetadata(invoice.id);
 		if (changed) {
-			expect(decision.body.approved).not.toBe(true);
-			expect(decision.body.error).toBeTruthy();
+			expect(decision.status, JSON.stringify(decision)).toBe(200);
+			expect(decision.body.message).toContain('skipped');
 			expect(stored.status).toBe('issued');
-			expect(stored.accepted_result_event_id).toBeUndefined();
-			expect(stored.accepted_assignment_id).toBeUndefined();
+			expect(stored[changed]).toBe(changed === 'assignment_id' ? 'assignment-b' : changed === 'result_event_id' ? 1002 : 502);
 		} else {
 			expect(decision.body.approved, JSON.stringify(decision)).toBe(true);
 			expect(stored.status).toBe('posted');
-			const replaced = await update({ result_event_id: 1002, accepted_result_event_id: 1002 }, humanAuth);
+			const replaced = await update({ result_event_id: 1002 }, humanAuth);
 			expect(replaced.status).toBe(400);
 			expect((await readMetadata(invoice.id)).result_event_id).toBe(1001);
 		}
