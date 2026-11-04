@@ -77,6 +77,20 @@ type XSyncPage = {
 
 import { normalizeXHandle, X_IDENTITY } from "./x-identity.js";
 
+export function xGraphqlInterceptPattern(
+	operation:
+		| "Search"
+		| "UserTweets"
+		| "Bookmark"
+		| "DM"
+		| "Dm"
+		| "Message"
+		| "Inbox",
+): { regex: string } {
+	// X query ids use the URL-safe alphabet, including hyphens.
+	return { regex: `/i/api/graphql/[A-Za-z0-9_-]+/.*${operation}` };
+}
+
 /** OAuth scopes needed per feed for the API path (not used to pause browser-capable feeds). */
 const X_OAUTH_FEED_SCOPES: Record<string, readonly string[]> = {
 	tweets: ["tweet.read", "users.read"],
@@ -2335,7 +2349,7 @@ async function syncSearchViaExtension(
 	return syncViaExtension({
 		ctx,
 		url: searchUrl,
-		interceptPatterns: [{ regex: "/i/api/graphql/\\w+/.*Search" }],
+		interceptPatterns: [xGraphqlInterceptPattern("Search")],
 		parseResponse: parseBrowserSearchResponse,
 		maxScrolls,
 		checkpoint,
@@ -2402,7 +2416,7 @@ async function syncMyTweetsViaExtension(
 	return syncViaExtension({
 		ctx,
 		url: profileUrl,
-		interceptPatterns: [{ regex: "/i/api/graphql/\\w+/.*UserTweets" }],
+		interceptPatterns: [xGraphqlInterceptPattern("UserTweets")],
 		parseResponse: parseBrowserTimelineResponse,
 		maxScrolls,
 		checkpoint,
@@ -2792,7 +2806,7 @@ async function syncBookmarksViaExtension(
 	return syncViaExtension({
 		ctx,
 		url: "https://x.com/i/bookmarks",
-		interceptPatterns: [{ regex: "/i/api/graphql/\\w+/.*Bookmark" }],
+		interceptPatterns: [xGraphqlInterceptPattern("Bookmark")],
 		parseResponse: parseBrowserTimelineResponse,
 		maxScrolls,
 		checkpoint,
@@ -2885,10 +2899,10 @@ async function syncDirectMessagesViaExtension(
 		dispatcher: requireXBrowser(ctx),
 		config: {
 			interceptPatterns: [
-				{ regex: "/i/api/graphql/\\w+/.*DM" },
-				{ regex: "/i/api/graphql/\\w+/.*Dm" },
-				{ regex: "/i/api/graphql/\\w+/.*Message" },
-				{ regex: "/i/api/graphql/\\w+/.*Inbox" },
+				xGraphqlInterceptPattern("DM"),
+				xGraphqlInterceptPattern("Dm"),
+				xGraphqlInterceptPattern("Message"),
+				xGraphqlInterceptPattern("Inbox"),
 			],
 			allowedOrigins: X_ALLOWED_ORIGINS,
 			maxScrolls,
@@ -3862,7 +3876,7 @@ export default class XConnector extends ConnectorRuntime {
 		name: "X (Twitter)",
 		description:
 			"Fetches tweets, browser-visible like history, bookmarks, and DMs through the X API v2 or the paired Owletto Chrome extension, reads the chronological Following timeline live through the X API, captures notification references and the accounts you follow, reads and answers DMs live in the paired browser, and likes posts or follows accounts there. Links social actors into the person and company graph.",
-		version: "3.17.0",
+		version: "3.17.1",
 		faviconDomain: "x.com",
 		browser: {
 			origins: ["https://x.com", "https://twitter.com"],

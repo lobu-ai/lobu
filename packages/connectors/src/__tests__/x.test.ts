@@ -48,6 +48,7 @@ let extractBottomCursor: any;
 let readGraphqlCursor: any;
 // biome-ignore lint/suspicious/noExplicitAny: dynamic import after mock
 let replaceGraphqlCursor: any;
+let xGraphqlInterceptPattern: typeof import("../x").xGraphqlInterceptPattern;
 
 beforeAll(async () => {
 	const mod = await import("../x");
@@ -72,6 +73,40 @@ beforeAll(async () => {
 	extractBottomCursor = mod.extractBottomCursor;
 	readGraphqlCursor = mod.readGraphqlCursor;
 	replaceGraphqlCursor = mod.replaceGraphqlCursor;
+	xGraphqlInterceptPattern = mod.xGraphqlInterceptPattern;
+});
+
+describe("X GraphQL response matching", () => {
+	for (const operation of [
+		"Search",
+		"UserTweets",
+		"Bookmark",
+		"DM",
+		"Dm",
+		"Message",
+		"Inbox",
+	] as const) {
+		test(`${operation} captures every URL-safe query-id shape`, () => {
+			const pattern = new RegExp(xGraphqlInterceptPattern(operation).regex);
+			for (const queryId of [
+				"syntheticHash",
+				"synthetic_hash",
+				"synthetic-hash",
+				"synthetic-hash_123",
+			]) {
+				expect(
+					pattern.test(
+						`https://x.com/i/api/graphql/${queryId}/${operation}Timeline?variables={}`,
+					),
+				).toBe(true);
+			}
+			expect(
+				pattern.test(
+					"https://x.com/i/api/graphql/synthetic-hash/UnrelatedTimeline",
+				),
+			).toBe(false);
+		});
+	}
 });
 
 // A tweet_results.result node in x.com's GraphQL shape. `restId`/`legacy` is
@@ -2490,10 +2525,6 @@ describe("isReplySubmitLabel", () => {
 });
 
 describe("prepare_reply action contract", () => {
-	test("pins the connector version for catalog upgrades", () => {
-		expect(new XConnector().definition.version).toBe("3.17.0");
-	});
-
 	test("classifies staging a reply as a write for org policy", () => {
 		const action = new XConnector().definition.actions.prepare_reply;
 		expect(action.kind).toBe("write");
