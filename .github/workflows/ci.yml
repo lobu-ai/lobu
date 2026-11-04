@@ -105,6 +105,20 @@ jobs:
           BEFORE_SHA: ${{ github.event.before }}
         run: node scripts/ci-paths.mjs suites
 
+  view-validator-image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - run: docker build -f docker/view-validator/Dockerfile -t view-validator-test .
+      - name: Test credential-free isolated runner
+        run: |
+          docker run --rm --init --network=none --read-only --tmpfs /tmp:rw,size=512m \
+            --shm-size=256m --memory=1g --cpus=2 --pids-limit=256 --cap-drop=ALL \
+            --security-opt no-new-privileges=true \
+            --security-opt seccomp=docker/view-validator/seccomp_profile.json \
+            view-validator-test bun docker/view-validator/smoke.ts
+
   # Fast unit tests — no Postgres, no submodule needed for most.
   # Splits from `integration` so a unit failure surfaces in <2 min instead of
   # waiting behind DB setup. Worker tests run under bun (full suite, not the
@@ -610,6 +624,7 @@ jobs:
         run: |
           cd packages/core && bun run build && cd ../..
           cd packages/connector-sdk && bun run build && cd ../..
+          cd packages/views && bun run build && cd ../..
 
       - name: owletto tests (vitest)
         if: steps.submodule.outputs.stubbed != 'true'
@@ -666,6 +681,10 @@ jobs:
       - name: MCP App failure smoke (built bundle in Chrome)
         if: steps.submodule.outputs.stubbed != 'true'
         run: node scripts/mcp-app-smoke.mjs --dist packages/owletto/dist-mcp-apps/interaction
+
+      - name: Native view runtime smoke (real browser)
+        if: steps.submodule.outputs.stubbed != 'true'
+        run: bun scripts/view-native-smoke.ts
 
   # Backend integration tests need a real Postgres + pgvector. The Vitest
   # files share a module graph and database within one process, so each shard
@@ -1036,7 +1055,7 @@ jobs:
     # that accepted `skipped` unconditionally turned a broken gate job into a
     # green required check. Skipped shards are only legitimate when the paths
     # filter itself said no runtime paths changed.
-    needs: [check-author, paths, server-integration-vitest, server-integration-bun]
+    needs: [check-author, paths, server-integration-vitest, server-integration-bun, view-validator-image]
     # This compatibility context only evaluates a handful of strings. Keep it on the
     # lightweight runner image while older open PRs still require the legacy
     # `integration` context; branch protection can move directly to the four
@@ -1051,12 +1070,13 @@ jobs:
           PACKAGES_CHANGED: ${{ needs.paths.outputs.packages }}
           VITEST_RESULT: ${{ needs.server-integration-vitest.result }}
           BUN_RESULT: ${{ needs.server-integration-bun.result }}
+          VALIDATOR_RESULT: ${{ needs.view-validator-image.result }}
         run: |
           echo "check-author: $AUTHOR_RESULT"
           echo "paths: $PATHS_RESULT (packages=$PACKAGES_CHANGED)"
           echo "Vitest matrix: $VITEST_RESULT"
           echo "Bun/Postgres: $BUN_RESULT"
-          for r in "$AUTHOR_RESULT" "$PATHS_RESULT"; do
+          for r in "$AUTHOR_RESULT" "$PATHS_RESULT" "$VALIDATOR_RESULT"; do
             if [ "$r" != success ]; then
               echo "gate job result \"$r\" is not success"
               exit 1

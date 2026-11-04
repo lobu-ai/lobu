@@ -27,6 +27,8 @@ import {
 import { get } from "../../setup/test-helpers";
 import { viewModule } from "./view-module";
 
+import { useViewValidator } from "../../setup/view-validator";
+
 const TEST_ENV: Env = {
 	ENVIRONMENT: "test",
 	DATABASE_URL: process.env.DATABASE_URL,
@@ -35,6 +37,8 @@ const TEST_ENV: Env = {
 	MAX_CONSECUTIVE_FAILURES: "3",
 	RATE_LIMIT_ENABLED: "false",
 };
+useViewValidator(TEST_ENV);
+
 
 const MARKER_SOURCE = `document.title = "VIEW_RAN";
 document.body.innerHTML = "<p>VIEW_RAN</p>";

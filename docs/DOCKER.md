@@ -111,3 +111,36 @@ The server tells the frontend which mode is active at runtime, so this is a plai
 - [ ] Database backups configured (Lobu writes encrypted secrets there — losing the DB means losing every connected integration).
 - [ ] `WORKER_ALLOWED_DOMAINS` reviewed for your use case.
 - [ ] Provider API keys added through the admin UI (or env vars) for whichever providers you intend to use.
+
+
+### Isolated view validation
+
+`views.set` keeps its existing input and validates the exact candidate in a
+credential-free browser runner before storing it. Set `VIEW_VALIDATOR_URL` to
+its internal HTTP address. Browser failures return 422; missing, overloaded or
+unavailable runners return 503. Both preserve the saved view. The API image
+continues to exclude browser tooling.
+
+The sample Compose file builds the runner separately on an internal network
+with no published ports. Its pinned Chromium seccomp profile is vendored from
+[Playwright v1.60.0](https://github.com/microsoft/playwright/blob/v1.60.0/utils/docker/seccomp_profile.json).
+The runner uses a non-root user with Chromium's sandbox enabled. Do not expose
+its endpoint to public ingress or attach application credentials. The new GHCR
+package must be made public through its package settings for anonymous pulls,
+or the deployment must supply `imagePullSecrets`. Repository linkage grants
+workflow access but does not inherit public visibility ([GitHub package access](https://docs.github.com/en/packages/learn-github-packages/configuring-a-packages-access-control-and-visibility)).
+
+For Kubernetes, install that profile as `profiles/lobu-view-validator.json`
+beneath the kubelet seccomp directory on eligible nodes, verify the node permits
+unprivileged user namespaces, then enable `viewValidator.enabled` in the chart.
+The chart supplies an internal Service, API-only ingress, deny-all egress
+(including UDP/WebRTC), temporary storage, resource limits, and the API URL.
+It deliberately defaults off until the node profile is installed; saves remain
+unavailable until a runner is configured. `viewValidator.runtimeClassName` can
+select an operator-provisioned isolated runtime. Run the container smoke against
+the actual runtime before enabling registration.
+
+Validation covers bounded empty/error/loading fixtures, both themes and display
+modes, and up to four distinct attached scopes. It does not prove every business
+rule or successful-data interaction. Authors must also exercise the actual
+workspace view, pagination, actions and peek interactions before claiming acceptance.

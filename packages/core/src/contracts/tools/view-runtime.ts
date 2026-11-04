@@ -15,9 +15,7 @@
 
 /** Global the shell's runtime script assigns and every view bundle reads. */
 export const VIEW_RUNTIME_GLOBAL = "__lobuViews";
-
-/** Per-call workspace selected by an MCP view. A routing hint, never authority. */
-export const VIEW_WORKSPACE_META_KEY = "lobu/view-workspace";
+export { VIEW_WORKSPACE_META_KEY } from "./view-host";
 
 /** Module specifiers a view imports from the shell runtime. */
 export const VIEW_RUNTIME_MODULES: readonly string[] = [
@@ -91,7 +89,9 @@ interface RuntimePluginBuild {
  * the runtime global, so the bundle carries none of the runtime. Structurally
  * typed: core does not depend on esbuild.
  */
-export function viewRuntimePlugin(): {
+export function viewRuntimePlugin(
+  exportNames: Readonly<Record<string, readonly string[]>> = {}
+): {
   name: string;
   setup(build: RuntimePluginBuild): void;
 } {
@@ -103,10 +103,24 @@ export function viewRuntimePlugin(): {
           ? { path: args.path, namespace: RUNTIME_NAMESPACE }
           : undefined
       );
-      build.onLoad({ filter: /.*/, namespace: RUNTIME_NAMESPACE }, (args) => ({
-        contents: `module.exports = globalThis[${JSON.stringify(VIEW_RUNTIME_GLOBAL)}][${JSON.stringify(args.path)}];`,
-        loader: "js",
-      }));
+      build.onLoad({ filter: /.*/, namespace: RUNTIME_NAMESPACE }, (args) => {
+        const reference = `globalThis[${JSON.stringify(VIEW_RUNTIME_GLOBAL)}][${JSON.stringify(args.path)}]`;
+        const names = exportNames[args.path];
+        return {
+          // Explicit trusted runtime exports let the compiler reject misspelled
+          // components, instead of installing a bundle that renders undefined.
+          contents: names
+            ? `const runtime = ${reference};\n${names
+                .map((name) =>
+                  name === "default"
+                    ? "export default runtime.default;"
+                    : `export const ${name} = runtime[${JSON.stringify(name)}];`
+                )
+                .join("\n")}`
+            : `module.exports = ${reference};`,
+          loader: "js",
+        };
+      });
     },
   };
 }

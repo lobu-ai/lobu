@@ -73,6 +73,10 @@ spec:
             - containerPort: 8787
               protocol: TCP
           env:
+            {{- if and .Values.viewValidator.enabled (not (hasKey (default dict .Values.app.env) "VIEW_VALIDATOR_URL")) }}
+            - name: VIEW_VALIDATOR_URL
+              value: {{ printf "http://%s-view-validator:8090" (include "lobu.fullname" .) | quote }}
+            {{- end }}
             {{- range $key, $value := .Values.app.env }}
             - name: {{ $key }}
               value: {{ $value | quote }}

@@ -27,7 +27,7 @@ export const view = defineView({
 export default function Probe() {
 	const [params] = useParams();
 	const scope = useScope();
-	const res = useQuery(tool("echo_state", { params, scope }));
+	const res = useQuery(tool("manage_entity", { action: "list", entity_type: scope.type, search: String(params.q) }));
 	const poke = useAction("poke");
 	void res;
 	void poke;
@@ -125,8 +125,8 @@ describe("loader handoff in a real browser", () => {
 								if (d.method === "tools/call") {
 									const p = d.params as Record<string, unknown>;
 									const a = p.arguments as Record<string, unknown>;
-									if (p.name === "echo_state") {
-										out.echoQ = (a.params as Record<string, unknown>).q;
+									if (p.name === "manage_entity" && a.action === "list") {
+										out.echoQ = a.search;
 									}
 									if (p.name === "invoke_view_action") out.action = true;
 									send({

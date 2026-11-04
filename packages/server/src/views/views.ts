@@ -41,9 +41,13 @@ import {
   viewRuntimePlugin,
 } from '@lobu/core/contracts/tools/view-runtime';
 import { build, type Loader, type Plugin, transform, version as esbuildVersion } from 'esbuild';
+import * as ViewAPI from '@lobu/views';
+import * as ViewComponents from '@lobu/views/components';
+import { VALIDATION_MAX_BYTES, VALIDATION_TIMEOUT_MS, validationIdentity, type ValidationRequest, type ValidationScenario } from './validation-contract';
 import { getDb } from '../db/client';
 import { ToolUserError } from '../utils/errors';
 import logger from '../utils/logger';
+import { readMcpAppAsset } from '../utils/mcp-app-bundle';
 
 export type { ViewAttachment };
 
@@ -233,10 +237,18 @@ export async function listViews(organizationId: string): Promise<StoredView[]> {
  */
 export async function setView(
   organizationId: string,
-  input: SetViewInput
+  input: SetViewInput,
+  expected?: Pick<StoredView, 'content_hash' | 'compile_config_hash'> | null
 ): Promise<{ view: StoredView; written: boolean }> {
-  const sql = getDb();
-  const existing = await getView(organizationId, input.key);
+  return getDb().begin(async sql => {
+  // Lock only after validation: no database connection is held by authored JS.
+  const current = await sql<ViewRow>`SELECT * FROM views
+    WHERE organization_id = ${organizationId} AND key = ${input.key} FOR UPDATE`;
+  const existing = current[0] ? mapViewRow(current[0]) : null;
+  if (expected !== undefined && (existing?.content_hash !== expected?.content_hash ||
+      existing?.compile_config_hash !== expected?.compile_config_hash)) {
+    throw new ToolUserError('View changed while the candidate was being validated; retry against the current version', 409);
+  }
   if (
     existing &&
     existing.content_hash === input.content_hash &&
@@ -274,11 +286,14 @@ export async function setView(
       actions = EXCLUDED.actions,
       last_writer = EXCLUDED.last_writer,
       updated_at = NOW()
+    WHERE ${expected !== null}
     RETURNING key, name, description, source_code, compiled_code, content_hash,
       source_files, dependencies, source_complete, compile_config_hash,
       attach, params, actions, last_writer, updated_at
   `;
+  if (!rows[0]) throw new ToolUserError('View changed while the candidate was being validated; retry against the current version', 409);
   return { view: mapViewRow(rows[0]), written: true };
+  });
 }
 
 export async function removeView(
@@ -401,6 +416,72 @@ function inertResolveDir(): string {
 }
 
 let runtimeScript: Promise<string> | null = null;
+let nativeAssetVersions: { js: string; css: string } | null = null;
+
+/** Validate the exact executable shell and installed native artifacts before a
+ * durable replacement. Runner outages and malformed/mismatched receipts fail closed. */
+export async function validateViewCandidate(view: StoredView, runnerUrl: string | undefined): Promise<void> {
+  if (!runnerUrl) throw new ToolUserError('View validation runner is unavailable; the saved view was preserved', 503, 'UPSTREAM_UNAVAILABLE');
+  const runtime = await viewRuntimeScript();
+  const assets: ValidationRequest['artifact']['assets'] = {};
+  for (const [file, contentType] of [['app.js', 'application/javascript'], ['app.css', 'text/css']]) {
+    const asset = await readMcpAppAsset('view-native', `assets/${file}`);
+    if (asset) assets[`https://view-validation.invalid/mcp-apps/view-native/assets/${file}?v=${asset.version}`] = {
+      body: Buffer.from(asset.bytes).toString('utf8'), contentType,
+    };
+  }
+  const scopes = view.attach.map(attachment => {
+    const scope: Record<string, string | number> = {};
+    if ('collection' in attachment) scope.type = attachment.collection;
+    if ('record' in attachment) { scope.type = attachment.record; scope.entity = attachment.id ?? 1; }
+    if ('event' in attachment) { scope.event = 1; if (attachment.type) scope.type = attachment.type; }
+    return scope;
+  });
+  if (scopes.length === 0) scopes.push({});
+  const uniqueScopes = [...new Map(scopes.map(scope => [JSON.stringify(scope), scope])).values()];
+  if (uniqueScopes.length > 4) throw new ToolUserError('Browser validation supports at most four distinct attached scopes per view; split the view into smaller modules', 422, 'VALIDATION');
+  const params = Object.fromEntries(Object.entries(view.params).flatMap(([key, decl]) =>
+    decl.default === undefined ? [] : [[key, decl.default]]));
+  const scenarios: ValidationScenario[] = uniqueScopes.flatMap(scope => ['light', 'dark'].flatMap(theme =>
+    ['inline', 'fullscreen'].flatMap(displayMode => ['empty', 'error', 'loading'].map(queryState =>
+      ({ theme, displayMode, queryState, scope, params }) as ValidationScenario))));
+  const artifact = { html: renderViewShell(view, 'https://view-validation.invalid/validation-workspace/', runtime), runtime, assets };
+  const body = JSON.stringify({ artifact, scenarios } satisfies ValidationRequest);
+  if (Buffer.byteLength(body) > VALIDATION_MAX_BYTES) throw new ToolUserError('View validation artifact exceeds the runner size limit', 422, 'VALIDATION');
+  let receipt: unknown;
+  try {
+    const response = await fetch(new URL('/validate', runnerUrl), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body,
+      signal: AbortSignal.timeout(VALIDATION_TIMEOUT_MS), redirect: 'error',
+    });
+    if (!response.ok) throw new Error('Runner unavailable');
+    // A runner response is bounded independently of the authored bundle.
+    if (!response.body) throw new Error('Missing runner response');
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        size += value.byteLength;
+        if (size > 16_384) throw new Error('Invalid runner response');
+        chunks.push(value);
+      }
+    } finally { await reader.cancel(); }
+    receipt = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  } catch {
+    throw new ToolUserError('View validation runner is unavailable; the saved view was preserved', 503, 'UPSTREAM_UNAVAILABLE');
+  }
+  const result = receipt as Partial<import('./validation-contract').ValidationResult> | null;
+  const expected = validationIdentity(artifact);
+  if (!result || typeof result.passed !== 'boolean' || result.artifactHash !== expected.artifactHash ||
+      result.runtimeHash !== expected.runtimeHash || !Array.isArray(result.diagnostics) ||
+      result.diagnostics.some(d => typeof d !== 'string')) {
+    throw new ToolUserError('View validation runner returned an invalid receipt; the saved view was preserved', 503, 'UPSTREAM_UNAVAILABLE');
+  }
+  if (!result.passed) throw new ToolUserError(`View failed browser validation: ${result.diagnostics.slice(0, 6).join('; ')}. The saved view was preserved`, 422, 'VALIDATION');
+}
 
 /**
  * The shell runtime script: React, React DOM, `@lobu/views` and its component
@@ -408,7 +489,7 @@ let runtimeScript: Promise<string> | null = null;
  * once per process and inlined ahead of every view bundle. Bundles compiled
  * against the shell global use this deploy's runtime.
  */
-export function viewRuntimeScript(): Promise<string> {
+export async function viewRuntimeScript(): Promise<string> {
   runtimeScript ??= build({
     ...VIEW_BUILD_OPTIONS,
     stdin: { contents: viewRuntimeEntry(), loader: 'js', resolveDir: inertResolveDir() },
@@ -421,7 +502,17 @@ export function viewRuntimeScript(): Promise<string> {
     runtimeScript = null;
     throw error;
   });
-  return runtimeScript;
+  const code = await runtimeScript;
+  // A development build can arrive after startup. Retry a missing artifact;
+  // readMcpAppAsset memoizes only successfully located immutable bytes.
+  if (!nativeAssetVersions) {
+    const [native, stylesheet] = await Promise.all([
+      readMcpAppAsset('view-native', 'assets/app.js'),
+      readMcpAppAsset('view-native', 'assets/app.css'),
+    ]);
+    if (native && stylesheet) nativeAssetVersions = { js: native.version, css: stylesheet.version };
+  }
+  return code;
 }
 
 const VIEW_SOURCE_NAMESPACE = 'lobu-view-source';
@@ -536,7 +627,7 @@ export async function compileView(
         loader: 'js',
         resolveDir: inertResolveDir(),
       },
-      plugins: [viewRuntimePlugin(), viewSourceFilesPlugin(sourceFiles)],
+      plugins: [viewRuntimePlugin({ "@lobu/views": Object.keys(ViewAPI), "@lobu/views/components": Object.keys(ViewComponents) }), viewSourceFilesPlugin(sourceFiles)],
     });
     compiled = result.outputFiles?.[0]?.text ?? '';
   } catch (err) {
@@ -562,7 +653,7 @@ export async function compileView(
  * Bump when the compile pipeline (resolve rules) changes in a way the
  * fingerprint's other inputs do not capture.
  */
-const VIEW_COMPILE_PIPELINE_VERSION = 2;
+const VIEW_COMPILE_PIPELINE_VERSION = 3;
 
 let compileFingerprint: string | undefined;
 
@@ -667,9 +758,12 @@ async function rebuildView(
   try {
     compiled = await compileView(view.source_files as SourceFiles);
   } catch (err) {
-    failedRebuilds.add(attempt);
-    if (failedRebuilds.size > MAX_FAILED_REBUILDS) {
-      failedRebuilds.delete(failedRebuilds.values().next().value!);
+    // Unavailable validation is retryable; never pin an outage until restart.
+    if (!(err instanceof ToolUserError) || err.httpStatus !== 503) {
+      failedRebuilds.add(attempt);
+      if (failedRebuilds.size > MAX_FAILED_REBUILDS) {
+        failedRebuilds.delete(failedRebuilds.values().next().value!);
+      }
     }
     logger.warn(
       { organization_id: organizationId, view_key: view.key, err },
@@ -689,6 +783,12 @@ async function rebuildView(
     compiled,
     { sourceFiles: view.source_files as SourceFiles, dependencies: view.dependencies as SourceDependencies }
   );
+  try {
+    await validateViewCandidate({ ...view, compiled_code: compiled, content_hash: hash }, process.env.VIEW_VALIDATOR_URL);
+  } catch (err) {
+    logger.warn({ organization_id: organizationId, view_key: view.key, err }, '[views] Rebuild validation failed; serving the stored bundle');
+    return view;
+  }
   const sql = getDb();
   const rows = await sql<ViewRow>`
     UPDATE views SET
@@ -743,6 +843,13 @@ export function renderViewShell(
   workspaceUrl: string,
   runtime: string
 ): string {
+  const assetRoot = `${new URL(workspaceUrl).origin}/mcp-apps/view-native/assets`;
+  const nativeHead = nativeAssetVersions
+    ? `<link rel="stylesheet" href="${assetRoot}/app.css?v=${nativeAssetVersions.css}">`
+    : '';
+  const nativeScript = nativeAssetVersions
+    ? `<script src="${assetRoot}/app.js?v=${nativeAssetVersions.js}"></script>`
+    : '';
   const inline = (code: string) => code.replaceAll('</script', '<\\/script');
   const workspace = workspaceUrl
     .replaceAll('&', '&amp;')
@@ -758,10 +865,12 @@ export function renderViewShell(
 <meta name="lobu-workspace" content="${workspace}">
 <title>Lobu — ${view.name.replaceAll('<', '&lt;')}</title>
 <style>${BASE_CSS}</style>
+${nativeHead}
 </head>
 <body>
 <div id="root"></div>
 <script>${inline(runtime)}</script>
+${nativeScript}
 <script>${inline(view.compiled_code)}</script>
 </body>
 </html>`;

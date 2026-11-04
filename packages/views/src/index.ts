@@ -23,6 +23,7 @@ export {
   escapeLiteral,
   mintInteractionId,
   mountView,
+  resolveViewHref,
   Provider,
   sql,
   tool,
