@@ -19,6 +19,7 @@ Root `AGENTS.md` holds the invariants and the workflow. This file holds the mech
 | `ERR_RESOLVE_PACKAGE_ENTRY_FAIL` in integration setup | Testing |
 | `could not create shared memory segment: No space left on device` | Testing |
 | A mock that works alone but not in the suite | Testing |
+| A `diagnostics_channel` fetch test that sees no events | Testing |
 | A server that is "healthy" suspiciously fast | Testing |
 | An auth-cookie fix that is green in tests but wrong in prod | Testing |
 | `gh run view --log-failed` printing nothing | CI triage |
@@ -49,9 +50,9 @@ Root `AGENTS.md` holds the invariants and the workflow. This file holds the mech
 
 ## Formatting & lint
 
-**Format only via `bun run check:fix` from the repo root.** Never `bunx biome check --write <path>`. Bare biome uses its own defaults (tabs) and ignores the repo config at `config/biome.config.json`.
+**Format via `bun run check:fix` from the repo root.** The rules live in `config/biome.config.json`; the root `biome.json` only `extends` it, so a bare `bunx biome ...` from the root or any package directory resolves the same config. A tree without that root file (a branch cut before it landed) silently falls back to Biome's defaults and reflows two-space files to tabs; recover from the file at `HEAD` and redo the edit by hand.
 
-**Several packages are biome-EXCLUDED, and an explicit file argument bypasses the exclusion.** `config/biome.config.json` excludes `packages/server`, `packages/owletto`, connector-sdk, connectors, connector-worker, embeddings, apps, and skills. Running biome on a file in one of them can turn a surgical change into a broad reflow diff that the CI format check will not catch. Recover from a clean copy of the file at `HEAD`, preserve any unrelated local changes, and redo the intended edit by hand in that file's existing style. `packages/core` and `packages/cli` *are* biome-formatted.
+**Several packages are biome-EXCLUDED.** `config/biome.config.json` excludes `packages/server`, `packages/owletto`, connector-sdk, connectors, connector-worker, embeddings, apps, and skills, so the CI format check never looks at them and biome reports `No files were processed` even for an explicit path there (the per-package `lint`/`format` scripts in server and owletto included). Edit those files by hand in each file's existing style (server mixes tabs and two spaces). `packages/core` and `packages/cli` *are* biome-formatted.
 
 ## DB & SQL
 
@@ -96,9 +97,11 @@ Rollback to a pre-cutover binary must also be quiesced and deploy its matching U
 
 **Vitest `list --shard=N/M` prints every file (3.2.6 and 4.1.11 alike), even though `run --shard=N/M` partitions correctly.** Do not use `vitest list` to prove shard coverage. Run each shard with the JSON reporter and compare `testResults`: the three shards are disjoint and complete at execution time, but not equal-sized — `packages/server/src/__tests__/setup/shard-sequencer.ts` packs files by measured duration (`shard-timings.json`), so per-shard file counts differ.
 
-**The test env speaks plain HTTP, so it validates the WRONG auth-cookie name.** Better Auth derives the session cookie name from `useSecureCookies`: tests get `better-auth.session_token`, prod gets `__Secure-better-auth.session_token`, and `getSession` reads exactly one of them and is blind to the other. Any code that *constructs* or *matches* that name can therefore pass a full red→green integration test and still fail in prod — #2578 nearly shipped a probe that rewrote every candidate to the bare basename, which would have locked out every duplicated jar in production (caught by `make review-fix`, not by the suite). Use `sessionCookieName(isHttps)` from `packages/server/src/auth/session-cookie-scope.ts`, never a literal, and cover **both** spellings explicitly. A unit test with a faked `getSession` is the stronger test here; the full-stack one inherits the harness's http-ness.
+**The test env speaks plain HTTP, so it validates the WRONG auth-cookie name.** Better Auth derives the session cookie name from `useSecureCookies`: tests get `better-auth.session_token`, prod gets `__Secure-better-auth.session_token`, and `getSession` reads exactly one of them and is blind to the other. Any code that *constructs* or *matches* that name can therefore pass a full red→green integration test and still fail in prod — #2578 nearly shipped a probe that rewrote every candidate to the bare basename, which would have locked out every duplicated jar in production (caught by the review fixer pass, not by the suite). Use `sessionCookieName(isHttps)` from `packages/server/src/auth/session-cookie-scope.ts`, never a literal, and cover **both** spellings explicitly. A unit test with a faked `getSession` is the stronger test here; the full-stack one inherits the harness's http-ness.
 
 **A cookie can be rejected two different ways, and the cheap fake only exercises one.** `better-call`'s `getSignedCookie` rejects a bad HMAC *before the database is consulted* (`context.mjs`: it also bails early on any signature that is not 44 base64 chars ending in `=`); a real stale twin is correctly signed and dies on the session lookup instead. A hand-written garbage token only ever tests the first path. To test the second, mint a real session and delete its `session` row.
+
+**Bun's `fetch` publishes no `undici:*` diagnostics_channel events.** Under Node 26 the global `fetch` publishes `undici:request:create`, `:headers`, `:trailers` and `:error` (a refused connection arrives on `undici:request:error`); under Bun 1.4 none of them fire. Anything built on those channels, such as fetch span instrumentation, is therefore untestable under `bun test`: put its test in a server Vitest suite (`cd packages/server && bun run test -- run <path>`), which runs on Node. Probe a failure with a closed ephemeral port (listen on `0`, read the port, close), never port 1 — it is on fetch's blocked-ports list, so the request fails with `bad port` before undici publishes anything.
 
 **`make dev` is not the test harness.** It migrates its owned local per-branch database and boots the app, but that does not exercise the branches a relevant unit or integration suite covers.
 

@@ -351,25 +351,27 @@ land:
 # NOT a substitute for the DB-backed suites (make test-integration) when you
 # touch server/runtime code — but it catches the cheap, common misses.
 pre-pr:
-	@echo "🔎 [1/5] Build workspace packages (fresh dist)..."
+	@echo "🔎 [1/6] Build workspace packages (fresh dist)..."
 	@# Typecheck resolves @lobu/* against built dist, not src. Without this a
 	@# stale core dist yields PHANTOM errors on any contract change (e.g. a new
 	@# field the dist predates) — the exact trap CI avoids by building first.
 	@make build-packages
-	@# Root `bun run typecheck` and `bun run check` are deliberately NOT run
-	@# here: .husky/pre-commit already runs both, in FAIL mode, on every commit
-	@# — the identical scripts. Running them twice bought nothing but wall time.
-	@# The per-package loop below has no such twin, so it stays.
-	@echo "🔎 [2/5] Strict typecheck (per-package; root is covered by the commit hook)..."
+	@# The same two scripts .husky/pre-commit runs. The root tsconfig is the
+	@# only one that typechecks packages/core with noUncheckedIndexedAccess, so
+	@# without it "pre-pr clean" still failed the commit hook. Both take ~2s.
+	@echo "🔎 [2/6] Root typecheck + biome check (same scripts as the commit hook)..."
+	@bun run typecheck
+	@bun run check
+	@echo "🔎 [3/6] Strict typecheck (per-package)..."
 	@for pkg in server connector-worker connector-sdk device-connectors plugin-api plugin-host plugin-toolkit plugin-memory plugin-conversations plugin-media plugin-mcp embeddings views cli; do \
 		echo "   typecheck packages/$$pkg..."; \
 		( cd "packages/$$pkg" && bunx tsc --noEmit ) || exit $$?; \
 	done
-	@echo "🔎 [3/5] Dead-code gate (knip --include files)..."
+	@echo "🔎 [4/6] Dead-code gate (knip --include files)..."
 	@bun run knip --include files
-	@echo "🔎 [4/5] Exposed surface naming (Automation is canonical)..."
+	@echo "🔎 [5/6] Exposed surface naming (Automation is canonical)..."
 	@bun scripts/check-exposed-surface-naming.ts
-	@echo "🔎 [5/5] Gateway LLM, entity-write funnel and migration deploy-window gates..."
+	@echo "🔎 [6/6] Gateway LLM, entity-write funnel and migration deploy-window gates..."
 	@node scripts/check-gateway-llm-calls.mjs
 	@bun scripts/check-entity-write-funnel.mjs
 	@node scripts/check-migration-quiesce.mjs
