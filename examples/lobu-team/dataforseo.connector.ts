@@ -311,7 +311,8 @@ interface PendingRankTask {
 }
 
 export interface RankTrackingCheckpoint {
-  pending?: PendingRankTask[];
+  /** Checkpoints written before 1.1.1 can lack the task timestamp. */
+  pending?: Array<Omit<PendingRankTask, "posted_at"> & { posted_at?: string }>;
   /**
    * Keywords whose task posted on `day` (UTC) is settled: recorded, failed, or
    * expired. Each keyword is posted (billed) at most once per day; a `more`
@@ -538,7 +539,7 @@ export default class DataForSeoConnector extends ConnectorRuntime {
     name: "DataForSEO",
     description:
       "On-demand SEO reads via DataForSEO Live endpoints plus scheduled rank tracking via the Standard method. Read-only; every paid call reports its cost.",
-    version: "1.1.0",
+    version: "1.1.1",
     faviconDomain: "dataforseo.com",
     authSchema: {
       methods: [
@@ -832,8 +833,21 @@ export default class DataForSeoConnector extends ConnectorRuntime {
     let found = 0;
     let skipped = 0;
     const now = Date.now();
+    let normalized = false;
     let pending: PendingRankTask[] = [];
-    for (const task of checkpoint.pending ?? []) {
+    for (const stored of checkpoint.pending ?? []) {
+      const postedAt = stored.posted_at;
+      const valid = postedAt && Number.isFinite(Date.parse(postedAt));
+      const fallback = checkpoint.last_sync_at;
+      const task: PendingRankTask = {
+        ...stored,
+        posted_at: valid
+          ? postedAt
+          : fallback && Number.isFinite(Date.parse(fallback))
+            ? new Date(fallback).toISOString()
+            : new Date(now).toISOString(),
+      };
+      if (!valid) normalized = true;
       if (now - Date.parse(task.posted_at) <= MAX_PENDING_AGE_MS) {
         pending.push(task);
       } else {
@@ -896,6 +910,9 @@ export default class DataForSeoConnector extends ConnectorRuntime {
       pending = stillPending;
     };
 
+    // Persist a legacy task's inferred age before a poll can fail. Otherwise
+    // every retry would reset its age and a paid task could live forever.
+    if (normalized) await commit();
     await collectReady();
 
     const pendingKeywords = new Set(pending.map((task) => task.keyword));
