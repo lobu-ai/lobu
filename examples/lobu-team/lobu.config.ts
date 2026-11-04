@@ -15,6 +15,7 @@ import {
 import type ClickHouseAnalyticsConnector from "./clickhouse-analytics.connector.ts";
 import type DataForSeoConnector from "./dataforseo.connector.ts";
 import type IssueTrackerReaction from "./issue-tracker.reaction.ts";
+import { productUsers } from "./product-users.ts";
 
 // One backlog type for every kind of team work, written by people and agents.
 // The organic acquisition review Automation reads the `seo` kind as its backlog
@@ -415,6 +416,7 @@ const productActivityDb = defineConnection({
             LEFT JOIN organization o ON o.id = e.organization_id
             WHERE e.semantic_type = 'audit'
               AND e.origin_type = 'tool_invocation'
+              AND e.metadata->>'event_type' = 'tool_invocation.completed'
               AND e.payload_data->>'success' = 'false'
               AND coalesce(u.principal_kind, 'human') = 'human'
           ) activity`,
@@ -442,6 +444,13 @@ const analytics = defineConnection({
   name: "Lobu analytics",
   authProfile: analyticsAuth,
   config: { CLICKHOUSE_URL: "https://clickhouse.lobu.ai" },
+  feeds: [
+    {
+      feed: "user_milestones",
+      name: "Live user journey milestones",
+      config: {},
+    },
+  ],
 });
 
 const lobuTeamSlack = defineConnection({
@@ -504,7 +513,7 @@ export default defineConfig({
     companyCloudflareAccount,
     gmailOAuthApp,
   ],
-  entities: [task, issue],
+  entities: [task, issue, productUsers],
   relationships: [trackedBy],
   connections: [analytics, productActivityDb, lobuTeamSlack, companyCloudflare],
   // The external digest is maintained by scripts/configure-product-activity.ts.
