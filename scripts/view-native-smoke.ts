@@ -278,12 +278,12 @@ try {
   });
   assert.equal(
     await agentLink.getAttribute("href"),
-    `${origin}/fixture-workspace/agents/fixture-agent/settings`
+    `${origin}/fixture-workspace/agents/fixture-agent`
   );
   await agentLink.click();
   await page.waitForFunction(() =>
     (window as unknown as { openedLink?: string }).openedLink?.endsWith(
-      "/fixture-workspace/agents/fixture-agent/settings"
+      "/fixture-workspace/agents/fixture-agent"
     )
   );
   await page.evaluate(() => {
