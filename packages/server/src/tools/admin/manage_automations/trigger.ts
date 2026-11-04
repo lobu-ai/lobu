@@ -85,14 +85,14 @@ async function loadTriggerExecution(
     executionConfig: { executor: payload.executor },
   });
   let persistedExecution: AutomationTriggerExecution;
-  if (executor?.kind === "agent") {
+  if (executor.kind === "agent") {
     persistedExecution = {
       lane: "managed_agent",
       owner: "lobu",
       managed_agent_id: executor.agentId,
       next_action: { kind: "handled_elsewhere" },
     };
-  } else if (executor?.kind === "device") {
+  } else if (executor.kind === "device") {
     persistedExecution = {
       lane: "device_worker",
       owner: "device",
@@ -120,7 +120,7 @@ async function loadTriggerExecution(
     return {
       execution: persistedExecution,
       shouldDispatch: true,
-      requiresGateway: executor?.kind === "agent" && payload.executor == null,
+      requiresGateway: executor.kind === "agent" && payload.executor == null,
     };
   }
   if (run.status !== "claimed" && run.status !== "running") {
@@ -175,10 +175,10 @@ async function loadTriggerExecution(
   const nativeScriptClaim =
     payload.executor?.kind === "script" && claimedBy === "automation-script";
   const nativeManagedClaim =
-    executor?.kind === "agent" &&
+    executor.kind === "agent" &&
     (claimedBy === "lobu-dispatcher" || claimedBy === `lobu:${executor.agentId}`);
   const nativeDeviceClaim =
-    executor?.kind === "device" && claimedBy === run.device_claimed_by;
+    executor.kind === "device" && claimedBy === run.device_claimed_by;
   if (!nativeScriptClaim && !nativeManagedClaim && !nativeDeviceClaim) {
     throw new ToolUserError(
       `Automation run ${runId} has no recognized active claimant.`,

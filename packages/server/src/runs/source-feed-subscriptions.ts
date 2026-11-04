@@ -68,7 +68,6 @@ export async function sourceFeedSubscriptions(
   for (const row of rows) {
     const executor = resolveAutomationExecutor({ agentId: row.managed_agent_id,
       deviceWorkerId: row.device_worker_id, agentKind: row.agent_kind, executionConfig: row.execution_config });
-    if (!executor) continue;
     const principal = typeof row.created_by === 'string' ? row.created_by : null;
     const subscriptionId = Number(row.id);
     const actor = await resolveActingPrincipal(sql, {

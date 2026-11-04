@@ -638,12 +638,14 @@ export async function handleUpdate(
       args.agent_kind !== undefined ? args.agent_kind : currentRow.agent_kind,
     executionConfig: effectiveExecutionConfig,
   };
-  // Only incoming model options on the resulting hosted lane use provider refs.
-  // Device and external clients own their model namespace. Unrelated updates
-  // leave installed options alone.
+  // A move onto the hosted lane must validate stored provider refs too.
+  // Unrelated edits of an already-hosted Automation leave legacy options alone.
   if (resolveAutomationExecutor(effectiveDefaults).kind === 'agent') {
+    const wasHosted = resolveAutomationExecutor({ agentId: currentRow.managed_agent_id,
+      deviceWorkerId: currentRow.device_worker_id, executionConfig: currentRow.execution_config }).kind === 'agent';
     await assertServerLaneModelResolves({
-      executionConfig: args.execution_config, organizationId: currentRow.organization_id,
+      executionConfig: wasHosted ? args.execution_config : effectiveExecutionConfig,
+      organizationId: currentRow.organization_id,
       isDevicePinned: false, applyId: ctx.applyId,
     });
   }

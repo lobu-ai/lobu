@@ -21,6 +21,7 @@ import { resolveAutomationExecutor } from './executors';
 import { runLeaseFence } from '../../../runs/run-lease';
 import type { AutomationTrigger } from '../../../types/automations';
 import { advanceAutomationScheduleAfterSuccessfulWindow } from '../../../automations/schedule-cursor';
+import { recordScheduledExecutionFailure } from '../../../automations/scheduled-failure-policy';
 import {
   completeSkippedAutomationRun,
   inspectUnchangedWindow,
@@ -208,7 +209,14 @@ export async function handleClaimNextWindow(
           409
         );
       }
-      await expireExternalClaims(tx, automationId);
+      if (await expireExternalClaims(tx, automationId)) {
+        const [state] = await tx`SELECT schedule_auto_paused_at FROM automations WHERE id = ${automationId}`;
+        if (state?.schedule_auto_paused_at) {
+          // Commit the timeout and failure count before returning the rejection,
+          // just as the no-op branch commits its completion before its 409.
+          return new ToolUserError('This external Automation schedule is auto-paused after repeated failures. Review its health before resuming.', 409);
+        }
+      }
       const active = await tx`
         SELECT id FROM runs
         WHERE automation_id = ${automationId}
@@ -375,6 +383,7 @@ export async function handleClaimNextWindow(
     };
   });
 
+  if (claimedWindow instanceof ToolUserError) throw claimedWindow;
   if (claimedWindow.skipped) {
     throw new ToolUserError(
       `Automation ${automationId} has nothing to process: the due window ` +
@@ -450,16 +459,27 @@ export async function handleClaimNextWindow(
   }
 }
 
-export async function expireExternalClaims(tx: DbClient, automationId: number): Promise<void> {
-  await tx`
-    UPDATE runs
+export async function expireExternalClaims(tx: DbClient, automationId: number): Promise<boolean> {
+  const expired = await tx<{ previous_status: string; dispatch_source: string | null }>`
+    WITH expired AS (
+      SELECT id, status AS previous_status FROM runs
+      WHERE automation_id = ${automationId}
+        AND run_type = 'automation'
+        AND status IN ('claimed', 'running')
+        AND expires_at IS NOT NULL AND expires_at <= current_timestamp
+      FOR UPDATE SKIP LOCKED
+    )
+    UPDATE runs r
     SET status = 'timeout', outcome = ${classifyRunOutcome({ status: 'timeout' })},
         completed_at = current_timestamp,
         error_message = 'External Automation window lease expired'
-    WHERE automation_id = ${automationId}
-      AND run_type = 'automation'
-      AND status IN ('claimed', 'running')
-      AND expires_at IS NOT NULL
-      AND expires_at <= current_timestamp
+    FROM expired WHERE r.id = expired.id AND r.status = expired.previous_status
+    RETURNING expired.previous_status, r.approved_input->>'dispatch_source' AS dispatch_source
   `;
+  for (const row of expired) {
+    if (row.previous_status === 'running') {
+      await recordScheduledExecutionFailure(tx, automationId, row.dispatch_source);
+    }
+  }
+  return expired.length > 0;
 }

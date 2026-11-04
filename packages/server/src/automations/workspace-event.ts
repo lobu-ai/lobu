@@ -224,7 +224,6 @@ async function findMatchingWorkspaceEventActivations(
         typeof row.device_worker_id === 'string' ? row.device_worker_id : null,
       agentKind: typeof row.agent_kind === 'string' ? row.agent_kind : null,
     });
-    if (!executor) continue;
     if (matches.length >= MAX_WORKSPACE_EVENT_FANOUT) {
       fanoutLimited = true;
       logger.warn(

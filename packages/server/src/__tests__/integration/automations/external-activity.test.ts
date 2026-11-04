@@ -3,7 +3,7 @@ import * as database from '../../../db/client';
 import type { DbClient } from '../../../db/client';
 import type { ToolContext } from '../../../tools/registry';
 import { initWorkspaceProvider } from '../../../workspace';
-import { materializeDueAutomationRuns, dispatchPendingAutomationRuns } from '../../../automations/automation';
+import { materializeDueAutomationRuns, dispatchPendingAutomationRuns, sweepStaleAutomationRuns } from '../../../automations/automation';
 import { handleListActivity } from '../../../tools/admin/manage_operations/handlers/runs';
 import { handleClaimNextWindow } from '../../../tools/admin/manage_automations/claim-next-window';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
@@ -92,6 +92,54 @@ describe('external Automation activity', () => {
     await api.automations.update({ automation_id: id, tags: ['updated'] });
     const listed = await api.automations.list({}) as { automations: Array<Record<string, unknown>> };
     expect(listed.automations.find(a => a.automation_id === id)?.model_config).toEqual({ model: 'legacy' });
+  });
+
+  it.each(['external', 'device'])('validates stored provider refs when moving %s analysis to hosted execution', async (lane) => {
+    let deviceId: string | null = null;
+    if (lane === 'device') {
+      const [device] = await sql`INSERT INTO device_workers (user_id, worker_id, platform, capabilities, organization_id)
+        VALUES (${ctx.userId}, 'synthetic-model-transition', 'headless', '{}'::jsonb, ${ctx.organizationId}) RETURNING id`;
+      deviceId = String(device.id);
+    }
+    const created = await api.automations.create({ slug: 'provider-transition', prompt: 'Review.',
+      device_worker_id: deviceId, execution_config: { model: 'synthetic-unregistered/model' } });
+    await expect(api.automations.update({ automation_id: created.automation_id,
+      managed_agent_id: agentId, device_worker_id: null })).rejects.toThrow(/cannot route/);
+    const [unchanged] = await sql`SELECT managed_agent_id, device_worker_id FROM automations WHERE id = ${Number(created.automation_id)}`;
+    expect(unchanged).toMatchObject({ managed_agent_id: null, device_worker_id: deviceId });
+    await api.automations.update({ automation_id: created.automation_id,
+      managed_agent_id: agentId, device_worker_id: null, execution_config: null });
+  });
+
+  it.each(['claim', 'sweep'])('counts an abandoned scheduled external lease once through %s recovery', async (recovery) => {
+    const id = await createExternal({ execution_config: null, managed_agent_id: null });
+    const claim = await api.automations.claimNextWindow({ automation_id: id });
+    await sql`UPDATE automations SET consecutive_scheduled_failures = 4 WHERE id = ${Number(id)}`;
+    await sql`UPDATE runs SET expires_at = NOW() - INTERVAL '1 second' WHERE id = ${claim.run_id}`;
+    if (recovery === 'claim') {
+      await expect(api.automations.claimNextWindow({ automation_id: id })).rejects.toThrow(/paused|not due/);
+    } else {
+      await sweepStaleAutomationRuns(sql);
+    }
+    await sweepStaleAutomationRuns(sql);
+    const [state] = await sql`SELECT consecutive_scheduled_failures, schedule_auto_paused_at,
+      next_run_at, next_window_start FROM automations WHERE id = ${Number(id)}`;
+    expect(state.consecutive_scheduled_failures).toBe(5);
+    expect(state.schedule_auto_paused_at).not.toBeNull();
+    expect(state.next_run_at).toBeNull();
+    expect(new Date(state.next_window_start).toISOString()).toBe(claim.context.window_start);
+    expect(await work()).toEqual([]);
+  });
+
+  it('keeps an expired manual trigger out of the scheduled-failure counter', async () => {
+    const id = await createExternal({ execution_config: null, managed_agent_id: null });
+    const run = await api.automations.trigger({ automation_id: id });
+    const claim = await api.automations.claimNextWindow({ automation_id: id });
+    expect(claim.run_id).toBe(run.run_id);
+    await sql`UPDATE runs SET expires_at = NOW() - INTERVAL '1 second' WHERE id = ${run.run_id}`;
+    await sweepStaleAutomationRuns(sql);
+    const [state] = await sql`SELECT consecutive_scheduled_failures, schedule_auto_paused_at FROM automations WHERE id = ${Number(id)}`;
+    expect(state).toEqual({ consecutive_scheduled_failures: 0, schedule_auto_paused_at: null });
   });
 
   it('does not let an external caller take pending native work after the live assignment is cleared', async () => {

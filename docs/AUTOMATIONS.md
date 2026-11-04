@@ -201,6 +201,9 @@ Each new run freezes its agent identity, device, runtime override, execution
 options and version. Later edits affect future runs. Historical snapshots that
 lack an execution-options or agent-identity field retain their old fallback.
 Device defaults still resolve on the selected device when no kind is specified.
+Moving analysis onto the hosted lane validates its stored provider model ref;
+replace or clear `execution_config` in the same update if it belongs to a device
+or external client. Unrelated edits retain installed options.
 
 ## External execution and activity discovery
 
@@ -218,6 +221,9 @@ books it as a completed no-op run, advances the schedule, and answers 409
 instead of handing out a window. Treat that 409 like any other: refresh
 activity. Set `skip_if_unchanged: false` on the schedule trigger when the
 client must see every due window, empty or not.
+Abandoned scheduled leases use the existing scheduled-failure counter and
+auto-pause policy, whether recovered by another claim or the stale-run sweep.
+Manual triggers keep their existing manual failure semantics.
 
 An authorized agent should query `operations.listActivity({ kinds:
 ["automation_due"] })` on startup, between tasks, and approximately every minute

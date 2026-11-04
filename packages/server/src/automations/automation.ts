@@ -305,9 +305,9 @@ async function enqueueAutomationRunForRecord(
 			windowEnd: windowEnd.toISOString(),
 			dispatchSource,
 			deviceWorkerId:
-				executor?.kind === "device" ? executor.deviceWorkerId : null,
+				executor.kind === "device" ? executor.deviceWorkerId : null,
 			agentKind:
-				executor?.kind === "device" ? executor.agentKind : null,
+				executor.kind === "device" ? executor.agentKind : null,
 			sourceFingerprint,
 			expectedWindowStart: inspectedWindow?.windowStart.toISOString(),
 		};
