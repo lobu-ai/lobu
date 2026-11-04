@@ -1613,6 +1613,7 @@ export async function listNotifications(opts: {
       t.user_id,
       e.metadata AS delivery_metadata,
       e.run_id AS delivery_run_id,
+      e.automation_id AS delivery_automation_id,
       COALESCE(e.metadata->>'notification_type', 'generic') AS type,
       CASE WHEN ${authorization.isRequest} THEN
         CASE WHEN ${authorization.pending} THEN 'Connection "' || COALESCE(auth_request.display_name, 'Account') || '" needs authorization'
@@ -1701,8 +1702,11 @@ export async function listNotifications(opts: {
       e.feed_id,
       e.feed_key,
       fd.display_name AS feed_name,
-      e.automation_id,
-      ${sql.unsafe(automationNameColumn('e'))} AS automation_name,
+      -- Approval notices are about the held run even when the notice itself
+      -- was emitted outside that Automation's window. Preserve producer
+      -- attribution for delivery while projecting the subject for navigation.
+      COALESCE(e.automation_id, ar.automation_id) AS automation_id,
+      COALESCE(${sql.unsafe(automationNameColumn('e'))}, approval_automation.name) AS automation_name,
       COALESCE(
         NULLIF(e.metadata->>'agent_id', ''),
         NULLIF(source_run.approved_input->>'agent_id', '')
@@ -1779,6 +1783,9 @@ export async function listNotifications(opts: {
     LEFT JOIN runs ar
       ON ar.organization_id = e.organization_id
      AND ar.id = pe.run_id
+    LEFT JOIN automations approval_automation
+      ON approval_automation.id = ar.automation_id
+     AND approval_automation.organization_id = e.organization_id
     -- Mirrors the connection-visibility predicate every content read applies
     -- (compileConnectionFkVisibility): the card counts as reviewable only when
     -- its connection is live, org-visible, and (for private) owned by the
@@ -1829,8 +1836,8 @@ export async function listNotifications(opts: {
 
 	const hasMore = rows.length > limit;
 	const notifications = (hasMore ? rows.slice(0, limit) : rows).map((row) => {
-		const { delivery_metadata, delivery_run_id, ...notification } = row;
-		const delivery = projectDelivery(Number(row.id), row.automation_id == null ? null : Number(row.automation_id),
+		const { delivery_metadata, delivery_run_id, delivery_automation_id, ...notification } = row;
+		const delivery = projectDelivery(Number(row.id), delivery_automation_id == null ? null : Number(delivery_automation_id),
 			delivery_run_id == null ? null : Number(delivery_run_id), jsonRecord(delivery_metadata));
 		return { ...notification, ...(delivery ? { delivery } : {}) };
 	});
