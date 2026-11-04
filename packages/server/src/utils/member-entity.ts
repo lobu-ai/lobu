@@ -90,8 +90,15 @@ export async function ensureMemberEntity(params: EnsureMemberEntityParams): Prom
     }
   }
 
-  const findIdByEmail = async (): Promise<number | null> => {
-    const rows = await sql.unsafe<{ id: number }>(
+  await withEntityWriteTransaction(sql, async (tx) => {
+    // Serialize the email lookup and insert across replicas. Random slugs let
+    // namesakes coexist, but cannot themselves make provisioning idempotent.
+    await tx`
+      SELECT pg_advisory_xact_lock(
+        hashtextextended(${JSON.stringify(['member-entity', params.organizationId, params.email])}, 0)
+      )
+    `;
+    const rows = await tx.unsafe<{ id: number }>(
       `SELECT e.id
       FROM entities e
       JOIN entity_types et ON et.id = e.entity_type_id
@@ -102,58 +109,56 @@ export async function ensureMemberEntity(params: EnsureMemberEntityParams): Prom
       LIMIT 1`,
       [params.organizationId, emailField, params.email]
     );
-    return rows.length > 0 ? Number(rows[0].id) : null;
-  };
+    // Check if a $member entity with this email already exists; create it if not.
+    let memberEntityId = rows.length > 0 ? Number(rows[0].id) : null;
+    if (memberEntityId === null) {
+      const metadata: Record<string, unknown> = {
+        [emailField]: params.email,
+        status: params.status ?? 'active',
+      };
+      if (params.image && imageField) metadata[imageField] = params.image;
+      if (params.role) metadata.role = params.role;
 
-  // Check if a $member entity with this email already exists; create it if not.
-  let memberEntityId = await findIdByEmail();
-  if (memberEntityId === null) {
-    const metadata: Record<string, unknown> = {
-      [emailField]: params.email,
-      status: params.status ?? 'active',
-    };
-    if (params.image && imageField) metadata[imageField] = params.image;
-    if (params.role) metadata.role = params.role;
-
-    const entityData: EntityData = {
-      entity_type: '$member',
-      name: params.name.trim(),
-      // Membership identity is the verified email/claim, not a display name.
-      // A namesake record or another member may already own the name's slug.
-      slug: `member-${randomUUID()}`,
-      organization_id: params.organizationId,
-      metadata,
-    };
-    // Authorship: the member's own id when self-provisioning, else the explicit
-    // actor (inviter). Identity attribution (the auth_user_id claim below) is a
-    // SEPARATE concern — only `userId` ever drives it.
-    const createdBy = params.userId ?? params.createdByUserId;
-    if (createdBy) {
-      entityData.created_by = createdBy;
+      const entityData: EntityData = {
+        entity_type: '$member',
+        name: params.name.trim(),
+        // Membership identity is the verified email/claim, not a display name.
+        // A namesake record or another member may already own the name's slug.
+        slug: `member-${randomUUID()}`,
+        organization_id: params.organizationId,
+        metadata,
+      };
+      // Authorship: the member's own id when self-provisioning, else the explicit
+      // actor (inviter). Identity attribution (the auth_user_id claim below) is a
+      // SEPARATE concern — only `userId` ever drives it.
+      const createdBy = params.userId ?? params.createdByUserId;
+      if (createdBy) {
+        entityData.created_by = createdBy;
+      }
+      const created = await createEntity(entityData, { skipHooks: true, sql: tx });
+      memberEntityId = created.id;
     }
-    await createEntity(entityData, { skipHooks: true });
-    memberEntityId = await findIdByEmail();
-  }
 
-  // Write the org-scoped auth_user_id identity so identity-based resolution (the
-  // authz channel-visibility gate's resolveRequesterMemberEntityId) can find this
-  // member in THIS org — not only the user's personal org. Without it, a member
-  // provisioned via a shared-org join (join-public) would resolve to nothing and
-  // every enforced connection would fail closed for them. Idempotent, and applied
-  // to existing members too so ones created before this gets backfilled. The
-  // 'auth:signup' source is the gate's anti-hijack guard — only written here from
-  // trusted server-side provisioning with a verified user id.
-  if (params.userId && memberEntityId !== null) {
-    await sql`
-      INSERT INTO entity_identities (
-        organization_id, entity_id, namespace, identifier, source_connector, scope_key
-      ) VALUES (
-        ${params.organizationId}, ${memberEntityId}, 'auth_user_id', ${params.userId}, 'auth:signup', NULL
-      )
-      ON CONFLICT (organization_id, namespace, identifier, COALESCE(scope_key, '')) WHERE deleted_at IS NULL
-      DO NOTHING
-    `;
-  }
+    // Write the org-scoped auth_user_id identity so identity-based resolution (the
+    // authz channel-visibility gate's resolveRequesterMemberEntityId) can find this
+    // member in THIS org — not only the user's personal org. Without it, a member
+    // provisioned via a shared-org join (join-public) would resolve to nothing and
+    // every enforced connection would fail closed for them. Idempotent, and applied
+    // to existing members too so ones created before this gets backfilled. The
+    // 'auth:signup' source is the gate's anti-hijack guard — only written here from
+    // trusted server-side provisioning with a verified user id.
+    if (params.userId && memberEntityId !== null) {
+      await tx`
+        INSERT INTO entity_identities (
+          organization_id, entity_id, namespace, identifier, source_connector, scope_key
+        ) VALUES (
+          ${params.organizationId}, ${memberEntityId}, 'auth_user_id', ${params.userId}, 'auth:signup', NULL
+        )
+        ON CONFLICT (organization_id, namespace, identifier, COALESCE(scope_key, '')) WHERE deleted_at IS NULL
+        DO NOTHING
+      `;
+    }
+  });
 }
 
 /**
