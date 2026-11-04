@@ -123,7 +123,9 @@ continues to exclude browser tooling.
 
 The sample Compose file builds the runner separately on an internal network
 with no published ports. Its pinned Chromium seccomp profile is vendored from
-[Playwright v1.60.0](https://github.com/microsoft/playwright/blob/v1.60.0/utils/docker/seccomp_profile.json).
+[Playwright v1.60.0](https://github.com/microsoft/playwright/blob/v1.60.0/utils/docker/seccomp_profile.json),
+with one change: `chroot` is allowed without the outer `CAP_SYS_CHROOT`, so
+Chromium's user-namespace sandbox starts after all capabilities are dropped.
 The runner uses a non-root user with Chromium's sandbox enabled. Do not expose
 its endpoint to public ingress or attach application credentials. The new GHCR
 package must be made public through its package settings for anonymous pulls,
@@ -152,6 +154,7 @@ checkout, with a loopback-only published port:
 docker compose -f docker-compose.example.yml build view-validator
 docker compose -f docker-compose.example.yml run -d --no-deps \
   --name lobu-view-validator -p 127.0.0.1:8090:8090 view-validator
+curl -fsS http://127.0.0.1:8090/health
 VIEW_VALIDATOR_URL=http://127.0.0.1:8090 lobu run
 ```
 

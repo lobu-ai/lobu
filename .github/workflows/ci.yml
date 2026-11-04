@@ -118,6 +118,25 @@ jobs:
             --security-opt no-new-privileges=true \
             --security-opt seccomp=docker/view-validator/seccomp_profile.json \
             view-validator-test bun docker/view-validator/smoke.ts
+      - name: Prove local Compose runner access
+        run: |
+          # Keep the service on its internal-only network. Only this trusted
+          # HTTP probe uses the host network; author code stays in the service.
+          override="$RUNNER_TEMP/view-validator-local.yml"
+          printf 'services:\n  view-validator:\n    image: view-validator-test\n' > "$override"
+          compose() {
+            docker compose --project-name view-validator-local \
+              -f docker-compose.example.yml -f "$override" "$@"
+          }
+          trap 'docker logs view-validator-local-test; compose down' EXIT
+          compose run -d --no-deps --name view-validator-local-test \
+            -p 127.0.0.1:8090:8090 view-validator
+          curl --fail --silent --show-error --retry 15 --retry-delay 1 \
+            --retry-connrefused --retry-max-time 30 --max-time 2 \
+            http://127.0.0.1:8090/health
+          docker run --rm --network=host --read-only --cap-drop=ALL \
+            --security-opt no-new-privileges=true view-validator-test \
+            bun docker/view-validator/smoke.ts http://127.0.0.1:8090
 
   # Fast unit tests — no Postgres, no submodule needed for most.
   # Splits from `integration` so a unit failure surfaces in <2 min instead of
