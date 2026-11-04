@@ -8,7 +8,7 @@
 
 import { describe, expect, it } from 'bun:test';
 import { isRetryable, ToolError, BrowserInterruptionError } from '@lobu/core';
-import { classifyPushdownFailure } from '../../lib/connector-pushdown';
+import { classifyPushdownFailure, isCompletePushdownResult } from '../../lib/connector-pushdown';
 
 // Mirror of ConnectorExecutionError's surface: a message plus the propagated httpStatus.
 class ConnectorExecutionErrorLike extends Error {
@@ -79,5 +79,26 @@ describe('classifyPushdownFailure', () => {
     const code = classifyPushdownFailure(new BrowserInterruptionError('challenge_required', 'timeout is not challenge evidence'));
     expect(code).toBe('BROWSER_INTERRUPTED');
     expect(isRetryable(code)).toBe(false);
+  });
+});
+
+describe('isCompletePushdownResult', () => {
+  const page = (n: number, total?: number) => ({
+    rows: Array.from({ length: n }, (_, i) => ({ i })),
+    columns: [],
+    ...(total === undefined ? {} : { total }),
+  });
+
+  it('accepts a page only when the reported total fits it', () => {
+    expect(isCompletePushdownResult(page(3, 3))).toBe(true);
+    expect(isCompletePushdownResult(page(0, 0))).toBe(true);
+    expect(isCompletePushdownResult(page(500, 501))).toBe(false);
+  });
+
+  it('cannot prove a nonempty page complete without a total', () => {
+    // A connector capping its page below the requested limit would otherwise
+    // pass a prefix off as the whole result.
+    expect(isCompletePushdownResult(page(1000))).toBe(false);
+    expect(isCompletePushdownResult(page(0))).toBe(true);
   });
 });

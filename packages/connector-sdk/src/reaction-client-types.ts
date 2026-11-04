@@ -244,8 +244,14 @@ export interface ReactionClient {
     }>;
   };
 
-  /** Run a read-only SQL query against the org's Postgres. */
-  query(sql: string): Promise<unknown[]>;
+  /**
+   * Run a read-only SQL query against the org's Postgres, or live against a
+   * connection's source when `options.connection` names one.
+   */
+  query(
+    sql: string,
+    options?: { window_token?: string; connection?: string }
+  ): Promise<unknown[]>;
 
   /** Structured log — appears in the Automation run output. */
   log(message: string, data?: Record<string, unknown>): void;

@@ -119,6 +119,12 @@ writes cannot advance the arrival mark. SDK effects are at-least-once: use
 skip code that may read additional SDK data. Device pins and model/CLI settings
 are rejected for code-only jobs.
 
+`client.query(sql, { connection: "<slug>" })` runs the SQL live and read-only
+against that connection's source through its connector, with the same
+connection visibility as `query_sql({ connection })`. It returns at most one
+source page: a larger result fails with 422 rather than returning a prefix, so
+aggregate in SQL. It cannot be combined with `window_token`.
+
 Adding a prompt, skills, exported extraction `input` or declared outputs enables
 agent analysis: preparation precedes the agent, and the default handler follows
 successful completion. Reply turns keep their completion semantics and cannot
