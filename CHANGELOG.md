@@ -1,5 +1,28 @@
 # Changelog
 
+## [24.6.0](https://github.com/lobu-ai/lobu/compare/lobu-v24.5.0...lobu-v24.6.0) (2026-11-04)
+
+
+### Features
+
+* **linkedin:** create companies from company-authored posts ([#4723](https://github.com/lobu-ai/lobu/issues/4723)) ([e0bdc2a](https://github.com/lobu-ai/lobu/commit/e0bdc2a647bb14bacb54fedff2119550a56f5330))
+* **lobu-team:** browse production users and journey milestones ([#4735](https://github.com/lobu-ai/lobu/issues/4735)) ([4d7b415](https://github.com/lobu-ai/lobu/commit/4d7b4155571364ec12cc21bb342c772459cace45))
+* **reviews:** link resource offers to native proposal reviews ([#4730](https://github.com/lobu-ai/lobu/issues/4730)) ([6ea136a](https://github.com/lobu-ai/lobu/commit/6ea136a8dae46d4974aec75508163aed33bd1776))
+* **views:** reuse native product UI with validated artifacts and agent discovery ([#4727](https://github.com/lobu-ai/lobu/issues/4727)) ([c986737](https://github.com/lobu-ai/lobu/commit/c98673737086ecbc8e7fc80e889db1cdf35cae6f))
+* **x:** like, follow and following feed for browser connections ([#4729](https://github.com/lobu-ai/lobu/issues/4729)) ([a58688b](https://github.com/lobu-ai/lobu/commit/a58688b28bb54192cd3c033671d2f7830d49856d))
+
+
+### Bug Fixes
+
+* **automations:** commit preparation handoff atomically ([#4740](https://github.com/lobu-ai/lobu/issues/4740)) ([a7202cd](https://github.com/lobu-ai/lobu/commit/a7202cd82b1f2ea8fd66cd16aa55b77fa9fc2087))
+* **automations:** resolve duplicate contacts through existing policies ([#4737](https://github.com/lobu-ai/lobu/issues/4737)) ([b303600](https://github.com/lobu-ai/lobu/commit/b303600efc161e583bcbbc9a33417aadf9033b6b))
+* **connectors:** preserve sync freshness during claims ([#4742](https://github.com/lobu-ai/lobu/issues/4742)) ([cbf5a94](https://github.com/lobu-ai/lobu/commit/cbf5a943d165890e631291db46273d97fd43dd40))
+* **docker:** preserve worker runtime layer cache across releases ([#4736](https://github.com/lobu-ai/lobu/issues/4736)) ([1436251](https://github.com/lobu-ai/lobu/commit/14362517c9fbd3bbe3f41b26a8b48424e55a3788))
+* **observability:** stamp worker images with the release SHA ([#4725](https://github.com/lobu-ai/lobu/issues/4725)) ([3f103da](https://github.com/lobu-ai/lobu/commit/3f103da7e16643394635d74fdf84d6afd7e35546))
+* **server:** retain rule escalations on held entity updates ([#4738](https://github.com/lobu-ai/lobu/issues/4738)) ([63d48ad](https://github.com/lobu-ai/lobu/commit/63d48ad57354f9a87b16ad1f4147c707a9b8ce0a))
+* **views:** validate every attached scope in bounded runs ([#4741](https://github.com/lobu-ai/lobu/issues/4741)) ([fa27034](https://github.com/lobu-ai/lobu/commit/fa270345934aaf497ddfbc7cc60b97ebbb09ec7c))
+* **worker:** compile connectors using the provided socket shim ([#4733](https://github.com/lobu-ai/lobu/issues/4733)) ([7134eda](https://github.com/lobu-ai/lobu/commit/7134eda5b6ee0ab8adb232d7ce013c910b25fd3c))
+
 ## [24.5.0](https://github.com/lobu-ai/lobu/compare/lobu-v24.4.0...lobu-v24.5.0) (2026-11-04)
 
 
