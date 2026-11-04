@@ -2,6 +2,8 @@
  * Runs in frontend CI where Owletto is built; backend-only shards have no UI artifacts. */
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
+import { mkdir, writeFile } from "node:fs/promises";
+import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 import { assertPortableArtifact } from "./artifact-portability.mjs";
 import { createServer } from "node:http";
@@ -15,7 +17,7 @@ import { readMcpAppAsset } from "../packages/server/src/utils/mcp-app-bundle";
 
 const source = `import { useState } from "react";
 import { defineView, sql, tool, useHost, useQuery } from "@lobu/views";
-import { Button, Badge, DataTable, EntityAvatar, EntityListPage, EntityRecordPage, Tabs, TabsList, TabsTrigger, TabsContent } from "@lobu/views/components";
+import { Button, Badge, DataTable, EntityAvatar, EntityListPage, EntityRecordPage, AutomationReference, AgentReference, ConnectorReference, JsonDiff, Tabs, TabsList, TabsTrigger, TabsContent } from "@lobu/views/components";
 export const view = defineView({ key: "native-proof", attach: [{ workspace: true }] });
 export default function Proof() {
   const host = useHost();
@@ -28,6 +30,35 @@ export default function Proof() {
   const customRows = (custom.data ?? []).map(row => ({key:"sql",label:"SQL + TypeScript row",amount:row.amount * 2}));
   customRows.push({key:"local",label:"TypeScript-only row",amount:0});
   return <main>
+    <section aria-label="Native resources">
+      <AutomationReference mode="live" workspace="fixture-workspace" automationId="42" />
+      <AutomationReference mode="live" workspace="fixture-workspace" automationId="43" appearance="inline" />
+      <AgentReference mode="live" workspace="fixture-workspace" agentId="fixture-agent" />
+      <ConnectorReference mode="live" workspace="fixture-workspace" connectorKey="fixture.feed" />
+      <ConnectorReference mode="live" workspace="fixture-workspace" connectorKey="fixture.feed" connectionId={7} />
+      <div data-testid="refused-reference"><AgentReference mode="live" workspace="fixture-workspace" agentId="refused-agent" /></div>
+      <div data-testid="wrong-workspace"><AgentReference mode="live" workspace="other-workspace" agentId="never-read" /></div>
+      <div data-testid="invalid-reference"><AutomationReference mode="live" workspace="fixture-workspace" automationId="invalid" /></div>
+      <Tabs defaultValue="connector-definition">
+        <TabsList label="Definition examples"><TabsTrigger value="connector-definition">Connector</TabsTrigger><TabsTrigger value="agent-definition">Agent</TabsTrigger><TabsTrigger value="automation-definition">Automation</TabsTrigger></TabsList>
+        <TabsContent value="connector-definition">
+          <h2>Proposed connector definition</h2><Badge>Proposal preview</Badge>
+          <p>Example values; rendering this diff does not change the connector.</p>
+          <JsonDiff before={{name:"Example feed",version:"1.0.0",batch_size:50,enabled:false}} after={{name:"Example feed",version:"1.1.0",batch_size:100,enabled:false}} />
+        </TabsContent>
+        <TabsContent value="agent-definition">
+          <h2>Proposed agent settings</h2><Badge>Proposal preview</Badge>
+          <p>Example values; rendering this diff does not change the agent.</p>
+          <JsonDiff before={{name:"Example researcher",description:"Research workspace records"}} after={{name:"Example researcher",description:"Summarize workspace records with linked evidence"}} />
+        </TabsContent>
+        <TabsContent value="automation-definition">
+          <h2>Proposed Automation settings</h2><Badge>Proposal preview</Badge>
+          <p>Example values; rendering this diff does not change the Automation.</p>
+          <JsonDiff before={{name:"Example digest",status:"active"}} after={{name:"Example digest",status:"archived"}} />
+        </TabsContent>
+      </Tabs>
+      <div data-testid="snapshot"><JsonDiff before={null} after={{name:"Proposed agent",enabled:false,count:0}} /></div>
+    </section>
     <p data-testid="state">{result.loading ? "loading" : result.error ? "error:" + result.error : result.data?.entities.length ? "data" : "empty"}</p>
     <p data-testid="theme">{host.theme}</p>
     <p data-testid="mode">{mode}</p>
@@ -46,7 +77,7 @@ export default function Proof() {
       empty={<p>No matching records</p>}
       table={result.data?.entities.length ? {entities:result.data.entities,owner:"fixture-workspace",isDerived:false,hasAnyParents:false,linkedEntityLookups:{},measureColumns:[],sorting,onSortingChange:setSorting,page,pageSize:2,totalCount:4,hasMore:result.data.metadata.has_more,pageTitle:"Records",onPrevPage:()=>setPage(p=>p-1),onNextPage:()=>setPage(p=>p+1)} : undefined} />
     <EntityListPage title="Custom data" controls={<p>Custom query results</p>}>
-      <DataTable rows={customRows} columns={[{key:"label",header:"Source"},{key:"amount",header:"Amount"}]} keyOf={row=>row.key} />
+      <DataTable caption="Computed query results" rows={customRows} columns={[{key:"label",header:"Source"},{key:"amount",header:"Amount"}]} keyOf={row=>row.key} />
     </EntityListPage>
   </main>;
 }`;
@@ -63,6 +94,7 @@ const errors: string[] = [];
 const calls: Record<string, unknown>[] = [];
 let origin: string;
 let shell: string;
+let hostHtml: string;
 const server = createServer(async (request, response) => {
   try {
     const pathname = new URL(request.url!, "http://localhost").pathname;
@@ -79,7 +111,7 @@ const server = createServer(async (request, response) => {
       return;
     }
     response.setHeader("Content-Type", "text/html");
-    response.end(`<!doctype html><html><body><iframe sandbox="allow-scripts" style="width:900px;height:700px"></iframe><script>
+    hostHtml = `<!doctype html><html><body><iframe sandbox="allow-scripts" style="width:900px;height:700px"></iframe><script>
       const frame = document.querySelector('iframe');
       let failedOnce = false;
       const send = message => frame.contentWindow.postMessage({jsonrpc:'2.0',...message},'*');
@@ -90,7 +122,7 @@ const server = createServer(async (request, response) => {
         if(id === undefined || !method) return;
         let result = {};
         if(method === 'ui/initialize') {
-          result = {hostContext:{theme:'light',styles:{variables:{'--color-text-primary':'rgb(11, 22, 33)','--color-text-inverse':'rgb(255, 255, 255)','--color-text-info':'rgb(30, 50, 70)'}}}};
+          result = {hostContext:{theme:'light',styles:{variables:{'--color-text-primary':'rgb(11, 22, 33)','--color-text-secondary':'rgb(91, 101, 111)','--color-background-primary':'rgb(255, 255, 255)','--color-background-secondary':'rgb(248, 249, 250)','--color-border-primary':'rgb(213, 218, 224)','--color-background-tertiary':'rgb(232, 236, 240)','--color-text-inverse':'rgb(255, 255, 255)','--color-text-info':'rgb(30, 50, 70)'}}}};
           send({id,result});
           send({method:'ui/notifications/tool-input',params:{arguments:{organization:'fixture-workspace',params:{},scope:{}}}});
           return;
@@ -98,8 +130,23 @@ const server = createServer(async (request, response) => {
         if(method === 'lobu/open-record') result = {mode:'peek'};
         if(method === 'ui/open-link') window.openedLink = params.url;
         if(method === 'tools/call') {
-          if (await window.reportCall(params)) window.sorted = true;
+          if (await window.reportCall?.(params)) window.sorted = true;
           const input = params.arguments;
+          if(params.name === 'manage_automations') {
+            const archived = input.automation_id === '43';
+            result = {structuredContent:{automations:archived && input.status === 'active' ? [] : [{automation_id:input.automation_id,name:archived?'Archived example':'Saved automation',status:archived?'archived':'active',triggers:[]}]}};
+            send({id,result}); return;
+          }
+          if(params.name === 'manage_agents') {
+            result = (input.agent_id === 'refused-agent' || window.refuseReference) ? {isError:true,structuredContent:{error:{code:'FORBIDDEN'}},content:[{type:'text',text:'Access refused'}]} : {structuredContent:{agent:{id:input.agent_id,name:'Saved agent',description:'Shared product agent row'}}};
+            send({id,result}); return;
+          }
+          if(params.name === 'manage_catalog') {
+            send({id,result:{structuredContent:{installed:{connectors:{items:[{id:'fixture.feed',name:'Saved connector',detail:{description:'Shared product connector row'}}]}}}}}); return;
+          }
+          if(params.name === 'manage_connections') {
+            send({id,result:{structuredContent:{connections:[{id:7,connector_key:'fixture.feed',display_name:'Example connection'}]}}}); return;
+          }
           if(params.name === 'query_sql') {
             send({id,result:{structuredContent:{rows:[{amount:2}],truncated:false}}});
             return;
@@ -111,7 +158,8 @@ const server = createServer(async (request, response) => {
         send({id,result});
       });
       frame.srcdoc = ${JSON.stringify(shell).replaceAll("<", "\\u003c")};
-    </script></body></html>`);
+    </script></body></html>`;
+    response.end(hostHtml);
   } catch (error) {
     response.statusCode = 500;
     console.error("Native view smoke server failed", error);
@@ -177,6 +225,111 @@ try {
         );
       }),
   ]);
+  await frame
+    .getByRole("link", { name: "Saved automation", exact: false })
+    .waitFor();
+  await frame
+    .getByRole("link", { name: "Archived example", exact: false })
+    .waitFor();
+  assert.equal(
+    await frame
+      .getByRole("link", { name: "Archived example", exact: false })
+      .evaluate((el) => getComputedStyle(el).backgroundColor),
+    "rgb(232, 236, 240)"
+  );
+  assert.equal(
+    await frame
+      .getByText("Computed query results", { exact: true })
+      .evaluate((el) => getComputedStyle(el).color),
+    "rgb(91, 101, 111)"
+  );
+  await frame
+    .getByRole("link", { name: "Saved agent", exact: false })
+    .waitFor();
+  await frame
+    .getByRole("link", { name: "Saved connector", exact: false })
+    .first()
+    .waitFor();
+  for (const id of [
+    "refused-reference",
+    "wrong-workspace",
+    "invalid-reference",
+  ]) {
+    assert.equal(
+      await frame.getByTestId(id).innerText(),
+      "Reference unavailable."
+    );
+  }
+  assert(
+    !calls.some(
+      (input) =>
+        input.agent_id === "never-read" || input.automation_id === "invalid"
+    )
+  );
+  const agentLink = frame.getByRole("link", {
+    name: "Saved agent",
+    exact: false,
+  });
+  assert.equal(
+    await agentLink.getAttribute("href"),
+    `${origin}/fixture-workspace/agents/fixture-agent/settings`
+  );
+  await agentLink.click();
+  await page.waitForFunction(() =>
+    (window as unknown as { openedLink?: string }).openedLink?.endsWith(
+      "/fixture-workspace/agents/fixture-agent/settings"
+    )
+  );
+  await page.evaluate(() => {
+    (window as unknown as { refuseReference: boolean }).refuseReference = true;
+  });
+  await frame
+    .locator("body")
+    .evaluate(() => window.dispatchEvent(new Event("focus")));
+  await frame
+    .getByRole("link", { name: "Saved agent", exact: false })
+    .waitFor({ state: "detached" });
+  await page.evaluate(() => {
+    (window as unknown as { refuseReference: boolean }).refuseReference = false;
+  });
+  await frame
+    .locator("body")
+    .evaluate(() => window.dispatchEvent(new Event("focus")));
+  await frame
+    .getByRole("link", { name: "Saved agent", exact: false })
+    .waitFor();
+  await frame.getByRole("button", { name: "Show diff", exact: true }).click();
+  await frame.locator(".cm-editor").waitFor();
+  const diffText = await frame.locator(".cm-editor").innerText();
+  assert(diffText.includes("50") && diffText.includes("100"));
+  assert.equal(
+    await frame.locator(".cm-content").getAttribute("contenteditable"),
+    "false"
+  );
+  await frame
+    .getByTestId("snapshot")
+    .getByRole("button", { name: "Show details", exact: true })
+    .click();
+  assert(
+    (await frame.getByTestId("snapshot").innerText()).includes(
+      '"enabled": false'
+    )
+  );
+  assert(
+    (await frame.getByTestId("snapshot").innerText()).includes('"count": 0')
+  );
+  for (const [tab, proposedText] of [
+    ["Agent", "Summarize workspace records with linked evidence"],
+    ["Automation", "archived"],
+  ]) {
+    await frame.getByRole("tab", { name: tab, exact: true }).click();
+    await frame.getByRole("button", { name: "Show diff", exact: true }).click();
+    assert(
+      (await frame.locator(".cm-editor").innerText()).includes(proposedText!)
+    );
+  }
+  await frame.getByRole("tab", { name: "Connector", exact: true }).click();
+  await frame.getByRole("button", { name: "Show diff", exact: true }).click();
   assert.equal(await frame.getByTestId("state").textContent(), "data");
   await frame
     .getByRole("heading", { name: "Native collection", exact: true })
@@ -234,7 +387,7 @@ try {
       styles: {
         variables: {
           "--color-text-primary": "rgb(210, 220, 230)",
-          "--color-text-info": "rgb(47, 99, 232)",
+          "--color-text-info": "rgb(155, 193, 255)",
           "--color-text-inverse": "rgb(15, 14, 12)",
         },
       },
@@ -242,8 +395,21 @@ try {
   );
   await frame.getByTestId("theme").filter({ hasText: "dark" }).waitFor();
   assert.equal(
+    await frame
+      .locator(".cm-content span")
+      .first()
+      .evaluate((el) => getComputedStyle(el).color),
+    "rgb(210, 220, 230)"
+  );
+  assert.equal(
     await frame.locator("main").evaluate((el) => getComputedStyle(el).color),
     "rgb(210, 220, 230)"
+  );
+  assert.equal(
+    await frame
+      .getByRole("link", { name: /fixture.example.invalid/ })
+      .evaluate((el) => getComputedStyle(el).color),
+    "rgb(155, 193, 255)"
   );
   const buttonPalette = await frame
     .getByRole("button", { name: "Peek record" })
@@ -265,11 +431,31 @@ try {
       };
       return {
         text: channels(getComputedStyle(button).color),
+        background: channels(getComputedStyle(button).backgroundColor),
         inverse: channels(inverse),
         primaryForeground: channels(primaryForeground),
       };
     });
   assert.deepEqual(buttonPalette.text, buttonPalette.primaryForeground);
+  const luminance = (rgba: number[]) =>
+    rgba.slice(0, 3).reduce((sum, value, index) => {
+      const channel = value / 255;
+      return (
+        sum +
+        (channel <= 0.04045
+          ? channel / 12.92
+          : ((channel + 0.055) / 1.055) ** 2.4) *
+          [0.2126, 0.7152, 0.0722][index]!
+      );
+    }, 0);
+  const textLight = luminance(buttonPalette.text);
+  const backgroundLight = luminance(buttonPalette.background);
+  assert(
+    (Math.max(textLight, backgroundLight) + 0.05) /
+      (Math.min(textLight, backgroundLight) + 0.05) >=
+      4.5,
+    "Native primary controls must remain readable when host info text is pale"
+  );
   assert.notDeepEqual(
     buttonPalette.text,
     buttonPalette.inverse,
@@ -305,8 +491,73 @@ try {
     "data"
   );
   assert.deepEqual(errors, []);
+  // Optional review artifact: the exact compiled fixture and native runtime,
+  // fully inlined with synthetic host replies. No service or workspace needed.
+  const exampleArg = process.argv.indexOf("--example-dir");
+  if (exampleArg >= 0) {
+    const exampleDir = process.argv[exampleArg + 1];
+    assert(exampleDir, "--example-dir requires an output directory");
+    const [js, css] = await Promise.all([
+      readMcpAppAsset("view-native", "assets/app.js"),
+      readMcpAppAsset("view-native", "assets/app.css"),
+    ]);
+    assert(js && css);
+    const embedded = shell
+      .replace(
+        `<link rel="stylesheet" href="${origin}/mcp-apps/view-native/assets/app.css?v=${css.version}">`,
+        () => `<style>${css.bytes.toString()}</style>`
+      )
+      .replace(
+        `<script src="${origin}/mcp-apps/view-native/assets/app.js?v=${js.version}"></script>`,
+        () =>
+          `<script>${js.bytes.toString().replaceAll("</script", "<\\/script")}</script>`
+      );
+    assert(!embedded.includes(`${origin}/mcp-apps/view-native/assets/`));
+    let example = hostHtml!
+      .replace(JSON.stringify(shell).replaceAll("<", "\\u003c"), () =>
+        JSON.stringify(embedded).replaceAll("<", "\\u003c")
+      )
+      .replace(
+        'style="width:900px;height:700px"',
+        'style="width:100%;max-width:900px;height:1100px;border:0"'
+      )
+      .replace(
+        "<html><body>",
+        `<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Native component examples</title><style>body{margin:0;font:14px/1.5 var(--font-sans,system-ui);color:var(--foreground,#202328);background:transparent}h1{font-size:23px;margin:0 0 8px}p{margin:0 0 14px;max-width:70ch}button{font:inherit;padding:6px 11px;border:1px solid var(--border,#ddd);border-radius:6px;color:inherit;background:transparent;cursor:pointer}button:focus-visible{outline:2px solid var(--ring,#2563eb)}nav{display:flex;gap:8px;flex-wrap:wrap;margin:16px 0}iframe{display:block;background:var(--card,#fff);border-radius:8px}.note{color:var(--muted-foreground,#666);font-size:12px}pre{overflow:auto;font-size:12px;padding:16px;background:var(--muted,#f5f5f5);border-radius:8px}details{margin:16px 0}summary{cursor:pointer}</style></head><body><h1>The same product components inside a view</h1><p>Actual compiled components with fictional data. Open the definition diff, inspect a snapshot, switch tabs, search and page through rows. These examples make no workspace changes.</p><nav aria-label="Demo controls"><button id="demo-light">Light</button><button id="demo-dark">Dark</button><button id="demo-narrow">Narrow</button><button id="demo-wide">Wide</button></nav><p class="note">Resource links are handled by this simulated host. No live workspace is connected.</p>`
+      );
+    example = example.replace(
+      "</body></html>",
+      `<details><summary>How a view shows a proposed change</summary><pre>import { Card, JsonDiff } from "@lobu/views/components";
+
+&lt;Card title="Proposed connector definition"&gt;
+  &lt;JsonDiff before={currentDefinition} after={proposedDefinition} /&gt;
+&lt;/Card&gt;
+
+// The same diff accepts Agent and Automation definitions.
+// Rendering it does not save or apply anything.</pre></details><script>
+const palette = dark => ({theme:dark?'dark':'light',styles:{variables:{'--color-background-primary':dark?'#14171c':'#fff','--color-background-secondary':dark?'#1c2027':'#f8f9fa','--color-background-tertiary':dark?'#282e37':'#eef0f3','--color-text-primary':dark?'#f1f3f5':'#202328','--color-text-secondary':dark?'#afb8c4':'#59616d','--color-text-info':dark?'#9bc1ff':'#244d84','--color-border-primary':dark?'#454c57':'#d5dae0'}}});
+for(const dark of [false,true])document.getElementById(dark?'demo-dark':'demo-light').onclick=()=>{document.querySelector('iframe').style.background=dark?'#14171c':'#fff';window.sendContext(palette(dark));};
+document.getElementById('demo-narrow').onclick=()=>document.querySelector('iframe').style.maxWidth='380px';
+document.getElementById('demo-wide').onclick=()=>document.querySelector('iframe').style.maxWidth='900px';
+</script></body></html>`
+    );
+    await mkdir(exampleDir, { recursive: true });
+    const file = resolve(exampleDir, "index.html");
+    await writeFile(file, example);
+    await page.goto(pathToFileURL(file).href);
+    await frame
+      .getByRole("link", { name: "Saved agent", exact: false })
+      .waitFor();
+    await frame.getByRole("button", { name: "Show diff", exact: true }).click();
+    await frame.locator(".cm-editor").waitFor();
+    await page.getByRole("button", { name: "Dark", exact: true }).click();
+    await frame.getByTestId("theme").filter({ hasText: "dark" }).waitFor();
+    await page.getByRole("button", { name: "Narrow", exact: true }).click();
+    await frame.getByTestId("record-details").waitFor();
+    assert.deepEqual(errors, []);
+  }
   console.log(
-    "PASS: shared list/record pages, SQL and TypeScript rows, responsive details, tabs, peek, pagination, query states and live theme in an opaque browser sandbox"
+    "PASS: shared resource references, read-only definition diffs and snapshots, list/record pages, SQL and TypeScript rows, responsive details, tabs, peek, pagination, query states and live theme in an opaque browser sandbox"
   );
 } catch (error) {
   console.error({
