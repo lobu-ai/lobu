@@ -316,7 +316,7 @@ Workspace attachment does not render individual events. For an event presentatio
 
 Before reporting a view working, open each attached surface, including an event page and peek when declared. Exercise filtering, drilldown, keyboard navigation, and a narrow pane; check loading, missing/error, and truncated data states. Refresh and reopen an earlier event of the kind to verify the view stays on that event rather than jumping to the newest one. Views render in an iframe, so an empty parent-page DOM is not evidence the view is empty; inspect the frame through an authorized browser or accessibility surface. A successful compile proves only that the bundle was built.
 
-Import reusable UI from **`@lobu/views/components`**. Discover this kit with `search_sdk({ query: "@lobu/views/components" })` or a component name. Use the smallest component that fits:
+Import reusable UI from **`@lobu/views/components`**. Discover this kit with `search_sdk({ query: "@lobu/views/components" })` or a component name. Start with the largest suitable native surface; compose smaller parts only for needs it does not cover:
 
 | Need | Component and minimum input |
 | --- | --- |

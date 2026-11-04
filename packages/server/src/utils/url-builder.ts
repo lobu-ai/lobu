@@ -99,8 +99,8 @@ export async function viewWorkspaceUrl(
  * back to a non-linked message.
  *
  * The `/settings` suffix names the exact configuration surface instead of
- * relying on the bare agent route's default destination. A `run_id` query can
- * additionally open a held manage_agents proposal for review.
+ * relying on the bare agent route's default destination. Proposal reviews use
+ * the run permalink instead.
  *
  * `publicGatewayUrl` is the gateway base, which in embedded mode carries the
  * `/lobu` path suffix (the gateway is mounted at `/lobu` under the web app).
@@ -110,43 +110,13 @@ export async function viewWorkspaceUrl(
 export async function buildAgentSettingsUrl(
   publicGatewayUrl: string | undefined,
   organizationId: string | undefined,
-  agentId: string | undefined,
-  // A pending manage_agents update run to review: appends `?run_id=<id>` so the
-  // settings form prefills the proposed change for Approve/Reject (WI-0.3).
-  opts?: { runId?: number }
+  agentId: string | undefined
 ): Promise<string | null> {
   if (!publicGatewayUrl || !organizationId || !agentId) return null;
   const slug = await getOrganizationSlug(organizationId).catch(() => null);
   if (!slug) return null;
   const webOrigin = publicGatewayUrl.replace(/\/+$/, '').replace(/\/lobu$/, '');
-  const base = `${webOrigin}/${encodeURIComponent(slug)}/agents/${encodeURIComponent(agentId)}/settings`;
-  return opts?.runId ? `${base}?run_id=${opts.runId}` : base;
-}
-
-/**
- * Build an Automation's edit URL —
- * `<webOrigin>/<orgSlug>/automations/<automationId>` — the
- * review target for a pending `manage_automations` update. Mirrors
- * {@link buildAgentSettingsUrl}: `?run_id=<id>` prefills the Automation edit form
- * with the proposed change for Approve/Reject.
- *
- * Automations live in the workspace-level Automations section (agent-owned and
- * agentless alike), so no agent id is needed. Returns null when any required
- * piece is missing; the producer falls back to the run permalink.
- */
-export async function buildAutomationSettingsUrl(
-  publicGatewayUrl: string | undefined,
-  organizationId: string | undefined,
-  automationId: string | number | undefined,
-  opts?: { runId?: number }
-): Promise<string | null> {
-  if (!publicGatewayUrl || !organizationId || automationId == null) {
-    return null;
-  }
-  const slug = await getOrganizationSlug(organizationId).catch(() => null);
-  if (!slug) return null;
-  const base = buildAutomationUrl(slug, automationId, publicGatewayUrl);
-  return opts?.runId ? `${base}?run_id=${opts.runId}` : base;
+  return `${webOrigin}/${encodeURIComponent(slug)}/agents/${encodeURIComponent(agentId)}/settings`;
 }
 
 /**
