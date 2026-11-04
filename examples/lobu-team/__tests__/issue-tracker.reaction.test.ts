@@ -172,11 +172,8 @@ describe("issue lifecycle", () => {
     const spike = occ({ seen_2h: 40, seen_24h: 45, seen_14d: 60 });
     const [change] = plan([spike], [issue()]);
     expect(change).toMatchObject({
-      metadata: { status: "escalating" },
-      alert: {
-        kind: "escalating",
-        key: `issue:${FP(1)}:escalating:2026-11-04T00:00:00.000Z`,
-      },
+      metadata: { status: "escalating", escalated_at: NOW.toISOString() },
+      alert: { kind: "escalating", key: `issue:${FP(1)}:escalating:first` },
     });
     // A steady high rate is the baseline, not an escalation.
     const steady = occ({ seen_2h: 40, seen_24h: 480, seen_14d: 480 * 14 });
@@ -185,6 +182,32 @@ describe("issue lifecycle", () => {
     expect(
       plan([spike], [issue({ status: "escalating" })])[0]
     ).not.toHaveProperty("alert");
+    // Escalating again within a day of the last alert: status only.
+    const flapped = plan([spike], [issue({ escalated_at: ago(5) })])[0];
+    expect(flapped).toMatchObject({ metadata: { status: "escalating" } });
+    expect(flapped).not.toHaveProperty("alert");
+    // A later episode is keyed by the escalation it follows, so a retry of
+    // the same run, even past midnight, repeats the key instead of a new one.
+    const later = issue({ escalated_at: ago(30) });
+    expect(plan([spike], [later])[0]).toMatchObject({
+      alert: { key: `issue:${FP(1)}:escalating:${ago(30)}` },
+    });
+    const pastMidnight = new Date(NOW.getTime() + 13 * 3_600_000);
+    expect(
+      planIssueChanges([spike], [later], pastMidnight, 0)[0]
+    ).toMatchObject({
+      alert: { key: `issue:${FP(1)}:escalating:${ago(30)}` },
+    });
+  });
+
+  test("a fingerprint with no history before today is new, never escalating", () => {
+    // A steady error seen only since this morning (or regrouped by a release).
+    const unseenBefore = occ({ seen_2h: 24, seen_24h: 40, seen_14d: 40 });
+    expect(plan([unseenBefore], [])[0]).toMatchObject({
+      action: "create",
+      metadata: { status: "new" },
+    });
+    expect(plan([unseenBefore], [issue()])[0]).not.toHaveProperty("alert");
   });
 
   test("an escalating issue calms down when the rate drops or it goes quiet", () => {
