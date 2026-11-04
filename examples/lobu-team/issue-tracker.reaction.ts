@@ -256,11 +256,13 @@ export function planIssueChanges(
     } else if (isEscalating(o)) {
       if (issue.status !== "escalating") {
         set("escalating");
-        metadata.escalated_at = now.toISOString();
-        // At most one alert a day. The key is the stored escalation it
-        // follows, so a retry after a failed write repeats the same key.
+        // At most one alert a day, counted from the last alert: escalated_at
+        // moves only when one is sent, so flapping cannot postpone the next.
+        // The key is the stored escalation it follows, so a retry after a
+        // failed write repeats the same key.
         const sinceLast = now.getTime() - ms(issue.escalated_at);
         if (Number.isNaN(sinceLast) || sinceLast >= DAY) {
+          metadata.escalated_at = now.toISOString();
           alert = {
             kind: "escalating",
             key: `issue:${o.fingerprint}:escalating:${issue.escalated_at ?? "first"}`,

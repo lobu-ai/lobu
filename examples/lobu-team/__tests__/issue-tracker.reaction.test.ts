@@ -182,10 +182,12 @@ describe("issue lifecycle", () => {
     expect(
       plan([spike], [issue({ status: "escalating" })])[0]
     ).not.toHaveProperty("alert");
-    // Escalating again within a day of the last alert: status only.
+    // Escalating again within a day of the last alert: status only, and the
+    // last alert's time is kept, so repeated flaps cannot postpone the next.
     const flapped = plan([spike], [issue({ escalated_at: ago(5) })])[0];
     expect(flapped).toMatchObject({ metadata: { status: "escalating" } });
     expect(flapped).not.toHaveProperty("alert");
+    expect(flapped).not.toHaveProperty("metadata.escalated_at");
     // A later episode is keyed by the escalation it follows, so a retry of
     // the same run, even past midnight, repeats the key instead of a new one.
     const later = issue({ escalated_at: ago(30) });
