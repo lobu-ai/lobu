@@ -35,8 +35,12 @@ import {
 	addUserToOrganization,
 	createTestAgent,
 	createTestOrganization,
+	createTestPAT,
+	createTestSession,
 	createTestUser,
 } from "../../setup/test-fixtures";
+
+import { post } from "../../setup/test-helpers";
 
 const INVOICE_RULE = `
 const ALLOWED = { draft: ["issued"], issued: ["posted"], posted: [] };
@@ -284,6 +288,125 @@ describe("approval hold vs a frozen-state rule", () => {
 		// The approval is real, not merely described: queueing it opens a run.
 		await result.deferred?.queue(agentCtx, TEST_ENV);
 		expect(await runCount(org.id)).toBe(runsBefore + 1);
+	}, 60_000);
+
+	it.each([false, true])("approves a held transition once when the residual is valid (extra field: %s)", async (extraField) => {
+		const compiled = await compileEntityRule(`export default row => {
+  if (row.changed('status') && row.next.status === 'posted') row.escalate(['status'], 'Posting needs review');
+};`);
+		const { org, user, invoice } = await seed(compiled);
+		const session = await createTestSession(user.id);
+		const pat = await createTestPAT(user.id, org.id, { scope: 'mcp:read mcp:write' });
+		const call = async (tool: string, body: Record<string, unknown>, auth: { cookie?: string; token?: string }) => {
+			const response = await post(`/api/${org.slug}/${tool}`, { body, ...auth });
+			const output = await response.json();
+			expect(response.status, JSON.stringify(output)).toBe(200);
+			return output;
+		};
+		await call('manage_entity', {
+			action: 'update', entity_id: invoice.id, metadata: { status: 'issued' },
+		}, { cookie: session.cookieHeader });
+
+		const requested = await call('manage_entity', {
+			action: 'update', entity_id: invoice.id,
+			metadata: { status: 'posted', ...(extraField ? { note: 'Ready' } : {}) },
+		}, { token: pat.token });
+		expect(requested.approval_queued).toBe(true);
+		expect((await readMetadata(invoice.id)).status).toBe('issued');
+		expect((await readMetadata(invoice.id)).note).toBeUndefined();
+		const [run] = await getTestDb()`
+      SELECT id FROM runs WHERE organization_id = ${org.id} AND approval_status = 'pending'
+      AND action_key IN ('entity_change', 'entity_field_change') ORDER BY id DESC LIMIT 1
+    `;
+		expect(run).toBeTruthy();
+		const approved = await call('manage_operations', {
+			action: 'approve', run_id: Number(run.id),
+		}, { cookie: session.cookieHeader });
+		expect(approved.approved, JSON.stringify(approved)).toBe(true);
+		const stored = await readMetadata(invoice.id);
+		expect(stored.status).toBe('posted');
+		if (extraField) expect(stored.note).toBe('Ready');
+	}, 60_000);
+
+	it.each([null, "result_event_id", "assignment_id", "result_artifact_id", "session_finished_at", "clock", "before_queue"])("binds native approval to the reviewed result and assignment (changed: %s)", async (changed) => {
+		const compiled = await compileEntityRule(`export default row => {
+  if (row.next.status !== 'posted') return;
+  const next = row.next;
+  if (row.changed('status') && ['result_event_id', 'assignment_id', 'result_artifact_id', 'session_finished_at', 'clock'].some(field => row.changed(field))) {
+    row.deny('Request review of the current work');
+  }
+  if (!next.result_event_id || !next.assignment_id || !next.result_artifact_id) {
+    row.deny('Approval must match the current result and assignment');
+  }
+  if (row.committed.status === 'posted' && ['result_event_id', 'assignment_id', 'result_artifact_id'].some(field => row.changed(field))) {
+    row.deny('Reopen before replacing accepted work');
+  }
+  if (row.changed('status')) row.escalate(['status'], 'Posting needs review');
+};`);
+		const { org, user, invoice } = await seed(compiled);
+		const session = await createTestSession(user.id);
+		const pat = await createTestPAT(user.id, org.id, { scope: 'mcp:read mcp:write' });
+		const call = async (tool: string, body: Record<string, unknown>, auth: { cookie?: string; token?: string }) => {
+			const response = await post(`/api/${org.slug}/${tool}`, { body, ...auth });
+			return { status: response.status, body: await response.json() };
+		};
+		const agentAuth = { token: pat.token };
+		const humanAuth = { cookie: session.cookieHeader };
+		const update = (metadata: Record<string, unknown>, auth: { cookie?: string; token?: string } = agentAuth) =>
+			call('manage_entity', { action: 'update', entity_id: invoice.id, metadata }, auth);
+		const reviewed = { result_event_id: 1001, assignment_id: 'assignment-a', result_artifact_id: 501, session_finished_at: '2026-01-01T00:00:00.000Z', clock: { observed_at: 1 } };
+		const replacements: Record<string, unknown> = { result_event_id: 1002, assignment_id: 'assignment-b', result_artifact_id: 502, session_finished_at: '2026-01-02T00:00:00.000Z', clock: { observed_at: 2 } };
+		expect((await update(reviewed)).status).toBe(200);
+		expect((await update({ status: 'issued' }, humanAuth)).status).toBe(200);
+		if (changed === 'before_queue') expect((await update({ assignment_id: 'assignment-b' })).status).toBe(200);
+		const proposed = await update({ status: 'posted', ...reviewed });
+		if (changed === 'before_queue') {
+			expect(proposed.status).toBe(400);
+			expect((await readMetadata(invoice.id)).assignment_id).toBe('assignment-b');
+			return;
+		}
+		expect(proposed.body.approval_queued, JSON.stringify(proposed)).toBe(true);
+		const [run] = await getTestDb()`
+      SELECT id FROM runs WHERE organization_id = ${org.id} AND approval_status = 'pending'
+      AND action_key IN ('entity_change', 'entity_field_change') ORDER BY id DESC LIMIT 1
+    `;
+		const approve = (auth: { cookie?: string; token?: string }) =>
+			call('manage_operations', { action: 'approve', run_id: Number(run.id) }, auth);
+		expect((await approve(agentAuth)).body.approved).not.toBe(true);
+		if (changed) {
+			const replacement = await update({ [changed]: replacements[changed] });
+			expect(replacement.status, JSON.stringify(replacement)).toBe(200);
+		}
+		const decision = await approve(humanAuth);
+		const stored = await readMetadata(invoice.id);
+		if (changed) {
+			expect(decision.status, JSON.stringify(decision)).toBe(200);
+			expect(decision.body.message).toContain('skipped');
+			expect(stored.status).toBe('issued');
+			expect(stored[changed]).toEqual(replacements[changed]);
+		} else {
+			expect(decision.body.approved, JSON.stringify(decision)).toBe(true);
+			expect(stored.status).toBe('posted');
+			const replaced = await update({ result_event_id: 1002 }, humanAuth);
+			expect(replaced.status).toBe(400);
+			expect((await readMetadata(invoice.id)).result_event_id).toBe(1001);
+		}
+	}, 60_000);
+
+	it("rejects a denied full proposal even when its residual would be valid", async () => {
+		const compiled = await compileEntityRule(`export default row => {
+  if (row.next.status === 'posted') row.deny('Posting is forbidden');
+};`);
+		const { org, user, agent, invoice } = await seed(compiled);
+		await updateEntity(invoice.id, { metadata: { status: 'issued' } }, TEST_ENV, ctxFor(org.id, { userId: user.id }));
+		await expect(updateEntity(
+			invoice.id, { metadata: { status: 'posted', note: 'Do not commit' } }, TEST_ENV,
+			ctxFor(org.id, { agentId: agent.agentId }),
+		)).rejects.toThrow('Posting is forbidden');
+		const stored = await readMetadata(invoice.id);
+		expect(stored.status).toBe('issued');
+		expect(stored.note).toBeUndefined();
+		expect(await runCount(org.id)).toBe(0);
 	}, 60_000);
 
 	it("defers the whole write when a RULE escalates, carrying the rule's own reason", async () => {
