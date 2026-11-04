@@ -316,24 +316,51 @@ Workspace attachment does not render individual events. For an event presentatio
 
 Before reporting a view working, open each attached surface, including an event page and peek when declared. Exercise filtering, drilldown, keyboard navigation, and a narrow pane; check loading, missing/error, and truncated data states. Refresh and reopen an earlier event of the kind to verify the view stays on that event rather than jumping to the newest one. Views render in an iframe, so an empty parent-page DOM is not evidence the view is empty; inspect the frame through an authorized browser or accessibility surface. A successful compile proves only that the bundle was built.
 
-Prefer the actual product components from `@lobu/views/components`: `EntityListPage`, `EntityRecordPage`, `EntityTableView`, `RecordSpecSheet`, `SchemaValue`, `EntityAvatar`, `AutomationReference`, `AgentReference`, `ConnectorReference`, `JsonDiff`, `Button`, `Badge`, and `Tabs`/`TabsList`/`TabsTrigger`/`TabsContent`. The host supplies their native JS/CSS and the same React instance; do not copy product markup or bundle a second React. Their exported prop types are the product's shared contracts. `EntityTableView` is controlled: pass query rows, schema, linked lookups, sorting and pagination from the list response; honor `metadata.has_more` and do not claim a partial page is the full collection. `RecordSpecSheet` accepts schema fields, values and `{ ownerSlug }` context; preserve meaningful zero and false values. The existing chart and state components are still available for custom layouts.
+Import reusable UI from **`@lobu/views/components`**. Discover this kit with `search_sdk({ query: "@lobu/views/components" })` or a component name. Use the smallest component that fits:
 
-For complete page bodies, use `EntityListPage` and `EntityRecordPage`; the product routes and peeks use these same implementations. They are controlled UI: supply query results and callbacks, never expect them to fetch or authorize writes. `EntityListPage` takes `title`, optional `actions` and `controls` slots, plus either a native `table` (`EntityTableViewProps`) or `children`. Its `loading`, `error`, `onRetry` and `empty` states affect only the results area, preserving mounted controls. For arbitrary SQL results, computed TypeScript rows or local arrays, pass a generic `DataTable` as children; do not invent entity IDs or types. `EntityRecordPage` takes `entity`, `owner` and optional `schema`; it renders the native title/avatar and schema fields, including meaningful zero/false values. Supply `actions`, `details`, `summary` and `children` for editing, linked records, activity and tabs. Its default `layout="record"` follows the container width; `layout="content"` retains the header and lets children own the layout. Omitting action slots adds no privileged controls. `null` can intentionally hide an optional title/details/summary slot.
+| Need | Component and minimum input |
+| --- | --- |
+| Complete entity list | `EntityListPage title={title} table={tableProps}` |
+| SQL, computed TypeScript or local rows | `EntityListPage title={title}` with `DataTable columns={columns} rows={rows} keyOf={keyOf}` as children |
+| Complete record body | `EntityRecordPage entity={entity} owner={workspace} schema={schema}` |
+| Entity table or individual fields | `EntityTableView`, `RecordSpecSheet`, `SchemaValue`, `EntityAvatar` |
+| Saved resource identity and navigation | `AutomationReference`, `AgentReference`, `ConnectorReference` |
+| Automation instructions, sources, triggers, outputs and code | `AutomationDefinition value={definition}` |
+| Agent identity, models and settings | `AgentDefinition value={definition}` |
+| Connector actions, feeds, schemas and source | `ConnectorDefinition value={definition}` |
+| Current / Proposed comparison | Existing `Tabs` with the same definition component in each panel |
+| Optional technical details | `JsonDiff before={current} after={proposed}` inside collapsed `<details>` |
 
+The host supplies native JS/CSS, React and live theme. Do not copy product markup or bundle a second React. Exported prop types describe the shared contracts. Use `Button`, `Badge`, `Card`, chart and state components for surrounding UI.
 
-Use `AutomationReference`, `AgentReference` and `ConnectorReference` for saved resources. They take `mode="live"`, the mounted `workspace`, optional `appearance="inline" | "row"` (default row), and respectively `automationId` (positive decimal string), `agentId` or `connectorKey` plus optional numeric `connectionId`. Discover actual IDs first. These reuse the product rows, resolve saved identity through structured permission-checked reads, and accept no authored names/status or mutation callbacks. Invalid selectors, another workspace, missing records and refused reads render unavailable. A connector definition alone does not imply a connected account. Reads revalidate on mount, focus, reconnect and host data invalidation; there is no interval polling.
+**Page bodies are controlled.** Supply data and slots; they fetch nothing and authorize no writes. `EntityListPage` accepts `title`, optional `actions`/`controls`, and either `table: EntityTableViewProps` or `children`. Its `loading`, `error`, `onRetry` and `empty` affect only results, keeping controls mounted. Native table props include rows, schema, linked lookups, sorting and pagination; honor `metadata.has_more`. For SQL/TypeScript rows use `DataTable`, without inventing entity IDs or types. `EntityRecordPage` renders the native title/avatar and schema fields; `actions`, `details`, `summary`, and `children` supply editing, links, activity and tabs. Default `layout="record"` adapts to width; `layout="content"` retains the header while children own the layout. A `null` title/details/summary hides that slot. Preserve zero and false.
 
-For an agent, Automation or connector definition proposal, render the current and proposed values with `JsonDiff before={currentDefinition} after={proposedDefinition}`. This is the product's collapsible read-only diff; `before={null}` shows one snapshot and both null render nothing. Label authored values as Snapshot or Proposal preview. Rendering a diff does not save or apply a change and needs no proposal endpoint. Compose it with existing cards, fields and tabs; do not turn an authored snapshot into a live reference. Keep writes on the existing declared `useAction` path, or link to the native authorized editor/review page. Do not invent an Approve button that implies server-held approval or new authority.
+**References resolve saved identity.** Pass `mode="live"`, mounted `workspace`, optional `appearance="inline" | "row"` (default row), and `automationId` (positive decimal string), `agentId`, or `connectorKey` plus optional numeric `connectionId`. Discover IDs first. These reuse product rows and visiting-user permission checks; they accept no authored name/status or mutation callbacks. Invalid selectors, another workspace, missing records and refused reads show unavailable. A connector definition does not imply a connected account. Reads refresh on mount, focus, reconnect and host invalidation, without interval polling.
+
+**Definitions render supplied objects.** All three have the same signature: `{ value: Record<string, unknown> }`. Pass the existing saved definition or complete proposed snapshot, not a patch. Automation fields include `name`, `description`, `prompt`, `sources`, `triggers`, `outputs`, `reaction_script`; Agent fields include `name`, `description`, `identity_md`, `settings`; Connector fields include `name`, `description`, `version`, `actions_schema`, `feeds_schema`, `source_code`. Remaining nested settings stay inspectable. Missing fields differ from empty values. Bodies fetch nothing, execute no supplied code, and add no save/approval controls. Label authored objects as Snapshot or Proposal preview; use a reference for live identity. Never supply credentials.
+
+Show changes as **Current / Proposed**, defaulting to Proposed, with the same native body on both sides. Keep JSON diff optional. Rendering does not save or apply anything and needs no new proposal endpoint. For an existing approval, render its held current/proposed snapshots; do not merge in newer live values. Writes remain on existing declared `useAction` paths or native authorized editor/review pages. An authored preview must not imply a held approval or authority to apply it.
 
 ```tsx
-import { Card, ConnectorReference, JsonDiff } from "@lobu/views/components";
-// workspace and connectorKey come from the mounted scope and an authorized read.
-<Card title="Proposed connector definition" description="Preview only; nothing has been applied.">
-  <ConnectorReference mode="live" workspace={workspace} connectorKey={connectorKey} />
-  <JsonDiff before={currentDefinition} after={proposedDefinition} />
+import {
+  Card, ConnectorDefinition, JsonDiff,
+  Tabs, TabsList, TabsTrigger, TabsContent,
+} from "@lobu/views/components";
+
+// current and proposed are complete definition objects from authorized reads
+// and the requested edit. Use AgentDefinition or AutomationDefinition identically.
+<Card title="Connector proposal preview" description="Nothing has been applied.">
+  <Tabs defaultValue="proposed">
+    <TabsList label="Definition version">
+      <TabsTrigger value="current">Current</TabsTrigger>
+      <TabsTrigger value="proposed">Proposed</TabsTrigger>
+    </TabsList>
+    <TabsContent value="current"><ConnectorDefinition value={current} /></TabsContent>
+    <TabsContent value="proposed"><ConnectorDefinition value={proposed} /></TabsContent>
+  </Tabs>
+  <details><summary>Technical diff</summary><JsonDiff before={current} after={proposed} /></details>
 </Card>
 ```
-
 
 Use `useHost().openRecord({ entity_id, entity_type? }, { mode: "peek" })` for a record's native peek. String source keys require the type. The promise reports the actual `{ mode: "peek" | "page" }`; a host without native peek opens the server-returned record URL. Errors remain errors. `useHost().theme` follows live theme changes; native components inherit the host palette and typography automatically. Use semantic host style variables and avoid hardcoded light/dark colors.
 

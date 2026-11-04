@@ -195,7 +195,16 @@ export interface JsonDiffProps {
   after: Record<string, unknown> | null;
 }
 
+/** Read-only native definition body. Pass a saved object or an authored snapshot.
+ * No fetching, code execution, saving or approval is performed by the body. */
+export interface DefinitionProps {
+  value: Record<string, unknown>;
+}
+
 export interface NativeComponentProps {
+  AutomationDefinition: DefinitionProps;
+  AgentDefinition: DefinitionProps;
+  ConnectorDefinition: DefinitionProps;
   AutomationReference: AutomationReferenceProps;
   AgentReference: AgentReferenceProps;
   ConnectorReference: ConnectorReferenceProps;
@@ -250,6 +259,9 @@ export type NativeComponents = {
   [K in keyof NativeComponentProps]: ComponentType<NativeComponentProps[K]>;
 };
 export const NATIVE_COMPONENT_NAMES = [
+  "AutomationDefinition",
+  "AgentDefinition",
+  "ConnectorDefinition",
   "AutomationReference",
   "AgentReference",
   "ConnectorReference",
@@ -305,3 +317,9 @@ export const AutomationReference = native("AutomationReference");
 export const AgentReference = native("AgentReference");
 export const ConnectorReference = native("ConnectorReference");
 export const JsonDiff = native("JsonDiff");
+/** Instructions, sources, triggers, outputs and code from an Automation snapshot. */
+export const AutomationDefinition = native("AutomationDefinition");
+/** Identity and settings from an Agent snapshot, using the native editor fields. */
+export const AgentDefinition = native("AgentDefinition");
+/** Connector capabilities, schemas and source from a definition snapshot. */
+export const ConnectorDefinition = native("ConnectorDefinition");

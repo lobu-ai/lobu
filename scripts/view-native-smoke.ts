@@ -17,8 +17,17 @@ import { readMcpAppAsset } from "../packages/server/src/utils/mcp-app-bundle";
 
 const source = `import { useState } from "react";
 import { defineView, sql, tool, useHost, useQuery } from "@lobu/views";
-import { Button, Badge, DataTable, EntityAvatar, EntityListPage, EntityRecordPage, AutomationReference, AgentReference, ConnectorReference, JsonDiff, Tabs, TabsList, TabsTrigger, TabsContent } from "@lobu/views/components";
+import { Button, Badge, DataTable, EntityAvatar, EntityListPage, EntityRecordPage, AutomationReference, AgentReference, ConnectorReference, AutomationDefinition, AgentDefinition, ConnectorDefinition, JsonDiff, Tabs, TabsList, TabsTrigger, TabsContent } from "@lobu/views/components";
 export const view = defineView({ key: "native-proof", attach: [{ workspace: true }] });
+const connectorCurrent = {name:"Example feed",version:"1.0.0",batch_size:50,enabled:false,actions_schema:{inspect:{name:"Inspect item",description:"Read one item"}},feeds_schema:{}};
+const connectorProposed = {...connectorCurrent,version:"1.1.0",batch_size:100,actions_schema:{...connectorCurrent.actions_schema,search:{name:"Search items",description:"Find matching records"}}};
+function DefinitionPreview({Body,current,proposed}) {
+  return <section data-testid="definition-preview"><Badge>Proposal preview</Badge><p>Nothing has been applied.</p>
+    <Tabs defaultValue="proposed"><TabsList label="Definition version"><TabsTrigger value="current">Current</TabsTrigger><TabsTrigger value="proposed">Proposed</TabsTrigger></TabsList>
+      <TabsContent value="current"><Body value={current} /></TabsContent><TabsContent value="proposed"><Body value={proposed} /></TabsContent>
+    </Tabs><details><summary>Technical diff</summary><JsonDiff before={current} after={proposed} /></details>
+  </section>;
+}
 export default function Proof() {
   const host = useHost();
   const [search, setSearch] = useState("data");
@@ -42,19 +51,16 @@ export default function Proof() {
       <Tabs defaultValue="connector-definition">
         <TabsList label="Definition examples"><TabsTrigger value="connector-definition">Connector</TabsTrigger><TabsTrigger value="agent-definition">Agent</TabsTrigger><TabsTrigger value="automation-definition">Automation</TabsTrigger></TabsList>
         <TabsContent value="connector-definition">
-          <h2>Proposed connector definition</h2><Badge>Proposal preview</Badge>
-          <p>Example values; rendering this diff does not change the connector.</p>
-          <JsonDiff before={{name:"Example feed",version:"1.0.0",batch_size:50,enabled:false}} after={{name:"Example feed",version:"1.1.0",batch_size:100,enabled:false}} />
+          <h2>Proposed connector definition</h2>
+          <DefinitionPreview Body={ConnectorDefinition} current={connectorCurrent} proposed={connectorProposed} />
         </TabsContent>
         <TabsContent value="agent-definition">
-          <h2>Proposed agent settings</h2><Badge>Proposal preview</Badge>
-          <p>Example values; rendering this diff does not change the agent.</p>
-          <JsonDiff before={{name:"Example researcher",description:"Research workspace records"}} after={{name:"Example researcher",description:"Summarize workspace records with linked evidence"}} />
+          <h2>Proposed agent settings</h2>
+          <DefinitionPreview Body={AgentDefinition} current={{name:"Example researcher",identity_md:"Read workspace records",settings:{showToolCalls:true,models:["fixture/model"]}}} proposed={{name:"Example researcher",identity_md:"Summarize workspace records with linked evidence",settings:{showToolCalls:false,models:[],skills:["fixture-skill"]}}} />
         </TabsContent>
         <TabsContent value="automation-definition">
-          <h2>Proposed Automation settings</h2><Badge>Proposal preview</Badge>
-          <p>Example values; rendering this diff does not change the Automation.</p>
-          <JsonDiff before={{name:"Example digest",status:"active"}} after={{name:"Example digest",status:"archived"}} />
+          <h2>Proposed Automation settings</h2>
+          <DefinitionPreview Body={AutomationDefinition} current={{name:"Example digest",prompt:"Summarize updates",sources:[],triggers:[],outputs:[]}} proposed={{name:"Example digest",prompt:"Summarize updates with source links",sources:[{name:"Recent items",query:"SELECT 1 AS amount"}],triggers:[],outputs:[],reaction_script:"const amount = 0;"}} />
         </TabsContent>
       </Tabs>
       <div data-testid="snapshot"><JsonDiff before={null} after={{name:"Proposed agent",enabled:false,count:0}} /></div>
@@ -298,12 +304,28 @@ try {
   await frame
     .getByRole("link", { name: "Saved agent", exact: false })
     .waitFor();
-  await frame.getByRole("button", { name: "Show diff", exact: true }).click();
-  await frame.locator(".cm-editor").waitFor();
-  const diffText = await frame.locator(".cm-editor").innerText();
+  const preview = frame.getByTestId("definition-preview");
+  assert.equal(
+    await preview
+      .getByRole("textbox", { name: "Version", exact: true })
+      .inputValue(),
+    "1.1.0"
+  );
+  await preview.getByRole("tab", { name: "Current", exact: true }).click();
+  assert.equal(
+    await preview
+      .getByRole("textbox", { name: "Version", exact: true })
+      .inputValue(),
+    "1.0.0"
+  );
+  await preview.getByRole("tab", { name: "Proposed", exact: true }).click();
+  assert.equal(await preview.locator("details").getAttribute("open"), null);
+  await preview.getByText("Technical diff", { exact: true }).click();
+  await preview.getByRole("button", { name: "Show diff", exact: true }).click();
+  const diffText = await preview.locator(".cm-editor").innerText();
   assert(diffText.includes("50") && diffText.includes("100"));
   assert.equal(
-    await frame.locator(".cm-content").getAttribute("contenteditable"),
+    await preview.locator(".cm-content").getAttribute("contenteditable"),
     "false"
   );
   await frame
@@ -318,18 +340,43 @@ try {
   assert(
     (await frame.getByTestId("snapshot").innerText()).includes('"count": 0')
   );
-  for (const [tab, proposedText] of [
-    ["Agent", "Summarize workspace records with linked evidence"],
-    ["Automation", "archived"],
-  ]) {
-    await frame.getByRole("tab", { name: tab, exact: true }).click();
-    await frame.getByRole("button", { name: "Show diff", exact: true }).click();
-    assert(
-      (await frame.locator(".cm-editor").innerText()).includes(proposedText!)
-    );
-  }
+  await frame.getByRole("tab", { name: "Agent", exact: true }).click();
+  assert.equal(
+    await preview
+      .getByRole("textbox", { name: "Identity", exact: true })
+      .inputValue(),
+    "Summarize workspace records with linked evidence"
+  );
+  assert.equal(await preview.getByRole("checkbox").isChecked(), false);
+  await preview.getByRole("tab", { name: "Current", exact: true }).click();
+  assert.equal(
+    await preview
+      .getByRole("textbox", { name: "Identity", exact: true })
+      .inputValue(),
+    "Read workspace records"
+  );
+  assert.equal(await preview.getByRole("checkbox").isChecked(), true);
+  await frame.getByRole("tab", { name: "Automation", exact: true }).click();
+  assert.equal(
+    await preview
+      .getByRole("textbox", { name: "Instructions", exact: true })
+      .inputValue(),
+    "Summarize updates with source links"
+  );
+  assert.equal(
+    await preview.locator(".cm-content").getAttribute("contenteditable"),
+    "false"
+  );
+  await preview.getByRole("tab", { name: "Current", exact: true }).click();
+  assert.equal(
+    await preview
+      .getByRole("textbox", { name: "Instructions", exact: true })
+      .inputValue(),
+    "Summarize updates"
+  );
   await frame.getByRole("tab", { name: "Connector", exact: true }).click();
-  await frame.getByRole("button", { name: "Show diff", exact: true }).click();
+  await preview.getByText("Technical diff", { exact: true }).click();
+  await preview.getByRole("button", { name: "Show diff", exact: true }).click();
   assert.equal(await frame.getByTestId("state").textContent(), "data");
   await frame
     .getByRole("heading", { name: "Native collection", exact: true })
@@ -355,9 +402,9 @@ try {
     frame.style.width = "900px";
   });
   await frame.locator("aside").waitFor();
-  assert.equal(await frame.locator("dd").nth(0).textContent(), "0");
+  assert.equal(await frame.locator("aside dd").nth(0).textContent(), "0");
   assert.match(
-    (await frame.locator("dd").nth(1).textContent()) ?? "",
+    (await frame.locator("aside dd").nth(1).textContent()) ?? "",
     /false|no/i
   );
   await frame.getByRole("link", { name: /fixture.example.invalid/ }).click();
@@ -523,17 +570,16 @@ try {
       )
       .replace(
         "<html><body>",
-        `<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Native component examples</title><style>body{margin:0;font:14px/1.5 var(--font-sans,system-ui);color:var(--foreground,#202328);background:transparent}h1{font-size:23px;margin:0 0 8px}p{margin:0 0 14px;max-width:70ch}button{font:inherit;padding:6px 11px;border:1px solid var(--border,#ddd);border-radius:6px;color:inherit;background:transparent;cursor:pointer}button:focus-visible{outline:2px solid var(--ring,#2563eb)}nav{display:flex;gap:8px;flex-wrap:wrap;margin:16px 0}iframe{display:block;background:var(--card,#fff);border-radius:8px}.note{color:var(--muted-foreground,#666);font-size:12px}pre{overflow:auto;font-size:12px;padding:16px;background:var(--muted,#f5f5f5);border-radius:8px}details{margin:16px 0}summary{cursor:pointer}</style></head><body><h1>The same product components inside a view</h1><p>Actual compiled components with fictional data. Open the definition diff, inspect a snapshot, switch tabs, search and page through rows. These examples make no workspace changes.</p><nav aria-label="Demo controls"><button id="demo-light">Light</button><button id="demo-dark">Dark</button><button id="demo-narrow">Narrow</button><button id="demo-wide">Wide</button></nav><p class="note">Resource links are handled by this simulated host. No live workspace is connected.</p>`
+        `<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Native component examples</title><style>body{margin:0;font:14px/1.5 var(--font-sans,system-ui);color:var(--foreground,#202328);background:transparent}h1{font-size:23px;margin:0 0 8px}p{margin:0 0 14px;max-width:70ch}button{font:inherit;padding:6px 11px;border:1px solid var(--border,#ddd);border-radius:6px;color:inherit;background:transparent;cursor:pointer}button:focus-visible{outline:2px solid var(--ring,#2563eb)}nav{display:flex;gap:8px;flex-wrap:wrap;margin:16px 0}iframe{display:block;background:var(--card,#fff);border-radius:8px}.note{color:var(--muted-foreground,#666);font-size:12px}pre{overflow:auto;font-size:12px;padding:16px;background:var(--muted,#f5f5f5);border-radius:8px}details{margin:16px 0}summary{cursor:pointer}</style></head><body><h1>The same product components inside a view</h1><p>Actual compiled components with fictional data. Switch Current / Proposed, inspect native definitions, switch tabs, search and page through rows. These examples make no workspace changes.</p><nav aria-label="Demo controls"><button id="demo-light">Light</button><button id="demo-dark">Dark</button><button id="demo-narrow">Narrow</button><button id="demo-wide">Wide</button></nav><p class="note">Resource links are handled by this simulated host. No live workspace is connected.</p>`
       );
     example = example.replace(
       "</body></html>",
-      `<details><summary>How a view shows a proposed change</summary><pre>import { Card, JsonDiff } from "@lobu/views/components";
+      `<details><summary>How a view shows a proposed change</summary><pre>import { ConnectorDefinition } from "@lobu/views/components";
 
-&lt;Card title="Proposed connector definition"&gt;
-  &lt;JsonDiff before={currentDefinition} after={proposedDefinition} /&gt;
-&lt;/Card&gt;
+&lt;ConnectorDefinition value={proposedDefinition} /&gt;
 
-// The same diff accepts Agent and Automation definitions.
+// AgentDefinition and AutomationDefinition take the same value prop.
+// Use Tabs for Current / Proposed; JsonDiff is optional technical detail.
 // Rendering it does not save or apply anything.</pre></details><script>
 const palette = dark => ({theme:dark?'dark':'light',styles:{variables:{'--color-background-primary':dark?'#14171c':'#fff','--color-background-secondary':dark?'#1c2027':'#f8f9fa','--color-background-tertiary':dark?'#282e37':'#eef0f3','--color-text-primary':dark?'#f1f3f5':'#202328','--color-text-secondary':dark?'#afb8c4':'#59616d','--color-text-info':dark?'#9bc1ff':'#244d84','--color-border-primary':dark?'#454c57':'#d5dae0'}}});
 for(const dark of [false,true])document.getElementById(dark?'demo-dark':'demo-light').onclick=()=>{document.querySelector('iframe').style.background=dark?'#14171c':'#fff';window.sendContext(palette(dark));};
@@ -548,8 +594,10 @@ document.getElementById('demo-wide').onclick=()=>document.querySelector('iframe'
     await frame
       .getByRole("link", { name: "Saved agent", exact: false })
       .waitFor();
-    await frame.getByRole("button", { name: "Show diff", exact: true }).click();
-    await frame.locator(".cm-editor").waitFor();
+    await frame
+      .getByTestId("definition-preview")
+      .getByRole("textbox", { name: "Version", exact: true })
+      .waitFor();
     await page.getByRole("button", { name: "Dark", exact: true }).click();
     await frame.getByTestId("theme").filter({ hasText: "dark" }).waitFor();
     await page.getByRole("button", { name: "Narrow", exact: true }).click();
