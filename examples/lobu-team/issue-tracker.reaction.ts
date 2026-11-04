@@ -6,10 +6,10 @@ import type { ReactionClient, ReactionContext } from "@lobu/connector-sdk";
  * fingerprint past a noise gate becomes an issue. External agents triage
  * issues and link the `task` that tracks a fix.
  *
- * While DRY_RUN is true the job writes nothing and returns the planned changes
- * as its run result, so the first runs can be reviewed before records exist.
+ * Set DRY_RUN to true to have the job write nothing and return the planned
+ * changes as its run result, for reviewing a rule change before it applies.
  */
-export const DRY_RUN = true;
+export const DRY_RUN = false;
 
 const CONNECTION = "lobu-analytics";
 /** The client.query row cap for Postgres reads. */
