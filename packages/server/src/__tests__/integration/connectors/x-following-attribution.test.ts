@@ -91,7 +91,7 @@ describe('X following attribution (real connector rules)', () => {
       WHERE e.organization_id = ${organizationId}
         AND et.slug = ${type}
         AND e.deleted_at IS NULL
-      ORDER BY e.name
+      ORDER BY e.name COLLATE "C"
     `;
   }
 
