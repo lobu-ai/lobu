@@ -13,7 +13,7 @@ import { resolveToolWorkspaceTarget } from '../sandbox/client-sdk';
 import { verifiedAutomationSource } from '../automations/automation-source';
 import { runWithActingAutomation } from '../utils/acting-automation-context';
 import type { Context } from 'hono';
-import { createSpan, isToolError, retryWithBackoff, runInSpanContext, SpanStatusCode, ToolError, type Span } from '@lobu/core';
+import { classifyErrorKind, createSpan, isToolError, recordError, retryWithBackoff, runInSpanContext, SpanStatusCode, ToolError, type Span } from '@lobu/core';
 import {
   getAction,
   getRequiredAccessLevel,
@@ -329,12 +329,28 @@ export async function executeTool(
   return runInSpanContext(span, async () => {
     try {
       const result = await executeToolInSpan(toolName, args, env, authCtx, callerSignal, span);
-      span?.setStatus({ code: isSoftErrorResult(result) ? SpanStatusCode.ERROR : SpanStatusCode.OK });
+      if (isSoftErrorResult(result)) {
+        // A returned error is a handled rejection, so it counts as the
+        // caller's unless its structured code marks a failing dependency.
+        const { error, code, error_code } = result as {
+          error: string;
+          code?: unknown;
+          error_code?: unknown;
+        };
+        const structuredCode = typeof code === 'string' ? code : typeof error_code === 'string' ? error_code : null;
+        recordError(
+          span,
+          { name: 'ToolResultError', message: error, code: structuredCode },
+          { scope: `tool ${name}`, kind: classifyErrorKind(structuredCode, null) === 'dependency' ? 'dependency' : 'user' }
+        );
+      } else {
+        span?.setStatus({ code: SpanStatusCode.OK });
+      }
       return result;
     } catch (error) {
-      // Errors/arguments can contain credentials or source data. Status alone
-      // records failure; the existing correlated audit owns its diagnostic.
-      span?.setStatus({ code: SpanStatusCode.ERROR });
+      // recordError keeps only the type, the parameterized message and frame
+      // locations: errors and arguments can carry credentials or source data.
+      recordError(span, error, { scope: `tool ${name}` });
       throw error;
     } finally {
       span?.end();

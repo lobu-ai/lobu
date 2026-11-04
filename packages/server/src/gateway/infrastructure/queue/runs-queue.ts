@@ -20,8 +20,13 @@
 
 import { randomUUID } from "node:crypto";
 import {
+	createChildSpan,
 	createLogger,
 	getErrorMessage,
+	recordError,
+	runInSpanContext,
+	SpanStatusCode,
+	traceparentHeader,
 } from "@lobu/core";
 import { intervals } from "../../../config/intervals.js";
 import { getDb, getDbListener, type DbClient } from "../../../db/client.js";
@@ -656,10 +661,34 @@ export class RunsQueue implements IMessageQueue {
       void this.heartbeatClaim(claimed.runId);
     }, intervals.runsClaimHeartbeatIntervalMs);
     if (typeof heartbeat.unref === "function") heartbeat.unref();
+    // One span per claimed run, joined to the trace that enqueued it when the
+    // payload carries one, so a failing job shows up under its request.
+    const span = createChildSpan(
+      `run ${worker.queueName}`,
+      traceparentHeader(
+        (claimed.payload as { traceparent?: unknown } | null)?.traceparent,
+      ),
+      {
+        "lobu.run_id": claimed.runId,
+        "lobu.run_type": worker.runType,
+        "lobu.queue": worker.queueName,
+        "lobu.attempt": claimed.attempts,
+      },
+    );
     try {
-      await worker.handler(job);
+      await runInSpanContext(span, () => worker.handler(job));
+      span?.setStatus({ code: SpanStatusCode.OK });
       await this.markCompleted(claimed.runId);
     } catch (err) {
+      if (isDeferralError(err)) {
+        span?.setAttribute("lobu.run_deferred", true);
+      } else {
+        span?.setAttribute(
+          "lobu.run_final_attempt",
+          claimed.attempts + 1 >= claimed.maxAttempts,
+        );
+        recordError(span, err, { scope: `run ${worker.queueName}` });
+      }
       if (isDeferralError(err)) {
         // Waiting, not failing — reschedule without consuming an attempt
         // (see isDeferralError in types.ts for the contract).
@@ -682,6 +711,7 @@ export class RunsQueue implements IMessageQueue {
       }
     } finally {
       clearInterval(heartbeat);
+      span?.end();
     }
   }
 

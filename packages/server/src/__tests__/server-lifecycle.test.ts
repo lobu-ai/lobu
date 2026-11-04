@@ -252,7 +252,7 @@ describe("buildWrapperApp", () => {
 		}
 	});
 
-	it("ends HTTP error spans for returned and thrown failures without exporting error text", async () => {
+	it("records grouped, parameterized errors for returned and thrown failures", async () => {
 		const { buildWrapperApp } = await import("../server-lifecycle");
 		const { Hono } = await import("hono");
 		const exporter = new InMemorySpanExporter();
@@ -261,18 +261,76 @@ describe("buildWrapperApp", () => {
 		try {
 			const app = new Hono();
 			app.get("/returned", (c) => c.json({ error: "private-returned-error" }, 500));
-			app.get("/thrown", () => { throw new Error("private-thrown-error"); });
+			app.get("/thrown/:id", (c) => {
+				throw new Error(`lookup failed for private@example.test run ${c.req.param("id")}`);
+			});
+			app.all("/any", () => { throw new Error("any-method failure"); });
 			const wrapper = buildWrapperApp({} as never, app);
-			for (const path of ["returned", "thrown"]) expect((await wrapper.request(`/lobu/${path}`)).status).toBe(500);
+			expect((await wrapper.request("/lobu/returned")).status).toBe(500);
+			expect((await wrapper.request("/lobu/any", { method: "PRIVATE_METHOD" })).status).toBe(500);
+			for (const id of ["run9f3a1c2e7b4d", "run0b8e6d5c4a3f"]) expect((await wrapper.request(`/lobu/thrown/${id}`)).status).toBe(500);
 			expect((await wrapper.request("/private-unmatched-path?token=private-query")).status).toBe(404);
 			expect((await wrapper.request("/unknown", { method: "PRIVATE_METHOD" })).status).toBe(404);
 			const requests = exporter.getFinishedSpans().filter((span) => span.kind === SpanKind.SERVER);
-			expect(requests).toHaveLength(4);
-			expect(requests.filter((span) => span.attributes["http.response.status_code"] === 500).map((span) => span.status.code)).toEqual([SpanStatusCode.ERROR, SpanStatusCode.ERROR]);
+			expect(requests).toHaveLength(6);
+			expect(requests.filter((span) => span.attributes["http.response.status_code"] === 500).map((span) => span.status.code)).toEqual([SpanStatusCode.ERROR, SpanStatusCode.ERROR, SpanStatusCode.ERROR, SpanStatusCode.ERROR]);
+			expect(requests.find((span) => span.attributes["http.route"] === "/lobu/any")?.attributes["error.grouping"]).toContain("_OTHER /lobu/any");
 			expect(requests.find((span) => span.attributes["http.response.status_code"] === 404)?.attributes["http.route"]).toBe("unmatched");
 			expect(requests.at(-1)?.attributes["http.request.method"]).toBe("_OTHER");
-			expect(JSON.stringify(requests.map((span) => ({ name: span.name, attributes: span.attributes, events: span.events, status: span.status })))).not.toMatch(/private-returned|private-thrown|private-unmatched|private-query|PRIVATE_METHOD/);
+
+			const returned = requests.find((span) => span.attributes["http.route"] === "/lobu/returned")!;
+			expect(returned.attributes).toMatchObject({ "exception.type": "HttpServerError", "error.kind": "system" });
+			const thrown = requests.filter((span) => span.attributes["http.route"] === "/lobu/thrown/:id");
+			expect(thrown).toHaveLength(2);
+			for (const span of thrown) {
+				expect(span.attributes).toMatchObject({ "exception.type": "Error", "exception.message": "lookup failed for <email> run <id>", "error.kind": "system" });
+				expect(span.events.map((event) => event.name)).toEqual(["exception"]);
+				// Frames are recorded without any machine's absolute path.
+				for (const frame of String(span.attributes["exception.stacktrace"]).split("\n")) expect(frame).not.toMatch(/^at (?:.+ \()?\//);
+			}
+			// One defect affecting two runs stays one issue.
+			expect(thrown[0].attributes["error.fingerprint"]).toBe(thrown[1].attributes["error.fingerprint"]);
+			expect(JSON.stringify(requests.map((span) => ({ name: span.name, attributes: span.attributes, events: span.events, status: span.status })))).not.toMatch(/private-returned|private@example|run9f3a|run0b8e|private-unmatched|private-query|PRIVATE_METHOD|\/Users\//);
 		} finally {
+			await shutdownTracing();
+		}
+	});
+
+	it("records outbound fetch as client spans with dependency errors", async () => {
+		const exporter = new InMemorySpanExporter();
+		await shutdownTracing();
+		initTracing({ serviceName: "fetch-tracing-test", spanProcessors: [new SimpleSpanProcessor(exporter)] });
+		const upstream = http.createServer((req, res) => {
+			res.statusCode = req.url?.startsWith("/ok") ? 200 : 503;
+			res.end("private-upstream-body");
+		});
+		await new Promise<void>((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+		const closed = net.createServer();
+		await new Promise<void>((resolve) => closed.listen(0, "127.0.0.1", resolve));
+		const closedPort = (closed.address() as net.AddressInfo).port;
+		await new Promise<void>((resolve) => closed.close(() => resolve()));
+		try {
+			const port = (upstream.address() as net.AddressInfo).port;
+			const caller = createSpan("calling work");
+			await runInSpanContext(caller, async () => (await fetch(`http://127.0.0.1:${port}/ok`)).text());
+			caller?.end();
+			await (await fetch(`http://127.0.0.1:${port}/items/item7c2f9e1a5b3d?token=private-query`, { method: "POST" })).text();
+			await expect(fetch(`http://127.0.0.1:${closedPort}/down`)).rejects.toThrow();
+			const spans = exporter.getFinishedSpans().filter((span) => span.kind === SpanKind.CLIENT);
+			expect(spans).toHaveLength(3);
+			const [ok, failed, refused] = spans;
+			expect(ok.name).toBe(`HTTP GET 127.0.0.1:${port}`);
+			// The call is traced under the work that made it.
+			expect(ok.parentSpanContext?.spanId).toBe(caller?.spanContext().spanId);
+			expect(ok.attributes).toMatchObject({ "http.request.method": "GET", "server.address": `127.0.0.1:${port}`, "url.template": "/ok", "http.response.status_code": 200 });
+			expect(ok.status.code).not.toBe(SpanStatusCode.ERROR);
+			expect(failed.attributes).toMatchObject({ "http.request.method": "POST", "url.template": "/items/<id>", "http.response.status_code": 503, "exception.type": "UpstreamHttpError", "error.code": "UPSTREAM_5XX", "error.kind": "dependency" });
+			expect(failed.status.code).toBe(SpanStatusCode.ERROR);
+			expect(refused.attributes).toMatchObject({ "server.address": `127.0.0.1:${closedPort}`, "error.kind": "dependency" });
+			expect(refused.status.code).toBe(SpanStatusCode.ERROR);
+			expect(JSON.stringify(spans.map((span) => ({ attributes: span.attributes, events: span.events })))).not.toMatch(/private-query|private-upstream-body|item7c2f/);
+		} finally {
+			await new Promise<void>((resolve) => upstream.close(() => resolve()));
 			await shutdownTracing();
 		}
 	});

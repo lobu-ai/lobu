@@ -16,7 +16,7 @@
 import http from "node:http";
 import v8 from "node:v8";
 import { getRequestListener } from "@hono/node-server";
-import { Hono } from "hono";
+import { type Context, Hono } from "hono";
 import { routePath } from "hono/route";
 import { pinoLogger } from "hono-pino";
 import { context, propagation, ROOT_CONTEXT } from "@opentelemetry/api";
@@ -36,13 +36,34 @@ import { bootTaskScheduler } from "./scheduled/jobs";
 import { startConnectorRecordWorker } from "./connectors/webhook-delivery";
 import { isErrorReported, markErrorReported } from "./diagnostics";
 import { BootConfigError } from "./utils/errors";
-import { createSpan, runInSpanContext, shutdownTracing, SpanKind, SpanStatusCode, traceparentHeader } from "@lobu/core";
+import {
+	createSpan,
+	getCurrentSpan,
+	recordError,
+	runInSpanContext,
+	shutdownTracing,
+	SpanKind,
+	traceparentHeader,
+} from "@lobu/core";
 import { cloudflareRayId } from "./utils/cloudflare-ray";
 import logger from "./utils/logger";
 import { initWorkspaceProvider } from "./workspace";
 
+/** Requests whose thrown error app.onError already recorded on the HTTP span. */
+const requestsWithRecordedError = new WeakSet<Request>();
+
 type ServerMode = "postgres" | "embedded-postgres";
 const HTTP_TRACE_METHODS = new Set(["CONNECT", "DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT", "TRACE"]);
+
+/**
+ * The span name and error scope for a request: a known method and the matched
+ * route template, so neither a caller-chosen method nor a raw path is recorded.
+ */
+function httpSpanName(c: Context): string {
+	const method = HTTP_TRACE_METHODS.has(c.req.method) ? c.req.method : "_OTHER";
+	const matched = routePath(c);
+	return `${method} ${matched && matched !== "*" && matched !== "/*" ? matched : "unmatched"}`;
+}
 
 interface ServerLifecycleConfig {
 	mode: ServerMode;
@@ -209,16 +230,18 @@ export function buildWrapperApp(
 		return context.with(parent, async () => {
 			const method = HTTP_TRACE_METHODS.has(c.req.method) ? c.req.method : "_OTHER";
 			const span = createSpan("HTTP request", { "http.request.method": method }, SpanKind.SERVER);
+			let thrown: unknown;
 			let failed = false;
 			try {
 				await runInSpanContext(span, () => next());
 			} catch (error) {
 				failed = true;
+				thrown = error;
 				throw error;
 			} finally {
-				const matched = routePath(c);
-				const route = matched && matched !== "*" && matched !== "/*" ? matched : "unmatched";
-				span?.updateName(`${method} ${route}`);
+				const name = httpSpanName(c);
+				const route = name.slice(name.indexOf(" ") + 1);
+				span?.updateName(name);
 				span?.setAttributes({ "http.route": route, "http.response.status_code": c.res.status });
 				const auth = c.get("authContext");
 				const userId = c.get("user")?.id ?? c.get("mcpAuthInfo")?.userId ?? c.get("session")?.userId
@@ -228,7 +251,19 @@ export function buildWrapperApp(
 				if (organizationId) span?.setAttribute("lobu.org_id", organizationId);
 				const ray = cloudflareRayId(c.req.header("cf-ray"));
 				if (ray) span?.setAttribute("cf_ray", ray);
-				if (failed || c.res.status >= 500) span?.setStatus({ code: SpanStatusCode.ERROR });
+				// onError already recorded a thrown error on this span. A route that
+				// returned a 5xx itself has no error object, so record the status.
+				if (!requestsWithRecordedError.has(c.req.raw)) {
+					if (failed) {
+						recordError(span, thrown, { scope: name });
+					} else if (c.res.status >= 500) {
+						recordError(
+							span,
+							{ name: "HttpServerError", message: `HTTP ${c.res.status}`, httpStatus: c.res.status },
+							{ scope: name },
+						);
+					}
+				}
 				span?.end();
 			}
 		});
@@ -287,6 +322,10 @@ export function buildWrapperApp(
 	// 6. Catch-all error handler for thrown exceptions that bubble past route
 	// catches. Preserves the original stack trace.
 	wrapper.onError((err, c) => {
+		// The HTTP span is still active here; give it the thrown error before
+		// the 500 response replaces it.
+		recordError(getCurrentSpan(), err, { scope: httpSpanName(c) });
+		requestsWithRecordedError.add(c.req.raw);
 		if (!isErrorReported(c)) {
 			logger.error({ err, source: "app_onError", http_method: c.req.method,
 				res_status: 500, path: c.req.path }, "Unhandled error in HTTP handler");

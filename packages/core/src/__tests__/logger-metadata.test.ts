@@ -411,7 +411,11 @@ describe("console logger structured output", () => {
       level: "error",
       message: "query failed",
       data: { status: 500 },
+      error_type: "LoggedError",
+      error_kind: "system",
+      error_fingerprint: expect.stringMatching(/^[0-9a-f]{32}$/),
     });
+    expect(records[0].error_fingerprint).toBeUndefined();
     expect(records[2]).toMatchObject({
       level: "info",
       message: "request completed",

@@ -10,6 +10,7 @@ import {
 	type GuardrailRegistry,
 	type MessagePayload,
 	OrchestratorError,
+	recordError,
 	runGuardrailInstances,
 	runInSpanContext,
 	SpanStatusCode,
@@ -654,10 +655,7 @@ export class MessageConsumer {
 
       logger.info({ traceId, jobId }, "Message job queued successfully");
     } catch (error) {
-      queueSpan?.setStatus({
-        code: SpanStatusCode.ERROR,
-        message: getErrorMessage(error),
-      });
+      recordError(queueSpan, error);
       queueSpan?.end();
       logger.error({ traceId, jobId, error }, "Message job failed");
 

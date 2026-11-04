@@ -1,4 +1,9 @@
 import { describe, expect, it } from "bun:test";
+import { initTracing, shutdownTracing, SpanStatusCode } from "@lobu/core";
+import {
+  InMemorySpanExporter,
+  SimpleSpanProcessor,
+} from "@opentelemetry/sdk-trace-node";
 import { executeTool, type AuthContext } from "../../tools/execute";
 import { ToolUserError } from "../../utils/errors";
 
@@ -80,6 +85,43 @@ describe("executeTool input-schema validation", () => {
     }
     if (caught instanceof ToolUserError) {
       expect(caught.message).not.toMatch(/Invalid arguments/);
+    }
+  });
+});
+
+describe("executeTool error spans", () => {
+  it("records a rejected call as one grouped user error per defect", async () => {
+    const exporter = new InMemorySpanExporter();
+    await shutdownTracing();
+    initTracing({
+      serviceName: "tool-span-test",
+      spanProcessors: [new SimpleSpanProcessor(exporter)],
+    });
+    try {
+      for (const args of [{}, { code: "export default async () => 1" }]) {
+        await executeTool("query_sdk", args, {} as never, baseAuth).catch(
+          () => undefined,
+        );
+      }
+      const spans = exporter
+        .getFinishedSpans()
+        .filter((span) => span.name === "tool query_sdk");
+      expect(spans).toHaveLength(2);
+      for (const span of spans) {
+        expect(span.status.code).toBe(SpanStatusCode.ERROR);
+        expect(span.attributes).toMatchObject({
+          "exception.type": "ToolUserError",
+          "error.kind": "user",
+        });
+      }
+      expect(spans[0].attributes["error.fingerprint"]).toBe(
+        spans[1].attributes["error.fingerprint"],
+      );
+      expect(JSON.stringify(spans.map((span) => span.attributes))).not.toContain(
+        "export default",
+      );
+    } finally {
+      await shutdownTracing();
     }
   });
 });
