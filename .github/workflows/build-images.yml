@@ -167,12 +167,15 @@ jobs:
           set -o pipefail
           docker run --rm --network=none "${REGISTRY}/${IMAGE_NAME_WORKER}@${{ needs.build-worker.outputs.digest }}" \
             node --no-node-snapshot dist/bin.js self-check --json | tee worker-self-check.json
-          docker run --rm --network=none "${REGISTRY}/${IMAGE_NAME_WORKER}@${{ needs.build-worker.outputs.digest }}" \
-            node -e 'if (process.env.APP_GIT_SHA !== process.argv[1]) process.exit(1)' "$GITHUB_SHA"
           jq -e '.isolate_lane.available == true' worker-self-check.json >/dev/null || {
             echo "::error::worker image cannot load isolated-vm: $(jq -c .isolate_lane worker-self-check.json)"
             exit 1
           }
+
+      - name: Verify worker image release SHA
+        run: |
+          docker run --rm --network=none "${REGISTRY}/${IMAGE_NAME_WORKER}@${{ needs.build-worker.outputs.digest }}" \
+            node -e 'if (process.env.APP_GIT_SHA !== process.argv[1]) { console.error("APP_GIT_SHA mismatch", { expected: process.argv[1], actual: process.env.APP_GIT_SHA ?? "<missing>" }); process.exit(1); }' "$GITHUB_SHA"
 
   build-app:
     runs-on: ubuntu-24.04
