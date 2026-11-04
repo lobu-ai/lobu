@@ -166,6 +166,7 @@ const config: KnipConfig = {
         // Separate credential-free image entrypoints, invoked by its Dockerfile.
         "docker/view-validator/service.ts",
         "docker/view-validator/smoke.ts",
+        "docker/view-validator/loopback.ts",
         // Example projects are loaded by file path at apply time and double as
         // the consumers of the public config DSL — treat them as entries so
         // knip follows them instead of flagging them (and the DSL) as unused.

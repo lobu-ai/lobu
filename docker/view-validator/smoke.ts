@@ -13,6 +13,13 @@ const url = process.argv[2]
   : `http://127.0.0.1:${(runner!.address() as { port: number }).port}/validate`;
 const handshake = `<script>window.addEventListener('message', e => { if(e.data.id === 1) window.parent.postMessage({jsonrpc:'2.0',method:'ui/notifications/initialized'},'*'); }); window.parent.postMessage({jsonrpc:'2.0',id:1,method:'ui/initialize',params:{}},'*');</script>`;
 try {
+  for (const [path, method] of [
+    ["/validate", "GET"],
+    ["/health", "POST"],
+    ["/other", "GET"],
+  ]) {
+    assert.equal((await fetch(new URL(path, url), { method })).status, 404);
+  }
   for (const [code, expected] of [
     ["", true],
     ['throw new Error("candidate failure")', false],

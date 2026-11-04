@@ -151,12 +151,18 @@ For a local `lobu run` or Mac-app project, start only the validator from this
 checkout, with a loopback-only published port:
 
 ```bash
-docker compose -f docker-compose.example.yml build view-validator
-docker compose -f docker-compose.example.yml run -d --no-deps \
-  --name lobu-view-validator -p 127.0.0.1:8090:8090 view-validator
+docker compose -f docker-compose.example.yml --profile local-validator \
+  up -d --build view-validator-local
 curl -fsS http://127.0.0.1:8090/health
 VIEW_VALIDATOR_URL=http://127.0.0.1:8090 lobu run
 ```
+
+This starts the isolated runner and a small trusted HTTP relay. The relay
+publishes only loopback and forwards only `/health` and `/validate`; Chromium
+stays on its internal-only network. Publishing a port directly on the runner's
+internal-only network does not work. Stop the local runner services with
+`docker compose -f docker-compose.example.yml --profile local-validator stop
+view-validator-local view-validator`.
 
 The CLI already passes environment variables and project `.env` settings to
 the embedded server. For a Mac-app launch, set the same `VIEW_VALIDATOR_URL`
