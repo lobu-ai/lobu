@@ -262,7 +262,7 @@ describe("RunsQueue — run spans", () => {
       });
       await queue.send(
         "test-run-spans",
-        { traceparent: `00-${traceId}-${"cd".repeat(8)}-01` },
+        { platformMetadata: { traceparent: `00-${traceId}-${"cd".repeat(8)}-01` } },
         { retryLimit: 1, retryDelay: 0 },
       );
       const spansFor = () =>

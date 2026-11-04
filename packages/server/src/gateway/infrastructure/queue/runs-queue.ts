@@ -663,10 +663,16 @@ export class RunsQueue implements IMessageQueue {
     if (typeof heartbeat.unref === "function") heartbeat.unref();
     // One span per claimed run, joined to the trace that enqueued it when the
     // payload carries one, so a failing job shows up under its request.
+    // Producers carry trace context in `platformMetadata.traceparent`, the field
+    // the message and thread-response consumers read.
     const span = createChildSpan(
       `run ${worker.queueName}`,
       traceparentHeader(
-        (claimed.payload as { traceparent?: unknown } | null)?.traceparent,
+        (
+          claimed.payload as {
+            platformMetadata?: { traceparent?: unknown };
+          } | null
+        )?.platformMetadata?.traceparent,
       ),
       {
         "lobu.run_id": claimed.runId,

@@ -4,14 +4,17 @@
  * whether or not anyone listens, and an unsubscribed channel costs nothing.
  *
  * A span records method, host and a parameterized path (no query string, ids
- * replaced), the response status and duration. Upstream 5xx responses and
+ * replaced), the response status and duration. A span is recorded only
+ * under an active span, so a call joins the trace of the work that made it; a
+ * background fetch with no surrounding work would only add a stray root trace
+ * per call. Upstream 5xx responses and
  * transport failures are recorded as dependency errors; a 4xx is often an
  * expected answer, so it is kept as an attribute rather than an error.
  */
 
 import diagnosticsChannel from "node:diagnostics_channel";
 import type { Span, Tracer } from "@opentelemetry/api";
-import { SpanKind } from "@opentelemetry/api";
+import { context, SpanKind, trace } from "@opentelemetry/api";
 import { parameterizeMessage } from "./error-report";
 
 interface UndiciRequest {
@@ -51,7 +54,7 @@ export function instrumentFetch(options: {
   diagnosticsChannel.subscribe("undici:request:create", (message) => {
     const { request } = message as { request: UndiciRequest };
     const tracer = activeTracer();
-    if (!tracer || !request) return;
+    if (!tracer || !request || !trace.getSpan(context.active())) return;
     const method = (request.method ?? "GET").toUpperCase();
     const address = host(request.origin);
     const span = tracer.startSpan(`HTTP ${method} ${address}`, {

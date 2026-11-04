@@ -311,17 +311,21 @@ describe("buildWrapperApp", () => {
 		await new Promise<void>((resolve) => closed.close(() => resolve()));
 		try {
 			const port = (upstream.address() as net.AddressInfo).port;
+			// A fetch with no surrounding work records nothing.
+			await (await fetch(`http://127.0.0.1:${port}/ok?background=1`)).text();
 			const caller = createSpan("calling work");
-			await runInSpanContext(caller, async () => (await fetch(`http://127.0.0.1:${port}/ok`)).text());
+			await runInSpanContext(caller, async () => {
+				await (await fetch(`http://127.0.0.1:${port}/ok`)).text();
+				await (await fetch(`http://127.0.0.1:${port}/items/item7c2f9e1a5b3d?token=private-query`, { method: "POST" })).text();
+				await expect(fetch(`http://127.0.0.1:${closedPort}/down`)).rejects.toThrow();
+			});
 			caller?.end();
-			await (await fetch(`http://127.0.0.1:${port}/items/item7c2f9e1a5b3d?token=private-query`, { method: "POST" })).text();
-			await expect(fetch(`http://127.0.0.1:${closedPort}/down`)).rejects.toThrow();
 			const spans = exporter.getFinishedSpans().filter((span) => span.kind === SpanKind.CLIENT);
 			expect(spans).toHaveLength(3);
 			const [ok, failed, refused] = spans;
 			expect(ok.name).toBe(`HTTP GET 127.0.0.1:${port}`);
-			// The call is traced under the work that made it.
-			expect(ok.parentSpanContext?.spanId).toBe(caller?.spanContext().spanId);
+			// Each call is traced under the work that made it.
+			for (const span of spans) expect(span.parentSpanContext?.spanId).toBe(caller?.spanContext().spanId);
 			expect(ok.attributes).toMatchObject({ "http.request.method": "GET", "server.address": `127.0.0.1:${port}`, "url.template": "/ok", "http.response.status_code": 200 });
 			expect(ok.status.code).not.toBe(SpanStatusCode.ERROR);
 			expect(failed.attributes).toMatchObject({ "http.request.method": "POST", "url.template": "/items/<id>", "http.response.status_code": 503, "exception.type": "UpstreamHttpError", "error.code": "UPSTREAM_5XX", "error.kind": "dependency" });
