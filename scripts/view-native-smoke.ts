@@ -14,8 +14,8 @@ import {
 import { readMcpAppAsset } from "../packages/server/src/utils/mcp-app-bundle";
 
 const source = `import { useState } from "react";
-import { defineView, tool, useHost, useQuery } from "@lobu/views";
-import { Button, Badge, EntityAvatar, EntityTableView, RecordSpecSheet, Tabs, TabsList, TabsTrigger, TabsContent } from "@lobu/views/components";
+import { defineView, sql, tool, useHost, useQuery } from "@lobu/views";
+import { Button, Badge, DataTable, EntityAvatar, EntityListPage, EntityRecordPage, Tabs, TabsList, TabsTrigger, TabsContent } from "@lobu/views/components";
 export const view = defineView({ key: "native-proof", attach: [{ workspace: true }] });
 export default function Proof() {
   const host = useHost();
@@ -24,19 +24,30 @@ export default function Proof() {
   const [sorting, setSorting] = useState([]);
   const [mode, setMode] = useState("");
   const result = useQuery(tool("manage_entity", { action: "list", entity_type: "fixture", search, limit: 2, offset: page * 2, sort_by: sorting[0]?.id, sort_order: sorting[0]?.desc ? "desc" : "asc" }));
+  const custom = useQuery<Array<{amount:number}>>(sql\`SELECT 2 AS amount\`);
+  const customRows = (custom.data ?? []).map(row => ({key:"sql",label:"SQL + TypeScript row",amount:row.amount * 2}));
+  customRows.push({key:"local",label:"TypeScript-only row",amount:0});
   return <main>
-    <input aria-label="Search" value={search} onChange={e => {setSearch(e.target.value);setPage(0);}} />
     <p data-testid="state">{result.loading ? "loading" : result.error ? "error:" + result.error : result.data?.entities.length ? "data" : "empty"}</p>
     <p data-testid="theme">{host.theme}</p>
     <p data-testid="mode">{mode}</p>
-    <Button onClick={() => host.openRecord({ entity_id: 1 }).then(result => setMode(result.mode))}>Peek record</Button>
     <Badge data-testid="badge">Native badge</Badge>
     <EntityAvatar name="Example" metadata={{ email: "fixture@example.invalid" }} metadataSchema={{ properties: { email: { "x-email": true } } }} initialsFallback />
-    <Tabs defaultValue="details"><TabsList><TabsTrigger value="details">Details</TabsTrigger><TabsTrigger value="other">Other</TabsTrigger></TabsList>
-      <TabsContent value="details"><RecordSpecSheet fields={[{key:"count",prop:{type:"number"}},{key:"enabled",prop:{type:"boolean"}},{key:"website",prop:{type:"string",format:"uri"}}]} values={{count:0,enabled:false,website:"https://fixture.example.invalid/record"}} context={{ownerSlug:"fixture-workspace"}} /></TabsContent>
-      <TabsContent value="other">Other tab works</TabsContent>
-    </Tabs>
-    {result.data && <EntityTableView entities={result.data.entities} owner="fixture-workspace" isDerived={false} hasAnyParents={false} linkedEntityLookups={{}} measureColumns={[]} sorting={sorting} onSortingChange={setSorting} page={page} pageSize={2} totalCount={4} hasMore={result.data.metadata.has_more} pageTitle="Records" onPrevPage={() => setPage(p=>p-1)} onNextPage={() => setPage(p=>p+1)} />}
+    <EntityRecordPage entity={{id:1,entity_type:"fixture",slug:"record",name:"Native record",metadata:{count:0,enabled:false,website:"https://fixture.example.invalid/record"}}} owner="fixture-workspace" schema={{properties:{count:{type:"number","x-table-column":true},enabled:{type:"boolean"},website:{type:"string",format:"uri"}}}}>
+      <Tabs defaultValue="details"><TabsList><TabsTrigger value="details">Details</TabsTrigger><TabsTrigger value="other">Other</TabsTrigger></TabsList>
+        <TabsContent value="details">Record activity slot</TabsContent>
+        <TabsContent value="other">Other tab works</TabsContent>
+      </Tabs>
+    </EntityRecordPage>
+    <EntityListPage title="Native collection"
+      actions={<Button onClick={() => host.openRecord({ entity_id: 1 }).then(result => setMode(result.mode))}>Peek record</Button>}
+      controls={<><input aria-label="Search" value={search} onChange={e => {setSearch(e.target.value);setPage(0);}} /><p>Collection controls</p></>}
+      loading={result.loading} error={result.error} onRetry={result.refetch}
+      empty={<p>No matching records</p>}
+      table={result.data?.entities.length ? {entities:result.data.entities,owner:"fixture-workspace",isDerived:false,hasAnyParents:false,linkedEntityLookups:{},measureColumns:[],sorting,onSortingChange:setSorting,page,pageSize:2,totalCount:4,hasMore:result.data.metadata.has_more,pageTitle:"Records",onPrevPage:()=>setPage(p=>p-1),onNextPage:()=>setPage(p=>p+1)} : undefined} />
+    <EntityListPage title="Custom data" controls={<p>Custom query results</p>}>
+      <DataTable rows={customRows} columns={[{key:"label",header:"Source"},{key:"amount",header:"Amount"}]} keyOf={row=>row.key} />
+    </EntityListPage>
   </main>;
 }`;
 assertPortableArtifact(
@@ -70,6 +81,7 @@ const server = createServer(async (request, response) => {
     response.setHeader("Content-Type", "text/html");
     response.end(`<!doctype html><html><body><iframe sandbox="allow-scripts" style="width:900px;height:700px"></iframe><script>
       const frame = document.querySelector('iframe');
+      let failedOnce = false;
       const send = message => frame.contentWindow.postMessage({jsonrpc:'2.0',...message},'*');
       window.sendContext = ctx => send({method:'ui/notifications/host-context-changed',params:ctx});
       window.addEventListener('message', async event => {
@@ -88,8 +100,12 @@ const server = createServer(async (request, response) => {
         if(method === 'tools/call') {
           if (await window.reportCall(params)) window.sorted = true;
           const input = params.arguments;
+          if(params.name === 'query_sql') {
+            send({id,result:{structuredContent:{rows:[{amount:2}],truncated:false}}});
+            return;
+          }
           if(input.search === 'loading') return;
-          if(input.search === 'error') result={isError:true,structuredContent:{error:{code:'UPSTREAM_TIMEOUT'}},content:[{type:'text',text:'Upstream unavailable'}]};
+          if(input.search === 'error' && !failedOnce) { failedOnce = true; result={isError:true,structuredContent:{error:{code:'UPSTREAM_TIMEOUT'}},content:[{type:'text',text:'Upstream unavailable'}]}; }
           else result={structuredContent:{action:'list',entities:input.search==='empty'?[]:[{id:1,entity_type:'fixture',name:'Native row '+(input.offset+1),slug:'row',metadata:{},created_at:'2026-01-01'}],metadata:{page_size:2,has_more:input.offset===0}}};
         }
         send({id,result});
@@ -149,8 +165,43 @@ try {
   page.on("pageerror", (error) => errors.push(error.message));
   await page.goto(origin);
   const frame = page.frameLocator("iframe");
-  await frame.getByText("Native row 1", { exact: true }).waitFor();
+  await Promise.race([
+    frame.getByText("Native row 1", { exact: true }).waitFor(),
+    frame
+      .locator("[data-lobu-render-error]")
+      .waitFor()
+      .then(async () => {
+        throw new Error(
+          (await frame.locator("[data-lobu-render-error]").textContent()) ??
+            "Native view failed to render"
+        );
+      }),
+  ]);
   assert.equal(await frame.getByTestId("state").textContent(), "data");
+  await frame
+    .getByRole("heading", { name: "Native collection", exact: true })
+    .waitFor();
+  await frame
+    .getByRole("heading", { name: "Native record", exact: true })
+    .waitFor();
+  const sqlRow = frame
+    .getByRole("row")
+    .filter({ hasText: "SQL + TypeScript row" });
+  await sqlRow.getByRole("cell", { name: "4", exact: true }).waitFor();
+  await frame
+    .getByRole("row")
+    .filter({ hasText: "TypeScript-only row" })
+    .getByRole("cell", { name: "0", exact: true })
+    .waitFor();
+  await page.locator("iframe").evaluate((frame) => {
+    frame.style.width = "440px";
+  });
+  await frame.getByTestId("record-details").waitFor();
+  assert.equal(await frame.getByTestId("record-summary").textContent(), "0");
+  await page.locator("iframe").evaluate((frame) => {
+    frame.style.width = "900px";
+  });
+  await frame.locator("aside").waitFor();
   assert.equal(await frame.locator("dd").nth(0).textContent(), "0");
   assert.match(
     (await frame.locator("dd").nth(1).textContent()) ?? "",
@@ -227,6 +278,25 @@ try {
   for (const state of ["empty", "error", "loading"]) {
     await frame.getByRole("textbox", { name: "Search" }).fill(state);
     await frame.getByTestId("state").filter({ hasText: state }).waitFor();
+    if (state === "empty")
+      await frame.getByText("No matching records", { exact: true }).waitFor();
+    if (state === "error")
+      await frame
+        .getByRole("alert")
+        .filter({ hasText: "Upstream unavailable" })
+        .waitFor();
+    if (state === "loading")
+      await frame.getByRole("status", { name: "Loading entities" }).waitFor();
+    assert.equal(
+      await frame
+        .getByRole("textbox", { name: "Search" })
+        .evaluate((input) => document.activeElement === input),
+      true
+    );
+    if (state === "error") {
+      await frame.getByRole("button", { name: "Retry", exact: true }).click();
+      await frame.getByTestId("state").filter({ hasText: "data" }).waitFor();
+    }
   }
   await frame.getByRole("textbox", { name: "Search" }).fill("data");
   await frame.getByText("Native row 1", { exact: true }).waitFor();
@@ -236,7 +306,7 @@ try {
   );
   assert.deepEqual(errors, []);
   console.log(
-    "PASS: native table, record values, tabs, peek request, pagination, structured reads, query states, live theme in an opaque browser sandbox"
+    "PASS: shared list/record pages, SQL and TypeScript rows, responsive details, tabs, peek, pagination, query states and live theme in an opaque browser sandbox"
   );
 } catch (error) {
   console.error({
