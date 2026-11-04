@@ -10,6 +10,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { generateSecureToken } from "../../../auth/oauth/utils";
 import { ensurePersonalOrganization } from "../../../auth/personal-org-provisioning";
 import { joinPublicOrganization } from "../../../workspace/join-public";
+import { createTestEntity } from "../../setup/test-fixtures";
 import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
 
 async function seedUser(name: string): Promise<{ id: string; email: string }> {
@@ -55,7 +56,7 @@ describe("public workspace join audit events", () => {
 		await cleanupTestDatabase();
 	});
 
-	it("emits exactly one member-created event for a double join", async () => {
+	it("creates one member projection and audit event for concurrent joins", async () => {
 		const owner = await seedUser("Owner");
 		const org = await ensurePersonalOrganization({
 			id: owner.id,
@@ -70,18 +71,86 @@ describe("public workspace join audit events", () => {
     `;
 
 		const joiner = await seedUser("Joiner");
-		const first = await joinPublicOrganization({
-			userId: joiner.id,
-			orgSlug: org.slug,
+		// A workspace record with the user's display name is not their login
+		// identity and must neither prevent the join projection nor receive it.
+		const namesake = await createTestEntity({
+			organization_id: org.organizationId,
+			entity_type: "fixture-profile",
+			name: "Joiner",
 		});
-		expect(first.status).toBe("joined");
+		// Hold entity writes until multiple joins are blocked in Postgres. This
+		// forces overlapping projection attempts instead of relying on timing.
+		let pendingJoins: ReturnType<typeof joinPublicOrganization>[] = [];
+		let blockedJoinCount = 0;
+		await sql.begin(async (tx) => {
+			await tx`LOCK TABLE entities IN SHARE MODE`;
+			pendingJoins = Array.from({ length: 8 }, () =>
+				joinPublicOrganization({ userId: joiner.id, orgSlug: org.slug }),
+			);
+			const blocked = await waitFor(async () => {
+				const waiting = await tx`
+          SELECT pid FROM pg_locks
+          WHERE NOT granted
+            AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+        `;
+				return waiting.length >= 2 ? waiting : [];
+			});
+			blockedJoinCount = blocked.length;
+		});
+		const concurrent = await Promise.all(pendingJoins);
+		expect(blockedJoinCount).toBeGreaterThanOrEqual(2);
+		expect(concurrent.filter((result) => result.status === "joined")).toHaveLength(1);
+		expect(
+			concurrent.filter((result) => result.status === "already_member"),
+		).toHaveLength(7);
 
-		// Second call — idempotent, must NOT re-emit an audit row.
+		// A later retry must remain idempotent too.
 		const second = await joinPublicOrganization({
 			userId: joiner.id,
 			orgSlug: org.slug,
 		});
 		expect(second.status).toBe("already_member");
+		const claims = await sql`
+      SELECT e.id, et.slug FROM entity_identities ei
+      JOIN entities e ON e.id = ei.entity_id
+      JOIN entity_types et ON et.id = e.entity_type_id
+      WHERE ei.organization_id = ${org.organizationId}
+        AND ei.namespace = 'auth_user_id' AND ei.identifier = ${joiner.id}
+        AND ei.source_connector = 'auth:signup' AND ei.scope_key IS NULL
+        AND ei.deleted_at IS NULL AND e.deleted_at IS NULL
+    `;
+		expect(claims).toHaveLength(1);
+		expect(claims[0].slug).toBe("$member");
+		expect(Number(claims[0].id)).not.toBe(namesake.id);
+		// Identity uniqueness alone can hide orphaned duplicate member entities.
+		const projections = await sql`
+      SELECT e.id FROM entities e
+      JOIN entity_types et ON et.id = e.entity_type_id
+      WHERE e.organization_id = ${org.organizationId}
+        AND et.slug = '$member' AND e.metadata->>'email' = ${joiner.email}
+        AND e.deleted_at IS NULL
+    `;
+		expect(projections).toHaveLength(1);
+		expect(Number(projections[0].id)).toBe(Number(claims[0].id));
+
+		// The email key must still let a different member share the display name.
+		const otherJoiner = await seedUser("Joiner");
+		const otherResult = await joinPublicOrganization({
+			userId: otherJoiner.id,
+			orgSlug: org.slug,
+		});
+		expect(otherResult.status).toBe("joined");
+		const otherClaims = await sql`
+      SELECT e.id, e.metadata->>'email' AS email FROM entity_identities ei
+      JOIN entities e ON e.id = ei.entity_id
+      WHERE ei.organization_id = ${org.organizationId}
+        AND ei.namespace = 'auth_user_id' AND ei.identifier = ${otherJoiner.id}
+        AND ei.source_connector = 'auth:signup' AND ei.deleted_at IS NULL
+        AND e.deleted_at IS NULL
+    `;
+		expect(otherClaims).toHaveLength(1);
+		expect(otherClaims[0].email).toBe(otherJoiner.email);
+		expect(Number(otherClaims[0].id)).not.toBe(Number(claims[0].id));
 
 		// Audit writers are fire-and-forget — poll until the joiner's
 		// member-created row lands.
