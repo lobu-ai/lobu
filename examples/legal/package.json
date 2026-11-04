@@ -3,8 +3,20 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "demo:seed": "bun scripts/seed-demo.ts",
+    "evals": "promptfoo eval -c evals/promptfooconfig.yaml --no-cache"
+  },
   "devDependencies": {
-    "@lobu/cli": "^24.3.0",
-    "@lobu/connector-sdk": "^24.3.0"
+    "@lobu/cli": "^24.4.0",
+    "@lobu/connector-sdk": "^24.4.0",
+    "@lobu/promptfoo-provider": "^24.4.0",
+    "@lobu/views": "^24.4.0",
+    "@types/react": "^19.0.0",
+    "@types/node": "^20.19.9",
+    "react": "^19.0.0",
+    "promptfoo": "^0.121.0",
+    "typescript": "^5.9.3"
   }
 }

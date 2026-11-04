@@ -9,8 +9,16 @@ import {
   every,
   secret,
   field,
+  viewFromFile,
 } from "@lobu/cli/config";
 import type DocuSignEnvelopesConnector from "./docusign-envelopes.connector.ts";
+import { legalAutomations, legalKnowledgeSkill } from "./legal-automations";
+import {
+  contractFields,
+  counterpartyFields,
+  legalEntities,
+  legalRelationships,
+} from "./legal-model";
 
 const contractReviewTrackerSkill = defineSkill({
   name: "contract-review-tracker",
@@ -20,7 +28,7 @@ const contractReviewTrackerSkill = defineSkill({
 
 const legalReview = defineAgent({
   id: "legal-review",
-  skills: [contractReviewTrackerSkill],
+  skills: [contractReviewTrackerSkill, legalKnowledgeSkill],
   name: "legal-review",
   description:
     "Review contracts, summarize risk, and surface missing protections",
@@ -61,7 +69,9 @@ const contract = defineEntityType({
   name: "Contract",
   description:
     "A legal agreement between parties with defined terms, obligations, and conditions",
+  required: [],
   properties: {
+    ...contractFields,
     contract_type: field("Type", { optional: true }),
     status: field("Status", { optional: true }),
     effective_date: field("Effective Date", { optional: true }),
@@ -75,6 +85,7 @@ const counterparty = defineEntityType({
   name: "Counterparty",
   description: "An external party involved in a contract or legal agreement",
   properties: {
+    ...counterpartyFields,
     organization_name: field("Organization", { optional: true }),
     jurisdiction: field("Jurisdiction", { optional: true }),
     contact_person: field("Contact", { optional: true }),
@@ -138,7 +149,16 @@ export default defineConfig({
   orgDescription:
     "Review contracts, summarize risk, and surface missing protections",
   agents: [legalReview],
-  entities: [clause, contract, counterparty, risk],
-  relationships: [belongsToCounterparty, containsClause, createsRisk],
-  automations: [contractReviewTracker],
+  entities: [clause, contract, counterparty, risk, ...legalEntities],
+  relationships: [
+    belongsToCounterparty,
+    containsClause,
+    createsRisk,
+    ...legalRelationships,
+  ],
+  automations: [contractReviewTracker, ...legalAutomations(legalReview)],
+  views: [
+    viewFromFile("./views/library.tsx"),
+    viewFromFile("./views/review.tsx"),
+  ],
 });
