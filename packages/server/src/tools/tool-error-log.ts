@@ -1,5 +1,16 @@
+import { describeError } from "@lobu/core";
 import logger from "../utils/logger";
 import { ToolUserError } from "../utils/errors";
+import { getTool } from "./registry";
+
+/**
+ * The span name and error scope of one tool call: the registered name, never a
+ * caller-supplied unknown name. The span and the failure log both derive their
+ * issue fingerprint from it, so one failure is one issue.
+ */
+export function toolErrorScope(toolName: string): string {
+	return `tool ${getTool(toolName)?.name ?? "unregistered"}`;
+}
 
 /**
  * Failure logging for the `executeTool` boundary, the shared chokepoint every
@@ -14,9 +25,12 @@ import { ToolUserError } from "../utils/errors";
  * error object is deliberately NOT passed to the logger: pino's err
  * serializer copies every enumerable own property, and a postgres.js
  * `PostgresError` carries `query`/`parameters`/`internal_query` — raw SQL and
- * bound values must never reach the diagnostic stream. Messages are excluded
- * for the same reason: they can embed entity titles, payload values or
- * credentials.
+ * bound values must never reach the diagnostic stream. Raw messages are
+ * excluded for the same reason: they can embed entity titles, payload values
+ * or credentials. The line carries the issue fingerprint, type and kind the
+ * tool span records (a hash, not the parameterized message or grouping text,
+ * which can still hold plain words), so it groups with that span instead of
+ * as one generic "Tool call failed" issue.
  */
 
 // Only bounded, constant-shaped codes are safe to log: ToolErrorCode values,
@@ -42,13 +56,17 @@ export function logToolCallFailure(args: {
 }): void {
 	const { error, toolName, callId, durationMs } = args;
 	if (error instanceof ToolUserError && error.httpStatus < 500) return;
+	const report = describeError(error, { scope: toolErrorScope(toolName) });
 	logger.error(
 		{
+			error_fingerprint: report.fingerprint,
+			error_type: report.type,
+			error_kind: report.kind,
 			tool_name: toolName,
 			call_id: callId,
 			duration_ms: durationMs,
 			error_class: error instanceof Error ? error.constructor.name : typeof error,
-			error_code: safeErrorCode(error),
+			error_code: safeErrorCode(error) ?? report.code ?? undefined,
 		},
 		"Tool call failed",
 	);

@@ -2,7 +2,14 @@ import postgres from "postgres";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import logger from "../../utils/logger";
 import { ToolUserError } from "../../utils/errors";
-import { logToolCallFailure } from "../tool-error-log";
+import { describeError } from "@lobu/core";
+import { logToolCallFailure, toolErrorScope } from "../tool-error-log";
+
+/** The fingerprint fields the tool span records for the same failure. */
+const spanIssue = (error: unknown, toolName: string) => {
+	const report = describeError(error, { scope: toolErrorScope(toolName) });
+	return { error_fingerprint: report.fingerprint, error_type: report.type, error_kind: report.kind };
+};
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -13,6 +20,7 @@ describe("logToolCallFailure", () => {
 		logToolCallFailure({ error, toolName: "resolve_path", callId: "call-1", durationMs: 10012 });
 		expect(log).toHaveBeenCalledExactlyOnceWith(
 			{
+				...spanIssue(error, "resolve_path"),
 				tool_name: "resolve_path",
 				call_id: "call-1",
 				duration_ms: 10012,
@@ -63,6 +71,7 @@ describe("logToolCallFailure", () => {
 		logToolCallFailure({ error, toolName: "resolve_path", callId: "call-3", durationMs: 10005 });
 		expect(log).toHaveBeenCalledExactlyOnceWith(
 			{
+				...spanIssue(error, "resolve_path"),
 				tool_name: "resolve_path",
 				call_id: "call-3",
 				duration_ms: 10005,
@@ -80,6 +89,7 @@ describe("logToolCallFailure", () => {
 		logToolCallFailure({ error, toolName: "manage_entity", callId: "call-4", durationMs: 2220 });
 		expect(log).toHaveBeenCalledExactlyOnceWith(
 			{
+				...spanIssue(error, "manage_entity"),
 				tool_name: "manage_entity",
 				call_id: "call-4",
 				duration_ms: 2220,
@@ -99,6 +109,7 @@ describe("logToolCallFailure", () => {
 		logToolCallFailure({ error, toolName: "resolve_path", callId: "call-5", durationMs: 1 });
 		expect(log).toHaveBeenCalledExactlyOnceWith(
 			{
+				...spanIssue(error, "resolve_path"),
 				tool_name: "resolve_path",
 				call_id: "call-5",
 				duration_ms: 1,
@@ -115,6 +126,7 @@ describe("logToolCallFailure", () => {
 		logToolCallFailure({ error: "string failure", toolName: "resolve_path", callId: "call-6", durationMs: 2 });
 		expect(log).toHaveBeenCalledExactlyOnceWith(
 			{
+				...spanIssue("string failure", "resolve_path"),
 				tool_name: "resolve_path",
 				call_id: "call-6",
 				duration_ms: 2,
@@ -123,5 +135,10 @@ describe("logToolCallFailure", () => {
 			},
 			"Tool call failed",
 		);
+	});
+
+	it("scopes by the registered tool name, never an unknown caller-supplied one", () => {
+		expect(toolErrorScope("resolve_path")).toBe("tool resolve_path");
+		expect(toolErrorScope("not-a-tool-sensitive-XYZ")).toBe("tool unregistered");
 	});
 });
