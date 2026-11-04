@@ -50,7 +50,7 @@ import {
   normalApprovalImpact,
 } from '../../utils/approval-context';
 import logger from '../../utils/logger';
-import { buildResourcePermalink, buildAutomationSettingsUrl } from '../../utils/url-builder';
+import { buildResourcePermalink } from '../../utils/url-builder';
 import { parsePositiveIntegerId, ToolUserError } from '../../utils/errors';
 import {
   requireOrgReadAccess,
@@ -800,21 +800,9 @@ async function queueAutomationWriteForApproval(
   });
 
   const { ownerSlug, baseUrl } = await getOrgUrlContext(ctx);
-  // An `update` is config-shaped, so its review surface is the automation edit form
-  // prefilled via `?run_id=` (WI-0.3, automation parity with manage_agents): the
-  // reviewer sees the proposed change in the real form and Approves/Rejects.
-  // The route is the workspace-level Automations section (agent-owned and
-  // agentless alike). create / create_from_version / set_reaction_script etc.
-  // aren't a single-form review, so they keep the run permalink (valid across
-  // the supersede chain on approve).
-  const settingsReviewUrl =
-    args.action === 'update' && args.automation_id != null
-      ? await buildAutomationSettingsUrl(baseUrl, ctx.organizationId, args.automation_id, {
-          runId,
-        }).catch(() => null)
-      : null;
-  const approvalUrl =
-    settingsReviewUrl ?? buildResourcePermalink(ownerSlug, { kind: 'run', runId }, baseUrl);
+  // The approval run is the review subject, including creation before an
+  // Automation exists. Event cards and peek reuse the same native review.
+  const approvalUrl = buildResourcePermalink(ownerSlug, { kind: 'run', runId }, baseUrl);
 
   // One destination, never the org-wide fan-out — see resolveApprovalChatOrigin.
   const chatOrigin = await resolveApprovalChatOrigin(ctx);

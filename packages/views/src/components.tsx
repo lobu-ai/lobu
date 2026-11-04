@@ -894,8 +894,9 @@ export function Sparkline({
 /**
  * A link the host opens: `href="deal/acme-renewal"` opens that record
  * (relative links resolve against the workspace root, see
- * `useHost().openLink`), a full URL opens a new tab. The sandboxed frame
- * cannot navigate itself, so every click goes through the host, modifier
+ * `useHost().openLink`). On Lobu hosts, supported same-workspace links open
+ * the peek pane; other app links navigate normally and external URLs open a new
+ * tab. The sandboxed frame cannot navigate itself, so every click goes through the host, modifier
  * clicks included; the anchor still shows the resolved address on hover.
  */
 export function Link({
