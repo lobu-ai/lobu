@@ -18,6 +18,9 @@
  *   - tweets:        search by query or track a handle (API v2 or extension search)
  *   - my_tweets:     authenticated user's posts and replies (API v2 or extension)
  *   - liked_tweets:  posts the user has liked (API v2 or signed-in extension backfill)
+ *   - following:     accounts the connected account follows (extension only);
+ *                    links each to a person, or a company for X Verified
+ *                    Organizations, walking the list across runs by cursor
  *   - bookmarks:        posts the user has bookmarked (API v2 or extension)
  *   - direct_messages:  1:1 and group DMs (OAuth API; extension fallback on /messages)
  *   - live_messages:    DMs read live from the signed-in browser without importing
@@ -63,6 +66,7 @@ import {
 	truncateHandoffReason as truncateSharedHandoffReason,
 } from "@lobu/connector-sdk";
 import { xDirectMessagesProgram } from "./x-dm-adapter.js";
+import { parseXHandleInput, setXFollow, setXLike } from "./x-like-follow.js";
 
 /** What one X sync gathers before it is committed. */
 type XSyncPage = {
@@ -94,6 +98,9 @@ interface XCheckpoint {
 	likes_oldest_tweet_id?: string;
 	likes_oldest_timestamp?: Date | string;
 	likes_backfill_completed_at?: Date | string;
+	/** Following walk position; absent when the next run starts at the top. */
+	following_cursor?: string;
+	following_walk_completed_at?: Date | string;
 }
 
 type XLikesBackfillStatus = "in_progress" | "complete";
@@ -232,6 +239,8 @@ interface XApiDmListResponse {
 /** x.com origins the dispatched chrome actions are allowed to touch. */
 const X_ALLOWED_ORIGINS = ["x.com", "*.x.com", "twitter.com", "*.twitter.com"];
 const X_LIKES_INTERCEPT_PATTERN = "/i/api/graphql/[^/]+/[^?]*Like";
+// Exactly the `Following` operation; `Followers` and `FollowersYouKnow` differ.
+const X_FOLLOWING_INTERCEPT_PATTERN = "/i/api/graphql/[^/]+/Following\\?";
 const X_RESPONSE_SHAPE_MAX_PATHS = 20;
 const X_RESPONSE_SHAPE_MAX_DEPTH = 6;
 const X_RESPONSE_SHAPE_MAX_SAMPLES = 3;
@@ -373,6 +382,86 @@ const X_LIKED_POST_ATTRIBUTIONS: EventAttributionRule[] = [
 			},
 			x_display_name: {
 				eventPath: "metadata.liked_by_name",
+				mergeStrategy: "prefer_non_empty",
+			},
+		},
+	},
+];
+
+/** The followed account as a person or company, keyed on its immutable id. */
+function xFollowedAccountTarget(
+	entityType: "person" | "company",
+	isOrganization: boolean,
+): EventAttributionTargetSpec {
+	return {
+		entityType,
+		createWhen: { path: "metadata.is_organization", equals: isOrganization },
+		titlePath: "metadata.followed_name",
+		identities: [
+			{
+				namespace: X_IDENTITY.USER_ID,
+				eventPath: "metadata.followed_user_id",
+				primary: true,
+			},
+			{ namespace: X_IDENTITY.HANDLE, eventPath: "metadata.followed_handle" },
+		],
+	};
+}
+
+const X_FOLLOWED_ACCOUNT_TRAITS: Record<string, EntityTraitSpec> = {
+	x_handle: {
+		eventPath: "metadata.followed_handle",
+		mergeStrategy: "prefer_non_empty",
+	},
+	x_display_name: {
+		eventPath: "metadata.followed_name",
+		mergeStrategy: "prefer_non_empty",
+	},
+};
+
+/**
+ * A followed account is an explicit personal signal, so it is created on no
+ * match: as a `company` when X marks it a Verified Organization (Business or
+ * Government), otherwise as a `person`. Identity lookup is type-agnostic and
+ * `createWhen` only gates create-on-miss, so an account already known under
+ * either type is linked, never duplicated. The followed account comes first
+ * so it keeps the event's flat `x_user_id` slot; the connected account is the
+ * performer, as on liked posts.
+ */
+const X_FOLLOWING_ATTRIBUTIONS: EventAttributionRule[] = [
+	{
+		role: "about",
+		autoCreate: true,
+		target: xFollowedAccountTarget("person", false),
+		traits: X_FOLLOWED_ACCOUNT_TRAITS,
+	},
+	{
+		role: "about",
+		autoCreate: true,
+		target: xFollowedAccountTarget("company", true),
+		traits: X_FOLLOWED_ACCOUNT_TRAITS,
+	},
+	{
+		role: "performed_by",
+		autoCreate: true,
+		target: {
+			entityType: "person",
+			titlePath: "metadata.followed_by_name",
+			identities: [
+				{
+					namespace: X_IDENTITY.USER_ID,
+					eventPath: "metadata.followed_by_id",
+					primary: true,
+				},
+				{
+					namespace: X_IDENTITY.HANDLE,
+					eventPath: "metadata.followed_by_handle",
+				},
+			],
+		},
+		traits: {
+			x_handle: {
+				eventPath: "metadata.followed_by_handle",
 				mergeStrategy: "prefer_non_empty",
 			},
 		},
@@ -693,6 +782,55 @@ function extractGraphqlUrls(legacy: any): XExpandedUrl[] {
 	});
 }
 
+/** An X account as GraphQL `user_results.result` describes it. */
+interface XGraphqlUser {
+	id?: string;
+	handle?: string;
+	name?: string;
+	description?: string;
+	createdAt?: string;
+	followersCount?: number;
+	isBlueVerified?: boolean;
+	/** X's organization/official verification, e.g. "Business" or "Government". */
+	verifiedType?: string;
+	profileImageShape?: string;
+}
+
+function optionalString(value: unknown): string | undefined {
+	return typeof value === "string" && value ? value : undefined;
+}
+
+/**
+ * Read one `user_results.result`. X moved the profile fields from `legacy`
+ * into `core`, `verification` and `profile_bio`; both shapes are read.
+ */
+function extractGraphqlUser(result: any): XGraphqlUser {
+	const id = result?.rest_id ?? result?.id;
+	const followers = result?.legacy?.followers_count;
+	return {
+		id: id ? String(id) : undefined,
+		handle: optionalString(
+			result?.core?.screen_name ?? result?.legacy?.screen_name,
+		),
+		name: optionalString(result?.core?.name ?? result?.legacy?.name),
+		description: optionalString(
+			result?.legacy?.description ?? result?.profile_bio?.description,
+		),
+		createdAt: optionalString(
+			result?.core?.created_at ?? result?.legacy?.created_at,
+		),
+		followersCount: typeof followers === "number" ? followers : undefined,
+		isBlueVerified:
+			typeof result?.is_blue_verified === "boolean"
+				? result.is_blue_verified
+				: undefined,
+		verifiedType: optionalString(
+			result?.verification?.verified_type ?? result?.legacy?.verified_type,
+		),
+		profileImageShape: optionalString(result?.profile_image_shape),
+	};
+}
+
 /**
  * Extract one tweet from an x.com GraphQL `tweet_results.result` object.
  * Shared by the search and home-timeline parsers so both handle the same edge
@@ -714,20 +852,16 @@ function extractTweetFromGraphqlResult(result: any): XTweet | null {
 	const restId = legacy.id_str ?? tweetNode?.rest_id ?? result.rest_id;
 	if (!restId) return null;
 
-	const userResult =
-		tweetNode?.core?.user_results?.result ?? result.core?.user_results?.result;
-	const screenName =
-		userResult?.core?.screen_name ?? userResult?.legacy?.screen_name ?? "";
-	const authorId = userResult?.rest_id ?? userResult?.id;
-	const authorDisplayName =
-		userResult?.core?.name ?? userResult?.legacy?.name ?? undefined;
+	const author = extractGraphqlUser(
+		tweetNode?.core?.user_results?.result ?? result.core?.user_results?.result,
+	);
 
 	return {
 		id: restId,
 		text,
-		username: screenName,
-		authorId: authorId ? String(authorId) : undefined,
-		authorDisplayName,
+		username: author.handle ?? "",
+		authorId: author.id,
+		authorDisplayName: author.name,
 		likes: legacy.favorite_count ?? 0,
 		retweets: legacy.retweet_count ?? 0,
 		replies: legacy.reply_count ?? 0,
@@ -887,15 +1021,29 @@ export function extractBottomCursor(instructions: any[]): string | undefined {
 	return undefined;
 }
 
+/** The first non-empty known instruction array, else the first array. */
+function timelineInstructions(data: any): any[] | undefined {
+	const candidates = timelineInstructionCandidates(data);
+	return (candidates.find(
+		(candidate) => Array.isArray(candidate) && candidate.length > 0,
+	) ?? candidates.find(Array.isArray)) as any[] | undefined;
+}
+
+function graphqlErrors(data: any): string[] {
+	return Array.isArray(data?.errors)
+		? data.errors.flatMap((error: any) => {
+				const message = error?.message ?? error?.detail;
+				return typeof message === "string" && message ? [message] : [];
+			})
+		: [];
+}
+
 export function parseBrowserTimelinePage(
 	_url: string,
 	json: unknown,
 ): XTimelinePage {
 	const data = json as any;
-	const candidates = timelineInstructionCandidates(data);
-	const instructions = (candidates.find(
-		(candidate) => Array.isArray(candidate) && candidate.length > 0,
-	) ?? candidates.find(Array.isArray)) as any[] | undefined;
+	const instructions = timelineInstructions(data);
 	const ownerResult = data?.data?.user?.result;
 	const owner = ownerResult
 		? {
@@ -914,12 +1062,7 @@ export function parseBrowserTimelinePage(
 					: {}),
 			}
 		: undefined;
-	const errors = Array.isArray(data?.errors)
-		? data.errors.flatMap((error: any) => {
-				const message = error?.message ?? error?.detail;
-				return typeof message === "string" && message ? [message] : [];
-			})
-		: [];
+	const errors = graphqlErrors(data);
 	return {
 		tweets: instructions ? extractTweetsFromInstructions(instructions) : [],
 		bottomCursor: instructions ? extractBottomCursor(instructions) : undefined,
@@ -939,6 +1082,95 @@ export function parseBrowserTimelineResponse(
 	json: unknown,
 ): XTweet[] {
 	return parseBrowserTimelinePage(url, json).tweets;
+}
+
+/** A followed account with the two fields an event cannot do without. */
+type XFollowedUser = XGraphqlUser & { id: string; handle: string };
+
+interface XFollowingPage {
+	users: XFollowedUser[];
+	bottomCursor?: string;
+	recognized: boolean;
+	errors: string[];
+}
+
+/** Parse one x.com GraphQL `Following` response into the accounts it lists. */
+function parseBrowserFollowingPage(
+	_url: string,
+	json: unknown,
+): XFollowingPage {
+	const data = json as any;
+	const instructions = timelineInstructions(data);
+	const users: XFollowedUser[] = [];
+	for (const instruction of instructions ?? []) {
+		for (const entry of instruction?.entries ?? []) {
+			const result =
+				entry?.content?.itemContent?.user_results?.result ??
+				entry?.item?.itemContent?.user_results?.result;
+			if (!result || result.__typename === "UserUnavailable") continue;
+			const user = extractGraphqlUser(result);
+			if (user.id && user.handle)
+				users.push({ ...user, id: user.id, handle: user.handle });
+		}
+	}
+	return {
+		users,
+		bottomCursor: instructions ? extractBottomCursor(instructions) : undefined,
+		recognized: instructions !== undefined,
+		errors: graphqlErrors(data),
+	};
+}
+
+/** X's Verified Organization types; other verified accounts are people. */
+const X_ORGANIZATION_VERIFIED_TYPES = new Set(["Business", "Government"]);
+
+/**
+ * One event per followed account, keyed on the connected account and the
+ * followed id so a later walk updates it instead of adding another. X does
+ * not say when a follow happened, and a sync-time date would supersede every
+ * row on every walk, so `occurred_at` is the followed account's creation time
+ * (`timestamp_basis` says so).
+ */
+export function followedAccountToEvent(
+	user: XFollowedUser,
+	follower: { id: string; handle: string },
+	observedAt: Date,
+): EventEnvelope {
+	const handle = normalizeXHandle(user.handle) ?? user.handle;
+	const name = user.name ?? `@${user.handle}`;
+	const created = user.createdAt ? new Date(user.createdAt) : null;
+	const createdValid = created !== null && !Number.isNaN(created.getTime());
+	return {
+		origin_id: `x_following_${follower.id}_${user.id}`,
+		origin_type: "followed_account",
+		payload_text: `Follows @${user.handle}${user.name ? ` (${user.name})` : ""}${
+			user.description ? `: ${user.description}` : ""
+		}`,
+		author_name: name,
+		source_url: `https://x.com/${user.handle}`,
+		occurred_at: createdValid ? created : observedAt,
+		metadata: {
+			followed_user_id: user.id,
+			followed_handle: handle,
+			followed_name: name,
+			...(user.description ? { followed_description: user.description } : {}),
+			...(user.followersCount !== undefined
+				? { followers_count: user.followersCount }
+				: {}),
+			is_blue_verified: user.isBlueVerified === true,
+			...(user.verifiedType ? { verified_type: user.verifiedType } : {}),
+			...(user.profileImageShape
+				? { profile_image_shape: user.profileImageShape }
+				: {}),
+			is_organization: X_ORGANIZATION_VERIFIED_TYPES.has(
+				user.verifiedType ?? "",
+			),
+			followed_by_id: follower.id,
+			followed_by_handle: normalizeXHandle(follower.handle) ?? follower.handle,
+			followed_by_name: `@${follower.handle}`,
+			timestamp_basis: createdValid ? "account_created_at" : "observed_at",
+		},
+	};
 }
 
 const TWEET_FIELDS =
@@ -1345,18 +1577,24 @@ function readLikesIncrementalPageBudget(
 	return readPositiveInteger(config.incremental_pages, 2, 10);
 }
 
-export function readGraphqlCursor(requestUrl: string): string | undefined {
+/** One non-empty string from a GraphQL request URL's `variables` JSON. */
+function readGraphqlVariable(
+	requestUrl: string,
+	name: string,
+): string | undefined {
 	try {
 		const parsed = new URL(requestUrl);
 		const raw = parsed.searchParams.get("variables");
 		if (!raw) return undefined;
-		const variables = JSON.parse(raw) as { cursor?: unknown };
-		return typeof variables.cursor === "string" && variables.cursor
-			? variables.cursor
-			: undefined;
+		const value = (JSON.parse(raw) as Record<string, unknown>)[name];
+		return typeof value === "string" && value ? value : undefined;
 	} catch {
 		return undefined;
 	}
+}
+
+export function readGraphqlCursor(requestUrl: string): string | undefined {
+	return readGraphqlVariable(requestUrl, "cursor");
 }
 
 export function replaceGraphqlCursor(
@@ -1365,11 +1603,11 @@ export function replaceGraphqlCursor(
 ): string {
 	const parsed = new URL(requestUrl);
 	if (!/(^|\.)(?:x|twitter)\.com$/i.test(parsed.hostname)) {
-		throw new Error("X likes pagination refused a non-X request URL");
+		throw new Error("X pagination refused a non-X request URL");
 	}
 	const raw = parsed.searchParams.get("variables");
 	if (!raw) {
-		throw new Error("X likes pagination response URL has no GraphQL variables");
+		throw new Error("X pagination response URL has no GraphQL variables");
 	}
 	const variables = JSON.parse(raw) as Record<string, unknown>;
 	variables.cursor = cursor;
@@ -1377,8 +1615,20 @@ export function replaceGraphqlCursor(
 	return parsed.toString();
 }
 
-class XLikesPageTracker {
-	readonly historicalTweetIds = new Set<string>();
+/** One parsed cursor page: the item ids it carried and X's bottom cursor. */
+interface XCursorPage {
+	itemIds: string[];
+	bottomCursor?: string;
+}
+
+/**
+ * Tracks a cursor walk over one X GraphQL timeline (Likes, Following) captured
+ * through the extension: which response advances the walk, the request URL to
+ * replay with the next cursor, and whether the list end was reached. Late
+ * duplicates of an earlier page never move the cursor back.
+ */
+class XCursorPageTracker {
+	readonly historicalIds = new Set<string>();
 	recognizedResponses = 0;
 	requestedPages = 0;
 	respondedPages = 0;
@@ -1390,15 +1640,20 @@ class XLikesPageTracker {
 	private readonly startedFromResume: boolean;
 	private terminalSeen = false;
 
+	/**
+	 * @param endsOnEmptyPage An advancing page without items ends the list even
+	 * when X still returns a bottom cursor (Following does this at its end).
+	 */
 	constructor(
 		private readonly backfill: boolean,
 		resumeCursor: string | undefined,
+		private readonly endsOnEmptyPage = false,
 	) {
 		this.nextCursor = resumeCursor;
 		this.startedFromResume = resumeCursor !== undefined;
 	}
 
-	recordPage(url: string, page: XTimelinePage): void {
+	recordPage(url: string, page: XCursorPage): void {
 		const isInitialPage = this.recognizedResponses === 0;
 		this.recognizedResponses += 1;
 
@@ -1412,17 +1667,19 @@ class XLikesPageTracker {
 
 		if (isRequestedPage) {
 			this.respondedPages += 1;
-			this.recordHistoricalPage(page.tweets);
+			this.recordHistoricalPage(page.itemIds);
 			this.activeRequestedCursor = undefined;
 		}
 
 		if (this.backfill && isInitialPage && !this.startedFromResume) {
-			this.recordHistoricalPage(page.tweets);
+			this.recordHistoricalPage(page.itemIds);
 		}
 
-		if (advancesCursor && page.bottomCursor) {
+		const empty = page.itemIds.length === 0;
+		if (!advancesCursor) return;
+		if (page.bottomCursor && !(this.endsOnEmptyPage && empty)) {
 			this.nextCursor = page.bottomCursor;
-		} else if (advancesCursor && page.tweets.length > 0) {
+		} else if (!empty || this.endsOnEmptyPage) {
 			this.nextCursor = undefined;
 			this.terminalSeen = true;
 		}
@@ -1448,10 +1705,10 @@ class XLikesPageTracker {
 		return !this.backfill || this.terminalSeen ? "complete" : "in_progress";
 	}
 
-	private recordHistoricalPage(tweets: XTweet[]): void {
+	private recordHistoricalPage(itemIds: string[]): void {
 		if (!this.backfill) return;
 		this.pagesRead += 1;
-		for (const tweet of tweets) this.historicalTweetIds.add(tweet.id);
+		for (const id of itemIds) this.historicalIds.add(id);
 	}
 }
 
@@ -2123,6 +2380,51 @@ async function syncMyTweetsViaExtension(
 	});
 }
 
+/**
+ * Pagination for a captured X timeline: replay the page's own GraphQL request
+ * in the page with the tracker's next cursor. Failures are recorded, never
+ * thrown, so pages already captured are kept.
+ */
+function cursorReplayTrigger(
+	pages: XCursorPageTracker,
+	label: string,
+	parserErrors: string[],
+) {
+	return async (
+		_tabId: number,
+		browserDispatcher: ChromeActionDispatcher,
+		sessionId: string,
+	): Promise<void> => {
+		let requestUrl: string | undefined;
+		try {
+			requestUrl = pages.prepareReplay();
+		} catch {
+			parserErrors.push(`X ${label} cursor rewrite failed`);
+			return;
+		}
+		if (!requestUrl) return;
+		let observation: { ok?: boolean; status?: number };
+		try {
+			observation = await browserDispatcher.dispatch<{
+				ok?: boolean;
+				status?: number;
+			}>("network_intercept_replay", {
+				session_id: sessionId,
+				url: requestUrl,
+				allowed_origins: X_ALLOWED_ORIGINS,
+			});
+		} catch {
+			parserErrors.push(`X ${label} cursor request failed (transport_error)`);
+			return;
+		}
+		if (observation.ok !== true) {
+			parserErrors.push(
+				`X ${label} cursor request failed (${observation.status ?? "unknown"})`,
+			);
+		}
+	};
+}
+
 async function syncLikedTweetsViaExtension(
 	ctx: SyncContext,
 	config: Record<string, unknown>,
@@ -2137,7 +2439,7 @@ async function syncLikedTweetsViaExtension(
 		: readLikesBackfillPageBudget(config);
 	const startsAtFirstPage =
 		!previouslyComplete && !checkpoint.likes_backfill_cursor;
-	const pages = new XLikesPageTracker(
+	const pages = new XCursorPageTracker(
 		!previouslyComplete,
 		previouslyComplete ? undefined : checkpoint.likes_backfill_cursor,
 	);
@@ -2156,7 +2458,10 @@ async function syncLikedTweetsViaExtension(
 		if (!page.recognized || page.errors.length > 0) {
 			return [];
 		}
-		pages.recordPage(url, page);
+		pages.recordPage(url, {
+			itemIds: page.tweets.map((tweet) => tweet.id),
+			bottomCursor: page.bottomCursor,
+		});
 		owner = page.owner ?? owner;
 
 		return page.tweets.map((tweet) => ({
@@ -2184,35 +2489,7 @@ async function syncLikedTweetsViaExtension(
 		url: likesUrl,
 		parseResponse,
 		checkAuth: (currentUrl) => !isXAuthWall(currentUrl),
-		triggerNextPage: async (_tabId, browserDispatcher, sessionId) => {
-			let requestUrl: string | undefined;
-			try {
-				requestUrl = pages.prepareReplay();
-			} catch {
-				parserErrors.push("X likes cursor rewrite failed");
-				return;
-			}
-			if (!requestUrl) return;
-			let observation: { ok?: boolean; status?: number };
-			try {
-				observation = await browserDispatcher.dispatch<{
-					ok?: boolean;
-					status?: number;
-				}>("network_intercept_replay", {
-					session_id: sessionId,
-					url: requestUrl,
-					allowed_origins: X_ALLOWED_ORIGINS,
-				});
-			} catch {
-				parserErrors.push("X likes cursor request failed (transport_error)");
-				return;
-			}
-			if (observation.ok !== true) {
-				parserErrors.push(
-					`X likes cursor request failed (${observation.status ?? "unknown"})`,
-				);
-			}
-		},
+		triggerNextPage: cursorReplayTrigger(pages, "likes", parserErrors),
 	});
 
 	if (pages.recognizedResponses === 0) {
@@ -2251,9 +2528,113 @@ async function syncLikedTweetsViaExtension(
 			status,
 			nextCursor: status === "in_progress" ? pages.nextCursor : undefined,
 			pagesRead: pages.pagesRead,
-			historicalItemsRead: pages.historicalTweetIds.size,
+			historicalItemsRead: pages.historicalIds.size,
 		},
 	);
+}
+
+/**
+ * Walk the connected account's Following list from the paired browser. Each
+ * run reads the top page (new follows appear first), then continues from the
+ * checkpointed cursor for up to `pages_per_run` pages. When the list ends the
+ * cursor is cleared, so the next run walks again from the top.
+ */
+async function syncFollowingViaExtension(
+	ctx: SyncContext,
+	config: Record<string, unknown>,
+	checkpoint: XCheckpoint,
+): Promise<XSyncPage> {
+	const accountId = requireXAccount(ctx);
+	const dispatcher = requireXBrowser(ctx);
+	const accountHandle = await resolveAccountHandle(config);
+	const followingUrl = `https://x.com/${encodeURIComponent(accountHandle)}/following`;
+	const pageBudget = readPositiveInteger(config.pages_per_run, 5, 30);
+	const resumeCursor = checkpoint.following_cursor;
+	const pages = new XCursorPageTracker(true, resumeCursor, true);
+	const parserErrors: string[] = [];
+	const listOwners = new Set<string>();
+
+	const parseResponse = (url: string, json: unknown): XFollowedUser[] => {
+		const page = parseBrowserFollowingPage(url, json);
+		parserErrors.push(...page.errors);
+		if (!page.recognized || page.errors.length > 0) return [];
+		// The request names whose list this is. Only the connected account's own
+		// list may be attributed to it.
+		const owner = readGraphqlVariable(url, "userId") ?? "unknown";
+		if (owner !== accountId) {
+			listOwners.add(owner);
+			return [];
+		}
+		pages.recordPage(url, {
+			itemIds: page.users.map((user) => user.id),
+			bottomCursor: page.bottomCursor,
+		});
+		return page.users;
+	};
+
+	const result = await extensionNetworkSync<XFollowedUser>({
+		dispatcher,
+		config: {
+			interceptPatterns: [{ regex: X_FOLLOWING_INTERCEPT_PATTERN }],
+			allowedOrigins: X_ALLOWED_ORIGINS,
+			// The page loads the top page itself; a resumed walk spends the whole
+			// budget past it.
+			maxScrolls: Math.max(0, pageBudget - (resumeCursor ? 0 : 1)),
+			scrollDelayMs: 750,
+			responseTimeoutMs: 5000,
+		},
+		url: followingUrl,
+		parseResponse,
+		checkAuth: (currentUrl) => !isXAuthWall(currentUrl),
+		triggerNextPage: cursorReplayTrigger(pages, "following", parserErrors),
+	});
+
+	if (listOwners.size > 0) {
+		throw new Error(
+			`X Following list for account_handle "${accountHandle}" is not the connected account's list; set account_handle to the connected account's own handle`,
+		);
+	}
+	if (pages.recognizedResponses === 0) {
+		throw new Error(
+			`X Following captured ${result.apiCallCount} matching response(s) but no recognizable list (pattern=${X_FOLLOWING_INTERCEPT_PATTERN})${
+				parserErrors.length > 0 ? `: ${parserErrors.join("; ")}` : ""
+			}`,
+		);
+	}
+
+	const observedAt = new Date();
+	const follower = { id: accountId, handle: accountHandle };
+	const seen = new Set<string>();
+	const events = result.items.flatMap((user) => {
+		if (seen.has(user.id)) return [];
+		seen.add(user.id);
+		return [followedAccountToEvent(user, follower, observedAt)];
+	});
+	const status = pages.status();
+	const nextCheckpoint: XCheckpoint = { ...checkpoint };
+	if (status === "complete") {
+		delete nextCheckpoint.following_cursor;
+		nextCheckpoint.following_walk_completed_at = observedAt;
+	} else if (pages.nextCursor) {
+		nextCheckpoint.following_cursor = pages.nextCursor;
+	}
+	return {
+		events,
+		checkpoint: nextCheckpoint as unknown as Record<string, unknown>,
+		metadata: {
+			items_found: events.length,
+			backend: result.backend,
+			api_calls: result.apiCallCount,
+			account_handle: accountHandle,
+			feed: "following",
+			collection_status: status,
+			pages_requested: pages.requestedPages,
+			pages_received: pages.respondedPages,
+			pages_unconfirmed: pages.unconfirmedPages,
+			parser_errors: parserErrors,
+			next_cursor: nextCheckpoint.following_cursor ?? null,
+		},
+	};
 }
 
 async function syncLikedTweetsViaOAuthApi(
@@ -2675,6 +3056,27 @@ const likedTweetsConfigSchema = {
 			default: 2,
 			description:
 				"Pages read from the newest likes after the historical backfill reaches the platform boundary.",
+		},
+	},
+};
+
+const followingConfigSchema = {
+	type: "object",
+	required: ["account_handle"],
+	properties: {
+		account_handle: {
+			type: "string",
+			minLength: 1,
+			description:
+				'The connected account\'s own X handle (e.g. "testuser"). Its Following list is read in the paired browser.',
+		},
+		pages_per_run: {
+			type: "integer",
+			minimum: 1,
+			maximum: 30,
+			default: 5,
+			description:
+				"Maximum Following pages read per run. The walk position is checkpointed so the next run continues; after the end of the list the next run starts again from the top.",
 		},
 	},
 };
@@ -3429,8 +3831,8 @@ export default class XConnector extends ConnectorRuntime {
 		key: "x",
 		name: "X (Twitter)",
 		description:
-			"Fetches tweets, browser-visible like history, bookmarks, and DMs through the X API v2 or the paired Owletto Chrome extension, reads the chronological Following timeline live through the X API, captures notification references, and reads and answers DMs live in the paired browser. Links social actors into the person graph.",
-		version: "3.16.0",
+			"Fetches tweets, browser-visible like history, bookmarks, and DMs through the X API v2 or the paired Owletto Chrome extension, reads the chronological Following timeline live through the X API, captures notification references and the accounts you follow, reads and answers DMs live in the paired browser, and likes posts or follows accounts there. Links social actors into the person and company graph.",
+		version: "3.17.0",
 		faviconDomain: "x.com",
 		browser: {
 			origins: ["https://x.com", "https://twitter.com"],
@@ -3513,6 +3915,7 @@ export default class XConnector extends ConnectorRuntime {
 			{ key: "tweet", label: "Tweet" },
 			{ key: "reply", label: "Reply" },
 			{ key: "liked_tweet", label: "Liked Tweet" },
+			{ key: "followed_account", label: "Followed Account" },
 			{ key: "bookmark", label: "Bookmark" },
 			{ key: "dm_message", label: "DM Message" },
 			{ key: "notification", label: "Notification" },
@@ -3629,6 +4032,20 @@ export default class XConnector extends ConnectorRuntime {
 					},
 				},
 			},
+			following: {
+				key: "following",
+				name: "Following",
+				sync: (ctx) => this.syncFeed(ctx),
+				description:
+					"Accounts the connected account follows, read from its Following list in the paired Chrome browser (requires a browser-authenticated X connection). Each followed account becomes a person, or a company when X marks it a Verified Organization (Business or Government). Each run reads the newest follows plus up to pages_per_run pages further down, resuming where the last run stopped and starting over from the top after the end of the list.",
+				configSchema: followingConfigSchema,
+				eventKinds: {
+					followed_account: {
+						description: "An account the connected account follows",
+						attributions: X_FOLLOWING_ATTRIBUTIONS,
+					},
+				},
+			},
 			bookmarks: {
 				key: "bookmarks",
 				name: "Bookmarks",
@@ -3686,6 +4103,83 @@ export default class XConnector extends ConnectorRuntime {
 			},
 		},
 		actions: {
+			set_like: {
+				key: "set_like",
+				name: "Set like",
+				kind: "write",
+				description:
+					"Requires an X connection authenticated through your paired Chrome browser. Set the Like on one exact X post as the connected account and verify it after reload. An already-matching post is unchanged. Never replies, reposts or posts; selection and budgets belong to the calling Automation or agent.",
+				annotations: {
+					openWorldHint: true,
+					destructiveHint: false,
+					idempotentHint: true,
+				},
+				inputSchema: {
+					type: "object",
+					required: ["liked"],
+					anyOf: [{ required: ["tweet_url"] }, { required: ["tweet_id"] }],
+					additionalProperties: false,
+					properties: {
+						tweet_url: {
+							type: "string",
+							description:
+								'Post URL, e.g. "https://x.com/someone/status/2083959735481716957". twitter.com URLs are accepted.',
+						},
+						tweet_id: {
+							type: "string",
+							description:
+								"Numeric post id when tweet_url is omitted (the `origin_id` on X timeline events).",
+						},
+						liked: { type: "boolean" },
+					},
+				},
+				outputSchema: {
+					type: "object",
+					properties: {
+						tweet_id: { type: "string" },
+						tweet_url: { type: "string" },
+						liked: { type: "boolean" },
+						changed: { type: "boolean" },
+						verified: { type: "boolean" },
+					},
+				},
+			},
+			set_follow: {
+				key: "set_follow",
+				name: "Set follow",
+				kind: "write",
+				description:
+					"Requires an X connection authenticated through your paired Chrome browser. Follow or unfollow one X account as the connected account and verify it after reload. An already-matching account is unchanged; following a protected account leaves a pending request (pending: true). Refuses the connected account itself. Selection and budgets belong to the calling Automation or agent.",
+				annotations: {
+					openWorldHint: true,
+					destructiveHint: false,
+					idempotentHint: true,
+				},
+				inputSchema: {
+					type: "object",
+					required: ["handle", "following"],
+					additionalProperties: false,
+					properties: {
+						handle: {
+							type: "string",
+							description:
+								'X handle with or without @, or the profile URL, e.g. "someone" or "https://x.com/someone".',
+						},
+						following: { type: "boolean" },
+					},
+				},
+				outputSchema: {
+					type: "object",
+					properties: {
+						handle: { type: "string" },
+						user_id: { type: "string" },
+						following: { type: "boolean" },
+						pending: { type: "boolean" },
+						changed: { type: "boolean" },
+						verified: { type: "boolean" },
+					},
+				},
+			},
 			send_message: {
 				key: "send_message",
 				kind: "write",
@@ -3799,6 +4293,50 @@ export default class XConnector extends ConnectorRuntime {
 
 	async execute(ctx: ActionContext): Promise<ActionResult> {
 		try {
+			if (ctx.actionKey === "set_like") {
+				if (typeof ctx.input.liked !== "boolean")
+					return { success: false, error: "liked must be a boolean" };
+				const tweetRef =
+					(typeof ctx.input.tweet_url === "string" &&
+						ctx.input.tweet_url.trim()) ||
+					(typeof ctx.input.tweet_id === "string" &&
+						ctx.input.tweet_id.trim()) ||
+					"";
+				const tweetUrl = tweetRef ? normalizeXPostUrl(tweetRef) : null;
+				if (!tweetUrl)
+					return {
+						success: false,
+						error: "tweet_url or tweet_id must identify an exact X post",
+					};
+				const browser = requireXBrowser(ctx);
+				const output = await setXLike(browser, {
+					tweetUrl,
+					tweetId: new URL(tweetUrl).pathname.split("/").at(-1) ?? "",
+					accountId: requireXAccount(ctx),
+					liked: ctx.input.liked,
+				});
+				return { success: true, output: { ...output } };
+			}
+			if (ctx.actionKey === "set_follow") {
+				if (typeof ctx.input.following !== "boolean")
+					return { success: false, error: "following must be a boolean" };
+				const handle =
+					typeof ctx.input.handle === "string"
+						? parseXHandleInput(ctx.input.handle)
+						: null;
+				if (!handle)
+					return {
+						success: false,
+						error: "handle must be an X handle or x.com profile URL",
+					};
+				const browser = requireXBrowser(ctx);
+				const output = await setXFollow(browser, {
+					handle,
+					accountId: requireXAccount(ctx),
+					following: ctx.input.following,
+				});
+				return { success: true, output: { ...output } };
+			}
 			if (ctx.actionKey === "send_message") {
 				const dispatcher = requireXBrowser(ctx);
 				const accountId = requireXAccount(ctx);
@@ -3882,6 +4420,11 @@ export default class XConnector extends ConnectorRuntime {
 				);
 			}
 			return syncMyTweetsViaExtension(ctx, config, checkpoint);
+		}
+
+		// The Following list is read in the browser only.
+		if (feedKey === "following") {
+			return syncFollowingViaExtension(ctx, config, checkpoint);
 		}
 
 		if (feedKey === "liked_tweets") {

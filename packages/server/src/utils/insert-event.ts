@@ -308,6 +308,7 @@ const VOLATILE_METADATA_KEYS = new Set([
   'retweet_count',
   'quote_count',
   'bookmark_count',
+  'followers_count',
   'rank',
   'updated_at',
 ]);
