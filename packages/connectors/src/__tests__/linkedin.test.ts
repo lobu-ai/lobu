@@ -921,6 +921,8 @@ describe("buildHomeFeedEvents", () => {
     );
     expect(ev.metadata).toEqual({
       author: "MoltSets",
+      author_company_slug: "moltsets",
+      author_company_url: "https://www.linkedin.com/company/moltsets",
       social_actor: "Deb Mukherjee",
       social_action: "like",
       social_actor_slug: "debgotwired",
@@ -953,6 +955,52 @@ describe("buildHomeFeedEvents", () => {
       new Date()
     );
     expect(ev.metadata).not.toHaveProperty("author_linkedin_slug");
+    // Equally ambiguous the other way: a same-named member blocks the company.
+    expect(ev.metadata).not.toHaveProperty("author_company_slug");
+  });
+
+  test("attributes a company author by its single company anchor, never a mentioned company", () => {
+    const [companyPost, personPost] = buildHomeFeedEvents(
+      [
+        {
+          id: "company-card",
+          body: "Feed post Synthetic Co 1,234 followers Company update with enough text to keep",
+          author_control_label: "Open control menu for post by Synthetic Co",
+          links: [
+            {
+              href: "https://www.linkedin.com/company/Synthetic-Co/posts/",
+              name: "View company: Synthetic Co",
+            },
+          ],
+        },
+        {
+          id: "person-card",
+          body: "Feed post Fixture Person • 2nd Congrats to Mentioned Co on the launch today",
+          author_control_label: "Open control menu for post by Fixture Person",
+          links: [
+            {
+              href: "https://www.linkedin.com/in/fixture-person/",
+              name: "View Fixture Person’s profile",
+            },
+            {
+              href: "https://www.linkedin.com/company/mentioned-co/",
+              name: "View company: Mentioned Co",
+            },
+          ],
+        },
+      ],
+      new Date()
+    );
+    expect(companyPost.author_name).toBe("Synthetic Co");
+    expect(companyPost.metadata).toMatchObject({
+      author_company_slug: "synthetic-co",
+      author_company_url: "https://www.linkedin.com/company/synthetic-co",
+    });
+    expect(companyPost.metadata).not.toHaveProperty("author_linkedin_slug");
+    expect(personPost.metadata).toMatchObject({
+      author_linkedin_slug: "fixture-person",
+    });
+    expect(personPost.metadata).not.toHaveProperty("author_company_slug");
   });
 
   test("does not attribute when two distinct members share the author's name", () => {
@@ -1037,7 +1085,7 @@ describe("buildHomeFeedEvents", () => {
     });
   });
 
-  test("live DOM: engagement card with a company author gives the author no person slug", () => {
+  test("live DOM: engagement card with a company author attributes the company, not a person", () => {
     const [ev] = buildHomeFeedEvents(
       [
         {
@@ -1061,6 +1109,8 @@ describe("buildHomeFeedEvents", () => {
     expect(ev.author_name).toBe("Swipeline TR");
     expect(ev.metadata).toEqual({
       author: "Swipeline TR",
+      author_company_slug: "swipelinetr",
+      author_company_url: "https://www.linkedin.com/company/swipelinetr",
       social_actor: "Onur Demirtaş",
       social_action: "like",
       social_actor_slug: "onurdmrts",
@@ -1300,7 +1350,7 @@ describe("buildHomeFeedEvents", () => {
     expect(ev.metadata).toEqual({ author: "Hugo Lu" });
   });
 
-  test("does not attribute a later person link to a company author", () => {
+  test("attributes a company author to its company, never a later tagged member", () => {
     const [ev] = buildHomeFeedEvents(
       [
         {
@@ -1322,7 +1372,11 @@ describe("buildHomeFeedEvents", () => {
       ],
       new Date()
     );
-    expect(ev.metadata).toEqual({ author: "Acme Corp" });
+    expect(ev.metadata).toEqual({
+      author: "Acme Corp",
+      author_company_slug: "acme",
+      author_company_url: "https://www.linkedin.com/company/acme",
+    });
   });
 
   test("drops rows without id or body and keeps posts sharing a component key", () => {
@@ -1734,6 +1788,65 @@ describe("LinkedInConnector home_feed", () => {
     ).toEqual(["commenter", "post_author", "parent_comment_author"]);
   });
 
+  test("declares a company author and gates only engager-type person creation", () => {
+    const homeFeed = new LinkedInConnector().definition.feeds.home_feed;
+    expect(homeFeed.configSchema.properties.create_engager_people).toMatchObject(
+      { type: "boolean", default: true }
+    );
+    const rules = [
+      ...homeFeed.eventKinds.post.attributions,
+      ...homeFeed.eventKinds.comment.attributions,
+    ];
+    const byName = Object.fromEntries(
+      rules.map((rule: { name: string }) => [rule.name, rule])
+    );
+    expect(byName.company_author).toMatchObject({
+      role: "authored_by",
+      autoCreate: true,
+      target: {
+        entityType: "company",
+        titlePath: "author_name",
+        identities: [
+          {
+            namespace: "linkedin_company_slug",
+            eventPath: "metadata.author_company_slug",
+          },
+        ],
+      },
+      traits: {
+        linkedin_url: {
+          eventPath: "metadata.author_company_url",
+          mergeStrategy: "prefer_non_empty",
+        },
+      },
+    });
+    // Engager-type roles keep linking existing people but create only while
+    // the connection's switch is on; an event without the stamp still creates
+    // because the gate is notEquals:false.
+    for (const name of ["engager", "commenter", "parent_comment_author"]) {
+      expect(byName[name].autoCreate).toBe(true);
+      expect(byName[name].target.createWhen).toEqual({
+        path: "metadata.create_engager_people",
+        notEquals: false,
+      });
+    }
+    for (const name of ["author", "post_author", "company_author"]) {
+      expect(byName[name].autoCreate).toBe(true);
+      expect(byName[name].target.createWhen).toBeUndefined();
+    }
+    expect(
+      homeFeed.eventKinds.post.metadataSchema.properties
+    ).toMatchObject({
+      author_company_slug: { type: "string" },
+      author_company_url: { type: "string" },
+      create_engager_people: { type: "boolean" },
+    });
+    expect(
+      homeFeed.eventKinds.comment.metadataSchema.properties
+        .create_engager_people
+    ).toMatchObject({ type: "boolean" });
+  });
+
   test("syncHomeFeed dispatches cs_scrape and maps rows to events", async () => {
     const calls: Array<{ action: string; input: Record<string, unknown> }> = [];
     const dom = new JSDOM(
@@ -2009,7 +2122,8 @@ describe("LinkedInConnector home_feed", () => {
     body: string,
     setup?: (dom: JSDOM) => void,
     expandRowsOverride?: Record<string, unknown>,
-    scrollOverride?: Record<string, number>
+    scrollOverride?: Record<string, number>,
+    feedConfig: Record<string, unknown> = {}
   ) => {
     const dom = new JSDOM(`<!doctype html><body>${body}</body>`, {
       url: "https://www.linkedin.com/feed/",
@@ -2045,7 +2159,7 @@ describe("LinkedInConnector home_feed", () => {
     try {
       return await runSync(new LinkedInConnector(), {
         feedKey: "home_feed",
-        config: { max_scrolls: 1 },
+        config: { max_scrolls: 1, ...feedConfig },
         checkpoint: {},
         browser: {
           dispatch: async (
@@ -2108,6 +2222,58 @@ describe("LinkedInConnector home_feed", () => {
       },
     ]);
     expect(res.metadata.comment_threads_complete).toBe(true);
+  });
+
+  // A company-authored card as the scrape sees it: the company avatar link is
+  // named by its logo's alt ("View company: <Name>"), the shape recorded from
+  // the live feed above. The slug must come from that anchor at scrape time.
+  const companyCardHtml = `
+      <div componentkey="expandedcompany_tokenFeedType_MAIN_FEED_RELEVANCE">
+        <button aria-label="Open control menu for post by Synthetic Co"></button>
+        <a href="https://www.linkedin.com/company/synthetic-co/posts/">
+          <img src="https://media.licdn.com/dms/image/v2/company-logo_100_100/synthetic" alt="View company: Synthetic Co" />
+        </a>
+        <span id="translatable-commentary-urn:li:activity:4444444444444444444"></span>
+        <p>Synthetic Co 1,234 followers A company update long enough to pass the noise filter</p>
+        <div id="replaceableComment_urn:li:comment:(urn:li:activity:4444444444444444444,5555555555555555555)">
+          <a href="https://www.linkedin.com/in/fixture-commenter/">
+            <span aria-hidden="true">Fixture Commenter</span>
+            <span aria-label="View Fixture Commenter’s profile"></span>
+          </a>
+          <p>Fixture Commenter • A visible comment on the company post that is long enough</p>
+        </div>
+      </div>`;
+
+  test("scrapes a company author's slug from the card and stamps the engager switch", async () => {
+    const res = await syncHomeFeedDom(companyCardHtml);
+    const [post, comment] = res.events;
+    expect(post.author_name).toBe("Synthetic Co");
+    expect(post.metadata).toMatchObject({
+      author_company_slug: "synthetic-co",
+      author_company_url: "https://www.linkedin.com/company/synthetic-co",
+      create_engager_people: true,
+    });
+    expect(comment.metadata).toMatchObject({
+      author_linkedin_slug: "fixture-commenter",
+      create_engager_people: true,
+    });
+    // The company slug belongs to the post author; a comment's own author is
+    // the commenter, so it never inherits the parent card's company.
+    expect(comment.metadata).not.toHaveProperty("author_company_slug");
+  });
+
+  test("create_engager_people: false stamps every home-feed event for the createWhen gate", async () => {
+    const res = await syncHomeFeedDom(
+      companyCardHtml,
+      undefined,
+      undefined,
+      undefined,
+      { create_engager_people: false }
+    );
+    expect(res.events).toHaveLength(2);
+    for (const event of res.events) {
+      expect(event.metadata.create_engager_people).toBe(false);
+    }
   });
 
   test.each([
@@ -3143,7 +3309,7 @@ describe("LinkedInConnector live post author identity (member id)", () => {
     expect(post.authorSlug).toBe("jane-doe");
   });
 
-  test("a company-authored post (no member urn) yields no member id", () => {
+  test("a company-authored post (no member urn) yields no member id but a company slug", async () => {
     const json = {
       included: [
         {
@@ -3174,6 +3340,49 @@ describe("LinkedInConnector live post author identity (member id)", () => {
     expect(post.authorMemberId).toBeUndefined();
     // /company/ URL is not a person slug.
     expect(post.authorSlug).toBeUndefined();
+    expect(post.authorCompanySlug).toBe("acme");
+
+    // The synced event carries the company identity the company_author rule reads.
+    const res = await runSync(new LinkedInConnector(), {
+      feedKey: "company_updates",
+      config: { company_url: "https://www.linkedin.com/company/acme/" },
+      checkpoint: {},
+      browser: {
+        dispatch: async () => ({
+          tab_id: 1,
+          result: { responses: [{ body: JSON.stringify(json) }] },
+        }),
+      },
+    } as never);
+    expect(res.events).toHaveLength(1);
+    expect(res.events[0].metadata).toMatchObject({
+      author_company_slug: "acme",
+      author_company_url: "https://www.linkedin.com/company/acme",
+    });
+    expect(res.events[0].metadata.author_member_id).toBeUndefined();
+  });
+
+  test("company_updates declares a company author keyed on the company slug", () => {
+    const post = new LinkedInConnector().definition.feeds.company_updates
+      .eventKinds.post;
+    const companyAuthor = post.attributions.find(
+      (rule: { name?: string }) => rule.name === "company_author"
+    );
+    expect(companyAuthor).toMatchObject({
+      role: "authored_by",
+      autoCreate: true,
+      target: {
+        entityType: "company",
+        identities: [
+          {
+            namespace: LINKEDIN_IDENTITY.COMPANY_SLUG,
+            eventPath: "metadata.author_company_slug",
+          },
+        ],
+      },
+    });
+    expect(companyAuthor.target.createWhen).toBeUndefined();
+    expect(post.metadataSchema.properties.author_company_slug).toBeDefined();
   });
 
   test("company_updates post attribution matches member id + slug equal-weight (neither primary)", () => {

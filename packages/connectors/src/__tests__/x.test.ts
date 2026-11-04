@@ -1837,6 +1837,49 @@ describe("XConnector home_feed", () => {
 		expect(res.events[0].origin_id).toBe("111");
 		expect(res.events[1].origin_id).toBe("222");
 		expect(res.metadata.backend).toBe("extension-cs-scrape");
+		// Default: timeline authors stay link-only.
+		for (const event of res.events) {
+			expect(event.metadata.create_authors).toBe(false);
+		}
+
+		const optedIn = await runSync(new XConnector(), {
+			...ctx,
+			config: { max_scrolls: 4, create_authors: true },
+		});
+		expect(optedIn.events).toHaveLength(2);
+		for (const event of optedIn.events) {
+			expect(event.metadata.create_authors).toBe(true);
+		}
+	});
+
+	test("home_feed creates timeline authors only when create_authors is on", () => {
+		const feeds = new XConnector().definition.feeds;
+		expect(feeds.home_feed.configSchema.properties.create_authors).toMatchObject(
+			{ type: "boolean", default: false },
+		);
+		const [author] = feeds.home_feed.eventKinds.tweet.attributions;
+		expect(author).toMatchObject({
+			role: "authored_by",
+			autoCreate: true,
+			target: {
+				entityType: "person",
+				createWhen: { path: "metadata.create_authors", equals: true },
+			},
+		});
+		expect(
+			feeds.home_feed.eventKinds.tweet.metadataSchema.properties.create_authors,
+		).toMatchObject({ type: "boolean" });
+		// Every other tweet-like feed keeps link-only authors.
+		for (const [feed, kind] of [
+			["tweets", "tweet"],
+			["tweets", "reply"],
+			["my_tweets", "tweet"],
+			["bookmarks", "bookmark"],
+		] as const) {
+			const [rule] = feeds[feed].eventKinds[kind].attributions;
+			expect(rule.autoCreate).toBe(false);
+			expect(rule.target.createWhen).toBeUndefined();
+		}
 	});
 
 	test("throws a clear error when not logged into X", async () => {
