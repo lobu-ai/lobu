@@ -247,18 +247,15 @@ try {
     waitUntil: "domcontentloaded",
   });
   await page.getByRole("heading", { name: "Authorize application" }).waitFor();
-  await page.getByText("Device capabilities").waitFor();
-  await page.getByText(`1 of ${workspaceCount} workspaces selected.`).waitFor();
+  await page
+    .getByText("This device can run commands and control apps.")
+    .waitFor();
+  await page.getByText("0 additional workspaces selected.").waitFor();
   for (const workspace of results.workspaces_created) {
     await page.locator(`[id$="-workspace-${workspace.id}"]`).check();
   }
-  // The required home workspace is preselected; this run adds its two fixtures.
-  await page.getByText(`3 of ${workspaceCount} workspaces selected.`).waitFor();
-  await page
-    .getByLabel(
-      "I initiated this request and confirmed that the device code matches."
-    )
-    .click();
+  // The required home workspace is included and this run adds its two fixtures.
+  await page.getByText("2 additional workspaces selected.").waitFor();
   await page.screenshot({
     path: join(outputDir, "oauth-device-review.png"),
     fullPage: true,
