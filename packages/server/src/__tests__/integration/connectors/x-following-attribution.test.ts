@@ -19,7 +19,7 @@ const feedKey = 'following';
 const follower = { id: '1000000001', handle: 'testuser' };
 
 /** Synthetic accounts: one person, one X Verified Organization (Business). */
-function followedAccounts(followersCount: number) {
+function followedAccounts() {
   const observedAt = new Date('2026-11-01T00:00:00.000Z');
   return [
     followedAccountToEvent(
@@ -27,7 +27,6 @@ function followedAccounts(followersCount: number) {
         id: '2001',
         handle: 'Synth_Person',
         name: 'Synthetic Person',
-        followersCount,
         createdAt: 'Wed Jun 04 12:00:00 +0000 2014',
       },
       follower,
@@ -40,7 +39,6 @@ function followedAccounts(followersCount: number) {
         name: 'Synthetic Co',
         verifiedType: 'Business',
         profileImageShape: 'Square',
-        followersCount,
         createdAt: 'Mon Jan 02 09:00:00 +0000 2012',
       },
       follower,
@@ -97,12 +95,8 @@ describe('X following attribution (real connector rules)', () => {
     `;
   }
 
-  async function ingest(
-    organizationId: string,
-    connectionId: number,
-    followersCount: number
-  ) {
-    const items = followedAccounts(followersCount);
+  async function ingest(organizationId: string, connectionId: number) {
+    const items = followedAccounts();
     const resolved = await applyEventAttributions({
       connectorKey,
       feedKey,
@@ -137,7 +131,7 @@ describe('X following attribution (real connector rules)', () => {
   it('creates a person for a normal account and a company for a Verified Organization, and a re-sync links without duplicating', async () => {
     const { organizationId, connectionId } = await seed();
 
-    const first = await ingest(organizationId, connectionId, 42);
+    const first = await ingest(organizationId, connectionId);
     const people = await entities(organizationId, 'person');
     const companies = await entities(organizationId, 'company');
     // The connected account is the performer, so it is a person too.
@@ -147,14 +141,14 @@ describe('X following attribution (real connector rules)', () => {
     expect(first.resolved.entityIdsByItem.get(0)).toContain(syntheticPerson.id);
     expect(first.resolved.entityIdsByItem.get(1)).toContain(companies[0].id);
 
-    // A later walk sees the same accounts with new follower counts.
-    const second = await ingest(organizationId, connectionId, 43);
+    // A later walk sees the same accounts again.
+    const second = await ingest(organizationId, connectionId);
     expect(await entities(organizationId, 'person')).toEqual(people);
     expect(await entities(organizationId, 'company')).toEqual(companies);
     expect(second.resolved.entityIdsByItem.get(1)).toContain(companies[0].id);
 
-    // A follower count is an observation: reconciled in place, never a new version.
-    expect(second.inserted.map((row) => row.change)).toEqual(['state_updated', 'state_updated']);
+    // Identical data re-observed is neither a new event nor a new version.
+    expect(second.inserted.map((row) => row.change)).toEqual(['unchanged', 'unchanged']);
     expect(second.inserted.map((row) => row.id)).toEqual(first.inserted.map((row) => row.id));
     const versions = await getTestDb()<{ count: number }[]>`
       SELECT count(*)::int AS count FROM events

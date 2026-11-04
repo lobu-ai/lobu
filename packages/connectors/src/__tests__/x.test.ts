@@ -1750,27 +1750,35 @@ const FOLLOWING_OWNER = "1000000001";
 
 function followingUrl(cursor?: string, userId = FOLLOWING_OWNER): string {
 	return `https://x.com/i/api/graphql/hash/Following?variables=${encodeURIComponent(
-		JSON.stringify({ userId, count: 20, ...(cursor ? { cursor } : {}) }),
+		JSON.stringify({
+			userId,
+			count: 20,
+			includePromotedContent: false,
+			withGrokTranslatedBio: false,
+			...(cursor ? { cursor } : {}),
+		}),
 	)}`;
 }
 
-// Synthetic accounts in both of X's user shapes: profile fields under
-// `legacy`, and the newer `core` / `verification` / `profile_bio` split.
+// Synthetic accounts in the live Following user shape: `core`, `profile_bio`
+// and `verification`, with no `legacy` object.
 const followedPerson = {
 	__typename: "User",
+	id: "VXNlcjoyMDAx",
 	rest_id: "2001",
 	is_blue_verified: false,
 	profile_image_shape: "Circle",
-	legacy: {
+	core: {
 		screen_name: "Synth_Person",
 		name: "Synthetic Person",
-		description: "Writes about synthetic things",
-		followers_count: 42,
 		created_at: "Wed Jun 04 12:00:00 +0000 2014",
 	},
+	profile_bio: { description: "Writes about synthetic things" },
+	verification: { verified: false },
 };
 const followedCompany = {
 	__typename: "User",
+	id: "VXNlcjoyMDAy",
 	rest_id: "2002",
 	is_blue_verified: true,
 	profile_image_shape: "Square",
@@ -1779,9 +1787,8 @@ const followedCompany = {
 		name: "Synthetic Co",
 		created_at: "Mon Jan 02 09:00:00 +0000 2012",
 	},
-	verification: { verified_type: "Business" },
 	profile_bio: { description: "We make synthetic things" },
-	legacy: { followers_count: 1000 },
+	verification: { verified: true, verified_type: "Business" },
 };
 const followedLater = {
 	__typename: "User",
@@ -1799,6 +1806,8 @@ function followingResponse(users: unknown[], bottomCursor?: string) {
 						timeline: {
 							instructions: [
 								{ type: "TimelineClearCache" },
+								{ type: "TimelineTerminateTimeline", direction: "Top" },
+								{ type: "TimelineTerminateTimeline", direction: "Bottom" },
 								{
 									type: "TimelineAddEntries",
 									entries: [
@@ -1928,7 +1937,6 @@ describe("XConnector following feed", () => {
 				followed_user_id: "2001",
 				followed_handle: "synth_person",
 				followed_name: "Synthetic Person",
-				followers_count: 42,
 				is_blue_verified: false,
 				profile_image_shape: "Circle",
 				is_organization: false,

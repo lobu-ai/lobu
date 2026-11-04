@@ -789,7 +789,6 @@ interface XGraphqlUser {
 	name?: string;
 	description?: string;
 	createdAt?: string;
-	followersCount?: number;
 	isBlueVerified?: boolean;
 	/** X's organization/official verification, e.g. "Business" or "Government". */
 	verifiedType?: string;
@@ -806,7 +805,6 @@ function optionalString(value: unknown): string | undefined {
  */
 function extractGraphqlUser(result: any): XGraphqlUser {
 	const id = result?.rest_id ?? result?.id;
-	const followers = result?.legacy?.followers_count;
 	return {
 		id: id ? String(id) : undefined,
 		handle: optionalString(
@@ -819,7 +817,6 @@ function extractGraphqlUser(result: any): XGraphqlUser {
 		createdAt: optionalString(
 			result?.core?.created_at ?? result?.legacy?.created_at,
 		),
-		followersCount: typeof followers === "number" ? followers : undefined,
 		isBlueVerified:
 			typeof result?.is_blue_verified === "boolean"
 				? result.is_blue_verified
@@ -1154,9 +1151,6 @@ export function followedAccountToEvent(
 			followed_handle: handle,
 			followed_name: name,
 			...(user.description ? { followed_description: user.description } : {}),
-			...(user.followersCount !== undefined
-				? { followers_count: user.followersCount }
-				: {}),
 			is_blue_verified: user.isBlueVerified === true,
 			...(user.verifiedType ? { verified_type: user.verifiedType } : {}),
 			...(user.profileImageShape
