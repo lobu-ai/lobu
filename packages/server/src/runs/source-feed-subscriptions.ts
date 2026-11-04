@@ -8,7 +8,7 @@ import type { DbClient } from '../db/client';
 import { feedDefinitionSelection } from '../connectors/feed-definition-selection';
 import { feedTriggerEligibilitySql } from '../connectors/feed-health-semantics';
 import { DEVICE_FEED_READ_ACTION_KEY } from '../lib/device-feed-read-protocol';
-import { resolveAutomationExecutor, type ResolvedExecutor } from '../tools/admin/manage_automations/executors';
+import { externalAutomationPredicate, resolveAutomationExecutor, type ResolvedExecutor } from '../tools/admin/manage_automations/executors';
 
 /** The same source configuration key fences listener setup and incoming deliveries. */
 export function sourceFeedScopeKey(config: unknown, version: string | null): string {
@@ -45,8 +45,6 @@ export async function sourceFeedSubscriptions(
       AND c.status = 'active' AND c.deleted_at IS NULL
       AND (${sql.unsafe(feedTriggerEligibilitySql('d', 'f', 'source-only'))})
       AND a.status = 'active'
-      AND (a.managed_agent_id IS NOT NULL OR a.device_worker_id IS NOT NULL
-        OR a.execution_config->'executor'->>'kind' = 'external')
       ${sql.unsafe(compileConnectionColumnVisibility('c', 'a.created_by'))}
       AND a.triggers @> jsonb_build_array(jsonb_build_object('kind', 'event', 'connector_key', c.connector_key))
       AND EXISTS (
@@ -58,7 +56,7 @@ export async function sourceFeedSubscriptions(
           AND trigger->>'connector_key' = c.connector_key
           AND (NOT trigger ? 'connection_id' OR trigger->'connection_id' = to_jsonb(c.id))
           AND trigger->'event_types' ? event
-          AND (a.execution_config->'executor'->>'kind' IS DISTINCT FROM 'external'
+          AND (NOT ${externalAutomationPredicate(sql, 'a')}
             OR trigger->>'capture' = 'references')
       )
     ORDER BY a.id
@@ -70,7 +68,6 @@ export async function sourceFeedSubscriptions(
   for (const row of rows) {
     const executor = resolveAutomationExecutor({ agentId: row.managed_agent_id,
       deviceWorkerId: row.device_worker_id, agentKind: row.agent_kind, executionConfig: row.execution_config });
-    if (!executor) continue;
     const principal = typeof row.created_by === 'string' ? row.created_by : null;
     const subscriptionId = Number(row.id);
     const actor = await resolveActingPrincipal(sql, {

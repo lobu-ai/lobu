@@ -13,30 +13,30 @@
 import type {
   AutomationEventTrigger,
   AutomationScheduleTrigger,
+  AutomationScriptContext,
   AutomationWorkspaceEventTrigger,
+  CollectionPresentation,
   ConnectorClass,
   ConnectorRuntime,
-  CollectionPresentation,
   Dimension,
   EventSet,
   Measure,
   ReactionClient,
-  AutomationScriptContext,
   ReactionContext,
   Segment,
 } from "@lobu/connector-sdk";
+import type { AgentSettingsPatch } from "@lobu/core/contracts/agent-settings";
+import type { AutomationExecutionConfig } from "@lobu/core/contracts/tools/manage-automations";
 import {
   Kind,
   OptionalKind,
-  Type,
   type StringOptions,
   type TOptional,
   type TSchema,
   type TString,
+  Type,
 } from "@sinclair/typebox";
 import type { SecretRef } from "./secret.js";
-import type { AgentSettingsPatch } from "@lobu/core/contracts/agent-settings";
-import type { AutomationExecutionConfig } from "@lobu/core/contracts/tools/manage-automations";
 
 /** A connector referenced by its key, or by the class produced by `defineConnector`. */
 export type ConnectorRef = string | ConnectorClass;
@@ -763,8 +763,8 @@ export interface Automation {
   readonly kind: "automation";
   /** Stable slug — diff key. */
   slug: string;
-  /** Owning agent (handle or id). Every Automation belongs to exactly one agent. */
-  agent: Agent | string;
+  /** Managed agent identity. Omit for device-only or external analysis. */
+  agent?: Agent | string | null;
   /** Canonical execution options. Omit to preserve; null clears. Cannot overlap the model helper. */
   executionConfig?: AutomationExecutionConfig | null;
   name?: string;

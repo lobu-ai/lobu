@@ -1,7 +1,7 @@
 import type { EntityMetrics } from "@lobu/connector-sdk";
 import {
-  type AgentSettings,
   type AgentMetadata,
+  type AgentSettings,
   getToolResultFailure,
   isPendingToolApproval,
 } from "@lobu/core";
@@ -25,15 +25,15 @@ import type {
 } from "@lobu/core/contracts/tools/manage-connections";
 import type { ManageEntitySchemaArgs } from "@lobu/core/contracts/tools/manage-entity-schema";
 import type {
-  InferenceProviderCreateInput,
-  InferenceCapabilityBlock,
-  InferenceModality,
-} from "@lobu/core/contracts/tools/manage-inference-providers";
-import type {
   FeedCreateInput,
   FeedUpdateInput,
   ManageFeedsArgs,
 } from "@lobu/core/contracts/tools/manage-feeds";
+import type {
+  InferenceCapabilityBlock,
+  InferenceModality,
+  InferenceProviderCreateInput,
+} from "@lobu/core/contracts/tools/manage-inference-providers";
 import type { ViewSetInput } from "@lobu/core/contracts/tools/manage-views";
 import { ApiClient, type HttpMethod } from "../../../internal/api-client.js";
 import { resolveApiClient } from "../../../internal/index.js";
@@ -1206,7 +1206,7 @@ export class ApplyClient {
       | "execution_config"
       | "outputs",
       "slug" | "prompt"
-    > & { agentId: NonNullable<ManageAutomationsArgs["managed_agent_id"]> }
+    > & { agentId: ManageAutomationsArgs["managed_agent_id"] }
   ): Promise<{ automation_id?: string }> {
     const { body } = await this.request<{ automation_id?: string }>(
       "POST",

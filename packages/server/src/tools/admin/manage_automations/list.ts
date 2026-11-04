@@ -21,6 +21,7 @@ import { computeAutomationHealth } from "../../../automations/automation-health"
 import { loadRecentAutomationRunStatuses } from "../../../automations/automation-health-history";
 import type { ToolContext } from "../../registry";
 import { batchCountUnanalyzedContent } from "./shared";
+import { resolveAutomationExecutor } from './executors';
 
 export { ListAutomationsResultSchema };
 
@@ -252,7 +253,8 @@ export async function handleList(
 
 		const automationHealth = computeAutomationHealth({
 			status: automation.status,
-			externalExecutor: automation.execution_config?.executor?.kind === 'external',
+			externalExecutor: resolveAutomationExecutor({ agentId: automation.managed_agent_id,
+				deviceWorkerId: automation.device_worker_id, executionConfig: automation.execution_config }).kind === 'external',
 			nextRunAt: automation.next_run_at,
 			consecutiveScheduledFailures:
 				automation.consecutive_scheduled_failures,

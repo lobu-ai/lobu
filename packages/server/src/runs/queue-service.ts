@@ -19,6 +19,7 @@ import {
   type AutomationEventTrigger,
   type AutomationWorkspaceEventTrigger,
   type LegacyAutomationExecutor,
+  type LegacyAutomationExecutionConfig,
   type AutomationSource,
 } from '@lobu/core/contracts/tools/manage-automations';
 import { normalizeAutomationSources } from '../automations/source-refs';
@@ -74,14 +75,16 @@ export interface AutomationRunPayload {
   automation_script?: import('../automations/preparation').AutomationScriptSnapshot;
   /** Executor selection and script code are pinned with the run, never reloaded on retry. */
   executor?: LegacyAutomationExecutor;
+  /** Explicit null freezes defaults; absent only on historical runs. */
+  execution_config?: LegacyAutomationExecutionConfig | null;
   automation_id: number;
   /**
    * The managed agent executing this run, or the external executor's optional
-   * permission and delivery principal. Absent for device-executed runs
-   * (the device lane claims via `device_worker_id`) and for manual runs open
-   * to any connected MCP client.
+   * permission and delivery principal, including when execution is placed on
+   * a device. Explicit null freezes the absence of an assigned agent. Only
+   * historical snapshots may omit the field.
    */
-  agent_id?: string;
+  agent_id?: string | null;
   window_start: string;
   window_end: string;
   dispatch_source: AutomationDispatchSource;
@@ -715,11 +718,11 @@ async function createAutomationRunWithClient(
   const versionRows = await sql<{
     current_version_id: unknown;
     next_window_start: string | Date | null;
-    executor: unknown;
+    execution_config: LegacyAutomationExecutionConfig | null;
     sources: AutomationSource[] | null;
     version_sources: AutomationSource[] | null;
   }>`
-    SELECT a.current_version_id, a.next_window_start, a.execution_config->'executor' AS executor,
+    SELECT a.current_version_id, a.next_window_start, a.execution_config,
            a.sources, v.version_sources
     FROM automations a
     LEFT JOIN automation_versions v ON v.id = a.current_version_id
@@ -744,7 +747,10 @@ async function createAutomationRunWithClient(
   const automationScript = await snapshotAutomationScript(sql, params.automationId, params.organizationId);
   const executor = automationScript?.has_analysis === false
     ? { kind: 'script' as const, source: automationScript.source }
-    : versionRows[0]?.executor as AutomationRunPayload['executor'] | undefined;
+    : versionRows[0]?.execution_config?.executor
+      // Freeze the inferred external lane too. Assigning an agent later must
+      // not transfer already-queued work to that agent.
+      ?? (!params.agentId && !params.deviceWorkerId ? { kind: 'external' as const } : undefined);
   let windowEnd = params.windowEnd;
   if (executor?.kind === 'script' && params.dispatchSource !== 'event') {
     // Match source reads: a nonempty version source list wins; otherwise use
@@ -775,12 +781,13 @@ async function createAutomationRunWithClient(
   const payload: AutomationRunPayload = {
     ...(automationScript ? { automation_script: automationScript } : {}),
     automation_id: params.automationId,
-    agent_id: params.agentId ?? undefined,
+    agent_id: params.agentId ?? null,
     window_start: params.windowStart,
     window_end: windowEnd,
     dispatch_source: params.dispatchSource,
     version_id: snapshotVersionId,
     ...(executor ? { executor } : {}),
+    execution_config: versionRows[0]?.execution_config ?? null,
     device_worker_id: normalizedDeviceWorkerId,
     agent_kind: normalizedAgentKind,
     // A fingerprint of the full backlog cannot prove the remainder was processed.
@@ -1149,7 +1156,7 @@ export async function createAutomationEventRun(
     }
 
     const versionRows = await tx`
-      SELECT current_version_id, execution_config->'executor' AS executor
+      SELECT current_version_id, execution_config
       FROM automations
       WHERE id = ${params.automationId} AND organization_id = ${params.organizationId}
       FOR SHARE
@@ -1161,14 +1168,15 @@ export async function createAutomationEventRun(
     const payload: AutomationRunPayload = {
       ...(automationScript ? { automation_script: automationScript } : {}),
       automation_id: params.automationId,
-      agent_id: params.agentId ?? undefined,
+      agent_id: params.agentId ?? null,
       window_start: signalWindowStart,
       window_end: signalWindowEnd,
       dispatch_source: 'event',
       version_id: versionId,
       ...(automationScript?.has_analysis === false
         ? { executor: { kind: 'script' as const, source: automationScript.source } }
-        : versionRows[0]?.executor ? { executor: versionRows[0].executor as AutomationRunPayload['executor'] } : {}),
+        : versionRows[0]?.execution_config?.executor ? { executor: versionRows[0].execution_config.executor as AutomationRunPayload['executor'] } : {}),
+      execution_config: versionRows[0]?.execution_config ?? null,
       device_worker_id: params.deviceWorkerId ?? null,
       agent_kind: params.agentKind ?? null,
       trigger_signal: params.signal,

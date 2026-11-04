@@ -61,7 +61,9 @@ describe("mapProjectToDesiredState", () => {
       // JavaScript configs reach runtime validation without TypeScript checking.
       expect(() =>
         mapProjectToDesiredState(
-          defineConfig({ agents: [agent as Parameters<typeof defineAgent>[0]] })
+          defineConfig({
+            agents: [agent as Parameters<typeof defineAgent>[0]],
+          })
         )
       ).toThrow();
     }
@@ -74,6 +76,27 @@ describe("mapProjectToDesiredState", () => {
     expect(() =>
       mergeAgentDirArtifacts({ skillsConfig: { skills: [] } }, {}, [])
     ).toThrow();
+  });
+
+  test("external and device-only analysis need no managed agent", () => {
+    const state = mapProjectToDesiredState(
+      defineConfig({
+        agents: [],
+        automations: [
+          defineAutomation({
+            slug: "external",
+            prompt: "Review updates",
+            triggers: [{ kind: "schedule", cron: "0 9 * * *" }],
+          }),
+          defineAutomation({
+            slug: "device-only",
+            prompt: "Review files",
+            deviceWorkerId: "11111111-1111-1111-1111-111111111111",
+          }),
+        ],
+      })
+    );
+    expect(state.automations.map((a) => a.agent)).toEqual([null, null]);
   });
 
   test("canonical execution options use existing bounds and cannot overlap helpers", () => {

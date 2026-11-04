@@ -134,8 +134,10 @@ compatible until the owner explicitly migrates them. Omitted execution options
 remain unmanaged; `executionConfig: null` explicitly clears legacy settings.
 Do not copy a read-only legacy executor back into a write.
 
-Migrate deterministic jobs to `reactionFromFile`. Move external analysis only
-after choosing and verifying its owning native agent/device. Preserve prompts,
+Migrate deterministic jobs to `reactionFromFile`. External analysis needs no
+executor setting when both agent and device are unassigned. Retain installed
+external overrides with an owning agent until its permission and delivery
+dependencies have been explicitly migrated. Preserve prompts,
 sources, outputs, cadence, permissions, privacy holds and delivery idempotency;
 refuse active claims or baseline drift. Deploy to every replica before applying
 owner migrations. Installing a platform release does not replace an owner
@@ -179,20 +181,49 @@ new definitions use the module lifecycle.
 Agent-level skills remain in the agent's `settings.skillsConfig`; an Automation's
 `skills` continue to be versioned snapshots owned by that Automation.
 
-## Legacy external execution and activity discovery
+The agent defines identity and permissions; the device defines placement. They
+are independent, and triggers never override either:
 
-Already-installed external definitions retain manual and scheduled processing
-by their authorized MCP client. New authoring uses native modules and agents. Keep cadence and timezone on
+| Managed agent | Device | Analysis processor |
+|---|---|---|
+| Assigned | Unassigned | Hosted managed agent |
+| Assigned | Assigned | That agent's run identity on the pinned device's local CLI |
+| Unassigned | Assigned | Device-local CLI |
+| Unassigned | Unassigned | Authorized external MCP client |
+
+`agent_kind` only selects a device CLI; null uses the device default. Execution
+options apply to their supported native runtime and do not control an external
+client. `model_config` had no execution effect and is rejected on new writes;
+use `execution_config.model`. Installed values remain readable and are retained
+by unrelated updates. Unknown new fields remain errors.
+
+Each new run freezes its agent identity, device, runtime override, execution
+options and version. Later edits affect future runs. Historical snapshots that
+lack an execution-options or agent-identity field retain their old fallback.
+Device defaults still resolve on the selected device when no kind is specified.
+Moving analysis onto the hosted lane validates its stored provider model ref;
+replace or clear `execution_config` in the same update if it belongs to a device
+or external client. Unrelated edits retain installed options.
+
+## External execution and activity discovery
+
+Analysis with no assigned managed agent or device uses authorized external MCP
+clients. No executor flag is needed. Keep cadence and timezone on
 the normal schedule trigger. Lobu leaves due work on `next_run_at` until the
-client claims it; it never launches a hosted agent or device CLI for this mode.
-An optional `managed_agent_id` remains the permission and delivery principal.
-Ordinary event execution, device pins, and hosted/CLI settings are incompatible. Connector event triggers with explicit `capture: "references"` may instead authorize continuous reference capture by a declared source-only observer.
+client claims it. The client owns its wakeup; Lobu does not launch it.
+Already-installed external overrides retain their optional owning managed agent
+and existing permission and delivery semantics. Ordinary event execution needs a
+native assignment. Connector event triggers with explicit `capture: "references"`
+may instead authorize continuous reference capture by a declared source-only observer.
 `skip_if_unchanged` (the schedule default) applies here as it does natively:
 when a due window has no new or changed source content, `claimNextWindow`
 books it as a completed no-op run, advances the schedule, and answers 409
 instead of handing out a window. Treat that 409 like any other: refresh
 activity. Set `skip_if_unchanged: false` on the schedule trigger when the
 client must see every due window, empty or not.
+Abandoned scheduled leases use the existing scheduled-failure counter and
+auto-pause policy, whether recovered by another claim or the stale-run sweep.
+Manual triggers keep their existing manual failure semantics.
 
 An authorized agent should query `operations.listActivity({ kinds:
 ["automation_due"] })` on startup, between tasks, and approximately every minute
@@ -407,11 +438,11 @@ window, run attempt, lease, source IDs, and page chain. A stale attempt cannot
 complete after a newer claim, while retrying an already committed completion is
 idempotent even after its lease expires. A non-pageable source exceeding its
 bound is reported as truncated but does not block completion. The processor
-must decide whether the returned context is sufficient or needs a SQL drill-down. An
-assigned `managed_agent_id` does not by itself exclude external claiming;
-ordinary internal dispatch through that agent continues to use the same run
-lifecycle. A script executor is different: its runs are pinned to the sandbox
-lane and cannot be claimed or completed by an external processor.
+must decide whether the returned context is sufficient or needs a SQL drill-down. A
+run's frozen assignment determines its processor. External clients cannot
+claim work assigned to a native agent or device. Installed external overrides
+retain their optional managed permission principal. Native code modules run in
+the sandbox and cannot be claimed by an external processor.
 
 ### Consistent SQL drill-downs
 

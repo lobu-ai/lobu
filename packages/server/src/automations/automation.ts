@@ -2,6 +2,7 @@ import { reconcileAutomationPreparationRuns } from './preparation-task';
 import { randomUUID } from "node:crypto";
 import {
 	resolveAutomationExecutor,
+	externalAutomationPredicate,
 } from "../tools/admin/manage_automations/executors";
 import {
 	automationTriggerSignals,
@@ -203,6 +204,8 @@ export function parseAutomationRunPayload(
 	return {
 		automation_id: automationId,
 		...(payload.executor ? { executor: payload.executor as AutomationRunPayload['executor'] } : {}),
+		...(Object.hasOwn(payload, 'execution_config')
+			? { execution_config: payload.execution_config as AutomationRunPayload['execution_config'] } : {}),
 		...(payload.automation_script ? { automation_script: payload.automation_script as AutomationRunPayload['automation_script'] } : {}),
 		// Optional: device-pinned runs carry only the pin, and manual-open
 		// runs carry neither. The dispatch guard below fails runs that reach
@@ -270,21 +273,13 @@ async function enqueueAutomationRunForRecord(
 		throw new Error(`Automation ${automation.id} is not active.`);
 	}
 
-	// Executor resolution: an Automation has exactly one executor (agent or
-	// device pin). Manual activations may legitimately resolve to nothing —
-	// the run stays pending for any connected MCP client to execute and
-	// complete.
+	// Resolve identity and placement once; the queue freezes them with the run.
 	const executor = resolveAutomationExecutor({
 		agentId: automation.managed_agent_id ?? null,
 		deviceWorkerId: automation.device_worker_id ?? null,
 		agentKind: automation.agent_kind ?? null,
 		executionConfig: automation.execution_config,
 	});
-	if (!executor && dispatchSource !== "manual") {
-		throw new Error(
-			`Automation ${automation.id} has no executor for ${dispatchSource} activation (need managed_agent_id or device_worker_id).`
-		);
-	}
 
 	// The arrival window [mark, horizon). It is empty only while the mark is
 	// younger than the settle budget — a just-created Automation, or one whose
@@ -305,16 +300,14 @@ async function enqueueAutomationRunForRecord(
 	const runParams = {
 			organizationId: automation.organization_id,
 			automationId: automation.id,
-			agentId: executor?.kind === "external"
-				? automation.managed_agent_id
-				: executor?.kind === "agent" ? executor.agentId : null,
+			agentId: executor.agentId,
 			windowStart: windowStart.toISOString(),
 			windowEnd: windowEnd.toISOString(),
 			dispatchSource,
 			deviceWorkerId:
-				executor?.kind === "device" ? executor.deviceWorkerId : null,
+				executor.kind === "device" ? executor.deviceWorkerId : null,
 			agentKind:
-				executor?.kind === "device" ? executor.agentKind : null,
+				executor.kind === "device" ? executor.agentKind : null,
 			sourceFingerprint,
 			expectedWindowStart: inspectedWindow?.windowStart.toISOString(),
 		};
@@ -801,7 +794,7 @@ export async function materializeDueAutomationRuns(
                w.device_worker_id::text AS device_worker_id, w.agent_kind
         FROM automations w
         WHERE w.status = 'active'
-          AND w.execution_config->'executor'->>'kind' IS DISTINCT FROM 'external'
+          AND NOT ${externalAutomationPredicate(sql, 'w')}
           AND w.schedule IS NOT NULL
           AND w.next_run_at IS NOT NULL
           AND w.next_run_at <= current_timestamp
@@ -856,7 +849,7 @@ export async function materializeDueAutomationRuns(
         SELECT count(*)::int AS count
         FROM automations w
         WHERE w.status = 'active'
-          AND w.execution_config->'executor'->>'kind' IS DISTINCT FROM 'external'
+          AND NOT ${externalAutomationPredicate(sql, 'w')}
           AND w.schedule IS NOT NULL
           AND w.next_run_at IS NOT NULL
           AND w.next_run_at <= current_timestamp
@@ -1266,16 +1259,18 @@ async function claimAutomationRun(
  */
 async function getAutomationInferenceOverrides(
 	sql: DbClient,
-	automationId: number
+	automationId: number,
+	payload: AutomationRunPayload,
 ): Promise<{ model?: string; effort?: string }> {
-	const rows = await sql`
-    SELECT execution_config->>'model' AS model, execution_config->>'effort' AS effort
+	const config = Object.hasOwn(payload, 'execution_config') ? payload.execution_config
+		: (await sql`
+    SELECT execution_config
     FROM automations
     WHERE id = ${automationId}
     LIMIT 1
-  `;
-	const model = rows[0]?.model as string | null | undefined;
-	const effort = rows[0]?.effort as string | null | undefined;
+  `)[0]?.execution_config;
+	const model = config?.model;
+	const effort = config?.effort;
 	return {
 		...(typeof model === "string" && model.trim() ? { model: model.trim() } : {}),
 		...(typeof effort === "string" && effort.trim() ? { effort: effort.trim() } : {}),
@@ -1381,7 +1376,7 @@ async function dispatchAutomationRun(
 	// baseOptions and the model wins the layered fallback (automation → agent →
 	// org default); when absent the agent/org default resolves and the turn
 	// keeps reasoning off.
-	const inferenceOverrides = await getAutomationInferenceOverrides(sql, run.automation_id);
+	const inferenceOverrides = await getAutomationInferenceOverrides(sql, run.automation_id, payload);
 	const automationInstructions = await getAutomationInstructions(
 		sql,
 		run.automation_id,

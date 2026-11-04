@@ -704,7 +704,7 @@ export const ManageAutomationsSchema = Type.Object(
     managed_agent_id: Type.Optional(
       Type.Union([Type.String({ minLength: 1 }), Type.Null()], {
         description:
-          "[create/update] Optional managed agent that owns this Automation and supplies its SDK permissions. Prompt, skills, input schema or outputs invoke agent analysis; a module alone runs code. Null clears the assignment. Without a managed agent or device pin, an Automation is manual-only. [list] Optional owner filter.",
+          "[create/update] Optional managed agent identity and SDK permission ancestor. A device pin places its execution on that device. Prompt, skills, input schema or outputs invoke analysis; a module alone runs code with owning-agent permissions. Null clears the assignment. Analysis without an agent or device is claimed by authorized external clients on manual/scheduled windows; clients own their wakeups. [list] Optional owner filter.",
       })
     ),
     status: Type.Optional(
@@ -768,9 +768,6 @@ export const ManageAutomationsSchema = Type.Object(
           "[create/update] Minimum seconds between two firings of this Automation (0 = no cooldown).",
         minimum: 0,
       })
-    ),
-    model_config: Type.Optional(
-      Type.Any({ description: "[create/update] AI model configuration" })
     ),
     // Union with Null so `update` can clear a previously-saved config back to
     // NULL/defaults — omitted = unchanged, null = clear, object = replace. The
@@ -941,7 +938,6 @@ export type ManageAutomationsArgs = Static<typeof ManageAutomationsSchema>;
  */
 export type AutomationUpdatePatch = Pick<
   ManageAutomationsArgs,
-  | "model_config"
   | "execution_config"
   | "triggers"
   | "managed_agent_id"
@@ -982,7 +978,6 @@ export function normalizeAutomationTags(values: unknown): string[] {
  * A `manage_automations` update is a PATCH — only keys PRESENT in `args` are
  * returned (absent keys keep their current values). Coercions mirror the stored
  * shape EXACTLY, incl. the ones that used to live only in the SQL params:
- *   - model_config ?? {}
  *   - tags → normalizeAutomationTags (trim/drop-empty/dedupe)
  *   - min_cooldown_seconds ?? 0
  *   - null-clearable fields (managed_agent_id/device_worker_id/agent_kind,
@@ -993,8 +988,6 @@ export function normalizeAutomationUpdatePatch(
   args: ManageAutomationsArgs
 ): AutomationUpdatePatch {
   const patch: AutomationUpdatePatch = {};
-  if (args.model_config !== undefined)
-    patch.model_config = args.model_config ?? {};
   // null is a REAL clear the write stores (toJsonParam(null) → SQL null); keep it
   // so the review shows the clear rather than hiding it (serializing away).
   if (args.execution_config !== undefined)

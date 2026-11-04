@@ -6162,7 +6162,7 @@ export type ManageAutomationsData = {
         }
     >;
     /**
-     * [create/update] Optional managed agent that owns this Automation and supplies its SDK permissions. Prompt, skills, input schema or outputs invoke agent analysis; a module alone runs code. Null clears the assignment. Without a managed agent or device pin, an Automation is manual-only. [list] Optional owner filter.
+     * [create/update] Optional managed agent identity and SDK permission ancestor. A device pin places its execution on that device. Prompt, skills, input schema or outputs invoke analysis; a module alone runs code with owning-agent permissions. Null clears the assignment. Analysis without an agent or device is claimed by authorized external clients on manual/scheduled windows; clients own their wakeups. [list] Optional owner filter.
      */
     managed_agent_id?: string | null;
     /**
@@ -6210,10 +6210,6 @@ export type ManageAutomationsData = {
      * [create/update] Minimum seconds between two firings of this Automation (0 = no cooldown).
      */
     min_cooldown_seconds?: number;
-    /**
-     * [create/update] AI model configuration
-     */
-    model_config?: unknown;
     execution_config?: null | {
       /**
        * Wall-clock cap in seconds for the device-worker CLI run (default 600).

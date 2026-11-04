@@ -61,7 +61,6 @@ describe('Automation response byte budget', () => {
   async function automation(slug: string, contextBytes = 100_000, sourceQuery = `@feed:${feedId}`) {
     return await api.automations.create({
       entity_id: entityId, slug, name: slug, prompt: 'Review all source rows.',
-      managed_agent_id: agentId,
       sources: [
         { name: 'content', query: sourceQuery },
         { name: 'context_rows', query: `SELECT id, name, repeat('c', ${contextBytes}) AS note FROM entities WHERE id = ${entityId}`, context: true },

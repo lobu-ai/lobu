@@ -26,7 +26,7 @@ describe("resolveAutomationExecutor", () => {
 	test("device pin takes precedence over the agent", () => {
 		expect(
 			resolveAutomationExecutor({ agentId: "a", deviceWorkerId: "d" }),
-		).toEqual({ kind: "device", deviceWorkerId: "d", agentKind: null });
+		).toEqual({ kind: "device", deviceWorkerId: "d", agentKind: null, agentId: "a" });
 	});
 
 	test("agent resolves when there is no device pin", () => {
@@ -39,11 +39,11 @@ describe("resolveAutomationExecutor", () => {
 	test("device carries its runtime kind", () => {
 		expect(
 			resolveAutomationExecutor({ deviceWorkerId: "d", agentKind: "codex" }),
-		).toEqual({ kind: "device", deviceWorkerId: "d", agentKind: "codex" });
+		).toEqual({ kind: "device", deviceWorkerId: "d", agentKind: "codex", agentId: null });
 	});
 
-	test("no executor resolves to null", () => {
-		expect(resolveAutomationExecutor({})).toBeNull();
+	test("unassigned analysis resolves to the external client", () => {
+		expect(resolveAutomationExecutor({})).toEqual({ kind: 'external', agentId: null });
 	});
 });
 
@@ -56,13 +56,13 @@ describe("assertAutomationExecutorsResolve", () => {
 		).not.toThrow();
 	});
 
-	test("automated automations require an executor", () => {
+	test("external schedules are allowed but event execution requires a native assignment", () => {
 		expect(() => assertAutomationExecutorsResolve([eventTrigger()], {})).toThrow(
 			ToolUserError,
 		);
 		expect(() =>
 			assertAutomationExecutorsResolve([scheduleTrigger()], {}),
-		).toThrow(ToolUserError);
+		).not.toThrow();
 	});
 
 	test("an agent satisfies automated triggers", () => {

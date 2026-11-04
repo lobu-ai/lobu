@@ -69,7 +69,7 @@ describe('SQL frame Automation coverage', () => {
   async function create(slug: string, frameQuery?: string, scheduled = false) {
     return await api.automations.create({
       entity_id: entityId, slug, name: slug, prompt: 'Analyze the SQL frame, using event IDs for provenance.',
-      managed_agent_id: agentId,
+      managed_agent_id: scheduled ? agentId : null,
       ...(scheduled ? { triggers: [{ kind: 'schedule', cron: '* * * * *', skip_if_unchanged: true }] } : {}),
       sources: [
         { name: 'content', query: `SELECT id, occurred_at FROM events WHERE feed_id = ${feedId}` },
@@ -163,7 +163,7 @@ describe('SQL frame Automation coverage', () => {
   it('completes a context-only SQL aggregate without enumerating its input events', async () => {
     const created = await api.automations.create({
       entity_id: entityId, slug: 'sql-frame-context-only', name: 'Context-only aggregate',
-      prompt: 'Analyze the SQL aggregate.', managed_agent_id: agentId,
+      prompt: 'Analyze the SQL aggregate.',
       // The constant id also satisfies the old validator: this execution path
       // predates the fix allowing context aggregates to omit an id column.
       sources: [{ name: 'frame', context: true,
@@ -239,7 +239,7 @@ describe('SQL frame Automation coverage', () => {
   it('still requires event ids for event sources', async () => {
     await expect(api.automations.create({
       entity_id: entityId, slug: 'sql-frame-event-id-required', name: 'Event id required',
-      prompt: 'Analyze events.', managed_agent_id: agentId,
+      prompt: 'Analyze events.',
       sources: [{ name: 'content', query: `SELECT COUNT(*)::int AS event_count FROM events WHERE feed_id = ${feedId}` }],
       outputs: { signals: { event: 'observation' } },
     })).rejects.toThrow(/query must project an "id" column/);

@@ -4,6 +4,7 @@ import { createNotificationForUsers } from "../notifications/service";
 import logger from "../utils/logger";
 import { buildAutomationUrl } from "../utils/url-builder";
 import { MIN_SCHEDULE_OVERDUE_MS, scheduleOverdueGraceMs } from "./schedule-overdue-grace";
+import { externalAutomationPredicate } from '../tools/admin/manage_automations/executors';
 
 interface OverdueAutomationRow {
 	id: number;
@@ -56,7 +57,7 @@ export async function runAutomationScheduleOverdueNotificationSweep(
       a.schedule,
       a.timezone,
       a.next_run_at,
-      a.execution_config->'executor'->>'kind' IS NOT DISTINCT FROM 'external' AS external,
+      ${externalAutomationPredicate(sql, 'a')} AS external,
       to_jsonb(array_agg(DISTINCT m."userId" ORDER BY m."userId")) AS admin_user_ids
     FROM automations a
     JOIN "organization" o ON o.id = a.organization_id

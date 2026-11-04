@@ -119,7 +119,10 @@ export const manageAutomations = withValidatedArgs(
   ManageAutomationsSchema,
   manageAutomationsImpl,
   (value) => {
-    const args = value as { action?: unknown; execution_config?: unknown } | null;
+    const args = value as { action?: unknown; execution_config?: unknown; model_config?: unknown } | null;
+    if ((args?.action === 'create' || args?.action === 'update') && Object.hasOwn(args, 'model_config')) {
+      throw new ToolUserError('model_config is retired and had no execution effect. Use execution_config.model for an explicit model override. Installed values remain readable.', 422);
+    }
     if ((args?.action === 'create' || args?.action === 'update') &&
         args.execution_config && typeof args.execution_config === 'object' &&
         Object.hasOwn(args.execution_config, 'executor')) {
@@ -545,7 +548,6 @@ const AUTOMATION_APPROVAL_CLEARED = '(cleared)';
 const VERSION_OWNED_AUTOMATION_FIELDS = ['name', 'description', 'prompt', 'sources'] as const;
 
 const AUTOMATION_PATCHABLE_FIELDS = [
-  'model_config',
   'execution_config',
   // schedule/timezone are projections of triggers (resolveAutomationTriggerWrite);
   // patch them only via triggers, not as direct writable fields.
@@ -584,7 +586,7 @@ function assertAutomationUpdateArgs(args: ManageAutomationsArgs): void {
   }
   if (present(AUTOMATION_PATCHABLE_FIELDS).length === 0) {
     throw new ToolUserError(
-      "update changes runtime config only (e.g. triggers, managed_agent_id, tags, model_config) and needs at least one such field. It cannot change status — an Automation is retired via action: 'delete' (→ archived); name/description/prompt/sources are version-owned (action: 'create_version')."
+      "update changes runtime config only (e.g. triggers, managed_agent_id, tags, execution_config) and needs at least one such field. It cannot change status — an Automation is retired via action: 'delete' (→ archived); name/description/prompt/sources are version-owned (action: 'create_version')."
     );
   }
 }

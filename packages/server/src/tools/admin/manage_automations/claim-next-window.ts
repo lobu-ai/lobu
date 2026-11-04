@@ -17,9 +17,11 @@ import {
 import { handleAutomationMode } from '../../get_content/automation-mode';
 import type { ToolContext } from '../../registry';
 import type { ManageAutomationsArgs } from '../manage_automations';
+import { resolveAutomationExecutor } from './executors';
 import { runLeaseFence } from '../../../runs/run-lease';
 import type { AutomationTrigger } from '../../../types/automations';
 import { advanceAutomationScheduleAfterSuccessfulWindow } from '../../../automations/schedule-cursor';
+import { recordScheduledExecutionFailure } from '../../../automations/scheduled-failure-policy';
 import {
   completeSkippedAutomationRun,
   inspectUnchangedWindow,
@@ -207,7 +209,14 @@ export async function handleClaimNextWindow(
           409
         );
       }
-      await expireExternalClaims(tx, automationId);
+      if (await expireExternalClaims(tx, automationId)) {
+        const [state] = await tx`SELECT schedule_auto_paused_at FROM automations WHERE id = ${automationId}`;
+        if (state?.schedule_auto_paused_at) {
+          // Commit the timeout and failure count before returning the rejection,
+          // just as the no-op branch commits its completion before its 409.
+          return new ToolUserError('This external Automation schedule is auto-paused after repeated failures. Review its health before resuming.', 409);
+        }
+      }
       const active = await tx`
         SELECT id FROM runs
         WHERE automation_id = ${automationId}
@@ -241,10 +250,12 @@ export async function handleClaimNextWindow(
         window_end: string;
         executor_kind: string | null;
         agent_id: string | null;
+        device_worker_id: string | null;
       }>`
         SELECT id, approved_input->>'window_end' AS window_end,
                approved_input->'executor'->>'kind' AS executor_kind,
-               approved_input->>'agent_id' AS agent_id
+               approved_input->>'agent_id' AS agent_id,
+               approved_input->>'device_worker_id' AS device_worker_id
         FROM runs
         WHERE automation_id = ${automationId}
           AND run_type = 'automation'
@@ -258,16 +269,24 @@ export async function handleClaimNextWindow(
       // edit could retroactively move already-queued work between lanes.
       const executorKind = queued ? queued.executor_kind : automation.executor_kind;
       const agentId = queued ? queued.agent_id : automation.managed_agent_id;
-      if (executorKind === 'external' && ctx.agentId && agentId && agentId !== ctx.agentId) {
-        throw new ToolUserError('This external Automation belongs to another agent.', 403);
-      }
       if (
         queued?.executor_kind === 'script' ||
         (!queued && automation.executor_kind === 'script')
       ) {
         throw new ToolUserError(SCRIPT_EXTERNAL_CLAIM_ERROR, 409);
       }
-      if (!queued && automation.executor_kind === 'external' && automation.schedule &&
+      const executor = resolveAutomationExecutor({
+        agentId,
+        deviceWorkerId: queued ? queued.device_worker_id : automation.device_worker_id,
+        executionConfig: { executor: { kind: executorKind } },
+      });
+      if (executor.kind !== 'external') {
+        throw new ToolUserError('This Automation run is assigned to a managed agent or device and cannot be claimed by an external processor. Use trigger and follow its execution handoff.', 409);
+      }
+      if (ctx.agentId && agentId && agentId !== ctx.agentId) {
+        throw new ToolUserError('This external Automation belongs to another agent.', 403);
+      }
+      if (!queued && automation.schedule &&
           (automation.schedule_auto_paused_at || !automation.next_run_at ||
            new Date(automation.next_run_at).getTime() > now.getTime())) {
         throw new ToolUserError('This external Automation is not due. Read its schedule and next_run_at before checking again.', 409);
@@ -280,7 +299,7 @@ export async function handleClaimNextWindow(
       // own read-only transaction, so it takes the pool client; the row lock
       // held here still serializes it against concurrent claims.
       const unchangedWindow =
-        !queued && automation.executor_kind === 'external' && automation.schedule
+        !queued && automation.schedule
           ? await inspectUnchangedWindow(
               sql,
               { id: automationId, triggers: automation.triggers },
@@ -319,7 +338,7 @@ export async function handleClaimNextWindow(
               agentId: automation.managed_agent_id,
               windowStart: windowStart.toISOString(),
               windowEnd: windowEnd.toISOString(),
-              dispatchSource: 'manual',
+              dispatchSource: automation.schedule ? 'scheduled' : 'manual',
               deviceWorkerId: automation.device_worker_id,
               agentKind: automation.agent_kind,
               sourceFingerprint,
@@ -364,6 +383,7 @@ export async function handleClaimNextWindow(
     };
   });
 
+  if (claimedWindow instanceof ToolUserError) throw claimedWindow;
   if (claimedWindow.skipped) {
     throw new ToolUserError(
       `Automation ${automationId} has nothing to process: the due window ` +
@@ -439,16 +459,27 @@ export async function handleClaimNextWindow(
   }
 }
 
-export async function expireExternalClaims(tx: DbClient, automationId: number): Promise<void> {
-  await tx`
-    UPDATE runs
+export async function expireExternalClaims(tx: DbClient, automationId: number): Promise<boolean> {
+  const expired = await tx<{ previous_status: string; dispatch_source: string | null }>`
+    WITH expired AS (
+      SELECT id, status AS previous_status FROM runs
+      WHERE automation_id = ${automationId}
+        AND run_type = 'automation'
+        AND status IN ('claimed', 'running')
+        AND expires_at IS NOT NULL AND expires_at <= current_timestamp
+      FOR UPDATE SKIP LOCKED
+    )
+    UPDATE runs r
     SET status = 'timeout', outcome = ${classifyRunOutcome({ status: 'timeout' })},
         completed_at = current_timestamp,
         error_message = 'External Automation window lease expired'
-    WHERE automation_id = ${automationId}
-      AND run_type = 'automation'
-      AND status IN ('claimed', 'running')
-      AND expires_at IS NOT NULL
-      AND expires_at <= current_timestamp
+    FROM expired WHERE r.id = expired.id AND r.status = expired.previous_status
+    RETURNING expired.previous_status, r.approved_input->>'dispatch_source' AS dispatch_source
   `;
+  for (const row of expired) {
+    if (row.previous_status === 'running') {
+      await recordScheduledExecutionFailure(tx, automationId, row.dispatch_source);
+    }
+  }
+  return expired.length > 0;
 }

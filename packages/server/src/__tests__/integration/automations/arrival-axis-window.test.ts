@@ -126,9 +126,7 @@ describe('Automation windows on the arrival axis', () => {
             "SELECT id, occurred_at, created_at, payload_text FROM events WHERE semantic_type = 'content' ORDER BY occurred_at DESC, id DESC",
         },
       ],
-      triggers: [{ kind: 'schedule', cron: '0 9 * * *' }],
       outputs: { signals: { event: 'observation' } },
-      managed_agent_id: agent.agentId,
     })) as { automation_id: string };
     automationId = Number(created.automation_id);
   });
@@ -284,6 +282,8 @@ describe('Automation windows on the arrival axis', () => {
   });
 
   it('lets a scheduled tick inside a fresh mark\'s settle budget wait instead of erroring', async () => {
+    await api.automations.update({ automation_id: String(automationId), managed_agent_id: agentId,
+      triggers: [{ kind: 'schedule', cron: '0 9 * * *' }] });
     // A mark younger than the settle budget: the horizon has not passed it yet,
     // so there is nothing to hand out. Creation no longer produces this state —
     // it reaches a lookback back — but the CUTOVER migration does, seeding every
@@ -354,8 +354,6 @@ describe('Automation windows on the arrival axis', () => {
             "SELECT id, occurred_at, created_at, payload_text FROM events WHERE semantic_type = 'content' ORDER BY occurred_at DESC, id DESC",
         },
       ],
-      triggers: [{ kind: 'schedule', cron: '0 9 * * *' }],
-      managed_agent_id: agentId,
     })) as { automation_id: string };
     const freshId = Number(created.automation_id);
 
@@ -386,11 +384,6 @@ describe('an Automation window and a writer still open across it', () => {
     await cleanupTestDatabase();
     const seeded = await seedOwnerContext();
     orgId = seeded.org.id;
-    const agent = await createTestAgent({
-      organizationId: orgId,
-      ownerUserId: seeded.user.id,
-      agentId: 'open-writer-agent',
-    });
     const entity = await createTestEntity({
       name: 'Open writer subject',
       organization_id: orgId,
@@ -414,9 +407,7 @@ describe('an Automation window and a writer still open across it', () => {
             "SELECT id, occurred_at, created_at, payload_text FROM events WHERE semantic_type = 'content' ORDER BY occurred_at DESC, id DESC",
         },
       ],
-      triggers: [{ kind: 'schedule', cron: '0 9 * * *' }],
       outputs: { signals: { event: 'observation' } },
-      managed_agent_id: agent.agentId,
     })) as { automation_id: string };
     automationId = Number(created.automation_id);
     await getTestDb()`

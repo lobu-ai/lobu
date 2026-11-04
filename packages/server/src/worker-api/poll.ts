@@ -1562,7 +1562,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
       const agentId =
         typeof approved['agent_id'] === 'string' && approved['agent_id'].trim()
           ? approved['agent_id'].trim()
-          : row.automation_agent_id?.trim() || null;
+          : Object.hasOwn(approved, 'agent_id') ? null : row.automation_agent_id?.trim() || null;
       if (
         runPayload &&
         agentId &&
@@ -1606,7 +1606,8 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
           // wrote it, and only while the run still resolves to the same agent
           // kind. Sessions are agent-local state, so a different device or a
           // re-pinned agent kind cannot resume them.
-          const selectedAgentKind = agentKindFromPayload ?? row.automation_agent_kind ?? null;
+          const selectedAgentKind = Object.hasOwn(approved, 'agent_kind')
+            ? agentKindFromPayload : row.automation_agent_kind ?? null;
           const checkpoint = row.run_metadata?.['device_agent_session'];
           const stored =
             checkpoint != null && typeof checkpoint === 'object' && !Array.isArray(checkpoint)
@@ -1687,10 +1688,12 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
           id: automationIdStr,
           name: row.automation_name ?? null,
           slug: row.automation_slug ?? null,
-          agent_kind: agentKindFromPayload ?? row.automation_agent_kind ?? null,
+          agent_kind: Object.hasOwn(approved, 'agent_kind')
+            ? agentKindFromPayload : row.automation_agent_kind ?? null,
           // Strip server-only keys (e.g. finalize_nudges) so the device-worker's
           // strict payload decode never sees a field it doesn't know.
-          execution_config: stripServerOnlyExecutionConfig(row.automation_execution_config),
+          execution_config: stripServerOnlyExecutionConfig(Object.hasOwn(approved, 'execution_config')
+            ? approved.execution_config as Record<string, unknown> | null : row.automation_execution_config),
           // The instructions of the version this run was pinned to at creation:
           // the author's prompt plus its frozen skill snapshots. Device-local
           // executors do not receive the server-side worker's `.skills/` tree,

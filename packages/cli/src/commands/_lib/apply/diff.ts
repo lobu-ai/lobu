@@ -22,6 +22,7 @@ import type {
 import type {
   DesiredAgent,
   DesiredAuthProfile,
+  DesiredAutomation,
   DesiredAutomationTrigger,
   DesiredConnection,
   DesiredConnectorDefinition,
@@ -30,7 +31,6 @@ import type {
   DesiredOrgProvider,
   DesiredRelationshipType,
   DesiredState,
-  DesiredAutomation,
   DesiredView,
 } from "./desired-state.js";
 import {
@@ -1608,7 +1608,7 @@ function diffAutomation(
   if (!deepEqual(desired.triggers ?? [], remote.triggers ?? [])) {
     scalar.push("triggers");
   }
-  if (desired.agent !== (remote.managed_agent_id ?? "")) {
+  if (desired.agent !== (remote.managed_agent_id ?? null)) {
     scalar.push("managed_agent_id");
   }
   if (

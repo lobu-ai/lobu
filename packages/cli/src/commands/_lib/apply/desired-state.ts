@@ -1,4 +1,3 @@
-import type { ManageAutomationsArgs } from "@lobu/core/contracts/tools/manage-automations";
 import { existsSync, readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -11,17 +10,18 @@ import type {
 } from "@lobu/connector-sdk";
 import type { AgentSettings } from "@lobu/core";
 import { createAjv } from "@lobu/core/ajv";
+import type { CollectionPresentation } from "@lobu/core/contracts/tools/collection-presentation";
 import type {
   AutomationEventTrigger,
   AutomationScheduleTrigger,
   AutomationWorkspaceEventTrigger,
+  ManageAutomationsArgs,
 } from "@lobu/core/contracts/tools/manage-automations";
-import type { CollectionPresentation } from "@lobu/core/contracts/tools/collection-presentation";
 import type { RetainedSource } from "@lobu/core/contracts/tools/source-files";
 import type Ajv from "ajv";
 import type {
-  ConnectorSource,
   Automation,
+  ConnectorSource,
   InferenceCapabilityBlock,
   InferenceModality,
   Project,
@@ -111,8 +111,8 @@ export interface DesiredRelationshipType {
 export interface DesiredAutomation {
   slug: string;
   executionConfig?: Automation["executionConfig"];
-  /** Owning agent id. Every automation belongs to exactly one agent. */
-  agent: string;
+  /** Managed agent identity, independent of device placement. */
+  agent: string | null;
   name?: string;
   description?: string;
   triggers?: DesiredAutomationTrigger[];
@@ -1326,7 +1326,7 @@ export async function loadDesiredStateFromConfig(
   for (const automation of state.automations) {
     automation.skillSnapshots = resolveAutomationSkills(
       automation,
-      skillsByAgentId.get(automation.agent) ?? []
+      automation.agent ? (skillsByAgentId.get(automation.agent) ?? []) : []
     );
   }
 

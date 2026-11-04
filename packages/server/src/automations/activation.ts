@@ -222,17 +222,13 @@ export async function findMatchingAutomationActivations(
       signal,
     );
     if (!trigger) continue;
-    // Executor resolution decides PLACEMENT only — a device pin shadows the
-    // agent here, while `managed_agent_id` below still carries the Automation's
-    // conversation identity. The create/update matrix guarantees automated
-    // Automations resolve; skip defensively if a legacy row slips through.
+    // A device places execution while the managed agent keeps its identity.
     const executor = resolveAutomationExecutor({
       agentId: row.managed_agent_id as string | null,
       deviceWorkerId:
         typeof row.device_worker_id === "string" ? row.device_worker_id : null,
       agentKind: typeof row.agent_kind === "string" ? row.agent_kind : null,
     });
-    if (!executor) continue;
     const executionConfig =
       (row.execution_config as LegacyAutomationExecutionConfig | null) ?? null;
     matches.push({

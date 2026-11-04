@@ -98,7 +98,6 @@ describe('automation config audit #3664', () => {
       triggers: [{ kind: 'schedule', cron: '0 9 * * *' }],
       managed_agent_id: agentId,
       agent_kind: 'claude-code',
-      model_config: { api_key: 'secret-should-redact' } as any,
     })) as { automation_id: string };
     expect(created.automation_id).toBeDefined();
     const rows = await configEvents(orgId, created.automation_id);
@@ -114,8 +113,6 @@ describe('automation config audit #3664', () => {
     expect(payload.before).toBeNull();
     expect(payload.state).toBeDefined();
     expect(payload.state.agent_kind).toBe('claude-code');
-    // Secrets never persist, even under non-denylisted nesting.
-    expect(JSON.stringify(payload.state)).not.toContain('secret-should-redact');
     // Create changedFields covers every config field in the after-state.
     for (const field of [
       'name', 'slug', 'status', 'version', 'entity_ids', 'schedule', 'timezone',
@@ -167,15 +164,13 @@ describe('automation config audit #3664', () => {
       prompt: 'v1',
       triggers: [],
       managed_agent_id: agentId,
-      model_config: { z: 1, a: { d: 4, c: 3 }, m: 2 } as any,
       execution_config: { timeout_seconds: 60, max_budget_usd: 1.5 } as any,
     })) as { automation_id: string };
     const beforeCount = (await configEvents(orgId, created.automation_id)).length;
 
-    // Same values, reversed key order at both levels → no new config event.
+    // Same values, reversed key order → no new config event.
     const res = (await owner.automations.update({
       automation_id: created.automation_id,
-      model_config: { m: 2, a: { c: 3, d: 4 }, z: 1 } as any,
       execution_config: { max_budget_usd: 1.5, timeout_seconds: 60 } as any,
     })) as { updated_fields: string[] };
     expect(res.updated_fields).toEqual([]);
@@ -257,7 +252,6 @@ describe('automation config audit #3664', () => {
       prompt: 'source prompt',
       triggers: [{ kind: 'schedule', cron: '0 9 * * *' }],
       managed_agent_id: agentId,
-      model_config: { model: 'm1' } as any,
       execution_config: { timeout_seconds: 30 } as any,
       tags: ['cfv-tag'],
     })) as { automation_id: string };
@@ -266,6 +260,8 @@ describe('automation config audit #3664', () => {
       reaction_script: 'export default async () => ({ summary: "cfv" });',
     });
     const sql = getTestDb();
+    // Installed legacy data remains readable and clonable, but cannot be authored.
+    await sql`UPDATE automations SET model_config = '{"model":"m1"}'::jsonb WHERE id = ${Number(source.automation_id)}`;
     const [srcRow] = await sql`SELECT current_version_id FROM automations WHERE id = ${Number(source.automation_id)}`;
     const entity = await createTestEntity({
       name: 'CFV Target',
