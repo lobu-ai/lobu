@@ -42,6 +42,7 @@ import {
   VIEW_COMPILED_MAX_BYTES,
   VIEW_SOURCE_MAX_CHARS,
   compileView,
+  validateViewCandidate,
   serverCompileStamp,
   contentHash,
   isServerBuildable,
@@ -54,6 +55,7 @@ import {
   type SetViewInput,
 } from '../../views/views';
 import type { ToolContext } from '../registry';
+import type { Env } from '../../index';
 import { action, defineActionTool } from './action-tool';
 
 export { ManageViewsResultSchema, ManageViewsSchema };
@@ -206,7 +208,8 @@ async function assertActionKindsRegistered(
 
 async function handleSet(
   args: Static<typeof SetViewAction>,
-  ctx: ToolContext
+  ctx: ToolContext,
+  env: Env
 ): Promise<ManageViewsResult> {
   requireWriter(ctx);
   validateViewSource(args);
@@ -259,9 +262,13 @@ async function handleSet(
   // never matches, so it refreshes exactly once on the next set and is a
   // no-op after that.
   const current = await getView(ctx.organizationId, key);
-  if (current && current.content_hash === hash && current.compile_config_hash === compileConfigHash) {
-    return { action: 'set', view: projectView(current), written: false };
-  }
+  await validateViewCandidate({
+    key, name, description, attach, params, actions,
+    source_code: args.source_code, compiled_code: compiled, content_hash: hash,
+    source_files: retained?.sourceFiles ?? null, dependencies: retained?.dependencies ?? null,
+    source_complete: retained !== undefined, compile_config_hash: compileConfigHash,
+    last_writer: 'validation', updated_at: new Date().toISOString(),
+  }, env.VIEW_VALIDATOR_URL);
 
   const { view, written } = await setView(ctx.organizationId, {
     key,
@@ -278,7 +285,7 @@ async function handleSet(
     params,
     actions,
     last_writer: args.last_writer ?? (ctx.applyId ? `apply:${ctx.applyId}` : (ctx.userId ?? 'unknown')),
-  });
+  }, current);
 
   // No config-audit emission: the audit trail gains no view resource kind in
   // phase 1, and `last_writer` (apply_id | user) carries the provenance.

@@ -345,7 +345,7 @@ const VIEWS_LOADER_META = {
  * probe the filesystem.
  */
 export const MCP_APP_DIRS: ReadonlySet<string> = new Set(
-  Object.values(MCP_APP_RESOURCES).map((r) => r.appDir)
+  [...Object.values(MCP_APP_RESOURCES).map((r) => r.appDir), "view-native"]
 );
 
 /**

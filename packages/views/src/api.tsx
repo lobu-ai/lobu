@@ -12,9 +12,8 @@
  *  - reads: `query_sql`, `query_sdk`, and tools the registry marks
  *    `readOnlyHint` (`read_knowledge`, `get_automation`, `query_metric`, …);
  *    actions: `invoke_view_action`. The web host refuses every other tool, so
- *    mixed read/write tools such as `manage_connections` are not reachable
- *    from a view: read that data with a `query_sdk` script
- *    (`client.connections.list()`) instead.
+ *    mixed read/write tools require an explicitly admitted read action.
+ *    Use structured `tool()` arguments for entity and schema reads.
  *  - `setParams` → `ui/update-model-context` `{ structuredContent: { view,
  *    params } }`; the web host mirrors it into the address bar. Hosts without
  *    that capability keep params local to the frame.
@@ -54,6 +53,10 @@
  */
 
 import type { CollectionSelection } from "@lobu/core/contracts/tools/collection-selection";
+import type {
+  EntityGetInput,
+  EntityGetResult,
+} from "@lobu/core/contracts/tools/manage-entity";
 import type { ViewAttachment } from "@lobu/core/contracts/tools/manage-views";
 import {
   Component,
@@ -67,7 +70,12 @@ import {
   useState,
 } from "react";
 import { createRoot } from "react-dom/client";
-import { type HostContext, type ToolResult, ViewBridge } from "./bridge.js";
+import {
+  type HostContext,
+  type ToolResult,
+  ViewBridge,
+  ViewBridgeError,
+} from "./bridge.js";
 
 export type ParamValue = string | number | boolean;
 export type Params = Record<string, ParamValue>;
@@ -194,6 +202,10 @@ interface ViewRuntime {
     args: Record<string, unknown>
   ) => Promise<ToolResult>;
   openLink: (url: string) => Promise<void>;
+  openRecord: (
+    record: EntityGetInput,
+    options?: { mode?: "peek" | "page" }
+  ) => Promise<{ mode: "peek" | "page" }>;
   displayMode: DisplayMode;
   container: Container;
   requestDisplayMode: (mode: DisplayMode) => Promise<DisplayMode>;
@@ -231,6 +243,10 @@ export function useHost(): {
    * rejects when the host declines.
    */
   openLink: (url: string) => Promise<void>;
+  openRecord: (
+    record: EntityGetInput,
+    options?: { mode?: "peek" | "page" }
+  ) => Promise<{ mode: "peek" | "page" }>;
   /** `inline` as a card on a page, `fullscreen` as the view's own surface.
    *  Render a summary inline and the full view fullscreen. */
   displayMode: DisplayMode;
@@ -245,6 +261,7 @@ export function useHost(): {
     ready: rt.ready,
     theme: rt.theme,
     openLink: rt.openLink,
+    openRecord: rt.openRecord,
     displayMode: rt.displayMode,
     container: rt.container,
     requestDisplayMode: rt.requestDisplayMode,
@@ -320,7 +337,7 @@ export function escapeLiteral(value: unknown): string {
 
 /** Direct tool read, for a tool the registry marks `readOnlyHint`
  *  (`read_knowledge`, `get_automation`, …). The web host refuses mixed
- *  read/write tools such as `manage_connections`; use `query_sdk` for those reads. */
+ *  read/write tools require an explicitly admitted read action. */
 export interface ToolQuery {
   kind: "tool";
   name: string;
@@ -842,7 +859,11 @@ class RenderBoundary extends Component<
   render() {
     if (!this.state.error) return this.props.children;
     return (
-      <div role="alert" style={{ padding: 12, color: "var(--fg)" }}>
+      <div
+        role="alert"
+        data-lobu-render-error="true"
+        style={{ padding: 12, color: "var(--fg)" }}
+      >
         This view failed to render: {this.state.error.message}
       </div>
     );
@@ -981,6 +1002,37 @@ export function Provider({
     if (error) throw new Error(error);
   }, []);
 
+  const openRecord = useCallback(
+    async (
+      record: EntityGetInput,
+      options?: { mode?: "peek" | "page" }
+    ): Promise<{ mode: "peek" | "page" }> => {
+      const b = bridgeRef.current;
+      if (!b?.isConnected()) throw new Error("Not connected to a host");
+      try {
+        return await b.openRecord(record, options?.mode ?? "peek");
+      } catch (error) {
+        // Only an unsupported extension falls back. A host refusal stays a refusal.
+        if (!(error instanceof ViewBridgeError) || error.code !== -32601)
+          throw error;
+      }
+      const response = await b.callTool("manage_entity", {
+        ...record,
+        action: "get",
+      });
+      const error = resultError(response);
+      if (error) throw new Error(error);
+      const result = (response.structuredContent ??
+        parseTextJson(response)) as EntityGetResult;
+      if (!result?.entity?.view_url)
+        throw new Error("The host did not return a record URL.");
+      const failed = resultError(await b.openLink(result.entity.view_url));
+      if (failed) throw new Error(failed);
+      return { mode: "page" };
+    },
+    []
+  );
+
   const requestDisplayMode = useCallback(async (mode: DisplayMode) => {
     const b = bridgeRef.current;
     if (!b?.isConnected()) throw new Error("Not connected to a host");
@@ -1000,6 +1052,7 @@ export function Provider({
       dataVersion,
       callTool,
       openLink,
+      openRecord,
       displayMode,
       container,
       requestDisplayMode,
@@ -1015,6 +1068,7 @@ export function Provider({
       dataVersion,
       callTool,
       openLink,
+      openRecord,
       displayMode,
       container,
       requestDisplayMode,

@@ -1,0 +1,8 @@
+{
+  "name": "lobu-view-validator",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "playwright-vanilla": "npm:playwright@1.60.0"
+  }
+}

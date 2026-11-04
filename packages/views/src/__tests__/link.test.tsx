@@ -31,6 +31,21 @@ function OpensProgrammatically() {
   );
 }
 
+function OpensRecord() {
+  const { openRecord } = useHost();
+  return (
+    <button
+      type="button"
+      data-record
+      onClick={() => {
+        opened = openRecord({ entity_id: 42 }).catch((error) => error);
+      }}
+    >
+      record
+    </button>
+  );
+}
+
 class FakeParent {
   posted: Array<Record<string, unknown>> = [];
   postMessage(message: unknown): void {
@@ -105,6 +120,7 @@ async function connect(): Promise<void> {
       <Provider def={DEF} bridge={bridge ?? undefined}>
         <Link href="flat/moda-3">Moda 3+1</Link>
         <OpensProgrammatically />
+        <OpensRecord />
       </Provider>
     );
     await tick();
@@ -126,6 +142,84 @@ function openRequests(): Array<{ id: number; params: { url: string } }> {
 }
 
 describe("links", () => {
+  test("record opening uses native peek and preserves a host refusal", async () => {
+    await connect();
+    await act(async () => {
+      container
+        .querySelector("[data-record]")
+        ?.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+      await tick();
+    });
+    const request = parent.posted.find((m) => m.method === "lobu/open-record")!;
+    await act(async () => {
+      hostSend({ jsonrpc: "2.0", id: request.id, result: { mode: "peek" } });
+      await tick();
+    });
+    expect(await opened).toEqual({ mode: "peek" });
+    await act(async () => {
+      container
+        .querySelector("[data-record]")
+        ?.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+      await tick();
+    });
+    const refused = parent.posted
+      .filter((m) => m.method === "lobu/open-record")
+      .at(-1)!;
+    await act(async () => {
+      hostSend({
+        jsonrpc: "2.0",
+        id: refused.id,
+        error: { code: -32000, message: "Record access denied" },
+      });
+      await tick();
+    });
+    expect(await opened).toBeInstanceOf(Error);
+    expect(((await opened) as Error).message).toBe("Record access denied");
+    expect(openRequests()).toHaveLength(0);
+  });
+
+  test("an unsupported peek extension resolves the authorized record URL before opening a page", async () => {
+    await connect();
+    await act(async () => {
+      container
+        .querySelector("[data-record]")
+        ?.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+      await tick();
+    });
+    const request = parent.posted.find((m) => m.method === "lobu/open-record")!;
+    await act(async () => {
+      hostSend({
+        jsonrpc: "2.0",
+        id: request.id,
+        error: { code: -32601, message: "Unsupported method" },
+      });
+      await tick();
+    });
+    const read = parent.posted.find((m) => m.method === "tools/call")!;
+    await act(async () => {
+      hostSend({
+        jsonrpc: "2.0",
+        id: read.id,
+        result: {
+          structuredContent: {
+            action: "get",
+            entity: { view_url: "https://app.example/acme/fixture/record" },
+          },
+        },
+      });
+      await tick();
+    });
+    const navigation = openRequests().at(-1)!;
+    expect(navigation.params.url).toBe(
+      "https://app.example/acme/fixture/record"
+    );
+    await act(async () => {
+      hostSend({ jsonrpc: "2.0", id: navigation.id, result: {} });
+      await tick();
+    });
+    expect(await opened).toEqual({ mode: "page" });
+  });
+
   test("a middle click opens through the host instead of navigating the sandbox", async () => {
     await connect();
     const click = new dom.window.MouseEvent("auxclick", {
