@@ -1086,6 +1086,11 @@ type XFollowedUser = XGraphqlUser & { id: string; handle: string };
 
 interface XFollowingPage {
 	users: XFollowedUser[];
+	/**
+	 * Every account entry X sent, including unavailable ones. End of list is
+	 * decided from these, not from the accounts that could be emitted.
+	 */
+	entryIds: string[];
 	bottomCursor?: string;
 	recognized: boolean;
 	errors: string[];
@@ -1099,11 +1104,15 @@ function parseBrowserFollowingPage(
 	const data = json as any;
 	const instructions = timelineInstructions(data);
 	const users: XFollowedUser[] = [];
+	const entryIds: string[] = [];
 	for (const instruction of instructions ?? []) {
 		for (const entry of instruction?.entries ?? []) {
-			const result =
-				entry?.content?.itemContent?.user_results?.result ??
-				entry?.item?.itemContent?.user_results?.result;
+			const userResults =
+				entry?.content?.itemContent?.user_results ??
+				entry?.item?.itemContent?.user_results;
+			if (!userResults) continue;
+			entryIds.push(String(entry?.entryId ?? `entry-${entryIds.length}`));
+			const result = userResults.result;
 			if (!result || result.__typename === "UserUnavailable") continue;
 			const user = extractGraphqlUser(result);
 			if (user.id && user.handle)
@@ -1112,6 +1121,7 @@ function parseBrowserFollowingPage(
 	}
 	return {
 		users,
+		entryIds,
 		bottomCursor: instructions ? extractBottomCursor(instructions) : undefined,
 		recognized: instructions !== undefined,
 		errors: graphqlErrors(data),
@@ -1121,22 +1131,48 @@ function parseBrowserFollowingPage(
 /** X's Verified Organization types; other verified accounts are people. */
 const X_ORGANIZATION_VERIFIED_TYPES = new Set(["Business", "Government"]);
 
+/** X's snowflake epoch, and its launch date as the last-resort timestamp. */
+const X_SNOWFLAKE_EPOCH_MS = 1288834974657n;
+const X_LAUNCH_DATE = new Date("2006-03-21T00:00:00.000Z");
+/** Pre-snowflake user ids were 32-bit; anything at or below is not a snowflake. */
+const X_MAX_LEGACY_USER_ID = 2n ** 32n;
+
+/**
+ * A deterministic time for a followed account: its creation time, else the
+ * time encoded in a snowflake user id, else X's launch date. It must never
+ * depend on when the walk ran: ingestion compares `occurred_at`, so a
+ * sync-time value would add a version of the row on every walk.
+ */
+function followedAccountTime(user: XFollowedUser): {
+	at: Date;
+	basis: "account_created_at" | "user_id_snowflake" | "platform_launch";
+} {
+	const created = user.createdAt ? new Date(user.createdAt) : null;
+	if (created && !Number.isNaN(created.getTime()))
+		return { at: created, basis: "account_created_at" };
+	const digits =
+		user.id.length > 0 && [...user.id].every((char) => char >= "0" && char <= "9");
+	if (digits && BigInt(user.id) > X_MAX_LEGACY_USER_ID) {
+		const ms = Number((BigInt(user.id) >> 22n) + X_SNOWFLAKE_EPOCH_MS);
+		if (ms > Number(X_SNOWFLAKE_EPOCH_MS) && ms <= Date.now())
+			return { at: new Date(ms), basis: "user_id_snowflake" };
+	}
+	return { at: X_LAUNCH_DATE, basis: "platform_launch" };
+}
+
 /**
  * One event per followed account, keyed on the connected account and the
  * followed id so a later walk updates it instead of adding another. X does
- * not say when a follow happened, and a sync-time date would supersede every
- * row on every walk, so `occurred_at` is the followed account's creation time
- * (`timestamp_basis` says so).
+ * not say when a follow happened, so `occurred_at` is a stable account time
+ * (`followedAccountTime`) and `timestamp_basis` says which one.
  */
 export function followedAccountToEvent(
 	user: XFollowedUser,
 	follower: { id: string; handle: string },
-	observedAt: Date,
 ): EventEnvelope {
 	const handle = normalizeXHandle(user.handle) ?? user.handle;
 	const name = user.name ?? `@${user.handle}`;
-	const created = user.createdAt ? new Date(user.createdAt) : null;
-	const createdValid = created !== null && !Number.isNaN(created.getTime());
+	const time = followedAccountTime(user);
 	return {
 		origin_id: `x_following_${follower.id}_${user.id}`,
 		origin_type: "followed_account",
@@ -1145,7 +1181,7 @@ export function followedAccountToEvent(
 		}`,
 		author_name: name,
 		source_url: `https://x.com/${user.handle}`,
-		occurred_at: createdValid ? created : observedAt,
+		occurred_at: time.at,
 		metadata: {
 			followed_user_id: user.id,
 			followed_handle: handle,
@@ -1162,7 +1198,7 @@ export function followedAccountToEvent(
 			followed_by_id: follower.id,
 			followed_by_handle: normalizeXHandle(follower.handle) ?? follower.handle,
 			followed_by_name: `@${follower.handle}`,
-			timestamp_basis: createdValid ? "account_created_at" : "observed_at",
+			timestamp_basis: time.basis,
 		},
 	};
 }
@@ -2560,7 +2596,7 @@ async function syncFollowingViaExtension(
 			return [];
 		}
 		pages.recordPage(url, {
-			itemIds: page.users.map((user) => user.id),
+			itemIds: page.entryIds,
 			bottomCursor: page.bottomCursor,
 		});
 		return page.users;
@@ -2602,7 +2638,7 @@ async function syncFollowingViaExtension(
 	const events = result.items.flatMap((user) => {
 		if (seen.has(user.id)) return [];
 		seen.add(user.id);
-		return [followedAccountToEvent(user, follower, observedAt)];
+		return [followedAccountToEvent(user, follower)];
 	});
 	const status = pages.status();
 	const nextCheckpoint: XCheckpoint = { ...checkpoint };

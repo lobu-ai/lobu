@@ -37,8 +37,10 @@ function pagePrelude(accountId: string): string {
 
 /**
  * Read (and with `desired` set, change) the like state of one focal post.
- * The focal article is the one linking to this status id; X marks the focal
- * post `tabindex="-1"`, which breaks a tie with a reply quoting it.
+ * Only the focal article counts: X marks it `tabindex="-1"`, and its own
+ * permalink (the link wrapping its `<time>`, outside any nested quoted-post
+ * card) must name this status. An unavailable post quoted by another article
+ * therefore finds no control and is never clicked.
  */
 export function buildXLikeExpression(
 	statusId: string,
@@ -61,12 +63,14 @@ export function buildXLikeExpression(
     };
     const read = () => {
       assertPage();
-      let articles = [...document.querySelectorAll('article[data-testid="tweet"]')].filter(article =>
-        [...article.querySelectorAll('a[href]')].some(link => {
-          try { return statusOf(new URL(link.getAttribute('href'), location.href).pathname) === statusId; }
-          catch { return false; }
-        }));
-      if (articles.length > 1) articles = articles.filter(article => article.getAttribute('tabindex') === '-1');
+      const ownPermalink = (article) => [...article.querySelectorAll('a[href]')].some(link => {
+        if (!link.querySelector('time') || link.closest('article') !== article) return false;
+        const card = link.closest('[role="link"]');
+        if (card && article.contains(card)) return false;
+        try { return statusOf(new URL(link.getAttribute('href'), location.href).pathname) === statusId; }
+        catch { return false; }
+      });
+      const articles = [...document.querySelectorAll('article[data-testid="tweet"][tabindex="-1"]')].filter(ownPermalink);
       if (articles.length > 1) throw new Error('X post like control is ambiguous');
       if (!articles.length) return null;
       const buttons = [...articles[0].querySelectorAll('[data-testid="like"], [data-testid="unlike"]')];

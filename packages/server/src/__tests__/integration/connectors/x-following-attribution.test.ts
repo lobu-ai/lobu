@@ -18,9 +18,11 @@ const connectorKey = 'x';
 const feedKey = 'following';
 const follower = { id: '1000000001', handle: 'testuser' };
 
-/** Synthetic accounts: one person, one X Verified Organization (Business). */
+/**
+ * Synthetic accounts: one person, one X Verified Organization (Business), and
+ * one person X sent without a creation time.
+ */
 function followedAccounts() {
-  const observedAt = new Date('2026-11-01T00:00:00.000Z');
   return [
     followedAccountToEvent(
       {
@@ -29,8 +31,7 @@ function followedAccounts() {
         name: 'Synthetic Person',
         createdAt: 'Wed Jun 04 12:00:00 +0000 2014',
       },
-      follower,
-      observedAt
+      follower
     ),
     followedAccountToEvent(
       {
@@ -41,8 +42,11 @@ function followedAccounts() {
         profileImageShape: 'Square',
         createdAt: 'Mon Jan 02 09:00:00 +0000 2012',
       },
-      follower,
-      observedAt
+      follower
+    ),
+    followedAccountToEvent(
+      { id: '1500000000000000000', handle: 'synth_undated', name: 'Synthetic Undated' },
+      follower
     ),
   ];
 }
@@ -135,7 +139,11 @@ describe('X following attribution (real connector rules)', () => {
     const people = await entities(organizationId, 'person');
     const companies = await entities(organizationId, 'company');
     // The connected account is the performer, so it is a person too.
-    expect(people.map((person) => person.name)).toEqual(['@testuser', 'Synthetic Person']);
+    expect(people.map((person) => person.name)).toEqual([
+      '@testuser',
+      'Synthetic Person',
+      'Synthetic Undated',
+    ]);
     expect(companies.map((company) => company.name)).toEqual(['Synthetic Co']);
     const syntheticPerson = people.find((person) => person.name === 'Synthetic Person')!;
     expect(first.resolved.entityIdsByItem.get(0)).toContain(syntheticPerson.id);
@@ -148,12 +156,12 @@ describe('X following attribution (real connector rules)', () => {
     expect(second.resolved.entityIdsByItem.get(1)).toContain(companies[0].id);
 
     // Identical data re-observed is neither a new event nor a new version.
-    expect(second.inserted.map((row) => row.change)).toEqual(['unchanged', 'unchanged']);
+    expect(second.inserted.map((row) => row.change)).toEqual(['unchanged', 'unchanged', 'unchanged']);
     expect(second.inserted.map((row) => row.id)).toEqual(first.inserted.map((row) => row.id));
     const versions = await getTestDb()<{ count: number }[]>`
       SELECT count(*)::int AS count FROM events
       WHERE organization_id = ${organizationId} AND connector_key = ${connectorKey}
     `;
-    expect(versions[0].count).toBe(2);
+    expect(versions[0].count).toBe(3);
   });
 });

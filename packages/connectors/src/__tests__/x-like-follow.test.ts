@@ -96,7 +96,7 @@ describe("X set_like", () => {
 	});
 
 	test("refuses another post, another account, a signed-out browser and ambiguous controls", async () => {
-		const otherFocal = `<article data-testid="tweet" tabindex="-1"><a href="/synthetic_peer/status/${STATUS}">again</a><button data-testid="like">Like</button></article>`;
+		const otherFocal = `<article data-testid="tweet" tabindex="-1"><a href="/synthetic_peer/status/${STATUS}"><time>again</time></a><button data-testid="like">Like</button></article>`;
 		for (const [extra, account, url, error] of [
 			["", SELF, postUrl.replace("0123", "0456"), "post changed"],
 			["", "3000", postUrl, "another account"],
@@ -111,6 +111,22 @@ describe("X set_like", () => {
 			page.window.close();
 		}
 	});
+
+	test("never likes another post that quotes or links an unavailable target", async () => {
+		// The target itself is unavailable. The focal article is a post quoting
+		// it, and a reply links to it; neither is the target's own permalink.
+		const page = dom(
+			`<main><article data-testid="tweet" tabindex="-1"><a href="/synthetic_other/status/999999999"><time>quoting</time></a><div role="link"><a href="/synthetic_peer/status/${STATUS}"><time>quoted</time></a></div><button data-testid="like">Like</button></article><article data-testid="tweet" tabindex="0"><a href="/synthetic_peer/status/${STATUS}"><time>reply</time></a><button data-testid="like">Like</button></article></main>`,
+			postUrl,
+		);
+		const counter = { clicks: 0 };
+		toggles(page, "button", (id) => (id === "like" ? "unlike" : "like"), counter);
+		await expect(
+			page.window.eval(buildXLikeExpression(STATUS, SELF, true)),
+		).rejects.toThrow("not found");
+		expect(counter.clicks).toBe(0);
+		page.window.close();
+	}, 20000);
 
 	test("re-reads after reload and closes only its scratch tab when the like did not persist", async () => {
 		const calls: Array<{ key: string; input: Record<string, unknown> }> = [];
