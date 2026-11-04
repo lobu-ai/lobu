@@ -50,6 +50,14 @@ export interface ErrorReport {
 const MAX_MESSAGE_INPUT = 8192;
 const MAX_MESSAGE_OUTPUT = 300;
 const MAX_STACK_FRAMES = 30;
+/**
+ * A stack starts with the error's message, which can hold untrusted text of
+ * any size. The frame patterns backtrack, so only a bounded prefix is read and
+ * any line longer than a real frame is skipped before a pattern touches it.
+ */
+const MAX_STACK_INPUT = 64 * 1024;
+const MAX_STACK_LINES = 200;
+const MAX_FRAME_LINE = 512;
 const GROUPING_FRAMES = 3;
 
 /**
@@ -139,7 +147,9 @@ function normalizeFunction(raw: string | undefined): string | null {
 /** Parse a V8/Bun stack into frames, outermost last. Message lines are skipped. */
 export function parseStackFrames(stack: string): StackFrame[] {
   const frames: StackFrame[] = [];
-  for (const line of stack.split("\n")) {
+  const lines = stack.slice(0, MAX_STACK_INPUT).split("\n", MAX_STACK_LINES);
+  for (const line of lines) {
+    if (line.length > MAX_FRAME_LINE) continue;
     const match = V8_FRAME.exec(line);
     if (match) {
       const file = normalizeFile(match[2] ?? "");

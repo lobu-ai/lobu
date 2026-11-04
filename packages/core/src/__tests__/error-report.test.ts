@@ -108,6 +108,21 @@ describe("parseStackFrames", () => {
       },
     ]);
   });
+  test("skips oversized lines and bounds hostile message text in a stack", () => {
+    const hostile = `at ${"a (a".repeat(1024)}`;
+    expect(
+      parseStackFrames(
+        `Error: upstream said:\n${hostile}\n    at handleTool (/app/packages/server/src/tool.ts:1:2)`
+      ).map((frame) => frame.function)
+    ).toEqual(["handleTool"]);
+
+    // Quadratic before the input was bounded: 256 KB took seconds.
+    const started = performance.now();
+    expect(
+      parseStackFrames(`Error: upstream said:\nat ${"a (a".repeat(65536)}`)
+    ).toEqual([]);
+    expect(performance.now() - started).toBeLessThan(1000);
+  });
 });
 
 describe("describeError grouping", () => {
