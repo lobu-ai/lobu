@@ -1909,6 +1909,8 @@ jobs:
           file: ./docker/worker/Dockerfile
           load: true
           push: false
+          build-args: |
+            APP_GIT_SHA=${{ github.sha }}
           tags: lobu-worker:parity-smoke
           cache-from: type=gha,scope=worker
 
@@ -1925,6 +1927,8 @@ jobs:
           set -o pipefail
           docker run --rm --network=none lobu-worker:parity-smoke \
             node --no-node-snapshot dist/bin.js self-check --json | tee worker-self-check.json
+          docker run --rm --network=none lobu-worker:parity-smoke \
+            node -e 'if (process.env.APP_GIT_SHA !== process.argv[1]) process.exit(1)' "$GITHUB_SHA"
           jq -e '.isolate_lane.available == true' worker-self-check.json >/dev/null || {
             echo "::error::worker image cannot load isolated-vm: $(jq -c .isolate_lane worker-self-check.json)"
             exit 1

@@ -167,6 +167,8 @@ jobs:
           set -o pipefail
           docker run --rm --network=none "${REGISTRY}/${IMAGE_NAME_WORKER}@${{ needs.build-worker.outputs.digest }}" \
             node --no-node-snapshot dist/bin.js self-check --json | tee worker-self-check.json
+          docker run --rm --network=none "${REGISTRY}/${IMAGE_NAME_WORKER}@${{ needs.build-worker.outputs.digest }}" \
+            node -e 'if (process.env.APP_GIT_SHA !== process.argv[1]) process.exit(1)' "$GITHUB_SHA"
           jq -e '.isolate_lane.available == true' worker-self-check.json >/dev/null || {
             echo "::error::worker image cannot load isolated-vm: $(jq -c .isolate_lane worker-self-check.json)"
             exit 1
@@ -400,6 +402,8 @@ jobs:
           platforms: ${{ env.BUILD_PLATFORMS }}
           file: ./docker/worker/Dockerfile
           push: true
+          build-args: |
+            APP_GIT_SHA=${{ github.sha }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # Retain builder-stage layers for native compilation. This is the
