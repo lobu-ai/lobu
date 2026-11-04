@@ -223,8 +223,50 @@ describe("issue lifecycle", () => {
     expect(plan([], [issue({ status: "ignored", last_seen: quiet })])).toEqual(
       []
     );
-    expect(plan([], [issue({ status: "resolved", last_seen: quiet })])).toEqual(
-      []
-    );
+    expect(
+      plan(
+        [],
+        [issue({ status: "resolved", last_seen: quiet, resolved_at: quiet })]
+      )
+    ).toEqual([]);
+  });
+
+  test("a board resolution without its time is stamped, then can regress", () => {
+    const stamped = { resolved_at: NOW.toISOString() };
+    // Resolved on the board: only status changed.
+    const [seen] = plan([occ()], [issue({ status: "resolved" })]);
+    expect(seen).toMatchObject({ metadata: stamped });
+    expect(seen).not.toHaveProperty("alert");
+    expect(seen).not.toHaveProperty("metadata.status");
+    expect(plan([], [issue({ status: "resolved" })])).toEqual([
+      { action: "update", id: 7, fingerprint: FP(1), metadata: stamped },
+    ]);
+    // Re-resolved after a regression: the old resolved_at is stale.
+    const reResolved = issue({
+      status: "resolved",
+      resolved_at: ago(48),
+      regressed_at: ago(24),
+    });
+    expect(plan([], [reResolved])[0]).toMatchObject({ metadata: stamped });
+    // Once stamped, a later occurrence regresses.
+    expect(
+      plan([occ()], [{ ...reResolved, resolved_at: ago(0.5) }])[0]
+    ).toMatchObject({
+      metadata: { status: "regressed" },
+      alert: { kind: "regressed" },
+    });
+  });
+
+  test("a deleted issue suppresses its fingerprint", () => {
+    const deleted = issue({ deleted: true });
+    expect(plan([occ()], [deleted])).toEqual([]);
+    expect(
+      plan([], [{ ...deleted, status: "regressed", last_seen: ago(24 * 30) }])
+    ).toEqual([]);
+    // A live record for the same fingerprint wins over a tombstone.
+    expect(plan([occ()], [deleted, issue({ id: 8 })])[0]).toMatchObject({
+      action: "update",
+      id: 8,
+    });
   });
 });

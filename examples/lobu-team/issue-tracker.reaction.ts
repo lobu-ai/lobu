@@ -12,6 +12,8 @@ import type { ReactionClient, ReactionContext } from "@lobu/connector-sdk";
 export const DRY_RUN = true;
 
 const CONNECTION = "lobu-analytics";
+/** The client.query row cap for Postgres reads. */
+const MAX_ISSUE_ROWS = 5000;
 const ENVIRONMENT = "summaries-prod";
 
 export const RULES = {
@@ -68,8 +70,11 @@ export interface IssueRecord {
   first_seen?: string;
   last_seen?: string;
   resolved_at?: string;
+  regressed_at?: string;
   resolved_in_release?: string;
   ignore_until?: string;
+  /** Soft-deleted: its slug stays taken, so the fingerprint stays suppressed. */
+  deleted?: boolean;
 }
 
 export type Alert = "regressed" | "escalating";
@@ -138,6 +143,26 @@ function ageStatus(issue: IssueRecord, now: Date): "new" | "ongoing" {
 }
 
 /**
+ * When the current resolution happened, or NaN if unknown. Moving a card to
+ * `resolved` on the board sets only status, so resolved_at is missing, or
+ * still names the resolution before the last regression.
+ */
+function resolutionTime(issue: IssueRecord): number {
+  const resolved = ms(issue.resolved_at);
+  const regressed = ms(issue.regressed_at);
+  return Number.isFinite(regressed) && !(resolved > regressed)
+    ? Number.NaN
+    : resolved;
+}
+
+/** A resolved issue with no usable resolved_at is resolved as of this run. */
+function stampResolution(issue: IssueRecord, now: Date) {
+  return issue.status === "resolved" && !Number.isFinite(resolutionTime(issue))
+    ? { resolved_at: now.toISOString() }
+    : null;
+}
+
+/**
  * Decide every create, update and alert for one run. Pure: the same inputs
  * always give the same plan. `createdLastHour` counts issues already created
  * in the trailing hour, so the quota holds across runs.
@@ -148,7 +173,12 @@ export function planIssueChanges(
   now: Date,
   createdLastHour: number
 ): IssueChange[] {
-  const byFingerprint = new Map(issues.map((i) => [i.fingerprint, i]));
+  const byFingerprint = new Map<string, IssueRecord>();
+  for (const i of issues) {
+    const held = byFingerprint.get(i.fingerprint);
+    if (!held || (held.deleted && !i.deleted))
+      byFingerprint.set(i.fingerprint, i);
+  }
   const seen = new Set<string>();
   const changes: IssueChange[] = [];
   let quota = Math.max(0, RULES.maxNewPerHour - createdLastHour);
@@ -160,6 +190,7 @@ export function planIssueChanges(
   for (const o of ordered) {
     seen.add(o.fingerprint);
     const issue = byFingerprint.get(o.fingerprint);
+    if (issue?.deleted) continue;
     if (!issue) {
       if (!passesGate(o)) continue;
       if (quota === 0) {
@@ -200,18 +231,21 @@ export function planIssueChanges(
       if (issue.ignore_until && ms(issue.ignore_until) <= now.getTime())
         set(ageStatus(issue, now));
     } else if (issue.status === "resolved") {
+      const stamp = stampResolution(issue, now);
       // A fix release names where the error must stop. Until it is deployed,
       // the old release still emitting it is expected, not a regression.
-      const after = ms(o.last_seen) > ms(issue.resolved_at);
+      const after = ms(o.last_seen) > resolutionTime(issue);
       const regressed = issue.resolved_in_release
         ? after && o.releases_2h.includes(issue.resolved_in_release)
         : after;
-      if (regressed) {
+      if (stamp) {
+        Object.assign(metadata, stamp);
+      } else if (regressed) {
         set("regressed");
         metadata.regressed_at = now.toISOString();
         alert = {
           kind: "regressed",
-          key: `issue:${o.fingerprint}:regressed:${issue.resolved_at ?? "unknown"}`,
+          key: `issue:${o.fingerprint}:regressed:${issue.resolved_at}`,
           title: `Issue regressed: ${o.title}`,
         };
       }
@@ -238,8 +272,18 @@ export function planIssueChanges(
     });
   }
 
-  for (const issue of issues) {
-    if (seen.has(issue.fingerprint)) continue;
+  for (const issue of byFingerprint.values()) {
+    if (seen.has(issue.fingerprint) || issue.deleted) continue;
+    const stamp = stampResolution(issue, now);
+    if (stamp) {
+      changes.push({
+        action: "update",
+        id: issue.id,
+        fingerprint: issue.fingerprint,
+        metadata: stamp,
+      });
+      continue;
+    }
     const quietFor = now.getTime() - ms(issue.last_seen);
     if (
       ["new", "ongoing", "escalating", "regressed"].includes(issue.status) &&
@@ -294,10 +338,11 @@ HAVING max(last_seen) >= now() - INTERVAL 2 HOUR
 ORDER BY seen_24h DESC, fingerprint
 LIMIT 400`;
 
+// Tombstones included: a deleted issue still holds its slug.
 const ISSUES_SQL = `
-SELECT id, metadata
+SELECT id, metadata, deleted_at IS NOT NULL AS deleted
 FROM entities
-WHERE entity_type = 'issue' AND deleted_at IS NULL`;
+WHERE entity_type = 'issue'`;
 
 const CREATED_LAST_HOUR_SQL = `
 SELECT count(*)::int AS n
@@ -341,8 +386,10 @@ function toIssue(row: Record<string, unknown>): IssueRecord | null {
     first_seen: str(m.first_seen) || undefined,
     last_seen: str(m.last_seen) || undefined,
     resolved_at: str(m.resolved_at) || undefined,
+    regressed_at: str(m.regressed_at) || undefined,
     resolved_in_release: str(m.resolved_in_release) || undefined,
     ignore_until: str(m.ignore_until) || undefined,
+    deleted: row.deleted === true,
   };
 }
 
@@ -358,7 +405,17 @@ export async function runIssueTracker(
       unknown
     >[]
   ).map(toOccurrence);
-  const issues = ((await client.query(ISSUES_SQL)) as Record<string, unknown>[])
+  const issueRows = (await client.query(ISSUES_SQL)) as Record<
+    string,
+    unknown
+  >[];
+  // client.query caps Postgres reads without an error. A truncated read would
+  // make existing fingerprints look new, so stop instead of guessing.
+  if (issueRows.length >= MAX_ISSUE_ROWS)
+    throw new Error(
+      `Read ${issueRows.length} issue records, the client.query cap; archive or delete old issues before the tracker can run`
+    );
+  const issues = issueRows
     .map(toIssue)
     .filter((i): i is IssueRecord => i !== null);
   const [{ n: createdLastHour } = { n: 0 }] = (await client.query(
@@ -369,7 +426,7 @@ export async function runIssueTracker(
   const summary = {
     dry_run: dryRun,
     fingerprints: occurrences.length,
-    issues: issues.length,
+    issues: issues.filter((i) => !i.deleted).length,
     created: changes.filter((c) => c.action === "create").length,
     updated: changes.filter((c) => c.action === "update").length,
     deferred: changes.filter((c) => c.action === "defer").length,
@@ -381,32 +438,53 @@ export async function runIssueTracker(
     automation_id: ctx.window.automation_id,
     run_id: ctx.window.run_id,
   };
+  // Each change stands alone: one failed write must not hold back the rest.
+  // The run still fails afterwards, so the task retries and the error shows.
+  const failures: string[] = [];
   for (const change of changes) {
-    if (change.action === "create") {
-      await client.entities.create({
-        entity_type: "issue",
-        name: change.name,
-        slug: `issue-${change.fingerprint}`,
-        metadata: change.metadata,
-        automation_source: source,
-      });
-    } else if (change.action === "update") {
-      await client.entities.update({
-        entity_id: change.id,
-        metadata: change.metadata,
-        automation_source: source,
-      });
-      if (change.alert)
-        await client.notifications.send({
-          title: change.alert.title.slice(0, 160),
-          body: `Fingerprint ${change.fingerprint}. Open the issue record for its occurrences and linked tasks.`,
-          recipients: "admins",
-          idempotency_key: change.alert.key,
-          automation_source: source,
-        });
+    try {
+      await applyChange(change, client, source);
+    } catch (error) {
+      failures.push(
+        `${change.action} ${change.fingerprint}: ${error instanceof Error ? error.message : String(error)}`
+      );
     }
   }
+  if (failures.length)
+    throw new Error(
+      `${failures.length} of ${changes.length} issue changes failed: ${failures.slice(0, 5).join("; ")}`
+    );
   return summary;
+}
+
+async function applyChange(
+  change: IssueChange,
+  client: ReactionClient,
+  source: { automation_id: number; run_id: number }
+): Promise<void> {
+  if (change.action === "create") {
+    await client.entities.create({
+      entity_type: "issue",
+      name: change.name,
+      slug: `issue-${change.fingerprint}`,
+      metadata: change.metadata,
+      automation_source: source,
+    });
+  } else if (change.action === "update") {
+    await client.entities.update({
+      entity_id: change.id,
+      metadata: change.metadata,
+      automation_source: source,
+    });
+    if (change.alert)
+      await client.notifications.send({
+        title: change.alert.title.slice(0, 160),
+        body: `Fingerprint ${change.fingerprint}. Open the issue record for its occurrences and linked tasks.`,
+        recipients: "admins",
+        idempotency_key: change.alert.key,
+        automation_source: source,
+      });
+  }
 }
 
 export default async function trackIssues(

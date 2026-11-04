@@ -15,9 +15,13 @@ beforeEach(cleanupTestDatabase);
 const FINGERPRINT = "0123456789abcdef0123456789abcdef";
 
 /** The ClickHouse read is the only stubbed edge: its SQL is ClickHouse's. */
-function occurrenceRow(lastSeen: string, releases = ["rel-a"]) {
+function occurrenceRow(
+  lastSeen: string,
+  releases = ["rel-a"],
+  fingerprint = FINGERPRINT
+) {
   return {
-    fingerprint: FINGERPRINT,
+    fingerprint,
     kind: "system",
     issue_title: "Error: Invalid encrypted format",
     issue_culprit: "log worker-auth",
@@ -114,4 +118,50 @@ it("creates, refreshes and regresses one issue per fingerprint without touching 
     resolved_at: resolvedAt,
     last_release: "rel-b",
   });
+
+  // Moved back to resolved on the board: only status changes. The run stamps
+  // the resolution instead of re-alerting off the stale resolved_at.
+  await sdk.entities.update({
+    entity_id: created.id,
+    metadata: { status: "resolved" },
+  });
+  expect(await run(false)).toMatchObject({ created: 0, updated: 1, alerts: 0 });
+  const [reResolved] = await issues();
+  expect(reResolved.metadata.status).toBe("resolved");
+  expect(Date.parse(reResolved.metadata.resolved_at as string)).toBeGreaterThan(
+    Date.parse(reResolved.metadata.regressed_at as string)
+  );
+
+  // A deleted issue keeps its slug: the fingerprint stays suppressed instead
+  // of failing every run on a duplicate create.
+  await sql`UPDATE entities SET deleted_at = NOW() WHERE id = ${created.id}`;
+  clickhouse = [occurrenceRow(new Date().toISOString(), ["rel-b"])];
+  expect(await run(false)).toMatchObject({
+    issues: 0,
+    created: 0,
+    updated: 0,
+  });
+
+  // One failed write must not hold back the rest of the run. Another record
+  // already holds the second fingerprint's slug, so only its create fails.
+  const blocked = "1".repeat(32);
+  const fresh = "2".repeat(32);
+  await sdk.entitySchema.createType({
+    slug: "note",
+    name: "Note",
+    metadata_schema: { type: "object", properties: {} },
+  });
+  await sdk.entities.create({
+    entity_type: "note",
+    name: "Squatter",
+    slug: `issue-${blocked}`,
+  });
+  clickhouse = [
+    occurrenceRow(new Date().toISOString(), ["rel-b"], blocked),
+    occurrenceRow(new Date().toISOString(), ["rel-b"], fresh),
+  ];
+  await expect(run(false)).rejects.toThrow(
+    /^1 of 2 issue changes failed: create 1{32}/
+  );
+  expect((await issues()).map((row) => row.slug)).toEqual([`issue-${fresh}`]);
 });
