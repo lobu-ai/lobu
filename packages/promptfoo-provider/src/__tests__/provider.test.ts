@@ -16,6 +16,7 @@ function streamFromChunks(chunks: string[]): ReadableStream<Uint8Array> {
 }
 
 function createFetchStub(events: string[]) {
+  let sentMessageId = "";
   return mock(async (input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
     if (url.endsWith("/lobu/api/v1/agents") && init?.method === "POST") {
@@ -25,19 +26,27 @@ function createFetchStub(events: string[]) {
       );
     }
     if (url.includes("/messages")) {
+      sentMessageId = JSON.parse(String(init?.body)).messageId;
       return new Response(
         JSON.stringify({
-          messageId: "msg-1",
+          messageId: sentMessageId,
           traceparent: "00-traceabcdef-span0-01",
         }),
         { status: 200, headers: { "content-type": "application/json" } }
       );
     }
     if (url.endsWith("/events")) {
-      return new Response(streamFromChunks(events), {
-        status: 200,
-        headers: { "content-type": "text/event-stream" },
-      });
+      return new Response(
+        streamFromChunks(
+          events.map((event) =>
+            event.replaceAll('"msg-1"', JSON.stringify(sentMessageId))
+          )
+        ),
+        {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        }
+      );
     }
     if (init?.method === "DELETE") {
       return new Response(null, { status: 204 });
@@ -178,6 +187,7 @@ interface Recorded {
 function installGatewayMock() {
   const recorded: Recorded[] = [];
   let messageCounter = 0;
+  let sentMessageId = "";
 
   const originalFetch = globalThis.fetch;
   const fetchMock = mock(
@@ -204,9 +214,10 @@ function installGatewayMock() {
       // works.
       if (method === "POST" && url.endsWith("/messages")) {
         messageCounter += 1;
+        sentMessageId = JSON.parse(body ?? "{}").messageId;
         return new Response(
           JSON.stringify({
-            messageId: `msg-${messageCounter}`,
+            messageId: sentMessageId,
             traceparent: `00-trace${messageCounter}-span-01`,
           }),
           { status: 200, headers: { "Content-Type": "application/json" } }
@@ -216,7 +227,7 @@ function installGatewayMock() {
       // SSE event stream — emits one `complete` event tagged with the current
       // messageId.
       if (method === "GET" && url.endsWith("/events")) {
-        const messageId = `msg-${messageCounter}`;
+        const messageId = sentMessageId;
         const payload =
           `event: output\ndata: ${JSON.stringify({ messageId, content: `turn-${messageCounter}` })}\n\n` +
           `event: complete\ndata: ${JSON.stringify({ messageId, usage: { input_tokens: 1, output_tokens: 2 } })}\n\n`;
@@ -358,5 +369,79 @@ describe("LobuProvider.callApi", () => {
     );
     expect(sends).toHaveLength(1);
     expect(JSON.parse(sends[0]!.body ?? "{}").content).toBe("fallback prompt");
+  });
+});
+
+describe("LobuProvider retained HTTP backlog", () => {
+  test.each([
+    "complete",
+    "error",
+    "agent-error",
+  ])("correlates follow-ups and batched %s without a response messageId", async (terminal) => {
+    const turns: Array<{ content: string; messageId: string }> = [];
+    let backlog = "";
+    const gateway = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        const path = new URL(request.url).pathname;
+        if (path.endsWith("/agents") && request.method === "POST") {
+          return Response.json({
+            agentId: "test-session",
+            token: "session-token",
+          });
+        }
+        if (path.endsWith("/messages")) {
+          const body = (await request.json()) as {
+            content: string;
+            messageId?: string;
+          };
+          const messageId = body.messageId ?? `server-${turns.length}`;
+          turns.push({ content: body.content, messageId });
+          const current =
+            turns.length === 1
+              ? sseEvent("output", { messageId, content: "old reply" }) +
+                sseEvent("complete", { messageId })
+              : sseEvent("output", {
+                  messageId: "unrelated",
+                  content: "stale delta",
+                }) +
+                sseEvent(terminal, {
+                  messageId: "batch-leader",
+                  processedMessageIds: ["batch-leader", messageId],
+                  finalText: "new batched reply",
+                  error: "current failure",
+                });
+          backlog += current;
+          // Some compatible gateways omit the optional response id. The caller
+          // must use its submitted identity rather than accepting the backlog.
+          return Response.json({ queued: true });
+        }
+        if (path.endsWith("/events")) {
+          return new Response(backlog, {
+            headers: { "Content-Type": "text/event-stream" },
+          });
+        }
+        return new Response(null, { status: 204 });
+      },
+    });
+    try {
+      const provider = new LobuProvider({
+        config: {
+          agent: "test-agent",
+          token: "test-token",
+          gateway: gateway.url.toString(),
+        },
+      });
+      const result = await provider.callApi("ignored", {
+        vars: { transcript: ["first task", "new task"] },
+      });
+      if (terminal === "complete")
+        expect(result.output).toBe("new batched reply");
+      else expect(result.error).toBe("current failure");
+      expect(turns).toHaveLength(2);
+      expect(turns[0]?.messageId).not.toBe(turns[1]?.messageId);
+    } finally {
+      await gateway.stop(true);
+    }
   });
 });

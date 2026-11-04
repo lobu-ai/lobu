@@ -33,6 +33,10 @@ import type { ResponseRenderer } from "./response-renderer.js";
 
 const logger = createLogger("unified-thread-consumer");
 
+// An expected owner-routing miss consumes the normal bounded retry budget.
+// Keep it distinct from renderer/coordination failures; it is not a deferral.
+class SseOwnerRetryError extends Error {}
+
 /**
  * customEvent.name for a CHAT-PLATFORM interaction card (ask_user question,
  * tool-approval, link-button, status message) that must reach the pod holding
@@ -317,10 +321,14 @@ export class UnifiedThreadResponseConsumer {
 
       await this.routeToRenderer(renderer, data, sessionKey, isFinalAttempt);
     } catch (error) {
-      logger.error(
-        `Error processing thread response for message ${data.messageId}:`,
-        error
-      );
+      if (error instanceof SseOwnerRetryError) {
+        logger.debug(error.message);
+      } else {
+        logger.error(
+          `Error processing thread response for message ${data.messageId}:`,
+          error
+        );
+      }
       throw error;
     } finally {
       span?.end();
@@ -507,7 +515,7 @@ export class UnifiedThreadResponseConsumer {
         // recovers it from the transcript snapshot on reload. Either way the
         // durable side effects run exactly where they otherwise would not.
         if (!isFinalAttempt) {
-          throw new Error(
+          throw new SseOwnerRetryError(
             `API SSE session ${sseKey} not owned by this gateway instance; re-queueing for owner delivery`
           );
         }

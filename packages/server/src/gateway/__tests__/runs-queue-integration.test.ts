@@ -17,6 +17,11 @@ import {
   expect,
   test,
 } from "bun:test";
+import { UnifiedThreadResponseConsumer } from "../platform/unified-thread-consumer.js";
+import { ApiResponseRenderer } from "../api/response-renderer.js";
+import { SseManager } from "../services/sse-manager.js";
+import type { PlatformRegistry } from "../platform.js";
+import { TERMINAL_DELIVERY_SEND_OPTS } from "../infrastructure/queue/types.js";
 import { RunsQueue } from "../infrastructure/queue/runs-queue.js";
 import type { QueueJob } from "../infrastructure/queue/types.js";
 import { getDb } from "../../db/client.js";
@@ -488,4 +493,48 @@ describe("RunsQueue — startup recovery scan", () => {
     expect(gatewayChat?.status).toBe("pending");
     expect(gatewayChat?.claimed_by).toBeNull();
   });
+});
+
+
+describe("RunsQueue — disconnected API delivery", () => {
+  test("exhausts the bounded owner budget without error-log spam and retains the terminal", async () => {
+    if (!queue) throw new Error("queue not started");
+    const sse = new SseManager();
+    const renderer = new ApiResponseRenderer(sse);
+    const registry = { get: () => ({ getResponseRenderer: () => renderer }) } as unknown as PlatformRegistry;
+    const consumer = new UnifiedThreadResponseConsumer(queue, registry, sse);
+    const errors: unknown[][] = [];
+    const originalError = console.error;
+    console.error = (...args: unknown[]) => { errors.push(args); };
+    try {
+      const runId = await queue.send("thread_response", {
+        messageId: "message-offline",
+        conversationId: "conversation-offline",
+        channelId: "conversation-offline",
+        userId: "user-offline",
+        teamId: "api",
+        timestamp: Date.now(),
+        processedMessageIds: ["message-offline"],
+        finalText: "retained answer",
+      }, { ...TERMINAL_DELIVERY_SEND_OPTS, retryDelay: 0 });
+      await consumer.start();
+      let delivered: { status: string; attempts: number } | undefined;
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline) {
+        [delivered] = await getDb()<{ status: string; attempts: number }>`
+          SELECT status, attempts FROM runs WHERE id = ${runId}
+        `;
+        if (delivered?.status === "completed") break;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      expect(delivered).toMatchObject({ status: "completed", attempts: 29 });
+      expect(sse.getRecentEvents("conversation-offline").map((entry) => entry.data)).toContainEqual(
+        expect.objectContaining({ messageId: "message-offline", finalText: "retained answer" })
+      );
+      expect(errors).toEqual([]);
+    } finally {
+      console.error = originalError;
+      await consumer.stop();
+    }
+  }, 15_000);
 });

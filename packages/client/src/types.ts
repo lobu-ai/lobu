@@ -71,6 +71,7 @@ export interface LobuCompleteData {
   type: "complete";
   messageId?: string;
   processedMessageIds?: string[];
+  finalText?: string;
   timestamp: number;
 }
 
@@ -79,6 +80,7 @@ export interface LobuErrorData {
   type: "error";
   error: string;
   messageId?: string;
+  processedMessageIds?: string[];
   timestamp: number;
 }
 
