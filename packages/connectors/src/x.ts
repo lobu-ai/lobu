@@ -312,6 +312,23 @@ const X_TWEET_AUTHOR_ATTRIBUTIONS: EventAttributionRule[] = [
 ];
 
 /**
+ * Home-timeline authors stay link-only unless the connection turns on
+ * `create_authors`. The setting is stamped on each event at sync time, so the
+ * gate reads it per event and every other tweet feed keeps link-only authors.
+ */
+const X_HOME_FEED_AUTHOR_ATTRIBUTIONS: EventAttributionRule[] = [
+	{
+		role: "authored_by",
+		autoCreate: true,
+		target: {
+			...X_PERSON_AUTHOR_TARGET,
+			createWhen: { path: "metadata.create_authors", equals: true },
+		},
+		traits: X_PERSON_AUTHOR_TRAITS,
+	},
+];
+
+/**
  * A liked post has two people with different roles: the connected account that
  * performed the interaction, and the post author. Both are resolved into the
  * event's people graph inputs. Likes deliberately auto-create authors: this
@@ -2512,12 +2529,21 @@ async function syncHomeFeedViaDomScrape(
 	}
 
 	const tweets = buildHomeFeedTweets(rows);
-	return finalizeSyncResult(tweets, checkpoint, {
+	const page = finalizeSyncResult(tweets, checkpoint, {
 		backend: "extension-cs-scrape",
 		items_scraped: rows.length,
 		scrolls_this_run: maxScrolls,
 		timeline: "home",
 	});
+	// Stamp the connection's author setting for the home-feed author gate.
+	const createAuthors = config.create_authors === true;
+	return {
+		...page,
+		events: page.events.map((event) => ({
+			...event,
+			metadata: { ...event.metadata, create_authors: createAuthors },
+		})),
+	};
 }
 
 // ── Config schemas ─────────────────────────────────────────────
@@ -2600,6 +2626,12 @@ const homeFeedConfigSchema = {
 			maximum: 30,
 			description:
 				"Optional lower bound. When set below max_scrolls, each sync picks a uniform random scroll count in [min_scrolls, max_scrolls].",
+		},
+		create_authors: {
+			type: "boolean",
+			default: false,
+			description:
+				"Create a new person for each author seen on the home timeline (default: false). When off, timeline posts only link to people that already exist.",
 		},
 	},
 };
@@ -3637,8 +3669,18 @@ export default class XConnector extends ConnectorRuntime {
 				eventKinds: {
 					tweet: {
 						description: "A tweet from your personalized home timeline",
-						metadataSchema: engagementMetadataSchema,
-						attributions: X_TWEET_AUTHOR_ATTRIBUTIONS,
+						metadataSchema: {
+							...engagementMetadataSchema,
+							properties: {
+								...engagementMetadataSchema.properties,
+								create_authors: {
+									type: "boolean",
+									description:
+										"The connection's create_authors setting when the post was read.",
+								},
+							},
+						},
+						attributions: X_HOME_FEED_AUTHOR_ATTRIBUTIONS,
 					},
 				},
 			},

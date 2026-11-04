@@ -3,6 +3,7 @@ import {
   LINKEDIN_IDENTITY,
   linkedInChatUserIdentity,
   linkedInIdentityModule,
+  normalizeLinkedInCompanySlug,
   normalizeLinkedInIdentityValue,
   normalizeLinkedInMemberId,
   normalizeLinkedInSlug,
@@ -16,6 +17,27 @@ describe('LinkedIn identity module', () => {
     expect(
       normalizeLinkedInSlug('https://www.linkedin.com/company/acme'),
     ).toBeNull();
+  });
+
+  it('normalizes company page slugs and rejects member or numeric ids', () => {
+    expect(
+      normalizeLinkedInCompanySlug(
+        'https://www.LinkedIn.com/company/Synthetic-Co/posts/?trk=x',
+      ),
+    ).toBe('synthetic-co');
+    expect(normalizeLinkedInCompanySlug('synthetic-co')).toBe('synthetic-co');
+    expect(
+      normalizeLinkedInCompanySlug('https://www.linkedin.com/in/jane-doe'),
+    ).toBeNull();
+    expect(
+      normalizeLinkedInCompanySlug('https://www.linkedin.com/company/12345/'),
+    ).toBeNull();
+    expect(
+      normalizeLinkedInIdentityValue(
+        LINKEDIN_IDENTITY.COMPANY_SLUG,
+        'https://www.linkedin.com/company/synthetic-co/',
+      ),
+    ).toBe('synthetic-co');
   });
 
   it('normalizes person member ids and rejects other URNs', () => {
