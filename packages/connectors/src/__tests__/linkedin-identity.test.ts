@@ -26,6 +26,14 @@ describe('LinkedIn identity module', () => {
       ),
     ).toBe('synthetic-co');
     expect(normalizeLinkedInCompanySlug('synthetic-co')).toBe('synthetic-co');
+    expect(normalizeLinkedInCompanySlug('/company/synthetic-co/')).toBe(
+      'synthetic-co',
+    );
+    expect(
+      normalizeLinkedInCompanySlug(
+        'https://www.linkedin.com/feed/?ref=/company/synthetic-co',
+      ),
+    ).toBeNull();
     expect(
       normalizeLinkedInCompanySlug('https://www.linkedin.com/in/jane-doe'),
     ).toBeNull();

@@ -65,11 +65,27 @@ export function normalizeLinkedInCompanySlug(
 	if (typeof raw !== "string") return null;
 	const value = raw.trim();
 	if (!value) return null;
-	const match = value.match(/\/company\/([^/?#]+)/i);
-	if (!match && value.includes("/")) return null;
-	const slug = (match ? match[1] : value).toLowerCase();
-	if (!/^[a-z0-9\-_%]+$/.test(slug) || /^\d+$/.test(slug)) return null;
+	const slug = (
+		value.includes("/") ? companyPathSlug(value) : value
+	)?.toLowerCase();
+	if (!slug || !/^[a-z0-9\-_%]+$/.test(slug) || /^\d+$/.test(slug)) {
+		return null;
+	}
 	return slug;
+}
+
+/** The path segment after `company` in an absolute or site-relative URL. */
+function companyPathSlug(url: string): string | null {
+	let segments: string[];
+	try {
+		segments = new URL(url, "https://www.linkedin.com").pathname.split("/");
+	} catch {
+		return null;
+	}
+	const index = segments.findIndex(
+		(segment) => segment.toLowerCase() === "company",
+	);
+	return index >= 0 ? (segments[index + 1] ?? null) : null;
 }
 
 /**
