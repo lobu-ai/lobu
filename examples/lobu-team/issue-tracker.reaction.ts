@@ -471,11 +471,9 @@ async function applyChange(
       automation_source: source,
     });
   } else if (change.action === "update") {
-    await client.entities.update({
-      entity_id: change.id,
-      metadata: change.metadata,
-      automation_source: source,
-    });
+    // Alert before the status write: the planner only builds an alert while the
+    // stored status still differs, so a send that failed after the write would
+    // never be retried. The idempotency key collapses a repeat send.
     if (change.alert)
       await client.notifications.send({
         title: change.alert.title.slice(0, 160),
@@ -484,6 +482,11 @@ async function applyChange(
         idempotency_key: change.alert.key,
         automation_source: source,
       });
+    await client.entities.update({
+      entity_id: change.id,
+      metadata: change.metadata,
+      automation_source: source,
+    });
   }
 }
 
