@@ -17,7 +17,7 @@ export function handleGetComponentReference(): {
     action: 'get_component_reference',
     documentation: {
       overview:
-        'Automations define extraction prompts, schemas, SQL source queries, and optional JSON rendering. Native Lobu event JSON templates can use permission-checked Automation, Connector and Agent references plus collapsible JSON details. These are native app template nodes, not React exports from @lobu/views/components; sandboxed React views do not inherit this registry.',
+        'Automations define extraction prompts, schemas, SQL source queries, and optional JSON rendering. Native Lobu event JSON templates can use permission-checked Automation, Connector and Agent references plus collapsible JSON details. These names describe native app template nodes. React views use the corresponding typed AutomationReference, ConnectorReference, AgentReference and JsonDiff exports from @lobu/views/components.',
       data_types: [
         {
           type: 'source',
@@ -143,7 +143,7 @@ export function handleGetComponentReference(): {
         'Exact {{path}} prop bindings preserve value types; mixed text interpolates to a string. Resolve bindings before reference validation. Use strings for automationId and numbers for connectionId.',
         'Reference nodes do not expose enable, run, send, publish or approval callbacks. Existing declared event interactions remain a separate authorization path; do not invent actions or bypass an approval through a reference.',
         'Snapshots and proposals use ordinary card, badge and text nodes labelled Snapshot / proposal. Native reference nodes accept live mode only. Do not give static proposals IDs, current status, links or executable controls that imply a resolved live record.',
-        'Native event JSON rendering is separate from the sandboxed React view runtime. Do not import AutomationReference, ConnectorReference, AgentReference or JsonDiff from @lobu/views/components on the strength of this reference.',
+        'Native event JSON node names are separate from React syntax. React views import AutomationReference, ConnectorReference, AgentReference and JsonDiff from @lobu/views/components; live references stay scoped to the mounted workspace and existing read permissions. JsonDiff before/after values are read-only presentation and grant no write or approval authority.',
       ],
       complete_examples: [
         {

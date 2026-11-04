@@ -173,7 +173,33 @@ export interface EntityRecordPageProps {
   layout?: "record" | "content";
 }
 
+/** Saved identities are resolved through the visiting user's existing reads.
+ * Authored names, status and callbacks are never accepted as identity. */
+interface LiveReference {
+  mode: "live";
+  workspace: string;
+  appearance?: "inline" | "row";
+}
+export interface AutomationReferenceProps extends LiveReference {
+  automationId: string;
+}
+export interface AgentReferenceProps extends LiveReference {
+  agentId: string;
+}
+export interface ConnectorReferenceProps extends LiveReference {
+  connectorKey: string;
+  connectionId?: number;
+}
+export interface JsonDiffProps {
+  before: Record<string, unknown> | null;
+  after: Record<string, unknown> | null;
+}
+
 export interface NativeComponentProps {
+  AutomationReference: AutomationReferenceProps;
+  AgentReference: AgentReferenceProps;
+  ConnectorReference: ConnectorReferenceProps;
+  JsonDiff: JsonDiffProps;
   EntityListPage: EntityListPageProps;
   EntityRecordPage: EntityRecordPageProps;
   EntityTableView: EntityTableViewProps;
@@ -224,6 +250,10 @@ export type NativeComponents = {
   [K in keyof NativeComponentProps]: ComponentType<NativeComponentProps[K]>;
 };
 export const NATIVE_COMPONENT_NAMES = [
+  "AutomationReference",
+  "AgentReference",
+  "ConnectorReference",
+  "JsonDiff",
   "EntityListPage",
   "EntityRecordPage",
   "EntityTableView",
@@ -244,17 +274,18 @@ function native<K extends keyof NativeComponents>(
 ): ComponentType<NativeComponentProps[K]> {
   return function NativeComponent(props: NativeComponentProps[K]) {
     const registry = (
-      globalThis as typeof globalThis & { __lobuViewNative?: NativeComponents }
+      globalThis as unknown as {
+        __lobuViewNative?: Partial<
+          Record<keyof NativeComponentProps, ComponentType<object>>
+        >;
+      }
     ).__lobuViewNative;
     const component = registry?.[name];
     if (!component)
       throw new Error(
         `Native component ${name} is unavailable in this host runtime.`
       );
-    return createElement(
-      component as ComponentType<NativeComponentProps[K]>,
-      props
-    );
+    return createElement(component, props);
   };
 }
 export const EntityListPage = native("EntityListPage");
@@ -269,3 +300,8 @@ export const Tabs = native("Tabs");
 export const TabsList = native("TabsList");
 export const TabsTrigger = native("TabsTrigger");
 export const TabsContent = native("TabsContent");
+
+export const AutomationReference = native("AutomationReference");
+export const AgentReference = native("AgentReference");
+export const ConnectorReference = native("ConnectorReference");
+export const JsonDiff = native("JsonDiff");
