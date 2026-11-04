@@ -257,10 +257,9 @@ async function handleSet(
   // Only a bundle this server compiled may be rebuilt later; a supplied one
   // is the caller's and stays as sent.
   const compileConfigHash = args.compiled_code ? null : serverCompileStamp(compiled);
-  // Same source AND same metadata AND same executable bundle AND same
-  // compiler provenance: no write. A legacy row (source/metadata-only hash)
-  // never matches, so it refreshes exactly once on the next set and is a
-  // no-op after that.
+  // Validate every submitted artifact against this runtime before storage.
+  // Identical source, metadata, executable bytes and provenance still avoid a
+  // write after validation; a legacy hash refreshes on its next successful set.
   const current = await getView(ctx.organizationId, key);
   await validateViewCandidate({
     key, name, description, attach, params, actions,

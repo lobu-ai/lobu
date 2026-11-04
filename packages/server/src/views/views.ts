@@ -10,8 +10,8 @@
  * route and mounted `srcdoc` into the sandboxed frame the MCP apps already
  * use. Newly compiled bundles read the shell runtime
  * (`@lobu/core/contracts/tools/view-runtime`); a bundle the server built
- * under an older compiler is rebuilt from its retained source when served
- * (`getServedView`). A supplied bundle from before the contract keeps its own
+ * under an older compiler is rebuilt from its retained source in the background
+ * after a read (`getViewForDisplay`). A supplied bundle from before the contract keeps its own
  * runtime until it is saved again.
  */
 import { createHash } from 'node:crypto';
@@ -716,18 +716,39 @@ export function servedContentHash(view: StoredView): string {
     .slice(0, view.content_hash.length || 16);
 }
 
-/** Bounded, process-local suppression of repeated failures for the same source and compiler. */
+/**
+ * Bounded, process-local suppression of repeated failures for the same source
+ * and compiler: attempt -> epoch ms before which the rebuild is not retried. A
+ * deterministic compile or validation rejection is never retried; an
+ * unavailable validator is retried after a backoff.
+ */
 const MAX_FAILED_REBUILDS = 256;
-const failedRebuilds = new Set<string>();
+const UNAVAILABLE_REBUILD_BACKOFF_MS = 5 * 60_000;
+const failedRebuilds = new Map<string, number>();
 const inflightRebuilds = new Map<string, Promise<StoredView | null>>();
+
+function suppressRebuild(attempt: string, err: unknown): void {
+  const retryable = !(err instanceof ToolUserError) || err.httpStatus === 503;
+  failedRebuilds.delete(attempt);
+  failedRebuilds.set(
+    attempt,
+    retryable ? Date.now() + UNAVAILABLE_REBUILD_BACKOFF_MS : Number.POSITIVE_INFINITY
+  );
+  if (failedRebuilds.size > MAX_FAILED_REBUILDS) {
+    failedRebuilds.delete(failedRebuilds.keys().next().value!);
+  }
+}
 
 /**
  * The view as it should be served. A bundle the server compiled under an
- * older compiler is rebuilt from its retained source files and saved, so a
- * change to the bundle contract reaches server-built views the first time
- * they are opened. A bundle the caller supplied is never rebuilt. A rebuild
- * that fails keeps serving the stored bundle. The save is compare-and-set on
- * the hash and stamp that were read, so a concurrent save always wins.
+ * older compiler is rebuilt from its retained source files, browser-validated,
+ * and saved. Request handlers use getViewForDisplay to schedule this work without
+ * waiting for the browser; a subsequent read receives the validated bundle.
+ * A bundle the caller supplied is never rebuilt,
+ * and nothing is rebuilt without a validation runner. A rebuild that fails
+ * keeps serving the stored bundle and is suppressed for later opens. The save
+ * is compare-and-set on the hash and stamp that were read, so a concurrent
+ * save always wins.
  */
 export async function getServedView(
   organizationId: string,
@@ -735,36 +756,57 @@ export async function getServedView(
 ): Promise<StoredView | null> {
   const view = await getView(organizationId, key);
   if (!view || !isStaleServerBuild(view)) return view;
+  // Without a runner no rebuild can be validated; never compile one.
+  const runnerUrl = process.env.VIEW_VALIDATOR_URL;
+  if (!runnerUrl) return view;
   const fingerprint = viewCompileFingerprint();
   const attempt = `${organizationId}\0${key}\0${view.content_hash}\0${fingerprint}`;
-  if (failedRebuilds.has(attempt)) return view;
+  const retryAt = failedRebuilds.get(attempt);
+  if (retryAt !== undefined) {
+    if (Date.now() < retryAt) return view;
+    failedRebuilds.delete(attempt);
+  }
   let rebuild = inflightRebuilds.get(attempt);
   if (!rebuild) {
-    rebuild = rebuildView(organizationId, view, fingerprint, attempt).finally(() =>
-      inflightRebuilds.delete(attempt)
-    );
+    rebuild = rebuildView(organizationId, view, fingerprint, attempt, runnerUrl).catch(err => {
+      suppressRebuild(attempt, err);
+      logger.warn({ organization_id: organizationId, view_key: key, err }, '[views] Background rebuild deferred after an infrastructure failure');
+      return view;
+    }).finally(() => inflightRebuilds.delete(attempt));
     inflightRebuilds.set(attempt, rebuild);
   }
   return rebuild;
+}
+
+/**
+ * User-facing reads always return stored bytes. A stale compiler rebuild is
+ * scheduled separately; its validated replacement appears on a later read.
+ */
+export async function getViewForDisplay(
+  organizationId: string,
+  key: string
+): Promise<StoredView | null> {
+  const view = await getView(organizationId, key);
+  if (view && isStaleServerBuild(view) && process.env.VIEW_VALIDATOR_URL) {
+    void getServedView(organizationId, key).catch(err => {
+      logger.warn({ organization_id: organizationId, view_key: key, err }, '[views] Background rebuild failed; serving the stored bundle');
+    });
+  }
+  return view;
 }
 
 async function rebuildView(
   organizationId: string,
   view: StoredView,
   fingerprint: string,
-  attempt: string
+  attempt: string,
+  runnerUrl: string
 ): Promise<StoredView | null> {
   let compiled: string;
   try {
     compiled = await compileView(view.source_files as SourceFiles);
   } catch (err) {
-    // Unavailable validation is retryable; never pin an outage until restart.
-    if (!(err instanceof ToolUserError) || err.httpStatus !== 503) {
-      failedRebuilds.add(attempt);
-      if (failedRebuilds.size > MAX_FAILED_REBUILDS) {
-        failedRebuilds.delete(failedRebuilds.values().next().value!);
-      }
-    }
+    suppressRebuild(attempt, err);
     logger.warn(
       { organization_id: organizationId, view_key: view.key, err },
       '[views] Stale view bundle failed to rebuild; serving the stored bundle'
@@ -784,8 +826,9 @@ async function rebuildView(
     { sourceFiles: view.source_files as SourceFiles, dependencies: view.dependencies as SourceDependencies }
   );
   try {
-    await validateViewCandidate({ ...view, compiled_code: compiled, content_hash: hash }, process.env.VIEW_VALIDATOR_URL);
+    await validateViewCandidate({ ...view, compiled_code: compiled, content_hash: hash }, runnerUrl);
   } catch (err) {
+    suppressRebuild(attempt, err);
     logger.warn({ organization_id: organizationId, view_key: view.key, err }, '[views] Rebuild validation failed; serving the stored bundle');
     return view;
   }

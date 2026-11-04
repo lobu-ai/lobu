@@ -89,7 +89,7 @@ sdk_gate="$(workflow_job "$workflow" sdk-cli-e2e)"
 grep -q '^    needs: \[sdk-cli-build, sdk-lifecycle-e2e, sdk-error-taxonomy-e2e, cli-command-smoke\]$' <<<"$sdk_gate" ||
   fail "sdk-cli-e2e does not aggregate every deep smoke"
 integration_gate="$(workflow_job "$workflow" integration)"
-grep -q '^    needs: \[check-author, paths, server-integration-vitest, server-integration-bun\]$' <<<"$integration_gate" ||
+grep -q '^    needs: \[check-author, paths, server-integration-vitest, server-integration-bun, view-validator-image\]$' <<<"$integration_gate" ||
   fail "integration fan-in does not gate on check-author/paths"
 # The fan-in decision is pure shell over the `needs.*.result` strings, so it can
 # be EXECUTED rather than pattern-matched. A grep only proves the text is
@@ -101,7 +101,7 @@ integration_gate_script="$(job_run_script "$integration_gate")"
 # author paths packages vitest bun -> pass|fail
 gate_verdict() {
   if AUTHOR_RESULT="$1" PATHS_RESULT="$2" PACKAGES_CHANGED="$3" \
-     VITEST_RESULT="$4" BUN_RESULT="$5" \
+     VITEST_RESULT="$4" BUN_RESULT="$5" VALIDATOR_RESULT="${6:-success}" \
      bash -e -c "$integration_gate_script" >/dev/null 2>&1; then
     echo pass
   else
@@ -120,6 +120,10 @@ assert_gate() {
 # Everything green passes, whether or not runtime paths changed.
 assert_gate pass success success true success success
 assert_gate pass success success false success success
+# Browser validation is a required boundary even when backend paths are unchanged.
+assert_gate fail success success true success success failure
+assert_gate fail success success false skipped skipped skipped
+assert_gate fail success success true success success cancelled
 # THE REGRESSION: a shard reports `skipped` when its own dependency broke. With
 # packages=true that is a broken gate, not an unaffected PR, and must be red.
 assert_gate fail success success true skipped success
