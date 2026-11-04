@@ -73,7 +73,14 @@ describe('account MCP dispatch', () => {
         SpanStatusCode.OK, SpanStatusCode.OK, SpanStatusCode.ERROR,
         SpanStatusCode.ERROR, SpanStatusCode.ERROR, SpanStatusCode.OK,
       ]);
-      expect(JSON.stringify(spans.map((span) => ({ name: span.name, attributes: span.attributes, events: span.events, status: span.status })))).not.toMatch(/private-|SELECT|org_slug|script/);
+      // Failures are recorded as grouped, typed errors. Only the tool's own
+      // message text is kept, parameterized; argument values never reach a span.
+      expect(spans.map((span) => [span.attributes['exception.type'], span.attributes['error.kind'], span.attributes['error.code']])).toEqual([
+        [undefined, undefined, undefined], [undefined, undefined, undefined],
+        ['ToolUserError', 'user', 'PERMISSION'], ['ToolUserError', 'user', 'VALIDATION'],
+        ['ToolResultError', 'user', 'VALIDATION'], [undefined, undefined, undefined],
+      ]);
+      expect(JSON.stringify(spans.map((span) => ({ name: span.name, attributes: span.attributes, events: span.events, status: span.status })))).not.toMatch(/private|SELECT|throw new Error/);
 
       // Exercise the production wrapper too: the shared helper above mounts the
       // bare app. A cached MCP server must use each HTTP request's active span.

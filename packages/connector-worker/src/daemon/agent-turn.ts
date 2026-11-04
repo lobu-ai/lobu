@@ -8,7 +8,15 @@
  * and reporting the result.
  */
 
-import { createChildSpan, initTracing, runInSpanContext, SpanStatusCode, traceparentHeader } from '@lobu/core';
+import {
+  classifyErrorMessage,
+  createChildSpan,
+  initTracing,
+  recordError,
+  runInSpanContext,
+  SpanStatusCode,
+  traceparentHeader,
+} from '@lobu/core';
 import {
   AGENT_TURN_BRIDGE_BYTES,
   AGENT_TURN_INPUT_MAX,
@@ -108,20 +116,22 @@ export async function executeAgentTurnRun(
     const { terminalStatus, ...outcome } = result;
     const status = terminalStatus ?? (outcome.error ? 'failed' : 'completed');
     span?.setAttribute('lobu.run_status', status);
-    if (status !== 'cancelled') {
-      span?.setStatus({
-        code: status === 'failed' ? SpanStatusCode.ERROR : SpanStatusCode.OK,
-        ...(outcome.error ? { message: outcome.error } : {}),
+    if (status === 'failed') {
+      // Classify the failure text once, here, so it groups and routes by its
+      // catalog code rather than by prose.
+      const message = outcome.error ?? 'Agent turn failed';
+      recordError(span, {
+        name: 'AgentTurnError',
+        message,
+        code: classifyErrorMessage(message),
       });
+    } else if (status !== 'cancelled') {
+      span?.setStatus({ code: SpanStatusCode.OK });
     }
     return outcome;
   } catch (error) {
     span?.setAttribute('lobu.run_status', 'failed');
-    span?.setStatus({
-      code: SpanStatusCode.ERROR,
-      message: error instanceof Error ? error.message : String(error),
-    });
-    span?.recordException(error instanceof Error ? error : new Error(String(error)));
+    recordError(span, error);
     throw error;
   } finally {
     span?.end();

@@ -22,6 +22,11 @@ import { ApiResponseRenderer } from "../api/response-renderer.js";
 import { SseManager } from "../services/sse-manager.js";
 import type { PlatformRegistry } from "../platform.js";
 import { TERMINAL_DELIVERY_SEND_OPTS } from "../infrastructure/queue/types.js";
+import { initTracing, shutdownTracing, SpanStatusCode } from "@lobu/core";
+import {
+  InMemorySpanExporter,
+  SimpleSpanProcessor,
+} from "@opentelemetry/sdk-trace-node";
 import { RunsQueue } from "../infrastructure/queue/runs-queue.js";
 import type { QueueJob } from "../infrastructure/queue/types.js";
 import { getDb } from "../../db/client.js";
@@ -231,6 +236,60 @@ describe("RunsQueue — deferral retries (isDeferralError contract)", () => {
     }
     expect(status).toBe("failed");
     expect(calls).toBe(1);
+  });
+});
+
+describe("RunsQueue — run spans", () => {
+  test("each claim is a span joined to the enqueuing trace; only real failures are errors", async () => {
+    if (!queue) throw new Error("queue not started");
+    const exporter = new InMemorySpanExporter();
+    await shutdownTracing();
+    initTracing({
+      serviceName: "runs-queue-span-test",
+      spanProcessors: [new SimpleSpanProcessor(exporter)],
+    });
+    try {
+      const traceId = "ab".repeat(16);
+      let calls = 0;
+      await queue.work("test-run-spans", async () => {
+        calls += 1;
+        if (calls === 1) {
+          throw Object.assign(new Error("prior turn still live"), {
+            deferral: true,
+          });
+        }
+        throw new Error("synthetic handler failure");
+      });
+      await queue.send(
+        "test-run-spans",
+        { platformMetadata: { traceparent: `00-${traceId}-${"cd".repeat(8)}-01` } },
+        { retryLimit: 1, retryDelay: 0 },
+      );
+      const spansFor = () =>
+        exporter
+          .getFinishedSpans()
+          .filter((span) => span.name === "run test-run-spans");
+      const start = Date.now();
+      while (spansFor().length < 2 && Date.now() - start < 5000) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      const [deferred, failed] = spansFor();
+      expect(deferred.spanContext().traceId).toBe(traceId);
+      expect(deferred.attributes).toMatchObject({
+        "lobu.queue": "test-run-spans",
+        "lobu.run_deferred": true,
+      });
+      expect(deferred.status.code).not.toBe(SpanStatusCode.ERROR);
+      expect(failed.status.code).toBe(SpanStatusCode.ERROR);
+      expect(failed.attributes).toMatchObject({
+        "lobu.run_final_attempt": true,
+        "exception.type": "Error",
+        "exception.message": "synthetic handler failure",
+        "error.kind": "system",
+      });
+    } finally {
+      await shutdownTracing();
+    }
   });
 });
 

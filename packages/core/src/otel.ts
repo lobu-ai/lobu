@@ -19,7 +19,13 @@ import type {
   ATTR_SERVICE_NAME as AttrServiceName,
   ATTR_SERVICE_VERSION as AttrServiceVersion,
 } from "@opentelemetry/semantic-conventions";
+import {
+  type DescribeErrorOptions,
+  describeError,
+  errorReportAttributes,
+} from "./error-report";
 import { createLogger } from "./logger";
+import { instrumentFetch } from "./otel-fetch";
 import { formatTraceparent, parseTraceparent } from "./trace-context";
 
 const logger = createLogger("otel");
@@ -119,6 +125,11 @@ export function initTracing(config: OtelConfig): void {
   // globally registered provider, so a later init would otherwise export
   // into a provider this call does not own.
   tracer = provider.getTracer(config.serviceName, config.serviceVersion);
+  instrumentFetch({
+    tracer: () => tracer,
+    recordError: (span, error) =>
+      recordError(span, error, { kind: "dependency" }),
+  });
 
   logger.info(
     useCustomProcessors
@@ -186,6 +197,30 @@ export function createSpan(
   return span;
 }
 
+/**
+ * Mark a span failed and attach its grouped error report: exception type,
+ * parameterized message, frame-only stack, kind and fingerprint. The raw
+ * message is never recorded, because it can carry credentials or source data.
+ * `scope` defaults to the span's name; pass it when the span was not the
+ * reporting boundary.
+ */
+export function recordError(
+  span: Span | null | undefined,
+  error: unknown,
+  options: Partial<DescribeErrorOptions> = {}
+): void {
+  if (!span) return;
+  const name = (span as { name?: unknown }).name;
+  const report = describeError(error, {
+    scope: options.scope ?? (typeof name === "string" ? name : "span"),
+    ...(options.kind ? { kind: options.kind } : {}),
+  });
+  const attributes = errorReportAttributes(report);
+  span.setAttributes(attributes);
+  span.addEvent("exception", attributes);
+  span.setStatus({ code: SpanStatusCode.ERROR, message: report.message });
+}
+
 async function runInSpan<T>(
   span: Span | null,
   fn: (span: Span | null) => Promise<T>
@@ -195,13 +230,7 @@ async function runInSpan<T>(
     span?.setStatus({ code: SpanStatusCode.OK });
     return result;
   } catch (error) {
-    if (span) {
-      span.setStatus({
-        code: SpanStatusCode.ERROR,
-        message: error instanceof Error ? error.message : String(error),
-      });
-      span.recordException(error as Error);
-    }
+    recordError(span, error);
     throw error;
   } finally {
     span?.end();

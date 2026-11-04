@@ -5,6 +5,7 @@ const USE_WINSTON_LOGGER = process.env.USE_WINSTON_LOGGER === "true";
 const USE_JSON_FORMAT = process.env.LOG_FORMAT === "json";
 
 import winston from "winston";
+import { annotateErrorLogRecord } from "./error-report";
 import { currentTraceLogFields } from "./trace-context";
 import { scrubDiagnosticValue } from "./utils/diagnostic-scrubber";
 
@@ -69,7 +70,7 @@ function createConsoleLogger(serviceName: string): Logger {
     const traceFields = currentTraceLogFields();
 
     if (USE_JSON_FORMAT) {
-      return safeStringify({
+      const record: Record<string, unknown> = {
         timestamp,
         level: lvl,
         service: serviceName,
@@ -79,7 +80,9 @@ function createConsoleLogger(serviceName: string): Logger {
         ...(args.length > 0
           ? { data: args.length === 1 ? args[0] : args }
           : {}),
-      });
+      };
+      annotateErrorLogRecord(record);
+      return safeStringify(record);
     }
 
     // Append remaining args

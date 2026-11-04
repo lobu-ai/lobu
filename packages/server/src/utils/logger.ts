@@ -1,4 +1,9 @@
-import { currentTraceLogFields, isSecretKey, scrubDiagnosticValue } from '@lobu/core';
+import {
+  annotateErrorLogRecord,
+  currentTraceLogFields,
+  isSecretKey,
+  scrubDiagnosticValue,
+} from '@lobu/core';
 import pino from 'pino';
 
 /**
@@ -62,6 +67,7 @@ const diagnosticStream: pino.DestinationStream = {
       return;
     }
     if (parsed && typeof parsed === 'object') {
+      annotateErrorLogRecord(parsed as Record<string, unknown>);
       process.stdout.write(`${JSON.stringify(parsed)}\n`);
     }
   },

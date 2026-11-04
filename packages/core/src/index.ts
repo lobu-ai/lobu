@@ -67,6 +67,7 @@ export {
 export * from "./logger";
 // Module system
 export * from "./modules";
+export * from "./error-report";
 export type { OtelConfig, Span, Tracer } from "./otel";
 // OpenTelemetry tracing
 export {
@@ -78,6 +79,7 @@ export {
   getTraceparent,
   getTracer,
   initTracing,
+  recordError,
   runInSpanContext,
   SpanKind,
   SpanStatusCode,

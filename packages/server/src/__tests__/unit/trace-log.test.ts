@@ -1,6 +1,7 @@
 import type { Context } from "@opentelemetry/api";
 import {
   createRootSpan,
+  describeError,
   initTracing,
   runInSpanContext,
   shutdownTracing,
@@ -82,5 +83,30 @@ describe("pino trace fields", () => {
     expect(inside?.span_id).toBe(spanId);
     expect(outside?.trace_id).toBeUndefined();
     expect(outside?.span_id).toBeUndefined();
+  });
+
+  it("stamps error records with one fingerprint per defect", () => {
+    const errors = ["run9f3a1c2e7b4d", "run0b8e6d5c4a3f"].map(
+      (id) => new Error(`lookup failed for ${id}`)
+    );
+    for (const err of errors) logger.error({ err }, "record lookup failed");
+    logger.warn({ err: errors[0] }, "not an issue");
+
+    const records = lines
+      .join("")
+      .split("\n")
+      .filter((line) => line.trim().length > 0)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    const failed = records.filter((record) => record.msg === "record lookup failed");
+    expect(failed).toHaveLength(2);
+    for (const record of failed) {
+      expect(record).toMatchObject({
+        error_type: "Error",
+        error_kind: "system",
+        // The shared grouping function, at the logger's service scope.
+        error_fingerprint: describeError(errors[0], { scope: "log lobu-server" }).fingerprint,
+      });
+    }
+    expect(records.find((record) => record.msg === "not an issue")?.error_fingerprint).toBeUndefined();
   });
 });
