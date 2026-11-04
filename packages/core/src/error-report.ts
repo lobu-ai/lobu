@@ -385,6 +385,9 @@ const ERROR_LEVELS = new Set(["error", "fatal"]);
 export function annotateErrorLogRecord(record: Record<string, unknown>): void {
   if (typeof record.level !== "string" || !ERROR_LEVELS.has(record.level))
     return;
+  // A writer that already described its error (with the scope of the span it
+  // fails in) keeps that grouping instead of the generic log-line one.
+  if (typeof record.error_fingerprint === "string") return;
   const service =
     typeof record.service === "string" ? record.service : "unknown";
   const logged = findLoggedError(record);
@@ -397,12 +400,23 @@ export function annotateErrorLogRecord(record: Record<string, unknown>): void {
   const report = describeError(logged ?? { name: "LoggedError", message }, {
     scope: `log ${service}`,
   });
-  record.error_fingerprint = report.fingerprint;
-  record.error_type = report.type;
-  record.error_kind = report.kind;
-  // The same safe fields a span carries, so a consumer of the log never needs
-  // the raw message to title or explain the issue.
-  record.error_message = report.message;
-  record.error_grouping = report.grouping;
-  if (report.code) record.error_code = report.code;
+  Object.assign(record, errorReportLogFields(report));
+}
+
+/**
+ * The log-record fields for one report: the same safe fields a span carries,
+ * so a consumer of the log never needs the raw message to title or explain
+ * the issue. A writer that stamps these keeps them through the annotator.
+ */
+export function errorReportLogFields(
+  report: ErrorReport
+): Record<string, string> {
+  return {
+    error_fingerprint: report.fingerprint,
+    error_type: report.type,
+    error_kind: report.kind,
+    error_message: report.message,
+    error_grouping: report.grouping,
+    ...(report.code ? { error_code: report.code } : {}),
+  };
 }

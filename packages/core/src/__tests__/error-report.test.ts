@@ -9,6 +9,7 @@ import {
   annotateErrorLogRecord,
   classifyErrorKind,
   describeError,
+  errorReportLogFields,
   parameterizeMessage,
   parseStackFrames,
 } from "../error-report";
@@ -327,5 +328,32 @@ describe("annotateErrorLogRecord", () => {
       "v1|log svc|LoggedError||message:queue <num> stalled for <id>"
     );
     expect(first.error_fingerprint).toBe(second.error_fingerprint);
+  });
+
+  test("a writer that described its error keeps the span's grouping", () => {
+    // A value-free wrapper line ("Tool call failed") would otherwise group
+    // every failure behind it as one generic issue.
+    const report = describeError(
+      {
+        name: "ToolUserError",
+        message: "upstream timed out",
+        code: "UPSTREAM_TIMEOUT",
+      },
+      { scope: "tool resolve_path" }
+    );
+    const record: Record<string, unknown> = {
+      level: "error",
+      service: "svc",
+      msg: "Tool call failed",
+      ...errorReportLogFields(report),
+    };
+    annotateErrorLogRecord(record);
+    expect(record).toMatchObject({
+      error_fingerprint: report.fingerprint,
+      error_type: "ToolUserError",
+      error_grouping: report.grouping,
+      error_code: "UPSTREAM_TIMEOUT",
+    });
+    expect(report.grouping).toContain("tool resolve_path");
   });
 });

@@ -30,7 +30,7 @@ import { parseApplyId } from '../utils/apply-context';
 import { assertDeploymentsNotPaused } from '../utils/deployment-pause';
 import { asReadTimeout } from '../utils/bounded-read';
 import { ToolNotRegisteredError, ToolUserError } from '../utils/errors';
-import { logToolCallFailure } from './tool-error-log';
+import { logToolCallFailure, toolErrorScope } from './tool-error-log';
 import { getConfiguredPublicOrigin } from '../utils/public-origin';
 import { enforcePublicReadLimit, getClientIP } from '../utils/rate-limiter';
 import { AccessDeniedError, enforceAdminToolAllowlist, enforceRoleScopeAccess, requireWorkspaceContext, scopeDenialMessage } from './access-control';
@@ -321,7 +321,8 @@ export async function executeTool(
 ): Promise<unknown> {
   // Use the registered name, never a caller-supplied unknown name or arguments.
   const name = getTool(toolName)?.name ?? 'unregistered';
-  const span = createSpan(`tool ${name}`, {
+  const scope = toolErrorScope(toolName);
+  const span = createSpan(scope, {
     'lobu.tool_name': name,
     ...(authCtx.userId ? { 'user.id': authCtx.userId } : {}),
     ...(authCtx.organizationId ? { 'lobu.org_id': authCtx.organizationId } : {}),
@@ -341,7 +342,7 @@ export async function executeTool(
         recordError(
           span,
           { name: 'ToolResultError', message: error, code: structuredCode },
-          { scope: `tool ${name}`, kind: classifyErrorKind(structuredCode, null) === 'dependency' ? 'dependency' : 'user' }
+          { scope, kind: classifyErrorKind(structuredCode, null) === 'dependency' ? 'dependency' : 'user' }
         );
       } else {
         span?.setStatus({ code: SpanStatusCode.OK });
@@ -350,7 +351,7 @@ export async function executeTool(
     } catch (error) {
       // recordError keeps only the type, the parameterized message and frame
       // locations: errors and arguments can carry credentials or source data.
-      recordError(span, error, { scope: `tool ${name}` });
+      recordError(span, error, { scope });
       throw error;
     } finally {
       span?.end();
