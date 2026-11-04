@@ -144,3 +144,22 @@ Validation covers bounded empty/error/loading fixtures, both themes and display
 modes, and up to four distinct attached scopes. It does not prove every business
 rule or successful-data interaction. Authors must also exercise the actual
 workspace view, pagination, actions and peek interactions before claiming acceptance.
+
+For a local `lobu run` or Mac-app project, start only the validator from this
+checkout, with a loopback-only published port:
+
+```bash
+docker compose -f docker-compose.example.yml build view-validator
+docker compose -f docker-compose.example.yml run -d --no-deps \
+  --name lobu-view-validator -p 127.0.0.1:8090:8090 view-validator
+VIEW_VALIDATOR_URL=http://127.0.0.1:8090 lobu run
+```
+
+The CLI already passes environment variables and project `.env` settings to
+the embedded server. For a Mac-app launch, set the same `VIEW_VALIDATOR_URL`
+in the project's `.env`. Local and embedded installs deliberately return 503
+for view creates and updates until this runner is configured and ready; they
+have no validation bypass. Existing views remain readable. Stale compiler
+bundles are rebuilt in the background after a read; rejected rebuilds remain
+suppressed for that source/compiler, and unavailable runners back off for five
+minutes. A later read receives a successful validated rebuild.

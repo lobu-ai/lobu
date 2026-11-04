@@ -77,7 +77,7 @@ import { renderMcpAppTemplate } from './utils/mcp-app-bundle';
 import { viewWorkspaceUrl } from './utils/url-builder';
 import {
   LOBU_VIEWS_RESOURCE_URI,
-  getServedView,
+  getViewForDisplay,
   renderViewShell,
   viewRuntimeScript,
   renderViewsLoaderShell,
@@ -613,7 +613,7 @@ function createServerForContext(
         toAccountToolContext(forThisRequest(authCtx)), viewOrganization
       );
       if (!workspace.memberRole) throw new AccessDeniedError('Workspace membership is required to read views.');
-      const storedView = await getServedView(workspace.organizationId, viewKey);
+      const storedView = await getViewForDisplay(workspace.organizationId, viewKey);
       if (storedView) {
         const meta = viewResourceMeta(storedView);
         return {

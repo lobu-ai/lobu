@@ -60,7 +60,11 @@ export function createValidatorServer() {
       const result = await validateCandidate(input, chromium);
       res.setHeader("Content-Type", "application/json");
       res.end(JSON.stringify(result));
-    } catch {
+    } catch (error) {
+      console.error(
+        "View validation infrastructure failure:",
+        error instanceof Error ? error.message.slice(-4000) : "Unknown failure"
+      );
       // Infrastructure failure is never a validation pass (or a client error).
       res.writeHead(503).end();
     } finally {
