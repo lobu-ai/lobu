@@ -1,14 +1,20 @@
 import {
   connectorFromFile,
+  context,
   defineAgent,
   defineAuthProfile,
+  defineAutomation,
   defineConfig,
   defineConnection,
   defineEntityType,
+  defineRelationshipType,
+  every,
+  reactionFromFile,
   Type,
 } from "@lobu/cli/config";
 import type ClickHouseAnalyticsConnector from "./clickhouse-analytics.connector.ts";
 import type DataForSeoConnector from "./dataforseo.connector.ts";
+import type IssueTrackerReaction from "./issue-tracker.reaction.ts";
 
 // One backlog type for every kind of team work, written by people and agents.
 // The organic acquisition review Automation reads the `seo` kind as its backlog
@@ -142,6 +148,139 @@ const productOps = defineAgent({
   name: "product-ops",
   description:
     "Summarizes Lobu production activity from organization-owned read-only feeds",
+});
+
+const text = (title: string, description?: string) =>
+  Type.Optional(
+    Type.Unsafe({
+      type: "string",
+      title,
+      ...(description ? { description } : {}),
+    })
+  );
+const time = (title: string, description?: string) =>
+  Type.Optional(
+    Type.Unsafe({
+      type: "string",
+      format: "date-time",
+      title,
+      ...(description ? { description } : {}),
+    })
+  );
+const count = (title: string) =>
+  Type.Optional(Type.Unsafe({ type: "integer", minimum: 0, title }));
+
+// A production error group. The issue-tracker Automation creates one only when
+// a ClickHouse fingerprint passes its noise gate, and owns status and the
+// counters. Triage fields belong to the agents and people who investigate; the
+// work to fix it is a linked `task`.
+const issue = defineEntityType({
+  key: "issue",
+  name: "Issue",
+  description:
+    "A production error group keyed by its fingerprint: lifecycle, counters and triage. Live occurrences stay in ClickHouse (issue_trend, issue_events).",
+  properties: {
+    fingerprint: Type.Unsafe({
+      type: "string",
+      title: "Fingerprint",
+      pattern: "^[0-9a-f]{32}$",
+    }),
+    status: Type.Unsafe({
+      enum: [
+        "new",
+        "ongoing",
+        "escalating",
+        "regressed",
+        "resolved",
+        "ignored",
+      ],
+      type: "string",
+      title: "Status",
+      "x-lobu": { role: "workflowState" },
+      "x-facet": true,
+      "x-table-column": true,
+    }),
+    kind: Type.Unsafe({
+      enum: ["system", "user", "dependency"],
+      type: "string",
+      title: "Kind",
+      "x-facet": true,
+      "x-table-column": true,
+    }),
+    priority: Type.Optional(
+      Type.Unsafe({
+        enum: ["high", "medium", "low"],
+        type: "string",
+        title: "Priority",
+        "x-facet": true,
+        "x-table-column": true,
+      })
+    ),
+    culprit: text("Culprit", "Where it fails: the span or log scope"),
+    message: text("Message", "Parameterized error message"),
+    first_seen: time("First seen"),
+    last_seen: Type.Optional(
+      Type.Unsafe({
+        type: "string",
+        format: "date-time",
+        title: "Last seen",
+        "x-table-column": true,
+      })
+    ),
+    seen_24h: count("Seen in 24h"),
+    seen_14d: count("Seen in 14 days"),
+    affected_orgs: count("Workspaces affected (peak hour)"),
+    affected_users: count("Users affected (peak hour)"),
+    first_release: text("First release"),
+    last_release: text("Last release"),
+    sample_trace_id: text("Sample trace"),
+    observed_at: time("Counters observed at"),
+    escalated_at: time("Escalated at"),
+    regressed_at: time("Regressed at"),
+    resolved_at: time("Resolved at"),
+    resolution: Type.Optional(
+      Type.Unsafe({
+        enum: ["auto", "manual", "fix"],
+        type: "string",
+        title: "Resolution",
+      })
+    ),
+    resolved_in_release: text(
+      "Resolved in release",
+      "Release that must stop emitting it; set by a merged fix"
+    ),
+    ignore_until: time("Ignore until"),
+    triage_summary: text(
+      "Triage summary",
+      "What is failing and why it matters"
+    ),
+    suspected_cause: text("Suspected cause"),
+    triaged_at: time("Triaged at"),
+  },
+});
+
+const trackedBy = defineRelationshipType({
+  key: "tracked-by",
+  name: "Tracked By",
+  description:
+    "Links an issue to the task that fixes it. One task can track several issues with the same cause.",
+});
+
+const issueTracker = defineAutomation({
+  agent: productOps,
+  slug: "issue-tracker",
+  name: "Issue tracker",
+  description:
+    "Promotes ClickHouse error fingerprints past the noise gate into issues and runs their lifecycle. Deterministic; no agent turn.",
+  // Five minutes after each quarter-hour issue_occurrences_hourly refresh.
+  triggers: [every("12,27,42,57 * * * *", { skip_if_unchanged: false })],
+  tags: ["observability", "issues"],
+  // The module reads ClickHouse and the issue records itself. A context-only
+  // source keeps the default events source from pacing runs by arrivals.
+  sources: { clock: context("SELECT CURRENT_TIMESTAMP AS observed_at") },
+  reaction: reactionFromFile<typeof IssueTrackerReaction>(
+    "./issue-tracker.reaction.ts"
+  ),
 });
 
 // Reuse the Lobu Team read-only database credentials already stored in Lobu.
@@ -365,9 +504,10 @@ export default defineConfig({
     companyCloudflareAccount,
     gmailOAuthApp,
   ],
-  entities: [task],
+  entities: [task, issue],
+  relationships: [trackedBy],
   connections: [analytics, productActivityDb, lobuTeamSlack, companyCloudflare],
   // The external digest is maintained by scripts/configure-product-activity.ts.
   // Apply without prune: preserve its existing delivery agent and manual Automation.
-  automations: [],
+  automations: [issueTracker],
 });
