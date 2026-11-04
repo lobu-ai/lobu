@@ -322,6 +322,10 @@ describe("annotateErrorLogRecord", () => {
     annotateErrorLogRecord(first);
     annotateErrorLogRecord(second);
     expect(first.error_type).toBe("LoggedError");
+    expect(first.error_message).toBe("queue <num> stalled for <id>");
+    expect(first.error_grouping).toBe(
+      "v1|log svc|LoggedError||message:queue <num> stalled for <id>"
+    );
     expect(first.error_fingerprint).toBe(second.error_fingerprint);
   });
 });

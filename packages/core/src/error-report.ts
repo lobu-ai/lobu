@@ -400,5 +400,9 @@ export function annotateErrorLogRecord(record: Record<string, unknown>): void {
   record.error_fingerprint = report.fingerprint;
   record.error_type = report.type;
   record.error_kind = report.kind;
+  // The same safe fields a span carries, so a consumer of the log never needs
+  // the raw message to title or explain the issue.
+  record.error_message = report.message;
+  record.error_grouping = report.grouping;
   if (report.code) record.error_code = report.code;
 }
