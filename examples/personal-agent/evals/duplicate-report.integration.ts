@@ -105,13 +105,34 @@ async function setup() {
     }
     return rows;
   };
-  const react = () =>
-    executeAutomationScript({
+  let windowNumber = 0;
+  const react = async (freshWindow = false) => {
+    if (freshWindow) {
+      await sql`UPDATE runs SET status = 'completed', completed_at = current_timestamp WHERE id = ${context.window.run_id}`;
+      const start = new Date(Date.UTC(2026, 9, 2 + windowNumber++));
+      const end = new Date(start.getTime() + 86_400_000);
+      const next = await createAutomationRun({
+        organizationId: workspace.org.id,
+        automationId,
+        agentId: agent.agentId,
+        windowStart: start.toISOString(),
+        windowEnd: end.toISOString(),
+        dispatchSource: "manual",
+      });
+      context.window = {
+        ...context.window,
+        run_id: next.runId,
+        window_start: start.toISOString(),
+        window_end: end.toISOString(),
+      };
+    }
+    return executeAutomationScript({
       compiledScript: script,
       context,
       env: {},
       executionKind: "reaction",
     });
+  };
   const reports = () =>
     sql`SELECT id, metadata FROM events WHERE organization_id = ${workspace.org.id} AND metadata->>'schema' = 'duplicate-candidates/v2' ORDER BY id`;
   const notifications = () =>
@@ -168,7 +189,7 @@ describe("duplicate report reaction", () => {
       h.sql`SELECT id, name, metadata, deleted_at FROM entities WHERE organization_id = ${h.workspace.org.id} ORDER BY id`;
     const before = await records();
     const pending = () =>
-      h.sql`SELECT id, automation_id, parent_run_id FROM runs WHERE organization_id = ${h.workspace.org.id} AND action_key = 'entity_change' AND approval_status = 'pending' ORDER BY id`;
+      h.sql`SELECT id, automation_id, parent_run_id, action_input FROM runs WHERE organization_id = ${h.workspace.org.id} AND action_key = 'entity_change' AND approval_status = 'pending' ORDER BY id`;
     const first = await h.react();
     expect(first, first.error).toMatchObject({
       success: true,
@@ -209,14 +230,23 @@ describe("duplicate report reaction", () => {
     });
     expect(await pending()).toHaveLength(20);
     await human.operations.reject({ run_id: Number(proposals[0].id) });
-    expect(await h.react()).toMatchObject({
+    expect(await h.react(true)).toMatchObject({
       success: true,
       returnValue: { approval_count: 1 },
     });
-    expect(await pending()).toHaveLength(20);
-    expect((await pending()).map((p) => Number(p.id))).not.toContain(
-      Number(proposals[0].id)
+    const nextProposals = await pending();
+    expect(nextProposals).toHaveLength(20);
+    const pair = (proposal: (typeof proposals)[number]) =>
+      [proposal.action_input.entity_id, proposal.action_input.to_entity_id]
+        .sort((a, b) => a - b)
+        .join(":");
+    expect(new Set(nextProposals.map(pair)).size).toBe(20);
+    expect(nextProposals.map(pair)).not.toContain(pair(proposals[0]));
+    const newProposals = nextProposals.filter(
+      (proposal) => !proposals.some((old) => old.id === proposal.id)
     );
+    expect(newProposals).toHaveLength(1);
+    expect(newProposals[0].parent_run_id).toBe(h.context.window.run_id);
     expect(await records()).toEqual(before);
   });
 
