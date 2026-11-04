@@ -236,7 +236,13 @@ Search before create to avoid duplicates. Prefer a read or dry run before mutati
 
 ## Custom Views
 
-Before authoring UI, inspect available native entity/event pages, existing views (`client.views.list()` and `client.views.get({ key })`), and the project's shared components and overrides. Honor explicit user designs; reuse a suitable existing surface or component. When exploration benefits from linked charts, searchable tables, filters, drilldowns, scenario controls, or Canvas/SVG, build a React view. `@lobu/views/components` supplies theme-aware defaults such as `Card`, `DataTable`, filters, charts, links and query-state components. Compose, wrap or replace them when project components or specialized UX fit better.
+Before authoring UI, inspect available native entity/event pages, existing views (`client.views.list()` and `client.views.get({ key })`), and the project's shared components and overrides. Honor explicit user designs and reuse UI from the top down:
+
+1. Use the largest existing surface or component that meets the task. Configure its segment, filters, search, saved preset and layout before replacing its UI.
+2. If that surface cannot meet a concrete requirement, compose its exported parts, such as an individual table, board, graph or shared collection controls when available. Preserve shared selection and action handling instead of rebuilding that logic.
+3. If those parts still do not fit, use smaller shared primitives and write custom UI only for the remaining gap. Explain the unmet requirement that forced each step down.
+
+Check the current exports and target host before choosing an import; native renderer registrations do not imply React exports. Surface a missing export as a platform gap rather than inventing an API or silently copying the native implementation. `@lobu/views/components` currently supplies theme-aware defaults such as `Card`, `DataTable`, filters, charts, links and query-state components. When exploration needs specialized linked charts, drilldowns, scenario controls or Canvas/SVG, compose a React view from the suitable existing components.
 
 Native JSON templates use the target renderer's registered component names and overrides; inspect what that host actually supplies. React views compose imported components in their own bundle, independently of that native renderer map.
 
