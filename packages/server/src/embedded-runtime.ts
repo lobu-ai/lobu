@@ -9,8 +9,9 @@
  * `server.ts` hands to the shared `createServerLifecycle()` spine.
  */
 
-import { execFileSync, fork } from "node:child_process";
+import { type ChildProcess, execFileSync, fork } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { once } from "node:events";
 import {
 	chmodSync,
 	chownSync,
@@ -533,7 +534,7 @@ export async function startEmbeddedRuntime(): Promise<EmbeddedRuntime> {
 		embeddedPgOptions(pgDataDir, pgPort, pgvector.postgresFlags),
 	);
 
-	let embeddingsChild: Awaited<ReturnType<typeof startEmbeddings>> | null = null;
+	let embeddingsChild: ChildProcess | null = null;
 	let postgresStarted = false;
 	try {
 		// initdb refuses a non-empty datadir; skip it when the cluster already
@@ -562,15 +563,13 @@ export async function startEmbeddedRuntime(): Promise<EmbeddedRuntime> {
 			// release before the embeddings child + PG child are stopped. Restore
 			// ancestor ownership/modes only after postgres no longer needs them.
 			extraTeardown: [
-				() => {
-					embeddingsChild?.kill();
-				},
+				() => stopEmbeddings(embeddingsChild),
 				() => pg.stop(),
 				() => restoreTraversal(),
 			],
 		};
 	} catch (error) {
-		embeddingsChild?.kill();
+		await stopEmbeddings(embeddingsChild);
 		const cleanupErrors: unknown[] = [];
 		// embedded-postgres leaves its process field set when start() rejects,
 		// even though the child has already closed. Calling stop() then waits for
@@ -717,7 +716,24 @@ export async function runMigrations(databaseUrl: string): Promise<void> {
 	}
 }
 
-export async function startEmbeddings(): Promise<ReturnType<typeof fork> | null> {
+/**
+ * Stops a forked embeddings service and resolves once it has exited, so its port
+ * is free when teardown returns. A child that has loaded the local model can take
+ * a moment to die, and the gateway must not exit while the child still listens.
+ */
+export async function stopEmbeddings(child: ChildProcess | null): Promise<void> {
+	if (!child || child.exitCode !== null || child.signalCode !== null) return;
+	const exited = once(child, "exit");
+	child.kill("SIGTERM");
+	const force = setTimeout(() => child.kill("SIGKILL"), 5_000);
+	try {
+		await exited;
+	} finally {
+		clearTimeout(force);
+	}
+}
+
+export async function startEmbeddings(): Promise<ChildProcess | null> {
 	if (process.env.EMBEDDINGS_SERVICE_URL?.trim()) return null;
 	const embeddingsPort = parseInt(process.env.EMBEDDINGS_PORT || "0", 10);
 	const publishedServerPath = (() => {

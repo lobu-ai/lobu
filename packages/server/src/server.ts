@@ -44,6 +44,7 @@ import {
 	runMigrations,
 	startEmbeddedRuntime,
 	startEmbeddings,
+	stopEmbeddings,
 } from "./embedded-runtime";
 import { externalDbBootstrapHooks } from "./local-bootstrap";
 import { initTracing } from "@lobu/core";
@@ -211,7 +212,7 @@ async function main(): Promise<void> {
 
 	if (external && process.env.LOBU_RUN_OWNS_DB === "1") {
 		const embeddings = await startEmbeddings();
-		if (embeddings) extraTeardown.push(() => { embeddings.kill(); });
+		if (embeddings) extraTeardown.push(() => stopEmbeddings(embeddings));
 	}
 
 	// Imported AFTER env + DATABASE_URL are finalised: the lifecycle's transitive

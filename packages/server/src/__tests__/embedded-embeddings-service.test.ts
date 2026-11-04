@@ -1,6 +1,8 @@
+import { once } from "node:events";
+import { createServer } from "node:net";
 import { networkInterfaces } from "node:os";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { startEmbeddings } from "../embedded-runtime";
+import { startEmbeddings, stopEmbeddings } from "../embedded-runtime";
 
 // `lobu run` forks the embeddings service for the gateway alone: it must not be
 // reachable from other hosts or callable without the gateway's credential. Drives
@@ -36,8 +38,8 @@ describe("startEmbeddings (embedded embeddings service)", () => {
 		}
 	}, 30_000);
 
-	afterAll(() => {
-		child?.kill();
+	afterAll(async () => {
+		await stopEmbeddings(child);
 		for (const [key, value] of Object.entries({
 			EMBEDDINGS_SERVICE_URL: saved.url,
 			EMBEDDINGS_SERVICE_TOKEN: saved.token,
@@ -75,5 +77,14 @@ describe("startEmbeddings (embedded embeddings service)", () => {
 			.find((address) => address && address.family === "IPv4" && !address.internal);
 		if (!lan) return; // No non-loopback interface on this host to probe.
 		await expect(fetch(`http://${lan.address}:${port}/health`)).rejects.toThrow();
+	});
+
+	// Teardown waits for the child: `lobu run` must not exit while its service
+	// still holds the port, or a restart on the same port fails with EADDRINUSE.
+	it("frees its port by the time stopping resolves", async () => {
+		await stopEmbeddings(child);
+		const probe = createServer().listen(port, "127.0.0.1");
+		await once(probe, "listening");
+		await new Promise((resolve) => probe.close(resolve));
 	});
 });
