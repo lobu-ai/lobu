@@ -1,6 +1,6 @@
 {
   "name": "@lobu/views",
-  "version": "24.4.0",
+  "version": "24.5.0",
   "description": "Authoring runtime for Lobu views — React modules rendered in the sandboxed MCP Apps frame",
   "type": "module",
   "main": "dist/index.js",
