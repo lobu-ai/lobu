@@ -145,7 +145,37 @@ export interface SpecSheetContext {
   dirtyKeys?: readonly string[];
 }
 
+/** Controlled collection page. Reads and actions remain with its caller. */
+export interface EntityListPageProps {
+  title: ReactNode;
+  actions?: ReactNode;
+  controls?: ReactNode;
+  table?: EntityTableViewProps;
+  /** Overrides the table, including for generic SQL/TypeScript rows. */
+  children?: ReactNode;
+  loading?: boolean;
+  error?: string | null;
+  onRetry?: () => void;
+  empty?: ReactNode;
+}
+
+/** Shared record body; callers provide activity, views and authorized actions. */
+export interface EntityRecordPageProps {
+  entity: ViewEntity;
+  owner: string;
+  schema?: EntityTableSchema;
+  title?: ReactNode;
+  actions?: ReactNode;
+  details?: ReactNode;
+  summary?: ReactNode;
+  children?: ReactNode;
+  /** Content mode keeps the header and lets children own the body layout. */
+  layout?: "record" | "content";
+}
+
 export interface NativeComponentProps {
+  EntityListPage: EntityListPageProps;
+  EntityRecordPage: EntityRecordPageProps;
   EntityTableView: EntityTableViewProps;
   RecordSpecSheet: {
     fields: SpecField[];
@@ -194,6 +224,8 @@ export type NativeComponents = {
   [K in keyof NativeComponentProps]: ComponentType<NativeComponentProps[K]>;
 };
 export const NATIVE_COMPONENT_NAMES = [
+  "EntityListPage",
+  "EntityRecordPage",
   "EntityTableView",
   "RecordSpecSheet",
   "SchemaValue",
@@ -225,6 +257,8 @@ function native<K extends keyof NativeComponents>(
     );
   };
 }
+export const EntityListPage = native("EntityListPage");
+export const EntityRecordPage = native("EntityRecordPage");
 export const EntityTableView = native("EntityTableView");
 export const RecordSpecSheet = native("RecordSpecSheet");
 export const SchemaValue = native("SchemaValue");
