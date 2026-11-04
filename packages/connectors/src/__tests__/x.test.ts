@@ -872,6 +872,7 @@ describe("XConnector definition", () => {
 		expect(Object.keys(def.feeds).sort()).toEqual([
 			"bookmarks",
 			"direct_messages",
+			"following",
 			"following_timeline",
 			"home_feed",
 			"liked_tweets",
@@ -1745,6 +1746,314 @@ describe("XConnector browser-first routing", () => {
 	});
 });
 
+const FOLLOWING_OWNER = "1000000001";
+
+function followingUrl(cursor?: string, userId = FOLLOWING_OWNER): string {
+	return `https://x.com/i/api/graphql/hash/Following?variables=${encodeURIComponent(
+		JSON.stringify({
+			userId,
+			count: 20,
+			includePromotedContent: false,
+			withGrokTranslatedBio: false,
+			...(cursor ? { cursor } : {}),
+		}),
+	)}`;
+}
+
+// Synthetic accounts in the live Following user shape: `core`, `profile_bio`
+// and `verification`, with no `legacy` object.
+const followedPerson = {
+	__typename: "User",
+	id: "VXNlcjoyMDAx",
+	rest_id: "2001",
+	is_blue_verified: false,
+	profile_image_shape: "Circle",
+	core: {
+		screen_name: "Synth_Person",
+		name: "Synthetic Person",
+		created_at: "Wed Jun 04 12:00:00 +0000 2014",
+	},
+	profile_bio: { description: "Writes about synthetic things" },
+	verification: { verified: false },
+};
+const followedCompany = {
+	__typename: "User",
+	id: "VXNlcjoyMDAy",
+	rest_id: "2002",
+	is_blue_verified: true,
+	profile_image_shape: "Square",
+	core: {
+		screen_name: "synthetic_co",
+		name: "Synthetic Co",
+		created_at: "Mon Jan 02 09:00:00 +0000 2012",
+	},
+	profile_bio: { description: "We make synthetic things" },
+	verification: { verified: true, verified_type: "Business" },
+};
+const followedLater = {
+	__typename: "User",
+	rest_id: "2003",
+	core: { screen_name: "synthetic_later", name: "Synthetic Later" },
+};
+
+function followingResponse(
+	users: unknown[],
+	bottomCursor?: string,
+	{ unavailable = true } = {},
+) {
+	return {
+		data: {
+			user: {
+				result: {
+					__typename: "User",
+					timeline: {
+						timeline: {
+							instructions: [
+								{ type: "TimelineClearCache" },
+								{ type: "TimelineTerminateTimeline", direction: "Top" },
+								{ type: "TimelineTerminateTimeline", direction: "Bottom" },
+								{
+									type: "TimelineAddEntries",
+									entries: [
+										...users.map((result, index) => ({
+											entryId: `user-${index}`,
+											content: {
+												itemContent: {
+													itemType: "TimelineUser",
+													user_results: { result },
+												},
+											},
+										})),
+										...(unavailable
+											? [
+													{
+														entryId: "user-unavailable",
+														content: {
+															itemContent: {
+																user_results: {
+																	result: { __typename: "UserUnavailable" },
+																},
+															},
+														},
+													},
+												]
+											: []),
+										...(bottomCursor
+											? [
+													{
+														entryId: "cursor-bottom-0",
+														content: {
+															entryType: "TimelineTimelineCursor",
+															cursorType: "Bottom",
+															value: bottomCursor,
+														},
+													},
+												]
+											: []),
+									],
+								},
+							],
+						},
+					},
+				},
+			},
+		},
+	};
+}
+
+/** A browser whose Following page loads `first` and answers cursor replays. */
+function followingBrowser(
+	first: { url: string; body: unknown },
+	replies: Record<string, unknown>,
+) {
+	const replays: string[] = [];
+	let pending: string | undefined;
+	const dispatcher = {
+		dispatch: async (action: string, input: Record<string, unknown>) => {
+			if (action === "navigate") {
+				return {
+					tab_id: 42,
+					result: {
+						responses: [{ url: first.url, body: JSON.stringify(first.body) }],
+					},
+				};
+			}
+			if (action === "network_intercept_replay") {
+				replays.push(String(input.url));
+				pending = String(input.url);
+				return { ok: true, status: 200 };
+			}
+			if (action === "network_intercept_drain") {
+				const url = pending;
+				pending = undefined;
+				const cursor = url ? readGraphqlCursor(url) : undefined;
+				const body = cursor ? replies[cursor] : undefined;
+				return {
+					result: {
+						responses:
+							url && body ? [{ url, body: JSON.stringify(body) }] : [],
+					},
+				};
+			}
+			return {};
+		},
+	};
+	return { dispatcher, replays };
+}
+
+function syncFollowing(
+	dispatcher: unknown,
+	checkpoint: Record<string, unknown> = {},
+	pages = 2,
+) {
+	return runSync(new XConnector(), {
+		feedKey: "following",
+		config: { account_handle: "testuser", pages_per_run: pages },
+		checkpoint,
+		credentials: {},
+		entityIds: [],
+		sessionState: { account_id: FOLLOWING_OWNER },
+		browser: dispatcher,
+	} as never);
+}
+
+describe("XConnector following feed", () => {
+	test("emits each followed account, marks Verified Organizations, and checkpoints the walk", async () => {
+		const { dispatcher, replays } = followingBrowser(
+			{
+				url: followingUrl(),
+				body: followingResponse([followedPerson, followedCompany], "c1"),
+			},
+			{ c1: followingResponse([followedLater], "c2") },
+		);
+		const result = await syncFollowing(dispatcher);
+
+		expect(replays).toEqual([followingUrl("c1")]);
+		expect(result.events.map((event: any) => event.origin_id)).toEqual([
+			`x_following_${FOLLOWING_OWNER}_2001`,
+			`x_following_${FOLLOWING_OWNER}_2002`,
+			`x_following_${FOLLOWING_OWNER}_2003`,
+		]);
+		const [person, company, later] = result.events as any[];
+		expect(person).toMatchObject({
+			origin_type: "followed_account",
+			payload_text:
+				"Follows @Synth_Person (Synthetic Person): Writes about synthetic things",
+			author_name: "Synthetic Person",
+			source_url: "https://x.com/Synth_Person",
+			metadata: {
+				followed_user_id: "2001",
+				followed_handle: "synth_person",
+				followed_name: "Synthetic Person",
+				is_blue_verified: false,
+				profile_image_shape: "Circle",
+				is_organization: false,
+				followed_by_id: FOLLOWING_OWNER,
+				followed_by_handle: "testuser",
+			},
+		});
+		expect(company.metadata).toMatchObject({
+			followed_handle: "synthetic_co",
+			followed_description: "We make synthetic things",
+			verified_type: "Business",
+			is_blue_verified: true,
+			is_organization: true,
+		});
+		// No source follow time: the stable account creation time, never sync time.
+		expect(company.occurred_at.toISOString()).toBe("2012-01-02T09:00:00.000Z");
+		expect(later.metadata.is_organization).toBe(false);
+		expect(later.metadata.timestamp_basis).toBe("platform_launch");
+		expect(result.metadata).toMatchObject({
+			collection_status: "in_progress",
+			pages_requested: 1,
+			pages_received: 1,
+		});
+		expect(result.checkpoint).toMatchObject({ following_cursor: "c2" });
+	});
+
+	test("resumes from the checkpointed cursor and restarts from the top after the end of the list", async () => {
+		const { dispatcher, replays } = followingBrowser(
+			{
+				url: followingUrl(),
+				body: followingResponse([followedPerson], "c1"),
+			},
+			// X keeps returning a bottom cursor on the empty page past the end.
+			{ c2: followingResponse([], "c3", { unavailable: false }) },
+		);
+		const result = await syncFollowing(dispatcher, { following_cursor: "c2" });
+
+		expect(replays).toEqual([followingUrl("c2")]);
+		expect(result.events.map((event: any) => event.origin_id)).toEqual([
+			`x_following_${FOLLOWING_OWNER}_2001`,
+		]);
+		expect(result.metadata.collection_status).toBe("complete");
+		expect(result.checkpoint?.following_cursor).toBeUndefined();
+		expect(result.checkpoint?.following_walk_completed_at).toBeDefined();
+	});
+
+	test("keeps walking past a page whose only account is unavailable", async () => {
+		const { dispatcher, replays } = followingBrowser(
+			{ url: followingUrl(), body: followingResponse([], "c1") },
+			{ c1: followingResponse([followedPerson], "c2") },
+		);
+		const result = await syncFollowing(dispatcher);
+
+		expect(replays).toEqual([followingUrl("c1")]);
+		expect(result.events.map((event: any) => event.origin_id)).toEqual([
+			`x_following_${FOLLOWING_OWNER}_2001`,
+		]);
+		expect(result.metadata.collection_status).toBe("in_progress");
+		expect(result.checkpoint).toMatchObject({ following_cursor: "c2" });
+	});
+
+	test("gives an account without a creation time the same time on every walk", async () => {
+		const undatedSnowflake = {
+			__typename: "User",
+			rest_id: "1500000000000000000",
+			core: { screen_name: "synth_undated", name: "Synthetic Undated" },
+		};
+		const walk = async () => {
+			const { dispatcher } = followingBrowser(
+				{
+					url: followingUrl(),
+					body: followingResponse([followedLater, undatedSnowflake]),
+				},
+				{},
+			);
+			return (await syncFollowing(dispatcher)).events as any[];
+		};
+		const first = await walk();
+		await new Promise((resolve) => setTimeout(resolve, 5));
+		const second = await walk();
+
+		expect(second.map((event) => event.occurred_at.toISOString())).toEqual(
+			first.map((event) => event.occurred_at.toISOString()),
+		);
+		expect(
+			first.map((event) => [
+				event.metadata.timestamp_basis,
+				event.occurred_at.toISOString(),
+			]),
+		).toEqual([
+			["platform_launch", "2006-03-21T00:00:00.000Z"],
+			["user_id_snowflake", "2022-03-05T06:47:23.309Z"],
+		]);
+	});
+
+	test("refuses a Following list that is not the connected account's", async () => {
+		const { dispatcher } = followingBrowser(
+			{
+				url: followingUrl(undefined, "9999"),
+				body: followingResponse([followedPerson]),
+			},
+			{},
+		);
+		await expect(syncFollowing(dispatcher)).rejects.toThrow(
+			"not the connected account's list",
+		);
+	});
+});
+
 describe("finalizeDmSyncResult", () => {
 	test("emits dm_message events with participant metadata", () => {
 		const res = finalizeDmSyncResult(
@@ -2182,7 +2491,7 @@ describe("isReplySubmitLabel", () => {
 
 describe("prepare_reply action contract", () => {
 	test("pins the connector version for catalog upgrades", () => {
-		expect(new XConnector().definition.version).toBe("3.16.0");
+		expect(new XConnector().definition.version).toBe("3.17.0");
 	});
 
 	test("classifies staging a reply as a write for org policy", () => {
