@@ -470,10 +470,11 @@ describe('connector-health alerter', () => {
   // feeds is intent, NOT a failure. Only feeds paused *because they failed*
   // (consecutive_failures > 0) count toward degradation.
   it.each([
-    { slug: 'recent-success-in-flight', days: 1, failures: 0, reason: null },
-    { slug: 'recent-failure-in-flight', days: 1, failures: 1, reason: 'no_recent_sync' },
-    { slug: 'old-success-in-flight', days: 9, failures: 0, reason: 'no_recent_sync' },
-  ] as const)('preserves sync freshness while claimed: $slug', async ({ slug, days, failures, reason }) => {
+    { slug: 'recent-success-in-flight', days: 1, failures: 0, terminal: 'completed', reason: null },
+    { slug: 'recent-failure-in-flight', days: 1, failures: 1, terminal: 'failed', reason: 'no_recent_sync' },
+    { slug: 'resumed-failure-in-flight', days: 1, failures: 0, terminal: 'failed', reason: 'no_recent_sync' },
+    { slug: 'old-success-in-flight', days: 9, failures: 0, terminal: 'completed', reason: 'no_recent_sync' },
+  ] as const)('preserves sync freshness while claimed: $slug', async ({ slug, days, failures, terminal, reason }) => {
     const day = 24 * 60 * 60 * 1000;
     const connection = await seedConnection({
       orgId, userId, connectorKey: 'github', slug, createdAt: OLD,
@@ -489,6 +490,12 @@ describe('connector-health alerter', () => {
       schedule: '30 */2 * * *', lastSyncStatus: 'pending',
       lastSyncAt: new Date(Date.now() - days * day), consecutiveFailures: failures,
     });
+    const sql = getTestDb();
+    await sql`
+      INSERT INTO runs (organization_id, connection_id, feed_id, run_type, status, completed_at)
+      SELECT organization_id, connection_id, id, 'sync', ${terminal}, last_sync_at
+      FROM feeds WHERE connection_id = ${connection.id} AND feed_key = 'b'
+    `;
     const result = await runConnectorHealthCheck();
     expect(reasonFor(result.details, connection.id) ?? null).toBe(reason);
   });

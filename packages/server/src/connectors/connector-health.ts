@@ -377,6 +377,7 @@ interface FeedHealthRow {
   timezone: string | null;
   last_sync_status: string | null;
   last_sync_at: Date | string | null;
+  last_sync_succeeded: boolean;
   consecutive_failures: string;
   last_error: string | null;
   acl_state_failed: boolean;
@@ -438,6 +439,16 @@ async function loadConnectionHealthRows(
       f.timezone,
       f.last_sync_status,
       f.last_sync_at,
+      -- Completion stamps both rows in the same transaction. An exact
+      -- terminal-time lookup uses idx_runs_terminal_completed_at and avoids
+      -- inferring a success from counters that an operator can reset.
+      CASE WHEN f.last_sync_status = 'pending' THEN EXISTS (
+        SELECT 1 FROM public.runs r
+        WHERE r.completed_at = f.last_sync_at AND r.completed_at IS NOT NULL
+          AND r.status = 'completed' AND r.run_type = 'sync'
+          AND r.feed_id = f.id AND r.connection_id = c.id
+          AND r.organization_id = c.organization_id AND NOT r.dry_run
+      ) ELSE false END AS last_sync_succeeded,
       f.consecutive_failures,
       f.last_error,
       -- Fails CLOSED: the connection's ACL graph is fail-closed. The ACL sync
@@ -779,10 +790,9 @@ function classify(
     if (feed.persistent) persistentCount += 1;
 
     if (row.last_sync_at) everFinishedASync = true;
-    // A claim changes status to pending without changing the last terminal
-    // timestamp or failure count. Zero failures preserves that last success;
-    // otherwise a scan mid-sync can mistake an old sibling for the newest one.
-    const preservesLastSuccess = row.last_sync_status === 'pending' && Number(row.consecutive_failures) === 0;
+    // A claim overwrites status, but the matching completed run still proves
+    // the outcome at last_sync_at. Missing/pruned evidence stays unknown.
+    const preservesLastSuccess = row.last_sync_status === 'pending' && row.last_sync_succeeded;
     if ((row.last_sync_status === 'success' || preservesLastSuccess) && row.last_sync_at) {
       const syncMs = tsTimeOrNull(row.last_sync_at);
       if (syncMs !== undefined && (newestSyncAtMs === null || syncMs > newestSyncAtMs)) {
