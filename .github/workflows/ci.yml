@@ -828,6 +828,13 @@ jobs:
           cd packages/connector-worker && bun run build && cd ../..
           cd packages/pgvector-embedded && bun run build && cd ../..
 
+      - name: Build native view runtime for browser validation
+        # Server-only dependency builds omit app assets. The save validator must
+        # mount the same native component artifact as the frontend, even on a
+        # restored package-dist cache.
+        working-directory: packages/owletto
+        run: MCP_APP=view-native bunx vite build --config vite.config.mcp.ts
+
       - name: Verify Postgres health (fail fast if pgvector setup is broken)
         run: |
           for _ in {1..20}; do
@@ -1002,6 +1009,13 @@ jobs:
           cd packages/embeddings && bun run build && cd ../..
           cd packages/connector-worker && bun run build && cd ../..
           cd packages/pgvector-embedded && bun run build && cd ../..
+
+      - name: Build native view runtime for browser validation
+        # Server-only dependency builds omit app assets. The save validator must
+        # mount the same native component artifact as the frontend, even on a
+        # restored package-dist cache.
+        working-directory: packages/owletto
+        run: MCP_APP=view-native bunx vite build --config vite.config.mcp.ts
 
       - name: Verify Postgres health (fail fast if pgvector setup is broken)
         run: |
