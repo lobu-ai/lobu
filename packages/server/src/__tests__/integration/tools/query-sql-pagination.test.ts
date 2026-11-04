@@ -16,8 +16,9 @@
  *     and `total_count` is still exact.
  */
 
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { querySql } from '../../../tools/admin/query_sql';
+import logger from '../../../utils/logger';
 import type { ToolContext } from '../../../tools/registry';
 import { QUERY_SQL_RESULT_MAX_BYTES } from '../../../utils/content-read-bounds';
 import { cleanupTestDatabase } from '../../setup/test-db';
@@ -343,6 +344,9 @@ describe('query_sql internal-path pagination contract', () => {
     });
 
     it('stops an unbounded statement at the timeout with a typed retryable code', async () => {
+      // The returned failure is the tool span's to report; an error-level log
+      // of the same timeout would open a second issue under another scope.
+      const errorLog = vi.spyOn(logger, 'error');
       const started = Date.now();
       const res = await querySql(
         {
@@ -356,6 +360,8 @@ describe('query_sql internal-path pagination contract', () => {
       expect(res.rows).toEqual([]);
       expect(res.error_code).toBe('UPSTREAM_TIMEOUT');
       expect(res.retryable).toBe(true);
+      expect(errorLog).not.toHaveBeenCalled();
+      errorLog.mockRestore();
     }, 30_000);
   });
 });

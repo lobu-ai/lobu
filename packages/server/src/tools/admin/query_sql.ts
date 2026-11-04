@@ -654,8 +654,10 @@ export async function querySqlImpl(
       options?.maxSerializedResultBytes
     );
   } catch (error) {
-    // A caller that left is not a query failure.
-    if (!ctx.abortSignal?.aborted) logger.error({ error }, 'query_sql error');
+    // The typed failure returned below is reported once, by the tool span; an
+    // error log here would group the same failure as a second issue. Keep the
+    // driver error at warn for debugging. A caller that left is not a failure.
+    if (!ctx.abortSignal?.aborted) logger.warn({ error }, 'query_sql error');
 
     // The `error_code`/`retryable` fields let the agent distinguish a transient
     // timeout (worth retrying) from a permanent SQL fault.

@@ -52,6 +52,18 @@ import { initWorkspaceProvider } from "./workspace";
 /** Requests whose thrown error app.onError already recorded on the HTTP span. */
 const requestsWithRecordedError = new WeakSet<Request>();
 
+/**
+ * Readiness probes intentionally 503 `{status:"draining"}` during the
+ * graceful-shutdown drain (SHUTDOWN_READINESS_DRAIN_MS); recording that turns
+ * every deploy rollover into an incident (LOBU-BACKEND-X). Only that exact
+ * shape: a health 5xx with any other body (DB unreachable, crash) is real.
+ */
+async function isReadinessDrain(c: Context): Promise<boolean> {
+	if (c.req.path !== "/health/ready" || c.res.status !== 503) return false;
+	const body: unknown = await c.res.clone().json().catch(() => null);
+	return typeof body === "object" && body !== null && (body as { status?: unknown }).status === "draining";
+}
+
 type ServerMode = "postgres" | "embedded-postgres";
 const HTTP_TRACE_METHODS = new Set(["CONNECT", "DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT", "TRACE"]);
 
@@ -256,7 +268,7 @@ export function buildWrapperApp(
 				if (!requestsWithRecordedError.has(c.req.raw)) {
 					if (failed) {
 						recordError(span, thrown, { scope: name });
-					} else if (c.res.status >= 500) {
+					} else if (c.res.status >= 500 && !(await isReadinessDrain(c))) {
 						recordError(
 							span,
 							{ name: "HttpServerError", message: `HTTP ${c.res.status}`, httpStatus: c.res.status },
@@ -290,21 +302,7 @@ export function buildWrapperApp(
 			} catch {
 				// response wasn't JSON; ignore
 			}
-			// Readiness probes intentionally 503 `{status:"draining"}` during the
-			// graceful-shutdown drain (SHUTDOWN_READINESS_DRAIN_MS) — capturing
-			// that turns every deploy rollover into an incident
-			// (LOBU-BACKEND-X). Skip ONLY that exact shape: a health 5xx with any
-			// other body (DB unreachable, crash) is a real incident and must
-			// still report.
-			if (
-				c.req.path === "/health/ready" &&
-				c.res.status === 503 &&
-				body !== null &&
-				typeof body === "object" &&
-				(body as { status?: unknown }).status === "draining"
-			) {
-				return;
-			}
+			if (await isReadinessDrain(c)) return;
 			const message =
 				(body &&
 				typeof body === "object" &&

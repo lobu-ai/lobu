@@ -455,26 +455,42 @@ describe("buildWrapperApp", () => {
 		const { default: logger } = await import("../utils/logger");
 		const { Hono } = await import("hono");
 		const captureMessage = logger.error as ReturnType<typeof vi.fn>;
+		const exporter = new InMemorySpanExporter();
+		await shutdownTracing();
+		initTracing({ serviceName: "readiness-drain-test", spanProcessors: [new SimpleSpanProcessor(exporter)] });
+		const readinessSpan = () => {
+			const span = exporter.getFinishedSpans().find((s) => s.attributes["http.route"] === "/health/ready");
+			exporter.reset();
+			return span;
+		};
+		try {
+			// Expected deploy-drain shape → neither logged nor recorded as an
+			// error span (was LOBU-BACKEND-X noise, then an issue per rollout).
+			const draining = buildWrapperApp({} as never, new Hono());
+			draining.get("/health/ready", (c) =>
+				c.json({ status: "draining", service: "lobu-api" }, 503),
+			);
+			captureMessage.mockClear();
+			const drainRes = await draining.request("/health/ready");
+			expect(drainRes.status).toBe(503);
+			expect(captureMessage).not.toHaveBeenCalled();
+			const drainSpan = readinessSpan();
+			expect(drainSpan?.status.code).not.toBe(SpanStatusCode.ERROR);
+			expect(drainSpan?.attributes["error.fingerprint"]).toBeUndefined();
 
-		// Expected deploy-drain shape → suppressed (was LOBU-BACKEND-X noise).
-		const draining = buildWrapperApp({} as never, new Hono());
-		draining.get("/health/ready", (c) =>
-			c.json({ status: "draining", service: "lobu-api" }, 503),
-		);
-		captureMessage.mockClear();
-		const drainRes = await draining.request("/health/ready");
-		expect(drainRes.status).toBe(503);
-		expect(captureMessage).not.toHaveBeenCalled();
-
-		// Same endpoint, non-draining body (e.g. DB unreachable) → still reports.
-		const broken = buildWrapperApp({} as never, new Hono());
-		broken.get("/health/ready", (c) =>
-			c.json({ status: "error", error: "db unreachable" }, 503),
-		);
-		captureMessage.mockClear();
-		const brokenRes = await broken.request("/health/ready");
-		expect(brokenRes.status).toBe(503);
-		expect(captureMessage).toHaveBeenCalled();
+			// Same endpoint, non-draining body (e.g. DB unreachable) → still reports.
+			const broken = buildWrapperApp({} as never, new Hono());
+			broken.get("/health/ready", (c) =>
+				c.json({ status: "error", error: "db unreachable" }, 503),
+			);
+			captureMessage.mockClear();
+			const brokenRes = await broken.request("/health/ready");
+			expect(brokenRes.status).toBe(503);
+			expect(captureMessage).toHaveBeenCalled();
+			expect(readinessSpan()?.status.code).toBe(SpanStatusCode.ERROR);
+		} finally {
+			await shutdownTracing();
+		}
 	});
 
 	it("does NOT double-report when onError fires after post-response middleware", async () => {
