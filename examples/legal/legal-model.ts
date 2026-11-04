@@ -251,6 +251,7 @@ export const legalEntities = [
       approvals: number("Approved for signature"),
       completed: number("Closed"),
       coverage: text("Coverage"),
+      decision_cursor: number("Last processed counsel receipt"),
     },
     required: ["as_of", "coverage"],
   }),

@@ -91,7 +91,8 @@ async function setup() {
   });
   const automations = new Map<string, number>();
   const context = async (
-    slug: string
+    slug: string,
+    windowStart = new Date(Date.parse(asOf) - 86_400_000).toISOString()
   ): Promise<ReactionContext & AutomationScriptContext> => {
     if (!automations.has(slug)) {
       const created = (await workspace.owner.automations.create({
@@ -112,7 +113,7 @@ async function setup() {
       organizationId: workspace.org.id,
       automationId,
       agentId: agent.agentId,
-      windowStart: new Date(Date.parse(asOf) - 86_400_000).toISOString(),
+      windowStart,
       windowEnd: asOf,
       dispatchSource: "manual",
     });
@@ -123,7 +124,7 @@ async function setup() {
       window: {
         automation_id: automationId,
         run_id: run.runId,
-        window_start: new Date(Date.parse(asOf) - 86_400_000).toISOString(),
+        window_start: windowStart,
         window_end: asOf,
         content_analyzed: 0,
       },
@@ -132,10 +133,10 @@ async function setup() {
       extracted_data: {},
     };
   };
-  const maintain = async (slug: string) =>
+  const maintain = async (slug: string, windowStart?: string) =>
     executeAutomationScript({
       compiledScript: maintenanceSource,
-      context: await context(slug),
+      context: await context(slug, windowStart),
       env: {},
     });
   const prepare = async () =>
@@ -183,8 +184,9 @@ async function setup() {
   const decide = async (
     reviewId: number,
     action = "negotiate",
-    instruction = "Keep the twelve-month cap; do not accept unlimited liability.",
-    reuse = true
+    instruction: unknown = "Keep the twelve-month cap; do not accept unlimited liability.",
+    reuse: unknown = true,
+    interactionId = `synthetic-${reviewId}-${action}`
   ) => {
     await workspace.owner.views.set({ source_code: viewSource });
     return executeTool(
@@ -194,7 +196,7 @@ async function setup() {
         scope: { event: reviewId },
         action,
         value: { instruction, reuse },
-        interaction_id: `synthetic-${reviewId}-${action}`,
+        interaction_id: interactionId,
       },
       {} as Env,
       auth
@@ -315,10 +317,43 @@ test("native human receipts apply to the displayed revision, survive retries and
   expect(again[0].prior_decisions).toHaveLength(1);
   expect(await h.save(again)).toMatchObject({ success: true });
   const current = (await h.reviews()).at(-1)!;
+  // Receipts a client can submit but the view would refuse (over-long or
+  // non-string instruction, non-boolean reuse) neither block the decision
+  // behind them nor stop a window holding more than one page of receipts.
+  for (let i = 0; i < 101; i++) {
+    await h.decide(
+      Number(current.id),
+      "escalate",
+      i % 3 === 0 ? "x".repeat(1501) : i % 3 === 1 ? 42 : "Escalate.",
+      i % 3 === 2 ? "yes" : false,
+      `synthetic-malformed-${i}`
+    );
+  }
   await h.decide(Number(current.id), "approve", "Ready for signature.", false);
-  expect(await h.maintain("legal-decisions")).toMatchObject({
+  for (let batch = 0; batch < 4; batch++) {
+    expect(
+      await h.maintain(
+        "legal-decisions",
+        batch > 0 ? new Date(Date.parse(h.asOf) - 1).toISOString() : undefined
+      )
+    ).toMatchObject({
+      success: true,
+      returnValue: { applied: 0, rejected: 25, has_more: true },
+    });
+    expect((await h.get(h.data.request)).metadata.status).toBe(
+      "awaiting_decision"
+    );
+  }
+  // The native arrival window has advanced beyond these receipts. The saved
+  // cursor must still carry the final malformed row and valid decision forward.
+  const advancedStart = new Date(Date.parse(h.asOf) - 1).toISOString();
+  expect(await h.maintain("legal-decisions", advancedStart)).toMatchObject({
     success: true,
-    returnValue: { applied: 1 },
+    returnValue: { applied: 1, rejected: 1, has_more: false },
+  });
+  expect(await h.maintain("legal-decisions", advancedStart)).toMatchObject({
+    success: true,
+    returnValue: { applied: 0, rejected: 0, has_more: false },
   });
   expect((await h.get(h.data.request)).metadata.status).toBe("approved");
   expect((await h.get(h.data.contract)).metadata.status).toBe("negotiating");
@@ -417,6 +452,62 @@ test("fabricated citations and quotes persist no review and unavailable evidence
   });
   expect(await h.maintain("legal-intake-triage")).toMatchObject({
     success: false,
+  });
+  await h.workspace.owner.entities.update({
+    entity_id: h.data.request,
+    metadata: { status: "triaged" },
+  });
+  expect(await h.prepare()).toMatchObject({ success: false });
+  // The SQL bridge returns bigint[] as text. A different record whose ID
+  // contains the selected ID must never count as a linked revision.
+  const selected = await h.workspace.owner.entities.create({
+    entity_type: "legal-document",
+    name: "Synthetic selected revision with mismatched source",
+    metadata: {
+      version: 8,
+      counterparty_id: h.data.company,
+      contract_id: h.data.contract,
+      source_event_id: 0,
+      available_at: new Date(Date.parse(h.asOf) - 1000).toISOString(),
+    },
+  });
+  const selectedId = Number(selected.entity!.id);
+  // Control only the fixture's next generated ID; both records and evidence
+  // still go through the real SDK entrypoints.
+  await h.sql`SELECT setval(pg_get_serial_sequence('entities', 'id'), ${selectedId * 10}, false)`;
+  const decoy = await h.workspace.owner.entities.create({
+    entity_type: "legal-document",
+    name: "Synthetic decoy revision",
+    metadata: {
+      version: 9,
+      counterparty_id: h.data.company,
+      contract_id: h.data.contract,
+      source_event_id: 0,
+      available_at: new Date(Date.parse(h.asOf) - 1000).toISOString(),
+    },
+  });
+  expect(Number(decoy.entity!.id)).toBe(selectedId * 10);
+  const decoyEvidence = await h.workspace.owner.knowledge.save({
+    title: "Evidence for the decoy, not the selected revision",
+    content: "This source belongs to another revision.",
+    semantic_type: "legal-document-evidence",
+    entity_ids: [Number(decoy.entity!.id)],
+  });
+  await h.workspace.owner.entities.update({
+    entity_id: selectedId,
+    metadata: { source_event_id: decoyEvidence.id },
+  });
+  await h.workspace.owner.entities.update({
+    entity_id: h.data.contract,
+    metadata: { current_document_id: selectedId },
+  });
+  await h.workspace.owner.entities.update({
+    entity_id: h.data.request,
+    metadata: {
+      current_document_id: selectedId,
+      status: "new",
+      review_event_id: 0,
+    },
   });
   await h.workspace.owner.entities.update({
     entity_id: h.data.request,

@@ -104,7 +104,7 @@ async function evidence(
   documentId?: number
 ): Promise<Evidence> {
   const rows = (await client.query(
-    `SELECT id, payload_text AS content, source_url, length(payload_text) AS body_length, entity_ids, semantic_type FROM events WHERE id = ${id(eventId)} AND created_at <= '${stamp(asOf)}' AND occurred_at <= '${stamp(asOf)}' LIMIT 1`
+    `SELECT id, payload_text AS content, source_url, length(payload_text) AS body_length, to_jsonb(entity_ids) AS entity_ids, semantic_type FROM events WHERE id = ${id(eventId)} AND created_at <= '${stamp(asOf)}' AND occurred_at <= '${stamp(asOf)}' LIMIT 1`
   )) as Array<
     Evidence & {
       body_length: number;
@@ -120,6 +120,7 @@ async function evidence(
   if (
     documentId &&
     (!row.content ||
+      !Array.isArray(row.entity_ids) ||
       !row.entity_ids.includes(documentId) ||
       row.semantic_type !== "legal-document-evidence")
   )

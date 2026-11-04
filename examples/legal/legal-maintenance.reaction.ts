@@ -337,119 +337,197 @@ export default async function maintain(
   return { alerts, requests: requests.length };
 }
 
+type DecisionReceipt = {
+  id: number;
+  metadata: Record<string, any>;
+  entity_ids: number[];
+  created_by: string;
+};
+type DecisionReview = {
+  id: number;
+  metadata: Record<string, unknown>;
+  entity_ids: number[];
+};
+const optionalId = (value: unknown): number | null => {
+  try {
+    return id(value);
+  } catch {
+    return null;
+  }
+};
+const ids = (values: unknown[]): number[] => [
+  ...new Set(
+    values.map(optionalId).filter((value): value is number => value !== null)
+  ),
+];
 async function applyDecisions(
   ctx: AutomationScriptContext,
   client: ReactionClient
 ) {
-  const receipts = (await client.query(
-    `SELECT id, metadata, entity_ids, created_by FROM events WHERE semantic_type = 'legal-decision' AND origin_type IN ('view_interaction', 'template_interaction') AND created_by IS NOT NULL AND created_at >= '${stamp(ctx.window.window_start)}' AND created_at <= '${stamp(ctx.window.window_end)}' ORDER BY id LIMIT 101`
-  )) as Array<{
-    id: number;
-    metadata: Record<string, any>;
-    entity_ids: number[];
-    created_by: string;
-  }>;
-  if (receipts.length > 100)
-    throw new Error(
-      "More than 100 decision receipts; narrow the decision window."
-    );
+  // Booking a window advances the native arrival mark. Keep a durable cursor
+  // in this example's operations record so later windows can finish its
+  // backlog. At most 25 receipts bounds even reuse writes below 200 SDK calls.
+  const [progress] = (await client.query(
+    "SELECT id, metadata FROM entities WHERE entity_type = 'legal-ops-snapshot' AND slug = 'legal-decision-progress' LIMIT 1"
+  )) as RecordRow[];
+  let after = optionalId(progress?.metadata.decision_cursor) ?? 0;
   let appliedCount = 0;
+  let rejected = 0;
+  const page = (await client.query(
+    `SELECT id, metadata, to_jsonb(entity_ids) AS entity_ids, created_by FROM events WHERE semantic_type = 'legal-decision' AND origin_type IN ('view_interaction', 'template_interaction') AND created_by IS NOT NULL AND created_at <= '${stamp(ctx.window.window_end)}' AND id > ${after} ORDER BY id LIMIT 26`
+  )) as DecisionReceipt[];
+  const receipts = page.slice(0, 25);
+  const reviewIds = ids(
+    receipts.map((r) => r.metadata.interaction?.source_event_id)
+  );
+  const reviews = new Map(
+    (reviewIds.length
+      ? ((await client.query(
+          `SELECT id, metadata, to_jsonb(entity_ids) AS entity_ids FROM events WHERE id IN (${reviewIds.join(", ")}) AND semantic_type = 'legal-review'`
+        )) as DecisionReview[])
+      : []
+    ).map((r) => [Number(r.id), r])
+  );
+  const requestIds = ids(
+    [...reviews.values()].map((r) => r.metadata.entity_id)
+  );
+  const requests = new Map(
+    (requestIds.length
+      ? ((await client.query(
+          `SELECT id, name, metadata FROM entities WHERE id IN (${requestIds.join(", ")}) AND entity_type = 'legal-request' AND deleted_at IS NULL`
+        )) as RecordRow[])
+      : []
+    ).map((r) => [Number(r.id), { ...r, id: Number(r.id) }])
+  );
   for (const receipt of receipts) {
-    const interaction = receipt.metadata.interaction;
-    if (
-      !interaction ||
-      interaction.actor?.platform !== "lobu" ||
-      interaction.actor.id !== receipt.created_by ||
-      !["approve", "negotiate", "escalate"].includes(interaction.action)
-    )
-      throw new Error("Unverified legal decision receipt.");
-    const sourceId = id(interaction.source_event_id);
-    const [review] = (await client.query(
-      `SELECT id, metadata, entity_ids FROM events WHERE id = ${sourceId} AND semantic_type = 'legal-review' LIMIT 1`
-    )) as Array<{
-      id: number;
-      metadata: Record<string, unknown>;
-      entity_ids: number[];
-    }>;
-    if (!review)
-      throw new Error(
-        "The decision's reviewed evidence is no longer available."
-      );
-    const request = await get(
+    after = Number(receipt.id);
+    const outcome = await applyDecision(
+      ctx,
       client,
-      review.metadata.entity_id,
-      "legal-request"
+      receipt,
+      reviews,
+      requests
     );
-    const m = request.metadata;
-    if (Number(m.last_decision_id ?? 0) >= Number(receipt.id)) continue;
-    if (
-      !receipt.entity_ids.includes(request.id) ||
-      !review.entity_ids.includes(request.id)
-    )
-      throw new Error("Decision is not linked to its reviewed request.");
-    if (
-      Number(m.review_event_id) !== sourceId ||
-      Number(m.current_document_id) !== Number(review.metadata.document_id)
-    )
-      continue;
-    const value = interaction.value ?? {};
-    if (
-      typeof value.instruction !== "string" ||
-      value.instruction.length > 1500 ||
-      (value.reuse !== undefined && typeof value.reuse !== "boolean")
-    )
-      throw new Error("Invalid counsel instruction.");
-    const state: Record<string, string> = {
-      approve: "approved",
-      negotiate: "negotiating",
-      escalate: "escalated",
-    };
-    // A scoped draft is a proposal, never an automatic global playbook update.
-    if (value.reuse && value.instruction.trim()) {
-      await upsert(
-        client,
-        "legal-guidance",
-        `decision-${receipt.id}`,
-        `Guidance: ${m.request_id}`,
-        {
-          question: `What position was taken on ${m.request_id}?`,
-          answer: value.instruction,
-          status: "draft",
-          counterparty_id: id(m.counterparty_id),
-          request_id: m.request_id,
-          source_event_ids: [
-            Number(receipt.id),
-            ...(review.metadata.evidence_ids as number[]),
-          ],
-          effective_at: stamp(ctx.window.window_end),
-          decision_id: Number(receipt.id),
-        },
-        m.knowledge_bank_id ? id(m.knowledge_bank_id) : undefined
-      );
-      await upsert(
-        client,
-        "legal-suggestion",
-        `guidance-${receipt.id}`,
-        `Review guidance from ${m.request_id}`,
-        {
-          kind: "guidance",
-          status: "open",
-          subject_id: request.id,
-          evidence_ids: [Number(receipt.id)],
-          summary:
-            "Counsel marked this instruction for reuse. Review its scope and approve the draft answer before it is used elsewhere.",
-        }
-      );
-    }
-    await patch(client, request.id, {
-      status: state[interaction.action],
-      decision: interaction.action,
-      instruction: value.instruction,
-      last_decision_id: Number(receipt.id),
-      decision_document_id: Number(review.metadata.document_id),
-      decision_review_id: sourceId,
-    });
-    appliedCount++;
+    if (outcome === "applied") appliedCount++;
+    if (outcome === "rejected") rejected++;
   }
-  return { applied: appliedCount };
+  if (receipts.length) {
+    await upsert(
+      client,
+      "legal-ops-snapshot",
+      "legal-decision-progress",
+      "Counsel decision processing",
+      {
+        as_of: stamp(ctx.window.window_end),
+        decision_cursor: after,
+        coverage: `Processed ${receipts.length} decision receipts in this batch; ${appliedCount} applied, ${rejected} rejected. ${page.length > 25 ? "More decisions are queued for the next run." : "No further receipts at this cutoff."}`,
+      },
+      undefined,
+      true
+    );
+  }
+  return { applied: appliedCount, rejected, has_more: page.length > 25 };
+}
+
+// A receipt that fails validation is rejected, never thrown: receipts are
+// append-only, and a throw would fail every later run on the same receipt.
+async function applyDecision(
+  ctx: AutomationScriptContext,
+  client: ReactionClient,
+  receipt: DecisionReceipt,
+  reviews: Map<number, DecisionReview>,
+  requests: Map<number, RecordRow>
+): Promise<"applied" | "stale" | "rejected"> {
+  const interaction = receipt.metadata.interaction;
+  if (
+    !interaction ||
+    interaction.actor?.platform !== "lobu" ||
+    interaction.actor.id !== receipt.created_by ||
+    !["approve", "negotiate", "escalate"].includes(interaction.action)
+  )
+    return "rejected";
+  const sourceId = optionalId(interaction.source_event_id);
+  const review = sourceId === null ? undefined : reviews.get(sourceId);
+  const requestId = review ? optionalId(review.metadata.entity_id) : null;
+  if (!review || requestId === null) return "rejected";
+  if (
+    !Array.isArray(review.metadata.evidence_ids) ||
+    review.metadata.evidence_ids.length === 0 ||
+    review.metadata.evidence_ids.length > 30 ||
+    review.metadata.evidence_ids.some((value) => optionalId(value) === null)
+  )
+    return "rejected";
+  // A deleted request has nothing left to decide.
+  const request = requests.get(requestId);
+  if (!request) return "stale";
+  const m = request.metadata;
+  if (Number(m.last_decision_id ?? 0) >= Number(receipt.id)) return "stale";
+  if (
+    !receipt.entity_ids.map(Number).includes(request.id) ||
+    !review.entity_ids.map(Number).includes(request.id)
+  )
+    return "rejected";
+  if (
+    Number(m.review_event_id) !== sourceId ||
+    Number(m.current_document_id) !== Number(review.metadata.document_id)
+  )
+    return "stale";
+  const value = interaction.value ?? {};
+  if (
+    typeof value.instruction !== "string" ||
+    value.instruction.length > 1500 ||
+    (value.reuse !== undefined && typeof value.reuse !== "boolean")
+  )
+    return "rejected";
+  const state: Record<string, string> = {
+    approve: "approved",
+    negotiate: "negotiating",
+    escalate: "escalated",
+  };
+  // A scoped draft is a proposal, never an automatic global playbook update.
+  if (value.reuse && value.instruction.trim()) {
+    await upsert(
+      client,
+      "legal-guidance",
+      `decision-${receipt.id}`,
+      `Guidance: ${m.request_id}`,
+      {
+        question: `What position was taken on ${m.request_id}?`,
+        answer: value.instruction,
+        status: "draft",
+        counterparty_id: id(m.counterparty_id),
+        request_id: m.request_id,
+        source_event_ids: [
+          Number(receipt.id),
+          ...(review.metadata.evidence_ids as number[]),
+        ],
+        effective_at: stamp(ctx.window.window_end),
+        decision_id: Number(receipt.id),
+      },
+      m.knowledge_bank_id ? id(m.knowledge_bank_id) : undefined
+    );
+    await upsert(
+      client,
+      "legal-suggestion",
+      `guidance-${receipt.id}`,
+      `Review guidance from ${m.request_id}`,
+      {
+        kind: "guidance",
+        status: "open",
+        subject_id: request.id,
+        evidence_ids: [Number(receipt.id)],
+        summary:
+          "Counsel marked this instruction for reuse. Review its scope and approve the draft answer before it is used elsewhere.",
+      }
+    );
+  }
+  await patch(client, request.id, {
+    status: state[interaction.action],
+    decision: interaction.action,
+    instruction: value.instruction,
+    last_decision_id: Number(receipt.id),
+    decision_document_id: Number(review.metadata.document_id),
+    decision_review_id: sourceId,
+  });
+  return "applied";
 }
