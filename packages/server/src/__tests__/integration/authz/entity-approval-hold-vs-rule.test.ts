@@ -328,10 +328,13 @@ describe("approval hold vs a frozen-state rule", () => {
 		if (extraField) expect(stored.note).toBe('Ready');
 	}, 60_000);
 
-	it.each([null, "result_event_id", "assignment_id", "result_artifact_id"])("binds native approval to the reviewed result and assignment (changed: %s)", async (changed) => {
+	it.each([null, "result_event_id", "assignment_id", "result_artifact_id", "session_finished_at", "clock", "before_queue"])("binds native approval to the reviewed result and assignment (changed: %s)", async (changed) => {
 		const compiled = await compileEntityRule(`export default row => {
   if (row.next.status !== 'posted') return;
   const next = row.next;
+  if (row.changed('status') && ['result_event_id', 'assignment_id', 'result_artifact_id', 'session_finished_at', 'clock'].some(field => row.changed(field))) {
+    row.deny('Request review of the current work');
+  }
   if (!next.result_event_id || !next.assignment_id || !next.result_artifact_id) {
     row.deny('Approval must match the current result and assignment');
   }
@@ -351,9 +354,17 @@ describe("approval hold vs a frozen-state rule", () => {
 		const humanAuth = { cookie: session.cookieHeader };
 		const update = (metadata: Record<string, unknown>, auth: { cookie?: string; token?: string } = agentAuth) =>
 			call('manage_entity', { action: 'update', entity_id: invoice.id, metadata }, auth);
-		expect((await update({ result_event_id: 1001, assignment_id: 'assignment-a', result_artifact_id: 501 })).status).toBe(200);
+		const reviewed = { result_event_id: 1001, assignment_id: 'assignment-a', result_artifact_id: 501, session_finished_at: '2026-01-01T00:00:00.000Z', clock: { observed_at: 1 } };
+		const replacements: Record<string, unknown> = { result_event_id: 1002, assignment_id: 'assignment-b', result_artifact_id: 502, session_finished_at: '2026-01-02T00:00:00.000Z', clock: { observed_at: 2 } };
+		expect((await update(reviewed)).status).toBe(200);
 		expect((await update({ status: 'issued' }, humanAuth)).status).toBe(200);
-		const proposed = await update({ status: 'posted', result_event_id: 1001, assignment_id: 'assignment-a', result_artifact_id: 501 });
+		if (changed === 'before_queue') expect((await update({ assignment_id: 'assignment-b' })).status).toBe(200);
+		const proposed = await update({ status: 'posted', ...reviewed });
+		if (changed === 'before_queue') {
+			expect(proposed.status).toBe(400);
+			expect((await readMetadata(invoice.id)).assignment_id).toBe('assignment-b');
+			return;
+		}
 		expect(proposed.body.approval_queued, JSON.stringify(proposed)).toBe(true);
 		const [run] = await getTestDb()`
       SELECT id FROM runs WHERE organization_id = ${org.id} AND approval_status = 'pending'
@@ -363,7 +374,7 @@ describe("approval hold vs a frozen-state rule", () => {
 			call('manage_operations', { action: 'approve', run_id: Number(run.id) }, auth);
 		expect((await approve(agentAuth)).body.approved).not.toBe(true);
 		if (changed) {
-			const replacement = await update({ [changed]: changed === 'assignment_id' ? 'assignment-b' : changed === 'result_event_id' ? 1002 : 502 });
+			const replacement = await update({ [changed]: replacements[changed] });
 			expect(replacement.status, JSON.stringify(replacement)).toBe(200);
 		}
 		const decision = await approve(humanAuth);
@@ -372,7 +383,7 @@ describe("approval hold vs a frozen-state rule", () => {
 			expect(decision.status, JSON.stringify(decision)).toBe(200);
 			expect(decision.body.message).toContain('skipped');
 			expect(stored.status).toBe('issued');
-			expect(stored[changed]).toBe(changed === 'assignment_id' ? 'assignment-b' : changed === 'result_event_id' ? 1002 : 502);
+			expect(stored[changed]).toEqual(replacements[changed]);
 		} else {
 			expect(decision.body.approved, JSON.stringify(decision)).toBe(true);
 			expect(stored.status).toBe('posted');
