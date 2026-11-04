@@ -469,6 +469,30 @@ describe('connector-health alerter', () => {
   // The crux of the degraded rule: an operator pausing most of a connection's
   // feeds is intent, NOT a failure. Only feeds paused *because they failed*
   // (consecutive_failures > 0) count toward degradation.
+  it.each([
+    { slug: 'recent-success-in-flight', days: 1, failures: 0, reason: null },
+    { slug: 'recent-failure-in-flight', days: 1, failures: 1, reason: 'no_recent_sync' },
+    { slug: 'old-success-in-flight', days: 9, failures: 0, reason: 'no_recent_sync' },
+  ] as const)('preserves sync freshness while claimed: $slug', async ({ slug, days, failures, reason }) => {
+    const day = 24 * 60 * 60 * 1000;
+    const connection = await seedConnection({
+      orgId, userId, connectorKey: 'github', slug, createdAt: OLD,
+    });
+    await seedFeed({
+      orgId, connectionId: connection.id, feedKey: 'a',
+      lastSyncStatus: 'success', lastSyncAt: new Date(Date.now() - 9 * day),
+    });
+    // Claiming a new run changes status to pending and clears last_error,
+    // preserving the previous terminal timestamp and failure counter.
+    await seedFeed({
+      orgId, connectionId: connection.id, feedKey: 'b',
+      schedule: '30 */2 * * *', lastSyncStatus: 'pending',
+      lastSyncAt: new Date(Date.now() - days * day), consecutiveFailures: failures,
+    });
+    const result = await runConnectorHealthCheck();
+    expect(reasonFor(result.details, connection.id) ?? null).toBe(reason);
+  });
+
   it('does not flag a connection whose feeds an operator paused cleanly', async () => {
     const sql = getTestDb();
     const operatorPaused = await seedConnection({

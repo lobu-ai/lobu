@@ -779,7 +779,11 @@ function classify(
     if (feed.persistent) persistentCount += 1;
 
     if (row.last_sync_at) everFinishedASync = true;
-    if (row.last_sync_status === 'success' && row.last_sync_at) {
+    // A claim changes status to pending without changing the last terminal
+    // timestamp or failure count. Zero failures preserves that last success;
+    // otherwise a scan mid-sync can mistake an old sibling for the newest one.
+    const preservesLastSuccess = row.last_sync_status === 'pending' && Number(row.consecutive_failures) === 0;
+    if ((row.last_sync_status === 'success' || preservesLastSuccess) && row.last_sync_at) {
       const syncMs = tsTimeOrNull(row.last_sync_at);
       if (syncMs !== undefined && (newestSyncAtMs === null || syncMs > newestSyncAtMs)) {
         newestSyncAtMs = syncMs;
