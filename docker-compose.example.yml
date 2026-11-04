@@ -98,7 +98,7 @@ services:
 
   # Credential-free browser runner: no published port, host filesystem, or
   # internet route. The API remains on its normal network as well.
-  view-validator:
+  view-validator: &view-validator
     build:
       context: .
       dockerfile: docker/view-validator/Dockerfile
@@ -115,6 +115,16 @@ services:
       - seccomp=docker/view-validator/seccomp_profile.json
     networks: [view-validation]
     restart: unless-stopped
+
+  # Optional trusted ingress for embedded/local servers. Only the relay joins
+  # the default network; Chromium stays on the internal-only runner network.
+  view-validator-local:
+    <<: *view-validator
+    profiles: [local-validator]
+    command: ["bun", "docker/view-validator/loopback.ts"]
+    ports: ["127.0.0.1:8090:8090"]
+    networks: [default, view-validation]
+    depends_on: [view-validator]
 
 networks:
   view-validation:
