@@ -131,7 +131,7 @@ jobs:
           trap 'compose logs --no-color; compose down' EXIT
           compose up -d --no-build view-validator-local
           curl --fail --silent --show-error --retry 15 --retry-delay 1 \
-            --retry-connrefused --retry-max-time 30 --max-time 2 \
+            --retry-all-errors --retry-connrefused --retry-max-time 30 --max-time 2 \
             http://127.0.0.1:8090/health
           docker run --rm --network=host --read-only --cap-drop=ALL \
             --security-opt no-new-privileges=true view-validator-test \

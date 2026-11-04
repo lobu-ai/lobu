@@ -153,7 +153,8 @@ checkout, with a loopback-only published port:
 ```bash
 docker compose -f docker-compose.example.yml --profile local-validator \
   up -d --build view-validator-local
-curl -fsS http://127.0.0.1:8090/health
+curl -fsS --retry 15 --retry-delay 1 --retry-all-errors --retry-connrefused \
+  --retry-max-time 30 --max-time 2 http://127.0.0.1:8090/health
 VIEW_VALIDATOR_URL=http://127.0.0.1:8090 lobu run
 ```
 
