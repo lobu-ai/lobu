@@ -71,6 +71,7 @@ export interface IssueRecord {
   last_seen?: string;
   resolved_at?: string;
   regressed_at?: string;
+  escalated_at?: string;
   resolved_in_release?: string;
   ignore_until?: string;
   /** Soft-deleted: its slug stays taken, so the fingerprint stays suppressed. */
@@ -113,6 +114,9 @@ function priority(o: Occurrence): "high" | "medium" | "low" {
 }
 
 function isEscalating(o: Occurrence): boolean {
+  // No sightings before the last day means no baseline to rise above: a
+  // fingerprint first seen today (or regrouped by a release) is new.
+  if (o.seen_14d <= o.seen_24h) return false;
   const rate = o.seen_2h / 2;
   const baseline = Math.max(1, (o.seen_14d - o.seen_24h) / (13 * 24));
   return (
@@ -252,12 +256,19 @@ export function planIssueChanges(
     } else if (isEscalating(o)) {
       if (issue.status !== "escalating") {
         set("escalating");
-        metadata.escalated_at = now.toISOString();
-        alert = {
-          kind: "escalating",
-          key: `issue:${o.fingerprint}:escalating:${new Date(Math.floor(now.getTime() / DAY) * DAY).toISOString()}`,
-          title: `Issue escalating: ${o.title}`,
-        };
+        // At most one alert a day, counted from the last alert: escalated_at
+        // moves only when one is sent, so flapping cannot postpone the next.
+        // The key is the stored escalation it follows, so a retry after a
+        // failed write repeats the same key.
+        const sinceLast = now.getTime() - ms(issue.escalated_at);
+        if (Number.isNaN(sinceLast) || sinceLast >= DAY) {
+          metadata.escalated_at = now.toISOString();
+          alert = {
+            kind: "escalating",
+            key: `issue:${o.fingerprint}:escalating:${issue.escalated_at ?? "first"}`,
+            title: `Issue escalating: ${o.title}`,
+          };
+        }
       }
     } else if (issue.status === "escalating" || issue.status === "new") {
       set(ageStatus(issue, now));
@@ -387,6 +398,7 @@ function toIssue(row: Record<string, unknown>): IssueRecord | null {
     last_seen: str(m.last_seen) || undefined,
     resolved_at: str(m.resolved_at) || undefined,
     regressed_at: str(m.regressed_at) || undefined,
+    escalated_at: str(m.escalated_at) || undefined,
     resolved_in_release: str(m.resolved_in_release) || undefined,
     ignore_until: str(m.ignore_until) || undefined,
     deleted: row.deleted === true,

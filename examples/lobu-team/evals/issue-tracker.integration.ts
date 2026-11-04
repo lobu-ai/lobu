@@ -123,6 +123,11 @@ it("creates, refreshes and regresses one issue per fingerprint without touching 
   await expect(run(false)).rejects.toThrow(/delivery unavailable/);
   expect((await issues())[0].metadata.status).toBe("resolved");
   expect(await run(false)).toMatchObject({ created: 0, updated: 1, alerts: 1 });
+  // Delivered once: the rejected send stored nothing, the retry one alert.
+  const delivered = await sql`SELECT id FROM events
+      WHERE organization_id = ${org.id}
+        AND metadata->>'_lobu_idempotency_key' = ${`issue:${FINGERPRINT}:regressed:${resolvedAt}`}`;
+  expect(delivered).toHaveLength(1);
   const after = await issues();
   expect(after).toHaveLength(1);
   expect(after[0].metadata).toMatchObject({
