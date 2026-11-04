@@ -28,6 +28,8 @@ import {
 } from '../../setup/test-fixtures';
 import { get, post, mcpRequest } from '../../setup/test-helpers';
 
+import { useViewValidator } from "../../setup/view-validator";
+
 const TEST_ENV: Env = {
 	ENVIRONMENT: 'test',
 	DATABASE_URL: process.env.DATABASE_URL,
@@ -36,6 +38,8 @@ const TEST_ENV: Env = {
 	MAX_CONSECUTIVE_FAILURES: '3',
 	RATE_LIMIT_ENABLED: 'false',
 };
+const validator = useViewValidator(TEST_ENV);
+
 
 const VIEW_SOURCE = 'export default function Board() { return null; }';
 
@@ -832,27 +836,29 @@ describe('views resources + open_view + invoke_view_action', () => {
 		return list.structuredContent.views.find((v: { key: string }) => v.key === 'board').content_hash;
 	}
 
-	it('rebuilds a stale server-built bundle when the shell route serves it', async () => {
+	it.each(['shell', 'resource'] as const)('serves stored bytes while a stale %s rebuild is validating', async (surface) => {
 		const { stored, read } = await staleBoard();
-		// The list reports a new hash first, so a client cache keyed on it fetches the shell.
 		expect(await listedBoardHash()).not.toBe(stored.content_hash);
-
-		const response = await get(`/api/${org.slug}/views/board/shell`, { token });
-		expect(response.status).toBe(200);
-		expect(await response.text()).not.toContain('stale-bundle');
-		expect(response.headers.get('x-lobu-view-hash')).toBe(stored.content_hash);
-		expect(await read()).toEqual({
-			compiled_code: stored.compiled_code,
-			compile_config_hash: serverCompileStamp(stored.compiled_code),
-		});
-		expect(await listedBoardHash()).toBe(stored.content_hash);
-	});
-
-	it('rebuilds a stale server-built bundle when the MCP resource serves it', async () => {
-		const { stored, read } = await staleBoard();
-		const result = await rpc('resources/read', { uri: 'ui://lobu/views/board' });
-		expect(result.contents[0].text).not.toContain('stale-bundle');
-		expect((await read()).compiled_code).toBe(stored.compiled_code);
+		const gate = validator.pauseNext();
+		const response = surface === 'shell'
+			? get(`/api/${org.slug}/views/board/shell`, { token }).then(async res => { expect(res.status).toBe(200); return res.text(); })
+			: rpc('resources/read', { uri: 'ui://lobu/views/board' }).then(result => result.contents[0].text);
+		let deadline: ReturnType<typeof setTimeout> | undefined;
+		try {
+			// A stalled validator must not hold either user-facing response.
+			const html = await Promise.race([response, new Promise<never>((_, reject) => {
+				deadline = setTimeout(() => reject(new Error('View read waited for browser validation')), 2000);
+			})]);
+			expect(html).toContain('stale-bundle');
+			await gate.entered;
+			expect((await read()).compiled_code).toBe('/*stale-bundle*/');
+		} finally {
+			clearTimeout(deadline);
+			gate.resume();
+			await response.catch(() => {});
+		}
+		await expect.poll(async () => (await read()).compiled_code).toBe(stored.compiled_code);
+		expect((await read()).compile_config_hash).toBe(serverCompileStamp(stored.compiled_code));
 	});
 
 	it('rejects the shell route without read scope', async () => {

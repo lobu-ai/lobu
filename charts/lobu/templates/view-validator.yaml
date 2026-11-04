@@ -1,0 +1,91 @@
+{{- if .Values.viewValidator.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "lobu.fullname" . }}-view-validator
+spec:
+  replicas: {{ .Values.viewValidator.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "lobu.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: view-validator
+  template:
+    metadata:
+      labels:
+        {{- include "lobu.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: view-validator
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.viewValidator.runtimeClassName }}
+      runtimeClassName: {{ . | quote }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: Localhost
+          localhostProfile: {{ .Values.viewValidator.seccompProfile | quote }}
+      containers:
+        - name: validator
+          image: {{ printf "%s/%s-view-validator:%s" .Values.image.registry .Values.image.repository (.Values.image.tag | default .Chart.AppVersion) | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          ports:
+            - name: http
+              containerPort: 8090
+          resources:
+            {{- toYaml .Values.viewValidator.resources | nindent 12 }}
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+          volumeMounts:
+            - { name: temporary, mountPath: /tmp }
+            - { name: shm, mountPath: /dev/shm }
+      volumes:
+        - name: temporary
+          emptyDir: { sizeLimit: 512Mi }
+        - name: shm
+          emptyDir: { medium: Memory, sizeLimit: 256Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "lobu.fullname" . }}-view-validator
+spec:
+  selector:
+    {{- include "lobu.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: view-validator
+  ports:
+    - { name: http, port: 8090, targetPort: http }
+---
+# No browser transport, including WebRTC/STUN, can leave the runner pod.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "lobu.fullname" . }}-view-validator
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "lobu.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: view-validator
+  policyTypes: [Ingress, Egress]
+  egress: []
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "lobu.appSelectorLabels" . | nindent 14 }}
+      ports:
+        - { protocol: TCP, port: 8090 }
+{{- end }}

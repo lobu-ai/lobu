@@ -251,7 +251,7 @@ Views are custom React panels attached to entity types, records, events, or the 
 Module shape (the server resolves React, React DOM, `@lobu/views` and `@lobu/views/components`; other dependencies need the CLI path with `node_modules` present):
 
 ```tsx
-import { defineView, sql, useAction, useParams, useQuery } from "@lobu/views";
+import { defineView, tool, useAction, useParams, useQuery } from "@lobu/views";
 import {
   Card,
   DataTable,
@@ -272,11 +272,9 @@ export const view = defineView({
 
 export default function Pipeline() {
   const [params, setParams] = useParams();
-  const deals = useQuery<Array<{ id: string; title: string }>>(
-    sql`SELECT id, title FROM deal WHERE stage = ${params.stage} LIMIT 100`
-  );
+  const deals = useQuery(tool("manage_entity", { action: "list", entity_type: "deal", filters: [{ field: "stage", op: "eq", value: String(params.stage) }], limit: 100 }));
   const markWon = useAction("markWon");
-  const rows = deals.data ?? [];
+  const rows = deals.data?.entities ?? [];
   // Keep the filter mounted across query states: an early return on
   // loading/error would unmount the focused input on every keystroke
   // (each keystroke re-queries). Render states inline instead.
@@ -292,7 +290,7 @@ export default function Pipeline() {
         <EmptyState title="No deals in this stage." />
       )}
       {!deals.loading && !deals.error && rows.length > 0 && (
-        <DataTable columns={[{ key: "title", header: "Title" }]} rows={rows} keyOf={(r) => r.id} />
+        <DataTable columns={[{ key: "name", header: "Name" }]} rows={rows} keyOf={(r) => r.id ?? r.slug} />
       )}
       {deals.truncated && <TruncatedNotice shown={rows.length} />}
     </Card>
@@ -318,14 +316,19 @@ Workspace attachment does not render individual events. For an event presentatio
 
 Before reporting a view working, open each attached surface, including an event page and peek when declared. Exercise filtering, drilldown, keyboard navigation, and a narrow pane; check loading, missing/error, and truncated data states. Refresh and reopen an earlier event of the kind to verify the view stays on that event rather than jumping to the newest one. Views render in an iframe, so an empty parent-page DOM is not evidence the view is empty; inspect the frame through an authorized browser or accessibility surface. A successful compile proves only that the bundle was built.
 
+Prefer the actual product components from `@lobu/views/components`: `EntityTableView`, `RecordSpecSheet`, `SchemaValue`, `EntityAvatar`, `Button`, `Badge`, and `Tabs`/`TabsList`/`TabsTrigger`/`TabsContent`. The host supplies their native JS/CSS and the same React instance; do not copy product markup or bundle a second React. Their exported prop types are the product's shared contracts. `EntityTableView` is controlled: pass query rows, schema, linked lookups, sorting and pagination from the list response; honor `metadata.has_more` and do not claim a partial page is the full collection. `RecordSpecSheet` accepts schema fields, values and `{ ownerSlug }` context; preserve meaningful zero and false values. The existing chart and state components are still available for custom layouts.
+
+Use `useHost().openRecord({ entity_id, entity_type? }, { mode: "peek" })` for a record's native peek. String source keys require the type. The promise reports the actual `{ mode: "peek" | "page" }`; a host without native peek opens the server-returned record URL. Errors remain errors. `useHost().theme` follows live theme changes; native components inherit the host palette and typography automatically. Use semantic host style variables and avoid hardcoded light/dark colors.
+
 Rules that are load-bearing, not style:
 
-- Reads go through `useQuery` (`sql`, a `query_sdk` script string, or a read-only `tool()`). `query_sql` allows 500 rows max with a 5 second timeout — branch on the typed `errorCode` (e.g. `UPSTREAM_TIMEOUT`), never on message text, and render `truncated` honestly instead of passing partial data off as complete. Each `query_sql` cell is bounded too: strings keep their first 4,000 Unicode code points plus "… [truncated]"; JSON values over 16 KiB become `{ _truncated: true, bytes }` (attachments become null with `attachments_truncated`). `truncatedColumns` names the affected columns. Select smaller elements or fields, for example one array element per row with `jsonb_array_elements(...)`, and paginate as needed; each returned cell is still subject to these limits.
+- Use structured reads: `useQuery(tool("manage_entity", { action: "list", entity_type: type, filters, limit: 100 }))`. The host admits entity `list/get/list_links` and entity-type schema `list/get` reads; tools marked read-only are also available. Use existing tool input/result contracts and preserve server authorization. Send structured arguments, never TypeScript inside a string. `sql` remains available; script-string queries are compatibility support for installed views. `query_sql` allows 500 rows max with a 5 second timeout — branch on the typed `errorCode` (e.g. `UPSTREAM_TIMEOUT`), never on message text, and render `truncated` honestly instead of passing partial data off as complete. Each `query_sql` cell is bounded too: strings keep their first 4,000 Unicode code points plus "… [truncated]"; JSON values over 16 KiB become `{ _truncated: true, bytes }` (attachments become null with `attachments_truncated`). `truncatedColumns` names the affected columns. Select smaller elements or fields, for example one array element per row with `jsonb_array_elements(...)`, and paginate as needed; each returned cell is still subject to these limits.
 - Never aggregate history in a view: no `GROUP BY`, `DISTINCT ON`, per-row regexp, or leading-wildcard `LIKE` over `events` or other growing tables. For "latest state" views, have an Automation maintain keyed event outputs (each run supersedes the previous event with the same key) and read the current head with `read_knowledge`.
-- Writes go only through declared view actions (`useAction` → `invoke_view_action`), which emit the declared event kind and can activate workspace-triggered Automations. Action `value` payloads are capped at 4000 JSON chars — save content first, then pass the id. A subject shown from a superseded event rejects with 409; refetch and ask the user to re-confirm rather than retrying blindly.
+- `run_sdk` is not exposed to views. Writes go only through declared view actions (`useAction` → `invoke_view_action`), which emit the declared event kind and can activate workspace-triggered Automations. Action `value` payloads are capped at 4000 JSON chars — save content first, then pass the id. A subject shown from a superseded event rejects with 409; refetch and ask the user to re-confirm rather than retrying blindly.
 - Link with `Link` from `@lobu/views/components` (or `useHost().openLink`): `href="<type>/<slug>"` opens that record in the workspace, a full URL opens a new tab. A plain `<a href>` goes nowhere inside the sandboxed frame.
 - Views run in a sandboxed frame with no direct network: no fetch, no third-party calls at runtime. Reuse local React components through relative imports and `source_files: { entrypoint, files }` plus `dependencies: {}` for local-only components with `views.set`, or use `viewFromFile` + `lobu apply`. Extra npm dependencies need the CLI-bundled `compiled_code`; listing `dependencies` alone does not install packages.
 - Never early-return the whole view on loading/error: each filter keystroke re-queries, so an early return unmounts the focused input mid-typing. Keep filters mounted and render query states inline in the results area.
+- Before calling a view verified, exercise the exact compiled artifact and host runtime in a sandboxed browser: representative data, loading, empty and error states, filters, sort/pagination, links/peek, declared actions, light/dark and narrow layouts. Fix failures and rerun. Registration compiles the module and requires an isolated browser check of the exact candidate against bounded empty/error/loading fixtures in light/dark themes and inline/fullscreen modes for every distinct attached scope (at most four per module). A failed check returns 422; an unavailable runner returns 503; both preserve the saved view. Fixture validation does not prove successful workspace data or every interaction. Distinguish compiled, browser-verified, stored and deployed; never claim more than the evidence.
 - Params sync to the URL on Lobu hosts only; elsewhere they stay frame-local. `refetch()` re-reads on demand; only Lobu hosts push live data-changed refreshes.
 
 ## Connectors, Feeds, and Operations

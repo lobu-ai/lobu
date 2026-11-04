@@ -41,6 +41,8 @@ import {
 } from "../../setup/test-fixtures";
 import { viewModule } from "../views/view-module";
 
+import { useViewValidator } from "../../setup/view-validator";
+
 const TEST_ENV: Env = {
 	ENVIRONMENT: "test",
 	DATABASE_URL: process.env.DATABASE_URL,
@@ -49,6 +51,8 @@ const TEST_ENV: Env = {
 	MAX_CONSECUTIVE_FAILURES: "3",
 	RATE_LIMIT_ENABLED: "false",
 };
+useViewValidator(TEST_ENV);
+
 
 /** How a tool is exercised, for human-readable reporting. */
 type Coverage = "round-trip" | "reachable";

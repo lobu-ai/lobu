@@ -73,6 +73,7 @@ const REQUIRED_IMAGE_JOBS = [
   "build-embeddings-service",
   "build-app",
   "app-image-smoke",
+  "build-view-validator",
   "promote-images",
 ];
 
@@ -541,6 +542,7 @@ describe("deployment images are published only after the candidate passes", () =
       "build-app",
       "build-worker",
       "build-embeddings-service",
+      "build-view-validator",
       "connector-parity-smoke",
       "app-image-smoke",
     ]);
@@ -571,6 +573,7 @@ describe("image promotion command", () => {
   const images = {
     WORKER_IMAGE: `registry.example.test/worker@sha256:${"a".repeat(64)}`,
     EMBEDDINGS_IMAGE: `registry.example.test/embeddings@sha256:${"b".repeat(64)}`,
+    VIEW_VALIDATOR_IMAGE: `registry.example.test/view-validator@sha256:${"d".repeat(64)}`,
     APP_IMAGE: `registry.example.test/app@sha256:${"c".repeat(64)}`,
   };
   const deployTag = "20990101-000000-000001";
@@ -653,6 +656,7 @@ if (args.includes(process.env.FAIL_IMAGE)) process.exit(23);
   it.each([
     images.WORKER_IMAGE,
     images.EMBEDDINGS_IMAGE,
+    images.VIEW_VALIDATOR_IMAGE,
   ])("never publishes the watched app tag after sibling promotion fails: %s", (FAIL_IMAGE) => {
     const result = promote({ FAIL_IMAGE });
     expect(result.code).toBe(23);
@@ -664,6 +668,7 @@ if (args.includes(process.env.FAIL_IMAGE)) process.exit(23);
   it.each([
     { APP_IMAGE: "registry.example.test/app:candidate-123-1" },
     { WORKER_IMAGE: "" },
+    { VIEW_VALIDATOR_IMAGE: "" },
     { EMBEDDINGS_IMAGE: "registry.example.test/embeddings@sha256:" },
     { DEPLOY_TAG: "latest" },
     { IS_STABLE: "unknown" },

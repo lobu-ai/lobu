@@ -17,7 +17,7 @@ permissions:
   actions: read
 
 env:
-  REQUIRED_IMAGE_JOBS: generate-tag connector-parity-smoke build-worker build-embeddings-service build-app app-image-smoke promote-images
+  REQUIRED_IMAGE_JOBS: generate-tag connector-parity-smoke build-worker build-embeddings-service build-app build-view-validator app-image-smoke promote-images
 
 jobs:
   attest:
