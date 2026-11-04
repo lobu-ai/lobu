@@ -15,6 +15,10 @@ export function isViewRead(
       args?.action === "list_links"
     );
   }
+  if (tool === "manage_automations") return args?.action === "list";
+  if (tool === "manage_agents") return args?.action === "get";
+  if (tool === "manage_connections") return args?.action === "list";
+  if (tool === "manage_catalog") return args?.action === "list_installed";
   return (
     tool === "manage_entity_schema" &&
     args?.schema_type === "entity_type" &&
