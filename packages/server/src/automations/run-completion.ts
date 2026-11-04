@@ -38,8 +38,7 @@ type AutomationTerminalResult =
  * no notion of automations/complete_window, so a worker-side self-nudge would
  * break that isolation. This constant is the GLOBAL default; an automation can
  * override it via execution_config.finalize_nudges (see
- * resolveFinalizeNudgeBudget). A declarative defineAutomation surface for it is
- * the remaining follow-up (the CLI doesn't expose execution_config yet).
+ * resolveFinalizeNudgeBudget).
  */
 const MAX_FINALIZE_NUDGES: number = (() => {
 	const raw = process.env.LOBU_AUTOMATION_FINALIZE_NUDGES;
@@ -242,7 +241,9 @@ export async function resolveAutomationRunsByMessageIds(
 
 	const sql = db ?? getDb();
 	const rows = await sql`
-    SELECT r.id, r.run_type, r.dispatched_message_id, r.automation_id, r.approved_input, w.execution_config
+    SELECT r.id, r.run_type, r.dispatched_message_id, r.automation_id, r.approved_input,
+           CASE WHEN r.approved_input ? 'execution_config'
+             THEN r.approved_input->'execution_config' ELSE w.execution_config END AS execution_config
     FROM runs r
     LEFT JOIN automations w ON w.id = r.automation_id
     WHERE r.run_type = ANY(${AUTOMATION_RUN_TYPES_PG}::text[])

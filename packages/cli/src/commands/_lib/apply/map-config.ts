@@ -17,8 +17,8 @@ import {
 import { AgentSettingsPatchSchema } from "@lobu/core/contracts/agent-settings";
 import { parseCollectionPresentation } from "@lobu/core/contracts/tools/collection-presentation";
 import {
-  ManageAutomationsSchema,
   AutomationExecutionConfigSchema,
+  ManageAutomationsSchema,
   normalizeWorkspaceEventTrigger,
   resolvedEventExecution,
 } from "@lobu/core/contracts/tools/manage-automations";
@@ -700,7 +700,7 @@ function mapAutomation(automation: Automation): DesiredAutomation {
   });
   return {
     slug: automation.slug,
-    agent: agentId(automation.agent),
+    agent: automation.agent == null ? null : agentId(automation.agent),
     // The author's task statement, carried straight through. Skill BODIES are
     // no longer folded in here — the loader resolves them into `skillSnapshots`
     // (see `resolveAutomationSkills` in desired-state.ts), because the mapper is
@@ -987,7 +987,7 @@ export function mapProjectToDesiredState(
   for (let i = 0; i < automations.length; i++) {
     const automation = automations[i];
     if (!automation) continue;
-    if (!agentIds.has(automation.agent)) {
+    if (automation.agent != null && !agentIds.has(automation.agent)) {
       throw new ValidationError(
         `Automation "${automation.slug}" names agent "${automation.agent}", but no agent with that id is declared in lobu.config.ts`
       );

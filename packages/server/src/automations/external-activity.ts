@@ -3,6 +3,7 @@ import logger from '../utils/logger';
 import { automationArrivalSettleMs } from '../utils/window-utils';
 import type { ToolContext } from '../tools/registry';
 import { encodeExternalAutomationClaimOwner } from './external-claim-owner';
+import { externalAutomationPredicate } from '../tools/admin/manage_automations/executors';
 
 export type ExternalActivityCaller = Pick<ToolContext, 'userId' | 'agentId' | 'clientId'>;
 
@@ -15,7 +16,7 @@ export async function listExternalSourceSubscriptions(params: {
   return sql<{ id: number; name: string; updated_at: string | Date }>`
     SELECT a.id, a.name, a.updated_at FROM automations a
     WHERE a.organization_id = ${params.organizationId} AND a.status = 'active'
-      AND a.execution_config->'executor'->>'kind' = 'external'
+      AND ${externalAutomationPredicate(sql, 'a')}
       ${params.agentId ? sql`AND a.managed_agent_id = ${params.agentId}` : sql``}
       ${params.caller.agentId ? sql`AND (a.managed_agent_id IS NULL OR a.managed_agent_id = ${params.caller.agentId})` : sql``}
       AND EXISTS (SELECT 1 FROM jsonb_array_elements(a.triggers) trigger
@@ -65,7 +66,7 @@ export async function listExternalAutomationWork(params: {
       AND (
         (active.executor_kind = 'external' AND active.status IN ('claimed', 'running') AND active.claimed_by = ${owner})
         OR (active.executor_kind = 'external' AND active.status = 'pending')
-        OR (active.id IS NULL AND a.execution_config->'executor'->>'kind' = 'external'
+        OR (active.id IS NULL AND ${externalAutomationPredicate(sql, 'a')}
           AND a.next_window_start < CURRENT_TIMESTAMP - (${automationArrivalSettleMs()} * INTERVAL '1 millisecond')
           AND a.schedule IS NOT NULL
           AND a.schedule_auto_paused_at IS NULL AND a.next_run_at <= CURRENT_TIMESTAMP)
@@ -96,7 +97,7 @@ export async function listExternalAutomationWork(params: {
         LIMIT 1
       ) active ON true
       WHERE a.organization_id = ${organizationId} AND a.status = 'active'
-        AND a.execution_config->'executor'->>'kind' = 'external'
+        AND ${externalAutomationPredicate(sql, 'a')}
       ORDER BY a.id
       LIMIT 50
     `.catch((err) => {

@@ -468,10 +468,10 @@ describe('source feed notifications', () => {
     expect(await sql`SELECT id FROM runs WHERE run_type = 'automation'`).toHaveLength(0);
   });
 
-  it('captures external subscriptions without executions and lets independent clients resume changes', async () => {
+  it.each([true, false])('captures external subscriptions without executions and lets independent clients resume changes (legacy=%s)', async (legacy) => {
     const { sql, org, user, device, notice, automationId } = await subscribedFixture();
     await sql`UPDATE automations SET managed_agent_id = NULL,
-      execution_config = ${sql.json({ executor: { kind: 'external' } })},
+      execution_config = ${legacy ? sql.json({ executor: { kind: 'external' } }) : null},
       triggers = ${sql.json([{ kind: 'event', connector_key: 'synthetic.source',
         connection_id: notice.connection_id, event_types: ['message.created'], capture: 'references' }])}
       WHERE id = ${automationId}`;
@@ -499,10 +499,10 @@ describe('source feed notifications', () => {
     expect(await sql`SELECT id FROM runs WHERE run_type = 'automation'`).toHaveLength(0);
   });
 
-  it('requires explicit capture consent for an external source observer', async () => {
+  it.each([true, false])('requires explicit capture consent for an external source observer (legacy=%s)', async (legacy) => {
     const { sql, org, device, notice, automationId } = await subscribedFixture();
     await sql`UPDATE automations SET managed_agent_id = NULL,
-      execution_config = ${sql.json({ executor: { kind: 'external' } })} WHERE id = ${automationId}`;
+      execution_config = ${legacy ? sql.json({ executor: { kind: 'external' } }) : null} WHERE id = ${automationId}`;
     expect(await sourceFeedSubscriptions(sql, org.id, notice.feed_id)).toEqual([]);
     expect((await receiveFeedNotifications(sql, [{ ...notice, subscription: referenceDelivery() }], device.id, [org.id]))[0].active).toBe(false);
     expect(await sql`SELECT id FROM events WHERE organization_id = ${org.id}`).toHaveLength(0);

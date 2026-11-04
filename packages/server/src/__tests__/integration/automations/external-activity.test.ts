@@ -61,6 +61,64 @@ describe('external Automation activity', () => {
     return (result as { items: Array<Record<string, any>> }).items;
   }
 
+  it('runs an unassigned schedule through external claims without an executor setting', async () => {
+    const created = await api.automations.create({
+      slug: 'unassigned-schedule', name: 'Unassigned schedule',
+      prompt: 'Review the window and complete it.', triggers: SCHEDULE,
+      execution_config: { model: 'external-client-model' },
+      outputs: { signals: { event: 'observation' } },
+    } as never) as { automation_id: string };
+    const id = created.automation_id;
+    await sql`UPDATE automations SET next_run_at = NOW() - INTERVAL '1 minute',
+      next_window_start = NOW() - INTERVAL '1 hour' WHERE id = ${Number(id)}`;
+    expect(await materializeDueAutomationRuns(ENV, sql, Number(id)))
+      .toMatchObject({ runsCreated: 0, unrunnable: 0 });
+    expect((await work())[0]).toMatchObject({ automation_id: Number(id), status: 'due' });
+    const claim = await api.automations.claimNextWindow({ automation_id: id });
+    expect((await dispatchPendingAutomationRuns({ db: sql })).claimed).toBe(0);
+    await api.automations.completeWindow({ automation_id: id, run_id: claim.run_id,
+      window_token: claim.context.window_token, extracted_data: { signals: [] } });
+    expect(await work()).toEqual([]);
+    await expect(api.automations.claimNextWindow({ automation_id: id })).rejects.toThrow(/not due/);
+  });
+
+  it('rejects inert model configuration writes while preserving installed values on ordinary updates', async () => {
+    const id = await createExternal();
+    await sql`UPDATE automations SET model_config = '{"model":"legacy"}'::jsonb WHERE id = ${Number(id)}`;
+    await expect(api.automations.create({ slug: 'inert-config', prompt: 'Review.', model_config: {} } as never))
+      .rejects.toThrow(/model_config is retired/);
+    await expect(api.automations.update({ automation_id: id, model_config: null } as never))
+      .rejects.toThrow(/model_config is retired/);
+    await api.automations.update({ automation_id: id, tags: ['updated'] });
+    const listed = await api.automations.list({}) as { automations: Array<Record<string, unknown>> };
+    expect(listed.automations.find(a => a.automation_id === id)?.model_config).toEqual({ model: 'legacy' });
+  });
+
+  it('does not let an external caller take pending native work after the live assignment is cleared', async () => {
+    const id = await createExternal({ execution_config: null, triggers: [] });
+    const [automation] = await sql`SELECT next_window_start FROM automations WHERE id = ${Number(id)}`;
+    const run = await createAutomationRun({ organizationId: ctx.organizationId!, automationId: Number(id),
+      agentId, dispatchSource: 'manual', windowStart: new Date(automation.next_window_start).toISOString(),
+      windowEnd: new Date(Date.now() - 60_000).toISOString() }, sql);
+    await api.automations.update({ automation_id: id, managed_agent_id: null });
+    expect(await work()).toEqual([]);
+    await expect(api.automations.claimNextWindow({ automation_id: id })).rejects.toThrow(/assigned/);
+    const [state] = await sql`SELECT status, claimed_by FROM runs WHERE id = ${run.runId}`;
+    expect(state).toMatchObject({ status: 'pending', claimed_by: null });
+  });
+
+  it('keeps an unassigned pending run external after assigning a managed agent', async () => {
+    const id = await createExternal({ execution_config: null, managed_agent_id: null, triggers: [] });
+    const run = await api.automations.trigger({ automation_id: id });
+    await api.automations.update({ automation_id: id, managed_agent_id: agentId });
+    expect((await work())[0]).toMatchObject({ run_id: run.run_id, status: 'due' });
+    expect((await dispatchPendingAutomationRuns({ db: sql, runIds: [run.run_id] })).claimed).toBe(0);
+    const claim = await api.automations.claimNextWindow({ automation_id: id });
+    expect(claim.run_id).toBe(run.run_id);
+    await api.automations.completeWindow({ automation_id: id, run_id: claim.run_id,
+      window_token: claim.context.window_token, extracted_data: { signals: [] } });
+  });
+
   it('advertises scheduled external work without starting the owning managed agent, and completion clears due work', async () => {
     const id = await createExternal();
     const materialized = await materializeDueAutomationRuns(ENV, sql, Number(id));

@@ -24,13 +24,6 @@ describe("normalizeAutomationUpdatePatch", () => {
     });
   });
 
-  it("model_config null stores as {} (handler: args.model_config ?? {})", () => {
-    expect(
-      normalizeAutomationUpdatePatch(update({ model_config: null as never }))
-        .model_config
-    ).toEqual({});
-  });
-
   it("tags falsy stores as [] (handler: args.tags || [])", () => {
     expect(
       normalizeAutomationUpdatePatch(update({ tags: null as never })).tags

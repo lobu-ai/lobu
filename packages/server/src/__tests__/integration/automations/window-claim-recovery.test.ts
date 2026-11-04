@@ -114,11 +114,14 @@ describe('Automation window claim and recovery', () => {
             "SELECT id, occurred_at, payload_text FROM events WHERE semantic_type = 'content' ORDER BY occurred_at DESC, id DESC",
         },
       ],
-      triggers: [{ kind: 'schedule', cron: '0 9 * * *' }],
+      triggers: [{ kind: 'schedule', cron: '0 9 * * *', skip_if_unchanged: false }],
       outputs: { signals: { event: 'observation' } },
       managed_agent_id: agentId,
     })) as { automation_id: string };
     automationId = Number(created.automation_id);
+    // Installed external jobs can retain an agent as their permission owner.
+    await sql`UPDATE automations SET execution_config = '{"executor":{"kind":"external"}}'::jsonb,
+      next_run_at = NOW() - INTERVAL '1 minute' WHERE id = ${automationId}`;
   });
 
   async function claim(input: Record<string, unknown> = {}): Promise<ClaimResult> {
@@ -250,6 +253,7 @@ describe('Automation window claim and recovery', () => {
   });
 
   async function queuedLiveRun() {
+    await sql`UPDATE automations SET execution_config = NULL WHERE id = ${automationId}`;
     await addLiveSources();
     const pending = await computePendingWindow(sql, automationId);
     const run = await createAutomationRun({ organizationId: orgId, automationId, agentId,
@@ -365,7 +369,7 @@ describe('Automation window claim and recovery', () => {
     expect(new Date(after.next_window_start).toISOString()).toBe(first.context.window_start);
   }, 30_000);
 
-  it('recovers a first-ever failed assigned-agent window before any external claim', async () => {
+  it('recovers a first-ever failed legacy external window with an agent permission owner', async () => {
     const failedStart = dayStart(4);
     const newerFailedRunId = await failRun(dayStart(3));
     const failedRunId = await failRun(failedStart);
@@ -708,7 +712,10 @@ describe('Automation window claim and recovery', () => {
         window_token: stale.context.window_token,
         extracted_data: { signals: [] },
       })
-    ).rejects.toThrow('window_token does not own the current Automation lease.');
+    ).rejects.toMatchObject({ httpStatus: 409 });
+    const [unchanged] = await sql`SELECT status, claimed_by FROM runs WHERE id = ${current.run_id}`;
+    expect(unchanged.status).toBe('running');
+    expect(unchanged.claimed_by).toContain(userId);
 
     const input = {
       automation_id: String(automationId),
@@ -840,11 +847,11 @@ describe('Automation window claim and recovery', () => {
           context: true,
         },
       ],
-      triggers: [{ kind: 'schedule', cron: '0 9 * * *' }],
+      triggers: [{ kind: 'schedule', cron: '0 9 * * *', skip_if_unchanged: false }],
       outputs: { signals: { event: 'observation' } },
-      managed_agent_id: agentId,
     })) as { automation_id: string };
 
+    await sql`UPDATE automations SET next_run_at = NOW() - INTERVAL '1 minute' WHERE id = ${Number(created.automation_id)}`;
     const truncated = (await api.automations.claimNextWindow({
       automation_id: created.automation_id,
       limit: 2,
@@ -900,11 +907,11 @@ describe('Automation window claim and recovery', () => {
           context: true,
         },
       ],
-      triggers: [{ kind: 'schedule', cron: '0 9 * * *' }],
+      triggers: [{ kind: 'schedule', cron: '0 9 * * *', skip_if_unchanged: false }],
       outputs: { signals: { event: 'observation' } },
-      managed_agent_id: agentId,
     })) as { automation_id: string };
 
+    await sql`UPDATE automations SET next_run_at = NOW() - INTERVAL '1 minute' WHERE id = ${Number(created.automation_id)}`;
     const truncated = (await api.automations.claimNextWindow({
       automation_id: created.automation_id,
       limit: 2,

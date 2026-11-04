@@ -239,7 +239,7 @@ async function findMatchingWorkspaceEventActivations(
     matches.push({
       automationId,
       organizationId: String(row.organization_id),
-      agentId: executor.kind === 'agent' ? executor.agentId : null,
+      agentId: executor.agentId,
       deviceWorkerId:
         executor.kind === 'device' ? executor.deviceWorkerId : null,
       agentKind: executor.kind === 'device' ? executor.agentKind : null,

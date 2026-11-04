@@ -235,10 +235,7 @@ export async function handleCreateVersion(
   }
 
   // Executor matrix on the LIVE row (set_as_current writes triggers to it):
-  // same rules as create/update — automated Automations need an executor, and
-  // every referenced executor must be authorized. Without this, create_version
-  // (the primary authoring path — `lobu apply`, owletto edit) could land
-  // zombie triggers.
+  // same trigger compatibility and assignment authorization as create/update.
   const setAsCurrentForMatrix = args.set_as_current !== false;
   if (setAsCurrentForMatrix && versionOrganizationId && triggersChanged) {
     const rowDefaults: AutomationExecutorDefaults = {

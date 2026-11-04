@@ -127,6 +127,34 @@ describe('headless Automation claim gate (automations.execute)', () => {
     await cleanupTestDatabase();
   });
 
+  it('dispatches the frozen agent, runtime and options after the live configuration changes', async () => {
+    const ctx = await setupDevicePinnedAutomation({ workerId: 'frozen-device', platform: 'headless', capabilities: { 'automations.execute': true } });
+    await ctx.workspace.owner.automations.update({ automation_id: String(ctx.automationId),
+      execution_config: { model: 'original-device-model', timeout_seconds: 120, finalize_nudges: 0 } });
+    const { token } = await createWorkerBoundPat(ctx.workspace.users.owner.id, ctx.workspace.org.id, 'frozen-device');
+    const trigger = await post(`/api/workers/me/automations/${ctx.automationId}/trigger`, { token });
+    expect(trigger.status).toBe(200);
+    const replacement = await createTestAgent({ organizationId: ctx.workspace.org.id, ownerUserId: ctx.workspace.users.owner.id });
+    await ctx.workspace.owner.automations.update({ automation_id: String(ctx.automationId),
+      managed_agent_id: replacement.agentId, agent_kind: 'codex',
+      execution_config: { model: 'replacement-device-model', timeout_seconds: 300 } });
+    const poll = await post('/api/workers/poll', { token, body: {
+      worker_id: 'frozen-device', capabilities: { 'automations.execute': true }, agent_kinds: ['opencode'],
+    } });
+    expect(poll.status).toBe(200);
+    const job = await poll.json() as any;
+    expect(job.run_type).toBe('automation');
+    expect(job.payload.automation.agent_kind).toBe('opencode');
+    expect(job.payload.automation.execution_config).toMatchObject({ model: 'original-device-model', timeout_seconds: 120 });
+    expect(job.payload.context.agent_session.conversation_id)
+      .toBe(`claim-gate-agent_automation_${ctx.automationId}_run_${job.run_id}`);
+    const exit = await post(`/api/workers/me/runs/${job.run_id}/complete-automation`, { token, body: {
+      worker_id: 'frozen-device', output: 'Agent exited without completing the window', exit_code: 0, exit_reason: 'ok',
+    } });
+    expect(exit.status).toBe(200);
+    expect(await exit.json()).toMatchObject({ status: 'failed' });
+  });
+
   it('withholds the device job until preparation commits and exposes its saved source', async () => {
     const ctx = await setupDevicePinnedAutomation({ workerId: 'prepared-device', platform: 'headless', capabilities: { 'automations.execute': true } });
     await ctx.workspace.owner.automations.setReactionScript({ automation_id: String(ctx.automationId), reaction_script: 'export async function prepare(ctx, client) { const rows = await client.query("SELECT 19 + 23 AS total"); return { calculated: rows }; }' });

@@ -396,13 +396,12 @@ describe('Automation script executor', () => {
     );
   });
 
-  it('still recommends the claim for a non-script Automation', async () => {
+  it('recommends the claim for an unassigned analysis Automation', async () => {
     const { workspace, automationId } = await seedScriptAutomation();
-    // Same window setup, but no script executor: this is the branch the script
-    // carve-out must leave untouched.
+    // Removing both native assignments leaves analysis to an external client.
     await getTestDb()`
       UPDATE automations
-      SET next_window_start = now() - interval '1 day', execution_config = NULL
+      SET next_window_start = now() - interval '1 day', execution_config = NULL, managed_agent_id = NULL
       WHERE id = ${automationId}
     `;
 
@@ -447,21 +446,21 @@ describe('Automation script executor', () => {
     ).toBe('pending');
   });
 
-  it('keeps an already-pinned agent run externally claimable after the live config switches to script', async () => {
+  it('keeps an already-pinned external run claimable after the live config switches to script', async () => {
     const { workspace, agentId, automationId } = await seedScriptAutomation();
     const sql = getTestDb();
     const start = '2026-01-01T00:00:00.000Z';
     const end = '2026-01-01T00:20:00.000Z';
-    await sql`UPDATE automations SET next_window_start = ${start}::timestamptz, execution_config = NULL WHERE id = ${automationId}`;
+    await sql`UPDATE automations SET next_window_start = ${start}::timestamptz, execution_config = NULL, managed_agent_id = NULL WHERE id = ${automationId}`;
     const run = await createAutomationRun({
       organizationId: workspace.org.id,
-      agentId,
+      agentId: null,
       automationId,
       windowStart: start,
       windowEnd: end,
       dispatchSource: 'scheduled',
     });
-    await sql`UPDATE automations SET execution_config = ${sql.json({ executor: { kind: 'script', source: SOURCE } })} WHERE id = ${automationId}`;
+    await sql`UPDATE automations SET managed_agent_id = ${agentId}, execution_config = ${sql.json({ executor: { kind: 'script', source: SOURCE } })} WHERE id = ${automationId}`;
 
     const claim = await workspace.owner.automations.claimNextWindow({
       automation_id: String(automationId),

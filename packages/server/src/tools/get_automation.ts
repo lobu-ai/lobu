@@ -1,4 +1,5 @@
 import { identityMemberIdsSql } from '../utils/entity-identity';
+import { resolveAutomationExecutor } from './admin/manage_automations/executors';
 /**
  * Tool: get_automation (Incremental Time Windows)
  *
@@ -739,7 +740,8 @@ async function getAutomationImpl(
     const recentRunStatuses = await loadRecentAutomationRunStatuses(sql, [automationId]);
     const automationHealth = computeAutomationHealth({
       status: automationRow.status,
-      externalExecutor: automationRow.execution_config?.executor?.kind === 'external',
+      externalExecutor: resolveAutomationExecutor({ agentId: automationRow.managed_agent_id,
+        deviceWorkerId: automationRow.device_worker_id, executionConfig: automationRow.execution_config }).kind === 'external',
       nextRunAt: automationRow.next_run_at,
       consecutiveScheduledFailures:
         automationRow.consecutive_scheduled_failures,
@@ -951,31 +953,27 @@ async function getAutomationImpl(
 
     // Generate structured next_action for MCP clients.
     //
-    // A window existing is not the same as that window being claimable by the
-    // caller. `claim_next_window` rejects script executors outright (409,
-    // `admin/manage_automations/claim-next-window.ts`:
-    // SCRIPT_EXTERNAL_CLAIM_ERROR) because the runtime owns their execution.
-    // Recommending it anyway sent external clients into a guaranteed error,
-    // which they reported back as "already processed" while `trigger` — which
-    // has no such fence — was the path that worked. Read the executor from the
-    // row already in scope rather than re-querying.
+    // Assigned analysis and native modules use trigger; unassigned analysis
+    // uses the external claim protocol. Read the row already in scope.
     //
     // This reads the LIVE config, while claim-next-window prefers a queued
     // run's pinned `approved_input->'executor'` snapshot when one exists, so
     // the two disagree while an executor-kind edit straddles a queued window.
     // That only mis-advises a hint, never gates execution, and it is not worth
     // an extra per-call query to close.
-    const executorKind = automationRow.execution_config?.executor?.kind;
+    const executorKind = automationRow.execution_config?.executor?.kind === 'script' ? 'script'
+      : resolveAutomationExecutor({ agentId: automationRow.managed_agent_id,
+          deviceWorkerId: automationRow.device_worker_id, executionConfig: automationRow.execution_config }).kind;
     const nextAction = !nextWindow
       ? null
-      : executorKind === 'script'
+      : executorKind !== 'external'
         ? {
             tool: 'client.automations.trigger',
             params: {
               automation_id: args.automation_id,
             },
             description:
-              'Script Automations execute through the runtime; trigger a run instead of claiming the window.',
+              'Assigned Automations execute through the runtime; trigger a run and follow its execution handoff.',
           }
         : {
             tool: 'client.automations.claimNextWindow',

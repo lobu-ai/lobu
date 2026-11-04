@@ -628,7 +628,7 @@ export default async (_ctx, client) => {
 	},
 	"automations.update": {
 		summary:
-			"Update runtime config only: triggers, managed_agent_id, model_config, execution_config, device_worker_id, agent_kind, delivery_target, min_cooldown_seconds, tags. delivery_target is a strict bound chat destination `{ connection_id, channel_id }`; null clears it. Version-owned fields (name, description, prompt, sources) are immutable here — use createVersion. Status is not patchable here (an Automation is retired via delete → archived).",
+			"Update runtime config only: triggers, managed_agent_id, execution_config, device_worker_id, agent_kind, delivery_target, min_cooldown_seconds, tags. delivery_target is a strict bound chat destination `{ connection_id, channel_id }`; null clears it. Version-owned fields (name, description, prompt, sources) are immutable here — use createVersion. Status is not patchable here (an Automation is retired via delete → archived).",
 		access: "admin",
 	},
 	"automations.createVersion": {

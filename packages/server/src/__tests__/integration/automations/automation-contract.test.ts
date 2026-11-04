@@ -1659,9 +1659,12 @@ describe("automation contract", () => {
 		// entirely — completions deferred to reconcile, failures to the 2h sweep.
 		// These contracts drive the REAL consumer + ApiResponseRenderer against
 		// the test DB with hasActiveConnection=false everywhere.
-		async function makeRunningAutomationRun(messageId: string) {
+		async function makeRunningAutomationRun(messageId: string, finalizeNudges?: number) {
 			const { sql, dbClient, workspace, automationId, agent } =
 				await createAutomatedAutomation();
+			if (finalizeNudges !== undefined) {
+				await sql`UPDATE automations SET execution_config = ${sql.json({ finalize_nudges: finalizeNudges })} WHERE id = ${automationId}`;
+			}
 			const { windowStart, windowEnd } = await computePendingWindow(dbClient, automationId);
 			const queued = await createAutomationRun({
 				organizationId: workspace.org.id,
@@ -1788,12 +1791,7 @@ describe("automation contract", () => {
 			// global default. 0 = no nudge → the first miss fails immediately, the
 			// opposite of the default semantics, proving the override is read.
 			const messageId = randomUUID();
-			const { sql, runId, automationId } = await makeRunningAutomationRun(messageId);
-			await sql`
-        UPDATE automations
-        SET execution_config = '{"finalize_nudges": 0}'::jsonb
-        WHERE id = ${automationId}
-      `;
+			const { sql, runId } = await makeRunningAutomationRun(messageId, 0);
 
 			await makeHeadlessConsumer().handleThreadResponse({
 				id: "job-headless-nudge0",

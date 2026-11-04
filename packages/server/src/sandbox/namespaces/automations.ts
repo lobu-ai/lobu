@@ -68,7 +68,6 @@ export type AutomationCreateInput = Input<
 	| "agent_kind"
 	| "delivery_target"
 	| "min_cooldown_seconds"
-	| "model_config"
 	| "execution_config"
 	| "tags",
 	"slug"
@@ -88,7 +87,6 @@ export type AutomationUpdateInput = Input<
 	| "agent_kind"
 	| "delivery_target"
 	| "min_cooldown_seconds"
-	| "model_config"
 	| "execution_config"
 	| "tags",
 	"automation_id"
