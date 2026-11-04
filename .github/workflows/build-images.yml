@@ -51,6 +51,7 @@ env:
   IMAGE_NAME_APP: lobu-ai/lobu-app
   IMAGE_NAME_WORKER: lobu-ai/lobu-worker
   IMAGE_NAME_EMBEDDINGS: lobu-ai/lobu-embeddings
+  IMAGE_NAME_VIEW_VALIDATOR: lobu-ai/lobu-view-validator
   # Excluded by Flux's timestamp-only ImagePolicy. Only promote-images may
   # publish deployment, semver, or latest tags after the candidate passes.
   CANDIDATE_TAG: candidate-${{ github.run_id }}-${{ github.run_attempt }}
@@ -309,7 +310,7 @@ jobs:
 
   promote-images:
     runs-on: ubuntu-24.04
-    needs: [generate-tag, build-app, build-worker, build-embeddings-service, connector-parity-smoke, app-image-smoke]
+    needs: [generate-tag, build-app, build-worker, build-embeddings-service, build-view-validator, connector-parity-smoke, app-image-smoke]
     if: needs.generate-tag.outputs.should_publish == 'true'
     permissions:
       contents: read
@@ -330,6 +331,7 @@ jobs:
           APP_IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_APP }}@${{ needs.build-app.outputs.digest }}
           WORKER_IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_WORKER }}@${{ needs.build-worker.outputs.digest }}
           EMBEDDINGS_IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_EMBEDDINGS }}@${{ needs.build-embeddings-service.outputs.digest }}
+          VIEW_VALIDATOR_IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_VIEW_VALIDATOR }}@${{ needs.build-view-validator.outputs.digest }}
           DEPLOY_TAG: ${{ needs.generate-tag.outputs.tag }}
           SEMVER: ${{ needs.generate-tag.outputs.semver }}
           IS_STABLE: ${{ needs.generate-tag.outputs.is_stable }}
@@ -360,6 +362,44 @@ jobs:
             --ref main \
             -f release_tag="$RELEASE_TAG" \
             -f image_run_id="$GITHUB_RUN_ID"
+
+  build-view-validator:
+    runs-on: ubuntu-24.04
+    needs: [generate-tag]
+    if: needs.generate-tag.outputs.should_publish == 'true'
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build isolated validator candidate
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./docker/view-validator/Dockerfile
+          platforms: ${{ env.BUILD_PLATFORMS }}
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_VIEW_VALIDATOR }}:${{ env.CANDIDATE_TAG }}
+          cache-from: type=gha,scope=view-validator
+          cache-to: type=gha,mode=min,scope=view-validator
+      - name: Prove isolated browser execution before promotion
+        run: |
+          docker run --rm --init --network=none --read-only --tmpfs /tmp:rw,size=512m \
+            --shm-size=256m --memory=1g --cpus=2 --pids-limit=256 --cap-drop=ALL \
+            --security-opt no-new-privileges=true \
+            --security-opt seccomp=docker/view-validator/seccomp_profile.json \
+            "${REGISTRY}/${IMAGE_NAME_VIEW_VALIDATOR}@${{ steps.build.outputs.digest }}" \
+            bun docker/view-validator/smoke.ts
 
   build-worker:
     runs-on: ubuntu-24.04
@@ -485,7 +525,7 @@ jobs:
   # from the event itself so missing outputs cannot suppress the alarm.
   notify-failure:
     runs-on: ubuntu-24.04
-    needs: [current-main-guard, generate-tag, connector-parity-smoke, build-worker, build-embeddings-service, build-app, app-image-smoke, promote-images, trigger-package-publish]
+    needs: [current-main-guard, generate-tag, connector-parity-smoke, build-worker, build-embeddings-service, build-app, build-view-validator, app-image-smoke, promote-images, trigger-package-publish]
     if: >-
       always()
       && (github.ref == 'refs/heads/main' || github.event_name == 'release')

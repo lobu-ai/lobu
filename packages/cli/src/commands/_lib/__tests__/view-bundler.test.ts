@@ -73,6 +73,17 @@ export default function Pipeline() {
 `;
 
 describe("bundleViewFromFile", () => {
+  test("rejects a native component that the installed runtime does not export", async () => {
+    const entry = mkView({
+      "views/deal/pipeline.tsx": `import { defineView } from "@lobu/views";
+import { NonexistentNativeTable } from "@lobu/views/components";
+export const view = defineView({ key: "invalid", attach: [] });
+export default function Invalid() { return <NonexistentNativeTable />; }`,
+    });
+    await expect(bundleFixture(entry)).rejects.toThrow(
+      /NonexistentNativeTable/
+    );
+  });
   test("extracts metadata and reads react + bridge from the shell runtime", async () => {
     const entry = mkView({ "views/deal/pipeline.tsx": PIPELINE_SOURCE });
     const bundled = await bundleFixture(entry);

@@ -20,6 +20,7 @@ import type { Env } from "../../../index";
 import { executeTool, type AuthContext } from "../../../tools/execute";
 import { ToolUserError } from "../../../utils/errors";
 import { compileView, setView as storeView, getView, viewRuntimeScript } from "../../../views/views";
+import { VALIDATION_TIMEOUT_MS } from "../../../views/validation-contract";
 import { initWorkspaceProvider } from "../../../workspace";
 import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
 import { viewModule } from "./view-module";
@@ -30,6 +31,8 @@ import {
 	createTestUser,
 } from "../../setup/test-fixtures";
 
+import { useViewValidator } from "../../setup/view-validator";
+
 const TEST_ENV: Env = {
 	ENVIRONMENT: "test",
 	DATABASE_URL: process.env.DATABASE_URL,
@@ -38,6 +41,8 @@ const TEST_ENV: Env = {
 	MAX_CONSECUTIVE_FAILURES: "3",
 	RATE_LIMIT_ENABLED: "false",
 };
+const validatorControl = useViewValidator(TEST_ENV);
+
 
 const SIMPLE_SOURCE = "export default function Board() { return null; }";
 const entryFiles = (source: string) => ({ entrypoint: "index.tsx", files: { "index.tsx": source } });
@@ -137,6 +142,79 @@ describe("manage_views", () => {
 			view: Record<string, unknown>;
 		};
 	}
+
+  it("preserves the working version when validation rejects, is unavailable or attests another runtime", async () => {
+    await setView(REACT_SOURCE);
+    const before = await getView(orgId, 'pipeline');
+    for (const [mode, status] of [['reject', 422], ['unavailable', 503], ['mismatch', 503]] as const) {
+      validatorControl.mode = mode;
+      await expect(setView(REACT_SOURCE + '\n// candidate')).rejects.toMatchObject({ httpStatus: status });
+      expect(await getView(orgId, 'pipeline')).toEqual(before);
+    }
+    validatorControl.mode = 'pass';
+    const oldUrl = TEST_ENV.VIEW_VALIDATOR_URL;
+    delete TEST_ENV.VIEW_VALIDATOR_URL;
+    try {
+      await expect(setView(REACT_SOURCE + '\n// candidate')).rejects.toMatchObject({ httpStatus: 503 });
+      expect(await getView(orgId, 'pipeline')).toEqual(before);
+    } finally { TEST_ENV.VIEW_VALIDATOR_URL = oldUrl; }
+  });
+
+  it("does not overwrite a newer save when an older candidate finishes validation later", async () => {
+    await setView(REACT_SOURCE);
+    const gate = validatorControl.pauseNext();
+    const pending = setView(REACT_SOURCE + '\n// older candidate').catch(error => error);
+    await gate.entered;
+    const newer = await setView(REACT_SOURCE + '\n// newer candidate');
+    gate.resume();
+    expect(await pending).toMatchObject({ httpStatus: 409 });
+    expect((await getView(orgId, 'pipeline'))?.content_hash).toBe(newer.view.content_hash);
+  });
+
+  it("renders the exact candidate in isolated Chromium and rejects runtime failures before replacement", async () => {
+    const { createValidatorServer } = await import('../../../../../../docker/view-validator/service');
+    const runner = createValidatorServer();
+    await new Promise<void>(resolve => runner.listen(0, '127.0.0.1', resolve));
+    const previous = TEST_ENV.VIEW_VALIDATOR_URL;
+    TEST_ENV.VIEW_VALIDATOR_URL = `http://127.0.0.1:${(runner.address() as {port:number}).port}`;
+    try {
+      const pages = `import {EntityListPage, EntityRecordPage, DataTable, AgentReference, JsonDiff, AutomationDefinition, AgentDefinition, ConnectorDefinition} from "@lobu/views/components";
+export default function Board() {
+  return <EntityListPage title="Shared collection" controls={<p>Collection controls</p>}>
+    <AgentReference mode="live" workspace="fixture-workspace" agentId="fixture-agent" />
+    <JsonDiff before={{enabled:false}} after={{enabled:true}} />
+    <AutomationDefinition value={{name:"Fixture Automation",prompt:"Read items",sources:[],triggers:[],reaction_script:"const amount = 0;"}} />
+    <AgentDefinition value={{name:"Fixture agent",identity_md:"Read items",settings:{showToolCalls:false,models:[],skills:["fixture-skill"]}}} />
+    <ConnectorDefinition value={{name:"Fixture connector",version:"1.0.0",actions_schema:{inspect:{name:"Inspect item"}},feeds_schema:{}}} />
+    <DataTable rows={[{key:"computed",amount:0}]} columns={[{key:"amount",header:"Amount"}]} keyOf={row=>row.key} />
+    <EntityRecordPage entity={{id:1,entity_type:"fixture",slug:"record",name:"Shared record",metadata:{count:0,enabled:false}}} owner="fixture-workspace" schema={{properties:{count:{type:"number"},enabled:{type:"boolean"}}}}>
+      <p>Record activity slot</p>
+    </EntityRecordPage>
+  </EntityListPage>;
+}`;
+      await setView(pages);
+      const before = await getView(orgId, 'pipeline');
+      const broken = 'export default function Board() { throw new Error("candidate render failure"); }';
+      await expect(setView(broken)).rejects.toMatchObject({ httpStatus: 422 });
+      expect(await getView(orgId, 'pipeline')).toEqual(before);
+      await expect(setView(REACT_SOURCE, { compiled_code: 'throw new Error("supplied artifact failure")' })).rejects.toMatchObject({ httpStatus: 422 });
+      expect(await getView(orgId, 'pipeline')).toEqual(before);
+      const scopeFailure = 'import {useScope} from "@lobu/views"; export default function Board(){if(useScope().entity) throw new Error("record scope failed"); return <p>workspace</p>; }';
+      await expect(setView(scopeFailure, { attach: [{workspace:true}, {record:'fixture'}], actions: {} })).rejects.toMatchObject({ httpStatus: 422 });
+      expect(await getView(orgId, 'pipeline')).toEqual(before);
+      const expandedFailure = 'import {useHost} from "@lobu/views"; export default function Board(){if(useHost().displayMode === "fullscreen") throw new Error("expanded scope failed"); return <p>inline</p>; }';
+      await expect(setView(expandedFailure)).rejects.toMatchObject({ httpStatus: 422 });
+      expect(await getView(orgId, 'pipeline')).toEqual(before);
+      const network = 'fetch("https://blocked.invalid/data"); ' + REACT_SOURCE;
+      await expect(setView(network)).rejects.toMatchObject({ httpStatus: 422 });
+      expect(await getView(orgId, 'pipeline')).toEqual(before);
+    } finally {
+      TEST_ENV.VIEW_VALIDATOR_URL = previous;
+      await new Promise<void>((resolve, reject) => runner.close(error => error ? reject(error) : resolve()));
+    }
+  // One accepted candidate and five rejected candidates each have their own
+  // bounded browser run; the suite deadline must cover all six plus setup.
+  }, 6 * VALIDATION_TIMEOUT_MS + 10_000);
 
 	it("replays the source migration in either direction without inventing legacy provenance", async () => {
 		const dir = resolve(import.meta.dirname, "../../../../../../db/migrations");
@@ -671,7 +749,15 @@ export default function V() { return null; }`;
 		expect((err as ToolUserError).httpStatus).toBe(422);
 	});
 
-	it("stored bundles never carry server package content", async () => {
+	it("rejects unknown runtime exports before replacing the working view", async () => {
+    await setView(SIMPLE_SOURCE);
+    const previous = await getView(orgId, "pipeline");
+    await expect(setView(`import { NonexistentNativeTable } from "@lobu/views/components";
+export default function Broken() { return <NonexistentNativeTable />; }`)).rejects.toMatchObject({ httpStatus: 422 });
+    expect(await getView(orgId, "pipeline")).toEqual(previous);
+  });
+
+  it("stored bundles never carry server package content", async () => {
 		// 'invoke_view_action' names a server tool file; it must never appear
 		// in a compiled view bundle, which reads the runtime from the shell.
 		const compiled = await compileView(entryFiles(REACT_SOURCE));

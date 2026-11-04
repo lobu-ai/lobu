@@ -68,6 +68,7 @@ services:
       # ---- Recommended -----------------------------------------------------
       NODE_ENV: production
       LOG_LEVEL: INFO
+      VIEW_VALIDATOR_URL: http://view-validator:8090
 
       # ---- Provider keys (set ONLY the providers you want available) -------
       # None are required at boot. Lobu picks up whichever you set and
@@ -87,12 +88,47 @@ services:
       # the allowlist below is a reasonable starting point.
       WORKER_ALLOWED_DOMAINS: "api.anthropic.com,api.openai.com,registry.npmjs.org,.npmjs.org,github.com,.github.com,.githubusercontent.com"
 
+    networks: [default, view-validation]
     volumes:
       - lobu_workspaces:/app/workspaces
     depends_on:
       postgres:
         condition: service_healthy
     restart: unless-stopped
+
+  # Credential-free browser runner: no published port, host filesystem, or
+  # internet route. The API remains on its normal network as well.
+  view-validator: &view-validator
+    build:
+      context: .
+      dockerfile: docker/view-validator/Dockerfile
+    init: true
+    read_only: true
+    tmpfs: ["/tmp:rw,size=512m"]
+    shm_size: 256m
+    mem_limit: 1g
+    cpus: 2
+    pids_limit: 256
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+      - seccomp=docker/view-validator/seccomp_profile.json
+    networks: [view-validation]
+    restart: unless-stopped
+
+  # Optional trusted ingress for embedded/local servers. Only the relay joins
+  # the default network; Chromium stays on the internal-only runner network.
+  view-validator-local:
+    <<: *view-validator
+    profiles: [local-validator]
+    command: ["bun", "docker/view-validator/loopback.ts"]
+    ports: ["127.0.0.1:8090:8090"]
+    networks: [default, view-validation]
+    depends_on: [view-validator]
+
+networks:
+  view-validation:
+    internal: true
 
 volumes:
   lobu_pgdata:
