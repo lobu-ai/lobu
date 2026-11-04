@@ -8,6 +8,8 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import type { Env } from '../../../index';
+import { buildClientSDK } from '../../../sandbox/client-sdk';
 import { querySql, querySqlImpl } from '../../../tools/admin/query_sql';
 import type { ToolContext } from '../../../tools/registry';
 import { createAuthProfile } from '../../../utils/auth-profiles';
@@ -204,6 +206,38 @@ describe('query_sql connection pushdown', () => {
     // …and an owner/admin still can.
     const ok = await querySql({ sql: 'SELECT count(*)::int AS n FROM qsp_ext', connection: 'qsp-priv-db' }, {}, ctx);
     expect(ok.error).toBeUndefined();
+  }, 60_000);
+
+  it('client.query({ connection }) runs the same pushdown and visibility gate as query_sql', async () => {
+    const owner = buildClientSDK(ctx, {} as Env);
+    expect(
+      await owner.query('SELECT name FROM qsp_ext WHERE amount < 99 ORDER BY name', { connection: 'qsp-ext-db' })
+    ).toEqual([{ name: 'a' }, { name: 'b' }, { name: 'c' }]);
+    expect(await owner.query('SELECT count(*)::int AS n FROM qsp_ext', { connection: 'qsp-priv-db' })).toEqual([{ n: 3 }]);
+
+    const member = buildClientSDK(memberCtx(), {} as Env);
+    await expect(member.query('SELECT 1', { connection: 'qsp-priv-db' })).rejects.toMatchObject({
+      message: expect.stringMatching(/not found or not accessible/i),
+      code: 'NOT_FOUND',
+    });
+    await expect(owner.query('SELECT 1', { connection: 'nope' })).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    await expect(owner.query('SELECT id FROM qsp_ext LIMIT 1', { connection: 'qsp-ext-db' })).rejects.toMatchObject({
+      message: expect.stringMatching(/did not run against the source/),
+      code: 'VALIDATION',
+    });
+    await expect(
+      owner.query('SELECT 1', { connection: 'qsp-ext-db', window_token: 'token' })
+    ).rejects.toMatchObject({ httpStatus: 400, code: 'VALIDATION' });
+    await expect(owner.query('SELECT 1', { connection: '' })).rejects.toMatchObject({ httpStatus: 400 });
+  }, 60_000);
+
+  it('client.query({ connection }) fails closed instead of returning a page prefix', async () => {
+    await expect(
+      buildClientSDK(ctx, {} as Env).query('SELECT g FROM generate_series(1, 5001) g', { connection: 'qsp-ext-db' })
+    ).rejects.toMatchObject({
+      message: expect.stringMatching(/returned 5000 of 5001 rows/),
+      httpStatus: 422,
+    });
   }, 60_000);
 
   it('under LOBU_CLOUD_MODE the gate is open but block-private egress fails an internal host closed', async () => {
