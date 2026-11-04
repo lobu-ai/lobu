@@ -861,12 +861,12 @@ async function createAutomationRunInternal(
   const sql = db ?? getDb();
 
   try {
-    if (db) {
-      return useSavepoint
-        ? await sql.savepoint((tx) => createAutomationRunWithClient(tx, params))
-        : await createAutomationRunWithClient(sql, params);
+    if (useSavepoint) {
+      return await sql.savepoint((tx) => createAutomationRunWithClient(tx, params));
     }
 
+    // An injected pool is not a transaction. Publish the parent, preparation
+    // task and correlation marker together before another replica can claim.
     return await sql.begin(async (tx) => createAutomationRunWithClient(tx, params));
   } catch (error) {
     if (isUniqueViolation(error, 'runs_idempotency_key_uniq')) {
