@@ -48,7 +48,7 @@ function toggles(
 
 function likePage(extra = "", account: string | null = SELF, url = postUrl) {
 	const page = dom(
-		`<main><article data-testid="tweet" tabindex="-1"><a href="/synthetic_peer/status/${STATUS}"><time>now</time></a><button data-testid="like">Like</button></article>${extra}</main>`,
+		`<main><article data-testid="tweet" tabindex="-1"><a role="link" href="/synthetic_peer/status/${STATUS}"><time>now</time></a><button data-testid="like">Like</button></article>${extra}</main>`,
 		url,
 		account,
 	);
@@ -62,7 +62,7 @@ function likePage(extra = "", account: string | null = SELF, url = postUrl) {
 	return { page, clicks: () => counter.clicks };
 }
 
-const reply = `<article data-testid="tweet" tabindex="0"><a href="/synthetic_other/status/999999999"><time>later</time></a><button data-testid="like">Like</button></article>`;
+const reply = `<article data-testid="tweet" tabindex="0"><a role="link" href="/synthetic_other/status/999999999"><time>later</time></a><button data-testid="like">Like</button></article>`;
 
 describe("X set_like", () => {
 	test("is an idempotent write taking a post and the desired state", () => {
@@ -96,7 +96,7 @@ describe("X set_like", () => {
 	});
 
 	test("refuses another post, another account, a signed-out browser and ambiguous controls", async () => {
-		const otherFocal = `<article data-testid="tweet" tabindex="-1"><a href="/synthetic_peer/status/${STATUS}"><time>again</time></a><button data-testid="like">Like</button></article>`;
+		const otherFocal = `<article data-testid="tweet" tabindex="-1"><a role="link" href="/synthetic_peer/status/${STATUS}"><time>again</time></a><button data-testid="like">Like</button></article>`;
 		for (const [extra, account, url, error] of [
 			["", SELF, postUrl.replace("0123", "0456"), "post changed"],
 			["", "3000", postUrl, "another account"],
@@ -116,7 +116,7 @@ describe("X set_like", () => {
 		// The target itself is unavailable. The focal article is a post quoting
 		// it, and a reply links to it; neither is the target's own permalink.
 		const page = dom(
-			`<main><article data-testid="tweet" tabindex="-1"><a href="/synthetic_other/status/999999999"><time>quoting</time></a><div role="link"><a href="/synthetic_peer/status/${STATUS}"><time>quoted</time></a></div><button data-testid="like">Like</button></article><article data-testid="tweet" tabindex="0"><a href="/synthetic_peer/status/${STATUS}"><time>reply</time></a><button data-testid="like">Like</button></article></main>`,
+			`<main><article data-testid="tweet" tabindex="-1"><a role="link" href="/synthetic_other/status/999999999"><time>quoting</time></a><div role="link"><a role="link" href="/synthetic_peer/status/${STATUS}"><time>quoted</time></a></div><button data-testid="like">Like</button></article><article data-testid="tweet" tabindex="0"><a role="link" href="/synthetic_peer/status/${STATUS}"><time>reply</time></a><button data-testid="like">Like</button></article></main>`,
 			postUrl,
 		);
 		const counter = { clicks: 0 };

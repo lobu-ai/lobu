@@ -65,7 +65,8 @@ export function buildXLikeExpression(
       assertPage();
       const ownPermalink = (article) => [...article.querySelectorAll('a[href]')].some(link => {
         if (!link.querySelector('time') || link.closest('article') !== article) return false;
-        const card = link.closest('[role="link"]');
+        // X marks its own <a> tags role="link" too; only an ANCESTOR card is a quote.
+        const card = link.parentElement && link.parentElement.closest('[role="link"]');
         if (card && article.contains(card)) return false;
         try { return statusOf(new URL(link.getAttribute('href'), location.href).pathname) === statusId; }
         catch { return false; }
