@@ -853,6 +853,7 @@ function createServerForContext(
       const structuredError =
         typeof code === 'string' && typeof error?.retryable === 'boolean'
           ? {
+              ...(error instanceof ToolUserError ? (error.details ?? {}) : {}),
               code,
               retryable: error.retryable as boolean,
               ...(error.callId ? { call_id: error.callId as string } : {}),

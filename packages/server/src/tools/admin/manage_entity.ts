@@ -740,6 +740,9 @@ async function handleUpdate(
 	// Asserted manual edit: honoured or refused (403) inside updateEntity.
 	if (args.manual_edit !== undefined) updateData.manual_edit = args.manual_edit;
 
+	// Optimistic-concurrency precondition: checked under the row lock (409 on a mismatch).
+	if (args.expected !== undefined) updateData.expected = args.expected;
+
 	const updateActor = await actingPrincipalFor(args, ctx);
 	// Update approvals inherit the producing run as their causal parent.
 	const updateAttribution = await resolveAutomationAttribution(

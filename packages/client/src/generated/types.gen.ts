@@ -1215,6 +1215,12 @@ export type ManageEntityData = {
          */
         manual_edit?: boolean;
         /**
+         * [update] Metadata field name -> the value the caller last read. Checked against the live row under the update's row lock: if any field differs, nothing is written (no field changes, ownership markers, events or approvals) and the update fails with 409 PRECONDITION_FAILED listing the field names in mismatched_fields. Values compare structurally (object key order is ignored); null matches a field that was never set. Metadata fields only (not name, content, slug or parent_id); at most 50 keys.
+         */
+        expected?: {
+          [key: string]: unknown;
+        };
+        /**
          * Attribution source when mutation is triggered by an Automation reaction
          */
         automation_source?: {

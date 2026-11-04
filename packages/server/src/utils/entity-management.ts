@@ -58,6 +58,7 @@ import {
 	type FieldControl,
 	type FieldMergeResult,
 	type FieldWriteSource,
+	mismatchedExpectedFields,
 } from "./entity-field-merge";
 import {
 	type EntityHookContext,
@@ -314,6 +315,37 @@ const MANUAL_EDIT_REFUSAL_MESSAGES: Record<ManualEditRefusal, string> = {
 		"manual_edit cannot be asserted by an agent, MCP session, chat turn or Automation; only a person's own edit relayed by a first-party backend qualifies. Nothing was written.",
 };
 
+/** Entity attributes an `expected` precondition may not name: it guards metadata only. */
+const NON_METADATA_EXPECTED_KEYS: ReadonlySet<string> = new Set(["name", "content", "slug", "parent_id"]);
+
+/**
+ * Refuse an `expected` key that is not a metadata field name (HTTP 400). A
+ * `$`-name is the reserved column namespace rules and approvals use for
+ * attributes, so it can never name a metadata field either.
+ */
+function assertExpectedNamesMetadata(expected: Record<string, unknown>): void {
+	const invalid = Object.keys(expected).filter(
+		(key) => NON_METADATA_EXPECTED_KEYS.has(key) || key.startsWith("$"),
+	);
+	if (invalid.length > 0) {
+		throw new ToolUserError(
+			`expected only takes metadata field names; ${invalid.join(", ")} cannot be used as a precondition.`,
+			400,
+			"VALIDATION",
+		);
+	}
+}
+
+/** The live row moved since the caller read it (HTTP 409); names only, never values. */
+function preconditionFailed(mismatchedFields: string[]): ToolUserError {
+	return new ToolUserError(
+		`Precondition failed: ${mismatchedFields.join(", ")} changed since it was read, so nothing was written. Re-read the entity and retry with its current values.`,
+		409,
+		"PRECONDITION_FAILED",
+		{ mismatched_fields: mismatchedFields },
+	);
+}
+
 /** `manual_edit: true` that this caller may not assert (HTTP 403). */
 function manualEditNotAllowed(refusal: ManualEditRefusal): ToolUserError {
 	return new ToolUserError(MANUAL_EDIT_REFUSAL_MESSAGES[refusal], 403, "MANUAL_EDIT_NOT_ALLOWED");
@@ -371,6 +403,11 @@ export interface EntityData {
   // signed-in person made this change (isAssertedManualEdit). Refused with 403
   // `MANUAL_EDIT_NOT_ALLOWED` when the caller may not assert it.
   manual_edit?: boolean | null;
+
+  // Optimistic-concurrency precondition: metadata field -> the value the caller
+  // read. Checked under the row lock; any mismatch writes nothing and fails 409
+  // `PRECONDITION_FAILED` with the mismatched field names (never live values).
+  expected?: Record<string, unknown> | null;
 }
 
 export interface CreatedEntity {
@@ -1085,6 +1122,8 @@ export async function updateEntity(
 	if (opts?.derivedName && data.name !== undefined) {
 		throw new ToolUserError("An explicit name cannot also be derived from metadata", 400, "VALIDATION");
 	}
+	const expected = data.expected ?? null;
+	if (expected) assertExpectedNamesMetadata(expected);
 
 	// Validate write access (uses PG for auth tables)
 	await requireWriteAccess(sql, entityId, ctx);
@@ -1209,6 +1248,12 @@ export async function updateEntity(
 				? JSON.parse(current[0].field_controls as string)
 				: (current[0].field_controls ?? {})
 		) as Record<string, FieldControl>;
+		// The precondition reads the row this transaction just locked, before any
+		// policy, merge, event or approval work: a stale caller gets nothing.
+		if (expected) {
+			const mismatched = mismatchedExpectedFields(existing, expected);
+			if (mismatched.length > 0) throw preconditionFailed(mismatched);
+		}
 		// There is no ownership marker for top-level names. Only keep deriving a
 		// label that still matches its prior projection; a custom or already
 		// divergent label is preserved. This comparison stays under the row lock.

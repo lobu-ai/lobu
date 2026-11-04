@@ -1269,6 +1269,11 @@ export async function runScript(
 				error: {
 					name: error.name,
 					message: error.message,
+					// A script that catches the failure branches on these (e.g.
+					// `mismatched_fields` on PRECONDITION_FAILED), not on prose.
+					...(error.details === undefined
+						? {}
+						: { details: safeErrorDetails(error.details) }),
 					classificationToken: trustErrorClassification(code),
 				},
 			});

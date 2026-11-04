@@ -72,6 +72,24 @@ function stableStringify(value: unknown): string {
 }
 
 /**
+ * The `expected` fields whose live metadata value differs, by the same
+ * comparison the merge uses (null matches a field that was never set). An
+ * update's precondition passes only when this is empty.
+ */
+export function mismatchedExpectedFields(
+	metadata: Record<string, unknown>,
+	expected: Record<string, unknown>,
+): string[] {
+	return Object.keys(expected).filter(
+		(field) =>
+			!sameValue(
+				Object.hasOwn(metadata, field) ? metadata[field] : undefined,
+				expected[field],
+			),
+	);
+}
+
+/**
  * Pure merge decision. Given the current metadata + ownership controls, decide which
  * proposed `fields` get applied vs blocked, and produce the next metadata/controls.
  * No DB, no I/O — the unit-tested heart of the feedback loop's correctness.
