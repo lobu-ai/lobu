@@ -177,7 +177,16 @@ describe("manage_views", () => {
     const previous = TEST_ENV.VIEW_VALIDATOR_URL;
     TEST_ENV.VIEW_VALIDATOR_URL = `http://127.0.0.1:${(runner.address() as {port:number}).port}`;
     try {
-      await setView(REACT_SOURCE);
+      const pages = `import {EntityListPage, EntityRecordPage, DataTable} from "@lobu/views/components";
+export default function Board() {
+  return <EntityListPage title="Shared collection" controls={<p>Collection controls</p>}>
+    <DataTable rows={[{key:"computed",amount:0}]} columns={[{key:"amount",header:"Amount"}]} keyOf={row=>row.key} />
+    <EntityRecordPage entity={{id:1,entity_type:"fixture",slug:"record",name:"Shared record",metadata:{count:0,enabled:false}}} owner="fixture-workspace" schema={{properties:{count:{type:"number"},enabled:{type:"boolean"}}}}>
+      <p>Record activity slot</p>
+    </EntityRecordPage>
+  </EntityListPage>;
+}`;
+      await setView(pages);
       const before = await getView(orgId, 'pipeline');
       const broken = 'export default function Board() { throw new Error("candidate render failure"); }';
       await expect(setView(broken)).rejects.toMatchObject({ httpStatus: 422 });
