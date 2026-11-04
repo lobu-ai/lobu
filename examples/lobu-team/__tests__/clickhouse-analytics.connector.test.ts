@@ -4,6 +4,82 @@ import {
   queryAnalytics,
   readOnlyQuery,
 } from "../clickhouse-analytics.connector.ts";
+import { readUserMilestones } from "../user-milestones.ts";
+
+describe("source-backed user milestones", () => {
+  it("pages exact milestones through HTTP without leaking source extras or mixing accounts", async () => {
+    const user = "synthetic-user";
+    let sourceUser = user;
+    const server = Bun.serve({
+      port: 0,
+      fetch: () =>
+        Response.json({
+          meta: [
+            "origin_id",
+            "user_id",
+            "occurred_at",
+            "title",
+            "payload_text",
+            "private_extra",
+            "__lobu_analytics_total__",
+          ].map((name) => ({ name, type: "String" })),
+          data: ["signup", "landing", "first-success"].map((kind) => ({
+            origin_id: `${kind}:${user}`,
+            user_id: sourceUser,
+            occurred_at: "2026-01-02 03:04:05.123",
+            title: kind,
+            payload_text: "Recorded milestone",
+            private_extra: "must-not-leak",
+            __lobu_analytics_total__: "3",
+          })),
+        }),
+    });
+    const context = {
+      feedKey: "user_milestones",
+      config: { CLICKHOUSE_URL: "https://analytics.example.test" },
+      credentials: null,
+      match: { path: "metadata.user_id", values: [user] },
+      limit: 1,
+    };
+    const read = (ctx: Parameters<typeof readUserMilestones>[0]) =>
+      readUserMilestones(ctx, (query) =>
+        queryAnalytics(query, (_url, init) => fetch(server.url, init))
+      );
+    try {
+      const first = await read(context);
+      const second = await read({ ...context, cursor: first.nextCursor });
+      const last = await read({ ...context, cursor: second.nextCursor });
+      const rows = [...first.rows, ...second.rows, ...last.rows];
+      expect(new Set(rows.map((row) => row.origin_id)).size).toBe(3);
+      expect(last.hasMore).toBe(false);
+      expect(last.nextCursor).toBeUndefined();
+      expect(
+        rows.every((row) => row.occurred_at === "2026-01-02T03:04:05.123Z")
+      ).toBe(true);
+      expect(
+        rows.every(
+          (row) => (row.metadata as { user_id: string }).user_id === user
+        )
+      ).toBe(true);
+      expect(JSON.stringify(rows)).not.toContain("must-not-leak");
+      expect(first.rowCursors).toEqual([first.nextCursor!]);
+      await expect(
+        read({
+          ...context,
+          cursor: first.nextCursor,
+          match: { path: "metadata.user_id", values: ["another-user"] },
+        })
+      ).rejects.toThrow("cursor");
+      await expect(read({ ...context, match: undefined })).rejects.toThrow(
+        "one exact"
+      );
+      sourceUser = "another-user";
+      await expect(read(context)).rejects.toThrow("projection");
+    } finally {
+      server.stop(true);
+    }
+  });
+});
 
 describe("ClickHouse SQL boundary", () => {
   for (const sql of [
