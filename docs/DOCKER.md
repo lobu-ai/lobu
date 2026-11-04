@@ -24,6 +24,8 @@ open http://localhost:8787
 
 That's it. Sign up via the admin UI, add provider API keys from the settings page, create your first agent.
 
+Running `lobu run` inside your own container instead of this image? It provisions a local operator on first boot, so you can sign in and mint tokens without a browser; see "Sign in without a browser" in the [CLI README](../packages/cli/README.md).
+
 ## What's actually required to boot
 
 | Env var | Required? | Notes |

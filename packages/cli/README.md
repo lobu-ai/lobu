@@ -16,7 +16,9 @@ The CLI installs cloud commands and the connector compiler. On the first
 local embeddings are separate components, selected from the effective
 `DATABASE_URL`, `EMBEDDINGS_SERVICE_URL`, and `EMBEDDINGS_BACKEND` settings.
 External Postgres plus a remote embeddings service installs neither native
-component. Model weights download when local embeddings are first requested.
+component. With local embeddings, `lobu run` starts loading the model as soon
+as the service boots (downloading its weights the first time), so the first
+search does not wait on a cold load.
 
 Software is cached under `~/.cache/lobu/runtime`, separately from database files
 and model weights. Versions, platform, libc, and Node ABI have separate cache
@@ -29,6 +31,23 @@ lobu runtime install                         # preinstall all components
 lobu runtime install server postgres         # select components
 lobu runtime install --offline               # verify the installed cache
 ```
+
+### Sign in without a browser
+
+The first `lobu run` provisions a local install operator, so a fresh install
+needs no sign-up page. On the same machine, sign in through the loopback-only
+`/api/local-init` route and mint a scoped token for a service:
+
+```bash
+lobu context add local --url http://127.0.0.1:8787
+lobu token --context local                     # signs in through /api/local-init
+lobu token create --context local --name my-service --scope 'mcp:read mcp:write'
+```
+
+`/api/local-init` accepts only a loopback TCP peer and refuses requests carrying
+`X-Forwarded-*` or `Forwarded` headers. Inside a container, run these commands in
+that container (`docker exec`), not through a published port. A token minted
+this way cannot mint further tokens (see "Personal access token limits").
 
 `lobu daemon` prepares the device runtime before polling. Callers of
 `lobu automation execute` must run `lobu runtime install device` before claiming
