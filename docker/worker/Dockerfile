@@ -102,6 +102,9 @@ RUN node scripts/image-browser-tooling.mjs --prune /app
 # ===========================================
 FROM node:26-bookworm-slim AS runtime
 
+ARG APP_GIT_SHA=unknown
+ENV APP_GIT_SHA=${APP_GIT_SHA}
+
 WORKDIR /app
 
 # No Bun in this stage: everything runs under the image's Node. curl stays for

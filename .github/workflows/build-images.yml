@@ -172,6 +172,11 @@ jobs:
             exit 1
           }
 
+      - name: Verify worker image release SHA
+        run: |
+          docker run --rm --network=none "${REGISTRY}/${IMAGE_NAME_WORKER}@${{ needs.build-worker.outputs.digest }}" \
+            node -e 'if (process.env.APP_GIT_SHA !== process.argv[1]) { console.error("APP_GIT_SHA mismatch", { expected: process.argv[1], actual: process.env.APP_GIT_SHA ?? "<missing>" }); process.exit(1); }' "$GITHUB_SHA"
+
   build-app:
     runs-on: ubuntu-24.04
     if: needs.generate-tag.outputs.should_publish == 'true'
@@ -400,6 +405,8 @@ jobs:
           platforms: ${{ env.BUILD_PLATFORMS }}
           file: ./docker/worker/Dockerfile
           push: true
+          build-args: |
+            APP_GIT_SHA=${{ github.sha }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # Retain builder-stage layers for native compilation. This is the

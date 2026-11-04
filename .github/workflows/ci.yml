@@ -1909,6 +1909,8 @@ jobs:
           file: ./docker/worker/Dockerfile
           load: true
           push: false
+          build-args: |
+            APP_GIT_SHA=${{ github.sha }}
           tags: lobu-worker:parity-smoke
           cache-from: type=gha,scope=worker
 
@@ -1929,6 +1931,12 @@ jobs:
             echo "::error::worker image cannot load isolated-vm: $(jq -c .isolate_lane worker-self-check.json)"
             exit 1
           }
+
+      - name: Verify worker image release SHA
+        if: github.event_name != 'push'
+        run: |
+          docker run --rm --network=none lobu-worker:parity-smoke \
+            node -e 'if (process.env.APP_GIT_SHA !== process.argv[1]) { console.error("APP_GIT_SHA mismatch", { expected: process.argv[1], actual: process.env.APP_GIT_SHA ?? "<missing>" }); process.exit(1); }' "$GITHUB_SHA"
 
       # Host (CLI) leg: same self-check function, exercised from the built CLI
       # runtime. This PR touches the gated paths, so this leg dogfoods the gate.
