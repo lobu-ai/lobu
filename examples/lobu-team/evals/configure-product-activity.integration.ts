@@ -1,5 +1,9 @@
 import { readFileSync } from "node:fs";
+import type { AutomationClaimNextWindowResult } from "@lobu/core/contracts/tools/manage-automations";
 import { beforeEach, expect, test } from "vitest";
+import { materializeDueAutomationRuns } from "../../../packages/server/src/automations/automation";
+import type { DbClient } from "../../../packages/server/src/db/client";
+import { claimPendingAutomationRun } from "../../../packages/server/src/runs/queue-service";
 import { buildClientSDK } from "../../../packages/server/src/sandbox/client-sdk";
 import { createTestAutomationSubscription } from "../../../packages/server/src/__tests__/setup/automation-subscriptions";
 import {
@@ -29,6 +33,42 @@ async function migrationBaseline(client: TestWorkspace["owner"], id: string) {
     device_worker_id: automation.device_worker_id ?? null,
     agent_kind: automation.agent_kind ?? null,
   };
+}
+
+async function startNativeWindow(
+  workspace: TestWorkspace,
+  id: string,
+  agentId: string,
+  limit?: number
+) {
+  const sql = getTestDb();
+  await materializeDueAutomationRuns(
+    { ENVIRONMENT: "test" },
+    sql as unknown as DbClient,
+    Number(id)
+  );
+  const [run] = await sql`
+    SELECT id FROM runs WHERE automation_id = ${id}
+      AND run_type = 'automation' AND status = 'pending'
+    ORDER BY id LIMIT 1
+  `;
+  if (!run) throw new Error("Expected the native schedule to enqueue a run");
+  const runId = Number(run.id);
+  const claimed = await sql.begin((tx) =>
+    claimPendingAutomationRun(tx as unknown as DbClient, {
+      runId,
+      automationId: Number(id),
+      claimedBy: `lobu:${agentId}`,
+      status: "running",
+    })
+  );
+  expect(claimed).toBe(true);
+  const context = (await workspace.owner.knowledge.read({
+    automation_id: Number(id),
+    run_id: runId,
+    limit,
+  })) as AutomationClaimNextWindowResult["context"];
+  return { run_id: runId, context };
 }
 
 test("native cutover preserves bound Slack delivery and the checkpoint", async () => {
@@ -160,10 +200,8 @@ test("native cutover preserves bound Slack delivery and the checkpoint", async (
     Number(id)
   );
 
-  // The same owner completes the native window through the existing completion contract.
-  const claimed = await workspace.owner.automations.claimNextWindow({
-    automation_id: id,
-  });
+  // The native scheduler queues the window; its agent reads and completes it.
+  const claimed = await startNativeWindow(workspace, id, agent.agentId);
   expect(claimed.context.window_start).toBe(checkpoint);
   expect(claimed.context.content).toEqual([]);
   await workspace.owner.automations.completeWindow({
@@ -184,7 +222,7 @@ test("native cutover preserves bound Slack delivery and the checkpoint", async (
         },
       ],
     },
-    client_id: "synthetic-external-client",
+    client_id: "synthetic-native-client",
   });
   const progress = await sql`
     SELECT metadata FROM events WHERE automation_id = ${id}
@@ -311,30 +349,27 @@ test("ClickHouse progress survives completion retries and product pagination wit
         created_at: new Date(start.getTime() + 30_000),
       });
   }
-  const first = await workspace.owner.automations.claimNextWindow({
-    automation_id: id,
-    limit: 1,
-  });
+  const first = await startNativeWindow(workspace, id, agent.agentId, 1);
   expect(first.context.page.has_more).toBe(true);
   const cursor = first.context.page.next_cursor;
   if (!cursor) throw new Error("Expected a second product page");
-  const second = await workspace.owner.automations.claimNextWindow({
-    automation_id: id,
+  const second = (await workspace.owner.knowledge.read({
+    automation_id: Number(id),
     run_id: first.run_id,
     limit: 1,
     before_occurred_at: cursor.occurred_at,
     before_id: cursor.id,
-  });
-  expect(second.context.page.has_more).toBe(false);
+  })) as AutomationClaimNextWindowResult["context"];
+  expect(second.page.has_more).toBe(false);
   expect(
-    [...first.context.content, ...second.context.content]
+    [...first.context.content, ...second.content]
       .map((row) => (row as { payload_text: string }).payload_text)
       .sort()
   ).toEqual(["Synthetic signup", "Synthetic source connected"]);
   const completion = {
     automation_id: id,
     run_id: first.run_id,
-    window_tokens: [first.context.window_token, second.context.window_token],
+    window_tokens: [first.context.window_token, second.window_token],
   };
   const snapshot = {
     window_start: "2026-10-01T00:00:00.000Z",
@@ -400,9 +435,7 @@ test("ClickHouse progress survives completion retries and product pagination wit
   // ClickHouse failure is represented by no new progress, while product arrival
   // processing can still complete. The old log cursor must survive unchanged.
   await sql`UPDATE automations SET next_run_at = NOW() - INTERVAL '1 second' WHERE id = ${id}`;
-  const resumed = await workspace.owner.automations.claimNextWindow({
-    automation_id: id,
-  });
+  const resumed = await startNativeWindow(workspace, id, agent.agentId);
   expect(resumed.context.window_start).toBe(first.context.window_end);
   expect(resumed.context.content).toEqual([]);
   const old = (await readProgress())[0];
@@ -417,9 +450,7 @@ test("ClickHouse progress survives completion retries and product pagination wit
   // Rechecked late arrivals replace the keyed current head without erasing
   // history, and without moving the event-time cursor forward.
   await sql`UPDATE automations SET next_run_at = NOW() - INTERVAL '1 second' WHERE id = ${id}`;
-  const recheck = await workspace.owner.automations.claimNextWindow({
-    automation_id: id,
-  });
+  const recheck = await startNativeWindow(workspace, id, agent.agentId);
   await workspace.owner.automations.completeWindow({
     automation_id: id,
     run_id: recheck.run_id,
