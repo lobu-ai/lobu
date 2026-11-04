@@ -439,13 +439,20 @@ export async function validateViewCandidate(view: StoredView, runnerUrl: string 
   });
   if (scopes.length === 0) scopes.push({});
   const uniqueScopes = [...new Map(scopes.map(scope => [JSON.stringify(scope), scope])).values()];
-  if (uniqueScopes.length > 4) throw new ToolUserError('Browser validation supports at most four distinct attached scopes per view; split the view into smaller modules', 422, 'VALIDATION');
   const params = Object.fromEntries(Object.entries(view.params).flatMap(([key, decl]) =>
     decl.default === undefined ? [] : [[key, decl.default]]));
-  const scenarios: ValidationScenario[] = uniqueScopes.flatMap(scope => ['light', 'dark'].flatMap(theme =>
-    ['inline', 'fullscreen'].flatMap(displayMode => ['empty', 'error', 'loading'].map(queryState =>
-      ({ theme, displayMode, queryState, scope, params }) as ValidationScenario))));
   const artifact = { html: renderViewShell(view, 'https://view-validation.invalid/validation-workspace/', runtime), runtime, assets };
+  // Every attached scope must pass before storage, including existing views
+  // with many scopes. Give each scope its own bounded runner deadline.
+  for (const scope of uniqueScopes) {
+    const scenarios: ValidationScenario[] = ['light', 'dark'].flatMap(theme =>
+      ['inline', 'fullscreen'].flatMap(displayMode => ['empty', 'error', 'loading'].map(queryState =>
+        ({ theme, displayMode, queryState, scope, params }) as ValidationScenario)));
+    await validateViewScenarios(artifact, scenarios, runnerUrl);
+  }
+}
+
+async function validateViewScenarios(artifact: ValidationRequest['artifact'], scenarios: ValidationScenario[], runnerUrl: string): Promise<void> {
   const body = JSON.stringify({ artifact, scenarios } satisfies ValidationRequest);
   if (Buffer.byteLength(body) > VALIDATION_MAX_BYTES) throw new ToolUserError('View validation artifact exceeds the runner size limit', 422, 'VALIDATION');
   let receipt: unknown;

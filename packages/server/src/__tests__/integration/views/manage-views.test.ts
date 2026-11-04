@@ -192,8 +192,12 @@ export default function Board() {
     </EntityRecordPage>
   </EntityListPage>;
 }`;
-      await setView(pages);
+      const attachments = Array.from({ length: 7 }, (_, index) => ({ record: `fixture_${index + 1}` }));
+      await setView(pages, { attach: attachments, actions: {} });
       const before = await getView(orgId, 'pipeline');
+      const lateScopeFailure = 'import {useScope} from "@lobu/views"; export default function Board(){if(useScope().type === "fixture_7") throw new Error("last scope failed"); return <p>working scopes</p>; }';
+      await expect(setView(lateScopeFailure, { attach: attachments, actions: {} })).rejects.toMatchObject({ httpStatus: 422 });
+      expect(await getView(orgId, 'pipeline')).toEqual(before);
       const broken = 'export default function Board() { throw new Error("candidate render failure"); }';
       await expect(setView(broken)).rejects.toMatchObject({ httpStatus: 422 });
       expect(await getView(orgId, 'pipeline')).toEqual(before);
@@ -212,9 +216,9 @@ export default function Board() {
       TEST_ENV.VIEW_VALIDATOR_URL = previous;
       await new Promise<void>((resolve, reject) => runner.close(error => error ? reject(error) : resolve()));
     }
-  // One accepted candidate and five rejected candidates each have their own
-  // bounded browser run; the suite deadline must cover all six plus setup.
-  }, 6 * VALIDATION_TIMEOUT_MS + 10_000);
+  // Acceptance and late-scope rejection each visit seven scopes. The five
+  // remaining failures include one that visits both workspace and record scope.
+  }, 20 * VALIDATION_TIMEOUT_MS + 10_000);
 
 	it("replays the source migration in either direction without inventing legacy provenance", async () => {
 		const dir = resolve(import.meta.dirname, "../../../../../../db/migrations");

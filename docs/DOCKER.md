@@ -143,7 +143,8 @@ select an operator-provisioned isolated runtime. Run the container smoke against
 the actual runtime before enabling registration.
 
 Validation covers bounded empty/error/loading fixtures, both themes and display
-modes, and up to four distinct attached scopes. It does not prove every business
+modes, with each distinct attached scope's twelve scenarios validated in its own
+bounded runner request. It does not prove every business
 rule or successful-data interaction. Authors must also exercise the actual
 workspace view, pagination, actions and peek interactions before claiming acceptance.
 
