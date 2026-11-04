@@ -7,7 +7,7 @@
 import type { EntityMetrics } from "@lobu/connector-sdk";
 import { authzScopeFromToolContext } from "../authz/scope";
 import { getDb } from "../db/client";
-import { pushdownFailureError, runConnectorQuery } from "../lib/connector-pushdown";
+import { isCompletePushdownResult, pushdownFailureError, runConnectorQuery } from "../lib/connector-pushdown";
 import { ToolUserError } from "../utils/errors";
 import { validateAndScopeQuery } from "../utils/execute-data-sources";
 import { type ColumnDef, SAFE_COLUMN_DEFS } from "../utils/table-schema";
@@ -160,11 +160,7 @@ async function runPushdownMetric(
   } catch (err) {
     throw pushdownFailureError(err, backingSource, "metric");
   }
-  const truncated =
-    result.total !== undefined
-      ? result.total > result.rows.length
-      : result.rows.length >= METRIC_PUSHDOWN_MAX_ROWS;
-  if (truncated) {
+  if (!isCompletePushdownResult(result)) {
     throw new ToolUserError(
       `metric "${input.measure}" on "${input.entityType}" returned an incomplete result from connection "${backingSource}" (row limit ${METRIC_PUSHDOWN_MAX_ROWS}); reduce the rows produced by its backing SQL.`,
       422,

@@ -278,6 +278,18 @@ function remainingReadMs(p: ReadSourceFeedParams): number {
 }
 
 /**
+ * Whether one pushdown page holds the source's whole result. A connector may cap
+ * a page below the requested limit, so only a reported `total` proves a
+ * nonempty result complete; a missing total fails closed instead of passing
+ * a prefix off as the answer.
+ */
+export function isCompletePushdownResult(result: ConnectorQueryResult): boolean {
+  return result.total === undefined
+    ? result.rows.length === 0
+    : result.total <= result.rows.length;
+}
+
+/**
  * The hard error every `runConnectorQuery` caller throws: a failed source query
  * is never a success-shaped empty result (#2042). Reported under the classified
  * code's status, not a flat 502 — the failing upstream is the connection's, and

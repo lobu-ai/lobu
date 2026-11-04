@@ -19,7 +19,7 @@ import { resolveGrantedWorkspaceTarget, findUngrantedMemberWorkspace, formatUngr
 import { boundedQuery, classifyReadQueryFailure } from "../utils/bounded-read";
 import { ToolUserError, toolErrorHttpStatus } from "../utils/errors";
 import { getOrganizationSlug } from "../utils/url-builder";
-import { pushdownFailureError, runConnectorQuery } from "../lib/connector-pushdown";
+import { isCompletePushdownResult, pushdownFailureError, runConnectorQuery } from "../lib/connector-pushdown";
 import { QUERY_SQL_STATEMENT_TIMEOUT_MS } from "../utils/content-read-bounds";
 import { METHOD_METADATA } from "./method-metadata";
 import { bindClientContext } from "./workspace-activity";
@@ -58,12 +58,9 @@ async function queryConnection(
 	} catch (err) {
 		throw pushdownFailureError(err, connectionSlug, "query");
 	}
-	const truncated = result.total !== undefined
-		? result.total > result.rows.length
-		: result.rows.length >= CLIENT_QUERY_MAX_ROWS;
-	if (truncated) {
+	if (!isCompletePushdownResult(result)) {
 		throw new ToolUserError(
-			`client.query on connection "${connectionSlug}" returned ${result.rows.length} of ${result.total ?? "more"} rows; aggregate or filter the SQL so the result fits one page.`,
+			`client.query on connection "${connectionSlug}" returned ${result.rows.length} of ${result.total ?? "an unreported number of"} rows; aggregate or filter the SQL so the result fits one page.`,
 			422,
 			"VALIDATION",
 		);
