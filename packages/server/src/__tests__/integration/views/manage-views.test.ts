@@ -20,6 +20,7 @@ import type { Env } from "../../../index";
 import { executeTool, type AuthContext } from "../../../tools/execute";
 import { ToolUserError } from "../../../utils/errors";
 import { compileView, setView as storeView, getView, viewRuntimeScript } from "../../../views/views";
+import { VALIDATION_TIMEOUT_MS } from "../../../views/validation-contract";
 import { initWorkspaceProvider } from "../../../workspace";
 import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
 import { viewModule } from "./view-module";
@@ -211,7 +212,9 @@ export default function Board() {
       TEST_ENV.VIEW_VALIDATOR_URL = previous;
       await new Promise<void>((resolve, reject) => runner.close(error => error ? reject(error) : resolve()));
     }
-  }, 30000);
+  // One accepted candidate and five rejected candidates each have their own
+  // bounded browser run; the suite deadline must cover all six plus setup.
+  }, 6 * VALIDATION_TIMEOUT_MS + 10_000);
 
 	it("replays the source migration in either direction without inventing legacy provenance", async () => {
 		const dir = resolve(import.meta.dirname, "../../../../../../db/migrations");
