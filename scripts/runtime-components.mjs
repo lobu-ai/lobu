@@ -264,6 +264,7 @@ export async function buildRuntimeComponents() {
       delete vendorCli.bin;
       vendorCli.dependencies["@lobu/core"] = "file:../core";
       vendorCli.dependencies["@lobu/connector-sdk"] = "file:../connector-sdk";
+      vendorCli.dependencies["@lobu/views"] = "file:../views";
       vendorCli.dependencies["@lobu/connector-worker"] =
         "file:../connector-worker";
       for (const value of Object.values(vendorCli.exports ?? {})) {
@@ -316,9 +317,7 @@ export async function buildRuntimeComponents() {
     // release can freeze and test its dependency graph before new sibling
     // versions exist in the registry (including canary versions).
     if (key === "server" || key === "device") {
-      for (const name of key === "server"
-        ? ["core", "connector-sdk", "views"]
-        : ["core", "connector-sdk"]) {
+      for (const name of ["core", "connector-sdk", "views"]) {
         copy(
           join(root, "packages", name, "dist"),
           join(directory, "vendor", name, "dist")

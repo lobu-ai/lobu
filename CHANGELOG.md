@@ -14,6 +14,7 @@
 
 ### Bug Fixes
 
+* **cli:** vendor view dependencies in the device runtime before publication ([#4745](https://github.com/lobu-ai/lobu/pull/4745))
 * **auth:** avoid display-name collisions in member projection ([#4743](https://github.com/lobu-ai/lobu/issues/4743)) ([9ca56c5](https://github.com/lobu-ai/lobu/commit/9ca56c5a4edb5f96bd080789f08edfdb794f84d2))
 * **automations:** commit preparation handoff atomically ([#4740](https://github.com/lobu-ai/lobu/issues/4740)) ([a7202cd](https://github.com/lobu-ai/lobu/commit/a7202cd82b1f2ea8fd66cd16aa55b77fa9fc2087))
 * **automations:** resolve duplicate contacts through existing policies ([#4737](https://github.com/lobu-ai/lobu/issues/4737)) ([b303600](https://github.com/lobu-ai/lobu/commit/b303600efc161e583bcbbc9a33417aadf9033b6b))
