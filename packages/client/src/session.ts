@@ -153,10 +153,17 @@ export class AgentSession {
           (event.data.messageId === messageId ||
             event.data.processedMessageIds?.includes(messageId))
         ) {
+          if (
+            typeof event.data.finalText === "string" &&
+            event.data.finalText.length > 0
+          ) {
+            text = event.data.finalText;
+          }
           return { text, messageId };
         } else if (
           (event.event === "error" || event.event === "agent-error") &&
-          event.data.messageId === messageId
+          (event.data.messageId === messageId ||
+            event.data.processedMessageIds?.includes(messageId))
         ) {
           throw new LobuAgentError(event.data.error, messageId);
         }

@@ -419,3 +419,89 @@ async function requestInfo(
     body: await request.clone().text(),
   };
 }
+
+describe("AgentSession.ask HTTP batch correlation", () => {
+  test.each([
+    "complete",
+    "error",
+    "agent-error",
+  ])("handles a batched %s after retained events from the previous ask", async (terminal) => {
+    const encoder = new TextEncoder();
+    let backlog = "";
+    let turn = 0;
+    let stream: ReadableStreamDefaultController<Uint8Array> | undefined;
+    const event = (name: string, data: unknown) =>
+      `event: ${name}\ndata: ${JSON.stringify(data)}\n\n`;
+    const gateway = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        const path = new URL(request.url).pathname;
+        if (path.endsWith("/agents"))
+          return Response.json({
+            agentId: "test-session",
+            token: "session-token",
+            expiresAt: Date.now() + 60_000,
+            sseUrl: `${gateway.url}api/v1/agents/test-session/events`,
+            messagesUrl: `${gateway.url}api/v1/agents/test-session/messages`,
+          });
+        if (path.endsWith("/events"))
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                stream = controller;
+                controller.enqueue(
+                  encoder.encode(
+                    event("connected", {
+                      agentId: "test-agent",
+                      timestamp: Date.now(),
+                    }) + backlog
+                  )
+                );
+              },
+            }),
+            { headers: { "Content-Type": "text/event-stream" } }
+          );
+        const body = (await request.json()) as { messageId: string };
+        turn += 1;
+        const current =
+          turn === 1
+            ? event("output", {
+                messageId: body.messageId,
+                content: "first reply",
+              }) + event("complete", { messageId: body.messageId })
+            : event(terminal, {
+                messageId: "batch-leader",
+                processedMessageIds: ["batch-leader", body.messageId],
+                finalText: "batched final reply",
+                error: "batched failure",
+              });
+        backlog += current;
+        stream?.enqueue(encoder.encode(current));
+        stream?.close();
+        return Response.json({ messageId: body.messageId, queued: true });
+      },
+    });
+    try {
+      const lobu = new Lobu({
+        baseUrl: gateway.url.toString(),
+        token: "test-token",
+      });
+      const session = await lobu.sessions.create({ agentId: "test-agent" });
+      expect((await session.ask("first task")).text).toBe("first reply");
+      if (terminal === "complete") {
+        expect((await session.ask("new task")).text).toBe(
+          "batched final reply"
+        );
+      } else {
+        await expect(session.ask("new task")).rejects.toBeInstanceOf(
+          LobuAgentError
+        );
+        await expect(session.ask("another task")).rejects.toThrow(
+          "batched failure"
+        );
+      }
+    } finally {
+      await gateway.stop(true);
+    }
+  });
+});
