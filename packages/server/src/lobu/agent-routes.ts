@@ -427,6 +427,8 @@ routes.get("/", async (c) => {
 		userCounts,
 		platformRows,
 		providerRows,
+		lastReplyRows,
+		lastRunRows,
 	] = await Promise.all([
 		sql<{ system_agent_id: string | null }>`
 			SELECT system_agent_id FROM organization WHERE id = ${orgId} LIMIT 1
@@ -466,6 +468,36 @@ routes.get("/", async (c) => {
         FROM agents
         WHERE organization_id = ${orgId}
       `,
+		// Each agent's newest reply: one probe per agent on conversations_listing.
+		sql`
+        SELECT a.id AS agent_id, c.platform, c.last_activity_at
+        FROM agents a
+        CROSS JOIN LATERAL (
+          SELECT platform, last_activity_at
+          FROM conversations
+          WHERE organization_id = a.organization_id
+            AND agent_id = a.id
+            AND archived_at IS NULL
+            AND last_activity_at IS NOT NULL
+          ORDER BY last_activity_at DESC
+          LIMIT 1
+        ) c
+        WHERE a.organization_id = ${orgId}
+      `,
+		// Each agent's newest Automation run that the agent itself analyzed: a
+		// prompted version, not a script or an outside client.
+		sql`
+        SELECT DISTINCT ON (au.managed_agent_id)
+          au.managed_agent_id AS agent_id, au.id, au.name, au.last_run_completed_at
+        FROM automations au
+        JOIN automation_versions v ON v.id = au.current_version_id
+        WHERE au.organization_id = ${orgId}
+          AND au.managed_agent_id IS NOT NULL
+          AND au.last_run_completed_at IS NOT NULL
+          AND btrim(COALESCE(v.prompt, '')) <> ''
+          AND COALESCE(au.execution_config->'executor'->>'kind', '') NOT IN ('script', 'external')
+        ORDER BY au.managed_agent_id, au.last_run_completed_at DESC
+      `,
 	]);
 	const systemAgentId = systemRows[0]?.system_agent_id ?? null;
 
@@ -498,6 +530,34 @@ routes.get("/", async (c) => {
 		providersMap.set((r as any).id, [...set]);
 	}
 
+	const lastReplyMap = new Map(
+		lastReplyRows.map((r: any) => [
+			r.agent_id as string,
+			{
+				kind: "conversation" as const,
+				at: new Date(r.last_activity_at).toISOString(),
+				platform: String(r.platform),
+			},
+		])
+	);
+	const lastRunMap = new Map(
+		lastRunRows.map((r: any) => [
+			r.agent_id as string,
+			{
+				kind: "automation" as const,
+				at: new Date(r.last_run_completed_at).toISOString(),
+				automationId: String(r.id),
+				automationName: String(r.name),
+			},
+		])
+	);
+	const lastActivityOf = (agentId: string) => {
+		const reply = lastReplyMap.get(agentId);
+		const run = lastRunMap.get(agentId);
+		if (!reply || !run) return reply ?? run ?? null;
+		return reply.at >= run.at ? reply : run;
+	};
+
 	return c.json({
 		agents: agents.map((a) => ({
 			...a,
@@ -510,6 +570,7 @@ routes.get("/", async (c) => {
 			platforms: platformsMap.get(a.agentId) ?? [],
 			providers: providersMap.get(a.agentId) ?? [],
 			status: (activeCountMap.get(a.agentId) ?? 0) > 0 ? "active" : "idle",
+			lastActivity: lastActivityOf(a.agentId),
 		})),
 	});
 });

@@ -435,4 +435,58 @@ describe("agent list wire keys", () => {
       automationCount: 1,
     });
   });
+
+  test("GET / names what the agent last did: a reply or a run it analyzed", async () => {
+    const { getDb } = await import("../../db/client.js");
+    const sql = getDb();
+    const lastActivity = async () => {
+      const res = await (await importAgentRoutes()).request("/");
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { agents: Array<Record<string, unknown>> };
+      return body.agents.find((item) => item.agentId === AGENT)?.lastActivity;
+    };
+    expect(await lastActivity()).toBeNull();
+
+    // Script and outside-client Automations run without the agent, so even a
+    // newer completion there is not the agent's activity.
+    await sql`
+      INSERT INTO automations (
+        id, organization_id, slug, name, managed_agent_id, created_by,
+        automation_group_id, status, execution_config, last_run_completed_at
+      ) VALUES
+        (9101, ${ORG}, 'analyzed', 'Daily review', ${AGENT}, 'u1', 9101,
+         'active', NULL, '2026-01-02T10:00:00Z'),
+        (9102, ${ORG}, 'scripted', 'Stage folder', ${AGENT}, 'u1', 9102,
+         'active', ${sql.json({ executor: { kind: "script", source: "export default async () => ({})" } })},
+         '2026-01-03T10:00:00Z'),
+        (9103, ${ORG}, 'code-only', 'Watchdog', ${AGENT}, 'u1', 9103,
+         'active', NULL, '2026-01-03T11:00:00Z')
+    `;
+    for (const [id, prompt] of [[9101, "Review the day."], [9102, "Unused."], [9103, ""]] as const) {
+      const [version] = await sql`
+        INSERT INTO automation_versions (automation_id, version, name, prompt, created_by)
+        VALUES (${id}, 1, 'v1', ${prompt}, 'u1') RETURNING id
+      `;
+      await sql`UPDATE automations SET current_version_id = ${version.id} WHERE id = ${id}`;
+    }
+    expect(await lastActivity()).toEqual({
+      kind: "automation",
+      at: "2026-01-02T10:00:00.000Z",
+      automationId: "9101",
+      automationName: "Daily review",
+    });
+
+    // A newer reply wins; an archived conversation does not count.
+    await sql`
+      INSERT INTO conversations (organization_id, agent_id, platform, conversation_id, kind, last_activity_at, archived_at)
+      VALUES
+        (${ORG}, ${AGENT}, 'telegram', 'chat-1', 'platform', '2026-01-02T12:00:00Z', NULL),
+        (${ORG}, ${AGENT}, 'slack', 'chat-2', 'platform', '2026-01-04T12:00:00Z', now())
+    `;
+    expect(await lastActivity()).toEqual({
+      kind: "conversation",
+      at: "2026-01-02T12:00:00.000Z",
+      platform: "telegram",
+    });
+  });
 });
