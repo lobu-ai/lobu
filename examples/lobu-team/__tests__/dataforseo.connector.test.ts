@@ -178,6 +178,69 @@ describe("DataForSEO rank_tracking feed", () => {
   describe("posts each keyword at most once per UTC day", () => {
     afterEach(() => setSystemTime());
 
+    it.each([
+      undefined,
+      "invalid",
+    ])("collects legacy paid tasks with timestamp %s without reposting", async (posted_at) => {
+      setSystemTime(new Date("2026-11-01T12:00:00Z"));
+      const api = fakeStandardApi();
+      api.ready.add("alpha");
+      const run = await runSync(rankConnector(api.fetchImpl), {
+        feedKey: "rank_tracking",
+        config: { ...credentials, keywords: ["alpha"] },
+        checkpoint: {
+          pending: [{ keyword: "alpha", task_id: "task-alpha", posted_at }],
+          last_sync_at: "2026-11-01T11:30:00Z",
+        },
+      });
+      expect(run.status).toBe("complete");
+      expect(run.events.map((event) => event.metadata?.keyword)).toEqual([
+        "alpha",
+      ]);
+      expect(api.posts).toEqual([]);
+    });
+
+    it("persists a legacy task's age before a failed poll and expires it without rebilling", async () => {
+      setSystemTime(new Date("2026-11-01T12:00:00Z"));
+      const api = fakeStandardApi();
+      api.outage.tasksReady = true;
+      const connector = rankConnector(api.fetchImpl);
+      const config = { ...credentials, keywords: ["alpha"] };
+      const committed: { checkpoint: RankTrackingCheckpoint | null } = {
+        checkpoint: null,
+      };
+      await expect(
+        runSync(connector, {
+          feedKey: "rank_tracking",
+          config,
+          checkpoint: {
+            pending: [{ keyword: "alpha", task_id: "task-alpha" }],
+            last_sync_at: "invalid",
+          },
+          commit: async (_events, next) => {
+            committed.checkpoint = next as RankTrackingCheckpoint;
+          },
+        })
+      ).rejects.toThrow("HTTP 503");
+      expect(committed.checkpoint?.pending).toEqual([
+        {
+          keyword: "alpha",
+          task_id: "task-alpha",
+          posted_at: "2026-11-01T12:00:00.000Z",
+        },
+      ]);
+      setSystemTime(new Date("2026-11-01T15:00:00Z"));
+      const retry = await runSync(connector, {
+        feedKey: "rank_tracking",
+        config,
+        checkpoint: committed.checkpoint,
+      });
+      expect(retry.status).toBe("complete");
+      expect(retry.metadata?.items_skipped).toBe(1);
+      expect((retry.checkpoint as RankTrackingCheckpoint).pending).toEqual([]);
+      expect(api.posts).toEqual([]);
+    });
+
     it("drops a task that never becomes ready instead of looping", async () => {
       setSystemTime(new Date("2026-11-01T12:00:00Z"));
       const api = fakeStandardApi();
