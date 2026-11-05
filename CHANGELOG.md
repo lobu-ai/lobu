@@ -1,5 +1,17 @@
 # Changelog
 
+## [24.7.0](https://github.com/lobu-ai/lobu/compare/lobu-v24.6.0...lobu-v24.7.0) (2026-11-05)
+
+
+### Features
+
+* **ui:** organize source activity and agent configuration ([#4739](https://github.com/lobu-ai/lobu/issues/4739)) ([d7d2c81](https://github.com/lobu-ai/lobu/commit/d7d2c81b620fed2211ee4ac0b5938b083fd08ff2))
+
+
+### Bug Fixes
+
+* **gateway:** scope agent attention digest to the caller's workspace role ([#4749](https://github.com/lobu-ai/lobu/issues/4749)) ([bc402bb](https://github.com/lobu-ai/lobu/commit/bc402bb043c51df091e40d42e05602790e18e070))
+
 ## [24.6.0](https://github.com/lobu-ai/lobu/compare/lobu-v24.5.0...lobu-v24.6.0) (2026-11-04)
 
 
