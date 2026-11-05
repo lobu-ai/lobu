@@ -26,8 +26,10 @@ const WRITE_TIMEOUT_MS = 30000;
 const MAX_SEARCH_LENGTH = 500;
 const MAX_SEND_LENGTH = 4000;
 // os.shell caps stdout at 1 MiB. Keep each text/blob column small and page
-// sizes bounded so a full page stays below that cap; the SQL selects a
-// truncated value only when the row is larger than this.
+// sizes bounded so a full page stays below that cap. Plain `text` over this
+// size is dropped; `attributedBody` is cut to its first bytes, which hold the
+// string ahead of the attribute data, so only text that itself overflows is
+// lost.
 const MAX_STORED_TEXT_BYTES = 2048;
 const MAX_SHELL_STDOUT_CHARS = 1_048_576;
 
@@ -265,11 +267,10 @@ function messageColumns(chatId: string): string {
             THEN m.text ELSE NULL END AS text,
        CASE WHEN length(CAST(m.text AS BLOB)) > ${MAX_STORED_TEXT_BYTES}
             THEN 1 ELSE 0 END AS text_truncated,
-       CASE WHEN length(m.attributedBody) <= ${MAX_STORED_TEXT_BYTES}
-            THEN hex(m.attributedBody) ELSE NULL END AS attributed_body_hex,
+       hex(substr(m.attributedBody, 1, ${MAX_STORED_TEXT_BYTES})) AS attributed_body_hex,
        CASE WHEN length(m.attributedBody) > ${MAX_STORED_TEXT_BYTES}
             THEN 1 ELSE 0 END AS body_truncated,
-       m.has_attachments AS has_attachments, m.date AS date,
+       m.cache_has_attachments AS has_attachments, m.date AS date,
        m.is_delivered AS is_delivered, m.is_sent AS is_sent, m.error AS error`;
 }
 
@@ -663,7 +664,7 @@ export default class IMessageConnector extends ConnectorRuntime {
       read_chat: action(
         'read_chat',
         'Read chat',
-        "Read one chat's messages newest first. Pass next_cursor as before_rowid for the next page. Bodies over 2 KiB return text: null with text_truncated: true.",
+        "Read one chat's messages newest first. Pass next_cursor as before_rowid for the next page. A message whose text does not fit in 2 KiB returns text: null with text_truncated: true.",
         'read',
         {
           chat_id: { type: 'integer', minimum: 1 },
@@ -679,7 +680,7 @@ export default class IMessageConnector extends ConnectorRuntime {
       search_messages: action(
         'search_messages',
         'Search messages',
-        'Case-sensitive literal substring search over message text, including bodies stored only in attributedBody. Blob attribute names are ignored. Bodies over 2 KiB are not searched. Pass next_cursor as before_rowid for the next page.',
+        'Case-sensitive literal substring search over message text, including bodies stored only in attributedBody. Blob attribute names are ignored. Messages whose text does not fit in 2 KiB are not matched. Pass next_cursor as before_rowid for the next page.',
         'read',
         {
           query: { type: 'string', minLength: 1, maxLength: MAX_SEARCH_LENGTH },

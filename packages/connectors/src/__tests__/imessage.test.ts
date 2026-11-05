@@ -75,7 +75,7 @@ function insertMessage(row: {
 }): void {
   db.run(
     `INSERT INTO message
-      (ROWID, guid, text, attributedBody, handle_id, is_from_me, service, has_attachments,
+      (ROWID, guid, text, attributedBody, handle_id, is_from_me, service, cache_has_attachments,
        date, is_delivered, is_sent, error)
      VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)`,
     [
@@ -193,7 +193,7 @@ beforeAll(async () => {
     CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER, message_date INTEGER);
     CREATE TABLE message (
       ROWID INTEGER PRIMARY KEY, guid TEXT, text TEXT, attributedBody BLOB,
-      handle_id INTEGER, is_from_me INTEGER, service TEXT, has_attachments INTEGER,
+      handle_id INTEGER, is_from_me INTEGER, service TEXT, cache_has_attachments INTEGER,
       date INTEGER, is_delivered INTEGER, is_sent INTEGER, error INTEGER
     );
     CREATE INDEX message_rowid ON message (ROWID);
@@ -597,22 +597,42 @@ describe('iMessage connector over the existing shell operation', () => {
     expect(result.error).not.toContain('invalid JSON');
   });
 
-  it('marks an oversized body as truncated instead of returning it', async () => {
+  it('decodes a body whose attribute tail runs past the byte cap, and flags text that does not fit', async () => {
+    // Real chat.db bodies carry attribute data after the string, so a short
+    // message can have a large blob; only the string has to fit in the cap.
     insertMessage({
       id: 11,
       chatId: 1,
-      guid: 'synthetic-huge-body',
+      guid: 'synthetic-long-tail',
       text: null,
       bodyHex: ASCII_BODY_HEX + '00'.repeat(4096),
       handleId: 1,
       service: 'iMessage',
       date: appleNs('2026-01-11T10:00:00Z'),
     });
-    const { result } = await invoke('read_chat', { chat_id: 1, limit: 1 });
+    const stringStart = ASCII_BODY_HEX.indexOf('012b') + 4;
+    insertMessage({
+      id: 12,
+      chatId: 1,
+      guid: 'synthetic-huge-string',
+      text: null,
+      // 0x81 + little-endian u16 2100: a string longer than the 2 KiB cap.
+      bodyHex: `${ASCII_BODY_HEX.slice(0, stringStart)}813408${'61'.repeat(2100)}8686`,
+      handleId: 1,
+      service: 'iMessage',
+      date: appleNs('2026-01-12T10:00:00Z'),
+    });
+    const { result } = await invoke('read_chat', { chat_id: 1, limit: 2 });
     expect(result.success).toBe(true);
-    const [message] = result.output?.messages as MessageRowOutput[];
-    expect(message).toMatchObject({
+    const [huge, tail] = result.output?.messages as MessageRowOutput[];
+    expect(tail).toMatchObject({
       rowid: 11,
+      text: 'Hello, synthetic world!',
+      text_source: 'attributedBody',
+      text_truncated: false,
+    });
+    expect(huge).toMatchObject({
+      rowid: 12,
       text: null,
       text_source: null,
       text_truncated: true,
