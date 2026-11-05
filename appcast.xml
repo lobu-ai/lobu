@@ -6,6 +6,15 @@
         <description>In-app updates for Lobu for Mac, signed with EdDSA.</description>
         <language>en</language>
         <item>
+            <title>Version 24.6.0</title>
+            <pubDate>Thu, 05 Nov 2026 00:33:31 GMT</pubDate>
+            <sparkle:version>24.6.0</sparkle:version>
+            <sparkle:shortVersionString>24.6.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:releaseNotesLink>https://github.com/lobu-ai/lobu/releases/tag/lobu-v24.6.0</sparkle:releaseNotesLink>
+            <enclosure url="https://github.com/lobu-ai/lobu/releases/download/lobu-v24.6.0/Lobu.dmg" sparkle:edSignature="Eodcm/lH5podxDZYm3D5E4B+4CqTawQYjwt8Br2122eFDNporjxIzs5cWqVisUteAg319tljBmVCpDQzVd2+Bw==" length="101915128" type="application/octet-stream" />
+        </item>
+        <item>
             <title>Version 24.4.0</title>
             <pubDate>Sun, 01 Nov 2026 18:47:25 GMT</pubDate>
             <sparkle:version>24.4.0</sparkle:version>
