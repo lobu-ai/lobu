@@ -491,7 +491,7 @@ done
 # Assert the connector emitted ≥1 event (items_collected on the run AND the
 # feed-level event_count from list_feeds).
 [ "${RUN_ITEMS:-0}" -ge 1 ] 2>/dev/null || fail "sync run completed but collected 0 items"
-api manage_feeds '{"action":"list_feeds"}' > "$FEEDS" || fail "manage_feeds list_feeds (post-sync) failed"
+api manage_feeds '{"action":"list_feeds","include_event_count":true}' > "$FEEDS" || fail "manage_feeds list_feeds (post-sync) failed"
 EVENT_COUNT="$(node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const j=JSON.parse(s);const f=(j.feeds||[]).find(x=>x.feed_key==="pulse");process.stdout.write(f?String(f.event_count??0):"0")})' < "$FEEDS")"
 [ "${EVENT_COUNT:-0}" -ge 1 ] 2>/dev/null || fail "connector sync persisted 0 events (event_count=$EVENT_COUNT)"
 echo "✓ connector sync ran the compiled connector and emitted events (items=$RUN_ITEMS, event_count=$EVENT_COUNT)"

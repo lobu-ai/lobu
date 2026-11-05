@@ -326,10 +326,11 @@ async function handleListFeeds(
     ORDER BY f.created_at DESC LIMIT ${limit} OFFSET ${offset}
   `;
 
-  const query = sql`
-    WITH page AS MATERIALIZED (
-      ${pageQuery}
-    ),
+  // Counting a feed's history scans every stored event it wrote: seconds on a
+  // busy connection. Only a caller that shows the number asks for it.
+  const countEvents = args.include_event_count === true;
+  const eventCounts = countEvents
+    ? sql`,
     event_counts AS (
       SELECT e.connection_id, e.feed_key, COUNT(*)::int AS event_count
       FROM events e
@@ -344,7 +345,20 @@ async function handleListFeeds(
         AND e.feed_key = ANY(ARRAY(SELECT DISTINCT feed_key FROM page WHERE feed_key IS NOT NULL))
         AND e.superseded_by IS NULL
       GROUP BY e.connection_id, e.feed_key
+    )`
+    : sql``;
+  const eventCountColumn = countEvents
+    ? sql`, COALESCE(ec.event_count, 0)::int AS event_count`
+    : sql``;
+  const eventCountJoin = countEvents
+    ? sql`LEFT JOIN event_counts ec ON ec.connection_id = p.connection_id AND ec.feed_key = p.feed_key`
+    : sql``;
+
+  const query = sql`
+    WITH page AS MATERIALIZED (
+      ${pageQuery}
     )
+    ${eventCounts}
     SELECT p.*, c.connector_key, c.display_name AS connection_name,
            c.status AS connection_status,
            c.external_tenant_id AS external_tenant_id,
@@ -380,8 +394,8 @@ async function handleListFeeds(
              WHERE subscription.organization_id = p.organization_id
                AND subscription.connection_id = p.connection_id
                AND subscription.channel_id = p.feed_key
-             LIMIT 1) AS target_agent_id,
-           COALESCE(ec.event_count, 0)::int AS event_count
+             LIMIT 1) AS target_agent_id
+           ${eventCountColumn}
     FROM page p
     JOIN connections c ON c.id = p.connection_id
     JOIN "organization" o ON o.id = c.organization_id
@@ -408,7 +422,7 @@ async function handleListFeeds(
       })}
     ) cv ON TRUE
     LEFT JOIN auth_profiles ap ON ap.id = c.auth_profile_id
-    LEFT JOIN event_counts ec ON ec.connection_id = p.connection_id AND ec.feed_key = p.feed_key
+    ${eventCountJoin}
     ORDER BY p.created_at DESC
   `;
 
