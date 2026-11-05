@@ -55,11 +55,6 @@ export function sqlStringLiteral(value: string): string {
   return "'" + value.replaceAll("'", "''") + "'";
 }
 
-/** Escape LIKE metacharacters so a search is literal, with ESCAPE '\'. */
-export function likeLiteral(value: string): string {
-  return value.replaceAll('\\', '\\\\').replaceAll('%', '\\%').replaceAll('_', '\\_');
-}
-
 export function isoFromAppleDate(value: unknown): string | null {
   if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return null;
   const milliseconds = value / 1e6 + APPLE_EPOCH_OFFSET_SECONDS * 1000;
@@ -269,10 +264,16 @@ export function searchMessagesSql(
   query: string,
   chatId: number | null,
   since: string | null,
+  beforeRowid: number | null,
   limit: number,
 ): string {
+  const literal = sqlStringLiteral(query);
+  // Byte-exact prefilter: most modern rows have text = NULL, and the body's
+  // UTF-8 bytes are stored verbatim inside the attributedBody blob. This is
+  // intentionally a superset: the blob also holds attribute key names, so the
+  // caller post-filters on the decoded body text.
   const clauses = [
-    `m.text LIKE ${sqlStringLiteral(`%${likeLiteral(query)}%`)} ESCAPE '\\'`,
+    `(instr(m.text, ${literal}) > 0 OR instr(m.attributedBody, CAST(${literal} AS BLOB)) > 0)`,
   ];
   if (chatId !== null) {
     clauses.push(
@@ -280,6 +281,7 @@ export function searchMessagesSql(
     );
   }
   if (since !== null) clauses.push(`m.date >= ${since}`);
+  if (beforeRowid !== null) clauses.push(`m.ROWID < ${beforeRowid}`);
   // A message can join multiple chats; report its canonical (lowest) chat id
   // once instead of duplicating the row per join.
   return `SELECT ${messageColumns('(SELECT MIN(cmj.chat_id) FROM chat_message_join cmj WHERE cmj.message_id = m.ROWID)')}
@@ -606,7 +608,7 @@ export default class IMessageConnector extends ConnectorRuntime {
       search_messages: action(
         'search_messages',
         'Search messages',
-        'Search message text with a literal LIKE. Messages whose body exists only in attributedBody are not matched by SQL and may be missing from results.',
+        'Case-sensitive literal substring search over message text, including bodies stored only in attributedBody. Blob attribute names are ignored. Pass next_cursor as before_rowid for the next page.',
         'read',
         {
           query: { type: 'string', minLength: 1, maxLength: MAX_SEARCH_LENGTH },
@@ -619,6 +621,11 @@ export default class IMessageConnector extends ConnectorRuntime {
             type: 'string',
             format: 'date-time',
             description: 'Optional ISO timestamp lower bound.',
+          },
+          before_rowid: {
+            type: 'integer',
+            minimum: 1,
+            description: 'Row cursor returned as next_cursor by a previous page.',
           },
           limit: { type: 'integer', minimum: 1, maximum: 200, default: 50 },
         },
@@ -752,6 +759,7 @@ export default class IMessageConnector extends ConnectorRuntime {
   ): Promise<ActionResult> {
     const query = requiredString(ctx.input, 'query', MAX_SEARCH_LENGTH);
     const limit = messageLimit(ctx.input);
+    const before = beforeRowid(ctx.input);
     const chatId = optionalChatId(ctx.input);
     const sinceInput = ctx.input.since;
     let since: string | null = null;
@@ -759,14 +767,25 @@ export default class IMessageConnector extends ConnectorRuntime {
       if (typeof sinceInput !== 'string') throw new Error('since must be an ISO timestamp');
       since = appleNsSince(sinceInput);
     }
+    const overFetch = Math.min(limit * 2, 400);
     const result = await runSql(
       ctx,
       connectionId,
-      searchMessagesSql(query, chatId, since, limit),
+      searchMessagesSql(query, chatId, since, before, overFetch),
       'imessage-search-messages',
     );
     if (!('rows' in result)) return resultFromSqlFailure(result);
-    return { success: true, output: { messages: result.rows.map(mapMessageRow) } };
+    const matched = result.rows
+      .map(mapMessageRow)
+      .filter((message) => message.text !== null && message.text.includes(query));
+    const messages = matched.slice(0, limit);
+    // If the batch was full, rows past the last match may still hold matches;
+    // page from the last scanned rowid so none are skipped.
+    const exhausted = result.rows.length < overFetch;
+    const nextCursor = exhausted
+      ? null
+      : (messages.at(-1)?.rowid ?? numberOrNull(result.rows.at(-1)?.rowid) ?? null);
+    return { success: true, output: { messages, next_cursor: nextCursor } };
   }
 
   private async sendMessage(ctx: ActionContext, connectionId: number): Promise<ActionResult> {

@@ -9,7 +9,6 @@ import IMessageConnector, {
   appleNsSince,
   decodeAttributedBody,
   isoFromAppleDate,
-  likeLiteral,
   quoteShellArg,
   type MessageRowOutput,
 } from '../imessage';
@@ -350,8 +349,7 @@ describe('iMessage connector over the existing shell operation', () => {
     expect(second.result.output?.next_cursor).toBeNull();
   });
 
-  it('treats LIKE metacharacters literally and does not match attributedBody rows', async () => {
-    expect(likeLiteral('a\\b%c_d')).toBe('a\\\\b\\%c\\_d');
+  it('searches attributedBody bodies without matching blob attribute names', async () => {
     const percent = await invoke('search_messages', { query: '100%' });
     expect(percent.result.success).toBe(true);
     expect(
@@ -363,10 +361,24 @@ describe('iMessage connector over the existing shell operation', () => {
       (underscore.result.output?.messages as MessageRowOutput[]).map((message) => message.rowid),
     ).toEqual([5]);
 
+    // Row 2 has text = NULL; its body exists only in attributedBody.
     const body = await invoke('search_messages', { query: 'synthetic' });
     expect(
       (body.result.output?.messages as MessageRowOutput[]).map((message) => message.rowid),
-    ).toEqual([3, 1]);
+    ).toEqual([3, 2, 1]);
+
+    // The blob contains "NSAttributedString", but the decoded body does not.
+    const attributeName = await invoke('search_messages', { query: 'Attribute' });
+    expect(attributeName.result.success).toBe(true);
+    expect(attributeName.result.output?.messages).toEqual([]);
+
+    // instr() is byte/codepoint exact, so matching is case-sensitive.
+    const capital = await invoke('search_messages', { query: 'Hello' });
+    expect(
+      (capital.result.output?.messages as MessageRowOutput[]).map((message) => message.rowid),
+    ).toEqual([2, 1]);
+    const lower = await invoke('search_messages', { query: 'hello' });
+    expect(lower.result.output?.messages).toEqual([]);
 
     const scoped = await invoke('search_messages', { query: 'synthetic', chat_id: 2 });
     expect(
@@ -380,6 +392,89 @@ describe('iMessage connector over the existing shell operation', () => {
     expect(
       (since.result.output?.messages as MessageRowOutput[]).map((message) => message.rowid),
     ).toEqual([3]);
+  });
+
+  it('pages search results and resumes a full prefilter batch from the last scanned row', async () => {
+    const first = await invoke('search_messages', { query: 'synthetic', limit: 1 });
+    expect(
+      (first.result.output?.messages as MessageRowOutput[]).map((message) => message.rowid),
+    ).toEqual([3]);
+    expect(first.result.output?.next_cursor).toBe(3);
+
+    const second = await invoke('search_messages', {
+      query: 'synthetic',
+      limit: 1,
+      before_rowid: 3,
+    });
+    expect(
+      (second.result.output?.messages as MessageRowOutput[]).map((message) => message.rowid),
+    ).toEqual([2]);
+    expect(second.result.output?.next_cursor).toBe(2);
+
+    const third = await invoke('search_messages', {
+      query: 'synthetic',
+      limit: 1,
+      before_rowid: 2,
+    });
+    expect(
+      (third.result.output?.messages as MessageRowOutput[]).map((message) => message.rowid),
+    ).toEqual([1]);
+    expect(third.result.output?.next_cursor).toBeNull();
+
+    // Two newer rows match only on attribute key names, so the first batch is
+    // post-filtered to empty; the cursor still advances past the scanned rows.
+    insertMessage({
+      id: 10,
+      chatId: 2,
+      guid: 'synthetic-attribute-10',
+      text: null,
+      bodyHex: ASCII_BODY_HEX,
+      handleId: 2,
+      service: 'SMS',
+      date: appleNs('2026-01-10T10:00:00Z'),
+    });
+    insertMessage({
+      id: 9,
+      chatId: 2,
+      guid: 'synthetic-attribute-9',
+      text: null,
+      bodyHex: ASCII_BODY_HEX,
+      handleId: 2,
+      service: 'SMS',
+      date: appleNs('2026-01-09T10:00:00Z'),
+    });
+    insertMessage({
+      id: 8,
+      chatId: 2,
+      guid: 'synthetic-attribute-8',
+      text: 'Attribute eight',
+      handleId: 2,
+      service: 'SMS',
+      date: appleNs('2026-01-08T10:00:00Z'),
+    });
+
+    const emptyFirstBatch = await invoke('search_messages', { query: 'Attribute', limit: 1 });
+    expect(emptyFirstBatch.result.success).toBe(true);
+    expect(emptyFirstBatch.result.output?.messages).toEqual([]);
+    expect(emptyFirstBatch.result.output?.next_cursor).toBe(9);
+
+    const resumed = await invoke('search_messages', {
+      query: 'Attribute',
+      limit: 1,
+      before_rowid: 9,
+    });
+    expect(
+      (resumed.result.output?.messages as MessageRowOutput[]).map((message) => message.rowid),
+    ).toEqual([8]);
+    expect(resumed.result.output?.next_cursor).toBe(8);
+
+    const afterResume = await invoke('search_messages', {
+      query: 'Attribute',
+      limit: 1,
+      before_rowid: 8,
+    });
+    expect(afterResume.result.output?.messages).toEqual([]);
+    expect(afterResume.result.output?.next_cursor).toBeNull();
   });
 
   it('keeps SQL injection attempts literal and runs no shell substitution', async () => {
