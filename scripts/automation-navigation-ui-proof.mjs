@@ -19,7 +19,8 @@ export async function runAutomationNavigationProof({
   assert,
 }) {
   const detailPath = `/${workspace}/automations/${automationId}`;
-  const listPath = `/${workspace}/automations`;
+  // Home's Automations section is the Automation list.
+  const listPath = `/${workspace}`;
   const name = page.locator("#scratch-name");
   const activity = () =>
     page.getByRole("link", { name: "View activity", exact: true });
@@ -122,7 +123,7 @@ export async function runAutomationNavigationProof({
     JSON.stringify(
       {
         editor_path: `${editorUrl.pathname}${editorUrl.search}`,
-        automation_list_path: listPath,
+        automation_list_path: `${listPath}?section=automation`,
         activity_path: `/${workspace}?tab=runs&automation_ids=${automationId}`,
         connection_path: `/${workspace}/connectors/${encodeURIComponent(connectorKey)}/${connectionId}`,
         connector_path: `/${workspace}/connectors/${encodeURIComponent(connectorKey)}`,

@@ -393,7 +393,7 @@ export async function runNativeReferenceProof({
       fullPage: true,
     });
     await freshPage.goto(
-      new URL(`/${workspace}/automations`, baseUrl).toString()
+      new URL(`/${workspace}?section=automation`, baseUrl).toString()
     );
     const activity = freshPage.getByRole("link", {
       name: "View activity",
@@ -582,7 +582,9 @@ export async function runNativeReferenceProof({
     path: join(outputDir, "reply-native-reference.png"),
     fullPage: true,
   });
-  await page.goto(new URL(`/${workspace}/automations`, baseUrl).toString());
+  await page.goto(
+    new URL(`/${workspace}?section=automation`, baseUrl).toString()
+  );
   await assertReplyIdentity();
   await page.screenshot({
     path: join(outputDir, "reply-automation-list.png"),
@@ -617,7 +619,7 @@ export async function runNativeReferenceProof({
     workspace,
     automation_id: String(automation.automation_id),
     editor_path: `/${workspace}/automations/${automation.automation_id}?view=definition`,
-    automation_list_path: `/${workspace}/automations`,
+    automation_list_path: `/${workspace}?section=automation`,
     activity_path: `/${workspace}?tab=runs&automation_ids=${automation.automation_id}`,
     connector_path: `/${workspace}/connectors/${encodeURIComponent(connector.id)}`,
     agent_id: agent.agent_id,
