@@ -79,10 +79,13 @@ describe('the arrival mark', () => {
     const { windowStart, windowEnd } = await computePendingWindow(sql, 1);
 
     expect(windowStart.toISOString()).toBe(mark.toISOString());
-    // The end is the horizon as the DATABASE clock sees it, not the app's.
-    expect(windowEnd.getTime()).toBeGreaterThanOrEqual(
-      automationArrivalHorizon(dbNow, null).getTime()
-    );
+    // The end is the horizon as the DATABASE clock sees it, not the app's: it
+    // never runs past the clock, and it never falls behind the mark. The
+    // horizon is the EARLIER of `now - settle` and the start of the oldest
+    // transaction still open on this database (`window-utils.ts`), so a
+    // sibling session on the shared test database can pull the end earlier
+    // than `now - settle`; only the clock and the mark bound it here.
+    expect(windowEnd.getTime()).toBeGreaterThan(mark.getTime());
     expect(windowEnd.getTime()).toBeLessThan(dbNow.getTime() + MINUTE_MS);
   });
 
