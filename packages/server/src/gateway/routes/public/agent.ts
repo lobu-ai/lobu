@@ -14,7 +14,10 @@ import {
 import { type Context, Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { bindRequestAbortToStream } from "../../../events/sse-abort-bridge.js";
-import { isAdminOrOwnerRole } from "../../../tools/access-control.js";
+import {
+  isAdminOrOwnerRole,
+  isPublicReader,
+} from "../../../tools/access-control.js";
 import { resolveRunInitiator } from "../../../tools/initiator.js";
 import {
   defineRoute,
@@ -1693,12 +1696,28 @@ export function createAgentApi(config: AgentApiConfig): Hono {
             SELECT slug FROM organization WHERE id = ${messageOrganizationId} LIMIT 1
           `) as unknown as Array<{ slug: string }>;
           const ownerSlug = orgRow[0]?.slug ?? messageOrganizationId;
+          // Agent ownership (`agent_users`) authorizes chat independently of
+          // workspace membership, so the caller may not belong to the org the
+          // agent resolved to. Read the digest the way
+          // manage_operations.list_activity would for this principal in THAT
+          // org: a non-member is a public reader and keeps only runs on
+          // org-visible connections (or their own), never another member's
+          // private connection names and error snippets.
+          const attentionMemberRole = await getMembershipRole(
+            messageOrganizationId,
+            attentionUserId
+          );
           const { items } = await listOrgActivity({
             organizationId: messageOrganizationId,
             userId: attentionUserId,
             ownerSlug,
             limit: 12,
             aggregate: true,
+            publicReader: isPublicReader({
+              isAuthenticated: true,
+              userId: attentionUserId,
+              memberRole: attentionMemberRole,
+            }),
           });
           ephemeralForTurn = formatActivityAttentionBlock(items);
         } catch {
