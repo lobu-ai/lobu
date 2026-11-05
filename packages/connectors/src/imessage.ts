@@ -580,19 +580,24 @@ function resultFromSqlFailure(result: { receipt: Record<string, unknown> } | { e
     : { success: false, error: result.error };
 }
 
-/** The first stdout line of the send `run` is the sentinel query's JSON. */
+/**
+ * The sentinel query's one-row JSON line in the send `run`'s stdout. A Mac
+ * endpoint runs commands under a login shell, so profile output may precede
+ * it; every line is checked, not just the first.
+ */
 function parseSentinel(stdout: string): number | null {
-  const firstLine = stdout.split('\n', 1)[0] ?? '';
-  try {
-    const rows = JSON.parse(firstLine) as unknown;
-    if (!Array.isArray(rows)) return null;
-    const row = rows[0];
-    return row && typeof row === 'object'
-      ? numberOrNull((row as Record<string, unknown>).rowid)
-      : null;
-  } catch {
-    return null;
+  for (const line of stdout.split('\n')) {
+    try {
+      const rows = JSON.parse(line) as unknown;
+      const row = Array.isArray(rows) ? rows[0] : undefined;
+      const rowid =
+        row && typeof row === 'object' ? numberOrNull((row as Record<string, unknown>).rowid) : null;
+      if (rowid !== null) return rowid;
+    } catch {
+      // Not the sentinel line.
+    }
   }
+  return null;
 }
 
 type ShellErrorDetails = { stdout?: string; stdout_head?: string };
@@ -854,13 +859,18 @@ export default class IMessageConnector extends ConnectorRuntime {
     );
     if (send.kind === 'receipt') return { success: true, output: { ...send.receipt } };
     if (send.kind === 'error') {
+      // The sentinel query always prints one row, so empty stdout proves
+      // sqlite3 failed and `&&` never reached osascript. Any other stdout
+      // (login-profile noise included) cannot rule out a send.
       const details = parseShellError(send.error);
-      const sentinelRan =
-        details !== null && parseSentinel(details.stdout_head ?? details.stdout ?? '') !== null;
+      const notSent =
+        details !== null &&
+        (details.stdout_head ?? '').trim() === '' &&
+        (details.stdout ?? '').trim() === '';
       return {
         success: false,
         error: `${send.error} ${
-          details !== null && !sentinelRan
+          notSent
             ? 'The message was not sent: the pre-send database read failed before osascript ran.'
             : 'The message may already have been sent; inspect this run before retrying.'
         }`,

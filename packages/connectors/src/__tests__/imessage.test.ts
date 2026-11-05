@@ -813,6 +813,24 @@ describe('iMessage connector over the existing shell operation', () => {
     expect(result.error).not.toContain('was not sent');
   });
 
+  it('warns about a possible send when login-profile output precedes the sentinel', async () => {
+    const { result } = await invoke(
+      'send_message',
+      { chat_guid: 'iMessage;-;+15550001001', text: 'synthetic profile noise' },
+      {
+        receipt: completed({
+          exit_code: 1,
+          stdout: 'synthetic profile banner\n[{"rowid":2}]\n',
+          stderr: 'osascript: timed out',
+          timed_out: false,
+        }),
+      },
+    );
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('may already have been sent');
+    expect(result.error).not.toContain('was not sent');
+  });
+
   it('quotes an injection recipient and body as single argv values', async () => {
     const marker = join(home, 'recipient-injection-marker');
     const recipient = `+1555'; touch ${marker}; echo '@example.test`;
