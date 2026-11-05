@@ -555,6 +555,37 @@ describe("RunsQueue — startup recovery scan", () => {
 });
 
 
+/**
+ * Log services the disconnected-API-delivery path emits through: the queue, the
+ * thread-response consumer, and the API response renderer.
+ *
+ * `console.error` is process-global and a gateway lane runs every one of its
+ * files in a single bun process, so the "no error-log spam" assertion below is
+ * scoped to these services. An error logged by a sibling file in the lane — an
+ * abandoned proxy request, for example — is not this test's failure.
+ */
+const DELIVERY_PATH_LOG_SERVICES = [
+  "runs-queue",
+  "unified-thread-consumer",
+  "api-response-renderer",
+] as const;
+
+/**
+ * True when a captured `console.error` argument was written by one of the
+ * delivery path's loggers. The console logger renders the service as
+ * `[<service>]` and the JSON format as `"service":"<service>"`.
+ */
+function isDeliveryPathLog(args: unknown[]): boolean {
+  return args.some(
+    (arg) =>
+      typeof arg === "string" &&
+      DELIVERY_PATH_LOG_SERVICES.some(
+        (service) =>
+          arg.includes(`[${service}]`) || arg.includes(`"service":"${service}"`)
+      )
+  );
+}
+
 describe("RunsQueue — disconnected API delivery", () => {
   test("exhausts the bounded owner budget without error-log spam and retains the terminal", async () => {
     if (!queue) throw new Error("queue not started");
@@ -590,7 +621,9 @@ describe("RunsQueue — disconnected API delivery", () => {
       expect(sse.getRecentEvents("conversation-offline").map((entry) => entry.data)).toContainEqual(
         expect.objectContaining({ messageId: "message-offline", finalText: "retained answer" })
       );
-      expect(errors).toEqual([]);
+      // Only the delivery path's own log lines count here: the capture is
+      // process-global, and a sibling file in this lane shares it.
+      expect(errors.filter(isDeliveryPathLog)).toEqual([]);
     } finally {
       console.error = originalError;
       await consumer.stop();
