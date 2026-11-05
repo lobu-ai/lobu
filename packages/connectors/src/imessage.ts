@@ -779,12 +779,13 @@ export default class IMessageConnector extends ConnectorRuntime {
       .map(mapMessageRow)
       .filter((message) => message.text !== null && message.text.includes(query));
     const messages = matched.slice(0, limit);
-    // If the batch was full, rows past the last match may still hold matches;
-    // page from the last scanned rowid so none are skipped.
+    // A short SQL batch can still hold more decoded matches than the page
+    // size; only the absence of further scanned rows *and* matches ends paging.
     const exhausted = result.rows.length < overFetch;
-    const nextCursor = exhausted
-      ? null
-      : (messages.at(-1)?.rowid ?? numberOrNull(result.rows.at(-1)?.rowid) ?? null);
+    const nextCursor =
+      exhausted && matched.length <= limit
+        ? null
+        : (messages.at(-1)?.rowid ?? numberOrNull(result.rows.at(-1)?.rowid) ?? null);
     return { success: true, output: { messages, next_cursor: nextCursor } };
   }
 

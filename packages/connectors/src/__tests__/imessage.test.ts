@@ -477,6 +477,24 @@ describe('iMessage connector over the existing shell operation', () => {
     expect(afterResume.result.output?.next_cursor).toBeNull();
   });
 
+  it('keeps the cursor when a short batch still has more matches than the page', async () => {
+    const first = await invoke('search_messages', { query: 'synthetic', limit: 2 });
+    expect(
+      (first.result.output?.messages as MessageRowOutput[]).map((message) => message.rowid),
+    ).toEqual([3, 2]);
+    expect(first.result.output?.next_cursor).toBe(2);
+
+    const rest = await invoke('search_messages', {
+      query: 'synthetic',
+      limit: 2,
+      before_rowid: 2,
+    });
+    expect(
+      (rest.result.output?.messages as MessageRowOutput[]).map((message) => message.rowid),
+    ).toEqual([1]);
+    expect(rest.result.output?.next_cursor).toBeNull();
+  });
+
   it('keeps SQL injection attempts literal and runs no shell substitution', async () => {
     const marker = join(home, 'sql-injection-marker');
     const injected = `'; CREATE TABLE pwned(x); -- $(touch ${marker})`;
