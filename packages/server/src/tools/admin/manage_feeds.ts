@@ -226,12 +226,10 @@ async function handleListFeeds(
   const selectedOperations = sql`COALESCE(selected_definition.feeds_schema->f.feed_key->'operations', '[]'::jsonb)`;
   const webhookDriven = sql`${sql.unsafe(feedWebhookDrivenSql('selected_definition', 'f'))}`;
 
-  // Build the filtered "page" of feeds first, then compute event_count in a
-  // single GROUP BY restricted to the (connection_id, feed_key) tuples on
-  // that page. The previous shape ran a correlated
-  // `SELECT COUNT(*) FROM current_event_records` per row — O(N feeds) ×
-  // an anti-join over the entire events table — ~880ms per feed on a busy
-  // connection. Batching collapses it to one scan.
+  // Build the filtered "page" of feeds first. When the caller asks for
+  // event_count (`include_event_count`), it is one GROUP BY restricted to the
+  // (connection_id, feed_key) tuples on that page, not a correlated count per
+  // row (~880ms per feed on a busy connection).
   // Filter predicates built ONCE and shared between the page query and the
   // overshoot fallback count, so the two can never diverge. `where` starts with
   // a TRUE seed so every real condition appends uniformly with AND.
