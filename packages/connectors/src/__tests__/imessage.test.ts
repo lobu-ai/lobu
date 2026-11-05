@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ActionContext } from '@lobu/connector-sdk';
@@ -45,6 +45,7 @@ const OSASCRIPT = '/usr/bin/osascript';
 const connector = new IMessageConnector();
 let home: string;
 let db: Database;
+let osascriptStub: string;
 
 function appleNs(iso: string): number {
   return (Date.parse(iso) / 1000 - APPLE_EPOCH_OFFSET_SECONDS) * 1e9;
@@ -109,7 +110,9 @@ function resetDb(): void {
   db.run("INSERT INTO chat VALUES (2, 'SMS;-;+15550001002', '+15550001002', NULL, 'SMS')");
   db.run("INSERT INTO handle VALUES (1, '+15550001001')");
   db.run("INSERT INTO handle VALUES (2, '+15550001002')");
+  db.run("INSERT INTO handle VALUES (3, '+15550001003')");
   db.run('INSERT INTO chat_handle_join VALUES (1, 1)');
+  db.run('INSERT INTO chat_handle_join VALUES (1, 3)');
   db.run('INSERT INTO chat_handle_join VALUES (2, 2)');
   insertMessage({
     id: 1,
@@ -173,6 +176,12 @@ function resetDb(): void {
 beforeAll(async () => {
   home = await mkdtemp(join(tmpdir(), 'imessage-connector-test-'));
   await mkdir(join(home, 'Library/Messages'), { recursive: true });
+  osascriptStub = join(home, 'osascript-stub');
+  await writeFile(
+    osascriptStub,
+    `#!/bin/sh\nprintf '%s\\n' "$@" > "$HOME/osascript-argv"\ncat > "$HOME/osascript-stdin"\necho sent\n`,
+    { mode: 0o755 },
+  );
   db = new Database(join(home, 'Library/Messages/chat.db'), { create: true });
   db.exec(`
     CREATE TABLE chat (
@@ -231,11 +240,14 @@ async function invoke(
       execute: async (request: RequestLog) => {
         requests.push(request);
         if (options.receipt) return options.receipt;
-        if (request.input.command.includes(OSASCRIPT)) {
-          options.onSend?.();
-          return completed({ exit_code: 0, stdout: 'sent\n', stderr: '', timed_out: false });
-        }
-        const child = Bun.spawn(['bash', '--noprofile', '--norc', '-c', request.input.command], {
+        // The real command runs; only the Messages automation binary is
+        // swapped for a stub that records the argv and script it received.
+        const isSend = request.input.command.includes(quoteShellArg(OSASCRIPT));
+        const command = request.input.command.replace(
+          quoteShellArg(OSASCRIPT),
+          quoteShellArg(osascriptStub),
+        );
+        const child = Bun.spawn(['bash', '--noprofile', '--norc', '-c', command], {
           env: { ...process.env, HOME: home } as Record<string, string>,
           stdin:
             request.input.stdin === undefined
@@ -246,8 +258,10 @@ async function invoke(
         });
         const stdout = await new Response(child.stdout).text();
         const stderr = await new Response(child.stderr).text();
+        const exitCode = await child.exited;
+        if (isSend && exitCode === 0) options.onSend?.();
         return completed({
-          exit_code: await child.exited,
+          exit_code: exitCode,
           stdout,
           stderr,
           timed_out: false,
@@ -288,9 +302,10 @@ describe('typedstream attributedBody decoding', () => {
 });
 
 describe('iMessage connector over the existing shell operation', () => {
-  it('lists chats by last message with participants and service', async () => {
-    const { result } = await invoke('list_chats', { limit: 20 });
+  it('lists chats and participants in one shell run', async () => {
+    const { result, requests } = await invoke('list_chats', { limit: 20 });
     expect(result.success).toBe(true);
+    expect(requests).toHaveLength(1);
     const chats = result.output?.chats as Array<Record<string, unknown>>;
     expect(chats).toHaveLength(2);
     expect(chats[0]).toMatchObject({
@@ -305,7 +320,7 @@ describe('iMessage connector over the existing shell operation', () => {
       chat_id: 1,
       guid: 'iMessage;-;+15550001001',
       display_name: 'Synthetic One',
-      participants: ['+15550001001'],
+      participants: ['+15550001001', '+15550001003'],
       service: 'iMessage',
       last_message_at: '2026-01-04T10:00:00.000Z',
     });
@@ -530,6 +545,26 @@ describe('iMessage connector over the existing shell operation', () => {
     expect(requests).toHaveLength(1);
   });
 
+  it('gates the send itself, so approving the one pending child sends the message', async () => {
+    const receipt = {
+      action: 'execute',
+      status: 'pending_approval',
+      run_id: 457,
+      approval_url: 'https://gateway.test/approval',
+    };
+    const { result, requests } = await invoke(
+      'send_message',
+      { chat_guid: 'iMessage;-;+15550001001', text: 'synthetic gated' },
+      { receipt },
+    );
+    expect(result).toEqual({ success: true, output: receipt });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.idempotency_key).toBe('imessage-send');
+    expect(requests[0]?.input.command).toContain(quoteShellArg(OSASCRIPT));
+    expect(requests[0]?.input.command).toContain(quoteShellArg('synthetic gated'));
+    expect(requests[0]?.input.stdin).toContain('on run argv');
+  });
+
   it('reports a shell failure with the run id and stderr', async () => {
     const { result } = await invoke('list_chats', {}, {
       receipt: completed({
@@ -547,10 +582,48 @@ describe('iMessage connector over the existing shell operation', () => {
     });
   });
 
+  it('reports a truncated shell page as a lower-limit error', async () => {
+    const { result } = await invoke('read_chat', { chat_id: 1, limit: 10 }, {
+      receipt: completed({
+        exit_code: 0,
+        stdout: 'x'.repeat(1_100_000),
+        stderr: '',
+        timed_out: false,
+      }),
+    });
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('lower');
+    expect(result.error).toContain('limit');
+    expect(result.error).not.toContain('invalid JSON');
+  });
+
+  it('marks an oversized body as truncated instead of returning it', async () => {
+    insertMessage({
+      id: 11,
+      chatId: 1,
+      guid: 'synthetic-huge-body',
+      text: null,
+      bodyHex: ASCII_BODY_HEX + '00'.repeat(4096),
+      handleId: 1,
+      service: 'iMessage',
+      date: appleNs('2026-01-11T10:00:00Z'),
+    });
+    const { result } = await invoke('read_chat', { chat_id: 1, limit: 1 });
+    expect(result.success).toBe(true);
+    const [message] = result.output?.messages as MessageRowOutput[];
+    expect(message).toMatchObject({
+      rowid: 11,
+      text: null,
+      text_source: null,
+      text_truncated: true,
+    });
+  });
+
   it('rejects unsafe identifiers, missing targets and invalid bounds before dispatch', async () => {
     await expect(invoke('read_chat', { chat_id: 0 })).rejects.toThrow('chat_id');
     await expect(invoke('read_chat', { chat_id: '1' })).rejects.toThrow('chat_id');
-    await expect(invoke('read_chat', { chat_id: 1, limit: 201 })).rejects.toThrow('1..200');
+    await expect(invoke('read_chat', { chat_id: 1, limit: 101 })).rejects.toThrow('1..100');
+    await expect(invoke('search_messages', { query: 'x', limit: 51 })).rejects.toThrow('1..50');
     await expect(invoke('list_chats', { limit: 101 })).rejects.toThrow('1..100');
     await expect(
       invoke('send_message', { text: 'hello' }),
@@ -638,6 +711,11 @@ describe('iMessage connector over the existing shell operation', () => {
       "'chat' 'iMessage;-;+15550001001'",
     );
     expect(send?.input.command).toContain(quoteShellArg(text));
+    expect(await readFile(join(home, 'osascript-stdin'), 'utf8')).toContain('on run argv');
+    expect(await readFile(join(home, 'osascript-argv'), 'utf8')).toBe(
+      `-\nchat\niMessage;-;+15550001001\n${text}\n`,
+    );
+    expect(requests[0]).toBe(send);
     expect(existsSync(marker)).toBe(false);
   });
 
@@ -697,6 +775,42 @@ describe('iMessage connector over the existing shell operation', () => {
       chat_id: 1,
       message: { rowid: 9, error: 22 },
     });
+  });
+
+  it('says the message was not sent when the pre-send read failed', async () => {
+    const { result } = await invoke(
+      'send_message',
+      { chat_guid: 'iMessage;-;+15550001001', text: 'synthetic not sent' },
+      {
+        receipt: completed({
+          exit_code: 1,
+          stdout: '',
+          stderr: 'Error: no such table: message',
+          timed_out: false,
+        }),
+      },
+    );
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('was not sent');
+    expect(result.error).not.toContain('may already have been sent');
+  });
+
+  it('warns about a possible send when osascript ran and failed', async () => {
+    const { result } = await invoke(
+      'send_message',
+      { chat_guid: 'iMessage;-;+15550001001', text: 'synthetic maybe sent' },
+      {
+        receipt: completed({
+          exit_code: 1,
+          stdout: '[{"rowid":2}]\n',
+          stderr: 'osascript: not authorized',
+          timed_out: false,
+        }),
+      },
+    );
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('may already have been sent');
+    expect(result.error).not.toContain('was not sent');
   });
 
   it('quotes an injection recipient and body as single argv values', async () => {

@@ -11,7 +11,8 @@ import {
  *
  * `run` is the only os.shell operation this connector uses: every command is
  * a fixed argv with user input quoted as one argument, and every SQL statement
- * arrives on stdin. SQLite and osascript are macOS system binaries, so no
+ * carrying a value arrives on stdin (only the constant pre-send sentinel query
+ * rides in argv). SQLite and osascript are macOS system binaries, so no
  * project install step is involved.
  */
 const APPLE_EPOCH_OFFSET_SECONDS = 978307200;
@@ -24,6 +25,11 @@ const READ_TIMEOUT_MS = 15000;
 const WRITE_TIMEOUT_MS = 30000;
 const MAX_SEARCH_LENGTH = 500;
 const MAX_SEND_LENGTH = 4000;
+// os.shell caps stdout at 1 MiB. Keep each text/blob column small and page
+// sizes bounded so a full page stays below that cap; the SQL selects a
+// truncated value only when the row is larger than this.
+const MAX_STORED_TEXT_BYTES = 2048;
+const MAX_SHELL_STDOUT_CHARS = 1_048_576;
 
 const SEND_SCRIPT = `on run argv
   set targetKind to item 1 of argv
@@ -160,6 +166,7 @@ export interface MessageRowOutput {
   service: string | null;
   text: string | null;
   text_source: 'text' | 'attributedBody' | null;
+  text_truncated: boolean;
   has_attachments: boolean;
   sent_at: string | null;
   is_delivered: boolean;
@@ -210,6 +217,8 @@ export function mapMessageRow(row: Record<string, unknown>): MessageRowOutput {
     service: stringOrNull(row.service),
     text,
     text_source: textSource,
+    text_truncated:
+      text === null && (flag(row.text_truncated) || flag(row.body_truncated)),
     has_attachments: flag(row.has_attachments),
     sent_at: isoFromAppleDate(row.date),
     is_delivered: flag(row.is_delivered),
@@ -221,7 +230,11 @@ export function mapMessageRow(row: Record<string, unknown>): MessageRowOutput {
 export function listChatsSql(limit: number): string {
   return `SELECT c.ROWID AS chat_id, c.guid AS guid, c.display_name AS display_name,
        c.chat_identifier AS chat_identifier, c.service_name AS service,
-       MAX(m.date) AS last_message_date
+       MAX(m.date) AS last_message_date,
+       (SELECT json_group_array(h.id)
+        FROM chat_handle_join chj
+        JOIN handle h ON h.ROWID = chj.handle_id
+        WHERE chj.chat_id = c.ROWID) AS participants_json
 FROM chat c
 JOIN chat_message_join cmj ON cmj.chat_id = c.ROWID
 JOIN message m ON m.ROWID = cmj.message_id
@@ -230,18 +243,32 @@ ORDER BY last_message_date DESC, c.ROWID DESC
 LIMIT ${limit};`;
 }
 
-export function participantsSql(chatIds: number[]): string {
-  return `SELECT chj.chat_id AS chat_id, h.id AS handle
-FROM chat_handle_join chj
-JOIN handle h ON h.ROWID = chj.handle_id
-WHERE chj.chat_id IN (${chatIds.join(', ')})
-ORDER BY chj.chat_id, h.id;`;
+export function participantsFromJson(value: unknown): string[] {
+  if (typeof value !== 'string' || value.length === 0) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  const handles = parsed.filter(
+    (item): item is string => typeof item === 'string' && item.length > 0,
+  );
+  return [...new Set(handles)].sort();
 }
 
 function messageColumns(chatId: string): string {
   return `m.ROWID AS rowid, m.guid AS guid, ${chatId} AS chat_id,
        h.id AS sender, m.is_from_me AS is_from_me, m.service AS service,
-       m.text AS text, hex(m.attributedBody) AS attributed_body_hex,
+       CASE WHEN length(CAST(m.text AS BLOB)) <= ${MAX_STORED_TEXT_BYTES}
+            THEN m.text ELSE NULL END AS text,
+       CASE WHEN length(CAST(m.text AS BLOB)) > ${MAX_STORED_TEXT_BYTES}
+            THEN 1 ELSE 0 END AS text_truncated,
+       CASE WHEN length(m.attributedBody) <= ${MAX_STORED_TEXT_BYTES}
+            THEN hex(m.attributedBody) ELSE NULL END AS attributed_body_hex,
+       CASE WHEN length(m.attributedBody) > ${MAX_STORED_TEXT_BYTES}
+            THEN 1 ELSE 0 END AS body_truncated,
        m.has_attachments AS has_attachments, m.date AS date,
        m.is_delivered AS is_delivered, m.is_sent AS is_sent, m.error AS error`;
 }
@@ -442,8 +469,12 @@ function listLimit(input: Record<string, unknown>): number {
   return boundedInteger(input.limit, 20, 100);
 }
 
-function messageLimit(input: Record<string, unknown>): number {
-  return boundedInteger(input.limit, 50, 200);
+function readLimit(input: Record<string, unknown>): number {
+  return boundedInteger(input.limit, 50, 100);
+}
+
+function searchLimit(input: Record<string, unknown>): number {
+  return boundedInteger(input.limit, 50, 50);
 }
 
 function beforeRowid(input: Record<string, unknown>): number | null {
@@ -500,6 +531,7 @@ async function runShell(
         timed_out: shell?.timed_out,
         stderr: shell?.stderr?.slice(-2000),
         stdout: shell?.stdout?.slice(-1000),
+        stdout_head: shell?.stdout?.slice(0, 1000),
       }),
     };
   return { kind: 'completed', runId: numberOrNull(receipt.run_id) ?? undefined, shell };
@@ -522,17 +554,23 @@ async function runSql(
   if (result.kind === 'receipt') return { receipt: result.receipt };
   if (result.kind === 'error') return { error: result.error };
   const stdout = result.shell.stdout ?? '';
+  if (stdout.length >= MAX_SHELL_STDOUT_CHARS)
+    return {
+      error: `sqlite3 output reached the shell's 1 MiB stdout cap; lower \`limit\` and retry (shell run ${result.runId}).`,
+    };
   if (stdout.trim() === '') return { rows: [] };
   let parsed: unknown;
   try {
     parsed = JSON.parse(stdout);
   } catch {
     return {
-      error: `sqlite3 returned invalid JSON (shell run ${result.runId}); inspect that run before retrying.`,
+      error: `sqlite3 output could not be parsed, possibly because it was truncated by the shell's 1 MiB stdout cap; lower \`limit\` and retry (shell run ${result.runId}).`,
     };
   }
   if (!Array.isArray(parsed) || parsed.some((row) => typeof row !== 'object' || row === null))
-    return { error: `sqlite3 returned an unexpected JSON shape (shell run ${result.runId}).` };
+    return {
+      error: `sqlite3 returned an unexpected JSON shape; lower \`limit\` and retry (shell run ${result.runId}).`,
+    };
   return { rows: parsed as Array<Record<string, unknown>> };
 }
 
@@ -542,16 +580,44 @@ function resultFromSqlFailure(result: { receipt: Record<string, unknown> } | { e
     : { success: false, error: result.error };
 }
 
-function chatRow(
-  row: Record<string, unknown>,
-  participants: string[],
-): ChatRowOutput {
+/** The first stdout line of the send `run` is the sentinel query's JSON. */
+function parseSentinel(stdout: string): number | null {
+  const firstLine = stdout.split('\n', 1)[0] ?? '';
+  try {
+    const rows = JSON.parse(firstLine) as unknown;
+    if (!Array.isArray(rows)) return null;
+    const row = rows[0];
+    return row && typeof row === 'object'
+      ? numberOrNull((row as Record<string, unknown>).rowid)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+type ShellErrorDetails = { stdout?: string; stdout_head?: string };
+
+/** The shell's nonzero-exit error JSON, or null for a pre-run failure. */
+function parseShellError(error: string): ShellErrorDetails | null {
+  try {
+    const parsed = JSON.parse(error) as unknown;
+    if (!parsed || typeof parsed !== 'object') return null;
+    const details = parsed as ShellErrorDetails;
+    return typeof details.stdout === 'string' || typeof details.stdout_head === 'string'
+      ? details
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function chatRow(row: Record<string, unknown>): ChatRowOutput {
   return {
     chat_id: numberOrNull(row.chat_id) ?? 0,
     guid: stringOrNull(row.guid),
     display_name: stringOrNull(row.display_name),
     chat_identifier: stringOrNull(row.chat_identifier),
-    participants,
+    participants: participantsFromJson(row.participants_json),
     service: stringOrNull(row.service),
     last_message_at: isoFromAppleDate(row.last_message_date),
   };
@@ -592,7 +658,7 @@ export default class IMessageConnector extends ConnectorRuntime {
       read_chat: action(
         'read_chat',
         'Read chat',
-        "Read one chat's messages newest first. Pass next_cursor as before_rowid for the next page.",
+        "Read one chat's messages newest first. Pass next_cursor as before_rowid for the next page. Bodies over 2 KiB return text: null with text_truncated: true.",
         'read',
         {
           chat_id: { type: 'integer', minimum: 1 },
@@ -601,14 +667,14 @@ export default class IMessageConnector extends ConnectorRuntime {
             minimum: 1,
             description: 'Row cursor returned as next_cursor by a previous page.',
           },
-          limit: { type: 'integer', minimum: 1, maximum: 200, default: 50 },
+          limit: { type: 'integer', minimum: 1, maximum: 100, default: 50 },
         },
         ['chat_id'],
       ),
       search_messages: action(
         'search_messages',
         'Search messages',
-        'Case-sensitive literal substring search over message text, including bodies stored only in attributedBody. Blob attribute names are ignored. Pass next_cursor as before_rowid for the next page.',
+        'Case-sensitive literal substring search over message text, including bodies stored only in attributedBody. Blob attribute names are ignored. Bodies over 2 KiB are not searched. Pass next_cursor as before_rowid for the next page.',
         'read',
         {
           query: { type: 'string', minLength: 1, maxLength: MAX_SEARCH_LENGTH },
@@ -627,7 +693,7 @@ export default class IMessageConnector extends ConnectorRuntime {
             minimum: 1,
             description: 'Row cursor returned as next_cursor by a previous page.',
           },
-          limit: { type: 'integer', minimum: 1, maximum: 200, default: 50 },
+          limit: { type: 'integer', minimum: 1, maximum: 50, default: 50 },
         },
         ['query'],
       ),
@@ -693,46 +759,15 @@ export default class IMessageConnector extends ConnectorRuntime {
     const limit = listLimit(ctx.input);
     const result = await runSql(ctx, connectionId, listChatsSql(limit), 'imessage-list-chats');
     if (!('rows' in result)) return resultFromSqlFailure(result);
-    const chats = result.rows.map((row) => ({
-      row,
-      participants: [] as string[],
-    }));
-    if (chats.length > 0) {
-      const ids = chats
-        .map((chat) => numberOrNull(chat.row.chat_id))
-        .filter((id): id is number => id !== null);
-      if (ids.length > 0) {
-        const people = await runSql(
-          ctx,
-          connectionId,
-          participantsSql(ids),
-          'imessage-chat-participants',
-        );
-        if (!('rows' in people)) return resultFromSqlFailure(people);
-        const byChat = new Map<number, string[]>();
-        for (const row of people.rows) {
-          const id = numberOrNull(row.chat_id);
-          const handle = stringOrNull(row.handle);
-          if (id === null || handle === null) continue;
-          const list = byChat.get(id) ?? [];
-          if (!list.includes(handle)) list.push(handle);
-          byChat.set(id, list);
-        }
-        for (const chat of chats) {
-          const id = numberOrNull(chat.row.chat_id);
-          chat.participants = id === null ? [] : (byChat.get(id) ?? []);
-        }
-      }
-    }
     return {
       success: true,
-      output: { chats: chats.map((chat) => chatRow(chat.row, chat.participants)) },
+      output: { chats: result.rows.map(chatRow) },
     };
   }
 
   private async readChat(ctx: ActionContext, connectionId: number): Promise<ActionResult> {
     const chatId = assertChatId(ctx.input);
-    const limit = messageLimit(ctx.input);
+    const limit = readLimit(ctx.input);
     const before = beforeRowid(ctx.input);
     const result = await runSql(
       ctx,
@@ -758,7 +793,7 @@ export default class IMessageConnector extends ConnectorRuntime {
     connectionId: number,
   ): Promise<ActionResult> {
     const query = requiredString(ctx.input, 'query', MAX_SEARCH_LENGTH);
-    const limit = messageLimit(ctx.input);
+    const limit = searchLimit(ctx.input);
     const before = beforeRowid(ctx.input);
     const chatId = optionalChatId(ctx.input);
     const sinceInput = ctx.input.since;
@@ -767,7 +802,7 @@ export default class IMessageConnector extends ConnectorRuntime {
       if (typeof sinceInput !== 'string') throw new Error('since must be an ISO timestamp');
       since = appleNsSince(sinceInput);
     }
-    const overFetch = Math.min(limit * 2, 400);
+    const overFetch = Math.min(limit * 2, 100);
     const result = await runSql(
       ctx,
       connectionId,
@@ -793,38 +828,22 @@ export default class IMessageConnector extends ConnectorRuntime {
     const target = sendTarget(ctx.input);
     const text = requiredString(ctx.input, 'text', MAX_SEND_LENGTH);
 
-    const sentinelResult = await runSql(
-      ctx,
-      connectionId,
-      outgoingSentinelSql(),
-      'imessage-send-sentinel',
-    );
-    if (!('rows' in sentinelResult)) return resultFromSqlFailure(sentinelResult);
-    const sentinel = numberOrNull(sentinelResult.rows[0]?.rowid) ?? 0;
-
-    const chatResult = await runSql(
-      ctx,
-      connectionId,
-      target.kind === 'chat'
-        ? chatByGuidSql(target.chatGuid)
-        : chatByRecipientSql(target.recipient),
-      'imessage-send-chat',
-    );
-    if (!('rows' in chatResult)) return resultFromSqlFailure(chatResult);
-    const resolvedChat = chatResult.rows[0];
-    const chatId = numberOrNull(resolvedChat?.chat_id);
-    const chatGuid =
-      target.kind === 'chat' ? target.chatGuid : stringOrNull(resolvedChat?.guid);
-
+    // The send is the first and only effectful child: the sentinel read rides
+    // in the same `run`, so an approval card shows (and approving executes)
+    // the actual send. sqlite3 takes its constant SQL as an argument and never
+    // reads stdin, which leaves the AppleScript on stdin for osascript.
     const command = [
-      OSASCRIPT_BINARY,
-      '-',
-      target.kind === 'chat' ? 'chat' : 'recipient',
-      target.kind === 'chat' ? target.chatGuid : target.recipient,
-      text,
-    ]
-      .map(quoteShellArg)
-      .join(' ');
+      `${quoteShellArg(SQLITE_BINARY)} -readonly -json ${CHAT_DB_PATH} ${quoteShellArg(outgoingSentinelSql())}`,
+      [
+        OSASCRIPT_BINARY,
+        '-',
+        target.kind === 'chat' ? 'chat' : 'recipient',
+        target.kind === 'chat' ? target.chatGuid : target.recipient,
+        text,
+      ]
+        .map(quoteShellArg)
+        .join(' '),
+    ].join(' && ');
     const send = await runShell(
       ctx,
       connectionId,
@@ -834,11 +853,50 @@ export default class IMessageConnector extends ConnectorRuntime {
       'imessage-send',
     );
     if (send.kind === 'receipt') return { success: true, output: { ...send.receipt } };
-    if (send.kind === 'error')
+    if (send.kind === 'error') {
+      const details = parseShellError(send.error);
+      const sentinelRan =
+        details !== null && parseSentinel(details.stdout_head ?? details.stdout ?? '') !== null;
       return {
         success: false,
-        error: `${send.error} The message may already have been sent; inspect this run before retrying.`,
+        error: `${send.error} ${
+          details !== null && !sentinelRan
+            ? 'The message was not sent: the pre-send database read failed before osascript ran.'
+            : 'The message may already have been sent; inspect this run before retrying.'
+        }`,
       };
+    }
+    const sentinel = parseSentinel(send.shell.stdout ?? '');
+
+    const chatResult = await runSql(
+      ctx,
+      connectionId,
+      target.kind === 'chat'
+        ? chatByGuidSql(target.chatGuid)
+        : chatByRecipientSql(target.recipient),
+      'imessage-send-chat',
+    );
+    const resolvedChat = 'rows' in chatResult ? chatResult.rows[0] : undefined;
+    const chatId = numberOrNull(resolvedChat?.chat_id);
+    const chatGuid =
+      target.kind === 'chat' ? target.chatGuid : stringOrNull(resolvedChat?.guid);
+    const base = {
+      run_id: send.runId,
+      chat_id: chatId,
+      chat_guid: chatGuid,
+      recipient: target.kind === 'recipient' ? target.recipient : null,
+    };
+    if (sentinel === null) {
+      return {
+        success: true,
+        output: {
+          ...base,
+          status: 'sent_unconfirmed',
+          message: null,
+          note: 'The pre-send outgoing row id was unreadable, so the sent row cannot be confirmed.',
+        },
+      };
+    }
 
     const confirm = await runSql(
       ctx,
@@ -846,12 +904,6 @@ export default class IMessageConnector extends ConnectorRuntime {
       confirmSentSql(target, sentinel),
       'imessage-send-confirm',
     );
-    const base = {
-      run_id: send.runId,
-      chat_id: chatId,
-      chat_guid: chatGuid,
-      recipient: target.kind === 'recipient' ? target.recipient : null,
-    };
     if (!('rows' in confirm)) {
       return {
         success: true,
