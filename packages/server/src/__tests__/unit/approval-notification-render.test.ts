@@ -3,6 +3,7 @@ import {
 	type ActionApprovalDetails,
 	buildActionApprovalCard,
 	formatActionApprovalBody,
+	formatActionApprovalTitle,
 } from "../../notifications/triggers";
 
 /**
@@ -145,6 +146,38 @@ describe("approval notification rendering", () => {
 			},
 		});
 		expect(body).toContain("- Severity: ~high~\n→ critical");
+	});
+
+	test("identity link titles name both records, falling back to ids", () => {
+		// Four pending links used to read as four identical "Review associating
+		// identity records" cards; the title is what tells them apart.
+		const link = (records: unknown): ActionApprovalDetails => ({
+			kind: "entity_change",
+			operation: "link",
+			proposal: { from_entity_id: 11, to_entity_id: 12, records },
+		});
+		expect(
+			formatActionApprovalTitle(
+				"entity_change",
+				link([
+					{ id: 12, name: "Ada\nLovelace", parent: null },
+					{ id: 11, name: "Ada Lovelace", parent: null },
+				]),
+			),
+		).toBe("Link Ada Lovelace (#11) and Ada Lovelace (#12)");
+		expect(
+			formatActionApprovalTitle("entity_change", {
+				...link([{ id: 11, name: "Ada", parent: null }]),
+				operation: "unlink",
+			} as ActionApprovalDetails),
+		).toBe("Separate Ada (#11) and #12");
+		expect(
+			formatActionApprovalTitle("entity_change", {
+				kind: "entity_change",
+				operation: "link",
+				proposal: null,
+			}),
+		).toBe("Review associating identity records");
 	});
 
 	test("an ask that takes no input still gets decision buttons", () => {
