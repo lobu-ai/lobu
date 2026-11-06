@@ -19,19 +19,10 @@ export async function runAutomationNavigationProof({
   assert,
 }) {
   const detailPath = `/${workspace}/automations/${automationId}`;
-  // Home's Automations section is the Automation list.
-  const listPath = `/${workspace}`;
+  const listPath = `/${workspace}/automations`;
   const name = page.locator("#scratch-name");
   const activity = () =>
     page.getByRole("link", { name: "View activity", exact: true });
-  // Home's Automations section is the Automation list; a row opens that
-  // Automation's activity in the peek.
-  const automationRow = () =>
-    page
-      .getByRole("region", { name: "Automations", exact: true })
-      .getByRole("link")
-      .filter({ hasText: automationName })
-      .first();
   const close = () =>
     page.getByRole("button", { name: "Close preview", exact: true }).click();
   const emptyActivity = () =>
@@ -131,7 +122,7 @@ export async function runAutomationNavigationProof({
     JSON.stringify(
       {
         editor_path: `${editorUrl.pathname}${editorUrl.search}`,
-        automation_list_path: `${listPath}?section=automation`,
+        automation_list_path: listPath,
         activity_path: `/${workspace}?tab=runs&automation_ids=${automationId}`,
         connection_path: `/${workspace}/connectors/${encodeURIComponent(connectorKey)}/${connectionId}`,
         connector_path: `/${workspace}/connectors/${encodeURIComponent(connectorKey)}`,
@@ -261,7 +252,7 @@ export async function runAutomationNavigationProof({
   );
   await page.getByRole("button", { name: "Done", exact: true }).click();
   await page.waitForURL((url) => url.pathname === listPath);
-  await automationRow().click();
+  await activity().click();
   await emptyActivity();
   assertHost(listPath);
   const fullActivity = await assertActivityDestination({
@@ -274,14 +265,14 @@ export async function runAutomationNavigationProof({
   await emptyActivity();
   await page.goBack();
   await page.waitForURL((url) => url.pathname === listPath);
-  await automationRow().waitFor();
+  await activity().waitFor();
   assert(
     (await page
       .getByRole("button", { name: "Close preview", exact: true })
       .count()) === 0,
     "Back restored a dismissed peek"
   );
-  await goto(detailPath);
+  await page.getByRole("link").filter({ hasText: automationName }).click();
   await assertName(automationName);
   await goto(`${detailPath}?view=activity`);
   await legacyEmptyActivity();
