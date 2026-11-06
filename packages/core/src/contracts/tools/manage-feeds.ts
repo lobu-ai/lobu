@@ -33,6 +33,12 @@ export const ListFeedsAction = Type.Object({
         "Filter by runtime health for active feeds on non-paused connections; paused feeds and feeds on paused connections are excluded. 'failing' = last sync failed or the feed has one or more consecutive failures; 'healthy' = otherwise. Surfaces active-but-failing feeds the `status` filter cannot.",
     })
   ),
+  include_event_count: Type.Optional(
+    Type.Boolean({
+      description:
+        "Add `event_count`, each feed's stored events. Counting takes seconds on a busy connection, so it is off by default; ask for it only when you show the number.",
+    })
+  ),
   ...paginationFields(50),
 });
 
