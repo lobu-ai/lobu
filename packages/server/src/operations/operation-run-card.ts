@@ -100,15 +100,15 @@ export async function terminalizeInlineOperationRun(
 			RETURNING action_key
 		`;
 		if (rows.length === 0) return false;
-		const actionKey = rows[0].action_key ?? "Operation";
 		await supersedeActionEvent(
 			runId,
 			organizationId,
 			terminal.status,
-			`${actionKey} — ${terminal.status}`,
-			terminal.status === "completed"
-				? `Operation completed: ${actionKey}`
-				: `Operation failed: ${actionKey} — ${terminal.errorMessage}`,
+			(operation) => `${operation} — ${terminal.status}`,
+			(operation) =>
+				terminal.status === "completed"
+					? `Operation completed: ${operation}`
+					: `Operation failed: ${operation} — ${terminal.errorMessage}`,
 			terminal.status === "completed"
 				? { output: terminal.output }
 				: {
