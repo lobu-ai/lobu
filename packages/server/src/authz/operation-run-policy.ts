@@ -5,7 +5,7 @@ import { type DbClient, getDb } from '../db/client';
 import { DEVICE_FEED_READ_ACTION_KEY, SOURCE_FEED_SUBSCRIPTION_METADATA_KEY, isSourceFeedRead, guardedSourceReadScrubAssignments } from '../lib/device-feed-read-protocol';
 import { sourceFeedSubscriptions } from '../runs/source-feed-subscriptions';
 import { getOperationForConnection } from '../operations/connector-operations';
-import { supersedeActionEvent } from '../tools/admin/approval-events';
+import { operationCardLabel, supersedeActionEvent } from '../tools/admin/approval-events';
 import { connectorApprovalMetadata } from '../operations/operation-run-card';
 import { type ActionApprovalNotificationContext, notifyActionApprovalNeeded } from '../notifications/triggers';
 import { insertEvent } from '../utils/insert-event';
@@ -197,7 +197,7 @@ export async function applyRunConnectorPolicyAtClaim(params: {
   if (!blocked && !resolved) throw new Error('Approval operation became unavailable during policy recheck');
   const connectionName = resolved?.connection.display_name ?? run.connector_key ?? 'Connection';
   const status = blocked ? 'rejected' : 'pending_approval';
-  const title = `${run.action_key ?? 'Operation'} — ${blocked ? 'blocked by policy' : 'pending approval'}`;
+  const title = (operation: string) => `${operation} — ${blocked ? 'blocked by policy' : 'pending approval'}`;
   const metadata = {
     policy_reason: policy.reason, policy_rule_ids: policy.ruleIds,
     ...(resolved ? connectorApprovalMetadata(connectionName, resolved.operation, run.action_input ?? {}) : {}),
@@ -208,7 +208,8 @@ export async function applyRunConnectorPolicyAtClaim(params: {
     // veto still needs a durable explanation alongside its terminal run.
     const event = await insertEvent({
       entityIds: [], organizationId, originId: `run_${runId}_${status}`,
-      title, content: message, semanticType: 'operation', runId,
+      title: title(operationCardLabel({ operation_name: resolved?.operation.name }, run.action_key)),
+      content: message, semanticType: 'operation', runId,
       connectorKey: run.connector_key, connectionId: run.connection_id,
       interactionType: 'approval', interactionStatus: blocked ? 'rejected' : 'pending',
       interactionInput: isSourceFeedRead(run.run_metadata) ? null : run.action_input,

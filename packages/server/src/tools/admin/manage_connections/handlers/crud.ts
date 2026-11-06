@@ -2449,12 +2449,11 @@ export async function handleDelete(
         `;
       if (expired.length === 0) continue;
 
-      const actionKey = expired[0].action_key ?? 'Action';
       const eventId = await supersedeActionEvent(
         pendingApproval.id,
         organizationId,
         'rejected',
-        `${actionKey} — expired`,
+        (operation) => `${operation} — expired`,
         approvalExpiryReason,
         {
           expiry_reason: approvalExpiryReason,
@@ -2517,12 +2516,11 @@ export async function handleDelete(
         `;
       if (cancelled.length === 0) continue;
 
-      const actionKey = cancelled[0].action_key ?? 'Action';
       const eventId = await supersedeActionEvent(
         unclaimedRun.id,
         organizationId,
         'failed',
-        `${actionKey} — cancelled`,
+        (operation) => `${operation} — cancelled`,
         unclaimedActionCancelReason,
         {
           error_message: unclaimedActionCancelReason,
