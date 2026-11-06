@@ -395,16 +395,18 @@ export async function runNativeReferenceProof({
     await freshPage.goto(
       new URL(`/${workspace}?section=automation`, baseUrl).toString()
     );
-    const activity = freshPage.getByRole("link", {
-      name: "View activity",
-      exact: true,
-    });
-    await activity.waitFor();
+    // Home's Automations section is the list; a row opens its activity peek.
+    const automationRow = freshPage
+      .getByRole("region", { name: "Automations", exact: true })
+      .getByRole("link")
+      .filter({ hasText: automationName })
+      .first();
+    await automationRow.waitFor();
     await freshPage.screenshot({
       path: join(outputDir, "automation-list-narrow.png"),
       fullPage: true,
     });
-    await activity.click();
+    await automationRow.click();
     await freshPage
       .getByRole("dialog")
       .getByText("No runs match these filters.", { exact: true })
