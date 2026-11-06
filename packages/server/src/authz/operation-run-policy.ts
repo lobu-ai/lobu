@@ -213,7 +213,7 @@ export async function applyRunConnectorPolicyAtClaim(params: {
       connectorKey: run.connector_key, connectionId: run.connection_id,
       interactionType: 'approval', interactionStatus: blocked ? 'rejected' : 'pending',
       interactionInput: isSourceFeedRead(run.run_metadata) ? null : run.action_input,
-      metadata: { ...metadata, status, run_id: runId, action_key: run.action_key, operation_key: run.action_key },
+      metadata: { ...metadata, ...(resolved ? { operation_name: resolved.operation.name } : {}), status, run_id: runId, action_key: run.action_key, operation_key: run.action_key },
     }, { sql });
     cardId = Number(event.id);
   }

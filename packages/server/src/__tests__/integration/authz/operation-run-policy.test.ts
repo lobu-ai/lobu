@@ -13,6 +13,7 @@ import { __setChatInstanceManagerForTests } from '../../../lobu/gateway';
 import { deliverNotificationTask } from '../../../notifications/service';
 import { createConnectorOperationRun } from '../../../runs/queue-service';
 import { NOTIFICATION_DELIVERY_TASK } from '../../../scheduled/task-definitions';
+import { supersedeActionEvent } from '../../../tools/admin/approval-events';
 import { waitForDeviceActionRunWithOptions } from '../../../tools/admin/device-action-wait';
 import { executeOperationInline, handleExecute } from '../../../tools/admin/manage_operations/handlers/execute';
 import { qualifiedOperationKey } from '../../../tools/admin/manage_operations/handlers/shared';
@@ -119,6 +120,19 @@ describe('operation policy at durable dispatch', () => {
     expect(await sql`SELECT id FROM runs WHERE organization_id = ${organizationId}
       AND action_key = ${NOTIFICATION_DELIVERY_TASK}
       AND action_input->'payload'->>'eventId' = ${String(notifications[0].id)}`).toHaveLength(1);
+  });
+
+  it('retains the operation display name after a fallback late-approval card transitions', async () => {
+    const id = await run();
+    await rule('approval');
+    expect(await admit(id)).toBe(false);
+    const [pending] = await sql`SELECT title, metadata FROM current_event_records WHERE run_id = ${id} AND semantic_type = 'operation'`;
+    expect(pending.title).toBe('Perform — pending approval');
+    expect(pending.metadata.operation_name).toBe('Perform');
+    await supersedeActionEvent(id, organizationId, 'confirmed', label => `${label} — approved`, 'Approved');
+    const [approved] = await sql`SELECT title, metadata FROM current_event_records WHERE run_id = ${id} AND semantic_type = 'operation'`;
+    expect(approved.title).toBe('Perform — approved');
+    expect(approved.metadata.operation_name).toBe('Perform');
   });
 
   it.each([
