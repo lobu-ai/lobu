@@ -4370,6 +4370,10 @@ export type ManageFeedsData = {
          */
         health?: "healthy" | "failing";
         /**
+         * Add `event_count`, each feed's stored events. Counting takes seconds on a busy connection, so it is off by default; ask for it only when you show the number.
+         */
+        include_event_count?: boolean;
+        /**
          * Page size (default: 50, max: 500)
          */
         limit?: number;
