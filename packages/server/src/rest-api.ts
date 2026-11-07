@@ -171,6 +171,8 @@ async function withPublicOrg<T>(
  */
 function toolUserErrorBody(error: ToolUserError): Record<string, unknown> {
 	return {
+		// Spread first so a detail can never overwrite the message or the code.
+		...(error.details ?? {}),
 		error: error.message,
 		...(error.code
 			? {

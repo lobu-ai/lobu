@@ -152,8 +152,11 @@ export default async (_ctx, client) => {
 };`,
 	},
 	"entities.update": {
-		summary: "Update an existing entity.",
+		summary:
+			"Update an existing entity. Pass `expected` (metadata field -> the value you read) to make the write conditional: if any field changed since, nothing is written and the call fails with 409 PRECONDITION_FAILED, whose `details.mismatched_fields` names the stale fields.",
 		access: "write",
+		example:
+			"await client.entities.update({ entity_id: 42, expected: { stage: 'open' }, metadata: { stage: 'won' } });",
 	},
 	"entities.delete": {
 		summary:

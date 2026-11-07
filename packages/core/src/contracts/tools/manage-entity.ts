@@ -153,6 +153,9 @@ export const CreateEntityAction = Type.Object({
   automation_source: Type.Optional(AutomationSource),
 });
 
+/** Upper bound on `update`'s `expected` precondition keys. */
+const MAX_EXPECTED_FIELDS = 50;
+
 export const UpdateEntityAction = Type.Object({
   action: Type.Literal("update", {
     description:
@@ -184,6 +187,13 @@ export const UpdateEntityAction = Type.Object({
     Type.Boolean({
       description:
         "[update] Assert that the signed-in person made this change themselves, so it is recorded as their manual edit: the fields it sets (and affirm_fields) become theirs, and Automations then queue an approval instead of updating them. A wrong assertion takes the field away from Automations. Honoured for a person's own web-session edit, or for a token minted with the entities:manual_edit scope by a person in the web app, with no agent, MCP session or Automation behind the call; otherwise the update fails with 403 MANUAL_EDIT_NOT_ALLOWED and nothing is written. Defaults to false.",
+    })
+  ),
+  // Optimistic concurrency: the values the caller read before writing
+  expected: Type.Optional(
+    Type.Record(Type.String(), Type.Unknown(), {
+      maxProperties: MAX_EXPECTED_FIELDS,
+      description: `[update] Metadata field name -> the value the caller last read. Checked against the live row under the update's row lock: if any field differs, nothing is written (no field changes, ownership markers, events or approvals) and the update fails with 409 PRECONDITION_FAILED listing the field names in mismatched_fields. Values compare structurally (object key order is ignored); null matches a field that was never set. Metadata fields only (not name, content, slug or parent_id); at most ${MAX_EXPECTED_FIELDS} keys.`,
     })
   ),
   automation_source: Type.Optional(AutomationSource),
