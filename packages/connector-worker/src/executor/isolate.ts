@@ -87,7 +87,9 @@ export interface IsolateExecutorOptions {
    * internal addresses are refused under every list except where an EXACT
    * entry names one: `localhost` or `127.0.0.1` is how a self-hosted install
    * reaches its own services and how the fixture suites reach a loopback
-   * server; even that exemption keeps cloud metadata refused. Raw sockets do
+   * server; even that exemption keeps cloud metadata refused. Off cloud the
+   * operator's `LOBU_HTTP_EGRESS_ALLOW_HOSTS` adds exemptions of the same kind
+   * for `fetch` (`operatorHttpExemptHosts`), never entries. Raw sockets do
    * NOT inherit it: a DB socket's address policy is `LOBU_DB_EGRESS_POLICY`
    * plus the operator's `LOBU_DB_EGRESS_ALLOW_HOSTS`, so this list can only
    * ever narrow what a run reaches, never widen the DB boundary.
@@ -464,6 +466,8 @@ type RunLog = (level: IsolateLogLevel, line: string) => void;
 /** What one run's `fetch` capability dials and resolves with. */
 interface RunNetwork {
   egress: EgressDispatcher;
+  /** Exact hosts `egress` lowers to the allow-private floor: the run's exact allowlist entries plus the operator's (`operatorHttpExemptHosts`). */
+  exemptHosts: readonly string[];
   vault: CredentialVault;
   /** `placeholder\nhost` pairs already logged: one audit line per credential per host, however chatty the connector. */
   spends: Set<string>;
@@ -527,6 +531,27 @@ function refusedAddress(error: unknown): string | null {
   if (error instanceof PrivateAddressError) return error.address ? ` (${error.address})` : '';
   if (error instanceof MalformedHostError) return '';
   return null;
+}
+
+/**
+ * The operator's `fetch` exemptions for one run: `LOBU_HTTP_EGRESS_ALLOW_HOSTS`
+ * (see `httpEgressAllowHostsEnv` in `env.ts`), the exact hosts a self-hosted
+ * install lets connector code reach in private space -- another container on
+ * its Docker network. Read from `job.env`, the run producer's deployment
+ * config, never from tenant `job.config`; and only for a run whose env says
+ * `allow-private`: under block-private (Cloud, which the gateway forces onto
+ * any worker it dispatches to) or a job that names no policy (offline webhook
+ * normalization) the list is inert, and an agent turn never gets one. Parsed
+ * by the DB list's parser, so a wildcard, CIDR, port or bracketed entry refuses
+ * the run rather than widening it. Address axis only: the run's allowlist
+ * still decides which hosts it may name, and metadata stays refused at the
+ * `allow-private` floor these hosts are lowered to.
+ */
+function operatorHttpExemptHosts(job: ExecutorJob): string[] {
+  if (job.mode === 'agent_turn' || job.env?.LOBU_DB_EGRESS_POLICY !== 'allow-private') return [];
+  return parseExemptHosts(job.env.LOBU_HTTP_EGRESS_ALLOW_HOSTS, 'LOBU_HTTP_EGRESS_ALLOW_HOSTS').map((host) =>
+    stripIpv6Brackets(normalizeDomainPattern(host))
+  );
 }
 
 /** Request headers that must not follow a redirect to another origin. */
@@ -602,6 +627,7 @@ export class IsolateExecutor implements SyncExecutor {
       throw new Error('HTTP authentication requires a gateway fetch hook');
     }
     assertIsolateEligible(compiledCode);
+    const exemptHosts = [...this.exactAllowedHosts, ...operatorHttpExemptHosts(job)];
     const ivm = await this.requireIsolatedVm();
 
     const tail = new RingBuffer(STREAM_TAIL_CAP_BYTES);
@@ -633,10 +659,10 @@ export class IsolateExecutor implements SyncExecutor {
       activeFetches.clear();
     };
     // The run's `fetch` transport: block-private, with the exact allowlist
-    // entries lowered to the allow-private floor. One per run and destroyed
-    // with it, so a worker that builds an executor per job never accumulates
-    // idle keep-alive sockets.
-    const egress = new EgressDispatcher({ exemptHosts: this.exactAllowedHosts, lookup: this.options.lookup });
+    // entries and the operator's HTTP exemptions lowered to the allow-private
+    // floor. One per run and destroyed with it, so a worker that builds an
+    // executor per job never accumulates idle keep-alive sockets.
+    const egress = new EgressDispatcher({ exemptHosts, lookup: this.options.lookup });
     // The run's credential vault: the guest gets placeholders, the host keeps
     // the values and resolves them into request headers at `fetch`. Cleared
     // with the run, so a placeholder that leaks into a checkpoint or a log is
@@ -757,7 +783,7 @@ export class IsolateExecutor implements SyncExecutor {
     };
 
     const network: RunNetwork = {
-      egress, vault, spends: new Set<string>(), log,
+      egress, exemptHosts, vault, spends: new Set<string>(), log,
       onHttpFetch: job.httpAuth ? hooks?.onHttpFetch : undefined,
       ...(job.mode === 'agent_turn' && job.credentials?.accessToken ? {
         agentGateway: {
@@ -1341,8 +1367,9 @@ export class IsolateExecutor implements SyncExecutor {
         // Placeholders resolve only now, with the destination admitted, and only
         // into a destination that may carry a credential: HTTPS, or the run's
         // own machine -- a loopback or reserved literal (or `localhost`) that the
-        // allowlist names exactly, the same exemption that lets a self-hosted
-        // install or a fixture reach a local service. A public name stays HTTPS
+        // allowlist or the operator's HTTP exemptions name exactly, the same
+        // exemption that lets a self-hosted install or a fixture reach a local
+        // service. A public name, or a private service NAME, stays HTTPS
         // only even when named exactly. Real values exist in `headers` from here
         // on and nowhere the guest can read. A refusal is the lane's egress
         // refusal: logged once host-side and named so the guest can tell it
@@ -1352,7 +1379,7 @@ export class IsolateExecutor implements SyncExecutor {
         try {
           spent = net.vault.swapHeaders(headers, url, {
             plaintextAllowed:
-              this.exactAllowedHosts.includes(bareHost) && (bareHost === 'localhost' || isReservedIp(bareHost)),
+              net.exemptHosts.includes(bareHost) && (bareHost === 'localhost' || isReservedIp(bareHost)),
           });
         } catch (error) {
           throw refuse(net.log, `fetch to ${url.hostname}: ${error instanceof Error ? error.message : String(error)}`);

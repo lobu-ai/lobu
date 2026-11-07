@@ -36,6 +36,7 @@ import {
 	type IsolateExecutorOptions,
 	type IsolateLogLevel,
 } from "@lobu/connector-worker/executor/isolate";
+import { connectorRunEnv, httpEgressAllowHostsEnv } from "@lobu/connector-worker/env";
 import { executeCompiledConnector } from "@lobu/connector-worker/executor/runtime";
 import {
 	assertIsolateEligible,
@@ -45,7 +46,8 @@ import {
 	type IsolatedVm,
 	loadIsolatedVm,
 } from "@lobu/connector-worker/isolate";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { dbEgressConfig } from "../../../utils/cloud-mode";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PACKAGES_DIR = resolve(HERE, "../../../../..");
@@ -736,6 +738,146 @@ describe("isolate lane: fixture connector", () => {
 		});
 		expect(restricted.message).toContain("this run may reach: example.com");
 		expect(hits).toBe(before);
+	});
+
+	describe("operator LOBU_HTTP_EGRESS_ALLOW_HOSTS", () => {
+		const ENV_KEYS = ["LOBU_HTTP_EGRESS_ALLOW_HOSTS", "LOBU_CLOUD_MODE"] as const;
+		let saved: Record<string, string | undefined>;
+		beforeEach(() => {
+			saved = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
+		});
+		afterEach(() => {
+			for (const key of ENV_KEYS) {
+				if (saved[key] === undefined) delete process.env[key];
+				else process.env[key] = saved[key];
+			}
+		});
+
+		/**
+		 * The env a self-hosted in-gateway run hands connector code, built by the
+		 * producer the run paths use: `connectorRunEnv` (feed sync, operations,
+		 * webhook registration) or the pushdown/listener pair. Off cloud both say
+		 * `allow-private`, and both carry the operator's list.
+		 */
+		function runEnv(hosts: string, opts: { cloud?: boolean; producer?: "run" | "pushdown" } = {}): Record<string, string> {
+			process.env.LOBU_HTTP_EGRESS_ALLOW_HOSTS = hosts;
+			if (opts.cloud) process.env.LOBU_CLOUD_MODE = "1";
+			else delete process.env.LOBU_CLOUD_MODE;
+			const env = opts.producer === "pushdown"
+				? { ...dbEgressConfig(), ...httpEgressAllowHostsEnv() }
+				: connectorRunEnv({ organizationSupplied: true, cloud: Boolean(opts.cloud) });
+			return Object.fromEntries(Object.entries(env).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
+		}
+		/** Every name the fixture uses resolves onto the loopback fixture server, except the metadata alias. */
+		const lookup = async (hostname: string) =>
+			[{ address: hostname === "metadata-alias" ? "169.254.169.254" : "127.0.0.1" }];
+
+		it("reaches an exactly named private host, by literal or by a service name, through either env producer", async () => {
+			const literal = await runViaRuntime(fixtureIsolateCode, syncJob({ scenario: "fetch", url: `${baseUrl}/ok` }, runEnv("127.0.0.1")));
+			expect(checkpointOf(literal)).toMatchObject({ status: 200, text: "hello from the fixture server" });
+
+			const pushdown = await runViaRuntime(
+				fixtureIsolateCode,
+				syncJob({ scenario: "fetch", url: `${baseUrl}/ok` }, runEnv("127.0.0.1", { producer: "pushdown" })),
+			);
+			expect(checkpointOf(pushdown)).toMatchObject({ status: 200 });
+
+			// A container-network service name: resolves into private space, named exactly.
+			const named = await runIsolate(
+				fixtureIsolateCode,
+				syncJob({ scenario: "fetch", url: `http://inventory-api:${port}/ok` }, runEnv("Inventory-API, 10.0.0.9")),
+				{ lookup },
+			);
+			expect(checkpointOf(named)).toMatchObject({ status: 200, text: "hello from the fixture server" });
+		});
+
+		it("still refuses every private host the list does not name, and cloud metadata even when it does", async () => {
+			const before = hits;
+			const env = runEnv("inventory-api,169.254.169.254,metadata-alias");
+			const unnamedLiteral = await failIsolate(fixtureIsolateCode, syncJob({ scenario: "fetch", url: `${baseUrl}/ok` }, env));
+			expect(unnamedLiteral.message).toContain("reserved and internal hosts are never reachable");
+
+			const unnamedService = await failIsolate(
+				fixtureIsolateCode,
+				syncJob({ scenario: "fetch", url: `http://billing-api:${port}/ok` }, env),
+				{ lookup },
+			);
+			expect(unnamedService.message).toContain("fetch to billing-api");
+			expect(unnamedService.message).toContain("reserved and internal hosts are never reachable");
+
+			for (const url of ["http://169.254.169.254/latest/meta-data/", "http://metadata-alias/latest/meta-data/"]) {
+				const metadata = await failIsolate(fixtureIsolateCode, syncJob({ scenario: "fetch", url }, env), { lookup });
+				expect(metadata.message).toContain("reserved and internal hosts are never reachable");
+			}
+			expect(hits).toBe(before);
+		});
+
+		it("is ignored under block-private (cloud), and never widens a run's own allowlist", async () => {
+			const before = hits;
+			const cloud = await failIsolate(
+				fixtureIsolateCode,
+				syncJob({ scenario: "fetch", url: `${baseUrl}/ok` }, runEnv("127.0.0.1", { cloud: true })),
+			);
+			expect(cloud.message).toContain("reserved and internal hosts are never reachable");
+
+			const cloudPushdown = await failIsolate(
+				fixtureIsolateCode,
+				syncJob({ scenario: "fetch", url: `${baseUrl}/ok` }, runEnv("127.0.0.1", { cloud: true, producer: "pushdown" })),
+			);
+			expect(cloudPushdown.message).toContain("reserved and internal hosts are never reachable");
+
+			// A job whose env names no policy (offline webhook normalization) fails closed.
+			const noPolicy = await failIsolate(
+				fixtureIsolateCode,
+				syncJob({ scenario: "fetch", url: `${baseUrl}/ok` }, { LOBU_HTTP_EGRESS_ALLOW_HOSTS: "127.0.0.1" }),
+			);
+			expect(noPolicy.message).toContain("reserved and internal hosts are never reachable");
+
+			// The address axis only: a restricted or empty allowlist still decides the host.
+			const restricted = await failIsolate(
+				fixtureIsolateCode,
+				syncJob({ scenario: "fetch", url: `${baseUrl}/ok` }, runEnv("127.0.0.1")),
+				{ allowedDomains: ["example.com"] },
+			);
+			expect(restricted.message).toContain("this run may reach: example.com");
+			const closed = await failIsolate(
+				fixtureIsolateCode,
+				syncJob({ scenario: "fetch", url: `${baseUrl}/ok` }, runEnv("127.0.0.1")),
+				{ allowedDomains: [] },
+			);
+			expect(closed.message).toContain("this run has no allowed domains");
+			expect(hits).toBe(before);
+		});
+
+		it("refuses the run for a wildcard, CIDR or port entry instead of widening anything", async () => {
+			const before = hits;
+			for (const entry of ["*", "*.internal", "127.0.0.0/8", `127.0.0.1:${port}`, "[::1]"]) {
+				const failed = await failIsolate(
+					fixtureIsolateCode,
+					syncJob({ scenario: "fetch", url: `${baseUrl}/ok` }, runEnv(`inventory-api,${entry}`)),
+				);
+				expect(failed.message).toContain(`LOBU_HTTP_EGRESS_ALLOW_HOSTS entry "${entry}" is invalid`);
+			}
+			expect(hits).toBe(before);
+		});
+
+		it("sends a credential in plaintext only to a named reserved literal, never to a named service name", async () => {
+			const credentials = { provider: "fixture", accessToken: "tok_real_9f3a" };
+			const literal = await runIsolate(fixtureIsolateCode, {
+				...syncJob({ scenario: "credential", url: `${baseUrl}/echo` }, runEnv("127.0.0.1")),
+				credentials,
+			});
+			expect(checkpointOf(literal).upstreamAuthorization).toBe("Bearer tok_real_9f3a");
+
+			const before = hits;
+			const named = await failIsolate(
+				fixtureIsolateCode,
+				{ ...syncJob({ scenario: "credential", url: `http://inventory-api:${port}/echo` }, runEnv("inventory-api")), credentials },
+				{ lookup },
+			);
+			expect(named.message).toContain("Credential-bearing requests require HTTPS");
+			expect(hits).toBe(before);
+		});
 	});
 
 	it("rejects a non-http(s) scheme before Node's fetch sees it, from the guest fetch and from the raw host bridge", async () => {
