@@ -25,9 +25,11 @@ import {
   RemoveViewAction,
   SetViewAction,
   type ManageViewsResult,
+  type ViewActionDecl,
 } from '@lobu/core/contracts/tools/manage-views';
 import type { Static } from '@sinclair/typebox';
 import { emit } from '../../events/emitter';
+import { getActionVersion } from '../../actions/registry';
 import { getDb, pgTextArray } from '../../db/client';
 import { isEventAttachment } from '@lobu/core/contracts/tools/view-attach';
 import type { ViewDefinitionRecord } from '@lobu/core/contracts/tools/view-definition';
@@ -150,7 +152,7 @@ function validateViewDefinition(def: ViewDefinitionRecord): void {
         400
       );
     }
-    if (!EMITS_NAME_RE.test(decl.emits)) {
+    if ('emits' in decl && !EMITS_NAME_RE.test(decl.emits)) {
       throw new ToolUserError(
         `Action '${name}' emits '${decl.emits}': use <subject>.<op> event-kind names`,
         400
@@ -166,10 +168,31 @@ function validateViewDefinition(def: ViewDefinitionRecord): void {
  */
 async function assertActionKindsRegistered(
   organizationId: string,
-  actions: Record<string, { emits: string }>,
+  actions: Record<string, ViewActionDecl>,
   attach: SetViewInput['attach'],
 ): Promise<void> {
-  if (Object.keys(actions).length === 0) return;
+  const emitted: Array<[string, { emits: string }]> = [];
+  for (const [name, decl] of Object.entries(actions)) {
+    if ('emits' in decl) {
+      emitted.push([name, decl]);
+      continue;
+    }
+    try {
+      const revision = await getActionVersion(getDb(), organizationId, decl.action.key, decl.action.version);
+      if (!revision.enabled) {
+        throw new ToolUserError(`Action '${name}' references a disabled registered action`, 422);
+      }
+    } catch (error) {
+      if (error instanceof ToolUserError && error.httpStatus === 404) {
+        throw new ToolUserError(
+          `Action '${name}' references an unknown published revision '${decl.action.key}@${decl.action.version}'`,
+          422,
+        );
+      }
+      throw error;
+    }
+  }
+  if (emitted.length === 0) return;
   const qualifiedTypes = attach.length > 0 &&
     attach.every((entry) => isEventAttachment(entry) && entry.type)
       ? [...new Set(attach.flatMap((entry) =>
@@ -184,7 +207,7 @@ async function assertActionKindsRegistered(
       AND deleted_at IS NULL
   `;
   const kindRegistry = readEventKindRegistry(organizationId);
-  for (const [name, decl] of Object.entries(actions)) {
+  for (const [name, decl] of emitted) {
     const global = await validateSaveContentSemanticType(
       decl.emits,
       null,

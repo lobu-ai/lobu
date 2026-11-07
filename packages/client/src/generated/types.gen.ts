@@ -458,7 +458,7 @@ export type SaveMemoryResponse = SaveMemoryResponses[keyof SaveMemoryResponses];
 export type SearchSdkData = {
   body: {
     /**
-     * SDK method or runtime-helper discovery query. Use a namespace (e.g. 'automations'), one or more dotted paths separated by whitespace (e.g. 'automations.create ctx.sleep'), an optional client. prefix, or free text. Pass mode='read' for query_sdk-safe methods only; omit mode for your full run_sdk tier. Namespaces: agents, authProfiles, automations, catalog, classifiers, connections, conversations, ctx, devices, entities, entitySchema, feeds, inferenceProviders, knowledge, metrics, notifications, operations, organizations, schedules, views.
+     * SDK method or runtime-helper discovery query. Use a namespace (e.g. 'automations'), one or more dotted paths separated by whitespace (e.g. 'automations.create ctx.sleep'), an optional client. prefix, or free text. Pass mode='read' for query_sdk-safe methods only; omit mode for your full run_sdk tier. Namespaces: actions, agents, authProfiles, automations, catalog, classifiers, connections, conversations, ctx, devices, entities, entitySchema, feeds, inferenceProviders, knowledge, metrics, notifications, operations, organizations, schedules, views.
      */
     query: string;
     /**
@@ -614,7 +614,7 @@ export type QuerySdkResponses = {
       code?: string;
       retryable?: boolean;
       /**
-       * Structured result of the failed SDK call when an uncaught ClientSdkActionError ended the script (the same value a catch block reads as error.details), redacted and size-bounded. For a failed operations.execute it holds run_id, error_message and any output the action reported, such as output.dialog for a browser action blocked by a JS dialog.
+       * Structured details of an uncaught typed SDK failure (the same value a catch block reads as error.details), redacted and size-bounded. For a failed operations.execute it holds run_id, error_message and any output the action reported, such as output.dialog for a browser action blocked by a JS dialog.
        */
       details?: unknown;
     };
@@ -897,7 +897,7 @@ export type RunSdkResponses = {
       code?: string;
       retryable?: boolean;
       /**
-       * Structured result of the failed SDK call when an uncaught ClientSdkActionError ended the script (the same value a catch block reads as error.details), redacted and size-bounded. For a failed operations.execute it holds run_id, error_message and any output the action reported, such as output.dialog for a browser action blocked by a JS dialog.
+       * Structured details of an uncaught typed SDK failure (the same value a catch block reads as error.details), redacted and size-bounded. For a failed operations.execute it holds run_id, error_message and any output the action reported, such as output.dialog for a browser action blocked by a JS dialog.
        */
       details?: unknown;
     };
@@ -7483,6 +7483,143 @@ export type ManageClassifiersResponses = {
 export type ManageClassifiersResponse =
   ManageClassifiersResponses[keyof ManageClassifiersResponses];
 
+export type ManageActionsData = {
+  body:
+    | {
+        action: "list";
+      }
+    | {
+        action: "get";
+        key: string;
+        version?: number;
+      }
+    | {
+        action: "publish";
+        key: string;
+        name?: string;
+        definition: {
+          /**
+           * A bounded, noncoercing JSON Schema object with additionalProperties:false.
+           */
+          params: {
+            [key: string]: unknown;
+          };
+          target: {
+            entityType: string;
+            idParam: string;
+          };
+          invokePermission: "write" | "admin";
+          requiredExpected?: Array<string>;
+          set: {
+            [key: string]:
+              | {
+                  param: string;
+                }
+              | {
+                  literal: unknown;
+                }
+              | {
+                  server: "timestamp";
+                }
+              | {
+                  event: "id";
+                };
+          };
+          transition?: {
+            field: string;
+            param: string;
+            allowed: Array<{
+              from: string | null;
+              to: Array<string>;
+            }>;
+          };
+          emits: {
+            kind: string;
+            schemaVersion: number;
+            payload: {
+              [key: string]:
+                | {
+                    param: string;
+                  }
+                | {
+                    literal: unknown;
+                  }
+                | {
+                    server: "timestamp";
+                  };
+            };
+          };
+        };
+      }
+    | {
+        action: "set_enabled";
+        key: string;
+        enabled: boolean;
+      }
+    | {
+        action: "apply";
+        key: string;
+        version: number;
+        params: {
+          [key: string]: unknown;
+        };
+        expected?: {
+          [key: string]: unknown;
+        };
+        idempotency_key: string;
+        dry_run?: boolean;
+      }
+    | {
+        action: "validate";
+        key: string;
+        version: number;
+        params: {
+          [key: string]: unknown;
+        };
+        expected?: {
+          [key: string]: unknown;
+        };
+      };
+  path: {
+    /**
+     * Organization slug (workspace identifier)
+     */
+    orgSlug: string;
+  };
+  query?: never;
+  url: "/api/{orgSlug}/manage_actions";
+};
+
+export type ManageActionsErrors = {
+  /**
+   * Bad request - invalid parameters
+   */
+  400: {
+    error?: string;
+  };
+  /**
+   * Forbidden - your role or token scope does not allow this action
+   */
+  403: {
+    error?: string;
+  };
+  /**
+   * Tool not found
+   */
+  404: {
+    error?: string;
+  };
+};
+
+export type ManageActionsError = ManageActionsErrors[keyof ManageActionsErrors];
+
+export type ManageActionsResponses = {
+  /**
+   * Successful response
+   */
+  200: unknown;
+};
+
 export type ManageViewsData = {
   body:
     | {
@@ -7668,6 +7805,12 @@ export type ManageViewsResponses = {
                    * Event kind appended when the action fires, e.g. 'deal.won'.
                    */
                   emits: string;
+                }
+              | {
+                  action: {
+                    key: string;
+                    version: number;
+                  };
                 };
           };
           /**
@@ -7769,6 +7912,12 @@ export type ManageViewsResponses = {
                    * Event kind appended when the action fires, e.g. 'deal.won'.
                    */
                   emits: string;
+                }
+              | {
+                  action: {
+                    key: string;
+                    version: number;
+                  };
                 };
           };
           /**
@@ -7877,6 +8026,12 @@ export type ManageViewsResponses = {
                    * Event kind appended when the action fires, e.g. 'deal.won'.
                    */
                   emits: string;
+                }
+              | {
+                  action: {
+                    key: string;
+                    version: number;
+                  };
                 };
           };
           /**

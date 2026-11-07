@@ -167,7 +167,7 @@ export const SdkScriptResultSchema = Type.Object({
         details: Type.Optional(
           Type.Unknown({
             description:
-              "Structured result of the failed SDK call when an uncaught ClientSdkActionError ended the script (the same value a catch block reads as error.details), redacted and size-bounded. For a failed operations.execute it holds run_id, error_message and any output the action reported, such as output.dialog for a browser action blocked by a JS dialog.",
+              "Structured details of an uncaught typed SDK failure (the same value a catch block reads as error.details), redacted and size-bounded. For a failed operations.execute it holds run_id, error_message and any output the action reported, such as output.dialog for a browser action blocked by a JS dialog.",
           }),
         ),
       },
@@ -340,10 +340,13 @@ export function toMcpPublicSdkScriptResult(result: unknown): unknown {
         ),
         ...(typeof error.code === "string" ? { code: error.code } : {}),
         ...(typeof error.retryable === "boolean" ? { retryable: error.retryable } : {}),
-        // Only a typed SDK failure carries agent-facing details; the sandbox
-        // already redacted and bounded them, and re-bounding here keeps the
-        // public contract independent of the internal producer.
-        ...(error.name === "ClientSdkActionError" && error.details !== undefined
+        // Only typed SDK/user failures carry public details. The runtime verifies
+        // host classification before preserving ToolUserError details; bound
+        // them again here and keep generic diagnostics private.
+        ...((error.name === "ClientSdkActionError" ||
+          (typeof error.code === "string" &&
+            (error.name === "ToolUserError" || error.name === "ValidationError"))) &&
+          error.details !== undefined
           ? { details: safeErrorDetails(error.details) }
           : {}),
       };

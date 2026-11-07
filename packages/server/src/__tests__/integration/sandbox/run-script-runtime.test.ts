@@ -19,7 +19,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import { ToolError } from "@lobu/core";
 import { Type } from "@sinclair/typebox";
 import type { ClientSDK } from "../../../sandbox/client-sdk";
@@ -70,6 +70,13 @@ vi.mock("../../../utils/compiler-core", async (importActual) => {
   const actual =
     await importActual<typeof import("../../../utils/compiler-core")>();
   return { ...actual, compileSource: vi.fn(actual.compileSource) };
+});
+
+// This file owns the compiler spy and its imported runtime graph. With the
+// shared Vitest registry, leave later HTTP suites a clean real app graph.
+afterAll(() => {
+  vi.doUnmock("../../../utils/compiler-core");
+  vi.resetModules();
 });
 
 async function compileCallCount(): Promise<number> {
@@ -403,7 +410,9 @@ describe("sandbox runtime", () => {
     const sdk = stubSDK({
       entities: {
         list: async () => {
-          throw new ToolUserError("knowledge provider unavailable", 503);
+          throw new ToolUserError("knowledge provider unavailable", 503, undefined, {
+            reason: "synthetic host detail",
+          });
         },
       } as never,
     });
@@ -415,6 +424,7 @@ describe("sandbox runtime", () => {
           const replacement = new Error((caught as Error).message);
           replacement.name = (caught as Error).name;
           (replacement as any).classificationToken = (caught as any).classificationToken;
+          (replacement as any).details = (caught as any).details;
           throw replacement;
         }
       };`,
@@ -427,6 +437,9 @@ describe("sandbox runtime", () => {
     });
     expect(result.error).not.toHaveProperty("code");
     expect(result.error).not.toHaveProperty("retryable");
+    expect(result.error).not.toHaveProperty("details");
+    const publicResult = toMcpPublicSdkScriptResult({ success: false, error: result.error }) as { error: Record<string, unknown> };
+    expect(publicResult.error).not.toHaveProperty("details");
   });
 
   it("does not expose classifications through patched WeakMap intrinsics", async () => {
@@ -553,7 +566,9 @@ describe("sandbox runtime", () => {
     const sdk = stubSDK({
       entities: {
         list: async () => {
-          throw new ToolUserError("knowledge provider unavailable", 503);
+          throw new ToolUserError("knowledge provider unavailable", 503, undefined, {
+            reason: "synthetic retry context", access_token: "synthetic-private-token",
+          });
         },
       } as never,
     });
@@ -568,7 +583,13 @@ describe("sandbox runtime", () => {
       name: "ToolUserError",
       code: "UPSTREAM_5XX",
       retryable: true,
+      details: { reason: "synthetic retry context", access_token: "[redacted]" },
     });
+    const publicResult = toMcpPublicSdkScriptResult({ success: false, error: result.error }) as { error: Record<string, unknown> };
+    expect(publicResult.error).toMatchObject({
+      details: { reason: "synthetic retry context", access_token: "[redacted]" },
+    });
+    expect(JSON.stringify(publicResult)).not.toContain("synthetic-private-token");
   });
 
   it("maps a local 403 ToolUserError to permission, not invalid credentials", async () => {

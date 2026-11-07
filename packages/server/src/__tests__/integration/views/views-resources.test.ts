@@ -908,6 +908,33 @@ describe('views resources + open_view + invoke_view_action', () => {
 		expect(missingId.status).toBe(400);
 	});
 
+	it('rejects malformed registered action input before appending a web event', async () => {
+		const sql = getTestDb();
+		const [before] = await sql`
+      SELECT count(*)::int AS count FROM events
+      WHERE organization_id = ${org.id} AND origin_type = 'view_interaction'
+    `;
+		const invalid = [
+			{ binding: { key: 'test.set_stage' } },
+			{ binding: { key: 'test.set_stage', version: 0 } },
+			{ binding: { key: 'test.set_stage', version: 1, extra: true } },
+			{ binding: { key: 'test.set_stage', version: 1 }, expected: [] },
+			{ expected: { stage_event_id: null } },
+		];
+		for (const [index, extra] of invalid.entries()) {
+			const response = await post(`/api/${org.slug}/views/board/actions/retry`, {
+				token,
+				body: { value: { id: entityId }, interaction_id: `invalid-typed-${index}`, ...extra },
+			});
+			expect(response.status).toBe(400);
+		}
+		const [after] = await sql`
+      SELECT count(*)::int AS count FROM events
+      WHERE organization_id = ${org.id} AND origin_type = 'view_interaction'
+    `;
+		expect(after.count).toBe(before.count);
+	});
+
 	it('runs a camelCase action end to end over the web route', async () => {
 		await executeTool(
 			'manage_views',

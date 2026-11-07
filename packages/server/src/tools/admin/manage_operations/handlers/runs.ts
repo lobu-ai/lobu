@@ -155,7 +155,8 @@ export async function handleListRuns(
   const sql = getDb();
 
   // Shared WHERE fragment so the count and page queries can't drift apart.
-  let where = sql`r.organization_id = ${ctx.organizationId}`;
+  // Typed receipts may contain protected params and are readable only via their executor.
+  let where = sql`r.organization_id = ${ctx.organizationId} AND r.action_type_id IS NULL`;
   if (args.run_types && args.run_types.length > 0) {
     // fetch_types:false means JS arrays aren't auto-serialized — use the
     // PG array-literal helpers (see db/client.ts).
@@ -279,6 +280,7 @@ export async function handleGetRun(
     LEFT JOIN connections c ON c.id = r.connection_id
     WHERE r.id = ${args.run_id}
       AND r.organization_id = ${ctx.organizationId}
+      AND r.action_type_id IS NULL
       AND r.run_type <> ALL(${pgTextArray([...LIST_RUNS_DEFAULT_EXCLUDED_RUN_TYPES])}::text[])
     LIMIT 1
   `;

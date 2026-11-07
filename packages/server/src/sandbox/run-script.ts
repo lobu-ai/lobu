@@ -502,6 +502,9 @@ function classifyRuntimeError(
 					: "ToolUserError",
 			message,
 			...classification,
+			...(classification && record.details !== undefined
+				? { details: safeErrorDetails(record.details) }
+				: {}),
 		};
 	}
 	if (isExpectedUserError) {
@@ -516,6 +519,9 @@ function classifyRuntimeError(
 			name: classification.code === "VALIDATION" ? "ValidationError" : rawName,
 			message,
 			...classification,
+			...(record.details === undefined
+				? {}
+				: { details: safeErrorDetails(record.details) }),
 		};
 	}
 

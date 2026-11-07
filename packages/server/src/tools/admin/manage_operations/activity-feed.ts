@@ -621,6 +621,7 @@ export async function listOrgActivity(opts: {
         LEFT JOIN connections c ON c.id = r.connection_id
         LEFT JOIN automations w ON w.id = r.automation_id
         WHERE r.organization_id = ${opts.organizationId}
+          AND r.action_type_id IS NULL
           AND r.run_type = ANY(${pgTextArray(runKinds)}::text[])
           ${agentFilter}
           ${connectionFilter}

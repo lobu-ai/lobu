@@ -1,5 +1,5 @@
 import { type Static, Type } from "@sinclair/typebox";
-import { ViewKeySchema } from "@lobu/core/contracts/tools/manage-views";
+import { ViewActionBindingSchema, ViewKeySchema } from "@lobu/core/contracts/tools/manage-views";
 import type { Env } from "../index";
 import { invokeViewAction } from "../interactions/template-event-actions";
 import { requireWorkspaceContext } from "./access-control";
@@ -15,10 +15,16 @@ export const ViewActionScopeSchema = Type.Object({
 	event: Type.Integer({ minimum: 1, description: "Exact stored event version shown by the view." }),
 }, { additionalProperties: false });
 
+export const ViewActionExpectedSchema = Type.Record(Type.String(), Type.Unknown(), {
+	description: "Observed target metadata checked by a registered action.",
+});
+
 export const InvokeViewActionSchema = Type.Object(
 	{
 		view: ViewKeySchema,
 		scope: Type.Optional(ViewActionScopeSchema),
+		binding: Type.Optional(ViewActionBindingSchema),
+		expected: Type.Optional(ViewActionExpectedSchema),
 		action: Type.String({ minLength: 1, maxLength: 64 }),
 		value: Type.Optional(
 			Type.Record(Type.String(), Type.Unknown(), {
@@ -48,6 +54,9 @@ async function invokeViewActionImpl(
 	const target = requireWorkspaceContext(ctx);
 	const result = await invokeViewAction({
 		organizationId: target.organizationId,
+		caller: { env, ctx: target },
+		binding: args.binding,
+		expected: args.expected,
 		...(args.scope ? { event: { id: args.scope.event, env, ctx: target } } : {}),
 		viewKey: args.view,
 		action: args.action,

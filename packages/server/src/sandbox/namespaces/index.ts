@@ -1,3 +1,4 @@
+export { buildActionsNamespace } from "./actions";
 /**
  * Re-exports for the per-namespace SDK builders.
  */

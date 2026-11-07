@@ -1,5 +1,6 @@
 import { type Static, Type } from "@sinclair/typebox";
 import type { ActionInput } from "./action-input";
+import { ActionKeySchema } from "./manage-actions";
 import { CollectionWhenSchema } from "./collection-selection";
 import {
   SourceDependenciesSchema,
@@ -130,16 +131,35 @@ export const ViewParamDeclSchema = Type.Object({
 });
 export type ViewParamDecl = Static<typeof ViewParamDeclSchema>;
 
-// Actions a view declares as metadata; each emits an event kind through the
-// template-action chokepoint. A removed action stops working on the next read
-// because the check runs against the CURRENT view row.
-export const ViewActionDeclSchema = Type.Object({
-  emits: Type.String({
-    minLength: 1,
-    maxLength: 128,
-    description: "Event kind appended when the action fires, e.g. 'deal.won'.",
-  }),
-});
+/** A registered action always names an immutable published revision. */
+export const ViewActionBindingSchema = Type.Object(
+  {
+    key: ActionKeySchema,
+    version: Type.Integer({ minimum: 1 }),
+  },
+  { additionalProperties: false }
+);
+export type ViewActionBinding = Static<typeof ViewActionBindingSchema>;
+
+// A view may append a declared event or invoke an exact registered action.
+// New submissions recheck the current view; accepted retries replay receipts.
+export const ViewActionDeclSchema = Type.Union([
+  Type.Object(
+    {
+      emits: Type.String({
+        minLength: 1,
+        maxLength: 128,
+        description:
+          "Event kind appended when the action fires, e.g. 'deal.won'.",
+      }),
+    },
+    { additionalProperties: false }
+  ),
+  Type.Object(
+    { action: ViewActionBindingSchema },
+    { additionalProperties: false }
+  ),
+]);
 export type ViewActionDecl = Static<typeof ViewActionDeclSchema>;
 
 // Everything a view declares about itself, read from its module's
@@ -168,7 +188,8 @@ export const ViewDefinitionSchema = Type.Object(
     ),
     actions: Type.Optional(
       Type.Record(Type.String(), ViewActionDeclSchema, {
-        description: "Declared actions and the event kind each emits.",
+        description:
+          "Declared event actions or pinned registered action revisions.",
       })
     ),
   },
