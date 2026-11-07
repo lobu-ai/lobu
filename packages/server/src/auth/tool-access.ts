@@ -35,6 +35,7 @@ export const MEMBER_WRITE_ACTIONS: Record<string, Set<string> | null> = {
 	// `manage_*` per-action policy. The same tables gate every surface: direct
 	// tool calls (MCP / REST proxy) via `checkToolAccess`, and the SDK namespace
 	// wrappers inside `run_sdk` via `routeAction`.
+	manage_actions: new Set(["apply", "validate"]),
 	manage_entity: new Set(["create", "update", "link", "unlink", "update_link"]),
 	// Members can install connections that bind to their own OAuth account
 	// grant. `update` is here so members can rebind their own connection's
@@ -189,6 +190,7 @@ export const OWNER_ADMIN_ACTIONS: Record<string, Set<string>> = {
 		"delete",
 		"classify",
 	]),
+	manage_actions: new Set(["publish", "set_enabled"]),
 	manage_views: new Set(["set", "remove"]),
 };
 

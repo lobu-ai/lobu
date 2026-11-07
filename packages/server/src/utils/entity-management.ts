@@ -256,6 +256,8 @@ interface EntityCreateOptions {
 }
 
 interface EntityUpdateOptions {
+	/** Atomic commands reject every held field or escalation before persistence. */
+	approvalMode?: "defer" | "reject";
 	/** Join an existing semantic mutation transaction when supplied. */
 	sql?: DbClient;
 	/** Keep an automatically derived label current until its name is customized. */
@@ -1542,6 +1544,14 @@ export async function updateEntity(
 			} else {
 				throw err;
 			}
+		}
+
+		if (opts?.approvalMode === "reject" && (heldFields.length > 0 || deferWholeWrite !== null)) {
+			throw new ToolUserError(
+				"This action requires approval; no changes were applied.",
+				409,
+				"APPROVAL_REQUIRED",
+			);
 		}
 
 		// The full proposal, for a deferral that must carry what the caller asked

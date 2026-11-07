@@ -867,13 +867,15 @@ export async function checkStalledExecutions(_env: Env): Promise<void> {
     logger.error({ error: connectTokenError }, '[StalledRuns] Error expiring connect tokens');
   }
 
-  // Clean up old completed runs (keep last 30 days). Delete in bounded
-  // batches to avoid long-held locks.
+  // Clean up old completed runs (keep last 30 days). Typed command receipts
+  // remain authoritative for retries until workspace deletion. Delete other
+  // runs in bounded batches to avoid long-held locks.
   const deleted = await sql`
     DELETE FROM runs
     WHERE id IN (
       SELECT id FROM runs
       WHERE status IN ('completed', 'failed', 'timeout', 'cancelled')
+        AND action_type_id IS NULL
         AND completed_at < current_timestamp - INTERVAL '30 days'
       LIMIT 1000
     )

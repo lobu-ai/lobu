@@ -45,6 +45,42 @@ describe("readViewDefinition", () => {
     });
   });
 
+  test("preserves an exact registered action revision beside emit-only actions", () => {
+    expect(
+      readViewDefinition(
+        module(`{
+          key: "pipeline",
+          attach: [{ collection: "deal" }],
+          actions: {
+            notify: { emits: "deal.notified" },
+            win: { action: { key: "deal.set_stage", version: 1 } },
+          },
+        }`)
+      ).actions
+    ).toEqual({
+      notify: { emits: "deal.notified" },
+      win: { action: { key: "deal.set_stage", version: 1 } },
+    });
+  });
+
+  test("rejects ambiguous, unpinned and malformed action declarations", () => {
+    for (const declaration of [
+      '{ action: { key: "deal.set_stage" } }',
+      '{ action: { key: "deal.set_stage", version: 0 } }',
+      '{ action: { key: "deal.set_stage", version: 1.5 } }',
+      '{ action: { key: "deal.set_stage", version: "latest" } }',
+      '{ action: { key: "deal.set_stage", version: 1 }, emits: "deal.won" }',
+      '{ action: { key: "deal.set_stage", version: 1, target: 42 } }',
+      '{ action: { key: "", version: 1 } }',
+    ]) {
+      expect(() =>
+        readViewDefinition(
+          module(`{ key: "p", attach: [], actions: { win: ${declaration} } }`)
+        )
+      ).toThrow(/^defineView\.actions\.win/);
+    }
+  });
+
   test("accepts quoted keys, templates without substitutions and an aliased import", () => {
     expect(
       readViewDefinition(

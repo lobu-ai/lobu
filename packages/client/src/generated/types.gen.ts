@@ -458,7 +458,7 @@ export type SaveMemoryResponse = SaveMemoryResponses[keyof SaveMemoryResponses];
 export type SearchSdkData = {
   body: {
     /**
-     * SDK method or runtime-helper discovery query. Use a namespace (e.g. 'automations'), one or more dotted paths separated by whitespace (e.g. 'automations.create ctx.sleep'), an optional client. prefix, or free text. Pass mode='read' for query_sdk-safe methods only; omit mode for your full run_sdk tier. Namespaces: agents, authProfiles, automations, catalog, classifiers, connections, conversations, ctx, devices, entities, entitySchema, feeds, inferenceProviders, knowledge, metrics, notifications, operations, organizations, schedules, views.
+     * SDK method or runtime-helper discovery query. Use a namespace (e.g. 'automations'), one or more dotted paths separated by whitespace (e.g. 'automations.create ctx.sleep'), an optional client. prefix, or free text. Pass mode='read' for query_sdk-safe methods only; omit mode for your full run_sdk tier. Namespaces: actions, agents, authProfiles, automations, catalog, classifiers, connections, conversations, ctx, devices, entities, entitySchema, feeds, inferenceProviders, knowledge, metrics, notifications, operations, organizations, schedules, views.
      */
     query: string;
     /**
@@ -614,7 +614,7 @@ export type QuerySdkResponses = {
       code?: string;
       retryable?: boolean;
       /**
-       * Structured result of the failed SDK call when an uncaught ClientSdkActionError ended the script (the same value a catch block reads as error.details), redacted and size-bounded. For a failed operations.execute it holds run_id, error_message and any output the action reported, such as output.dialog for a browser action blocked by a JS dialog.
+       * Structured details of an uncaught typed SDK failure (the same value a catch block reads as error.details), redacted and size-bounded. For a failed operations.execute it holds run_id, error_message and any output the action reported, such as output.dialog for a browser action blocked by a JS dialog.
        */
       details?: unknown;
     };
@@ -897,7 +897,7 @@ export type RunSdkResponses = {
       code?: string;
       retryable?: boolean;
       /**
-       * Structured result of the failed SDK call when an uncaught ClientSdkActionError ended the script (the same value a catch block reads as error.details), redacted and size-bounded. For a failed operations.execute it holds run_id, error_message and any output the action reported, such as output.dialog for a browser action blocked by a JS dialog.
+       * Structured details of an uncaught typed SDK failure (the same value a catch block reads as error.details), redacted and size-bounded. For a failed operations.execute it holds run_id, error_message and any output the action reported, such as output.dialog for a browser action blocked by a JS dialog.
        */
       details?: unknown;
     };
@@ -7483,6 +7483,348 @@ export type ManageClassifiersResponses = {
 export type ManageClassifiersResponse =
   ManageClassifiersResponses[keyof ManageClassifiersResponses];
 
+export type ManageActionsData = {
+  body:
+    | {
+        /**
+         * List registered action types and their current published revisions.
+         */
+        action: "list";
+      }
+    | {
+        /**
+         * Get an immutable action definition; omit version to select the current published revision.
+         */
+        action: "get";
+        key: string;
+        version?: number;
+      }
+    | {
+        /**
+         * Publish a new immutable revision of a declarative action definition. Requires workspace admin access.
+         */
+        action: "publish";
+        key: string;
+        name?: string;
+        definition: {
+          /**
+           * A bounded, noncoercing JSON Schema object with additionalProperties:false.
+           */
+          params: {
+            [key: string]: unknown;
+          };
+          target: {
+            entityType: string;
+            idParam: string;
+          };
+          invokePermission: "write" | "admin";
+          requiredExpected?: Array<string>;
+          set: {
+            [key: string]:
+              | {
+                  param: string;
+                }
+              | {
+                  literal: unknown;
+                }
+              | {
+                  server: "timestamp";
+                }
+              | {
+                  event: "id";
+                };
+          };
+          transition?: {
+            field: string;
+            param: string;
+            allowed: Array<{
+              from: string | null;
+              to: Array<string>;
+            }>;
+          };
+          emits: {
+            kind: string;
+            schemaVersion: number;
+            payload: {
+              [key: string]:
+                | {
+                    param: string;
+                  }
+                | {
+                    literal: unknown;
+                  }
+                | {
+                    server: "timestamp";
+                  };
+            };
+          };
+        };
+      }
+    | {
+        /**
+         * Enable or disable new invocations of an action type. Completed receipts remain replayable to authorized callers.
+         */
+        action: "set_enabled";
+        key: string;
+        enabled: boolean;
+      }
+    | {
+        /**
+         * Invoke a pinned action revision with params, expected metadata and an idempotency key; dry_run validates without committing.
+         */
+        action: "apply";
+        key: string;
+        version: number;
+        params: {
+          [key: string]: unknown;
+        };
+        expected?: {
+          [key: string]: unknown;
+        };
+        idempotency_key: string;
+        dry_run?: boolean;
+      }
+    | {
+        /**
+         * Validate a pinned action against current state and permissions, returning a preview without writes, events or receipts.
+         */
+        action: "validate";
+        key: string;
+        version: number;
+        params: {
+          [key: string]: unknown;
+        };
+        expected?: {
+          [key: string]: unknown;
+        };
+      };
+  path: {
+    /**
+     * Organization slug (workspace identifier)
+     */
+    orgSlug: string;
+  };
+  query?: never;
+  url: "/api/{orgSlug}/manage_actions";
+};
+
+export type ManageActionsErrors = {
+  /**
+   * Bad request - invalid parameters
+   */
+  400: {
+    error?: string;
+  };
+  /**
+   * Forbidden - your role or token scope does not allow this action
+   */
+  403: {
+    error?: string;
+  };
+  /**
+   * Tool not found
+   */
+  404: {
+    error?: string;
+  };
+};
+
+export type ManageActionsError = ManageActionsErrors[keyof ManageActionsErrors];
+
+export type ManageActionsResponses = {
+  /**
+   * Successful response
+   */
+  200:
+    | {
+        action: "list";
+        actions: Array<{
+          id: number;
+          key: string;
+          name: string;
+          current_version: number;
+          enabled: boolean;
+        }>;
+      }
+    | {
+        action: "get";
+        action_type: {
+          id: number;
+          key: string;
+          name: string;
+          current_version: number;
+          enabled: boolean;
+        };
+        version: {
+          id: number;
+          version: number;
+          definition: {
+            /**
+             * A bounded, noncoercing JSON Schema object with additionalProperties:false.
+             */
+            params: {
+              [key: string]: unknown;
+            };
+            target: {
+              entityType: string;
+              idParam: string;
+            };
+            invokePermission: "write" | "admin";
+            requiredExpected?: Array<string>;
+            set: {
+              [key: string]:
+                | {
+                    param: string;
+                  }
+                | {
+                    literal: unknown;
+                  }
+                | {
+                    server: "timestamp";
+                  }
+                | {
+                    event: "id";
+                  };
+            };
+            transition?: {
+              field: string;
+              param: string;
+              allowed: Array<{
+                from: string | null;
+                to: Array<string>;
+              }>;
+            };
+            emits: {
+              kind: string;
+              schemaVersion: number;
+              payload: {
+                [key: string]:
+                  | {
+                      param: string;
+                    }
+                  | {
+                      literal: unknown;
+                    }
+                  | {
+                      server: "timestamp";
+                    };
+              };
+            };
+          };
+        };
+      }
+    | {
+        action: "publish";
+        action_type: {
+          id: number;
+          key: string;
+          name: string;
+          current_version: number;
+          enabled: boolean;
+        };
+        version: {
+          id: number;
+          version: number;
+          definition: {
+            /**
+             * A bounded, noncoercing JSON Schema object with additionalProperties:false.
+             */
+            params: {
+              [key: string]: unknown;
+            };
+            target: {
+              entityType: string;
+              idParam: string;
+            };
+            invokePermission: "write" | "admin";
+            requiredExpected?: Array<string>;
+            set: {
+              [key: string]:
+                | {
+                    param: string;
+                  }
+                | {
+                    literal: unknown;
+                  }
+                | {
+                    server: "timestamp";
+                  }
+                | {
+                    event: "id";
+                  };
+            };
+            transition?: {
+              field: string;
+              param: string;
+              allowed: Array<{
+                from: string | null;
+                to: Array<string>;
+              }>;
+            };
+            emits: {
+              kind: string;
+              schemaVersion: number;
+              payload: {
+                [key: string]:
+                  | {
+                      param: string;
+                    }
+                  | {
+                      literal: unknown;
+                    }
+                  | {
+                      server: "timestamp";
+                    };
+              };
+            };
+          };
+        };
+      }
+    | {
+        action: "set_enabled";
+        action_type: {
+          id: number;
+          key: string;
+          name: string;
+          current_version: number;
+          enabled: boolean;
+        };
+      }
+    | {
+        created: boolean;
+        replayed: boolean;
+        dry_run: false;
+        receipt_id: number;
+        action: {
+          id: number;
+          key: string;
+          version: number;
+        };
+        event_id: number;
+        event_type: string;
+        entity: {
+          id: number;
+          metadata: {
+            [key: string]: unknown;
+          };
+        };
+      }
+    | {
+        dry_run: true;
+        valid: true;
+        action: {
+          id: number;
+          key: string;
+          version: number;
+        };
+        target_id: number;
+        changed_fields: Array<string>;
+      };
+};
+
+export type ManageActionsResponse =
+  ManageActionsResponses[keyof ManageActionsResponses];
+
 export type ManageViewsData = {
   body:
     | {
@@ -7668,6 +8010,12 @@ export type ManageViewsResponses = {
                    * Event kind appended when the action fires, e.g. 'deal.won'.
                    */
                   emits: string;
+                }
+              | {
+                  action: {
+                    key: string;
+                    version: number;
+                  };
                 };
           };
           /**
@@ -7769,6 +8117,12 @@ export type ManageViewsResponses = {
                    * Event kind appended when the action fires, e.g. 'deal.won'.
                    */
                   emits: string;
+                }
+              | {
+                  action: {
+                    key: string;
+                    version: number;
+                  };
                 };
           };
           /**
@@ -7877,6 +8231,12 @@ export type ManageViewsResponses = {
                    * Event kind appended when the action fires, e.g. 'deal.won'.
                    */
                   emits: string;
+                }
+              | {
+                  action: {
+                    key: string;
+                    version: number;
+                  };
                 };
           };
           /**

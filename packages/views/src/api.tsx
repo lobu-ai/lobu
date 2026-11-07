@@ -57,7 +57,10 @@ import type {
   EntityGetInput,
   EntityGetResult,
 } from "@lobu/core/contracts/tools/manage-entity";
-import type { ViewAttachment } from "@lobu/core/contracts/tools/manage-views";
+import type {
+  ViewActionDecl,
+  ViewAttachment,
+} from "@lobu/core/contracts/tools/manage-views";
 import {
   Component,
   createContext,
@@ -169,7 +172,7 @@ export interface ViewDefinition {
    *  no attach/detach verbs. */
   attach: Attachment[];
   params?: Record<string, ParamDef>;
-  actions?: Record<string, { emits: string }>;
+  actions?: Record<string, ViewActionDecl>;
 }
 
 export function defineView(def: ViewDefinition): ViewDefinition {
@@ -626,17 +629,28 @@ export function mintInteractionId(): string {
   return `${Date.now()}-${Math.floor(Math.random() * 1e9)}`;
 }
 
+export interface ActionOptions {
+  /** Observed target metadata required by a registered action's preconditions. */
+  expected?: Record<string, unknown>;
+}
+
 /** Submit a declared action. Failed acknowledgements expose an explicit retry
- * that keeps the original value, event subject and interaction id. */
+ * that keeps the original binding, value, expected fields, subject and id. */
 export function useAction(
   name: string
-): (value?: Record<string, unknown>) => Promise<ActionResult> {
+): (
+  value?: Record<string, unknown>,
+  options?: ActionOptions
+) => Promise<ActionResult> {
   const rt = useRuntime();
   if (!rt.def.actions?.[name]) {
     throw new Error(`Action "${name}" is not declared on view "${rt.def.key}"`);
   }
   return useCallback(
-    async (value: Record<string, unknown> = {}) => {
+    async (
+      value: Record<string, unknown> = {},
+      options: ActionOptions = {}
+    ) => {
       if (!rt.ready) {
         return {
           ok: false,
@@ -647,6 +661,7 @@ export function useAction(
       }
       let args: Record<string, unknown>;
       try {
+        const declaration = rt.def.actions?.[name];
         // Snapshot JSON before the first send; edits to a form after a failure
         // must not change the meaning of an already accepted submission.
         args = JSON.parse(
@@ -654,6 +669,12 @@ export function useAction(
             view: rt.def.key,
             action: name,
             value,
+            ...(declaration && "action" in declaration
+              ? { binding: declaration.action }
+              : {}),
+            ...(options.expected === undefined
+              ? {}
+              : { expected: options.expected }),
             ...(rt.scope.event === undefined
               ? {}
               : { scope: { event: rt.scope.event } }),

@@ -62,6 +62,9 @@ import type {
   ListOrganizationsData,
   ListOrganizationsErrors,
   ListOrganizationsResponses,
+  ManageActionsData,
+  ManageActionsErrors,
+  ManageActionsResponses,
   ManageAgentsData,
   ManageAgentsErrors,
   ManageAgentsResponses,
@@ -680,6 +683,27 @@ export const manageClassifiers = <ThrowOnError extends boolean = false>(
     ThrowOnError
   >({
     url: "/api/{orgSlug}/manage_classifiers",
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      ...options.headers,
+    },
+  });
+
+/**
+ * Immutable typed action registry and invocation
+ *
+ * Immutable typed action registry and invocation. SDK alternative: client.actions.
+ */
+export const manageActions = <ThrowOnError extends boolean = false>(
+  options: Options<ManageActionsData, ThrowOnError>,
+): RequestResult<ManageActionsResponses, ManageActionsErrors, ThrowOnError> =>
+  (options.client ?? client).post<
+    ManageActionsResponses,
+    ManageActionsErrors,
+    ThrowOnError
+  >({
+    url: "/api/{orgSlug}/manage_actions",
     ...options,
     headers: {
       "Content-Type": "application/json",

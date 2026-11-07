@@ -213,6 +213,101 @@ async function stampPendingProposalCounts(
 // Main Function
 // ============================================
 
+/**
+ * Shared entity-policy gate for knowledge reads and exact event subjects.
+ * Supplying the caller's SQL handle keeps transactional readers on that handle.
+ * Row visibility (tenant/connection/audit scope) still belongs to the query.
+ */
+export async function assertContentEntityReadPolicy(
+  sql: DbClient,
+  ctx: ToolContext,
+  args: Pick<GetContentArgs, 'record' | 'entity_id' | 'entity_types' | 'content_ids'>,
+): Promise<void> {
+  // Agent/automation: entity read policy (same envelope as manage_entity /
+  // search_memory). Humans skip — role ACL is separate.
+  if (ctx.agentId || ctx.actingAutomationId) {
+    const actor = await resolveActingPrincipal(sql, {
+      organizationId: ctx.organizationId,
+      userId: ctx.userId,
+      agentId: ctx.agentId,
+      sessionAutomationId: ctx.actingAutomationId ?? null,
+    });
+    if (actor.kind !== 'user') {
+      const restrictions = await entityReadRestrictions(sql, ctx, actor);
+      const assertReadable = async (records: Array<{ id: number | string }>) => {
+        if ((await filterEntityReadRows(sql, records, restrictions)).length !== records.length) {
+          throw new ToolUserError('Policy denies reading one or more requested entities for this principal.', 403);
+        }
+      };
+      const requestedRecords: Array<{ id: number | string }> = [];
+      const typeSlugs = new Set<string>();
+      if (args.record) typeSlugs.add(args.record.type);
+      if (args.entity_types?.length) {
+        for (const t of args.entity_types) {
+          if (typeof t === 'string' && t.trim()) typeSlugs.add(t.trim());
+        }
+      }
+      if (args.entity_id) {
+        const typeRows = await sql<{ id: number; entity_type: string }>`
+          SELECT e.id, et.slug AS entity_type
+          FROM entities e
+          JOIN entity_types et ON et.id = e.entity_type_id
+          WHERE e.id = ${args.entity_id}
+            AND e.organization_id = ${ctx.organizationId}
+          LIMIT 1
+        `;
+        requestedRecords.push(...typeRows);
+        if (typeRows[0]?.entity_type) {
+          typeSlugs.add(String(typeRows[0].entity_type));
+        }
+      }
+      if (args.content_ids?.length) {
+        const eventTypeRows = await sql<{ id: number | null; entity_type: string | null }>`
+          SELECT DISTINCT e.id, et.slug AS entity_type
+          FROM events ev
+          LEFT JOIN LATERAL unnest(ev.entity_ids) linked(entity_id) ON TRUE
+          LEFT JOIN entities e
+            ON e.id = linked.entity_id
+           AND e.deleted_at IS NULL
+          LEFT JOIN entity_types et
+            ON et.id = e.entity_type_id
+           AND et.deleted_at IS NULL
+          WHERE ev.id = ANY(${pgBigintArray(args.content_ids)}::bigint[])
+            AND (
+              ev.organization_id = ${ctx.organizationId}
+              OR ev.linked_org_ids @> ARRAY[${ctx.organizationId}]::text[]
+              OR EXISTS (
+                SELECT 1 FROM entities scoped_entity
+                WHERE scoped_entity.id = ANY(ev.entity_ids)
+                  AND scoped_entity.organization_id = ${ctx.organizationId}
+              )
+              OR EXISTS (
+                SELECT 1 FROM connections scoped_connection
+                WHERE scoped_connection.id = ev.connection_id
+                  AND scoped_connection.organization_id = ${ctx.organizationId}
+              )
+            )
+        `;
+        requestedRecords.push(...eventTypeRows.flatMap(row => row.id === null ? [] : [{ id: row.id }]));
+        for (const row of eventTypeRows) {
+          // Unbound events use the workspace-wide $member policy envelope.
+          typeSlugs.add(row.entity_type ? String(row.entity_type) : '$member');
+        }
+      }
+      for (const slug of typeSlugs) {
+        if (restrictions.some(rule => rule.entity_id === null &&
+          (rule.entity_type_slug === null || rule.entity_type_slug === slug))) {
+          throw new ToolUserError(
+            `Policy denies reading entities of type '${slug}' for this principal.`,
+            403,
+          );
+        }
+      }
+      await assertReadable(requestedRecords);
+    }
+  }
+}
+
 export const getContent = withValidatedArgs('read_knowledge', GetContentSchema, getContentImpl);
 
 async function getContentImpl(
@@ -308,89 +403,7 @@ async function getContentImpl(
     );
   }
 
-  // Agent/automation: entity read policy (same envelope as manage_entity /
-  // search_memory). Humans skip — role ACL is separate.
-  if (ctx.agentId || ctx.actingAutomationId) {
-    const actor = await resolveActingPrincipal(getDb(), {
-      organizationId: ctx.organizationId,
-      userId: ctx.userId,
-      agentId: ctx.agentId,
-      sessionAutomationId: ctx.actingAutomationId ?? null,
-    });
-    if (actor.kind !== 'user') {
-      const restrictions = await entityReadRestrictions(sql, ctx, actor);
-      const assertReadable = async (records: Array<{ id: number | string }>) => {
-        if ((await filterEntityReadRows(sql, records, restrictions)).length !== records.length) {
-          throw new ToolUserError('Policy denies reading one or more requested entities for this principal.', 403);
-        }
-      };
-      const requestedRecords: Array<{ id: number | string }> = [];
-      const typeSlugs = new Set<string>();
-      if (args.record) typeSlugs.add(args.record.type);
-      if (args.entity_types?.length) {
-        for (const t of args.entity_types) {
-          if (typeof t === 'string' && t.trim()) typeSlugs.add(t.trim());
-        }
-      }
-      if (args.entity_id) {
-        const typeRows = await sql<{ id: number; entity_type: string }>`
-          SELECT e.id, et.slug AS entity_type
-          FROM entities e
-          JOIN entity_types et ON et.id = e.entity_type_id
-          WHERE e.id = ${args.entity_id}
-            AND e.organization_id = ${ctx.organizationId}
-          LIMIT 1
-        `;
-        requestedRecords.push(...typeRows);
-        if (typeRows[0]?.entity_type) {
-          typeSlugs.add(String(typeRows[0].entity_type));
-        }
-      }
-      if (args.content_ids?.length) {
-        const eventTypeRows = await sql<{ id: number | null; entity_type: string | null }>`
-          SELECT DISTINCT e.id, et.slug AS entity_type
-          FROM events ev
-          LEFT JOIN LATERAL unnest(ev.entity_ids) linked(entity_id) ON TRUE
-          LEFT JOIN entities e
-            ON e.id = linked.entity_id
-           AND e.deleted_at IS NULL
-          LEFT JOIN entity_types et
-            ON et.id = e.entity_type_id
-           AND et.deleted_at IS NULL
-          WHERE ev.id = ANY(${pgBigintArray(args.content_ids)}::bigint[])
-            AND (
-              ev.organization_id = ${ctx.organizationId}
-              OR ev.linked_org_ids @> ARRAY[${ctx.organizationId}]::text[]
-              OR EXISTS (
-                SELECT 1 FROM entities scoped_entity
-                WHERE scoped_entity.id = ANY(ev.entity_ids)
-                  AND scoped_entity.organization_id = ${ctx.organizationId}
-              )
-              OR EXISTS (
-                SELECT 1 FROM connections scoped_connection
-                WHERE scoped_connection.id = ev.connection_id
-                  AND scoped_connection.organization_id = ${ctx.organizationId}
-              )
-            )
-        `;
-        requestedRecords.push(...eventTypeRows.flatMap(row => row.id === null ? [] : [{ id: row.id }]));
-        for (const row of eventTypeRows) {
-          // Unbound events use the workspace-wide $member policy envelope.
-          typeSlugs.add(row.entity_type ? String(row.entity_type) : '$member');
-        }
-      }
-      for (const slug of typeSlugs) {
-        if (restrictions.some(rule => rule.entity_id === null &&
-          (rule.entity_type_slug === null || rule.entity_type_slug === slug))) {
-          throw new ToolUserError(
-            `Policy denies reading entities of type '${slug}' for this principal.`,
-            403,
-          );
-        }
-      }
-      await assertReadable(requestedRecords);
-    }
-  }
+  await assertContentEntityReadPolicy(sql, ctx, args);
 
   if (args.record) {
     await requireOrgReadAccess(pgSql, ctx);

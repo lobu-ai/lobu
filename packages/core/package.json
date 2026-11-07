@@ -147,6 +147,12 @@
       "import": "./dist/contracts/tools/manage-schedules.js",
       "require": "./dist/contracts/tools/manage-schedules.js"
     },
+    "./contracts/tools/manage-actions": {
+      "types": "./dist/contracts/tools/manage-actions.d.ts",
+      "bun": "./src/contracts/tools/manage-actions.ts",
+      "import": "./dist/contracts/tools/manage-actions.js",
+      "require": "./dist/contracts/tools/manage-actions.js"
+    },
     "./contracts/tools/manage-views": {
       "types": "./dist/contracts/tools/manage-views.d.ts",
       "bun": "./src/contracts/tools/manage-views.ts",

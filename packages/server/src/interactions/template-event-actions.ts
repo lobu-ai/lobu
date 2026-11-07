@@ -1,4 +1,8 @@
+import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import { ViewActionBindingSchema, type ViewActionBinding } from "@lobu/core/contracts/tools/manage-views";
+import { Value } from "@sinclair/typebox/value";
+import { applyAction } from "../actions/executor";
 import { isEventAttachment } from "@lobu/core/contracts/tools/view-attach";
 import {
 	collectTemplateActionInvocations,
@@ -17,8 +21,8 @@ import {
 } from "../utils/event-kind-validation";
 import { insertConnectionlessWorkspaceEvent } from "../utils/insert-event";
 import { emit } from "../events/emitter";
-import { getView, isValidViewKey, VIEW_ACTION_NAME_RE } from "../views/views";
-import { resolveEventViewSubject } from "../views/event-subject";
+import { getView, isValidViewKey, VIEW_ACTION_NAME_RE, type StoredView } from "../views/views";
+import { resolveCurrentEventViewSubject, resolveEventViewSubject } from "../views/event-subject";
 import type { Env } from "../index";
 import type { ToolContext } from "../tools/registry";
 
@@ -64,6 +68,11 @@ export interface InvokedTemplateEventAction {
  * Event-bound actions additionally validate their readable source version.
  * An accepted retry returns its receipt even after the declaration changes. */
 export interface InvokeViewActionParams {
+	/** The authenticated adapter supplies this even when no event is mounted. */
+	caller?: { env: Env; ctx: ToolContext };
+	/** The exact revision declared by the loaded browser bundle. */
+	binding?: ViewActionBinding;
+	expected?: Record<string, unknown>;
 	/** Trusted caller context is required to resolve an event-bound action. */
 	event?: { id: number; env: Env; ctx: ToolContext };
 	organizationId: string;
@@ -151,6 +160,15 @@ async function replayableAction(
 const MAX_VIEW_VALUE_JSON_LENGTH = 4_000;
 
 function validateViewInvocation(params: InvokeViewActionParams): void {
+	if (params.binding !== undefined && !Value.Check(ViewActionBindingSchema, params.binding)) {
+		throw new ToolUserError("binding must name an exact registered action revision", 400);
+	}
+	if (params.expected !== undefined && (
+		!params.binding || params.expected === null || typeof params.expected !== "object" ||
+		Array.isArray(params.expected) || JSON.stringify(params.expected).length > MAX_VIEW_VALUE_JSON_LENGTH
+	)) {
+		throw new ToolUserError("expected must be a bounded object for a registered action", 400);
+	}
 	if (!isValidViewKey(params.viewKey)) {
 		throw new ToolUserError("Invalid view key", 400);
 	}
@@ -178,10 +196,70 @@ export async function invokeViewAction(
 	params: InvokeViewActionParams,
 ): Promise<InvokedTemplateEventAction> {
 	validateViewInvocation(params);
-	const result = await replayableAction(params, (key) => appendViewAction(params, key));
+	const result = params.binding
+		? await invokeRegisteredViewAction(params, params.binding)
+		: await replayableAction(params, (key) => appendViewAction(params, key));
 	// A retried acknowledgement should still let the caller refresh its view.
 	emit(params.organizationId, { keys: [`view:${params.viewKey}`] });
 	return result;
+}
+
+/**
+ * The executor owns replay before this adapter checks the current declaration.
+ * A lost acknowledgement must survive a view revision or deletion.
+ */
+async function invokeRegisteredViewAction(
+	params: InvokeViewActionParams,
+	binding: ViewActionBinding,
+): Promise<InvokedTemplateEventAction> {
+	const caller = params.caller;
+	if (!caller || !caller.ctx.isAuthenticated || !caller.ctx.userId ||
+		caller.ctx.organizationId !== params.organizationId ||
+		caller.ctx.userId !== params.actor.userId ||
+		params.actor.platform !== "lobu" || params.actor.platformUserId !== caller.ctx.userId) {
+		throw new ToolUserError("A trusted signed-in caller is required for a registered action", 401);
+	}
+	// A bounded deterministic key retains the existing view/surface/intent
+	// scope. The executor separately binds actor, revision, payload and source.
+	const idempotencyKey = `view-action:${createHash("sha256")
+		.update(JSON.stringify([params.viewKey, params.surface, params.interactionId]))
+		.digest("hex")}`;
+	const result = await applyAction({
+		key: binding.key,
+		version: binding.version,
+		params: params.value ?? {},
+		...(params.expected === undefined ? {} : { expected: params.expected }),
+		idempotency_key: idempotencyKey,
+		dry_run: false,
+	}, caller.env, caller.ctx, {
+		source: {
+			viewKey: params.viewKey,
+			action: params.action,
+			...(params.event ? { scopeEventId: params.event.id } : {}),
+		},
+		beforeNewExecution: async (tx) => {
+			const [view] = await tx<Pick<StoredView, "key" | "attach" | "actions">>`
+        SELECT key, attach, actions FROM views
+        WHERE organization_id = ${params.organizationId} AND key = ${params.viewKey}
+        FOR SHARE
+      `;
+			if (!view) throw new ToolUserError(`Unknown view: ${params.viewKey}`, 404);
+			const declared = Object.hasOwn(view.actions ?? {}, params.action)
+				? view.actions[params.action] : undefined;
+			if (!declared || !("action" in declared) ||
+				declared.action.key !== binding.key || declared.action.version !== binding.version) {
+				throw new ToolUserError("This view action has changed. Reopen the view before submitting.", 409);
+			}
+			if (!params.event && view.attach.length > 0 && view.attach.every(isEventAttachment)) {
+				throw new ToolUserError("This view action requires its event subject.", 400);
+			}
+			if (params.event) {
+				await resolveCurrentEventViewSubject(view, params.event.id, caller.ctx, tx);
+			}
+		},
+	});
+	if (result.dry_run) throw new Error("View actions must commit their application");
+	return { created: result.created, eventId: result.event_id, eventType: result.event_type };
 }
 
 async function appendViewAction(
@@ -192,8 +270,12 @@ async function appendViewAction(
 	if (!view) {
 		throw new ToolUserError(`Unknown view: ${params.viewKey}`, 404);
 	}
-	const declared = view.actions?.[params.action];
-	if (!declared || typeof declared.emits !== "string" || !declared.emits) {
+	const declared = Object.hasOwn(view.actions ?? {}, params.action)
+		? view.actions[params.action] : undefined;
+	if (declared && "action" in declared) {
+		throw new ToolUserError("This registered view action requires its loaded revision binding", 400);
+	}
+	if (!declared || !("emits" in declared) || typeof declared.emits !== "string" || !declared.emits) {
 		throw new ToolUserError(
 			`View "${params.viewKey}" does not declare action "${params.action}"`,
 			403,

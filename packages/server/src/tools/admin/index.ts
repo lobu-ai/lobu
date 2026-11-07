@@ -86,6 +86,7 @@ import {
 	manageAutomations,
 	ManageAutomationsResultSchema,
 } from "./manage_automations";
+import { ManageActionsSchema, ManageActionsResultSchema, manageActions } from "./manage_actions";
 import { NotifySchema, notify } from "./notify";
 
 interface AdminToolEntry {
@@ -279,6 +280,14 @@ const ENTRIES: AdminToolEntry[] = [
 		resultSchema: ManageClassifiersResultSchema,
 		handler: manageClassifiers,
 		annotations: DESTRUCTIVE_WITH_TITLE("Manage classifiers"),
+	},
+	{
+		name: "manage_actions",
+		description: "Immutable typed action registry and invocation. SDK alternative: client.actions.",
+		schema: ManageActionsSchema,
+		resultSchema: ManageActionsResultSchema,
+		handler: manageActions,
+		annotations: DESTRUCTIVE_WITH_TITLE("Manage actions"),
 	},
 	{
 		name: "manage_views",

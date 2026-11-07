@@ -44,6 +44,10 @@ export type ToolErrorCode =
    * with the current values.
    */
   | "PRECONDITION_FAILED"
+  /** The whole command needs approval; no subset was applied. */
+  | "APPROVAL_REQUIRED"
+  /** An idempotency key was already committed for another request. */
+  | "IDEMPOTENCY_CONFLICT"
   // ── transient: the same call may succeed on retry ──
   /** Upstream throttled the request (HTTP 429 / too many requests). */
   | "RATE_LIMITED"
@@ -101,6 +105,14 @@ export const TOOL_ERRORS: Record<ToolErrorCode, ToolErrorSpec> = {
     retryable: false,
     message:
       "A field changed since it was read, so nothing was written; re-read it and retry with the current values.",
+  },
+  APPROVAL_REQUIRED: {
+    retryable: false,
+    message: "This action requires approval; no changes were applied.",
+  },
+  IDEMPOTENCY_CONFLICT: {
+    retryable: false,
+    message: "The idempotency key belongs to a different request.",
   },
   RATE_LIMITED: {
     retryable: true,

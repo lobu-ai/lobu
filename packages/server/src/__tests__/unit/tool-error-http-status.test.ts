@@ -26,6 +26,8 @@ const ALL_CODES = Object.keys({
   PERMISSION: true,
   MANUAL_EDIT_NOT_ALLOWED: true,
   PRECONDITION_FAILED: true,
+  APPROVAL_REQUIRED: true,
+  IDEMPOTENCY_CONFLICT: true,
   RATE_LIMITED: true,
   UPSTREAM_TIMEOUT: true,
   UPSTREAM_5XX: true,
@@ -46,6 +48,8 @@ describe('toolErrorHttpStatus', () => {
     expect(toolErrorHttpStatus('PERMISSION')).toBe(403);
     expect(toolErrorHttpStatus('MANUAL_EDIT_NOT_ALLOWED')).toBe(403);
     expect(toolErrorHttpStatus('PRECONDITION_FAILED')).toBe(409);
+    expect(toolErrorHttpStatus('APPROVAL_REQUIRED')).toBe(409);
+    expect(toolErrorHttpStatus('IDEMPOTENCY_CONFLICT')).toBe(409);
     expect(toolErrorHttpStatus('RATE_LIMITED')).toBe(429);
     expect(toolErrorHttpStatus('VALIDATION')).toBe(400);
     // The CALLER's session is valid — only the connection's credentials are

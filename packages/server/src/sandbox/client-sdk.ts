@@ -89,6 +89,7 @@ import {
 	buildOperationsNamespace,
 	buildOrganizationsNamespace,
 	buildSchedulesNamespace,
+	buildActionsNamespace,
 	buildViewsNamespace,
 } from "./namespaces";
 import type { AgentsNamespace } from "./namespaces/agents";
@@ -110,6 +111,7 @@ import type { MetricsNamespace } from "./namespaces/metrics";
 import type { NotificationsNamespace } from "./namespaces/notifications";
 import type { OperationsNamespace } from "./namespaces/operations";
 import type { OrganizationsNamespace } from "./namespaces/organizations";
+import type { ActionsNamespace } from "./namespaces/actions";
 import type { ViewsNamespace } from "./namespaces/views";
 import type { SchedulesNamespace } from "./namespaces/schedules";
 import type { AutomationsNamespace } from "./namespaces/automations";
@@ -128,6 +130,7 @@ export interface ClientSDK {
 	operations: OperationsNamespace;
 	automations: AutomationsNamespace;
 	classifiers: ClassifiersNamespace;
+	actions: ActionsNamespace;
 	views: ViewsNamespace;
 	knowledge: KnowledgeNamespace;
 	metrics: MetricsNamespace;
@@ -331,6 +334,7 @@ export function buildClientSDK(
 		get operations() { return namespace("operations", buildOperationsNamespace(requireWorkspaceContext(ctx), env)); },
 		get automations() { return namespace("automations", buildAutomationsNamespace(requireWorkspaceContext(ctx), env)); },
 		get classifiers() { return namespace("classifiers", buildClassifiersNamespace(requireWorkspaceContext(ctx), env)); },
+		get actions() { return namespace("actions", buildActionsNamespace(requireWorkspaceContext(ctx), env)); },
 		get views() { return namespace("views", buildViewsNamespace(requireWorkspaceContext(ctx), env)); },
 		get knowledge() { return namespace("knowledge", buildKnowledgeNamespace(requireWorkspaceContext(ctx), env)); },
 		get metrics() { return namespace("metrics", buildMetricsNamespace(requireWorkspaceContext(ctx), env)); },

@@ -6,14 +6,20 @@ import { defineView, Provider, useAction } from "../api.js";
 import { ViewBridge } from "../bridge.js";
 
 let submit: ReturnType<typeof useAction>;
+let submitTyped: ReturnType<typeof useAction>;
+const typedBinding = { key: "test.set_stage", version: 1 };
 function Probe() {
   submit = useAction("vote");
+  submitTyped = useAction("setStage");
   return <input aria-label="Event response" defaultValue="" />;
 }
 const def = defineView({
   key: "event-vote",
   attach: [{ event: "test.poll", type: "test_record" }],
-  actions: { vote: { emits: "test.vote" } },
+  actions: {
+    vote: { emits: "test.vote" },
+    setStage: { action: typedBinding },
+  },
 });
 let dom: JSDOM;
 let root: Root;
@@ -25,6 +31,8 @@ type Message = {
     arguments: {
       scope?: { event: number };
       value: Record<string, unknown>;
+      binding?: { key: string; version: number };
+      expected?: Record<string, unknown>;
       interaction_id: string;
     };
   };
@@ -39,6 +47,7 @@ function send(data: unknown) {
 const calls = () => posted.filter((m) => m.method === "tools/call");
 
 beforeEach(async () => {
+  typedBinding.version = 1;
   dom = new JSDOM(
     "<!doctype html><html><body><div id='root'></div></body></html>",
     {
@@ -155,6 +164,45 @@ test("explicit retry keeps the accepted intent, while another submission gets a 
     },
   });
   expect((await next).ok).toBe(true);
+});
+
+test("registered action retries retain the loaded revision and observed fields", async () => {
+  await act(async () => {
+    send({
+      jsonrpc: "2.0",
+      method: "ui/notifications/tool-input",
+      params: { arguments: { scope: { event: 42 }, params: {} } },
+    });
+    await tick();
+  });
+  const value = { id: 7, stage: "review" };
+  const expected = { stage_event_id: null as number | null };
+  const failed = await submitTyped(value, { expected });
+  expect(failed.ok).toBe(false);
+  const first = calls()[0];
+  expect(first.params.arguments).toMatchObject({
+    binding: { key: "test.set_stage", version: 1 },
+    expected: { stage_event_id: null },
+    scope: { event: 42 },
+    value: { id: 7, stage: "review" },
+  });
+  value.stage = "done";
+  expected.stage_event_id = 99;
+  typedBinding.version = 2;
+  if (!failed.retry) throw new Error("Expected an explicit retry");
+  const retry = failed.retry();
+  await tick();
+  const second = calls()[1];
+  expect(second.params.arguments).toEqual(first.params.arguments);
+  send({
+    jsonrpc: "2.0",
+    id: second.id,
+    result: {
+      structuredContent: { created: false, event_id: 100 },
+      content: [],
+    },
+  });
+  expect((await retry).ok).toBe(true);
 });
 
 test("resolving a replacement event discards the previous subject's form", async () => {

@@ -7,6 +7,7 @@
  */
 
 import { hasRequiredMcpScope, type ToolAccessLevel } from '../auth/tool-access';
+import type { DbClient } from '../db/client';
 import { ToolUserError } from '../utils/errors';
 import { getOrganizationSlug } from '../utils/url-builder';
 import type { AccountToolContext, TokenType, ToolContext } from './registry';
@@ -152,11 +153,17 @@ export async function workspaceScopeDenialMessage(
   },
   subject: string,
   requiredAccess: ToolAccessLevel,
-  alternative?: string | null
+  alternative?: string | null,
+  sql?: DbClient
 ): Promise<string> {
   // Only reached on the denial path, so a lookup per denial is fine; a failed
   // lookup only loses the workspace name, never the denial.
-  const workspace = await getOrganizationSlug(ctx.organizationId).catch(() => null);
+  // A caller-owned transaction may be holding the pool's only connection.
+  // Resolve even error-message context on that handle, never on a second lease.
+  const workspace = await (sql && ctx.organizationId
+    ? sql<{ slug: string }>`SELECT slug FROM organization WHERE id = ${ctx.organizationId} LIMIT 1`
+      .then((rows) => rows[0]?.slug ?? null)
+    : getOrganizationSlug(ctx.organizationId)).catch(() => null);
   return scopeDenialMessage({
     subject,
     requiredAccess,
@@ -249,11 +256,12 @@ export async function enforceRoleScopeAccess(
   subject: string,
   writeRole?: string,
   /** A lower-tier route to the same goal (`ownerAdminActionAlternative`); admin denials only. */
-  alternative?: string | null
+  alternative?: string | null,
+  sql?: DbClient
 ): Promise<void> {
   if (requiredAccess === 'admin' && !isAdminOrOwnerRole(ctx.memberRole)) {
     throw new AccessDeniedError(
-      await workspaceScopeDenialMessage(ctx, subject, 'admin', alternative)
+      await workspaceScopeDenialMessage(ctx, subject, 'admin', alternative, sql)
     );
   }
 
@@ -262,7 +270,7 @@ export async function enforceRoleScopeAccess(
   }
 
   if (!hasRequiredMcpScope(requiredAccess, ctx.scopes)) {
-    const message = await workspaceScopeDenialMessage(ctx, subject, requiredAccess, alternative);
+    const message = await workspaceScopeDenialMessage(ctx, subject, requiredAccess, alternative, sql);
     if (requiredAccess === 'admin') throw new McpScopeRequiredError(message, 'mcp:admin');
     throw new AccessDeniedError(message);
   }

@@ -24,7 +24,7 @@ const VIEW_DEF = {
   last_writer: 'synthetic-probe',
 };
 
-describe('resolveEventViewSubject fast mismatch probe', () => {
+describe.each(['opening', 'application'] as const)('event-view subject authorization for %s', mode => {
   let getContentCalls = 0;
   let fixtures: typeof import('../../setup/test-fixtures');
   let subjectOf: (
@@ -60,12 +60,29 @@ describe('resolveEventViewSubject fast mismatch probe', () => {
     await initWorkspaceProvider();
     fixtures = await import('../../setup/test-fixtures');
     const { setView, getView } = await import('../../../views/views');
-    const { resolveEventViewSubject } = await import(
+    const { resolveCurrentEventViewSubject, resolveEventViewSubject } = await import(
       '../../../views/event-subject'
     );
+    const database = await import('../../../db/client');
+    const { getTestDb } = await import('../../setup/test-db');
 
-    subjectOf = (view, eventId, ctx) =>
-      resolveEventViewSubject(view, eventId, TEST_ENV, ctx);
+    subjectOf = (view, eventId, ctx) => {
+      if (mode === 'opening') return resolveEventViewSubject(view, eventId, TEST_ENV, ctx);
+      return getTestDb().begin(async transaction => {
+        // Application already owns a connection. Any nested global-pool read
+        // can deadlock when all connections are executing bound actions.
+        const pooledRead = vi.spyOn(database, 'getDb').mockImplementation(() => {
+          throw new Error('Subject authorization escaped its transaction');
+        });
+        try {
+          return await resolveCurrentEventViewSubject(
+            view, eventId, ctx, transaction as unknown as import('../../../db/client').DbClient,
+          );
+        } finally {
+          pooledRead.mockRestore();
+        }
+      });
+    };
 
     setupKind = async (kind: 'mismatch' | 'match') => {
       const org = await fixtures.createTestOrganization({ name: 'probe org' });
@@ -128,29 +145,29 @@ describe('resolveEventViewSubject fast mismatch probe', () => {
     expect(getContentCalls).toBe(0);
   });
 
-  it('falls through to the full read when the kind matches', async () => {
+  it('returns the matching current event through the appropriate read path', async () => {
     const { event, view, ctx } = await setupKind('match');
 
     const subject = await subjectOf(view, event.id, ctx);
 
     expect(subject.id).toBe(event.id);
-    expect(getContentCalls).toBeGreaterThan(0);
+    expect(getContentCalls > 0).toBe(mode === 'opening');
   });
 
-  it('falls through for a superseded row, preserving the 404', async () => {
+  it('rejects an event whose successor is missing', async () => {
     const { event, view, ctx } = await setupKind('mismatch');
     const { getTestDb } = await import('../../setup/test-db');
     const sql = getTestDb();
-    // Point the row at a nonexistent successor: the full path's chain walk
-    // finds no head and reports 404, and the probe must not answer instead.
+    // Opening follows the lineage and reports no head; an application rejects
+    // the replaced subject immediately instead of silently changing its input.
     await sql`UPDATE events SET superseded_by = 999999998 WHERE id = ${event.id}`;
 
     const error = await subjectOf(view, event.id, ctx).catch(
       (e: unknown) => e
     );
 
-    expect((error as { httpStatus?: number })?.httpStatus).toBe(404);
-    expect(getContentCalls).toBeGreaterThan(0);
+    expect((error as { httpStatus?: number })?.httpStatus).toBe(mode === 'opening' ? 404 : 409);
+    expect(getContentCalls > 0).toBe(mode === 'opening');
   });
 
   it.each(['oauth', 'pat'] as const)('preserves the %s MCP read-scope denial', async tokenType => {
@@ -158,7 +175,7 @@ describe('resolveEventViewSubject fast mismatch probe', () => {
 
     await expect(subjectOf(view, event.id, { ...ctx, tokenType, scopes: [] }))
       .rejects.toMatchObject({ httpStatus: 403 });
-    expect(getContentCalls).toBe(1);
+    expect(getContentCalls).toBe(mode === 'opening' ? 1 : 0);
   });
 
   it('checks agent entity read policy before disclosing a mismatch', async () => {
@@ -177,7 +194,7 @@ describe('resolveEventViewSubject fast mismatch probe', () => {
 
     await expect(subjectOf(view, event.id, { ...ctx, agentId: agent.agentId }))
       .rejects.toMatchObject({ httpStatus: 403 });
-    expect(getContentCalls).toBe(1);
+    expect(getContentCalls).toBe(mode === 'opening' ? 1 : 0);
   });
 
   it('preserves the fail-closed policy for an unresolved Automation', async () => {
@@ -185,7 +202,7 @@ describe('resolveEventViewSubject fast mismatch probe', () => {
 
     await expect(subjectOf(view, event.id, { ...ctx, actingAutomationId: 999999998 }))
       .rejects.toMatchObject({ httpStatus: 403 });
-    expect(getContentCalls).toBe(1);
+    expect(getContentCalls).toBe(mode === 'opening' ? 1 : 0);
   });
 
   it('returns 404 for an event outside the workspace', async () => {
@@ -198,7 +215,7 @@ describe('resolveEventViewSubject fast mismatch probe', () => {
     });
 
     await expect(subjectOf(view, hidden.id, ctx)).rejects.toMatchObject({ httpStatus: 404 });
-    expect(getContentCalls).toBeGreaterThan(0);
+    expect(getContentCalls > 0).toBe(mode === 'opening');
   });
 
   it.each([
@@ -215,7 +232,7 @@ describe('resolveEventViewSubject fast mismatch probe', () => {
 
     await expect(subjectOf(view, hidden.id, { ...ctx, memberRole }))
       .rejects.toMatchObject({ httpStatus: 404 });
-    expect(getContentCalls).toBeGreaterThan(0);
+    expect(getContentCalls > 0).toBe(mode === 'opening');
   });
 
   it('returns 404 for another member\'s private connection event', async () => {
@@ -237,7 +254,29 @@ describe('resolveEventViewSubject fast mismatch probe', () => {
     });
 
     await expect(subjectOf(view, hidden.id, ctx)).rejects.toMatchObject({ httpStatus: 404 });
-    expect(getContentCalls).toBeGreaterThan(0);
+    expect(getContentCalls > 0).toBe(mode === 'opening');
+  });
+
+  it('preserves exact-read access through a workspace entity bridge', async () => {
+    const { view, ctx } = await setupKind('match');
+    const producer = await fixtures.createTestOrganization({ name: 'Source event org' });
+    const linked = await fixtures.createTestEntity({
+      organization_id: ctx.organizationId,
+      name: 'Linked asset',
+      entity_type: 'asset',
+    });
+    const event = await fixtures.createTestEvent({
+      organization_id: producer.id,
+      entity_id: linked.id,
+      semantic_type: 'note',
+      content: 'Event visible through its linked workspace entity',
+    });
+    view.attach = [{ event: 'note', type: 'asset' }];
+
+    await expect(subjectOf(view, event.id, ctx)).resolves.toMatchObject({
+      id: event.id, entity_ids: [linked.id],
+    });
+    expect(getContentCalls > 0).toBe(mode === 'opening');
   });
 
   it.each([false, true])('checks linked types with matching link = %s', async matching => {
@@ -257,7 +296,7 @@ describe('resolveEventViewSubject fast mismatch probe', () => {
 
     if (matching) {
       await expect(subjectOf(view, event.id, ctx)).resolves.toMatchObject({ id: event.id });
-      expect(getContentCalls).toBeGreaterThan(0);
+      expect(getContentCalls > 0).toBe(mode === 'opening');
     } else {
       await expect(subjectOf(view, event.id, ctx)).rejects.toMatchObject({ httpStatus: 400 });
       expect(getContentCalls).toBe(0);

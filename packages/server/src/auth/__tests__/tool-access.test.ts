@@ -830,6 +830,7 @@ manage_automations: create=admin list=read+public update=admin create_version=ad
 get_automation: read+public ?=read+public
 read_knowledge: read+public ?=read+public
 manage_classifiers: create=admin list=read+public delete=admin classify=admin ?=read
+manage_actions: list=read get=read publish=admin set_enabled=admin apply=write validate=write ?=read
 manage_views: set=admin get=read list=read+public remove=admin ?=read
 list_organizations: read ?=read
 list_metrics: read ?=read

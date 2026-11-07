@@ -7,7 +7,8 @@
 
 import { toJsonSafe } from "@lobu/core";
 import { Value } from "@sinclair/typebox/value";
-import { ViewActionScopeSchema } from "./tools/invoke_view_action";
+import { ViewActionExpectedSchema, ViewActionScopeSchema } from "./tools/invoke_view_action";
+import { ViewActionBindingSchema } from "@lobu/core/contracts/tools/manage-views";
 import type { Context } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import {
@@ -579,6 +580,8 @@ export async function restInvokeViewAction(c: Context<{ Bindings: Env }>) {
 			value?: unknown;
 			interaction_id?: unknown;
 			scope?: unknown;
+			binding?: unknown;
+			expected?: unknown;
 		}>();
 		if (
 			body.value !== undefined &&
@@ -593,8 +596,17 @@ export async function restInvokeViewAction(c: Context<{ Bindings: Env }>) {
 		if (body.scope !== undefined && !Value.Check(ViewActionScopeSchema, body.scope)) {
 			throw new ToolUserError("scope must name one stored event version", 400);
 		}
+		if (body.binding !== undefined && !Value.Check(ViewActionBindingSchema, body.binding)) {
+			throw new ToolUserError("binding must name an exact registered action revision", 400);
+		}
+		if (body.expected !== undefined && !Value.Check(ViewActionExpectedSchema, body.expected)) {
+			throw new ToolUserError("expected must be an object", 400);
+		}
 		const result = await invokeViewAction({
 			organizationId: ctx.organizationId,
+			caller: { env: c.env, ctx },
+			binding: body.binding,
+			expected: body.expected,
 			...(body.scope ? { event: { id: body.scope.event, env: c.env, ctx } } : {}),
 			viewKey: key,
 			action,

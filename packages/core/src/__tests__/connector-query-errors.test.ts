@@ -41,6 +41,8 @@ describe("TOOL_ERRORS catalog", () => {
       "PERMISSION",
       "MANUAL_EDIT_NOT_ALLOWED",
       "PRECONDITION_FAILED",
+      "APPROVAL_REQUIRED",
+      "IDEMPOTENCY_CONFLICT",
       "INTERNAL",
     ] as ToolErrorCode[]) {
       expect(isRetryable(code)).toBe(false);
