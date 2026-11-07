@@ -215,6 +215,11 @@ describe("all agent MCP tools — registry-driven e2e (model-free)", () => {
 				coverage: "reachable",
 				note: "lists scheduled jobs for the org",
 			},
+			manage_actions: {
+				args: { action: "list" },
+				coverage: "reachable",
+				note: "lists registered action types for the authorized workspace",
+			},
 			manage_views: {
 				// 'list' returns the org's views as metadata (never bundles) —
 				// a structured success, not an error, when empty.

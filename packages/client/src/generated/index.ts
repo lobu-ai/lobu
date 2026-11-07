@@ -128,6 +128,7 @@ export type {
   ManageActionsData,
   ManageActionsError,
   ManageActionsErrors,
+  ManageActionsResponse,
   ManageActionsResponses,
   ManageAgentsData,
   ManageAgentsError,

@@ -7486,14 +7486,23 @@ export type ManageClassifiersResponse =
 export type ManageActionsData = {
   body:
     | {
+        /**
+         * List registered action types and their current published revisions.
+         */
         action: "list";
       }
     | {
+        /**
+         * Get an immutable action definition; omit version to select the current published revision.
+         */
         action: "get";
         key: string;
         version?: number;
       }
     | {
+        /**
+         * Publish a new immutable revision of a declarative action definition. Requires workspace admin access.
+         */
         action: "publish";
         key: string;
         name?: string;
@@ -7552,11 +7561,17 @@ export type ManageActionsData = {
         };
       }
     | {
+        /**
+         * Enable or disable new invocations of an action type. Completed receipts remain replayable to authorized callers.
+         */
         action: "set_enabled";
         key: string;
         enabled: boolean;
       }
     | {
+        /**
+         * Invoke a pinned action revision with params, expected metadata and an idempotency key; dry_run validates without committing.
+         */
         action: "apply";
         key: string;
         version: number;
@@ -7570,6 +7585,9 @@ export type ManageActionsData = {
         dry_run?: boolean;
       }
     | {
+        /**
+         * Validate a pinned action against current state and permissions, returning a preview without writes, events or receipts.
+         */
         action: "validate";
         key: string;
         version: number;
@@ -7617,8 +7635,195 @@ export type ManageActionsResponses = {
   /**
    * Successful response
    */
-  200: unknown;
+  200:
+    | {
+        action: "list";
+        actions: Array<{
+          id: number;
+          key: string;
+          name: string;
+          current_version: number;
+          enabled: boolean;
+        }>;
+      }
+    | {
+        action: "get";
+        action_type: {
+          id: number;
+          key: string;
+          name: string;
+          current_version: number;
+          enabled: boolean;
+        };
+        version: {
+          id: number;
+          version: number;
+          definition: {
+            /**
+             * A bounded, noncoercing JSON Schema object with additionalProperties:false.
+             */
+            params: {
+              [key: string]: unknown;
+            };
+            target: {
+              entityType: string;
+              idParam: string;
+            };
+            invokePermission: "write" | "admin";
+            requiredExpected?: Array<string>;
+            set: {
+              [key: string]:
+                | {
+                    param: string;
+                  }
+                | {
+                    literal: unknown;
+                  }
+                | {
+                    server: "timestamp";
+                  }
+                | {
+                    event: "id";
+                  };
+            };
+            transition?: {
+              field: string;
+              param: string;
+              allowed: Array<{
+                from: string | null;
+                to: Array<string>;
+              }>;
+            };
+            emits: {
+              kind: string;
+              schemaVersion: number;
+              payload: {
+                [key: string]:
+                  | {
+                      param: string;
+                    }
+                  | {
+                      literal: unknown;
+                    }
+                  | {
+                      server: "timestamp";
+                    };
+              };
+            };
+          };
+        };
+      }
+    | {
+        action: "publish";
+        action_type: {
+          id: number;
+          key: string;
+          name: string;
+          current_version: number;
+          enabled: boolean;
+        };
+        version: {
+          id: number;
+          version: number;
+          definition: {
+            /**
+             * A bounded, noncoercing JSON Schema object with additionalProperties:false.
+             */
+            params: {
+              [key: string]: unknown;
+            };
+            target: {
+              entityType: string;
+              idParam: string;
+            };
+            invokePermission: "write" | "admin";
+            requiredExpected?: Array<string>;
+            set: {
+              [key: string]:
+                | {
+                    param: string;
+                  }
+                | {
+                    literal: unknown;
+                  }
+                | {
+                    server: "timestamp";
+                  }
+                | {
+                    event: "id";
+                  };
+            };
+            transition?: {
+              field: string;
+              param: string;
+              allowed: Array<{
+                from: string | null;
+                to: Array<string>;
+              }>;
+            };
+            emits: {
+              kind: string;
+              schemaVersion: number;
+              payload: {
+                [key: string]:
+                  | {
+                      param: string;
+                    }
+                  | {
+                      literal: unknown;
+                    }
+                  | {
+                      server: "timestamp";
+                    };
+              };
+            };
+          };
+        };
+      }
+    | {
+        action: "set_enabled";
+        action_type: {
+          id: number;
+          key: string;
+          name: string;
+          current_version: number;
+          enabled: boolean;
+        };
+      }
+    | {
+        created: boolean;
+        replayed: boolean;
+        dry_run: false;
+        receipt_id: number;
+        action: {
+          id: number;
+          key: string;
+          version: number;
+        };
+        event_id: number;
+        event_type: string;
+        entity: {
+          id: number;
+          metadata: {
+            [key: string]: unknown;
+          };
+        };
+      }
+    | {
+        dry_run: true;
+        valid: true;
+        action: {
+          id: number;
+          key: string;
+          version: number;
+        };
+        target_id: number;
+        changed_fields: Array<string>;
+      };
 };
+
+export type ManageActionsResponse =
+  ManageActionsResponses[keyof ManageActionsResponses];
 
 export type ManageViewsData = {
   body:

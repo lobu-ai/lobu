@@ -158,12 +158,20 @@ export const ActionApplyInputSchema = Type.Object(
 export type ActionApplyInput = Static<typeof ActionApplyInputSchema>;
 
 export const ListActionsAction = Type.Object(
-  { action: Type.Literal("list") },
+  {
+    action: Type.Literal("list", {
+      description:
+        "List registered action types and their current published revisions.",
+    }),
+  },
   { additionalProperties: false }
 );
 export const GetActionAction = Type.Object(
   {
-    action: Type.Literal("get"),
+    action: Type.Literal("get", {
+      description:
+        "Get an immutable action definition; omit version to select the current published revision.",
+    }),
     key: ActionKeySchema,
     version: Type.Optional(Type.Integer({ minimum: 1 })),
   },
@@ -171,7 +179,10 @@ export const GetActionAction = Type.Object(
 );
 export const PublishActionAction = Type.Object(
   {
-    action: Type.Literal("publish"),
+    action: Type.Literal("publish", {
+      description:
+        "Publish a new immutable revision of a declarative action definition. Requires workspace admin access.",
+    }),
     key: ActionKeySchema,
     name: Type.Optional(Type.String({ minLength: 1, maxLength: 120 })),
     definition: ActionDefinitionSchema,
@@ -180,19 +191,31 @@ export const PublishActionAction = Type.Object(
 );
 export const SetActionEnabledAction = Type.Object(
   {
-    action: Type.Literal("set_enabled"),
+    action: Type.Literal("set_enabled", {
+      description:
+        "Enable or disable new invocations of an action type. Completed receipts remain replayable to authorized callers.",
+    }),
     key: ActionKeySchema,
     enabled: Type.Boolean(),
   },
   { additionalProperties: false }
 );
 export const ApplyActionAction = Type.Object(
-  { action: Type.Literal("apply"), ...ActionApplyInputSchema.properties },
+  {
+    action: Type.Literal("apply", {
+      description:
+        "Invoke a pinned action revision with params, expected metadata and an idempotency key; dry_run validates without committing.",
+    }),
+    ...ActionApplyInputSchema.properties,
+  },
   { additionalProperties: false }
 );
 export const ValidateActionAction = Type.Object(
   {
-    action: Type.Literal("validate"),
+    action: Type.Literal("validate", {
+      description:
+        "Validate a pinned action against current state and permissions, returning a preview without writes, events or receipts.",
+    }),
     key: ActionKeySchema,
     version: Type.Integer({ minimum: 1 }),
     params: ActionApplyInputSchema.properties.params,
@@ -217,5 +240,105 @@ export type ActionSetEnabledInput = ActionInput<
 >;
 export type ActionValidateInput = ActionInput<ManageActionsArgs, "validate">;
 
-// Apply returns the executor's bounded receipt; validation returns its preview.
-export const ManageActionsResultSchema = Type.Unknown();
+const ActionTypeSummarySchema = Type.Object(
+  {
+    id: Type.Integer({ minimum: 1 }),
+    key: ActionKeySchema,
+    name: Type.String({ minLength: 1, maxLength: 120 }),
+    current_version: Type.Integer({ minimum: 0 }),
+    enabled: Type.Boolean(),
+  },
+  { additionalProperties: false }
+);
+
+const PublishedActionVersionSchema = Type.Object(
+  {
+    id: Type.Integer({ minimum: 1 }),
+    version: Type.Integer({ minimum: 1 }),
+    definition: ActionDefinitionSchema,
+  },
+  { additionalProperties: false }
+);
+
+const ActionResultIdentitySchema = Type.Object(
+  {
+    id: Type.Integer({ minimum: 1 }),
+    key: ActionKeySchema,
+    version: Type.Integer({ minimum: 1 }),
+  },
+  { additionalProperties: false }
+);
+
+// Apply returns only the receipt and declared writeback fields.
+const CommittedActionResultSchema = Type.Object(
+  {
+    created: Type.Boolean(),
+    replayed: Type.Boolean(),
+    dry_run: Type.Literal(false),
+    receipt_id: Type.Integer({ minimum: 1 }),
+    action: ActionResultIdentitySchema,
+    event_id: Type.Integer({ minimum: 1 }),
+    event_type: ActionDefinitionSchema.properties.emits.properties.kind,
+    entity: Type.Object(
+      {
+        id: Type.Integer({ minimum: 1 }),
+        metadata: Type.Record(ActionFieldNameSchema, JsonValueSchema, {
+          maxProperties: 50,
+          additionalProperties: false,
+        }),
+      },
+      { additionalProperties: false }
+    ),
+  },
+  { additionalProperties: false }
+);
+
+// Both validate and apply(dry_run:true) return this rollback-only preview.
+const ValidatedActionResultSchema = Type.Object(
+  {
+    dry_run: Type.Literal(true),
+    valid: Type.Literal(true),
+    action: ActionResultIdentitySchema,
+    target_id: Type.Integer({ minimum: 1 }),
+    changed_fields: Type.Array(ActionFieldNameSchema, {
+      maxItems: 50,
+      uniqueItems: true,
+    }),
+  },
+  { additionalProperties: false }
+);
+
+export const ManageActionsResultSchema = Type.Union([
+  Type.Object(
+    {
+      action: Type.Literal("list"),
+      actions: Type.Array(ActionTypeSummarySchema),
+    },
+    { additionalProperties: false }
+  ),
+  Type.Object(
+    {
+      action: Type.Literal("get"),
+      action_type: ActionTypeSummarySchema,
+      version: PublishedActionVersionSchema,
+    },
+    { additionalProperties: false }
+  ),
+  Type.Object(
+    {
+      action: Type.Literal("publish"),
+      action_type: ActionTypeSummarySchema,
+      version: PublishedActionVersionSchema,
+    },
+    { additionalProperties: false }
+  ),
+  Type.Object(
+    {
+      action: Type.Literal("set_enabled"),
+      action_type: ActionTypeSummarySchema,
+    },
+    { additionalProperties: false }
+  ),
+  CommittedActionResultSchema,
+  ValidatedActionResultSchema,
+]);
