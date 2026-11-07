@@ -231,19 +231,38 @@ function startHttpServer(): void {
 	// replay a 'disconnect' emitted before a listener exists, and the parent can
 	// die mid-module-load (imports run before this line). Register-then-check is
 	// gap-free — no event can be processed between two synchronous statements.
-	if (process.send) {
+	const forked = Boolean(process.send);
+	if (forked) {
 		process.on("disconnect", () => process.exit(143));
 		if (!process.connected) process.exit(143);
 	}
 
 	const port = Number.parseInt(process.env.PORT || String(DEFAULT_PORT), 10);
 
+	// Forked, the parent is the only client and calls 127.0.0.1, so listen on
+	// loopback alone. The standalone service (Helm, Docker) serves other hosts
+	// and keeps listening on every interface.
 	serve({
 		fetch: app.fetch,
 		port,
+		...(forked ? { hostname: "127.0.0.1" } : {}),
 	});
 
 	console.log(`[EmbeddingsService] Listening on port ${port}`);
+
+	// Forked by `lobu run`, start loading the local model now: a cold load takes
+	// 25-30 s, which would otherwise land inside the first search's 30 s request
+	// timeout. The standalone service keeps loading on first use.
+	if (forked && process.env.EMBEDDINGS_BACKEND?.toLowerCase() !== "openai") {
+		generateLocalEmbeddingsOffThread(new URL(import.meta.url), ["warm-up"], 1).catch(
+			(error: unknown) => {
+				const message = error instanceof Error ? error.message : String(error);
+				console.warn(
+					`[EmbeddingsService] Model warm-up failed; the first request loads it: ${scrubServerSecrets(message)}`,
+				);
+			},
+		);
+	}
 }
 
 // This module is also the local inference worker's entry (see

@@ -14,8 +14,8 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import {
-  ensureNativeLibSonames,
   installPgvector,
+  prepareEmbeddedNative,
   resolveEmbeddedNativeDir,
 } from '@lobu/pgvector-embedded';
 import exitHook from 'async-exit-hook';
@@ -132,7 +132,7 @@ export async function startEmbeddedBackend(): Promise<EmbeddedBackend> {
   // our own, so a kill can never accumulate disk (see reapStaleClusters).
   reapStaleClusters();
 
-  ensureNativeLibSonames(resolveEmbeddedNativeDir());
+  prepareEmbeddedNative(resolveEmbeddedNativeDir());
   // Staged outside the installed binary tree, like the embedded runtime. One
   // shared dir is safe: installPgvector is idempotent and swaps files atomically.
   const { postgresFlags } = installPgvector(join(tmpdir(), 'lobu-test-pgvector'));
