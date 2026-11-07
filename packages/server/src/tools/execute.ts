@@ -20,6 +20,7 @@ import {
   hasRequiredMcpScope,
   isPublicReadable,
   ownerAdminActionAlternative,
+  publicToolDenial,
   SCOPE_CHECK_NOT_APPLICABLE,
   type ToolAccessLevel,
 } from '../auth/tool-access';
@@ -274,6 +275,8 @@ export async function checkToolAccess(
 
   if (!role) {
     if (!isPublicReadable(toolName, args)) {
+      const denial = publicToolDenial(toolName);
+      if (denial) throw new AccessDeniedError(denial);
       if (authCtx.userId) {
         throw new AccessDeniedError(
           'This public workspace is read-only for your account. Join the workspace to unlock write access.'

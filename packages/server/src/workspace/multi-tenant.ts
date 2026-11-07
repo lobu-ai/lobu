@@ -13,7 +13,7 @@ import {
 } from '../auth/oauth/resource-indicator';
 import type { AuthInfo } from '../auth/oauth/types';
 import { PersonalAccessTokenService } from '../auth/tokens';
-import { isPublicReadable } from '../auth/tool-access';
+import { isPublicReadable, publicToolDenial } from '../auth/tool-access';
 import { getDb } from '../db/client';
 import { AUTOMATION_RUN_SOURCE } from '../gateway/automation-run-session';
 import { getRevokedTokenStore } from '../gateway/auth/revoked-token-store';
@@ -788,6 +788,16 @@ export class MultiTenantProvider implements WorkspaceProvider {
     //    tools/call will enforce org context at the handler level.
     if (!requestedOrgId) {
       return setContextAndContinue({ organizationId: null, memberRole: null });
+    }
+
+    if (requestedOrgVisibility === 'public' && requestedToolName) {
+      const denial = publicToolDenial(requestedToolName);
+      if (denial) {
+        return c.json(
+          { error: 'forbidden', error_description: denial },
+          403
+        );
+      }
     }
 
     if (!allowOrgLevelPublicRead && !allowAnonymousPublicOrgMcp) {

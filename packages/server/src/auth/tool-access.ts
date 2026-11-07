@@ -412,6 +412,19 @@ export function isPublicReadable(toolName: string, args: unknown): boolean {
 	return actionMatches(PUBLIC_READ_ACTIONS, toolName, args);
 }
 
+/**
+ * A deliberate public denial gets a policy message, not the generic
+ * "sign in with an OAuth client that has write access" text. Raw SQL and
+ * arbitrary SDK scripts are member tools even when the workspace is public;
+ * public views must use the entity/knowledge reads instead.
+ */
+export function publicToolDenial(toolName: string): string | null {
+	if (toolName === "query_sql" || toolName === "query_sdk") {
+		return "SQL and SDK queries are not available to public workspace visitors. Sign in and join this workspace, or use its public pages.";
+	}
+	return null;
+}
+
 export function getPublicReadableActions(
 	toolName: string
 ): Set<string> | null | undefined {

@@ -21,6 +21,7 @@ import {
   getRequiredAccessLevel,
   hasRequiredMcpScope,
   isPublicReadable,
+  publicToolDenial,
   requiresMemberWrite,
   requiresOwnerAdmin,
   resolveMaxAccessLevel,
@@ -427,6 +428,12 @@ describe('isPublicReadable', () => {
 
   it('should deny public read for query_sql', () => {
     expect(isPublicReadable('query_sql', {})).toBe(false);
+  });
+
+  it('explains the public denial for SQL and SDK queries', () => {
+    expect(publicToolDenial('query_sql')).toMatch(/not available to public workspace visitors/i);
+    expect(publicToolDenial('query_sdk')).toMatch(/not available to public workspace visitors/i);
+    expect(publicToolDenial('manage_entity')).toBeNull();
   });
 
   it('should deny public read for unknown tools', () => {

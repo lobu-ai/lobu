@@ -8,6 +8,7 @@ export function isViewRead(
   tool: string,
   args: Record<string, unknown> | undefined
 ): boolean {
+  if (tool === "read_knowledge") return true;
   if (tool === "manage_entity") {
     return (
       args?.action === "list" ||
