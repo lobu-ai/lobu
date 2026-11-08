@@ -54,7 +54,7 @@ export function assertActionJson(value: unknown, label: string): void {
     if (++nodes > 10_000 || depth > MAX_JSON_DEPTH) invalid(`${label} exceeds JSON complexity limits`);
     if (item === null || typeof item === 'string' || typeof item === 'boolean') return;
     if (typeof item === 'number' && Number.isFinite(item)) return;
-    if (typeof item !== 'object' || item === null) invalid(`${label} must contain JSON values only`);
+    if (typeof item !== 'object') invalid(`${label} must contain JSON values only`);
     if (seen.has(item)) invalid(`${label} must not contain cycles`);
     seen.add(item);
     if (Array.isArray(item)) {
