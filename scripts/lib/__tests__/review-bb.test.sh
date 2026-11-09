@@ -82,7 +82,16 @@ case "$1 $2" in
     if [ "${BB_FAKE_ASSERT_OWNER:-0}" = 1 ] && [ "${REVIEW_BB_CHILD_ID:-}" != "${BB_FAKE_EXPECT_OWNER:-thr_child9}" ]; then
       exit 1
     fi
-    exit "${BB_FAKE_WAIT_RC:-0}" ;;
+    if [ "${BB_FAKE_WAIT_RC:-0}" != 0 ]; then exit "$BB_FAKE_WAIT_RC"; fi
+    # Like the real CLI, only `idle` satisfies `--status idle`: any other
+    # status (including `error`) holds the wait until its timeout.
+    if [ "$("$BB_FAKE_JQ" -r '.thread.status' "$state/child-show.json")" != idle ]; then
+      sleep "${BB_FAKE_WAIT_TIMEOUT:-30}" & timer=$!
+      trap 'kill "$timer" 2>/dev/null; exit 143' TERM
+      wait "$timer"
+      exit 1
+    fi
+    exit 0 ;;
   "thread interactions") cat "$state/interactions.json" ;;
   "thread output") "$BB_FAKE_JQ" -n --arg o "$(cat "$state/output.txt")" '{output:$o}' ;;
   "thread stop") printf '{"ok":true}\n' ;;
@@ -464,18 +473,46 @@ reset_calls
 review_bb_cancel_owned
 [ "$(grep -c '^thread stop' "$FAKE_STATE/calls.log" || true)" = "0" ] || fail "cancel with no owned child must stop nothing"
 
-# A real TERM while waiting must trigger cleanup before the CLI timeout.
+# A real TERM while waiting on a still-running child must trigger cleanup
+# before the CLI timeout or the next status poll.
 reset_calls
 signal_rc=0
+signal_started=$SECONDS
 (
   trap 'review_bb_cancel_owned' EXIT
   trap 'exit 143' TERM
   REVIEW_BB_CHILD_ID=thr_signal1
   export BB_FAKE_WAIT_SIGNAL=1
+  printf '{"thread":{"id":"thr_signal1","status":"active"},"environment":null}\n' > "$FAKE_STATE/child-show.json"
   review_bb_wait_idle thr_signal1 20m
 ) >/dev/null 2>&1 || signal_rc=$?
+jq -n --arg p "$SCRATCH" '{thread:{id:"thr_child9",status:"idle"},environment:{path:$p}}' > "$FAKE_STATE/child-show.json"
 [ "$signal_rc" = 143 ] || fail "TERM must interrupt the asynchronous CLI wait"
+[ $((SECONDS - signal_started)) -lt 5 ] || fail "TERM must not wait out the CLI wait or a status poll"
 grep -q '^thread stop thr_signal1' "$FAKE_STATE/calls.log" || fail "TERM must stop the owned child"
+
+# A child that errors while the driver waits (a provider usage limit seconds
+# after spawn) never reaches idle. The wait must keep waiting through running
+# statuses, then fail fast naming the status instead of sitting out the
+# timeout, and stop and release the owned child.
+reset_calls
+cp "$FAKE_STATE/child-show.json" "$TEST_DIR/child-show.saved"
+mkdir -p "$FAKE_STATE/show-queue"
+printf '{"thread":{"id":"thr_err1","status":"active"},"environment":null}\n' > "$FAKE_STATE/show-queue/01-active.json"
+jq '.thread.id = "thr_err1" | .thread.status = "error"' "$TEST_DIR/child-show.saved" > "$FAKE_STATE/child-show.json"
+REVIEW_BB_CHILD_ID=thr_err1
+error_rc=0
+error_started=$SECONDS
+BB_FAKE_WAIT_TIMEOUT=30 review_bb_wait_idle thr_err1 20m 2>"$TEST_DIR/wait-error.err" || error_rc=$?
+error_elapsed=$((SECONDS - error_started))
+[ "$error_rc" = 1 ] || fail "an errored child must fail the wait (rc $error_rc)"
+[ "$error_elapsed" -lt 15 ] || fail "an errored child must fail fast, not sit out the wait timeout (took ${error_elapsed}s)"
+grep -q "status 'error'" "$TEST_DIR/wait-error.err" || fail "wait failure must name the child status: $(cat "$TEST_DIR/wait-error.err")"
+grep -q '@thread:thr_err1' "$TEST_DIR/wait-error.err" || fail "wait failure must name the child thread"
+grep -q '^thread stop thr_err1' "$FAKE_STATE/calls.log" || fail "an errored child must be stopped"
+[ -z "$REVIEW_BB_CHILD_ID" ] || fail "an errored child must release ownership"
+rm -rf "$FAKE_STATE/show-queue"
+cp "$TEST_DIR/child-show.saved" "$FAKE_STATE/child-show.json"
 
 # 13b. A disallowed Claude model fails before any spawn (reviewer flow).
 printf '[]\n' > "$FAKE_STATE/list.json"

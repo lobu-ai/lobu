@@ -279,14 +279,42 @@ review_bb_settled_env_path() {
   printf '%s\n' "$path"
 }
 
-# review_bb_wait_idle <child-id> <timeout>: wait for idle; on timeout or wait
-# failure stop ONLY the owned child and fail.
+# review_bb_child_status <child-id>: the child's current status, empty when
+# unreadable.
+review_bb_child_status() {
+  review_bb_cli_invoke thread show "$1" --json 2>/dev/null | jq -r '.thread.status // empty' 2>/dev/null || true
+}
+
+# review_bb_wait_idle <child-id> <timeout>: wait for idle; on timeout, wait
+# failure, or a status that is neither idle nor running (a quota/auth/provider
+# `error`), stop ONLY the owned child and fail.
 review_bb_wait_idle() {
-  local child="$1" timeout="${2:-20m}" wait_rc=0
+  local child="$1" timeout="${2:-20m}" wait_rc=0 status
   # Bash defers signal traps during a foreground command; waiting on an async
   # CLI lets the driver's EXIT/TERM cleanup stop its owned child promptly.
   "$(review_bb_cli)" thread wait "$child" --status idle --timeout "$timeout" --json >/dev/null 2>&1 &
   REVIEW_BB_WAIT_PID=$!
+  # `bb thread wait` owns the timeout but matches one status, so a child that
+  # ends in `error` would hold it for the full timeout. Poll the status beside
+  # it and fail fast once the child can no longer reach idle on its own.
+  while kill -0 "$REVIEW_BB_WAIT_PID" 2>/dev/null; do
+    status="$(review_bb_child_status "$child")"
+    case "$status" in
+      idle) break ;;
+      active|starting|stopping|pending|'') ;;
+      *)
+        kill "$REVIEW_BB_WAIT_PID" 2>/dev/null || true
+        wait "$REVIEW_BB_WAIT_PID" 2>/dev/null || true
+        REVIEW_BB_WAIT_PID=""
+        echo "review_bb_wait_idle: child @thread:$child reached status '$status' instead of idle; inspect it with 'bb thread show $child' (quota/auth/provider error); stopping the owned child" >&2
+        review_bb_cli_invoke thread stop "$child" >/dev/null 2>&1 || true
+        review_bb_clear_child
+        return 1
+        ;;
+    esac
+    sleep 5 >/dev/null 2>&1 &
+    wait $! || true
+  done
   wait "$REVIEW_BB_WAIT_PID" || wait_rc=$?
   REVIEW_BB_WAIT_PID=""
   if [ "$wait_rc" -ne 0 ]; then
@@ -300,9 +328,7 @@ review_bb_wait_idle() {
 
 # review_bb_child_settled_idle <child-id>: 0 iff the child is idle now.
 review_bb_child_settled_idle() {
-  local child_id="$1" status
-  status="$(review_bb_cli_invoke thread show "$child_id" --json 2>/dev/null | jq -r '.thread.status // empty' 2>/dev/null || true)"
-  [ "$status" = "idle" ]
+  [ "$(review_bb_child_status "$1")" = "idle" ]
 }
 
 # Print the pending interaction count; unreadable state is an error.
