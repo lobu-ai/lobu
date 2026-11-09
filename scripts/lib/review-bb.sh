@@ -259,6 +259,26 @@ review_bb_env_path() {
     jq -r '.environment.path // empty' 2>/dev/null || true
 }
 
+# review_bb_settled_env_path <child-id>: workspace path of a freshly spawned
+# child once BB has attached it. Spawning onto a path BB has no environment
+# for provisions a new one asynchronously, and until that finishes the child
+# reports `starting` with a null environment. An absent path is "not yet
+# known" only while the child is still starting; any other status, or the
+# bounded wait running out, prints the empty path so the caller fails closed.
+review_bb_settled_env_path() {
+  local child="$1" show path status attempt
+  for attempt in $(seq 1 120); do
+    show="$(review_bb_cli_invoke thread show "$child" --json 2>/dev/null || true)"
+    path="$(printf '%s\n' "$show" | jq -r '.environment.path // empty' 2>/dev/null || true)"
+    status="$(printf '%s\n' "$show" | jq -r '.thread.status // empty' 2>/dev/null || true)"
+    if [ -n "$path" ] || { [ "$status" != starting ] && [ "$status" != pending ]; }; then
+      break
+    fi
+    [ "$attempt" = 120 ] || sleep 0.5
+  done
+  printf '%s\n' "$path"
+}
+
 # review_bb_wait_idle <child-id> <timeout>: wait for idle; on timeout or wait
 # failure stop ONLY the owned child and fail.
 review_bb_wait_idle() {
@@ -514,7 +534,7 @@ review_bb_run_reviewer() {
     rm -f "$bb_prompt"
     # The exact reviewed worktree must be attached, not an inherited default.
     local child_path
-    child_path="$(review_bb_env_path "$child")"
+    child_path="$(review_bb_settled_env_path "$child")"
     if [ "$child_path" != "$worktree" ]; then
       RAW="review_bb: child @thread:$child attached to '$child_path', not the reviewed worktree '$worktree'"
       review_bb_cli_invoke thread stop "$child" >/dev/null 2>&1 || true
