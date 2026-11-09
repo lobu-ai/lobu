@@ -416,8 +416,8 @@ async function handleSetNavigation(
   env: Env
 ): Promise<ManageViewsResult> {
   requireWriter(ctx);
-  // Items nest by explicit schema levels, so their static type is opaque;
-  // validateNavigationConfig is what establishes the NavigationConfig shape.
+  // Nested children are typed opaque in the action schema; the iterative
+  // validateNavigationConfig walk is what establishes the NavigationConfig shape.
   const config = args.config as NavigationConfig | null;
   if (config !== null) {
     const errors = validateNavigationConfig(config);
