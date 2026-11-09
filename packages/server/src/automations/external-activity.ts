@@ -61,6 +61,8 @@ export async function listExternalAutomationWork(params: {
       LIMIT 1
     ) active ON true
     WHERE a.organization_id = ${organizationId} AND a.status = 'active'
+      -- An auto-paused Automation offers no work, not even a queued run.
+      AND a.schedule_auto_paused_at IS NULL
       ${agentFilter} ${identityFilter}
       AND (
         (active.executor_kind = 'external' AND active.status IN ('claimed', 'running') AND active.claimed_by = ${owner})
@@ -68,7 +70,7 @@ export async function listExternalAutomationWork(params: {
         OR (active.id IS NULL AND ${externalAutomationPredicate(sql, 'a')}
           AND a.next_window_start < CURRENT_TIMESTAMP - (${automationArrivalSettleMs()} * INTERVAL '1 millisecond')
           AND a.schedule IS NOT NULL
-          AND a.schedule_auto_paused_at IS NULL AND a.next_run_at <= CURRENT_TIMESTAMP)
+          AND a.next_run_at <= CURRENT_TIMESTAMP)
       )
     ORDER BY CASE WHEN active.claimed_by = ${owner} THEN 0 ELSE 1 END,
              a.next_run_at ASC NULLS LAST, a.id

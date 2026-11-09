@@ -21,8 +21,22 @@ function isScheduledDispatch(
 	return dispatchSource == null || dispatchSource === "scheduled";
 }
 
+/** The terminal run, as its own frozen snapshot describes it. */
+export interface FailedAutomationRun {
+	/** `approved_input.dispatch_source`. */
+	dispatchSource: string | null | undefined;
+	/** `approved_input.executor.kind`, frozen when the run was created. */
+	executorKind: string | null | undefined;
+}
+
 /**
- * Count one terminal failure from a real, executed scheduled Automation run.
+ * Count one terminal failure from a real, executed Automation run.
+ *
+ * Native lanes count scheduled dispatches only. An external client owns its
+ * own wakeups, so every failure of an external run counts, whatever its
+ * dispatch source and whether or not the Automation has a schedule: a client
+ * that triggers and abandons manual windows is exactly as broken as one that
+ * abandons scheduled ones.
  *
  * The UPDATE is the counter lock: concurrent distinct failures serialize on
  * the Automation row, while a duplicate terminal report never reaches this
@@ -36,12 +50,13 @@ function isScheduledDispatch(
  * gets its own `begin`; the `savepoint` probe distinguishes the two without
  * ever nesting a transaction.
  */
-export async function recordScheduledExecutionFailure(
+export async function recordAutomationRunFailure(
 	sql: DbClient,
 	automationId: number | null | undefined,
-	dispatchSource: string | null | undefined,
+	run: FailedAutomationRun,
 ): Promise<void> {
-	if (automationId == null || !isScheduledDispatch(dispatchSource)) {
+	const external = run.executorKind === "external";
+	if (automationId == null || (!external && !isScheduledDispatch(run.dispatchSource))) {
 		return;
 	}
 
@@ -51,17 +66,18 @@ export async function recordScheduledExecutionFailure(
 	// nested begin when the caller already holds the transaction.
 	const isTxHandle = typeof inTransactionProbe === 'function';
 	if (isTxHandle) {
-		await recordFailureInTransaction(sql, automationId);
+		await recordFailureInTransaction(sql, automationId, external);
 		return;
 	}
 	await sql.begin(async (tx) => {
-		await recordFailureInTransaction(tx, automationId);
+		await recordFailureInTransaction(tx, automationId, external);
 	});
 }
 
 async function recordFailureInTransaction(
 	sql: DbClient,
 	automationId: number,
+	external: boolean,
 ): Promise<void> {
 	const threshold = scheduledFailurePauseThreshold();
 	const beforeRows = await sql`
@@ -91,7 +107,7 @@ async function recordFailureInTransaction(
         updated_at = current_timestamp
     WHERE id = ${automationId}
       AND status = 'active'
-      AND schedule IS NOT NULL
+      AND (schedule IS NOT NULL OR ${external})
       AND schedule_auto_paused_at IS NULL
     RETURNING id, organization_id, consecutive_scheduled_failures, schedule_auto_paused_at, next_run_at
   `;
@@ -107,8 +123,8 @@ async function recordFailureInTransaction(
 		op: 'updated',
 		action: paused ? 'auto_pause' : 'failure_count',
 		summary: paused
-			? `Automation ${automationId} auto-paused after ${String((after as { consecutive_scheduled_failures: unknown }).consecutive_scheduled_failures)} consecutive scheduled failures`
-			: `Automation ${automationId} scheduled failure counted`,
+			? `Automation ${automationId} auto-paused after ${String((after as { consecutive_scheduled_failures: unknown }).consecutive_scheduled_failures)} consecutive failed runs`
+			: `Automation ${automationId} failed run counted`,
 		before: {
 			id: automationId,
 			consecutive_scheduled_failures: before.consecutive_scheduled_failures,

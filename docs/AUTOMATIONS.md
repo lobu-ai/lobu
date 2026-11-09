@@ -227,9 +227,15 @@ books it as a completed no-op run, advances the schedule, and answers 409
 instead of handing out a window. Treat that 409 like any other: refresh
 activity. Set `skip_if_unchanged: false` on the schedule trigger when the
 client must see every due window, empty or not.
-Abandoned scheduled leases use the existing scheduled-failure counter and
-auto-pause policy, whether recovered by another claim or the stale-run sweep.
-Manual triggers keep their existing manual failure semantics.
+Every failure of an external run counts toward the auto-pause policy below,
+whatever started it (schedule, manual trigger or event) and whether or not the
+Automation has a schedule: a lease that expires from `claimed` or `running`,
+recovered by another claim, a trigger or the stale-run sweep, and a claimed
+window whose source read fails. While an external Automation is auto-paused,
+`automation_due` omits it (queued runs included), and `claimNextWindow` and a
+trigger from an agent, OAuth client or PAT answer 409. A person's Run now in a
+web session is the resume: it clears the pause and the counter, restarts the
+schedule, and queues the run.
 
 An authorized agent should query `operations.listActivity({ kinds:
 ["automation_due"] })` on startup, between tasks, and approximately every minute
@@ -342,8 +348,10 @@ so its `xact_start` is visible in `pg_stat_activity`.
 Repeated execution failures are bounded by a schedule circuit breaker. After
 `AUTOMATION_PAUSE_AFTER_CONSECUTIVE_FAILURES` consecutive scheduled runs fail or
 time out (default five), Lobu keeps the Automation active but stamps
-`schedule_auto_paused_at` and clears `next_run_at`. Event, eval, manual,
-dispatch-only, cancelled, and never-executed runs do not increment the counter.
+`schedule_auto_paused_at` and clears `next_run_at`. For native lanes, event,
+eval, manual, dispatch-only, cancelled, and never-executed runs do not increment
+the counter; external runs count from any source (see external processors
+above), and an unscheduled external Automation pauses the same way.
 A successful scheduled or manual window, or a real schedule/timezone change,
 clears the failure state and resumes the cursor. A scheduled notification sweep
 durably notifies workspace admins and owners once per pause generation, quoting

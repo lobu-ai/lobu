@@ -13,6 +13,7 @@ import type { Env } from '../../../index';
 import { handleAutomationMode } from '../../../tools/get_content/automation-mode';
 import { handleCompleteWindow } from '../../../tools/admin/manage_automations/complete-window';
 import { createAutomationRun } from '../../../runs/queue-service';
+import { handleTrigger } from '../../../tools/admin/manage_automations/trigger';
 
 const ENV = { JWT_SECRET: 'test-jwt-secret-for-testing-only' } as Env;
 const EXTERNAL = { executor: { kind: 'external' } };
@@ -131,15 +132,74 @@ describe('external Automation activity', () => {
     expect(await work()).toEqual([]);
   });
 
-  it('keeps an expired manual trigger out of the scheduled-failure counter', async () => {
-    const id = await createExternal({ execution_config: null, managed_agent_id: null });
-    const run = await api.automations.trigger({ automation_id: id });
-    const claim = await api.automations.claimNextWindow({ automation_id: id });
+  // An OAuth/PAT client (the incident's caller), not a person in a web session.
+  function delegated(): ToolContext {
+    return { ...ctx, clientId: 'pat_synthetic-external-client', tokenType: 'pat' };
+  }
+
+  async function abandonManualClaim(id: string, caller: ToolContext) {
+    const run = await handleTrigger({ action: 'trigger', automation_id: id } as never, ENV, caller);
+    const claim = await handleClaimNextWindow({ action: 'claim_next_window', automation_id: id } as never, ENV, caller);
     expect(claim.run_id).toBe(run.run_id);
     await sql`UPDATE runs SET expires_at = NOW() - INTERVAL '1 second' WHERE id = ${run.run_id}`;
     await sweepStaleAutomationRuns(sql);
-    const [state] = await sql`SELECT consecutive_scheduled_failures, schedule_auto_paused_at FROM automations WHERE id = ${Number(id)}`;
-    expect(state).toEqual({ consecutive_scheduled_failures: 0, schedule_auto_paused_at: null });
+  }
+
+  async function pauseState(id: string) {
+    const [state] = await sql`SELECT consecutive_scheduled_failures, schedule_auto_paused_at, next_run_at
+      FROM automations WHERE id = ${Number(id)}`;
+    return state;
+  }
+
+  it('auto-pauses an external Automation that a client keeps triggering and abandoning', async () => {
+    const id = await createExternal({ execution_config: null, managed_agent_id: null });
+    for (let attempt = 1; attempt <= 5; attempt++) await abandonManualClaim(id, delegated());
+    const state = await pauseState(id);
+    expect(state.consecutive_scheduled_failures).toBe(5);
+    expect(state.schedule_auto_paused_at).not.toBeNull();
+    expect(state.next_run_at).toBeNull();
+
+    // Paused: no due work, not even for a run that is already queued.
+    await createAutomationRun({ organizationId: ctx.organizationId!, automationId: Number(id),
+      windowStart: new Date(Date.now() - 60_000).toISOString(), windowEnd: new Date().toISOString(),
+      dispatchSource: 'manual' }, sql);
+    expect(await work()).toEqual([]);
+    await expect(handleClaimNextWindow({ action: 'claim_next_window', automation_id: id } as never, ENV, delegated()))
+      .rejects.toMatchObject({ httpStatus: 409, message: expect.stringMatching(/auto-paused/) });
+    await expect(handleTrigger({ action: 'trigger', automation_id: id } as never, ENV, delegated()))
+      .rejects.toMatchObject({ httpStatus: 409, message: expect.stringMatching(/auto-paused/) });
+    expect((await pauseState(id)).schedule_auto_paused_at).not.toBeNull();
+
+    // A person's Run now lifts the pause and restarts the schedule.
+    await handleTrigger({ action: 'trigger', automation_id: id } as never, ENV, ctx);
+    const resumed = await pauseState(id);
+    expect(resumed.consecutive_scheduled_failures).toBe(0);
+    expect(resumed.schedule_auto_paused_at).toBeNull();
+    expect(resumed.next_run_at).not.toBeNull();
+    expect((await work()).map((item) => item.automation_id)).toEqual([Number(id)]);
+  });
+
+  it.each(['running', 'claimed'])('auto-pauses an unscheduled external Automation when a %s lease expires', async (status) => {
+    const id = await createExternal({ execution_config: null, managed_agent_id: null, triggers: [] });
+    await sql`UPDATE automations SET consecutive_scheduled_failures = 4 WHERE id = ${Number(id)}`;
+    const run = await handleTrigger({ action: 'trigger', automation_id: id } as never, ENV, delegated());
+    await handleClaimNextWindow({ action: 'claim_next_window', automation_id: id } as never, ENV, delegated());
+    await sql`UPDATE runs SET status = ${status}, expires_at = NOW() - INTERVAL '1 second' WHERE id = ${run.run_id}`;
+    await sweepStaleAutomationRuns(sql);
+    const state = await pauseState(id);
+    expect(state.consecutive_scheduled_failures).toBe(5);
+    expect(state.schedule_auto_paused_at).not.toBeNull();
+  });
+
+  it('counts a claimed external window whose source read fails', async () => {
+    const id = await createExternal({ execution_config: null, managed_agent_id: null,
+      sources: [{ name: 'broken', query: 'SELECT id, 1 / (id - id) AS value FROM events' }] });
+    await createTestEvent({ organization_id: ctx.organizationId!, content: 'Source execution must fail', created_at: new Date(Date.now() - 5_000) });
+    await sql`UPDATE automations SET consecutive_scheduled_failures = 4 WHERE id = ${Number(id)}`;
+    await expect(api.automations.claimNextWindow({ automation_id: id })).rejects.toThrow();
+    const [run] = await sql`SELECT status FROM runs WHERE automation_id = ${Number(id)}`;
+    expect(run.status).toBe('failed');
+    expect((await pauseState(id)).schedule_auto_paused_at).not.toBeNull();
   });
 
   it('does not let an external caller take pending native work after the live assignment is cleared', async () => {
