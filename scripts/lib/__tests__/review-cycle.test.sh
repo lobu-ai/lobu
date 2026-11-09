@@ -30,8 +30,12 @@ case "$1 $2" in
     [ -n "${TEST_PR:-}" ] || exit 1
     if [[ "$*" == *--jq* ]]; then echo "$TEST_PR"; else printf '{"number":%s,"url":"u"}\n' "$TEST_PR"; fi ;;
   'api -X')
+    # Drain a piped body like the real gh does; exiting unread races the
+    # writer into SIGPIPE, which pipefail turns into a spurious review failure.
+    if [[ "$*" == *'--input -'* ]]; then cat > /dev/null; fi
     if [ "${TEST_STATUS_FAIL:-false}" = true ] && [[ "$*" == *state=success* ]]; then exit 1; fi
     printf '%s\n' "$*" >> "$TEST_STATE/statuses" ;;
+  'api repos/'*'/comments') ;;
   'api '*) echo 'unit: completed success' ;;
 esac
 CLI
