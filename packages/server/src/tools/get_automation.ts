@@ -24,6 +24,7 @@ import {
   PendingAnalysisSchema,
   AutomationMetadataSchema,
   AutomationWindowSchema,
+  WINDOW_DATA_BUDGET_BYTES,
 } from '../types/automations';
 import {
   buildEntityLinkUnion,
@@ -172,7 +173,8 @@ interface WindowRow {
   window_start: string;
   window_end: string;
   content_analyzed: number;
-  extracted_data: Record<string, unknown> | null;
+  /** JSON byte length of the run's output; the output itself is fetched only if it fits. */
+  extracted_data_bytes: number;
   model_used: string | null;
   client_id: string | null;
   run_metadata: Record<string, unknown> | null;
@@ -380,12 +382,20 @@ async function getAutomationImpl(
 
   const whereClause = whereClauses.length > 0 ? whereClauses.join(' AND ') : '1=1';
 
+  // Output sizes are measured by the outer select, over the page only: inside
+  // the paged select Postgres would evaluate them before LIMIT, for every one
+  // of the Automation's completed runs.
   const windowsQuery = `
-    ${buildWindowsSelectClause()}
-    WHERE ${whereClause}
-    ORDER BY (iw.approved_input->>'window_start')::timestamptz DESC
-    LIMIT ${addParam(pageSize)}
-    OFFSET ${addParam(offset)}
+    SELECT page.*, octet_length(output_run.action_output::text) AS extracted_data_bytes
+    FROM (
+      ${buildWindowsSelectClause()}
+      WHERE ${whereClause}
+      ORDER BY (iw.approved_input->>'window_start')::timestamptz DESC
+      LIMIT ${addParam(pageSize)}
+      OFFSET ${addParam(offset)}
+    ) page
+    JOIN runs output_run ON output_run.id = page.run_id
+    ORDER BY page.window_start DESC
   `;
 
   const windows = await sql.unsafe(windowsQuery, params);
@@ -419,6 +429,29 @@ async function getAutomationImpl(
   const typedWindows = windows as unknown as WindowRow[];
   const runIds = typedWindows.map((w) => ensureNumber(w.run_id));
   const classificationStatsMap: Map<number, Record<string, Record<string, number>>> = new Map();
+
+  // Fill the window-data budget newest first (the page is window_start DESC).
+  // A window that does not fit is omitted; a later, smaller one may still fit.
+  // Only the outputs that fit are read, by primary key.
+  let remainingDataBytes = WINDOW_DATA_BUDGET_BYTES;
+  const fittingRunIds: number[] = [];
+  for (const w of typedWindows) {
+    const bytes = ensureNumber(w.extracted_data_bytes);
+    if (bytes > remainingDataBytes) continue;
+    remainingDataBytes -= bytes;
+    fittingRunIds.push(ensureNumber(w.run_id));
+  }
+  const outputsByRunId = new Map<number, unknown>();
+  if (fittingRunIds.length > 0) {
+    // PG array literal, not a JS array bind: see the reactions query below.
+    const outputRows = (await sql.unsafe(
+      `SELECT id, action_output FROM runs WHERE id = ANY($1::bigint[])`,
+      [`{${fittingRunIds.join(',')}}`]
+    )) as unknown as Array<{ id: number; action_output: unknown }>;
+    for (const row of outputRows) {
+      outputsByRunId.set(ensureNumber(row.id), row.action_output);
+    }
+  }
 
   // Reaction-script execution log per window (newest first). One batched
   // query for the page; capped per page so a chatty reaction can't bloat the
@@ -635,16 +668,11 @@ async function getAutomationImpl(
   // Step 5: Format results
   // ============================================
 
-  // Format windows and include previous window data for trend calculation
-  // Windows are sorted by window_start DESC, so "next" in array is "previous" chronologically
-  const formattedWindows: AutomationWindow[] = typedWindows.map((w, index, arr) => {
-    const previousWindow = arr[index + 1]; // Next in array = previous chronologically
+  // Windows are sorted by window_start DESC: the previous window is windows[i + 1].
+  const formattedWindows: AutomationWindow[] = typedWindows.map((w) => {
     const runId = ensureNumber(w.run_id);
     const stats = classificationStatsMap.get(runId);
-    const extractedData = parseJsonObject(w.extracted_data);
-    const previousExtractedData = previousWindow
-      ? parseJsonObject(previousWindow.extracted_data)
-      : undefined;
+    const fits = outputsByRunId.has(runId);
     return {
       run_id: ensureNumber(w.run_id),
       automation_id: String(w.automation_id),
@@ -656,8 +684,10 @@ async function getAutomationImpl(
       window_start: ensureIsoString(w.window_start) ?? '',
       window_end: ensureIsoString(w.window_end) ?? '',
       content_analyzed: ensureNumber(w.content_analyzed),
-      extracted_data: extractedData,
-      previous_extracted_data: previousExtractedData,
+      extracted_data: fits ? parseJsonObject(outputsByRunId.get(runId)) : null,
+      ...(!fits && {
+        extracted_data_omitted: { bytes: ensureNumber(w.extracted_data_bytes) },
+      }),
       classification_stats: stats,
       model_used: w.model_used ?? '',
       client_id: w.client_id ?? undefined,

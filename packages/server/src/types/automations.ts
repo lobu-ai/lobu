@@ -50,6 +50,9 @@ export const AutomationWindowReactionSchema = Type.Object({
 });
 export type AutomationWindowReaction = Static<typeof AutomationWindowReactionSchema>;
 
+/** Well under the 4 MiB sandbox bridge cap, leaving room for the Automation config, reactions and run metadata. */
+export const WINDOW_DATA_BUDGET_BYTES = 1_048_576;
+
 /**
  * Automation window data as returned by get_automation
  */
@@ -60,8 +63,20 @@ export const AutomationWindowSchema = Type.Object({
   window_start: Type.String(),
   window_end: Type.String(),
   content_analyzed: Type.Integer(),
-  extracted_data: Type.Record(Type.String(), Type.Unknown()),
-  previous_extracted_data: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+  extracted_data: Type.Union([Type.Record(Type.String(), Type.Unknown()), Type.Null()], {
+    description: `The window's output. Null when it did not fit the response's ${WINDOW_DATA_BUDGET_BYTES}-byte budget for window outputs, filled newest first; see extracted_data_omitted.`,
+  }),
+  extracted_data_omitted: Type.Optional(
+    Type.Object(
+      {
+        bytes: Type.Integer({ description: 'JSON byte length of the omitted output.' }),
+      },
+      {
+        description:
+          'Present when extracted_data is null. Read the full output with operations.getRun(run_id).',
+      }
+    )
+  ),
   classification_stats: Type.Optional(
     Type.Record(Type.String(), Type.Record(Type.String(), Type.Integer()))
   ),
