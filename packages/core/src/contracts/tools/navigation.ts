@@ -175,16 +175,18 @@ export interface ResolvedNavigationSection {
   items: ResolvedNavigationItem[];
 }
 
-const ResolvedItemSchema: TSchema = Type.Recursive((This) =>
-  Type.Object({
-    id: Type.String(),
-    label: Type.String(),
-    icon: Type.Optional(Type.String()),
-    href: Type.Optional(Type.String()),
-    external: Type.Optional(Type.Boolean()),
-    children: Type.Array(This),
-  })
-);
+// Children are typed opaque on the wire, as on the input side: a recursive
+// schema publishes a `$ref` the OpenAPI document never defines.
+const ResolvedItemSchema = Type.Object({
+  id: Type.String(),
+  label: Type.String(),
+  icon: Type.Optional(Type.String()),
+  href: Type.Optional(Type.String()),
+  external: Type.Optional(Type.Boolean()),
+  children: Type.Array(Type.Unknown(), {
+    description: "Nested items, each the same shape as this one.",
+  }),
+});
 export const ResolvedNavigationSectionSchema = Type.Object({
   id: Type.String(),
   label: Type.Optional(Type.String()),

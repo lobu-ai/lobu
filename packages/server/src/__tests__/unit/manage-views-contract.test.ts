@@ -92,12 +92,15 @@ describe("manage_views wire schema", () => {
 		expect(listedFor("read")?.inputSchema.properties.action.enum).toEqual([
 			"get",
 			"list",
+			"get_navigation",
 		]);
 		expect(listedFor("admin")?.inputSchema.properties.action.enum).toEqual([
 			"set",
 			"get",
 			"list",
 			"remove",
+			"get_navigation",
+			"set_navigation",
 		]);
 	});
 
@@ -110,5 +113,7 @@ describe("manage_views wire schema", () => {
 		expect(lineFor("get")).toContain("Required: key.");
 		expect(lineFor("list")).not.toContain("Required:");
 		expect(lineFor("remove")).toContain("Required: key.");
+		expect(lineFor("get_navigation")).not.toContain("Required:");
+		expect(lineFor("set_navigation")).toContain("Required: expected_revision, config.");
 	});
 });
