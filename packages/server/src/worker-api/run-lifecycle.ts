@@ -1078,7 +1078,7 @@ export async function streamContent(c: Context<{ Bindings: Env }>) {
 	try {
 		let batch = await c.req.json<StreamBatch>();
 
-		// Connector-supplied checkpoints (LinkedIn takeout cursors, browser
+		// Connector-supplied checkpoints (feed cursors, browser
 		// scrapes) can carry stray NUL (0x00), which Postgres rejects when written
 		// to the jsonb checkpoint column (unsupported Unicode escape sequence).
 		// Item payloads go through insertEvent which already sanitizes; the

@@ -59,7 +59,7 @@ async function setup() {
   return { ...owner, client: buildConnectionsNamespace(owner.ctx, env) };
 }
 
-test("enabling LinkedIn discovers identity login after browser and export methods", async () => {
+test("enabling LinkedIn discovers identity login after the browser method", async () => {
   const { org, client } = await setup();
   expect(
     await client.toggleConnectorLogin({
@@ -105,30 +105,6 @@ test.each([
     await sql`SELECT id FROM connections
       WHERE organization_id = ${org.id} AND connector_key = ${definition.key}`
   ).toHaveLength(0);
-});
-
-test("explicit local export stays active without OAuth through a metadata update", async () => {
-  const { org, client } = await setup();
-  const result = (await client.create({
-    connector_key: definition.key,
-    auth_profile_slug: null,
-    app_auth_profile_slug: null,
-  })) as { connection: { id: number } };
-  expect(result).toHaveProperty("connection.id");
-  await client.update({
-    connection_id: result.connection.id,
-    display_name: "Synthetic local export",
-  });
-  const sql = getTestDb();
-  const [saved] =
-    await sql`SELECT display_name, status, auth_profile_id, app_auth_profile_id
-    FROM connections WHERE organization_id = ${org.id} AND id = ${result.connection.id}`;
-  expect(saved).toEqual({
-    display_name: "Synthetic local export",
-    status: "active",
-    auth_profile_id: null,
-    app_auth_profile_id: null,
-  });
 });
 
 test("LinkedIn sign-in never provisions source accounts, connections or feeds", async () => {
