@@ -6,6 +6,9 @@ import {
   createTestOrganization, createTestUser,
 } from '../../setup/test-fixtures';
 import { TestApiClient, TestMcpClient } from '../../setup/test-mcp-client';
+import { GetAutomationResultSchema, type GetAutomationResult } from '../../../tools/get_automation';
+import { WINDOW_DATA_BUDGET_BYTES } from '../../../types/automations';
+import { validateToolResult } from '../../../tools/validate-args';
 
 const ROW_COUNT = 150;
 
@@ -191,4 +194,81 @@ describe('Automation response byte budget', () => {
       WHERE automation_id = ${Number(created.automation_id)} AND status = 'completed'`;
     expect(completed).toEqual([]);
   });
+
+  it('bounds get_automation window outputs by bytes and keeps omitted outputs on getRun', async () => {
+    const created = await automation('response-budget-windows');
+    const automationId = Number(created.automation_id);
+    // Four-byte characters, so a character-counting budget would let twice as
+    // much through. Newest first: two large outputs fill the budget, the third
+    // does not fit, a later small one still does, and the rest are large again.
+    const largeChars = Math.floor((WINDOW_DATA_BUDGET_BYTES * 0.4) / 4);
+    const kinds = ['large', 'large', 'large', 'small', ...Array<string>(8).fill('large')];
+    const sql = getTestDb();
+    const runIds: number[] = [];
+    for (const [index, kind] of kinds.entries()) {
+      const [run] = await sql`
+        INSERT INTO runs (organization_id, run_type, automation_id, approval_status, status,
+          approved_input, action_output, completed_at)
+        VALUES (${orgId}, 'automation', ${automationId}, 'auto', 'completed',
+          jsonb_build_object(
+            'window_start', NOW() - make_interval(days => ${index + 1}::int),
+            'window_end', NOW() - make_interval(days => ${index}::int)),
+          jsonb_build_object('summary', CASE WHEN ${kind}::text = 'large'
+            THEN repeat('😀', ${largeChars}::int) ELSE 'small' END),
+          NOW())
+        RETURNING id
+      `;
+      runIds.push(Number(run.id));
+    }
+    const largeSummary = '😀'.repeat(largeChars);
+
+    // An external client walking its Automations through the SDK bridge must
+    // not trip the 4 MiB bridge cap, and an omitted output stays readable.
+    const bridged = await wire.querySdk<{
+      success: boolean;
+      error?: unknown;
+      return_value?: { listed: number; omittedRunId: number; fullSummary: string };
+    }>(`export default async (_ctx, client) => {
+      const detail = await client.automations.get({ automation_id: '${automationId}' });
+      const omitted = detail.windows.find((w) => w.extracted_data_omitted);
+      const { run } = await client.operations.getRun(omitted.run_id);
+      return { listed: detail.windows.length, omittedRunId: omitted.run_id, fullSummary: run.output.summary };
+    }`);
+    expect(bridged.success, JSON.stringify(bridged.error)).toBe(true);
+    expect(bridged.return_value?.listed).toBe(kinds.length);
+    expect(bridged.return_value?.omittedRunId).toBe(runIds[2]);
+    expect(bridged.return_value?.fullSummary).toBe(largeSummary);
+
+    const detail = (await api.automations.get({
+      automation_id: String(automationId),
+    })) as GetAutomationResult;
+    expect(validateToolResult(GetAutomationResultSchema, detail)).not.toBeNull();
+    expect(detail.pagination.total).toBe(kinds.length);
+    expect(detail.windows.map((w) => w.run_id)).toEqual(runIds);
+    for (const window of detail.windows) {
+      expect(window).not.toHaveProperty('previous_extracted_data');
+    }
+    const kept = detail.windows.filter((w) => w.extracted_data !== null);
+    expect(kept.map((w) => w.run_id)).toEqual([runIds[0], runIds[1], runIds[3]]);
+    expect(kept.map((w) => w.extracted_data)).toEqual([
+      { summary: largeSummary },
+      { summary: largeSummary },
+      { summary: 'small' },
+    ]);
+    expect(kept.every((w) => w.extracted_data_omitted === undefined)).toBe(true);
+    const keptBytes = kept.reduce(
+      (total, w) => total + Buffer.byteLength(JSON.stringify(w.extracted_data), 'utf8'),
+      0
+    );
+    expect(keptBytes).toBeLessThanOrEqual(WINDOW_DATA_BUDGET_BYTES);
+    const largeBytes = Buffer.byteLength(JSON.stringify({ summary: largeSummary }), 'utf8');
+    const omitted = detail.windows.filter((w) => w.extracted_data === null);
+    expect(omitted).toHaveLength(kinds.length - kept.length);
+    for (const window of omitted) {
+      expect(window.extracted_data_omitted?.bytes).toBeGreaterThanOrEqual(largeBytes);
+      expect(window.extracted_data_omitted?.bytes).toBeGreaterThan(
+        WINDOW_DATA_BUDGET_BYTES - keptBytes
+      );
+    }
+  }, 60_000);
 });

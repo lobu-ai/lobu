@@ -456,6 +456,14 @@ claim work assigned to a native agent or device. Installed external overrides
 retain their optional managed permission principal. Native code modules run in
 the sandbox and cannot be claimed by an external processor.
 
+### Reading completed windows
+
+`automations.get` returns a page of completed windows, newest first; the
+previous window is `windows[i + 1]`. The outputs on one page share a 1 MiB
+budget so the response fits the SDK bridge. A window whose output does not fit
+is still listed, with `extracted_data: null` and `extracted_data_omitted:
+{ bytes }`; `operations.getRun(run_id)` returns its full output.
+
 ### Consistent SQL drill-downs
 
 Stored event sources select the versions that existed at the exclusive window

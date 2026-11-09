@@ -6711,11 +6711,20 @@ export type GetAutomationResponses = {
       window_start: string;
       window_end: string;
       content_analyzed: number;
+      /**
+       * The window's output. Null when it did not fit the response's 1048576-byte budget for window outputs, filled newest first; see extracted_data_omitted.
+       */
       extracted_data: {
         [key: string]: unknown;
-      };
-      previous_extracted_data?: {
-        [key: string]: unknown;
+      } | null;
+      /**
+       * Present when extracted_data is null. Read the full output with operations.getRun(run_id).
+       */
+      extracted_data_omitted?: {
+        /**
+         * JSON byte length of the omitted output.
+         */
+        bytes: number;
       };
       classification_stats?: {
         [key: string]:

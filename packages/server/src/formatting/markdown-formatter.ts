@@ -823,6 +823,9 @@ function formatGetAutomationResult(result: any, _options: FormatterOptions): str
       md += '### 📈 Analysis Results\n\n';
       md += formatExtractedData(window.extracted_data);
       md += '\n\n';
+    } else if (window.extracted_data_omitted) {
+      const kb = Math.ceil(window.extracted_data_omitted.bytes / 1024);
+      md += `Output omitted (${kb} KB); read it with operations.getRun(${window.run_id})\n\n`;
     }
 
     md += '---\n\n';

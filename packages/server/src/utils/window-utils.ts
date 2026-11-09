@@ -460,7 +460,6 @@ export function buildWindowsSelectClause(): string {
           THEN (iw.run_metadata->>'content_analyzed')::bigint END,
         (SELECT COUNT(*) FROM automation_run_events link WHERE link.run_id = iw.id)
       ) as content_analyzed,
-      iw.action_output as extracted_data,
       iw.model_used,
       NULLIF(iw.run_metadata->>'client_id', '') as client_id,
       iw.run_metadata,
