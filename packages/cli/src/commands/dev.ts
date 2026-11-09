@@ -27,6 +27,9 @@ import { prepareRuntime } from "../internal/runtime-components.js";
 import { loadProjectConfig } from "./_lib/apply/desired-state.js";
 import type { DependencySession } from "./_lib/ensure-deps-installed.js";
 
+/** How long `lobu run` waits after forwarding a signal before forcing exit. */
+const SERVER_SHUTDOWN_GRACE_MS = 45_000;
+
 interface DevOptions {
   port?: string;
   quiet?: boolean;
@@ -412,10 +415,16 @@ export async function devCommand(
   // is a verified Node 26 binary (the current process when it already is one).
   // `--no-node-snapshot` is isolated-vm's upstream launch requirement on
   // Node 20+.
+  // The server leads its own process group, so the embedded Postgres and the
+  // embeddings child it starts share that group with it. Signals still go to
+  // the server alone and its teardown stops those children in order; the group
+  // is only for the forced kill below, which must not leave them listening.
+  const ownProcessGroup = process.platform !== "win32";
   const child = spawn(nodeBinary, ["--no-node-snapshot", bundlePath], {
     cwd,
     env: childEnv,
     stdio: "inherit",
+    detached: ownProcessGroup,
   });
 
   child.on("error", (err) => {
@@ -489,16 +498,22 @@ export async function devCommand(
     }
   );
 
-  // Forward Ctrl+C to the child so it can clean up its own subprocess workers
-  // before the parent exits. SIGKILL after a timeout in case it wedges.
+  // Forward Ctrl+C / SIGTERM to the server so it can run its ordered shutdown
+  // before the parent exits. The grace period covers the server's SIGTERM
+  // budget (connector worker 15s, HTTP close 10s, service and tracing
+  // teardown); a shorter one cut that teardown off mid-way. If it still wedges,
+  // SIGKILL its whole process group so no child outlives `lobu run`.
   const forwardSignal = (signal: NodeJS.Signals) => {
     if (child.exitCode !== null || child.signalCode !== null) return;
     child.kill(signal);
     setTimeout(() => {
-      if (child.exitCode === null && child.signalCode === null) {
+      if (child.exitCode !== null || child.signalCode !== null) return;
+      if (ownProcessGroup && child.pid !== undefined) {
+        process.kill(-child.pid, "SIGKILL");
+      } else {
         child.kill("SIGKILL");
       }
-    }, 10_000).unref();
+    }, SERVER_SHUTDOWN_GRACE_MS).unref();
   };
 
   process.on("SIGINT", () => forwardSignal("SIGINT"));
