@@ -378,6 +378,11 @@ const claim = await client.automations.claimNextWindow({
   limit: 100,
 });
 
+// The task to perform: the prompt and skill snapshots of the version this run
+// is pinned to. Only the first page of a window carries it; follow it rather
+// than a cached copy, so an edit to the Automation reaches the next window.
+const { prompt, skills } = claim.context.instructions ?? { prompt: null, skills: [] };
+
 const tokens = [claim.context.window_token];
 let page = claim.context.page;
 while (page.has_more) {

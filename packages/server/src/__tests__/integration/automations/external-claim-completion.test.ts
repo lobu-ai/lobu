@@ -181,6 +181,43 @@ describe('external MCP claim then completion', () => {
     expect(new Date(after.next_window_start).toISOString()).toBe(claimed.context.window_end);
   });
 
+  it('hands the claimer the run-pinned prompt and skills, not a later edit', async () => {
+    const skills = [{ name: 'signal-rubric', content: 'Score each signal from 1 to 5.' }];
+    await sql`
+      UPDATE automation_versions
+      SET skills = ${sql.json(skills)}
+      WHERE id = (SELECT current_version_id FROM automations WHERE id = ${automationId})
+    `;
+    const [pinned] = await sql<{ current_version_id: string | number }>`
+      SELECT current_version_id FROM automations WHERE id = ${automationId}
+    `;
+
+    const claimed = await api.automations.claimNextWindow({
+      automation_id: String(automationId), lease_seconds: 1800,
+    });
+    expect(claimed.context.instructions).toEqual({
+      version_id: Number(pinned.current_version_id),
+      prompt: 'Extract durable signals from each arrival window.',
+      skills,
+    });
+
+    // A mid-run edit moves the Automation to a new version; the leased run
+    // stays pinned to the one it was claimed with.
+    await api.automations.createVersion({
+      automation_id: String(automationId),
+      prompt: 'A rewritten prompt the running window must not see.',
+    });
+    const [edited] = await sql<{ current_version_id: string | number }>`
+      SELECT current_version_id FROM automations WHERE id = ${automationId}
+    `;
+    expect(Number(edited.current_version_id)).not.toBe(Number(pinned.current_version_id));
+
+    const renewed = await api.automations.claimNextWindow({
+      automation_id: String(automationId), run_id: claimed.run_id, lease_seconds: 1800,
+    });
+    expect(renewed.context.instructions).toEqual(claimed.context.instructions);
+  });
+
   it('keeps a paginated external claim completable until its explicit lease expires', async () => {
     for (const content of ['First arrival', 'Second arrival']) {
       await createTestEvent({
@@ -191,6 +228,7 @@ describe('external MCP claim then completion', () => {
       automation_id: String(automationId), limit: 1, lease_seconds: 1800,
     });
     expect(first.context.page.has_more).toBe(true);
+    expect(first.context.instructions?.prompt).toBe('Extract durable signals from each arrival window.');
     const cursor = first.context.page.next_cursor!;
     const second = await api.automations.claimNextWindow({
       automation_id: String(automationId), run_id: first.run_id,
@@ -198,6 +236,8 @@ describe('external MCP claim then completion', () => {
       limit: 1, lease_seconds: 1800,
     });
     expect(second.context.page.has_more).toBe(false);
+    // Instructions belong to the window, not each page: continuations omit them.
+    expect(second.context).not.toHaveProperty('instructions');
     // The continuation advances the heartbeat past the claim. A processor can
     // then legitimately spend more than three minutes investigating this window.
     await sql`

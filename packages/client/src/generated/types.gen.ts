@@ -6454,6 +6454,14 @@ export type ManageAutomationsResponses = {
           extraction_schema?: {
             [key: string]: unknown;
           };
+          instructions?: {
+            version_id: number;
+            prompt: string | null;
+            skills: Array<{
+              name: string;
+              content: string;
+            }>;
+          };
         };
       }
     | {
