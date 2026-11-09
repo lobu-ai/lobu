@@ -884,40 +884,14 @@ export function viewResourceMeta(view: StoredView): {
 // the host sends in `hostContext.styles.variables` (the guest writes them onto
 // <html>) with the same mapping as the native sheet, which is linked after this
 // one and restates it, falling back to Lobu's palette when a host sends none;
-// the host's `theme` flips `.dark` on <html>. `--primary` has no host variable.
-// The background stays transparent so the frame shows the host's surface.
-const THEME_TOKENS: ReadonlyArray<[token: string, hostVar: string | null, light: string, dark: string]> = [
-  ['--background', '--color-background-primary', '#fcfcfb', '#0f0e0c'],
-  ['--foreground', '--color-text-primary', '#141414', '#f3eee2'],
-  ['--card', '--color-background-secondary', '#ffffff', '#1a1815'],
-  ['--card-foreground', '--color-text-primary', '#141414', '#f3eee2'],
-  ['--popover', '--color-background-secondary', '#ffffff', '#1a1815'],
-  ['--popover-foreground', '--color-text-primary', '#141414', '#f3eee2'],
-  ['--primary', null, '#2f63e8', '#2f63e8'],
-  ['--primary-foreground', null, '#fcfcfb', '#fcfcfb'],
-  ['--secondary', '--color-background-tertiary', '#f3f1ea', '#211e1a'],
-  ['--secondary-foreground', '--color-text-primary', '#141414', '#f3eee2'],
-  ['--muted', '--color-background-tertiary', '#f3f1ea', '#1a1815'],
-  ['--muted-foreground', '--color-text-secondary', '#545454', '#b4ae9f'],
-  ['--accent', '--color-background-tertiary', '#f3f1ea', '#211e1a'],
-  ['--accent-foreground', '--color-text-primary', '#141414', '#f3eee2'],
-  ['--destructive', '--color-text-danger', '#dc2626', '#dc2626'],
-  ['--border', '--color-border-primary', '#e7e4dc', '#2c2a25'],
-  ['--input', '--color-border-secondary', '#e7e4dc', '#2c2a25'],
-  ['--ring', '--color-ring-primary', '#2f63e8', '#2f63e8'],
-];
-const themeDeclarations = (mode: 'light' | 'dark'): string =>
-  THEME_TOKENS.filter(([, , light, dark]) => mode === 'light' || light !== dark)
-    .map(([token, hostVar, light, dark]) => {
-      const fallback = mode === 'light' ? light : dark;
-      return `${token}:${hostVar ? `var(${hostVar},${fallback})` : fallback}`;
-    })
-    .join(';');
-// `--font-sans` is itself the host variable: the guest's inline value on <html>
-// overrides this fallback, which matches the native sheet's.
+// the host's `theme` flips `.dark` on <html>. Paired tokens reference their
+// base so the dark rule only restates the primitives. `--primary` has no host
+// variable; `--font-sans` is itself one, so the guest's inline value overrides
+// the fallback here. The background stays transparent so the frame shows the
+// host's surface.
 const BASE_CSS = `
-:root{color-scheme:light;${themeDeclarations('light')};--font-sans:"DM Sans",ui-sans-serif,system-ui,-apple-system,sans-serif;--radius:var(--border-radius-md,6px);--radius-lg:var(--border-radius-lg,8px)}
-html.dark{color-scheme:dark;${themeDeclarations('dark')}}
+:root{color-scheme:light;--background:var(--color-background-primary,#fcfcfb);--foreground:var(--color-text-primary,#141414);--card:var(--color-background-secondary,#fff);--card-foreground:var(--foreground);--popover:var(--card);--popover-foreground:var(--foreground);--primary:#2f63e8;--primary-foreground:#fcfcfb;--secondary:var(--color-background-tertiary,#f3f1ea);--secondary-foreground:var(--foreground);--muted:var(--secondary);--muted-foreground:var(--color-text-secondary,#545454);--accent:var(--secondary);--accent-foreground:var(--foreground);--destructive:var(--color-text-danger,#dc2626);--border:var(--color-border-primary,#e7e4dc);--input:var(--color-border-secondary,var(--border));--ring:var(--color-ring-primary,var(--primary));--font-sans:"DM Sans",ui-sans-serif,system-ui,-apple-system,sans-serif;--radius:var(--border-radius-md,6px);--radius-lg:var(--border-radius-lg,8px)}
+html.dark{color-scheme:dark;--background:var(--color-background-primary,#0f0e0c);--foreground:var(--color-text-primary,#f3eee2);--card:var(--color-background-secondary,#1a1815);--secondary:var(--color-background-tertiary,#211e1a);--muted-foreground:var(--color-text-secondary,#b4ae9f);--border:var(--color-border-primary,#2c2a25)}
 html,body{margin:0;background:transparent;color:var(--foreground);font:13px/1.45 var(--font-sans)}
 *{box-sizing:border-box}
 `;

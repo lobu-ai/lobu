@@ -473,9 +473,10 @@ describe("view shell theme tokens", () => {
       "--foreground:var(--color-text-primary,#141414)",
       // --muted and --accent are surfaces, as in the native sheet; secondary
       // text is --muted-foreground.
-      "--muted:var(--color-background-tertiary,#f3f1ea)",
+      "--secondary:var(--color-background-tertiary,#f3f1ea)",
+      "--muted:var(--secondary)",
       "--muted-foreground:var(--color-text-secondary,#545454)",
-      "--accent:var(--color-background-tertiary,#f3f1ea)",
+      "--accent:var(--secondary)",
       "--border:var(--color-border-primary,#e7e4dc)",
       "--radius:var(--border-radius-md,6px)",
       "--radius-lg:var(--border-radius-lg,8px)",
