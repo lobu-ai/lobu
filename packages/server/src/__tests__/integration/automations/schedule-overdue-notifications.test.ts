@@ -3,6 +3,7 @@ import {
 	automationScheduleOverdueNotificationKey,
 	runAutomationScheduleOverdueNotificationSweep,
 } from "../../../automations/schedule-overdue-notifications";
+import { listOrgActivity } from "../../../tools/admin/manage_operations/activity-feed";
 import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
 import { createTestAgent, createTestEntity } from "../../setup/test-fixtures";
 import { TestWorkspace } from "../../setup/test-mcp-client";
@@ -95,6 +96,19 @@ describe("Automation schedule overdue notifications", () => {
 		expect(sent[0].title).toBe('Automation "Unclaimed digest" has not run');
 		expect(sent[0].payload_text).toContain("external client");
 		expect(sent[0].target_user_ids).toContain(workspace.users.owner.id);
+
+		// Home files the notice under the Automation it is about.
+		const feed = await listOrgActivity({
+			organizationId: workspace.org.id,
+			userId: workspace.users.owner.id,
+			ownerSlug: workspace.org.slug,
+			includeRuns: false,
+			kinds: ["notification"],
+		});
+		const card = feed.items.find(
+			(item) => item.notification_id === sent[0].id,
+		);
+		expect(card?.automation_id).toBe(automationId);
 
 		// A client claimed once, then went quiet again: a new episode.
 		await setDue(automationId, new Date(Date.now() - 2 * HOUR), true);

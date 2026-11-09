@@ -25,11 +25,12 @@ import {
   readFileSync,
   renameSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const require = createRequire(import.meta.url);
@@ -88,37 +89,88 @@ export function resolveEmbeddedNativeDir(
   return join(dirname(entry), "..", "native");
 }
 
+/** Read + execute for owner, group and other: what embedded-postgres requires of its programs. */
+const PROGRAM_MODE = 0o555;
+
 /**
- * embedded-postgres' macOS native libs ship only as the fully-versioned
- * `lib<name>.<major>.<minor>.dylib`, but the Postgres binaries link against both
- * the major SONAME (`lib<name>.<major>.dylib`) and the unversioned linker name
- * (`lib<name>.dylib`, e.g. postgres' `@loader_path/../lib/libicui18n.dylib`) —
- * and the @embedded-postgres/darwin-* packages omit those symlinks. Without them
- * `initdb`/`postgres` abort with `Library not loaded`. Recreate both link levels
- * idempotently, pointing at the real versioned file. No-op off macOS (Linux ships
- * the `.so.<major>` links) and when a link already exists.
+ * Make the installed `@embedded-postgres/<platform>` tree runnable as-is, so a
+ * later boot never has to write into it. The installer runs this as the cache
+ * owner, and boot runs it again as a no-op once everything is in place. A
+ * read-only or other-user install must already be prepared, because each step
+ * below is skipped when nothing is missing and is best-effort otherwise.
+ *
+ * - Linux: each platform package ships its shared libs (ICU, libpq) as versioned
+ *   files plus a `pg-symlinks.json` manifest, and its `postinstall` creates the
+ *   SONAME links that `RUNPATH=$ORIGIN/../lib` resolves. npm runs that
+ *   postinstall; `bun install` and some installers skip it, and then `initdb`
+ *   dies with "error while loading shared libraries: libicuuc.so.60".
+ * - macOS: the libs ship only as `lib<name>.<major>.<minor>.dylib`, but the
+ *   binaries also link the major SONAME and the unversioned name; the darwin
+ *   packages omit both links, so `initdb`/`postgres` abort with `Library not loaded`.
+ * - Programs: embedded-postgres chmods `initdb` and `postgres` on every start
+ *   unless both are r-x for everyone, and that chmod crashes a read-only install
+ *   with EROFS. An install under umask 077 leaves them 0700. Add r-x for all to
+ *   every program the owner can already execute; write bits are kept, and
+ *   directories are untouched, so access to the tree is unchanged.
  */
-export function ensureNativeLibSonames(
+export function prepareEmbeddedNative(
   nativeDir: string = resolveEmbeddedNativeDir()
-): void {
-  if (process.platform !== "darwin") return;
+): { linksCreated: number } {
+  let linksCreated = 0;
+  const link = (target: string, path: string) => {
+    if (existsSync(path)) return;
+    try {
+      symlinkSync(target, path);
+      linksCreated++;
+    } catch {
+      // Best-effort: a race or a read-only tree surfaces as the real initdb error.
+    }
+  };
+
+  const manifest = join(nativeDir, "pg-symlinks.json");
+  if (existsSync(manifest)) {
+    let entries: Array<{ source: string; target: string }> = [];
+    try {
+      entries = JSON.parse(readFileSync(manifest, "utf8"));
+    } catch {
+      // An unreadable manifest leaves the links to the installer's postinstall.
+    }
+    const pkgRoot = dirname(nativeDir);
+    for (const { source, target } of entries) {
+      const targetPath = join(pkgRoot, target);
+      link(relative(dirname(targetPath), join(pkgRoot, source)), targetPath);
+    }
+  }
+
   const libDir = join(nativeDir, "lib");
-  if (!existsSync(libDir)) return;
-  for (const file of readdirSync(libDir)) {
-    // lib<base>.<major>.<minor>.dylib → { lib<base>.<major>.dylib, lib<base>.dylib }
-    const match = file.match(/^(lib.+?)\.(\d+)\.\d+\.dylib$/);
-    if (!match) continue;
-    const [, base, major] = match;
-    for (const soname of [`${base}.${major}.dylib`, `${base}.dylib`]) {
-      const link = join(libDir, soname);
-      if (existsSync(link)) continue;
-      try {
-        symlinkSync(file, link); // relative target within libDir
-      } catch {
-        // Best-effort: a race or perms issue surfaces as the real initdb error.
+  if (process.platform === "darwin" && existsSync(libDir)) {
+    for (const file of readdirSync(libDir)) {
+      // lib<base>.<major>.<minor>.dylib → { lib<base>.<major>.dylib, lib<base>.dylib }
+      const match = file.match(/^(lib.+?)\.(\d+)\.\d+\.dylib$/);
+      if (!match) continue;
+      const [, base, major] = match;
+      for (const soname of [`${base}.${major}.dylib`, `${base}.dylib`]) {
+        link(file, join(libDir, soname)); // relative target within libDir
       }
     }
   }
+
+  const binDir = join(nativeDir, "bin");
+  if (existsSync(binDir)) {
+    for (const file of readdirSync(binDir)) {
+      const path = join(binDir, file);
+      try {
+        const stat = statSync(path);
+        if (!stat.isFile() || (stat.mode & 0o100) === 0) continue;
+        if ((stat.mode & PROGRAM_MODE) === PROGRAM_MODE) continue;
+        chmodSync(path, stat.mode | PROGRAM_MODE);
+      } catch {
+        // Best-effort: embedded-postgres reports the same EROFS on its own chmod.
+      }
+    }
+  }
+
+  return { linksCreated };
 }
 
 /** Result of `installPgvector`. */

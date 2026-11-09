@@ -3,7 +3,8 @@ import type { ReactionClient, ReactionContext } from "@lobu/connector-sdk";
 // Match against the complete live population before the caller adds keyset
 // pagination. A person may belong to several groups; no CASE priority drops
 // their other evidence. Associated records retain their own evidence here; this
-// reporting Automation never changes identity relationships.
+// report preserves the broader name-only evidence. Identity decisions below
+// use the schema's resolution rules, never these report groups.
 export const duplicateCandidateQuery = `
 WITH people AS (
   SELECT id, name,
@@ -71,10 +72,93 @@ function canonical(value: unknown): string {
   return JSON.stringify(value) ?? "null";
 }
 
+async function resolveDuplicates(ctx: ReactionContext, client: ReactionClient) {
+  const pending = await client.operations.listRuns({
+    automation_ids: [ctx.automation.id],
+    operation_key: "entity_change",
+    approval_status: "pending",
+    limit: 20,
+  });
+  // Keep the review queue small. Existing approvals remain actionable across
+  // runs; do not fill the inbox with the same candidates every week.
+  let available = Math.max(0, 20 - pending.runs.length);
+  if (!available || pending.has_more)
+    return { approval_count: 0, linked_count: 0 };
+  const pairKey = (a: number, b: number) =>
+    [a, b].sort((a, b) => a - b).join(":");
+  const openPairs = new Set(
+    pending.runs.flatMap((run) => {
+      const input = run.input as Record<string, unknown> | undefined;
+      return input?.operation === "link"
+        ? [pairKey(Number(input.entity_id), Number(input.to_entity_id))]
+        : [];
+    })
+  );
+  let queued = 0;
+  let linked = 0;
+  let cursor: string | undefined;
+  // Bound preflight work as well as writes within the reaction SDK budget.
+  // Restart against current state next run; pending/rejected pairs are skipped.
+  for (let pageNumber = 0; pageNumber < 4 && available > 0; pageNumber++) {
+    const page = await client.entities.discoverDuplicates({
+      entity_type: "person",
+      limit: 20,
+      ...(cursor ? { cursor } : {}),
+    });
+    for (const component of page.components) {
+      for (const decision of component.decisions) {
+        const key = pairKey(decision.from_entity_id, decision.to_entity_id);
+        if (openPairs.has(key)) continue;
+        const proposal = {
+          ...decision,
+          automation_source: {
+            automation_id: ctx.automation.id,
+            run_id: ctx.window.run_id,
+          },
+        };
+        const preview = await client.entities.link({
+          ...proposal,
+          dry_run: true,
+        });
+        // Submit both automatic and approval-required matches through the same
+        // write boundary, which rechecks current evidence and policies.
+        if (
+          !("preview" in preview) ||
+          (preview.preview.outcome !== "review" &&
+            preview.preview.outcome !== "apply")
+        )
+          continue;
+        const result = await client.entities.link(proposal);
+        if ("approval_queued" in result && result.approval_queued) {
+          queued++;
+        } else if ("relationship" in result && result.relationship) {
+          linked++;
+        } else {
+          continue;
+        }
+        available--;
+        openPairs.add(key);
+        if (!available) break;
+      }
+      if (!available) break;
+    }
+    if (!page.next_cursor) break;
+    if (page.next_cursor === cursor)
+      throw new Error("Duplicate review pagination did not advance");
+    cursor = page.next_cursor;
+  }
+  return { approval_count: queued, linked_count: linked };
+}
+
 export default async function reportDuplicates(
   ctx: ReactionContext,
   client: ReactionClient
-): Promise<{ group_count: number; candidate_count: number }> {
+): Promise<{
+  group_count: number;
+  candidate_count: number;
+  approval_count: number;
+  linked_count: number;
+}> {
   const candidates: Candidate[] = [];
   let after = 0;
   // client.query caps rows on its own. Page by id until an empty page so a cap
@@ -120,7 +204,7 @@ export default async function reportDuplicates(
   const fingerprint = hash.digest;
   const summary = [
     `Duplicate candidate groups: ${groups.size} (candidates: ${candidates.length}).`,
-    "Candidates need review; this report does not associate contacts.",
+    "Candidate evidence is preserved here; identity links follow configured resolution rules and write policies.",
     ...orderedGroups
       .slice(0, 12)
       .map(
@@ -158,11 +242,16 @@ export default async function reportDuplicates(
   });
   await client.notifications.send({
     title: candidates.length
-      ? "Duplicate contacts need review"
+      ? "Duplicate contact report"
       : "No duplicate candidates remain",
     body: summary.slice(0, 1000),
     idempotency_key: `${key}:notify`,
     automation_source,
   });
-  return { group_count: groups.size, candidate_count: candidates.length };
+  const resolution = await resolveDuplicates(ctx, client);
+  return {
+    group_count: groups.size,
+    candidate_count: candidates.length,
+    ...resolution,
+  };
 }

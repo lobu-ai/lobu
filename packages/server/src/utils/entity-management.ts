@@ -58,6 +58,7 @@ import {
 	type FieldControl,
 	type FieldMergeResult,
 	type FieldWriteSource,
+	mismatchedExpectedFields,
 } from "./entity-field-merge";
 import {
 	type EntityHookContext,
@@ -314,6 +315,37 @@ const MANUAL_EDIT_REFUSAL_MESSAGES: Record<ManualEditRefusal, string> = {
 		"manual_edit cannot be asserted by an agent, MCP session, chat turn or Automation; only a person's own edit relayed by a first-party backend qualifies. Nothing was written.",
 };
 
+/** Entity attributes an `expected` precondition may not name: it guards metadata only. */
+const NON_METADATA_EXPECTED_KEYS: ReadonlySet<string> = new Set(["name", "content", "slug", "parent_id"]);
+
+/**
+ * Refuse an `expected` key that is not a metadata field name (HTTP 400). A
+ * `$`-name is the reserved column namespace rules and approvals use for
+ * attributes, so it can never name a metadata field either.
+ */
+function assertExpectedNamesMetadata(expected: Record<string, unknown>): void {
+	const invalid = Object.keys(expected).filter(
+		(key) => NON_METADATA_EXPECTED_KEYS.has(key) || key.startsWith("$"),
+	);
+	if (invalid.length > 0) {
+		throw new ToolUserError(
+			`expected only takes metadata field names; ${invalid.join(", ")} cannot be used as a precondition.`,
+			400,
+			"VALIDATION",
+		);
+	}
+}
+
+/** The live row moved since the caller read it (HTTP 409); names only, never values. */
+function preconditionFailed(mismatchedFields: string[]): ToolUserError {
+	return new ToolUserError(
+		`Precondition failed: ${mismatchedFields.join(", ")} changed since it was read, so nothing was written. Re-read the entity and retry with its current values.`,
+		409,
+		"PRECONDITION_FAILED",
+		{ mismatched_fields: mismatchedFields },
+	);
+}
+
 /** `manual_edit: true` that this caller may not assert (HTTP 403). */
 function manualEditNotAllowed(refusal: ManualEditRefusal): ToolUserError {
 	return new ToolUserError(MANUAL_EDIT_REFUSAL_MESSAGES[refusal], 403, "MANUAL_EDIT_NOT_ALLOWED");
@@ -371,6 +403,11 @@ export interface EntityData {
   // signed-in person made this change (isAssertedManualEdit). Refused with 403
   // `MANUAL_EDIT_NOT_ALLOWED` when the caller may not assert it.
   manual_edit?: boolean | null;
+
+  // Optimistic-concurrency precondition: metadata field -> the value the caller
+  // read. Checked under the row lock; any mismatch writes nothing and fails 409
+  // `PRECONDITION_FAILED` with the mismatched field names (never live values).
+  expected?: Record<string, unknown> | null;
 }
 
 export interface CreatedEntity {
@@ -821,9 +858,9 @@ function parseEntityJsonObject(value: unknown): Record<string, unknown> {
  *    boolean) lets the caller fail in the proposer's own terms; throwing the
  *    RESIDUAL's error would describe a write nobody made.
  *  - escalate → the card is right, and `fields` is what it must record. The
- *    caught residual verdict cannot supply that: the residual may have DENIED
- *    while the full proposal escalates, and a card recording no escalated fields
- *    is stuck the moment it is approved.
+ *    residual verdict cannot supply that: it may allow, deny, or never run when
+ *    every field is held. A card recording no escalated fields is stuck the
+ *    moment it is approved.
  *
  * A rule that crashes or times out reads as a deny, so a broken rule surfaces as
  * an error rather than an unanswerable approval.
@@ -1085,6 +1122,8 @@ export async function updateEntity(
 	if (opts?.derivedName && data.name !== undefined) {
 		throw new ToolUserError("An explicit name cannot also be derived from metadata", 400, "VALIDATION");
 	}
+	const expected = data.expected ?? null;
+	if (expected) assertExpectedNamesMetadata(expected);
 
 	// Validate write access (uses PG for auth tables)
 	await requireWriteAccess(sql, entityId, ctx);
@@ -1209,6 +1248,12 @@ export async function updateEntity(
 				? JSON.parse(current[0].field_controls as string)
 				: (current[0].field_controls ?? {})
 		) as Record<string, FieldControl>;
+		// The precondition reads the row this transaction just locked, before any
+		// policy, merge, event or approval work: a stale caller gets nothing.
+		if (expected) {
+			const mismatched = mismatchedExpectedFields(existing, expected);
+			if (mismatched.length > 0) throw preconditionFailed(mismatched);
+		}
 		// There is no ownership marker for top-level names. Only keep deriving a
 		// label that still matches its prior projection; a custom or already
 		// divergent label is preserved. This comparison stays under the row lock.
@@ -1412,26 +1457,56 @@ export async function updateEntity(
 		if (hasEmbedding && (applyContent || !hasContent)) {
 			rowPatch.embedding = data.embedding ?? null;
 		}
-		// Validate the EFFECTIVE patch, not the caller's proposal: approval-held
-		// fields were stripped above and the ownership merge rewrote the rest, so
-		// this is the first point where what-will-commit is known.
-		//
-		// That also means a hold can hand the rule a write nobody proposed. An
-		// agent proposing a legal `issued -> posted` plus the field that move
-		// unlocks gets `status` stripped (human-owned), leaving a naked field edit
-		// in a frozen state — illegal. The proposal was legal; the SPLIT was not.
-		//
-		// So an approval hold may not manufacture an illegal state: when the
-		// residual fails and fields were held, nothing commits and the ENTIRE
-		// proposal defers as one approval unit.
+		// Validate both the full proposal and the effective patch when fields are
+		// held. A full denial must not become an unanswerable card; a full
+		// escalation must defer everything and record its approved fields, even
+		// when the residual is valid or empty. If the proposal is legal but its
+		// stripped remainder is not, defer it as one unit rather than rejecting
+		// a fragment the caller never proposed.
 		let deferWholeWrite: string | null = null;
 		// What the rule named when it escalated — carried onto the card so applying
 		// it waives exactly these and nothing else.
 		let deferEscalatedFields: string[] = [];
 		let validated: ValidatedEntityRowPatch | null = null;
+		const heldFields = Object.keys(fieldMerge?.blocked ?? {});
+		// A held field can hide an escalation even when the residual is valid
+		// (or empty). Evaluate the full proposal before splitting it so the card
+		// records every required approval and can be applied once.
+		const fullVerdict =
+			heldFields.length > 0
+				? await fullProposalVerdict({
+						tx,
+						entityId,
+						patch: {
+							...rowPatch,
+							metadata: {
+								...(mergedMetadata ?? existing),
+								...metadataUpdates,
+							},
+							...(attributeProposals.$name
+								? { name: attributeProposals.$name.proposed as string }
+								: {}),
+							...(attributeProposals.$parent_id
+								? {
+										parentId: attributeProposals.$parent_id.proposed as
+											| number
+											| null,
+									}
+								: {}),
+							...(attributeProposals.$content
+								? {
+										content: attributeProposals.$content.proposed as
+											| string
+											| null,
+									}
+								: {}),
+						},
+					})
+				: null;
+		if (fullVerdict?.verdict.outcome === "deny") throw fullVerdict;
 		try {
-			// A replay with no inline changes must not become a new rule verdict
-			// or refresh updated_at. Ownership-held fields still queue below.
+			if (fullVerdict?.verdict.outcome === "escalate") throw fullVerdict;
+			// A replay with no inline changes must not refresh updated_at.
 			if (Object.keys(rowPatch).length > 0) {
 				validated = await validateEntityRowPatch({
 					tx,
@@ -1441,53 +1516,6 @@ export async function updateEntity(
 			}
 		} catch (err) {
 			if (!(err instanceof EntityRowValidationError)) throw err;
-			const heldFields = Object.keys(fieldMerge?.blocked ?? {});
-
-			// Whatever the verdict, the card replays the FULL proposal — so the full
-			// proposal is what has to be legal. Only a SPLIT write may be rescued: if
-			// the caller's own proposal is illegal too, deferring would mint a card no
-			// approval could clear, because applying re-runs validation and a deny
-			// throws in approved mode.
-			//
-			// Checked for BOTH outcomes, not just deny. A rule can escalate the
-			// residual while denying the full proposal — approving then skips the
-			// escalate and hits the deny, which is the same dead end by a longer road.
-			//
-			// Skipped when nothing was held: the residual IS the full proposal then,
-			// so the rule has already answered this exact question.
-			const fullVerdict =
-				heldFields.length > 0
-					? await fullProposalVerdict({
-							tx,
-							entityId,
-							patch: {
-								...rowPatch,
-								metadata: {
-									...(mergedMetadata ?? existing),
-									...metadataUpdates,
-								},
-								...(attributeProposals.$name
-									? { name: attributeProposals.$name.proposed as string }
-									: {}),
-								...(attributeProposals.$parent_id
-									? {
-											parentId: attributeProposals.$parent_id.proposed as
-												| number
-												| null,
-										}
-									: {}),
-								...(attributeProposals.$content
-									? {
-											content: attributeProposals.$content.proposed as
-												| string
-												| null,
-										}
-									: {}),
-							},
-						})
-					: null;
-			// Stated in the terms the caller proposed, not the residual's.
-			if (fullVerdict?.verdict.outcome === "deny") throw fullVerdict;
 
 			// Prefer the FULL proposal's escalation: that is the write the card
 			// replays, so its fields are what the approver is consenting to. The

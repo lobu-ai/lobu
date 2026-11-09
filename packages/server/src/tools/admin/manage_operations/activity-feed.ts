@@ -138,6 +138,16 @@ function buildNotificationCard(
 	const type = String(n.type ?? "generic");
 	const created = String(n.created_at ?? new Date().toISOString());
 	const atMs = new Date(created).getTime();
+	// A notice ABOUT an Automation or connection (overdue schedule, auto-pause,
+	// stopped collecting) names that subject as its resource. The event's own
+	// automation_id/connection_id columns mean "emitted by" and drive window
+	// self-exclusion, so producers leave them unset; the card still has to say
+	// which source the notice belongs to.
+	const resourceSubjectId = (type: string): number | undefined => {
+		if (n.resource_type !== type) return undefined;
+		const subjectId = Number(n.resource_id);
+		return Number.isSafeInteger(subjectId) && subjectId > 0 ? subjectId : undefined;
+	};
 	const approvalRunId = n.approval_run_id != null ? Number(n.approval_run_id) : NaN;
 	const interactionType =
 		typeof n.interaction_type === "string" && n.interaction_type !== ""
@@ -226,7 +236,9 @@ function buildNotificationCard(
 		browser_handoff: browserHandoff,
 		platform: typeof n.platform === "string" ? n.platform : undefined,
 		connection_id:
-			typeof n.connection_id === "number" ? n.connection_id : undefined,
+			typeof n.connection_id === "number"
+				? n.connection_id
+				: resourceSubjectId("connection"),
 		connection_name:
 			typeof n.connection_name === "string"
 				? n.connection_name
@@ -235,7 +247,9 @@ function buildNotificationCard(
 		feed_key: typeof n.feed_key === "string" ? n.feed_key : undefined,
 		feed_name: typeof n.feed_name === "string" ? n.feed_name : undefined,
 		automation_id:
-			typeof n.automation_id === "number" ? n.automation_id : undefined,
+			typeof n.automation_id === "number"
+				? n.automation_id
+				: resourceSubjectId("automation"),
 		automation_name:
 			typeof n.automation_name === "string" ? n.automation_name : undefined,
 		agent_id: typeof n.agent_id === "string" ? n.agent_id : undefined,

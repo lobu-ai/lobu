@@ -105,6 +105,38 @@ jobs:
           BEFORE_SHA: ${{ github.event.before }}
         run: node scripts/ci-paths.mjs suites
 
+  view-validator-image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - run: docker build -f docker/view-validator/Dockerfile -t view-validator-test .
+      - name: Test credential-free isolated runner
+        run: |
+          docker run --rm --init --network=none --read-only --tmpfs /tmp:rw,size=512m \
+            --shm-size=256m --memory=1g --cpus=2 --pids-limit=256 --cap-drop=ALL \
+            --security-opt no-new-privileges=true \
+            --security-opt seccomp=docker/view-validator/seccomp_profile.json \
+            view-validator-test bun docker/view-validator/smoke.ts
+      - name: Prove local Compose runner access
+        run: |
+          # Keep the service on its internal-only network. Only this trusted
+          # HTTP probe uses the host network; author code stays in the service.
+          override="$RUNNER_TEMP/view-validator-local.yml"
+          printf 'services:\n  view-validator:\n    image: view-validator-test\n  view-validator-local:\n    image: view-validator-test\n' > "$override"
+          compose() {
+            docker compose --project-name view-validator-local --profile local-validator \
+              -f docker-compose.example.yml -f "$override" "$@"
+          }
+          trap 'compose logs --no-color; compose down' EXIT
+          compose up -d --no-build view-validator-local
+          curl --fail --silent --show-error --retry 15 --retry-delay 1 \
+            --retry-all-errors --retry-connrefused --retry-max-time 30 --max-time 2 \
+            http://127.0.0.1:8090/health
+          docker run --rm --network=host --read-only --cap-drop=ALL \
+            --security-opt no-new-privileges=true view-validator-test \
+            bun docker/view-validator/smoke.ts http://127.0.0.1:8090
+
   # Fast unit tests — no Postgres, no submodule needed for most.
   # Splits from `integration` so a unit failure surfaces in <2 min instead of
   # waiting behind DB setup. Worker tests run under bun (full suite, not the
@@ -610,6 +642,7 @@ jobs:
         run: |
           cd packages/core && bun run build && cd ../..
           cd packages/connector-sdk && bun run build && cd ../..
+          cd packages/views && bun run build && cd ../..
 
       - name: owletto tests (vitest)
         if: steps.submodule.outputs.stubbed != 'true'
@@ -666,6 +699,10 @@ jobs:
       - name: MCP App failure smoke (built bundle in Chrome)
         if: steps.submodule.outputs.stubbed != 'true'
         run: node scripts/mcp-app-smoke.mjs --dist packages/owletto/dist-mcp-apps/interaction
+
+      - name: Native view runtime smoke (real browser)
+        if: steps.submodule.outputs.stubbed != 'true'
+        run: bun scripts/view-native-smoke.ts
 
   # Backend integration tests need a real Postgres + pgvector. The Vitest
   # files share a module graph and database within one process, so each shard
@@ -791,6 +828,13 @@ jobs:
           cd packages/connector-worker && bun run build && cd ../..
           cd packages/pgvector-embedded && bun run build && cd ../..
 
+      - name: Build native view runtime for browser validation
+        # Server-only dependency builds omit app assets. The save validator must
+        # mount the same native component artifact as the frontend, even on a
+        # restored package-dist cache.
+        working-directory: packages/owletto
+        run: MCP_APP=view-native bunx vite build --config vite.config.mcp.ts
+
       - name: Verify Postgres health (fail fast if pgvector setup is broken)
         run: |
           for _ in {1..20}; do
@@ -819,6 +863,21 @@ jobs:
       # the 15-minute job timeout; a missing library fails the launch loudly.
       - name: Install Chromium for gateway-extension integration
         run: node node_modules/playwright-vanilla/cli.js install chromium
+
+      - name: Allow the test browser's user-namespace sandbox
+        run: |
+          # Ubuntu 24.04 restricts downloaded browsers independently of Docker
+          # seccomp. Follow Chromium's per-binary AppArmor allowlist, preserving
+          # the global restriction and chromiumSandbox:true in the real runner.
+          # https://chromium.googlesource.com/chromium/src/+/main/docs/security/apparmor-userns-restrictions.md
+          if [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)" != 1 ]; then
+            exit 0
+          fi
+          browser_cache="$(node -e 'const p=require("node:path"); console.log(p.dirname(p.dirname(p.dirname(require("playwright-vanilla").chromium.executablePath()))))')"
+          profile="lobu-ci-chromium-$GITHUB_RUN_ID-${{ matrix.shard }}"
+          printf 'abi <abi/4.0>,\ninclude <tunables/global>\nprofile %s "%s/**/chrome{,-headless-shell}" flags=(unconfined) {\n  userns,\n}\n' \
+            "$profile" "$browser_cache" > "$RUNNER_TEMP/$profile"
+          sudo apparmor_parser -r "$RUNNER_TEMP/$profile"
 
       - name: server integration suite shard ${{ matrix.shard }}/3 (vitest under Node)
         working-directory: packages/server
@@ -853,6 +912,15 @@ jobs:
           directory: packages/server/coverage
           flags: server-integration-vitest-${{ matrix.shard }}
           fail_ci_if_error: false
+
+      - name: Remove the test browser AppArmor profile
+        if: always()
+        run: |
+          profile="$RUNNER_TEMP/lobu-ci-chromium-$GITHUB_RUN_ID-${{ matrix.shard }}"
+          if [ -f "$profile" ]; then
+            sudo apparmor_parser -R "$profile"
+            rm "$profile"
+          fi
 
   # The bun:test suites need Postgres but are intentionally separate from
   # Vitest: they use bun's runner and several gateway directories need their
@@ -941,6 +1009,13 @@ jobs:
           cd packages/embeddings && bun run build && cd ../..
           cd packages/connector-worker && bun run build && cd ../..
           cd packages/pgvector-embedded && bun run build && cd ../..
+
+      - name: Build native view runtime for browser validation
+        # Server-only dependency builds omit app assets. The save validator must
+        # mount the same native component artifact as the frontend, even on a
+        # restored package-dist cache.
+        working-directory: packages/owletto
+        run: MCP_APP=view-native bunx vite build --config vite.config.mcp.ts
 
       - name: Verify Postgres health (fail fast if pgvector setup is broken)
         run: |
@@ -1036,7 +1111,7 @@ jobs:
     # that accepted `skipped` unconditionally turned a broken gate job into a
     # green required check. Skipped shards are only legitimate when the paths
     # filter itself said no runtime paths changed.
-    needs: [check-author, paths, server-integration-vitest, server-integration-bun]
+    needs: [check-author, paths, server-integration-vitest, server-integration-bun, view-validator-image]
     # This compatibility context only evaluates a handful of strings. Keep it on the
     # lightweight runner image while older open PRs still require the legacy
     # `integration` context; branch protection can move directly to the four
@@ -1051,12 +1126,13 @@ jobs:
           PACKAGES_CHANGED: ${{ needs.paths.outputs.packages }}
           VITEST_RESULT: ${{ needs.server-integration-vitest.result }}
           BUN_RESULT: ${{ needs.server-integration-bun.result }}
+          VALIDATOR_RESULT: ${{ needs.view-validator-image.result }}
         run: |
           echo "check-author: $AUTHOR_RESULT"
           echo "paths: $PATHS_RESULT (packages=$PACKAGES_CHANGED)"
           echo "Vitest matrix: $VITEST_RESULT"
           echo "Bun/Postgres: $BUN_RESULT"
-          for r in "$AUTHOR_RESULT" "$PATHS_RESULT"; do
+          for r in "$AUTHOR_RESULT" "$PATHS_RESULT" "$VALIDATOR_RESULT"; do
             if [ "$r" != success ]; then
               echo "gate job result \"$r\" is not success"
               exit 1

@@ -31,11 +31,44 @@ describe("scheduled Automation unchanged gate", () => {
 		}, {} as Env, ctx) as { automation_id: string };
 		const sql = getTestDb();
 		await sql`UPDATE automations SET next_run_at = now() - interval '1 hour' WHERE id = ${created.automation_id}`;
-		expect(await materializeDueAutomationRuns({} as Env, sql as unknown as DbClient)).toMatchObject({ runsCreated: 1, skipped: 0 });
+		// A queue consumer on another connection can claim a committed task as
+		// soon as it is inserted, before the scheduler writes its parent marker.
+		const visibleTasks: unknown[] = [];
+		let taskInserts = 0;
+		const observe = (client: DbClient): DbClient => new Proxy(client, {
+			apply(target, self, args) {
+				const query = Reflect.apply(target, self, args);
+				const text = Array.isArray(args[0]) ? args[0].join('') : '';
+				if (text.includes('INSERT INTO public.runs')) {
+					return query.then(async (rows: unknown) => {
+						taskInserts++;
+						visibleTasks.push(...await sql`
+							SELECT t.id FROM runs t
+							WHERE t.automation_id = ${created.automation_id}
+							  AND t.action_key = 'automation-preparation'
+							  AND t.status = 'pending'
+							`);
+						return rows;
+					});
+				}
+				return query;
+			},
+			get(target, key) {
+				if (key === 'begin' || key === 'savepoint') return (callback: (tx: DbClient) => Promise<unknown>) => target[key]((tx) => callback(observe(tx)));
+				return Reflect.get(target, key);
+			},
+		});
+		expect(await materializeDueAutomationRuns({} as Env, observe(sql))).toMatchObject({ runsCreated: 1, skipped: 0 });
+		expect(taskInserts).toBe(1);
+		expect(visibleTasks).toEqual([]);
 		const runs = await sql`SELECT id, status FROM runs WHERE automation_id = ${created.automation_id} AND run_type = 'automation'`;
 		expect(runs).toHaveLength(1);
 		expect(runs[0].status).toBe("pending");
-		const tasks = await sql`SELECT id FROM runs WHERE parent_run_id = ${runs[0].id} AND action_key = 'automation-preparation'`;
+		const tasks = await sql`
+			SELECT t.id FROM runs t JOIN runs r ON r.id = t.parent_run_id
+			WHERE r.id = ${runs[0].id} AND t.action_key = 'automation-preparation'
+			  AND r.run_metadata->>'preparation_task_run_id' = t.id::text
+		`;
 		expect(tasks).toHaveLength(1);
 	});
 

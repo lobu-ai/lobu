@@ -15,6 +15,7 @@ import { executeAutomationScript } from "../../../packages/server/src/automation
 import type { Env } from "../../../packages/server/src/index";
 import { createAutomationRun } from "../../../packages/server/src/runs/queue-service";
 import { buildClientSDK } from "../../../packages/server/src/sandbox/client-sdk";
+import { listOrgActivity } from "../../../packages/server/src/tools/admin/manage_operations/activity-feed";
 import config from "../lobu.config";
 
 const script = readFileSync(
@@ -53,6 +54,13 @@ async function setup() {
     ],
   })) as { automation_id: string };
   const automationId = Number(created.automation_id);
+  await workspace
+    .withAuth({ tokenType: "session" })
+    .entity_schema.createRelType({
+      slug: "same_record",
+      name: "Same record",
+      purpose: "identity",
+    });
   const run = await createAutomationRun({
     organizationId: workspace.org.id,
     automationId,
@@ -97,8 +105,34 @@ async function setup() {
     }
     return rows;
   };
-  const react = () =>
-    executeAutomationScript({ compiledScript: script, context, env: {} });
+  let windowNumber = 0;
+  const react = async (freshWindow = false) => {
+    if (freshWindow) {
+      await sql`UPDATE runs SET status = 'completed', completed_at = current_timestamp WHERE id = ${context.window.run_id}`;
+      const start = new Date(Date.UTC(2026, 9, 2 + windowNumber++));
+      const end = new Date(start.getTime() + 86_400_000);
+      const next = await createAutomationRun({
+        organizationId: workspace.org.id,
+        automationId,
+        agentId: agent.agentId,
+        windowStart: start.toISOString(),
+        windowEnd: end.toISOString(),
+        dispatchSource: "manual",
+      });
+      context.window = {
+        ...context.window,
+        run_id: next.runId,
+        window_start: start.toISOString(),
+        window_end: end.toISOString(),
+      };
+    }
+    return executeAutomationScript({
+      compiledScript: script,
+      context,
+      env: {},
+      executionKind: "reaction",
+    });
+  };
   const reports = () =>
     sql`SELECT id, metadata FROM events WHERE organization_id = ${workspace.org.id} AND metadata->>'schema' = 'duplicate-candidates/v2' ORDER BY id`;
   const notifications = () =>
@@ -131,6 +165,154 @@ async function setup() {
 }
 
 describe("duplicate report reaction", () => {
+  it("applies policy-authorized links within the work bound and preserves records", async () => {
+    const h = await setup();
+    await h.workspace
+      .withAuth({ tokenType: "session" })
+      .entity_schema.updateType({
+        slug: "person",
+        metadata_schema: {
+          type: "object",
+          "x-lobu-resolution": {
+            rules: [
+              { fields: ["email"], normalizer: "email", onMatch: "auto_link" },
+            ],
+          },
+        },
+      });
+    const nameOnly = [await h.person("Name only"), await h.person("Name only")];
+    const pairs: number[][] = [];
+    for (let i = 0; i < 25; i++) {
+      pairs.push([
+        await h.person(`First ${i}`, {
+          email: `automatic-${i}@sample.invalid`,
+        }),
+        await h.person(`Second ${i}`, {
+          email: `automatic-${i}@sample.invalid`,
+        }),
+      ]);
+    }
+    const records = () =>
+      h.sql`SELECT id, name, metadata, deleted_at FROM entities WHERE organization_id = ${h.workspace.org.id} ORDER BY id`;
+    const links = () =>
+      h.sql`SELECT from_entity_id, to_entity_id FROM entity_relationships WHERE organization_id = ${h.workspace.org.id} AND deleted_at IS NULL`;
+    const before = await records();
+    const first = await h.react();
+    expect(await links()).toHaveLength(20);
+    expect(first, first.error).toMatchObject({
+      success: true,
+      returnValue: { approval_count: 0, linked_count: 20 },
+    });
+    expect(await h.react(true)).toMatchObject({
+      success: true,
+      returnValue: { approval_count: 0, linked_count: 5 },
+    });
+    const applied = await links();
+    expect(applied).toHaveLength(25);
+    const pairKey = (ids: number[]) => [...ids].sort((a, b) => a - b).join(":");
+    expect(
+      new Set(
+        applied.map((link) => pairKey([link.from_entity_id, link.to_entity_id]))
+      )
+    ).toEqual(new Set(pairs.map(pairKey)));
+    expect(
+      applied.flatMap((link) => [link.from_entity_id, link.to_entity_id])
+    ).not.toEqual(expect.arrayContaining(nameOnly));
+    expect(await h.react(true)).toMatchObject({
+      success: true,
+      returnValue: { approval_count: 0, linked_count: 0 },
+    });
+    expect(await records()).toEqual(before);
+    expect(
+      await h.sql`SELECT id FROM runs WHERE organization_id = ${h.workspace.org.id} AND action_key = 'entity_change' AND approval_status = 'pending'`
+    ).toHaveLength(0);
+  });
+
+  it("queues attributed reviews, preserves records, bounds the backlog, and respects rejection", async () => {
+    const h = await setup();
+    const human = h.workspace.withAuth({ tokenType: "session" });
+    await human.entity_schema.updateType({
+      slug: "person",
+      metadata_schema: {
+        type: "object",
+        "x-lobu-resolution": {
+          rules: [
+            { fields: ["email"], normalizer: "email", onMatch: "review" },
+          ],
+        },
+      },
+    });
+    await h.person("Name only");
+    await h.person("Name only");
+    for (let i = 0; i < 22; i++) {
+      await h.person(`First ${i}`, { email: `contact-${i}@sample.invalid` });
+      await h.person(`Second ${i}`, { email: `contact-${i}@sample.invalid` });
+    }
+    const records = () =>
+      h.sql`SELECT id, name, metadata, deleted_at FROM entities WHERE organization_id = ${h.workspace.org.id} ORDER BY id`;
+    const before = await records();
+    const pending = () =>
+      h.sql`SELECT id, automation_id, parent_run_id, action_input FROM runs WHERE organization_id = ${h.workspace.org.id} AND action_key = 'entity_change' AND approval_status = 'pending' ORDER BY id`;
+    const first = await h.react();
+    expect(first, first.error).toMatchObject({
+      success: true,
+      returnValue: { approval_count: 20 },
+    });
+    const proposals = await pending();
+    expect(proposals).toHaveLength(20);
+    const activity = await listOrgActivity({
+      organizationId: h.workspace.org.id,
+      ownerSlug: h.workspace.org.slug,
+      userId: h.workspace.users.owner.id,
+      kinds: ["notification"],
+      includeRuns: false,
+      limit: 50,
+    });
+    const approvalCards = activity.items.filter(
+      (card) => card.interaction_status === "pending"
+    );
+    expect(approvalCards).toHaveLength(20);
+    expect(
+      approvalCards.every(
+        (card) => card.automation_id === h.context.automation.id
+      )
+    ).toBe(true);
+    for (const proposal of proposals) {
+      expect(proposal).toMatchObject({
+        automation_id: h.context.automation.id,
+        parent_run_id: h.context.window.run_id,
+      });
+    }
+    expect(await records()).toEqual(before);
+    expect(
+      await h.sql`SELECT id FROM entity_relationships WHERE organization_id = ${h.workspace.org.id}`
+    ).toHaveLength(0);
+    expect(await h.react()).toMatchObject({
+      success: true,
+      returnValue: { approval_count: 0 },
+    });
+    expect(await pending()).toHaveLength(20);
+    await human.operations.reject({ run_id: Number(proposals[0].id) });
+    expect(await h.react(true)).toMatchObject({
+      success: true,
+      returnValue: { approval_count: 1 },
+    });
+    const nextProposals = await pending();
+    expect(nextProposals).toHaveLength(20);
+    const pair = (proposal: (typeof proposals)[number]) =>
+      [proposal.action_input.entity_id, proposal.action_input.to_entity_id]
+        .sort((a, b) => a - b)
+        .join(":");
+    expect(new Set(nextProposals.map(pair)).size).toBe(20);
+    expect(nextProposals.map(pair)).not.toContain(pair(proposals[0]));
+    const newProposals = nextProposals.filter(
+      (proposal) => !proposals.some((old) => old.id === proposal.id)
+    );
+    expect(newProposals).toHaveLength(1);
+    expect(newProposals[0].parent_run_id).toBe(h.context.window.run_id);
+    expect(await records()).toEqual(before);
+  });
+
   it("reads more than 1000 candidates without splitting the boundary pair", async () => {
     const h = await setup();
     await h.person("Person 251");
@@ -169,11 +351,6 @@ describe("duplicate report reaction", () => {
     const associated = await h.person("Shared Name");
     await h.sql`UPDATE entities SET deleted_at = NOW() WHERE id = ${deleted}`;
     const human = h.workspace.withAuth({ tokenType: "session" });
-    await human.entity_schema.createRelType({
-      slug: "same_record",
-      name: "Same record",
-      purpose: "identity",
-    });
     await human.entities.link({
       from_entity_id: associated,
       to_entity_id: a,

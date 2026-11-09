@@ -1,3 +1,5 @@
+import * as ViewAPI from "@lobu/views";
+import * as ViewComponents from "@lobu/views/components";
 /**
  * Bundle a Lobu view module for the browser and extract its metadata.
  *
@@ -54,7 +56,13 @@ export async function bundleViewFromFile(
   const capture = createSourceCapture(entry, projectRoot);
   const browser = await build({
     ...VIEW_BUILD_OPTIONS,
-    plugins: [capture.plugin, viewRuntimePlugin()],
+    plugins: [
+      capture.plugin,
+      viewRuntimePlugin({
+        "@lobu/views": Object.keys(ViewAPI),
+        "@lobu/views/components": Object.keys(ViewComponents),
+      }),
+    ],
     stdin: { contents: viewMountEntry(rel), loader: "js", resolveDir: dir },
   });
   const compiledCode = browser.outputFiles?.[0]?.text ?? "";

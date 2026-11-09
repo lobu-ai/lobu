@@ -83,10 +83,7 @@ import {
   normalApprovalImpact,
 } from '../../utils/approval-context';
 import logger from '../../utils/logger';
-import {
-  buildAgentSettingsUrl,
-  buildResourcePermalink,
-} from '../../utils/url-builder';
+import { buildResourcePermalink } from '../../utils/url-builder';
 import { ToolUserError } from '../../utils/errors';
 import { requireOrgReadAccess, requireOrgWriteAccess } from '../../utils/organization-access';
 import { resolveRunInitiator } from '../initiator';
@@ -808,22 +805,10 @@ async function queueWriteForApproval(
   }));
 
   const { ownerSlug, baseUrl } = await getOrgUrlContext(ctx);
-  // An `update` proposal is config-shaped (name/description/identity), so its
-  // review surface is the agent settings form prefilled via `?run_id=` (WI-0.3):
-  // the reviewer sees the proposed change in the real form and Approves/Rejects.
-  // Settings patches include fields the identity form cannot render, so they
-  // use the full run review too. create/delete keep the run permalink
-  // (a run-scoped link that survives the supersede chain on approve→complete;
-  // read-side content_ids resolution also covers the event id carried below).
-  const settingsReviewUrl =
-    proposal.action === 'update' && !proposal.settings
-      ? await buildAgentSettingsUrl(baseUrl, ctx.organizationId, proposal.agent_id, {
-          runId,
-        }).catch(() => null)
-      : null;
-  const approvalUrl =
-    settingsReviewUrl ??
-    buildResourcePermalink(ownerSlug, { kind: 'run', runId }, baseUrl);
+  // One run-scoped review for creation, updates and deletion. The event/peek
+  // renders the held proposal and its decision controls without depending on
+  // an existing resource's editable settings page.
+  const approvalUrl = buildResourcePermalink(ownerSlug, { kind: 'run', runId }, baseUrl);
 
   // One destination, never the org-wide fan-out — see resolveApprovalChatOrigin.
   const chatOrigin = await resolveApprovalChatOrigin(ctx);

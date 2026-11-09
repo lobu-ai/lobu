@@ -4,6 +4,7 @@ import {
   type QueryResult,
   type RuntimeConnectorDefinition,
 } from "@lobu/connector-sdk";
+import { readUserMilestones } from "./user-milestones.ts";
 
 interface AnalyticsConfig {
   CLICKHOUSE_URL: string;
@@ -269,7 +270,7 @@ export default class ClickHouseAnalyticsConnector extends ConnectorRuntime<
   > = {
     key: "clickhouse.analytics",
     name: "ClickHouse analytics",
-    version: "1.0.0",
+    version: "1.1.0",
     description:
       "Run governed read-only SQL against an organization-owned ClickHouse analytics endpoint.",
     authSchema: {
@@ -294,6 +295,39 @@ export default class ClickHouseAnalyticsConnector extends ConnectorRuntime<
       properties: { CLICKHOUSE_URL: { type: "string", format: "uri" } },
       required: ["CLICKHOUSE_URL"],
       additionalProperties: false,
+    },
+    feeds: {
+      user_milestones: {
+        key: "user_milestones",
+        name: "User journey milestones",
+        description:
+          "Live acquisition, signup and first verified success. This is milestone coverage, not a full click or tool-call history.",
+        userManaged: true,
+        configSchema: { type: "object", properties: {} },
+        matchPaths: ["metadata.user_id"],
+        eventKinds: {
+          "product.milestone": {
+            description: "A materialized production user journey milestone.",
+            attributions: [
+              {
+                role: "about",
+                target: {
+                  entityType: "product-user",
+                  identities: [
+                    {
+                      namespace: "lobu_product_account_id",
+                      eventPath: "metadata.user_id",
+                      primary: true,
+                    },
+                  ],
+                },
+                autoCreate: false,
+              },
+            ],
+          },
+        },
+        read: (ctx) => readUserMilestones(ctx, queryAnalytics),
+      },
     },
   };
 

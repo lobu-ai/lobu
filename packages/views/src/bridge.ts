@@ -14,7 +14,20 @@
  * like the SDK's transport.
  */
 
-import { VIEW_WORKSPACE_META_KEY } from "@lobu/core/contracts/tools/view-runtime";
+import type { EntityGetInput } from "@lobu/core/contracts/tools/manage-entity";
+import {
+  VIEW_OPEN_RECORD_METHOD,
+  VIEW_WORKSPACE_META_KEY,
+} from "@lobu/core/contracts/tools/view-host";
+
+export class ViewBridgeError extends Error {
+  constructor(
+    message: string,
+    readonly code: number
+  ) {
+    super(message);
+  }
+}
 
 export interface ToolResult {
   isError?: boolean;
@@ -261,6 +274,15 @@ export class ViewBridge {
     }) as Promise<ToolResult>;
   }
 
+  openRecord(
+    record: EntityGetInput,
+    mode: "peek" | "page"
+  ): Promise<{ mode: "peek" | "page" }> {
+    return this.request(VIEW_OPEN_RECORD_METHOD, { record, mode }) as Promise<{
+      mode: "peek" | "page";
+    }>;
+  }
+
   /** Read one `resources/read` URI and return the first text payload. The
    *  generic loader uses this to fetch `ui://lobu/views/<key>` through the
    *  host instead of a custom message. */
@@ -401,7 +423,10 @@ export class ViewBridge {
     clearTimeout(pending.timer);
     if ("error" in data && isRecord(data.error)) {
       pending.reject(
-        new Error(String(data.error.message ?? "Host request failed"))
+        new ViewBridgeError(
+          String(data.error.message ?? "Host request failed"),
+          Number(data.error.code)
+        )
       );
       return;
     }

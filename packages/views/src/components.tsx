@@ -77,7 +77,12 @@ export function Card({ title, description, actions, children }: CardProps) {
         </header>
       )}
       {description && (
-        <p style={{ margin: "0 0 8px", color: "var(--muted, #6b7280)" }}>
+        <p
+          style={{
+            margin: "0 0 8px",
+            color: "var(--color-text-secondary, #6b7280)",
+          }}
+        >
           {description}
         </p>
       )}
@@ -166,7 +171,10 @@ export function DataTable<T>({
       {caption && (
         <p
           id={labelId}
-          style={{ margin: "0 0 6px", color: "var(--muted, #6b7280)" }}
+          style={{
+            margin: "0 0 6px",
+            color: "var(--color-text-secondary, #6b7280)",
+          }}
         >
           {caption}
         </p>
@@ -206,7 +214,7 @@ export function DataTable<T>({
                         background: "transparent",
                         font: "inherit",
                         cursor: "pointer",
-                        color: "var(--accent, #2563eb)",
+                        color: "var(--color-text-info, #2563eb)",
                       }}
                     >
                       {col.header}
@@ -262,7 +270,7 @@ export function DataTable<T>({
               onClick={() => pagination.onPage(pagination.page - 1)}
               label="Previous page"
             />
-            <span style={{ color: "var(--muted, #6b7280)" }}>
+            <span style={{ color: "var(--color-text-secondary, #6b7280)" }}>
               Page {pagination.page}
               {pageCount != null ? ` of ${pageCount}` : ""}
             </span>
@@ -336,7 +344,7 @@ export function FilterBar({ children }: { children: ReactNode }) {
 const FIELD_LABEL: CSSProperties = {
   display: "block",
   fontSize: 12,
-  color: "var(--muted, #6b7280)",
+  color: "var(--color-text-secondary, #6b7280)",
   marginBottom: 2,
 };
 
@@ -430,9 +438,9 @@ export interface ChartDatum {
   color?: string;
 }
 
-const CHART_BAR = "var(--accent, #2563eb)";
+const CHART_BAR = "var(--color-text-info, #2563eb)";
 const CHART_GRID = "var(--border, #e5e7eb)";
-const CHART_TEXT = "var(--muted, #6b7280)";
+const CHART_TEXT = "var(--color-text-secondary, #6b7280)";
 
 function niceMax(value: number): number {
   if (!Number.isFinite(value) || value <= 0) return 1;
@@ -886,8 +894,9 @@ export function Sparkline({
 /**
  * A link the host opens: `href="deal/acme-renewal"` opens that record
  * (relative links resolve against the workspace root, see
- * `useHost().openLink`), a full URL opens a new tab. The sandboxed frame
- * cannot navigate itself, so every click goes through the host, modifier
+ * `useHost().openLink`). On Lobu hosts, supported same-workspace links open
+ * the peek pane; other app links navigate normally and external URLs open a new
+ * tab. The sandboxed frame cannot navigate itself, so every click goes through the host, modifier
  * clicks included; the anchor still shows the resolved address on hover.
  */
 export function Link({
@@ -911,7 +920,10 @@ export function Link({
       onAuxClick={(event) => {
         if (event.button === 1) open(event);
       }}
-      style={{ color: "var(--accent, #2563eb)", textDecoration: "none" }}
+      style={{
+        color: "var(--color-text-info, #2563eb)",
+        textDecoration: "none",
+      }}
     >
       {children}
     </a>
@@ -924,7 +936,10 @@ export function Link({
 
 export function LoadingState({ text = "Loading…" }: { text?: string }) {
   return (
-    <p role="status" style={{ ...INK, color: "var(--muted, #6b7280)" }}>
+    <p
+      role="status"
+      style={{ ...INK, color: "var(--color-text-secondary, #6b7280)" }}
+    >
       {text}
     </p>
   );
@@ -932,7 +947,7 @@ export function LoadingState({ text = "Loading…" }: { text?: string }) {
 
 export function EmptyState({ title, hint }: { title: string; hint?: string }) {
   return (
-    <div style={{ ...INK, color: "var(--muted, #6b7280)" }}>
+    <div style={{ ...INK, color: "var(--color-text-secondary, #6b7280)" }}>
       <p style={{ margin: "4px 0" }}>{title}</p>
       {hint && <p style={{ margin: "0 0 4px", fontSize: 12 }}>{hint}</p>}
     </div>
@@ -965,7 +980,7 @@ export function ErrorState({
           style={{
             margin: "0 0 4px",
             fontSize: 12,
-            color: "var(--muted, #6b7280)",
+            color: "var(--color-text-secondary, #6b7280)",
           }}
         >
           Code: {errorCode}
@@ -1005,7 +1020,13 @@ export function TruncatedNotice({
   total?: number;
 }) {
   return (
-    <p style={{ ...INK, color: "var(--muted, #6b7280)", fontSize: 12 }}>
+    <p
+      style={{
+        ...INK,
+        color: "var(--color-text-secondary, #6b7280)",
+        fontSize: 12,
+      }}
+    >
       Showing {shown}
       {total != null ? ` of ${total}` : ""} rows — refine filters to see the
       rest.
@@ -1021,3 +1042,5 @@ export function formatCompact(value: number): string {
   if (abs >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
   return String(value);
 }
+
+export * from "./native.js";

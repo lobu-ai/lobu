@@ -6,10 +6,9 @@
  * a rebuild is in flight is never overwritten.
  */
 import postgres from "postgres";
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { Env } from "../../../index";
 import { executeTool, type AuthContext } from "../../../tools/execute";
-import logger from "../../../utils/logger";
 import {
 	compileView,
 	getServedView,
@@ -22,6 +21,8 @@ import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
 import { addUserToOrganization, createTestOrganization, createTestUser } from "../../setup/test-fixtures";
 import { viewModule } from "./view-module";
 
+import { useViewValidator } from "../../setup/view-validator";
+
 const TEST_ENV: Env = {
 	ENVIRONMENT: "test",
 	DATABASE_URL: process.env.DATABASE_URL,
@@ -30,6 +31,7 @@ const TEST_ENV: Env = {
 	MAX_CONSECUTIVE_FAILURES: "3",
 	RATE_LIMIT_ENABLED: "false",
 };
+const validator = useViewValidator(TEST_ENV);
 
 const BODY = "export default function Board() { return null; }";
 const SOURCE = viewModule({ key: "board", attach: [] }, BODY);
@@ -68,10 +70,6 @@ describe("getServedView", () => {
 			scopedToOrg: true,
 			allowCrossOrg: false,
 		};
-	});
-
-	afterEach(() => {
-		vi.restoreAllMocks();
 	});
 
 	async function set(args: Record<string, unknown>) {
@@ -186,9 +184,10 @@ describe("getServedView", () => {
 	it("keeps the stored bundle when the rebuild fails, and does not retry it per request", async () => {
 		await set({ source_code: SOURCE });
 		await makeStale(UNRESOLVABLE);
-		const warn = vi.spyOn(logger, "warn");
 
 		const first = await getServedView(orgId, "board");
+		// A repeated attempt must stay suppressed even if its source now compiles.
+		await makeStale(SOURCE);
 		const second = await getServedView(orgId, "board");
 
 		expect(first?.compiled_code).toBe("/*stale-bundle*/");
@@ -196,7 +195,40 @@ describe("getServedView", () => {
 		expect((await getView(orgId, "board"))?.compile_config_hash).toBe(
 			serverCompileStamp("/*stale-bundle*/", "older-compiler")
 		);
-		expect(warn.mock.calls.filter(([, message]) => String(message).includes("failed to rebuild"))).toHaveLength(1);
+	});
+
+	it.each(["reject", "unavailable"] as const)(
+		"keeps the stored bundle when validation is %s, and does not retry it per request",
+		async (mode) => {
+			await set({ source_code: SOURCE });
+			await makeStale();
+			validator.mode = mode;
+
+			const first = await getServedView(orgId, "board");
+			validator.mode = "pass";
+			const second = await getServedView(orgId, "board");
+
+			expect(first?.compiled_code).toBe("/*stale-bundle*/");
+			expect(second?.compiled_code).toBe("/*stale-bundle*/");
+		}
+	);
+
+	it("never compiles a rebuild when no validation runner is configured", async () => {
+		await set({ source_code: SOURCE });
+		await makeStale(UNRESOLVABLE);
+		const runner = process.env.VIEW_VALIDATOR_URL;
+		delete process.env.VIEW_VALIDATOR_URL;
+		try {
+			const served = await getServedView(orgId, "board");
+			expect(served?.compiled_code).toBe("/*stale-bundle*/");
+		} finally {
+			process.env.VIEW_VALIDATOR_URL = runner;
+		}
+		// Re-enabling the runner can rebuild the same hash: no failed compile
+		// attempt was cached while the runner was absent.
+		await makeStale(SOURCE);
+		const rebuilt = await getServedView(orgId, "board");
+		expect(rebuilt?.compile_config_hash).toBe(serverCompileStamp(rebuilt?.compiled_code ?? ""));
 	});
 
 	it("serves the same rebuilt content to concurrent requests for one stale view", async () => {

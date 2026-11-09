@@ -27,7 +27,7 @@ vi.mock("embedded-postgres", () => ({
 }));
 
 vi.mock("@lobu/pgvector-embedded", () => ({
-	ensureNativeLibSonames: vi.fn(),
+	prepareEmbeddedNative: vi.fn(() => ({ linksCreated: 0 })),
 	installPgvector: pgvector.installPgvector,
 	resolveEmbeddedNativeDir: () => process.cwd(),
 }));

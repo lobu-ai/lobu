@@ -600,6 +600,78 @@ describe("POST /api/v1/agents — org member using an agent they don't own", () 
     expect(shared.store.size).toBe(2);
   });
 
+  // Agent ownership (`agent_users`) authorizes chat without workspace
+  // membership, and every direct-API turn is auto-injected with a workspace
+  // attention digest. That digest must be read as the CALLER may see the
+  // agent's org: a member keeps the full org activity, an owner who is not a
+  // member reads it as a public reader and never sees another member's private
+  // connection name or error snippet.
+  for (const reader of [
+    { caller: "member", userId: MEMBER_ID, seesPrivate: true },
+    { caller: "non-member agent owner", userId: "user-nonmember-owner-attention", seesPrivate: false },
+  ] as const) {
+    test(`attention digest honors private connections (${reader.caller})`, async () => {
+      const sql = getDb();
+      await orgContext.run({ organizationId: AGENT_ORG }, () =>
+        userAgentsStore.addAgent("external", "user-nonmember-owner-attention", AGENT_ID)
+      );
+      for (const conn of [
+        { slug: "attention-private", name: "Admin Private Inbox", visibility: "private", error: "private-error-snippet" },
+        { slug: "attention-shared", name: "Shared Tracker", visibility: "org", error: "shared-error-snippet" },
+      ]) {
+        const [row] = await sql<{ id: number }>`
+          INSERT INTO connections (organization_id, connector_key, slug, display_name, status, config, visibility, created_by)
+          VALUES (${AGENT_ORG}, 'github', ${conn.slug}, ${conn.name}, 'active', ${sql.json({})}, ${conn.visibility}, ${ADMIN_ID})
+          RETURNING id
+        `;
+        await sql`
+          INSERT INTO runs (organization_id, run_type, connection_id, connector_key, status, error_message)
+          VALUES (${AGENT_ORG}, 'sync', ${row?.id}, 'github', 'failed', ${conn.error})
+        `;
+      }
+      const enqueued: Array<Record<string, unknown>> = [];
+      setAuthProvider(() => sessionFor(reader.userId));
+      const { app, sessions } = makeApp(
+        userAgentsStore,
+        agentMetadataStore,
+        CALLER_DEFAULT_ORG,
+        makeSessionManager(),
+        {
+          enqueueMessage: async (payload: Record<string, unknown>) => {
+            enqueued.push(payload);
+            return "attention-job";
+          },
+        } as never,
+      );
+      const created = await postCreate(app, { thread: "attention" }, { "x-lobu-org": AGENT_ORG });
+      expect(created.status).toBe(201);
+      const session = sessions.getStored();
+      expect(session?.organizationId).toBe(AGENT_ORG);
+      if (!session) throw new Error("Missing attention session");
+
+      const sent = await app.request(
+        `/api/v1/agents/${encodeURIComponent(session.conversationId)}/messages`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-lobu-org": AGENT_ORG },
+          body: JSON.stringify({ content: "What needs attention?" }),
+        },
+      );
+      expect(sent.status).toBe(200);
+      expect(enqueued).toHaveLength(1);
+      const digest = String(enqueued[0]?.ephemeralContext ?? "");
+      expect(digest).toContain("Shared Tracker");
+      expect(digest).toContain("shared-error-snippet");
+      if (reader.seesPrivate) {
+        expect(digest).toContain("Admin Private Inbox");
+        expect(digest).toContain("private-error-snippet");
+      } else {
+        expect(digest).not.toContain("Admin Private Inbox");
+        expect(digest).not.toContain("private-error-snippet");
+      }
+    });
+  }
+
   test("the agent's owner is still authorized (regression)", async () => {
     setAuthProvider(() => sessionFor(AGENT_OWNER_ID));
     const { app, sessions } = makeApp(

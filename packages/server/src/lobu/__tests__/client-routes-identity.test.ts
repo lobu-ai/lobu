@@ -152,8 +152,17 @@ describe('MCP client identity', () => {
 
   test('links the granting user to their workspace member entity', async () => {
     const clients = await listClients();
-
-    expect(clients.get(CHATGPT_CLIENT)?.linkedUserEntitySlug).toBe('owner');
+    const { getDb } = await import('../../db/client.js');
+    const members = await getDb()`
+      SELECT e.slug FROM entities e
+      JOIN entity_types et ON et.id = e.entity_type_id
+      WHERE e.organization_id = ${ORG} AND et.slug = '$member'
+        AND e.metadata->>'email' = 'owner@test' AND e.deleted_at IS NULL
+    `;
+    expect(members).toHaveLength(1);
+    for (const clientId of [MAC_CLIENT, CHATGPT_CLIENT]) {
+      expect(clients.get(clientId)?.linkedUserEntitySlug).toBe(members[0].slug);
+    }
   });
 
   test('no client is classified as first-party by its self-asserted name', async () => {

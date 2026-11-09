@@ -29,6 +29,7 @@ import { ENTITY_CHANGE_ACTION_KEYS, runDeciderUserIdSql } from "../../run-decide
 import type { ToolContext } from "../../../registry";
 import {
 	type ApprovalReviewer,
+	type CardText,
 	requireApprovalCard,
 	supersedeActionEvent,
 	terminalizeApprovalRunCompleted,
@@ -125,8 +126,8 @@ async function tryReconcileTerminalization(
 		claimed_by: string | null;
 	};
 	const output = row.action_output;
-	let title: string;
-	let content: string;
+	let title: CardText;
+	let content: CardText;
 	let message: string;
 	if (row.run_type === "internal") {
 		const handler = getBuilderApprovalHandlers().find(
@@ -138,8 +139,8 @@ async function tryReconcileTerminalization(
 		content = `Builder action completed: ${desc}`;
 		message = `${handler.nounLabel} ${desc} approved and applied.`;
 	} else {
-		title = `${row.action_key} — completed`;
-		content = `Operation completed: ${row.action_key}`;
+		title = (operation) => `${operation} — completed`;
+		content = (operation) => `Operation completed: ${operation}`;
 		message = "Operation approved and executed.";
 	}
 	const eventId = await terminalizeApprovalRunCompleted(
@@ -1386,7 +1387,7 @@ export async function handleApprove(
 				args.run_id,
 				ctx.organizationId,
 				"rejected",
-				`${pendingRun.action_key} — blocked by policy`,
+				(operation) => `${operation} — blocked by policy`,
 				why,
 				{ reject_reason: why },
 				reviewer,
@@ -1468,8 +1469,8 @@ export async function handleApprove(
 			args.run_id,
 			ctx.organizationId,
 			"confirmed",
-			`${(rows[0] as { action_key: string }).action_key} — executing`,
-			`Operation confirmed: ${(rows[0] as { action_key: string }).action_key} — waiting for execution`,
+			(operation) => `${operation} — executing`,
+			(operation) => `Operation confirmed: ${operation} — waiting for execution`,
 			args.input ? { approved_input: args.input } : {},
 			reviewer,
 			tx,
@@ -1531,8 +1532,8 @@ export async function handleApprove(
 			ctx.organizationId,
 			result.output,
 			{
-				title: `${run.action_key} — completed`,
-				content: `Operation completed: ${run.action_key}`,
+				title: (operation) => `${operation} — completed`,
+				content: (operation) => `Operation completed: ${operation}`,
 			},
 			reviewer,
 			inlineOwner,
@@ -1574,8 +1575,8 @@ export async function handleApprove(
 			args.run_id,
 			ctx.organizationId,
 			"failed",
-			`${run.action_key} — failed`,
-			`Operation failed: ${run.action_key}${result.error_message ? ` — ${result.error_message}` : ""}`,
+			(operation) => `${operation} — failed`,
+			(operation) => `Operation failed: ${operation}${result.error_message ? ` — ${result.error_message}` : ""}`,
 			{ error_message: result.error_message },
 			reviewer,
 			tx,
@@ -1631,13 +1632,12 @@ export async function handleReject(
 		`;
 		if (updated.length === 0) return null;
 
-		const operationKey = (updated[0] as { action_key: string }).action_key;
 		const eventId = await supersedeActionEvent(
 			args.run_id,
 			ctx.organizationId,
 			"rejected",
-			`${operationKey} — rejected`,
-			`Operation rejected: ${operationKey}${args.reason ? ` — ${args.reason}` : ""}`,
+			(operation) => `${operation} — rejected`,
+			(operation) => `Operation rejected: ${operation}${args.reason ? ` — ${args.reason}` : ""}`,
 			{ reject_reason: reason },
 			reviewer,
 			tx,

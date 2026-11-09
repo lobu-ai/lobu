@@ -30,6 +30,8 @@ import {
 	createTestUser,
 } from "../../setup/test-fixtures";
 
+import { useViewValidator } from "../../setup/view-validator";
+
 const TEST_ENV: Env = {
 	ENVIRONMENT: "test",
 	DATABASE_URL: process.env.DATABASE_URL,
@@ -38,6 +40,8 @@ const TEST_ENV: Env = {
 	MAX_CONSECUTIVE_FAILURES: "3",
 	RATE_LIMIT_ENABLED: "false",
 };
+useViewValidator(TEST_ENV);
+
 
 const VIEW_SOURCE = "export default function Retry() { return null; }";
 

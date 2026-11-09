@@ -1215,6 +1215,12 @@ export type ManageEntityData = {
          */
         manual_edit?: boolean;
         /**
+         * [update] Metadata field name -> the value the caller last read. Checked against the live row under the update's row lock: if any field differs, nothing is written (no field changes, ownership markers, events or approvals) and the update fails with 409 PRECONDITION_FAILED listing the field names in mismatched_fields. Values compare structurally (object key order is ignored); null matches a field that was never set. Metadata fields only (not name, content, slug or parent_id); at most 50 keys.
+         */
+        expected?: {
+          [key: string]: unknown;
+        };
+        /**
          * Attribution source when mutation is triggered by an Automation reaction
          */
         automation_source?: {
@@ -4369,6 +4375,10 @@ export type ManageFeedsData = {
          * Filter by runtime health for active feeds on non-paused connections; paused feeds and feeds on paused connections are excluded. 'failing' = last sync failed or the feed has one or more consecutive failures; 'healthy' = otherwise. Surfaces active-but-failing feeds the `status` filter cannot.
          */
         health?: "healthy" | "failing";
+        /**
+         * Add `event_count`, each feed's stored events. Counting takes seconds on a busy connection, so it is off by default; ask for it only when you show the number.
+         */
+        include_event_count?: boolean;
         /**
          * Page size (default: 50, max: 500)
          */

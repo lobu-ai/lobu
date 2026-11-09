@@ -280,6 +280,30 @@ jq -n --arg p "$TEST_DIR/worktree-link" '{id:"env_review_test",path:$p}' > "$FAK
 [ "$(review_bb_environment_arg "$SCRATCH")" = env_review_test ] || fail "canonical paths must match"
 unset BB_ENVIRONMENT_ID
 
+# A path BB has never seen provisions a new environment asynchronously: the
+# fresh child reports no environment while it is still starting. That is not
+# yet a mismatch; the driver waits for the settled path.
+mkdir -p "$FAKE_STATE/show-queue"
+printf '{"thread":{"id":"thr_child9","status":"starting","environmentId":null},"environment":null}\n' > "$FAKE_STATE/show-queue/01-provisioning.json"
+reset_calls
+review_bb_run_reviewer "$PROMPT" "$HEAD_SHA_SCRATCH" "origin/main" "provisioning-case" \
+  codex gpt-6-astra xhigh '(.ok == true)' "/tmp/ci.txt" >/dev/null 2>&1
+[ "$REVIEWER_EXIT" = 0 ] || fail "a still-provisioning child must be awaited, not rejected: $RAW"
+grep -q '^thread stop ' "$FAKE_STATE/calls.log" && fail "a still-provisioning child must not be stopped"
+# A child that settles somewhere else, or settles with no environment, still
+# fails closed and is stopped.
+for settled in "{\"id\":\"env_x\",\"path\":\"/tmp/foreign-worktree\"}" null; do
+  printf '{"thread":{"id":"thr_child9","status":"starting","environmentId":null},"environment":null}\n' > "$FAKE_STATE/show-queue/01-provisioning.json"
+  printf '{"thread":{"id":"thr_child9","status":"idle"},"environment":%s}\n' "$settled" > "$FAKE_STATE/show-queue/02-settled.json"
+  reset_calls
+  review_bb_run_reviewer "$PROMPT" "$HEAD_SHA_SCRATCH" "origin/main" "provisioning-case" \
+    codex gpt-6-astra xhigh '(.ok == true)' "/tmp/ci.txt" >/dev/null 2>&1
+  [ "$REVIEWER_EXIT" = 1 ] || fail "a child settled outside the reviewed worktree must fail closed ($settled)"
+  case "$RAW" in *"not the reviewed worktree"*) ;; *) fail "unexpected failure for $settled: $RAW" ;; esac
+  grep -q '^thread stop thr_child9' "$FAKE_STATE/calls.log" || fail "a mis-attached child must be stopped ($settled)"
+done
+rm -rf "$FAKE_STATE/show-queue"
+
 # 6. Malformed child output is returned unsettled-neutral; the caller's schema
 #    validation (mirrored here exactly as review.sh runs it) must reject it —
 #    malformed output never becomes green.

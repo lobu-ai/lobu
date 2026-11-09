@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   buildAgentSettingsUrl,
-  buildAutomationSettingsUrl,
   buildAutomationUrl,
   buildEntityUrl,
   buildProviderConnectUrl,
@@ -109,20 +108,6 @@ describe('buildAgentSettingsUrl', () => {
     expect(url?.endsWith('/settings')).toBe(true);
   });
 
-  // WI-0.3 config-prefill: an update proposal's approval CTA appends ?run_id=<id>
-  // so the settings form opens the review flow prefilled with the held change.
-  it('appends ?run_id when a review run is given', async () => {
-    const url = await buildAgentSettingsUrl('https://app.lobu.com/lobu', 'org-1', 'lobu-builder', {
-      runId: 42,
-    });
-    expect(url).toBe('https://app.lobu.com/acme/agents/lobu-builder/settings?run_id=42');
-  });
-
-  it('omits ?run_id when no review run is given', async () => {
-    const url = await buildAgentSettingsUrl('https://app.lobu.com', 'org-1', 'lobu-builder', {});
-    expect(url).toBe('https://app.lobu.com/acme/agents/lobu-builder/settings');
-  });
-
   it('strips the embedded-mode /lobu suffix from the web origin', async () => {
     const url = await buildAgentSettingsUrl('https://app.lobu.com/lobu/', 'org-1', 'my agent/id');
     // agentId is percent-encoded; origin has no /lobu.
@@ -142,49 +127,6 @@ describe('buildAgentSettingsUrl', () => {
     expect(await buildAgentSettingsUrl(undefined, 'org-1', 'a')).toBeNull();
     expect(await buildAgentSettingsUrl('https://x', undefined, 'a')).toBeNull();
     expect(await buildAgentSettingsUrl('https://x', 'org-1', undefined)).toBeNull();
-  });
-});
-
-describe('buildAutomationSettingsUrl', () => {
-  stubOrgSlug();
-  it('deep-links to the workspace Automation edit route', async () => {
-    const url = await buildAutomationSettingsUrl(
-      'https://app.lobu.com/lobu',
-      'org-1',
-      7
-    );
-    expect(url).toBe('https://app.lobu.com/acme/automations/7');
-  });
-
-  it('appends ?run_id when a review run is given', async () => {
-    const url = await buildAutomationSettingsUrl(
-      'https://app.lobu.com/lobu',
-      'org-1',
-      7,
-      { runId: 42 }
-    );
-    expect(url).toBe('https://app.lobu.com/acme/automations/7?run_id=42');
-  });
-
-  it('accepts a string Automation id and percent-encodes the slug', async () => {
-    const url = await buildAutomationSettingsUrl(
-      'https://app.lobu.com',
-      'org-special',
-      '7'
-    );
-    expect(url).toBe('https://app.lobu.com/acme%2Fteam/automations/7');
-  });
-
-  it('returns null when the org slug cannot be resolved', async () => {
-    expect(
-      await buildAutomationSettingsUrl('https://app.lobu.com', 'unknown-org', 7)
-    ).toBeNull();
-  });
-
-  it('returns null when any required piece is missing', async () => {
-    expect(await buildAutomationSettingsUrl(undefined, 'org-1', 7)).toBeNull();
-    expect(await buildAutomationSettingsUrl('https://x', undefined, 7)).toBeNull();
-    expect(await buildAutomationSettingsUrl('https://x', 'org-1', undefined)).toBeNull();
   });
 });
 

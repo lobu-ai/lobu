@@ -180,13 +180,12 @@ export async function failClaimedWorkerRun(params: {
       row.run_type === 'action' &&
       (row.approval_status === 'approved' || row.approval_status === 'auto')
     ) {
-      const actionKey = row.action_key ?? 'Action';
       const eventId = await supersedeActionEvent(
         params.runId,
         row.organization_id,
         'failed',
-        `${actionKey} — failed`,
-        `Action failed before worker dispatch: ${actionKey} — ${params.errorMessage}`,
+        (operation) => `${operation} — failed`,
+        (operation) => `Action failed before worker dispatch: ${operation} — ${params.errorMessage}`,
         { error_message: params.errorMessage },
         null,
         tx

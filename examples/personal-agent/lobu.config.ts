@@ -46,7 +46,7 @@ const taskCollaboratorSkill = defineSkill({
 const duplicateEntityResolutionRealV3FinalSkill = defineSkill({
   name: "duplicate-entity-resolution-real-v3-final",
   content:
-    "Review the supplied sources.people context for this reporting-only Automation. State whether that context is complete; the reaction independently reads all candidate pages. Explain likely duplicate groups in analysis_summary and put uncertain groups in uncertain_groups with why. Names, aliases, handles, email and phone strings are candidate evidence, not proof of shared ownership. Do not call entity tools, merge contacts, or emit backlog tasks. The deterministic reaction re-reads all current candidates, saves the evidence, and sends one notification per distinct report.\n",
+    "Review the supplied sources.people context for this identity-resolution Automation. State whether that context is complete; the reaction independently reads all candidate pages. Explain likely duplicate groups in analysis_summary and put uncertain groups in uncertain_groups with why. Names, aliases, handles, email and phone strings are candidate evidence, not proof of shared ownership. Do not call entity tools, merge contacts, or emit backlog tasks. The deterministic reaction re-reads all current candidates, saves the evidence, and sends one notification per distinct report. It separately discovers matches using the configured resolution rules and applies permitted identity links or queues required human approvals, with at most 20 successful submissions per reaction and at most 20 open reviews; names alone never create identity links.\n",
 });
 
 const personalAgent = defineAgent({
@@ -98,16 +98,6 @@ const revolutConnection = defineConnection({
     { feed: "balances", config: {} },
   ],
 });
-
-// LinkedIn is also a browser connector. Unlike takeout-only connections, never
-// synthesize a local path for it: a browser-only deployment must not provision
-// CSV feeds that can only fail forever. Opt in with either an explicit LinkedIn
-// directory or an explicitly configured shared takeout root.
-const linkedinTakeoutDir =
-  process.env.LINKEDIN_TAKEOUT_DIR ??
-  (process.env.LOCAL_TAKEOUT_ROOT
-    ? `${process.env.LOCAL_TAKEOUT_ROOT}/linkedin`
-    : null);
 
 const takeoutConnection = defineConnection({
   slug: "google-takeout-buremba",
@@ -219,21 +209,6 @@ const linkedinConnection = defineConnection({
     // Apply never prunes feeds. Clear the old schedule explicitly so live
     // reads do not leave the previous periodic ingestion running.
     { feed: "home_feed", schedule: null },
-    // Local Data Export (CSV) feeds.
-    ...(linkedinTakeoutDir
-      ? [
-          "messages",
-          "connections",
-          "invitations",
-          "applied_jobs",
-          "profile",
-          "companies",
-          "learning",
-          "events",
-          "endorsements",
-          "media",
-        ].map((feed) => ({ feed, config: { takeout_dir: linkedinTakeoutDir } }))
-      : []),
   ],
 });
 
@@ -480,9 +455,9 @@ const duplicateEntityResolution = defineAutomation({
   ],
   sources: { people: context(duplicateCandidateQuery) },
   prompt:
-    "Review the supplied sources.people context for this reporting-only Automation. State whether that context is complete; the reaction independently reads all candidate pages. Follow the pinned skill.",
+    "Review the supplied sources.people context for this identity-resolution Automation. State whether that context is complete; the reaction independently reads all candidate pages. Follow the pinned skill.",
   reactionsGuidance:
-    "Explain uncertainty; never merge contacts or submit candidates for merging. The reaction only saves a report and notification.",
+    "Explain uncertainty. Preserve every contact and its evidence. The reaction saves the broad candidate report, then uses configured resolution rules and write policies to apply permitted reversible identity links or queue required human approvals, with at most 20 successful submissions per reaction, at most 20 open reviews, and bounded discovery work. It skips rejected, refused, and already-pending pairs; no name-only identity links.",
   reaction: reactionFromFile<typeof DuplicateReportReaction>(
     "./duplicate-report.reaction.ts"
   ),

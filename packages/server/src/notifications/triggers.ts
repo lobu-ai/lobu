@@ -144,6 +144,39 @@ function formatWhyApprovalNeeded(reason: string | null | undefined): string {
 	return reason.replace(/^Automation proposes updating /i, "Field is protected: ");
 }
 
+/**
+ * "Link Example Co (#11) and Example Co (#12)": an identity change names
+ * the two records it joins or separates, from the `from_entity_id` /
+ * `to_entity_id` / `records` the proposal already carries. A record whose name
+ * is missing keeps its id; with no ids at all the title stays generic.
+ */
+function formatIdentityChangeTitle(
+	operation: "link" | "unlink",
+	proposal: Record<string, unknown> | null | undefined,
+): string {
+	const verb = operation === "link" ? "Link" : "Separate";
+	const ids = [proposal?.from_entity_id, proposal?.to_entity_id].filter(
+		(id): id is number => typeof id === "number" && Number.isFinite(id),
+	);
+	if (ids.length < 2)
+		return `Review ${operation === "link" ? "associating" : "separating"} identity records`;
+	const records = Array.isArray(proposal?.records) ? proposal.records : [];
+	const nameOf = (id: number) => {
+		const record = records.find(
+			(item): item is { id: number; name?: unknown } =>
+				typeof item === "object" &&
+				item !== null &&
+				(item as { id?: unknown }).id === id,
+		);
+		const name =
+			typeof record?.name === "string"
+				? truncateNotificationLine(record.name)
+				: "";
+		return name ? `${name} (#${id})` : `#${id}`;
+	};
+	return `${verb} ${nameOf(ids[0])} and ${nameOf(ids[1])}`;
+}
+
 export function formatActionApprovalTitle(
 	actionKey: string,
 	details?: ActionApprovalDetails,
@@ -158,7 +191,8 @@ export function formatActionApprovalTitle(
 		const entityLabel = details.entityType
 			? formatLabel(details.entityType).toLowerCase()
 			: "entity";
-		if (details.operation === "link" || details.operation === "unlink") return `Review ${details.operation === "link" ? "associating" : "separating"} identity records`;
+		if (details.operation === "link" || details.operation === "unlink")
+			return formatIdentityChangeTitle(details.operation, details.proposal);
 		return details.operation === "delete"
 			? `Review deleting ${entityLabel}`
 			: `Review creating ${entityLabel}`;

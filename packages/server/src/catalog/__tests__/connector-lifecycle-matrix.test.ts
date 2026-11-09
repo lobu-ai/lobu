@@ -11,6 +11,7 @@ const EXPECTED_BUNDLED_CONNECTORS = [
 	"gchat",
 	"hackernews",
 	"herdr",
+	"imessage",
 	"jira",
 	"linear",
 	"linkedin",
@@ -88,6 +89,7 @@ describe("bundled connector lifecycle matrix", () => {
 			// 67 compiled + 6 hand-written (get_thread, send_email, …).
 			"google.gmail": 73,
 			herdr: 12,
+			imessage: 4,
 			linkedin: 9,
 			"market.quotes": 1,
 			// outlook's first actions: list_attachments + download_attachment.
@@ -95,8 +97,9 @@ describe("bundled connector lifecycle matrix", () => {
 			// Browser-backed connectors also expose the gateway's verification action.
 			"tiktok.web": 4,
 			"whatsapp.web": 7,
-			// prepare_reply (public-reply draft) + send_message (DM reply) + verification.
-			x: 3,
+			// prepare_reply (public-reply draft) + send_message (DM reply) +
+			// set_like + set_follow + verification.
+			x: 5,
 			youtube: 5,
 		});
 

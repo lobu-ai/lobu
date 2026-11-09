@@ -175,7 +175,7 @@ export async function expirePendingApprovals(
 						Number(row.id),
 						row.organization_id,
 						"rejected",
-						`${row.action_key ?? "approval"} — expired`,
+						(operation) => `${operation} — expired`,
 						reason,
 						{ reason, expired: true, expired_after_days: ttlDays },
 						null,

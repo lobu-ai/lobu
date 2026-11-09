@@ -487,7 +487,6 @@ describe('headless Automation claim gate (automations.execute)', () => {
             run_id: ${job.run_id},
             window_token: window.window_token,
             extracted_data: { summary: 'completed by the Mac daemon session' },
-            model: 'device-cli:opencode',
           });
         }`,
       },
@@ -495,10 +494,13 @@ describe('headless Automation claim gate (automations.execute)', () => {
     );
     expect(completion.success).toBe(true);
 
+    // The device agent names no model; the run still records the Mac's CLI
+    // that executed it, not an outside client.
     const [run] = await ctx.sql`
-      SELECT status FROM runs WHERE id = ${job.run_id}
+      SELECT status, model_used FROM runs WHERE id = ${job.run_id}
     `;
     expect(String(run.status)).toBe('completed');
+    expect(run.model_used).toBe('device-cli:opencode');
   });
 
   it('capable macOS daemon fails closed when no assigned agent can mint a session', async () => {

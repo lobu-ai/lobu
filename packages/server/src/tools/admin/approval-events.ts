@@ -14,6 +14,31 @@ export interface ApprovalReviewer {
 }
 
 /**
+ * What an operation card is called: the connector operation's display name
+ * stamped on the card when it was queued ("Search Emails"), falling back to its
+ * action key — the card's, else the run's — for a card that never recorded one.
+ */
+export function operationCardLabel(
+	metadata: Record<string, unknown>,
+	runActionKey?: string | null,
+): string {
+	const label =
+		metadata.operation_name ??
+		metadata.action_name ??
+		metadata.operation_key ??
+		metadata.action_key ??
+		runActionKey;
+	return typeof label === "string" && label !== "" ? label : "Operation";
+}
+
+/**
+ * Card title or content. A callback receives the card's
+ * {@link operationCardLabel}, so a caller holding only `runs.action_key` still
+ * renders the operation's display name.
+ */
+export type CardText = string | ((operation: string) => string);
+
+/**
  * Fail-closed guard for a managed approval DECISION's card. {@link
  * supersedeActionEvent} returns `undefined` when the run has NO approval card
  * (`current_event_records` has no matching `interaction_type='approval'` row) —
@@ -56,7 +81,7 @@ export async function terminalizeApprovalRunCompleted(
 	runId: number,
 	organizationId: string,
 	output: Record<string, unknown>,
-	card: { title: string; content: string },
+	card: { title: CardText; content: CardText },
 	reviewer: ApprovalReviewer | null,
 	expectedOwner: string | null,
 	db: DbClient = getDb(),
@@ -99,8 +124,8 @@ export async function supersedeActionEvent(
 	runId: number,
 	organizationId: string,
 	status: string,
-	title: string,
-	content: string,
+	titleText: CardText,
+	contentText: CardText,
 	extraMetadata: Record<string, unknown> = {},
 	reviewer: ApprovalReviewer | null = null,
 	db: DbClient = getDb(),
@@ -108,7 +133,8 @@ export async function supersedeActionEvent(
 ): Promise<number | undefined> {
 	const sql = db;
 	const originalEvent = await sql`
-    SELECT id, entity_ids, metadata, author_name, interaction_input_schema, interaction_input
+    SELECT id, entity_ids, metadata, author_name, interaction_input_schema, interaction_input,
+      (SELECT action_key FROM runs WHERE id = ${runId} AND organization_id = ${organizationId}) AS run_action_key
     FROM current_event_records
     WHERE run_id = ${runId}
       AND organization_id = ${organizationId}
@@ -122,6 +148,11 @@ export async function supersedeActionEvent(
 	// Carry the reviewer forward. A decision supplies one; later system
 	// transitions inherit the reviewer stamped on the prior state.
 	const priorMetadata = (orig.metadata ?? {}) as Record<string, unknown>;
+	const operationName = operationCardLabel(priorMetadata, orig.run_action_key);
+	const title =
+		typeof titleText === "function" ? titleText(operationName) : titleText;
+	const content =
+		typeof contentText === "function" ? contentText(operationName) : contentText;
 	const reviewedById =
 		reviewer?.userId ??
 		(priorMetadata.reviewed_by_id as string | undefined) ??
@@ -199,13 +230,7 @@ export async function supersedeActionEvent(
 		runId,
 		organizationId,
 		cardStatus: status,
-		operationName: String(
-			priorMetadata.operation_name ??
-				priorMetadata.action_name ??
-				priorMetadata.operation_key ??
-				priorMetadata.action_key ??
-				"Operation",
-		),
+		operationName,
 		connectionName:
 			typeof priorMetadata.connection_name === "string"
 				? priorMetadata.connection_name

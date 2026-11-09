@@ -1078,7 +1078,7 @@ export async function streamContent(c: Context<{ Bindings: Env }>) {
 	try {
 		let batch = await c.req.json<StreamBatch>();
 
-		// Connector-supplied checkpoints (LinkedIn takeout cursors, browser
+		// Connector-supplied checkpoints (feed cursors, browser
 		// scrapes) can carry stray NUL (0x00), which Postgres rejects when written
 		// to the jsonb checkpoint column (unsupported Unicode escape sequence).
 		// Item payloads go through insertEvent which already sanitizes; the
@@ -2663,7 +2663,6 @@ export async function completeActionRun(c: Context<{ Bindings: Env }>) {
 			if (rows.length === 0) return rows;
 
 			const organizationId = (rows[0] as any)?.organization_id;
-			const actionKey = (rows[0] as any)?.action_key ?? "Action";
 			const approvalStatus = (rows[0] as any)?.approval_status;
 			const cardBearingRun =
 				approvalStatus === "approved" ||
@@ -2674,10 +2673,11 @@ export async function completeActionRun(c: Context<{ Bindings: Env }>) {
 					req.run_id,
 					organizationId,
 					newStatus,
-					`${actionKey} — ${newStatus}`,
-					req.status === "success"
-						? `Action completed: ${actionKey}`
-						: `Action failed: ${actionKey}${req.error_message ? ` — ${req.error_message}` : ""}`,
+					(operation) => `${operation} — ${newStatus}`,
+					(operation) =>
+						req.status === "success"
+							? `Action completed: ${operation}`
+							: `Action failed: ${operation}${req.error_message ? ` — ${req.error_message}` : ""}`,
 					req.status === "success"
 						? { action_output: actionOutput }
 						: { error_message: req.error_message },

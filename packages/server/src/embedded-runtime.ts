@@ -9,22 +9,22 @@
  * `server.ts` hands to the shared `createServerLifecycle()` spine.
  */
 
-import { execFileSync, fork } from "node:child_process";
+import { type ChildProcess, execFileSync, fork } from "node:child_process";
+import { randomBytes } from "node:crypto";
+import { once } from "node:events";
 import {
 	chmodSync,
 	chownSync,
 	existsSync,
 	lstatSync,
 	mkdirSync,
-	readFileSync,
 	realpathSync,
-	symlinkSync,
 } from "node:fs";
 import type { Stats } from "node:fs";
 import http from "node:http";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
-import { dirname, join, relative, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import postgres from "postgres";
 import {
@@ -449,50 +449,6 @@ export function ensureEmbeddedPgTraversal(
 }
 
 /**
- * Ensure the @embedded-postgres platform binary's SONAME symlinks exist.
- *
- * Each `@embedded-postgres/<platform>` package ships its shared libs (ICU, libpq)
- * under `native/lib` as versioned files (`libicuuc.so.60.2`, …) plus a
- * `pg-symlinks.json` manifest; its `postinstall` (hydrate-symlinks) creates the
- * SONAME symlinks (`libicuuc.so.60` → `…60.2`) that the binary's
- * `RUNPATH=$ORIGIN/../lib` resolves. npm/npx run that postinstall, but
- * `bun install` (no `trustedDependencies`) and some installs skip it — leaving
- * the binary unable to load on a host without those exact old system libs
- * (e.g. ICU 60 on modern Linux), so `lobu run` dies at initdb with
- * "error while loading shared libraries: libicuuc.so.60". Recreate the symlinks
- * idempotently at boot so embedded Postgres works regardless of installer.
- */
-export function hydrateEmbeddedPgSymlinks(nativeDir: string): void {
-	const manifest = join(nativeDir, "pg-symlinks.json");
-	if (!existsSync(manifest)) return;
-	let entries: Array<{ source: string; target: string }>;
-	try {
-		entries = JSON.parse(readFileSync(manifest, "utf8"));
-	} catch {
-		return;
-	}
-	const pkgRoot = dirname(nativeDir);
-	let created = 0;
-	for (const { source, target } of entries) {
-		const targetPath = join(pkgRoot, target);
-		if (existsSync(targetPath)) continue; // already hydrated (e.g. by npm postinstall)
-		const rel = relative(dirname(targetPath), join(pkgRoot, source));
-		try {
-			symlinkSync(rel, targetPath);
-			created++;
-		} catch {
-			// best-effort — a race or read-only fs must not crash boot
-		}
-	}
-	if (created > 0) {
-		logger.info(
-			{ nativeDir, created },
-			"Hydrated embedded Postgres library symlinks"
-		);
-	}
-}
-
-/**
  * Spawn an embedded PostgreSQL (with pgvector staged), set process.env.DATABASE_URL
  * to its TCP URL, fork the embeddings child, and return the lifecycle hooks.
  */
@@ -515,15 +471,16 @@ export async function startEmbeddedRuntime(): Promise<EmbeddedRuntime> {
 	// entry by absolute URL keeps native package resolution inside that cache.
 	const component = componentEntry ? await import(pathToFileURL(componentEntry).href) : null;
 	const { default: EmbeddedPostgres } = component ?? await import("embedded-postgres");
-	const { ensureNativeLibSonames, installPgvector, resolveEmbeddedNativeDir } =
+	const { installPgvector, prepareEmbeddedNative, resolveEmbeddedNativeDir } =
 		component ?? await importPgvectorEmbedded();
 	const nativeDir = resolveEmbeddedNativeDir();
 
-	// The bundled Postgres binary needs its SONAME symlinks in place before it can
-	// load (the postinstall that creates them is skipped by bun / some installers).
-	// Both are best-effort no-ops when the links already exist.
-	hydrateEmbeddedPgSymlinks(nativeDir);
-	ensureNativeLibSonames(nativeDir);
+	// The runtime installer prepares the binary tree; this is a no-op then, and
+	// covers source/dev launches whose installer skipped the postinstall.
+	const { linksCreated } = prepareEmbeddedNative(nativeDir);
+	if (linksCreated > 0) {
+		logger.info({ nativeDir, linksCreated }, "Prepared embedded Postgres library links");
+	}
 
 	// embedded-postgres bundles pg_trgm but not pgvector. Stage the host
 	// platform's prebuilt pgvector next to the cluster (a user-owned dir) and
@@ -577,7 +534,7 @@ export async function startEmbeddedRuntime(): Promise<EmbeddedRuntime> {
 		embeddedPgOptions(pgDataDir, pgPort, pgvector.postgresFlags),
 	);
 
-	let embeddingsChild: Awaited<ReturnType<typeof startEmbeddings>> | null = null;
+	let embeddingsChild: ChildProcess | null = null;
 	let postgresStarted = false;
 	try {
 		// initdb refuses a non-empty datadir; skip it when the cluster already
@@ -606,15 +563,13 @@ export async function startEmbeddedRuntime(): Promise<EmbeddedRuntime> {
 			// release before the embeddings child + PG child are stopped. Restore
 			// ancestor ownership/modes only after postgres no longer needs them.
 			extraTeardown: [
-				() => {
-					embeddingsChild?.kill();
-				},
+				() => stopEmbeddings(embeddingsChild),
 				() => pg.stop(),
 				() => restoreTraversal(),
 			],
 		};
 	} catch (error) {
-		embeddingsChild?.kill();
+		await stopEmbeddings(embeddingsChild);
 		const cleanupErrors: unknown[] = [];
 		// embedded-postgres leaves its process field set when start() rejects,
 		// even though the child has already closed. Calling stop() then waits for
@@ -761,7 +716,24 @@ export async function runMigrations(databaseUrl: string): Promise<void> {
 	}
 }
 
-export async function startEmbeddings(): Promise<ReturnType<typeof fork> | null> {
+/**
+ * Stops a forked embeddings service and resolves once it has exited, so its port
+ * is free when teardown returns. A child that has loaded the local model can take
+ * a moment to die, and the gateway must not exit while the child still listens.
+ */
+export async function stopEmbeddings(child: ChildProcess | null): Promise<void> {
+	if (!child || child.exitCode !== null || child.signalCode !== null) return;
+	const exited = once(child, "exit");
+	child.kill("SIGTERM");
+	const force = setTimeout(() => child.kill("SIGKILL"), 5_000);
+	try {
+		await exited;
+	} finally {
+		clearTimeout(force);
+	}
+}
+
+export async function startEmbeddings(): Promise<ChildProcess | null> {
 	if (process.env.EMBEDDINGS_SERVICE_URL?.trim()) return null;
 	const embeddingsPort = parseInt(process.env.EMBEDDINGS_PORT || "0", 10);
 	const publishedServerPath = (() => {
@@ -785,6 +757,12 @@ export async function startEmbeddings(): Promise<ReturnType<typeof fork> | null>
 	}
 
 	const port = embeddingsPort || (await findFreePort());
+	// The child listens on loopback only; a per-boot token also keeps other local
+	// users and processes out. The gateway and the in-process connector worker
+	// send it from process.env, exactly as they send a configured token.
+	if (!process.env.EMBEDDINGS_SERVICE_TOKEN?.trim()) {
+		process.env.EMBEDDINGS_SERVICE_TOKEN = randomBytes(32).toString("hex");
+	}
 	let execArgv: string[] = [];
 	if (serverPath.endsWith(".ts")) {
 		const tsxPackageJson = require.resolve("tsx/package.json");

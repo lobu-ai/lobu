@@ -107,8 +107,9 @@ export function normalizeSdkSpecifier(specifier: string): string {
 /**
  * esbuild options for code that runs inside a V8 isolate: the gateway's script
  * sandbox (`packages/server/src/sandbox/run-script.ts`, via the server's
- * `compiler-core`) and the connector isolate lane. `external: []` inlines every
- * import because an isolate has no module resolver, and `platform: 'node'`
+ * `compiler-core`) and the connector isolate lane. Packages are inlined because
+ * an isolate has no module resolver; only the provided socket shim is external.
+ * `platform: 'node'`
  * leaves Node builtins as bare `require()` calls that throw at load — the
  * fail-closed signal `findIsolateIneligibleBuiltins` and the lane tests key
  * on. One constant so the runtime and the tests that classify bundles can
@@ -120,7 +121,9 @@ export const ISOLATE_LANE_BUILD_OPTIONS = {
   platform: 'node',
   conditions: ['workerd'],
   supported: { 'dynamic-import': false },
-  external: [],
+  // This non-Node specifier is supplied by the isolate's host-backed prelude;
+  // unlike Node builtins, esbuild otherwise tries to resolve it as a package.
+  external: ['cloudflare:sockets'],
 } as const satisfies Partial<BuildOptions>;
 
 /**

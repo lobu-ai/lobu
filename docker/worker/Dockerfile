@@ -102,9 +102,6 @@ RUN node scripts/image-browser-tooling.mjs --prune /app
 # ===========================================
 FROM node:26-bookworm-slim AS runtime
 
-ARG APP_GIT_SHA=unknown
-ENV APP_GIT_SHA=${APP_GIT_SHA}
-
 WORKDIR /app
 
 # No Bun in this stage: everything runs under the image's Node. curl stays for
@@ -150,6 +147,10 @@ WORKDIR /app/packages/connector-worker
 # Prove the non-root production user can load and construct an isolated-vm
 # Isolate on this exact final image (Node 26 ABI + copied native build).
 RUN node --no-node-snapshot -e "const ivm = require('isolated-vm'); const isolate = new ivm.Isolate({ memoryLimit: 8 }); isolate.dispose(); console.log('isolated-vm ok on Node ' + process.versions.node)"
+
+# Keep commit metadata after build layers so a new SHA preserves their cache.
+ARG APP_GIT_SHA=unknown
+ENV APP_GIT_SHA=${APP_GIT_SHA}
 
 # Node, not Bun: the isolate lane loads the isolated-vm addon, which Bun cannot
 # dlopen. `--no-node-snapshot` is isolated-vm's upstream launch requirement on
