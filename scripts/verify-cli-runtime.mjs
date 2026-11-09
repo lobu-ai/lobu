@@ -116,6 +116,13 @@ try {
   console.log(
     "Packed runtime: embedded PG/pgvector, migrations, web UI, local embedding service, and external DB/remote embeddings boot passed."
   );
+  // SIGTERM must run the server's own ordered teardown and exit 0. A
+  // dependency's forced exit (128 + SIGTERM) skips it and leaves services up.
+  assert.deepEqual(
+    await stop(embedded),
+    { code: 0, signal: null },
+    "embedded lobu run must shut down through its own lifecycle on SIGTERM"
+  );
 } finally {
   for (const child of running.reverse()) await stop(child);
 }
@@ -179,12 +186,16 @@ async function healthy(child, port) {
   throw new Error(`Packed server did not become ready:\n${child.output}`);
 }
 async function stop(child) {
-  if (child.exitCode !== null || child.signalCode !== null) return;
+  if (child.exitCode !== null || child.signalCode !== null)
+    return { code: child.exitCode, signal: child.signalCode };
   const exited = once(child, "exit");
   child.kill("SIGTERM");
-  const timeout = setTimeout(() => child.kill("SIGKILL"), 15000);
+  // Longer than `lobu run`'s own 45s grace, so a wedged server is force-killed
+  // by the CLI together with the services it started.
+  const timeout = setTimeout(() => child.kill("SIGKILL"), 60_000);
   try {
-    await exited;
+    const [code, signal] = await exited;
+    return { code, signal };
   } finally {
     clearTimeout(timeout);
   }

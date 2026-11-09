@@ -75,7 +75,49 @@ export interface EmbeddedRuntime {
 	dataDir: string;
 	databaseReadiness: () => Promise<void>;
 	preListenHooks: Array<() => Promise<void> | void>;
+	postListenHooks: Array<() => void>;
 	extraTeardown: Array<() => Promise<void> | void>;
+}
+
+/**
+ * Signals whose shutdown the server lifecycle owns. It registers handlers for
+ * both before `listen()` and runs the ordered teardown in `extraTeardown`.
+ */
+const LIFECYCLE_SIGNALS = ["SIGTERM", "SIGINT"] as const;
+
+/**
+ * Run `load` and return a function that removes the SIGTERM/SIGINT listeners
+ * it added. embedded-postgres registers async-exit-hook when its module loads:
+ * on SIGTERM/SIGINT the hook stops every cluster and then calls
+ * `process.exit(128 + signal)`. That exit pre-empts the lifecycle's ordered
+ * teardown, so the embeddings child is never stopped and claimed runs are
+ * never released, and `lobu run` returns while the service ports are still
+ * listening. The hook is kept during boot, where it is the only thing that
+ * stops the cluster on a signal, and released once the lifecycle owns the
+ * signals. Diffing listeners works for both load paths: the runtime component
+ * bundles its own copy of async-exit-hook, which this module cannot import.
+ */
+async function loadReleasingSignalHooks<T>(
+	load: () => Promise<T>,
+): Promise<{ loaded: T; releaseSignalHooks: () => void }> {
+	const before = new Map(
+		LIFECYCLE_SIGNALS.map((signal) => [signal, new Set(process.listeners(signal))]),
+	);
+	const loaded = await load();
+	const added = LIFECYCLE_SIGNALS.flatMap((signal) =>
+		process
+			.listeners(signal)
+			.filter((listener) => !before.get(signal)?.has(listener))
+			.map((listener) => ({ signal, listener })),
+	);
+	return {
+		loaded,
+		releaseSignalHooks: () => {
+			for (const { signal, listener } of added) {
+				process.removeListener(signal, listener);
+			}
+		},
+	};
 }
 
 /**
@@ -469,8 +511,17 @@ export async function startEmbeddedRuntime(): Promise<EmbeddedRuntime> {
 	const componentEntry = process.env.LOBU_RUNTIME_POSTGRES_ENTRY;
 	// The launcher installs PG only for an embedded DATABASE_URL. Loading its
 	// entry by absolute URL keeps native package resolution inside that cache.
-	const component = componentEntry ? await import(pathToFileURL(componentEntry).href) : null;
-	const { default: EmbeddedPostgres } = component ?? await import("embedded-postgres");
+	const {
+		loaded: { component, EmbeddedPostgres },
+		releaseSignalHooks,
+	} = await loadReleasingSignalHooks(async () => {
+		const component = componentEntry
+			? await import(pathToFileURL(componentEntry).href)
+			: null;
+		const { default: EmbeddedPostgres } =
+			component ?? (await import("embedded-postgres"));
+		return { component, EmbeddedPostgres };
+	});
 	const { installPgvector, prepareEmbeddedNative, resolveEmbeddedNativeDir } =
 		component ?? await importPgvectorEmbedded();
 	const nativeDir = resolveEmbeddedNativeDir();
@@ -559,6 +610,8 @@ export async function startEmbeddedRuntime(): Promise<EmbeddedRuntime> {
 			// Install-operator provisioning, shared with the external-DB
 			// `lobu run` path (see local-bootstrap.ts).
 			preListenHooks: buildLocalBootstrapHooks(),
+			// The lifecycle has registered its SIGTERM/SIGINT handlers by now.
+			postListenHooks: [releaseSignalHooks],
 			// Runs after stopLobuGateway + closeDbSingleton so gateway connections
 			// release before the embeddings child + PG child are stopped. Restore
 			// ancestor ownership/modes only after postgres no longer needs them.
