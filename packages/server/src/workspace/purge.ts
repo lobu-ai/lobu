@@ -208,7 +208,25 @@ export async function runWorkspacePurgeTask(
       )) > 0
     );
 
-    // 5. The organization row. What still cascades is small by now.
+    // 5. Other workspaces' edges to this workspace's public source types. A
+    //    stored cross-workspace edge cascades with its endpoint entity; a
+    //    source edge names the type instead, whose foreign key restricts, so
+    //    it goes the same way explicitly before the types cascade.
+    while (
+      (await batch('foreign_source_edges', async (tx) => {
+        const deleted = await tx`
+          DELETE FROM entity_relationships WHERE id IN (
+            SELECT r.id FROM entity_relationships r
+            JOIN entity_types t ON t.id = r.to_entity_type_id
+            WHERE t.organization_id = ${organizationId} AND r.organization_id <> ${organizationId}
+            LIMIT ${WORKSPACE_PURGE_BATCH_SIZE}
+          )
+        `;
+        return deleted.count;
+      })) > 0
+    );
+
+    // 6. The organization row. What still cascades is small by now.
     await batch('organization', (tx) =>
       withAclPrivilege(tx, async () => {
         const deleted = await tx`DELETE FROM organization WHERE id = ${organizationId}`;
@@ -217,12 +235,12 @@ export async function runWorkspacePurgeTask(
     );
   }
 
-  // 6. Tables the organization delete does not reach.
+  // 7. Tables the organization delete does not reach.
   for (const table of WORKSPACE_PURGE_UNLINKED_TABLES) {
     while ((await batch(table, (tx) => deleteBatchByOrganization(tx, table, organizationId))) > 0);
   }
 
-  // 7. The public namespace entry. It is keyed by `ref_id`, not
+  // 8. The public namespace entry. It is keyed by `ref_id`, not
   //    `organization_id`, so it is neither cascaded from `organization` nor
   //    part of the batch tables above. One row per workspace at most.
   await batch('namespace', async (tx) => {

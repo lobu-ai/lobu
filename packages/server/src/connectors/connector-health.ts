@@ -12,7 +12,7 @@
  * This module is a periodic, read-only scan over `connections` + `feeds` that
  * classifies each active connection as healthy or unhealthy by clear rules and
  * emits a structured `logger.error` for each NEWLY-unhealthy connection, which
- * lands in the hosted log pipeline (Loki). Because no log reaches the org's own
+ * lands in the hosted log pipeline (ClickHouse). Because no log reaches the org's own
  * admins, the same transition also sends them an in-product notification when
  * a connection that was collecting has stopped.
  *
@@ -377,6 +377,7 @@ interface FeedHealthRow {
   timezone: string | null;
   last_sync_status: string | null;
   last_sync_at: Date | string | null;
+  last_sync_succeeded: boolean;
   consecutive_failures: string;
   last_error: string | null;
   acl_state_failed: boolean;
@@ -438,6 +439,16 @@ async function loadConnectionHealthRows(
       f.timezone,
       f.last_sync_status,
       f.last_sync_at,
+      -- Completion stamps both rows in the same transaction. An exact
+      -- terminal-time lookup uses idx_runs_terminal_completed_at and avoids
+      -- inferring a success from counters that an operator can reset.
+      CASE WHEN f.last_sync_status = 'pending' THEN EXISTS (
+        SELECT 1 FROM public.runs r
+        WHERE r.completed_at = f.last_sync_at AND r.completed_at IS NOT NULL
+          AND r.status = 'completed' AND r.run_type = 'sync'
+          AND r.feed_id = f.id AND r.connection_id = c.id
+          AND r.organization_id = c.organization_id AND NOT r.dry_run
+      ) ELSE false END AS last_sync_succeeded,
       f.consecutive_failures,
       f.last_error,
       -- Fails CLOSED: the connection's ACL graph is fail-closed. The ACL sync
@@ -779,7 +790,10 @@ function classify(
     if (feed.persistent) persistentCount += 1;
 
     if (row.last_sync_at) everFinishedASync = true;
-    if (row.last_sync_status === 'success' && row.last_sync_at) {
+    // A claim overwrites status, but the matching completed run still proves
+    // the outcome at last_sync_at. Missing/pruned evidence stays unknown.
+    const preservesLastSuccess = row.last_sync_status === 'pending' && row.last_sync_succeeded;
+    if ((row.last_sync_status === 'success' || preservesLastSuccess) && row.last_sync_at) {
       const syncMs = tsTimeOrNull(row.last_sync_at);
       if (syncMs !== undefined && (newestSyncAtMs === null || syncMs > newestSyncAtMs)) {
         newestSyncAtMs = syncMs;

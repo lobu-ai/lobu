@@ -160,8 +160,8 @@ describe("credential store I/O", () => {
     const entries = await readdir(dir);
     expect(entries.filter((n) => n.includes(".tmp-"))).toEqual([]);
     expect(entries).toContain("credentials.json");
-    // Bun 1.3.5 ignores bunfig's test timeout, so keep the larger budget local
-    // to this I/O stress test.
+    // Bun's bunfig test timeout has been unreliable, so keep the larger budget
+    // local to this I/O stress test.
   }, 30_000);
 
   test("delete removes one context; deletes the file when none remain", async () => {

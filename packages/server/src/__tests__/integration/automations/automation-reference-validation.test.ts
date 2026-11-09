@@ -24,6 +24,7 @@ import type { Env } from "../../../index";
 import type { AuthContext } from "../../../tools/execute";
 import { executeTool } from "../../../tools/execute";
 import { ensureMemberEntityType } from "../../../utils/member-entity-type";
+import { primeMemberEventKinds } from "../../../utils/event-kind-validation";
 import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
 import { createTestAgent } from "../../setup/test-fixtures";
 import { TestWorkspace } from "../../setup/test-mcp-client";
@@ -387,6 +388,31 @@ describe("manage_automations reference validation", () => {
 				ctx
 			)
 		).rejects.toThrow(/Invalid event type 'not_a_registered_kind'/i);
+	});
+
+	it("accepts a just-registered output kind despite a stale cache", async () => {
+		await executeTool("manage_entity_schema", {
+			schema_type: "entity_type", action: "update", slug: "$member",
+			event_kinds: { note: {}, fresh_report: {} },
+		}, TEST_ENV, ctx);
+		primeMemberEventKinds(workspace.org.id, { note: {} });
+		const created = await executeTool("manage_automations", {
+			action: "create", slug: "fresh-output", prompt: "Report evidence.",
+			managed_agent_id: agentId, outputs: { reports: { event: "fresh_report" } },
+		}, TEST_ENV, ctx) as { automation_id: string };
+		expect(Number(created.automation_id)).toBeGreaterThan(0);
+	});
+
+	it("refuses a removed output kind despite its cached definition", async () => {
+		await executeTool("manage_entity_schema", {
+			schema_type: "entity_type", action: "update", slug: "$member",
+			event_kinds: { note: {} },
+		}, TEST_ENV, ctx);
+		primeMemberEventKinds(workspace.org.id, { note: {}, removed_report: {} });
+		await expect(executeTool("manage_automations", {
+			action: "create", slug: "removed-output", prompt: "Report evidence.",
+			managed_agent_id: agentId, outputs: { reports: { event: "removed_report" } },
+		}, TEST_ENV, ctx)).rejects.toThrow(/Invalid event type 'removed_report'/i);
 	});
 
 	it("accepts the built-in draft_reply output type", async () => {

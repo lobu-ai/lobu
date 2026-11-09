@@ -35,7 +35,7 @@ async function seedAutomation(executor: 'script' | 'agent', skipIfUnchanged = fa
     triggers: [{ kind: 'schedule', cron: '*/5 * * * *', execution: 'window', skip_if_unchanged: skipIfUnchanged }],
     ...(sources ? { sources } : skipIfUnchanged ? { sources: [{ name: 'empty', query: 'SELECT id FROM events WHERE false' }] } : {}),
     ...(executor === 'script'
-      ? { execution_config: { executor: { kind: 'script', source: 'export default async () => ({});' } } }
+      ? { reaction_script: 'export default async () => ({});' }
       : { prompt: 'Summarize the window.' }),
   } as never)) as { automation_id: string };
   return { workspace, orgId: workspace.org.id, agentId: agent.agentId, automationId: Number(created.automation_id) };
@@ -304,7 +304,7 @@ describe('script executor window bound', () => {
     });
   });
 
-  it('books only the recorded window when the scheduler skips empty sources', async () => {
+  it('runs code-only jobs even when configured sources are empty', async () => {
     const seed = await seedAutomation('script', true);
     const stamps = await seedArrivals(seed.orgId, 250);
     const sql = getTestDb();
@@ -315,11 +315,11 @@ describe('script executor window bound', () => {
     `;
     await materializeDueAutomationRuns({} as Env);
     const [run] = await sql`SELECT id, status FROM runs WHERE automation_id = ${seed.automationId} AND run_type = 'automation'`;
-    expect(run.status).toBe('completed');
+    expect(run.status).toBe('pending');
     const window = await claimedWindow(Number(run.id));
     expect(window.end).toBe(stamps[200].toISOString());
     const [automation] = await sql`SELECT next_window_start FROM automations WHERE id = ${seed.automationId}`;
-    expect(new Date(automation.next_window_start).toISOString()).toBe(window.end);
+    expect(new Date(automation.next_window_start).toISOString()).toBe(WINDOW_START);
   });
 
   it('leaves agent windows unbounded: the model reads them in pages', async () => {

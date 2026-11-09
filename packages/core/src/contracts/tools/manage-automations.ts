@@ -319,7 +319,7 @@ export const AutomationOutputsSchema = Type.Object(
 // value contract to TypeScript consumers.
 export type AutomationOutputs = Record<string, AutomationOutput>;
 
-export const AutomationScriptExecutorSchema = Type.Object(
+export const LegacyAutomationScriptExecutorSchema = Type.Object(
   {
     kind: Type.Literal("script"),
     source: Type.String({ minLength: 1, maxLength: 131072 }),
@@ -331,11 +331,11 @@ export const AutomationScriptExecutorSchema = Type.Object(
       "Run this TypeScript module directly in the Automation sandbox. Export default async (ctx, client). The runtime pins the script and window at activation and completes the run only after success. SDK writes retain the owning agent's permissions. Use ctx.window.run_id for retry idempotency.",
   }
 );
-export type AutomationScriptExecutor = Static<
-  typeof AutomationScriptExecutorSchema
+export type LegacyAutomationScriptExecutor = Static<
+  typeof LegacyAutomationScriptExecutorSchema
 >;
 
-export const AutomationExternalExecutorSchema = Type.Object(
+export const LegacyAutomationExternalExecutorSchema = Type.Object(
   { kind: Type.Literal("external") },
   {
     additionalProperties: false,
@@ -343,18 +343,12 @@ export const AutomationExternalExecutorSchema = Type.Object(
       "An authorized external MCP client claims and completes this Automation. Manual and schedule window activations only. The schedule remains authoritative; Lobu does not start a hosted agent or device CLI. managed_agent_id may retain the owning delivery principal.",
   }
 );
-export type AutomationExecutor =
-  | AutomationScriptExecutor
-  | Static<typeof AutomationExternalExecutorSchema>;
+export type LegacyAutomationExecutor =
+  | LegacyAutomationScriptExecutor
+  | Static<typeof LegacyAutomationExternalExecutorSchema>;
 
 export const AutomationExecutionConfigSchema = Type.Object(
   {
-    executor: Type.Optional(
-      Type.Union([
-        AutomationScriptExecutorSchema,
-        AutomationExternalExecutorSchema,
-      ])
-    ),
     timeout_seconds: Type.Optional(
       Type.Integer({
         minimum: 1,
@@ -408,11 +402,28 @@ export const AutomationExecutionConfigSchema = Type.Object(
   {
     additionalProperties: false,
     description:
-      "[create/update] Per-Automation execution settings: an external MCP client, a sandboxed script executor, device-worker CLI flags, or the server-side finalize-nudge budget. Omitted fields fall back to dispatcher/CLI/global defaults; pass null to clear.",
+      "[create/update] Per-Automation agent execution settings. Code-only modules use sandbox limits and do not accept these options. Omitted fields fall back to dispatcher/CLI/global defaults; pass null to clear.",
   }
 );
 export type AutomationExecutionConfig = Static<
   typeof AutomationExecutionConfigSchema
+>;
+
+/** Read-only compatibility shape for installed definitions and frozen runs. */
+export const LegacyAutomationExecutionConfigSchema = Type.Object(
+  {
+    ...AutomationExecutionConfigSchema.properties,
+    executor: Type.Optional(
+      Type.Union([
+        LegacyAutomationScriptExecutorSchema,
+        LegacyAutomationExternalExecutorSchema,
+      ])
+    ),
+  },
+  { additionalProperties: false }
+);
+export type LegacyAutomationExecutionConfig = Static<
+  typeof LegacyAutomationExecutionConfigSchema
 >;
 
 export const AutomationDeliveryTargetSchema = Type.Object(
@@ -651,7 +662,7 @@ export const ManageAutomationsSchema = Type.Object(
     prompt: Type.Optional(
       Type.String({
         description:
-          "[create/create_version] Literal LLM instruction text for the Automation — the task statement, frozen into the version. No template expansion happens: the text is delivered to the agent verbatim, and the window's data (content, sources, entities, extraction_schema) arrives alongside it in the knowledge-read payload. Reusable know-how belongs in `skills` instead, which is delivered as readable files rather than pasted in here. A schedule trigger, an event trigger with execution 'window', and an Automation with no triggers each need an instruction source — supply `prompt`, `skills`, a reaction script, or a script executor; an event trigger with execution 'turn' may omit all instruction sources and use the built-in default.",
+          "[create/create_version] Literal LLM instruction text for the Automation — the task statement, frozen into the version. No template expansion happens: the text is delivered to the agent verbatim, and the window's data (content, sources, entities, extraction_schema) arrives alongside it in the knowledge-read payload. Reusable know-how belongs in `skills` instead, which is delivered as readable files rather than pasted in here. A schedule trigger, an event trigger with execution 'window', and an Automation with no triggers each need an instruction source — supply `prompt`, `skills`, or a code module; an event trigger with execution 'turn' may omit all instruction sources and use the built-in default.",
       })
     ),
     skills: Type.Optional(
@@ -693,7 +704,7 @@ export const ManageAutomationsSchema = Type.Object(
     managed_agent_id: Type.Optional(
       Type.Union([Type.String({ minLength: 1 }), Type.Null()], {
         description:
-          "[create/update] Optional managed agent that owns this Automation. Normally executes its runs; an explicit external executor retains the agent only as the permission and delivery principal. Null clears the assignment. Without a managed agent, device pin, or external executor, an Automation is manual-only. [list] Optional owner filter.",
+          "[create/update] Optional managed agent identity and SDK permission ancestor. A device pin places its execution on that device. Prompt, skills, input schema or outputs invoke analysis; a module alone runs code with owning-agent permissions. Null clears the assignment. Analysis without an agent or device is claimed by authorized external clients on manual/scheduled windows; clients own their wakeups. [list] Optional owner filter.",
       })
     ),
     status: Type.Optional(
@@ -757,9 +768,6 @@ export const ManageAutomationsSchema = Type.Object(
           "[create/update] Minimum seconds between two firings of this Automation (0 = no cooldown).",
         minimum: 0,
       })
-    ),
-    model_config: Type.Optional(
-      Type.Any({ description: "[create/update] AI model configuration" })
     ),
     // Union with Null so `update` can clear a previously-saved config back to
     // NULL/defaults — omitted = unchanged, null = clear, object = replace. The
@@ -852,7 +860,7 @@ export const ManageAutomationsSchema = Type.Object(
     reaction_script: Type.Optional(
       Type.String({
         description:
-          "[create/set_reaction_script] TypeScript source for an automated reaction. On create, it is compiled before the Automation and its reaction fields are stored in one transaction. Pass an empty string to set_reaction_script to remove an existing script.",
+          "[create/set_reaction_script] TypeScript lifecycle module. Without prompt, skills, exported input or declared outputs, runs code without an LLM: prepare then default when present. With analysis inputs, prepare runs before the native agent and default follows completion. prepare returns named arrays of records (32 names, 16384 JSON bytes maximum), saved per run and read through knowledge.read(...).sources. Preparation requires native windows; legacy executors and reply turns are unsupported. Compiled and validated before saving; an empty string removes the module.",
       })
     ),
 
@@ -930,7 +938,6 @@ export type ManageAutomationsArgs = Static<typeof ManageAutomationsSchema>;
  */
 export type AutomationUpdatePatch = Pick<
   ManageAutomationsArgs,
-  | "model_config"
   | "execution_config"
   | "triggers"
   | "managed_agent_id"
@@ -971,7 +978,6 @@ export function normalizeAutomationTags(values: unknown): string[] {
  * A `manage_automations` update is a PATCH — only keys PRESENT in `args` are
  * returned (absent keys keep their current values). Coercions mirror the stored
  * shape EXACTLY, incl. the ones that used to live only in the SQL params:
- *   - model_config ?? {}
  *   - tags → normalizeAutomationTags (trim/drop-empty/dedupe)
  *   - min_cooldown_seconds ?? 0
  *   - null-clearable fields (managed_agent_id/device_worker_id/agent_kind,
@@ -982,8 +988,6 @@ export function normalizeAutomationUpdatePatch(
   args: ManageAutomationsArgs
 ): AutomationUpdatePatch {
   const patch: AutomationUpdatePatch = {};
-  if (args.model_config !== undefined)
-    patch.model_config = args.model_config ?? {};
   // null is a REAL clear the write stores (toJsonParam(null) → SQL null); keep it
   // so the review shows the clear rather than hiding it (serializing away).
   if (args.execution_config !== undefined)
@@ -1293,11 +1297,13 @@ export type ManageAutomationsResult = Static<
  * human approver). Without this, a group reassigned between queue and approve
  * would let A's pending mutation land on B-owned automation.
  *
- * Automation definition writes have no per-field pre-image (unlike manage_agents
- * update `base`); a straight re-run is the launch path — a stale approval may
- * clobber a newer edit (ownership re-check still rejects foreign owners).
+ * Existing-target writes also pin configuration revisions; runtime execution
+ * bookkeeping does not invalidate them. These are internal approval metadata,
+ * never caller-supplied mutation fields.
  */
 export interface ManageAutomationsProposal {
+  /** Target configuration revisions; absent only on legacy proposals and creates. */
+  base?: Record<string, string>;
   args: ManageAutomationsArgs;
   /** Resolved `actor.ownerAgentId ?? actor.id` at queue time; null for humans. */
   actingAgentId: string | null;

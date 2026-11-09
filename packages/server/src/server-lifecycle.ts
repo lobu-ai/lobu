@@ -16,8 +16,10 @@
 import http from "node:http";
 import v8 from "node:v8";
 import { getRequestListener } from "@hono/node-server";
-import { Hono } from "hono";
+import { type Context, Hono } from "hono";
+import { routePath } from "hono/route";
 import { pinoLogger } from "hono-pino";
+import { context, propagation, ROOT_CONTEXT } from "@opentelemetry/api";
 import { closeDbSingleton } from "./db/client";
 import { mountViteDev } from "./dev-vite";
 import { markShuttingDown } from "./lifecycle-state";
@@ -34,10 +36,46 @@ import { bootTaskScheduler } from "./scheduled/jobs";
 import { startConnectorRecordWorker } from "./connectors/webhook-delivery";
 import { isErrorReported, markErrorReported } from "./diagnostics";
 import { BootConfigError } from "./utils/errors";
+import {
+	createSpan,
+	getCurrentSpan,
+	recordError,
+	runInSpanContext,
+	shutdownTracing,
+	SpanKind,
+	traceparentHeader,
+} from "@lobu/core";
+import { cloudflareRayId } from "./utils/cloudflare-ray";
 import logger from "./utils/logger";
 import { initWorkspaceProvider } from "./workspace";
 
+/** Requests whose thrown error app.onError already recorded on the HTTP span. */
+const requestsWithRecordedError = new WeakSet<Request>();
+
+/**
+ * Readiness probes intentionally 503 `{status:"draining"}` during the
+ * graceful-shutdown drain (SHUTDOWN_READINESS_DRAIN_MS); recording that turns
+ * every deploy rollover into an incident (LOBU-BACKEND-X). Only that exact
+ * shape: a health 5xx with any other body (DB unreachable, crash) is real.
+ */
+async function isReadinessDrain(c: Context): Promise<boolean> {
+	if (c.req.path !== "/health/ready" || c.res.status !== 503) return false;
+	const body: unknown = await c.res.clone().json().catch(() => null);
+	return typeof body === "object" && body !== null && (body as { status?: unknown }).status === "draining";
+}
+
 type ServerMode = "postgres" | "embedded-postgres";
+const HTTP_TRACE_METHODS = new Set(["CONNECT", "DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT", "TRACE"]);
+
+/**
+ * The span name and error scope for a request: a known method and the matched
+ * route template, so neither a caller-chosen method nor a raw path is recorded.
+ */
+function httpSpanName(c: Context): string {
+	const method = HTTP_TRACE_METHODS.has(c.req.method) ? c.req.method : "_OTHER";
+	const matched = routePath(c);
+	return `${method} ${matched && matched !== "*" && matched !== "/*" ? matched : "unmatched"}`;
+}
 
 interface ServerLifecycleConfig {
 	mode: ServerMode;
@@ -149,9 +187,11 @@ export function reportBootFailure(err: unknown): never {
  *      BEFORE the env-inject middleware replaces shared fields)
  *   2. env-inject                (`Object.assign(c.env, env)` — preserves
  *      `c.env.incoming` so the Node adapter's `getConnInfo` keeps working)
- *   3. request logger             (covers both `/lobu` and the main app)
- *   4. structured 5xx response capture (for inner-catch returns that never throw)
- *   5. `app.onError` for thrown exceptions
+ *   3. HTTP server span           (fresh per-request trace context, so the
+ *      logger below and all route work inherit its trace/span ids)
+ *   4. request logger             (covers both `/lobu` and the main app)
+ *   5. structured 5xx response capture (for inner-catch returns that never throw)
+ *   6. `app.onError` for thrown exceptions
  *
  * Route mounts:
  *   - `/lobu` → `lobuApp` (only when non-null)
@@ -193,12 +233,60 @@ export function buildWrapperApp(
 		return next();
 	});
 
-	// 3. Request logging belongs on the wrapper because `/lobu` and the main app
+	// 3. HTTP server span. Both mounts share a fresh request context. Accept
+	// only the validated remote trace parent; ambient work and incoming baggage
+	// must not leak into a request.
+	wrapper.use("*", async (c, next) => {
+		const traceparent = traceparentHeader(c.req.header("traceparent"));
+		const parent = traceparent ? propagation.extract(ROOT_CONTEXT, { traceparent }) : ROOT_CONTEXT;
+		return context.with(parent, async () => {
+			const method = HTTP_TRACE_METHODS.has(c.req.method) ? c.req.method : "_OTHER";
+			const span = createSpan("HTTP request", { "http.request.method": method }, SpanKind.SERVER);
+			let thrown: unknown;
+			let failed = false;
+			try {
+				await runInSpanContext(span, () => next());
+			} catch (error) {
+				failed = true;
+				thrown = error;
+				throw error;
+			} finally {
+				const name = httpSpanName(c);
+				const route = name.slice(name.indexOf(" ") + 1);
+				span?.updateName(name);
+				span?.setAttributes({ "http.route": route, "http.response.status_code": c.res.status });
+				const auth = c.get("authContext");
+				const userId = c.get("user")?.id ?? c.get("mcpAuthInfo")?.userId ?? c.get("session")?.userId
+					?? (auth?.via !== "worker_token" ? auth?.userId : undefined);
+				const organizationId = c.get("organizationId") ?? auth?.organizationId;
+				if (userId) span?.setAttribute("user.id", userId);
+				if (organizationId) span?.setAttribute("lobu.org_id", organizationId);
+				const ray = cloudflareRayId(c.req.header("cf-ray"));
+				if (ray) span?.setAttribute("cf_ray", ray);
+				// onError already recorded a thrown error on this span. A route that
+				// returned a 5xx itself has no error object, so record the status.
+				if (!requestsWithRecordedError.has(c.req.raw)) {
+					if (failed) {
+						recordError(span, thrown, { scope: name });
+					} else if (c.res.status >= 500 && !(await isReadinessDrain(c))) {
+						recordError(
+							span,
+							{ name: "HttpServerError", message: `HTTP ${c.res.status}`, httpStatus: c.res.status },
+							{ scope: name },
+						);
+					}
+				}
+				span?.end();
+			}
+		});
+	});
+
+	// 4. Request logging belongs on the wrapper because `/lobu` and the main app
 	// are sibling mounts. Putting it inside only one child silently drops the
 	// other child's requests from the access log.
 	wrapper.use("*", pinoLogger({ pino: logger }));
 
-	// 4. Server-error capture. Two layers cover both shapes of failing route:
+	// 5. Server-error capture. Two layers cover both shapes of failing route:
 	//   (a) routes that throw — handled by `app.onError` below.
 	//   (b) routes that try/catch internally and `return c.json(..., 500)` —
 	//       the framework never sees the exception, so onError doesn't fire.
@@ -214,21 +302,7 @@ export function buildWrapperApp(
 			} catch {
 				// response wasn't JSON; ignore
 			}
-			// Readiness probes intentionally 503 `{status:"draining"}` during the
-			// graceful-shutdown drain (SHUTDOWN_READINESS_DRAIN_MS) — capturing
-			// that turns every deploy rollover into an incident
-			// (LOBU-BACKEND-X). Skip ONLY that exact shape: a health 5xx with any
-			// other body (DB unreachable, crash) is a real incident and must
-			// still report.
-			if (
-				c.req.path === "/health/ready" &&
-				c.res.status === 503 &&
-				body !== null &&
-				typeof body === "object" &&
-				(body as { status?: unknown }).status === "draining"
-			) {
-				return;
-			}
+			if (await isReadinessDrain(c)) return;
 			const message =
 				(body &&
 				typeof body === "object" &&
@@ -243,9 +317,13 @@ export function buildWrapperApp(
 		}
 	});
 
-	// 4. Catch-all error handler for thrown exceptions that bubble past route
+	// 6. Catch-all error handler for thrown exceptions that bubble past route
 	// catches. Preserves the original stack trace.
 	wrapper.onError((err, c) => {
+		// The HTTP span is still active here; give it the thrown error before
+		// the 500 response replaces it.
+		recordError(getCurrentSpan(), err, { scope: httpSpanName(c) });
+		requestsWithRecordedError.add(c.req.raw);
 		if (!isErrorReported(c)) {
 			logger.error({ err, source: "app_onError", http_method: c.req.method,
 				res_status: 500, path: c.req.path }, "Unhandled error in HTTP handler");
@@ -460,6 +538,9 @@ export function createServerLifecycle(
 			for (let i = 0; i < extraTeardown.length; i++) {
 				await safe(`extraTeardown[${i}]`, extraTeardown[i]);
 			}
+			// Telemetry may still be waiting on an unavailable collector. Give it
+			// a bounded flush after application teardown, then let the process exit.
+			await safe("shutdownTracing", () => shutdownTracing(5_000));
 			process.exit(0);
 		};
 		// Single-flight guard: SIGTERM+SIGINT or a double-tap on either must

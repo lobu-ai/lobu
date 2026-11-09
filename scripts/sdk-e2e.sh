@@ -40,13 +40,16 @@ CHAT_OUT="$RUN_DIR/chat.out"
 # its fresh database with real device registrations and default Automations.
 export HOME="$RUN_DIR/home"
 
-# The sandbox supports Node 22-24 via isolated-vm@6 and Node 26+ via the
-# isolated-vm-next alias. Node 25 is the only supported-age gap. Prefer a
-# Homebrew node@22 locally only when the current Node is actually unsupported;
-# otherwise keep the installed runtime and its matching native optional dep.
+# The sandbox has one isolated-vm build and requires Node 26.x. Prefer a
+# Homebrew node@26 locally only when the current Node is unsupported.
 NODE_MAJOR="$(node -p 'Number(process.versions.node.split(".")[0])' 2>/dev/null || echo 0)"
-if [ -x /opt/homebrew/opt/node@22/bin/node ] && { [ "$NODE_MAJOR" -lt 22 ] || [ "$NODE_MAJOR" -eq 25 ]; }; then
-  export PATH="/opt/homebrew/opt/node@22/bin:$PATH"
+if [ -x /opt/homebrew/opt/node@26/bin/node ] && [ "$NODE_MAJOR" -ne 26 ]; then
+  export PATH="/opt/homebrew/opt/node@26/bin:$PATH"
+  NODE_MAJOR=26
+fi
+if [ "$NODE_MAJOR" -ne 26 ]; then
+  echo "❌ Node 26.x is required (found $(node -v 2>/dev/null || echo missing))." >&2
+  exit 1
 fi
 
 MOCK_PID=""
@@ -112,18 +115,21 @@ const digestSkill = defineSkill({ name: "digest", content: "summarize" });
 const agent = defineAgent({
   id: "echo", name: "Echo", dir: "./agents/echo",
   skills: [digestSkill],
+  settings: { verboseLogging: false, showToolCalls: false, guardrailsInline: [], nixConfig: { packages: [] } },
   providers: [{ id: "mock", model: "mock-model", key: secret("MOCK_API_KEY") }],
 });
 // The skill body carries a token the turn has to READ off the seeded file to
 // report, so a pass proves the file reached the isolate's filesystem rather
 // than that the prompt merely mentioned a skill.
-const isolateSkill = defineSkill({
-  name: "isolate-smoke-skill",
-  content: "# Isolate smoke skill\n\nThe skill token is SKILL-SEED-OK.\n",
-});
 const isolateAgent = defineAgent({
   id: "isolate-smoke", name: "Isolate smoke", dir: "./agents/isolate-smoke",
-  skills: [isolateSkill],
+  settings: {
+    skillsConfig: { skills: [{
+      repo: "inline/isolate-smoke-skill", name: "isolate-smoke-skill", enabled: true,
+      content: "# Isolate smoke skill\n\nThe skill token is SKILL-SEED-OK.\n",
+      thinkingLevel: "low", system: false,
+    }] },
+  },
   providers: [{ id: "mock", model: "mock-model", key: secret("MOCK_API_KEY") }],
 });
 // `company` exercises the declarative rendering config: event_kinds (with a
@@ -176,6 +182,7 @@ const digest = defineAutomation({
 // one installed-project flow.
 const publisher = defineAutomation({
   slug: "publisher", agent, name: "Publisher", prompt: "Publish companies and observation events.",
+  executionConfig: { timeout_seconds: 120, finalize_nudges: 0, max_budget_usd: 1 },
   outputs: {
     companies: { entity: company, key: ["name"], name: ["name"] },
     observations: { event: "observation" },
@@ -385,6 +392,22 @@ api() {
 # Extract a JSON field from stdin with node (no jq dependency).
 jget() { node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{let v;try{v=JSON.parse(s)}catch{process.exit(2)};for(const k of process.argv[1].split("."))v=v?.[k];process.stdout.write(v==null?"":String(v))})' "$1"; }
 
+# Exercise the MCP transport itself as well as the REST-backed action proxy.
+MCP_AGENT="$RUN_DIR/mcp-agent.json"
+( cd "$PROJ" && LOBU_API_TOKEN="$TOKEN" LOBU_MEMORY_URL="$GW/mcp/$ORG" \
+    $LOBU call manage_agents --arg action=get --arg agent_id=echo --raw > "$MCP_AGENT" 2> "$RUN_DIR/mcp-agent.err" ) \
+  || { cat "$RUN_DIR/mcp-agent.err" >&2; fail "MCP agents.get failed"; }
+node - "$MCP_AGENT" <<'JS' || fail "MCP response omitted typed settings or revision"
+const assert = require('node:assert/strict'), fs = require('node:fs');
+const result = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+assert.notEqual(result.isError, true);
+const agent = result.structuredContent ?? JSON.parse(result.content.find(c => c.type === 'text').text);
+assert.equal(agent.action, 'get');
+assert.match(agent.revision, /^[a-f0-9]{64}$/);
+assert.equal(agent.settings.showToolCalls, false);
+JS
+echo "✓ MCP agents.get exposes canonical settings and revision"
+
 # 4b) Client SDK consumption — drive @lobu/client (the CONSUMPTION SDK) against
 #     the live gateway: create a session, send a message, stream the reply back.
 #     This is the path an external JS app takes; the rest of the gate chats via
@@ -414,7 +437,7 @@ DEVTOKEN="$(curl -fsS -X POST "$GW/api/local-init" -H 'X-Lobu-Client: cli' | jge
   || fail "public API conversation did not complete through the isolate"
 
 CLIENT_OUT="$RUN_DIR/client-consumer.out"
-( cd "$CLIENT_DIR" && LOBU_BASE_URL="$GW/lobu" LOBU_TOKEN="$DEVTOKEN" LOBU_AGENT_ID="echo" \
+( cd "$CLIENT_DIR" && LOBU_BASE_URL="$GW/lobu" LOBU_TOKEN="$DEVTOKEN" LOBU_AGENT_ID="echo" LOBU_ADMIN_TOKEN="$TOKEN" LOBU_ORG="$ORG" \
     timeout 90 node consumer.mjs > "$CLIENT_OUT" 2>&1 ) \
   || { cat "$CLIENT_OUT" >&2; fail "@lobu/client consumer exited non-zero"; }
 grep -qF "$MOCK_REPLY" "$CLIENT_OUT" \
@@ -468,7 +491,7 @@ done
 # Assert the connector emitted ≥1 event (items_collected on the run AND the
 # feed-level event_count from list_feeds).
 [ "${RUN_ITEMS:-0}" -ge 1 ] 2>/dev/null || fail "sync run completed but collected 0 items"
-api manage_feeds '{"action":"list_feeds"}' > "$FEEDS" || fail "manage_feeds list_feeds (post-sync) failed"
+api manage_feeds '{"action":"list_feeds","include_event_count":true}' > "$FEEDS" || fail "manage_feeds list_feeds (post-sync) failed"
 EVENT_COUNT="$(node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const j=JSON.parse(s);const f=(j.feeds||[]).find(x=>x.feed_key==="pulse");process.stdout.write(f?String(f.event_count??0):"0")})' < "$FEEDS")"
 [ "${EVENT_COUNT:-0}" -ge 1 ] 2>/dev/null || fail "connector sync persisted 0 events (event_count=$EVENT_COUNT)"
 echo "✓ connector sync ran the compiled connector and emitted events (items=$RUN_ITEMS, event_count=$EVENT_COUNT)"
@@ -579,6 +602,14 @@ grep -q '"companies"' "$PUB" && grep -q '"observations"' "$PUB" \
   || { cat "$PUB" >&2; fail "publisher API response omitted its named outputs"; }
 grep -q 'keying_config' "$PUB" && { cat "$PUB" >&2; fail "retired keying_config leaked through the public Automation API"; }
 
+node - "$PUB" <<'JS' || fail "publisher execution settings did not survive apply"
+const assert = require('node:assert/strict');
+const response = JSON.parse(require('node:fs').readFileSync(process.argv[2], 'utf8'));
+const publisher = response.automations.find(a => a.slug === 'publisher');
+assert.deepEqual(publisher.execution_config, { timeout_seconds: 120, finalize_nudges: 0, max_budget_usd: 1 });
+JS
+echo "✓ canonical Automation execution settings persisted through apply"
+
 PUB_TRIGGER="$RUN_DIR/publisher-trigger.json"
 api manage_automations "{\"action\":\"trigger\",\"automation_id\":\"$PUBLISHER_ID\"}" > "$PUB_TRIGGER" 2>/dev/null \
   || { cat "$PUB_TRIGGER" >&2; fail "publisher trigger failed"; }
@@ -627,5 +658,42 @@ echo "✓ re-apply is idempotent (no deletes on a stable config)"
 grep -qE "entity-type company" "$REAPPLY" && grep -qiE "eventKinds" "$REAPPLY" \
   && fail "re-apply reported a company eventKinds change on a stable config (diff churn)"
 echo "✓ re-apply did not churn entity-type event_kinds"
+
+# The unchanged config must not mint a new Automation revision. Read the real
+# stored version/config before exercising omitted and explicit-clear options.
+PUB_AFTER="$RUN_DIR/publisher-after.json"
+read_publisher() {
+  api manage_automations "{\"action\":\"list\",\"automation_id\":\"$PUBLISHER_ID\",\"include_details\":true}" > "$PUB_AFTER" 2>/dev/null
+}
+read_publisher || fail "could not read publisher after reapply"
+node - "$PUB" "$PUB_AFTER" <<'JS' || fail "stable reapply changed Automation versions or execution settings"
+const assert = require('node:assert/strict'), fs = require('node:fs');
+const projection = file => JSON.parse(fs.readFileSync(file, 'utf8')).automations.map(a => ({ id: a.id, version: a.version, execution_config: a.execution_config }));
+assert.deepEqual(projection(process.argv[2]), projection(process.argv[3]));
+JS
+
+# Omitted executionConfig preserves remote options; explicit null clears them.
+node - "$PROJ/lobu.config.ts" <<'JS'
+const fs = require('node:fs'), path = process.argv[2];
+const text = fs.readFileSync(path, 'utf8');
+fs.writeFileSync(path, text.replace('executionConfig: { timeout_seconds: 120, finalize_nudges: 0, max_budget_usd: 1 },', '/* execution options unmanaged */'));
+JS
+( cd "$PROJ" && MOCK_API_KEY=mock-key-e2e $LOBU apply --url "http://localhost:$GW_PORT" --yes > "$RUN_DIR/omitted.out" 2>&1 ) || fail "apply with omitted execution options failed"
+read_publisher || fail "could not read preserved execution settings"
+node - "$PUB_AFTER" <<'JS' || fail "omitted executionConfig cleared stored options"
+const assert = require('node:assert/strict'), fs = require('node:fs');
+assert.deepEqual(JSON.parse(fs.readFileSync(process.argv[2], 'utf8')).automations[0].execution_config, { timeout_seconds: 120, finalize_nudges: 0, max_budget_usd: 1 });
+JS
+node - "$PROJ/lobu.config.ts" <<'JS'
+const fs = require('node:fs'), path = process.argv[2];
+fs.writeFileSync(path, fs.readFileSync(path, 'utf8').replace('/* execution options unmanaged */', 'executionConfig: null,'));
+JS
+( cd "$PROJ" && MOCK_API_KEY=mock-key-e2e $LOBU apply --url "http://localhost:$GW_PORT" --yes > "$RUN_DIR/cleared.out" 2>&1 ) || fail "apply with cleared execution options failed"
+read_publisher || fail "could not read cleared execution settings"
+node - "$PUB_AFTER" <<'JS' || fail "explicit null did not clear executionConfig"
+const assert = require('node:assert/strict'), fs = require('node:fs');
+assert.equal(JSON.parse(fs.readFileSync(process.argv[2], 'utf8')).automations[0].execution_config, null);
+JS
+echo "✓ stable Automation revisions, unmanaged execution options, and explicit clearing"
 
 echo "✅ SDK lifecycle e2e PASSED"

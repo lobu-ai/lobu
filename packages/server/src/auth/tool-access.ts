@@ -90,6 +90,14 @@ export const MEMBER_WRITE_ACTIONS: Record<string, Set<string> | null> = {
 };
 
 export const OWNER_ADMIN_ACTIONS: Record<string, Set<string>> = {
+	manage_inference_providers: new Set([
+		"create",
+		"update",
+		"set_default",
+		"set_capability",
+		"rotate_key",
+		"delete",
+	]),
 	// manage_catalog is READ-ONLY (both actions list — no writes exist). An empty
 	// admin set gives it an explicit policy entry so its actions fall through to
 	// READ tier; without it, `requiresOwnerAdmin`'s no-policy fallback classified
@@ -215,12 +223,16 @@ export const PUBLIC_READ_ACTIONS: Record<string, Set<string> | null> = {
 		"get_feedback",
 	]),
 	manage_classifiers: new Set(["list"]),
-	// manage_views is deliberately absent: views carry owner-authored
-	// executable source, so reads stay signed-in-only in phase 1 (the public
-	// anonymous bridge arrives in phase 2 with its own design).
-	// `list`/`get` are org-read-gated in the handler (requireOrgReadAccess);
-	// their METHOD_METADATA tier is `read` so query_sdk read mode surfaces them.
+	// A public workspace publishes its views too: the Data hub's tabs and the
+	// rendered view are part of what a visitor came to see, and gating them
+	// behind membership made a shared demo link render an empty pane.
+	//
+	// Only the METADATA is public here. `get` returns `source_code` and the
+	// retained source files, so it stays member-only; a public reader reaches a
+	// view's compiled bundle through the tiles-and-bundle projection at
+	// `GET /api/:orgSlug/public/views/:key/shell`, never through its source.
 	// The mutating siblings stay owner-admin (OWNER_ADMIN_ACTIONS).
+	manage_views: new Set(["list"]),
 	manage_agents: new Set(["list", "get"]),
 };
 
@@ -398,6 +410,19 @@ export function resolveSdkMaxAccessLevel(
 
 export function isPublicReadable(toolName: string, args: unknown): boolean {
 	return actionMatches(PUBLIC_READ_ACTIONS, toolName, args);
+}
+
+/**
+ * A deliberate public denial gets a policy message, not the generic
+ * "sign in with an OAuth client that has write access" text. Raw SQL and
+ * arbitrary SDK scripts are member tools even when the workspace is public;
+ * public views must use the entity/knowledge reads instead.
+ */
+export function publicToolDenial(toolName: string): string | null {
+	if (toolName === "query_sql" || toolName === "query_sdk") {
+		return "SQL and SDK queries are not available to public workspace visitors. Sign in and join this workspace, or use its public pages.";
+	}
+	return null;
 }
 
 export function getPublicReadableActions(

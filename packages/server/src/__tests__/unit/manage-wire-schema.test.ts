@@ -12,6 +12,7 @@
  * `src/__tests__/unit/`, also imports the registry directly).
  */
 import { describe, expect, it } from "bun:test";
+import Ajv from "ajv";
 import { getAllTools } from "../../tools/registry";
 import { SdkScriptResultSchema } from "../../tools/sdk_run";
 import { validateToolResult } from "../../tools/validate-args";
@@ -42,6 +43,14 @@ function actionsOf(schema: any): string[] | null {
 const MANAGE_TOOLS = TOOLS.filter((t) => t.name.startsWith("manage_"));
 
 describe("manage_* wire schema: action discoverability", () => {
+  it("advertises immutable numeric type selectors on the actual MCP wire schema", () => {
+    const validate = new Ajv({ strict: false, validateFormats: false }).compile(byName.get("manage_entity")!.inputSchema);
+    expect(validate({ action: "get", entity_id: "007", entity_type: 101 })).toBe(true);
+    expect(validate({ action: "list_links", entity_id: "007", entity_type: 101 })).toBe(true);
+    expect(validate({ action: "link", from_entity_id: 10, to_entity_id: "007", to_entity_type: 101, relationship_type_slug: "related" })).toBe(true);
+    expect(validate({ action: "get", entity_id: "007", entity_type: "catalog" })).toBe(true);
+  });
+
 	it("every manage_* tool exposes a flat object input schema (no top-level anyOf/oneOf)", () => {
 		for (const tool of MANAGE_TOOLS) {
 			const schema = tool.inputSchema as any;

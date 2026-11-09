@@ -83,8 +83,8 @@ describe("review output schema stays loadable by both reviewer CLIs", () => {
   it("flags a required name with no matching property", () => {
     expect(
       danglingRequired({
-        required: ["bugs", "typo_field"],
-        properties: { bugs: { type: "number" } },
+        required: ["decision", "typo_field"],
+        properties: { decision: { type: "string" } },
       })
     ).toEqual(["typo_field"]);
   });
@@ -92,26 +92,5 @@ describe("review output schema stays loadable by both reviewer CLIs", () => {
   it("keeps the closed-object shape codex's structured output needs", () => {
     expect(schema.type).toBe("object");
     expect(schema.additionalProperties).toBe(false);
-  });
-
-  it("still carries the fields review.sh reads out of the verdict", () => {
-    // review.sh pipes the verdict through `jq -r .<field>` and validates each
-    // one before posting the status; a field dropped here fails the gate for
-    // every PR, not just the one that dropped it.
-    for (const field of [
-      "bug_free_confidence",
-      "bugs",
-      "slop",
-      "simplicity",
-      "blockers",
-      "change_type",
-      "runtime_change_risk",
-      "tests_adequate",
-      "suggested_fixes",
-      "notes",
-      "categories",
-    ]) {
-      expect(schema.required).toContain(field);
-    }
   });
 });

@@ -1,9 +1,11 @@
 #!/usr/bin/env bun
 
 import { createLogger, type MessagePayload } from "@lobu/core";
-import type { IMessageQueue } from "./types.js";
+import type { IMessageQueue, QueueOptions } from "./types.js";
 
 const logger = createLogger("queue-producer");
+
+type MessageQueueOptions = Pick<QueueOptions, "priority" | "retryLimit" | "retryDelay" | "expireInSeconds" | "initiator">;
 
 /**
  * The `messages` job options for `payload`: one admission per message within
@@ -12,16 +14,12 @@ const logger = createLogger("queue-producer");
  */
 export function messagesJobOptions(
   payload: MessagePayload,
-  options?: {
-    priority?: number;
-    retryLimit?: number;
-    retryDelay?: number;
-    expireInSeconds?: number;
-  }
+  options?: MessageQueueOptions
 ) {
   // Preserve the existing key normalization so retries collide with ordinary admissions.
   const rawSingletonKey = `message-${payload.platform}-${payload.channelId}-${payload.conversationId}-${payload.messageId || Date.now()}`;
   return {
+    initiator: options?.initiator,
     priority: options?.priority || 0,
     retryLimit: options?.retryLimit || 3,
     retryDelay: options?.retryDelay || 30,
@@ -72,12 +70,7 @@ export class QueueProducer {
    */
   async enqueueMessage(
     payload: MessagePayload,
-    options?: {
-      priority?: number;
-      retryLimit?: number;
-      retryDelay?: number;
-      expireInSeconds?: number;
-    }
+    options?: MessageQueueOptions
   ): Promise<string> {
     if (!this.isInitialized) {
       throw new Error("Queue producer is not initialized");

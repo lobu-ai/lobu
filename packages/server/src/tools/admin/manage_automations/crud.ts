@@ -3,7 +3,13 @@
  *   create, update, delete, create_from_version
  */
 
+import { assertAutomationModuleConfiguration } from '../../../automations/preparation';
 import { getDb, parsePgTextArray } from '../../../db/client';
+import {
+  assertAutomationConfigVersion,
+  assertAutomationConfigVersionsUnchanged,
+  automationAuditSnapshot,
+} from './config-state';
 import type { Env } from '../../../index';
 import { ToolUserError } from '../../../utils/errors';
 import { isUniqueViolation } from '../../../utils/pg-errors';
@@ -55,7 +61,7 @@ import { DEFAULT_AUTOMATION_SOURCE_QUERY, automationSourcesFromPrompt, mergeProm
 import {
   compileReactionScript,
   extractReactionInputSchema,
-  validateReactionDefaultExport,
+  inspectAutomationScriptExports,
 } from '../../../automations/reaction-executor';
 import {
   assertAutomationInstructions,
@@ -108,30 +114,6 @@ function stableJson(value: unknown): string {
   return JSON.stringify(canonicalizeJson(value ?? null));
 }
 
-function automationAuditSnapshot(row: Record<string, unknown> | null): Record<string, unknown> | null {
-  if (!row) return null;
-  const pick = (k: string) => (k in row ? row[k] : null);
-  return {
-    id: pick('id'),
-    agent_kind: pick('agent_kind'),
-    device_worker_id: pick('device_worker_id'),
-    managed_agent_id: pick('managed_agent_id'),
-    execution_config: pick('execution_config'),
-    model_config: pick('model_config'),
-    delivery_target: pick('delivery_target'),
-    triggers: pick('triggers'),
-    schedule: pick('schedule'),
-    timezone: pick('timezone'),
-    tags: pick('tags'),
-    min_cooldown_seconds: pick('min_cooldown_seconds'),
-    status: pick('status'),
-    reaction_script: pick('reaction_script'),
-    consecutive_scheduled_failures: pick('consecutive_scheduled_failures'),
-    schedule_auto_paused_at: pick('schedule_auto_paused_at'),
-    next_run_at: pick('next_run_at'),
-  };
-}
-
 // ============================================
 // handleCreate
 // ============================================
@@ -160,12 +142,6 @@ export async function handleCreate(
     throw new ToolUserError('slug is required for create action');
   }
   assertValidExecutionConfig(args.execution_config, ctx);
-  await assertServerLaneModelResolves({
-    executionConfig: args.execution_config,
-    organizationId: ctx.organizationId,
-    isDevicePinned: args.device_worker_id != null,
-    applyId: ctx.applyId,
-  });
 
   // entity_id is optional: omit it for an org-scoped/global automation.
   const entityId = args.entity_id;
@@ -252,15 +228,20 @@ export async function handleCreate(
   // Both of these are free-text columns with NO database foreign key, so an
   // unresolvable id is accepted by the INSERT and only shows up as an Automation
   // that never runs (managed_agent_id) or one whose output contract is silently voided
-  // (outputs' entity/event targets). The executor matrix catches unresolvable
-  // executors up front — every automated Automation needs an executor;
-  // manual-only Automations (no triggers) may be executor-less.
+  // (outputs' entity/event targets). Validate referenced identities and targets
+  // up front; unassigned analysis belongs to external clients.
   const executorDefaults: AutomationExecutorDefaults = {
     agentId: args.managed_agent_id ?? null,
     deviceWorkerId: args.device_worker_id ?? null,
     agentKind: args.agent_kind ?? null,
     executionConfig: args.execution_config,
   };
+  if (resolveAutomationExecutor(executorDefaults).kind === 'agent') {
+    await assertServerLaneModelResolves({
+      executionConfig: args.execution_config, organizationId: ctx.organizationId,
+      isDevicePinned: false, applyId: ctx.applyId,
+    });
+  }
   // Resolve entity output targets BEFORE the row is written.
   await assertOutputEntityTypesExist(sql, organizationId, outputs);
   await assertOutputEventTypesExist(
@@ -279,8 +260,7 @@ export async function handleCreate(
   });
   assertAutomationOutputsUseWindowExecution(triggerWrite.triggers, outputs);
   await assertAutomationTriggerConnections(sql, organizationId, triggerWrite.triggers);
-  // Executor matrix (after triggers resolve): every automated Automation needs
-  // an executor; manual-only Automations (no triggers) may be executor-less.
+  // Check trigger compatibility independently of assignment authorization.
   assertAutomationExecutorsResolve(
     triggerWrite.triggers as AutomationTriggerInput[],
     executorDefaults
@@ -315,14 +295,12 @@ export async function handleCreate(
     automationScriptExecutor(args.execution_config)?.source
   );
   assertPromptSkillTokensPinned(args.prompt, skills);
-  // v1 constraint: skill bodies resolve against ONE agent library at save
-  // time — the Automation-level default executor when it is an agent.
-  // Per-trigger responders reuse these frozen bodies at dispatch.
+  // Skill snapshots belong to the agent's library regardless of placement.
   const defaultExecutor = resolveAutomationExecutor(executorDefaults);
   if (skills.length > 0) {
-    if (!defaultExecutor || defaultExecutor.kind !== 'agent') {
+    if (!defaultExecutor.agentId) {
       throw new ToolUserError(
-        'skills require an Automation-level agent executor: skills compile against the default agent’s library. Set managed_agent_id, or remove skills for device-executed / manual-only Automations.',
+        'skills require managed_agent_id to resolve the owning agent’s library.',
         422
       );
     }
@@ -346,12 +324,13 @@ export async function handleCreate(
   const reactionScriptCompiled = reactionScript
     ? await compileReactionScript(reactionScript)
     : null;
-  if (reactionScriptCompiled) {
-    await validateReactionDefaultExport(reactionScriptCompiled);
-  }
   const reactionInputSchema = reactionScript
     ? await extractReactionInputSchema(reactionScript)
     : null;
+
+  if (reactionScriptCompiled) {
+    assertAutomationModuleConfiguration({ ...args, outputs, reaction_input_schema: reactionInputSchema }, await inspectAutomationScriptExports(reactionScriptCompiled));
+  }
 
   const createdBy = ctx.userId ?? 'system';
 
@@ -376,7 +355,7 @@ export async function handleCreate(
     managed_agent_id: args.managed_agent_id ?? null,
     agent_kind: args.agent_kind ?? null,
     device_worker_id: args.device_worker_id ?? null,
-    model_config: args.model_config ?? {},
+    model_config: {},
     execution_config: args.execution_config ?? null,
     sources,
     tags: args.tags ?? [],
@@ -418,7 +397,7 @@ export async function handleCreate(
         ${`{${entityIdsArray.join(',')}}`}::bigint[],
         ${triggerWrite.schedule}, ${triggerWrite.timezone}, ${nextRunAtVal}, ${tx.json(triggerWrite.triggers)},
         ${args.managed_agent_id ?? null},
-        ${sql.json(args.model_config || {})}, ${sql.json(sources)},
+        ${sql.json({})}, ${sql.json(sources)},
         1, NULL, ${toTextArrayParam(args.tags || [])}::text[],
         'active', ${createdBy}, NOW(), NOW(),
         ${automationId},
@@ -560,7 +539,8 @@ export async function handleCreate(
 export async function handleUpdate(
   args: ManageAutomationsArgs,
   _env: Env,
-  ctx: ToolContext
+  ctx: ToolContext,
+  base?: Record<string, string>
 ): Promise<{ action: 'update'; automation_id: string; updated_fields: string[] }> {
   const sql = getDb();
 
@@ -614,24 +594,6 @@ export async function handleUpdate(
     current_skills: Array<{ name: string; content: string }> | null;
     current_outputs: Record<string, unknown> | null;
   };
-  // Judge the model against the lane the Automation will be on AFTER this
-  // patch, not the one it is on now: clearing a device pin in the same call
-  // moves the ref onto the server lane, where it has to resolve.
-  //
-  // Only an incoming `execution_config` is judged. Clearing the pin WITHOUT
-  // re-sending one leaves an already-stored CLI-namespace ref on the now-server
-  // lane, and it fails at dispatch rather than here. That is deliberate:
-  // re-validating the stored model would make unrelated updates start failing
-  // on legacy rows nobody is touching.
-  await assertServerLaneModelResolves({
-    executionConfig: args.execution_config,
-    organizationId: currentRow.organization_id,
-    isDevicePinned:
-      args.device_worker_id !== undefined
-        ? args.device_worker_id != null
-        : currentRow.device_worker_id != null,
-    applyId: ctx.applyId,
-  });
   const effectiveExecutionConfig =
     args.execution_config !== undefined
       ? args.execution_config
@@ -665,10 +627,7 @@ export async function handleUpdate(
     );
   }
 
-  // Executor matrix on the EFFECTIVE state (patch over the current row): an
-  // automated Automation needs an executor. Clearing managed_agent_id is fine when a
-  // device pin remains (device precedence), and manual-only Automations (no
-  // triggers) may be executor-less.
+  // Validate the effective state, including assignment clears.
   const effectiveDefaults: AutomationExecutorDefaults = {
     agentId: args.managed_agent_id !== undefined ? args.managed_agent_id : currentRow.managed_agent_id,
     deviceWorkerId:
@@ -679,6 +638,17 @@ export async function handleUpdate(
       args.agent_kind !== undefined ? args.agent_kind : currentRow.agent_kind,
     executionConfig: effectiveExecutionConfig,
   };
+  // A move onto the hosted lane must validate stored provider refs too.
+  // Unrelated edits of an already-hosted Automation leave legacy options alone.
+  if (resolveAutomationExecutor(effectiveDefaults).kind === 'agent') {
+    const wasHosted = resolveAutomationExecutor({ agentId: currentRow.managed_agent_id,
+      deviceWorkerId: currentRow.device_worker_id, executionConfig: currentRow.execution_config }).kind === 'agent';
+    await assertServerLaneModelResolves({
+      executionConfig: wasHosted ? args.execution_config : effectiveExecutionConfig,
+      organizationId: currentRow.organization_id,
+      isDevicePinned: false, applyId: ctx.applyId,
+    });
+  }
   assertAutomationExecutorsResolve(
     triggerWrite.triggers as AutomationTriggerInput[],
     effectiveDefaults
@@ -729,7 +699,6 @@ export async function handleUpdate(
   }
 
   const requestedFields: string[] = [];
-  if (args.model_config !== undefined) requestedFields.push('model_config');
   if (args.execution_config !== undefined) requestedFields.push('execution_config');
   if (args.triggers !== undefined) requestedFields.push('triggers');
   if (args.managed_agent_id !== undefined) requestedFields.push('managed_agent_id');
@@ -775,7 +744,10 @@ export async function handleUpdate(
     const lockedRows = await tx`
       SELECT id, name, status, organization_id, managed_agent_id, schedule, timezone, triggers,
              device_worker_id::text AS device_worker_id, agent_kind,
-             delivery_target, reaction_script, execution_config, model_config, tags,
+             delivery_target, reaction_script, reaction_script_compiled, reaction_input_schema, execution_config, model_config, tags,
+             (SELECT prompt FROM automation_versions WHERE id = current_version_id) AS prompt,
+             (SELECT skills FROM automation_versions WHERE id = current_version_id) AS skills,
+             (SELECT outputs FROM automation_versions WHERE id = current_version_id) AS outputs,
              min_cooldown_seconds, consecutive_scheduled_failures, schedule_auto_paused_at, next_run_at
       FROM automations
       WHERE id = ${args.automation_id} AND organization_id = ${ctx.organizationId}
@@ -785,7 +757,18 @@ export async function handleUpdate(
     if (lockedRows.length === 0) {
       throw new ToolUserError(`Automation ${args.automation_id} not found`, 404);
     }
+    if (base) await assertAutomationConfigVersionsUnchanged(args, ctx.organizationId, base, tx);
     const locked = lockedRows[0] as unknown as typeof currentRow;
+    if (lockedRows[0].reaction_script_compiled) {
+      assertAutomationModuleConfiguration({
+        ...lockedRows[0],
+        execution_config: args.execution_config !== undefined ? args.execution_config : locked.execution_config,
+        managed_agent_id: args.managed_agent_id !== undefined ? args.managed_agent_id : locked.managed_agent_id,
+        device_worker_id: args.device_worker_id !== undefined ? args.device_worker_id : locked.device_worker_id,
+        agent_kind: args.agent_kind !== undefined ? args.agent_kind : locked.agent_kind,
+        triggers: args.triggers !== undefined ? triggerWrite.triggers : locked.triggers,
+      }, await inspectAutomationScriptExports(lockedRows[0].reaction_script_compiled));
+    }
     const lockedTriggersValueEqual =
       args.triggers === undefined ||
       automationTriggersEqual(locked.triggers ?? [], triggerWrite.triggers);
@@ -802,11 +785,7 @@ export async function handleUpdate(
         : null;
 
     // No-op by value (#3664): arg presence alone must not emit a config event.
-    // Null model_config compares as {} on both sides (normalize coerces
-    // null→{} on write, legacy rows may store null) so null-vs-{} is not a
-    // false change.
     const valueChangedFields: string[] = [];
-    if (has('model_config') && stableJson(patch.model_config ?? {}) !== stableJson((locked as unknown as Record<string, unknown>).model_config ?? {})) valueChangedFields.push('model_config');
     if (has('execution_config') && stableJson(patch.execution_config ?? null) !== stableJson(locked.execution_config ?? null)) valueChangedFields.push('execution_config');
     if (has('triggers') && !lockedTriggersValueEqual) valueChangedFields.push('triggers');
     if (has('managed_agent_id') && (patch.managed_agent_id ?? null) !== (locked.managed_agent_id ?? null)) valueChangedFields.push('managed_agent_id');
@@ -838,7 +817,6 @@ export async function handleUpdate(
     const updatedRows = await tx`
     UPDATE automations SET
       updated_at = NOW(),
-      model_config = CASE WHEN ${has('model_config')} THEN ${toJsonParam(tx, patch.model_config)} ELSE model_config END,
       execution_config = CASE WHEN ${has('execution_config')} THEN ${toJsonParam(tx, patch.execution_config)} ELSE execution_config END,
       schedule = CASE WHEN ${lockedTouchesCadence} THEN ${triggerWrite.schedule ?? null} ELSE schedule END,
       timezone = CASE WHEN ${lockedTouchesCadence} THEN ${triggerWrite.timezone ?? null} ELSE timezone END,
@@ -916,7 +894,8 @@ export async function handleUpdate(
 
 export async function handleDelete(
   args: ManageAutomationsArgs,
-  ctx: ToolContext
+  ctx: ToolContext,
+  base?: Record<string, string>
 ): Promise<{
   action: 'delete';
   results: AutomationOperationResult[];
@@ -945,7 +924,7 @@ export async function handleDelete(
                device_worker_id::text AS device_worker_id, execution_config, model_config,
                delivery_target, triggers, schedule, timezone, tags, min_cooldown_seconds,
                consecutive_scheduled_failures, schedule_auto_paused_at, next_run_at,
-               reaction_script, entity_ids
+               reaction_script, entity_ids, slug, description, current_version_id, automation_group_id
         FROM automations
         WHERE id = ${automationId} AND organization_id = ${ctx.organizationId}
         LIMIT 1
@@ -953,6 +932,7 @@ export async function handleDelete(
       `;
         const beforeRow = (beforeRows[0] ?? null) as Record<string, unknown> | null;
         if (!beforeRow || beforeRow.status === 'archived') return;
+        if (base) assertAutomationConfigVersion(beforeRow, base);
         const beforeSnapshot = automationAuditSnapshot(beforeRow);
         const updated = await tx`
         UPDATE automations
@@ -1093,10 +1073,8 @@ export async function handleCreateFromVersion(
   // The clone strips chat-link steer/reply triggers (a second agent turn for
   // the same message), so the matrix runs on the STRIPPED shape — an agentless
   // source whose only automated triggers were chat-link responders must be
-  // allowed to clone as manual-only, and a source that strips down to nothing
-  // must not land executor-less automated rows. Every automated clone needs an
-  // executor; manual-only clones may be executor-less (same invariant as
-  // handleCreate/handleUpdate).
+  // allowed to clone without triggers. Validate the remaining triggers and
+  // assignments with the same rules as create/update.
   const cloneTriggers = stripChatLinkTriggers(version.triggers) as AutomationTrigger[];
   const cloneDefaults: AutomationExecutorDefaults = {
     agentId: (version.managed_agent_id as string | null) ?? null,
@@ -1218,6 +1196,13 @@ export async function handleCreateFromVersion(
           (Array.isArray(cloneTriggers) ? cloneTriggers : []) as AutomationTrigger[],
           clonedOutputs
         );
+        if ((version.execution_config as { executor?: unknown } | null)?.executor) {
+          throw new ToolUserError('Migrate the legacy executor before creating another Automation from this version.', 422);
+        }
+        if (version.reaction_script_compiled) assertAutomationModuleConfiguration({
+          ...version, prompt: version.prompt as string | null, skills: version.skills as unknown[] | null,
+          outputs: clonedOutputs, triggers: cloneTriggers as AutomationTrigger[],
+        }, await inspectAutomationScriptExports(String(version.reaction_script_compiled)));
         await assertAutomationScriptExecutor({ executionConfig: version.execution_config, ...cloneDefaults,
           triggers: cloneTriggers as AutomationTrigger[], skills: version.skills as unknown[] | null,
           outputs: clonedOutputs, validateSource: false });

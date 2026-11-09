@@ -1,5 +1,11 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
+import { initTracing, shutdownTracing, SpanStatusCode } from "@lobu/core";
+import {
+  InMemorySpanExporter,
+  SimpleSpanProcessor,
+} from "@opentelemetry/sdk-trace-node";
 import { executeTool, type AuthContext } from "../../tools/execute";
+import { getTool } from "../../tools/registry";
 import { ToolUserError } from "../../utils/errors";
 
 const baseAuth: AuthContext = {
@@ -81,5 +87,91 @@ describe("executeTool input-schema validation", () => {
     if (caught instanceof ToolUserError) {
       expect(caught.message).not.toMatch(/Invalid arguments/);
     }
+  });
+});
+
+describe("executeTool error spans", () => {
+  it("records a rejected call as one grouped user error per defect", async () => {
+    const exporter = new InMemorySpanExporter();
+    await shutdownTracing();
+    initTracing({
+      serviceName: "tool-span-test",
+      spanProcessors: [new SimpleSpanProcessor(exporter)],
+    });
+    try {
+      for (const args of [{}, { code: "export default async () => 1" }]) {
+        await executeTool("query_sdk", args, {} as never, baseAuth).catch(
+          () => undefined,
+        );
+      }
+      const spans = exporter
+        .getFinishedSpans()
+        .filter((span) => span.name === "tool query_sdk");
+      expect(spans).toHaveLength(2);
+      for (const span of spans) {
+        expect(span.status.code).toBe(SpanStatusCode.ERROR);
+        expect(span.attributes).toMatchObject({
+          "exception.type": "ToolUserError",
+          "error.kind": "user",
+        });
+      }
+      expect(spans[0].attributes["error.fingerprint"]).toBe(
+        spans[1].attributes["error.fingerprint"],
+      );
+      expect(JSON.stringify(spans.map((span) => span.attributes))).not.toContain(
+        "export default",
+      );
+    } finally {
+      await shutdownTracing();
+    }
+  });
+
+  it("groups a failed call's log line with its span, not as one generic issue", async () => {
+    const exporter = new InMemorySpanExporter();
+    const lines: string[] = [];
+    const originalWrite = process.stdout.write.bind(process.stdout);
+    await shutdownTracing();
+    initTracing({
+      serviceName: "tool-span-test",
+      spanProcessors: [new SimpleSpanProcessor(exporter)],
+    });
+    process.stdout.write = ((chunk: string | Uint8Array) => {
+      lines.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString());
+      return true;
+    }) as typeof process.stdout.write;
+    // Inject a server-side failure past validation; logging and tracing stay real.
+    const tool = getTool("query_sdk");
+    if (!tool) throw new Error("query_sdk is not registered");
+    const handler = spyOn(tool, "handler").mockImplementation(() => {
+      throw new Error("database unavailable");
+    });
+    try {
+      await executeTool(
+        "query_sdk",
+        { script: "export default async () => 1" },
+        {} as never,
+        baseAuth,
+      ).catch(() => undefined);
+    } finally {
+      process.stdout.write = originalWrite;
+      handler.mockRestore();
+    }
+    // Read before shutdown, which clears the in-memory exporter.
+    const [span] = exporter
+      .getFinishedSpans()
+      .filter((s) => s.name === "tool query_sdk");
+    await shutdownTracing();
+    const failure = lines
+      .flatMap((line) => line.split("\n"))
+      .filter((line) => line.includes("Tool call failed"))
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(span?.status.code).toBe(SpanStatusCode.ERROR);
+    expect(failure).toHaveLength(1);
+    expect(failure[0]).toMatchObject({
+      error_fingerprint: span?.attributes["error.fingerprint"],
+      error_type: span?.attributes["exception.type"],
+      error_kind: span?.attributes["error.kind"],
+    });
+    expect(failure[0]).not.toHaveProperty("error_message");
   });
 });

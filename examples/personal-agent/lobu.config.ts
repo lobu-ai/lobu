@@ -10,7 +10,6 @@ import {
   defineSkill,
   every,
   reactionFromFile,
-  scriptFromFile,
 } from "@lobu/cli/config";
 import { duplicateCandidateQuery } from "./duplicate-report.reaction.ts";
 import type DuplicateReportReaction from "./duplicate-report.reaction.ts";
@@ -47,7 +46,7 @@ const taskCollaboratorSkill = defineSkill({
 const duplicateEntityResolutionRealV3FinalSkill = defineSkill({
   name: "duplicate-entity-resolution-real-v3-final",
   content:
-    "Review the supplied sources.people context for this reporting-only Automation. State whether that context is complete; the reaction independently reads all candidate pages. Explain likely duplicate groups in analysis_summary and put uncertain groups in uncertain_groups with why. Names, aliases, handles, email and phone strings are candidate evidence, not proof of shared ownership. Do not call entity tools, merge contacts, or emit backlog tasks. The deterministic reaction re-reads all current candidates, saves the evidence, and sends one notification per distinct report.\n",
+    "Review the supplied sources.people context for this identity-resolution Automation. State whether that context is complete; the reaction independently reads all candidate pages. Explain likely duplicate groups in analysis_summary and put uncertain groups in uncertain_groups with why. Names, aliases, handles, email and phone strings are candidate evidence, not proof of shared ownership. Do not call entity tools, merge contacts, or emit backlog tasks. The deterministic reaction re-reads all current candidates, saves the evidence, and sends one notification per distinct report. It separately discovers matches using the configured resolution rules and applies permitted identity links or queues required human approvals, with at most 20 successful submissions per reaction and at most 20 open reviews; names alone never create identity links.\n",
 });
 
 const personalAgent = defineAgent({
@@ -382,9 +381,9 @@ const midasNetWorth = defineAutomation({
   // Keep the existing slug: it is the Automation's durable identity. Renaming it
   // would delete/recreate the Automation and discard its cooldown/history.
   slug: "midas-net-worth",
-  name: "Weekly net worth",
+  name: "Weekly finances",
   description:
-    "Consolidates connector positions and current balance-sheet observations into one immutable weekly GBP snapshot with exact change attribution.",
+    "Calculates one immutable weekly GBP balance sheet before the agent reviews portfolio changes, coverage and questions, then sends one private briefing.",
   triggers: [
     every("0 9 * * 1", {
       timezone: "Europe/London",
@@ -399,8 +398,16 @@ const midasNetWorth = defineAutomation({
   sources: {
     valuation_clock: context("SELECT CURRENT_TIMESTAMP AS observed_at"),
   },
-  executor: scriptFromFile<typeof NetWorthScript>("./net-worth.reaction.ts"),
-  reaction: null,
+  // Replace a previously installed script executor when adopting this config.
+  executionConfig: {},
+  reaction: reactionFromFile<typeof NetWorthScript>("./net-worth.reaction.ts"),
+  prompt:
+    "Review this run's saved net_worth source for a single weekly finances briefing. " +
+    "Preparation already calculated and persisted the authoritative balance sheet; do not rerun calculations or change its totals. " +
+    "Use knowledge.read with content_ids:[snapshot_event_id] from that source when the stored position book is needed. " +
+    "Explain weekly portfolio changes, attribution, missing or stale coverage, and questions supported by the saved evidence. " +
+    "Record the concise review in weekly_review; the completion reaction sends the existing private briefing. " +
+    "Do not open or refresh broker accounts, trade, transfer money, change connections or send a separate notification.",
 });
 
 const taskCollaborator = defineAutomation({
@@ -448,9 +455,9 @@ const duplicateEntityResolution = defineAutomation({
   ],
   sources: { people: context(duplicateCandidateQuery) },
   prompt:
-    "Review the supplied sources.people context for this reporting-only Automation. State whether that context is complete; the reaction independently reads all candidate pages. Follow the pinned skill.",
+    "Review the supplied sources.people context for this identity-resolution Automation. State whether that context is complete; the reaction independently reads all candidate pages. Follow the pinned skill.",
   reactionsGuidance:
-    "Explain uncertainty; never merge contacts or submit candidates for merging. The reaction only saves a report and notification.",
+    "Explain uncertainty. Preserve every contact and its evidence. The reaction saves the broad candidate report, then uses configured resolution rules and write policies to apply permitted reversible identity links or queue required human approvals, with at most 20 successful submissions per reaction, at most 20 open reviews, and bounded discovery work. It skips rejected, refused, and already-pending pairs; no name-only identity links.",
   reaction: reactionFromFile<typeof DuplicateReportReaction>(
     "./duplicate-report.reaction.ts"
   ),
@@ -473,10 +480,10 @@ const sahibindenAlerts = defineAutomation({
   sources: {
     run_clock: context("SELECT CURRENT_TIMESTAMP AS observed_at"),
   },
-  executor: scriptFromFile<typeof SahibindenAlertsScript>(
+  executionConfig: null,
+  reaction: reactionFromFile<typeof SahibindenAlertsScript>(
     "./sahibinden-alerts.script.ts"
   ),
-  reaction: null,
 });
 
 // The review requests image attachments through fetch_photos.

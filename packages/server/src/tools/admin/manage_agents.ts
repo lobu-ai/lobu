@@ -18,6 +18,8 @@
  * tier is separate). create/update/delete still go through the write-gate.
  */
 
+import { isDeepStrictEqual } from 'node:util';
+import type { AgentSettings } from '@lobu/core';
 import {
   collectLobuFields,
   type LobuField,
@@ -28,6 +30,7 @@ import {
   GetAgentAction,
   ListAgentsAction,
   ManageAgentsSchema,
+  ManageAgentsResultSchema,
   UpdateAgentAction,
   type AgentModelInfo,
   type AgentRecord,
@@ -40,7 +43,6 @@ import {
   resolveWritePolicyDecision,
   type ActingPrincipal,
 } from '../../authz/entity-policy';
-import { resolveNewAgentProvisioningDefaults } from '../../auth/system-provider-resolution';
 
 import { createDbClientFromEnv, getDb, type DbClient } from '../../db/client';
 import type { Env } from '../../index';
@@ -49,13 +51,27 @@ import {
   currentMcpActivityEventMetadata,
 } from '../../lobu/stores/mcp-client-conversations';
 import {
-  persistDefaultModel,
   readAgentModels,
   resolveAgentModelInfo,
   validateModelRefsAgainstOrg,
 } from '../../lobu/model-config';
 import { getLobuCoreServices } from '../../lobu/gateway';
-import { isValidAgentId } from '../../lobu/stores/postgres-stores';
+import {
+  createPostgresAgentConfigStore,
+  isValidAgentId,
+} from '../../lobu/stores/postgres-stores';
+import { orgContext } from '../../lobu/stores/org-context';
+import {
+  deleteAgentConfig,
+  insertAgentConfig,
+  persistAgentMetadataPatch,
+  persistAgentSettingsPatch,
+  validateAgentSettingsUpdate,
+  agentConfigRevision,
+  validateAgentConfigRevision,
+} from '../../lobu/agent-settings';
+import { deriveToolActorSource } from '../../utils/apply-context';
+import { lockOrganizationForRelationshipClaims } from '../../utils/relationship-claims';
 import { resolveActionOrigin } from '../../notifications/action-origin';
 import { notifyActionApprovalNeeded } from '../../notifications/triggers';
 import { resolveApprovalChatOrigin } from './approval-delivery';
@@ -67,10 +83,7 @@ import {
   normalApprovalImpact,
 } from '../../utils/approval-context';
 import logger from '../../utils/logger';
-import {
-  buildAgentSettingsUrl,
-  buildResourcePermalink,
-} from '../../utils/url-builder';
+import { buildResourcePermalink } from '../../utils/url-builder';
 import { ToolUserError } from '../../utils/errors';
 import { requireOrgReadAccess, requireOrgWriteAccess } from '../../utils/organization-access';
 import { resolveRunInitiator } from '../initiator';
@@ -80,7 +93,7 @@ import { getOrgUrlContext } from '../view-urls';
 import { action, defineActionTool } from './action-tool';
 import { eventClientId } from '../../auth/event-client-id';
 
-export { ManageAgentsSchema };
+export { ManageAgentsSchema, ManageAgentsResultSchema };
 export type { ManageAgentsProposal };
 
 type ListArgs = Static<typeof ListAgentsAction>;
@@ -129,8 +142,11 @@ async function actingPrincipalFor(ctx: ToolContext): Promise<ActingPrincipal> {
 async function agentModelInfo(
   ctx: ToolContext,
   agentId: string,
+  settings?: AgentSettings,
 ): Promise<AgentModelInfo> {
-  const models = await readAgentModels(agentId, ctx.organizationId);
+  const models = settings
+    ? settings.models
+    : await readAgentModels(agentId, ctx.organizationId);
   const coreServices = getLobuCoreServices();
   return resolveAgentModelInfo(models, ctx.organizationId, {
     agentId,
@@ -173,32 +189,39 @@ async function assertDefaultModelValid(
  */
 const AGENT_FIELDS: LobuField[] = collectLobuFields(UpdateAgentAction);
 
-/** Column-backed fields (an `agents` table column). Their name IS the column. */
-const COLUMN_FIELDS = AGENT_FIELDS.filter((f) => f.meta.store === 'column');
-
 /** Read a field's requested value off a write action's args. */
 function argValue(args: WriteArgs, key: string): string | undefined {
   return (args as Record<string, unknown>)[key] as string | undefined;
 }
 
 /**
- * The live value of a field for the stale-guard pre-image / equality checks.
- * Column fields read straight off the agent row; the model field reads the
- * agent-pinned `models[0]` (an inherited org default is NOT a pinned value, so
- * it reads as null — clearing then re-inheriting is not a "change" to guard).
+ * The live value a field's pre-image is captured from and compared against:
+ * its `agents` column, or the agent-pinned `models[0]` (an inherited org
+ * default is NOT a pinned value, so it reads as null). Both the queue-time
+ * snapshot and the approval-time check read through this one function.
  */
-async function liveFieldValue(
-  ctx: ToolContext,
-  agentId: string,
+function liveFieldValue(
   field: LobuField,
-  agentRow: Record<string, unknown> | null,
-): Promise<string | null> {
-  if (field.meta.store === 'column') {
-    return (agentRow?.[field.key] as string | null) ?? null;
-  }
-  // store === 'model'
-  const info = await agentModelInfo(ctx, agentId);
-  return info.source === 'agent' ? (info.effective_model ?? null) : null;
+  row: Record<string, unknown>,
+  settings: AgentSettings,
+): unknown {
+  return field.meta.store === 'model'
+    ? (settings.models?.[0] ?? null)
+    : (row[field.key] ?? null);
+}
+
+/**
+ * Whether a write may still land against `base`, the pre-image a queued update
+ * captured. No base (an immediate apply) always lands. Otherwise the key must
+ * have been snapshotted AND still equal its live value, so a stale approval
+ * skips and a key with no snapshot fails closed.
+ */
+function matchesPreimage(
+  base: Record<string, unknown> | undefined,
+  key: string,
+  live: unknown,
+): boolean {
+  return !base || (Object.hasOwn(base, key) && isDeepStrictEqual(live, base[key]));
 }
 
 /** Validate a single field's requested value (only the model field validates). */
@@ -209,18 +232,6 @@ async function validateField(
 ): Promise<void> {
   if (field.meta.store === 'model') {
     await assertDefaultModelValid(ctx.organizationId, value);
-  }
-}
-
-/** Persist a non-column field after the agents-row UPDATE (model → models[0]). */
-async function writeNonColumnField(
-  ctx: ToolContext,
-  agentId: string,
-  field: LobuField,
-  value: string,
-): Promise<void> {
-  if (field.meta.store === 'model') {
-    await persistDefaultModel(agentId, ctx.organizationId, value);
   }
 }
 
@@ -321,24 +332,38 @@ async function handleGet(
   // "forbidden" via timing alone more than a 404 would — we still 403 on deny
   // after confirming org membership of the id when found; missing stays 404.
   const sql = createDbClientFromEnv(env);
-  const rows = await sql`
-    SELECT
-      a.id,
-      a.name,
-      a.description,
-      a.owner_platform,
-      a.owner_user_id,
-      a.created_at,
-      a.last_used_at
-    FROM agents a
-    WHERE a.organization_id = ${ctx.organizationId} AND a.id = ${args.agent_id}
-  `;
-  if (rows.length === 0) {
-    throw new ToolUserError(`Agent "${args.agent_id}" not found`, 404);
-  }
-  await assertAgentConfigReadAllowed(ctx, args.agent_id.trim());
-  const model = await agentModelInfo(ctx, args.agent_id);
-  return { action: 'get', agent: rows[0] as unknown as AgentRecord, model };
+  const snapshot = await orgContext.run({ organizationId: ctx.organizationId }, () =>
+    sql.begin(async (tx) => {
+      const [row] = await tx`
+        SELECT id, name, description, owner_platform, owner_user_id, created_at, last_used_at
+        FROM agents
+        WHERE organization_id = ${ctx.organizationId} AND id = ${args.agent_id}
+        FOR SHARE
+      `;
+      if (!row) throw new ToolUserError(`Agent "${args.agent_id}" not found`, 404);
+      await assertAgentConfigReadAllowed(ctx, args.agent_id.trim());
+      const settings = (await createPostgresAgentConfigStore(tx).getSettings(args.agent_id))!;
+      const revision = await agentConfigRevision(tx, ctx.organizationId, args.agent_id, settings);
+      return { agent: row as unknown as AgentRecord, settings, revision };
+    }),
+  );
+  const model = await agentModelInfo(ctx, args.agent_id, snapshot.settings);
+  return { action: 'get', ...snapshot, model };
+}
+
+function agentConfigAudit(ctx: ToolContext) {
+  return {
+    organizationId: ctx.organizationId,
+    applyId: ctx.applyId,
+    actorSource: deriveToolActorSource(ctx),
+    createdBy: ctx.userId,
+    clientId: eventClientId(ctx),
+    agentId: ctx.agentId,
+    actingAutomationId: ctx.actingAutomationId,
+    actingRunId: ctx.actingRunId,
+    mcpSessionId: ctx.mcpSessionId,
+    tokenType: ctx.tokenType,
+  };
 }
 
 /**
@@ -368,57 +393,22 @@ export async function applyCreate(
   }
   const sql = createDbClientFromEnv(env);
   const ownerUserId = ctx.userId;
-  // Fresh-agent provisioning defaults, from the SAME helper every other create
-  // path uses (see `resolveNewAgentProvisioningDefaults` for the full rationale
-  // and the org-default ordering). Seeded ONLY when the caller did not pin an
-  // explicit `default_model` — that outranks both and is persisted below by the
-  // non-column field loop.
-  const provisioning = await resolveNewAgentProvisioningDefaults(
-    ctx.organizationId
-  );
   const explicitModel = argValue(args, 'default_model');
   const seedModels =
-    explicitModel !== undefined && explicitModel.trim()
-      ? null
-      : provisioning.models;
-  // owner_platform='external' on the row AND an agent_users mapping, so the
-  // per-user ownership check (SPA cookie / PAT session) can reach the new agent.
-  // Without the agent_users row the agent is unreachable through chat,
-  // especially in non-default orgs. Column fields are seeded from args (with the
-  // insert defaults for those not supplied); non-column fields are set after.
-  const rows = await sql`
-    INSERT INTO agents (
-      id, organization_id, name, description, identity_md,
-      owner_platform, owner_user_id, models,
-      created_at, updated_at
-    )
-    VALUES (
-      ${args.agent_id}, ${ctx.organizationId}, ${args.name}, ${args.description ?? null},
-      ${args.identity_md ?? ''}, 'external', ${ownerUserId},
-      ${seedModels === null ? null : sql.json(seedModels)},
-      NOW(), NOW()
-    )
-    ON CONFLICT (organization_id, id) DO NOTHING
-    RETURNING id
-  `;
-  const created = rows.length > 0;
-  if (created) {
-    await sql`
-      INSERT INTO agent_users (organization_id, agent_id, platform, user_id, created_at)
-      VALUES (${ctx.organizationId}, ${args.agent_id}, 'external', ${ownerUserId}, NOW())
-      ON CONFLICT (organization_id, agent_id, platform, user_id) DO NOTHING
-    `;
-    // Persist non-column fields (e.g. default_model → models[0]) through their
-    // stores, so a freshly created agent is runnable rather than silently
-    // model-less (#2047). Loop-driven: any future non-column field is picked up.
-    for (const field of AGENT_FIELDS) {
-      if (field.meta.store === 'column') continue;
-      const value = argValue(args, field.key);
-      if (value !== undefined) {
-        await writeNonColumnField(ctx, args.agent_id, field, value);
-      }
-    }
-  }
+    explicitModel === undefined
+      ? undefined
+      : explicitModel.trim()
+        ? [explicitModel.trim()]
+        : null;
+  const created = await sql.begin((tx) =>
+    insertAgentConfig(
+      tx,
+      args,
+      { platform: 'external', userId: ownerUserId },
+      seedModels,
+      agentConfigAudit(ctx),
+    ),
+  );
   const model = await agentModelInfo(ctx, args.agent_id);
   return { action: 'create', agent_id: args.agent_id, created, model };
 }
@@ -428,128 +418,140 @@ export async function applyUpdate(
   ctx: ToolContext,
   env: Env,
   /**
-   * Pre-image captured when a queued update was proposed. When present, a field
-   * is written only if its live value still equals its pre-image — a stale
-   * approval skips (and reports) fields another writer has since changed. Absent
-   * for immediate (human) applies, which overwrite unconditionally.
+   * Pre-image captured when a queued update was proposed; absent for immediate
+   * (human) applies, which overwrite unconditionally. When present, each field
+   * is written only if it was snapshotted and its live value still equals the
+   * snapshot (see {@link matchesPreimage}): a stale approval skips and reports
+   * fields another writer has since changed, and a legacy pending run queued
+   * without a pre-image (dispatched with `{}`) fails closed on every field.
    */
   base?: ManageAgentsProposal['base'],
-  /**
-   * Set by the QUEUED-approval apply path ({@link applyManageAgentsProposal}).
-   * A queued update MUST carry a pre-image for every field it writes — that's
-   * how a stale approval is prevented from clobbering a newer human edit. A
-   * legacy pending run created before this branch has no `base`; without this
-   * flag a missing base read as "overwrite unconditionally" and silently
-   * clobbered the newer value (sol review #8). With it set, a field lacking a
-   * pre-image FAILS CLOSED: the field is skipped and reported, never written on
-   * blind faith. Immediate (human) applies leave this false and overwrite.
-   */
-  requireBase = false
 ): Promise<ManageAgentsResult> {
   const agentId = args.agent_id;
-  const sql = createDbClientFromEnv(env);
-
-  // ── Requested set — every editable field the args actually carry (loop-driven
-  //    off the schema; no per-field enumeration). default_model lives in the
-  //    settings row, name/description/identity_md are columns — all counted here
-  //    so "set only the model" is a valid update (#2047).
   const requested = AGENT_FIELDS.filter(
-    (f) => argValue(args, f.key) !== undefined
+    (f) => argValue(args, f.key) !== undefined,
   );
-  if (requested.length === 0) {
-    const names = AGENT_FIELDS.map((f) => f.key).join(', ');
-    throw new ToolUserError(`update requires at least one of: ${names}`);
+  const requestedSettings = args.settings ?? {};
+  if (!requested.length && !Object.keys(requestedSettings).length) {
+    throw new ToolUserError(
+      'update requires at least one editable field or setting',
+    );
   }
-
-  // ── Validate each requested field up-front (only the model field validates),
-  //    so an immediate apply rejects a bad value before touching any storage.
-  for (const field of requested) {
-    await validateField(ctx, field, argValue(args, field.key) as string);
-  }
-
-  // ── Fail-closed on a queued apply lacking a pre-image: a field the proposal
-  //    didn't snapshot can't be written without risking clobbering a newer human
-  //    edit, so drop it (it's reported skipped). Immediate applies keep all.
-  const writable = requireBase
-    ? requested.filter((f) => base?.[f.key as keyof typeof base] !== undefined)
-    : requested;
-
-  // ── Column fields: one explicit UPDATE (the single honest place a column name
-  //    appears). Each column's write-flag and stale-guard flag come from the
-  //    loop, so adding a column field never means re-deriving these by hand.
-  const flags = Object.fromEntries(
-    COLUMN_FIELDS.map((f) => {
-      const write = writable.includes(f);
-      const guard = base ? base[f.key as keyof typeof base] !== undefined : false;
-      return [f.key, { write, guard }];
-    })
-  ) as Record<string, { write: boolean; guard: boolean }>;
-  const rows = await sql<{
-    id: string;
-    name: string | null;
-    description: string | null;
-    identity_md: string | null;
-  }>`
-    UPDATE agents SET
-      name = CASE
-        WHEN ${flags.name.write}
-          AND (${!flags.name.guard} OR name IS NOT DISTINCT FROM ${base?.name ?? null})
-        THEN ${args.name ?? null} ELSE name END,
-      description = CASE
-        WHEN ${flags.description.write}
-          AND (${!flags.description.guard} OR description IS NOT DISTINCT FROM ${base?.description ?? null})
-        THEN ${args.description ?? null} ELSE description END,
-      identity_md = CASE
-        WHEN ${flags.identity_md.write}
-          AND (${!flags.identity_md.guard} OR identity_md IS NOT DISTINCT FROM ${base?.identity_md ?? null})
-        THEN ${args.identity_md ?? ''} ELSE identity_md END,
-      updated_at = NOW()
-    WHERE organization_id = ${ctx.organizationId} AND id = ${agentId}
-    RETURNING id, name, description, identity_md
-  `;
-  if (rows.length === 0) {
-    throw new ToolUserError(`Agent "${agentId}" not found`, 404);
-  }
-  const after = rows[0];
-
-  // ── Applied/skipped, loop-driven. A column field landed iff its post-image
-  //    equals the requested value; a non-column field is persisted here (through
-  //    its store) honoring the same stale-guard, then marked applied.
-  const appliedFields: string[] = [];
-  for (const field of writable) {
-    const value = argValue(args, field.key) as string;
-    if (field.meta.store === 'column') {
-      const emptyDefault = field.meta.emptyClears ? null : '';
-      const want = value ?? emptyDefault;
-      if ((after[field.key as keyof typeof after] ?? null) === (want ?? null)) {
-        appliedFields.push(field.key);
+  assertUnambiguousSettings(args);
+  const updatedFields: string[] = [];
+  const skippedFields: string[] = [];
+  await orgContext.run({ organizationId: ctx.organizationId }, () =>
+    createDbClientFromEnv(env).begin(async (tx) => {
+      await lockOrganizationForRelationshipClaims(tx, ctx.organizationId);
+      const [row] = await tx`
+        SELECT name, description, identity_md
+        FROM agents
+        WHERE organization_id = ${ctx.organizationId} AND id = ${agentId}
+        FOR UPDATE
+      `;
+      if (!row) {
+        throw new ToolUserError(`Agent "${agentId}" not found`, 404);
       }
-      continue;
-    }
-    // Non-column (model): re-check the pre-image against the live value, then
-    // persist. `writable` already dropped it if unbacked on a queued apply.
-    let stale = false;
-    if (base?.[field.key as keyof typeof base] !== undefined) {
-      const live = await liveFieldValue(ctx, agentId, field, null);
-      stale = live !== (base[field.key as keyof typeof base] ?? null);
-    }
-    if (!stale) {
-      await writeNonColumnField(ctx, agentId, field, value);
-      appliedFields.push(field.key);
-    }
-  }
+      const before = (await createPostgresAgentConfigStore(tx).getSettings(
+        agentId,
+      ))!;
+      const conflict = validateAgentConfigRevision(
+        args.expected_revision,
+        await agentConfigRevision(tx, ctx.organizationId, agentId, before),
+      );
+      if (conflict) {
+        throw new ToolUserError(conflict.error_description, conflict.status);
+      }
+      const settings: Partial<AgentSettings> = {};
+      const metadata: Pick<UpdateArgs, 'name' | 'description'> = {};
 
-  const skippedFields = requested
-    .map((f) => f.key)
-    .filter((k) => !appliedFields.includes(k));
+      // Schema-owned fields, compared under the row lock and mapped onto the
+      // canonical settings / metadata patches.
+      for (const field of requested) {
+        if (!matchesPreimage(base, field.key, liveFieldValue(field, row, before))) {
+          skippedFields.push(field.key);
+          continue;
+        }
+        const value = argValue(args, field.key)!;
+        if (field.meta.store === 'model') {
+          // Replace models[0] and keep the fallbacks; the merged list is
+          // validated with the rest of the patch below. A blank ref clears to
+          // the org default: the explicit `undefined` overrides the stored list
+          // in the store's `{ ...existing, ...updates }` merge and persists
+          // NULL, where omitting the key would keep the old list.
+          const model = value.trim();
+          settings.models = model
+            ? [model, ...(before.models?.slice(1) ?? [])]
+            : undefined;
+        } else if (field.key === 'identity_md') {
+          settings.identityMd = value;
+        } else if (field.key === 'name' || field.key === 'description') {
+          metadata[field.key] = value;
+        }
+        updatedFields.push(field.key);
+      }
+
+      // Canonical settings, compared key by key the same way.
+      const settingsBase = base && (base.settings ?? {});
+      for (const key of Object.keys(requestedSettings) as Array<
+        keyof typeof requestedSettings
+      >) {
+        if (!matchesPreimage(settingsBase, key, before[key] ?? null)) {
+          skippedFields.push(`settings.${key}`);
+          continue;
+        }
+        // Object.assign: TS cannot relate settings[key] to requestedSettings[key]
+        // across the key union, and the action schema already typed the value.
+        Object.assign(settings, { [key]: requestedSettings[key] });
+        updatedFields.push(`settings.${key}`);
+      }
+
+      await assertSettingsValid(ctx, agentId, settings, before);
+      const audit = agentConfigAudit(ctx);
+      if (Object.keys(settings).length) {
+        await persistAgentSettingsPatch(tx, agentId, settings, before, audit);
+      }
+      if (Object.keys(metadata).length) {
+        await persistAgentMetadataPatch(tx, agentId, metadata, audit);
+      }
+    }),
+  );
   const model = await agentModelInfo(ctx, agentId);
   return {
     action: 'update',
     agent_id: agentId,
-    updated_fields: appliedFields,
-    ...(skippedFields.length > 0 ? { skipped_fields: skippedFields } : {}),
+    updated_fields: updatedFields,
+    ...(skippedFields.length ? { skipped_fields: skippedFields } : {}),
     model,
   };
+}
+
+function assertUnambiguousSettings(args: UpdateArgs): void {
+  if (args.default_model !== undefined && args.settings?.models !== undefined) {
+    throw new ToolUserError(
+      'Use either default_model or settings.models, not both',
+    );
+  }
+}
+
+async function assertSettingsValid(
+  ctx: ToolContext,
+  agentId: string,
+  settings: Partial<AgentSettings>,
+  before: AgentSettings | null,
+): Promise<void> {
+  const error = await validateAgentSettingsUpdate(
+    settings,
+    before,
+    ctx.organizationId,
+    agentId,
+  );
+  if (error) {
+    throw new ToolUserError(
+      error.error_description,
+      error.error === 'models_validation_failed' ? 503 : 400,
+    );
+  }
 }
 
 export async function applyDelete(
@@ -557,16 +559,21 @@ export async function applyDelete(
   ctx: ToolContext,
   env: Env
 ): Promise<ManageAgentsResult> {
-  const sql = createDbClientFromEnv(env);
-  const rows = await sql`
-    DELETE FROM agents
-    WHERE organization_id = ${ctx.organizationId} AND id = ${args.agent_id}
-    RETURNING id
-  `;
-  // The agent's write-gate policy rows (principal_kind='agent') cascade via a DB
-  // trigger on `agents` (see 20260710140000) — covers this path AND the dashboard's
-  // configStore.deleteMetadata, so no app-level cleanup is duplicated here.
-  return { action: 'delete', agent_id: args.agent_id, deleted: rows.length > 0 };
+  const deleted = await orgContext.run(
+    { organizationId: ctx.organizationId },
+    () =>
+      createDbClientFromEnv(env).begin(async (tx) => {
+        await lockOrganizationForRelationshipClaims(tx, ctx.organizationId);
+        await tx`
+          SELECT id
+          FROM agents
+          WHERE organization_id = ${ctx.organizationId} AND id = ${args.agent_id}
+          FOR UPDATE
+        `;
+        return deleteAgentConfig(tx, args.agent_id, agentConfigAudit(ctx));
+      }),
+  );
+  return { action: 'delete', agent_id: args.agent_id, deleted };
 }
 
 // ============================================
@@ -620,12 +627,12 @@ function buildProposal(args: WriteArgs): ManageAgentsProposal {
     }
   }
   if (action === 'update') {
-    const hasField = AGENT_FIELDS.some(
-      (f) => argValue(args, f.key) !== undefined
-    );
+    assertUnambiguousSettings(args);
+    const hasField =
+      Object.keys(args.settings ?? {}).length > 0 ||
+      AGENT_FIELDS.some((f) => argValue(args, f.key) !== undefined);
     if (!hasField) {
-      const names = AGENT_FIELDS.map((f) => f.key).join(', ');
-      throw new ToolUserError(`update requires at least one of: ${names}`);
+      throw new ToolUserError('update requires at least one editable field or setting');
     }
   }
   // Copy every requested editable field onto the proposal, loop-driven off the
@@ -636,6 +643,9 @@ function buildProposal(args: WriteArgs): ManageAgentsProposal {
     if (value !== undefined) {
       (proposal as unknown as Record<string, unknown>)[field.key] = value;
     }
+  }
+  if (args.action === 'update' && args.settings !== undefined) {
+    proposal.settings = args.settings;
   }
   return proposal;
 }
@@ -680,32 +690,63 @@ async function queueWriteForApproval(
     throw new ToolUserError(`Agent "${proposal.agent_id}" not found`, 404);
   }
 
-  // Capture the pre-image of each field this update touches, so the eventual
-  // approve applies only fields that haven't since been changed by someone else.
-  // Loop-driven: column fields read from the fetched row, the model field reads
-  // its live agent-pinned value — one shape, every field.
-  if (proposal.action === 'update' && current) {
-    const base: NonNullable<ManageAgentsProposal['base']> = {};
-    for (const field of AGENT_FIELDS) {
-      const value = (proposal as unknown as Record<string, unknown>)[field.key];
-      if (value === undefined) continue;
-      (base as Record<string, unknown>)[field.key] = await liveFieldValue(
-        ctx,
-        proposal.agent_id,
-        field,
-        current
-      );
-    }
-    proposal.base = base;
-  }
-
   const initiatorColumns = resolveRunInitiator(ctx);
   const label = actionLabel(proposal.action, proposal.agent_id);
   // Atomic: the pending run and its approval card commit together. If the card
   // INSERT fails, the run must not exist — otherwise the proposal is durably
   // pending but the events-only approval surface shows nothing (the #2033
   // divergence, same as the connector queue path).
-  const { runId, eventId } = await sql.begin(async (tx) => {
+  const { runId, eventId } = await orgContext.run({ organizationId: ctx.organizationId }, () => sql.begin(async (tx) => {
+    if (proposal.action === 'update' && current) {
+      // Capture the pre-image of every field and setting this update touches,
+      // under the same row lock applyUpdate compares it under, so the eventual
+      // approve writes only what nobody has changed since.
+      await lockOrganizationForRelationshipClaims(tx, ctx.organizationId);
+      const [row] = await tx`
+        SELECT name, description, identity_md
+        FROM agents
+        WHERE organization_id = ${ctx.organizationId}
+          AND id = ${proposal.agent_id}
+        FOR UPDATE
+      `;
+      if (!row) {
+        throw new ToolUserError(`Agent "${proposal.agent_id}" not found`, 404);
+      }
+      const settings = (await createPostgresAgentConfigStore(tx).getSettings(
+        proposal.agent_id,
+      ))!;
+      const conflict = validateAgentConfigRevision(
+        args.action === 'update' ? args.expected_revision : undefined,
+        await agentConfigRevision(tx, ctx.organizationId, proposal.agent_id, settings),
+      );
+      if (conflict) {
+        throw new ToolUserError(conflict.error_description, conflict.status);
+      }
+      await assertSettingsValid(
+        ctx,
+        proposal.agent_id,
+        { ...proposal.settings },
+        settings,
+      );
+      const base: NonNullable<ManageAgentsProposal['base']> = {};
+      for (const field of AGENT_FIELDS) {
+        if (argValue(args, field.key) === undefined) continue;
+        Object.assign(base, {
+          [field.key]: liveFieldValue(field, row, settings),
+        });
+      }
+      if (proposal.settings) {
+        base.settings = {};
+        for (const key of Object.keys(proposal.settings) as Array<
+          keyof typeof proposal.settings
+        >) {
+          Object.assign(base.settings, { [key]: settings[key] ?? null });
+        }
+      }
+      proposal.base = base;
+      Object.assign(current, row, base.settings && { settings: base.settings });
+    }
+
     const inserted = await tx`
       INSERT INTO runs (
         organization_id, run_type, action_key, action_input,
@@ -761,24 +802,13 @@ async function queueWriteForApproval(
       { sql: tx },
     );
     return { runId, eventId: Number(event.id) };
-  });
+  }));
 
   const { ownerSlug, baseUrl } = await getOrgUrlContext(ctx);
-  // An `update` proposal is config-shaped (name/description/identity), so its
-  // review surface is the agent settings form prefilled via `?run_id=` (WI-0.3):
-  // the reviewer sees the proposed change in the real form and Approves/Rejects.
-  // create/delete aren't config-form-shaped, so they keep the run permalink
-  // (a run-scoped link that survives the supersede chain on approve→complete;
-  // read-side content_ids resolution also covers the event id carried below).
-  const settingsReviewUrl =
-    proposal.action === 'update'
-      ? await buildAgentSettingsUrl(baseUrl, ctx.organizationId, proposal.agent_id, {
-          runId,
-        }).catch(() => null)
-      : null;
-  const approvalUrl =
-    settingsReviewUrl ??
-    buildResourcePermalink(ownerSlug, { kind: 'run', runId }, baseUrl);
+  // One run-scoped review for creation, updates and deletion. The event/peek
+  // renders the held proposal and its decision controls without depending on
+  // an existing resource's editable settings page.
+  const approvalUrl = buildResourcePermalink(ownerSlug, { kind: 'run', runId }, baseUrl);
 
   // One destination, never the org-wide fan-out — see resolveApprovalChatOrigin.
   const chatOrigin = await resolveApprovalChatOrigin(ctx);
@@ -840,6 +870,9 @@ export async function applyManageAgentsProposal(
     const value = (proposal as unknown as Record<string, unknown>)[field.key];
     if (value !== undefined) fields[field.key] = value;
   }
+  if (proposal.action === 'update' && proposal.settings !== undefined) {
+    fields.settings = proposal.settings;
+  }
   const args = validateToolArgs('manage_agents', WriteActions, fields) as WriteArgs;
   // Re-run the rules the schema cannot express (agent_id shape, "update needs
   // one field"); the rebuilt proposal itself is discarded — `proposal` is what
@@ -852,9 +885,10 @@ export async function applyManageAgentsProposal(
     case 'create':
       return applyCreate(args, applyCtx, env);
     case 'update':
-      // Queued apply: require a pre-image per field. A legacy pending run with no
-      // `base` thus skips (never blind-overwrites a newer human edit) — fail closed.
-      return applyUpdate(args, applyCtx, env, proposal.base, true);
+      // Queued apply: every field needs a pre-image. A legacy pending run with
+      // no `base` compares against `{}`, so it skips every field rather than
+      // blind-overwriting a newer human edit — fail closed.
+      return applyUpdate(args, applyCtx, env, proposal.base ?? {});
     case 'delete':
       return applyDelete(args, applyCtx, env);
   }

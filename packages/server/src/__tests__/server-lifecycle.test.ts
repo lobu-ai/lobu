@@ -6,7 +6,7 @@
  * #948 + the #943 7-hygiene catch-up):
  *
  *   1. Middleware ordering on the Hono wrapper:
- *      peer-address stash → env-inject → request logger → structured-5xx-capture → onError
+ *      peer-address stash → env-inject → HTTP span → request logger → structured-5xx-capture → onError
  *   2. Route mounts: `/lobu` mounted only when lobuApp is non-null; `/` always.
  *   3. Shutdown drains in-flight requests before gateway/db teardown.
  *   4. `serializeBootError` walks nested cause chains and never returns `{}`.
@@ -17,7 +17,14 @@
 
 import http from "node:http";
 import net from "node:net";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
+import { createSpan, currentTraceLogFields, initTracing, runInSpanContext, shutdownTracing, SpanKind, SpanStatusCode } from "@lobu/core";
+import { InMemorySpanExporter, SimpleSpanProcessor } from "@opentelemetry/sdk-trace-node";
+
+// This suite replaces the wrapper's collaborators. Other integration suites
+// import the real wrapper, so its cached module must not cross this boundary.
+vi.hoisted(() => vi.resetModules());
+afterAll(() => vi.resetModules());
 
 // --- heavy collaborators of createServerLifecycle, replaced so the spine
 // --- boots in-process against a real ephemeral HTTP server.
@@ -190,6 +197,176 @@ describe("reportBootFailure", () => {
 });
 
 describe("buildWrapperApp", () => {
+	it("isolates concurrent HTTP traces, parents async work, and exports only normalized request attributes", async () => {
+		const { buildWrapperApp } = await import("../server-lifecycle");
+		const { Hono } = await import("hono");
+		const exporter = new InMemorySpanExporter();
+		await shutdownTracing();
+		initTracing({ serviceName: "wrapper-tracing-test", spanProcessors: [new SimpleSpanProcessor(exporter)] });
+		try {
+			const app = new Hono();
+			app.get("/records/:id", async (c) => {
+				const id = c.req.param("id");
+				c.set("user", { id, email: "private@example.test", name: "Private", emailVerified: true });
+				c.set("organizationId", `org-${id}`);
+				await new Promise((resolve) => setTimeout(resolve, 2));
+				const child = createSpan("async child");
+				child?.end();
+				return c.json(currentTraceLogFields());
+			});
+			const wrapper = buildWrapperApp({} as never, app, app as never);
+			const ambient = createSpan("unrelated ambient work");
+			const [first, second] = await runInSpanContext(ambient, () => Promise.all([
+				wrapper.request("/lobu/records/synthetic-one?token=private-query", { headers: {
+					traceparent: "00-11111111111111111111111111111111-2222222222222222-01",
+					"cf-ray": "a53b9d57c926253b-LHR", authorization: "Bearer private-token",
+				} }),
+				wrapper.request("/records/synthetic-two?email=private@example.test", { headers: {
+					traceparent: "invalid-private-header", "cf-ray": "private@example.test",
+				} }),
+			]));
+			ambient?.end();
+			expect(first.status).toBe(200);
+			expect(second.status).toBe(200);
+			const spans = exporter.getFinishedSpans();
+			const requests = spans.filter((span) => span.kind === SpanKind.SERVER);
+			expect(requests).toHaveLength(2);
+			for (const [id, response, route] of [["synthetic-one", first, "/lobu/records/:id"], ["synthetic-two", second, "/records/:id"]] as const) {
+				const request = requests.find((span) => span.attributes["user.id"] === id)!;
+				expect(request.attributes).toMatchObject({ "http.request.method": "GET", "http.route": route, "http.response.status_code": 200, "lobu.org_id": `org-${id}` });
+				expect((await response.json()).trace_id).toBe(request.spanContext().traceId);
+				expect(request.spanContext().traceId).not.toBe(ambient?.spanContext().traceId);
+				expect(spans.filter((span) => span.name === "async child" && span.parentSpanContext?.spanId === request.spanContext().spanId)).toHaveLength(1);
+				if (id === "synthetic-one") {
+					expect(request.spanContext().traceId).toBe("11111111111111111111111111111111");
+					expect(request.parentSpanContext?.spanId).toBe("2222222222222222");
+					expect(request.attributes.cf_ray).toBe("a53b9d57c926253b");
+				} else {
+					expect(request.parentSpanContext).toBeUndefined();
+					expect(request.attributes.cf_ray).toBeUndefined();
+				}
+			}
+			expect(JSON.stringify(requests.map((span) => ({ attributes: span.attributes, events: span.events, status: span.status })))).not.toMatch(/private-query|private-token|private@example|invalid-private-header/);
+		} finally {
+			await shutdownTracing();
+		}
+	});
+
+	it("records grouped, parameterized errors for returned and thrown failures", async () => {
+		const { buildWrapperApp } = await import("../server-lifecycle");
+		const { Hono } = await import("hono");
+		const exporter = new InMemorySpanExporter();
+		await shutdownTracing();
+		initTracing({ serviceName: "wrapper-failure-test", spanProcessors: [new SimpleSpanProcessor(exporter)] });
+		try {
+			const app = new Hono();
+			app.get("/returned", (c) => c.json({ error: "private-returned-error" }, 500));
+			app.get("/thrown/:id", (c) => {
+				throw new Error(`lookup failed for private@example.test run ${c.req.param("id")}`);
+			});
+			app.all("/any", () => { throw new Error("any-method failure"); });
+			const wrapper = buildWrapperApp({} as never, app);
+			expect((await wrapper.request("/lobu/returned")).status).toBe(500);
+			expect((await wrapper.request("/lobu/any", { method: "PRIVATE_METHOD" })).status).toBe(500);
+			for (const id of ["run9f3a1c2e7b4d", "run0b8e6d5c4a3f"]) expect((await wrapper.request(`/lobu/thrown/${id}`)).status).toBe(500);
+			expect((await wrapper.request("/private-unmatched-path?token=private-query")).status).toBe(404);
+			expect((await wrapper.request("/unknown", { method: "PRIVATE_METHOD" })).status).toBe(404);
+			const requests = exporter.getFinishedSpans().filter((span) => span.kind === SpanKind.SERVER);
+			expect(requests).toHaveLength(6);
+			expect(requests.filter((span) => span.attributes["http.response.status_code"] === 500).map((span) => span.status.code)).toEqual([SpanStatusCode.ERROR, SpanStatusCode.ERROR, SpanStatusCode.ERROR, SpanStatusCode.ERROR]);
+			expect(requests.find((span) => span.attributes["http.route"] === "/lobu/any")?.attributes["error.grouping"]).toContain("_OTHER /lobu/any");
+			expect(requests.find((span) => span.attributes["http.response.status_code"] === 404)?.attributes["http.route"]).toBe("unmatched");
+			expect(requests.at(-1)?.attributes["http.request.method"]).toBe("_OTHER");
+
+			const returned = requests.find((span) => span.attributes["http.route"] === "/lobu/returned")!;
+			expect(returned.attributes).toMatchObject({ "exception.type": "HttpServerError", "error.kind": "system" });
+			const thrown = requests.filter((span) => span.attributes["http.route"] === "/lobu/thrown/:id");
+			expect(thrown).toHaveLength(2);
+			for (const span of thrown) {
+				expect(span.attributes).toMatchObject({ "exception.type": "Error", "exception.message": "lookup failed for <email> run <id>", "error.kind": "system" });
+				expect(span.events.map((event) => event.name)).toEqual(["exception"]);
+				// Frames are recorded without any machine's absolute path.
+				for (const frame of String(span.attributes["exception.stacktrace"]).split("\n")) expect(frame).not.toMatch(/^at (?:.+ \()?\//);
+			}
+			// One defect affecting two runs stays one issue.
+			expect(thrown[0].attributes["error.fingerprint"]).toBe(thrown[1].attributes["error.fingerprint"]);
+			expect(JSON.stringify(requests.map((span) => ({ name: span.name, attributes: span.attributes, events: span.events, status: span.status })))).not.toMatch(/private-returned|private@example|run9f3a|run0b8e|private-unmatched|private-query|PRIVATE_METHOD|\/Users\//);
+		} finally {
+			await shutdownTracing();
+		}
+	});
+
+	it("records outbound fetch as client spans with dependency errors", async () => {
+		const exporter = new InMemorySpanExporter();
+		await shutdownTracing();
+		initTracing({ serviceName: "fetch-tracing-test", spanProcessors: [new SimpleSpanProcessor(exporter)] });
+		const upstream = http.createServer((req, res) => {
+			res.statusCode = req.url?.startsWith("/ok") ? 200 : 503;
+			res.end("private-upstream-body");
+		});
+		await new Promise<void>((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+		const closed = net.createServer();
+		await new Promise<void>((resolve) => closed.listen(0, "127.0.0.1", resolve));
+		const closedPort = (closed.address() as net.AddressInfo).port;
+		await new Promise<void>((resolve) => closed.close(() => resolve()));
+		try {
+			const port = (upstream.address() as net.AddressInfo).port;
+			// A fetch with no surrounding work records nothing.
+			await (await fetch(`http://127.0.0.1:${port}/ok?background=1`)).text();
+			const caller = createSpan("calling work");
+			await runInSpanContext(caller, async () => {
+				await (await fetch(`http://127.0.0.1:${port}/ok`)).text();
+				await (await fetch(`http://127.0.0.1:${port}/items/item7c2f9e1a5b3d?token=private-query`, { method: "POST" })).text();
+				await expect(fetch(`http://127.0.0.1:${closedPort}/down`)).rejects.toThrow();
+			});
+			caller?.end();
+			const spans = exporter.getFinishedSpans().filter((span) => span.kind === SpanKind.CLIENT);
+			expect(spans).toHaveLength(3);
+			const [ok, failed, refused] = spans;
+			expect(ok.name).toBe(`HTTP GET 127.0.0.1:${port}`);
+			// Each call is traced under the work that made it.
+			for (const span of spans) expect(span.parentSpanContext?.spanId).toBe(caller?.spanContext().spanId);
+			expect(ok.attributes).toMatchObject({ "http.request.method": "GET", "server.address": `127.0.0.1:${port}`, "url.template": "/ok", "http.response.status_code": 200 });
+			expect(ok.status.code).not.toBe(SpanStatusCode.ERROR);
+			expect(failed.attributes).toMatchObject({ "http.request.method": "POST", "url.template": "/items/<id>", "http.response.status_code": 503, "exception.type": "UpstreamHttpError", "error.code": "UPSTREAM_5XX", "error.kind": "dependency" });
+			expect(failed.status.code).toBe(SpanStatusCode.ERROR);
+			expect(refused.attributes).toMatchObject({ "server.address": `127.0.0.1:${closedPort}`, "error.kind": "dependency" });
+			expect(refused.status.code).toBe(SpanStatusCode.ERROR);
+			expect(JSON.stringify(spans.map((span) => ({ attributes: span.attributes, events: span.events })))).not.toMatch(/private-query|private-upstream-body|item7c2f/);
+		} finally {
+			await new Promise<void>((resolve) => upstream.close(() => resolve()));
+			await shutdownTracing();
+		}
+	});
+
+	it("attributes verified settings callers without treating worker agent ids as users", async () => {
+		const { buildWrapperApp } = await import("../server-lifecycle");
+		const { Hono } = await import("hono");
+		const exporter = new InMemorySpanExporter();
+		await shutdownTracing();
+		initTracing({ serviceName: "wrapper-principal-test", spanProcessors: [new SimpleSpanProcessor(exporter)] });
+		try {
+			const app = new Hono();
+			app.get("/worker", (c) => {
+				c.set("authContext", { via: "worker_token", userId: "synthetic-agent", organizationId: "synthetic-worker-org" });
+				return c.text("ok");
+			});
+			app.get("/settings", (c) => {
+				c.set("authContext", { via: "settings_session", userId: "synthetic-user", organizationId: "synthetic-settings-org" });
+				return c.text("ok");
+			});
+			const wrapper = buildWrapperApp({} as never, app);
+			await wrapper.request("/lobu/worker");
+			await wrapper.request("/lobu/settings");
+			const requests = exporter.getFinishedSpans();
+			expect(requests.map((span) => span.attributes["user.id"])).toEqual([undefined, "synthetic-user"]);
+			expect(requests.map((span) => span.attributes["lobu.org_id"])).toEqual(["synthetic-worker-org", "synthetic-settings-org"]);
+		} finally {
+			await shutdownTracing();
+		}
+		expect((await buildWrapperApp({} as never, null).request("/health")).status).toBe(200);
+	});
+
 	it("mounts mainApp at / and lobuApp at /lobu when present", async () => {
 		const { buildWrapperApp } = await import("../server-lifecycle");
 		const { Hono } = await import("hono");
@@ -278,26 +455,42 @@ describe("buildWrapperApp", () => {
 		const { default: logger } = await import("../utils/logger");
 		const { Hono } = await import("hono");
 		const captureMessage = logger.error as ReturnType<typeof vi.fn>;
+		const exporter = new InMemorySpanExporter();
+		await shutdownTracing();
+		initTracing({ serviceName: "readiness-drain-test", spanProcessors: [new SimpleSpanProcessor(exporter)] });
+		const readinessSpan = () => {
+			const span = exporter.getFinishedSpans().find((s) => s.attributes["http.route"] === "/health/ready");
+			exporter.reset();
+			return span;
+		};
+		try {
+			// Expected deploy-drain shape → neither logged nor recorded as an
+			// error span (was LOBU-BACKEND-X noise, then an issue per rollout).
+			const draining = buildWrapperApp({} as never, new Hono());
+			draining.get("/health/ready", (c) =>
+				c.json({ status: "draining", service: "lobu-api" }, 503),
+			);
+			captureMessage.mockClear();
+			const drainRes = await draining.request("/health/ready");
+			expect(drainRes.status).toBe(503);
+			expect(captureMessage).not.toHaveBeenCalled();
+			const drainSpan = readinessSpan();
+			expect(drainSpan?.status.code).not.toBe(SpanStatusCode.ERROR);
+			expect(drainSpan?.attributes["error.fingerprint"]).toBeUndefined();
 
-		// Expected deploy-drain shape → suppressed (was LOBU-BACKEND-X noise).
-		const draining = buildWrapperApp({} as never, new Hono());
-		draining.get("/health/ready", (c) =>
-			c.json({ status: "draining", service: "lobu-api" }, 503),
-		);
-		captureMessage.mockClear();
-		const drainRes = await draining.request("/health/ready");
-		expect(drainRes.status).toBe(503);
-		expect(captureMessage).not.toHaveBeenCalled();
-
-		// Same endpoint, non-draining body (e.g. DB unreachable) → still reports.
-		const broken = buildWrapperApp({} as never, new Hono());
-		broken.get("/health/ready", (c) =>
-			c.json({ status: "error", error: "db unreachable" }, 503),
-		);
-		captureMessage.mockClear();
-		const brokenRes = await broken.request("/health/ready");
-		expect(brokenRes.status).toBe(503);
-		expect(captureMessage).toHaveBeenCalled();
+			// Same endpoint, non-draining body (e.g. DB unreachable) → still reports.
+			const broken = buildWrapperApp({} as never, new Hono());
+			broken.get("/health/ready", (c) =>
+				c.json({ status: "error", error: "db unreachable" }, 503),
+			);
+			captureMessage.mockClear();
+			const brokenRes = await broken.request("/health/ready");
+			expect(brokenRes.status).toBe(503);
+			expect(captureMessage).toHaveBeenCalled();
+			expect(readinessSpan()?.status.code).toBe(SpanStatusCode.ERROR);
+		} finally {
+			await shutdownTracing();
+		}
 	});
 
 	it("does NOT double-report when onError fires after post-response middleware", async () => {

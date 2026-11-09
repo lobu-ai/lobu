@@ -33,7 +33,7 @@ import { isEventAttachment } from '@lobu/core/contracts/tools/view-attach';
 import type { ViewDefinitionRecord } from '@lobu/core/contracts/tools/view-definition';
 import { ToolUserError } from '../../utils/errors';
 import {
-  refreshMemberEventKinds,
+  readEventKindRegistry,
   validateSaveContentSemanticType,
 } from '../../utils/event-kind-validation';
 import {
@@ -42,6 +42,7 @@ import {
   VIEW_COMPILED_MAX_BYTES,
   VIEW_SOURCE_MAX_CHARS,
   compileView,
+  validateViewCandidate,
   serverCompileStamp,
   contentHash,
   isServerBuildable,
@@ -54,6 +55,7 @@ import {
   type SetViewInput,
 } from '../../views/views';
 import type { ToolContext } from '../registry';
+import type { Env } from '../../index';
 import { action, defineActionTool } from './action-tool';
 
 export { ManageViewsResultSchema, ManageViewsSchema };
@@ -168,7 +170,6 @@ async function assertActionKindsRegistered(
   attach: SetViewInput['attach'],
 ): Promise<void> {
   if (Object.keys(actions).length === 0) return;
-  await refreshMemberEventKinds(organizationId);
   const qualifiedTypes = attach.length > 0 &&
     attach.every((entry) => isEventAttachment(entry) && entry.type)
       ? [...new Set(attach.flatMap((entry) =>
@@ -182,8 +183,15 @@ async function assertActionKindsRegistered(
       AND slug = ANY(${pgTextArray(qualifiedTypes)}::text[])
       AND deleted_at IS NULL
   `;
+  const kindRegistry = readEventKindRegistry(organizationId);
   for (const [name, decl] of Object.entries(actions)) {
-    const global = await validateSaveContentSemanticType(decl.emits, null, organizationId, []);
+    const global = await validateSaveContentSemanticType(
+      decl.emits,
+      null,
+      organizationId,
+      [],
+      kindRegistry
+    );
     if (global.valid) continue;
     if (qualifiedTypes.length > 0 && registries.length === qualifiedTypes.length &&
       registries.every((row) => row.event_kinds && Object.hasOwn(row.event_kinds, decl.emits))) continue;
@@ -200,7 +208,8 @@ async function assertActionKindsRegistered(
 
 async function handleSet(
   args: Static<typeof SetViewAction>,
-  ctx: ToolContext
+  ctx: ToolContext,
+  env: Env
 ): Promise<ManageViewsResult> {
   requireWriter(ctx);
   validateViewSource(args);
@@ -248,14 +257,17 @@ async function handleSet(
   // Only a bundle this server compiled may be rebuilt later; a supplied one
   // is the caller's and stays as sent.
   const compileConfigHash = args.compiled_code ? null : serverCompileStamp(compiled);
-  // Same source AND same metadata AND same executable bundle AND same
-  // compiler provenance: no write. A legacy row (source/metadata-only hash)
-  // never matches, so it refreshes exactly once on the next set and is a
-  // no-op after that.
+  // Validate every submitted artifact against this runtime before storage.
+  // Identical source, metadata, executable bytes and provenance still avoid a
+  // write after validation; a legacy hash refreshes on its next successful set.
   const current = await getView(ctx.organizationId, key);
-  if (current && current.content_hash === hash && current.compile_config_hash === compileConfigHash) {
-    return { action: 'set', view: projectView(current), written: false };
-  }
+  await validateViewCandidate({
+    key, name, description, attach, params, actions,
+    source_code: args.source_code, compiled_code: compiled, content_hash: hash,
+    source_files: retained?.sourceFiles ?? null, dependencies: retained?.dependencies ?? null,
+    source_complete: retained !== undefined, compile_config_hash: compileConfigHash,
+    last_writer: 'validation', updated_at: new Date().toISOString(),
+  }, env.VIEW_VALIDATOR_URL);
 
   const { view, written } = await setView(ctx.organizationId, {
     key,
@@ -272,7 +284,7 @@ async function handleSet(
     params,
     actions,
     last_writer: args.last_writer ?? (ctx.applyId ? `apply:${ctx.applyId}` : (ctx.userId ?? 'unknown')),
-  });
+  }, current);
 
   // No config-audit emission: the audit trail gains no view resource kind in
   // phase 1, and `last_writer` (apply_id | user) carries the provenance.
@@ -337,7 +349,19 @@ async function handleList(
   ctx: ToolContext
 ): Promise<ManageViewsResult> {
   const views = await listViews(ctx.organizationId);
-  return { action: 'list', views: views.map(projectView) };
+  return {
+    action: 'list',
+    // A public workspace's visitor reads this list too, and `last_writer` is an
+    // internal apply id or user id. Members keep it (it is how the web host
+    // distinguishes a config-owned row from a chat-authored one); readers
+    // outside the workspace get every other field and no author identity.
+    views: views.map((view) => {
+      const row = projectView(view);
+      if (ctx.memberRole) return row;
+      const { last_writer: _author, ...publicRow } = row;
+      return publicRow as typeof row;
+    }),
+  };
 }
 
 async function handleRemove(

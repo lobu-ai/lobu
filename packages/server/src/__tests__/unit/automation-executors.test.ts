@@ -26,7 +26,7 @@ describe("resolveAutomationExecutor", () => {
 	test("device pin takes precedence over the agent", () => {
 		expect(
 			resolveAutomationExecutor({ agentId: "a", deviceWorkerId: "d" }),
-		).toEqual({ kind: "device", deviceWorkerId: "d", agentKind: null });
+		).toEqual({ kind: "device", deviceWorkerId: "d", agentKind: null, agentId: "a" });
 	});
 
 	test("agent resolves when there is no device pin", () => {
@@ -39,11 +39,11 @@ describe("resolveAutomationExecutor", () => {
 	test("device carries its runtime kind", () => {
 		expect(
 			resolveAutomationExecutor({ deviceWorkerId: "d", agentKind: "codex" }),
-		).toEqual({ kind: "device", deviceWorkerId: "d", agentKind: "codex" });
+		).toEqual({ kind: "device", deviceWorkerId: "d", agentKind: "codex", agentId: null });
 	});
 
-	test("no executor resolves to null", () => {
-		expect(resolveAutomationExecutor({})).toBeNull();
+	test("unassigned analysis resolves to the external client", () => {
+		expect(resolveAutomationExecutor({})).toEqual({ kind: 'external', agentId: null });
 	});
 });
 
@@ -56,13 +56,13 @@ describe("assertAutomationExecutorsResolve", () => {
 		).not.toThrow();
 	});
 
-	test("automated automations require an executor", () => {
+	test("external schedules are allowed but event execution requires a native assignment", () => {
 		expect(() => assertAutomationExecutorsResolve([eventTrigger()], {})).toThrow(
-			/executor/,
+			ToolUserError,
 		);
 		expect(() =>
 			assertAutomationExecutorsResolve([scheduleTrigger()], {}),
-		).toThrow(/executor/);
+		).not.toThrow();
 	});
 
 	test("an agent satisfies automated triggers", () => {
@@ -99,7 +99,7 @@ describe('reference capture executors', () => {
   });
   test('serves the capture and change-read fields through the real tool schemas', () => {
     const create = validateToolArgs('manage_automations', getTool('manage_automations')!.inputSchema, {
-      action: 'create', slug: 'synthetic-source', name: 'Synthetic source', execution_config: external.executionConfig,
+      action: 'create', slug: 'synthetic-source', name: 'Synthetic source', managed_agent_id: 'synthetic-owner',
       triggers: [capture()],
     });
     expect((create as any).triggers[0].capture).toBe('references');

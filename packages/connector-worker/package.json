@@ -1,6 +1,6 @@
 {
   "name": "@lobu/connector-worker",
-  "version": "24.3.0",
+  "version": "24.7.0",
   "description": "Self-hosted worker for Lobu memory — connectors and embedding generation",
   "type": "module",
   "bin": {
@@ -98,11 +98,10 @@
     "typescript": "^5.3.3"
   },
   "optionalDependencies": {
-    "isolated-vm": "^6.2.0",
-    "isolated-vm-next": "npm:isolated-vm@^7.0.1"
+    "isolated-vm": "7.0.2"
   },
   "engines": {
-    "node": ">=20.9.0"
+    "node": ">=26 <27"
   },
   "keywords": [
     "worker",

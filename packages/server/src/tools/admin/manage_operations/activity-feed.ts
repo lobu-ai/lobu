@@ -7,6 +7,8 @@
  */
 
 import type { NotificationDelivery } from "@lobu/core/contracts/tools/manage-operations";
+import { compileConnectionFkVisibilityLiteral } from "../../../authz/connection-visibility";
+import { authzScopeFromToolContext } from "../../../authz/scope";
 import { getDb, pgTextArray } from "../../../db/client";
 import { listNotifications } from "../../../notifications/service";
 import { buildResourcePermalink } from "../../../utils/url-builder";
@@ -136,6 +138,16 @@ function buildNotificationCard(
 	const type = String(n.type ?? "generic");
 	const created = String(n.created_at ?? new Date().toISOString());
 	const atMs = new Date(created).getTime();
+	// A notice ABOUT an Automation or connection (overdue schedule, auto-pause,
+	// stopped collecting) names that subject as its resource. The event's own
+	// automation_id/connection_id columns mean "emitted by" and drive window
+	// self-exclusion, so producers leave them unset; the card still has to say
+	// which source the notice belongs to.
+	const resourceSubjectId = (type: string): number | undefined => {
+		if (n.resource_type !== type) return undefined;
+		const subjectId = Number(n.resource_id);
+		return Number.isSafeInteger(subjectId) && subjectId > 0 ? subjectId : undefined;
+	};
 	const approvalRunId = n.approval_run_id != null ? Number(n.approval_run_id) : NaN;
 	const interactionType =
 		typeof n.interaction_type === "string" && n.interaction_type !== ""
@@ -224,7 +236,9 @@ function buildNotificationCard(
 		browser_handoff: browserHandoff,
 		platform: typeof n.platform === "string" ? n.platform : undefined,
 		connection_id:
-			typeof n.connection_id === "number" ? n.connection_id : undefined,
+			typeof n.connection_id === "number"
+				? n.connection_id
+				: resourceSubjectId("connection"),
 		connection_name:
 			typeof n.connection_name === "string"
 				? n.connection_name
@@ -233,7 +247,9 @@ function buildNotificationCard(
 		feed_key: typeof n.feed_key === "string" ? n.feed_key : undefined,
 		feed_name: typeof n.feed_name === "string" ? n.feed_name : undefined,
 		automation_id:
-			typeof n.automation_id === "number" ? n.automation_id : undefined,
+			typeof n.automation_id === "number"
+				? n.automation_id
+				: resourceSubjectId("automation"),
 		automation_name:
 			typeof n.automation_name === "string" ? n.automation_name : undefined,
 		agent_id: typeof n.agent_id === "string" ? n.agent_id : undefined,
@@ -531,6 +547,12 @@ export async function listOrgActivity(opts: {
 	agentId?: string;
 	/** Trusted caller identity, independent of the agent display filter. */
 	caller?: ExternalActivityCaller;
+	/**
+	 * A reader outside the workspace. Their feed keeps runs on org-visible
+	 * connections and runs with no connection. Private device connections
+	 * (a paired browser, a team chat account) stay off the public home.
+	 */
+	publicReader?: boolean;
 }): Promise<{ items: ActivityCard[]; total: number; limit: number }> {
 	const limit = Math.min(Math.max(opts.limit ?? 24, 1), 50);
 	// Notifications are not agent-attributable, so an agent-scoped feed omits
@@ -572,6 +594,20 @@ export async function listOrgActivity(opts: {
 			const agentFilter = opts.agentId
 				? sql`AND w.managed_agent_id = ${opts.agentId}`
 				: sql``;
+			// Same FK predicate as every other connection-sourced read. NULL
+			// connection_id stays visible. The literal form is safe here: both
+			// values come from the server-derived caller, and the compiler escapes them.
+			const connectionFilter = opts.publicReader
+				? sql.unsafe(
+						compileConnectionFkVisibilityLiteral(
+							authzScopeFromToolContext({
+								organizationId: opts.organizationId,
+								userId: opts.userId,
+							}),
+							"r",
+						),
+					)
+				: sql``;
 			const rows = (await sql`
         SELECT r.id, r.run_type, r.automation_id, r.connection_id, r.feed_id,
                r.connector_key, r.action_key AS operation_key,
@@ -587,6 +623,7 @@ export async function listOrgActivity(opts: {
         WHERE r.organization_id = ${opts.organizationId}
           AND r.run_type = ANY(${pgTextArray(runKinds)}::text[])
           ${agentFilter}
+          ${connectionFilter}
         ORDER BY r.created_at DESC, r.id DESC
         LIMIT 60
       `) as unknown as Array<{

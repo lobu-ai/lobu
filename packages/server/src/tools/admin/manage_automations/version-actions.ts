@@ -3,6 +3,8 @@
  *   create_version, upgrade, get_versions, get_version_details
  */
 
+import { assertAutomationModuleConfiguration } from '../../../automations/preparation';
+import { inspectAutomationScriptExports } from '../../../automations/reaction-executor';
 import { getDb, parsePgNumberArray } from '../../../db/client';
 import { assertAutomationScriptExecutor } from '../../../automations/script-config';
 import { ToolUserError } from '../../../utils/errors';
@@ -10,6 +12,7 @@ import { insertToolConfigChange } from '../helpers/config-audit';
 import { nextRunAt } from '../../../utils/cron';
 import { resolveUsernames } from '../../../utils/resolve-usernames';
 import { getNextNumericId } from '../helpers/db-helpers';
+import { assertAutomationConfigVersionsUnchanged } from './config-state';
 import type { ToolContext } from '../../registry';
 import type { ManageAutomationsArgs, ManageAutomationsResult } from '../manage_automations';
 import {
@@ -46,7 +49,8 @@ import { syncAutomationChannelFeedsBestEffort } from '../../../automations/chann
 export async function handleCreateVersion(
   args: ManageAutomationsArgs,
   _env: unknown,
-  ctx: ToolContext
+  ctx: ToolContext,
+  base?: Record<string, string>
 ): Promise<{
   action: 'create_version';
   automation_id: string;
@@ -231,10 +235,7 @@ export async function handleCreateVersion(
   }
 
   // Executor matrix on the LIVE row (set_as_current writes triggers to it):
-  // same rules as create/update — automated Automations need an executor, and
-  // every referenced executor must be authorized. Without this, create_version
-  // (the primary authoring path — `lobu apply`, owletto edit) could land
-  // zombie triggers.
+  // same trigger compatibility and assignment authorization as create/update.
   const setAsCurrentForMatrix = args.set_as_current !== false;
   if (setAsCurrentForMatrix && versionOrganizationId && triggersChanged) {
     const rowDefaults: AutomationExecutorDefaults = {
@@ -339,12 +340,24 @@ export async function handleCreateVersion(
     // automations row is untouched, so the audit must report the persisted
     // current_version_id rather than null/undefined.
     const preimageRows = await tx`
-      SELECT current_version_id FROM automations WHERE id = ${args.automation_id} LIMIT 1 FOR UPDATE
+      SELECT id, current_version_id, reaction_script_compiled, reaction_input_schema, execution_config, agent_kind,
+             managed_agent_id, device_worker_id, triggers FROM automations
+      WHERE automation_group_id = ${groupId} AND organization_id = ${ctx.organizationId}
+      ORDER BY id FOR UPDATE
     `;
-    const persistedCurrentVersionId =
-      preimageRows.length > 0 && preimageRows[0].current_version_id != null
-        ? Number(preimageRows[0].current_version_id)
-        : null;
+    if (base) await assertAutomationConfigVersionsUnchanged(args, ctx.organizationId, base, tx);
+    const preimage = preimageRows.find(row => Number(row.id) === Number(args.automation_id));
+    if (setAsCurrent) {
+      for (const row of preimageRows) {
+        if (row.reaction_script_compiled) assertAutomationModuleConfiguration({
+          ...row, prompt, skills, outputs,
+          triggers: args.triggers !== undefined ? triggerWrite.triggers : row.triggers,
+        }, await inspectAutomationScriptExports(row.reaction_script_compiled));
+      }
+    }
+    const persistedCurrentVersionId = preimage?.current_version_id != null
+      ? Number(preimage.current_version_id)
+      : null;
 
     // The new version row is owned by the group root, not the assignment
     // the caller named. Every automation in the group will later point at

@@ -243,14 +243,15 @@ export class LobuProvider {
   private async sendMessage(
     session: Session,
     content: string
-  ): Promise<{ traceId?: string; messageId?: string }> {
+  ): Promise<{ traceId?: string; messageId: string }> {
+    const messageId = randomUUID();
     const res = await fetch(`${session.base}/messages`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${session.sessionToken}`,
       },
-      body: JSON.stringify({ content }),
+      body: JSON.stringify({ content, messageId }),
     });
 
     if (!res.ok) {
@@ -263,13 +264,13 @@ export class LobuProvider {
       messageId?: string;
     };
     const traceId = data.traceparent?.split("-")[1];
-    return { traceId, messageId: data.messageId };
+    return { traceId, messageId };
   }
 
   private async collectResponse(
     session: Session,
     timeoutMs: number,
-    messageId?: string
+    messageId: string
   ): Promise<CollectedResponse> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -299,11 +300,15 @@ export class LobuProvider {
       const seenSnippetIds = new Set<number>();
 
       const matchesTarget = (eventMessageId: unknown): boolean => {
-        if (!messageId) return true;
         return (
           typeof eventMessageId === "string" && eventMessageId === messageId
         );
       };
+
+      const matchesTerminal = (data: Record<string, unknown>): boolean =>
+        matchesTarget(data.messageId) ||
+        (Array.isArray(data.processedMessageIds) &&
+          data.processedMessageIds.includes(messageId));
 
       const finalize = (
         extra: Partial<CollectedResponse> = {}
@@ -364,7 +369,13 @@ export class LobuProvider {
                 break;
               }
               case "complete": {
-                if (!matchesTarget(data.messageId)) break;
+                if (!matchesTerminal(data)) break;
+                if (
+                  typeof data.finalText === "string" &&
+                  data.finalText.length > 0
+                ) {
+                  text = data.finalText;
+                }
                 const usage = data.usage as Record<string, number> | undefined;
                 return finalize({
                   tokens: usage
@@ -379,7 +390,8 @@ export class LobuProvider {
                 });
               }
               case "error":
-                if (!matchesTarget(data.messageId)) break;
+              case "agent-error":
+                if (!matchesTerminal(data)) break;
                 return finalize({
                   error: String(data.error ?? "Unknown error"),
                 });

@@ -820,9 +820,7 @@ describe("lobu run hosted-chat link-code ordering", () => {
     // /preview/claims, which fails with "fetch failed" if the embedded gateway
     // isn't listening yet. It must be called from the announceLocalSignIn
     // then-chain (after reachability + auto-apply), never the pre-spawn banner.
-    const spawnIndex = devSource.indexOf(
-      "const child = spawn(process.execPath"
-    );
+    const spawnIndex = devSource.indexOf("const child = spawn(nodeBinary");
     const chainCallIndex = devSource.indexOf(
       "printPreviewInstructions(cwd)",
       devSource.indexOf("announceLocalSignIn")

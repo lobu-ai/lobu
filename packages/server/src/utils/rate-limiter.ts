@@ -435,6 +435,17 @@ export const RateLimitPresets = {
       'OAuth client registration rate limit exceeded. Maximum 10 registrations per hour.',
   } as RateLimitConfig,
 
+  /**
+   * Token grants: 600/minute per IP across both route mounts. Leave room for
+   * shared service egress and device polling while bounding unauthenticated
+   * database and client-secret work. Public client IDs are not limiter keys.
+   */
+  OAUTH_TOKEN_PER_IP_MINUTE: {
+    limit: 600,
+    windowSeconds: 60,
+    errorMessage: 'Too many token requests. Retry after the indicated delay.',
+  } as RateLimitConfig,
+
   /** Agent device-claim email: 10/hour per IP (sends a login email to a caller-supplied address) */
   DEVICE_EMAIL_PER_IP_HOUR: {
     limit: 10,
@@ -498,11 +509,16 @@ export function enforcePublicReadLimit(caller: {
         RateLimitPresets.PUBLIC_READ_PER_IP_MINUTE
       );
   if (!result.allowed) {
-    throw new ToolUserError(
-      `${result.errorMessage} Try again in ${Math.max(1, result.resetInSeconds)}s.`,
+    const retryAfterSeconds = Math.max(1, result.resetInSeconds);
+    const error = new ToolUserError(
+      `${result.errorMessage} Try again in ${retryAfterSeconds}s.`,
       429,
       'RATE_LIMITED'
     );
+    // Machine-readable alongside the prose: the HTTP boundary turns this into
+    // `Retry-After`, and the web host renders the wait without parsing text.
+    error.retryAfterSeconds = retryAfterSeconds;
+    throw error;
   }
 }
 

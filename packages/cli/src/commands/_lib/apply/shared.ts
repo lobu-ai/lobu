@@ -1,3 +1,8 @@
+import type {
+  AutomationExecutionConfig,
+  LegacyAutomationExecutionConfig,
+} from "@lobu/core/contracts/tools/manage-automations";
+
 /**
  * Shared structural types + tiny helpers used across the apply pipeline
  * (desired-state IR, wire client, diff, apply-cmd).
@@ -37,26 +42,21 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** Apply declared model/executor fields while preserving unmanaged execution options. */
+/** Preserve omitted options; replacing a legacy definition must be explicit. */
 export function automationExecutionConfig(
   model: string | null | undefined,
-  remote?: Record<string, unknown> | null,
-  executor?: {
-    kind: "script";
-    source: string;
-    params?: Record<string, unknown>;
-  } | null
-): Record<string, unknown> | null {
-  if (executor) {
-    if (model != null)
-      throw new Error("Script Automations do not use a model override.");
-    return { executor };
-  }
-  if (model === undefined && executor === undefined) return remote ?? null;
+  remote?: LegacyAutomationExecutionConfig | null,
+  declared?: AutomationExecutionConfig | null
+): LegacyAutomationExecutionConfig | null {
+  if (declared !== undefined) return declared;
+  if (model === undefined) return remote ?? null;
+  if (remote?.executor)
+    throw new Error(
+      "Clear the legacy executor explicitly with executionConfig before changing its model."
+    );
   const config = { ...remote };
-  if (executor === null) delete config.executor;
   if (model === null) delete config.model;
-  else if (model !== undefined) config.model = model;
+  else config.model = model;
   return Object.keys(config).length > 0 ? config : null;
 }
 

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { initTracing, shutdownTracing } from '@lobu/core';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -437,6 +438,76 @@ describe('WorkerPollLoop', () => {
     await handler('SIGTERM');
 
     expect(events).toEqual(['daemon-stop', 'wait', 'exit:0']);
+  });
+
+  describe('tracing shutdown budget', () => {
+    let savedGrace: string | undefined;
+    let releaseFlush: () => void;
+
+    beforeEach(async () => {
+      savedGrace = process.env.WORKER_SHUTDOWN_GRACE_SECONDS;
+      await shutdownTracing();
+    });
+
+    afterEach(async () => {
+      releaseFlush?.();
+      await shutdownTracing();
+      if (savedGrace === undefined) delete process.env.WORKER_SHUTDOWN_GRACE_SECONDS;
+      else process.env.WORKER_SHUTDOWN_GRACE_SECONDS = savedGrace;
+    });
+
+    function holdTracingShutdown(): void {
+      const pending = new Promise<void>((resolve) => { releaseFlush = resolve; });
+      initTracing({
+        serviceName: 'shutdown-budget-test',
+        spanProcessors: [{
+          onStart() {},
+          onEnd() {},
+          forceFlush: async () => undefined,
+          shutdown: () => pending,
+        }],
+      });
+    }
+
+    test('exits within remaining pod grace even when the tracing exporter stalls', async () => {
+      process.env.WORKER_SHUTDOWN_GRACE_SECONDS = '2';
+      holdTracingShutdown();
+      const exits: number[] = [];
+      const loop = { waitForActiveJobs: async () => true } as unknown as WorkerPollLoop;
+      const shutdown = createWorkerPollLoopShutdownHandler(loop, () => undefined, (code) => exits.push(code))('SIGTERM');
+      try {
+        const exited = await Promise.race([
+          shutdown.then(() => true),
+          Bun.sleep(1_800).then(() => false),
+        ]);
+        expect(exited).toBe(true);
+        expect(exits).toEqual([0]);
+      } finally {
+        releaseFlush();
+        await shutdown;
+      }
+    });
+
+    test('accounts for time spent in the shutdown hook before flushing traces', async () => {
+      process.env.WORKER_SHUTDOWN_GRACE_SECONDS = '2';
+      holdTracingShutdown();
+      const exits: number[] = [];
+      const loop = { waitForActiveJobs: async () => true } as unknown as WorkerPollLoop;
+      const shutdown = createWorkerPollLoopShutdownHandler(
+        loop, () => Bun.sleep(1_200), (code) => exits.push(code)
+      )('SIGTERM');
+      try {
+        const exited = await Promise.race([
+          shutdown.then(() => true),
+          Bun.sleep(1_800).then(() => false),
+        ]);
+        expect(exited).toBe(true);
+        expect(exits).toEqual([0]);
+      } finally {
+        releaseFlush();
+        await shutdown;
+      }
+    });
   });
 
   // A fleet pod gets SIGTERM on every deploy. The kubelet SIGKILLs it after

@@ -1,13 +1,13 @@
 import type {
-  AutomationExecutionConfig,
-  AutomationScriptExecutor,
+  LegacyAutomationExecutionConfig,
+  LegacyAutomationScriptExecutor,
 } from '@lobu/core/contracts/tools/manage-automations';
 import { listOrgModelProviderSlugs } from '../../lobu/model-config';
 import { ToolUserError } from '../../utils/errors';
 import { isAdminOrOwnerRole } from '../access-control';
 
-export function automationScriptExecutor(config: unknown): AutomationScriptExecutor | undefined {
-  const executor = (config as AutomationExecutionConfig | null | undefined)?.executor;
+export function automationScriptExecutor(config: unknown): LegacyAutomationScriptExecutor | undefined {
+  const executor = (config as LegacyAutomationExecutionConfig | null | undefined)?.executor;
   return executor?.kind === 'script' ? executor : undefined;
 }
 

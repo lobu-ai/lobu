@@ -22,6 +22,15 @@ const EntityType = Type.String({
   description: "Entity type as defined in your workspace",
 });
 
+// Type names are local; a discovered numeric ID identifies one immutable type.
+const EntityReferenceType = Type.Union(
+  [EntityType, Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER })],
+  {
+    description:
+      "[get/list_links and relationship endpoints] A local type slug or discovered numeric type ID. Other actions require a slug. Foreign IDs allow only public-record reads, not workspace access.",
+  }
+);
+
 const EntityId = Type.Union(
   [
     Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
@@ -98,8 +107,8 @@ const IncludeDeleted = Type.Boolean({
 const EdgeEndpoints = {
   from_entity_id: EntityId,
   to_entity_id: EntityId,
-  from_entity_type: Type.Optional(EntityType),
-  to_entity_type: Type.Optional(EntityType),
+  from_entity_type: Type.Optional(EntityReferenceType),
+  to_entity_type: Type.Optional(EntityReferenceType),
   relationship_type_slug: Type.String({
     description: "[link/unlink/update_link/list_links] Relationship type slug",
     minLength: 1,
@@ -144,6 +153,9 @@ export const CreateEntityAction = Type.Object({
   automation_source: Type.Optional(AutomationSource),
 });
 
+/** Upper bound on `update`'s `expected` precondition keys. */
+const MAX_EXPECTED_FIELDS = 50;
+
 export const UpdateEntityAction = Type.Object({
   action: Type.Literal("update", {
     description:
@@ -175,6 +187,13 @@ export const UpdateEntityAction = Type.Object({
     Type.Boolean({
       description:
         "[update] Assert that the signed-in person made this change themselves, so it is recorded as their manual edit: the fields it sets (and affirm_fields) become theirs, and Automations then queue an approval instead of updating them. A wrong assertion takes the field away from Automations. Honoured for a person's own web-session edit, or for a token minted with the entities:manual_edit scope by a person in the web app, with no agent, MCP session or Automation behind the call; otherwise the update fails with 403 MANUAL_EDIT_NOT_ALLOWED and nothing is written. Defaults to false.",
+    })
+  ),
+  // Optimistic concurrency: the values the caller read before writing
+  expected: Type.Optional(
+    Type.Record(Type.String(), Type.Unknown(), {
+      maxProperties: MAX_EXPECTED_FIELDS,
+      description: `[update] Metadata field name -> the value the caller last read. Checked against the live row under the update's row lock: if any field differs, nothing is written (no field changes, ownership markers, events or approvals) and the update fails with 409 PRECONDITION_FAILED listing the field names in mismatched_fields. Values compare structurally (object key order is ignored); null matches a field that was never set. Metadata fields only (not name, content, slug or parent_id); at most ${MAX_EXPECTED_FIELDS} keys.`,
     })
   ),
   automation_source: Type.Optional(AutomationSource),
@@ -213,7 +232,7 @@ export const ListEntitiesAction = Type.Object({
 export const GetEntityAction = Type.Object({
   action: Type.Literal("get", { description: "Fetch one entity." }),
   entity_id: EntityId,
-  entity_type: Type.Optional(EntityType),
+  entity_type: Type.Optional(EntityReferenceType),
   include_deleted: Type.Optional(IncludeDeleted),
 });
 
@@ -323,7 +342,7 @@ export const ListLinksAction = Type.Object({
     description: "List relationships for an entity with filters + counts.",
   }),
   entity_id: Type.Optional(EntityId),
-  entity_type: Type.Optional(EntityType),
+  entity_type: Type.Optional(EntityReferenceType),
   record: Type.Optional(
     Type.Object(
       {
@@ -387,10 +406,12 @@ export const DiscoverDuplicatesAction = Type.Object({
 });
 
 export const ManageEntitySchema = Type.Union([
+  // MCP flattens duplicate fields first-occurrence-wins: advertise the read
+  // selector superset while each mutation still validates its slug-only input.
+  GetEntityAction,
   CreateEntityAction,
   UpdateEntityAction,
   ListEntitiesAction,
-  GetEntityAction,
   DeleteEntityAction,
   LinkEntitiesAction,
   UnlinkEntitiesAction,
@@ -446,6 +467,11 @@ export const RelationshipRowSchema = Type.Object({
   // dead affordance this exists to remove. Every producer projects it from
   // the one shared RELATIONSHIP_SELECT, so no path needs to omit it.
   acl_managed: Type.Boolean(),
+  from_entity_type_id: Type.Optional(Type.Integer({ minimum: 1 })),
+  to_entity_type_id: Type.Optional(Type.Integer({ minimum: 1 })),
+  // Canonical links for foreign endpoints; same-workspace peeks are unchanged.
+  from_entity_url: Type.Optional(Type.String()),
+  to_entity_url: Type.Optional(Type.String()),
   from_entity_name: Type.Optional(Type.String()),
   from_entity_slug: Type.Optional(Type.String()),
   from_entity_type: Type.Optional(Type.String()),
@@ -495,6 +521,7 @@ export type EntityIdentity = Static<typeof EntityIdentitySchema>;
 export const ManageEntityItemSchema = Type.Object({
   id: Type.Union([EntityId, Type.Null()]),
   identity: Type.Optional(EntityIdentitySchema),
+  entity_type_id: Type.Optional(Type.Integer({ minimum: 1 })),
   entity_type: Type.String(),
   name: Type.String(),
   slug: Type.String(),

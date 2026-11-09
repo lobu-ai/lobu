@@ -9,7 +9,7 @@ import type { SocialScripts } from "../external-social.prompt";
 export async function buildExternalSocial(
   policy: EvidencePolicy
 ): Promise<SocialScripts> {
-  async function bundle(file: string, exported: string) {
+  async function bundle(file: string, exported: string | null) {
     const result = await build({
       entrypoints: [fileURLToPath(new URL(`../${file}.ts`, import.meta.url))],
       target: "browser",
@@ -22,16 +22,16 @@ export async function buildExternalSocial(
       throw new AggregateError(result.logs, "Social script build failed");
     const code = await result.outputs[0]!.text();
     // CJS exports stay local to the expression, including in an import-free V8 isolate.
-    return `(() => { const module = {exports:{}}; ${code}\nreturn module.exports.${exported}; })()`;
+    return `(() => { const module = {exports:{}}; ${code}\nreturn module.exports${exported ? `.${exported}` : ""}; })()`;
   }
   const [reader, verifier, reaction] = await Promise.all([
     bundle("social-timeline-reader", "readSocialTimelinePage"),
-    bundle("external-social-evidence", "verifySocialEvidence"),
+    bundle("external-social-evidence", null),
     bundle("external-social.reaction", "deliverExternalSocial"),
   ]);
   return {
     policy,
-    preflight: `const timelineReaderSource = ${JSON.stringify(reader)};\nconst verifySocialEvidence = (${verifier}).bind(null, timelineReaderSource);`,
+    preflight: `const timelineReaderSource = ${JSON.stringify(reader)};\nconst socialEvidence = ${verifier};\nconst verifySocialEvidence = socialEvidence.verifySocialEvidence.bind(null, timelineReaderSource);\nconst verifySocialEvidenceForRetention = socialEvidence.verifySocialEvidenceForRetention.bind(null, timelineReaderSource);`,
     reaction: `export default (ctx, client) => (${reaction})(ctx, client, ${JSON.stringify(policy)});`,
   };
 }

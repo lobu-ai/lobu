@@ -1,6 +1,6 @@
 {
   "name": "@lobu/pgvector-embedded",
-  "version": "24.3.0",
+  "version": "24.7.0",
   "license": "BUSL-1.1",
   "type": "module",
   "description": "Prebuilt pgvector binaries + injector for embedded-postgres (Lobu local runtime)",
@@ -20,7 +20,7 @@
     }
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=26 <27"
   },
   "private": true,
   "repository": {

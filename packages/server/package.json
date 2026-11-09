@@ -6,12 +6,12 @@
 	"type": "module",
 	"description": "Lobu memory backend — Hono HTTP server, MCP handler, REST API, in-process Lobu gateway",
 	"engines": {
-		"node": ">=22 <25 || >=26"
+		"node": ">=26 <27"
 	},
 	"scripts": {
-		"dev": "tsx watch --ignore=../web/** --ignore=../owletto/** --ignore=../../node_modules/** src/server.ts",
-		"dev:local": "tsx watch --ignore=../web/** --ignore=../owletto/** --ignore=../../node_modules/** src/server.ts",
-		"start": "tsx src/server.ts",
+		"dev": "node --no-node-snapshot ../../node_modules/tsx/dist/cli.mjs watch --ignore=../web/** --ignore=../owletto/** --ignore=../../node_modules/** src/server.ts",
+		"dev:local": "node --no-node-snapshot ../../node_modules/tsx/dist/cli.mjs watch --ignore=../web/** --ignore=../owletto/** --ignore=../../node_modules/** src/server.ts",
+		"start": "node --no-node-snapshot ../../node_modules/tsx/dist/cli.mjs src/server.ts",
 		"build:server": "node ./scripts/build-server-bundle.mjs && bun ./scripts/build-catalog-manifests.ts",
 		"test": "vitest",
 		"test:gateway": "dirs=$(find src/gateway -type d -name __tests__ | sort); [ -n \"$dirs\" ] || { echo 'no gateway __tests__ dirs found' >&2; exit 1; }; rc=0; for d in $dirs; do bun test \"$d\" --timeout 30000 || rc=1; done; exit $rc",
@@ -42,6 +42,7 @@
 		"@mariozechner/pi-ai": "^0.73.1",
 		"@mariozechner/pi-coding-agent": "^0.73.1",
 		"@modelcontextprotocol/sdk": "^1.27.1",
+		"@opentelemetry/api": "^1.9.0",
 		"@polyglot-sql/sdk": "^0.1.13",
 		"@react-email/components": "^1.0.12",
 		"@react-email/render": "^2.0.7",
@@ -84,7 +85,6 @@
 		"vitest": "4.1.11"
 	},
 	"optionalDependencies": {
-		"isolated-vm": "^6.2.0",
-		"isolated-vm-next": "npm:isolated-vm@^7.0.1"
+		"isolated-vm": "7.0.2"
 	}
 }

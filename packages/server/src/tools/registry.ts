@@ -122,6 +122,8 @@ export interface ToolContext {
   userId: string | null;
   /** Caller's role in the organization (null for non-members reading a public workspace). */
   memberRole: string | null;
+  /** Verified worker-token limit on admin-tier tools; retained by nested SDK calls. */
+  adminTools?: string[] | null;
   /** Durable Lobu/Lobu agent identity bound to this MCP session, when provided. */
   agentId?: string | null;
   /**
@@ -267,6 +269,8 @@ interface ToolDefinitionMetadata {
   inputSchema: any; // JSON Schema
   /** Explicit workspace selector shared by discovery and dispatch. */
   workspaceTarget?: string;
+  /** Require an activity heading in advertised schemas while accepting legacy calls. */
+  requestTitle?: boolean;
   /**
    * Narrower schema advertised on `tools/list` when the tool accepts fields
    * that are server-internal (e.g. pre-computed embeddings, identity-bound
@@ -409,6 +413,7 @@ const AGENT_TOOLS: ToolDefinition[] = [
   {
     name: 'query_sdk',
     scope: 'account',
+    requestTitle: true,
     description:
       'Run capability-scoped, read-only TypeScript through the Lobu SDK. On bare OAuth /mcp, select a workspace with await client.org(target) before workspace methods. Query entities, relationships, feeds, operations, metrics, and authorized connected-source data; write, administrative, and external-action methods are rejected by the sandbox. Use `run_sdk` for mutations and `search_sdk` to discover methods. Keep batches within the wall-clock budget and return a partial result with a cursor before expiry; reserve `ctx.sleep(ms)` for short bounded retries. Start long device work in `run_sdk` with operations.execute({ ..., background: true }) and check operations.getRun later. Lobu appends a private audit/activity record for the invocation.',
     inputSchema: QuerySchema,
@@ -422,6 +427,7 @@ const AGENT_TOOLS: ToolDefinition[] = [
   {
     name: 'query_sql',
     workspaceTarget: 'org_slug',
+    requestTitle: true,
     description:
       'Run a paginated, sortable, searchable read-only SQL query (member-safe). Table references auto-scope to the bound org, or pass `connection` to push read-only SQL fully into an external database connector. Source-backed feeds are queried explicitly with query_sdk client.feeds.readMany. Prefer client.metrics.query for declared measures; use client.query in query_sdk for simple one-shot SQL. Do NOT use positional parameters ($1, $2, …). `org_slug` selects a granted workspace on bare OAuth /mcp and is required when the connection has no workspace binding. The query does not change workspace content or external systems, but Lobu appends a private audit/activity record for the invocation.',
     inputSchema: QuerySqlSchema,
@@ -434,6 +440,7 @@ const AGENT_TOOLS: ToolDefinition[] = [
   {
     name: 'run_sdk',
     scope: 'account',
+    requestTitle: true,
     description:
       'Execute a capability-scoped Lobu SDK script. On bare OAuth /mcp, select workspace operations with await client.org(target); account discovery and conversation titles require no target. The script can create, update, or delete Lobu data and invoke connector, agent, or device operations only through documented `client` methods; workspace permissions, operation policies, human approvals, and audit remain enforced. Use `query_sdk` for reads, `search_sdk` to discover methods, and `dry_run=true` to preview write, administrative, or external calls without executing them. For connector setup, do the authorized SDK work first using connections.connect or connections.reauthenticate. When human input is required, use only exact URLs returned by tools, explain which account/app and permissions the user is authorizing, and follow the returned resume_call/completion_check. Never invent setup URLs or ask for OAuth client secrets in chat; use the returned browser setup form. Resume the requested work after verifying authorization completed.',
     inputSchema: RunSchema,
@@ -838,17 +845,24 @@ type ListedToolOptions = {
  */
 export function getMcpTools(options?: ListedToolOptions) {
   const tools = getListedTools(ALL_MCP_TOOLS, options);
-  if (!options?.requireWorkspaceTarget) return tools;
   // Never mutate cached schemas: a bound connection may list immediately after
   // an account connection in the same process.
   return tools.map((tool) => {
-    const field = getTool(tool.name)?.workspaceTarget;
-    if (!field) return tool;
+    const required = [...(tool.inputSchema.required ?? [])];
+    // Ask MCP callers for readable activity headings without rejecting older
+    // callers: dispatch still validates the original, title-optional schema.
+    const definition = getTool(tool.name);
+    if (definition?.requestTitle) {
+      required.push('title');
+    }
+    const field = options?.requireWorkspaceTarget ? definition?.workspaceTarget : undefined;
+    if (field) required.push(field);
+    if (required.length === (tool.inputSchema.required ?? []).length) return tool;
     return {
       ...tool,
       inputSchema: {
         ...tool.inputSchema,
-        required: [...new Set([...(tool.inputSchema.required ?? []), field])],
+        required: [...new Set(required)],
       },
     };
   });

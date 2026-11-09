@@ -1,4 +1,4 @@
-import type { AutomationExecutionConfig } from '@lobu/core/contracts/tools/manage-automations';
+import type { LegacyAutomationExecutionConfig } from '@lobu/core/contracts/tools/manage-automations';
 import { ToolUserError } from '../utils/errors';
 import { automationScriptExecutor } from '../tools/admin/automation-execution-config';
 import {
@@ -43,7 +43,7 @@ export async function assertAutomationScriptExecutor(params: {
       422
     );
   }
-  const config = params.executionConfig as AutomationExecutionConfig;
+  const config = params.executionConfig as LegacyAutomationExecutionConfig;
   if (
     config.model ||
     config.effort ||

@@ -70,14 +70,7 @@ function checkNodeVersion(): Check {
     return {
       name: "node",
       status: "fail",
-      detail: `${version} (needs >=${MIN_NODE_MAJOR})`,
-    };
-  }
-  if (!support.sandbox) {
-    return {
-      name: "node",
-      status: "warn",
-      detail: `${version} (SDK sandbox unavailable; use 24 LTS or 26+)`,
+      detail: `${version} (needs ${MIN_NODE_MAJOR}.x)`,
     };
   }
   return { name: "node", status: "ok", detail: version };

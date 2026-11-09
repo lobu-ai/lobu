@@ -308,7 +308,13 @@ describe("X identity-only login through the real Better Auth handler", () => {
     clearLoginProviderCachesForTests();
     const callbackRequest = new Request(callback, { headers: { cookie: cookies(start) } });
     const callbackAuth = await createAuth(getEnvFromProcess(), callbackRequest);
+    const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
     const finish = await callbackAuth.handler(callbackRequest);
+    const observed = stdout.mock.calls
+      .flatMap(([chunk]) => String(chunk).split("\n"))
+      .filter((line) => line.includes('"auth.observed"'))
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    stdout.mockRestore();
     expect(finish.status).toBe(302);
     expect(finish.headers.get("location")).toBe(`${ORIGIN}/acme`);
     const sessionCookie = cookies(finish);
@@ -321,6 +327,10 @@ describe("X identity-only login through the real Better Auth handler", () => {
       email: hasEmail ? "alice@acme.test" : `${X_ACCOUNT_ID}@twitter.placeholder.invalid`,
       emailVerified: hasEmail,
     });
+    // The provider comes from the callback route, not from the account row.
+    expect(observed).toEqual([expect.objectContaining({
+      event: "auth.observed", kind: "sign_up", user_id: session.user.id, method: "twitter",
+    })]);
     const [account] = await sql`SELECT "accountId", "userId", scope, "refreshToken"
       FROM account WHERE "providerId" = 'twitter'`;
     expect(account).toMatchObject({ accountId: X_ACCOUNT_ID, userId: session.user.id, refreshToken: null });

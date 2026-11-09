@@ -9,6 +9,8 @@
 import { randomUUID } from "node:crypto";
 import {
   createLogger,
+  getCurrentSpan,
+  getTraceparent,
   type InstructionProvider,
   type ThreadResponsePayload,
 } from "@lobu/core";
@@ -135,6 +137,7 @@ export class ApiPlatform implements PlatformAdapter {
     name: string,
     data: Record<string, unknown>
   ): void {
+    const traceparent = getTraceparent(getCurrentSpan() ?? null);
     const payload: ThreadResponsePayload = {
       messageId: randomUUID(),
       conversationId: event.conversationId,
@@ -149,8 +152,13 @@ export class ApiPlatform implements PlatformAdapter {
       // headless turns — no browser SSE exists on any pod for them, so an
       // owner-gated card would re-queue 30x and dead-letter. Interactive turns
       // carry no source and stay owner-routed.
-      ...(event.source
-        ? { platformMetadata: { source: event.source } }
+      ...(event.source || traceparent
+        ? {
+            platformMetadata: {
+              ...(event.source ? { source: event.source } : {}),
+              ...(traceparent ? { traceparent } : {}),
+            },
+          }
         : {}),
       customEvent: { name, data: { ...data, turnMessageId: event.turnMessageId }, requireSseOwner: true },
     };

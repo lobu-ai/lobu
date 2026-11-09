@@ -3,6 +3,7 @@ import type {
 	AutomationTriggerResult,
 } from "@lobu/core/contracts/tools/manage-automations";
 import { beforeEach, describe, expect, it } from "vitest";
+import { encodeExternalAutomationClaimOwner } from "../../../automations/external-claim-owner";
 import type { DbClient } from "../../../db/client";
 import { createAutomationRun } from "../../../runs/queue-service";
 import { computePendingWindow } from "../../../utils/window-utils";
@@ -73,8 +74,24 @@ describe("Automation trigger execution contract", () => {
       SET next_window_start = ${windowStart.toISOString()}::timestamptz
       WHERE id = ${Number(automation.automation_id)}
     `;
+		// Before the assignment fence, external clients could already hold a
+		// native snapshot. Those durable leases must still renew and finish.
+		const pending = await computePendingWindow(sql as unknown as DbClient, Number(automation.automation_id));
+		const run = await createAutomationRun({
+			organizationId: workspace.org.id,
+			automationId: Number(automation.automation_id),
+			agentId: executor.managed_agent_id,
+			...("device_worker_id" in executor ? { deviceWorkerId: executor.device_worker_id, agentKind: executor.agent_kind } : {}),
+			windowStart: pending.windowStart.toISOString(),
+			windowEnd: pending.windowEnd.toISOString(),
+			dispatchSource: "scheduled",
+		});
+		const owner = encodeExternalAutomationClaimOwner({ userId: workspace.users.owner.id, agentId: null, clientId: null });
+		await sql`UPDATE runs SET status = 'running', claimed_by = ${owner}, claimed_at = NOW(),
+      last_heartbeat_at = NOW(), expires_at = NOW() + INTERVAL '15 minutes' WHERE id = ${run.runId}`;
 		const claim = (await workspace.owner.automations.claimNextWindow({
 			automation_id: automation.automation_id,
+			run_id: run.runId,
 		})) as AutomationClaimNextWindowResult;
 		return { sql, workspace, automation, claim };
 	}

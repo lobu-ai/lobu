@@ -53,7 +53,7 @@ jobs:
           # floor. `ubuntu-latest` silently became 24.04 (glibc 2.39), which
           # published a `vector.so` requiring GLIBC_2.38 (via
           # `__isoc23_strtol`, the gcc-13 uplift) — so `lobu run` could not
-          # boot embedded Postgres on Debian 12 (incl. `node:22-slim`, the
+          # boot embedded Postgres on Debian 12 (incl. `node:26-slim`, the
           # most obvious Docker base), Ubuntu 22.04 LTS, RHEL 9 or AL2023.
           # bullseye is glibc 2.31, which clears all of them. Verified by the
           # "assert glibc floor" step below, so this cannot regress silently
@@ -76,7 +76,7 @@ jobs:
       - uses: actions/setup-node@v7
         if: runner.os == 'macOS'
         with:
-          node-version: 22
+          node-version: 26
 
       - name: Install PostgreSQL 18 dev (macOS)
         if: runner.os == 'macOS'

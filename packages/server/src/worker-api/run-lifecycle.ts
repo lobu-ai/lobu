@@ -2083,17 +2083,15 @@ export async function completeAutomationRun(c: Context<{ Bindings: Env }>) {
 
 	// Window Automation: agent never called completeWindow. Bounded device-held
 	// resume (same finalize_nudges budget as cloud) so the Mac can re-spawn.
-	const automationRows = (await sql`
+	const executionConfig = Object.hasOwn(approved, 'execution_config')
+		? approved.execution_config as Record<string, unknown> | null
+		: (await sql<{ execution_config: Record<string, unknown> | null }>`
     SELECT execution_config
     FROM automations
     WHERE id = ${automationId}
     LIMIT 1
-  `) as unknown as Array<{
-		execution_config: Record<string, unknown> | null;
-	}>;
-	const budget = resolveFinalizeNudgeBudget(
-		automationRows[0]?.execution_config ?? null
-	);
+  `)[0]?.execution_config ?? null;
+	const budget = resolveFinalizeNudgeBudget(executionConfig);
 	const nudgeCount = Number(approved.finalize_nudge_count ?? 0);
 	const attemptsSoFar = Number.isFinite(nudgeCount) ? nudgeCount : 0;
 
@@ -2665,7 +2663,6 @@ export async function completeActionRun(c: Context<{ Bindings: Env }>) {
 			if (rows.length === 0) return rows;
 
 			const organizationId = (rows[0] as any)?.organization_id;
-			const actionKey = (rows[0] as any)?.action_key ?? "Action";
 			const approvalStatus = (rows[0] as any)?.approval_status;
 			const cardBearingRun =
 				approvalStatus === "approved" ||
@@ -2676,10 +2673,11 @@ export async function completeActionRun(c: Context<{ Bindings: Env }>) {
 					req.run_id,
 					organizationId,
 					newStatus,
-					`${actionKey} — ${newStatus}`,
-					req.status === "success"
-						? `Action completed: ${actionKey}`
-						: `Action failed: ${actionKey}${req.error_message ? ` — ${req.error_message}` : ""}`,
+					(operation) => `${operation} — ${newStatus}`,
+					(operation) =>
+						req.status === "success"
+							? `Action completed: ${operation}`
+							: `Action failed: ${operation}${req.error_message ? ` — ${req.error_message}` : ""}`,
 					req.status === "success"
 						? { action_output: actionOutput }
 						: { error_message: req.error_message },

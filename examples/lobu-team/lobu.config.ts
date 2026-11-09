@@ -1,13 +1,21 @@
 import {
   connectorFromFile,
+  context,
   defineAgent,
   defineAuthProfile,
+  defineAutomation,
   defineConfig,
   defineConnection,
   defineEntityType,
+  defineRelationshipType,
+  every,
+  reactionFromFile,
   Type,
 } from "@lobu/cli/config";
-import type LokiActivityConnector from "./loki-activity.connector.ts";
+import type ClickHouseAnalyticsConnector from "./clickhouse-analytics.connector.ts";
+import type DataForSeoConnector from "./dataforseo.connector.ts";
+import type IssueTrackerReaction from "./issue-tracker.reaction.ts";
+import { productUsers } from "./product-users.ts";
 
 // One backlog type for every kind of team work, written by people and agents.
 // The organic acquisition review Automation reads the `seo` kind as its backlog
@@ -143,6 +151,139 @@ const productOps = defineAgent({
     "Summarizes Lobu production activity from organization-owned read-only feeds",
 });
 
+const text = (title: string, description?: string) =>
+  Type.Optional(
+    Type.Unsafe({
+      type: "string",
+      title,
+      ...(description ? { description } : {}),
+    })
+  );
+const time = (title: string, description?: string) =>
+  Type.Optional(
+    Type.Unsafe({
+      type: "string",
+      format: "date-time",
+      title,
+      ...(description ? { description } : {}),
+    })
+  );
+const count = (title: string) =>
+  Type.Optional(Type.Unsafe({ type: "integer", minimum: 0, title }));
+
+// A production error group. The issue-tracker Automation creates one only when
+// a ClickHouse fingerprint passes its noise gate, and owns status and the
+// counters. Triage fields belong to the agents and people who investigate; the
+// work to fix it is a linked `task`.
+const issue = defineEntityType({
+  key: "issue",
+  name: "Issue",
+  description:
+    "A production error group keyed by its fingerprint: lifecycle, counters and triage. Live occurrences stay in ClickHouse (issue_trend, issue_events).",
+  properties: {
+    fingerprint: Type.Unsafe({
+      type: "string",
+      title: "Fingerprint",
+      pattern: "^[0-9a-f]{32}$",
+    }),
+    status: Type.Unsafe({
+      enum: [
+        "new",
+        "ongoing",
+        "escalating",
+        "regressed",
+        "resolved",
+        "ignored",
+      ],
+      type: "string",
+      title: "Status",
+      "x-lobu": { role: "workflowState" },
+      "x-facet": true,
+      "x-table-column": true,
+    }),
+    kind: Type.Unsafe({
+      enum: ["system", "user", "dependency"],
+      type: "string",
+      title: "Kind",
+      "x-facet": true,
+      "x-table-column": true,
+    }),
+    priority: Type.Optional(
+      Type.Unsafe({
+        enum: ["high", "medium", "low"],
+        type: "string",
+        title: "Priority",
+        "x-facet": true,
+        "x-table-column": true,
+      })
+    ),
+    culprit: text("Culprit", "Where it fails: the span or log scope"),
+    message: text("Message", "Parameterized error message"),
+    first_seen: time("First seen"),
+    last_seen: Type.Optional(
+      Type.Unsafe({
+        type: "string",
+        format: "date-time",
+        title: "Last seen",
+        "x-table-column": true,
+      })
+    ),
+    seen_24h: count("Seen in 24h"),
+    seen_14d: count("Seen in 14 days"),
+    affected_orgs: count("Workspaces affected (peak hour)"),
+    affected_users: count("Users affected (peak hour)"),
+    first_release: text("First release"),
+    last_release: text("Last release"),
+    sample_trace_id: text("Sample trace"),
+    observed_at: time("Counters observed at"),
+    escalated_at: time("Escalated at"),
+    regressed_at: time("Regressed at"),
+    resolved_at: time("Resolved at"),
+    resolution: Type.Optional(
+      Type.Unsafe({
+        enum: ["auto", "manual", "fix"],
+        type: "string",
+        title: "Resolution",
+      })
+    ),
+    resolved_in_release: text(
+      "Resolved in release",
+      "Release that must stop emitting it; set by a merged fix"
+    ),
+    ignore_until: time("Ignore until"),
+    triage_summary: text(
+      "Triage summary",
+      "What is failing and why it matters"
+    ),
+    suspected_cause: text("Suspected cause"),
+    triaged_at: time("Triaged at"),
+  },
+});
+
+const trackedBy = defineRelationshipType({
+  key: "tracked-by",
+  name: "Tracked By",
+  description:
+    "Links an issue to the task that fixes it. One task can track several issues with the same cause.",
+});
+
+const issueTracker = defineAutomation({
+  agent: productOps,
+  slug: "issue-tracker",
+  name: "Issue tracker",
+  description:
+    "Promotes ClickHouse error fingerprints past the noise gate into issues and runs their lifecycle. Deterministic; no agent turn.",
+  // Five minutes after each quarter-hour issue_occurrences_hourly refresh.
+  triggers: [every("12,27,42,57 * * * *", { skip_if_unchanged: false })],
+  tags: ["observability", "issues"],
+  // The module reads ClickHouse and the issue records itself. A context-only
+  // source keeps the default events source from pacing runs by arrivals.
+  sources: { clock: context("SELECT CURRENT_TIMESTAMP AS observed_at") },
+  reaction: reactionFromFile<typeof IssueTrackerReaction>(
+    "./issue-tracker.reaction.ts"
+  ),
+});
+
 // Reuse the Lobu Team read-only database credentials already stored in Lobu.
 // Apply preserves the live secret because credentials are intentionally omitted.
 const productActivityDbAuth = defineAuthProfile({
@@ -275,6 +416,7 @@ const productActivityDb = defineConnection({
             LEFT JOIN organization o ON o.id = e.organization_id
             WHERE e.semantic_type = 'audit'
               AND e.origin_type = 'tool_invocation'
+              AND e.metadata->>'event_type' = 'tool_invocation.completed'
               AND e.payload_data->>'success' = 'false'
               AND coalesce(u.principal_kind, 'human') = 'human'
           ) activity`,
@@ -290,29 +432,22 @@ const productActivityDb = defineConnection({
 
 // Provisioned with an immutable HTTP binding through authProfiles.create.
 // Apply preserves the live secret because credentials are intentionally omitted.
-const productionLogsAuth = defineAuthProfile({
-  slug: "lobu-production-loki-http",
-  connector: "loki.activity",
+const analyticsAuth = defineAuthProfile({
+  slug: "lobu-clickhouse-analytics-http",
+  connector: "clickhouse.analytics",
   authKind: "env",
-  name: "Lobu production Loki HTTP",
+  name: "Lobu ClickHouse analytics HTTP",
 });
-
-const productionLogs = defineConnection({
-  slug: "lobu-production-logs",
-  connector: "loki.activity",
-  name: "Lobu production Kubernetes logs",
-  authProfile: productionLogsAuth,
-  config: {
-    LOKI_URL: "https://loki.lobu.ai",
-    namespace: "summaries-prod",
-    grafana_url:
-      "https://monitoring-kube-prometheus-stack-grafana.brill-kanyu.ts.net",
-  },
+const analytics = defineConnection({
+  slug: "lobu-analytics",
+  connector: "clickhouse.analytics",
+  name: "Lobu analytics",
+  authProfile: analyticsAuth,
+  config: { CLICKHOUSE_URL: "https://clickhouse.lobu.ai" },
   feeds: [
     {
-      feed: "activity",
-      name: "Lobu production log activity",
-      schedule: "3,23,43 * * * *",
+      feed: "user_milestones",
+      name: "Live user journey milestones",
       config: {},
     },
   ],
@@ -361,9 +496,10 @@ const gmailOAuthApp = defineAuthProfile({
 
 export default defineConfig({
   connectors: [
-    connectorFromFile<typeof LokiActivityConnector>(
-      "./loki-activity.connector.ts"
+    connectorFromFile<typeof ClickHouseAnalyticsConnector>(
+      "./clickhouse-analytics.connector.ts"
     ),
+    connectorFromFile<typeof DataForSeoConnector>("./dataforseo.connector.ts"),
   ],
   org: "lobu-team",
   orgName: "Lobu Team",
@@ -371,20 +507,16 @@ export default defineConfig({
   organizationId: "UdNAH1bb3csC842vhOgxAHVcfX4tYU5A",
   agents: [developer, productOps],
   authProfiles: [
+    analyticsAuth,
     productActivityDbAuth,
-    productionLogsAuth,
     cloudflareOAuthApp,
     companyCloudflareAccount,
     gmailOAuthApp,
   ],
-  entities: [task],
-  connections: [
-    productActivityDb,
-    productionLogs,
-    lobuTeamSlack,
-    companyCloudflare,
-  ],
+  entities: [task, issue, productUsers],
+  relationships: [trackedBy],
+  connections: [analytics, productActivityDb, lobuTeamSlack, companyCloudflare],
   // The external digest is maintained by scripts/configure-product-activity.ts.
   // Apply without prune: preserve its existing delivery agent and manual Automation.
-  automations: [],
+  automations: [issueTracker],
 });

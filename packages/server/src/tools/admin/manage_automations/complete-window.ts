@@ -135,6 +135,9 @@ export async function handleCompleteWindow(
   // (the pre-literal-prompt templating era), and the run-thread view reads it
   // back. A completion payload must never introduce or replace that key.
   delete provenanceMetadata.prompt_rendered;
+  delete provenanceMetadata.preparation_sources;
+  delete provenanceMetadata.preparation_task_run_id;
+  delete provenanceMetadata.preparation_started_at;
   if (provenanceClientId) provenanceMetadata.client_id = provenanceClientId;
   // The run row is the identity; never duplicate its id inside run_metadata.
   delete provenanceMetadata.automation_run_id;
@@ -268,6 +271,10 @@ export async function handleCompleteWindow(
     approvedInput && typeof approvedInput === 'object' && !Array.isArray(approvedInput)
       ? (approvedInput as Record<string, unknown>)
       : {};
+  if (ctx.executionMode === 'capture' &&
+      (approvedInputRecord.automation_script as { has_prepare?: boolean } | undefined)?.has_prepare) {
+    throw new ToolUserError('Preparation is not supported for captured or evaluation windows.', 422);
+  }
   if ((approvedInputRecord.executor as { kind?: string } | undefined)?.kind === 'script') {
     throw new ToolUserError(
       'The runtime completes script Automations after the script succeeds; completeWindow cannot finalize them.',
@@ -381,13 +388,18 @@ export async function handleCompleteWindow(
   // STEP 2.5: Validate extracted_data against the extraction schema.
   // The schema is composed from declared outputs and the optional reaction
   // input. Entity schemas still live on their entity types; event outputs use
-  // the standard event draft. The worker and completion share this helper.
+  // the standard event draft. Event metadata stays with the persistence
+  // validator so its alternatives and coercion semantics remain authoritative.
   // ============================================
   const extractionSchema: Record<string, any> | null = await deriveAutomationExtractionSchema(
     getDb(),
     automationOrgId,
     outputs,
-    automationId
+    automationId,
+    {
+      includeEventMetadata: false,
+      scriptSnapshot: approvedInputRecord.automation_script as import('../../../automations/preparation').AutomationScriptSnapshot | undefined,
+    }
   );
   if (extractionSchema) {
     const validate = ajv.compile(extractionSchema);
@@ -840,6 +852,9 @@ export async function handleCompleteWindow(
       }
     }
 
+    // With no model named, the executor comes from how the run was dispatched:
+    // a run pinned to a device ran on that device's CLI, whose own completion
+    // report may never arrive to correct a placeholder.
     const [completedRun] = await tx`
       UPDATE runs
       SET status = 'completed',
@@ -854,6 +869,11 @@ export async function handleCompleteWindow(
             NULLIF(model_used, 'external-client'),
             CASE
               WHEN dispatched_message_id IS NOT NULL THEN 'lobu-agent'
+              WHEN approved_input->>'device_worker_id' IS NOT NULL
+                THEN 'device-cli' || COALESCE(
+                  ':' || NULLIF(btrim(approved_input->>'agent_kind'), ''),
+                  ''
+                )
               ELSE 'external-client'
             END
           ),
@@ -895,7 +915,10 @@ export async function handleCompleteWindow(
     // completion UPDATE matched, i.e. this transaction owns the single
     // `running|claimed -> completed` transition for the run — so the enqueue
     // happens exactly once per run without needing a durable claim of its own.
-    const reactionScriptSnapshot = lockedAutomation.reaction_script_compiled;
+    const lifecycle = approvedInputRecord.automation_script as import('../../../automations/preparation').AutomationScriptSnapshot | undefined;
+    const reactionScriptSnapshot = lifecycle
+      ? (lifecycle.has_reaction ? lifecycle.source : null)
+      : lockedAutomation.reaction_script_compiled;
     const queuesReaction = Boolean(reactionScriptSnapshot);
     let reactionTaskRunId: number | undefined;
     if (reactionScriptSnapshot) {

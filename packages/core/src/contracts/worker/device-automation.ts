@@ -82,14 +82,16 @@ export const DEVICE_AGENT_SPECS: readonly AgentSpec[] = [
     binaryName: "claude",
     promptDelivery: { kind: "flag", flag: "-p" },
     // Automation runs have a narrow completion contract; do not merge in the
-    // user's global MCP config, and pre-approve exactly the two completion tools.
+    // user's global MCP config, and pre-approve only read-only SDK discovery
+    // plus the two completion tools. Keep in sync with the Claude Code ACP
+    // adapter's allowedTools in connector-worker's mac-device-daemon.
     mcpDelivery: {
       kind: "claude-config-file",
       flag: "--mcp-config",
       extraArgs: [
         "--strict-mcp-config",
         "--allowedTools",
-        "mcp__lobu__query_sdk,mcp__lobu__run_sdk",
+        "mcp__lobu__search_sdk,mcp__lobu__query_sdk,mcp__lobu__run_sdk",
       ],
     },
     headlessArgs: [],

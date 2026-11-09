@@ -23,6 +23,7 @@ import { cleanupTestDatabase, getTestDb } from "../setup/test-db";
 import {
 	createTestConnection,
 	createTestConnectorDefinition,
+	createTestEvent,
 	seedOwnerContext,
 } from "../setup/test-fixtures";
 
@@ -487,5 +488,27 @@ describe("list_feeds health filter and true total", () => {
 		expect(failing.feeds.map((feed) => feed.feed_key)).toEqual([
 			"scheduled-overdue",
 		]);
+	});
+
+	// Counting a feed's stored events scans its whole history, so a plain list
+	// never pays for it; a caller that shows the number asks.
+	it("counts each feed's events only when asked", async () => {
+		for (const n of [1, 2]) {
+			await createTestEvent({
+				organization_id: orgId,
+				connection_id: connectionId,
+				feed_key: "h1",
+				content: `Synthetic item ${n}`,
+			});
+		}
+
+		const plain = await list({ limit: 50 });
+		expect(plain.feeds.length).toBeGreaterThan(0);
+		for (const feed of plain.feeds) expect(feed).not.toHaveProperty("event_count");
+
+		const counted = await list({ limit: 50, include_event_count: true });
+		const byKey = new Map(counted.feeds.map((feed) => [feed.feed_key, feed]));
+		expect(byKey.get("h1")?.event_count).toBe(2);
+		expect(byKey.get("h2")?.event_count).toBe(0);
 	});
 });

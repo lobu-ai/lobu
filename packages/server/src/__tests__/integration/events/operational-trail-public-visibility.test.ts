@@ -179,7 +179,25 @@ describe('operational trail > public-read exclusion', () => {
     deletedNotificationId = notification.eventId!;
     expect(await deleteNotification(org.id, alice.id, deletedNotificationId)).toBe(true);
 
-    trailIds = [operationCardId, approvalNoticeId, unboundOperationCardId, deletedNotificationId];
+    // An Automation receipt. Public readers were seeing these as recent
+    // knowledge ("Automation applied 0 new + 1 updated").
+    const changeSetId = (
+      await createTestEvent({
+        organization_id: org.id,
+        entity_id: entity.id,
+        title: 'Automation applied 0 new + 1 updated',
+        content: 'warehouse run created 0 and updated 1 entities.',
+        semantic_type: 'change_set',
+      })
+    ).id;
+
+    trailIds = [
+      operationCardId,
+      approvalNoticeId,
+      unboundOperationCardId,
+      deletedNotificationId,
+      changeSetId,
+    ];
 
     const sql = getTestDb();
     await sql`
@@ -203,7 +221,7 @@ describe('operational trail > public-read exclusion', () => {
 
     const boot = await bootstrap(memberCtx());
     expect(boot.ids.has(operationCardId)).toBe(true);
-    expect(boot.total).toBe(5);
+    expect(boot.total).toBe(6);
   });
 
   it.each(publicReaders)('%s org-home bootstrap lists and counts knowledge only', async (_, ctx) => {
@@ -277,7 +295,7 @@ describe('operational trail > public-read exclusion', () => {
     // serialized window.__LOBU_PUBLIC_BOOTSTRAP__ payload.
     const served = `${model?.bodyHtml}\n${JSON.stringify(model?.bootstrap)}`;
     expect(served).toContain('Warehouse rents rose 4% in Q3');
-    for (const leaked of ['send_message', 'needs approval', 'evaluate — rejected']) {
+    for (const leaked of ['send_message', 'needs approval', 'evaluate — rejected', 'Automation applied']) {
       expect(served).not.toContain(leaked);
     }
   });

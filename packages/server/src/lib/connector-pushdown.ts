@@ -28,6 +28,7 @@ import { DEVICE_FEED_READ_ACTION_KEY } from './device-feed-read-protocol';
 import type { AuthzScope, SourceReadScope } from '../authz/scope';
 import { getDb } from '../db/client';
 import { dbEgressConfig } from '../utils/cloud-mode';
+import { ToolUserError, toolErrorHttpStatus } from '../utils/errors';
 import { findBundledConnectorFile } from '../utils/connector-catalog';
 import { resolveConnectorCodeForKey } from '../utils/ensure-connector-installed';
 import { mergeExecutionConfig, resolveExecutionAuth } from '../utils/execution-context';
@@ -274,6 +275,38 @@ function remainingReadMs(p: ReadSourceFeedParams): number {
   const remaining = Math.trunc(p.deadlineAt - Date.now());
   if (remaining <= 0) throw sourceReadDeadlineError(p.feedId);
   return remaining;
+}
+
+/**
+ * Whether one pushdown page holds the source's whole result. A connector may cap
+ * a page below the requested limit, so only a reported `total` proves a
+ * nonempty result complete; a missing total fails closed instead of passing
+ * a prefix off as the answer.
+ */
+export function isCompletePushdownResult(result: ConnectorQueryResult): boolean {
+  return result.total === undefined
+    ? result.rows.length === 0
+    : result.total <= result.rows.length;
+}
+
+/**
+ * The hard error every `runConnectorQuery` caller throws: a failed source query
+ * is never a success-shaped empty result (#2042). Reported under the classified
+ * code's status, not a flat 502 — the failing upstream is the connection's, and
+ * a 502 body is the edge's to replace (see `toolErrorHttpStatus`).
+ */
+export function pushdownFailureError(
+  err: unknown,
+  connectionSlug: string,
+  subject: 'query' | 'metric',
+): ToolUserError {
+  const code = classifyPushdownFailure(err);
+  return new ToolUserError(
+    `connection pushdown failed (connection=${connectionSlug}): ${getErrorMessage(err)}. ` +
+      `The ${subject} did not run against the source — this is not an empty result.`,
+    toolErrorHttpStatus(code),
+    code,
+  );
 }
 
 /** Classify a thrown connector/source failure using structured diagnostics first. */

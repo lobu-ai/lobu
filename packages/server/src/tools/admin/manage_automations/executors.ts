@@ -1,31 +1,13 @@
 /**
  * Executor resolution for Automations.
  *
- * An Automation is an org-level goal with one durable contract (prompt, outputs,
- * reaction script, budget) and exactly ONE executor:
- *
- *  - `execution_config.executor.kind = external` — the external MCP client
- *    claims manual/scheduled windows; the agent remains the optional owner
- *  - `managed_agent_id` — a managed Lobu agent executes runs (server dispatch lane)
- *  - `device_worker_id` — the pinned device worker's local CLI executes them
- *    (device lane); `agent_kind` picks the local runtime, null = device
- *    default
- *
- * Triggers are the "when" and carry no executor of their own.
- *
- * Resolution rules enforced here (create/update):
- *
- *  - Every automated Automation (any event/schedule trigger) MUST have an
- *    executor — an automated activation with no executor is a zombie: there
- *    is no lane that could ever run it (the scheduler/event SELECTs gate on
- *    the row-level columns).
- *  - An Automation with NO triggers is manual-only: executor is optional.
- *    Without an executor, authorized MCP clients may execute and complete its
- *    manually activated windows through write-tier `complete_window`.
+ * Agent identity and device placement are independent. Without either, an
+ * external client claims manual/scheduled windows. Triggers only decide when.
+ * Installed external overrides retain their original optional owning agent.
  */
 import type {
   AutomationEventTrigger,
-  AutomationExecutionConfig,
+  LegacyAutomationExecutionConfig,
   AutomationScheduleTrigger,
   AutomationWorkspaceEventTrigger,
 } from "@lobu/core/contracts/tools/manage-automations";
@@ -49,46 +31,48 @@ export interface AutomationExecutorDefaults {
 }
 
 export type ResolvedExecutor =
-  | { kind: "external" }
+  | { kind: "external"; agentId: string | null }
   | { kind: "agent"; agentId: string }
   | {
       kind: "device";
       deviceWorkerId: string;
       agentKind: string | null;
+      agentId: string | null;
     };
 
 /** Resolve the Automation's executor.
- * Explicit external mode takes precedence over the owning agent. Otherwise
- * precedence is DEVICE PIN FIRST: legacy dual rows carried both managed_agent_id and
- * device_worker_id and always ran on the device lane (#802) — agent-first
- * fallback would silently flip those runs to server dispatch. */
+ * Legacy external overrides keep their owning principal. A device places the
+ * managed agent there; it never erases that agent's identity. */
 export function resolveAutomationExecutor(
   defaults: AutomationExecutorDefaults
-): ResolvedExecutor | null {
-  if ((defaults.executionConfig as AutomationExecutionConfig | null)?.executor?.kind === "external") {
-    return { kind: "external" };
+): ResolvedExecutor {
+  if ((defaults.executionConfig as LegacyAutomationExecutionConfig | null)?.executor?.kind === "external") {
+    return { kind: "external", agentId: defaults.agentId ?? null };
   }
   if (defaults.deviceWorkerId) {
     return {
       kind: "device",
       deviceWorkerId: defaults.deviceWorkerId,
       agentKind: defaults.agentKind ?? null,
+      agentId: defaults.agentId ?? null,
     };
   }
   if (defaults.agentId) {
     return { kind: "agent", agentId: defaults.agentId };
   }
-  return null;
+  return { kind: "external", agentId: null };
 }
 
-/**
- * Structural matrix check. Rules:
- *  - Automated Automations (any event/schedule trigger) MUST have an executor.
- *    Triggers carry no executor of their own, and the scheduler/event SELECTs
- *    gate on the row-level columns — an executor-less automated Automation
- *    would validate but never fire.
- *  - Manual-only Automations (no triggers) pass with or without an executor.
- */
+/** SQL counterpart for config discovery/admission, never for frozen runs.
+ * `alias` is a trusted table alias supplied by the caller, not user input. */
+export function externalAutomationPredicate(sql: DbClient, alias: string) {
+  const row = sql.unsafe(alias);
+  return sql`(COALESCE(${row}.execution_config->'executor'->>'kind' = 'external', false)
+    OR (${row}.managed_agent_id IS NULL AND ${row}.device_worker_id IS NULL
+      AND ${row}.execution_config->'executor'->>'kind' IS DISTINCT FROM 'script'))`;
+}
+
+/** External clients own their wakeup; events may capture references, not turns. */
 export function assertAutomationExecutorsResolve(
   triggers: AutomationTriggerInput[] | null | undefined,
   defaults: AutomationExecutorDefaults
@@ -99,14 +83,14 @@ export function assertAutomationExecutorsResolve(
       throw new ToolUserError('Reference capture supports resource_ref/resource_type matching only.', 422);
     }
   }
-  if (resolveAutomationExecutor(defaults)?.kind === "external") {
-    const config = defaults.executionConfig as AutomationExecutionConfig;
-    if (defaults.deviceWorkerId || defaults.agentKind ||
+  if (resolveAutomationExecutor(defaults).kind === "external") {
+    const config = defaults.executionConfig as LegacyAutomationExecutionConfig | null;
+    if ((config?.executor?.kind === 'external' && (defaults.deviceWorkerId || defaults.agentKind ||
+        Object.keys(config).some((key) => key !== "executor"))) ||
         (triggers ?? []).some((trigger) => trigger.kind !== "schedule" &&
-          !(trigger.kind === 'event' && trigger.source !== 'workspace' && trigger.capture === 'references')) ||
-        Object.keys(config).some((key) => key !== "executor")) {
+          !(trigger.kind === 'event' && trigger.source !== 'workspace' && trigger.capture === 'references'))) {
       throw new ToolUserError(
-        "An external executor supports manual, scheduled, or reference-capture connector subscriptions; device pins and hosted/CLI settings do not apply.",
+        "Unassigned Automations support manual, scheduled, or reference-capture connector subscriptions. Assign an agent or device for event execution. Legacy external overrides cannot use device pins or hosted/CLI settings.",
         422
       );
     }
@@ -117,15 +101,6 @@ export function assertAutomationExecutorsResolve(
       }
     }
     return;
-  }
-  const automated = (triggers ?? []).some(
-    (trigger) => trigger.kind === "event" || trigger.kind === "schedule"
-  );
-  if (!automated) return;
-  if (!resolveAutomationExecutor(defaults)) {
-    throw new ToolUserError(
-      "Automated Automations need an executor: set managed_agent_id (managed agent), device_worker_id (device), or execution_config.executor.kind=external (MCP client). Manual-only Automations (no triggers) may omit both."
-    );
   }
 }
 

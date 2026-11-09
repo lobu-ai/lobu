@@ -21,9 +21,7 @@
  * `base_url` still resolves (baseUrl undefined) so `model`/`modelsEndpoint`
  * overrides apply against the static URL.
  */
-import type { InferenceModality } from "../../lobu/stores/provider-secrets.js";
-
-export type { InferenceModality };
+import type { InferenceModality } from "@lobu/core/contracts/tools/manage-inference-providers";
 
 export interface ResolvedInferenceProvider {
   /** The row's ONE decrypted api key (from resolveInferenceProviderConfig). */

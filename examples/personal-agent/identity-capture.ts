@@ -4,21 +4,26 @@ export interface CaptureSubscription {
   event_types: string[];
 }
 
-// Call automations.create with this input only AFTER discovery proves the
-// source supports reference capture. No guessed event names or connections.
-// This factory never calls trigger, claimNextWindow, feeds.trigger or an agent.
+// Update an installed legacy capture binding only after discovery and consent.
+// New external authoring is retired; this helper cannot create a replacement.
+// It never triggers work, claims a window or starts an agent.
 export function captureDefinition(input: {
-  slug: string;
-  principal: string;
+  existing: {
+    automation_id: string;
+    managed_agent_id?: string | null;
+    execution_config?: { executor?: { kind?: string } } | null;
+  };
   subscriptions: CaptureSubscription[];
 }) {
   if (
-    !/^[a-z0-9][a-z0-9-]+$/.test(input.slug) ||
-    !input.principal ||
+    !Number.isSafeInteger(Number(input.existing.automation_id)) ||
+    Number(input.existing.automation_id) <= 0 ||
+    input.existing.execution_config?.executor?.kind !== "external" ||
+    !input.existing.managed_agent_id ||
     !input.subscriptions.length
   )
     throw new Error(
-      "Explicit capture slug, owning principal and discovered subscriptions required"
+      "An installed legacy capture binding, owning principal and discovered subscriptions are required"
     );
   const seen = new Set<string>();
   const triggers = input.subscriptions.map((source) => {
@@ -47,19 +52,8 @@ export function captureDefinition(input: {
     };
   });
   return {
-    slug: input.slug,
-    name: "External identity source capture",
-    managed_agent_id: input.principal,
-    prompt:
-      "Capture source references for external clients. Do not execute agents, infer human identities, or copy message bodies.",
-    execution_config: { executor: { kind: "external" as const } },
+    automation_id: input.existing.automation_id,
+    managed_agent_id: input.existing.managed_agent_id,
     triggers,
-    sources: [
-      {
-        name: "references",
-        query:
-          "SELECT id, connector_key, connection_id, origin_id, occurred_at, metadata->>'resource_ref' AS resource_ref, metadata->>'observation_id' AS observation_id FROM events",
-      },
-    ],
   };
 }

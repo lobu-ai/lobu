@@ -147,9 +147,8 @@ function listBundledConnectors(): string[] {
 
 type IsolatedVm = typeof import("isolated-vm");
 async function loadIsolatedVm(): Promise<IsolatedVm> {
-	const major = Number(process.versions.node.split(".")[0]);
-	// Two ABI builds ship as optionalDependencies; see sandbox/run-script.ts.
-	const mod = major >= 26 ? await import("isolated-vm-next") : await import("isolated-vm");
+	// One ABI build ships as an optionalDependency; see sandbox/run-script.ts.
+	const mod = await import("isolated-vm");
 	return ((mod as { default?: IsolatedVm }).default ?? mod) as IsolatedVm;
 }
 

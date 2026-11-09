@@ -110,10 +110,10 @@ export default async (_ctx, client) => {
 };`,
 	},
 	"entities.get": {
-		summary: "Fetch a single entity by id.",
+		summary: "Fetch a stored entity or typed source key. entity_type accepts a local slug or a discovered numeric type ID; the latter identifies its owner without switching execution workspaces. Foreign type IDs are read only through the public visitor projection, never with local owner/source credentials.",
 		access: "read",
 		signature:
-			"entities.get(input: { entity_id: number | string; entity_type?: string; include_deleted?: boolean }): Promise<unknown>",
+			"entities.get(input: { entity_id: number | string; entity_type?: string | number; include_deleted?: boolean }): Promise<unknown>",
 		throws: ["EntityNotFound"],
 		example: "const entity = await client.entities.get({ entity_id: 42 });",
 		usageExample: `export default async (_ctx, client) => {
@@ -152,8 +152,11 @@ export default async (_ctx, client) => {
 };`,
 	},
 	"entities.update": {
-		summary: "Update an existing entity.",
+		summary:
+			"Update an existing entity. Pass `expected` (metadata field -> the value you read) to make the write conditional: if any field changed since, nothing is written and the call fails with 409 PRECONDITION_FAILED, whose `details.mismatched_fields` names the stale fields.",
 		access: "write",
+		example:
+			"await client.entities.update({ entity_id: 42, expected: { stage: 'open' }, metadata: { stage: 'won' } });",
 	},
 	"entities.delete": {
 		summary:
@@ -169,7 +172,7 @@ export default async (_ctx, client) => {
 			"Create a relationship between two entities. Identity-purpose relationships associate retained records; applied, queued approval, suppressed, and preview results are distinct. Needs the two entity IDs AND a relationship TYPE that already exists — if the relationship type is new, call `entitySchema.createRelType` first; list existing ones with `entitySchema.listRelTypes()`. (`entitySchema.addRule` does NOT create a type; it restricts the allowed source/target entity-type pairs on a type that already exists.)",
 		access: "write",
 		signature:
-			"entities.link(input: { from_entity_id: number | string; from_entity_type?: string; to_entity_id: number | string; to_entity_type?: string; relationship_type_slug: string; source?: 'ui' | 'llm' | 'feed' | 'api'; confidence?: number; metadata?: object; dry_run?: boolean }): Promise<unknown>",
+			"entities.link(input: { from_entity_id: number | string; from_entity_type?: string | number; to_entity_id: number | string; to_entity_type?: string | number; relationship_type_slug: string; source?: 'ui' | 'llm' | 'feed' | 'api'; confidence?: number; metadata?: object; dry_run?: boolean }): Promise<unknown>",
 		example:
 			"await client.entities.link({ from_entity_id: 42, to_entity_id: 43, relationship_type_slug: 'customer_of' });",
 		usageExample: `// Two-hop: the relationship TYPE must exist before linking. Ensure it
@@ -204,10 +207,10 @@ export default async (_ctx, client) => {
 		access: "write",
 	},
 	"entities.listLinks": {
-		summary: "List relationships for a stored entity or source-backed record; record reads accept cursor: null then next_cursor.",
+		summary: "List relationships for a stored entity or source-backed record. entity_type accepts a local slug or discovered numeric type ID. Authored links stay scoped to this workspace; foreign source-native links use only the public visitor projection. Record reads accept cursor: null then next_cursor.",
 		access: "read",
 		signature:
-			"entities.listLinks(input: { entity_id?: number | string; entity_type?: string; record?: { type: string; key: string }; cursor?: string | null; direction?: 'outbound' | 'inbound' | 'both'; relationship_type_slug?: string; source?: 'ui' | 'llm' | 'feed' | 'api'; confidence_min?: number; include_deleted?: boolean; limit?: number; offset?: number }): Promise<unknown>",
+			"entities.listLinks(input: { entity_id?: number | string; entity_type?: string | number; record?: { type: string; key: string }; cursor?: string | null; direction?: 'outbound' | 'inbound' | 'both'; relationship_type_slug?: string; source?: 'ui' | 'llm' | 'feed' | 'api'; confidence_min?: number; include_deleted?: boolean; limit?: number; offset?: number }): Promise<unknown>",
 	},
 
 	// entitySchema
@@ -389,10 +392,10 @@ export default async (_ctx, client) => {
 	},
 	"agents.get": {
 		summary:
-			"Fetch one agent by id when agent_config read allows that target. Org-read gated via requireOrgReadAccess.",
+			"Fetch one agent, its persisted settings (including skills), and model routing when agent_config read allows that target. Org-read gated via requireOrgReadAccess.",
 		access: "read",
 		signature:
-			"agents.get(agent_id: string): Promise<unknown> // or agents.get({ agent_id })",
+			"agents.get(agent_id: string) // returns { action, agent, model, settings, revision }; or agents.get({ agent_id })",
 		example: "const { agent } = await client.agents.get('builder');",
 	},
 	"agents.create": {
@@ -404,8 +407,9 @@ export default async (_ctx, client) => {
 	},
 	"agents.update": {
 		summary:
-			"Update agent fields (may queue for approval). Requires admin tier + agent_config update.",
+			"Patch agent fields and settings (may queue for approval). Omitted settings are unchanged; supplied settings objects/arrays replace that setting. Pass expected_revision from agents.get to reject stale writes with 409 before applying or queuing approval. Write identity via identity_md; updatedAt is read-only. Use settings.models for the full ordered model list, or default_model to change its first entry while preserving fallbacks (empty string clears the list). Do not send both. Requires admin tier + agent_config update.",
 		access: "admin",
+		example: "await client.agents.update({ agent_id: 'researcher', settings: { skillsConfig: { skills: [{ repo: 'example/skills', name: 'triage', enabled: true, content: 'Read the queue.' }] } } });",
 	},
 	"agents.delete": {
 		summary:
@@ -603,11 +607,11 @@ export default async (_ctx, client) => {
 	},
 	"automations.create": {
 		summary:
-			"Create an Automation. Successful creates return the canonical `{ action: 'create', automation_id, version, status }` receipt; policy-gated creates return a pending approval receipt with `run_id`. Requires slug and managed_agent_id; window/manual Automations also need prompt, skills, or a reaction script. Use device_worker_id to pin execution to a registered device and agent_kind to select its interchangeable local CLI. Declare named outputs as `{ entity, key, name? }` or `{ event }`, or omit outputs for a run-result/reaction-only Automation. Event output rows are standard drafts with required content and optional title, metadata, author, source_url, occurred_at, parent_event_id, payload_type, idempotency_key, and entity_ids. entity_ids on a row replace the bound entities of the Automation for that row (omit to keep them); each id must be an entity in the same workspace the run may write, or the completion fails. Outputs require window execution. Each sources[] entry requires `name` and `query`: an @feed reference for a configured feed, or read-only SELECT/WITH SQL. Event SQL projects an `id` column; `context: true` permits aggregate context without event IDs. Window-capable live feeds use their existing reader and report per-source pagination. entity_id is optional for an org-scoped Automation.",
+			"Create an Automation. Successful creates return the canonical `{ action: 'create', automation_id, version, status }` receipt; policy-gated creates return a pending approval receipt with `run_id`. Requires slug. Window/manual Automations also need prompt, skills, or a reaction module. managed_agent_id supplies identity and permissions; device_worker_id independently places execution on a registered device, with optional agent_kind selecting its local CLI. Analysis without either assignment uses authorized external clients for manual/scheduled windows; clients own their wakeups. Code-only modules need managed_agent_id. Declare named outputs as `{ entity, key, name? }` or `{ event }`, or omit outputs for a run-result/reaction-only Automation. Event output rows are standard drafts with required content and optional title, metadata, author, source_url, occurred_at, parent_event_id, payload_type, idempotency_key, and entity_ids. entity_ids on a row replace the bound entities of the Automation for that row (omit to keep them); each id must be an entity in the same workspace the run may write, or the completion fails. Outputs require window execution. Each sources[] entry requires `name` and `query`: an @feed reference for a configured feed, or read-only SELECT/WITH SQL. Event SQL projects an `id` column; `context: true` permits aggregate context without event IDs. Window-capable live feeds use their existing reader and report per-source pagination. entity_id is optional for an org-scoped Automation.",
 		access: "admin",
 		throws: ["EntityNotFound"],
 		signature:
-			"automations.create(input: { slug: string; managed_agent_id: string; prompt?: string; device_worker_id?: string | null; agent_kind?: 'claude-code' | 'codex' | 'opencode' | 'pi' | 'agy' | null; ... }): Promise<{ action: 'create'; automation_id: string; version: number; status: string; ... } | { action: 'create'; status: 'pending_approval'; run_id: number; ... }>",
+			"automations.create(input: { slug: string; managed_agent_id?: string | null; prompt?: string; device_worker_id?: string | null; agent_kind?: 'claude-code' | 'codex' | 'opencode' | 'pi' | 'agy' | null; ... }): Promise<{ action: 'create'; automation_id: string; version: number; status: string; ... } | { action: 'create'; status: 'pending_approval'; run_id: number; ... }>",
 		example:
 			"const created = await client.automations.create({ slug: 'pricing', managed_agent_id: 'agt_123', device_worker_id: 'device-worker-uuid', agent_kind: 'opencode', prompt: 'Extract pricing records and notable changes.', outputs: { prices: { entity: 'price', key: ['sku'] }, alerts: { event: 'observation' } }, sources: [{ name: 'content', query: 'SELECT id, content FROM events ORDER BY occurred_at DESC' }] }); const automationId = 'automation_id' in created ? created.automation_id : undefined; // undefined when the create was policy-gated into an approval",
 		usageExample: `// Stand up an Automation that extracts pricing entities from recent events.
@@ -627,7 +631,7 @@ export default async (_ctx, client) => {
 	},
 	"automations.update": {
 		summary:
-			"Update runtime config only: triggers, managed_agent_id, model_config, execution_config, device_worker_id, agent_kind, delivery_target, min_cooldown_seconds, tags. delivery_target is a strict bound chat destination `{ connection_id, channel_id }`; null clears it. Version-owned fields (name, description, prompt, sources) are immutable here — use createVersion. Status is not patchable here (an Automation is retired via delete → archived).",
+			"Update runtime config only: triggers, managed_agent_id, execution_config, device_worker_id, agent_kind, delivery_target, min_cooldown_seconds, tags. delivery_target is a strict bound chat destination `{ connection_id, channel_id }`; null clears it. Version-owned fields (name, description, prompt, sources) are immutable here — use createVersion. Status is not patchable here (an Automation is retired via delete → archived).",
 		access: "admin",
 	},
 	"automations.createVersion": {
@@ -685,7 +689,7 @@ export default async (_ctx, client) => {
 	},
 	"automations.claimNextWindow": {
 		summary:
-			"Atomically claim the Automation unclaimed arrival window and return bounded source context plus a fenced window_token. The window is [arrival mark, now - settle) over events.created_at, not a calendar period. The caller MUST finish the claim with completeWindow, even for an empty or non-actionable window. Continue event pages with run_id and context.page.next_cursor. Continue each live source with run_id, source_name and sources_page[name].next_cursor as source_cursor. Keep every window_token for completeWindow; code may aggregate rows before returning results to the model. Each live source reports its own window_axis.",
+			"Atomically claim an external Automation's unclaimed arrival window and return bounded source context plus a fenced window_token. A new claim requires no native agent/device assignment or an installed legacy external override; assigned native runs use trigger. Existing caller-owned external leases can still renew. The window is [arrival mark, now - settle) over events.created_at, not a calendar period. The caller MUST finish the claim with completeWindow, even for an empty or non-actionable window. Continue event pages with run_id and context.page.next_cursor. Continue each live source with run_id, source_name and sources_page[name].next_cursor as source_cursor. Keep every window_token for completeWindow; code may aggregate rows before returning results to the model. Each live source reports its own window_axis.",
 		access: "write",
 		signature:
 			"automations.claimNextWindow(input: { automation_id: string; lease_seconds?: number; limit?: number; run_id?: number; before_occurred_at?: string; before_id?: number; source_name?: string; source_cursor?: string }): Promise<AutomationClaimNextWindowResult>",
@@ -1023,6 +1027,57 @@ export default async (_ctx, client) => {
 			"await client.feeds.recollect({ feed_id: 42 });\nawait client.feeds.trigger({ feed_id: 42 });",
 	},
 
+	// inferenceProviders
+	"inferenceProviders.list": {
+		summary:
+			"List this workspace's inference providers and health metadata, without credentials.",
+		access: "read",
+		signature:
+			"inferenceProviders.list(): Promise<{ providers: InferenceProviderListItem[] }>",
+	},
+	"inferenceProviders.create": {
+		summary:
+			"Create an org-shared API-key inference provider. Uses catalog model defaults; the first runnable provider becomes the org default. OAuth sign-in stays on the interactive settings page.",
+		access: "admin",
+		signature:
+			"inferenceProviders.create(input: { slug: string; kind: string; apiKey: string; displayName?: string; capabilities?: InferenceCapabilities }): Promise<{ provider: InferenceProviderSummary & { isDefault: boolean } }>",
+	},
+	"inferenceProviders.update": {
+		summary:
+			"Rename a provider. Omitted or blank displayName preserves its name; slug and kind are immutable.",
+		access: "admin",
+		signature:
+			"inferenceProviders.update(input: { slug: string; displayName?: string }): Promise<{ provider: InferenceProviderSummary }>",
+	},
+	"inferenceProviders.setDefault": {
+		summary:
+			"Select the org default. Requires a configured text model and an org-shared API key; personal OAuth providers cannot become the org default.",
+		access: "admin",
+		signature:
+			"inferenceProviders.setDefault(input: { slug: string }): Promise<{ success: true; slug: string; isDefault: true }>",
+	},
+	"inferenceProviders.setCapability": {
+		summary:
+			"Replace one text, image, stt or tts capability block; other modalities are preserved. Blocks accept base_url, model and models_endpoint. An empty block clears that modality's configuration.",
+		access: "admin",
+		signature:
+			"inferenceProviders.setCapability(input: { slug: string; modality: 'text' | 'image' | 'stt' | 'tts'; block: InferenceCapabilityBlock }): Promise<{ provider: InferenceProviderSummary }>",
+	},
+	"inferenceProviders.rotateKey": {
+		summary:
+			"Rotate a provider's API key in the existing vault. Never returns or audits the key value; OAuth credentials require interactive sign-in.",
+		access: "admin",
+		signature:
+			"inferenceProviders.rotateKey(input: { slug: string; value: string }): Promise<{ success: true }>",
+	},
+	"inferenceProviders.delete": {
+		summary:
+			"Soft-delete an inference provider and promote the oldest surviving runnable provider if it was the default. Does not revoke a personal OAuth grant from a headless call.",
+		access: "admin",
+		signature:
+			"inferenceProviders.delete(input: { slug: string }): Promise<{ success: true }>",
+	},
+
 	// authProfiles
 	"authProfiles.manage": {
 		summary: "Raw manage_auth_profiles action wrapper. Prefer named methods.",
@@ -1123,12 +1178,12 @@ export default async (_ctx, client) => {
 	},
 	"views.set": {
 		summary:
-			"Store a view, the authored surface for interactive pages and dashboards: a React module (@lobu/views) upserted by the key it declares. Inspect available native entity/event pages, views.list/get and project components first; honor user designs and existing overrides, and reuse what fits. The runtime kit @lobu/views/components provides Card, DataTable, FilterBar, SearchField, SelectField, BarChart, LineChart, PieChart, Sparkline, Link, LoadingState, EmptyState, ErrorState, TruncatedNotice and formatCompact. These are defaults: compose, wrap or replace them with custom React components for specialized UX. Read Custom Views in skill://lobu (or /api/skill/lobu on the selected runtime) for the full contract. Use views when exploration helps: linked charts, filters, drilldowns and Canvas/SVG; bundle extra npm libraries through the CLI, with no runtime CDN or fetch. Compiles source_code server-side unless compiled_code is supplied. Params: { source_code, compiled_code?, source_files?, dependencies?, last_writer? }. Supply source_files and dependencies together (use {} for local-only files); source_code is still required and must equal source_files.files[source_files.entrypoint]. The module is the only declaration: it must `export const view = defineView({ key, name?, description?, attach, params?, actions? })` written out as a literal (no variables, spreads or ${} templates; the server reads it without running the module) and default-export the component. attach lists the pages the view appears on, one per entry: { record: '<type>', id? } is a card on each record page of the type (or one pinned record) that opens fullscreen in the peek, { collection: '<type>', when? } a tab on the type's list page, { workspace: true } a Data hub tab, and { event: '<kind>', type? } one event's page at /events/<id>/-/views/<key> and its peek (read it with read_knowledge({ content_ids: [scope.event] }) and select that exact ID from the returned lineage). Workspace attachment alone does not render events. Event attachments match semantic_type, not metadata schema names; use a dedicated registered kind rather than generic summary. One view may list several pages and branch on useScope(); event scope must stay on scope.event, never fall back to the latest event or a date param. The view reads useHost().displayMode ('inline' card or 'fullscreen') to choose a summary or the full rendering; params are typed URL params ({ type, default?, filter? }; a param with filter: { label, options? } is offered in the host's filter bar above the view and shows its value as a chip), read with `const [params, setParams] = useParams()`. actions map names to the event kind each emits. Preserve readable fallback content and verify each attached page/peek, narrow sizing, interactions, errors and truncation; compilation alone is not UI proof. Identical content (source, declaration, compiled bundle, retained files and dependencies) is a no-op (written:false).",
+			"Store a view, the authored surface for interactive pages and dashboards: a React module (@lobu/views) upserted by the key it declares. Inspect available native entity/event pages, views.list/get and project components first; honor user designs and existing overrides, and reuse what fits. Reuse UI from the top down: configure the largest suitable surface or component first (segment, filters, search, preset and layout), then compose its exported parts and shared controls only for concrete unmet requirements, then smaller primitives. Write custom UI only for the remaining gap and explain why the larger options do not fit. Verify current exports and host compatibility; native renderer components are not automatically React imports. Surface missing exports rather than inventing an API or copying the native implementation. Discover reusable UI with search_sdk('@lobu/views/components') or a component name. Import from @lobu/views/components: EntityListPage(title, table? or children) for complete lists; DataTable(columns, rows, keyOf) for SQL/TypeScript rows; EntityRecordPage(entity, owner, schema?) for records; EntityTableView, RecordSpecSheet, SchemaValue and EntityAvatar for smaller pieces. AutomationReference, AgentReference and ConnectorReference resolve saved identity with mode: live, mounted workspace and saved ID/key. AutomationDefinition({value}), AgentDefinition({value}) and ConnectorDefinition({value}) render complete supplied definition objects read-only, including nested settings, using native product bodies. They perform no fetching, code execution, saving or approval. For changes, compose existing Tabs with Current / Proposed panels (default Proposed), using the same Definition component for each; JsonDiff(before, after) is optional technical detail. Label authored snapshots as previews; keep writes on existing guarded actions/native reviews. No proposal endpoint is needed to render a change. Page and definition bodies are controlled; references use visiting-user permission checks. Structured reads use useQuery(tool(\"manage_entity\", {action: \"list\", entity_type, ...})); do not embed SDK TypeScript strings in a view. useHost().openRecord({entity_id, entity_type?}, {mode: 'peek'}) opens native record details, with a page fallback on other hosts; theme follows live host context. Mutations use declared useAction intents, never run_sdk. The runtime kit also provides Card, DataTable, FilterBar, SearchField, SelectField, BarChart, LineChart, PieChart, Sparkline, Link, LoadingState, EmptyState, ErrorState, TruncatedNotice and formatCompact. These are defaults: compose, wrap or replace them with custom React components for specialized UX. Read Custom Views in skill://lobu (or /api/skill/lobu on the selected runtime) for the full contract. Use views when exploration helps: linked charts, filters, drilldowns and Canvas/SVG; bundle extra npm libraries through the CLI, with no runtime CDN or fetch. Compiles source_code server-side unless compiled_code is supplied. Params: { source_code, compiled_code?, source_files?, dependencies?, last_writer? }. Supply source_files and dependencies together (use {} for local-only files); source_code is still required and must equal source_files.files[source_files.entrypoint]. The module is the only declaration: it must `export const view = defineView({ key, name?, description?, attach, params?, actions? })` written out as a literal (no variables, spreads or ${} templates; the server reads it without running the module) and default-export the component. attach lists the pages the view appears on, one per entry: { record: '<type>', id? } is a card on each record page of the type (or one pinned record) that opens fullscreen in the peek, { collection: '<type>', when? } a tab on the type's list page, { workspace: true } a Data hub tab, and { event: '<kind>', type? } one event's page at /events/<id>/-/views/<key> and its peek (read it with read_knowledge({ content_ids: [scope.event] }) and select that exact ID from the returned lineage). Workspace attachment alone does not render events. Event attachments match semantic_type, not metadata schema names; use a dedicated registered kind rather than generic summary. One view may list several pages and branch on useScope(); event scope must stay on scope.event, never fall back to the latest event or a date param. The view reads useHost().displayMode ('inline' card or 'fullscreen') to choose a summary or the full rendering; params are typed URL params ({ type, default?, filter? }; a param with filter: { label, options? } is offered in the host's filter bar above the view and shows its value as a chip), read with `const [params, setParams] = useParams()`. actions map names to the event kind each emits. Preserve readable fallback content and verify each attached page/peek, narrow sizing, interactions, errors and truncation; compilation alone is not UI proof. Every set is browser-validated against the installed runtime before storage; invalid rendering returns 422, unavailable validation returns 503, and a concurrent save returns 409, preserving the saved view. Identical validated content (source, declaration, compiled bundle, retained files and dependencies) avoids a write (written:false) but still requires the validator.",
 		access: "admin",
 		signature:
 			"views.set(input: { source_code: string; compiled_code?: string; source_files?: { entrypoint: string; files: Record<string, string> }; dependencies?: Record<string, string> }): Promise<unknown>",
 		example:
-			"await client.views.set({ source_code: `import { defineView, sql, useParams, useQuery } from '@lobu/views';\nimport { Card, DataTable, TruncatedNotice } from '@lobu/views/components';\nexport const view = defineView({ key: 'pipeline', name: 'Pipeline', attach: [{ collection: 'deal' }], params: { stage: { type: 'string', default: 'open', filter: { label: 'Stage', options: [{ value: 'open', label: 'Open' }, { value: 'won', label: 'Won' }] } } } });\nexport default function Pipeline() {\n  const [{ stage }] = useParams();\n  const deals = useQuery<Array<{ id: string; title: string }>>(sql\\`SELECT id, title FROM deal WHERE stage = \\${stage} ORDER BY id LIMIT 100\\`);\n  const rows = deals.data ?? [];\n  return <Card title=\"Pipeline\"><DataTable columns={[{ key: 'title', header: 'Title' }]} rows={rows} keyOf={(r) => r.id} loading={deals.loading} error={deals.error} onRetry={deals.refetch} emptyText=\"No deals in this stage.\" caption=\"First 100 deals in this stage\" />{deals.truncated && <TruncatedNotice shown={rows.length} />}</Card>;\n}` });",
+			"await client.views.set({ source_code: `import { defineView, tool, useQuery } from '@lobu/views';\nimport { EntityListPage, DataTable } from '@lobu/views/components';\nexport const view = defineView({ key: 'pipeline', name: 'Pipeline', attach: [{ collection: 'deal' }] });\nexport default function Pipeline() {\n  const deals = useQuery(tool('manage_entity', { action: 'list', entity_type: 'deal', limit: 100 }));\n  return <EntityListPage title=\"Pipeline\" loading={deals.loading} error={deals.error} onRetry={deals.refetch}><DataTable columns={[{ key: 'name', header: 'Name' }]} rows={deals.data?.entities ?? []} keyOf={r => r.id ?? r.slug} loading={deals.loading} error={deals.error} onRetry={deals.refetch} />{deals.data?.metadata.has_more && <p>More records are available; add pagination.</p>}</EntityListPage>;\n}` });",
 	},
 	"views.list": {
 		summary:
@@ -1189,9 +1244,9 @@ export default async (_ctx, client) => {
 
 	// top-level
 	query: {
-		signature: "query(sql: string, options?: { window_token?: string }): Promise<unknown[]>",
+		signature: "query(sql: string, options?: { window_token?: string; connection?: string }): Promise<unknown[]>",
 		summary:
-			"Run a simple read-only SQL string scoped to the org (member-safe column allowlist). Pass options.window_token from the latest run-bound Automation page to use the same stored event versions and arrival bounds as its sources. Entities and classifications remain current, and the token does not grant additional access. For pagination or connection pushdown use the `query_sql` MCP tool; query source-backed feeds explicitly with feeds.readMany. Prefer `client.metrics.query` for declared measures.",
+			"Run a simple read-only SQL string scoped to the org (member-safe column allowlist). Pass options.window_token from the latest run-bound Automation page to use the same stored event versions and arrival bounds as its sources. Entities and classifications remain current, and the token does not grant additional access. Pass options.connection (a connection slug) instead to run the SQL live and read-only against that connection's source, with the same visibility checks as `query_sql`; a result larger than one source page fails rather than returning a prefix, and it cannot be combined with window_token. For pagination use the `query_sql` MCP tool; query source-backed feeds explicitly with feeds.readMany. Prefer `client.metrics.query` for declared measures.",
 		access: "read",
 		example:
 			"const rows = await client.query(\"SELECT id, name FROM entities WHERE entity_type = 'company' LIMIT 10\");",

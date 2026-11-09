@@ -116,15 +116,17 @@ export const RESERVED_ENTITY_TYPE_SLUGS = [
   // Live /$owner/<segment> routes that are NOT owner-nav segments (so they are
   // absent from OWNER_ROUTE_SEGMENTS). Entity pages render through the
   // `/$owner/$` splat, which a static segment always outranks, so an entity
-  // type with one of these slugs is permanently shadowed: `recent` loses its
-  // list page to /$owner/recent, while `entity-types` and `chat` have no index
-  // route and instead lose every detail page to /$owner/entity-types/$slug and
-  // /$owner/chat/$agentId. Create-time hygiene only — deliberately not added to
+  // type with one of these slugs is permanently shadowed: `recent` and `chat`
+  // lose their list page to the /$owner/recent and /$owner/chat index routes,
+  // while `entity-types` and `views` have no index route and instead lose
+  // every detail page to /$owner/entity-types/$slug and
+  // /$owner/views/$view. Create-time hygiene only — deliberately not added to
   // OWNER_ROUTE_SEGMENTS, which also feeds the SPA's entity-splat routing
   // guard and would break any existing entity type already using the slug.
   "entity-types",
   "recent",
   "chat",
+  "views",
   // The web host's view marker (`/<type>/-/views/<key>`): a type stored as `-`
   // would make its own list page parse as a view path.
   VIEW_PATH_MARKER,

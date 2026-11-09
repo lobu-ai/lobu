@@ -4,6 +4,7 @@
 
 export * from "./agent-policy";
 export * from "./tool-trace-summary";
+export * from "./tool-result";
 export * from "./shell-safety";
 export * from "./turn-control";
 export * from "./memory-flush";
@@ -66,6 +67,7 @@ export {
 export * from "./logger";
 // Module system
 export * from "./modules";
+export * from "./error-report";
 export type { OtelConfig, Span, Tracer } from "./otel";
 // OpenTelemetry tracing
 export {
@@ -77,6 +79,7 @@ export {
   getTraceparent,
   getTracer,
   initTracing,
+  recordError,
   runInSpanContext,
   SpanKind,
   SpanStatusCode,
@@ -84,6 +87,7 @@ export {
   withChildSpan,
   withSpan,
 } from "./otel";
+export { currentTraceLogFields, traceparentHeader } from "./trace-context";
 // Config-driven provider types
 export type {
   ProviderConfigEntry,

@@ -1,6 +1,6 @@
 {
   "name": "lobu-monorepo",
-  "version": "24.3.0",
+  "version": "24.7.0",
   "description": "Deploy autonomous AI agents with sandboxing, network isolation, and multi-platform access.",
   "license": "Apache-2.0",
   "workspaces": [
@@ -52,7 +52,7 @@
     "typescript": "^5.8.3"
   },
   "engines": {
-    "node": ">=22 <25 || >=26"
+    "node": ">=26 <27"
   },
   "patchedDependencies": {
     "ora@8.2.0": "patches/ora@8.2.0.patch",

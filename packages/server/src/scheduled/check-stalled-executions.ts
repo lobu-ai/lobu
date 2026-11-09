@@ -316,14 +316,13 @@ export async function reapStaleRuns(): Promise<ReapStaleRunsResult> {
           // tick cannot double-finalize, and a card failure rolls it back for
           // the next tick to retry.
           if (candidate.action_output != null) {
-            const actionKey = candidate.action_key ?? 'Action';
             const eventId = await terminalizeApprovalRunCompleted(
               runId,
               candidate.organization_id,
               candidate.action_output,
               {
-                title: `${actionKey} — completed`,
-                content: `Operation completed: ${actionKey}`,
+                title: (operation) => `${operation} — completed`,
+                content: (operation) => `Operation completed: ${operation}`,
               },
               null,
               // Finalize the run exactly as read: if the gateway or another
@@ -361,14 +360,13 @@ export async function reapStaleRuns(): Promise<ReapStaleRunsResult> {
             );
             if (rows.length === 0) return false;
 
-            const actionKey = rows[0].action_key ?? 'Action';
             const errorMessage = rows[0].error_message;
             const eventId = await supersedeActionEvent(
               runId,
               rows[0].organization_id,
               'failed',
-              `${actionKey} — timed out`,
-              `Action timed out: ${actionKey} — ${errorMessage}`,
+              (operation) => `${operation} — timed out`,
+              (operation) => `Action timed out: ${operation} — ${errorMessage}`,
               {
                 error_message: errorMessage,
                 run_status: 'timeout',
@@ -624,9 +622,9 @@ export async function reapStaleRuns(): Promise<ReapStaleRunsResult> {
       // not their terminal semantics: a crashed fleet worker leaves a client
       // waiting on an authoritative turn's reply, so the sweep that times the
       // run out also publishes the thread_response the completion route would
-      // have. A stale turn without recorded tool activity is instead put back
-      // to `pending` once (logged and counted by the sweep itself, not here:
-      // it is not reaped). A shadow turn terminalizes silently.
+      // have. A stale turn without recorded side-effecting tool activity is
+      // instead put back to `pending` once (logged and counted by the sweep
+      // itself, not here: it is not reaped). A shadow turn terminalizes silently.
       let agentTurnsReaped = 0;
       let agentTurnErrorsDelivered = 0;
       try {
@@ -670,7 +668,6 @@ export async function reapStaleRuns(): Promise<ReapStaleRunsResult> {
         actionKey: string | null;
         staleStatus: string | null;
       }>) {
-        const actionKey = row.actionKey ?? 'Operation';
         // Mirror the CASE that set `runs.error_message` above: a row reaped at
         // 'pending' was never claimed by a worker, so its cause is the claim
         // timeout, not a lost heartbeat. Hardcoding one of the two here made
@@ -682,8 +679,8 @@ export async function reapStaleRuns(): Promise<ReapStaleRunsResult> {
             row.runId,
             row.organizationId,
             'failed',
-            `${actionKey} — timed out`,
-            `Operation timed out: ${actionKey} — ${reason}`,
+            (operation) => `${operation} — timed out`,
+            (operation) => `Operation timed out: ${operation} — ${reason}`,
             {
               error_message: reason,
               run_status: 'timeout',

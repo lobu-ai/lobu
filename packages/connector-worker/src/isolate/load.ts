@@ -1,14 +1,12 @@
 /**
- * Load `isolated-vm` for the Node line this worker runs on.
+ * Load `isolated-vm` for the worker's Node runtime.
  *
- * The native addon is ABI-bound per Node major, so two builds ship as
- * optionalDependencies: `isolated-vm@6` for Node 22–24 and the aliased
- * `isolated-vm-next` (= `isolated-vm@7`) for Node 26+. Node 25 is an EOL
- * non-LTS line upstream skipped, and Bun cannot dlopen a V8 addon at all.
- * Both return `null` so the caller fails closed: the executor selector fails
- * an `isolate` run instead of forking a child for it. Mirrors
- * `packages/server/src/sandbox/run-script.ts`; the gateway adopting this
- * module is a follow-up.
+ * The native addon is ABI-bound to the Node major: Lobu ships one
+ * `isolated-vm@7` build and runs it on Node 26 only. Bun cannot dlopen a V8
+ * addon, and Node majors other than 26 have no matching ABI build, so both
+ * return `null` and the executor selector fails an `isolate` run instead of
+ * forking a child for it. Mirrors
+ * `packages/server/src/sandbox/run-script.ts`.
  */
 
 import type { IsolatedVm } from './ivm-types.js';
@@ -31,10 +29,13 @@ function nodeMajor(): number {
   return Number(process.versions.node?.split('.')[0] ?? 0);
 }
 
+/** The only Node major this repo's isolated-vm build supports. */
+const SUPPORTED_NODE_MAJOR = 26;
+
 /**
- * Why this host cannot run an isolate, or `null` when the Node line has a
- * build. A load failure on an eligible line (native build skipped on this
- * platform) is reported by `loadIsolatedVm()` returning null; this only
+ * Why this host cannot run an isolate, or `null` when it is the supported
+ * Node 26 line. A load failure on an eligible host (native build skipped on
+ * this platform) is reported by `loadIsolatedVm()` returning null; this only
  * classifies the runtime.
  */
 export function isolatedVmUnavailableReason(): string | null {
@@ -43,14 +44,14 @@ export function isolatedVmUnavailableReason(): string | null {
   }
   const major = nodeMajor();
   if (!Number.isFinite(major) || major === 0) return 'could not determine the Node major version';
-  if (major < 22) return `isolated-vm needs Node 22+; this host runs Node ${process.versions.node}`;
-  if (major === 25) return 'isolated-vm has no build for Node 25 (EOL non-LTS line skipped upstream)';
+  if (major !== SUPPORTED_NODE_MAJOR) {
+    return `isolated-vm requires Node ${SUPPORTED_NODE_MAJOR}.x; this host runs Node ${process.versions.node}`;
+  }
   return null;
 }
 
-/** `isolated-vm@6` (Node 22–24) and the `isolated-vm-next` alias of `isolated-vm@7` (Node 26+). */
+/** The one optionalDependency that carries the Node 26 isolated-vm build. */
 const IVM_MODULE = 'isolated-vm';
-const IVM_NEXT_MODULE = 'isolated-vm-next';
 
 /**
  * The optionalDependency that carries this Node line's isolated-vm build, or
@@ -58,8 +59,7 @@ const IVM_NEXT_MODULE = 'isolated-vm-next';
  * Shared by the loader and the self-check so both name the same package.
  */
 export function isolatedVmSpecifier(): string | null {
-  if (isolatedVmUnavailableReason() !== null) return null;
-  return nodeMajor() >= 26 ? IVM_NEXT_MODULE : IVM_MODULE;
+  return isolatedVmUnavailableReason() === null ? IVM_MODULE : null;
 }
 
 let cached: Promise<IsolatedVm | null> | null = null;
@@ -78,12 +78,12 @@ async function loadIsolatedVmUncached(): Promise<IsolatedVm | null> {
   const specifier = isolatedVmSpecifier();
   if (!specifier) return null;
   try {
-    // Dynamic on purpose: the two builds are optionalDependencies gated by
-    // Node major, and a static import of a native addon absent on this host
-    // would fail this module (and every static importer of the executor) at
-    // load instead of failing closed for the isolate lane alone. The
-    // specifier is a variable so the worker typechecks with neither package
-    // installed; `unwrapIsolatedVm` narrows to the structural `IsolatedVm`.
+    // Dynamic on purpose: the addon is an optionalDependency, and a static
+    // import of a native addon absent on this host would fail this module
+    // (and every static importer of the executor) at load instead of failing
+    // closed for the isolate lane alone. The specifier is a variable so the
+    // worker typechecks with the package absent; `unwrapIsolatedVm` narrows
+    // to the structural `IsolatedVm`.
     return unwrapIsolatedVm(await import(specifier));
   } catch {
     return null;

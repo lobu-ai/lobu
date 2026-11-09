@@ -24,6 +24,8 @@ open http://localhost:8787
 
 That's it. Sign up via the admin UI, add provider API keys from the settings page, create your first agent.
 
+Running `lobu run` inside your own container instead of this image? It provisions a local operator on first boot, so you can sign in and mint tokens without a browser; see "Sign in without a browser" in the [CLI README](../packages/cli/README.md).
+
 ## What's actually required to boot
 
 | Env var | Required? | Notes |
@@ -111,3 +113,67 @@ The server tells the frontend which mode is active at runtime, so this is a plai
 - [ ] Database backups configured (Lobu writes encrypted secrets there — losing the DB means losing every connected integration).
 - [ ] `WORKER_ALLOWED_DOMAINS` reviewed for your use case.
 - [ ] Provider API keys added through the admin UI (or env vars) for whichever providers you intend to use.
+
+
+### Isolated view validation
+
+`views.set` keeps its existing input and validates the exact candidate in a
+credential-free browser runner before storing it. Set `VIEW_VALIDATOR_URL` to
+its internal HTTP address. Browser failures return 422; missing, overloaded or
+unavailable runners return 503. Both preserve the saved view. The API image
+continues to exclude browser tooling.
+
+The sample Compose file builds the runner separately on an internal network
+with no published ports. Its pinned Chromium seccomp profile is vendored from
+[Playwright v1.60.0](https://github.com/microsoft/playwright/blob/v1.60.0/utils/docker/seccomp_profile.json),
+with one change: `chroot` is allowed without the outer `CAP_SYS_CHROOT`, so
+Chromium's user-namespace sandbox starts after all capabilities are dropped.
+The runner uses a non-root user with Chromium's sandbox enabled. Do not expose
+its endpoint to public ingress or attach application credentials. The new GHCR
+package must be made public through its package settings for anonymous pulls,
+or the deployment must supply `imagePullSecrets`. Repository linkage grants
+workflow access but does not inherit public visibility ([GitHub package access](https://docs.github.com/en/packages/learn-github-packages/configuring-a-packages-access-control-and-visibility)).
+
+For Kubernetes, install that profile as `profiles/lobu-view-validator.json`
+beneath the kubelet seccomp directory on eligible nodes, verify the node permits
+unprivileged user namespaces, then enable `viewValidator.enabled` in the chart.
+The chart supplies an internal Service, API-only ingress, deny-all egress
+(including UDP/WebRTC), temporary storage, resource limits, and the API URL.
+It deliberately defaults off until the node profile is installed; saves remain
+unavailable until a runner is configured. `viewValidator.runtimeClassName` can
+select an operator-provisioned isolated runtime. Run the container smoke against
+the actual runtime before enabling registration.
+
+Validation covers bounded empty/error/loading fixtures, both themes and display
+modes, and up to eight distinct attached scopes, each validated as its own
+bounded runner request of twelve scenarios. More scopes are rejected with 422
+before any runner work. It does not prove every business
+rule or successful-data interaction. Authors must also exercise the actual
+workspace view, pagination, actions and peek interactions before claiming acceptance.
+
+For a local `lobu run` or Mac-app project, start only the validator from this
+checkout, with a loopback-only published port:
+
+```bash
+docker compose -f docker-compose.example.yml --profile local-validator \
+  up -d --build view-validator-local
+curl -fsS --retry 15 --retry-delay 1 --retry-all-errors --retry-connrefused \
+  --retry-max-time 30 --max-time 2 http://127.0.0.1:8090/health
+VIEW_VALIDATOR_URL=http://127.0.0.1:8090 lobu run
+```
+
+This starts the isolated runner and a small trusted HTTP relay. The relay
+publishes only loopback and forwards only `/health` and `/validate`; Chromium
+stays on its internal-only network. Publishing a port directly on the runner's
+internal-only network does not work. Stop the local runner services with
+`docker compose -f docker-compose.example.yml --profile local-validator stop
+view-validator-local view-validator`.
+
+The CLI already passes environment variables and project `.env` settings to
+the embedded server. For a Mac-app launch, set the same `VIEW_VALIDATOR_URL`
+in the project's `.env`. Local and embedded installs deliberately return 503
+for view creates and updates until this runner is configured and ready; they
+have no validation bypass. Existing views remain readable. Stale compiler
+bundles are rebuilt in the background after a read; rejected rebuilds remain
+suppressed for that source/compiler, and unavailable runners back off for five
+minutes. A later read receives a successful validated rebuild.

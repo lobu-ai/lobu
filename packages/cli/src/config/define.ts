@@ -13,26 +13,28 @@
 import type {
   AutomationEventTrigger,
   AutomationScheduleTrigger,
+  AutomationScriptContext,
   AutomationWorkspaceEventTrigger,
+  CollectionPresentation,
   ConnectorClass,
   ConnectorRuntime,
-  CollectionPresentation,
   Dimension,
   EventSet,
   Measure,
   ReactionClient,
-  AutomationScriptContext,
   ReactionContext,
   Segment,
 } from "@lobu/connector-sdk";
+import type { AgentSettingsPatch } from "@lobu/core/contracts/agent-settings";
+import type { AutomationExecutionConfig } from "@lobu/core/contracts/tools/manage-automations";
 import {
   Kind,
   OptionalKind,
-  Type,
   type StringOptions,
   type TOptional,
   type TSchema,
   type TString,
+  Type,
 } from "@sinclair/typebox";
 import type { SecretRef } from "./secret.js";
 
@@ -666,28 +668,15 @@ export type ReactionHandler = (
   params?: Record<string, unknown>
 ) => Promise<unknown>;
 
-export type AutomationScriptHandler = (
+/** Optional preparation export in an Automation reaction module. */
+export type PreparationHandler = (
   ctx: AutomationScriptContext,
-  client: ReactionClient,
-  params?: Record<string, unknown>
-) => Promise<unknown>;
-
-export interface ScriptSource {
-  readonly kind: "scriptSource";
-  path: string;
-  params?: Record<string, unknown>;
-}
-
-/** Execute a local TypeScript job directly, with the owning agent's SDK permissions. */
-export function scriptFromFile<
-  _Handler extends AutomationScriptHandler = AutomationScriptHandler,
->(path: string, params?: Record<string, unknown>): ScriptSource {
-  return { kind: "scriptSource", path, ...(params ? { params } : {}) };
-}
+  client: ReactionClient
+) => Promise<Record<string, Record<string, unknown>[]>>;
 
 /**
- * A local reaction source file to compile + run in a sandboxed isolate when the
- * Automation fires. Built with {@link reactionFromFile} and set on
+ * A local lifecycle module: optional `prepare` before the native agent and/or
+ * a default completion reaction, both run in the shared sandbox. Built with {@link reactionFromFile} and set on
  * {@link Automation.reaction}. Like {@link ConnectorSource}, this carries only the
  * path as plain data — the handler module is NOT imported at config-eval time;
  * `lobu apply` reads the raw source and the server compiles it.
@@ -699,7 +688,10 @@ export interface ReactionSource {
 }
 
 /**
- * Reference a local reaction source file to compile + ship at apply time.
+ * Reference a local lifecycle module to compile + ship at apply time.
+ * A preparation-only module needs no generic: `reactionFromFile("./prepare.ts")`.
+ * Its `prepare` export returns named arrays of records, saved per run and read
+ * by the agent through `knowledge.read({ automation_id, run_id }).sources`.
  *
  * Pass the handler's module type via the generic for go-to-def / rename and a
  * `tsc` error if the module's default export drifts from {@link ReactionHandler}:
@@ -713,7 +705,7 @@ export interface ReactionSource {
  * so the handler module is never imported during config eval.
  */
 export function reactionFromFile<
-  _Handler extends ReactionHandler = ReactionHandler,
+  _Handler extends (...args: never[]) => Promise<unknown> = ReactionHandler,
 >(path: string): ReactionSource {
   return { kind: "reactionSource", path };
 }
@@ -771,10 +763,10 @@ export interface Automation {
   readonly kind: "automation";
   /** Stable slug — diff key. */
   slug: string;
-  /** Owning agent (handle or id). Every Automation belongs to exactly one agent. */
-  agent: Agent | string;
-  /** Script job or agent execution. Omitted preserves the stored executor; "agent" clears a script executor. */
-  executor?: ScriptSource | "agent";
+  /** Managed agent identity. Omit for device-only or external analysis. */
+  agent?: Agent | string | null;
+  /** Canonical execution options. Omit to preserve; null clears. Cannot overlap the model helper. */
+  executionConfig?: AutomationExecutionConfig | null;
   name?: string;
   description?: string;
   /**
@@ -802,7 +794,7 @@ export interface Automation {
    * action for a declarative project.
    *
    * Supply {@link Automation.prompt}, `skills`, a {@link Automation.reaction}
-   * script, or an {@link Automation.executor} script. Any one is required for schedule triggers, event
+   * script. Any one is required for schedule triggers, event
    * triggers with execution `"window"`, and Automations with no triggers
    * (manual runs); an event trigger with execution `"turn"` may omit all
    * instruction sources, since the incoming event is the content and a built-in
@@ -828,7 +820,7 @@ export interface Automation {
   tags?: string[];
   /** LLM guidance for the Automation's downstream reaction agent. */
   reactionsGuidance?: string;
-  /** Agent-kind override for firings (e.g. "background", "notifier"). */
+  /** Agent runtime override for firings. */
   agentKind?: string;
   /**
    * UUID pinning this Automation's runs to a specific device worker. Only
@@ -842,16 +834,14 @@ export interface Automation {
    */
   model?: string | null;
   /**
-   * A sibling `.ts` reaction script (`./reactions/foo.reaction.ts`) compiled +
-   * run in a sandboxed isolate when the Automation fires, built with
-   * {@link reactionFromFile}. The script must `export default async (ctx,
-   * client, params?) => …` ({@link ReactionHandler}). Kept in its own file (not
-   * inline) so your IDE type-checks it; the path must stay under the config
-   * directory.
+   * A sibling TypeScript module, built with {@link reactionFromFile}. Export
+   * `prepare` to save named sources before analysis and/or a default handler
+   * for completion. Without prompt, skills, input schema or declared outputs,
+   * the module runs as code without a model. The path stays under the config
+   * directory so it can be typechecked and bundled portably.
    *
    * Omit to preserve a previously installed reaction. Set explicitly to `null`
-   * to remove it — required when switching a reaction-driven Automation to a
-   * script executor so the same work is not performed twice.
+   * to remove it after the remaining definition has its required instructions.
    */
   reaction?: ReactionSource | null;
 }
@@ -970,7 +960,7 @@ export interface ProviderConfig {
 }
 
 /** Modalities an org inference provider may declare a capability block for. */
-export type InferenceModality = "text" | "image" | "stt" | "tts" | "embedding";
+export type InferenceModality = "text" | "image" | "stt" | "tts";
 
 /**
  * Per-modality upstream override for an {@link OrgProvider}. Omit a modality
@@ -1020,6 +1010,8 @@ export interface Agent {
   id: string;
   name?: string;
   description?: string;
+  /** Canonical settings. Omitted keys stay unmanaged; supplied settings replace their stored value. */
+  settings?: AgentSettingsPatch;
   /**
    * Agent directory holding `SOUL.md` / `IDENTITY.md` / `USER.md`. Relative to
    * the config file; defaults to `./agents/<id>`. (Skills are referenced

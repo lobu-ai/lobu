@@ -171,6 +171,7 @@ gate_format_lint() {
   bash scripts/lib/__tests__/review-commit-lock.test.sh || return 1
   bash scripts/lib/__tests__/review-process.test.sh || return 1
   bash scripts/lib/__tests__/review-reviewer.test.sh || return 1
+  bash scripts/lib/__tests__/review-cycle.test.sh || return 1
   bash scripts/lib/__tests__/review-bb.test.sh || return 1
   bash scripts/lib/__tests__/review-upstream-guard.test.sh || return 1
   bash scripts/lib/__tests__/review-skip.test.sh || return 1
@@ -306,7 +307,7 @@ gate_connector_parity_smoke() {
   gate_require_docker || return 77
   docker build -f docker/worker/Dockerfile -t lobu-worker:parity-smoke . || return 1
   local self_check rc=0
-  self_check=$(docker run --rm --network=none lobu-worker:parity-smoke node dist/bin.js self-check --json) || rc=$?
+  self_check=$(docker run --rm --network=none lobu-worker:parity-smoke node --no-node-snapshot dist/bin.js self-check --json) || rc=$?
   printf '%s\n' "$self_check"
   [ "$rc" -eq 0 ] || return 1
   # Mirrors ci.yml / build-images.yml: the image runs under Node so the isolate

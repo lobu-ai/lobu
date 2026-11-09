@@ -103,6 +103,26 @@ describe('PostgresConnector.sync (keyset incremental, real DB)', () => {
     expect(r.events.map((e) => e.origin_id)).toEqual(['query:1', 'query:2', 'query:3']);
   });
 
+  it('preserves quoted SQL values through query, source reads and sync', async () => {
+    const query = `/* :ignored; $1 /* nested */ */ SELECT id, created_at,
+      'tool_invocation:query_sdk; $1 LIMIT' AS "value:field",
+      $tag$literal; :name $1 OFFSET$tag$ AS tagged,
+      'it''s a literal' AS escaped
+      FROM pgc_it`;
+    const config = { DATABASE_URL: process.env.DATABASE_URL, ...cfg, query };
+    const result = await conn.query({ query, config, credentials: null });
+    expect(result.rows).toHaveLength(3);
+    expect(result.rows[0]).toMatchObject({
+      'value:field': 'tool_invocation:query_sdk; $1 LIMIT',
+      tagged: 'literal; :name $1 OFFSET',
+      escaped: "it's a literal",
+    });
+    const read = await conn.read({ feedKey: 'query', config, credentials: null });
+    expect(read.rows).toHaveLength(3);
+    const synced = await run({ query }, null);
+    expect(synced.events.map((event) => event.origin_id)).toEqual(['query:1', 'query:2', 'query:3']);
+  });
+
   it('namespaces origin_id by feed instance so two feeds on one connection do not collide', async () => {
     // Both feeds share feedKey 'query' and the same primary keys; distinct feedId
     // must keep their origin_ids apart (else one supersedes the other's events).

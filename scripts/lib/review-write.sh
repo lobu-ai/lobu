@@ -1,48 +1,44 @@
 #!/usr/bin/env bash
-# Pre-review fixer: runs the reviewer CLI over the local diff with WRITE
-# access and prompts/review-fix-prompt.md, so review-grade findings get fixed
-# BEFORE `make review` posts a pi-review status. Posts nothing; commits
-# nothing. The driving agent inspects the edits (shown at the end), commits,
-# then runs `make review` once on the settled HEAD.
-#
-# Reviewer selection matches review.sh — REVIEWER_CLI=auto|codex|claude. This
-# step is mandated by AGENTS.md but is not a gate: unlike review.sh it posts no
-# status, so a reviewer outage here silently skips the fixer instead of failing
-# a check. Being hard-wired to one CLI therefore costs a whole quality pass
-# whenever that CLI is unavailable, with nothing to signal it happened.
+# Internal write phase for make review. Requires findings and a result path.
+# Never commits, pushes, or posts; make review independently verifies edits.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/review-reviewer.sh
-. "$SCRIPT_DIR/lib/review-reviewer.sh"
-# shellcheck source=scripts/lib/review-skip.sh
-. "$SCRIPT_DIR/lib/review-skip.sh"
+. "$SCRIPT_DIR/review-reviewer.sh"
 # shellcheck source=scripts/lib/review-bb.sh
-. "$SCRIPT_DIR/lib/review-bb.sh"
+. "$SCRIPT_DIR/review-bb.sh"
 
-cd "$(dirname "$0")/.."
+# Checked in the caller's directory: the cd below would hide a submodule start.
+review_refuse_submodule || exit 2
+cd "$SCRIPT_DIR/../.."
+review_load_config "$(pwd)"
 
 review_fix_bb_cleanup() {
   review_bb_cancel_owned
+  [ -z "${bounded_prompt:-}" ] || rm -f "$bounded_prompt"
 }
 trap review_fix_bb_cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+usage() {
+  echo "usage: internal review write phase: --base <branch> --findings <json> --result <json>" >&2
+  exit 2
+}
+
 BASE_BRANCH="${BASE:-}"
+FINDINGS_FILE=""
+REVIEW_FIX_RESULT_FILE=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --base)
-      [ $# -ge 2 ] || { echo "usage: scripts/review-fix.sh [--base <branch>]" >&2; exit 2; }
-      BASE_BRANCH="$2"
-      shift 2
-      ;;
-    *)
-      echo "usage: scripts/review-fix.sh [--base <branch>]" >&2
-      exit 2
-      ;;
+    --findings) [ $# -ge 2 ] || usage; FINDINGS_FILE="$2"; shift 2 ;;
+    --result) [ $# -ge 2 ] || usage; REVIEW_FIX_RESULT_FILE="$2"; shift 2 ;;
+    --base) [ $# -ge 2 ] || usage; BASE_BRANCH="$2"; shift 2 ;;
+    *) usage ;;
   esac
 done
+[ -n "$FINDINGS_FILE" ] && [ -n "$REVIEW_FIX_RESULT_FILE" ] || usage
 if [ -z "$BASE_BRANCH" ]; then
   if git rev-parse --verify --quiet origin/main >/dev/null; then
     BASE_BRANCH="origin/main"
@@ -56,49 +52,53 @@ git rev-parse --verify --quiet "$BASE_BRANCH^{commit}" >/dev/null \
 git merge-base "$BASE_BRANCH" HEAD >/dev/null 2>&1 \
   || { echo ">> no merge base between '$BASE_BRANCH' and HEAD" >&2; exit 2; }
 
-PROMPT_FILE="prompts/review-fix-prompt.md"
-[ -f "$PROMPT_FILE" ] || { echo ">> missing $PROMPT_FILE" >&2; exit 1; }
+jq -e 'type == "object"' "$FINDINGS_FILE" >/dev/null 2>&1 ||
+  { echo "--findings must be a JSON object: $FINDINGS_FILE" >&2; exit 2; }
+bounded_prompt="$(mktemp /tmp/lobu-review-write-prompt.XXXXXX)"
+cat > "$bounded_prompt" <<'PROMPT'
 
-if git diff --quiet "$BASE_BRANCH...HEAD" 2>/dev/null \
-  && git diff --quiet \
-  && git diff --cached --quiet \
-  && [ -z "$(git ls-files --others --exclude-standard | head -n 1)" ]; then
-  echo ">> no diff against $BASE_BRANCH and no local changes; nothing to fix"
-  exit 0
-fi
+You are the internal write phase of make review. Follow repository instructions.
 
-# The fixer and posted review share one path/content classifier. A trivial diff
-# should not pay for an unposted LLM pass only to self-skip at `make review`.
-REVIEWER_MODE="${REVIEWER_MODE:-light}"
-if [ "$REVIEWER_MODE" != "full" ] \
-  && review_classify_diff "$BASE_BRANCH" worktree; then
-  echo ">> pre-review fixer skipped: $REVIEW_SKIP_REASON"
-  echo ">> deterministic CI and make review remain required"
-  exit 0
-fi
+Fix ONLY supplied blocking findings whose correction is clear and supported by evidence. If uncertain,
+return a decision instead of guessing. The JSON may include explicit parent
+instructions resolving prior decisions; follow them within repository rules.
+Run focused tests for edits. Do not make product, architecture, API/SDK/DB,
+or credential decisions yourself. Return those
+to the parent; never request credentials or broaden scope yourself. Do not
+run review drivers, spawn agents, commit, push, or post statuses.
+Emit exactly one JSON object, without fences or prose:
+{"summary":"what changed","decisions":[{"kind":"product|architecture|credentials|verification","finding":"unresolved finding","question":"decision needed from parent"}],"tests":[{"command":"focused command run","passed":true}]}
+Use empty arrays when appropriate. If tests cannot run, include a verification
+decision. The tests array records final checks against the fixed tree only;
+describe an expected failing reproduction before the fix in summary instead.
+A summary is never a passing review; the independent read-only reviewer will
+inspect the changed tree independently.
+
+Findings:
+PROMPT
+cat "$FINDINGS_FILE" >> "$bounded_prompt"
+PROMPT_FILE="$bounded_prompt"
 
 FIXER_CLI="$(review_select_reviewer "${REVIEWER_CLI:-auto}")"
-CLAUDE_REVIEW_MODEL="${CLAUDE_REVIEW_MODEL:-fable}"
+CLAUDE_REVIEW_MODEL="${CLAUDE_REVIEW_MODEL:-}"
+review_require_model "$FIXER_CLI" || exit $?
 
 if review_bb_wants_run; then
   echo ">> BB context detected ($BB_THREAD_ID): routing the fixer through a visible BB child in an isolated worktree" >&2
-  review_bb_run_fixer "$BASE_BRANCH"
+  review_bb_run_fixer "$BASE_BRANCH" "$PROMPT_FILE"
   exit $?
 fi
 CLAUDE_REVIEW_EFFORT="${CLAUDE_REVIEW_EFFORT:-high}"
-CODEX_REVIEW_MODEL="${CODEX_REVIEW_MODEL:-gpt-6-astra}"
+CODEX_REVIEW_MODEL="${CODEX_REVIEW_MODEL:-}"
 CODEX_REVIEW_EFFORT="${CODEX_REVIEW_EFFORT:-xhigh}"
-if [ "$FIXER_CLI" = "claude" ]; then
-  review_validate_claude_model "$CLAUDE_REVIEW_MODEL" || exit $?
-fi
 command -v "$FIXER_CLI" >/dev/null 2>&1 || { echo ">> $FIXER_CLI not found on PATH" >&2; exit 1; }
 
-LAST_MSG_FILE="$(mktemp /tmp/lobu-review-fix.XXXXXX)"
+LAST_MSG_FILE="${REVIEW_FIX_RESULT_FILE%.json}.output.log"
 # Deliberately NOT removed on exit: the driving agent inspects the full summary
 # from the file on demand instead of the script dumping it into the session
 # context. /tmp clears on reboot.
 
-echo ">> pre-review fixer ($FIXER_CLI, base $BASE_BRANCH) — edits the working tree, posts nothing"
+echo ">> review write phase ($FIXER_CLI, base $BASE_BRANCH) — edits the working tree, posts nothing"
 
 set +e
 case "$FIXER_CLI" in
@@ -131,6 +131,12 @@ case "$FIXER_CLI" in
     ;;
 esac
 set -e
+
+[ "$FIXER_EXIT" -eq 0 ] && review_validate_fix_result "$LAST_MSG_FILE" || {
+    echo ">> write phase failed or returned malformed JSON; inspect $LAST_MSG_FILE" >&2
+    exit 1
+  }
+cp "$LAST_MSG_FILE" "$REVIEW_FIX_RESULT_FILE"
 
 echo
 echo "========== fixer summary =========="

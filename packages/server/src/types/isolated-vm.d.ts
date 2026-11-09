@@ -1,7 +1,7 @@
 /**
  * Minimal type shim for `isolated-vm` so TypeScript compiles even when the
- * native module is missing locally (it's an optionalDependency — fails to
- * build on Node versions without a prebuild). Production installs that can
+ * native module is missing locally (it's an optionalDependency — the native
+ * build can fail on an unsupported platform). Production installs that can
  * load the native module get its own types; this shim is only consulted when
  * the package isn't on disk.
  *
@@ -66,14 +66,4 @@ declare module "isolated-vm" {
     constructor(value: T);
     copyInto(): T;
   }
-}
-
-/**
- * Alias for isolated-vm@7 (Node 26+), installed as `isolated-vm-next` via
- * optionalDependencies. Same API surface as v6 for the bits we use. Declared so
- * the dynamic `import("isolated-vm-next")` in run-script.ts typechecks on Node
- * 22–24 hosts where this optional build isn't installed (engine-skipped).
- */
-declare module "isolated-vm-next" {
-  export * from "isolated-vm";
 }

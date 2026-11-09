@@ -105,6 +105,7 @@ export class LobuRestClient {
         ...headersToRecord(options.headers),
       },
       signal: controller.signal,
+      fetch: endBodyOnAbort(this.fetchImpl, controller.signal),
       // The generated SSE client retries forever by default: a non-OK response
       // (401/404/5xx) or a network failure throws inside its read loop, fires
       // onSseError, then sleeps and reconnects with no attempt cap — so a
@@ -196,6 +197,52 @@ export class LobuRestClient {
 
 async function resolveToken(provider: TokenProvider): Promise<string> {
   return typeof provider === "function" ? provider() : provider;
+}
+
+/**
+ * The generated SSE reader calls `reader.cancel()` on abort without handling
+ * the returned promise. Once the aborted fetch has errored the response body,
+ * that cancel rejects with nobody listening: an unhandled AbortError that can
+ * crash a Node process. Ending the body cleanly on our own abort keeps the
+ * stream from erroring, so that cancel resolves. Failures that are not ours
+ * still propagate as errors.
+ */
+function endBodyOnAbort(fetchImpl: LobuFetch, signal: AbortSignal): LobuFetch {
+  const wrapped = async (
+    input: Parameters<LobuFetch>[0],
+    init?: Parameters<LobuFetch>[1]
+  ): Promise<Response> => {
+    const response = await fetchImpl(input, init);
+    if (!response.body) return response;
+    const reader = response.body.getReader();
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        let chunk: Awaited<ReturnType<typeof reader.read>>;
+        try {
+          chunk = await reader.read();
+        } catch (error) {
+          if (cancelled) return;
+          if (signal.aborted) controller.close();
+          else controller.error(error);
+          return;
+        }
+        if (cancelled) return;
+        if (chunk.done) controller.close();
+        else controller.enqueue(chunk.value);
+      },
+      cancel(reason) {
+        cancelled = true;
+        return reader.cancel(reason).catch(() => undefined);
+      },
+    });
+    return new Response(body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    });
+  };
+  return wrapped as LobuFetch;
 }
 
 function normalizeBaseUrl(baseUrl: string): string {

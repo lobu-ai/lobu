@@ -27,6 +27,12 @@ export const LINKEDIN_IDENTITY = {
 	 * sender's messages auto-create.
 	 */
 	USER_MEMBER_ID: "linkedin_user_member_id",
+	/**
+	 * Canonical `/company/<vanity>` page slug, the identity of a company page
+	 * that authors a post. Like the member slug it is mutable, so it stays an
+	 * equal-weight identity.
+	 */
+	COMPANY_SLUG: "linkedin_company_slug",
 } as const;
 
 export type LinkedInIdentityNamespace =
@@ -45,6 +51,41 @@ export function normalizeLinkedInSlug(
 	const slug = (match ? match[1] : value).toLowerCase();
 	if (!/^[a-z0-9\-_%]+$/.test(slug)) return null;
 	return slug;
+}
+
+/**
+ * Extract a canonical LinkedIn company-page slug from a `/company/<slug>` URL
+ * or bare slug. An all-digit value is LinkedIn's numeric company id rather than
+ * the vanity slug; accepting it would key the same page under two identifiers,
+ * so it is rejected.
+ */
+export function normalizeLinkedInCompanySlug(
+	raw: string | null | undefined,
+): string | null {
+	if (typeof raw !== "string") return null;
+	const value = raw.trim();
+	if (!value) return null;
+	const slug = (
+		value.includes("/") ? companyPathSlug(value) : value
+	)?.toLowerCase();
+	if (!slug || !/^[a-z0-9\-_%]+$/.test(slug) || /^\d+$/.test(slug)) {
+		return null;
+	}
+	return slug;
+}
+
+/** The path segment after `company` in an absolute or site-relative URL. */
+function companyPathSlug(url: string): string | null {
+	let segments: string[];
+	try {
+		segments = new URL(url, "https://www.linkedin.com").pathname.split("/");
+	} catch {
+		return null;
+	}
+	const index = segments.findIndex(
+		(segment) => segment.toLowerCase() === "company",
+	);
+	return index >= 0 ? (segments[index + 1] ?? null) : null;
 }
 
 /**
@@ -73,6 +114,8 @@ export function normalizeLinkedInIdentityValue(
 	switch (namespace) {
 		case LINKEDIN_IDENTITY.SLUG:
 			return normalizeLinkedInSlug(raw);
+		case LINKEDIN_IDENTITY.COMPANY_SLUG:
+			return normalizeLinkedInCompanySlug(raw);
 		case LINKEDIN_IDENTITY.MEMBER_ID:
 		case LINKEDIN_IDENTITY.USER_MEMBER_ID:
 			return normalizeLinkedInMemberId(raw);

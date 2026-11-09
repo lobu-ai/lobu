@@ -1,10 +1,12 @@
 // Use simple console.log-based logger by default (unbuffered, 12-factor compliant)
 // Set USE_WINSTON_LOGGER=true only if you need Winston features (file rotation, multiple transports)
 const USE_WINSTON_LOGGER = process.env.USE_WINSTON_LOGGER === "true";
-// Use JSON format for structured logging (better for Loki parsing in production)
+// Use JSON format for structured logging (parsed by the production log pipeline)
 const USE_JSON_FORMAT = process.env.LOG_FORMAT === "json";
 
 import winston from "winston";
+import { annotateErrorLogRecord } from "./error-report";
+import { currentTraceLogFields } from "./trace-context";
 import { scrubDiagnosticValue } from "./utils/diagnostic-scrubber";
 
 export interface Logger {
@@ -65,17 +67,22 @@ function createConsoleLogger(serviceName: string): Logger {
       msgStr = scrubDiagnosticValue(String(message)) as string;
     }
 
+    const traceFields = currentTraceLogFields();
+
     if (USE_JSON_FORMAT) {
-      return safeStringify({
+      const record: Record<string, unknown> = {
         timestamp,
         level: lvl,
         service: serviceName,
         release: process.env.APP_GIT_SHA,
+        ...traceFields,
         message: msgStr,
         ...(args.length > 0
           ? { data: args.length === 1 ? args[0] : args }
           : {}),
-      });
+      };
+      annotateErrorLogRecord(record);
+      return safeStringify(record);
     }
 
     // Append remaining args
@@ -83,7 +90,10 @@ function createConsoleLogger(serviceName: string): Logger {
       msgStr += ` ${safeStringify(args.length === 1 ? args[0] : args)}`;
     }
 
-    return `[${timestamp.replace("T", " ").slice(0, 19)}] [${lvl}] [${serviceName}] ${msgStr}`;
+    const traced = traceFields.trace_id
+      ? ` trace_id=${traceFields.trace_id} span_id=${traceFields.span_id}`
+      : "";
+    return `[${timestamp.replace("T", " ").slice(0, 19)}] [${lvl}] [${serviceName}] ${msgStr}${traced}`;
   };
 
   return {
@@ -123,7 +133,7 @@ export function createLogger(serviceName: string): Logger {
   const isProduction = process.env.NODE_ENV === "production";
   const level = process.env.LOG_LEVEL || "info";
 
-  // JSON format for structured logging (better for Loki/Grafana parsing)
+  // JSON format for structured logging (parsed by the production log pipeline)
   const jsonFormat = winston.format.combine(
     winston.format.timestamp({ format: "YYYY-MM-DDTHH:mm:ss.SSSZ" }),
     winston.format.json()
@@ -156,7 +166,11 @@ export function createLogger(serviceName: string): Logger {
       winston.format((info) => {
         // Preserve Winston's symbol fields while applying the same boundary
         // scrubbing as the default console transport.
-        return Object.assign(info, scrubDiagnosticValue(info));
+        return Object.assign(
+          info,
+          scrubDiagnosticValue(info),
+          currentTraceLogFields()
+        );
       })()
     ),
     defaultMeta: { service: serviceName, release: process.env.APP_GIT_SHA },

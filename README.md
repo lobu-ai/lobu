@@ -60,7 +60,7 @@ Lobu when it needs shared context.
 
 The same MCP endpoint works with **Claude Code, Codex, OpenCode, Antigravity, ChatGPT, Claude Desktop, Cursor**, and custom MCP clients. Run `lobu connect` to detect a client, install the supported MCP and skill bundle, or get the exact native handoff when the host requires UI setup. Authentication happens in that agent on first use.
 
-Setup guides: [Claude](https://lobu.ai/connect-from/claude/) · [ChatGPT](https://lobu.ai/connect-from/chatgpt/) · [Codex](https://lobu.ai/connect-from/codex/) · [Grok](https://lobu.ai/connect-from/grok/)
+Setup guides: [Claude](https://lobu.ai/connect-from/claude-code/) · [ChatGPT](https://lobu.ai/connect-from/chatgpt/) · [Codex](https://lobu.ai/connect-from/codex/) · [Grok](https://lobu.ai/connect-from/grok/)
 
 Download Lobu: [Mac app](https://github.com/lobu-ai/lobu/releases/latest/download/Lobu.dmg) · [Chrome extension](https://chromewebstore.google.com/detail/jhgcecbdpnoehfnhpdfihlchjddapepi)
 
@@ -155,7 +155,7 @@ WhatsApp  Gmail  Calendar  Mac        Slack  GitHub  CRM  DB
 
 Agents can search and save memory, query structured entities, inspect connected sources, and delegate to Lobu specialists without moving to a new chat interface or adopting Lobu's runtime.
 
-Docs: [Memory](https://lobu.ai/getting-started/memory/) · [Claude](https://lobu.ai/connect-from/claude/) · [ChatGPT](https://lobu.ai/connect-from/chatgpt/) · [Codex](https://lobu.ai/connect-from/codex/)
+Docs: [Memory](https://lobu.ai/getting-started/memory/) · [Claude](https://lobu.ai/connect-from/claude-code/) · [ChatGPT](https://lobu.ai/connect-from/chatgpt/) · [Codex](https://lobu.ai/connect-from/codex/)
 
 ### 2. Run persistent Lobu specialists
 

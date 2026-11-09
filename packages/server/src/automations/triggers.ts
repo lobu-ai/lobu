@@ -316,7 +316,7 @@ export function assertAutomationInstructions(
 	if (reactionScript?.trim()) return;
 	if (executorSource?.trim()) return;
 	throw new ToolUserError(
-		"This Automation runs from a schedule, an analysis window, or manual runs, so it needs instructions: attach at least one skill, provide instruction text, set a reaction script, or configure a script executor. Only event triggers with execution 'turn' may omit all instruction sources."
+		"This Automation runs from a schedule, an analysis window, or manual runs, so it needs instructions: attach at least one skill, provide instruction text, attach a code module. Only event triggers with execution 'turn' may omit all instruction sources."
 	);
 }
 

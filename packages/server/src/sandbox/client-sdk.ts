@@ -19,6 +19,7 @@ import { resolveGrantedWorkspaceTarget, findUngrantedMemberWorkspace, formatUngr
 import { boundedQuery, classifyReadQueryFailure } from "../utils/bounded-read";
 import { ToolUserError, toolErrorHttpStatus } from "../utils/errors";
 import { getOrganizationSlug } from "../utils/url-builder";
+import { isCompletePushdownResult, pushdownFailureError, runConnectorQuery } from "../lib/connector-pushdown";
 import { QUERY_SQL_STATEMENT_TIMEOUT_MS } from "../utils/content-read-bounds";
 import { METHOD_METADATA } from "./method-metadata";
 import { bindClientContext } from "./workspace-activity";
@@ -33,11 +34,46 @@ import type { SDKMode } from "./sdk-manifest";
  */
 const CLIENT_QUERY_MAX_ROWS = 5000;
 
+/**
+ * `client.query(sql, { connection })`: the same live read-only pushdown and
+ * connection-visibility gate as `query_sql({ connection })`, returned as plain
+ * rows. The connector may cap a page below the requested ceiling, so a result
+ * the source reports as larger fails closed instead of returning a prefix.
+ */
+async function queryConnection(
+	ctx: ToolContext,
+	isAdmin: boolean,
+	connectionSlug: string,
+	querySql: string,
+): Promise<unknown[]> {
+	let result: Awaited<ReturnType<typeof runConnectorQuery>>;
+	try {
+		result = await runConnectorQuery({
+			scope: authzScopeFromToolContext(ctx),
+			isAdmin,
+			connectionSlug,
+			query: querySql.trim(),
+			limit: CLIENT_QUERY_MAX_ROWS,
+		});
+	} catch (err) {
+		throw pushdownFailureError(err, connectionSlug, "query");
+	}
+	if (!isCompletePushdownResult(result)) {
+		throw new ToolUserError(
+			`client.query on connection "${connectionSlug}" returned ${result.rows.length} of ${result.total ?? "an unreported number of"} rows; aggregate or filter the SQL so the result fits one page.`,
+			422,
+			"VALIDATION",
+		);
+	}
+	return result.rows.map((row) => ({ ...row }));
+}
+
 export { enumerateSDKManifest, type SDKMode } from "./sdk-manifest";
 
 import {
 	buildAgentsNamespace,
 	buildAuthProfilesNamespace,
+	buildInferenceProvidersNamespace,
 	buildAutomationsNamespace,
 	buildCatalogNamespace,
 	buildClassifiersNamespace,
@@ -56,6 +92,7 @@ import {
 	buildViewsNamespace,
 } from "./namespaces";
 import type { AgentsNamespace } from "./namespaces/agents";
+import type { InferenceProvidersNamespace } from "./namespaces/inference-providers";
 import type { AuthProfilesNamespace } from "./namespaces/auth-profiles";
 import type { CatalogNamespace } from "./namespaces/catalog";
 import type { ClassifiersNamespace } from "./namespaces/classifiers";
@@ -87,6 +124,7 @@ export interface ClientSDK {
 	conversations: ConversationsNamespace;
 	feeds: FeedsNamespace;
 	authProfiles: AuthProfilesNamespace;
+	inferenceProviders: InferenceProvidersNamespace;
 	operations: OperationsNamespace;
 	automations: AutomationsNamespace;
 	classifiers: ClassifiersNamespace;
@@ -99,7 +137,7 @@ export interface ClientSDK {
 	schedules: SchedulesNamespace;
 
 	org(slugOrId: string): Promise<ClientSDK>;
-	query(sql: string, options?: { window_token?: string }): Promise<unknown[]>;
+	query(sql: string, options?: { window_token?: string; connection?: string }): Promise<unknown[]>;
 	log(message: string, data?: Record<string, unknown>): void;
 }
 
@@ -289,6 +327,7 @@ export function buildClientSDK(
 		get connections() { return namespace("connections", buildConnectionsNamespace(requireWorkspaceContext(ctx), env)); },
 		get feeds() { return namespace("feeds", buildFeedsNamespace(requireWorkspaceContext(ctx), env)); },
 		get authProfiles() { return namespace("authProfiles", buildAuthProfilesNamespace(requireWorkspaceContext(ctx), env)); },
+		get inferenceProviders() { return namespace("inferenceProviders", buildInferenceProvidersNamespace(requireWorkspaceContext(ctx), env)); },
 		get operations() { return namespace("operations", buildOperationsNamespace(requireWorkspaceContext(ctx), env)); },
 		get automations() { return namespace("automations", buildAutomationsNamespace(requireWorkspaceContext(ctx), env)); },
 		get classifiers() { return namespace("classifiers", buildClassifiersNamespace(requireWorkspaceContext(ctx), env)); },
@@ -327,10 +366,17 @@ export function buildClientSDK(
 			// Read-tier parity with `query_sql` / `metric_series`: members may query
 			// operational tables; auth/identity tables stay admin-only per-query.
 			const isAdmin = isAdminOrOwnerRole(workspaceCtx.memberRole);
+			const optionKeys = ["window_token", "connection"] as const;
 			if (options !== undefined && (options === null || typeof options !== "object" || Array.isArray(options) ||
-				Object.keys(options).some((key) => key !== "window_token") ||
-				(options.window_token !== undefined && (typeof options.window_token !== "string" || !options.window_token)))) {
-				throw new ToolUserError("client.query options must contain a non-empty window_token string.", 400, "VALIDATION");
+				Object.keys(options).some((key) => !(optionKeys as readonly string[]).includes(key)) ||
+				optionKeys.some((key) => options[key] !== undefined && (typeof options[key] !== "string" || !options[key])))) {
+				throw new ToolUserError("client.query options accept only a non-empty window_token or connection string.", 400, "VALIDATION");
+			}
+			if (options?.connection) {
+				if (options.window_token) {
+					throw new ToolUserError("client.query window_token cannot be combined with connection.", 400, "VALIDATION");
+				}
+				return queryConnection(workspaceCtx, isAdmin, options.connection, querySql);
 			}
 			const window = options?.window_token
 				? await resolveWindowQueryContext(options.window_token, env, workspaceCtx, getDb())

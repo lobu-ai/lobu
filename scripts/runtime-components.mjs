@@ -96,10 +96,10 @@ export function runtimeVerificationSource(key, component) {
   );
   if (key === "postgres")
     verify.push(
-      // Install time, as the cache owner: hydrate the binary's SONAME links and
-      // prove pgvector stages. Runtime stages it per data root and never writes
-      // into this tree, which another user may not be able to write.
-      'const pg = await import("./index.mjs"); pg.ensureNativeLibSonames(pg.resolveEmbeddedNativeDir());',
+      // Install time, as the cache owner: prepare the binary tree (library links,
+      // program modes) and prove pgvector stages. Runtime stages it per data root
+      // and never writes into this tree, which may be read-only or another user's.
+      'const pg = await import("./index.mjs"); pg.prepareEmbeddedNative(pg.resolveEmbeddedNativeDir());',
       'import { mkdtempSync, rmSync } from "node:fs"; import { tmpdir } from "node:os"; import { join } from "node:path";',
       'const staged = mkdtempSync(join(tmpdir(), "lobu-pgvector-verify-")); try { pg.installPgvector(join(staged, "pgvector")); } finally { rmSync(staged, { recursive: true, force: true }); }'
     );
@@ -112,7 +112,7 @@ export function runtimeVerificationSource(key, component) {
   else verify.push("const nativeRequire = require;");
   if (key === "server" || key === "device")
     verify.push(
-      'const major = Number(process.versions.node.split(".")[0]); if (major !== 25) { const ivm = nativeRequire(major >= 26 ? "isolated-vm-next" : "isolated-vm"); const isolate = new ivm.Isolate({ memoryLimit: 8 }); isolate.dispose(); }'
+      'const ivm = nativeRequire("isolated-vm"); const isolate = new ivm.Isolate({ memoryLimit: 8 }); isolate.dispose();'
     );
   return `${verify.join("\n")}\n`;
 }
@@ -160,7 +160,7 @@ export async function bundleCompiler() {
     bundle: true,
     platform: "node",
     format: "esm",
-    target: "node22",
+    target: "node26",
     plugins: [externalNonWorkspace],
   });
 }
@@ -241,7 +241,7 @@ export async function buildRuntimeComponents() {
         bundle: true,
         platform: "node",
         format: "esm",
-        target: "node22",
+        target: "node26",
         packages: "external",
       });
     } else if (key === "device") {
@@ -264,6 +264,7 @@ export async function buildRuntimeComponents() {
       delete vendorCli.bin;
       vendorCli.dependencies["@lobu/core"] = "file:../core";
       vendorCli.dependencies["@lobu/connector-sdk"] = "file:../connector-sdk";
+      vendorCli.dependencies["@lobu/views"] = "file:../views";
       vendorCli.dependencies["@lobu/connector-worker"] =
         "file:../connector-worker";
       for (const value of Object.values(vendorCli.exports ?? {})) {
@@ -284,7 +285,7 @@ export async function buildRuntimeComponents() {
         bundle: true,
         platform: "node",
         format: "esm",
-        target: "node22",
+        target: "node26",
         plugins: [externalNonWorkspace],
       });
     } else if (key === "postgres") {
@@ -316,9 +317,7 @@ export async function buildRuntimeComponents() {
     // release can freeze and test its dependency graph before new sibling
     // versions exist in the registry (including canary versions).
     if (key === "server" || key === "device") {
-      for (const name of key === "server"
-        ? ["core", "connector-sdk", "views"]
-        : ["core", "connector-sdk"]) {
+      for (const name of ["core", "connector-sdk", "views"]) {
         copy(
           join(root, "packages", name, "dist"),
           join(directory, "vendor", name, "dist")

@@ -98,11 +98,11 @@ jobs:
           deploy-key: ${{ secrets.OWLETTO_WEB_DEPLOY_KEY }}
 
       # The bundled device daemon is compiled by `build-mac-device-daemon.sh`
-      # during the Xcode build. Bun 1.3.5 silently ignores --metafile, which
-      # the packaging graph guard depends on; pin the measured toolchain.
+      # during the Xcode build. The packaging graph guard depends on
+      # --metafile; pin the measured toolchain.
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.3.14
+          bun-version: 1.4.4
 
       # Release contract — fail fast rather than build a wrong/missing artifact:
       #   1. The deploy key must work. The setup-submodule action writes a stub

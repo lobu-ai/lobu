@@ -26,21 +26,20 @@ cd "$REPO_ROOT"
 
 command -v bun >/dev/null || { echo "bun is required: curl -fsSL https://bun.sh/install | bash"; exit 1; }
 
-# Lobu's SDK sandbox (query_sdk / run_sdk) depends on isolated-vm@6, which has
-# not shipped Node 25+ support yet (upstream: laverdet/isolated-vm#553). The
-# call-site gate in packages/server/src/sandbox/run-script.ts only surfaces
+# The gateway and worker load isolated-vm, whose native build is Node 26 only.
+# The call-site gate in packages/server/src/sandbox/run-script.ts only surfaces
 # this when an agent invokes the sandbox; we fail fast here so `make dev`
-# itself refuses to boot under an unsupported Node major.
+# itself refuses to boot under any other Node major.
 node_supported() {
   local bin=$1
   [ -x "$bin" ] || return 1
   local major
   major=$("$bin" -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo "")
-  [ -n "$major" ] && [ "$major" -ge 22 ] && [ "$major" -lt 25 ]
+  [ -n "$major" ] && [ "$major" -eq 26 ]
 }
 
 if ! node_supported "$(command -v node || true)"; then
-  for candidate in /opt/homebrew/opt/node@22/bin /opt/homebrew/opt/node@23/bin /opt/homebrew/opt/node@24/bin /usr/local/opt/node@22/bin /usr/local/opt/node@23/bin /usr/local/opt/node@24/bin; do
+  for candidate in /opt/homebrew/opt/node@26/bin /usr/local/opt/node@26/bin; do
     if node_supported "$candidate/node"; then
       echo "↪︎  Using $($candidate/node -v) from $candidate (system node is unsupported)"
       export PATH="$candidate:$PATH"
@@ -51,12 +50,27 @@ fi
 
 if ! node_supported "$(command -v node || true)"; then
   current=$(node -v 2>/dev/null || echo 'unknown')
-  echo "❌ Unsupported Node.js runtime: $current (required: 22.x–24.x)"
-  echo "   isolated-vm has no Node 25+ build yet — see https://github.com/laverdet/isolated-vm/issues/553"
-  echo "   Quick fix on macOS: brew install node@22 (this script auto-detects Homebrew node@22-24)"
+  echo "❌ Unsupported Node.js runtime: $current (required: 26.x)"
+  echo "   Quick fix on macOS: brew install node@26 (this script auto-detects Homebrew node@26)"
   echo "   Or use a version manager (nvm, fnm, mise, asdf, volta) that honours .nvmrc / .node-version."
   exit 1
 fi
+
+# The backend must be hosted by that verified Node, not by the Bun process that
+# ran this script. `tsx` supplies `tsx watch` semantics under Node.
+TSX_CLI="$REPO_ROOT/node_modules/tsx/dist/cli.mjs"
+if [ ! -f "$TSX_CLI" ]; then
+  echo "❌ tsx not installed at $TSX_CLI (run: bun install)"
+  exit 1
+fi
+
+run_server_dev() {
+  cd "$REPO_ROOT/packages/server"
+  NODE_OPTIONS="${NODE_OPTIONS:-} --no-node-snapshot" \
+    exec node --no-node-snapshot "$TSX_CLI" watch \
+      --ignore=../web/** --ignore=../owletto/** --ignore=../../node_modules/** \
+      src/server.ts
+}
 
 if [ ! -f .env ]; then
   echo "❌ .env not found at $REPO_ROOT/.env"
@@ -193,7 +207,7 @@ if [ "$_LOBU_EMBEDDED" = 1 ]; then
   if [[ "${OPEN:-}" == "1" || "${OPEN:-}" == "true" ]]; then
     lobu_dev_schedule_open
   fi
-  exec bun run --filter '@lobu/server' dev:local
+  run_server_dev
 fi
 
 # External Postgres (postgres:// URL). Point this at a running instance's
@@ -227,4 +241,4 @@ if [[ "${OPEN:-}" == "1" || "${OPEN:-}" == "true" ]]; then
   lobu_dev_schedule_open
 fi
 
-exec bun run --filter '@lobu/server' dev
+run_server_dev

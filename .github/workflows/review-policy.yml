@@ -1,0 +1,71 @@
+name: Review Policy
+
+# Privileged entrypoints always use the default branch's classifier. PR files
+# are inspected as Git data, never executed with this token.
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions:
+  contents: read
+  pull-requests: read
+  actions: read
+  statuses: write
+
+jobs:
+  safe-change:
+    if: >-
+      github.event_name == 'pull_request_target' ||
+      (github.event.workflow_run.event == 'pull_request' &&
+       github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Classify with trusted policy and publish after exact-head CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          event_sha="$(jq -r '.pull_request.head.sha // .workflow_run.head_sha' "$GITHUB_EVENT_PATH")"
+          pr="$(jq -r '.pull_request.number // .workflow_run.pull_requests[0].number // empty' "$GITHUB_EVENT_PATH")"
+          if [ -z "$pr" ]; then
+            pr="$(gh api "repos/$REPO/commits/$event_sha/pulls?per_page=100" \
+              --jq '[.[] | select(.state == "open" and .base.ref == "main")][0].number // empty')"
+          fi
+          [ -n "$pr" ] || { echo 'No associated PR; leave semantic review to the driver.'; exit 0; }
+          metadata="$(gh api "repos/$REPO/pulls/$pr")"
+          [ "$(jq -r '.state' <<< "$metadata")" = open ] || exit 0
+          [ "$(jq -r '.base.ref' <<< "$metadata")" = main ] || exit 0
+          head_sha="$(jq -r '.head.sha' <<< "$metadata")"
+          base_sha="$(jq -r '.base.sha' <<< "$metadata")"
+          [ "$head_sha" = "$event_sha" ] || { echo 'Superseded event.'; exit 0; }
+
+          # Preserve the trusted classifier before changing the inspected tree.
+          trusted="$RUNNER_TEMP/review-skip.sh"
+          cp scripts/lib/review-skip.sh "$trusted"
+          git -c core.hooksPath=/dev/null fetch --no-tags origin "$head_sha"
+          git -c core.hooksPath=/dev/null checkout --detach "$head_sha"
+          if ! reason="$(bash "$trusted" "$base_sha")"; then
+            echo 'Keep the independent semantic review requirement.'
+            exit 0
+          fi
+          green="$(gh api --method GET "repos/$REPO/actions/workflows/ci.yml/runs" \
+            -f "head_sha=$head_sha" -f per_page=100 \
+            --jq 'any(.workflow_runs[]; .status == "completed" and .conclusion == "success")')"
+          [ "$green" = true ] || { echo 'Safe-class diff; waiting for exact-head CI completion.'; exit 0; }
+          # A synchronize event may have arrived during classification.
+          [ "$(gh api "repos/$REPO/pulls/$pr" --jq .head.sha)" = "$head_sha" ] || exit 0
+          gh api --method POST "repos/$REPO/statuses/$head_sha" \
+            -f state=success -f context=pi-review \
+            -f "description=Safe-class policy: ${reason:0:110}" \
+            -f "target_url=$GITHUB_SERVER_URL/$REPO/actions/runs/$GITHUB_RUN_ID"

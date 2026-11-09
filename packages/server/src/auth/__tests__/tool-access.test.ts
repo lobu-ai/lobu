@@ -21,6 +21,7 @@ import {
   getRequiredAccessLevel,
   hasRequiredMcpScope,
   isPublicReadable,
+  publicToolDenial,
   requiresMemberWrite,
   requiresOwnerAdmin,
   resolveMaxAccessLevel,
@@ -429,6 +430,12 @@ describe('isPublicReadable', () => {
     expect(isPublicReadable('query_sql', {})).toBe(false);
   });
 
+  it('explains the public denial for SQL and SDK queries', () => {
+    expect(publicToolDenial('query_sql')).toMatch(/not available to public workspace visitors/i);
+    expect(publicToolDenial('query_sdk')).toMatch(/not available to public workspace visitors/i);
+    expect(publicToolDenial('manage_entity')).toBeNull();
+  });
+
   it('should deny public read for unknown tools', () => {
     expect(isPublicReadable('unknown_tool', {})).toBe(false);
   });
@@ -807,13 +814,14 @@ query_sdk: read ?=read
 query_sql: read ?=read
 run_sdk: write ?=write
 open_view: read ?=read
-manage_entity: create=write update=write list=read+public get=read+public delete=admin link=write unlink=write update_link=write list_links=read+public discover_duplicates=read ?=read
+manage_entity: get=read+public create=write update=write list=read+public delete=admin link=write unlink=write update_link=write list_links=read+public discover_duplicates=read ?=read
 manage_entity_schema: list=read+public get=read+public create=admin update=admin delete=admin audit=read+public add_rule=admin remove_rule=admin list_rules=read+public ?=read
 manage_connections: list_connector_groups=read+public list=read+public get=read+public create=write setup_options=read+public connect=write connect_managed=write update=write apply_chat_connection=admin delete=admin reauthenticate=write test=admin install_connector=admin uninstall_connector=admin get_connector_source=admin validate_connector_source=admin update_connector_source=admin rollback_connector_version=admin toggle_connector_login=admin update_connector_auth=admin update_connector_default_config=admin set_channel_about=admin ?=read
 manage_catalog: list_catalog=read+public list_installed=read+public ?=read
 manage_agents: list=read+public get=read+public create=admin update=admin delete=admin ?=read
 manage_conversations: list=read get=read send=write ?=read
 manage_feeds: list_feeds=read+public read_feed=read+public read_feeds=read+public create_feed=admin update_feed=admin delete_feed=admin trigger_feed=admin recollect_feed=admin ?=read
+manage_inference_providers: list=read create=admin update=admin set_default=admin set_capability=admin rotate_key=admin delete=admin ?=read
 manage_auth_profiles: list_auth_profiles=read+public get_auth_profile=read+public test_auth_profile=admin create_auth_profile=write update_auth_profile=write delete_auth_profile=admin set_default_auth_profile=admin ?=read
 manage_operations: list_available=read+public execute=write list_runs=read+public get_run=read+public cancel=write list_activity=read+public approve=write reject=write approve_batch=write reject_batch=write ?=read
 notify: send=admin ?=admin
@@ -822,7 +830,7 @@ manage_automations: create=admin list=read+public update=admin create_version=ad
 get_automation: read+public ?=read+public
 read_knowledge: read+public ?=read+public
 manage_classifiers: create=admin list=read+public delete=admin classify=admin ?=read
-manage_views: set=admin get=read list=read remove=admin ?=read
+manage_views: set=admin get=read list=read+public remove=admin ?=read
 list_organizations: read ?=read
 list_metrics: read ?=read
 query_metric: read ?=read

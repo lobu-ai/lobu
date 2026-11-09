@@ -12,6 +12,9 @@
  *    connection via a `connection_id` column (events, event_classifications'
  *    underlying event, feeds). A NULL `connection_id` (system / non-connection
  *    rows) stays visible.
+ *  - {@link compileConnectionFkVisibilityLiteral} — the same FK predicate with
+ *    server-derived values escaped into the SQL, for tagged-template queries
+ *    with no `$n` param list.
  *  - {@link compileConnectionRowVisibility} — for the `connections` row itself.
  *
  * Rule: a connection is visible when `visibility = 'org'` OR it is the
@@ -57,6 +60,19 @@ export function compileConnectionColumnVisibility(tableAlias: string, principalC
  * Binds two params from `baseParamIndex`: the org id and the principal.
  * Returns an `AND (...)` fragment (no leading space).
  */
+function connectionFkVisibilitySql(
+  tableAlias: string,
+  orgSql: string,
+  principalSql: string | null,
+): string {
+  return `AND (${tableAlias}.connection_id IS NULL OR ${tableAlias}.connection_id IN (
+      SELECT vc.id FROM public.connections vc
+      WHERE vc.organization_id = ${orgSql}
+        AND vc.deleted_at IS NULL
+        AND ${connectionVisibilityPredicate('vc', principalSql)}
+    ))`;
+}
+
 export function compileConnectionFkVisibility(
   scope: AuthzScope,
   baseParamIndex: number,
@@ -65,14 +81,22 @@ export function compileConnectionFkVisibility(
   const orgParam = `$${baseParamIndex}::text`;
   const userParam = `$${baseParamIndex + 1}::text`;
   return {
-    sql: `AND (${tableAlias}.connection_id IS NULL OR ${tableAlias}.connection_id IN (
-      SELECT vc.id FROM public.connections vc
-      WHERE vc.organization_id = ${orgParam}
-        AND vc.deleted_at IS NULL
-        AND ${connectionVisibilityPredicate('vc', userParam)}
-    ))`,
+    sql: connectionFkVisibilitySql(tableAlias, orgParam, userParam),
     params: [scope.organizationId, scope.principal],
   };
+}
+
+/**
+ * The same FK predicate, with the org id and principal escaped into the SQL.
+ * For tagged-template queries (`sql.unsafe(fragment)`) where `$n` placeholders
+ * have no parameter list to bind against.
+ */
+export function compileConnectionFkVisibilityLiteral(scope: AuthzScope, tableAlias: string): string {
+  return connectionFkVisibilitySql(
+    tableAlias,
+    sqlLiteral(scope.organizationId),
+    scope.principal == null ? null : sqlLiteral(scope.principal),
+  );
 }
 
 /**

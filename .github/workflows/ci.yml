@@ -105,6 +105,38 @@ jobs:
           BEFORE_SHA: ${{ github.event.before }}
         run: node scripts/ci-paths.mjs suites
 
+  view-validator-image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - run: docker build -f docker/view-validator/Dockerfile -t view-validator-test .
+      - name: Test credential-free isolated runner
+        run: |
+          docker run --rm --init --network=none --read-only --tmpfs /tmp:rw,size=512m \
+            --shm-size=256m --memory=1g --cpus=2 --pids-limit=256 --cap-drop=ALL \
+            --security-opt no-new-privileges=true \
+            --security-opt seccomp=docker/view-validator/seccomp_profile.json \
+            view-validator-test bun docker/view-validator/smoke.ts
+      - name: Prove local Compose runner access
+        run: |
+          # Keep the service on its internal-only network. Only this trusted
+          # HTTP probe uses the host network; author code stays in the service.
+          override="$RUNNER_TEMP/view-validator-local.yml"
+          printf 'services:\n  view-validator:\n    image: view-validator-test\n  view-validator-local:\n    image: view-validator-test\n' > "$override"
+          compose() {
+            docker compose --project-name view-validator-local --profile local-validator \
+              -f docker-compose.example.yml -f "$override" "$@"
+          }
+          trap 'compose logs --no-color; compose down' EXIT
+          compose up -d --no-build view-validator-local
+          curl --fail --silent --show-error --retry 15 --retry-delay 1 \
+            --retry-all-errors --retry-connrefused --retry-max-time 30 --max-time 2 \
+            http://127.0.0.1:8090/health
+          docker run --rm --network=host --read-only --cap-drop=ALL \
+            --security-opt no-new-privileges=true view-validator-test \
+            bun docker/view-validator/smoke.ts http://127.0.0.1:8090
+
   # Fast unit tests — no Postgres, no submodule needed for most.
   # Splits from `integration` so a unit failure surfaces in <2 min instead of
   # waiting behind DB setup. Worker tests run under bun (full suite, not the
@@ -123,15 +155,15 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.3.5
+          bun-version: 1.4.4
 
-      # Node 22 — the node-version-guard test spawns the real `node` on PATH and
+      # Node 26 — the node-version-guard test spawns the real `node` on PATH and
       # asserts the CLI gate lets a supported Node through. The runner's default
-      # Node major (20) is below Lobu's floor of 22, so without this the guard
-      # fires and the "real runtime, >=22" case fails. Matches every other job.
+      # Node major is below Lobu's floor of 26, so without this the guard fires
+      # and the "real runtime, 26.x" case fails. Matches every other job.
       - uses: actions/setup-node@v7
         with:
-          node-version: "22"
+          node-version: "26"
 
       - name: Compute cache keys
         id: cache-keys
@@ -323,10 +355,10 @@ jobs:
           deploy-key: ${{ secrets.OWLETTO_WEB_DEPLOY_KEY }}
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.3.5
+          bun-version: 1.4.4
       - uses: actions/setup-node@v7
         with:
-          node-version: "22"
+          node-version: "26"
       - name: Compute cache keys
         id: cache-keys
         shell: bash
@@ -377,10 +409,10 @@ jobs:
           deploy-key: ${{ secrets.OWLETTO_WEB_DEPLOY_KEY }}
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.3.5
+          bun-version: 1.4.4
       - uses: actions/setup-node@v7
         with:
-          node-version: "22"
+          node-version: "26"
       - name: Compute cache keys
         id: cache-keys
         shell: bash
@@ -410,10 +442,10 @@ jobs:
           deploy-key: ${{ secrets.OWLETTO_WEB_DEPLOY_KEY }}
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.3.5
+          bun-version: 1.4.4
       - uses: actions/setup-node@v7
         with:
-          node-version: "22"
+          node-version: "26"
       - name: Compute cache keys
         id: cache-keys
         shell: bash
@@ -450,10 +482,10 @@ jobs:
           deploy-key: ${{ secrets.OWLETTO_WEB_DEPLOY_KEY }}
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.3.5
+          bun-version: 1.4.4
       - uses: actions/setup-node@v7
         with:
-          node-version: "22"
+          node-version: "26"
       - name: Compute cache keys
         id: cache-keys
         shell: bash
@@ -489,10 +521,10 @@ jobs:
           deploy-key: ${{ secrets.OWLETTO_WEB_DEPLOY_KEY }}
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.3.5
+          bun-version: 1.4.4
       - uses: actions/setup-node@v7
         with:
-          node-version: "22"
+          node-version: "26"
       - name: Compute cache keys
         id: cache-keys
         shell: bash
@@ -569,13 +601,13 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.3.5
+          bun-version: 1.4.4
 
       # Vitest runs under Node and clipboard-action tests rely on Node's global
       # Navigator API. Do not inherit the runner image's unpinned Node version.
       - uses: actions/setup-node@v7
         with:
-          node-version: "22"
+          node-version: "26"
 
       - name: Compute cache keys
         id: cache-keys
@@ -610,6 +642,7 @@ jobs:
         run: |
           cd packages/core && bun run build && cd ../..
           cd packages/connector-sdk && bun run build && cd ../..
+          cd packages/views && bun run build && cd ../..
 
       - name: owletto tests (vitest)
         if: steps.submodule.outputs.stubbed != 'true'
@@ -667,6 +700,10 @@ jobs:
         if: steps.submodule.outputs.stubbed != 'true'
         run: node scripts/mcp-app-smoke.mjs --dist packages/owletto/dist-mcp-apps/interaction
 
+      - name: Native view runtime smoke (real browser)
+        if: steps.submodule.outputs.stubbed != 'true'
+        run: bun scripts/view-native-smoke.ts
+
   # Backend integration tests need a real Postgres + pgvector. The Vitest
   # files share a module graph and database within one process, so each shard
   # remains single-forked; the shards themselves get isolated runners and
@@ -721,13 +758,13 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.3.5
+          bun-version: 1.4.4
 
-      # Pin Node 22 so isolated-vm's abi127 prebuild loads. Without this the
-      # sandbox runtime test segfaults on the runner's default Node major.
+      # Pin Node 26 so isolated-vm 7's abi147 prebuild loads. Without this the
+      # sandbox runtime test fails on the runner's default Node major.
       - uses: actions/setup-node@v7
         with:
-          node-version: '22'
+          node-version: '26'
 
       - name: Compute cache keys
         id: cache-keys
@@ -791,6 +828,13 @@ jobs:
           cd packages/connector-worker && bun run build && cd ../..
           cd packages/pgvector-embedded && bun run build && cd ../..
 
+      - name: Build native view runtime for browser validation
+        # Server-only dependency builds omit app assets. The save validator must
+        # mount the same native component artifact as the frontend, even on a
+        # restored package-dist cache.
+        working-directory: packages/owletto
+        run: MCP_APP=view-native bunx vite build --config vite.config.mcp.ts
+
       - name: Verify Postgres health (fail fast if pgvector setup is broken)
         run: |
           for _ in {1..20}; do
@@ -819,6 +863,21 @@ jobs:
       # the 15-minute job timeout; a missing library fails the launch loudly.
       - name: Install Chromium for gateway-extension integration
         run: node node_modules/playwright-vanilla/cli.js install chromium
+
+      - name: Allow the test browser's user-namespace sandbox
+        run: |
+          # Ubuntu 24.04 restricts downloaded browsers independently of Docker
+          # seccomp. Follow Chromium's per-binary AppArmor allowlist, preserving
+          # the global restriction and chromiumSandbox:true in the real runner.
+          # https://chromium.googlesource.com/chromium/src/+/main/docs/security/apparmor-userns-restrictions.md
+          if [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)" != 1 ]; then
+            exit 0
+          fi
+          browser_cache="$(node -e 'const p=require("node:path"); console.log(p.dirname(p.dirname(p.dirname(require("playwright-vanilla").chromium.executablePath()))))')"
+          profile="lobu-ci-chromium-$GITHUB_RUN_ID-${{ matrix.shard }}"
+          printf 'abi <abi/4.0>,\ninclude <tunables/global>\nprofile %s "%s/**/chrome{,-headless-shell}" flags=(unconfined) {\n  userns,\n}\n' \
+            "$profile" "$browser_cache" > "$RUNNER_TEMP/$profile"
+          sudo apparmor_parser -r "$RUNNER_TEMP/$profile"
 
       - name: server integration suite shard ${{ matrix.shard }}/3 (vitest under Node)
         working-directory: packages/server
@@ -853,6 +912,15 @@ jobs:
           directory: packages/server/coverage
           flags: server-integration-vitest-${{ matrix.shard }}
           fail_ci_if_error: false
+
+      - name: Remove the test browser AppArmor profile
+        if: always()
+        run: |
+          profile="$RUNNER_TEMP/lobu-ci-chromium-$GITHUB_RUN_ID-${{ matrix.shard }}"
+          if [ -f "$profile" ]; then
+            sudo apparmor_parser -R "$profile"
+            rm "$profile"
+          fi
 
   # The bun:test suites need Postgres but are intentionally separate from
   # Vitest: they use bun's runner and several gateway directories need their
@@ -890,11 +958,11 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.3.5
+          bun-version: 1.4.4
 
       - uses: actions/setup-node@v7
         with:
-          node-version: '22'
+          node-version: '26'
 
       - name: Compute cache keys
         id: cache-keys
@@ -941,6 +1009,13 @@ jobs:
           cd packages/embeddings && bun run build && cd ../..
           cd packages/connector-worker && bun run build && cd ../..
           cd packages/pgvector-embedded && bun run build && cd ../..
+
+      - name: Build native view runtime for browser validation
+        # Server-only dependency builds omit app assets. The save validator must
+        # mount the same native component artifact as the frontend, even on a
+        # restored package-dist cache.
+        working-directory: packages/owletto
+        run: MCP_APP=view-native bunx vite build --config vite.config.mcp.ts
 
       - name: Verify Postgres health (fail fast if pgvector setup is broken)
         run: |
@@ -995,8 +1070,8 @@ jobs:
           rc=0
           for d in $dirs; do
             echo "::group::bun test $d"
-            # Database setup hooks can exceed Bun's 5s default under CI load;
-            # Bun 1.3.5 ignores `[test].timeout`, so use the CLI flag.
+            # Database setup hooks can exceed Bun's 5s default under CI load,
+            # so use the CLI flag rather than relying on [test].timeout.
             bun test "$d" --coverage --timeout 30000 || rc=1
             if [ -f coverage/lcov.info ]; then
               safe=$(printf '%s' "$d" | tr '/' '-')
@@ -1036,7 +1111,7 @@ jobs:
     # that accepted `skipped` unconditionally turned a broken gate job into a
     # green required check. Skipped shards are only legitimate when the paths
     # filter itself said no runtime paths changed.
-    needs: [check-author, paths, server-integration-vitest, server-integration-bun]
+    needs: [check-author, paths, server-integration-vitest, server-integration-bun, view-validator-image]
     # This compatibility context only evaluates a handful of strings. Keep it on the
     # lightweight runner image while older open PRs still require the legacy
     # `integration` context; branch protection can move directly to the four
@@ -1051,12 +1126,13 @@ jobs:
           PACKAGES_CHANGED: ${{ needs.paths.outputs.packages }}
           VITEST_RESULT: ${{ needs.server-integration-vitest.result }}
           BUN_RESULT: ${{ needs.server-integration-bun.result }}
+          VALIDATOR_RESULT: ${{ needs.view-validator-image.result }}
         run: |
           echo "check-author: $AUTHOR_RESULT"
           echo "paths: $PATHS_RESULT (packages=$PACKAGES_CHANGED)"
           echo "Vitest matrix: $VITEST_RESULT"
           echo "Bun/Postgres: $BUN_RESULT"
-          for r in "$AUTHOR_RESULT" "$PATHS_RESULT"; do
+          for r in "$AUTHOR_RESULT" "$PATHS_RESULT" "$VALIDATOR_RESULT"; do
             if [ "$r" != success ]; then
               echo "gate job result \"$r\" is not success"
               exit 1
@@ -1085,7 +1161,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.3.5
+          bun-version: 1.4.4
 
       - name: Compute cache keys
         id: cache-keys
@@ -1287,6 +1363,7 @@ jobs:
           bash scripts/lib/__tests__/review-commit-lock.test.sh
           bash scripts/lib/__tests__/review-process.test.sh
           bash scripts/lib/__tests__/review-reviewer.test.sh
+          bash scripts/lib/__tests__/review-cycle.test.sh
           bash scripts/lib/__tests__/review-bb.test.sh
           bash scripts/lib/__tests__/review-upstream-guard.test.sh
           bash scripts/lib/__tests__/review-skip.test.sh
@@ -1349,7 +1426,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.3.5
+          bun-version: 1.4.4
 
       - name: Compute cache keys
         id: cache-keys
@@ -1804,9 +1881,8 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         if: steps.submodule.outputs.stubbed != 'true'
         with:
-          # Bun 1.3.5 silently ignores --metafile; the packaging graph guard
-          # requires the measured Bun 1.3.14 toolchain.
-          bun-version: 1.3.14
+          # The packaging graph guard requires the measured Bun 1.4.4 toolchain.
+          bun-version: 1.4.4
 
       - name: Install workspace dependencies for Mac daemon smoke
         if: steps.submodule.outputs.stubbed != 'true'
@@ -1909,6 +1985,8 @@ jobs:
           file: ./docker/worker/Dockerfile
           load: true
           push: false
+          build-args: |
+            APP_GIT_SHA=${{ github.sha }}
           tags: lobu-worker:parity-smoke
           cache-from: type=gha,scope=worker
 
@@ -1924,21 +2002,27 @@ jobs:
         run: |
           set -o pipefail
           docker run --rm --network=none lobu-worker:parity-smoke \
-            node dist/bin.js self-check --json | tee worker-self-check.json
+            node --no-node-snapshot dist/bin.js self-check --json | tee worker-self-check.json
           jq -e '.isolate_lane.available == true' worker-self-check.json >/dev/null || {
             echo "::error::worker image cannot load isolated-vm: $(jq -c .isolate_lane worker-self-check.json)"
             exit 1
           }
 
+      - name: Verify worker image release SHA
+        if: github.event_name != 'push'
+        run: |
+          docker run --rm --network=none lobu-worker:parity-smoke \
+            node -e 'if (process.env.APP_GIT_SHA !== process.argv[1]) { console.error("APP_GIT_SHA mismatch", { expected: process.argv[1], actual: process.env.APP_GIT_SHA ?? "<missing>" }); process.exit(1); }' "$GITHUB_SHA"
+
       # Host (CLI) leg: same self-check function, exercised from the built CLI
       # runtime. This PR touches the gated paths, so this leg dogfoods the gate.
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.3.5
+          bun-version: 1.4.4
 
       - uses: actions/setup-node@v7
         with:
-          node-version: "22"
+          node-version: "26"
 
       - name: Compute cache keys
         id: cache-keys
@@ -1981,10 +2065,10 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.0
+          bun-version: 1.4.4
 
       - name: Read release locks with consumer Bun
-        # Read the exact 1.3.5-generated release locks, without regenerating
+        # Read the exact 1.4.4-generated release locks, without regenerating
         # them under the consumer version and hiding migration defects.
         run: |
           for component in "$RUNNER_TEMP/lazy-runtime-smoke"/packages/@lobu-runtime-*; do

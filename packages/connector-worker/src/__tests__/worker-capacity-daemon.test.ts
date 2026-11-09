@@ -1,14 +1,205 @@
 import { describe, expect, test } from "bun:test";
+import { fileURLToPath } from "node:url";
 import { WORKER_POLL_MAX_WAIT_SECONDS } from "@lobu/core/contracts/worker/protocol";
 import { WorkerHttpError } from "../daemon/client";
 import { WorkerPollLoop } from "../daemon/poll-loop";
 import { defaultDeviceMaxConcurrentJobs } from "../daemon/device-concurrency";
+import { ResourceAdmission } from "../daemon/resource-admission";
+import { createResourceSampler } from "../daemon/resources";
 
 function deferred<T = void>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((done) => { resolve = done; });
   return { promise, resolve };
 }
+
+describe("resource-aware worker admission", () => {
+  test("bare-metal admission uses available memory, including reclaimable cache", () => {
+    const unavailable = () => { throw new Error('no cgroup files'); };
+    for (const [availableBytes, expectedUsed] of [[300, 700], [1000, 0], [1200, 0]] as const) {
+      const sample = createResourceSampler(unavailable, 'darwin', () => ({ limitBytes: 1000, availableBytes }))();
+      expect(sample?.memory).toEqual([{ usedBytes: expectedUsed, limitBytes: 1000 }]);
+    }
+    expect(createResourceSampler(unavailable, 'linux', () => ({ limitBytes: 1000, availableBytes: Number.NaN }))()).toBeNull();
+  });
+
+  test("an unbounded cgroup v2 root falls back to host resources", () => {
+    const files: Record<string, string> = {
+      '/proc/self/cgroup': '0::/\n',
+      '/proc/self/mountinfo': '1 0 0:1 / /sys/fs/cgroup rw - cgroup2 cgroup rw\n',
+    };
+    // The unified root has no memory.max; a controller that is not enabled
+    // for a child likewise exposes no limit file.
+    const sample = createResourceSampler(path => {
+      if (!(path in files)) throw Object.assign(new Error('unavailable'), { code: 'ENOENT' });
+      return files[path]!;
+    }, 'linux', () => ({ limitBytes: 1000, availableBytes: 800 }))();
+    expect(sample?.memory).toEqual([{ usedBytes: 200, limitBytes: 1000 }]);
+    expect(sample?.cpu[0]?.key).toBe('process');
+    const unreadable = createResourceSampler(path => {
+      if (!(path in files)) throw Object.assign(new Error('denied'), { code: 'EACCES' });
+      return files[path]!;
+    }, 'linux', () => ({ limitBytes: 1000, availableBytes: 800 }));
+    expect(unreadable()).toBeNull();
+  });
+
+  test("native isolates respect resource admission through the real HTTP client", async () => {
+    const fixture = fileURLToPath(new URL('./fixtures/resource-admission.fixture.ts', import.meta.url));
+    const child = Bun.spawn(['node', '--import', 'tsx', '--test', fixture], {
+      env: { ...process.env, TSX_TSCONFIG_PATH: fileURLToPath(new URL('../../tsconfig.json', import.meta.url)) },
+      stdout: 'pipe', stderr: 'pipe',
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited,
+    ]);
+    expect({ exitCode, stderr, output: exitCode ? stdout : '' }).toEqual({ exitCode: 0, stderr: '', output: '' });
+  }, 30_000);
+
+  test("paces starts and recovers from CPU and memory pressure with hysteresis", () => {
+    let now = 0;
+    let used = 100;
+    let cpu = 0;
+    const admission = new ResourceAdmission(() => ({
+      memory: [{ usedBytes: used, limitBytes: 1000 }],
+      cpu: [{ key: 'container', usageMicros: cpu, cores: 1 }],
+    }), () => now);
+    expect(admission.capacity()).toBe(1);
+    admission.started();
+    expect(admission.capacity()).toBe(0);
+    now += 500;
+    cpu += 500_000;
+    expect(admission.capacity()).toBe(0);
+    now += 500;
+    cpu += 100_000;
+    expect(admission.capacity()).toBe(1);
+    used = 850;
+    now += 500;
+    expect(admission.capacity()).toBe(0);
+    used = 750;
+    now += 500;
+    expect(admission.capacity()).toBe(0);
+    used = 400;
+    now += 500;
+    expect(admission.capacity()).toBe(1);
+  });
+
+  test("missing samples pause claims and recovery does not require a completion", async () => {
+    let healthy = false;
+    const admission = new ResourceAdmission(() => healthy ? {
+      memory: [{ usedBytes: 100, limitBytes: 1000 }], cpu: [],
+    } : null);
+    const started = deferred();
+    const finish = deferred();
+    const capacities: number[] = [];
+    const loop = new WorkerPollLoop({
+      resourceAdmission: admission,
+      maxConcurrentJobs: 2,
+      client: { healthCheck: async () => true, poll: async (capacity: number) => {
+        capacities.push(capacity);
+        return capacity > 0 ? { run_id: 1, run_type: 'action' } : { next_poll_seconds: 30 };
+      } } as never,
+      execute: async () => { started.resolve(); await finish.promise; },
+    });
+    const running = loop.start();
+    try {
+      await Bun.sleep(30);
+      expect(capacities).toEqual([0]);
+      healthy = true;
+      await Promise.race([started.promise, Bun.sleep(1500).then(() => { throw new Error('admission did not recover'); })]);
+      expect(capacities).toContain(1);
+    } finally {
+      loop.stop(); finish.resolve(); await running;
+      expect(await loop.waitForActiveJobs(1000, 1)).toBe(true);
+    }
+  });
+
+  test("executes an already admitted held claim after resources become pressured", async () => {
+    let healthy = true;
+    const admission = new ResourceAdmission(() => healthy ? {
+      memory: [{ usedBytes: 100, limitBytes: 1000 }], cpu: [],
+    } : null);
+    const entered = deferred();
+    const claim = deferred<{ run_id: number; run_type: string }>();
+    const executed: number[] = [];
+    const loop = new WorkerPollLoop({
+      resourceAdmission: admission,
+      client: { healthCheck: async () => true, poll: async () => { entered.resolve(); return claim.promise; } } as never,
+      execute: async (job) => { executed.push(job.run_id!); loop.stop(); },
+    });
+    const running = loop.start();
+    await entered.promise;
+    healthy = false;
+    claim.resolve({ run_id: 1, run_type: 'action' });
+    await running;
+    expect(executed).toEqual([1]);
+  });
+
+  test("samples namespaced cgroup v2 usage and inherited fractional CPU limits", () => {
+    const files: Record<string, string> = {
+      '/proc/self/cgroup': '0::/tenant/worker\n',
+      '/proc/self/mountinfo': '1 0 0:1 / /sys/fs/cgroup rw - cgroup2 cgroup rw\n',
+      '/sys/fs/cgroup/tenant/worker/memory.max': 'max',
+      '/sys/fs/cgroup/tenant/memory.max': '1000',
+      '/sys/fs/cgroup/tenant/memory.current': '700',
+      '/sys/fs/cgroup/tenant/cpu.max': '50000 100000',
+      '/sys/fs/cgroup/tenant/cpu.stat': 'usage_usec 125000\n',
+    };
+    const sample = createResourceSampler(path => {
+      if (!(path in files)) throw Object.assign(new Error('unavailable'), { code: 'ENOENT' });
+      return files[path]!;
+    }, 'linux')();
+    expect(sample?.memory).toContainEqual({ usedBytes: 700, limitBytes: 1000 });
+    expect(sample?.cpu).toContainEqual({ key: '/sys/fs/cgroup/tenant', usageMicros: 125000, cores: 0.5 });
+    files['/sys/fs/cgroup/tenant/memory.stat'] = 'inactive_file 600\n';
+    expect(createResourceSampler(path => {
+      if (!(path in files)) throw Object.assign(new Error('unavailable'), { code: 'ENOENT' });
+      return files[path]!;
+    }, 'linux')()?.memory).toContainEqual({ usedBytes: 100, limitBytes: 1000 });
+    delete files['/sys/fs/cgroup/tenant/memory.current'];
+    expect(createResourceSampler(path => {
+      if (!(path in files)) throw Object.assign(new Error('unavailable'), { code: 'ENOENT' });
+      return files[path]!;
+    }, 'linux')()).toBeNull();
+  });
+
+  test("supports cgroup v1 mount roots, unlimited sentinels and separate accounting", () => {
+    const files: Record<string, string> = {
+      '/proc/self/cgroup': '5:memory:/tenant/worker\n4:cpu:/tenant/worker\n3:cpuacct:/tenant/worker\n',
+      '/proc/self/mountinfo': [
+        '1 0 0:1 /tenant /cg/mem rw - cgroup cgroup rw,memory',
+        '2 0 0:2 /tenant /cg/cpu rw - cgroup cgroup rw,cpu',
+        '3 0 0:3 /tenant /cg/acct rw - cgroup cgroup rw,cpuacct',
+      ].join('\n'),
+      '/cg/mem/worker/memory.limit_in_bytes': '9223372036854771712',
+      '/cg/mem/memory.limit_in_bytes': '2000',
+      '/cg/mem/memory.usage_in_bytes': '1500',
+      '/cg/mem/memory.stat': 'total_inactive_file 500\n',
+      '/cg/cpu/worker/cpu.cfs_quota_us': '-1',
+      '/cg/cpu/worker/cpu.cfs_period_us': '100000',
+      '/cg/cpu/cpu.cfs_quota_us': '25000',
+      '/cg/cpu/cpu.cfs_period_us': '100000',
+      '/cg/acct/cpuacct.usage': '125000000',
+    };
+    const read = (path: string) => {
+      if (!(path in files)) throw Object.assign(new Error('unavailable'), { code: 'ENOENT' });
+      return files[path]!;
+    };
+    const sample = createResourceSampler(read, 'linux')();
+    expect(sample?.memory).toEqual([{ usedBytes: 1000, limitBytes: 2000 }]);
+    expect(sample?.cpu).toEqual([{ key: '/cg/cpu', usageMicros: 125000, cores: 0.25 }]);
+    files['/cg/cpu/cpu.cfs_quota_us'] = 'invalid';
+    expect(createResourceSampler(read, 'linux')()).toBeNull();
+    files['/cg/cpu/cpu.cfs_quota_us'] = '25000';
+    // A hybrid host's unified hierarchy does not own the v1 controllers.
+    files['/proc/self/cgroup'] += '0::/tenant/worker\n';
+    const v1Mounts = files['/proc/self/mountinfo'];
+    const v2Mount = '4 0 0:4 / /cg/unified rw - cgroup2 cgroup rw';
+    for (const mounts of [`${v1Mounts}\n${v2Mount}`, `${v2Mount}\n${v1Mounts}`]) {
+      files['/proc/self/mountinfo'] = mounts;
+      expect(createResourceSampler(read, 'linux')()).toEqual(sample);
+    }
+  });
+});
 
 describe("worker daemon capacity polling", () => {
   test("holds only claims with capacity and cancels an idle request on shutdown", async () => {
@@ -355,6 +546,54 @@ describe("worker daemon capacity polling", () => {
     await loop.start();
 
     expect(polls).toBe(3);
+  });
+
+  test("budgets agent turns apart from connector work; a backfill borrows a free turn slot", async () => {
+    const polls: Array<{ capacity: number; wait?: number; lanes?: unknown }> = [];
+    // The gateway gates turns and connector runs per lane, but an embedding
+    // backfill only on free capacity, so it can arrive while the connector
+    // budget is full.
+    const answers: Array<{ run_id?: number; run_type?: string; next_poll_seconds?: number }> = [
+      { run_id: 1, run_type: "sync" },
+      { run_id: 2, run_type: "embed_backfill" },
+    ];
+    const finish = new Map<number, () => void>();
+    const loop = new WorkerPollLoop({
+      client: {
+        healthCheck: async () => true,
+        poll: async (capacity: number, options: { waitSeconds?: number; lanes?: unknown }) => {
+          polls.push({ capacity, wait: options.waitSeconds, lanes: options.lanes });
+          return answers.shift() ?? { next_poll_seconds: 1 };
+        },
+      } as never,
+      maxConcurrentJobs: 1,
+      maxConcurrentAgentTurns: 1,
+      pollIntervalMs: 10,
+      execute: (job) => new Promise<void>((resolve) => { finish.set(Number(job.run_id), resolve); }),
+    });
+    const running = loop.start();
+    try {
+      await Bun.sleep(50);
+      // Freeing the sync's connector slot does not reopen the borrowed turn
+      // slot, so the poll still withdraws turns and does not hold.
+      finish.get(1)!();
+      await Bun.sleep(50);
+      // The backfill hands its turn slot back.
+      finish.get(2)!();
+      await Bun.sleep(50);
+      expect(polls).toEqual([
+        { capacity: 2, wait: WORKER_POLL_MAX_WAIT_SECONDS, lanes: { agentTurns: 1, connectorJobs: 1 } },
+        { capacity: 1, wait: WORKER_POLL_MAX_WAIT_SECONDS, lanes: { agentTurns: 1, connectorJobs: 0 } },
+        { capacity: 0, wait: 0, lanes: { agentTurns: 0, connectorJobs: 0 } },
+        { capacity: 1, wait: 0, lanes: { agentTurns: 0, connectorJobs: 1 } },
+        { capacity: 2, wait: WORKER_POLL_MAX_WAIT_SECONDS, lanes: { agentTurns: 1, connectorJobs: 1 } },
+      ]);
+    } finally {
+      loop.stop();
+      for (const done of finish.values()) done();
+      await running;
+      await loop.waitForActiveJobs(1000, 1);
+    }
   });
 
   test("polls at capacity with zero and does not execute a returned job", async () => {

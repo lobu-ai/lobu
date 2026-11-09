@@ -107,6 +107,18 @@ describe("check-exposed-surface-naming", () => {
     expect(runGuard()).toBe(0);
   });
 
+  it.each([
+    ['await page.unrouteAll({ behavior: "wait" });', 0],
+    ["await context.unrouteAll({ behavior: 'wait' });", 0],
+    ['const options = { behavior: "wait" };', 1],
+    ['page.unrouteAllLater({ behavior: "wait" });', 1],
+    ['page.unrouteAll({ behavior: "product" });', 1],
+    ['page.unrouteAll({ behavior: "wait" }); // Behavior run', 1],
+  ])("keeps the Playwright teardown exception narrow: %s", (source, code) => {
+    create(GENERIC_BEHAVIOR_PROBE_FILE, `${source}\n`);
+    expect(runGuard()).toBe(code);
+  });
+
   it("allows exact AppKit behavior property and type spellings", () => {
     create(
       APPKIT_BEHAVIOR_PROBE_FILE,

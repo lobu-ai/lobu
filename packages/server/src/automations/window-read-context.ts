@@ -9,6 +9,8 @@ import { automationTriggerSignals, isWorkspaceEventTriggerSignal } from './works
 
 interface BoundAutomationRun {
   versionId: number | null;
+  automationScript?: import('./preparation').AutomationScriptSnapshot;
+  preparationSources?: import('./preparation').PreparationSources;
   windowStart: Date;
   windowEnd: Date;
   triggerContentIds: number[];
@@ -30,8 +32,8 @@ export async function loadBoundAutomationRun(
   automationId: number,
   runId: number
 ): Promise<BoundAutomationRun> {
-  const rows = await sql<{ approved_input: unknown; entity_ids: unknown; status: string; expires_at: Date | null; run_type: string }>`
-    SELECT r.approved_input, r.status, r.expires_at, r.run_type, a.entity_ids
+  const rows = await sql<{ approved_input: unknown; run_metadata: Record<string, unknown> | null; entity_ids: unknown; status: string; expires_at: Date | null; run_type: string }>`
+    SELECT r.approved_input, r.run_metadata, r.status, r.expires_at, r.run_type, a.entity_ids
     FROM runs r
     JOIN automations a ON a.id = r.automation_id AND a.organization_id = r.organization_id
     WHERE r.id = ${runId}
@@ -80,9 +82,19 @@ export async function loadBoundAutomationRun(
       ? parsedVersionId
       : null;
 
+  const script = input.automation_script as import('./preparation').AutomationScriptSnapshot | undefined;
+  if (script?.has_prepare && rows[0].run_type !== 'automation') {
+    throw new ToolUserError('Preparation is not supported for captured or evaluation windows.', 422);
+  }
+  const preparationSources = rows[0].run_metadata?.preparation_sources as import('./preparation').PreparationSources | undefined;
+  if (script?.has_prepare && !preparationSources) {
+    throw new ToolUserError('Automation preparation is not ready for this run.', 409);
+  }
   return {
+    ...(script?.has_prepare ? { preparationSources } : {}),
     versionId,
-    entityIds: parsePgNumberArray(rows[0].entity_ids),
+    automationScript: script,
+    entityIds: script?.entities ?? parsePgNumberArray(rows[0].entity_ids),
     status: rows[0].status,
     expiresAt: rows[0].expires_at ? new Date(rows[0].expires_at).toISOString() : null,
     runType: rows[0].run_type,

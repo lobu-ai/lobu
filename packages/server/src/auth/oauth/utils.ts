@@ -273,6 +273,7 @@ export type OAuthErrorCode =
   | 'invalid_scope'
   | 'access_denied'
   | 'server_error'
+  | 'temporarily_unavailable'
   | 'authorization_pending'
   | 'slow_down'
   | 'expired_token'

@@ -7,7 +7,7 @@
  * failures. Pass `--debug` to enable the poll/heartbeat/retry chatter.
  */
 
-import { scrubDiagnosticValue } from '@lobu/core';
+import { currentTraceLogFields, scrubDiagnosticValue } from '@lobu/core';
 
 let debugEnabled = false;
 
@@ -17,6 +17,7 @@ function write(level: string, parts: unknown[]): void {
     const record = scrubDiagnosticValue({
       timestamp: new Date().toISOString(), level, service: 'lobu-worker',
       release: process.env.APP_GIT_SHA,
+      ...currentTraceLogFields(),
       message: parts.filter((part) => typeof part === 'string').join(' '),
       data: parts.filter((part) => typeof part !== 'string'),
     });

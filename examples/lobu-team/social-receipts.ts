@@ -155,29 +155,48 @@ async function loadSourcePosts(
 ): Promise<SourcePage> {
   const c = await client.org(receipt.workspace);
   if (!("run_id" in receipt)) {
-    // Stored HN events have no browser-operation run. Keep their exact
-    // event version AND stable source identity. Stored text never proves
-    // completeness, so every HN receipt stays partial.
+    // Stored events have no browser-operation run. Keep their exact version,
+    // source connection, kind and stable identity; snapshots stay partial.
     // Ingestion time is not read time: older stored posts may be read again
     // in this window, so event.created_at is not an operation-window boundary.
-    if (platform !== "hackernews" || !receipt.origin_id)
+    const spec = policy.stored_sources?.[platform];
+    if (!spec || !receipt.origin_id)
       throw new Error("Unsupported stored source");
     const [event] = await c.query(
-      `SELECT id, origin_id, title, payload_text, source_url, author_name, occurred_at, connector_key FROM events WHERE id = ${receipt.event_id} LIMIT 1`
+      `SELECT id, origin_id, connection_id, semantic_type, title, payload_text, source_url, author_name, occurred_at, connector_key FROM events WHERE id = ${receipt.event_id} LIMIT 1`
     );
     if (
       !event ||
       event.origin_id !== receipt.origin_id ||
-      event.connector_key !== "hackernews"
+      event.connector_key !== spec.connector_key ||
+      event.connection_id !== spec.connection_id ||
+      !spec.semantic_types.includes(event.semantic_type)
     )
       throw new Error("Stored source identity mismatch");
+    if (platform === "reddit") {
+      const match =
+        /^https:\/\/(?:www\.)?reddit\.com\/r\/[^/]+\/comments\/([a-z0-9]+)\//i.exec(
+          event.source_url || ""
+        );
+      if (!match || event.origin_id !== "reddit_post_t3_" + match[1])
+        throw new Error("Stored Reddit permalink identity mismatch");
+    }
+    const text =
+      typeof event.payload_text === "string" ? event.payload_text : "";
+    if (!text.trim())
+      return {
+        limitations: ["Stored title-only item is not body evidence."],
+        posts: [],
+      };
     return {
-      limitations: [],
+      limitations: [
+        "Stored snapshot only; full source, comments and media remain unverified.",
+      ],
       posts: [
         {
           source_url: event.source_url,
           origin_id: event.origin_id,
-          text: event.payload_text || event.title || "",
+          text,
           author: event.author_name || "",
           occurred_at: event.occurred_at,
           truncated: true,

@@ -383,6 +383,9 @@ function verifyToken(
   token: string,
   expectedKind: "worker" | "egress-proxy" | "gateway-mcp"
 ): WorkerTokenData | null {
+  // Routes try a worker token before PAT/OAuth, so most bearers seen here are
+  // something else. Only a token in the worker envelope is a failed verify.
+  if (!looksLikeWorkerToken(token)) return null;
   try {
     const parsed: unknown = JSON.parse(decrypt(token));
 

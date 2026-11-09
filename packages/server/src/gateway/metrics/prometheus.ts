@@ -149,7 +149,7 @@ function initializeMetrics() {
   );
   registerMetric(
     "lobu_agent_turn_requeued_total",
-    "Agent turns re-run by the stale-run reaper without recorded tool activity",
+    "Agent turns re-run by the stale-run reaper without recorded side-effecting tool activity",
     "counter"
   );
   // A conversation whose native session outgrew the snapshot cap. Trimmed to

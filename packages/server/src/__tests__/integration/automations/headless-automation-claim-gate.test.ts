@@ -20,6 +20,8 @@
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { randomBytes } from 'node:crypto';
+import { runAutomationPreparationTask } from '../../../automations/preparation-task';
+import type { Env } from '../../../index';
 import { verifyWorkerToken } from '@lobu/core';
 import type { DbClient } from '../../../db/client';
 import { generateSecureToken, hashToken } from '../../../auth/oauth/utils';
@@ -124,6 +126,56 @@ describe('headless Automation claim gate (automations.execute)', () => {
   beforeEach(async () => {
     await cleanupTestDatabase();
   });
+
+  it('dispatches the frozen agent, runtime and options after the live configuration changes', async () => {
+    const ctx = await setupDevicePinnedAutomation({ workerId: 'frozen-device', platform: 'headless', capabilities: { 'automations.execute': true } });
+    await ctx.workspace.owner.automations.update({ automation_id: String(ctx.automationId),
+      execution_config: { model: 'original-device-model', timeout_seconds: 120, finalize_nudges: 0 } });
+    const { token } = await createWorkerBoundPat(ctx.workspace.users.owner.id, ctx.workspace.org.id, 'frozen-device');
+    const trigger = await post(`/api/workers/me/automations/${ctx.automationId}/trigger`, { token });
+    expect(trigger.status).toBe(200);
+    const replacement = await createTestAgent({ organizationId: ctx.workspace.org.id, ownerUserId: ctx.workspace.users.owner.id });
+    await ctx.workspace.owner.automations.update({ automation_id: String(ctx.automationId),
+      managed_agent_id: replacement.agentId, agent_kind: 'codex',
+      execution_config: { model: 'replacement-device-model', timeout_seconds: 300 } });
+    const poll = await post('/api/workers/poll', { token, body: {
+      worker_id: 'frozen-device', capabilities: { 'automations.execute': true }, agent_kinds: ['opencode'],
+    } });
+    expect(poll.status).toBe(200);
+    const job = await poll.json() as any;
+    expect(job.run_type).toBe('automation');
+    expect(job.payload.automation.agent_kind).toBe('opencode');
+    expect(job.payload.automation.execution_config).toMatchObject({ model: 'original-device-model', timeout_seconds: 120 });
+    expect(job.payload.context.agent_session.conversation_id)
+      .toBe(`claim-gate-agent_automation_${ctx.automationId}_run_${job.run_id}`);
+    const exit = await post(`/api/workers/me/runs/${job.run_id}/complete-automation`, { token, body: {
+      worker_id: 'frozen-device', output: 'Agent exited without completing the window', exit_code: 0, exit_reason: 'ok',
+    } });
+    expect(exit.status).toBe(200);
+    expect(await exit.json()).toMatchObject({ status: 'failed' });
+  });
+
+  it('withholds the device job until preparation commits and exposes its saved source', async () => {
+    const ctx = await setupDevicePinnedAutomation({ workerId: 'prepared-device', platform: 'headless', capabilities: { 'automations.execute': true } });
+    await ctx.workspace.owner.automations.setReactionScript({ automation_id: String(ctx.automationId), reaction_script: 'export async function prepare(ctx, client) { const rows = await client.query("SELECT 19 + 23 AS total"); return { calculated: rows }; }' });
+    const { token } = await createWorkerBoundPat(ctx.workspace.users.owner.id, ctx.workspace.org.id, 'prepared-device');
+    const trigger = await post(`/api/workers/me/automations/${ctx.automationId}/trigger`, { token });
+    expect(trigger.status).toBe(200);
+    const { run_id } = await trigger.json() as { run_id: number };
+    const poll = () => post('/api/workers/poll', { token, body: { worker_id: 'prepared-device', capabilities: { 'automations.execute': true } } });
+    const waiting = await poll();
+    expect(waiting.status).toBe(200);
+    expect((await waiting.json() as { run_id?: number }).run_id).toBeUndefined();
+    const [task] = await ctx.sql`SELECT id FROM runs WHERE parent_run_id = ${run_id} AND action_key = 'automation-preparation'`;
+    await ctx.sql`UPDATE runs SET status = 'claimed', claimed_at = now(), claimed_by = 'preparation-fixture' WHERE id = ${task.id}`;
+    await runAutomationPreparationTask({ organizationId: ctx.workspace.org.id, automationId: ctx.automationId, sourceRunId: run_id }, {} as Env, Number(task.id));
+    const ready = await poll();
+    expect(ready.status).toBe(200);
+    expect((await ready.json() as { run_id: number }).run_id).toBe(run_id);
+    const read = await ctx.workspace.owner.knowledge.read({ automation_id: ctx.automationId, run_id }) as { sources: Record<string, unknown[]> };
+    expect(read.sources.calculated).toEqual([{ total: 42 }]);
+    expect((await (await poll()).json() as { run_id?: number }).run_id).toBeUndefined();
+  }, 60_000);
 
   it('never lets a paired device claim a frozen external snapshot', async () => {
     const ctx = await setupDevicePinnedAutomation({
@@ -435,7 +487,6 @@ describe('headless Automation claim gate (automations.execute)', () => {
             run_id: ${job.run_id},
             window_token: window.window_token,
             extracted_data: { summary: 'completed by the Mac daemon session' },
-            model: 'device-cli:opencode',
           });
         }`,
       },
@@ -443,10 +494,13 @@ describe('headless Automation claim gate (automations.execute)', () => {
     );
     expect(completion.success).toBe(true);
 
+    // The device agent names no model; the run still records the Mac's CLI
+    // that executed it, not an outside client.
     const [run] = await ctx.sql`
-      SELECT status FROM runs WHERE id = ${job.run_id}
+      SELECT status, model_used FROM runs WHERE id = ${job.run_id}
     `;
     expect(String(run.status)).toBe('completed');
+    expect(run.model_used).toBe('device-cli:opencode');
   });
 
   it('capable macOS daemon fails closed when no assigned agent can mint a session', async () => {

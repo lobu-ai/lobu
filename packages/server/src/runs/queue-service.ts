@@ -7,9 +7,10 @@
  * - JSON utilities for duplicate detection
  */
 
+import { snapshotAutomationScript } from '../automations/preparation';
+import { enqueueAutomationPreparation } from '../automations/preparation-enqueue';
 import { feedDefinitionSelection } from '../connectors/feed-definition-selection';
 import { browserBindingSnapshot, connectionBrowserResource } from '../connectors/browser-resource';
-import { randomUUID } from 'node:crypto';
 import type { BrowserActionContext } from '../worker-api/browser-action-context';
 
 import { type DbClient, parsePgTextArray, pgTextArray } from '../db/client';
@@ -17,7 +18,8 @@ import {
   resolvedEventExecution,
   type AutomationEventTrigger,
   type AutomationWorkspaceEventTrigger,
-  type AutomationExecutor,
+  type LegacyAutomationExecutor,
+  type LegacyAutomationExecutionConfig,
   type AutomationSource,
 } from '@lobu/core/contracts/tools/manage-automations';
 import { normalizeAutomationSources } from '../automations/source-refs';
@@ -56,6 +58,7 @@ import logger from '../utils/logger';
 import { isUniqueViolation } from '../utils/pg-errors';
 import { ACTIVE_RUN_STATUSES, runStatusLiteral } from '../utils/run-statuses';
 import { normalizePageActivationUrls } from './page-activation';
+import { newGatewayInlineOwner } from './run-lease';
 import { AUTOMATION_RUN_TYPES_PG } from "./run-types.js";
 
 import { notifyWorkerWork } from './worker-wakeup';
@@ -69,16 +72,19 @@ export type AutomationActivationSignal =
   | WorkspaceEventTriggerSignal;
 
 export interface AutomationRunPayload {
+  automation_script?: import('../automations/preparation').AutomationScriptSnapshot;
   /** Executor selection and script code are pinned with the run, never reloaded on retry. */
-  executor?: AutomationExecutor;
+  executor?: LegacyAutomationExecutor;
+  /** Explicit null freezes defaults; absent only on historical runs. */
+  execution_config?: LegacyAutomationExecutionConfig | null;
   automation_id: number;
   /**
    * The managed agent executing this run, or the external executor's optional
-   * permission and delivery principal. Absent for device-executed runs
-   * (the device lane claims via `device_worker_id`) and for manual runs open
-   * to any connected MCP client.
+   * permission and delivery principal, including when execution is placed on
+   * a device. Explicit null freezes the absence of an assigned agent. Only
+   * historical snapshots may omit the field.
    */
-  agent_id?: string;
+  agent_id?: string | null;
   window_start: string;
   window_end: string;
   dispatch_source: AutomationDispatchSource;
@@ -187,6 +193,8 @@ export async function claimPendingAutomationRun(
           AND r.automation_id = ${params.automationId}
           AND r.run_type = ANY(${AUTOMATION_RUN_TYPES_PG}::text[])
           AND r.status = 'pending'
+          AND (r.approved_input->'automation_script'->>'has_prepare' IS DISTINCT FROM 'true'
+               OR r.run_metadata ? 'preparation_sources')
           -- Same-type guard, deliberately not widened to both run types: one
           -- Automation at a time per Automation, and one eval at a time per
           -- Automation, but an eval replay must never be blocked by (or block)
@@ -710,16 +718,16 @@ async function createAutomationRunWithClient(
   const versionRows = await sql<{
     current_version_id: unknown;
     next_window_start: string | Date | null;
-    executor: unknown;
+    execution_config: LegacyAutomationExecutionConfig | null;
     sources: AutomationSource[] | null;
     version_sources: AutomationSource[] | null;
   }>`
-    SELECT a.current_version_id, a.next_window_start, a.execution_config->'executor' AS executor,
+    SELECT a.current_version_id, a.next_window_start, a.execution_config,
            a.sources, v.version_sources
     FROM automations a
     LEFT JOIN automation_versions v ON v.id = a.current_version_id
     WHERE a.id = ${params.automationId}
-    ${params.expectedWindowStart ? sql`FOR UPDATE OF a` : sql`LIMIT 1`}
+    ${params.expectedWindowStart ? sql`FOR UPDATE OF a` : sql`FOR SHARE OF a`}
   `;
   const currentWindowStart = versionRows[0]?.next_window_start == null
     ? null
@@ -736,7 +744,13 @@ async function createAutomationRunWithClient(
       ? Number(versionRows[0].current_version_id)
       : null;
 
-  const executor = versionRows[0]?.executor as AutomationRunPayload['executor'] | undefined;
+  const automationScript = await snapshotAutomationScript(sql, params.automationId, params.organizationId);
+  const executor = automationScript?.has_analysis === false
+    ? { kind: 'script' as const, source: automationScript.source }
+    : versionRows[0]?.execution_config?.executor
+      // Freeze the inferred external lane too. Assigning an agent later must
+      // not transfer already-queued work to that agent.
+      ?? (!params.agentId && !params.deviceWorkerId ? { kind: 'external' as const } : undefined);
   let windowEnd = params.windowEnd;
   if (executor?.kind === 'script' && params.dispatchSource !== 'event') {
     // Match source reads: a nonempty version source list wins; otherwise use
@@ -765,13 +779,15 @@ async function createAutomationRunWithClient(
       : null;
 
   const payload: AutomationRunPayload = {
+    ...(automationScript ? { automation_script: automationScript } : {}),
     automation_id: params.automationId,
-    agent_id: params.agentId ?? undefined,
+    agent_id: params.agentId ?? null,
     window_start: params.windowStart,
     window_end: windowEnd,
     dispatch_source: params.dispatchSource,
     version_id: snapshotVersionId,
     ...(executor ? { executor } : {}),
+    execution_config: versionRows[0]?.execution_config ?? null,
     device_worker_id: normalizedDeviceWorkerId,
     agent_kind: normalizedAgentKind,
     // A fingerprint of the full backlog cannot prove the remainder was processed.
@@ -818,6 +834,7 @@ async function createAutomationRunWithClient(
     `[queue] Created automation run ${runId} for automation ${params.automationId} (${params.dispatchSource})`
   );
 
+  if (automationScript?.has_prepare) await enqueueAutomationPreparation(sql, { organizationId: params.organizationId, automationId: params.automationId, sourceRunId: runId });
   await notifyWorkerWork(sql);
   return { runId, status, created: true };
 }
@@ -844,12 +861,12 @@ async function createAutomationRunInternal(
   const sql = db ?? getDb();
 
   try {
-    if (db) {
-      return useSavepoint
-        ? await sql.savepoint((tx) => createAutomationRunWithClient(tx, params))
-        : await createAutomationRunWithClient(sql, params);
+    if (useSavepoint) {
+      return await sql.savepoint((tx) => createAutomationRunWithClient(tx, params));
     }
 
+    // An injected pool is not a transaction. Publish the parent, preparation
+    // task and correlation marker together before another replica can claim.
     return await sql.begin(async (tx) => createAutomationRunWithClient(tx, params));
   } catch (error) {
     if (isUniqueViolation(error, 'runs_idempotency_key_uniq')) {
@@ -1044,6 +1061,7 @@ export async function createAutomationEventRun(
           AND status = 'pending'
           AND approved_input->>'dispatch_source' = 'event'
           AND approved_input->>'trigger_key' = ${triggerKey}
+          AND NOT (COALESCE(run_metadata, '{}'::jsonb) ? 'preparation_started_at')
           AND CASE
             WHEN jsonb_typeof(approved_input->'delivery_ids') = 'array'
               THEN jsonb_array_length(approved_input->'delivery_ids')
@@ -1138,22 +1156,27 @@ export async function createAutomationEventRun(
     }
 
     const versionRows = await tx`
-      SELECT current_version_id, execution_config->'executor' AS executor
+      SELECT current_version_id, execution_config
       FROM automations
-      WHERE id = ${params.automationId}
-      LIMIT 1
+      WHERE id = ${params.automationId} AND organization_id = ${params.organizationId}
+      FOR SHARE
     `;
     const versionId = versionRows[0]?.current_version_id == null
       ? null
       : Number(versionRows[0]?.current_version_id);
+    const automationScript = await snapshotAutomationScript(tx, params.automationId, params.organizationId);
     const payload: AutomationRunPayload = {
+      ...(automationScript ? { automation_script: automationScript } : {}),
       automation_id: params.automationId,
-      agent_id: params.agentId ?? undefined,
+      agent_id: params.agentId ?? null,
       window_start: signalWindowStart,
       window_end: signalWindowEnd,
       dispatch_source: 'event',
       version_id: versionId,
-      ...(versionRows[0]?.executor ? { executor: versionRows[0].executor as AutomationRunPayload['executor'] } : {}),
+      ...(automationScript?.has_analysis === false
+        ? { executor: { kind: 'script' as const, source: automationScript.source } }
+        : versionRows[0]?.execution_config?.executor ? { executor: versionRows[0].execution_config.executor as AutomationRunPayload['executor'] } : {}),
+      execution_config: versionRows[0]?.execution_config ?? null,
       device_worker_id: params.deviceWorkerId ?? null,
       agent_kind: params.agentKind ?? null,
       trigger_signal: params.signal,
@@ -1178,6 +1201,7 @@ export async function createAutomationEventRun(
       )
       RETURNING id, status
     `;
+    if (automationScript?.has_prepare) await enqueueAutomationPreparation(tx, { organizationId: params.organizationId, automationId: params.automationId, sourceRunId: Number(inserted[0]?.id) });
     await notifyWorkerWork(tx);
     return {
       runId: Number(inserted[0]?.id),
@@ -1369,7 +1393,7 @@ export async function createConnectorOperationRun(params: {
     params.activation || params.approvalMode !== 'inline' ? 'pending' : 'running';
   const inlineOwner =
     params.approvalMode === 'inline' && !params.activation
-      ? `gateway-inline-${randomUUID()}`
+      ? newGatewayInlineOwner()
       : null;
 
   // Ephemeral device/browser/shell action runs get a bounded claim horizon:

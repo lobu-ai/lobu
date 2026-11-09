@@ -330,6 +330,46 @@ describe("workspace purge", () => {
 		expect(task.action_output.removed.events).toBe(eventsBefore);
 	});
 
+	it("removes other workspaces' edges to its public records, stored and source-backed alike", async () => {
+		const sql = getTestDb();
+		const target = await signUpOwnerWithWorkspace("public-catalog");
+		const reader = await createTestOrganization();
+		await sql`UPDATE organization SET visibility = 'public' WHERE id = ${target.organizationId}`;
+		const [sourceType] = await sql<{ id: number }[]>`
+			INSERT INTO entity_types (organization_id, slug, name, backing_sql, metadata_schema)
+			VALUES (${target.organizationId}, 'catalog-item', 'Catalog item', 'SELECT ''k'' AS id',
+			        '{"type": "object", "x-lobu-record-key": "id"}'::jsonb)
+			RETURNING id
+		`;
+		const publicEntity = await createTestEntity({ name: "Public record", organization_id: target.organizationId, created_by: target.userId });
+		const own = await createTestEntity({ name: "Reader record", organization_id: reader.id });
+		const [relType] = await sql<{ id: number }[]>`
+			INSERT INTO entity_relationship_types (slug, name, organization_id)
+			VALUES ('cites', 'Cites', ${reader.id}) RETURNING id
+		`;
+		await sql`
+			INSERT INTO entity_relationships (organization_id, from_entity_id, to_entity_type_id, to_source_key, relationship_type_id)
+			VALUES (${reader.id}, ${own.id}, ${sourceType.id}, 'k', ${relType.id})
+		`;
+		await sql`
+			INSERT INTO entity_relationships (organization_id, from_entity_id, to_entity_id, relationship_type_id)
+			VALUES (${reader.id}, ${own.id}, ${publicEntity.id}, ${relType.id})
+		`;
+
+		const deleted = await call("/organization/delete", { organizationId: target.organizationId }, target.token);
+		expect(deleted.status).toBe(200);
+		const [task] = await pendingPurgeTask(target.organizationId);
+		await claimPurgeTask(task.id, "test-holder");
+		await runWorkspacePurgeTask(
+			{ organizationId: target.organizationId },
+			{ taskRunId: task.id, claimedBy: "test-holder" },
+		);
+
+		expect(await sql`SELECT 1 FROM organization WHERE id = ${target.organizationId}`).toHaveLength(0);
+		expect(await sql`SELECT 1 FROM entity_relationships WHERE organization_id = ${reader.id}`).toHaveLength(0);
+		expect(await sql`SELECT 1 FROM entities WHERE id = ${own.id}`).toHaveLength(1);
+	});
+
 	it("resumes after losing its lease mid-batch and completes", async () => {
 		const sql = getTestDb();
 		const target = await signUpOwnerWithWorkspace("resume");

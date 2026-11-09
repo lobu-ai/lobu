@@ -6,7 +6,9 @@
  * Delivery retries preserve that outcome; exhausting them must not turn a
  * completed turn into a failure or replace a failure's execution evidence.
  */
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
+import * as tracing from "@lobu/core";
+import { InMemorySpanExporter, SimpleSpanProcessor } from "@opentelemetry/sdk-trace-node";
 import {
   type AgentTurnPollPayload,
   type PollResponse,
@@ -1449,4 +1451,117 @@ describe("executeAgentTurnRun completion delivery", () => {
     expect(reported.calls.map((call) => call.status)).toEqual(Array(4).fill(status));
     for (const call of reported.calls) expect(call).toEqual(reported.calls[0]);
   }, 15_000);
+});
+
+describe("agent turn tracing outcomes", () => {
+  let exporter: InMemorySpanExporter;
+  let previousEndpoint: string | undefined;
+
+  beforeEach(async () => {
+    previousEndpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+    delete process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+    await tracing.shutdownTracing();
+    exporter = new InMemorySpanExporter();
+    tracing.initTracing({
+      serviceName: "worker-outcome-test",
+      spanProcessors: [new SimpleSpanProcessor(exporter)],
+    });
+  });
+
+  afterEach(async () => {
+    mock.restore();
+    await tracing.shutdownTracing();
+    if (previousEndpoint === undefined) delete process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+    else process.env.OTEL_EXPORTER_OTLP_ENDPOINT = previousEndpoint;
+  });
+
+  function tracedJob(overrides: Record<string, unknown> = {}): PollResponse {
+    return turnJob({ traceparent: `00-${"ab".repeat(16)}-${"cd".repeat(8)}-01`, ...overrides });
+  }
+
+  function successfulExecutor(): SyncExecutor {
+    return executorReturning({
+      mode: "agent_turn",
+      turn: { text: "hi", stopReason: "stop", usage: null, consumedInputs: [], sessionJsonl: SESSION_JSONL },
+    });
+  }
+
+  test("keeps a valid turn running when tracing cannot initialize", async () => {
+    process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://127.0.0.1:4317";
+    spyOn(tracing, "initTracing").mockImplementation(() => {
+      throw new Error("optional tracing exporter could not load");
+    });
+    const reported: Reported = { calls: [] };
+
+    const result = await executeAgentTurnRun(
+      fakeClient(reported) as never, tracedJob(), {}, cfgWith(successfulExecutor())
+    );
+
+    expect(result).toEqual({ itemsCollected: 0 });
+    expect(reported.calls[0]).toMatchObject({ status: "completed", text: "hi" });
+  });
+
+  test("marks a returned provider failure on its span", async () => {
+    const reported: Reported = { calls: [] };
+    const result = await executeAgentTurnRun(
+      fakeClient(reported) as never, tracedJob(), {},
+      cfgWith({ execute: async () => { throw new Error("provider unavailable"); } })
+    );
+    await tracing.flushTracing();
+
+    expect(result.error).toBe("provider unavailable");
+    expect(reported.calls[0]).toMatchObject({ status: "failed", error: "provider unavailable" });
+    const span = exporter.getFinishedSpans().find((entry) => entry.name === "agent_turn");
+    expect(span?.status.code).toBe(tracing.SpanStatusCode.ERROR);
+    expect(span?.attributes["lobu.run_status"]).toBe("failed");
+  });
+
+  test("marks a completed turn without changing its public result", async () => {
+    const reported: Reported = { calls: [] };
+    const result = await executeAgentTurnRun(
+      fakeClient(reported) as never, tracedJob(), {}, cfgWith(successfulExecutor())
+    );
+    await tracing.flushTracing();
+
+    expect(result).toEqual({ itemsCollected: 0 });
+    const span = exporter.getFinishedSpans().find((entry) => entry.name === "agent_turn");
+    expect(span?.status.code).toBe(tracing.SpanStatusCode.OK);
+    expect(span?.attributes["lobu.run_status"]).toBe("completed");
+  });
+
+  test("distinguishes an authoritative cancellation from an execution failure", async () => {
+    const reported: Reported = { calls: [] };
+    const client = {
+      ...fakeClient(reported),
+      completeAgentTurn: async (request: CompleteAgentTurnRequest) => {
+        reported.calls.push(request);
+        return { ok: true, status: "cancelled" as const };
+      },
+    };
+    const result = await executeAgentTurnRun(
+      client as never, tracedJob(), {}, cfgWith(successfulExecutor())
+    );
+    await tracing.flushTracing();
+
+    expect(result).toEqual({ itemsCollected: 0, error: "agent turn cancelled" });
+    const span = exporter.getFinishedSpans().find((entry) => entry.name === "agent_turn");
+    expect(span?.status.code).toBe(tracing.SpanStatusCode.UNSET);
+    expect(span?.attributes["lobu.run_status"]).toBe("cancelled");
+  });
+
+  test("records a thrown host failure and preserves the thrown error", async () => {
+    const failure = new Error("turn envelope could not be read");
+    const job = tracedJob();
+    Object.defineProperty(job, "payload", { get() { throw failure; } });
+
+    await expect(executeAgentTurnRun(
+      {} as never, job, {}, cfgWith(successfulExecutor())
+    )).rejects.toBe(failure);
+    await tracing.flushTracing();
+
+    const span = exporter.getFinishedSpans().find((entry) => entry.name === "agent_turn");
+    expect(span?.status.code).toBe(tracing.SpanStatusCode.ERROR);
+    expect(span?.events.some((event) => event.name === "exception"
+      && event.attributes?.["exception.message"] === failure.message)).toBe(true);
+  });
 });

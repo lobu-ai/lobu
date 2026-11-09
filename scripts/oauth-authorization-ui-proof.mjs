@@ -2,6 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join } from "node:path";
+import { runNativeReferenceProof } from "./native-reference-ui-proof.mjs";
 
 const require = createRequire(import.meta.url);
 const runtime = process.env.PLAYWRIGHT_RUNTIME;
@@ -113,10 +114,13 @@ try {
     "Local preview bootstrap did not return a workspace"
   );
 
-  for (const [name, slug] of [
+  // Preserve earlier review fixtures when the preview keeps its database.
+  const fixtureId = randomBytes(4).toString("hex");
+  for (const [name, prefix] of [
     ["Engineering", "oauth-proof-engineering"],
     ["Customer operations", "oauth-proof-customer-operations"],
   ]) {
+    const slug = `${prefix}-${fixtureId}`;
     const organization = await browserPost(
       page,
       "/api/auth/organization/create",
@@ -124,6 +128,13 @@ try {
     );
     results.workspaces_created.push({ id: organization?.id, name, slug });
   }
+  const membershipResponse = await page.request.get(
+    new URL("/api/organizations", baseUrl).toString()
+  );
+  assert(membershipResponse.ok(), "Read synthetic preview memberships failed");
+  const memberships = await membershipResponse.json();
+  const workspaceCount = memberships.organizations?.length;
+  assert(workspaceCount >= 3, "Preview memberships are missing fixtures");
 
   const redirectUri = "http://localhost:8787/oauth-proof/callback";
   const consentClient = await postJson("/oauth/register", {
@@ -157,9 +168,13 @@ try {
 
   await page.goto(authorizeUrl.toString(), { waitUntil: "domcontentloaded" });
   await page.getByRole("heading", { name: "Authorize application" }).waitFor();
-  await page.getByText("0 of 3 workspaces selected.").waitFor();
-  await page.getByRole("button", { name: "Select all 3" }).click();
-  await page.getByText("3 of 3 workspaces selected.").waitFor();
+  await page.getByText(`0 of ${workspaceCount} workspaces selected.`).waitFor();
+  // A persistent preview accumulates review fixtures. Grant only this run's
+  // two workspaces so reruns cannot exceed the 50-workspace OAuth bound.
+  for (const workspace of results.workspaces_created) {
+    await page.locator(`[id$="-workspace-${workspace.id}"]`).check();
+  }
+  await page.getByText(`2 of ${workspaceCount} workspaces selected.`).waitFor();
   await page.getByLabel("Read only").check();
   await page.screenshot({
     path: join(outputDir, "oauth-consent-review.png"),
@@ -202,7 +217,7 @@ try {
     screenshot: "oauth-consent-review.png",
     requested_access: "admin",
     approved_access: "read",
-    workspace_access: "all_current",
+    workspace_ids: results.workspaces_created.map(({ id }) => id),
     token_scope: consentScope,
   };
 
@@ -232,15 +247,15 @@ try {
     waitUntil: "domcontentloaded",
   });
   await page.getByRole("heading", { name: "Authorize application" }).waitFor();
-  await page.getByText("Device capabilities").waitFor();
-  await page.getByText("1 of 3 workspaces selected.").waitFor();
-  await page.getByRole("button", { name: "Select all 3" }).click();
-  await page.getByText("3 of 3 workspaces selected.").waitFor();
   await page
-    .getByLabel(
-      "I initiated this request and confirmed that the device code matches."
-    )
-    .click();
+    .getByText("This device can run commands and control apps.")
+    .waitFor();
+  await page.getByText("0 additional workspaces selected.").waitFor();
+  for (const workspace of results.workspaces_created) {
+    await page.locator(`[id$="-workspace-${workspace.id}"]`).check();
+  }
+  // The required home workspace is included and this run adds its two fixtures.
+  await page.getByText("2 additional workspaces selected.").waitFor();
   await page.screenshot({
     path: join(outputDir, "oauth-device-review.png"),
     fullPage: true,
@@ -267,10 +282,16 @@ try {
   results.device = {
     screenshot: "oauth-device-review.png",
     approved_access: "admin",
-    workspace_access: "all_current",
-    sensitive_capabilities_acknowledged: true,
     token_scope: deviceScope,
   };
+
+  results.native_report = await runNativeReferenceProof({
+    page,
+    browserPost,
+    baseUrl,
+    outputDir,
+    assert,
+  });
 
   await writeFile(
     join(outputDir, "results.json"),

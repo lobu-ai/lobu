@@ -2,9 +2,8 @@
 # shellcheck shell=bash
 #
 # REVIEWER_MODE=light (default) skips the cross-harness reviewer when the diff
-# is small AND every changed file is in a class where an independent LLM review
-# adds near-zero signal: docs, CI-verified generated output, the root Bun
-# lockfile, snapshots, exact renames between safe-class paths, additive-only
+# contains only inert docs or small changes where an independent LLM review
+# adds near-zero signal: snapshots, exact renames between safe-class paths, additive-only
 # test changes, exact model-literal swaps in lobu.config.ts, or a pure
 # packages/owletto pointer bump. Everything else — non-test source, migrations,
 # runtime-affecting config, static assets, other/mixed submodule changes, and
@@ -31,7 +30,7 @@ REVIEW_SKIP_REASON=""
 review_skip_hard_escalate() {
   local path="$1"
   case "$path" in
-    scripts/review*|scripts/lib/review*|prompts/review-*|docs/REVIEW_SCHEMA.md|Makefile|makefile|.github/*) return 0 ;;
+    scripts/review*|scripts/lib/review*|prompts/*|docs/REVIEW_SCHEMA.md|Makefile|makefile|.github/*|AGENTS.md|CLAUDE.md|*/AGENTS.md|*/CLAUDE.md|skills/*|.claude/*|.agents/*|.codex/*) return 0 ;;
     db/migrations/*|db/schema.sql) return 0 ;;
     package.json) return 0 ;;
     config/*|.env*|.gitmodules) return 0 ;;
@@ -93,7 +92,7 @@ review_skip_is_model_only_change() {
 
 review_skip_is_test_path() {
   case "$1" in
-    *__tests__*) return 0 ;;
+    */__tests__/*) return 0 ;;
   esac
   case "$1" in
     *.test.ts) return 0 ;;
@@ -142,10 +141,6 @@ review_classify_diff() {
   # user's diff.renames config, so the line count is deterministic.
   total="$(git diff --numstat -M100% "$diff_spec" 2>/dev/null | awk '{a+=$1; d+=$2} END {print a+d}')"
   [ -n "$total" ] || total=0
-  if [ "$total" -ge 100 ]; then
-    REVIEW_SKIP_REASON="diff too large ($total lines)"
-    return 1
-  fi
 
   changed_paths="$(git diff --name-only -M100% "$diff_spec" 2>/dev/null | awk 'END {print NR + 0}')"
 
@@ -204,11 +199,33 @@ review_classify_diff() {
         continue
       fi
 
+      # Documentation must be regular text. A docs-looking symlink or binary,
+      # executable file, or script under docs/ is not an inert prose change.
+      case "$base_mode:$head_mode" in
+        *120000*|*100755*)
+          REVIEW_SKIP_REASON="non-regular documentation or executable path '$path'"; return 1 ;;
+      esac
+      if git diff --numstat "$diff_spec" -- "$path" | awk '$1 == "-" || $2 == "-" { found=1 } END { exit !found }'; then
+        REVIEW_SKIP_REASON="binary change '$path'"; return 1
+      fi
       case "$path" in
-        *.md|README*|LICENSE|docs/*) continue ;;                               # docs: safe
-        packages/owletto/src/routeTree.gen.ts|*/dist/*) continue ;;            # generated: safe
-        bun.lock) continue ;;                                                   # workspace lockfile: CI-installed
-        */__snapshots__/*|*.snap) continue ;;                                  # snapshots: CI-checked
+        README|README.txt|LICENSE|LICENSE.txt) continue ;;
+        *.md)
+          case "$path" in
+            docs/*|*/docs/*|*/README.md|*/CHANGELOG.md) continue ;;
+            */*) ;; # Markdown under runtime source is not automatically docs.
+            *) continue ;;
+          esac
+          ;;
+      esac
+      # Size alone does not escalate inert prose. Other safe classes retain
+      # the conservative small-change bound.
+      if [ "$total" -ge 100 ]; then
+        REVIEW_SKIP_REASON="non-documentation diff too large ($total lines)"; return 1
+      fi
+      case "$path" in
+        packages/owletto/src/routeTree.gen.ts) continue ;;
+        */__snapshots__/*|*.snap) continue ;;
       esac
       case "$path" in
         lobu.config.ts|*/lobu.config.ts)
@@ -241,7 +258,19 @@ review_classify_diff() {
   elif [ "$saw_submodule" = "1" ]; then
     REVIEW_SKIP_REASON="pure packages/owletto submodule pointer bump"
   else
-    REVIEW_SKIP_REASON="small path/content-gated safe-class diff ($total lines)"
+    REVIEW_SKIP_REASON="path/content-gated safe-class diff ($total lines)"
   fi
   return 0
 }
+
+# CI copies this trusted base-branch file outside the checkout before inspecting
+# the PR tree. No script, config, dependency or action from the PR is executed.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  set -euo pipefail
+  if review_classify_diff "${1:?base commit required}"; then
+    printf '%s\n' "$REVIEW_SKIP_REASON"
+  else
+    printf 'Independent review required: %s\n' "$REVIEW_SKIP_REASON" >&2
+    exit 1
+  fi
+fi

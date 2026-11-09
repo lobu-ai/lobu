@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import {
   __resetEncryptionKeyCacheForTests,
   encrypt,
@@ -454,8 +454,27 @@ describe("worker auth token", () => {
     );
   });
 
-  test("verifyWorkerToken returns null for completely invalid token", () => {
-    expect(verifyWorkerToken("not-a-valid-token")).toBeNull();
+  test("a bearer that is not a worker token is rejected without an error log", () => {
+    // Routes try the worker token before falling back to OAuth, so every
+    // PAT or OAuth bearer reaches this check; none of them is a failure.
+    const errors = spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      for (const bearer of [
+        "not-a-valid-token",
+        "owl_pat_synthetic",
+        "a:b:c:d",
+      ]) {
+        expect(verifyWorkerToken(bearer)).toBeNull();
+        expect(verifyEgressProxyToken(bearer)).toBeNull();
+        expect(verifyGatewayMcpToken(bearer)).toBeNull();
+      }
+      expect(errors).not.toHaveBeenCalled();
+      // A token in the worker envelope that fails to decrypt is still logged.
+      expect(verifyWorkerToken("aa:bb:cc")).toBeNull();
+      expect(errors).toHaveBeenCalled();
+    } finally {
+      errors.mockRestore();
+    }
   });
 
   test("verifyWorkerToken returns null for malformed iv:tag:cipher", () => {

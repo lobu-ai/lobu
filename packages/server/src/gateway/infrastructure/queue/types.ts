@@ -3,6 +3,8 @@
  * Implemented by RunsQueue over the Postgres `public.runs` substrate.
  */
 
+import type { RunInitiatorColumns } from "../../../tools/initiator.js";
+
 // ============================================================================
 // Queue Types
 // ============================================================================
@@ -28,6 +30,8 @@ export interface QueueJob<T = any> {
 }
 
 export interface QueueOptions {
+  /** Server-verified admission context, never derived from the queued payload. */
+  initiator?: RunInitiatorColumns;
   priority?: number;
   retryLimit?: number;
   retryDelay?: number;

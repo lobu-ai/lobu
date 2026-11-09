@@ -58,7 +58,7 @@ export async function handleCancel(
     `;
     await supersedeActionEvent(args.run_id, ctx.organizationId,
       withdrawnApproval ? 'rejected' : 'failed',
-      `${run.action_key} — cancelled`, message,
+      (operation) => `${operation} — cancelled`, message,
       withdrawnApproval
         ? { run_status: 'cancelled', approval_status: 'expired', expiry_reason: message,
             withdrawn_by: { principal_kind: actor.kind, principal_id: actor.id, user_id: ctx.userId ?? null } }

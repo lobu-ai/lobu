@@ -39,6 +39,7 @@ import {
 } from "@lobu/connector-sdk";
 import {
   LINKEDIN_IDENTITY,
+  normalizeLinkedInCompanySlug,
   normalizeLinkedInMemberId,
   normalizeLinkedInSlug,
 } from "./linkedin-identity.js";
@@ -65,6 +66,7 @@ interface LinkedInConfig {
   company_url?: string;
   max_scrolls?: number;
   min_scrolls?: number;
+  create_engager_people?: boolean;
 }
 
 interface LinkedInPost {
@@ -76,6 +78,8 @@ interface LinkedInPost {
   authorMemberId?: string;
   /** Canonical `/in/<slug>` vanity id — soft identity alongside member id. */
   authorSlug?: string;
+  /** Canonical `/company/<slug>` when the actor is a company page. */
+  authorCompanySlug?: string;
   likes: number;
   comments: number;
   shares: number;
@@ -99,6 +103,47 @@ function normalizeCheckpointPostId(postId?: string): string | undefined {
 }
 
 // ── Identity attributions ──────────────────────────────────────
+
+/**
+ * Link a post written by a company page to a `company` entity keyed on the
+ * page's `/company/<slug>`. Like person authors, a company that authors a post
+ * is a real source, so it is minted on no match; a workspace without a
+ * `company` entity type skips the mint. Companies that are only mentioned or
+ * anchored in someone else's post get no rule, matching person mentions.
+ */
+const LINKEDIN_COMPANY_AUTHOR_ATTRIBUTION: EventAttributionRule = {
+  name: "company_author",
+  role: "authored_by",
+  autoCreate: true,
+  target: {
+    entityType: "company",
+    titlePath: "author_name",
+    identities: [
+      {
+        namespace: LINKEDIN_IDENTITY.COMPANY_SLUG,
+        eventPath: "metadata.author_company_slug",
+      },
+    ],
+  },
+  traits: {
+    linkedin_url: {
+      eventPath: "metadata.author_company_url",
+      mergeStrategy: "prefer_non_empty",
+    },
+  },
+};
+
+/**
+ * Engager-type people (reactors, commenters, the comment being replied to) are
+ * mostly one-off strangers. The home_feed `create_engager_people` setting is
+ * stamped on each event; when it is false these roles still link to people who
+ * already exist but never create new ones. Events without the stamp keep
+ * creating, so the default and older events are unchanged.
+ */
+const CREATE_ENGAGER_PEOPLE_GATE = {
+  path: "metadata.create_engager_people",
+  notEquals: false,
+} as const;
 
 /**
  * Link a live `post` to its author. The Voyager feed (company_updates) exposes
@@ -136,6 +181,7 @@ const LINKEDIN_POST_AUTHOR_ATTRIBUTIONS: EventAttributionRule[] = [
       },
     },
   },
+  LINKEDIN_COMPANY_AUTHOR_ATTRIBUTION,
 ];
 
 /**
@@ -167,12 +213,14 @@ const LINKEDIN_HOME_FEED_ATTRIBUTIONS: EventAttributionRule[] = [
       },
     },
   },
+  LINKEDIN_COMPANY_AUTHOR_ATTRIBUTION,
   {
     name: "engager",
     role: "performed_by",
     autoCreate: true,
     target: {
       entityType: "person",
+      createWhen: CREATE_ENGAGER_PEOPLE_GATE,
       titlePath: "metadata.social_actor",
       identities: [
         {
@@ -198,6 +246,7 @@ const LINKEDIN_HOME_COMMENT_ATTRIBUTIONS: EventAttributionRule[] = [
     autoCreate: true,
     target: {
       entityType: "person",
+      createWhen: CREATE_ENGAGER_PEOPLE_GATE,
       titlePath: "author_name",
       identities: [
         {
@@ -240,6 +289,7 @@ const LINKEDIN_HOME_COMMENT_ATTRIBUTIONS: EventAttributionRule[] = [
     autoCreate: true,
     target: {
       entityType: "person",
+      createWhen: CREATE_ENGAGER_PEOPLE_GATE,
       titlePath: "metadata.parent_comment_author",
       identities: [
         {
@@ -1031,6 +1081,10 @@ export function homeFeedObjectAllSupported(rows: HomeFeedRow[]): boolean {
   return withLinks.some((r) => Array.isArray(r.links));
 }
 
+function companyPageUrl(slug: string): string {
+  return `https://www.linkedin.com/company/${slug}`;
+}
+
 /** Whether an href points at a `/company/` page rather than a member. */
 function isCompanyHref(href?: string): boolean {
   return /\/company\//i.test(href ?? "");
@@ -1065,6 +1119,32 @@ function resolveMemberSlug(
   }
   if (companyMatch || memberSlugs.size !== 1) return undefined;
   return [...memberSlugs][0];
+}
+
+/**
+ * Resolve a company author's `/company/<slug>` the same way: the target name
+ * must match exactly one company page and no member, so a same-named person
+ * (or two same-named pages) leaves the author unattributed rather than guessed.
+ */
+function resolveCompanySlug(
+  links: HomeFeedLink[],
+  targetName: string
+): string | undefined {
+  const target = nameKey(targetName);
+  if (!target) return undefined;
+  const companySlugs = new Set<string>();
+  let memberMatch = false;
+  for (const link of links) {
+    if (nameKey(linkDisplayName(link)) !== target) continue;
+    if (normalizeLinkedInSlug(link.href)) {
+      memberMatch = true;
+      continue;
+    }
+    const slug = normalizeLinkedInCompanySlug(link.href);
+    if (slug) companySlugs.add(slug);
+  }
+  if (memberMatch || companySlugs.size !== 1) return undefined;
+  return [...companySlugs][0];
 }
 
 /**
@@ -1112,6 +1192,8 @@ interface HomeFeedCommentIdentity {
 interface HomeFeedRowContext {
   author: string;
   authorSlug?: string;
+  /** Set when the row's author is a company page rather than a member. */
+  authorCompanySlug?: string;
   postUrl?: string;
   metadata: Record<string, unknown>;
 }
@@ -1371,6 +1453,9 @@ function buildHomeFeedRowContext(row: HomeFeedRow): HomeFeedRowContext {
   const links = normalizeHomeFeedLinks(row.links);
   const engagement = banner?.kind === "actor" ? banner : null;
   const authorSlug = resolveMemberSlug(links, author);
+  const authorCompanySlug = authorSlug
+    ? undefined
+    : resolveCompanySlug(links, author);
   const engagerSlug = engagement
     ? resolveMemberSlug(links, engagement.actor)
     : undefined;
@@ -1407,6 +1492,7 @@ function buildHomeFeedRowContext(row: HomeFeedRow): HomeFeedRowContext {
   return {
     author,
     authorSlug,
+    ...(authorCompanySlug ? { authorCompanySlug } : {}),
     postUrl: postUrl || undefined,
     metadata,
   };
@@ -1575,7 +1661,15 @@ export function buildHomeFeedEvents(
       // source_url is the durable post handle action callers (prepare_comment)
       // resolve directly.
       ...(sourceUrl ? { source_url: sourceUrl } : {}),
-      metadata: context.metadata,
+      // A company author belongs to the post only: comment rows share the row
+      // context, but their author is always the commenter.
+      metadata: context.authorCompanySlug
+        ? {
+            ...context.metadata,
+            author_company_slug: context.authorCompanySlug,
+            author_company_url: companyPageUrl(context.authorCompanySlug),
+          }
+        : context.metadata,
     });
   }
   return events;
@@ -2476,6 +2570,12 @@ export function parseCompanyUpdates(
     // normalizeLinkedInSlug pulls the `/in/<slug>` segment from a full URL (and
     // returns null for a company `/company/…` URL or anything slug-invalid).
     const authorSlug = normalizeLinkedInSlug(authorProfileUrl);
+    // A company actor navigates to its `/company/<slug>` page. Require the
+    // `/company/` path: a bare publicIdentifier is a member's vanity slug.
+    const authorCompanySlug =
+      !authorMemberId && !authorSlug && isCompanyHref(authorProfileUrl)
+        ? normalizeLinkedInCompanySlug(authorProfileUrl)
+        : null;
 
     // Get social counts
     const socialRef = el["*socialDetail"] ?? el.socialDetail;
@@ -2503,6 +2603,7 @@ export function parseCompanyUpdates(
       authorHeadline: typeof authorDesc === "string" ? authorDesc : undefined,
       authorMemberId: authorMemberId || undefined,
       authorSlug: authorSlug ?? undefined,
+      authorCompanySlug: authorCompanySlug ?? undefined,
       likes: counts.numLikes ?? 0,
       comments: counts.numComments ?? 0,
       shares: counts.numShares ?? 0,
@@ -2599,6 +2700,12 @@ const homeFeedConfigSchema = {
       maximum: 30,
       description:
         "Optional lower bound. When set below max_scrolls, each sync picks a uniform random scroll count in [min_scrolls, max_scrolls].",
+    },
+    create_engager_people: {
+      type: "boolean",
+      default: true,
+      description:
+        "Create a new person for each member who reacted to, commented on, or was replied to on a feed post (default: true). When off, those members are still linked to people that already exist, but no new people are created for them. Post authors are always created.",
     },
   },
 };
@@ -2859,6 +2966,17 @@ export default class LinkedInConnector extends ConnectorRuntime<
                 author: { type: "string" },
                 author_linkedin_slug: { type: "string" },
                 author_profile_url: { type: "string" },
+                author_company_slug: {
+                  type: "string",
+                  description:
+                    "The `/company/<slug>` of the company page that wrote the post, when the author is a company.",
+                },
+                author_company_url: { type: "string" },
+                create_engager_people: {
+                  type: "boolean",
+                  description:
+                    "The connection's create_engager_people setting when the post was read.",
+                },
                 social_actor: {
                   type: "string",
                   description:
@@ -2901,6 +3019,11 @@ export default class LinkedInConnector extends ConnectorRuntime<
                 parent_comment_author_linkedin_slug: { type: "string" },
                 parent_comment_author_profile_url: { type: "string" },
                 is_reply: { type: "boolean" },
+                create_engager_people: {
+                  type: "boolean",
+                  description:
+                    "The connection's create_engager_people setting when the comment was read.",
+                },
                 reactions: { type: "number" },
                 comments: { type: "number" },
                 reposts: { type: "number" },
@@ -2925,6 +3048,12 @@ export default class LinkedInConnector extends ConnectorRuntime<
                 author_headline: { type: "string" },
                 author_member_id: { type: "string" },
                 author_linkedin_slug: { type: "string" },
+                author_company_slug: {
+                  type: "string",
+                  description:
+                    "The `/company/<slug>` of the company page that wrote the post, when the author is a company.",
+                },
+                author_company_url: { type: "string" },
                 likes: { type: "number" },
                 comments: { type: "number" },
                 shares: { type: "number" },
@@ -3408,7 +3537,12 @@ export default class LinkedInConnector extends ConnectorRuntime<
     // company_url — it always reads LINKEDIN_HOME_URL.
     if (feedKey === "home_feed") {
       const homeScrolls = readHomeScrollBudget(config);
-      return this.syncHomeFeed(homeScrolls, checkpoint, requireBrowser(ctx));
+      return this.syncHomeFeed(
+        homeScrolls,
+        config.create_engager_people !== false,
+        checkpoint,
+        requireBrowser(ctx)
+      );
     }
 
     if (!config.company_url) {
@@ -3439,6 +3573,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
    */
   private async syncHomeFeed(
     maxScrolls: number,
+    createEngagerPeople: boolean,
     checkpoint: LinkedInCheckpoint,
     dispatcher: ChromeActionDispatcher
   ): Promise<LinkedInSyncPage> {
@@ -3488,7 +3623,17 @@ export default class LinkedInConnector extends ConnectorRuntime<
 
     const commentCoverage = summarizeHomeFeedCommentCoverage(resolvedRows);
 
-    const events = buildHomeFeedEvents(resolvedRows, new Date());
+    // Stamp the connection's engager setting on every event so the engager,
+    // commenter, and replied-to rules can gate person creation on it.
+    const events = buildHomeFeedEvents(resolvedRows, new Date()).map(
+      (event) => ({
+        ...event,
+        metadata: {
+          ...event.metadata,
+          create_engager_people: createEngagerPeople,
+        },
+      })
+    );
     if (events.length === 0) {
       throw new Error(
         "LinkedIn is logged in and returned feed rows, but no row combined usable content with a durable identity. Confirm that the paired browser is signed into LinkedIn and retry."
@@ -3569,6 +3714,12 @@ export default class LinkedInConnector extends ConnectorRuntime<
         // Voyager exposed the actor's fsd_profile urn; slug is the soft identity.
         author_member_id: post.authorMemberId,
         author_linkedin_slug: post.authorSlug,
+        ...(post.authorCompanySlug
+          ? {
+              author_company_slug: post.authorCompanySlug,
+              author_company_url: companyPageUrl(post.authorCompanySlug),
+            }
+          : {}),
         likes: post.likes,
         comments: post.comments,
         shares: post.shares,

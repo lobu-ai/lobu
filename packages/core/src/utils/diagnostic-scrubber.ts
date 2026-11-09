@@ -235,7 +235,7 @@ function isSecretObjectKey(key: string): boolean {
  * the value is a credential, so the whole value is replaced without
  * inspection. Credential CONTAINERS (`hasCredentialSegment`) are deliberately
  * excluded — their collapse rule depends on the value type (see the walk),
- * and collapsing a map parent would destroy surviving key names the Loki
+ * and collapsing a map parent would destroy surviving key names an upstream
  * connector pre-redacted.
  */
 function isStrongSecretKey(key: string): boolean {

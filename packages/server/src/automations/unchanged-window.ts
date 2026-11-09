@@ -1,3 +1,5 @@
+import { automationModuleHasAnalysis } from "./preparation";
+import { inspectAutomationScriptExports } from "./reaction-executor";
 import type { DbClient } from "../db/client";
 import { classifyRunOutcome } from "../runs/run-outcome";
 import { fingerprintAutomationSources } from "../tools/get_content/automation-mode";
@@ -26,6 +28,19 @@ export async function inspectUnchangedWindow(
 	window: { windowStart: Date; windowEnd: Date },
 ): Promise<UnchangedWindowState | null> {
 	if (scheduleTriggerOf(automation.triggers)?.skip_if_unchanged !== true) return null;
+	// Preparation may derive fresh context from SDK reads beyond configured sources.
+	// The source fingerprint cannot prove that work unchanged.
+	// This read also runs on a pool connection while an external claim owns the
+	// assignment lock. Do not take another row lock here.
+	const [module] = await sql`
+    SELECT a.reaction_script_compiled, a.reaction_input_schema, a.execution_config,
+           a.triggers, v.prompt, v.skills, v.outputs
+    FROM automations a LEFT JOIN automation_versions v ON v.id = a.current_version_id
+    WHERE a.id = ${automation.id}
+  `;
+	if (module?.reaction_script_compiled &&
+      ((await inspectAutomationScriptExports(module.reaction_script_compiled)).has_prepare ||
+       (!module.execution_config?.executor && !automationModuleHasAnalysis(module)))) return null;
 	const sourceState = await fingerprintAutomationSources({
 		sql,
 		automationId: automation.id,

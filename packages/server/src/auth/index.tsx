@@ -37,6 +37,7 @@ import {
 	normalizeHost,
 } from "../utils/public-origin";
 import { TtlCache } from "../utils/ttl-cache";
+import { logAuthObserved, noteUserCreated, withSignInScope } from "./auth-observed";
 import { resolveBaseUrl, safeParseUrl } from "./base-url";
 import {
 	buildGenericOAuthEntry,
@@ -919,6 +920,7 @@ export async function createAuth(
 						return { data: user };
 					},
 					after: async (user, context) => {
+						let personalOrgId: string | null = null;
 						try {
 							const { ensurePersonalOrganization } = await import(
 								"./personal-org-provisioning"
@@ -930,6 +932,7 @@ export async function createAuth(
 								username:
 									(user as { username?: string | null }).username ?? null,
 							});
+							personalOrgId = result.organizationId;
 							if (result.created) {
 								console.log(
 									`[Auth] Provisioned personal org ${result.slug} for user ${user.id}`,
@@ -938,6 +941,7 @@ export async function createAuth(
 						} catch (error) {
 							console.error("[Auth] Failed to provision personal org:", error);
 						}
+						noteUserCreated(user.id, personalOrgId);
 
 						if ((!env.CLOUDFLARE_EMAIL_API_TOKEN || !env.CLOUDFLARE_EMAIL_ACCOUNT_ID) && runtimeNodeEnv !== "production") {
 							console.info(
@@ -974,6 +978,13 @@ export async function createAuth(
 								error,
 							);
 						});
+					},
+				},
+			},
+			session: {
+				create: {
+					after: async (session, context) => {
+						logAuthObserved(session, context);
 					},
 				},
 			},
@@ -1127,7 +1138,9 @@ export async function createAuth(
 		// only console-prints it; route it to the structured log with its request.
 		onAPIError: { onError: logUnhandledAuthEndpointError },
 	});
-	auth.handler = withAuthRequestScope(withGenericOAuthRoutes(auth.handler));
+	auth.handler = withAuthRequestScope(
+		withSignInScope(withGenericOAuthRoutes(auth.handler)),
+	);
 	sessionApi = auth;
 	// betterAuth's inferred return narrows generics per call site (socialProviders
 	// shape, required-vs-optional database/secret); the cache stores the general

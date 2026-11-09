@@ -21,7 +21,11 @@ import {
 	getAutomation,
 } from "../get_automation";
 import type { ToolAnnotations, ToolContext, ToolDefinition } from "../registry";
-import { ManageAgentsSchema, manageAgents } from "./manage_agents";
+import {
+	ManageAgentsSchema,
+	ManageAgentsResultSchema,
+	manageAgents,
+} from "./manage_agents";
 import {
 	ManageConversationsSchema,
 	manageConversations,
@@ -67,6 +71,11 @@ import {
 	manageOperations,
 } from "./manage_operations";
 import { ManageSchedulesSchema, manageSchedules } from "./manage_schedules";
+import {
+	ManageInferenceProvidersResultSchema,
+	ManageInferenceProvidersSchema,
+	manageInferenceProviders,
+} from "./manage_inference_providers";
 import {
 	ManageViewsResultSchema,
 	ManageViewsSchema,
@@ -166,6 +175,7 @@ const ENTRIES: AdminToolEntry[] = [
 		description:
 			"Agent management. SDK alternative: client.agents.",
 		schema: ManageAgentsSchema,
+		resultSchema: ManageAgentsResultSchema,
 		handler: manageAgents,
 		annotations: DESTRUCTIVE_WITH_TITLE("Manage agents"),
 	},
@@ -185,6 +195,15 @@ const ENTRIES: AdminToolEntry[] = [
 		resultSchema: ManageFeedsResultSchema,
 		handler: manageFeeds,
 		annotations: DESTRUCTIVE_WITH_TITLE("Manage feeds"),
+	},
+	{
+		name: "manage_inference_providers",
+		description:
+			"Organization inference-provider management. SDK alternative: client.inferenceProviders. API keys stay in the existing credential vault; OAuth sign-in remains interactive.",
+		schema: ManageInferenceProvidersSchema,
+		resultSchema: ManageInferenceProvidersResultSchema,
+		handler: manageInferenceProviders,
+		annotations: DESTRUCTIVE_WITH_TITLE("Manage inference providers"),
 	},
 	{
 		name: "manage_auth_profiles",

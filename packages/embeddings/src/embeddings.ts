@@ -1,3 +1,5 @@
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import {
   type FeatureExtractionPipeline,
   pipeline,
@@ -7,7 +9,10 @@ import {
 import { DEFAULT_BATCH_SIZE, getLocalModelName } from './metadata.js';
 export { DEFAULT_BATCH_SIZE, DEFAULT_DIMENSIONS, getLocalModelName } from './metadata.js';
 
-transformersEnv.cacheDir = process.env.TRANSFORMERS_CACHE || '~/.cache/huggingface/transformers/';
+// transformers.js uses this path as given, so a literal `~` would cache the model
+// under the process's working directory (a `~/` folder in every project).
+transformersEnv.cacheDir =
+  process.env.TRANSFORMERS_CACHE || join(homedir(), '.cache', 'huggingface', 'transformers');
 transformersEnv.backends.onnx.wasm.numThreads = 1;
 
 let extractorPromise: Promise<FeatureExtractionPipeline> | null = null;

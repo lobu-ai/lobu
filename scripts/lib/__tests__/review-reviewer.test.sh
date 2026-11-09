@@ -81,116 +81,108 @@ case "$failure_message" in
 esac
 
 review_script="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/review.sh"
-grep -Fq 'CLAUDE_REVIEW_MODEL="${CLAUDE_REVIEW_MODEL:-fable}"' "$review_script" ||
-  fail "Claude reviewer must default to the Fable model"
+# Model configuration is dotenv data, with explicit shell values taking priority.
+config_dir="$(mktemp -d /tmp/lobu-review-config.XXXXXX)"
+trap 'rm -rf "$config_dir"' EXIT
+cat > "$config_dir/.env" <<'ENV'
+CLAUDE_REVIEW_MODEL=fable
+CODEX_REVIEW_MODEL=old-model
+CLAUDE_REVIEW_EFFORT=high
+UNRELATED_REVIEW_SECRET=never-export-this
+ENV
+cat > "$config_dir/.env.local" <<'ENV'
+export CLAUDE_REVIEW_MODEL="claude-opus-5-5" # local override
+CODEX_REVIEW_MODEL='gpt-6.1-sol'
+CODEX_REVIEW_EFFORT=xhigh
+REVIEWER_CLI=codex
+ENV
+(
+  unset CLAUDE_REVIEW_MODEL CODEX_REVIEW_MODEL CLAUDE_REVIEW_EFFORT CODEX_REVIEW_EFFORT REVIEWER_CLI
+  review_load_config "$config_dir"
+  [ "$CLAUDE_REVIEW_MODEL" = claude-opus-5-5 ] || fail "local Claude model did not win"
+  [ "$CODEX_REVIEW_MODEL" = gpt-6.1-sol ] || fail "local Codex model did not win"
+  [ "$CLAUDE_REVIEW_EFFORT" = high ] || fail "base effort did not load"
+  [ "$REVIEWER_CLI" = codex ] || fail "reviewer selection did not load"
+  [ -z "${UNRELATED_REVIEW_SECRET+x}" ] || fail "unrelated secrets must not load"
+  export CODEX_REVIEW_MODEL=shell-model CLAUDE_REVIEW_MODEL=opus
+  review_load_config "$config_dir"
+  [ "$CODEX_REVIEW_MODEL" = shell-model ] || fail "exported Codex value was overridden"
+  [ "$CLAUDE_REVIEW_MODEL" = opus ] || fail "exported Claude value was overridden"
+  export CODEX_REVIEW_MODEL=''
+  review_load_config "$config_dir"
+  review_require_model codex >/dev/null 2>&1 && fail "explicit empty model must fail closed"
+  true
+)
+printf 'CODEX_REVIEW_MODEL=$(touch %s/executed)\n' "$config_dir" > "$config_dir/.env.local"
+(
+  unset CODEX_REVIEW_MODEL
+  review_load_config "$config_dir"
+  [ ! -e "$config_dir/executed" ] || fail "dotenv must not execute shell code"
+)
+rm -f "$config_dir/.env" "$config_dir/.env.local"
+(
+  unset CODEX_REVIEW_MODEL CLAUDE_REVIEW_MODEL
+  review_load_config "$config_dir"
+  review_require_model codex >/dev/null 2>&1 && fail "missing Codex configuration must fail closed"
+  review_require_model claude >/dev/null 2>&1 && fail "missing Claude configuration must fail closed"
+  true
+)
+rm -rf "$config_dir"
+trap - EXIT
 
-grep -Fq 'CODEX_REVIEW_MODEL="${CODEX_REVIEW_MODEL:-gpt-6-astra}"' "$review_script" ||
-  fail "Codex reviewer must default to the gpt-6-astra model"
+# Recover a completed verdict wrapped in prose/fences, including escaped quotes
+# and braces inside evidence. Ambiguous multiple objects must fail closed.
+parser_input='{"decision":"pass","evidence":"a \"quoted\" {value} and \\ path"}'
+parsed="$(extract_json_verdict "Completed review:
+\`\`\`json
+$parser_input
+\`\`\`")" || fail 'wrapped verdict was not recovered'
+[ "$(printf '%s' "$parsed" | jq -c .)" = "$(printf '%s' "$parser_input" | jq -c .)" ] || fail 'escaped evidence was altered'
+if extract_json_verdict '{} {}' >/dev/null 2>&1; then fail 'ambiguous verdicts accepted'; fi
+if extract_json_verdict 'unfinished {' >/dev/null 2>&1; then fail 'malformed verdict accepted'; fi
 
-grep -Fq 'CODEX_REVIEW_EFFORT="${CODEX_REVIEW_EFFORT:-xhigh}"' "$review_script" ||
-  fail "Codex reviewer must default to xhigh reasoning effort"
+# Submodule guard (review_refuse_submodule): both scripts must refuse a start
+# inside a submodule checkout before touching GitHub or a reviewer CLI.
+submodule_tmp="$(mktemp -d "${TMPDIR:-/tmp}/lobu-review-submodule-test.XXXXXX")"
+trap 'rm -rf "$submodule_tmp"' EXIT
+new_repo() {
+  git init -q "$1"
+  git -C "$1" config user.email t@t.t
+  git -C "$1" config user.name t
+  git -C "$1" commit -q --allow-empty -m base
+}
+new_repo "$submodule_tmp/child"
+new_repo "$submodule_tmp/super"
+git -C "$submodule_tmp/super" -c protocol.file.allow=always \
+  submodule add -q "$submodule_tmp/child" packages/child
+submodule_dir="$submodule_tmp/super/packages/child"
 
-grep -Fq 'review_validate_claude_model "$CLAUDE_REVIEW_MODEL"' "$review_script" ||
-  fail "review.sh must fail closed on disallowed Claude reviewer models"
+(cd "$submodule_tmp/super" && review_refuse_submodule) ||
+  fail "a superproject checkout must be reviewable"
+set +e
+(cd "$submodule_dir" && review_refuse_submodule 2>/dev/null)
+status=$?
+set -e
+[ "$status" -eq 2 ] || fail "a submodule checkout must be refused (exit $status)"
 
-schema_arg_count="$(grep -F -- '--json-schema "$(cat "$SCHEMA_FILE")"' "$review_script" | wc -l | tr -d ' ')"
-[ "$schema_arg_count" -eq 1 ] ||
-  fail "Claude reviewer must receive the verdict schema exactly once (inline path)"
-
-grep -Fq '2> "$diagnostic_file"' "$review_script" ||
-  fail "inline Codex reviewer stderr must be retained for fail-closed diagnostics"
-
-# pi was removed from the review gate: no pi invocation or pi-specific model
-# knobs may reappear in review.sh. The `pi-review` STATUS CONTEXT name is
-# unrelated — branch protection requires that exact status label.
-if grep -Eq 'pi -p|PI_REVIEW_MODEL|PI_REVIEW_PROVIDER' "$review_script"; then
-  fail "pi reviewer must not reappear in review.sh"
-fi
-
-if grep -Eiq 'herdr|CLAUDE_REVIEW_HERDR' "$review_script"; then
-  fail "review.sh must not reference Herdr (inline-only reviewer)"
-fi
-
-# review-fix.sh is the selector's other consumer (step 5 of "Ship a change").
-# Unlike review.sh it posts no status, so when it was hard-wired to codex
-# (`command -v codex || exit 1`) a codex outage silently skipped the whole
-# fixer pass, with nothing anywhere to record that a quality pass never ran.
-# Pin the structure that regressed: the shared selector, an invocation arm per
-# CLI, the model allowlist, and the write tools that make the claude arm a
-# fixer rather than a review whose findings go nowhere.
-review_fix_script="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/review-fix.sh"
-grep -Fq '. "$SCRIPT_DIR/lib/review-reviewer.sh"' "$review_fix_script" ||
-  fail "review-fix.sh must source the shared reviewer lib"
-grep -Fq '. "$SCRIPT_DIR/lib/review-skip.sh"' "$review_fix_script" ||
-  fail "review-fix.sh must source the shared skip classifier"
-grep -Fq 'review_classify_diff "$BASE_BRANCH" worktree' "$review_fix_script" ||
-  fail "review-fix.sh must skip safe worktree diffs before selecting a reviewer"
-grep -Fq 'FIXER_CLI="$(review_select_reviewer' "$review_fix_script" ||
-  fail "review-fix.sh must pick its CLI through review_select_reviewer"
-grep -Fq 'review_validate_claude_model "$CLAUDE_REVIEW_MODEL"' "$review_fix_script" ||
-  fail "review-fix.sh must fail closed on disallowed Claude fixer models"
-grep -Fq 'codex exec' "$review_fix_script" ||
-  fail "review-fix.sh must keep its codex invocation arm"
-grep -Fq 'claude -p' "$review_fix_script" ||
-  fail "review-fix.sh must keep its claude invocation arm"
-grep -Eq -- '--tools [^[:space:]]*Edit[^[:space:]]*Write' "$review_fix_script" ||
-  fail "review-fix.sh claude arm must carry the Edit/Write tools that make it a fixer"
-if grep -Eq 'pi -p|PI_REVIEW_MODEL|PI_REVIEW_PROVIDER' "$review_fix_script"; then
-  fail "pi reviewer must not reappear in review-fix.sh"
-fi
-if grep -Fq 'command -v codex >/dev/null' "$review_fix_script"; then
-  fail "review-fix.sh must not gate every run on codex being installed"
-fi
+# Stub every external the scripts could reach, so a regressed guard fails this
+# test instead of posting to GitHub or starting a reviewer.
+stub_bin="$submodule_tmp/bin"
+mkdir -p "$stub_bin"
+for cmd in gh codex claude bb; do
+  printf '#!/bin/sh\nexit 97\n' > "$stub_bin/$cmd"
+  chmod +x "$stub_bin/$cmd"
+done
+for script in review.sh lib/review-write.sh; do
+  set +e
+  output="$(cd "$submodule_dir" && PATH="$stub_bin:$PATH" bash "$repo_root/scripts/$script" 2>&1)"
+  status=$?
+  set -e
+  [ "$status" -eq 2 ] || fail "$script inside a submodule must exit 2 (got $status: $output)"
+  case "$output" in
+    *"inside submodule"*) ;;
+    *) fail "$script must say it refused a submodule (got: $output)" ;;
+  esac
+done
 
 echo "review reviewer selection tests passed"
-
-# --- pi-review gate matrix -------------------------------------------------
-# Extract the verdict→status block from review.sh and evaluate it directly, so
-# the gate SET is asserted semantically rather than by grepping for a line.
-# runtime_change_risk is reported in the headline but must never fail the
-# status; every defect/quality axis must still fail it.
-gate_block="$(sed -n '/^HEADLINE="bug_free /,/^fi$/p' "$review_script")"
-[ -n "$gate_block" ] ||
-  fail "could not extract the pi-review gate block from review.sh"
-
-# usage: run_gate BUG_FREE BUGS SLOP SIMPLICITY TESTS_ADEQUATE RISK BLOCKERS
-run_gate() {
-  BUG_FREE="$1" BUGS="$2" SLOP="$3" SIMPLICITY="$4" TESTS_ADEQUATE="$5" \
-  RISK="$6" BLOCKER_COUNT="$7" \
-  PI_REVIEW_MIN_BUG_FREE=80 PI_REVIEW_MAX_SLOP=15 PI_REVIEW_MIN_SIMPLICITY=70 \
-  bash -c "$gate_block"'
-printf "%s|%s\n" "$STATUS_STATE" "$STATUS_DESCRIPTION"'
-}
-
-# A high-risk verdict that is otherwise clean must SUCCEED, and must still
-# surface the tier in the description so a human can weigh it.
-clean_high_risk="$(run_gate 88 0 0 95 true high 0)"
-case "$clean_high_risk" in
-  success\|*) ;;
-  *) fail "high risk must not fail the status (got: $clean_high_risk)" ;;
-esac
-case "$clean_high_risk" in
-  *"risk high"*) ;;
-  *) fail "headline must report the risk tier (got: $clean_high_risk)" ;;
-esac
-
-# Every defect/quality axis must still gate. Guards the removal from widening
-# past runtime_change_risk.
-assert_gate_fails() {
-  local label="$1" result="$2" expected="$3"
-  case "$result" in
-    failure\|*) ;;
-    *) fail "$label must fail the status (got: $result)" ;;
-  esac
-  case "$result" in
-    *"$expected"*) ;;
-    *) fail "$label must report '$expected' (got: $result)" ;;
-  esac
-}
-
-assert_gate_fails "low bug_free"   "$(run_gate 70 0 0 95 true none 0)"  "bug_free<80"
-assert_gate_fails "bugs>0"         "$(run_gate 88 1 0 95 true none 0)"  "bugs>0"
-assert_gate_fails "high slop"      "$(run_gate 88 0 20 95 true none 0)" "slop>15"
-assert_gate_fails "low simplicity" "$(run_gate 88 0 0 50 true none 0)"  "simplicity<70"
-assert_gate_fails "blockers"       "$(run_gate 88 0 0 95 true none 2)"  "blockers>0"
-assert_gate_fails "tests"          "$(run_gate 88 0 0 95 false none 0)" "tests inadequate"

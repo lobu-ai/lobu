@@ -432,13 +432,12 @@ export async function waitForDeviceActionRunWithOptions(
       RETURNING id, action_key
     `) as Array<{ id: number; action_key: string | null }>;
     if (rows.length === 0) return rows;
-    const actionKey = rows[0].action_key ?? 'Operation';
     await supersedeActionEvent(
       runId,
       organizationId,
       'failed',
-      `${actionKey} — ${callerAbortMessage == null ? 'timed out' : 'caller wait ended'}`,
-      `Operation ${callerAbortMessage == null ? 'timed out' : 'wait ended'}: ${actionKey} — ${timeoutMessage}`,
+      (operation) => `${operation} — ${callerAbortMessage == null ? 'timed out' : 'caller wait ended'}`,
+      (operation) => `Operation ${callerAbortMessage == null ? 'timed out' : 'wait ended'}: ${operation} — ${timeoutMessage}`,
       { error_message: timeoutMessage, run_status: 'timeout' },
       null,
       tx

@@ -11,14 +11,22 @@ import { context, SpanKind, SpanStatusCode, trace } from "@opentelemetry/api";
 import type { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-grpc";
 import type { resourceFromAttributes as resourceFromAttributesType } from "@opentelemetry/resources";
 import type {
+  BatchSpanProcessor as BatchSpanProcessorType,
   NodeTracerProvider as NodeTracerProviderType,
-  SimpleSpanProcessor as SimpleSpanProcessorType,
+  SpanProcessor,
 } from "@opentelemetry/sdk-trace-node";
 import type {
   ATTR_SERVICE_NAME as AttrServiceName,
   ATTR_SERVICE_VERSION as AttrServiceVersion,
 } from "@opentelemetry/semantic-conventions";
+import {
+  type DescribeErrorOptions,
+  describeError,
+  errorReportAttributes,
+} from "./error-report";
 import { createLogger } from "./logger";
+import { instrumentFetch } from "./otel-fetch";
+import { formatTraceparent, parseTraceparent } from "./trace-context";
 
 const logger = createLogger("otel");
 
@@ -30,6 +38,11 @@ export interface OtelConfig {
   serviceVersion?: string;
   otlpEndpoint?: string;
   enabled?: boolean;
+  /**
+   * Replaces the OTLP exporter. Tests pass an in-memory processor so init
+   * never constructs a gRPC client. Production leaves this unset.
+   */
+  spanProcessors?: SpanProcessor[];
 }
 
 export function initTracing(config: OtelConfig): void {
@@ -37,7 +50,10 @@ export function initTracing(config: OtelConfig): void {
     return;
   }
 
-  const enabled = config.enabled ?? !!config.otlpEndpoint;
+  const customProcessors = config.spanProcessors;
+  const useCustomProcessors = (customProcessors?.length ?? 0) > 0;
+  const enabled =
+    config.enabled ?? (!!config.otlpEndpoint || useCustomProcessors);
   if (!enabled) {
     logger.debug(
       "Tracing disabled (no OTEL_EXPORTER_OTLP_ENDPOINT configured)"
@@ -49,25 +65,41 @@ export function initTracing(config: OtelConfig): void {
   // require, bun provides one for src TS, and the server ESM bundle banner
   // defines `const require = __createRequire(import.meta.url)` for exactly
   // these calls — while __filename has no shim there and would throw.
-  let exporterCtor: typeof OTLPTraceExporter;
   let resourceFromAttributes: typeof resourceFromAttributesType;
   let NodeTracerProvider: typeof NodeTracerProviderType;
-  let SimpleSpanProcessor: typeof SimpleSpanProcessorType;
   let ATTR_SERVICE_NAME: typeof AttrServiceName;
   let ATTR_SERVICE_VERSION: typeof AttrServiceVersion;
+  let spanProcessors: SpanProcessor[];
   try {
-    exporterCtor =
-      require("@opentelemetry/exporter-trace-otlp-grpc").OTLPTraceExporter;
     resourceFromAttributes =
       require("@opentelemetry/resources").resourceFromAttributes;
+    let BatchSpanProcessor: typeof BatchSpanProcessorType;
     ({
+      BatchSpanProcessor,
       NodeTracerProvider,
-      SimpleSpanProcessor,
     } = require("@opentelemetry/sdk-trace-node"));
     ({
       ATTR_SERVICE_NAME,
       ATTR_SERVICE_VERSION,
     } = require("@opentelemetry/semantic-conventions"));
+    if (customProcessors?.length) {
+      // A caller-supplied processor (tests) never loads the gRPC exporter.
+      spanProcessors = customProcessors;
+    } else {
+      // The server is long-lived: a batch keeps export off the request path
+      // and bounds memory with a drop-on-full queue while a collector is
+      // down. shutdownTracing flushes it.
+      const exporterCtor: typeof OTLPTraceExporter =
+        require("@opentelemetry/exporter-trace-otlp-grpc").OTLPTraceExporter;
+      spanProcessors = [
+        new BatchSpanProcessor(
+          new exporterCtor({
+            url: config.otlpEndpoint,
+            timeoutMillis: 30000,
+          })
+        ),
+      ];
+    }
   } catch (err) {
     // Only a missing module means the optional peers aren't installed. A
     // genuine load failure inside an installed OTel module (e.g. grpc native
@@ -83,22 +115,26 @@ export function initTracing(config: OtelConfig): void {
     [ATTR_SERVICE_VERSION]: config.serviceVersion || "1.0.0",
   });
 
-  const exporter = new exporterCtor({
-    url: config.otlpEndpoint,
-    timeoutMillis: 30000,
-  });
-
-  // SimpleSpanProcessor exports immediately — workers are short-lived
   provider = new NodeTracerProvider({
     resource,
-    spanProcessors: [new SimpleSpanProcessor(exporter)],
+    spanProcessors,
   });
   provider.register();
 
-  tracer = trace.getTracer(config.serviceName, config.serviceVersion);
+  // Bind the tracer we just built. trace.getTracer() stays on the first
+  // globally registered provider, so a later init would otherwise export
+  // into a provider this call does not own.
+  tracer = provider.getTracer(config.serviceName, config.serviceVersion);
+  instrumentFetch({
+    tracer: () => tracer,
+    recordError: (span, error) =>
+      recordError(span, error, { kind: "dependency" }),
+  });
 
   logger.info(
-    `Tracing initialized: ${config.serviceName} -> ${config.otlpEndpoint}`
+    useCustomProcessors
+      ? `Tracing initialized: ${config.serviceName} (custom span processors)`
+      : `Tracing initialized: ${config.serviceName} -> ${config.otlpEndpoint}`
   );
 }
 
@@ -106,11 +142,35 @@ export function getTracer(): Tracer | null {
   return tracer;
 }
 
-export async function shutdownTracing(): Promise<void> {
-  if (provider) {
-    await provider.shutdown();
-    provider = null;
-    tracer = null;
+/**
+ * Flush and stop tracing. With `timeoutMs`, an unreachable collector cannot
+ * hold up process exit past that budget; the timeout rejects.
+ */
+export async function shutdownTracing(timeoutMs?: number): Promise<void> {
+  if (!provider) return;
+  const shutdown = provider.shutdown();
+  provider = null;
+  tracer = null;
+  if (timeoutMs === undefined) {
+    await shutdown;
+    return;
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      shutdown,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () =>
+            reject(
+              new Error(`Tracing shutdown exceeded its ${timeoutMs}ms budget`)
+            ),
+          timeoutMs
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -137,6 +197,30 @@ export function createSpan(
   return span;
 }
 
+/**
+ * Mark a span failed and attach its grouped error report: exception type,
+ * parameterized message, frame-only stack, kind and fingerprint. The raw
+ * message is never recorded, because it can carry credentials or source data.
+ * `scope` defaults to the span's name; pass it when the span was not the
+ * reporting boundary.
+ */
+export function recordError(
+  span: Span | null | undefined,
+  error: unknown,
+  options: Partial<DescribeErrorOptions> = {}
+): void {
+  if (!span) return;
+  const name = (span as { name?: unknown }).name;
+  const report = describeError(error, {
+    scope: options.scope ?? (typeof name === "string" ? name : "span"),
+    ...(options.kind ? { kind: options.kind } : {}),
+  });
+  const attributes = errorReportAttributes(report);
+  span.setAttributes(attributes);
+  span.addEvent("exception", attributes);
+  span.setStatus({ code: SpanStatusCode.ERROR, message: report.message });
+}
+
 async function runInSpan<T>(
   span: Span | null,
   fn: (span: Span | null) => Promise<T>
@@ -146,13 +230,7 @@ async function runInSpan<T>(
     span?.setStatus({ code: SpanStatusCode.OK });
     return result;
   } catch (error) {
-    if (span) {
-      span.setStatus({
-        code: SpanStatusCode.ERROR,
-        message: error instanceof Error ? error.message : String(error),
-      });
-      span.recordException(error as Error);
-    }
+    recordError(span, error);
     throw error;
   } finally {
     span?.end();
@@ -171,9 +249,10 @@ export function getCurrentSpan(): Span | undefined {
   return trace.getActiveSpan();
 }
 
-export function runInSpanContext<T>(span: Span, fn: () => T): T {
-  const ctx = trace.setSpan(context.active(), span);
-  return context.with(ctx, fn);
+/** Run `fn` with `span` active, or plainly when tracing produced no span. */
+export function runInSpanContext<T>(span: Span | null, fn: () => T): T {
+  if (!span) return fn();
+  return context.with(trace.setSpan(context.active(), span), fn);
 }
 
 export function createRootSpan(
@@ -184,15 +263,14 @@ export function createRootSpan(
     return { span: null, traceparent: null };
   }
 
+  // Not the active context. Callers that want logs to see this span run
+  // the work through runInSpanContext.
   const span = tracer.startSpan(name, {
     kind: SpanKind.SERVER,
     attributes,
   });
 
-  const spanContext = span.spanContext();
-  const traceparent = `00-${spanContext.traceId}-${spanContext.spanId}-01`;
-
-  return { span, traceparent };
+  return { span, traceparent: formatTraceparent(span.spanContext()) };
 }
 
 export function createChildSpan(
@@ -204,30 +282,15 @@ export function createChildSpan(
     return null;
   }
 
-  if (!traceparent) {
+  const parent = parseTraceparent(traceparent);
+  if (!parent) {
     return createSpan(name, attributes);
   }
-
-  // W3C traceparent: 00-traceId-parentSpanId-flags
-  const parts = traceparent.split("-");
-  if (parts.length !== 4) {
-    return createSpan(name, attributes);
-  }
-
-  const traceId = parts[1]!;
-  const parentSpanId = parts[2]!;
-
-  const parentContext = trace.setSpanContext(context.active(), {
-    traceId,
-    spanId: parentSpanId,
-    traceFlags: 1,
-    isRemote: true,
-  });
 
   return tracer.startSpan(
     name,
     { kind: SpanKind.INTERNAL, attributes },
-    parentContext
+    trace.setSpanContext(context.active(), parent)
   );
 }
 
@@ -242,8 +305,7 @@ export async function withChildSpan<T>(
 
 export function getTraceparent(span: Span | null): string | null {
   if (!span) return null;
-  const ctx = span.spanContext();
-  return `00-${ctx.traceId}-${ctx.spanId}-01`;
+  return formatTraceparent(span.spanContext());
 }
 
 export type { Span, Tracer };

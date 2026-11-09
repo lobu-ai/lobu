@@ -107,7 +107,7 @@ const lock = JSON.parse(
 );
 for (const [path, pkg] of Object.entries(lock.packages)) {
   assert.ok(
-    !/(?:^|\/)node_modules\/(?:embedded-postgres|@embedded-postgres\/[^/]+|@xenova\/transformers|onnxruntime-[^/]+|playwright(?:-vanilla|-core)?|patchright(?:-core)?|isolated-vm(?:-next)?|@lobu\/(?:connector-worker|embeddings))(?:\/|$)/.test(
+    !/(?:^|\/)node_modules\/(?:embedded-postgres|@embedded-postgres\/[^/]+|@xenova\/transformers|onnxruntime-[^/]+|playwright(?:-vanilla|-core)?|patchright(?:-core)?|isolated-vm|@lobu\/(?:connector-worker|embeddings))(?:\/|$)/.test(
       path
     ),
     `${path} leaked into the base CLI installation`

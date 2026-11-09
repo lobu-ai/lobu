@@ -16,9 +16,13 @@ export interface ReactionEntity {
 /**
  * Context passed to reaction scripts containing the analysis results
  * and metadata about the completed Automation run. Reaction scripts have the
- * shape `default async (ctx: ReactionContext, client, params?)`.
+ * shape `default async (ctx: ReactionContext, client, params?)`. The same
+ * module may export `prepare(ctx: AutomationScriptContext, client)` returning
+ * named arrays of records, saved before the run's agent is dispatched.
  */
 export interface ReactionContext {
+  /** Named sources prepared and saved before this run's agent execution. */
+  sources?: Record<string, unknown[]>;
   /** The extracted analysis data from the completed run */
   extracted_data: Record<string, unknown>;
   /** All entities the Automation is attached to */

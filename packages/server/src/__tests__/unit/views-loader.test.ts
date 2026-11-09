@@ -391,7 +391,7 @@ describe("views loader shell", () => {
 describe("view shell runtime", () => {
   it("publishes the installed runtime before executing the view bundle", async () => {
     const pending = viewRuntimeScript();
-    expect(viewRuntimeScript()).toBe(pending);
+    expect(await viewRuntimeScript()).toBe(await pending);
     const runtime = await pending;
     const html = renderViewShell({
       key: "probe",
@@ -400,12 +400,13 @@ describe("view shell runtime", () => {
       compiled_code: "globalThis.viewReact = globalThis.__lobuViews.react;",
     } as StoredView, "https://app.example/acme/", runtime);
     const context = createContext({});
-    // Inlined code never contains a closing tag (the shell escapes it), so
-    // each one ends a script; the runtime may itself contain "<script>".
-    const scripts = html
-      .split("</script>")
-      .slice(0, -1)
-      .map((chunk) => chunk.slice(chunk.indexOf("<script>") + "<script>".length));
+    // Execute inline runtime and mount code. The separately served native
+    // component script is exercised by the real-browser smoke suite.
+    const scripts: string[] = [];
+    await new HTMLRewriter().on("script:not([src])", {
+      element() { scripts.push(""); },
+      text(chunk) { scripts[scripts.length - 1] += chunk.text; },
+    }).transform(new Response(html)).text();
     expect(scripts).toHaveLength(2);
     for (const code of scripts) runInContext(code, context);
     const modules = context.__lobuViews;

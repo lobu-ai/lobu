@@ -77,7 +77,7 @@ import { renderMcpAppTemplate } from './utils/mcp-app-bundle';
 import { viewWorkspaceUrl } from './utils/url-builder';
 import {
   LOBU_VIEWS_RESOURCE_URI,
-  getServedView,
+  getViewForDisplay,
   renderViewShell,
   viewRuntimeScript,
   renderViewsLoaderShell,
@@ -345,7 +345,7 @@ const VIEWS_LOADER_META = {
  * probe the filesystem.
  */
 export const MCP_APP_DIRS: ReadonlySet<string> = new Set(
-  Object.values(MCP_APP_RESOURCES).map((r) => r.appDir)
+  [...Object.values(MCP_APP_RESOURCES).map((r) => r.appDir), "view-native"]
 );
 
 /**
@@ -613,7 +613,7 @@ function createServerForContext(
         toAccountToolContext(forThisRequest(authCtx)), viewOrganization
       );
       if (!workspace.memberRole) throw new AccessDeniedError('Workspace membership is required to read views.');
-      const storedView = await getServedView(workspace.organizationId, viewKey);
+      const storedView = await getViewForDisplay(workspace.organizationId, viewKey);
       if (storedView) {
         const meta = viewResourceMeta(storedView);
         return {
@@ -853,6 +853,7 @@ function createServerForContext(
       const structuredError =
         typeof code === 'string' && typeof error?.retryable === 'boolean'
           ? {
+              ...(error instanceof ToolUserError ? (error.details ?? {}) : {}),
               code,
               retryable: error.retryable as boolean,
               ...(error.callId ? { call_id: error.callId as string } : {}),

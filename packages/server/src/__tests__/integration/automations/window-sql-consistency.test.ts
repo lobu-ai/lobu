@@ -181,6 +181,7 @@ describe('Automation window SQL event-version consistency', () => {
 
   it('pages event versions through a refresh, renews the lease and completes with every token', async () => {
     await sql`UPDATE runs SET status = 'failed' WHERE id = ${runId}`;
+    await api.automations.update({ automation_id: String(automationId), managed_agent_id: null });
     const sources = [{ name: 'content', query: "SELECT id, occurred_at, payload_text FROM events WHERE semantic_type = 'window_fixture' ORDER BY occurred_at DESC, id DESC" }];
     await api.automations.createVersion({ automation_id: String(automationId), prompt: 'Analyze each page.', sources });
     const older = await event('older', '2026-08-01T10:10:00.000Z');

@@ -30,7 +30,7 @@ The unused `agents.tools_config` column remains through this release. Drop it in
 - Actual authorization/dispatch and conversation authorization tests pass.
 - Evaluation isolation fails under deliberate session leakage and passes with fresh sessions.
 - Cutover refuses stored restrictions and pending/claimed/running legacy turns, preserving their data.
-- Focused tests, pre-pr, review-fix, CI and review gates pass; show the final diff at the shipping checkpoint.
+- Focused tests, pre-pr, CI and review gates pass; show the final diff at the shipping checkpoint.
 
 ## Out of scope
 

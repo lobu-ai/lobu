@@ -673,11 +673,10 @@ export async function initCommand(
 
     await renderTemplate(".env.tmpl", variables, join(projectDir, ".env"));
 
-    // Pin Node 22 for nvm / fnm / mise / asdf / volta — Lobu refuses to boot
-    // on Node 25+ (isolated-vm has no prebuilt). Homebrew's `node` now
-    // resolves to 26, so without these files a fresh `lobu run` fails.
-    await writeFile(join(projectDir, ".nvmrc"), "22\n");
-    await writeFile(join(projectDir, ".node-version"), "22\n");
+    // Pin Node 26 for nvm / fnm / mise / asdf / volta — Lobu's gateway and
+    // worker load the Node-26-only isolated-vm native build.
+    await writeFile(join(projectDir, ".nvmrc"), "26\n");
+    await writeFile(join(projectDir, ".node-version"), "26\n");
     // `.env` carries ENCRYPTION_KEY + provider API keys / OAuth tokens
     // appended via setLocalEnvValue below. Tighten now so the initial
     // write isn't world-readable on multi-user hosts (default umask 022).

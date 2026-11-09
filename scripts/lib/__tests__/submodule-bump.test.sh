@@ -18,18 +18,15 @@ $actual"
 }
 
 run_bump() {
-  local name="$1" target="$2" fail_fix="$3" fail_review="$4" fail_ui="$5"
-  local fix_extra="$6" fail_merge="$7" artifact="${8-https://proof.example/$name}"
+  local name="$1" target="$2" fail_ui="$3"
+  local fail_merge="$4" artifact="${5-https://proof.example/$name}"
   (
     cd "$driver"
     env \
       ARTIFACT="$artifact" \
       CALL_LOG="$call_log" \
-      FAIL_FIX="$fail_fix" \
       FAIL_MERGE="$fail_merge" \
-      FAIL_REVIEW="$fail_review" \
       FAIL_UI="$fail_ui" \
-      FIX_EXTRA="$fix_extra" \
       GIT_ALLOW_PROTOCOL=file \
       NAME="$name" \
       PATH="$fake_bin:$PATH" \
@@ -114,15 +111,14 @@ printf '%s\n' \
   '#!/usr/bin/env bash' \
   'set -euo pipefail' \
   'echo "make:$*" >> "$CALL_LOG"' \
-  'if [ "${1:-}" = "review-fix" ] && [ "$FAIL_FIX" = "1" ]; then exit 1; fi' \
-  'if [ "${1:-}" = "review-fix" ] && [ "$FIX_EXTRA" = "1" ]; then echo extra > unexpected.txt; fi' \
-  'if [ "${1:-}" = "review" ] && [ "$FAIL_REVIEW" = "1" ]; then exit 1; fi' \
+  '# A local review seconds after push can only report pending CI (exit 2).' \
+  'if [ "${1:-}" = "review" ]; then exit 2; fi' \
   'if [ "${1:-}" = "ui-review" ] && [ "$FAIL_UI" = "1" ]; then exit 1; fi' \
   > "$fake_bin/make"
 chmod +x "$fake_bin/gh" "$fake_bin/make"
 
 : > "$call_log"
-if run_bump rollback "$sha_a" 0 0 0 0 0 >"$tmp_root/rollback.out" 2>&1; then
+if run_bump rollback "$sha_a" 0 0 >"$tmp_root/rollback.out" 2>&1; then
   fail "backward target should stop the bump"
 fi
 grep -Fq "target would move packages/owletto backwards or sideways" "$tmp_root/rollback.out" \
@@ -135,7 +131,7 @@ if git -C "$driver" show-ref --verify --quiet refs/heads/chore/bump-rollback; th
 fi
 
 : > "$call_log"
-if run_bump off-main origin/feature 0 0 0 0 0 >"$tmp_root/off-main.out" 2>&1; then
+if run_bump off-main origin/feature 0 0 >"$tmp_root/off-main.out" 2>&1; then
   fail "off-main target should stop the bump"
 fi
 grep -Fq "is not reachable from packages/owletto origin/main" "$tmp_root/off-main.out" \
@@ -143,87 +139,48 @@ grep -Fq "is not reachable from packages/owletto origin/main" "$tmp_root/off-mai
 expect_calls "off-main target" ""
 
 : > "$call_log"
-run_bump success origin/main 0 0 0 0 0 >/dev/null
-expect_calls "successful bump" "make:review-fix
-gh:pr-create
-make:review
+run_bump success origin/main 0 0 >/dev/null
+expect_calls "successful bump" "gh:pr-create
 make:ui-review ARTIFACT=https://proof.example/success
 gh:pr-merge"
 
 : > "$call_log"
-run_bump annotated-tag release 0 0 0 0 0 >/dev/null
-expect_calls "annotated tag target" "make:review-fix
-gh:pr-create
-make:review
+run_bump annotated-tag release 0 0 >/dev/null
+expect_calls "annotated tag target" "gh:pr-create
 make:ui-review ARTIFACT=https://proof.example/annotated-tag
 gh:pr-merge"
 
 : > "$call_log"
-run_bump reusable-proof origin/main 0 0 0 0 0 "" >/dev/null
-expect_calls "reusable UI proof" "make:review-fix
-gh:pr-create
-make:review
+run_bump reusable-proof origin/main 0 0 "" >/dev/null
+expect_calls "reusable UI proof" "gh:pr-create
 make:ui-review
 gh:pr-merge"
 
 : > "$call_log"
-if run_bump fix-fails origin/main 1 0 0 0 0 >"$tmp_root/fix-fails.out" 2>&1; then
-  fail "pre-review fixer failure should stop the bump"
-fi
-grep -Fq "review-fix failed; inspect the retained worktree" "$tmp_root/fix-fails.out" \
-  || fail "fixer failure should identify the retained worktree"
-expect_calls "fixer failure" "make:review-fix"
-
-: > "$call_log"
-if run_bump fix-expands-scope origin/main 0 0 0 1 0 >"$tmp_root/fix-expands-scope.out" 2>&1; then
-  fail "unexpected fixer edits should stop the bump"
-fi
-grep -Fq "review-fix left changes beyond the packages/owletto pointer" \
-  "$tmp_root/fix-expands-scope.out" \
-  || fail "unexpected fixer edits should explain the scope violation"
-expect_calls "fixer scope expansion" "make:review-fix"
-
-: > "$call_log"
-if run_bump review-fails origin/main 0 1 0 0 0 >"$tmp_root/review-fails.out" 2>&1; then
-  fail "review failure should stop the bump"
-fi
-grep -Fq "pi-review failed; PR remains open" "$tmp_root/review-fails.out" \
-  || fail "review failure should explain that the PR remains open"
-expect_calls "review failure" "make:review-fix
-gh:pr-create
-make:review"
-
-: > "$call_log"
-if run_bump ui-fails origin/main 0 0 1 0 0 >"$tmp_root/ui-fails.out" 2>&1; then
+if run_bump ui-fails origin/main 1 0 >"$tmp_root/ui-fails.out" 2>&1; then
   fail "UI review failure should stop the bump"
 fi
 grep -Fq "ui-review failed; PR remains open" "$tmp_root/ui-fails.out" \
   || fail "UI review failure should explain that the PR remains open"
-expect_calls "UI review failure" "make:review-fix
-gh:pr-create
-make:review
+expect_calls "UI review failure" "gh:pr-create
 make:ui-review ARTIFACT=https://proof.example/ui-fails"
 
 : > "$call_log"
-if run_bump proof-missing origin/main 0 0 1 0 0 "" >"$tmp_root/proof-missing.out" 2>&1; then
+if run_bump proof-missing origin/main 1 0 "" >"$tmp_root/proof-missing.out" 2>&1; then
   fail "missing reusable UI proof should stop the bump"
 fi
 grep -Fq "UI proof is required; rerun" "$tmp_root/proof-missing.out" \
   || fail "missing reusable UI proof should explain how to provide an artifact"
-expect_calls "missing reusable UI proof" "make:review-fix
-gh:pr-create
-make:review
+expect_calls "missing reusable UI proof" "gh:pr-create
 make:ui-review"
 
 : > "$call_log"
-if run_bump merge-fails origin/main 0 0 0 0 1 >"$tmp_root/merge-fails.out" 2>&1; then
+if run_bump merge-fails origin/main 0 1 >"$tmp_root/merge-fails.out" 2>&1; then
   fail "auto-merge failure should stop the bump"
 fi
 grep -Fq "auto-merge could not be enabled; PR remains open" "$tmp_root/merge-fails.out" \
   || fail "auto-merge failure should explain that the PR remains open"
-expect_calls "auto-merge failure" "make:review-fix
-gh:pr-create
-make:review
+expect_calls "auto-merge failure" "gh:pr-create
 make:ui-review ARTIFACT=https://proof.example/merge-fails
 gh:pr-merge"
 

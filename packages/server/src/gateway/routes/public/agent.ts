@@ -6,6 +6,7 @@ import {
   createLogger,
   createRootSpan,
   generateWorkerToken,
+  runInSpanContext,
   type NetworkConfig,
   normalizeDomainPatterns,
   verifyWorkerToken,
@@ -13,7 +14,11 @@ import {
 import { type Context, Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { bindRequestAbortToStream } from "../../../events/sse-abort-bridge.js";
-import { isAdminOrOwnerRole } from "../../../tools/access-control.js";
+import {
+  isAdminOrOwnerRole,
+  isPublicReader,
+} from "../../../tools/access-control.js";
+import { resolveRunInitiator } from "../../../tools/initiator.js";
 import {
   defineRoute,
   getValidated,
@@ -61,7 +66,7 @@ import {
   isRestrictedOrgAgentMember,
 } from "../shared/org-agent-access.js";
 import { errorResponses } from "../shared/openapi-responses.js";
-import { verifySettingsSessionOrToken } from "./settings-auth.js";
+import { verifySettingsSession, verifySettingsSessionOrToken } from "./settings-auth.js";
 import {
   formatActivityAttentionBlock,
   listOrgActivity,
@@ -1605,11 +1610,25 @@ export function createAgentApi(config: AgentApiConfig): Hono {
 
     const realAgentId = session.agentId || agentId;
 
+    // Ids only. The principal is the Lobu user the auth bridge resolved from a
+    // session or PAT, else the user the agent API's own auth check resolved
+    // from a settings session or external OAuth token. A worker token names
+    // an agent, not a user, so a worker-token caller has none. The org is the
+    // tenant the turn was authorized under, not the caller's default org.
+    const apiAuth = c.get("authContext");
+    const principalUserId =
+      (c.get("user") as { id?: string } | null | undefined)?.id ??
+      (apiAuth?.via === "worker_token" ? undefined : apiAuth?.userId);
     const { span: rootSpan, traceparent } = createRootSpan("message_received", {
       "lobu.agent_id": realAgentId,
       "lobu.message_id": messageId,
+      "lobu.org_id": messageOrganizationId,
+      ...(principalUserId ? { "user.id": principalUserId } : {}),
     });
 
+    // createRootSpan does not make the span active. The logger reads trace ids
+    // off the active context, so the handler has to run inside it.
+    const dispatch = async () => {
     try {
       const channelId = session.channelId || `api_${session.userId}`;
 
@@ -1677,12 +1696,28 @@ export function createAgentApi(config: AgentApiConfig): Hono {
             SELECT slug FROM organization WHERE id = ${messageOrganizationId} LIMIT 1
           `) as unknown as Array<{ slug: string }>;
           const ownerSlug = orgRow[0]?.slug ?? messageOrganizationId;
+          // Agent ownership (`agent_users`) authorizes chat independently of
+          // workspace membership, so the caller may not belong to the org the
+          // agent resolved to. Read the digest the way
+          // manage_operations.list_activity would for this principal in THAT
+          // org: a non-member is a public reader and keeps only runs on
+          // org-visible connections (or their own), never another member's
+          // private connection names and error snippets.
+          const attentionMemberRole = await getMembershipRole(
+            messageOrganizationId,
+            attentionUserId
+          );
           const { items } = await listOrgActivity({
             organizationId: messageOrganizationId,
             userId: attentionUserId,
             ownerSlug,
             limit: 12,
             aggregate: true,
+            publicReader: isPublicReader({
+              isAuthenticated: true,
+              userId: attentionUserId,
+              memberRole: attentionMemberRole,
+            }),
           });
           ephemeralForTurn = formatActivityAttentionBlock(items);
         } catch {
@@ -1722,6 +1757,21 @@ export function createAgentApi(config: AgentApiConfig): Hono {
         ingestedFiles
       );
 
+      // Ownership and routing ids are not human initiation. Freeze only a
+      // current first-party settings-session member in this proven workspace.
+      // Legacy OAuth subjects and platform ids are different namespaces;
+      // Bearer and Automation requests retain their existing unknown actor.
+      const humanSession = !tokenFromHeader(c) && session.intent?.kind !== "automation_run"
+        ? await verifySettingsSession(c) : null;
+      const humanMember = humanSession?.platform === "external" && !humanSession.oauthUserId
+        && !humanSession.agentId && msgAccess.callerUserId
+        ? await authorizeOrgAgentMemberInProvenOrg({
+            organizationId: messageOrganizationId,
+            agentId: realAgentId,
+            userId: msgAccess.callerUserId,
+          })
+        : null;
+
       const jobId = await queueProducer.enqueueMessage({
         userId: session.userId,
         conversationId: session.conversationId || agentId,
@@ -1757,7 +1807,7 @@ export function createAgentApi(config: AgentApiConfig): Hono {
         networkConfig: session.networkConfig || settingsNetwork,
         guardrailsInline: settingsGuardrailsInline,
         nixConfig: resolvedNixConfig,
-      });
+      }, humanMember ? { initiator: resolveRunInitiator({ userId: humanMember.userId }) } : undefined);
 
       rootSpan?.end();
 
@@ -1772,6 +1822,8 @@ export function createAgentApi(config: AgentApiConfig): Hono {
       rootSpan?.end();
       throw error;
     }
+    };
+    return runInSpanContext(rootSpan, dispatch);
   });
 
   logger.debug("Hono Agent API routes registered");

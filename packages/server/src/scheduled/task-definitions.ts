@@ -16,6 +16,7 @@ export const AUTOMATION_REACTION_TASK = 'automation-reaction';
 export const AUTOMATION_DIGEST_TASK = 'automation-digest';
 export const ENTITY_APPROVAL_TASK = 'entity-approval';
 export const AUTOMATION_SCRIPT_TASK = 'automation-script';
+export const AUTOMATION_PREPARATION_TASK = 'automation-preparation';
 export const SOURCE_FEED_LISTENER_TASK = 'source-feed-listener';
 export const WORKSPACE_PURGE_TASK = 'workspace-purge';
 /** Wake an agent with a prompt; scheduled follow-ups and operation outcomes. */
@@ -36,6 +37,7 @@ export const AUTOMATION_SCRIPT_TASK_QUEUE =
  * during a rolling deploy. Existing task names stay on the shared lane.
  */
 export function taskQueueName(name: string): string {
+  if (name === AUTOMATION_PREPARATION_TASK) return `task:${AUTOMATION_PREPARATION_TASK}`;
   if (name === ENTITY_APPROVAL_TASK) return `task:${ENTITY_APPROVAL_TASK}`;
   if (name === SOURCE_FEED_LISTENER_TASK) {
     return SOURCE_FEED_LISTENER_TASK_QUEUE;
@@ -66,6 +68,7 @@ export function isTransactionalTaskName(name: string): boolean {
     name === AUTOMATION_DIGEST_TASK ||
     name === NOTIFICATION_DELIVERY_TASK ||
     name === AUTOMATION_SCRIPT_TASK ||
+    name === AUTOMATION_PREPARATION_TASK ||
     name === SOURCE_FEED_LISTENER_TASK ||
     name === WORKSPACE_PURGE_TASK ||
     name === WAKE_AGENT_TASK

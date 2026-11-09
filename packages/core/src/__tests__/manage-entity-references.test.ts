@@ -8,6 +8,41 @@ import {
 } from "../contracts/tools/manage-entity";
 
 describe("entity references", () => {
+  it("accepts discovered type IDs without coercing string source keys", () => {
+    expect(
+      Value.Check(GetEntityAction, {
+        action: "get",
+        entity_id: "007",
+        entity_type: 101,
+      })
+    ).toBe(true);
+    expect(
+      Value.Check(LinkEntitiesAction, {
+        action: "link",
+        from_entity_id: 10,
+        to_entity_id: "007",
+        to_entity_type: 101,
+        relationship_type_slug: "related-to",
+      })
+    ).toBe(true);
+    expect(
+      Value.Check(ListLinksAction, {
+        action: "list_links",
+        entity_id: "007",
+        entity_type: 101,
+      })
+    ).toBe(true);
+    for (const type of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(
+        Value.Check(GetEntityAction, {
+          action: "get",
+          entity_id: "007",
+          entity_type: type,
+        })
+      ).toBe(false);
+    }
+  });
+
   it("accepts typed source keys on the existing entity fields", () => {
     expect(
       Value.Check(GetEntityAction, {

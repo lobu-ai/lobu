@@ -3,8 +3,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { upsertEntityApprovalPolicy } from "../../../packages/server/src/authz/entity-policy";
 import { dispatchPendingAutomationRuns } from "../../../packages/server/src/automations/automation";
 import { runAutomationScriptTask } from "../../../packages/server/src/automations/script-task";
+import { runAutomationPreparationTask } from "../../../packages/server/src/automations/preparation-task";
+import { runAutomationReactionTask } from "../../../packages/server/src/automations/reaction-task";
+import type { DbClient } from "../../../packages/server/src/db/client";
 import type { Env } from "../../../packages/server/src/index";
-import { createAutomationRun } from "../../../packages/server/src/runs/queue-service";
+import {
+  claimPendingAutomationRun,
+  createAutomationRun,
+} from "../../../packages/server/src/runs/queue-service";
 import { NOTIFICATION_DELIVERY_TASK } from "../../../packages/server/src/scheduled/task-definitions";
 import { initWorkspaceProvider } from "../../../packages/server/src/workspace";
 import {
@@ -38,6 +44,7 @@ async function setup(
     loseNotificationResponse?: boolean;
     missingFx?: boolean;
     stale?: boolean;
+    native?: boolean;
   } = {}
 ) {
   const sql = getTestDb();
@@ -171,11 +178,23 @@ async function setup(
       name,
       ...(typeof value === "string" ? { query: value } : value),
     })),
-    ...(definition.executor
-      ? { execution_config: { executor: { kind: "script" as const, source } } }
-      : { prompt: definition.prompt }),
+    ...(options.native
+      ? {
+          prompt: definition.prompt ?? "Review the saved net_worth source.",
+          reaction_script: source,
+        }
+      : {
+          prompt: "Legacy fixture",
+        }),
   });
+  if (!("automation_id" in created)) {
+    throw new Error("Synthetic finance Automation creation did not apply.");
+  }
   const automationId = Number(created.automation_id);
+  if (!options.native) {
+    await sql`UPDATE automations SET execution_config = ${sql.json({ executor: { kind: "script", source } })} WHERE id = ${automationId}`;
+    await sql`UPDATE automation_versions SET prompt = '' WHERE automation_id = ${automationId}`;
+  }
   await sql`UPDATE automations SET next_window_start = ${START}::timestamptz,
     next_run_at = now() - interval '1 hour' WHERE id = ${automationId}`;
   const run = await createAutomationRun({
@@ -189,17 +208,21 @@ async function setup(
   });
   const [queued] =
     await sql`SELECT approved_input FROM runs WHERE id = ${run.runId}`;
-  expect(queued.approved_input.executor?.kind).toBe("script");
+  expect(queued.approved_input.executor?.kind).toBe(
+    options.native ? undefined : "script"
+  );
   expect(queued.approved_input.window_end).toBe(END);
   expect(queued.approved_input.window_truncated).toBeUndefined();
-  expect(
-    await dispatchPendingAutomationRuns({ runIds: [run.runId] })
-  ).toMatchObject({
-    dispatched: 1,
-    failed: 0,
-  });
+  if (!options.native) {
+    expect(
+      await dispatchPendingAutomationRuns({ runIds: [run.runId] })
+    ).toMatchObject({ dispatched: 1, failed: 0 });
+  }
+  const taskKey = options.native
+    ? "automation-preparation"
+    : "automation-script";
   const [task] =
-    await sql`SELECT id FROM runs WHERE parent_run_id = ${run.runId} AND action_key = 'automation-script'`;
+    await sql`SELECT id FROM runs WHERE parent_run_id = ${run.runId} AND action_key = ${taskKey}`;
   expect(task).toBeDefined();
   await sql`UPDATE runs SET status = 'claimed', claimed_by = 'synthetic-net-worth-queue',
     claimed_at = now() WHERE id = ${task.id}`;
@@ -209,7 +232,7 @@ async function setup(
     automationId,
     runId: run.runId,
     execute: (attempt = 1) =>
-      runAutomationScriptTask(
+      (options.native ? runAutomationPreparationTask : runAutomationScriptTask)(
         {
           organizationId: workspace.org.id,
           automationId,
@@ -219,6 +242,50 @@ async function setup(
         Number(task.id),
         attempt
       ),
+    async complete(review: string, attempt = 1) {
+      const payload = {
+        organizationId: workspace.org.id,
+        automationId,
+        sourceRunId: run.runId,
+      };
+      const [reaction] =
+        await sql`SELECT id FROM runs WHERE parent_run_id = ${run.runId} AND action_key = 'automation-reaction'`;
+      if (reaction)
+        return runAutomationReactionTask(
+          payload,
+          ENV,
+          Number(reaction.id),
+          attempt
+        );
+      expect(
+        await sql.begin((tx) =>
+          claimPendingAutomationRun(tx as unknown as DbClient, {
+            runId: run.runId,
+            automationId,
+            claimedBy: "synthetic-finance-agent",
+            status: "running",
+          })
+        )
+      ).toBe(true);
+      const read = (await workspace.owner.knowledge.read({
+        automation_id: automationId,
+        run_id: run.runId,
+      })) as { window_token: string };
+      await workspace.owner.automations.completeWindow({
+        automation_id: String(automationId),
+        run_id: run.runId,
+        window_token: read.window_token,
+        extracted_data: { weekly_review: review },
+      });
+      const [queuedReaction] =
+        await sql`SELECT id FROM runs WHERE parent_run_id = ${run.runId} AND action_key = 'automation-reaction'`;
+      return runAutomationReactionTask(
+        payload,
+        ENV,
+        Number(queuedReaction.id),
+        attempt
+      );
+    },
     async status() {
       const [row] =
         await sql`SELECT status, model_used, error_message FROM runs WHERE id = ${run.runId}`;
@@ -233,13 +300,66 @@ async function setup(
   };
 }
 
-describe("weekly net worth through the native script lifecycle", () => {
+describe("weekly finances through the native lifecycle", () => {
   beforeEach(async () => {
     vi.stubEnv("LOBU_CLOUD_MODE", "false");
     await cleanupTestDatabase();
     await initWorkspaceProvider();
   });
   afterEach(() => vi.unstubAllEnvs());
+
+  it("prepares the immutable snapshot before analysis and sends one briefing after completion", async () => {
+    const h = await setup({ native: true, loseNotificationResponse: true });
+    await h.execute();
+    expect(await h.status()).toMatchObject({
+      status: "pending",
+      model_used: null,
+    });
+    expect(await h.notifications()).toEqual([]);
+    const read = (await h.workspace.owner.knowledge.read({
+      automation_id: h.automationId,
+      run_id: h.runId,
+    })) as { sources: { net_worth: Array<Record<string, unknown>> } };
+    const [snapshot] = await h.snapshots();
+    expect(read.sources.net_worth).toEqual([
+      expect.objectContaining({
+        snapshot_event_id: Number(snapshot.id),
+        week: "2026-W33",
+        net_worth_gbp: 200,
+      }),
+    ]);
+    await expect(
+      h.complete(
+        "The saved balance sheet totals GBP 200; no account refresh or trade was performed."
+      )
+    ).rejects.toThrow("Synthetic response lost after notification commit");
+    expect(await h.complete("unused on reaction retry", 2)).toEqual({
+      status: "success",
+    });
+    expect(await h.snapshots()).toHaveLength(1);
+    expect(await h.notifications()).toHaveLength(1);
+    expect(await h.status()).toMatchObject({ status: "completed" });
+    const quoteRuns =
+      await h.sql`SELECT id FROM runs WHERE automation_id = ${h.automationId} AND action_key = 'quote'`;
+    expect(quoteRuns).toHaveLength(1);
+  });
+
+  it("holds analysis and delivery when preparation lacks a defensible FX rate", async () => {
+    const h = await setup({ native: true, missingFx: true });
+    await expect(h.execute()).rejects.toThrow(
+      "Missing a defensible USD to GBP FX rate"
+    );
+    await h.execute(3);
+    expect(await h.status()).toMatchObject({
+      status: "failed",
+      model_used: null,
+    });
+    expect(await h.snapshots()).toEqual([]);
+    expect(await h.notifications()).toEqual([]);
+    const [cursor] =
+      await h.sql`SELECT next_window_start FROM automations WHERE id = ${h.automationId}`;
+    expect(new Date(cursor.next_window_start).toISOString()).toBe(START);
+  });
 
   it("retries uncertain writes without duplicating quotes, the weekly snapshot or its notification", async () => {
     const h = await setup({ loseNotificationResponse: true });

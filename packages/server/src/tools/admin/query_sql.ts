@@ -14,7 +14,7 @@ import { authzScopeFromToolContext } from '../../authz/scope';
 import { getDb } from '../../db/client';
 import type { Env } from '../../index';
 import { resolveWindowQueryContext } from '../../automations/window-read-context';
-import { classifyPushdownFailure, runConnectorQuery } from '../../lib/connector-pushdown';
+import { pushdownFailureError, runConnectorQuery } from '../../lib/connector-pushdown';
 import { validateAndScopeQuery } from '../../utils/execute-data-sources';
 import logger from '../../utils/logger';
 import { boundedRead, cancellable, classifyReadQueryFailure } from '../../utils/bounded-read';
@@ -25,7 +25,7 @@ import { withValidatedArgs } from '../validate-args';
 import { SortOrderField } from './schemas/common-fields';
 import { isAdminOrOwnerRole, isInProcessSystemCall } from '../access-control';
 import { getErrorMessage, isRetryable, type ToolErrorCode } from "@lobu/core";
-import { ToolUserError, toolErrorHttpStatus } from '../../utils/errors';
+import { ToolUserError } from '../../utils/errors';
 import {
   QUERY_SQL_RESULT_MAX_BYTES,
   finalizeDynamicQueryRows,
@@ -296,7 +296,7 @@ function finalizeQuerySqlResult(
 // Cost-attribution ledger: a single expensive user/derived query is how an org
 // degrades the shared DB for everyone (precedent: the 3.5s subscription view).
 // Anything at or above this gets an alertable, structured entry so expensive
-// queries can be rolled up per org in Loki and cross-referenced against
+// queries can be rolled up per org in ClickHouse and cross-referenced against
 // pg_stat_statements for the normalized SQL.
 const SLOW_QUERY_COST_MS = 500;
 
@@ -457,24 +457,10 @@ export async function querySqlImpl(
         options?.maxSerializedResultBytes
       );
     } catch (err) {
-      // A pushdown failure is a hard tool
-      // error, never a success-shaped empty table (#2042).
-      //
-      // Report it under the classified code's status, not a flat 502: the
-      // failing upstream is the connection's, not this gateway's, and a 502
-      // body is the edge's to replace (see `toolErrorHttpStatus`) — which is
-      // how "<connector> does not support live queries" reached users as a bare
-      // `error code: 502`. Both derived-entity read seams
-      // (`listDerivedEntities`, `resolveDerivedLeaf`) handle only the SOFT
-      // error shape and let this throw pass through, so they showed the same
-      // blank page.
-      const code = classifyPushdownFailure(err);
-      throw new ToolUserError(
-        `connection pushdown failed (connection=${args.connection}): ${getErrorMessage(err)}. ` +
-          'The query did not run against the source — this is not an empty result.',
-        toolErrorHttpStatus(code),
-        code
-      );
+      // Both derived-entity read seams (`listDerivedEntities`,
+      // `resolveDerivedLeaf`) handle only the SOFT error shape and let this
+      // throw pass through, so a flat 502 showed them a blank page.
+      throw pushdownFailureError(err, args.connection, 'query');
     }
   }
 
@@ -668,8 +654,10 @@ export async function querySqlImpl(
       options?.maxSerializedResultBytes
     );
   } catch (error) {
-    // A caller that left is not a query failure.
-    if (!ctx.abortSignal?.aborted) logger.error({ error }, 'query_sql error');
+    // The typed failure returned below is reported once, by the tool span; an
+    // error log here would group the same failure as a second issue. Keep the
+    // driver error at warn for debugging. A caller that left is not a failure.
+    if (!ctx.abortSignal?.aborted) logger.warn({ error }, 'query_sql error');
 
     // The `error_code`/`retryable` fields let the agent distinguish a transient
     // timeout (worth retrying) from a permanent SQL fault.

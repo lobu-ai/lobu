@@ -121,7 +121,8 @@ export const ManageEntitySchemaSchema = Type.Object({
           "Soft-delete a rule (relationship_type only), governed as update_relationship_type.",
       }),
       Type.Literal("list_rules", {
-        description: "List allowed type rules (relationship_type only).",
+        description:
+          "List allowed type rules (relationship_type only). Omit `slug` to read every rule in one call — the Data hub's schema map needs them all, and one read per relationship type made a public visitor's page load cost dozens of metered requests.",
       }),
     ],
     { description: "Action to perform" }
@@ -131,7 +132,7 @@ export const ManageEntitySchemaSchema = Type.Object({
   slug: Type.Optional(
     Type.String({
       description:
-        "[get/create/update/delete/audit/add_rule/remove_rule/list_rules] Type slug",
+        "[get/create/update/delete/audit/add_rule/remove_rule/list_rules] Type slug. `list_rules` also accepts none, which returns every rule the caller can see.",
       minLength: 1,
     })
   ),

@@ -79,8 +79,46 @@ agent-attested (ID-JAG) zero-touch flow; do not attempt one.
 
 ## Use the credential
 
-Send \`Authorization: Bearer <access_token>\` to the API / MCP endpoint. Refresh
-with the standard \`refresh_token\` grant at \`${baseUrl}/oauth/token\`.
+Send \`Authorization: Bearer <access_token>\` to the API / MCP endpoint. Access
+tokens last 24 hours. Refresh tokens last 30 days; every successful refresh
+returns a new \`refresh_token\`, revokes the one you sent, and starts a new 30-day
+refresh-token lifetime.
+
+Persist \`client_id\`, \`client_secret\` (when returned), \`access_token\`,
+\`refresh_token\`, \`resource\`, and an absolute \`expires_at\` computed when the
+token response arrives in secure storage that survives process restarts. Do not
+keep the credential only in memory, a temporary filesystem, or an ephemeral job
+container. If your runtime cannot retain it,
+tell the user before starting instead of asking for repeated approvals.
+
+Serialize refreshes for each stored credential. Reload it before refreshing,
+then atomically replace both tokens after a successful response. If refresh
+returns \`invalid_grant\`, reload once in case another process already refreshed;
+if it is still invalid, start a new device flow.
+
+Refresh with the standard \`refresh_token\` grant at \`${baseUrl}/oauth/token\`.
+
+For a resource-bound MCP credential, include the exact \`resource\` from device
+authorization again; omitting it is rejected as \`invalid_grant\`:
+
+\`\`\`http
+POST ${baseUrl}/oauth/token
+Content-Type: application/json
+
+{ "grant_type": "refresh_token", "refresh_token": "<current refresh_token>", "client_id": "<client_id>", "client_secret": "<client_secret>", "resource": "<exact resource from device authorization>" }
+\`\`\`
+
+For the standard MCP endpoint, that value is \`${baseUrl}/mcp\`.
+
+A Cloudflare 403 with code \`1010\` / \`browser_signature_banned\` is an edge block,
+not an app OAuth error. Keep the saved credential and surface the block; do not
+start a new device flow, bypass the security check, or retry in a loop.
+
+An app HTTP 400 JSON response from \`${baseUrl}/oauth/token\` is different:
+\`invalid_grant\` means the grant or refresh token is no longer valid;
+\`invalid_client\` means the client credentials are invalid. For \`invalid_grant\`,
+reload once, then reauthorize if it is still invalid. For \`invalid_client\`,
+reload once, then register a new client and start a new device flow.
 
 ## Errors
 
@@ -89,7 +127,9 @@ with the standard \`refresh_token\` grant at \`${baseUrl}/oauth/token\`.
 | \`authorization_pending\` | token poll | user has not approved yet; keep polling |
 | \`slow_down\` | token poll | poll less often |
 | \`expired_token\` | token poll | the device_code expired; start over |
-| \`invalid_grant\` | device/email, token | invalid code; device/email also rejects a \`user_code\` already claimed by a verifier |
+| \`invalid_grant\` | device/email, token | invalid code or grant; refresh also uses it for a rotated/expired token or missing original \`resource\` |
+| \`invalid_client\` | token | invalid client credentials; reload, then register a new client and start a new device flow |
+| Cloudflare 403 / \`1010\` | edge | \`browser_signature_banned\`; keep the saved credential and surface the edge block |
 | \`access_denied\` | token poll | the user denied the request |
 `;
 }

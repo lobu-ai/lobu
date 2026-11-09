@@ -1,6 +1,8 @@
+import { reconcileAutomationPreparationRuns } from './preparation-task';
 import { randomUUID } from "node:crypto";
 import {
 	resolveAutomationExecutor,
+	externalAutomationPredicate,
 } from "../tools/admin/manage_automations/executors";
 import {
 	automationTriggerSignals,
@@ -202,6 +204,9 @@ export function parseAutomationRunPayload(
 	return {
 		automation_id: automationId,
 		...(payload.executor ? { executor: payload.executor as AutomationRunPayload['executor'] } : {}),
+		...(Object.hasOwn(payload, 'execution_config')
+			? { execution_config: payload.execution_config as AutomationRunPayload['execution_config'] } : {}),
+		...(payload.automation_script ? { automation_script: payload.automation_script as AutomationRunPayload['automation_script'] } : {}),
 		// Optional: device-pinned runs carry only the pin, and manual-open
 		// runs carry neither. The dispatch guard below fails runs that reach
 		// the server lane without an agent.
@@ -268,21 +273,13 @@ async function enqueueAutomationRunForRecord(
 		throw new Error(`Automation ${automation.id} is not active.`);
 	}
 
-	// Executor resolution: an Automation has exactly one executor (agent or
-	// device pin). Manual activations may legitimately resolve to nothing —
-	// the run stays pending for any connected MCP client to execute and
-	// complete.
+	// Resolve identity and placement once; the queue freezes them with the run.
 	const executor = resolveAutomationExecutor({
 		agentId: automation.managed_agent_id ?? null,
 		deviceWorkerId: automation.device_worker_id ?? null,
 		agentKind: automation.agent_kind ?? null,
 		executionConfig: automation.execution_config,
 	});
-	if (!executor && dispatchSource !== "manual") {
-		throw new Error(
-			`Automation ${automation.id} has no executor for ${dispatchSource} activation (need managed_agent_id or device_worker_id).`
-		);
-	}
 
 	// The arrival window [mark, horizon). It is empty only while the mark is
 	// younger than the settle budget — a just-created Automation, or one whose
@@ -303,16 +300,14 @@ async function enqueueAutomationRunForRecord(
 	const runParams = {
 			organizationId: automation.organization_id,
 			automationId: automation.id,
-			agentId: executor?.kind === "external"
-				? automation.managed_agent_id
-				: executor?.kind === "agent" ? executor.agentId : null,
+			agentId: executor.agentId,
 			windowStart: windowStart.toISOString(),
 			windowEnd: windowEnd.toISOString(),
 			dispatchSource,
 			deviceWorkerId:
-				executor?.kind === "device" ? executor.deviceWorkerId : null,
+				executor.kind === "device" ? executor.deviceWorkerId : null,
 			agentKind:
-				executor?.kind === "device" ? executor.agentKind : null,
+				executor.kind === "device" ? executor.agentKind : null,
 			sourceFingerprint,
 			expectedWindowStart: inspectedWindow?.windowStart.toISOString(),
 		};
@@ -448,6 +443,7 @@ export async function reconcileAutomationRuns(
 ): Promise<ReconcileAutomationRunsResult> {
 	const sql = db ?? getDb();
 	let reconciled = await reconcileAutomationScriptRuns(sql);
+	await reconcileAutomationPreparationRuns(sql);
 
 	// Find the (small) set of active automation runs awaiting a dispatched
 	// message. If there are none — the common steady state — skip the heavy
@@ -798,7 +794,7 @@ export async function materializeDueAutomationRuns(
                w.device_worker_id::text AS device_worker_id, w.agent_kind
         FROM automations w
         WHERE w.status = 'active'
-          AND w.execution_config->'executor'->>'kind' IS DISTINCT FROM 'external'
+          AND NOT ${externalAutomationPredicate(sql, 'w')}
           AND w.schedule IS NOT NULL
           AND w.next_run_at IS NOT NULL
           AND w.next_run_at <= current_timestamp
@@ -853,7 +849,7 @@ export async function materializeDueAutomationRuns(
         SELECT count(*)::int AS count
         FROM automations w
         WHERE w.status = 'active'
-          AND w.execution_config->'executor'->>'kind' IS DISTINCT FROM 'external'
+          AND NOT ${externalAutomationPredicate(sql, 'w')}
           AND w.schedule IS NOT NULL
           AND w.next_run_at IS NOT NULL
           AND w.next_run_at <= current_timestamp
@@ -1124,7 +1120,7 @@ export function buildDispatchMessage(params: {
 		"",
 		"Required steps:",
 		`1. Call query_sdk with a script that runs client.knowledge.read({ automation_id: ${params.automationId}, run_id: ${params.runId}, limit: 25 }). The run ID binds the queued version, window, and trigger inputs. Keep the returned window_token from every page you actually analyze.`,
-		`2. Follow the Automation instructions above against the returned payload — content, sources, entities, extraction_schema, reactions_guidance, past_reactions, and past_feedback. Read as far as the instructions need: pages, SQL drill-downs, or both. If more event rows are needed and page.has_more is true, call knowledge.read again with the same automation_id and run_id plus page.next_cursor as before_occurred_at/before_id. Collect that page's window_token too. For a live sources_page entry with has_more and next_cursor, request more rows with the same automation_id and run_id plus source_name and source_cursor from that entry's next_cursor. Follow empty pages with a continuation when more evidence is needed. Reduce pages in code and return compact evidence to the model; keep exactly one window_token for every analyzed page. Completing the window advances the arrival mark even over unread rows; complete only when you have processed the window as the instructions require. The run records the contiguous page coverage of each pinned live source. A context source with has_more but no next_cursor is truncated: use its returned rows or a SQL drill-down if sufficient for the task, and report any remaining evidence gap. Live rows may be metadata/snippets; use connector reads for needed detail.`,
+		`2. Follow the Automation instructions above against the returned payload — content, sources, entities, extraction_schema, reactions_guidance, past_reactions, and past_feedback. Read as far as the instructions need: pages, SQL drill-downs, or both. If more event rows are needed and page.has_more is true, call knowledge.read again with the same automation_id and run_id plus page.next_cursor as before_occurred_at/before_id. Collect that page's window_token too. For a sources_page entry with has_more and next_cursor, request more rows with the same automation_id and run_id plus source_name and source_cursor from that entry's next_cursor. Follow empty pages with a continuation when more evidence is needed. Reduce pages in code and return compact evidence to the model; keep exactly one window_token for every analyzed page. Completing the window advances the arrival mark even over unread rows; complete only when you have processed the window as the instructions require. The run records the contiguous page coverage of each pinned live source. A context source with has_more but no next_cursor is truncated: use its returned rows or a SQL drill-down if sufficient for the task, and report any remaining evidence gap. Preparation results are already saved as named sources; read them here without rerunning preparation. Live rows may be metadata/snippets; use connector reads for needed detail.`,
 		"For SQL drill-downs over stored events, pass the latest returned window_token to query_sql or client.query(sql, { window_token }). This applies the same arrival bounds and event versions as of the window end as the source summary, even after a refresh supersedes them. Add the source's own filters to your SQL. Ordinary SQL without a token reads current versions and may omit earlier window evidence. Entities, classifications and source providers are not historical database snapshots; current access checks still apply.",
 		`3. Call run_sdk with a script that runs client.automations.completeWindow({ window_tokens: [all window_token values from pages you actually analyzed], extracted_data, run_id: ${params.runId} }). Pass exactly one token per page you actually analyzed, including the first page.`,
 		"4. Include this run_metadata object in complete_window exactly, and add any extra provider/job fields you know:",
@@ -1214,6 +1210,8 @@ async function claimAutomationRun(
         -- MCP client may execute and complete them (write-tier
         -- complete_window). The server dispatcher must leave them pending.
         AND r.approved_input->'executor'->>'kind' IS DISTINCT FROM 'external'
+        AND (r.approved_input->'automation_script'->>'has_prepare' IS DISTINCT FROM 'true'
+             OR r.run_metadata ? 'preparation_sources')
         AND r.approved_input->>'agent_id' IS NOT NULL
         AND r.approved_input->>'agent_id' <> ''
         ${specificRunClause}
@@ -1261,16 +1259,18 @@ async function claimAutomationRun(
  */
 async function getAutomationInferenceOverrides(
 	sql: DbClient,
-	automationId: number
+	automationId: number,
+	payload: AutomationRunPayload,
 ): Promise<{ model?: string; effort?: string }> {
-	const rows = await sql`
-    SELECT execution_config->>'model' AS model, execution_config->>'effort' AS effort
+	const config = Object.hasOwn(payload, 'execution_config') ? payload.execution_config
+		: (await sql`
+    SELECT execution_config
     FROM automations
     WHERE id = ${automationId}
     LIMIT 1
-  `;
-	const model = rows[0]?.model as string | null | undefined;
-	const effort = rows[0]?.effort as string | null | undefined;
+  `)[0]?.execution_config;
+	const model = config?.model;
+	const effort = config?.effort;
 	return {
 		...(typeof model === "string" && model.trim() ? { model: model.trim() } : {}),
 		...(typeof effort === "string" && effort.trim() ? { effort: effort.trim() } : {}),
@@ -1305,6 +1305,14 @@ async function dispatchAutomationRun(
 			"Automation run is missing a valid dispatch payload."
 		);
 		return "failed";
+	}
+
+	if (payload.automation_script?.has_prepare) {
+		const [source] = await sql`SELECT run_type FROM runs WHERE id = ${run.id}`;
+		if (source?.run_type !== "automation") {
+			await failAutomationRun(sql, run.id, "Preparation is not supported for captured or evaluation windows.");
+			return "failed";
+		}
 	}
 
 	if (
@@ -1368,7 +1376,7 @@ async function dispatchAutomationRun(
 	// baseOptions and the model wins the layered fallback (automation → agent →
 	// org default); when absent the agent/org default resolves and the turn
 	// keeps reasoning off.
-	const inferenceOverrides = await getAutomationInferenceOverrides(sql, run.automation_id);
+	const inferenceOverrides = await getAutomationInferenceOverrides(sql, run.automation_id, payload);
 	const automationInstructions = await getAutomationInstructions(
 		sql,
 		run.automation_id,

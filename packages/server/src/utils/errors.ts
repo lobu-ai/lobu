@@ -43,6 +43,8 @@ export function toolErrorHttpStatus(code: ToolErrorCode): number {
     case 'PERMISSION':
     case 'MANUAL_EDIT_NOT_ALLOWED':
       return 403;
+    case 'PRECONDITION_FAILED':
+      return 409;
     case 'RATE_LIMITED':
       return 429;
     case 'VALIDATION':
@@ -74,9 +76,26 @@ export class ToolUserError extends Error {
   readonly httpStatus: number;
   readonly code?: ToolErrorCode;
   readonly retryable: boolean;
+  /**
+   * Seconds until the caller may retry. Carried structurally (not only inside
+   * the message) so HTTP boundaries can emit `Retry-After` and a client can
+   * render a countdown without parsing prose.
+   */
+  retryAfterSeconds?: number;
   callId?: string;
+  /**
+   * Structured, caller-safe facts about the failure (e.g. `mismatched_fields`
+   * for `PRECONDITION_FAILED`). Every wire boundary that reports `code`
+   * reports these alongside it, so a client branches on data, not prose.
+   */
+  readonly details?: Readonly<Record<string, unknown>>;
 
-  constructor(message: string, httpStatus = 400, code?: ToolErrorCode) {
+  constructor(
+    message: string,
+    httpStatus = 400,
+    code?: ToolErrorCode,
+    details?: Readonly<Record<string, unknown>>,
+  ) {
     super(message);
     this.name = 'ToolUserError';
     // Guard the class, not one throw site: every wire boundary that answers a
@@ -91,6 +110,7 @@ export class ToolUserError extends Error {
       : httpStatus;
     this.code = code;
     this.retryable = code ? isRetryable(code) : false;
+    this.details = details;
   }
 }
 

@@ -40,6 +40,7 @@ const CONNECTOR = "demo.ops.auto.ledger";
 type LedgerRow = {
 	id: string;
 	origin_id: string;
+	title: string;
 	semantic_type: string;
 	interaction_type: string;
 	interaction_status: string | null;
@@ -58,7 +59,7 @@ async function operationLedger(
 ): Promise<LedgerRow[]> {
 	const sql = getTestDb();
 	return (await sql`
-		SELECT id, origin_id, semantic_type, interaction_type, interaction_status,
+		SELECT id, origin_id, title, semantic_type, interaction_type, interaction_status,
 		       interaction_input, interaction_output, interaction_error,
 		       supersedes_event_id, superseded_by, connection_id, metadata
 		FROM events
@@ -201,6 +202,10 @@ describe("operation ledger under Auto policy", () => {
 			interaction_output: { value: "auto-ok" },
 			superseded_by: null,
 		});
+		// Every version is titled by the operation's name, not its raw key: an
+		// agent reading the ledger sees titles without the structured fields.
+		expect(dispatched.title).toBe("Echo — dispatched");
+		expect(terminal.title).toBe("Echo — completed");
 		expect(Number(terminal.supersedes_event_id)).toBe(Number(dispatched.id));
 	});
 

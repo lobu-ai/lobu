@@ -19,9 +19,15 @@ import {
   AgentTurnPollPayloadSchema,
   PollResponseSchema,
 } from '@lobu/core/contracts/worker/protocol';
-import { AGENT_ERRORS, AgentErrorCode, mintGatewayMcpToken, parseSessionEntries, type MessagePayload, type ThreadResponsePayload, renderBaselineAgentPolicy, verifyWorkerToken } from '@lobu/core';
+import { AGENT_ERRORS, AgentErrorCode, flushTracing, initTracing, mintGatewayMcpToken, parseSessionEntries, type MessagePayload, type ThreadResponsePayload, renderBaselineAgentPolicy, shutdownTracing, verifyWorkerToken } from '@lobu/core';
 import { FOLLOW_UP_SUGGESTIONS_PROMPT } from '@lobu/core/agent-tooling';
 import { Value } from '@sinclair/typebox/value';
+import { InMemorySpanExporter, SimpleSpanProcessor } from '@opentelemetry/sdk-trace-node';
+import { MessageConsumer } from '../../gateway/orchestration/message-consumer';
+import { RunsQueue, insertQueueJob } from '../../gateway/infrastructure/queue/runs-queue';
+import { resolveRunInitiator } from '../../tools/initiator';
+import { UnifiedThreadResponseConsumer } from '../../gateway/platform/unified-thread-consumer';
+import { startOtelWorker, startTestCollector, unusedLoopbackPort, type TransportSpan } from '../setup/otel-transport';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as db from '../../db/client';
 import { ApiKeyProviderModule } from '../../gateway/auth/api-key-provider-module';
@@ -32,6 +38,7 @@ import { createConnectedGatewayStateAdapter } from '../../gateway/connections/st
 import type { PlatformConnection } from '../../gateway/connections/types';
 import { type AssembledChatBridge, startAssembledChatBridge, waitFor } from '../../gateway/__tests__/helpers/chat-bridge-harness';
 import { resetRateLimiterForTests } from '../../utils/rate-limiter';
+import { __resetPublicOriginCachesForTests } from '../../utils/public-origin';
 import { createTestAutomationSubscription } from '../setup/automation-subscriptions';
 import { createInteractionRoutes } from '../../gateway/routes/internal/interactions';
 import { enqueueAgentTurn,
@@ -47,11 +54,14 @@ import { manageSchedules } from '../../tools/admin/manage_schedules';
 import { reapStaleRuns } from '../../scheduled/check-stalled-executions';
 import { sweepStaleAgentTurnRuns } from '../../worker-api/agent-turn';
 import { failClaimedWorkerRun } from '../../worker-api/poll';
+import { newGatewayInlineOwner } from '../../runs/run-lease';
 import { Hono } from 'hono';
 import { authenticateWorker } from '../../gateway/routes/internal/middleware';
 import { McpProxy } from '../../gateway/auth/mcp/proxy';
 import { isAuthorizationReadOnlyToolName } from '../../tools/registry';
-import type { AgentSettingsStore } from '../../gateway/auth/settings/agent-settings-store';
+import { AgentSettingsStore } from '../../gateway/auth/settings/agent-settings-store';
+import { createPostgresAgentConfigStore } from '../../lobu/stores/postgres-stores';
+import { buildAgentsNamespace } from '../../sandbox/namespaces/agents';
 import type { ProviderCatalogService } from '../../gateway/auth/provider-catalog';
 import type { McpConfigService } from '../../gateway/auth/mcp/config-service';
 import type { ModelProviderModule } from '../../gateway/modules/module-system';
@@ -60,6 +70,7 @@ import {
   addUserToOrganization,
   createTestAgent,
   createTestConnection,
+  createTestConnectorDefinition,
   createTestOrganization,
   createTestPAT,
   createTestUser,
@@ -122,8 +133,11 @@ interface McpFixture {
   listed: Array<{ mcpId: string; agentId: string; token: string | undefined }>;
 }
 
-/** An MCP surface with one server publishing three tools and an instruction block. */
-function mcpFixture(options: { fail?: boolean; serverId?: string; empty?: boolean } = {}): McpFixture {
+/**
+ * An MCP surface with one server publishing three tools and an instruction
+ * block; `alsoPublish` adds one more tool by name.
+ */
+function mcpFixture(options: { fail?: boolean; serverId?: string; empty?: boolean; alsoPublish?: string } = {}): McpFixture {
   const listed: McpFixture['listed'] = [];
   const configService = {
     getMcpStatus: async () => [
@@ -140,6 +154,7 @@ function mcpFixture(options: { fail?: boolean; serverId?: string; empty?: boolea
           { name: 'query_sdk', description: 'Read data', inputSchema: { type: 'object', properties: { code: { type: 'string' } } } },
           { name: 'run_sdk', description: 'Write data', inputSchema: { type: 'object', properties: { code: { type: 'string' } } } },
           { name: 'query_sql', inputSchema: undefined },
+          ...(options.alsoPublish ? [{ name: options.alsoPublish, inputSchema: undefined }] : []),
         ],
       };
     },
@@ -243,7 +258,8 @@ async function threadResponsesGlobal(): Promise<Array<Record<string, unknown>>> 
 async function agentTurnRuns() {
   const sql = getTestDb();
   return (await sql`
-    SELECT id, run_type, status, approval_status, organization_id, action_input, parent_run_id
+    SELECT id, run_type, status, approval_status, organization_id, action_input, parent_run_id,
+           initiator_kind, initiator_ref, created_by_user_id
     FROM runs
     WHERE run_type = 'agent_turn'
     ORDER BY id
@@ -255,6 +271,9 @@ async function agentTurnRuns() {
     organization_id: string;
     action_input: Record<string, unknown>;
     parent_run_id: number | null;
+    initiator_kind: string | null;
+    initiator_ref: Record<string, unknown> | null;
+    created_by_user_id: string | null;
   }>;
 }
 
@@ -276,12 +295,13 @@ async function postAsFleet(path: string, body: Record<string, unknown>) {
 }
 
 /** Enqueue a turn and claim it, as the fleet worker would. */
-async function claimedTurnRun(workerId: string, platform: 'api' | 'slack' = 'api', opts: { legacy?: boolean } = {}): Promise<number> {
+async function claimedTurnRun(workerId: string, platform: 'api' | 'slack' = 'api', opts: { legacy?: boolean; mcp?: McpFixture['mcp'] } = {}): Promise<number> {
   const org = await createTestOrganization();
   await enqueueMessage({ ...messageFor(org.id), platform }, {
     agentSettings: settingsStore,
     catalog: catalogFor(claudeModule()),
     gatewayUrl: GATEWAY_URL,
+    ...(opts.mcp ? { mcp: opts.mcp } : {}),
   });
   const response = await pollFleet(workerId, { agent_turn: true });
   const body = await response.json();
@@ -346,6 +366,26 @@ describe('agent turn producer', () => {
   afterEach(() => {
   });
 
+  it('inherits an admitted API human without granting the turn a human principal', async () => {
+    const org = await createTestOrganization();
+    const actor = await createTestUser();
+    const message = { ...messageFor(org.id), platformMetadata: { source: 'direct-api' } };
+    const options = { singletonKey: 'api-human-message', initiator: resolveRunInitiator({ userId: actor.id }) };
+    const sql = getTestDb();
+    const id = await sql.begin((tx) => insertQueueJob(tx as never, 'messages', message, options));
+    await enqueueAgentTurn({ ...message, runId: Number(id) }, {
+      agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: GATEWAY_URL,
+    });
+    const [run] = await agentTurnRuns();
+    expect(run).toMatchObject({
+      initiator_kind: 'agent_session', created_by_user_id: actor.id,
+      initiator_ref: { agent_id: AGENT_ID, user_id: actor.id },
+    });
+    const claims = verifyWorkerToken(run.action_input.credential);
+    expect(chatTurnAccessOf(claims!)).toBeNull();
+    expect(claims).not.toHaveProperty('actorUserId');
+  });
+
   it('EXECUTES a real HTTP interaction live with the producer-minted turn credential', async () => {
     const org = await createTestOrganization();
     await enqueueMessage(messageFor(org.id), {
@@ -358,6 +398,9 @@ describe('agent turn producer', () => {
     expect((await pollFleet('fleet-interaction', { agent_turn: true })).status).toBe(200);
     const [run] = await agentTurnRuns();
     const postLinkButton = vi.fn(async () => ({ id: 'synthetic-post' }));
+    // An API credential authorizes this turn; it does not establish a human sender.
+    expect(run).toMatchObject({ initiator_kind: 'agent_session', created_by_user_id: null, initiator_ref: { user_id: null } });
+    expect(run.initiator_ref).not.toHaveProperty('platform_user_id');
     const app = createInteractionRoutes({ postLinkButton } as never);
     const server = serve({ fetch: app.fetch, port: 0, hostname: '127.0.0.1' });
     try {
@@ -1063,23 +1106,26 @@ describe('agent turn producer', () => {
   it('seeds only valid bounded skill files and names their directory in the prompt', async () => {
     const org = await createTestOrganization();
     const content = 'x'.repeat(64_000);
-    const agentSettings = {
-      getSettings: async () => ({
-        identityMd: '',
-        soulMd: '',
-        userMd: '',
-        skillsConfig: {
-          skills: [
-            { repo: 'owner', name: 'owner/triage', enabled: true, content },
-            { repo: 'owner', name: 'bad skill', enabled: true, content: 'skip' },
-            { repo: 'owner', name: '..', enabled: true, content: 'skip' },
-            { repo: 'owner', name: 'x'.repeat(129), enabled: true, content: 'skip' },
-            { repo: 'owner', name: 'oversized', enabled: true, content: 'x'.repeat(64_001) },
-            { repo: 'owner', name: 'disabled', enabled: false, content: 'skip' },
-          ],
-        },
-      }),
-    } as unknown as AgentSettingsStore;
+    const owner = await createTestUser();
+    await addUserToOrganization(owner.id, org.id, 'owner');
+    const sdk = buildAgentsNamespace({
+      organizationId: org.id, userId: owner.id, memberRole: 'owner', agentId: null,
+      sourceContext: null, isAuthenticated: true, tokenType: 'session',
+      scopedToOrg: true, allowCrossOrg: false, grantedOrganizationIds: null,
+      directSearchFederation: false, scopes: ["mcp:read", "mcp:write", "mcp:admin"],
+    }, {});
+    await sdk.create({ agent_id: AGENT_ID, name: 'Skill execution' });
+    await sdk.update({ agent_id: AGENT_ID, settings: {
+      skillsConfig: { skills: [
+        { repo: 'owner', name: 'owner/triage', enabled: true, content },
+        { repo: 'owner', name: 'bad skill', enabled: true, content: 'skip' },
+        { repo: 'owner', name: '..', enabled: true, content: 'skip' },
+        { repo: 'owner', name: 'x'.repeat(129), enabled: true, content: 'skip' },
+        { repo: 'owner', name: 'oversized', enabled: true, content: 'x'.repeat(64_001) },
+        { repo: 'owner', name: 'disabled', enabled: false, content: 'skip' },
+      ] },
+    } });
+    const agentSettings = new AgentSettingsStore(createPostgresAgentConfigStore());
     await enqueueMessage(messageFor(org.id), {
       agentSettings,
       catalog: catalogFor(claudeModule()),
@@ -1130,18 +1176,28 @@ describe('agent turn producer', () => {
       }),
     } as unknown as AgentSettingsStore;
 
-    await enqueueMessage(
-      {
-        ...messageFor(org.id),
-        // The canonical correlation the resolver scopes its query by.
-        conversationId: `${AGENT_ID}_automation_${automationId}_run_${Number(runRow!.id)}`,
-      },
+    const message = {
+      ...messageFor(org.id),
+      // The canonical correlation the resolver scopes its query by.
+      conversationId: `${AGENT_ID}_automation_${automationId}_run_${Number(runRow!.id)}`,
+    };
+    // Even a human-admitted kickoff remains an Automation execution.
+    const inputId = await sql.begin((tx) => insertQueueJob(tx as never, 'messages', message, {
+      initiator: resolveRunInitiator({ userId: author.id }),
+    }));
+    await enqueueAgentTurn(
+      { ...message, runId: Number(inputId) },
       { agentSettings: liveSettings, catalog: catalogFor(claudeModule()), mcp: mcpFixture().mcp, gatewayUrl: GATEWAY_URL },
     );
 
     const runs = await agentTurnRuns();
     const turn = runs[runs.length - 1]!.action_input.turn as { skills?: Array<{ name: string; content: string }> };
     expect(turn.skills).toEqual([{ name: 'frozen', content: 'Frozen instructions.' }]);
+    expect(runs.at(-1)).toMatchObject({
+      initiator_kind: 'automation',
+      initiator_ref: { automation_id: automationId, run_id: Number(runRow!.id) },
+      created_by_user_id: null,
+    });
   });
 
   it('advertises seeded inputs with the standard workspace tools', async () => {
@@ -1263,6 +1319,11 @@ describe('agent turn producer', () => {
     expect(envelope.turn.memory).toBeUndefined();
     expect(envelope.turn.system_prompt).toContain(chatTurnAccessInstructions('reply_only'));
     expect(verifyWorkerToken(envelope.credential)?.chatAccess).toBe('reply_only');
+    expect(run).toMatchObject({
+      initiator_kind: 'agent_session', created_by_user_id: null,
+      initiator_ref: { agent_id: AGENT_ID, user_id: null, platform_user_id: 'U0UNLINKED', platform_team_id: 'T0REPLYONLY' },
+    });
+    expect(run.initiator_ref).not.toHaveProperty('member_user_id');
   });
 
   it('runs a vouched unlinked sender with org-shared tools and the org-shared access section', async () => {
@@ -1383,6 +1444,10 @@ describe('agent turn producer', () => {
     expect(fixture.listed).toEqual([{ mcpId: 'lobu-memory', agentId: AGENT_ID, token: envelope.credential }]);
     expect(envelope.turn.system_prompt).toContain(chatTurnAccessInstructions('org_shared'));
     expect(envelope.turn.system_prompt).not.toContain('workspace by default');
+    expect(run).toMatchObject({
+      initiator_kind: 'agent_session', created_by_user_id: null,
+      initiator_ref: { agent_id: AGENT_ID, user_id: null, member_user_id: member.id, platform_user_id: 'U0LINKED', platform_team_id: 'T0LINKED' },
+    });
   });
 
   it('tells a linked DM member turn who is speaking and that its tools act as them', async () => {
@@ -1421,6 +1486,13 @@ describe('agent turn producer', () => {
     // The sender is conversation-scoped, so it rides the per-turn context, never the cached prompt.
     expect(envelope.turn.system_prompt).not.toContain('Synthetic Member');
     expect(envelope.turn.ephemeral_context).toBe(chatTurnSenderContext({ name: 'Synthetic Member', role: 'member' }));
+    expect(run).toMatchObject({
+      initiator_kind: 'agent_session', created_by_user_id: member.id,
+      initiator_ref: { agent_id: AGENT_ID, user_id: member.id, platform_user_id: 'U0DMMEMBER', platform_team_id: 'T0DMMEMBER' },
+    });
+    // Attribution is frozen even if today's membership changes later.
+    await getTestDb()`DELETE FROM member WHERE "userId" = ${member.id} AND "organizationId" = ${org.id}`;
+    expect((await agentTurnRuns())[0]).toMatchObject({ created_by_user_id: member.id, initiator_ref: { user_id: member.id } });
   });
 
   it.each([
@@ -1672,6 +1744,8 @@ describe('agent turn producer', () => {
     const [run] = await agentTurnRuns();
     const turn = run.action_input.turn as { tools?: { follow_ups?: true } };
     expect(turn.tools?.follow_ups).toBeUndefined();
+    expect(run).toMatchObject({ initiator_kind: 'agent_session', created_by_user_id: null, initiator_ref: { user_id: null } });
+    expect(run.initiator_ref).not.toHaveProperty('member_user_id');
   });
 
   it('retains workspace tools when MCP is unavailable', async () => {
@@ -2139,6 +2213,38 @@ describe('agent turn producer', () => {
     expect((await runRow(follower.id)).status).toBe('pending');
   });
 
+  it.each([
+    ['different traces', '00-11111111111111111111111111111111-1111111111111111-01', '00-22222222222222222222222222222222-2222222222222222-01'],
+    ['tracing enabled mid-turn', undefined, '00-22222222222222222222222222222222-2222222222222222-01'],
+    ['tracing disabled mid-turn', '00-11111111111111111111111111111111-1111111111111111-01', undefined],
+  ])('offers a compatible follow-up with %s', async (_case, ownerTraceparent, followerTraceparent) => {
+    const org = await createTestOrganization();
+    const routing = { connectionId: 'synthetic-steer-connection', chatId: 'synthetic-steer-channel' };
+    const first = { ...messageFor(org.id), platformMetadata: {
+      ...routing, ...(ownerTraceparent ? { traceparent: ownerTraceparent } : {}),
+    } };
+    const deps = { agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: GATEWAY_URL };
+    await enqueueMessage(first, deps);
+    const { run_id } = await (await pollFleet('fleet-traced-follow-up', { agent_turn: true })).json();
+    await enqueueMessage({ ...first, messageId: 'traced-follow-up', messageText: 'keep this input',
+      platformMetadata: { ...routing, ...(followerTraceparent ? { traceparent: followerTraceparent } : {}) },
+    }, deps);
+    const [owner, follower] = await agentTurnRuns();
+    expect((owner.action_input.reply as { platform_metadata: Record<string, unknown> }).platform_metadata.traceparent).toBe(ownerTraceparent);
+    expect((follower.action_input.reply as { platform_metadata: Record<string, unknown> }).platform_metadata.traceparent).toBe(followerTraceparent);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const response = await postAsFleet('/api/workers/heartbeat', { run_id, worker_id: 'fleet-traced-follow-up' });
+      expect(await response.json()).toMatchObject({ continue: true, steer: [
+        { run_id: follower.id, message_id: 'traced-follow-up', text: 'keep this input' },
+      ] });
+    }
+    // Comparing execution policy must not erase the persisted delivery context.
+    expect(((await agentTurnRuns())[1].action_input.reply as { platform_metadata: Record<string, unknown> }).platform_metadata).toEqual({
+      ...routing, ...(followerTraceparent ? { traceparent: followerTraceparent } : {}),
+    });
+    expect((await runRow(follower.id)).status).toBe('pending');
+  });
+
   it('offers a follow-up whose transient context differs, and carries that context', async () => {
     // The API route attaches a live workspace-attention block, and it changes
     // as runs appear, so two messages sent seconds apart almost never carry
@@ -2499,6 +2605,7 @@ describe('agent turn producer', () => {
     ['grants', { networkConfig: { allowedDomains: ['different.example'] } }],
     ['packages', { nixConfig: { packages: ['git'] } }],
     ['platform metadata', { platformMetadata: { opaqueRouting: 'different' } }],
+    ['traced routing', { platformMetadata: { connectionId: 'different-connection', traceparent: '00-22222222222222222222222222222222-2222222222222222-01' } }],
     ['attachment', { platformMetadata: { files: [{ name: 'notes.txt', mimetype: 'text/plain' }] } }],
     ['reset', { platformMetadata: { sessionReset: true } }],
     ['automation', { platformMetadata: { source: 'automation-run' } }],
@@ -4790,12 +4897,19 @@ describe('agent turn reaper', () => {
     expect((await threadResponses()).at(-1)?.action_input).toMatchObject({ finalText: 'the whole answer' });
   });
 
-  it('terminalizes a dead turn that already ran a tool, as before', async () => {
+  // A trace is the only evidence for a call that reached no gateway route, so
+  // it still counts for anything the turn's stored catalog does not route
+  // through the gateway, even beside an MCP catalog of read-only tools.
+  it.each([
+    ['a tool the turn was not offered', 'search', undefined],
+    ['a workspace tool', 'write', undefined],
+    ['a workspace tool an MCP server also publishes', 'write', 'write'],
+  ])('terminalizes a dead turn that already ran %s, as before', async (_kind, tool, alsoPublish) => {
     const workerId = 'fleet-died-after-tool';
-    const runId = await claimedTurnRun(workerId);
+    const runId = await claimedTurnRun(workerId, 'api', { mcp: mcpFixture({ serverId: 'lobu', alsoPublish }).mcp });
     const beat = await postAsFleet('/api/workers/heartbeat', {
       run_id: runId, worker_id: workerId,
-      turn_tool_events: [{ tool_call_id: 'call-1', name: 'search', is_error: false, output: 'ok' }],
+      turn_tool_events: [{ tool_call_id: 'call-1', name: tool, is_error: false, output: 'ok' }],
     });
     expect(await beat.json()).toMatchObject({ turn_tool_ack: { received: 1 } });
     await loseHeartbeat(runId);
@@ -4904,16 +5018,44 @@ describe('agent turn reaper', () => {
     expect(reply!.action_input).toMatchObject({ errorCode: AgentErrorCode.WORKER_DIED });
   });
 
+  // A deploy restarting the worker mid-turn: every call so far was a read the
+  // gateway passed without stamping, and the worker reported each one as a
+  // trace on its heartbeat before it went away. The trace is not new evidence
+  // of an effect, so the reaper tick re-runs the turn and it completes.
   it.each([
-    ['a GET read', 'GET', '/lobu/internal/read'],
-    ['a read-only Lobu memory tool', 'POST', '/lobu/mcp/lobu/tools/search_memory'],
-  ] as const)('still re-runs an attempt that only made %s', async (_kind, method, path) => {
-    const runId = await claimedTurnRun('fleet-read-only');
+    ['a GET read', 'GET', '/lobu/internal/read', 'read_conversation'],
+    ['a read-only Lobu tool', 'POST', '/lobu/mcp/lobu/tools/query_sql', 'query_sql'],
+  ] as const)('still re-runs an attempt that only made %s', async (_kind, method, path, tool) => {
+    const workerId = 'fleet-read-only';
+    const runId = await claimedTurnRun(workerId, 'api', { mcp: mcpFixture({ serverId: 'lobu' }).mcp });
+    const credential = await credentialOf(runId);
     const { app } = gatewayRoutes();
-    await call(app, method, path, await credentialOf(runId));
+    await call(app, method, path, credential);
+    expect((await turnRow(runId)).run_metadata?.turn_tool_started).toBe(false);
+    const beat = await postAsFleet('/api/workers/heartbeat', {
+      run_id: runId, worker_id: workerId, turn_credential: credential,
+      turn_tool_events: [{ tool_call_id: 'call-read', name: tool, is_error: false, output: 'ok' }],
+    });
+    expect(await beat.json()).toMatchObject({ turn_tool_ack: { received: 1 } });
     expect((await turnRow(runId)).run_metadata?.turn_tool_started).toBe(false);
     await loseHeartbeat(runId);
-    expect(await sweepStaleAgentTurnRuns(STALE_THRESHOLD_SECONDS)).toEqual({ reaped: 0, delivered: 0, requeued: 1 });
+
+    // Through the real reaper tick: nothing is reaped, nothing is delivered.
+    expect(await reapStaleRuns()).toMatchObject({ acquired: true, reaped: 0 });
+    const requeued = await turnRow(runId);
+    expect(requeued.status).toBe('pending');
+    expect(requeued.run_metadata?.turn_requeue_count).toBe(1);
+    expect((await threadResponses()).filter((reply) => reply.action_input.error)).toEqual([]);
+
+    // The next worker claims the same turn and answers it.
+    const again = await (await pollFleet('fleet-after-deploy', { agent_turn: true })).json();
+    expect(again.run_id).toBe(runId);
+    const completed = await postAsFleet('/api/workers/complete-agent-turn', {
+      run_id: runId, worker_id: 'fleet-after-deploy', turn_credential: again.credentials.accessToken,
+      status: 'completed', session_jsonl: nativeSession(), text: 'the isolate answer',
+    });
+    expect(completed.status).toBe(200);
+    expect((await threadResponses()).at(-1)?.action_input).toMatchObject({ finalText: 'the isolate answer' });
   });
 
   it('refuses a side-effecting call from an attempt the reaper already re-queued', async () => {
@@ -5162,7 +5304,7 @@ describe('existing team bot replay (single-workspace Slack, unlinked channel sen
     };
   }
 
-  async function startTeamBot() {
+  async function startTeamBot(model?: string) {
     const org = await createTestOrganization();
     const owner = await createTestUser({ email: 'team-bot-owner@example.test' });
     await addUserToOrganization(owner.id, org.id, 'owner');
@@ -5173,7 +5315,7 @@ describe('existing team bot replay (single-workspace Slack, unlinked channel sen
       SELECT id FROM connections WHERE organization_id = ${org.id} AND connector_key = 'slack'
     `;
     await createTestAutomationSubscription({
-      organizationId: org.id, agentId: AGENT_ID, connectionId: Number(row.id), platform: 'slack', channelId: CHANNEL, teamId: TEAM,
+      organizationId: org.id, agentId: AGENT_ID, connectionId: Number(row.id), platform: 'slack', channelId: CHANNEL, teamId: TEAM, model,
     });
     await createTestConnection({
       organization_id: org.id, connector_key: 'github', display_name: 'Team shared conn', visibility: 'org', created_by: owner.id,
@@ -5185,8 +5327,11 @@ describe('existing team bot replay (single-workspace Slack, unlinked channel sen
     const adapter = createSlackAdapter({ signingSecret: SIGNING_SECRET, botToken: 'xoxb-synthetic', botUserId: BOT_USER, userName: 'lobu' });
     const posts = vi.fn(async () => ({ ts: '1787292000.999999' }));
     (adapter as any).fetchMessages = async () => ({ messages: [] });
+    (adapter as any).lookupUser = async (userId: string) => ({ userId, userName: 'synthetic-user', fullName: 'Synthetic User', isBot: false, isMe: false });
     (adapter as any).startTyping = async () => undefined;
     (adapter as any).postMessage = posts;
+    (adapter as any).client.chat.postMessage = posts;
+    (adapter as any).client.apiCall = async () => { throw new Error('Unexpected external Slack API in test'); };
     const state = await createConnectedGatewayStateAdapter();
     const chat = new Chat({ userName: 'lobu', adapters: { slack: adapter }, state, logger: 'silent' });
     const connection: PlatformConnection = {
@@ -5216,6 +5361,199 @@ describe('existing team bot replay (single-workspace Slack, unlinked channel sen
     `;
     return rows.map((r) => r.action_input);
   }
+
+  type TraceTransportMode = 'memory' | 'collector' | 'disabled' | 'unavailable';
+
+  async function runTracedChatTurn(mode: TraceTransportMode, providerFails: boolean) {
+    const collectorBinary = process.env.LOBU_OTEL_COLLECTOR_BINARY;
+    const collector = mode === 'collector' ? await startTestCollector(collectorBinary!) : undefined;
+    const endpoint = collector?.endpoint ?? (mode === 'unavailable'
+      ? `http://127.0.0.1:${await unusedLoopbackPort()}` : undefined);
+    const previousEnv = {
+      endpoint: process.env.OTEL_EXPORTER_OTLP_ENDPOINT,
+      gateway: process.env.PUBLIC_GATEWAY_URL,
+    };
+    const exporter = new InMemorySpanExporter();
+    const serverErrors: string[] = [];
+    let pollBody: unknown;
+    let pollTraceparent: string | null = null;
+    let worker: ReturnType<typeof startOtelWorker> | undefined;
+    let consumer: MessageConsumer | undefined;
+    let responses: UnifiedThreadResponseConsumer | undefined;
+    const server = createServer(async (req, res) => {
+      try {
+        const chunks = [];
+        for await (const chunk of req) chunks.push(Buffer.from(chunk));
+        const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        const path = new URL(req.url!, 'http://localhost').pathname;
+        if (path.startsWith('/lobu/api/proxy/compatible/')) {
+          if (providerFails) {
+            res.writeHead(400, { 'content-type': 'application/json' });
+            res.end(JSON.stringify({ error: { message: 'synthetic provider failure' } }));
+            return;
+          }
+          const text = isFollowUpChipsRequest(body) ? '[]' : 'OTLP pipeline verified.';
+          res.writeHead(200, { 'content-type': 'text/event-stream' });
+          res.end(`data: ${JSON.stringify({ id: 'synthetic-otel-completion', object: 'chat.completion.chunk', created: 1,
+            model: 'compatible-model', choices: [{ index: 0, delta: { role: 'assistant', content: text }, finish_reason: 'stop' }],
+            usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } })}\n\ndata: [DONE]\n\n`);
+          return;
+        }
+        const response = await post(path, { body, headers: { authorization: req.headers.authorization ?? '' },
+          env: { WORKER_API_TOKEN: 'synthetic-otel-fleet' } });
+        const responseText = await response.text();
+        if (path.endsWith('/poll')) {
+          pollBody = JSON.parse(responseText);
+          pollTraceparent = response.headers.get('traceparent');
+        }
+        // The actual poll header crosses HTTP. Reconstructing it from the job
+        // would mask a broken header/body boundary.
+        res.writeHead(response.status, Object.fromEntries(response.headers));
+        res.end(responseText);
+      } catch (error) {
+        serverErrors.push(String(error));
+        res.writeHead(500).end();
+      }
+    });
+    try {
+      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+      const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      process.env.PUBLIC_GATEWAY_URL = `${origin}/lobu`;
+      __resetPublicOriginCachesForTests();
+      if (endpoint) process.env.OTEL_EXPORTER_OTLP_ENDPOINT = endpoint;
+      else delete process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+      await shutdownTracing();
+      initTracing({
+        serviceName: 'lobu-server', otlpEndpoint: endpoint,
+        ...(mode === 'memory' ? { spanProcessors: [new SimpleSpanProcessor(exporter)] } : {}),
+      });
+      const provider = new ApiKeyProviderModule({
+        providerId: 'compatible', providerDisplayName: 'Synthetic OTLP provider', providerIconUrl: '',
+        envVarName: 'SYNTHETIC_PROVIDER_API_KEY', sdkCompat: 'openai',
+        upstreamBaseUrl: 'https://provider.example.test/v1',
+      });
+      const catalog = { ...catalogFor(provider), resolveDispatchModel: async () => ({ replaced: false }) };
+      consumer = new MessageConsumer({
+        getProviderCatalogService: () => catalog,
+        syncNetworkConfigGrants: async () => {},
+      } as never);
+      consumer.setGuardrails(undefined, settingsStore);
+      await consumer.start();
+      const { deliver, posts } = await startTeamBot('compatible/compatible-model');
+      responses = new UnifiedThreadResponseConsumer(new RunsQueue(), {} as never, {} as never);
+      responses.setChatResponseBridge(new ChatResponseBridge(bridge!.manager as never));
+      await responses.start();
+
+      const started = Date.now();
+      expect(await deliver(channelMessage('Ev0OTELSMOKE', '1787292000.000701', 'U0TEAMMATE'))).toBe(200);
+      let run: Awaited<ReturnType<typeof agentTurnRuns>>[number] | undefined;
+      await waitFor(async () => {
+        [run] = await agentTurnRuns();
+        expect(run?.status).toBe('pending');
+      });
+      worker = startOtelWorker({ apiUrl: origin, authToken: 'synthetic-otel-fleet', runId: Number(run!.id), mode, endpoint });
+      const completed = await worker.completed.catch(error => {
+        throw new Error(`${String(error)}; gateway fixture errors: ${serverErrors.join('; ')}`);
+      });
+      const expectedText = providerFails ? 'synthetic provider failure' : 'OTLP pipeline verified.';
+      expect(completed.runId).toBe(Number(run!.id));
+      expect(completed.tracingEnabled).toBe(mode !== 'disabled');
+      if (providerFails) expect(completed.error).toContain(expectedText);
+      else expect(completed.error).toBeUndefined();
+      expect((await runRow(Number(run!.id))).status).toBe(providerFails ? 'failed' : 'completed');
+      await waitFor(async () => {
+        const terminal = await getTestDb()`
+          SELECT status, action_input FROM runs WHERE queue_name = 'thread_response'
+            AND action_input->>'turnRunId' = ${String(run!.id)}
+            AND (action_input ? 'finalText' OR action_input ? 'error') ORDER BY id DESC LIMIT 1
+        `;
+        expect(terminal[0]?.status).toBe('completed');
+        expect(JSON.stringify(posts.mock.calls)).toContain(expectedText);
+      }, 10_000);
+      // A failed exporter must never make the user wait its 30s RPC timeout.
+      if (mode === 'unavailable') {
+        expect(completed.elapsedMs).toBeLessThan(20_000);
+        expect(Date.now() - started).toBeLessThan(20_000);
+      }
+      expect(serverErrors).toEqual([]);
+      expect(Value.Check(PollResponseSchema, pollBody)).toBe(true);
+      expect(pollBody).not.toHaveProperty('traceparent');
+      expect(pollBody).not.toHaveProperty('payload.traceparent');
+      expect(pollBody).not.toHaveProperty('payload.turn.traceparent');
+
+      if (mode === 'disabled') {
+        expect(pollTraceparent).toBeNull();
+        expect(completed.spans).toEqual([]);
+        expect(exporter.getFinishedSpans()).toEqual([]);
+        return;
+      }
+      expect(pollTraceparent).toMatch(/^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/);
+      if (mode === 'unavailable') return;
+      await flushTracing();
+      const memorySpans = (): TransportSpan[] => exporter.getFinishedSpans().map(span => ({
+        name: span.name, traceId: span.spanContext().traceId, spanId: span.spanContext().spanId,
+        parentSpanId: span.parentSpanContext?.spanId,
+        serviceName: String(span.resource.attributes['service.name']), status: span.status.code,
+      }));
+      await waitFor(async () => {
+        const spans = collector ? await collector.spans() : [...memorySpans(), ...completed.spans];
+        const roots = spans.filter(span => span.name === 'message_received');
+        const queues = spans.filter(span => span.name === 'queue_processing');
+        const turns = spans.filter(span => span.name === 'agent_turn');
+        const deliveries = spans.filter(span => span.name === 'response_delivery');
+        expect(roots).toHaveLength(1);
+        expect(queues).toHaveLength(1);
+        expect(turns).toHaveLength(1);
+        expect(deliveries.length).toBeGreaterThanOrEqual(1);
+        const [root] = roots;
+        const [queue] = queues;
+        const [turn] = turns;
+        expect(new Set(spans.map(span => span.traceId))).toEqual(new Set([root.traceId]));
+        expect(queue.parentSpanId).toBe(root.spanId);
+        expect(turn.parentSpanId).toBe(queue.spanId);
+        expect(deliveries.every(span => span.parentSpanId === queue.spanId)).toBe(true);
+        expect(pollTraceparent).toBe(`00-${queue.traceId}-${queue.spanId}-01`);
+        expect(root.serviceName).toBe('lobu-server');
+        expect(queue.serviceName).toBe('lobu-server');
+        expect(turn.serviceName).toBe('lobu-worker');
+        expect(deliveries.every(span => span.serviceName === 'lobu-server')).toBe(true);
+        expect(turn.status).toBe(providerFails ? 2 : 1);
+      }, 10_000);
+    } finally {
+      const cleanupErrors: unknown[] = [];
+      for (const dispose of [
+        () => consumer?.stop(), () => responses?.stop(), () => worker?.stop(),
+        // The final batch cannot reach an unavailable collector; production
+        // callers log that rejection, and so does nothing here.
+        () => mode === 'unavailable' ? shutdownTracing().catch(() => undefined) : shutdownTracing(),
+        () => collector?.stop(),
+        async () => {
+          server.closeAllConnections();
+          await new Promise<void>(resolve => server.close(() => resolve()));
+        },
+      ]) {
+        try { await dispose(); } catch (error) { cleanupErrors.push(error); }
+      }
+      for (const [name, value] of [
+        ['OTEL_EXPORTER_OTLP_ENDPOINT', previousEnv.endpoint],
+        ['PUBLIC_GATEWAY_URL', previousEnv.gateway],
+      ] as const) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+      __resetPublicOriginCachesForTests();
+      if (cleanupErrors.length) throw new AggregateError(cleanupErrors, 'Tracing smoke cleanup failed');
+    }
+  }
+
+  const traceTransportCases: Array<[TraceTransportMode, boolean]> = [
+    ['memory', false], ['memory', true], ['disabled', false], ['unavailable', false],
+    ...(process.env.LOBU_OTEL_COLLECTOR_BINARY
+      ? [['collector', false], ['collector', true]] as Array<[TraceTransportMode, boolean]> : []),
+  ];
+  it.each(traceTransportCases)('tracing pipeline via %s (provider failure: %s)', async (mode, providerFails) => {
+    await runTracedChatTurn(mode, providerFails);
+  }, 65_000);
 
   it('a same-team unlinked sender gets a turn with org-shared tools, no extra post, no reply-only prompt', async () => {
     const { org, deliver, posts } = await startTeamBot();
@@ -5533,5 +5871,163 @@ describe('chat follow-up turns run as the sender who asked', () => {
     expect(claims.source).toBe('scheduled-job');
     expect(claims.chatAccess).toBeUndefined();
     expect(chatTurnAccessOf(claims)).toBeNull();
+  });
+});
+
+describe('fleet claim order', () => {
+  beforeEach(async () => {
+    await cleanupTestDatabase();
+    delete process.env.WORKER_API_TOKEN;
+  });
+
+  /** The run a fleet worker that also runs agent turns claims next. */
+  async function claimNext(workerId: string): Promise<number | undefined> {
+    const response = await pollFleet(workerId, { agent_turn: true });
+    expect(response.status).toBe(200);
+    return (await response.json()).run_id;
+  }
+
+  /** A fleet connector source; each call to the result queues one pending sync. */
+  async function syncSource(organizationId: string) {
+    const sql = getTestDb();
+    const connectorKey = `synthetic.claim-order-${organizationId.slice(0, 8)}`;
+    await createTestConnectorDefinition({ key: connectorKey, name: 'Claim order source', organization_id: organizationId });
+    const connection = await createTestConnection({ organization_id: organizationId, connector_key: connectorKey, createDefaultFeed: false });
+    return async (ageSeconds: number): Promise<number> => {
+      const [run] = await sql`
+        INSERT INTO runs (organization_id, run_type, connection_id, connector_key, connector_version,
+          approval_status, status, created_at)
+        VALUES (${organizationId}, 'sync', ${connection.id}, ${connectorKey}, '1.0.0', 'auto', 'pending',
+          now() - make_interval(secs => ${ageSeconds}))
+        RETURNING id
+      `;
+      return Number(run.id);
+    };
+  }
+
+  async function queueEmbed(organizationId: string, ageSeconds: number): Promise<number> {
+    const [run] = await getTestDb()`
+      INSERT INTO runs (organization_id, run_type, status, approval_status, created_at)
+      VALUES (${organizationId}, 'embed_backfill', 'pending', 'auto', now() - make_interval(secs => ${ageSeconds}))
+      RETURNING id
+    `;
+    return Number(run.id);
+  }
+
+  async function queueTurn(organizationId: string): Promise<number> {
+    await enqueueMessage(messageFor(organizationId), {
+      agentSettings: settingsStore,
+      catalog: catalogFor(claudeModule()),
+      gatewayUrl: GATEWAY_URL,
+    });
+    const turns = await agentTurnRuns();
+    return turns.find((turn) => turn.organization_id === organizationId)!.id;
+  }
+
+  it('claims a waiting chat turn ahead of a recent connector backlog in another organization', async () => {
+    const backlogOrg = await createTestOrganization();
+    const chatOrg = await createTestOrganization();
+    // Background embedding older than the backlog, still inside its setback.
+    const embed = await queueEmbed(backlogOrg.id, 180);
+    const queueSync = await syncSource(backlogOrg.id);
+    const backlog: number[] = [];
+    for (let age = 85; age > 60; age--) backlog.push(await queueSync(age));
+    const turn = await queueTurn(chatOrg.id);
+
+    // A person is waiting on the turn; the backlog is not waiting on anyone.
+    expect(await claimNext('fleet-claim-order')).toBe(turn);
+    // Connector work drains oldest first, still ahead of the older embedding.
+    expect(await claimNext('fleet-claim-order')).toBe(backlog[0]);
+    const [embedRow] = await getTestDb()`SELECT status FROM runs WHERE id = ${embed}`;
+    expect(embedRow.status).toBe('pending');
+  });
+
+  it('lets old enough scheduled and background work go ahead of fresh work instead of starving', async () => {
+    const org = await createTestOrganization();
+    const queueSync = await syncSource(org.id);
+    const staleEmbed = await queueEmbed(org.id, 11 * 60);
+    const staleSync = await queueSync(6 * 60);
+    const turn = await queueTurn(org.id);
+    const freshSync = await queueSync(0);
+
+    // A sync queued longer ago than the interactive head start beats a fresh turn.
+    expect(await claimNext('fleet-aging')).toBe(staleSync);
+    expect(await claimNext('fleet-aging')).toBe(turn);
+    // An embedding queued longer ago than its setback beats a fresh sync.
+    expect(await claimNext('fleet-aging')).toBe(staleEmbed);
+    expect(await claimNext('fleet-aging')).toBe(freshSync);
+  });
+
+  it('prefers the organization with less running work over a slightly older backlog', async () => {
+    const busyOrg = await createTestOrganization();
+    const quietOrg = await createTestOrganization();
+    const queueBusy = await syncSource(busyOrg.id);
+    // Queued one load penalty before the quiet organization's run: inside
+    // the two penalties the busy organization pays once it holds two slots.
+    const busy = [await queueBusy(62), await queueBusy(61), await queueBusy(60)];
+    // The busy organization takes the first two slots while it is alone.
+    expect(await claimNext('fleet-fair-a')).toBe(busy[0]);
+    expect(await claimNext('fleet-fair-b')).toBe(busy[1]);
+
+    // A newer run from an organization with nothing running goes next, ahead
+    // of the busy organization's older remaining run.
+    const quiet = await (await syncSource(quietOrg.id))(0);
+    expect(await claimNext('fleet-fair-c')).toBe(quiet);
+    expect(await claimNext('fleet-fair-d')).toBe(busy[2]);
+  });
+
+  it('keeps a chat turn ahead of quiet organizations\' recent syncs while its own organization has a run in flight', async () => {
+    const chatOrg = await createTestOrganization();
+    // The chat organization already holds a fleet slot.
+    const inFlight = await (await syncSource(chatOrg.id))(30);
+    expect(await claimNext('fleet-busy-turn-a')).toBe(inFlight);
+
+    // Three organizations with nothing running, one sync each: one queued
+    // before the turn's remaining head start (300s less one 60s load
+    // penalty, so 240s), two inside it.
+    const [stale, recent, newest] = [
+      await (await syncSource((await createTestOrganization()).id))(300),
+      await (await syncSource((await createTestOrganization()).id))(180),
+      await (await syncSource((await createTestOrganization()).id))(100),
+    ];
+    const turn = await queueTurn(chatOrg.id);
+
+    expect(await claimNext('fleet-busy-turn-b')).toBe(stale);
+    expect(await claimNext('fleet-busy-turn-c')).toBe(turn);
+    expect(await claimNext('fleet-busy-turn-d')).toBe(recent);
+    expect(await claimNext('fleet-busy-turn-e')).toBe(newest);
+  });
+
+  it('does not count device or gateway-inline runs against an organization fleet share', async () => {
+    const sql = getTestDb();
+    const fleetOrg = await createTestOrganization();
+    const deviceOrg = await createTestOrganization();
+    const queueFleet = await syncSource(fleetOrg.id);
+    // Queued just before the other organization's run, so the one load
+    // penalty this organization pays puts it a minute behind.
+    const fleetRuns = [await queueFleet(5), await queueFleet(0)];
+    // One of the fleet organization's runs holds a fleet slot.
+    expect(await claimNext('fleet-share-a')).toBe(fleetRuns[0]);
+
+    // The other organization has plenty in flight, none of it on the fleet:
+    // operations its devices execute, and operations the gateway runs inline.
+    await sql`
+      INSERT INTO runs (organization_id, run_type, status, approval_status, created_at, claimed_at,
+        claimed_by, executed_by_device_worker_id, target_device_worker_id)
+      SELECT ${deviceOrg.id}, 'action', 'running', 'auto', now(), now(), 'device-share-worker', device, device
+      FROM (SELECT gen_random_uuid() AS device FROM generate_series(1, 5)) devices
+    `;
+    for (let index = 0; index < 2; index++) {
+      await sql`
+        INSERT INTO runs (organization_id, run_type, status, approval_status, created_at, claimed_at, claimed_by)
+        VALUES (${deviceOrg.id}, 'action', 'running', 'auto', now(), now(), ${newGatewayInlineOwner()})
+      `;
+    }
+    const deviceOrgSync = await (await syncSource(deviceOrg.id))(0);
+
+    // Its fleet share is still zero, so its newer sync goes before the fleet
+    // organization's older one.
+    expect(await claimNext('fleet-share-b')).toBe(deviceOrgSync);
+    expect(await claimNext('fleet-share-c')).toBe(fleetRuns[1]);
   });
 });

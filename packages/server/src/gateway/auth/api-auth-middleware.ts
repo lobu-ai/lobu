@@ -19,6 +19,11 @@ export const TOKEN_EXPIRATION_MS = 24 * 60 * 60 * 1000;
  * org fallback.
  */
 interface ApiAuthContext {
+  /**
+   * Which check passed. A worker token's `userId` is its agent id, not a
+   * person, so only the other two name an authenticated user.
+   */
+  via: "settings_session" | "worker_token" | "external_oauth";
   userId?: string;
   organizationId?: string;
 }
@@ -88,7 +93,11 @@ export function createApiAuthMiddleware(opts: {
         ? await verifySettingsSessionOrToken(c, "token")
         : await verifySettingsSession(c);
       if (session) {
-        return runWithContext({ userId: session.userId }, c, next);
+        return runWithContext(
+          { via: "settings_session", userId: session.userId },
+          c,
+          next
+        );
       }
     }
 
@@ -109,6 +118,7 @@ export function createApiAuthMiddleware(opts: {
           }
           return runWithContext(
             {
+              via: "worker_token",
               userId: workerData.userId,
               organizationId: workerData.organizationId,
             },
@@ -126,6 +136,7 @@ export function createApiAuthMiddleware(opts: {
         if (userInfo?.sub) {
           return runWithContext(
             {
+              via: "external_oauth",
               userId: userInfo.sub,
               organizationId: userInfo.organizationId,
             },

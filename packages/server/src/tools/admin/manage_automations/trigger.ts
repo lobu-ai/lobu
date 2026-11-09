@@ -3,6 +3,7 @@
  *   trigger, set_reaction_script
  */
 
+import { assertAutomationModuleConfiguration } from "../../../automations/preparation";
 import { transform } from "esbuild";
 import { getDb, type DbClient } from "../../../db/client";
 import type { Env } from "../../../index";
@@ -19,7 +20,7 @@ import {
 import {
   compileReactionScript,
   extractReactionInputSchema,
-  validateReactionDefaultExport,
+  inspectAutomationScriptExports,
 } from "../../../automations/reaction-executor";
 import { assertAutomationInstructions } from "../../../automations/triggers";
 import type {
@@ -29,6 +30,7 @@ import type {
 } from "@lobu/core/contracts/tools/manage-automations";
 import type { ToolContext } from "../../registry";
 import { insertToolConfigChange } from "../helpers/config-audit";
+import { assertAutomationConfigVersionsUnchanged } from "./config-state";
 import type { ManageAutomationsArgs } from "../manage_automations";
 import {
   encodeExternalAutomationClaimOwner,
@@ -83,14 +85,14 @@ async function loadTriggerExecution(
     executionConfig: { executor: payload.executor },
   });
   let persistedExecution: AutomationTriggerExecution;
-  if (executor?.kind === "agent") {
+  if (executor.kind === "agent") {
     persistedExecution = {
       lane: "managed_agent",
       owner: "lobu",
       managed_agent_id: executor.agentId,
       next_action: { kind: "handled_elsewhere" },
     };
-  } else if (executor?.kind === "device") {
+  } else if (executor.kind === "device") {
     persistedExecution = {
       lane: "device_worker",
       owner: "device",
@@ -118,7 +120,7 @@ async function loadTriggerExecution(
     return {
       execution: persistedExecution,
       shouldDispatch: true,
-      requiresGateway: executor?.kind === "agent" && payload.executor == null,
+      requiresGateway: executor.kind === "agent" && payload.executor == null,
     };
   }
   if (run.status !== "claimed" && run.status !== "running") {
@@ -173,10 +175,10 @@ async function loadTriggerExecution(
   const nativeScriptClaim =
     payload.executor?.kind === "script" && claimedBy === "automation-script";
   const nativeManagedClaim =
-    executor?.kind === "agent" &&
+    executor.kind === "agent" &&
     (claimedBy === "lobu-dispatcher" || claimedBy === `lobu:${executor.agentId}`);
   const nativeDeviceClaim =
-    executor?.kind === "device" && claimedBy === run.device_claimed_by;
+    executor.kind === "device" && claimedBy === run.device_claimed_by;
   if (!nativeScriptClaim && !nativeManagedClaim && !nativeDeviceClaim) {
     throw new ToolUserError(
       `Automation run ${runId} has no recognized active claimant.`,
@@ -272,6 +274,7 @@ export async function handleSetReactionScript(
   args: ManageAutomationsArgs,
   _env: Env,
   ctx: ToolContext,
+  base?: Record<string, string>,
 ): Promise<{
   action: "set_reaction_script";
   automation_id: string;
@@ -364,6 +367,7 @@ export async function handleSetReactionScript(
         ORDER BY id
         FOR UPDATE
       `;
+      if (base) await assertAutomationConfigVersionsUnchanged(args, ctx.organizationId, base, tx);
       const lockedBefore = new Map<number, string | null>(
         locked.map((r) => [Number(r.id), (r.reaction_script as string | null) ?? null]),
       );
@@ -413,7 +417,7 @@ export async function handleSetReactionScript(
   }
 
   const compiledCode = await compileReactionScript(script);
-  await validateReactionDefaultExport(compiledCode);
+  const scriptExports = await inspectAutomationScriptExports(compiledCode);
   const targetCode = await comparableReactionCode(compiledCode);
   // Derive the reaction's extraction contract from its exported `input` schema,
   // so the worker is told the exact shape the reaction will Value.Parse. NULL
@@ -421,11 +425,17 @@ export async function handleSetReactionScript(
   const reactionInputSchema = await extractReactionInputSchema(script);
   await sql.begin(async (tx) => {
     const locked = await tx`
-      SELECT id, reaction_script, reaction_script_compiled, reaction_input_schema FROM automations
+      SELECT id, reaction_script, reaction_script_compiled, reaction_input_schema,
+             execution_config, managed_agent_id, device_worker_id, agent_kind, triggers,
+             (SELECT prompt FROM automation_versions WHERE id = current_version_id) AS prompt,
+             (SELECT skills FROM automation_versions WHERE id = current_version_id) AS skills,
+             (SELECT outputs FROM automation_versions WHERE id = current_version_id) AS outputs FROM automations
       WHERE automation_group_id = ${groupId} AND organization_id = ${ctx.organizationId}
       ORDER BY id
       FOR UPDATE
     `;
+    if (base) await assertAutomationConfigVersionsUnchanged(args, ctx.organizationId, base, tx);
+    for (const row of locked) assertAutomationModuleConfiguration({ ...row, reaction_input_schema: reactionInputSchema }, scriptExports);
     const targetSchema = reactionInputSchema ?? null;
     for (const row of locked) {
       const rowId = Number(row.id);
@@ -478,6 +488,6 @@ export async function handleSetReactionScript(
     automation_id: String(args.automation_id),
     has_script: true,
     message:
-      "Reaction script compiled and saved. It will auto-execute on future complete_window calls.",
+      "Automation script compiled and saved. prepare runs before native analysis; the default handler runs after completion.",
   };
 }

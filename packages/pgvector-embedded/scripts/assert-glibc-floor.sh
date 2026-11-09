@@ -8,7 +8,7 @@
 # `ubuntu-latest`; when that label moved to 24.04 (glibc 2.39) the published
 # `vector.so` picked up `__isoc23_strtol@GLIBC_2.38` — the gcc-13 uplift of
 # plain `strtol` — and `lobu run` stopped being able to boot embedded Postgres
-# on Debian 12 (including `node:22-slim`), Ubuntu 22.04 LTS, RHEL 9 and AL2023:
+# on Debian 12 (including `node:26-slim`), Ubuntu 22.04 LTS, RHEL 9 and AL2023:
 #
 #   could not load library ".../vector.so": /lib/x86_64-linux-gnu/libc.so.6:
 #   version `GLIBC_2.38' not found

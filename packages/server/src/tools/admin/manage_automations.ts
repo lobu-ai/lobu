@@ -50,7 +50,7 @@ import {
   normalApprovalImpact,
 } from '../../utils/approval-context';
 import logger from '../../utils/logger';
-import { buildResourcePermalink, buildAutomationSettingsUrl } from '../../utils/url-builder';
+import { buildResourcePermalink } from '../../utils/url-builder';
 import { parsePositiveIntegerId, ToolUserError } from '../../utils/errors';
 import {
   requireOrgReadAccess,
@@ -86,6 +86,10 @@ import {
 } from './manage_automations/feedback';
 import { handleGetComponentReference } from './manage_automations/reference';
 import { handleList } from './manage_automations/list';
+import {
+  assertAutomationConfigVersionsUnchanged,
+  readAutomationConfigVersions,
+} from './manage_automations/config-state';
 import { eventClientId } from '../../auth/event-client-id';
 
 export {
@@ -113,7 +117,18 @@ export const MANAGE_AUTOMATIONS_ACTION_KEY = 'manage_automations';
 export const manageAutomations = withValidatedArgs(
   'manage_automations',
   ManageAutomationsSchema,
-  manageAutomationsImpl
+  manageAutomationsImpl,
+  (value) => {
+    const args = value as { action?: unknown; execution_config?: unknown; model_config?: unknown } | null;
+    if ((args?.action === 'create' || args?.action === 'update') && Object.hasOwn(args, 'model_config')) {
+      throw new ToolUserError('model_config is retired and had no execution effect. Use execution_config.model for an explicit model override. Installed values remain readable.', 422);
+    }
+    if ((args?.action === 'create' || args?.action === 'update') &&
+        args.execution_config && typeof args.execution_config === 'object' &&
+        Object.hasOwn(args.execution_config, 'executor')) {
+      throw new ToolUserError('execution_config.executor is retired. Use reaction_script alone for code-only jobs, or add agent instructions for analysis. Installed legacy jobs remain readable until migrated.', 422);
+    }
+  }
 );
 
 async function manageAutomationsImpl(
@@ -449,10 +464,8 @@ async function fetchCurrentAutomation(
  * for the gated write so a malformed proposal is rejected at request time, not
  * at approve time.
  *
- * Automation definition writes have no per-field pre-image; the proposal is the
- * full original args for a straight re-run on approve (a stale approval may
- * clobber a newer edit — acceptable for launch). Acting principal is persisted
- * so apply can re-run the foreign-owner guard against the original actor.
+ * Captures the requested args and original acting principal. Queueing also pins
+ * the target configuration revisions so approval cannot overwrite a newer edit.
  */
 function buildAutomationProposal(
   args: ManageAutomationsArgs,
@@ -472,9 +485,8 @@ function buildAutomationProposal(
       args.prompt,
       args.skills,
       args.reaction_script,
-      args.execution_config?.executor?.kind === 'script' ? args.execution_config.executor.source : undefined,
     );
-    if (!args.managed_agent_id && args.execution_config?.executor?.kind !== 'external') {
+    if (!args.managed_agent_id) {
       throw new ToolUserError(
         'managed_agent_id is required to create an Automation (the agent that executes it).'
       );
@@ -536,7 +548,6 @@ const AUTOMATION_APPROVAL_CLEARED = '(cleared)';
 const VERSION_OWNED_AUTOMATION_FIELDS = ['name', 'description', 'prompt', 'sources'] as const;
 
 const AUTOMATION_PATCHABLE_FIELDS = [
-  'model_config',
   'execution_config',
   // schedule/timezone are projections of triggers (resolveAutomationTriggerWrite);
   // patch them only via triggers, not as direct writable fields.
@@ -575,7 +586,7 @@ function assertAutomationUpdateArgs(args: ManageAutomationsArgs): void {
   }
   if (present(AUTOMATION_PATCHABLE_FIELDS).length === 0) {
     throw new ToolUserError(
-      "update changes runtime config only (e.g. triggers, managed_agent_id, tags, model_config) and needs at least one such field. It cannot change status — an Automation is retired via action: 'delete' (→ archived); name/description/prompt/sources are version-owned (action: 'create_version')."
+      "update changes runtime config only (e.g. triggers, managed_agent_id, tags, execution_config) and needs at least one such field. It cannot change status — an Automation is retired via action: 'delete' (→ archived); name/description/prompt/sources are version-owned (action: 'create_version')."
     );
   }
 }
@@ -698,6 +709,9 @@ async function queueAutomationWriteForApproval(
   acting: { actingAgentId: string | null; actingAutomationId: string | null }
 ): Promise<ManageAutomationsResult> {
   const proposal = buildAutomationProposal(args, acting);
+  if (args.action !== 'create' && args.action !== 'create_from_version') {
+    proposal.base = await readAutomationConfigVersions(args, ctx.organizationId);
+  }
   const writeAction = automationWriteAction(args.action)!;
 
   // create attributes ownership via created_by — fail at request time rather
@@ -786,21 +800,9 @@ async function queueAutomationWriteForApproval(
   });
 
   const { ownerSlug, baseUrl } = await getOrgUrlContext(ctx);
-  // An `update` is config-shaped, so its review surface is the automation edit form
-  // prefilled via `?run_id=` (WI-0.3, automation parity with manage_agents): the
-  // reviewer sees the proposed change in the real form and Approves/Rejects.
-  // The route is the workspace-level Automations section (agent-owned and
-  // agentless alike). create / create_from_version / set_reaction_script etc.
-  // aren't a single-form review, so they keep the run permalink (valid across
-  // the supersede chain on approve).
-  const settingsReviewUrl =
-    args.action === 'update' && args.automation_id != null
-      ? await buildAutomationSettingsUrl(baseUrl, ctx.organizationId, args.automation_id, {
-          runId,
-        }).catch(() => null)
-      : null;
-  const approvalUrl =
-    settingsReviewUrl ?? buildResourcePermalink(ownerSlug, { kind: 'run', runId }, baseUrl);
+  // The approval run is the review subject, including creation before an
+  // Automation exists. Event cards and peek reuse the same native review.
+  const approvalUrl = buildResourcePermalink(ownerSlug, { kind: 'run', runId }, baseUrl);
 
   // One destination, never the org-wide fan-out — see resolveApprovalChatOrigin.
   const chatOrigin = await resolveApprovalChatOrigin(ctx);
@@ -878,9 +880,10 @@ async function assertAutomationOwnersMatchActingAgent(
  * between queue and approve (e.g. group reassigned to another agent), the apply
  * fails closed — the approve handler supersedes the card to 'failed'.
  *
- * Automation definition writes have no per-field pre-image; this is a straight
- * re-run — a stale approval may clobber a newer edit (acceptable for launch)
- * when ownership is still valid.
+ * Configuration revisions are rechecked under the existing group lock before
+ * dispatch and again by each handler under its own FOR UPDATE row locks, since
+ * a delete serializes only on the row lock. Legacy proposals without a
+ * revision fail closed.
  */
 export async function applyManageAutomationsProposal(
   proposal: ManageAutomationsProposal,
@@ -940,6 +943,9 @@ export async function applyManageAutomationsProposal(
         }
       }
     }
+    if (args.action !== 'create' && args.action !== 'create_from_version') {
+      await assertAutomationConfigVersionsUnchanged(args, applyCtx.organizationId, proposal.base);
+    }
     // The approval path already established the human's authority. Dispatch
     // directly so this server-side continuation does not re-enter routeAction's
     // fresh-call mcp:admin gate; resolve_approval intentionally requires only
@@ -948,15 +954,15 @@ export async function applyManageAutomationsProposal(
       case 'create':
         return handleCreate(args, env, applyCtx);
       case 'update':
-        return handleUpdate(args, env, applyCtx);
+        return handleUpdate(args, env, applyCtx, proposal.base);
       case 'create_version':
-        return handleCreateVersion(args, env, applyCtx);
+        return handleCreateVersion(args, env, applyCtx, proposal.base);
       case 'create_from_version':
         return handleCreateFromVersion(args, env, applyCtx);
       case 'set_reaction_script':
-        return handleSetReactionScript(args, env, applyCtx);
+        return handleSetReactionScript(args, env, applyCtx, proposal.base);
       case 'delete':
-        return handleDelete(args, applyCtx);
+        return handleDelete(args, applyCtx, proposal.base);
       default:
         // Only write actions queue (automationWriteAction gates the queue path);
         // a held proposal with any other action is corrupt — fail the apply.

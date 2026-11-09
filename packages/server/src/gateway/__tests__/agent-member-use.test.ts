@@ -27,6 +27,11 @@ import {
   expect,
   test,
 } from "bun:test";
+import { encrypt, generateWorkerToken, initTracing, shutdownTracing } from "@lobu/core";
+import {
+  InMemorySpanExporter,
+  SimpleSpanProcessor,
+} from "@opentelemetry/sdk-trace-node";
 import { Hono } from "hono";
 import { AgentMetadataStore } from "../auth/agent-metadata-store.js";
 import type { SettingsTokenPayload } from "../auth/settings/token-service.js";
@@ -35,6 +40,8 @@ import { getDb } from "../../db/client.js";
 import { createPostgresAgentConfigStore } from "../../lobu/stores/postgres-stores.js";
 import { orgContext } from "../../lobu/stores/org-context.js";
 import { buildApiConversationId } from "../services/api-conversation-id.js";
+import { QueueProducer } from "../infrastructure/queue/queue-producer.js";
+import { RunsQueue } from "../infrastructure/queue/runs-queue.js";
 import { createAgentApi } from "../routes/public/agent.js";
 import { setAuthProvider } from "../routes/public/settings-auth.js";
 import type { ThreadSession } from "../session.js";
@@ -225,6 +232,90 @@ describe("POST /api/v1/agents — org member using an agent they don't own", () 
     expect(sessions.store.get(expectedKey)).toBe(stored);
   });
 
+  type AdmissionRequest = { session: ThreadSession; headers: Record<string, string>; url: string };
+  type AdmissionCase = {
+    caller: string;
+    auth: (() => SettingsTokenPayload) | null;
+    expectedStatus: number;
+    expectedUser: string | null;
+    setup?: (request: AdmissionRequest) => unknown;
+    repeatAs?: string;
+  };
+  const workerAuthorization = (session: ThreadSession) => `Bearer ${generateWorkerToken(AGENT_ID, session.conversationId, "initiator-deployment", {
+    channelId: "api", agentId: AGENT_ID, organizationId: AGENT_ORG, platform: "api",
+  })}`;
+  const admissionCases: AdmissionCase[] = [
+    { caller: "member", auth: () => sessionFor(MEMBER_ID), expectedStatus: 200, expectedUser: MEMBER_ID },
+    { caller: "admin", auth: () => sessionFor(ADMIN_ID), expectedStatus: 200, expectedUser: ADMIN_ID, repeatAs: AGENT_OWNER_ID },
+    { caller: "owner", auth: () => sessionFor(AGENT_OWNER_ID), expectedStatus: 200, expectedUser: AGENT_OWNER_ID },
+    { caller: "unmapped owner", auth: () => sessionFor("legacy-provider-subject"), expectedStatus: 200, expectedUser: null,
+      setup: () => orgContext.run({ organizationId: AGENT_ORG }, () => userAgentsStore.addAgent("external", "legacy-provider-subject", AGENT_ID)) },
+    { caller: "legacy OAuth session", auth: () => ({ ...sessionFor(AGENT_OWNER_ID), oauthUserId: AGENT_OWNER_ID }), expectedStatus: 200, expectedUser: null },
+    { caller: "SSE ticket", auth: null, expectedStatus: 401, expectedUser: null,
+      setup: (request) => { request.url += `?token=${encodeURIComponent(encrypt(JSON.stringify(sessionFor(AGENT_OWNER_ID))))}`; } },
+    { caller: "bearer with cookie", auth: () => sessionFor(AGENT_OWNER_ID), expectedStatus: 403, expectedUser: null,
+      setup: ({ session, headers }) => { headers.authorization = workerAuthorization(session); } },
+    { caller: "agent session", auth: () => ({ ...sessionFor(AGENT_OWNER_ID), agentId: AGENT_ID }), expectedStatus: 200, expectedUser: null },
+    { caller: "worker", auth: null, expectedStatus: 200, expectedUser: null,
+      setup: ({ session, headers }) => { headers.authorization = workerAuthorization(session); } },
+    { caller: "automation", auth: () => sessionFor(AGENT_OWNER_ID), expectedStatus: 200, expectedUser: null,
+      setup: ({ session }) => { session.intent = { kind: "automation_run", runId: 123, automationId: 456 }; } },
+  ];
+  for (const caller of admissionCases) {
+    test(`message admission freezes the current human only (${caller.caller})`, async () => {
+      const queue = new RunsQueue();
+      await queue.start();
+      const producer = new QueueProducer(queue);
+      await producer.start();
+      try {
+        setAuthProvider(() => sessionFor(MEMBER_ID));
+        const { app, sessions } = makeApp(
+          userAgentsStore, agentMetadataStore, CALLER_DEFAULT_ORG,
+          makeSessionManager(), producer as never,
+          { getSettings: async () => ({ models: ["test-provider/test-model"] }) } as never,
+        );
+        expect((await postCreate(app, { thread: "initiator", userId: "routing-only" }, { "x-lobu-org": AGENT_ORG })).status).toBe(201);
+        const session = sessions.getStored();
+        if (!session) throw new Error("Missing initiator session");
+        const request = {
+          session,
+          headers: { "content-type": "application/json", "x-lobu-org": AGENT_ORG } as Record<string, string>,
+          url: `/api/v1/agents/${encodeURIComponent(session.conversationId)}/messages`,
+        };
+        setAuthProvider(caller.auth);
+        await caller.setup?.(request);
+        const send = () => app.request(request.url, {
+          method: "POST", headers: request.headers,
+          body: JSON.stringify({ content: "hello", messageId: "frozen-actor", actorUserId: MEMBER_ID }),
+        });
+        const sent = await send();
+        expect(sent.status).toBe(caller.expectedStatus);
+        if (caller.expectedStatus !== 200) {
+          expect(await getDb()`SELECT id FROM runs WHERE queue_name = 'messages'`).toHaveLength(0);
+          return;
+        }
+        const expectedUser = caller.expectedUser;
+        const sql = getDb();
+        const read = () => sql`SELECT id, initiator_kind, initiator_ref, created_by_user_id FROM runs
+          WHERE organization_id = ${AGENT_ORG} AND queue_name = 'messages' AND action_input->>'messageId' = 'frozen-actor'`;
+        const [admitted] = await read();
+        expect(admitted).toMatchObject(expectedUser ? {
+          initiator_kind: "user", initiator_ref: { user_id: expectedUser }, created_by_user_id: expectedUser,
+        } : { initiator_kind: null, initiator_ref: null, created_by_user_id: null });
+        const repeatAs = caller.repeatAs;
+        if (repeatAs) {
+          // A later duplicate from another authorized person cannot retag the first admission.
+          setAuthProvider(() => sessionFor(repeatAs));
+          expect((await send()).status).toBe(200);
+          expect(await read()).toEqual([admitted]);
+        }
+      } finally {
+        await producer.stop();
+        await queue.stop();
+      }
+    });
+  }
+
   for (const source of ["direct-api", "automation_run"] as const) {
     test(`${source} preserves org-scoped settings without forwarding MCP grants`, async () => {
       const enqueued: Array<Record<string, unknown>> = [];
@@ -278,6 +369,81 @@ describe("POST /api/v1/agents — org member using an agent they don't own", () 
       expect(enqueued[0]).not.toHaveProperty("preApprovedTools");
       expect(enqueued[0]?.agentOptions).not.toHaveProperty("preApprovedTools");
       expect(enqueued[0]?.organizationId).toBe(AGENT_ORG);
+    });
+  }
+
+  // A worker token names an agent, not a user, so it adds no `user.id`.
+  for (const caller of ["auth bridge", "settings session", "worker token"] as const) {
+    test(`the message_received span names the principal and the agent's org (${caller})`, async () => {
+      const exporter = new InMemorySpanExporter();
+      await shutdownTracing();
+      initTracing({
+        serviceName: "lobu-server-test",
+        spanProcessors: [new SimpleSpanProcessor(exporter)],
+      });
+      try {
+        setAuthProvider(() => sessionFor(MEMBER_ID));
+        const { app, sessions } = makeApp(
+          userAgentsStore,
+          agentMetadataStore,
+          CALLER_DEFAULT_ORG,
+          makeSessionManager(),
+          { enqueueMessage: async () => "span-job" } as never,
+          { getSettings: async () => ({ models: ["test-provider/test-model"] }) } as never,
+        );
+        const created = await postCreate(app, { thread: "span-thread" }, {
+          "x-lobu-org": AGENT_ORG,
+        });
+        expect(created.status).toBe(201);
+        const session = sessions.getStored();
+        if (!session) throw new Error("Missing span session");
+
+        // "auth bridge": the principal production's `createLobuAuthBridge`
+        // sets. "settings session": only the agent API's own auth check
+        // (`authContext`) knows the caller.
+        const authenticated = new Hono();
+        authenticated.use("*", async (c, next) => {
+          if (caller === "auth bridge") {
+            c.set("user", {
+              id: MEMBER_ID,
+              name: "Member",
+              email: "member@agent-use.test",
+              emailVerified: true,
+            });
+          }
+          return next();
+        });
+        authenticated.route("/", app);
+        const headers: Record<string, string> = {
+          "content-type": "application/json",
+          "x-lobu-org": AGENT_ORG,
+        };
+        if (caller === "worker token") {
+          setAuthProvider(null);
+          headers.authorization = `Bearer ${generateWorkerToken(
+            AGENT_ID,
+            session.conversationId,
+            "span-deployment",
+            { channelId: "api", agentId: AGENT_ID, organizationId: AGENT_ORG, platform: "api" },
+          )}`;
+        }
+        const sent = await authenticated.request(
+          `/api/v1/agents/${encodeURIComponent(session.conversationId)}/messages`,
+          { method: "POST", headers, body: JSON.stringify({ content: "hello" }) },
+        );
+        expect(sent.status).toBe(200);
+        const spans = exporter
+          .getFinishedSpans()
+          .filter((span) => span.name === "message_received");
+        expect(spans).toHaveLength(1);
+        // The caller's ambient default org is not the tenant the turn runs in.
+        expect(spans[0]?.attributes["lobu.org_id"]).toBe(AGENT_ORG);
+        expect(spans[0]?.attributes["user.id"]).toBe(
+          caller === "worker token" ? undefined : MEMBER_ID,
+        );
+      } finally {
+        await shutdownTracing();
+      }
     });
   }
 
@@ -433,6 +599,78 @@ describe("POST /api/v1/agents — org member using an agent they don't own", () 
     expect(shared.store.get(outsiderOrgKey)?.organizationId).toBe(OUTSIDER_ORG);
     expect(shared.store.size).toBe(2);
   });
+
+  // Agent ownership (`agent_users`) authorizes chat without workspace
+  // membership, and every direct-API turn is auto-injected with a workspace
+  // attention digest. That digest must be read as the CALLER may see the
+  // agent's org: a member keeps the full org activity, an owner who is not a
+  // member reads it as a public reader and never sees another member's private
+  // connection name or error snippet.
+  for (const reader of [
+    { caller: "member", userId: MEMBER_ID, seesPrivate: true },
+    { caller: "non-member agent owner", userId: "user-nonmember-owner-attention", seesPrivate: false },
+  ] as const) {
+    test(`attention digest honors private connections (${reader.caller})`, async () => {
+      const sql = getDb();
+      await orgContext.run({ organizationId: AGENT_ORG }, () =>
+        userAgentsStore.addAgent("external", "user-nonmember-owner-attention", AGENT_ID)
+      );
+      for (const conn of [
+        { slug: "attention-private", name: "Admin Private Inbox", visibility: "private", error: "private-error-snippet" },
+        { slug: "attention-shared", name: "Shared Tracker", visibility: "org", error: "shared-error-snippet" },
+      ]) {
+        const [row] = await sql<{ id: number }>`
+          INSERT INTO connections (organization_id, connector_key, slug, display_name, status, config, visibility, created_by)
+          VALUES (${AGENT_ORG}, 'github', ${conn.slug}, ${conn.name}, 'active', ${sql.json({})}, ${conn.visibility}, ${ADMIN_ID})
+          RETURNING id
+        `;
+        await sql`
+          INSERT INTO runs (organization_id, run_type, connection_id, connector_key, status, error_message)
+          VALUES (${AGENT_ORG}, 'sync', ${row?.id}, 'github', 'failed', ${conn.error})
+        `;
+      }
+      const enqueued: Array<Record<string, unknown>> = [];
+      setAuthProvider(() => sessionFor(reader.userId));
+      const { app, sessions } = makeApp(
+        userAgentsStore,
+        agentMetadataStore,
+        CALLER_DEFAULT_ORG,
+        makeSessionManager(),
+        {
+          enqueueMessage: async (payload: Record<string, unknown>) => {
+            enqueued.push(payload);
+            return "attention-job";
+          },
+        } as never,
+      );
+      const created = await postCreate(app, { thread: "attention" }, { "x-lobu-org": AGENT_ORG });
+      expect(created.status).toBe(201);
+      const session = sessions.getStored();
+      expect(session?.organizationId).toBe(AGENT_ORG);
+      if (!session) throw new Error("Missing attention session");
+
+      const sent = await app.request(
+        `/api/v1/agents/${encodeURIComponent(session.conversationId)}/messages`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-lobu-org": AGENT_ORG },
+          body: JSON.stringify({ content: "What needs attention?" }),
+        },
+      );
+      expect(sent.status).toBe(200);
+      expect(enqueued).toHaveLength(1);
+      const digest = String(enqueued[0]?.ephemeralContext ?? "");
+      expect(digest).toContain("Shared Tracker");
+      expect(digest).toContain("shared-error-snippet");
+      if (reader.seesPrivate) {
+        expect(digest).toContain("Admin Private Inbox");
+        expect(digest).toContain("private-error-snippet");
+      } else {
+        expect(digest).not.toContain("Admin Private Inbox");
+        expect(digest).not.toContain("private-error-snippet");
+      }
+    });
+  }
 
   test("the agent's owner is still authorized (regression)", async () => {
     setAuthProvider(() => sessionFor(AGENT_OWNER_ID));

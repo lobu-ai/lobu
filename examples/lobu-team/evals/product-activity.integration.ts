@@ -9,7 +9,10 @@ import {
   seedOwnerContext,
 } from "../../../packages/server/src/__tests__/setup/test-fixtures";
 import { recordMcpConversationActivity } from "../../../packages/server/src/lobu/stores/mcp-client-conversations";
-import { recordToolInvocationAudit } from "../../../packages/server/src/tools/audit";
+import {
+  recordToolInvocationAudit,
+  recordWorkspaceActivityAudit,
+} from "../../../packages/server/src/tools/audit";
 import config from "../lobu.config";
 
 const query = config.connections?.find(
@@ -89,8 +92,8 @@ it("lets the durable cursor catch up after more than a day offline", async () =>
   expect(await activity("MCP activity")).toHaveLength(1);
 });
 
-it("includes failed SDK outcomes even when transport succeeded, without successful calls", async () => {
-  const { ctx, user } = await seedOwnerContext();
+it("includes one failed SDK outcome across workspace mirrors, without successful calls", async () => {
+  const { ctx, user, org } = await seedOwnerContext();
   const account = { ...ctx, organizationId: null };
   await recordToolInvocationAudit({
     ctx: account,
@@ -101,6 +104,14 @@ it("includes failed SDK outcomes even when transport succeeded, without successf
       success: false,
       error: { name: "TimeoutError", message: "Synthetic timeout" },
     },
+  });
+  await recordWorkspaceActivityAudit({
+    ctx: {
+      ...account,
+      workspaceActivity: new Map([[org.id, new Set(["entities.list"])]]),
+    },
+    toolName: "run_sdk",
+    failed: true,
   });
   await recordToolInvocationAudit({
     ctx: account,

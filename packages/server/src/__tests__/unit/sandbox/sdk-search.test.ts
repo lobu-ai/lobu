@@ -49,8 +49,8 @@ describe("sdkSearch", () => {
 		},
 	);
 
-	it("discovers the component kit by a component name", async () => {
-		const result = await sdkSearch({ query: "DataTable" }, stubEnv, adminCtx);
+	it.each(["DataTable", "AutomationDefinition", "AgentDefinition", "ConnectorDefinition"])("discovers the component kit by %s", async (query) => {
+		const result = await sdkSearch({ query }, stubEnv, adminCtx);
 		const view = result.results.find((entry) => entry.startsWith("views.set"));
 		expect(view).toContain("@lobu/views/components");
 	});

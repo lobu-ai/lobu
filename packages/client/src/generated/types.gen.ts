@@ -458,7 +458,7 @@ export type SaveMemoryResponse = SaveMemoryResponses[keyof SaveMemoryResponses];
 export type SearchSdkData = {
   body: {
     /**
-     * SDK method or runtime-helper discovery query. Use a namespace (e.g. 'automations'), one or more dotted paths separated by whitespace (e.g. 'automations.create ctx.sleep'), an optional client. prefix, or free text. Pass mode='read' for query_sdk-safe methods only; omit mode for your full run_sdk tier. Namespaces: agents, authProfiles, automations, catalog, classifiers, connections, conversations, ctx, devices, entities, entitySchema, feeds, knowledge, metrics, notifications, operations, organizations, schedules, views.
+     * SDK method or runtime-helper discovery query. Use a namespace (e.g. 'automations'), one or more dotted paths separated by whitespace (e.g. 'automations.create ctx.sleep'), an optional client. prefix, or free text. Pass mode='read' for query_sdk-safe methods only; omit mode for your full run_sdk tier. Namespaces: agents, authProfiles, automations, catalog, classifiers, connections, conversations, ctx, devices, entities, entitySchema, feeds, inferenceProviders, knowledge, metrics, notifications, operations, organizations, schedules, views.
      */
     query: string;
     /**
@@ -1106,6 +1106,24 @@ export type ManageEntityData = {
   body:
     | {
         /**
+         * Fetch one entity.
+         */
+        action: "get";
+        /**
+         * A stored integer ID, or a source key. String IDs require the accompanying entity_type; keys are case-sensitive and never coerced to integers.
+         */
+        entity_id: number | string;
+        /**
+         * [get/list_links and relationship endpoints] A local type slug or discovered numeric type ID. Other actions require a slug. Foreign IDs allow only public-record reads, not workspace access.
+         */
+        entity_type?: string | number;
+        /**
+         * [get] Return the entity even if it is soft-deleted (deleted_at set). [list_links] Include soft-deleted relationships.
+         */
+        include_deleted?: boolean;
+      }
+    | {
+        /**
          * Create an entity of a given type.
          */
         action: "create";
@@ -1197,6 +1215,12 @@ export type ManageEntityData = {
          */
         manual_edit?: boolean;
         /**
+         * [update] Metadata field name -> the value the caller last read. Checked against the live row under the update's row lock: if any field differs, nothing is written (no field changes, ownership markers, events or approvals) and the update fails with 409 PRECONDITION_FAILED listing the field names in mismatched_fields. Values compare structurally (object key order is ignored); null matches a field that was never set. Metadata fields only (not name, content, slug or parent_id); at most 50 keys.
+         */
+        expected?: {
+          [key: string]: unknown;
+        };
+        /**
          * Attribution source when mutation is triggered by an Automation reaction
          */
         automation_source?: {
@@ -1275,24 +1299,6 @@ export type ManageEntityData = {
       }
     | {
         /**
-         * Fetch one entity.
-         */
-        action: "get";
-        /**
-         * A stored integer ID, or a source key. String IDs require the accompanying entity_type; keys are case-sensitive and never coerced to integers.
-         */
-        entity_id: number | string;
-        /**
-         * Entity type as defined in your workspace
-         */
-        entity_type?: string;
-        /**
-         * [get] Return the entity even if it is soft-deleted (deleted_at set). [list_links] Include soft-deleted relationships.
-         */
-        include_deleted?: boolean;
-      }
-    | {
-        /**
          * Delete an entity (force_delete_tree for cascading).
          */
         action: "delete";
@@ -1344,13 +1350,13 @@ export type ManageEntityData = {
          */
         to_entity_id: number | string;
         /**
-         * Entity type as defined in your workspace
+         * [get/list_links and relationship endpoints] A local type slug or discovered numeric type ID. Other actions require a slug. Foreign IDs allow only public-record reads, not workspace access.
          */
-        from_entity_type?: string;
+        from_entity_type?: string | number;
         /**
-         * Entity type as defined in your workspace
+         * [get/list_links and relationship endpoints] A local type slug or discovered numeric type ID. Other actions require a slug. Foreign IDs allow only public-record reads, not workspace access.
          */
-        to_entity_type?: string;
+        to_entity_type?: string | number;
         /**
          * [link/unlink/update_link/list_links] Relationship type slug
          */
@@ -1418,13 +1424,13 @@ export type ManageEntityData = {
          */
         to_entity_id?: number | string;
         /**
-         * Entity type as defined in your workspace
+         * [get/list_links and relationship endpoints] A local type slug or discovered numeric type ID. Other actions require a slug. Foreign IDs allow only public-record reads, not workspace access.
          */
-        from_entity_type?: string;
+        from_entity_type?: string | number;
         /**
-         * Entity type as defined in your workspace
+         * [get/list_links and relationship endpoints] A local type slug or discovered numeric type ID. Other actions require a slug. Foreign IDs allow only public-record reads, not workspace access.
          */
-        to_entity_type?: string;
+        to_entity_type?: string | number;
         /**
          * [link/unlink/update_link/list_links] Relationship type slug
          */
@@ -1448,13 +1454,13 @@ export type ManageEntityData = {
          */
         to_entity_id?: number | string;
         /**
-         * Entity type as defined in your workspace
+         * [get/list_links and relationship endpoints] A local type slug or discovered numeric type ID. Other actions require a slug. Foreign IDs allow only public-record reads, not workspace access.
          */
-        from_entity_type?: string;
+        from_entity_type?: string | number;
         /**
-         * Entity type as defined in your workspace
+         * [get/list_links and relationship endpoints] A local type slug or discovered numeric type ID. Other actions require a slug. Foreign IDs allow only public-record reads, not workspace access.
          */
-        to_entity_type?: string;
+        to_entity_type?: string | number;
         /**
          * [link/unlink/update_link/list_links] Relationship type slug
          */
@@ -1484,9 +1490,9 @@ export type ManageEntityData = {
          */
         entity_id?: number | string;
         /**
-         * Entity type as defined in your workspace
+         * [get/list_links and relationship endpoints] A local type slug or discovered numeric type ID. Other actions require a slug. Foreign IDs allow only public-record reads, not workspace access.
          */
-        entity_type?: string;
+        entity_type?: string | number;
         /**
          * [list_links] A record of a source-backed entity type, instead of entity_id. Its relationships are read live from the event kinds that declare them; stores nothing.
          */
@@ -1604,6 +1610,7 @@ export type ManageEntityResponses = {
             root_id: number;
             member_ids: Array<number>;
           };
+          entity_type_id?: number;
           entity_type: string;
           name: string;
           slug: string;
@@ -1644,6 +1651,7 @@ export type ManageEntityResponses = {
             root_id: number;
             member_ids: Array<number>;
           };
+          entity_type_id?: number;
           entity_type: string;
           name: string;
           slug: string;
@@ -1684,6 +1692,7 @@ export type ManageEntityResponses = {
             root_id: number;
             member_ids: Array<number>;
           };
+          entity_type_id?: number;
           entity_type: string;
           name: string;
           slug: string;
@@ -1734,6 +1743,7 @@ export type ManageEntityResponses = {
             root_id: number;
             member_ids: Array<number>;
           };
+          entity_type_id?: number;
           entity_type: string;
           name: string;
           slug: string;
@@ -1817,6 +1827,10 @@ export type ManageEntityResponses = {
           relationship_type_name: string;
           is_symmetric: boolean;
           acl_managed: boolean;
+          from_entity_type_id?: number;
+          to_entity_type_id?: number;
+          from_entity_url?: string;
+          to_entity_url?: string;
           from_entity_name?: string;
           from_entity_slug?: string;
           from_entity_type?: string;
@@ -1853,6 +1867,10 @@ export type ManageEntityResponses = {
           relationship_type_name: string;
           is_symmetric: boolean;
           acl_managed: boolean;
+          from_entity_type_id?: number;
+          to_entity_type_id?: number;
+          from_entity_url?: string;
+          to_entity_url?: string;
           from_entity_name?: string;
           from_entity_slug?: string;
           from_entity_type?: string;
@@ -1913,6 +1931,10 @@ export type ManageEntityResponses = {
           relationship_type_name: string;
           is_symmetric: boolean;
           acl_managed: boolean;
+          from_entity_type_id?: number;
+          to_entity_type_id?: number;
+          from_entity_url?: string;
+          to_entity_url?: string;
           from_entity_name?: string;
           from_entity_slug?: string;
           from_entity_type?: string;
@@ -1978,6 +2000,10 @@ export type ManageEntityResponses = {
           relationship_type_name: string;
           is_symmetric: boolean;
           acl_managed: boolean;
+          from_entity_type_id?: number;
+          to_entity_type_id?: number;
+          from_entity_url?: string;
+          to_entity_url?: string;
           from_entity_name?: string;
           from_entity_slug?: string;
           from_entity_type?: string;
@@ -2057,7 +2083,7 @@ export type ManageEntitySchemaData = {
       | "remove_rule"
       | "list_rules";
     /**
-     * [get/create/update/delete/audit/add_rule/remove_rule/list_rules] Type slug
+     * [get/create/update/delete/audit/add_rule/remove_rule/list_rules] Type slug. `list_rules` also accepts none, which returns every rule the caller can see.
      */
     slug?: string;
     /**
@@ -3762,7 +3788,7 @@ export type ManageAgentsData = {
          */
         identity_md?: string;
         /**
-         * [create/update] Default model as an explicit "<provider>/<model>" ref (e.g. "anthropic/claude-sonnet-5"). Validated against the org's connected providers. Without it the agent inherits the org default model; if the org has none the agent is not runnable. Pass an empty string to clear it and fall back to the org default.
+         * [create/update] Default model (updates preserve the existing fallback entries) as an explicit "<provider>/<model>" ref (e.g. "anthropic/claude-sonnet-5"). Validated against the org's connected providers. Without it the agent inherits the org default model; if the org has none the agent is not runnable. Pass an empty string to clear it and fall back to the org default.
          */
         default_model?: string;
       }
@@ -3788,9 +3814,60 @@ export type ManageAgentsData = {
          */
         identity_md?: string;
         /**
-         * [create/update] Default model as an explicit "<provider>/<model>" ref (e.g. "anthropic/claude-sonnet-5"). Validated against the org's connected providers. Without it the agent inherits the org default model; if the org has none the agent is not runnable. Pass an empty string to clear it and fall back to the org default.
+         * [create/update] Default model (updates preserve the existing fallback entries) as an explicit "<provider>/<model>" ref (e.g. "anthropic/claude-sonnet-5"). Validated against the org's connected providers. Without it the agent inherits the org default model; if the org has none the agent is not runnable. Pass an empty string to clear it and fall back to the org default.
          */
         default_model?: string;
+        /**
+         * Canonical agent settings patch. Omitted keys preserve stored values; supplied settings replace that top-level value. Empty strings/arrays/objects clear where allowed. Identity is written through identity_md.
+         */
+        settings?: {
+          models?: Array<string>;
+          networkConfig?: {
+            allowedDomains?: Array<string>;
+            deniedDomains?: Array<string>;
+          };
+          nixConfig?: {
+            flakeUrl?: string;
+            packages?: Array<string>;
+          };
+          soulMd?: string;
+          userMd?: string;
+          skillsConfig?: {
+            skills: Array<{
+              repo: string;
+              name: string;
+              description?: string;
+              instructions?: string;
+              enabled: boolean;
+              system?: boolean;
+              content?: string;
+              modelPreference?: string;
+              thinkingLevel?: "off" | "low" | "medium" | "high";
+            }>;
+          };
+          guardrails?: Array<string>;
+          guardrailsInline?: Array<{
+            name: string;
+            enabled: boolean;
+            stage: "input" | "output" | "pre-tool" | "egress";
+            kind?: "judge" | "require-tool";
+            policy?: string;
+            model?: string;
+            tools?: Array<string>;
+            domains?: Array<string>;
+          }>;
+          sandboxId?: string;
+          verboseLogging?: boolean;
+          showToolCalls?: boolean;
+          starters?: Array<{
+            title: string;
+            message: string;
+          }>;
+        };
+        /**
+         * Opaque agent configuration revision returned by agents.get. A stale expected_revision rejects the entire update with 409 before any write or approval is queued. Omit for an unconditional update.
+         */
+        expected_revision?: string;
       }
     | {
         /**
@@ -3839,9 +3916,323 @@ export type ManageAgentsResponses = {
   /**
    * Successful response
    */
-  200: {
-    [key: string]: unknown;
-  };
+  200:
+    | {
+        action: "list";
+        agents: Array<{
+          id: string;
+          name: string;
+          description: string | null;
+          owner_platform: string | null;
+          owner_user_id: string | null;
+          created_at: string;
+          last_used_at: string | null;
+        }>;
+      }
+    | {
+        action: "get";
+        agent: {
+          id: string;
+          name: string;
+          description: string | null;
+          owner_platform: string | null;
+          owner_user_id: string | null;
+          created_at: string;
+          last_used_at: string | null;
+        };
+        model: {
+          /**
+           * Configured model ref before provider fallback, or null when none resolves.
+           */
+          effective_model: string | null;
+          source: "agent" | "org_default" | "none";
+          /**
+           * No model resolves or provider preflight rejects every candidate. False does not guarantee a successful run or describe device-local execution.
+           */
+          not_runnable: boolean;
+        };
+        settings: {
+          models?: Array<string>;
+          networkConfig?: {
+            allowedDomains?: Array<string>;
+            deniedDomains?: Array<string>;
+          };
+          nixConfig?: {
+            flakeUrl?: string;
+            packages?: Array<string>;
+          };
+          soulMd?: string;
+          userMd?: string;
+          identityMd?: string;
+          skillsConfig?: {
+            skills: Array<{
+              repo: string;
+              name: string;
+              description?: string;
+              instructions?: string;
+              enabled: boolean;
+              system?: boolean;
+              content?: string;
+              modelPreference?: string;
+              thinkingLevel?: "off" | "low" | "medium" | "high";
+            }>;
+          };
+          guardrails?: Array<string>;
+          guardrailsInline?: Array<{
+            name: string;
+            enabled: boolean;
+            stage: "input" | "output" | "pre-tool" | "egress";
+            kind?: "judge" | "require-tool";
+            policy?: string;
+            model?: string;
+            tools?: Array<string>;
+            domains?: Array<string>;
+          }>;
+          sandboxId?: string;
+          verboseLogging?: boolean;
+          showToolCalls?: boolean;
+          starters?: Array<{
+            title: string;
+            message: string;
+          }>;
+          updatedAt: number;
+        };
+        /**
+         * Opaque agent configuration revision returned by agents.get. A stale expected_revision rejects the entire update with 409 before any write or approval is queued. Omit for an unconditional update.
+         */
+        revision: string;
+      }
+    | {
+        action: "create";
+        /**
+         * Agent ID (lowercase slug, e.g. "support").
+         */
+        agent_id: string;
+        created: boolean;
+        model: {
+          /**
+           * Configured model ref before provider fallback, or null when none resolves.
+           */
+          effective_model: string | null;
+          source: "agent" | "org_default" | "none";
+          /**
+           * No model resolves or provider preflight rejects every candidate. False does not guarantee a successful run or describe device-local execution.
+           */
+          not_runnable: boolean;
+        };
+      }
+    | {
+        action: "update";
+        /**
+         * Agent ID (lowercase slug, e.g. "support").
+         */
+        agent_id: string;
+        updated_fields: Array<string>;
+        /**
+         * Fields skipped because they changed since approval was requested.
+         */
+        skipped_fields?: Array<string>;
+        model?: {
+          /**
+           * Configured model ref before provider fallback, or null when none resolves.
+           */
+          effective_model: string | null;
+          source: "agent" | "org_default" | "none";
+          /**
+           * No model resolves or provider preflight rejects every candidate. False does not guarantee a successful run or describe device-local execution.
+           */
+          not_runnable: boolean;
+        };
+      }
+    | {
+        action: "delete";
+        /**
+         * Agent ID (lowercase slug, e.g. "support").
+         */
+        agent_id: string;
+        deleted: boolean;
+      }
+    | {
+        action: "create" | "update" | "delete";
+        run_id: number;
+        event_id?: number;
+        status: "pending_approval";
+        message: string;
+        proposal: {
+          /**
+           * Agent ID (lowercase slug, e.g. "support").
+           */
+          agent_id: string;
+          /**
+           * [create/update] Display name for the agent.
+           */
+          name?: string;
+          /**
+           * [create/update] Agent description.
+           */
+          description?: string;
+          /**
+           * [create/update] Agent identity / system prompt (Markdown).
+           */
+          identity_md?: string;
+          /**
+           * [create/update] Default model (updates preserve the existing fallback entries) as an explicit "<provider>/<model>" ref (e.g. "anthropic/claude-sonnet-5"). Validated against the org's connected providers. Without it the agent inherits the org default model; if the org has none the agent is not runnable. Pass an empty string to clear it and fall back to the org default.
+           */
+          default_model?: string;
+          /**
+           * Canonical agent settings patch. Omitted keys preserve stored values; supplied settings replace that top-level value. Empty strings/arrays/objects clear where allowed. Identity is written through identity_md.
+           */
+          settings?: {
+            models?: Array<string>;
+            networkConfig?: {
+              allowedDomains?: Array<string>;
+              deniedDomains?: Array<string>;
+            };
+            nixConfig?: {
+              flakeUrl?: string;
+              packages?: Array<string>;
+            };
+            soulMd?: string;
+            userMd?: string;
+            skillsConfig?: {
+              skills: Array<{
+                repo: string;
+                name: string;
+                description?: string;
+                instructions?: string;
+                enabled: boolean;
+                system?: boolean;
+                content?: string;
+                modelPreference?: string;
+                thinkingLevel?: "off" | "low" | "medium" | "high";
+              }>;
+            };
+            guardrails?: Array<string>;
+            guardrailsInline?: Array<{
+              name: string;
+              enabled: boolean;
+              stage: "input" | "output" | "pre-tool" | "egress";
+              kind?: "judge" | "require-tool";
+              policy?: string;
+              model?: string;
+              tools?: Array<string>;
+              domains?: Array<string>;
+            }>;
+            sandboxId?: string;
+            verboseLogging?: boolean;
+            showToolCalls?: boolean;
+            starters?: Array<{
+              title: string;
+              message: string;
+            }>;
+          };
+          action: "create" | "update" | "delete";
+          base?: {
+            name?: string | null;
+            description?: string | null;
+            identity_md?: string | null;
+            default_model?: string | null;
+            settings?: {
+              models?: Array<string> | null;
+              networkConfig?: {
+                allowedDomains?: Array<string>;
+                deniedDomains?: Array<string>;
+              } | null;
+              nixConfig?: {
+                flakeUrl?: string;
+                packages?: Array<string>;
+              } | null;
+              soulMd?: string | null;
+              userMd?: string | null;
+              skillsConfig?: {
+                skills: Array<{
+                  repo: string;
+                  name: string;
+                  description?: string;
+                  instructions?: string;
+                  enabled: boolean;
+                  system?: boolean;
+                  content?: string;
+                  modelPreference?: string;
+                  thinkingLevel?: "off" | "low" | "medium" | "high";
+                }>;
+              } | null;
+              guardrails?: Array<string> | null;
+              guardrailsInline?: Array<{
+                name: string;
+                enabled: boolean;
+                stage: "input" | "output" | "pre-tool" | "egress";
+                kind?: "judge" | "require-tool";
+                policy?: string;
+                model?: string;
+                tools?: Array<string>;
+                domains?: Array<string>;
+              }> | null;
+              sandboxId?: string | null;
+              verboseLogging?: boolean | null;
+              showToolCalls?: boolean | null;
+              starters?: Array<{
+                title: string;
+                message: string;
+              }> | null;
+            };
+          };
+        };
+        current: {
+          id?: string;
+          name?: string;
+          description?: string | null;
+          owner_platform?: string | null;
+          owner_user_id?: string | null;
+          created_at?: string;
+          last_used_at?: string | null;
+          identity_md?: string | null;
+          settings?: {
+            models?: Array<string> | null;
+            networkConfig?: {
+              allowedDomains?: Array<string>;
+              deniedDomains?: Array<string>;
+            } | null;
+            nixConfig?: {
+              flakeUrl?: string;
+              packages?: Array<string>;
+            } | null;
+            soulMd?: string | null;
+            userMd?: string | null;
+            skillsConfig?: {
+              skills: Array<{
+                repo: string;
+                name: string;
+                description?: string;
+                instructions?: string;
+                enabled: boolean;
+                system?: boolean;
+                content?: string;
+                modelPreference?: string;
+                thinkingLevel?: "off" | "low" | "medium" | "high";
+              }>;
+            } | null;
+            guardrails?: Array<string> | null;
+            guardrailsInline?: Array<{
+              name: string;
+              enabled: boolean;
+              stage: "input" | "output" | "pre-tool" | "egress";
+              kind?: "judge" | "require-tool";
+              policy?: string;
+              model?: string;
+              tools?: Array<string>;
+              domains?: Array<string>;
+            }> | null;
+            sandboxId?: string | null;
+            verboseLogging?: boolean | null;
+            showToolCalls?: boolean | null;
+            starters?: Array<{
+              title: string;
+              message: string;
+            }> | null;
+          };
+        } | null;
+      };
 };
 
 export type ManageAgentsResponse =
@@ -3984,6 +4375,10 @@ export type ManageFeedsData = {
          * Filter by runtime health for active feeds on non-paused connections; paused feeds and feeds on paused connections are excluded. 'failing' = last sync failed or the feed has one or more consecutive failures; 'healthy' = otherwise. Surfaces active-but-failing feeds the `status` filter cannot.
          */
         health?: "healthy" | "failing";
+        /**
+         * Add `event_count`, each feed's stored events. Counting takes seconds on a busy connection, so it is off by default; ask for it only when you show the number.
+         */
+        include_event_count?: boolean;
         /**
          * Page size (default: 50, max: 500)
          */
@@ -4277,6 +4672,271 @@ export type ManageFeedsResponses = {
 
 export type ManageFeedsResponse =
   ManageFeedsResponses[keyof ManageFeedsResponses];
+
+export type ManageInferenceProvidersData = {
+  body:
+    | {
+        /**
+         * List this organization's inference providers with health metadata; credentials are never returned.
+         */
+        action: "list";
+      }
+    | {
+        /**
+         * Add an org-shared API-key provider; the key is stored in the credential vault. OAuth providers sign in interactively instead.
+         */
+        action: "create";
+        /**
+         * Provider slug: 1–63 lowercase letters, digits or hyphens; no leading/trailing hyphen.
+         */
+        slug: string;
+        kind: string;
+        displayName?: string;
+        apiKey: string;
+        capabilities?: {
+          text?: {
+            base_url?: string;
+            model?: string;
+            models_endpoint?: string;
+          };
+          image?: {
+            base_url?: string;
+            model?: string;
+            models_endpoint?: string;
+          };
+          stt?: {
+            base_url?: string;
+            model?: string;
+            models_endpoint?: string;
+          };
+          tts?: {
+            base_url?: string;
+            model?: string;
+            models_endpoint?: string;
+          };
+        };
+      }
+    | {
+        /**
+         * Rename a provider; slug and kind are immutable.
+         */
+        action: "update";
+        /**
+         * Provider slug: 1–63 lowercase letters, digits or hyphens; no leading/trailing hyphen.
+         */
+        slug: string;
+        displayName?: string;
+      }
+    | {
+        /**
+         * Make this provider the organization default model source; it needs a text model and an org-shared API key.
+         */
+        action: "set_default";
+        /**
+         * Provider slug: 1–63 lowercase letters, digits or hyphens; no leading/trailing hyphen.
+         */
+        slug: string;
+      }
+    | {
+        /**
+         * Replace one modality's capability block (base_url, model, models_endpoint); other modalities are kept.
+         */
+        action: "set_capability";
+        /**
+         * Provider slug: 1–63 lowercase letters, digits or hyphens; no leading/trailing hyphen.
+         */
+        slug: string;
+        modality: "text" | "image" | "stt" | "tts";
+        block: {
+          base_url?: string;
+          model?: string;
+          models_endpoint?: string;
+        };
+      }
+    | {
+        /**
+         * Replace the provider's API key in the vault; the value is never echoed or audited.
+         */
+        action: "rotate_key";
+        /**
+         * Provider slug: 1–63 lowercase letters, digits or hyphens; no leading/trailing hyphen.
+         */
+        slug: string;
+        value: string;
+      }
+    | {
+        /**
+         * Soft-delete a provider; if it was the default, the oldest remaining runnable provider is promoted.
+         */
+        action: "delete";
+        /**
+         * Provider slug: 1–63 lowercase letters, digits or hyphens; no leading/trailing hyphen.
+         */
+        slug: string;
+      };
+  path: {
+    /**
+     * Organization slug (workspace identifier)
+     */
+    orgSlug: string;
+  };
+  query?: never;
+  url: "/api/{orgSlug}/manage_inference_providers";
+};
+
+export type ManageInferenceProvidersErrors = {
+  /**
+   * Bad request - invalid parameters
+   */
+  400: {
+    error?: string;
+  };
+  /**
+   * Forbidden - your role or token scope does not allow this action
+   */
+  403: {
+    error?: string;
+  };
+  /**
+   * Tool not found
+   */
+  404: {
+    error?: string;
+  };
+};
+
+export type ManageInferenceProvidersError =
+  ManageInferenceProvidersErrors[keyof ManageInferenceProvidersErrors];
+
+export type ManageInferenceProvidersResponses = {
+  /**
+   * Successful response
+   */
+  200:
+    | {
+        providers: Array<{
+          id: number;
+          slug: string;
+          kind: string;
+          displayName: string | null;
+          capabilities: {
+            text?: {
+              base_url?: string;
+              model?: string;
+              models_endpoint?: string;
+            };
+            image?: {
+              base_url?: string;
+              model?: string;
+              models_endpoint?: string;
+            };
+            stt?: {
+              base_url?: string;
+              model?: string;
+              models_endpoint?: string;
+            };
+            tts?: {
+              base_url?: string;
+              model?: string;
+              models_endpoint?: string;
+            };
+          };
+          hasCustomUpstream: boolean;
+          status: string;
+          createdAt: string;
+          /**
+           * Most recent terminal provider failure, or null.
+           */
+          errorMessage: string | null;
+          /**
+           * When provider configuration or health last changed.
+           */
+          updatedAt: string;
+          /**
+           * Whether this row supplies the organization default model.
+           */
+          isDefault: boolean;
+        }>;
+      }
+    | {
+        provider: {
+          id: number;
+          slug: string;
+          kind: string;
+          displayName: string | null;
+          capabilities: {
+            text?: {
+              base_url?: string;
+              model?: string;
+              models_endpoint?: string;
+            };
+            image?: {
+              base_url?: string;
+              model?: string;
+              models_endpoint?: string;
+            };
+            stt?: {
+              base_url?: string;
+              model?: string;
+              models_endpoint?: string;
+            };
+            tts?: {
+              base_url?: string;
+              model?: string;
+              models_endpoint?: string;
+            };
+          };
+          hasCustomUpstream: boolean;
+          status: string;
+          createdAt: string;
+          isDefault: boolean;
+        };
+      }
+    | {
+        provider: {
+          id: number;
+          slug: string;
+          kind: string;
+          displayName: string | null;
+          capabilities: {
+            text?: {
+              base_url?: string;
+              model?: string;
+              models_endpoint?: string;
+            };
+            image?: {
+              base_url?: string;
+              model?: string;
+              models_endpoint?: string;
+            };
+            stt?: {
+              base_url?: string;
+              model?: string;
+              models_endpoint?: string;
+            };
+            tts?: {
+              base_url?: string;
+              model?: string;
+              models_endpoint?: string;
+            };
+          };
+          hasCustomUpstream: boolean;
+          status: string;
+          createdAt: string;
+        };
+      }
+    | {
+        success: true;
+        slug: string;
+        isDefault: true;
+      }
+    | {
+        success: true;
+      };
+};
+
+export type ManageInferenceProvidersResponse =
+  ManageInferenceProvidersResponses[keyof ManageInferenceProvidersResponses];
 
 export type ManageAuthProfilesData = {
   body:
@@ -5367,7 +6027,7 @@ export type ManageAutomationsData = {
      */
     name_pattern?: string;
     /**
-     * [create/create_version] Literal LLM instruction text for the Automation — the task statement, frozen into the version. No template expansion happens: the text is delivered to the agent verbatim, and the window's data (content, sources, entities, extraction_schema) arrives alongside it in the knowledge-read payload. Reusable know-how belongs in `skills` instead, which is delivered as readable files rather than pasted in here. A schedule trigger, an event trigger with execution 'window', and an Automation with no triggers each need an instruction source — supply `prompt`, `skills`, a reaction script, or a script executor; an event trigger with execution 'turn' may omit all instruction sources and use the built-in default.
+     * [create/create_version] Literal LLM instruction text for the Automation — the task statement, frozen into the version. No template expansion happens: the text is delivered to the agent verbatim, and the window's data (content, sources, entities, extraction_schema) arrives alongside it in the knowledge-read payload. Reusable know-how belongs in `skills` instead, which is delivered as readable files rather than pasted in here. A schedule trigger, an event trigger with execution 'window', and an Automation with no triggers each need an instruction source — supply `prompt`, `skills`, or a code module; an event trigger with execution 'turn' may omit all instruction sources and use the built-in default.
      */
     prompt?: string;
     /**
@@ -5512,7 +6172,7 @@ export type ManageAutomationsData = {
         }
     >;
     /**
-     * [create/update] Optional managed agent that owns this Automation. Normally executes its runs; an explicit external executor retains the agent only as the permission and delivery principal. Null clears the assignment. Without a managed agent, device pin, or external executor, an Automation is manual-only. [list] Optional owner filter.
+     * [create/update] Optional managed agent identity and SDK permission ancestor. A device pin places its execution on that device. Prompt, skills, input schema or outputs invoke analysis; a module alone runs code with owning-agent permissions. Null clears the assignment. Analysis without an agent or device is claimed by authorized external clients on manual/scheduled windows; clients own their wakeups. [list] Optional owner filter.
      */
     managed_agent_id?: string | null;
     /**
@@ -5560,22 +6220,7 @@ export type ManageAutomationsData = {
      * [create/update] Minimum seconds between two firings of this Automation (0 = no cooldown).
      */
     min_cooldown_seconds?: number;
-    /**
-     * [create/update] AI model configuration
-     */
-    model_config?: unknown;
     execution_config?: null | {
-      executor?:
-        | {
-            kind: "script";
-            source: string;
-            params?: {
-              [key: string]: unknown;
-            };
-          }
-        | {
-            kind: "external";
-          };
       /**
        * Wall-clock cap in seconds for the device-worker CLI run (default 600).
        */
@@ -5662,7 +6307,7 @@ export type ManageAutomationsData = {
      */
     template_version_id?: number;
     /**
-     * [create/set_reaction_script] TypeScript source for an automated reaction. On create, it is compiled before the Automation and its reaction fields are stored in one transaction. Pass an empty string to set_reaction_script to remove an existing script.
+     * [create/set_reaction_script] TypeScript lifecycle module. Without prompt, skills, exported input or declared outputs, runs code without an LLM: prepare then default when present. With analysis inputs, prepare runs before the native agent and default follows completion. prepare returns named arrays of records (32 names, 16384 JSON bytes maximum), saved per run and read through knowledge.read(...).sources. Preparation requires native windows; legacy executors and reply turns are unsupported. Compiled and validated before saving; an empty string removes the module.
      */
     reaction_script?: string;
     /**
@@ -6197,17 +6842,6 @@ export type GetAutomationResponses = {
       device_worker_id?: string | null;
       agent_kind?: string | null;
       execution_config?: {
-        executor?:
-          | {
-              kind: "script";
-              source: string;
-              params?: {
-                [key: string]: unknown;
-              };
-            }
-          | {
-              kind: "external";
-            };
         /**
          * Wall-clock cap in seconds for the device-worker CLI run (default 600).
          */
@@ -6238,6 +6872,17 @@ export type GetAutomationResponses = {
          * How many extra times to re-dispatch a server-side Automation run that finished WITHOUT calling complete_window before failing it. 0 disables; omitted = global default.
          */
         finalize_nudges?: number;
+        executor?:
+          | {
+              kind: "script";
+              source: string;
+              params?: {
+                [key: string]: unknown;
+              };
+            }
+          | {
+              kind: "external";
+            };
       } | null;
       version: number;
       sources: Array<{
@@ -7026,9 +7671,9 @@ export type ManageViewsResponses = {
                 };
           };
           /**
-           * apply:<apply_id> | <user_id> | migration:view-templates
+           * apply:<apply_id> | <user_id> | migration:view-templates. Omitted for readers outside the workspace.
            */
-          last_writer: string;
+          last_writer?: string;
           updated_at: string;
           compiled_bytes: number;
           source_bytes: number;
@@ -7127,9 +7772,9 @@ export type ManageViewsResponses = {
                 };
           };
           /**
-           * apply:<apply_id> | <user_id> | migration:view-templates
+           * apply:<apply_id> | <user_id> | migration:view-templates. Omitted for readers outside the workspace.
            */
-          last_writer: string;
+          last_writer?: string;
           updated_at: string;
           compiled_bytes: number;
           source_bytes: number;
@@ -7235,9 +7880,9 @@ export type ManageViewsResponses = {
                 };
           };
           /**
-           * apply:<apply_id> | <user_id> | migration:view-templates
+           * apply:<apply_id> | <user_id> | migration:view-templates. Omitted for readers outside the workspace.
            */
-          last_writer: string;
+          last_writer?: string;
           updated_at: string;
           compiled_bytes: number;
           source_bytes: number;

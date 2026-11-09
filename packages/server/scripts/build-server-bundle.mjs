@@ -33,7 +33,7 @@ const commonOptions = {
   absWorkingDir: pkgDir,
   bundle: true,
   platform: 'node',
-  target: 'node22',
+  target: 'node26',
   format: 'esm',
   conditions: ['bun', 'import', 'module', 'default'],
   // Bundle only @lobu/* workspace packages and relative imports. Everything

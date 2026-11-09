@@ -151,14 +151,13 @@ declare unrelated concurrent workspace data invalid or delete extra records.
 
 4. Maintain through existing sources and external MCP clients
 
-Discover actual observer events and policy first. identity-capture.ts exports a
-captureDefinition factory: pass the selected owner principal, a dedicated slug,
-and discovered connector_key/connection_id/event_types to produce the existing
-automations.create input. Inspect existing Automations before create. Reuse only
-one with the same purpose; never replace unrelated triggers. The factory requests
-references-only capture, silent output, and an external executor; it does not
-trigger a run or start a hosted/device agent. Verify subscription, binding and
-durable checkpoint health after setup/rebind, plus zero processing runs.
+Discover actual observer events and policy first. identity-capture.ts builds an
+update for an existing legacy binding using its readback and discovered
+subscriptions. New external installation is retired. Keep the existing principal,
+reference-only consent and silent delivery; never replace unrelated triggers.
+A native replacement remains held until its source capture, zero-model execution
+and privacy policy are verified. Check binding and durable checkpoint health
+without reinstalling its legacy executor.
 
 Two external clients can independently traverse knowledge.read(view:'changes')
 with their own cursors. Deduplicate observation IDs, handle scope-change cursor

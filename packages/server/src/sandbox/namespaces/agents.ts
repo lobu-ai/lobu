@@ -5,6 +5,8 @@
 import type {
 	AgentCreateInput,
 	AgentUpdateInput,
+	ManageAgentsArgs,
+	ManageAgentsResult,
 } from "@lobu/core/contracts/tools/manage-agents";
 import type { Env } from "../../index";
 import { manageAgents } from "../../tools/admin/manage_agents";
@@ -12,12 +14,12 @@ import type { ToolContext } from "../../tools/registry";
 import { createActionCaller, idArg } from "./action-call";
 
 export interface AgentsNamespace {
-	manage(input: Record<string, unknown>): Promise<unknown>;
-	list(): Promise<unknown>;
-	get(agent_id: string): Promise<unknown>;
-	create(input: AgentCreateInput): Promise<unknown>;
-	update(input: AgentUpdateInput): Promise<unknown>;
-	delete(agent_id: string): Promise<unknown>;
+	manage(input: ManageAgentsArgs): Promise<ManageAgentsResult>;
+	list(): Promise<Extract<ManageAgentsResult, { action: "list" }>>;
+	get(agent_id: string): Promise<Extract<ManageAgentsResult, { action: "get" }>>;
+	create(input: AgentCreateInput): Promise<ManageAgentsResult>;
+	update(input: AgentUpdateInput): Promise<ManageAgentsResult>;
+	delete(agent_id: string): Promise<ManageAgentsResult>;
 }
 
 export function buildAgentsNamespace(
@@ -27,7 +29,7 @@ export function buildAgentsNamespace(
 	const { manage, method } = createActionCaller(manageAgents, env, ctx, "agents");
 
 	return {
-		manage,
+		manage: manage as AgentsNamespace["manage"],
 		list: method("list"),
 		get: method("get", {
 			mapArgs: (agent_id) => ({

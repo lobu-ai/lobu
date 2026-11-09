@@ -9,8 +9,8 @@
  *
  * The result also reports the isolate lane (`isolate_lane`): whether this
  * runtime can load `isolated-vm`, the V8 addon every connector run needs.
- * That section never flips `ok` — a Bun or Node 25 host legitimately lacks the
- * addon and simply runs no connector code — but the worker
+ * That section never flips `ok` — a Bun or non-26 Node host legitimately lacks
+ * the addon and simply runs no connector code — but the worker
  * image smoke asserts `isolate_lane.available` separately, because the image
  * exists to run the isolate lane and its native build is otherwise unproven.
  *

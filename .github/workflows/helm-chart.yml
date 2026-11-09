@@ -161,6 +161,11 @@ jobs:
               | grep -q "value: \"$expected\""
           done
 
+      # The app's in-process worker drains for a fixed 15s on SIGTERM, so a
+      # run it holds dies on every deploy once worker pods exist to take it.
+      - name: App stops claiming runs while worker pods run
+        run: bash charts/lobu/tests/embedded-worker-gate.sh
+
       - name: Exercise migration failure recovery
         run: sh charts/lobu/tests/migrate-upgrade-recovery.sh
 

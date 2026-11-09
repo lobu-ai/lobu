@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 
 const MIB = 1024 ** 2;
 
-/** Node 22/libuv can miss a cgroup v2 limit on a parent of init.scope. */
+/** Node/libuv can miss a cgroup v2 limit on a parent of init.scope. */
 export function memoryLimit(
   read = (path) => readFileSync(path, "utf8"),
   hostMemory = totalmem()
@@ -27,7 +27,9 @@ export function memoryLimit(
       .split("\n")
       .find((line) => line.startsWith("0::"))
       ?.slice(3);
-    if (relative) group = join(root, resolve("/", relative));
+    // Normalize the trailing slash from a namespace root (0::/). Without
+    // this, the ascent skips the root equality check and loops at / forever.
+    if (relative) group = resolve(join(root, resolve("/", relative)));
   } catch {
     /* macOS has no cgroups. */
   }

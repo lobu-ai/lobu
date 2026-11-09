@@ -1,6 +1,6 @@
 {
   "name": "@lobu/core",
-  "version": "24.3.0",
+  "version": "24.7.0",
   "license": "Apache-2.0",
   "description": "Core types and utilities for Lobu agent platform",
   "repository": {
@@ -159,6 +159,12 @@
       "import": "./dist/contracts/tools/view-content-hash.js",
       "require": "./dist/contracts/tools/view-content-hash.js"
     },
+    "./contracts/tools/manage-inference-providers": {
+      "types": "./dist/contracts/tools/manage-inference-providers.d.ts",
+      "bun": "./src/contracts/tools/manage-inference-providers.ts",
+      "import": "./dist/contracts/tools/manage-inference-providers.js",
+      "require": "./dist/contracts/tools/manage-inference-providers.js"
+    },
     "./contracts/tools/manage-auth-profiles": {
       "types": "./dist/contracts/tools/manage-auth-profiles.d.ts",
       "bun": "./src/contracts/tools/manage-auth-profiles.ts",
@@ -272,6 +278,18 @@
       "bun": "./src/contracts/tools/view-definition.ts",
       "import": "./dist/contracts/tools/view-definition.js",
       "require": "./dist/contracts/tools/view-definition.js"
+    },
+    "./contracts/tools/pagination": {
+      "types": "./dist/contracts/tools/pagination.d.ts",
+      "bun": "./src/contracts/tools/pagination.ts",
+      "import": "./dist/contracts/tools/pagination.js",
+      "require": "./dist/contracts/tools/pagination.js"
+    },
+    "./contracts/tools/view-host": {
+      "types": "./dist/contracts/tools/view-host.d.ts",
+      "bun": "./src/contracts/tools/view-host.ts",
+      "import": "./dist/contracts/tools/view-host.js",
+      "require": "./dist/contracts/tools/view-host.js"
     },
     "./contracts/tools/view-runtime": {
       "types": "./dist/contracts/tools/view-runtime.d.ts",

@@ -44,8 +44,8 @@ or public domain from a personal email address.
 
 ## Prerequisites
 
-Before `lobu run`, the host needs Node 22-24 or 26+ (only Node 25 is unsupported —
-`isolated-vm` skips that EOL non-LTS line) and one LLM provider credential in
+Before `lobu run`, the host needs Node 26.x — the gateway and worker load the
+Node-26-only `isolated-vm` native build — and one LLM provider credential in
 `.env`.
 Postgres is built in: `lobu run`
 starts an embedded PostgreSQL (with `pgvector`); set `DATABASE_URL` only to use an
@@ -227,7 +227,7 @@ const gh = defineConnection({
 `google.gmail`, not `gmail` or `google_gmail`): `github`, `slack`, `linear`, `jira`, `google.gmail`,
 `google.calendar`, `google.drive`, `microsoft.outlook`, `discord`, `teams`, `telegram`, `tiktok.web`, `webhook`,
 `whatsapp`, `whatsapp.web`, `gchat`, `rss`, `postgres`,
-`hackernews`, `herdr`, `linkedin`, `market.quotes`, `reddit`, `x`, `youtube`, `producthunt`, `agentid`.
+`hackernews`, `herdr`, `imessage`, `linkedin`, `market.quotes`, `reddit`, `x`, `youtube`, `producthunt`, `agentid`.
 
 Device connectors are not in that list: they are advertised by the device at
 poll time and appear after it grants permission. `os.shell` is one of them —

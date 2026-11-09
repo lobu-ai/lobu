@@ -13,13 +13,14 @@ import { resolveToolWorkspaceTarget } from '../sandbox/client-sdk';
 import { verifiedAutomationSource } from '../automations/automation-source';
 import { runWithActingAutomation } from '../utils/acting-automation-context';
 import type { Context } from 'hono';
-import { isToolError, retryWithBackoff, ToolError } from '@lobu/core';
+import { classifyErrorKind, createSpan, isToolError, recordError, retryWithBackoff, runInSpanContext, SpanStatusCode, ToolError, type Span } from '@lobu/core';
 import {
   getAction,
   getRequiredAccessLevel,
   hasRequiredMcpScope,
   isPublicReadable,
   ownerAdminActionAlternative,
+  publicToolDenial,
   SCOPE_CHECK_NOT_APPLICABLE,
   type ToolAccessLevel,
 } from '../auth/tool-access';
@@ -30,10 +31,10 @@ import { parseApplyId } from '../utils/apply-context';
 import { assertDeploymentsNotPaused } from '../utils/deployment-pause';
 import { asReadTimeout } from '../utils/bounded-read';
 import { ToolNotRegisteredError, ToolUserError } from '../utils/errors';
-import { logToolCallFailure } from './tool-error-log';
+import { logToolCallFailure, toolErrorScope } from './tool-error-log';
 import { getConfiguredPublicOrigin } from '../utils/public-origin';
 import { enforcePublicReadLimit, getClientIP } from '../utils/rate-limiter';
-import { AccessDeniedError, enforceRoleScopeAccess, requireWorkspaceContext, scopeDenialMessage } from './access-control';
+import { AccessDeniedError, enforceAdminToolAllowlist, enforceRoleScopeAccess, requireWorkspaceContext, scopeDenialMessage } from './access-control';
 import { recordToolInvocationAudit, recordWorkspaceActivityAudit } from './audit';
 import { getAccountContent } from './get_content';
 import {
@@ -253,20 +254,7 @@ export async function checkToolAccess(
   const role = authCtx.memberRole;
   const requiredAccess = getRequiredAccessLevel(toolName, args, isReadOnly);
 
-  // Admin-tools run: the per-turn allowlist is a LIMIT on which
-  // tools may exercise ADMIN-tier actions. Read/write-tier actions follow the
-  // uniform role × scope model like every other caller.
-  const adminAllowlist = authCtx.adminTools;
-  if (
-    requiredAccess === 'admin' &&
-    adminAllowlist &&
-    adminAllowlist.length > 0 &&
-    !adminAllowlist.includes(toolName)
-  ) {
-    throw new AccessDeniedError(
-      `This agent run may not perform admin actions with ${toolName}. Allowed admin tools: ${adminAllowlist.join(', ')}.`
-    );
-  }
+  enforceAdminToolAllowlist(requiredAccess, toolName, authCtx.adminTools);
 
   if (accountScope && (authCtx.allowCrossOrg || !authCtx.organizationId || toolName === 'list_organizations')) {
     if (!authCtx.isAuthenticated || !authCtx.userId) throw new Error('Authentication required.');
@@ -287,6 +275,8 @@ export async function checkToolAccess(
 
   if (!role) {
     if (!isPublicReadable(toolName, args)) {
+      const denial = publicToolDenial(toolName);
+      if (denial) throw new AccessDeniedError(denial);
       if (authCtx.userId) {
         throw new AccessDeniedError(
           'This public workspace is read-only for your account. Join the workspace to unlock write access.'
@@ -332,6 +322,54 @@ export async function executeTool(
   authCtx: AuthContext,
   callerSignal?: AbortSignal
 ): Promise<unknown> {
+  // Use the registered name, never a caller-supplied unknown name or arguments.
+  const name = getTool(toolName)?.name ?? 'unregistered';
+  const scope = toolErrorScope(toolName);
+  const span = createSpan(scope, {
+    'lobu.tool_name': name,
+    ...(authCtx.userId ? { 'user.id': authCtx.userId } : {}),
+    ...(authCtx.organizationId ? { 'lobu.org_id': authCtx.organizationId } : {}),
+  });
+  return runInSpanContext(span, async () => {
+    try {
+      const result = await executeToolInSpan(toolName, args, env, authCtx, callerSignal, span);
+      if (isSoftErrorResult(result)) {
+        // A returned error is a handled rejection, so it counts as the
+        // caller's unless its structured code marks a failing dependency.
+        const { error, code, error_code } = result as {
+          error: string;
+          code?: unknown;
+          error_code?: unknown;
+        };
+        const structuredCode = typeof code === 'string' ? code : typeof error_code === 'string' ? error_code : null;
+        recordError(
+          span,
+          { name: 'ToolResultError', message: error, code: structuredCode },
+          { scope, kind: classifyErrorKind(structuredCode, null) === 'dependency' ? 'dependency' : 'user' }
+        );
+      } else {
+        span?.setStatus({ code: SpanStatusCode.OK });
+      }
+      return result;
+    } catch (error) {
+      // recordError keeps only the type, the parameterized message and frame
+      // locations: errors and arguments can carry credentials or source data.
+      recordError(span, error, { scope });
+      throw error;
+    } finally {
+      span?.end();
+    }
+  });
+}
+
+async function executeToolInSpan(
+  toolName: string,
+  args: Record<string, unknown>,
+  env: Env,
+  authCtx: AuthContext,
+  callerSignal: AbortSignal | undefined,
+  span: Span | null,
+): Promise<unknown> {
   const startTime = Date.now();
 
   // Per-invocation correlation id (lobu#2051 Item 2). Distinct from the
@@ -367,6 +405,8 @@ export async function executeTool(
       };
     }
     const requiredAccess = await checkToolAccess(toolName, args, authCtx);
+    // A requested target becomes trace identity only after access succeeds.
+    if (authCtx.organizationId) span?.setAttribute('lobu.org_id', authCtx.organizationId);
     toolContext = {
       ...toAccountToolContext(authCtx),
       workspaceActivity,
@@ -552,6 +592,7 @@ export function toAccountToolContext(authCtx: AuthContext): AccountToolContext {
     organizationId: authCtx.organizationId,
     userId: authCtx.userId,
     memberRole: authCtx.memberRole,
+    adminTools: authCtx.adminTools ?? null,
     agentId: authCtx.agentId,
     actingAutomationId: authCtx.actingAutomationId ?? null,
     actingRunId: authCtx.actingRunId ?? null,

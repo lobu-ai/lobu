@@ -10,15 +10,17 @@ import type {
 } from "@lobu/connector-sdk";
 import type { AgentSettings } from "@lobu/core";
 import { createAjv } from "@lobu/core/ajv";
+import type { CollectionPresentation } from "@lobu/core/contracts/tools/collection-presentation";
 import type {
   AutomationEventTrigger,
   AutomationScheduleTrigger,
   AutomationWorkspaceEventTrigger,
+  ManageAutomationsArgs,
 } from "@lobu/core/contracts/tools/manage-automations";
-import type { CollectionPresentation } from "@lobu/core/contracts/tools/collection-presentation";
 import type { RetainedSource } from "@lobu/core/contracts/tools/source-files";
 import type Ajv from "ajv";
 import type {
+  Automation,
   ConnectorSource,
   InferenceCapabilityBlock,
   InferenceModality,
@@ -108,13 +110,9 @@ export interface DesiredRelationshipType {
 
 export interface DesiredAutomation {
   slug: string;
-  /** Owning agent id. Every automation belongs to exactly one agent. */
-  agent: string;
-  executor?: {
-    kind: "script";
-    source: string;
-    params?: Record<string, unknown>;
-  } | null;
+  executionConfig?: Automation["executionConfig"];
+  /** Managed agent identity, independent of device placement. */
+  agent: string | null;
   name?: string;
   description?: string;
   triggers?: DesiredAutomationTrigger[];
@@ -158,8 +156,8 @@ export interface DesiredAutomation {
   minCooldownSeconds?: number;
   /** Free-form tags for filtering. */
   tags?: string[];
-  /** Optional agent-kind override (e.g. "background", "notifier"). */
-  agentKind?: string;
+  /** Optional agent runtime override. */
+  agentKind?: NonNullable<ManageAutomationsArgs["agent_kind"]>;
   /** Named durable outputs; explicit null clears existing declarations. */
   outputs?: Record<string, unknown> | null;
 }
@@ -571,7 +569,7 @@ async function readMarkdown(agentDir: string): Promise<AgentMarkdown> {
   for (const [key, filename] of files) {
     try {
       const content = await readFile(join(agentDir, filename), "utf-8");
-      if (content.trim()) result[key] = content.trim();
+      result[key] = content.trim();
     } catch {
       // missing file is fine
     }
@@ -1309,12 +1307,12 @@ export async function loadDesiredStateFromConfig(
       if (!settings) return;
       const agentDir = resolve(opts.cwd, agent.dir ?? join("agents", agent.id));
       const markdown = await readMarkdown(agentDir);
-      const localSkills = await resolveAgentSkills(
-        agent.skills ?? [],
-        opts.cwd
-      );
+      const localSkills =
+        agent.skills === undefined
+          ? undefined
+          : await resolveAgentSkills(agent.skills, opts.cwd);
       mergeAgentDirArtifacts(settings, markdown, localSkills);
-      skillsByAgentId.set(agent.id, localSkills);
+      skillsByAgentId.set(agent.id, settings.skillsConfig?.skills ?? []);
     })
   );
 
@@ -1328,54 +1326,15 @@ export async function loadDesiredStateFromConfig(
   for (const automation of state.automations) {
     automation.skillSnapshots = resolveAutomationSkills(
       automation,
-      skillsByAgentId.get(automation.agent) ?? []
+      automation.agent ? (skillsByAgentId.get(automation.agent) ?? []) : []
     );
   }
 
-  // Automation executor and reaction scripts: sibling `.ts` files referenced
+  // Automation lifecycle modules: sibling `.ts` files referenced
   // by path. The mapper stays pure; resolve + read each raw source here for the
   // server to compile. state.automations[i] aligns with
   // typedProject.automations[i] (the mapper maps them in order).
   (typedProject.automations ?? []).forEach((automation, i) => {
-    if (automation.executor !== undefined && automation.executor !== "agent") {
-      const desired = state.automations[i];
-      if (!desired) return;
-      if (
-        !automation.executor ||
-        typeof automation.executor !== "object" ||
-        automation.executor.kind !== "scriptSource" ||
-        typeof automation.executor.path !== "string"
-      ) {
-        throw new ValidationError(
-          `Automation "${automation.slug}": use scriptFromFile("./job.ts") for a script executor.`
-        );
-      }
-      if (
-        automation.executor.params !== undefined &&
-        !isRecord(automation.executor.params)
-      ) {
-        throw new ValidationError(
-          `Automation "${automation.slug}": scriptFromFile params must be an object, not an array.`
-        );
-      }
-      const script = resolveLocalSourceFile({
-        cwd: opts.cwd,
-        owner: `Automation ${JSON.stringify(automation.slug)}`,
-        field: "executor",
-        example: 'scriptFromFile("./job.ts")',
-        rel: automation.executor.path,
-        maxBytes: 131072,
-        sizeHint:
-          "Automation scripts must stay within the sandbox source limit",
-      });
-      desired.executor = {
-        kind: "script",
-        source: script.sourceCode,
-        ...(automation.executor.params
-          ? { params: automation.executor.params }
-          : {}),
-      };
-    }
     // Gate on absence, not truthiness — a present-but-empty
     // `reactionFromFile("")` must reach the validator (which rejects it),
     // matching parseAutomation.
@@ -1383,9 +1342,8 @@ export async function loadDesiredStateFromConfig(
     const dw = state.automations[i];
     if (!dw) return;
     // Explicit `null` removes a previously installed reaction. Carried through
-    // the diff as declared and applied via set_reaction_script("") AFTER the
-    // executor install, so a reaction-driven job switching to a script
-    // executor never runs both paths. Omitted (`undefined`) preserves.
+    // the diff as declared and applied via set_reaction_script("").
+    // Omitted (`undefined`) preserves.
     if (automation.reaction === null) {
       dw.reactionScript = null;
       return;

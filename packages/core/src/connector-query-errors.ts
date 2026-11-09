@@ -38,6 +38,12 @@ export type ToolErrorCode =
    * agent, MCP session or Automation is behind the call (HTTP 403).
    */
   | "MANUAL_EDIT_NOT_ALLOWED"
+  /**
+   * `manage_entity update` sent `expected`, and at least one field's live value
+   * no longer matches it, so nothing was written (HTTP 409). Re-read and retry
+   * with the current values.
+   */
+  | "PRECONDITION_FAILED"
   // ── transient: the same call may succeed on retry ──
   /** Upstream throttled the request (HTTP 429 / too many requests). */
   | "RATE_LIMITED"
@@ -90,6 +96,11 @@ export const TOOL_ERRORS: Record<ToolErrorCode, ToolErrorSpec> = {
     retryable: false,
     message:
       "This caller may not assert a manual edit; it needs the entities:manual_edit scope and no agent, MCP session or Automation behind it.",
+  },
+  PRECONDITION_FAILED: {
+    retryable: false,
+    message:
+      "A field changed since it was read, so nothing was written; re-read it and retry with the current values.",
   },
   RATE_LIMITED: {
     retryable: true,
