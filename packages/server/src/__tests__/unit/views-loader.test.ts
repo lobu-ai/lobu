@@ -467,23 +467,27 @@ describe("view shell theme tokens", () => {
     compiled_code: "",
   } as StoredView;
 
-  it("derives every kit token from the MCP Apps standard variable, keeping Lobu's palette as the fallback", () => {
+  it("derives every theme token from the MCP Apps standard variable, keeping Lobu's palette as the fallback", () => {
     const html = renderViewShell(view, "https://app.example/acme/", "");
     for (const token of [
-      "--fg:var(--color-text-primary,#0a0a0a)",
-      "--muted:var(--color-text-secondary,#6b7280)",
-      "--border:var(--color-border-primary,#e5e7eb)",
-      "--accent:var(--color-text-info,#2563eb)",
-      "--font:var(--font-sans,system-ui,",
+      "--foreground:var(--color-text-primary,#141414)",
+      // --muted and --accent are surfaces, as in the native sheet; secondary
+      // text is --muted-foreground.
+      "--muted:var(--color-background-tertiary,#f3f1ea)",
+      "--muted-foreground:var(--color-text-secondary,#545454)",
+      "--accent:var(--color-background-tertiary,#f3f1ea)",
+      "--border:var(--color-border-primary,#e7e4dc)",
       "--radius:var(--border-radius-md,6px)",
       "--radius-lg:var(--border-radius-lg,8px)",
       // Dark fallbacks still flip with the host's theme class.
-      "--fg:var(--color-text-primary,#fafafa)",
-      "--border:var(--color-border-primary,#27272a)",
+      "--foreground:var(--color-text-primary,#f3eee2)",
+      "--muted-foreground:var(--color-text-secondary,#b4ae9f)",
     ]) {
       expect(html).toContain(token);
     }
-    expect(html).toContain("font:13px/1.45 var(--font)");
+    expect(html).toContain("font:13px/1.45 var(--font-sans)");
+    // One vocabulary: the retired kit aliases are gone.
+    expect(html).not.toMatch(/--(fg|font):/);
     // The frame shows the host's surface, never an opaque canvas.
     expect(html).toContain("background:transparent");
   });
@@ -498,8 +502,10 @@ describe("view shell theme tokens", () => {
   });
 
   it("gives the loader shell the same tokens", () => {
-    expect(renderViewsLoaderShell()).toContain(
-      "--fg:var(--color-text-primary,#0a0a0a)"
+    const html = renderViewsLoaderShell();
+    expect(html).toContain(
+      "--muted-foreground:var(--color-text-secondary,#545454)"
     );
+    expect(html).not.toMatch(/var\(--(fg|font)\)/);
   });
 });

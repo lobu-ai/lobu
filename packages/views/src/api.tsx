@@ -777,9 +777,10 @@ function applyTheme(theme: "light" | "dark"): void {
 /**
  * The MCP Apps standard style variables (`McpUiStyleVariableKey`, protocol
  * `2026-01-26`). A host sends any subset in `hostContext.styles.variables`;
- * the shell's tokens (`--fg`, `--muted`, `--border`, `--accent`, the font and
- * radii) derive from them, so a view takes the host's look. Built from the
- * spec's own axes rather than imported: the guest carries no ext-apps code.
+ * the shell's shadcn tokens (`--foreground`, `--muted-foreground`, `--muted`,
+ * `--accent`, `--border`, the font and radii) derive from them, so a view takes
+ * the host's look. Built from the spec's own axes rather than imported: the
+ * guest carries no ext-apps code.
  */
 const SEMANTIC = ["primary", "secondary", "tertiary", "inverse", "ghost"];
 const STATUS = ["info", "danger", "success", "warning"];
@@ -862,7 +863,7 @@ class RenderBoundary extends Component<
       <div
         role="alert"
         data-lobu-render-error="true"
-        style={{ padding: 12, color: "var(--fg)" }}
+        style={{ padding: 12, color: "var(--foreground)" }}
       >
         This view failed to render: {this.state.error.message}
       </div>
