@@ -198,12 +198,9 @@ export class ApiResponseRenderer implements ResponseRenderer {
 
     await this.resolveAutomationRunsFromPayload(payload, {
       ok: false,
-      // Persist only the guarded/user-visible text. The raw provider string is
-      // used solely to parse a reset boundary and must never reappear through
-      // Automation run metadata.
+      // Persist only the guarded/user-visible text.
       error: typeof errorText === "string" ? errorText : "agent error",
       errorCode: code,
-      quotaResetError: payload.bookkeepingError,
     });
 
     const errorEvent = {
@@ -240,7 +237,6 @@ export class ApiResponseRenderer implements ResponseRenderer {
           ok: false;
           error: string;
           errorCode?: string;
-          quotaResetError?: string;
         }
   ): Promise<void> {
     const ids = new Set<string>();

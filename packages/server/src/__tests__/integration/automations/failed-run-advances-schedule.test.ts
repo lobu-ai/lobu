@@ -2,16 +2,10 @@ import { describe, expect, it } from "vitest";
 import type { DbClient } from "../../../db/client";
 import { claimPendingAutomationRun } from "../../../runs/queue-service";
 import { ApiResponseRenderer } from "../../../gateway/api/response-renderer";
-import { ChatResponseBridge } from "../../../gateway/connections/chat-response-bridge";
 import { materializeDueAutomationRuns } from "../../../automations/automation";
 import { resolveAutomationRunsByMessageIds } from "../../../automations/run-completion";
-import {
-  advanceAutomationSchedule,
-  deviceProviderQuotaResetNotBefore,
-  parseProviderQuotaResetAt,
-  parseProviderRetryAfter,
-  providerQuotaResetNotBefore,
-} from "../../../automations/schedule-cursor";
+import { advanceAutomationSchedule } from "../../../automations/schedule-cursor";
+import { nextRunAt } from "../../../utils/cron";
 import { getTestDb } from "../../setup/test-db";
 import { createTestAgent, createTestEntity } from "../../setup/test-fixtures";
 import { TestWorkspace } from "../../setup/test-mcp-client";
@@ -79,7 +73,6 @@ async function createDueAutomationWithDispatchedRun(opts: {
   return {
     sql,
     organizationId: workspace.org.id,
-    agentId: agent.agentId,
     automationId,
     runId: Number(run.id),
     staleCursor,
@@ -93,292 +86,32 @@ async function cursorOf(automationId: number): Promise<Date> {
   return new Date(row.next_run_at as string);
 }
 
-function chatResponseBridge(organizationId: string): ChatResponseBridge {
-  const target = { post: async () => ({ id: "posted" }) };
-  const manager = {
-    getInstance: () => ({
-      connection: {
-        platform: "telegram",
-        organizationId,
-      },
-      chat: {
-        channel: () => target,
-      },
-    }),
-    getPublicGatewayUrl: () => "",
-  };
-  return new ChatResponseBridge(
-    manager as unknown as ConstructorParameters<typeof ChatResponseBridge>[0]
-  );
+/** The cron tick the Automation's own schedule names after `now`. */
+async function nextTickOf(automationId: number): Promise<number> {
+  const sql = getTestDb();
+  const [row] =
+    await sql`SELECT schedule, timezone FROM automations WHERE id = ${automationId}`;
+  return new Date(
+    nextRunAt(row.schedule as string, new Date(), row.timezone as string | null)
+  ).getTime();
 }
 
-describe("provider quota reset parsing", () => {
-  it("treats a date-only reset as UTC and adds boundary grace", () => {
-    const reset = parseProviderQuotaResetAt(
-      "429 Limit Exhausted. Your limit will reset at 2026-07-31",
-      new Date("2026-07-30T12:00:00.000Z")
-    );
-
-    expect(reset?.toISOString()).toBe("2026-07-31T00:01:00.000Z");
-  });
-
-  it("ignores missing or already-past reset timestamps", () => {
-    const now = new Date("2026-07-31T12:00:00.000Z");
-
-    expect(parseProviderQuotaResetAt("429 Limit Exhausted", now)).toBeNull();
-    expect(
-      parseProviderQuotaResetAt("Your limit will reset at 2026-07-31", now)
-    ).toBeNull();
-  });
-
-  it("keeps the boundary grace when the reset time just passed", () => {
-    const now = new Date("2026-07-31T12:00:30.000Z");
-
-    expect(
-      parseProviderQuotaResetAt(
-        "Your limit will reset at 2026-07-31 12:00:00",
-        now
-      )?.toISOString()
-    ).toBe("2026-07-31T12:01:00.000Z");
-  });
-
-  it.each([
-    "2026-02-31",
-    "2026-07-31 24:00:00",
-    "2026-07-31 12:60:00",
-    "2026-07-31 12:00:60",
-    "2026-07-31 12:00:00+24:00",
-    "2026-07-31 12:00:00+bad",
-    "2026-07-31 12:00:000",
-    "2026-07-31T12:00:00.1234Z",
-    "2026-07-31x",
-  ])("rejects invalid reset timestamp %s", (timestamp) => {
-    expect(
-      parseProviderQuotaResetAt(
-        `Your limit will reset at ${timestamp}`,
-        new Date("2026-01-01T00:00:00.000Z")
-      )
-    ).toBeNull();
-  });
-
-  it("requires quota evidence for unclassified device stderr", () => {
-    const now = new Date("2026-07-31T10:00:00.000Z");
-    expect(
-      deviceProviderQuotaResetNotBefore(
-        "429 Limit Exhausted. Your limit will reset at 2026-07-31 12:00:00",
-        now
-      )?.toISOString()
-    ).toBe("2026-07-31T12:01:00.000Z");
-    expect(
-      deviceProviderQuotaResetNotBefore(
-        "Authentication session resets at 2026-07-31 12:00:00",
-        now
-      )
-    ).toBeNull();
-  });
-
-  it("parks a reset-less balance exhaustion for a day", () => {
-    const now = new Date("2026-08-05T10:00:00.000Z");
-
-    expect(
-      providerQuotaResetNotBefore(
-        "z.ai returned an error: 429 Insufficient balance or no resource package",
-        "PROVIDER_QUOTA_EXHAUSTED",
-        now
-      )?.toISOString()
-    ).toBe("2026-08-06T10:00:00.000Z");
-    expect(
-      deviceProviderQuotaResetNotBefore(
-        "429 Insufficient balance or no resource package",
-        now
-      )?.toISOString()
-    ).toBe("2026-08-06T10:00:00.000Z");
-    // No "429"/rate-limit token: balance wording alone must count as device
-    // quota evidence.
-    expect(
-      deviceProviderQuotaResetNotBefore(
-        "Insufficient balance or no resource package",
-        now
-      )?.toISOString()
-    ).toBe("2026-08-06T10:00:00.000Z");
-    // Captured verbatim from prod 2026-08-05. This wording reached the parker
-    // only because the message list moved into core: it lived here but NOT in
-    // the worker's `classifyError`, which assigns the very errorCode this
-    // function gates on — so the park could never fire for it in production.
-    expect(
-      providerQuotaResetNotBefore(
-        "You have no credits remaining. Add credits to continue using the API at https://platform.openai.com/settings/organization/billing/.",
-        "PROVIDER_QUOTA_EXHAUSTED",
-        now
-      )?.toISOString()
-    ).toBe("2026-08-06T10:00:00.000Z");
-    // OpenAI's insufficient_quota billing message names no retry horizon.
-    expect(
-      providerQuotaResetNotBefore(
-        "429 You exceeded your current quota, please check your plan and billing details.",
-        "PROVIDER_QUOTA_EXHAUSTED",
-        now
-      )?.toISOString()
-    ).toBe("2026-08-06T10:00:00.000Z");
-    // Widened by the shared core literal: "insufficient quota" was previously
-    // worker-only (classification without a park). Reset-less, it is billing
-    // wording (OpenAI/Azure insufficient_quota) and now day-parks; the windowed
-    // variant with a named horizon stays unparked (case below).
-    expect(
-      providerQuotaResetNotBefore(
-        "429 You have insufficient quota for this request.",
-        "PROVIDER_QUOTA_EXHAUSTED",
-        now
-      )?.toISOString()
-    ).toBe("2026-08-06T10:00:00.000Z");
-  });
-
-  it("prefers a named reset over the balance park", () => {
-    const now = new Date("2026-08-05T10:00:00.000Z");
-
-    expect(
-      providerQuotaResetNotBefore(
-        "429 Insufficient balance. Your limit will reset at 2026-08-05 12:00:00",
-        "PROVIDER_QUOTA_EXHAUSTED",
-        now
-      )?.toISOString()
-    ).toBe("2026-08-05T12:01:00.000Z");
-  });
-
-  it("honors OpenCode Go's relative account-limit reset", () => {
-    const now = new Date("2026-08-05T10:00:00.000Z");
-    const message =
-      "Monthly usage limit reached. Resets in 14 days. " +
-      "To continue using this model now, enable usage from your available balance";
-
-    expect(
-      deviceProviderQuotaResetNotBefore(message, now)?.toISOString()
-    ).toBe("2026-08-19T10:01:00.000Z");
-  });
-
-  // Subscription-plan CLIs report an account window in wording neither matcher
-  // covered: Codex on a ChatGPT plan says "usage limit (pro plan)" rather than
-  // "usage limit reached", and quotes the horizon as "Try again in ~N min"
-  // rather than "resets in <hours|days|weeks>". Missing both halves meant no
-  // park at all, so every cron tick burned a scheduled failure until the
-  // consecutive-failure auto-pause stopped the Automation outright.
-  it.each([
-    [
-      "You have hit your ChatGPT usage limit (pro plan). Try again in ~8700 min.",
-      "2026-09-19T05:01:00.000Z",
-    ],
-    ["Monthly usage limit reached. Resets in 90 minutes.", "2026-09-13T05:31:00.000Z"],
-  ])("parks a usage-limit window quoted in minutes (%s)", (message, expected) => {
-    const now = new Date("2026-09-13T04:00:00.000Z");
-
-    expect(deviceProviderQuotaResetNotBefore(message, now)?.toISOString()).toBe(
-      expected
-    );
-  });
-
-  // "try again in" alone is not quota evidence — a CLI's own limit must still
-  // retry on the normal cadence rather than park a durable schedule.
-  it.each([
-    "Tool call limit reached. Try again in ~5 min.",
-    "Context limit reached. Try again in ~2 hours.",
-  ])("does not park a non-quota limit that says try again in (%s)", (message) => {
-    const now = new Date("2026-09-13T04:00:00.000Z");
-
-    expect(deviceProviderQuotaResetNotBefore(message, now)).toBeNull();
-  });
-
-  // A CLI's own limits reuse the "limit reached" phrasing but are not provider
-  // quota, and a relative "resets in" would otherwise park a durable schedule
-  // for hours or days on a run that should simply retry next tick.
-  it.each([
-    "Context limit reached. Please start a new session.",
-    "Session limit reached. Resets in 5 hours.",
-    "Tool call limit reached after 50 iterations",
-    "File size limit reached, resets in 2 days",
-  ])("does not park a non-quota CLI limit (%s)", (message) => {
-    const now = new Date("2026-08-05T10:00:00.000Z");
-
-    expect(deviceProviderQuotaResetNotBefore(message, now)).toBeNull();
-  });
-
-  it.each([
-    "Gemini returned an error: 429 status code (no body)",
-    "429 Too Many Requests",
-    "rate limit exceeded, retry shortly",
-  ])("leaves an undated self-healing rate limit on normal cadence (%s)", (message) => {
-    const now = new Date("2026-08-05T10:00:00.000Z");
-
-    expect(
-      providerQuotaResetNotBefore(message, "PROVIDER_QUOTA_EXHAUSTED", now)
-    ).toBeNull();
-    expect(deviceProviderQuotaResetNotBefore(message, now)).toBeNull();
-  });
-
-  it.each([
-    [
-      "429 You exceeded your current quota. Please try again in 25.137s.",
-      "2026-08-05T10:00:26.137Z",
-    ],
-    [
-      "429 insufficient quota; retryDelay: 26s",
-      "2026-08-05T10:00:27.000Z",
-    ],
-    [
-      "429 out of credits (Retry-After: 30)",
-      "2026-08-05T10:00:31.000Z",
-    ],
-    [
-      "429 out of credits (Retry-After: Wed, 05 Aug 2026 10:00:30 GMT)",
-      "2026-08-05T10:00:31.000Z",
-    ],
-  ])("honors an explicit transient retry horizon (%s)", (message, expected) => {
-    const now = new Date("2026-08-05T10:00:00.000Z");
-
-    expect(parseProviderRetryAfter(message, now)?.toISOString()).toBe(expected);
-    expect(
-      providerQuotaResetNotBefore(message, "PROVIDER_QUOTA_EXHAUSTED", now)?.toISOString()
-    ).toBe(expected);
-    expect(deviceProviderQuotaResetNotBefore(message, now)?.toISOString()).toBe(expected);
-  });
-
-  it("still requires quota classification for balance wording", () => {
-    const now = new Date("2026-08-05T10:00:00.000Z");
-    const message = "Insufficient balance";
-
-    expect(
-      providerQuotaResetNotBefore(message, "NO_MODEL_CONFIGURED", now)
-    ).toBeNull();
-    expect(providerQuotaResetNotBefore(message, undefined, now)).toBeNull();
-  });
-
-  it("requires the structured quota code", () => {
-    const message = "Your limit will reset at 2026-07-31 12:00:00";
-    const now = new Date("2026-07-31T10:00:00.000Z");
-
-    expect(
-      providerQuotaResetNotBefore(
-        message,
-        "PROVIDER_QUOTA_EXHAUSTED",
-        now
-      )?.toISOString()
-    ).toBe("2026-07-31T12:01:00.000Z");
-    expect(
-      providerQuotaResetNotBefore(message, "NO_MODEL_CONFIGURED", now)
-    ).toBeNull();
-    expect(providerQuotaResetNotBefore(message, undefined, now)).toBeNull();
-  });
-});
-
 describe("a terminally failed Automation run advances next_run_at", () => {
-  it("auto-pauses after five consecutive scheduled execution failures", async () => {
+  // A provider quota failure is not special-cased: Lobu does not infer when the
+  // provider resets, so the breaker pauses it like any other repeated failure
+  // and the admin resumes it.
+  it.each([
+    { kind: "executor", errorCode: undefined },
+    { kind: "quota", errorCode: "PROVIDER_QUOTA_EXHAUSTED" },
+  ])("auto-pauses after five consecutive scheduled $kind failures", async ({ kind, errorCode }) => {
     const { sql, automationId, organizationId } =
       await createDueAutomationWithDispatchedRun({
-        slug: "auto-pause-repeated-failures",
-        messageId: "msg-repeated-failure-1",
+        slug: `auto-pause-repeated-${kind}-failures`,
+        messageId: `msg-repeated-${kind}-failure-1`,
       });
 
     for (let attempt = 1; attempt <= 5; attempt += 1) {
-      const messageId = `msg-repeated-failure-${attempt}`;
+      const messageId = `msg-repeated-${kind}-failure-${attempt}`;
       if (attempt > 1) {
         await sql`
           UPDATE automations
@@ -399,7 +132,11 @@ describe("a terminally failed Automation run advances next_run_at", () => {
 
       await resolveAutomationRunsByMessageIds([messageId], {
         ok: false,
-        error: `executor timed out on attempt ${attempt}`,
+        error:
+          kind === "quota"
+            ? "429 Weekly/Monthly Limit Exhausted. Your limit will reset at 2099-01-01"
+            : `executor timed out on attempt ${attempt}`,
+        errorCode,
       });
     }
 
@@ -498,16 +235,17 @@ describe("a terminally failed Automation run advances next_run_at", () => {
     expect(after.getTime()).toBeGreaterThan(Date.now());
   });
 
-  it("parks a quota-exhausted Automation through the provider reset boundary", async () => {
+  it("moves a provider-quota failure to the next cron tick, not the provider's reset", async () => {
     const resetAt = new Date(Date.now() + 6 * 60 * 60 * 1000);
     const providerReset = resetAt
       .toISOString()
       .replace("T", " ")
       .replace(/\.\d{3}Z$/, "");
-    const { automationId, runId } = await createDueAutomationWithDispatchedRun({
-      slug: "park-until-provider-reset",
+    const { sql, automationId, runId } = await createDueAutomationWithDispatchedRun({
+      slug: "quota-failure-next-tick",
       messageId: "msg-provider-reset",
     });
+    const tickBefore = await nextTickOf(automationId);
 
     const renderer = new ApiResponseRenderer({
       broadcast() {},
@@ -520,57 +258,24 @@ describe("a terminally failed Automation run advances next_run_at", () => {
         userId: "automation-test",
         teamId: "api",
         timestamp: Date.now(),
-        error: "Message blocked by guardrail: require-tool",
-        bookkeepingError: `429 Weekly/Monthly Limit Exhausted. Your limit will reset at ${providerReset}`,
+        error: `429 Weekly/Monthly Limit Exhausted. Your limit will reset at ${providerReset}`,
         errorCode: "PROVIDER_QUOTA_EXHAUSTED",
       }
     );
 
-    const sql = getTestDb();
     const [run] = await sql`SELECT status, error_message FROM runs WHERE id = ${runId}`;
     expect(run.status).toBe("failed");
-    expect(run.error_message).toBe(
-      "Message blocked by guardrail: require-tool"
-    );
+    expect(run.error_message).toContain(providerReset);
 
-    const after = await cursorOf(automationId);
-    const expectedNotBefore =
-      Math.floor(resetAt.getTime() / 1000) * 1000 + 60_000;
-    expect(after.getTime()).toBe(expectedNotBefore);
-  });
-
-  it("retries a scheduled transient quota failure before the next cron tick", async () => {
-    const { automationId, runId } = await createDueAutomationWithDispatchedRun({
-      slug: "retry-transient-provider-limit",
-      messageId: "msg-provider-retry",
-    });
-    const before = Date.now();
-
-    const renderer = new ApiResponseRenderer({
-      broadcast() {},
-    } as unknown as ConstructorParameters<typeof ApiResponseRenderer>[0]);
-    await renderer.handleError(
-      {
-        messageId: "msg-provider-retry",
-        channelId: "api-provider-retry",
-        conversationId: "api-provider-retry",
-        userId: "automation-test",
-        teamId: "api",
-        timestamp: Date.now(),
-        error: "Provider rate limited this turn.",
-        bookkeepingError:
-          "Rate limit reached for gpt-5.6-luna. Please try again in 25.137s.",
-        errorCode: "PROVIDER_QUOTA_EXHAUSTED",
-      }
-    );
-
-    const sql = getTestDb();
-    const [run] = await sql`SELECT status FROM runs WHERE id = ${runId}`;
-    expect(run.status).toBe("failed");
-
-    const after = await cursorOf(automationId);
-    expect(after.getTime()).toBeGreaterThanOrEqual(before + 26_000);
-    expect(after.getTime()).toBeLessThan(before + 60_000);
+    const after = (await cursorOf(automationId)).getTime();
+    expect([tickBefore, await nextTickOf(automationId)]).toContain(after);
+    expect(after).toBeLessThan(resetAt.getTime());
+    const [automation] = await sql`
+      SELECT consecutive_scheduled_failures, schedule_auto_paused_at
+      FROM automations WHERE id = ${automationId}
+    `;
+    expect(Number(automation.consecutive_scheduled_failures)).toBe(1);
+    expect(automation.schedule_auto_paused_at).toBeNull();
   });
 
   it("advances the cursor when the agent never calls complete_window", async () => {
@@ -666,205 +371,24 @@ describe("a terminally failed Automation run advances next_run_at", () => {
     expect(Number(automation.consecutive_scheduled_failures)).toBe(0);
   });
 
-  it("parks a scheduled Automation after a quota-exhausted event dispatch", async () => {
-    const resetAt = new Date(Date.now() + 6 * 60 * 60 * 1000);
-    const providerReset = resetAt
-      .toISOString()
-      .replace("T", " ")
-      .replace(/\.\d{3}Z$/, "");
-    const { automationId, runId } = await createDueAutomationWithDispatchedRun({
-      slug: "park-event-until-provider-reset",
-      messageId: "msg-event-provider-reset",
-      dispatchSource: "event",
-    });
+  it("does not move the cursor for a quota-exhausted event dispatch", async () => {
+    // A coded quota error is no exception to the event carve-out: there is no
+    // provider-reset park for the scheduled side to inherit.
+    const { sql, automationId, runId, staleCursor } =
+      await createDueAutomationWithDispatchedRun({
+        slug: "event-quota-keeps-cursor",
+        messageId: "msg-event-provider-reset",
+        dispatchSource: "event",
+      });
 
     await resolveAutomationRunsByMessageIds(["msg-event-provider-reset"], {
       ok: false,
-      error: `429 Weekly/Monthly Limit Exhausted. Your limit will reset at ${providerReset}`,
+      error: "429 Weekly/Monthly Limit Exhausted. Your limit will reset at 2099-01-01",
       errorCode: "PROVIDER_QUOTA_EXHAUSTED",
     });
 
-    const sql = getTestDb();
     const [run] = await sql`SELECT status FROM runs WHERE id = ${runId}`;
     expect(run.status).toBe("failed");
-
-    const after = await cursorOf(automationId);
-    const expectedNotBefore =
-      Math.floor(resetAt.getTime() / 1000) * 1000 + 60_000;
-    expect(after.getTime()).toBe(expectedNotBefore);
-  });
-
-  it("parks an hourly Automation for a day when the provider balance is empty", async () => {
-    const { automationId, runId } = await createDueAutomationWithDispatchedRun({
-      slug: "park-empty-balance-for-a-day",
-      messageId: "msg-empty-balance",
-    });
-    const before = Date.now();
-
-    await resolveAutomationRunsByMessageIds(["msg-empty-balance"], {
-      ok: false,
-      error:
-        "z.ai returned an error: 429 Insufficient balance or no resource package",
-      errorCode: "PROVIDER_QUOTA_EXHAUSTED",
-    });
-
-    const sql = getTestDb();
-    const [run] = await sql`SELECT status FROM runs WHERE id = ${runId}`;
-    expect(run.status).toBe("failed");
-
-    // Without the park this lands on the next hourly tick (< 1h out), which is
-    // exactly the one-failed-run-per-tick burn the park exists to stop.
-    const after = await cursorOf(automationId);
-    expect(after.getTime()).toBeGreaterThanOrEqual(
-      before + 24 * 60 * 60 * 1000
-    );
-    expect(after.getTime()).toBeLessThanOrEqual(
-      Date.now() + 24 * 60 * 60 * 1000
-    );
-  });
-
-  it("does not shorten a quota park when another run finishes later", async () => {
-    const resetAt = new Date(Date.now() + 6 * 60 * 60 * 1000);
-    const providerReset = resetAt
-      .toISOString()
-      .replace("T", " ")
-      .replace(/\.\d{3}Z$/, "");
-    const { sql, automationId } = await createDueAutomationWithDispatchedRun({
-      slug: "preserve-provider-reset",
-      messageId: "msg-provider-reset-first",
-    });
-    await resolveAutomationRunsByMessageIds(["msg-provider-reset-first"], {
-      ok: false,
-      error: `429 Limit Exhausted. Your limit will reset at ${providerReset}`,
-      errorCode: "PROVIDER_QUOTA_EXHAUSTED",
-    });
-    await sql`
-      INSERT INTO runs (organization_id, run_type, automation_id, status,
-                        dispatched_message_id, approved_input)
-      SELECT organization_id, 'automation', ${automationId}, 'running',
-             'msg-ordinary-error-second',
-             ${sql.json({ finalize_nudge_count: 99, dispatch_source: "scheduled" })}
-      FROM automations
-      WHERE id = ${automationId}
-    `;
-    await resolveAutomationRunsByMessageIds(["msg-ordinary-error-second"], {
-      ok: false,
-      error: "provider disconnected",
-    });
-
-    const expectedNotBefore =
-      Math.floor(resetAt.getTime() / 1000) * 1000 + 60_000;
-    expect((await cursorOf(automationId)).getTime()).toBe(expectedNotBefore);
-  });
-
-  it("parks a reply-to-source Automation on a coded quota error", async () => {
-    const resetAt = new Date(Date.now() + 6 * 60 * 60 * 1000);
-    const providerReset = resetAt
-      .toISOString()
-      .replace("T", " ")
-      .replace(/\.\d{3}Z$/, "");
-    const { automationId, organizationId, agentId } =
-      await createDueAutomationWithDispatchedRun({
-        slug: "park-chat-reply-until-provider-reset",
-        messageId: "msg-chat-provider-reset",
-        dispatchSource: "event",
-      });
-
-    await chatResponseBridge(organizationId).parkQuotaExhaustedAutomation({
-      messageId: "msg-chat-provider-reset",
-      channelId: "chat-provider-reset",
-      conversationId: "chat-provider-reset",
-      userId: "automation-test",
-      teamId: "telegram",
-      organizationId,
-      platform: "telegram",
-      timestamp: Date.now(),
-      error: `429 Limit Exhausted. Your limit will reset at ${providerReset}`,
-      errorCode: "PROVIDER_QUOTA_EXHAUSTED",
-      platformMetadata: {
-        connectionId: "chat-test",
-        chatId: "chat-provider-reset",
-        organizationId,
-        agentId,
-        automationId: automationId,
-      },
-    });
-
-    const after = await cursorOf(automationId);
-    const expectedNotBefore =
-      Math.floor(resetAt.getTime() / 1000) * 1000 + 60_000;
-    expect(after.getTime()).toBe(expectedNotBefore);
-  });
-
-  it("does not park a reply-to-source Automation from another organization", async () => {
-    const resetAt = new Date(Date.now() + 6 * 60 * 60 * 1000);
-    const providerReset = resetAt
-      .toISOString()
-      .replace("T", " ")
-      .replace(/\.\d{3}Z$/, "");
-    const { automationId, staleCursor, organizationId, agentId } =
-      await createDueAutomationWithDispatchedRun({
-        slug: "reject-cross-org-chat-parking",
-        messageId: "msg-cross-org-provider-reset",
-        dispatchSource: "event",
-      });
-
-    await chatResponseBridge(organizationId).parkQuotaExhaustedAutomation({
-      messageId: "msg-cross-org-provider-reset",
-      channelId: "cross-org-provider-reset",
-      conversationId: "cross-org-provider-reset",
-      userId: "automation-test",
-      teamId: "telegram",
-      organizationId: "another-organization",
-      platform: "telegram",
-      timestamp: Date.now(),
-      error: `429 Limit Exhausted. Your limit will reset at ${providerReset}`,
-      errorCode: "PROVIDER_QUOTA_EXHAUSTED",
-      platformMetadata: {
-        connectionId: "chat-test",
-        chatId: "cross-org-provider-reset",
-        organizationId: "another-organization",
-        agentId,
-        automationId: automationId,
-      },
-    });
-
-    expect((await cursorOf(automationId)).getTime()).toBe(staleCursor.getTime());
-  });
-
-  it("does not park another agent's Automation in the same organization", async () => {
-    const resetAt = new Date(Date.now() + 6 * 60 * 60 * 1000);
-    const providerReset = resetAt
-      .toISOString()
-      .replace("T", " ")
-      .replace(/\.\d{3}Z$/, "");
-    const { automationId, staleCursor, organizationId } =
-      await createDueAutomationWithDispatchedRun({
-        slug: "reject-cross-agent-chat-parking",
-        messageId: "msg-cross-agent-provider-reset",
-        dispatchSource: "event",
-      });
-
-    await chatResponseBridge(organizationId).parkQuotaExhaustedAutomation({
-      messageId: "msg-cross-agent-provider-reset",
-      channelId: "cross-agent-provider-reset",
-      conversationId: "cross-agent-provider-reset",
-      userId: "automation-test",
-      teamId: "telegram",
-      organizationId,
-      platform: "telegram",
-      timestamp: Date.now(),
-      error: `429 Limit Exhausted. Your limit will reset at ${providerReset}`,
-      errorCode: "PROVIDER_QUOTA_EXHAUSTED",
-      platformMetadata: {
-        connectionId: "chat-test",
-        chatId: "cross-agent-provider-reset",
-        organizationId,
-        agentId: "another-agent",
-        automationId: automationId,
-      },
-    });
-
     expect((await cursorOf(automationId)).getTime()).toBe(staleCursor.getTime());
   });
 

@@ -1163,7 +1163,7 @@ describe("automation contract", () => {
 			expect(dupeJson.idempotent).toBe(true);
 		});
 
-		it("complete-automation endpoint parks a failed run until provider quota resets", async () => {
+		it("complete-automation endpoint moves a provider-quota failure to the next tick", async () => {
 			const { sql, dbClient, workspace, automationId, agent } =
 				await createAutomatedAutomation();
 			const { windowStart, windowEnd } = await computePendingWindow(dbClient, automationId);
@@ -1194,6 +1194,7 @@ describe("automation contract", () => {
 				.replace("T", " ")
 				.replace(/\.\d{3}Z$/, "");
 			const error = `429 Limit Exhausted. Your limit will reset at ${providerReset}`;
+			const tickBefore = new Date(nextRunAt("0 9 * * *", new Date())).getTime();
 			const response = await post(
 				`/api/workers/me/runs/${queued.runId}/complete-automation`,
 				{
@@ -1222,12 +1223,19 @@ describe("automation contract", () => {
 			expect(String(run.exit_reason)).toBe("crash");
 
 
+			// Lobu does not infer the provider's reset: the cursor moves to the
+			// next daily tick and the failure counts toward the auto-pause breaker.
 			const [automation] = await sql`
-        SELECT next_run_at FROM automations WHERE id = ${automationId}
+        SELECT next_run_at, consecutive_scheduled_failures
+        FROM automations WHERE id = ${automationId}
       `;
-			expect(new Date(automation.next_run_at as string).getTime()).toBe(
-				Math.floor(resetAt.getTime() / 1000) * 1000 + 60_000
-			);
+			const after = new Date(automation.next_run_at as string).getTime();
+			expect([
+				tickBefore,
+				new Date(nextRunAt("0 9 * * *", new Date())).getTime(),
+			]).toContain(after);
+			expect(after).toBeLessThan(resetAt.getTime());
+			expect(Number(automation.consecutive_scheduled_failures)).toBe(1);
 		});
 
 		it("complete-automation endpoint refuses non-Automation run types", async () => {
