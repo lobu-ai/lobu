@@ -4,7 +4,7 @@ import { classifyRunOutcome } from "../runs/run-outcome";
 import logger from "../utils/logger";
 import { ACTIVE_RUN_STATUSES, runStatusLiteral } from "../utils/run-statuses";
 import { advanceScheduleAfterTerminalFailure } from "./schedule-cursor";
-import { recordScheduledExecutionFailure } from "./scheduled-failure-policy";
+import { recordAutomationRunFailure } from "./scheduled-failure-policy";
 import {
 	AUTOMATION_EVAL_RUN_TYPE,
 	AUTOMATION_RUN_TYPE,
@@ -158,6 +158,7 @@ export async function markAutomationRunFailed(
 			automation_id: string | number | null;
 			run_type: string;
 			dispatch_source: string | null;
+			executor_kind: string | null;
 		}>`
       UPDATE runs
       SET status = 'failed',
@@ -167,7 +168,8 @@ export async function markAutomationRunFailed(
       WHERE id = ${runId}
         AND (${expectedMessageId ?? null}::text IS NULL OR dispatched_message_id = ${expectedMessageId ?? null})
         AND status = ANY(${runStatusLiteral(ACTIVE_RUN_STATUSES)}::text[])
-      RETURNING automation_id, run_type, approved_input->>'dispatch_source' AS dispatch_source
+      RETURNING automation_id, run_type, approved_input->>'dispatch_source' AS dispatch_source,
+                approved_input->'executor'->>'kind' AS executor_kind
     `;
 		if (!failed) return false;
 		// Only a REAL Automation failure moves the schedule. An eval replay copies
@@ -175,10 +177,10 @@ export async function markAutomationRunFailed(
 		// failing eval (a quota 429, a scoring rerun) would advance the cron
 		// cursor of the live Automation it is merely replaying.
 		if (failed.run_type === AUTOMATION_RUN_TYPE) {
-			await recordScheduledExecutionFailure(
+			await recordAutomationRunFailure(
 				tx,
 				failed.automation_id == null ? null : Number(failed.automation_id),
-				failed.dispatch_source,
+				{ dispatchSource: failed.dispatch_source, executorKind: failed.executor_kind },
 			);
 			await advanceScheduleAfterTerminalFailure(
 				tx,

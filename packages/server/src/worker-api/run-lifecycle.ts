@@ -97,7 +97,7 @@ import {
 	resolveFinalizeNudgeBudget,
 } from "../automations/run-completion";
 import { advanceScheduleAfterTerminalFailure } from "../automations/schedule-cursor";
-import { recordScheduledExecutionFailure } from "../automations/scheduled-failure-policy";
+import { recordAutomationRunFailure } from "../automations/scheduled-failure-policy";
 import {
 	publishTurnDeltaBestEffort,
 	publishTurnStatusBestEffort,
@@ -1852,13 +1852,16 @@ export async function completeAutomationRun(c: Context<{ Bindings: Env }>) {
         SET last_fired_at = NOW(), updated_at = NOW()
         WHERE id = ${automationId}
       `;
-			await recordScheduledExecutionFailure(
-				tx,
-				automationId,
-				typeof approved.dispatch_source === "string"
-					? approved.dispatch_source
-					: null
-			);
+			await recordAutomationRunFailure(tx, automationId, {
+				dispatchSource:
+					typeof approved.dispatch_source === "string"
+						? approved.dispatch_source
+						: null,
+				executorKind: (() => {
+					const kind = (approved.executor as { kind?: unknown } | null | undefined)?.kind;
+					return typeof kind === "string" ? kind : null;
+				})(),
+			});
 			await advanceScheduleAfterTerminalFailure(
 				tx,
 				automationId,

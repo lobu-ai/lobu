@@ -9,7 +9,7 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import { parsePositiveIntegerId } from '../../../utils/errors';
 import { redactConfigState } from '../../../utils/config-redaction';
-import { resetScheduledFailureState, recordScheduledExecutionFailure } from '../../../automations/scheduled-failure-policy';
+import { resetScheduledFailureState, recordAutomationRunFailure } from '../../../automations/scheduled-failure-policy';
 import type { Env } from '../../../index';
 import type { AuthContext } from '../../../tools/execute';
 import { executeTool } from '../../../tools/execute';
@@ -698,7 +698,7 @@ describe('automation config audit #3664', () => {
     const beforeCount = (await configEvents(orgId, created.automation_id)).length;
     // Force threshold to 1 so one failure pauses.
     process.env.AUTOMATION_PAUSE_AFTER_CONSECUTIVE_FAILURES = '1';
-    await recordScheduledExecutionFailure(sql, Number(created.automation_id), 'scheduled');
+    await recordAutomationRunFailure(sql, Number(created.automation_id), { dispatchSource: 'scheduled', executorKind: null });
     let rows = await configEvents(orgId, created.automation_id);
     expect(rows.length).toBeGreaterThan(beforeCount);
     const pause = rows[rows.length - 1];

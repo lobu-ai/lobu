@@ -44,7 +44,7 @@ import {
 	enqueueAutomationScript,
 	reconcileAutomationScriptRuns,
 } from "./script-enqueue";
-import { recordScheduledExecutionFailure } from "./scheduled-failure-policy";
+import { recordAutomationRunFailure } from "./scheduled-failure-policy";
 import { completeSkippedAutomationRun, inspectUnchangedWindow } from "./unchanged-window";
 import { organizationIdLiveSql } from "../workspace/deletion-state";
 import {
@@ -568,9 +568,11 @@ export async function sweepStaleAutomationRuns(
 	);
 	const executingTimedOutRows = await sql.begin(async (tx) => {
 		const rows = await markStaleRunsAsTimeout(tx, {
-			// Both lanes are terminalized, but only a real Automation that reached
-			// `running` may count toward the schedule circuit breaker. A claimed
-			// row is a dispatch failure; an eval is a replay of live state.
+			// Both lanes are terminalized, but only a real Automation may count
+			// toward the circuit breaker; an eval is a replay of live state. A
+			// native row must have reached `running` (a claimed one is a dispatch
+			// failure). An external client's lease counts from either status:
+			// claiming and walking away is that client's failure.
 			runTypes: AUTOMATION_RUN_TYPES,
 			heartbeatSemantics: "beat-after-claim",
 			heartbeatStaleInterval,
@@ -580,14 +582,13 @@ export async function sweepStaleAutomationRuns(
 		});
 		for (const row of rows) {
 			if (
-				row.previous_status === "running" &&
-				row.run_type === AUTOMATION_RUN_TYPE
+				row.run_type === AUTOMATION_RUN_TYPE &&
+				(row.previous_status === "running" || row.executor_kind === "external")
 			) {
-				await recordScheduledExecutionFailure(
-					tx,
-					row.automation_id,
-					row.dispatch_source,
-				);
+				await recordAutomationRunFailure(tx, row.automation_id, {
+					dispatchSource: row.dispatch_source,
+					executorKind: row.executor_kind,
+				});
 			}
 		}
 		return rows;

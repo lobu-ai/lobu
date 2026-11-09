@@ -33,11 +33,15 @@ import { insertToolConfigChange } from "../helpers/config-audit";
 import { assertAutomationConfigVersionsUnchanged } from "./config-state";
 import type { ManageAutomationsArgs } from "../manage_automations";
 import {
+  autoPausedAutomationError,
   encodeExternalAutomationClaimOwner,
   expireExternalClaims,
   isExternalAutomationClaimOwner,
 } from "./claim-next-window";
-import { resolveAutomationExecutor } from "./executors";
+import { externalAutomationPredicate, resolveAutomationExecutor } from "./executors";
+import { isHumanDecision } from "../../../auth/direct-user-context";
+import { resetScheduledFailureState } from "../../../automations/scheduled-failure-policy";
+import { advanceAutomationSchedule } from "../../../automations/schedule-cursor";
 
 async function loadTriggerExecution(
   sql: DbClient,
@@ -192,6 +196,33 @@ async function loadTriggerExecution(
   };
 }
 
+/**
+ * An auto-paused external Automation accepts no work from its client: a
+ * client that keeps triggering and abandoning windows is the failure the
+ * pause exists to stop. A person's Run now is the explicit resume, so it
+ * clears the pause and restarts the schedule before queueing the run.
+ * Native lanes keep running Run now while paused; their success lifts it.
+ */
+async function admitAutoPausedExternalTrigger(
+  tx: DbClient,
+  automationId: number,
+  ctx: ToolContext,
+): Promise<ToolUserError | null> {
+  const [automation] = await tx<{ paused: boolean; external: boolean }>`
+    SELECT a.schedule_auto_paused_at IS NOT NULL AS paused,
+           ${externalAutomationPredicate(tx, "a")} AS external
+    FROM automations a
+    WHERE a.id = ${automationId}
+      AND a.organization_id = ${ctx.organizationId}
+    FOR UPDATE
+  `;
+  if (!automation?.paused || !automation.external) return null;
+  if (!isHumanDecision(ctx)) return autoPausedAutomationError(automationId);
+  await resetScheduledFailureState(tx, automationId);
+  await advanceAutomationSchedule(tx, automationId);
+  return null;
+}
+
 // ============================================
 // handleTrigger
 // ============================================
@@ -214,6 +245,9 @@ export async function handleTrigger(
     // before enqueueing, otherwise the queue reuses that still-"active" run
     // and loadTriggerExecution fails closed instead of creating fresh work.
     await expireExternalClaims(tx, automationId);
+    // Returned, not thrown, so the expiry and its failure count commit.
+    const refusal = await admitAutoPausedExternalTrigger(tx, automationId, ctx);
+    if (refusal) return refusal;
     const run = await enqueueAutomationRunForAutomationInTransaction(
       automationId,
       "manual",
@@ -235,6 +269,7 @@ export async function handleTrigger(
     }
     return { ...run, ...loaded };
   });
+  if (queued instanceof ToolUserError) throw queued;
   const dispatch = queued.shouldDispatch
     ? await dispatchPendingAutomationRuns({
         db: sql,

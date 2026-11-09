@@ -11,6 +11,7 @@ interface PausedAutomationNotificationRow {
 	organization_slug: string;
 	consecutive_scheduled_failures: number;
 	schedule_auto_paused_at: Date | string;
+	scheduled: boolean;
 	admin_user_ids: string[];
 	latest_error: string | null;
 }
@@ -71,6 +72,7 @@ export async function runAutomationAutoPauseNotificationSweep(
         o.slug AS organization_slug,
         a.consecutive_scheduled_failures,
         a.schedule_auto_paused_at,
+        a.schedule IS NOT NULL AS scheduled,
         to_jsonb(array_agg(DISTINCT m."userId" ORDER BY m."userId")) AS admin_user_ids
       FROM automations a
       JOIN "organization" o ON o.id = a.organization_id
@@ -88,7 +90,7 @@ export async function runAutomationAutoPauseNotificationSweep(
               floor(extract(epoch FROM a.schedule_auto_paused_at) * 1000)::bigint::text
         )
       GROUP BY a.id, a.name, a.organization_id, o.slug,
-               a.consecutive_scheduled_failures, a.schedule_auto_paused_at
+               a.consecutive_scheduled_failures, a.schedule_auto_paused_at, a.schedule
       ORDER BY a.schedule_auto_paused_at ASC, a.id ASC
       LIMIT ${limit}
     )
@@ -117,9 +119,12 @@ export async function runAutomationAutoPauseNotificationSweep(
 				type: "generic",
 				title: `Automation "${row.name ?? row.id}" was auto-paused`,
 				body:
-					`Lobu paused this schedule after ${row.consecutive_scheduled_failures} ` +
-					"consecutive execution failures. Review the latest run, then complete " +
-					"a successful manual run or change the cadence to resume it." +
+					// An external Automation pauses with or without a schedule, so only
+					// offer the cadence change when there is one.
+					`Lobu paused this Automation after ${row.consecutive_scheduled_failures} ` +
+					"consecutive failed runs. Review the latest run, then use Run now" +
+					(row.scheduled ? " or change its schedule" : "") +
+					" to resume it." +
 					latestErrorSentence(row.latest_error),
 				resourceType: "automation",
 				resourceId: String(row.id),

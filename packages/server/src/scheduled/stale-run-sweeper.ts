@@ -201,6 +201,8 @@ export interface TimedOutStaleRun {
 	run_type: string;
 	previous_status: string;
 	dispatch_source: string | null;
+	/** The frozen `approved_input.executor.kind`. */
+	executor_kind: string | null;
 }
 
 export async function markStaleRunsAsTimeout(
@@ -219,6 +221,7 @@ export async function markStaleRunsAsTimeout(
               automation_id,
               run_type,
               approved_input->>'dispatch_source' AS dispatch_source,
+              approved_input->'executor'->>'kind' AS executor_kind,
               CASE
                 WHEN ${AUTOMATION_LEASE_SQL} THEN 'External Automation window lease expired'
                 WHEN ${hasHeartbeatSql(spec.heartbeatSemantics)} THEN $1
@@ -237,7 +240,7 @@ export async function markStaleRunsAsTimeout(
      WHERE r.id = stale.id
        AND r.status = stale.previous_status
      RETURNING r.id, r.automation_id, r.run_type,
-               stale.previous_status, stale.dispatch_source`,
+               stale.previous_status, stale.dispatch_source, stale.executor_kind`,
 		[
 			spec.heartbeatErrorMessage,
 			spec.coarseErrorMessage,

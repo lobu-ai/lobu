@@ -22,7 +22,7 @@ import { resolveAutomationExecutor } from './executors';
 import { runLeaseFence } from '../../../runs/run-lease';
 import type { AutomationTrigger } from '../../../types/automations';
 import { advanceAutomationScheduleAfterSuccessfulWindow } from '../../../automations/schedule-cursor';
-import { recordScheduledExecutionFailure } from '../../../automations/scheduled-failure-policy';
+import { recordAutomationRunFailure } from '../../../automations/scheduled-failure-policy';
 import {
   completeSkippedAutomationRun,
   inspectUnchangedWindow,
@@ -46,6 +46,15 @@ const SCRIPT_EXTERNAL_CLAIM_ERROR =
   'Script Automations execute through the runtime and cannot be claimed by an external processor.';
 
 export { encodeExternalAutomationClaimOwner } from '../../../automations/external-claim-owner';
+
+/** The one rejection for work on an auto-paused external Automation. */
+export function autoPausedAutomationError(automationId: number): ToolUserError {
+  return new ToolUserError(
+    `Automation ${automationId} is auto-paused after repeated failed runs. ` +
+      'A person must review its latest run and resume it with Run now; agents and API clients cannot resume it.',
+    409
+  );
+}
 
 export function isExternalAutomationClaimOwner(value: string): boolean {
   if (!value.startsWith('external:')) return false;
@@ -197,6 +206,16 @@ export async function handleClaimNextWindow(
         WHERE id = ${runId}
       `;
     } else {
+      // Reconcile expired leases first: the expiry may be the failure that
+      // pauses the Automation. A paused Automation hands out no new window,
+      // queued or not; only a person's Run now (trigger) resumes it.
+      await expireExternalClaims(tx, automationId);
+      const [state] = await tx`SELECT schedule_auto_paused_at FROM automations WHERE id = ${automationId}`;
+      if (state?.schedule_auto_paused_at) {
+        // Commit the timeout and failure count before returning the rejection,
+        // just as the no-op branch commits its completion before its 409.
+        return autoPausedAutomationError(automationId);
+      }
       // The arrival window [mark, horizon) stays empty while the settle delay
       // or an open writer keeps the horizon at or behind the mark.
       const pending = await computePendingWindow(tx, automationId);
@@ -209,14 +228,6 @@ export async function handleClaimNextWindow(
             'and in-flight transactions can delay the window further.',
           409
         );
-      }
-      if (await expireExternalClaims(tx, automationId)) {
-        const [state] = await tx`SELECT schedule_auto_paused_at FROM automations WHERE id = ${automationId}`;
-        if (state?.schedule_auto_paused_at) {
-          // Commit the timeout and failure count before returning the rejection,
-          // just as the no-op branch commits its completion before its 409.
-          return new ToolUserError('This external Automation schedule is auto-paused after repeated failures. Review its health before resuming.', 409);
-        }
       }
       const active = await tx`
         SELECT id FROM runs
@@ -456,17 +467,27 @@ export async function handleClaimNextWindow(
     };
   } catch (error) {
     const sourceError = error instanceof Error ? error.message : String(error);
-    await sql`
-      UPDATE runs
-      SET status = 'failed',
-          outcome = ${classifyRunOutcome({ status: 'failed', errorMessage: sourceError })},
-          completed_at = current_timestamp,
-          error_message = ${`Automation source context failed: ${sourceError}`}
-      WHERE id = ${claimedWindow.runId}
-        AND automation_id = ${automationId}
-        ${runLeaseFence(sql, owner)}
-        AND expires_at = ${claimedWindow.leaseExpiresAt.toISOString()}::timestamptz
-    `;
+    await sql.begin(async (tx) => {
+      const [failed] = await tx<{ dispatch_source: string | null; executor_kind: string | null }>`
+        UPDATE runs
+        SET status = 'failed',
+            outcome = ${classifyRunOutcome({ status: 'failed', errorMessage: sourceError })},
+            completed_at = current_timestamp,
+            error_message = ${`Automation source context failed: ${sourceError}`}
+        WHERE id = ${claimedWindow.runId}
+          AND automation_id = ${automationId}
+          ${runLeaseFence(tx, owner)}
+          AND expires_at = ${claimedWindow.leaseExpiresAt.toISOString()}::timestamptz
+        RETURNING approved_input->>'dispatch_source' AS dispatch_source,
+                  approved_input->'executor'->>'kind' AS executor_kind
+      `;
+      if (failed) {
+        await recordAutomationRunFailure(tx, automationId, {
+          dispatchSource: failed.dispatch_source,
+          executorKind: failed.executor_kind,
+        });
+      }
+    });
     throw error;
   }
 }
@@ -506,7 +527,7 @@ async function readPinnedInstructions(
 }
 
 export async function expireExternalClaims(tx: DbClient, automationId: number): Promise<boolean> {
-  const expired = await tx<{ previous_status: string; dispatch_source: string | null }>`
+  const expired = await tx<{ previous_status: string; dispatch_source: string | null; executor_kind: string | null }>`
     WITH expired AS (
       SELECT id, status AS previous_status FROM runs
       WHERE automation_id = ${automationId}
@@ -520,11 +541,17 @@ export async function expireExternalClaims(tx: DbClient, automationId: number): 
         completed_at = current_timestamp,
         error_message = 'External Automation window lease expired'
     FROM expired WHERE r.id = expired.id AND r.status = expired.previous_status
-    RETURNING expired.previous_status, r.approved_input->>'dispatch_source' AS dispatch_source
+    RETURNING expired.previous_status, r.approved_input->>'dispatch_source' AS dispatch_source,
+              r.approved_input->'executor'->>'kind' AS executor_kind
   `;
   for (const row of expired) {
-    if (row.previous_status === 'running') {
-      await recordScheduledExecutionFailure(tx, automationId, row.dispatch_source);
+    // Same rule as the stale-run sweep: an external lease counts from either
+    // status, a native row only once it reached `running`.
+    if (row.previous_status === 'running' || row.executor_kind === 'external') {
+      await recordAutomationRunFailure(tx, automationId, {
+        dispatchSource: row.dispatch_source,
+        executorKind: row.executor_kind,
+      });
     }
   }
   return expired.length > 0;
