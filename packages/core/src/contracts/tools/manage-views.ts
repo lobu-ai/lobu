@@ -264,7 +264,7 @@ export const RemoveViewAction = Type.Object({
 export const GetNavigationAction = Type.Object({
   action: Type.Literal("get_navigation", {
     description:
-      "Read the workspace navigation: { revision, config, sections }. config is the stored document (null = automatic defaults; members only), sections what the sidebar renders for the caller.",
+      "Read the workspace navigation: { revision, config, sections }. config is the stored document (null = automatic defaults), returned only to owner/admin callers with admin access; sections is what the sidebar renders for the caller.",
   }),
 });
 
