@@ -7,7 +7,7 @@ import {
 } from '../../setup/test-fixtures';
 import { TestApiClient, TestMcpClient } from '../../setup/test-mcp-client';
 import { GetAutomationResultSchema, type GetAutomationResult } from '../../../tools/get_automation';
-import { WINDOW_DATA_BUDGET_BYTES } from '../../../types/automations';
+import { REACTION_RESULT_BUDGET_BYTES, WINDOW_DATA_BUDGET_BYTES } from '../../../types/automations';
 import { validateToolResult } from '../../../tools/validate-args';
 
 const ROW_COUNT = 150;
@@ -221,6 +221,20 @@ describe('Automation response byte budget', () => {
       runIds.push(Number(run.id));
     }
     const largeSummary = '😀'.repeat(largeChars);
+    // Reaction script results are capped per row on write; a page of them
+    // shares its own budget too, newest first.
+    const resultChars = 15_000;
+    for (const runId of runIds) {
+      await sql`
+        INSERT INTO automation_reactions (organization_id, automation_id, source_run_id,
+          reaction_type, tool_name, tool_args, tool_result, created_at)
+        SELECT ${orgId}, ${automationId}, ${runId}, 'script_execution', 'reaction_executor',
+          jsonb_build_object('attempt', n),
+          jsonb_build_object('success', true, 'result', jsonb_build_object('note', repeat('r', ${resultChars}::int))),
+          NOW() - make_interval(secs => (${runId}::int * 10 + n)::double precision)
+        FROM generate_series(1, 7) n
+      `;
+    }
 
     // An external client walking its Automations through the SDK bridge must
     // not trip the 4 MiB bridge cap, and an omitted output stays readable.
@@ -247,6 +261,17 @@ describe('Automation response byte budget', () => {
     expect(detail.windows.map((w) => w.run_id)).toEqual(runIds);
     for (const window of detail.windows) {
       expect(window).not.toHaveProperty('previous_extracted_data');
+    }
+    const reactions = detail.windows
+      .flatMap((w) => w.reactions ?? [])
+      .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
+    expect(reactions).toHaveLength(runIds.length * 7);
+    const resultBytes = Buffer.byteLength(JSON.stringify({ note: 'r'.repeat(resultChars) }), 'utf8');
+    const keptResults = reactions.filter((r) => r.tool_result?.result !== undefined);
+    expect(keptResults).toHaveLength(Math.floor(REACTION_RESULT_BUDGET_BYTES / resultBytes));
+    expect(reactions.slice(0, keptResults.length)).toEqual(keptResults);
+    for (const reaction of reactions.slice(keptResults.length)) {
+      expect(reaction.tool_result).toEqual({ success: true, result_omitted: { bytes: resultBytes } });
     }
     const kept = detail.windows.filter((w) => w.extracted_data !== null);
     expect(kept.map((w) => w.run_id)).toEqual([runIds[0], runIds[1], runIds[3]]);

@@ -42,10 +42,18 @@ export async function executeReaction(options: ExecuteAutomationScriptOptions): 
   error?: string;
   /** The host's typed verdict, when the failure carries one (see `runScript`). */
   retryable?: boolean;
+  /** The script's return value; `null` when it returned nothing. */
+  returnValue?: unknown;
+  /** JSON byte size of a return value the sandbox withheld as over its output limit. */
+  returnBytes?: number;
 }> {
   const result = await executeAutomationScript({ ...options, executionKind: 'reaction' });
   return result.success
-    ? { success: true }
+    ? {
+        success: true,
+        returnValue: result.returnValue,
+        ...(result.returnBytes === undefined ? {} : { returnBytes: result.returnBytes }),
+      }
     : {
         success: false,
         error: result.error,
@@ -60,6 +68,8 @@ export async function executeAutomationScript(options: ExecuteAutomationScriptOp
   retryable?: boolean;
   returnValue?: unknown;
   didReturnValue?: boolean;
+  /** Set when the sandbox withheld an oversized return value (reactions only). */
+  returnBytes?: number;
 }> {
   const {
     compiledScript,
@@ -164,6 +174,7 @@ export async function executeAutomationScript(options: ExecuteAutomationScriptOp
       success: true,
       returnValue: result.returnValue,
       didReturnValue: result.didReturnValue,
+      ...(result.returnTruncated ? { returnBytes: result.returnTruncated.total_bytes } : {}),
     };
   }
 

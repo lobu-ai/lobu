@@ -477,6 +477,14 @@ budget so the response fits the SDK bridge. A window whose output does not fit
 is still listed, with `extracted_data: null` and `extracted_data_omitted:
 { bytes }`; `operations.getRun(run_id)` returns its full output.
 
+Each window's `reactions` lists its reaction log. A `script_execution` row's
+`tool_result` is `{ success, error?, result? }`, where `result` is what the
+reaction script returned, so a reaction can report its own counts. A return of
+`null` or nothing records no `result`. A return over 16 KiB of JSON is not
+stored: the row carries `result_omitted: { bytes }` instead. Stored results on
+one page share a separate 1 MiB budget, newest first, and a result past it is
+listed the same way.
+
 ### Consistent SQL drill-downs
 
 Stored event sources select the versions that existed at the exclusive window

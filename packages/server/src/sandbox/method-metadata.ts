@@ -600,7 +600,7 @@ export default async (_ctx, client) => {
 	},
 	"automations.get": {
 		summary:
-			"Fetch an Automation by id with a page of its completed windows, newest first (`page`, `page_size`). The previous window is `windows[i + 1]`. Window outputs share a 1 MiB budget per response: a window whose output does not fit returns `extracted_data: null` with `extracted_data_omitted: { bytes }`; read its full output with `operations.getRun(run_id)`.",
+			"Fetch an Automation by id with a page of its completed windows, newest first (`page`, `page_size`). The previous window is `windows[i + 1]`. Window outputs share a 1 MiB budget per response: a window whose output does not fit returns `extracted_data: null` with `extracted_data_omitted: { bytes }`; read its full output with `operations.getRun(run_id)`. Each window's `reactions[]` is its reaction log; a `script_execution` entry's `tool_result.result` is the reaction script's return value (over 16 KiB, or past the page's 1 MiB result budget, it is `result_omitted: { bytes }` instead).",
 		access: "read",
 		throws: ["AutomationNotFound"],
 		signature:
