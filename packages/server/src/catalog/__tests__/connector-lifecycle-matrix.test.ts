@@ -91,7 +91,7 @@ describe("bundled connector lifecycle matrix", () => {
 			herdr: 12,
 			imessage: 4,
 			linkedin: 9,
-			"market.quotes": 1,
+			"market.quotes": 2,
 			// outlook's first actions: list_attachments + download_attachment.
 			"microsoft.outlook": 2,
 			// Browser-backed connectors also expose the gateway's verification action.
