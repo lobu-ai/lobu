@@ -44,6 +44,17 @@ describe("Automation schedule auto-pause notifications", () => {
 			await createScheduledAutomation("Notification pause");
 		const sql = getTestDb();
 		const firstPause = new Date("2026-08-27T12:00:00.000Z");
+		// The admin should see why the schedule paused without opening the run:
+		// the latest failure's error is quoted, bounded, and an older one is not.
+		const quotaError = `429 Weekly/Monthly Limit Exhausted. ${"Your plan quota is spent. ".repeat(20)}`;
+		await sql`
+			INSERT INTO runs (organization_id, run_type, automation_id, status, completed_at, error_message)
+			VALUES
+				(${workspace.org.id}, 'automation', ${automationId}, 'failed',
+				 '2026-08-27T11:00:00.000Z'::timestamptz, 'executor timed out'),
+				(${workspace.org.id}, 'automation', ${automationId}, 'failed',
+				 '2026-08-27T11:59:59.000Z'::timestamptz, ${quotaError})
+		`;
 		await sql`
 			UPDATE automations
 			SET consecutive_scheduled_failures = 5,
@@ -72,18 +83,25 @@ describe("Automation schedule auto-pause notifications", () => {
 			SELECT
 				e.id,
 				e.title,
+				e.payload_text,
 				e.metadata,
 				to_jsonb(array_agg(t.user_id ORDER BY t.user_id)) AS target_user_ids
 			FROM events e
 			JOIN notification_targets t ON t.event_id = e.id
 			WHERE e.organization_id = ${workspace.org.id}
 			  AND e.metadata->>'_lobu_idempotency_key' = ${firstKey}
-			GROUP BY e.id, e.title, e.metadata
+			GROUP BY e.id, e.title, e.payload_text, e.metadata
 		`;
 		expect(firstEvents).toHaveLength(1);
 		expect(firstEvents[0]?.title).toBe(
 			'Automation "Notification pause" was auto-paused',
 		);
+		const body = String(firstEvents[0]?.payload_text);
+		expect(body).toContain(
+			`${Array.from(quotaError).slice(0, 300).join("").trimEnd()}…`,
+		);
+		expect(body).not.toContain(quotaError);
+		expect(body).not.toContain("executor timed out");
 		expect(
 			[...(firstEvents[0]?.target_user_ids as string[])].sort(),
 		).toEqual(

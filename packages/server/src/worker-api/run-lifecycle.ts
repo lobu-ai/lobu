@@ -96,10 +96,7 @@ import {
 	bumpDeviceFinalizeNudge,
 	resolveFinalizeNudgeBudget,
 } from "../automations/run-completion";
-import {
-	advanceScheduleAfterTerminalFailure,
-	deviceProviderQuotaResetNotBefore,
-} from "../automations/schedule-cursor";
+import { advanceScheduleAfterTerminalFailure } from "../automations/schedule-cursor";
 import { recordScheduledExecutionFailure } from "../automations/scheduled-failure-policy";
 import {
 	publishTurnDeltaBestEffort,
@@ -1867,8 +1864,7 @@ export async function completeAutomationRun(c: Context<{ Bindings: Env }>) {
 				automationId,
 				typeof approved.dispatch_source === "string"
 					? approved.dispatch_source
-					: null,
-				deviceProviderQuotaResetNotBefore(reason)
+					: null
 			);
 			return true;
 		});

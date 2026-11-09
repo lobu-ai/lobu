@@ -132,11 +132,11 @@ describe("classifyError", () => {
     // agent routed to openai/gpt-4o-mini): the worker logged a bare
     // `{"name":"Error","message":"You have no credits remaining…"}` because no
     // pre-split worker pattern matched this sentence. `undefined` here is not a
-    // cosmetic miss — it silently disables the downstream feature that gates on
-    // the code: `providerQuotaResetNotBefore` (24h Automation park). The provider
-    // health row no longer depends on this classification — the proxy marks it
-    // from the upstream HTTP status (`classifyProviderHealthStatus`). The parker
-    // shipped believing this message classified.
+    // cosmetic miss — the run is blamed on the agent (`agent_error`), the user
+    // gets no "Manage provider" CTA, and the failure dodges the PROVIDER_*
+    // alert. The provider health row no longer depends on this classification —
+    // the proxy marks it from the upstream HTTP status
+    // (`classifyProviderHealthStatus`).
     expect(
       classifyError(
         new Error(
@@ -279,8 +279,9 @@ describe("provider refusals prod was recording as the agent's fault", () => {
       );
     }
 
-    // A windowed subscription limit must NOT reach the balance union, which
-    // parks an Automation for a flat day; this one names its own reset.
+    // A windowed subscription limit must NOT reach the balance union, which the
+    // device daemon treats as a wall no retry clears; this one names its own
+    // reset.
     expect(
       PROVIDER_BALANCE_EXHAUSTED.test(
         "You have hit your ChatGPT usage limit (pro plan). Try again in ~8700 minutes."

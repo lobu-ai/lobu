@@ -264,9 +264,6 @@ export class UnifiedThreadResponseConsumer {
       // polling transport leased to another replica) — then fail the job so the retry lands
       // somewhere that can, instead of silently completing an undelivered reply.
       const chatConnectionId = data.platformMetadata?.connectionId as string | undefined;
-      if (chatConnectionId && data.error) {
-        await this.chatResponseBridge?.parkQuotaExhaustedAutomation(data);
-      }
       if (await this.chatResponseBridge?.ensureDeliverable(data)) {
         const sessionKey = `${data.userId}:${data.originalMessageId || data.messageId}`;
         await this.routeToRenderer(
@@ -454,13 +451,6 @@ export class UnifiedThreadResponseConsumer {
     const isApiRow =
       (data.platform || data.teamId) === "api" &&
       !data.platformMetadata?.connectionId;
-
-    // Preserve the original terminal error before output guardrails replace the
-    // user-visible text. The API renderer consumes this field only for durable
-    // Automation scheduling; it is never included in an SSE event.
-    if (typeof data.error === "string") {
-      data = { ...data, bookkeepingError: data.error };
-    }
 
     if (isApiRow) {
       const isTerminal = !!(

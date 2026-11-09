@@ -277,22 +277,17 @@ export const AGENT_ERRORS: Record<AgentErrorCode, AgentErrorSpec> = {
  * Provider says: the key is VALID, the account just cannot spend — a balance,
  * credit, or billing-limit wall rather than a windowed rate limit.
  *
- * The native turn classifier maps this wording to
- * `PROVIDER_QUOTA_EXHAUSTED`, while `providerQuotaResetNotBefore` parks
- * an Automation for a day on the same wording. They were maintained as separate
- * literals and drifted in both directions: the parker learned OpenAI's
- * "no credits remaining" while the classifier did not, and the classifier
- * matched "insufficient quota" while the parker's
- * list did not. Because the server gates on the code the worker assigns, the
- * first drift silently disabled BOTH the day-park and the provider-health
- * writeback for OpenAI balance exhaustion (observed in prod 2026-08-05). This
- * union closes both — which deliberately promotes reset-less "insufficient
- * quota" wording (OpenAI/Azure billing) into the day-park; the retry-horizon
- * guard in `balanceExhaustedNotBefore` keeps windowed 429s out of it.
+ * `classifyErrorMessage` maps this wording to `PROVIDER_QUOTA_EXHAUSTED`, and
+ * the device daemon stops an OpenCode run that is retrying it, since no retry
+ * clears an empty balance. It lives in core because separate copies of this
+ * list drifted in both directions: one learned OpenAI's "no credits remaining"
+ * while the classifier did not, and the classifier matched "insufficient
+ * quota" while the other did not, which left OpenAI balance exhaustion
+ * unclassified in prod (2026-08-05). This union closes both.
  *
  * Keep this to balance/billing wording only. Windowed limits ("too many
- * requests", a bare 429) classify as quota too, but must NOT day-park — they
- * self-heal, often within the minute.
+ * requests", a bare 429) classify as quota too, but they self-heal, often
+ * within the minute, so they belong in {@link PROVIDER_WINDOWED_QUOTA}.
  */
 export const PROVIDER_BALANCE_EXHAUSTED =
   /credit balance is too low|insufficient (?:credits?|balance|funds|quota)\b|no resource package|billing_hard_limit_reached|payment required|exceeded your current quota|out of credits?\b|no credits remaining/i;
@@ -304,17 +299,15 @@ export const PROVIDER_BALANCE_EXHAUSTED =
  *
  * Hoisted here for exactly the reason {@link PROVIDER_BALANCE_EXHAUSTED} was.
  * This alternation was maintained as three independent literals — the turn
- * classifier (`classify-error.ts`), the device schedule parker
- * (`deviceProviderQuotaResetNotBefore`) and the server's own `INFRA_PATTERNS`
- * — and drifted the same way the balance list did: the device parker learned
- * ChatGPT's `usage limit` and the other two did not, so over the 30 days to
- * 2026-09-15, 47 runs the provider had refused were recorded as the agent's
- * fault, rendered to the user with no remediation CTA, and dodged the
- * PROVIDER_* alert.
+ * classifier (`classify-error.ts`), a since-removed device schedule check and
+ * the server's own `INFRA_PATTERNS` — and drifted the same way the balance
+ * list did: the device check learned ChatGPT's `usage limit` and the other two
+ * did not, so over the 30 days to 2026-09-15, 47 runs the provider had refused
+ * were recorded as the agent's fault, rendered to the user with no remediation
+ * CTA, and dodged the PROVIDER_* alert.
  *
- * Keep windowed wording ONLY. These must classify as quota but must NOT reach
- * the day-park: they often clear within the minute, and the caller decides the
- * horizon from the provider's own named reset.
+ * Keep windowed wording ONLY. These classify as quota, but they often clear
+ * within the minute, so nothing may treat them as a balance wall.
  */
 export const PROVIDER_WINDOWED_QUOTA =
   /limit exhausted|usage limit|rate[-\s]?limit|quota (?:exceeded|exhausted)|too many requests|\b429\b|resource_exhausted/i;

@@ -315,12 +315,6 @@ export interface ThreadResponsePayload {
    * the provider's sentence; `errorCode` selects the CTA link.
    */
   error?: string;
-  /**
-   * Original terminal error used only for durable run bookkeeping when an
-   * output guardrail replaces the user-visible error text. Gateway-owned;
-   * renderers must never expose this field to clients.
-   */
-  bookkeepingError?: string;
   errorCode?: string;
   /** Non-secret provider/model targeting for the error CTA. */
   errorContext?: AgentErrorContext;

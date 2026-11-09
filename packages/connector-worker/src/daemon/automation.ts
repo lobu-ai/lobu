@@ -248,10 +248,13 @@ function drain(stream: Readable, capBytes: number): Promise<{ data: Buffer; trun
  * for deterministic account limits. Generic stream errors remain owned by the
  * CLI and its own retry loop.
  *
- * The wording accepted here must stay a subset of what the server's
- * `deviceProviderQuotaResetNotBefore` recognizes as quota evidence. Killing a
- * run the server will not park just moves the same failure to the next cron
- * tick, which is the waste this path exists to stop.
+ * OpenCode keeps retrying an account limit for the provider's whole reset
+ * window, so the run would otherwise burn its wall clock before failing.
+ * Accept only wording no in-run retry can clear: an empty balance, or a
+ * daily/weekly/monthly usage window that resets hours or more away. A short
+ * rate limit stays with the CLI, whose own retry may still finish the run.
+ * The relayed reason must still classify as provider quota in core's
+ * `classifyErrorMessage`, so the failed run is not blamed on the agent.
  */
 function openCodeTerminalRetryDiagnostic(output: string): string | null {
   const lines = output.split(/\r?\n/);
