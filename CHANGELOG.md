@@ -1,5 +1,34 @@
 # Changelog
 
+## [24.8.0](https://github.com/lobu-ai/lobu/compare/lobu-v24.7.0...lobu-v24.8.0) (2026-11-09)
+
+
+### Features
+
+* **connectors:** add imessage connector over os.shell ([#4751](https://github.com/lobu-ai/lobu/issues/4751)) ([c3a92ad](https://github.com/lobu-ai/lobu/commit/c3a92ad17e210fc4ef49f624a980719b4bd6304d))
+* **connectors:** LOBU_HTTP_EGRESS_ALLOW_HOSTS for self-hosted private HTTP sources ([#4732](https://github.com/lobu-ai/lobu/issues/4732)) ([60d266e](https://github.com/lobu-ai/lobu/commit/60d266e34786dc8343efd7ad9f97da0ae83fc600))
+* **entities:** optional expected precondition on entity update ([#4734](https://github.com/lobu-ai/lobu/issues/4734)) ([067a631](https://github.com/lobu-ai/lobu/commit/067a63105defb68151a2e0d3f5ae41183a873924))
+* home navigation and activity rows; identity approval titles name both records ([#4752](https://github.com/lobu-ai/lobu/issues/4752)) ([5f7bfed](https://github.com/lobu-ai/lobu/commit/5f7bfed7769914de36587c17227667fe45849ba8))
+
+
+### Bug Fixes
+
+* allow legal workspace routes through SPA fallback ([#4761](https://github.com/lobu-ai/lobu/issues/4761)) ([c20cde8](https://github.com/lobu-ai/lobu/commit/c20cde88bbe2e5dfbc0b4442ab3f03fc8d629a6b))
+* **connectors:** read imessage attachments and long bodies from the real chat.db ([#4754](https://github.com/lobu-ai/lobu/issues/4754)) ([7ab4461](https://github.com/lobu-ai/lobu/commit/7ab4461b27c261402fc07f12fa7d7af7f98693b0))
+* **connect:** register connector webhooks under the gateway mount ([#4667](https://github.com/lobu-ai/lobu/issues/4667)) ([cc65a35](https://github.com/lobu-ai/lobu/commit/cc65a355be1d2ef4f2d72294e61bf1e1cd905249))
+* **deps:** dedupe prosemirror-model and prosemirror-view in the workspace lockfile ([#4762](https://github.com/lobu-ai/lobu/issues/4762)) ([5743521](https://github.com/lobu-ai/lobu/commit/574352159a1e7a6fca862c7610b52e91e225b54d))
+* **linkedin:** remove dead Data Export takeout feeds ([#4633](https://github.com/lobu-ai/lobu/issues/4633)) ([f1754f8](https://github.com/lobu-ai/lobu/commit/f1754f821eb1067f41f579c4f529b20fb8730673))
+* **local-runtime:** harden and smooth self-hosted lobu run ([#4731](https://github.com/lobu-ai/lobu/issues/4731)) ([47b8d19](https://github.com/lobu-ai/lobu/commit/47b8d19330e3c63a96cd7d25fda7dd221fc22cbb))
+* **operations:** title operation cards by the operation's name ([#4760](https://github.com/lobu-ai/lobu/issues/4760)) ([5dfce2c](https://github.com/lobu-ai/lobu/commit/5dfce2c8349759e55698d250467fb2483eec1a4e))
+* **public:** explain denied SQL queries and allow knowledge reads in views [client-regen-not-needed] ([#4764](https://github.com/lobu-ai/lobu/issues/4764)) ([f8ff304](https://github.com/lobu-ai/lobu/commit/f8ff304d5670afa130f1770c8c8af263fd282366))
+* **review:** wait for a new review child's environment before checking it ([#4770](https://github.com/lobu-ai/lobu/issues/4770)) ([6a44ab3](https://github.com/lobu-ai/lobu/commit/6a44ab3486e04f22bc889ae674435c5765d6c3f7))
+* **runtime:** let the server own SIGTERM so lobu run stops its services ([#4771](https://github.com/lobu-ai/lobu/issues/4771)) ([577f123](https://github.com/lobu-ai/lobu/commit/577f1239a4615dcda66c12085df82d4c26c40f4a))
+
+
+### Performance Improvements
+
+* **feeds:** list_feeds counts events only when asked ([#4757](https://github.com/lobu-ai/lobu/issues/4757)) ([9bb6bd0](https://github.com/lobu-ai/lobu/commit/9bb6bd01edd554ae45618a62e03b813496cc575f))
+
 ## [24.7.0](https://github.com/lobu-ai/lobu/compare/lobu-v24.6.0...lobu-v24.7.0) (2026-11-05)
 
 
