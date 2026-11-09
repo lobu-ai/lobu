@@ -878,15 +878,21 @@ export function viewResourceMeta(view: StoredView): {
   };
 }
 
-// Theme tokens the view kit reads. Each derives from the MCP Apps standard
-// style variable the host sends in `hostContext.styles.variables` (the guest
-// writes them onto <html>), falling back to Lobu's own palette when a host
-// sends none; the host's `theme` flips `.dark` on <html>. The background stays
-// transparent so the frame shows the host's surface.
+// Theme tokens views read, in the shadcn vocabulary Owletto's view-native
+// stylesheet uses: `--muted`/`--accent` are surfaces and secondary text is
+// `--muted-foreground`. Each derives from the MCP Apps standard style variable
+// the host sends in `hostContext.styles.variables` (the guest writes them onto
+// <html>) with the same mapping as the native sheet, which is linked after this
+// one and restates it, falling back to Lobu's palette when a host sends none;
+// the host's `theme` flips `.dark` on <html>. Paired tokens reference their
+// base so the dark rule only restates the primitives. `--primary` has no host
+// variable; `--font-sans` is itself one, so the guest's inline value overrides
+// the fallback here. The background stays transparent so the frame shows the
+// host's surface.
 const BASE_CSS = `
-:root{color-scheme:light;--fg:var(--color-text-primary,#0a0a0a);--muted:var(--color-text-secondary,#6b7280);--border:var(--color-border-primary,#e5e7eb);--accent:var(--color-text-info,#2563eb);--font:var(--font-sans,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif);--radius:var(--border-radius-md,6px);--radius-lg:var(--border-radius-lg,8px)}
-html.dark{color-scheme:dark;--fg:var(--color-text-primary,#fafafa);--muted:var(--color-text-secondary,#9ca3af);--border:var(--color-border-primary,#27272a);--accent:var(--color-text-info,#60a5fa)}
-html,body{margin:0;background:transparent;color:var(--fg);font:13px/1.45 var(--font)}
+:root{color-scheme:light;--background:var(--color-background-primary,#fcfcfb);--foreground:var(--color-text-primary,#141414);--card:var(--color-background-secondary,#fff);--card-foreground:var(--foreground);--popover:var(--card);--popover-foreground:var(--foreground);--primary:#2f63e8;--primary-foreground:#fcfcfb;--secondary:var(--color-background-tertiary,#f3f1ea);--secondary-foreground:var(--foreground);--muted:var(--secondary);--muted-foreground:var(--color-text-secondary,#545454);--accent:var(--secondary);--accent-foreground:var(--foreground);--destructive:var(--color-text-danger,#dc2626);--border:var(--color-border-primary,#e7e4dc);--input:var(--color-border-secondary,var(--border));--ring:var(--color-ring-primary,var(--primary));--font-sans:"DM Sans",ui-sans-serif,system-ui,-apple-system,sans-serif;--radius:var(--border-radius-md,6px);--radius-lg:var(--border-radius-lg,8px)}
+html.dark{color-scheme:dark;--background:var(--color-background-primary,#0f0e0c);--foreground:var(--color-text-primary,#f3eee2);--card:var(--color-background-secondary,#1a1815);--secondary:var(--color-background-tertiary,#211e1a);--muted-foreground:var(--color-text-secondary,#b4ae9f);--border:var(--color-border-primary,#2c2a25)}
+html,body{margin:0;background:transparent;color:var(--foreground);font:13px/1.45 var(--font-sans)}
 *{box-sizing:border-box}
 `;
 
@@ -958,20 +964,20 @@ export function renderViewsLoaderShell(): string {
 <title>Lobu views</title>
 <style>${BASE_CSS}
 #root{max-width:960px;margin:auto;padding:24px}
-#lobu-views-status{color:var(--muted)}
+#lobu-views-status{color:var(--muted-foreground)}
 .view-picker h1{font-size:24px;line-height:1.2;margin:0 0 8px}
-.view-picker p{color:var(--muted);max-width:65ch;margin:0 0 24px}
+.view-picker p{color:var(--muted-foreground);max-width:65ch;margin:0 0 24px}
 .view-picker label{display:block;font-weight:600;margin:20px 0 6px}
-.view-picker input,.view-picker select{display:block;width:100%;max-width:480px;min-height:40px;padding:8px 12px;border:1px solid var(--border);border-radius:var(--radius);font:inherit;color:var(--fg);background:Canvas}
-.view-picker button{font:inherit;color:var(--fg);cursor:pointer}
+.view-picker input,.view-picker select{display:block;width:100%;max-width:480px;min-height:40px;padding:8px 12px;border:1px solid var(--border);border-radius:var(--radius);font:inherit;color:var(--foreground);background:Canvas}
+.view-picker button{font:inherit;color:var(--foreground);cursor:pointer}
 .view-picker button:disabled{cursor:wait;opacity:.6}
-.view-picker :focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+.view-picker :focus-visible{outline:2px solid var(--ring);outline-offset:3px}
 .view-picker ul{list-style:none;padding:0;margin:24px 0}
 .view-picker li{border-bottom:1px solid var(--border)}
 .view-picker li button{display:block;text-align:left;width:100%;padding:16px 0;border:0;background:transparent}
-.view-picker li button:hover strong{color:var(--accent)}
-.view-picker li span{display:block;color:var(--muted);margin-top:4px;overflow-wrap:anywhere}
-.view-picker .picker-link{border:0;background:transparent;color:var(--accent);padding:8px 0;text-decoration:underline;text-underline-offset:3px}
+.view-picker li button:hover strong{color:var(--color-text-info,var(--primary))}
+.view-picker li span{display:block;color:var(--muted-foreground);margin-top:4px;overflow-wrap:anywhere}
+.view-picker .picker-link{border:0;background:transparent;color:var(--color-text-info,var(--primary));padding:8px 0;text-decoration:underline;text-underline-offset:3px}
 .view-picker [role=alert]{margin:16px 0}
 @media(max-width:480px){#root{padding:16px}.view-picker h1{font-size:22px}}
 </style>

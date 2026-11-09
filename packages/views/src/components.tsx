@@ -8,10 +8,11 @@
  * what the host returns, plus the honest states (`QueryState.loading`,
  * `.error`, `.errorCode`, `.truncated`) that `useQuery` reports.
  *
- * Styling follows the shell's theme tokens (`--fg`, `--muted`, `--border`,
- * `--accent`, `--font`, `--radius`, `--radius-lg`), which derive from the
- * host's MCP Apps style variables and flip with its `.dark` class, so kit
- * output takes the host's look without configuration. Theme tokens carry
+ * Styling follows the shell's theme tokens (shadcn names: `--foreground`,
+ * `--muted-foreground` for secondary text, `--muted`/`--accent` for surfaces,
+ * `--border`, `--primary`, `--font-sans`, `--radius`, `--radius-lg`), which
+ * derive from the host's MCP Apps style variables and flip with its `.dark`
+ * class, so kit output takes the host's look without configuration. Theme tokens carry
  * light-mode fallbacks; pie series and error accents use fixed colors.
  *
  * Server-side compile allowlist: this module is pinned beside `react` and
@@ -26,10 +27,10 @@ import { useEffect, useId, useRef, useState } from "react";
 import { resolveViewHref, useHost } from "./api.js";
 
 const FONT_STACK =
-  'var(--font, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif)';
+  'var(--font-sans, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif)';
 
 const INK: CSSProperties = {
-  color: "var(--fg, #0a0a0a)",
+  color: "var(--foreground, #0a0a0a)",
   fontFamily: FONT_STACK,
   fontSize: 13,
   lineHeight: 1.45,
@@ -310,7 +311,7 @@ function PageButton({
         border: "1px solid var(--border, #e5e7eb)",
         borderRadius: "var(--radius, 6px)",
         background: "transparent",
-        color: "var(--fg, #0a0a0a)",
+        color: "var(--foreground, #0a0a0a)",
         padding: "2px 10px",
         font: "inherit",
       }}
@@ -352,7 +353,7 @@ const FIELD_BOX: CSSProperties = {
   border: "1px solid var(--border, #e5e7eb)",
   borderRadius: "var(--radius, 6px)",
   background: "transparent",
-  color: "var(--fg, #0a0a0a)",
+  color: "var(--foreground, #0a0a0a)",
   padding: "4px 8px",
   font: "inherit",
   maxWidth: "100%",
@@ -995,7 +996,7 @@ export function ErrorState({
             border: "1px solid var(--border, #e5e7eb)",
             borderRadius: "var(--radius, 6px)",
             background: "transparent",
-            color: "var(--fg, #0a0a0a)",
+            color: "var(--foreground, #0a0a0a)",
             padding: "2px 10px",
             font: "inherit",
           }}
