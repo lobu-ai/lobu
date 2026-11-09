@@ -518,6 +518,14 @@ export async function devCommand(
 
   process.on("SIGINT", () => forwardSignal("SIGINT"));
   process.on("SIGTERM", () => forwardSignal("SIGTERM"));
+  // In its own session the server no longer receives the terminal's hangup or
+  // Ctrl+\, and either signal would kill this process at once by default,
+  // orphaning the server with its ports held. Turn both into the same ordered
+  // shutdown (and forced group kill) as SIGTERM.
+  if (ownProcessGroup) {
+    process.on("SIGHUP", () => forwardSignal("SIGTERM"));
+    process.on("SIGQUIT", () => forwardSignal("SIGTERM"));
+  }
 
   child.on("exit", (code, signal) => {
     if (signal) {
