@@ -118,6 +118,9 @@ rather than relying on either default):
   IPv4-mapped / NAT64 / zone-id normalization and fail-closed on malformed
   literals; `localhost` and the internal suffixes are refused by name before
   DNS.
+- This list governs DB sockets only. A connector's HTTP `fetch` to a private
+  host is a separate, self-hosted-only setting, `LOBU_HTTP_EGRESS_ALLOW_HOSTS`
+  (`docs/DOCKER.md`), which is ignored under cloud mode.
 - **Resolve-then-pin** is the transport's, not a driver option: the host dials
   exactly the address it validated, so the driver never re-resolves DNS and the
   rebind TOCTOU is closed across pool reconnects. The TLS `servername` stays

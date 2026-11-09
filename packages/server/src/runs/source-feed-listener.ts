@@ -1,3 +1,4 @@
+import { httpEgressAllowHostsEnv } from '@lobu/connector-worker/env';
 import { executeCompiledConnector } from '@lobu/connector-worker/executor/runtime';
 import { getDb, pgTextArray, pgBigintArray, type DbClient } from '../db/client';
 import { createSourceReadBridge } from '../lib/source-read-bridge';
@@ -185,7 +186,7 @@ export async function runSourceFeedListener(task: SourceFeedListenerTask): Promi
         credentials: auth.credentials,
         sessionState: auth.sessionState,
         httpAuth: auth.httpAuth,
-        env: dbEgressConfig(),
+        env: { ...dbEgressConfig(), ...httpEgressAllowHostsEnv() },
       },
       hooks: {
         onHttpFetch: auth.onHttpFetch,
