@@ -538,7 +538,7 @@ export const ManageAutomationsSchema = Type.Object(
         }),
         Type.Literal("claim_next_window", {
           description:
-            "Atomically claim the Automation unclaimed arrival window and return bounded source context plus a fenced window token. The window is [arrival mark, now - settle) over events.created_at, not a calendar period. The caller MUST finish the claim with complete_window, even for an empty or non-actionable window.",
+            "Atomically claim the Automation unclaimed arrival window and return bounded source context plus a fenced window token. The first page carries context.instructions, the prompt and skills of the run's pinned version; follow them instead of a cached copy. The window is [arrival mark, now - settle) over events.created_at, not a calendar period. The caller MUST finish the claim with complete_window, even for an empty or non-actionable window.",
         }),
         Type.Literal("trigger", {
           description:
@@ -1079,6 +1079,20 @@ export const AutomationClaimNextWindowContextSchema = Type.Object({
     )
   ),
   extraction_schema: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+  /**
+   * The run's pinned Automation version instructions. Present on the first
+   * page of a window (no source_cursor / before_* cursor), omitted on
+   * continuation pages. Follow these instead of a cached copy of the prompt.
+   */
+  instructions: Type.Optional(
+    Type.Object({
+      version_id: Type.Integer(),
+      prompt: Type.Union([Type.String(), Type.Null()]),
+      skills: Type.Array(
+        Type.Object({ name: Type.String(), content: Type.String() })
+      ),
+    })
+  ),
 });
 export type AutomationClaimNextWindowContext = Static<
   typeof AutomationClaimNextWindowContextSchema

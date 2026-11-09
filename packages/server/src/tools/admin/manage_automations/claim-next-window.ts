@@ -15,6 +15,7 @@ import {
   computePendingWindow,
 } from '../../../utils/window-utils';
 import { handleAutomationMode } from '../../get_content/automation-mode';
+import { parseAutomationSkillSnapshots } from '../../../automations/skill-snapshots';
 import type { ToolContext } from '../../registry';
 import type { ManageAutomationsArgs } from '../manage_automations';
 import { resolveAutomationExecutor } from './executors';
@@ -372,14 +373,24 @@ export async function handleClaimNextWindow(
       LIMIT 1
     `;
 
+    const templateVersionId =
+      snapshot?.version_id == null ? null : Number(snapshot.version_id);
+    // Instructions belong to the window, not each page: only the first page
+    // carries them, so a long continuation loop does not re-ship the prompt.
+    const firstPage = !args.source_cursor && !hasBeforeOccurredAt;
+    const instructions =
+      firstPage && templateVersionId != null
+        ? await readPinnedInstructions(tx, ctx.organizationId, automationId, templateVersionId)
+        : undefined;
+
     return {
       skipped: false as const,
       runId,
       windowStart,
       windowEnd,
       leaseExpiresAt,
-      templateVersionId:
-        snapshot?.version_id == null ? null : Number(snapshot.version_id),
+      templateVersionId,
+      instructions,
     };
   });
 
@@ -434,6 +445,7 @@ export async function handleClaimNextWindow(
       window_token: context.window_token,
       window_start: context.window_start,
       window_end: context.window_end,
+      ...(claimedWindow.instructions ? { instructions: claimedWindow.instructions } : {}),
     };
     return {
       action: 'claim_next_window',
@@ -457,6 +469,40 @@ export async function handleClaimNextWindow(
     `;
     throw error;
   }
+}
+
+/**
+ * The prompt and skill snapshots of the version a run is pinned to. An
+ * external client has no worker to receive them, so the claim is its only
+ * delivery; reading the pinned row (never `current_version_id`) keeps a
+ * mid-run edit from changing what the claimer is told. A pinned version that
+ * cannot be read fails the claim, as it fails native dispatch, rather than
+ * letting the client fall back to a stale cached copy.
+ */
+async function readPinnedInstructions(
+  tx: DbClient,
+  organizationId: string,
+  automationId: number,
+  versionId: number
+): Promise<NonNullable<AutomationClaimNextWindowResult['context']['instructions']>> {
+  const [version] = await tx<{ prompt: string | null; skills: unknown }>`
+    SELECT v.prompt, v.skills
+    FROM automations a
+    JOIN automation_versions v
+      ON v.id = ${versionId}
+     AND v.automation_id = a.automation_group_id
+    WHERE a.id = ${automationId}
+      AND a.organization_id = ${organizationId}
+    LIMIT 1
+  `;
+  if (!version) {
+    throw new Error(`Automation ${automationId} run's pinned version ${versionId} was not found.`);
+  }
+  return {
+    version_id: versionId,
+    prompt: version.prompt?.trim() ? version.prompt : null,
+    skills: parseAutomationSkillSnapshots(version.skills),
+  };
 }
 
 export async function expireExternalClaims(tx: DbClient, automationId: number): Promise<boolean> {
