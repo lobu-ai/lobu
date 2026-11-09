@@ -41,7 +41,16 @@ import { getOrganizationSlug } from '../utils/url-builder';
 import { resolveEventViewSubject } from './event-subject';
 import { getView } from './views';
 
-const ENTITY_READ_CONCURRENCY = 8;
+/** Reads the resolver runs at once: a document holds up to 5,000 targets, and
+ *  `get_navigation` is a public read, so per-target checks share the pool in
+ *  small batches. */
+const TARGET_READ_CONCURRENCY = 8;
+
+async function inBatches<T>(items: readonly T[], read: (item: T) => Promise<void>): Promise<void> {
+  for (let i = 0; i < items.length; i += TARGET_READ_CONCURRENCY) {
+    await Promise.all(items.slice(i, i + TARGET_READ_CONCURRENCY).map(read));
+  }
+}
 
 export interface NavigationState {
   revision: number;
@@ -111,7 +120,8 @@ async function buildLookup(
   const sql = getDb();
   const typeSlugs = new Set<string>();
   const entityIds = new Set<number>();
-  const eventTargets: Array<{ key: string; event: number }> = [];
+  // One check per distinct (view, event), however often the document repeats it.
+  const eventTargets = new Map<string, { key: string; event: number }>();
   for (const section of config?.sections ?? []) {
     walk(section.items, (item) => {
       const target = item.target;
@@ -120,7 +130,8 @@ async function buildLookup(
       if (target?.kind === 'view') {
         if (target.scope?.type !== undefined) typeSlugs.add(target.scope.type);
         if (target.scope?.entity !== undefined) entityIds.add(target.scope.entity);
-        if (target.scope?.event !== undefined) eventTargets.push({ key: target.key, event: target.scope.event });
+        if (target.scope?.event !== undefined)
+          eventTargets.set(`${target.key}\u0000${target.scope.event}`, { key: target.key, event: target.scope.event });
       }
     });
   }
@@ -150,46 +161,44 @@ async function buildLookup(
   };
   // Types: the member directory only for members, and the same read policy
   // that gates a scoped agent's entity reads.
-  await Promise.all(
-    typeRows.map(async (type) => {
-      if (type.slug === MEMBER_ENTITY_TYPE_SLUG && !canSeeMemberList(ctx.memberRole)) return;
-      const allowed = await assertEntityReadAllowed(undefined, ctx, type.slug).then(
-        () => true,
-        () => false
-      );
-      if (allowed) lookup.types.set(type.slug, type.name);
-    })
-  );
+  await inBatches(typeRows, async (type) => {
+    if (type.slug === MEMBER_ENTITY_TYPE_SLUG && !canSeeMemberList(ctx.memberRole)) return;
+    const allowed = await assertEntityReadAllowed(undefined, ctx, type.slug).then(
+      () => true,
+      () => false
+    );
+    if (allowed) lookup.types.set(type.slug, type.name);
+  });
   // Records: the record page's own read (`manage_entity get`), so every rule
   // it applies — read restrictions, identity groups, the member directory,
   // deletion — decides here too. Bounded by the document's item cap.
-  const ids = [...entityIds];
-  for (let i = 0; i < ids.length; i += ENTITY_READ_CONCURRENCY) {
-    await Promise.all(
-      ids.slice(i, i + ENTITY_READ_CONCURRENCY).map(async (id) => {
-        const result = (await manageEntity({ action: 'get', entity_id: id }, env, ctx).catch(() => null)) as {
-          entity?: { entity_type?: string; slug?: string; name?: string };
-        } | null;
-        const entity = result?.entity;
-        if (entity?.entity_type && entity.slug && typeof entity.name === 'string') {
-          lookup.entities.set(id, { entity_type: entity.entity_type, slug: entity.slug, name: entity.name });
-        }
-      })
-    );
-  }
-  // Event subjects go through the event page's own visibility check.
-  await Promise.all(
-    eventTargets.map(async ({ key, event }) => {
-      const view = await getView(ctx.organizationId, key);
-      const ok = view
-        ? await resolveEventViewSubject(view, event, env, ctx).then(
-            () => true,
-            () => false
-          )
-        : false;
-      lookup.events.set(`${key}\u0000${event}`, ok);
-    })
-  );
+  await inBatches([...entityIds], async (id) => {
+    const result = (await manageEntity({ action: 'get', entity_id: id }, env, ctx).catch(() => null)) as {
+      entity?: { entity_type?: string; slug?: string; name?: string };
+    } | null;
+    const entity = result?.entity;
+    if (entity?.entity_type && entity.slug && typeof entity.name === 'string') {
+      lookup.entities.set(id, { entity_type: entity.entity_type, slug: entity.slug, name: entity.name });
+    }
+  });
+  // Event subjects go through the event page's own visibility check. Each
+  // view is read once, however many of its events the document names.
+  const viewReads = new Map<string, ReturnType<typeof getView>>();
+  await inBatches([...eventTargets], async ([id, { key, event }]) => {
+    let view = viewReads.get(key);
+    if (!view) {
+      view = getView(ctx.organizationId, key);
+      viewReads.set(key, view);
+    }
+    const found = await view;
+    const ok = found
+      ? await resolveEventViewSubject(found, event, env, ctx).then(
+          () => true,
+          () => false
+        )
+      : false;
+    lookup.events.set(id, ok);
+  });
   return lookup;
 }
 

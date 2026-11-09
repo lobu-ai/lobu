@@ -17,6 +17,7 @@ import {
 	addUserToOrganization,
 	createTestAgent,
 	createTestEntity,
+	createTestEvent,
 	createTestOrganization,
 	createTestSession,
 	createTestUser,
@@ -280,6 +281,33 @@ describe("workspace navigation", () => {
 		// The "Reports" group lost its only child, so it is gone too.
 		expect(body).not.toContain("Reports");
 		expect(json.sections[0].items.map((i) => i.id)).toEqual(["deals", "docs", "won"]);
+	});
+
+	it("links event pages through the event's own check, once per view and event", async () => {
+		await setView("note-card", { name: "Note Card", attach: [{ event: "note" }] });
+		const first = await createTestEvent({ organization_id: org.id, semantic_type: "note", content: "first" });
+		const second = await createTestEvent({ organization_id: org.id, semantic_type: "note", content: "second" });
+		const memo = await createTestEvent({ organization_id: org.id, semantic_type: "memo", content: "memo" });
+		const note = (id: string, event: number) => ({
+			id,
+			target: { kind: "view", key: "note-card", scope: { event } },
+		});
+		// An event of another kind is not a page this view renders.
+		expect((await write(0, { schemaVersion: 1, sections: [{ id: "notes", items: [note("m", memo.id)] }] })).status).toBe(400);
+		const config = {
+			schemaVersion: 1,
+			sections: [{ id: "notes", items: [note("a", first.id), note("a-again", first.id), note("b", second.id)] }],
+		};
+		expect((await write(0, config)).status).toBe(200);
+		const { json } = await read();
+		expect(json.sections[0].items.map((i) => [i.id, i.href])).toEqual([
+			["a", `/${org.slug}/events/${first.id}/-/views/note-card`],
+			["a-again", `/${org.slug}/events/${first.id}/-/views/note-card`],
+			["b", `/${org.slug}/events/${second.id}/-/views/note-card`],
+		]);
+		// The view removed: every one of its event links goes, and the section with them.
+		await getTestDb()`DELETE FROM views WHERE organization_id = ${org.id} AND key = 'note-card'`;
+		expect((await read()).json.sections).toEqual([]);
 	});
 
 	it("holds a thousand views and a tree far deeper than four levels", async () => {
