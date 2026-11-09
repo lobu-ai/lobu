@@ -433,6 +433,12 @@ export async function fetchRemoteSnapshot(
   // Views are org-scoped modules (neither agents nor memory): a full apply
   // reconciles them against `manage_views list` (metadata only).
   const views = only === undefined ? await client.listViews() : [];
+  // Navigation is read only when the config manages it: its revision is the
+  // compare-and-swap token the write presents.
+  const navigation =
+    only === undefined && state.navigation !== undefined
+      ? await client.getNavigation()
+      : undefined;
 
   return {
     agents,
@@ -446,6 +452,7 @@ export async function fetchRemoteSnapshot(
     feedsByConnectionId,
     inferenceProviders,
     views,
+    ...(navigation ? { navigation } : {}),
   };
 }
 
@@ -893,6 +900,31 @@ export async function executePlan(
         `  → ${ctx.apiBaseUrl}/api/${ctx.orgSlug}/views/${row.id}/shell`
       )
     );
+  }
+
+  // 2c) Navigation — after views, since its targets must resolve when saved.
+  //     The write presents the revision this apply read; anyone else's edit
+  //     in between fails it (409) rather than being overwritten.
+  for (const row of rowsByKind("navigation")) {
+    if (row.kind !== "navigation") continue;
+    try {
+      const result = await ctx.client.setNavigation(row.revision, row.desired);
+      printText(
+        renderProgress(
+          row.verb,
+          "navigation",
+          row.id,
+          `(revision ${result.revision})`
+        )
+      );
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409) {
+        throw new Error(
+          `Workspace navigation changed since this apply read it (revision ${row.revision}). Run lobu apply again to plan against the current document.`
+        );
+      }
+      throw error;
+    }
   }
 
   // 3) Agents

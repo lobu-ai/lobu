@@ -579,6 +579,7 @@ export async function restInvokeViewAction(c: Context<{ Bindings: Env }>) {
 			value?: unknown;
 			interaction_id?: unknown;
 			scope?: unknown;
+			expected_content_hash?: unknown;
 		}>();
 		if (
 			body.value !== undefined &&
@@ -593,10 +594,21 @@ export async function restInvokeViewAction(c: Context<{ Bindings: Env }>) {
 		if (body.scope !== undefined && !Value.Check(ViewActionScopeSchema, body.scope)) {
 			throw new ToolUserError("scope must name one stored event version", 400);
 		}
+		if (
+			body.expected_content_hash !== undefined &&
+			(typeof body.expected_content_hash !== "string" ||
+				!body.expected_content_hash ||
+				body.expected_content_hash.length > 128)
+		) {
+			throw new ToolUserError("expected_content_hash must be a content hash", 400);
+		}
 		const result = await invokeViewAction({
 			organizationId: ctx.organizationId,
 			...(body.scope ? { event: { id: body.scope.event, env: c.env, ctx } } : {}),
 			viewKey: key,
+			...(typeof body.expected_content_hash === "string"
+				? { expectedContentHash: body.expected_content_hash }
+				: {}),
 			action,
 			value: (body.value ?? null) as Record<string, unknown> | null,
 			interactionId: body.interaction_id,

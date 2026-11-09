@@ -13,6 +13,7 @@
  * server → SDK authoring objects → emitted TypeScript source.
  */
 
+import type { NavigationConfig } from "@lobu/core/contracts/tools/navigation";
 import { randomBytes } from "node:crypto";
 import { chmod, mkdir, writeFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
@@ -789,6 +790,9 @@ interface FetchedState {
   connections: Array<{ connection: RemoteConnection; feeds: RemoteFeed[] }>;
   /** connector_key → auth_schema (for emitting real credential field keys). */
   connectorDefinitions: RemoteConnectorDefinition[];
+  /** The stored navigation document; null when the workspace uses defaults
+   *  or this login is not a navigation editor. */
+  navigation: NavigationConfig | null;
 }
 
 async function fetchOrgState(
@@ -815,6 +819,12 @@ async function fetchOrgState(
     // — a fetch failure falls back to placeholder credential keys.
     client.listConnectors(true).catch(() => []),
   ]);
+  // Only an owner/admin can read the raw document; any other login bootstraps
+  // without it and apply leaves the workspace's navigation unmanaged.
+  const navigation = await client
+    .getNavigation()
+    .then((state) => state.config)
+    .catch(() => null);
 
   // The relationship-type `list` action omits rules, so hydrate each type's
   // rules (list_rules) before emitting — otherwise the generated config drops
@@ -903,6 +913,7 @@ async function fetchOrgState(
       .sort((a, b) => a.slug.localeCompare(b.slug)),
     connections,
     connectorDefinitions,
+    navigation,
   };
 }
 
@@ -1104,6 +1115,9 @@ function generateProject(
   }
   if (automationHandles.length > 0) {
     configFields.push(`automations: [${automationHandles.join(", ")}]`);
+  }
+  if (state.navigation) {
+    configFields.push(`navigation: ${emitValue(state.navigation, 1)}`);
   }
 
   const blocks: string[] = [];

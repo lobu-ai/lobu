@@ -1,5 +1,5 @@
 import { type Static, Type } from "@sinclair/typebox";
-import { ViewKeySchema } from "@lobu/core/contracts/tools/manage-views";
+import { ViewKeySchema, ViewScopeSchema } from "@lobu/core/contracts/tools/manage-views";
 import {
 	hasWorkspaceAttachment,
 	isEventAttachment,
@@ -27,25 +27,7 @@ export const OpenViewSchema = Type.Object(
 	{
 		key: Type.Optional(ViewKeySchema),
 		organization: Type.Optional(Type.String({ minLength: 1, maxLength: 256, description: "Authorized workspace slug or id. Omit key to browse that workspace's views; omit both to open the workspace picker." })),
-		scope: Type.Optional(
-			Type.Object({
-				collection: Type.Optional(CollectionSelectionSchema),
-				type: Type.Optional(
-					Type.String({ minLength: 1, description: "Entity-type slug the view opens for." })
-				),
-				entity: Type.Optional(
-					Type.Integer({ description: "Entity id the view opens for." })
-				),
-				event: Type.Optional(
-					Type.Integer({
-						description:
-							"Event id the view opens for. It names the event's supersede lineage, so the view shows the current version, and it opens at /events/<id>/-/views/<key>.",
-					})
-				),
-			}, {
-				description: "Required unless the view is attached to the workspace. Pass scope.type, scope.entity, or scope.event to select its subject.",
-			})
-		),
+		scope: Type.Optional(ViewScopeSchema),
 		params: Type.Optional(
 			Type.Record(Type.String(), ParamValueSchema, {
 				description: "Declared view params; unknown names are ignored.",
@@ -127,8 +109,8 @@ type OpenViewArgs = Static<typeof OpenViewSchema>;
  * match their declared scalar type. The canonical map is what the frame and
  * the URL both carry, so neither can smuggle an undeclared query into SQL.
  */
-function resolveViewParams(
-	view: NonNullable<Awaited<ReturnType<typeof getView>>>,
+export function resolveViewParams(
+	view: Pick<StoredView, "params">,
 	params: Record<string, string | number | boolean> | undefined
 ): Record<string, string | number | boolean> {
 	const declared = view.params ?? {};
@@ -161,31 +143,30 @@ function resolveViewParams(
 	return resolved;
 }
 
+/** What a view's page path needs to know about its scope's subject. */
+export interface ViewScopeFacts {
+	/** The scope's entity, when it names one that exists. */
+	entity?: { entity_type: string; slug: string } | null;
+	/** Whether the scope's entity type exists. */
+	typeExists?: boolean;
+}
+
 /**
  * The page that renders `view` for `scope`, chosen from the view's attachments
  * exactly as the web host selects them, so the link never lands on a
  * "no view named …" page: the Data hub mounts workspace views, a list page its
- * collection tabs, and a record view opens full page under its record.
+ * collection tabs, and a record view opens full page under its record. Pure:
+ * `open_view` and workspace navigation look the facts up, then both call this.
  */
-async function resolveViewPath(
-	view: StoredView,
+export function viewPagePath(
+	view: Pick<StoredView, "key" | "attach">,
 	scope: { type?: string; entity?: number; collection?: CollectionSelection },
 	orgSlug: string,
-	organizationId: string
-): Promise<string> {
+	facts: ViewScopeFacts
+): string {
 	const suffix = viewPathSuffix(view.key);
-	const sql = getDb();
 	if (scope.entity !== undefined) {
-		const rows = await sql<{ entity_type: string; slug: string }>`
-      SELECT et.slug AS entity_type, e.slug
-      FROM entities e
-      JOIN entity_types et ON et.id = e.entity_type_id
-      WHERE e.id = ${scope.entity}
-        AND e.organization_id = ${organizationId}
-        AND e.deleted_at IS NULL
-      LIMIT 1
-    `;
-		const row = rows[0];
+		const row = facts.entity;
 		if (!row) {
 			throw new ToolUserError(`Entity ${scope.entity} not found`, 404);
 		}
@@ -199,14 +180,7 @@ async function resolveViewPath(
 		);
 	}
 	if (scope.type !== undefined) {
-		const rows = await sql<{ id: number }>`
-      SELECT id FROM entity_types
-      WHERE slug = ${scope.type}
-        AND deleted_at IS NULL
-        AND organization_id = ${organizationId}
-      LIMIT 1
-    `;
-		if (rows.length === 0) {
+		if (!facts.typeExists) {
 			throw new ToolUserError(`Entity type '${scope.type}' not found`, 404);
 		}
 		const type = scope.type;
@@ -233,6 +207,50 @@ async function resolveViewPath(
 				}`,
 		400
 	);
+}
+
+async function resolveViewPath(
+	view: StoredView,
+	scope: { type?: string; entity?: number; collection?: CollectionSelection },
+	orgSlug: string,
+	organizationId: string
+): Promise<string> {
+	const sql = getDb();
+	const facts: ViewScopeFacts = {};
+	if (scope.entity !== undefined) {
+		const rows = await sql<{ entity_type: string; slug: string }>`
+      SELECT et.slug AS entity_type, e.slug
+      FROM entities e
+      JOIN entity_types et ON et.id = e.entity_type_id
+      WHERE e.id = ${scope.entity}
+        AND e.organization_id = ${organizationId}
+        AND e.deleted_at IS NULL
+      LIMIT 1
+    `;
+		facts.entity = rows[0] ?? null;
+	} else if (scope.type !== undefined) {
+		const rows = await sql<{ id: number }>`
+      SELECT id FROM entity_types
+      WHERE slug = ${scope.type}
+        AND deleted_at IS NULL
+        AND organization_id = ${organizationId}
+      LIMIT 1
+    `;
+		facts.typeExists = rows.length > 0;
+	}
+	return viewPagePath(view, scope, orgSlug, facts);
+}
+
+/** The view link's query: shared collection selection under its reserved key,
+ *  then the resolved params. The view itself is the path. */
+export function viewLinkQuery(
+	scope: { collection?: CollectionSelection },
+	params: Record<string, string | number | boolean>
+): string {
+	const search = new URLSearchParams();
+	if (scope.collection !== undefined) search.set(COLLECTION_QUERY_KEY, JSON.stringify(scope.collection));
+	for (const [k, v] of Object.entries(params)) search.set(k, String(v));
+	return search.toString();
 }
 
 async function openViewImpl(
@@ -270,11 +288,7 @@ async function openViewImpl(
 	const origin = resolvePublicOrigin(
 		ctx.requestUrl ?? ctx.baseUrl ?? "http://127.0.0.1"
 	);
-	// The view is the path; shared collection selection has its own reserved key.
-	const search = new URLSearchParams();
-	if (scope.collection !== undefined) search.set(COLLECTION_QUERY_KEY, JSON.stringify(scope.collection));
-	for (const [k, v] of Object.entries(params)) search.set(k, String(v));
-	const query = search.toString();
+	const query = viewLinkQuery(scope, params);
 	return {
 		view: args.key,
 		scope: {

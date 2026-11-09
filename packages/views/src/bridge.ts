@@ -16,8 +16,14 @@
 
 import type { EntityGetInput } from "@lobu/core/contracts/tools/manage-entity";
 import {
+  VIEW_EMBED_FOCUS_NOTIFICATION,
+  VIEW_EMBED_SIZE_NOTIFICATION,
+  VIEW_EMBEDS_FOCUS_METHOD,
+  VIEW_EMBEDS_SYNC_METHOD,
   VIEW_OPEN_RECORD_METHOD,
   VIEW_WORKSPACE_META_KEY,
+  type ViewEmbedSlot,
+  type ViewEmbedStatus,
 } from "@lobu/core/contracts/tools/view-host";
 
 export class ViewBridgeError extends Error {
@@ -115,6 +121,10 @@ export class ViewBridge {
   private toolCancelledListeners = new Set<(reason: string | null) => void>();
   private hostContextListeners = new Set<(ctx: HostContext) => void>();
   private dataChangedListeners = new Set<() => void>();
+  private embedSizeListeners = new Set<(id: string, height: number) => void>();
+  private embedFocusListeners = new Set<
+    (id: string, direction: "forward" | "backward") => void
+  >();
   /** Set by the first `tool-input` and never cleared: queries must not fire
    *  before it (the host seeds scope + params there; anything read earlier
    *  runs against defaults and double-fetches). */
@@ -202,6 +212,33 @@ export class ViewBridge {
   onDataChanged(listener: () => void): () => void {
     this.dataChangedListeners.add(listener);
     return () => this.dataChangedListeners.delete(listener);
+  }
+
+  /** A child view's height in a slot (Lobu web host only). */
+  onEmbedSize(listener: (id: string, height: number) => void): () => void {
+    this.embedSizeListeners.add(listener);
+    return () => this.embedSizeListeners.delete(listener);
+  }
+
+  /** Keyboard focus left a slot's child (Lobu web host only). */
+  onEmbedFocus(
+    listener: (id: string, direction: "forward" | "backward") => void
+  ): () => void {
+    this.embedFocusListeners.add(listener);
+    return () => this.embedFocusListeners.delete(listener);
+  }
+
+  /** Report every slot on screen. Rejects with code -32601 on a host that
+   *  does not mount embedded views. */
+  syncEmbeds(embeds: ViewEmbedSlot[]): Promise<{ embeds?: ViewEmbedStatus[] }> {
+    return this.request(VIEW_EMBEDS_SYNC_METHOD, { embeds }) as Promise<{
+      embeds?: ViewEmbedStatus[];
+    }>;
+  }
+
+  /** Move keyboard focus into a slot's child. */
+  focusEmbed(id: string): Promise<unknown> {
+    return this.request(VIEW_EMBEDS_FOCUS_METHOD, { id });
   }
 
   /**
@@ -466,6 +503,21 @@ export class ViewBridge {
       }
       case DATA_CHANGED_NOTIFICATION: {
         for (const listener of [...this.dataChangedListeners]) listener();
+        break;
+      }
+      case VIEW_EMBED_SIZE_NOTIFICATION: {
+        if (typeof params.id !== "string" || typeof params.height !== "number")
+          break;
+        for (const listener of [...this.embedSizeListeners])
+          listener(params.id, params.height);
+        break;
+      }
+      case VIEW_EMBED_FOCUS_NOTIFICATION: {
+        if (typeof params.id !== "string") break;
+        const direction =
+          params.direction === "backward" ? "backward" : "forward";
+        for (const listener of [...this.embedFocusListeners])
+          listener(params.id, direction);
         break;
       }
       default:

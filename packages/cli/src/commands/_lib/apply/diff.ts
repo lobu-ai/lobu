@@ -1,3 +1,4 @@
+import type { NavigationConfig } from "@lobu/core/contracts/tools/navigation";
 import { type AgentSettings, isSystemEntityType } from "@lobu/core";
 import type {
   InferenceCapabilityBlock,
@@ -182,6 +183,18 @@ export interface ViewDiffRow extends BaseRow {
 }
 
 /**
+ * The workspace navigation document: one per workspace, replaced whole. The
+ * write presents `revision`, the one apply read, so a concurrent edit fails
+ * the apply instead of being overwritten.
+ */
+export interface NavigationDiffRow extends BaseRow {
+  kind: "navigation";
+  desired: NavigationConfig | null;
+  remote: NavigationConfig | null;
+  revision: number;
+}
+
+/**
  * A blocking drift item: either a field moved remotely or a remote-only
  * definition is not safe to delete. Apply must not converge over it — the
  * whole run blocks and reports this.
@@ -244,6 +257,7 @@ export type DiffRow =
   | FeedDiffRow
   | InferenceProviderDiffRow
   | ViewDiffRow
+  | NavigationDiffRow
   | BlockingDriftRow;
 
 export interface DiffPlan {
@@ -1949,6 +1963,8 @@ export interface RemoteSnapshot {
   inferenceProviders: RemoteInferenceProvider[];
   /** Applied views (`manage_views list`). Full-apply only. */
   views: RemoteView[];
+  /** The stored navigation document; read only when the config manages it. */
+  navigation?: { revision: number; config: NavigationConfig | null };
 }
 
 /**
@@ -1963,6 +1979,7 @@ type DesiredStateForDiff = Pick<
   | "connectors"
   | "providers"
   | "views"
+  | "navigation"
 >;
 
 interface ComputeDiffOptions {
@@ -2513,6 +2530,23 @@ export function computeDiff(
         verb: prune ? "delete" : "drift",
       });
     }
+  }
+
+  // Navigation. Full-apply only, and only when the config manages it.
+  if (only === undefined && desired.navigation !== undefined) {
+    const current = remote.navigation ?? { revision: 0, config: null };
+    rows.push({
+      kind: "navigation",
+      id: "workspace",
+      desired: desired.navigation,
+      remote: current.config,
+      revision: current.revision,
+      verb: deepEqual(desired.navigation, current.config)
+        ? "noop"
+        : current.config === null
+          ? "create"
+          : "update",
+    });
   }
 
   const counts = { create: 0, update: 0, noop: 0, drift: 0, delete: 0 };

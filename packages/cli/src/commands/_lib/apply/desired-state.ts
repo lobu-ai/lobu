@@ -1,3 +1,4 @@
+import type { NavigationConfig } from "@lobu/core/contracts/tools/navigation";
 import { existsSync, readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -368,6 +369,11 @@ export interface DesiredState {
    * path — and apply re-derives it from the bundle, refusing a mismatch.
    */
   views: DesiredView[];
+  /**
+   * The workspace navigation document, already validated. Undefined when the
+   * config leaves navigation unmanaged; null returns it to the default.
+   */
+  navigation?: NavigationConfig | null;
   /**
    * Names of env vars referenced via `secret()` / `$VAR` (provider keys,
    * auth-profile + mcp credentials). The CLI surfaces these before mutating

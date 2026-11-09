@@ -1,5 +1,13 @@
 import { type Static, Type } from "@sinclair/typebox";
 import type { ActionInput } from "./action-input";
+import { ViewKeySchema } from "./view-scope";
+
+export { ViewKeySchema, ViewScopeSchema } from "./view-scope";
+export type { ViewScopeInput } from "./view-scope";
+import {
+  NavigationConfigSchema,
+  ResolvedNavigationSectionSchema,
+} from "./navigation";
 import { CollectionWhenSchema } from "./collection-selection";
 import {
   SourceDependenciesSchema,
@@ -9,15 +17,6 @@ import {
 // ============================================
 // Lobu views: React modules rendered in the sandboxed frame.
 // ============================================
-
-// A view key names the module: lowercase, dashes, 1-64 chars. The folder is
-// only a convention — the key is the identity (no `custom:<name>` prefix).
-export const ViewKeySchema = Type.String({
-  pattern: "^[a-z0-9][a-z0-9-]{0,63}$",
-  minLength: 1,
-  maxLength: 64,
-  description: "View key, e.g. 'pipeline'.",
-});
 
 // Where a view appears: one page per entry, named by its key. The attach line
 // lives in the module source; there are no attach/detach verbs — changing it
@@ -259,11 +258,39 @@ export const RemoveViewAction = Type.Object({
   key: ViewKeySchema,
 });
 
+// The workspace's sidebar navigation (see ./navigation). One versioned
+// document per workspace; `set_navigation` replaces it whole, and only when
+// `expected_revision` is still the stored revision (409 otherwise).
+export const GetNavigationAction = Type.Object({
+  action: Type.Literal("get_navigation", {
+    description:
+      "Read the workspace navigation: { revision, config, sections }. config is the stored document (null = automatic defaults; members only), sections what the sidebar renders for the caller.",
+  }),
+});
+
+export const SetNavigationAction = Type.Object({
+  action: Type.Literal("set_navigation", {
+    description:
+      "Replace the workspace navigation document. Fails with 409 when expected_revision is stale.",
+  }),
+  expected_revision: Type.Integer({
+    minimum: 0,
+    description:
+      "[set_navigation] The revision get_navigation returned; the write applies only if it is still current.",
+  }),
+  config: Type.Union([NavigationConfigSchema, Type.Null()], {
+    description:
+      "[set_navigation] The whole navigation document, or null to return to the automatic defaults.",
+  }),
+});
+
 export const ManageViewsSchema = Type.Union([
   SetViewAction,
   GetViewAction,
   ListViewsAction,
   RemoveViewAction,
+  GetNavigationAction,
+  SetNavigationAction,
 ]);
 
 export type ManageViewsArgs = Static<typeof ManageViewsSchema>;
@@ -272,6 +299,8 @@ export type ViewSetInput = ActionInput<ManageViewsArgs, "set">;
 export type ViewGetInput = ActionInput<ManageViewsArgs, "get">;
 export type ViewListInput = ActionInput<ManageViewsArgs, "list">;
 export type ViewRemoveInput = ActionInput<ManageViewsArgs, "remove">;
+export type NavigationGetInput = ActionInput<ManageViewsArgs, "get_navigation">;
+export type NavigationSetInput = ActionInput<ManageViewsArgs, "set_navigation">;
 
 // ============================================
 // Result Types
@@ -307,6 +336,17 @@ export const ManageViewsResultSchema = Type.Union([
     action: Type.Literal("remove"),
     key: Type.String(),
     removed: Type.Boolean(),
+  }),
+  Type.Object({
+    action: Type.Literal("get_navigation"),
+    revision: Type.Integer(),
+    config: Type.Optional(Type.Union([NavigationConfigSchema, Type.Null()])),
+    sections: Type.Array(ResolvedNavigationSectionSchema),
+  }),
+  Type.Object({
+    action: Type.Literal("set_navigation"),
+    revision: Type.Integer(),
+    config: Type.Union([NavigationConfigSchema, Type.Null()]),
   }),
 ]);
 export type ManageViewsResult = Static<typeof ManageViewsResultSchema>;

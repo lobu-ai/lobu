@@ -285,6 +285,18 @@
       "import": "./dist/contracts/tools/pagination.js",
       "require": "./dist/contracts/tools/pagination.js"
     },
+    "./contracts/tools/navigation": {
+      "types": "./dist/contracts/tools/navigation.d.ts",
+      "bun": "./src/contracts/tools/navigation.ts",
+      "import": "./dist/contracts/tools/navigation.js",
+      "require": "./dist/contracts/tools/navigation.js"
+    },
+    "./contracts/tools/view-scope": {
+      "types": "./dist/contracts/tools/view-scope.d.ts",
+      "bun": "./src/contracts/tools/view-scope.ts",
+      "import": "./dist/contracts/tools/view-scope.js",
+      "require": "./dist/contracts/tools/view-scope.js"
+    },
     "./contracts/tools/view-host": {
       "types": "./dist/contracts/tools/view-host.d.ts",
       "bun": "./src/contracts/tools/view-host.ts",

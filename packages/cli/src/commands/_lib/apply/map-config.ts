@@ -8,6 +8,10 @@
  * unit-tested without importing `lobu.config.ts`.
  */
 
+import {
+  type NavigationConfig,
+  validateNavigationConfig,
+} from "@lobu/core/contracts/tools/navigation";
 import { validateEntityMetrics } from "@lobu/connector-sdk/metrics";
 import {
   type AgentSettings,
@@ -1042,7 +1046,26 @@ export function mapProjectToDesiredState(
     connectors: { definitions: [], authProfiles, connections },
     // View modules resolve in the loader (file IO): the mapper stays pure.
     views: [],
+    ...(project.navigation !== undefined
+      ? { navigation: canonicalNavigation(project.navigation) }
+      : {}),
     providers,
     requiredSecrets: [...required].sort(),
   };
+}
+
+/**
+ * The navigation document as the server would store it, after the same
+ * canonical validation the server runs: a config error fails the load, before
+ * anything reaches the workspace.
+ */
+function canonicalNavigation(
+  navigation: NavigationConfig | null
+): NavigationConfig | null {
+  if (navigation === null) return null;
+  const errors = validateNavigationConfig(navigation);
+  if (errors.length > 0) {
+    throw new Error(`Invalid navigation:\n  ${errors.join("\n  ")}`);
+  }
+  return navigation;
 }

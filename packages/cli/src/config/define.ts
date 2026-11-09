@@ -36,6 +36,7 @@ import {
   type TString,
   Type,
 } from "@sinclair/typebox";
+import type { NavigationConfig } from "@lobu/core/contracts/tools/navigation";
 import type { SecretRef } from "./secret.js";
 
 /** A connector referenced by its key, or by the class produced by `defineConnector`. */
@@ -1154,6 +1155,15 @@ export interface Project {
    * appears; `lobu run` watches the listed files and their import graph.
    */
   views?: ViewSource[];
+  /**
+   * The workspace sidebar navigation, replacing the stored document on apply
+   * (compare-and-swap against the revision apply read; a concurrent edit
+   * fails the apply instead of being overwritten). Omit to leave it
+   * unmanaged; `null` returns the workspace to the automatic default (every
+   * workspace view). Targets must resolve when applied, so list the views
+   * they name in `views`.
+   */
+  navigation?: NavigationConfig | null;
 }
 
 export function defineConfig(config: Omit<Project, "kind">): Project {

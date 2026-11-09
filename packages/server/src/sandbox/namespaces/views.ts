@@ -3,11 +3,14 @@
  *
  * The attach line lives in the module source — there are no attach/detach
  * verbs, and git is the only history of definitions, so this namespace is
- * set/get/list/remove.
+ * set/get/list/remove, plus the workspace sidebar navigation document
+ * (getNavigation/setNavigation).
  */
 
 import type {
 	ManageViewsArgs,
+	NavigationGetInput,
+	NavigationSetInput,
 	ViewGetInput,
 	ViewListInput,
 	ViewRemoveInput,
@@ -24,6 +27,8 @@ export interface ViewsNamespace {
 	set(input: ViewSetInput): Promise<unknown>;
 	list(input: ViewListInput): Promise<unknown>;
 	remove(input: ViewRemoveInput): Promise<unknown>;
+	getNavigation(input?: NavigationGetInput): Promise<unknown>;
+	setNavigation(input: NavigationSetInput): Promise<unknown>;
 }
 
 export function buildViewsNamespace(
@@ -43,5 +48,7 @@ export function buildViewsNamespace(
 		set: method("set"),
 		list: method("list"),
 		remove: method("remove"),
+		getNavigation: method("get_navigation", { publicMethod: "getNavigation" }),
+		setNavigation: method("set_navigation", { publicMethod: "setNavigation" }),
 	};
 }

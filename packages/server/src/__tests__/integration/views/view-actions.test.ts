@@ -27,8 +27,10 @@ import {
 	addUserToOrganization,
 	createTestOrganization,
 	createTestEntity,
+	createTestSession,
 	createTestUser,
 } from "../../setup/test-fixtures";
+import { post } from "../../setup/test-helpers";
 
 import { useViewValidator } from "../../setup/view-validator";
 
@@ -51,6 +53,7 @@ function actor(userId: string): TrustedTemplateActor {
 
 describe("view actions", () => {
 	let orgId: string;
+	let orgSlug: string;
 	let ownerId: string;
 	let ownerCtx: AuthContext;
 	let memberCtx: AuthContext;
@@ -98,6 +101,7 @@ describe("view actions", () => {
 		await cleanupTestDatabase();
 		const org = await createTestOrganization({ name: "view actions e2e" });
 		orgId = org.id;
+		orgSlug = org.slug;
 		const owner = await createTestUser({ email: "view-actions@test.com" });
 		ownerId = owner.id;
 		await addUserToOrganization(owner.id, org.id, "owner");
@@ -249,6 +253,50 @@ describe("view actions", () => {
 			(rows[0].metadata as { interaction: { view: string; action: string } })
 				.interaction
 		).toMatchObject({ view: "poke-view", action: "retry" });
+	});
+
+	it("runs a web action only against the bundle the caller mounted", async () => {
+		await setView("poke-view", VIEW_SOURCE, { retry: { emits: "test.poked" } });
+		const sql = getTestDb();
+		const hashOf = async () =>
+			String(
+				(
+					await sql`SELECT content_hash FROM views WHERE organization_id = ${orgId} AND key = 'poke-view'`
+				)[0].content_hash
+			);
+		const mounted = await hashOf();
+		const cookie = (await createTestSession(ownerId)).cookieHeader;
+		const click = (interaction_id: string, expected_content_hash: unknown) =>
+			post(`/api/${orgSlug}/views/poke-view/actions/retry`, {
+				body: { value: null, interaction_id, expected_content_hash },
+				cookie,
+			});
+		const count = async () =>
+			Number(
+				(
+					await sql`SELECT count(*)::int AS n FROM events WHERE organization_id = ${orgId} AND origin_type = 'view_interaction'`
+				)[0].n
+			);
+
+		expect((await click("mounted-1", mounted)).status).toBe(200);
+		expect(await count()).toBe(1);
+
+		// Re-applied while the old bundle is still on screen.
+		await setView("poke-view", `${VIEW_SOURCE}\n// v2\n`, {
+			retry: { emits: "test.poked" },
+		});
+		const current = await hashOf();
+		expect(current).not.toBe(mounted);
+		const stale = await click("mounted-2", mounted);
+		expect(stale.status).toBe(409);
+		expect(((await stale.json()) as { error: string }).error).toMatch(
+			/changed since it was opened/,
+		);
+		expect(await count()).toBe(1);
+
+		expect((await click("mounted-3", current)).status).toBe(200);
+		expect((await click("mounted-4", 7)).status).toBe(400);
+		expect(await count()).toBe(2);
 	});
 
 	it("dedupes a retried interaction_id", async () => {
