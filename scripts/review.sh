@@ -411,7 +411,20 @@ REVIEW_PREVIOUS_BASE=""
 REVIEW_PREVIOUS_THREAD=""
 REVIEW_PREVIOUS_VERDICT=null
 CYCLE_FILE="$(review_cycle_file)"
+# A cycle belongs to one PR. A branch name reused by a later PR (Release Please
+# reuses one branch for every release) must not inherit the old PR's budget or
+# its reviewer thread, which may be archived by now.
+REVIEW_CYCLE_PR=""
+if [ "$GH_AVAILABLE" = "1" ]; then
+  REVIEW_CYCLE_PR="$(gh pr view --json number --jq '.number // empty' 2>/dev/null || true)"
+fi
+if [ -f "$CYCLE_FILE" ] && [ -n "$REVIEW_CYCLE_PR" ] &&
+   jq -e --arg pr "$REVIEW_CYCLE_PR" '(.pr // "") != "" and .pr != $pr' "$CYCLE_FILE" >/dev/null 2>&1; then
+  echo ">> review cycle state belongs to PR #$(jq -r .pr "$CYCLE_FILE"), not #$REVIEW_CYCLE_PR; starting a fresh cycle"
+  rm -f "$CYCLE_FILE"
+fi
 if [ -f "$CYCLE_FILE" ]; then
+  [ -n "$REVIEW_CYCLE_PR" ] || REVIEW_CYCLE_PR="$(jq -r '.pr // ""' "$CYCLE_FILE")"
   jq -e '(.passes | type == "number" and floor == . and . >= 0 and . <= 2)' "$CYCLE_FILE" >/dev/null || {
     echo "Invalid review cycle state: $CYCLE_FILE" >&2; exit 2;
   }
