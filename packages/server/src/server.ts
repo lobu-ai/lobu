@@ -100,6 +100,7 @@ async function main(): Promise<void> {
 	let databaseReadiness: () => Promise<void>;
 	let preListenHooks: Array<() => Promise<void> | void> = [];
 	let extraTeardown: Array<() => Promise<void> | void> = [];
+	let runtimePostListenHooks: Array<() => void> = [];
 
 	// Local-install conveniences — ephemeral secrets + localhost URLs so a bare
 	// `lobu run` works without hand-written env. Applies to the embedded backend
@@ -207,6 +208,7 @@ async function main(): Promise<void> {
 		databaseReadiness = rt.databaseReadiness;
 		preListenHooks = rt.preListenHooks;
 		extraTeardown = rt.extraTeardown;
+		runtimePostListenHooks = rt.postListenHooks;
 		logger.info(`Data: ${rt.dataDir}`);
 	}
 
@@ -233,6 +235,7 @@ async function main(): Promise<void> {
 		// instead of letting feeds silently fail later. After listen() so the
 		// sync require.resolve walk doesn't add to readiness latency.
 		postListenHooks: [
+			...runtimePostListenHooks,
 			() => {
 				try {
 					assertExternalDepsResolvable(createRequire(import.meta.url).resolve);

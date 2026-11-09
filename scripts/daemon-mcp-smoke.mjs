@@ -101,7 +101,9 @@ async function stop(child) {
   } catch (error) {
     if (error.code !== "ESRCH") throw error;
   }
-  const deadline = Date.now() + 8_000;
+  // Longer than `lobu run`'s 45s grace: the server leads its own process
+  // group, so only the CLI can force-kill it together with its services.
+  const deadline = Date.now() + 60_000;
   while (
     child.exitCode === null &&
     child.signalCode === null &&
