@@ -270,5 +270,29 @@ describe('Automation response byte budget', () => {
         WINDOW_DATA_BUDGET_BYTES - keptBytes
       );
     }
+
+    // Omission never shrinks a page: walking pages through the bridge with an
+    // explicit page_size visits every window once, in order, with an exact total.
+    const paged = await wire.querySdk<{
+      success: boolean;
+      error?: unknown;
+      return_value?: { runIds: number[]; totals: number[]; pageLengths: number[]; omittedPerPage: number[] };
+    }>(`export default async (_ctx, client) => {
+      const runIds = [], totals = [], pageLengths = [], omittedPerPage = [];
+      for (let page = 1; page <= 3; page++) {
+        const r = await client.automations.get({ automation_id: '${automationId}', page, page_size: 5 });
+        runIds.push(...r.windows.map((w) => w.run_id));
+        totals.push(r.pagination.total);
+        pageLengths.push(r.windows.length);
+        omittedPerPage.push(r.windows.filter((w) => w.extracted_data_omitted).length);
+      }
+      return { runIds, totals, pageLengths, omittedPerPage };
+    }`);
+    expect(paged.success, JSON.stringify(paged.error)).toBe(true);
+    expect(paged.return_value?.runIds).toEqual(runIds);
+    expect(paged.return_value?.totals).toEqual([kinds.length, kinds.length, kinds.length]);
+    expect(paged.return_value?.pageLengths).toEqual([5, 5, 2]);
+    expect(paged.return_value?.omittedPerPage[0]).toBeGreaterThan(0);
+    expect(paged.return_value?.omittedPerPage[1]).toBeGreaterThan(0);
   }, 60_000);
 });

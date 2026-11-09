@@ -141,11 +141,17 @@ export type AutomationCreateFromVersionInput = Input<
 	"version_id" | "entity_ids"
 >;
 
+/** The get_automation fields an SDK caller may pass; the tool schema owns their bounds. */
+export type AutomationGetInput = Pick<
+	Parameters<typeof getAutomation>[0],
+	"page" | "page_size" | "content_since" | "content_until" | "template_version_id"
+> & { automation_id: AutomationId };
+
 export interface AutomationsNamespace {
 	/** Raw escape hatch for any manage_automations action. Prefer named methods. */
 	manage(input: ManageAutomationsArgs): Promise<unknown>;
 	list(filter?: AutomationListFilter): Promise<unknown>;
-	get(input: { automation_id: AutomationId }): Promise<unknown>;
+	get(input: AutomationGetInput): Promise<unknown>;
 	create(input: AutomationCreateInput): Promise<AutomationCreateResult>;
 	update(input: AutomationUpdateInput): Promise<unknown>;
 	createVersion(input: AutomationCreateVersionInput): Promise<unknown>;
@@ -188,11 +194,7 @@ export function buildAutomationsNamespace(
 		manage,
 		list: method("list"),
 		get(input) {
-			return getAutomation(
-				input as never,
-				env,
-				ctx,
-			) as Promise<unknown>;
+			return getAutomation(input, env, ctx) as Promise<unknown>;
 		},
 		create: method("create"),
 		update: method("update"),
