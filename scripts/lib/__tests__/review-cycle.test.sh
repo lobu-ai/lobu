@@ -26,7 +26,9 @@ case "$1 $2" in
   'auth status') exit 0 ;;
   'repo view') echo test/repo ;;
   'run list') echo "${TEST_CI_GREEN:-true}" ;;
-  'pr view') exit 1 ;;
+  'pr view')
+    [ -n "${TEST_PR:-}" ] || exit 1
+    if [[ "$*" == *--jq* ]]; then echo "$TEST_PR"; else printf '{"number":%s,"url":"u"}\n' "$TEST_PR"; fi ;;
   'api -X')
     if [ "${TEST_STATUS_FAIL:-false}" = true ] && [[ "$*" == *state=success* ]]; then exit 1; fi
     printf '%s\n' "$*" >> "$TEST_STATE/statuses" ;;
@@ -200,6 +202,20 @@ for args in plain resume; do
   [ "$retry_rc" = 1 ] && [ "$(count writes)" = 2 ] && [ "$(count reads)" = 3 ] || fail 'rerun/resume reset the budget or repeated the same review'
 done
 handoff autofix_limit
+# A reused branch name (Release Please) is a new PR: it must not inherit the
+# previous PR's spent budget, while the same PR keeps it.
+TEST_PR=1 run_case cap
+[ "$rc" = 1 ] && [ "$(count writes)" = 2 ] || fail 'PR-scoped cap did not stop at two writes'
+pr_rc=0
+TEST_PR=1 bash scripts/review.sh > "$tmp/output" 2>&1 || pr_rc=$?
+sed -n 's/^>> review run: //p' "$tmp/output" >> "$tmp/roots"
+[ "$pr_rc" = 1 ] && [ "$(count writes)" = 2 ] || fail 'same PR reset its budget'
+pr_rc=0
+TEST_PR=2 bash scripts/review.sh > "$tmp/output" 2>&1 || pr_rc=$?
+sed -n 's/^>> review run: //p' "$tmp/output" >> "$tmp/roots"
+[ "$(count writes)" -gt 2 ] || fail 'a new PR on a reused branch inherited the old budget'
+grep -q 'not #2; starting a fresh cycle' "$tmp/output" || fail 'reused branch did not report the fresh cycle'
+rm -rf "$(dirname "$(sed -n 's/^>> structured parent handoff: //p' "$tmp/output")")"
 run_case decision
 [ "$rc" = 1 ] && [ "$(count writes)" = 1 ] || fail 'decision did not stop writing'
 no_success

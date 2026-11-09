@@ -77,7 +77,8 @@ review_cache_store() {
 }
 
 # One branch owns a cycle. Commits, rebases, model changes and resume
-# commands cannot reset its automatic-write budget. New branches start fresh.
+# commands cannot reset its automatic-write budget. New branches start fresh,
+# and so does a later PR on a reused branch name (the file records its PR).
 review_cycle_file() {
   local key
   key="$(git symbolic-ref --short HEAD 2>/dev/null || git rev-parse HEAD)"
@@ -93,7 +94,8 @@ review_cycle_save() {
   jq -n --argjson passes "$AUTOFIX_PASSES" --arg sig "$REVIEWER_SIG" \
     --arg tree "${REVIEW_PREVIOUS_TREE:-}" --arg base "${REVIEW_PREVIOUS_BASE:-}" \
     --arg thread "${REVIEW_PREVIOUS_THREAD:-}" --argjson verdict "${REVIEW_PREVIOUS_VERDICT:-null}" \
-    '{passes:$passes,reviewer_sig:$sig,tree:$tree,base:$base,thread:$thread,verdict:$verdict}' > "$temporary"
+    --arg pr "${REVIEW_CYCLE_PR:-}" \
+    '{passes:$passes,reviewer_sig:$sig,tree:$tree,base:$base,thread:$thread,verdict:$verdict,pr:$pr}' > "$temporary"
   mv "$temporary" "$file"
 }
 
