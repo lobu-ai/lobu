@@ -329,6 +329,101 @@ describe("X notifications source", () => {
 		expect(JSON.parse(second.nextCursor).source).toBe("older");
 	});
 
+	// X's newest page regroups between reads: a grouped reaction is re-keyed,
+	// dropped, or bumped to the top as new reactions arrive.
+	const pageChanges: Record<string, (ids: string[]) => string[]> = {
+		unchanged: (ids) => ids,
+		"last returned row re-keyed": (ids) =>
+			ids.map((id) => (id === "n19" ? "n19-regrouped" : id)),
+		"last returned row removed": (ids) => ids.filter((id) => id !== "n19"),
+		"unreturned row bumped above the last returned row": (ids) => [
+			"n30",
+			...ids.filter((id) => id !== "n30"),
+		],
+	};
+
+	test.each(
+		Object.keys(pageChanges),
+	)("returns every row of a source page read in parts when it changes between reads: %s", async (change) => {
+		const ids = Array.from({ length: 50 }, (_, i) => `n${i}`);
+		let current = ids;
+		const b = browser((url) =>
+			url.searchParams.get("cursor") === "older"
+				? listing(["older"], null)
+				: listing(current, "older"),
+		);
+		const connector = new XConnector();
+		const returned: string[] = [];
+		let cursor: string | undefined;
+		for (let read = 0; read < 10; read++) {
+			const page = await connector.read(
+				readOptions(b, { limit: 20, ...(cursor ? { cursor } : {}) }),
+			);
+			returned.push(...page.rows.map((row: any) => row.notification_id));
+			if (read === 0) current = pageChanges[change](ids);
+			cursor = page.nextCursor;
+			if (!cursor) break;
+		}
+		expect(returned.length).toBe(new Set(returned).size);
+		expect(new Set(returned)).toEqual(
+			new Set([...ids.slice(0, 20), ...current, "older"]),
+		);
+		expect(b.requests.map((url) => url.searchParams.get("cursor"))).toEqual([
+			null,
+			null,
+			null,
+			"older",
+		]);
+	});
+
+	test("sync reads a full source page in one read before X's continuation", async () => {
+		const ids = Array.from({ length: 50 }, (_, i) => `n${i}`);
+		const b = browser((url) =>
+			url.searchParams.get("cursor") === "older"
+				? listing(["older"], null)
+				: listing(ids, "older"),
+		);
+		const result = await runSync(new XConnector(), {
+			...readOptions(b),
+			checkpoint: null,
+		});
+		expect(result.events).toHaveLength(51);
+		expect(b.requests.map((url) => url.searchParams.get("cursor"))).toEqual([
+			null,
+			"older",
+		]);
+		expect(result.status).toBe("complete");
+	});
+
+	test("asks for a restart on a superseded in-page cursor; sync restarts it", async () => {
+		const superseded = JSON.stringify({
+			v: 1,
+			kind: "notifications",
+			account: "1000",
+			source: null,
+			after: "1000:notification-one",
+		});
+		const b = browser((url) =>
+			url.searchParams.get("cursor") ? listing(["older"], null) : listing(),
+		);
+		await expect(
+			new XConnector().read(readOptions(b, { cursor: superseded })),
+		).rejects.toThrow(/restart the read/);
+		const result = await runSync(new XConnector(), {
+			...readOptions(b),
+			checkpoint: {
+				notifications_cursor: superseded,
+				notifications_account: "1000",
+				notifications_head_revision: (
+					await new XConnector().read(readOptions(b))
+				).rows[0].revision,
+			},
+		});
+		expect(result.metadata?.cursor_reset).toBe(true);
+		expect(result.events).toHaveLength(3);
+		expect(result.status).toBe("complete");
+	});
+
 	test("rejects a read cursor and a completed sync checkpoint from another account", async () => {
 		const b = browser();
 		const connector = new XConnector();

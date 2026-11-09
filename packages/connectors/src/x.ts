@@ -3876,7 +3876,7 @@ export default class XConnector extends ConnectorRuntime {
 		name: "X (Twitter)",
 		description:
 			"Fetches tweets, browser-visible like history, bookmarks, and DMs through the X API v2 or the paired Owletto Chrome extension, reads the chronological Following timeline live through the X API, captures notification references and the accounts you follow, reads and answers DMs live in the paired browser, and likes posts or follows accounts there. Links social actors into the person and company graph.",
-		version: "3.17.1",
+		version: "3.17.2",
 		faviconDomain: "x.com",
 		browser: {
 			origins: ["https://x.com", "https://twitter.com"],

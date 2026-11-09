@@ -621,6 +621,20 @@ export function xDirectMessagesProgram() {
 			fail("Unable to attach source subscription");
 		return { listening: true };
 	}
+	// X serves at most 50 entries per notifications page (`count=50`); the
+	// cap leaves room for a page grown by a replacement instruction.
+	const PAGE_ROWS_MAX = 200;
+	// A short row-identity hash for the in-page cursor: a page's returned set
+	// stays well under the 10,000-character cursor bound.
+	async function rowKey(id) {
+		const hash = await crypto.subtle.digest(
+			"SHA-256",
+			new TextEncoder().encode(id),
+		);
+		return Array.from(new Uint8Array(hash).slice(0, 6), (x) =>
+			x.toString(16).padStart(2, "0"),
+		).join("");
+	}
 	// The notification API is read from this same neutral page. In particular,
 	// never render /notifications or call its seen/read-state endpoints here.
 	async function readNotifications(input) {
@@ -635,13 +649,32 @@ export function xDirectMessagesProgram() {
 				fail("Invalid notification cursor");
 			cursor = JSON.parse(input.cursor);
 			if (
-				cursor.v !== 1 ||
+				![1, 2].includes(cursor.v) ||
 				cursor.kind !== "notifications" ||
 				cursor.account !== self ||
-				!(cursor.source === null || typeof cursor.source === "string") ||
-				!(cursor.after === null || typeof cursor.after === "string")
+				!(cursor.source === null || typeof cursor.source === "string")
 			)
 				fail("Notification cursor belongs to another account or source");
+			// v1 boundary cursors persist in sync checkpoints and equal a v2
+			// cursor with nothing returned yet. A v1 cursor inside a source page
+			// anchored on one row, which X can re-key; that read must restart.
+			if (cursor.v === 1) {
+				if (cursor.after !== null) {
+					account(self);
+					if (input.restartExpired)
+						return { rows: [], account_id: self, expired: true };
+					fail(
+						"Notification cursor format changed; restart the read (coverage incomplete)",
+					);
+				}
+				cursor = { ...cursor, returned: [] };
+			}
+			if (
+				!Array.isArray(cursor.returned) ||
+				cursor.returned.length > PAGE_ROWS_MAX ||
+				!cursor.returned.every((x) => typeof x === "string" && x.length === 12)
+			)
+				fail("Invalid notification cursor");
 		}
 		const path =
 			"/i/api/2/notifications/all.json?count=50" +
@@ -760,39 +793,40 @@ export function xDirectMessagesProgram() {
 			if (input.metadataOnly) delete row.text;
 			all.push(row);
 		}
-		let start = 0;
-		if (cursor?.after) {
-			start = all.findIndex((row) => row.id === cursor.after) + 1;
-			if (!start) {
-				account(self);
-				if (input.restartExpired)
-					return { rows: [], account_id: self, expired: true };
-				fail(
-					"Notification page changed; restart the read (coverage incomplete)",
-				);
-			}
-		}
-		const rows = all.slice(start, start + limit);
-		const moreInPage = start + rows.length < all.length;
+		// Resume by excluding rows already returned from this source page, not
+		// by anchoring on one row: X regroups its newest page between reads
+		// (re-keying, dropping, or reordering grouped reactions). A re-keyed
+		// row may come back as a duplicate reference, deduped by origin_id;
+		// no row is ever skipped.
+		const returned = new Set(cursor?.returned ?? []);
+		const keys = [];
+		for (const row of all) keys.push(await rowKey(row.id));
+		const remaining = all.filter((_, index) => !returned.has(keys[index]));
+		const rows = remaining.slice(0, limit);
+		const moreInPage = rows.length < remaining.length;
 		if (!moreInPage && cursor && next === cursor.source) {
 			if (all.length) fail("Notification cursor did not advance");
 			next = undefined;
 		}
+		// Keep only keys still on the page, so the set stays page-bounded.
+		const sent = new Set(rows.map((row) => row.id));
 		const nextCursor = moreInPage
 			? JSON.stringify({
-					v: 1,
+					v: 2,
 					kind: "notifications",
 					account: self,
 					source: cursor?.source ?? null,
-					after: rows.at(-1).id,
+					returned: keys.filter(
+						(key, index) => returned.has(key) || sent.has(all[index].id),
+					),
 				})
 			: next
 				? JSON.stringify({
-						v: 1,
+						v: 2,
 						kind: "notifications",
 						account: self,
 						source: next,
-						after: null,
+						returned: [],
 					})
 				: undefined;
 		if (account() !== self)
