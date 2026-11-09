@@ -37,6 +37,28 @@ export function matchesRecord(
   );
 }
 
+/**
+ * Whether the view mounts on records of `typeSlug`: a tab on the type's list
+ * or a card on its record pages. With `recordId`, a record card pinned to
+ * another id does not count. A collection's `when` narrows what the tab
+ * shows, not which records the view is about, so it is ignored here.
+ */
+export function attachesToEntityType(
+  attach: readonly ViewAttachment[],
+  typeSlug: string,
+  recordId?: number
+): boolean {
+  return attach.some(
+    (attachment) =>
+      ("collection" in attachment && attachment.collection === typeSlug) ||
+      ("record" in attachment &&
+        attachment.record === typeSlug &&
+        (recordId === undefined ||
+          attachment.id === undefined ||
+          attachment.id === recordId))
+  );
+}
+
 export function hasWorkspaceAttachment(
   attach: readonly ViewAttachment[]
 ): boolean {

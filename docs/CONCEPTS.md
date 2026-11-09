@@ -16,7 +16,13 @@ then the feature map. `AUTOMATIONS.md` holds the Automation primitive contract;
   an instance of a declared entity type (for example, `ticket`) with typed
   properties. Current values live on the entity row; linked content events and
   append-only change events preserve its evidence and update history. Entities
-  are not a read-time fold over the event log.
+  are not a read-time fold over the event log. Field invariants live with the
+  type, not with one writer: root `metadata_schema["x-lobu-stamps"]`
+  (`{ "stage_at": "stage" }`) makes the server set a declared date-time field
+  whenever its tracked field is set on create or changes value, for every
+  writer, and ignore caller-supplied stamp values. A view action may write a
+  declared field allowlist directly (`updates: { entityType, fields }`), in
+  the same transaction as its event, so accepted means applied.
 - **Identity has two layers.**
   - `origin_id` — the source platform's stable id for an item, scoped to its
     connection. This is cross-sync identity: re-syncing the same GitHub issue

@@ -29,6 +29,11 @@ import type {
 	EntityRowPatch,
 } from "../utils/entity-management";
 import { type EntityRuleRow, runEntityRules } from "./entity-rule-executor";
+import {
+	ENTITY_STAMPS_ANNOTATION,
+	applyEntityStamps,
+	readEntityStamps,
+} from "../utils/entity-stamps";
 
 declare const validatedBrand: unique symbol;
 
@@ -157,6 +162,10 @@ interface CommittedRow {
 	entity_type: string;
 	metadata: unknown;
 	rules_compiled: string | null;
+	/** The type's `x-lobu-stamps`, raw. */
+	stamps: unknown;
+	/** The transaction clock, so a stamp matches the row's `updated_at`. */
+	now: Date | string;
 	name: string | null;
 	slug: string | null;
 	parent_id: string | number | null;
@@ -164,14 +173,44 @@ interface CommittedRow {
 	deleted_at: Date | null;
 }
 
-function committedState(row: CommittedRow): Record<string, unknown> {
-	const metadata = (
-		typeof row.metadata === "string"
-			? JSON.parse(row.metadata)
-			: (row.metadata ?? {})
+function parseMetadata(value: unknown): Record<string, unknown> {
+	return (
+		typeof value === "string" ? JSON.parse(value) : (value ?? {})
 	) as Record<string, unknown>;
+}
+
+/**
+ * Apply the type's `x-lobu-stamps` to a metadata patch: stamped fields keep
+ * their committed value whatever the writer sent, and are set to the
+ * transaction time when their tracked field changes. This is the seam every
+ * validated write crosses, so the stamp holds for every writer.
+ *
+ * `patch.metadata` is the full merged object for exactly one row; every
+ * metadata writer patches a single id. A multi-row metadata patch would need a
+ * per-row stamp, so it fails loudly instead of stamping one value onto many.
+ */
+function stampRowPatch(rows: CommittedRow[], patch: EntityRowPatch): EntityRowPatch {
+	if (patch.metadata == null) return patch;
+	const stamped = rows.filter((row) => Object.keys(readEntityStamps(row.stamps)).length > 0);
+	if (stamped.length === 0) return patch;
+	if (rows.length !== 1) {
+		throw new Error(`A metadata patch on a type with ${ENTITY_STAMPS_ANNOTATION} must target one row`);
+	}
+	const [row] = stamped;
 	return {
-		...metadata,
+		...patch,
+		metadata: applyEntityStamps({
+			stamps: readEntityStamps(row.stamps),
+			committed: parseMetadata(row.metadata),
+			next: patch.metadata,
+			now: new Date(row.now).toISOString(),
+		}),
+	};
+}
+
+function committedState(row: CommittedRow): Record<string, unknown> {
+	return {
+		...parseMetadata(row.metadata),
 		$name: row.name ?? null,
 		$slug: row.slug ?? null,
 		$parent_id: row.parent_id == null ? null : Number(row.parent_id),
@@ -272,45 +311,45 @@ export async function validateEntityRowPatchGrantingApprovedFields(params: {
 	approvedFields: readonly string[];
 }): Promise<ValidatedEntityRowPatch> {
 	const { tx, ids, patch, approvedFields, operation = "update" } = params;
-	const branded = patch as ValidatedEntityRowPatch;
-	if (ids.length === 0) return branded;
+	if (ids.length === 0) return patch as ValidatedEntityRowPatch;
 	// Fast path: nothing a rule could govern, so no read and no evaluation.
-	if (!touchesGovernedColumn(patch)) return branded;
-
-	await enforceCompiledRules({
-		tx,
-		ids,
-		flatPatch: flatten(patch, patch.metadata),
-		approvedFields,
-		operation,
-	});
-	return branded;
-}
-
-/** Read target rows, evaluate their compiled rules, and enforce approval grants. */
-async function enforceCompiledRules(params: {
-	tx: DbClient;
-	ids: number[];
-	flatPatch: Record<string, unknown>;
-	approvedFields: readonly string[];
-	operation: EntityWriteOperation;
-}): Promise<void> {
-	const { tx, ids, flatPatch, approvedFields, operation } = params;
+	if (!touchesGovernedColumn(patch)) return patch as ValidatedEntityRowPatch;
 
 	// The pool runs with `fetch_types: false`, so a raw JS array binds as
 	// "malformed array literal". Bind the formatted `{n,n}` text and cast, exactly
 	// as `patchEntityRows` itself does.
 	//
-	// `rules_compiled` rides the join this query already makes, so rule lookup
-	// costs no extra round trip.
+	// `rules_compiled` and the stamps ride the join this query already makes, so
+	// neither costs an extra round trip.
 	const rows = await tx<CommittedRow>`
     SELECT e.id, e.organization_id, et.slug AS entity_type,
            e.metadata, e.name, e.slug, e.parent_id, e.content,
-           e.deleted_at, et.rules_compiled
+           e.deleted_at, et.rules_compiled,
+           et.metadata_schema -> 'x-lobu-stamps' AS stamps,
+           current_timestamp AS now
     FROM entities e
     JOIN entity_types et ON et.id = e.entity_type_id
     WHERE e.id = ANY(${pgBigintArray(ids)}::bigint[])
   `;
+	// Rules judge the bytes that commit, stamps included.
+	const effective = stampRowPatch(rows, patch);
+	await enforceCompiledRules({
+		rows,
+		flatPatch: flatten(effective, effective.metadata),
+		approvedFields,
+		operation,
+	});
+	return effective as ValidatedEntityRowPatch;
+}
+
+/** Evaluate the target rows' compiled rules and enforce approval grants. */
+async function enforceCompiledRules(params: {
+	rows: CommittedRow[];
+	flatPatch: Record<string, unknown>;
+	approvedFields: readonly string[];
+	operation: EntityWriteOperation;
+}): Promise<void> {
+	const { rows, flatPatch, approvedFields, operation } = params;
 
 	// One group per distinct compiled rule. Types without rules never reach an
 	// isolate at all, which keeps an unruled org's writes exactly as cheap as
@@ -477,17 +516,35 @@ export async function validateEntityRowInsertGrantingApprovedFields(params: {
 	/** REQUIRED. Fields a human already approved on the create card. */
 	approvedFields: readonly string[];
 }): Promise<ValidatedEntityRowInsert> {
-	const { tx, row, approvedFields } = params;
-	const branded = row as ValidatedEntityRowInsert;
+	const { tx, approvedFields } = params;
 
 	const types = await tx<{
 		rules_compiled: string | null;
 		slug: string;
+		stamps: unknown;
+		now: Date | string;
 	}>`
-    SELECT rules_compiled, slug
-    FROM entity_types WHERE id = ${row.entityTypeId}
+    SELECT rules_compiled, slug,
+           metadata_schema -> 'x-lobu-stamps' AS stamps,
+           current_timestamp AS now
+    FROM entity_types WHERE id = ${params.row.entityTypeId}
   `;
 	const type = types[0];
+	// A create is an update from nothing: a set tracked field is a change.
+	const stamps = readEntityStamps(type?.stamps);
+	const row: EntityRowInsert =
+		type && Object.keys(stamps).length > 0
+			? {
+					...params.row,
+					metadata: applyEntityStamps({
+						stamps,
+						committed: null,
+						next: params.row.metadata ?? {},
+						now: new Date(type.now).toISOString(),
+					}),
+				}
+			: params.row;
+	const branded = row as ValidatedEntityRowInsert;
 	const compiled = type?.rules_compiled;
 	if (!compiled) return branded;
 	const flatPatch = flatten(

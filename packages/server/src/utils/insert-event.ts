@@ -1581,6 +1581,72 @@ export async function insertChangeEventInTransaction(
   );
 }
 
+interface EntityRowState {
+  name: string | null;
+  slug: string | null;
+  parent_id?: number | null;
+  metadata?: Record<string, unknown> | null;
+}
+
+/**
+ * The canonical `entity.updated` event for one committed entity update, joined
+ * to its transaction. Null when nothing visible changed. `via` names a
+ * non-tool writer acting for `createdBy`, e.g. `view:<key>` for a view action.
+ */
+export async function insertEntityUpdatedEventInTransaction(
+  params: {
+    entityId: number;
+    organizationId: string;
+    before: EntityRowState;
+    after: EntityRowState;
+    contentChanged: boolean;
+    createdBy: string | null;
+    clientId: string | null;
+    via?: string;
+  },
+  sql: DbClient
+): Promise<InsertedEvent | null> {
+  const { before, after } = params;
+  const changes: Array<{ field: string; old: unknown; new: unknown }> = [];
+  if (before.name !== after.name) {
+    changes.push({ field: 'name', old: before.name, new: after.name });
+  }
+  if (before.slug !== after.slug) {
+    changes.push({ field: 'slug', old: before.slug, new: after.slug });
+  }
+  if ((before.parent_id ?? null) !== (after.parent_id ?? null)) {
+    changes.push({ field: 'parent_id', old: before.parent_id ?? null, new: after.parent_id ?? null });
+  }
+  if (params.contentChanged) {
+    changes.push({ field: 'content', old: '[changed]', new: '[changed]' });
+  }
+  const beforeMetadata = before.metadata ?? {};
+  const afterMetadata = after.metadata ?? {};
+  for (const key of new Set([...Object.keys(beforeMetadata), ...Object.keys(afterMetadata)])) {
+    if (stableJson(beforeMetadata[key] ?? null) !== stableJson(afterMetadata[key] ?? null)) {
+      changes.push({ field: key, old: beforeMetadata[key] ?? null, new: afterMetadata[key] ?? null });
+    }
+  }
+  if (changes.length === 0) return null;
+  const contentLines = changes.map(
+    (change) => `- ${change.field}: ${JSON.stringify(change.old)} → ${JSON.stringify(change.new)}`
+  );
+  return insertChangeEventInTransaction(
+    {
+      entityIds: [params.entityId],
+      organizationId: params.organizationId,
+      subject: 'entity',
+      op: 'updated',
+      title: `Entity updated: ${changes.map((change) => change.field).join(', ')}`,
+      content: `Entity "${after.name}" (id: ${params.entityId}) updated:\n${contentLines.join('\n')}`,
+      metadata: { changes, ...(params.via ? { via: params.via } : {}) },
+      createdBy: params.createdBy,
+      clientId: params.clientId,
+    },
+    sql
+  );
+}
+
 interface EdgeFieldChange {
   field: string;
   old: unknown;

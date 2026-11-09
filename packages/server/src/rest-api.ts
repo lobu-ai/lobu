@@ -7,7 +7,7 @@
 
 import { toJsonSafe } from "@lobu/core";
 import { Value } from "@sinclair/typebox/value";
-import { ViewActionScopeSchema } from "./tools/invoke_view_action";
+import { ViewActionScopeSchema, viewActionResult } from "./tools/invoke_view_action";
 import type { Context } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import {
@@ -579,6 +579,7 @@ export async function restInvokeViewAction(c: Context<{ Bindings: Env }>) {
 			value?: unknown;
 			interaction_id?: unknown;
 			scope?: unknown;
+			expected?: unknown;
 			expected_content_hash?: unknown;
 		}>();
 		if (
@@ -593,6 +594,12 @@ export async function restInvokeViewAction(c: Context<{ Bindings: Env }>) {
 		}
 		if (body.scope !== undefined && !Value.Check(ViewActionScopeSchema, body.scope)) {
 			throw new ToolUserError("scope must name one stored event version", 400);
+		}
+		if (
+			body.expected !== undefined &&
+			(!body.expected || typeof body.expected !== "object" || Array.isArray(body.expected))
+		) {
+			throw new ToolUserError("expected must be an object of metadata field values", 400);
 		}
 		if (
 			body.expected_content_hash !== undefined &&
@@ -611,6 +618,10 @@ export async function restInvokeViewAction(c: Context<{ Bindings: Env }>) {
 				: {}),
 			action,
 			value: (body.value ?? null) as Record<string, unknown> | null,
+			...(body.expected !== undefined
+				? { expected: body.expected as Record<string, unknown> }
+				: {}),
+			caller: { env: c.env, ctx },
 			interactionId: body.interaction_id,
 			surface: "web",
 			actor: {
@@ -620,13 +631,7 @@ export async function restInvokeViewAction(c: Context<{ Bindings: Env }>) {
 			},
 			source: { clientId: eventClientId(ctx) },
 		});
-		return c.json(
-			toJsonSafe({
-				created: result.created,
-				event_id: result.eventId,
-				event_type: result.eventType,
-			})
-		);
+		return c.json(toJsonSafe(viewActionResult(result)));
 	} catch (error) {
 		return restErrorResponse(c, error);
 	}

@@ -36,6 +36,8 @@ export {
   useScope,
 } from "./api.js";
 export type {
+  ActionDef,
+  ActionOptions,
   ActionResult,
   Attachment,
   Container,

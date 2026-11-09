@@ -25,6 +25,7 @@ type Message = {
     arguments: {
       scope?: { event: number };
       value: Record<string, unknown>;
+      expected?: Record<string, unknown>;
       interaction_id: string;
     };
   };
@@ -117,12 +118,15 @@ test("explicit retry keeps the accepted intent, while another submission gets a 
     await tick();
   });
   const value = { choice: "yes" };
+  const expected = { choice: null as string | null };
   // The server accepted this request, but its acknowledgement never reaches the guest.
-  const failed = await submit(value);
+  const failed = await submit(value, { expected });
   expect(failed.ok).toBe(false);
   const first = calls()[0];
   expect(first.params.arguments.scope).toEqual({ event: 42 });
+  expect(first.params.arguments.expected).toEqual({ choice: null });
   value.choice = "no";
+  expected.choice = "no";
   expect(typeof failed.retry).toBe("function");
   if (!failed.retry)
     throw new Error("Expected a retry after the lost acknowledgement");
@@ -131,6 +135,7 @@ test("explicit retry keeps the accepted intent, while another submission gets a 
   const second = calls()[1];
   expect(second.params.arguments).toEqual(first.params.arguments);
   expect(second.params.arguments.value).toEqual({ choice: "yes" });
+  expect(second.params.arguments.expected).toEqual({ choice: null });
   send({
     jsonrpc: "2.0",
     id: second.id,

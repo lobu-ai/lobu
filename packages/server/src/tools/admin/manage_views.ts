@@ -27,11 +27,12 @@ import {
   RemoveViewAction,
   SetViewAction,
   type ManageViewsResult,
+  type ViewActionDecl,
 } from '@lobu/core/contracts/tools/manage-views';
 import type { Static } from '@sinclair/typebox';
 import { emit } from '../../events/emitter';
 import { getDb, pgTextArray } from '../../db/client';
-import { isEventAttachment } from '@lobu/core/contracts/tools/view-attach';
+import { attachesToEntityType, isEventAttachment } from '@lobu/core/contracts/tools/view-attach';
 import type { ViewDefinitionRecord } from '@lobu/core/contracts/tools/view-definition';
 import { ToolUserError } from '../../utils/errors';
 import {
@@ -162,9 +163,16 @@ function validateViewDefinition(def: ViewDefinitionRecord): void {
         400
       );
     }
-    if (!EMITS_NAME_RE.test(decl.emits)) {
+    if (decl.emits !== undefined && !EMITS_NAME_RE.test(decl.emits)) {
       throw new ToolUserError(
         `Action '${name}' emits '${decl.emits}': use <subject>.<op> event-kind names`,
+        400
+      );
+    }
+    const target = decl.updates?.entityType;
+    if (target !== undefined && !attachesToEntityType(def.attach, target)) {
+      throw new ToolUserError(
+        `Action '${name}' updates '${target}', but the view does not attach to that type: add { collection: '${target}' } or { record: '${target}' } to attach`,
         400
       );
     }
@@ -178,10 +186,12 @@ function validateViewDefinition(def: ViewDefinitionRecord): void {
  */
 async function assertActionKindsRegistered(
   organizationId: string,
-  actions: Record<string, { emits: string }>,
+  declared: Record<string, ViewActionDecl>,
   attach: SetViewInput['attach'],
 ): Promise<void> {
-  if (Object.keys(actions).length === 0) return;
+  const actions = Object.entries(declared).flatMap(([name, decl]) =>
+    decl.emits === undefined ? [] : [[name, { emits: decl.emits }] as const]);
+  if (actions.length === 0) return;
   const qualifiedTypes = attach.length > 0 &&
     attach.every((entry) => isEventAttachment(entry) && entry.type)
       ? [...new Set(attach.flatMap((entry) =>
@@ -196,7 +206,7 @@ async function assertActionKindsRegistered(
       AND deleted_at IS NULL
   `;
   const kindRegistry = readEventKindRegistry(organizationId);
-  for (const [name, decl] of Object.entries(actions)) {
+  for (const [name, decl] of actions) {
     const global = await validateSaveContentSemanticType(
       decl.emits,
       null,

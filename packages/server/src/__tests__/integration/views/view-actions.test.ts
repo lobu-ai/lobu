@@ -8,6 +8,12 @@
  * an emits kind the registry does not know is a 422 at save and at click, and
  * saves use the committed registry even with a stale replica cache;
  * unauthenticated callers get 401; every fire emits the `view:<key>` SSE invalidation.
+ *
+ * An action that `updates` an entity writes its declared fields through the
+ * shared entity update path in the receipt's transaction: the patch, the
+ * schema's stamps, the canonical change event and the receipt commit together
+ * or not at all, a replay returns the original result, a human-owned field
+ * defers to an approval, and the write never claims field ownership.
  */
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { Env } from "../../../index";
@@ -591,5 +597,209 @@ describe("view actions", () => {
 		).catch((e) => e);
 		expect(removed).toBeInstanceOf(ToolUserError);
 		expect((removed as ToolUserError).httpStatus).toBe(403);
+	});
+
+	describe("entity updates", () => {
+		const DEAL_SCHEMA = {
+			type: "object",
+			properties: {
+				stage: { type: "string" },
+				stage_at: { type: "string", format: "date-time" },
+				notes: { type: "string" },
+				amount: { type: "number" },
+			},
+			"x-lobu-stamps": { stage_at: "stage" },
+		};
+
+		beforeEach(async () => {
+			for (const [slug, metadata_schema] of [["deal", DEAL_SCHEMA], ["lead", undefined]] as const) {
+				await executeTool("manage_entity_schema", {
+					schema_type: "entity_type", action: "create", slug, name: slug,
+					...(metadata_schema ? { metadata_schema } : {}),
+				}, TEST_ENV, ownerCtx);
+			}
+			await executeTool("manage_views", {
+				action: "set",
+				source_code: viewModule({
+					key: "deal-board",
+					// One pinned lead record, so the attach check has a record to miss.
+					attach: [{ collection: "deal" }, { record: "lead", id: 999999 }],
+					actions: {
+						advance: { emits: "test.poked", updates: { entityType: "deal", fields: ["stage", "notes"] } },
+						note: { updates: { entityType: "deal", fields: ["notes"] } },
+						restamp: { updates: { entityType: "deal", fields: ["stage_at"] } },
+						qualify: { updates: { entityType: "lead", fields: ["stage"] } },
+					},
+				}, VIEW_SOURCE),
+			}, TEST_ENV, ownerCtx);
+		});
+
+		async function createRecord(entity_type: string, metadata: Record<string, unknown>) {
+			const created = await executeTool("manage_entity", {
+				action: "create", entity_type, name: `${entity_type} ${Math.random()}`, metadata,
+			}, TEST_ENV, ownerCtx) as { entity: { id: number } };
+			return created.entity.id;
+		}
+
+		async function entityRow(id: number) {
+			const [row] = await getTestDb()`
+        SELECT metadata, field_controls, updated_at FROM entities WHERE id = ${id}
+      `;
+			return row as { metadata: Record<string, unknown>; field_controls: Record<string, unknown>; updated_at: Date };
+		}
+
+		async function eventCount() {
+			const [row] = await getTestDb()`
+        SELECT count(*)::int AS n FROM events
+        WHERE organization_id = ${orgId}
+          AND (origin_type = 'view_interaction' OR semantic_type = 'change')
+      `;
+			return Number(row.n);
+		}
+
+		async function pendingApprovals() {
+			const [row] = await getTestDb()`
+        SELECT count(*)::int AS n FROM runs
+        WHERE organization_id = ${orgId} AND action_key = 'entity_field_change' AND approval_status = 'pending'
+      `;
+			return Number(row.n);
+		}
+
+		const invoke = (args: Record<string, unknown>, ctx: AuthContext = memberCtx) =>
+			executeTool("invoke_view_action", { view: "deal-board", ...args }, TEST_ENV, ctx) as Promise<{
+				created: boolean; event_id: number; event_type: string;
+				applied?: { entity_id: number; fields: Record<string, unknown> };
+				pending_approval?: { entity_id: number; fields: Record<string, unknown> };
+			}>;
+
+		it("applies declared fields, stamps, the change event and the receipt in one transaction, and replays the result", async () => {
+			const deal = await createRecord("deal", { stage: "open", notes: "first call" });
+			const created = await entityRow(deal);
+			// The create set the tracked field, so the stamp is the create's time.
+			expect(created.metadata.stage_at).toBe(new Date(created.updated_at).toISOString());
+
+			const args = {
+				action: "advance",
+				value: { entity_id: deal, set: { stage: "won" } },
+				expected: { stage: "open" },
+				interaction_id: "advance-1",
+			};
+			const first = await invoke(args);
+			const after = await entityRow(deal);
+			expect(after.metadata).toMatchObject({ stage: "won", notes: "first call" });
+			expect(after.metadata.stage_at).toBe(new Date(after.updated_at).toISOString());
+			expect(after.metadata.stage_at).not.toBe(created.metadata.stage_at);
+			// A member wrote through the view's grant, yet no field became human-owned.
+			expect(after.field_controls ?? {}).toEqual({});
+			expect(first).toMatchObject({
+				created: true,
+				event_type: "test.poked",
+				applied: { entity_id: deal, fields: { stage: "won", stage_at: after.metadata.stage_at } },
+			});
+			expect(first.pending_approval).toBeUndefined();
+
+			const events = await getTestDb()`
+        SELECT id, semantic_type, origin_type, created_by, created_at,
+               to_json(entity_ids) AS entity_ids, metadata
+        FROM events
+        WHERE organization_id = ${orgId} AND ${deal}::bigint = ANY(entity_ids)
+          AND (origin_type = 'view_interaction' OR semantic_type = 'change')
+        ORDER BY id
+      `;
+			const receipt = events.find((event) => event.id === first.event_id);
+			const change = events.find((event) => event.semantic_type === "change");
+			expect(receipt).toMatchObject({ origin_type: "view_interaction", semantic_type: "test.poked", entity_ids: [deal] });
+			expect(receipt?.metadata.interaction).toMatchObject({ expected: { stage: "open" }, result: { applied: first.applied } });
+			expect(change).toMatchObject({ created_by: memberCtx.userId });
+			expect(change?.metadata).toMatchObject({ via: "view:deal-board" });
+			expect(change?.metadata.changes.map((c: { field: string }) => c.field).sort()).toEqual(["stage", "stage_at"]);
+			// One transaction wrote the row, its change event and the receipt: all
+			// three carry that transaction's clock.
+			expect(new Set([after.updated_at, receipt?.created_at, change?.created_at]
+				.map((at) => new Date(at).getTime())).size).toBe(1);
+
+			// The retry carries an expected value that is now stale; the replay still
+			// answers with the original result and writes nothing.
+			const count = await eventCount();
+			await expect(invoke(args)).resolves.toEqual({ ...first, created: false });
+			expect(await entityRow(deal)).toEqual(after);
+			expect(await eventCount()).toBe(count);
+			// The same id with different expected values is another request.
+			await expect(invoke({ ...args, expected: { stage: "won" } })).rejects.toMatchObject({ httpStatus: 409 });
+		});
+
+		it("refuses undeclared fields, stamped fields, another type, a missing record and a stale read without writing", async () => {
+			const deal = await createRecord("deal", { stage: "open" });
+			const lead = await createRecord("lead", { stage: "new" });
+			const before = await entityRow(deal);
+			const count = await eventCount();
+			const refusals: Array<[Record<string, unknown>, number]> = [
+				[{ action: "advance", value: { entity_id: deal, set: { amount: 5 } } }, 403],
+				[{ action: "restamp", value: { entity_id: deal, set: { stage_at: "2020-01-01T00:00:00.000Z" } } }, 403],
+				[{ action: "advance", value: { entity_id: lead, set: { stage: "won" } } }, 403],
+				// The view attaches to one pinned lead record, not this one.
+				[{ action: "qualify", value: { entity_id: lead, set: { stage: "hot" } } }, 403],
+				[{ action: "advance", value: { entity_id: 999999999, set: { stage: "won" } } }, 404],
+				[{ action: "advance", value: { entity_id: deal, set: {} } }, 400],
+				[{ action: "advance", value: { entity_id: deal, set: { stage: "won" } }, expected: { stage: "lost" } }, 409],
+			];
+			for (const [index, [args, status]] of refusals.entries()) {
+				await expect(invoke({ ...args, interaction_id: `refused-${index}` }), JSON.stringify(args))
+					.rejects.toMatchObject({ httpStatus: status });
+			}
+			await getTestDb()`UPDATE entities SET deleted_at = NOW() WHERE id = ${lead}`;
+			await expect(invoke({ action: "qualify", value: { entity_id: lead, set: { stage: "hot" } }, interaction_id: "deleted" }))
+				.rejects.toMatchObject({ httpStatus: 404 });
+			expect(await entityRow(deal)).toEqual(before);
+			expect(await eventCount()).toBe(count);
+			// A declaration naming a type the view does not attach to fails at set.
+			await expect(executeTool("manage_views", {
+				action: "set",
+				source_code: viewModule({
+					key: "unattached",
+					attach: [{ collection: "deal" }],
+					actions: { qualify: { updates: { entityType: "lead", fields: ["stage"] } } },
+				}, VIEW_SOURCE),
+			}, TEST_ENV, ownerCtx)).rejects.toMatchObject({ httpStatus: 400 });
+
+			// The web route carries the same precondition and its structured refusal.
+			const cookie = (await createTestSession(ownerId)).cookieHeader;
+			const stale = await post(`/api/${orgSlug}/views/deal-board/actions/advance`, {
+				body: { value: { entity_id: deal, set: { stage: "won" } }, expected: { stage: "lost" }, interaction_id: "web-stale" },
+				cookie,
+			});
+			expect(stale.status).toBe(409);
+			expect(await stale.json()).toMatchObject({ code: "PRECONDITION_FAILED", mismatched_fields: ["stage"] });
+			const fresh = await post(`/api/${orgSlug}/views/deal-board/actions/advance`, {
+				body: { value: { entity_id: deal, set: { stage: "won" } }, expected: { stage: "open" }, interaction_id: "web-fresh" },
+				cookie,
+			});
+			expect(fresh.status).toBe(200);
+			expect(await fresh.json()).toMatchObject({ applied: { entity_id: deal, fields: { stage: "won" } } });
+			// A signed-in owner's click is still a view write, not a manual edit.
+			expect((await entityRow(deal)).field_controls ?? {}).toEqual({});
+		});
+
+		it("defers a human-owned field to an approval instead of writing it", async () => {
+			const deal = await createRecord("deal", { stage: "open" });
+			// The owner's own edit claims `notes`.
+			await executeTool("manage_entity", { action: "update", entity_id: deal, metadata: { notes: "owner's words" } }, TEST_ENV, ownerCtx);
+			expect(Object.keys((await entityRow(deal)).field_controls)).toEqual(["notes"]);
+			const approvals = await pendingApprovals();
+			const args = { action: "note", value: { entity_id: deal, set: { notes: "member's words" } }, interaction_id: "note-1" };
+
+			const result = await invoke(args);
+			expect(result).toMatchObject({
+				created: true,
+				event_type: "audit",
+				pending_approval: { entity_id: deal, fields: { notes: "member's words" } },
+			});
+			expect(result.applied).toBeUndefined();
+			expect((await entityRow(deal)).metadata.notes).toBe("owner's words");
+			expect(await pendingApprovals()).toBe(approvals + 1);
+
+			await expect(invoke(args)).resolves.toEqual({ ...result, created: false });
+			expect(await pendingApprovals()).toBe(approvals + 1);
+		});
 	});
 });

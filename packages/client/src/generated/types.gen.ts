@@ -2095,7 +2095,7 @@ export type ManageEntitySchemaData = {
      */
     description?: string;
     /**
-     * [create/update] JSON Schema for metadata validation. Source-backed types declare a durable projected key with root x-lobu-record-key naming the key column; this enables string entity_id + entity_type addressing and authored links without storing source rows. A linked type cannot change its backing or key until its edges are unlinked. Entity property annotations: x-facet: true exposes scalar enum values as collection filters; x-sidebar: true also exposes those values as navigation shortcuts. x-enum-labels maps stringified enum values to display labels. x-table-label or title labels the attribute. These annotations do not grant access or define separate segments.
+     * [create/update] JSON Schema for metadata validation. Source-backed types declare a durable projected key with root x-lobu-record-key naming the key column; this enables string entity_id + entity_type addressing and authored links without storing source rows. A linked type cannot change its backing or key until its edges are unlinked. Root x-lobu-stamps maps a server-owned timestamp field to the field it tracks (e.g. { stage_at: stage }): the stamp must be a declared property with type string and format date-time, and the tracked field a declared property; every write sets the stamp when the tracked field is set on create or changes value, and caller-supplied stamp values are ignored. Entity property annotations: x-facet: true exposes scalar enum values as collection filters; x-sidebar: true also exposes those values as navigation shortcuts. x-enum-labels maps stringified enum values to display labels. x-table-label or title labels the attribute. These annotations do not grant access or define separate segments.
      */
     metadata_schema?: {
       [key: string]: unknown;
@@ -7790,7 +7790,20 @@ export type ManageViewsResponses = {
                   /**
                    * Event kind appended when the action fires, e.g. 'deal.won'.
                    */
-                  emits: string;
+                  emits?: string;
+                  /**
+                   * Entity fields the action may write: value carries { entity_id, set }.
+                   */
+                  updates?: {
+                    /**
+                     * Entity type the action writes. The view must attach to it (collection or record).
+                     */
+                    entityType: string;
+                    /**
+                     * Metadata fields the action may set. Schema-stamped fields (x-lobu-stamps) are server-owned and refused.
+                     */
+                    fields: Array<string>;
+                  };
                 };
           };
           /**
@@ -7891,7 +7904,20 @@ export type ManageViewsResponses = {
                   /**
                    * Event kind appended when the action fires, e.g. 'deal.won'.
                    */
-                  emits: string;
+                  emits?: string;
+                  /**
+                   * Entity fields the action may write: value carries { entity_id, set }.
+                   */
+                  updates?: {
+                    /**
+                     * Entity type the action writes. The view must attach to it (collection or record).
+                     */
+                    entityType: string;
+                    /**
+                     * Metadata fields the action may set. Schema-stamped fields (x-lobu-stamps) are server-owned and refused.
+                     */
+                    fields: Array<string>;
+                  };
                 };
           };
           /**
@@ -7999,7 +8025,20 @@ export type ManageViewsResponses = {
                   /**
                    * Event kind appended when the action fires, e.g. 'deal.won'.
                    */
-                  emits: string;
+                  emits?: string;
+                  /**
+                   * Entity fields the action may write: value carries { entity_id, set }.
+                   */
+                  updates?: {
+                    /**
+                     * Entity type the action writes. The view must attach to it (collection or record).
+                     */
+                    entityType: string;
+                    /**
+                     * Metadata fields the action may set. Schema-stamped fields (x-lobu-stamps) are server-owned and refused.
+                     */
+                    fields: Array<string>;
+                  };
                 };
           };
           /**

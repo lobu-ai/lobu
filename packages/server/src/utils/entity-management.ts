@@ -71,6 +71,7 @@ import { validateAndScopeQuery } from "./execute-data-sources";
 import logger from "./logger";
 import { isUniqueViolation } from "./pg-errors";
 import { requireWriteAccess } from "./organization-access";
+import { readEntityStamps } from "./entity-stamps";
 import { RESERVED_ENTITY_TYPE_SLUGS } from "./reserved";
 import {
 	invalidateOrgAcl,
@@ -281,6 +282,15 @@ interface EntityUpdateOptions {
 		tx: DbClient,
 	) => Promise<void>;
 	policyPrincipalKind?: MutationPrincipalKind;
+	/**
+	 * A declared view action invoked by the signed-in user. The caller
+	 * (`invokeViewAction`) authorized this write from the CURRENT view row, which
+	 * only an owner/admin can set, so that declaration stands in for the
+	 * org-role check. The write is never a manual edit: it runs the mutation gate
+	 * and claims no field ownership, so a human-owned field or an escalating rule
+	 * defers it to an approval.
+	 */
+	viewAction?: { key: string };
 	/** Attribution for a deferred approval of blocked fields. Defaults to 'agent'. */
 	attribution?: MutationAttribution;
 	/** Causal parent for a deferred approval run. */
@@ -1125,8 +1135,9 @@ export async function updateEntity(
 	const expected = data.expected ?? null;
 	if (expected) assertExpectedNamesMetadata(expected);
 
-	// Validate write access (uses PG for auth tables)
-	await requireWriteAccess(sql, entityId, ctx);
+	// Validate write access (uses PG for auth tables). A view action's grant is
+	// its declaration, which the caller already checked against this entity.
+	if (!opts?.viewAction) await requireWriteAccess(sql, entityId, ctx);
 
 	// Validate parent hierarchy (replaces prevent_entity_cycles trigger)
 	if (data.parent_id !== undefined && data.parent_id !== null) {
@@ -1154,6 +1165,7 @@ export async function updateEntity(
 	// edit (`manual_edit`), and verified Automation attribution prevents pinning
 	// when the calling context happens to carry a signed-in user.
 	const isHumanEdit =
+		!opts?.viewAction &&
 		(isManualUserEdit(ctx) || isAssertedManualEdit(ctx, data)) &&
 		opts?.policyPrincipalKind !== "automation";
 	// An unhonoured assertion must fail, never quietly become a non-human write
@@ -1201,12 +1213,19 @@ export async function updateEntity(
 		// claim a coarser lock (e.g. the organization row) ahead of the entity
 		// row, which the `current` SELECT below takes.
 		const [type] = await tx`
-			SELECT et.slug FROM entities e
+			SELECT et.slug, et.metadata_schema -> 'x-lobu-stamps' AS stamps
+			FROM entities e
 			JOIN entity_types et ON et.id = e.entity_type_id
 			WHERE e.id = ${entityId}
 			  AND e.organization_id = ${ctx.organizationId}
 			  AND e.deleted_at IS NULL
 		`;
+		// Stamped fields are server-owned. Drop a caller's value here so it never
+		// reaches the gate, an approval card or `applied`; the row-validation seam
+		// discards it again for writers that do not come through this function.
+		for (const field of Object.keys(readEntityStamps(type?.stamps))) {
+			delete metadataUpdates[field];
+		}
 		const hooks = type ? getEntityHooks(type.slug as string) : undefined;
 		const hookContext: EntityTransactionHookContext = {
 			organizationId: ctx.organizationId,
@@ -1688,6 +1707,9 @@ export async function updateEntity(
 					blockedPaths.map((p) => [p, blocked[p].current]),
 				),
 				attribution: opts?.attribution ?? "agent",
+				...(opts?.viewAction
+					? { reason: `View "${opts.viewAction.key}" proposes updating ${blockedPaths.join(", ")} on this entity.` }
+					: {}),
 				// The approval card groups by the acting automation; recover its numeric
 				// id from the resolved principalId (`automation:<id>`), null otherwise.
 				automationId: automationIdFromPrincipalId(opts?.principalId ?? null),
