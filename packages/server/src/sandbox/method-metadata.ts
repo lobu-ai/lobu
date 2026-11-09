@@ -603,6 +603,8 @@ export default async (_ctx, client) => {
 			"Fetch an Automation by id with a page of its completed windows, newest first (`page`, `page_size`). The previous window is `windows[i + 1]`. Window outputs share a 1 MiB budget per response: a window whose output does not fit returns `extracted_data: null` with `extracted_data_omitted: { bytes }`; read its full output with `operations.getRun(run_id)`.",
 		access: "read",
 		throws: ["AutomationNotFound"],
+		signature:
+			"automations.get(input: { automation_id: string; page?: number; page_size?: number; content_since?: string; content_until?: string; template_version_id?: number }): Promise<{ automation; windows; pagination: { page; page_size; total }; ... }>",
 		example:
 			"const automation = await client.automations.get({ automation_id: '42' });",
 	},
