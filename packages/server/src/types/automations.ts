@@ -45,13 +45,21 @@ export const AutomationWindowReactionSchema = Type.Object({
   reaction_type: Type.String(),
   tool_name: Type.String(),
   tool_args: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
-  tool_result: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+  tool_result: Type.Optional(
+    Type.Record(Type.String(), Type.Unknown(), {
+      description:
+        "The tool call's outcome. For `script_execution` rows: `{ success, error?, result?, result_omitted? }`, where `result` is the reaction script's return value (absent when it returned nothing). A value over 16 KiB of JSON, or one that does not fit this response's reaction-result budget, has no `result` and carries `result_omitted: { bytes }`; a value JSON cannot represent carries `result_omitted: { reason: 'unserializable' }`.",
+    })
+  ),
   created_at: Type.String(),
 });
 export type AutomationWindowReaction = Static<typeof AutomationWindowReactionSchema>;
 
 /** Well under the 4 MiB sandbox bridge cap, leaving room for the Automation config, reactions and run metadata. */
 export const WINDOW_DATA_BUDGET_BYTES = 1_048_576;
+
+/** Shared by every reaction `tool_result.result` in one get_automation response, newest first. */
+export const REACTION_RESULT_BUDGET_BYTES = 1_048_576;
 
 /**
  * Automation window data as returned by get_automation

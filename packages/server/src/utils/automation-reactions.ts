@@ -7,6 +7,7 @@ import { resolveActingPrincipal, listEntityApprovalPolicies } from '../authz/ent
 import { evaluateConnectorPolicy } from '../authz/connector-policy';
 import { listOperations } from '../operations/connector-operations';
 import logger from './logger';
+import { stripNulDeep } from './strip-nul';
 
 /**
  * Fetch available connection operations for a set of entity IDs.
@@ -159,6 +160,36 @@ export async function getPastReactionsSummary(
     );
   }
   return lines.join('\n');
+}
+
+/** Serialized-JSON cap for a reaction script's return value on its log row. */
+export const REACTION_RESULT_MAX_BYTES = 16_384;
+
+/**
+ * The `tool_result` fields that carry a reaction script's return value:
+ * `result` when it fits {@link REACTION_RESULT_MAX_BYTES}, else
+ * `result_omitted: { bytes }` (the same shape `get_automation` uses for
+ * `extracted_data_omitted`). `sandboxBytes` is the size of a value the sandbox
+ * already withheld as over its own output limit. A `null`/`undefined` return
+ * records nothing; a value JSON cannot represent records why it is missing.
+ */
+export function reactionScriptResultFields(
+  value: unknown,
+  sandboxBytes?: number
+): { result?: unknown; result_omitted?: { bytes: number } | { reason: 'unserializable' } } {
+  if (sandboxBytes !== undefined) return { result_omitted: { bytes: sandboxBytes } };
+  if (value == null) return {};
+  let json: string | undefined;
+  try {
+    json = JSON.stringify(value);
+  } catch {
+    json = undefined;
+  }
+  if (json === undefined) return { result_omitted: { reason: 'unserializable' } };
+  const bytes = Buffer.byteLength(json, 'utf8');
+  if (bytes > REACTION_RESULT_MAX_BYTES) return { result_omitted: { bytes } };
+  // jsonb rejects NUL, and a failed insert would drop the whole log row.
+  return { result: stripNulDeep(JSON.parse(json)) };
 }
 
 /**

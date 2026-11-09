@@ -28,7 +28,7 @@
 import type { Env, ReactionContext } from '@lobu/connector-sdk';
 import { getDb, pgBigintArray } from '../db/client';
 import { AUTOMATION_REACTION_TASK } from '../scheduled/task-definitions';
-import { trackAutomationReaction } from '../utils/automation-reactions';
+import { reactionScriptResultFields, trackAutomationReaction } from '../utils/automation-reactions';
 import { getErrorMessage } from '@lobu/core';
 import logger from '../utils/logger';
 import { executeReaction } from './reaction-executor';
@@ -209,7 +209,13 @@ export async function runAutomationReactionTask(
     reactionType: 'script_execution',
     toolName: 'reaction_executor',
     toolArgs: { attempt },
-    toolResult: { success: execResult.success, error: execResult.error },
+    toolResult: {
+      success: execResult.success,
+      error: execResult.error,
+      ...(execResult.success
+        ? reactionScriptResultFields(execResult.returnValue, execResult.returnBytes)
+        : {}),
+    },
   });
 
   if (execResult.success) {

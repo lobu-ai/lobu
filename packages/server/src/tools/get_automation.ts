@@ -24,6 +24,7 @@ import {
   PendingAnalysisSchema,
   AutomationMetadataSchema,
   AutomationWindowSchema,
+  REACTION_RESULT_BUDGET_BYTES,
   WINDOW_DATA_BUDGET_BYTES,
 } from '../types/automations';
 import {
@@ -480,15 +481,29 @@ async function getAutomationImpl(
       tool_result: Record<string, unknown> | null;
       created_at: string;
     }>;
+    // Script return values (each already capped at write time) share one
+    // budget per response, filled newest first, so a large page of reactions
+    // stays under the sandbox bridge cap alongside the window outputs.
+    let remainingResultBytes = REACTION_RESULT_BUDGET_BYTES;
     for (const r of reactionRows) {
       const wid = ensureNumber(r.source_run_id);
       const list = reactionsMap.get(wid) ?? [];
+      let toolResult = r.tool_result ?? undefined;
+      if (toolResult && 'result' in toolResult) {
+        const { result, ...rest } = toolResult;
+        const bytes = Buffer.byteLength(JSON.stringify(result) ?? '', 'utf8');
+        if (bytes > remainingResultBytes) {
+          toolResult = { ...rest, result_omitted: { bytes } };
+        } else {
+          remainingResultBytes -= bytes;
+        }
+      }
       list.push({
         id: ensureNumber(r.id),
         reaction_type: r.reaction_type,
         tool_name: r.tool_name,
         tool_args: r.tool_args ?? undefined,
-        tool_result: r.tool_result ?? undefined,
+        tool_result: toolResult,
         created_at: r.created_at,
       });
       reactionsMap.set(wid, list);

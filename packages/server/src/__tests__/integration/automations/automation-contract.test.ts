@@ -743,13 +743,43 @@ describe("automation contract", () => {
 		// Content-less windows (device runs fetch their own context; nothing is
 		// linked server-side) still fire the reaction script — the signal is the
 		// extracted_data itself. The reaction log is surfaced on the window via
-		// get_automation so the UI can show what the script did.
-		it("fires the reaction script for a content-less window and surfaces the log", async () => {
+		// get_automation so the UI can show what the script did, including the
+		// script's return value, bounded on write.
+		const oversized = { blob: "x".repeat(20_000) };
+		const sandboxWithheld = { blob: "x".repeat(1_100_000) };
+		it.each([
+			{
+				label: "an object return",
+				body: "return { group_count: 2, candidate_count: 5, approval_count: 0, linked_count: 0 };",
+				toolResult: {
+					success: true,
+					result: { group_count: 2, candidate_count: 5, approval_count: 0, linked_count: 0 },
+				},
+			},
+			{
+				label: "an oversized return",
+				body: `return { blob: "x".repeat(${oversized.blob.length}) };`,
+				toolResult: {
+					success: true,
+					result_omitted: { bytes: Buffer.byteLength(JSON.stringify(oversized), "utf8") },
+				},
+			},
+			{
+				// Over the sandbox's own 1 MiB output limit: it never reaches the host.
+				label: "a return the sandbox withholds",
+				body: `return { blob: "x".repeat(${sandboxWithheld.blob.length}) };`,
+				toolResult: {
+					success: true,
+					result_omitted: { bytes: Buffer.byteLength(JSON.stringify(sandboxWithheld), "utf8") },
+				},
+			},
+			{ label: "no return", body: "return;", toolResult: { success: true } },
+		])("fires the reaction script for a content-less window and logs $label", async ({ body, toolResult }) => {
 			const { sql, dbClient, workspace, api, automationId, agent } =
 				await createAutomatedAutomation();
 			await api.automations.setReactionScript({
 				automation_id: String(automationId),
-				reaction_script: "export default async function reaction() { return; }",
+				reaction_script: `export default async function reaction() { ${body} }`,
 			});
 			const { windowStart, windowEnd } = await computePendingWindow(dbClient, automationId);
 			const queued = await createAutomationRun({
@@ -800,7 +830,7 @@ describe("automation contract", () => {
 			// than an inline call, so drive it the way the scheduler would before
 			// asserting on its log. Crash safety itself is pinned in
 			// reaction-crash-safety.test.ts.
-			await runAutomationReactionTask(
+			const outcome = await runAutomationReactionTask(
 				{
 					organizationId: workspace.org.id,
 					automationId,
@@ -809,6 +839,7 @@ describe("automation contract", () => {
 				{} as Env,
 				Number(completion.reaction_task_run_id)
 			);
+			expect(outcome.status).toBe("success");
 
 			const reactionRows = await sql`
         SELECT reaction_type, tool_name FROM automation_reactions
@@ -823,7 +854,7 @@ describe("automation contract", () => {
 			})) as {
 				windows: Array<{
 					run_id: number;
-					reactions?: Array<{ tool_name: string }>;
+					reactions?: Array<{ tool_name: string; tool_result?: Record<string, unknown> }>;
 				}>;
 			};
 			const window = detail.windows.find(
@@ -832,6 +863,7 @@ describe("automation contract", () => {
 			expect(window).toBeDefined();
 			expect(window?.reactions?.length ?? 0).toBeGreaterThan(0);
 			expect(window?.reactions?.[0].tool_name).toBe("reaction_executor");
+			expect(window?.reactions?.[0].tool_result).toEqual(toolResult);
 		});
 
 		// Fail closed: the agent exiting cleanly WITHOUT calling complete_window

@@ -6756,6 +6756,9 @@ export type GetAutomationResponses = {
         tool_args?: {
           [key: string]: unknown;
         };
+        /**
+         * The tool call's outcome. For `script_execution` rows: `{ success, error?, result?, result_omitted? }`, where `result` is the reaction script's return value (absent when it returned nothing). A value over 16 KiB of JSON, or one that does not fit this response's reaction-result budget, has no `result` and carries `result_omitted: { bytes }`; a value JSON cannot represent carries `result_omitted: { reason: 'unserializable' }`.
+         */
         tool_result?: {
           [key: string]: unknown;
         };
