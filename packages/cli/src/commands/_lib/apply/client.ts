@@ -1,3 +1,4 @@
+import type { NavigationConfig } from "@lobu/core/contracts/tools/navigation";
 import type { EntityMetrics } from "@lobu/connector-sdk";
 import {
   type AgentMetadata,
@@ -799,6 +800,41 @@ export class ApplyClient {
       written: body.written ?? false,
       content_hash: body.view?.content_hash ?? "",
     };
+  }
+
+  /**
+   * The stored navigation document and its revision. Needs editor access: the
+   * raw document is only returned to a caller who could also write it.
+   */
+  async getNavigation(): Promise<{
+    revision: number;
+    config: NavigationConfig | null;
+  }> {
+    const { body } = await this.request<{
+      revision?: number;
+      config?: NavigationConfig | null;
+    }>("POST", `/api/${this.orgSlug}/manage_views`, {
+      action: "get_navigation",
+    });
+    if (body.config === undefined) {
+      throw new Error(
+        "This login cannot read the workspace navigation document; an owner or admin with admin access manages navigation."
+      );
+    }
+    return { revision: body.revision ?? 0, config: body.config };
+  }
+
+  /** Replace the navigation document; 409 when `expectedRevision` is stale. */
+  async setNavigation(
+    expectedRevision: number,
+    config: NavigationConfig | null
+  ): Promise<{ revision: number }> {
+    const { body } = await this.request<{ revision?: number }>(
+      "POST",
+      `/api/${this.orgSlug}/manage_views`,
+      { action: "set_navigation", expected_revision: expectedRevision, config }
+    );
+    return { revision: body.revision ?? expectedRevision + 1 };
   }
 
   /** Delete an applied view by key (prune-gated removal). */

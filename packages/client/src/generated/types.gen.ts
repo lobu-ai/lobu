@@ -7543,6 +7543,112 @@ export type ManageViewsData = {
          * View key, e.g. 'pipeline'.
          */
         key: string;
+      }
+    | {
+        /**
+         * Read the workspace navigation: { revision, config, sections }. config is the stored document (null = automatic defaults), returned only to owner/admin callers with admin access; sections is what the sidebar renders for the caller.
+         */
+        action: "get_navigation";
+      }
+    | {
+        /**
+         * Replace the workspace navigation document. Fails with 409 when expected_revision is stale.
+         */
+        action: "set_navigation";
+        /**
+         * [set_navigation] The revision get_navigation returned; the write applies only if it is still current.
+         */
+        expected_revision: number;
+        /**
+         * [set_navigation] The whole navigation document, or null to return to the automatic defaults.
+         */
+        config: {
+          schemaVersion: 1;
+          sections: Array<{
+            /**
+             * Stable id, unique across the whole document (sections and items). It names the menu entry, not its destination: two entries may open the same page.
+             */
+            id: string;
+            label?: string;
+            items: Array<{
+              /**
+               * Stable id, unique across the whole document (sections and items). It names the menu entry, not its destination: two entries may open the same page.
+               */
+              id: string;
+              label?: string;
+              /**
+               * Icon name, e.g. 'layout-dashboard'. Unknown names render the default icon.
+               */
+              icon?: string;
+              /**
+               * { kind: 'view', key, scope?, params? } | { kind: 'collection', entityType } | { kind: 'record', entityId } | { kind: 'link', href }
+               */
+              target?:
+                | {
+                    kind: "view";
+                    /**
+                     * View key, e.g. 'pipeline'.
+                     */
+                    key: string;
+                    scope?: {
+                      collection?: {
+                        search?: string;
+                        filters?: Array<
+                          | {
+                              field: string;
+                              op: "eq" | "neq";
+                              value: string | number | boolean | null;
+                            }
+                          | {
+                              field: string;
+                              op: "lt" | "lte" | "gt" | "gte";
+                              value: string | number;
+                            }
+                        >;
+                        segment?: string;
+                      };
+                      /**
+                       * Entity-type slug the view opens for.
+                       */
+                      type?: string;
+                      /**
+                       * Entity id the view opens for.
+                       */
+                      entity?: number;
+                      /**
+                       * Event id the view opens for. It names the event's supersede lineage, so the view shows the current version, and it opens at /events/<id>/-/views/<key>.
+                       */
+                      event?: number;
+                    };
+                    /**
+                     * Declared view params; validated against the view when resolved.
+                     */
+                    params?: {
+                      [key: string]: unknown | string | number | boolean;
+                    };
+                  }
+                | {
+                    kind: "collection";
+                    entityType: string;
+                  }
+                | {
+                    kind: "record";
+                    entityId: number;
+                  }
+                | {
+                    kind: "link";
+                    /**
+                     * Workspace-root-relative path (e.g. 'deal?stage=won', resolved under /<workspace>/) or an absolute https:// URL.
+                     */
+                    href: string;
+                  };
+              /**
+               * Nested items, each the same shape as this one.
+               */
+              children?: Array<unknown>;
+            }>;
+          }>;
+        } | null;
       };
   path: {
     /**
@@ -7892,6 +7998,203 @@ export type ManageViewsResponses = {
         action: "remove";
         key: string;
         removed: boolean;
+      }
+    | {
+        action: "get_navigation";
+        revision: number;
+        config?: {
+          schemaVersion: 1;
+          sections: Array<{
+            /**
+             * Stable id, unique across the whole document (sections and items). It names the menu entry, not its destination: two entries may open the same page.
+             */
+            id: string;
+            label?: string;
+            items: Array<{
+              /**
+               * Stable id, unique across the whole document (sections and items). It names the menu entry, not its destination: two entries may open the same page.
+               */
+              id: string;
+              label?: string;
+              /**
+               * Icon name, e.g. 'layout-dashboard'. Unknown names render the default icon.
+               */
+              icon?: string;
+              /**
+               * { kind: 'view', key, scope?, params? } | { kind: 'collection', entityType } | { kind: 'record', entityId } | { kind: 'link', href }
+               */
+              target?:
+                | {
+                    kind: "view";
+                    /**
+                     * View key, e.g. 'pipeline'.
+                     */
+                    key: string;
+                    scope?: {
+                      collection?: {
+                        search?: string;
+                        filters?: Array<
+                          | {
+                              field: string;
+                              op: "eq" | "neq";
+                              value: string | number | boolean | null;
+                            }
+                          | {
+                              field: string;
+                              op: "lt" | "lte" | "gt" | "gte";
+                              value: string | number;
+                            }
+                        >;
+                        segment?: string;
+                      };
+                      /**
+                       * Entity-type slug the view opens for.
+                       */
+                      type?: string;
+                      /**
+                       * Entity id the view opens for.
+                       */
+                      entity?: number;
+                      /**
+                       * Event id the view opens for. It names the event's supersede lineage, so the view shows the current version, and it opens at /events/<id>/-/views/<key>.
+                       */
+                      event?: number;
+                    };
+                    /**
+                     * Declared view params; validated against the view when resolved.
+                     */
+                    params?: {
+                      [key: string]: unknown | string | number | boolean;
+                    };
+                  }
+                | {
+                    kind: "collection";
+                    entityType: string;
+                  }
+                | {
+                    kind: "record";
+                    entityId: number;
+                  }
+                | {
+                    kind: "link";
+                    /**
+                     * Workspace-root-relative path (e.g. 'deal?stage=won', resolved under /<workspace>/) or an absolute https:// URL.
+                     */
+                    href: string;
+                  };
+              /**
+               * Nested items, each the same shape as this one.
+               */
+              children?: Array<unknown>;
+            }>;
+          }>;
+        } | null;
+        sections: Array<{
+          id: string;
+          label?: string;
+          items: Array<{
+            id: string;
+            label: string;
+            icon?: string;
+            href?: string;
+            external?: boolean;
+            /**
+             * Nested items, each the same shape as this one.
+             */
+            children: Array<unknown>;
+          }>;
+        }>;
+      }
+    | {
+        action: "set_navigation";
+        revision: number;
+        config: {
+          schemaVersion: 1;
+          sections: Array<{
+            /**
+             * Stable id, unique across the whole document (sections and items). It names the menu entry, not its destination: two entries may open the same page.
+             */
+            id: string;
+            label?: string;
+            items: Array<{
+              /**
+               * Stable id, unique across the whole document (sections and items). It names the menu entry, not its destination: two entries may open the same page.
+               */
+              id: string;
+              label?: string;
+              /**
+               * Icon name, e.g. 'layout-dashboard'. Unknown names render the default icon.
+               */
+              icon?: string;
+              /**
+               * { kind: 'view', key, scope?, params? } | { kind: 'collection', entityType } | { kind: 'record', entityId } | { kind: 'link', href }
+               */
+              target?:
+                | {
+                    kind: "view";
+                    /**
+                     * View key, e.g. 'pipeline'.
+                     */
+                    key: string;
+                    scope?: {
+                      collection?: {
+                        search?: string;
+                        filters?: Array<
+                          | {
+                              field: string;
+                              op: "eq" | "neq";
+                              value: string | number | boolean | null;
+                            }
+                          | {
+                              field: string;
+                              op: "lt" | "lte" | "gt" | "gte";
+                              value: string | number;
+                            }
+                        >;
+                        segment?: string;
+                      };
+                      /**
+                       * Entity-type slug the view opens for.
+                       */
+                      type?: string;
+                      /**
+                       * Entity id the view opens for.
+                       */
+                      entity?: number;
+                      /**
+                       * Event id the view opens for. It names the event's supersede lineage, so the view shows the current version, and it opens at /events/<id>/-/views/<key>.
+                       */
+                      event?: number;
+                    };
+                    /**
+                     * Declared view params; validated against the view when resolved.
+                     */
+                    params?: {
+                      [key: string]: unknown | string | number | boolean;
+                    };
+                  }
+                | {
+                    kind: "collection";
+                    entityType: string;
+                  }
+                | {
+                    kind: "record";
+                    entityId: number;
+                  }
+                | {
+                    kind: "link";
+                    /**
+                     * Workspace-root-relative path (e.g. 'deal?stage=won', resolved under /<workspace>/) or an absolute https:// URL.
+                     */
+                    href: string;
+                  };
+              /**
+               * Nested items, each the same shape as this one.
+               */
+              children?: Array<unknown>;
+            }>;
+          }>;
+        } | null;
       };
 };
 

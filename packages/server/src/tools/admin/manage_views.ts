@@ -18,8 +18,10 @@ import {
   validateRetainedSource,
 } from '@lobu/core/contracts/tools/source-files';
 import {
+  GetNavigationAction,
   GetViewAction,
   ListViewsAction,
+  SetNavigationAction,
   ManageViewsResultSchema,
   ManageViewsSchema,
   RemoveViewAction,
@@ -54,6 +56,14 @@ import {
   setView,
   type SetViewInput,
 } from '../../views/views';
+import { type NavigationConfig, validateNavigationConfig } from '@lobu/core/contracts/tools/navigation';
+import {
+  readNavigation,
+  resolveNavigation,
+  unresolvedTargets,
+  writeNavigation,
+} from '../../views/navigation';
+import { resolveMaxAccessLevel } from '../../auth/tool-access';
 import type { ToolContext } from '../registry';
 import type { Env } from '../../index';
 import { action, defineActionTool } from './action-tool';
@@ -67,6 +77,8 @@ const manageViewsTool = defineActionTool('manage_views', {
   get: action(GetViewAction, handleGet),
   list: action(ListViewsAction, handleList),
   remove: action(RemoveViewAction, handleRemove),
+  get_navigation: action(GetNavigationAction, handleGetNavigation),
+  set_navigation: action(SetNavigationAction, handleSetNavigation),
 });
 
 export const manageViews = manageViewsTool.run;
@@ -374,4 +386,58 @@ async function handleRemove(
     emit(ctx.organizationId, { keys: [`view:${args.key}`] });
   }
   return { action: 'remove', key: args.key, removed };
+}
+
+/**
+ * The stored document and what the sidebar shows this caller. The raw
+ * document goes only to a caller who could also write it (owner/admin with
+ * admin access, the `set_navigation` tier): it names every destination,
+ * including ones a member, a scoped agent or a public visitor cannot open.
+ * Everyone else gets the sections resolved for them.
+ */
+async function handleGetNavigation(
+  _args: Static<typeof GetNavigationAction>,
+  ctx: ToolContext,
+  env: Env
+): Promise<ManageViewsResult> {
+  const state = await readNavigation(ctx.organizationId);
+  const sections = await resolveNavigation(state.config, ctx, env);
+  return {
+    action: 'get_navigation',
+    revision: state.revision,
+    ...(resolveMaxAccessLevel(ctx.memberRole, ctx.scopes) === 'admin' ? { config: state.config } : {}),
+    sections,
+  };
+}
+
+async function handleSetNavigation(
+  args: Static<typeof SetNavigationAction>,
+  ctx: ToolContext,
+  env: Env
+): Promise<ManageViewsResult> {
+  requireWriter(ctx);
+  // Nested children are typed opaque in the action schema; the iterative
+  // validateNavigationConfig walk is what establishes the NavigationConfig shape.
+  const config = args.config as NavigationConfig | null;
+  if (config !== null) {
+    const errors = validateNavigationConfig(config);
+    if (errors.length > 0) throw new ToolUserError(errors.join('; '), 400);
+    const missing = await unresolvedTargets(config, ctx, env);
+    if (missing.length > 0) {
+      throw new ToolUserError(
+        `Navigation targets do not resolve to a page in this workspace: ${missing.join(', ')}`,
+        400
+      );
+    }
+  }
+  const written = await writeNavigation(ctx.organizationId, args.expected_revision, config);
+  if (!written) {
+    const current = await readNavigation(ctx.organizationId);
+    throw new ToolUserError(
+      `Navigation changed since revision ${args.expected_revision} (now ${current.revision}); read it again and reapply`,
+      409
+    );
+  }
+  emit(ctx.organizationId, { keys: ['navigation'] });
+  return { action: 'set_navigation', revision: written.revision, config: written.config };
 }

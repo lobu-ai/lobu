@@ -10,6 +10,8 @@ export type {
   CollectionSelection,
 } from "@lobu/core/contracts/tools/collection-selection";
 export { ViewBridge } from "./bridge.js";
+export { EmbeddedView } from "./embed.js";
+export type { EmbeddedViewProps } from "./embed.js";
 export type {
   BridgeOptions,
   HostContext,

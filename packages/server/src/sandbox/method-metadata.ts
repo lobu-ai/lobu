@@ -1204,6 +1204,23 @@ export default async (_ctx, client) => {
 			"await client.views.remove({ key: 'pipeline' });",
 	},
 
+	"views.getNavigation": {
+		summary:
+			"Read the workspace sidebar navigation: { revision, config, sections }. config is the stored document (null = automatic: every workspace view), returned only to owner/admin callers with admin access; sections is what the sidebar renders for the caller, with unresolvable or unreadable targets dropped. Pass revision to setNavigation.",
+		access: "read",
+		signature: "views.getNavigation(): Promise<unknown>",
+		example: "const nav = await client.views.getNavigation({});",
+	},
+	"views.setNavigation": {
+		summary:
+			"Replace the workspace sidebar navigation document atomically. Params: { expected_revision, config }. config is { schemaVersion: 1, sections: [{ id, label?, items: [{ id, label?, icon?, target?, children? }] }] } or null for the automatic default; target is { kind: 'view', key, scope?, params? } | { kind: 'collection', entityType } | { kind: 'record', entityId } | { kind: 'link', href } (workspace-relative path or https URL). An item without target is a labeled group; with both, the label opens the target and children expand separately. Ids are unique across the document; nesting depth <= 32, <= 100 sections, <= 5000 items in total, <= 1 MiB serialized. Every target must resolve when saved. 409 when expected_revision is stale: read again and reapply. Sections only present; they never grant or deny access, and the product shell (Home, Memory, Search, Settings) is always shown.",
+		access: "admin",
+		signature:
+			"views.setNavigation(input: { expected_revision: number; config: NavigationConfig | null }): Promise<unknown>",
+		example:
+			"const { revision } = await client.views.getNavigation({});\nawait client.views.setNavigation({ expected_revision: revision, config: { schemaVersion: 1, sections: [{ id: 'work', label: 'Work', items: [{ id: 'pipeline', target: { kind: 'view', key: 'pipeline' }, children: [{ id: 'deals', target: { kind: 'collection', entityType: 'deal' } }] }] }] } });",
+	},
+
 	// metrics — governed measures (prefer over client.query / query_sql)
 	"metrics.list": {
 		summary:

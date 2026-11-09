@@ -68,6 +68,13 @@ export interface InvokeViewActionParams {
 	event?: { id: number; env: Env; ctx: ToolContext };
 	organizationId: string;
 	viewKey: string;
+	/**
+	 * The content hash of the bundle the caller mounted. When given, the action
+	 * runs only against that same bundle: a view re-applied since it was opened
+	 * answers 409, so a click never runs under a definition the user did not
+	 * see. Only the latest hash is stored, so there is nothing older to run.
+	 */
+	expectedContentHash?: string;
 	action: string;
 	value: Record<string, unknown> | null;
 	interactionId: string;
@@ -191,6 +198,15 @@ async function appendViewAction(
 	const view = await getView(params.organizationId, params.viewKey);
 	if (!view) {
 		throw new ToolUserError(`Unknown view: ${params.viewKey}`, 404);
+	}
+	if (
+		params.expectedContentHash !== undefined &&
+		params.expectedContentHash !== view.content_hash
+	) {
+		throw new ToolUserError(
+			"This view changed since it was opened. Reload it before submitting.",
+			409,
+		);
 	}
 	const declared = view.actions?.[params.action];
 	if (!declared || typeof declared.emits !== "string" || !declared.emits) {

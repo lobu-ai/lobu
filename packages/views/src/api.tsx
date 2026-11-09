@@ -76,6 +76,7 @@ import {
   ViewBridge,
   ViewBridgeError,
 } from "./bridge.js";
+import { EmbedProvider, EmbedRegistry } from "./embed.js";
 
 export type ParamValue = string | number | boolean;
 export type Params = Record<string, ParamValue>;
@@ -897,6 +898,10 @@ export function Provider({
   const bridgeRef = useRef<ViewBridge | null>(bridge ?? null);
   if (bridge) bridgeRef.current = bridge;
   if (bridgeRef.current === null) bridgeRef.current = new ViewBridge();
+  const embedsRef = useRef<EmbedRegistry | null>(null);
+  if (embedsRef.current === null)
+    embedsRef.current = new EmbedRegistry(() => bridgeRef.current);
+  const embeds = embedsRef.current;
 
   useEffect(() => {
     const b = bridgeRef.current;
@@ -929,10 +934,12 @@ export function Provider({
     };
     const offCtx = b.onHostContext(adoptContext);
     const offData = b.onDataChanged(() => setDataVersion((v) => v + 1));
+    const offEmbeds = embeds.attach(b);
     b.connect()
       .then((ctx) => {
         adoptContext(ctx);
         setConnected(true);
+        embeds.setConnected(true);
         setReady(b.hasToolInput());
         document.documentElement.setAttribute("data-ready", "true");
       })
@@ -942,8 +949,10 @@ export function Provider({
       offResult();
       offCtx();
       offData();
+      offEmbeds();
+      embeds.setConnected(false);
     };
-  }, [def]);
+  }, [def, embeds]);
 
   // Report the document height so the host can fit the frame. This lives in
   // the provider, not `mountView`: the server bootstrap renders the provider
@@ -1079,11 +1088,13 @@ export function Provider({
   // keep the iframe mounted while delivering the opening result.
   return (
     <Ctx.Provider key={scope.event ?? "unbound"} value={value}>
-      <RenderBoundary
-        resetKey={`${ready}:${JSON.stringify(scope)}:${JSON.stringify(params)}:${dataVersion}`}
-      >
-        {children}
-      </RenderBoundary>
+      <EmbedProvider registry={embeds}>
+        <RenderBoundary
+          resetKey={`${ready}:${JSON.stringify(scope)}:${JSON.stringify(params)}:${dataVersion}`}
+        >
+          {children}
+        </RenderBoundary>
+      </EmbedProvider>
     </Ctx.Provider>
   );
 }

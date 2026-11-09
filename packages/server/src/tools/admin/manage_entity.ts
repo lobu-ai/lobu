@@ -217,7 +217,7 @@ function recordToolDenial(params: {
  * Entity read gate for agents/automations. Humans skip (role ACL is separate).
  * Default is auto (unrestricted within org); a policy can deny by type.
  */
-async function assertEntityReadAllowed(
+export async function assertEntityReadAllowed(
 	args: Attributed | undefined,
 	ctx: ToolContext,
 	entityTypeSlug: string | null | undefined,

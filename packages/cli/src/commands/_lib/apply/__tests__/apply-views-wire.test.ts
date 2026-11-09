@@ -45,7 +45,7 @@ export const view = defineView({
 export default function Pipeline() { return null; }
 `;
 
-function mkProject(): string {
+function mkProject(navigation?: string): string {
   const dir = mkdtempSync(join(import.meta.dir, "views-wire-fixture-"));
   tempDirs.push(dir);
   writeFileSync(
@@ -53,7 +53,7 @@ function mkProject(): string {
     `import { defineAgent, defineConfig, viewFromFile } from "@lobu/cli/config";
 export default defineConfig({
   agents: [defineAgent({ id: "triage", name: "Triage", dir: "./agents/triage" })],
-  views: [viewFromFile("./views/deal/pipeline.tsx")],
+  views: [viewFromFile("./views/deal/pipeline.tsx")],${navigation ? `\n  navigation: ${navigation},` : ""}
 });
 `
   );
@@ -68,8 +68,15 @@ interface WireCall {
   body: Record<string, unknown>;
 }
 
+interface Store {
+  views: Array<Record<string, unknown>>;
+  navigation?: { revision: number; config: unknown };
+  /** Simulate another editor writing between apply's read and its write. */
+  concurrentEdit?: boolean;
+}
+
 /** Remote store the stubbed `manage_views` reads/writes against. */
-function makeFetch(store: { views: Array<Record<string, unknown>> }) {
+function makeFetch(store: Store) {
   const calls: WireCall[] = [];
   const json = (payload: unknown) =>
     new Response(JSON.stringify(payload), {
@@ -126,6 +133,28 @@ function makeFetch(store: { views: Array<Record<string, unknown>> }) {
         if (i >= 0) store.views[i] = row;
         else store.views.push(row);
         return json({ action: "set", view: row, written: true });
+      }
+      if (body.action === "get_navigation") {
+        const nav = store.navigation ?? { revision: 0, config: null };
+        const reply = json({ action: "get_navigation", ...nav, sections: [] });
+        if (store.concurrentEdit) {
+          store.navigation = { revision: nav.revision + 1, config: null };
+        }
+        return reply;
+      }
+      if (body.action === "set_navigation") {
+        const current = store.navigation ?? { revision: 0, config: null };
+        if (body.expected_revision !== current.revision) {
+          return new Response(JSON.stringify({ error: "Navigation changed" }), {
+            status: 409,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        store.navigation = {
+          revision: current.revision + 1,
+          config: body.config,
+        };
+        return json({ action: "set_navigation", ...store.navigation });
       }
       if (body.action === "remove") {
         store.views = store.views.filter((v) => v.key !== body.key);
@@ -197,5 +226,93 @@ describe("apply views over the wire", () => {
     expect(compiled as string).not.toContain("views-wire-fixture-");
     expect(typeof sets[0]?.body.source_code).toBe("string");
     expect(sets[0]?.body.source_code as string).toContain("defineView");
+  });
+});
+
+const NAVIGATION = `{
+    schemaVersion: 1,
+    sections: [{ id: "work", label: "Work", items: [
+      { id: "pipeline", target: { kind: "view", key: "pipeline", scope: { type: "deal" } },
+        children: [{ id: "won", label: "Won", target: { kind: "link", href: "deal?stage=won" } }] },
+    ] }],
+  }`;
+
+describe("apply navigation over the wire", () => {
+  beforeEach(() => {
+    spyOn(process.stdout, "write").mockImplementation(() => true);
+    spyOn(context, "resolveContext").mockResolvedValue({
+      name: "prod",
+      url: "https://app.lobu.ai/api/v1",
+      source: "config",
+    });
+    spyOn(credentials, "getToken").mockResolvedValue("tok");
+    spyOn(context, "getActiveOrg").mockResolvedValue("acme");
+    spyOn(context, "loadContextConfig").mockResolvedValue({
+      currentContext: "prod",
+      contexts: { prod: { url: "https://app.lobu.ai/api/v1" } },
+    });
+  });
+
+  const actions = (calls: WireCall[]) =>
+    calls
+      .filter((c) => c.url.includes("/manage_views"))
+      .map((c) => c.body.action);
+
+  test("writes the document after its views, at the revision apply read", async () => {
+    const store: Store = {
+      views: [],
+      navigation: { revision: 4, config: null },
+    };
+    const { fetchStub, calls } = makeFetch(store);
+    await runApply(mkProject(NAVIGATION), fetchStub);
+    const sequence = actions(calls);
+    expect(sequence.indexOf("set")).toBeLessThan(
+      sequence.indexOf("set_navigation")
+    );
+    const write = calls.find((c) => c.body.action === "set_navigation");
+    expect(write?.body.expected_revision).toBe(4);
+    expect(store.navigation?.revision).toBe(5);
+    expect(store.navigation?.config).toMatchObject({
+      schemaVersion: 1,
+      sections: [{ id: "work", items: [{ id: "pipeline" }] }],
+    });
+
+    // Re-applying the same document is a no-op: no second write.
+    const again = makeFetch(store);
+    await runApply(mkProject(NAVIGATION), again.fetchStub);
+    expect(actions(again.calls)).not.toContain("set_navigation");
+  });
+
+  test("leaves navigation alone when the config does not manage it", async () => {
+    const { fetchStub, calls } = makeFetch({ views: [] });
+    await runApply(mkProject(), fetchStub);
+    expect(actions(calls)).not.toContain("get_navigation");
+    expect(actions(calls)).not.toContain("set_navigation");
+  });
+
+  test("fails instead of overwriting a concurrent edit", async () => {
+    const store: Store = {
+      views: [],
+      navigation: { revision: 1, config: null },
+      concurrentEdit: true,
+    };
+    const { fetchStub } = makeFetch(store);
+    await expect(runApply(mkProject(NAVIGATION), fetchStub)).rejects.toThrow(
+      /navigation changed since this apply read it/i
+    );
+    expect(store.navigation).toEqual({ revision: 2, config: null });
+  });
+
+  test("rejects an invalid document before any write", async () => {
+    const { fetchStub, calls } = makeFetch({ views: [] });
+    const duplicate = `{ schemaVersion: 1, sections: [{ id: "a", items: [
+      { id: "a", label: "Bad", target: { kind: "link", href: "javascript:alert(1)" } },
+    ] }] }`;
+    await expect(runApply(mkProject(duplicate), fetchStub)).rejects.toThrow(
+      /duplicate id 'a'[\s\S]*target\.href/
+    );
+    expect(
+      actions(calls).filter((a) => a === "set" || a === "set_navigation")
+    ).toEqual([]);
   });
 });

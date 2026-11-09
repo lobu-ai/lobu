@@ -189,7 +189,7 @@ export const OWNER_ADMIN_ACTIONS: Record<string, Set<string>> = {
 		"delete",
 		"classify",
 	]),
-	manage_views: new Set(["set", "remove"]),
+	manage_views: new Set(["set", "remove", "set_navigation"]),
 };
 
 export const PUBLIC_READ_ACTIONS: Record<string, Set<string> | null> = {
@@ -232,7 +232,9 @@ export const PUBLIC_READ_ACTIONS: Record<string, Set<string> | null> = {
 	// view's compiled bundle through the tiles-and-bundle projection at
 	// `GET /api/:orgSlug/public/views/:key/shell`, never through its source.
 	// The mutating siblings stay owner-admin (OWNER_ADMIN_ACTIONS).
-	manage_views: new Set(["list"]),
+	// `get_navigation` too: the sidebar a visitor sees. Its handler returns
+	// only the sections resolved for that reader, never the raw document.
+	manage_views: new Set(["list", "get_navigation"]),
 	manage_agents: new Set(["list", "get"]),
 };
 
