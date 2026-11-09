@@ -35,7 +35,7 @@ const NavigationLabelSchema = Type.String({ minLength: 1, maxLength: 80 });
 const NavigationIconSchema = Type.String({
   pattern: "^[a-z0-9-]{1,40}$",
   description:
-    "Icon name, e.g. 'layout-dashboard'. Unknown names render the default icon.",
+    "A Lucide icon name in kebab-case (https://lucide.dev/icons), e.g. 'building-2'; former Lucide names resolve too. Unknown names render the default icon.",
 });
 const ScalarParamSchema = Type.Union([
   Type.String({ maxLength: 500 }),

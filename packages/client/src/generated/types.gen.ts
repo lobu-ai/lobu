@@ -7594,7 +7594,7 @@ export type ManageViewsData = {
               id: string;
               label?: string;
               /**
-               * Icon name, e.g. 'layout-dashboard'. Unknown names render the default icon.
+               * A Lucide icon name in kebab-case (https://lucide.dev/icons), e.g. 'building-2'; former Lucide names resolve too. Unknown names render the default icon.
                */
               icon?: string;
               /**
@@ -8034,7 +8034,7 @@ export type ManageViewsResponses = {
               id: string;
               label?: string;
               /**
-               * Icon name, e.g. 'layout-dashboard'. Unknown names render the default icon.
+               * A Lucide icon name in kebab-case (https://lucide.dev/icons), e.g. 'building-2'; former Lucide names resolve too. Unknown names render the default icon.
                */
               icon?: string;
               /**
@@ -8140,7 +8140,7 @@ export type ManageViewsResponses = {
               id: string;
               label?: string;
               /**
-               * Icon name, e.g. 'layout-dashboard'. Unknown names render the default icon.
+               * A Lucide icon name in kebab-case (https://lucide.dev/icons), e.g. 'building-2'; former Lucide names resolve too. Unknown names render the default icon.
                */
               icon?: string;
               /**
