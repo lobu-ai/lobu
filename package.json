@@ -7,7 +7,9 @@
     "packages/*"
   ],
   "overrides": {
-    "sharp": "^0.35.3"
+    "sharp": "^0.35.3",
+    "prosemirror-model": "^1.25.11",
+    "prosemirror-view": "^1.42.3"
   },
   "scripts": {
     "build": "cd packages/core && bun run build && cd ../plugin-api && bun run build && cd ../plugin-host && bun run build && cd ../plugin-toolkit && bun run build && cd ../plugin-memory && bun run build && cd ../plugin-conversations && bun run build && cd ../plugin-media && bun run build && cd ../plugin-mcp && bun run build && cd ../..",
