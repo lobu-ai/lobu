@@ -28,10 +28,6 @@ import {
   type RenderedAgentError,
   renderAgentError,
 } from "../../utils/url-builder.js";
-import {
-  advanceScheduleAfterTerminalFailure,
-  providerQuotaResetNotBefore,
-} from "../../automations/schedule-cursor.js";
 import type { AgentSettingsStore } from "../auth/settings/agent-settings-store.js";
 import type { InteractionService } from "../interactions.js";
 import {
@@ -173,60 +169,6 @@ export class ChatResponseBridge implements ResponseRenderer {
     return typeof fromConnection === "string" && fromConnection
       ? fromConnection
       : undefined;
-  }
-
-  /**
-   * Park the scheduled side of a reply-to-source Automation when its event turn
-   * hits a known provider quota boundary. These turns intentionally have no
-   * Automation run row, so the API run terminalizer cannot move their cursor.
-   *
-   * The gateway-restored Automation id is still scoped to the authenticated
-   * organization and agent that own it. Database errors propagate
-   * so the durable thread-response job retries instead of delivering an error
-   * while leaving the Automation immediately due.
-   */
-  async parkQuotaExhaustedAutomation(
-    payload: ThreadResponsePayload
-  ): Promise<void> {
-    const notBefore = providerQuotaResetNotBefore(
-      payload.error ?? "",
-      payload.errorCode
-    );
-    if (!notBefore) return;
-
-    const metadata = readPlatformMetadata(payload.platformMetadata);
-    const automationId = metadata.automationId;
-    if (
-      typeof automationId !== "number" ||
-      !Number.isSafeInteger(automationId) ||
-      automationId < 1
-    ) {
-      return;
-    }
-
-    const organizationId = payload.organizationId ?? metadata.organizationId;
-    const agentId = metadata.agentId;
-    if (!organizationId || !agentId) return;
-
-    const sql = getDb();
-    await sql.begin(async (tx) => {
-      const owned = await tx<{ id: number }>`
-        SELECT id
-        FROM automations
-        WHERE id = ${automationId}
-          AND organization_id = ${organizationId}
-          AND managed_agent_id = ${agentId}
-          AND status = 'active'
-        LIMIT 1
-      `;
-      if (owned.length === 0) return;
-      await advanceScheduleAfterTerminalFailure(
-        tx,
-        automationId,
-        "event",
-        notBefore
-      );
-    });
   }
 
   /**

@@ -346,7 +346,13 @@ time out (default five), Lobu keeps the Automation active but stamps
 dispatch-only, cancelled, and never-executed runs do not increment the counter.
 A successful scheduled or manual window, or a real schedule/timezone change,
 clears the failure state and resumes the cursor. A scheduled notification sweep
-durably notifies workspace admins and owners once per pause generation.
+durably notifies workspace admins and owners once per pause generation, quoting
+the first 300 characters of the latest failed run's error.
+An exhausted provider quota or balance is an ordinary failure here. Lobu does
+not try to work out when the provider resets: each failed scheduled run moves
+the cursor to the next tick and counts toward the breaker, a failed event run
+leaves the cursor alone, and once the breaker pauses the schedule the user
+resumes it after restoring the quota.
 
 `pending_analysis.next_window` is the arrival range a claim would hand out, or
 null while the settle delay or an open transaction keeps the horizon at or

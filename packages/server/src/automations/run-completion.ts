@@ -3,10 +3,7 @@ import { getDb, pgTextArray } from "../db/client";
 import { classifyRunOutcome } from "../runs/run-outcome";
 import logger from "../utils/logger";
 import { ACTIVE_RUN_STATUSES, runStatusLiteral } from "../utils/run-statuses";
-import {
-	advanceScheduleAfterTerminalFailure,
-	providerQuotaResetNotBefore,
-} from "./schedule-cursor";
+import { advanceScheduleAfterTerminalFailure } from "./schedule-cursor";
 import { recordScheduledExecutionFailure } from "./scheduled-failure-policy";
 import {
 	AUTOMATION_EVAL_RUN_TYPE,
@@ -21,8 +18,6 @@ type AutomationTerminalResult =
 			ok: false;
 			error: string;
 			errorCode?: string;
-			/** Raw provider text used only to parse a quota reset boundary. */
-			quotaResetError?: string;
 		};
 
 /**
@@ -155,7 +150,6 @@ export async function markAutomationRunFailed(
 	sql: DbClient,
 	runId: number,
 	message: string,
-	notBefore?: Date | null,
 	errorCode?: string | null,
 	expectedMessageId?: string
 ): Promise<boolean> {
@@ -178,8 +172,8 @@ export async function markAutomationRunFailed(
 		if (!failed) return false;
 		// Only a REAL Automation failure moves the schedule. An eval replay copies
 		// the source run's dispatch_source verbatim, so without this gate a
-		// failing eval (a quota 429, a scoring rerun) would advance — or park for
-		// a day — the live Automation's cron cursor it is merely replaying.
+		// failing eval (a quota 429, a scoring rerun) would advance the cron
+		// cursor of the live Automation it is merely replaying.
 		if (failed.run_type === AUTOMATION_RUN_TYPE) {
 			await recordScheduledExecutionFailure(
 				tx,
@@ -189,8 +183,7 @@ export async function markAutomationRunFailed(
 			await advanceScheduleAfterTerminalFailure(
 				tx,
 				failed.automation_id == null ? null : Number(failed.automation_id),
-				failed.dispatch_source,
-				notBefore
+				failed.dispatch_source
 			);
 		}
 		return true;
@@ -271,16 +264,11 @@ export async function resolveAutomationRunsByMessageIds(
 		};
 
 		if (!result.ok) {
-			const notBefore = providerQuotaResetNotBefore(
-				result.quotaResetError ?? result.error,
-				result.errorCode
-			);
 			if (
 				await markAutomationRunFailed(
 					sql,
 					runId,
 					result.error,
-					notBefore,
 					result.errorCode,
 					typedRow.dispatched_message_id
 				)
@@ -321,7 +309,6 @@ export async function resolveAutomationRunsByMessageIds(
 				sql,
 				runId,
 				describeFinalizeMiss(budget),
-				undefined,
 				undefined,
 				typedRow.dispatched_message_id
 			)

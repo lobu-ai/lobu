@@ -5,10 +5,9 @@
  * `AgentErrorCode`. Every other layer consumes this rather than growing its
  * own regex, and three of them act on the result:
  *
- * - `providerQuotaResetNotBefore` (automations/schedule-cursor.ts) returns
- *   `null` unless the code is `PROVIDER_QUOTA_EXHAUSTED`, so an unclassified
- *   quota trip never parks the Automation until the provider's reset — it
- *   keeps firing on schedule against an exhausted quota.
+ * - `classifyRunOutcome` (server runs/run-outcome.ts) stamps a classified
+ *   failure `infra_error`; an unclassified provider refusal is blamed on the
+ *   agent as `agent_error`.
  * - `response-renderer.ts` and `chat-response-bridge.ts` resolve the code to
  *   a remediation CTA; with none, the user gets the provider's raw prose.
  * - An unclassified failure also misses the `PROVIDER_*` Sentry alerting.
@@ -95,10 +94,11 @@ export function classifyErrorMessage(
   // dodged the PROVIDER_* alert.
   //
   // It belongs HERE and not in `PROVIDER_BALANCE_EXHAUSTED` above: a
-  // subscription usage limit is WINDOWED — the provider names its own reset,
-  // hours or days out — while that union parks an Automation for a flat day
-  // regardless. Parking a windowed limit on a balance schedule would be a
-  // worse bug than the one this fixes.
+  // subscription usage limit is WINDOWED — it clears on the provider's own
+  // reset — while that union means the account cannot spend until someone tops
+  // it up. The device daemon stops a retrying OpenCode run on balance wording
+  // alone, so a windowed limit in that union would cut short a run the CLI's
+  // own retry could still finish.
   if (PROVIDER_WINDOWED_QUOTA.test(message))
     return AgentErrorCode.PROVIDER_QUOTA_EXHAUSTED;
 

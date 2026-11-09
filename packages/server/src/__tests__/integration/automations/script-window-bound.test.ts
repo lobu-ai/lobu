@@ -407,7 +407,7 @@ describe('script executor window bound', () => {
     expect(next).toHaveLength(0);
   });
 
-  it.each(['historical replay', 'later retry boundary'] as const)(
+  it.each(['historical replay', 'later cursor'] as const)(
     'does not expedite a truncated window with a %s',
     async (scenario) => {
       const seed = await seedAutomation('script');
@@ -415,7 +415,7 @@ describe('script executor window bound', () => {
       const mark = scenario === 'historical replay' ? WINDOW_END : WINDOW_START;
       await getTestDb()`
         UPDATE automations SET next_window_start = ${mark}::timestamptz,
-          next_run_at = CASE WHEN ${scenario === 'later retry boundary'}
+          next_run_at = CASE WHEN ${scenario === 'later cursor'}
             THEN now() + interval '1 day' ELSE next_run_at END
         WHERE id = ${seed.automationId}
       `;

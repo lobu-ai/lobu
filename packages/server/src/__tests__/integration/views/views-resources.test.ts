@@ -207,9 +207,9 @@ describe('views resources + open_view + invoke_view_action', () => {
 		// §10(a): the loader ships no ext-apps/React/framework bytes.
 		expect(html).not.toContain('ext-apps');
 		expect(html).not.toContain('react');
-		// The stable shell now also owns the workspace/view picker, without a
-		// framework bundle or remote assets.
-		expect(html.length).toBeLessThan(16384);
+		// The stable shell now also owns the workspace/view picker and the full
+		// theme token set, without a framework bundle or remote assets.
+		expect(html.length).toBeLessThan(20480);
 	});
 
 	it('loader only accepts bundle messages from the host frame', async () => {

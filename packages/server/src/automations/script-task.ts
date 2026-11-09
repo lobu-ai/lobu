@@ -154,8 +154,8 @@ export async function runAutomationScriptTask(
         tx,
         payload.automationId
       );
-      // Resume actual backlog progress promptly, but preserve a later retry
-      // boundary and leave historical replays on the normal cadence.
+      // Resume actual backlog progress promptly, but never pull a later cursor
+      // back, and leave historical replays on the normal cadence.
       if (markMoved && input.window_truncated === true && nextTick) {
         const due = await tx`
           UPDATE automations SET next_run_at = current_timestamp
