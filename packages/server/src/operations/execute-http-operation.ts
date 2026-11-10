@@ -23,10 +23,43 @@ export interface HttpOperationConnection {
 	connector_key: string;
 }
 
+function isDotSegment(segment: string): boolean {
+	let decoded = segment;
+	try {
+		decoded = decodeURIComponent(segment);
+	} catch {
+		// Malformed escapes stay literal; encodeURIComponent will escape the `%`.
+	}
+	return decoded === "." || decoded === "..";
+}
+
+/**
+ * Encode one path parameter so it stays inside its template slot. URL
+ * resolution would otherwise walk `.`/`..` up the path (`/repos/{owner}/{repo}`
+ * with owner `..` reaches `/user`), letting a caller reach an endpoint other
+ * than the operation that policy admitted with the connection's credential.
+ * Only a parameter the spec marks multi-segment may contain `/`, and each of
+ * its segments is checked the same way.
+ */
+function encodePathParam(name: string, value: unknown, multiSegment: boolean): string {
+	const raw = String(value);
+	const segments = multiSegment ? raw.split("/") : [raw];
+	if (!multiSegment && raw.includes("/")) {
+		throw new Error(`Path parameter '${name}' must be a single path segment.`);
+	}
+	for (const segment of segments) {
+		if (segment === "" || isDotSegment(segment)) {
+			throw new Error(`Path parameter '${name}' contains an empty or dot path segment.`);
+		}
+	}
+	return segments.map((segment) => encodeURIComponent(segment)).join("/");
+}
+
 function buildResolvedUrl(
 	serverUrl: string,
 	pathTemplate: string,
 	input: Record<string, unknown>,
+	multiSegmentPathParams: readonly string[] = [],
 ): URL {
 	const pathValues =
 		input.path && typeof input.path === "object"
@@ -38,7 +71,11 @@ function buildResolvedUrl(
 			: {};
 	let path = pathTemplate;
 	for (const [key, value] of Object.entries(pathValues)) {
-		path = path.replaceAll(`{${key}}`, encodeURIComponent(String(value)));
+		if (!path.includes(`{${key}}`)) continue;
+		path = path.replaceAll(
+			`{${key}}`,
+			encodePathParam(key, value, multiSegmentPathParams.includes(key)),
+		);
 	}
 
 	const url = new URL(
@@ -225,6 +262,7 @@ export async function executeHttpOperation(
 			operation.backend_config.serverUrl,
 			operation.backend_config.pathTemplate,
 			actionInput,
+			operation.backend_config.multiSegmentPathParams,
 		);
 
 		const requestAbort = requestAbortSignal(abortSignal);

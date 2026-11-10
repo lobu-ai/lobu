@@ -224,7 +224,7 @@ describe("operations.execute backend lifecycle", () => {
 		mcpConnectionId = mcp.id;
 		secondMcpConnectionId = secondMcp.id;
 		httpConnectionId = http.id;
-		for (const [connectorKey, keys] of [[LOCAL, ["echo", "stage_browser", "download"]], [MCP, ["remote_echo"]], [HTTP, ["create_item"]]] as const) {
+		for (const [connectorKey, keys] of [[LOCAL, ["echo", "stage_browser", "download"]], [MCP, ["remote_echo"]], [HTTP, ["create_item", "get_repo", "get_content"]]] as const) {
 			for (const operationKey of keys) await upsertEntityApprovalPolicy(orgId, {
 				resourceClass: "connector_action", operationKey: `${connectorKey}::${operationKey}`, effects: { execute: "auto" },
 			});
@@ -287,6 +287,24 @@ describe("operations.execute backend lifecycle", () => {
 									responses: { "200": { description: "ok" } },
 								},
 							},
+							"/repos/{owner}/{repo}": {
+								parameters: [
+									{ name: "owner", in: "path", required: true, schema: { type: "string" } },
+									{ name: "repo", in: "path", required: true, schema: { type: "string" } },
+								],
+								get: { operationId: "get_repo", responses: { "200": { description: "ok" } } },
+							},
+							"/repos/{owner}/{repo}/contents/{path}": {
+								get: {
+									operationId: "get_content",
+									parameters: [
+										{ name: "owner", in: "path", required: true, schema: { type: "string" } },
+										{ name: "repo", in: "path", required: true, schema: { type: "string" } },
+										{ name: "path", in: "path", required: true, "x-multi-segment": true, schema: { type: "string" } },
+									],
+									responses: { "200": { description: "ok" } },
+								},
+							},
 							"/items/{id}": {
 								get: {
 									operationId: "get_item",
@@ -315,6 +333,9 @@ describe("operations.execute backend lifecycle", () => {
 							},
 						},
 					});
+				}
+				if (url.startsWith("https://api.example.test/repos/")) {
+					return jsonResponse({ fetched: url });
 				}
 				if (url === "https://api.example.test/items") {
 					const body = JSON.parse(String(init?.body)) as { value?: string };
@@ -1345,7 +1366,11 @@ describe("operations.execute backend lifecycle", () => {
 				listed.operations
 					.filter((operation) => operation.backend === "http_operation")
 					.map((operation) => [operation.operation_key, operation.kind]),
-			).toEqual([["get_item", "read"]]);
+			).toEqual([
+				["get_repo", "read"],
+				["get_content", "read"],
+				["get_item", "read"],
+			]);
 
 			const excluded = await manageOperations(
 				{
@@ -1367,6 +1392,39 @@ describe("operations.execute backend lifecycle", () => {
 				WHERE organization_id = ${orgId} AND key = ${HTTP}
 			`;
 		}
+	});
+
+	it("keeps every OpenAPI path parameter inside its template segment", async () => {
+		const fetchMock = vi.mocked(globalThis.fetch);
+		const repoFetches = () =>
+			fetchMock.mock.calls
+				.map(([input]) => String(input))
+				.filter((url) => url.startsWith("https://api.example.test/repos/") || url === "https://api.example.test/user");
+		const before = repoFetches().length;
+		const execute = (operation_key: string, path: Record<string, string>) =>
+			manageOperations(
+				{ action: "execute", connection_id: httpConnectionId, operation_key, input: { path } },
+				{} as Env,
+				ctx,
+			);
+
+		for (const [operationKey, path] of [
+			["get_repo", { owner: "..", repo: "user" }],
+			["get_repo", { owner: "%2e%2e", repo: "user" }],
+			["get_repo", { owner: "lobu/../..", repo: "user" }],
+			["get_content", { owner: "acme", repo: "app", path: "docs/../../../user" }],
+		] as const) {
+			expect(await execute(operationKey, path), JSON.stringify(path)).toMatchObject({
+				status: "failed",
+				error_message: expect.stringMatching(/Path parameter '(owner|path)'/),
+			});
+		}
+		expect(repoFetches().length).toBe(before);
+
+		expect(await execute("get_content", { owner: "acme", repo: "app", path: "packages/owletto" })).toMatchObject({
+			status: "completed",
+			output: { body: { fetched: "https://api.example.test/repos/acme/app/contents/packages/owletto" } },
+		});
 	});
 
 	it("marks an OpenAPI DELETE approval as high impact", async () => {

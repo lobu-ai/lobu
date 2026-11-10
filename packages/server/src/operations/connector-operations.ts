@@ -388,6 +388,10 @@ async function getOpenApiOperations(
 			if (includeTags.size > 0 && !tags.some((tag) => includeTags.has(tag)))
 				continue;
 
+			const multiSegmentPathParams = [...pathParameters, ...(Array.isArray(opRecord.parameters) ? opRecord.parameters : [])]
+				.map((param) => resolveRef(spec, param) as Record<string, unknown> | undefined)
+				.filter((param) => param?.in === "path" && param["x-multi-segment"] === true && typeof param.name === "string")
+				.map((param) => String(param?.name));
 			const kind = method === "get" || method === "head" ? "read" : "write";
 			operations.push({
 				connector_key: connectorKey,
@@ -425,6 +429,7 @@ async function getOpenApiOperations(
 					method: method.toUpperCase(),
 					pathTemplate,
 					serverUrl,
+					...(multiSegmentPathParams.length > 0 ? { multiSegmentPathParams } : {}),
 				},
 			});
 		}
