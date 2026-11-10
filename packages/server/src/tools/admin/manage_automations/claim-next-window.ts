@@ -384,24 +384,13 @@ export async function handleClaimNextWindow(
       LIMIT 1
     `;
 
-    const templateVersionId =
-      snapshot?.version_id == null ? null : Number(snapshot.version_id);
-    // Instructions belong to the window, not each page: only the first page
-    // carries them, so a long continuation loop does not re-ship the prompt.
-    const firstPage = !args.source_cursor && !hasBeforeOccurredAt;
-    const instructions =
-      firstPage && templateVersionId != null
-        ? await readPinnedInstructions(tx, ctx.organizationId, automationId, templateVersionId)
-        : undefined;
-
     return {
       skipped: false as const,
       runId,
       windowStart,
       windowEnd,
       leaseExpiresAt,
-      templateVersionId,
-      instructions,
+      templateVersionId: snapshot?.version_id == null ? null : Number(snapshot.version_id),
     };
   });
 
@@ -414,6 +403,52 @@ export async function handleClaimNextWindow(
         'and the schedule advanced. Refresh activity for the next due window.',
       409
     );
+  }
+
+  // Everything after the claim commits runs against a leased run. A failure
+  // here fails that run and counts it, behind the lease fence, so a client
+  // that keeps hitting it trips auto-pause instead of an endless retry loop.
+  const failClaimedRun = (errorMessage: string, cause: string) =>
+    sql.begin(async (tx) => {
+      const [failed] = await tx<{ dispatch_source: string | null; executor_kind: string | null }>`
+        UPDATE runs
+        SET status = 'failed',
+            outcome = ${classifyRunOutcome({ status: 'failed', errorMessage: cause })},
+            completed_at = current_timestamp,
+            error_message = ${errorMessage}
+        WHERE id = ${claimedWindow.runId}
+          AND automation_id = ${automationId}
+          ${runLeaseFence(tx, owner)}
+          AND expires_at = ${claimedWindow.leaseExpiresAt.toISOString()}::timestamptz
+        RETURNING approved_input->>'dispatch_source' AS dispatch_source,
+                  approved_input->'executor'->>'kind' AS executor_kind
+      `;
+      if (failed) {
+        await recordAutomationRunFailure(tx, automationId, {
+          dispatchSource: failed.dispatch_source,
+          executorKind: failed.executor_kind,
+        });
+      }
+    });
+
+  // Instructions belong to the window, not each page: only the first page
+  // carries them, so a long continuation loop does not re-ship the prompt.
+  const versionId = claimedWindow.templateVersionId;
+  let instructions: PinnedInstructions | undefined;
+  if (versionId != null && !args.source_cursor && !hasBeforeOccurredAt) {
+    try {
+      instructions = await readPinnedInstructions(sql, ctx.organizationId, automationId, versionId);
+    } catch (error) {
+      const cause = error instanceof Error ? error.message : String(error);
+      await failClaimedRun(`Automation pinned version ${versionId} could not be read: ${cause}`, cause);
+      throw new ToolUserError(
+        `Automation ${automationId} run ${claimedWindow.runId} failed: its pinned version ${versionId} ` +
+          `could not be read (${cause}). The run is recorded as failed; refresh activity before claiming again.`,
+        409,
+        'PRECONDITION_FAILED',
+        { run_id: claimedWindow.runId, version_id: versionId }
+      );
+    }
   }
 
   try {
@@ -456,7 +491,7 @@ export async function handleClaimNextWindow(
       window_token: context.window_token,
       window_start: context.window_start,
       window_end: context.window_end,
-      ...(claimedWindow.instructions ? { instructions: claimedWindow.instructions } : {}),
+      ...(instructions ? { instructions } : {}),
     };
     return {
       action: 'claim_next_window',
@@ -467,46 +502,28 @@ export async function handleClaimNextWindow(
     };
   } catch (error) {
     const sourceError = error instanceof Error ? error.message : String(error);
-    await sql.begin(async (tx) => {
-      const [failed] = await tx<{ dispatch_source: string | null; executor_kind: string | null }>`
-        UPDATE runs
-        SET status = 'failed',
-            outcome = ${classifyRunOutcome({ status: 'failed', errorMessage: sourceError })},
-            completed_at = current_timestamp,
-            error_message = ${`Automation source context failed: ${sourceError}`}
-        WHERE id = ${claimedWindow.runId}
-          AND automation_id = ${automationId}
-          ${runLeaseFence(tx, owner)}
-          AND expires_at = ${claimedWindow.leaseExpiresAt.toISOString()}::timestamptz
-        RETURNING approved_input->>'dispatch_source' AS dispatch_source,
-                  approved_input->'executor'->>'kind' AS executor_kind
-      `;
-      if (failed) {
-        await recordAutomationRunFailure(tx, automationId, {
-          dispatchSource: failed.dispatch_source,
-          executorKind: failed.executor_kind,
-        });
-      }
-    });
+    await failClaimedRun(`Automation source context failed: ${sourceError}`, sourceError);
     throw error;
   }
 }
+
+type PinnedInstructions = NonNullable<AutomationClaimNextWindowResult['context']['instructions']>;
 
 /**
  * The prompt and skill snapshots of the version a run is pinned to. An
  * external client has no worker to receive them, so the claim is its only
  * delivery; reading the pinned row (never `current_version_id`) keeps a
  * mid-run edit from changing what the claimer is told. A pinned version that
- * cannot be read fails the claim, as it fails native dispatch, rather than
- * letting the client fall back to a stale cached copy.
+ * cannot be read fails the claimed run, as it fails native dispatch, rather
+ * than letting the client fall back to a stale cached copy.
  */
 async function readPinnedInstructions(
-  tx: DbClient,
+  sql: DbClient,
   organizationId: string,
   automationId: number,
   versionId: number
-): Promise<NonNullable<AutomationClaimNextWindowResult['context']['instructions']>> {
-  const [version] = await tx<{ prompt: string | null; skills: unknown }>`
+): Promise<PinnedInstructions> {
+  const [version] = await sql<{ prompt: string | null; skills: unknown }>`
     SELECT v.prompt, v.skills
     FROM automations a
     JOIN automation_versions v
