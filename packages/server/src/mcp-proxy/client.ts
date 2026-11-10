@@ -19,6 +19,7 @@ import { errorMessage } from '../utils/errors';
 import logger from '../utils/logger';
 import { TtlCache } from '../utils/ttl-cache';
 import {
+  credentialHeader,
   type ResolvedCredentials,
   resolveCredentialsByConnectionId,
 } from './credential-resolver';
@@ -56,6 +57,8 @@ async function fetchMcpResponse(
   init: RequestInit,
   timeoutMs: number,
   callerSignal?: AbortSignal,
+  /** The request carries a connection credential, in whatever header it is declared. */
+  credentialed = false,
 ): Promise<Response> {
   const callId = newMcpCallId();
   const requestBytes = typeof init.body === 'string' ? new TextEncoder().encode(init.body).byteLength : 0;
@@ -72,7 +75,7 @@ async function fetchMcpResponse(
   });
   try {
     if (typeof init.body === 'string') assertRequestBodySize(init.body);
-    const fetchUrl = new Headers(init.headers).has('Authorization')
+    const fetchUrl = credentialed || new Headers(init.headers).has('Authorization')
       ? fetchCredentialedPublicUrl
       : fetchPublicUrl;
     const response = await fetchUrl(url, { ...init, signal: scope.signal });
@@ -224,7 +227,8 @@ function buildHeaders(
   }
 
   if (credentials?.accessToken) {
-    headers.Authorization = `${credentials.tokenType || 'Bearer'} ${credentials.accessToken}`;
+    const [name, value] = credentialHeader(credentials);
+    headers[name] = value;
   }
 
   return headers;
@@ -255,7 +259,8 @@ async function sendRequest(
     upstreamUrl,
     { method: 'POST', headers, body },
     timeoutMs,
-    callerSignal
+    callerSignal,
+    !!credentials?.accessToken
   );
 
   // Track session ID from response

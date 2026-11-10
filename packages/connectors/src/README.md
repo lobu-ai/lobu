@@ -117,6 +117,7 @@ authSchema: {
         example: 'sk-...',       // Placeholder hint
         secret: true,            // Mask in UI
         required: true,          // Whether this field is required
+        httpCredential: {},      // Optional: send as `Authorization: Bearer <value>`
       },
     ],
   }],
@@ -124,6 +125,8 @@ authSchema: {
 ```
 
 When `scope` is `'organization'`, the auth profile is shared across all connections in the org. Default is `'connection'` (per-connection credentials).
+
+`httpCredential` marks the one env field that authenticates generated `openapiConfig` operations and MCP upstream calls for a connection on this env method, sent as `<header>: <scheme> <value>` (defaults `Authorization` and `Bearer`, e.g. `{ header: 'X-Api-Key', scheme: 'Token' }`). An App, OAuth or managed token always wins. The value is set gateway-side and never reaches a worker. At most one field per connector may declare it; `Host`, `Cookie`, framing and hop-by-hop headers are rejected at install. A token kept only in connection config (not an env auth profile) is not used.
 
 ### `oauth` - OAuth providers
 

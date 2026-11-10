@@ -512,13 +512,15 @@ export default class GitHubConnector extends ConnectorRuntime {
         {
           type: 'env_keys',
           required: false,
-          description: 'Optional fallback token for sync/action calls.',
+          description: 'Optional fallback token for sync/action calls and generated REST reads.',
           fields: [
             {
               key: 'GITHUB_TOKEN',
               label: 'GitHub Token',
               description: 'Personal access token used as fallback auth for API requests.',
               secret: true,
+              // Sent as `Authorization: Bearer <token>` on the generated reads.
+              httpCredential: {},
             },
           ],
         },

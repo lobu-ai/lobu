@@ -8,6 +8,7 @@ import {
   getAppInstallationAuthMethods,
   getOAuthAuthMethods,
   normalizeConnectorAuthSchema,
+  resolveEnvHttpCredential,
 } from '../connector-auth';
 
 describe('normalizeConnectorAuthSchema', () => {
@@ -191,5 +192,45 @@ describe('app_installation auth method', () => {
     expect(getAppInstallationAuthMethods(schema).length).toBe(1);
     expect(getOAuthAuthMethods(schema).length).toBe(1);
     expect(schema.methods.length).toBe(3);
+  });
+});
+
+describe('resolveEnvHttpCredential', () => {
+  const schema = (...fields: Array<Record<string, unknown>>) => ({
+    methods: [{ type: 'oauth', provider: 'test', requiredScopes: [] }, { type: 'env_keys', fields }],
+  });
+
+  it('is absent unless a field declares it', () => {
+    expect(resolveEnvHttpCredential(schema({ key: 'API_TOKEN' }))).toBeNull();
+    expect(resolveEnvHttpCredential(null)).toBeNull();
+  });
+
+  it('defaults to an Authorization bearer and honours an override', () => {
+    expect(resolveEnvHttpCredential(schema({ key: 'API_TOKEN', httpCredential: {} }))).toEqual({
+      fieldKey: 'API_TOKEN', header: 'Authorization', scheme: 'Bearer',
+    });
+    expect(resolveEnvHttpCredential(schema({ key: 'API_TOKEN', httpCredential: { header: 'X-Api-Key', scheme: 'Token' } }))).toEqual({
+      fieldKey: 'API_TOKEN', header: 'X-Api-Key', scheme: 'Token',
+    });
+  });
+
+  it.each([
+    'Host', 'cookie', 'Set-Cookie', 'Content-Length', 'Transfer-Encoding', 'Proxy-Authorization',
+    'X Api', 'X-Api:Key', 'X-Api\r\nInjected: 1', 'Authörization',
+  ])('rejects header %j', (header) => {
+    expect(() => resolveEnvHttpCredential(schema({ key: 'API_TOKEN', httpCredential: { header } }))).toThrow(/header/);
+  });
+
+  it.each(['Bearer token', 'Bearer\r\nX: 1'])('rejects scheme %j', (scheme) => {
+    expect(() => resolveEnvHttpCredential(schema({ key: 'API_TOKEN', httpCredential: { scheme } }))).toThrow(/scheme/);
+  });
+
+  it('allows at most one credential field per connector', () => {
+    expect(() => resolveEnvHttpCredential({
+      methods: [
+        { type: 'env_keys', fields: [{ key: 'A', httpCredential: {} }] },
+        { type: 'env_keys', fields: [{ key: 'B', httpCredential: {} }] },
+      ],
+    })).toThrow(/At most one/);
   });
 });

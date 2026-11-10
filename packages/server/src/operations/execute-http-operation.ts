@@ -2,7 +2,10 @@ import { getErrorMessage } from "@lobu/core";
 import { fetchCredentialedPublicUrl } from "@lobu/connector-worker/egress";
 import { LOST_LEASE_MESSAGE } from "../runs/run-lease";
 import { terminalizeInlineOperationRun } from "./operation-run-card";
-import { resolveCredentialsByConnectionId } from "../mcp-proxy/credential-resolver";
+import {
+	credentialHeader,
+	resolveCredentialsByConnectionId,
+} from "../mcp-proxy/credential-resolver";
 import { readResponseTextWithLimit } from "../utils/bounded-response";
 import { stripNul, stripNulDeep } from "../utils/strip-nul";
 import type { OperationDescriptor } from "./types";
@@ -251,10 +254,8 @@ export async function executeHttpOperation(
 			headers.set(key, String(value));
 		}
 		if (credentials) {
-			headers.set(
-				"Authorization",
-				`${credentials.tokenType} ${credentials.accessToken}`,
-			);
+			// Set after the caller's headers, so it replaces any spoofed copy.
+			headers.set(...credentialHeader(credentials));
 		}
 
 		const body = actionInput.body;

@@ -346,7 +346,12 @@ describe("operations.execute backend lifecycle", () => {
 					});
 				}
 				if (url.startsWith("https://api.example.test/repos/")) {
-					return jsonResponse({ fetched: url });
+					const headers = new Headers(init?.headers);
+					return jsonResponse({
+						fetched: url,
+						authorization: headers.get("authorization"),
+						api_key: headers.get("x-api-key"),
+					});
 				}
 				if (url === "https://api.example.test/items") {
 					const body = JSON.parse(String(init?.body)) as { value?: string };
@@ -1449,6 +1454,73 @@ describe("operations.execute backend lifecycle", () => {
 				status: "completed",
 				output: { body: { fetched: `https://api.example.test${url}` } },
 			});
+		}
+	});
+
+	it("authenticates generated operations with the connector's declared env credential", async () => {
+		const sql = getTestDb();
+		const [{ auth_schema: originalAuthSchema }] = await sql<{ auth_schema: unknown }>`
+			SELECT auth_schema FROM connector_definitions
+			WHERE organization_id = ${orgId} AND key = ${HTTP} AND status = 'active'
+		`;
+		const setEnvCredential = (httpCredential: Record<string, string>) => sql`
+			UPDATE connector_definitions
+			SET auth_schema = ${sql.json({
+				methods: [
+					{ type: "oauth", provider: "test", requiredScopes: [] },
+					{ type: "env_keys", fields: [
+						{ key: "API_REGION", secret: false },
+						{ key: "API_TOKEN", secret: true, httpCredential },
+					] },
+				],
+			})}
+			WHERE organization_id = ${orgId} AND key = ${HTTP}
+		`;
+		const envConnection = await createTestConnection({
+			organization_id: orgId,
+			connector_key: HTTP,
+			created_by: userId,
+			visibility: "private",
+		});
+		const envProfile = await createAuthProfile({
+			organizationId: orgId,
+			connectorKey: HTTP,
+			displayName: "HTTP env token",
+			profileKind: "env",
+			authData: { API_REGION: "eu", API_TOKEN: "env-secret-value" },
+			status: "active",
+			createdBy: userId,
+		});
+		await sql`UPDATE connections SET auth_profile_id = ${envProfile.id} WHERE id = ${envConnection.id}`;
+		const readRepo = (connectionId: number) =>
+			manageOperations(
+				{ action: "execute", connection_id: connectionId, operation_key: "get_repo", input: { path: { owner: "acme", repo: "app" } } },
+				{} as Env,
+				ctx,
+			);
+
+		try {
+			await setEnvCredential({});
+			expect(await readRepo(envConnection.id)).toMatchObject({
+				status: "completed",
+				output: { body: { authorization: "Bearer env-secret-value", api_key: null } },
+			});
+			// An OAuth connection on the same connector keeps its own token.
+			expect(await readRepo(httpConnectionId)).toMatchObject({
+				status: "completed",
+				output: { body: { authorization: `Bearer backend-test-token-${httpConnectionId}` } },
+			});
+
+			await setEnvCredential({ header: "X-Api-Key", scheme: "Token" });
+			expect(await readRepo(envConnection.id)).toMatchObject({
+				status: "completed",
+				output: { body: { authorization: null, api_key: "Token env-secret-value" } },
+			});
+		} finally {
+			await sql`
+				UPDATE connector_definitions SET auth_schema = ${sql.json(originalAuthSchema as never)}
+				WHERE organization_id = ${orgId} AND key = ${HTTP}
+			`;
 		}
 	});
 

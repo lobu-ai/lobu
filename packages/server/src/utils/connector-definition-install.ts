@@ -18,6 +18,7 @@ import {
 import { fetchPublicUrl, isInternalUrl } from '@lobu/connector-worker/egress';
 import type { McpOAuthMetadata } from '../mcp-proxy/types';
 import { assertChromeNamespaceInstallIsDeviceManifest } from './connector-execution-placement';
+import { resolveEnvHttpCredential } from './connector-auth';
 import { preflightConnectorRelationshipTypes } from './connector-relationship-declarations';
 import { reconcileConnectorIdentityScopeRegistry } from './connector-identity-scopes';
 import { reconcileBrowserConnections } from '../connectors/browser-resource';
@@ -356,6 +357,9 @@ async function upsertConnectorDefinitionRecordsInTransaction(
     sourceCode: params.versionRecord.sourceCode,
   });
 
+  // A credential header declaration is gateway egress policy: reject a bad
+  // one before any definition can become active.
+  resolveEnvHttpCredential(metadata.authSchema);
   await preflightConnectorRelationshipTypes({
     sql,
     organizationId: params.organizationId,

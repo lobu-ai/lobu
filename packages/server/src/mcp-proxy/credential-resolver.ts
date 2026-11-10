@@ -8,12 +8,24 @@
 
 import { parseJsonObject } from '@lobu/core';
 import { getDb } from '../db/client';
-import { getOAuthAuthMethods, normalizeConnectorAuthSchema } from '../utils/connector-auth';
+import {
+  getOAuthAuthMethods,
+  normalizeConnectorAuthSchema,
+  resolveEnvHttpCredential,
+} from '../utils/connector-auth';
 import { resolveExecutionAuth } from '../utils/execution-context';
 
 export interface ResolvedCredentials {
   accessToken: string;
+  /** Authorization scheme, e.g. `Bearer`. */
   tokenType: string;
+  /** Header that carries `<tokenType> <accessToken>`. */
+  header: string;
+}
+
+/** The one header a caller sets from resolved credentials. Never log the value. */
+export function credentialHeader(credentials: ResolvedCredentials): [string, string] {
+  return [credentials.header, `${credentials.tokenType} ${credentials.accessToken}`];
 }
 
 /**
@@ -40,8 +52,12 @@ export async function resolveCredentialsByConnectionId(
       c.auth_profile_id,
       c.app_auth_profile_id,
       c.config,
-      cd.auth_schema
+      cd.auth_schema,
+      ap.profile_kind AS auth_profile_kind
     FROM connections c
+    LEFT JOIN auth_profiles ap
+      ON ap.id = c.auth_profile_id
+     AND ap.organization_id = c.organization_id
     JOIN connector_definitions cd
       ON cd.key = c.connector_key
      AND cd.organization_id = c.organization_id
@@ -73,7 +89,24 @@ export async function resolveCredentialsByConnectionId(
     return {
       accessToken: resolved.credentials.accessToken,
       tokenType: 'Bearer',
+      header: 'Authorization',
     };
+  }
+
+  // No App/OAuth/managed token: a connection on env auth may still carry an
+  // HTTP credential when the connector declares one env field as such. The
+  // value comes from the env profile's resolved secrets and is only ever set
+  // as a gateway-side request header.
+  if (connection.auth_profile_kind === 'env') {
+    const envCredential = resolveEnvHttpCredential(connection.auth_schema);
+    const value = envCredential ? resolved.connectionCredentials[envCredential.fieldKey] : undefined;
+    if (envCredential && typeof value === 'string' && value.trim()) {
+      return {
+        accessToken: value.trim(),
+        tokenType: envCredential.scheme,
+        header: envCredential.header,
+      };
+    }
   }
 
   const authSchema = normalizeConnectorAuthSchema(connection.auth_schema);
@@ -99,6 +132,7 @@ interface ConnectionRow {
   app_auth_profile_id: number | null;
   config: unknown;
   auth_schema: unknown;
+  auth_profile_kind: string | null;
 }
 
 function hasManagedBy(config: unknown): boolean {
