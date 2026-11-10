@@ -1,4 +1,5 @@
-import type { DbClient } from "../../db/client";
+import { type DbClient, pgTextArray } from "../../db/client";
+import { runtimeConnectionPredicate } from "../../lobu/stores/connections-projection";
 import { isAdminOrOwnerRole } from "../../tools/access-control";
 import { getWorkspaceRole } from "../../utils/organization-access";
 
@@ -13,14 +14,19 @@ export function authorizedChatLinkIds(
   sql: DbClient,
   chat: {
     connectionOrganizationId: string;
-    connection: { id: number } | { slug: string };
+    connection: { id: number } | { slug: string } | { runtimeId: string };
     channelId: string;
     teamId?: string | null;
   },
+  connectorTransportPlatforms: readonly string[],
 ) {
-  const connectionFilter = "id" in chat.connection
-    ? sql`s.connection_id = ${chat.connection.id}`
-    : sql`s.connection_slug = ${chat.connection.slug}`;
+  const connectionFilter = "runtimeId" in chat.connection
+    ? runtimeConnectionPredicate(sql, chat.connection.runtimeId, {
+        id: sql`s.connection_id`, slug: sql`s.connection_slug`, credentialMode: sql`s.credential_mode`,
+      })
+    : "id" in chat.connection
+      ? sql`s.connection_id = ${chat.connection.id}`
+      : sql`s.connection_slug = ${chat.connection.slug}`;
   // These role predicates mirror isAdminOrOwnerRole. The query owns its SQL
   // aliases; callers only match the returned IDs, then their specific trigger.
   return sql`
@@ -39,7 +45,7 @@ export function authorizedChatLinkIds(
       AND s.native_channel_id = ${chat.channelId}
       AND s.trigger_team_id IS NOT DISTINCT FROM ${chat.teamId || null}
       AND s.connection_status = 'active'
-      AND s.credential_mode IS NOT NULL
+      AND (s.credential_mode IS NOT NULL OR s.platform = ANY(${pgTextArray([...connectorTransportPlatforms])}::text[]))
       AND w.tags @> ARRAY['system:chat-link']::text[]
   `;
 }

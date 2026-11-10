@@ -482,7 +482,15 @@ export class MessageHandlerBridge {
       thread,
       message,
       thread.isDM === true ? "dm" : "subscribed",
-      undefined,
+      typeof plan.signal.attributes?.channel_id === "string"
+        ? {
+            // Source adapters already supplied the native chat identity. The SDK
+            // thread additionally scopes it to a connection for locks and replies.
+            channelId: plan.signal.attributes.channel_id,
+            conversationId: thread.id,
+            responseThreadId: thread.id,
+          }
+        : undefined,
       plan
     );
   }
