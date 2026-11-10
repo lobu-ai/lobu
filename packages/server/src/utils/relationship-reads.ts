@@ -15,6 +15,7 @@ import {
 } from '../authz/entity-read-policy';
 import { sourceReadScopeFromToolContext } from '../authz/scope';
 import { getDb, pgBigintArray } from '../db/client';
+import { memberReadRole } from '../tools/access-control';
 import { MEMBER_ENTITY_TYPE_SLUG } from '../tools/constants';
 import type { ToolContext } from '../tools/registry';
 import { type EntityEndpoint, type ResolvedEntityReference, resolveEntityReference } from './entity-reference';
@@ -191,7 +192,7 @@ export async function readableRelationships(
     const hiddenStoredEndpoint = [row.from_entity_id, row.to_entity_id]
       .some(id => typeof id === 'number' && !allowed.has(id));
     const touchesMember = row.from_entity_type === MEMBER_ENTITY_TYPE_SLUG || row.to_entity_type === MEMBER_ENTITY_TYPE_SLUG;
-    if (hiddenStoredEndpoint || (touchesMember && !canSeeMemberList(ctx.memberRole))) return null;
+    if (hiddenStoredEndpoint || (touchesMember && !canSeeMemberList(memberReadRole(ctx)))) return null;
     const outcomes = await Promise.allSettled([
       typeof row.from_entity_id === 'string' ? resolveSource(row.from_entity_id, row.from_entity_type_id ?? row.from_entity_type) : null,
       typeof row.to_entity_id === 'string' ? resolveSource(row.to_entity_id, row.to_entity_type_id ?? row.to_entity_type) : null,

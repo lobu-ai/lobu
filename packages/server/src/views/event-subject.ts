@@ -3,7 +3,7 @@ import { hasRequiredMcpScope } from "../auth/tool-access";
 import { authzScopeFromToolContext } from "../authz/scope";
 import { getDb, parsePgNumberArray, pgBigintArray } from "../db/client";
 import type { Env } from "../index";
-import { isInProcessSystemCall, isPublicReader } from "../tools/access-control";
+import { canReadWorkspaceIdentity, isPublicReader } from "../tools/access-control";
 import { buildExactIdScopeWhere } from "../tools/get_content/query";
 import { getContent } from "../tools/get_content/handler";
 import type { ToolContext } from "../tools/registry";
@@ -45,10 +45,7 @@ export async function resolveEventViewSubject(
         organizationId: ctx.organizationId,
         userId: authzScopeFromToolContext(ctx).principal,
       },
-      excludeWorkspaceAudit:
-        ctx.memberRole !== 'owner' &&
-        ctx.memberRole !== 'admin' &&
-        !isInProcessSystemCall(ctx),
+      excludeWorkspaceAudit: !canReadWorkspaceIdentity(ctx),
       excludeOperationalTrail: isPublicReader(ctx),
       baseParamIndex: 1,
     });

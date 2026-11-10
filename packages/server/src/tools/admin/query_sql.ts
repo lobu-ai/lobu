@@ -23,7 +23,7 @@ import { ADMIN_ONLY_QUERYABLE_TABLES, SAFE_COLUMN_DEFS } from '../../utils/table
 import type { ToolContext } from '../registry';
 import { withValidatedArgs } from '../validate-args';
 import { SortOrderField } from './schemas/common-fields';
-import { isAdminOrOwnerRole, isInProcessSystemCall } from '../access-control';
+import { canReadWorkspaceIdentity, isAdminOrOwnerRole, memberReadRole } from '../access-control';
 import { getErrorMessage, isRetryable, type ToolErrorCode } from "@lobu/core";
 import { ToolUserError } from '../../utils/errors';
 import {
@@ -476,17 +476,17 @@ export async function querySqlImpl(
     const scoped = validateAndScopeQuery(baseSql, targetOrgId, {
       window,
       safeColumns: SAFE_COLUMN_DEFS,
-      restrictedTables: callerIsAdmin ? undefined : ADMIN_ONLY_QUERYABLE_TABLES,
+      restrictedTables: isAdminOrOwnerRole(memberReadRole(ctx)) ? undefined : ADMIN_ONLY_QUERYABLE_TABLES,
       // Per-user connection visibility: even an admin sees another user's
       // PRIVATE-connection events only when org-visible. Cross-org reuses the
       // same global user id, re-validated against the target org above.
       userId: authzScopeFromToolContext(ctx).principal,
       // Workspace-identity audit rows are owner/admin/system-only; ordinary
       // members must not select their member/invitation lifecycle data via raw SQL.
-      excludeWorkspaceAudit: !isInProcessSystemCall(ctx) && !callerIsAdmin,
+      excludeWorkspaceAudit: !canReadWorkspaceIdentity(ctx),
       // $member entity rows carry PII reserved by the manage_entity read
       // policy; ordinary members must not bypass it via raw SQL.
-      excludeMemberEntities: !isInProcessSystemCall(ctx) && !callerIsAdmin,
+      excludeMemberEntities: !canReadWorkspaceIdentity(ctx),
     });
     scopedSql = scoped.sql;
     params = scoped.params;

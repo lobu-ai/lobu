@@ -7,9 +7,10 @@
  */
 
 import { hasRequiredMcpScope, type ToolAccessLevel } from '../auth/tool-access';
+import { AUTOMATION_RUN_SOURCE } from '../gateway/automation-run-session';
 import { ToolUserError } from '../utils/errors';
 import { getOrganizationSlug } from '../utils/url-builder';
-import type { AccountToolContext, TokenType, ToolContext } from './registry';
+import type { AccountToolContext, AutomationReadMemberRole, TokenType, ToolContext } from './registry';
 
 /** Narrow an account-dispatch context to a workspace-bound one, or reject. */
 export function requireWorkspaceContext(ctx: AccountToolContext): ToolContext {
@@ -46,6 +47,8 @@ export function isSystemContext(ctx: AccessControlContext): boolean {
 /**
  * True for a trusted in-process system call (automation reaction and friends),
  * which run with `userId: null` + `isAuthenticated: true` + `tokenType: 'session'`.
+ * Member-data reads use {@link canReadWorkspaceIdentity} / {@link memberReadRole}
+ * instead: an Automation script reads those with its creator's role.
  *
  * `isSystemContext` alone also matches a userless OAuth/PAT token admitted to a
  * public org (memberRole null). Requiring `tokenType === 'session'` excludes
@@ -68,6 +71,50 @@ export function isPublicReader(ctx: AccessControlContext): boolean {
 /** True when the role grants admin-tier access (owner or admin). */
 export function isAdminOrOwnerRole(memberRole: string | null | undefined): boolean {
   return memberRole === 'owner' || memberRole === 'admin';
+}
+
+/** The slice of ToolContext the member-data read policy needs. */
+interface MemberReadContext extends AccessControlContext {
+  organizationId?: string | null;
+  sourceContext?: { source?: string } | null;
+  automationReadMemberRole?: AutomationReadMemberRole | null;
+}
+
+/**
+ * True for a user-authored Automation script (reaction, executor or `prepare`
+ * handler). It runs as an in-process system call so writes, policy and
+ * approvals resolve its autonomous Automation principal, but its reads of
+ * member data never take the system bypass: they follow its creator (see
+ * {@link memberReadRole}).
+ */
+function isAutomationScriptCall(ctx: MemberReadContext): boolean {
+  return isInProcessSystemCall(ctx) && ctx.sourceContext?.source === AUTOMATION_RUN_SOURCE;
+}
+
+/**
+ * The role a caller reads member data with: the $member list and its emails,
+ * workspace-identity audit rows, and the admin-only identity tables. An
+ * Automation script reads with its creator's CURRENT role in the script's own
+ * workspace (null once they leave, or in any other workspace); every other
+ * caller with its own role.
+ */
+export function memberReadRole(ctx: MemberReadContext): string | null {
+  if (ctx.memberRole) return ctx.memberRole;
+  const automationRole = ctx.automationReadMemberRole;
+  if (!automationRole || !isAutomationScriptCall(ctx)) return null;
+  return automationRole.organizationId === ctx.organizationId ? automationRole.role : null;
+}
+
+/**
+ * Owner/admin standing for workspace-identity data ($member rows and emails in
+ * SQL, workspace-identity audit rows). Trusted internal in-process calls keep
+ * their bypass; an Automation script has it only through its creator's role.
+ */
+export function canReadWorkspaceIdentity(ctx: MemberReadContext): boolean {
+  return (
+    (isInProcessSystemCall(ctx) && !isAutomationScriptCall(ctx)) ||
+    isAdminOrOwnerRole(memberReadRole(ctx))
+  );
 }
 
 /** What a caller tried, at which tier, and as whom: the input to every denial message. */

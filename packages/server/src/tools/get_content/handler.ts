@@ -14,6 +14,7 @@ import {
 } from '../../authz/entity-policy';
 import { hasRequiredMcpScope } from '../../auth/tool-access';
 import {
+  canReadWorkspaceIdentity,
   isInProcessSystemCall,
   isPublicReader,
   workspaceScopeDenialMessage,
@@ -233,13 +234,10 @@ async function getContentImpl(
 
   // Workspace-identity audit events record member/invitation lifecycle
   // (titles, member names, invitation status). Exclude them for everyone
-  // EXCEPT owners/admins and trusted in-process system contexts (automation
-  // runs: userId=null, isAuthenticated=true) — the $member read policy
-  // reserves that lifecycle data for owner/admin.
-  const excludeWorkspaceAudit =
-    ctx.memberRole !== 'owner' &&
-    ctx.memberRole !== 'admin' &&
-    !isInProcessSystemCall(ctx);
+  // EXCEPT owners/admins and trusted in-process system contexts — the $member
+  // read policy reserves that lifecycle data for owner/admin. An Automation
+  // script reads it only when its creator is an owner/admin.
+  const excludeWorkspaceAudit = !canReadWorkspaceIdentity(ctx);
   // A public workspace publishes its knowledge, not its operational trail
   // (operation cards, approvals, notifications), to readers outside it.
   const excludeOperationalTrail = isPublicReader(ctx);

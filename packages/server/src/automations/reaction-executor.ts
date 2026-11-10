@@ -6,19 +6,22 @@
  * export `prepare` before the agent and/or a default handler after completion.
  *
  * Scripts run with `userId: null` + `isAuthenticated: true` so handler-level
- * access checks treat them as system calls.
+ * access checks treat them as system calls. Reads of member data are the
+ * exception: they follow the Automation creator's current role.
  */
 
 import type { ReactionContext, AutomationScriptContext } from '@lobu/connector-sdk';
 import { SCOPE_CHECK_NOT_APPLICABLE } from '../auth/tool-access';
 import { resolveAutomationConnectionVisibilityUserId } from '../authz/automation-connection-visibility';
 import { getDb } from '../db/client';
+import { AUTOMATION_RUN_SOURCE } from '../gateway/automation-run-session';
 import type { Env } from '../index';
 import { buildClientSDK } from '../sandbox/client-sdk';
 import { runScript } from '../sandbox/run-script';
 import { compileSource } from '../utils/compiler-core';
 import logger from '../utils/logger';
 import { ToolUserError } from '../utils/errors';
+import { getMembershipRole } from '../workspace/multi-tenant';
 
 const REACTION_TIMEOUT_MS = 60_000;
 
@@ -86,6 +89,21 @@ export async function executeAutomationScript(options: ExecuteAutomationScriptOp
   // is intentionally disabled. The builder form lets the sandbox forward its
   // wall-clock signal into `ctx.abortSignal` so SQL via `client.query` can
   // cancel upstream when the script times out.
+  // Reads see what the Automation's creator can see: their private connections
+  // and, for member data, their CURRENT role here (null once they leave).
+  // Approvals and policy keep the autonomous Automation identity.
+  const automationReadPrincipalId = await resolveAutomationConnectionVisibilityUserId(
+    {
+      organizationId: context.organization_id,
+      userId: null,
+      actingAutomationId: context.window.automation_id,
+    },
+    getDb()
+  );
+  const automationReadMemberRole = {
+    organizationId: context.organization_id,
+    role: await getMembershipRole(context.organization_id, automationReadPrincipalId),
+  };
   const scriptCtx = {
     organizationId: context.organization_id,
     userId: null,
@@ -108,17 +126,9 @@ export async function executeAutomationScript(options: ExecuteAutomationScriptOp
     // autonomous even for surfaces that read only sourceContext.
     actingAutomationId: context.window.automation_id,
     actingRunId: context.window.run_id,
-    // Reads see the private connections of the Automation's creator, as its
-    // operations already do; approvals and policy keep the autonomous identity.
-    automationReadPrincipalId: await resolveAutomationConnectionVisibilityUserId(
-      {
-        organizationId: context.organization_id,
-        userId: null,
-        actingAutomationId: context.window.automation_id,
-      },
-      getDb()
-    ),
-    sourceContext: { source: 'automation-run' as const },
+    automationReadPrincipalId,
+    automationReadMemberRole,
+    sourceContext: { source: AUTOMATION_RUN_SOURCE },
   };
 
   let approvalPending = false;

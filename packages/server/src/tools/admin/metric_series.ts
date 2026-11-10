@@ -32,7 +32,7 @@ import logger from '../../utils/logger';
 import type { ToolContext } from '../registry';
 import { authzScopeFromToolContext } from '../../authz/scope';
 import { withValidatedArgs } from '../validate-args';
-import { isAdminOrOwnerRole, isInProcessSystemCall } from '../access-control';
+import { canReadWorkspaceIdentity, isAdminOrOwnerRole, memberReadRole } from '../access-control';
 
 export const MetricSeriesSchema = Type.Object({
   sql: Type.String({
@@ -169,21 +169,20 @@ async function metricSeriesImpl(
 
   // Members may chart their org's operational data; the auth/identity tables
   // (oauth_tokens, oauth_clients, user) stay admin-only.
-  const isAdmin = isAdminOrOwnerRole(ctx.memberRole);
   const { sql: scopedSql, params } = validateAndScopeQuery(args.sql, orgId, {
     // Emit the safe column allowlist (not SELECT *) so a member charting e.g.
     // `connections` can't pull credential columns the allowlist withholds.
     safeColumns: SAFE_COLUMN_DEFS,
-    restrictedTables: isAdmin ? undefined : ADMIN_ONLY_QUERYABLE_TABLES,
+    restrictedTables: isAdminOrOwnerRole(memberReadRole(ctx)) ? undefined : ADMIN_ONLY_QUERYABLE_TABLES,
     // Charts are filtered to the requesting user's connection visibility, so a
     // member can't sparkline another user's private-connection events.
     userId: authzScopeFromToolContext(ctx).principal,
     // Workspace-identity audit rows are owner/admin/system-only; ordinary
     // members must not chart member/invitation lifecycle data via raw SQL.
-    excludeWorkspaceAudit: !isInProcessSystemCall(ctx) && !isAdmin,
+    excludeWorkspaceAudit: !canReadWorkspaceIdentity(ctx),
     // $member entity rows carry PII reserved by the manage_entity read
     // policy; ordinary members must not bypass it via raw SQL.
-    excludeMemberEntities: !isInProcessSystemCall(ctx) && !isAdmin,
+    excludeMemberEntities: !canReadWorkspaceIdentity(ctx),
   });
   const db = getDb();
 
