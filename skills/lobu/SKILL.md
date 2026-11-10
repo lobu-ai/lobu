@@ -300,7 +300,9 @@ export default function Pipeline() {
 }
 ```
 
-`defineView` is the view's only declaration: `key`, optional `name` (defaults to the key) and `description`, `attach`, `params` and `actions` are read from it, never passed separately. `views.set` always requires `source_code` containing the entrypoint module, including when retaining multiple files. Write `defineView` out as a literal (no variables, spreads or `${}` templates): the server reads it without running the module.
+`defineView` is the view's only declaration: `key`, optional `name` (defaults to the key) and `description`, `attach`, `params`, `actions` and `resources` are read from it, never passed separately. `views.set` always requires `source_code` containing the entrypoint module, including when retaining multiple files. Write `defineView` out as a literal (no variables, spreads or `${}` templates): the server reads it without running the module.
+
+A view makes no network requests of its own; data comes through `useQuery`. The one exception is images: `resources: ["https://tile.openstreetmap.org"]` lets the view load images (map tiles, logos) from those origins. Each entry is a bare `https://` origin with a public hostname (no path, wildcard, localhost or IP), at most 8. Scripts, styles, fonts and fetches from a declared origin are still blocked, and a save whose view loads anything else fails browser validation.
 
 For a multi-file view, `files` maps relative paths to complete source strings and `entrypoint` names the view module. Include all three inputs below; `source_code` must exactly equal `files[entrypoint]`:
 

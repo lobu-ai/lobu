@@ -134,6 +134,8 @@ export interface StoredView {
   attach: ViewAttachment[];
   params: Record<string, ViewParamDecl>;
   actions: Record<string, ViewActionDecl>;
+  /** Bare https origins the view may load images from. */
+  resources: string[];
   last_writer: string;
   updated_at: string;
 }
@@ -153,6 +155,7 @@ export interface SetViewInput {
   attach: ViewAttachment[];
   params: StoredView['params'];
   actions: StoredView['actions'];
+  resources: string[];
   last_writer: string;
 }
 
@@ -170,6 +173,7 @@ interface ViewRow {
   attach: unknown;
   params: unknown;
   actions: unknown;
+  resources: unknown;
   last_writer: string;
   updated_at: Date;
 }
@@ -189,6 +193,7 @@ function mapViewRow(row: ViewRow): StoredView {
     attach: (row.attach ?? []) as ViewAttachment[],
     params: (row.params ?? {}) as StoredView['params'],
     actions: (row.actions ?? {}) as StoredView['actions'],
+    resources: (row.resources ?? []) as string[],
     last_writer: String(row.last_writer),
     updated_at:
       row.updated_at instanceof Date
@@ -205,7 +210,7 @@ export async function getView(
   const rows = await sql<ViewRow>`
     SELECT key, name, description, source_code, compiled_code, content_hash,
       source_files, dependencies, source_complete, compile_config_hash,
-      attach, params, actions, last_writer, updated_at
+      attach, params, actions, resources, last_writer, updated_at
     FROM views
     WHERE organization_id = ${organizationId} AND key = ${key}
     LIMIT 1
@@ -218,7 +223,7 @@ export async function listViews(organizationId: string): Promise<StoredView[]> {
   const rows = await sql<ViewRow>`
     SELECT key, name, description, source_code, compiled_code, content_hash,
       source_files, dependencies, source_complete, compile_config_hash,
-      attach, params, actions, last_writer, updated_at
+      attach, params, actions, resources, last_writer, updated_at
     FROM views
     WHERE organization_id = ${organizationId}
     ORDER BY key ASC
@@ -257,7 +262,7 @@ export async function setView(
     INSERT INTO views (
       organization_id, key, name, description, source_code, compiled_code,
       content_hash, source_files, dependencies, source_complete, compile_config_hash,
-      attach, params, actions, last_writer, updated_at
+      attach, params, actions, resources, last_writer, updated_at
     ) VALUES (
       ${organizationId}, ${input.key}, ${input.name}, ${input.description},
       ${input.source_code}, ${input.compiled_code}, ${input.content_hash},
@@ -265,7 +270,7 @@ export async function setView(
       ${input.dependencies ? sql.json(input.dependencies) : null}, ${input.source_complete ?? false},
       ${input.compile_config_hash ?? null},
       ${sql.json(input.attach)}, ${sql.json(input.params)},
-      ${sql.json(input.actions)}, ${input.last_writer}, NOW()
+      ${sql.json(input.actions)}, ${sql.json(input.resources)}, ${input.last_writer}, NOW()
     )
     ON CONFLICT (organization_id, key) DO UPDATE SET
       name = EXCLUDED.name,
@@ -280,12 +285,13 @@ export async function setView(
       attach = EXCLUDED.attach,
       params = EXCLUDED.params,
       actions = EXCLUDED.actions,
+      resources = EXCLUDED.resources,
       last_writer = EXCLUDED.last_writer,
       updated_at = NOW()
     WHERE ${expected !== null}
     RETURNING key, name, description, source_code, compiled_code, content_hash,
       source_files, dependencies, source_complete, compile_config_hash,
-      attach, params, actions, last_writer, updated_at
+      attach, params, actions, resources, last_writer, updated_at
   `;
   if (!rows[0]) throw new ToolUserError('View changed while the candidate was being validated; retry against the current version', 409);
   return { view: mapViewRow(rows[0]), written: true };
@@ -449,12 +455,12 @@ export async function validateViewCandidate(view: StoredView, runnerUrl: string 
     const scenarios: ValidationScenario[] = ['light', 'dark'].flatMap(theme =>
       ['inline', 'fullscreen'].flatMap(displayMode => ['empty', 'error', 'loading'].map(queryState =>
         ({ theme, displayMode, queryState, scope, params }) as ValidationScenario)));
-    await validateViewScenarios(artifact, scenarios, runnerUrl);
+    await validateViewScenarios(artifact, scenarios, view.resources, runnerUrl);
   }
 }
 
-async function validateViewScenarios(artifact: ValidationRequest['artifact'], scenarios: ValidationScenario[], runnerUrl: string): Promise<void> {
-  const body = JSON.stringify({ artifact, scenarios } satisfies ValidationRequest);
+async function validateViewScenarios(artifact: ValidationRequest['artifact'], scenarios: ValidationScenario[], resources: string[], runnerUrl: string): Promise<void> {
+  const body = JSON.stringify({ artifact, scenarios, resources } satisfies ValidationRequest);
   if (Buffer.byteLength(body) > VALIDATION_MAX_BYTES) throw new ToolUserError('View validation artifact exceeds the runner size limit', 422, 'VALIDATION');
   let receipt: unknown;
   try {
@@ -598,7 +604,7 @@ export function isServerBuildable(dependencies: SourceDependencies): boolean {
  * The view's own declaration, read from its module's `defineView({...})`
  * without running it: esbuild strips TypeScript and JSX, then the literal is
  * read off the syntax tree. The module is the only place a view declares its
- * key, name, description, attach, params and actions.
+ * key, name, description, attach, params, actions and resources.
  */
 export async function readViewModule(source: string): Promise<ViewDefinitionRecord> {
   let js: string;
@@ -829,6 +835,7 @@ async function rebuildView(
       attach: view.attach,
       params: view.params,
       actions: view.actions,
+      resources: view.resources,
     },
     compiled,
     { sourceFiles: view.source_files as SourceFiles, dependencies: view.dependencies as SourceDependencies }
@@ -852,7 +859,7 @@ async function rebuildView(
       AND compile_config_hash = ${view.compile_config_hash}
     RETURNING key, name, description, source_code, compiled_code, content_hash,
       source_files, dependencies, source_complete, compile_config_hash,
-      attach, params, actions, last_writer, updated_at
+      attach, params, actions, resources, last_writer, updated_at
   `;
   return rows.length > 0 ? mapViewRow(rows[0]) : getView(organizationId, view.key);
 }
@@ -869,7 +876,8 @@ export function viewResourceMeta(view: StoredView): {
     name: view.name,
     description: view.description || `Lobu view ${view.key}`,
     appDir: `views/${view.key}`,
-    csp: { connectDomains: [], resourceDomains: [], frameDomains: [] },
+    // Image origins the view declared; it may connect to and frame nothing.
+    csp: { connectDomains: [], resourceDomains: [...view.resources], frameDomains: [] },
     prefersBorder: true,
   };
 }

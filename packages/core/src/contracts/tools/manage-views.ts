@@ -173,6 +173,22 @@ export const ViewActionDeclSchema = Type.Object({
 });
 export type ViewActionDecl = Static<typeof ViewActionDeclSchema>;
 
+/** Most external origins one view may load images from. */
+const VIEW_MAX_RESOURCES = 8;
+
+// External origins the view may load images from (map tiles, logos). Each is a
+// bare https origin with a public hostname; anything else the view requests,
+// and images from any other origin, stay blocked. Checked by
+// `readViewDefinition`, which also drops duplicates.
+const ViewResourcesSchema = Type.Array(
+  Type.String({ minLength: 1, maxLength: 260 }),
+  {
+    maxItems: VIEW_MAX_RESOURCES,
+    description:
+      "External origins the view may load images from, e.g. 'https://tile.openstreetmap.org': https, a public hostname, no path. At most 8.",
+  }
+);
+
 // Everything a view declares about itself, read from its module's
 // `export const view = defineView({...})`. The module is the only place these
 // live: `set` takes the source and the server reads this out of it.
@@ -203,6 +219,7 @@ export const ViewDefinitionSchema = Type.Object(
           "Declared actions: the event kind each emits and the entity fields each may update.",
       })
     ),
+    resources: Type.Optional(ViewResourcesSchema),
   },
   { additionalProperties: false }
 );
@@ -221,6 +238,7 @@ export const ViewRowSchema = Type.Object({
   attach: Type.Array(ViewAttachmentSchema),
   params: Type.Record(Type.String(), ViewParamDeclSchema),
   actions: Type.Record(Type.String(), ViewActionDeclSchema),
+  resources: ViewResourcesSchema,
   // Optional because a reader outside the workspace (a public workspace's
   // visitor) gets the list without anyone's user id in it.
   last_writer: Type.Optional(
@@ -246,13 +264,13 @@ export type ViewRow = Static<typeof ViewRowSchema>;
 export const SetViewAction = Type.Object({
   action: Type.Literal("set", {
     description:
-      "Store a view: read its key, name, description, attach, params and actions from the module's `export const view = defineView({...})`, compile it, and upsert by that key.",
+      "Store a view: read its key, name, description, attach, params, actions and resources from the module's `export const view = defineView({...})`, compile it, and upsert by that key.",
   }),
   source_code: Type.String({
     minLength: 1,
     maxLength: 1_000_000,
     description:
-      "[set] The view module source (TSX). Its `defineView({...})` argument must be a literal; it is the only place the view's key, name, description, attach, params and actions are declared.",
+      "[set] The view module source (TSX). Its `defineView({...})` argument must be a literal; it is the only place the view's key, name, description, attach, params, actions and resources are declared.",
   }),
   compiled_code: Type.Optional(
     Type.String({

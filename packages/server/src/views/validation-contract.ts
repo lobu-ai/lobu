@@ -19,6 +19,9 @@ export interface ValidationScenario {
 export interface ValidationRequest {
   artifact: ValidationArtifact;
   scenarios: ValidationScenario[];
+  /** Origins the view declared for images. The runner aborts those image
+   * requests without a diagnostic; every other request still fails. */
+  resources: string[];
 }
 export interface ValidationResult {
   passed: boolean;

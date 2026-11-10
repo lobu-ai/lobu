@@ -160,6 +160,7 @@ describe('views resources + open_view + invoke_view_action', () => {
 						attach: [{ collection: 'company' }, { record: 'company' }],
 						params: { by: { type: 'string', default: 'owner' } },
 						actions: { retry: { emits: 'test.poked' } },
+						resources: ['https://tiles.example.com'],
 					},
 					VIEW_SOURCE
 				),
@@ -239,6 +240,12 @@ describe('views resources + open_view + invoke_view_action', () => {
 		// base-uri 'self', so both would 404 there.
 		expect(html).not.toMatch(/src="\.\//);
 		expect(html).not.toContain('<base');
+		// The host may load images from the view's declared origins, and the
+		// view may connect to and frame nothing.
+		const { csp } = result.contents[0]._meta.ui;
+		expect(csp.resourceDomains).toContain('https://tiles.example.com');
+		expect(csp.connectDomains).toEqual([]);
+		expect(csp.frameDomains).toEqual([]);
 	});
 
 	it('fails closed on a removed view resource', async () => {

@@ -121,6 +121,7 @@ describe("view desired state", () => {
           attach: [{ collection: "deal" }],
           params: { by: { type: "string", default: "owner" } },
           actions: { markWon: { emits: "deal.won" } },
+          resources: [],
         },
         view?.compiledCode ?? "",
         view && {
@@ -205,6 +206,7 @@ export default function Board() { return LABEL; }
           attach: [{ collection: "deal" }],
           params: {},
           actions: {},
+          resources: [],
         },
         firstView?.compiledCode ?? "",
         firstView && {

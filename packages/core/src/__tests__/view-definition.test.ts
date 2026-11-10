@@ -30,6 +30,7 @@ describe("readViewDefinition", () => {
       ],
       params: { min: { type: "number", default: -1 } },
       actions: { win: { emits: "deal.won" } },
+      resources: [],
     });
     expect(
       readViewDefinition(
@@ -42,6 +43,7 @@ describe("readViewDefinition", () => {
       attach: [{ workspace: true }],
       params: {},
       actions: {},
+      resources: [],
     });
   });
 

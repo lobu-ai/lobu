@@ -138,6 +138,7 @@ function makeFetch(store: Store) {
           attach: def.attach,
           params: def.params,
           actions: def.actions,
+          resources: def.resources,
           last_writer: "apply:test",
           updated_at: new Date().toISOString(),
           compiled_bytes: 10,

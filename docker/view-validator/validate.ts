@@ -6,6 +6,12 @@ import {
   type ValidationResult,
 } from "../../packages/server/src/views/validation-contract";
 
+/** 1x1 transparent GIF served for images from a view's declared origins. */
+const BLANK_GIF = Buffer.from(
+  "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7",
+  "base64"
+);
+
 /** Fresh browser per candidate: no cookies, reusable pages, API credentials,
  * network access, or author code in the API process. The container is a second
  * boundary; Chromium's own sandbox remains enabled. */
@@ -14,6 +20,8 @@ export async function validateCandidate(
   chromium: BrowserType
 ): Promise<ValidationResult> {
   const identity = validationIdentity(input.artifact);
+  // A runner request from before views declared resources carries none.
+  const imageOrigins = new Set(input.resources ?? []);
   const diagnostics: string[] = [];
   const started = Date.now();
   const server = await chromium.launchServer({
@@ -68,6 +76,14 @@ export async function validateCandidate(
             contentType: asset.contentType,
             headers: { "Access-Control-Allow-Origin": "*" },
           });
+        } else if (
+          request.resourceType() === "image" &&
+          imageOrigins.has(new URL(request.url()).origin)
+        ) {
+          // A declared image origin (map tiles): allowed in the product, but
+          // the runner stays offline, so a blank pixel answers it here.
+          // Aborting would log "Failed to load resource", a failure above.
+          await route.fulfill({ body: BLANK_GIF, contentType: "image/gif" });
         } else {
           fail(
             `Unbrokered network request: ${new URL(request.url()).protocol}`

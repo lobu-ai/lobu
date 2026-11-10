@@ -45,6 +45,9 @@ export function createValidatorServer() {
         typeof input.artifact.runtime !== "string" ||
         !input.artifact.assets ||
         !Array.isArray(input.scenarios) ||
+        (input.resources !== undefined &&
+          (!Array.isArray(input.resources) ||
+            input.resources.some((origin) => typeof origin !== "string"))) ||
         input.scenarios.length < 1 ||
         input.scenarios.length > 48 ||
         input.scenarios.some(

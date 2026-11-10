@@ -56,7 +56,7 @@ const DEFAULT_DEF = {
 };
 const SIMPLE_MODULE = viewModule(DEFAULT_DEF, SIMPLE_SOURCE);
 /** The keys a module declares; anything else in `extra` is a set argument. */
-const DECLARED = new Set(["key", "name", "description", "attach", "params", "actions"]);
+const DECLARED = new Set(["key", "name", "description", "attach", "params", "actions", "resources"]);
 
 const REACT_SOURCE = `import React from "react";
 export default function Board() { return React.createElement("div", null, "hi"); }
@@ -226,6 +226,28 @@ export default function Board() {
   // remaining failures include one that visits both workspace and record scope.
   }, 20 * VALIDATION_TIMEOUT_MS + 10_000);
 
+  it("lets a view load images from its declared origins only, in isolated Chromium", async () => {
+    const { createValidatorServer } = await import('../../../../../../docker/view-validator/service');
+    const runner = createValidatorServer();
+    await new Promise<void>(resolve => runner.listen(0, '127.0.0.1', resolve));
+    const previous = TEST_ENV.VIEW_VALIDATOR_URL;
+    TEST_ENV.VIEW_VALIDATOR_URL = `http://127.0.0.1:${(runner.address() as {port:number}).port}`;
+    const map = { key: 'map', attach: [{ workspace: true }], actions: {}, resources: ['https://tiles.example.com'] };
+    try {
+      const declared = await setView('export default function Map() { return <img alt="tile" src="https://tiles.example.com/0/0/0.png" />; }', map);
+      expect(declared.view.resources).toEqual(['https://tiles.example.com']);
+      const before = await getView(orgId, 'map');
+      await expect(setView('export default function Map() { return <img alt="tile" src="https://elsewhere.example.org/0/0/0.png" />; }', map))
+        .rejects.toThrow(/Unbrokered network request/);
+      const script = 'import {useEffect} from "react"; export default function Map() { useEffect(() => { const s = document.createElement("script"); s.src = "https://tiles.example.com/tiles.js"; document.head.appendChild(s); }, []); return <p>map</p>; }';
+      await expect(setView(script, map)).rejects.toThrow(/Unbrokered network request/);
+      expect(await getView(orgId, 'map')).toEqual(before);
+    } finally {
+      TEST_ENV.VIEW_VALIDATOR_URL = previous;
+      await new Promise<void>((resolve, reject) => runner.close(error => error ? reject(error) : resolve()));
+    }
+  }, 3 * VALIDATION_TIMEOUT_MS + 10_000);
+
 	it("replays the source migration in either direction without inventing legacy provenance", async () => {
 		const dir = resolve(import.meta.dirname, "../../../../../../db/migrations");
 		const file = "20260924000000_resource_source_files.sql";
@@ -270,7 +292,7 @@ export default function Board() {
 		for (const [key, attach] of Object.entries(legacy)) {
 			await storeView(orgId, {
 				key, name: key, description: "", source_code: SIMPLE_MODULE, compiled_code: compiled,
-				content_hash: key, attach: [], params: {}, actions: {}, last_writer: "test",
+				content_hash: key, attach: [], params: {}, actions: {}, resources: [], last_writer: "test",
 			});
 			await sql`UPDATE views SET attach = ${sql.json(attach)} WHERE organization_id = ${orgId} AND key = ${key}`;
 		}
@@ -350,6 +372,62 @@ export default function Board() {
 		expect(list.views[0]).not.toHaveProperty("source_code");
 		expect(list.views[0]).not.toHaveProperty("compiled_code");
 		expect(list.views[0]).not.toHaveProperty("source_files");
+	});
+
+	it("stores declared image origins, deduplicated, and returns them from set, get and list", async () => {
+		const plain = await setView(SIMPLE_SOURCE, { key: "plain" });
+		expect(plain.view.resources).toEqual([]);
+		const set = await setView(SIMPLE_SOURCE, {
+			key: "map",
+			resources: [
+				"https://tiles.example.com",
+				"https://images.example.org:8443",
+				"https://tiles.example.com",
+			],
+		});
+		const declared = ["https://tiles.example.com", "https://images.example.org:8443"];
+		expect(set.view.resources).toEqual(declared);
+		const get = (await executeTool(
+			"manage_views",
+			{ action: "get", key: "map" },
+			TEST_ENV,
+			ownerCtx
+		)) as { view: Record<string, unknown> };
+		expect(get.view.resources).toEqual(declared);
+		const list = (await executeTool(
+			"manage_views",
+			{ action: "list" },
+			TEST_ENV,
+			ownerCtx
+		)) as { views: Record<string, unknown>[] };
+		expect(Object.fromEntries(list.views.map((view) => [view.key, view.resources])))
+			.toEqual({ map: declared, plain: [] });
+	});
+
+	it("rejects resources that are not bare public https origins, naming the entry", async () => {
+		for (const entry of [
+			"http://tiles.example.com",
+			"https://tiles.example.com/",
+			"https://tiles.example.com/tiles",
+			"https://tiles.example.com?v=1",
+			"https://tiles.example.com#top",
+			"https://user@tiles.example.com",
+			"https://*.example.com",
+			"https://localhost",
+			"https://tiles.localhost",
+			"https://127.0.0.1",
+			"https://[::1]",
+			"https://tiles",
+			"tiles.example.com",
+		]) {
+			const err = await setView(SIMPLE_SOURCE, { resources: [entry] }).catch((e) => e);
+			expect(err, entry).toBeInstanceOf(ToolUserError);
+			expect((err as ToolUserError).httpStatus, entry).toBe(400);
+			expect((err as ToolUserError).message, entry).toContain(JSON.stringify(entry));
+		}
+		const nine = Array.from({ length: 9 }, (_, i) => `https://tiles${i}.example.com`);
+		await expect(setView(SIMPLE_SOURCE, { resources: nine })).rejects.toMatchObject({ httpStatus: 400 });
+		expect(await getView(orgId, "pipeline")).toBeNull();
 	});
 
 	it("retains imported source changes even when the compiled artifact is unchanged; rejects invalid source atomically", async () => {
@@ -833,6 +911,7 @@ export default function Broken() { return <NonexistentNativeTable />; }`)).rejec
 					attach: [{ collection: "deal" }],
 					params: { by: { type: "string", default: "owner" } },
 					actions: { markWon: { emits: "deal.won" } },
+					resources: [],
 				},
 				BUNDLE_B
 			)
@@ -866,7 +945,7 @@ export default function Broken() { return <NonexistentNativeTable />; }`)).rejec
 			.digest("hex")
 			.slice(0, 16);
 		expect(legacyHash).not.toBe(
-			contentHash(SIMPLE_MODULE, legacyMeta, compiled)
+			contentHash(SIMPLE_MODULE, { ...legacyMeta, resources: [] }, compiled)
 		);
 		await storeView(orgId, {
 			key: "pipeline",
@@ -878,13 +957,14 @@ export default function Broken() { return <NonexistentNativeTable />; }`)).rejec
 			attach: [{ collection: "deal" }],
 			params: { by: { type: "string", default: "owner" } },
 			actions: { markWon: { emits: "deal.won" } },
+			resources: [],
 			last_writer: "migration:view-templates",
 		});
 		// Same executable content refreshes the stored identity exactly once.
 		const refresh = await setView(SIMPLE_SOURCE);
 		expect(refresh.written).toBe(true);
 		expect(refresh.view.content_hash).toBe(
-			contentHash(SIMPLE_MODULE, legacyMeta, compiled, { sourceFiles: { entrypoint: "index.tsx", files: { "index.tsx": SIMPLE_MODULE } }, dependencies: {} })
+			contentHash(SIMPLE_MODULE, { ...legacyMeta, resources: [] }, compiled, { sourceFiles: { entrypoint: "index.tsx", files: { "index.tsx": SIMPLE_MODULE } }, dependencies: {} })
 		);
 		const again = await setView(SIMPLE_SOURCE);
 		expect(again.written).toBe(false);

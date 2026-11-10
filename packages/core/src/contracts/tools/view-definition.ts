@@ -17,6 +17,8 @@ export interface ViewDefinitionRecord {
   attach: ViewAttachment[];
   params: Record<string, ViewParamDecl>;
   actions: Record<string, ViewActionDecl>;
+  /** Bare https origins the view may load images from, deduplicated. */
+  resources: string[];
 }
 
 const VIEWS_PACKAGE = "@lobu/views";
@@ -72,6 +74,15 @@ export function readViewDefinition(js: string): ViewDefinitionRecord {
       );
     }
   }
+  const resources = [...new Set(def.resources ?? [])];
+  for (const entry of resources) {
+    const problem = imageOriginProblem(entry);
+    if (problem) {
+      throw new Error(
+        `defineView.resources: ${JSON.stringify(entry)} ${problem}`
+      );
+    }
+  }
   return {
     key: def.key,
     name: def.name?.trim() ? def.name : def.key,
@@ -79,7 +90,46 @@ export function readViewDefinition(js: string): ViewDefinitionRecord {
     attach: def.attach,
     params: def.params ?? {},
     actions: def.actions ?? {},
+    resources,
   };
+}
+
+/**
+ * Why `entry` is not a declarable image origin, or null when it is: exactly
+ * `https://<host>[:port]` as the URL parser prints the origin (so no path,
+ * query, fragment, userinfo, uppercase or default port), with a public
+ * multi-label hostname. Localhost, IP literals and single-label hosts would
+ * point a viewer's browser at their own machine or network.
+ */
+function imageOriginProblem(entry: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(entry);
+  } catch {
+    return "is not a URL; write an origin like https://tiles.example.com";
+  }
+  if (url.protocol !== "https:") return "must use https";
+  if (url.hostname.includes("*"))
+    return "cannot use a wildcard; list each origin";
+  if (url.origin !== entry) {
+    return `must be a bare origin with no path, query, fragment or credentials; write ${url.origin}`;
+  }
+  const host = url.hostname;
+  // The URL parser brackets every IPv6 literal and rewrites any host whose
+  // last label is numeric into IPv4, so these two checks cover IP literals.
+  const labels = host.split(".");
+  const last = labels[labels.length - 1] ?? "";
+  const numeric = last !== "" && [...last].every((c) => c >= "0" && c <= "9");
+  if (host.startsWith("[") || numeric) {
+    return "must name a host, not an IP address";
+  }
+  if (host === "localhost" || host.endsWith(".localhost")) {
+    return "must be a public host, not localhost";
+  }
+  if (labels.length < 2 || labels.some((label) => label === "")) {
+    return "must be a fully qualified public hostname";
+  }
+  return null;
 }
 
 type AnyNode = Node & Record<string, unknown>;

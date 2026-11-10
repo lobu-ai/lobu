@@ -53,6 +53,7 @@ describe("loader handoff in a real browser", () => {
 			attach: [],
 			params: {},
 			actions: {},
+			resources: [],
 			last_writer: "probe",
 			updated_at: new Date().toISOString(),
 		}, "https://app.example/acme/", await viewRuntimeScript());

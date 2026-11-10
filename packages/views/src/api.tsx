@@ -171,6 +171,11 @@ export interface ViewDefinition {
   attach: Attachment[];
   params?: Record<string, ParamDef>;
   actions?: Record<string, ActionDef>;
+  /** External origins the view may load images from, such as a map tile
+   *  server: bare https origins with a public hostname and no path
+   *  (`"https://tile.openstreetmap.org"`), at most 8. Everything else the
+   *  view requests stays blocked. */
+  resources?: string[];
 }
 
 /** A declared action: the event kind it emits, the entity fields it may
