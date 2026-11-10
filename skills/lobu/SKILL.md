@@ -167,7 +167,7 @@ export default defineConfig({
 
 The entity schema also renders the record page form. Give every array `items` and every object `properties` (bare ones render as raw JSON), put the label in `title` and help text in `description`, mark derived fields `readOnly: true`, and declare every field an Automation writes.
 
-For a "when did this field last change" timestamp, declare root `metadata_schema["x-lobu-stamps"]: { "stage_at": "stage" }` instead of writing it from an Automation. The stamp field must be a declared `{ type: "string", format: "date-time" }` property and the tracked field a declared property. Every writer (agent, SDK, Automation, connector projection, view action, approval) then gets it for free: the server sets `stage_at` when a record is created with `stage` set or when `stage` changes value, and discards any value a caller sends for `stage_at`. `readOnly` alone is presentation only; it is not enforced.
+For a "when did this field last change" timestamp, declare root `metadata_schema["x-lobu-stamps"]: { "stage_at": "stage" }` instead of writing it from an Automation. The stamp field must be a declared `{ type: "string", format: "date-time" }` property (not listed in `required`) and the tracked field a declared property. Every writer (agent, SDK, Automation, connector projection, view action, approval) then gets it for free: the server sets `stage_at` when a record is created with `stage` set or when `stage` changes value, and discards any value a caller sends for `stage_at`. `readOnly` alone is presentation only; it is not enforced.
 
 Seed data records still live as YAML under `./data`. Then seed or operate the memory workspace with:
 

@@ -61,6 +61,13 @@ export function entityStampsConfigError(
 			: null;
 	};
 	const entries = Object.entries(raw as Record<string, unknown>);
+	// Schema validation runs on the caller's metadata before the stamp is
+	// applied, so a required stamp would make every create without one fail.
+	const required = new Set(
+		Array.isArray(metadataSchema.required)
+			? metadataSchema.required.filter((key): key is string => typeof key === "string")
+			: [],
+	);
 	const tracked = new Set(
 		entries.flatMap(([, value]) => (typeof value === "string" ? [value] : [])),
 	);
@@ -73,6 +80,9 @@ export function entityStampsConfigError(
 		if (!stampProp) return `${stamp} is not a declared property`;
 		if (stampProp.type !== "string" || stampProp.format !== "date-time") {
 			return `${stamp} must be declared as { type: "string", format: "date-time" }`;
+		}
+		if (required.has(stamp)) {
+			return `${stamp} is server-owned and cannot be listed in required`;
 		}
 		if (!declared(field)) return `${stamp} tracks ${field}, which is not a declared property`;
 		if (tracked.has(stamp)) {

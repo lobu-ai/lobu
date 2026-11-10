@@ -90,9 +90,10 @@ describe('entity schema CRUD', () => {
       ['non-string tracked field', { stage_at: 5 }],
       ['field stamping itself', { stage_at: 'stage_at' }],
       ['stamp field also tracked', { stage_at: 'stage', closed_at: 'stage_at' }],
-    ])('rejects x-lobu-stamps with a %s before create or update writes', async (_case, stamps) => {
+      ['required stamp field', { stage_at: 'stage' }, { required: ['stage', 'stage_at'] }],
+    ])('rejects x-lobu-stamps with a %s before create or update writes', async (_case, stamps, extra = {}) => {
       const slug = 'invalid-stamps';
-      const metadata_schema = { type: 'object', properties: stampProperties, 'x-lobu-stamps': stamps };
+      const metadata_schema = { type: 'object', properties: stampProperties, ...extra, 'x-lobu-stamps': stamps };
       await expect(owner.entity_schema.createType({ slug, name: 'Invalid stamps', metadata_schema }))
         .rejects.toThrow(/invalid_schema.*x-lobu-stamps/);
       expect(await owner.entity_schema.getType(slug)).toMatchObject({ entity_type: null });
