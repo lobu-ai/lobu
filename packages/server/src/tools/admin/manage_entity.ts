@@ -901,7 +901,16 @@ async function handleList(
 			readRestrictions,
 		),
 		args.entity_type
-			? sql`SELECT metadata_schema FROM entity_types WHERE slug = ${args.entity_type} AND organization_id = ${ctx.organizationId} AND deleted_at IS NULL LIMIT 1`.then(
+			? // The type search path: the workspace's own type, then a public catalog's.
+				sql`
+					SELECT et.metadata_schema FROM entity_types et
+					LEFT JOIN organization o ON o.id = et.organization_id
+					WHERE et.slug = ${args.entity_type} AND et.deleted_at IS NULL
+						AND (et.organization_id = ${ctx.organizationId}
+							OR (o.visibility = 'public' AND et.slug <> ${MEMBER_ENTITY_TYPE_SLUG}))
+					ORDER BY (et.organization_id = ${ctx.organizationId}) DESC, et.id ASC
+					LIMIT 1
+				`.then(
 					(r) => r[0] ?? null,
 				)
 			: Promise.resolve(null),
