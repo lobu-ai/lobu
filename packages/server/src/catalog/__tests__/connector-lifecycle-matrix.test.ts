@@ -80,8 +80,8 @@ describe("bundled connector lifecycle matrix", () => {
 				]),
 		);
 		expect(actionCounts).toEqual({
-			// 6 writes + get_pull_request_status/get_branch_head reads.
-			github: 8,
+			// 6 writes + get_pull_request_status/get_branch_head/get_submodule_pointer reads.
+			github: 9,
 			// Google actions are compiled one per Discovery method
 			// (connectors/src/_google); a pinned-doc refresh moves these counts.
 			"google.calendar": 32,

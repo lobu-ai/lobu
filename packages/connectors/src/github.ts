@@ -250,6 +250,12 @@ interface GitHubBranch {
   };
 }
 
+interface GitHubContentEntry {
+  type: string;
+  path?: string;
+  sha: string;
+}
+
 interface GitHubMutationResponse {
   id: number;
   number: number;
@@ -485,7 +491,7 @@ export default class GitHubConnector extends ConnectorRuntime {
     key: 'github',
     name: 'GitHub',
     description: 'Collects GitHub issues/discussions and executes repo actions.',
-    version: '1.7.0',
+    version: '1.8.0',
     automationEvents: GITHUB_AUTOMATION_EVENTS,
     faviconDomain: 'github.com',
     // A GitHub connection gives the agent's sandbox an authenticated `gh`.
@@ -1133,6 +1139,32 @@ export default class GitHubConnector extends ConnectorRuntime {
           },
         },
       },
+      get_submodule_pointer: {
+        key: 'get_submodule_pointer',
+        kind: 'read',
+        name: 'Get Submodule Pointer',
+        description:
+          "Read the commit SHA a submodule path points at (its gitlink) at a ref. Defaults to the repository's default branch; a path that is not a submodule is an error, never a file SHA.",
+        inputSchema: {
+          type: 'object',
+          required: ['path'],
+          properties: {
+            path: { type: 'string', minLength: 1 },
+            ref: { type: 'string', minLength: 1 },
+            repo_owner: { type: 'string' },
+            repo_name: { type: 'string' },
+          },
+        },
+        outputSchema: {
+          type: 'object',
+          required: ['path', 'sha', 'ref'],
+          properties: {
+            path: { type: 'string' },
+            sha: { type: 'string' },
+            ref: { type: 'string' },
+          },
+        },
+      },
     },
   };
 
@@ -1214,6 +1246,8 @@ export default class GitHubConnector extends ConnectorRuntime {
           return await this.getPullRequestStatus(repo, token, ctx.input);
         case 'get_branch_head':
           return await this.getBranchHead(repo, token, ctx.input);
+        case 'get_submodule_pointer':
+          return await this.getSubmodulePointer(repo, token, ctx.input);
         default:
           return { success: false, error: `Unknown action: ${ctx.actionKey}` };
       }
@@ -2519,17 +2553,52 @@ export default class GitHubConnector extends ConnectorRuntime {
     };
   }
 
+  private async defaultBranch(repo: RepoRef, token: string): Promise<string | undefined> {
+    const repository = await this.readJson<{ default_branch?: string }>(githubRepoApiUrl(repo), token);
+    return asString(repository.default_branch);
+  }
+
+  private async getSubmodulePointer(
+    repo: RepoRef,
+    token: string,
+    input: Record<string, unknown>
+  ): Promise<ActionResult> {
+    const path = asString(input.path);
+    if (!path) return { success: false, error: 'path is required' };
+    const segments = path.split('/');
+    if (segments.some((segment) => segment === '')) {
+      return { success: false, error: `GitHub submodule path has an empty segment: "${path}"` };
+    }
+    const encodedPath = segments.map((segment) => encodeGitHubPathSegment(segment, 'submodule path')).join('/');
+
+    const ref = asString(input.ref) ?? (await this.defaultBranch(repo, token));
+    if (!ref) return { success: false, error: 'GitHub repository has no default branch.' };
+
+    // The contents API answers a gitlink with `type: "submodule"` and the
+    // pinned commit as `sha`; a directory comes back as an array and a file or
+    // symlink carries its own blob SHA, which must never pass as a pointer.
+    const entry = await this.readJson<GitHubContentEntry | GitHubContentEntry[]>(
+      githubRepoApiUrl(repo, `/contents/${encodedPath}?ref=${encodeURIComponent(ref)}`),
+      token
+    );
+    if (Array.isArray(entry) || entry.type !== 'submodule') {
+      const kind = Array.isArray(entry) ? 'dir' : entry.type;
+      return {
+        success: false,
+        error: `GitHub not_submodule: ${path} at ${ref} is a ${kind}, not a submodule.`,
+      };
+    }
+
+    return { success: true, output: { path: entry.path ?? path, sha: entry.sha, ref } };
+  }
+
   private async getBranchHead(
     repo: RepoRef,
     token: string,
     input: Record<string, unknown>
   ): Promise<ActionResult> {
-    let branch = asString(input.branch);
-    if (!branch) {
-      const repository = await this.readJson<{ default_branch?: string }>(githubRepoApiUrl(repo), token);
-      branch = asString(repository.default_branch);
-      if (!branch) return { success: false, error: 'GitHub repository has no default branch.' };
-    }
+    const branch = asString(input.branch) ?? (await this.defaultBranch(repo, token));
+    if (!branch) return { success: false, error: 'GitHub repository has no default branch.' };
 
     const head = await this.readJson<GitHubBranch>(
       githubRepoApiUrl(repo, `/branches/${encodeGitHubPathSegment(branch, 'branch')}`),

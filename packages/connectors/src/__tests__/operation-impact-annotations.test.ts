@@ -58,7 +58,7 @@ describe("built-in connector operation impact annotations", () => {
 	});
 
 	test("github status reads are classified as reads for connector policy", () => {
-		for (const key of ["get_pull_request_status", "get_branch_head"]) {
+		for (const key of ["get_pull_request_status", "get_branch_head", "get_submodule_pointer"]) {
 			expect(github.actions?.[key]?.kind, key).toBe("read");
 		}
 	});

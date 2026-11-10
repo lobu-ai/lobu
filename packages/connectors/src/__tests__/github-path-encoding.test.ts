@@ -13,12 +13,14 @@
  *     through and URL parsing then resolves them away, so encoding alone still
  *     lets `/repos/../../user` reach `/user`.
  *
- * Also drives the two read-only status actions (`get_pull_request_status`,
- * `get_branch_head`) through `execute()` against real `Response` objects:
+ * Also drives the read-only actions (`get_pull_request_status`,
+ * `get_branch_head`, `get_submodule_pointer`) through `execute()` against
+ * real `Response` objects:
  * their paths, GitHub's review-decision dedupe per reviewer, the 50-reviewer
  * and 100-listed-run caps with their truncation flags, check-run paging and
- * counts, the default-branch fallback, and 404 / 403 handling classified from
- * the status and rate-limit headers.
+ * counts, the default-branch fallback, the submodule-only gitlink read with
+ * per-segment path encoding, and 404 / 403 handling classified from the
+ * status and rate-limit headers.
  */
 
 import { beforeAll, describe, expect, mock, test } from "bun:test";
@@ -437,6 +439,87 @@ describe("GitHub read-only status actions", () => {
 		const explicit = await runRead(named.connector, "get_branch_head", { branch: "feat/x?y" });
 		expect(named.calls.map((call) => call.url)).toEqual([`${REPO_API}/branches/feat%2Fx%3Fy`]);
 		expect(explicit.output.branch).toBe("feat/x?y");
+	});
+
+	test("get_submodule_pointer reads the gitlink SHA, encoding each path segment and the ref", async () => {
+		const SUBMODULE_PATH = "packages/own letto?x";
+		const ENCODED_PATH = "packages/own%20letto%3Fx";
+		const gitlink = {
+			type: "submodule",
+			name: "own letto?x",
+			path: SUBMODULE_PATH,
+			sha: "gitlink-sha",
+			submodule_git_url: "https://github.com/acme/owletto.git",
+		};
+		const fallback = buildReadConnector({
+			[REPO_API]: { body: { default_branch: "trunk" } },
+			[`${REPO_API}/contents/${ENCODED_PATH}?ref=trunk`]: { body: gitlink },
+		});
+		const defaulted = await runRead(fallback.connector, "get_submodule_pointer", { path: SUBMODULE_PATH });
+		expect(defaulted.error).toBeUndefined();
+		expect(fallback.calls.map((call) => call.url)).toEqual([
+			REPO_API,
+			`${REPO_API}/contents/${ENCODED_PATH}?ref=trunk`,
+		]);
+		expect(fallback.calls.every((call) => call.auth === "Bearer token")).toBe(true);
+		expect(defaulted.output).toEqual({ path: SUBMODULE_PATH, sha: "gitlink-sha", ref: "trunk" });
+
+		const named = buildReadConnector({
+			[`${REPO_API}/contents/${ENCODED_PATH}?ref=feat%2Fx%26y%3D1`]: { body: gitlink },
+		});
+		const explicit = await runRead(named.connector, "get_submodule_pointer", {
+			path: SUBMODULE_PATH,
+			ref: "feat/x&y=1",
+		});
+		expect(named.calls.map((call) => call.url)).toEqual([
+			`${REPO_API}/contents/${ENCODED_PATH}?ref=feat%2Fx%26y%3D1`,
+		]);
+		expect(explicit.output).toEqual({ path: SUBMODULE_PATH, sha: "gitlink-sha", ref: "feat/x&y=1" });
+	});
+
+	test("get_submodule_pointer refuses a path that is not a submodule instead of returning its SHA", async () => {
+		const cases: Array<[string, unknown, string]> = [
+			["package.json", { type: "file", path: "package.json", sha: "blob-sha" }, "file"],
+			["packages", [{ type: "dir", path: "packages/a", sha: "tree-sha" }], "dir"],
+			["link", { type: "symlink", path: "link", sha: "link-sha", target: "x" }, "symlink"],
+		];
+		for (const [path, body, kind] of cases) {
+			const { connector } = buildReadConnector({
+				[`${REPO_API}/contents/${path}?ref=main`]: { body },
+			});
+			const result = await runRead(connector, "get_submodule_pointer", { path, ref: "main" });
+			expect(result.success, path).toBe(false);
+			expect(result.output, path).toBeUndefined();
+			expect(result.error, path).toContain("GitHub not_submodule");
+			expect(result.error, path).toContain(kind);
+			expect(result.error, path).not.toMatch(/blob-sha|tree-sha|link-sha/);
+		}
+	});
+
+	test("get_submodule_pointer rejects traversal and empty path segments before any request", async () => {
+		for (const path of ["packages/../../user", "./x", "packages//owletto", "/packages", "packages/", ""]) {
+			const { connector, calls } = buildReadConnector({});
+			const result = await runRead(connector, "get_submodule_pointer", { path, ref: "main" });
+			expect(result.success, path).toBe(false);
+			expect(calls, path).toHaveLength(0);
+		}
+	});
+
+	test("get_submodule_pointer types a missing path and a denial from the status", async () => {
+		const missing = buildReadConnector({});
+		const notFound = await runRead(missing.connector, "get_submodule_pointer", { path: "nope/x", ref: "main" });
+		expect(notFound.success).toBe(false);
+		expect(notFound.error).toContain("not_found (HTTP 404)");
+
+		const denied = buildReadConnector({
+			[`${REPO_API}/contents/a/b?ref=main`]: {
+				status: 403,
+				headers: { "x-ratelimit-remaining": "10" },
+				body: { message: "Resource not accessible" },
+			},
+		});
+		const forbidden = await runRead(denied.connector, "get_submodule_pointer", { path: "a/b", ref: "main" });
+		expect(forbidden.error).toContain("forbidden (HTTP 403)");
 	});
 
 	test("reports 404 and 403 from the status and rate-limit headers, not the body text", async () => {
