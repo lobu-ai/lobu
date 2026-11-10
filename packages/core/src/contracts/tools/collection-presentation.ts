@@ -1,6 +1,7 @@
 import { type Static, Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import {
+  AttributeFiltersSchema,
   type CollectionSelection,
   CollectionSelectionSchema,
 } from "./collection-selection";
@@ -47,6 +48,11 @@ const PresetSchema = Type.Object(
         { additionalProperties: false }
       )
     ),
+    /** Adds `{ field, op: "eq", value: <signed-in user's email> }`. Only a
+     * filter: read access is still enforced server-side. */
+    viewer: Type.Optional(
+      Type.Object({ field: Field }, { additionalProperties: false })
+    ),
   },
   { additionalProperties: false }
 );
@@ -67,6 +73,8 @@ export type CollectionPresentation = Static<
 export type CollectionPreset = Static<typeof PresetSchema>;
 export type CollectionTable = Static<typeof TableSchema>;
 
+const MAX_FILTERS = AttributeFiltersSchema.maxItems ?? 32;
+
 export function parseCollectionPresentation(
   raw: unknown
 ): CollectionPresentation {
@@ -77,11 +85,17 @@ export function parseCollectionPresentation(
     if (keys.has(preset.key))
       throw new Error(`Duplicate collection preset: ${preset.key}`);
     keys.add(preset.key);
+    // The resolved selection must still fit the selection contract.
+    if (
+      (preset.selection.filters?.length ?? 0) +
+        (preset.viewer ? 1 : 0) +
+        (preset.relativeDate ? 2 : 0) >
+      MAX_FILTERS
+    )
+      throw new Error(
+        `Collection preset ${preset.key} resolves to more than ${MAX_FILTERS} filters`
+      );
     if (preset.relativeDate) {
-      if ((preset.selection.filters?.length ?? 0) > 30)
-        throw new Error(
-          "Relative date presets support at most 30 other filters"
-        );
       if (preset.relativeDate.fromDays > preset.relativeDate.toDays)
         throw new Error("Relative date range is reversed");
       // Intl validates IANA timezone names, including UTC.
@@ -93,11 +107,30 @@ export function parseCollectionPresentation(
   return raw;
 }
 
+/**
+ * The preset as a concrete selection. A viewer preset needs the signed-in
+ * viewer and throws without one, so it never widens to every row.
+ */
 export function resolveCollectionPreset(
   preset: CollectionPreset,
-  now = new Date()
+  now = new Date(),
+  viewer?: { email: string }
 ): CollectionSelection {
   const selection = structuredClone(preset.selection);
+  if (preset.viewer) {
+    if (!viewer?.email)
+      throw new Error(
+        `Collection preset ${preset.key} needs a signed-in viewer`
+      );
+    selection.filters = [
+      ...(selection.filters ?? []),
+      {
+        field: preset.viewer.field,
+        op: "eq",
+        value: viewer.email.toLowerCase(),
+      },
+    ];
+  }
   if (!preset.relativeDate) return selection;
   const { field, fromDays, toDays, timeZone } = preset.relativeDate;
   const parts = new Intl.DateTimeFormat("en", {
