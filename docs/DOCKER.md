@@ -89,7 +89,11 @@ Migrations are applied at boot. If you roll back to an older image whose migrati
 
 `PUBLIC_GATEWAY_URL` is the canonical public gateway URL. Set it to your real public URL (e.g. `https://lobu.example.com` or `https://lobu.example.com/lobu`) so OAuth callbacks, webhook URLs, public-page bootstrap links, and cookie domain attribute match. Behind nginx/Caddy/Cloudflare — proxy `:8787` and terminate TLS at the proxy.
 
-`FRAME_ANCESTORS` lets you embed the admin UI inside another origin if needed (Content-Security-Policy frame-ancestors directive). Set as a comma-separated list of allowed origins; leave unset to deny all framing.
+`FRAME_ANCESTORS` lets you embed the admin UI inside another origin if needed (Content-Security-Policy frame-ancestors directive). Set as a comma-separated list of allowed origins; leave unset to deny all framing. A `*` port is accepted only on loopback hosts, so a desktop host that serves from a port it picks at launch can embed the app:
+
+```yaml
+FRAME_ANCESTORS: "http://127.0.0.1:*"
+```
 
 ### Path-based orgs (default) vs per-org subdomains
 
