@@ -71,10 +71,14 @@ import {
 	deleteEntity,
 	type EntityData,
 	getEntity,
+	type LinkedEntityRef,
 	listEntities,
 	type RelationshipColumnSpec,
+	resolveSourceBackedLinks,
 	updateEntity,
 } from "../../utils/entity-management";
+import logger from "../../utils/logger";
+import { raceAbort } from "../../utils/race-abort";
 import { ToolUserError } from "../../utils/errors";
 import { runTurnWriteOnce } from "../turn-write-idempotency";
 import { recordKeyColumn } from "@lobu/core/contracts/entity-reference";
@@ -933,7 +937,7 @@ async function handleList(
 		relSpecs.length > 0 && entityIds.length > 0
 			? batchLoadRelationships(entityIds, relSpecs, ctx.organizationId, readRestrictions)
 			: Promise.resolve(new Map()),
-		resolveLinkedColumns(entities, schema, ctx.organizationId, readRestrictions),
+		resolveLinkedColumns(entities, schema, args, ctx, readRestrictions),
 	]);
 
 	const { ownerSlug, baseUrl } = await getOrgUrlContext(ctx);
@@ -989,6 +993,9 @@ async function handleList(
 	};
 }
 
+/** A link lookup must not hold a list page hostage to a slow source. */
+const SOURCE_LINK_READ_TIMEOUT_MS = 10_000;
+
 /**
  * Resolve every `x-link-entity-type` column on the schema to `{slug, name}`
  * pairs in one batch per (entityType, lookupField). Replaces the previous
@@ -996,18 +1003,20 @@ async function handleList(
  * column. Returns a map keyed `${entityType}:${lookupField}` → lookup-value
  * → ref. Empty object if the schema declares no linked columns or none of
  * the visible rows reference linked values.
+ *
+ * Stored targets read `entities`; source-backed targets read their backing
+ * source through {@link resolveSourceBackedLinks}. A lookup by anything other
+ * than `slug` links only a value with exactly one readable match. A source
+ * read that fails, times out, or is not supported by its connector degrades
+ * to no refs for that bucket rather than failing the list.
  */
 async function resolveLinkedColumns(
 	entities: Array<{ metadata?: Record<string, any> | null }>,
 	schema: Record<string, unknown> | null,
-	organizationId: string,
+	args: Static<typeof ListEntitiesAction>,
+	ctx: ToolContext,
 	readRestrictions: EntityReadRestrictions,
-): Promise<
-	Record<
-		string,
-		Record<string, { slug: string; entity_type: string; name: string }>
-	>
-> {
+): Promise<Record<string, Record<string, LinkedEntityRef>>> {
 	if (!schema || entities.length === 0) return {};
 	const properties = (schema as { properties?: Record<string, any> })
 		.properties;
@@ -1049,16 +1058,55 @@ async function resolveLinkedColumns(
 	if (buckets.size === 0) return {};
 
 	const sql = getDb();
-	const out: Record<
-		string,
-		Record<string, { slug: string; entity_type: string; name: string }>
-	> = {};
+	const organizationId = ctx.organizationId;
+	// Only a workspace's own type can be source-backed (the same rule as
+	// listEntities): a catalog's backing SQL never runs here.
+	const linkedTypes = [...new Set([...buckets.values()].map((b) => b.entityType))];
+	const sourceTypes = new Map(
+		(
+			await sql<{ slug: string; backing_sql: string; backing_source: string | null; metadata_schema: unknown }>`
+				SELECT slug, backing_sql, backing_source, metadata_schema FROM entity_types
+				WHERE organization_id = ${organizationId} AND deleted_at IS NULL
+					AND backing_sql IS NOT NULL AND slug = ANY(${pgTextArray(linkedTypes)}::text[])
+			`
+		).map((row) => [row.slug, row]),
+	);
+	const out: Record<string, Record<string, LinkedEntityRef>> = {};
 
 	await Promise.all(
 		[...buckets.entries()].map(
 			async ([bucketKey, { entityType, lookupField, values }]) => {
 				if (values.size === 0) return;
 				const valuesArr = [...values];
+				const sourceType = sourceTypes.get(entityType);
+				if (sourceType) {
+					// The type-level read gate handleList applies to a direct list of
+					// this type. Source rows have no stored id, so record rules can't apply.
+					if (readRestrictions.some((rule) => rule.entity_id === null
+						&& (rule.entity_type_slug === null || rule.entity_type_slug === entityType))) return;
+					try {
+						await assertEntityReadAllowed(args, ctx, entityType);
+					} catch {
+						return;
+					}
+					try {
+						const signal = AbortSignal.timeout(SOURCE_LINK_READ_TIMEOUT_MS);
+						const refs = await raceAbort(
+							resolveSourceBackedLinks(sourceType, lookupField, valuesArr, {
+								...ctx,
+								abortSignal: ctx.abortSignal ? AbortSignal.any([ctx.abortSignal, signal]) : signal,
+							}),
+							signal,
+						);
+						if (Object.keys(refs).length > 0) out[bucketKey] = refs;
+					} catch (err) {
+						logger.warn(
+							{ err, entityType, lookupField, values: valuesArr.length },
+							"Source-backed linked-column lookup failed; rendering plain values",
+						);
+					}
+					return;
+				}
 				const valuesLiteral = pgTextArray(valuesArr);
 				const rows =
 					lookupField === "slug"
@@ -1082,33 +1130,40 @@ async function resolveLinkedColumns(
 								name: string;
 								lookup_value: string;
 							}>`
-              SELECT e.id, e.slug, et.slug AS entity_type, e.name, (e.metadata->>${lookupField}) AS lookup_value
+              SELECT e.id, e.slug, et.slug AS entity_type, e.name,
+                ${lookupField === "name" ? sql`e.name` : sql`(e.metadata->>${lookupField})`} AS lookup_value
               FROM entities e
               JOIN entity_types et ON et.id = e.entity_type_id
               WHERE e.organization_id = ${organizationId}
                 AND e.deleted_at IS NULL
                 AND et.slug = ${entityType}
-                AND (e.metadata->>${lookupField}) = ANY(${valuesLiteral}::text[])
+                AND ${lookupField === "name" ? sql`e.name` : sql`(e.metadata->>${lookupField})`} = ANY(${valuesLiteral}::text[])
             `;
-      if (rows.length === 0) return;
-				const bucketMap: Record<
-					string,
-					{ slug: string; entity_type: string; name: string }
-				> = {};
-      for (const r of await filterEntityReadRows(sql, rows, readRestrictions)) {
-        if (r.lookup_value == null) continue;
+				if (rows.length === 0) return;
+				const readable = await filterEntityReadRows(sql, rows, readRestrictions);
+				// A slug names one entity of its type. Any other field may repeat,
+				// and a repeated value is ambiguous, so it stays plain text.
+				const matchCounts = new Map<string, number>();
+				for (const r of readable) {
+					if (r.lookup_value == null) continue;
+					matchCounts.set(r.lookup_value, (matchCounts.get(r.lookup_value) ?? 0) + 1);
+				}
+				const bucketMap: Record<string, LinkedEntityRef> = {};
+				for (const r of readable) {
+					if (r.lookup_value == null) continue;
+					if (lookupField !== "slug" && matchCounts.get(r.lookup_value) !== 1) continue;
 					bucketMap[r.lookup_value] = {
 						slug: r.slug,
 						entity_type: r.entity_type,
 						name: r.name,
 					};
-      }
-      out[bucketKey] = bucketMap;
+				}
+				out[bucketKey] = bucketMap;
 			},
 		),
-  );
+	);
 
-  return out;
+	return out;
 }
 
 async function handleGet(

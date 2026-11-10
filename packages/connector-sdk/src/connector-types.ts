@@ -51,7 +51,7 @@ export interface ConnectorDefinition {
   /** Available action definitions (keyed by action_key) */
   actions?: Record<string, ActionDefinition>;
   /** Query filters implemented by this connector. Unsupported filters fail before query(). */
-  queryCapabilities?: { exactMatch?: boolean; verbatimExactMatch?: boolean; selection?: boolean };
+  queryCapabilities?: { exactMatch?: boolean; verbatimExactMatch?: boolean; exactMatchAny?: boolean; selection?: boolean };
   /** Connector-normalized events that can activate Automations. */
   automationEvents?: ConnectorAutomationEvent[];
   /**
@@ -1245,8 +1245,14 @@ export interface QueryContext<F = Record<string, unknown>> {
    * connector, which owns its source dialect. Requires queryCapabilities.exactMatch.
    * `verbatim: true` preserves the scalar string without trimming and additionally
    * requires queryCapabilities.verbatimExactMatch. The default stays trimmed.
+   * Exactly one of `value` / `values` is set. `values` (1-500 strings) keeps a
+   * row whose key equals ANY of them, under the same per-column semantics as
+   * `value`, and additionally requires queryCapabilities.exactMatchAny.
    */
-  exactMatch?: { columns: string[]; value: string; verbatim?: boolean };
+  exactMatch?: { columns: string[]; verbatim?: boolean } & (
+    | { value: string; values?: never }
+    | { values: string[]; value?: never }
+  );
   /**
    * Shared collection predicates, applied before sorting and pagination.
    * Search is a literal case-insensitive substring of the projected name.
