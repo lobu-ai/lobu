@@ -203,7 +203,7 @@ export interface BlockingDriftRow extends BaseRow {
   verb: "drift";
   /** Always true — distinguishes blocking drift from legacy non-blocking drift. */
   blocking: true;
-  kind: "entity-type" | "relationship-type" | "automation";
+  kind: "entity-type" | "relationship-type" | "automation" | "navigation";
   id: string;
   /** The moved field; absent for a whole remote-only definition. */
   field?: string;
@@ -222,6 +222,8 @@ export interface AttributionSnapshot {
   entityTypes: RemoteEntityType[];
   relationshipTypes: RemoteRelationshipType[];
   automations: RemoteAutomation[];
+  /** The navigation document after this config's last apply. */
+  navigation?: { config: NavigationConfig | null };
 }
 
 export interface Baseline {
@@ -2532,21 +2534,53 @@ export function computeDiff(
     }
   }
 
-  // Navigation. Full-apply only, and only when the config manages it.
+  // Navigation. Full-apply only, and only when the config manages it. The
+  // document is shared with the app's editor and agents, so replacing it is
+  // three-way: the config may only overwrite what it last applied. A document
+  // someone changed since then — or one this config never applied (a file
+  // exported earlier) — blocks until the file adopts it; the revision the
+  // write presents then guards the read-to-write window (409, never retried).
   if (only === undefined && desired.navigation !== undefined) {
     const current = remote.navigation ?? { revision: 0, config: null };
+    const inSync = deepEqual(desired.navigation, current.config);
+    const applied = baseline?.recorded
+      ? baseline.attribution.navigation
+      : undefined;
+    // Once this config applied a document, any other remote document —
+    // including a reset to the automatic default (null) — was set elsewhere.
+    // Before that, only a set document (one never applied from here) is.
+    const movedElsewhere =
+      !inSync &&
+      (applied === undefined
+        ? current.config !== null
+        : !deepEqual(current.config, applied.config));
     rows.push({
       kind: "navigation",
       id: "workspace",
       desired: desired.navigation,
       remote: current.config,
       revision: current.revision,
-      verb: deepEqual(desired.navigation, current.config)
-        ? "noop"
-        : current.config === null
-          ? "create"
-          : "update",
+      verb:
+        inSync || movedElsewhere
+          ? "noop"
+          : current.config === null
+            ? "create"
+            : "update",
     });
+    if (movedElsewhere) {
+      rows.push({
+        kind: "navigation",
+        verb: "drift",
+        blocking: true,
+        id: "workspace",
+        field: "document",
+        remoteChange: `revision ${current.revision}, edited outside this config`,
+        desiredChange:
+          applied === undefined
+            ? "a different document (never applied from this config)"
+            : "a different document",
+      });
+    }
   }
 
   const counts = { create: 0, update: 0, noop: 0, drift: 0, delete: 0 };

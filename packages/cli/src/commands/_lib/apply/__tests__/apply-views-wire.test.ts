@@ -73,6 +73,8 @@ interface Store {
   navigation?: { revision: number; config: unknown };
   /** Simulate another editor writing between apply's read and its write. */
   concurrentEdit?: boolean;
+  /** The manifest of the latest succeeded deployment, as the server keeps it. */
+  latestManifest?: unknown;
 }
 
 /** Remote store the stubbed `manage_views` reads/writes against. */
@@ -103,6 +105,18 @@ function makeFetch(store: Store) {
         sub: "u1",
         organizations: [{ id: "org_1", slug: "acme", name: "Acme" }],
       });
+    }
+    if (urlStr.endsWith("/deployments/latest")) {
+      return json({
+        deployment:
+          store.latestManifest === undefined
+            ? null
+            : { id: 1, status: "succeeded", manifest: store.latestManifest },
+      });
+    }
+    if (urlStr.endsWith("/deployments") && method === "POST") {
+      if (body.status === "succeeded") store.latestManifest = body.manifest;
+      return json({ ok: true });
     }
     if (urlStr.includes("/manage_views")) {
       if (body.action === "list") return json({ views: store.views });
@@ -301,6 +315,88 @@ describe("apply navigation over the wire", () => {
       /navigation changed since this apply read it/i
     );
     expect(store.navigation).toEqual({ revision: 2, config: null });
+  });
+
+  // Another editor's document: the same tree with Work renamed.
+  const EDITED = {
+    schemaVersion: 1,
+    sections: [
+      {
+        id: "work",
+        label: "Sales work",
+        items: [
+          {
+            id: "pipeline",
+            target: { kind: "view", key: "pipeline", scope: { type: "deal" } },
+          },
+        ],
+      },
+    ],
+  };
+  const LOCAL_EDIT = NAVIGATION.replace('label: "Work"', 'label: "Deals"');
+
+  test("blocks a stale file from replacing a document edited since this config last applied it", async () => {
+    const store: Store = {
+      views: [],
+      navigation: { revision: 0, config: null },
+    };
+    await runApply(mkProject(NAVIGATION), makeFetch(store).fetchStub);
+    expect(store.navigation?.revision).toBe(1);
+
+    // Someone edits the navigation in the app; the config file is unchanged.
+    store.navigation = { revision: 2, config: EDITED };
+    const stale = makeFetch(store);
+    await expect(
+      runApply(mkProject(NAVIGATION), stale.fetchStub)
+    ).rejects.toThrow(/blocked by 1 drift item/);
+    expect(actions(stale.calls)).not.toContain("set_navigation");
+    expect(store.navigation).toEqual({ revision: 2, config: EDITED });
+
+    // Someone resets it to the automatic default: also an edit since.
+    store.navigation = { revision: 3, config: null };
+    const afterReset = makeFetch(store);
+    await expect(
+      runApply(mkProject(NAVIGATION), afterReset.fetchStub)
+    ).rejects.toThrow(/blocked by 1 drift item/);
+    expect(actions(afterReset.calls)).not.toContain("set_navigation");
+    expect(store.navigation).toEqual({ revision: 3, config: null });
+  });
+
+  test("applies a config edit while the document is still what this config last applied", async () => {
+    const store: Store = {
+      views: [],
+      navigation: { revision: 0, config: null },
+    };
+    await runApply(mkProject(NAVIGATION), makeFetch(store).fetchStub);
+    await runApply(mkProject(LOCAL_EDIT), makeFetch(store).fetchStub);
+    expect(store.navigation?.revision).toBe(2);
+    expect(store.navigation?.config).toMatchObject({
+      sections: [{ label: "Deals" }],
+    });
+  });
+
+  test("an exported document is adopted first, then edits apply over it", async () => {
+    // Exported from a workspace whose navigation someone set in the app:
+    // there is no record of what this config applied, so a changed file
+    // cannot tell an older export from a newer one and blocks.
+    const store: Store = {
+      views: [],
+      navigation: { revision: 3, config: EDITED },
+    };
+    await expect(
+      runApply(mkProject(NAVIGATION), makeFetch(store).fetchStub)
+    ).rejects.toThrow(/blocked by 1 drift item/);
+    expect(store.navigation).toEqual({ revision: 3, config: EDITED });
+    // The file as exported applies as a no-op and records the baseline …
+    const exported = `{ schemaVersion: 1, sections: [{ id: "work", label: "Sales work", items: [
+      { id: "pipeline", target: { kind: "view", key: "pipeline", scope: { type: "deal" } } },
+    ] }] }`;
+    const adopt = makeFetch(store);
+    await runApply(mkProject(exported), adopt.fetchStub);
+    expect(actions(adopt.calls)).not.toContain("set_navigation");
+    // … after which an edit to it applies.
+    await runApply(mkProject(NAVIGATION), makeFetch(store).fetchStub);
+    expect(store.navigation?.revision).toBe(4);
   });
 
   test("rejects an invalid document before any write", async () => {

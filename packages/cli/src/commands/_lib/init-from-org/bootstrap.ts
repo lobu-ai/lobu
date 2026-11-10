@@ -820,7 +820,11 @@ async function fetchOrgState(
     client.listConnectors(true).catch(() => []),
   ]);
   // Only an owner/admin can read the raw document; any other login bootstraps
-  // without it and apply leaves the workspace's navigation unmanaged.
+  // without it and apply leaves the workspace's navigation unmanaged. The
+  // export is a starting point, not a license: apply replaces the document
+  // only while it is still what this config last applied, so run apply once
+  // before editing (a no-op that records it) and a later app edit blocks the
+  // stale file instead of being erased.
   const navigation = await client
     .getNavigation()
     .then((state) => state.config)

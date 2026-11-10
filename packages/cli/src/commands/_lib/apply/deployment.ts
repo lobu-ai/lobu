@@ -1,3 +1,4 @@
+import type { NavigationConfig } from "@lobu/core/contracts/tools/navigation";
 /**
  * Deployment identity for `lobu apply`.
  *
@@ -124,6 +125,8 @@ export interface DeploymentManifest {
     entityTypes: unknown[];
     relationshipTypes: unknown[];
     automations: unknown[];
+    /** The navigation document this config last applied (or found equal). */
+    navigation?: NavigationBaseline;
   };
   /**
    * Kind-qualified definition incarnation identities (`entity-type:12`,
@@ -132,11 +135,17 @@ export interface DeploymentManifest {
   owned?: string[];
 }
 
+/** What the workspace navigation was after this config's last apply. */
+export interface NavigationBaseline {
+  config: NavigationConfig | null;
+}
+
 export interface BaselineRecord {
   attribution: {
     entityTypes: unknown[];
     relationshipTypes: unknown[];
     automations: unknown[];
+    navigation?: NavigationBaseline;
   };
   owned: string[];
   /** Connector key → version from the deployment's post-apply pins. */
@@ -166,11 +175,15 @@ export function loadBaselineFromManifest(
   ) {
     return null;
   }
+  const navigation = attribution.navigation;
   return {
     attribution: {
       entityTypes: attribution.entityTypes,
       relationshipTypes: attribution.relationshipTypes,
       automations: attribution.automations,
+      ...(navigation && typeof navigation === "object" && "config" in navigation
+        ? { navigation: { config: navigation.config } }
+        : {}),
     },
     owned: manifest.owned,
     ...(manifest.connector_versions
@@ -330,7 +343,16 @@ export function buildAttributionAndOwned(
     }
   }
   return {
-    attribution: { entityTypes, relationshipTypes, automations },
+    attribution: {
+      entityTypes,
+      relationshipTypes,
+      automations,
+      // A full apply that manages navigation leaves it as the config says
+      // (a write, or already equal); the next apply compares against this.
+      ...(remote.navigation !== undefined && state.navigation !== undefined
+        ? { navigation: { config: state.navigation } }
+        : {}),
+    },
     owned,
   };
 }

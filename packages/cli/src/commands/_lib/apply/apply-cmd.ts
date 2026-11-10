@@ -1709,6 +1709,10 @@ async function applyProject(
       resolvedOrg?.id,
       prune
     );
+    // Navigation is full-apply only: a partial run keeps the last record.
+    if (opts.only !== undefined && baselineRecord?.attribution.navigation) {
+      built.attribution.navigation = baselineRecord.attribution.navigation;
+    }
     if (opts.only === "memory" && baselineRecord) {
       built.owned = [
         ...built.owned,

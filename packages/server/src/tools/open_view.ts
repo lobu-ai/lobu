@@ -10,6 +10,7 @@ import type { Env } from "../index";
 import { ToolUserError } from "../utils/errors";
 import { resolvePublicOrigin } from "../utils/public-origin";
 import { viewPathSuffix } from "@lobu/core/contracts/tools/view-path";
+import { viewScopeShapeError } from "@lobu/core/contracts/tools/view-scope";
 import { getOrganizationSlug } from "../utils/url-builder";
 import { getView, LOBU_VIEWS_RESOURCE_URI, viewResourceUri, type StoredView } from "../views/views";
 import { listLiveGrantedMemberWorkspaces } from "../auth/oauth/workspace-grants";
@@ -242,14 +243,20 @@ async function resolveViewPath(
 }
 
 /** The view link's query: shared collection selection under its reserved key,
- *  then the resolved params. The view itself is the path. */
+ *  then the resolved params — except those at their declared default, which
+ *  the view fills in itself, so the link names only what differs. The view
+ *  itself is the path. */
 export function viewLinkQuery(
+	view: Pick<StoredView, "params">,
 	scope: { collection?: CollectionSelection },
 	params: Record<string, string | number | boolean>
 ): string {
 	const search = new URLSearchParams();
 	if (scope.collection !== undefined) search.set(COLLECTION_QUERY_KEY, JSON.stringify(scope.collection));
-	for (const [k, v] of Object.entries(params)) search.set(k, String(v));
+	for (const [k, v] of Object.entries(params)) {
+		if (view.params?.[k]?.default === v) continue;
+		search.set(k, String(v));
+	}
 	return search.toString();
 }
 
@@ -265,20 +272,10 @@ async function openViewImpl(
 		throw new ToolUserError(`Unknown view: ${args.key}`, 404);
 	}
 	const scope = args.scope ?? {};
-	if (scope.collection !== undefined && (!scope.type || scope.entity !== undefined || scope.event !== undefined)) {
-		throw new ToolUserError("Collection selection requires scope.type without entity or event", 400);
-	}
+	const shape = viewScopeShapeError(scope);
+	if (shape) throw new ToolUserError(shape, 400);
 	const orgSlug =
 		(await getOrganizationSlug(target.organizationId)) ?? target.organizationId;
-	if (
-		scope.event !== undefined &&
-		(scope.type !== undefined || scope.entity !== undefined)
-	) {
-		throw new ToolUserError(
-			"scope.event names the view's subject on its own; drop scope.type and scope.entity",
-			400
-		);
-	}
 	const event = scope.event === undefined ? null : await resolveEventViewSubject(view, scope.event, env, target);
 	const pathname =
 		scope.event !== undefined
@@ -288,7 +285,7 @@ async function openViewImpl(
 	const origin = resolvePublicOrigin(
 		ctx.requestUrl ?? ctx.baseUrl ?? "http://127.0.0.1"
 	);
-	const query = viewLinkQuery(scope, params);
+	const query = viewLinkQuery(view, scope, params);
 	return {
 		view: args.key,
 		scope: {

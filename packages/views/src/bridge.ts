@@ -20,10 +20,12 @@ import {
   VIEW_EMBED_SIZE_NOTIFICATION,
   VIEW_EMBEDS_FOCUS_METHOD,
   VIEW_EMBEDS_SYNC_METHOD,
+  VIEW_FOCUS_ENTER_NOTIFICATION,
   VIEW_OPEN_RECORD_METHOD,
   VIEW_WORKSPACE_META_KEY,
   type ViewEmbedSlot,
   type ViewEmbedStatus,
+  type ViewFocusDirection,
 } from "@lobu/core/contracts/tools/view-host";
 
 export class ViewBridgeError extends Error {
@@ -123,7 +125,10 @@ export class ViewBridge {
   private dataChangedListeners = new Set<() => void>();
   private embedSizeListeners = new Set<(id: string, height: number) => void>();
   private embedFocusListeners = new Set<
-    (id: string, direction: "forward" | "backward") => void
+    (id: string, direction: ViewFocusDirection) => void
+  >();
+  private focusEnterListeners = new Set<
+    (direction: ViewFocusDirection) => void
   >();
   /** Set by the first `tool-input` and never cleared: queries must not fire
    *  before it (the host seeds scope + params there; anything read earlier
@@ -222,10 +227,16 @@ export class ViewBridge {
 
   /** Keyboard focus left a slot's child (Lobu web host only). */
   onEmbedFocus(
-    listener: (id: string, direction: "forward" | "backward") => void
+    listener: (id: string, direction: ViewFocusDirection) => void
   ): () => void {
     this.embedFocusListeners.add(listener);
     return () => this.embedFocusListeners.delete(listener);
+  }
+
+  /** Keyboard focus entered this view as a slot's child (Lobu web host only). */
+  onFocusEnter(listener: (direction: ViewFocusDirection) => void): () => void {
+    this.focusEnterListeners.add(listener);
+    return () => this.focusEnterListeners.delete(listener);
   }
 
   /** Report every slot on screen. Rejects with code -32601 on a host that
@@ -237,8 +248,8 @@ export class ViewBridge {
   }
 
   /** Move keyboard focus into a slot's child. */
-  focusEmbed(id: string): Promise<unknown> {
-    return this.request(VIEW_EMBEDS_FOCUS_METHOD, { id });
+  focusEmbed(id: string, direction: ViewFocusDirection): Promise<unknown> {
+    return this.request(VIEW_EMBEDS_FOCUS_METHOD, { id, direction });
   }
 
   /**
@@ -518,6 +529,13 @@ export class ViewBridge {
           params.direction === "backward" ? "backward" : "forward";
         for (const listener of [...this.embedFocusListeners])
           listener(params.id, direction);
+        break;
+      }
+      case VIEW_FOCUS_ENTER_NOTIFICATION: {
+        const direction =
+          params.direction === "backward" ? "backward" : "forward";
+        for (const listener of [...this.focusEnterListeners])
+          listener(direction);
         break;
       }
       default:
