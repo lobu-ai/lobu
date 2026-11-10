@@ -202,6 +202,28 @@ describe('external Automation activity', () => {
     expect((await pauseState(id)).schedule_auto_paused_at).not.toBeNull();
   });
 
+  it.each(['missing', 'malformed'])('fails and counts every claim whose pinned version is %s until it pauses', async (damage) => {
+    const id = await createExternal({ execution_config: null, managed_agent_id: null, triggers: [] });
+    for (let attempt = 1; attempt <= 5; attempt++) {
+      const run = await handleTrigger({ action: 'trigger', automation_id: id } as never, ENV, delegated());
+      if (damage === 'missing') {
+        await sql`UPDATE runs SET approved_input = jsonb_set(approved_input, '{version_id}', '999999999'::jsonb)
+          WHERE id = ${run.run_id}`;
+      } else {
+        await sql`UPDATE automation_versions SET skills = '{"not":"an array"}'::jsonb
+          WHERE id = (SELECT (approved_input->>'version_id')::bigint FROM runs WHERE id = ${run.run_id})`;
+      }
+      await expect(handleClaimNextWindow({ action: 'claim_next_window', automation_id: id } as never, ENV, delegated()))
+        .rejects.toMatchObject({ httpStatus: 409, code: 'PRECONDITION_FAILED', details: { run_id: run.run_id } });
+      const [failed] = await sql`SELECT status, error_message FROM runs WHERE id = ${run.run_id}`;
+      expect(failed.status).toBe('failed');
+      expect(failed.error_message).toMatch(/pinned version/);
+      expect((await pauseState(id)).consecutive_scheduled_failures).toBe(attempt);
+    }
+    expect((await pauseState(id)).schedule_auto_paused_at).not.toBeNull();
+    expect(await work(delegated())).toEqual([]);
+  });
+
   it('does not let an external caller take pending native work after the live assignment is cleared', async () => {
     const id = await createExternal({ execution_config: null, triggers: [] });
     const [automation] = await sql`SELECT next_window_start FROM automations WHERE id = ${Number(id)}`;
