@@ -11,7 +11,9 @@ import {
   DataTable,
   formatCompact,
   LineChart,
+  LoadingState,
   PieChart,
+  Skeleton,
   Sparkline,
 } from "../components.js";
 
@@ -366,5 +368,54 @@ describe("formatCompact", () => {
     expect(formatCompact(999)).toBe("999");
     expect(formatCompact(1500)).toBe("1.5K");
     expect(formatCompact(2_500_000)).toBe("2.5M");
+  });
+});
+
+describe("loading placeholders", () => {
+  function stubMotion(reduce: boolean) {
+    const pulses = { started: 0, cancelled: 0 };
+    const w = dom.window as unknown as Record<string, unknown>;
+    w.matchMedia = (query: string) => ({
+      matches: reduce && query.includes("reduce"),
+    });
+    (
+      dom.window.HTMLElement.prototype as unknown as Record<string, unknown>
+    ).animate = () => {
+      pulses.started += 1;
+      return {
+        cancel: () => {
+          pulses.cancelled += 1;
+        },
+      };
+    };
+    return pulses;
+  }
+
+  test("a loading state announces its text in the live region and draws the lines asked for, hidden from readers", async () => {
+    render(<LoadingState text="Loading deals" lines={2} />);
+    await shown();
+    const status = el.querySelectorAll('[role="status"]');
+    expect(status.length).toBe(1);
+    // The live region's content is what is announced.
+    expect(status[0]?.textContent).toBe("Loading deals");
+    const blocks = status[0]?.querySelectorAll('[aria-hidden="true"]') ?? [];
+    expect(blocks.length).toBe(2);
+  });
+
+  test("a skeleton pulses while mounted and stops on unmount, and holds still for reduced motion", async () => {
+    const pulses = stubMotion(false);
+    render(<Skeleton width={120} height={28} />);
+    await shown();
+    expect(pulses.started).toBe(1);
+    const block = el.firstElementChild as HTMLElement;
+    expect([block.style.width, block.style.height]).toEqual(["120px", "28px"]);
+    render(null);
+    await shown();
+    expect(pulses.cancelled).toBe(1);
+
+    const still = stubMotion(true);
+    render(<Skeleton />);
+    await shown();
+    expect(still.started).toBe(0);
   });
 });
