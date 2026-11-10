@@ -398,6 +398,8 @@ describe("computeDiff — idempotency (applying twice is a no-op)", () => {
     if (clearRow?.kind === "entity-type")
       expect(clearRow.changedFields).toEqual(["icon"]);
     expect(computeDiff(clearing, live({ icon: "" })).counts.update).toBe(0);
+    for (const prune of [false, true])
+      expect(computeDiff(clearing, live({}), { prune }).counts.update).toBe(0);
 
     // An icon/color set in the UI survives a config that omits them, even under prune.
     const omitted = buildState([], {

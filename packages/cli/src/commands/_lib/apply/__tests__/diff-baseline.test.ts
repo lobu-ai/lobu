@@ -764,6 +764,51 @@ describe("three-way edge cases", () => {
     );
   });
 
+  test.each([
+    ["icon", false],
+    ["icon", true],
+    ["color", false],
+    ["color", true],
+  ] as const)("a declared empty %s against an unset one stays a noop across recorded baselines (prune=%p)", (field, prune) => {
+    const desired = buildState([taskType({ [field]: "" })]);
+    const unset = emptyRemote();
+    unset.entityTypes = [remoteTask(1, { [field]: null })];
+    const first = computeDiff(desired, unset, {
+      orgId: "org-1",
+      baseline: baselineFor([remoteTask(1, { [field]: null })], [1]),
+      prune,
+    });
+    expect(first.counts.update).toBe(0);
+    expect(first.counts.drift).toBe(0);
+
+    // "" and null both mean unset, so the recorded baseline cannot read the
+    // unchanged live null as drift on the next apply.
+    const recorded = toBaseline(
+      JSON.parse(
+        JSON.stringify(buildAttributionAndOwned(desired, unset, "org-1", prune))
+      )
+    );
+    const next = computeDiff(desired, unset, {
+      orgId: "org-1",
+      baseline: recorded,
+      prune,
+    });
+    expect(next.counts.update).toBe(0);
+    expect(next.counts.drift).toBe(0);
+
+    // A declared "" still clears a live value.
+    const live = emptyRemote();
+    live.entityTypes = [remoteTask(1, { [field]: "x" })];
+    const clear = computeDiff(desired, live, {
+      orgId: "org-1",
+      baseline: baselineFor([remoteTask(1, { [field]: "x" })], [1]),
+      prune,
+    });
+    expect(
+      clear.rows.find((r) => r.kind === "entity-type")?.changedFields
+    ).toEqual([field]);
+  });
+
   test("a baseline recorded before icon/color existed converges a declared change instead of blocking", () => {
     const desired = buildState([taskType({ icon: "✅", color: "#0a7" })]);
     const remote = emptyRemote();

@@ -863,13 +863,22 @@ function compareEntityTypeThreeWay(
     remote: unknown;
     attribution: unknown | undefined;
   }> = [
-    ...ENTITY_TYPE_DISPLAY_FIELDS.map((field) => ({
+    // Display fields are unmanaged when omitted, under BOTH prune and
+    // non-prune: upsert never clears them, so a configMoved classification
+    // would perpetual-update without effect. A declared "" (a clear) is
+    // declared, though it compares as unset.
+    ...ENTITY_TYPE_DISPLAY_FIELDS.filter(
+      (field) => desired[field] !== undefined
+    ).map((field) => ({
       field,
-      desired: desired[field],
-      remote: remote[field],
+      desired: comparableDisplayValue(field, desired[field]),
+      remote: comparableDisplayValue(field, remote[field]),
       attribution:
         attribution &&
-        withUnrecordedDisplayFromLive(attribution, remote)[field],
+        comparableDisplayValue(
+          field,
+          withUnrecordedDisplayFromLive(attribution, remote)[field]
+        ),
     })),
     {
       // Under prune, omitting required means "clear to []" — normalize so an
@@ -936,12 +945,6 @@ function compareEntityTypeThreeWay(
   // — eventKinds/properties round-trip untouched). Only under
   // prune does omission mean "remove". Without this, an unchanged omitted facet
   // would be misclassified as config-moved and executePlan would clear it.
-  // Display fields are unmanaged under BOTH prune and non-prune: upsert
-  // never clears them when omitted, so a configMoved classification would
-  // perpetual-update without effect.
-  const alwaysUnmanaged: ReadonlySet<string> = new Set(
-    ENTITY_TYPE_DISPLAY_FIELDS
-  );
   const omittableOutsidePrune = new Set([
     "required",
     "backing",
@@ -954,7 +957,6 @@ function compareEntityTypeThreeWay(
   return classifyThreeWay(
     triples.filter((t) => {
       if (t.desired !== undefined) return true;
-      if (alwaysUnmanaged.has(t.field)) return false;
       if (
         !prune &&
         (omittableOutsidePrune.has(t.field) ||
@@ -1228,7 +1230,10 @@ const normalizeEntityFacets = (
   // Unset is an explicit null, so a recorded baseline keeps the key and an
   // unset value stays distinguishable from one it never recorded.
   ...(Object.fromEntries(
-    ENTITY_TYPE_DISPLAY_FIELDS.map((field) => [field, e[field] ?? null])
+    ENTITY_TYPE_DISPLAY_FIELDS.map((field) => [
+      field,
+      comparableDisplayValue(field, e[field]) ?? null,
+    ])
   ) as Record<EntityTypeDisplayField, string | null>),
   required: e.required ?? [],
   properties: e.properties ?? {},
@@ -1237,6 +1242,21 @@ const normalizeEntityFacets = (
   eventKinds: e.eventKinds,
   schemaExtras: e.schemaExtras ?? {},
 });
+
+/**
+ * A display field's value as the three-way compare and the baseline see it.
+ * Unset is undefined (recorded as null). For icon/color a declared "" (a
+ * clear) is unset too, since the server reads an unset field as null; the
+ * two-way diff already treats "" and null alike (`stringChanged`). Legacy
+ * fields keep "" as a value.
+ */
+function comparableDisplayValue(
+  field: EntityTypeDisplayField,
+  value: string | null | undefined
+): string | undefined {
+  if (value == null) return undefined;
+  return value === "" && !LEGACY_DISPLAY_FIELDS.has(field) ? undefined : value;
+}
 
 /** The live remote entity type, in the comparable facet shape. */
 const remoteEntityTypeFacets = (r: RemoteEntityType): EntityTypeFacets =>
