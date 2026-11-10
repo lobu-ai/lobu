@@ -20,10 +20,15 @@ try {
   ]) {
     assert.equal((await fetch(new URL(path, url), { method })).status, 404);
   }
+  const image = (src: string) =>
+    `document.body.appendChild(Object.assign(document.createElement("img"), { src: "${src}" }))`;
   for (const [code, expected] of [
     ["", true],
     ['throw new Error("candidate failure")', false],
     ['fetch("https://blocked.invalid/")', false],
+    // A declared image origin is answered offline; any other origin fails.
+    [image("https://tiles.example.com/0.png"), true],
+    [image("https://elsewhere.example.org/0.png"), false],
   ] as const) {
     const artifact = {
       html: `<div id="root">Fixture</div>${handshake}<script>${code}</script>`,
@@ -44,6 +49,7 @@ try {
             params: {},
           },
         ],
+        resources: ["https://tiles.example.com"],
       }),
     });
     assert.equal(response.status, 200);
@@ -60,7 +66,7 @@ try {
     assert.equal(result.runtimeHash, validationIdentity(artifact).runtimeHash);
   }
   console.log(
-    "PASS: isolated validator mounts, rejects broken candidates and denies network"
+    "PASS: isolated validator mounts, rejects broken candidates and denies network beyond declared image origins"
   );
 } finally {
   if (runner)

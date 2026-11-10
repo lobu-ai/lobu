@@ -300,7 +300,9 @@ export default function Pipeline() {
 }
 ```
 
-`defineView` is the view's only declaration: `key`, optional `name` (defaults to the key) and `description`, `attach`, `params` and `actions` are read from it, never passed separately. `views.set` always requires `source_code` containing the entrypoint module, including when retaining multiple files. Write `defineView` out as a literal (no variables, spreads or `${}` templates): the server reads it without running the module.
+`defineView` is the view's only declaration: `key`, optional `name` (defaults to the key) and `description`, `attach`, `params`, `actions` and `resources` are read from it, never passed separately. `views.set` always requires `source_code` containing the entrypoint module, including when retaining multiple files. Write `defineView` out as a literal (no variables, spreads or `${}` templates): the server reads it without running the module.
+
+A view makes no network requests of its own; data comes through `useQuery`. The one exception is images: `resources: ["https://tile.openstreetmap.org"]` declares origins the view may load images (map tiles, logos) from. Each entry is a bare `https://` origin with a public hostname (no path, wildcard, localhost or IP), at most 8. The images-only limit is a save-time check: `views.set` renders the view's empty, error and loading states in an offline browser and refuses the save if anything other than an image from a declared origin is requested. It is not enforced at runtime. MCP hosts receive the origins as the MCP Apps `resourceDomains` CSP, which allows scripts, styles, fonts and media from them as well as images, and the Lobu web app applies no runtime CSP to views. Declare only image or tile CDN origins you trust. Hosts that render through the generic `ui://lobu/views` loader use its CSP, which declares no image origins, so declared images may not load there.
 
 For a multi-file view, `files` maps relative paths to complete source strings and `entrypoint` names the view module. Include all three inputs below; `source_code` must exactly equal `files[entrypoint]`:
 

@@ -1070,7 +1070,7 @@ async function resolveViewSources(
     }
     const bundled = await bundleViewFromFile(abs, baseDir);
     sourceCode = bundled.sourceFiles.files[bundled.sourceFiles.entrypoint]!;
-    const { key, name, description, attach, params, actions } =
+    const { key, name, description, attach, params, actions, resources } =
       bundled.definition;
     if (seen.has(key)) {
       throw new ValidationError(
@@ -1095,6 +1095,7 @@ async function resolveViewSources(
           attach,
           params,
           actions,
+          resources,
         },
         bundled.compiledCode,
         {

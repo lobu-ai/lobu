@@ -783,7 +783,7 @@ export class ApplyClient {
 
   /**
    * Store a view: source + CLI-bundled browser bundle. The server reads the
-   * view's key, attach, params and actions from the source. Returns whether a
+   * view's key, attach, params, actions and resources from the source. Returns whether a
    * write happened (same executable artifact is a server-side no-op).
    */
   async setView(

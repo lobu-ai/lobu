@@ -23,6 +23,7 @@ function meta(
     attach: [{ record: "deal" }],
     params: {},
     actions: {},
+    resources: [],
     ...overrides,
   };
 }
@@ -54,6 +55,19 @@ describe("contentHash", () => {
     expect(after).not.toBe(before);
   });
 
+  test("declaring no resources keeps the identity stored before resources existed; declaring one rehashes", () => {
+    // Pinned from the hash function as it was before views could declare
+    // resources: every stored view without them must stay a no-op on apply.
+    expect(contentHash(SOURCE, meta(), COMPILED)).toBe("dfe7770e73f8986a");
+    expect(
+      contentHash(
+        SOURCE,
+        meta({ resources: ["https://tiles.example.com"] }),
+        COMPILED
+      )
+    ).not.toBe("dfe7770e73f8986a");
+  });
+
   test("key order does not rehash (wire order is not content)", () => {
     const a = contentHash(
       SOURCE,
@@ -61,7 +75,7 @@ describe("contentHash", () => {
       COMPILED
     );
     const reordered = JSON.parse(
-      '{"params":{"x":{"type":"string"}},"name":"pipeline","description":"","attach":[{"record":"deal"}],"actions":{}}'
+      '{"params":{"x":{"type":"string"}},"name":"pipeline","description":"","attach":[{"record":"deal"}],"actions":{},"resources":[]}'
     ) as ViewContentMetadata;
     expect(contentHash(SOURCE, reordered, COMPILED)).toBe(a);
   });

@@ -21,6 +21,7 @@ const VIEW_DEF = {
   content_hash: 'synthetic-probe-hash',
   params: {},
   actions: {},
+  resources: [],
   last_writer: 'synthetic-probe',
 };
 

@@ -19,6 +19,10 @@ export interface ValidationScenario {
 export interface ValidationRequest {
   artifact: ValidationArtifact;
   scenarios: ValidationScenario[];
+  /** Origins the view declared for images. The runner answers those image
+   * requests with a 1x1 blank GIF, offline and without a diagnostic; every
+   * other request still fails. */
+  resources: string[];
 }
 export interface ValidationResult {
   passed: boolean;

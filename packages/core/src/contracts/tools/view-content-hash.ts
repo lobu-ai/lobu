@@ -6,7 +6,7 @@ import type { RetainedSource } from "./source-files";
  * and the CLI (diff-before-apply): ONE function derives the key on both
  * sides, never read off whatever carried it. The hash covers the source, the
  * declared metadata that affects the stored row (name, description, attach,
- * params, actions), the retained files and dependencies when present, AND
+ * params, actions, resources), the retained files and dependencies when present, AND
  * the digest of the executable browser bundle. The
  * bundle matters because the CLI resolves relative imports and view npm deps
  * where node_modules exists: two different executable artifacts built from
@@ -41,6 +41,9 @@ export interface ViewContentMetadata {
   attach: unknown;
   params: unknown;
   actions: unknown;
+  /** Hashed only when non-empty, so a view that declares none keeps the
+   *  identity it had before views could declare resources. */
+  resources: readonly string[];
 }
 
 /**
@@ -57,10 +60,12 @@ export function contentHash(
   const artifactDigest = createHash("sha256")
     .update(compiledCode, "utf8")
     .digest("hex");
+  const { resources, ...declared } = metadata;
+  const hashed = resources.length > 0 ? metadata : declared;
   const hash = createHash("sha256")
     .update(source)
     .update("\n")
-    .update(stableStringify(metadata ?? null))
+    .update(stableStringify(hashed))
     .update("\n")
     .update(artifactDigest);
   if (retainedSource) hash.update("\n").update(stableStringify(retainedSource));

@@ -239,7 +239,7 @@ async function handleSet(
   // CLI hashes with, so both compare exactly what the row would store.
   const def = await readViewModule(args.source_code);
   validateViewDefinition(def);
-  const { key, name, description, attach, params, actions } = def;
+  const { key, name, description, attach, params, actions, resources } = def;
   await assertActionKindsRegistered(ctx.organizationId, actions, attach);
   // Resolve the executable artifact BEFORE the identity: a supplied bundle is
   // validated (non-empty, under the cap) and source-only input is compiled,
@@ -272,6 +272,7 @@ async function handleSet(
       attach,
       params,
       actions,
+      resources,
     },
     compiled,
     retained
@@ -284,7 +285,7 @@ async function handleSet(
   // write after validation; a legacy hash refreshes on its next successful set.
   const current = await getView(ctx.organizationId, key);
   await validateViewCandidate({
-    key, name, description, attach, params, actions,
+    key, name, description, attach, params, actions, resources,
     source_code: args.source_code, compiled_code: compiled, content_hash: hash,
     source_files: retained?.sourceFiles ?? null, dependencies: retained?.dependencies ?? null,
     source_complete: retained !== undefined, compile_config_hash: compileConfigHash,
@@ -305,6 +306,7 @@ async function handleSet(
     attach,
     params,
     actions,
+    resources,
     last_writer: args.last_writer ?? (ctx.applyId ? `apply:${ctx.applyId}` : (ctx.userId ?? 'unknown')),
   }, current);
 

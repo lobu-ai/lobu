@@ -171,6 +171,15 @@ export interface ViewDefinition {
   attach: Attachment[];
   params?: Record<string, ParamDef>;
   actions?: Record<string, ActionDef>;
+  /** External origins the view may load images from, such as a map tile
+   *  server: bare https origins with a public hostname and no path
+   *  (`"https://tile.openstreetmap.org"`), at most 8. Images only is a
+   *  save-time check (the validator renders the empty, error and loading
+   *  states), not a runtime limit: MCP hosts receive these as
+   *  `resourceDomains`, which also allows scripts, styles, fonts and media
+   *  from them, and the Lobu web app applies no runtime CSP to views. Declare
+   *  only image or tile CDN origins you trust. */
+  resources?: string[];
 }
 
 /** A declared action: the event kind it emits, the entity fields it may

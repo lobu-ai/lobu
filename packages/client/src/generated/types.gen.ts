@@ -7507,11 +7507,11 @@ export type ManageViewsData = {
   body:
     | {
         /**
-         * Store a view: read its key, name, description, attach, params and actions from the module's `export const view = defineView({...})`, compile it, and upsert by that key.
+         * Store a view: read its key, name, description, attach, params, actions and resources from the module's `export const view = defineView({...})`, compile it, and upsert by that key.
          */
         action: "set";
         /**
-         * [set] The view module source (TSX). Its `defineView({...})` argument must be a literal; it is the only place the view's key, name, description, attach, params and actions are declared.
+         * [set] The view module source (TSX). Its `defineView({...})` argument must be a literal; it is the only place the view's key, name, description, attach, params, actions and resources are declared.
          */
         source_code: string;
         /**
@@ -7810,6 +7810,10 @@ export type ManageViewsResponses = {
                 };
           };
           /**
+           * External origins the view may load images from, e.g. 'https://tile.openstreetmap.org': https, a public hostname, no path. At most 8.
+           */
+          resources: Array<string>;
+          /**
            * apply:<apply_id> | <user_id> | migration:view-templates. Omitted for readers outside the workspace.
            */
           last_writer?: string;
@@ -7923,6 +7927,10 @@ export type ManageViewsResponses = {
                   };
                 };
           };
+          /**
+           * External origins the view may load images from, e.g. 'https://tile.openstreetmap.org': https, a public hostname, no path. At most 8.
+           */
+          resources: Array<string>;
           /**
            * apply:<apply_id> | <user_id> | migration:view-templates. Omitted for readers outside the workspace.
            */
@@ -8044,6 +8052,10 @@ export type ManageViewsResponses = {
                   };
                 };
           };
+          /**
+           * External origins the view may load images from, e.g. 'https://tile.openstreetmap.org': https, a public hostname, no path. At most 8.
+           */
+          resources: Array<string>;
           /**
            * apply:<apply_id> | <user_id> | migration:view-templates. Omitted for readers outside the workspace.
            */
