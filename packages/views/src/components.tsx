@@ -935,14 +935,90 @@ export function Link({
 /* Query states — render `useQuery` honestly                            */
 /* ------------------------------------------------------------------ */
 
-export function LoadingState({ text = "Loading…" }: { text?: string }) {
+/** Pulse an element while it is mounted, unless the reader asked for less
+ *  motion. The kit ships no stylesheet, so the animation runs from script. */
+function usePulse(ref: RefObject<HTMLElement | null>) {
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || typeof el.animate !== "function") return;
+    if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
+    const pulse = el.animate(
+      [{ opacity: 1 }, { opacity: 0.45 }, { opacity: 1 }],
+      {
+        duration: 1600,
+        iterations: Number.POSITIVE_INFINITY,
+        easing: "ease-in-out",
+      }
+    );
+    return () => pulse.cancel();
+  }, [ref]);
+}
+
+export interface SkeletonProps {
+  /** CSS width; default the full width. */
+  width?: number | string;
+  /** CSS height; default one line of text. */
+  height?: number | string;
+  /** Corner radius; default the host's. */
+  radius?: number | string;
+}
+
+/**
+ * A placeholder shaped like what is loading: a pulsing block in the host's
+ * muted surface colour. Size it like the content it stands for (a figure,
+ * a row, a chart) so the page does not jump when the data lands. Purely
+ * visual; announce the wait with `LoadingState` or your own `role="status"`.
+ */
+export function Skeleton({
+  width = "100%",
+  height = 14,
+  radius,
+}: SkeletonProps) {
+  const ref = useRef<HTMLSpanElement>(null);
+  usePulse(ref);
   return (
-    <p
+    <span
+      ref={ref}
+      aria-hidden="true"
+      style={{
+        display: "block",
+        width,
+        height,
+        borderRadius: radius ?? "var(--radius, 6px)",
+        background: "var(--muted, #f3f4f6)",
+      }}
+    />
+  );
+}
+
+/**
+ * A query's loading state, as skeleton lines in the host's style. `text` is
+ * what assistive technology announces; `lines` sets how many lines stand in
+ * for the content (default 3).
+ */
+export function LoadingState({
+  text = "Loading…",
+  lines = 3,
+}: {
+  text?: string;
+  lines?: number;
+}) {
+  const widths = ["72%", "94%", "56%", "84%", "64%"];
+  // Fixed placeholder lines: each keeps its position for the whole wait.
+  const placeholders = Array.from(
+    { length: Math.max(1, Math.floor(lines)) },
+    (_, i) => ({ id: `line-${i}`, width: widths[i % widths.length] })
+  );
+  return (
+    <div
       role="status"
-      style={{ ...INK, color: "var(--color-text-secondary, #6b7280)" }}
+      aria-label={text}
+      style={{ display: "grid", gap: 8, padding: "4px 0" }}
     >
-      {text}
-    </p>
+      {placeholders.map((line) => (
+        <Skeleton key={line.id} width={line.width} height={12} />
+      ))}
+    </div>
   );
 }
 
