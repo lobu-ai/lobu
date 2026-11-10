@@ -935,6 +935,15 @@ export function Link({
 /* Query states — render `useQuery` honestly                            */
 /* ------------------------------------------------------------------ */
 
+const VISUALLY_HIDDEN: CSSProperties = {
+  position: "absolute",
+  width: 1,
+  height: 1,
+  overflow: "hidden",
+  clip: "rect(0 0 0 0)",
+  whiteSpace: "nowrap",
+};
+
 /** Pulse an element while it is mounted, unless the reader asked for less
  *  motion. The kit ships no stylesheet, so the animation runs from script. */
 function usePulse(ref: RefObject<HTMLElement | null>) {
@@ -1006,15 +1015,14 @@ export function LoadingState({
   const widths = ["72%", "94%", "56%", "84%", "64%"];
   // Fixed placeholder lines: each keeps its position for the whole wait.
   const placeholders = Array.from(
-    { length: Math.max(1, Math.floor(lines)) },
+    { length: Number.isFinite(lines) ? Math.max(1, Math.floor(lines)) : 3 },
     (_, i) => ({ id: `line-${i}`, width: widths[i % widths.length] })
   );
   return (
-    <div
-      role="status"
-      aria-label={text}
-      style={{ display: "grid", gap: 8, padding: "4px 0" }}
-    >
+    <div role="status" style={{ display: "grid", gap: 8, padding: "4px 0" }}>
+      {/* Live regions announce their content, not their name: keep the
+          text in the region, visible only to assistive technology. */}
+      <span style={VISUALLY_HIDDEN}>{text}</span>
       {placeholders.map((line) => (
         <Skeleton key={line.id} width={line.width} height={12} />
       ))}

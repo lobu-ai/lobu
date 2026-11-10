@@ -391,15 +391,15 @@ describe("loading placeholders", () => {
     return pulses;
   }
 
-  test("a loading state announces its text once and draws the lines asked for, hidden from readers", async () => {
+  test("a loading state announces its text in the live region and draws the lines asked for, hidden from readers", async () => {
     render(<LoadingState text="Loading deals" lines={2} />);
     await shown();
     const status = el.querySelectorAll('[role="status"]');
     expect(status.length).toBe(1);
-    expect(status[0]?.getAttribute("aria-label")).toBe("Loading deals");
+    // The live region's content is what is announced.
+    expect(status[0]?.textContent).toBe("Loading deals");
     const blocks = status[0]?.querySelectorAll('[aria-hidden="true"]') ?? [];
     expect(blocks.length).toBe(2);
-    expect(status[0]?.textContent).toBe("");
   });
 
   test("a skeleton pulses while mounted and stops on unmount, and holds still for reduced motion", async () => {
