@@ -93,7 +93,8 @@ function makeFetch(
     auth_profile_slug?: string;
     app_auth_profile_slug?: string;
     device_worker_id?: string;
-  } = REMOTE_CONNECTION
+  } = REMOTE_CONNECTION,
+  remoteEntityTypes: Record<string, unknown>[] = []
 ) {
   const calls: WireCall[] = [];
 
@@ -158,7 +159,10 @@ function makeFetch(
       return json({ connections: [remoteConnection] });
     }
     if (urlStr.includes("/manage_entity_schema")) {
-      return json({ entity_types: [], relationship_types: [] });
+      return json({
+        entity_types: remoteEntityTypes,
+        relationship_types: [],
+      });
     }
     if (urlStr.includes("/manage_automations"))
       return json({ automations: [] });
@@ -543,6 +547,63 @@ export default defineConfig({ agents: [defineAgent({
     expect(writes[0]).not.toHaveProperty("auth_profile_slug");
     expect(writes[0]).not.toHaveProperty("app_auth_profile_slug");
     expect(writes[0]).not.toHaveProperty("device_worker_id");
+  });
+});
+
+describe("apply wire payloads: entity type display fields", () => {
+  const config = `import { defineAgent, defineConfig, defineEntityType } from "@lobu/cli/config";
+export default defineConfig({
+  agents: [defineAgent({ id: "triage", name: "Triage", dir: "./agents/triage" })],
+  entities: [defineEntityType({ key: "deal", name: "Deal", icon: "💼" })],
+});
+`;
+  const liveDeal = (icon: string) => ({
+    id: 9,
+    slug: "deal",
+    name: "Deal",
+    icon,
+    color: "#123456",
+    metadata_schema: { type: "object", properties: {} },
+    organization_id: "org_1",
+  });
+  const entityWrites = (calls: WireCall[]) =>
+    calls
+      .filter((c) => c.url.endsWith("/manage_entity_schema"))
+      .map((c) => c.body)
+      .filter((b) => b.action === "create" || b.action === "update");
+
+  test("a declared icon that differs from live is sent; the undeclared color is not", async () => {
+    const dir = mkProject(config);
+    const { fetchStub, calls } = makeFetch([], REMOTE_CONNECTION, [
+      liveDeal("📁"),
+    ]);
+    await runApply(dir, fetchStub, "memory");
+    const writes = entityWrites(calls);
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toMatchObject({ slug: "deal", icon: "💼" });
+    expect(writes[0]).not.toHaveProperty("color");
+  });
+
+  test("a declared empty color clears the live one", async () => {
+    const dir = mkProject(
+      config.replace('icon: "💼"', 'icon: "💼", color: ""')
+    );
+    const { fetchStub, calls } = makeFetch([], REMOTE_CONNECTION, [
+      liveDeal("💼"),
+    ]);
+    await runApply(dir, fetchStub, "memory");
+    const writes = entityWrites(calls);
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toMatchObject({ slug: "deal", color: "" });
+  });
+
+  test("a declared icon equal to live sends nothing", async () => {
+    const dir = mkProject(config);
+    const { fetchStub, calls } = makeFetch([], REMOTE_CONNECTION, [
+      liveDeal("💼"),
+    ]);
+    await runApply(dir, fetchStub, "memory");
+    expect(entityWrites(calls)).toEqual([]);
   });
 });
 

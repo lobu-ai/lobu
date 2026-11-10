@@ -351,6 +351,71 @@ describe("computeDiff — idempotency (applying twice is a no-op)", () => {
       expect(row.changedFields).toContain("eventKinds");
   });
 
+  test("entity type: a declared icon is diffed, converges, and an omitted one is unmanaged even under prune", () => {
+    const declared = buildState([], {
+      memorySchema: {
+        entityTypes: [
+          { slug: "deal", name: "Deal", icon: "💼", color: "#0a7" },
+        ],
+        relationshipTypes: [],
+      },
+    });
+    const live = (display: { icon?: string; color?: string }) => ({
+      ...emptyRemote(),
+      entityTypes: [{ slug: "deal", name: "Deal", ...display }],
+    });
+
+    // A declared value that differs from live is an update of exactly that field.
+    const first = computeDiff(declared, live({ icon: "📁", color: "#0a7" }));
+    const row = first.rows.find((r) => r.kind === "entity-type");
+    expect(row?.verb).toBe("update");
+    if (row?.kind === "entity-type")
+      expect(row.changedFields).toEqual(["icon"]);
+
+    // Once live matches, a repeat apply is a noop, with or without prune.
+    for (const prune of [false, true]) {
+      const repeat = computeDiff(
+        declared,
+        live({ icon: "💼", color: "#0a7" }),
+        {
+          prune,
+        }
+      );
+      expect(repeat.counts.update).toBe(0);
+    }
+
+    // A declared "" clears a live icon, and is a noop once live is cleared.
+    const clearing = buildState([], {
+      memorySchema: {
+        entityTypes: [{ slug: "deal", name: "Deal", icon: "" }],
+        relationshipTypes: [],
+      },
+    });
+    const clearRow = computeDiff(clearing, live({ icon: "💼" })).rows.find(
+      (r) => r.kind === "entity-type"
+    );
+    expect(clearRow?.verb).toBe("update");
+    if (clearRow?.kind === "entity-type")
+      expect(clearRow.changedFields).toEqual(["icon"]);
+    expect(computeDiff(clearing, live({ icon: "" })).counts.update).toBe(0);
+    for (const prune of [false, true])
+      expect(computeDiff(clearing, live({}), { prune }).counts.update).toBe(0);
+
+    // An icon/color set in the UI survives a config that omits them, even under prune.
+    const omitted = buildState([], {
+      memorySchema: {
+        entityTypes: [{ slug: "deal", name: "Deal" }],
+        relationshipTypes: [],
+      },
+    });
+    const pruned = computeDiff(omitted, live({ icon: "💼", color: "#0a7" }), {
+      prune: true,
+    });
+    expect(pruned.rows.find((r) => r.kind === "entity-type")?.verb).toBe(
+      "noop"
+    );
+  });
+
   test("entity type: no metrics on either side is a noop (no churn)", () => {
     const desired = buildState([], {
       memorySchema: {

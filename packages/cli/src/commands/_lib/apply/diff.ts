@@ -37,6 +37,10 @@ import type {
 import {
   type AutomationSource,
   declaredConnectorKeys,
+  ENTITY_TYPE_DISPLAY_FIELDS,
+  type EntityTypeDisplayField,
+  type EntityTypeDisplayFields,
+  LEGACY_DISPLAY_FIELDS,
   referencedConnectorKeys,
 } from "./shared.js";
 
@@ -655,11 +659,14 @@ function diffEntityType(
     desired,
     remote,
     fields: [
-      { name: "name", changed: (d, r) => stringChanged(d.name, r.name) },
-      {
-        name: "description",
-        changed: (d, r) => stringChanged(d.description, r.description),
-      },
+      ...ENTITY_TYPE_DISPLAY_FIELDS.map(
+        (field): DiffField<DesiredEntityType, RemoteEntityType> => ({
+          name: field,
+          changed: (d, r) =>
+            (d[field] !== undefined || LEGACY_DISPLAY_FIELDS.has(field)) &&
+            stringChanged(d[field], r[field]),
+        })
+      ),
       {
         // required — prune-aware, like eventKinds. Declared: diff and set on
         // change. Omitted + prune: a present remote set is a removal (apply
@@ -856,18 +863,23 @@ function compareEntityTypeThreeWay(
     remote: unknown;
     attribution: unknown | undefined;
   }> = [
-    {
-      field: "name",
-      desired: desired.name,
-      remote: remote.name,
-      attribution: attribution?.name,
-    },
-    {
-      field: "description",
-      desired: desired.description,
-      remote: remote.description,
-      attribution: attribution?.description,
-    },
+    // Display fields are unmanaged when omitted, under BOTH prune and
+    // non-prune: upsert never clears them, so a configMoved classification
+    // would perpetual-update without effect. A declared "" (a clear) is
+    // declared, though it compares as unset.
+    ...ENTITY_TYPE_DISPLAY_FIELDS.filter(
+      (field) => desired[field] !== undefined
+    ).map((field) => ({
+      field,
+      desired: comparableDisplayValue(field, desired[field]),
+      remote: comparableDisplayValue(field, remote[field]),
+      attribution:
+        attribution &&
+        comparableDisplayValue(
+          field,
+          withUnrecordedDisplayFromLive(attribution, remote)[field]
+        ),
+    })),
     {
       // Under prune, omitting required means "clear to []" — normalize so an
       // already-empty remote does not perpetual-update (undefined ≠ []).
@@ -933,10 +945,6 @@ function compareEntityTypeThreeWay(
   // — eventKinds/properties round-trip untouched). Only under
   // prune does omission mean "remove". Without this, an unchanged omitted facet
   // would be misclassified as config-moved and executePlan would clear it.
-  // name/description are unmanaged under BOTH prune and non-prune: upsert
-  // never clears them when omitted, so a configMoved classification would
-  // perpetual-update without effect.
-  const alwaysUnmanaged = new Set(["name", "description"]);
   const omittableOutsidePrune = new Set([
     "required",
     "backing",
@@ -949,7 +957,6 @@ function compareEntityTypeThreeWay(
   return classifyThreeWay(
     triples.filter((t) => {
       if (t.desired !== undefined) return true;
-      if (alwaysUnmanaged.has(t.field)) return false;
       if (
         !prune &&
         (omittableOutsidePrune.has(t.field) ||
@@ -1200,9 +1207,8 @@ function diffRelationshipTypeWithBaseline(
  * The entity-type facets a comparison cares about, normalized so an absent
  * collection and an empty one compare equal.
  */
-export interface EntityTypeFacets {
-  name: string | undefined;
-  description: string | undefined;
+export interface EntityTypeFacets
+  extends Record<EntityTypeDisplayField, string | null> {
   required: string[];
   properties: Record<string, unknown>;
   backing: unknown;
@@ -1211,18 +1217,24 @@ export interface EntityTypeFacets {
   schemaExtras: Record<string, unknown>;
 }
 
-const normalizeEntityFacets = (e: {
-  name?: string;
-  description?: string;
-  required?: string[];
-  properties?: Record<string, unknown>;
-  backing?: unknown;
-  metrics?: unknown;
-  eventKinds?: unknown;
-  schemaExtras?: Record<string, unknown>;
-}): EntityTypeFacets => ({
-  name: e.name,
-  description: e.description,
+const normalizeEntityFacets = (
+  e: EntityTypeDisplayFields & {
+    required?: string[];
+    properties?: Record<string, unknown>;
+    backing?: unknown;
+    metrics?: unknown;
+    eventKinds?: unknown;
+    schemaExtras?: Record<string, unknown>;
+  }
+): EntityTypeFacets => ({
+  // Unset is an explicit null, so a recorded baseline keeps the key and an
+  // unset value stays distinguishable from one it never recorded.
+  ...(Object.fromEntries(
+    ENTITY_TYPE_DISPLAY_FIELDS.map((field) => [
+      field,
+      comparableDisplayValue(field, e[field]) ?? null,
+    ])
+  ) as Record<EntityTypeDisplayField, string | null>),
   required: e.required ?? [],
   properties: e.properties ?? {},
   backing: e.backing,
@@ -1231,9 +1243,42 @@ const normalizeEntityFacets = (e: {
   schemaExtras: e.schemaExtras ?? {},
 });
 
+/**
+ * A display field's value as the three-way compare and the baseline see it.
+ * Unset is undefined (recorded as null). For icon/color a declared "" (a
+ * clear) is unset too, since the server reads an unset field as null; the
+ * two-way diff already treats "" and null alike (`stringChanged`). Legacy
+ * fields keep "" as a value.
+ */
+function comparableDisplayValue(
+  field: EntityTypeDisplayField,
+  value: string | null | undefined
+): string | undefined {
+  if (value == null) return undefined;
+  return value === "" && !LEGACY_DISPLAY_FIELDS.has(field) ? undefined : value;
+}
+
 /** The live remote entity type, in the comparable facet shape. */
 const remoteEntityTypeFacets = (r: RemoteEntityType): EntityTypeFacets =>
   normalizeEntityFacets(r);
+
+/**
+ * A baseline entity type with the display fields it never recorded read off
+ * the live type: a baseline written before a non-legacy display field existed
+ * lacks its key (see LEGACY_DISPLAY_FIELDS), and that is not a recorded unset.
+ */
+const withUnrecordedDisplayFromLive = (
+  recorded: RemoteEntityType,
+  live: RemoteEntityType
+): RemoteEntityType => {
+  const out = { ...recorded };
+  for (const field of ENTITY_TYPE_DISPLAY_FIELDS) {
+    if (!LEGACY_DISPLAY_FIELDS.has(field) && !(field in recorded)) {
+      out[field] = live[field];
+    }
+  }
+  return out;
+};
 
 /**
  * What the remote entity type BECOMES after this apply: declared values, plus
@@ -1287,10 +1332,13 @@ export const effectiveEntityTypeAfterApply = (
             ),
             ...declaredProperties,
           };
-  return normalizeEntityFacets({
+  const display: EntityTypeDisplayFields = {};
+  for (const field of ENTITY_TYPE_DISPLAY_FIELDS) {
     // Never cleared by omission, under prune or not.
-    name: d.name !== undefined ? d.name : r?.name,
-    description: d.description !== undefined ? d.description : r?.description,
+    display[field] = d[field] !== undefined ? d[field] : r?.[field];
+  }
+  return normalizeEntityFacets({
+    ...display,
     required: d.required !== undefined ? d.required : prune ? [] : r?.required,
     properties,
     backing: inherit(d.backing, r?.backing),
@@ -2140,7 +2188,9 @@ export function computeDiff(
                 !!a &&
                 deepEqual(
                   remoteEntityTypeFacets(remoteEntity),
-                  remoteEntityTypeFacets(a)
+                  remoteEntityTypeFacets(
+                    withUnrecordedDisplayFromLive(a, remoteEntity)
+                  )
                 )
               );
             }

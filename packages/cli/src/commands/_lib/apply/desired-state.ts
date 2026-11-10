@@ -39,6 +39,7 @@ import {
 import {
   type AutomationSource,
   type EntityBacking,
+  type EntityTypeDisplayFields,
   isRecord,
   type RelationshipRule,
 } from "./shared.js";
@@ -51,10 +52,8 @@ export interface DesiredAgentMetadata {
   description?: string;
 }
 
-export interface DesiredEntityType {
+export interface DesiredEntityType extends EntityTypeDisplayFields {
   slug: string;
-  name?: string;
-  description?: string;
   required?: string[];
   properties?: Record<string, unknown>;
   /**

@@ -290,8 +290,20 @@ describe("mapProjectToDesiredState", () => {
   });
 
   test("maps entities + relationships with typed-handle slugs", () => {
-    const person = defineEntityType({ key: "person", name: "Person" });
+    const person = defineEntityType({
+      key: "person",
+      name: "Person",
+      icon: "🧑",
+      color: "#336699",
+    });
     const org = defineEntityType({ key: "org" });
+    // "" clears a live icon/color; an empty name/description is dropped as before.
+    const cleared = defineEntityType({
+      key: "cleared",
+      description: "",
+      icon: "",
+      color: "",
+    });
     const worksAt = defineRelationshipType({
       key: "works_at",
       rules: [{ source: person, target: org }],
@@ -299,14 +311,28 @@ describe("mapProjectToDesiredState", () => {
     const state = mapProjectToDesiredState(
       defineConfig({
         agents: [],
-        entities: [person, org],
+        entities: [person, org, cleared],
         relationships: [worksAt],
       })
     );
     expect(state.memorySchema.entityTypes.map((e) => e.slug)).toEqual([
       "person",
       "org",
+      "cleared",
     ]);
+    // Declared display fields reach the desired state; omitted ones stay absent
+    // so they are never sent or diffed.
+    expect(state.memorySchema.entityTypes[0]).toMatchObject({
+      icon: "🧑",
+      color: "#336699",
+    });
+    expect(state.memorySchema.entityTypes[1]).not.toHaveProperty("icon");
+    expect(state.memorySchema.entityTypes[1]).not.toHaveProperty("color");
+    expect(state.memorySchema.entityTypes[2]).toEqual({
+      slug: "cleared",
+      icon: "",
+      color: "",
+    });
     expect(state.memorySchema.relationshipTypes[0]?.rules).toEqual([
       { source: "person", target: "org" },
     ]);

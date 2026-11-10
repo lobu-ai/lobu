@@ -210,10 +210,15 @@ describe("three-way attribution (baseline present)", () => {
 });
 
 describe("owned-based delete classification (baseline present)", () => {
-  test("remote-only definition IN owned + unchanged + prune → config-expressed delete", () => {
+  test.each([
+    ["unset (null)", { icon: null, color: null }],
+    ["set", { icon: "💼", color: "#0a7" }],
+  ])("remote-only definition IN owned + unchanged + prune → config-expressed delete (live icon/color %s)", (_label, display) => {
     const desired = buildState([]);
     const remote = emptyRemote();
-    remote.entityTypes = [remoteTask(7)];
+    // A baseline recorded before icon/color were hoisted lacks the keys: it
+    // never recorded them, so whatever is live does not read as an edit.
+    remote.entityTypes = [remoteTask(7, display)];
     const baseline = baselineFor([remoteTask(7)], [7]);
 
     const plan = computeDiff(desired, remote, {
@@ -693,6 +698,132 @@ describe("three-way edge cases", () => {
         from: [],
         to: [{ source: "a", target: "c" }],
       },
+    ]);
+  });
+
+  test("a declared icon converges three-way, records into the baseline, and blocks on a later UI edit", () => {
+    const desired = buildState([taskType({ icon: "✅" })]);
+    const before = emptyRemote();
+    before.entityTypes = [remoteTask()];
+    const plan = computeDiff(desired, before, {
+      orgId: "org-1",
+      baseline: baselineFor([remoteTask()], [1]),
+      prune: true,
+    });
+    const row = plan.rows.find((r) => r.kind === "entity-type");
+    expect(row?.verb).toBe("update");
+    expect(row?.changedValues).toEqual([
+      { field: "icon", from: undefined, to: "✅" },
+    ]);
+
+    const after = emptyRemote();
+    after.entityTypes = [remoteTask(1, { icon: "✅" })];
+    // Round-trip as the stored deployment manifest does (JSON drops undefined).
+    const recorded = toBaseline(
+      JSON.parse(
+        JSON.stringify(buildAttributionAndOwned(desired, after, "org-1", true))
+      )
+    );
+    const repeat = computeDiff(desired, after, {
+      orgId: "org-1",
+      baseline: recorded,
+      prune: true,
+    });
+    expect(repeat.counts.update).toBe(0);
+    expect(repeat.counts.drift).toBe(0);
+
+    const uiEdited = emptyRemote();
+    uiEdited.entityTypes = [remoteTask(1, { icon: "📌" })];
+    const blocked = computeDiff(desired, uiEdited, {
+      orgId: "org-1",
+      baseline: recorded,
+      prune: true,
+    });
+    expect(blocked.rows).toContainEqual(
+      expect.objectContaining({
+        kind: "entity-type",
+        verb: "drift",
+        blocking: true,
+        field: "icon",
+      })
+    );
+
+    // A baseline records an unset color too, so a UI-set color the config then
+    // overrides is still remote drift, not an unrecorded field.
+    const colored = buildState([taskType({ icon: "✅", color: "#0a7" })]);
+    const uiColored = emptyRemote();
+    uiColored.entityTypes = [remoteTask(1, { icon: "✅", color: "#f00" })];
+    expect(
+      computeDiff(colored, uiColored, {
+        orgId: "org-1",
+        baseline: recorded,
+        prune: true,
+      }).rows
+    ).toContainEqual(
+      expect.objectContaining({ verb: "drift", blocking: true, field: "color" })
+    );
+  });
+
+  test.each([
+    ["icon", false],
+    ["icon", true],
+    ["color", false],
+    ["color", true],
+  ] as const)("a declared empty %s against an unset one stays a noop across recorded baselines (prune=%p)", (field, prune) => {
+    const desired = buildState([taskType({ [field]: "" })]);
+    const unset = emptyRemote();
+    unset.entityTypes = [remoteTask(1, { [field]: null })];
+    const first = computeDiff(desired, unset, {
+      orgId: "org-1",
+      baseline: baselineFor([remoteTask(1, { [field]: null })], [1]),
+      prune,
+    });
+    expect(first.counts.update).toBe(0);
+    expect(first.counts.drift).toBe(0);
+
+    // "" and null both mean unset, so the recorded baseline cannot read the
+    // unchanged live null as drift on the next apply.
+    const recorded = toBaseline(
+      JSON.parse(
+        JSON.stringify(buildAttributionAndOwned(desired, unset, "org-1", prune))
+      )
+    );
+    const next = computeDiff(desired, unset, {
+      orgId: "org-1",
+      baseline: recorded,
+      prune,
+    });
+    expect(next.counts.update).toBe(0);
+    expect(next.counts.drift).toBe(0);
+
+    // A declared "" still clears a live value.
+    const live = emptyRemote();
+    live.entityTypes = [remoteTask(1, { [field]: "x" })];
+    const clear = computeDiff(desired, live, {
+      orgId: "org-1",
+      baseline: baselineFor([remoteTask(1, { [field]: "x" })], [1]),
+      prune,
+    });
+    expect(
+      clear.rows.find((r) => r.kind === "entity-type")?.changedFields
+    ).toEqual([field]);
+  });
+
+  test("a baseline recorded before icon/color existed converges a declared change instead of blocking", () => {
+    const desired = buildState([taskType({ icon: "✅", color: "#0a7" })]);
+    const remote = emptyRemote();
+    remote.entityTypes = [remoteTask(1, { icon: "📌", color: "#f00" })];
+    const plan = computeDiff(desired, remote, {
+      orgId: "org-1",
+      baseline: baselineFor([remoteTask(1)], [1]),
+      prune: true,
+    });
+    expect(plan.counts.drift).toBe(0);
+    expect(
+      plan.rows.find((r) => r.kind === "entity-type")?.changedValues
+    ).toEqual([
+      { field: "icon", from: "📌", to: "✅" },
+      { field: "color", from: "#f00", to: "#0a7" },
     ]);
   });
 
