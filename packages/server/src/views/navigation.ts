@@ -144,11 +144,20 @@ async function buildLookup(
     `,
     typeSlugs.size === 0
       ? Promise.resolve([] as Array<{ slug: string; name: string }>)
-      : sql<{ slug: string; name: string }>`
-          SELECT slug, name FROM entity_types
-          WHERE organization_id = ${ctx.organizationId}
-            AND deleted_at IS NULL
-            AND slug = ANY(${pgTextArray([...typeSlugs])}::text[])
+      : // The entity type search path every other type read uses: the
+        // workspace's own type first, then a public catalog's. `$member` is
+        // per-workspace and never comes from a catalog.
+        sql<{ slug: string; name: string }>`
+          SELECT DISTINCT ON (et.slug) et.slug, et.name
+          FROM entity_types et
+          LEFT JOIN organization o ON o.id = et.organization_id
+          WHERE et.deleted_at IS NULL
+            AND et.slug = ANY(${pgTextArray([...typeSlugs])}::text[])
+            AND (
+              et.organization_id = ${ctx.organizationId}
+              OR (o.visibility = 'public' AND et.slug <> ${MEMBER_ENTITY_TYPE_SLUG})
+            )
+          ORDER BY et.slug, (et.organization_id = ${ctx.organizationId}) DESC, et.id ASC
         `,
   ]);
   const lookup: Lookup = {

@@ -300,6 +300,33 @@ describe("workspace navigation", () => {
 		expect((await read(ownerCookie)).json.revision).toBe(0);
 	});
 
+	it("links a collection whose type comes from a public catalog, and only a public one", async () => {
+		const db = getTestDb();
+		const catalog = await createTestOrganization({ name: "Catalog", slug: "nav-catalog", visibility: "public" });
+		const hidden = await createTestOrganization({ name: "Hidden", slug: "nav-hidden" });
+		await db`
+			INSERT INTO entity_types (organization_id, slug, name, created_at, updated_at)
+			VALUES (${catalog.id}, 'firm', 'Firm', now(), now()),
+			       (${hidden.id}, 'secret', 'Secret', now(), now())
+		`;
+		const doc = (entityType: string) => ({
+			schemaVersion: 1,
+			sections: [{ id: "s", items: [{ id: "c", target: { kind: "collection", entityType } }] }],
+		});
+
+		expect((await write(0, doc("secret"))).status).toBe(400);
+		const saved = await write(0, doc("firm"));
+		expect(saved.status).toBe(200);
+		expect((await read(memberCookie)).json.sections[0].items[0]).toMatchObject({ label: "Firm", href: "/nav-org/firm" });
+
+		// The workspace's own type of the same slug wins over the catalog's.
+		await db`
+			INSERT INTO entity_types (organization_id, slug, name, created_at, updated_at)
+			VALUES (${org.id}, 'firm', 'Our Firms', now(), now())
+		`;
+		expect((await read(memberCookie)).json.sections[0].items[0]).toMatchObject({ label: "Our Firms" });
+	});
+
 	it("drops a removed destination's label and keeps its readable children", async () => {
 		await write(0, curatedFor(dealId));
 		await getTestDb()`UPDATE entities SET deleted_at = NOW() WHERE id = ${dealId}`;

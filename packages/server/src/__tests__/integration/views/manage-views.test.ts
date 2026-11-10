@@ -787,6 +787,23 @@ export default function V() { return null; }`;
 		expect(opened.params).toEqual({ n: 7, flag: false, label: "" });
 	});
 
+	it("opens a collection tab whose type comes from a public catalog, and only a public one", async () => {
+		await setView(SIMPLE_SOURCE, { attach: [{ collection: "firm" }, { collection: "secret" }] });
+		const catalog = await createTestOrganization({ name: "catalog", visibility: "public" });
+		const hidden = await createTestOrganization({ name: "hidden" });
+		await getTestDb()`
+			INSERT INTO entity_types (organization_id, slug, name, created_at, updated_at)
+			VALUES (${catalog.id}, 'firm', 'Firm', now(), now()),
+			       (${hidden.id}, 'secret', 'Secret', now(), now())
+		`;
+		const opened = (await executeTool("open_view", { key: "pipeline", scope: { type: "firm" } }, TEST_ENV, ownerCtx)) as {
+			url: string;
+		};
+		expect(new URL(opened.url).pathname).toMatch(/\/firm\/-\/views\/pipeline$/);
+		const err = await executeTool("open_view", { key: "pipeline", scope: { type: "secret" } }, TEST_ENV, ownerCtx).catch((e) => e);
+		expect((err as ToolUserError).httpStatus).toBe(404);
+	});
+
 	it("rejects source that does not compile", async () => {
 		const err = await setView(UNRESOLVABLE_SOURCE).catch((e) => e);
 		expect(err).toBeInstanceOf(ToolUserError);
