@@ -9,6 +9,7 @@
 import { deriveToolActorSource } from './apply-context';
 import { recordKey, recordKeyColumn } from '@lobu/core/contracts/entity-reference';
 import { isAssertedManualEdit, isManualUserEdit, type ManualEditRefusal, manualEditRefusal } from '../auth/direct-user-context';
+import { MEMBER_ENTITY_TYPE_SLUG } from '../tools/constants';
 import type { EntityIdentity } from '@lobu/core/contracts/tools/manage-entity';
 import { attachEntityIdentities, identityMemberExistsSql, identityMemberIdsSql, identityRootSql } from './entity-identity';
 import { type EntityReadRestrictions, entityReadPolicySql, entityReadRestrictions, filterEntityReadRows } from '../authz/entity-read-policy';
@@ -2443,12 +2444,23 @@ export async function listEntities(
 	// renders them with the normal table (no derived-specific UI path).
 	let segmentFilter: { sql: string; params: unknown[] } | null = null;
 	if (filters.entity_type) {
+		// The type search path (the workspace's own type, then a public
+		// catalog's), so a catalog type's schema drives filters and segments.
+		// Only a workspace's own type can be derived: a catalog's backing SQL
+		// never runs here.
 		const etRows = await sql`
-      SELECT id, backing_sql, backing_source, metrics_config, metadata_schema
-      FROM entity_types
-      WHERE slug = ${filters.entity_type}
-        AND organization_id = ${ctx.organizationId}
-        AND deleted_at IS NULL
+      SELECT et.id, et.metrics_config, et.metadata_schema,
+        CASE WHEN et.organization_id = ${ctx.organizationId} THEN et.backing_sql END AS backing_sql,
+        CASE WHEN et.organization_id = ${ctx.organizationId} THEN et.backing_source END AS backing_source
+      FROM entity_types et
+      LEFT JOIN organization o ON o.id = et.organization_id
+      WHERE et.slug = ${filters.entity_type}
+        AND et.deleted_at IS NULL
+        AND (
+          et.organization_id = ${ctx.organizationId}
+          OR (o.visibility = 'public' AND et.slug <> ${MEMBER_ENTITY_TYPE_SLUG})
+        )
+      ORDER BY (et.organization_id = ${ctx.organizationId}) DESC, et.id ASC
       LIMIT 1
     `;
 		const backingSql = etRows[0]?.backing_sql as string | null | undefined;

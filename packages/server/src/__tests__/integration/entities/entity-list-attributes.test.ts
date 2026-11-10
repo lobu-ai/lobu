@@ -68,6 +68,26 @@ describe('shared collection attribute selection', () => {
       await expect(api.entities.list({ entity_type, filters: [{ field: 'not_declared', op: 'eq', value: 'large' }] })).rejects.toThrow(/Unknown attribute/);
     });
   }
+  it('filters a public catalog type by its schema and never runs a catalog view', async () => {
+    const catalog = await createTestOrganization({ visibility: 'public' });
+    const curator = await createTestUser();
+    await addUserToOrganization(curator.id, catalog.id, 'owner');
+    const owner = await TestApiClient.for({ organizationId: catalog.id, userId: curator.id, memberRole: 'owner' });
+    await owner.entity_schema.createType({ slug: 'vendor', name: 'Vendors', metadata_schema: schema });
+    await owner.entity_schema.createType({
+      slug: 'vendor-report', name: 'Vendor report', metadata_schema: schema,
+      backing: { sql: `SELECT name, slug, metadata->>'tier' AS tier FROM entities` },
+    });
+    await api.entities.create({ entity_type: 'vendor', name: 'Large vendor', metadata: { tier: 'large', seats: 5, active: true } });
+    await api.entities.create({ entity_type: 'vendor', name: 'Small vendor', metadata: { tier: 'small', seats: 1, active: true } });
+
+    const large = await api.entities.list({ entity_type: 'vendor', filters: [{ field: 'tier', op: 'eq', value: 'large' }] });
+    expect(large.entities.map(row => row.name)).toEqual(['Large vendor']);
+    await expect(api.entities.list({ entity_type: 'vendor', filters: [{ field: 'not_declared', op: 'eq', value: 1 }] })).rejects.toThrow(/Unknown attribute/);
+    const report = await api.entities.list({ entity_type: 'vendor-report' });
+    expect(report.entities).toEqual([]);
+  });
+
   it('rejects filters without a type', async () => {
     await expect(api.entities.list({ filters: [{ field: 'tier', op: 'eq', value: 'large' }] })).rejects.toThrow(/require entity_type/);
   });
