@@ -82,6 +82,8 @@ export interface ConnectorDefinition {
     includeOperations?: string[];
     excludeOperations?: string[];
     includeTags?: string[];
+    /** HTTP methods to expose (e.g. `['get']` for a read-only surface). */
+    includeMethods?: string[];
     serverUrl?: string;
   };
   /**

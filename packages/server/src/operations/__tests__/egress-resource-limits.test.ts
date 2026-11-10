@@ -69,6 +69,21 @@ describe("OpenAPI discovery resource limits", () => {
 		expect(tracked.wasCancelled()).toBe(true);
 	});
 
+	test("loads a provider-sized spec under the default cap", async () => {
+		// GitHub's REST description is ~14 MB; the default cap must admit it.
+		const padding = "x".repeat(15 * 1024 * 1024);
+		globalThis.fetch = (async () =>
+			new Response(
+				JSON.stringify({ openapi: "3.0.0", paths: {}, "x-padding": padding }),
+				{ status: 200 },
+			)) as typeof fetch;
+
+		const spec = await __connectorOperationsTestOnly.fetchOpenApiSpec(
+			"https://provider-sized-openapi.example/spec.json",
+		);
+		expect(spec).toMatchObject({ openapi: "3.0.0", paths: {} });
+	});
+
 	test("aborts a spec request at its deadline", async () => {
 		globalThis.fetch = ((_input, init) =>
 			new Promise<Response>((_resolve, reject) => {

@@ -57,12 +57,6 @@ describe("built-in connector operation impact annotations", () => {
 		});
 	});
 
-	test("github status reads are classified as reads for connector policy", () => {
-		for (const key of ["get_pull_request_status", "get_branch_head"]) {
-			expect(github.actions?.[key]?.kind, key).toBe("read");
-		}
-	});
-
 	// Google actions are compiled one per API method, so the write set is
 	// Discovery's; these pin the classes: DELETE is destructive, a POST that
 	// destroys data irreversibly is too, and a reversible one (trash) is not.

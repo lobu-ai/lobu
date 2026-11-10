@@ -288,6 +288,18 @@ describe("operations.execute backend lifecycle", () => {
 								},
 							},
 							"/items/{id}": {
+								get: {
+									operationId: "get_item",
+									parameters: [
+										{
+											name: "id",
+											in: "path",
+											required: true,
+											schema: { type: "string" },
+										},
+									],
+									responses: { "200": { description: "ok" } },
+								},
 								delete: {
 									operationId: "delete_item",
 									parameters: [
@@ -1308,6 +1320,53 @@ describe("operations.execute backend lifecycle", () => {
 				body: { created: true, body: { value: "http-ok" } },
 			},
 		});
+	});
+
+	it("exposes only the OpenAPI methods the connector declares", async () => {
+		const sql = getTestDb();
+		const [{ openapi_config: original }] = await sql<{
+			openapi_config: Record<string, unknown>;
+		}>`
+			SELECT openapi_config FROM connector_definitions
+			WHERE organization_id = ${orgId} AND key = ${HTTP} AND status = 'active'
+		`;
+		await sql`
+			UPDATE connector_definitions
+			SET openapi_config = ${sql.json({ ...original, includeMethods: ["GET"] })}
+			WHERE organization_id = ${orgId} AND key = ${HTTP}
+		`;
+		try {
+			const listed = (await manageOperations(
+				{ action: "list_available", connection_id: httpConnectionId },
+				{} as Env,
+				ctx,
+			)) as { operations: Array<{ operation_key: string; kind: string; backend: string }> };
+			expect(
+				listed.operations
+					.filter((operation) => operation.backend === "http_operation")
+					.map((operation) => [operation.operation_key, operation.kind]),
+			).toEqual([["get_item", "read"]]);
+
+			const excluded = await manageOperations(
+				{
+					action: "execute",
+					connection_id: httpConnectionId,
+					operation_key: "create_item",
+					input: { body: { value: "http-ok" } },
+				},
+				{} as Env,
+				ctx,
+			);
+			expect(excluded).toMatchObject({
+				error: expect.stringContaining("Invalid operation_key 'create_item'"),
+			});
+		} finally {
+			await sql`
+				UPDATE connector_definitions
+				SET openapi_config = ${sql.json(original)}
+				WHERE organization_id = ${orgId} AND key = ${HTTP}
+			`;
+		}
 	});
 
 	it("marks an OpenAPI DELETE approval as high impact", async () => {
