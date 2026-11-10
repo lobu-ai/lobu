@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { slugify } from '@lobu/core';
 import { HttpAuthBindingSchema, type HttpAuthBinding } from '@lobu/core/contracts/tools/manage-auth-profiles';
 import { Value } from '@sinclair/typebox/value';
@@ -227,20 +228,37 @@ export function browserSessionIsUsable(
     : summary.cookie_count > 0 && !!summary.auth_cookie_name && !summary.is_expired;
 }
 
+const MAX_AUTH_PROFILE_SLUG_LENGTH = 80;
+
 function sanitizeProfileSlug(value: string): string {
   const slug = slugify(value);
   if (!slug) {
     throw new Error('Auth profile slug must contain at least one letter or number');
   }
-  if (slug.length > 80) {
-    throw new Error('Auth profile slug must be at most 80 characters');
+  if (slug.length > MAX_AUTH_PROFILE_SLUG_LENGTH) {
+    throw new Error(`Auth profile slug must be at most ${MAX_AUTH_PROFILE_SLUG_LENGTH} characters`);
   }
   return slug;
 }
 
+/**
+ * Slug for a name the platform composes itself (a connector key plus provider,
+ * or a display name) rather than one a caller chose. Connector keys run to 200
+ * characters, so an over-long name keeps a readable prefix plus a hash of the
+ * full name instead of failing the flow; the same input always derives the
+ * same slug.
+ */
+export function deriveAuthProfileSlug(value: string): string {
+  const slug = slugify(value);
+  if (slug.length <= MAX_AUTH_PROFILE_SLUG_LENGTH) return sanitizeProfileSlug(slug);
+  const hash = createHash('sha256').update(slug).digest('hex').slice(0, 8);
+  return `${slugify(slug.slice(0, MAX_AUTH_PROFILE_SLUG_LENGTH - hash.length - 1))}-${hash}`;
+}
+
+/** An explicit slug is validated as given; a missing one is derived from the fallback name. */
 export function normalizeAuthProfileSlug(value?: string | null, fallback?: string | null): string {
-  const source = value?.trim() || fallback?.trim() || '';
-  return sanitizeProfileSlug(source);
+  const explicit = value?.trim();
+  return explicit ? sanitizeProfileSlug(explicit) : deriveAuthProfileSlug(fallback?.trim() ?? '');
 }
 
 export async function ensureUniqueAuthProfileSlug(params: {
@@ -267,7 +285,8 @@ export async function ensureUniqueAuthProfileSlug(params: {
       return candidate;
     }
 
-    candidate = `${baseSlug}-${suffix}`;
+    const suffixText = `-${suffix}`;
+    candidate = `${slugify(baseSlug.slice(0, MAX_AUTH_PROFILE_SLUG_LENGTH - suffixText.length))}${suffixText}`;
     suffix += 1;
   }
 }

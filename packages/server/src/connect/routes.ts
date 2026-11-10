@@ -31,7 +31,7 @@ import {
   ensureUniqueAuthProfileSlug,
   getAuthProfileById,
   getPrimaryAuthProfileForKind,
-  normalizeAuthProfileSlug,
+  deriveAuthProfileSlug,
   normalizeAuthValues,
 } from '../utils/auth-profiles';
 import {
@@ -1021,7 +1021,7 @@ async function handleOAuthCallback(
         // ensureUniqueAuthProfileSlug() is safe to call outside tx — only reads committed rows.
         const profileSlug = await ensureUniqueAuthProfileSlug({
           organizationId: tokenRow.organization_id,
-          slug: normalizeAuthProfileSlug(meta.slug, meta.displayName),
+          slug: deriveAuthProfileSlug(meta.slug),
         });
         const profileRows = await tx`
           INSERT INTO auth_profiles (

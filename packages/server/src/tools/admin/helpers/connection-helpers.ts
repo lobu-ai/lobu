@@ -20,7 +20,7 @@ import {
   getAuthProfileBySlug,
   getAuthProfileById,
   getPrimaryAuthProfileForKind,
-  normalizeAuthProfileSlug,
+  deriveAuthProfileSlug,
   normalizeAuthValues,
   resolveAuthProfileSlugToId,
   summarizeBrowserSessionAuthData,
@@ -234,7 +234,7 @@ export async function ensureEnvBackedOAuthAppProfile(params: {
   if (!clientId || !clientSecret) return null;
 
   const credentials = { [clientIdKey]: clientId, [clientSecretKey]: clientSecret };
-  const slug = normalizeAuthProfileSlug(`${connectorKey}-${provider}-app`);
+  const slug = deriveAuthProfileSlug(`${connectorKey}-${provider}-app`);
   const displayName = `${params.connectorName} ${provider[0]?.toUpperCase() ?? ''}${provider.slice(1)} App`;
 
   const existing = await getAuthProfileBySlug(organizationId, slug);
@@ -366,7 +366,7 @@ export async function upsertConnectorAuthProfiles(params: {
   );
 
   for (const profile of oauthAppProfiles) {
-    const profileSlug = normalizeAuthProfileSlug(`${params.connectorKey}-${profile.provider}-app`);
+    const profileSlug = deriveAuthProfileSlug(`${params.connectorKey}-${profile.provider}-app`);
     const existing = await getAuthProfileBySlug(params.organizationId, profileSlug, transaction);
     if (existing) {
       await updateAuthProfile({
@@ -395,7 +395,7 @@ export async function upsertConnectorAuthProfiles(params: {
   }
 
   if (Object.keys(envValues).length > 0) {
-    const profileSlug = normalizeAuthProfileSlug(`${params.connectorKey}-default`);
+    const profileSlug = deriveAuthProfileSlug(`${params.connectorKey}-default`);
     const existing = await getAuthProfileBySlug(params.organizationId, profileSlug, transaction);
     if (existing) {
       await updateAuthProfile({
@@ -1268,7 +1268,7 @@ export async function maybeUpsertAuthAfterInstall(
         organizationId: ctx.organizationId,
         connectorKey: installed.connectorKey,
         displayName: `${installed.name} OAuth App`,
-        slug: normalizeAuthProfileSlug(`${installed.connectorKey}-${provider}-app`),
+        slug: deriveAuthProfileSlug(`${installed.connectorKey}-${provider}-app`),
         profileKind: 'oauth_app',
         authData: {
           [clientIdKey]: registration.clientId,
