@@ -251,6 +251,7 @@ function sanitizeProfileSlug(value: string): string {
 export function deriveAuthProfileSlug(value: string): string {
   const slug = slugify(value);
   if (slug.length <= MAX_AUTH_PROFILE_SLUG_LENGTH) return sanitizeProfileSlug(slug);
+  // codeql[js/insufficient-password-hash]: hashes a public slug (connector key + provider name) only to shorten it; no secret is involved.
   const hash = createHash('sha256').update(slug).digest('hex').slice(0, 8);
   return `${slugify(slug.slice(0, MAX_AUTH_PROFILE_SLUG_LENGTH - hash.length - 1))}-${hash}`;
 }
