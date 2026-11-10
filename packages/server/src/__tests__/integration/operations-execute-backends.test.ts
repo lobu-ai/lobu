@@ -224,7 +224,7 @@ describe("operations.execute backend lifecycle", () => {
 		mcpConnectionId = mcp.id;
 		secondMcpConnectionId = secondMcp.id;
 		httpConnectionId = http.id;
-		for (const [connectorKey, keys] of [[LOCAL, ["echo", "stage_browser", "download"]], [MCP, ["remote_echo"]], [HTTP, ["create_item", "get_repo", "get_content"]]] as const) {
+		for (const [connectorKey, keys] of [[LOCAL, ["echo", "stage_browser", "download"]], [MCP, ["remote_echo"]], [HTTP, ["create_item", "get_repo", "get_content", "get_environment"]]] as const) {
 			for (const operationKey of keys) await upsertEntityApprovalPolicy(orgId, {
 				resourceClass: "connector_action", operationKey: `${connectorKey}::${operationKey}`, effects: { execute: "auto" },
 			});
@@ -301,6 +301,17 @@ describe("operations.execute backend lifecycle", () => {
 										{ name: "owner", in: "path", required: true, schema: { type: "string" } },
 										{ name: "repo", in: "path", required: true, schema: { type: "string" } },
 										{ name: "path", in: "path", required: true, "x-multi-segment": true, schema: { type: "string" } },
+									],
+									responses: { "200": { description: "ok" } },
+								},
+							},
+							"/repos/{owner}/{repo}/environments/{environment_name}": {
+								get: {
+									operationId: "get_environment",
+									parameters: [
+										{ name: "owner", in: "path", required: true, schema: { type: "string" } },
+										{ name: "repo", in: "path", required: true, schema: { type: "string" } },
+										{ name: "environment_name", in: "path", required: true, schema: { type: "string" } },
 									],
 									responses: { "200": { description: "ok" } },
 								},
@@ -1369,6 +1380,7 @@ describe("operations.execute backend lifecycle", () => {
 			).toEqual([
 				["get_repo", "read"],
 				["get_content", "read"],
+				["get_environment", "read"],
 				["get_item", "read"],
 			]);
 
@@ -1411,8 +1423,9 @@ describe("operations.execute backend lifecycle", () => {
 		for (const [operationKey, path] of [
 			["get_repo", { owner: "..", repo: "user" }],
 			["get_repo", { owner: "%2e%2e", repo: "user" }],
-			["get_repo", { owner: "lobu/../..", repo: "user" }],
+			["get_repo", { owner: "", repo: "user" }],
 			["get_content", { owner: "acme", repo: "app", path: "docs/../../../user" }],
+			["get_content", { owner: "acme", repo: "app", path: "docs/%2E%2E/%2e%2e/user" }],
 		] as const) {
 			expect(await execute(operationKey, path), JSON.stringify(path)).toMatchObject({
 				status: "failed",
@@ -1421,10 +1434,22 @@ describe("operations.execute backend lifecycle", () => {
 		}
 		expect(repoFetches().length).toBe(before);
 
-		expect(await execute("get_content", { owner: "acme", repo: "app", path: "packages/owletto" })).toMatchObject({
-			status: "completed",
-			output: { body: { fetched: "https://api.example.test/repos/acme/app/contents/packages/owletto" } },
-		});
+		// A single-segment value keeps its `/` inside the segment, and a
+		// pre-encoded `%2F` is not double-encoded.
+		for (const [operationKey, path, url] of [
+			["get_environment", { owner: "acme", repo: "app", environment_name: "prod/eu" }, "/repos/acme/app/environments/prod%2Feu"],
+			["get_environment", { owner: "acme", repo: "app", environment_name: "prod%2Feu" }, "/repos/acme/app/environments/prod%2Feu"],
+			["get_repo", { owner: "acme", repo: "a..b" }, "/repos/acme/a..b"],
+			["get_repo", { owner: "lobu/../..", repo: "user" }, "/repos/lobu%2F..%2F../user"],
+			["get_content", { owner: "acme", repo: "app", path: "packages/owletto" }, "/repos/acme/app/contents/packages/owletto"],
+			["get_content", { owner: "acme", repo: "app", path: "" }, "/repos/acme/app/contents/"],
+			["get_content", { owner: "acme", repo: "app", path: "docs/" }, "/repos/acme/app/contents/docs/"],
+		] as const) {
+			expect(await execute(operationKey, path), JSON.stringify(path)).toMatchObject({
+				status: "completed",
+				output: { body: { fetched: `https://api.example.test${url}` } },
+			});
+		}
 	});
 
 	it("marks an OpenAPI DELETE approval as high impact", async () => {

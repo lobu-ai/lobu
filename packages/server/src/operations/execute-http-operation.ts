@@ -23,13 +23,22 @@ export interface HttpOperationConnection {
 	connector_key: string;
 }
 
-function isDotSegment(segment: string): boolean {
-	let decoded = segment;
+function decodeLenient(value: string): string {
 	try {
-		decoded = decodeURIComponent(segment);
+		return decodeURIComponent(value);
 	} catch {
-		// Malformed escapes stay literal; encodeURIComponent will escape the `%`.
+		// Malformed escapes stay literal; re-encoding escapes the `%`.
+		return value;
 	}
+}
+
+/** Decode then encode, so a caller's pre-encoded `%2F` is not double-encoded. */
+function encodeSegment(segment: string): string {
+	return encodeURIComponent(decodeLenient(segment));
+}
+
+function isDotSegment(segment: string): boolean {
+	const decoded = decodeLenient(segment);
 	return decoded === "." || decoded === "..";
 }
 
@@ -38,21 +47,24 @@ function isDotSegment(segment: string): boolean {
  * resolution would otherwise walk `.`/`..` up the path (`/repos/{owner}/{repo}`
  * with owner `..` reaches `/user`), letting a caller reach an endpoint other
  * than the operation that policy admitted with the connection's credential.
- * Only a parameter the spec marks multi-segment may contain `/`, and each of
- * its segments is checked the same way.
+ * A single-segment value is encoded whole (`prod/eu` → `prod%2Feu`) and may not
+ * be empty or a dot segment. A parameter the spec marks multi-segment keeps
+ * its `/` separators; none of its segments may be a dot segment, but it may be
+ * empty (a repository root) or end in `/`.
  */
 function encodePathParam(name: string, value: unknown, multiSegment: boolean): string {
 	const raw = String(value);
-	const segments = multiSegment ? raw.split("/") : [raw];
-	if (!multiSegment && raw.includes("/")) {
-		throw new Error(`Path parameter '${name}' must be a single path segment.`);
-	}
-	for (const segment of segments) {
-		if (segment === "" || isDotSegment(segment)) {
-			throw new Error(`Path parameter '${name}' contains an empty or dot path segment.`);
+	if (!multiSegment) {
+		if (raw === "" || isDotSegment(raw)) {
+			throw new Error(`Path parameter '${name}' must not be empty, '.' or '..'.`);
 		}
+		return encodeSegment(raw);
 	}
-	return segments.map((segment) => encodeURIComponent(segment)).join("/");
+	const segments = raw.split("/");
+	if (segments.some(isDotSegment)) {
+		throw new Error(`Path parameter '${name}' must not contain '.' or '..' segments.`);
+	}
+	return segments.map(encodeSegment).join("/");
 }
 
 function buildResolvedUrl(
