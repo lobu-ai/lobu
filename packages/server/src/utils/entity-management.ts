@@ -2875,16 +2875,28 @@ const LINK_LOOKUP_KEYS_PER_READ = 250;
  * slug/id); any other field matches that projected column. A value links only
  * when exactly one row matches it; a truncated read (`has_more`) leaves its
  * single matches unlinked because a second match may lie past the limit.
- * Read failures throw; the caller decides how to degrade.
+ * `values` are raw cell strings and key the result: a declared record key
+ * matches them verbatim, every other lookup by their trimmed form. Stops
+ * before the next read once `ctx.abortSignal` aborts, and caps each connector
+ * run at `deadlineAt`. Read failures throw; the caller decides how to degrade.
  */
 export async function resolveSourceBackedLinks(
 	type: { slug: string; backing_sql: string; backing_source: string | null; metadata_schema: unknown },
 	lookupField: string,
 	values: string[],
 	ctx: ToolContext,
+	deadlineAt?: number,
 ): Promise<Record<string, LinkedEntityRef>> {
 	const keyColumn = recordKeyColumn(type.metadata_schema);
 	const bySlug = lookupField === "slug";
+	const verbatim = bySlug && keyColumn !== null;
+	// Normalized key → the raw cell values that reference it.
+	const cellsByKey = new Map<string, string[]>();
+	for (const value of values) {
+		const key = verbatim ? value : value.trim();
+		cellsByKey.set(key, [...(cellsByKey.get(key) ?? []), value]);
+	}
+	const keys = [...cellsByKey.keys()];
 	const rowSlug = (row: Record<string, unknown>) =>
 		(keyColumn ? recordKey(row, keyColumn) : null) ?? derivedRowSlug(row);
 	const rowLookup = (row: Record<string, unknown>): string | null => {
@@ -2894,18 +2906,20 @@ export async function resolveSourceBackedLinks(
 		return String(raw).trim() || null;
 	};
 	const out: Record<string, LinkedEntityRef> = {};
-	for (let start = 0; start < values.length; start += LINK_LOOKUP_KEYS_PER_READ) {
-		const chunk = values.slice(start, start + LINK_LOOKUP_KEYS_PER_READ);
+	for (let start = 0; start < keys.length; start += LINK_LOOKUP_KEYS_PER_READ) {
+		ctx.abortSignal?.throwIfAborted();
+		const chunk = keys.slice(start, start + LINK_LOOKUP_KEYS_PER_READ);
 		const result = await querySqlImpl(
 			{ sql: type.backing_sql, connection: type.backing_source ?? undefined, limit: chunk.length * 2, offset: 0 },
 			undefined,
 			ctx,
 			{
 				maxSerializedResultBytes: Number.POSITIVE_INFINITY,
+				deadlineAt,
 				exactMatch: {
 					columns: bySlug ? (keyColumn ? [keyColumn] : [...DERIVED_SLUG_COLUMNS]) : [lookupField],
 					values: chunk,
-					...(bySlug && keyColumn ? { verbatim: true } : {}),
+					...(verbatim ? { verbatim: true } : {}),
 				},
 			},
 		);
@@ -2920,11 +2934,13 @@ export async function resolveSourceBackedLinks(
 			if (value === null || !wanted.has(value)) continue;
 			matches.set(value, [...(matches.get(value) ?? []), row]);
 		}
-		for (const [value, rows] of matches) {
+		for (const [key, rows] of matches) {
 			if (rows.length !== 1) continue;
 			const slug = rowSlug(rows[0]);
 			if (!slug) continue;
-			out[value] = { slug, entity_type: type.slug, name: derivedRowName(rows[0], slug) };
+			for (const cell of cellsByKey.get(key) ?? []) {
+				out[cell] = { slug, entity_type: type.slug, name: derivedRowName(rows[0], slug) };
+			}
 		}
 	}
 	return out;

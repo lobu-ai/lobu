@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, it } from 'vitest';
-import { derivedRowSlug, queryDerivedEntityView } from '../../../utils/entity-management';
+import { derivedRowSlug, queryDerivedEntityView, resolveSourceBackedLinks } from '../../../utils/entity-management';
 import { createAuthProfile } from '../../../utils/auth-profiles';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import {
@@ -288,7 +288,8 @@ describe('external derived record lookup', () => {
       metadata_schema: { type: 'object', 'x-lobu-record-key': 'id' },
       backing: {
         sql: `SELECT 'p-' || n AS id, 'Person ' || n AS name FROM generate_series(1, 3) n
-          UNION ALL SELECT 'p-twin-a', 'Twin' UNION ALL SELECT 'p-twin-b', 'Twin'`,
+          UNION ALL SELECT 'p-twin-a', 'Twin' UNION ALL SELECT 'p-twin-b', 'Twin'
+          UNION ALL SELECT ' p-pad ', 'Padded' UNION ALL SELECT 'p-pad', 'Unpadded'`,
         connection: 'record-source',
       },
     });
@@ -322,7 +323,7 @@ describe('external derived record lookup', () => {
     });
     const tasks = [
       { owner_name: 'Person 1', owner_id: 'p-2', company_id: 'acme', contact_name: 'Solo', broken_id: '1' },
-      { owner_name: 'Twin', owner_id: 'p-missing', company_id: 'initech', contact_name: 'Same' },
+      { owner_name: 'Twin', owner_id: ' p-pad ', company_id: 'initech', contact_name: 'Same' },
     ];
     for (const [index, metadata] of tasks.entries()) {
       await api.entities.create({ entity_type: 'link-task', name: `Link task ${index}`, metadata });
@@ -333,7 +334,11 @@ describe('external derived record lookup', () => {
     // An unreadable source (link-broken) degrades to no refs instead of failing the list.
     expect(page.linked_entities).toEqual({
       'link-person:name': { 'Person 1': { slug: 'p-1', entity_type: 'link-person', name: 'Person 1' } },
-      'link-person:slug': { 'p-2': { slug: 'p-2', entity_type: 'link-person', name: 'Person 2' } },
+      // A declared record key is verbatim, and refs are keyed by the raw cell.
+      'link-person:slug': {
+        'p-2': { slug: 'p-2', entity_type: 'link-person', name: 'Person 2' },
+        ' p-pad ': { slug: ' p-pad ', entity_type: 'link-person', name: 'Padded' },
+      },
       'link-company:slug': { acme: { slug: 'acme', entity_type: 'link-company', name: 'Acme Inc' } },
       'link-contact:name': { Solo: { slug: String(solo.slug), entity_type: 'link-contact', name: 'Solo' } },
     });
@@ -344,6 +349,16 @@ describe('external derived record lookup', () => {
     });
     const denied = await api.withAuth({ agentId: agent.agentId }).entities.list({ entity_type: 'link-task' }) as LinkedPage;
     expect(Object.keys(denied.linked_entities ?? {}).sort()).toEqual(['link-company:slug', 'link-contact:name']);
+  });
+
+  it('starts no source read for a cancelled or expired link lookup', async () => {
+    // Any read that ran would surface this missing table instead.
+    const type = { slug: 'link-gone', backing_sql: 'SELECT id FROM missing_link_table', backing_source: 'record-source', metadata_schema: {} };
+    const values = Array.from({ length: 251 }, (_, index) => `v-${index}`);
+    const aborted = { ...ownerToolContext(orgId, userId), abortSignal: AbortSignal.abort(new Error('link lookup cancelled')) };
+    await expect(resolveSourceBackedLinks(type, 'slug', values, aborted)).rejects.toThrow('link lookup cancelled');
+    await expect(resolveSourceBackedLinks(type, 'slug', values, ownerToolContext(orgId, userId), Date.now() - 1))
+      .rejects.toThrow(/deadline expired/);
   });
 
   it('marks unfiltered collections for exact source totals without counting ordinary SQL reads', async () => {

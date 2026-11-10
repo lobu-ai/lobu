@@ -1022,7 +1022,8 @@ async function resolveLinkedColumns(
 		.properties;
 	if (!properties) return {};
 
-	// Collect (linkedType, lookupField) → set of referenced values from the rows.
+	// Collect (linkedType, lookupField) → set of referenced cell values, as the
+	// cell holds them (the frontend indexes refs by the raw cell string).
 	const buckets = new Map<
 		string,
 		{ entityType: string; lookupField: string; values: Set<string> }
@@ -1050,8 +1051,8 @@ async function resolveLinkedColumns(
 			const list = Array.isArray(raw) ? raw : [raw];
 			for (const v of list) {
 				if (v == null) continue;
-				const s = String(v).trim();
-				if (s !== "") bucket.values.add(s);
+				const s = String(v);
+				if (s.trim() !== "") bucket.values.add(s);
 			}
 		}
 	}
@@ -1077,7 +1078,6 @@ async function resolveLinkedColumns(
 		[...buckets.entries()].map(
 			async ([bucketKey, { entityType, lookupField, values }]) => {
 				if (values.size === 0) return;
-				const valuesArr = [...values];
 				const sourceType = sourceTypes.get(entityType);
 				if (sourceType) {
 					// The type-level read gate handleList applies to a direct list of
@@ -1090,24 +1090,28 @@ async function resolveLinkedColumns(
 						return;
 					}
 					try {
+						// One budget for every chunk: the signal stops further reads and
+						// the deadline caps each connector run at what is left of it.
+						const deadlineAt = Date.now() + SOURCE_LINK_READ_TIMEOUT_MS;
 						const signal = AbortSignal.timeout(SOURCE_LINK_READ_TIMEOUT_MS);
 						const refs = await raceAbort(
-							resolveSourceBackedLinks(sourceType, lookupField, valuesArr, {
+							resolveSourceBackedLinks(sourceType, lookupField, [...values], {
 								...ctx,
 								abortSignal: ctx.abortSignal ? AbortSignal.any([ctx.abortSignal, signal]) : signal,
-							}),
+							}, deadlineAt),
 							signal,
 						);
 						if (Object.keys(refs).length > 0) out[bucketKey] = refs;
 					} catch (err) {
 						logger.warn(
-							{ err, entityType, lookupField, values: valuesArr.length },
+							{ err, entityType, lookupField, values: values.size },
 							"Source-backed linked-column lookup failed; rendering plain values",
 						);
 					}
 					return;
 				}
-				const valuesLiteral = pgTextArray(valuesArr);
+				// Stored lookups match trimmed values and key refs by them.
+				const valuesLiteral = pgTextArray([...new Set([...values].map((v) => v.trim()))]);
 				const rows =
 					lookupField === "slug"
 						? await sql<{

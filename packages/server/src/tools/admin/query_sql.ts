@@ -365,6 +365,8 @@ export async function querySqlImpl(
     selection?: QueryContext['selection'];
     /** Internal derived-row routing columns, used only to break equal sort values. */
     stableIdentityColumns?: string[];
+    /** Internal wall-clock deadline forwarded to a connection pushdown; it can only shorten the budget. */
+    deadlineAt?: number;
   }
 ): Promise<QuerySqlResult> {
   const startTime = Date.now();
@@ -435,6 +437,8 @@ export async function querySqlImpl(
     const bounds = coercePageBounds(args);
     if ('error' in bounds) return fail(bounds.error);
     const { limit, offset } = bounds;
+    // A fork the caller has already abandoned is never started.
+    ctx.abortSignal?.throwIfAborted();
     try {
       const r = await runConnectorQuery({
         scope: authzScopeFromToolContext({
@@ -447,6 +451,7 @@ export async function querySqlImpl(
         query: baseSql,
         exactMatch: options?.exactMatch,
         selection: options?.selection,
+        deadlineAt: options?.deadlineAt,
         limit,
         offset,
         sort: args.sort_by
