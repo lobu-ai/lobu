@@ -24,7 +24,7 @@ import {
   listLiveGrantedMemberWorkspaces,
   resolveGrantedWorkspaceTarget,
 } from '../auth/oauth/workspace-grants';
-import { isInProcessSystemCall, isPublicReader } from './access-control';
+import { canReadWorkspaceIdentity, isInProcessSystemCall, isPublicReader, memberReadRole } from './access-control';
 import { AUDIT_SEMANTIC_TYPE, MEMBER_ENTITY_TYPE_SLUG } from './constants';
 import { canSeeMemberEmail, canSeeMemberList, redactMemberEmail } from '../utils/member-entity-type';
 import { type AuthzScope, authzScopeFromToolContext } from '../authz/scope';
@@ -1662,10 +1662,7 @@ async function searchWorkspaceImpl(
           // recall them (ordinary members do not see another member's
           // invitation lifecycle — the $member read policy reserves that for
           // owner/admin).
-          excludeWorkspaceAudit:
-            ctx.memberRole !== 'owner' &&
-            ctx.memberRole !== 'admin' &&
-            !isInProcessSystemCall(ctx),
+          excludeWorkspaceAudit: !canReadWorkspaceIdentity(ctx),
           excludeOperationalTrail: isPublicReader(ctx),
         })
       : Promise.resolve({});
@@ -1691,7 +1688,7 @@ async function searchWorkspaceImpl(
       // recall) instead of flowing into formatEntityResult.
       if (
         entity.entity_type === MEMBER_ENTITY_TYPE_SLUG &&
-        (entity.organization_id !== ctx.organizationId || !canSeeMemberList(ctx.memberRole))
+        (entity.organization_id !== ctx.organizationId || !canSeeMemberList(memberReadRole(ctx)))
       ) {
         return emptyResult({
           ...(title ? { title } : {}),
@@ -2172,14 +2169,14 @@ async function formatEntityResult(
   const memberRows = entityRows.filter((row) => row.entity_type === MEMBER_ENTITY_TYPE_SLUG);
   let visibleRows = entityRows;
   if (memberRows.length > 0) {
-    if (!canSeeMemberList(ctx.memberRole)) {
+    if (!canSeeMemberList(memberReadRole(ctx))) {
       visibleRows = entityRows.filter((row) => row.entity_type !== MEMBER_ENTITY_TYPE_SLUG);
     } else {
       visibleRows = entityRows.filter(
         (row) => row.entity_type !== MEMBER_ENTITY_TYPE_SLUG || row.organization_id === ctx.organizationId
       );
     }
-    if (!canSeeMemberEmail(ctx.memberRole)) {
+    if (!canSeeMemberEmail(memberReadRole(ctx))) {
       const memberSchema = await loadMemberMetadataSchema(ctx.organizationId);
       visibleRows = visibleRows.map((row) =>
         row.entity_type === MEMBER_ENTITY_TYPE_SLUG

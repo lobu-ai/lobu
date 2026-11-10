@@ -29,9 +29,10 @@ import { measureColumns as inferMeasureColumns } from '../utils/infer-measures';
 import { RESERVED_PATHS_SET } from '../utils/reserved';
 import { getWorkspaceProvider } from '../workspace';
 import {
+  canReadWorkspaceIdentity,
   isAdminOrOwnerRole,
-  isInProcessSystemCall,
   isPublicReader,
+  memberReadRole,
   requireWorkspaceContext,
 } from './access-control';
 import { MEMBER_ENTITY_TYPE_SLUG } from './constants';
@@ -411,12 +412,11 @@ async function _resolvePath(
   }
 
   const workspaceCtx = requireWorkspaceContext(resolvedCtx);
-  const roleInResolvedWorkspace = workspaceCtx.memberRole;
+  const roleInResolvedWorkspace = memberReadRole(workspaceCtx);
   // Workspace-identity audit + template events: owner/admin of THIS workspace
   // (or trusted system) only.
   const readBoundary: EventReadBoundary = {
-    excludeWorkspaceAudit:
-      !isInProcessSystemCall(ctx) && !isAdminOrOwnerRole(roleInResolvedWorkspace),
+    excludeWorkspaceAudit: !canReadWorkspaceIdentity(workspaceCtx),
     excludeOperationalTrail: isPublicReader(workspaceCtx),
   };
 

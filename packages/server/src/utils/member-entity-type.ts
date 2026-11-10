@@ -400,6 +400,8 @@ export function resolveMemberSchemaFieldsFromSchema(
  * Keep these three in one place so a new caller cannot drift the rule — the
  * member list is PII, and search_memory once served it (with emails) to
  * anonymous callers on public orgs because only manage_entity enforced it.
+ * Pass `memberReadRole(ctx)`, never `ctx.memberRole`: an Automation script
+ * reads members with its creator's role.
  */
 export function canSeeMemberList(memberRole: string | null | undefined): boolean {
   return !!memberRole;

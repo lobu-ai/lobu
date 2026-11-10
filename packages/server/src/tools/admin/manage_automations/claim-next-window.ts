@@ -14,6 +14,7 @@ import {
   automationArrivalSettleMs,
   computePendingWindow,
 } from '../../../utils/window-utils';
+import { isAdminOrOwnerRole, memberReadRole } from '../../access-control';
 import { handleAutomationMode } from '../../get_content/automation-mode';
 import { parseAutomationSkillSnapshots } from '../../../automations/skill-snapshots';
 import type { ToolContext } from '../../registry';
@@ -472,7 +473,7 @@ export async function handleClaimNextWindow(
         sourceContext: ctx.sourceContext ?? null,
         tokenType: ctx.tokenType,
         abortSignal: ctx.abortSignal,
-        excludeWorkspaceAudit: ctx.memberRole !== 'owner' && ctx.memberRole !== 'admin',
+        excludeWorkspaceAudit: !isAdminOrOwnerRole(memberReadRole(ctx)),
         claimedWindow: {
           runId: claimedWindow.runId,
           windowStart: claimedWindow.windowStart.toISOString(),
