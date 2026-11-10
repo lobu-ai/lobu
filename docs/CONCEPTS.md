@@ -49,7 +49,11 @@ read-only views. Reads never create stored rows.
 Declared keys use `exactMatch.verbatim: true` on connector queries. A connector
 must advertise both `queryCapabilities.exactMatch` and `queryCapabilities.verbatimExactMatch`;
 unsupported sources reject the lookup before executing it. Legacy view slugs
-retain trimmed matching.
+retain trimmed matching. Entity lists resolve a page's `x-link-entity-type`
+values against a source-backed target in one multi-value exact match
+(`exactMatch.values`), which also requires `queryCapabilities.exactMatchAny`;
+without it, or when the read fails, those cells render as plain values. A lookup
+by any field other than `slug` links only a value with exactly one match.
 
 Reference selectors also accept a discovered numeric entity-type ID. A string
 type slug resolves only in the current workspace; a numeric type ID identifies

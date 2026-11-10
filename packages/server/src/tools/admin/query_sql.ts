@@ -11,7 +11,7 @@ import type { QueryContext } from '@lobu/connector-sdk';
 import { parseCollectionSelection } from '@lobu/core/contracts/tools/collection-selection';
 import { attributeFilterSql } from '../../utils/attribute-filters';
 import { authzScopeFromToolContext } from '../../authz/scope';
-import { getDb } from '../../db/client';
+import { getDb, pgTextArray } from '../../db/client';
 import type { Env } from '../../index';
 import { resolveWindowQueryContext } from '../../automations/window-read-context';
 import { pushdownFailureError, runConnectorQuery } from '../../lib/connector-pushdown';
@@ -94,6 +94,8 @@ export const QuerySqlSchema = Type.Object({
 type QuerySqlArgs = Static<typeof QuerySqlSchema>;
 
 const COLUMN_NAME_RE = /^[a-zA-Z_]\w*$/;
+/** One page of record keys: the entity list page cap. */
+const EXACT_MATCH_MAX_VALUES = 500;
 
 const PG_OID_TYPE_MAP: Record<number, string> = {
   16: 'boolean',
@@ -363,6 +365,8 @@ export async function querySqlImpl(
     selection?: QueryContext['selection'];
     /** Internal derived-row routing columns, used only to break equal sort values. */
     stableIdentityColumns?: string[];
+    /** Internal wall-clock deadline forwarded to a connection pushdown; it can only shorten the budget. */
+    deadlineAt?: number;
   }
 ): Promise<QuerySqlResult> {
   const startTime = Date.now();
@@ -400,6 +404,13 @@ export async function querySqlImpl(
     for (const col of options.exactMatch.columns) {
       if (!COLUMN_NAME_RE.test(col)) return fail(`Invalid exact-match column name: ${col}`);
     }
+    const { value, values } = options.exactMatch;
+    if ((value === undefined) === (values === undefined)) {
+      return fail('exactMatch takes exactly one of value or values.');
+    }
+    if (values !== undefined && (!values.length || values.length > EXACT_MATCH_MAX_VALUES)) {
+      return fail(`exactMatch.values must hold 1-${EXACT_MATCH_MAX_VALUES} keys.`);
+    }
   }
   if (options?.selection) {
     try { parseCollectionSelection(options.selection); }
@@ -426,6 +437,8 @@ export async function querySqlImpl(
     const bounds = coercePageBounds(args);
     if ('error' in bounds) return fail(bounds.error);
     const { limit, offset } = bounds;
+    // A fork the caller has already abandoned is never started.
+    ctx.abortSignal?.throwIfAborted();
     try {
       const r = await runConnectorQuery({
         scope: authzScopeFromToolContext({
@@ -438,6 +451,7 @@ export async function querySqlImpl(
         query: baseSql,
         exactMatch: options?.exactMatch,
         selection: options?.selection,
+        deadlineAt: options?.deadlineAt,
         limit,
         offset,
         sort: args.sort_by
@@ -519,14 +533,15 @@ export async function querySqlImpl(
     whereClauses.push(`(${orClauses.join(' OR ')})`);
   }
   if (options?.exactMatch) {
-    const { columns, value, verbatim } = options.exactMatch;
+    const { columns, value, values, verbatim } = options.exactMatch;
     const matchParamRef = `$${params.length + 1}`;
-    params.push(value);
+    params.push(values === undefined ? value : pgTextArray(values));
     const coalesced = columns.map((col) => `to_jsonb(_t)->>'${col}'`).join(', ');
     // Preserve legacy slug normalization; declared record keys must not
     // collapse whitespace variants into the same identity.
     const scalar = `COALESCE(${coalesced})`;
-    whereClauses.push(`${verbatim ? scalar : `btrim(${scalar}, E' \\t\\n\\r\\f\\v')`} = ${matchParamRef}`);
+    const target = values === undefined ? matchParamRef : `ANY(${matchParamRef}::text[])`;
+    whereClauses.push(`${verbatim ? scalar : `btrim(${scalar}, E' \\t\\n\\r\\f\\v')`} = ${target}`);
   }
   whereClauses.push(...attributeFilterSql(options?.selection?.filters ?? [], 'to_jsonb(_t)', params));
   const searchWhere = whereClauses.length ? `WHERE ${whereClauses.join(' AND ')}` : '';

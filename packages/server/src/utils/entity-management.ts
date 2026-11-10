@@ -2854,6 +2854,99 @@ async function listDerivedEntities(
 	};
 }
 
+/** A resolved `x-link-entity-type` cell: where the link points and its label. */
+export interface LinkedEntityRef {
+  slug: string;
+  entity_type: string;
+  name: string;
+}
+
+/**
+ * Keys per source read. The read's limit is twice this, so a source whose
+ * matches are all unique never reports `has_more`; only duplicates can.
+ */
+const LINK_LOOKUP_KEYS_PER_READ = 250;
+
+/**
+ * Resolve a page's `x-link-entity-type` values against a source-backed type.
+ * Each read pushes every key of the chunk to the source as one multi-value
+ * exact match (a connector must declare `queryCapabilities.exactMatchAny`).
+ * `slug` matches the routing key the list derives (declared record key, else
+ * slug/id); any other field matches that projected column. A value links only
+ * when exactly one row matches it; a truncated read (`has_more`) leaves its
+ * single matches unlinked because a second match may lie past the limit.
+ * `values` are raw cell strings and key the result: a declared record key
+ * matches them verbatim, every other lookup by their trimmed form. Stops
+ * before the next read once `ctx.abortSignal` aborts, and caps each connector
+ * run at `deadlineAt`. Read failures throw; the caller decides how to degrade.
+ */
+export async function resolveSourceBackedLinks(
+	type: { slug: string; backing_sql: string; backing_source: string | null; metadata_schema: unknown },
+	lookupField: string,
+	values: string[],
+	ctx: ToolContext,
+	deadlineAt?: number,
+): Promise<Record<string, LinkedEntityRef>> {
+	const keyColumn = recordKeyColumn(type.metadata_schema);
+	const bySlug = lookupField === "slug";
+	const verbatim = bySlug && keyColumn !== null;
+	// Normalized key → the raw cell values that reference it.
+	const cellsByKey = new Map<string, string[]>();
+	for (const value of values) {
+		const key = verbatim ? value : value.trim();
+		if (key === "") continue;
+		cellsByKey.set(key, [...(cellsByKey.get(key) ?? []), value]);
+	}
+	const keys = [...cellsByKey.keys()];
+	const rowSlug = (row: Record<string, unknown>) =>
+		(keyColumn ? recordKey(row, keyColumn) : null) ?? derivedRowSlug(row);
+	const rowLookup = (row: Record<string, unknown>): string | null => {
+		if (bySlug) return keyColumn ? recordKey(row, keyColumn) : derivedRowSlug(row) || null;
+		const raw = row[lookupField];
+		if (typeof raw !== "string" && typeof raw !== "number" && typeof raw !== "boolean") return null;
+		return String(raw).trim() || null;
+	};
+	const out: Record<string, LinkedEntityRef> = {};
+	for (let start = 0; start < keys.length; start += LINK_LOOKUP_KEYS_PER_READ) {
+		ctx.abortSignal?.throwIfAborted();
+		const chunk = keys.slice(start, start + LINK_LOOKUP_KEYS_PER_READ);
+		const result = await querySqlImpl(
+			{ sql: type.backing_sql, connection: type.backing_source ?? undefined, limit: chunk.length * 2, offset: 0 },
+			undefined,
+			ctx,
+			{
+				maxSerializedResultBytes: Number.POSITIVE_INFINITY,
+				deadlineAt,
+				exactMatch: {
+					columns: bySlug ? (keyColumn ? [keyColumn] : [...DERIVED_SLUG_COLUMNS]) : [lookupField],
+					values: chunk,
+					...(verbatim ? { verbatim: true } : {}),
+				},
+			},
+		);
+		if (result.error) {
+			throw new ToolUserError(`Source-backed link lookup on '${type.slug}' failed: ${result.error}`, 400);
+		}
+		if (result.has_more) continue;
+		const wanted = new Set(chunk);
+		const matches = new Map<string, Record<string, unknown>[]>();
+		for (const row of result.rows) {
+			const value = rowLookup(row);
+			if (value === null || !wanted.has(value)) continue;
+			matches.set(value, [...(matches.get(value) ?? []), row]);
+		}
+		for (const [key, rows] of matches) {
+			if (rows.length !== 1) continue;
+			const slug = rowSlug(rows[0]);
+			if (!slug) continue;
+			for (const cell of cellsByKey.get(key) ?? []) {
+				out[cell] = { slug, entity_type: type.slug, name: derivedRowName(rows[0], slug) };
+			}
+		}
+	}
+	return out;
+}
+
 // ============================================
 // Relationship Batch Loading
 // ============================================

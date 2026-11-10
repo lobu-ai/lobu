@@ -1,14 +1,17 @@
 import { beforeAll, describe, expect, it } from 'vitest';
-import { derivedRowSlug, queryDerivedEntityView } from '../../../utils/entity-management';
+import { derivedRowSlug, queryDerivedEntityView, resolveSourceBackedLinks } from '../../../utils/entity-management';
 import { createAuthProfile } from '../../../utils/auth-profiles';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import {
   addUserToOrganization,
+  createTestAgent,
+  createTestEntity,
   createTestOrganization,
   createTestConnectorDefinition,
   createTestUser,
   ownerToolContext,
 } from '../../setup/test-fixtures';
+import { upsertEntityApprovalPolicy } from '../../../authz/entity-policy';
 import { resolvePath } from '../../../tools/resolve_path';
 import { TestApiClient } from '../../setup/test-mcp-client';
 import { createIsolateConnectorCompiler } from '@lobu/connector-worker/compile';
@@ -261,6 +264,104 @@ describe('external derived record lookup', () => {
       mode: 'query', query: 'SELECT 1', exactMatch: { columns: ['id'], value: ' padded ', verbatim: true },
       config: {}, credentials: null, sessionState: null, env: {}, limit: 1,
     } })).rejects.toMatchObject({ httpStatus: 400, message: 'Connector does not support verbatim exact-match queries' });
+  });
+
+  it('rejects multi-value filters before calling a connector without exactMatchAny', async () => {
+    const compiledCode = await createIsolateConnectorCompiler().compileConnectorForIsolateFromSource(`
+      import { defineConnector } from '@lobu/connector-sdk';
+      export default defineConnector({
+        key: 'single_exact', name: 'Single exact', version: '0.0.1',
+        queryCapabilities: { exactMatch: true, verbatimExactMatch: true, selection: true },
+        query: async () => { throw new Error('query handler must not run'); }
+      });
+    `);
+    await expect(executeCompiledConnector({ compiledCode, job: {
+      mode: 'query', query: 'SELECT 1', exactMatch: { columns: ['id'], values: ['1', '2'] },
+      config: {}, credentials: null, sessionState: null, env: {}, limit: 4,
+    } })).rejects.toMatchObject({ httpStatus: 400, message: 'Connector does not support multi-value exact-match queries' });
+  });
+
+  it('resolves linked columns against source-backed targets and links only unique names', async () => {
+    const api = await TestApiClient.for({ organizationId: orgId, userId, memberRole: 'owner' });
+    await api.entity_schema.createType({
+      slug: 'link-person', name: 'Link person',
+      metadata_schema: { type: 'object', 'x-lobu-record-key': 'id' },
+      backing: {
+        sql: `SELECT 'p-' || n AS id, 'Person ' || n AS name FROM generate_series(1, 3) n
+          UNION ALL SELECT 'p-twin-a', 'Twin' UNION ALL SELECT 'p-twin-b', 'Twin'
+          UNION ALL SELECT ' p-pad ', 'Padded' UNION ALL SELECT 'p-pad', 'Unpadded'
+          UNION ALL SELECT ' ', 'Blank key'`,
+        connection: 'record-source',
+      },
+    });
+    // No connection: the backing SQL runs on the workspace's own tables.
+    await api.entity_schema.createType({
+      slug: 'link-company', name: 'Link company',
+      backing: { sql: `SELECT * FROM (VALUES ('acme', 'Acme Inc'), ('globex', 'Globex')) AS c(slug, name)` },
+    });
+    await api.entity_schema.createType({
+      slug: 'link-broken', name: 'Link broken',
+      backing: { sql: 'SELECT 1 AS id', connection: 'record-source' },
+    });
+    await getTestDb()`UPDATE entity_types SET backing_sql = 'SELECT id FROM missing_link_table'
+      WHERE organization_id = ${orgId} AND slug = 'link-broken'`;
+    await api.entity_schema.createType({ slug: 'link-contact', name: 'Link contact' });
+    await createTestEntity({ name: 'Solo', entity_type: 'link-contact', organization_id: orgId });
+    const [solo] = await getTestDb()`SELECT slug FROM entities WHERE organization_id = ${orgId} AND name = 'Solo'`;
+    for (const name of ['Same A', 'Same B']) {
+      const row = await createTestEntity({ name, entity_type: 'link-contact', organization_id: orgId });
+      await getTestDb()`UPDATE entities SET name = 'Same' WHERE id = ${row.id}`;
+    }
+    await api.entity_schema.createType({
+      slug: 'link-task', name: 'Link task',
+      metadata_schema: { type: 'object', properties: {
+        owner_name: { type: 'string', 'x-link-entity-type': 'link-person', 'x-link-lookup-field': 'name' },
+        owner_id: { type: 'string', 'x-link-entity-type': 'link-person' },
+        backup_owner_id: { type: 'string', 'x-link-entity-type': 'link-person' },
+        company_id: { type: 'string', 'x-link-entity-type': 'link-company' },
+        contact_name: { type: 'string', 'x-link-entity-type': 'link-contact', 'x-link-lookup-field': 'name' },
+        broken_id: { type: 'string', 'x-link-entity-type': 'link-broken' },
+      } },
+    });
+    const tasks = [
+      { owner_name: 'Person 1', owner_id: 'p-2', backup_owner_id: ' ', company_id: 'acme', contact_name: 'Solo', broken_id: '1' },
+      { owner_name: 'Twin', owner_id: ' p-pad ', company_id: 'initech', contact_name: 'Same' },
+    ];
+    for (const [index, metadata] of tasks.entries()) {
+      await api.entities.create({ entity_type: 'link-task', name: `Link task ${index}`, metadata });
+    }
+    type LinkedPage = { entities: unknown[]; linked_entities?: Record<string, Record<string, unknown>> };
+    const page = await api.entities.list({ entity_type: 'link-task' }) as LinkedPage;
+    expect(page.entities).toHaveLength(2);
+    // An unreadable source (link-broken) degrades to no refs instead of failing the list.
+    expect(page.linked_entities).toEqual({
+      'link-person:name': { 'Person 1': { slug: 'p-1', entity_type: 'link-person', name: 'Person 1' } },
+      // A declared record key is verbatim, and refs are keyed by the raw cell.
+      'link-person:slug': {
+        'p-2': { slug: 'p-2', entity_type: 'link-person', name: 'Person 2' },
+        ' p-pad ': { slug: ' p-pad ', entity_type: 'link-person', name: 'Padded' },
+        ' ': { slug: ' ', entity_type: 'link-person', name: 'Blank key' },
+      },
+      'link-company:slug': { acme: { slug: 'acme', entity_type: 'link-company', name: 'Acme Inc' } },
+      'link-contact:name': { Solo: { slug: String(solo.slug), entity_type: 'link-contact', name: 'Solo' } },
+    });
+
+    const agent = await createTestAgent({ organizationId: orgId, ownerUserId: userId });
+    await upsertEntityApprovalPolicy(orgId, {
+      principalKind: 'agent', principalId: agent.agentId, entityTypeSlug: 'link-person', effects: { read: 'deny' },
+    });
+    const denied = await api.withAuth({ agentId: agent.agentId }).entities.list({ entity_type: 'link-task' }) as LinkedPage;
+    expect(Object.keys(denied.linked_entities ?? {}).sort()).toEqual(['link-company:slug', 'link-contact:name']);
+  });
+
+  it('starts no source read for a cancelled or expired link lookup', async () => {
+    // Any read that ran would surface this missing table instead.
+    const type = { slug: 'link-gone', backing_sql: 'SELECT id FROM missing_link_table', backing_source: 'record-source', metadata_schema: {} };
+    const values = Array.from({ length: 251 }, (_, index) => `v-${index}`);
+    const aborted = { ...ownerToolContext(orgId, userId), abortSignal: AbortSignal.abort(new Error('link lookup cancelled')) };
+    await expect(resolveSourceBackedLinks(type, 'slug', values, aborted)).rejects.toThrow('link lookup cancelled');
+    await expect(resolveSourceBackedLinks(type, 'slug', values, ownerToolContext(orgId, userId), Date.now() - 1))
+      .rejects.toThrow(/deadline expired/);
   });
 
   it('marks unfiltered collections for exact source totals without counting ordinary SQL reads', async () => {

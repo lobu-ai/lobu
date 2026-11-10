@@ -387,7 +387,7 @@ export default class PostgresConnector extends ConnectorRuntime {
     description:
       'Bring your own PostgreSQL database as memory, read a configured feed directly, or run governed connection-level SQL.',
     version: '1.1.0',
-    queryCapabilities: { exactMatch: true, verbatimExactMatch: true, selection: true },
+    queryCapabilities: { exactMatch: true, verbatimExactMatch: true, exactMatchAny: true, selection: true },
     faviconDomain: 'postgresql.org',
     authSchema: {
       methods: [
@@ -563,8 +563,10 @@ export default class PostgresConnector extends ConnectorRuntime {
         const bind = (value: string) => { params.push(value); return `$${params.length}::text`; };
         let where = '';
         if (ctx.exactMatch) {
-          const { columns, value, verbatim } = ctx.exactMatch;
+          const { columns, verbatim } = ctx.exactMatch;
+          const values = ctx.exactMatch.values ?? [ctx.exactMatch.value];
           if (!columns.length) throw new Error('exactMatch.columns must not be empty');
+          if (!values.length) throw new Error('exactMatch.values must not be empty');
           for (const column of columns) assertIdentifier(column, 'exactMatch.column');
           const projection = await tx.unsafe(`SELECT * FROM (\n${baseSql}\n) q LIMIT 0`);
           const projected = projection.columns as Array<{ name: string; type: number; parser?: { array?: boolean } }>;
@@ -574,11 +576,15 @@ export default class PostgresConnector extends ConnectorRuntime {
           if (!candidates.some(isScalar)) {
             throw Object.assign(new Error('Exact-match identity must be a scalar; project a text key in the source query'), { status: 400 });
           }
+          // One bound array literal per comparison: a page of keys stays one statement.
+          const bindArray = (items: string[]) =>
+            bind(`{${items.map((item) => `"${item.replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`).join(',')}}`);
           const textMatch = (ref: string) => verbatim
-            ? `${ref} = ${bind(value)}`
-            : `btrim(${ref}, ${bind('\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff')}) = ${bind(value)}`;
-          const numberMatch = (ref: string, cast: string) => Number.isFinite(Number(value)) && String(Number(value)) === value
-            ? `${ref} = ${bind(value)}::${cast}` : 'FALSE';
+            ? `${ref} = ANY(${bindArray(values)}::text[])`
+            : `btrim(${ref}, ${bind('\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff')}) = ANY(${bindArray(values)}::text[])`;
+          const numbers = values.filter((value) => Number.isFinite(Number(value)) && String(Number(value)) === value);
+          const numberMatch = (ref: string, cast: string) => numbers.length
+            ? `${ref} = ANY(${bindArray(numbers)}::${cast}[])` : 'FALSE';
           const cases = candidates.map((column) => {
             const ref = `q.${quoteIdent(column.name)}`;
             const jsonType = [114, 3802].includes(column.type) ? `${column.type === 114 ? 'json' : 'jsonb'}_typeof(${ref})` : undefined;
@@ -602,20 +608,21 @@ export default class PostgresConnector extends ConnectorRuntime {
             } else if ([1082, 1114, 1184].includes(column.type)) {
               // The driver returns Date values; the isolate serializes them as ISO.
               present = `isfinite(${ref})`;
-              const date = new Date(value);
-              if (!Number.isFinite(date.getTime()) || date.toISOString() !== value) {
-                match = 'FALSE';
-              } else if (column.type === 1082) {
-                match = value.endsWith('T00:00:00.000Z') ? `${ref} = ${bind(value.slice(0, 10))}::date` : 'FALSE';
-              } else {
+              const dateMatches = values.flatMap((value) => {
+                const date = new Date(value);
+                if (!Number.isFinite(date.getTime()) || date.toISOString() !== value) return [];
+                if (column.type === 1082) {
+                  return value.endsWith('T00:00:00.000Z') ? [`${ref} = ${bind(value.slice(0, 10))}::date`] : [];
+                }
                 // Timestamp without zone is parsed in the worker's local zone.
                 const key = column.type === 1114
                   ? new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, -1)
                   : value;
                 const bound = `${bind(key)}::${PG_OID[column.type].cast}`;
                 // Date drops source microseconds, so retain its full millisecond.
-                match = `${ref} >= ${bound} AND ${ref} < ${bound} + INTERVAL '1 millisecond'`;
-              }
+                return [`(${ref} >= ${bound} AND ${ref} < ${bound} + INTERVAL '1 millisecond')`];
+              });
+              match = dateMatches.length ? dateMatches.join(' OR ') : 'FALSE';
             } else {
               match = textMatch(`${ref}::text`);
             }
