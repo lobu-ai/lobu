@@ -160,6 +160,8 @@ export async function findMatchingAutomationActivations(
   // down must agree on what "no workspace" means.
   const rawTeamId = signal.attributes?.team_id;
   const teamId = typeof rawTeamId === "string" && rawTeamId !== "" ? rawTeamId : null;
+  // Platform setup imports channel authorization; load the registry only at
+  // query time so a platform-first import cannot re-enter its own descriptor.
   const chatLinkFilter = options?.includeAuthorizedChatLinks &&
     signal.event_type === "message.created" && signal.connection_id != null &&
     typeof channelId === "string"
@@ -168,7 +170,7 @@ export async function findMatchingAutomationActivations(
         connection: { id: signal.connection_id },
         channelId,
         teamId,
-      })})`
+      }, (await import("../gateway/connections/platforms/index.js")).connectorTransportPlatforms())})`
     : db``;
   const organizationFilter = options?.crossOrganization
     ? db``

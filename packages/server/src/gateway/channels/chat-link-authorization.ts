@@ -1,5 +1,4 @@
 import { type DbClient, pgTextArray } from "../../db/client";
-import { connectorTransportPlatforms } from "../connections/platforms/index";
 import { runtimeConnectionPredicate } from "../../lobu/stores/connections-projection";
 import { isAdminOrOwnerRole } from "../../tools/access-control";
 import { getWorkspaceRole } from "../../utils/organization-access";
@@ -19,6 +18,7 @@ export function authorizedChatLinkIds(
     channelId: string;
     teamId?: string | null;
   },
+  connectorTransportPlatforms: readonly string[],
 ) {
   const connectionFilter = "runtimeId" in chat.connection
     ? runtimeConnectionPredicate(sql, chat.connection.runtimeId, {
@@ -45,7 +45,7 @@ export function authorizedChatLinkIds(
       AND s.native_channel_id = ${chat.channelId}
       AND s.trigger_team_id IS NOT DISTINCT FROM ${chat.teamId || null}
       AND s.connection_status = 'active'
-      AND (s.credential_mode IS NOT NULL OR s.platform = ANY(${pgTextArray(connectorTransportPlatforms())}::text[]))
+      AND (s.credential_mode IS NOT NULL OR s.platform = ANY(${pgTextArray([...connectorTransportPlatforms])}::text[]))
       AND w.tags @> ARRAY['system:chat-link']::text[]
   `;
 }

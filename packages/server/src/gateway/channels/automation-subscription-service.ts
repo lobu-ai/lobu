@@ -184,6 +184,8 @@ async function loadChatAutomationSubscriptions(
 		: null;
 	// An admitted Automation may also carry triggers for other workspaces on
 	// this channel; return only the trigger row that matches this chat's team.
+	// Platform setup imports this service. Load the registry at query time so
+	// it cannot read a platform descriptor before that module initializes.
 	const linkedOrgFilter = filters.includeAuthorizedChatLinks &&
 		filters.connectionOrganizationId && filters.runtimeConnectionId && native
 		? sql`OR (
@@ -192,7 +194,7 @@ async function loadChatAutomationSubscriptions(
 				connection: { runtimeId: filters.runtimeConnectionId },
 				channelId: native,
 				teamId: filters.teamId,
-			})})
+			}, (await import("../connections/platforms/index.js")).connectorTransportPlatforms())})
 			AND s.trigger_team_id IS NOT DISTINCT FROM ${filters.teamId || null}
 		)`
 		: sql``;
