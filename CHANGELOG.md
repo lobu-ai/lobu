@@ -1,5 +1,42 @@
 # Changelog
 
+## [24.9.0](https://github.com/lobu-ai/lobu/compare/lobu-v24.8.0...lobu-v24.9.0) (2026-11-10)
+
+
+### Features
+
+* **automations:** keep reaction script results in the reaction log ([#4797](https://github.com/lobu-ai/lobu/issues/4797)) ([d6216b3](https://github.com/lobu-ai/lobu/commit/d6216b309d1aa0f48be5633792cb8b3fa5d33c0a))
+* **automations:** return pinned prompt and skills on external window claims ([#4787](https://github.com/lobu-ai/lobu/issues/4787)) ([7bd1052](https://github.com/lobu-ai/lobu/commit/7bd1052db83885cf92c879acfbc585e5fd924d30))
+* **collections:** viewer-scoped presets ([#4815](https://github.com/lobu-ai/lobu/issues/4815)) ([5d6827a](https://github.com/lobu-ai/lobu/commit/5d6827a7bd93e883ee589a33ff1801b450383f60))
+* **connectors:** add read-only history action to market.quotes ([#4777](https://github.com/lobu-ai/lobu/issues/4777)) ([a449f5c](https://github.com/lobu-ai/lobu/commit/a449f5c40ac38c03a419e8841541479822fca40e))
+* **connectors:** generate GitHub reads from the official OpenAPI spec ([#4819](https://github.com/lobu-ai/lobu/issues/4819)) ([b0be4f1](https://github.com/lobu-ai/lobu/commit/b0be4f1170a3581e8c007698df8ce77eec3d3668))
+* **connectors:** read-only PR status and branch head actions for GitHub ([#4806](https://github.com/lobu-ai/lobu/issues/4806)) ([e3817cb](https://github.com/lobu-ai/lobu/commit/e3817cbab0b35720dbef8835c9492269c2eed29b))
+* **csp:** allow loopback port wildcards in FRAME_ANCESTORS ([#4809](https://github.com/lobu-ai/lobu/issues/4809)) ([6b36121](https://github.com/lobu-ai/lobu/commit/6b361212d714744c721987e5642f5eff69cad88d))
+* **sdk:** accept get_automation paging and range fields on automations.get ([#4789](https://github.com/lobu-ai/lobu/issues/4789)) ([55df8f7](https://github.com/lobu-ai/lobu/commit/55df8f7951d0e5979d3487a5be4b3814ec07bbba))
+* **views:** let view actions update entity fields; add x-lobu-stamps ([#4798](https://github.com/lobu-ai/lobu/issues/4798)) ([0349e91](https://github.com/lobu-ai/lobu/commit/0349e9116f270cfff4626dd659fb061230a84d4f))
+* **views:** let views declare image origins ([#4803](https://github.com/lobu-ai/lobu/issues/4803)) ([5c99793](https://github.com/lobu-ai/lobu/commit/5c99793add99559f1948ca23ebd15e139d56c28c))
+* **views:** Skeleton placeholder; LoadingState draws skeleton lines ([#4800](https://github.com/lobu-ai/lobu/issues/4800)) ([26c9cbb](https://github.com/lobu-ai/lobu/commit/26c9cbbf003ba5d4f9c156862a5c4df4344a5754))
+* **views:** workspace navigation document, embedded views and bundle-bound view actions ([#4778](https://github.com/lobu-ai/lobu/issues/4778)) ([166f8b4](https://github.com/lobu-ai/lobu/commit/166f8b468249c453653285667fe81bf7f66d16e7))
+
+
+### Bug Fixes
+
+* **automations:** auto-pause external Automations on any failed run ([#4793](https://github.com/lobu-ai/lobu/issues/4793)) ([244ae67](https://github.com/lobu-ai/lobu/commit/244ae6728c32774f62fe377d663c7d7f9935b99f))
+* **automations:** bound get_automation window output; windows[].extracted_data may now be null (see extracted_data_omitted) and previous_extracted_data is removed ([eedb3b3](https://github.com/lobu-ai/lobu/commit/eedb3b3a2bb33d94584842190cc76bbe02051362))
+* **automations:** fail and count a claim whose pinned version is unreadable ([#4802](https://github.com/lobu-ai/lobu/issues/4802)) ([c2331b4](https://github.com/lobu-ai/lobu/commit/c2331b4cc1d6ca2627912fd18ea091b539d588d3))
+* **automations:** reaction scripts read members with their creator's role ([#4816](https://github.com/lobu-ai/lobu/issues/4816)) ([d98976c](https://github.com/lobu-ai/lobu/commit/d98976c79078c62db0739f4d400dd3822b00ab2c))
+* **chat:** honor authorized workspace bindings for source chats ([#4811](https://github.com/lobu-ai/lobu/issues/4811)) ([2533f06](https://github.com/lobu-ai/lobu/commit/2533f062dd82439dc3393331229085a936b1d598))
+* **cli:** entity type display fields come from the schema contract; add icon and color ([#4822](https://github.com/lobu-ai/lobu/issues/4822)) ([6b01106](https://github.com/lobu-ai/lobu/commit/6b011066b0c21ffe19cb86a767522a1e27ed467d))
+* **connectors:** complete GitHub PR status counts and follow review decisions ([#4807](https://github.com/lobu-ai/lobu/issues/4807)) ([69733ce](https://github.com/lobu-ai/lobu/commit/69733ce8e4cb2b1f2352a0af423d020e5d190176))
+* **connectors:** resume X notification reads by returned rows, not one anchor ([#4796](https://github.com/lobu-ai/lobu/issues/4796)) ([2eb3edc](https://github.com/lobu-ai/lobu/commit/2eb3edcc35e896d66fa4080f612e3c1f14ead7a4))
+* **entities:** read a public catalog type's schema when listing its entities ([#4813](https://github.com/lobu-ai/lobu/issues/4813)) ([c5dbe59](https://github.com/lobu-ai/lobu/commit/c5dbe5944b73df4cde03897a127ed4004bde2937))
+* **entities:** resolve linked columns against source-backed types ([#4821](https://github.com/lobu-ai/lobu/issues/4821)) ([b2df6d4](https://github.com/lobu-ai/lobu/commit/b2df6d4ea60eec0b91c0aefea64ce777b95ca5ce))
+* **review:** fail fast when the BB reviewer child errors ([#4782](https://github.com/lobu-ai/lobu/issues/4782)) ([89e22f2](https://github.com/lobu-ai/lobu/commit/89e22f25cc5ba0bd2864c79ec70513527b06f6c1))
+* **review:** start a fresh review cycle when a branch name carries a new PR ([#4775](https://github.com/lobu-ai/lobu/issues/4775)) ([0f33818](https://github.com/lobu-ai/lobu/commit/0f33818fbf1cb455e6a12db038ddfdcda08e7dac))
+* **views:** one theme token vocabulary for view shells ([#4781](https://github.com/lobu-ai/lobu/issues/4781)) ([b796d5f](https://github.com/lobu-ai/lobu/commit/b796d5ff6d35bc2c1979a61dbd210f45921fd349))
+* **views:** reliable embeds, page context and a navigation edit baseline ([#4799](https://github.com/lobu-ai/lobu/issues/4799)) ([8455ce9](https://github.com/lobu-ai/lobu/commit/8455ce9402326569b26f33639dd0e94158a344d2))
+* **views:** resolve public catalog entity types in navigation and open_view ([#4808](https://github.com/lobu-ai/lobu/issues/4808)) ([5295325](https://github.com/lobu-ai/lobu/commit/529532523bfeae577e4a8c471ee4ea6f607c175c))
+
 ## [24.8.0](https://github.com/lobu-ai/lobu/compare/lobu-v24.7.0...lobu-v24.8.0) (2026-11-09)
 
 
