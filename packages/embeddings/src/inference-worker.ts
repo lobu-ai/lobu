@@ -123,7 +123,13 @@ export function runInferenceWorker(): void {
 				const start = job.embeddings.length;
 				try {
 					const batch = job.texts.slice(start, start + job.batchSize);
-					job.embeddings.push(...(await batchGenerateLocalEmbeddings(batch, batch.length)));
+					const vectors = await batchGenerateLocalEmbeddings(batch, batch.length);
+					// A short answer would misalign every later batch, and an
+					// empty one would never finish the request.
+					if (vectors.length !== batch.length) {
+						throw new Error(`Local embeddings returned ${vectors.length} vectors for ${batch.length} texts`);
+					}
+					job.embeddings.push(...vectors);
 					if (job.embeddings.length < job.texts.length) continue;
 					port.postMessage({ id: job.id, embeddings: job.embeddings } satisfies InferenceResponse);
 				} catch (error) {
