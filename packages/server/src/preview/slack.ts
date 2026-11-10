@@ -7,7 +7,7 @@ import { parseJsonBody } from "../gateway/routes/shared/helpers";
 import { SecretStoreRegistry } from "../gateway/secrets";
 import { PostgresSecretStore } from "../lobu/stores/postgres-secret-store";
 import type { Env } from "../index";
-import { runtimeConnectionIdToSlug } from "../lobu/stores/connections-projection";
+import { runtimeConnectionIdToSlug, runtimeConnectionPredicate } from "../lobu/stores/connections-projection";
 import { errorMessage } from "../utils/errors";
 import logger from "../utils/logger";
 import { getConfiguredPublicOrigin } from "../utils/public-origin";
@@ -196,7 +196,9 @@ export async function createPreviewClaim(c: Context<{ Bindings: Env }>) {
 			SELECT id, connector_key, organization_id
 			FROM connections
 			WHERE id = ${requestedConnectionId}
-				AND credential_mode IS NOT NULL
+				AND (credential_mode IS NOT NULL OR (
+					connector_key = ${platform} AND ${getPlatformDescriptor(platform)?.connectorTransport === true}
+				))
 				AND status = 'active'
 				AND deleted_at IS NULL
 			LIMIT 1
@@ -369,9 +371,11 @@ export async function consumePreviewClaim(args: {
 				SELECT 1 FROM connections
 				WHERE id = ${claim.connectionId}
 					AND organization_id = ${claimedConnectionOrg}
-					AND slug = ${runtimeConnectionIdToSlug(connectionId)}
+					AND ${runtimeConnectionPredicate(tx, connectionId, {
+						id: tx`id`, slug: tx`slug`, credentialMode: tx`credential_mode`,
+					})}
 					AND connector_key = ${platform}
-					AND credential_mode IS NOT NULL
+					AND (credential_mode IS NOT NULL OR ${getPlatformDescriptor(platform)?.connectorTransport === true})
 					AND status = 'active'
 					AND deleted_at IS NULL
 				LIMIT 1

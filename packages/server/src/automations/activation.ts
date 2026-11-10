@@ -160,6 +160,8 @@ export async function findMatchingAutomationActivations(
   // down must agree on what "no workspace" means.
   const rawTeamId = signal.attributes?.team_id;
   const teamId = typeof rawTeamId === "string" && rawTeamId !== "" ? rawTeamId : null;
+  // Platform setup imports channel authorization; load the registry only at
+  // query time so a platform-first import cannot re-enter its own descriptor.
   const chatLinkFilter = options?.includeAuthorizedChatLinks &&
     signal.event_type === "message.created" && signal.connection_id != null &&
     typeof channelId === "string"
@@ -168,7 +170,7 @@ export async function findMatchingAutomationActivations(
         connection: { id: signal.connection_id },
         channelId,
         teamId,
-      })})`
+      }, (await import("../gateway/connections/platforms/index.js")).connectorTransportPlatforms())})`
     : db``;
   const organizationFilter = options?.crossOrganization
     ? db``
@@ -190,7 +192,8 @@ export async function findMatchingAutomationActivations(
   const rows = await db`
 		SELECT w.id, w.organization_id, w.managed_agent_id, w.device_worker_id::text AS device_worker_id,
 		       w.agent_kind, w.triggers, w.execution_config,
-		       w.min_cooldown_seconds, v.prompt
+		       w.min_cooldown_seconds, v.prompt,
+		       CASE WHEN w.tags @> ARRAY['system:chat-link']::text[] THEN 1 ELSE 0 END AS is_chat_link
 		FROM automations w
 		JOIN automation_versions v ON v.id = w.current_version_id
 		WHERE w.status = 'active'
@@ -198,10 +201,11 @@ export async function findMatchingAutomationActivations(
 		  AND (w.managed_agent_id IS NOT NULL OR w.device_worker_id IS NOT NULL)
 		  AND ${triggerFilter}
 		  ${organizationFilter}
-		ORDER BY w.id ASC
+		ORDER BY w.updated_at DESC, w.id DESC
 	`;
 
   const matches: MatchingAutomationActivation[] = [];
+  const links: MatchingAutomationActivation[] = [];
   for (const row of rows) {
     const triggers = Array.isArray(row.triggers)
       ? (row.triggers as AutomationTrigger[])
@@ -231,7 +235,7 @@ export async function findMatchingAutomationActivations(
     });
     const executionConfig =
       (row.execution_config as LegacyAutomationExecutionConfig | null) ?? null;
-    matches.push({
+    const match: MatchingAutomationActivation = {
       automationId: Number(row.id),
       organizationId: String(row.organization_id),
       agentId:
@@ -246,9 +250,27 @@ export async function findMatchingAutomationActivations(
       instructions: typeof row.prompt === "string" ? row.prompt : "",
       minCooldownSeconds: Number(row.min_cooldown_seconds ?? 0),
       trigger,
-    });
+    };
+    matches.push(match);
+    if (
+      Number(row.is_chat_link) === 1 && signal.event_type === "message.created" &&
+      signal.connection_id != null && trigger.connection_id === signal.connection_id &&
+      typeof channelId === "string" && trigger.match?.channel_id === channelId
+    ) {
+      links.push(match);
+    }
   }
-  return matches;
+  // An explicit link owns this chat, including when an older wildcard responder
+  // also matches. Keep background work, but send only to the latest linked reply.
+  // Foreign links reached this point through the live dual-admin grant above.
+  const replyIds = new Set(planAutomationActivations(signal, matches).replyTargets.map((match) => match.automationId));
+  // Preserve Postgres timestamp precision for the binding winner; converting
+  // updated_at to JS milliseconds can disagree with canonical channel routing.
+  const linked = links.find((match) => replyIds.has(match.automationId));
+  matches.sort((a, b) => a.automationId - b.automationId);
+  return linked
+    ? matches.filter((match) => !replyIds.has(match.automationId) || match.automationId === linked.automationId)
+    : matches;
 }
 
 /**
