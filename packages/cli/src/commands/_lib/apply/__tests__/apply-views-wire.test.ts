@@ -351,6 +351,15 @@ describe("apply navigation over the wire", () => {
     ).rejects.toThrow(/blocked by 1 drift item/);
     expect(actions(stale.calls)).not.toContain("set_navigation");
     expect(store.navigation).toEqual({ revision: 2, config: EDITED });
+
+    // Someone resets it to the automatic default: also an edit since.
+    store.navigation = { revision: 3, config: null };
+    const afterReset = makeFetch(store);
+    await expect(
+      runApply(mkProject(NAVIGATION), afterReset.fetchStub)
+    ).rejects.toThrow(/blocked by 1 drift item/);
+    expect(actions(afterReset.calls)).not.toContain("set_navigation");
+    expect(store.navigation).toEqual({ revision: 3, config: null });
   });
 
   test("applies a config edit while the document is still what this config last applied", async () => {

@@ -2546,10 +2546,14 @@ export function computeDiff(
     const applied = baseline?.recorded
       ? baseline.attribution.navigation
       : undefined;
+    // Once this config applied a document, any other remote document —
+    // including a reset to the automatic default (null) — was set elsewhere.
+    // Before that, only a set document (one never applied from here) is.
     const movedElsewhere =
       !inSync &&
-      current.config !== null &&
-      (applied === undefined || !deepEqual(current.config, applied.config));
+      (applied === undefined
+        ? current.config !== null
+        : !deepEqual(current.config, applied.config));
     rows.push({
       kind: "navigation",
       id: "workspace",
