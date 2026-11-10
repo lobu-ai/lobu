@@ -14,6 +14,20 @@ describe('isValidFrameAncestor', () => {
     expect(isValidFrameAncestor('wss:')).toBe(true);
   });
 
+  it('accepts a port wildcard only on loopback hosts', () => {
+    expect(isValidFrameAncestor('http://127.0.0.1:*')).toBe(true);
+    expect(isValidFrameAncestor('http://localhost:*')).toBe(true);
+    expect(isValidFrameAncestor('http://*.localhost:*')).toBe(true);
+    expect(isValidFrameAncestor('http://bb.localhost:*')).toBe(true);
+    expect(isValidFrameAncestor('https://localhost:*')).toBe(true);
+    // A public origin must name its port; a wildcard there would let any
+    // service on that host frame the app.
+    expect(isValidFrameAncestor('https://example.com:*')).toBe(false);
+    expect(isValidFrameAncestor('https://evil.example:*')).toBe(false);
+    expect(isValidFrameAncestor('http://127.0.0.2:*')).toBe(false);
+    expect(isValidFrameAncestor('http://127.0.0.1:')).toBe(false);
+  });
+
   it('rejects entries with embedded whitespace', () => {
     expect(isValidFrameAncestor('https:// lobu.ai')).toBe(false);
     expect(isValidFrameAncestor('https://lobu .ai')).toBe(false);
