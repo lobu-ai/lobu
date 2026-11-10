@@ -17,6 +17,7 @@ import { listLiveGrantedMemberWorkspaces } from "../auth/oauth/workspace-grants"
 import { resolveToolWorkspaceTarget } from "../sandbox/client-sdk";
 import { getDb } from "../db/client";
 import { requireWorkspaceContext } from "./access-control";
+import { MEMBER_ENTITY_TYPE_SLUG } from "./constants";
 import { resolveEventViewSubject } from "../views/event-subject";
 import type { AccountToolContext } from "./registry";
 import { withValidatedArgs } from "./validate-args";
@@ -230,11 +231,17 @@ async function resolveViewPath(
     `;
 		facts.entity = rows[0] ?? null;
 	} else if (scope.type !== undefined) {
+		// The entity type search path: the workspace's own type, or a public
+		// catalog's (never a catalog's per-workspace `$member`).
 		const rows = await sql<{ id: number }>`
-      SELECT id FROM entity_types
-      WHERE slug = ${scope.type}
-        AND deleted_at IS NULL
-        AND organization_id = ${organizationId}
+      SELECT et.id FROM entity_types et
+      LEFT JOIN organization o ON o.id = et.organization_id
+      WHERE et.slug = ${scope.type}
+        AND et.deleted_at IS NULL
+        AND (
+          et.organization_id = ${organizationId}
+          OR (o.visibility = 'public' AND et.slug <> ${MEMBER_ENTITY_TYPE_SLUG})
+        )
       LIMIT 1
     `;
 		facts.typeExists = rows.length > 0;
