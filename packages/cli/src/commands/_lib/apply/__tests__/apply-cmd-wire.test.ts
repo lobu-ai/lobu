@@ -584,6 +584,19 @@ export default defineConfig({
     expect(writes[0]).not.toHaveProperty("color");
   });
 
+  test("a declared empty color clears the live one", async () => {
+    const dir = mkProject(
+      config.replace('icon: "💼"', 'icon: "💼", color: ""')
+    );
+    const { fetchStub, calls } = makeFetch([], REMOTE_CONNECTION, [
+      liveDeal("💼"),
+    ]);
+    await runApply(dir, fetchStub, "memory");
+    const writes = entityWrites(calls);
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toMatchObject({ slug: "deal", color: "" });
+  });
+
   test("a declared icon equal to live sends nothing", async () => {
     const dir = mkProject(config);
     const { fetchStub, calls } = makeFetch([], REMOTE_CONNECTION, [

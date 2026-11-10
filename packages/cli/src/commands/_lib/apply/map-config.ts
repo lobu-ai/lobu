@@ -67,6 +67,7 @@ import type {
 import {
   ENTITY_TYPE_DISPLAY_FIELDS,
   type EntityTypeDisplayFields,
+  LEGACY_DISPLAY_FIELDS,
 } from "./shared.js";
 
 /** Source label recorded on connector docs (mirrors the YAML manifest path). */
@@ -434,12 +435,14 @@ function mapEntityType(entity: EntityType): DesiredEntityType {
       );
     }
   }
-  // Display fields pass through as declared; an omitted or empty one stays
-  // absent, so it is never sent and never diffed.
+  // Display fields pass through as declared ("" clears); an omitted one stays
+  // absent, so it is never sent and never diffed. See LEGACY_DISPLAY_FIELDS
+  // for name/description, where "" is dropped too.
   const display: EntityTypeDisplayFields = {};
   for (const field of ENTITY_TYPE_DISPLAY_FIELDS) {
     const value = entity[field];
-    if (value) display[field] = value;
+    if (LEGACY_DISPLAY_FIELDS.has(field) ? value : value !== undefined)
+      display[field] = value;
   }
   return {
     slug: normalizeEntityTypeSlug(entity.key),

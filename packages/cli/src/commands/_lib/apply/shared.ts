@@ -38,7 +38,20 @@ export const ENTITY_TYPE_DISPLAY_FIELDS = [
   "color",
 ] as const satisfies ReadonlyArray<keyof ManageEntitySchemaArgs>;
 
-type EntityTypeDisplayField = (typeof ENTITY_TYPE_DISPLAY_FIELDS)[number];
+export type EntityTypeDisplayField =
+  (typeof ENTITY_TYPE_DISPLAY_FIELDS)[number];
+
+/**
+ * `name` and `description` predate the list and keep their original rules: a
+ * declared empty value is dropped like an omitted one; the two-way diff
+ * compares an omitted value as "" against live (reporting an update that sends
+ * nothing); and a baseline without the key recorded it unset. The other
+ * display fields send a declared "" as a clear, are unmanaged when omitted,
+ * and read a baseline without the key as "not recorded", because clients
+ * before them never wrote them into the baseline.
+ */
+export const LEGACY_DISPLAY_FIELDS: ReadonlySet<EntityTypeDisplayField> =
+  new Set(["name", "description"]);
 
 export type EntityTypeDisplayFields = Pick<
   ManageEntitySchemaArgs,

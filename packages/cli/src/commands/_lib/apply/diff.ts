@@ -38,7 +38,9 @@ import {
   type AutomationSource,
   declaredConnectorKeys,
   ENTITY_TYPE_DISPLAY_FIELDS,
+  type EntityTypeDisplayField,
   type EntityTypeDisplayFields,
+  LEGACY_DISPLAY_FIELDS,
   referencedConnectorKeys,
 } from "./shared.js";
 
@@ -646,17 +648,6 @@ function diffSettings(
   };
 }
 
-/**
- * In the two-way diff, an omitted name or description still compares as ""
- * against the live value, so it reports an update that sends nothing. That
- * predates the display-field list and is kept unchanged; every other display
- * field (icon, color) is unmanaged when omitted, prune or not.
- */
-const OMITTED_DISPLAY_FIELD_COMPARES_AS_EMPTY: ReadonlySet<string> = new Set([
-  "name",
-  "description",
-]);
-
 function diffEntityType(
   desired: DesiredEntityType,
   remote: RemoteEntityType | undefined,
@@ -672,8 +663,7 @@ function diffEntityType(
         (field): DiffField<DesiredEntityType, RemoteEntityType> => ({
           name: field,
           changed: (d, r) =>
-            (d[field] !== undefined ||
-              OMITTED_DISPLAY_FIELD_COMPARES_AS_EMPTY.has(field)) &&
+            (d[field] !== undefined || LEGACY_DISPLAY_FIELDS.has(field)) &&
             stringChanged(d[field], r[field]),
         })
       ),
@@ -877,7 +867,9 @@ function compareEntityTypeThreeWay(
       field,
       desired: desired[field],
       remote: remote[field],
-      attribution: attribution?.[field],
+      attribution:
+        attribution &&
+        withUnrecordedDisplayFromLive(attribution, remote)[field],
     })),
     {
       // Under prune, omitting required means "clear to []" — normalize so an
@@ -1213,7 +1205,8 @@ function diffRelationshipTypeWithBaseline(
  * The entity-type facets a comparison cares about, normalized so an absent
  * collection and an empty one compare equal.
  */
-export interface EntityTypeFacets extends EntityTypeDisplayFields {
+export interface EntityTypeFacets
+  extends Record<EntityTypeDisplayField, string | null> {
   required: string[];
   properties: Record<string, unknown>;
   backing: unknown;
@@ -1232,11 +1225,11 @@ const normalizeEntityFacets = (
     schemaExtras?: Record<string, unknown>;
   }
 ): EntityTypeFacets => ({
-  // A live display field reads `null` when unset, and a baseline recorded
-  // before the field was hoisted lacks the key: both mean "unset".
-  ...Object.fromEntries(
-    ENTITY_TYPE_DISPLAY_FIELDS.map((field) => [field, e[field] ?? undefined])
-  ),
+  // Unset is an explicit null, so a recorded baseline keeps the key and an
+  // unset value stays distinguishable from one it never recorded.
+  ...(Object.fromEntries(
+    ENTITY_TYPE_DISPLAY_FIELDS.map((field) => [field, e[field] ?? null])
+  ) as Record<EntityTypeDisplayField, string | null>),
   required: e.required ?? [],
   properties: e.properties ?? {},
   backing: e.backing,
@@ -1248,6 +1241,24 @@ const normalizeEntityFacets = (
 /** The live remote entity type, in the comparable facet shape. */
 const remoteEntityTypeFacets = (r: RemoteEntityType): EntityTypeFacets =>
   normalizeEntityFacets(r);
+
+/**
+ * A baseline entity type with the display fields it never recorded read off
+ * the live type: a baseline written before a non-legacy display field existed
+ * lacks its key (see LEGACY_DISPLAY_FIELDS), and that is not a recorded unset.
+ */
+const withUnrecordedDisplayFromLive = (
+  recorded: RemoteEntityType,
+  live: RemoteEntityType
+): RemoteEntityType => {
+  const out = { ...recorded };
+  for (const field of ENTITY_TYPE_DISPLAY_FIELDS) {
+    if (!LEGACY_DISPLAY_FIELDS.has(field) && !(field in recorded)) {
+      out[field] = live[field];
+    }
+  }
+  return out;
+};
 
 /**
  * What the remote entity type BECOMES after this apply: declared values, plus
@@ -2157,7 +2168,9 @@ export function computeDiff(
                 !!a &&
                 deepEqual(
                   remoteEntityTypeFacets(remoteEntity),
-                  remoteEntityTypeFacets(a)
+                  remoteEntityTypeFacets(
+                    withUnrecordedDisplayFromLive(a, remoteEntity)
+                  )
                 )
               );
             }

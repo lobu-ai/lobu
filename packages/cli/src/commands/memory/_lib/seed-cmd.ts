@@ -6,7 +6,10 @@ import type {
   DesiredRelationshipType,
 } from "../../_lib/apply/desired-state.js";
 import { loadDesiredStateFromConfig } from "../../_lib/apply/desired-state.js";
-import { ENTITY_TYPE_DISPLAY_FIELDS } from "../../_lib/apply/shared.js";
+import {
+  ENTITY_TYPE_DISPLAY_FIELDS,
+  LEGACY_DISPLAY_FIELDS,
+} from "../../_lib/apply/shared.js";
 import { isPlatformOwnedRelationshipSlug } from "../../_lib/platform-owned-types.js";
 import { ApiError, ValidationError } from "./errors.js";
 import {
@@ -201,7 +204,9 @@ async function seedEntity(
     slug: entity.slug,
   };
   for (const field of ENTITY_TYPE_DISPLAY_FIELDS) {
-    if (entity[field]) payload[field] = entity[field];
+    const value = entity[field];
+    if (LEGACY_DISPLAY_FIELDS.has(field) ? value : value !== undefined)
+      payload[field] = value;
   }
   if (entity.properties !== undefined || entity.required !== undefined) {
     payload.metadata_schema = {

@@ -384,6 +384,21 @@ describe("computeDiff — idempotency (applying twice is a no-op)", () => {
       expect(repeat.counts.update).toBe(0);
     }
 
+    // A declared "" clears a live icon, and is a noop once live is cleared.
+    const clearing = buildState([], {
+      memorySchema: {
+        entityTypes: [{ slug: "deal", name: "Deal", icon: "" }],
+        relationshipTypes: [],
+      },
+    });
+    const clearRow = computeDiff(clearing, live({ icon: "💼" })).rows.find(
+      (r) => r.kind === "entity-type"
+    );
+    expect(clearRow?.verb).toBe("update");
+    if (clearRow?.kind === "entity-type")
+      expect(clearRow.changedFields).toEqual(["icon"]);
+    expect(computeDiff(clearing, live({ icon: "" })).counts.update).toBe(0);
+
     // An icon/color set in the UI survives a config that omits them, even under prune.
     const omitted = buildState([], {
       memorySchema: {
