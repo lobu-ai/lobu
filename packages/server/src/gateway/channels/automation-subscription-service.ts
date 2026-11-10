@@ -189,7 +189,7 @@ async function loadChatAutomationSubscriptions(
 		? sql`OR (
 			s.automation_id IN (${authorizedChatLinkIds(sql, {
 				connectionOrganizationId: filters.connectionOrganizationId,
-				connection: { slug: runtimeConnectionIdToSlug(filters.runtimeConnectionId) },
+				connection: { runtimeId: filters.runtimeConnectionId },
 				channelId: native,
 				teamId: filters.teamId,
 			})})

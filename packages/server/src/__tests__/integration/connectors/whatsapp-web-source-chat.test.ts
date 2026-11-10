@@ -15,11 +15,16 @@
  */
 
 import { EventEmitter } from "node:events";
+import type { Context } from "hono";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { planAutomationActivationsForRuntimeConnection } from "../../../automations/activation";
 import { upsertEntityApprovalPolicy } from "../../../authz/entity-policy";
 import { AutomationSubscriptionService } from "../../../gateway/channels/automation-subscription-service";
 import { CommandRegistry, verifyWorkerToken } from "@lobu/core";
+import { registerBuiltInCommands } from "../../../gateway/commands/built-in-commands";
+import type { Env } from "../../../index";
+import { createPreviewClaim } from "../../../preview/slack";
+import { readSourceFeed } from "../../../lib/connector-pushdown";
 import { AgentSettingsStore } from "../../../gateway/auth/settings/agent-settings-store";
 import { AuthProfilesManager } from "../../../gateway/auth/settings/auth-profiles-manager";
 import { UserAuthProfileStore } from "../../../gateway/auth/settings/user-auth-profile-store";
@@ -244,14 +249,20 @@ async function modelCredentialFor(claims: { agentId?: string; organizationId?: s
 function buildManager(): ChatInstanceManager {
   const built = new ChatInstanceManager();
   const interactions = new EventEmitter();
+  const commands = new CommandRegistry();
+  const subscriptions = new AutomationSubscriptionService();
+  registerBuiltInCommands(commands, {
+    agentSettingsStore: { getSettings: async () => undefined } as never,
+    automationSubscriptionService: subscriptions,
+  });
   Object.assign(built as unknown as Record<string, unknown>, {
     connectionStore: createPostgresAgentConnectionStore({ connectorTransportPlatforms: connectorTransportPlatforms() }),
     publicGatewayUrl: "",
     services: {
       getAppInstallationStore: () => undefined,
       getSecretStore: () => undefined,
-      getCommandRegistry: () => new CommandRegistry(),
-      getAutomationSubscriptionService: () => undefined,
+      getCommandRegistry: () => commands,
+      getAutomationSubscriptionService: () => subscriptions,
       getInteractionService: () => interactions,
       getArtifactStore: () => null,
       getPublicGatewayUrl: () => "",
@@ -269,6 +280,40 @@ function buildManager(): ChatInstanceManager {
     },
   });
   return built;
+}
+
+
+async function mintSourceClaim(targetOrgId: string, targetAgentId: string, userId = ownerId) {
+  return createPreviewClaim({
+    var: { organizationId: targetOrgId, session: { userId }, authSource: "session" },
+    req: { json: async () => ({
+      platform: "whatsapp.web", agent_id: targetAgentId, connection_id: connectionId, surfaces: ["channel"],
+    }) },
+    json: (value: unknown, status = 200) => new Response(JSON.stringify(value), { status }),
+  } as unknown as Context<{ Bindings: Env }>);
+}
+
+/** Redeem through the real source command path, using its connection-scoped SDK thread. */
+async function linkSourceGroup() {
+  const targetOrg = await createTestOrganization({ name: "Linked source-chat workspace" });
+  await addUserToOrganization(ownerId, targetOrg.id, "admin");
+  const targetAgent = await createTestAgent({ organizationId: targetOrg.id, ownerUserId: ownerId });
+  const minted = await mintSourceClaim(targetOrg.id, targetAgent.agentId);
+  expect(minted.status).toBe(200);
+  const { command } = await minted.json();
+  const sentAt = Math.ceil(Date.now() / 1000) + 1;
+  const id = `SYNTHLINK-${targetAgent.agentId}`;
+  deviceMessages.push({
+    id, chat_jid: GROUP_JID, sender_jid: GROUP_SENDER,
+    body: command, mentions_me: true, timestamp: sentAt,
+  });
+  await deliver(id, id, new Date(sentAt * 1000));
+  await drain();
+  expect(enqueued).toHaveLength(0);
+  const [binding] = await sql`SELECT id, triggers FROM automations WHERE organization_id = ${targetOrg.id}`;
+  expect(binding?.triggers[0]?.match?.channel_id).toBe(GROUP_JID);
+  sends = [];
+  return { targetOrgId: targetOrg.id, targetAgentId: targetAgent.agentId, bindingId: Number(binding.id), sentAt };
 }
 
 describe("WhatsApp Web source chat", () => {
@@ -317,6 +362,11 @@ describe("WhatsApp Web source chat", () => {
       await linkChatIdentityInGraph({ organizationId: orgId, userId: member.id, platform: "whatsapp.web", platformUserId: jid });
     }
 
+    // WhatsApp has no provider sign-in: device-proven identities stay scoped
+    // to the workspace that linked them.
+    await sql`UPDATE entity_identities SET source_connector = 'chat:link'
+      WHERE organization_id = ${orgId} AND namespace = 'whatsapp_user_jid'`;
+
     vi.spyOn(chromeDispatch, "dispatchChromeActionToExtension").mockImplementation(async (params) =>
       fakeWhatsAppTab(params) as any);
     vi.spyOn(executeHandler, "handleExecute").mockImplementation(async (args: any) => {
@@ -343,6 +393,155 @@ describe("WhatsApp Web source chat", () => {
   });
 
   afterAll(cleanupTestDatabase);
+
+
+  it("routes an explicitly linked source group across workspaces before the owner wildcard", async () => {
+    await insertAutomation("owner-reply", replyTo());
+    const { targetOrgId, targetAgentId, sentAt } = await linkSourceGroup();
+    await addUserToOrganization(memberIds[1], targetOrgId, "member");
+    await linkChatIdentityInGraph({
+      organizationId: targetOrgId, userId: memberIds[1], platform: "whatsapp.web", platformUserId: GROUP_SENDER,
+    });
+    await sql`UPDATE entity_identities SET source_connector = 'chat:link'
+      WHERE organization_id = ${targetOrgId} AND namespace = 'whatsapp_user_jid'`;
+
+    deviceMessages.push(
+      { id: "SYNTHLINK2", chat_jid: GROUP_JID, sender_jid: GROUP_SENDER, body: "group request", timestamp: sentAt + 1 },
+      { id: "SYNTHLINK3", chat_jid: OTHER_GROUP_JID, sender_jid: GROUP_SENDER, body: "other group", mentions_me: true, timestamp: sentAt + 1 },
+      { id: "SYNTHLINK4", chat_jid: DM_JID, body: "direct request", timestamp: sentAt + 1 },
+    );
+    await deliver(["SYNTHLINK2", "SYNTHLINK3", "SYNTHLINK4"], "linked-requests", new Date((sentAt + 1) * 1000));
+    await drain();
+    expect(enqueued.map(({ organizationId, agentId }) => ({ organizationId, agentId }))).toEqual([
+      { organizationId: targetOrgId, agentId: targetAgentId },
+      { organizationId: orgId, agentId },
+      { organizationId: orgId, agentId },
+    ]);
+    expect(await mintedClaims(enqueued[0])).toMatchObject({
+      organizationId: targetOrgId, agentId: targetAgentId, chatAccess: "org_shared", actorUserId: memberIds[1],
+    });
+    const subscriptions = new AutomationSubscriptionService();
+    expect(await subscriptions.resolveForConnection(String(connectionId), GROUP_JID, orgId))
+      .toMatchObject({ organizationId: targetOrgId, agentId: targetAgentId });
+    expect(await subscriptions.channelHasMessageSubscription(String(connectionId), GROUP_JID, orgId)).toBe(true);
+    await completeTurns();
+    expect(sends.map((send) => send.input.chat_jid)).toEqual([GROUP_JID, OTHER_GROUP_JID, DM_JID]);
+  }, 60_000);
+
+
+  it.each(["source", "target"] as const)("requires current %s administrator authority for a source connection claim", async (workspace) => {
+    const targetOrg = await createTestOrganization({ name: "Claim boundary" });
+    await addUserToOrganization(ownerId, targetOrg.id, "admin");
+    const targetAgent = await createTestAgent({ organizationId: targetOrg.id, ownerUserId: ownerId });
+    const revokedOrg = workspace === "source" ? orgId : targetOrg.id;
+    await sql`UPDATE member SET role = 'member' WHERE "organizationId" = ${revokedOrg} AND "userId" = ${ownerId}`;
+    expect((await mintSourceClaim(targetOrg.id, targetAgent.agentId)).status).toBe(404);
+  });
+
+  it.each(["source", "target"] as const)("rechecks %s administrator authority after a source message is queued", async (workspace) => {
+    await insertAutomation("owner-reply", replyTo());
+    const linked = await linkSourceGroup();
+    await queue!.stop();
+    queue = null;
+    deviceMessages.push({
+      id: "SYNTHREVOKED", chat_jid: GROUP_JID, sender_jid: GROUP_SENDER,
+      body: "queued request", mentions_me: true, timestamp: linked.sentAt + 1,
+    });
+    await deliver("SYNTHREVOKED", "queued-before-revocation", new Date((linked.sentAt + 1) * 1000));
+    const revokedOrg = workspace === "source" ? orgId : linked.targetOrgId;
+    await sql`UPDATE member SET role = 'member' WHERE "organizationId" = ${revokedOrg} AND "userId" = ${ownerId}`;
+    await startWorker();
+    await drain();
+    expect(enqueued).toHaveLength(1);
+    expect(enqueued[0]).toMatchObject({ organizationId: orgId, agentId });
+    const route = await new AutomationSubscriptionService()
+      .resolveForConnection(String(connectionId), GROUP_JID, orgId);
+    expect(route?.organizationId).not.toBe(linked.targetOrgId);
+  }, 60_000);
+
+  it("does not grant the linked workspace general access to the source feed or its participants", async () => {
+    await insertAutomation("owner-reply", replyTo());
+    const linked = await linkSourceGroup();
+    // Membership does not make the source workspace's device-proven identity
+    // trusted in the destination workspace.
+    await addUserToOrganization(memberIds[1], linked.targetOrgId, "admin");
+    await expect(readSourceFeed({
+      scope: { organizationId: linked.targetOrgId, principal: ownerId, chatAccess: null },
+      feedId, query: "id:SYNTHPRIVATE", limit: 1, deadlineAt: Date.now() + 5_000,
+    })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(readSourceFeed({
+      scope: { organizationId: orgId, principal: null, chatAccess: null },
+      automationId: linked.bindingId, feedId, query: "id:SYNTHPRIVATE", limit: 1, deadlineAt: Date.now() + 5_000,
+    })).rejects.toMatchObject({ code: "NOT_FOUND" });
+
+    deviceMessages.push({
+      id: "SYNTHUNLINKED", chat_jid: GROUP_JID, sender_jid: GROUP_SENDER,
+      body: "workspace request", timestamp: linked.sentAt + 1,
+    });
+    await deliver("SYNTHUNLINKED", "unlinked-participant", new Date((linked.sentAt + 1) * 1000));
+    await drain();
+    expect(enqueued).toHaveLength(1);
+    const claims = await mintedClaims(enqueued[0]);
+    expect(claims).toMatchObject({
+      organizationId: linked.targetOrgId, agentId: linked.targetAgentId, chatAccess: "reply_only",
+    });
+    expect(claims.actorUserId).toBeUndefined();
+    expect(claims.chatSenderWorkspaces).toBeUndefined();
+  }, 60_000);
+
+  it.each(["source policy", "source trigger"] as const)("keeps the %s admission gate for a linked source group", async (gate) => {
+    const sourceAutomationId = await insertAutomation("owner-reply", replyTo());
+    const linked = await linkSourceGroup();
+    await queue!.stop();
+    queue = null;
+    deviceMessages.push({
+      id: "SYNTHSOURCEGATE", chat_jid: GROUP_JID, sender_jid: GROUP_SENDER,
+      body: "queued request", timestamp: linked.sentAt + 1,
+    });
+    await deliver("SYNTHSOURCEGATE", "queued-before-source-change", new Date((linked.sentAt + 1) * 1000));
+    if (gate === "source policy") {
+      await upsertEntityApprovalPolicy(orgId, {
+        resourceClass: "connector_action", connectorKey: "whatsapp.web",
+        operationCategory: "read", effects: { execute: "block" },
+      });
+    } else {
+      await sql`UPDATE automations SET triggers = jsonb_set(triggers, '{0,match}',
+        ${sql.json({ channel_id: OTHER_GROUP_JID })}::jsonb) WHERE id = ${sourceAutomationId}`;
+    }
+    await startWorker();
+    await drain();
+    expect(enqueued).toHaveLength(0);
+    expect(sends).toHaveLength(0);
+  }, 60_000);
+
+  it("uses the newest explicit source binding without replaying old messages into the wildcard", async () => {
+    await insertAutomation("owner-reply", replyTo());
+    const first = await linkSourceGroup();
+    const second = await linkSourceGroup();
+    // The older row is relinked later within the same millisecond. Both
+    // routing paths must preserve the database's sub-millisecond ordering.
+    await sql`UPDATE automations SET updated_at = date_trunc('milliseconds', statement_timestamp()) +
+      CASE WHEN id = ${first.bindingId} THEN interval '2 microseconds' ELSE interval '1 microsecond' END
+      WHERE id IN (${first.bindingId}, ${second.bindingId})`;
+    expect(await new AutomationSubscriptionService().resolveForConnection(String(connectionId), GROUP_JID, orgId))
+      .toMatchObject({ organizationId: first.targetOrgId, agentId: first.targetAgentId });
+    deviceMessages.push(
+      { id: "SYNTHRELINK", chat_jid: GROUP_JID, sender_jid: GROUP_SENDER, body: "new destination", timestamp: second.sentAt + 1 },
+      { id: "SYNTHOLDLINK", chat_jid: GROUP_JID, sender_jid: GROUP_SENDER, body: "old message", timestamp: BASE_TIME },
+    );
+    await deliver("SYNTHRELINK", "new-destination", new Date((second.sentAt + 1) * 1000));
+    await drain();
+    expect(enqueued).toHaveLength(1);
+    expect(enqueued[0]).toMatchObject({ organizationId: first.targetOrgId, agentId: first.targetAgentId });
+    expect(enqueued[0].organizationId).not.toBe(second.targetOrgId);
+    enqueued = [];
+    sends = [];
+    await deliver("SYNTHOLDLINK", "old-message", new Date(BASE_TIME * 1000));
+    await drain();
+    expect(enqueued).toHaveLength(0);
+    expect(sends).toHaveLength(0);
+    expect((await dispositions()).at(-1)).toBe("older_than_reply_automation");
+  }, 60_000);
 
   it("answers a DM reference with exactly one send_message", async () => {
     const replyId = await insertAutomation("dm-reply", replyTo());

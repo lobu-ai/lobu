@@ -22,7 +22,7 @@
  *      gets no reply from it (a device replays older references when a feed
  *      is subscribed again);
  *   8. the bridge runs its normal reply path for the one reply Automation
- *      that answers it (the oldest that matches),
+ *      that answers it (the latest explicit binding, otherwise the oldest match),
  *      and every post it makes for the message (a command's confirmation, a
  *      notice) goes through the platform's keyed send, so a retried job
  *      adopts the first send instead of dispatching another.
@@ -162,23 +162,39 @@ export async function handleChatSourceIngress(
     });
     if (!thread) throw new Error(`Could not open chat thread ${message.threadId}`);
 
+    // The installation's admitted subscription remains the source-read authority.
+    // Only after its trigger matches this hydrated message may an explicit chat
+    // link change the destination. A foreign link grants no general feed access
+    // and cannot provision a listener without an installation-owned responder.
+    let replyTargets = plan.replyTargets;
+    if (replyTargets.length > 0) {
+      const linkedPlan = planAutomationActivations(hydrated,
+        await findMatchingAutomationActivations(organizationId, hydrated, sql, { includeAuthorizedChatLinks: true }));
+      const foreign = linkedPlan.replyTargets.find((target) => target.organizationId !== organizationId);
+      if (foreign) replyTargets = [foreign];
+    }
+
     // Matching triggers may answer DMs. Groups additionally need a mention
     // or a trigger scoped to that group; mention_only was checked above.
-    const eligible = plan.replyTargets.filter((target) =>
+    const eligible = replyTargets.filter((target) =>
       thread.isDM === true || isMention || target.trigger.match?.channel_id === parsed.channelId);
     if (eligible.length === 0) {
-      return plan.replyTargets.length === 0 ? "no_matching_reply_trigger" : "group_not_addressed";
+      return replyTargets.length === 0 ? "no_matching_reply_trigger" : "group_not_addressed";
     }
     if (!signal.occurred_at) return "missing_source_time";
     const current = new Set(
       (await sql<{ id: number | string }>`
         SELECT id FROM automations
-        WHERE id = ANY(${pgBigintArray(eligible.map((target) => target.automationId))}::bigint[])
+        WHERE id = ANY(${pgBigintArray([...new Set([...eligible, ...plan.replyTargets].map((target) => target.automationId))])}::bigint[])
           AND updated_at <= ${signal.occurred_at}::timestamptz
       `).map((row) => Number(row.id)),
     );
-    // One reply Automation answers a message: the oldest that matches. A
-    // retry then re-admits that one target and nothing else.
+    if (!plan.replyTargets.some((target) => current.has(target.automationId))) {
+      return "older_than_reply_automation";
+    }
+    // An explicit binding already suppressed competing replies, so an older
+    // message cannot fall back to the previous destination. Ordinary responders
+    // retain their oldest current match on retries.
     const [replyTarget] = eligible
       .filter((target) => current.has(target.automationId))
       .sort((a, b) => a.automationId - b.automationId);
