@@ -13,6 +13,7 @@ import {
   normalizeConnectorAuthSchema,
   resolveEnvHttpCredential,
 } from '../utils/connector-auth';
+import { ToolUserError } from '../utils/errors';
 import { resolveExecutionAuth } from '../utils/execution-context';
 
 export interface ResolvedCredentials {
@@ -49,6 +50,8 @@ export async function resolveCredentialsByConnectionId(
 
   const connections = await sql`
     SELECT
+      c.status,
+      cd.key AS definition_key,
       c.auth_profile_id,
       c.app_auth_profile_id,
       c.config,
@@ -58,23 +61,38 @@ export async function resolveCredentialsByConnectionId(
     LEFT JOIN auth_profiles ap
       ON ap.id = c.auth_profile_id
      AND ap.organization_id = c.organization_id
-    JOIN connector_definitions cd
+    LEFT JOIN connector_definitions cd
       ON cd.key = c.connector_key
      AND cd.organization_id = c.organization_id
      AND cd.status = 'active'
     WHERE c.id = ${connectionId}
       AND c.organization_id = ${organizationId}
       AND c.deleted_at IS NULL
-      AND c.status = 'active'
-    ORDER BY cd.updated_at DESC
+    ORDER BY cd.updated_at DESC NULLS LAST
     LIMIT 1
   `;
 
-  if (connections.length === 0) {
-    throw new Error(`MCP connection ${connectionId} is not active or does not exist`);
+  // A missing, paused/revoked, or uninstalled connection is the caller's to
+  // fix (reconnect, pick another connection), not a server failure. Name the
+  // actual state: the same words `operations.execute` uses once it has the row.
+  const connection = connections[0] as ConnectionRow | undefined;
+  if (!connection) {
+    throw new ToolUserError(`Connection ${connectionId} not found`, 404, 'NOT_FOUND');
   }
-
-  const connection = connections[0] as ConnectionRow;
+  if (connection.status !== 'active') {
+    throw new ToolUserError(
+      `Connection ${connectionId} is ${connection.status}, must be active`,
+      400,
+      'VALIDATION'
+    );
+  }
+  if (connection.definition_key === null) {
+    throw new ToolUserError(
+      `Connection ${connectionId}'s connector is not installed in this workspace`,
+      400,
+      'VALIDATION'
+    );
+  }
   const resolved = await resolveExecutionAuth({
     organizationId,
     connectionId,
@@ -128,6 +146,8 @@ export async function resolveCredentialsByConnectionId(
 }
 
 interface ConnectionRow {
+  status: string;
+  definition_key: string | null;
   auth_profile_id: number | null;
   app_auth_profile_id: number | null;
   config: unknown;
