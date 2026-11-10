@@ -290,7 +290,12 @@ describe("mapProjectToDesiredState", () => {
   });
 
   test("maps entities + relationships with typed-handle slugs", () => {
-    const person = defineEntityType({ key: "person", name: "Person" });
+    const person = defineEntityType({
+      key: "person",
+      name: "Person",
+      icon: "🧑",
+      color: "#336699",
+    });
     const org = defineEntityType({ key: "org" });
     const worksAt = defineRelationshipType({
       key: "works_at",
@@ -307,6 +312,14 @@ describe("mapProjectToDesiredState", () => {
       "person",
       "org",
     ]);
+    // Declared display fields reach the desired state; omitted ones stay absent
+    // so they are never sent or diffed.
+    expect(state.memorySchema.entityTypes[0]).toMatchObject({
+      icon: "🧑",
+      color: "#336699",
+    });
+    expect(state.memorySchema.entityTypes[1]).not.toHaveProperty("icon");
+    expect(state.memorySchema.entityTypes[1]).not.toHaveProperty("color");
     expect(state.memorySchema.relationshipTypes[0]?.rules).toEqual([
       { source: "person", target: "org" },
     ]);

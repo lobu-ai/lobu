@@ -37,6 +37,8 @@ import type {
 import {
   type AutomationSource,
   declaredConnectorKeys,
+  ENTITY_TYPE_DISPLAY_FIELDS,
+  type EntityTypeDisplayFields,
   referencedConnectorKeys,
 } from "./shared.js";
 
@@ -644,6 +646,17 @@ function diffSettings(
   };
 }
 
+/**
+ * In the two-way diff, an omitted name or description still compares as ""
+ * against the live value, so it reports an update that sends nothing. That
+ * predates the display-field list and is kept unchanged; every other display
+ * field (icon, color) is unmanaged when omitted, prune or not.
+ */
+const OMITTED_DISPLAY_FIELD_COMPARES_AS_EMPTY: ReadonlySet<string> = new Set([
+  "name",
+  "description",
+]);
+
 function diffEntityType(
   desired: DesiredEntityType,
   remote: RemoteEntityType | undefined,
@@ -655,11 +668,15 @@ function diffEntityType(
     desired,
     remote,
     fields: [
-      { name: "name", changed: (d, r) => stringChanged(d.name, r.name) },
-      {
-        name: "description",
-        changed: (d, r) => stringChanged(d.description, r.description),
-      },
+      ...ENTITY_TYPE_DISPLAY_FIELDS.map(
+        (field): DiffField<DesiredEntityType, RemoteEntityType> => ({
+          name: field,
+          changed: (d, r) =>
+            (d[field] !== undefined ||
+              OMITTED_DISPLAY_FIELD_COMPARES_AS_EMPTY.has(field)) &&
+            stringChanged(d[field], r[field]),
+        })
+      ),
       {
         // required — prune-aware, like eventKinds. Declared: diff and set on
         // change. Omitted + prune: a present remote set is a removal (apply
@@ -856,18 +873,12 @@ function compareEntityTypeThreeWay(
     remote: unknown;
     attribution: unknown | undefined;
   }> = [
-    {
-      field: "name",
-      desired: desired.name,
-      remote: remote.name,
-      attribution: attribution?.name,
-    },
-    {
-      field: "description",
-      desired: desired.description,
-      remote: remote.description,
-      attribution: attribution?.description,
-    },
+    ...ENTITY_TYPE_DISPLAY_FIELDS.map((field) => ({
+      field,
+      desired: desired[field],
+      remote: remote[field],
+      attribution: attribution?.[field],
+    })),
     {
       // Under prune, omitting required means "clear to []" — normalize so an
       // already-empty remote does not perpetual-update (undefined ≠ []).
@@ -933,10 +944,12 @@ function compareEntityTypeThreeWay(
   // — eventKinds/properties round-trip untouched). Only under
   // prune does omission mean "remove". Without this, an unchanged omitted facet
   // would be misclassified as config-moved and executePlan would clear it.
-  // name/description are unmanaged under BOTH prune and non-prune: upsert
+  // Display fields are unmanaged under BOTH prune and non-prune: upsert
   // never clears them when omitted, so a configMoved classification would
   // perpetual-update without effect.
-  const alwaysUnmanaged = new Set(["name", "description"]);
+  const alwaysUnmanaged: ReadonlySet<string> = new Set(
+    ENTITY_TYPE_DISPLAY_FIELDS
+  );
   const omittableOutsidePrune = new Set([
     "required",
     "backing",
@@ -1200,9 +1213,7 @@ function diffRelationshipTypeWithBaseline(
  * The entity-type facets a comparison cares about, normalized so an absent
  * collection and an empty one compare equal.
  */
-export interface EntityTypeFacets {
-  name: string | undefined;
-  description: string | undefined;
+export interface EntityTypeFacets extends EntityTypeDisplayFields {
   required: string[];
   properties: Record<string, unknown>;
   backing: unknown;
@@ -1211,18 +1222,21 @@ export interface EntityTypeFacets {
   schemaExtras: Record<string, unknown>;
 }
 
-const normalizeEntityFacets = (e: {
-  name?: string;
-  description?: string;
-  required?: string[];
-  properties?: Record<string, unknown>;
-  backing?: unknown;
-  metrics?: unknown;
-  eventKinds?: unknown;
-  schemaExtras?: Record<string, unknown>;
-}): EntityTypeFacets => ({
-  name: e.name,
-  description: e.description,
+const normalizeEntityFacets = (
+  e: EntityTypeDisplayFields & {
+    required?: string[];
+    properties?: Record<string, unknown>;
+    backing?: unknown;
+    metrics?: unknown;
+    eventKinds?: unknown;
+    schemaExtras?: Record<string, unknown>;
+  }
+): EntityTypeFacets => ({
+  // A live display field reads `null` when unset, and a baseline recorded
+  // before the field was hoisted lacks the key: both mean "unset".
+  ...Object.fromEntries(
+    ENTITY_TYPE_DISPLAY_FIELDS.map((field) => [field, e[field] ?? undefined])
+  ),
   required: e.required ?? [],
   properties: e.properties ?? {},
   backing: e.backing,
@@ -1287,10 +1301,13 @@ export const effectiveEntityTypeAfterApply = (
             ),
             ...declaredProperties,
           };
-  return normalizeEntityFacets({
+  const display: EntityTypeDisplayFields = {};
+  for (const field of ENTITY_TYPE_DISPLAY_FIELDS) {
     // Never cleared by omission, under prune or not.
-    name: d.name !== undefined ? d.name : r?.name,
-    description: d.description !== undefined ? d.description : r?.description,
+    display[field] = d[field] !== undefined ? d[field] : r?.[field];
+  }
+  return normalizeEntityFacets({
+    ...display,
     required: d.required !== undefined ? d.required : prune ? [] : r?.required,
     properties,
     backing: inherit(d.backing, r?.backing),

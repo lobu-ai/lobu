@@ -64,6 +64,10 @@ import type {
   DesiredRelationshipType,
   DesiredState,
 } from "./desired-state.js";
+import {
+  ENTITY_TYPE_DISPLAY_FIELDS,
+  type EntityTypeDisplayFields,
+} from "./shared.js";
 
 /** Source label recorded on connector docs (mirrors the YAML manifest path). */
 const CONFIG_SOURCE = "lobu.config.ts";
@@ -430,10 +434,16 @@ function mapEntityType(entity: EntityType): DesiredEntityType {
       );
     }
   }
+  // Display fields pass through as declared; an omitted or empty one stays
+  // absent, so it is never sent and never diffed.
+  const display: EntityTypeDisplayFields = {};
+  for (const field of ENTITY_TYPE_DISPLAY_FIELDS) {
+    const value = entity[field];
+    if (value) display[field] = value;
+  }
   return {
     slug: normalizeEntityTypeSlug(entity.key),
-    ...(entity.name ? { name: entity.name } : {}),
-    ...(entity.description ? { description: entity.description } : {}),
+    ...display,
     ...(entity.required ? { required: entity.required } : {}),
     ...(entity.properties ? { properties: entity.properties } : {}),
     ...(entity.collection !== undefined

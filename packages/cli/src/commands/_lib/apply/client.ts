@@ -47,7 +47,9 @@ import type {
 } from "./desired-state.js";
 import {
   type AutomationSource,
+  ENTITY_TYPE_DISPLAY_FIELDS,
   type EntityBacking,
+  type EntityTypeDisplayFields,
   isRecord,
   type RelationshipRule,
 } from "./shared.js";
@@ -99,12 +101,10 @@ export interface DeploymentPauseState {
   pausedBy?: string | null;
 }
 
-export interface RemoteEntityType {
+export interface RemoteEntityType extends EntityTypeDisplayFields {
   /** Persistent incarnation id (`entity_types.id`) — the `owned` identity for deletes. */
   id?: number;
   slug: string;
-  name?: string;
-  description?: string;
   required?: string[];
   properties?: Record<string, unknown>;
   /** Event kinds keyed by semantic_type (mirrors {@link DesiredEntityType.eventKinds}); hoisted from the row's `event_kinds`. */
@@ -373,13 +373,14 @@ function hoistEntityTypeSchema(
   const out: RemoteEntityType = {
     ...(row.id !== undefined ? { id: row.id } : {}),
     slug: row.slug,
-    ...(row.name !== undefined ? { name: row.name } : {}),
-    ...(row.description !== undefined ? { description: row.description } : {}),
     // Preserve owning org so prune can skip public types from other orgs.
     ...(row.organization_id !== undefined
       ? { organization_id: row.organization_id }
       : {}),
   };
+  for (const field of ENTITY_TYPE_DISPLAY_FIELDS) {
+    if (row[field] !== undefined) out[field] = row[field];
+  }
   if (isRecord(schema)) {
     if (isRecord(schema.properties)) out.properties = schema.properties;
     if (Array.isArray(schema.required)) {
@@ -949,8 +950,6 @@ export class ApplyClient {
     // update because the stored schema stays empty).
     const {
       slug,
-      name,
-      description,
       required,
       properties,
       eventKinds,
@@ -961,8 +960,11 @@ export class ApplyClient {
       rulesSource,
     } = entity;
     const payload: Record<string, unknown> = { slug };
-    if (name !== undefined) payload.name = name;
-    if (description !== undefined) payload.description = description;
+    // Declared display fields only: an omitted one is never sent, so the
+    // server keeps whatever it has (e.g. an icon set in the UI).
+    for (const field of ENTITY_TYPE_DISPLAY_FIELDS) {
+      if (entity[field] !== undefined) payload[field] = entity[field];
+    }
     if (
       properties !== undefined ||
       required !== undefined ||

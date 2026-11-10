@@ -213,7 +213,9 @@ describe("owned-based delete classification (baseline present)", () => {
   test("remote-only definition IN owned + unchanged + prune → config-expressed delete", () => {
     const desired = buildState([]);
     const remote = emptyRemote();
-    remote.entityTypes = [remoteTask(7)];
+    // The server reads an unset icon/color as null; a baseline recorded before
+    // they were hoisted lacks the keys. Both mean unset, so it is unchanged.
+    remote.entityTypes = [remoteTask(7, { icon: null, color: null })];
     const baseline = baselineFor([remoteTask(7)], [7]);
 
     const plan = computeDiff(desired, remote, {
@@ -694,6 +696,51 @@ describe("three-way edge cases", () => {
         to: [{ source: "a", target: "c" }],
       },
     ]);
+  });
+
+  test("a declared icon converges three-way, records into the baseline, and blocks on a later UI edit", () => {
+    const desired = buildState([taskType({ icon: "✅" })]);
+    const before = emptyRemote();
+    before.entityTypes = [remoteTask()];
+    const plan = computeDiff(desired, before, {
+      orgId: "org-1",
+      baseline: baselineFor([remoteTask()], [1]),
+      prune: true,
+    });
+    const row = plan.rows.find((r) => r.kind === "entity-type");
+    expect(row?.verb).toBe("update");
+    expect(row?.changedValues).toEqual([
+      { field: "icon", from: undefined, to: "✅" },
+    ]);
+
+    const after = emptyRemote();
+    after.entityTypes = [remoteTask(1, { icon: "✅" })];
+    const recorded = toBaseline(
+      buildAttributionAndOwned(desired, after, "org-1", true)
+    );
+    const repeat = computeDiff(desired, after, {
+      orgId: "org-1",
+      baseline: recorded,
+      prune: true,
+    });
+    expect(repeat.counts.update).toBe(0);
+    expect(repeat.counts.drift).toBe(0);
+
+    const uiEdited = emptyRemote();
+    uiEdited.entityTypes = [remoteTask(1, { icon: "📌" })];
+    const blocked = computeDiff(desired, uiEdited, {
+      orgId: "org-1",
+      baseline: recorded,
+      prune: true,
+    });
+    expect(blocked.rows).toContainEqual(
+      expect.objectContaining({
+        kind: "entity-type",
+        verb: "drift",
+        blocking: true,
+        field: "icon",
+      })
+    );
   });
 
   test("outside prune, omitted description is preserved so a later owned delete stays eligible", () => {

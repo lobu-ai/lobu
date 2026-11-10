@@ -27,6 +27,7 @@ import type {
 } from "@lobu/connector-sdk";
 import type { AgentSettingsPatch } from "@lobu/core/contracts/agent-settings";
 import type { AutomationExecutionConfig } from "@lobu/core/contracts/tools/manage-automations";
+import type { ManageEntitySchemaArgs } from "@lobu/core/contracts/tools/manage-entity-schema";
 import {
   Kind,
   OptionalKind,
@@ -189,12 +190,20 @@ export function rulesFromFile<
   return { kind: "entityRulesSource", path };
 }
 
-export interface EntityType {
+/**
+ * An entity type's display fields — `name`, `description`, `icon` (an emoji or
+ * icon name) and `color` (for UI display) — typed by the `manage_entity_schema`
+ * contract they are sent on unchanged. A declared value is applied; an omitted
+ * one is left as it is on the server.
+ */
+export interface EntityType
+  extends Pick<
+    ManageEntitySchemaArgs,
+    "name" | "description" | "icon" | "color"
+  > {
   readonly kind: "entityType";
   /** Stable slug — diff key. */
   key: string;
-  name?: string;
-  description?: string;
   /** Required property names for the entity's metadata. Omit when the properties
    * use `field()`/TypeBox — the required list is then derived from which fields
    * are not marked `optional`. An explicit list always wins. */

@@ -2,6 +2,7 @@ import type {
   AutomationExecutionConfig,
   LegacyAutomationExecutionConfig,
 } from "@lobu/core/contracts/tools/manage-automations";
+import type { ManageEntitySchemaArgs } from "@lobu/core/contracts/tools/manage-entity-schema";
 
 /**
  * Shared structural types + tiny helpers used across the apply pipeline
@@ -23,6 +24,26 @@ export interface EntityBacking {
   sql: string;
   connection?: string;
 }
+
+/**
+ * Entity-type display fields whose authoring, desired and wire shapes are the
+ * same `manage_entity_schema` string. This one list drives the mapping
+ * (map-config), the remote snapshot (client.ts), the diff (diff.ts) and the
+ * upsert payload, so a new display field is added here and nowhere else.
+ */
+export const ENTITY_TYPE_DISPLAY_FIELDS = [
+  "name",
+  "description",
+  "icon",
+  "color",
+] as const satisfies ReadonlyArray<keyof ManageEntitySchemaArgs>;
+
+type EntityTypeDisplayField = (typeof ENTITY_TYPE_DISPLAY_FIELDS)[number];
+
+export type EntityTypeDisplayFields = Pick<
+  ManageEntitySchemaArgs,
+  EntityTypeDisplayField
+>;
 
 /** One relationship-type rule (source/target entity-type slugs). */
 export interface RelationshipRule {
