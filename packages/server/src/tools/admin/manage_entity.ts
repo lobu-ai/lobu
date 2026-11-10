@@ -1051,8 +1051,10 @@ async function resolveLinkedColumns(
 			const list = Array.isArray(raw) ? raw : [raw];
 			for (const v of list) {
 				if (v == null) continue;
+				// A declared record key may be whitespace-only; the normalized
+				// paths drop values that trim to nothing.
 				const s = String(v);
-				if (s.trim() !== "") bucket.values.add(s);
+				if (s !== "") bucket.values.add(s);
 			}
 		}
 	}
@@ -1111,7 +1113,9 @@ async function resolveLinkedColumns(
 					return;
 				}
 				// Stored lookups match trimmed values and key refs by them.
-				const valuesLiteral = pgTextArray([...new Set([...values].map((v) => v.trim()))]);
+				const trimmed = [...new Set([...values].map((v) => v.trim()).filter((v) => v !== ""))];
+				if (trimmed.length === 0) return;
+				const valuesLiteral = pgTextArray(trimmed);
 				const rows =
 					lookupField === "slug"
 						? await sql<{

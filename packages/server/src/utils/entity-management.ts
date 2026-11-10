@@ -2894,6 +2894,7 @@ export async function resolveSourceBackedLinks(
 	const cellsByKey = new Map<string, string[]>();
 	for (const value of values) {
 		const key = verbatim ? value : value.trim();
+		if (key === "") continue;
 		cellsByKey.set(key, [...(cellsByKey.get(key) ?? []), value]);
 	}
 	const keys = [...cellsByKey.keys()];

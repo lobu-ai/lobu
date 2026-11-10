@@ -289,7 +289,8 @@ describe('external derived record lookup', () => {
       backing: {
         sql: `SELECT 'p-' || n AS id, 'Person ' || n AS name FROM generate_series(1, 3) n
           UNION ALL SELECT 'p-twin-a', 'Twin' UNION ALL SELECT 'p-twin-b', 'Twin'
-          UNION ALL SELECT ' p-pad ', 'Padded' UNION ALL SELECT 'p-pad', 'Unpadded'`,
+          UNION ALL SELECT ' p-pad ', 'Padded' UNION ALL SELECT 'p-pad', 'Unpadded'
+          UNION ALL SELECT ' ', 'Blank key'`,
         connection: 'record-source',
       },
     });
@@ -316,13 +317,14 @@ describe('external derived record lookup', () => {
       metadata_schema: { type: 'object', properties: {
         owner_name: { type: 'string', 'x-link-entity-type': 'link-person', 'x-link-lookup-field': 'name' },
         owner_id: { type: 'string', 'x-link-entity-type': 'link-person' },
+        backup_owner_id: { type: 'string', 'x-link-entity-type': 'link-person' },
         company_id: { type: 'string', 'x-link-entity-type': 'link-company' },
         contact_name: { type: 'string', 'x-link-entity-type': 'link-contact', 'x-link-lookup-field': 'name' },
         broken_id: { type: 'string', 'x-link-entity-type': 'link-broken' },
       } },
     });
     const tasks = [
-      { owner_name: 'Person 1', owner_id: 'p-2', company_id: 'acme', contact_name: 'Solo', broken_id: '1' },
+      { owner_name: 'Person 1', owner_id: 'p-2', backup_owner_id: ' ', company_id: 'acme', contact_name: 'Solo', broken_id: '1' },
       { owner_name: 'Twin', owner_id: ' p-pad ', company_id: 'initech', contact_name: 'Same' },
     ];
     for (const [index, metadata] of tasks.entries()) {
@@ -338,6 +340,7 @@ describe('external derived record lookup', () => {
       'link-person:slug': {
         'p-2': { slug: 'p-2', entity_type: 'link-person', name: 'Person 2' },
         ' p-pad ': { slug: ' p-pad ', entity_type: 'link-person', name: 'Padded' },
+        ' ': { slug: ' ', entity_type: 'link-person', name: 'Blank key' },
       },
       'link-company:slug': { acme: { slug: 'acme', entity_type: 'link-company', name: 'Acme Inc' } },
       'link-contact:name': { Solo: { slug: String(solo.slug), entity_type: 'link-contact', name: 'Solo' } },
