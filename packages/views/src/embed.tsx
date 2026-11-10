@@ -17,10 +17,12 @@ import {
   type ViewEmbedScope,
   type ViewEmbedSlot,
   type ViewEmbedStatus,
+  type ViewFocusDirection,
 } from "@lobu/core/contracts/tools/view-host";
 import {
   type CSSProperties,
   createContext,
+  type FocusEvent,
   type ReactNode,
   type RefObject,
   useContext,
@@ -51,10 +53,80 @@ const PENDING: SlotState = { kind: "pending" };
 /** `Node.DOCUMENT_POSITION_FOLLOWING`, without needing the `Node` global. */
 const DOCUMENT_POSITION_FOLLOWING = 4;
 
+/** Layers laid over the page: while one covers a slot, its child hides so
+ *  the parent's own dialog or menu stays on top and takes the clicks. */
+const OVERLAYS =
+  'dialog[open],[role="dialog"],[role="alertdialog"],[role="menu"],[role="listbox"],[data-lobu-overlay]';
+
+type Box = { x: number; y: number; width: number; height: number };
+
+function intersect(a: Box, b: Box): Box {
+  const x = Math.max(a.x, b.x);
+  const y = Math.max(a.y, b.y);
+  const right = Math.min(a.x + a.width, b.x + b.width);
+  const bottom = Math.min(a.y + a.height, b.y + b.height);
+  return {
+    x,
+    y,
+    width: Math.max(0, right - x),
+    height: Math.max(0, bottom - y),
+  };
+}
+
+const EMPTY: Box = { x: 0, y: 0, width: 0, height: 0 };
+
+/** The part of `element` the page actually shows: inside the viewport and
+ *  every ancestor that clips or scrolls, and none of it under an overlay. */
+function shownPart(element: HTMLElement, box: Box): Box {
+  let shown = intersect(box, {
+    x: 0,
+    y: 0,
+    width: window.innerWidth,
+    height: window.innerHeight,
+  });
+  for (
+    let el = element.parentElement;
+    el && el !== document.documentElement;
+    el = el.parentElement
+  ) {
+    const style = window.getComputedStyle(el);
+    if (style.overflowX === "visible" && style.overflowY === "visible")
+      continue;
+    const r = el.getBoundingClientRect();
+    // The padding box: clientWidth/Height exclude borders and scrollbars.
+    shown = intersect(shown, {
+      x: r.left + el.clientLeft,
+      y: r.top + el.clientTop,
+      width: el.clientWidth,
+      height: el.clientHeight,
+    });
+  }
+  if (shown.width === 0 || shown.height === 0) return EMPTY;
+  for (const layer of document.querySelectorAll<HTMLElement>(OVERLAYS)) {
+    if (layer.contains(element)) continue;
+    const r = layer.getBoundingClientRect();
+    if (r.width === 0 || r.height === 0) continue;
+    const over = intersect(shown, {
+      x: r.left,
+      y: r.top,
+      width: r.width,
+      height: r.height,
+    });
+    if (over.width > 0 && over.height > 0) return EMPTY;
+  }
+  return shown;
+}
+
+/** Longest a transition or animation keeps the per-frame sync running. */
+const MOTION_LIMIT_MS = 5_000;
+
 /**
- * The slots of one frame. Every change (a slot added, moved, resized, or its
- * params changed) schedules one sync on the next animation frame, carrying
- * all slots — the host's answer is the whole picture, never a diff.
+ * The slots of one frame. A change that can move a slot — the page's DOM, a
+ * resize, any scroll, an image load, a transition or animation — schedules
+ * one measurement on the next animation frame; only a changed picture is
+ * sent, carrying all slots (the host's answer is the whole picture, never a
+ * diff). Nothing polls: with no change there is no work, and motion keeps
+ * measuring each frame only until it ends (bounded by `MOTION_LIMIT_MS`).
  */
 export class EmbedRegistry {
   private slots = new Map<string, SlotEntry>();
@@ -64,6 +136,9 @@ export class EmbedRegistry {
   private unsupported = false;
   private connected = false;
   private returning = new Set<string>();
+  /** Set while focus is being placed on entry from the host, so a slot that
+   *  is itself the first or last stop passes the same direction on. */
+  arrival: ViewFocusDirection | null = null;
 
   constructor(private readonly bridge: () => ViewBridge | null) {}
 
@@ -86,19 +161,73 @@ export class EmbedRegistry {
         slot.enter.current?.focus();
       }
     });
+    // This view is itself a slot's child: land on its first or last control.
+    const offEnter = bridge.onFocusEnter((direction) => {
+      const stops = tabStops(document);
+      this.arrival = direction;
+      try {
+        (direction === "forward" ? stops[0] : stops[stops.length - 1])?.focus();
+      } finally {
+        this.arrival = null;
+      }
+    });
     const reflow = () => this.schedule();
+    const motionStart = () => {
+      this.motionUntil = window.performance.now() + MOTION_LIMIT_MS;
+      this.moving += 1;
+      this.schedule();
+    };
+    const motionEnd = () => {
+      this.moving = Math.max(0, this.moving - 1);
+      this.schedule();
+    };
     window.addEventListener("resize", reflow);
     window.addEventListener("scroll", reflow, true);
+    window.addEventListener("load", reflow, true);
+    window.addEventListener("transitionrun", motionStart, true);
+    window.addEventListener("animationstart", motionStart, true);
+    for (const end of [
+      "transitionend",
+      "transitioncancel",
+      "animationend",
+      "animationcancel",
+    ])
+      window.addEventListener(end, motionEnd, true);
     const observer =
       typeof ResizeObserver === "undefined" ? null : new ResizeObserver(reflow);
     if (observer && document.body) observer.observe(document.body);
     this.observer = observer;
+    // A slot moves without resizing when content above it changes, it is
+    // reordered, or a class or style shifts it: the DOM says so.
+    const mutations =
+      typeof window.MutationObserver === "undefined"
+        ? null
+        : new window.MutationObserver(reflow);
+    mutations?.observe(document.documentElement, {
+      subtree: true,
+      childList: true,
+      characterData: true,
+      attributes: true,
+      attributeFilter: ["class", "style", "hidden", "open", "role"],
+    });
     return () => {
       offSize();
       offFocus();
+      offEnter();
       window.removeEventListener("resize", reflow);
       window.removeEventListener("scroll", reflow, true);
+      window.removeEventListener("load", reflow, true);
+      window.removeEventListener("transitionrun", motionStart, true);
+      window.removeEventListener("animationstart", motionStart, true);
+      for (const end of [
+        "transitionend",
+        "transitioncancel",
+        "animationend",
+        "animationcancel",
+      ])
+        window.removeEventListener(end, motionEnd, true);
       observer?.disconnect();
+      mutations?.disconnect();
       this.observer = null;
       if (this.frame) cancelAnimationFrame(this.frame);
       this.frame = 0;
@@ -106,9 +235,15 @@ export class EmbedRegistry {
   }
 
   private observer: ResizeObserver | null = null;
+  /** Transitions/animations running now, and when to stop trusting the count. */
+  private moving = 0;
+  private motionUntil = 0;
+  /** The last picture sent; an identical one is not sent again. */
+  private sent: string | null = null;
 
   setConnected(connected: boolean): void {
     this.connected = connected;
+    this.sent = null;
     if (connected) this.schedule();
   }
 
@@ -130,11 +265,11 @@ export class EmbedRegistry {
 
   /** Keyboard focus reached the slot: hand it to the child, unless it is
    *  coming back out of the child the other way. */
-  enter(id: string): void {
+  enter(id: string, direction: ViewFocusDirection): void {
     if (this.returning.delete(id)) return;
     if (this.states.get(id)?.kind !== "mounted") return;
     void this.bridge()
-      ?.focusEmbed(id)
+      ?.focusEmbed(id, direction)
       .catch(() => {
         /* host declined: focus stays on the slot */
       });
@@ -159,6 +294,10 @@ export class EmbedRegistry {
     this.frame = requestAnimationFrame(() => {
       this.frame = 0;
       void this.sync();
+      // Mid-motion a slot moves every frame without any other signal.
+      if (this.moving > 0 && window.performance.now() < this.motionUntil)
+        this.schedule();
+      else this.moving = 0;
     });
   }
 
@@ -176,24 +315,37 @@ export class EmbedRegistry {
         : 1;
     });
     for (const [id, slot] of ordered) {
-      const box = slot.element.current?.getBoundingClientRect();
+      const element = slot.element.current;
+      const r = element?.getBoundingClientRect();
+      const box: Box = {
+        x: r?.left ?? 0,
+        y: r?.top ?? 0,
+        width: r?.width ?? 0,
+        height: r?.height ?? 0,
+      };
+      const shown = element ? shownPart(element, box) : EMPTY;
+      const whole =
+        shown.x === box.x &&
+        shown.y === box.y &&
+        shown.width === box.width &&
+        shown.height === box.height;
       embeds.push({
         id,
         view: slot.view,
         scope: slot.scope,
         params: slot.params,
-        rect: {
-          x: box?.left ?? 0,
-          y: box?.top ?? 0,
-          width: box?.width ?? 0,
-          height: box?.height ?? 0,
-        },
+        rect: whole ? box : { ...box, clip: shown },
       });
     }
+    const picture = JSON.stringify(embeds);
+    if (picture === this.sent) return;
+    this.sent = picture;
     let answer: { embeds?: ViewEmbedStatus[] };
     try {
       answer = await bridge.syncEmbeds(embeds);
     } catch (error) {
+      // Not delivered: the same picture must be sent again next time.
+      this.sent = null;
       if (error instanceof ViewBridgeError && error.code === -32601) {
         this.unsupported = true;
         for (const id of this.slots.keys())
@@ -236,6 +388,32 @@ const REFUSALS: Record<string, string> = {
   limit: "This view shows too many embedded views at once.",
   invalid: "This embedded view's settings are not valid.",
 };
+
+const TABBABLE =
+  'a[href],area[href],button,input,select,textarea,iframe,summary,[tabindex],[contenteditable="true"]';
+
+/** The document's Tab stops in order (positive `tabIndex` is not used by
+ *  views, so document order is Tab order). */
+function tabStops(root: Document): HTMLElement[] {
+  return [...root.querySelectorAll<HTMLElement>(TABBABLE)].filter(
+    (el) =>
+      el.tabIndex >= 0 &&
+      !(el as HTMLButtonElement).disabled &&
+      !el.closest("[inert],[hidden]") &&
+      el.getClientRects().length > 0
+  );
+}
+
+/** Which way the visitor was tabbing when focus reached the slot: from a
+ *  control after it means backward. From outside this frame, forward. */
+function focusDirection(event: FocusEvent<HTMLElement>): ViewFocusDirection {
+  const from = event.relatedTarget as Node | null;
+  return from &&
+    event.currentTarget.compareDocumentPosition(from) &
+      window.Node.DOCUMENT_POSITION_FOLLOWING
+    ? "backward"
+    : "forward";
+}
 
 const HIDDEN: CSSProperties = {
   position: "absolute",
@@ -339,8 +517,10 @@ export function EmbeddedView({
           ref={enterRef}
           type="button"
           style={HIDDEN}
-          onFocus={() => registry.enter(id)}
-          onClick={() => registry.enter(id)}
+          onFocus={(event) =>
+            registry.enter(id, registry.arrival ?? focusDirection(event))
+          }
+          onClick={() => registry.enter(id, "forward")}
         >
           {label}
         </button>

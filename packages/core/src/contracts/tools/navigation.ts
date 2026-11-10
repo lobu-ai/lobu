@@ -1,6 +1,10 @@
 import { type Static, type TSchema, Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
-import { ViewKeySchema, ViewScopeSchema } from "./view-scope";
+import {
+  ViewKeySchema,
+  ViewScopeSchema,
+  viewScopeShapeError,
+} from "./view-scope";
 
 // ============================================
 // Workspace navigation: the sidebar's curated sections.
@@ -362,21 +366,8 @@ export function validateNavigationConfig(config: unknown): string[] {
       );
     }
     if (item.target?.kind === "view") {
-      const scope = item.target.scope ?? {};
-      if (
-        scope.event !== undefined &&
-        (scope.type !== undefined || scope.entity !== undefined)
-      ) {
-        errors.push(`${at}.target.scope: event names the subject on its own`);
-      }
-      if (
-        scope.collection !== undefined &&
-        (!scope.type || scope.entity !== undefined || scope.event !== undefined)
-      ) {
-        errors.push(
-          `${at}.target.scope: collection needs type without entity or event`
-        );
-      }
+      const shape = viewScopeShapeError(item.target.scope ?? {});
+      if (shape) errors.push(`${at}.target.scope: ${shape}`);
     }
     for (let i = children.length - 1; i >= 0; i -= 1) {
       stack.push({

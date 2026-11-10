@@ -198,7 +198,7 @@ describe("validateNavigationConfig", () => {
           },
         ])
       )[0]
-    ).toContain("event names the subject");
+    ).toContain(".target.scope: scope.event");
     expect(
       validateNavigationConfig(
         doc([

@@ -38,3 +38,27 @@ export const ViewScopeSchema = Type.Object(
   }
 );
 export type ViewScopeInput = Static<typeof ViewScopeSchema>;
+
+/** Which scope fields combine. `open_view`, a navigation entry and an
+ *  embedded view all apply this one rule, so a scope one accepts the others
+ *  accept too. Null when the combination is valid. */
+export function viewScopeShapeError(scope: {
+  type?: unknown;
+  entity?: unknown;
+  event?: unknown;
+  collection?: unknown;
+}): string | null {
+  if (
+    scope.collection !== undefined &&
+    (!scope.type || scope.entity !== undefined || scope.event !== undefined)
+  ) {
+    return "Collection selection requires scope.type without entity or event";
+  }
+  if (
+    scope.event !== undefined &&
+    (scope.type !== undefined || scope.entity !== undefined)
+  ) {
+    return "scope.event names the view's subject on its own; drop scope.type and scope.entity";
+  }
+  return null;
+}

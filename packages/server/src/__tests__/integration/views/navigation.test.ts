@@ -2,7 +2,8 @@
  * Workspace navigation through the REST tool route the web host uses
  * (`POST /api/:org/manage_views` get_navigation / set_navigation), against
  * real Postgres. Covers: automatic defaults while unset; owner writes with
- * compare-and-swap (one of two concurrent writers 409s); member reads but
+ * compare-and-swap (one of two concurrent writers 409s); an admin edits like
+ * the owner, over the owner's revision; member reads but
  * cannot write; canonical validation (duplicate ids, unsafe hrefs, unresolved
  * targets); resolution into real links with typed params; a removed parent
  * never shows its label; a public visitor gets resolved sections only, never
@@ -55,6 +56,7 @@ describe("workspace navigation", () => {
 	let org: { id: string; slug: string };
 	let ownerCookie: string;
 	let memberCookie: string;
+	let adminCookie: string;
 	let dealId: number;
 	let memberRecordId: number;
 
@@ -106,6 +108,9 @@ describe("workspace navigation", () => {
 		const member = await createTestUser({ email: "nav-member@test.com" });
 		await addUserToOrganization(member.id, org.id, "member");
 		memberCookie = (await createTestSession(member.id)).cookieHeader;
+		const admin = await createTestUser({ email: "nav-admin@test.com" });
+		await addUserToOrganization(admin.id, org.id, "admin");
+		adminCookie = (await createTestSession(admin.id)).cookieHeader;
 		dealId = (await createTestEntity({ name: "Acme Renewal", entity_type: "deal", organization_id: org.id })).id;
 		memberRecordId = (await createTestEntity({ name: "Directory Person", entity_type: "$member", organization_id: org.id })).id;
 		await setView("pipeline", {
@@ -114,7 +119,11 @@ describe("workspace navigation", () => {
 			params: { stage: { type: "string" }, open: { type: "boolean" }, page: { type: "number" } },
 		});
 		await setView("queue", { name: "Work Queue", attach: [{ workspace: true }] });
-		await setView("deal-card", { name: "Deal Card", attach: [{ record: "deal" }] });
+		await setView("deal-card", {
+			name: "Deal Card",
+			attach: [{ record: "deal" }],
+			params: { note: { type: "string", default: "" }, tab: { type: "string", default: "summary" } },
+		});
 	});
 
 	afterAll(async () => {
@@ -140,7 +149,14 @@ describe("workspace navigation", () => {
 							{ id: "acme", label: "Acme", target: { kind: "record", entityId: 0 } },
 							{
 								id: "acme-card",
-								target: { kind: "view", key: "deal-card", scope: { type: "deal", entity: 0 } },
+								// A param at its default adds nothing to the link: the view
+								// fills its defaults in itself.
+								target: {
+									kind: "view",
+									key: "deal-card",
+									scope: { type: "deal", entity: 0 },
+									params: { tab: "summary" },
+								},
 							},
 						],
 					},
@@ -230,6 +246,20 @@ describe("workspace navigation", () => {
 		// null returns to the automatic default.
 		expect((await write(2, null)).status).toBe(200);
 		expect((await read(ownerCookie)).json.sections[0].id).toBe("views");
+	});
+
+	it("lets an admin read the document and edit it over the owner's revision", async () => {
+		expect((await write(0, curatedFor(dealId))).status).toBe(200);
+		const seen = await read(adminCookie);
+		expect(seen.status).toBe(200);
+		expect(seen.json.config).toEqual(curatedFor(dealId));
+		expect(seen.json.revision).toBe(1);
+		// Same compare-and-swap as the owner: a stale revision is refused.
+		expect((await write(0, { schemaVersion: 1, sections: [] }, adminCookie)).status).toBe(409);
+		const edited = await write(1, { schemaVersion: 1, sections: [] }, adminCookie);
+		expect(edited.status).toBe(200);
+		expect(edited.json.revision).toBe(2);
+		expect((await read(ownerCookie)).json.sections).toEqual([]);
 	});
 
 	it("refuses a member's write", async () => {

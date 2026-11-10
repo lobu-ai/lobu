@@ -219,7 +219,9 @@ describe("EmbeddedView", () => {
       await frames();
     });
     const focus = parent.posted.filter((m) => m.method === "lobu/embeds/focus");
-    expect(focus.map((m) => m.params)).toEqual([{ id: "left" }]);
+    expect(focus.map((m) => m.params)).toEqual([
+      { id: "left", direction: "forward" },
+    ]);
 
     await act(async () => {
       hostSend({
