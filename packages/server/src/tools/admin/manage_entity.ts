@@ -123,7 +123,7 @@ import {
 import { validateEntityMetadata } from "../../utils/schema-validation";
 import { buildEntityUrl } from "../../utils/url-builder";
 import { trackAutomationReaction } from "../../utils/automation-reactions";
-import { isInProcessSystemCall } from "../access-control";
+import { isInProcessSystemCall, memberReadRole } from "../access-control";
 import { MEMBER_ENTITY_TYPE_SLUG } from "../constants";
 import type { ToolContext } from "../registry";
 import {
@@ -851,7 +851,7 @@ async function handleDiscoverDuplicates(
 		throw new ToolUserError("Duplicate discovery requires workspace membership", 403);
 	}
 	// Discovery can expose relationships inferred from member email addresses.
-	if (args.entity_type === MEMBER_ENTITY_TYPE_SLUG && !canSeeMemberEmail(ctx.memberRole)) {
+	if (args.entity_type === MEMBER_ENTITY_TYPE_SLUG && !canSeeMemberEmail(memberReadRole(ctx))) {
 		throw new ToolUserError("Member identity discovery requires workspace administrator access", 403);
 	}
 	await assertEntityReadAllowed(undefined, ctx, args.entity_type);
@@ -866,7 +866,7 @@ async function handleList(
 	env: Env,
 	ctx: ToolContext,
 ): Promise<ManageEntityResult> {
-	if (args.entity_type === MEMBER_ENTITY_TYPE_SLUG && !canSeeMemberList(ctx.memberRole)) {
+	if (args.entity_type === MEMBER_ENTITY_TYPE_SLUG && !canSeeMemberList(memberReadRole(ctx))) {
 		throw new ToolUserError(
 			"The member list is only visible to members of this workspace. Join the workspace to see members.",
 			400,
@@ -937,7 +937,7 @@ async function handleList(
 	]);
 
 	const { ownerSlug, baseUrl } = await getOrgUrlContext(ctx);
-	const hideMemberEmail = !canSeeMemberEmail(ctx.memberRole);
+	const hideMemberEmail = !canSeeMemberEmail(memberReadRole(ctx));
 
 	return {
 		action: "list",
@@ -1142,7 +1142,7 @@ async function handleGet(
 
 	if (
 		entity.entity_type === MEMBER_ENTITY_TYPE_SLUG &&
-		!canSeeMemberList(ctx.memberRole)
+		!canSeeMemberList(memberReadRole(ctx))
 	) {
 		throw new ToolUserError(
 			"Member details are only visible to members of this workspace. Join the workspace to see members.",
@@ -1156,7 +1156,7 @@ async function handleGet(
 	let metadata = entity.metadata ?? {};
 	if (
 		entity.entity_type === MEMBER_ENTITY_TYPE_SLUG &&
-		!canSeeMemberEmail(ctx.memberRole)
+		!canSeeMemberEmail(memberReadRole(ctx))
 	) {
 		const sql = getDb();
 		const rows = await sql`

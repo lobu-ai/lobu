@@ -91,6 +91,12 @@ export interface ToolAnnotations {
 
 export type TokenType = 'oauth' | 'session' | 'pat' | 'anonymous';
 
+export interface AutomationReadMemberRole {
+  organizationId: string;
+  /** Null when the creator is no longer a member of that workspace. */
+  role: string | null;
+}
+
 export interface ToolSourceContext {
   platform?: string;
   conversationId?: string;
@@ -145,6 +151,13 @@ export interface ToolContext {
    * operation path already does. Never a write-policy or approval identity.
    */
   automationReadPrincipalId?: string | null;
+  /**
+   * Member-data read role of a headless Automation script: its creator's
+   * CURRENT role in the Automation's workspace, resolved by the script executor
+   * (see memberReadRole). Bound to that workspace, so a context retargeted to
+   * another one never carries it. Never a write-policy or approval identity.
+   */
+  automationReadMemberRole?: AutomationReadMemberRole | null;
   /** Verified source conversation for worker-originated tool calls, when any. */
   sourceContext: ToolSourceContext | null;
   /** `x-lobu-apply-id` when this call belongs to a `lobu apply` run (REST proxy only). */

@@ -44,7 +44,7 @@ import {
 import { type DbClient, getDb, pgBigintArray, pgTextArray } from "../db/client";
 import type { Env } from "../index";
 import { entitySegmentPredicate } from "../metrics/compiler";
-import { isAdminOrOwnerRole, isInProcessSystemCall } from "../tools/access-control";
+import { canReadWorkspaceIdentity } from "../tools/access-control";
 import { querySqlImpl } from "../tools/admin/query_sql";
 import type { ToolContext } from "../tools/registry";
 import {
@@ -2727,7 +2727,7 @@ function compileEntitySegmentFilter(
 				userId: authzScopeFromToolContext(ctx).principal,
 				// Match metric SQL: the outer type gate does not authorize nested
 				// predicates to read protected member metadata.
-				excludeMemberEntities: !isInProcessSystemCall(ctx) && !isAdminOrOwnerRole(ctx.memberRole),
+				excludeMemberEntities: !canReadWorkspaceIdentity(ctx),
 			},
 		);
 	} catch (error) {

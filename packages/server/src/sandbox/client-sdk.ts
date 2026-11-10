@@ -8,7 +8,7 @@ import type { Env } from "../index";
 import { getDb } from "../db/client";
 import { validateAndScopeQuery } from "../utils/execute-data-sources";
 import { resolveWindowQueryContext } from "../automations/window-read-context";
-import { CrossOrgAccessDenied, isAdminOrOwnerRole, isInProcessSystemCall, isSystemContext, requireWorkspaceContext } from "../tools/access-control";
+import { canReadWorkspaceIdentity, CrossOrgAccessDenied, isAdminOrOwnerRole, memberReadRole, requireWorkspaceContext } from "../tools/access-control";
 import {
 	ADMIN_ONLY_QUERYABLE_TABLES,
 	SAFE_COLUMN_DEFS,
@@ -381,20 +381,22 @@ export function buildClientSDK(
 			const window = options?.window_token
 				? await resolveWindowQueryContext(options.window_token, env, workspaceCtx, getDb())
 				: undefined;
+			// The callers here are user-authored code (run_sdk, Automation
+			// scripts), so the allowlisted columns always apply and member data
+			// follows the caller's role, or an Automation script's creator role.
 			const scoped = validateAndScopeQuery(querySql, workspaceCtx.organizationId, {
 				window,
 				userId: authzScopeFromToolContext(workspaceCtx).principal,
-				safeColumns: isSystemContext(workspaceCtx) ? undefined : SAFE_COLUMN_DEFS,
-				restrictedTables:
-					isSystemContext(workspaceCtx) || isAdmin
-						? undefined
-						: ADMIN_ONLY_QUERYABLE_TABLES,
+				safeColumns: SAFE_COLUMN_DEFS,
+				restrictedTables: isAdminOrOwnerRole(memberReadRole(workspaceCtx))
+					? undefined
+					: ADMIN_ONLY_QUERYABLE_TABLES,
 				// Workspace-identity audit rows are owner/admin-only; ordinary
 				// members running client.query must not surface them.
-				excludeWorkspaceAudit: !isInProcessSystemCall(workspaceCtx) && !isAdmin,
+				excludeWorkspaceAudit: !canReadWorkspaceIdentity(workspaceCtx),
 				// $member entity rows carry PII reserved by the manage_entity
 				// read policy; ordinary members must not bypass it via raw SQL.
-				excludeMemberEntities: !isInProcessSystemCall(workspaceCtx) && !isAdmin,
+				excludeMemberEntities: !canReadWorkspaceIdentity(workspaceCtx),
 			});
 			// Outer LIMIT caps rows at the source so a broad SELECT can't
 			// materialize an unbounded result set host-side.

@@ -31,6 +31,7 @@ import { hasWorkspaceAttachment } from '@lobu/core/contracts/tools/view-attach';
 import { viewPathSuffix } from '@lobu/core/contracts/tools/view-path';
 import { getDb, pgTextArray } from '../db/client';
 import type { Env } from '../index';
+import { memberReadRole } from '../tools/access-control';
 import { assertEntityReadAllowed, manageEntity } from '../tools/admin/manage_entity';
 import { MEMBER_ENTITY_TYPE_SLUG } from '../tools/constants';
 import { resolveViewParams, viewLinkQuery, viewPagePath } from '../tools/open_view';
@@ -171,7 +172,7 @@ async function buildLookup(
   // Types: the member directory only for members, and the same read policy
   // that gates a scoped agent's entity reads.
   await inBatches(typeRows, async (type) => {
-    if (type.slug === MEMBER_ENTITY_TYPE_SLUG && !canSeeMemberList(ctx.memberRole)) return;
+    if (type.slug === MEMBER_ENTITY_TYPE_SLUG && !canSeeMemberList(memberReadRole(ctx))) return;
     const allowed = await assertEntityReadAllowed(undefined, ctx, type.slug).then(
       () => true,
       () => false

@@ -12,7 +12,7 @@
 import { type Static, Type } from '@sinclair/typebox';
 import type { Env } from '../../index';
 import { runMetric } from '../../metrics/run-metric';
-import { isAdminOrOwnerRole, isInProcessSystemCall } from '../access-control';
+import { canReadWorkspaceIdentity, isAdminOrOwnerRole } from '../access-control';
 import type { ToolContext } from '../registry';
 import { authzScopeFromToolContext } from '../../authz/scope';
 import { withValidatedArgs } from '../validate-args';
@@ -55,10 +55,10 @@ async function queryMetricImpl(
     userId: authzScopeFromToolContext(ctx).principal,
     // Workspace-identity audit rows are owner/admin/system-only; ordinary
     // members must not move a declared metric by counting lifecycle events.
-    excludeWorkspaceAudit: !isInProcessSystemCall(ctx) && !isAdminOrOwnerRole(ctx.memberRole),
+    excludeWorkspaceAudit: !canReadWorkspaceIdentity(ctx),
     // $member entity rows carry PII reserved by the manage_entity read
     // policy; ordinary members must not bypass it via a declared measure.
-    excludeMemberEntities: !isInProcessSystemCall(ctx) && !isAdminOrOwnerRole(ctx.memberRole),
+    excludeMemberEntities: !canReadWorkspaceIdentity(ctx),
     // A connection-backed type pushes down to its backing connection under the
     // same owner/admin bypass query_sql grants a derived record read.
     isAdmin: isAdminOrOwnerRole(ctx.memberRole),

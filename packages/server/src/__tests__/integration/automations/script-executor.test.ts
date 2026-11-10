@@ -22,9 +22,41 @@ import type { AutomationScriptTaskPayload } from '../../../automations/script-en
 import { assertAutomationScriptExecutor } from '../../../automations/script-config';
 import { runAutomationPreparationTask, reconcileAutomationPreparationRuns } from '../../../automations/preparation-task';
 import { claimPendingAutomationRun } from '../../../runs/queue-service';
+import { ensureMemberEntityType } from '../../../utils/member-entity-type';
 
 const SOURCE =
   'export default async (ctx) => ({ run_id: ctx.window.run_id, result: "script result" });';
+
+const MEMBER_PROBE_EMAIL = 'probe-member@test.example.com';
+const AUDIT_PROBE_TITLE = 'Synthetic workspace audit row';
+
+// Every member-data read a script can make, each reporting its own denial so
+// one failure does not hide the others.
+const MEMBER_READ_PROBE = `export default async (_ctx, client) => {
+  const read = async (fn) => {
+    try { return { ...(await fn()), error: null }; }
+    catch (error) { return { error: String(error?.message ?? error) }; }
+  };
+  return {
+    list: await read(async () => {
+      const { entities } = await client.entities.list({ entity_type: '$member', limit: 50 });
+      const probe = entities.filter((e) => e.name === 'Probe Member');
+      return { names: probe.map((e) => e.name), emails: probe.map((e) => e.metadata.email).filter(Boolean) };
+    }),
+    memberRows: await read(async () => {
+      const rows = await client.query("SELECT metadata FROM entities WHERE entity_type = '$member' AND name = 'Probe Member'");
+      return { emails: rows.map((r) => r.metadata.email).filter(Boolean) };
+    }),
+    auditRows: await read(async () => {
+      const rows = await client.query("SELECT title FROM events WHERE title = '${AUDIT_PROBE_TITLE}'");
+      return { titles: rows.map((r) => r.title) };
+    }),
+    users: await read(async () => {
+      const rows = await client.query('SELECT * FROM "user"');
+      return { withheldEmail: rows.some((r) => 'email' in r) };
+    }),
+  };
+};`;
 
 async function seedScriptAutomation(source = SOURCE) {
   const workspace = await TestWorkspace.create({ name: 'Script Executor Org' });
@@ -699,6 +731,66 @@ describe('Automation script executor', () => {
         seen: ['visibility-probe:author-private', 'visibility-probe:org-visible'],
       },
     });
+  });
+
+  it.each([
+    {
+      creator: 'member' as const,
+      expected: {
+        list: { names: ['Probe Member'], emails: [], error: null },
+        memberRows: { emails: [], error: null },
+        auditRows: { titles: [], error: null },
+        users: { error: expect.stringMatching(/require owner\/admin access/) },
+      },
+    },
+    {
+      creator: 'admin' as const,
+      expected: {
+        list: { names: ['Probe Member'], emails: [MEMBER_PROBE_EMAIL], error: null },
+        memberRows: { emails: [MEMBER_PROBE_EMAIL], error: null },
+        auditRows: { titles: [AUDIT_PROBE_TITLE], error: null },
+        users: { error: null, withheldEmail: false },
+      },
+    },
+    {
+      creator: 'departed' as const,
+      expected: {
+        list: { error: expect.stringMatching(/only visible to members/) },
+        memberRows: { emails: [], error: null },
+        auditRows: { titles: [], error: null },
+        users: { error: expect.stringMatching(/require owner\/admin access/) },
+      },
+    },
+  ])('reads member data with its $creator creator\'s current role', async ({ creator, expected }) => {
+    const { sql, workspace, automationId, runId, taskRunId, payload } = await dispatchedScript(MEMBER_READ_PROBE);
+    const orgId = workspace.org.id;
+    await ensureMemberEntityType(orgId);
+    await sql`
+      INSERT INTO entities (name, slug, entity_type_id, organization_id, metadata, created_by, created_at, updated_at)
+      VALUES (
+        'Probe Member', 'probe-member',
+        (SELECT id FROM entity_types WHERE slug = '$member' AND organization_id = ${orgId} AND deleted_at IS NULL),
+        ${orgId}, ${sql.json({ email: MEMBER_PROBE_EMAIL, status: 'active', role: 'member' })},
+        ${workspace.users.owner.id}, NOW(), NOW()
+      )
+    `;
+    await createTestEvent({
+      organization_id: orgId,
+      title: AUDIT_PROBE_TITLE,
+      content: 'Probe Member joined the workspace.',
+      metadata: { _lobu_workspace_audit: true, category: 'workspace' },
+    });
+    const creatorId = creator === 'member' ? workspace.users.member.id : workspace.users.admin.id;
+    await sql`UPDATE automations SET created_by = ${creatorId} WHERE id = ${automationId}`;
+    if (creator === 'departed') {
+      await sql`DELETE FROM "member" WHERE "organizationId" = ${orgId} AND "userId" = ${creatorId}`;
+    }
+
+    await runAutomationScriptTask(payload, TEST_ENV, taskRunId);
+
+    const [run] = await sql`SELECT status, action_output, error_message FROM runs WHERE id = ${runId}`;
+    expect(run!.error_message ?? null).toBeNull();
+    expect(run).toMatchObject({ status: 'completed', action_output: expected });
   });
 
   it.each([
