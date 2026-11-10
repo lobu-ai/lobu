@@ -413,9 +413,14 @@ describe('entity schema CRUD', () => {
       await expect(owner.entity_schema.createType({
         slug: 'invalid-collection', name: 'Invalid collection', metadata_schema: invalid,
       })).rejects.toThrow(/metadata_schema.x-lobu-collection/);
-      const valid = { 'x-lobu-collection': { presets: [{ key: 'active', label: 'Active', selection: { filters: [{ field: 'status', op: 'eq', value: 'active' }] } }] } };
+      const valid = { 'x-lobu-collection': { presets: [
+        { key: 'active', label: 'Active', selection: { filters: [{ field: 'status', op: 'eq', value: 'active' }] } },
+        { key: 'mine', label: 'Mine', viewer: { field: 'owner_email' }, selection: {} },
+      ] } };
       await owner.entity_schema.createType({ slug: 'collection-asset', name: 'Collection asset', metadata_schema: valid });
       await expect(owner.entity_schema.updateType({ slug: 'collection-asset', metadata_schema: invalid })).rejects.toThrow(/metadata_schema.x-lobu-collection/);
+      const malformedViewer = { 'x-lobu-collection': { presets: [{ key: 'mine', label: 'Mine', viewer: { field: 'owner_email', op: 'neq' }, selection: {} }] } };
+      await expect(owner.entity_schema.updateType({ slug: 'collection-asset', metadata_schema: malformedViewer })).rejects.toThrow(/metadata_schema.x-lobu-collection/);
       const saved = await owner.entity_schema.getType('collection-asset') as { entity_type: { metadata_schema: unknown } };
       expect(saved.entity_type.metadata_schema).toEqual(valid);
       await owner.entity_schema.deleteType({ slug: 'collection-asset' });
