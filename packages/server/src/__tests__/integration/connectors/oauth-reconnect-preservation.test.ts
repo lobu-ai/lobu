@@ -250,6 +250,37 @@ describe('OAuth reconnect preserves the existing connection until consent', () =
     expect(await state(s.connection.id)).toEqual(before);
   });
 
+  it('completes a first connect whose connector key derives an over-long profile slug', async () => {
+    const s = await seed();
+    const sql = getTestDb();
+    const longKey = `synthetic.${'long-connector-name-'.repeat(7)}end`;
+    await createTestConnectorDefinition({
+      key: longKey, name: 'Synthetic long OAuth', organization_id: s.org.id,
+      auth_schema: { methods: [{ type: 'oauth', provider: 'synthetic', requiredScopes: [BASE],
+        clientIdKey: 'client_id', clientSecretKey: 'client_secret', authorizationUrl: 'https://provider.example/authorize',
+        tokenUrl: 'https://provider.example/token', userinfoUrl: 'https://provider.example/userinfo' }] },
+    });
+    const app = await createAuthProfile({ organizationId: s.org.id, connectorKey: longKey,
+      displayName: 'Long key app', profileKind: 'oauth_app', provider: 'synthetic',
+      authData: { client_id: 'synthetic-long-client', client_secret: 'synthetic-long-secret' },
+      status: 'active', createdBy: s.user.id });
+    const result = await s.client.connect({ connector_key: longKey, app_auth_profile_slug: app.slug }) as
+      { connection_id: number; connect_url: string };
+    const token = new URL(result.connect_url).pathname.split('/').at(-3)!;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      if (url === 'https://provider.example/token') return Response.json({ access_token: 'synthetic-long-token', scope: BASE });
+      if (url === 'https://provider.example/userinfo') return Response.json({ id: 'synthetic-long-user' });
+      return originalFetch(input, init);
+    }) as typeof fetch;
+    const response = await connectRoutes.request(`/oauth/callback?state=${token}&code=synthetic-long-code`, {}, {} as Env);
+    expect(response.headers.get('location')).toContain('auth_result=connected');
+    const [row] = await sql`SELECT c.status, ap.slug FROM connections c
+      JOIN auth_profiles ap ON ap.id = c.auth_profile_id WHERE c.id = ${result.connection_id}`;
+    expect(row.status).toBe('active');
+    expect(row.slug.length).toBeLessThanOrEqual(80);
+  });
+
   it('keeps ordinary connections and feeds intact when managed OAuth is enabled', async () => {
     const s = await seed();
     const sql = getTestDb();

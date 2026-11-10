@@ -1,6 +1,9 @@
 import { createAuthRun } from "../../../runs/queue-service";
 import type { DbClient } from "../../../db/client";
-import { createAuthProfile } from "../../../utils/auth-profiles";
+import {
+	createAuthProfile,
+	deriveAuthProfileSlug,
+} from "../../../utils/auth-profiles";
 import {
 	ensureLiveBrowserProfile,
 	type LiveBrowserProfileParams,
@@ -48,7 +51,9 @@ export async function createConnectionSetupBundle(params: {
 				organizationId: params.organizationId,
 				connectorKey: params.connectorKey,
 				displayName: `${params.displayName} (pairing)`,
-				slug: `${params.connectorKey}-interactive-${Date.now()}`,
+				slug: deriveAuthProfileSlug(
+					`${params.connectorKey}-interactive-${Date.now()}`,
+				),
 				profileKind: "interactive",
 				authData: {},
 				status: "pending_auth",
