@@ -162,6 +162,14 @@ function githubRepoApiUrl(repo: RepoRef, suffix = ''): string {
 /** Output caps for `get_pull_request_status`. */
 const MAX_PR_REVIEWERS = 50;
 const MAX_CHECK_RUNS = 100;
+// Counts cover every run up to this many pages of 100; beyond it they are
+// flagged `truncated` against GitHub's total_count.
+const MAX_CHECK_RUN_PAGES = 3;
+const CHECK_RUNS_PER_PAGE = 100;
+/** Review states that are a decision; a later COMMENTED never replaces one. */
+const DECISION_REVIEW_STATES = new Set(['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED']);
+/** Check conclusions that need no attention; every other run is listed first. */
+const GREEN_CHECK_CONCLUSIONS = new Set(['success', 'neutral', 'skipped']);
 // Reviews arrive oldest first, so the latest per reviewer needs every page;
 // bound the scan so a pathological PR cannot burn the installation's quota.
 const MAX_REVIEW_PAGES = 10;
@@ -477,7 +485,7 @@ export default class GitHubConnector extends ConnectorRuntime {
     key: 'github',
     name: 'GitHub',
     description: 'Collects GitHub issues/discussions and executes repo actions.',
-    version: '1.6.0',
+    version: '1.7.0',
     automationEvents: GITHUB_AUTOMATION_EVENTS,
     faviconDomain: 'github.com',
     // A GitHub connection gives the agent's sandbox an authenticated `gh`.
@@ -1011,7 +1019,7 @@ export default class GitHubConnector extends ConnectorRuntime {
         key: 'get_pull_request_status',
         kind: 'read',
         name: 'Get Pull Request Status',
-        description: `Read a pull request's state, the latest review per reviewer (max ${MAX_PR_REVIEWERS}), check runs on its head commit (max ${MAX_CHECK_RUNS}) with per-conclusion counts, and the combined commit status.`,
+        description: `Read a pull request's state, each reviewer's current review, check runs on its head commit with per-conclusion counts, and the combined commit status. Reviews follow GitHub's review decision: a reviewer's latest APPROVED, CHANGES_REQUESTED or DISMISSED review stands until a newer one of those, so a later COMMENTED review never hides it; comment-only reviewers show their latest comment. Decisions are listed before comments, newest first, max ${MAX_PR_REVIEWERS} (reviews_truncated marks a cut). Check counts cover up to ${MAX_CHECK_RUN_PAGES * CHECK_RUNS_PER_PAGE} runs (checks.truncated is true when GitHub's checks.total_count exceeds that); runs lists at most ${MAX_CHECK_RUNS}, non-green first.`,
         inputSchema: {
           type: 'object',
           required: ['pull_number'],
@@ -1032,6 +1040,7 @@ export default class GitHubConnector extends ConnectorRuntime {
             'base_sha',
             'mergeable_state',
             'reviews',
+            'reviews_truncated',
             'checks',
             'commit_status',
           ],
@@ -1056,11 +1065,14 @@ export default class GitHubConnector extends ConnectorRuntime {
                 },
               },
             },
+            reviews_truncated: { type: 'boolean' },
             checks: {
               type: 'object',
-              required: ['counts', 'runs'],
+              required: ['counts', 'runs', 'total_count', 'truncated'],
               properties: {
                 counts: { type: 'object', additionalProperties: { type: 'integer' } },
+                total_count: { type: 'integer' },
+                truncated: { type: 'boolean' },
                 runs: {
                   type: 'array',
                   maxItems: MAX_CHECK_RUNS,
@@ -2403,9 +2415,15 @@ export default class GitHubConnector extends ConnectorRuntime {
       token
     );
 
-    // Latest submitted_at wins per reviewer (ties: the later-listed review).
-    // PENDING (unsubmitted) reviews have no submitted_at and are not a decision.
-    const latestByReviewer = new Map<string, { user: string; state: string; submitted_at: string }>();
+    // GitHub's review decision per reviewer: the newest decision (APPROVED,
+    // CHANGES_REQUESTED, DISMISSED) stands until a newer decision; a COMMENTED
+    // review only stands in for a reviewer with no decision. PENDING
+    // (unsubmitted) reviews have no submitted_at and are skipped. Ties go to
+    // the later-listed review.
+    type ReviewSummary = { user: string; state: string; submitted_at: string };
+    const isDecision = (item: ReviewSummary) => DECISION_REVIEW_STATES.has(item.state);
+    const byReviewer = new Map<string, ReviewSummary>();
+    let reviewScanComplete = false;
     for (let page = 1; page <= MAX_REVIEW_PAGES; page++) {
       const batch = await this.readJson<GitHubReview[]>(
         githubRepoApiUrl(repo, `/pulls/${pullNumber}/reviews?per_page=${REVIEWS_PER_PAGE}&page=${page}`),
@@ -2414,32 +2432,58 @@ export default class GitHubConnector extends ConnectorRuntime {
       for (const item of batch) {
         const user = item.user?.login;
         if (!user || !item.submitted_at) continue;
-        const previous = latestByReviewer.get(user);
-        if (previous && previous.submitted_at > item.submitted_at) continue;
-        latestByReviewer.set(user, { user, state: item.state, submitted_at: item.submitted_at });
+        const candidate = { user, state: item.state, submitted_at: item.submitted_at };
+        const current = byReviewer.get(user);
+        if (current) {
+          if (isDecision(current) && !isDecision(candidate)) continue;
+          if (isDecision(current) === isDecision(candidate) && current.submitted_at > candidate.submitted_at) {
+            continue;
+          }
+        }
+        byReviewer.set(user, candidate);
       }
-      if (batch.length < REVIEWS_PER_PAGE) break;
+      if (batch.length < REVIEWS_PER_PAGE) {
+        reviewScanComplete = true;
+        break;
+      }
     }
-    const reviews = [...latestByReviewer.values()]
-      .sort((a, b) => b.submitted_at.localeCompare(a.submitted_at))
-      .slice(0, MAX_PR_REVIEWERS);
+    const rankedReviews = [...byReviewer.values()].sort(
+      (a, b) => Number(isDecision(b)) - Number(isDecision(a)) || b.submitted_at.localeCompare(a.submitted_at)
+    );
+    const reviews = rankedReviews.slice(0, MAX_PR_REVIEWERS);
+    const reviewsTruncated = !reviewScanComplete || rankedReviews.length > reviews.length;
 
     const headSegment = encodeGitHubPathSegment(pr.head.sha, 'commit sha');
-    const checkRuns = await this.readJson<{ check_runs?: GitHubCheckRun[] }>(
-      githubRepoApiUrl(repo, `/commits/${headSegment}/check-runs?per_page=${MAX_CHECK_RUNS}`),
-      token
-    );
-    const runs = (checkRuns.check_runs ?? []).slice(0, MAX_CHECK_RUNS).map((run) => ({
-      name: run.name,
-      status: run.status,
-      conclusion: run.conclusion ?? null,
-      details_url: run.details_url ?? null,
-    }));
+    const allRuns: GitHubCheckRun[] = [];
+    let totalCount = 0;
+    for (let page = 1; page <= MAX_CHECK_RUN_PAGES; page++) {
+      const batch = await this.readJson<{ total_count?: number; check_runs?: GitHubCheckRun[] }>(
+        githubRepoApiUrl(
+          repo,
+          `/commits/${headSegment}/check-runs?per_page=${CHECK_RUNS_PER_PAGE}&page=${page}`
+        ),
+        token
+      );
+      const pageRuns = batch.check_runs ?? [];
+      allRuns.push(...pageRuns);
+      totalCount = Math.max(totalCount, toInt(batch.total_count, 0), allRuns.length);
+      if (pageRuns.length < CHECK_RUNS_PER_PAGE || allRuns.length >= totalCount) break;
+    }
     const counts: Record<string, number> = {};
-    for (const run of runs) {
+    for (const run of allRuns) {
       const bucket = run.conclusion ?? run.status;
       counts[bucket] = (counts[bucket] ?? 0) + 1;
     }
+    const isGreen = (run: GitHubCheckRun) =>
+      run.conclusion !== null && GREEN_CHECK_CONCLUSIONS.has(run.conclusion);
+    const runs = [...allRuns.filter((run) => !isGreen(run)), ...allRuns.filter(isGreen)]
+      .slice(0, MAX_CHECK_RUNS)
+      .map((run) => ({
+        name: run.name,
+        status: run.status,
+        conclusion: run.conclusion ?? null,
+        details_url: run.details_url ?? null,
+      }));
 
     const combined = await this.readJson<GitHubCombinedStatus>(
       githubRepoApiUrl(repo, `/commits/${headSegment}/status?per_page=100`),
@@ -2457,7 +2501,13 @@ export default class GitHubConnector extends ConnectorRuntime {
         base_sha: pr.base.sha,
         mergeable_state: pr.mergeable_state ?? null,
         reviews,
-        checks: { counts, runs },
+        reviews_truncated: reviewsTruncated,
+        checks: {
+          counts,
+          runs,
+          total_count: totalCount,
+          truncated: totalCount > allRuns.length,
+        },
         commit_status: {
           state: combined.state,
           contexts: (combined.statuses ?? []).map((status) => ({

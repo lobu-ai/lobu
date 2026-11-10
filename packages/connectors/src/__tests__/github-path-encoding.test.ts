@@ -15,9 +15,10 @@
  *
  * Also drives the two read-only status actions (`get_pull_request_status`,
  * `get_branch_head`) through `execute()` against real `Response` objects:
- * their paths, the latest-review-per-reviewer dedupe, the 50-review and
- * 100-check-run caps, check counts, the default-branch fallback, and 404 /
- * 403 handling classified from the status and rate-limit headers.
+ * their paths, GitHub's review-decision dedupe per reviewer, the 50-reviewer
+ * and 100-listed-run caps with their truncation flags, check-run paging and
+ * counts, the default-branch fallback, and 404 / 403 handling classified from
+ * the status and rate-limit headers.
  */
 
 import { beforeAll, describe, expect, mock, test } from "bun:test";
@@ -250,7 +251,7 @@ function pullRoutes(overrides: Record<string, Route | (() => Route)> = {}) {
 			},
 		},
 		[`${REPO_API}/pulls/12/reviews?per_page=100&page=1`]: { body: [] },
-		[`${REPO_API}/commits/${ENCODED_SHA}/check-runs?per_page=100`]: {
+		[`${REPO_API}/commits/${ENCODED_SHA}/check-runs?per_page=100&page=1`]: {
 			body: { total_count: 0, check_runs: [] },
 		},
 		[`${REPO_API}/commits/${ENCODED_SHA}/status?per_page=100`]: {
@@ -287,7 +288,7 @@ describe("GitHub read-only status actions", () => {
 		expect(calls.map((call) => call.url)).toEqual([
 			`${REPO_API}/pulls/12`,
 			`${REPO_API}/pulls/12/reviews?per_page=100&page=1`,
-			`${REPO_API}/commits/${ENCODED_SHA}/check-runs?per_page=100`,
+			`${REPO_API}/commits/${ENCODED_SHA}/check-runs?per_page=100&page=1`,
 			`${REPO_API}/commits/${ENCODED_SHA}/status?per_page=100`,
 		]);
 		expect(calls.every((call) => call.auth === "Bearer token")).toBe(true);
@@ -300,12 +301,13 @@ describe("GitHub read-only status actions", () => {
 			base_sha: "base-sha",
 			mergeable_state: "blocked",
 			reviews: [],
-			checks: { counts: {}, runs: [] },
+			reviews_truncated: false,
+			checks: { counts: {}, runs: [], total_count: 0, truncated: false },
 			commit_status: { state: "pending", contexts: [{ context: "deploy", state: "pending" }] },
 		});
 	});
 
-	test("keeps only each reviewer's latest submitted review across pages", async () => {
+	test("keeps each reviewer's decision the way GitHub does, across pages", async () => {
 		const firstPage = [
 			review("alice", "APPROVED", 1),
 			review("bob", "COMMENTED", 2),
@@ -314,6 +316,11 @@ describe("GitHub read-only status actions", () => {
 		const secondPage = [
 			review("alice", "CHANGES_REQUESTED", 30),
 			{ user: { login: "bob" }, state: "PENDING" },
+			// A later comment never replaces an approval or a dismissal.
+			review("dave", "APPROVED", 20),
+			review("dave", "COMMENTED", 40),
+			review("erin", "DISMISSED", 6),
+			review("erin", "COMMENTED", 50),
 		];
 		const { connector, calls } = buildReadConnector(
 			pullRoutes({
@@ -327,32 +334,38 @@ describe("GitHub read-only status actions", () => {
 		expect(calls.map((call) => call.url)).toContain(
 			`${REPO_API}/pulls/12/reviews?per_page=100&page=2`,
 		);
+		// State-bearing decisions first, then comment-only reviewers; newest first.
 		expect(result.output.reviews).toEqual([
 			{ user: "alice", state: "CHANGES_REQUESTED", submitted_at: review("a", "x", 30).submitted_at },
+			{ user: "dave", state: "APPROVED", submitted_at: review("a", "x", 20).submitted_at },
+			{ user: "erin", state: "DISMISSED", submitted_at: review("a", "x", 6).submitted_at },
 			{ user: "carol", state: "COMMENTED", submitted_at: review("a", "x", 12).submitted_at },
 			{ user: "bob", state: "COMMENTED", submitted_at: review("a", "x", 2).submitted_at },
 		]);
+		expect(result.output.reviews_truncated).toBe(false);
 	});
 
-	test("caps reviews at 50 reviewers and check runs at 100, counting by conclusion or status", async () => {
+	test("caps reviewers at 50 and pages check runs, counting every run and listing non-green first", async () => {
 		const reviews = Array.from({ length: 60 }, (_, i) => review(`user-${i}`, "APPROVED", i));
-		const runs = [
-			{ name: "build", status: "completed", conclusion: "success", details_url: "https://ci/1" },
-			{ name: "lint", status: "completed", conclusion: "failure", details_url: "https://ci/2" },
+		const shard = (i: number) => ({
+			name: `shard-${i}`,
+			status: "completed",
+			conclusion: "success",
+			details_url: `https://ci/s${i}`,
+		});
+		const pageOne = Array.from({ length: 100 }, (_, i) => shard(i));
+		const pageTwo = [
 			{ name: "e2e", status: "in_progress", conclusion: null, details_url: null },
-			...Array.from({ length: 127 }, (_, i) => ({
-				name: `shard-${i}`,
-				status: "completed",
-				conclusion: "success",
-				details_url: `https://ci/s${i}`,
-			})),
+			{ name: "lint", status: "completed", conclusion: "failure", details_url: "https://ci/lint" },
+			...Array.from({ length: 28 }, (_, i) => shard(100 + i)),
 		];
+		const checkRunsUrl = (page: number) =>
+			`${REPO_API}/commits/${ENCODED_SHA}/check-runs?per_page=100&page=${page}`;
 		const { connector } = buildReadConnector(
 			pullRoutes({
 				[`${REPO_API}/pulls/12/reviews?per_page=100&page=1`]: { body: reviews },
-				[`${REPO_API}/commits/${ENCODED_SHA}/check-runs?per_page=100`]: {
-					body: { total_count: runs.length, check_runs: runs },
-				},
+				[checkRunsUrl(1)]: { body: { total_count: 130, check_runs: pageOne } },
+				[checkRunsUrl(2)]: { body: { total_count: 130, check_runs: pageTwo } },
 			}),
 		);
 
@@ -361,14 +374,44 @@ describe("GitHub read-only status actions", () => {
 		expect(result.output.reviews).toHaveLength(50);
 		expect(result.output.reviews[0].user).toBe("user-59");
 		expect(result.output.reviews.map((r: { user: string }) => r.user)).not.toContain("user-9");
+		expect(result.output.reviews_truncated).toBe(true);
+		const { checks } = result.output;
+		expect(checks.counts).toEqual({ success: 128, failure: 1, in_progress: 1 });
+		expect(checks.total_count).toBe(130);
+		expect(checks.truncated).toBe(false);
+		expect(checks.runs).toHaveLength(100);
+		// The failing and running checks from page 2 lead the listed runs.
+		expect(checks.runs.slice(0, 2)).toEqual([
+			{ name: "e2e", status: "in_progress", conclusion: null, details_url: null },
+			{ name: "lint", status: "completed", conclusion: "failure", details_url: "https://ci/lint" },
+		]);
+	});
+
+	test("stops paging check runs after 3 pages and flags the counts as truncated", async () => {
+		const full = (page: number) =>
+			Array.from({ length: 100 }, (_, i) => ({
+				name: `p${page}-${i}`,
+				status: "completed",
+				conclusion: "success",
+				details_url: null,
+			}));
+		const checkRunsUrl = (page: number) =>
+			`${REPO_API}/commits/${ENCODED_SHA}/check-runs?per_page=100&page=${page}`;
+		const { connector, calls } = buildReadConnector(
+			pullRoutes({
+				[checkRunsUrl(1)]: { body: { total_count: 350, check_runs: full(1) } },
+				[checkRunsUrl(2)]: { body: { total_count: 350, check_runs: full(2) } },
+				[checkRunsUrl(3)]: { body: { total_count: 350, check_runs: full(3) } },
+			}),
+		);
+
+		const result = await runRead(connector, "get_pull_request_status", { pull_number: 12 });
+
+		expect(calls.map((call) => call.url)).not.toContain(checkRunsUrl(4));
+		expect(result.output.checks.counts).toEqual({ success: 300 });
+		expect(result.output.checks.total_count).toBe(350);
+		expect(result.output.checks.truncated).toBe(true);
 		expect(result.output.checks.runs).toHaveLength(100);
-		expect(result.output.checks.runs[2]).toEqual({
-			name: "e2e",
-			status: "in_progress",
-			conclusion: null,
-			details_url: null,
-		});
-		expect(result.output.checks.counts).toEqual({ success: 98, failure: 1, in_progress: 1 });
 	});
 
 	test("get_branch_head falls back to the default branch and encodes the branch", async () => {
