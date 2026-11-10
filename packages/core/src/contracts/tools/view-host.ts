@@ -1,3 +1,5 @@
+import type { CollectionSelection } from "./collection-selection";
+
 /** Browser bridge routing hints, never authority. */
 export const VIEW_WORKSPACE_META_KEY = "lobu/view-workspace";
 export const VIEW_OPEN_RECORD_METHOD = "lobu/open-record";
@@ -37,12 +39,19 @@ export function isViewRead(
  */
 /** guest → host request: the slots on screen now. Answered per slot. */
 export const VIEW_EMBEDS_SYNC_METHOD = "lobu/embeds/sync";
-/** guest → host request: keyboard focus moves into a slot's child. */
+/** guest → host request: keyboard focus moves into a slot's child, `{ id,
+ *  direction? }`; `direction` says which way the visitor was tabbing. */
 export const VIEW_EMBEDS_FOCUS_METHOD = "lobu/embeds/focus";
 /** host → guest: a child's height, so the slot reserves its space. */
 export const VIEW_EMBED_SIZE_NOTIFICATION = "lobu/notifications/embed-size";
 /** host → guest: keyboard focus left a child; continue after or before it. */
 export const VIEW_EMBED_FOCUS_NOTIFICATION = "lobu/notifications/embed-focus";
+/** host → child guest: keyboard focus entered this embedded view, `{ direction
+ *  }`; it lands on the first control going forward, the last going backward,
+ *  so entering a child is one Tab, never a stop on its empty document. */
+export const VIEW_FOCUS_ENTER_NOTIFICATION = "lobu/notifications/focus-enter";
+
+export type ViewFocusDirection = "forward" | "backward";
 
 /** Child frames one view may show at once. */
 export const VIEW_EMBED_MAX_COUNT = 8;
@@ -53,19 +62,35 @@ export const VIEW_EMBED_MAX_PARAMS = 20;
 
 export type ViewEmbedParams = Record<string, string | number | boolean>;
 
+/** The child's subject, combined by the same rule as `open_view`'s scope
+ *  (`viewScopeShapeError`); `entity` may also be a source key, which then
+ *  needs `type`. The collection selection is the host-owned list filter —
+ *  never one of the child's own params. */
 export interface ViewEmbedScope {
   type?: string;
   entity?: number | string;
   event?: number;
+  collection?: CollectionSelection;
 }
 
-/** One slot as the guest reports it; `rect` is in the guest's viewport. */
+export interface ViewEmbedBox {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** One slot as the guest reports it; `rect` is in the guest's viewport.
+ *  `rect.clip` is the part of it the guest actually shows — inside every
+ *  scrolling or clipping ancestor, and outside any dialog or menu laid over
+ *  it — so the host never lets the child cover the parent's own controls.
+ *  Absent means all of it; an empty box means none. */
 export interface ViewEmbedSlot {
   id: string;
   view: string;
   scope: ViewEmbedScope;
   params: ViewEmbedParams;
-  rect: { x: number; y: number; width: number; height: number };
+  rect: ViewEmbedBox & { clip?: ViewEmbedBox };
 }
 
 export type ViewEmbedStatus =

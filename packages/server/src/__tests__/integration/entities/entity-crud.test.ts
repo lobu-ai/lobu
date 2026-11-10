@@ -353,6 +353,59 @@ describe('entity CRUD', () => {
     }, 30_000);
   });
 
+  describe('x-lobu-stamps', () => {
+    const iso = (at: Date) => new Date(at).toISOString();
+    async function stampedRow(id: number) {
+      const [found] = await getTestDb()`
+        SELECT metadata, updated_at FROM entities WHERE id = ${id}
+      `;
+      return found as { metadata: Record<string, unknown>; updated_at: Date };
+    }
+
+    it('stamps for every writer, ignores caller-supplied stamps, and holds still when the tracked field does not change', async () => {
+      await owner.entity_schema.createType({
+        slug: 'stamped-deal',
+        name: 'Stamped deal',
+        metadata_schema: {
+          type: 'object',
+          properties: {
+            stage: { type: 'string' },
+            stage_at: { type: 'string', format: 'date-time' },
+            notes: { type: 'string' },
+          },
+          'x-lobu-stamps': { stage_at: 'stage' },
+        },
+      });
+      const forged = '2001-01-01T00:00:00.000Z';
+      const created = (await owner.entities.create({
+        entity_type: 'stamped-deal',
+        name: 'Stamped',
+        metadata: { stage: 'open', stage_at: forged },
+      })) as { entity: { id: number } };
+      const id = created.entity.id;
+      const born = await stampedRow(id);
+      expect(born.metadata.stage_at).toBe(iso(born.updated_at));
+
+      // A write that leaves the tracked field alone leaves the stamp alone,
+      // and a forged stamp on its own changes nothing.
+      await owner.entities.update({ entity_id: id, metadata: { notes: 'call back', stage_at: forged } });
+      expect((await stampedRow(id)).metadata.stage_at).toBe(born.metadata.stage_at);
+      await owner.entities.update({ entity_id: id, metadata: { stage: 'open' } });
+      expect((await stampedRow(id)).metadata.stage_at).toBe(born.metadata.stage_at);
+
+      // An agent's SDK update is not a view write, and still maintains the stamp.
+      const agent = await createTestAgent({ organizationId: org.id, ownerUserId: ownerUser.id });
+      await owner.withAuth({ agentId: agent.agentId }).entities.update({
+        entity_id: id,
+        metadata: { stage: 'qualified', stage_at: forged },
+      });
+      const moved = await stampedRow(id);
+      expect(moved.metadata.stage).toBe('qualified');
+      expect(moved.metadata.stage_at).toBe(iso(moved.updated_at));
+      expect(moved.metadata.stage_at).not.toBe(born.metadata.stage_at);
+    });
+  });
+
   describe('access control', () => {
     it('lets a member create + list (write scope is enough)', async () => {
       const created = (await member.entities.create({

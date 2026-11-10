@@ -1156,12 +1156,15 @@ export interface Project {
    */
   views?: ViewSource[];
   /**
-   * The workspace sidebar navigation, replacing the stored document on apply
-   * (compare-and-swap against the revision apply read; a concurrent edit
-   * fails the apply instead of being overwritten). Omit to leave it
-   * unmanaged; `null` returns the workspace to the automatic default (every
-   * workspace view). Targets must resolve when applied, so list the views
-   * they name in `views`.
+   * The workspace sidebar navigation, replacing the stored document on apply.
+   * The document is shared with the app's editor and agents, so apply only
+   * replaces what this config last applied: if someone changed it since (or
+   * it was exported before a later edit), apply blocks until this file adopts
+   * that change, and a concurrent edit during apply fails it (409) instead of
+   * being overwritten. A freshly exported file applies once as a no-op to
+   * record that starting point. Omit to leave it unmanaged; `null` returns
+   * the workspace to the automatic default (every workspace view). Targets
+   * must resolve when applied, so list the views they name in `views`.
    */
   navigation?: NavigationConfig | null;
 }

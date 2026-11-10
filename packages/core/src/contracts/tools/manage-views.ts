@@ -129,15 +129,47 @@ export const ViewParamDeclSchema = Type.Object({
 });
 export type ViewParamDecl = Static<typeof ViewParamDeclSchema>;
 
-// Actions a view declares as metadata; each emits an event kind through the
-// template-action chokepoint. A removed action stops working on the next read
-// because the check runs against the CURRENT view row.
+/** Most metadata fields one view action may write. */
+const VIEW_ACTION_MAX_UPDATE_FIELDS = 50;
+
+// Actions a view declares as metadata. An action emits an event kind through
+// the template-action chokepoint, writes an allowlist of entity fields through
+// the shared entity update path, or both in one transaction. At least one is
+// required (checked by `readViewDefinition`). A removed action stops working on
+// the next read because the check runs against the CURRENT view row.
 export const ViewActionDeclSchema = Type.Object({
-  emits: Type.String({
-    minLength: 1,
-    maxLength: 128,
-    description: "Event kind appended when the action fires, e.g. 'deal.won'.",
-  }),
+  emits: Type.Optional(
+    Type.String({
+      minLength: 1,
+      maxLength: 128,
+      description:
+        "Event kind appended when the action fires, e.g. 'deal.won'.",
+    })
+  ),
+  updates: Type.Optional(
+    Type.Object(
+      {
+        entityType: Type.String({
+          minLength: 1,
+          maxLength: 128,
+          description:
+            "Entity type the action writes. The view must attach to it (collection or record).",
+        }),
+        fields: Type.Array(Type.String({ minLength: 1, maxLength: 128 }), {
+          minItems: 1,
+          maxItems: VIEW_ACTION_MAX_UPDATE_FIELDS,
+          uniqueItems: true,
+          description:
+            "Metadata fields the action may set. Schema-stamped fields (x-lobu-stamps) are server-owned and refused.",
+        }),
+      },
+      {
+        additionalProperties: false,
+        description:
+          "Entity fields the action may write: value carries { entity_id, set }.",
+      }
+    )
+  ),
 });
 export type ViewActionDecl = Static<typeof ViewActionDeclSchema>;
 
@@ -167,7 +199,8 @@ export const ViewDefinitionSchema = Type.Object(
     ),
     actions: Type.Optional(
       Type.Record(Type.String(), ViewActionDeclSchema, {
-        description: "Declared actions and the event kind each emits.",
+        description:
+          "Declared actions: the event kind each emits and the entity fields each may update.",
       })
     ),
   },

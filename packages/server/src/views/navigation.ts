@@ -243,7 +243,7 @@ function resolveTarget(target: PageRef, lookup: Lookup): { href: string; externa
             typeExists: scope.type === undefined ? undefined : lookup.types.has(scope.type),
           });
         }
-        const query = viewLinkQuery(scope, resolveViewParams(view, target.params));
+        const query = viewLinkQuery(view, scope, resolveViewParams(view, target.params));
         return { href: query ? `${path}?${query}` : path, name: view.name };
       } catch {
         // Not attached where the scope points, a removed subject, or params

@@ -170,7 +170,23 @@ export interface ViewDefinition {
    *  no attach/detach verbs. */
   attach: Attachment[];
   params?: Record<string, ParamDef>;
-  actions?: Record<string, { emits: string }>;
+  actions?: Record<string, ActionDef>;
+}
+
+/** A declared action: the event kind it emits, the entity fields it may
+ *  update, or both (committed in one transaction). */
+export interface ActionDef {
+  emits?: string;
+  /** Submit `{ entity_id, set: { field: value } }` as the action value. The
+   *  view must attach to `entityType`. Stamped (x-lobu-stamps) fields are
+   *  server-owned and refused. */
+  updates?: { entityType: string; fields: string[] };
+}
+
+export interface ActionOptions {
+  /** For an `updates` action: metadata field -> the value this view read.
+   *  The server checks it under the row lock and refuses a stale write (409). */
+  expected?: Record<string, unknown>;
 }
 
 export function defineView(def: ViewDefinition): ViewDefinition {
@@ -628,16 +644,23 @@ export function mintInteractionId(): string {
 }
 
 /** Submit a declared action. Failed acknowledgements expose an explicit retry
- * that keeps the original value, event subject and interaction id. */
+ * that keeps the original value, expected values, event subject and
+ * interaction id. */
 export function useAction(
   name: string
-): (value?: Record<string, unknown>) => Promise<ActionResult> {
+): (
+  value?: Record<string, unknown>,
+  options?: ActionOptions
+) => Promise<ActionResult> {
   const rt = useRuntime();
   if (!rt.def.actions?.[name]) {
     throw new Error(`Action "${name}" is not declared on view "${rt.def.key}"`);
   }
   return useCallback(
-    async (value: Record<string, unknown> = {}) => {
+    async (
+      value: Record<string, unknown> = {},
+      options: ActionOptions = {}
+    ) => {
       if (!rt.ready) {
         return {
           ok: false,
@@ -655,6 +678,9 @@ export function useAction(
             view: rt.def.key,
             action: name,
             value,
+            ...(options.expected === undefined
+              ? {}
+              : { expected: options.expected }),
             ...(rt.scope.event === undefined
               ? {}
               : { scope: { event: rt.scope.event } }),
