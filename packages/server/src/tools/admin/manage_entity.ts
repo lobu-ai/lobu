@@ -96,8 +96,8 @@ import {
 	recordEntityWriteDenial,
 } from "../../utils/entity-write-denial-audit";
 import {
-	insertChangeEventInTransaction,
 	insertEdgeChangeEventInTransaction,
+	insertEntityUpdatedEventInTransaction,
 	stableJson,
 } from "../../utils/insert-event";
 import { canSeeMemberEmail, canSeeMemberList, redactMemberEmail } from "../../utils/member-entity-type";
@@ -758,62 +758,13 @@ async function handleUpdate(
 		ownerAgentId: updateActor.ownerAgentId,
 		ownerResolved: updateActor.ownerResolved,
 		afterPersist: async (lockedBefore, after, tx) => {
-			const beforeMetadata = lockedBefore.metadata ?? {};
-			const afterMetadata = after.metadata ?? {};
-			const changes: Array<{ field: string; old: unknown; new: unknown }> = [];
-			if (lockedBefore.name !== after.name) {
-				changes.push({
-					field: "name",
-					old: lockedBefore.name,
-					new: after.name,
-				});
-			}
-			if (lockedBefore.slug !== after.slug) {
-				changes.push({
-					field: "slug",
-					old: lockedBefore.slug,
-					new: after.slug,
-				});
-			}
-			if (lockedBefore.parent_id !== (after.parent_id ?? null)) {
-				changes.push({
-					field: "parent_id",
-					old: lockedBefore.parent_id,
-					new: after.parent_id ?? null,
-				});
-			}
-			if (args.content !== undefined) {
-				changes.push({ field: "content", old: "[changed]", new: "[changed]" });
-			}
-			for (const key of new Set([
-				...Object.keys(beforeMetadata),
-				...Object.keys(afterMetadata),
-			])) {
-				if (
-					stableJson(beforeMetadata[key] ?? null) !==
-					stableJson(afterMetadata[key] ?? null)
-				) {
-					changes.push({
-						field: key,
-						old: beforeMetadata[key] ?? null,
-						new: afterMetadata[key] ?? null,
-					});
-				}
-			}
-			if (changes.length === 0) return;
-			const contentLines = changes.map(
-				(change) =>
-					`- ${change.field}: ${JSON.stringify(change.old)} → ${JSON.stringify(change.new)}`,
-			);
-			await insertChangeEventInTransaction(
+			await insertEntityUpdatedEventInTransaction(
 				{
-					entityIds: [entityId],
+					entityId,
 					organizationId: ctx.organizationId,
-					subject: "entity",
-					op: "updated",
-					title: `Entity updated: ${changes.map((change) => change.field).join(", ")}`,
-					content: `Entity "${after.name}" (id: ${entityId}) updated:\n${contentLines.join("\n")}`,
-					metadata: { changes },
+					before: lockedBefore,
+					after,
+					contentChanged: args.content !== undefined,
 					createdBy: ctx.userId ?? null,
 					clientId: eventClientId(ctx),
 				},

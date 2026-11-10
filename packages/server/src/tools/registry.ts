@@ -49,6 +49,7 @@ import {
   invokeEventAction,
 } from './invoke_event_action';
 import {
+  InvokeViewActionResultSchema,
   InvokeViewActionSchema,
   invokeViewActionTool,
 } from './invoke_view_action';
@@ -547,9 +548,9 @@ const MCP_APP_TOOLS: ToolDefinition[] = [
     name: 'invoke_view_action',
     scope: 'account',
     description:
-      'Append the declared event for a view action using the signed-in MCP App user as the actor. The server revalidates the CURRENT view row: an action the view no longer declares is rejected.',
+      'Run a declared view action as the signed-in MCP App user: append its declared event, apply its declared entity field updates, or both in one transaction. The server revalidates the CURRENT view row: an action the view no longer declares is rejected.',
     inputSchema: InvokeViewActionSchema,
-    outputSchema: InvokeEventActionResultSchema,
+    outputSchema: InvokeViewActionResultSchema,
     annotations: {
       readOnlyHint: false,
       destructiveHint: false,

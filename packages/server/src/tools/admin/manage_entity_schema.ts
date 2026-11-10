@@ -10,6 +10,7 @@ import { lockIdentityOrganization } from "../../utils/relationship-validation";
  * Relationship Type Actions: list, get, create, update, delete, add_rule, remove_rule, list_rules
  */
 
+import { ENTITY_STAMPS_ANNOTATION, entityStampsConfigError } from '../../utils/entity-stamps';
 import {
   ManageEntitySchemaResultSchema,
   ManageEntitySchemaSchema,
@@ -1062,6 +1063,11 @@ function validateEntityMetadataSchemaConfig(
       if (!(error instanceof InvalidEntityResolutionPolicyError)) throw error;
       throw invalidSchema(`metadata_schema.x-lobu-resolution: ${error.message}`);
     }
+  }
+
+  const stampsError = entityStampsConfigError(metadataSchema);
+  if (stampsError) {
+    throw invalidSchema(`metadata_schema.${ENTITY_STAMPS_ANNOTATION}: ${stampsError}`);
   }
 
   if (metadataSchema[COLLECTION_PRESENTATION_KEY] !== undefined) {

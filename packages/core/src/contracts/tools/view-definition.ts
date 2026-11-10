@@ -65,6 +65,13 @@ export function readViewDefinition(js: string): ViewDefinitionRecord {
     throw new Error(`${at}: ${message}`);
   }
   const def = raw as ViewDefinitionDecl;
+  for (const [name, action] of Object.entries(def.actions ?? {})) {
+    if (action.emits === undefined && action.updates === undefined) {
+      throw new Error(
+        `defineView.actions.${name}: declare emits, updates, or both`
+      );
+    }
+  }
   return {
     key: def.key,
     name: def.name?.trim() ? def.name : def.key,

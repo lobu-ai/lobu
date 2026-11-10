@@ -76,6 +76,36 @@ describe('entity schema CRUD', () => {
       await owner.entity_schema.deleteType({ slug });
     });
 
+    const stampProperties = {
+      stage: { type: 'string' },
+      stage_at: { type: 'string', format: 'date-time' },
+      closed_at: { type: 'string', format: 'date-time' },
+      plain_at: { type: 'string' },
+    };
+    it.each([
+      ['not a map', ['stage_at']],
+      ['undeclared stamp field', { missing_at: 'stage' }],
+      ['stamp field without date-time format', { plain_at: 'stage' }],
+      ['undeclared tracked field', { stage_at: 'missing' }],
+      ['non-string tracked field', { stage_at: 5 }],
+      ['field stamping itself', { stage_at: 'stage_at' }],
+      ['stamp field also tracked', { stage_at: 'stage', closed_at: 'stage_at' }],
+      ['required stamp field', { stage_at: 'stage' }, { required: ['stage', 'stage_at'] }],
+    ])('rejects x-lobu-stamps with a %s before create or update writes', async (_case, stamps, extra = {}) => {
+      const slug = 'invalid-stamps';
+      const metadata_schema = { type: 'object', properties: stampProperties, ...extra, 'x-lobu-stamps': stamps };
+      await expect(owner.entity_schema.createType({ slug, name: 'Invalid stamps', metadata_schema }))
+        .rejects.toThrow(/invalid_schema.*x-lobu-stamps/);
+      expect(await owner.entity_schema.getType(slug)).toMatchObject({ entity_type: null });
+
+      const valid = { type: 'object', properties: stampProperties, 'x-lobu-stamps': { stage_at: 'stage' } };
+      await owner.entity_schema.createType({ slug, name: 'Valid stamps', metadata_schema: valid });
+      await expect(owner.entity_schema.updateType({ slug, metadata_schema }))
+        .rejects.toThrow(/invalid_schema.*x-lobu-stamps/);
+      expect(await owner.entity_schema.getType(slug)).toMatchObject({ entity_type: { metadata_schema: valid } });
+      await owner.entity_schema.deleteType({ slug });
+    });
+
     it('rejects malformed matching policy through the authenticated MCP SDK path', async () => {
       const result = await wire.runSdk(`export default async (_ctx, client) => {
         return client.entitySchema.createType({ slug: 'malformed-wire-policy', name: 'Malformed policy',
