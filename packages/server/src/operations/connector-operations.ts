@@ -38,7 +38,9 @@ type ConnectorRow = {
 const HTTP_METHODS = ["get", "post", "put", "patch", "delete", "head"] as const;
 const OPENAPI_CACHE_TTL_MS = 5 * 60 * 1000;
 const OPENAPI_FETCH_TIMEOUT_MS = 30_000;
-const MAX_OPENAPI_SPEC_BYTES = 5 * 1024 * 1024;
+// Large provider specs (GitHub's REST description is ~14 MB) must load whole;
+// the parsed spec is cached per URL for OPENAPI_CACHE_TTL_MS.
+const MAX_OPENAPI_SPEC_BYTES = 20 * 1024 * 1024;
 
 const openApiCache = new Map<
 	string,
@@ -72,6 +74,8 @@ type OpenApiConfig = {
 	includeOperations?: string[];
 	excludeOperations?: string[];
 	includeTags?: string[];
+	/** Lowercase HTTP methods to expose; empty/absent exposes every method. */
+	includeMethods?: string[];
 	serverUrl?: string;
 };
 
@@ -91,6 +95,11 @@ function normalizeOpenApiConfig(
 			: undefined,
 		includeTags: Array.isArray(raw.includeTags)
 			? raw.includeTags.filter((v): v is string => typeof v === "string")
+			: undefined,
+		includeMethods: Array.isArray(raw.includeMethods)
+			? raw.includeMethods
+					.filter((v): v is string => typeof v === "string")
+					.map((v) => v.toLowerCase())
 			: undefined,
 		serverUrl: typeof raw.serverUrl === "string" ? raw.serverUrl : undefined,
 	};
@@ -351,6 +360,7 @@ async function getOpenApiOperations(
 	const includeOperations = new Set(config.includeOperations ?? []);
 	const excludeOperations = new Set(config.excludeOperations ?? []);
 	const includeTags = new Set(config.includeTags ?? []);
+	const includeMethods = new Set(config.includeMethods ?? []);
 	const operations: OperationDescriptor[] = [];
 
 	for (const [pathTemplate, pathItem] of Object.entries(paths)) {
@@ -361,6 +371,7 @@ async function getOpenApiOperations(
 			: [];
 
 		for (const method of HTTP_METHODS) {
+			if (includeMethods.size > 0 && !includeMethods.has(method)) continue;
 			const operation = pathRecord[method];
 			if (!operation || typeof operation !== "object") continue;
 			const opRecord = operation as Record<string, unknown>;
@@ -377,6 +388,10 @@ async function getOpenApiOperations(
 			if (includeTags.size > 0 && !tags.some((tag) => includeTags.has(tag)))
 				continue;
 
+			const multiSegmentPathParams = [...pathParameters, ...(Array.isArray(opRecord.parameters) ? opRecord.parameters : [])]
+				.map((param) => resolveRef(spec, param) as Record<string, unknown> | undefined)
+				.filter((param) => param?.in === "path" && param["x-multi-segment"] === true && typeof param.name === "string")
+				.map((param) => String(param?.name));
 			const kind = method === "get" || method === "head" ? "read" : "write";
 			operations.push({
 				connector_key: connectorKey,
@@ -414,6 +429,7 @@ async function getOpenApiOperations(
 					method: method.toUpperCase(),
 					pathTemplate,
 					serverUrl,
+					...(multiSegmentPathParams.length > 0 ? { multiSegmentPathParams } : {}),
 				},
 			});
 		}

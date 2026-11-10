@@ -48,6 +48,54 @@ function parseLoginProvisioning(
   return Object.keys(result).length > 0 ? result : undefined;
 }
 
+const HTTP_CREDENTIAL_TOKEN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+// Headers a credential may never be written into: routing, framing and
+// cookie state, plus hop-by-hop proxy headers.
+const FORBIDDEN_HTTP_CREDENTIAL_HEADERS = new Set([
+  'host', 'cookie', 'set-cookie', 'connection', 'content-length', 'content-type',
+  'transfer-encoding', 'upgrade', 'proxy-authorization', 'proxy-authenticate', 'te',
+  'trailer', 'keep-alive',
+]);
+
+function normalizeHttpCredential(raw: Record<string, unknown>): { header?: string; scheme?: string } {
+  return {
+    ...(typeof raw.header === 'string' ? { header: raw.header.trim() } : {}),
+    ...(typeof raw.scheme === 'string' ? { scheme: raw.scheme.trim() } : {}),
+  };
+}
+
+export interface EnvHttpCredential {
+  fieldKey: string;
+  header: string;
+  scheme: string;
+}
+
+/**
+ * Validate the env fields that declare `httpCredential`: at most one per
+ * connector, a token-grammar header that is not a routing/cookie/framing
+ * header, and a token-grammar scheme. Returns the resolved declaration.
+ * Throws on a declaration the gateway must never act on.
+ */
+export function resolveEnvHttpCredential(authSchema: unknown): EnvHttpCredential | null {
+  const flagged = getEnvAuthMethods(normalizeConnectorAuthSchema(authSchema)).flatMap((method) =>
+    method.fields.filter((field) => field.httpCredential !== undefined)
+  );
+  if (flagged.length === 0) return null;
+  if (flagged.length > 1) {
+    throw new Error('At most one env auth field may declare httpCredential');
+  }
+  const [field] = flagged;
+  const header = field.httpCredential?.header || 'Authorization';
+  const scheme = field.httpCredential?.scheme || 'Bearer';
+  if (!HTTP_CREDENTIAL_TOKEN.test(header) || FORBIDDEN_HTTP_CREDENTIAL_HEADERS.has(header.toLowerCase())) {
+    throw new Error(`Invalid httpCredential header for env field '${field.key}'`);
+  }
+  if (!HTTP_CREDENTIAL_TOKEN.test(scheme)) {
+    throw new Error(`Invalid httpCredential scheme for env field '${field.key}'`);
+  }
+  return { fieldKey: field.key, header, scheme };
+}
+
 export function normalizeConnectorAuthSchema(value: unknown): ConnectorAuthSchema {
   if (typeof value === 'string') {
     try {
@@ -92,6 +140,9 @@ export function normalizeConnectorAuthSchema(value: unknown): ConnectorAuthSchem
             example: typeof f.example === 'string' ? f.example : undefined,
             required: typeof f.required === 'boolean' ? f.required : undefined,
             secret: typeof f.secret === 'boolean' ? f.secret : isLikelySecretKey(key),
+            ...(f.httpCredential && typeof f.httpCredential === 'object' && !Array.isArray(f.httpCredential)
+              ? { httpCredential: normalizeHttpCredential(f.httpCredential as Record<string, unknown>) }
+              : {}),
           };
         })
         .filter((field) => field.key.length > 0);

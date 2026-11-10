@@ -82,6 +82,8 @@ export interface ConnectorDefinition {
     includeOperations?: string[];
     excludeOperations?: string[];
     includeTags?: string[];
+    /** HTTP methods to expose (e.g. `['get']` for a read-only surface). */
+    includeMethods?: string[];
     serverUrl?: string;
   };
   /**
@@ -357,6 +359,13 @@ export interface ConnectorAuthEnvField {
   example?: string;
   secret?: boolean;
   required?: boolean;
+  /**
+   * Send this field as the HTTP credential for generated `openapiConfig`
+   * operations (and MCP upstreams) when the connection authenticates with this
+   * env method: `<header>: <scheme> <value>`. Defaults: header `Authorization`,
+   * scheme `Bearer`. At most one env field per connector may set it.
+   */
+  httpCredential?: { header?: string; scheme?: string };
 }
 
 export interface ConnectorAuthEnvKeys {

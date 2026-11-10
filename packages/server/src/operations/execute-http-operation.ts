@@ -2,7 +2,10 @@ import { getErrorMessage } from "@lobu/core";
 import { fetchCredentialedPublicUrl } from "@lobu/connector-worker/egress";
 import { LOST_LEASE_MESSAGE } from "../runs/run-lease";
 import { terminalizeInlineOperationRun } from "./operation-run-card";
-import { resolveCredentialsByConnectionId } from "../mcp-proxy/credential-resolver";
+import {
+	credentialHeader,
+	resolveCredentialsByConnectionId,
+} from "../mcp-proxy/credential-resolver";
 import { readResponseTextWithLimit } from "../utils/bounded-response";
 import { stripNul, stripNulDeep } from "../utils/strip-nul";
 import type { OperationDescriptor } from "./types";
@@ -23,10 +26,55 @@ export interface HttpOperationConnection {
 	connector_key: string;
 }
 
+function decodeLenient(value: string): string {
+	try {
+		return decodeURIComponent(value);
+	} catch {
+		// Malformed escapes stay literal; re-encoding escapes the `%`.
+		return value;
+	}
+}
+
+/** Decode then encode, so a caller's pre-encoded `%2F` is not double-encoded. */
+function encodeSegment(segment: string): string {
+	return encodeURIComponent(decodeLenient(segment));
+}
+
+function isDotSegment(segment: string): boolean {
+	const decoded = decodeLenient(segment);
+	return decoded === "." || decoded === "..";
+}
+
+/**
+ * Encode one path parameter so it stays inside its template slot. URL
+ * resolution would otherwise walk `.`/`..` up the path (`/repos/{owner}/{repo}`
+ * with owner `..` reaches `/user`), letting a caller reach an endpoint other
+ * than the operation that policy admitted with the connection's credential.
+ * A single-segment value is encoded whole (`prod/eu` → `prod%2Feu`) and may not
+ * be empty or a dot segment. A parameter the spec marks multi-segment keeps
+ * its `/` separators; none of its segments may be a dot segment, but it may be
+ * empty (a repository root) or end in `/`.
+ */
+function encodePathParam(name: string, value: unknown, multiSegment: boolean): string {
+	const raw = String(value);
+	if (!multiSegment) {
+		if (raw === "" || isDotSegment(raw)) {
+			throw new Error(`Path parameter '${name}' must not be empty, '.' or '..'.`);
+		}
+		return encodeSegment(raw);
+	}
+	const segments = raw.split("/");
+	if (segments.some(isDotSegment)) {
+		throw new Error(`Path parameter '${name}' must not contain '.' or '..' segments.`);
+	}
+	return segments.map(encodeSegment).join("/");
+}
+
 function buildResolvedUrl(
 	serverUrl: string,
 	pathTemplate: string,
 	input: Record<string, unknown>,
+	multiSegmentPathParams: readonly string[] = [],
 ): URL {
 	const pathValues =
 		input.path && typeof input.path === "object"
@@ -38,7 +86,11 @@ function buildResolvedUrl(
 			: {};
 	let path = pathTemplate;
 	for (const [key, value] of Object.entries(pathValues)) {
-		path = path.replaceAll(`{${key}}`, encodeURIComponent(String(value)));
+		if (!path.includes(`{${key}}`)) continue;
+		path = path.replaceAll(
+			`{${key}}`,
+			encodePathParam(key, value, multiSegmentPathParams.includes(key)),
+		);
 	}
 
 	const url = new URL(
@@ -202,10 +254,8 @@ export async function executeHttpOperation(
 			headers.set(key, String(value));
 		}
 		if (credentials) {
-			headers.set(
-				"Authorization",
-				`${credentials.tokenType} ${credentials.accessToken}`,
-			);
+			// Set after the caller's headers, so it replaces any spoofed copy.
+			headers.set(...credentialHeader(credentials));
 		}
 
 		const body = actionInput.body;
@@ -225,6 +275,7 @@ export async function executeHttpOperation(
 			operation.backend_config.serverUrl,
 			operation.backend_config.pathTemplate,
 			actionInput,
+			operation.backend_config.multiSegmentPathParams,
 		);
 
 		const requestAbort = requestAbortSignal(abortSignal);

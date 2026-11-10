@@ -45,6 +45,8 @@ interface HttpOperationBackendConfig {
   method: string;
   pathTemplate: string;
   serverUrl: string;
+  /** Path params the spec marks `x-multi-segment`: their value may span `/`. */
+  multiSegmentPathParams?: string[];
 }
 
 export type OperationBackendConfig =

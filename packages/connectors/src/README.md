@@ -75,6 +75,7 @@ interface ConnectorSpec {
     includeOperations?: string[];
     excludeOperations?: string[];
     includeTags?: string[];
+    includeMethods?: string[];              // e.g. ['get'] for a read-only surface
     serverUrl?: string;
   };
   query?(ctx: QueryContext): Promise<QueryResult>; // Connection-level SQL/warehouse pushdown
@@ -87,7 +88,7 @@ Set `mcpConfig` to proxy an upstream MCP server through Lobu. The connector acts
 
 ### OpenAPI Config
 
-Set `openapiConfig` to auto-generate connector actions from an OpenAPI specification. The platform fetches the spec, filters operations by `includeOperations`/`excludeOperations`/`includeTags`, and exposes them as actions. Useful for REST APIs that already have OpenAPI docs.
+Set `openapiConfig` to auto-generate connector actions from an OpenAPI specification. The platform fetches the spec, filters operations by `includeOperations`/`excludeOperations`/`includeTags`/`includeMethods`, and exposes them as actions. Operation keys are the spec's `operationId`. GET and HEAD operations are reads; every other method is a write, and DELETE is destructive. Use `includeMethods: ['get']` to expose only reads while writes stay hand-written actions. Useful for REST APIs that already have OpenAPI docs.
 
 ## Authentication
 
@@ -116,6 +117,7 @@ authSchema: {
         example: 'sk-...',       // Placeholder hint
         secret: true,            // Mask in UI
         required: true,          // Whether this field is required
+        httpCredential: {},      // Optional: send as `Authorization: Bearer <value>`
       },
     ],
   }],
@@ -123,6 +125,8 @@ authSchema: {
 ```
 
 When `scope` is `'organization'`, the auth profile is shared across all connections in the org. Default is `'connection'` (per-connection credentials).
+
+`httpCredential` marks the one env field that authenticates generated `openapiConfig` operations and MCP upstream calls for a connection on this env method, sent as `<header>: <scheme> <value>` (defaults `Authorization` and `Bearer`, e.g. `{ header: 'X-Api-Key', scheme: 'Token' }`). An App, OAuth or managed token always wins. The value is set gateway-side and never reaches a worker. At most one field per connector may declare it; `Host`, `Cookie`, framing and hop-by-hop headers are rejected at install. A token kept only in connection config (not an env auth profile) is not used.
 
 ### `oauth` - OAuth providers
 

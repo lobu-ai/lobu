@@ -646,6 +646,7 @@ describe("managed connector — local resolver (env LOBU_CLOUD_PAT fallback)", (
 		).resolves.toEqual({
 			accessToken: REFRESHED.access_token,
 			tokenType: "Bearer",
+			header: "Authorization",
 		});
 	});
 

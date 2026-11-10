@@ -224,7 +224,7 @@ describe("operations.execute backend lifecycle", () => {
 		mcpConnectionId = mcp.id;
 		secondMcpConnectionId = secondMcp.id;
 		httpConnectionId = http.id;
-		for (const [connectorKey, keys] of [[LOCAL, ["echo", "stage_browser", "download"]], [MCP, ["remote_echo"]], [HTTP, ["create_item"]]] as const) {
+		for (const [connectorKey, keys] of [[LOCAL, ["echo", "stage_browser", "download"]], [MCP, ["remote_echo"]], [HTTP, ["create_item", "get_repo", "get_content", "get_environment"]]] as const) {
 			for (const operationKey of keys) await upsertEntityApprovalPolicy(orgId, {
 				resourceClass: "connector_action", operationKey: `${connectorKey}::${operationKey}`, effects: { execute: "auto" },
 			});
@@ -287,7 +287,48 @@ describe("operations.execute backend lifecycle", () => {
 									responses: { "200": { description: "ok" } },
 								},
 							},
+							"/repos/{owner}/{repo}": {
+								parameters: [
+									{ name: "owner", in: "path", required: true, schema: { type: "string" } },
+									{ name: "repo", in: "path", required: true, schema: { type: "string" } },
+								],
+								get: { operationId: "get_repo", responses: { "200": { description: "ok" } } },
+							},
+							"/repos/{owner}/{repo}/contents/{path}": {
+								get: {
+									operationId: "get_content",
+									parameters: [
+										{ name: "owner", in: "path", required: true, schema: { type: "string" } },
+										{ name: "repo", in: "path", required: true, schema: { type: "string" } },
+										{ name: "path", in: "path", required: true, "x-multi-segment": true, schema: { type: "string" } },
+									],
+									responses: { "200": { description: "ok" } },
+								},
+							},
+							"/repos/{owner}/{repo}/environments/{environment_name}": {
+								get: {
+									operationId: "get_environment",
+									parameters: [
+										{ name: "owner", in: "path", required: true, schema: { type: "string" } },
+										{ name: "repo", in: "path", required: true, schema: { type: "string" } },
+										{ name: "environment_name", in: "path", required: true, schema: { type: "string" } },
+									],
+									responses: { "200": { description: "ok" } },
+								},
+							},
 							"/items/{id}": {
+								get: {
+									operationId: "get_item",
+									parameters: [
+										{
+											name: "id",
+											in: "path",
+											required: true,
+											schema: { type: "string" },
+										},
+									],
+									responses: { "200": { description: "ok" } },
+								},
 								delete: {
 									operationId: "delete_item",
 									parameters: [
@@ -302,6 +343,14 @@ describe("operations.execute backend lifecycle", () => {
 								},
 							},
 						},
+					});
+				}
+				if (url.startsWith("https://api.example.test/repos/")) {
+					const headers = new Headers(init?.headers);
+					return jsonResponse({
+						fetched: url,
+						authorization: headers.get("authorization"),
+						api_key: headers.get("x-api-key"),
 					});
 				}
 				if (url === "https://api.example.test/items") {
@@ -1308,6 +1357,171 @@ describe("operations.execute backend lifecycle", () => {
 				body: { created: true, body: { value: "http-ok" } },
 			},
 		});
+	});
+
+	it("exposes only the OpenAPI methods the connector declares", async () => {
+		const sql = getTestDb();
+		const [{ openapi_config: original }] = await sql<{
+			openapi_config: Record<string, unknown>;
+		}>`
+			SELECT openapi_config FROM connector_definitions
+			WHERE organization_id = ${orgId} AND key = ${HTTP} AND status = 'active'
+		`;
+		await sql`
+			UPDATE connector_definitions
+			SET openapi_config = ${sql.json({ ...original, includeMethods: ["GET"] })}
+			WHERE organization_id = ${orgId} AND key = ${HTTP}
+		`;
+		try {
+			const listed = (await manageOperations(
+				{ action: "list_available", connection_id: httpConnectionId },
+				{} as Env,
+				ctx,
+			)) as { operations: Array<{ operation_key: string; kind: string; backend: string }> };
+			expect(
+				listed.operations
+					.filter((operation) => operation.backend === "http_operation")
+					.map((operation) => [operation.operation_key, operation.kind]),
+			).toEqual([
+				["get_repo", "read"],
+				["get_content", "read"],
+				["get_environment", "read"],
+				["get_item", "read"],
+			]);
+
+			const excluded = await manageOperations(
+				{
+					action: "execute",
+					connection_id: httpConnectionId,
+					operation_key: "create_item",
+					input: { body: { value: "http-ok" } },
+				},
+				{} as Env,
+				ctx,
+			);
+			expect(excluded).toMatchObject({
+				error: expect.stringContaining("Invalid operation_key 'create_item'"),
+			});
+		} finally {
+			await sql`
+				UPDATE connector_definitions
+				SET openapi_config = ${sql.json(original)}
+				WHERE organization_id = ${orgId} AND key = ${HTTP}
+			`;
+		}
+	});
+
+	it("keeps every OpenAPI path parameter inside its template segment", async () => {
+		const fetchMock = vi.mocked(globalThis.fetch);
+		const repoFetches = () =>
+			fetchMock.mock.calls
+				.map(([input]) => String(input))
+				.filter((url) => url.startsWith("https://api.example.test/repos/") || url === "https://api.example.test/user");
+		const before = repoFetches().length;
+		const execute = (operation_key: string, path: Record<string, string>) =>
+			manageOperations(
+				{ action: "execute", connection_id: httpConnectionId, operation_key, input: { path } },
+				{} as Env,
+				ctx,
+			);
+
+		for (const [operationKey, path] of [
+			["get_repo", { owner: "..", repo: "user" }],
+			["get_repo", { owner: "%2e%2e", repo: "user" }],
+			["get_repo", { owner: "", repo: "user" }],
+			["get_content", { owner: "acme", repo: "app", path: "docs/../../../user" }],
+			["get_content", { owner: "acme", repo: "app", path: "docs/%2E%2E/%2e%2e/user" }],
+		] as const) {
+			expect(await execute(operationKey, path), JSON.stringify(path)).toMatchObject({
+				status: "failed",
+				error_message: expect.stringMatching(/Path parameter '(owner|path)'/),
+			});
+		}
+		expect(repoFetches().length).toBe(before);
+
+		// A single-segment value keeps its `/` inside the segment, and a
+		// pre-encoded `%2F` is not double-encoded.
+		for (const [operationKey, path, url] of [
+			["get_environment", { owner: "acme", repo: "app", environment_name: "prod/eu" }, "/repos/acme/app/environments/prod%2Feu"],
+			["get_environment", { owner: "acme", repo: "app", environment_name: "prod%2Feu" }, "/repos/acme/app/environments/prod%2Feu"],
+			["get_repo", { owner: "acme", repo: "a..b" }, "/repos/acme/a..b"],
+			["get_repo", { owner: "lobu/../..", repo: "user" }, "/repos/lobu%2F..%2F../user"],
+			["get_content", { owner: "acme", repo: "app", path: "packages/owletto" }, "/repos/acme/app/contents/packages/owletto"],
+			["get_content", { owner: "acme", repo: "app", path: "" }, "/repos/acme/app/contents/"],
+			["get_content", { owner: "acme", repo: "app", path: "docs/" }, "/repos/acme/app/contents/docs/"],
+		] as const) {
+			expect(await execute(operationKey, path), JSON.stringify(path)).toMatchObject({
+				status: "completed",
+				output: { body: { fetched: `https://api.example.test${url}` } },
+			});
+		}
+	});
+
+	it("authenticates generated operations with the connector's declared env credential", async () => {
+		const sql = getTestDb();
+		const [{ auth_schema: originalAuthSchema }] = await sql<{ auth_schema: unknown }>`
+			SELECT auth_schema FROM connector_definitions
+			WHERE organization_id = ${orgId} AND key = ${HTTP} AND status = 'active'
+		`;
+		const setEnvCredential = (httpCredential: Record<string, string>) => sql`
+			UPDATE connector_definitions
+			SET auth_schema = ${sql.json({
+				methods: [
+					{ type: "oauth", provider: "test", requiredScopes: [] },
+					{ type: "env_keys", fields: [
+						{ key: "API_REGION", secret: false },
+						{ key: "API_TOKEN", secret: true, httpCredential },
+					] },
+				],
+			})}
+			WHERE organization_id = ${orgId} AND key = ${HTTP}
+		`;
+		const envConnection = await createTestConnection({
+			organization_id: orgId,
+			connector_key: HTTP,
+			created_by: userId,
+			visibility: "private",
+		});
+		const envProfile = await createAuthProfile({
+			organizationId: orgId,
+			connectorKey: HTTP,
+			displayName: "HTTP env token",
+			profileKind: "env",
+			authData: { API_REGION: "eu", API_TOKEN: "env-secret-value" },
+			status: "active",
+			createdBy: userId,
+		});
+		await sql`UPDATE connections SET auth_profile_id = ${envProfile.id} WHERE id = ${envConnection.id}`;
+		const readRepo = (connectionId: number) =>
+			manageOperations(
+				{ action: "execute", connection_id: connectionId, operation_key: "get_repo", input: { path: { owner: "acme", repo: "app" } } },
+				{} as Env,
+				ctx,
+			);
+
+		try {
+			await setEnvCredential({});
+			expect(await readRepo(envConnection.id)).toMatchObject({
+				status: "completed",
+				output: { body: { authorization: "Bearer env-secret-value", api_key: null } },
+			});
+			// An OAuth connection on the same connector keeps its own token.
+			expect(await readRepo(httpConnectionId)).toMatchObject({
+				status: "completed",
+				output: { body: { authorization: `Bearer backend-test-token-${httpConnectionId}` } },
+			});
+
+			await setEnvCredential({ header: "X-Api-Key", scheme: "Token" });
+			expect(await readRepo(envConnection.id)).toMatchObject({
+				status: "completed",
+				output: { body: { authorization: null, api_key: "Token env-secret-value" } },
+			});
+		} finally {
+			await sql`
+				UPDATE connector_definitions SET auth_schema = ${sql.json(originalAuthSchema as never)}
+				WHERE organization_id = ${orgId} AND key = ${HTTP}
+			`;
+		}
 	});
 
 	it("marks an OpenAPI DELETE approval as high impact", async () => {
