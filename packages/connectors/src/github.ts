@@ -1,7 +1,8 @@
 /**
  * GitHub Connector (V1 runtime)
  *
- * Syncs GitHub repository content and executes write actions. Provider
+ * Syncs GitHub repository content, reads PR/branch status, and executes write
+ * actions. Provider
  * deliveries (the App webhook, or a per-connection hook for OAuth/PAT) mark the
  * matching feed due; star deliveries are recorded directly through the
  * stargazers feed's `normalize`, keyed on the poll's origin_id.
@@ -18,6 +19,7 @@ import {
   type EventAttributionRule,
   type EventEnvelope,
   type FeedWebhookDeclaration,
+  HttpStatusError,
   SubscriptionCandidateSchema,
   type SyncContext,
   type SyncResult,
@@ -155,6 +157,89 @@ function githubRepoApiUrl(repo: RepoRef, suffix = ''): string {
   const owner = encodeGitHubPathSegment(repo.owner, 'repository owner');
   const name = encodeGitHubPathSegment(repo.repo, 'repository name');
   return `https://api.github.com/repos/${owner}/${name}${suffix}`;
+}
+
+/** Output caps for `get_pull_request_status`. */
+const MAX_PR_REVIEWERS = 50;
+const MAX_CHECK_RUNS = 100;
+// Reviews arrive oldest first, so the latest per reviewer needs every page;
+// bound the scan so a pathological PR cannot burn the installation's quota.
+const MAX_REVIEW_PAGES = 10;
+const REVIEWS_PER_PAGE = 100;
+
+type GitHubReadFailure = 'not_found' | 'rate_limited' | 'forbidden';
+
+/**
+ * A read action's non-2xx response, classified from the HTTP status and
+ * GitHub's rate-limit headers (never the body text): a 403 is a rate limit
+ * only when the quota is spent (`x-ratelimit-remaining: 0`) or GitHub asks for
+ * a back-off (`retry-after`, its secondary limit); otherwise it is a denial.
+ */
+class GitHubReadError extends Error {
+  constructor(
+    readonly failure: GitHubReadFailure,
+    readonly status: number,
+    detail: string
+  ) {
+    super(`GitHub ${failure} (HTTP ${status}): ${detail}`);
+    this.name = 'GitHubReadError';
+  }
+}
+
+function classifyGitHubReadFailure(status: number, headers: Headers): GitHubReadFailure | null {
+  if (status === 404) return 'not_found';
+  if (status === 429) return 'rate_limited';
+  if (status !== 403) return null;
+  if (headers.get('x-ratelimit-remaining') === '0' || headers.has('retry-after')) {
+    return 'rate_limited';
+  }
+  return 'forbidden';
+}
+
+function rateLimitResetDetail(headers: Headers): string {
+  const reset = Number(headers.get('x-ratelimit-reset'));
+  if (Number.isFinite(reset) && reset > 0) {
+    return `GitHub API rate limit exhausted; resets at ${new Date(reset * 1000).toISOString()}.`;
+  }
+  const retryAfter = headers.get('retry-after');
+  return retryAfter
+    ? `GitHub API rate limit hit; retry after ${retryAfter}s.`
+    : 'GitHub API rate limit hit.';
+}
+
+interface GitHubPullRequestDetail {
+  number: number;
+  state: string;
+  draft?: boolean;
+  mergeable_state?: string | null;
+  head: { sha: string };
+  base: { sha: string; ref: string };
+}
+
+interface GitHubReview {
+  user?: { login?: string } | null;
+  state: string;
+  submitted_at?: string | null;
+}
+
+interface GitHubCheckRun {
+  name: string;
+  status: string;
+  conclusion: string | null;
+  details_url: string | null;
+}
+
+interface GitHubCombinedStatus {
+  state: string;
+  statuses?: Array<{ context: string; state: string }>;
+}
+
+interface GitHubBranch {
+  name: string;
+  commit: {
+    sha: string;
+    commit?: { committer?: { date?: string | null } | null; author?: { date?: string | null } | null };
+  };
 }
 
 interface GitHubMutationResponse {
@@ -392,7 +477,7 @@ export default class GitHubConnector extends ConnectorRuntime {
     key: 'github',
     name: 'GitHub',
     description: 'Collects GitHub issues/discussions and executes repo actions.',
-    version: '1.5.0',
+    version: '1.6.0',
     automationEvents: GITHUB_AUTOMATION_EVENTS,
     faviconDomain: 'github.com',
     // A GitHub connection gives the agent's sandbox an authenticated `gh`.
@@ -922,6 +1007,120 @@ export default class GitHubConnector extends ConnectorRuntime {
           },
         },
       },
+      get_pull_request_status: {
+        key: 'get_pull_request_status',
+        kind: 'read',
+        name: 'Get Pull Request Status',
+        description: `Read a pull request's state, the latest review per reviewer (max ${MAX_PR_REVIEWERS}), check runs on its head commit (max ${MAX_CHECK_RUNS}) with per-conclusion counts, and the combined commit status.`,
+        inputSchema: {
+          type: 'object',
+          required: ['pull_number'],
+          properties: {
+            pull_number: { type: 'integer', minimum: 1 },
+            repo_owner: { type: 'string' },
+            repo_name: { type: 'string' },
+          },
+        },
+        outputSchema: {
+          type: 'object',
+          required: [
+            'pull_number',
+            'state',
+            'draft',
+            'head_sha',
+            'base_ref',
+            'base_sha',
+            'mergeable_state',
+            'reviews',
+            'checks',
+            'commit_status',
+          ],
+          properties: {
+            pull_number: { type: 'integer' },
+            state: { type: 'string' },
+            draft: { type: 'boolean' },
+            head_sha: { type: 'string' },
+            base_ref: { type: 'string' },
+            base_sha: { type: 'string' },
+            mergeable_state: { type: ['string', 'null'] },
+            reviews: {
+              type: 'array',
+              maxItems: MAX_PR_REVIEWERS,
+              items: {
+                type: 'object',
+                required: ['user', 'state', 'submitted_at'],
+                properties: {
+                  user: { type: 'string' },
+                  state: { type: 'string' },
+                  submitted_at: { type: 'string' },
+                },
+              },
+            },
+            checks: {
+              type: 'object',
+              required: ['counts', 'runs'],
+              properties: {
+                counts: { type: 'object', additionalProperties: { type: 'integer' } },
+                runs: {
+                  type: 'array',
+                  maxItems: MAX_CHECK_RUNS,
+                  items: {
+                    type: 'object',
+                    required: ['name', 'status', 'conclusion', 'details_url'],
+                    properties: {
+                      name: { type: 'string' },
+                      status: { type: 'string' },
+                      conclusion: { type: ['string', 'null'] },
+                      details_url: { type: ['string', 'null'] },
+                    },
+                  },
+                },
+              },
+            },
+            commit_status: {
+              type: 'object',
+              required: ['state', 'contexts'],
+              properties: {
+                state: { type: 'string' },
+                contexts: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    required: ['context', 'state'],
+                    properties: {
+                      context: { type: 'string' },
+                      state: { type: 'string' },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      get_branch_head: {
+        key: 'get_branch_head',
+        kind: 'read',
+        name: 'Get Branch Head',
+        description: "Read a branch's head commit SHA and commit time. Defaults to the repository's default branch.",
+        inputSchema: {
+          type: 'object',
+          properties: {
+            branch: { type: 'string', minLength: 1 },
+            repo_owner: { type: 'string' },
+            repo_name: { type: 'string' },
+          },
+        },
+        outputSchema: {
+          type: 'object',
+          required: ['branch', 'sha', 'committed_at'],
+          properties: {
+            branch: { type: 'string' },
+            sha: { type: 'string' },
+            committed_at: { type: ['string', 'null'] },
+          },
+        },
+      },
     },
   };
 
@@ -999,6 +1198,10 @@ export default class GitHubConnector extends ConnectorRuntime {
           return await this.createPullRequest(repo, token, ctx.input);
         case 'merge_pull_request':
           return await this.mergePullRequest(repo, token, ctx.input);
+        case 'get_pull_request_status':
+          return await this.getPullRequestStatus(repo, token, ctx.input);
+        case 'get_branch_head':
+          return await this.getBranchHead(repo, token, ctx.input);
         default:
           return { success: false, error: `Unknown action: ${ctx.actionKey}` };
       }
@@ -2183,6 +2386,152 @@ export default class GitHubConnector extends ConnectorRuntime {
         sha: merged.sha,
       },
     };
+  }
+
+  private async getPullRequestStatus(
+    repo: RepoRef,
+    token: string,
+    input: Record<string, unknown>
+  ): Promise<ActionResult> {
+    const pullNumber = toInt(input.pull_number, 0);
+    if (!Number.isInteger(pullNumber) || pullNumber < 1) {
+      return { success: false, error: 'pull_number must be a positive integer' };
+    }
+
+    const pr = await this.readJson<GitHubPullRequestDetail>(
+      githubRepoApiUrl(repo, `/pulls/${pullNumber}`),
+      token
+    );
+
+    // Latest submitted_at wins per reviewer (ties: the later-listed review).
+    // PENDING (unsubmitted) reviews have no submitted_at and are not a decision.
+    const latestByReviewer = new Map<string, { user: string; state: string; submitted_at: string }>();
+    for (let page = 1; page <= MAX_REVIEW_PAGES; page++) {
+      const batch = await this.readJson<GitHubReview[]>(
+        githubRepoApiUrl(repo, `/pulls/${pullNumber}/reviews?per_page=${REVIEWS_PER_PAGE}&page=${page}`),
+        token
+      );
+      for (const item of batch) {
+        const user = item.user?.login;
+        if (!user || !item.submitted_at) continue;
+        const previous = latestByReviewer.get(user);
+        if (previous && previous.submitted_at > item.submitted_at) continue;
+        latestByReviewer.set(user, { user, state: item.state, submitted_at: item.submitted_at });
+      }
+      if (batch.length < REVIEWS_PER_PAGE) break;
+    }
+    const reviews = [...latestByReviewer.values()]
+      .sort((a, b) => b.submitted_at.localeCompare(a.submitted_at))
+      .slice(0, MAX_PR_REVIEWERS);
+
+    const headSegment = encodeGitHubPathSegment(pr.head.sha, 'commit sha');
+    const checkRuns = await this.readJson<{ check_runs?: GitHubCheckRun[] }>(
+      githubRepoApiUrl(repo, `/commits/${headSegment}/check-runs?per_page=${MAX_CHECK_RUNS}`),
+      token
+    );
+    const runs = (checkRuns.check_runs ?? []).slice(0, MAX_CHECK_RUNS).map((run) => ({
+      name: run.name,
+      status: run.status,
+      conclusion: run.conclusion ?? null,
+      details_url: run.details_url ?? null,
+    }));
+    const counts: Record<string, number> = {};
+    for (const run of runs) {
+      const bucket = run.conclusion ?? run.status;
+      counts[bucket] = (counts[bucket] ?? 0) + 1;
+    }
+
+    const combined = await this.readJson<GitHubCombinedStatus>(
+      githubRepoApiUrl(repo, `/commits/${headSegment}/status?per_page=100`),
+      token
+    );
+
+    return {
+      success: true,
+      output: {
+        pull_number: pr.number,
+        state: pr.state,
+        draft: pr.draft ?? false,
+        head_sha: pr.head.sha,
+        base_ref: pr.base.ref,
+        base_sha: pr.base.sha,
+        mergeable_state: pr.mergeable_state ?? null,
+        reviews,
+        checks: { counts, runs },
+        commit_status: {
+          state: combined.state,
+          contexts: (combined.statuses ?? []).map((status) => ({
+            context: status.context,
+            state: status.state,
+          })),
+        },
+      },
+    };
+  }
+
+  private async getBranchHead(
+    repo: RepoRef,
+    token: string,
+    input: Record<string, unknown>
+  ): Promise<ActionResult> {
+    let branch = asString(input.branch);
+    if (!branch) {
+      const repository = await this.readJson<{ default_branch?: string }>(githubRepoApiUrl(repo), token);
+      branch = asString(repository.default_branch);
+      if (!branch) return { success: false, error: 'GitHub repository has no default branch.' };
+    }
+
+    const head = await this.readJson<GitHubBranch>(
+      githubRepoApiUrl(repo, `/branches/${encodeGitHubPathSegment(branch, 'branch')}`),
+      token
+    );
+
+    return {
+      success: true,
+      output: {
+        branch: head.name,
+        sha: head.commit.sha,
+        committed_at: head.commit.commit?.committer?.date ?? head.commit.commit?.author?.date ?? null,
+      },
+    };
+  }
+
+  /**
+   * GET for the read actions. Uses `http.raw` so a 403/404 arrives as a
+   * Response whose status and rate-limit headers type the failure; a 429
+   * (transient) is retried by the client and surfaces as an HttpStatusError.
+   */
+  private async readJson<T>(url: string, token: string): Promise<T> {
+    let response: Response;
+    try {
+      response = await this.http.raw(url, {
+        method: 'GET',
+        headers: {
+          Accept: 'application/vnd.github+json',
+          'X-GitHub-Api-Version': '2022-11-28',
+          Authorization: `Bearer ${token}`,
+        },
+      });
+    } catch (error) {
+      if (error instanceof HttpStatusError && error.status === 429) {
+        throw new GitHubReadError('rate_limited', 429, 'GitHub API rate limit hit; retries exhausted.');
+      }
+      throw error;
+    }
+    if (response.ok) return (await response.json()) as T;
+
+    const failure = classifyGitHubReadFailure(response.status, response.headers);
+    const path = new URL(url).pathname;
+    if (failure === 'rate_limited') {
+      throw new GitHubReadError(failure, response.status, rateLimitResetDetail(response.headers));
+    }
+    if (failure === 'not_found') {
+      throw new GitHubReadError(failure, response.status, `${path} does not exist or is not visible to this connection.`);
+    }
+    if (failure === 'forbidden') {
+      throw new GitHubReadError(failure, response.status, `this connection is not permitted to read ${path}.`);
+    }
+    throw new Error(`GitHub API GET ${path} failed (HTTP ${response.status}).`);
   }
 
   private async requestGraphQL<T>(params: {
