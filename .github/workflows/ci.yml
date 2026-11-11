@@ -609,6 +609,25 @@ jobs:
         with:
           node-version: "26"
 
+      - name: Install window manager for Chrome lifecycle tests
+        if: steps.submodule.outputs.stubbed != 'true' && needs.paths.outputs.chromeExt == 'true'
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          # Ubuntu-domain DNS failures on hosted runners exhausted the job timeout.
+          # Prefer an independent Ubuntu mirror; retain archive/security fallbacks
+          # and APT's existing Ubuntu signing-key verification.
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            sudo tee /etc/apt/apt-mirrors.txt > /dev/null <<'MIRRORS'
+          https://mirrors.edge.kernel.org/ubuntu/ priority:1
+          https://archive.ubuntu.com/ubuntu/ priority:2
+          https://security.ubuntu.com/ubuntu/ priority:3
+          MIRRORS
+          fi
+          apt_options=(-o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15)
+          sudo apt-get "${apt_options[@]}" update
+          sudo apt-get "${apt_options[@]}" install -y --no-install-recommends xvfb openbox xauth
+
       - name: Compute cache keys
         id: cache-keys
         shell: bash
@@ -671,21 +690,6 @@ jobs:
         # job into its 25-minute timeout.
         if: steps.submodule.outputs.stubbed != 'true' && needs.paths.outputs.chromeExt == 'true'
         run: node node_modules/playwright-vanilla/cli.js install chromium
-
-      - name: Install window manager for Chrome lifecycle tests
-        if: steps.submodule.outputs.stubbed != 'true' && needs.paths.outputs.chromeExt == 'true'
-        timeout-minutes: 5
-        shell: bash
-        run: |
-          # The hosted runner prioritizes Azure in this list. Its DNS failures
-          # consumed the entire job timeout before apt reached Ubuntu's official
-          # archive/security fallbacks. Keep those fallbacks and bound acquisition.
-          if [ -f /etc/apt/apt-mirrors.txt ]; then
-            sudo sed -i '\|azure\.archive\.ubuntu\.com|d' /etc/apt/apt-mirrors.txt
-          fi
-          apt_options=(-o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15)
-          sudo apt-get "${apt_options[@]}" update -qq
-          sudo apt-get "${apt_options[@]}" install -y --no-install-recommends xvfb openbox xauth
 
       - name: Chrome extension smoke (real Chromium, --load-extension)
         # Loads apps/chrome into headed Chromium against a loopback gateway
