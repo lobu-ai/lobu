@@ -376,7 +376,7 @@ function buildReturnPreview(
 
 type TrustedErrorClassification = {
 	code: ToolErrorCode;
-	retryable: boolean;
+	retryable?: boolean;
 };
 
 function classifyToolUserError(error: ToolUserError): ToolErrorCode {
@@ -448,12 +448,23 @@ function trustedRuntimeClassification(
 
 /**
  * Classify an error the script surfaced: its uncaught throw, or a host error it
- * let propagate. Typed host errors keep their trusted classification; anything
+ * let propagate. Host errors keep their trusted classification; anything
  * else is a ScriptError, whatever its message says.
+ *
+ * `fromGuestRunner` marks an error the guest runner caught from the script's
+ * default export. Every host failure that crosses into the isolate carries a
+ * host token, so such an error without one is positively the script's own
+ * exception: a VALIDATION failure of the supplied program. It carries no
+ * `retryable` verdict: a script also throws to ask for a later attempt (data
+ * not there yet, a response it could not confirm), so task retry policy keeps
+ * treating its throw as it always has. Errors that reach
+ * the host's own catch (setup, protocol, a module's top-level throw) are not
+ * identified that way and stay unclassified.
  */
 function classifyRuntimeError(
 	error: unknown,
-	trust?: HostErrorTrust,
+	trust: HostErrorTrust | undefined,
+	fromGuestRunner: boolean,
 ): NonNullable<RunScriptResult["error"]> {
 	const record =
 		error !== null && typeof error === "object"
@@ -466,6 +477,12 @@ function classifyRuntimeError(
 		MAX_SCRIPT_ERROR_MESSAGE_BYTES,
 	);
 	const classification = trustedRuntimeClassification(record, trust);
+	// An untyped host failure has no retryability verdict. Its diagnostic name
+	// stays available to guest catch blocks, but cannot claim a terminal runtime
+	// or typed SDK failure at the result boundary.
+	if (classification && classification.retryable === undefined) {
+		return { name: "ScriptError", message, ...classification };
+	}
 	// Expected user-input errors (bad SDK args, business-rule failures) must NOT
 	// leak a server-bundle stack to the client — the message already carries the
 	// actionable "Invalid arguments for client.x.y: …" guidance, and the full
@@ -507,10 +524,9 @@ function classifyRuntimeError(
 	if (isExpectedUserError) {
 		return { name: "ValidationError", message, ...classification };
 	}
-	// A trusted classification is bound only to an error the host threw (a
-	// ToolUserError subclass with its own name, or a ToolError), so it is a
-	// typed tool failure, never an isolate runtime failure: its code is the
-	// classification ("Memory" in copy must not read as OutOfMemory).
+	// A trusted classification belongs to a host failure, never an isolate
+	// runtime failure: its code is authoritative ("Memory" in copy must not
+	// read as OutOfMemory).
 	if (classification) {
 		return {
 			name: classification.code === "VALIDATION" ? "ValidationError" : rawName,
@@ -531,6 +547,7 @@ function classifyRuntimeError(
 	return {
 		name: "ScriptError",
 		message,
+		...(fromGuestRunner ? { code: "VALIDATION" as const } : {}),
 		...(record.stack != null
 			? {
 					stack: boundScriptErrorText(
@@ -1039,11 +1056,14 @@ export async function runScript(
 		string,
 		TrustedErrorClassification
 	>();
-	const trustErrorClassification = (code: ToolErrorCode): string => {
+	const trustErrorClassification = (
+		code: ToolErrorCode,
+		includeRetryability = true,
+	): string => {
 		const token = randomUUID();
 		trustedErrorClassifications.set(token, {
 			code,
-			retryable: isRetryable(code),
+			...(includeRetryability ? { retryable: isRetryable(code) } : {}),
 		});
 		return token;
 	};
@@ -1293,13 +1313,17 @@ export async function runScript(
 			return guardMessage(json) ? json : terminalEnvelope();
 		}
 		// Classification belongs at the script-result boundary: guest catch blocks
-		// still need the host error's name and diagnostic message.
+		// still need the host error's name and diagnostic message. An untyped
+		// host failure is still the host's, so it carries a trusted INTERNAL
+		// token: only an error without any host token is the script's own.
+		// It has no typed retryability verdict; keep the existing task retries.
 		const failure = {
 			name: boundScriptErrorText(error instanceof Error ? error.name : "Error", MAX_SCRIPT_ERROR_NAME_BYTES),
 			message: boundScriptErrorText(
 				error instanceof Error ? error.message : errorFieldText(error, "Script execution failed"),
 				MAX_SCRIPT_ERROR_MESSAGE_BYTES,
 			),
+			classificationToken: trustErrorClassification("INTERNAL", false),
 		};
 		const json = JSON.stringify({ __lobu_sdk_dispatch: 1, ok: false, error: failure });
 		return guardMessage(json) ? json : terminalEnvelope();
@@ -1719,7 +1743,7 @@ export async function runScript(
 				return {
 					success: false,
 					logs,
-					error: classifyRuntimeError(scriptError ?? {}, hostErrorTrust),
+					error: classifyRuntimeError(scriptError ?? {}, hostErrorTrust, true),
 					durationMs: Date.now() - started,
 					sdkCalls,
 					skippedCalls,
@@ -1798,7 +1822,7 @@ export async function runScript(
 			error:
 				e instanceof SandboxRuntimeFailure
 					? runtimeFailureError(e)
-					: classifyRuntimeError(e, hostErrorTrust),
+					: classifyRuntimeError(e, hostErrorTrust, false),
 			durationMs: Date.now() - started,
 			sdkCalls,
 			skippedCalls,

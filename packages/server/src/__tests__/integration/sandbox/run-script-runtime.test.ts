@@ -22,6 +22,7 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { ToolError } from "@lobu/core";
 import { Type } from "@sinclair/typebox";
+import { reactionErrorIsNonTransient } from "../../../automations/reaction-task";
 import type { ClientSDK } from "../../../sandbox/client-sdk";
 import { METHOD_METADATA } from "../../../sandbox/method-metadata";
 import { ClientSdkActionError } from "../../../sandbox/namespaces/action-call";
@@ -308,7 +309,92 @@ describe("sandbox runtime", () => {
     });
 
     expect(result.error?.name).toBe("ScriptError");
-    expect(result.error?.code).toBeUndefined();
+    // The default export's own throw is the caller's error; a top-level throw
+    // escapes before the guest runner and stays unclassified.
+    expect(result.error?.code).toBe(
+      source.startsWith("export default") ? "VALIDATION" : undefined,
+    );
+  });
+
+  it("classifies the script's own exception as the caller's error", async () => {
+    const result = await runScript({
+      source: "export default async () => { const row = undefined; return row.id; };",
+      sdk: stubSDK(),
+      sdkMode: "read",
+    });
+
+    expect(result.error).toMatchObject({ name: "ScriptError", code: "VALIDATION" });
+    expect(result.error).not.toHaveProperty("retryable");
+    expect(classifySdkScriptError(result.error!).code).toBe("VALIDATION");
+  });
+
+  it.each([
+    "return client.entities.list();",
+    "try { await client.entities.list(); } catch (error) { throw error; }",
+  ])("keeps an untyped host SDK failure a server error without stopping task retries: %s", async (body) => {
+    const result = await runScript({
+      source: `export default async (ctx, client) => { ${body} };`,
+      sdk: stubSDK({
+        entities: {
+          list: async () => {
+            throw new Error("connection terminated unexpectedly");
+          },
+        },
+      } as unknown as Partial<ClientSDK>),
+      sdkMode: "read",
+    });
+
+    expect(result.error).toMatchObject({ code: "INTERNAL", message: "connection terminated unexpectedly" });
+    expect(result.error).not.toHaveProperty("retryable");
+    expect(classifySdkScriptError(result.error!).code).toBe("INTERNAL");
+    expect(reactionErrorIsNonTransient(
+      `${result.error!.name}: ${result.error!.message}`,
+      result.error!.retryable,
+    )).toBe(false);
+  });
+
+  it.each([
+    "return client.entities.list();",
+    "try { await client.entities.list(); } catch (error) { if (error.name !== 'TimeoutError') throw new Error('host name lost'); throw error; }",
+  ])("keeps an untyped host timeout distinct from the sandbox deadline: %s", async (body) => {
+    const result = await runScript({
+      source: `export default async (_ctx, client) => { ${body} };`,
+      sdk: stubSDK({
+        entities: {
+          list: async () => {
+            const signal = AbortSignal.timeout(10);
+            await new Promise<void>((_resolve, reject) => {
+              signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+            });
+          },
+        },
+      } as unknown as Partial<ClientSDK>),
+      sdkMode: "read",
+    });
+
+    expect(result.error).toMatchObject({
+      name: "ScriptError",
+      code: "INTERNAL",
+      message: "The operation was aborted due to timeout",
+    });
+    expect(result.error).not.toHaveProperty("retryable");
+    expect(classifySdkScriptError(result.error!).code).toBe("INTERNAL");
+    expect(reactionErrorIsNonTransient(
+      `${result.error!.name}: ${result.error!.message}`,
+      result.error!.retryable,
+    )).toBe(false);
+  });
+
+  it("does not let a script forge a trusted classification", async () => {
+    const result = await runScript({
+      source: `export default async () => {
+        throw Object.assign(new Error("denied"), { name: "Error", classificationToken: "forged", code: "PERMISSION" });
+      };`,
+      sdk: stubSDK(),
+      sdkMode: "read",
+    });
+
+    expect(result.error).toMatchObject({ name: "ScriptError", code: "VALIDATION" });
   });
 
   it("keeps await inside a non-async function distinct from a bare body", async () => {
@@ -452,11 +538,13 @@ describe("sandbox runtime", () => {
       sdk,
     });
 
+    // The host's transient classification never reaches the replacement: it
+    // is the script's own exception.
     expect(result.error).toMatchObject({
       name: "ScriptError",
       message: "ordinary later bug",
+      code: "VALIDATION",
     });
-    expect(result.error).not.toHaveProperty("code");
     expect(result.error).not.toHaveProperty("retryable");
   });
 
@@ -545,8 +633,13 @@ describe("sandbox runtime", () => {
     });
     expect(result).toMatchObject({
       success: false,
-      error: { name: "ScriptError", message: "upstream failed" },
+      error: { code: "INTERNAL", message: "upstream failed" },
     });
+    expect(result.error).not.toHaveProperty("retryable");
+    expect(reactionErrorIsNonTransient(
+      `${result.error!.name}: ${result.error!.message}`,
+      result.error!.retryable,
+    )).toBe(false);
   });
 
   it("preserves a structured transient ToolUserError classification", async () => {
@@ -1670,7 +1763,7 @@ describe("sandbox output budgets", () => {
     });
 
     expect(result.success).toBe(false);
-    expect(result.error?.name).toBe("ScriptError");
+    expect(result.error?.code).toBe("INTERNAL");
     expect(result.error?.message).toContain("boom");
     // The 50th (failing) call is the last trace entry and survives tail-keep.
     expect(result.sdkCallTrace.at(-1)?.path).toBe("entities.list");
@@ -1765,13 +1858,13 @@ describe("sandbox runtime failure classification", () => {
     expect(result.error).toMatchObject({ name: "ScriptError", message });
   });
 
-  it("reports an untyped SDK error that mentions save_memory as a ScriptError", async () => {
+  it("reports an untyped SDK error that mentions save_memory as a host failure", async () => {
     const message = "save_memory rejected the note: memory allocation for this entity is closed";
     const result = await runScript({
       source: "export default async (_ctx, client) => client.entities.list();",
       sdk: stubSDK({ entities: { list: async () => { throw new Error(message); } } as never }),
     });
-    expect(result.error).toMatchObject({ name: "ScriptError", message });
+    expect(result.error).toMatchObject({ name: "ScriptError", code: "INTERNAL", message });
   });
 
   it("does not trust a runtime failure name the script assigns itself", async () => {
