@@ -98,10 +98,66 @@ export function readOnlyQuery(raw: string): string {
   return sql;
 }
 
+const MAX_EXCEPTION_CHARS = 1000;
+const MAX_EXCEPTION_BYTES = 8 * 1024;
+
+/** At most `maxBytes` of the body as text; the rest is never read. */
+async function readPrefix(
+  response: Response,
+  maxBytes: number
+): Promise<string> {
+  const reader = response.body?.getReader();
+  if (!reader) return "";
+  const bytes = new Uint8Array(maxBytes);
+  let size = 0;
+  try {
+    while (size < maxBytes) {
+      const next = await reader.read();
+      if (next.done) break;
+      const take = Math.min(next.value.byteLength, maxBytes - size);
+      bytes.set(next.value.subarray(0, take), size);
+      size += take;
+    }
+  } finally {
+    await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
+  }
+  return new TextDecoder().decode(bytes.subarray(0, size));
+}
+
+/** The exception ClickHouse itself raised for the query, or null. Only a
+ * response carrying ClickHouse's exception-code header is ClickHouse's own
+ * text; anything else (a proxy, an auth failure) may echo request headers, so
+ * it is never relayed. The text has ClickHouse's fixed shape
+ * `Code: N. DB::Exception: <message>. (NAME) (version …)`. */
+async function clickHouseException(response: Response): Promise<string | null> {
+  if (
+    !response.headers.has("X-ClickHouse-Exception-Code") ||
+    response.status === 401 ||
+    response.status === 403
+  )
+    return null;
+  let text = (await readPrefix(response, MAX_EXCEPTION_BYTES)).trim();
+  const prefix = "DB::Exception: ";
+  const start = text.indexOf(prefix);
+  if (start !== -1) text = text.slice(start + prefix.length);
+  const version = text.lastIndexOf(" (version ");
+  if (version !== -1) text = text.slice(0, version);
+  return text.slice(0, MAX_EXCEPTION_CHARS) || null;
+}
+
 async function jsonResponse(response: Response): Promise<unknown> {
   if (!response.ok) {
-    await response.body?.cancel();
-    throw new Error(`Analytics query failed (HTTP ${response.status})`);
+    const exception = await clickHouseException(response);
+    if (!response.bodyUsed) await response.body?.cancel();
+    throw Object.assign(
+      new Error(
+        exception
+          ? `Analytics query failed: ${exception}`
+          : `Analytics query failed (HTTP ${response.status})`
+      ),
+      { status: response.status }
+    );
   }
   const reader = response.body?.getReader();
   if (!reader) throw new Error("Analytics returned no response body");

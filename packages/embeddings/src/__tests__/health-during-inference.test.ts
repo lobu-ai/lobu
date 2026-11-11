@@ -87,3 +87,57 @@ describe("/health stays responsive while local inference runs", () => {
 		}, 30000);
 	}
 });
+
+// Prod regression: search_memory's one-text query embedding waited 30-50 s
+// behind connector backfills (up to 256 texts each) on the one inference
+// thread. A short request must run between a long request's batches instead
+// of after the whole of it.
+describe("a short request does not wait for a long one to finish", () => {
+	test("query embedding during a bulk request", async () => {
+		const port = 18963;
+		const child = spawn("bun", [SERVER], {
+			cwd: PKG_ROOT,
+			stdio: ["ignore", "pipe", "pipe"],
+			env: {
+				...process.env,
+				PORT: String(port),
+				EMBEDDINGS_BACKEND: "local",
+				EMBEDDINGS_SERVICE_TOKEN: "",
+				EMBEDDINGS_BATCH_SIZE: "1",
+				LOBU_RUNTIME_EMBEDDINGS_ENTRY: BLOCKING_COMPONENT,
+			},
+		});
+		const base = `http://127.0.0.1:${port}`;
+		const post = async (texts: string[]) => {
+			const res = await fetch(`${base}/api/embeddings`, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ texts }),
+			});
+			return { status: res.status, body: (await res.json()) as { embeddings: number[][] }, at: Date.now() };
+		};
+		try {
+			await waitForHealth(base);
+			const started = Date.now();
+			// Eight one-text batches of 500 ms each: about 4 s of inference.
+			const bulk = post(Array.from({ length: 8 }, () => "block:500"));
+			await new Promise((r) => setTimeout(r, 300));
+			const query = await post(["what did we decide about pricing?"]);
+			const done = await bulk;
+
+			expect(query.status).toBe(200);
+			expect(query.body.embeddings).toHaveLength(1);
+			expect(done.status).toBe(200);
+			expect(done.body.embeddings).toHaveLength(8);
+			// The query waited for at most the bulk batch already running.
+			expect(query.at - started).toBeLessThan(1500);
+			expect(query.at).toBeLessThan(done.at);
+		} finally {
+			child.kill("SIGKILL");
+			await new Promise<void>((resolve) => {
+				if (child.exitCode !== null || child.signalCode !== null) resolve();
+				else child.on("exit", () => resolve());
+			});
+		}
+	}, 30000);
+});
