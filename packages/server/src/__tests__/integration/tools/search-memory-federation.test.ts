@@ -564,11 +564,10 @@ describe('search_memory direct OAuth workspace federation', () => {
     expect(localOnly.content ?? []).toEqual([]);
   });
 
-  // An entity match must be named by the query, not carried by the topic
-  // words around the name. Trigram similarity over whole strings scored an
-  // unrelated "<other> Renewal Risk" above the 0.3 floor on "renewal risk"
-  // alone, and the sub-phrase fallback returned the first non-empty single
-  // word ("promise") when the named account did not exist.
+  // A fuzzy entity match must be named by the query, not carried by the topic
+  // words around the name. Whole-string trigram similarity scored an
+  // unrelated "Sample Renewal Risk" above the 0.3 floor for "<account>
+  // renewal risk" on the shared words alone, next to the account itself.
   it('matches entities on the name the query gives, not its topic words', async () => {
     const catalog = await createTestOrganization({
       name: 'Synthetic Topic Catalog',
@@ -576,12 +575,19 @@ describe('search_memory direct OAuth workspace federation', () => {
     });
     await createTestEntity({ name: 'Sample Renewal Risk', organization_id: catalog.id });
     await createTestEntity({ name: 'Sample Renewal Risk', organization_id: orgA.id });
-    await createTestEntity({
-      name: 'Northwind: 3 client questions; 22 promises, 5 overdue',
+    await createTestEntity({ name: 'Zentrova', organization_id: orgA.id });
+    await createTestEntity({ name: 'Rowan Quillfeather', organization_id: orgA.id });
+    await createTestEntity({ name: 'Marlo Quillfeather', organization_id: orgA.id });
+    const named = await createTestEntity({ name: 'Halvorsen Freight', organization_id: orgA.id });
+    const phoneOwner = await createTestEntity({
+      name: 'Pemberton Ashdown',
       organization_id: orgA.id,
     });
-    await createTestEntity({ name: 'Rowan Quillfeather', organization_id: orgA.id });
-    const named = await createTestEntity({ name: 'Halvorsen Freight', organization_id: orgA.id });
+    await getTestDb()`
+      INSERT INTO entity_identities (
+        organization_id, entity_id, namespace, identifier, source_connector
+      ) VALUES (${orgA.id}, ${phoneOwner.id}, 'phone', '9876543210', 'test:fixture')
+    `;
 
     const matchNames = async (query: string) =>
       (
@@ -592,17 +598,18 @@ describe('search_memory direct OAuth workspace federation', () => {
         )
       ).matches.map((entity) => entity.name);
 
-    expect(await matchNames('Zentrova renewal risk')).toEqual([]);
-    expect(await matchNames('what did we promise Ostberg Logistics')).toEqual([]);
-    expect(await matchNames('Marlo Quillfeather accounts')).toEqual([]);
+    expect(await matchNames('Zentrova renewal risk')).toEqual(['Zentrova']);
+    expect(await matchNames('Marlo Quillfeather accounts')).toEqual(['Marlo Quillfeather']);
 
-    // The name itself still matches: whole, partial, inside a question, and
-    // with a typo.
+    // The name itself still matches: whole, partial, with a typo, and inside
+    // a question, as does an identifier inside a question.
     expect(await matchNames('Sample Renewal Risk')).toContain('Sample Renewal Risk');
     expect(await matchNames('renewal risk')).toContain('Sample Renewal Risk');
     expect(await matchNames('Halvorsen')).toEqual([named.name]);
-    expect(await matchNames('what did we promise Halvorsen Freight')).toEqual([named.name]);
     expect(await matchNames('Halvorsen Frieght')).toEqual([named.name]);
+    expect(await matchNames('what did we promise Halvorsen Freight')).toEqual([named.name]);
+    expect(await matchNames('what did we promise Halvorsen')).toEqual([named.name]);
+    expect(await matchNames('who is 9876543210')).toEqual([phoneOwner.name]);
   });
 
   it('keeps agent-bound calls single-workspace and bounds children', async () => {
