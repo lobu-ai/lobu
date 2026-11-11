@@ -34,6 +34,13 @@ export interface AuditEventType {
  */
 export const AUDIT_EVENT_TYPE_METADATA_KEY = '_lobu_event_type';
 
+/**
+ * Prefix of the reserved `_lobu_idempotency_key` every audit writer stamps
+ * (`audit:<originId>`). Recall reads it to tell the platform change log from
+ * other rows that carry the event-type stamp.
+ */
+export const AUDIT_IDEMPOTENCY_KEY_PREFIX = 'audit:';
+
 /** `{subject:'device', op:'created'}` -> `'device.created'`. */
 export function formatAuditEventType(type: AuditEventType): string {
   return `${type.subject}.${type.op}`;

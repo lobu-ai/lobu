@@ -26,10 +26,12 @@ import type { Env } from '../../../index';
 import { search } from '../../../tools/search';
 import type { ToolContext } from '../../../tools/registry';
 import { searchContentByText } from '../../../utils/content-search';
+import { insertConnectionlessAuditEvent } from '../../../utils/insert-event';
 import { initWorkspaceProvider } from '../../../workspace';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import {
   addUserToOrganization,
+  createTestEntity,
   createTestEvent,
   createTestOrganization,
   createTestUser,
@@ -241,47 +243,37 @@ describe('searchContentByText > exclude_internal_ops', () => {
 });
 
 /**
- * Interactive cards — operation runs, approvals, entity-change cards — are run
- * bookkeeping, not memory, but their titles name the entities they touched. On
- * a workspace whose records are source-backed, `search_memory "Genentech
- * renewal risk"` returned only "Entity updated: band, health, top_risks…"
- * cards. Recall hides every row whose `interaction_type` is not 'none'; an
- * explicit semantic_type filter still returns them, as it does for audit rows.
+ * Run bookkeeping is not memory, but its titles name the entities it touched.
+ * On a workspace whose records are source-backed, `search_memory "Genentech
+ * renewal risk"` returned only "Entity updated: band, health, top_risks…" rows
+ * and `"Shanti Oppenheimer accounts"` only "Review task field: Draft" rows.
+ * Those were the platform change log (`insertConnectionlessAuditEvent`) and
+ * approval notifications — neither an interactive card. Fixtures below use
+ * the shapes those writers persist; the change-log row goes through the real
+ * writer. Recall hides them, plus interactive cards and Automation receipts;
+ * an explicit semantic_type filter still returns them, as it does for audit.
  */
-describe('search_memory > interactive cards', () => {
-  const CARD_QUERY = 'Genentech renewal risk';
+describe('search_memory > run bookkeeping', () => {
+  const QUERY = 'Genentech renewal risk';
   const env = {} as Env;
   let orgId: string;
   let ctx: ToolContext;
   let noteId: number;
-  let changeCardId: number;
-  let approvalCardId: number;
+  let unstampedChangeId: number;
+  let forgedStampId: number;
+  let changeLogId: number;
+  let notificationId: number;
+  let receiptId: number;
+  let cardId: number;
 
-  async function createCard(input: {
-    title: string;
-    semantic_type: string;
-    interaction_status: string;
-  }): Promise<number> {
-    const event = await createTestEvent({
-      organization_id: orgId,
-      title: input.title,
-      content: '',
-      semantic_type: input.semantic_type,
-    });
-    // Only system writers set interaction_type; the fixture has no knob for it.
-    await getTestDb()`
-      UPDATE events
-      SET interaction_type = 'approval', interaction_status = ${input.interaction_status}
-      WHERE id = ${event.id}
-    `;
-    return Number(event.id);
-  }
+  const event = async (input: Parameters<typeof createTestEvent>[0]): Promise<number> =>
+    Number((await createTestEvent({ organization_id: orgId, content: '', ...input })).id);
 
   beforeAll(async () => {
     await initWorkspaceProvider();
-    const org = await createTestOrganization({ name: 'Interaction Card Org' });
+    const org = await createTestOrganization({ name: 'Recall Bookkeeping Org' });
     orgId = org.id;
-    const user = await createTestUser({ email: 'interaction-cards@example.com' });
+    const user = await createTestUser({ email: 'recall-bookkeeping@example.com' });
     await addUserToOrganization(user.id, org.id, 'owner');
     ctx = {
       organizationId: org.id,
@@ -289,62 +281,103 @@ describe('search_memory > interactive cards', () => {
       tokenType: 'session',
       memberRole: 'owner',
     } as ToolContext;
+    const account = await createTestEntity({ name: 'Genentech', organization_id: orgId });
 
-    noteId = Number(
+    // Memory recall must keep returning.
+    noteId = await event({
+      title: 'Genentech renewal risk review',
+      content: 'Genentech renewal risk is high: the champion left in Q3.',
+      semantic_type: 'note',
+    });
+    // A `change` row the change-log writer did not write (no event-type stamp).
+    unstampedChangeId = await event({
+      title: 'Genentech renewal risk change noted',
+      content: 'Renewal moved to the risk list after the QBR.',
+      semantic_type: 'change',
+    });
+    // Automation output keeps caller `_lobu_` keys except the idempotency key,
+    // which it overwrites with its own; the stamp alone must not hide it.
+    forgedStampId = await event({
+      title: 'Genentech renewal risk signal',
+      content: 'Usage dropped 40% month over month.',
+      semantic_type: 'note',
+      metadata: {
+        _lobu_event_type: 'entity.updated',
+        _lobu_idempotency_key: 'automation:1:output:signals:key:genentech',
+      },
+    });
+
+    // Platform change log, through the writer that produces it in prod.
+    changeLogId = Number(
       (
-        await createTestEvent({
-          organization_id: orgId,
-          title: 'Genentech renewal risk review',
-          content: 'Genentech renewal risk is high: the champion left in Q3.',
-          semantic_type: 'note',
-        })
+        await insertConnectionlessAuditEvent(
+          {
+            entityIds: [account.id],
+            organizationId: orgId,
+            originId: `change_${crypto.randomUUID()}`,
+            title: 'Entity updated: Genentech renewal risk band, health, top_risks',
+            content: '',
+            semanticType: 'change',
+            metadata: { changes: { band: { from: 'green', to: 'red' } } },
+          },
+          { subject: 'entity', op: 'updated' }
+        )
       ).id
     );
-    changeCardId = await createCard({
-      title: 'Entity updated: Genentech renewal risk band, health, top_risks',
-      semantic_type: 'change',
-      interaction_status: 'completed',
-    });
-    approvalCardId = await createCard({
+    // Approval notification: interaction_type stays 'none'.
+    notificationId = await event({
       title: 'Review Genentech renewal risk field: Draft',
       semantic_type: 'entity_change_approval',
-      interaction_status: 'pending',
+      metadata: { notification_type: 'action_approval_needed' },
     });
+    // Automation receipt.
+    receiptId = await event({
+      title: 'Automation applied 0 new + 1 updated',
+      content: 'This run updated Genentech renewal risk.',
+      semantic_type: 'change_set',
+      metadata: { kind: 'automation_change_set' },
+    });
+    // Interactive card. Only system writers set interaction_type, so the
+    // fixture has no knob for it.
+    cardId = await event({
+      title: 'Run: refresh Genentech renewal risk',
+      semantic_type: 'change',
+    });
+    await getTestDb()`
+      UPDATE events SET interaction_type = 'approval', interaction_status = 'pending'
+      WHERE id = ${cardId}
+    `;
   });
 
-  it('search_memory leaves interactive cards out of recall', async () => {
-    const result = await search(
-      { query: CARD_QUERY, include_content: true, content_limit: 10 },
-      env,
-      ctx
-    );
+  const kept = () => [noteId, unstampedChangeId, forgedStampId];
+  const hidden = () => [changeLogId, notificationId, receiptId, cardId];
+
+  it('search_memory leaves run bookkeeping out of recall', async () => {
+    const result = await search({ query: QUERY, include_content: true, content_limit: 20 }, env, ctx);
     const ids = (result.content ?? []).map((item) => item.id);
-    expect(ids).toContain(noteId);
-    expect(ids).not.toContain(changeCardId);
-    expect(ids).not.toContain(approvalCardId);
+    expect(ids).toEqual(expect.arrayContaining(kept()));
+    for (const id of hidden()) expect(ids).not.toContain(id);
   });
 
-  it('hides them on the list path too', async () => {
+  it('hides it on the list path too', async () => {
     const result = await searchContentByText(null, {
       organization_id: orgId,
-      exclude_interaction_cards: true,
+      exclude_recall_bookkeeping: true,
     });
     const ids = result.content.map((r) => Number(r.id));
-    expect(ids).toContain(noteId);
-    expect(ids).not.toContain(changeCardId);
-    expect(ids).not.toContain(approvalCardId);
+    expect(ids).toEqual(expect.arrayContaining(kept()));
+    for (const id of hidden()) expect(ids).not.toContain(id);
   });
 
-  it('an explicit semantic_type filter still returns them on both paths', async () => {
-    for (const query of [CARD_QUERY, null]) {
+  it('an explicit semantic_type filter still returns it on both paths', async () => {
+    for (const query of [QUERY, null]) {
       const result = await searchContentByText(query, {
         organization_id: orgId,
-        exclude_interaction_cards: true,
-        semantic_type: ['change', 'entity_change_approval'],
+        exclude_recall_bookkeeping: true,
+        semantic_type: ['change', 'entity_change_approval', 'change_set'],
       });
       const ids = result.content.map((r) => Number(r.id));
-      expect(ids).toContain(changeCardId);
-      expect(ids).toContain(approvalCardId);
+      expect(ids).toEqual(expect.arrayContaining(hidden()));
       expect(ids).not.toContain(noteId);
     }
   });

@@ -609,6 +609,26 @@ jobs:
         with:
           node-version: "26"
 
+      - name: Install window manager for Chrome lifecycle tests
+        if: steps.submodule.outputs.stubbed != 'true' && needs.paths.outputs.chromeExt == 'true'
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          # Ubuntu-domain DNS failures on hosted runners exhausted the job timeout.
+          # Prefer an independent Ubuntu mirror; retain archive/security fallbacks
+          # and APT's existing Ubuntu signing-key verification. APT's mirror
+          # method only parses tags after a TAB, so emit the separator explicitly.
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            printf '%s\tpriority:%s\n' \
+              https://mirrors.edge.kernel.org/ubuntu/ 1 \
+              https://archive.ubuntu.com/ubuntu/ 2 \
+              https://security.ubuntu.com/ubuntu/ 3 \
+              | sudo tee /etc/apt/apt-mirrors.txt > /dev/null
+          fi
+          apt_options=(-o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15)
+          sudo apt-get "${apt_options[@]}" update
+          sudo apt-get "${apt_options[@]}" install -y --no-install-recommends xvfb openbox xauth
+
       - name: Compute cache keys
         id: cache-keys
         shell: bash
@@ -671,13 +691,6 @@ jobs:
         # job into its 25-minute timeout.
         if: steps.submodule.outputs.stubbed != 'true' && needs.paths.outputs.chromeExt == 'true'
         run: node node_modules/playwright-vanilla/cli.js install chromium
-
-      - name: Install window manager for Chrome lifecycle tests
-        # --no-install-recommends: openbox otherwise recommends ghostscript,
-        # poppler-data and several font packages (~20MB) the smoke never uses,
-        # all fetched from the same slow mirror.
-        if: steps.submodule.outputs.stubbed != 'true' && needs.paths.outputs.chromeExt == 'true'
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends xvfb openbox xauth
 
       - name: Chrome extension smoke (real Chromium, --load-extension)
         # Loads apps/chrome into headed Chromium against a loopback gateway
