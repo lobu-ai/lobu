@@ -507,3 +507,11 @@ instead of silently repeating or skipping events. Relationships come from the
 event kind's `relationships`: the other attribution's identity is the peer's
 key and its `titlePath` the peer's name. A path not in `matchPaths` is
 rejected, never filtered after the read.
+
+When a source deliberately withholds a record (for example, a person whose
+communications are private), throw `SourceWithheldError` from
+`@lobu/connector-sdk` with the human reason as its message. Lobu keys on the
+error's own `code === 'withheld'`, so a connector on an older SDK can throw
+`Object.assign(new Error(reason), { code: 'withheld' })`. The record shows the
+reason as private instead of a failed source, and the read is never retried.
+Any other rejection is a read failure: it is reported and retried on request.

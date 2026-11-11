@@ -4,6 +4,7 @@
 
 import { type Static, Type } from '@sinclair/typebox';
 import type { ContentItem } from '@lobu/connector-sdk';
+import { SourceReadFailureSchema } from '@lobu/core/contracts/tools/manage-entity';
 
 // ============================================
 // Type Definitions
@@ -126,10 +127,12 @@ export const GetContentResultSchema = Type.Object({
   ),
   /** Record reads only: continues this record's live read. */
   record_cursor: Type.Optional(Type.String()),
-  /** Record reads only: feeds that failed. Their events are missing, not absent. */
-  record_failures: Type.Optional(
-    Type.Array(Type.Object({ feed_id: Type.Integer(), error: Type.String() }))
-  ),
+  /**
+   * Record reads only: feeds that returned no rows. Without a code, the feed
+   * failed and its events are missing, not absent; record_cursor retains it
+   * for an explicit retry. Code 'withheld': the source keeps them private.
+   */
+  record_failures: Type.Optional(Type.Array(SourceReadFailureSchema)),
   /**
    * Automation-bound entities as structured rows (id, name, type, metadata,
    * field_controls). field_controls marks human-owned field values the agent

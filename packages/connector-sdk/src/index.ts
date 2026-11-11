@@ -334,6 +334,7 @@ export type {
   SocketOptions,
 } from './net.js';
 export { assertFeedReadWindow, validateFeedReadWindow } from './feed-read-window.js';
+export { SourceWithheldError } from './source-withheld-error.js';
 
 // The worker's output redaction catalog, shared so a connector that returns
 // third-party text (logs, messages) can scrub it with the same patterns.

@@ -282,12 +282,19 @@ export interface SyncExecutor {
 
 export type ConnectorExitReason = 'ok' | 'error_message' | 'timeout' | 'oom' | 'crash';
 
+/**
+ * A structured outcome the connector itself declared on the error it threw.
+ * `withheld`: the source deliberately withholds the record (SourceWithheldError).
+ */
+export type ConnectorErrorCode = 'withheld';
+
 export interface ConnectorExecutionDiagnostics {
   exitCode: number | null;
   exitSignal: string | null;
   outputTail: string;
   exitReason: ConnectorExitReason;
   httpStatus?: number;
+  code?: ConnectorErrorCode;
 }
 
 export class ConnectorExecutionError extends Error implements ConnectorExecutionDiagnostics {
@@ -296,6 +303,7 @@ export class ConnectorExecutionError extends Error implements ConnectorExecution
   outputTail: string;
   exitReason: ConnectorExitReason;
   httpStatus?: number;
+  code?: ConnectorErrorCode;
 
   constructor(
     message: string,
@@ -309,6 +317,7 @@ export class ConnectorExecutionError extends Error implements ConnectorExecution
     this.outputTail = diagnostics.outputTail;
     this.exitReason = diagnostics.exitReason;
     this.httpStatus = diagnostics.httpStatus;
+    if (diagnostics.code) this.code = diagnostics.code;
   }
 }
 

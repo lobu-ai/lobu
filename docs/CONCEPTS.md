@@ -97,6 +97,14 @@ require unlinking live source edges first. Their conflict returns up to 25 block
 relationship IDs for owner/admin cleanup, even when the source is unavailable.
 No source row is copied or refreshed.
 
+A source-backed record's live Activity (`read_knowledge` with `record`) and
+`record_links` report each feed that returned no rows in `record_failures`
+(`{ feed_id, error, code? }`). Without a `code` the read failed: those items are
+missing, the cursor retains the feed, and a client retries it only on request.
+`code: "withheld"` means the connector deliberately withholds the record, and
+`error` is its reason. Those items are private, not missing: the feed is not
+retained for retry and pagination continues past it.
+
 ## Entity identity groups
 
 A workspace can declare a relationship type with `purpose: "identity"` for its

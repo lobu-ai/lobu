@@ -56,7 +56,7 @@ import type {
   SyncExecutor,
 } from './interface.js';
 import { redactOutput } from '@lobu/connector-sdk/redact';
-import { RingBuffer, ConnectorExecutionError } from './interface.js';
+import { RingBuffer, ConnectorExecutionError, type ConnectorErrorCode } from './interface.js';
 
 export type IsolateLogLevel = 'log' | 'info' | 'debug' | 'warn' | 'error';
 
@@ -150,6 +150,7 @@ interface GuestErrorDescription {
   message?: string;
   stack?: string;
   httpStatus?: number;
+  code?: ConnectorErrorCode;
 }
 
 type GuestOutcome =
@@ -1292,6 +1293,7 @@ export class IsolateExecutor implements SyncExecutor {
         typeof description.httpStatus === 'number' && description.httpStatus >= 100 && description.httpStatus < 600
           ? description.httpStatus
           : undefined,
+      code: description.code === 'withheld' ? description.code : undefined,
     });
     error.name = description.name ? redactOutput(String(description.name)) : 'ConnectorExecutionError';
     if (description.stack) error.stack = redactOutput(String(description.stack));

@@ -27,7 +27,7 @@ const CONNECTOR_KEY = 'record_source_test';
 // pages with a keyset cursor (the last returned origin_id), as a warehouse
 // connector would in SQL.
 const SOURCE = `
-  import { defineConnector } from '@lobu/connector-sdk';
+  import { defineConnector, SourceWithheldError } from '@lobu/connector-sdk';
   const ROWS = [
     { origin_id: 'w3', origin_type: 'role', occurred_at: '2026-02-03T00:00:00.000Z',
       metadata: { company_id: ' padded-company ', person_id: ' padded-person ' } },
@@ -67,6 +67,11 @@ const SOURCE = `
           role: { attributions: [person, company], relationships: [{ type: 'works_at', from: 'person', to: 'company' }] },
         },
         read: async (ctx) => {
+          const key = ctx.match?.values[0];
+          if (key === 'private-sdk') throw new SourceWithheldError('Communication details are private');
+          // A connector on an older SDK opts in by the structural code alone.
+          if (key === 'private-plain') throw Object.assign(new Error('Communication details are private'), { code: 'withheld' });
+          if (key === 'unavailable') throw new Error('Source unavailable');
           const matched = ROWS.filter((row) => !ctx.match || ctx.match.values.includes(String(at(row, ctx.match.path))));
           const remaining = matched.filter((row) => !ctx.cursor || row.origin_id < ctx.cursor);
           const page = remaining.slice(0, ctx.limit ?? 50);
@@ -158,6 +163,33 @@ describe('source-backed record reads', () => {
     expect(second.content.map((item) => (item as { origin_id: string }).origin_id)).toEqual(['e1']);
     expect(second.page.has_more).toBe(false);
     expect(await counts()).toEqual(before);
+  }, 60_000);
+
+  it.each(['private-sdk', 'private-plain'])('reports a withheld source as private and never retains it for retry (%s)', async (key) => {
+    const record = { type: 'company', key };
+    const activity = await getContent({ record, limit: 2 }, {} as Env, owner);
+    expect(activity.content).toEqual([]);
+    expect(activity.record_failures).toEqual([
+      { feed_id: feedId, error: 'Communication details are private', code: 'withheld' },
+    ]);
+    expect(activity.page.has_more).toBe(false);
+    expect(activity.record_cursor).toBeUndefined();
+    const links = await manageEntity({ action: 'list_links', record, cursor: null }, {} as Env, owner);
+    expect(links).toMatchObject({
+      record_links: [],
+      record_failures: [{ feed_id: feedId, error: 'Communication details are private', code: 'withheld' }],
+      next_cursor: null,
+    });
+  }, 60_000);
+
+  it('retains a failed source for an explicit retry', async () => {
+    const record = { type: 'company', key: 'unavailable' };
+    const activity = await getContent({ record, limit: 2 }, {} as Env, owner);
+    expect(activity.record_failures).toEqual([{ feed_id: feedId, error: expect.stringContaining('Source unavailable') }]);
+    expect(activity.record_cursor).toEqual(expect.any(String));
+    const links = await manageEntity({ action: 'list_links', record, cursor: null }, {} as Env, owner);
+    expect(links).toMatchObject({ record_failures: [{ feed_id: feedId }], next_cursor: expect.any(String) });
+    expect((links as { record_failures: object[] }).record_failures[0]).not.toHaveProperty('code');
   }, 60_000);
 
   it('preserves the rich source envelope through the compiled connector without storing an event', async () => {

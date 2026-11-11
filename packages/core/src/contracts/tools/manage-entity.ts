@@ -375,7 +375,7 @@ export const ListLinksAction = Type.Object({
   cursor: Type.Optional(
     Type.Union([Type.String({ minLength: 1, maxLength: 65536 }), Type.Null()], {
       description:
-        "[list_links, source records] Omit or pass null for the first bounded page, then pass next_cursor until it is null. Stop automatic pagination on record_failures; the cursor retains failed sources for an explicit retry. Pages may be short or empty while next_cursor exists. Merge repeated links across pages by (relationship_type, direction, entity_type, key), keeping the newest occurred_at. Numeric entity_id calls retain limit/offset pagination; source pages bound limit to 100. Authored relationships are permission checked at both endpoints. counts_by_type describes the visible page (counts_scope: page), not a global total. Source pages reject source, confidence_min and include_deleted filters, which cannot be applied to live links. Source reads share a 20 second page deadline. Unavailable endpoints are withheld with key-free relationship_failures; readable links remain available. Updating an edge still requires readable endpoints. Unlink by relationship_id remains available during outages.",
+        "[list_links, source records] Omit or pass null for the first bounded page, then pass next_cursor until it is null. Stop automatic pagination on record_failures without a code; the cursor retains those failed sources for an explicit retry. A failure with code 'withheld' is a source deliberately keeping the record private (error is its reason): its links are not missing, it is never retried, and pagination continues. Pages may be short or empty while next_cursor exists. Merge repeated links across pages by (relationship_type, direction, entity_type, key), keeping the newest occurred_at. Numeric entity_id calls retain limit/offset pagination; source pages bound limit to 100. Authored relationships are permission checked at both endpoints. counts_by_type describes the visible page (counts_scope: page), not a global total. Source pages reject source, confidence_min and include_deleted filters, which cannot be applied to live links. Source reads share a 20 second page deadline. Unavailable endpoints are withheld with key-free relationship_failures; readable links remain available. Updating an edge still requires readable endpoints. Unlink by relationship_id remains available during outages.",
     })
   ),
   automation_source: Type.Optional(AutomationSource),
@@ -557,6 +557,19 @@ export type RelationshipReadFailure = Static<
   typeof RelationshipReadFailureSchema
 >;
 
+/** A feed of a source-backed record's live read that returned no rows. */
+export const SourceReadFailureSchema = Type.Object({
+  feed_id: Type.Integer(),
+  error: Type.String(),
+  code: Type.Optional(
+    Type.Literal("withheld", {
+      description:
+        "The source deliberately withholds this record and `error` is its reason. Its items are private, not missing; it is never retained for retry.",
+    })
+  ),
+});
+export type SourceReadFailure = Static<typeof SourceReadFailureSchema>;
+
 export const ManageEntityResultSchema = Type.Union([
   Type.Object({
     action: Type.Literal("create"),
@@ -710,9 +723,7 @@ export const ManageEntityResultSchema = Type.Union([
         source_url: Type.Union([Type.String(), Type.Null()]),
       })
     ),
-    record_failures: Type.Array(
-      Type.Object({ feed_id: Type.Integer(), error: Type.String() })
-    ),
+    record_failures: Type.Array(SourceReadFailureSchema),
     next_cursor: Type.Optional(Type.Union([Type.String(), Type.Null()])),
   }),
   Type.Object({

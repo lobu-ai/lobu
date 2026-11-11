@@ -339,6 +339,9 @@ var exports = module.exports;
     if (error instanceof Error) {
       var desc = { name: String(error.name || 'Error'), message: String(error.message), stack: typeof error.stack === 'string' ? error.stack : undefined };
       if (typeof error.status === 'number' && error.status >= 100 && error.status < 600) desc.httpStatus = error.status;
+      // A deliberately withheld source read (SourceWithheldError, or any error
+      // whose own code is 'withheld'). Only this code crosses the boundary.
+      if (Object.prototype.hasOwnProperty.call(error, 'code') && error.code === 'withheld') desc.code = 'withheld';
       return desc;
     }
     var text;
