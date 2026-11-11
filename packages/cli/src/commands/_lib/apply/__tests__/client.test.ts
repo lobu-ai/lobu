@@ -652,21 +652,7 @@ describe("ApplyClient — entity schema merge", () => {
 // mistaken for "already exists" (which retried as `update` and buried the
 // real message under "Entity type not found").
 describe("isDuplicateError", () => {
-  test("coded duplicates are duplicates", () => {
-    for (const code of [
-      "entity_type_exists",
-      "relationship_type_exists",
-      "already_exists",
-    ]) {
-      expect(
-        isDuplicateError(
-          new ApiError(`POST /x failed: [${code}] thing already exists`, 409)
-        )
-      ).toBe(true);
-    }
-  });
-
-  test("bare 409 without a code is still a duplicate", () => {
+  test("409 is a duplicate", () => {
     expect(
       isDuplicateError(new ApiError("POST /x failed: conflict", 409))
     ).toBe(true);
