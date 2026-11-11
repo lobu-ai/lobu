@@ -9,8 +9,8 @@ import { getTool } from "../../tools/registry";
 import { ToolUserError } from "../../utils/errors";
 
 const baseAuth: AuthContext = {
-  organizationId: "8dc12bdd-5d8c-4768-a2e9-a18005cc5ebd",
-  tokenOrganizationId: "8dc12bdd-5d8c-4768-a2e9-a18005cc5ebd",
+  organizationId: "org_tool_validation_test",
+  tokenOrganizationId: "org_tool_validation_test",
   userId: "user_test",
   memberRole: "owner",
   agentId: null,
@@ -91,6 +91,35 @@ describe("executeTool input-schema validation", () => {
 });
 
 describe("executeTool error spans", () => {
+  it.each([
+    [{ error: "synthetic failure", error_code: "INTERNAL" }, "system"],
+    [{ error: "synthetic failure", code: "INTERNAL" }, "system"],
+    [{ error: "synthetic failure", error_code: "UPSTREAM_5XX" }, "dependency"],
+    [{ error: "synthetic failure", error_code: "VALIDATION" }, "user"],
+    [{ error: "synthetic failure", error_code: "UNKNOWN_FAILURE" }, "system"],
+    [{ error: "synthetic failure" }, "user"],
+  ])("preserves structured error classification for %j", async (result, kind) => {
+    const exporter = new InMemorySpanExporter();
+    await shutdownTracing();
+    initTracing({
+      serviceName: "tool-result-span-test",
+      spanProcessors: [new SimpleSpanProcessor(exporter)],
+    });
+    const tool = getTool("query_sql");
+    if (!tool) throw new Error("query_sql is not registered");
+    const handler = spyOn(tool, "handler").mockResolvedValue(result);
+    try {
+      expect(await executeTool("query_sql", { sql: "SELECT 1" }, {} as never, baseAuth)).toEqual(result);
+      const [span] = exporter.getFinishedSpans().filter((s) => s.name === "tool query_sql");
+      expect(span?.status.code).toBe(SpanStatusCode.ERROR);
+      expect(span?.attributes["error.kind"]).toBe(kind);
+      expect(span?.attributes["error.code"]).toBe("code" in result ? result.code : "error_code" in result ? result.error_code : undefined);
+    } finally {
+      handler.mockRestore();
+      await shutdownTracing();
+    }
+  });
+
   it("records a rejected call as one grouped user error per defect", async () => {
     const exporter = new InMemorySpanExporter();
     await shutdownTracing();
