@@ -65,6 +65,13 @@ const METADATA_BY_LOWER_PATH = new Map(
 );
 
 export const SdkSearchSchema = Type.Object({
+	title: Type.Optional(
+		Type.String({
+			description:
+				'Human-friendly heading for this search (e.g. "Feed methods"). The activity feed shows it on this call.',
+			maxLength: 200,
+		})
+	),
 	query: Type.String({
 		description: `SDK method or runtime-helper discovery query. Use a namespace (e.g. 'automations'), one or more dotted paths separated by whitespace (e.g. 'automations.create ctx.sleep'), an optional client. prefix, or free text. Pass mode='read' for query_sdk-safe methods only; omit mode for your full run_sdk tier. Namespaces: ${NAMESPACES.join(", ")}.`,
 		minLength: 1,
@@ -98,6 +105,9 @@ export const SdkSearchSchema = Type.Object({
 type SdkSearchArgs = Static<typeof SdkSearchSchema>;
 
 export const SdkSearchResultSchema = Type.Object({
+	title: Type.Optional(
+		Type.String({ description: "The caller's heading, echoed." })
+	),
 	query: Type.String({ description: "The query that was searched." }),
 	match_count: Type.Integer({
 		description: "Number of matches returned.",
@@ -295,10 +305,14 @@ export function isSdkOnlyDiscoveryQuery(query: string): boolean {
 export const sdkSearch = withValidatedArgs(
 	"search_sdk",
 	SdkSearchSchema,
-	sdkSearchImpl
+	async (args: SdkSearchArgs, env: Env, ctx: AccountToolContext) => {
+		const title = args.title?.trim() || undefined;
+		const result = await searchSdkCatalog(args, env, ctx);
+		return title ? { title, ...result } : result;
+	}
 );
 
-async function sdkSearchImpl(
+async function searchSdkCatalog(
 	args: SdkSearchArgs,
 	env: Env,
 	ctx: AccountToolContext
