@@ -2223,7 +2223,21 @@ async function queryEntities(
         ? Math.max(0, Math.min(1, rawMinSimilarity))
         : 0.3;
       const minSimParamIdx = addParam(nameSimFloor);
-      const textCondition = `(LOWER(e.name) LIKE '%' || LOWER($${queryParamIdx}) || '%' OR LOWER(e.name) = LOWER($${queryParamIdx}) OR similarity(LOWER(e.name), LOWER($${queryParamIdx})) > $${minSimParamIdx}::numeric OR e.content_tsv @@ websearch_to_tsquery('english', $${queryParamIdx}) OR ${identifierExactSql})`;
+      // A trigram hit must also be NAMED by the query: every word of the
+      // entity name appears in the query, or every word of the query appears
+      // in the name. Whole-string similarity cannot tell a typo from a word
+      // substitution, so shared topic words alone carried an unrelated name
+      // over the floor ("<account> renewal risk" vs "Sample Renewal Risk"
+      // scores 0.4). Requiring one side's words to be covered by the other
+      // rejects a match where BOTH sides carry a word the other lacks. Words
+      // come from Postgres's own `simple` text-search parser (no stemming, no
+      // stopwords); each is matched with pg_trgm word_similarity at the same
+      // floor, so typos still match. Exact, substring, full-text and
+      // identifier arms are explicit evidence and stay ungated.
+      const wordsCoveredSql = (words: string, text: string) =>
+        `NOT EXISTS (SELECT 1 FROM unnest(tsvector_to_array(to_tsvector('simple', ${words}))) AS term(word) WHERE word_similarity(term.word, LOWER(${text})) < $${minSimParamIdx}::numeric)`;
+      const namedByQuerySql = `(${wordsCoveredSql('e.name', `$${queryParamIdx}`)} OR ${wordsCoveredSql(`$${queryParamIdx}`, 'e.name')})`;
+      const textCondition = `(LOWER(e.name) LIKE '%' || LOWER($${queryParamIdx}) || '%' OR LOWER(e.name) = LOWER($${queryParamIdx}) OR (similarity(LOWER(e.name), LOWER($${queryParamIdx})) > $${minSimParamIdx}::numeric AND ${namedByQuerySql}) OR e.content_tsv @@ websearch_to_tsquery('english', $${queryParamIdx}) OR ${identifierExactSql})`;
       conditions.push(
         hasEmbedding ? `(${textCondition} OR e.embedding IS NOT NULL)` : textCondition
       );
