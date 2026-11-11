@@ -185,7 +185,37 @@ describe("ClickHouse query HTTP boundary", () => {
         queryAnalytics(context("SELECT 1"), (_url, init) =>
           fetch(server.url, init)
         )
-      ).rejects.toThrow("HTTP 403");
+      ).rejects.toMatchObject({
+        status: 403,
+        message: "Analytics query failed (HTTP 403)",
+      });
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  it("relays a ClickHouse query exception with its status", async () => {
+    const server = Bun.serve({
+      port: 0,
+      fetch: () =>
+        new Response(
+          "Code: 47. DB::Exception: Unknown expression identifier `no_such_column` in scope SELECT no_such_column FROM telemetry. (UNKNOWN_IDENTIFIER) (version 25.3.1.1 (official build))\n",
+          { status: 404, headers: { "X-ClickHouse-Exception-Code": "47" } }
+        ),
+    });
+    try {
+      const error = await queryAnalytics(
+        context("SELECT no_such_column FROM telemetry"),
+        (_url, init) => fetch(server.url, init)
+      ).then(
+        () => null,
+        (thrown: unknown) => thrown
+      );
+      expect(error).toMatchObject({
+        status: 404,
+        message:
+          "Analytics query failed: Unknown expression identifier `no_such_column` in scope SELECT no_such_column FROM telemetry. (UNKNOWN_IDENTIFIER)",
+      });
     } finally {
       server.stop(true);
     }
