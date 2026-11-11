@@ -270,6 +270,16 @@ export type SearchMemoryResponses = {
         workspace_slug: string;
       }>;
       more_source_feeds: boolean;
+      source_entity_types?: Array<{
+        workspace_slug: string;
+        entity_type: string;
+        display_name: string;
+        status: "not_queried";
+        method: "entities.list";
+        name_search: "literal_ci_substring" | "unsupported" | "unknown";
+      }>;
+      source_entity_discovery?: "complete" | "partial" | "unavailable";
+      more_source_entity_types?: boolean;
       workspaces?: Array<{
         workspace_slug: string;
         status: "complete" | "partial" | "unavailable";
@@ -287,6 +297,16 @@ export type SearchMemoryResponses = {
           workspace_slug: string;
         }>;
         more_source_feeds: boolean;
+        source_entity_types?: Array<{
+          workspace_slug: string;
+          entity_type: string;
+          display_name: string;
+          status: "not_queried";
+          method: "entities.list";
+          name_search: "literal_ci_substring" | "unsupported" | "unknown";
+        }>;
+        source_entity_discovery?: "complete" | "partial" | "unavailable";
+        more_source_entity_types?: boolean;
       }>;
     };
     discovery_status?: "not_found" | "complete" | "discovering";

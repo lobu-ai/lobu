@@ -455,6 +455,7 @@ function formatSearchCoverage(coverage: any): string {
   if (coverage.reason === 'query_embedding_unavailable') {
     md += 'Ranking was text-only: the query embedding was unavailable, so semantic matches may be missing.\n\n';
   }
+  md += formatSourceEntityTypes(coverage);
   if (coverage.source_feed_discovery === 'unavailable') {
     md += 'Source feed discovery was unavailable for this search.\n\n';
     return md;
@@ -472,6 +473,23 @@ function formatSearchCoverage(coverage: any): string {
     md += `- Feed ${feed.feed_id}: \`${label}\`${displayName}, ${feed.connector_key}${workspace}, not queried\n`;
   }
   if (coverage.more_source_feeds) md += '- More accessible source feeds are available\n';
+  return `${md}\n`;
+}
+
+function formatSourceEntityTypes(coverage: any): string {
+  if (coverage.source_entity_discovery === undefined) return '';
+  if (coverage.source_entity_discovery === 'unavailable') {
+    return 'Live source-backed entity type discovery was unavailable for this search.\n\n';
+  }
+  const types = Array.isArray(coverage.source_entity_types) ? coverage.source_entity_types : [];
+  if (types.length === 0) return 'No accessible live source-backed entity types were found.\n\n';
+  let md =
+    "Live source-backed records were not searched. Look a named record up with `client.entities.list({ entity_type, search: <the record's name>, limit: 5 })` in its workspace.\n\n";
+  md += 'Live entity types (not queried):\n\n';
+  for (const type of types) {
+    md += `- \`${type.entity_type}\` (${type.display_name}), workspace \`${type.workspace_slug}\`, name search: ${type.name_search}\n`;
+  }
+  if (coverage.more_source_entity_types) md += '- More live entity types are available\n';
   return `${md}\n`;
 }
 

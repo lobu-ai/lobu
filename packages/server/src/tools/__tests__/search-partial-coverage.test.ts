@@ -11,7 +11,7 @@ import { search } from '../search';
 describe('search_memory partial coverage guidance', () => {
   afterEach(() => vi.restoreAllMocks());
 
-  it.each(['events', 'source_feeds', 'both', 'none'] as const)(
+  it.each(['events', 'source_feeds', 'source_entity_types', 'both', 'none'] as const)(
     'keeps an empty response consistent when the unavailable source is %s',
     async (unavailable) => {
       const failure = Object.assign(new Error('synthetic database failure'), { code: '57014' });
@@ -22,6 +22,10 @@ describe('search_memory partial coverage guidance', () => {
             return [];
           }
           if (query.includes('WITH candidates AS MATERIALIZED')) return [];
+          if (query.startsWith('SELECT et.slug, et.name')) {
+            if (unavailable === 'source_entity_types') throw failure;
+            return [];
+          }
           throw new Error(`Unexpected query: ${query}`);
         }),
       } as unknown as db.DbClient;
@@ -52,6 +56,10 @@ describe('search_memory partial coverage guidance', () => {
       );
 
       expect(result.coverage?.status).toBe(unavailable === 'none' ? 'complete' : 'partial');
+      // A failed live entity-type lookup never reads as "no live types".
+      expect(result.coverage?.source_entity_discovery).toBe(
+        unavailable === 'source_entity_types' ? 'unavailable' : 'complete'
+      );
       expect(result.discovery_status).toBe(unavailable === 'none' ? 'not_found' : 'discovering');
       if (unavailable === 'none') {
         expect(result.suggestion).toContain('entities.create');
