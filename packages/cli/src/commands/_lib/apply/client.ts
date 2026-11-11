@@ -208,6 +208,9 @@ export interface RemoteAutomation {
   // NB: reaction_script is not included in Automation lists — push always (idempotent).
 }
 
+/** Whether apply creates a schema type or updates the existing one. */
+type SchemaWriteVerb = "create" | "update";
+
 interface UpsertEntityTypeResult {
   created?: boolean;
   updated?: boolean;
@@ -872,18 +875,30 @@ export class ApplyClient {
 
   /**
    * The `manage_entity_schema` admin tool exposes separate `create` / `update`
-   * actions and surfaces duplicates as a coded 409 (`[entity_type_exists]` /
-   * `[relationship_type_exists]`). Probe with `create`; on that explicit
-   * duplicate signal retry with `update`. Any other error (e.g. a 422
-   * `[invalid_schema]` validation failure) propagates verbatim — retrying it
-   * as an update used to mask the real message behind "Entity type not
-   * found" (issue #1177).
+   * actions. The plan already knows which one a row needs, so an `update` row
+   * goes straight to `update`: probing with `create` first made every apply of
+   * an existing type a failed call on the server. A `create` row that meets a
+   * duplicate (`[entity_type_exists]` / `[relationship_type_exists]`, 409) was
+   * created concurrently after the plan was read, so it is reconciled as an
+   * update. Any other error (e.g. a 422 `[invalid_schema]` validation failure)
+   * propagates verbatim — retrying it as an update used to mask the real
+   * message behind "Entity type not found" (issue #1177).
    */
   private async upsertSchemaResource(
+    verb: SchemaWriteVerb,
     schemaType: "entity_type" | "relationship_type",
     payload: Omit<ManageEntitySchemaArgs, "action" | "schema_type">
   ): Promise<UpsertEntityTypeResult> {
     const url = `/api/${this.orgSlug}/manage_entity_schema`;
+    const update = async () => {
+      await this.request("POST", url, {
+        schema_type: schemaType,
+        action: "update",
+        ...payload,
+      });
+      return { updated: true };
+    };
+    if (verb === "update") return update();
     try {
       await this.request("POST", url, {
         schema_type: schemaType,
@@ -892,19 +907,14 @@ export class ApplyClient {
       });
       return { created: true };
     } catch (err) {
-      if (err instanceof ApiError && isDuplicateError(err)) {
-        await this.request("POST", url, {
-          schema_type: schemaType,
-          action: "update",
-          ...payload,
-        });
-        return { updated: true };
-      }
+      if (err instanceof ApiError && isDuplicateError(err)) return update();
       throw err;
     }
   }
 
   async upsertEntityType(
+    /** The plan's verb for this row: whether the type exists remotely. */
+    verb: SchemaWriteVerb,
     // `metadata` is authoring-only — never sent to the server (see
     // DesiredEntityType); extra properties on the passed value are ignored.
     entity: Omit<DesiredEntityType, "metadata">,
@@ -1063,7 +1073,7 @@ export class ApplyClient {
     if (rulesSource !== undefined || clearFacets?.has("rules")) {
       payload.rules_source = rulesSource?.sourceCode ?? null;
     }
-    return this.upsertSchemaResource("entity_type", payload);
+    return this.upsertSchemaResource(verb, "entity_type", payload);
   }
 
   async listRelationshipTypes(): Promise<RemoteRelationshipType[]> {
@@ -1110,11 +1120,14 @@ export class ApplyClient {
   }
 
   async upsertRelationshipType(
+    /** The plan's verb for this row: whether the type exists remotely. */
+    verb: SchemaWriteVerb,
     // `metadata` is authoring-only — never sent (see DesiredRelationshipType).
     rel: Omit<DesiredRelationshipType, "metadata">
   ): Promise<UpsertEntityTypeResult> {
     const { rules, ...payload } = rel;
     const result = await this.upsertSchemaResource(
+      verb,
       "relationship_type",
       payload
     );
