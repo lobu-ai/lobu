@@ -43,6 +43,7 @@ import {
   buildTsqueryString,
 } from './fts';
 import {
+  INTERACTION_CARD_EXCLUSION_SQL,
   INTERNAL_OPS_EXCLUSION_SQL,
   buildFinalSelect,
   deduplicateWithClassifications,
@@ -308,6 +309,13 @@ export async function searchContentBySingleQuery(
             // for 'audit' rows is reading the ops trail on purpose.
             options.exclude_internal_ops && !options.semantic_type
               ? `AND ${INTERNAL_OPS_EXCLUSION_SQL}`
+              : ''
+          }
+          ${
+            // Interactive cards (runs, approvals, entity-change cards): same
+            // discovery-filter semantics, $9 lifts it.
+            options.exclude_interaction_cards && !options.semantic_type
+              ? `AND ${INTERACTION_CARD_EXCLUSION_SQL}`
               : ''
           }
           ${classificationClause.sql}
