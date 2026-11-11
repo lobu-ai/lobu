@@ -43,7 +43,7 @@ import {
   buildTsqueryString,
 } from './fts';
 import {
-  INTERACTION_CARD_EXCLUSION_SQL,
+  RECALL_BOOKKEEPING_EXCLUSION_SQL,
   INTERNAL_OPS_EXCLUSION_SQL,
   buildFinalSelect,
   deduplicateWithClassifications,
@@ -312,10 +312,10 @@ export async function searchContentBySingleQuery(
               : ''
           }
           ${
-            // Interactive cards (runs, approvals, entity-change cards): same
-            // discovery-filter semantics, $9 lifts it.
-            options.exclude_interaction_cards && !options.semantic_type
-              ? `AND ${INTERACTION_CARD_EXCLUSION_SQL}`
+            // Run bookkeeping (cards, notifications, receipts, change log):
+            // same discovery-filter semantics, $9 lifts it.
+            options.exclude_recall_bookkeeping && !options.semantic_type
+              ? `AND ${RECALL_BOOKKEEPING_EXCLUSION_SQL}`
               : ''
           }
           ${classificationClause.sql}

@@ -757,7 +757,7 @@ function buildEmptySearchSuggestion(
   // The literals come from the shared constant so the SQL and the filter we
   // hand the agent cannot drift from the value audit events are written with.
   lines.push(
-    `2. **Check activity, audit and run records:** tool invocations and other operational events are written to \`events\` with no body text and no embedding, so semantic recall cannot rank them and this tool leaves them out. It also leaves out interactive cards (operation runs, approvals, entity-change cards). Read them explicitly with \`query_sql\` (e.g. \`SELECT id, title, semantic_type, occurred_at FROM events WHERE semantic_type = '${AUDIT_SEMANTIC_TYPE}' ORDER BY occurred_at DESC LIMIT 50\`, or \`WHERE interaction_type <> 'none'\` for cards) or with \`client.knowledge.read({ semantic_type: '${AUDIT_SEMANTIC_TYPE}' })\` through \`query_sdk\`.`
+    `2. **Check activity, audit and run records:** tool invocations and other operational events are written to \`events\` with no body text and no embedding, so semantic recall cannot rank them and this tool leaves them out. It also leaves out run bookkeeping: interactive cards (operation runs, approvals), notifications, Automation receipts, and the platform change log ("Entity updated: …" and other \`change\` rows the platform records). Read them explicitly with \`query_sql\` (e.g. \`SELECT id, title, semantic_type, occurred_at FROM events WHERE semantic_type = '${AUDIT_SEMANTIC_TYPE}' ORDER BY occurred_at DESC LIMIT 50\`; use \`semantic_type = 'change'\` for the change log or \`interaction_type <> 'none'\` for cards) or with \`client.knowledge.read({ semantic_type: '${AUDIT_SEMANTIC_TYPE}' })\` through \`query_sdk\`.`
   );
 
   const filterRelaxations: string[] = [];
@@ -1068,10 +1068,11 @@ async function fetchContentSnippets(
       // noise here (duplicate Automation titles, "query_sql completed" for an
       // unrelated query). Explicit reads via get_content / query_sql unaffected.
       exclude_internal_ops: true,
-      // Interactive cards (operation runs, approvals, entity-change cards) are
-      // run bookkeeping whose titles name the entities they touched, so they
-      // outrank the memory a query is after. Keyed on `interaction_type`.
-      exclude_interaction_cards: true,
+      // Run bookkeeping — interactive cards, notifications, Automation receipts
+      // and the platform change log ("Entity updated: band, health, …") —
+      // names the entities it touched, so it outranks the memory a query is
+      // after. Matched on platform-written markers, never on titles.
+      exclude_recall_bookkeeping: true,
       // Enforce the org/private-connection visibility boundary on the recall
       // path, exactly as get_content does. Without visibility_scope the
       // connection-visibility clause is skipped entirely, so search_memory
