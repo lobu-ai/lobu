@@ -4,8 +4,9 @@
  * attribution's own identity path. Nothing is written.
  */
 
+import { createServer, type Server } from 'node:http';
 import { COMPILE_CONFIG_HASH } from '@lobu/connector-worker/compile';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Env } from '../../../index';
 import { buildEntitiesNamespace } from '../../../sandbox/namespaces/entities';
 import { manageEntity } from '../../../tools/admin/manage_entity';
@@ -83,12 +84,58 @@ const SOURCE = `
   });
 `;
 
+// One feed whose rows live behind an upstream HTTP source. Many feed rows of it
+// on one connection reproduce a record page's per-connection read fan-out; the
+// upstream reports failures by numeric status (HttpStatusError), the shape a
+// gateway-backed connector preserves.
+const BURST_KEY = 'record_burst_test';
+const BURST_SOURCE = `
+  import { defineConnector, HttpStatusError } from '@lobu/connector-sdk';
+  const account = { name: 'account', role: 'about', target: { entityType: 'account',
+    identities: [{ namespace: 'test_account', eventPath: 'metadata.account_id' }] } };
+  const contact = { name: 'contact', role: 'about', target: { entityType: 'person', titlePath: 'metadata.contact_name',
+    identities: [{ namespace: 'test_person', eventPath: 'metadata.contact_id' }] } };
+  export default defineConnector({
+    key: '${BURST_KEY}',
+    name: 'Record burst',
+    version: '1.0.0',
+    authSchema: { methods: [{ type: 'none' }] },
+    feeds: {
+      burst: {
+        key: 'burst',
+        name: 'Burst',
+        matchPaths: ['metadata.account_id'],
+        eventKinds: {
+          touch: { attributions: [account, contact], relationships: [{ type: 'touches', from: 'account', to: 'contact' }] },
+        },
+        read: async (ctx) => {
+          const key = ctx.match?.values[0];
+          const url = ctx.config.base_url + '/read?feed=' + ctx.feedId + '&key=' + encodeURIComponent(key);
+          const res = await fetch(url);
+          if (!res.ok) {
+            const error = new HttpStatusError({ prefix: 'Burst source', method: 'GET', url, status: res.status, statusText: res.statusText, bodyText: '' });
+            // A deliberate refusal stays withheld even when it carries a transient status.
+            throw key === 'private' ? Object.assign(error, { code: 'withheld' }) : error;
+          }
+          const rows = await res.json();
+          return { rows, rowCursors: rows.map((row) => row.origin_id) };
+        },
+      },
+    },
+  });
+`;
+
+/** More streams than a page may read at once against one connection. */
+const BURST_FEEDS = 12;
+const READS_PER_CONNECTION = 4;
+
 describe('source-backed record reads', () => {
   let orgId: string;
   let owner: ToolContext;
   let member: ToolContext;
   let privateConnectionId: number;
   let feedId: number;
+  let ownerUserId: string;
 
   beforeAll(async () => {
     await cleanupTestDatabase();
@@ -97,6 +144,7 @@ describe('source-backed record reads', () => {
     const user = await createTestUser({ email: 'source-record-reads@test.com' });
     await addUserToOrganization(user.id, orgId, 'owner');
     owner = ownerToolContext(orgId, user.id);
+    ownerUserId = user.id;
     const memberUser = await createTestUser({ email: 'source-record-member@test.com' });
     await addUserToOrganization(memberUser.id, orgId, 'member');
     member = { ...owner, userId: memberUser.id, memberRole: 'member' };
@@ -359,4 +407,156 @@ describe('source-backed record reads', () => {
     ).rejects.toThrow(/cannot be combined with query/);
     await expect(getContent({ entity_id: 0 }, {} as Env, owner)).rejects.toThrow();
   }, 60_000);
+
+  describe('bounded reads against one connection', () => {
+    // What the upstream observed per record key: concurrent requests and every
+    // request's feed, in arrival order.
+    const upstream = new Map<string, { inFlight: number; peak: number; feeds: number[] }>();
+    let server: Server;
+    let burstFeeds: number[];
+    let savedAllowHosts: string | undefined;
+    const observed = (key: string) => {
+      let entry = upstream.get(key);
+      if (!entry) upstream.set(key, (entry = { inFlight: 0, peak: 0, feeds: [] }));
+      return entry;
+    };
+    const attempts = (key: string, feed: number) => observed(key).feeds.filter((value) => value === feed).length;
+
+    beforeAll(async () => {
+      server = createServer((req, res) => {
+        const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+        const key = url.searchParams.get('key') ?? '';
+        const feed = Number(url.searchParams.get('feed'));
+        const entry = observed(key);
+        entry.inFlight += 1;
+        entry.peak = Math.max(entry.peak, entry.inFlight);
+        entry.feeds.push(feed);
+        const attempt = attempts(key, feed);
+        let open = true;
+        const finish = () => {
+          if (!open) return;
+          open = false;
+          entry.inFlight -= 1;
+        };
+        res.on('close', finish);
+        // Long enough for reads of one page to overlap; `slow` outlasts half the page deadline.
+        setTimeout(() => {
+          finish();
+          if (res.destroyed) return;
+          if (key === 'down' || key === 'private' || (key === 'flaky' && attempt === 1)) {
+            res.writeHead(503).end('unavailable');
+            return;
+          }
+          res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify([{
+            origin_id: `touch-${feed}`,
+            origin_type: 'touch',
+            occurred_at: new Date(Date.UTC(2026, 2, 1, 0, 0, feed % 60)).toISOString(),
+            metadata: { account_id: key, contact_id: `contact-${feed}`, contact_name: `Contact ${feed}` },
+          }]));
+        }, key === 'slow' ? 12_000 : 150);
+      });
+      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+      const { port } = server.address() as { port: number };
+      // A loopback upstream is reachable only through the operator's exact exemption.
+      savedAllowHosts = process.env.LOBU_HTTP_EGRESS_ALLOW_HOSTS;
+      process.env.LOBU_HTTP_EGRESS_ALLOW_HOSTS = '127.0.0.1';
+
+      const compiled = await compileConnectorSource(BURST_SOURCE);
+      const metadata = await extractConnectorMetadata(compiled.compiledCode);
+      const sql = getTestDb();
+      await sql`
+        INSERT INTO connector_definitions
+          (key, name, version, feeds_schema, auth_schema, organization_id, status, created_at, updated_at)
+        VALUES (${BURST_KEY}, 'Record burst', '1.0.0', ${sql.json(metadata.feeds as object)},
+          ${sql.json({ methods: [{ type: 'none' }] })}, ${orgId}, 'active', NOW(), NOW())
+      `;
+      await sql`
+        INSERT INTO connector_versions
+          (organization_id, connector_key, version, compiled_code, compiled_code_hash, compile_config_hash, source_code, created_at)
+        VALUES (${orgId}, ${BURST_KEY}, '1.0.0', ${compiled.compiledCode}, ${compiled.compiledCodeHash},
+          ${COMPILE_CONFIG_HASH}, ${BURST_SOURCE}, NOW())
+      `;
+      const [connection] = await sql`
+        INSERT INTO connections (organization_id, connector_key, slug, display_name, status, visibility, config, created_by, created_at, updated_at)
+        VALUES (${orgId}, ${BURST_KEY}, 'record-burst', 'Record burst', 'active', 'private',
+          ${sql.json({ base_url: `http://127.0.0.1:${port}` })}, ${ownerUserId}, NOW(), NOW())
+        RETURNING id
+      `;
+      burstFeeds = [];
+      for (let lane = 0; lane < BURST_FEEDS; lane += 1) {
+        const [feed] = await sql`
+          INSERT INTO feeds (organization_id, connection_id, feed_key, display_name, status, config, created_at, updated_at)
+          VALUES (${orgId}, ${connection.id}, 'burst', ${`Burst ${lane}`}, 'active', ${sql.json({})}, NOW(), NOW())
+          RETURNING id
+        `;
+        burstFeeds.push(Number(feed.id));
+      }
+      await sql`
+        INSERT INTO entity_types (organization_id, slug, name, backing_sql, created_at, updated_at)
+        VALUES (${orgId}, 'account', 'Account', ${"SELECT 'x' AS slug"}, NOW(), NOW())
+      `;
+    }, 120_000);
+
+    afterAll(async () => {
+      if (savedAllowHosts === undefined) delete process.env.LOBU_HTTP_EGRESS_ALLOW_HOSTS;
+      else process.env.LOBU_HTTP_EGRESS_ALLOW_HOSTS = savedAllowHosts;
+      server?.closeAllConnections();
+      await new Promise<void>((resolve) => (server ? server.close(() => resolve()) : resolve()));
+    });
+
+    const originIds = (content: unknown[]) =>
+      content.map((item) => (item as { origin_id: string }).origin_id).sort();
+    const everyTouch = () => burstFeeds.map((feed) => `touch-${feed}`).sort();
+
+    it('keeps at most the per-connection cap of record reads in flight', async () => {
+      const page = await getContent({ record: { type: 'account', key: 'steady' } }, {} as Env, owner);
+      expect(page.record_failures).toBeUndefined();
+      expect(originIds(page.content)).toEqual(everyTouch());
+      expect(observed('steady').feeds).toHaveLength(BURST_FEEDS);
+      expect(observed('steady').peak).toBeLessThanOrEqual(READS_PER_CONNECTION);
+    }, 60_000);
+
+    it('recovers a transient upstream 503 with one retry, on activity and relationships', async () => {
+      const page = await getContent({ record: { type: 'account', key: 'flaky' } }, {} as Env, owner);
+      expect(page.record_failures).toBeUndefined();
+      expect(page.record_cursor).toBeUndefined();
+      expect(originIds(page.content)).toEqual(everyTouch());
+      for (const feed of burstFeeds) expect(attempts('flaky', feed)).toBe(2);
+
+      upstream.delete('flaky');
+      const links = await manageEntity({ action: 'list_links', record: { type: 'account', key: 'flaky' }, cursor: null }, {} as Env, owner);
+      expect(links).toMatchObject({ record_failures: [], next_cursor: null });
+      expect((links as { record_links: Array<{ key: string }> }).record_links.map((link) => link.key).sort())
+        .toEqual(burstFeeds.map((feed) => `contact-${feed}`).sort());
+      expect(observed('flaky').peak).toBeLessThanOrEqual(READS_PER_CONNECTION);
+    }, 60_000);
+
+    it('reports a persistent 503 after one retry and keeps it for an explicit retry', async () => {
+      const page = await getContent({ record: { type: 'account', key: 'down' } }, {} as Env, owner);
+      expect(page.content).toEqual([]);
+      expect(page.record_failures?.map((failure) => failure.feed_id).sort()).toEqual([...burstFeeds].sort());
+      for (const failure of page.record_failures ?? []) expect(failure).not.toHaveProperty('code');
+      expect(page.record_cursor).toEqual(expect.any(String));
+      for (const feed of burstFeeds) expect(attempts('down', feed)).toBe(2);
+    }, 60_000);
+
+    it('never retries a withheld read, even one carrying a transient status', async () => {
+      const page = await getContent({ record: { type: 'account', key: 'private' } }, {} as Env, owner);
+      expect(page.record_failures).toHaveLength(BURST_FEEDS);
+      for (const failure of page.record_failures ?? []) expect(failure).toHaveProperty('code', 'withheld');
+      expect(page.record_cursor).toBeUndefined();
+      for (const feed of burstFeeds) expect(attempts('private', feed)).toBe(1);
+    }, 60_000);
+
+    it('reports reads not started by the page deadline as retryable timeouts', async () => {
+      // 12 streams, 4 at a time, 12s each: the first 4 finish, the next 4 run
+      // into the 20s page deadline, and the last 4 never reach the upstream.
+      const page = await getContent({ record: { type: 'account', key: 'slow' } }, {} as Env, owner);
+      expect(page.content).toHaveLength(READS_PER_CONNECTION);
+      expect(page.record_failures).toHaveLength(BURST_FEEDS - READS_PER_CONNECTION);
+      for (const failure of page.record_failures ?? []) expect(failure).not.toHaveProperty('code');
+      expect(page.record_cursor).toEqual(expect.any(String));
+      expect(observed('slow').feeds).toHaveLength(2 * READS_PER_CONNECTION);
+    }, 60_000);
+  });
 });

@@ -88,7 +88,19 @@ interface ConnectorQueryResult {
 export const PUSHDOWN_QUERY_TIMEOUT_MS = 30_000;
 
 /** Pause before the one transient-failure retry; it never extends the deadline. */
-const PUSHDOWN_RETRY_BACKOFF_MS = 250;
+export const PUSHDOWN_RETRY_BACKOFF_MS = 250;
+
+/**
+ * Whether another attempt can help: the connector preserved the upstream's
+ * numeric HTTP status (`httpStatus`, carried across the isolate boundary) and
+ * the shared taxonomy calls it transient (429, 408/504, 5xx). Opaque connector
+ * errors, timeouts that already spent the deadline, and permanent refusals
+ * (auth, validation, not found) never are.
+ */
+export function isTransientUpstreamFailure(error: unknown): boolean {
+  const status = (error as { httpStatus?: unknown } | null)?.httpStatus;
+  return typeof status === 'number' && isRetryable(classifyToolError({ httpStatus: status }));
+}
 
 /**
  * The budget one pushdown gets: the cap, or whatever is left of the caller's
@@ -205,9 +217,7 @@ export async function runConnectorQuery(p: ConnectorQueryParams): Promise<Connec
       auth = await resolveExecutionAuth({ ...authParams, rejectedAccessToken });
       if (!auth.credentials?.accessToken || auth.credentials.accessToken === rejectedAccessToken) throw error;
     } else {
-      // Opaque connector errors and permanent refusals are never evidence that
-      // another request will help. Preserve the structured HTTP taxonomy.
-      if (typeof status !== 'number' || !isRetryable(classifyToolError({ httpStatus: status }))) throw error;
+      if (!isTransientUpstreamFailure(error)) throw error;
       if (deadlineAt - Date.now() <= PUSHDOWN_RETRY_BACKOFF_MS) throw error;
       await new Promise(resolve => setTimeout(resolve, PUSHDOWN_RETRY_BACKOFF_MS));
     }

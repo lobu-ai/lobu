@@ -19,11 +19,25 @@ import type { GetContentArgs } from "@lobu/core/contracts/tools/read-knowledge";
 import type { SourceReadScope } from "../authz/scope";
 import { compileConnectionRowVisibility } from "../authz/connection-visibility";
 import { getDb } from "../db/client";
-import { readSourceFeedPage } from "../lib/source-feed-page";
+import { isTransientUpstreamFailure, PUSHDOWN_RETRY_BACKOFF_MS } from "../lib/connector-pushdown";
+import { readSourceFeedPage, type SourceFeedPageRequest } from "../lib/source-feed-page";
 import { ToolUserError } from "./errors";
 import { getValueAtPath } from "./object-path";
 
+/** One record page's whole budget, shared by every read it starts or retries. */
 const READ_TIMEOUT_MS = 20_000;
+
+/**
+ * Reads one record page keeps in flight against one connection. A page fans
+ * out one read per attributing feed and identity path (18 on a measured pilot
+ * workspace); started all at once they drew intermittent 503s from the
+ * connector's upstream gateway, while the same reads one at a time were clean.
+ * Four caps a record page that also loads Relationships at 8 per connection,
+ * and still fits 18 reads into five rounds of the 20s page deadline while one
+ * read takes under ~4s; a slower source keeps its unstarted streams in the
+ * cursor instead. Reads on different connections never wait for each other.
+ */
+const READS_PER_CONNECTION = 4;
 
 type EventKinds = Record<
   string,
@@ -60,6 +74,62 @@ function readFailure(feedId: number, error: unknown): SourceReadFailure {
     ...((error as { code?: unknown } | null)?.code === "withheld"
       ? { code: "withheld" as const }
       : {}),
+  };
+}
+
+/**
+ * The source reader of one record page. Every read shares the page deadline, and
+ * at most READS_PER_CONNECTION run at once per connection, started in call
+ * order. A read still queued at the deadline fails like any timed-out read
+ * (the source reader refuses an expired deadline before reaching the source),
+ * so its stream stays in the cursor for an explicit retry.
+ *
+ * The bound is per request, not per process. A process-wide limiter would also
+ * queue one viewer's page behind another's against the same 20s deadline,
+ * turning load into timeouts on pages that would have succeeded, and a read
+ * that never settled would hold its slot for every later request on that
+ * replica. A page's own fan-out is the measured burst.
+ *
+ * A failure the upstream marked transient by its preserved HTTP status is
+ * retried once, after a short pause and only within the deadline. A withheld
+ * read is a deliberate answer and is never retried, whatever status it carries.
+ */
+function recordPageReader(
+  scope: SourceReadScope,
+  options: { signal?: AbortSignal; automationId?: number | null }
+) {
+  const deadlineAt = Date.now() + READ_TIMEOUT_MS;
+  const connections = new Map<number, { running: number; waiting: Array<() => void> }>();
+  const attempt = (read: SourceFeedPageRequest) =>
+    readSourceFeedPage(read, deadlineAt - Date.now(), scope, options.signal, options.automationId);
+  const readWithRetry = async (read: SourceFeedPageRequest) => {
+    try {
+      return await attempt(read);
+    } catch (error) {
+      if (
+        (error as { code?: unknown } | null)?.code === "withheld" ||
+        !isTransientUpstreamFailure(error) ||
+        deadlineAt - Date.now() <= PUSHDOWN_RETRY_BACKOFF_MS
+      ) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, PUSHDOWN_RETRY_BACKOFF_MS));
+      return attempt(read);
+    }
+  };
+  return async (feed: SourceFeed, read: SourceFeedPageRequest) => {
+    const connection = connections.get(feed.connectionId) ?? { running: 0, waiting: [] };
+    connections.set(feed.connectionId, connection);
+    if (connection.running < READS_PER_CONNECTION) connection.running += 1;
+    else await new Promise<void>((resolve) => connection.waiting.push(resolve));
+    try {
+      return await readWithRetry(read);
+    } finally {
+      // Hand the slot straight to the next queued read, in call order.
+      const next = connection.waiting.shift();
+      if (next) next();
+      else connection.running -= 1;
+    }
   };
 }
 
@@ -293,22 +363,17 @@ export async function readSourceRecordActivity(
 
   const failures: SourceReadFailure[] = [];
   const next: Record<string, string | null> = {};
+  const readPage = recordPageReader(scope, options);
   const pages = (
     await Promise.all(
       reads.map(async ({ feed, path, stream, cursor }) => {
         try {
-          const page = await readSourceFeedPage(
-            {
-              feed_id: feed.feedId,
-              match: { path, values: [record.key] },
-              limit: options.limit,
-              cursor: cursor ?? undefined,
-            },
-            READ_TIMEOUT_MS,
-            scope,
-            options.signal,
-            options.automationId
-          );
+          const page = await readPage(feed, {
+            feed_id: feed.feedId,
+            match: { path, values: [record.key] },
+            limit: options.limit,
+            cursor: cursor ?? undefined,
+          });
           if (page.rows.length > 0 && !page.row_cursors) {
             throw new Error("This feed cannot resume after individual rows; merged record activity requires exact row cursors.");
           }
@@ -519,6 +584,7 @@ async function readLinkPage(
   }
   const failures: SourceReadFailure[] = [];
   const next: Record<string, LinkPosition> = {};
+  const readPage = recordPageReader(scope, options);
   // Each stream's partial-row state: `taken` rows of its page are fully
   // consumed, and `skip` links of row `taken` were already returned.
   const pages = (
@@ -530,18 +596,12 @@ async function readLinkPage(
         if (!position) return [];
         const { feed, path } = group[0];
         try {
-          const page = await readSourceFeedPage(
-            {
-              feed_id: feed.feedId,
-              match: { path, values: [record.key] },
-              limit: options.limit,
-              cursor: position.after ?? undefined,
-            },
-            READ_TIMEOUT_MS,
-            scope,
-            options.signal,
-            options.automationId
-          );
+          const page = await readPage(feed, {
+            feed_id: feed.feedId,
+            match: { path, values: [record.key] },
+            limit: options.limit,
+            cursor: position.after ?? undefined,
+          });
           if (
             page.rows.some(
               (row) => typeof row.origin_id !== "string" || !row.origin_id
