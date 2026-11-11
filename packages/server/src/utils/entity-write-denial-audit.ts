@@ -4,6 +4,7 @@ import type { EntityWriteOperation } from "../authz/entity-row-validation";
 import type { DbClient } from "../db/client";
 import { currentMcpActivityEventMetadata } from "../lobu/stores/mcp-client-conversations";
 import type { ToolContext } from "../tools/registry";
+import { AUDIT_IDEMPOTENCY_KEY_PREFIX } from "./audit-event-type";
 import { ToolUserError } from "./errors";
 import { insertConnectionlessAuditEvent } from "./insert-event";
 import logger from "./logger";
@@ -90,7 +91,7 @@ export async function recordEntityWriteDenial(
 	// insertEvent strips NUL from originId before deriving the persisted key, so
 	// strip here too or the reconciliation SELECT below looks up a key that was
 	// never stored.
-	const idempotencyKey = `audit:${stripNul(originId)}`;
+	const idempotencyKey = `${AUDIT_IDEMPOTENCY_KEY_PREFIX}${stripNul(originId)}`;
 	const event = {
 		entityIds: sameOrgEntityIds,
 		organizationId,
