@@ -13,6 +13,8 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { beforeAll, describe, expect, it } from 'vitest';
+import { initTracing, shutdownTracing, SpanStatusCode } from '@lobu/core';
+import { InMemorySpanExporter, SimpleSpanProcessor } from '@opentelemetry/sdk-trace-node';
 import {
   addUserToOrganization,
   createTestAccessToken,
@@ -245,6 +247,30 @@ describe('sandbox run (wire)', () => {
     const json = JSON.stringify(result);
     expect(json).toContain('"action":"list"');
     expect(json).toMatch(/"n":\d+/);
+  });
+
+  it.skipIf(!isolatedAvailable).each([
+    ['query_sdk', 'throw new Error("Synthetic caller failure");', 'VALIDATION', 'user'],
+    ['run_sdk', 'for (;;) {}', 'INTERNAL', 'user'],
+  ])('traces %s script failures while preserving the MCP result', async (tool, body, code, kind) => {
+    const exporter = new InMemorySpanExporter();
+    await shutdownTracing();
+    initTracing({ serviceName: 'sdk-wire-telemetry-test', spanProcessors: [new SimpleSpanProcessor(exporter)] });
+    try {
+      const client = new TestMcpClient({ token, orgSlug });
+      const response = await client.raw<{ structuredContent: Record<string, unknown>; isError?: boolean }>('tools/call', {
+        name: tool,
+        arguments: { script: `export default async () => { ${body} };`, timeout_ms: 100 },
+      });
+      expect(response.error).toBeUndefined();
+      expect(response.result.isError).not.toBe(true);
+      expect(response.result.structuredContent).toMatchObject({ success: false, error: { code } });
+      const [span] = exporter.getFinishedSpans().filter((entry) => entry.name === `tool ${tool}`);
+      expect(span?.status.code).toBe(SpanStatusCode.ERROR);
+      expect(span?.attributes).toMatchObject({ 'error.code': code, 'error.kind': kind });
+    } finally {
+      await shutdownTracing();
+    }
   });
 
   it('reports a caught timeout as a terminal failure through MCP', async (testCtx) => {
