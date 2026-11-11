@@ -87,6 +87,11 @@ describe("ClickHouse SQL boundary", () => {
     "WITH x AS (SELECT 1) INSERT INTO telemetry SELECT * FROM x",
     "SELECT 1 INTO OUTFILE '/tmp/out'",
     "SELECT 1 SETTINGS readonly=0",
+    "SELECT 1. SETTINGS readonly=0",
+    "SELECT x FROM t WHERE y > 0. SETTINGS max_execution_time=3600",
+    "SELECT 1e5. SETTINGS readonly=0",
+    "SELECT 1. FORMAT CSV",
+    "SELECT 1 SETTINGS .5",
     "SELECT 1 FORMAT CSV",
     "SET readonly=0",
     "SYSTEM SHUTDOWN",
@@ -118,6 +123,7 @@ describe("ClickHouse SQL boundary", () => {
     "SELECT name, type FROM SYSTEM /* metadata */ . columns WHERE table = 'otel_traces'",
     "SELECT t.settings, t.format FROM telemetry AS t",
     "SELECT * FROM telemetry.settings",
+    'SELECT * FROM "telemetry".settings, `t`.format',
   ])
     it(`accepts a wrapped read ${JSON.stringify(sql)}`, () =>
       expect(readOnlyQuery(sql)).toBe(sql));
