@@ -6,6 +6,7 @@ import { listOrgInstalled } from "../../catalog/installed";
 import { getOperationsSummary, getOperationsSummaryBatch, listOperations } from "../../operations/connector-operations";
 import { manageOperations } from "../../tools/admin/manage_operations";
 import { createAuthProfile } from "../../utils/auth-profiles";
+import { ToolUserError } from "../../utils/errors";
 import { initWorkspaceProvider } from "../../workspace";
 import { cleanupTestDatabase, getTestDb } from "../setup/test-db";
 import {
@@ -203,6 +204,21 @@ describe("connection-scoped MCP catalog", () => {
 		}]);
 		await expect(list({ connection_id: broken.id })).rejects.toThrow(/503.*unavailable/);
 		expect(requests).not.toContain("anonymous");
+	});
+
+	it("rejects a revoked account as the caller's error without contacting the upstream", async () => {
+		const revoked = await account([tool("revoked_tool")], owner.user.id, "revoked");
+		const execute = () => manageOperations(
+			{ action: "execute", connection_id: revoked.id, operation_key: "revoked_tool", input: {} } as never,
+			{} as Env, owner.ctx,
+		);
+		for (const attempt of [() => list({ connection_id: revoked.id }), execute]) {
+			const error = await attempt().then(() => null, (thrown: unknown) => thrown);
+			expect(error).toBeInstanceOf(ToolUserError);
+			expect(error).toMatchObject({ httpStatus: 400, code: "VALIDATION" });
+			expect((error as Error).message).toBe(`Connection ${revoked.id} is revoked, must be active`);
+		}
+		expect(requests).toEqual([]);
 	});
 
 	it("uses the same private-account catalog in policy pickers and policy validation", async () => {
