@@ -223,9 +223,10 @@ native assignment. Connector event triggers with explicit `capture: "references"
 may instead authorize continuous reference capture by a declared source-only observer.
 `skip_if_unchanged` (the schedule default) applies here as it does natively:
 when a due window has no new or changed source content, `claimNextWindow`
-books it as a completed no-op run, advances the schedule, and answers 409
-instead of handing out a window. Treat that 409 like any other: refresh
-activity. Set `skip_if_unchanged: false` on the schedule trigger when the
+books it as a completed no-op run, advances the schedule, and returns a
+`status: "completed"` receipt (`skipped_unchanged: true`, the window bounds and
+the run id) instead of handing out a window. A receipt needs no
+`completeWindow`: refresh activity. Set `skip_if_unchanged: false` on the schedule trigger when the
 client must see every due window, empty or not.
 Every failure of an external run counts toward the auto-pause policy below,
 whatever started it (schedule, manual trigger or event) and whether or not the
