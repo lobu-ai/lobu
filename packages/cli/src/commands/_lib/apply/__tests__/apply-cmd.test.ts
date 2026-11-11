@@ -488,6 +488,73 @@ describe("executePlan — connector relationship schema ordering", () => {
   });
 });
 
+describe("executePlan — schema writes follow the plan verb", () => {
+  test("an existing type is updated without a create probe", async () => {
+    const actions: string[] = [];
+    const client = new ApplyClient(
+      { apiBaseUrl: "https://example.test", orgSlug: "acme", token: "tok" },
+      (async (_url, init) => {
+        const body = JSON.parse(String(init?.body));
+        actions.push(`${body.schema_type}:${body.action}`);
+        if (body.action === "create") {
+          return new Response(
+            JSON.stringify({ error: `[${body.schema_type}_exists] exists` }),
+            { status: 409 }
+          );
+        }
+        return Response.json(
+          body.action === "list_rules" ? { rules: [] } : { success: true }
+        );
+      }) as typeof fetch
+    );
+    const entity = { slug: "person", name: "Person" };
+    const relationship = { slug: "works_at", name: "Works at", rules: [] };
+    const state = stateWith({
+      definitions: [],
+      authProfiles: [],
+      connections: [],
+    });
+    const plan: DiffPlan = {
+      rows: [
+        {
+          kind: "entity-type",
+          verb: "update",
+          id: entity.slug,
+          desired: entity,
+        },
+        {
+          kind: "relationship-type",
+          verb: "update",
+          id: relationship.slug,
+          desired: relationship,
+        },
+      ],
+      counts: { create: 0, update: 2, noop: 0, drift: 0, delete: 0 },
+      notes: [],
+    };
+    const remote: RemoteSnapshot = {
+      agents: [],
+      agentSettings: new Map(),
+      entityTypes: [],
+      relationshipTypes: [],
+      automations: [],
+      connectorDefinitions: [],
+      authProfiles: [],
+      connections: [],
+      feedsByConnectionId: new Map(),
+      inferenceProviders: [],
+    };
+
+    await executePlan({ client, state, plan, remote } as never, []);
+
+    expect(actions).toEqual([
+      "entity_type:update",
+      "relationship_type:update",
+      "relationship_type:list_rules",
+    ]);
+  });
+});
+
 describe("executePlan — entity-type schema fidelity", () => {
   test("carries the live type's out-of-band metadata_schema keys into the upsert", async () => {
     const desired = {
@@ -562,7 +629,7 @@ describe("executePlan — entity-type schema fidelity", () => {
     await executePlan({ client, state, plan, remote }, []);
 
     expect(upsertEntityType).toHaveBeenCalledTimes(1);
-    expect(upsertEntityType.mock.calls[0]?.[1]).toEqual(schemaExtras);
+    expect(upsertEntityType.mock.calls[0]?.[2]).toEqual(schemaExtras);
   });
 
   test("maps three-way properties.<key> clears to a whole-properties clearFacet when config omits properties", async () => {
@@ -618,7 +685,7 @@ describe("executePlan — entity-type schema fidelity", () => {
     await executePlan({ client, state, plan, remote }, []);
 
     expect(upsertEntityType).toHaveBeenCalledTimes(1);
-    const clearFacets = upsertEntityType.mock.calls[0]?.[3] as Set<string>;
+    const clearFacets = upsertEntityType.mock.calls[0]?.[4] as Set<string>;
     expect(clearFacets.has("properties")).toBe(true);
   });
 });
