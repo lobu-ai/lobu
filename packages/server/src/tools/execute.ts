@@ -330,12 +330,15 @@ export async function executeTool(
     ...(authCtx.userId ? { 'user.id': authCtx.userId } : {}),
     ...(authCtx.organizationId ? { 'lobu.org_id': authCtx.organizationId } : {}),
   });
+  // The signal the handler actually ran under: reads get the caller's, writes
+  // none, since they finish after the caller leaves.
+  const handlerSignal: { current?: AbortSignal } = {};
   return runInSpanContext(span, async () => {
     try {
-      const result = await executeToolInSpan(toolName, args, env, authCtx, callerSignal, span);
-      // A caller that left is not a failure (see trackMCPToolCall): its read
-      // stopped because nobody was waiting for the answer.
-      if (callerSignal?.aborted) return result;
+      const result = await executeToolInSpan(toolName, args, env, authCtx, callerSignal, span, handlerSignal);
+      // A read stopped because its caller left is not a failure (see
+      // trackMCPToolCall): nobody was waiting for the answer.
+      if (handlerSignal.current?.aborted) return result;
       if (isSoftErrorResult(result)) {
         // A returned error is a handled rejection, so it counts as the
         // caller's unless its structured code marks a failing dependency.
@@ -357,7 +360,7 @@ export async function executeTool(
     } catch (error) {
       // recordError keeps only the type, the parameterized message and frame
       // locations: errors and arguments can carry credentials or source data.
-      if (!callerSignal?.aborted) recordError(span, error, { scope });
+      if (!handlerSignal.current?.aborted) recordError(span, error, { scope });
       throw error;
     } finally {
       span?.end();
@@ -372,6 +375,7 @@ async function executeToolInSpan(
   authCtx: AuthContext,
   callerSignal: AbortSignal | undefined,
   span: Span | null,
+  handlerSignal: { current?: AbortSignal },
 ): Promise<unknown> {
   const startTime = Date.now();
 
@@ -415,6 +419,7 @@ async function executeToolInSpan(
       workspaceActivity,
       ...(requiredAccess === 'read' && callerSignal && { abortSignal: callerSignal }),
     };
+    handlerSignal.current = toolContext.abortSignal;
 
     // A capture run records the effect it WOULD have had instead of performing
     // it. SDK capture and eval-window finalization enforce their own

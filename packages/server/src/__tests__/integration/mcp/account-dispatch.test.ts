@@ -127,6 +127,14 @@ describe('account MCP dispatch', () => {
       const [abandonedSpan] = exporter.getFinishedSpans().filter((span) => span.attributes['lobu.tool_name'] === 'query_sql');
       expect(abandonedSpan?.status.code).toBe(SpanStatusCode.UNSET);
       expect(abandonedSpan?.attributes['exception.type']).toBeUndefined();
+      // A write never receives the caller's signal and finishes after it
+      // leaves, so its own failure is still a failure.
+      exporter.reset();
+      await expect(executeTool('save_memory', { content: 'private-abandoned-write' }, {} as Env,
+        { ...auth, mcpConversationId: 'abandoned-write' }, cancelled.signal)).rejects.toThrow();
+      const [writeSpan] = exporter.getFinishedSpans().filter((span) => span.attributes['lobu.tool_name'] === 'save_memory');
+      expect(writeSpan?.status.code).toBe(SpanStatusCode.ERROR);
+      expect(writeSpan?.attributes['exception.type']).toBe('ToolUserError');
     } finally {
       await shutdownTracing();
     }
