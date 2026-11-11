@@ -22,6 +22,7 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { ToolError } from "@lobu/core";
 import { Type } from "@sinclair/typebox";
+import { reactionErrorIsNonTransient } from "../../../automations/reaction-task";
 import type { ClientSDK } from "../../../sandbox/client-sdk";
 import { METHOD_METADATA } from "../../../sandbox/method-metadata";
 import { ClientSdkActionError } from "../../../sandbox/namespaces/action-call";
@@ -327,9 +328,12 @@ describe("sandbox runtime", () => {
     expect(classifySdkScriptError(result.error!).code).toBe("VALIDATION");
   });
 
-  it("keeps an untyped host SDK failure a server error when the script lets it propagate", async () => {
+  it.each([
+    "return client.entities.list();",
+    "try { await client.entities.list(); } catch (error) { throw error; }",
+  ])("keeps an untyped host SDK failure a server error without stopping task retries: %s", async (body) => {
     const result = await runScript({
-      source: "export default async (ctx, client) => client.entities.list();",
+      source: `export default async (ctx, client) => { ${body} };`,
       sdk: stubSDK({
         entities: {
           list: async () => {
@@ -341,7 +345,44 @@ describe("sandbox runtime", () => {
     });
 
     expect(result.error).toMatchObject({ code: "INTERNAL", message: "connection terminated unexpectedly" });
+    expect(result.error).not.toHaveProperty("retryable");
     expect(classifySdkScriptError(result.error!).code).toBe("INTERNAL");
+    expect(reactionErrorIsNonTransient(
+      `${result.error!.name}: ${result.error!.message}`,
+      result.error!.retryable,
+    )).toBe(false);
+  });
+
+  it.each([
+    "return client.entities.list();",
+    "try { await client.entities.list(); } catch (error) { if (error.name !== 'TimeoutError') throw new Error('host name lost'); throw error; }",
+  ])("keeps an untyped host timeout distinct from the sandbox deadline: %s", async (body) => {
+    const result = await runScript({
+      source: `export default async (_ctx, client) => { ${body} };`,
+      sdk: stubSDK({
+        entities: {
+          list: async () => {
+            const signal = AbortSignal.timeout(10);
+            await new Promise<void>((_resolve, reject) => {
+              signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+            });
+          },
+        },
+      } as unknown as Partial<ClientSDK>),
+      sdkMode: "read",
+    });
+
+    expect(result.error).toMatchObject({
+      name: "ScriptError",
+      code: "INTERNAL",
+      message: "The operation was aborted due to timeout",
+    });
+    expect(result.error).not.toHaveProperty("retryable");
+    expect(classifySdkScriptError(result.error!).code).toBe("INTERNAL");
+    expect(reactionErrorIsNonTransient(
+      `${result.error!.name}: ${result.error!.message}`,
+      result.error!.retryable,
+    )).toBe(false);
   });
 
   it("does not let a script forge a trusted classification", async () => {
@@ -594,6 +635,11 @@ describe("sandbox runtime", () => {
       success: false,
       error: { code: "INTERNAL", message: "upstream failed" },
     });
+    expect(result.error).not.toHaveProperty("retryable");
+    expect(reactionErrorIsNonTransient(
+      `${result.error!.name}: ${result.error!.message}`,
+      result.error!.retryable,
+    )).toBe(false);
   });
 
   it("preserves a structured transient ToolUserError classification", async () => {
@@ -1818,7 +1864,7 @@ describe("sandbox runtime failure classification", () => {
       source: "export default async (_ctx, client) => client.entities.list();",
       sdk: stubSDK({ entities: { list: async () => { throw new Error(message); } } as never }),
     });
-    expect(result.error).toMatchObject({ name: "Error", code: "INTERNAL", message });
+    expect(result.error).toMatchObject({ name: "ScriptError", code: "INTERNAL", message });
   });
 
   it("does not trust a runtime failure name the script assigns itself", async () => {
