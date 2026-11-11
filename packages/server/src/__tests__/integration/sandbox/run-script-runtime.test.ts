@@ -322,7 +322,8 @@ describe("sandbox runtime", () => {
       sdkMode: "read",
     });
 
-    expect(result.error).toMatchObject({ name: "ScriptError", code: "VALIDATION", retryable: false });
+    expect(result.error).toMatchObject({ name: "ScriptError", code: "VALIDATION" });
+    expect(result.error).not.toHaveProperty("retryable");
     expect(classifySdkScriptError(result.error!).code).toBe("VALIDATION");
   });
 
@@ -502,8 +503,8 @@ describe("sandbox runtime", () => {
       name: "ScriptError",
       message: "ordinary later bug",
       code: "VALIDATION",
-      retryable: false,
     });
+    expect(result.error).not.toHaveProperty("retryable");
   });
 
   it("keeps a caught host classification bound across a later read dispatch", async () => {

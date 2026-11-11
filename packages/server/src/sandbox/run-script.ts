@@ -454,7 +454,10 @@ function trustedRuntimeClassification(
  * `fromGuestRunner` marks an error the guest runner caught from the script's
  * default export. Every host failure that crosses into the isolate carries a
  * host token, so such an error without one is positively the script's own
- * exception: a VALIDATION failure of the supplied program. Errors that reach
+ * exception: a VALIDATION failure of the supplied program. It carries no
+ * `retryable` verdict: a script also throws to ask for a later attempt (data
+ * not there yet, a response it could not confirm), so task retry policy keeps
+ * treating its throw as it always has. Errors that reach
  * the host's own catch (setup, protocol, a module's top-level throw) are not
  * identified that way and stay unclassified.
  */
@@ -539,7 +542,7 @@ function classifyRuntimeError(
 	return {
 		name: "ScriptError",
 		message,
-		...(fromGuestRunner ? { code: "VALIDATION" as const, retryable: false } : {}),
+		...(fromGuestRunner ? { code: "VALIDATION" as const } : {}),
 		...(record.stack != null
 			? {
 					stack: boundScriptErrorText(
