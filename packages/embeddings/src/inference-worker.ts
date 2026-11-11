@@ -87,18 +87,72 @@ export function generateLocalEmbeddingsOffThread(
 	});
 }
 
+interface Job extends InferenceRequest {
+	embeddings: number[][];
+}
+
+/**
+ * Pick the next request to advance one batch: the one with the fewest batches
+ * left, oldest first on a tie. A one-text search query then waits for at most
+ * the batch already running, not for every connector backfill queued ahead of
+ * it (prod: 30-50 s behind 256-text requests on this one thread).
+ */
+function nextJob(jobs: Job[]): Job {
+	const remaining = (job: Job) =>
+		Math.ceil((job.texts.length - job.embeddings.length) / job.batchSize);
+	return jobs.reduce((best, job) => (remaining(job) < remaining(best) ? job : best));
+}
+
 export function runInferenceWorker(): void {
+	if (!parentPort) throw new Error("runInferenceWorker must run on a worker thread");
 	const port = parentPort;
-	if (!port) throw new Error("runInferenceWorker must run on a worker thread");
-	port.on("message", async ({ id, texts, batchSize }: InferenceRequest) => {
+	const jobs: Job[] = [];
+	let pumping = false;
+
+	async function pump(): Promise<void> {
+		if (pumping) return;
+		pumping = true;
 		try {
 			const { batchGenerateLocalEmbeddings } = await loadLocalEmbeddings();
-			const embeddings = await batchGenerateLocalEmbeddings(texts, batchSize);
-			port.postMessage({ id, embeddings } satisfies InferenceResponse);
+			while (jobs.length > 0) {
+				// A forward pass blocks this thread, so a request that arrives
+				// mid-batch is only seen here: yield to the message queue before
+				// choosing the next batch.
+				await new Promise((resolve) => setImmediate(resolve));
+				const job = nextJob(jobs);
+				const start = job.embeddings.length;
+				try {
+					const batch = job.texts.slice(start, start + job.batchSize);
+					const vectors = await batchGenerateLocalEmbeddings(batch, batch.length);
+					// A short answer would misalign every later batch, and an
+					// empty one would never finish the request.
+					if (vectors.length !== batch.length) {
+						throw new Error(`Local embeddings returned ${vectors.length} vectors for ${batch.length} texts`);
+					}
+					job.embeddings.push(...vectors);
+					if (job.embeddings.length < job.texts.length) continue;
+					port.postMessage({ id: job.id, embeddings: job.embeddings } satisfies InferenceResponse);
+				} catch (error) {
+					const message =
+						error instanceof Error ? error.message : "Embedding generation failed";
+					port.postMessage({ id: job.id, error: message } satisfies InferenceResponse);
+				}
+				jobs.splice(jobs.indexOf(job), 1);
+			}
 		} catch (error) {
+			// The component itself failed to load: fail everything queued.
 			const message =
 				error instanceof Error ? error.message : "Embedding generation failed";
-			port.postMessage({ id, error: message } satisfies InferenceResponse);
+			for (const job of jobs.splice(0)) {
+				port.postMessage({ id: job.id, error: message } satisfies InferenceResponse);
+			}
+		} finally {
+			pumping = false;
 		}
+	}
+
+	port.on("message", (request: InferenceRequest) => {
+		jobs.push({ ...request, batchSize: Math.max(1, request.batchSize), embeddings: [] });
+		void pump();
 	});
 }
