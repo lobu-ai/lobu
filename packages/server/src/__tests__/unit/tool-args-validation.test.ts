@@ -210,6 +210,7 @@ describe("SDK script failure telemetry", () => {
   it.each([
     ["query_sdk", "VALIDATION", "user", "ScriptError"],
     ["run_sdk", "PERMISSION", "user", "ScriptError"],
+    ["run_sdk", "VALIDATION", "user", "ValidationError"],
     ["query_sdk", "UPSTREAM_TIMEOUT", "dependency", "ClientSdkActionError"],
     ["run_sdk", "INTERNAL", "system", "RuntimeUnavailable"],
     ["run_sdk", "INTERNAL", "user", "OutOfMemory"],
@@ -219,7 +220,7 @@ describe("SDK script failure telemetry", () => {
     initTracing({ serviceName: "sdk-script-span-test", spanProcessors: [new SimpleSpanProcessor(exporter)] });
     const tool = getTool(toolName);
     if (!tool) throw new Error(`${toolName} is not registered`);
-    const report = { success: false, error: { name, message: "Synthetic script failure", code, retryable: false } };
+    const report = { success: false, error: { name, message: "private-script-error", stack: "Error: private-script-error\n    at privateGuestFunction (synthetic-script.ts:1:1)", code, retryable: false } };
     const handler = spyOn(tool, "handler").mockResolvedValue(report);
     try {
       const result = await executeTool(toolName, { script: "export default async () => 1" }, {} as never, baseAuth);
@@ -228,6 +229,9 @@ describe("SDK script failure telemetry", () => {
       const [span] = exporter.getFinishedSpans().filter((entry) => entry.name === `tool ${toolName}`);
       expect(span?.status.code).toBe(SpanStatusCode.ERROR);
       expect(span?.attributes).toMatchObject({ "exception.type": name, "error.code": code, "error.kind": kind });
+      if (name === "ScriptError" || name === "ValidationError") {
+        expect(JSON.stringify({ attributes: span?.attributes, events: span?.events, status: span?.status })).not.toContain("private");
+      }
     } finally {
       handler.mockRestore();
       await shutdownTracing();

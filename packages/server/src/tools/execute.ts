@@ -364,11 +364,20 @@ export async function executeTool(
         // These names are host-owned: guest throws are always ScriptError.
         // Exhausting a caller's script budget is user telemetry even while the
         // public response retains its historical INTERNAL code.
-        const callerBudget = 'name' in result.error && [
+        const errorName = 'name' in result.error ? String(result.error.name) : '';
+        const callerBudget = [
           'TimeoutError', 'OutOfMemory', 'QuotaExceeded', 'OutputSizeExceeded',
           'InvalidSleepDuration', 'SleepLimitExceeded',
-        ].includes(String(result.error.name));
-        recordError(span, result.error, { scope, ...(callerBudget ? { kind: 'user' as const } : {}) });
+        ].includes(errorName);
+        // Guest-authored messages and stack names can contain arbitrary source
+        // data. Keep their classification, but do not copy their text to spans.
+        const callerScript = errorName === 'ScriptError' || errorName === 'ValidationError';
+        const telemetryError = callerScript ? {
+          name: errorName,
+          code: 'code' in result.error ? result.error.code : undefined,
+          message: 'Sandbox script failed',
+        } : result.error;
+        recordError(span, telemetryError, { scope, ...(callerBudget ? { kind: 'user' as const } : {}) });
       } else {
         span?.setStatus({ code: SpanStatusCode.OK });
       }
