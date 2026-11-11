@@ -140,6 +140,13 @@ describe("sdkSearch", () => {
 		expect(result.results[1]).toStartWith("operations.execute —");
 	});
 
+	it("discovers the explicit failure helper in read mode", async () => {
+		const result = await sdkSearch({ query: "ctx.fail", mode: "read" }, stubEnv, readCtx);
+		expect(result.match_count).toBe(1);
+		expect(result.results[0]).toContain("ctx.fail");
+		expect(result.results[0]).toContain("never");
+	});
+
 	it("discovers top-level methods with the client prefix callers use", async () => {
 		const result = await sdkSearch({ query: "client.org" }, stubEnv, readCtx);
 

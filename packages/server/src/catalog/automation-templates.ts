@@ -162,7 +162,7 @@ Write at most 50 rows in files per run, including deletions; leave the rest for 
 	{
 		id: "duplicate-identity",
 		name: "Duplicate identity resolution",
-		version: "4.0.0",
+		version: "4.0.1",
 		description:
 			"Associate duplicate records with reversible identity links while preserving every record. Attach one entity to select the entity type to inspect.",
 		detail: {
@@ -180,7 +180,7 @@ Write at most 50 rows in files per run, including deletions; leave the rest for 
 export default async function reaction(ctx, client) {
 	const types = [...new Set((ctx.entities ?? []).map((entity) => entity.entity_type))];
 	if (types.length !== 1 || !types[0] || types[0].startsWith("$")) {
-		throw new Error("Attach entities of exactly one stored entity type to select the identity sweep");
+		ctx.fail("Attach entities of exactly one stored entity type to select the identity sweep");
 	}
 	const progress = { entity_type: types[0], applied: 0, queued: 0, suppressed: 0, oversized: 0, deferred_candidates: 0, complete: false, next_cursor: null };
 	let calls = 0;

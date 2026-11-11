@@ -92,6 +92,7 @@ describe("duplicate identity Automation template", () => {
     const { discoveries, result } = await executeReaction({ entities });
     expect(result.success).toBe(false);
     expect(result.error?.message).toContain("exactly one stored entity type");
+    expect(result.error).toMatchObject({ name: "ValidationError", code: "VALIDATION", retryable: false });
     expect(discoveries).toEqual([]);
   });
 

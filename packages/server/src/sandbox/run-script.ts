@@ -223,7 +223,8 @@ type RuntimeFailureName =
 	| "OutOfMemory"
 	| "InvalidSleepDuration"
 	| "SleepLimitExceeded"
-	| "RuntimeUnavailable";
+	| "RuntimeUnavailable"
+	| "ValidationError";
 
 /**
  * A runtime failure the host determined from its own state: the deadline it
@@ -570,7 +571,8 @@ function runtimeFailureError(
 		failure.reason === "SleepLimitExceeded";
 	return {
 		name: failure.reason,
-		...(isCallerLimit ? { code: "VALIDATION" as const } : {}),
+		...(isCallerLimit || failure.reason === "ValidationError" ? { code: "VALIDATION" as const } : {}),
+		...(failure.reason === "ValidationError" ? { retryable: false } : {}),
 		message: boundScriptErrorText(
 			failure.message,
 			MAX_SCRIPT_ERROR_MESSAGE_BYTES,
@@ -752,6 +754,8 @@ function guestPreamble(
 const { client, ctx, takeErrorToken: ${errorTokenReader} } = (() => {
 const __hostSdkDispatch = __sdk_dispatch;
 const __hostSleep = __sleep;
+const __hostFail = __fail;
+delete globalThis.__fail;
 try {
   globalThis.__sdk_dispatch = undefined;
   delete globalThis.__sdk_dispatch;
@@ -894,6 +898,11 @@ return {
   client: __makeClient([]),
   ctx: __makeCtx({
     ...__parseJson(__ctx_json),
+    fail: (message) => {
+      const text = typeof message === 'string' ? message : 'ctx.fail(message) requires a string';
+      __hostFail.applySync(undefined, [text.slice(0, ${MAX_SCRIPT_ERROR_MESSAGE_BYTES})]);
+      throw new Error('Script terminated by ctx.fail');
+    },
     sleep: async (ms) => {
       const result = await __hostSleep.apply(undefined, [ms], { result: { promise: true, copy: true } });
       if (result) {
@@ -1673,6 +1682,14 @@ export async function runScript(
 				} catch (error) {
 					return sdkErrorEnvelope(error);
 				}
+			}),
+		);
+
+		await jail.set(
+			"__fail",
+			new ivm.Reference((message: string) => {
+				assertActive();
+				terminateRun("ValidationError", boundScriptErrorText(message, MAX_SCRIPT_ERROR_MESSAGE_BYTES));
 			}),
 		);
 

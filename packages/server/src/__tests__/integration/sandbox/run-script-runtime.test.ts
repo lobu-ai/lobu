@@ -1907,6 +1907,28 @@ describe("sandbox runtime failure classification", () => {
     expect(result.error?.name).toBe("TimeoutError");
   });
 
+  it("ends a script with a non-retryable validation failure when ctx.fail is caught", async () => {
+    const result = await runScript({
+      source: "export default async (ctx) => { try { ctx.fail('Synthetic configuration required'); } catch {} return 'incorrect success'; };",
+      sdk: stubSDK(),
+    });
+    expect(result.success).toBe(false);
+    expect(result.error).toMatchObject({ name: "ValidationError", message: "Synthetic configuration required", code: "VALIDATION", retryable: false });
+    expect(reactionErrorIsNonTransient(`${result.error?.name}: ${result.error?.message}`, result.error?.retryable)).toBe(true);
+    expect(result.sdkCalls).toBe(0);
+  });
+
+  it("bounds explicit failure text and preserves side effects already started", async () => {
+    const result = await runScript({
+      source: "export default async (ctx, client) => { await client.entities.update({ entity_id: 101, metadata: { name: 'synthetic' } }); ctx.fail('界'.repeat(20000)); };",
+      sdk: stubSDK({ entities: { update: async () => ({ id: 101 }) } as never }),
+    });
+    expect(result.success).toBe(false);
+    expect(result.error).toMatchObject({ name: "ValidationError", code: "VALIDATION", retryable: false });
+    expect(Buffer.byteLength(result.error!.message, "utf8")).toBeLessThanOrEqual(MAX_SCRIPT_ERROR_MESSAGE_BYTES);
+    expect(result.startedSideEffects).toEqual([{ path: "entities.update", access: "write", count: 1 }]);
+  });
+
   it("keeps the sleep limit typed when the script does not catch it", async () => {
     const result = await runScript({
       source: "export default async (ctx) => ctx.sleep(30001);",

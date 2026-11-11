@@ -357,6 +357,20 @@ describe("automation reaction crash safety", () => {
 		expect(Number(after[0].id)).toBe(Number(first[0].id));
 	});
 
+	it("settles an explicit configuration failure without requesting a retry", async () => {
+		const { sql, automationId, runId, api, workspace } = await seedRunnableWindow(
+			'export default async (ctx) => { ctx.fail("Synthetic configuration required"); };',
+		);
+		await completeWindow(api, automationId, runId);
+		const [task] = await reactionTasks(sql, runId);
+		const outcome = await runAutomationReactionTask(
+			{ organizationId: workspace.org.id, automationId, sourceRunId: runId }, {} as Env, Number(task.id),
+		);
+		expect(outcome.status).toBe("failed");
+		const [logged] = await sql`SELECT tool_result FROM automation_reactions WHERE source_run_id = ${runId}`;
+		expect(logged.tool_result).toMatchObject({ success: false, error: "ValidationError: Synthetic configuration required" });
+	});
+
 	it("settles without retrying when the script fails deterministically", async () => {
 		// A compile failure is non-transient: retrying re-burns the executor budget
 		// for no chance of recovery, so the handler must NOT ask for another attempt.
