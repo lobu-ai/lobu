@@ -809,7 +809,7 @@ export async function executePlan(
   //    by this same desired apply.
   for (const row of rowsByKind("entity-type")) {
     if (row.kind !== "entity-type") continue;
-    if (!row.desired) continue;
+    if (!row.desired || row.verb === "delete") continue;
     // The upsert rebuilds `metadata_schema` from the config's flat properties/
     // required, so hand it the live type's out-of-band top-level keys (e.g.
     // `x-lobu-resolution`) to carry forward — otherwise every apply erases them
@@ -830,6 +830,7 @@ export async function executePlan(
       clearFacets.add("properties");
     }
     await ctx.client.upsertEntityType(
+      row.verb,
       row.desired,
       row.remote?.schemaExtras,
       {
@@ -848,8 +849,8 @@ export async function executePlan(
   //    schema, so a type created by this same apply must already exist.
   for (const row of rowsByKind("relationship-type")) {
     if (row.kind !== "relationship-type") continue;
-    if (!row.desired) continue;
-    await ctx.client.upsertRelationshipType(row.desired);
+    if (!row.desired || row.verb === "delete") continue;
+    await ctx.client.upsertRelationshipType(row.verb, row.desired);
     printText(renderProgress(row.verb, "relationship-type", row.id));
   }
 

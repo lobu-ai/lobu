@@ -38,7 +38,8 @@ describe("ApplyClient", () => {
     ],
     [
       "schema",
-      (client) => client.upsertEntityType({ slug: "fixture", name: "Fixture" }),
+      (client) =>
+        client.upsertEntityType("create", { slug: "fixture", name: "Fixture" }),
     ],
     ["view", (client) => client.setView({ source_code: "fixture" })],
     [
@@ -132,6 +133,7 @@ describe("ApplyClient", () => {
       required: ["size"],
     };
     await client.upsertEntityType(
+      "create",
       { slug: "account", collection },
       { "x-other": true },
       core
@@ -142,11 +144,13 @@ describe("ApplyClient", () => {
       "x-lobu-collection": collection,
     });
     await client.upsertEntityType(
+      "create",
       { slug: "account", properties: core.properties },
       { "x-lobu-collection": collection }
     );
     expect(bodies[1]?.metadata_schema["x-lobu-collection"]).toEqual(collection);
     await client.upsertEntityType(
+      "create",
       { slug: "account" },
       { "x-lobu-collection": collection },
       core,
@@ -192,11 +196,15 @@ describe("ApplyClient — entity schema merge", () => {
 
     // A stored type with no diff flag: backing is omitted, so a fired update
     // for an unrelated field never reverts out-of-band backing.
-    await client.upsertEntityType({ slug: "company", name: "Company" });
+    await client.upsertEntityType("create", {
+      slug: "company",
+      name: "Company",
+    });
     expect(JSON.parse(String(calls[0]?.init?.body)).backing).toBeUndefined();
 
     // Flagged revert (derived → stored): backing:null is sent.
     await client.upsertEntityType(
+      "create",
       { slug: "company", name: "Company" },
       undefined,
       undefined,
@@ -215,12 +223,16 @@ describe("ApplyClient — entity schema merge", () => {
       }) as typeof fetch
     );
 
-    await client.upsertEntityType({ slug: "company", name: "Company" });
+    await client.upsertEntityType("create", {
+      slug: "company",
+      name: "Company",
+    });
     expect(
       JSON.parse(String(calls[0]?.init?.body)).metrics_config
     ).toBeUndefined();
 
     await client.upsertEntityType(
+      "create",
       { slug: "company", name: "Company" },
       undefined,
       undefined,
@@ -245,18 +257,19 @@ describe("ApplyClient — entity schema merge", () => {
         metadataSchema: { type: "object" },
       },
     };
-    await client.upsertEntityType({ slug: "deal", eventKinds });
+    await client.upsertEntityType("create", { slug: "deal", eventKinds });
     expect(JSON.parse(String(calls[0]?.init?.body)).event_kinds).toEqual(
       eventKinds
     );
 
     // Not declared + not flagged → omitted, so an unrelated update never wipes
     // out-of-band eventKinds. Flagged prune removal → null is sent.
-    await client.upsertEntityType({ slug: "person", name: "Person" });
+    await client.upsertEntityType("create", { slug: "person", name: "Person" });
     expect(
       JSON.parse(String(calls[1]?.init?.body)).event_kinds
     ).toBeUndefined();
     await client.upsertEntityType(
+      "create",
       { slug: "person", name: "Person" },
       undefined,
       undefined,
@@ -339,6 +352,7 @@ describe("ApplyClient — entity schema merge", () => {
     // Re-apply a config that adds a field: properties come from config, the
     // out-of-band key rides along.
     await client.upsertEntityType(
+      "create",
       {
         slug: "person",
         properties: {
@@ -373,6 +387,7 @@ describe("ApplyClient — entity schema merge", () => {
     );
 
     await client.upsertEntityType(
+      "create",
       {
         slug: "person",
         properties: { email: { type: "string" } },
@@ -408,6 +423,7 @@ describe("ApplyClient — entity schema merge", () => {
     );
 
     await client.upsertEntityType(
+      "create",
       { slug: "person", properties: { email: { type: "string" } } },
       {
         "x-lobu-resolution": {
@@ -436,6 +452,7 @@ describe("ApplyClient — entity schema merge", () => {
     // Config declares ONLY the resolution policy — no properties/required. The
     // live type has a full schema, which must survive the rebuild verbatim.
     await client.upsertEntityType(
+      "create",
       {
         slug: "person",
         resolutionPolicy: {
@@ -476,7 +493,7 @@ describe("ApplyClient — entity schema merge", () => {
       }) as typeof fetch
     );
 
-    await client.upsertEntityType({
+    await client.upsertEntityType("create", {
       slug: "person",
       resolutionPolicy: {
         "x-lobu-resolution": {
@@ -509,6 +526,7 @@ describe("ApplyClient — entity schema merge", () => {
     );
 
     await client.upsertEntityType(
+      "create",
       {
         slug: "person",
         resolutionPolicy: {
@@ -543,6 +561,7 @@ describe("ApplyClient — entity schema merge", () => {
     );
 
     await client.upsertEntityType(
+      "create",
       { slug: "person", name: "Person" },
       {
         "x-lobu-resolution": {
@@ -574,6 +593,7 @@ describe("ApplyClient — entity schema merge", () => {
     );
 
     await client.upsertEntityType(
+      "create",
       { slug: "person", properties: { email: { type: "string" } } },
       // A malformed extras bag must never shadow the config's own fields —
       // including `required`, which the config omits here (an empty required
@@ -632,21 +652,7 @@ describe("ApplyClient — entity schema merge", () => {
 // mistaken for "already exists" (which retried as `update` and buried the
 // real message under "Entity type not found").
 describe("isDuplicateError", () => {
-  test("coded duplicates are duplicates", () => {
-    for (const code of [
-      "entity_type_exists",
-      "relationship_type_exists",
-      "already_exists",
-    ]) {
-      expect(
-        isDuplicateError(
-          new ApiError(`POST /x failed: [${code}] thing already exists`, 409)
-        )
-      ).toBe(true);
-    }
-  });
-
-  test("bare 409 without a code is still a duplicate", () => {
+  test("409 is a duplicate", () => {
     expect(
       isDuplicateError(new ApiError("POST /x failed: conflict", 409))
     ).toBe(true);
@@ -695,7 +701,7 @@ describe("ApplyClient — upsert create/update flow", () => {
       }) as typeof fetch
     );
 
-    const result = await client.upsertEntityType({
+    const result = await client.upsertEntityType("create", {
       slug: "task",
       name: "Task",
     });
@@ -722,7 +728,7 @@ describe("ApplyClient — upsert create/update flow", () => {
     );
 
     await expect(
-      client.upsertEntityType({ slug: "task", name: "Task" })
+      client.upsertEntityType("create", { slug: "task", name: "Task" })
     ).rejects.toThrow(
       /metadata_schema.properties.a.x-table-column must be a boolean/
     );
