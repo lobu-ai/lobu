@@ -616,13 +616,14 @@ jobs:
         run: |
           # Ubuntu-domain DNS failures on hosted runners exhausted the job timeout.
           # Prefer an independent Ubuntu mirror; retain archive/security fallbacks
-          # and APT's existing Ubuntu signing-key verification.
+          # and APT's existing Ubuntu signing-key verification. APT's mirror
+          # method only parses tags after a TAB, so emit the separator explicitly.
           if [ -f /etc/apt/apt-mirrors.txt ]; then
-            sudo tee /etc/apt/apt-mirrors.txt > /dev/null <<'MIRRORS'
-          https://mirrors.edge.kernel.org/ubuntu/ priority:1
-          https://archive.ubuntu.com/ubuntu/ priority:2
-          https://security.ubuntu.com/ubuntu/ priority:3
-          MIRRORS
+            printf '%s\tpriority:%s\n' \
+              https://mirrors.edge.kernel.org/ubuntu/ 1 \
+              https://archive.ubuntu.com/ubuntu/ 2 \
+              https://security.ubuntu.com/ubuntu/ 3 \
+              | sudo tee /etc/apt/apt-mirrors.txt > /dev/null
           fi
           apt_options=(-o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15)
           sudo apt-get "${apt_options[@]}" update
