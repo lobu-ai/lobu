@@ -89,9 +89,17 @@ export function readOnlyQuery(raw: string): string {
     invalid("Reserved analytics column name");
   if (!/^\s*\(*\s*(SELECT|WITH)\b/i.test(code))
     invalid("Only SELECT or WITH SELECT is allowed");
+  // A keyword beside a dot is an identifier, e.g. system.tables or t.settings.
+  // Quotes and comments have already been removed, so only SQL tokens remain.
+  const tokens = code.match(/[A-Za-z_][A-Za-z0-9_]*|[^\s]/g) ?? [];
   if (
-    /\b(INSERT|UPDATE|DELETE|ALTER|CREATE|DROP|TRUNCATE|RENAME|ATTACH|DETACH|SET|SYSTEM|KILL|GRANT|REVOKE|OPTIMIZE|BACKUP|RESTORE|INTO|OUTFILE|FORMAT|SETTINGS)\b/i.test(
-      code
+    tokens.some(
+      (token, i) =>
+        /^(INSERT|UPDATE|DELETE|ALTER|CREATE|DROP|TRUNCATE|RENAME|ATTACH|DETACH|SET|SYSTEM|KILL|GRANT|REVOKE|OPTIMIZE|BACKUP|RESTORE|INTO|OUTFILE|FORMAT|SETTINGS)$/i.test(
+          token
+        ) &&
+        tokens[i - 1] !== "." &&
+        tokens[i + 1] !== "."
     )
   )
     invalid("SQL contains an unsupported statement or output clause");
@@ -326,9 +334,9 @@ export default class ClickHouseAnalyticsConnector extends ConnectorRuntime<
   > = {
     key: "clickhouse.analytics",
     name: "ClickHouse analytics",
-    version: "1.1.1",
+    version: "1.1.2",
     description:
-      "Run governed read-only SQL against an organization-owned ClickHouse analytics endpoint.",
+      "Run governed read-only SQL against an organization-owned ClickHouse analytics endpoint. Discover accessible tables and columns with SELECT from system.tables and system.columns; information_schema requires separate grants.",
     authSchema: {
       methods: [
         {
