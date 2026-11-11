@@ -1914,29 +1914,16 @@ function mapConnectorDefinitionItem(item: {
 }
 
 /**
- * Recognise duplicate-name errors from the admin tools without substring
- * matching the user-facing message. The server stamps a bracketed code into
- * the error message of every duplicate path `apply` upserts through
- * (`manage_entity_schema` create / add_rule → `[entity_type_exists]`,
- * `[relationship_type_exists]`, `[already_exists]`, all httpStatus 409).
+ * Recognise duplicate-name errors from the admin tools by status alone. Every
+ * duplicate path `apply` upserts through (`manage_entity_schema` create /
+ * add_rule) answers 409, and nothing else those calls return does.
  *
  * Anything else is NOT a duplicate. In particular a 422 schema-validation
  * error (`[invalid_schema]`, e.g. ">4 x-table-column fields") must surface
- * verbatim — the old status-only fallback treated any 4xx as "already
- * exists", retried with `action: update`, and buried the real message under
- * a misleading "Entity type not found" (issue #1177). The 409 fallback stays
- * as a belt-and-braces signal for duplicate paths that predate the codes.
+ * verbatim: the old any-4xx fallback retried with `action: update` and buried
+ * the real message under a misleading "Entity type not found" (issue #1177).
  */
 export function isDuplicateError(err: ApiError): boolean {
-  if (typeof err.status !== "number") return false;
-  const message = err.message.toLowerCase();
-  if (
-    message.includes("[entity_type_exists]") ||
-    message.includes("[relationship_type_exists]") ||
-    message.includes("[already_exists]")
-  ) {
-    return true;
-  }
   return err.status === 409;
 }
 

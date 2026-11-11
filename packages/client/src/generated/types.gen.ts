@@ -458,6 +458,10 @@ export type SaveMemoryResponse = SaveMemoryResponses[keyof SaveMemoryResponses];
 export type SearchSdkData = {
   body: {
     /**
+     * Human-friendly heading for this search (e.g. "Feed methods"). The activity feed shows it on this call.
+     */
+    title?: string;
+    /**
      * SDK method or runtime-helper discovery query. Use a namespace (e.g. 'automations'), one or more dotted paths separated by whitespace (e.g. 'automations.create ctx.sleep'), an optional client. prefix, or free text. Pass mode='read' for query_sdk-safe methods only; omit mode for your full run_sdk tier. Namespaces: agents, authProfiles, automations, catalog, classifiers, connections, conversations, ctx, devices, entities, entitySchema, feeds, inferenceProviders, knowledge, metrics, notifications, operations, organizations, schedules, views.
      */
     query: string;
@@ -508,6 +512,10 @@ export type SearchSdkResponses = {
    * Successful response
    */
   200: {
+    /**
+     * The caller's heading, echoed.
+     */
+    title?: string;
     /**
      * The query that was searched.
      */
@@ -6170,7 +6178,7 @@ export type ManageAutomationsData = {
           execution?: "window";
           active_run?: "coalesce";
           /**
-           * Book a due window with no new or changed source content as a no-op run instead of dispatching an agent. Applies to native dispatch and to external claimNextWindow, which answers 409 for a skipped window.
+           * Book a due window with no new or changed source content as a no-op run instead of dispatching an agent. Applies to native dispatch and to external claimNextWindow, which returns a status 'completed' receipt for a skipped window.
            */
           skip_if_unchanged?: boolean;
         }
@@ -6424,6 +6432,7 @@ export type ManageAutomationsResponses = {
     | {
         action: "claim_next_window";
         automation_id: string;
+        status: "claimed";
         run_id: number;
         lease_expires_at: string;
         context: {
@@ -6467,6 +6476,15 @@ export type ManageAutomationsResponses = {
             }>;
           };
         };
+      }
+    | {
+        action: "claim_next_window";
+        automation_id: string;
+        status: "completed";
+        run_id: number;
+        skipped_unchanged: true;
+        window_start: string;
+        window_end: string;
       }
     | {
         action: "trigger";
@@ -6844,7 +6862,7 @@ export type GetAutomationResponses = {
             execution?: "window";
             active_run?: "coalesce";
             /**
-             * Book a due window with no new or changed source content as a no-op run instead of dispatching an agent. Applies to native dispatch and to external claimNextWindow, which answers 409 for a skipped window.
+             * Book a due window with no new or changed source content as a no-op run instead of dispatching an agent. Applies to native dispatch and to external claimNextWindow, which returns a status 'completed' receipt for a skipped window.
              */
             skip_if_unchanged?: boolean;
           }

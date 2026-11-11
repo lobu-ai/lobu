@@ -16,6 +16,9 @@ const MAX_REQUEST_BYTES = 256 * 1024;
 // These tools retain their request, except host file capabilities, on the
 // audit event. Other tools retain only the sanitized summary below.
 const REQUEST_EVENT_TOOLS = new Set(['run_sdk', 'query_sdk', 'query_sql']);
+// Tools whose `title` argument is a heading for the call itself. Elsewhere
+// (save_memory, notify, schedules) `title` is content and stays off list rows.
+const CALL_HEADING_TOOLS = new Set([...REQUEST_EVENT_TOOLS, 'search_sdk']);
 const KNOWN_SECRET_SHAPE_RE =
   /\b(?:sk[-_][a-z0-9_-]{8,}|xox[baprs]-[a-z0-9-]{8,}|gh[pousr]_[a-z0-9_]{12,}|AKIA[A-Z0-9]{16}|eyJ[a-z0-9_-]{8,}\.[a-z0-9_-]{8,}\.[a-z0-9_-]{8,})\b/gi;
 // Redaction principle: consume the COMPLETE credential. Over-consumption is
@@ -370,8 +373,8 @@ export async function recordToolInvocationAudit(
     const payload = buildPayload(params);
     if (!payload) return;
     const request = captureRequest(params);
-    if (request) {
-      Object.assign(payload, request);
+    if (request) Object.assign(payload, request);
+    if (CALL_HEADING_TOOLS.has(params.toolName)) {
       // Keep a redacted heading on list rows, where the author-only request is omitted.
       payload.title =
         typeof params.args?.title === 'string'

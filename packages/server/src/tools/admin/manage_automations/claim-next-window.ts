@@ -1,5 +1,8 @@
 import { encodeExternalAutomationClaimOwner } from '../../../automations/external-claim-owner';
-import type { AutomationClaimNextWindowResult } from '@lobu/core/contracts/tools/manage-automations';
+import type {
+  AutomationClaimNextWindowContext,
+  AutomationClaimNextWindowResult,
+} from '@lobu/core/contracts/tools/manage-automations';
 import type { DbClient } from '../../../db/client';
 import { getDb } from '../../../db/client';
 import type { Env } from '../../../index';
@@ -214,7 +217,7 @@ export async function handleClaimNextWindow(
       const [state] = await tx`SELECT schedule_auto_paused_at FROM automations WHERE id = ${automationId}`;
       if (state?.schedule_auto_paused_at) {
         // Commit the timeout and failure count before returning the rejection,
-        // just as the no-op branch commits its completion before its 409.
+        // just as the no-op branch commits its completion before its receipt.
         return autoPausedAutomationError(automationId);
       }
       // The arrival window [mark, horizon) stays empty while the settle delay
@@ -397,13 +400,15 @@ export async function handleClaimNextWindow(
 
   if (claimedWindow instanceof ToolUserError) throw claimedWindow;
   if (claimedWindow.skipped) {
-    throw new ToolUserError(
-      `Automation ${automationId} has nothing to process: the due window ` +
-        `[${claimedWindow.windowStart.toISOString()}, ${claimedWindow.windowEnd.toISOString()}) ` +
-        `has no new or changed source content, so it was completed as no-op run ${claimedWindow.runId} ` +
-        'and the schedule advanced. Refresh activity for the next due window.',
-      409
-    );
+    return {
+      action: 'claim_next_window',
+      automation_id: String(automationId),
+      status: 'completed',
+      run_id: claimedWindow.runId,
+      skipped_unchanged: true,
+      window_start: claimedWindow.windowStart.toISOString(),
+      window_end: claimedWindow.windowEnd.toISOString(),
+    };
   }
 
   // Everything after the claim commits runs against a leased run. A failure
@@ -487,7 +492,7 @@ export async function handleClaimNextWindow(
     if (!context.window_token || !context.window_start || !context.window_end) {
       throw new Error('Claimed Automation context is missing its signed window bounds.');
     }
-    const claimContext: AutomationClaimNextWindowResult['context'] = {
+    const claimContext: AutomationClaimNextWindowContext = {
       ...context,
       window_token: context.window_token,
       window_start: context.window_start,
@@ -497,6 +502,7 @@ export async function handleClaimNextWindow(
     return {
       action: 'claim_next_window',
       automation_id: String(automationId),
+      status: 'claimed',
       run_id: claimedWindow.runId,
       lease_expires_at: claimedWindow.leaseExpiresAt.toISOString(),
       context: claimContext,
@@ -508,7 +514,7 @@ export async function handleClaimNextWindow(
   }
 }
 
-type PinnedInstructions = NonNullable<AutomationClaimNextWindowResult['context']['instructions']>;
+type PinnedInstructions = NonNullable<AutomationClaimNextWindowContext['instructions']>;
 
 /**
  * The prompt and skill snapshots of the version a run is pinned to. An

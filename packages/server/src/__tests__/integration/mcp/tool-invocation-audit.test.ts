@@ -416,16 +416,18 @@ describe('tool invocation audit coverage', () => {
     expect(rows).toHaveLength(1);
   });
 
-  it('lists the caller title on run_sdk, query_sdk and query_sql rows, redacted', async () => {
+  it('lists the caller title on run_sdk, query_sdk, query_sql and search_sdk rows, redacted', async () => {
     const script = 'export default async () => 1;';
     const calls: Array<[string, Record<string, unknown>]> = [
       ['run_sdk', { script, title: '  Mark stale password=hunter2 read ' }],
       ['query_sdk', { script, title: 'Failing feeds' }],
       ['query_sql', { sql: 'SELECT 1 AS n', title: 'Feed health' }],
+      ['search_sdk', { query: 'feeds', title: ' Feed methods ' }],
     ];
     const ids: string[] = [];
     for (const [tool, args] of calls) {
-      await executeTool(tool, args, {} as Env, authCtxFor('pat'));
+      const output = await executeTool(tool, args, {} as Env, authCtxFor('pat'));
+      if (tool === 'search_sdk') expect(output).toMatchObject({ title: 'Feed methods' });
       ids.push(String((await latestAuditRow(orgId, tool))!.id));
     }
     await executeTool('query_sdk', { script }, {} as Env, authCtxFor('pat'));
@@ -445,6 +447,7 @@ describe('tool invocation audit coverage', () => {
       'Mark stale password=[redacted] read',
       'Failing feeds',
       'Feed health',
+      'Feed methods',
     ]);
     expect(titleOf(untitled)).toBeNull();
   });
