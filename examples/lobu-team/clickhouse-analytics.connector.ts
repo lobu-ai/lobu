@@ -386,7 +386,7 @@ export default class ClickHouseAnalyticsConnector extends ConnectorRuntime<
   > = {
     key: "clickhouse.analytics",
     name: "ClickHouse analytics",
-    version: "1.2.0",
+    version: "2.0.0",
     description:
       "Run governed read-only SQL against an organization-owned ClickHouse analytics endpoint. Discover accessible tables and columns with SELECT from system.tables and system.columns; information_schema requires separate grants.",
     authSchema: {
@@ -422,11 +422,6 @@ export default class ClickHouseAnalyticsConnector extends ConnectorRuntime<
         configSchema: { type: "object", properties: {} },
         matchPaths: ["metadata.user_id"],
         eventKinds: {
-          "product.milestone": {
-            description:
-              "Legacy kind retained for compatibility; no longer emitted. Signup is owned by Postgres.",
-            attributions: productUserAttributions,
-          },
           "product.landing_attributed": {
             description:
               "Inferred external landing match by IP and browser within 24 hours; not verified visitor identity.",

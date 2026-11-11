@@ -305,12 +305,14 @@ const productActivityDb = defineConnection({
       schedule: "2,22,42 * * * *",
       config: {
         primary_key: "activity_id",
-        cursor_column: "occurred_at",
+        cursor_column: "observed_at",
         max_rows_per_sync: 5000,
         // Incremental timestamps are not a commit-ordered ledger: late commits
         // behind the checkpoint can be missed. Session/connection rows can
         // disappear, and tool audit is best effort. This is observed account
         // activity, not a complete history or anonymous browsing coverage.
+        // Delivery time is separate from occurrence time: a conversation may
+        // be seeded with zero calls and become visible only on completion.
         query: `SELECT *
           FROM (
             SELECT
@@ -327,7 +329,8 @@ const productActivityDb = defineConnection({
                   JOIN organization o ON o.id = m."organizationId"
                   WHERE m."userId" = u.id
                 ), 'No organization')
-              ) AS payload_text
+              ) AS payload_text,
+              u."createdAt" AS observed_at
             FROM "user" u
             WHERE coalesce(u.principal_kind, 'human') = 'human'
 
@@ -347,7 +350,8 @@ const productActivityDb = defineConnection({
                   JOIN organization o ON o.id = m."organizationId"
                   WHERE m."userId" = u.id
                 ), 'No organization')
-              )
+              ),
+              s."createdAt"
             FROM session s
             JOIN "user" u ON u.id = s."userId"
             WHERE coalesce(u.principal_kind, 'human') = 'human'
@@ -364,7 +368,8 @@ const productActivityDb = defineConnection({
                 coalesce(nullif(c.display_name, ''), 'Unnamed connection'),
                 o.name,
                 CASE WHEN u.email IS NOT NULL THEN 'created by ' || u.email END
-              )
+              ),
+              c.created_at
             FROM connections c
             JOIN organization o ON o.id = c.organization_id
             LEFT JOIN "user" u ON u.id = c.created_by
@@ -381,9 +386,9 @@ const productActivityDb = defineConnection({
                 coalesce(nullif(m.client_software_id, ''), nullif(client.client_name, ''), 'Unknown client'),
                 coalesce(nullif(u.name, ''), 'Unknown user'),
                 u.email,
-                'Account activity',
-                'First seen conversation; call totals and last activity are current state, not events'
-              )
+                'Account-linked conversation; workspace scope is not captured by this fact'
+              ),
+              m.last_activity_at
             FROM mcp_client_conversations m
             LEFT JOIN oauth_clients client ON client.id = m.client_id
             JOIN "user" u ON u.id = m.user_id
@@ -403,7 +408,8 @@ const productActivityDb = defineConnection({
                 coalesce(o.name, 'Account activity'),
                 e.payload_data->>'tool_name',
                 coalesce(e.payload_data->'error'->>'code', e.payload_data->'error'->>'name', 'Unknown error')
-              )
+              ),
+              e.created_at
             FROM events e
             JOIN "user" u ON u.id = e.created_by
             LEFT JOIN organization o ON o.id = e.organization_id

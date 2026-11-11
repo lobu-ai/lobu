@@ -59,7 +59,7 @@ describe("source-backed user milestones", () => {
         "product.landing_attributed",
       ]);
       expect(
-        rows.find((row) => row.origin_id.startsWith("landing:"))?.metadata
+        rows.find((row) => row.origin_id === `landing:${user}`)?.metadata
       ).toMatchObject({
         user_id: user,
         evidence_basis: "inferred",
@@ -67,7 +67,7 @@ describe("source-backed user milestones", () => {
         computed_at: "2026-01-02T06:00:00.000Z",
       });
       expect(
-        rows.find((row) => row.origin_id.startsWith("first-success:"))?.metadata
+        rows.find((row) => row.origin_id === `first-success:${user}`)?.metadata
       ).toMatchObject({
         user_id: user,
         evidence_basis: "observed",
