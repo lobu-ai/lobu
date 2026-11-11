@@ -353,6 +353,15 @@ export async function executeTool(
           { name: 'ToolResultError', message: error, code: structuredCode },
           { scope, kind: structuredCode ? classifyErrorKind(structuredCode, null) : 'user' }
         );
+      } else if (
+        (toolName === 'query_sdk' || toolName === 'run_sdk') &&
+        result !== null && typeof result === 'object' &&
+        'success' in result && result.success === false &&
+        'error' in result && result.error !== null && typeof result.error === 'object'
+      ) {
+        // SDK tools report script failures as data. Record the trusted sandbox
+        // classification without changing MCP isError or retrying side effects.
+        recordError(span, result.error, { scope });
       } else {
         span?.setStatus({ code: SpanStatusCode.OK });
       }
