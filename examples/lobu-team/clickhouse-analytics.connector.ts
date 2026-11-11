@@ -326,7 +326,7 @@ export default class ClickHouseAnalyticsConnector extends ConnectorRuntime<
   > = {
     key: "clickhouse.analytics",
     name: "ClickHouse analytics",
-    version: "1.1.0",
+    version: "1.1.1",
     description:
       "Run governed read-only SQL against an organization-owned ClickHouse analytics endpoint.",
     authSchema: {
