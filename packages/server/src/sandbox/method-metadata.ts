@@ -47,6 +47,13 @@ export type MethodMetadata = MethodAccessMetadata & {
 
 /** Runtime helpers passed through `ctx`, not dispatchable ClientSDK methods. */
 export const RUNTIME_HELPER_METADATA: Record<string, MethodMetadata> = {
+	"ctx.fail": {
+		summary:
+			"End the script with a non-retryable VALIDATION failure, even if caught. Use for permanent configuration or input errors; ordinary throws retain their current retry rules. The message uses the existing bounded error text limit. Completed side effects remain committed and reported.",
+		signature: "ctx.fail(message: string): never",
+		access: "read",
+		example: 'if (!ctx.entities?.length) ctx.fail("Attach an entity before running");',
+	},
 	"ctx.sleep": {
 		summary:
 			"Pause a sandbox script for 0–30000ms for a short, bounded retry delay. The wait ends at cancellation or the script deadline, which is terminal even if caught. For long device work, return a background operation run_id and read operations.getRun in a later invocation instead of polling here.",
