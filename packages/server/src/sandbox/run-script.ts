@@ -450,10 +450,18 @@ function trustedRuntimeClassification(
  * Classify an error the script surfaced: its uncaught throw, or a host error it
  * let propagate. Typed host errors keep their trusted classification; anything
  * else is a ScriptError, whatever its message says.
+ *
+ * `fromGuestRunner` marks an error the guest runner caught from the script's
+ * default export. Every host failure that crosses into the isolate carries a
+ * host token, so such an error without one is positively the script's own
+ * exception: a VALIDATION failure of the supplied program. Errors that reach
+ * the host's own catch (setup, protocol, a module's top-level throw) are not
+ * identified that way and stay unclassified.
  */
 function classifyRuntimeError(
 	error: unknown,
-	trust?: HostErrorTrust,
+	trust: HostErrorTrust | undefined,
+	fromGuestRunner: boolean,
 ): NonNullable<RunScriptResult["error"]> {
 	const record =
 		error !== null && typeof error === "object"
@@ -531,6 +539,7 @@ function classifyRuntimeError(
 	return {
 		name: "ScriptError",
 		message,
+		...(fromGuestRunner ? { code: "VALIDATION" as const, retryable: false } : {}),
 		...(record.stack != null
 			? {
 					stack: boundScriptErrorText(
@@ -1293,13 +1302,16 @@ export async function runScript(
 			return guardMessage(json) ? json : terminalEnvelope();
 		}
 		// Classification belongs at the script-result boundary: guest catch blocks
-		// still need the host error's name and diagnostic message.
+		// still need the host error's name and diagnostic message. An untyped
+		// host failure is still the host's, so it carries a trusted INTERNAL
+		// token: only an error without any host token is the script's own.
 		const failure = {
 			name: boundScriptErrorText(error instanceof Error ? error.name : "Error", MAX_SCRIPT_ERROR_NAME_BYTES),
 			message: boundScriptErrorText(
 				error instanceof Error ? error.message : errorFieldText(error, "Script execution failed"),
 				MAX_SCRIPT_ERROR_MESSAGE_BYTES,
 			),
+			classificationToken: trustErrorClassification("INTERNAL"),
 		};
 		const json = JSON.stringify({ __lobu_sdk_dispatch: 1, ok: false, error: failure });
 		return guardMessage(json) ? json : terminalEnvelope();
@@ -1719,7 +1731,7 @@ export async function runScript(
 				return {
 					success: false,
 					logs,
-					error: classifyRuntimeError(scriptError ?? {}, hostErrorTrust),
+					error: classifyRuntimeError(scriptError ?? {}, hostErrorTrust, true),
 					durationMs: Date.now() - started,
 					sdkCalls,
 					skippedCalls,
@@ -1798,7 +1810,7 @@ export async function runScript(
 			error:
 				e instanceof SandboxRuntimeFailure
 					? runtimeFailureError(e)
-					: classifyRuntimeError(e, hostErrorTrust),
+					: classifyRuntimeError(e, hostErrorTrust, false),
 			durationMs: Date.now() - started,
 			sdkCalls,
 			skippedCalls,
