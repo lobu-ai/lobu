@@ -340,8 +340,8 @@ export async function executeTool(
       // trackMCPToolCall): nobody was waiting for the answer.
       if (handlerSignal.current?.aborted) return result;
       if (isSoftErrorResult(result)) {
-        // A returned error is a handled rejection, so it counts as the
-        // caller's unless its structured code marks a failing dependency.
+        // Keep a structured failure's classification, including system errors.
+        // Only an untyped handled rejection defaults to the caller's fault.
         const { error, code, error_code } = result as {
           error: string;
           code?: unknown;
@@ -351,7 +351,7 @@ export async function executeTool(
         recordError(
           span,
           { name: 'ToolResultError', message: error, code: structuredCode },
-          { scope, kind: classifyErrorKind(structuredCode, null) === 'dependency' ? 'dependency' : 'user' }
+          { scope, kind: structuredCode ? classifyErrorKind(structuredCode, null) : 'user' }
         );
       } else {
         span?.setStatus({ code: SpanStatusCode.OK });
