@@ -912,11 +912,20 @@ export function validateTableQuery(
     return e.code === 'E200'; // unknown table — always a real error
   });
   const unknownTables: string[] = [];
+  const columnTables = new Set<string>();
   const messages: string[] = [];
   for (const error of errors as Array<{ code: string; message: string }>) {
     const match = error.code === 'E200' ? /Unknown table '([^']+)'/i.exec(error.message) : null;
     if (match) unknownTables.push(match[1]);
-    else messages.push(error.message);
+    else {
+      messages.push(error.message);
+      // E201 has no structured table field in polyglot's diagnostics.
+      const table = error.code === 'E201' ? /in table '([^']+)'/i.exec(error.message)?.[1] : undefined;
+      if (table && safeColumns.has(table)) columnTables.add(table);
+    }
+  }
+  for (const table of columnTables) {
+    messages.push(`Allowed columns for '${table}': ${safeColumns.get(table)!.map((column) => column.name).join(', ')}. Select named columns; whole-row expressions such as to_jsonb(alias) and alias::text are rejected to keep non-queryable columns private.`);
   }
   if (unknownTables.length > 0) {
     messages.unshift(formatUnknownTablesError(unknownTables, safeColumns.keys()));
