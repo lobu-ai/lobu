@@ -23,6 +23,7 @@ import { buildLatestClassificationsCteSql, buildThreadMetaCteSql } from './ctes'
 import { buildEntityLinkUnion, entityLinkMatchSql, fetchEntityIdentityScopes } from './entity-link';
 import type { EntityIdentityScope } from './entity-link';
 import {
+  INTERACTION_CARD_EXCLUSION_SQL,
   INTERNAL_OPS_EXCLUSION_SQL,
   buildFinalSelect,
   deduplicateWithClassifications,
@@ -516,6 +517,7 @@ export async function listContentInternal(
         exclude_workspace_audit: options.exclude_workspace_audit,
         exclude_operational_trail: options.exclude_operational_trail,
         exclude_internal_ops: options.exclude_internal_ops,
+        exclude_interaction_cards: options.exclude_interaction_cards,
       }
     );
 
@@ -687,6 +689,11 @@ export async function listContentInternal(
             // on the sibling site above.
             options.exclude_internal_ops && !options.semantic_type
               ? `AND ${INTERNAL_OPS_EXCLUSION_SQL}`
+              : ''
+          }
+          ${
+            options.exclude_interaction_cards && !options.semantic_type
+              ? `AND ${INTERACTION_CARD_EXCLUSION_SQL}`
               : ''
           }
           ${excludeClause.sql}

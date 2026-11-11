@@ -61,7 +61,7 @@ describe('account MCP dispatch', () => {
       expect(missing.result.isError).toBe(true);
       const invalidSql = await tracedCall('query_sql', { org_slug: first.slug, sql: 'SELECT private_missing_column' });
       expect(invalidSql.result.isError).toBe(true);
-      const scriptFailure = await tracedCall('query_sdk', { script: 'export default async () => { throw new Error("private-script-error"); };' });
+      const scriptFailure = await tracedCall('query_sdk', { script: 'export default async () => { function privateGuestFunction() { throw new Error("private-script-error"); } privateGuestFunction(); };' });
       expect(scriptFailure.result.isError ?? false).toBe(false);
       expect(scriptFailure.result.structuredContent.success).toBe(false);
       const spans = exporter.getFinishedSpans().filter((span) => span.attributes['lobu.tool_name']);
@@ -71,14 +71,14 @@ describe('account MCP dispatch', () => {
       expect(spans.map((span) => span.attributes['user.id'])).toEqual(Array(6).fill(auth.userId));
       expect(spans.map((span) => span.status.code)).toEqual([
         SpanStatusCode.OK, SpanStatusCode.OK, SpanStatusCode.ERROR,
-        SpanStatusCode.ERROR, SpanStatusCode.ERROR, SpanStatusCode.OK,
+        SpanStatusCode.ERROR, SpanStatusCode.ERROR, SpanStatusCode.ERROR,
       ]);
       // Failures are recorded as grouped, typed errors. Only the tool's own
       // message text is kept, parameterized; argument values never reach a span.
       expect(spans.map((span) => [span.attributes['exception.type'], span.attributes['error.kind'], span.attributes['error.code']])).toEqual([
         [undefined, undefined, undefined], [undefined, undefined, undefined],
         ['ToolUserError', 'user', 'PERMISSION'], ['ToolUserError', 'user', 'VALIDATION'],
-        ['ToolResultError', 'user', 'VALIDATION'], [undefined, undefined, undefined],
+        ['ToolResultError', 'user', 'VALIDATION'], ['ScriptError', 'user', 'VALIDATION'],
       ]);
       expect(JSON.stringify(spans.map((span) => ({ name: span.name, attributes: span.attributes, events: span.events, status: span.status })))).not.toMatch(/private|SELECT|throw new Error/);
 

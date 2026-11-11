@@ -147,6 +147,12 @@ describe('SDK host user-input errors are typed', () => {
     });
   });
 
+  it.each(['query_sdk', 'run_sdk'])('returns ctx.fail through %s as a terminal validation failure', async (tool) => {
+    const result = await call(tool, { script: script(`{ try { ctx.fail('Synthetic configuration required'); } catch {} return 'incorrect success'; }`) });
+    expect(result.success).toBe(false);
+    expect(result.error).toMatchObject({ name: 'ValidationError', message: 'Synthetic configuration required', code: 'VALIDATION', retryable: false });
+  });
+
   it('reports invalid operation input as VALIDATION', async () => {
     const result = await call('run_sdk', {
       script: script(`client.operations.execute({ connection_id: ${connectionId}, operation_key: 'echo', input: {} })`),

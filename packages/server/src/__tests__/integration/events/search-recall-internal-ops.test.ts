@@ -22,8 +22,12 @@
  */
 
 import { beforeAll, describe, expect, it } from 'vitest';
+import type { Env } from '../../../index';
+import { search } from '../../../tools/search';
+import type { ToolContext } from '../../../tools/registry';
 import { searchContentByText } from '../../../utils/content-search';
-import { cleanupTestDatabase } from '../../setup/test-db';
+import { initWorkspaceProvider } from '../../../workspace';
+import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import {
   addUserToOrganization,
   createTestEvent,
@@ -233,5 +237,115 @@ describe('searchContentByText > exclude_internal_ops', () => {
     const auditIds = auditOnly.content.map((r) => String(r.id));
     expect(auditIds).toContain(auditRowId);
     expect(auditIds).not.toContain(normalContentId);
+  });
+});
+
+/**
+ * Interactive cards — operation runs, approvals, entity-change cards — are run
+ * bookkeeping, not memory, but their titles name the entities they touched. On
+ * a workspace whose records are source-backed, `search_memory "Genentech
+ * renewal risk"` returned only "Entity updated: band, health, top_risks…"
+ * cards. Recall hides every row whose `interaction_type` is not 'none'; an
+ * explicit semantic_type filter still returns them, as it does for audit rows.
+ */
+describe('search_memory > interactive cards', () => {
+  const CARD_QUERY = 'Genentech renewal risk';
+  const env = {} as Env;
+  let orgId: string;
+  let ctx: ToolContext;
+  let noteId: number;
+  let changeCardId: number;
+  let approvalCardId: number;
+
+  async function createCard(input: {
+    title: string;
+    semantic_type: string;
+    interaction_status: string;
+  }): Promise<number> {
+    const event = await createTestEvent({
+      organization_id: orgId,
+      title: input.title,
+      content: '',
+      semantic_type: input.semantic_type,
+    });
+    // Only system writers set interaction_type; the fixture has no knob for it.
+    await getTestDb()`
+      UPDATE events
+      SET interaction_type = 'approval', interaction_status = ${input.interaction_status}
+      WHERE id = ${event.id}
+    `;
+    return Number(event.id);
+  }
+
+  beforeAll(async () => {
+    await initWorkspaceProvider();
+    const org = await createTestOrganization({ name: 'Interaction Card Org' });
+    orgId = org.id;
+    const user = await createTestUser({ email: 'interaction-cards@example.com' });
+    await addUserToOrganization(user.id, org.id, 'owner');
+    ctx = {
+      organizationId: org.id,
+      userId: user.id,
+      tokenType: 'session',
+      memberRole: 'owner',
+    } as ToolContext;
+
+    noteId = Number(
+      (
+        await createTestEvent({
+          organization_id: orgId,
+          title: 'Genentech renewal risk review',
+          content: 'Genentech renewal risk is high: the champion left in Q3.',
+          semantic_type: 'note',
+        })
+      ).id
+    );
+    changeCardId = await createCard({
+      title: 'Entity updated: Genentech renewal risk band, health, top_risks',
+      semantic_type: 'change',
+      interaction_status: 'completed',
+    });
+    approvalCardId = await createCard({
+      title: 'Review Genentech renewal risk field: Draft',
+      semantic_type: 'entity_change_approval',
+      interaction_status: 'pending',
+    });
+  });
+
+  it('search_memory leaves interactive cards out of recall', async () => {
+    const result = await search(
+      { query: CARD_QUERY, include_content: true, content_limit: 10 },
+      env,
+      ctx
+    );
+    const ids = (result.content ?? []).map((item) => item.id);
+    expect(ids).toContain(noteId);
+    expect(ids).not.toContain(changeCardId);
+    expect(ids).not.toContain(approvalCardId);
+  });
+
+  it('hides them on the list path too', async () => {
+    const result = await searchContentByText(null, {
+      organization_id: orgId,
+      exclude_interaction_cards: true,
+    });
+    const ids = result.content.map((r) => Number(r.id));
+    expect(ids).toContain(noteId);
+    expect(ids).not.toContain(changeCardId);
+    expect(ids).not.toContain(approvalCardId);
+  });
+
+  it('an explicit semantic_type filter still returns them on both paths', async () => {
+    for (const query of [CARD_QUERY, null]) {
+      const result = await searchContentByText(query, {
+        organization_id: orgId,
+        exclude_interaction_cards: true,
+        semantic_type: ['change', 'entity_change_approval'],
+      });
+      const ids = result.content.map((r) => Number(r.id));
+      expect(ids).toContain(changeCardId);
+      expect(ids).toContain(approvalCardId);
+      expect(ids).not.toContain(noteId);
+    }
   });
 });

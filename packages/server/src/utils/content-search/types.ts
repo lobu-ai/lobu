@@ -54,6 +54,12 @@ export interface ContentSearchOptions {
    * audit rows remain governed by exclude_workspace_audit.
    */
   exclude_internal_ops?: boolean;
+  /**
+   * Hide interactive cards — operation runs, approvals, entity-change cards
+   * (see INTERACTION_CARD_EXCLUSION_SQL). Recall only. A discovery filter
+   * like exclude_internal_ops: an explicit semantic_type filter lifts it.
+   */
+  exclude_interaction_cards?: boolean;
   run_id?: number; // Filter by Automation run ID
   /** Events analyzed by any run of this automation (`automation_run_events`). */
   analyzed_by_automation_id?: number;

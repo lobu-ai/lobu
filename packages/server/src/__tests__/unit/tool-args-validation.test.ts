@@ -4,7 +4,7 @@ import {
   InMemorySpanExporter,
   SimpleSpanProcessor,
 } from "@opentelemetry/sdk-trace-node";
-import { executeTool, type AuthContext } from "../../tools/execute";
+import { executeTool, isSoftErrorResult, type AuthContext } from "../../tools/execute";
 import { getTool } from "../../tools/registry";
 import { ToolUserError } from "../../utils/errors";
 
@@ -202,5 +202,39 @@ describe("executeTool error spans", () => {
       error_kind: span?.attributes["error.kind"],
     });
     expect(failure[0]).not.toHaveProperty("error_message");
+  });
+});
+
+
+describe("SDK script failure telemetry", () => {
+  it.each([
+    ["query_sdk", "VALIDATION", "user", "ScriptError"],
+    ["run_sdk", "PERMISSION", "user", "ScriptError"],
+    ["run_sdk", "VALIDATION", "user", "ValidationError"],
+    ["query_sdk", "UPSTREAM_TIMEOUT", "dependency", "ClientSdkActionError"],
+    ["run_sdk", "INTERNAL", "system", "RuntimeUnavailable"],
+    ["run_sdk", "INTERNAL", "user", "OutOfMemory"],
+  ])("records %s %s without turning its report into a tool error", async (toolName, code, kind, name) => {
+    const exporter = new InMemorySpanExporter();
+    await shutdownTracing();
+    initTracing({ serviceName: "sdk-script-span-test", spanProcessors: [new SimpleSpanProcessor(exporter)] });
+    const tool = getTool(toolName);
+    if (!tool) throw new Error(`${toolName} is not registered`);
+    const report = { success: false, error: { name, message: "private-script-error", stack: "Error: private-script-error\n    at privateGuestFunction (synthetic-script.ts:1:1)", code, retryable: false } };
+    const handler = spyOn(tool, "handler").mockResolvedValue(report);
+    try {
+      const result = await executeTool(toolName, { script: "export default async () => 1" }, {} as never, baseAuth);
+      expect(result).toEqual(report);
+      expect(isSoftErrorResult(result)).toBe(false);
+      const [span] = exporter.getFinishedSpans().filter((entry) => entry.name === `tool ${toolName}`);
+      expect(span?.status.code).toBe(SpanStatusCode.ERROR);
+      expect(span?.attributes).toMatchObject({ "exception.type": name, "error.code": code, "error.kind": kind });
+      if (name === "ScriptError" || name === "ValidationError") {
+        expect(JSON.stringify({ attributes: span?.attributes, events: span?.events, status: span?.status })).not.toContain("private");
+      }
+    } finally {
+      handler.mockRestore();
+      await shutdownTracing();
+    }
   });
 });

@@ -37,6 +37,26 @@ export function internalOpsExclusionSql(alias: string): string {
 export const INTERNAL_OPS_EXCLUSION_SQL = internalOpsExclusionSql('f');
 
 /**
+ * Rows that are interactive cards rather than knowledge: operation runs and
+ * their approvals, entity-change cards, questions, link buttons and UI
+ * suggestions. Every one carries an `interaction_type` other than the column's
+ * `'none'` default, which only system writers set (`save_content` cannot).
+ * Their titles ("Entity updated: band, health, …", "Review task field: Draft")
+ * name the entities they touched, so recall title-matches them ahead of the
+ * workspace's actual memory.
+ *
+ * Recall hides them by default; like INTERNAL_OPS_EXCLUSION_SQL this is a
+ * discovery filter that an explicit semantic_type filter lifts. The column is
+ * NOT NULL, so the bare comparison keeps the planner's statistics (see
+ * operationalTrailExclusionSql).
+ */
+function interactionCardExclusionSql(alias: string): string {
+  return `${alias}.interaction_type = 'none'`;
+}
+
+export const INTERACTION_CARD_EXCLUSION_SQL = interactionCardExclusionSql('f');
+
+/**
  * Rows a public workspace never publishes to readers outside it: the
  * operational trail rather than knowledge. Matched on system-written columns
  * that `save_content` cannot set:
@@ -60,7 +80,7 @@ export const INTERNAL_OPS_EXCLUSION_SQL = internalOpsExclusionSql('f');
 // its statistics. Wrapped in COALESCE it estimated a few hundred matching rows
 // and nested-looped the anti-join (64s for a 300k-event public list read).
 export function operationalTrailExclusionSql(alias: string): string {
-  return `(${alias}.interaction_type = 'none'
+  return `(${interactionCardExclusionSql(alias)}
            AND ${alias}.semantic_type IS DISTINCT FROM 'change_set'
            AND jsonb_typeof(${alias}.metadata->'notification_type') IS DISTINCT FROM 'string'
            AND NOT EXISTS (SELECT 1 FROM notification_targets nt WHERE nt.event_id = ${alias}.id))`;
