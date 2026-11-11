@@ -134,6 +134,19 @@ describe('SDK host user-input errors are typed', () => {
     expect(result.error).toMatchObject({ name: 'CrossOrgAccessDenied', code: 'PERMISSION', retryable: false });
   });
 
+  describe.each(['query_sdk', 'run_sdk'])('%s sandbox limits', (tool) => {
+    it.each([
+      ['OutputSizeExceeded', "'x'.repeat(4_200_000)"],
+      ['QuotaExceeded', '(async () => { for (let i = 0; i < 201; i++) await client.organizations.current(); })()'],
+      ['SleepLimitExceeded', 'ctx.sleep(30001)'],
+      ['InvalidSleepDuration', 'ctx.sleep(-1)'],
+    ])('reports %s as non-retryable VALIDATION', async (name, body) => {
+      const result = await call(tool, { script: script(body) });
+      expect(result.success).toBe(false);
+      expect(result.error).toMatchObject({ name, code: 'VALIDATION', retryable: false });
+    });
+  });
+
   it('reports invalid operation input as VALIDATION', async () => {
     const result = await call('run_sdk', {
       script: script(`client.operations.execute({ connection_id: ${connectionId}, operation_key: 'echo', input: {} })`),
