@@ -208,17 +208,18 @@ describe("executeTool error spans", () => {
 
 describe("SDK script failure telemetry", () => {
   it.each([
-    ["query_sdk", "VALIDATION", "user"],
-    ["run_sdk", "PERMISSION", "user"],
-    ["query_sdk", "UPSTREAM_TIMEOUT", "dependency"],
-    ["run_sdk", "INTERNAL", "system"],
-  ])("records %s %s without turning its report into a tool error", async (toolName, code, kind) => {
+    ["query_sdk", "VALIDATION", "user", "ScriptError"],
+    ["run_sdk", "PERMISSION", "user", "ScriptError"],
+    ["query_sdk", "UPSTREAM_TIMEOUT", "dependency", "ClientSdkActionError"],
+    ["run_sdk", "INTERNAL", "system", "RuntimeUnavailable"],
+    ["run_sdk", "INTERNAL", "user", "OutOfMemory"],
+  ])("records %s %s without turning its report into a tool error", async (toolName, code, kind, name) => {
     const exporter = new InMemorySpanExporter();
     await shutdownTracing();
     initTracing({ serviceName: "sdk-script-span-test", spanProcessors: [new SimpleSpanProcessor(exporter)] });
     const tool = getTool(toolName);
     if (!tool) throw new Error(`${toolName} is not registered`);
-    const report = { success: false, error: { name: "ScriptError", message: "Synthetic script failure", code, retryable: false } };
+    const report = { success: false, error: { name, message: "Synthetic script failure", code, retryable: false } };
     const handler = spyOn(tool, "handler").mockResolvedValue(report);
     try {
       const result = await executeTool(toolName, { script: "export default async () => 1" }, {} as never, baseAuth);
@@ -226,7 +227,7 @@ describe("SDK script failure telemetry", () => {
       expect(isSoftErrorResult(result)).toBe(false);
       const [span] = exporter.getFinishedSpans().filter((entry) => entry.name === `tool ${toolName}`);
       expect(span?.status.code).toBe(SpanStatusCode.ERROR);
-      expect(span?.attributes).toMatchObject({ "exception.type": "ScriptError", "error.code": code, "error.kind": kind });
+      expect(span?.attributes).toMatchObject({ "exception.type": name, "error.code": code, "error.kind": kind });
     } finally {
       handler.mockRestore();
       await shutdownTracing();

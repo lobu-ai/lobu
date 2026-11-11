@@ -249,11 +249,10 @@ describe('sandbox run (wire)', () => {
     expect(json).toMatch(/"n":\d+/);
   });
 
-  it.each([
+  it.skipIf(!isolatedAvailable).each([
     ['query_sdk', 'throw new Error("Synthetic caller failure");', 'VALIDATION', 'user'],
-    ['run_sdk', 'for (;;) {}', 'INTERNAL', 'system'],
-  ])('traces %s script failures while preserving the MCP result', async (tool, body, code, kind, testCtx) => {
-    if (!isolatedAvailable) return testCtx.skip();
+    ['run_sdk', 'for (;;) {}', 'INTERNAL', 'user'],
+  ])('traces %s script failures while preserving the MCP result', async (tool, body, code, kind) => {
     const exporter = new InMemorySpanExporter();
     await shutdownTracing();
     initTracing({ serviceName: 'sdk-wire-telemetry-test', spanProcessors: [new SimpleSpanProcessor(exporter)] });

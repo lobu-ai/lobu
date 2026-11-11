@@ -361,7 +361,14 @@ export async function executeTool(
       ) {
         // SDK tools report script failures as data. Record the trusted sandbox
         // classification without changing MCP isError or retrying side effects.
-        recordError(span, result.error, { scope });
+        // These names are host-owned: guest throws are always ScriptError.
+        // Exhausting a caller's script budget is user telemetry even while the
+        // public response retains its historical INTERNAL code.
+        const callerBudget = 'name' in result.error && [
+          'TimeoutError', 'OutOfMemory', 'QuotaExceeded', 'OutputSizeExceeded',
+          'InvalidSleepDuration', 'SleepLimitExceeded',
+        ].includes(String(result.error.name));
+        recordError(span, result.error, { scope, ...(callerBudget ? { kind: 'user' as const } : {}) });
       } else {
         span?.setStatus({ code: SpanStatusCode.OK });
       }
