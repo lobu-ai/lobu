@@ -9,6 +9,7 @@ import { Value } from '@sinclair/typebox/value';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { upsertEntityApprovalPolicy } from '../../../authz/entity-policy';
 import type { AuthzScope } from '../../../authz/scope';
+import { formatToolResult } from '../../../formatting/markdown-formatter';
 import type { Env } from '../../../index';
 import { manageFeeds } from '../../../tools/admin/manage_feeds';
 import { QuerySqlSchema } from '../../../tools/admin/query_sql';
@@ -16,6 +17,7 @@ import type { ToolContext } from '../../../tools/registry';
 import { manageEntity } from '../../../tools/admin/manage_entity';
 import {
   gatherLocalRecall,
+  mergeFederatedSearchResults,
   type RecallContext,
   search,
   UnifiedSearchResultSchema,
@@ -424,6 +426,33 @@ describe('explicit feed source reads', () => {
       )) as { entities: Array<{ name: string }> };
       expect(listed.entities.map((entity) => entity.name).sort()).toEqual(['apple']);
     }, 60_000);
+
+    it.each(['apple', 'synthetic absent record'])('renders discovered live targets despite an unavailable workspace (query=%s)', async (query) => {
+      const args = { query };
+      const available = await withSourceTableLocked(() => search(args, {} as Env, ownerCtx));
+      const result = mergeFederatedSearchResults(args, [
+        { id: orgId, slug: orgSlug, name: 'ExplicitFeedReads', role: 'owner', personal: false },
+        { ...emptyOrg, role: 'owner', personal: false },
+      ], [
+        { status: 'fulfilled', value: available },
+        { status: 'rejected', reason: new Error('synthetic workspace outage') },
+      ]);
+
+      expect(result.coverage?.source_entity_discovery).toBe('unavailable');
+      expect(result.matches).toEqual([]);
+      if (query === 'apple') {
+        expect(result.content?.map((item) => item.id)).toContain(localNoteId);
+      } else {
+        expect(result.content).toEqual([]);
+      }
+      const markdown = formatToolResult('search_memory', result);
+      expect(markdown).toMatch(/entity type discovery was unavailable/i);
+      expect(markdown).toContain(`\`${FRUIT_TYPE}\``);
+      expect(markdown).toContain(`\`${PRIVATE_TYPE}\``);
+      expect(markdown).toContain(`workspace \`${orgSlug}\``);
+      expect(markdown).toContain('client.entities.list');
+      expect(markdown).not.toMatch(/No accessible live source-backed entity types/i);
+    });
 
     it('leaves out types on connections the caller cannot see', async () => {
       const result = await search({ query: 'apple' }, {} as Env, memberCtx());

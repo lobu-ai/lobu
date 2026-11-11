@@ -478,12 +478,13 @@ function formatSearchCoverage(coverage: any): string {
 
 function formatSourceEntityTypes(coverage: any): string {
   if (coverage.source_entity_discovery === undefined) return '';
+  let md = '';
   if (coverage.source_entity_discovery === 'unavailable') {
-    return 'Live source-backed entity type discovery was unavailable for this search.\n\n';
+    md += 'Live source-backed entity type discovery was unavailable for this search.\n\n';
   }
   const types = Array.isArray(coverage.source_entity_types) ? coverage.source_entity_types : [];
-  if (types.length === 0) return 'No accessible live source-backed entity types were found.\n\n';
-  let md =
+  if (types.length === 0) return md || 'No accessible live source-backed entity types were found.\n\n';
+  md +=
     "Live source-backed records were not searched. Look a named record up with `client.entities.list({ entity_type, search: <the record's name>, limit: 5 })` in its workspace.\n\n";
   md += 'Live entity types (not queried):\n\n';
   for (const type of types) {
