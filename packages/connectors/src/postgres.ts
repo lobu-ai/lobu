@@ -72,9 +72,9 @@ interface PgQueryConfig {
 }
 
 interface PgCheckpoint {
-  /** Last cursor value seen, serialized (ISO for dates, String() otherwise). */
+  /** Native PostgreSQL text for the last cursor, preserving timestamp microseconds. */
   last_cursor?: string;
-  /** Last primary-key value seen, serialized. */
+  /** Native PostgreSQL text for the last primary-key value. */
   last_pk?: string;
 }
 
@@ -362,11 +362,6 @@ async function setReadOnly(
   await tx.unsafe(`SET LOCAL statement_timeout = ${Math.floor(timeoutMs)}`);
 }
 
-function toCheckpointValue(v: unknown): string {
-  if (v instanceof Date) return v.toISOString();
-  return String(v);
-}
-
 function toDate(v: unknown): Date | null {
   if (v instanceof Date) return v;
   if (typeof v === 'number') return new Date(v);
@@ -386,7 +381,7 @@ export default class PostgresConnector extends ConnectorRuntime {
     name: 'PostgreSQL',
     description:
       'Bring your own PostgreSQL database as memory, read a configured feed directly, or run governed connection-level SQL.',
-    version: '1.1.0',
+    version: '1.1.1',
     queryCapabilities: { exactMatch: true, verbatimExactMatch: true, exactMatchAny: true, selection: true },
     faviconDomain: 'postgresql.org',
     authSchema: {
@@ -449,7 +444,7 @@ export default class PostgresConnector extends ConnectorRuntime {
       // Everything runs inside ONE read-only transaction — the probe included —
       // so even a crafted query (e.g. a data-modifying CTE that slipped past
       // validation) cannot write while we introspect or read.
-      const rows = (await sql.begin(async (tx) => {
+      const rows = await sql.begin(async (tx) => {
         await setReadOnly(tx, timeoutMs);
 
         // 1. Probe column types so the string-serialized checkpoint can be re-cast.
@@ -470,10 +465,28 @@ export default class PostgresConnector extends ConnectorRuntime {
         };
         const curCast = castFor(cursorCol);
         const pkCast = castFor(pkCol);
+        // Bind as text before the native cast: binding directly as a timestamp
+        // makes postgres.js serialize the string through Date, losing precision again.
+        const curBound = curCast ? `$1::text${curCast}` : '$1';
+        const pkBound = pkCast ? `$2::text${pkCast}` : '$2';
 
-        // 2. Build the keyset-paginated query.
+        // Keep checkpoints separate from driver-decoded payloads: Date loses
+        // microseconds, which can make a capped page repeat forever. Native
+        // text round-trips through the same type casts used by the predicate.
+        // Choose unused aliases so source columns with these names survive.
+        const checkpointAlias = (base: string): string => {
+          let name = base;
+          let suffix = 0;
+          while (colByName.has(name)) name = `${base}_${++suffix}`;
+          return name;
+        };
+        const cursorAlias = checkpointAlias('__lobu_checkpoint_cursor');
+        const pkAlias = checkpointAlias('__lobu_checkpoint_pk');
         const colCur = `q."${cursorCol}"`;
         const colPk = `q."${pkCol}"`;
+        const projection = `q.*, ${colCur}::text AS "${cursorAlias}", ${colPk}::text AS "${pkAlias}"`;
+
+        // 2. Build the keyset-paginated query.
         const haveCursor =
           checkpoint.last_cursor !== undefined && checkpoint.last_pk !== undefined;
 
@@ -483,18 +496,25 @@ export default class PostgresConnector extends ConnectorRuntime {
           // security-allowed: colCur/colPk are assertIdentifier-validated + quoted;
           // the cursor/pk values are bound parameters ($1/$2/$3), not interpolated.
           wrapped =
-            `SELECT * FROM (\n${baseSql}\n) q\n` +
-            `WHERE (${colCur} > $1${curCast} ` +
-            `OR (${colCur} = $1${curCast} AND ${colPk} > $2${pkCast}))\n` +
+            `SELECT ${projection} FROM (\n${baseSql}\n) q\n` +
+            `WHERE (${colCur} > ${curBound} ` +
+            `OR (${colCur} = ${curBound} AND ${colPk} > ${pkBound}))\n` +
             `ORDER BY ${colCur}, ${colPk} LIMIT $3`;
           params = [checkpoint.last_cursor, checkpoint.last_pk, limit];
         } else {
-          wrapped = `SELECT * FROM (\n${baseSql}\n) q\nORDER BY ${colCur}, ${colPk} LIMIT $1`;
+          wrapped = `SELECT ${projection} FROM (\n${baseSql}\n) q\nORDER BY ${colCur}, ${colPk} LIMIT $1`;
           params = [limit];
         }
 
-        return tx.unsafe(wrapped, params as never[]);
-      })) as unknown as Array<Record<string, unknown>>;
+        const page = await tx.unsafe(wrapped, params as never[]);
+        return page.map((source) => {
+          const { [cursorAlias]: cursor, [pkAlias]: pk, ...row } = source;
+          return {
+            row,
+            checkpoint: { last_cursor: String(cursor), last_pk: String(pk) } satisfies PgCheckpoint,
+          };
+        });
+      });
 
       // Namespace origin_ids by the feed INSTANCE, not the feed key: every
       // postgres feed shares feedKey 'query', so two feeds on one connection with
@@ -508,14 +528,9 @@ export default class PostgresConnector extends ConnectorRuntime {
       // so a run cut short keeps every slice it committed.
       for (let start = 0; start < rows.length; start += COMMIT_ROWS) {
         const slice = rows.slice(start, start + COMMIT_ROWS);
-        const last = slice[slice.length - 1];
-        const sliceCheckpoint: PgCheckpoint = {
-          last_cursor: toCheckpointValue(last[cursorCol]),
-          last_pk: toCheckpointValue(last[pkCol]),
-        };
         await ctx.commit(
-          slice.map((row) => this.rowToEvent(originPrefix, row, config, cursorCol, pkCol)),
-          sliceCheckpoint as unknown as Record<string, unknown>
+          slice.map(({ row }) => this.rowToEvent(originPrefix, row, config, cursorCol, pkCol)),
+          slice[slice.length - 1].checkpoint
         );
       }
 
