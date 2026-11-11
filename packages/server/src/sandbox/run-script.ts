@@ -539,7 +539,7 @@ function classifyRuntimeError(
 		typeof record.classificationToken === "string"
 			? trust?.runtimeFailures.get(record.classificationToken)
 			: undefined;
-	if (runtimeFailure) return { name: runtimeFailure, message };
+	if (runtimeFailure) return runtimeFailureError({ reason: runtimeFailure, message });
 
 	// Whatever the script itself threw. Its name and message are the script's
 	// own text, so neither can make it a runtime failure: those are decided
@@ -561,10 +561,16 @@ function classifyRuntimeError(
 
 /** The public error for a runtime failure the host itself determined. */
 function runtimeFailureError(
-	failure: SandboxRuntimeFailure,
+	failure: Pick<SandboxRuntimeFailure, "reason" | "message">,
 ): NonNullable<RunScriptResult["error"]> {
+	const isCallerLimit =
+		failure.reason === "QuotaExceeded" ||
+		failure.reason === "OutputSizeExceeded" ||
+		failure.reason === "InvalidSleepDuration" ||
+		failure.reason === "SleepLimitExceeded";
 	return {
 		name: failure.reason,
+		...(isCallerLimit ? { code: "VALIDATION" as const } : {}),
 		message: boundScriptErrorText(
 			failure.message,
 			MAX_SCRIPT_ERROR_MESSAGE_BYTES,

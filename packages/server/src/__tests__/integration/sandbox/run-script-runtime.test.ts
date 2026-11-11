@@ -1416,7 +1416,7 @@ describe("sandbox output budgets", () => {
     });
 
     expect(result.success).toBe(false);
-    expect(result.error?.name).toBe("OutputSizeExceeded");
+    expect(result.error).toMatchObject({ name: "OutputSizeExceeded", code: "VALIDATION" });
     expect(result.returnValuePreview).toBeUndefined();
   });
 
@@ -1498,7 +1498,7 @@ describe("sandbox output budgets", () => {
     });
 
     expect(result.success).toBe(false);
-    expect(result.error?.name).toBe("OutputSizeExceeded");
+    expect(result.error).toMatchObject({ name: "OutputSizeExceeded", code: "VALIDATION" });
   });
 
   it("does not let a large SDK call result evict a small return value", async () => {
@@ -1545,7 +1545,7 @@ describe("sandbox output budgets", () => {
     });
 
     expect(result.success).toBe(false);
-    expect(result.error?.name).toBe("OutputSizeExceeded");
+    expect(result.error).toMatchObject({ name: "OutputSizeExceeded", code: "VALIDATION" });
     // Only the first result ran host work before the message cap terminated.
     expect(hostCalls).toBe(1);
   });
@@ -1568,7 +1568,7 @@ describe("sandbox output budgets", () => {
     });
 
     expect(result.success).toBe(false);
-    expect(result.error?.name).toBe("OutputSizeExceeded");
+    expect(result.error).toMatchObject({ name: "OutputSizeExceeded", code: "VALIDATION" });
     expect(hostCalls).toBe(0);
   });
 
@@ -1579,7 +1579,7 @@ describe("sandbox output budgets", () => {
     });
 
     expect(result.success).toBe(false);
-    expect(result.error?.name).toBe("OutputSizeExceeded");
+    expect(result.error).toMatchObject({ name: "OutputSizeExceeded", code: "VALIDATION" });
     expect(result.returnValuePreview).toBeUndefined();
   });
 
@@ -1626,7 +1626,7 @@ describe("sandbox output budgets", () => {
     });
 
     expect(result.success).toBe(false);
-    expect(result.error?.name).toBe("OutputSizeExceeded");
+    expect(result.error).toMatchObject({ name: "OutputSizeExceeded", code: "VALIDATION" });
     expect(hostCalls).toBe(0);
   });
 
@@ -1651,7 +1651,7 @@ describe("sandbox output budgets", () => {
     });
 
     expect(result.success).toBe(false);
-    expect(result.error?.name).toBe("QuotaExceeded");
+    expect(result.error).toMatchObject({ name: "QuotaExceeded", code: "VALIDATION" });
     // Terminated on quota exhaustion, not left spinning until the timeout.
     expect(Date.now() - started).toBeLessThan(3000);
   });
@@ -1676,7 +1676,7 @@ describe("sandbox output budgets", () => {
     });
 
     expect(result.success).toBe(false);
-    expect(result.error?.name).toBe("OutputSizeExceeded");
+    expect(result.error).toMatchObject({ name: "OutputSizeExceeded", code: "VALIDATION" });
     // Interrupted at the first oversized payload, well under the 5s timeout.
     expect(Date.now() - started).toBeLessThan(3000);
   });
@@ -1912,12 +1912,12 @@ describe("sandbox runtime failure classification", () => {
       source: "export default async (ctx) => ctx.sleep(30001);",
       sdk: stubSDK(),
     });
-    expect(result.error).toMatchObject({ name: "SleepLimitExceeded" });
+    expect(result.error).toMatchObject({ name: "SleepLimitExceeded", code: "VALIDATION" });
     const invalid = await runScript({
       source: "export default async (ctx) => ctx.sleep(-1);",
       sdk: stubSDK(),
     });
-    expect(invalid.error).toMatchObject({ name: "InvalidSleepDuration" });
+    expect(invalid.error).toMatchObject({ name: "InvalidSleepDuration", code: "VALIDATION" });
   });
 });
 
