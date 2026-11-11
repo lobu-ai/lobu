@@ -142,6 +142,24 @@ describe('query_sql unknown-table errors are never rendered as an empty result',
     expect(res.errors.join('; ')).toMatch(/Unknown column 'platform'/i);
   });
 
+  it('offers only the caller-supplied safe columns after an unknown-column rejection', () => {
+    const columns = new Map([['example_records', [{ name: 'id', type: 'text' }, { name: 'label', type: 'text' }]]]);
+    const result = validateTableQuery('SELECT private_token FROM example_records', columns);
+    expect(result.valid).toBe(false);
+    const guidance = result.errors.find((message) => message.startsWith('Allowed columns'));
+    expect(guidance).toContain('example_records');
+    expect(guidance).toContain('id, label');
+    expect(guidance).not.toContain('private_token');
+    expect(guidance).not.toContain('organization_id');
+  });
+
+  it.each(['to_jsonb(e)', 'e::text'])('explains the whole-row guard for %s', (projection) => {
+    const result = validateTableQuery(`SELECT ${projection} FROM events e`);
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((message) => message.includes('whole-row'))).toBe(true);
+    expect(result.errors.some((message) => message.startsWith('Allowed columns'))).toBe(true);
+  });
+
   it('an admin-only table is rejected as an error, never an empty result', () => {
     expect(ADMIN_ONLY_QUERYABLE_TABLES.has('oauth_tokens')).toBe(true);
     let message = '';
