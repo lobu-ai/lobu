@@ -14,6 +14,7 @@ import { createHash } from "node:crypto";
 import type { EventAttributionRule } from "@lobu/connector-sdk";
 import { getErrorMessage } from "@lobu/core";
 import { recordKey, recordKeyColumn } from "@lobu/core/contracts/entity-reference";
+import type { SourceReadFailure } from "@lobu/core/contracts/tools/manage-entity";
 import type { GetContentArgs } from "@lobu/core/contracts/tools/read-knowledge";
 import type { SourceReadScope } from "../authz/scope";
 import { compileConnectionRowVisibility } from "../authz/connection-visibility";
@@ -46,9 +47,20 @@ interface SourceRecordRef {
   key: string;
 }
 
-interface SourceReadFailure {
-  feed_id: number;
-  error: string;
+/**
+ * A rejected feed read. A connector that deliberately withholds the record
+ * declares it structurally (own `code === 'withheld'`, carried across the
+ * isolate boundary); retrying cannot change that, so the caller never retains
+ * it in a cursor. Every other rejection is a failure kept for an explicit retry.
+ */
+function readFailure(feedId: number, error: unknown): SourceReadFailure {
+  return {
+    feed_id: feedId,
+    error: getErrorMessage(error),
+    ...((error as { code?: unknown } | null)?.code === "withheld"
+      ? { code: "withheld" as const }
+      : {}),
+  };
 }
 
 /** The attribution's first identity path the feed can filter on. */
@@ -252,7 +264,8 @@ function activityStreams(feeds: SourceFeed[], type: string) {
  * One page of a record's events across every attributing read feed, newest
  * first and at most `limit` long. Streams are merged by occurred_at; the
  * cursor resumes each stream after its last consumed row, so unconsumed rows
- * stay at the source. A failing feed is reported, never shown as "no activity", and resumes where it stopped.
+ * stay at the source. A failing feed is reported, never shown as "no activity", and resumes where it stopped;
+ * a withheld feed is reported and ends its stream.
  */
 export async function readSourceRecordActivity(
   scope: SourceReadScope,
@@ -301,11 +314,9 @@ export async function readSourceRecordActivity(
           }
           return [{ feed, path, stream, cursor, page, taken: 0 }];
         } catch (error) {
-          failures.push({
-            feed_id: feed.feedId,
-            error: getErrorMessage(error),
-          });
-          next[stream] = cursor;
+          const failure = readFailure(feed.feedId, error);
+          failures.push(failure);
+          if (!failure.code) next[stream] = cursor;
           return [];
         }
       })
@@ -556,8 +567,9 @@ async function readLinkPage(
             },
           ];
         } catch (error) {
-          failures.push({ feed_id: feed.feedId, error: getErrorMessage(error) });
-          next[key] = position;
+          const failure = readFailure(feed.feedId, error);
+          failures.push(failure);
+          if (!failure.code) next[key] = position;
           return [];
         }
       })

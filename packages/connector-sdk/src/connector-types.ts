@@ -1193,6 +1193,12 @@ export type FeedSyncHandler<C = Record<string, unknown>, F = Record<string, unkn
   ctx: SyncContext<C, F>
 ) => Promise<SyncResult>;
 
+/**
+ * Reads one page from the source. Throw `SourceWithheldError` (or any error
+ * whose own `code` is `'withheld'`) when the source deliberately withholds the
+ * requested record: callers report it as private with the error's message as
+ * the reason, and never retry it. Any other rejection is a read failure.
+ */
 export type FeedReadHandler<F = Record<string, unknown>> = (
   ctx: FeedReadContext<F>
 ) => Promise<FeedReadResult>;

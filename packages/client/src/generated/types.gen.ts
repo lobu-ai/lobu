@@ -1537,7 +1537,7 @@ export type ManageEntityData = {
          */
         offset?: number;
         /**
-         * [list_links, source records] Omit or pass null for the first bounded page, then pass next_cursor until it is null. Stop automatic pagination on record_failures; the cursor retains failed sources for an explicit retry. Pages may be short or empty while next_cursor exists. Merge repeated links across pages by (relationship_type, direction, entity_type, key), keeping the newest occurred_at. Numeric entity_id calls retain limit/offset pagination; source pages bound limit to 100. Authored relationships are permission checked at both endpoints. counts_by_type describes the visible page (counts_scope: page), not a global total. Source pages reject source, confidence_min and include_deleted filters, which cannot be applied to live links. Source reads share a 20 second page deadline. Unavailable endpoints are withheld with key-free relationship_failures; readable links remain available. Updating an edge still requires readable endpoints. Unlink by relationship_id remains available during outages.
+         * [list_links, source records] Omit or pass null for the first bounded page, then pass next_cursor until it is null. Stop automatic pagination on record_failures without a code; the cursor retains those failed sources for an explicit retry. A failure with code 'withheld' is a source deliberately keeping the record private (error is its reason): its links are not missing, it is never retried, and pagination continues. Pages may be short or empty while next_cursor exists. Merge repeated links across pages by (relationship_type, direction, entity_type, key), keeping the newest occurred_at. Numeric entity_id calls retain limit/offset pagination; source pages bound limit to 100. Authored relationships are permission checked at both endpoints. counts_by_type describes the visible page (counts_scope: page), not a global total. Source pages reject source, confidence_min and include_deleted filters, which cannot be applied to live links. Source reads share a 20 second page deadline. Unavailable endpoints are withheld with key-free relationship_failures; readable links remain available. Updating an edge still requires readable endpoints. Unlink by relationship_id remains available during outages.
          */
         cursor?: string | null;
         /**
@@ -1987,6 +1987,10 @@ export type ManageEntityResponses = {
         record_failures: Array<{
           feed_id: number;
           error: string;
+          /**
+           * The source deliberately withholds this record and `error` is its reason. Its items are private, not missing; it is never retained for retry.
+           */
+          code?: "withheld";
         }>;
         next_cursor?: string | null;
       }
@@ -7325,6 +7329,10 @@ export type ReadKnowledgeResponses = {
     record_failures?: Array<{
       feed_id: number;
       error: string;
+      /**
+       * The source deliberately withholds this record and `error` is its reason. Its items are private, not missing; it is never retained for retry.
+       */
+      code?: "withheld";
     }>;
     entities?: Array<unknown>;
     unprocessed_ranges?: Array<unknown>;
