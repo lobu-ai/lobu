@@ -458,6 +458,10 @@ export type SaveMemoryResponse = SaveMemoryResponses[keyof SaveMemoryResponses];
 export type SearchSdkData = {
   body: {
     /**
+     * Human-friendly heading for this search (e.g. "Feed methods"). The activity feed shows it on this call.
+     */
+    title?: string;
+    /**
      * SDK method or runtime-helper discovery query. Use a namespace (e.g. 'automations'), one or more dotted paths separated by whitespace (e.g. 'automations.create ctx.sleep'), an optional client. prefix, or free text. Pass mode='read' for query_sdk-safe methods only; omit mode for your full run_sdk tier. Namespaces: agents, authProfiles, automations, catalog, classifiers, connections, conversations, ctx, devices, entities, entitySchema, feeds, inferenceProviders, knowledge, metrics, notifications, operations, organizations, schedules, views.
      */
     query: string;
@@ -508,6 +512,10 @@ export type SearchSdkResponses = {
    * Successful response
    */
   200: {
+    /**
+     * The caller's heading, echoed.
+     */
+    title?: string;
     /**
      * The query that was searched.
      */
