@@ -29,7 +29,7 @@ import { AUDIT_SEMANTIC_TYPE, MEMBER_ENTITY_TYPE_SLUG } from './constants';
 import { canSeeMemberEmail, canSeeMemberList, redactMemberEmail } from '../utils/member-entity-type';
 import { type AuthzScope, authzScopeFromToolContext } from '../authz/scope';
 import { compileConnectionRowVisibility } from '../authz/connection-visibility';
-import { getDb } from '../db/client';
+import { getDb, pgTextArray } from '../db/client';
 import type { Env } from '../index';
 import type { ContentItem } from '@lobu/connector-sdk';
 import {
@@ -43,6 +43,7 @@ import { redactConnectionRows } from '../utils/connection-config-redaction';
 import { toVectorLiteral } from '../utils/entity-management';
 import { generateQueryEmbedding } from '../utils/embeddings';
 import { ToolUserError } from '../utils/errors';
+import { raceAbort } from '../utils/race-abort';
 import logger from '../utils/logger';
 import { expandSearchQueries } from '../utils/query-expansion';
 import { buildEntityUrl, getPublicWebUrl } from '../utils/url-builder';
@@ -218,6 +219,40 @@ const SourceFeedCoverageSchema = Type.Object({
   workspace_slug: Type.String(),
 });
 
+/**
+ * A live, source-backed entity type (`backing: { connection, sql }`) this
+ * search deliberately did not query. Its records exist only in the connected
+ * source, so local recall can never match them; the entry tells the client how
+ * to look one up instead.
+ */
+const SourceEntityTypeCoverageSchema = Type.Object({
+  workspace_slug: Type.String(),
+  entity_type: Type.String(),
+  display_name: Type.String(),
+  status: Type.Literal('not_queried'),
+  method: Type.Literal('entities.list'),
+  name_search: Type.Union([
+    Type.Literal('literal_ci_substring'),
+    Type.Literal('unsupported'),
+    Type.Literal('unknown'),
+  ]),
+});
+type SourceEntityTypeCoverage = Static<typeof SourceEntityTypeCoverageSchema>;
+
+const SourceEntityDiscoverySchema = Type.Union([
+  Type.Literal('complete'),
+  Type.Literal('partial'),
+  Type.Literal('unavailable'),
+]);
+type SourceEntityDiscovery = Static<typeof SourceEntityDiscoverySchema>;
+
+/** Present together whenever source entity-type discovery ran. */
+const sourceEntityCoverageFields = {
+  source_entity_types: Type.Optional(Type.Array(SourceEntityTypeCoverageSchema)),
+  source_entity_discovery: Type.Optional(SourceEntityDiscoverySchema),
+  more_source_entity_types: Type.Optional(Type.Boolean()),
+};
+
 const WorkspaceCoverageSchema = Type.Object({
   workspace_slug: Type.String(),
   status: Type.Union([
@@ -233,6 +268,7 @@ const WorkspaceCoverageSchema = Type.Object({
   source_feed_discovery: Type.Union([Type.Literal('complete'), Type.Literal('unavailable')]),
   source_feeds: Type.Array(SourceFeedCoverageSchema),
   more_source_feeds: Type.Boolean(),
+  ...sourceEntityCoverageFields,
 });
 type WorkspaceCoverage = Static<typeof WorkspaceCoverageSchema>;
 
@@ -257,6 +293,7 @@ const SearchCoverageSchema = Type.Object({
   source_feed_discovery: Type.Union([Type.Literal('complete'), Type.Literal('unavailable')]),
   source_feeds: Type.Array(SourceFeedCoverageSchema),
   more_source_feeds: Type.Boolean(),
+  ...sourceEntityCoverageFields,
   workspaces: Type.Optional(Type.Array(WorkspaceCoverageSchema)),
 });
 type SearchCoverage = Static<typeof SearchCoverageSchema>;
@@ -339,6 +376,40 @@ function hasSearchHits(result: UnifiedSearchResult): boolean {
 const QUERY_EMBEDDING_UNAVAILABLE_SUGGESTION =
   'Search returned partial results ranked on text only: the query embedding was unavailable, so semantic matches may be missing. Retry the search.';
 
+const PARTIAL_RECALL_SUGGESTION =
+  'Search returned partial results. Some memory sources could not be searched or discovered. Retry the search.';
+
+// Deliberately generic: every tenant-specific value (workspace, type slug)
+// reaches the client only through the structured coverage entries, never
+// interpolated into instructions. The client model extracts the record name;
+// the server never guesses one out of the question.
+const SOURCE_ENTITY_HANDOFF =
+  'Live source-backed records were not searched: `coverage.source_entity_types` lists the live entity types this search left unqueried. ' +
+  "For a named record, call `client.entities.list({ entity_type, search: <the record's name, not the whole question>, limit: 5 })` through `query_sdk` in the entry's workspace (`client.org(workspace_slug)` when it is not the current one), then verify the candidates. " +
+  "When the entry's `name_search` is `unsupported`, the source cannot filter by name: page through `entities.list({ entity_type })` instead. " +
+  'Local matches or an empty local result do not show what the live source contains.';
+
+const MORE_SOURCE_ENTITY_TYPES_HANDOFF =
+  'More live entity types exist than are listed (`coverage.more_source_entity_types`); list them with `client.entitySchema.listTypes()`.';
+
+/** Append the live-record handoff whenever coverage names a target, even when
+ * local results matched: local side data must not hide the live source.
+ * Idempotent, so a federated merge can reuse a shard's suggestion. */
+function withSourceEntityHandoff<T extends UnifiedSearchResult>(result: T): T {
+  const coverage = result.coverage;
+  if (!coverage?.source_entity_types?.length || result.suggestion?.includes(SOURCE_ENTITY_HANDOFF)) {
+    return result;
+  }
+  result.suggestion = [
+    result.suggestion,
+    SOURCE_ENTITY_HANDOFF,
+    coverage.more_source_entity_types ? MORE_SOURCE_ENTITY_TYPES_HANDOFF : undefined,
+  ]
+    .filter(Boolean)
+    .join('\n\n');
+  return result;
+}
+
 function withRecall<T extends UnifiedSearchResult>(
   result: T,
   recall: Partial<UnifiedSearchResult>
@@ -348,10 +419,10 @@ function withRecall<T extends UnifiedSearchResult>(
     result.suggestion =
       recall.coverage.reason === 'query_embedding_unavailable'
         ? QUERY_EMBEDDING_UNAVAILABLE_SUGGESTION
-        : 'Search returned partial results. Some memory sources could not be searched or discovered. Retry the search.';
+        : PARTIAL_RECALL_SUGGESTION;
     if (!hasSearchHits(result)) result.discovery_status = 'discovering';
   }
-  return result;
+  return withSourceEntityHandoff(result);
 }
 
 interface WorkspaceSearchExecution {
@@ -538,10 +609,20 @@ function asWorkspaceCoverage(
     source_feed_discovery: coverage?.source_feed_discovery ?? 'complete',
     source_feeds: coverage?.source_feeds ?? [],
     more_source_feeds: coverage?.more_source_feeds ?? false,
+    ...(coverage?.source_entity_discovery
+      ? {
+          source_entity_types: coverage.source_entity_types ?? [],
+          source_entity_discovery: coverage.source_entity_discovery,
+          more_source_entity_types: coverage.more_source_entity_types ?? false,
+        }
+      : {}),
   };
 }
 
-function unavailableWorkspaceCoverage(workspace: GrantedMemberWorkspace): WorkspaceCoverage {
+function unavailableWorkspaceCoverage(
+  workspace: GrantedMemberWorkspace,
+  sourceEntityDiscoveryRan: boolean
+): WorkspaceCoverage {
   return {
     workspace_slug: workspace.slug,
     status: 'unavailable',
@@ -550,7 +631,46 @@ function unavailableWorkspaceCoverage(workspace: GrantedMemberWorkspace): Worksp
     source_feed_discovery: 'unavailable',
     source_feeds: [],
     more_source_feeds: false,
+    // A failed shard never reads as "no live types here".
+    ...(sourceEntityDiscoveryRan
+      ? {
+          source_entity_types: [],
+          source_entity_discovery: 'unavailable' as const,
+          more_source_entity_types: false,
+        }
+      : {}),
   };
+}
+
+/**
+ * Apply the response-wide target ceiling across workspaces, in target order.
+ * Each shard already capped its own list; a workspace whose list is cut here
+ * reports the truncation exactly like a shard-level overflow.
+ */
+function capSourceEntityTypesAcrossWorkspaces(entries: WorkspaceCoverage[]): void {
+  let remaining = MAX_SOURCE_ENTITY_TYPES_IN_COVERAGE;
+  for (const entry of entries) {
+    const types = entry.source_entity_types;
+    if (!types) continue;
+    const kept = types.slice(0, remaining);
+    remaining -= kept.length;
+    if (kept.length === types.length) continue;
+    entry.source_entity_types = kept;
+    entry.more_source_entity_types = true;
+    if (entry.source_entity_discovery === 'complete') entry.source_entity_discovery = 'partial';
+    if (entry.status === 'complete') entry.status = 'partial';
+  }
+}
+
+function aggregateSourceEntityDiscovery(
+  entries: readonly WorkspaceCoverage[]
+): SourceEntityDiscovery | undefined {
+  const states = entries.flatMap((entry) =>
+    entry.source_entity_discovery ? [entry.source_entity_discovery] : []
+  );
+  if (states.length === 0) return undefined;
+  if (states.includes('unavailable')) return 'unavailable';
+  return states.includes('partial') ? 'partial' : 'complete';
 }
 
 /**
@@ -757,14 +877,21 @@ export function mergeFederatedSearchResults(
     ? fulfilled.find((result) => result.entity?.id === entity.id)
     : undefined;
 
+  // Every shard runs the same arguments, so discovery either ran on all of
+  // them or on none (numeric entity-id reads skip it).
+  const sourceEntityDiscoveryRan = fulfilled.some(
+    (result) => result.coverage?.source_entity_discovery !== undefined
+  );
   const workspaceCoverage = settled.map((item, index) =>
     item.status === 'fulfilled'
       ? asWorkspaceCoverage(targets[index], item.value)
-      : unavailableWorkspaceCoverage(targets[index])
+      : unavailableWorkspaceCoverage(targets[index], sourceEntityDiscoveryRan)
   );
+  capSourceEntityTypesAcrossWorkspaces(workspaceCoverage);
   const status = workspaceCoverage.some((entry) => entry.status !== 'complete')
     ? 'partial'
     : 'complete';
+  const sourceEntityDiscovery = aggregateSourceEntityDiscovery(workspaceCoverage);
   const localSources = Array.from(
     new Set(workspaceCoverage.flatMap((entry) => entry.local_sources))
   ) as SearchCoverage['local_sources'];
@@ -790,6 +917,16 @@ export function mergeFederatedSearchResults(
       workspaceCoverage.some((entry) => entry.more_source_feeds) ||
       workspaceCoverage.reduce((count, entry) => count + entry.source_feeds.length, 0) >
         sourceFeeds.length,
+    ...(sourceEntityDiscovery
+      ? {
+          // Already within the response-wide ceiling after the per-workspace cap.
+          source_entity_types: workspaceCoverage.flatMap((entry) => entry.source_entity_types ?? []),
+          source_entity_discovery: sourceEntityDiscovery,
+          more_source_entity_types: workspaceCoverage.some(
+            (entry) => entry.more_source_entity_types === true
+          ),
+        }
+      : {}),
     workspaces: workspaceCoverage,
   };
 
@@ -820,7 +957,9 @@ export function mergeFederatedSearchResults(
       : status === 'partial'
         ? coverage.reason === 'query_embedding_unavailable'
           ? QUERY_EMBEDDING_UNAVAILABLE_SUGGESTION
-          : 'Search returned partial results; one or more granted workspaces was temporarily unavailable.'
+          : workspaceCoverage.some((entry) => entry.status === 'unavailable')
+            ? 'Search returned partial results; one or more granted workspaces was temporarily unavailable.'
+            : PARTIAL_RECALL_SUGGESTION
         : matches.length === 0 && !hasAnyRecall
           ? buildEmptySearchSuggestion(args.query ?? null, args, coverage, callerMax)
           : selectedResult?.suggestion,
@@ -830,7 +969,7 @@ export function mergeFederatedSearchResults(
       page_size: matches.length,
     },
   };
-  return result;
+  return withSourceEntityHandoff(result);
 }
 
 function parseExactContentId(query: string | undefined): number | null {
@@ -1182,6 +1321,16 @@ export interface RecallContext {
   entityId?: number;
   /** Workspace provenance attached to every returned local row. */
   workspaceSlug: string;
+  /**
+   * List live source-backed entity types in coverage. Omitted (no discovery)
+   * for entity-id reads; the caller's entity read policy is required so an
+   * unreadable type is never named.
+   */
+  sourceEntityTypes?: {
+    readRestrictions: EntityReadRestrictions;
+    /** An explicit `entity_type` argument narrows discovery to that type. */
+    entityType?: string;
+  };
 }
 
 const MAX_SOURCE_FEEDS_IN_COVERAGE = 10;
@@ -1242,11 +1391,95 @@ async function discoverSourceFeeds(gate: AuthzScope, workspaceSlug: string) {
   };
 }
 
+// Response-wide ceiling on live entity-type handoff targets, federated
+// searches included (the merge re-applies it across workspaces).
+const MAX_SOURCE_ENTITY_TYPES_IN_COVERAGE = 10;
+// Discovery is one statement over bounded config tables (entity_types by its
+// (organization_id, slug) index, connections by org + slug), so a healthy read
+// is single-digit milliseconds. It runs beside recall, whose events scan alone
+// usually takes longer, so 250ms never delays a normal search; it only caps
+// how long a contended pool can hold the response before the handoff is
+// reported `unavailable` instead.
+const SOURCE_ENTITY_DISCOVERY_BUDGET_MS = 250;
+
+type SourceEntityTypeDiscovery = { types: SourceEntityTypeCoverage[]; more: boolean };
+
+/**
+ * Live source-backed entity types the principal may read, without querying
+ * them: no backing SQL, no counts, no connector execution. A type qualifies
+ * when its backing connection is active and visible to the principal under the
+ * same visibility compiler source-feed discovery uses, and no type-level entity
+ * read restriction denies it. Anything else is silently left out.
+ */
+async function discoverSourceEntityTypes(
+  gate: AuthzScope,
+  workspaceSlug: string,
+  options: NonNullable<RecallContext['sourceEntityTypes']>
+): Promise<SourceEntityTypeDiscovery> {
+  const { readRestrictions, entityType } = options;
+  if (readRestrictions.some((rule) => rule.entity_id === null && rule.entity_type_slug === null)) {
+    return { types: [], more: false };
+  }
+  const params: unknown[] = [gate.organizationId];
+  const deniedTypes = readRestrictions.flatMap((rule) =>
+    rule.entity_id === null && rule.entity_type_slug !== null ? [rule.entity_type_slug] : []
+  );
+  let filters = '';
+  if (deniedTypes.length > 0) {
+    params.push(pgTextArray(deniedTypes));
+    filters += ` AND et.slug <> ALL($${params.length}::text[])`;
+  }
+  if (entityType) {
+    params.push(entityType);
+    filters += ` AND et.slug = $${params.length}`;
+  }
+  const vis = compileConnectionRowVisibility(gate, 'c');
+  const query = getDb().unsafe<{ slug: string; name: string }>(
+    `SELECT et.slug, et.name
+     FROM entity_types et
+     WHERE et.organization_id = $1
+       AND et.deleted_at IS NULL
+       AND et.backing_sql IS NOT NULL
+       AND et.backing_source IS NOT NULL
+       AND left(et.slug, 1) <> '$'${filters}
+       AND EXISTS (
+         SELECT 1 FROM connections c
+         WHERE c.organization_id = et.organization_id
+           AND c.slug = et.backing_source
+           AND c.deleted_at IS NULL
+           AND c.status = 'active'
+           ${vis}
+       )
+     ORDER BY et.id
+     LIMIT ${MAX_SOURCE_ENTITY_TYPES_IN_COVERAGE + 1}`,
+    params
+  );
+  const rows = await raceAbort(query, AbortSignal.timeout(SOURCE_ENTITY_DISCOVERY_BUDGET_MS));
+  return {
+    types: rows.slice(0, MAX_SOURCE_ENTITY_TYPES_IN_COVERAGE).map((row) => ({
+      workspace_slug: workspaceSlug,
+      entity_type: row.slug,
+      display_name: row.name,
+      status: 'not_queried' as const,
+      method: 'entities.list' as const,
+      // Query capabilities exist only on the compiled connector runtime: the
+      // definition install path persists feeds, actions and auth metadata but
+      // not `queryCapabilities`, so stored definition data cannot say whether
+      // the source supports `selection.search`. Never infer it from the
+      // connector key.
+      name_search: 'unknown' as const,
+    })),
+    more: rows.length > MAX_SOURCE_ENTITY_TYPES_IN_COVERAGE,
+  };
+}
+
 /**
  * Assemble the coverage facet. `discovered` is the settled result of
  * {@link discoverSourceFeeds}: a rejection degrades discovery to `unavailable`
  * rather than failing the search, since coverage is metadata about the answer,
- * not the answer.
+ * not the answer. `entityTypes`, when discovery ran, follows the same rule:
+ * a rejection or timeout reports `unavailable`, never an empty list, and an
+ * overflow reports `partial`.
  */
 function buildCoverage(
   workspaceSlug: string,
@@ -1254,7 +1487,7 @@ function buildCoverage(
   discovered: PromiseSettledResult<Awaited<ReturnType<typeof discoverSourceFeeds>>>,
   localRecallFailed = false,
   queryEmbeddingUnavailable = false,
-  scope: SearchCoverage['scope'] = 'current_workspace'
+  entityTypes?: PromiseSettledResult<SourceEntityTypeDiscovery>
 ): SearchCoverage {
   const reason = queryEmbeddingUnavailable
     ? ({ reason: 'query_embedding_unavailable' } as const)
@@ -1263,28 +1496,41 @@ function buildCoverage(
     logger.warn(
       `[search] source feed coverage lookup failed: ${getErrorMessage(discovered.reason)}`
     );
-    return {
-      scope,
-      status: 'partial',
-      ...reason,
-      workspace_slug: workspaceSlug,
-      local_sources,
-      source_queried: false,
-      source_feed_discovery: 'unavailable',
-      source_feeds: [],
-      more_source_feeds: false,
-    };
   }
+  if (entityTypes?.status === 'rejected') {
+    logger.warn(
+      `[search] source entity type coverage lookup failed: ${getErrorMessage(entityTypes.reason)}`
+    );
+  }
+  const sourceEntityFields: Pick<
+    SearchCoverage,
+    'source_entity_types' | 'source_entity_discovery' | 'more_source_entity_types'
+  > = !entityTypes
+    ? {}
+    : entityTypes.status === 'rejected'
+      ? { source_entity_types: [], source_entity_discovery: 'unavailable', more_source_entity_types: false }
+      : {
+          source_entity_types: entityTypes.value.types,
+          source_entity_discovery: entityTypes.value.more ? 'partial' : 'complete',
+          more_source_entity_types: entityTypes.value.more,
+        };
+  const partial =
+    localRecallFailed ||
+    queryEmbeddingUnavailable ||
+    discovered.status === 'rejected' ||
+    (sourceEntityFields.source_entity_discovery !== undefined &&
+      sourceEntityFields.source_entity_discovery !== 'complete');
   return {
-    scope,
-    status: localRecallFailed || queryEmbeddingUnavailable ? 'partial' : 'complete',
+    scope: 'current_workspace',
+    status: partial ? 'partial' : 'complete',
     ...reason,
     workspace_slug: workspaceSlug,
     local_sources,
     source_queried: false,
-    source_feed_discovery: 'complete',
-    source_feeds: discovered.value.feeds,
-    more_source_feeds: discovered.value.more,
+    source_feed_discovery: discovered.status === 'rejected' ? 'unavailable' : 'complete',
+    source_feeds: discovered.status === 'rejected' ? [] : discovered.value.feeds,
+    more_source_feeds: discovered.status === 'rejected' ? false : discovered.value.more,
+    ...sourceEntityFields,
   };
 }
 
@@ -1324,11 +1570,18 @@ export async function gatherLocalRecall(
     ? fetchConversationSnippets(gate, ctx.workspaceSlug, ctx.query as string, ctx.contentLimit)
     : Promise.resolve(null);
   const coveragePromise = discoverSourceFeeds(gate, ctx.workspaceSlug);
-  const [contentResult, conversationResult, sourceFeedsResult] = await Promise.allSettled([
-    contentPromise,
-    conversationPromise,
-    coveragePromise,
-  ]);
+  // Entity-scoped recall is an id read: it names no live type to hand off.
+  const sourceEntityTypesPromise =
+    ctx.sourceEntityTypes && ctx.entityId == null
+      ? discoverSourceEntityTypes(gate, ctx.workspaceSlug, ctx.sourceEntityTypes)
+      : null;
+  const [contentResult, conversationResult, sourceFeedsResult, sourceEntityTypesResult] =
+    await Promise.allSettled([
+      contentPromise,
+      conversationPromise,
+      coveragePromise,
+      sourceEntityTypesPromise,
+    ]);
   ctx.signal?.throwIfAborted();
 
   const result: Partial<UnifiedSearchResult> = {};
@@ -1363,7 +1616,10 @@ export async function gatherLocalRecall(
     local_sources,
     sourceFeedsResult,
     localRecallFailed,
-    queryEmbeddingUnavailable
+    queryEmbeddingUnavailable,
+    sourceEntityTypesPromise
+      ? (sourceEntityTypesResult as PromiseSettledResult<SourceEntityTypeDiscovery>)
+      : undefined
   );
   return result;
 }
@@ -1669,6 +1925,10 @@ async function searchWorkspaceImpl(
           // owner/admin).
           excludeWorkspaceAudit: !canReadWorkspaceIdentity(ctx),
           excludeOperationalTrail: isPublicReader(ctx),
+          sourceEntityTypes: {
+            readRestrictions,
+            ...(args.entity_type ? { entityType: args.entity_type } : {}),
+          },
         })
       : Promise.resolve({});
   // ========================================
