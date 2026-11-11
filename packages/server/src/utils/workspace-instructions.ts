@@ -64,6 +64,7 @@ export const DIRECT_MCP_INSTRUCTIONS = [
   '',
   '### Read tools',
   '- `search_memory` searches saved workspace memory.',
+  "- `search_memory` does not search live source-backed records. When its `coverage.source_entity_types` lists entity types, look a named record up with `client.entities.list({ entity_type, search: <the record's name, not the whole question>, limit: 5 })` through `query_sdk` in that workspace (`client.org(workspace_slug)`), then verify the candidates. Local matches or an empty result do not show what the live source contains.",
   '- On a multi-workspace grant, `search_memory` accepts a singular `workspace` argument to narrow to one of the granted workspaces; every other tool stays in the current workspace.',
   '- `search_sdk` discovers documented SDK methods and connector capabilities.',
   '- `query_sdk` runs capability-scoped, read-only TypeScript.',

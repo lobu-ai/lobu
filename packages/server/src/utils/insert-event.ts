@@ -18,6 +18,7 @@ import {
 import { WorkspaceEventCausalityLimitError } from '../automations/workspace-event-contract';
 import {
   AUDIT_EVENT_TYPE_METADATA_KEY,
+  AUDIT_IDEMPOTENCY_KEY_PREFIX,
   type AuditEventType,
   formatAuditEventType,
 } from './audit-event-type';
@@ -1436,7 +1437,7 @@ export async function insertConnectionlessAuditEvent(
   // insertEvent strips NUL from originId, so derive the key from the stripped
   // value: the unique index and the reconciliation SELECT below both read the
   // persisted `_lobu_idempotency_key`, which is the stripped form.
-  const idempotencyKey = `audit:${stripNul(params.originId)}`;
+  const idempotencyKey = `${AUDIT_IDEMPOTENCY_KEY_PREFIX}${stripNul(params.originId)}`;
   const formattedEventType = formatAuditEventType(eventType);
   const metadata: Record<string, unknown> = {
     ...(params.metadata ?? {}),

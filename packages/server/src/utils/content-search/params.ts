@@ -6,7 +6,7 @@
 import { buildEventResourceFilterClause } from './resource-filter';
 import { pgTextArray } from '../../db/client';
 import {
-  INTERACTION_CARD_EXCLUSION_SQL,
+  RECALL_BOOKKEEPING_EXCLUSION_SQL,
   INTERNAL_OPS_EXCLUSION_SQL,
   operationalTrailExclusionSql,
 } from './sql-fragments';
@@ -176,7 +176,7 @@ export function appendStandardEventFilters(
     | 'exclude_workspace_audit'
     | 'exclude_operational_trail'
     | 'exclude_internal_ops'
-    | 'exclude_interaction_cards'
+    | 'exclude_recall_bookkeeping'
   > & { sinceDate?: Date | null; untilDate?: Date | null }
 ): { sinceParam: string | null; untilParam: string | null } {
   const alias = 'f';
@@ -230,8 +230,8 @@ export function appendStandardEventFilters(
   if (filters.exclude_internal_ops && !filters.semantic_type) {
     conditions.push(INTERNAL_OPS_EXCLUSION_SQL);
   }
-  if (filters.exclude_interaction_cards && !filters.semantic_type) {
-    conditions.push(INTERACTION_CARD_EXCLUSION_SQL);
+  if (filters.exclude_recall_bookkeeping && !filters.semantic_type) {
+    conditions.push(RECALL_BOOKKEEPING_EXCLUSION_SQL);
   }
   if (filters.interaction_status) {
     params.push(filters.interaction_status);

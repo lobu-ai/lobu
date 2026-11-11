@@ -1,21 +1,34 @@
 /**
- * Explicit source-read contract. Search reports visible source feeds without
- * querying them; feeds.get is metadata-only; feeds.readMany is the one bounded
- * live-read seam.
+ * Explicit source-read contract. Search reports visible source feeds and live
+ * source-backed entity types without querying them; feeds.get is
+ * metadata-only; feeds.readMany and entities.list are the bounded live-read
+ * seams.
  */
 
+import { Value } from '@sinclair/typebox/value';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { upsertEntityApprovalPolicy } from '../../../authz/entity-policy';
 import type { AuthzScope } from '../../../authz/scope';
+import { formatToolResult } from '../../../formatting/markdown-formatter';
 import type { Env } from '../../../index';
 import { manageFeeds } from '../../../tools/admin/manage_feeds';
 import { QuerySqlSchema } from '../../../tools/admin/query_sql';
 import type { ToolContext } from '../../../tools/registry';
-import { gatherLocalRecall, type RecallContext } from '../../../tools/search';
+import { manageEntity } from '../../../tools/admin/manage_entity';
+import {
+  gatherLocalRecall,
+  mergeFederatedSearchResults,
+  type RecallContext,
+  search,
+  UnifiedSearchResultSchema,
+} from '../../../tools/search';
 import { createAuthProfile } from '../../../utils/auth-profiles';
+import { initWorkspaceProvider } from '../../../workspace';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import {
   addUserToOrganization,
+  createTestEntity,
+  createTestEvent,
   createTestOrganization,
   createTestUser,
   ownerToolContext,
@@ -330,5 +343,203 @@ describe('explicit feed source reads', () => {
     await db`DELETE FROM automations WHERE id = ${automationId}`;
     expect(await read(reactionCtx)).toMatchObject({ ok: false, error_code: 'NOT_FOUND' });
   }, 60_000);
+
+  describe('search_memory live entity-type handoff', () => {
+    const FRUIT_TYPE = 'vfsurf-fruit';
+    const PRIVATE_TYPE = 'vfsurf-private-fruit';
+    const OVERFLOW_TYPES = Array.from({ length: 11 }, (_, i) => `vfsurf-overflow-${String(i).padStart(2, '0')}`);
+    let emptyOrg: Awaited<ReturnType<typeof createTestOrganization>>;
+    let overflowOrg: Awaited<ReturnType<typeof createTestOrganization>>;
+    let localNoteId: number;
+
+    const createSourceType = async (organizationId: string, slug: string, name: string, connection: string) => {
+      await getTestDb()`
+        INSERT INTO entity_types (organization_id, slug, name, backing_sql, backing_source, created_by)
+        VALUES (${organizationId}, ${slug}, ${name}, 'SELECT id, name, amount FROM vfsurf_ext', ${connection}, ${ownerId})
+      `;
+    };
+
+    // Structural no-execution signal: the source table is exclusively locked
+    // for the whole call, so any backing-SQL read through the connector would
+    // queue behind this transaction. The call must return, and no backend may
+    // be waiting on the lock holder.
+    const withSourceTableLocked = async <T>(fn: () => Promise<T>): Promise<T> =>
+      getTestDb().begin(async (tx) => {
+        await tx`LOCK TABLE vfsurf_ext IN ACCESS EXCLUSIVE MODE`;
+        const result = await fn();
+        const [{ waiting }] = await tx`
+          SELECT count(*)::int AS waiting FROM pg_stat_activity
+          WHERE pg_backend_pid() = ANY(pg_blocking_pids(pid))
+        `;
+        expect(Number(waiting)).toBe(0);
+        return result;
+      });
+
+    beforeAll(async () => {
+      await initWorkspaceProvider();
+      await createSourceType(orgId, FRUIT_TYPE, 'Fruit', 'explicit-public');
+      await createSourceType(orgId, PRIVATE_TYPE, 'Private fruit', 'explicit-private');
+      // A local note that matches the query, so recall is not empty.
+      localNoteId = (
+        await createTestEvent({
+          organization_id: orgId,
+          title: 'apple tasting notes',
+          content: 'The apple tasting went well.',
+          semantic_type: 'note',
+        })
+      ).id;
+
+      emptyOrg = await createTestOrganization({ name: 'NoLiveTypes' });
+      await addUserToOrganization(ownerId, emptyOrg.id, 'owner');
+
+      overflowOrg = await createTestOrganization({ name: 'ManyLiveTypes' });
+      await addUserToOrganization(ownerId, overflowOrg.id, 'owner');
+      await getTestDb()`
+        INSERT INTO connections (organization_id, connector_key, slug, display_name, status, visibility, created_by, created_at, updated_at)
+        VALUES (${overflowOrg.id}, 'postgres', 'overflow-db', 'overflow-db', 'active', 'org', ${ownerId}, NOW(), NOW())
+      `;
+      for (const slug of OVERFLOW_TYPES) await createSourceType(overflowOrg.id, slug, slug, 'overflow-db');
+    }, 120_000);
+
+    it('lists visible live types with a handoff even when a local note matched, without querying the source', async () => {
+      const result = await withSourceTableLocked(() => search({ query: 'apple' }, {} as Env, ownerCtx));
+
+      expect(result.content?.map((item) => item.id)).toContain(localNoteId);
+      expect(result.coverage).toMatchObject({
+        status: 'complete',
+        source_queried: false,
+        source_entity_discovery: 'complete',
+        more_source_entity_types: false,
+      });
+      expect(result.coverage?.source_entity_types).toEqual([
+        { workspace_slug: orgSlug, entity_type: FRUIT_TYPE, display_name: 'Fruit', status: 'not_queried', method: 'entities.list', name_search: 'unknown' },
+        { workspace_slug: orgSlug, entity_type: PRIVATE_TYPE, display_name: 'Private fruit', status: 'not_queried', method: 'entities.list', name_search: 'unknown' },
+      ]);
+      expect(result.suggestion).toContain('Live source-backed records were not searched');
+      expect(result.suggestion).toContain('client.entities.list');
+
+      // The handoff is actionable: the named record is one live list call away.
+      const listed = (await manageEntity(
+        { action: 'list', entity_type: FRUIT_TYPE, search: 'apple', limit: 5 },
+        {} as Env,
+        ownerCtx
+      )) as { entities: Array<{ name: string }> };
+      expect(listed.entities.map((entity) => entity.name).sort()).toEqual(['apple']);
+    }, 60_000);
+
+    it.each(['apple', 'synthetic absent record'])('renders discovered live targets despite an unavailable workspace (query=%s)', async (query) => {
+      const args = { query };
+      const available = await withSourceTableLocked(() => search(args, {} as Env, ownerCtx));
+      const result = mergeFederatedSearchResults(args, [
+        { id: orgId, slug: orgSlug, name: 'ExplicitFeedReads', role: 'owner', personal: false },
+        { ...emptyOrg, role: 'owner', personal: false },
+      ], [
+        { status: 'fulfilled', value: available },
+        { status: 'rejected', reason: new Error('synthetic workspace outage') },
+      ]);
+
+      expect(result.coverage?.source_entity_discovery).toBe('unavailable');
+      expect(result.matches).toEqual([]);
+      if (query === 'apple') {
+        expect(result.content?.map((item) => item.id)).toContain(localNoteId);
+      } else {
+        expect(result.content).toEqual([]);
+      }
+      const markdown = formatToolResult('search_memory', result);
+      expect(markdown).toMatch(/entity type discovery was unavailable/i);
+      expect(markdown).toContain(`\`${FRUIT_TYPE}\``);
+      expect(markdown).toContain(`\`${PRIVATE_TYPE}\``);
+      expect(markdown).toContain(`workspace \`${orgSlug}\``);
+      expect(markdown).toContain('client.entities.list');
+      expect(markdown).not.toMatch(/No accessible live source-backed entity types/i);
+    });
+
+    it('leaves out types on connections the caller cannot see', async () => {
+      const result = await search({ query: 'apple' }, {} as Env, memberCtx());
+      expect(result.coverage?.source_entity_types?.map((type) => type.entity_type)).toEqual([FRUIT_TYPE]);
+      expect(result.coverage?.source_entity_discovery).toBe('complete');
+      expect(JSON.stringify(result)).not.toContain(PRIVATE_TYPE);
+    });
+
+    it('narrows to an explicit entity_type and skips entity-id and exact memory-id reads', async () => {
+      const narrowed = await search({ query: 'apple', entity_type: PRIVATE_TYPE }, {} as Env, ownerCtx);
+      expect(narrowed.coverage?.source_entity_types?.map((type) => type.entity_type)).toEqual([PRIVATE_TYPE]);
+
+      const stored = await createTestEntity({ name: 'Orchard', organization_id: orgId, created_by: ownerId });
+      const entityRead = await search({ entity_id: stored.id, query: 'apple' }, {} as Env, ownerCtx);
+      expect(entityRead.entity?.id).toBe(stored.id);
+      expect(entityRead.coverage?.source_queried).toBe(false);
+      expect(entityRead.coverage).not.toHaveProperty('source_entity_discovery');
+      expect(entityRead.suggestion ?? '').not.toContain('Live source-backed records');
+
+      const exactMemory = await search({ query: `memory ${localNoteId}` }, {} as Env, ownerCtx);
+      expect(exactMemory.content?.map((item) => item.id)).toEqual([localNoteId]);
+      expect(exactMemory.coverage?.source_queried).toBe(false);
+      expect(exactMemory.coverage).not.toHaveProperty('source_entity_discovery');
+      expect(exactMemory.coverage).not.toHaveProperty('source_entity_types');
+      expect(exactMemory.suggestion ?? '').not.toContain('Live source-backed records');
+    });
+
+    it('reports an empty, complete discovery for a workspace without live types', async () => {
+      const result = await search({ query: 'apple' }, {} as Env, ownerToolContext(emptyOrg.id, ownerId));
+      expect(result.coverage).toMatchObject({
+        status: 'complete',
+        source_entity_types: [],
+        source_entity_discovery: 'complete',
+        more_source_entity_types: false,
+      });
+      expect(result.suggestion ?? '').not.toContain('Live source-backed records');
+    });
+
+    it('caps targets and marks overflow partial', async () => {
+      const result = await search({ query: 'apple' }, {} as Env, ownerToolContext(overflowOrg.id, ownerId));
+      expect(result.coverage?.source_entity_types?.map((type) => type.entity_type)).toEqual(OVERFLOW_TYPES.slice(0, 10));
+      expect(result.coverage).toMatchObject({
+        status: 'partial',
+        source_entity_discovery: 'partial',
+        more_source_entity_types: true,
+      });
+      expect(result.suggestion).toContain('Live source-backed records were not searched');
+      expect(result.suggestion).toContain('client.entitySchema.listTypes()');
+    });
+
+    it('puts federated targets per workspace under one response-wide cap', async () => {
+      const federated: ToolContext = {
+        ...ownerCtx,
+        scopedToOrg: false,
+        allowCrossOrg: true,
+        grantedOrganizationIds: [orgId, overflowOrg.id],
+        directSearchFederation: true,
+      };
+      const result = await withSourceTableLocked(() => search({ query: 'apple' }, {} as Env, federated));
+
+      const [main, overflow] = result.coverage?.workspaces ?? [];
+      expect(main).toMatchObject({ workspace_slug: orgSlug, source_entity_discovery: 'complete', more_source_entity_types: false });
+      expect(main.source_entity_types?.map((type) => [type.workspace_slug, type.entity_type])).toEqual([
+        [orgSlug, FRUIT_TYPE],
+        [orgSlug, PRIVATE_TYPE],
+      ]);
+      expect(overflow).toMatchObject({
+        workspace_slug: overflowOrg.slug,
+        status: 'partial',
+        source_entity_discovery: 'partial',
+        more_source_entity_types: true,
+      });
+      expect(overflow.source_entity_types?.map((type) => type.entity_type)).toEqual(OVERFLOW_TYPES.slice(0, 8));
+      expect(overflow.source_entity_types?.every((type) => type.workspace_slug === overflowOrg.slug)).toBe(true);
+      expect(result.coverage).toMatchObject({
+        scope: 'all_granted',
+        status: 'partial',
+        source_entity_discovery: 'partial',
+        more_source_entity_types: true,
+      });
+      expect(result.coverage?.source_entity_types).toHaveLength(10);
+      // The declared coverage outputSchema MCP clients validate structuredContent against.
+      expect([...Value.Errors(UnifiedSearchResultSchema.properties.coverage, result.coverage)]).toEqual([]);
+      // Local recall still matched; the handoff appears once regardless.
+      expect(result.content?.map((item) => item.id)).toContain(localNoteId);
+      expect(result.suggestion?.split('Live source-backed records were not searched')).toHaveLength(2);
+    }, 60_000);
+  });
 
 });
