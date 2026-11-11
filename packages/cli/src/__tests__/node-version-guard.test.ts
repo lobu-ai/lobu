@@ -159,11 +159,11 @@ describe("bin/lobu.js bootstrap supervision", () => {
        import { join } from "node:path";
        export async function runCli() {
          const dir = process.argv[3];
+         ${body}
          writeFileSync(join(dir, "ready"), JSON.stringify({
            pid: process.pid, node: process.versions.node,
            bun: process.versions.bun ?? null
          }));
-         ${body}
        }`
     );
     const [binary, ...args] = host;
