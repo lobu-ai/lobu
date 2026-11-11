@@ -276,9 +276,13 @@ describe('external Automation activity', () => {
   it('books a due window with nothing new as a no-op instead of handing it to the client', async () => {
     const id = await createExternal({ triggers: SKIPPING_SCHEDULE });
     expect(await work()).toHaveLength(1);
-    await expect(api.automations.claimNextWindow({ automation_id: id })).rejects.toThrow(/nothing to process/);
-    const runs = await sql`SELECT status, claimed_by, run_metadata, approved_input FROM runs WHERE automation_id = ${Number(id)}`;
+    const receipt = await api.automations.claimNextWindow({ automation_id: id });
+    const runs = await sql`SELECT id, status, claimed_by, run_metadata, approved_input FROM runs WHERE automation_id = ${Number(id)}`;
     expect(runs).toHaveLength(1);
+    expect(receipt).toEqual({
+      action: 'claim_next_window', automation_id: id, status: 'completed', run_id: Number(runs[0].id),
+      skipped_unchanged: true, window_start: runs[0].approved_input.window_start, window_end: runs[0].approved_input.window_end,
+    });
     expect(runs[0]).toMatchObject({ status: 'completed', claimed_by: null });
     expect(runs[0].run_metadata).toMatchObject({ skipped_unchanged: true, content_analyzed: 0 });
     expect(typeof runs[0].approved_input.source_fingerprint).toBe('string');
@@ -322,7 +326,8 @@ describe('external Automation activity', () => {
       resume.resolve();
       spy.mockRestore();
     }
-    expect(results.map(result => result.status)).toEqual(['rejected', 'rejected']);
+    expect(results.map(result => result.status)).toEqual(['fulfilled', 'rejected']);
+    expect(results[0]).toMatchObject({ value: { status: 'completed', skipped_unchanged: true } });
     const runs = await sql`SELECT status, run_metadata FROM runs WHERE automation_id = ${Number(id)}`;
     expect(runs).toHaveLength(1);
     expect(runs[0]).toMatchObject({ status: 'completed', run_metadata: { skipped_unchanged: true } });
@@ -339,7 +344,7 @@ describe('external Automation activity', () => {
     await api.automations.completeWindow({ automation_id: id, run_id: claim.run_id,
       window_token: claim.context.window_token, extracted_data: { signals: [] } });
     await sql`UPDATE automations SET next_run_at = NOW() - INTERVAL '1 minute' WHERE id = ${Number(id)}`;
-    await expect(api.automations.claimNextWindow({ automation_id: id })).rejects.toThrow(/nothing to process/);
+    await expect(api.automations.claimNextWindow({ automation_id: id })).resolves.toMatchObject({ status: 'completed', skipped_unchanged: true });
     const [counts] = await sql`SELECT COUNT(*)::int AS total,
       COUNT(*) FILTER (WHERE run_metadata->>'skipped_unchanged' = 'true')::int AS skipped
       FROM runs WHERE automation_id = ${Number(id)}`;
@@ -348,7 +353,7 @@ describe('external Automation activity', () => {
 
   it('claims a late-arriving old event after a skipped window without losing arrival progress', async () => {
     const id = await createExternal({ triggers: SKIPPING_SCHEDULE, sources: CONTENT_SOURCE });
-    await expect(api.automations.claimNextWindow({ automation_id: id })).rejects.toThrow(/nothing to process/);
+    await expect(api.automations.claimNextWindow({ automation_id: id })).resolves.toMatchObject({ status: 'completed' });
     const [skipped] = await sql`SELECT approved_input FROM runs WHERE automation_id = ${Number(id)}`;
     await createTestEvent({ organization_id: ctx.organizationId!, content: 'Late source item', occurred_at: new Date('2000-01-01T00:00:00Z') });
     await sql`UPDATE automations SET next_run_at = NOW() - INTERVAL '1 minute' WHERE id = ${Number(id)}`;

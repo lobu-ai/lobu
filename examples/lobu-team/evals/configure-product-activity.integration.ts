@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import type { AutomationClaimNextWindowResult } from "@lobu/core/contracts/tools/manage-automations";
+import type { AutomationClaimNextWindowContext } from "@lobu/core/contracts/tools/manage-automations";
 import { beforeEach, expect, test } from "vitest";
 import { materializeDueAutomationRuns } from "../../../packages/server/src/automations/automation";
 import type { DbClient } from "../../../packages/server/src/db/client";
@@ -67,7 +67,7 @@ async function startNativeWindow(
     automation_id: Number(id),
     run_id: runId,
     limit,
-  })) as AutomationClaimNextWindowResult["context"];
+  })) as AutomationClaimNextWindowContext;
   return { run_id: runId, context };
 }
 
@@ -359,7 +359,7 @@ test("ClickHouse progress survives completion retries and product pagination wit
     limit: 1,
     before_occurred_at: cursor.occurred_at,
     before_id: cursor.id,
-  })) as AutomationClaimNextWindowResult["context"];
+  })) as AutomationClaimNextWindowContext;
   expect(second.page.has_more).toBe(false);
   expect(
     [...first.context.content, ...second.content]

@@ -183,7 +183,7 @@ export const AutomationScheduleTriggerSchema = Type.Object(
       Type.Boolean({
         default: true,
         description:
-          "Book a due window with no new or changed source content as a no-op run instead of dispatching an agent. Applies to native dispatch and to external claimNextWindow, which answers 409 for a skipped window.",
+          "Book a due window with no new or changed source content as a no-op run instead of dispatching an agent. Applies to native dispatch and to external claimNextWindow, which returns a status 'completed' receipt for a skipped window.",
       })
     ),
   },
@@ -1098,13 +1098,32 @@ export type AutomationClaimNextWindowContext = Static<
   typeof AutomationClaimNextWindowContextSchema
 >;
 
-export const AutomationClaimNextWindowResultSchema = Type.Object({
-  action: Type.Literal("claim_next_window"),
-  automation_id: Type.String(),
-  run_id: Type.Integer(),
-  lease_expires_at: Type.String(),
-  context: AutomationClaimNextWindowContextSchema,
-});
+/**
+ * A claim either leases a window (`claimed`, with context to process and a
+ * window_token for completeWindow) or reports that the due window had no new
+ * or changed source content and was already booked as a no-op run
+ * (`completed`). A completed receipt needs no completeWindow: the schedule
+ * has advanced, so refresh activity for the next due window.
+ */
+export const AutomationClaimNextWindowResultSchema = Type.Union([
+  Type.Object({
+    action: Type.Literal("claim_next_window"),
+    automation_id: Type.String(),
+    status: Type.Literal("claimed"),
+    run_id: Type.Integer(),
+    lease_expires_at: Type.String(),
+    context: AutomationClaimNextWindowContextSchema,
+  }),
+  Type.Object({
+    action: Type.Literal("claim_next_window"),
+    automation_id: Type.String(),
+    status: Type.Literal("completed"),
+    run_id: Type.Integer(),
+    skipped_unchanged: Type.Literal(true),
+    window_start: Type.String(),
+    window_end: Type.String(),
+  }),
+]);
 export type AutomationClaimNextWindowResult = Static<
   typeof AutomationClaimNextWindowResultSchema
 >;
