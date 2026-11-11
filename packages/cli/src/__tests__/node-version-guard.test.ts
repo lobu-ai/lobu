@@ -155,12 +155,17 @@ describe("bin/lobu.js bootstrap supervision", () => {
     writeFileSync(join(dir, "package.json"), '{"type":"module"}');
     writeFileSync(
       join(dir, "dist", "index.js"),
-      `import { existsSync, writeFileSync } from "node:fs";
+      `import { existsSync, renameSync, writeFileSync } from "node:fs";
        import { join } from "node:path";
        export async function runCli() {
          const dir = process.argv[3];
+         const publish = (name, content) => {
+           const temporary = join(dir, name + ".tmp");
+           writeFileSync(temporary, content);
+           renameSync(temporary, join(dir, name));
+         };
          ${body}
-         writeFileSync(join(dir, "ready"), JSON.stringify({
+         publish("ready", JSON.stringify({
            pid: process.pid, node: process.versions.node,
            bun: process.versions.bun ?? null
          }));
@@ -217,10 +222,10 @@ describe("bin/lobu.js bootstrap supervision", () => {
         host.command,
         `
           process.once(${JSON.stringify(signal)}, () => {
-            writeFileSync(join(dir, "received"), ${JSON.stringify(signal)});
+            publish("received", ${JSON.stringify(signal)});
             setInterval(() => {
               if (!existsSync(join(dir, "finish"))) return;
-              writeFileSync(join(dir, "cleaned"), "done");
+              publish("cleaned", "done");
               process.exit(23);
             }, 10);
           });
