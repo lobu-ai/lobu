@@ -117,6 +117,16 @@ describe('account MCP dispatch', () => {
         expect(tool.parentSpanContext?.spanId).toBe(request.spanContext().spanId);
         expect(tool.attributes['lobu.org_id']).toBe(item.org.id);
       }
+
+      // A caller that disconnected mid-read is not a failure of anyone's.
+      exporter.reset();
+      const cancelled = new AbortController();
+      cancelled.abort();
+      const abandoned = await executeTool('query_sql', { org_slug: first.slug, sql: 'SELECT 11 AS value' }, {} as Env, { ...auth, mcpConversationId: 'abandoned-read' }, cancelled.signal);
+      expect(abandoned).toHaveProperty('error');
+      const [abandonedSpan] = exporter.getFinishedSpans().filter((span) => span.attributes['lobu.tool_name'] === 'query_sql');
+      expect(abandonedSpan?.status.code).toBe(SpanStatusCode.UNSET);
+      expect(abandonedSpan?.attributes['exception.type']).toBeUndefined();
     } finally {
       await shutdownTracing();
     }
