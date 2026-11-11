@@ -307,9 +307,10 @@ const productActivityDb = defineConnection({
         primary_key: "activity_id",
         cursor_column: "occurred_at",
         max_rows_per_sync: 5000,
-        // The durable keyset cursor bounds reads, including catch-up after an
-        // outage; a feed without a checkpoint starts from the oldest row. Keep
-        // rows readable without connector-specific payload fields.
+        // Incremental timestamps are not a commit-ordered ledger: late commits
+        // behind the checkpoint can be missed. Session/connection rows can
+        // disappear, and tool audit is best effort. This is observed account
+        // activity, not a complete history or anonymous browsing coverage.
         query: `SELECT *
           FROM (
             SELECT
@@ -373,23 +374,15 @@ const productActivityDb = defineConnection({
 
             SELECT
               'mcp:' || jsonb_build_array(m.user_id, m.client_identity, m.conversation_id)::text,
-              m.last_activity_at,
-              'MCP activity'::text,
+              m.first_activity_at,
+              'MCP conversation first seen'::text,
               concat_ws(
                 ' · ',
                 coalesce(nullif(m.client_software_id, ''), nullif(client.client_name, ''), 'Unknown client'),
                 coalesce(nullif(u.name, ''), 'Unknown user'),
                 u.email,
-                coalesce((
-                  SELECT string_agg(o.name, ', ' ORDER BY o.name)
-                  FROM mcp_client_conversation_workspaces w
-                  JOIN organization o ON o.id = w.organization_id
-                  WHERE w.user_id = m.user_id
-                    AND w.client_identity = m.client_identity
-                    AND w.conversation_id = m.conversation_id
-                ), 'Account activity'),
-                CASE WHEN m.last_action IS NOT NULL THEN 'last action: ' || m.last_action END,
-                m.call_count || ' total calls'
+                'Account activity',
+                'First seen conversation; call totals and last activity are current state, not events'
               )
             FROM mcp_client_conversations m
             LEFT JOIN oauth_clients client ON client.id = m.client_id

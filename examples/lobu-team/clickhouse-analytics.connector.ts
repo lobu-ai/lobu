@@ -3,8 +3,53 @@ import {
   type QueryContext,
   type QueryResult,
   type RuntimeConnectorDefinition,
+  type EventAttributionRule,
 } from "@lobu/connector-sdk";
 import { readUserMilestones } from "./user-milestones.ts";
+
+const productUserAttributions: EventAttributionRule[] = [
+  {
+    role: "about",
+    target: {
+      entityType: "product-user",
+      identities: [
+        {
+          namespace: "lobu_product_account_id",
+          eventPath: "metadata.user_id",
+          primary: true,
+        },
+      ],
+    },
+    autoCreate: false,
+  },
+];
+
+const milestoneMetadata = {
+  type: "object",
+  required: [
+    "user_id",
+    "computed_at",
+    "event_type",
+    "evidence_basis",
+    "source",
+    "coverage",
+  ],
+  properties: {
+    user_id: { type: "string" },
+    computed_at: {
+      type: "string",
+      format: "date-time",
+      description:
+        "When this materialized version was computed; not a refresh heartbeat.",
+    },
+    event_type: { type: "string" },
+    evidence_basis: { enum: ["inferred", "observed"] },
+    source: { type: "string" },
+    coverage: { type: "object" },
+    attribution_method: { type: "string" },
+    success_kind: { enum: ["agent_reply", "source_read", "automation_output"] },
+  },
+};
 
 interface AnalyticsConfig {
   CLICKHOUSE_URL: string;
@@ -341,7 +386,7 @@ export default class ClickHouseAnalyticsConnector extends ConnectorRuntime<
   > = {
     key: "clickhouse.analytics",
     name: "ClickHouse analytics",
-    version: "1.1.2",
+    version: "1.2.0",
     description:
       "Run governed read-only SQL against an organization-owned ClickHouse analytics endpoint. Discover accessible tables and columns with SELECT from system.tables and system.columns; information_schema requires separate grants.",
     authSchema: {
@@ -372,29 +417,27 @@ export default class ClickHouseAnalyticsConnector extends ConnectorRuntime<
         key: "user_milestones",
         name: "User journey milestones",
         description:
-          "Live acquisition, signup and first verified success. This is milestone coverage, not a full click or tool-call history.",
+          "Read-only derived attribution and first observed success. Signup belongs to Postgres. IP/browser attribution is inferred; success covers the 90-day signup cohort within 7 days of signup, refreshed every 6 hours. Missing milestones do not prove inactivity; this feed does not trigger Automations.",
         userManaged: true,
         configSchema: { type: "object", properties: {} },
         matchPaths: ["metadata.user_id"],
         eventKinds: {
           "product.milestone": {
-            description: "A materialized production user journey milestone.",
-            attributions: [
-              {
-                role: "about",
-                target: {
-                  entityType: "product-user",
-                  identities: [
-                    {
-                      namespace: "lobu_product_account_id",
-                      eventPath: "metadata.user_id",
-                      primary: true,
-                    },
-                  ],
-                },
-                autoCreate: false,
-              },
-            ],
+            description:
+              "Legacy kind retained for compatibility; no longer emitted. Signup is owned by Postgres.",
+            attributions: productUserAttributions,
+          },
+          "product.landing_attributed": {
+            description:
+              "Inferred external landing match by IP and browser within 24 hours; not verified visitor identity.",
+            metadataSchema: milestoneMetadata,
+            attributions: productUserAttributions,
+          },
+          "product.first_success": {
+            description:
+              "First observed qualifying success within 7 days of signup for the 90-day cohort; includes account or personal-organization activity.",
+            metadataSchema: milestoneMetadata,
+            attributions: productUserAttributions,
           },
         },
         read: (ctx) => readUserMilestones(ctx, queryAnalytics),

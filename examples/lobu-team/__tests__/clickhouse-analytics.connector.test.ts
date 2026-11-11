@@ -23,14 +23,16 @@ describe("source-backed user milestones", () => {
             "private_extra",
             "__lobu_analytics_total__",
           ].map((name) => ({ name, type: "String" })),
-          data: ["signup", "landing", "first-success"].map((kind) => ({
+          data: ["landing", "first-success"].map((kind) => ({
             origin_id: `${kind}:${user}`,
             user_id: sourceUser,
             occurred_at: "2026-01-02 03:04:05.123",
             title: kind,
             payload_text: "Recorded milestone",
+            computed_at: "2026-01-02 06:00:00",
+            success_kind: kind === "first-success" ? "source_read" : null,
             private_extra: "must-not-leak",
-            __lobu_analytics_total__: "3",
+            __lobu_analytics_total__: "2",
           })),
         }),
     });
@@ -48,11 +50,31 @@ describe("source-backed user milestones", () => {
     try {
       const first = await read(context);
       const second = await read({ ...context, cursor: first.nextCursor });
-      const last = await read({ ...context, cursor: second.nextCursor });
-      const rows = [...first.rows, ...second.rows, ...last.rows];
-      expect(new Set(rows.map((row) => row.origin_id)).size).toBe(3);
-      expect(last.hasMore).toBe(false);
-      expect(last.nextCursor).toBeUndefined();
+      const rows = [...first.rows, ...second.rows];
+      expect(new Set(rows.map((row) => row.origin_id)).size).toBe(2);
+      expect(second.hasMore).toBe(false);
+      expect(second.nextCursor).toBeUndefined();
+      expect(rows.map((row) => row.origin_type).sort()).toEqual([
+        "product.first_success",
+        "product.landing_attributed",
+      ]);
+      expect(
+        rows.find((row) => row.origin_id.startsWith("landing:"))?.metadata
+      ).toMatchObject({
+        user_id: user,
+        evidence_basis: "inferred",
+        attribution_method: "ip_user_agent_24h",
+        computed_at: "2026-01-02T06:00:00.000Z",
+      });
+      expect(
+        rows.find((row) => row.origin_id.startsWith("first-success:"))?.metadata
+      ).toMatchObject({
+        user_id: user,
+        evidence_basis: "observed",
+        success_kind: "source_read",
+        computed_at: "2026-01-02T06:00:00.000Z",
+        coverage: { signup_cohort_days: 90, success_window_days: 7 },
+      });
       expect(
         rows.every((row) => row.occurred_at === "2026-01-02T03:04:05.123Z")
       ).toBe(true);

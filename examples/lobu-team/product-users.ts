@@ -5,7 +5,7 @@ export const productUsers = defineEntityType({
   key: "product-user",
   name: "User",
   description:
-    "Lobu production accounts, read live. Activity shows recorded acquisition, signup and first-success milestones; missing attribution means unknown, not direct. Detailed tool journeys are published in the team reports.",
+    "Lobu production accounts, read live; signup_at is the canonical signup record. Activity shows inferred acquisition and observed first success, with computation time and bounded coverage. Missing milestones mean unknown, not inactivity; this is not a full browsing or tool-call history.",
   backing: {
     connection: "lobu-product-activity-db",
     sql: `SELECT u.id, coalesce(nullif(u.name, ''), 'Unnamed user') AS name,
