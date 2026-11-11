@@ -564,6 +564,47 @@ describe('search_memory direct OAuth workspace federation', () => {
     expect(localOnly.content ?? []).toEqual([]);
   });
 
+  // An entity match must be named by the query, not carried by the topic
+  // words around the name. Trigram similarity over whole strings scored an
+  // unrelated "<other> Renewal Risk" above the 0.3 floor on "renewal risk"
+  // alone, and the sub-phrase fallback returned the first non-empty single
+  // word ("promise") when the named account did not exist.
+  it('matches entities on the name the query gives, not its topic words', async () => {
+    const catalog = await createTestOrganization({
+      name: 'Synthetic Topic Catalog',
+      visibility: 'public',
+    });
+    await createTestEntity({ name: 'Sample Renewal Risk', organization_id: catalog.id });
+    await createTestEntity({ name: 'Sample Renewal Risk', organization_id: orgA.id });
+    await createTestEntity({
+      name: 'Northwind: 3 client questions; 22 promises, 5 overdue',
+      organization_id: orgA.id,
+    });
+    await createTestEntity({ name: 'Rowan Quillfeather', organization_id: orgA.id });
+    const named = await createTestEntity({ name: 'Halvorsen Freight', organization_id: orgA.id });
+
+    const matchNames = async (query: string) =>
+      (
+        await search(
+          { query, workspace: orgA.slug, include_content: false, limit: 10 },
+          {} as Env,
+          context()
+        )
+      ).matches.map((entity) => entity.name);
+
+    expect(await matchNames('Zentrova renewal risk')).toEqual([]);
+    expect(await matchNames('what did we promise Ostberg Logistics')).toEqual([]);
+    expect(await matchNames('Marlo Quillfeather accounts')).toEqual([]);
+
+    // The name itself still matches: whole, partial, inside a question, and
+    // with a typo.
+    expect(await matchNames('Sample Renewal Risk')).toContain('Sample Renewal Risk');
+    expect(await matchNames('renewal risk')).toContain('Sample Renewal Risk');
+    expect(await matchNames('Halvorsen')).toEqual([named.name]);
+    expect(await matchNames('what did we promise Halvorsen Freight')).toEqual([named.name]);
+    expect(await matchNames('Halvorsen Frieght')).toEqual([named.name]);
+  });
+
   it('keeps agent-bound calls single-workspace and bounds children', async () => {
     const agent = await createTestAgent({
       organizationId: orgA.id,

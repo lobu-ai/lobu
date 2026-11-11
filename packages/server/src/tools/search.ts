@@ -2026,7 +2026,8 @@ async function searchWorkspaceImpl(
         args,
         env,
         connectionScope,
-        readRestrictions
+        readRestrictions,
+        query
       );
       if (results.length > 0) {
         logger.info(
@@ -2150,6 +2151,7 @@ const entityJoinsSql = (parentReadPredicate = 'TRUE') => `
  * - query_embedding: vector similarity search
  * - metadata_filter: key-value metadata conditions
  * - scope: organization and connection-visibility principal
+ * - namedBy: the caller's whole query, when `query` is a fallback variant of it
  */
 async function queryEntities(
   query: string | null,
@@ -2157,6 +2159,7 @@ async function queryEntities(
   _env: Env,
   scope: AuthzScope,
   readRestrictions: EntityReadRestrictions,
+  namedBy: string | null = query,
 ) {
   const sql = getDb();
   const fuzzyEnabled = args.fuzzy ?? true;
@@ -2197,33 +2200,52 @@ async function queryEntities(
       ? `EXISTS (SELECT 1 FROM entity_identities ei WHERE ei.entity_id = e.id AND ei.organization_id = $${orgParamIdx} AND lower(ei.identifier) = lower($${queryParamIdx}) AND ei.deleted_at IS NULL)`
       : 'FALSE';
 
+  // `min_similarity` is the caller-facing knob whose schema declares it
+  // applies to BOTH fuzzy entity-name matching and recalled content. The
+  // entity-name half must read the caller's value rather than a hardcoded
+  // constant. Clamped to [0,1] (an out-of-range value would make the arm
+  // always-true / always-false) and defaulted to the SAME 0.3 the schema
+  // advertises, so an omitted value keeps today's query contract exactly.
+  //
+  // Bound as a param with an explicit `::numeric` cast, mirroring
+  // content-search/search-path.ts: `packages/server` runs `fetch_types:
+  // false`, so an uncast placeholder leaves postgres.js without a type to
+  // infer. `similarity()` returns `real`; `real > numeric` resolves fine.
+  // No index is lost by parameterizing: the only trigram index in the
+  // schema is `idx_events_raw_content_trgm` on `events.payload_text`, and
+  // the sole index on this column, `idx_entities_name`, is a BTREE over
+  // `lower(name)` — a btree can never serve `similarity()` at any
+  // threshold, literal or bound. It still serves the `LOWER(e.name) =
+  // LOWER($n)` arm of the match condition, which is untouched.
+  const rawMinSimilarity = Number(args.min_similarity ?? 0.3);
+  const nameSimFloor = Number.isFinite(rawMinSimilarity)
+    ? Math.max(0, Math.min(1, rawMinSimilarity))
+    : 0.3;
+  const minSimParamIdx = query && (fuzzyEnabled || namedBy !== query) ? addParam(nameSimFloor) : null;
+
+  // A name match must be NAMED by the caller's query: every word of the
+  // entity name appears in the query, or every word of the query appears in
+  // the name. Whole-string trigram similarity cannot tell a typo from a word
+  // substitution, so shared topic words alone carried unrelated names over
+  // the floor ("<account> renewal risk" vs "Sample Renewal Risk" scores 0.4).
+  // Requiring one side's words to be covered by the other rejects a match
+  // where BOTH sides carry a word the other lacks. Words come from Postgres's
+  // own `simple` text-search parser (no stemming, no stopwords); each is
+  // matched with pg_trgm word_similarity at the caller's floor, so typos and
+  // partial names still match.
+  const namedByParamIdx =
+    query && namedBy ? (namedBy === query ? queryParamIdx : addParam(namedBy)) : null;
+  const wordsCoveredSql = (words: string, text: string) =>
+    `NOT EXISTS (SELECT 1 FROM unnest(tsvector_to_array(to_tsvector('simple', ${words}))) AS term(word) WHERE word_similarity(term.word, LOWER(${text})) < $${minSimParamIdx}::numeric)`;
+  const namedByQuerySql =
+    namedByParamIdx !== null && minSimParamIdx !== null
+      ? `(${wordsCoveredSql('e.name', `$${namedByParamIdx}`)} OR ${wordsCoveredSql(`$${namedByParamIdx}`, 'e.name')})`
+      : 'TRUE';
+
   // Query match condition: text match OR vector match
   if (query) {
     if (fuzzyEnabled) {
-      // `min_similarity` is the caller-facing knob whose schema declares it
-      // applies to BOTH fuzzy entity-name matching and recalled content. This
-      // predicate is the entity-name half, so it must read the caller's value
-      // rather than a hardcoded constant. Clamped to [0,1] (an out-of-range
-      // value would make the arm always-true / always-false) and defaulted to
-      // the SAME 0.3 the schema advertises, so an omitted value keeps today's
-      // query contract exactly.
-      //
-      // Bound as a param with an explicit `::numeric` cast, mirroring
-      // content-search/search-path.ts: `packages/server` runs `fetch_types:
-      // false`, so an uncast placeholder leaves postgres.js without a type to
-      // infer. `similarity()` returns `real`; `real > numeric` resolves fine.
-      // No index is lost by parameterizing: the only trigram index in the
-      // schema is `idx_events_raw_content_trgm` on `events.payload_text`, and
-      // the sole index on this column, `idx_entities_name`, is a BTREE over
-      // `lower(name)` — a btree can never serve `similarity()` at any
-      // threshold, literal or bound. It still serves the `LOWER(e.name) =
-      // LOWER($n)` arm of this same OR, which is untouched.
-      const rawMinSimilarity = Number(args.min_similarity ?? 0.3);
-      const nameSimFloor = Number.isFinite(rawMinSimilarity)
-        ? Math.max(0, Math.min(1, rawMinSimilarity))
-        : 0.3;
-      const minSimParamIdx = addParam(nameSimFloor);
-      const textCondition = `(LOWER(e.name) LIKE '%' || LOWER($${queryParamIdx}) || '%' OR LOWER(e.name) = LOWER($${queryParamIdx}) OR similarity(LOWER(e.name), LOWER($${queryParamIdx})) > $${minSimParamIdx}::numeric OR e.content_tsv @@ websearch_to_tsquery('english', $${queryParamIdx}) OR ${identifierExactSql})`;
+      const textCondition = `(LOWER(e.name) LIKE '%' || LOWER($${queryParamIdx}) || '%' OR LOWER(e.name) = LOWER($${queryParamIdx}) OR (similarity(LOWER(e.name), LOWER($${queryParamIdx})) > $${minSimParamIdx}::numeric AND ${namedByQuerySql}) OR e.content_tsv @@ websearch_to_tsquery('english', $${queryParamIdx}) OR ${identifierExactSql})`;
       conditions.push(
         hasEmbedding ? `(${textCondition} OR e.embedding IS NOT NULL)` : textCondition
       );
@@ -2234,6 +2256,14 @@ async function queryEntities(
     }
   } else if (hasEmbedding) {
     conditions.push('e.embedding IS NOT NULL');
+  }
+  // A fallback variant is a fragment of the caller's query: its hits must
+  // still be named by the whole query, or a lone topic word ("promise")
+  // returns every entity that mentions it when the named one does not exist.
+  // Folded into the match expression (not a separate top-level qual, which the
+  // planner may reorder) so it only runs on rows the variant already matched.
+  if (query && namedBy !== query) {
+    conditions.push(`(${conditions.pop()} AND ${namedByQuerySql})`);
   }
 
   // Organization filter — caller's org always; public-catalog orgs when the
