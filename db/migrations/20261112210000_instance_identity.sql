@@ -14,5 +14,5 @@ CREATE TABLE IF NOT EXISTS public.instance_identity (
 );
 
 -- migrate:down
-
+-- squawk-ignore ban-drop-table -- rollback of the identity table introduced above
 DROP TABLE IF EXISTS public.instance_identity;
