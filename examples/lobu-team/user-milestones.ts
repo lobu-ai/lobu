@@ -10,7 +10,10 @@ interface AnalyticsConfig {
 }
 type Query = (ctx: QueryContext<AnalyticsConfig>) => Promise<QueryResult>;
 
-/** Reads at most three materialized milestones, never aggregates request history. */
+/** Reads at most two derived milestones, never aggregates request history.
+ * Signup is owned by the account row in Postgres. This source cannot prove
+ * complete activity coverage, a signed-in landing visitor, or absence of use.
+ */
 export async function readUserMilestones(
   ctx: FeedReadContext<AnalyticsConfig>,
   query: Query
@@ -57,30 +60,27 @@ export async function readUserMilestones(
   const user = `unhex('${hex}')`;
   const result = await query({
     ...ctx,
-    query: `SELECT concat('signup:', user_id) AS origin_id, user_id,
-        toString(toTimeZone(signup_at, 'UTC')) AS occurred_at, 'Signed up' AS title,
-        concat('Signup method: ', method, ' · ', if(attribution = 'unattributed',
-          'Acquisition source unknown; this does not mean direct traffic',
-          'An approximate last external touch was matched within 24 hours')) AS payload_text
-      FROM observability.analytics_signup_journey FINAL WHERE user_id = ${user}
-      UNION ALL
-      SELECT concat('landing:', user_id), user_id, toString(toTimeZone(assumeNotNull(landing_at), 'UTC')),
-        'Landing visit (approximate match)',
+    query: `SELECT concat('landing:', user_id) AS origin_id, user_id,
+        toString(toTimeZone(assumeNotNull(landing_at), 'UTC')) AS occurred_at,
+        'Landing visit (approximate match)' AS title,
         concat(landing_host, landing_path, ' · source: ', utm_source, ' · medium: ', utm_medium,
           ' · campaign: ', utm_campaign, ' · referrer: ', referrer_domain,
-          ' · IP and browser match within 24 hours; not verified identity or first touch')
+          ' · IP and browser match within 24 hours; not verified identity or first touch') AS payload_text,
+        toString(toTimeZone(computed_at, 'UTC')) AS computed_at, CAST(NULL AS Nullable(String)) AS success_kind
       FROM observability.analytics_signup_journey FINAL
       WHERE user_id = ${user} AND landing_at IS NOT NULL AND attribution = 'last_external_touch_24h'
       UNION ALL
       SELECT concat('first-success:', user_id), user_id, toString(toTimeZone(assumeNotNull(first_success_at), 'UTC')),
-        'First verified success', concat('Success kind: ', toString(assumeNotNull(success_kind)))
+        'First observed success within 7 days', concat('Success kind: ', toString(assumeNotNull(success_kind)),
+          ' · 90-day signup cohort; successes within 7 days of signup; absence is not proof of inactivity'),
+        toString(toTimeZone(computed_at, 'UTC')), toString(assumeNotNull(success_kind))
       FROM observability.analytics_first_success FINAL
       WHERE user_id = ${user} AND first_success_at IS NOT NULL`,
-    limit: 4,
+    limit: 3,
     offset: 0,
     sort: undefined,
   });
-  if ((result.total ?? result.rows.length) > 3 || result.rows.length > 3)
+  if ((result.total ?? result.rows.length) > 2 || result.rows.length > 2)
     throw new Error("User milestone projection returned duplicate accounts");
   const rows = result.rows
     .map((row) => {
@@ -89,16 +89,48 @@ export async function readUserMilestones(
         typeof row.origin_id !== "string" ||
         typeof row.occurred_at !== "string" ||
         typeof row.title !== "string" ||
-        typeof row.payload_text !== "string"
+        typeof row.payload_text !== "string" ||
+        typeof row.computed_at !== "string" ||
+        (row.origin_id !== `landing:${userId}` &&
+          row.origin_id !== `first-success:${userId}`) ||
+        (row.origin_id === `first-success:${userId}` &&
+          !["agent_reply", "source_read", "automation_output"].includes(
+            String(row.success_kind)
+          ))
       )
         throw new Error("Invalid user milestone projection");
       const date = new Date(`${row.occurred_at.replace(" ", "T")}Z`);
-      if (!Number.isFinite(date.getTime()))
+      const computed = new Date(`${row.computed_at.replace(" ", "T")}Z`);
+      if (
+        !Number.isFinite(date.getTime()) ||
+        !Number.isFinite(computed.getTime())
+      )
         throw new Error("Invalid user milestone timestamp");
       const occurred_at = date.toISOString();
       return {
         origin_id: row.origin_id,
-        user_id: row.user_id,
+        metadata: {
+          user_id: userId,
+          computed_at: computed.toISOString(),
+          ...(row.origin_id === `landing:${userId}`
+            ? {
+                event_type: "product.landing_attributed",
+                evidence_basis: "inferred",
+                attribution_method: "ip_user_agent_24h",
+                source: "observability.analytics_signup_journey",
+                coverage: {
+                  lookback_hours: 24,
+                  verified_visitor_identity: false,
+                },
+              }
+            : {
+                event_type: "product.first_success",
+                evidence_basis: "observed",
+                source: "observability.analytics_first_success",
+                success_kind: row.success_kind,
+                coverage: { signup_cohort_days: 90, success_window_days: 7 },
+              }),
+        },
         title: row.title,
         payload_text: row.payload_text,
         occurred_at,
@@ -114,11 +146,10 @@ export async function readUserMilestones(
     JSON.stringify({ v: 1, user_id: userId, before: row.pageKey })
   );
   return {
-    rows: selected.map(({ user_id, pageKey: _pageKey, ...row }) => ({
+    rows: selected.map(({ pageKey: _pageKey, ...row }) => ({
       ...row,
-      origin_type: "product.milestone",
+      origin_type: row.metadata.event_type,
       payload_type: "text",
-      metadata: { user_id },
     })),
     rowCursors,
     hasMore: rows.length > limit,
