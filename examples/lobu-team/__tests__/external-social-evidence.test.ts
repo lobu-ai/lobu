@@ -508,6 +508,10 @@ test("serialized reaction preserves preflight coverage and result identities", a
         automation: { id: 1 },
         window: { run_id: 10 },
         extracted_data: JSON.parse(JSON.stringify(h.data)),
+        // The sandbox's ctx.fail never returns.
+        fail: (message: string) => {
+          throw new Error(message);
+        },
       },
       client: {
         query: async () => [{ created_by: "synthetic-owner" }],

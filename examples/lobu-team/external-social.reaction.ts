@@ -14,7 +14,13 @@ export async function deliverExternalSocial(
   policy: EvidencePolicy
 ) {
   const d = ctx.extracted_data;
-  const m = assertBriefingEnvelope(d, policy, ctx.window.run_id);
+  let m: ReturnType<typeof assertBriefingEnvelope>;
+  try {
+    m = assertBriefingEnvelope(d, policy, ctx.window.run_id);
+  } catch (error) {
+    // The completed output is stored; a retry would reject it again.
+    return ctx.fail(error instanceof Error ? error.message : String(error));
+  }
   const { automationId, ownerId } = await automationOwner(
     client,
     ctx.automation?.id
