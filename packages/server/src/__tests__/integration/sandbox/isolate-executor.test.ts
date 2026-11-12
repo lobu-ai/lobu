@@ -511,6 +511,109 @@ describe("isolate lane: fixture connector", () => {
 		expect(artifacts).toEqual([{ step: 1 }]);
 	});
 
+	it("reports a cancel that lands while hooks drain as the cancel, not as the skipped hook", async () => {
+		// The guest returns at once; its two unawaited artifacts drain after.
+		// Cancelling while the first blocks must fail the run with the cancel
+		// itself: neither success with a dropped artifact nor the skip.
+		let releaseFirst!: () => void;
+		const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+		let firstStarted!: () => void;
+		const started = new Promise<void>((resolve) => { firstStarted = resolve; });
+		const artifacts: Record<string, unknown>[] = [];
+		const controller = new AbortController();
+		const executor = new IsolateExecutor({ timeoutMs: 60_000, logSink: () => undefined });
+		const execution = executor
+			.execute(
+				`class Runtime {
+					async authenticate(ctx) {
+						ctx.emit({ step: 1 });
+						ctx.emit({ step: 2 });
+						return { credentials: { provider: "fixture", accessToken: "tok" } };
+					}
+					async sync() { return { status: "complete" }; }
+					async execute() { return { ok: true }; }
+				} module.exports = { default: Runtime };`,
+				{ mode: "authenticate", config: {}, previousCredentials: null, env: {} },
+				{
+					signal: controller.signal,
+					onAuthArtifact: async (artifact) => {
+						artifacts.push(artifact);
+						if (artifacts.length === 1) {
+							firstStarted();
+							await firstGate;
+						}
+					},
+				},
+			)
+			.then(() => null, (error: unknown) => error as LaneError);
+		await started;
+		controller.abort();
+		releaseFirst();
+		const failure = await execution;
+		expect(failure?.message).toContain("the run was cancelled");
+		expect(artifacts).toEqual([{ step: 1 }]);
+	});
+
+	it.each(["guest error", "cancellation"] as const)("preserves the %s when skipping a queued host hook", async (ending) => {
+		let releaseFirst!: () => void;
+		const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+		const controller = new AbortController();
+		const artifacts: Record<string, unknown>[] = [];
+		const terminate = IsolateHost.prototype.terminate;
+		// Release the in-flight hook during teardown so its queued successor is
+		// skipped before the executor has reported the original terminal error.
+		const terminating = vi.spyOn(IsolateHost.prototype, "terminate").mockImplementation(function (this: IsolateHost, state) {
+			releaseFirst();
+			terminate.call(this, state);
+		});
+		try {
+			const failure = await executeCompiledConnector({
+				compiledCode: `class Runtime {
+					async authenticate(ctx) {
+						ctx.emit({ step: 1 });
+						ctx.emit({ step: 2 });
+						await ctx.awaitSignal("queued");
+						setTimeout(() => {
+							const error = new RangeError("fixture timer exploded");
+							error.status = 429;
+							throw error;
+						}, 0);
+						await new Promise(() => {});
+					}
+					async sync() { return { status: "complete" }; }
+					async execute() { return { ok: true }; }
+				} module.exports = { default: Runtime };`,
+				job: { mode: "authenticate", config: {}, previousCredentials: null, env: {} },
+				hooks: {
+					signal: controller.signal,
+					onAuthArtifact: async (artifact) => {
+						artifacts.push(artifact);
+						if (artifacts.length === 1) await firstGate;
+					},
+					onAwaitAuthSignal: async () => {
+						if (ending === "cancellation") controller.abort();
+						return {};
+					},
+				},
+				timeoutMs: 5_000,
+			}).then(() => null, (error: unknown) => error as LaneError);
+			if (ending === "guest error") {
+				expect(failure?.name).toBe("RangeError");
+				expect(failure?.message).toBe("fixture timer exploded");
+				expect(failure?.exitReason).toBe("error_message");
+				expect(failure?.httpStatus).toBe(429);
+			} else {
+				expect(failure?.message).toBe("the run was cancelled");
+				expect(failure?.exitReason).toBe("crash");
+			}
+			await new Promise((resolve) => setImmediate(resolve));
+			expect(artifacts).toEqual([{ step: 1 }]);
+		} finally {
+			releaseFirst();
+			terminating.mockRestore();
+		}
+	});
+
 	it("keeps the wall-clock deadline disabled when timeoutMs is zero", async () => {
 		const result = await executeCompiledConnector({
 			compiledCode: `class Runtime {
