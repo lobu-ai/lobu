@@ -21,7 +21,6 @@ import http from "node:http";
 import net from "node:net";
 import { serve } from "@hono/node-server";
 import { WorkerClient } from "@lobu/connector-worker/daemon";
-import { Agent, fetch as undiciFetch } from "undici";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { createSpan, currentTraceLogFields, initTracing, runInSpanContext, shutdownTracing, SpanKind, SpanStatusCode } from "@lobu/core";
 import { InMemorySpanExporter, SimpleSpanProcessor } from "@opentelemetry/sdk-trace-node";
@@ -831,19 +830,18 @@ describe("shutdown ordering (live drain)", () => {
 				databaseReadiness: async () => {},
 			}).start();
 
-			// One pooled connection, as a worker's fetch keeps to the Service.
-			const workerConnection = new Agent({ connections: 1 });
-			const originalFetch = globalThis.fetch;
-			globalThis.fetch = ((input: string, init?: Record<string, unknown>) =>
-				undiciFetch(input, { ...init, dispatcher: workerConnection })) as unknown as typeof fetch;
 			let signalled = false;
 			try {
 				const baseUrl = `http://127.0.0.1:${freePort}`;
-				const busyResponse = undiciFetch(`${baseUrl}/lobu/busy`, { method: "POST", dispatcher: workerConnection });
+				// The worker's fetch keeps this connection alive in its pool and,
+				// once it is idle, reuses it for the completion below.
+				const busyResponse = fetch(`${baseUrl}/lobu/busy`, { method: "POST" });
 				await busy;
 				process.emit("SIGTERM");
 				signalled = true;
-				expect((await busyResponse).status).toBe(200);
+				const busyResult = await busyResponse;
+				expect(busyResult.status).toBe(200);
+				await busyResult.arrayBuffer();
 
 				await poolClosingReached;
 				const client = new WorkerClient({ apiUrl: baseUrl, workerId, capabilities: {} });
@@ -877,10 +875,8 @@ describe("shutdown ordering (live drain)", () => {
 					await new Promise<void>((resolve) => replacement.close(() => resolve()));
 				}
 			} finally {
-				globalThis.fetch = originalFetch;
 				releaseTeardown();
 				if (signalled) await exited;
-				await workerConnection.close();
 				for (const signal of ["SIGTERM", "SIGINT"] as const) {
 					for (const listener of process.listeners(signal)) {
 						if (!sigListenersBefore.includes(listener)) process.removeListener(signal, listener);
