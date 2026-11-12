@@ -13,12 +13,31 @@
 import { type Static, Type } from "@sinclair/typebox";
 import type { FlatActionInput } from "./action-input";
 
+/** Bounds on `{ name }` entries in `entity_ids`; the handler enforces the count. */
+export const MAX_ENTITY_NAMES = 20;
+const MAX_ENTITY_NAME_LENGTH = 256;
+
 export const SaveContentSchema = Type.Object({
   entity_ids: Type.Optional(
-    Type.Array(Type.Number(), {
-      description:
-        "Entity IDs to associate content with. Omit for org-scoped content.",
-    })
+    Type.Array(
+      Type.Union([
+        Type.Integer({ minimum: 1 }),
+        Type.Object(
+          {
+            name: Type.String({
+              minLength: 1,
+              maxLength: MAX_ENTITY_NAME_LENGTH,
+              description:
+                "The record's exact full name: a person's full name, owner/repo for a repository.",
+            }),
+          },
+          { additionalProperties: false }
+        ),
+      ]),
+      {
+        description: `Records this content is about. Each entry is a record id, or { name } with the record's exact full name. A name links only when exactly one record in this workspace has that name; otherwise it is returned in \`unlinked\` and the content is still saved. Reference only records the content is substantially about, at most ${MAX_ENTITY_NAMES} names. Omit for org-scoped content.`,
+      }
+    )
   ),
   content: Type.Optional(
     Type.String({
