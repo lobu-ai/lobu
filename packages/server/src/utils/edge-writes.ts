@@ -1,10 +1,9 @@
 /**
  * Conflict-safe batch edge writes for first-party materializers.
  *
- * Four call sites had hand-rolled the same statement one round trip per edge.
- * Three agreed; `auto-linker` had copied it WITHOUT the conflict clause and put
- * a `SELECT` in front instead, so two concurrent linkers could both pass the
- * check and the second raise `23505`.
+ * Call sites had hand-rolled the same statement one round trip per edge; one
+ * copy lacked the conflict clause and put a `SELECT` in front instead, so two
+ * concurrent writers could both pass the check and the second raise `23505`.
  *
  * Not a replacement for `relationship-validation.ts`, which guards the
  * caller-facing `manage_entity` surface: its `validateSource` accepts only

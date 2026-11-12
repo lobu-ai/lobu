@@ -389,4 +389,17 @@ describe('saveContent supported event formats', () => {
       expect(rows.every((row) => row.client_id === null)).toBe(true);
     });
   });
+  it('infers no relationships from names in the saved text', async () => {
+    const named = await createTestEntity({ name: 'Synthetic Named Record', organization_id: org.id });
+    await saveContent({
+      semantic_type: 'content',
+      content: 'This note mentions Synthetic Named Record in passing.',
+      entity_ids: [entityId],
+    }, {} as never, ctx);
+    const edges = await getTestDb()`
+      SELECT id FROM entity_relationships
+      WHERE organization_id = ${org.id} AND to_entity_id = ${named.id} AND deleted_at IS NULL
+    `;
+    expect(edges).toHaveLength(0);
+  });
 });

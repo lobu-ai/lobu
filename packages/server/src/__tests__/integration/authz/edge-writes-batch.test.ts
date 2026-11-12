@@ -70,7 +70,7 @@ describe("upsertEdges", () => {
 			});
 
 		// Both run against the same live-triple index at once. Without a conflict
-		// clause one of these raises 23505 — that is the auto-linker bug.
+		// clause one of these raises 23505.
 		const [first, second] = await Promise.all([call(), call()]);
 
 		expect(first.length + second.length).toBe(1);

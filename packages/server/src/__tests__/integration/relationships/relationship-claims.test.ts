@@ -1,7 +1,6 @@
 /** Atomic source-claim invariants for shared relationship triples. */
 
 import { beforeEach, describe, expect, it } from 'vitest';
-import { autoLinkEvent } from '../../../utils/auto-linker';
 import { ensureRelationshipType, upsertEdges } from '../../../utils/edge-writes';
 import {
   connectionRelationshipClaimKey,
@@ -488,39 +487,6 @@ describe('relationship source claims', () => {
     expect(Object.keys(row.metadata[RELATIONSHIP_CLAIMS_METADATA_KEY])).toEqual([
       `connection:${connection.id}:feed:invoice:source`,
     ]);
-  });
-
-  it('keeps auto-linked mention guesses manually removable', async () => {
-    const { sql, workspace, invoice, customer } = await seedClaimGraph();
-    await autoLinkEvent({
-      eventId: 1,
-      entityIds: [invoice.entity.id],
-      content: 'Race Customer is mentioned here.',
-      organizationId: workspace.org.id,
-    });
-
-    const [row] = await sql`
-      SELECT r.id, r.metadata, r.confidence, r.source
-      FROM entity_relationships r
-      JOIN entity_relationship_types rt ON rt.id = r.relationship_type_id
-      WHERE r.organization_id = ${workspace.org.id}
-        AND r.from_entity_id = ${invoice.entity.id}
-        AND r.to_entity_id = ${customer.entity.id}
-        AND rt.slug = 'mentions'
-        AND r.deleted_at IS NULL
-    `;
-    expect(row.metadata[RELATIONSHIP_CLAIMS_METADATA_KEY]).toEqual({ manual: {} });
-    expect(row.confidence).toBe(0.4);
-    expect(row.source).toBe('feed');
-
-    await workspace.owner.entities.unlink({
-      relationship_id: Number(row.id),
-    });
-
-    const [removed] = await sql`
-      SELECT deleted_at FROM entity_relationships WHERE id = ${row.id}
-    `;
-    expect(removed.deleted_at).not.toBeNull();
   });
 
   // The same fail-closed rule the migration header documents, from the caller
