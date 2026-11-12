@@ -40,8 +40,10 @@ import {
   GUIDANCE_SEMANTIC_TYPE,
 } from '../utils/org-guidance';
 import { ensureMemberEntityType } from '../utils/member-entity-type';
-import { canWriteOrg, requireWriteAccess } from '../utils/organization-access';
-import { resolveEntityNameReferences } from '../utils/entity-name-references';
+import {
+  requireLinkableEntityIds,
+  resolveEntityNameReferences,
+} from '../utils/entity-name-references';
 import { isUniqueViolation } from '../utils/pg-errors';
 import { trackAutomationReaction } from '../utils/automation-reactions';
 import { isSystemContext, workspaceScopeDenialMessage } from './access-control';
@@ -165,7 +167,7 @@ export const SaveContentResultSchema = Type.Object({
   }),
   unlinked: Type.Array(UnlinkedEntityNameSchema, {
       description:
-        'Names from entity_ids that were not linked: no record has that exact name, several do, or the caller may not link records here.',
+        'Names from entity_ids that were not linked: no readable record has that exact name, or several do.',
     }
   ),
 });
@@ -303,12 +305,10 @@ async function saveContentImpl(
     throw new ToolUserError(`content is required for payload_type '${payloadType}'`);
   }
 
-  // 1. Require write access for each explicit entity id; resolve names to ids.
-  //    An explicit id the caller cannot link fails the save; a name that does not
-  //    resolve to exactly one record is reported in `unlinked` instead.
-  for (const eid of explicitEntityIds) {
-    await requireWriteAccess(sql, eid, ctx);
-  }
+  // 1. Check explicit entity ids; resolve names to ids. An explicit id the
+  //    caller cannot link fails the save; a name that does not resolve to
+  //    exactly one record is reported in `unlinked` instead.
+  await requireLinkableEntityIds(sql, explicitEntityIds, ctx);
   // A retry of a stored save keeps the links that save resolved: records renamed
   // or added since must not change, or fail, the original outcome.
   const storedSave =
@@ -317,12 +317,7 @@ async function saveContentImpl(
       : undefined;
   const nameResolution = storedSave
     ? { entityIds: storedSave.entity_ids ?? [], unlinked: unlinkedFromMetadata(storedSave.metadata) }
-    : await resolveEntityNameReferences(
-        sql,
-        entityNames,
-        ctx,
-        entityNames.length > 0 && (await canWriteOrg(sql, ctx))
-      );
+    : await resolveEntityNameReferences(sql, entityNames, ctx);
   const entityIds = [...new Set([...explicitEntityIds, ...nameResolution.entityIds])];
 
   // 2. Validate semantic_type against $member.event_kinds + entity type event_kinds.

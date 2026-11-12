@@ -479,11 +479,11 @@ export type SaveMemoryResponses = {
       content_ids: [unknown];
     };
     /**
-     * Names from entity_ids that were not linked: no record has that exact name, several do, or the caller may not link records here.
+     * Names from entity_ids that were not linked: no readable record has that exact name, or several do.
      */
     unlinked: Array<{
       name: string;
-      reason: "not_found" | "ambiguous" | "not_writable";
+      reason: "not_found" | "ambiguous";
     }>;
   };
 };

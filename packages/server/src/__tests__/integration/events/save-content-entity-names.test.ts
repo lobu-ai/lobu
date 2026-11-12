@@ -37,6 +37,8 @@ describe('save_memory entity name references', () => {
   let member: ToolContext;
   let person: number;
   let repo: number;
+  let systemRecord: number;
+  let foreignRecord: number;
 
   beforeAll(async () => {
     await initWorkspaceProvider();
@@ -56,13 +58,13 @@ describe('save_memory entity name references', () => {
     repo = (await createTestEntity({ name: 'acme/widgets', entity_type: 'product', organization_id: orgId })).id;
     // A system record sharing the person's name must not make it ambiguous.
     // (A parent keeps its slug distinct from the person's.)
-    await createTestEntity({ name: 'Jane Doe Synthetic', entity_type: '$member', organization_id: orgId, parent_id: repo });
+    systemRecord = (await createTestEntity({ name: 'Jane Doe Synthetic', entity_type: '$member', organization_id: orgId, parent_id: repo })).id;
     // Two same-type records with one name are ambiguous.
     const first = await createTestEntity({ name: 'Sam Twin Synthetic', entity_type: 'person', organization_id: orgId });
     await createTestEntity({ name: 'Sam Twin Synthetic', entity_type: 'person', organization_id: orgId, parent_id: first.id });
     // A record in another workspace never resolves here.
     const other = await createTestOrganization({ name: 'Synthetic other workspace' });
-    await createTestEntity({ name: 'Elsewhere Synthetic', entity_type: 'person', organization_id: other.id });
+    foreignRecord = (await createTestEntity({ name: 'Elsewhere Synthetic', entity_type: 'person', organization_id: other.id })).id;
   });
 
   it('links exact names, reports the rest, and still saves', async () => {
@@ -133,14 +135,21 @@ describe('save_memory entity name references', () => {
     expect(replay).toMatchObject({ id: first.id, created: false, unlinked: [] });
   });
 
-  it('reports names as not_writable for a caller who cannot link records', async () => {
+  it('lets a member link records they can read, but not system or foreign records', async () => {
     const result = await saveContent({
       semantic_type: 'content',
-      content: 'A member mentions Jane.',
-      entity_ids: [{ name: 'Jane Doe Synthetic' }],
+      content: 'A member notes Jane and acme/widgets.',
+      entity_ids: [{ name: 'Jane Doe Synthetic' }, repo],
     }, {} as never, member);
-    expect(result.unlinked).toEqual([{ name: 'Jane Doe Synthetic', reason: 'not_writable' }]);
-    expect(await storedEntityIds(result.id)).not.toContain(person);
+    expect(result.unlinked).toEqual([]);
+    expect(await storedEntityIds(result.id)).toEqual(expect.arrayContaining([person, repo]));
+
+    await expect(saveContent({
+      semantic_type: 'content', content: 'x', entity_ids: [systemRecord],
+    }, {} as never, member)).rejects.toThrow(/system record/);
+    await expect(saveContent({
+      semantic_type: 'content', content: 'x', entity_ids: [foreignRecord],
+    }, {} as never, member)).rejects.toThrow(/not found in this workspace/);
   });
 
   it('rejects blank names and more than the name limit', async () => {

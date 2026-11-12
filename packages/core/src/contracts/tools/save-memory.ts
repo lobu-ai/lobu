@@ -139,11 +139,7 @@ export type SaveContentArgs = Static<typeof SaveContentSchema>;
 /** A `{ name }` entry from `entity_ids` that did not link, as returned in the save result's `unlinked`. */
 export const UnlinkedEntityNameSchema = Type.Object({
   name: Type.String(),
-  reason: Type.Union([
-    Type.Literal("not_found"),
-    Type.Literal("ambiguous"),
-    Type.Literal("not_writable"),
-  ]),
+  reason: Type.Union([Type.Literal("not_found"), Type.Literal("ambiguous")]),
 });
 
 export type UnlinkedEntityName = Static<typeof UnlinkedEntityNameSchema>;
