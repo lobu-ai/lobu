@@ -46,7 +46,7 @@ import {
 	type IsolatedVm,
 	loadIsolatedVm,
 } from "@lobu/connector-worker/isolate";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { dbEgressConfig } from "../../../utils/cloud-mode";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -429,6 +429,63 @@ describe("isolate lane: hackernews against the live API", () => {
 });
 
 describe("isolate lane: fixture connector", () => {
+	it("expires the runtime budget while setup is pending and never starts the late guest", async () => {
+		let releaseSetup!: () => void;
+		const setupGate = new Promise<void>((resolve) => { releaseSetup = resolve; });
+		let setupStarted!: () => void;
+		const started = new Promise<void>((resolve) => { setupStarted = resolve; });
+		let lateHost: IsolateHost | undefined;
+		const create = IsolateHost.create;
+		const delayedSetup = vi.spyOn(IsolateHost, "create").mockImplementation(async (options) => {
+			lateHost = await create(options);
+			setupStarted();
+			await setupGate;
+			return lateHost;
+		});
+		const captured = emptyCapture();
+		const execution = executeCompiledConnector({
+			compiledCode: `class Runtime {
+				async sync() { console.log("LATE_GUEST_RAN"); return { status: "complete" }; }
+				async execute() { return { ok: true }; }
+			} module.exports = { default: Runtime };`,
+			job: syncJob({}),
+			hooks: captureHooks(captured),
+			timeoutMs: 150,
+		}).then(() => null, (error: unknown) => error as LaneError);
+		try {
+			await started;
+			const failure = await Promise.race([
+				execution,
+				new Promise<null>((resolve) => setTimeout(() => resolve(null), 1_000)),
+			]);
+			expect(failure?.exitReason).toBe("timeout");
+			expect(failure?.message).toContain("Execution timed out after 150ms");
+		} finally {
+			releaseSetup();
+			await execution;
+			await new Promise((resolve) => setImmediate(resolve));
+			delayedSetup.mockRestore();
+		}
+		expect(captured.events).toEqual([]);
+		// Disposal is observable through the real host, not a mocked dispose call.
+		await expect(lateHost!.run("true", { timeoutMs: 100 })).rejects.toBeInstanceOf(IsolateHostError);
+	});
+
+	it("keeps the wall-clock deadline disabled when timeoutMs is zero", async () => {
+		const result = await executeCompiledConnector({
+			compiledCode: `class Runtime {
+				async sync() {
+					await new Promise(resolve => setTimeout(resolve, 200));
+					return { status: "complete", metadata: { waited: true } };
+				}
+				async execute() { return { ok: true }; }
+			} module.exports = { default: Runtime };`,
+			job: syncJob({}),
+			timeoutMs: 0,
+		});
+		expect(result).toMatchObject({ mode: "sync", metadata: { waited: true } });
+	});
+
 	it("refuses a run whose signal is already aborted, without running the guest", async () => {
 		// `terminate` reaches the isolate through `host?.`, and `host` is assigned
 		// only after `IsolateHost.create` resolves — an await away. An abort that
