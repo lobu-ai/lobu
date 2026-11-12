@@ -310,7 +310,7 @@ export const PROVIDER_BALANCE_EXHAUSTED =
  * within the minute, so nothing may treat them as a balance wall.
  */
 export const PROVIDER_WINDOWED_QUOTA =
-  /limit exhausted|usage limit|rate[-\s]?limit|quota (?:exceeded|exhausted)|too many requests|\b429\b|resource_exhausted/i;
+  /limit exhausted|usage limit|(?:you've|you have) hit your weekly limit\b|rate[-\s]?limit|quota (?:exceeded|exhausted)|too many requests|\b429\b|resource_exhausted/i;
 
 /** Parse an `AgentErrorCode` from an unknown value (payload/DB boundary). */
 export function toAgentErrorCode(value: unknown): AgentErrorCode | undefined {

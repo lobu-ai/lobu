@@ -1195,7 +1195,7 @@ describe("automation contract", () => {
 			expect(dupeJson.idempotent).toBe(true);
 		});
 
-		it("complete-automation endpoint moves a provider-quota failure to the next tick", async () => {
+		it.each(["HTTP 429", "Claude weekly limit"])("complete-automation endpoint attributes %s to the provider and moves to the next tick", async (providerFailure) => {
 			const { sql, dbClient, workspace, automationId, agent } =
 				await createAutomatedAutomation();
 			const { windowStart, windowEnd } = await computePendingWindow(dbClient, automationId);
@@ -1225,7 +1225,10 @@ describe("automation contract", () => {
 				.toISOString()
 				.replace("T", " ")
 				.replace(/\.\d{3}Z$/, "");
-			const error = `429 Limit Exhausted. Your limit will reset at ${providerReset}`;
+			const error = providerFailure === "HTTP 429"
+				? `429 Limit Exhausted. Your limit will reset at ${providerReset}`
+				: "Internal error: You've hit your weekly limit · resets Nov 8 at 5pm (Europe/London)\nError: Query closed before response received";
+			const exitCode = providerFailure === "HTTP 429" ? 127 : null;
 			const tickBefore = new Date(nextRunAt("0 9 * * *", new Date())).getTime();
 			const response = await post(
 				`/api/workers/me/runs/${queued.runId}/complete-automation`,
@@ -1235,7 +1238,7 @@ describe("automation contract", () => {
 						error,
 						duration_ms: 12,
 						exit_reason: "crash",
-						exit_code: 127,
+						exit_code: exitCode,
 					},
 				}
 			);
@@ -1244,14 +1247,16 @@ describe("automation contract", () => {
 			expect(json.status).toBe("failed");
 
 			const [run] = await sql`
-        SELECT status, error_message, action_output, exit_code, exit_reason
+        SELECT status, outcome, error_message, action_output, exit_code, exit_signal, exit_reason
         FROM runs
         WHERE id = ${queued.runId}
       `;
 			expect(String(run.status)).toBe("failed");
+			expect(String(run.outcome)).toBe("infra_error");
 			expect(String(run.error_message)).toBe(error);
 			expect(run.action_output).toBeNull();
-			expect(Number(run.exit_code)).toBe(127);
+			expect(run.exit_code).toBe(exitCode);
+			expect(run.exit_signal).toBeNull();
 			expect(String(run.exit_reason)).toBe("crash");
 
 
