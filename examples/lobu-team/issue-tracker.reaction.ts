@@ -28,6 +28,11 @@ export const RULES = {
   /** high priority for a system/dependency issue at this volume or reach. */
   highMinSeen24h: 20,
   highMinOrgs: 3,
+  /**
+   * Sign-in and consent routes. A failure here locks a user out before they
+   * reach the product, often once per person, so one sighting is an issue.
+   */
+  blockingCulprit: /^[A-Z]+ \/(connect|oauth|api\/auth)(\/|$)/,
   newForDays: 7,
   resolveAfterQuietDays: 14,
   /** escalating: the last two hours' hourly rate vs the prior 13 days. */
@@ -78,7 +83,8 @@ export interface IssueRecord {
   deleted?: boolean;
 }
 
-export type Alert = "regressed" | "escalating";
+export type Alert = "new_high" | "regressed" | "escalating";
+type AlertNotice = { kind: Alert; key: string; title: string };
 
 export type IssueChange =
   | {
@@ -86,13 +92,14 @@ export type IssueChange =
       fingerprint: string;
       name: string;
       metadata: Record<string, unknown>;
+      alert?: AlertNotice;
     }
   | {
       action: "update";
       id: number;
       fingerprint: string;
       metadata: Record<string, unknown>;
-      alert?: { kind: Alert; key: string; title: string };
+      alert?: AlertNotice;
     }
   | { action: "defer"; fingerprint: string; reason: "hourly_quota" };
 
@@ -100,7 +107,11 @@ const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 const ms = (iso: string | undefined) => (iso ? Date.parse(iso) : Number.NaN);
 
+const blocksSignIn = (o: Occurrence) =>
+  o.kind !== "user" && RULES.blockingCulprit.test(o.culprit);
+
 function passesGate(o: Occurrence): boolean {
+  if (blocksSignIn(o)) return true;
   return o.kind === "user"
     ? o.seen_24h >= RULES.userMinSeen24h || o.max_orgs >= RULES.userMinOrgs
     : o.seen_24h >= RULES.systemMinSeen24h || o.max_orgs >= RULES.systemMinOrgs;
@@ -108,7 +119,9 @@ function passesGate(o: Occurrence): boolean {
 
 function priority(o: Occurrence): "high" | "medium" | "low" {
   if (o.kind === "user") return "low";
-  return o.seen_24h >= RULES.highMinSeen24h || o.max_orgs >= RULES.highMinOrgs
+  return blocksSignIn(o) ||
+    o.seen_24h >= RULES.highMinSeen24h ||
+    o.max_orgs >= RULES.highMinOrgs
     ? "high"
     : "medium";
 }
@@ -186,9 +199,12 @@ export function planIssueChanges(
   const seen = new Set<string>();
   const changes: IssueChange[] = [];
   let quota = Math.max(0, RULES.maxNewPerHour - createdLastHour);
+  // Sign-in failures first, so a busy hour cannot defer them past the quota.
   const ordered = [...occurrences].sort(
     (a, b) =>
-      b.seen_24h - a.seen_24h || a.fingerprint.localeCompare(b.fingerprint)
+      Number(blocksSignIn(b)) - Number(blocksSignIn(a)) ||
+      b.seen_24h - a.seen_24h ||
+      a.fingerprint.localeCompare(b.fingerprint)
   );
 
   for (const o of ordered) {
@@ -206,6 +222,7 @@ export function planIssueChanges(
         continue;
       }
       quota--;
+      const level = priority(o);
       changes.push({
         action: "create",
         fingerprint: o.fingerprint,
@@ -214,19 +231,28 @@ export function planIssueChanges(
           fingerprint: o.fingerprint,
           status: isEscalating(o) ? "escalating" : "new",
           kind: o.kind,
-          priority: priority(o),
+          priority: level,
           culprit: o.culprit,
           message: o.message,
           first_seen: o.first_seen,
           first_release: o.last_release,
           ...snapshot(o, now),
         },
+        ...(level === "high"
+          ? {
+              alert: {
+                kind: "new_high" as const,
+                key: `issue-new:${o.fingerprint}`,
+                title: `New high-priority issue: ${o.title} (${o.culprit})`,
+              },
+            }
+          : {}),
       });
       continue;
     }
 
     const metadata = snapshot(o, now);
-    let alert: Extract<IssueChange, { action: "update" }>["alert"];
+    let alert: AlertNotice | undefined;
     const set = (status: IssueStatus) => {
       if (status !== issue.status) metadata.status = status;
     };
@@ -442,7 +468,7 @@ export async function runIssueTracker(
     created: changes.filter((c) => c.action === "create").length,
     updated: changes.filter((c) => c.action === "update").length,
     deferred: changes.filter((c) => c.action === "defer").length,
-    alerts: changes.filter((c) => c.action === "update" && c.alert).length,
+    alerts: changes.filter((c) => c.action !== "defer" && c.alert).length,
   };
   if (dryRun) return { ...summary, changes: changes.slice(0, 50) };
 
@@ -474,6 +500,17 @@ async function applyChange(
   client: ReactionClient,
   source: { automation_id: number; run_id: number }
 ): Promise<void> {
+  // Alert before the write: once the record exists the planner never builds
+  // this alert again, so a send that failed after the write would be lost.
+  // The idempotency key collapses a repeat send.
+  if (change.action !== "defer" && change.alert)
+    await client.notifications.send({
+      title: change.alert.title.slice(0, 160),
+      body: `Fingerprint ${change.fingerprint}. Open the issue record for its occurrences and linked tasks.`,
+      recipients: "admins",
+      idempotency_key: change.alert.key,
+      automation_source: source,
+    });
   if (change.action === "create") {
     await client.entities.create({
       entity_type: "issue",
@@ -483,17 +520,6 @@ async function applyChange(
       automation_source: source,
     });
   } else if (change.action === "update") {
-    // Alert before the status write: the planner only builds an alert while the
-    // stored status still differs, so a send that failed after the write would
-    // never be retried. The idempotency key collapses a repeat send.
-    if (change.alert)
-      await client.notifications.send({
-        title: change.alert.title.slice(0, 160),
-        body: `Fingerprint ${change.fingerprint}. Open the issue record for its occurrences and linked tasks.`,
-        recipients: "admins",
-        idempotency_key: change.alert.key,
-        automation_source: source,
-      });
     await client.entities.update({
       entity_id: change.id,
       metadata: change.metadata,
