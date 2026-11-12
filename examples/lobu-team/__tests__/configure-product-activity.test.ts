@@ -6,6 +6,7 @@ describe("external production digest configuration", () => {
     const settings = {
       namespace: "synthetic-production",
       logStart: "2026-10-01T00:00:00.000Z",
+      productStart: "2026-10-01T00:00:00.000Z",
     };
     for (const id of [
       "0",

@@ -1,5 +1,23 @@
+import type { AutomationTrigger } from "@lobu/core/contracts/tools/manage-automations";
 import type { ClientSDK } from "../../../packages/server/src/sandbox/client-sdk";
 import { productActivityConfiguration } from "../product-activity-digest.prompt";
+
+export interface AutomationReadback {
+  automation: {
+    slug: string;
+    automation_name: string;
+    version: number;
+    managed_agent_id: string | null;
+    device_worker_id: string | null;
+    reaction_script?: string | null;
+    agent_kind?: "pi" | "opencode" | "claude-code" | "codex" | "agy" | null;
+    execution_config: unknown;
+    delivery_target: unknown;
+    triggers: AutomationTrigger[];
+    automation_run?: { status: string };
+  };
+  pending_analysis?: { next_window?: { start: string; end: string } };
+}
 
 function needsApproval(result: unknown): boolean {
   return (
@@ -8,6 +26,69 @@ function needsApproval(result: unknown): boolean {
     "status" in result &&
     result.status === "pending_approval"
   );
+}
+
+/** Migrate the external analyst in place; never change its executor or progress. */
+export async function configureLiveProductActivityDigest(
+  client: Pick<ClientSDK, "automations">,
+  automationId: string,
+  reactionScript: string,
+  settings: Parameters<typeof productActivityConfiguration>[1],
+  expectedVersion: number
+) {
+  const configuration = productActivityConfiguration(automationId, settings);
+  const read = async () => {
+    const result = (await client.automations.get({
+      automation_id: automationId,
+    })) as AutomationReadback;
+    if (!("automation" in result))
+      throw new Error("Expected an installed digest");
+    return result.automation;
+  };
+  const current = await read();
+  if (
+    current.slug !== "product-activity-digest" ||
+    current.version !== expectedVersion
+  )
+    throw new Error("Digest baseline changed; review before migration");
+  if (
+    current.managed_agent_id ||
+    current.device_worker_id ||
+    current.execution_config
+  )
+    throw new Error("Expected the existing unassigned external processor");
+  const pause = await client.automations.update({
+    automation_id: automationId,
+    triggers: [],
+  });
+  if (needsApproval(pause)) return pause;
+  const paused = await read();
+  if (
+    ["pending", "running", "claimed"].includes(
+      paused.automation_run?.status ?? ""
+    )
+  )
+    throw new Error("Schedule stopped; wait for the active digest run");
+  if (paused.version !== expectedVersion)
+    throw new Error("Digest version changed while stopping");
+  const version = await client.automations.createVersion({
+    automation_id: automationId,
+    ...configuration,
+    name: current.automation_name,
+    description:
+      "Live product-source analysis and ClickHouse logs with independent durable progress.",
+    set_as_current: true,
+  });
+  if (needsApproval(version)) return version;
+  const reaction = await client.automations.setReactionScript({
+    automation_id: automationId,
+    reaction_script: reactionScript,
+  });
+  if (needsApproval(reaction)) return reaction;
+  return client.automations.update({
+    automation_id: automationId,
+    triggers: current.triggers,
+  });
 }
 
 /** Selected-workspace native migration. Choose and verify the target before calling.
@@ -22,7 +103,7 @@ export async function configureProductActivityDigest(
   native: {
     managedAgentId: string;
     deviceWorkerId?: string;
-    agentKind?: string;
+    agentKind?: AutomationReadback["automation"]["agent_kind"];
     baseline: {
       version: number;
       execution_config: unknown;

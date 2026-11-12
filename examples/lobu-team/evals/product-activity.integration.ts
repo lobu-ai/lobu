@@ -1,18 +1,27 @@
+import type { AutomationReadback } from "../scripts/configure-product-activity";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
+import { createAutomationRun } from "../../../packages/server/src/runs/queue-service";
+import { readFileSync } from "node:fs";
+import { executeAutomationScript } from "../../../packages/server/src/automations/reaction-executor";
+import {
+  configureTeamAlerts,
+  teamAlertsModule,
+} from "../scripts/configure-team-alerts";
 import { beforeEach, expect, it } from "vitest";
-import PostgresConnector from "@lobu/connectors/postgres";
-import type { EventEnvelope } from "@lobu/connector-sdk";
+
 import {
   cleanupTestDatabase,
   getTestDb,
 } from "../../../packages/server/src/__tests__/setup/test-db";
 import {
+  createTestAgent,
   createTestConnection,
-  createTestOAuthClient,
-  createTestPAT,
+  createTestEvent,
   createTestUser,
   seedOwnerContext,
 } from "../../../packages/server/src/__tests__/setup/test-fixtures";
-import { postForm } from "../../../packages/server/src/__tests__/setup/test-helpers";
 import {
   recordMcpConversationActivity,
   setCurrentMcpConversationTitle,
@@ -21,90 +30,17 @@ import {
   recordToolInvocationAudit,
   recordWorkspaceActivityAudit,
 } from "../../../packages/server/src/tools/audit";
-import { insertEvent } from "../../../packages/server/src/utils/insert-event";
-import config from "../lobu.config";
+import { productActivitySql, productActivityQuery } from "../product-activity";
+import { buildClientSDK } from "../../../packages/server/src/sandbox/client-sdk";
+import { createAuthProfile } from "../../../packages/server/src/utils/auth-profiles";
 
-const feed = config.connections?.find(
-  (connection) => connection.slug === "lobu-product-activity-db"
-)?.feeds?.[0];
-const query = feed?.config?.query;
+const execFileAsync = promisify(execFile);
 
 async function activity(prefix: string) {
-  if (typeof query !== "string") throw new Error("Missing activity query");
   return getTestDb().unsafe(
-    `SELECT * FROM (${query}) activity WHERE activity_id LIKE $1 ORDER BY activity_id`,
+    `SELECT * FROM (${productActivitySql}) activity WHERE activity_id LIKE $1 ORDER BY activity_id`,
     [`${prefix}%`]
   );
-}
-
-async function collector(organizationId: string) {
-  const connection = await createTestConnection({
-    organization_id: organizationId,
-    connector_key: "postgres",
-    slug: "synthetic-product-activity",
-  });
-  const connector = new PostgresConnector();
-  let checkpoint: Record<string, unknown> | null = null;
-  return {
-    async sync(recollect = false, timeZone?: string) {
-      if (recollect) checkpoint = null;
-      const collected: EventEnvelope[] = [];
-      const databaseUrl = new URL(process.env.DATABASE_URL!);
-      if (timeZone) {
-        databaseUrl.searchParams.set("options", `-c TimeZone=${timeZone}`);
-        const setting = await connector.query({
-          query: "SELECT current_setting('TimeZone') AS zone",
-          config: { DATABASE_URL: databaseUrl.toString() },
-          credentials: null,
-          feedKey: null,
-        });
-        expect(setting.rows[0].zone).toBe(timeZone);
-      }
-      await connector.sync({
-        feedKey: "query",
-        config: { ...feed?.config, DATABASE_URL: databaseUrl.toString() },
-        checkpoint,
-        credentials: null,
-        entityIds: [],
-        commit: async (events, next) => {
-          // Production envelopes cross the worker's JSON transport before
-          // insertEvent; in particular, driver Dates in payload_data are strings.
-          const transported = JSON.parse(
-            JSON.stringify(events)
-          ) as EventEnvelope[];
-          for (const event of transported) {
-            await insertEvent(
-              {
-                organizationId,
-                entityIds: [],
-                connectionId: connection.id,
-                connectorKey: "postgres",
-                originId: event.origin_id,
-                originType: event.origin_type,
-                semanticType:
-                  event.semantic_type ?? event.origin_type ?? "content",
-                title: event.title,
-                content: event.payload_text,
-                payloadData: event.payload_data,
-                occurredAt: event.occurred_at,
-              },
-              { onConflictUpdate: true }
-            );
-          }
-          collected.push(...events);
-          if (next) checkpoint = next;
-        },
-      });
-      return collected;
-    },
-    stored(prefix = "") {
-      return getTestDb()`SELECT id, origin_id, occurred_at, payload_data,
-        supersedes_event_id FROM events
-        WHERE connection_id = ${connection.id}
-          AND origin_id LIKE ${`query:${prefix}%`}
-        ORDER BY id`;
-    },
-  };
 }
 
 beforeEach(cleanupTestDatabase);
@@ -140,199 +76,74 @@ it("keeps account and activity identity across users and workspace changes", asy
   ).toBe(true);
 });
 
-it("delivers a seeded activity at its completed-call watermark and retains later observations", async () => {
+it("reads bounded account facts live through the SDK without stored copies or vectors", async () => {
   const { ctx, user, org } = await seedOwnerContext();
-  const account = {
-    ...ctx,
-    tokenType: "pat" as const,
-    mcpConversationId: "synthetic-seeded-conversation",
-  };
-  await setCurrentMcpConversationTitle(account, "Synthetic title");
-  await getTestDb()`UPDATE mcp_client_conversations
-    SET first_activity_at = now() - interval '2 days' WHERE user_id = ${user.id}`;
+  const db = getTestDb();
+  const profile = await createAuthProfile({
+    organizationId: org.id,
+    connectorKey: "postgres",
+    displayName: "Synthetic live source",
+    profileKind: "env",
+    authData: { DATABASE_URL: process.env.DATABASE_URL! },
+  });
+  await db`INSERT INTO connections (organization_id, connector_key, slug, display_name, status,
+    auth_profile_id, visibility, created_by) VALUES (${org.id}, 'postgres',
+    'synthetic-live-source', 'Synthetic live source', 'active', ${profile.id}, 'org', ${user.id})`;
+  await db`UPDATE "user" SET "createdAt" = '2026-01-01T00:00:00Z' WHERE id = ${user.id}`;
+  const client = buildClientSDK(ctx, { ENVIRONMENT: "test" });
+  const [before] = await db`SELECT count(*)::int AS n FROM events`;
+  const read = async (start: string, end: string) =>
+    client.query(productActivityQuery(start, end), {
+      connection: "synthetic-live-source",
+    }) as Promise<Array<Record<string, unknown>>>;
+  const first = await read(
+    "2026-01-01T00:00:00.000Z",
+    "2026-01-01T00:00:01.000Z"
+  );
+  expect(
+    first.filter((row) => row.activity_id === `signup:${user.id}`)
+  ).toHaveLength(1);
+  expect(
+    await read("2026-01-01T00:00:01.000Z", "2026-01-01T00:00:02.000Z")
+  ).toHaveLength(0);
+  await db`UPDATE "user" SET name = 'Current source name' WHERE id = ${user.id}`;
+  const reread = await read(
+    "2026-01-01T00:00:00.000Z",
+    "2026-01-01T00:00:01.000Z"
+  );
+  expect(
+    reread.find((row) => row.activity_id === `signup:${user.id}`)?.payload_text
+  ).toContain("Current source name");
+  const [after] = await db`SELECT count(*)::int AS n FROM events`;
+  expect(after.n).toBe(before.n);
+  expect(await db`SELECT event_id FROM event_embeddings`).toHaveLength(0);
+}, 60_000);
+
+it("reads current MCP state, including a seeded conversation after its first completed call", async () => {
+  const { ctx, user } = await seedOwnerContext();
+  const account = { ...ctx, mcpConversationId: "synthetic-live-conversation" };
+  await setCurrentMcpConversationTitle(account, "Seeded title");
   expect(await activity("mcp:")).toHaveLength(0);
-  const source = await collector(org.id);
-  await source.sync();
-  await recordMcpConversationActivity({
-    ctx: account,
-    toolName: "run_sdk",
-    failed: false,
-  });
-  const [call] = await getTestDb()`SELECT last_activity_at
-    FROM mcp_client_conversations WHERE user_id = ${user.id}`;
-  await source.sync();
-  const first = await source.stored("mcp:");
-  expect(first).toHaveLength(1);
-  expect(first[0].occurred_at).toEqual(call.last_activity_at);
   await recordMcpConversationActivity({
     ctx: account,
     toolName: "query_sdk",
     failed: false,
   });
-  await source.sync();
-  const observations = await source.stored("mcp:");
-  expect(observations).toHaveLength(2);
-  expect(new Set(observations.map((row) => row.origin_id)).size).toBe(2);
-  expect(observations.every((row) => row.supersedes_event_id === null)).toBe(
-    true
-  );
-  await source.sync();
-  expect(await source.stored("mcp:")).toEqual(observations);
-  await setCurrentMcpConversationTitle(account, "Renamed conversation");
-  await source.sync(true);
-  expect(await source.stored("mcp:")).toEqual(observations);
-});
-
-it.each([
-  ["9", "10"],
-  ["9007199254740992", "9007199254740993"],
-])("orders same-timestamp observations from %s to %s without losing counter precision", async (start, next) => {
-  const { ctx, user, org } = await seedOwnerContext();
-  const account = { ...ctx, mcpConversationId: "synthetic-tied-observations" };
+  expect((await activity("mcp:"))[0].activity_data.call_count).toBe("1");
   await recordMcpConversationActivity({
     ctx: account,
     toolName: "query_sdk",
     failed: false,
   });
-  const db = getTestDb();
-  await db`UPDATE mcp_client_conversations SET call_count = ${start}::bigint,
-    last_activity_at = '2030-01-01T00:00:00.000000Z' WHERE user_id = ${user.id}`;
-  const source = await collector(org.id);
-  await source.sync();
-  await recordMcpConversationActivity({
-    ctx: account,
-    toolName: "query_sdk",
-    failed: false,
+  const rows = await activity("mcp:");
+  expect(rows).toHaveLength(1);
+  expect(rows[0].activity_data).toMatchObject({
+    user_id: user.id,
+    call_count: "2",
   });
-  await db`UPDATE mcp_client_conversations
-    SET last_activity_at = '2030-01-01T00:00:00.000000Z' WHERE user_id = ${user.id}`;
-  await source.sync();
-  const observations = await source.stored("mcp:");
   expect(
-    observations.map((row) => row.payload_data.activity_data.call_count)
-  ).toEqual([start, next]);
-  expect(observations.every((row) => row.supersedes_event_id === null)).toBe(
-    true
-  );
-});
-
-it("keeps recorded content stable across renames, soft deletion and recollection", async () => {
-  const { ctx, user, org } = await seedOwnerContext();
-  const { token } = await createTestPAT(user.id, org.id, {
-    scope: "mcp:admin profile:read",
-  });
-  const response = await postForm("/api/extension-session", { token });
-  expect(response.status).toBe(200);
-  const client = await createTestOAuthClient({
-    client_name: "Synthetic client",
-  });
-  const account = {
-    ...ctx,
-    clientId: client.client_id,
-    mcpConversationId: "synthetic-rename",
-  };
-  await recordMcpConversationActivity({
-    ctx: account,
-    toolName: "query_sdk",
-    failed: false,
-  });
-  await recordToolInvocationAudit({
-    ctx: account,
-    toolName: "run_sdk",
-    args: {},
-    durationMs: 1,
-    result: { success: false, error: { name: "SyntheticError" } },
-  });
-  const connection = await createTestConnection({
-    organization_id: org.id,
-    connector_key: "synthetic.connector",
-    created_by: user.id,
-  });
-  const source = await collector(org.id);
-  await source.sync();
-  const before = await source.stored();
-  expect(
-    new Set(before.map((row) => row.payload_data.activity_data.event_type))
-  ).toEqual(
-    new Set([
-      "account.created",
-      "session.created",
-      "connection.created",
-      "mcp.activity_observed",
-      "tool_invocation.completed",
-    ])
-  );
-  const db = getTestDb();
-  await db`UPDATE "user" SET name = 'Renamed user', email = 'renamed@synthetic.example'
-    WHERE id = ${user.id}`;
-  await db`UPDATE organization SET name = 'Renamed workspace' WHERE id = ${org.id}`;
-  await db`UPDATE oauth_clients SET client_name = 'Renamed client' WHERE id = ${client.client_id}`;
-  await db`UPDATE connections SET display_name = 'Renamed connection', deleted_at = now()
-    WHERE id = ${connection.id}`;
-  await db`UPDATE mcp_client_conversations SET client_software_id = 'Renamed software'
-    WHERE user_id = ${user.id}`;
-  await setCurrentMcpConversationTitle(account, "Renamed title");
-  expect(await source.sync()).toHaveLength(0);
-  expect(await source.stored()).toEqual(before);
-  await source.sync(true, "Pacific/Honolulu");
-  const after = await source.stored();
-  const isSignup = (row: (typeof after)[number]) =>
-    row.origin_id.startsWith("query:signup:");
-  expect(after.filter((row) => !isSignup(row))).toEqual(
-    before.filter((row) => !isSignup(row))
-  );
-  // The existing signup alert consumes display text, so only its snapshot
-  // changes on explicit recollection; incremental sync remains quiet.
-  const signups = after.filter(isSignup);
-  expect(signups).toHaveLength(2);
-  expect(signups[1].supersedes_event_id).toBe(signups[0].id);
-  const { payload_text: oldText, ...oldData } = signups[0].payload_data;
-  const { payload_text: newText, ...newData } = signups[1].payload_data;
-  expect(newData).toEqual(oldData);
-  expect(newText).not.toEqual(oldText);
-});
-
-it("catches up after more than a day offline and preserves observations within one millisecond", async () => {
-  const { ctx, user, org } = await seedOwnerContext();
-  const account = {
-    ...ctx,
-    mcpConversationId: "synthetic-precise-observations",
-  };
-  await recordMcpConversationActivity({
-    ctx: account,
-    toolName: "query_sdk",
-    failed: false,
-  });
-  const db = getTestDb();
-  await db`UPDATE mcp_client_conversations SET first_activity_at = '2026-01-01Z',
-    last_activity_at = '2026-01-01T00:00:00.000100Z' WHERE user_id = ${user.id}`;
-  const source = await collector(org.id);
-  await source.sync();
-  expect(await source.stored("mcp:")).toHaveLength(1);
-  await recordMcpConversationActivity({
-    ctx: account,
-    toolName: "query_sdk",
-    failed: false,
-  });
-  await db`UPDATE mcp_client_conversations SET last_activity_at = '2030-01-01T00:00:00.000100Z'
-    WHERE user_id = ${user.id}`;
-  await source.sync();
-  await recordMcpConversationActivity({
-    ctx: account,
-    toolName: "query_sdk",
-    failed: false,
-  });
-  await db`UPDATE mcp_client_conversations SET last_activity_at = '2030-01-01T00:00:00.000200Z'
-    WHERE user_id = ${user.id}`;
-  await source.sync();
-  expect(await source.sync()).toHaveLength(0);
-  const observations = await source.stored("mcp:");
-  expect(
-    observations.map((row) => row.payload_data.activity_data.call_count)
-  ).toEqual(["1", "2", "3"]);
-  expect(observations.every((row) => row.supersedes_event_id === null)).toBe(
-    true
-  );
+    await getTestDb()`SELECT id FROM events WHERE origin_type = 'row'`
+  ).toHaveLength(0);
 });
 
 it("includes one failed SDK outcome across workspace mirrors without duplicating successful calls", async () => {
@@ -384,3 +195,278 @@ it("includes one failed SDK outcome across workspace mirrors without duplicating
   expect(rows[0].activity_data.actor).not.toHaveProperty("token_name");
   expect(JSON.stringify(rows[0])).not.toContain("synthetic private");
 });
+
+it("runs the migrated alert module against live accounts and preserves legacy notification keys", async () => {
+  const { ctx, user, org } = await seedOwnerContext();
+  const db = getTestDb();
+  const second = await createTestUser();
+  await db`UPDATE "user" SET "createdAt" = '2026-01-01T00:00:30Z' WHERE id IN (${user.id}, ${second.id})`;
+  const profile = await createAuthProfile({
+    organizationId: org.id,
+    connectorKey: "postgres",
+    displayName: "Synthetic alert source",
+    profileKind: "env",
+    authData: { DATABASE_URL: process.env.DATABASE_URL! },
+  });
+  await db`INSERT INTO connections (organization_id, connector_key, slug, display_name, status,
+    auth_profile_id, visibility, created_by) VALUES (${org.id}, 'postgres',
+    'synthetic-alert-source', 'Synthetic alert source', 'active', ${profile.id}, 'org', ${user.id})`;
+  const client = buildClientSDK(ctx, { ENVIRONMENT: "test" });
+  const agent = await createTestAgent({
+    organizationId: org.id,
+    ownerUserId: user.id,
+    agentId: "synthetic-alert-owner",
+  });
+  const digest = await client.automations.create({
+    slug: "synthetic-digest",
+    name: "Synthetic digest",
+    prompt: "Synthetic",
+  });
+  if (!("automation_id" in digest)) throw new Error("Expected digest");
+  const github = await createTestConnection({
+    organization_id: org.id,
+    connector_key: "synthetic.github",
+    slug: "github-app-install",
+  });
+  await createTestEvent({
+    organization_id: org.id,
+    connection_id: github.id,
+    origin_id: "synthetic-issue",
+    semantic_type: "issue",
+    content: "Synthetic outside issue",
+    created_at: new Date("2026-01-01T00:40:00Z"),
+    occurred_at: new Date("2026-01-01T00:40:00Z"),
+    metadata: { author_login: "synthetic-outsider" },
+  });
+  await createTestEvent({
+    organization_id: org.id,
+    automation_id: Number(digest.automation_id),
+    semantic_type: "summary",
+    content: "Synthetic log progress",
+    created_at: new Date("2026-01-01T00:40:00Z"),
+    metadata: {
+      automation_output: "log_progress",
+      namespace: "synthetic-production",
+      checkpoint_key: `product-activity-digest:${digest.automation_id}:synthetic-production`,
+      recent_windows: [
+        {
+          window_start: "2026-01-01T00:20:00.000Z",
+          window_end: "2026-01-01T00:40:00.000Z",
+          http_server_errors: "5",
+        },
+      ],
+    },
+  });
+  const rawSource = readFileSync(
+    new URL("../team-alerts.reaction.ts", import.meta.url),
+    "utf8"
+  );
+  const settings = {
+    teamGithub: ["synthetic-team"],
+    digestAutomationId: String(digest.automation_id),
+    namespace: "synthetic-production",
+    sourceConnection: "synthetic-alert-source",
+    legacyFeedId: 701,
+    signupCatchupStart: "2026-01-01T00:00:00.000Z",
+    cutoverEnd: "2026-01-01T01:00:00.000Z",
+  };
+  const module = teamAlertsModule(rawSource, settings);
+  const created = await client.automations.create({
+    slug: "github-external-activity-alert",
+    name: "Synthetic alerts",
+    managed_agent_id: agent.agentId,
+    prompt: "Legacy fixture",
+    triggers: [{ kind: "schedule", cron: "*/30 * * * *" }],
+  });
+  if (!("automation_id" in created))
+    throw new Error("Expected legacy Automation");
+  const id = Number(created.automation_id);
+  const execution = {
+    executor: { kind: "script", source: "export default async () => ({});" },
+  };
+  await db`UPDATE automations SET execution_config = ${db.json(execution)},
+    next_window_start = '2026-01-01T00:30:00Z' WHERE id = ${id}`;
+  const old = (
+    (await client.automations.get({
+      automation_id: String(id),
+    })) as AutomationReadback
+  ).automation;
+  const baseline = {
+    version: old.version,
+    owner: agent.agentId,
+    execution_config: execution,
+    delivery_target: old.delivery_target ?? null,
+    triggers: old.triggers,
+  };
+  await expect(
+    configureTeamAlerts(
+      client,
+      String(id),
+      rawSource,
+      { ...settings, cutoverEnd: "2026-01-01T00:15:00.000Z" },
+      baseline
+    )
+  ).rejects.toThrow("cutover must include");
+  await client.automations.update({
+    automation_id: String(id),
+    triggers: old.triggers,
+  });
+  await configureTeamAlerts(client, String(id), rawSource, settings, baseline);
+  const [migrated] =
+    await db`SELECT managed_agent_id, execution_config, next_window_start, triggers, reaction_script_compiled
+    FROM automations WHERE id = ${id}`;
+  expect(migrated.managed_agent_id).toBe(agent.agentId);
+  expect(migrated.execution_config).toBeNull();
+  expect(migrated.triggers).toEqual(old.triggers);
+  expect(new Date(migrated.next_window_start).toISOString()).toBe(
+    "2026-01-01T00:30:00.000Z"
+  );
+  // An existing signup delivery has the same organization-wide idempotency key.
+  await client.notifications.send({
+    title: "Existing signup",
+    body: "Previously notified",
+    idempotency_key: `signup:701:signup:${user.id}`,
+  });
+  const run = await createAutomationRun({
+    organizationId: org.id,
+    agentId: agent.agentId,
+    automationId: id,
+    windowStart: "2026-01-01T00:30:00.000Z",
+    windowEnd: "2026-01-01T01:00:00.000Z",
+    dispatchSource: "manual",
+  });
+  const [queued] =
+    await db`SELECT approved_input FROM runs WHERE id = ${run.runId}`;
+  expect(queued.approved_input.automation_script.has_analysis).toBe(false);
+  expect(queued.approved_input.executor.kind).toBe("script");
+  expect(queued.approved_input.executor.source).toBe(
+    migrated.reaction_script_compiled
+  );
+  const context = {
+    window: {
+      automation_id: id,
+      run_id: run.runId,
+      window_start: "2026-01-01T00:30:00.000Z",
+      window_end: "2026-01-01T01:00:00.000Z",
+    },
+    automation: {
+      id,
+      slug: "synthetic-team-alerts",
+      name: "Synthetic alerts",
+      version: 1,
+    },
+    organization_id: org.id,
+    organization_slug: org.slug,
+    trigger_signals: [],
+    entities: [],
+  };
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const result = await executeAutomationScript({
+      compiledScript: queued.approved_input.executor.source,
+      context,
+      env: { ENVIRONMENT: "test" },
+    });
+    expect(result, result.error).toMatchObject({ success: true });
+  }
+  const notifications =
+    await db`SELECT metadata->>'_lobu_idempotency_key' AS key FROM events
+    WHERE organization_id = ${org.id} AND semantic_type = 'notification' ORDER BY id`;
+  expect(notifications.map((row) => row.key).sort()).toEqual(
+    [
+      `signup:701:signup:${user.id}`,
+      `signup:701:signup:${second.id}`,
+      "gh-external:synthetic-issue",
+      "prod-5xx:2026-01-01T00:40:00.000Z",
+    ].sort()
+  );
+  expect(
+    await db`SELECT id FROM events WHERE origin_type = 'row'`
+  ).toHaveLength(0);
+}, 60_000);
+
+it("purges only an explicitly retired feed after inventory and preserves sources and reports", async () => {
+  const { user, org } = await seedOwnerContext();
+  const db = getTestDb();
+  const connection = await createTestConnection({
+    organization_id: org.id,
+    connector_key: "postgres",
+    slug: "synthetic-retired-source",
+    createDefaultFeed: false,
+    created_by: user.id,
+  });
+  const [feed] =
+    await db`INSERT INTO feeds (organization_id, connection_id, feed_key, status, config)
+    VALUES (${org.id}, ${connection.id}, 'query', 'active', '{}') RETURNING id`;
+  const copied = await createTestEvent({
+    organization_id: org.id,
+    connection_id: connection.id,
+    feed_id: Number(feed.id),
+    origin_type: "row",
+    semantic_type: "row",
+    content: "Copied source fact",
+    embedding: Array(768).fill(0),
+  });
+  const original = await createTestEvent({
+    organization_id: org.id,
+    content: "Original audit evidence",
+    origin_type: "tool_invocation",
+    semantic_type: "audit",
+  });
+  const report = await createTestEvent({
+    organization_id: org.id,
+    content: "Retained report",
+    semantic_type: "summary",
+  });
+  const url = new URL(process.env.DATABASE_URL!);
+  const execute = (extra: string[] = []) =>
+    execFileAsync(
+      "psql",
+      [
+        "-X",
+        "-At",
+        "-v",
+        `workspace_slug=${org.slug}`,
+        "-v",
+        "connection_slug=synthetic-retired-source",
+        "-v",
+        `feed_id=${feed.id}`,
+        ...extra,
+        "-f",
+        fileURLToPath(
+          new URL("../scripts/purge-retired-activity.sql", import.meta.url)
+        ),
+      ],
+      {
+        env: {
+          ...process.env,
+          PGHOST: url.hostname,
+          PGPORT: url.port,
+          PGUSER: url.username,
+          PGPASSWORD: url.password,
+          PGDATABASE: url.pathname.slice(1),
+          PGSSLMODE: "disable",
+        },
+      }
+    );
+  expect((await execute()).stdout).toContain("copied_events|1|");
+  await expect(
+    execute(["-v", "apply=true", "-v", "expected_rows=1"])
+  ).rejects.toThrow("Retire the feed");
+  await db`UPDATE feeds SET deleted_at = NOW(), status = 'paused' WHERE id = ${feed.id}`;
+  await expect(
+    execute(["-v", "apply=true", "-v", "expected_rows=2"])
+  ).rejects.toThrow("Count changed");
+  expect(await db`SELECT id FROM events WHERE id = ${copied.id}`).toHaveLength(
+    1
+  );
+  const result = await execute(["-v", "apply=true", "-v", "expected_rows=1"]);
+  expect(result.stdout).toContain("remaining_copies|0");
+  expect(result.stdout).toContain("remaining_vectors|0");
+  expect(
+    await db`SELECT id FROM events WHERE id IN (${original.id}, ${report.id})`
+  ).toHaveLength(2);
+  expect(await db`SELECT id FROM "user" WHERE id = ${user.id}`).toHaveLength(1);
+  expect(
+    await db`SELECT event_id FROM event_embeddings WHERE event_id = ${copied.id}`
+  ).toHaveLength(0);
+}, 60_000);
