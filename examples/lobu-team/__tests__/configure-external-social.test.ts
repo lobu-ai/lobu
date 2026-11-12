@@ -141,22 +141,26 @@ test("reaction reports missing evidence rather than silently delivering unverifi
   expect(send.mock.calls[0][0].title).toBe("Social research needs evidence");
 });
 
-test("reaction requires the same numeric run identity as completion preflight", async () => {
-  await expect(
-    deliverExternalSocial(
-      {
-        window: { run_id: 20 },
-        extracted_data: {
-          briefings: [
-            { metadata: { workflow: policy.workflow, run_id: "20" } },
-          ],
-          findings: [],
-        },
+test("reaction rejects a mismatched run identity as a permanent failure", async () => {
+  // The sandbox's ctx.fail ends the run as a non-retryable failure; a plain
+  // throw asks for a retry that cannot change the stored completion.
+  class PermanentFailure extends Error {}
+  const failure = await deliverExternalSocial(
+    {
+      fail: (message: string) => {
+        throw new PermanentFailure(message);
       },
-      {},
-      policy
-    )
-  ).rejects.toThrow("Briefing ownership/run mismatch");
+      window: { run_id: 20 },
+      extracted_data: {
+        briefings: [{ metadata: { workflow: policy.workflow, run_id: "20" } }],
+        findings: [],
+      },
+    },
+    {},
+    policy
+  ).catch((error: unknown) => error);
+  expect(failure).toBeInstanceOf(PermanentFailure);
+  expect((failure as Error).message).toBe("Briefing ownership/run mismatch");
 });
 
 test("a verified briefing is delivered within the notification limit without splitting an emoji", async () => {
