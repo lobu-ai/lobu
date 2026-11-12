@@ -130,6 +130,8 @@ const MAX_REDIRECTS = 20;
  * reads; an honest connector drains or cancels every body it opens.
  */
 const MAX_OPEN_FETCHES = 1024;
+/** Rejects a host hook that was still queued when the run ended; never a run's failure. */
+const SKIPPED_HOOK = new Error('the run ended before this hook started');
 
 /** Thrown when a job demands the isolate lane on a host that cannot run one. */
 export class IsolateRuntimeUnavailableError extends Error {
@@ -768,7 +770,11 @@ export class IsolateExecutor implements SyncExecutor {
       });
     };
 
+    // The first state that ended the run. A run can end after the guest
+    // returned, while its hooks drain; that run did not complete.
+    let endedWith: IsolateTerminalState | null = null;
     const terminate = (state: IsolateTerminalState) => {
+      endedWith ??= state;
       runAbort.abort();
       for (const timer of pendingSleeps) clearTimeout(timer);
       pendingSleeps.clear();
@@ -797,12 +803,19 @@ export class IsolateExecutor implements SyncExecutor {
 
     const queueHook = (task: () => Promise<void> | void): Promise<void> => {
       const next = processingChain.then(async () => {
+        // A hook queued behind one that outlived the run must not start: the
+        // run already has its terminal state, so any side effect now would
+        // land for a run reported as failed.
+        if (runAbort.signal.aborted) throw SKIPPED_HOOK;
         await task();
       });
       // Keep the chain alive after a failure so later calls still see the
       // terminal state instead of re-running against a torn-down host.
       processingChain = next.catch(() => undefined);
       next.catch((error: unknown) => {
+        // A skipped hook is a consequence of the run's end, not its cause:
+        // the original failure keeps its name, status and diagnostics.
+        if (error === SKIPPED_HOOK) return;
         if (hookFailure === null) hookFailure = error;
         terminate({ name: 'HookFailure', message: error instanceof Error ? error.message : String(error) });
       });
@@ -1286,9 +1299,29 @@ export class IsolateExecutor implements SyncExecutor {
         );
       }
       // Wait for hooks the guest fired without awaiting (or whose promise the
-      // guest dropped) before reporting the result.
-      await processingChain;
+      // guest dropped) before reporting the result. A hook fired just before
+      // the guest returned can join the chain after this wait begins, so wait
+      // until the chain stops growing.
+      let drained: Promise<void>;
+      do {
+        drained = processingChain;
+        await drained;
+      } while (drained !== processingChain);
       if (hookFailure !== null) throw hookFailure;
+      // The guest returned, but the run ended (e.g. cancelled) while its hooks
+      // drained, so some never ran or never reached the host: reporting
+      // success would drop their side effects silently.
+      // Assigned inside `terminate`, which TypeScript's narrowing cannot see.
+      const ended = endedWith as IsolateTerminalState | null;
+      if (ended) {
+        if (guestFatal) throw this.guestError(guestFatal, redactedTail());
+        throw new ConnectorExecutionError(withTail(ended.message), {
+          exitCode: null,
+          exitSignal: null,
+          outputTail: redactedTail(),
+          exitReason: 'crash',
+        });
+      }
       const outcome = parseGuestJson(raw, 'result') as GuestOutcome;
       if (!outcome || typeof outcome !== 'object' || typeof outcome.ok !== 'boolean') {
         throw new Error('result: guest returned a malformed outcome envelope');
