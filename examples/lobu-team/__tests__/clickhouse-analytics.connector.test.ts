@@ -270,6 +270,8 @@ describe("ClickHouse query HTTP boundary", () => {
     [500, "158", 400],
     [500, "47", 500],
     [500, "307x", 500],
+    [500, "0202", 500],
+    [401, "202", 401],
     [500, "0307", 500],
     [500, undefined, 500],
     [401, "307", 401],
@@ -297,6 +299,76 @@ describe("ClickHouse query HTTP boundary", () => {
         )
       ).rejects.toMatchObject({ status: expectedStatus });
       expect(requests).toBe(1);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  // The analytics account runs one query at a time. ClickHouse refuses a second
+  // one at admission with code 202 (TOO_MANY_SIMULTANEOUS_QUERIES), before it runs.
+  const slotBusy = (status: number) =>
+    new Response(
+      "Code: 202. DB::Exception: Too many simultaneous queries for user synthetic_reader. Current: 1, maximum: 1. (TOO_MANY_SIMULTANEOUS_QUERIES) (version 25.3.1.1)",
+      { status, headers: { "X-ClickHouse-Exception-Code": "202" } }
+    );
+
+  it.each([
+    500, 503,
+  ])("waits for the busy query slot instead of failing the read (HTTP %s)", async (status) => {
+    let requests = 0;
+    const server = Bun.serve({
+      port: 0,
+      fetch: () =>
+        ++requests <= 2
+          ? slotBusy(status)
+          : Response.json({
+              meta: [
+                { name: "n", type: "UInt8" },
+                { name: total, type: "UInt64" },
+              ],
+              data: [{ n: 1, [total]: "1" }],
+            }),
+    });
+    try {
+      const result = await queryAnalytics(
+        context("SELECT 1 AS n"),
+        (_url, init) => fetch(server.url, init)
+      );
+      expect(result).toEqual({
+        rows: [{ n: 1 }],
+        columns: [{ name: "n", type: "UInt8" }],
+        total: 1,
+      });
+      expect(requests).toBe(3);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  it("reports a slot that stays busy past the query budget as retryable throttling", async () => {
+    let requests = 0;
+    const server = Bun.serve({
+      port: 0,
+      fetch: () => {
+        requests++;
+        return slotBusy(500);
+      },
+    });
+    const started = Date.now();
+    try {
+      await expect(
+        queryAnalytics(
+          context("SELECT 1"),
+          (_url, init) => fetch(server.url, init),
+          1500
+        )
+      ).rejects.toMatchObject({
+        status: 429,
+        message:
+          "Analytics query failed: Too many simultaneous queries for user synthetic_reader. Current: 1, maximum: 1. (TOO_MANY_SIMULTANEOUS_QUERIES)",
+      });
+      expect(requests).toBeGreaterThan(1);
+      expect(Date.now() - started).toBeLessThan(1500);
     } finally {
       server.stop(true);
     }
