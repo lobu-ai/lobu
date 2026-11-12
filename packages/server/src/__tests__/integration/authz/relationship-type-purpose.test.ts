@@ -114,9 +114,8 @@ describe('relationship type purpose', () => {
   });
 
   it('does not clear an existing classification when a caller omits purpose', async () => {
-    // `mentions` and `member_of` share this function. An unclassified upsert must
-    // never strip a stamp, or the auto-linker would silently declassify the ACL
-    // type on every run.
+    // Every relationship type shares this function. An unclassified upsert must
+    // never strip a stamp, or it would silently declassify the ACL type.
     await ensureRelationshipType({
       organizationId: orgId,
       slug: 'member_of',

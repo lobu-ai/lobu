@@ -24,7 +24,6 @@ import { type DbClient, getDb, parsePgNumberArray } from '../db/client';
 import type { Env } from '../index';
 import { INTERACTIVE_EVENT_CARD_REFRESH_TASK } from '../scheduled/task-definitions';
 import { enqueueTasksInTransaction } from '../scheduled/task-scheduler';
-import { autoLinkEvent } from '../utils/auto-linker';
 import { ToolUserError } from '../utils/errors';
 import { validateSaveContentSemanticType } from '../utils/event-kind-validation';
 import { getConfiguredEmbeddingModel, needsEmbeddingSql } from '../utils/embeddings';
@@ -733,21 +732,6 @@ async function saveContentImpl(
         throw error;
       }
     }
-  }
-
-  // 6b. Auto-link: scan content for entity name mentions.
-  // Awaited so the background work doesn't outlive the tool call and reject
-  // into an unhandled promise after the DB pool has been torn down.
-  if (inserted && finalEntityIds.length > 0) {
-    await autoLinkEvent({
-      eventId: Number(row.id),
-      entityIds: finalEntityIds,
-      content: args.content ?? '',
-      title: args.title,
-      organizationId: ctx.organizationId,
-    }).catch((err) => {
-      logger.warn({ err, eventId: row.id }, 'autoLinkEvent failed');
-    });
   }
 
   logger.info(

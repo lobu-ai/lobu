@@ -65,7 +65,6 @@ import {
 	getBrowserSessionReadiness,
 } from "../utils/auth-profiles";
 import { toSecretRefAuthData } from "../utils/auth-credential-secrets";
-import { autoLinkEvent } from "../utils/auto-linker";
 import { nextRunAt as nextRunAtFromCron } from "../utils/cron";
 import {
 	getConfiguredEmbeddingModel,
@@ -635,7 +634,6 @@ export async function ingestConnectorItems(
 		const pendingTranscriptions: Parameters<
 			typeof triggerAudioTranscriptions
 		>[1] = [];
-		const autoLinks: Array<Parameters<typeof autoLinkEvent>[0]> = [];
 		const referencedArtifactIds = new Set<string>();
 
 		// Resolve or create entities declared via eventKinds[kind].attributions
@@ -880,15 +878,6 @@ export async function ingestConnectorItems(
 					}
 				}
 				totalItems++;
-				if (entityIds.length > 0) {
-					autoLinks.push({
-						eventId: Number(inserted.id),
-						entityIds,
-						content: item.payload_text,
-						title: item.title,
-						organizationId: target.organizationId,
-					});
-				}
 				// Captured after a successful insert, so the preview describes rows
 				// that really did land (and would land again on a real sync) rather
 				// than rows we merely hoped would.
@@ -955,7 +944,6 @@ export async function ingestConnectorItems(
 			totalItems,
 			activations,
 			pendingTranscriptions,
-			autoLinks,
 			referencedArtifactIds,
 		};
 	};
@@ -1050,10 +1038,6 @@ export async function ingestConnectorItems(
 		// Dispatches real Automation runs to the worker fleet; their activation
 		// rows committed with the page.
 		await dispatchAutomationRunsBestEffort(committed.activations);
-		// Detached (`.catch(() => {})`), writing through the getDb() singleton.
-		for (const link of committed.autoLinks) {
-			autoLinkEvent(link).catch(() => {});
-		}
 		// Transcription is an external, paid API call, fired detached.
 		triggerAudioTranscriptions(
 			target.organizationId,
