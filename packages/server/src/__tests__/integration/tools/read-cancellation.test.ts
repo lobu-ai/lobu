@@ -17,7 +17,7 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { getRequestListener } from '@hono/node-server';
 import { Hono } from 'hono';
-import { afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mcpAuth } from '../../../auth/middleware';
 import type { Env } from '../../../index';
 import { restToolProxy } from '../../../rest-api';
@@ -68,6 +68,24 @@ describe('read cancellation', () => {
   let orgSlug: string;
   let token: string;
   let release: (() => Promise<void>) | null = null;
+  let logLines: string[];
+
+  beforeEach(() => {
+    logLines = [];
+    // Capture the real serialized diagnostic output, not logger method calls.
+    vi.spyOn(process.stdout, 'write').mockImplementation((chunk, encodingOrCallback, callback) => {
+      logLines.push(String(chunk));
+      const done = typeof encodingOrCallback === 'function' ? encodingOrCallback : callback;
+      if (done) queueMicrotask(done);
+      return true;
+    });
+  });
+
+  function toolFailures(toolName: string) {
+    return logLines.flatMap((line) => {
+      try { return [JSON.parse(line)]; } catch { return []; }
+    }).filter((record) => record.level === 'error' && record.tool_name === toolName);
+  }
 
   beforeAll(async () => {
     await cleanupTestDatabase();
@@ -83,8 +101,12 @@ describe('read cancellation', () => {
   });
 
   afterEach(async () => {
-    await release?.();
-    release = null;
+    try {
+      await release?.();
+      release = null;
+    } finally {
+      vi.restoreAllMocks();
+    }
   });
 
   async function holdEventsLock(): Promise<number> {
@@ -125,6 +147,7 @@ describe('read cancellation', () => {
     await release?.();
     release = null;
     await response;
+    expect(toolFailures('read_knowledge')).toEqual([]);
   });
 
   it('cancels the feed read when the HTTP connection drops', async () => {
@@ -169,6 +192,42 @@ describe('read cancellation', () => {
       release = null;
       server.closeAllConnections();
       await new Promise((resolve) => server.close(resolve));
+    }
+    expect(toolFailures('read_knowledge')).toEqual([]);
+  });
+
+  it('keeps a real write failure visible after its caller leaves', async () => {
+    const sql = getTestDb();
+    await sql`ALTER TABLE events ADD CONSTRAINT synthetic_failed_write
+      CHECK (payload_text IS DISTINCT FROM 'synthetic failed write') NOT VALID`;
+    try {
+      const holderPid = await holdEventsLock();
+      const caller = new AbortController();
+      const pending = app.fetch(new Request(`http://localhost/api/${orgSlug}/save_memory`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ semantic_type: 'note', content: 'synthetic failed write' }),
+        signal: caller.signal,
+      }), env);
+      expect(await waitFor(async () => {
+        const rows = await sql`SELECT pid FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock' AND pid <> ${holderPid}`;
+        return rows.length ? rows : null;
+      }, 5000)).not.toBeNull();
+      caller.abort();
+      await release?.();
+      release = null;
+      const response = await pending;
+      expect(response.status).toBeGreaterThanOrEqual(400);
+      expect(toolFailures('save_memory')).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          call_id: expect.any(String), error_code: '23514', error_fingerprint: expect.any(String),
+        }),
+      ]));
+    } finally {
+      await release?.();
+      release = null;
+      await sql`ALTER TABLE events DROP CONSTRAINT synthetic_failed_write`;
     }
   });
 });
