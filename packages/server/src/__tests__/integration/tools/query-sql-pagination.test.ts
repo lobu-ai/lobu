@@ -14,14 +14,22 @@
  *     window alias (`__lobu_total_count__`), the tool falls back to the plain
  *     two-query shape — the caller's column survives untouched, exactly once,
  *     and `total_count` is still exact.
+ *
+ * It also pins the plan shape of the org-scoping CTEs: Postgres materializes a
+ * CTE referenced more than once, so a caller self-join (`... NOT EXISTS (SELECT
+ * 1 FROM events s ...)`) used to copy every visible row of the organization
+ * before applying the caller's own `id IN (...)`, and timed out at 5s on a
+ * large workspace. Every scope CTE must be inlined into each reference.
  */
 
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { querySql } from '../../../tools/admin/query_sql';
+import { validateAndScopeQuery } from '../../../utils/execute-data-sources';
+import { QUERYABLE_TABLE_NAMES, SAFE_COLUMN_DEFS } from '../../../utils/table-schema';
 import logger from '../../../utils/logger';
 import type { ToolContext } from '../../../tools/registry';
 import { QUERY_SQL_RESULT_MAX_BYTES } from '../../../utils/content-read-bounds';
-import { cleanupTestDatabase } from '../../setup/test-db';
+import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import {
   addUserToOrganization,
   createTestAccessToken,
@@ -37,6 +45,8 @@ describe('query_sql internal-path pagination contract', () => {
   let orgId: string;
   let orgSlug: string;
   let ownerCtx: ToolContext;
+  let ownerId: string;
+  const eventIds: number[] = [];
 
   beforeAll(async () => {
     await cleanupTestDatabase();
@@ -46,13 +56,15 @@ describe('query_sql internal-path pagination contract', () => {
     const user = await createTestUser({ email: 'qsql-page@test.com' });
     await addUserToOrganization(user.id, org.id, 'owner');
     ownerCtx = ownerToolContext(orgId, user.id);
+    ownerId = user.id;
 
     for (let i = 0; i < 5; i++) {
-      await createTestEvent({
+      const event = await createTestEvent({
         organization_id: orgId,
         content: `pagination event ${i}`,
         title: `pagination event ${i}`,
       });
+      eventIds.push(event.id);
     }
   });
 
@@ -246,6 +258,48 @@ describe('query_sql internal-path pagination contract', () => {
     // And the real total is still exact via the fallback COUNT.
     expect(res.total_count).toBe(5);
     expect(res.has_more).toBe(true);
+  });
+
+  describe('org-scoping CTEs are inlined, never materialized', () => {
+    /** Plan node types of the scoped statement query_sql executes. */
+    async function planNodeTypes(query: string): Promise<string[]> {
+      const scoped = validateAndScopeQuery(query, orgId, {
+        safeColumns: SAFE_COLUMN_DEFS,
+        userId: ownerId,
+      });
+      const [row] = await getTestDb().unsafe(
+        `EXPLAIN (FORMAT JSON) SELECT * FROM (${scoped.sql}) AS _t LIMIT 50`,
+        scoped.params as never
+      );
+      const types: string[] = [];
+      const walk = (node: Record<string, unknown>) => {
+        types.push(String(node['Node Type']));
+        for (const child of (node.Plans as Record<string, unknown>[] | undefined) ?? []) walk(child);
+      };
+      walk((row['QUERY PLAN'] as Array<{ Plan: Record<string, unknown> }>)[0].Plan);
+      return types;
+    }
+
+    it('reads every scoped table referenced twice without a CTE scan', async () => {
+      const materialized: string[] = [];
+      for (const table of [...QUERYABLE_TABLE_NAMES].sort()) {
+        const types = await planNodeTypes(`SELECT 1 FROM "${table}" a, "${table}" b LIMIT 1`);
+        if (types.includes('CTE Scan')) materialized.push(table);
+      }
+      expect(materialized).toEqual([]);
+    });
+
+    it('answers an events self-join by id through the scope', async () => {
+      const wanted = eventIds.slice(0, 2);
+      const query = `SELECT e.id FROM events e WHERE e.id IN (${wanted.join(', ')})
+        AND NOT EXISTS (SELECT 1 FROM events s WHERE s.supersedes_event_id = e.id)`;
+      expect(await planNodeTypes(query)).not.toContain('CTE Scan');
+
+      const res = await querySql({ sql: query, sort_by: 'id' }, {}, ownerCtx);
+      expect(res.error).toBeUndefined();
+      expect(res.rows.map((row) => Number(row.id))).toEqual(wanted);
+      expect(res.total_count).toBe(2);
+    });
   });
 
   describe('error taxonomy (lobu#2051 item 2)', () => {
