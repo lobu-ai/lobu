@@ -105,6 +105,21 @@ That mode additionally requires wildcard DNS (`*.lobu.example.com`), a wildcard-
 
 The server tells the frontend which mode is active at runtime, so this is a plain env change: no image rebuild, and nothing is inferred from the hostname you happen to serve on.
 
+## Anonymous usage telemetry
+
+A production server sends one anonymous ping a day to `https://telemetry.lobu.ai/v1/install`, so we can tell how many installs run which version. One ping goes out per installation, however many replicas you run. It contains:
+
+- a random install id, generated on first use and stored in your database (`instance_identity`)
+- the Lobu version and git SHA, how it was deployed (`docker`, `helm`, `cli` or `mac`), OS and CPU architecture, and process uptime as a range
+- how many server replicas are connected to the database right now. This counts distinct client addresses, so replicas behind PgBouncer or another pooler show up as one.
+- counts of workspaces, users, agents, connections, active Automations and Automation runs in the last 7 days, each sent only as a range (`0`, `1-5`, `6-20`, `21+`)
+
+It never includes hostnames, URLs, emails, names, workspace or connector identifiers, or any content. The ping itself carries nothing that identifies you and we store no IP address with it, but like any HTTPS request it passes through our CDN, whose standard edge logs record request IPs for their usual retention.
+
+The ping is a single best-effort request with a 5 second timeout. A failure is ignored until the next day and never affects the server.
+
+To turn it off, set `LOBU_TELEMETRY=0` or `DO_NOT_TRACK=1`. It is already off when `NODE_ENV` is `development` or `test` and when `CI` is set. The server logs one line at startup while it is on. `LOBU_TELEMETRY_URL` sends the ping to a different endpoint instead.
+
 ## Production checklist
 
 - [ ] Real `ENCRYPTION_KEY` and `BETTER_AUTH_SECRET` (NOT the example placeholders).

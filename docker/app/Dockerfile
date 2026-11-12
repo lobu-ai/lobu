@@ -246,6 +246,8 @@ ARG APP_GIT_SHA=unknown
 ARG APP_BUILD_TIME=unknown
 ENV NODE_ENV=production
 ENV LOG_FORMAT=json
+# Reported by the anonymous install ping; the Helm chart overrides it.
+ENV LOBU_DEPLOY_KIND=docker
 # isolated-vm's upstream launch requirement on Node 20+; also covers
 # `docker exec ... lobu ...` and any child Node processes.
 ENV NODE_OPTIONS=--no-node-snapshot

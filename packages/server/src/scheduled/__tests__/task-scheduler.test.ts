@@ -29,6 +29,7 @@ import {
   AUTOMATION_REACTION_TASK,
   AUTOMATION_REACTION_TASK_QUEUE,
   ENTITY_APPROVAL_TASK,
+  INSTALL_PING_TASK,
   NOTIFICATION_DELIVERY_TASK,
   NOTIFICATION_DELIVERY_TASK_QUEUE,
 } from "../task-definitions";
@@ -152,6 +153,21 @@ describe("TaskScheduler.spawn", () => {
     await scheduler.spawn(ENTITY_APPROVAL_TASK, { sourceRunId: 42 });
     expect(queue.sent[0]?.queueName).toBe(`task:${ENTITY_APPROVAL_TASK}`);
     expect(queue.workers.has(`task:${ENTITY_APPROVAL_TASK}`)).toBe(true);
+  });
+
+  test("seeds the install ping's cron tick on a lane old replicas never work", async () => {
+    // An older replica without the handler would otherwise claim the tick,
+    // burn its retries on "unknown task" and never seed the next one.
+    const oldQueue = new FakeQueue();
+    await new TaskScheduler(oldQueue).start();
+    expect(oldQueue.workers.has(`task:${INSTALL_PING_TASK}`)).toBe(false);
+
+    const queue = new FakeQueue();
+    const scheduler = new TaskScheduler(queue);
+    scheduler.register(INSTALL_PING_TASK, async () => {}, { cron: "17 3 * * *" });
+    await scheduler.start();
+    expect(queue.sent[0]?.queueName).toBe(`task:${INSTALL_PING_TASK}`);
+    expect(queue.workers.has(`task:${INSTALL_PING_TASK}`)).toBe(true);
   });
 });
 
