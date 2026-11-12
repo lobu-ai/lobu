@@ -10,6 +10,7 @@
  * exception: they follow the Automation creator's current role.
  */
 
+import { describeError, errorReportLogFields, type ToolErrorCode } from '@lobu/core';
 import type { ReactionContext, AutomationScriptContext } from '@lobu/connector-sdk';
 import { SCOPE_CHECK_NOT_APPLICABLE } from '../auth/tool-access';
 import { resolveAutomationConnectionVisibilityUserId } from '../authz/automation-connection-visibility';
@@ -17,7 +18,7 @@ import { getDb } from '../db/client';
 import { AUTOMATION_RUN_SOURCE } from '../gateway/automation-run-session';
 import type { Env } from '../index';
 import { buildClientSDK } from '../sandbox/client-sdk';
-import { runScript } from '../sandbox/run-script';
+import { runScript, scriptFailureTelemetry } from '../sandbox/run-script';
 import { compileSource } from '../utils/compiler-core';
 import logger from '../utils/logger';
 import { ToolUserError } from '../utils/errors';
@@ -43,6 +44,8 @@ interface ExecuteAutomationScriptOptions {
 export async function executeReaction(options: ExecuteAutomationScriptOptions): Promise<{
   success: boolean;
   error?: string;
+  /** The sandbox's typed code, when the failure carries one (see `runScript`). */
+  code?: ToolErrorCode;
   /** The host's typed verdict, when the failure carries one (see `runScript`). */
   retryable?: boolean;
   /** The script's return value; `null` when it returned nothing. */
@@ -60,6 +63,7 @@ export async function executeReaction(options: ExecuteAutomationScriptOptions): 
     : {
         success: false,
         error: result.error,
+        ...(result.code === undefined ? {} : { code: result.code }),
         ...(result.retryable === undefined ? {} : { retryable: result.retryable }),
       };
 }
@@ -67,6 +71,8 @@ export async function executeReaction(options: ExecuteAutomationScriptOptions): 
 export async function executeAutomationScript(options: ExecuteAutomationScriptOptions): Promise<{
   success: boolean;
   error?: string;
+  /** The sandbox's typed code, when the failure carries one (see `runScript`). */
+  code?: ToolErrorCode;
   /** The host's typed verdict, when the failure carries one (see `runScript`). */
   retryable?: boolean;
   returnValue?: unknown;
@@ -194,11 +200,20 @@ export async function executeAutomationScript(options: ExecuteAutomationScriptOp
       ? 'Unknown reaction error'
       : 'Unknown Automation script error';
 
+  // Group and classify on the sandbox's typed failure, so an upstream outage,
+  // the script's own bug and a platform fault are separate issues instead of
+  // one "system" log line.
+  const telemetry = scriptFailureTelemetry(result.error ?? { name: 'ScriptError', message: errorMessage });
+  const report = describeError(telemetry.error, {
+    scope: executionKind === 'reaction' ? 'automation reaction' : 'automation script',
+    ...(telemetry.kind ? { kind: telemetry.kind } : {}),
+  });
   logger.error(
     {
       automation_id: context.window.automation_id,
       run_id: context.window.run_id,
       error: errorMessage,
+      ...errorReportLogFields(report),
     },
     executionKind === 'reaction'
       ? 'Reaction script execution failed'
@@ -207,6 +222,7 @@ export async function executeAutomationScript(options: ExecuteAutomationScriptOp
   return {
     success: false,
     error: errorMessage,
+    ...(result.error?.code === undefined ? {} : { code: result.error.code }),
     ...(result.error?.retryable === undefined ? {} : { retryable: result.error.retryable }),
   };
 }
