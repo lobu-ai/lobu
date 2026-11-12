@@ -483,7 +483,7 @@ export type SaveMemoryResponses = {
      */
     unlinked: Array<{
       name: string;
-      reason: "not_found" | "ambiguous";
+      reason: "not_found" | "ambiguous" | "not_writable";
     }>;
   };
 };

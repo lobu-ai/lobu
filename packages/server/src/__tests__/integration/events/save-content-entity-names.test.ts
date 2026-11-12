@@ -1,12 +1,14 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import { parsePgNumberArray } from '../../../db/client';
-import { saveContent } from '../../../tools/save_content';
+import { SaveContentResultSchema, saveContent } from '../../../tools/save_content';
+import { validateToolResult } from '../../../tools/validate-args';
 import type { ToolContext } from '../../../tools/registry';
 import { initWorkspaceProvider } from '../../../workspace';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import {
   addUserToOrganization,
   createTestEntity,
+  createTestEvent,
   createTestOrganization,
   createTestUser,
   seedSystemEntityTypes,
@@ -106,6 +108,23 @@ describe('save_memory entity name references', () => {
     expect(replay.created).toBe(false);
     expect(replay.id).toBe(first.id);
     expect(replay.unlinked).toEqual(first.unlinked);
+  });
+
+  it('replays a not_writable receipt stored before members could link', async () => {
+    const idempotencyKey = 'synthetic-name-refs-stored-not-writable';
+    const unlinked = [{ name: 'Jane Doe Synthetic', reason: 'not_writable' }];
+    const original = await createTestEvent({
+      organization_id: orgId,
+      content: 'A member saved this before readable records could be linked.',
+      metadata: { _lobu_idempotency_key: idempotencyKey, _lobu_unlinked_entity_names: unlinked },
+    });
+    const replay = await saveContent({
+      semantic_type: 'content',
+      content: 'A member saved this before readable records could be linked.',
+      idempotency_key: idempotencyKey,
+      entity_ids: [{ name: 'Jane Doe Synthetic' }],
+    }, {} as never, member);
+    expect(validateToolResult(SaveContentResultSchema, replay)).toMatchObject({ id: original.id, created: false, unlinked });
   });
 
   it('keeps a retry on its stored links after a namesake appears', async () => {
