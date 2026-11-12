@@ -94,8 +94,8 @@ describe('buildScopedQuery device_workers CTE — owner scoping', () => {
       { organizationId: 'org_test', userId: 'user_a' },
       opts
     );
-    expect(sql).toContain('"device_workers" AS (SELECT');
-    expect(sql).toMatch(/"device_workers" AS \(SELECT[^)]*\bid\b/);
+    expect(sql).toContain('"device_workers" AS NOT MATERIALIZED (SELECT');
+    expect(sql).toMatch(/"device_workers" AS NOT MATERIALIZED \(SELECT[^)]*\bid\b/);
     // and the projection must be explicit, never a wildcard
     expect(sql).not.toContain('dw.*');
   });

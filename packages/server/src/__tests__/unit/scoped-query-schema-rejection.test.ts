@@ -213,8 +213,8 @@ describe('validateAndScopeQuery — parser-bypass regressions', () => {
     // complete walk catches it so it gets its own org-scoped CTE rather than
     // reading every org's events.
     const out = scopeAsMember('SELECT id, (SELECT count(*) FROM events) AS n FROM entities');
-    expect(out.sql).toMatch(/"events"\s+AS\s+\(/i);
-    expect(out.sql).toMatch(/"entities"\s+AS\s+\(/i);
+    expect(out.sql).toMatch(/"events"\s+AS\s+NOT\s+MATERIALIZED\s+\(/i);
+    expect(out.sql).toMatch(/"entities"\s+AS\s+NOT\s+MATERIALIZED\s+\(/i);
   });
 
   it('rejects a CTE whose name shadows a real table (fail-closed)', () => {
@@ -236,7 +236,7 @@ describe('validateAndScopeQuery — parser-bypass regressions', () => {
 
   it('still allows an ordinary (non-colliding) CTE name', () => {
     const out = scopeAsMember('WITH recent AS (SELECT id FROM events) SELECT * FROM recent');
-    expect(out.sql).toMatch(/"events"\s+AS\s+\(/i);
+    expect(out.sql).toMatch(/"events"\s+AS\s+NOT\s+MATERIALIZED\s+\(/i);
   });
 });
 
@@ -325,7 +325,7 @@ describe('validateAndScopeQuery — ORDER BY/GROUP BY alias + leading-comment WI
   it('emits a single WITH for a leading-comment WITH query (valid SQL)', () => {
     const out = scopeAsMember('-- note\nWITH recent AS (SELECT id FROM events) SELECT * FROM recent');
     expect((out.sql.match(/\bWITH\b/gi) || []).length).toBe(1);
-    expect(out.sql).toMatch(/"events"\s+AS\s+\(/i);
+    expect(out.sql).toMatch(/"events"\s+AS\s+NOT\s+MATERIALIZED\s+\(/i);
   });
 });
 
