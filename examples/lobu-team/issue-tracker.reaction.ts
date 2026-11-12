@@ -29,10 +29,12 @@ export const RULES = {
   highMinSeen24h: 20,
   highMinOrgs: 3,
   /**
-   * Sign-in and consent routes. A failure here locks a user out before they
+   * Sign-in and consent requests. A failure here locks a user out before they
    * reach the product, often once per person, so one sighting is an issue.
+   * Matched against the culprit, and for a logged error against the request
+   * its sample trace served.
    */
-  blockingCulprit: /^[A-Z]+ \/(connect|oauth|api\/auth)(\/|$)/,
+  signInRequest: /^[A-Z]+ \/(connect|oauth|api\/auth)(\/|$)/,
   newForDays: 7,
   resolveAfterQuietDays: 14,
   /** escalating: the last two hours' hourly rate vs the prior 13 days. */
@@ -66,6 +68,8 @@ export interface Occurrence {
   releases_2h: string[];
   last_release: string;
   sample_trace_id: string;
+  /** For a logged error, the request its sample trace served; otherwise "". */
+  request: string;
 }
 
 export interface IssueRecord {
@@ -108,7 +112,8 @@ const DAY = 24 * HOUR;
 const ms = (iso: string | undefined) => (iso ? Date.parse(iso) : Number.NaN);
 
 const blocksSignIn = (o: Occurrence) =>
-  o.kind !== "user" && RULES.blockingCulprit.test(o.culprit);
+  o.kind !== "user" &&
+  (RULES.signInRequest.test(o.culprit) || RULES.signInRequest.test(o.request));
 
 function passesGate(o: Occurrence): boolean {
   if (blocksSignIn(o)) return true;
@@ -233,6 +238,7 @@ export function planIssueChanges(
           kind: o.kind,
           priority: level,
           culprit: o.culprit,
+          ...(o.request ? { request: o.request } : {}),
           message: o.message,
           first_seen: o.first_seen,
           first_release: o.last_release,
@@ -243,7 +249,7 @@ export function planIssueChanges(
               alert: {
                 kind: "new_high" as const,
                 key: `issue-new:${o.fingerprint}`,
-                title: `New high-priority issue: ${o.title} (${o.culprit})`,
+                title: `New high-priority issue: ${o.title} (${o.request || o.culprit})`,
               },
             }
           : {}),
@@ -375,6 +381,41 @@ HAVING max(last_seen) >= now() - INTERVAL 2 HOUR
 ORDER BY seen_24h DESC, fingerprint
 LIMIT 400`;
 
+const TRACE_ID = /^[0-9a-f]{32}$/;
+
+/**
+ * A logged error's culprit names the logger, not the request. Its sample
+ * trace's server span does. Only well-formed trace ids are inlined.
+ */
+function requestsSql(traceIds: string[]): string {
+  return `
+SELECT TraceId AS trace_id, any(SpanName) AS request
+FROM observability.otel_traces
+WHERE Timestamp >= now() - INTERVAL 1 DAY
+  AND SpanKind = 'Server'
+  AND TraceId IN (${traceIds.map((id) => `'${id}'`).join(", ")})
+GROUP BY TraceId`;
+}
+
+async function attachRequests(
+  occurrences: Occurrence[],
+  client: ReactionClient
+): Promise<void> {
+  const logged = occurrences.filter(
+    (o) =>
+      o.kind !== "user" &&
+      o.culprit.startsWith("log ") &&
+      TRACE_ID.test(o.sample_trace_id)
+  );
+  if (logged.length === 0) return;
+  const rows = (await client.query(
+    requestsSql([...new Set(logged.map((o) => o.sample_trace_id))]),
+    { connection: CONNECTION }
+  )) as Array<{ trace_id: string; request: string }>;
+  const byTrace = new Map(rows.map((r) => [r.trace_id, str(r.request)]));
+  for (const o of logged) o.request = byTrace.get(o.sample_trace_id) ?? "";
+}
+
 // Tombstones included: a deleted issue still holds its slug.
 const ISSUES_SQL = `
 SELECT id, metadata, deleted_at IS NOT NULL AS deleted
@@ -409,6 +450,7 @@ function toOccurrence(row: Record<string, unknown>): Occurrence {
       : [],
     last_release: str(row.last_release),
     sample_trace_id: str(row.sample_trace_id),
+    request: "",
   };
 }
 
@@ -443,6 +485,7 @@ export async function runIssueTracker(
       unknown
     >[]
   ).map(toOccurrence);
+  await attachRequests(occurrences, client);
   const issueRows = (await client.query(ISSUES_SQL)) as Record<
     string,
     unknown
