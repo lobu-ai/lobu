@@ -305,32 +305,27 @@ const productActivityDb = defineConnection({
       schedule: "2,22,42 * * * *",
       config: {
         primary_key: "activity_id",
-        cursor_column: "observed_at",
+        cursor_column: "occurred_at",
         max_rows_per_sync: 5000,
-        // Incremental timestamps are not a commit-ordered ledger: late commits
-        // behind the checkpoint can be missed. Session/connection rows can
-        // disappear, and tool audit is best effort. This is observed account
-        // activity, not a complete history or anonymous browsing coverage.
-        // Delivery time is separate from occurrence time: a conversation may
-        // be seeded with zero calls and become visible only on completion.
+        // Recorded account activity, not a complete history or browsing feed.
+        // Late commits can land behind this timestamp cursor. Session rows can
+        // disappear, and tool audit/conversation recording are best effort.
+        // MCP rows are cumulative observations at an activity watermark: calls
+        // between syncs collapse into one sample, not one event per call. Calls
+        // without an MCP activity id are absent except for recorded failures.
+        // The padded count keeps keys ordered when calls share a timestamp.
+        // Content uses stable source ids; resolve current names through
+        // product-user at read time. Do not recollect to normalize old shapes:
+        // that would re-version earlier rows and arrive as fresh digest input.
         query: `SELECT *
           FROM (
             SELECT
               'signup:' || u.id AS activity_id,
               u."createdAt" AS occurred_at,
               'New signup'::text AS title,
-              concat_ws(
-                ' · ',
-                coalesce(nullif(u.name, ''), 'Unnamed user'),
-                u.email,
-                coalesce((
-                  SELECT string_agg(DISTINCT o.name, ', ' ORDER BY o.name)
-                  FROM member m
-                  JOIN organization o ON o.id = m."organizationId"
-                  WHERE m."userId" = u.id
-                ), 'No organization')
-              ) AS payload_text,
-              u."createdAt" AS observed_at
+              'Account ' || u.id AS payload_text,
+              jsonb_build_object('event_type', 'account.created',
+                'user_id', u.id) AS activity_data
             FROM "user" u
             WHERE coalesce(u.principal_kind, 'human') = 'human'
 
@@ -339,19 +334,10 @@ const productActivityDb = defineConnection({
             SELECT
               'login:' || s.id,
               s."createdAt",
-              'User login'::text,
-              concat_ws(
-                ' · ',
-                coalesce(nullif(u.name, ''), 'Unnamed user'),
-                u.email,
-                coalesce((
-                  SELECT string_agg(DISTINCT o.name, ', ' ORDER BY o.name)
-                  FROM member m
-                  JOIN organization o ON o.id = m."organizationId"
-                  WHERE m."userId" = u.id
-                ), 'No organization')
-              ),
-              s."createdAt"
+              'Session created'::text,
+              'Account ' || s."userId",
+              jsonb_build_object('event_type', 'session.created',
+                'user_id', s."userId", 'session_id', s.id)
             FROM session s
             JOIN "user" u ON u.id = s."userId"
             WHERE coalesce(u.principal_kind, 'human') = 'human'
@@ -362,35 +348,32 @@ const productActivityDb = defineConnection({
               'connection:' || c.id,
               c.created_at,
               'New connection'::text,
-              concat_ws(
-                ' · ',
-                c.connector_key,
-                coalesce(nullif(c.display_name, ''), 'Unnamed connection'),
-                o.name,
-                CASE WHEN u.email IS NOT NULL THEN 'created by ' || u.email END
-              ),
-              c.created_at
+              concat_ws(' · ', c.connector_key, 'Connection ' || c.id,
+                'Workspace ' || c.organization_id),
+              jsonb_build_object('event_type', 'connection.created',
+                'connection_id', c.id, 'connector_key', c.connector_key,
+                'organization_id', c.organization_id, 'user_id', c.created_by)
             FROM connections c
-            JOIN organization o ON o.id = c.organization_id
-            LEFT JOIN "user" u ON u.id = c.created_by
-            WHERE c.deleted_at IS NULL
 
             UNION ALL
 
             SELECT
-              'mcp:' || jsonb_build_array(m.user_id, m.client_identity, m.conversation_id)::text,
-              m.first_activity_at,
-              'MCP conversation first seen'::text,
-              concat_ws(
-                ' · ',
-                coalesce(nullif(m.client_software_id, ''), nullif(client.client_name, ''), 'Unknown client'),
-                coalesce(nullif(u.name, ''), 'Unknown user'),
-                u.email,
-                'Account-linked conversation; workspace scope is not captured by this fact'
-              ),
-              m.last_activity_at
+              'mcp:' || jsonb_build_array(m.user_id, m.client_identity,
+                m.conversation_id,
+                to_char(m.last_activity_at AT TIME ZONE 'UTC', 'YYYYMMDD"T"HH24MISS.US'),
+                lpad(m.call_count::text, 20, '0'))::text,
+              m.last_activity_at,
+              'MCP activity observed'::text,
+              concat_ws(' · ', 'Account ' || m.user_id,
+                'Client ' || nullif(m.client_identity, ''),
+                m.call_count || ' cumulative calls at observation',
+                m.failed_count || ' cumulative failures at observation'),
+              jsonb_build_object('event_type', 'mcp.activity_observed',
+                'user_id', m.user_id, 'client_identity', m.client_identity,
+                'client_id', m.client_id, 'activity_id', m.conversation_id,
+                'conversation_started_at', m.first_activity_at,
+                'call_count', m.call_count::text, 'failed_count', m.failed_count::text)
             FROM mcp_client_conversations m
-            LEFT JOIN oauth_clients client ON client.id = m.client_id
             JOIN "user" u ON u.id = m.user_id
             WHERE m.call_count > 0
               AND coalesce(u.principal_kind, 'human') = 'human'
@@ -401,18 +384,15 @@ const productActivityDb = defineConnection({
               'tool-failure:' || e.origin_id,
               e.created_at,
               'Failed tool call'::text,
-              concat_ws(
-                ' · ',
-                coalesce(nullif(u.name, ''), 'Unknown user'),
-                u.email,
-                coalesce(o.name, 'Account activity'),
+              concat_ws(' · ', 'Account ' || e.created_by,
                 e.payload_data->>'tool_name',
-                coalesce(e.payload_data->'error'->>'code', e.payload_data->'error'->>'name', 'Unknown error')
-              ),
-              e.created_at
+                coalesce(e.payload_data->'error'->>'code', e.payload_data->'error'->>'name', 'Unknown error')),
+              jsonb_build_object('event_type', 'tool_invocation.completed',
+                'user_id', e.created_by, 'organization_id', e.organization_id,
+                'tool_name', e.payload_data->>'tool_name', 'success', false,
+                'error', e.payload_data->'error', 'actor', e.metadata)
             FROM events e
             JOIN "user" u ON u.id = e.created_by
-            LEFT JOIN organization o ON o.id = e.organization_id
             WHERE e.semantic_type = 'audit'
               AND e.origin_type = 'tool_invocation'
               AND e.metadata->>'event_type' = 'tool_invocation.completed'
