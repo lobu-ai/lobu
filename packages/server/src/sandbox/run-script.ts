@@ -560,6 +560,42 @@ function classifyRuntimeError(
 	};
 }
 
+/** Runtime failures that exhaust the caller's own script budget. */
+const CALLER_BUDGET_FAILURES = new Set<string>([
+	"TimeoutError",
+	"OutOfMemory",
+	"QuotaExceeded",
+	"OutputSizeExceeded",
+	"InvalidSleepDuration",
+	"SleepLimitExceeded",
+]);
+
+/**
+ * What a span or error log may record for a failed script. The names are
+ * host-owned (a guest throw is always ScriptError), so they classify without
+ * reading text. A ScriptError or ValidationError message is guest-authored or
+ * echoes caller input and can carry source data, so only its name and code
+ * survive. Exhausting the script's own budget is the caller's failure even
+ * where the public code is INTERNAL.
+ */
+export function scriptFailureTelemetry(error: object): {
+	error: object;
+	kind?: "user";
+} {
+	const name = "name" in error ? String(error.name) : "";
+	const callerScript = name === "ScriptError" || name === "ValidationError";
+	return {
+		error: callerScript
+			? {
+					name,
+					code: "code" in error ? error.code : undefined,
+					message: "Sandbox script failed",
+				}
+			: error,
+		...(CALLER_BUDGET_FAILURES.has(name) ? { kind: "user" as const } : {}),
+	};
+}
+
 /** The public error for a runtime failure the host itself determined. */
 function runtimeFailureError(
 	failure: Pick<SandboxRuntimeFailure, "reason" | "message">,

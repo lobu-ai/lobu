@@ -10,6 +10,7 @@ import type { AgentTurnIdentity } from './turn-write-idempotency';
 import type { ChatSenderReach } from '../auth/oauth/types';
 import { isTokenDerivedSession } from '../auth/oauth/scopes';
 import { resolveToolWorkspaceTarget } from '../sandbox/client-sdk';
+import { scriptFailureTelemetry } from '../sandbox/run-script';
 import { verifiedAutomationSource } from '../automations/automation-source';
 import { runWithActingAutomation } from '../utils/acting-automation-context';
 import type { Context } from 'hono';
@@ -361,23 +362,8 @@ export async function executeTool(
       ) {
         // SDK tools report script failures as data. Record the trusted sandbox
         // classification without changing MCP isError or retrying side effects.
-        // These names are host-owned: guest throws are always ScriptError.
-        // Exhausting a caller's script budget is user telemetry even while the
-        // public response retains its historical INTERNAL code.
-        const errorName = 'name' in result.error ? String(result.error.name) : '';
-        const callerBudget = [
-          'TimeoutError', 'OutOfMemory', 'QuotaExceeded', 'OutputSizeExceeded',
-          'InvalidSleepDuration', 'SleepLimitExceeded',
-        ].includes(errorName);
-        // Guest-authored messages and stack names can contain arbitrary source
-        // data. Keep their classification, but do not copy their text to spans.
-        const callerScript = errorName === 'ScriptError' || errorName === 'ValidationError';
-        const telemetryError = callerScript ? {
-          name: errorName,
-          code: 'code' in result.error ? result.error.code : undefined,
-          message: 'Sandbox script failed',
-        } : result.error;
-        recordError(span, telemetryError, { scope, ...(callerBudget ? { kind: 'user' as const } : {}) });
+        const telemetry = scriptFailureTelemetry(result.error);
+        recordError(span, telemetry.error, { scope, ...(telemetry.kind ? { kind: telemetry.kind } : {}) });
       } else {
         span?.setStatus({ code: SpanStatusCode.OK });
       }

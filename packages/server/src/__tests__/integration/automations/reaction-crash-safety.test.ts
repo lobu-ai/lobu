@@ -10,6 +10,7 @@
  * window — plus the rehydration and retry classification the inline loop used to own.
  */
 
+import { describeError } from "@lobu/core";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
 	automationReactionIdempotencyKey,
@@ -369,6 +370,42 @@ describe("automation reaction crash safety", () => {
 		expect(outcome.status).toBe("failed");
 		const [logged] = await sql`SELECT tool_result FROM automation_reactions WHERE source_run_id = ${runId}`;
 		expect(logged.tool_result).toMatchObject({ success: false, error: "ValidationError: Synthetic configuration required" });
+	});
+
+	it("charges the script's own throw to the Automation in telemetry, without its text", async () => {
+		const { sql, automationId, runId, api, workspace } = await seedRunnableWindow(
+			'export default async () => { throw new Error("Synthetic private detail"); };',
+		);
+		await completeWindow(api, automationId, runId);
+		const [task] = await reactionTasks(sql, runId);
+		const lines: string[] = [];
+		const write = process.stdout.write;
+		process.stdout.write = ((chunk: string | Uint8Array) => {
+			lines.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString());
+			return true;
+		}) as typeof process.stdout.write;
+		let thrown: unknown;
+		try {
+			await runAutomationReactionTask(
+				{ organizationId: workspace.org.id, automationId, sourceRunId: runId }, {} as Env, Number(task.id),
+			);
+		} catch (error) {
+			thrown = error;
+		} finally {
+			process.stdout.write = write;
+		}
+		// A plain throw still asks for a retry; the run span classifies that request.
+		expect(describeError(thrown, { scope: "run task" })).toMatchObject({ code: "VALIDATION", kind: "user" });
+		const records = lines.flatMap((line) => {
+			try {
+				return [JSON.parse(line) as Record<string, unknown>];
+			} catch {
+				return [];
+			}
+		});
+		const failure = records.find((record) => record.msg === "Reaction script execution failed");
+		expect(failure).toMatchObject({ error_kind: "user", error_code: "VALIDATION", error_type: "ScriptError" });
+		expect(String(failure?.error_message)).not.toContain("Synthetic private detail");
 	});
 
 	it("settles without retrying when the script fails deterministically", async () => {
