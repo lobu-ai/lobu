@@ -73,6 +73,37 @@ describe('PostgresConnector.sync (keyset incremental, real DB)', () => {
     expect(r2.events.map((e) => e.origin_id)).toEqual(['query:3']);
   });
 
+  it.each(['timestamptz', 'timestamp'])('preserves %s microseconds across single-row pages without changing the payload', async (type) => {
+    const config = {
+      query: `SELECT id, created_at, 'source column' AS __lobu_checkpoint_cursor, 'source key' AS __lobu_checkpoint_pk
+        FROM (VALUES
+          (101, '2026-01-01 00:00:00.000100'::${type}),
+          (102, '2026-01-01 00:00:00.000200'::${type})
+        ) AS source(id, created_at)`,
+      max_rows_per_sync: 1,
+    };
+    const first = await run(config, null);
+    const second = await run(config, first.checkpoint);
+    const last = await run(config, second.checkpoint);
+    expect(first.events.map((event) => event.origin_id)).toEqual(['query:101']);
+    expect(second.events.map((event) => event.origin_id)).toEqual(['query:102']);
+    expect(last.events).toEqual([]);
+    expect(last.status).toBe('complete');
+    for (const event of [...first.events, ...second.events]) {
+      expect(event.payload_data).toEqual({
+        id: expect.any(Number),
+        created_at: expect.any(Date),
+        __lobu_checkpoint_cursor: 'source column',
+        __lobu_checkpoint_pk: 'source key',
+      });
+    }
+  });
+
+  it('accepts ISO checkpoints written by the previous connector version', async () => {
+    const result = await run({}, { last_cursor: '2026-01-01T10:00:00.000Z', last_pk: '1' });
+    expect(result.events.map((event) => event.origin_id)).toEqual(['query:2', 'query:3']);
+  });
+
   it('is incremental: a re-sync from the checkpoint yields no rows', async () => {
     const r1 = await run({}, null);
     const r2 = await run({}, r1.checkpoint);
