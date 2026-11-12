@@ -473,6 +473,44 @@ describe("isolate lane: fixture connector", () => {
 		await expect(lateHost!.run("true", { timeoutMs: 100 })).rejects.toBeInstanceOf(IsolateHostError);
 	});
 
+	it("never starts a queued host hook after the deadline ends the run", async () => {
+		// The guest fires two artifacts without awaiting. The first hook blocks
+		// past the deadline; the second is already queued behind it.
+		let releaseFirst!: () => void;
+		const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+		let firstStarted!: () => void;
+		const started = new Promise<void>((resolve) => { firstStarted = resolve; });
+		const artifacts: Record<string, unknown>[] = [];
+		const execution = executeCompiledConnector({
+			compiledCode: `class Runtime {
+				async authenticate(ctx) {
+					ctx.emit({ step: 1 });
+					ctx.emit({ step: 2 });
+					await new Promise(() => {});
+				}
+				async sync() { return { status: "complete" }; }
+				async execute() { return { ok: true }; }
+			} module.exports = { default: Runtime };`,
+			job: { mode: "authenticate", config: {}, previousCredentials: null, env: {} },
+			hooks: {
+				onAuthArtifact: async (artifact) => {
+					artifacts.push(artifact);
+					if (artifacts.length === 1) {
+						firstStarted();
+						await firstGate;
+					}
+				},
+			},
+			timeoutMs: 150,
+		}).then(() => null, (error: unknown) => error as LaneError);
+		await started;
+		const failure = await execution;
+		expect(failure?.exitReason).toBe("timeout");
+		releaseFirst();
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		expect(artifacts).toEqual([{ step: 1 }]);
+	});
+
 	it("keeps the wall-clock deadline disabled when timeoutMs is zero", async () => {
 		const result = await executeCompiledConnector({
 			compiledCode: `class Runtime {

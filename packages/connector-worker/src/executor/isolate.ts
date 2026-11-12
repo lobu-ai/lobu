@@ -797,6 +797,10 @@ export class IsolateExecutor implements SyncExecutor {
 
     const queueHook = (task: () => Promise<void> | void): Promise<void> => {
       const next = processingChain.then(async () => {
+        // A hook queued behind one that outlived the run must not start: the
+        // caller already has the timeout or cancellation, so any side effect
+        // now would land for a run reported as failed.
+        if (runAbort.signal.aborted) throw new Error('the run ended before this hook started');
         await task();
       });
       // Keep the chain alive after a failure so later calls still see the
