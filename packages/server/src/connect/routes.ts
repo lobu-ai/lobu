@@ -14,6 +14,7 @@
  * - GET  /connect/oauth/client-metadata.json → public OAuth client metadata document
  */
 
+import { getCurrentSpan } from '@lobu/core';
 import { type Context, Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import {
@@ -735,6 +736,13 @@ connectRoutes.get('/oauth/callback', async (c) => {
     }
     return c.json({ error: 'Invalid or expired connect token' }, 404);
   }
+  // The callback is unauthenticated, so the request span has no session to
+  // name the workspace or user. The connect token does; without them a
+  // sign-in failure is counted as affecting nobody.
+  getCurrentSpan()?.setAttributes({
+    'lobu.org_id': tokenRow.organization_id,
+    ...(tokenRow.created_by ? { 'user.id': tokenRow.created_by } : {}),
+  });
 
   const baseUrl = getBaseUrl(c);
   // Resolve the token first: a denied or failed consent still has to land the

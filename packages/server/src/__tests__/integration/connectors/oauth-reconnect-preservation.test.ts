@@ -1,4 +1,6 @@
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { createSpan, initTracing, runInSpanContext, shutdownTracing, SpanKind } from '@lobu/core';
+import { InMemorySpanExporter, SimpleSpanProcessor } from '@opentelemetry/sdk-trace-node';
 import { connectRoutes } from '../../../connect/routes';
 import { CredentialService } from '../../../auth/credentials';
 import type { Env } from '../../../index';
@@ -972,6 +974,30 @@ describe('OAuth reconnect preserves the existing connection until consent', () =
     expect(response.headers.get('location')).toContain(`/${s.connection.id}?settings=true&auth_result=failed`);
     expect(await state(s.connection.id)).toEqual(before);
   });
+  it('attributes a callback to the connect token workspace and user, so its failures count who they hit', async () => {
+    const s = await seed();
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      if (url === 'https://provider.example/token') return Response.json({ error: 'invalid_grant' }, { status: 400 });
+      return originalFetch(input, init);
+    }) as typeof fetch;
+    const result = await s.client.reauthenticate(s.connection.id) as { connect_url: string };
+    const token = new URL(result.connect_url).pathname.split('/').at(-3)!;
+    const exporter = new InMemorySpanExporter();
+    await shutdownTracing();
+    initTracing({ serviceName: 'oauth-callback-attribution-test', spanProcessors: [new SimpleSpanProcessor(exporter)] });
+    try {
+      // The callback is unauthenticated: the request span has no session to read.
+      const request = createSpan('HTTP request', { 'http.request.method': 'GET' }, SpanKind.SERVER);
+      await runInSpanContext(request, () => connectRoutes.request(`/oauth/callback?state=${token}&code=synthetic-failed`, {}, {} as Env));
+      request?.end();
+      const [span] = exporter.getFinishedSpans().filter((finished) => finished.kind === SpanKind.SERVER);
+      expect(span?.attributes).toMatchObject({ 'lobu.org_id': s.org.id, 'user.id': s.user.id });
+    } finally {
+      await shutdownTracing();
+    }
+  });
+
   it('members connect their own account with the workspace default, without configuring an app', async () => {
     const s = await seed();
     const member = await createTestUser({ name: 'Synthetic consenting member' });
