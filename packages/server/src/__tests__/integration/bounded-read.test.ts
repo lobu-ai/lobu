@@ -154,3 +154,23 @@ describe('boundedRead', () => {
     }
   });
 });
+
+it('keeps bounded reads reserved when a multi-connection pool reaches pipeline capacity', async () => {
+  const pool = postgres(process.env.DATABASE_URL!, { max: 2, ...PROD_PG_VALUE_OPTIONS });
+  try {
+    const warm = await Promise.all([pool.reserve(), pool.reserve()]);
+    await Promise.all(warm.map(connection => connection`SELECT 1`));
+    for (const connection of warm) connection.release();
+    const preceding = Array.from({ length: 200 }, () => pool`SELECT pg_sleep(0.01)`.execute());
+    const read = boundedQuery(pool as unknown as DbClient,
+      "SELECT current_setting('transaction_read_only') AS read_only, 1 AS value", [],
+      { statementTimeoutMs: 5000 });
+    const results = await Promise.all([...preceding, read]);
+    expect(results.at(-1)?.[0]).toEqual({ read_only: 'on', value: 1 });
+    const [outside] = await pool`SELECT current_setting('transaction_read_only') AS read_only,
+      current_setting('statement_timeout') AS statement_timeout`;
+    expect(outside).toEqual({ read_only: 'off', statement_timeout: '0' });
+  } finally {
+    await pool.end({ timeout: 0 });
+  }
+});

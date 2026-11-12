@@ -138,3 +138,32 @@ describe('Postgres cold connection reservations', () => {
     }
   });
 });
+
+describe('Postgres transaction reservations under pipeline pressure', () => {
+  it.each(drivers)('%s reserves BEGIN when the pipeline reaches capacity', async (_name, driver) => {
+    await getTestDb()`SELECT 1`;
+    const sql = driver(process.env.DATABASE_URL!, { max: 2, ...PROD_PG_VALUE_OPTIONS });
+    try {
+      const warm = await Promise.all([sql.reserve(), sql.reserve()]);
+      await Promise.all(warm.map(connection => connection`SELECT 1`));
+      for (const connection of warm) connection.release();
+
+      // Use the normal 100-query pipeline, not max:1 (which disables the
+      // driver's unreserved-BEGIN guard). The next BEGIN reaches its edge.
+      const preceding = Array.from({ length: 200 }, () => sql`SELECT pg_sleep(0.01)`.execute());
+      const transaction = sql.begin(async tx => {
+        const [before] = await tx`SELECT pg_backend_pid() AS pid`;
+        await tx`CREATE TEMP TABLE pipeline_reservation_test (value int) ON COMMIT DROP`;
+        await tx`INSERT INTO pipeline_reservation_test VALUES (7)`;
+        const [after] = await tx`SELECT pg_backend_pid() AS pid, value FROM pipeline_reservation_test`;
+        expect(after).toEqual({ pid: before.pid, value: 7 });
+      });
+      // Attach both rejection handlers immediately; the failing BEGIN must
+      // not escape as an unhandled rejection while preceding work drains.
+      await Promise.all([...preceding, transaction]);
+      expect((await sql`SELECT 1 AS reusable`)[0].reusable).toBe(1);
+    } finally {
+      await sql.end({ timeout: 0 });
+    }
+  });
+});
