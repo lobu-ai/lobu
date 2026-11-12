@@ -325,9 +325,17 @@ export type SearchMemoryResponse =
 export type SaveMemoryData = {
   body: {
     /**
-     * Entity IDs to associate content with. Omit for org-scoped content.
+     * Records this content is about. Each entry is a record id, or { name } with the record's exact full name. A name links only when exactly one record in this workspace has that name; otherwise it is returned in `unlinked` and the content is still saved. Reference only records the content is substantially about, at most 20 names. Omit for org-scoped content.
      */
-    entity_ids?: Array<number>;
+    entity_ids?: Array<
+      | number
+      | {
+          /**
+           * The record's exact full name: a person's full name, owner/repo for a repository.
+           */
+          name: string;
+        }
+    >;
     /**
      * The text content to save. Required for text/markdown payload types.
      */
@@ -470,6 +478,13 @@ export type SaveMemoryResponses = {
       method: "client.knowledge.read";
       content_ids: [unknown];
     };
+    /**
+     * Names from entity_ids that were not linked: no record has that exact name, several do, or the caller may not link records here.
+     */
+    unlinked: Array<{
+      name: string;
+      reason: "not_found" | "ambiguous" | "not_writable";
+    }>;
   };
 };
 

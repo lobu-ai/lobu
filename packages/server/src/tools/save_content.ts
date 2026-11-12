@@ -9,7 +9,13 @@
 
 import { Buffer } from 'node:buffer';
 import { normalizeAuthUserId, normalizeEmail } from '@lobu/connector-sdk/identity-normalize';
-import { type SaveContentArgs, SaveContentSchema } from '@lobu/core/contracts/tools/save-memory';
+import {
+  MAX_ENTITY_NAMES,
+  type SaveContentArgs,
+  SaveContentSchema,
+  type UnlinkedEntityName,
+  UnlinkedEntityNameSchema,
+} from '@lobu/core/contracts/tools/save-memory';
 import { Type } from '@sinclair/typebox';
 import { resolveAutomationAttribution } from '../automations/automation-source';
 import { hasRequiredMcpScope } from '../auth/tool-access';
@@ -35,7 +41,8 @@ import {
   GUIDANCE_SEMANTIC_TYPE,
 } from '../utils/org-guidance';
 import { ensureMemberEntityType } from '../utils/member-entity-type';
-import { requireWriteAccess } from '../utils/organization-access';
+import { canWriteOrg, requireWriteAccess } from '../utils/organization-access';
+import { resolveEntityNameReferences } from '../utils/entity-name-references';
 import { isUniqueViolation } from '../utils/pg-errors';
 import { trackAutomationReaction } from '../utils/automation-reactions';
 import { isSystemContext, workspaceScopeDenialMessage } from './access-control';
@@ -157,6 +164,11 @@ export const SaveContentResultSchema = Type.Object({
     method: Type.Literal('client.knowledge.read'),
     content_ids: Type.Tuple([Type.Integer()]),
   }),
+  unlinked: Type.Array(UnlinkedEntityNameSchema, {
+      description:
+        'Names from entity_ids that were not linked: no record has that exact name, several do, or the caller may not link records here.',
+    }
+  ),
 });
 
 interface SaveContentResult {
@@ -194,6 +206,26 @@ interface SaveContentResult {
   /** Metadata on the durable event (the original metadata on an idempotent replay). */
   metadata: Record<string, unknown>;
   exact_read: { method: 'client.knowledge.read'; content_ids: [number] };
+  unlinked: UnlinkedEntityName[];
+}
+
+/** Server-owned receipt of the names a save could not link. */
+const UNLINKED_ENTITY_NAMES_KEY = '_lobu_unlinked_entity_names';
+
+function uniqueEntityNames(references: NonNullable<SaveContentArgs['entity_ids']>): string[] {
+  const names = new Map<string, string>();
+  for (const ref of references) {
+    if (typeof ref === 'number') continue;
+    const name = ref.name.trim();
+    if (!name) throw new ToolUserError('entity_ids names must not be blank', 400);
+    if (!names.has(name.toLowerCase())) names.set(name.toLowerCase(), name);
+  }
+  return [...names.values()];
+}
+
+function unlinkedFromMetadata(metadata: Record<string, unknown>): UnlinkedEntityName[] {
+  const value = metadata[UNLINKED_ENTITY_NAMES_KEY];
+  return Array.isArray(value) ? (value as UnlinkedEntityName[]) : [];
 }
 
 // ============================================
@@ -227,7 +259,12 @@ async function saveContentImpl(
   // 0. Ensure $member entity type exists for this org
   await ensureMemberEntityType(ctx.organizationId);
 
-  const entityIds: number[] = args.entity_ids ?? [];
+  const references = args.entity_ids ?? [];
+  const explicitEntityIds = references.filter((ref): ref is number => typeof ref === 'number');
+  const entityNames = uniqueEntityNames(references);
+  if (entityNames.length > MAX_ENTITY_NAMES) {
+    throw new ToolUserError(`entity_ids accepts at most ${MAX_ENTITY_NAMES} names`, 400);
+  }
   const semanticType = args.semantic_type;
   if (!semanticType) throw new ToolUserError('semantic_type is required');
 
@@ -267,10 +304,27 @@ async function saveContentImpl(
     throw new ToolUserError(`content is required for payload_type '${payloadType}'`);
   }
 
-  // 1. Require write access for each entity
-  for (const eid of entityIds) {
+  // 1. Require write access for each explicit entity id; resolve names to ids.
+  //    An explicit id the caller cannot link fails the save; a name that does not
+  //    resolve to exactly one record is reported in `unlinked` instead.
+  for (const eid of explicitEntityIds) {
     await requireWriteAccess(sql, eid, ctx);
   }
+  // A retry of a stored save keeps the links that save resolved: records renamed
+  // or added since must not change, or fail, the original outcome.
+  const storedSave =
+    args.idempotency_key && entityNames.length > 0
+      ? await findIdempotentEvent(sql, ctx.organizationId, args.idempotency_key)
+      : undefined;
+  const nameResolution = storedSave
+    ? { entityIds: storedSave.entity_ids ?? [], unlinked: unlinkedFromMetadata(storedSave.metadata) }
+    : await resolveEntityNameReferences(
+        sql,
+        entityNames,
+        ctx,
+        entityNames.length > 0 && (await canWriteOrg(sql, ctx))
+      );
+  const entityIds = [...new Set([...explicitEntityIds, ...nameResolution.entityIds])];
 
   // 2. Validate semantic_type against $member.event_kinds + entity type event_kinds.
   //    `guidance` is a built-in org-wide kind registered in the $member
@@ -506,6 +560,11 @@ async function saveContentImpl(
   const eventMetadata: Record<string, unknown> = {
     ...callerMetadata,
     ...(args.idempotency_key ? { _lobu_idempotency_key: args.idempotency_key } : {}),
+    // The resolution receipt: an idempotent replay reports these, not a fresh
+    // lookup against records that may have changed since. Never linked later.
+    ...(nameResolution.unlinked.length > 0
+      ? { [UNLINKED_ENTITY_NAMES_KEY]: nameResolution.unlinked }
+      : {}),
     ...(ctx.agentId ? { agent_id: ctx.agentId } : {}),
   };
 
@@ -806,6 +865,7 @@ async function saveContentImpl(
     searchable,
     created: inserted,
     metadata: persistedMetadata,
+    unlinked: unlinkedFromMetadata(persistedMetadata),
     // `knowledge.read` takes `content_ids` (array) — a singular `content_id`
     // is rejected as an unknown argument, so the self-documenting hint must
     // use the exact shape the reader accepts.
