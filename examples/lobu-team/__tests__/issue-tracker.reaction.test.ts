@@ -88,6 +88,39 @@ describe("issue creation gate", () => {
     });
   });
 
+  test("one system error on a sign-in or consent route is a high-priority issue", () => {
+    const blocked = occ({
+      culprit: "GET /connect/oauth/callback",
+      seen_2h: 1,
+      seen_24h: 1,
+      seen_14d: 1,
+      max_orgs: 0,
+      max_users: 0,
+    });
+    expect(plan([blocked], [])[0]).toMatchObject({
+      action: "create",
+      metadata: { priority: "high" },
+    });
+    expect(plan([{ ...blocked, kind: "user" }], [])).toEqual([]);
+    expect(plan([{ ...blocked, culprit: "GET /x" }], [])).toEqual([]);
+    const louder = Array.from({ length: 5 }, (_, n) =>
+      occ({ fingerprint: FP(n + 2), seen_24h: 50 })
+    );
+    const changes = plan([...louder, blocked], [], 1);
+    expect(changes.find((c) => c.fingerprint === FP(1))?.action).toBe("create");
+  });
+
+  test("a new high-priority issue alerts admins once; medium ones do not", () => {
+    const [high] = plan([occ({ seen_24h: RULES.highMinSeen24h })], []);
+    expect(high).toMatchObject({
+      action: "create",
+      alert: { kind: "new_high", key: `issue-new:${FP(1)}` },
+    });
+    const [medium] = plan([occ()], []);
+    expect(medium).toMatchObject({ action: "create" });
+    expect(medium).not.toHaveProperty("alert");
+  });
+
   test("the hourly quota defers the quietest new fingerprints", () => {
     const many = Array.from({ length: 7 }, (_, n) =>
       occ({ fingerprint: FP(n + 1), seen_24h: 10 + n })
