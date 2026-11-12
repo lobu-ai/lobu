@@ -46,12 +46,23 @@ async function collector(organizationId: string) {
   const connector = new PostgresConnector();
   let checkpoint: Record<string, unknown> | null = null;
   return {
-    async sync(recollect = false) {
+    async sync(recollect = false, timeZone?: string) {
       if (recollect) checkpoint = null;
       const collected: EventEnvelope[] = [];
+      const databaseUrl = new URL(process.env.DATABASE_URL!);
+      if (timeZone) {
+        databaseUrl.searchParams.set("options", `-c TimeZone=${timeZone}`);
+        const setting = await connector.query({
+          query: "SELECT current_setting('TimeZone') AS zone",
+          config: { DATABASE_URL: databaseUrl.toString() },
+          credentials: null,
+          feedKey: null,
+        });
+        expect(setting.rows[0].zone).toBe(timeZone);
+      }
       await connector.sync({
         feedKey: "query",
-        config: { ...feed?.config, DATABASE_URL: process.env.DATABASE_URL },
+        config: { ...feed?.config, DATABASE_URL: databaseUrl.toString() },
         checkpoint,
         credentials: null,
         entityIds: [],
@@ -261,8 +272,24 @@ it("keeps recorded content stable across renames, soft deletion and recollection
   await db`UPDATE mcp_client_conversations SET client_software_id = 'Renamed software'
     WHERE user_id = ${user.id}`;
   await setCurrentMcpConversationTitle(account, "Renamed title");
-  await source.sync(true);
+  expect(await source.sync()).toHaveLength(0);
   expect(await source.stored()).toEqual(before);
+  await source.sync(true, "Pacific/Honolulu");
+  const after = await source.stored();
+  const isSignup = (row: (typeof after)[number]) =>
+    row.origin_id.startsWith("query:signup:");
+  expect(after.filter((row) => !isSignup(row))).toEqual(
+    before.filter((row) => !isSignup(row))
+  );
+  // The existing signup alert consumes display text, so only its snapshot
+  // changes on explicit recollection; incremental sync remains quiet.
+  const signups = after.filter(isSignup);
+  expect(signups).toHaveLength(2);
+  expect(signups[1].supersedes_event_id).toBe(signups[0].id);
+  const { payload_text: oldText, ...oldData } = signups[0].payload_data;
+  const { payload_text: newText, ...newData } = signups[1].payload_data;
+  expect(newData).toEqual(oldData);
+  expect(newText).not.toEqual(oldText);
 });
 
 it("catches up after more than a day offline and preserves observations within one millisecond", async () => {
@@ -310,7 +337,12 @@ it("catches up after more than a day offline and preserves observations within o
 
 it("includes one failed SDK outcome across workspace mirrors without duplicating successful calls", async () => {
   const { ctx, user, org } = await seedOwnerContext();
-  const account = { ...ctx, organizationId: null };
+  const account = {
+    ...ctx,
+    organizationId: null,
+    tokenType: "pat" as const,
+    tokenName: "synthetic private token label",
+  };
   await recordToolInvocationAudit({
     ctx: account,
     toolName: "run_sdk",
@@ -318,7 +350,10 @@ it("includes one failed SDK outcome across workspace mirrors without duplicating
     durationMs: 60000,
     result: {
       success: false,
-      error: { name: "TimeoutError", message: "Synthetic timeout" },
+      error: {
+        name: "TimeoutError",
+        message: "synthetic private failure detail",
+      },
     },
   });
   await recordWorkspaceActivityAudit({
@@ -345,4 +380,7 @@ it("includes one failed SDK outcome across workspace mirrors without duplicating
     success: false,
     error: { name: "TimeoutError" },
   });
+  expect(rows[0].activity_data.error).not.toHaveProperty("message");
+  expect(rows[0].activity_data.actor).not.toHaveProperty("token_name");
+  expect(JSON.stringify(rows[0])).not.toContain("synthetic private");
 });

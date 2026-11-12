@@ -314,8 +314,10 @@ const productActivityDb = defineConnection({
         // between syncs collapse into one sample, not one event per call. Calls
         // without an MCP activity id are absent except for recorded failures.
         // The padded count keeps keys ordered when calls share a timestamp.
-        // Content uses stable source ids; resolve current names through
-        // product-user at read time. Do not recollect to normalize old shapes:
+        // Resolve current names through product-user. Signup display snapshots
+        // retain their deployed format for the legacy Lobu team alerts consumer;
+        // all redefined activity rows use stable source ids instead of labels.
+        // Do not recollect to normalize old shapes:
         // that would re-version earlier rows and arrive as fresh digest input.
         query: `SELECT *
           FROM (
@@ -323,7 +325,17 @@ const productActivityDb = defineConnection({
               'signup:' || u.id AS activity_id,
               u."createdAt" AS occurred_at,
               'New signup'::text AS title,
-              'Account ' || u.id AS payload_text,
+              concat_ws(
+                ' · ',
+                coalesce(nullif(u.name, ''), 'Unnamed user'),
+                u.email,
+                coalesce((
+                  SELECT string_agg(DISTINCT o.name, ', ' ORDER BY o.name)
+                  FROM member m
+                  JOIN organization o ON o.id = m."organizationId"
+                  WHERE m."userId" = u.id
+                ), 'No organization')
+              ) AS payload_text,
               jsonb_build_object('event_type', 'account.created',
                 'user_id', u.id) AS activity_data
             FROM "user" u
@@ -370,8 +382,8 @@ const productActivityDb = defineConnection({
                 m.failed_count || ' cumulative failures at observation'),
               jsonb_build_object('event_type', 'mcp.activity_observed',
                 'user_id', m.user_id, 'client_identity', m.client_identity,
-                'client_id', m.client_id, 'activity_id', m.conversation_id,
-                'conversation_started_at', m.first_activity_at,
+                'client_id', m.client_id, 'mcp_activity_id', m.conversation_id,
+                'conversation_started_at', to_char(m.first_activity_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
                 'call_count', m.call_count::text, 'failed_count', m.failed_count::text)
             FROM mcp_client_conversations m
             JOIN "user" u ON u.id = m.user_id
@@ -390,7 +402,13 @@ const productActivityDb = defineConnection({
               jsonb_build_object('event_type', 'tool_invocation.completed',
                 'user_id', e.created_by, 'organization_id', e.organization_id,
                 'tool_name', e.payload_data->>'tool_name', 'success', false,
-                'error', e.payload_data->'error', 'actor', e.metadata)
+                'error', jsonb_strip_nulls(jsonb_build_object(
+                  'code', e.payload_data#>>'{error,code}',
+                  'name', e.payload_data#>>'{error,name}')),
+                'actor', jsonb_build_object('token_type', e.metadata->>'token_type',
+                  'agent_id', e.metadata->>'agent_id', 'client_id', e.client_id,
+                  'mcp_session_id', e.metadata->>'mcp_session_id',
+                  'mcp_conversation_id', e.metadata->>'mcp_conversation_id'))
             FROM events e
             JOIN "user" u ON u.id = e.created_by
             WHERE e.semantic_type = 'audit'
