@@ -1,4 +1,4 @@
-import { generateWorkerToken } from "@lobu/core";
+import { generateWorkerTokenWithExpiry } from "@lobu/core";
 import { AUTOMATION_RUN_SOURCE } from "../automation-run-session.js";
 import { buildAutomationRunConversationId } from "../permissions/automation-run-intent.js";
 import { buildWorkerTokenClaims } from "../orchestration/worker-token-claims.js";
@@ -7,11 +7,6 @@ export interface RunWorkerAccess {
 	conversationId: string;
 	token: string;
 	expiresAt: number;
-}
-
-function workerTokenTtlMs(): number {
-	const raw = Number.parseInt(process.env.WORKER_TOKEN_TTL_MS ?? "", 10);
-	return Number.isFinite(raw) && raw > 0 ? raw : 2 * 60 * 60 * 1000;
 }
 
 /**
@@ -39,11 +34,9 @@ export function buildAutomationRunWorkerAccess(args: {
 	}
 
 	const userId = `automation_${args.automationId}`;
-	const issuedAt = Date.now();
 	return {
 		conversationId,
-		expiresAt: issuedAt + workerTokenTtlMs(),
-		token: generateWorkerToken(
+		...generateWorkerTokenWithExpiry(
 			args.agentId,
 			conversationId,
 			// `deploymentName`. It keys per-turn liveness markers and secret

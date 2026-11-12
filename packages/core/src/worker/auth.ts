@@ -259,7 +259,8 @@ function generateToken(
   deploymentName: string,
   options: WorkerTokenOptions,
   tokenKind: "worker" | "egress-proxy",
-  jti = randomUUID()
+  jti = randomUUID(),
+  timestamp = Date.now()
 ): string {
   if (!options.channelId) {
     throw new Error("channelId is required for worker token generation");
@@ -276,7 +277,7 @@ function generateToken(
     connectionId: options.connectionId,
     responseThreadId: options.responseThreadId,
     deploymentName,
-    timestamp: Date.now(),
+    timestamp,
     platform: options.platform,
     source: options.source,
     executionMode: options.executionMode,
@@ -313,6 +314,28 @@ export function generateWorkerToken(
     options,
     "worker"
   );
+}
+
+/** Mint a session bearer and advertise the same lifetime the verifier enforces. */
+export function generateWorkerTokenWithExpiry(
+  userId: string,
+  conversationId: string,
+  deploymentName: string,
+  options: WorkerTokenOptions
+): { token: string; expiresAt: number } {
+  const issuedAt = Date.now();
+  return {
+    token: generateToken(
+      userId,
+      conversationId,
+      deploymentName,
+      options,
+      "worker",
+      randomUUID(),
+      issuedAt
+    ),
+    expiresAt: workerTokenExpiresAt(issuedAt),
+  };
 }
 
 /**
@@ -374,6 +397,12 @@ function parsePositiveIntEnv(
   if (Number.isNaN(raw)) return fallback;
   if (allowZero ? raw < 0 : raw <= 0) return fallback;
   return raw;
+}
+
+function workerTokenExpiresAt(issuedAt: number): number {
+  return (
+    issuedAt + parsePositiveIntEnv("WORKER_TOKEN_TTL_MS", 2 * 60 * 60 * 1000)
+  );
 }
 
 /**
@@ -589,14 +618,13 @@ function verifyToken(
     // WORKER_TOKEN_CLOCK_SKEW_MS. Tokens timestamped further in the future
     // than the skew are rejected too — otherwise forward drift would grant
     // an unbounded validity window.
-    const ttl = parsePositiveIntEnv("WORKER_TOKEN_TTL_MS", 2 * 60 * 60 * 1000);
     const skewMs = parsePositiveIntEnv(
       "WORKER_TOKEN_CLOCK_SKEW_MS",
       30 * 1000,
       true
     );
     const age = Date.now() - data.timestamp;
-    if (age > ttl + skewMs) {
+    if (Date.now() > workerTokenExpiresAt(data.timestamp) + skewMs) {
       logger.error("Worker token rejected: expired");
       return null;
     }
