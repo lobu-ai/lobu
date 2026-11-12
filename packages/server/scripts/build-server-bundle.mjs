@@ -17,7 +17,7 @@
  * runtime). Published `@lobu/runtime-server` declares those dependencies
  * directly so Node's resolver finds them inside its component cache. Native addons
  * (isolated-vm), embedded-postgres + pgvector binaries, and packages with
- * require-in-the-middle hooks (Sentry, OpenTelemetry, pino) MUST stay external
+ * require-in-the-middle hooks (OpenTelemetry, pino) MUST stay external
  * to keep their runtime hooks working.
  */
 

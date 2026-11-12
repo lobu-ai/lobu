@@ -239,7 +239,7 @@ export const AGENT_ERRORS: Record<AgentErrorCode, AgentErrorSpec> = {
   // The provider's own finish_reason string is not useful to an end user
   // ("function_call_filter: MALFORMED_FUNCTION_CALL"), so unlike the other
   // PROVIDER_* entries this one carries its own text and does NOT relay the
-  // upstream blob. The raw message stays in the logs / Sentry.
+  // upstream blob. The raw message stays in the logs.
   [AgentErrorCode.PROVIDER_TOOL_CALL_FAILED]: {
     message:
       "The model provider rejected its own tool call and ended the turn. This is usually temporary — please try again.",

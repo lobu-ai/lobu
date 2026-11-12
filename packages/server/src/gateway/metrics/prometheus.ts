@@ -12,7 +12,7 @@ const logger = createLogger("metrics");
 // gauge at scrape time so the "worker stopped responding" freeze — a total
 // event-loop stall — shows up on Grafana as a lag spike, instead of only being
 // reconstructable from ping-log gaps after the fact. `instrument.ts` runs a
-// separate monitor that fires a Sentry event on a hard stall; this one feeds the
+// separate monitor that logs a structured diagnostic on a hard stall; this one feeds the
 // metrics scrape. Zero deps (native perf_hooks). We read `.max` since the last
 // scrape and then reset, so each scrape window reports its own peak lag.
 const eventLoopDelay = monitorEventLoopDelay({ resolution: 20 });

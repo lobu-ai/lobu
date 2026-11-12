@@ -2,7 +2,7 @@
  * SDK logger.
  *
  * Deliberately self-contained. The package root must stay loadable inside a
- * V8 isolate, and `@lobu/core`'s root entry pulls winston, Sentry and
+ * V8 isolate, and `@lobu/core`'s root entry pulls winston and
  * OpenTelemetry into every connector bundle — 6 MB of gateway internals whose
  * first `require('util')` throws where no Node runtime exists (guarded by
  * `packages/server/src/__tests__/integration/sandbox/connector-isolate-lane.test.ts`).

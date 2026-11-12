@@ -9,7 +9,7 @@
  * 503.
  *
  * The backoff loop lives here rather than being imported from `@lobu/core`:
- * core's root entry drags winston, Sentry and OpenTelemetry into every
+ * core's root entry drags winston and OpenTelemetry into every
  * connector bundle, and the package root must stay loadable inside a V8
  * isolate. It keeps the semantics of core's `retryWithBackoff` for the one
  * configuration `withHttpRetry` uses: exponential, capped, full jitter.

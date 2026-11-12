@@ -18,7 +18,7 @@ import { getErrorMessage } from "@lobu/core";
 /**
  * Log level for an error caught in `routeAction`. ToolUserError is an expected
  * client fault (the REST/MCP layer turns it into a 4xx) — log it at `warn` so it
- * stays diagnosable without paging or leaking to the Sentry alert feed. Genuine
+ * stays diagnosable without paging or reaching the error-log alerts. Genuine
  * handler faults log at `error`. Exported for direct unit testing.
  */
 function errorLogLevel(error: unknown): 'warn' | 'error' {
@@ -62,8 +62,8 @@ export async function routeAction<TResult>(
     // ToolUserError is an expected client fault (bad input, not-found,
     // permission denied, conflict) that the REST/MCP layer turns into a 4xx for
     // the caller — it is NOT an operational error. Logging it at `error` both
-    // spams the error log and (via the pino→Sentry bridge) created noisy alerts
-    // for routine 409/403 outcomes. Log at `warn` so it stays diagnosable
+    // spams the error log and creates noisy alerts for routine 409/403
+    // outcomes. Log at `warn` so it stays diagnosable
     // without paging; genuine handler faults still log at `error`.
     logger[errorLogLevel(error)](
       {
@@ -84,7 +84,7 @@ export async function routeAction<TResult>(
 export function requireField<T>(value: T | undefined | null, fieldName: string, action: string): T {
   if (value === undefined || value === null) {
     // Missing required input is a caller fault (a 400), not an operational
-    // error — so it returns the right status and stays out of the Sentry feed.
+    // error — so it returns the right status and stays out of the error log.
     throw new ToolUserError(`${fieldName} is required for ${action} action`, 400);
   }
   return value;

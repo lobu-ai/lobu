@@ -10,7 +10,7 @@
  * Two concurrent supersedes of the SAME target both pass the read, both
  * INSERT, and the loser hits the partial unique index
  * `idx_events_superseded_by` with a raw Postgres 23505. Because that raw error
- * is NOT a ToolUserError, it was captured to Sentry as noise (sentry.ts) even
+ * is NOT a ToolUserError, it was logged as an operational error even
  * though no data is lost — the unique index correctly protects the invariant.
  *
  * Pinned contract after the fix:
@@ -75,7 +75,7 @@ describe('saveContent > supersession robustness', () => {
     // 6 concurrent supersedes of the SAME target. The non-atomic "already
     // superseded?" read lets several through; the partial unique index lets
     // exactly one win — the rest must surface as ToolUserError(409), NOT a raw
-    // Postgres 23505 (which would be Sentry noise).
+    // Postgres 23505 (which would be error-log noise).
     const results = await Promise.allSettled(
       Array.from({ length: 6 }, (_, i) =>
         saveContent(

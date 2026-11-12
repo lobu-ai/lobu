@@ -15,18 +15,14 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { checkJudgeShadowingAllowlist } from "../network-allowlist.js";
 
 const WAD_PRESERVE = process.env.WORKER_ALLOWED_DOMAINS;
-const SENTRY_PRESERVE = process.env.SENTRY_DSN;
 
 beforeEach(() => {
   delete process.env.WORKER_ALLOWED_DOMAINS;
-  delete process.env.SENTRY_DSN;
 });
 
 afterEach(() => {
   if (WAD_PRESERVE === undefined) delete process.env.WORKER_ALLOWED_DOMAINS;
   else process.env.WORKER_ALLOWED_DOMAINS = WAD_PRESERVE;
-  if (SENTRY_PRESERVE === undefined) delete process.env.SENTRY_DSN;
-  else process.env.SENTRY_DSN = SENTRY_PRESERVE;
 });
 
 describe("checkJudgeShadowingAllowlist", () => {
@@ -67,15 +63,6 @@ describe("checkJudgeShadowingAllowlist", () => {
 
   test("whitespace around * still counts as unrestricted", () => {
     process.env.WORKER_ALLOWED_DOMAINS = "  *  ";
-    expect(checkJudgeShadowingAllowlist()).not.toBeNull();
-  });
-
-  test("SENTRY_DSN does not defeat the unrestricted check", () => {
-    // loadAllowedDomains appends the Sentry host in restricted mode but must
-    // leave `*` alone; if it ever appended, the array would stop being `["*"]`
-    // and this preflight would silently stop firing.
-    process.env.SENTRY_DSN = "https://abc@o1.ingest.sentry.io/2";
-    process.env.WORKER_ALLOWED_DOMAINS = "*";
     expect(checkJudgeShadowingAllowlist()).not.toBeNull();
   });
 });
