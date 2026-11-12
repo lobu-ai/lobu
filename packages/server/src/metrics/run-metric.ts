@@ -8,7 +8,8 @@ import type { EntityMetrics } from "@lobu/connector-sdk";
 import { authzScopeFromToolContext } from "../authz/scope";
 import { getDb } from "../db/client";
 import { isCompletePushdownResult, pushdownFailureError, runConnectorQuery } from "../lib/connector-pushdown";
-import { ToolUserError } from "../utils/errors";
+import { classifyReadQueryFailure } from "../utils/bounded-read";
+import { ToolUserError, toolErrorHttpStatus } from "../utils/errors";
 import { validateAndScopeQuery } from "../utils/execute-data-sources";
 import { type ColumnDef, SAFE_COLUMN_DEFS } from "../utils/table-schema";
 import { compileDerivedMetricSql, compileMetricSql } from "./compiler";
@@ -114,11 +115,19 @@ export async function runMetric(input: RunMetricInput): Promise<Record<string, u
     excludeMemberEntities: input.excludeMemberEntities,
   });
 
-  const rows = await sql.begin(async (tx: typeof sql) => {
-    await tx`SET TRANSACTION READ ONLY`;
-    return tx.unsafe(scoped.sql, scoped.params as unknown[]);
-  });
-  return rows as unknown as Record<string, unknown>[];
+  let rows: unknown;
+  try {
+    rows = await sql.begin(async (tx: typeof sql) => {
+      await tx`SET TRANSACTION READ ONLY`;
+      return tx.unsafe(scoped.sql, scoped.params as unknown[]);
+    });
+  } catch (err) {
+    // Same caller-facing text as query_sql: a database error can quote a row
+    // the scope would have removed.
+    const failure = classifyReadQueryFailure(err);
+    throw new ToolUserError(failure.message, toolErrorHttpStatus(failure.code), failure.code);
+  }
+  return rows as Record<string, unknown>[];
 }
 
 /**

@@ -27,7 +27,8 @@ import { type Static, Type } from '@sinclair/typebox';
 import { getDb } from '../../db/client';
 import { isReadQuery, validateAndScopeQuery } from '../../utils/execute-data-sources';
 import { ADMIN_ONLY_QUERYABLE_TABLES, SAFE_COLUMN_DEFS } from '../../utils/table-schema';
-import { ToolUserError } from '../../utils/errors';
+import { classifyReadQueryFailure } from '../../utils/bounded-read';
+import { ToolUserError, toolErrorHttpStatus } from '../../utils/errors';
 import logger from '../../utils/logger';
 import type { ToolContext } from '../registry';
 import { authzScopeFromToolContext } from '../../authz/scope';
@@ -201,7 +202,10 @@ async function metricSeriesImpl(
     })) as Record<string, unknown>[];
   } catch (err) {
     logger.warn({ err, orgId }, '[metric_series] query failed');
-    throw err;
+    // Same caller-facing text as query_sql: a database error can quote a row
+    // the scope would have removed.
+    const failure = classifyReadQueryFailure(err);
+    throw new ToolUserError(failure.message, toolErrorHttpStatus(failure.code), failure.code);
   }
 
   if (rows.length > MAX_ROWS) {
