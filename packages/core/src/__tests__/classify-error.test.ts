@@ -191,7 +191,7 @@ describe("classifyError", () => {
   test("model-resolver's 'No model resolved' now classifies (was unclassified)", () => {
     // model-resolver.ts throws this when no default/per-automation/org model is
     // set. It previously fell through to `undefined` → raw crash delta + dodged
-    // the PROVIDER_* Sentry alert. Now it renders the actionable catalog line.
+    // the PROVIDER_* alert. Now it renders the actionable catalog line.
     expect(
       classifyError(
         new Error(

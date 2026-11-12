@@ -10,7 +10,7 @@
  *   agent as `agent_error`.
  * - `response-renderer.ts` and `chat-response-bridge.ts` resolve the code to
  *   a remediation CTA; with none, the user gets the provider's raw prose.
- * - An unclassified failure also misses the `PROVIDER_*` Sentry alerting.
+ * - An unclassified failure also misses the `PROVIDER_*` error alerting.
  *
  * Adding a failure mode = one pattern here + one entry in `AGENT_ERRORS`.
  *
@@ -132,7 +132,7 @@ export function classifyErrorMessage(
   // (code no_credentials) when every credential tier misses. The live red-test
   // (LOBU-BACKEND-W) landed as `unclassified` because the auth-hint regex
   // doesn't cover this shape — and an unclassified event dodges the
-  // PROVIDER_* Sentry alert.
+  // PROVIDER_* alert.
   if (
     /no\s+(provider\s+)?credentials\s+configured|no_credentials/i.test(message)
   )

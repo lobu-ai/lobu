@@ -21,7 +21,7 @@
  * Keeping the classifier here rather than in each consumer is deliberate:
  * `@lobu/connector-sdk` is the only package every consumer can import (the
  * server package is not reachable from a bundled connector, and `@lobu/core`
- * pulls OpenTelemetry, Sentry, and winston, which connectors intentionally
+ * pulls OpenTelemetry and winston, which connectors intentionally
  * avoid).
  *
  * The matcher collapses the spellings an attacker can use to dress up an

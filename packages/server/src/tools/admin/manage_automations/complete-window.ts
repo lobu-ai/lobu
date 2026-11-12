@@ -183,7 +183,7 @@ export async function handleCompleteWindow(
   } catch (error) {
     const errorMsg = getErrorMessage(error);
     // Agent-recoverable validation (the message says how) — ToolUserError so
-    // it returns 400 and stays out of the Sentry feed (was LOBU-BACKEND-D).
+    // it returns 400 and stays out of the error log (was LOBU-BACKEND-D).
     throw new ToolUserError(
         `Invalid window_token: ${errorMsg}. ` +
         'The token may have expired or been tampered with. ' +

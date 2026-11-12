@@ -50,7 +50,6 @@ const ENV_SUBSTITUTION_BLOCKLIST = new Set([
   "GH_TOKEN",
   "GITHUB_TOKEN",
   "AWS_SECRET_ACCESS_KEY",
-  "SENTRY_DSN",
 ]);
 
 function isBlockedEnvSubstitution(varName: string): boolean {

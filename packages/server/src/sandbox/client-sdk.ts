@@ -418,7 +418,7 @@ export function buildClientSDK(
 		},
 
 		log(message, data) {
-			// biome-ignore lint/suspicious/noConsole: structured-log fallback; routes through Sentry breadcrumbs in prod.
+			// biome-ignore lint/suspicious/noConsole: structured-log fallback; collected from pod stdout in prod.
 			console.log(`[client-sdk] ${message}`, data ?? {});
 		},
 	};

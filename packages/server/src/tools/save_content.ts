@@ -467,7 +467,7 @@ async function saveContentImpl(
     `;
     if (existing.length === 0) {
       // Stale supersede target (already gone / wrong org) is a user fault, not
-      // an infra error — ToolUserError so it doesn't fire a Sentry alert.
+      // an infra error — ToolUserError so it doesn't log as an operational error.
       throw new ToolUserError(
         `Cannot supersede event ${args.supersedes_event_id}: not found in this organization`,
         404

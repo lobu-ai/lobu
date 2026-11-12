@@ -5,7 +5,7 @@
  * esbuild options the isolate lane uses (`ISOLATE_LANE_BUILD_OPTIONS`), then:
  *
  *  1. asserts the SDK root pulls in no Node builtin and none of `@lobu/core`'s
- *     heavy graph (winston, Sentry, OpenTelemetry) — the property that makes a
+ *     heavy graph (winston, OpenTelemetry) — the property that makes a
  *     connector bundle loadable inside a V8 isolate at all;
  *  2. pins the Node builtins each bundled connector imports — adding `node:fs`
  *     to an isolate-eligible connector fails here instead of at a tenant's
@@ -194,7 +194,7 @@ async function loadInIsolate(ivm: IsolatedVm, code: string): Promise<{ kind: str
 	}
 }
 
-const HEAVY_INPUT = /(^|\/)(winston|@sentry|@opentelemetry|@grpc)(\/|$)|packages\/core\/dist\/(index|logger|sentry|credentials)\.js$/;
+const HEAVY_INPUT = /(^|\/)(winston|@opentelemetry|@grpc)(\/|$)|packages\/core\/dist\/(index|logger|credentials)\.js$/;
 
 describe("connector isolate lane", () => {
 	it("SDK root bundles without Node builtins or @lobu/core's heavy graph", async () => {

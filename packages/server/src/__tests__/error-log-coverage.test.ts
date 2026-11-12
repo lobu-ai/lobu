@@ -7,7 +7,7 @@ beforeEach(() => {
   vi.doUnmock('../diagnostics');
 });
 
-describe('operational errors reach stdout without a Sentry transport', () => {
+describe('operational errors reach stdout', () => {
   it('retains the original caught route stack and marks the request to avoid duplicate capture', async () => {
     const { captureServerError, isErrorReported } = await import('../diagnostics');
     const app = new Hono();

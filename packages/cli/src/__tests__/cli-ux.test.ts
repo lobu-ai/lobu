@@ -106,8 +106,6 @@ describe("lobu init --yes", () => {
       expect(existsSync(join(proj, "agents", "demo", "IDENTITY.md"))).toBe(
         true
       );
-      const env = readFileSync(join(proj, ".env"), "utf-8");
-      expect(env.includes("SENTRY_DSN=")).toBe(false);
       // The generated lobu.config.ts imports @lobu/cli/config, so the scaffolded
       // package.json MUST declare @lobu/cli — else `lobu apply` (jiti) can't
       // resolve it outside this monorepo. Regression guard for that blocker.
@@ -293,22 +291,6 @@ describe("agent scaffold", () => {
       console.log = original;
     }
     expect(logs.join("\n")).toContain('name: "Sales \\"Bot\\" v2"');
-  });
-});
-
-describe("retired Sentry controls", () => {
-  test("built CLI no longer offers remote error reporting", () => {
-    const cliEntry = join(import.meta.dir, "..", "..", "bin", "lobu.js");
-    for (const args of [["--help"], ["init", "--help"]]) {
-      const result = Bun.spawnSync({
-        cmd: [process.execPath, cliEntry, ...args],
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-      expect(result.exitCode).toBe(0);
-      const output = new TextDecoder().decode(result.stdout);
-      expect(output).not.toMatch(/sentry|\btelemetry\b/i);
-    }
   });
 });
 

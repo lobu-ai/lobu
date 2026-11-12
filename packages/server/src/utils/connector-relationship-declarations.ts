@@ -164,7 +164,7 @@ export async function preflightConnectorRelationshipTypes(params: {
       assertNotAclManagedEdge(row, 'connector relationship preflight');
     } catch (error) {
       // Keep the status the ACL guard chose. Re-wrapping as a bare Error would
-      // turn its deliberate 403 into a 500 plus a Sentry alert, for what is a
+      // turn its deliberate 403 into a 500 plus an error-log alert, for what is a
       // caller-fixable connector definition.
       throw new ToolUserError(
         `${label}: ${errorMessage(error)}`,
