@@ -894,6 +894,34 @@ describe('OAuth reconnect preserves the existing connection until consent', () =
     expect(response.headers.get('location')).toContain(`/connectors/${KEY}/${s.connection.id}`);
   });
 
+  it('reconnecting through any connection that shares the account renews it for all of them', async () => {
+    const s = await seed();
+    const sql = getTestDb();
+    const second = await manageConnections({ action: 'connect', connector_key: KEY, auth_profile_slug: s.profile.slug,
+      app_auth_profile_slug: s.app.slug, slug: 'synthetic-shared-account-connection' }, {} as Env, s.ctx) as { connection_id: number };
+    const ids = [s.connection.id, second.connection_id];
+    await sql`UPDATE connections SET status = 'revoked' WHERE id IN (${ids[0]}, ${ids[1]})`;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      if (url === 'https://provider.example/token') return Response.json({ access_token: 'synthetic-renewed-token', refresh_token: 'synthetic-renewed-refresh', scope: [BASE, OLD].join(' '), expires_in: 3600 });
+      if (url === 'https://provider.example/userinfo') return Response.json({ id: 'synthetic-provider-user' });
+      return originalFetch(input, init);
+    }) as typeof fetch;
+    const result = await s.client.reauthenticate(second.connection_id) as { connect_url: string };
+    const token = new URL(result.connect_url).pathname.split('/').at(-3)!;
+    const response = await connectRoutes.request(`/oauth/callback?state=${token}&code=synthetic-code`, {}, {} as Env);
+    expect(response.status).toBe(302);
+    expect(response.headers.get('location')).not.toContain('auth_result=failed');
+    const service = new CredentialService(sql);
+    for (const id of ids) {
+      const [row] = await sql`SELECT status, auth_profile_id FROM connections WHERE id = ${id}`;
+      expect(row).toMatchObject({ status: 'active', auth_profile_id: s.profile.id });
+      expect(await service.getConnectionTokens(id, s.profile.account_id!)).toMatchObject({ accessToken: 'synthetic-renewed-token' });
+    }
+    const stamped = await sql`SELECT id FROM connections WHERE id IN (${ids[0]}, ${ids[1]}) AND account_id = ${s.profile.account_id}`;
+    expect(stamped).toEqual([{ id: s.connection.id }]);
+  });
+
   it('new account setup honors the explicitly selected app and optional scopes', async () => {
     const s = await seed();
     const user = await createTestUser({ name: 'Synthetic new account owner' });

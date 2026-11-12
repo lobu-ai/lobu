@@ -89,7 +89,7 @@ import {
 	isDeviceAutowireIdentity,
 } from "../../../../utils/device-autowire-suppression";
 import logger from "../../../../utils/logger";
-import { lockOAuthAccountBinding, OAUTH_SCOPE_PAUSE_LAST_ERROR, syncOAuthConnectionsForAuthProfile } from "../../../../utils/oauth-connection-state";
+import { connectionAccountStamp, lockOAuthAccountBinding, OAUTH_SCOPE_PAUSE_LAST_ERROR, syncOAuthConnectionsForAuthProfile } from "../../../../utils/oauth-connection-state";
 import { ToolUserError, withFailureCode } from '../../../../utils/errors';
 import { CONNECT_TOKEN_EXPIRED_ERROR } from "../../../../utils/connect-tokens";
 import { OAUTH_ACCOUNT_BINDING_ERROR, oauthAccountOwnershipError } from '../../../../authz/oauth-account-ownership';
@@ -1346,8 +1346,9 @@ export async function handleCreate(
           ${connectionStatus},
             ${authProfileId ?? authSelection?.authProfile?.id ?? null},
           ${authSelection?.appAuthProfile?.id ?? null},
-          (SELECT account_id FROM auth_profiles WHERE id = ${authProfileId ?? authSelection?.authProfile?.id ?? null}
-            AND organization_id = ${organizationId} AND NOT ${connectionConfigToInsert?.consent_only === true}),
+          ${connectionAccountStamp(db, { organizationId, connectorKey: args.connector_key,
+            account: db`(SELECT account_id FROM auth_profiles WHERE id = ${authProfileId ?? authSelection?.authProfile?.id ?? null}
+              AND organization_id = ${organizationId} AND NOT ${connectionConfigToInsert?.consent_only === true})` })},
             ${connectionConfigToInsert ? db.json(connectionConfigToInsert) : null},
           ${effectiveCreatedBy},
           ${visibility},
@@ -2164,8 +2165,9 @@ export async function handleUpdate(
             auth_profile_id = ${liveBrowserProfile?.id ?? nextAuthProfileId},
             app_auth_profile_id = ${nextAppAuthProfileId},
             account_id = CASE WHEN ${explicitlyNoAuth} THEN NULL
-              WHEN ${hasAuthProfileArg} THEN (SELECT account_id FROM auth_profiles
-                WHERE id = ${nextAuthProfileId} AND organization_id = ${organizationId})
+              WHEN ${hasAuthProfileArg} THEN ${connectionAccountStamp(tx, { organizationId,
+                connectorKey: tx`connections.connector_key`, connectionId: tx`connections.id`,
+                account: tx`(SELECT account_id FROM auth_profiles WHERE id = ${nextAuthProfileId} AND organization_id = ${organizationId})` })}
               ELSE account_id END,
             error_message = CASE WHEN ${explicitlyNoAuth}
               AND (status = 'pending_auth' OR (status = 'revoked' AND error_message = ${CONNECT_TOKEN_EXPIRED_ERROR}))

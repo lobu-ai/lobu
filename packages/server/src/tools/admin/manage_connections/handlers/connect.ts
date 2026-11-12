@@ -7,7 +7,7 @@ import { selectedBrowserRequirement } from '../../../../connectors/browser-resou
 import { checkBrowserConnectionSetup } from '../../helpers/browser-connection-setup';
 import { getDb, pgBigintArray, type DbClient } from "../../../../db/client";
 import { OAUTH_ACCOUNT_BINDING_ERROR, oauthAccountOwnershipError } from '../../../../authz/oauth-account-ownership';
-import { lockOAuthAccountBinding } from '../../../../utils/oauth-connection-state';
+import { connectionAccountStamp, lockOAuthAccountBinding } from '../../../../utils/oauth-connection-state';
 import { ToolUserError, withFailureCode } from '../../../../utils/errors';
 import { notifyConnectionPermissionRequest } from "../../../../notifications/triggers";
 import {
@@ -641,8 +641,9 @@ async function handleConnectImpl(
           ${connectionStatus},
             ${authProfileId ?? authSelection.authProfile?.id ?? null},
           ${authSelection.appAuthProfile?.id ?? null},
-          (SELECT account_id FROM auth_profiles WHERE id = ${authProfileId ?? authSelection.authProfile?.id ?? null}
-            AND organization_id = ${organizationId} AND NOT ${isManagedConnect}),
+          ${connectionAccountStamp(db, { organizationId, connectorKey: args.connector_key,
+            account: db`(SELECT account_id FROM auth_profiles WHERE id = ${authProfileId ?? authSelection.authProfile?.id ?? null}
+              AND organization_id = ${organizationId} AND NOT ${isManagedConnect})` })},
             ${connectionConfigToInsert ? db.json(connectionConfigToInsert) : null},
           ${userId},
           ${connectVisibility},
