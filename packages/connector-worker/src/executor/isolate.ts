@@ -1263,19 +1263,6 @@ export class IsolateExecutor implements SyncExecutor {
         if (hookFailure !== null) throw hookFailure;
         if (guestFatal) throw this.guestError(guestFatal, redactedTail());
         if (error instanceof IsolateHostError) {
-          if (error.kind === 'timeout') {
-            // Not "Feed execution": this executor runs feeds, connector
-            // actions AND agent turns, and a chat user whose turn timed out
-            // was being told a feed had failed. The classifier maps both
-            // spellings (classify-error.ts) so a mid-rollout worker still
-            // classifies.
-            throw new ConnectorExecutionError(withTail(`Execution timed out after ${this.options.timeoutMs}ms`), {
-              exitCode: null,
-              exitSignal: null,
-              outputTail: redactedTail(),
-              exitReason: 'timeout',
-            });
-          }
           if (error.kind === 'memory') {
             throw new ConnectorExecutionError(withTail(`Isolate out of memory (limit ${this.options.memoryMb} MB)`), {
               exitCode: null,
