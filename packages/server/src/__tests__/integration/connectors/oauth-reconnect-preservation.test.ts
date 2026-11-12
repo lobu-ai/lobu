@@ -13,9 +13,10 @@ import { manageConnections } from '../../../tools/admin/manage_connections';
 import { getTool } from '../../../tools/registry';
 import { createAuthProfile, updateAuthProfile } from '../../../utils/auth-profiles';
 import { expireStaleConnectTokens } from '../../../utils/connect-tokens';
-import { syncOAuthConnectionsForAuthProfile } from '../../../utils/oauth-connection-state';
+import { OAUTH_SCOPE_PAUSE_LAST_ERROR, syncOAuthConnectionsForAuthProfile } from '../../../utils/oauth-connection-state';
 import { generateCodeChallenge } from '../../../utils/pkce';
 import { initWorkspaceProvider } from '../../../workspace';
+import { listNotifications } from '../../../notifications/service';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import { addUserToOrganization, createTestConnection, createTestConnectorDefinition, createTestUser, seedOwnerContext } from '../../setup/test-fixtures';
 
@@ -71,7 +72,7 @@ async function state(connectionId: number) {
   return { connection, feeds };
 }
 
-async function waitForBlockedQueries(table: 'connect_tokens' | 'connections', count: number): Promise<void> {
+async function waitForBlockedQueries(table: 'account' | 'auth_profiles' | 'connect_tokens' | 'connections' | 'feeds', count: number): Promise<void> {
   const sql = getTestDb();
   for (let attempt = 0; attempt < 200; attempt++) {
     const rows = await sql`SELECT pid FROM pg_stat_activity
@@ -996,6 +997,240 @@ describe('OAuth reconnect preserves the existing connection until consent', () =
     } finally {
       await shutdownTracing();
     }
+  });
+
+  it.each([
+    ['invalid_grant', 400, 'revoked'],
+    ['invalid_client', 401, 'active'],
+    ['temporarily_unavailable', 503, 'active'],
+  ] as const)('a refresh rejected with %s (HTTP %i) leaves the connection %s', async (error, status, expected) => {
+    const s = await seed();
+    const sql = getTestDb();
+    await sql`UPDATE account SET "refreshToken" = 'synthetic-stored-refresh', "accessTokenExpiresAt" = NOW() - INTERVAL '1 hour'
+      WHERE id = ${s.profile.account_id}`;
+    let tokenResponse = () => Response.json({ error }, { status });
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      if (url === 'https://provider.example/token') return tokenResponse();
+      if (url === 'https://provider.example/userinfo') return Response.json({ id: 'synthetic-provider-user' });
+      return originalFetch(input, init);
+    }) as typeof fetch;
+    const oauthConfig = { tokenUrl: 'https://provider.example/token', clientId: 'synthetic-selected-client',
+      clientSecret: 'synthetic-selected-secret' };
+    await new CredentialService(sql).getConnectionTokens(s.connection.id, s.profile.account_id!, oauthConfig,
+      { rejectedAccessToken: 'synthetic-original-token' });
+    const [row] = await sql`SELECT status FROM connections WHERE id = ${s.connection.id}`;
+    expect(row.status).toBe(expected);
+    const { notifications } = await listNotifications({ organizationId: s.org.id, userId: s.user.id });
+    expect(notifications.some((n) => n.resource_id === String(s.connection.id))).toBe(expected === 'revoked');
+    if (expected !== 'revoked') return;
+
+    tokenResponse = () => Response.json({ access_token: 'synthetic-renewed-token', refresh_token: 'synthetic-renewed-refresh',
+      scope: [BASE, OLD].join(' '), expires_in: 3600 });
+    const result = await s.client.reauthenticate(s.connection.id) as { connect_url: string };
+    const token = new URL(result.connect_url).pathname.split('/').at(-3)!;
+    const response = await connectRoutes.request(`/oauth/callback?state=${token}&code=synthetic-code`, {}, {} as Env);
+    expect(response.headers.get('location')).not.toContain('auth_result=failed');
+    const [recovered] = await sql`SELECT status FROM connections WHERE id = ${s.connection.id}`;
+    expect(recovered.status).toBe('active');
+  });
+
+  it('a rejected grant stays revoked through scope reconciliation until the account consents again', async () => {
+    const s = await seed();
+    const sql = getTestDb();
+    await sql`UPDATE account SET "refreshToken" = 'synthetic-stored-refresh', "accessTokenExpiresAt" = NOW() - INTERVAL '1 hour'
+      WHERE id = ${s.profile.account_id}`;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      if (url === 'https://provider.example/token') return Response.json({ error: 'invalid_grant' }, { status: 400 });
+      return originalFetch(input, init);
+    }) as typeof fetch;
+    await new CredentialService(sql).getConnectionTokens(s.connection.id, s.profile.account_id!, {
+      tokenUrl: 'https://provider.example/token', clientId: 'synthetic-selected-client', clientSecret: 'synthetic-selected-secret',
+    }, { rejectedAccessToken: 'synthetic-original-token' });
+    // Feed and connection edits reconcile scopes; the stored scopes still look sufficient.
+    await syncOAuthConnectionsForAuthProfile(s.org.id, s.profile.id);
+    const [row] = await sql`SELECT status FROM connections WHERE id = ${s.connection.id}`;
+    expect(row.status).toBe('revoked');
+  });
+
+  it('a rejected grant keeps its connections revoked whatever path reactivates them', async () => {
+    const s = await seed();
+    const sql = getTestDb();
+    await sql`UPDATE account SET "refreshToken" = 'synthetic-stored-refresh', "accessTokenExpiresAt" = NOW() - INTERVAL '1 hour'
+      WHERE id = ${s.profile.account_id}`;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      if (url === 'https://provider.example/token') return Response.json({ error: 'invalid_grant' }, { status: 400 });
+      return originalFetch(input, init);
+    }) as typeof fetch;
+    await new CredentialService(sql).getConnectionTokens(s.connection.id, s.profile.account_id!, {
+      tokenUrl: 'https://provider.example/token', clientId: 'synthetic-selected-client', clientSecret: 'synthetic-selected-secret',
+    }, { rejectedAccessToken: 'synthetic-original-token' });
+    // An activation path (a status edit, or a new connection on this profile)
+    // writes active, then reconciles; ordinary feed edits reconcile again.
+    await sql`UPDATE connections SET status = 'active' WHERE id = ${s.connection.id}`;
+    await syncOAuthConnectionsForAuthProfile(s.org.id, s.profile.id);
+    await syncOAuthConnectionsForAuthProfile(s.org.id, s.profile.id);
+    const [row] = await sql`SELECT c.status, ap.status AS profile_status FROM connections c
+      JOIN auth_profiles ap ON ap.id = c.auth_profile_id WHERE c.id = ${s.connection.id}`;
+    expect(row).toEqual({ status: 'revoked', profile_status: 'revoked' });
+  });
+
+  it('a rejected refresh racing a reconnect that holds the profile neither deadlocks nor revokes it', async () => {
+    const s = await seed();
+    const sql = getTestDb();
+    await sql`UPDATE account SET "refreshToken" = 'synthetic-stored-refresh', "accessTokenExpiresAt" = NOW() - INTERVAL '1 hour'
+      WHERE id = ${s.profile.account_id}`;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      if (url === 'https://provider.example/token') return Response.json({ error: 'invalid_grant' }, { status: 400 });
+      return originalFetch(input, init);
+    }) as typeof fetch;
+    // The reconnect callback locks the account profile first, then the connection.
+    let lockConnection!: () => void;
+    const mayLockConnection = new Promise<void>((resolve) => { lockConnection = resolve; });
+    const reconnect = sql.begin(async (tx) => {
+      await tx`SELECT id FROM auth_profiles WHERE id = ${s.profile.id} FOR UPDATE`;
+      await mayLockConnection;
+      await tx`SELECT id FROM connections WHERE id = ${s.connection.id} FOR UPDATE`;
+      await tx`UPDATE account SET "accessToken" = 'synthetic-renewed-token', "refreshToken" = 'synthetic-renewed-refresh',
+        "accessTokenExpiresAt" = NOW() + INTERVAL '1 hour', "updatedAt" = NOW() WHERE id = ${s.profile.account_id}`;
+      await tx`UPDATE auth_profiles SET status = 'active' WHERE id = ${s.profile.id}`;
+      await tx`UPDATE connections SET status = 'active' WHERE id = ${s.connection.id}`;
+    });
+    const refresh = new CredentialService(sql).getConnectionTokens(s.connection.id, s.profile.account_id!, {
+      tokenUrl: 'https://provider.example/token', clientId: 'synthetic-selected-client', clientSecret: 'synthetic-selected-secret',
+    }, { rejectedAccessToken: 'synthetic-original-token' });
+    // The rejected refresh has committed and its revoke now waits on the profile the reconnect holds.
+    await waitForBlockedQueries('auth_profiles', 1);
+    lockConnection();
+    const [refreshed, reconnected] = await Promise.allSettled([refresh, reconnect]);
+    expect(reconnected.status).toBe('fulfilled');
+    expect(refreshed.status).toBe('fulfilled');
+    const [row] = await sql`SELECT c.status, ap.status AS profile_status, a."accessToken" FROM connections c
+      JOIN auth_profiles ap ON ap.id = c.auth_profile_id JOIN account a ON a.id = c.account_id WHERE c.id = ${s.connection.id}`;
+    expect(row).toEqual({ status: 'active', profile_status: 'active', accessToken: 'synthetic-renewed-token' });
+  });
+
+  it('reconciliation that read a connection before a revoke does not overwrite it', async () => {
+    const s = await seed();
+    const sql = getTestDb();
+    // A rejected refresh is revoking this connection but has not committed.
+    let commitRevoke!: () => void;
+    const revokeMayCommit = new Promise<void>((resolve) => { commitRevoke = resolve; });
+    const revoke = sql.begin(async (tx) => {
+      await tx`UPDATE connections SET status = 'revoked' WHERE id = ${s.connection.id}`;
+      await tx`UPDATE auth_profiles SET status = 'revoked' WHERE id = ${s.profile.id}`;
+      await revokeMayCommit;
+    });
+    // Reconciliation reads the profile as active, then waits on its lock.
+    const reconcile = syncOAuthConnectionsForAuthProfile(s.org.id, s.profile.id);
+    await waitForBlockedQueries('auth_profiles', 1);
+    commitRevoke();
+    await Promise.all([revoke, reconcile]);
+    const [row] = await sql`SELECT status FROM connections WHERE id = ${s.connection.id}`;
+    expect(row.status).toBe('revoked');
+  });
+
+  it('reconciliation that read a revoked profile before a reconnect does not revoke the renewed connection', async () => {
+    const s = await seed();
+    const sql = getTestDb();
+    await sql`UPDATE auth_profiles SET status = 'revoked' WHERE id = ${s.profile.id}`;
+    await sql`UPDATE connections SET status = 'revoked' WHERE id = ${s.connection.id}`;
+    const [feed] = await sql`UPDATE feeds SET status = 'paused', last_error = ${OAUTH_SCOPE_PAUSE_LAST_ERROR}
+      WHERE connection_id = ${s.connection.id} AND feed_key = 'items' RETURNING id`;
+    // Something else holds the feed, so reconciliation stops after reading the revoked profile.
+    let releaseFeed!: () => void;
+    const feedMayCommit = new Promise<void>((resolve) => { releaseFeed = resolve; });
+    const feedHolder = sql.begin(async (tx) => {
+      await tx`SELECT id FROM feeds WHERE id = ${feed.id} FOR UPDATE`;
+      await feedMayCommit;
+    });
+    const reconcile = syncOAuthConnectionsForAuthProfile(s.org.id, s.profile.id);
+    await waitForBlockedQueries('feeds', 1);
+    // Consent completes meanwhile: the callback renews the profile and its connection.
+    await sql.begin(async (tx) => {
+      await tx`UPDATE auth_profiles SET status = 'active', updated_at = NOW() WHERE id = ${s.profile.id}`;
+      await tx`UPDATE connections SET status = 'active', updated_at = NOW() WHERE id = ${s.connection.id}`;
+    });
+    releaseFeed();
+    await Promise.all([feedHolder, reconcile]);
+    const [row] = await sql`SELECT c.status, ap.status AS profile_status FROM connections c
+      JOIN auth_profiles ap ON ap.id = c.auth_profile_id WHERE c.id = ${s.connection.id}`;
+    expect(row).toEqual({ status: 'active', profile_status: 'active' });
+  });
+
+  it('reconciliation that read the grant before a reconnect keeps the newly granted scopes', async () => {
+    const s = await seed();
+    const sql = getTestDb();
+    const [feed] = await sql`UPDATE feeds SET status = 'paused', last_error = ${OAUTH_SCOPE_PAUSE_LAST_ERROR}
+      WHERE connection_id = ${s.connection.id} AND feed_key = 'items' RETURNING id`;
+    // Something else holds the feed, so reconciliation stops after reading the old grant.
+    let releaseFeed!: () => void;
+    const feedMayCommit = new Promise<void>((resolve) => { releaseFeed = resolve; });
+    const feedHolder = sql.begin(async (tx) => {
+      await tx`SELECT id FROM feeds WHERE id = ${feed.id} FOR UPDATE`;
+      await feedMayCommit;
+    });
+    const reconcile = syncOAuthConnectionsForAuthProfile(s.org.id, s.profile.id);
+    await waitForBlockedQueries('feeds', 1);
+    // Consent adds an optional scope to the same account and profile meanwhile.
+    await sql.begin(async (tx) => {
+      await tx`UPDATE account SET scope = ${[BASE, OLD, EXTRA].join(' ')} WHERE id = ${s.profile.account_id}`;
+      await tx`UPDATE auth_profiles SET auth_data = auth_data || ${tx.json({ granted_scopes: [BASE, OLD, EXTRA] })}
+        WHERE id = ${s.profile.id}`;
+    });
+    releaseFeed();
+    await Promise.all([feedHolder, reconcile]);
+    const [profile] = await sql`SELECT status, auth_data FROM auth_profiles WHERE id = ${s.profile.id}`;
+    expect(profile.status).toBe('active');
+    expect([...profile.auth_data.granted_scopes].sort()).toEqual([BASE, OLD, EXTRA].sort());
+  });
+
+  it('a rejected refresh racing a reconnect neither deadlocks nor revokes the renewed grant', async () => {
+    const s = await seed();
+    const sql = getTestDb();
+    await sql`UPDATE account SET "refreshToken" = 'synthetic-stored-refresh', "accessTokenExpiresAt" = NOW() - INTERVAL '1 hour'
+      WHERE id = ${s.profile.account_id}`;
+    let started!: () => void;
+    let release!: () => void;
+    const providerCalled = new Promise<void>((resolve) => { started = resolve; });
+    const providerAnswers = new Promise<void>((resolve) => { release = resolve; });
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      if (url !== 'https://provider.example/token') return originalFetch(input, init);
+      started();
+      await providerAnswers;
+      return Response.json({ error: 'invalid_grant' }, { status: 400 });
+    }) as typeof fetch;
+    // The refresh holds the account lock while it waits for the provider.
+    const refresh = new CredentialService(sql).getConnectionTokens(s.connection.id, s.profile.account_id!, {
+      tokenUrl: 'https://provider.example/token', clientId: 'synthetic-selected-client', clientSecret: 'synthetic-selected-secret',
+    }, { rejectedAccessToken: 'synthetic-original-token' });
+    await providerCalled;
+    // A reconnect callback locks the connection first, then stores the renewed grant on the account.
+    let finish!: () => void;
+    const reconnectMayCommit = new Promise<void>((resolve) => { finish = resolve; });
+    const reconnect = sql.begin(async (tx) => {
+      await tx`SELECT id FROM connections WHERE id = ${s.connection.id} FOR UPDATE`;
+      await tx`UPDATE account SET "accessToken" = 'synthetic-renewed-token', "refreshToken" = 'synthetic-renewed-refresh',
+        "accessTokenExpiresAt" = NOW() + INTERVAL '1 hour', "updatedAt" = NOW() WHERE id = ${s.profile.account_id}`;
+      await reconnectMayCommit;
+      await tx`UPDATE connections SET status = 'active', updated_at = NOW() WHERE id = ${s.connection.id}`;
+    });
+    await waitForBlockedQueries('account', 1);
+    release();
+    // The rejected refresh has committed and now waits on the connection the
+    // reconnect still holds, whose renewed tokens are not yet committed.
+    await waitForBlockedQueries('connections', 1);
+    finish();
+    const [refreshed, reconnected] = await Promise.allSettled([refresh, reconnect]);
+    expect(reconnected.status).toBe('fulfilled');
+    expect(refreshed.status).toBe('fulfilled');
+    const [row] = await sql`SELECT c.status, a."accessToken" FROM connections c JOIN account a ON a.id = c.account_id
+      WHERE c.id = ${s.connection.id}`;
+    expect(row).toEqual({ status: 'active', accessToken: 'synthetic-renewed-token' });
   });
 
   it('members connect their own account with the workspace default, without configuring an app', async () => {

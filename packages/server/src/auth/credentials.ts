@@ -16,6 +16,7 @@ import {
 } from '../utils/connector-oauth-http';
 import { buildRefreshRequest, parseTokenRefreshResponse } from './oauth/token-refresh';
 import logger from '../utils/logger';
+import { notifyConnectionPermissionRequest } from '../notifications/triggers';
 
 /**
  * Credential tokens for sync execution
@@ -43,6 +44,115 @@ function isTokenExpiringSoon(expiresAt: Date | string | null): boolean {
  */
 function refreshLockTag(accountId: string): string {
   return `oauth_account_refresh:${accountId}`;
+}
+
+type RefreshParams = {
+  tokenUrl: string;
+  clientId: string;
+  clientSecret?: string;
+  refreshToken: string;
+  authMethod?: 'client_secret_post' | 'client_secret_basic' | 'none';
+  resource?: string;
+};
+type RefreshedTokens = { accessToken: string; expiresAt: Date; refreshToken?: string };
+type RejectedGrantConnection = { id: number; organization_id: string; connector_key: string };
+
+/** The provider rejected the stored grant itself; only new consent recovers it. */
+const GRANT_REJECTED = 'grant_rejected' as const;
+
+const OAUTH_GRANT_REJECTED_ERROR =
+  'The provider rejected this account authorization (expired or revoked). Reconnect the connection to restore access.';
+
+/** The `error` code of an OAuth error response, or null. The body is never logged. */
+async function readOAuthErrorCode(response: Response): Promise<string | null> {
+  try {
+    const parsed = JSON.parse(await readConnectorOAuthResponse(response)) as { error?: unknown };
+    return typeof parsed?.error === 'string' ? parsed.error : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Drop the rejected grant's tokens from the account, so no later call retries
+ * it against the provider, and a reconnect (which stores new tokens) is
+ * distinguishable from it. Runs under the account's refresh lock, on the row
+ * that lock already holds.
+ */
+async function clearRejectedGrant(tx: DbClient, accountId: string): Promise<void> {
+  await tx`
+    UPDATE "account"
+    SET "accessToken" = NULL, "refreshToken" = NULL, "accessTokenExpiresAt" = NULL, "updatedAt" = NOW()
+    WHERE id = ${accountId}
+  `;
+}
+
+/**
+ * Every connection on a rejected grant fails until the account consents
+ * again. Mark its account profiles revoked, which reconciliation honours on
+ * every path (a status edit, a new connection, a feed edit) until a reconnect
+ * sets them active, and revoke the live connections so health, the UI and
+ * operations report them. Runs after the refresh commits, and locks in the
+ * reconnect callback's and connection updates' order: the account profiles,
+ * then their connections. The account is read only once those locks are held,
+ * so a reconnect that stored new tokens while we waited is seen and left alone.
+ */
+function markGrantRejected(sql: DbClient, accountId: string): Promise<RejectedGrantConnection[]> {
+  return sql.begin(async (tx) => {
+    await tx`
+      SELECT id FROM auth_profiles
+      WHERE account_id = ${accountId} AND profile_kind = 'oauth_account'
+      ORDER BY id
+      FOR UPDATE
+    `;
+    const live = await tx`
+      SELECT c.id
+      FROM connections c
+      JOIN auth_profiles ap ON ap.id = c.auth_profile_id AND ap.organization_id = c.organization_id
+      WHERE ap.account_id = ${accountId} AND ap.profile_kind = 'oauth_account'
+        AND c.status = 'active' AND c.deleted_at IS NULL
+      ORDER BY c.id
+      FOR UPDATE OF c
+    `;
+    const [stillRejected] = await tx`
+      SELECT 1 FROM "account"
+      WHERE id = ${accountId} AND "accessToken" IS NULL AND "refreshToken" IS NULL
+    `;
+    if (!stillRejected) return [];
+    await tx`
+      UPDATE auth_profiles
+      SET status = 'revoked', updated_at = NOW()
+      WHERE account_id = ${accountId} AND profile_kind = 'oauth_account' AND status = 'active'
+    `;
+    if (live.length === 0) return [];
+    return tx<RejectedGrantConnection>`
+      UPDATE connections c
+      SET status = 'revoked', error_message = ${OAUTH_GRANT_REJECTED_ERROR}, updated_at = NOW()
+      FROM auth_profiles ap
+      WHERE ap.id = c.auth_profile_id AND ap.organization_id = c.organization_id
+        AND ap.account_id = ${accountId} AND ap.profile_kind = 'oauth_account'
+        AND c.status = 'active' AND c.deleted_at IS NULL
+      RETURNING c.id, c.organization_id, c.connector_key
+    `;
+  });
+}
+
+/** Tell each owner after the revocation commits. Delivery is best-effort; the status is the record. */
+async function notifyGrantRejected(accountId: string, connections: RejectedGrantConnection[]): Promise<void> {
+  if (connections.length === 0) return;
+  logger.warn(
+    { account_id: accountId, connection_ids: connections.map((c) => c.id) },
+    '[Credentials] OAuth grant rejected; connections need reauthorization'
+  );
+  for (const connection of connections) {
+    try {
+      await notifyConnectionPermissionRequest({ orgId: connection.organization_id,
+        connectionId: Number(connection.id), connectorKey: connection.connector_key, reason: 'grant_rejected' });
+    } catch (error) {
+      logger.warn({ connection_id: connection.id, err: scrubDiagnosticValue(error) },
+        '[Credentials] Failed to notify about a rejected OAuth grant');
+    }
+  }
 }
 
 export class CredentialService {
@@ -168,8 +278,9 @@ export class CredentialService {
       resource?: string;
     },
     opts?: { rejectedAccessToken?: string }
-  ): Promise<{ accessToken: string; expiresAt: Date; refreshToken?: string } | null> {
-    return this.sql.begin(async (tx) => {
+  ): Promise<RefreshedTokens | null> {
+    let grantRejected = false;
+    const refreshed = await this.sql.begin(async (tx) => {
       await tx.unsafe(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
         refreshLockTag(accountId),
       ]);
@@ -216,15 +327,22 @@ export class CredentialService {
           : null;
       }
 
-      const result = await this.refreshTokenGeneric({
+      const result = await this.requestTokenRefresh({
         ...oauthConfig,
         refreshToken: current.refreshToken,
       });
+      if (result === GRANT_REJECTED) {
+        await clearRejectedGrant(tx, accountId);
+        grantRejected = true;
+        return null;
+      }
       if (!result) return null;
 
       await this.persistAccountTokens(accountId, result, tx);
       return result;
     });
+    if (grantRejected) await notifyGrantRejected(accountId, await markGrantRejected(this.sql, accountId));
+    return refreshed;
   }
 
   private async persistAccountTokens(
@@ -246,14 +364,18 @@ export class CredentialService {
    * Generic OAuth token refresh supporting multiple auth methods.
    * Ported from Termos GenericOAuth2Client.refreshToken().
    */
-  async refreshTokenGeneric(params: {
-    tokenUrl: string;
-    clientId: string;
-    clientSecret?: string;
-    refreshToken: string;
-    authMethod?: 'client_secret_post' | 'client_secret_basic' | 'none';
-    resource?: string;
-  }): Promise<{ accessToken: string; expiresAt: Date; refreshToken?: string } | null> {
+  async refreshTokenGeneric(params: RefreshParams): Promise<RefreshedTokens | null> {
+    const result = await this.requestTokenRefresh(params);
+    return result === GRANT_REJECTED ? null : result;
+  }
+
+  /**
+   * The refresh request, telling a rejected grant apart from every other
+   * failure. Only the RFC 6749 §5.2 `invalid_grant` code means the stored grant
+   * is dead and needs new consent; other rejections (a bad client, a rate
+   * limit, an outage) leave it usable.
+   */
+  private async requestTokenRefresh(params: RefreshParams): Promise<RefreshedTokens | typeof GRANT_REJECTED | null> {
     const { headers, body } = buildRefreshRequest({
       profile: 'account-credential',
       clientId: params.clientId,
@@ -277,25 +399,32 @@ export class CredentialService {
           redirect: 'error',
           signal,
         });
-        // Failure bodies are unused. Cancel them so a read error cannot hide
-        // the HTTP status or turn an expected rejection into error telemetry.
+        // Only a 400/401 body carries the OAuth error code; cancel any other
+        // failure body. A read error must not hide the HTTP status or turn an
+        // expected rejection into error telemetry, and the body is never logged.
         if (!response.ok) {
-          await cancelResponseBody(response);
-          return { response, text: '' };
+          const grantRejected = (response.status === 400 || response.status === 401)
+            && await readOAuthErrorCode(response) === 'invalid_grant';
+          if (response.status !== 400 && response.status !== 401) await cancelResponseBody(response);
+          return { response, text: '', grantRejected };
         }
         const text = await readConnectorOAuthResponse(response);
-        return { response, text };
+        return { response, text, grantRejected: false };
       });
 
       if (!result.response.ok) {
-        const details = { token_origin: tokenOrigin, status: result.response.status };
+        const details = {
+          token_origin: tokenOrigin,
+          status: result.response.status,
+          grant_rejected: result.grantRejected,
+        };
         // Rejected/expired grants and rate limits are expected client outcomes.
         if (result.response.status >= 400 && result.response.status < 500) {
           logger.warn(details, '[Credentials] Generic token refresh failed');
         } else {
           logger.error(details, '[Credentials] Generic token refresh failed');
         }
-        return null;
+        return result.grantRejected ? GRANT_REJECTED : null;
       }
 
       let data: Record<string, unknown>;
