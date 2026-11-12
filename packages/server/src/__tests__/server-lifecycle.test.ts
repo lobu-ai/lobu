@@ -541,43 +541,71 @@ describe("shutdown ordering (live drain)", () => {
 		}
 	});
 
+	const deferred = () => {
+		let resolve!: () => void;
+		const promise = new Promise<void>((done) => {
+			resolve = done;
+		});
+		return { promise, resolve };
+	};
+
+	// Boots the real lifecycle with teardown steps recorded in `events`.
+	async function bootLifecycle(
+		lobuApp: unknown,
+		env: Record<string, string>,
+		events: string[],
+		closeDb: () => Promise<void> = async () => {},
+		extraTeardown: Array<() => Promise<void>> = [],
+	) {
+		const lifecycleState = await import("../lifecycle-state");
+		let shuttingDown = false;
+		vi.spyOn(lifecycleState, "markShuttingDown").mockImplementation(() => {
+			shuttingDown = true;
+		});
+		vi.spyOn(lifecycleState, "isShuttingDown").mockImplementation(() => shuttingDown);
+		const { closeDbSingleton } = await import("../db/client");
+		const { stopLobuGateway } = await import("../lobu/gateway");
+		vi.mocked(stopLobuGateway).mockImplementation(async () => {
+			events.push("gateway-stopped");
+		});
+		vi.mocked(closeDbSingleton).mockImplementation(async () => {
+			await closeDb();
+			events.push("db-closed");
+		});
+		const exited = new Promise<void>((resolve) => {
+			vi.spyOn(process, "exit").mockImplementation((() => {
+				events.push("exit");
+				resolve();
+				return undefined as never;
+			}) as never);
+		});
+		gwAppSlot.app = lobuApp;
+		const port = await new Promise<number>((resolve, reject) => {
+			const scout = net.createServer();
+			scout.on("error", reject);
+			scout.listen(0, "127.0.0.1", () => {
+				const { port } = scout.address() as net.AddressInfo;
+				scout.close(() => resolve(port));
+			});
+		});
+		const { createServerLifecycle } = await import("../server-lifecycle");
+		await createServerLifecycle({
+			mode: "postgres",
+			env: env as never,
+			host: "127.0.0.1",
+			port,
+			databaseReadiness: async () => {},
+			extraTeardown,
+		}).start();
+		return { port, exited };
+	}
+
 	it(
 		"refuses new work and drains the in-flight request before gateway/db teardown",
 		async () => {
 			const events: string[] = [];
-			const lifecycleState = await import("../lifecycle-state");
-			let shuttingDown = false;
-			vi.spyOn(lifecycleState, "markShuttingDown").mockImplementation(() => {
-				shuttingDown = true;
-			});
-			vi.spyOn(lifecycleState, "isShuttingDown").mockImplementation(
-				() => shuttingDown,
-			);
-			const { closeDbSingleton } = await import("../db/client");
-			const { stopLobuGateway } = await import("../lobu/gateway");
-			vi.mocked(closeDbSingleton).mockImplementation(async () => {
-				events.push("db-closed");
-			});
-			vi.mocked(stopLobuGateway).mockImplementation(async () => {
-				events.push("gateway-stopped");
-			});
-
-			const exited = new Promise<number | undefined>((resolveExit) => {
-				vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
-					events.push("exit");
-					resolveExit(code);
-					return undefined as never;
-				}) as never);
-			});
-
-			const sigListenersBefore = {
-				SIGTERM: process.listeners("SIGTERM"),
-				SIGINT: process.listeners("SIGINT"),
-			};
-
 			const { Hono } = await import("hono");
 			const lobuApp = new Hono();
-			gwAppSlot.app = lobuApp;
 			const slowHandler = (c: {
 				json: (body: Record<string, string>) => unknown;
 			}) => {
@@ -591,33 +619,11 @@ describe("shutdown ordering (live drain)", () => {
 			};
 			lobuApp.get("/slow", slowHandler);
 			lobuApp.post("/slow", slowHandler);
-
-			const { createServerLifecycle } = await import("../server-lifecycle");
-			// Claim a free loopback port first: the spine logs its configured
-			// port, not the bound one, so port 0 can't be discovered afterwards.
-			const freePort = await new Promise<number>((resolve, reject) => {
-				const scout = net.createServer();
-				scout.unref();
-				scout.on("error", reject);
-				scout.listen(0, "127.0.0.1", () => {
-					const { port } = scout.address() as net.AddressInfo;
-					scout.close(() => resolve(port));
-				});
-			});
-			const lifecycle = createServerLifecycle({
-				mode: "postgres",
-				env: {} as never,
-				host: "127.0.0.1",
-				port: freePort,
-				databaseReadiness: async () => {},
-				extraTeardown: [
-					async () => {
-						events.push("extra-teardown");
-					},
-				],
-			});
-			await lifecycle.start();
-			const port = freePort;
+			const { port, exited } = await bootLifecycle(lobuApp, {}, events, async () => {}, [
+				async () => {
+					events.push("extra-teardown");
+				},
+			]);
 
 			let inflightError: unknown = null;
 			const inflight = new Promise<{ status: number }>((resolveInflight) => {
@@ -687,14 +693,6 @@ describe("shutdown ordering (live drain)", () => {
 			).toBe(200);
 			await exited;
 
-			for (const signal of ["SIGTERM", "SIGINT"] as const) {
-				for (const listener of process.listeners(signal)) {
-					if (!sigListenersBefore[signal].includes(listener)) {
-						process.removeListener(signal, listener);
-					}
-				}
-			}
-
 			const indexOfEvent = (name: string): number => {
 				const idx = events.findIndex(
 					(event) => event === name || event.startsWith(`${name}:`),
@@ -720,65 +718,11 @@ describe("shutdown ordering (live drain)", () => {
 				indexOfEvent("extra-teardown"),
 			);
 			expect(events[events.length - 1]).toBe("exit");
-			expect(shuttingDown).toBe(true);
 			vi.restoreAllMocks();
-			expect(lifecycleState.isShuttingDown()).toBe(false);
+			expect((await import("../lifecycle-state")).isShuttingDown()).toBe(false);
 		},
 		20_000,
 	);
-
-	const deferred = () => {
-		let resolve!: () => void;
-		const promise = new Promise<void>((done) => {
-			resolve = done;
-		});
-		return { promise, resolve };
-	};
-
-	// Boots the real lifecycle with teardown steps recorded in `events`.
-	async function bootLifecycle(
-		lobuApp: unknown,
-		env: Record<string, string>,
-		events: string[],
-		closeDb: () => Promise<void> = async () => {},
-	) {
-		const lifecycleState = await import("../lifecycle-state");
-		let shuttingDown = false;
-		vi.spyOn(lifecycleState, "markShuttingDown").mockImplementation(() => {
-			shuttingDown = true;
-		});
-		vi.spyOn(lifecycleState, "isShuttingDown").mockImplementation(() => shuttingDown);
-		const { closeDbSingleton } = await import("../db/client");
-		const { stopLobuGateway } = await import("../lobu/gateway");
-		vi.mocked(stopLobuGateway).mockImplementation(async () => {
-			events.push("gateway-stopped");
-		});
-		vi.mocked(closeDbSingleton).mockImplementation(closeDb);
-		const exited = new Promise<void>((resolve) => {
-			vi.spyOn(process, "exit").mockImplementation((() => {
-				resolve();
-				return undefined as never;
-			}) as never);
-		});
-		gwAppSlot.app = lobuApp;
-		const port = await new Promise<number>((resolve, reject) => {
-			const scout = net.createServer();
-			scout.on("error", reject);
-			scout.listen(0, "127.0.0.1", () => {
-				const { port } = scout.address() as net.AddressInfo;
-				scout.close(() => resolve(port));
-			});
-		});
-		const { createServerLifecycle } = await import("../server-lifecycle");
-		await createServerLifecycle({
-			mode: "postgres",
-			env: env as never,
-			host: "127.0.0.1",
-			port,
-			databaseReadiness: async () => {},
-		}).start();
-		return { port, exited };
-	}
 
 	it(
 		"closes a worker's kept-alive connection so its completion cannot reach pool teardown",
