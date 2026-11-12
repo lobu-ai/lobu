@@ -4,6 +4,7 @@ import {
   type Occurrence,
   planIssueChanges,
   RULES,
+  runIssueTracker,
 } from "../issue-tracker.reaction";
 
 const NOW = new Date("2026-11-04T12:00:00.000Z");
@@ -28,6 +29,7 @@ function occ(overrides: Partial<Occurrence> = {}): Occurrence {
     releases_2h: ["rel-b"],
     last_release: "rel-b",
     sample_trace_id: "trace",
+    request: "",
     ...overrides,
   };
 }
@@ -108,6 +110,28 @@ describe("issue creation gate", () => {
     );
     const changes = plan([...louder, blocked], [], 1);
     expect(changes.find((c) => c.fingerprint === FP(1))?.action).toBe("create");
+  });
+
+  test("a logged error during a sign-in request is a high-priority issue on first sighting", () => {
+    const logged = occ({
+      culprit: "log lobu-server",
+      request: "GET /connect/oauth/callback",
+      seen_2h: 1,
+      seen_24h: 1,
+      seen_14d: 1,
+      max_orgs: 0,
+      max_users: 0,
+    });
+    expect(plan([logged], [])[0]).toMatchObject({
+      action: "create",
+      metadata: { priority: "high", request: "GET /connect/oauth/callback" },
+      alert: {
+        title:
+          "New high-priority issue: Error: boom (GET /connect/oauth/callback)",
+      },
+    });
+    expect(plan([{ ...logged, request: "GET /x" }], [])).toEqual([]);
+    expect(plan([{ ...logged, request: "" }], [])).toEqual([]);
   });
 
   test("a new high-priority issue alerts admins once; medium ones do not", () => {
@@ -326,5 +350,76 @@ describe("issue lifecycle", () => {
       action: "update",
       id: 8,
     });
+  });
+});
+
+describe("runIssueTracker", () => {
+  test("looks up the request behind a logged error from its sample trace", async () => {
+    const trace = "a".repeat(32);
+    const sql: string[] = [];
+    const client = {
+      query: async (text: string) => {
+        sql.push(text);
+        if (text.includes("issue_occurrences_hourly"))
+          return [
+            {
+              fingerprint: FP(1),
+              kind: "system",
+              issue_title: "LoggedError: OAuth token exchange failed",
+              issue_culprit: "log lobu-server",
+              seen_2h: 1,
+              seen_24h: 1,
+              seen_14d: 1,
+              max_orgs: 0,
+              max_users: 0,
+              releases_2h: [],
+              last_release: "rel",
+              sample_trace_id: trace,
+              first_seen_at: ago(1),
+              last_seen_at: ago(0.5),
+            },
+            {
+              fingerprint: FP(2),
+              kind: "system",
+              issue_title: "LoggedError: unrelated",
+              issue_culprit: "log lobu-server",
+              seen_2h: 1,
+              seen_24h: 1,
+              seen_14d: 1,
+              max_orgs: 0,
+              max_users: 0,
+              releases_2h: [],
+              last_release: "rel",
+              sample_trace_id: "not-a-trace-id'",
+              first_seen_at: ago(1),
+              last_seen_at: ago(0.5),
+            },
+          ];
+        if (text.includes("otel_traces"))
+          return [{ trace_id: trace, request: "GET /connect/oauth/callback" }];
+        if (text.includes("count(*)")) return [{ n: 0 }];
+        return [];
+      },
+    };
+    const result = (await runIssueTracker(
+      { window: { automation_id: 1, run_id: 1 } } as never,
+      client as never,
+      true
+    )) as {
+      created: number;
+      changes: Array<{
+        fingerprint: string;
+        metadata?: Record<string, unknown>;
+      }>;
+    };
+    expect(result.created).toBe(1);
+    expect(result.changes[0]).toMatchObject({
+      fingerprint: FP(1),
+      metadata: { priority: "high" },
+    });
+    // Only well-formed trace ids reach the lookup.
+    const lookup = sql.find((text) => text.includes("otel_traces"));
+    expect(lookup).toContain(`'${trace}'`);
+    expect(lookup).not.toContain("not-a-trace-id");
   });
 });
