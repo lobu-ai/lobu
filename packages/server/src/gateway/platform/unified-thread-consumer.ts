@@ -23,6 +23,7 @@ import type {
   ThreadResponsePayload,
 } from "../infrastructure/queue/index.js";
 import { TERMINAL_DELIVERY_SEND_OPTS } from "../infrastructure/queue/index.js";
+import { QueueRoutingRetryError } from "../infrastructure/queue/types.js";
 import type { InteractionService } from "../interactions.js";
 import { incrementCounter } from "../metrics/prometheus.js";
 import type { PlatformRegistry } from "../platform.js";
@@ -35,7 +36,7 @@ const logger = createLogger("unified-thread-consumer");
 
 // An expected owner-routing miss consumes the normal bounded retry budget.
 // Keep it distinct from renderer/coordination failures; it is not a deferral.
-class SseOwnerRetryError extends Error {}
+class SseOwnerRetryError extends QueueRoutingRetryError {}
 
 /**
  * customEvent.name for a CHAT-PLATFORM interaction card (ask_user question,
