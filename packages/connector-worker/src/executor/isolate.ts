@@ -150,6 +150,7 @@ interface GuestErrorDescription {
   message?: string;
   stack?: string;
   httpStatus?: number;
+  pgCode?: string;
   code?: ConnectorErrorCode;
 }
 
@@ -1323,6 +1324,10 @@ export class IsolateExecutor implements SyncExecutor {
           ? description.httpStatus
           : undefined,
       code: description.code === 'withheld' ? description.code : undefined,
+      pgCode:
+        typeof description.pgCode === 'string' && /^[0-9A-Z]{5}$/.test(description.pgCode) && !description.pgCode.startsWith('E')
+          ? description.pgCode
+          : undefined,
     });
     error.name = description.name ? redactOutput(String(description.name)) : 'ConnectorExecutionError';
     if (description.stack) error.stack = redactOutput(String(description.stack));

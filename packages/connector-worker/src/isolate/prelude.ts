@@ -340,8 +340,10 @@ var exports = module.exports;
       var desc = { name: String(error.name || 'Error'), message: String(error.message), stack: typeof error.stack === 'string' ? error.stack : undefined };
       if (typeof error.status === 'number' && error.status >= 100 && error.status < 600) desc.httpStatus = error.status;
       // A deliberately withheld source read (SourceWithheldError, or any error
-      // whose own code is 'withheld'). Only this code crosses the boundary.
+      // whose own code is 'withheld'). SQLSTATE travels separately so it cannot
+      // be mistaken for a connector outcome. Ambiguous E-prefixed errnos stay opaque.
       if (Object.prototype.hasOwnProperty.call(error, 'code') && error.code === 'withheld') desc.code = 'withheld';
+      if (Object.prototype.hasOwnProperty.call(error, 'code') && typeof error.code === 'string' && /^[0-9A-Z]{5}$/.test(error.code) && error.code.charAt(0) !== 'E') desc.pgCode = error.code;
       return desc;
     }
     var text;

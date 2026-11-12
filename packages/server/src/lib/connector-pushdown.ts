@@ -325,9 +325,11 @@ export function classifyPushdownFailure(err: unknown): ToolErrorCode {
   if (err instanceof ToolError) return err.code;
   const diagnostic = err as {
     httpStatus?: unknown;
+    pgCode?: unknown;
     exitReason?: unknown;
   } | null;
   const httpStatus = typeof diagnostic?.httpStatus === 'number' ? diagnostic.httpStatus : undefined;
+  const pgCode = typeof diagnostic?.pgCode === 'string' ? diagnostic.pgCode : undefined;
   const exitReason =
     diagnostic?.exitReason === 'timeout' ||
     diagnostic?.exitReason === 'oom' ||
@@ -335,7 +337,7 @@ export function classifyPushdownFailure(err: unknown): ToolErrorCode {
     diagnostic?.exitReason === 'error_message'
       ? diagnostic.exitReason
       : undefined;
-  const code = classifyToolError({ httpStatus, exitReason, message: getErrorMessage(err) });
+  const code = classifyToolError({ httpStatus, pgCode, exitReason, message: getErrorMessage(err) });
   return code === 'INTERNAL' ? 'UPSTREAM_5XX' : code;
 }
 
