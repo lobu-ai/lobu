@@ -22,7 +22,7 @@ import { pinoLogger } from "hono-pino";
 import { context, propagation, ROOT_CONTEXT } from "@opentelemetry/api";
 import { closeDbSingleton } from "./db/client";
 import { mountViteDev } from "./dev-vite";
-import { markShuttingDown } from "./lifecycle-state";
+import { isShuttingDown, markShuttingDown } from "./lifecycle-state";
 import type { Env } from "./index";
 import { isAuthorizationReadOnlyToolName, app as mainApp } from "./index";
 import {
@@ -183,6 +183,8 @@ export function reportBootFailure(err: unknown): never {
  * without standing up the full lifecycle.
  *
  * Middleware order (locked):
+ *   0. draining connection close  (outermost, so every response written after
+ *      SIGTERM carries it, error responses included)
  *   1. peer-remote-address stash  (read `c.env.incoming.socket.remoteAddress`
  *      BEFORE the env-inject middleware replaces shared fields)
  *   2. env-inject                (`Object.assign(c.env, env)` — preserves
@@ -203,6 +205,17 @@ export function buildWrapperApp(
 	mountedMainApp: Hono<{ Bindings: Env }> = mainApp,
 ): Hono<{ Bindings: Env }> {
 	const wrapper = new Hono<{ Bindings: Env }>();
+
+	// 0. Once shutdown starts, every response closes its connection. Node's
+	// `server.close()` only ends connections that are idle when it runs; a
+	// client that keeps one busy (a worker's pooled fetch connection) would
+	// otherwise keep sending requests over it into gateway and pool teardown.
+	// Closing it makes the client's next request open a new connection, which
+	// the Service routes to a ready replica.
+	wrapper.use("*", async (c, next) => {
+		await next();
+		if (isShuttingDown()) c.header("Connection", "close");
+	});
 
 	// 1. peer remote address stash — must run BEFORE env injection because
 	// env injection mutates `c.env` and could blow away the adapter field.
@@ -496,6 +509,8 @@ export function createServerLifecycle(
 			//      `close()` refuses new connections while letting in-flight
 			//      requests finish. Await it before gateway and database teardown so
 			//      accepted requests retain those dependencies while draining.
+			//      Busy kept-alive connections end after their current response,
+			//      which the wrapper marks `Connection: close` during shutdown.
 			//      `close()` alone never completes while non-idle sockets
 			//      such as SSE streams are open, so it is bounded by
 			//      HTTP_CLOSE_TIMEOUT_MS (default 10s). Requests still active after

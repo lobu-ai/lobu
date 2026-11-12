@@ -81,6 +81,7 @@
 		"playwright-vanilla": "npm:playwright@^1.60.0",
 		"tsx": "^4.19.2",
 		"typescript": "^5.7.2",
+		"undici": "7.30.1",
 		"vite": "^6.0.0",
 		"vitest": "4.1.11"
 	},
