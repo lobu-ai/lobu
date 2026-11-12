@@ -8,18 +8,23 @@
  *   1. Middleware ordering on the Hono wrapper:
  *      peer-address stash → env-inject → HTTP span → request logger → structured-5xx-capture → onError
  *   2. Route mounts: `/lobu` mounted only when lobuApp is non-null; `/` always.
- *   3. Shutdown drains in-flight requests before gateway/db teardown.
+ *   3. Shutdown drains in-flight requests before gateway/db teardown, and a
+ *      kept-alive connection cannot carry a worker's completion into it.
  *   4. `serializeBootError` walks nested cause chains and never returns `{}`.
  *
  * The wrapper-app and serializer assertions exercise real code paths, and the
- * live-drain case boots the real lifecycle against an ephemeral HTTP server.
+ * live-drain cases boot the real lifecycle against an ephemeral HTTP server;
+ * the worker-completion case also uses the real pool and Postgres.
  */
 
 import http from "node:http";
 import net from "node:net";
-import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
+import { WorkerClient } from "@lobu/connector-worker/daemon";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createSpan, currentTraceLogFields, initTracing, runInSpanContext, shutdownTracing, SpanKind, SpanStatusCode } from "@lobu/core";
 import { InMemorySpanExporter, SimpleSpanProcessor } from "@opentelemetry/sdk-trace-node";
+import { getTestDb } from "./setup/test-db";
+import { createTestOrganization } from "./setup/test-fixtures";
 
 // This suite replaces the wrapper's collaborators. Other integration suites
 // import the real wrapper, so its cached module must not cross this boundary.
@@ -523,47 +528,84 @@ describe("shutdown ordering (live drain)", () => {
 	// flag makes `/api/workers/poll` stop holding and answer
 	// `next_poll_seconds: 10`, turning each device action in a later browser
 	// test into a ~10s wait.
+	let signalListeners: NodeJS.SignalsListener[] = [];
+	beforeEach(() => {
+		signalListeners = [...process.listeners("SIGTERM"), ...process.listeners("SIGINT")];
+	});
 	afterEach(() => {
 		vi.restoreAllMocks();
+		for (const signal of ["SIGTERM", "SIGINT"] as const) {
+			for (const listener of process.listeners(signal)) {
+				if (!signalListeners.includes(listener)) process.removeListener(signal, listener);
+			}
+		}
 	});
+
+	const deferred = () => {
+		let resolve!: () => void;
+		const promise = new Promise<void>((done) => {
+			resolve = done;
+		});
+		return { promise, resolve };
+	};
+
+	// Boots the real lifecycle with teardown steps recorded in `events`.
+	async function bootLifecycle(
+		lobuApp: unknown,
+		env: Record<string, string>,
+		events: string[],
+		closeDb: () => Promise<void> = async () => {},
+		extraTeardown: Array<() => Promise<void>> = [],
+	) {
+		const lifecycleState = await import("../lifecycle-state");
+		let shuttingDown = false;
+		vi.spyOn(lifecycleState, "markShuttingDown").mockImplementation(() => {
+			shuttingDown = true;
+		});
+		vi.spyOn(lifecycleState, "isShuttingDown").mockImplementation(() => shuttingDown);
+		const { closeDbSingleton } = await import("../db/client");
+		const { stopLobuGateway } = await import("../lobu/gateway");
+		vi.mocked(stopLobuGateway).mockImplementation(async () => {
+			events.push("gateway-stopped");
+		});
+		vi.mocked(closeDbSingleton).mockImplementation(async () => {
+			await closeDb();
+			events.push("db-closed");
+		});
+		const exited = new Promise<void>((resolve) => {
+			vi.spyOn(process, "exit").mockImplementation((() => {
+				events.push("exit");
+				resolve();
+				return undefined as never;
+			}) as never);
+		});
+		gwAppSlot.app = lobuApp;
+		const port = await new Promise<number>((resolve, reject) => {
+			const scout = net.createServer();
+			scout.on("error", reject);
+			scout.listen(0, "127.0.0.1", () => {
+				const { port } = scout.address() as net.AddressInfo;
+				scout.close(() => resolve(port));
+			});
+		});
+		const { createServerLifecycle } = await import("../server-lifecycle");
+		await createServerLifecycle({
+			mode: "postgres",
+			env: env as never,
+			host: "127.0.0.1",
+			port,
+			databaseReadiness: async () => {},
+			extraTeardown,
+		}).start();
+		return { port, exited };
+	}
 
 	it(
 		"refuses new work and drains the in-flight request before gateway/db teardown",
 		async () => {
 			const events: string[] = [];
-			const lifecycleState = await import("../lifecycle-state");
-			let shuttingDown = false;
-			vi.spyOn(lifecycleState, "markShuttingDown").mockImplementation(() => {
-				shuttingDown = true;
-			});
-			vi.spyOn(lifecycleState, "isShuttingDown").mockImplementation(
-				() => shuttingDown,
-			);
-			const { closeDbSingleton } = await import("../db/client");
-			const { stopLobuGateway } = await import("../lobu/gateway");
-			vi.mocked(closeDbSingleton).mockImplementation(async () => {
-				events.push("db-closed");
-			});
-			vi.mocked(stopLobuGateway).mockImplementation(async () => {
-				events.push("gateway-stopped");
-			});
-
-			const exited = new Promise<number | undefined>((resolveExit) => {
-				vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
-					events.push("exit");
-					resolveExit(code);
-					return undefined as never;
-				}) as never);
-			});
-
-			const sigListenersBefore = {
-				SIGTERM: process.listeners("SIGTERM"),
-				SIGINT: process.listeners("SIGINT"),
-			};
-
 			const { Hono } = await import("hono");
 			const lobuApp = new Hono();
-			gwAppSlot.app = lobuApp;
 			const slowHandler = (c: {
 				json: (body: Record<string, string>) => unknown;
 			}) => {
@@ -577,33 +619,11 @@ describe("shutdown ordering (live drain)", () => {
 			};
 			lobuApp.get("/slow", slowHandler);
 			lobuApp.post("/slow", slowHandler);
-
-			const { createServerLifecycle } = await import("../server-lifecycle");
-			// Claim a free loopback port first: the spine logs its configured
-			// port, not the bound one, so port 0 can't be discovered afterwards.
-			const freePort = await new Promise<number>((resolve, reject) => {
-				const scout = net.createServer();
-				scout.unref();
-				scout.on("error", reject);
-				scout.listen(0, "127.0.0.1", () => {
-					const { port } = scout.address() as net.AddressInfo;
-					scout.close(() => resolve(port));
-				});
-			});
-			const lifecycle = createServerLifecycle({
-				mode: "postgres",
-				env: {} as never,
-				host: "127.0.0.1",
-				port: freePort,
-				databaseReadiness: async () => {},
-				extraTeardown: [
-					async () => {
-						events.push("extra-teardown");
-					},
-				],
-			});
-			await lifecycle.start();
-			const port = freePort;
+			const { port, exited } = await bootLifecycle(lobuApp, {}, events, async () => {}, [
+				async () => {
+					events.push("extra-teardown");
+				},
+			]);
 
 			let inflightError: unknown = null;
 			const inflight = new Promise<{ status: number }>((resolveInflight) => {
@@ -673,14 +693,6 @@ describe("shutdown ordering (live drain)", () => {
 			).toBe(200);
 			await exited;
 
-			for (const signal of ["SIGTERM", "SIGINT"] as const) {
-				for (const listener of process.listeners(signal)) {
-					if (!sigListenersBefore[signal].includes(listener)) {
-						process.removeListener(signal, listener);
-					}
-				}
-			}
-
 			const indexOfEvent = (name: string): number => {
 				const idx = events.findIndex(
 					(event) => event === name || event.startsWith(`${name}:`),
@@ -706,10 +718,141 @@ describe("shutdown ordering (live drain)", () => {
 				indexOfEvent("extra-teardown"),
 			);
 			expect(events[events.length - 1]).toBe("exit");
-			expect(shuttingDown).toBe(true);
 			vi.restoreAllMocks();
-			expect(lifecycleState.isShuttingDown()).toBe(false);
+			expect((await import("../lifecycle-state")).isShuttingDown()).toBe(false);
 		},
 		20_000,
+	);
+
+	it(
+		"closes a worker's kept-alive connection so its completion cannot reach pool teardown",
+		async () => {
+			// Node's `server.close()` never ends a connection that was busy when it
+			// ran. On the 2026-11-12 rollout a worker kept sending over such a
+			// connection, and both attempts of a sync completion got 500
+			// CONNECTION_ENDED from the closing pool.
+			const sql = getTestDb();
+			const workerId = "synthetic-draining-worker";
+			const org = await createTestOrganization();
+			const [connection] = await sql`
+				INSERT INTO connections (organization_id, connector_key, status, visibility, slug, created_at, updated_at)
+				VALUES (${org.id}, 'chrome', 'active', 'org', 'synthetic-drain', NOW(), NOW()) RETURNING id`;
+			const [run] = await sql`
+				INSERT INTO runs (organization_id, run_type, connection_id, connector_key, connector_version,
+					status, claimed_by, claimed_at, created_at)
+				VALUES (${org.id}, 'sync', ${connection.id}, 'chrome', '0.2.0', 'running', ${workerId}, NOW(), NOW())
+				RETURNING id`;
+
+			// Teardown closes the real pool while another request's transaction
+			// keeps it open, as in production, and holds there.
+			const db = await vi.importActual<typeof import("../db/client")>("../db/client");
+			const poolClosing = deferred();
+			const releaseTeardown = deferred();
+			const closeDb = async () => {
+				const open = deferred();
+				const inflight = db.getDb().begin(async (tx) => {
+					await tx`SELECT 1`;
+					open.resolve();
+					await releaseTeardown.promise;
+				});
+				await open.promise;
+				const closed = db.closeDbSingleton();
+				poolClosing.resolve();
+				await Promise.all([inflight, closed]);
+			};
+			const { Hono } = await import("hono");
+			const { app: mainApp } = await import("../index");
+			const { completeWorkerJob } = await import("../worker-api");
+			mainApp.post("/api/workers/complete", completeWorkerJob);
+			const busy = deferred();
+			const lobuApp = new Hono();
+			lobuApp.post("/busy", async (c) => {
+				busy.resolve();
+				await new Promise((resolve) => setTimeout(resolve, 300));
+				return c.json({ ok: true });
+			});
+			const { port, exited } = await bootLifecycle(lobuApp, { HTTP_CLOSE_TIMEOUT_MS: "1000" }, [], closeDb);
+			const baseUrl = `http://127.0.0.1:${port}`;
+
+			// The worker's fetch pool keeps this connection and, once it is idle,
+			// reuses it for the completion below.
+			const busyResponse = fetch(`${baseUrl}/lobu/busy`, { method: "POST" });
+			await busy.promise;
+			process.emit("SIGTERM");
+			try {
+				await (await busyResponse).arrayBuffer();
+				await poolClosing.promise;
+				const client = new WorkerClient({ apiUrl: baseUrl, workerId, capabilities: {} });
+				const delivery = await client
+					.complete({ run_id: Number(run.id), worker_id: workerId, status: "failed", error_message: "synthetic failure" })
+					.then(() => null, (error: unknown) => error);
+				// The connection is gone, so the worker's retry opens a new one that the
+				// Service routes to a ready replica; nothing reached the closing pool.
+				expect(delivery, String(delivery)).toBeInstanceOf(TypeError);
+				expect((delivery as { cause?: { code?: string } }).cause?.code).toBe("ECONNREFUSED");
+				const [after] = await sql`SELECT status FROM runs WHERE id = ${run.id}`;
+				expect(after.status).toBe("running");
+			} finally {
+				releaseTeardown.resolve();
+				await exited;
+			}
+		},
+		20_000,
+	);
+
+	it.each([
+		["waits for", "3000"],
+		["stays bounded by", "100"],
+	])(
+		"shutdown %s a pipelined handler left running by the closed connection",
+		async (_label, closeTimeoutMs) => {
+			// Closing a connection after its first response does not cancel a second
+			// request already pipelined on it, so the drain must also wait for
+			// accepted handlers, within its timeout.
+			const events: string[] = [];
+			const first = deferred();
+			const second = deferred();
+			const bothStarted = deferred();
+			let started = 0;
+			const { Hono } = await import("hono");
+			const lobuApp = new Hono();
+			for (const [name, release] of [["first", first], ["second", second]] as const) {
+				lobuApp.get(`/${name}`, async (c) => {
+					if (++started === 2) bothStarted.resolve();
+					await release.promise;
+					events.push(`${name}-finished`);
+					return c.text(name);
+				});
+			}
+			const { port, exited } = await bootLifecycle(lobuApp, { HTTP_CLOSE_TIMEOUT_MS: closeTimeoutMs }, events);
+			const socket = net.connect({ host: "127.0.0.1", port }).resume();
+			const socketClosed = new Promise((resolve) => socket.on("close", resolve));
+			socket.write(
+				"GET /lobu/first HTTP/1.1\r\nHost: localhost\r\n\r\n" +
+					"GET /lobu/second HTTP/1.1\r\nHost: localhost\r\n\r\n",
+			);
+			await bothStarted.promise;
+			process.emit("SIGTERM");
+			first.resolve();
+			try {
+				await socketClosed;
+				if (closeTimeoutMs === "100") {
+					await exited;
+					expect(events).not.toContain("second-finished");
+				} else {
+					// Let the close callback's teardown run first if it does not wait.
+					await new Promise((resolve) => setImmediate(resolve));
+					second.resolve();
+					await exited;
+					expect(events.indexOf("second-finished")).toBeGreaterThanOrEqual(0);
+					expect(events.indexOf("second-finished")).toBeLessThan(events.indexOf("gateway-stopped"));
+				}
+			} finally {
+				second.resolve();
+				socket.destroy();
+				await exited;
+			}
+		},
+		10_000,
 	);
 });
