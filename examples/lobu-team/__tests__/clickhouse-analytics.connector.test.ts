@@ -167,24 +167,33 @@ describe("ClickHouse query HTTP boundary", () => {
   });
   const total = "__lobu_analytics_total__";
 
-  it("preserves lossless source values and removes the pagination count", async () => {
+  it.each([
+    undefined,
+    "307",
+  ])("preserves successful source values and pagination (exception header: %s)", async (code) => {
     const server = Bun.serve({
       port: 0,
       fetch: () =>
-        Response.json({
-          meta: [
-            { name: "id", type: "UInt64" },
-            { name: "amount", type: "Decimal(38, 8)" },
-            { name: total, type: "UInt64" },
-          ],
-          data: [
-            {
-              id: "18446744073709551615",
-              amount: "12345678901234567890.12345678",
-              [total]: "1",
-            },
-          ],
-        }),
+        Response.json(
+          {
+            meta: [
+              { name: "id", type: "UInt64" },
+              { name: "amount", type: "Decimal(38, 8)" },
+              { name: total, type: "UInt64" },
+            ],
+            data: [
+              {
+                id: "18446744073709551615",
+                amount: "12345678901234567890.12345678",
+                [total]: "1",
+              },
+            ],
+          },
+          {
+            headers:
+              code === undefined ? {} : { "X-ClickHouse-Exception-Code": code },
+          }
+        ),
     });
     try {
       const result = await queryAnalytics(
@@ -251,6 +260,43 @@ describe("ClickHouse query HTTP boundary", () => {
         message:
           "Analytics query failed: Unknown expression identifier `no_such_column` in scope SELECT no_such_column FROM telemetry. (UNKNOWN_IDENTIFIER)",
       });
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  it.each([
+    [500, "307", 400],
+    [500, "158", 400],
+    [500, "47", 500],
+    [500, "307x", 500],
+    [500, "0307", 500],
+    [500, undefined, 500],
+    [401, "307", 401],
+    [403, "158", 403],
+  ] as const)("classifies a failed query by exact ClickHouse code (HTTP %s, code %s)", async (status, code, expectedStatus) => {
+    let requests = 0;
+    const server = Bun.serve({
+      port: 0,
+      fetch: () => {
+        requests++;
+        return new Response(
+          "Code: 307. DB::Exception: synthetic read cap. (TOO_MANY_BYTES) (version 25.3.1.1)",
+          {
+            status,
+            headers:
+              code === undefined ? {} : { "X-ClickHouse-Exception-Code": code },
+          }
+        );
+      },
+    });
+    try {
+      await expect(
+        queryAnalytics(context("SELECT 1"), (_url, init) =>
+          fetch(server.url, init)
+        )
+      ).rejects.toMatchObject({ status: expectedStatus });
+      expect(requests).toBe(1);
     } finally {
       server.stop(true);
     }

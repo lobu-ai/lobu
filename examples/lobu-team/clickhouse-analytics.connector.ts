@@ -208,6 +208,14 @@ async function clickHouseException(response: Response): Promise<string | null> {
 
 async function jsonResponse(response: Response): Promise<unknown> {
   if (!response.ok) {
+    const exceptionCode = response.headers.get("X-ClickHouse-Exception-Code");
+    // Read caps reject this query, so use the existing non-retryable caller-error path.
+    const status =
+      response.status !== 401 &&
+      response.status !== 403 &&
+      (exceptionCode === "307" || exceptionCode === "158")
+        ? 400
+        : response.status;
     const exception = await clickHouseException(response);
     if (!response.bodyUsed) await response.body?.cancel();
     throw Object.assign(
@@ -216,7 +224,7 @@ async function jsonResponse(response: Response): Promise<unknown> {
           ? `Analytics query failed: ${exception}`
           : `Analytics query failed (HTTP ${response.status})`
       ),
-      { status: response.status }
+      { status }
     );
   }
   const reader = response.body?.getReader();
@@ -386,7 +394,7 @@ export default class ClickHouseAnalyticsConnector extends ConnectorRuntime<
   > = {
     key: "clickhouse.analytics",
     name: "ClickHouse analytics",
-    version: "2.0.0",
+    version: "2.0.1",
     description:
       "Run governed read-only SQL against an organization-owned ClickHouse analytics endpoint. Discover accessible tables and columns with SELECT from system.tables and system.columns; information_schema requires separate grants.",
     authSchema: {
