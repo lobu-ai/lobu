@@ -176,4 +176,36 @@ describe('identity-group recall — query plan stays index-driven', () => {
       }
     }
   });
+
+  it('can restrict all attribution branches to events already selected for a preview', async () => {
+    const sql = getTestDb();
+    const [selected] = await sql`
+      SELECT id FROM events WHERE entity_ids @> ARRAY[${members[0]}::bigint] LIMIT 1
+    `;
+    const [identity] = await sql`
+      INSERT INTO entity_identities (organization_id, entity_id, namespace, identifier)
+      SELECT organization_id, id, 'email', 'bounded-preview@example.test' FROM entities WHERE id = ${root}
+      RETURNING organization_id
+    `;
+    const [selectedIdentity] = await sql`
+      INSERT INTO events (organization_id, semantic_type, metadata)
+      VALUES (${identity.organization_id}, 'content', '{"email":"bounded-preview@example.test"}'::jsonb)
+      RETURNING id
+    `;
+    await sql`
+      INSERT INTO events (organization_id, semantic_type, metadata)
+      SELECT ${identity.organization_id}, 'content', '{"email":"bounded-preview@example.test"}'::jsonb
+      FROM generate_series(1, 100)
+    `;
+    const rows = await sql.unsafe<{ id: number }[]>(
+      `WITH preview_events AS MATERIALIZED (
+         SELECT * FROM events WHERE id = ANY($2::bigint[])
+       )
+       SELECT e.id FROM events e
+       WHERE ${entityLinkMatchSql('$1::bigint', 'e', 'preview_events')}
+       ORDER BY e.id`,
+      [root, pgBigintArray([Number(selected.id), Number(selectedIdentity.id)])],
+    );
+    expect(rows.map(row => Number(row.id))).toEqual([Number(selected.id), Number(selectedIdentity.id)]);
+  });
 });
