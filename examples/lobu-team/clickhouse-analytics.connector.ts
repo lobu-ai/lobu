@@ -1,5 +1,6 @@
 import {
   ConnectorRuntime,
+  sleep,
   type QueryContext,
   type QueryResult,
   type RuntimeConnectorDefinition,
@@ -206,16 +207,31 @@ async function clickHouseException(response: Response): Promise<string | null> {
   return text.slice(0, MAX_EXCEPTION_CHARS) || null;
 }
 
+/** ClickHouse's own exception code for a failed query; never an auth refusal. */
+function exceptionCode(response: Response): string | null {
+  if (response.ok || response.status === 401 || response.status === 403)
+    return null;
+  return response.headers.get("X-ClickHouse-Exception-Code");
+}
+
+/** TOO_MANY_SIMULTANEOUS_QUERIES: the account's concurrent-query limit refused
+ * the query at admission, before it ran, so repeating it is safe. */
+const SLOT_BUSY = "202";
+const QUERY_TIMEOUT_MS = 20000;
+const SLOT_RETRY_BASE_MS = 250;
+const SLOT_RETRY_MAX_MS = 2000;
+
 async function jsonResponse(response: Response): Promise<unknown> {
   if (!response.ok) {
-    const exceptionCode = response.headers.get("X-ClickHouse-Exception-Code");
-    // Read caps reject this query, so use the existing non-retryable caller-error path.
+    const code = exceptionCode(response);
     const status =
-      response.status !== 401 &&
-      response.status !== 403 &&
-      (exceptionCode === "307" || exceptionCode === "158")
+      // Read caps reject this query, so use the existing non-retryable caller-error path.
+      code === "307" || code === "158"
         ? 400
-        : response.status;
+        : // A slot still busy after waiting is throttling, not a source failure.
+          code === SLOT_BUSY
+          ? 429
+          : response.status;
     const exception = await clickHouseException(response);
     if (!response.bodyUsed) await response.body?.cancel();
     throw Object.assign(
@@ -275,7 +291,8 @@ function count(value: unknown): number {
  * from ctx.credentials or placed in worker-supplied headers. */
 export async function queryAnalytics(
   ctx: QueryContext<AnalyticsConfig>,
-  fetchImpl: FetchLike = fetch
+  fetchImpl: FetchLike = fetch,
+  timeoutMs = QUERY_TIMEOUT_MS
 ): Promise<QueryResult> {
   const url = new URL(ctx.config.CLICKHOUSE_URL);
   if (
@@ -308,7 +325,9 @@ export async function queryAnalytics(
       invalid("Invalid sort direction");
     order = `ORDER BY q.\`${ctx.sort.column}\` ${ctx.sort.order.toUpperCase()}`;
   }
-  const signal = AbortSignal.timeout(20000);
+  const signal = AbortSignal.timeout(timeoutMs);
+  // Waiting for the slot may use half the budget; the rest is for the query.
+  const slotWaitEnds = Date.now() + timeoutMs / 2;
   async function run(statement: string): Promise<{
     meta: { name: string; type: string }[];
     data: Record<string, unknown>[];
@@ -316,16 +335,30 @@ export async function queryAnalytics(
     if (new TextEncoder().encode(statement).length > 65536)
       invalid("Wrapped SQL exceeds 65536 UTF-8 bytes");
     let response: Response;
-    try {
-      response = await fetchImpl(url, {
-        method: "POST",
-        headers: { "Content-Type": "text/plain", Accept: "application/json" },
-        body: statement,
-        redirect: "error",
-        signal,
-      });
-    } catch {
-      throw new Error("Analytics transport failed");
+    // Concurrent readers share the account's query slot. Wait for it with
+    // jittered, capped backoff inside this query's own budget.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        response = await fetchImpl(url, {
+          method: "POST",
+          headers: { "Content-Type": "text/plain", Accept: "application/json" },
+          body: statement,
+          redirect: "error",
+          signal,
+        });
+      } catch {
+        throw new Error("Analytics transport failed");
+      }
+      const pause =
+        Math.min(SLOT_RETRY_BASE_MS * 2 ** attempt, SLOT_RETRY_MAX_MS) *
+        (0.5 + Math.random() / 2);
+      if (
+        exceptionCode(response) !== SLOT_BUSY ||
+        Date.now() + pause >= slotWaitEnds
+      )
+        break;
+      await response.body?.cancel();
+      await sleep(pause);
     }
     const body = (await jsonResponse(response)) as {
       meta?: unknown;
@@ -394,7 +427,7 @@ export default class ClickHouseAnalyticsConnector extends ConnectorRuntime<
   > = {
     key: "clickhouse.analytics",
     name: "ClickHouse analytics",
-    version: "2.0.1",
+    version: "2.0.2",
     description:
       "Run governed read-only SQL against an organization-owned ClickHouse analytics endpoint. Discover accessible tables and columns with SELECT from system.tables and system.columns; information_schema requires separate grants.",
     authSchema: {
