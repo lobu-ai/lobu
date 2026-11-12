@@ -627,6 +627,46 @@ export class IsolateExecutor implements SyncExecutor {
     job: ExecutorJob,
     hooks?: ExecutionHooks
   ): Promise<ExecutorResult> {
+    const tail = new RingBuffer(STREAM_TAIL_CAP_BYTES);
+    if (this.options.timeoutMs === 0) return this.executeInIsolate(compiledCode, job, hooks, tail);
+
+    // The budget belongs to the whole run, including native context setup.
+    // Race setup too: merely subtracting its duration would still leave a
+    // caller waiting indefinitely before the guest's timer could start.
+    const timeoutAbort = new AbortController();
+    const signal = hooks?.signal
+      ? AbortSignal.any([hooks.signal, timeoutAbort.signal])
+      : timeoutAbort.signal;
+    let timer: ReturnType<typeof setTimeout>;
+    const timeout = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        const outputTail = redactOutput(tail.toString());
+        reject(new ConnectorExecutionError(
+          `Execution timed out after ${this.options.timeoutMs}ms${outputTail ? `\n[console]\n${outputTail}` : ''}`,
+          { exitCode: null, exitSignal: null, outputTail, exitReason: 'timeout' }
+        ));
+        // An in-flight host is terminated immediately. If setup resolves
+        // later, executeInIsolate's cancellation latch disposes it before
+        // handing it any guest code.
+        timeoutAbort.abort();
+      }, this.options.timeoutMs);
+    });
+    try {
+      return await Promise.race([
+        this.executeInIsolate(compiledCode, job, { ...hooks, signal }, tail),
+        timeout,
+      ]);
+    } finally {
+      clearTimeout(timer!);
+    }
+  }
+
+  private async executeInIsolate(
+    compiledCode: string,
+    job: ExecutorJob,
+    hooks: ExecutionHooks | undefined,
+    tail: RingBuffer
+  ): Promise<ExecutorResult> {
     if (job.httpAuth && !hooks?.onHttpFetch) {
       throw new Error('HTTP authentication requires a gateway fetch hook');
     }
@@ -634,7 +674,6 @@ export class IsolateExecutor implements SyncExecutor {
     const exemptHosts = [...this.exactAllowedHosts, ...operatorHttpExemptHosts(job)];
     const ivm = await this.requireIsolatedVm();
 
-    const tail = new RingBuffer(STREAM_TAIL_CAP_BYTES);
     let logBytesUsed = 0;
     let logTruncated = false;
     let hookFailure: unknown = null;
@@ -874,7 +913,7 @@ export class IsolateExecutor implements SyncExecutor {
 
     const mergedConfig = job.mode === 'authenticate' ? job.config : buildConnectorConfig(job);
 
-    host = await IsolateHost.create({
+    const createHost = () => IsolateHost.create({
       ivm,
       memoryMb: this.options.memoryMb,
       messageBytes: this.options.messageBytes,
@@ -1200,13 +1239,14 @@ export class IsolateExecutor implements SyncExecutor {
       },
     });
 
-    const redactedTail = () => redactOutput(tail.toString());
-    const withTail = (prefix: string) => {
-      const t = redactedTail();
-      return t ? `${prefix}\n[console]\n${t}` : prefix;
-    };
-
     try {
+      host = await createHost();
+      const redactedTail = () => redactOutput(tail.toString());
+      const withTail = (prefix: string) => {
+        const t = redactedTail();
+        return t ? `${prefix}\n[console]\n${t}` : prefix;
+      };
+
       const source = `var __job_json = ${jsonLiteral(guestJob)};\nvar __config_json = ${jsonLiteral(mergedConfig)};\n${compiledCode}\n${GUEST_RUNNER}`;
       let raw: unknown;
       try {
@@ -1216,7 +1256,9 @@ export class IsolateExecutor implements SyncExecutor {
         // `host.run` then rejects with the terminal state, and the cancel
         // reports through exactly the path a mid-run cancel takes.
         if (cancelled || hooks?.signal?.aborted) host.terminate(cancelState);
-        raw = await host.run(source, { timeoutMs: this.options.timeoutMs });
+        // execute owns the single deadline from entry, including setup and
+        // outstanding hooks; a second guest timer would restart the budget.
+        raw = await host.run(source, { timeoutMs: 0 });
       } catch (error) {
         if (hookFailure !== null) throw hookFailure;
         if (guestFatal) throw this.guestError(guestFatal, redactedTail());
@@ -1277,7 +1319,7 @@ export class IsolateExecutor implements SyncExecutor {
       closeAllSockets();
       vault.clear();
       void egress.destroy().catch(() => undefined);
-      host.dispose();
+      host?.dispose();
     }
   }
 
