@@ -18,7 +18,7 @@ import { getDb, pgBigintArray } from '../db/client';
 import { memberReadRole } from '../tools/access-control';
 import { MEMBER_ENTITY_TYPE_SLUG } from '../tools/constants';
 import type { ToolContext } from '../tools/registry';
-import { type EntityEndpoint, type ResolvedEntityReference, resolveEntityReference } from './entity-reference';
+import { type EntityEndpoint, type ResolvedEntityReference, resolveEntityReference, SourceRecordReadError } from './entity-reference';
 import { ToolUserError } from './errors';
 import { buildEntityViewUrl } from '../tools/view-urls';
 import { canSeeMemberList } from './member-entity-type';
@@ -201,10 +201,10 @@ export async function readableRelationships(
     // Hidden endpoints suppress failure IDs even when another read fails first.
     if (rejected.some(({ reason }) => reason instanceof ToolUserError && (reason.httpStatus === 403 || reason.httpStatus === 404))) return null;
     if (rejected.length) {
-      const fatal = rejected.find(({ reason }) => !(reason instanceof ToolUserError) || reason.httpStatus < 500);
+      const fatal = rejected.find(({ reason }) => !(reason instanceof ToolUserError) || (reason.httpStatus < 500 && !(reason instanceof SourceRecordReadError)));
       if (fatal) throw fatal.reason;
       const error: unknown = rejected[0].reason;
-      if (failures && error instanceof ToolUserError && error.httpStatus >= 500) {
+      if (failures && error instanceof ToolUserError && (error.httpStatus >= 500 || error instanceof SourceRecordReadError)) {
         failures.push({ relationship_id: row.id, code: error.code ?? 'UPSTREAM_UNAVAILABLE' });
         return null;
       }

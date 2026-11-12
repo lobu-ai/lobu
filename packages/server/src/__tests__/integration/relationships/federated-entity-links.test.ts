@@ -206,7 +206,7 @@ describe('typed references and authored source relationships', () => {
     expect(query.rows?.map(row => Number(row.id))).not.toContain(Number(edge.relationship.id));
     await ws.owner.entities.unlink({ relationship_id: Number(edge.relationship.id) });
   });
-  it('reports a source failure explicitly while allowing unlink without reading the source', async () => {
+  it('reports configured-source SQL validation while allowing unlink without reading the source', async () => {
     const sql = getTestDb();
     await sql`CREATE VIEW federated_outage_fixture AS SELECT 'outage-key'::text AS id, 'Outage item'::text AS name`;
     const profile = await createAuthProfile({ organizationId: ws.org.id, connectorKey: 'postgres', displayName: 'Outage fixture', profileKind: 'env', authData: { DATABASE_URL: process.env.DATABASE_URL! } });
@@ -221,17 +221,17 @@ describe('typed references and authored source relationships', () => {
     await sql`DROP VIEW federated_outage_fixture`;
     const listed = await ws.owner.entities.listLinks({ entity_id: stored });
     expect(listed.relationships.map(r => Number(r.id))).toContain(Number(healthy.relationship.id));
-    expect(listed.relationship_failures).toEqual([{ relationship_id: Number(edge.relationship.id), code: 'UPSTREAM_5XX' }]);
+    expect(listed.relationship_failures).toEqual([{ relationship_id: Number(edge.relationship.id), code: 'VALIDATION' }]);
     expect(JSON.stringify(listed)).not.toContain('outage-key');
     await expect(ws.owner.entity_schema.updateType({ slug: 'outage-items', backing: { sql: "SELECT 'replacement' AS id" } }))
       .rejects.toMatchObject({ httpStatus: 409, message: expect.stringContaining(String(edge.relationship.id)) });
-    await expect(ws.owner.entities.updateLink({ relationship_id: Number(edge.relationship.id), confidence: 0.5 })).rejects.toMatchObject({ code: 'UPSTREAM_5XX', httpStatus: 500 });
+    await expect(ws.owner.entities.updateLink({ relationship_id: Number(edge.relationship.id), confidence: 0.5 })).rejects.toMatchObject({ code: 'VALIDATION', httpStatus: 400, retryable: false });
     await ws.owner.entities.unlink({ relationship_id: Number(edge.relationship.id) });
     await ws.owner.entity_schema.updateType({ slug: 'outage-items', backing: { sql: "SELECT 'replacement' AS id" } });
     await ws.owner.entities.unlink({ relationship_id: Number(healthy.relationship.id) });
   });
 
-  it.each([403, 404, 409].flatMap(endpointStatus => [true, false].flatMap(unavailableFirst =>
+  it.each([400, 403, 404, 409].flatMap(endpointStatus => [true, false].flatMap(unavailableFirst =>
     [true, false].map(unavailableFrom => ({ endpointStatus, unavailableFirst, unavailableFrom })))))(
     'prioritizes endpoint status $endpointStatus over an outage (outage first: $unavailableFirst, from: $unavailableFrom)',
     async ({ endpointStatus, unavailableFirst, unavailableFrom }) => {
@@ -267,7 +267,7 @@ describe('typed references and authored source relationships', () => {
         if (unavailableFirst) rejectEndpoint(endpointError);
         else rejectUnavailable(unavailable);
         const outcome = await listing;
-        if (endpointStatus === 409) expect(outcome).toMatchObject({ error: { httpStatus: 409 } });
+        if (endpointStatus === 400 || endpointStatus === 409) expect(outcome).toMatchObject({ error: { httpStatus: endpointStatus } });
         else expect(outcome).toMatchObject({ result: { relationships: [], relationship_failures: [], counts_by_type: [] } });
         expect(anchorReads).toBe(2);
       } finally {
@@ -480,7 +480,7 @@ describe('public source type identity across workspaces', () => {
     await reader.owner.entities.unlink({ relationship_id: edge });
   });
 
-  it('reports a public source outage by relationship ID only and still allows unlink', async () => {
+  it('reports public source SQL validation by relationship ID only and still allows unlink', async () => {
     const shared = await TestWorkspace.create({ name: 'Outage catalog' });
     await getTestDb()`CREATE VIEW public_catalog_outage_fixture AS SELECT 'outage-key'::text AS id, 'Outage item'::text AS name`;
     await sourceConnection(shared, 'outage-catalog-source', 'org', shared.users.owner.id);
@@ -489,9 +489,9 @@ describe('public source type identity across workspaces', () => {
       relationship_type_slug: 'cites' })).relationship.id);
     await getTestDb()`DROP VIEW public_catalog_outage_fixture`;
     const listed = await reader.owner.entities.listLinks({ entity_id: note });
-    expect(listed.relationship_failures).toEqual([{ relationship_id: edge, code: 'UPSTREAM_5XX' }]);
+    expect(listed.relationship_failures).toEqual([{ relationship_id: edge, code: 'VALIDATION' }]);
     expect(JSON.stringify(listed)).not.toContain('outage-key');
-    await expect(reader.owner.entities.updateLink({ relationship_id: edge, confidence: 0.5 })).rejects.toMatchObject({ code: 'UPSTREAM_5XX' });
+    await expect(reader.owner.entities.updateLink({ relationship_id: edge, confidence: 0.5 })).rejects.toMatchObject({ code: 'VALIDATION', httpStatus: 400, retryable: false });
     await reader.owner.entities.unlink({ relationship_id: edge });
     expect(ids(await reader.owner.entities.listLinks({ entity_id: note, include_deleted: true }))).not.toContain(edge);
   });

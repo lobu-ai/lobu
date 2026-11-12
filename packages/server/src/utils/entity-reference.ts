@@ -13,6 +13,16 @@ import { derivedRowName, queryDerivedEntityView } from './entity-management';
 import { ToolUserError, toolErrorHttpStatus } from './errors';
 import { normalizeEntityTypeSlug } from './reserved';
 
+/** Keeps configured-source validation distinct from invalid relationship arguments. */
+export class SourceRecordReadError extends ToolUserError {
+  constructor(error: ToolUserError) {
+    super(error.message, error.httpStatus, error.code, error.details);
+    this.stack = error.stack;
+    this.callId = error.callId;
+    this.retryAfterSeconds = error.retryAfterSeconds;
+  }
+}
+
 export interface EntityEndpoint {
   entityId: number | null;
   sourceTypeId: number | null;
@@ -113,11 +123,13 @@ export async function resolveEntityReference(
       { limit: 2, offset: 0 }, readContext, { exactSlug: id, keyColumn, preservePageRows: true }), ctx.abortSignal);
   } catch (error) {
     if (ctx.abortSignal?.aborted) throw new ToolUserError('Source record read exceeded the deadline', 500, 'UPSTREAM_TIMEOUT');
+    if (error instanceof ToolUserError && error.code === 'VALIDATION') throw new SourceRecordReadError(error);
     throw error;
   }
   if (result.error) {
     const code = result.error_code ?? 'UPSTREAM_UNAVAILABLE';
-    throw new ToolUserError('Source record could not be read', toolErrorHttpStatus(code), code);
+    const error = new ToolUserError('Source record could not be read', toolErrorHttpStatus(code), code);
+    throw code === 'VALIDATION' ? new SourceRecordReadError(error) : error;
   }
   const matches = result.rows.filter(candidate => recordKey(candidate, keyColumn) === id);
   if (matches.length === 0) throw new ToolUserError('Source record not found or not readable', 404);
