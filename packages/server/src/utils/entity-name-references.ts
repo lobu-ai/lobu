@@ -8,16 +8,11 @@
  * inference. System (`$`) records are excluded before counting so a member's
  * own `$member` record never makes a teammate's person record ambiguous.
  */
+import type { UnlinkedEntityName } from '@lobu/core/contracts/tools/save-memory';
 import { entityReadRestrictions, filterEntityReadRows } from '../authz/entity-read-policy';
 import { type DbClient, pgTextArray } from '../db/client';
 import type { ToolContext } from '../tools/registry';
 
-export type EntityNameReferenceReason = 'not_found' | 'ambiguous' | 'not_writable';
-
-export interface UnlinkedEntityName {
-  name: string;
-  reason: EntityNameReferenceReason;
-}
 
 export interface EntityNameResolution {
   entityIds: number[];

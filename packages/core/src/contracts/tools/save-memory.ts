@@ -136,6 +136,18 @@ export const SaveContentSchema = Type.Object({
 
 export type SaveContentArgs = Static<typeof SaveContentSchema>;
 
+/** A `{ name }` entry from `entity_ids` that did not link, as returned in the save result's `unlinked`. */
+export const UnlinkedEntityNameSchema = Type.Object({
+  name: Type.String(),
+  reason: Type.Union([
+    Type.Literal("not_found"),
+    Type.Literal("ambiguous"),
+    Type.Literal("not_writable"),
+  ]),
+});
+
+export type UnlinkedEntityName = Static<typeof UnlinkedEntityNameSchema>;
+
 /**
  * `client.knowledge.save` input. The schema leaves every field optional
  * because `saveContent` resolves the requirement per `payload_type`:

@@ -106,6 +106,33 @@ describe('save_memory entity name references', () => {
     expect(replay.unlinked).toEqual(first.unlinked);
   });
 
+  it('keeps a retry on its stored links after a namesake appears', async () => {
+    // A kind only this record's type declares: validation needs the name to link.
+    // ($member declares its own kinds, as in production, so others are rejected.)
+    await getTestDb()`
+      UPDATE entity_types SET event_kinds = ${getTestDb().json({ content: { description: 'Content' } })}
+      WHERE organization_id = ${orgId} AND slug = '$member'
+    `;
+    await getTestDb()`
+      INSERT INTO entity_types (organization_id, slug, name, event_kinds, created_at, updated_at)
+      VALUES (${orgId}, 'review-target', 'Review target',
+        ${getTestDb().json({ review_metric: { description: 'A review metric' } })}, NOW(), NOW())
+    `;
+    const target = await createTestEntity({ name: 'Review Target Synthetic', entity_type: 'review-target', organization_id: orgId });
+    const args = {
+      semantic_type: 'review_metric',
+      content: 'A metric for the review target.',
+      idempotency_key: 'synthetic-name-refs-kind-replay',
+      entity_ids: [{ name: 'Review Target Synthetic' }],
+    };
+    const first = await saveContent(args, {} as never, owner);
+    expect(await storedEntityIds(first.id)).toContain(target.id);
+
+    await createTestEntity({ name: 'Review Target Synthetic', entity_type: 'review-target', organization_id: orgId, parent_id: target.id });
+    const replay = await saveContent(args, {} as never, owner);
+    expect(replay).toMatchObject({ id: first.id, created: false, unlinked: [] });
+  });
+
   it('reports names as not_writable for a caller who cannot link records', async () => {
     const result = await saveContent({
       semantic_type: 'content',

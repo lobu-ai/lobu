@@ -13,6 +13,8 @@ import {
   MAX_ENTITY_NAMES,
   type SaveContentArgs,
   SaveContentSchema,
+  type UnlinkedEntityName,
+  UnlinkedEntityNameSchema,
 } from '@lobu/core/contracts/tools/save-memory';
 import { Type } from '@sinclair/typebox';
 import { resolveAutomationAttribution } from '../automations/automation-source';
@@ -40,10 +42,7 @@ import {
 } from '../utils/org-guidance';
 import { ensureMemberEntityType } from '../utils/member-entity-type';
 import { canWriteOrg, requireWriteAccess } from '../utils/organization-access';
-import {
-  resolveEntityNameReferences,
-  type UnlinkedEntityName,
-} from '../utils/entity-name-references';
+import { resolveEntityNameReferences } from '../utils/entity-name-references';
 import { isUniqueViolation } from '../utils/pg-errors';
 import { trackAutomationReaction } from '../utils/automation-reactions';
 import { isSystemContext, workspaceScopeDenialMessage } from './access-control';
@@ -165,16 +164,7 @@ export const SaveContentResultSchema = Type.Object({
     method: Type.Literal('client.knowledge.read'),
     content_ids: Type.Tuple([Type.Integer()]),
   }),
-  unlinked: Type.Array(
-    Type.Object({
-      name: Type.String(),
-      reason: Type.Union([
-        Type.Literal('not_found'),
-        Type.Literal('ambiguous'),
-        Type.Literal('not_writable'),
-      ]),
-    }),
-    {
+  unlinked: Type.Array(UnlinkedEntityNameSchema, {
       description:
         'Names from entity_ids that were not linked: no record has that exact name, several do, or the caller may not link records here.',
     }
@@ -320,12 +310,20 @@ async function saveContentImpl(
   for (const eid of explicitEntityIds) {
     await requireWriteAccess(sql, eid, ctx);
   }
-  const nameResolution = await resolveEntityNameReferences(
-    sql,
-    entityNames,
-    ctx,
-    entityNames.length > 0 && (await canWriteOrg(sql, ctx))
-  );
+  // A retry of a stored save keeps the links that save resolved: records renamed
+  // or added since must not change, or fail, the original outcome.
+  const storedSave =
+    args.idempotency_key && entityNames.length > 0
+      ? await findIdempotentEvent(sql, ctx.organizationId, args.idempotency_key)
+      : undefined;
+  const nameResolution = storedSave
+    ? { entityIds: storedSave.entity_ids ?? [], unlinked: unlinkedFromMetadata(storedSave.metadata) }
+    : await resolveEntityNameReferences(
+        sql,
+        entityNames,
+        ctx,
+        entityNames.length > 0 && (await canWriteOrg(sql, ctx))
+      );
   const entityIds = [...new Set([...explicitEntityIds, ...nameResolution.entityIds])];
 
   // 2. Validate semantic_type against $member.event_kinds + entity type event_kinds.

@@ -45,7 +45,10 @@ import type {
   OperationListRunsInput,
 } from "@lobu/core/contracts/tools/manage-operations";
 import type { PublicGetContentArgs } from "@lobu/core/contracts/tools/read-knowledge";
-import type { SaveContentInput } from "@lobu/core/contracts/tools/save-memory";
+import type {
+  SaveContentInput,
+  UnlinkedEntityName,
+} from "@lobu/core/contracts/tools/save-memory";
 import type { PublicSearchArgs } from "@lobu/core/contracts/tools/search-memory";
 import type {} from "./reaction-client-types.typecheck";
 
@@ -95,6 +98,8 @@ export interface KnowledgeSaveResult {
   id: number;
   created: boolean;
   metadata: Record<string, unknown>;
+  /** `{ name }` entries from `entity_ids` that did not link. */
+  unlinked: UnlinkedEntityName[];
 }
 
 // ── Notifications ────────────────────────────────────────────────────────────
