@@ -50,6 +50,7 @@ import {
 import { TaskScheduler } from './task-scheduler';
 import {
   ENTITY_APPROVAL_TASK,
+  INSTALL_PING_TASK,
   AUTOMATION_REACTION_TASK,
   AUTOMATION_DIGEST_TASK,
   AUTOMATION_SCRIPT_TASK,
@@ -62,11 +63,7 @@ import {
   WAKE_AGENT_TASK,
 } from './task-definitions';
 import { triggerEmbedBackfill } from './trigger-embed-backfill';
-import {
-  INSTALL_PING_TASK,
-  logInstallTelemetryNotice,
-  sendInstallPing,
-} from '../telemetry/install-ping';
+import { logInstallTelemetryNotice, sendInstallPing } from '../telemetry/install-ping';
 import { runMemberClaimDriftCheck } from './member-claim-drift';
 import { runReapStaleDeviceWorkers } from './reap-stale-device-workers';
 import { runReapExpiredPendingSlackInstalls } from './reap-expired-pending-installs';

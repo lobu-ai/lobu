@@ -8,7 +8,11 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { getDb } from '../../db/client';
-import { installTelemetryEnabled, sendInstallPing } from '../../telemetry/install-ping';
+import {
+  installTelemetryEnabled,
+  logInstallTelemetryNotice,
+  sendInstallPing,
+} from '../../telemetry/install-ping';
 import { cleanupTestDatabase, getTestDb } from '../setup/test-db';
 import { createTestOrganization } from '../setup/test-fixtures';
 
@@ -99,6 +103,16 @@ describe('install telemetry ping', () => {
   it('is on by default for a production process', () => {
     expect(installTelemetryEnabled({ NODE_ENV: 'production' })).toBe(true);
     expect(installTelemetryEnabled({})).toBe(true);
+  });
+
+  it('a malformed LOBU_TELEMETRY_URL turns the ping off instead of failing boot', async () => {
+    for (const bad of ['telemetry.internal/v1/install', 'ftp://telemetry.invalid/v1/install']) {
+      const env = { LOBU_TELEMETRY: '1', LOBU_TELEMETRY_URL: bad };
+      expect(() => logInstallTelemetryNotice(env)).not.toThrow();
+      await expect(sendInstallPing(getDb(), env)).resolves.toBeUndefined();
+    }
+    expect(received).toHaveLength(0);
+    expect(await getTestDb()`SELECT 1 FROM instance_identity`).toHaveLength(0);
   });
 
   it('an unreachable endpoint resolves quietly', async () => {

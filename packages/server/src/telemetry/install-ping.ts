@@ -19,7 +19,6 @@ import logger from '../utils/logger';
 import { getRuntimeInfo } from '../utils/runtime-info';
 import { organizationLiveSql } from '../workspace/deletion-state';
 
-export const INSTALL_PING_TASK = 'install-telemetry-ping';
 const DEFAULT_INSTALL_PING_URL = 'https://telemetry.lobu.ai/v1/install';
 const SEND_TIMEOUT_MS = 5_000;
 /** Counting stops here: the top bucket is "21+", so more rows add nothing. */
@@ -75,8 +74,14 @@ export function installTelemetryEnabled(env: Env = process.env): boolean {
   return true;
 }
 
-export function installPingUrl(env: Env = process.env): string {
-  return env.LOBU_TELEMETRY_URL?.trim() || DEFAULT_INSTALL_PING_URL;
+/** The ping endpoint, or null when `LOBU_TELEMETRY_URL` is not a valid http(s) URL. */
+export function installPingUrl(env: Env = process.env): URL | null {
+  try {
+    const url = new URL(env.LOBU_TELEMETRY_URL?.trim() || DEFAULT_INSTALL_PING_URL);
+    return url.protocol === 'https:' || url.protocol === 'http:' ? url : null;
+  } catch {
+    return null;
+  }
 }
 
 export function bucketCount(count: number): CountBucket {
@@ -164,10 +169,11 @@ export async function sendInstallPing(
   sql: DbClient = getDb(),
   env: Env = process.env,
 ): Promise<void> {
-  if (!installTelemetryEnabled(env)) return;
+  const url = installPingUrl(env);
+  if (!installTelemetryEnabled(env) || !url) return;
   try {
     const ping = await buildInstallPing(sql, env);
-    const response = await fetch(installPingUrl(env), {
+    const response = await fetch(url, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(ping),
@@ -179,10 +185,15 @@ export async function sendInstallPing(
   }
 }
 
-/** One line per boot, so the default is never silent. */
+/** One line per boot, so the default is never silent. Never throws. */
 export function logInstallTelemetryNotice(env: Env = process.env): void {
   if (!installTelemetryEnabled(env)) return;
+  const url = installPingUrl(env);
+  if (!url) {
+    logger.warn('LOBU_TELEMETRY_URL is not a valid http(s) URL; the anonymous install ping is off.');
+    return;
+  }
   logger.info(
-    `Anonymous install telemetry is on: one daily ping to ${new URL(installPingUrl(env)).host} with the version and bucketed usage counts, no identifying data. Set LOBU_TELEMETRY=0 to turn it off. See docs/DOCKER.md#anonymous-usage-telemetry.`,
+    `Anonymous install telemetry is on: one daily ping to ${url.host} with the version and bucketed usage counts, no identifying data. Set LOBU_TELEMETRY=0 to turn it off. See docs/DOCKER.md#anonymous-usage-telemetry.`,
   );
 }
