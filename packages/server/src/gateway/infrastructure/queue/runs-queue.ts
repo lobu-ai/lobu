@@ -34,6 +34,7 @@ import { incrementCounter } from "../../metrics/prometheus.js";
 import { pruneTurnWriteReceipts } from "../../../tools/turn-write-idempotency.js";
 import {
   isDeferralError,
+  QueueRoutingRetryError,
   type IMessageQueue,
   type JobHandler,
   type QueueJob,
@@ -689,11 +690,16 @@ export class RunsQueue implements IMessageQueue {
       if (isDeferralError(err)) {
         span?.setAttribute("lobu.run_deferred", true);
       } else {
+        const finalAttempt = claimed.attempts + 1 >= claimed.maxAttempts;
         span?.setAttribute(
           "lobu.run_final_attempt",
-          claimed.attempts + 1 >= claimed.maxAttempts,
+          finalAttempt,
         );
-        recordError(span, err, { scope: `run ${worker.queueName}` });
+        if (err instanceof QueueRoutingRetryError && !finalAttempt) {
+          span?.setAttribute("lobu.run_routing_retry", true);
+        } else {
+          recordError(span, err, { scope: `run ${worker.queueName}` });
+        }
       }
       if (isDeferralError(err)) {
         // Waiting, not failing — reschedule without consuming an attempt

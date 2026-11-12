@@ -68,6 +68,13 @@ export const TERMINAL_DELIVERY_SEND_OPTS: QueueOptions = {
 };
 
 /**
+ * Expected routing miss that still consumes the normal attempt budget.
+ * Intermediate attempts are observable retries, not system failures; exhaustion
+ * remains a failure if the handler does not provide its final-attempt fallback.
+ */
+export class QueueRoutingRetryError extends Error {}
+
+/**
  * A handler-thrown error carrying `deferral: true` asks the queue to
  * reschedule the job WITHOUT consuming an attempt: the job is waiting on an
  * external condition (e.g. the dispatch gate waiting out a prior turn on the
