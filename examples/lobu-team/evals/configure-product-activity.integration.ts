@@ -1,3 +1,4 @@
+import type { AutomationReadback } from "../scripts/configure-product-activity";
 import { readFileSync } from "node:fs";
 import type { AutomationClaimNextWindowContext } from "@lobu/core/contracts/tools/manage-automations";
 import { beforeEach, expect, test } from "vitest";
@@ -18,12 +19,17 @@ import {
   ownerToolContext,
 } from "../../../packages/server/src/__tests__/setup/test-fixtures";
 import { TestWorkspace } from "../../../packages/server/src/__tests__/setup/test-mcp-client";
-import { configureProductActivityDigest } from "../scripts/configure-product-activity";
+import {
+  configureLiveProductActivityDigest,
+  configureProductActivityDigest,
+} from "../scripts/configure-product-activity";
 
 beforeEach(cleanupTestDatabase);
 
 async function migrationBaseline(client: TestWorkspace["owner"], id: string) {
-  const { automation } = await client.automations.get({ automation_id: id });
+  const { automation } = (await client.automations.get({
+    automation_id: id,
+  })) as AutomationReadback;
   return {
     version: automation.version,
     execution_config: automation.execution_config ?? null,
@@ -135,6 +141,7 @@ test("native cutover preserves bound Slack delivery and the checkpoint", async (
       {
         namespace: "synthetic-production",
         logStart: "2026-10-01T00:00:00.000Z",
+        productStart: "2026-10-01T00:00:00.000Z",
       },
       {
         managedAgentId: agent.agentId,
@@ -150,6 +157,7 @@ test("native cutover preserves bound Slack delivery and the checkpoint", async (
       {
         namespace: "synthetic-production",
         logStart: "2026-10-01T00:00:00.000Z",
+        productStart: "2026-10-01T00:00:00.000Z",
       },
       { managedAgentId: "synthetic-other-owner", baseline: reviewed }
     )
@@ -163,6 +171,7 @@ test("native cutover preserves bound Slack delivery and the checkpoint", async (
     {
       namespace: "synthetic-production",
       logStart: "2026-10-01T00:00:00.000Z",
+      productStart: "2026-10-01T00:00:00.000Z",
     },
     {
       managedAgentId: agent.agentId,
@@ -210,6 +219,7 @@ test("native cutover preserves bound Slack delivery and the checkpoint", async (
     window_token: claimed.context.window_token,
     extracted_data: {
       digests: [],
+      product_progress: [],
       log_progress: [
         {
           content: "Checked synthetic-production through 00:20 UTC",
@@ -280,6 +290,7 @@ test("native migration pauses cadence without changing a claimed definition", as
       {
         namespace: "synthetic-production",
         logStart: "2026-10-01T00:00:00.000Z",
+        productStart: "2026-10-01T00:00:00.000Z",
       },
       { managedAgentId: agent.agentId, baseline }
     )
@@ -318,7 +329,11 @@ test("ClickHouse progress survives completion retries and product pagination wit
       new URL("../product-activity-digest.reaction.ts", import.meta.url),
       "utf8"
     ),
-    { namespace: "synthetic-production", logStart: "2026-10-01T00:00:00.000Z" },
+    {
+      namespace: "synthetic-production",
+      logStart: "2026-10-01T00:00:00.000Z",
+      productStart: "2026-10-01T00:00:00.000Z",
+    },
     {
       managedAgentId: agent.agentId,
       baseline: await migrationBaseline(workspace.owner, id),
@@ -328,10 +343,7 @@ test("ClickHouse progress survives completion retries and product pagination wit
   await sql`UPDATE automations SET next_window_start = ${start}, next_run_at = NOW() - INTERVAL '1 second' WHERE id = ${id}`;
   for (const [slug, contents] of [
     ["synthetic-unlisted-connection", ["Unlisted source must not be consumed"]],
-    [
-      "lobu-product-activity-db",
-      ["Synthetic signup", "Synthetic source connected"],
-    ],
+    ["github-app-install", ["Synthetic commit", "Synthetic PR"]],
   ] as const) {
     const connection = await createTestConnection({
       organization_id: workspace.org.id,
@@ -344,6 +356,7 @@ test("ClickHouse progress survives completion retries and product pagination wit
       await createTestEvent({
         organization_id: workspace.org.id,
         connection_id: connection.id,
+        feed_key: "commits",
         content,
         metadata: { source: slug },
         created_at: new Date(start.getTime() + 30_000),
@@ -365,7 +378,7 @@ test("ClickHouse progress survives completion retries and product pagination wit
     [...first.context.content, ...second.content]
       .map((row) => (row as { payload_text: string }).payload_text)
       .sort()
-  ).toEqual(["Synthetic signup", "Synthetic source connected"]);
+  ).toEqual(["Synthetic PR", "Synthetic commit"]);
   const completion = {
     automation_id: id,
     run_id: first.run_id,
@@ -394,6 +407,7 @@ test("ClickHouse progress survives completion retries and product pagination wit
       ...completion,
       extracted_data: {
         digests: [],
+        product_progress: [],
         log_progress: [
           {
             ...progress,
@@ -417,7 +431,11 @@ test("ClickHouse progress survives completion retries and product pagination wit
 
   await workspace.owner.automations.completeWindow({
     ...completion,
-    extracted_data: { digests: [], log_progress: [progress] },
+    extracted_data: {
+      digests: [],
+      product_progress: [],
+      log_progress: [progress],
+    },
   });
   const reader = buildClientSDK(
     ownerToolContext(workspace.org.id, workspace.users.owner.id),
@@ -443,7 +461,7 @@ test("ClickHouse progress survives completion retries and product pagination wit
     automation_id: id,
     run_id: resumed.run_id,
     window_token: resumed.context.window_token,
-    extracted_data: { digests: [], log_progress: [] },
+    extracted_data: { digests: [], product_progress: [], log_progress: [] },
   });
   expect(await readProgress()).toEqual([old]);
 
@@ -457,6 +475,7 @@ test("ClickHouse progress survives completion retries and product pagination wit
     window_token: recheck.context.window_token,
     extracted_data: {
       digests: [],
+      product_progress: [],
       log_progress: [
         {
           ...progress,
@@ -480,4 +499,81 @@ test("ClickHouse progress survives completion retries and product pagination wit
   expect(new Date(advanced.next_window_start).toISOString()).toBe(
     recheck.context.window_end
   );
+});
+
+test("external live-source migration preserves its executor and commits product progress independently", async () => {
+  const workspace = await TestWorkspace.create({
+    name: "Synthetic external live analyst",
+  });
+  const sql = getTestDb();
+  const created = await workspace.owner.automations.create({
+    slug: "product-activity-digest",
+    name: "Synthetic external analyst",
+    prompt: "Analyze sources",
+    sources: [{ name: "content", query: "SELECT * FROM events WHERE FALSE" }],
+    triggers: [
+      { kind: "schedule", cron: "*/20 * * * *", skip_if_unchanged: false },
+    ],
+  });
+  if (!("automation_id" in created)) throw new Error("Expected Automation");
+  const id = String(created.automation_id);
+  const before = (
+    (await workspace.owner.automations.get({
+      automation_id: id,
+    })) as AutomationReadback
+  ).automation;
+  const start = new Date(Date.now() - 60_000).toISOString();
+  await sql`UPDATE automations SET next_window_start = ${start} WHERE id = ${id}`;
+  await configureLiveProductActivityDigest(
+    workspace.owner,
+    id,
+    readFileSync(
+      new URL("../product-activity-digest.reaction.ts", import.meta.url),
+      "utf8"
+    ),
+    {
+      namespace: "synthetic-production",
+      logStart: "2026-10-01T00:00:00.000Z",
+      productStart: "2026-10-01T00:00:00.000Z",
+    },
+    before.version
+  );
+  const [state] =
+    await sql`SELECT managed_agent_id, device_worker_id, execution_config, next_window_start FROM automations WHERE id = ${id}`;
+  expect(state.managed_agent_id).toBeNull();
+  expect(state.device_worker_id).toBeNull();
+  expect(state.execution_config).toBeNull();
+  expect(new Date(state.next_window_start).toISOString()).toBe(start);
+  const progress = {
+    content: "Read live source interval",
+    metadata: {
+      checkpoint_key: `product-activity-source:${id}`,
+      window_end: "2026-10-01T01:00:00.000Z",
+    },
+  };
+  for (const items of [[progress], []]) {
+    await sql`UPDATE automations SET next_run_at = NOW() - INTERVAL '1 second' WHERE id = ${id}`;
+    const claim = await workspace.owner.automations.claimNextWindow({
+      automation_id: id,
+    });
+    if (!("context" in claim))
+      throw new Error("Expected an external claim even for a quiet tick");
+    expect(claim.context.content).toEqual([]);
+    const completion = {
+      automation_id: id,
+      run_id: claim.run_id,
+      window_token: claim.context.window_token,
+      extracted_data: {
+        digests: [],
+        log_progress: [],
+        product_progress: items,
+      },
+    };
+    await workspace.owner.automations.completeWindow(completion);
+    await workspace.owner.automations.completeWindow(completion);
+  }
+  const rows = await sql`SELECT metadata FROM events WHERE automation_id = ${id}
+    AND metadata->>'automation_output' = 'product_progress'`;
+  expect(rows).toHaveLength(1);
+  expect(rows[0].metadata).toMatchObject(progress.metadata);
 });

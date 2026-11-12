@@ -61,6 +61,27 @@ export const input = {
         additionalProperties: false,
       },
     },
+    product_progress: {
+      type: "array",
+      maxItems: 1,
+      items: {
+        type: "object",
+        properties: {
+          content: { type: "string", minLength: 1, maxLength: 240 },
+          metadata: {
+            type: "object",
+            properties: {
+              checkpoint_key: { type: "string", minLength: 1, maxLength: 160 },
+              window_end: timestamp,
+            },
+            required: ["checkpoint_key", "window_end"],
+            additionalProperties: false,
+          },
+        },
+        required: ["content", "metadata"],
+        additionalProperties: false,
+      },
+    },
     digests: {
       type: "array",
       maxItems: 1,
