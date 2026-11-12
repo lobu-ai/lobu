@@ -294,6 +294,8 @@ export interface ConnectorExecutionDiagnostics {
   outputTail: string;
   exitReason: ConnectorExitReason;
   httpStatus?: number;
+  /** Validated PostgreSQL SQLSTATE; distinct from connector outcome codes. */
+  pgCode?: string;
   code?: ConnectorErrorCode;
 }
 
@@ -303,6 +305,7 @@ export class ConnectorExecutionError extends Error implements ConnectorExecution
   outputTail: string;
   exitReason: ConnectorExitReason;
   httpStatus?: number;
+  pgCode?: string;
   code?: ConnectorErrorCode;
 
   constructor(
@@ -317,6 +320,7 @@ export class ConnectorExecutionError extends Error implements ConnectorExecution
     this.outputTail = diagnostics.outputTail;
     this.exitReason = diagnostics.exitReason;
     this.httpStatus = diagnostics.httpStatus;
+    if (diagnostics.pgCode) this.pgCode = diagnostics.pgCode;
     if (diagnostics.code) this.code = diagnostics.code;
   }
 }

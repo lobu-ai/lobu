@@ -181,6 +181,15 @@ describe('query_sql connection pushdown', () => {
     ).rejects.toThrow(/duplicate output column/i);
   }, 60_000);
 
+  it.each([
+    ['unknown column', 'SELECT absent_column FROM qsp_ext'],
+    ['division by zero', 'SELECT 1 / 0 AS value'],
+  ])('preserves PostgreSQL %s as a non-retryable caller error through both source entrypoints', async (_name, sql) => {
+    const expected = { code: 'VALIDATION', httpStatus: 400, retryable: false };
+    await expect(querySql({ sql, connection: 'qsp-ext-db' }, {}, ctx)).rejects.toMatchObject(expected);
+    await expect(buildClientSDK(ctx, {} as Env).query(sql, { connection: 'qsp-ext-db' })).rejects.toMatchObject(expected);
+  }, 60_000);
+
   it('errors on a missing connection', async () => {
     await expect(querySql({ sql: 'SELECT 1', connection: 'nope' }, {}, ctx)).rejects.toThrow(
       /not found or not accessible/i

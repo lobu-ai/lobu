@@ -48,6 +48,7 @@ import {
 } from "@lobu/connector-worker/isolate";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { dbEgressConfig } from "../../../utils/cloud-mode";
+import { classifyPushdownFailure } from "../../../lib/connector-pushdown";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PACKAGES_DIR = resolve(HERE, "../../../../..");
@@ -73,6 +74,7 @@ interface LaneError extends Error {
 	exitReason?: string;
 	httpStatus?: number;
 	outputTail?: string;
+	pgCode?: string;
 }
 
 interface Captured {
@@ -1160,6 +1162,32 @@ describe("isolate lane: fixture connector", () => {
 		expect(shape(isolate)).toEqual(shape(proc));
 		expect(isolate.message).toContain("fixture exploded");
 		expect(isolate.httpStatus).toBe(418);
+	});
+
+	it.each([
+		["42703", undefined, "42703", "VALIDATION"],
+		["23505", undefined, "23505", "VALIDATION"],
+		["57014", undefined, "57014", "UPSTREAM_TIMEOUT"],
+		["08006", undefined, "08006", "NETWORK"],
+		["40001", undefined, "40001", "NETWORK"],
+		["40P01", undefined, "40P01", "NETWORK"],
+		["42703", 503, "42703", "UPSTREAM_5XX"],
+		["EPIPE", undefined, undefined, "UPSTREAM_5XX"],
+		["42703x", undefined, undefined, "UPSTREAM_5XX"],
+		[42703, undefined, undefined, "UPSTREAM_5XX"],
+		[undefined, undefined, undefined, "UPSTREAM_5XX"],
+	])("preserves bounded SQLSTATE %s across the native executor (HTTP %s)", async (code, status, pgCode, classification) => {
+		const compiledCode = `module.exports = { default: class {
+  async execute() {}
+  async sync(ctx) {
+    throw Object.assign(new Error('fixture database failure'), { code: ctx.config.code, status: ctx.config.status });
+  }
+}};`;
+		const failure = await failViaRuntime(compiledCode, syncJob({ code, status }));
+		expect(failure.pgCode).toBe(pgCode);
+		expect(failure.message).toBe("fixture database failure");
+		expect(failure.exitReason).toBe("error_message");
+		expect(classifyPushdownFailure(failure)).toBe(classification);
 	});
 
 	it("forwards console output through the redactor", async () => {
