@@ -392,6 +392,8 @@ export async function devCommand(
     (existsSync(bundledWebDistPath) ? bundledWebDistPath : undefined);
 
   const childEnv: Record<string, string> = {
+    // Reported by the anonymous install ping; the project .env may override.
+    LOBU_DEPLOY_KIND: "cli",
     ...mergedEnv,
     ...runtime.env,
     LOBU_DEV_PROJECT_PATH: projectPath,

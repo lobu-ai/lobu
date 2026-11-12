@@ -8,8 +8,8 @@
  * Re-read on every call so a process (or test harness) can flip the flag
  * without a restart. All call sites are cold-path, so caching isn't worth it.
  */
-export function isCloudMode(): boolean {
-  const raw = process.env.LOBU_CLOUD_MODE;
+export function isCloudMode(env: Record<string, string | undefined> = process.env): boolean {
+  const raw = env.LOBU_CLOUD_MODE;
   if (!raw) return false;
   const v = raw.trim().toLowerCase();
   return v === '1' || v === 'true' || v === 'yes';
