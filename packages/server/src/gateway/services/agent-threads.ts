@@ -14,7 +14,7 @@
  * remain the single auth-gated entry point for external clients.
  */
 import { randomUUID } from "node:crypto";
-import { createLogger, generateWorkerToken } from "@lobu/core";
+import { createLogger, generateWorkerTokenWithExpiry } from "@lobu/core";
 import type { QueueProducer } from "../infrastructure/queue/queue-producer.js";
 import type { ISessionManager, ThreadSession } from "../session.js";
 
@@ -55,8 +55,6 @@ interface CreateThreadForAgentResult {
   expiresAt: number;
 }
 
-const TOKEN_EXPIRATION_MS = 24 * 60 * 60 * 1000;
-
 /**
  * Mint a new thread session for an agent.
  *
@@ -76,14 +74,13 @@ export async function createThreadForAgent(
   const channelId = `api_${userId}`;
   const deploymentName = `api-${agentId.slice(0, 8)}`;
 
-  const token = generateWorkerToken(agentId, conversationId, deploymentName, {
+  const { token, expiresAt } = generateWorkerTokenWithExpiry(agentId, conversationId, deploymentName, {
     channelId,
     agentId,
     organizationId,
     platform: "api",
     sessionKey: userId,
   });
-  const expiresAt = Date.now() + TOKEN_EXPIRATION_MS;
 
   const session: ThreadSession = {
     conversationId,
