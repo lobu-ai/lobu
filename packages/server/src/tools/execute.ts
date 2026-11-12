@@ -543,12 +543,16 @@ async function executeToolInSpan(
     if (error instanceof ToolError || error instanceof ToolUserError) {
       error.callId = callId;
     }
-    logToolCallFailure({
-      error,
-      toolName,
-      callId,
-      durationMs: Date.now() - startTime,
-    });
+    // Match span recording: only a read handler receives the caller's signal.
+    // A caller-abandoned read is not an operational failure; writes still log.
+    if (!toolContext.abortSignal?.aborted) {
+      logToolCallFailure({
+        error,
+        toolName,
+        callId,
+        durationMs: Date.now() - startTime,
+      });
+    }
     await recordToolInvocationAudit({
       toolName,
       args,
