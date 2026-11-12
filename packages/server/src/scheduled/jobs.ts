@@ -62,6 +62,11 @@ import {
   WAKE_AGENT_TASK,
 } from './task-definitions';
 import { triggerEmbedBackfill } from './trigger-embed-backfill';
+import {
+  INSTALL_PING_TASK,
+  logInstallTelemetryNotice,
+  sendInstallPing,
+} from '../telemetry/install-ping';
 import { runMemberClaimDriftCheck } from './member-claim-drift';
 import { runReapStaleDeviceWorkers } from './reap-stale-device-workers';
 import { runReapExpiredPendingSlackInstalls } from './reap-expired-pending-installs';
@@ -208,6 +213,13 @@ function registerMaintenanceTasks(
   // MCP session cleanup — drops expired session rows from the DB. Lives here
   // (cross-pod-coordinated) instead of as an mcp-handler module-level
   // setInterval. The IN-MEMORY part stays per-pod (see mcp-handler.ts).
+  // Anonymous install ping. The cron must be identical on every replica: the
+  // tick's idempotency key is what collapses N pods into one ping a day.
+  // Registered even when disabled so an already-queued tick still finds its
+  // handler; sendInstallPing re-checks the opt-out and does nothing.
+  logInstallTelemetryNotice();
+  scheduler.register(INSTALL_PING_TASK, () => sendInstallPing(), { cron: '17 3 * * *' });
+
   scheduler.register(
     'mcp-session-cleanup',
     () => cleanupExpiredMcpSessions(),

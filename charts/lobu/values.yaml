@@ -66,6 +66,9 @@ app:
     NODE_ENV: production
     # Label structured diagnostics with the deployment environment.
     ENVIRONMENT: production
+    # Reported by the anonymous daily install ping. Set LOBU_TELEMETRY: "0"
+    # here to turn the ping off (docs/DOCKER.md#anonymous-usage-telemetry).
+    LOBU_DEPLOY_KIND: helm
     # Hold teardown after SIGTERM so /health/ready returns 503 and kube-proxy
     # removes this pod from the Service endpoints before in-flight connections
     # are cut. Keep below terminationGracePeriodSeconds (and roughly aligned
