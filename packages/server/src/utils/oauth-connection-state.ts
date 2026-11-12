@@ -76,6 +76,31 @@ export async function lockOAuthAccountBinding(
   return true;
 }
 
+/**
+ * SQL value for `connections.account_id`. The column marks the one live
+ * connection per connector that owns an OAuth account
+ * (`idx_connections_org_connector_account_live`). Further sources on the same
+ * account (an explicit new slug or source config, or connections sharing one
+ * auth profile) read credentials through their auth profile and stay unmarked,
+ * so every write of the column goes through this rather than copying the
+ * profile's account. `account`, `connectorKey` and `connectionId` take values
+ * or SQL fragments; INSERTs omit `connectionId`.
+ */
+export function connectionAccountStamp(
+  db: DbClient,
+  target: { organizationId: string; connectorKey: unknown; account: unknown; connectionId?: unknown },
+) {
+  return db`(SELECT stamp.account_id FROM (SELECT (${target.account})::text AS account_id) stamp
+    WHERE NOT EXISTS (
+      SELECT 1 FROM connections holder
+      WHERE holder.organization_id = ${target.organizationId}
+        AND holder.connector_key = ${target.connectorKey}
+        AND holder.account_id = stamp.account_id
+        AND holder.deleted_at IS NULL
+        ${target.connectionId === undefined ? db`` : db`AND holder.id <> ${target.connectionId}`}
+    ))`;
+}
+
 export async function syncOAuthConnectionsForAuthProfile(
   organizationId: string,
   authProfileId: number
@@ -246,6 +271,7 @@ export async function syncOAuthConnectionsForAuthProfile(
     WHERE organization_id = ${organizationId}
       AND auth_profile_id = ${authProfileId}
       AND deleted_at IS NULL
+    ORDER BY id
   `;
 
   for (const row of connectionRows as Array<{ id: number; status: string }>) {
@@ -258,7 +284,8 @@ export async function syncOAuthConnectionsForAuthProfile(
     await sql`
       UPDATE connections
       SET status = ${nextConnectionStatus},
-          account_id = ${authProfile.account_id},
+          account_id = ${connectionAccountStamp(sql, { organizationId,
+            connectorKey: sql`connections.connector_key`, connectionId: row.id, account: authProfile.account_id })},
           updated_at = NOW()
       WHERE id = ${row.id}
     `;

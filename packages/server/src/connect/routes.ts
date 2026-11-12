@@ -40,7 +40,7 @@ import {
 } from '../utils/auth-credential-secrets';
 import { type ConnectTokenRow, resolveConnectToken } from '../utils/connect-tokens';
 import logger from '../utils/logger';
-import { lockOAuthAccountBinding, syncOAuthConnectionsForAuthProfile } from '../utils/oauth-connection-state';
+import { connectionAccountStamp, lockOAuthAccountBinding, syncOAuthConnectionsForAuthProfile } from '../utils/oauth-connection-state';
 import {
   isPersonalCredentialKind,
   resolveOAuthAppClientCredentials,
@@ -1086,7 +1086,8 @@ async function handleOAuthCallback(
         const sitePatch = jiraSiteConfigPatch(jiraSite);
         await tx`
           UPDATE connections
-          SET account_id = ${resolvedAccountId},
+          SET account_id = ${connectionAccountStamp(tx, { organizationId: tokenRow.organization_id,
+                connectorKey: tx`connections.connector_key`, connectionId: tokenRow.connection_id, account: resolvedAccountId })},
               auth_profile_id = COALESCE(${authProfileId ?? null}, auth_profile_id),
               status = CASE WHEN status = 'paused' THEN status ELSE 'active' END,
               error_message = CASE WHEN status = 'paused' THEN error_message ELSE NULL END,
@@ -1105,7 +1106,8 @@ async function handleOAuthCallback(
       } else {
         await tx`
           UPDATE connections
-          SET account_id = ${resolvedAccountId},
+          SET account_id = ${connectionAccountStamp(tx, { organizationId: tokenRow.organization_id,
+                connectorKey: tx`connections.connector_key`, connectionId: tokenRow.connection_id, account: resolvedAccountId })},
               auth_profile_id = COALESCE(${authProfileId ?? null}, auth_profile_id),
               status = CASE WHEN status = 'paused' THEN status ELSE 'active' END,
               error_message = CASE WHEN status = 'paused' THEN error_message ELSE NULL END,

@@ -10,7 +10,7 @@ import {
 } from '../utils/auth-profiles';
 import { getOAuthAuthMethods, normalizeConnectorAuthSchema } from '../utils/connector-auth';
 import logger from '../utils/logger';
-import { syncOAuthConnectionsForAuthProfile } from '../utils/oauth-connection-state';
+import { connectionAccountStamp, syncOAuthConnectionsForAuthProfile } from '../utils/oauth-connection-state';
 import {
   declaredOAuthScopes,
   hasAllScopes,
@@ -194,7 +194,8 @@ export async function provisionConnectorFromSocialLogin(params: {
         await sql`
           UPDATE connections
           SET auth_profile_id = ${authProfile.id},
-              account_id = ${authProfile.account_id},
+              account_id = ${connectionAccountStamp(sql, { organizationId, connectorKey: sql`connections.connector_key`,
+                connectionId: existingConnection.id, account: authProfile.account_id })},
               visibility = 'private',
               updated_at = NOW()
           WHERE id = ${existingConnection.id} AND organization_id = ${organizationId}
