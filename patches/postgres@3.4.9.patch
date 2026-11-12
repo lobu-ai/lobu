@@ -17,7 +17,24 @@ index 8e79170aeb13efe8c3c77ccede0cd3a115b5e1b5..6f9ea35bc6413ac0e8528970859dc0ae
      if (stream)
        return queryError(q, Errors.generic('COPY_IN_PROGRESS', 'You cannot execute queries during copy'))
  
-@@ -254,6 +262,16 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -174,9 +182,14 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+       build(q)
+-      return write(toBuffer(q))
++      const written = write(toBuffer(q))
++      // BEGIN must reserve its connection even when this write fills the
++      // pipeline or reports backpressure. The hook's result still controls
++      // whether the pool may schedule another query on this connection.
++      const executed = !q.options.onexecute || q.options.onexecute(connection)
++      return written
+         && !q.describeFirst
+         && !q.cursorFn
+         && sent.length < max_pipeline
+-        && (!q.options.onexecute || q.options.onexecute(connection))
++        && executed
+     } catch (error) {
+       sent.length === 0 && write(Sync)
+       errored(error)
+@@ -254,6 +267,16 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
    }
  
    function nextWrite(fn) {
@@ -34,7 +51,7 @@ index 8e79170aeb13efe8c3c77ccede0cd3a115b5e1b5..6f9ea35bc6413ac0e8528970859dc0ae
      const x = socket.write(chunk, fn)
      nextWriteTimer !== null && clearImmediate(nextWriteTimer)
      chunk = nextWriteTimer = null
-@@ -566,9 +584,12 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -566,9 +589,12 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
          return fetchArrayTypes()
        }
  
@@ -68,7 +85,24 @@ index 07f6716702ac888215c86ad6e0071aaf55ae519c..c4da4ada1ed4008b02ce1dcfb801e175
      if (stream)
        return queryError(q, Errors.generic('COPY_IN_PROGRESS', 'You cannot execute queries during copy'))
  
-@@ -252,6 +260,16 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -172,9 +180,14 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+       build(q)
+-      return write(toBuffer(q))
++      const written = write(toBuffer(q))
++      // BEGIN must reserve its connection even when this write fills the
++      // pipeline or reports backpressure. The hook's result still controls
++      // whether the pool may schedule another query on this connection.
++      const executed = !q.options.onexecute || q.options.onexecute(connection)
++      return written
+         && !q.describeFirst
+         && !q.cursorFn
+         && sent.length < max_pipeline
+-        && (!q.options.onexecute || q.options.onexecute(connection))
++        && executed
+     } catch (error) {
+       sent.length === 0 && write(Sync)
+       errored(error)
+@@ -252,6 +265,16 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
    }
  
    function nextWrite(fn) {
@@ -85,7 +119,7 @@ index 07f6716702ac888215c86ad6e0071aaf55ae519c..c4da4ada1ed4008b02ce1dcfb801e175
      const x = socket.write(chunk, fn)
      nextWriteTimer !== null && clearImmediate(nextWriteTimer)
      chunk = nextWriteTimer = null
-@@ -564,9 +582,12 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -564,9 +587,12 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
          return fetchArrayTypes()
        }
  
@@ -119,7 +153,24 @@ index 1b1cccde43b4570d5d071d6ffaab2669b3c2065a..9d4a0471efab70ba73263bc79f5d6d92
      if (stream)
        return queryError(q, Errors.generic('COPY_IN_PROGRESS', 'You cannot execute queries during copy'))
  
-@@ -252,6 +260,16 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -172,9 +180,14 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+       build(q)
+-      return write(toBuffer(q))
++      const written = write(toBuffer(q))
++      // BEGIN must reserve its connection even when this write fills the
++      // pipeline or reports backpressure. The hook's result still controls
++      // whether the pool may schedule another query on this connection.
++      const executed = !q.options.onexecute || q.options.onexecute(connection)
++      return written
+         && !q.describeFirst
+         && !q.cursorFn
+         && sent.length < max_pipeline
+-        && (!q.options.onexecute || q.options.onexecute(connection))
++        && executed
+     } catch (error) {
+       sent.length === 0 && write(Sync)
+       errored(error)
+@@ -252,6 +265,16 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
    }
  
    function nextWrite(fn) {
@@ -136,7 +187,7 @@ index 1b1cccde43b4570d5d071d6ffaab2669b3c2065a..9d4a0471efab70ba73263bc79f5d6d92
      const x = socket.write(chunk, fn)
      nextWriteTimer !== null && clearImmediate(nextWriteTimer)
      chunk = nextWriteTimer = null
-@@ -564,9 +582,12 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -564,9 +587,12 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
          return fetchArrayTypes()
        }
  
