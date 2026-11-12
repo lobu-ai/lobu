@@ -10,8 +10,8 @@
  * (encrypted with a test ENCRYPTION_KEY) scoped to a different agent, so
  * ownership is always denied. This file bootstraps the gateway test DB.
  */
-import { afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { generateWorkerToken } from "@lobu/core";
+import { afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { generateWorkerToken, verifyWorkerToken } from "@lobu/core";
 import { hashToken } from "../../auth/oauth/utils.js";
 import { getDb } from "../../db/client.js";
 import { parseAutomationRunConversationId } from "../permissions/automation-run-intent.js";
@@ -543,6 +543,51 @@ describe("POST /api/v1/agents — automation_run intent verification", () => {
     // Exact prod-proven shape: `<agentId>_automation_<automationId>_run_<runId>`.
     expect(body.agentId).toBe(`${AGENT}_automation_${automationId}_run_${runId}`);
     expect(body.agentId).not.toContain(ORG_ID);
+  });
+
+  test.each([undefined, "300000"])("ordinary create and refresh advertise the effective token TTL (%s)", async (configuredTtl) => {
+    const savedTtl = process.env.WORKER_TOKEN_TTL_MS;
+    const savedSkew = process.env.WORKER_TOKEN_CLOCK_SKEW_MS;
+    if (configuredTtl === undefined) delete process.env.WORKER_TOKEN_TTL_MS;
+    else process.env.WORKER_TOKEN_TTL_MS = configuredTtl;
+    process.env.WORKER_TOKEN_CLOCK_SKEW_MS = "0";
+    const ttl = configuredTtl ? Number(configuredTtl) : 2 * 60 * 60 * 1000;
+    // The owner credential can refresh even after the shorter session token
+    // expires. No expired session bearer is allowed to renew itself.
+    await getDb()`UPDATE oauth_tokens SET expires_at = NOW() + INTERVAL '2 days'
+      WHERE token_hash = ${hashToken(ORDINARY_ACCESS_TOKEN)}`;
+    const app = makeAutomationApp();
+    const request = () => app.request("/api/v1/agents", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${ORDINARY_ACCESS_TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ agentId: AGENT, forceNew: false }),
+    });
+    let clock: ReturnType<typeof spyOn> | undefined;
+    try {
+      const first = await request();
+      expect(first.status).toBe(201);
+      const created = await first.json() as { agentId: string; token: string; expiresAt: number };
+      const claims = verifyWorkerToken(created.token)!;
+      expect(claims).not.toBeNull();
+      expect(created.expiresAt).toBe(claims.timestamp + ttl);
+
+      clock = spyOn(Date, "now").mockReturnValue(claims.timestamp + ttl + 1);
+      expect(verifyWorkerToken(created.token)).toBeNull();
+      const second = await request();
+      expect(second.status).toBe(201);
+      const refreshed = await second.json() as { agentId: string; token: string; expiresAt: number };
+      const renewedClaims = verifyWorkerToken(refreshed.token)!;
+      expect(renewedClaims).not.toBeNull();
+      expect(refreshed.agentId).toBe(created.agentId);
+      expect(refreshed.token).not.toBe(created.token);
+      expect(refreshed.expiresAt).toBe(renewedClaims.timestamp + ttl);
+    } finally {
+      clock?.mockRestore();
+      if (savedTtl === undefined) delete process.env.WORKER_TOKEN_TTL_MS;
+      else process.env.WORKER_TOKEN_TTL_MS = savedTtl;
+      if (savedSkew === undefined) delete process.env.WORKER_TOKEN_CLOCK_SKEW_MS;
+      else process.env.WORKER_TOKEN_CLOCK_SKEW_MS = savedSkew;
+    }
   });
 
   test("an ordinary same-org token cannot borrow an in-flight Automation run", async () => {

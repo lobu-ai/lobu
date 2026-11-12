@@ -62,7 +62,7 @@ export class AgentSession {
     return this._token;
   }
 
-  /** Unix epoch ms when {@link token} expires (24h TTL). */
+  /** Unix epoch ms when {@link token} expires, as advertised by the server. */
   get expiresAt(): number {
     return this._expiresAt;
   }
@@ -92,8 +92,8 @@ export class AgentSession {
   /**
    * Re-mint this session's token without losing the conversation. Re-runs the
    * original create-session request against the resume path (`forceNew: false`)
-   * and updates {@link token}/{@link expiresAt} in place. Tokens have a 24h TTL;
-   * call this before {@link expiresAt} for a long-lived chat. Manual by
+   * and updates {@link token}/{@link expiresAt} in place. Call this before
+   * {@link expiresAt} for a long-lived chat. Manual by
    * design — there is no background auto-renew.
    */
   async refresh(): Promise<this> {

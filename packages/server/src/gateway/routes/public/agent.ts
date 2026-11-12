@@ -5,11 +5,11 @@ import {
   type AgentConfigStore,
   createLogger,
   createRootSpan,
-  generateWorkerToken,
   runInSpanContext,
   type NetworkConfig,
   normalizeDomainPatterns,
   verifyWorkerToken,
+  generateWorkerTokenWithExpiry,
 } from "@lobu/core";
 import { type Context, Hono } from "hono";
 import { streamSSE } from "hono/streaming";
@@ -973,9 +973,8 @@ export function createAgentApi(config: AgentApiConfig): Hono {
     // Automation sessions mint through buildAutomationRunWorkerAccess so the
     // token identity matches the canonical `..._automation_<id>_run_<id>`
     // correlation AND the advertised expiry matches the worker token's real
-    // verification TTL (WORKER_TOKEN_TTL_MS, default 2h) — the generic
-    // TOKEN_EXPIRATION_MS (24h) overstated it. Non-automation sessions keep the
-    // generic mint unchanged.
+    // verification TTL. Ordinary sessions use the same expiry-aware mint:
+    // TOKEN_EXPIRATION_MS is the owner credential lifetime, not this bearer's.
     const mintSessionToken = (): { token: string; expiresAt: number } => {
       const automationAccess =
         automationIntent && tokenOrganizationId
@@ -987,19 +986,14 @@ export function createAgentApi(config: AgentApiConfig): Hono {
               conversationId,
             })
           : null;
-      return {
-        token:
-          automationAccess?.token ??
-          generateWorkerToken(agentId, conversationId, deploymentName, {
-            channelId,
-            agentId,
-            organizationId: tokenOrganizationId,
-            platform: "api",
-            sessionKey: userId,
-          }),
-        expiresAt:
-          automationAccess?.expiresAt ?? Date.now() + TOKEN_EXPIRATION_MS,
-      };
+      if (automationAccess) return automationAccess;
+      return generateWorkerTokenWithExpiry(agentId, conversationId, deploymentName, {
+        channelId,
+        agentId,
+        organizationId: tokenOrganizationId,
+        platform: "api",
+        sessionKey: userId,
+      });
     };
 
     // Read the session this request would resume or overwrite once, then run
