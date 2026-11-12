@@ -142,6 +142,7 @@ export const UnlinkedEntityNameSchema = Type.Object({
   reason: Type.Union([
     Type.Literal("not_found"),
     Type.Literal("ambiguous"),
+    // Only on a replay of a save stored before members could link records (Nov 2026).
     Type.Literal("not_writable"),
   ]),
 });
