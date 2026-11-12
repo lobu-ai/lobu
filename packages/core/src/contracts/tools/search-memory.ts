@@ -56,7 +56,8 @@ export const SearchSchema = Type.Object({
   ),
   fuzzy: Type.Optional(
     Type.Boolean({
-      description: "Enable fuzzy name matching",
+      description:
+        "Enable fuzzy name matching. When false, an entity matches only on its exact name or an exact identifier (case-insensitive); no partial or similar names.",
       default: true,
     })
   ),

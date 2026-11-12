@@ -104,4 +104,22 @@ describe('search_memory > exact-identifier entity match', () => {
     );
     expect(result.matches.map((m) => m.name)).toContain('Instinct Test Two');
   });
+
+  it('non-fuzzy mode never falls back to partial query variants', async () => {
+    // "Instinct Agent" is a word-pair variant of this query; only fuzzy search may recover it.
+    const query = 'Instinct Agent Nonexistent';
+    const exact = await search(
+      { query, fuzzy: false, include_content: false },
+      {} as Parameters<typeof search>[1],
+      ctxFor(orgId, userId)
+    );
+    expect(exact.matches).toEqual([]);
+
+    const fuzzy = await search(
+      { query, include_content: false },
+      {} as Parameters<typeof search>[1],
+      ctxFor(orgId, userId)
+    );
+    expect(fuzzy.matches.map((m) => m.name)).toContain('Instinct Agent');
+  });
 });

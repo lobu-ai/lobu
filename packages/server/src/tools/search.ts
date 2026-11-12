@@ -2016,7 +2016,8 @@ async function searchWorkspaceImpl(
     recallFor(),
   ]);
 
-  if (results.length === 0 && query && !args.query_embedding?.length) {
+  // Partial-query variants are fuzzy recovery; `fuzzy: false` means exact name or identifier only.
+  if (results.length === 0 && query && (args.fuzzy ?? true) && !args.query_embedding?.length) {
     const fallbackQueries = expandSearchQueries(query, {
       maxVariants: 8,
     }).slice(1);

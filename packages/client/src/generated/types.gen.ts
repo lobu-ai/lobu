@@ -63,7 +63,7 @@ export type SearchMemoryData = {
      */
     category?: string;
     /**
-     * Enable fuzzy name matching
+     * Enable fuzzy name matching. When false, an entity matches only on its exact name or an exact identifier (case-insensitive); no partial or similar names.
      */
     fuzzy?: boolean;
     /**
