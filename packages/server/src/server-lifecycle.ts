@@ -443,7 +443,18 @@ export function createServerLifecycle(
 		// 6. Wrapper app + HTTP server. Timeouts are locked at 75/76s so SSE
 		// streams (MCP) survive idle periods above the typical 60s LB timeout.
 		const wrapper = buildWrapperApp(env, lobuApp);
-		const honoListener = getRequestListener(wrapper.fetch);
+		const requestListener = getRequestListener(wrapper.fetch);
+		let activeHandlers = 0;
+		let checkHandlersDrained: (() => void) | undefined;
+		const honoListener = async (req: http.IncomingMessage, res: http.ServerResponse) => {
+			activeHandlers++;
+			try {
+				await requestListener(req, res);
+			} finally {
+				activeHandlers--;
+				checkHandlersDrained?.();
+			}
+		};
 		const httpServer = http.createServer();
 		httpServer.keepAliveTimeout = 75_000;
 		httpServer.headersTimeout = 76_000;
@@ -511,6 +522,8 @@ export function createServerLifecycle(
 			//      accepted requests retain those dependencies while draining.
 			//      Busy kept-alive connections end after their current response,
 			//      which the wrapper marks `Connection: close` during shutdown.
+			//      Closing a pipelined socket does not cancel other accepted
+			//      handlers on it, so await those even after `close()` completes.
 			//      `close()` alone never completes while non-idle sockets
 			//      such as SSE streams are open, so it is bounded by
 			//      HTTP_CLOSE_TIMEOUT_MS (default 10s). Requests still active after
@@ -523,14 +536,24 @@ export function createServerLifecycle(
 					signal === "SIGINT" ? Math.min(configuredMs, 1_000) : configuredMs;
 				await new Promise<void>((resolve) => {
 					let settled = false;
+					let listenerClosed = false;
 					const done = () => {
 						if (settled) return;
 						settled = true;
+						clearTimeout(timer);
+						checkHandlersDrained = undefined;
 						resolve();
 					};
-					httpServer.close(() => done());
+					const timer = setTimeout(done, closeTimeoutMs);
+					timer.unref?.();
+					checkHandlersDrained = () => {
+						if (listenerClosed && activeHandlers === 0) done();
+					};
+					httpServer.close(() => {
+						listenerClosed = true;
+						checkHandlersDrained?.();
+					});
 					httpServer.closeIdleConnections();
-					setTimeout(done, closeTimeoutMs).unref?.();
 				});
 			});
 			//   c. Close Vite after the listener stops accepting new connections so

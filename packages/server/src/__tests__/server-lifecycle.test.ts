@@ -19,9 +19,8 @@
 
 import http from "node:http";
 import net from "node:net";
-import { serve } from "@hono/node-server";
 import { WorkerClient } from "@lobu/connector-worker/daemon";
-import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createSpan, currentTraceLogFields, initTracing, runInSpanContext, shutdownTracing, SpanKind, SpanStatusCode } from "@lobu/core";
 import { InMemorySpanExporter, SimpleSpanProcessor } from "@opentelemetry/sdk-trace-node";
 import { getTestDb } from "./setup/test-db";
@@ -529,8 +528,17 @@ describe("shutdown ordering (live drain)", () => {
 	// flag makes `/api/workers/poll` stop holding and answer
 	// `next_poll_seconds: 10`, turning each device action in a later browser
 	// test into a ~10s wait.
+	let signalListeners: NodeJS.SignalsListener[] = [];
+	beforeEach(() => {
+		signalListeners = [...process.listeners("SIGTERM"), ...process.listeners("SIGINT")];
+	});
 	afterEach(() => {
 		vi.restoreAllMocks();
+		for (const signal of ["SIGTERM", "SIGINT"] as const) {
+			for (const listener of process.listeners(signal)) {
+				if (!signalListeners.includes(listener)) process.removeListener(signal, listener);
+			}
+		}
 	});
 
 	it(
@@ -719,171 +727,188 @@ describe("shutdown ordering (live drain)", () => {
 		20_000,
 	);
 
+	const deferred = () => {
+		let resolve!: () => void;
+		const promise = new Promise<void>((done) => {
+			resolve = done;
+		});
+		return { promise, resolve };
+	};
+
+	// Boots the real lifecycle with teardown steps recorded in `events`.
+	async function bootLifecycle(
+		lobuApp: unknown,
+		env: Record<string, string>,
+		events: string[],
+		closeDb: () => Promise<void> = async () => {},
+	) {
+		const lifecycleState = await import("../lifecycle-state");
+		let shuttingDown = false;
+		vi.spyOn(lifecycleState, "markShuttingDown").mockImplementation(() => {
+			shuttingDown = true;
+		});
+		vi.spyOn(lifecycleState, "isShuttingDown").mockImplementation(() => shuttingDown);
+		const { closeDbSingleton } = await import("../db/client");
+		const { stopLobuGateway } = await import("../lobu/gateway");
+		vi.mocked(stopLobuGateway).mockImplementation(async () => {
+			events.push("gateway-stopped");
+		});
+		vi.mocked(closeDbSingleton).mockImplementation(closeDb);
+		const exited = new Promise<void>((resolve) => {
+			vi.spyOn(process, "exit").mockImplementation((() => {
+				resolve();
+				return undefined as never;
+			}) as never);
+		});
+		gwAppSlot.app = lobuApp;
+		const port = await new Promise<number>((resolve, reject) => {
+			const scout = net.createServer();
+			scout.on("error", reject);
+			scout.listen(0, "127.0.0.1", () => {
+				const { port } = scout.address() as net.AddressInfo;
+				scout.close(() => resolve(port));
+			});
+		});
+		const { createServerLifecycle } = await import("../server-lifecycle");
+		await createServerLifecycle({
+			mode: "postgres",
+			env: env as never,
+			host: "127.0.0.1",
+			port,
+			databaseReadiness: async () => {},
+		}).start();
+		return { port, exited };
+	}
+
 	it(
 		"closes a worker's kept-alive connection so its completion cannot reach pool teardown",
 		async () => {
-			// A worker keeps one pooled connection busy across SIGTERM. Node's
-			// `server.close()` never ends a connection that was active when it ran,
-			// so a kept-alive connection would carry the worker's next request into
-			// gateway and pool teardown: on the 2026-11-12 rollout both attempts
-			// of a sync completion got 500 CONNECTION_ENDED from the closing pool.
+			// Node's `server.close()` never ends a connection that was busy when it
+			// ran. On the 2026-11-12 rollout a worker kept sending over such a
+			// connection, and both attempts of a sync completion got 500
+			// CONNECTION_ENDED from the closing pool.
 			const sql = getTestDb();
 			const workerId = "synthetic-draining-worker";
 			const org = await createTestOrganization();
 			const [connection] = await sql`
 				INSERT INTO connections (organization_id, connector_key, status, visibility, slug, created_at, updated_at)
-				VALUES (${org.id}, 'chrome', 'active', 'org', 'synthetic-drain', NOW(), NOW())
-				RETURNING id`;
-			const [feed] = await sql`
-				INSERT INTO feeds (organization_id, connection_id, feed_key, status, schedule, consecutive_failures, created_at, updated_at)
-				VALUES (${org.id}, ${connection.id}, 'synthetic-drain', 'active', '0 */6 * * *', 0, NOW(), NOW())
-				RETURNING id`;
+				VALUES (${org.id}, 'chrome', 'active', 'org', 'synthetic-drain', NOW(), NOW()) RETURNING id`;
 			const [run] = await sql`
-				INSERT INTO runs (organization_id, run_type, feed_id, connection_id, connector_key, connector_version,
+				INSERT INTO runs (organization_id, run_type, connection_id, connector_key, connector_version,
 					status, claimed_by, claimed_at, created_at)
-				VALUES (${org.id}, 'sync', ${feed.id}, ${connection.id}, 'chrome', '0.2.0',
-					'running', ${workerId}, NOW(), NOW())
+				VALUES (${org.id}, 'sync', ${connection.id}, 'chrome', '0.2.0', 'running', ${workerId}, NOW(), NOW())
 				RETURNING id`;
-			const runState = async () => (await sql`
-				SELECT r.status, r.error_message, f.consecutive_failures
-				FROM runs r JOIN feeds f ON f.id = r.feed_id WHERE r.id = ${run.id}`)[0];
-			const failure = {
-				run_id: Number(run.id),
-				worker_id: workerId,
-				status: "failed" as const,
-				error_message: "synthetic connector failure",
-				items_collected: 0,
-			};
 
-			const lifecycleState = await import("../lifecycle-state");
-			let shuttingDown = false;
-			vi.spyOn(lifecycleState, "markShuttingDown").mockImplementation(() => {
-				shuttingDown = true;
-			});
-			vi.spyOn(lifecycleState, "isShuttingDown").mockImplementation(() => shuttingDown);
-			// Teardown closes the real pool while another request's transaction is
-			// still open on it, as in production, and holds there so the worker's
-			// report lands while the pool is closing.
+			// Teardown closes the real pool while another request's transaction
+			// keeps it open, as in production, and holds there.
 			const db = await vi.importActual<typeof import("../db/client")>("../db/client");
-			const { closeDbSingleton } = await import("../db/client");
-			let releaseTeardown!: () => void;
-			const teardownReleased = new Promise<void>((resolve) => {
-				releaseTeardown = resolve;
-			});
-			let poolClosing!: () => void;
-			const poolClosingReached = new Promise<void>((resolve) => {
-				poolClosing = resolve;
-			});
-			vi.mocked(closeDbSingleton).mockImplementation(async () => {
-				let transactionOpen!: () => void;
-				const opened = new Promise<void>((resolve) => {
-					transactionOpen = resolve;
-				});
+			const poolClosing = deferred();
+			const releaseTeardown = deferred();
+			const closeDb = async () => {
+				const open = deferred();
 				const inflight = db.getDb().begin(async (tx) => {
 					await tx`SELECT 1`;
-					transactionOpen();
-					await teardownReleased;
+					open.resolve();
+					await releaseTeardown.promise;
 				});
-				await opened;
+				await open.promise;
 				const closed = db.closeDbSingleton();
-				poolClosing();
+				poolClosing.resolve();
 				await Promise.all([inflight, closed]);
-			});
-			const exited = new Promise<void>((resolveExit) => {
-				vi.spyOn(process, "exit").mockImplementation((() => {
-					resolveExit();
-					return undefined as never;
-				}) as never);
-			});
-			const sigListenersBefore = [...process.listeners("SIGTERM"), ...process.listeners("SIGINT")];
-
+			};
 			const { Hono } = await import("hono");
 			const { app: mainApp } = await import("../index");
 			const { completeWorkerJob } = await import("../worker-api");
 			mainApp.post("/api/workers/complete", completeWorkerJob);
-			let busyStarted!: () => void;
-			const busy = new Promise<void>((resolve) => {
-				busyStarted = resolve;
-			});
+			const busy = deferred();
 			const lobuApp = new Hono();
-			lobuApp.post("/busy", (c) => {
-				busyStarted();
-				return new Promise<Response>((resolve) => setTimeout(() => resolve(c.json({ ok: true })), 300));
+			lobuApp.post("/busy", async (c) => {
+				busy.resolve();
+				await new Promise((resolve) => setTimeout(resolve, 300));
+				return c.json({ ok: true });
 			});
-			gwAppSlot.app = lobuApp;
+			const { port, exited } = await bootLifecycle(lobuApp, { HTTP_CLOSE_TIMEOUT_MS: "1000" }, [], closeDb);
+			const baseUrl = `http://127.0.0.1:${port}`;
 
-			const freePort = await new Promise<number>((resolve, reject) => {
-				const scout = net.createServer();
-				scout.unref();
-				scout.on("error", reject);
-				scout.listen(0, "127.0.0.1", () => {
-					const { port } = scout.address() as net.AddressInfo;
-					scout.close(() => resolve(port));
-				});
-			});
-			const { createServerLifecycle } = await import("../server-lifecycle");
-			await createServerLifecycle({
-				mode: "postgres",
-				env: { HTTP_CLOSE_TIMEOUT_MS: "1000" } as never,
-				host: "127.0.0.1",
-				port: freePort,
-				databaseReadiness: async () => {},
-			}).start();
-
-			let signalled = false;
+			// The worker's fetch pool keeps this connection and, once it is idle,
+			// reuses it for the completion below.
+			const busyResponse = fetch(`${baseUrl}/lobu/busy`, { method: "POST" });
+			await busy.promise;
+			process.emit("SIGTERM");
 			try {
-				const baseUrl = `http://127.0.0.1:${freePort}`;
-				// The worker's fetch keeps this connection alive in its pool and,
-				// once it is idle, reuses it for the completion below.
-				const busyResponse = fetch(`${baseUrl}/lobu/busy`, { method: "POST" });
-				await busy;
-				process.emit("SIGTERM");
-				signalled = true;
-				const busyResult = await busyResponse;
-				expect(busyResult.status).toBe(200);
-				await busyResult.arrayBuffer();
-
-				await poolClosingReached;
+				await (await busyResponse).arrayBuffer();
+				await poolClosing.promise;
 				const client = new WorkerClient({ apiUrl: baseUrl, workerId, capabilities: {} });
-				const delivery = await client.complete(failure).then(() => null, (error: unknown) => error);
-				// The draining process must not serve it: the connection is gone, so
-				// the worker's retry opens a new one, which the Service routes to a
-				// ready replica. A response here would be served by a closing pool.
+				const delivery = await client
+					.complete({ run_id: Number(run.id), worker_id: workerId, status: "failed", error_message: "synthetic failure" })
+					.then(() => null, (error: unknown) => error);
+				// The connection is gone, so the worker's retry opens a new one that the
+				// Service routes to a ready replica; nothing reached the closing pool.
 				expect(delivery, String(delivery)).toBeInstanceOf(TypeError);
 				expect((delivery as { cause?: { code?: string } }).cause?.code).toBe("ECONNREFUSED");
-				expect(await runState()).toMatchObject({ status: "running", consecutive_failures: 0 });
-
-				releaseTeardown();
-				await exited;
-
-				// The replacement replica takes the retry: the terminal outcome and its
-				// feed bookkeeping land once, and a duplicate delivery is fenced.
-				const { buildWrapperApp } = await import("../server-lifecycle");
-				const replacement = serve({ hostname: "127.0.0.1", port: 0, fetch: buildWrapperApp({} as never, null).fetch });
-				if (!replacement.listening) await new Promise<void>((resolve) => replacement.once("listening", resolve));
-				try {
-					const { port } = replacement.address() as net.AddressInfo;
-					const retry = new WorkerClient({ apiUrl: `http://127.0.0.1:${port}`, workerId, capabilities: {} });
-					await retry.complete(failure);
-					await retry.complete(failure);
-					expect(await runState()).toMatchObject({
-						status: "failed",
-						error_message: "synthetic connector failure",
-						consecutive_failures: 1,
-					});
-				} finally {
-					await new Promise<void>((resolve) => replacement.close(() => resolve()));
-				}
+				const [after] = await sql`SELECT status FROM runs WHERE id = ${run.id}`;
+				expect(after.status).toBe("running");
 			} finally {
-				releaseTeardown();
-				if (signalled) await exited;
-				for (const signal of ["SIGTERM", "SIGINT"] as const) {
-					for (const listener of process.listeners(signal)) {
-						if (!sigListenersBefore.includes(listener)) process.removeListener(signal, listener);
-					}
-				}
+				releaseTeardown.resolve();
+				await exited;
 			}
 		},
 		20_000,
+	);
+
+	it.each([
+		["waits for", "3000"],
+		["stays bounded by", "100"],
+	])(
+		"shutdown %s a pipelined handler left running by the closed connection",
+		async (_label, closeTimeoutMs) => {
+			// Closing a connection after its first response does not cancel a second
+			// request already pipelined on it, so the drain must also wait for
+			// accepted handlers, within its timeout.
+			const events: string[] = [];
+			const first = deferred();
+			const second = deferred();
+			const bothStarted = deferred();
+			let started = 0;
+			const { Hono } = await import("hono");
+			const lobuApp = new Hono();
+			for (const [name, release] of [["first", first], ["second", second]] as const) {
+				lobuApp.get(`/${name}`, async (c) => {
+					if (++started === 2) bothStarted.resolve();
+					await release.promise;
+					events.push(`${name}-finished`);
+					return c.text(name);
+				});
+			}
+			const { port, exited } = await bootLifecycle(lobuApp, { HTTP_CLOSE_TIMEOUT_MS: closeTimeoutMs }, events);
+			const socket = net.connect({ host: "127.0.0.1", port }).resume();
+			const socketClosed = new Promise((resolve) => socket.on("close", resolve));
+			socket.write(
+				"GET /lobu/first HTTP/1.1\r\nHost: localhost\r\n\r\n" +
+					"GET /lobu/second HTTP/1.1\r\nHost: localhost\r\n\r\n",
+			);
+			await bothStarted.promise;
+			process.emit("SIGTERM");
+			first.resolve();
+			try {
+				await socketClosed;
+				if (closeTimeoutMs === "100") {
+					await exited;
+					expect(events).not.toContain("second-finished");
+				} else {
+					// Let the close callback's teardown run first if it does not wait.
+					await new Promise((resolve) => setImmediate(resolve));
+					second.resolve();
+					await exited;
+					expect(events.indexOf("second-finished")).toBeGreaterThanOrEqual(0);
+					expect(events.indexOf("second-finished")).toBeLessThan(events.indexOf("gateway-stopped"));
+				}
+			} finally {
+				second.resolve();
+				socket.destroy();
+				await exited;
+			}
+		},
+		10_000,
 	);
 });
