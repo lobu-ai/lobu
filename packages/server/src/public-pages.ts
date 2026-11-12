@@ -174,16 +174,22 @@ async function resolvePublicPath(
       // Deleted system entities are deliberately NOT excluded: `events` is
       // append-only, so soft-deleting a system entity leaves its events behind — an
       // `e.deleted_at IS NULL` filter here would un-hide their titles/payloads.
+      // Bound every attribution branch to the preview before materializing it.
+      // An outer id filter alone still expands each system entity's full
+      // history inside entityLinkMatchSql, starving the shared database pool.
       const systemRows = await getDb().unsafe<{ id: number }>(
-        `SELECT DISTINCT ev.id
-           FROM events ev
+        `WITH preview_events AS MATERIALIZED (
+           SELECT id, organization_id, entity_ids, metadata, linked_org_ids
+           FROM events WHERE id IN (${eventIds.join(',')})
+         )
+         SELECT DISTINCT ev.id
+           FROM preview_events ev
            JOIN entities e
              ON e.organization_id = ev.organization_id
            JOIN entity_types et
              ON et.id = e.entity_type_id
             AND et.slug LIKE '$%'
-          WHERE ev.id IN (${eventIds.join(',')})
-            AND ${entityLinkMatchSql('e.id', 'ev')}`,
+          WHERE ${entityLinkMatchSql('e.id', 'ev', 'preview_events')}`,
         []
       );
       const systemEventIds = new Set(systemRows.map((row) => Number(row.id)));

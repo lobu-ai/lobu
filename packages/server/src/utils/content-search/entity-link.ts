@@ -73,12 +73,15 @@ function visibleToOrgSql(orgSql: string): string {
   return `(e2.organization_id = ${orgSql} OR e2.linked_org_ids @> ARRAY[${orgSql}]::text[])`;
 }
 
-export function entityLinkMatchSql(paramRef: string, alias = 'f'): string {
-  const directBranch = `SELECT e2.id FROM events e2
+// eventSource is a trusted SQL relation, like paramRef/alias. A caller checking
+// an already-selected preview can supply a bounded CTE instead of expanding
+// each entity's complete event history behind the materialization barrier.
+export function entityLinkMatchSql(paramRef: string, alias = 'f', eventSource = 'events'): string {
+  const directBranch = `SELECT e2.id FROM ${eventSource} e2
     WHERE e2.entity_ids && ARRAY(SELECT id FROM identity_members)`;
 
   const standardBranches = STANDARD_IDENTITY_NAMESPACES.map(
-    (ns) => `SELECT e2.id FROM events e2
+    (ns) => `SELECT e2.id FROM ${eventSource} e2
       JOIN entity_identities ei
         ON ei.entity_id IN (SELECT id FROM identity_members)
        AND ei.namespace = '${ns}'
