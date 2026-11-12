@@ -99,11 +99,23 @@ describe("classifyError", () => {
     expect(classifyError(new Error("RESOURCE_EXHAUSTED: quota"))).toBe(
       "PROVIDER_QUOTA_EXHAUSTED"
     );
+    for (const message of [
+      "You've hit your weekly limit · resets Nov 8 at 5pm (Europe/London)",
+      "You have hit your weekly limit",
+      "Internal error: You've hit your weekly limit · resets Nov 8 at 5pm (Europe/London)\nError: Query closed before response received",
+    ]) {
+      expect(classifyErrorMessage(message)).toBe("PROVIDER_QUOTA_EXHAUSTED");
+      expect(PROVIDER_BALANCE_EXHAUSTED.test(message)).toBe(false);
+    }
   });
 
   test("leaves unrelated crashes unclassified", () => {
     expect(classifyError(new Error("kaboom"))).toBeUndefined();
     expect(classifyError("not an error")).toBeUndefined();
+    expect(classifyErrorMessage("Weekly limit is configured")).toBeUndefined();
+    expect(
+      classifyErrorMessage("Query closed before response received")
+    ).toBeUndefined();
   });
 
   test("recognizes a credit/billing-exhausted 400 as quota, not a raw crash", () => {
