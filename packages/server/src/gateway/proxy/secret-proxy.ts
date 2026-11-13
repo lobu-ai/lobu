@@ -36,7 +36,7 @@ import {
 import type { SecretStore } from "../secrets/index.js";
 import { getClientIP } from "../../utils/rate-limiter.js";
 import { classifyProviderHealthStatus } from "./provider-health-status.js";
-import { routeFailure } from "../../diagnostics.js";
+import { redactedFailure, routeFailure } from "../../diagnostics.js";
 
 /**
  * Caller-supplied resolver: agentId → orgId of the agent's owning org.
@@ -1228,7 +1228,7 @@ export class SecretProxy {
         { method, provider: resolvedSlug },
         "Custom provider request failed"
       );
-      return c.json({ error: "Internal proxy error" }, 500);
+      throw routeFailure(c.json({ error: "Internal proxy error" }, 500), redactedFailure(error));
     }
 
     if (!response.ok) {

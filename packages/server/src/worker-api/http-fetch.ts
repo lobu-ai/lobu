@@ -4,6 +4,7 @@ import { Value } from '@sinclair/typebox/value';
 import type { Context } from 'hono';
 import { intervals } from '../config/intervals';
 import { getDb } from '../db/client';
+import { redactedFailure, routeFailure } from '../diagnostics';
 import type { Env } from '../index';
 import { fetchConnectionHttp } from '../utils/http-auth';
 
@@ -56,8 +57,8 @@ export async function fetchWorkerHttp(c: Context<{ Bindings: Env }>) {
       request: raw.request,
       signal: c.req.raw.signal,
     }));
-  } catch {
+  } catch (error) {
     // A transport error can contain the authenticated URL or request headers.
-    return c.json({ error: 'Gateway HTTP request failed' }, 502);
+    throw routeFailure(c.json({ error: 'Gateway HTTP request failed' }, 502), redactedFailure(error));
   }
 }

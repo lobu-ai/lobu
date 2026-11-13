@@ -1,5 +1,10 @@
+import { initTracing, shutdownTracing, SpanKind } from '@lobu/core';
+import { InMemorySpanExporter, SimpleSpanProcessor } from '@opentelemetry/sdk-trace-node';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { app } from '../../index';
+import { buildWrapperApp } from '../../server-lifecycle';
 import * as httpAuth from '../../utils/http-auth';
+import { getEnvFromProcess } from '../../utils/env';
 import { cleanupTestDatabase, getTestDb } from '../setup/test-db';
 import { createTestAccessToken, createTestConnection, createTestOAuthClient, seedOwnerContext } from '../setup/test-fixtures';
 import { post } from '../setup/test-helpers';
@@ -127,11 +132,33 @@ describe('gateway HTTP worker route', () => {
     expect(httpAuth.fetchConnectionHttp).not.toHaveBeenCalled();
   });
 
-  it('does not expose upstream diagnostics on failure', async () => {
+  it('does not expose upstream diagnostics on failure, in the response or the request span', async () => {
     const { runId } = await seedRun();
-    vi.mocked(httpAuth.fetchConnectionHttp).mockRejectedValue(new Error('secret-fixture-value'));
-    const response = await fetchForRun(runId);
-    expect(response.status).toBe(502);
-    expect(await response.json()).toEqual({ error: 'Gateway HTTP request failed' });
+    // A transport failure whose message carries a credential no pattern
+    // scrubber recognizes: only dropping the message keeps it in.
+    vi.mocked(httpAuth.fetchConnectionHttp).mockRejectedValue(Object.assign(
+      new TypeError('fetch failed: upstream refused secretfixture'),
+      { cause: { code: 'ECONNREFUSED' } },
+    ));
+    const exporter = new InMemorySpanExporter();
+    await shutdownTracing();
+    initTracing({ serviceName: 'worker-http-fetch-test', spanProcessors: [new SimpleSpanProcessor(exporter)] });
+    try {
+      // Through the deployed boundary, which records the route's failure.
+      const response = await buildWrapperApp(getEnvFromProcess(), null, app).request('/api/workers/http-fetch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${fleetToken}` },
+        body: JSON.stringify({ worker_id: workerId, run_id: runId, request }),
+      }, { ...getEnvFromProcess(), WORKER_API_TOKEN: fleetToken });
+      expect(response.status).toBe(502);
+      expect(await response.json()).toEqual({ error: 'Gateway HTTP request failed' });
+      const spans = exporter.getFinishedSpans().filter((span) => span.kind === SpanKind.SERVER);
+      expect(spans).toHaveLength(1);
+      // Nothing from the message, yet still grouped by what failed.
+      expect(JSON.stringify([spans[0].attributes, spans[0].events, spans[0].status])).not.toContain('secretfixture');
+      expect(spans[0].attributes).toMatchObject({ 'exception.type': 'TypeError', 'error.code': 'ECONNREFUSED' });
+    } finally {
+      await shutdownTracing();
+    }
   });
 });

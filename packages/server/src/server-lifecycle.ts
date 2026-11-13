@@ -55,6 +55,11 @@ const requestsWithRecordedError = new WeakSet<Request>();
 /** The failure behind a route's own 5xx response (`routeFailure`), by request. */
 const routeFailureCauses = new WeakMap<Request, unknown>();
 
+/** A thrown error the boundary did not answer itself (see `wrapper.onError`). */
+function unexpectedError(c: Context): Error | undefined {
+	return c.error instanceof HTTPException || c.error instanceof DbClosedError ? undefined : c.error;
+}
+
 /** Requests answered 503 because the database pools had shut down. */
 const requestsRefusedAfterDbShutdown = new WeakSet<Request>();
 
@@ -330,8 +335,17 @@ export function buildWrapperApp(
 
 	// 4. Request logging belongs on the wrapper because `/lobu` and the main app
 	// are sibling mounts. Putting it inside only one child silently drops the
-	// other child's requests from the access log.
-	wrapper.use("*", pinoLogger({ pino: logger }));
+	// other child's requests from the access log. A thrown `HTTPException` (a
+	// route's own response, `routeFailure`) or `DbClosedError` (the shutdown
+	// 503) is answered, not unexpected: the route logged its own failure, so
+	// the access line reads as a completed request rather than a blank error.
+	wrapper.use("*", pinoLogger({
+		pino: logger,
+		http: {
+			onResLevel: (c) => (unexpectedError(c) ? "error" : "info"),
+			onResMessage: (c) => unexpectedError(c)?.message || "Request completed",
+		},
+	}));
 
 	// 5. Server-error capture. Two layers cover both shapes of failing route:
 	//   (a) routes that throw — handled by `app.onError` below.
@@ -376,19 +390,12 @@ export function buildWrapperApp(
 	// catches. Preserves the original stack trace. A route that reached the
 	// database after shutdown closed it gets the same 503 as the refusal above.
 	wrapper.onError((err, c) => {
-		// The two answered responses below are reported as if the route had
-		// returned them, so the access log must not read the caught exception
-		// (`c.error`) as a second, blank failure.
-		if (err instanceof DbClosedError) {
-			c.error = undefined;
-			return dbShutDownResponse(c);
-		}
+		if (err instanceof DbClosedError) return dbShutDownResponse(c);
 		// A route's own response, thrown with the failure behind it
 		// (`routeFailure`). Send it unchanged: the route logged its failure, and
 		// the span middleware records the cause unless the 5xx is unreportable.
 		if (err instanceof HTTPException) {
 			if (err.status >= 500) routeFailureCauses.set(c.req.raw, err.cause ?? err);
-			c.error = undefined;
 			return err.getResponse();
 		}
 		// The HTTP span is still active here; give it the thrown error before
