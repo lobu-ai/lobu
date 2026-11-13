@@ -32,8 +32,9 @@ describe('OAuth scope reconciliation', () => {
       ...(isolated ? [] : ['sibling.read']),
     ];
     const updateAuthProfile = vi.fn();
-    const sql = vi.fn(async (parts: TemplateStringsArray) => {
+    const sql = Object.assign(vi.fn(async (parts: TemplateStringsArray) => {
       const query = parts.join('?');
+      if (query.includes('FROM auth_profiles')) return [profile];
       if (query.includes('FROM account')) return [{ userId: 'synthetic-owner', providerId: 'synthetic' }];
       if (query.includes('FROM "account"')) return [{
         accountId: isolated ? 'lobu-connector:synthetic:oauth:1' : 'synthetic-provider-user',
@@ -46,7 +47,7 @@ describe('OAuth scope reconciliation', () => {
       }];
       if (query.includes('FROM feeds') || query.includes('FROM connections')) return [];
       throw new Error(`Unexpected query: ${query}`);
-    });
+    }), { begin: async (run: (tx: unknown) => Promise<unknown>) => run(sql) });
     vi.doMock('../../db/client', () => ({ getDb: () => sql }));
     vi.doMock('../auth-profiles', () => ({
       getAuthProfileById: async () => profile,
@@ -60,6 +61,6 @@ describe('OAuth scope reconciliation', () => {
         ...profile.auth_data,
         granted_scopes: [...granted, 'optional.read', 'feed.read', ...(isolated ? ['retired.read'] : [])],
       },
-    }));
+    }), sql);
   });
 });
