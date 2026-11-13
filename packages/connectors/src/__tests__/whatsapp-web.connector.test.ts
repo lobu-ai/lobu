@@ -830,10 +830,6 @@ describe("readiness over the generic chrome bridge", () => {
     }
   });
 
-  it("bumps the WhatsApp connector version for account-bound source recovery", () => {
-    expect(connector.definition.version).toBe("2.3.0");
-  });
-
   it("names the remedy when WhatsApp Web is signed out", async () => {
     const { dispatcher } = makeDispatcher({
       probe: {
@@ -890,6 +886,7 @@ describe("actions", () => {
           message("hit-1"),
           { id: "no-timestamp", chat_jid: "1@c.us" },
           message("hit-2", { chat_jid: "status@broadcast" }),
+          message("hit-3", { chat_jid: "0@c.us" }),
         ],
       },
     });
@@ -903,7 +900,7 @@ describe("actions", () => {
     } as never);
     expect(result.success).toBe(true);
     expect(result.output?.source).toBe("whatsapp_fts");
-    // The undatable row and the status broadcast are both dropped.
+    // The undatable row, the status broadcast and the announcement chat are dropped.
     expect(
       (result.output?.results as Array<{ id: string }>).map((row) => row.id)
     ).toEqual(["hit-1"]);

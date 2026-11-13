@@ -363,7 +363,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
     name: "WhatsApp",
     description:
       "Personal WhatsApp messages read live from WhatsApp Web in the paired Owletto Chrome without importing message history. Automations react to new-message references and read content on demand. Search, draft, send, edit, react to, and revoke messages.",
-    version: "2.3.0",
+    version: "2.3.1",
     faviconDomain: "whatsapp.com",
     authSchema: { methods: [{ type: "browser", mode: "live" }] },
     browser: {

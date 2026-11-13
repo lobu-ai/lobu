@@ -380,16 +380,25 @@ describe("WhatsApp source-owned history reads", () => {
     });
   });
 
-  it("skips status entries during replay without requesting private message models", async () => {
-    const status = sourceRow(1);
-    status.model.id.remote = "status@broadcast";
-    const page = install([status, sourceRow(2)]);
+  it("skips status and service-announcement entries during replay without requesting private message models", async () => {
+    // `0@c.us` is WhatsApp's read-only service-announcement chat: nobody can
+    // reply there, so a reply Automation it triggered hung until the run timeout.
+    const status = sourceRow(1, "status", false, "status@broadcast");
+    const announcement = sourceRow(2, "announcement", false, "0@c.us");
+    const page = install([status, announcement, sourceRow(3)]);
     page.omit(); // Native message loading is deliberately unavailable.
     expect(await page.observe({ after: 0, started_at: 1_787_358_200 }),
     ).toMatchObject({
-      ok: true, after: 2, references: [{ id: "synthetic-2" }], hasMore: false,
+      ok: true, after: 3, references: [{ id: "synthetic-3" }], hasMore: false,
     });
     expect(page.requested).toHaveLength(0);
+  });
+
+  it("leaves service announcements out of history reads", async () => {
+    const page = install([sourceRow(1, "announcement", false, "0@c.us"), sourceRow(2)]);
+    const result = await page.read({ limit: 10 });
+    expect(result).toMatchObject({ ok: true, results: [{ id: "synthetic-2" }] });
+    expect(result.results).toHaveLength(1);
   });
   it("refuses to create an empty database when source history is unavailable", async () => {
     const page = install([], true);
