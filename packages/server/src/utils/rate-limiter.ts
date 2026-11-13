@@ -404,20 +404,24 @@ export class RateLimiter {
  * Predefined rate limit configurations (only those actively used)
  */
 export const RateLimitPresets = {
-  /** Public-workspace reads by an anonymous visitor: 60/minute per IP */
+  /**
+   * Public-workspace reads by an anonymous visitor: 300/minute per IP. The web
+   * app itself spends ~8 reads opening a workspace and ~16 opening a view, and
+   * ordinary browsing peaks at 50–130 a minute, so the budget sits above that.
+   */
   PUBLIC_READ_PER_IP_MINUTE: {
-    limit: 60,
-    windowSeconds: 60,
-    errorMessage:
-      'Public read limit reached: 60 requests per minute. Sign in for a higher limit, or join the workspace to lift it.',
-  } as RateLimitConfig,
-
-  /** Public-workspace reads by a signed-in non-member: 300/minute per user */
-  PUBLIC_READ_PER_USER_MINUTE: {
     limit: 300,
     windowSeconds: 60,
     errorMessage:
-      'Public read limit reached: 300 requests per minute. Join the workspace to lift it.',
+      'Public read limit reached: 300 requests per minute. Sign in for a higher limit, or join the workspace to lift it.',
+  } as RateLimitConfig,
+
+  /** Public-workspace reads by a signed-in non-member: 1200/minute per user */
+  PUBLIC_READ_PER_USER_MINUTE: {
+    limit: 1200,
+    windowSeconds: 60,
+    errorMessage:
+      'Public read limit reached: 1200 requests per minute. Join the workspace to lift it.',
   } as RateLimitConfig,
 
   /** Discovery: 5/hour per IP (expensive operation) */
