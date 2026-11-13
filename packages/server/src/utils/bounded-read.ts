@@ -74,9 +74,9 @@ export function boundedRead<T>(
       // Transaction-local, so the settings and the role end with this
       // transaction on whichever pooled connection ran it.
       await tx.unsafe(
-        "SELECT set_config('lobu.member_sql_org', $1, true), " +
-          "set_config('lobu.member_sql_principal', $2, true), " +
-          "set_config('role', 'lobu_member_sql', true)",
+        `SELECT set_config('lobu.member_sql_org', $1, true),
+          set_config('lobu.member_sql_principal', $2, true),
+          set_config('role', 'lobu_member_sql', true)`,
         [options.fence.organizationId, options.fence.principal ?? '']
       );
     }
