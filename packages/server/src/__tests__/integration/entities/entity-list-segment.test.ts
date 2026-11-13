@@ -56,6 +56,11 @@ const METRICS = {
       where: "setval('entity_list_segment_probe', 100) > 0",
       on: 'entity',
     },
+    tier_number: {
+      description: 'A cast that fails on the tier text.',
+      where: "(metadata->>'tier')::int > 0",
+      on: 'entity',
+    },
     member_probe: {
       description: 'A predicate reading protected member metadata.',
       where: "metadata->>'tier' = 'gold' AND EXISTS (SELECT 1 FROM entities protected WHERE protected.entity_type = '$member' AND protected.metadata->>'email' = 'private-member@test.example.com')",
@@ -208,7 +213,7 @@ describe('entity list segment filter', () => {
       expect(status).toBe(400);
       const body = JSON.parse(text) as { error?: string; code?: string };
       expect(body.code).toBe('VALIDATION');
-      expect(body.error).toContain('read-only transaction');
+      expect(body.error).toContain('Only read-only queries are allowed');
       const [sequence] = await sql`SELECT last_value, is_called FROM entity_list_segment_probe`;
       expect(Number(sequence.last_value)).toBe(41);
       expect(sequence.is_called).toBe(false);
@@ -238,6 +243,18 @@ describe('entity list segment filter', () => {
     const body = JSON.parse(text) as { error?: string; code?: string };
     expect(body.code).toBe('VALIDATION');
     expect(body.error).toContain(message);
+  });
+
+  // A failing cast quotes the offending value. The planner may evaluate an
+  // authored predicate on a row before the scope removes it, so the database
+  // text is withheld here exactly as query_sql withholds it.
+  it('withholds the row value a failing segment predicate would quote', async () => {
+    const { status, text } = await listOverHttp({ entity_type: 'synthetic-vendor', segment: 'tier_number' });
+    expect(status).toBe(400);
+    const body = JSON.parse(text) as { error?: string; code?: string };
+    expect(body.code).toBe('VALIDATION');
+    expect(body.error).toContain('SQLSTATE 22P02');
+    expect(body.error).not.toContain('gold');
   });
 
   it('accepts the segment over HTTP', async () => {

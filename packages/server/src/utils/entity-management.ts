@@ -67,6 +67,8 @@ import {
 	getEntityHooks,
 } from "./entity-hooks";
 import { ToolUserError, toolErrorHttpStatus } from "./errors";
+import { boundedRead, classifyReadQueryFailure } from "./bounded-read";
+import { QUERY_SQL_STATEMENT_TIMEOUT_MS } from "./content-read-bounds";
 import { EntityPolicyDenialError } from "./entity-write-denial-audit";
 import { validateAndScopeQuery } from "./execute-data-sources";
 import logger from "./logger";
@@ -2656,21 +2658,19 @@ export async function listEntities(
     return { totalCountResult, result, hasMoreIds };
   };
   // Parsing and scoping do not prevent function side effects or expensive
-  // expressions. Run authored predicates with the SQL tools' execution limits.
+  // expressions. Run authored predicates through the member SQL runner.
   const { totalCountResult, result, hasMoreIds } = segmentFilter
-    ? await sql
-        .begin(async (tx) => {
-          await tx.unsafe('SET TRANSACTION READ ONLY');
-          await tx.unsafe("SET LOCAL statement_timeout = '5s'");
-          return fetchPage(tx);
-        })
+    ? await boundedRead(sql, { signal: ctx.abortSignal, statementTimeoutMs: QUERY_SQL_STATEMENT_TIMEOUT_MS }, fetchPage)
         .catch((error: unknown) => {
+          if (ctx.abortSignal?.aborted) throw error;
           // A SQLSTATE fault (bad cast, read-only violation, timeout) is the
           // authored predicate's, not the server's; anything else rethrows.
+          // Its text is the query_sql text: a cast error quotes the row value,
+          // and the planner may evaluate the predicate before the scope.
           const code = classifyToolError({ pgCode: (error as { code?: string } | null)?.code });
           if (code !== 'VALIDATION' && code !== 'UPSTREAM_TIMEOUT') throw error;
           throw new ToolUserError(
-            `Segment '${filters.segment}' failed: ${getErrorMessage(error)}`,
+            `Segment '${filters.segment}' failed: ${classifyReadQueryFailure(error).message}`,
             toolErrorHttpStatus(code),
             code,
           );

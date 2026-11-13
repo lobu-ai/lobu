@@ -17,7 +17,8 @@
 
 import { Dialect, ast, parse as parseSql } from '@polyglot-sql/sdk';
 import { type DbClient, pgTextArray } from '../db/client';
-import { readQueryFailureMessage } from './bounded-read';
+import { boundedQuery, readQueryFailureMessage } from './bounded-read';
+import { QUERY_SQL_STATEMENT_TIMEOUT_MS } from './content-read-bounds';
 import { ToolUserError } from './errors';
 import logger from './logger';
 import { useLinkedOrgScope } from './linked-org-ids';
@@ -115,7 +116,6 @@ function isForbiddenQueryFunction(name: string): boolean {
   );
 }
 export const MAX_DATA_SOURCE_ROWS = 1000;
-const QUERY_TIMEOUT_MS = 5000;
 
 type SqlNode = ast.Expression;
 
@@ -1241,10 +1241,8 @@ export async function executeDataSources(
           }
         }
 
-        const rows = await sql.begin(async (tx) => {
-          await tx.unsafe('SET TRANSACTION READ ONLY');
-          await tx.unsafe(`SET LOCAL statement_timeout = '${QUERY_TIMEOUT_MS}'`);
-          return tx.unsafe(scopedQuery, params);
+        const rows = await boundedQuery(sql, scopedQuery, params, {
+          statementTimeoutMs: QUERY_SQL_STATEMENT_TIMEOUT_MS,
         });
 
         const rowLimit = MAX_DATA_SOURCE_ROWS + (options?.includeOverflowRow ? 1 : 0);
