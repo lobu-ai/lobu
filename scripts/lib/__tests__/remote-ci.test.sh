@@ -191,7 +191,7 @@ fi
 grep -Fq 'node scripts/ci-paths.mjs smokes' <<<"$optional_filter" ||
   fail "optional smoke filter does not execute the shared event-range helper"
 vitest_job="$(workflow_job "$workflow" server-integration-vitest)"
-grep -q -- '--shard=${{ matrix.shard }}/3' <<<"$vitest_job" ||
+grep -q -- '--shard=${{ matrix.shard }}/4' <<<"$vitest_job" ||
   fail "static isolated Vitest shard is missing"
 if grep -q 'depot/tests-run-action' <<<"$vitest_job"; then
   fail "timing regrouping is unsafe for the order-sensitive shared-DB suite"
