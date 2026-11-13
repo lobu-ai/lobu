@@ -36,6 +36,8 @@ describe("context management", () => {
     readFileSpy = spyOn(fs, "readFile");
     writeFileSpy = spyOn(fs, "writeFile").mockResolvedValue(undefined);
     spyOn(fs, "mkdir").mockResolvedValue(undefined);
+    spyOn(fs, "chmod").mockResolvedValue(undefined);
+    spyOn(fs, "rename").mockResolvedValue(undefined);
   });
 
   afterEach(() => {
@@ -43,12 +45,24 @@ describe("context management", () => {
   });
 
   test("loadContextConfig handles missing file", async () => {
-    readFileSpy.mockRejectedValue(new Error("File not found"));
+    readFileSpy.mockRejectedValue(
+      Object.assign(new Error("File not found"), { code: "ENOENT" })
+    );
 
     const config = await loadContextConfig();
 
     expect(config.currentContext).toBe(DEFAULT_CONTEXT_NAME);
     expect(config.contexts[DEFAULT_CONTEXT_NAME]).toBeDefined();
+  });
+
+  test("a truncated config is an error, never an empty config to save over", async () => {
+    readFileSpy.mockResolvedValue("");
+
+    await expect(loadContextConfig()).rejects.toThrow("is not valid JSON");
+    await expect(setActiveOrg("acme", "prod")).rejects.toThrow(
+      "is not valid JSON"
+    );
+    expect(writeFileSpy.mock.calls.length).toBe(0);
   });
 
   test("stores and reads the active org per context", async () => {

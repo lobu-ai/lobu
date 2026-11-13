@@ -3,6 +3,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vites
 import type { Env } from "../../../index";
 import { __setChatInstanceManagerForTests } from "../../../lobu/gateway";
 import {
+	getUnreadCount,
 	listNotifications,
 	refreshApprovalNotificationCards,
 } from "../../../notifications/service";
@@ -144,6 +145,58 @@ describe("approval notification live state", () => {
 				interaction_inline: true,
 			}),
 		);
+	});
+
+	it("counts an approval as unread only while it can still be decided", async () => {
+		const sql = getTestDb();
+		const org = await createTestOrganization({ slug: "acme" });
+		const user = await createTestUser();
+		await addUserToOrganization(user.id, org.id, "owner");
+		const conn = await createTestConnection({
+			organization_id: org.id,
+			connector_key: "synthetic.device",
+			created_by: user.id,
+		});
+		const expiringRunId = await seedApprovalNotification({
+			organizationId: org.id,
+			userId: user.id,
+			actionKey: "entity_change",
+			title: "Merge duplicates",
+		});
+		await seedApprovalNotification({
+			organizationId: org.id,
+			userId: user.id,
+			actionKey: "observe",
+			title: "Observe UI",
+			proposalConnectionId: conn.id,
+		});
+		await seedApprovalNotification({
+			organizationId: org.id,
+			userId: user.id,
+			actionKey: "manage_automations",
+			title: "Change Automation",
+		});
+		const options = { organizationId: org.id, userId: user.id, limit: 50 };
+		const unreadTitles = async () =>
+			(await listNotifications({ ...options, unreadOnly: true })).notifications.map((n) => n.title).sort();
+		expect(await getUnreadCount(org.id, user.id)).toBe(3);
+
+		// One window elapses, one card becomes unreachable: neither can be decided any more.
+		await sql`UPDATE runs SET approval_status = 'expired', status = 'cancelled' WHERE id = ${expiringRunId}`;
+		await sql`UPDATE connections SET deleted_at = NOW() WHERE id = ${conn.id}`;
+
+		expect(await getUnreadCount(org.id, user.id)).toBe(1);
+		expect(await unreadTitles()).toEqual(["Change Automation"]);
+		expect(
+			(await listNotifications({ ...options, attentionOnly: true })).notifications.map((n) => n.title),
+		).toEqual(["Change Automation"]);
+		// History still holds all three, with their resolved state.
+		const history = (await listNotifications(options)).notifications;
+		expect(history.map((n) => [n.title, n.approval_status, n.is_read]).sort()).toEqual([
+			["Change Automation", "pending", false],
+			["Merge duplicates", "expired", false],
+			["Observe UI", "expired", false],
+		]);
 	});
 
 	it("resolves a pending approval whose review card is unreachable as expired", async () => {

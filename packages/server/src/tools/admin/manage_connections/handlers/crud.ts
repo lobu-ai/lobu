@@ -2090,6 +2090,14 @@ export async function handleUpdate(
         organizationId, authProfileId: nextAuthProfileId!, appAuthProfileId: nextAppAuthProfileId,
         ownerUserId: ctx.userId ?? null,
       })) return { denial: withFailureCode({ error: OAUTH_ACCOUNT_BINDING_ERROR }, "VALIDATION") };
+      // A grant the provider rejected has no usable tokens; only consent renews it.
+      if (validateOAuthBinding && args.status === 'active') {
+        const [profile] = await tx`SELECT status FROM auth_profiles
+          WHERE id = ${nextAuthProfileId} AND organization_id = ${organizationId}`;
+        if (profile?.status === 'revoked') {
+          return { denial: withFailureCode({ error: 'The provider rejected this account\'s sign-in. Reconnect the connection to grant access again.' }, "VALIDATION") };
+        }
+      }
       const lockedRows = await tx`
         SELECT *
         FROM connections

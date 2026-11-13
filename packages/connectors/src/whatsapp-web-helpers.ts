@@ -14,7 +14,7 @@ import {
   WHATSAPP_PHONE_SERVER,
 } from "./whatsapp-web-identity.js";
 
-export const WHATSAPP_ADAPTER_VERSION = 27;
+export const WHATSAPP_ADAPTER_VERSION = 28;
 export const WHATSAPP_ORIGIN = "https://web.whatsapp.com";
 
 export type ChatFilter = "all" | "individual" | "group";
@@ -114,10 +114,13 @@ export function normalizeRelayedMessage(
   const timestamp = timestampOf(raw);
   if (timestamp <= 0) return null;
   const chatJid = canonicalizeJid(raw.chat_jid);
+  // Status updates, channels and the read-only service-announcement chat
+  // (`0@c.us`) are feeds nobody can reply in; the page adapter drops them too.
   if (
     !chatJid ||
     chatJid === "status@broadcast" ||
-    chatJid.endsWith("@newsletter")
+    chatJid.endsWith("@newsletter") ||
+    chatJid === `0@${WHATSAPP_PHONE_SERVER}`
   ) {
     return null;
   }

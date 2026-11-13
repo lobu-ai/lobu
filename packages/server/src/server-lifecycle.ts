@@ -20,7 +20,7 @@ import { type Context, Hono } from "hono";
 import { routePath } from "hono/route";
 import { pinoLogger } from "hono-pino";
 import { context, propagation, ROOT_CONTEXT } from "@opentelemetry/api";
-import { closeDbSingleton } from "./db/client";
+import { DbClosedError, isDbShutDown, shutdownDb } from "./db/client";
 import { mountViteDev } from "./dev-vite";
 import { isShuttingDown, markShuttingDown } from "./lifecycle-state";
 import type { Env } from "./index";
@@ -52,6 +52,21 @@ import { initWorkspaceProvider } from "./workspace";
 /** Requests whose thrown error app.onError already recorded on the HTTP span. */
 const requestsWithRecordedError = new WeakSet<Request>();
 
+/** Requests answered 503 because the database pools had shut down. */
+const requestsRefusedAfterDbShutdown = new WeakSet<Request>();
+
+/**
+ * The answer to a request that needs the database after shutdown closed it.
+ * A 503 with `Retry-After` is retriable for every client, and closing the
+ * connection sends the retry to a replica that is still serving.
+ */
+function dbShutDownResponse(c: Context): Response {
+	requestsRefusedAfterDbShutdown.add(c.req.raw);
+	c.header("Retry-After", "1");
+	c.header("Connection", "close");
+	return c.json({ error: "Server is shutting down" }, 503);
+}
+
 /**
  * Readiness probes intentionally 503 `{status:"draining"}` during the
  * graceful-shutdown drain (SHUTDOWN_READINESS_DRAIN_MS); recording that turns
@@ -66,14 +81,15 @@ async function isReadinessDrain(c: Context): Promise<boolean> {
 
 /**
  * Whether a returned 5xx is not a server failure to report: the readiness
- * drain, or a response its caller disconnected before receiving. A read-tier
- * tool runs under the request's signal, so the caller leaving is what made it
- * fail (#4833 applies the same rule to the tool span and failure log). A real
+ * drain, the shutdown refusal after the database closed, or a response its
+ * caller disconnected before receiving. A read-tier tool runs under the
+ * request's signal, so the caller leaving is what made it fail (#4833 applies
+ * the same rule to the tool span and failure log). A real
  * failure behind it is still logged where it happened; thrown errors still
  * report through onError.
  */
 async function isUnreportedServerStatus(c: Context): Promise<boolean> {
-	return c.req.raw.signal.aborted || (await isReadinessDrain(c));
+	return c.req.raw.signal.aborted || requestsRefusedAfterDbShutdown.has(c.req.raw) || (await isReadinessDrain(c));
 }
 
 type ServerMode = "postgres" | "embedded-postgres";
@@ -205,7 +221,8 @@ export function reportBootFailure(err: unknown): never {
  *      logger below and all route work inherit its trace/span ids)
  *   4. request logger             (covers both `/lobu` and the main app)
  *   5. structured 5xx response capture (for inner-catch returns that never throw)
- *   6. `app.onError` for thrown exceptions
+ *   6. database-shutdown refusal  (503 once the pools closed for exit)
+ *   7. `app.onError` for thrown exceptions
  *
  * Route mounts:
  *   - `/lobu` → `lobuApp` (only when non-null)
@@ -342,9 +359,19 @@ export function buildWrapperApp(
 		}
 	});
 
-	// 6. Catch-all error handler for thrown exceptions that bubble past route
-	// catches. Preserves the original stack trace.
+	// 6. Once shutdown closed the database pools, nothing a route does can
+	// succeed, and most routes catch the failure into their own 500. Refuse the
+	// request before it reaches one so the caller sees a retriable 503.
+	wrapper.use("*", async (c, next) => {
+		if (isDbShutDown()) return dbShutDownResponse(c);
+		return next();
+	});
+
+	// 7. Catch-all error handler for thrown exceptions that bubble past route
+	// catches. Preserves the original stack trace. A route that reached the
+	// database after shutdown closed it gets the same 503 as the refusal above.
 	wrapper.onError((err, c) => {
+		if (err instanceof DbClosedError) return dbShutDownResponse(c);
 		// The HTTP span is still active here; give it the thrown error before
 		// the 500 response replaces it.
 		recordError(getCurrentSpan(), err, { scope: httpSpanName(c) });
@@ -581,8 +608,10 @@ export function createServerLifecycle(
 			//      holds postgres.js connections that must be released before
 			//      mode-specific db teardown runs.
 			await safe("stopLobuGateway", () => stopLobuGateway());
-			//   g. Close the postgres.js singleton pool.
-			await safe("closeDbSingleton", () => closeDbSingleton());
+			//   g. Close the postgres.js pools for good: a straggler that still
+			//      calls getDb() gets DbClosedError (served as a 503 above), not a
+			//      freshly dialed pool.
+			await safe("shutdownDb", () => shutdownDb());
 			//   h. Mode-specific teardown (embedded kills embeddings child, stops
 			//      socket server, closes the in-process db).
 			for (let i = 0; i < extraTeardown.length; i++) {
