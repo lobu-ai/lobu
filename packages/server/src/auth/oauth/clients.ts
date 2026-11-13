@@ -259,13 +259,17 @@ export class OAuthClientsStore {
    * the operation to the owner displayed in the connected-apps inventory.
    * Omitting `userId` retains the org-wide operation used by administrative
    * cleanup paths. The registration remains intact for other organizations.
+   *
+   * A caller that must commit the revoke together with its own writes passes
+   * its open `transaction`; otherwise the revoke runs in one of its own.
    */
   async revokeClientForOrganization(
     clientId: string,
     organizationId: string,
-    userId?: string | null
+    userId?: string | null,
+    transaction?: DbClient
   ): Promise<boolean> {
-    return this.sql.begin(async (tx) => {
+    const revoke = async (tx: DbClient): Promise<boolean> => {
       // Shared transaction mutex with auth-code/device exchange and refresh.
       // Once acquired, no token-issuing path for this registration can race
       // the grant narrowing below or re-mint a stale workspace snapshot.
@@ -403,7 +407,8 @@ export class OAuthClientsStore {
         deletedDeviceCodes.length > 0 ||
         deletedSessions.length > 0
       );
-    });
+    };
+    return transaction ? revoke(transaction) : this.sql.begin(revoke);
   }
 
   /**
@@ -563,4 +568,97 @@ export class OAuthClientsStore {
       metadata: stored.metadata || {},
     };
   }
+}
+
+/**
+ * Settle one registration homed in an organization that is being deleted,
+ * inside the caller's transaction. Returns null once none is homed there.
+ *
+ * `oauth_clients.organization_id` records only the first organization that
+ * authorized a registration (`touchClientActivity`); one registration, such as
+ * a CLI login, then holds grants for many. The organization foreign key
+ * cascades, so a registration left homed there is deleted with the
+ * organization, taking every other organization's tokens with it and
+ * rewriting `events.client_id` for all of its events in one statement.
+ *
+ * The organization's own grants are revoked first, exactly as a connected-app
+ * revoke does. A registration nothing else uses is then deleted. One that is
+ * still used (a live grant or session, or an event that names it) only loses
+ * its home, and the next organization to use it adopts it.
+ *
+ * Nothing here scales with a registration's event history: the event probe
+ * stops at its first row. A registration is deleted only when no event names
+ * it, which leaves its `events.client_id` ON DELETE SET NULL action nothing to
+ * rewrite. The caller removes the organization's own events first.
+ */
+export async function releaseClientHomedInOrganization(
+  tx: DbClient,
+  organizationId: string
+): Promise<'deleted' | 'detached' | null> {
+  // The registration mutex every token-issuing path takes. Holding it from
+  // here means no exchange or refresh can mint a grant the probes below
+  // missed. It also blocks event writes that name the registration, so this
+  // transaction has to stay short.
+  const [homed] = await tx<{ id: string }>`
+    SELECT id FROM oauth_clients
+    WHERE organization_id = ${organizationId}
+    LIMIT 1
+    FOR UPDATE
+  `;
+  if (!homed) return null;
+  const clientId = homed.id;
+
+  await new OAuthClientsStore(tx).revokeClientForOrganization(clientId, organizationId, null, tx);
+
+  // What is left after the revoke belongs to another organization or to an
+  // account-only grant. Credentials are a few indexed rows per registration,
+  // so they answer first; most shared registrations never reach the events.
+  const [credentials] = await tx<{ live: boolean }>`
+    SELECT (
+      EXISTS (
+        SELECT 1 FROM oauth_tokens
+        WHERE client_id = ${clientId} AND revoked_at IS NULL AND expires_at > NOW()
+      )
+      OR EXISTS (
+        SELECT 1 FROM oauth_authorization_codes
+        WHERE client_id = ${clientId} AND expires_at > NOW()
+      )
+      OR EXISTS (
+        SELECT 1 FROM oauth_device_codes
+        WHERE client_id = ${clientId} AND expires_at > NOW()
+      )
+      OR EXISTS (
+        SELECT 1 FROM mcp_sessions
+        WHERE client_id = ${clientId} AND expires_at > NOW()
+      )
+    ) AS live
+  `;
+  if (credentials.live || (await anyEventNamesClient(tx, clientId))) {
+    await tx`
+      UPDATE oauth_clients SET organization_id = NULL, updated_at = NOW()
+      WHERE id = ${clientId}
+    `;
+    return 'detached';
+  }
+  await tx`DELETE FROM oauth_clients WHERE id = ${clientId}`;
+  return 'deleted';
+}
+
+/**
+ * Whether any event names the registration, answered by one descent of
+ * `idx_events_client_id`.
+ *
+ * A first-row probe is the query a sequential scan looks cheapest for: the
+ * planner expects to meet a common registration's row within a few pages. When
+ * that registration's events all sit late in the table, the scan reads
+ * everything before them while this transaction holds the registration lock.
+ * Ruling the sequential scan out makes the cost independent of the statistics.
+ */
+async function anyEventNamesClient(tx: DbClient, clientId: string): Promise<boolean> {
+  await tx`SET LOCAL enable_seqscan = off`;
+  const [probe] = await tx<{ named: boolean }>`
+    SELECT EXISTS (SELECT 1 FROM events WHERE client_id = ${clientId}) AS named
+  `;
+  await tx`SET LOCAL enable_seqscan TO DEFAULT`;
+  return probe.named;
 }
