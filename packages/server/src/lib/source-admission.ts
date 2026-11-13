@@ -167,7 +167,12 @@ export class SourceAdmission {
         finish();
       };
       const leave = (reason: unknown) => settle(() => {
-        if (read.participants === 0) read.controller.abort(reason);
+        if (read.participants === 0) {
+          // Nobody is left to receive it, and a later caller must not join a
+          // run that is being aborted: it starts its own read.
+          if (this.reads.get(key) === read) this.reads.delete(key);
+          read.controller.abort(reason);
+        }
         reject(reason);
       });
       const onAbort = () => leave(participant.signal?.reason);
