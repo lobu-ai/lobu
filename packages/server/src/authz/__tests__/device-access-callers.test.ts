@@ -38,6 +38,7 @@ const KNOWN: Record<string, string> = {
   'lib/connector-pushdown.ts -> readDeviceFeed': 'after the gate above',
   'utils/entity-reference.ts -> chatAccessOfToolContext': 'the source read ToolContext (public visitor for a foreign type)',
   'utils/entity-reference.ts -> decideDeviceAccess': 'that tier, for a device-pinned backing_source connection',
+  'lib/source-admission.ts -> chatAccessOfToolContext': 'the reading ToolContext, for its admission class only (no device decision)',
   // Tool entry points: the caller's own ToolContext.
   'tools/admin/manage_feeds.ts -> sourceReadScopeFromToolContext': 'read_feeds ToolContext',
   'tools/admin/manage_feeds.ts -> readSourceFeedPage': 'that scope',

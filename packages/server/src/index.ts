@@ -1929,13 +1929,22 @@ app.get("*", async (c) => {
 				c.env,
 				c.req.url,
 				c.get("subdomainOrg"),
+				c.req.raw.signal,
 			);
 		} catch (error) {
 			// Not a missing page — a transient failure. 503 + no-store tells
-			// crawlers and the CDN to come back, instead of caching a 404.
+			// crawlers and the CDN to come back, instead of caching a 404. A
+			// source refused at its live-read limit says when it will have room.
 			logger.error({ error, path: requestPath }, "[public-pages] render failed");
 			c.header("Cache-Control", "no-store");
-			c.header("Retry-After", "60");
+			c.header(
+				"Retry-After",
+				String(
+					error instanceof ToolUserError && error.retryAfterSeconds !== undefined
+						? error.retryAfterSeconds
+						: 60,
+				),
+			);
 			throw routeFailure(c.text("Temporarily unavailable", 503), error);
 		}
 		if (publicPageModel) {

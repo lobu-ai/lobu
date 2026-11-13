@@ -29,7 +29,7 @@ export function publicBrowseContext(ctx: AccountToolContext, organizationId: str
 
 export function publicVisitorContext(
   organizationId: string,
-  request: Pick<ToolContext, 'requestUrl' | 'baseUrl' | 'abortSignal'>,
+  request: Pick<ToolContext, 'requestUrl' | 'baseUrl' | 'abortSignal' | 'deadlineAt'>,
 ): ToolContext {
   return {
     organizationId,
@@ -49,5 +49,6 @@ export function publicVisitorContext(
     requestUrl: request.requestUrl,
     baseUrl: request.baseUrl,
     ...(request.abortSignal ? { abortSignal: request.abortSignal } : {}),
+    ...(request.deadlineAt !== undefined ? { deadlineAt: request.deadlineAt } : {}),
   };
 }

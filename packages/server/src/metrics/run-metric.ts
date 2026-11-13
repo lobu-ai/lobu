@@ -8,6 +8,7 @@ import type { EntityMetrics } from "@lobu/connector-sdk";
 import { authzScopeFromToolContext } from "../authz/scope";
 import { getDb } from "../db/client";
 import { isCompletePushdownResult, pushdownFailureError, runConnectorQuery } from "../lib/connector-pushdown";
+import type { SourceCallerClass } from "../lib/source-admission";
 import { boundedQuery, classifyReadQueryFailure } from "../utils/bounded-read";
 import { QUERY_SQL_STATEMENT_TIMEOUT_MS } from "../utils/content-read-bounds";
 import { ToolUserError, toolErrorHttpStatus } from "../utils/errors";
@@ -66,6 +67,8 @@ interface RunMetricInput {
   isAdmin?: boolean;
   /** The caller's lifetime: its abort cancels the running statement. */
   signal?: AbortSignal;
+  /** Admission class of a connection-backed read (`lib/source-admission.ts`); defaults to member. */
+  callerClass?: SourceCallerClass;
 }
 
 /**
@@ -172,6 +175,8 @@ async function runPushdownMetric(
       connectionSlug: backingSource,
       query,
       limit: METRIC_PUSHDOWN_MAX_ROWS,
+      signal: input.signal,
+      callerClass: input.callerClass ?? 'member',
     });
   } catch (err) {
     throw pushdownFailureError(err, backingSource, "metric");

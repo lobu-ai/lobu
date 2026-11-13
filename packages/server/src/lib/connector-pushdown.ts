@@ -40,6 +40,7 @@ import { sourceRecoveryHash } from './browser-recovery';
 import { pinnedDeviceConnectorContractSql } from '../utils/connector-execution-placement';
 import { computeCodeHash } from '../utils/compiler-core';
 import { sourceFeedScopeKey, sourceFeedSubscriptions } from '../runs/source-feed-subscriptions';
+import { sourceAdmission, sourceCallerClassOfAccess, type SourceCallerClass } from './source-admission';
 
 interface ConnectorQueryParams {
   /** The ACL gate — tenant + principal. Its `organizationId`/`principal` drive
@@ -65,6 +66,18 @@ interface ConnectorQueryParams {
    * it, and a deadline already in the past fails before anything is forked.
    */
   deadlineAt?: number;
+  /** Caller cancellation: a queued read leaves its queue and a running one stops. */
+  signal?: AbortSignal;
+  /** Admission class (`lib/source-admission.ts`): public visitors leave members a slot. */
+  callerClass: SourceCallerClass;
+}
+
+interface QueryConnection {
+  id: number;
+  connector_key: string;
+  auth_profile_id: number | null;
+  app_auth_profile_id: number | null;
+  config: Record<string, unknown> | null;
 }
 
 interface ConnectorQueryResult {
@@ -144,14 +157,37 @@ export async function runConnectorQuery(p: ConnectorQueryParams): Promise<Connec
       `source connection '${p.connectionSlug}' not found or not accessible`,
     );
   }
-  const conn = connRows[0] as {
-    id: number;
-    connector_key: string;
-    auth_profile_id: number | null;
-    app_auth_profile_id: number | null;
-    config: Record<string, unknown> | null;
-  };
+  const conn = connRows[0] as QueryConnection;
 
+  // Identical concurrent reads share one run. The key holds every input the
+  // run depends on. Caller identity is deliberately absent: each caller passed
+  // the visibility check above before joining, and the run's code and
+  // credentials come from the connection, never from the caller.
+  const readKey = createHash('sha256').update(stableJson({
+    connectionId: Number(conn.id), connectorKey: conn.connector_key, query: p.query,
+    exactMatch: p.exactMatch ?? null, selection: p.selection ?? null, limit: p.limit ?? null,
+    offset: p.offset ?? null, sort: p.sort ?? null, config: p.config ?? null,
+  })).digest('hex');
+  const participant = { callerClass: p.callerClass, deadlineAt, signal: p.signal };
+  return sourceAdmission.coalesce(readKey, Number(conn.id), participant, async (signal) => {
+    const slot = await sourceAdmission.acquire(Number(conn.id), { ...participant, signal });
+    let rateLimited = false;
+    try {
+      return await runAdmittedQuery(p, conn, deadlineAt, signal, () => { rateLimited = true; });
+    } finally {
+      slot.release({ rateLimited });
+    }
+  });
+}
+
+/** The admitted run: resolve code and credentials, then query once plus one recovery attempt. */
+async function runAdmittedQuery(
+  p: ConnectorQueryParams,
+  conn: QueryConnection,
+  deadlineAt: number,
+  signal: AbortSignal,
+  onRateLimited: () => void,
+): Promise<ConnectorQueryResult> {
   const compiledCode = await resolveConnectorCodeForKey(
     conn.connector_key,
     p.scope.organizationId
@@ -199,7 +235,7 @@ export async function runConnectorQuery(p: ConnectorQueryParams): Promise<Connec
         offset: p.offset,
         sort: p.sort,
       },
-      hooks: { onHttpFetch },
+      hooks: { onHttpFetch, signal },
       timeoutMs: resolvePushdownTimeoutMs(deadlineAt),
     });
   };
@@ -212,6 +248,7 @@ export async function runConnectorQuery(p: ConnectorQueryParams): Promise<Connec
     // exact token the provider refused; the credential service serializes token
     // rotation across replicas and reuses a concurrent refresh.
     const status = (error as { httpStatus?: unknown } | null)?.httpStatus;
+    if (status === 429) onRateLimited();
     if (status === 401 && auth.credentials?.accessToken) {
       const rejectedAccessToken = auth.credentials.accessToken;
       auth = await resolveExecutionAuth({ ...authParams, rejectedAccessToken });
@@ -223,7 +260,12 @@ export async function runConnectorQuery(p: ConnectorQueryParams): Promise<Connec
     }
     // One retry, sharing the original deadline rather than a fresh 30s budget.
     if (deadlineAt <= Date.now()) throw error;
-    result = await execute(auth);
+    try {
+      result = await execute(auth);
+    } catch (retryError) {
+      if ((retryError as { httpStatus?: unknown } | null)?.httpStatus === 429) onRateLimited();
+      throw retryError;
+    }
   }
 
   if (result.mode !== 'query') {
@@ -312,12 +354,16 @@ export function pushdownFailureError(
   subject: 'query' | 'metric',
 ): ToolUserError {
   const code = classifyPushdownFailure(err);
-  return new ToolUserError(
+  const failure = new ToolUserError(
     `connection pushdown failed (connection=${connectionSlug}): ${getErrorMessage(err)}. ` +
       `The ${subject} did not run against the source — this is not an empty result.`,
     toolErrorHttpStatus(code),
     code,
   );
+  // An admission refusal knows when the source will have room again.
+  const retryAfterSeconds = (err as { retryAfterSeconds?: unknown } | null)?.retryAfterSeconds;
+  if (typeof retryAfterSeconds === 'number') failure.retryAfterSeconds = retryAfterSeconds;
+  return failure;
 }
 
 /** Classify a thrown connector/source failure using structured diagnostics first. */
@@ -373,6 +419,31 @@ export async function readSourceFeed(p: ReadSourceFeedParams): Promise<ReadSourc
     if (timer) clearTimeout(timer);
     p.signal?.removeEventListener('abort', onAbort);
   }
+}
+
+/** The feed, its connection, and the selected connector contract one source read resolves. */
+interface SourceFeedRow {
+  id: number;
+  feed_key: string;
+  config: Record<string, unknown> | null;
+  pinned_version: string | null;
+  feed_status: string;
+  definition_version: string | null;
+  feed_operations: unknown;
+  read_window_axis: string | null;
+  match_paths: unknown;
+  connection_id: number;
+  connector_key: string;
+  auth_profile_id: number | null;
+  app_auth_profile_id: number | null;
+  device_worker_id: string | null;
+  device_owner_user_id: string | null;
+  connection_config: Record<string, unknown>;
+  mcp_config: Record<string, unknown> | null;
+  runtime: Record<string, unknown> | null;
+  required_capability: string | null;
+  has_compiled_code: boolean | null;
+  selected_artifact_hash: string | null;
 }
 
 /** Every transport receives the one source-read deadline and cancellation signal. */
@@ -487,29 +558,7 @@ async function readSourceFeedWithinDeadline(
        ${vis}
      LIMIT 1`,
     [p.feedId, p.scope.organizationId],
-  )) as unknown as Array<{
-    id: number;
-    feed_key: string;
-    config: Record<string, unknown> | null;
-    pinned_version: string | null;
-    feed_status: string;
-    definition_version: string | null;
-    feed_operations: unknown;
-    read_window_axis: string | null;
-    match_paths: unknown;
-    connection_id: number;
-    connector_key: string;
-    auth_profile_id: number | null;
-    app_auth_profile_id: number | null;
-    device_worker_id: string | null;
-    device_owner_user_id: string | null;
-    connection_config: Record<string, unknown>;
-    mcp_config: Record<string, unknown> | null;
-    runtime: Record<string, unknown> | null;
-    required_capability: string | null;
-    has_compiled_code: boolean | null;
-    selected_artifact_hash: string | null;
-  }>;
+  )) as unknown as SourceFeedRow[];
 
   if (feedRows.length === 0) {
     throw new ToolError(
@@ -635,6 +684,35 @@ async function readSourceFeedWithinDeadline(
     });
   }
 
+  // Adapter and compiled reads reach the shared source, so they are admitted
+  // per connection. A device-pinned read runs on its member's own device.
+  if (feed.device_worker_id !== null) {
+    return readLiveSourceFeed(p, feed, feedConfig, sourceRevision, sourceSubscription, finish, onBrowserLease);
+  }
+  const slot = await sourceAdmission.acquire(Number(feed.connection_id), {
+    callerClass: sourceCallerClassOfAccess(p.scope.chatAccess), deadlineAt: p.deadlineAt, signal: p.signal,
+  });
+  let rateLimited = false;
+  try {
+    return await readLiveSourceFeed(p, feed, feedConfig, sourceRevision, sourceSubscription, finish, onBrowserLease);
+  } catch (error) {
+    rateLimited = (error as { httpStatus?: unknown } | null)?.httpStatus === 429;
+    throw error;
+  } finally {
+    slot.release({ rateLimited });
+  }
+}
+
+/** Read a resolved feed from its source adapter or compiled connector. */
+async function readLiveSourceFeed(
+  p: ReadSourceFeedParams & { signal: AbortSignal },
+  feed: SourceFeedRow,
+  feedConfig: Record<string, unknown>,
+  sourceRevision: string,
+  sourceSubscription: boolean,
+  finish: (result: ReadSourceFeedResult) => ReadSourceFeedResult,
+  onBrowserLease: () => void,
+): Promise<ReadSourceFeedResult> {
   const adapterResult = p.recoveryId ? null : await readSourceFeedFromAdapter({
     organizationId: p.scope.organizationId,
     connectionId: Number(feed.connection_id),

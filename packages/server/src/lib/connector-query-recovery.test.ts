@@ -34,7 +34,7 @@ beforeEach(() => {
 
 function read(deadlineAt?: number) {
   return query({ scope: { organizationId: 'synthetic-org', principal: 'synthetic-owner' },
-    isAdmin: true, connectionSlug: 'synthetic-source', query: 'SELECT 1', deadlineAt });
+    isAdmin: true, connectionSlug: 'synthetic-source', query: 'SELECT 1', deadlineAt, callerClass: 'member' });
 }
 const failure = (status: number) => Object.assign(new Error('opaque upstream failure'), { httpStatus: status });
 
@@ -75,6 +75,16 @@ describe('read-only source query recovery', () => {
       await expect(read()).rejects.toBe(error);
       expect(execute).toHaveBeenCalledTimes(1);
     }
+  });
+
+  it('recovers once inside a read shared by identical concurrent callers', async () => {
+    execute.mockImplementationOnce(async () => { await new Promise(resolve => setTimeout(resolve, 30)); throw failure(401); });
+    const results = await Promise.all([read(), read(), read()]);
+    expect(results.map(r => r.rows)).toEqual([[{ probe: 1 }], [{ probe: 1 }], [{ probe: 1 }]]);
+    // Each caller owns its rows; the shared run is not handed out by reference.
+    expect(results[0].rows).not.toBe(results[1].rows);
+    expect(execute).toHaveBeenCalledTimes(2);
+    expect(resolveAuth).toHaveBeenCalledTimes(2);
   });
 
   it('keeps a single caller deadline across attempts', async () => {
