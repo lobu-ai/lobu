@@ -182,4 +182,20 @@ describe('coalesced source reads', () => {
     await expect(abandoned).rejects.toThrow('nobody left');
     expect(runSignal.aborted).toBe(true);
   });
+
+  it('a caller arriving after everyone abandoned a run starts a fresh read', async () => {
+    const admission = new SourceAdmission();
+    // The abandoned run settles only later, as a real executor does after abort.
+    let settleAbandoned!: () => void;
+    const abandonedRun = async (signal: AbortSignal) => new Promise<string>((_, reject) => {
+      settleAbandoned = () => reject(signal.reason);
+    });
+    const left = new AbortController();
+    const abandoned = admission.coalesce('read', CONNECTION, participant(left.signal), abandonedRun);
+    left.abort(new Error('visitor left'));
+    await expect(abandoned).rejects.toThrow('visitor left');
+    const next = admission.coalesce('read', CONNECTION, participant(), async () => 'fresh rows');
+    settleAbandoned();
+    expect(await next).toBe('fresh rows');
+  });
 });
