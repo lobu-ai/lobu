@@ -67,6 +67,8 @@ import {
 	getEntityHooks,
 } from "./entity-hooks";
 import { ToolUserError, toolErrorHttpStatus } from "./errors";
+import { boundedRead, cancellable, classifyReadQueryFailure } from "./bounded-read";
+import { QUERY_SQL_STATEMENT_TIMEOUT_MS } from "./content-read-bounds";
 import { EntityPolicyDenialError } from "./entity-write-denial-audit";
 import { validateAndScopeQuery } from "./execute-data-sources";
 import logger from "./logger";
@@ -2303,6 +2305,8 @@ async function batchTotalContentCounts(
 		organizationId: string;
 		userId: string | null;
 		entityIds: number[];
+		/** Cancels the running statement and skips the rest. */
+		signal?: AbortSignal;
 	},
 ): Promise<Map<number, number>> {
 	const counts = new Map<number, number>();
@@ -2312,11 +2316,11 @@ async function batchTotalContentCounts(
 	// Conservative edge check: an entity with no live relationship at all is
 	// its own whole identity group. Anything with an edge walks the identity
 	// graph so ordinary relationships cannot group unrelated records.
-	const edgedRows = await db.unsafe<{ id: number | string }>(
+	const edgedRows = await cancellable(db.unsafe<{ id: number | string }>(
 		`SELECT v.id FROM (VALUES ${entityIds.map((eid) => `(${eid})`).join(',')}) v(id)
      WHERE EXISTS (SELECT 1 FROM entity_relationships ir WHERE ir.from_entity_id = v.id AND ir.deleted_at IS NULL)
         OR EXISTS (SELECT 1 FROM entity_relationships ir WHERE ir.to_entity_id = v.id AND ir.deleted_at IS NULL)`,
-	);
+	), opts.signal);
 	// Resolve each edged entity's group once and reuse it for claims and events.
 	// A literal member array exposes its values to the planner; ARRAY(<walk>)
 	// can instead lead to an org-wide bitmap alongside the entity GIN probe.
@@ -2324,18 +2328,18 @@ async function batchTotalContentCounts(
 	const membersByEntity = new Map<number, number[]>(entityIds.map((eid) => [eid, [eid]]));
 	for (const eid of edgedIds) membersByEntity.set(eid, []);
 	if (edgedIds.length > 0) {
-		const memberRows = await db.unsafe<{ eid: number | string; member_id: number | string }>(
+		const memberRows = await cancellable(db.unsafe<{ eid: number | string; member_id: number | string }>(
 			edgedIds
 				.map((eid) => `SELECT ${eid}::bigint AS eid, members.id AS member_id FROM (${identityMemberIdsSql(`${eid}::bigint`)}) members`)
 				.join('\nUNION ALL\n'),
-		);
+		), opts.signal);
 		for (const row of memberRows) membersByEntity.get(Number(row.eid))?.push(Number(row.member_id));
 	}
 	const membersSql = (eid: number) => `'${pgBigintArray(membersByEntity.get(eid) ?? [eid])}'::bigint[]`;
 
 	// Claims live on any group member, not just the listed root, attributed
 	// to the root.
-	const scopeRows = await db.unsafe<{ eid: number | string; namespace: unknown; identifier: unknown; scope_key: unknown }>(
+	const scopeRows = await cancellable(db.unsafe<{ eid: number | string; namespace: unknown; identifier: unknown; scope_key: unknown }>(
 		entityIds
 			.map(
 				(eid) => `SELECT ${eid}::bigint AS eid, identity.namespace, identity.identifier, identity.scope_key
@@ -2345,7 +2349,7 @@ async function batchTotalContentCounts(
        AND identity.namespace = ANY('${pgTextArray([...STANDARD_IDENTITY_NAMESPACES])}'::text[])`,
 			)
 			.join('\nUNION ALL\n'),
-	);
+	), opts.signal);
 	const scopesByEntity = new Map<number, EntityIdentityScope[]>();
 	for (const row of scopeRows) {
 		const eid = Number(row.eid);
@@ -2379,10 +2383,10 @@ async function batchTotalContentCounts(
 		arms.push(`SELECT ${eid}::bigint AS eid, COUNT(*) AS cnt FROM (\n    ${probed}\n  ) u`);
 	}
 
-	const rows = await db.unsafe<{ eid: number | string; cnt: number | string }>(
+	const rows = await cancellable(db.unsafe<{ eid: number | string; cnt: number | string }>(
 		arms.join('\nUNION ALL\n'),
 		params,
-	);
+	), opts.signal);
 	for (const row of rows) counts.set(Number(row.eid), Number(row.cnt));
 	return counts;
 }
@@ -2621,33 +2625,34 @@ export async function listEntities(
     ${plainSort ? '' : `OFFSET ${offset}`}`;
   const fetchPage = async (db: DbClient) => {
     if (!plainSort) {
-      const totalCountResult = await db.unsafe<{ total_count: number }>(
+      const totalCountResult = await cancellable(db.unsafe<{ total_count: number }>(
         `SELECT CAST(COUNT(*) AS INTEGER) as total_count ${baseQuery}`,
         params
-      );
-      const result = await db.unsafe<CreatedEntity>(pageQuery(), params);
+      ), ctx.abortSignal);
+      const result = await cancellable(db.unsafe<CreatedEntity>(pageQuery(), params), ctx.abortSignal);
       return { totalCountResult, result, hasMoreIds: null as boolean | null };
     }
     const pageIds = (
-      await db.unsafe<{ id: number | string }>(pageIdQuery, params.slice(0, filterParamCount))
+      await cancellable(db.unsafe<{ id: number | string }>(pageIdQuery, params.slice(0, filterParamCount)), ctx.abortSignal)
     ).map((row) => Number(row.id));
     const hasMoreIds = pageIds.length > limit;
     const ids = hasMoreIds ? pageIds.slice(0, limit) : pageIds;
     const [totalCountResult, result, contentCounts] = await Promise.all([
-      db.unsafe<{ total_count: number }>(
+      cancellable(db.unsafe<{ total_count: number }>(
         `SELECT CAST(COUNT(*) AS INTEGER) as total_count ${countFrom}`,
         params.slice(0, filterParamCount)
-      ),
+      ), ctx.abortSignal),
       ids.length > 0
-        ? db.unsafe<CreatedEntity>(
+        ? cancellable(db.unsafe<CreatedEntity>(
             pageQuery(`AND e.id = ANY('${pgBigintArray(ids)}'::bigint[])`),
             params.slice(0, enrichParamCount),
-          )
+          ), ctx.abortSignal)
         : Promise.resolve([] as CreatedEntity[]),
       batchTotalContentCounts(db, {
         organizationId: ctx.organizationId,
         userId: ctx.userId ?? null,
         entityIds: ids,
+        signal: ctx.abortSignal,
       }),
     ]);
     for (const row of result) {
@@ -2656,21 +2661,19 @@ export async function listEntities(
     return { totalCountResult, result, hasMoreIds };
   };
   // Parsing and scoping do not prevent function side effects or expensive
-  // expressions. Run authored predicates with the SQL tools' execution limits.
+  // expressions. Run authored predicates through the member SQL runner.
   const { totalCountResult, result, hasMoreIds } = segmentFilter
-    ? await sql
-        .begin(async (tx) => {
-          await tx.unsafe('SET TRANSACTION READ ONLY');
-          await tx.unsafe("SET LOCAL statement_timeout = '5s'");
-          return fetchPage(tx);
-        })
+    ? await boundedRead(sql, { signal: ctx.abortSignal, statementTimeoutMs: QUERY_SQL_STATEMENT_TIMEOUT_MS }, fetchPage)
         .catch((error: unknown) => {
+          if (ctx.abortSignal?.aborted) throw error;
           // A SQLSTATE fault (bad cast, read-only violation, timeout) is the
           // authored predicate's, not the server's; anything else rethrows.
+          // Its text is the query_sql text: a cast error quotes the row value,
+          // and the planner may evaluate the predicate before the scope.
           const code = classifyToolError({ pgCode: (error as { code?: string } | null)?.code });
           if (code !== 'VALIDATION' && code !== 'UPSTREAM_TIMEOUT') throw error;
           throw new ToolUserError(
-            `Segment '${filters.segment}' failed: ${getErrorMessage(error)}`,
+            `Segment '${filters.segment}' failed: ${classifyReadQueryFailure(error).message}`,
             toolErrorHttpStatus(code),
             code,
           );

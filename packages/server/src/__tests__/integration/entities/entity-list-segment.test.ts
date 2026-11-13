@@ -17,6 +17,9 @@ import {
 import { TestApiClient } from '../../setup/test-mcp-client';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import { post } from '../../setup/test-helpers';
+import type { Env } from '../../../index';
+import type { ToolContext } from '../../../tools/registry';
+import { listEntities } from '../../../utils/entity-management';
 import { ensureMemberEntityType } from '../../../utils/member-entity-type';
 
 interface ListResult {
@@ -56,6 +59,16 @@ const METRICS = {
       where: "setval('entity_list_segment_probe', 100) > 0",
       on: 'entity',
     },
+    slow_scan: {
+      description: 'A predicate that runs until the statement cap.',
+      where: '(SELECT count(*) FROM generate_series(1, 2000000000)) > 0',
+      on: 'entity',
+    },
+    tier_number: {
+      description: 'A cast that fails on the tier text.',
+      where: "(metadata->>'tier')::int > 0",
+      on: 'entity',
+    },
     member_probe: {
       description: 'A predicate reading protected member metadata.',
       where: "metadata->>'tier' = 'gold' AND EXISTS (SELECT 1 FROM entities protected WHERE protected.entity_type = '$member' AND protected.metadata->>'email' = 'private-member@test.example.com')",
@@ -68,13 +81,17 @@ describe('entity list segment filter', () => {
   let owner: TestApiClient;
   let member: TestApiClient;
   let orgSlug: string;
+  let orgId: string;
+  let ownerId: string;
   let cookie: string;
 
   beforeAll(async () => {
     await cleanupTestDatabase();
     const org = await createTestOrganization({ name: 'EntityListSegment Org' });
     orgSlug = org.slug;
+    orgId = org.id;
     const user = await createTestUser({ email: 'entity-segment@test.com' });
+    ownerId = user.id;
     await addUserToOrganization(user.id, org.id, 'owner');
     cookie = (await createTestSession(user.id)).cookieHeader;
     owner = await TestApiClient.for({
@@ -208,13 +225,59 @@ describe('entity list segment filter', () => {
       expect(status).toBe(400);
       const body = JSON.parse(text) as { error?: string; code?: string };
       expect(body.code).toBe('VALIDATION');
-      expect(body.error).toContain('read-only transaction');
+      expect(body.error).toContain('Only read-only queries are allowed');
       const [sequence] = await sql`SELECT last_value, is_called FROM entity_list_segment_probe`;
       expect(Number(sequence.last_value)).toBe(41);
       expect(sequence.is_called).toBe(false);
     } finally {
       await sql`DROP SEQUENCE entity_list_segment_probe`;
     }
+  });
+
+  it('stops the segment query on the database when the caller leaves', async () => {
+    const sql = getTestDb();
+    // pg_stat_activity keeps only the first 1 KB of a statement, so match the
+    // listing statements' openings rather than the predicate deep inside them.
+    const running = async () =>
+      (await sql`
+        SELECT count(*)::int AS n FROM pg_stat_activity
+        WHERE pid <> pg_backend_pid() AND datname = current_database() AND state = 'active'
+          AND (query LIKE 'SELECT e2.id FROM entities e2%' OR query LIKE 'SELECT CAST(COUNT(*) AS INTEGER) as total_count%')
+      `)[0].n as number;
+    const until = async (done: () => Promise<boolean>, ms: number) => {
+      const deadline = Date.now() + ms;
+      while (!(await done())) {
+        if (Date.now() > deadline) return false;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      return true;
+    };
+    const controller = new AbortController();
+    const ctx = {
+      organizationId: orgId,
+      userId: ownerId,
+      memberRole: 'owner',
+      agentId: null,
+      isAuthenticated: true,
+      clientId: null,
+      scopes: ['mcp:read', 'mcp:write'],
+      tokenType: 'oauth',
+      scopedToOrg: true,
+      allowCrossOrg: false,
+      abortSignal: controller.signal,
+    } as unknown as ToolContext;
+    const listing = listEntities(
+      { entity_type: 'synthetic-vendor', segment: 'slow_scan' },
+      {} as Env,
+      ctx,
+    );
+    listing.catch(() => {});
+    expect(await until(async () => (await running()) > 0, 3_000)).toBe(true);
+
+    controller.abort(new Error('caller left'));
+    await expect(listing).rejects.toThrow('caller left');
+    // Well inside the 5 second statement cap, so only a cancel can explain it.
+    expect(await until(async () => (await running()) === 0, 2_000)).toBe(true);
   });
 
   async function listOverHttp(body: Record<string, unknown>) {
@@ -238,6 +301,18 @@ describe('entity list segment filter', () => {
     const body = JSON.parse(text) as { error?: string; code?: string };
     expect(body.code).toBe('VALIDATION');
     expect(body.error).toContain(message);
+  });
+
+  // A failing cast quotes the offending value. The planner may evaluate an
+  // authored predicate on a row before the scope removes it, so the database
+  // text is withheld here exactly as query_sql withholds it.
+  it('withholds the row value a failing segment predicate would quote', async () => {
+    const { status, text } = await listOverHttp({ entity_type: 'synthetic-vendor', segment: 'tier_number' });
+    expect(status).toBe(400);
+    const body = JSON.parse(text) as { error?: string; code?: string };
+    expect(body.code).toBe('VALIDATION');
+    expect(body.error).toContain('SQLSTATE 22P02');
+    expect(body.error).not.toContain('gold');
   });
 
   it('accepts the segment over HTTP', async () => {

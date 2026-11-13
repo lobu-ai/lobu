@@ -301,8 +301,9 @@ describe('external Automation activity', () => {
     // it must find the schedule advanced, not a pending no-op to adopt.
     const observed = new Proxy(sql, {
       get(target, key) {
-        if (key === 'begin') return async (callback: (tx: DbClient) => Promise<unknown>) => {
-          const result = await target.begin(callback);
+        // Forward both begin forms: `begin(fn)` and `begin('read only', fn)`.
+        if (key === 'begin') return async (...args: Parameters<DbClient['begin']>) => {
+          const result = await (target.begin as (...a: unknown[]) => Promise<unknown>)(...args);
           if (result && typeof result === 'object' && 'skipped' in result && result.skipped) {
             committed.resolve();
             await resume.promise;
