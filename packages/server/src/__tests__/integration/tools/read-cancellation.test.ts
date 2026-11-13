@@ -81,10 +81,19 @@ describe('read cancellation', () => {
     });
   });
 
-  function toolFailures(toolName: string) {
+  function errorRecords() {
     return logLines.flatMap((line) => {
       try { return [JSON.parse(line)]; } catch { return []; }
-    }).filter((record) => record.level === 'error' && record.tool_name === toolName);
+    }).filter((record) => record.level === 'error');
+  }
+
+  function toolFailures(toolName: string) {
+    return errorRecords().filter((record) => record.tool_name === toolName);
+  }
+
+  /** Every record the issue tracker would count, whichever code path wrote it. */
+  function issues() {
+    return errorRecords().filter((record) => typeof record.error_fingerprint === 'string');
   }
 
   beforeAll(async () => {
@@ -148,6 +157,32 @@ describe('read cancellation', () => {
     release = null;
     await response;
     expect(toolFailures('read_knowledge')).toEqual([]);
+  });
+
+  it('does not record an abandoned search as a failed recall', async () => {
+    const holderPid = await holdEventsLock();
+    const caller = new AbortController();
+    const response = app.fetch(
+      new Request(`http://localhost/api/${orgSlug}/search_memory`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: 'synthetic feed item', include_content: true }),
+        signal: caller.signal,
+      }),
+      env
+    );
+
+    const blocked = await waitFor(() => blockedReads(holderPid), 5000);
+    expect(blocked).not.toBeNull();
+
+    // Aborting under the held lock is the only thing that can end the recall
+    // read, and it rejects like a failed one. The rest of the search needs the
+    // lock gone before it can settle.
+    caller.abort();
+    await release?.();
+    release = null;
+    await response;
+    expect(issues()).toEqual([]);
   });
 
   it('cancels the feed read when the HTTP connection drops', async () => {

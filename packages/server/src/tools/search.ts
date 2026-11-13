@@ -54,7 +54,7 @@ import { resolveCrossOrgToolContext } from '../sandbox/client-sdk';
 import { getContent } from './get_content';
 import type { AccountToolContext, ToolContext } from './registry';
 import { markAcceptedInternalFields, withValidatedArgs } from './validate-args';
-import { getErrorMessage } from '@lobu/core';
+import { describeError, errorReportLogFields, getErrorMessage } from '@lobu/core';
 import {
   PUBLIC_SEARCH_SCHEMA_INTERNAL_FIELDS,
   type SearchArgs,
@@ -1543,6 +1543,31 @@ async function coverageForLocalSources(
   return buildCoverage(workspaceSlug, local_sources, discovered);
 }
 
+/**
+ * Report a local store that failed while the search still answered from the
+ * rest. The caller gets partial coverage and no error reaches a span, so this
+ * error-level record is the only thing that makes the lost recall an issue.
+ * It groups on structure alone (the store, the error's class and its SQLSTATE
+ * or code) under a fixed message, as `scriptFailureTelemetry` does. Describing
+ * the raw error would group on Postgres's wording instead: a recall query runs
+ * through `unsafe`, whose stack holds no frame of ours to group by.
+ */
+function reportLocalRecallFailure(
+  gate: AuthzScope,
+  store: 'events' | 'conversation',
+  reason: unknown
+): void {
+  const { name, code } = (reason ?? {}) as { name?: unknown; code?: unknown };
+  const report = describeError(
+    { name, code, message: `Local ${store} recall failed` },
+    { scope: `search_memory ${store} recall` }
+  );
+  logger.error(
+    { organization_id: gate.organizationId, ...errorReportLogFields(report) },
+    `[search] local ${store} recall failed (pg_code=${report.code ?? 'none'}): ${getErrorMessage(reason)}`
+  );
+}
+
 /** Search local stores only. Source-backed feeds are enumerated in coverage but
  * never queried implicitly; each local store fails independently. */
 export async function gatherLocalRecall(
@@ -1594,10 +1619,7 @@ export async function gatherLocalRecall(
     local_sources.push('events');
   } else {
     localRecallFailed = true;
-    const pgCode = (contentResult.reason as { code?: unknown } | null)?.code;
-    logger.warn(
-      `[search] local events recall failed (pg_code=${typeof pgCode === 'string' ? pgCode : 'none'}): ${getErrorMessage(contentResult.reason)}`
-    );
+    reportLocalRecallFailure(gate, 'events', contentResult.reason);
   }
   if (shouldSearchConversation && conversationResult.status === 'fulfilled') {
     local_sources.push('channel_messages');
@@ -1606,9 +1628,7 @@ export async function gatherLocalRecall(
     }
   } else if (conversationResult.status === 'rejected') {
     localRecallFailed = true;
-    logger.warn(
-      `[search] local conversation recall failed: ${getErrorMessage(conversationResult.reason)}`
-    );
+    reportLocalRecallFailure(gate, 'conversation', conversationResult.reason);
   }
 
   result.coverage = buildCoverage(

@@ -7,7 +7,7 @@
  *    the binding set IS the tenant boundary).
  */
 
-import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanupTestDatabase, getTestDb } from "../../__tests__/setup/test-db";
 import {
   addUserToOrganization,
@@ -223,5 +223,81 @@ describe("search_memory channel recall", () => {
 			ctx,
     );
     expect((generic.conversation_messages ?? []).length).toBeGreaterThan(0);
+  });
+
+  it("records a failed channel recall as an issue while the search still answers", async () => {
+    const org = await createTestOrganization({ name: "Failed Recall Org" });
+    const user = await createTestUser();
+    await addUserToOrganization(user.id, org.id, "owner");
+    const agent = await createTestAgent({ organizationId: org.id });
+    await bindChannelWithMessages({
+      organizationId: org.id,
+      createdBy: user.id,
+      agentId: agent.agentId,
+      connectionId: "conn-failed",
+      channelId: "C-FAILED",
+      messages: ["The quarterly revenue forecast was revised"],
+    });
+
+    // Block the transcript read on a held lock, then cancel it on Postgres:
+    // the read fails for a reason of ours while the rest of the search runs.
+    const sql = getTestDb();
+    const holder = await sql.reserve();
+    await holder`BEGIN`;
+    await holder`LOCK TABLE channel_messages IN ACCESS EXCLUSIVE MODE`;
+    // The serialized log stream, as the issue tracker reads it.
+    const lines: string[] = [];
+    vi.spyOn(process.stdout, "write").mockImplementation((chunk, encodingOrCallback, callback) => {
+      lines.push(String(chunk));
+      const done = typeof encodingOrCallback === "function" ? encodingOrCallback : callback;
+      if (done) queueMicrotask(done);
+      return true;
+    });
+    try {
+      const pending = search(
+        { query: "quarterly revenue", include_content: true },
+        {} as Parameters<typeof search>[1],
+        {
+          organizationId: org.id,
+          userId: user.id,
+          agentId: agent.agentId,
+        } as Parameters<typeof search>[2],
+      );
+      let cancelled = 0;
+      for (let attempt = 0; attempt < 100 && cancelled === 0; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        cancelled = (
+          await sql`
+            SELECT pg_cancel_backend(pid) FROM pg_stat_activity
+            WHERE datname = current_database() AND wait_event_type = 'Lock'`
+        ).length;
+      }
+      expect(cancelled).toBe(1);
+
+      const result = await pending;
+      expect(result.conversation_messages).toBeUndefined();
+      expect(result.coverage?.status).toBe("partial");
+      expect(result.coverage?.local_sources).toEqual(["events"]);
+
+      const issues = lines
+        .flatMap((line) => {
+          try {
+            return [JSON.parse(line) as Record<string, unknown>];
+          } catch {
+            return [];
+          }
+        })
+        .filter((record) => record.level === "error" && typeof record.error_fingerprint === "string");
+      expect(issues).toHaveLength(1);
+      expect(issues[0]).toMatchObject({
+        error_kind: "system",
+        error_code: "57014",
+        organization_id: org.id,
+      });
+    } finally {
+      vi.restoreAllMocks();
+      await holder`ROLLBACK`;
+      holder.release();
+    }
   });
 });
