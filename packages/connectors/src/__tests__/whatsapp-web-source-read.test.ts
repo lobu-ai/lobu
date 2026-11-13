@@ -1,6 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { whatsAppWebAdapterProgram } from "../whatsapp-web-adapter.js";
-import { WHATSAPP_ADAPTER_VERSION } from "../whatsapp-web-helpers.js";
+import { WHATSAPP_ADAPTER_INSTALL, WHATSAPP_ADAPTER_VERSION } from "../whatsapp-web-helpers.js";
 
 function sourceRow(
   rowId: number,
@@ -97,7 +96,7 @@ function install(
     },
     },
   };
-  new Function(...Object.keys(page), `(${whatsAppWebAdapterProgram.toString()})();`)(...Object.values(page));
+  new Function(...Object.keys(page), `${WHATSAPP_ADAPTER_INSTALL};`)(...Object.values(page));
   return {
     read: (input: Record<string, unknown> = {}) => globals.__owlettoWhatsAppAdapterV1.invoke({
       op: "read_messages",
