@@ -171,6 +171,15 @@ describe('validateAndScopeQuery — parser-bypass regressions', () => {
     ["SELECT pg_log_backend_memory_contexts(1)"],
     ["SELECT PG_CATALOG.PG_STAT_GET_ACTIVITY(NULL)"],
     ["SELECT current_setting('server_version')"],
+    [String.raw`SELECT 1 AS u, U&"set\005Fconfig"('lobu.acl_write', 'on', true)`],
+    [String.raw`SELECT 1 AS u, U&"query\005Fto\005Fxml"('SELECT 1', true, false, '')`],
+    [String.raw`SELECT 1 AS u, U&"pg\005Fsleep"(10)`],
+    [String.raw`SELECT 1 AS u, U&"query\+00005Fto\005Fxml"('SELECT 1', true, false, '')`],
+    [String.raw`SELECT id, 1 AS u FROM entities WHERE (U&"query\005Fto\005Fxml"('SELECT 1', true, false, ''))::text <> ''`],
+    [String.raw`SELECT pg_catalog."query\005Fto\005Fxml"('SELECT 1', true, false, '')`],
+    [String.raw`SELECT 1 AS u, pg_catalog.U&"query\005Fto\005Fxml"('SELECT 1', true, false, '')`],
+    ['SELECT "custom_function"(name) FROM entities'],
+    ['SELECT public."custom_function"(name) FROM entities'],
   ])('rejects %s', (sql) => {
     expect(() => scopeAsMember(sql)).toThrow(/not allowed/i);
   });
@@ -179,6 +188,8 @@ describe('validateAndScopeQuery — parser-bypass regressions', () => {
     ["SELECT lower(name), to_char(created_at, 'YYYY'), date_trunc('day', created_at) FROM entities"],
     ["SELECT coalesce(metadata->>'tier', 'none'), jsonb_array_length(coalesce(metadata->'tags', '[]'::jsonb)) FROM entities"],
     ["SELECT count(*), max(created_at), log(2, 8), to_tsvector(name) FROM entities GROUP BY 4"],
+    ['SELECT "lower"(name) AS "set_config" FROM entities'],
+    [String.raw`SELECT 'U&"query\005Fto\005Fxml"' AS sample`],
   ])('still allows ordinary functions: %s', (sql) => {
     expect(() => scopeAsMember(sql)).not.toThrow();
   });
