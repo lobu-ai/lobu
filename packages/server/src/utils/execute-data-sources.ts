@@ -165,6 +165,14 @@ function assertNoForbiddenFunctions(root: unknown): void {
     const record = node as Record<string, unknown>;
     const functionNode = record.function as Record<string, unknown> | undefined;
     const methodNode = record.method_call as Record<string, unknown> | undefined;
+    // A quoted function name is refused outright. Postgres spells identifiers
+    // with Unicode escapes (`U&"set\005Fconfig"`), which the parser reads as
+    // `u & "set\005Fconfig"(…)`: the name checked below is the escaped text
+    // while the database calls `set_config`. Every escaped spelling is quoted,
+    // and caller SQL has no need to quote a function name.
+    if (functionNode?.quoted === true || methodNode?.quoted === true) {
+      throw new ToolUserError('Quoted function names are not allowed in read-only queries.', 400, 'VALIDATION');
+    }
     const name = identName(functionNode?.name) ?? identName(methodNode?.method);
     if (name && isForbiddenQueryFunction(name)) {
       throw new ToolUserError(`Function '${name}' is not allowed in read-only queries.`, 400, 'VALIDATION');
