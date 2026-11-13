@@ -64,6 +64,18 @@ async function isReadinessDrain(c: Context): Promise<boolean> {
 	return typeof body === "object" && body !== null && (body as { status?: unknown }).status === "draining";
 }
 
+/**
+ * Whether a returned 5xx is not a server failure to report: the readiness
+ * drain, or a response its caller disconnected before receiving. A read-tier
+ * tool runs under the request's signal, so the caller leaving is what made it
+ * fail (#4833 applies the same rule to the tool span and failure log). A real
+ * failure behind it is still logged where it happened; thrown errors still
+ * report through onError.
+ */
+async function isUnreportedServerStatus(c: Context): Promise<boolean> {
+	return c.req.raw.signal.aborted || (await isReadinessDrain(c));
+}
+
 type ServerMode = "postgres" | "embedded-postgres";
 const HTTP_TRACE_METHODS = new Set(["CONNECT", "DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT", "TRACE"]);
 
@@ -281,7 +293,7 @@ export function buildWrapperApp(
 				if (!requestsWithRecordedError.has(c.req.raw)) {
 					if (failed) {
 						recordError(span, thrown, { scope: name });
-					} else if (c.res.status >= 500 && !(await isReadinessDrain(c))) {
+					} else if (c.res.status >= 500 && !(await isUnreportedServerStatus(c))) {
 						recordError(
 							span,
 							{ name: "HttpServerError", message: `HTTP ${c.res.status}`, httpStatus: c.res.status },
@@ -315,7 +327,7 @@ export function buildWrapperApp(
 			} catch {
 				// response wasn't JSON; ignore
 			}
-			if (await isReadinessDrain(c)) return;
+			if (await isUnreportedServerStatus(c)) return;
 			const message =
 				(body &&
 				typeof body === "object" &&
