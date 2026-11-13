@@ -7,7 +7,9 @@
  */
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { type AuthContext, checkToolAccess } from '../../../tools/execute';
+import { InMemorySpanExporter, SimpleSpanProcessor } from '@opentelemetry/sdk-trace-node';
+import type { Env } from '../../../index';
+import { type AuthContext, checkToolAccess, executeTool } from '../../../tools/execute';
 import {
   getRateLimiter,
   RateLimitPresets,
@@ -21,7 +23,7 @@ import {
   createTestOrganization,
   createTestUser,
 } from '../../setup/test-fixtures';
-import { MCP_PROTOCOL_VERSION } from '@lobu/core';
+import { initTracing, MCP_PROTOCOL_VERSION, shutdownTracing } from '@lobu/core';
 import { get, mcpToolsCall, post } from '../../setup/test-helpers';
 
 describe('public read rate limit', () => {
@@ -217,6 +219,25 @@ describe('public read rate limit', () => {
     // The event has no attachment: an admitted read reports it unknown.
     expect(await anonymousResourceError(sessionId, '198.51.100.2')).toMatch(/Public read limit reached: 60/);
     expect(await anonymousResourceError(sessionId, '198.51.100.1')).toMatch(/Unknown resource/);
+  });
+
+  it('records a limited read as the caller\'s error, not a failing dependency', async () => {
+    // RATE_LIMITED otherwise classifies as an upstream provider throttling us.
+    // Here Lobu is refusing its own caller, which is a correct rejection.
+    const exporter = new InMemorySpanExporter();
+    await shutdownTracing();
+    initTracing({ serviceName: 'public-read-limit-test', spanProcessors: [new SimpleSpanProcessor(exporter)] });
+    try {
+      exhaustIP('192.0.2.10');
+      const anonymous = callerIn({ userId: null, isAuthenticated: false, tokenType: 'anonymous', clientIP: '192.0.2.10' });
+      await expect(executeTool('search_memory', { query: 'rents' }, {} as Env, anonymous)).rejects.toThrow(
+        expect.objectContaining({ code: 'RATE_LIMITED' })
+      );
+      const span = exporter.getFinishedSpans().find((s) => s.attributes['lobu.tool_name'] === 'search_memory');
+      expect(span?.attributes).toMatchObject({ 'error.code': 'RATE_LIMITED', 'error.kind': 'user' });
+    } finally {
+      await shutdownTracing();
+    }
   });
 
   it('never meters members, internal calls, or an unknown anonymous IP', async () => {
