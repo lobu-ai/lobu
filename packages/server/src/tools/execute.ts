@@ -302,6 +302,11 @@ export async function checkToolAccess(
   return requiredAccess;
 }
 
+interface HandlerRun {
+  admitted: boolean;
+  signal?: AbortSignal;
+}
+
 /**
  * Execute a tool by name with access control and operational error logging.
  * Returns the raw tool result (caller decides formatting).
@@ -331,15 +336,16 @@ export async function executeTool(
     ...(authCtx.userId ? { 'user.id': authCtx.userId } : {}),
     ...(authCtx.organizationId ? { 'lobu.org_id': authCtx.organizationId } : {}),
   });
-  // The signal the handler actually ran under: reads get the caller's, writes
-  // none, since they finish after the caller leaves.
-  const handlerSignal: { current?: AbortSignal } = {};
+  // Whether the caller passed the access gate, and the signal the handler
+  // actually ran under: reads get the caller's, writes none, since they finish
+  // after the caller leaves.
+  const handlerRun: HandlerRun = { admitted: false };
   return runInSpanContext(span, async () => {
     try {
-      const result = await executeToolInSpan(toolName, args, env, authCtx, callerSignal, span, handlerSignal);
+      const result = await executeToolInSpan(toolName, args, env, authCtx, callerSignal, span, handlerRun);
       // A read stopped because its caller left is not a failure (see
       // trackMCPToolCall): nobody was waiting for the answer.
-      if (handlerSignal.current?.aborted) return result;
+      if (handlerRun.signal?.aborted) return result;
       if (isSoftErrorResult(result)) {
         // Keep a structured failure's classification, including system errors.
         // Only an untyped handled rejection defaults to the caller's fault.
@@ -371,7 +377,13 @@ export async function executeTool(
     } catch (error) {
       // recordError keeps only the type, the parameterized message and frame
       // locations: errors and arguments can carry credentials or source data.
-      if (!handlerSignal.current?.aborted) recordError(span, error, { scope });
+      // A ToolUserError from the access gate refuses this caller (bad target,
+      // no access, over the public read limit): a correct rejection, not a
+      // failing dependency, whatever its code would otherwise classify as.
+      if (!handlerRun.signal?.aborted) {
+        const refusedCaller = !handlerRun.admitted && error instanceof ToolUserError;
+        recordError(span, error, { scope, ...(refusedCaller ? { kind: 'user' as const } : {}) });
+      }
       throw error;
     } finally {
       span?.end();
@@ -386,7 +398,7 @@ async function executeToolInSpan(
   authCtx: AuthContext,
   callerSignal: AbortSignal | undefined,
   span: Span | null,
-  handlerSignal: { current?: AbortSignal },
+  handlerRun: HandlerRun,
 ): Promise<unknown> {
   const startTime = Date.now();
 
@@ -430,7 +442,8 @@ async function executeToolInSpan(
       workspaceActivity,
       ...(requiredAccess === 'read' && callerSignal && { abortSignal: callerSignal }),
     };
-    handlerSignal.current = toolContext.abortSignal;
+    handlerRun.admitted = true;
+    handlerRun.signal = toolContext.abortSignal;
 
     // A capture run records the effect it WOULD have had instead of performing
     // it. SDK capture and eval-window finalization enforce their own
