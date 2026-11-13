@@ -97,8 +97,11 @@ export async function validateCandidate(
         await page.setContent(
           '<!doctype html><iframe sandbox="allow-scripts" style="width:100%;height:650px;border:0"></iframe>'
         );
+        // Only the shell document crosses into the page. The route above
+        // serves the assets, so serializing them here again would add their
+        // full size to every scenario.
         await page.evaluate(
-          ({ artifact, scenario }) => {
+          ({ html, scenario }) => {
             const frame = document.querySelector("iframe")!;
             const send = (message: Record<string, unknown>) =>
               frame.contentWindow!.postMessage(
@@ -218,9 +221,9 @@ export async function validateCandidate(
               }
               send({ id, result });
             });
-            frame.srcdoc = artifact.html;
+            frame.srcdoc = html;
           },
-          { artifact: input.artifact, scenario }
+          { html: input.artifact.html, scenario }
         );
         await page.waitForFunction(
           () =>
