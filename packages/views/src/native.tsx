@@ -195,6 +195,33 @@ export interface JsonDiffProps {
   after: Record<string, unknown> | null;
 }
 
+/** Schema declarations use the entitySchema SDK's field names. List responses
+ * supply entity_types / relationship_types; compose rules from listRules.
+ * Rendering never applies a declaration. createType/createRelType require a
+ * name; the graph alone permits omission and displays the slug. */
+export interface SchemaSpec {
+  entityTypes: Array<{
+    slug: string;
+    name?: string;
+    description?: string;
+    metadata_schema?: object;
+    event_kinds?: object;
+  }>;
+  relationshipTypes: Array<{
+    slug: string;
+    name?: string;
+    metadata_schema?: object;
+    rules: Array<{
+      source_entity_type_slug: string;
+      target_entity_type_slug: string;
+    }>;
+  }>;
+}
+
+export type SchemaGraphProps =
+  | { schema?: undefined; base?: never }
+  | { schema: SchemaSpec; base?: "workspace" | SchemaSpec };
+
 /** Read-only native definition body. Pass a saved object or an authored snapshot.
  * No fetching, code execution, saving or approval is performed by the body. */
 export interface DefinitionProps {
@@ -202,6 +229,7 @@ export interface DefinitionProps {
 }
 
 export interface NativeComponentProps {
+  SchemaGraph: SchemaGraphProps;
   AutomationDefinition: DefinitionProps;
   AgentDefinition: DefinitionProps;
   ConnectorDefinition: DefinitionProps;
@@ -259,6 +287,7 @@ export type NativeComponents = {
   [K in keyof NativeComponentProps]: ComponentType<NativeComponentProps[K]>;
 };
 export const NATIVE_COMPONENT_NAMES = [
+  "SchemaGraph",
   "AutomationDefinition",
   "AgentDefinition",
   "ConnectorDefinition",
@@ -301,6 +330,8 @@ function native<K extends keyof NativeComponents>(
   };
 }
 export const EntityListPage = native("EntityListPage");
+/** Read-only workspace schema, snapshot, or semantic schema comparison. */
+export const SchemaGraph = native("SchemaGraph");
 export const EntityRecordPage = native("EntityRecordPage");
 export const EntityTableView = native("EntityTableView");
 export const RecordSpecSheet = native("RecordSpecSheet");
