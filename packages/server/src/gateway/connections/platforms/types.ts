@@ -138,6 +138,12 @@ export interface ChatPlatformDescriptor {
    */
   connectorTransport?: boolean;
   /**
+   * False when this platform cannot show tappable action buttons, so a card's
+   * buttons would arrive as plain text the user cannot act on. Turns on such a
+   * platform get no follow-up chips. Absent = buttons render.
+   */
+  rendersActionButtons?: boolean;
+  /**
    * Connector transports: the chat one live source row belongs to, and the
    * inbound message it is, or `message: null` when nothing should answer it.
    * `channelId` is the native chat id an Automation's `channel_id` filter

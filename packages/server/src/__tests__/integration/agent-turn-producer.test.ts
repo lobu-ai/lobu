@@ -36,6 +36,7 @@ import { ChatGPTOAuthModule } from '../../gateway/auth/chatgpt/chatgpt-oauth-mod
 import { ChatResponseBridge } from '../../gateway/connections/chat-response-bridge';
 import { createConnectedGatewayStateAdapter } from '../../gateway/connections/state-adapter';
 import type { PlatformConnection } from '../../gateway/connections/types';
+import { WHATSAPP_WEB_PLATFORM } from '../../gateway/connections/platforms/whatsapp-web-adapter';
 import { type AssembledChatBridge, startAssembledChatBridge, waitFor } from '../../gateway/__tests__/helpers/chat-bridge-harness';
 import { resetRateLimiterForTests } from '../../utils/rate-limiter';
 import { __resetPublicOriginCachesForTests } from '../../utils/public-origin';
@@ -1746,6 +1747,22 @@ describe('agent turn producer', () => {
     expect(turn.tools?.follow_ups).toBeUndefined();
     expect(run).toMatchObject({ initiator_kind: 'agent_session', created_by_user_id: null, initiator_ref: { user_id: null } });
     expect(run.initiator_ref).not.toHaveProperty('member_user_id');
+  });
+
+  it.each([
+    [WHATSAPP_WEB_PLATFORM, undefined],
+    ['whatsapp', true],
+  ])('asks for follow-up chips on %s only where it can show them as buttons', async (platform, expected) => {
+    const org = await createTestOrganization();
+    await enqueueMessage({ ...messageFor(org.id), platform } as MessagePayload, {
+      agentSettings: settingsStore,
+      catalog: catalogFor(tokenEchoingModule()),
+      gatewayUrl: GATEWAY_URL,
+    });
+
+    const [run] = await agentTurnRuns();
+    const turn = run.action_input.turn as { tools?: { follow_ups?: true } };
+    expect(turn.tools?.follow_ups).toBe(expected);
   });
 
   it('retains workspace tools when MCP is unavailable', async () => {
