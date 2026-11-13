@@ -9,11 +9,12 @@
  * module shapes are load-bearing.
  *
  * How it gets into the page: the connector serialises this function with
- * Function.prototype.toString() and runs `(<source>)()` through the generic
- * chrome `evaluate` op, which executes in the page's MAIN world. That is the
- * same mechanism the extension used with chrome.scripting.executeScript({func}),
- * minus the extension. The adapter is idempotent and self-versioning
- * (__owlettoWhatsAppAdapterV1 + ADAPTER_VERSION), so re-injecting is safe.
+ * Function.prototype.toString() and runs `(<source>)("<version>")` through the
+ * generic chrome `evaluate` op, which executes in the page's MAIN world. That is
+ * the same mechanism the extension used with chrome.scripting.executeScript({func}),
+ * minus the extension. The version is a fingerprint of that exact source,
+ * computed by the connector (WHATSAPP_ADAPTER_INSTALL in whatsapp-web-helpers.ts),
+ * so the adapter is idempotent per program text and re-injecting is safe.
  *
  * INVARIANT — every binding this function needs must live INSIDE it. A constant
  * hoisted to module scope would vanish from toString() output and the page would
@@ -26,14 +27,14 @@
  * and cost a @ts-nocheck plus a set of `declare const` shims.
  */
 
-export function whatsAppWebAdapterProgram() {
+export function whatsAppWebAdapterProgram(adapterVersion) {
   const GLOBAL_KEY = "__owlettoWhatsAppAdapterV1";
-  // Bumped whenever the program changes at all, not only its RPC surface.
-  // A WhatsApp tab outlives a deploy, so the resident adapter is replaced only
-  // when this number moves: shipping a fix under the old number leaves every
-  // already-open tab running the previous code with nothing to show for it.
-  // Keep in lockstep with WHATSAPP_ADAPTER_VERSION in whatsapp-web-helpers.ts.
-  const ADAPTER_VERSION = 28;
+  // A WhatsApp tab outlives a deploy, so a resident adapter is replaced only
+  // when this version differs. The connector derives it from this program's
+  // own source, so any change to the program replaces it with no manual bump.
+  const ADAPTER_VERSION = adapterVersion;
+  if (typeof ADAPTER_VERSION !== "string" || !ADAPTER_VERSION)
+    throw new Error("WhatsApp adapter must be installed with its content version");
   const SOURCE_ERROR_ID = "whatsapp-web:source-observation-error";
   // Storage rows one `chat:` read examines; a whole personal history is
   // usually under this, so one read answers.
@@ -1562,7 +1563,7 @@ export function whatsAppWebAdapterProgram() {
 
   async function invoke(request) {
     try {
-      if (Number(request?.adapter_version) !== ADAPTER_VERSION) {
+      if (request?.adapter_version !== ADAPTER_VERSION) {
         return {
           ok: false,
           error: {

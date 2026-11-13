@@ -31,10 +31,10 @@ import {
   messageTitle,
   normalizeRelayedMessage,
   type ObservationCheckpoint,
+  WHATSAPP_ADAPTER_INSTALL,
   WHATSAPP_ADAPTER_VERSION,
   WHATSAPP_ORIGIN,
 } from "./whatsapp-web-helpers.js";
-import { whatsAppWebAdapterProgram } from "./whatsapp-web-adapter.js";
 
 /**
  * How long a run waits for WhatsApp Web to finish hydrating before giving up.
@@ -119,7 +119,7 @@ async function adapterInstalled(
     tab_id: tabId,
     expression: `(() => {
       const a = globalThis.__owlettoWhatsAppAdapterV1;
-      return !!a && typeof a.invoke === 'function' && a.version === ${WHATSAPP_ADAPTER_VERSION};
+      return !!a && typeof a.invoke === 'function' && a.version === ${JSON.stringify(WHATSAPP_ADAPTER_VERSION)};
     })()`,
     await_promise: false,
   });
@@ -144,7 +144,7 @@ async function injectAdapter(
     exception?: unknown;
   }>("evaluate", {
     tab_id: tabId,
-    expression: `(${whatsAppWebAdapterProgram.toString()})()`,
+    expression: WHATSAPP_ADAPTER_INSTALL,
     await_promise: false,
   });
   if (result.exception) {
@@ -372,9 +372,9 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
       accountProbe: {
         url: `${WHATSAPP_ORIGIN}/`,
         expression: `(async () => {
-          (${whatsAppWebAdapterProgram.toString()})();
+          ${WHATSAPP_ADAPTER_INSTALL};
           for (let i = 0; i < 40; i++) {
-            const identity = await globalThis.__owlettoWhatsAppAdapterV1.invoke({ op: "account_identity", adapter_version: ${WHATSAPP_ADAPTER_VERSION} });
+            const identity = await globalThis.__owlettoWhatsAppAdapterV1.invoke({ op: "account_identity", adapter_version: ${JSON.stringify(WHATSAPP_ADAPTER_VERSION)} });
             if (identity?.accountId) return identity;
             await new Promise(resolve => setTimeout(resolve, 250));
           }
