@@ -1571,33 +1571,6 @@ export async function dispatchNextPendingAutomationRuns(
 	}
 }
 
-/**
- * Materialize and dispatch one Automation's due window now instead of on the
- * next scheduler tick. Same gates as the tick: active, runnable, not already
- * in flight, and a non-empty pending window.
- */
-export async function startDueAutomationWindow(
-	env: Env,
-	automationId: number,
-	db?: DbClient
-): Promise<DispatchAutomationRunsResult> {
-	const sql = db ?? getDb();
-	await materializeDueAutomationRuns(env, sql, automationId);
-	const pending = await sql<{ id: string }>`
-		SELECT id FROM runs
-		WHERE automation_id = ${automationId}
-		  AND run_type = 'automation'
-		  AND status = 'pending'
-	`;
-	if (pending.length === 0) {
-		return { claimed: 0, dispatched: 0, reconciled: 0, failed: 0 };
-	}
-	return dispatchPendingAutomationRuns({
-		db: sql,
-		runIds: pending.map((row) => Number(row.id)),
-	});
-}
-
 export async function queueAndDispatchAutomationRun(
 	automationId: number,
 	dispatchSource: AutomationRunPayload["dispatch_source"],
