@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import type { Env } from '../index';
 import { createAuth } from '../auth';
-import { resolveSession, serveAuthRequest, sessionCookieCandidates } from '../auth/resolve-session';
+import { isSignedInBrowserFormPost, resolveSession, serveAuthRequest } from '../auth/resolve-session';
 import { resolveBaseUrl } from '../auth/base-url';
 import { loginProviderForChatPlatform } from '../auth/chat-login-identities';
 import {
@@ -57,7 +57,6 @@ interface ChatIdentityRouteDeps {
   session(request: Request, env: Env): Promise<{ user: SessionUser } | null>;
   /** End the browser's Lobu session; returns the `Set-Cookie` values to send. */
   signOut(request: Request, env: Env): Promise<string[]>;
-  origin(request: Request): string;
 }
 
 /**
@@ -85,17 +84,16 @@ async function signOutBrowserSession(request: Request, env: Env): Promise<string
 const DEFAULT_DEPS: ChatIdentityRouteDeps = {
   session: async (request, env) => resolveSession(await createAuth(env, request), request.headers),
   signOut: signOutBrowserSession,
-  origin: (request) => resolveBaseUrl({ request }),
 };
 
 /**
- * Sign in, then land back on this link. With `provider`, the login page starts
- * that provider's sign-in straight away.
+ * Sign in, then land back on this link. Both are paths, so the visitor stays
+ * on the host they opened the link on, a per-org subdomain included. With
+ * `provider`, the login page starts that provider's sign-in straight away.
  */
-function loginContinuation(origin: string, token: string, provider?: string | null): string {
-  const callback = new URL(PATH, origin);
-  callback.searchParams.set('token', token);
-  const query = new URLSearchParams({ ...(provider && { provider }), callbackUrl: callback.toString() });
+function loginContinuation(token: string, provider?: string | null): string {
+  const callbackUrl = `${PATH}?${new URLSearchParams({ token })}`;
+  const query = new URLSearchParams({ ...(provider && { provider }), callbackUrl });
   return `/auth/login?${query}`;
 }
 
@@ -399,7 +397,7 @@ export function createChatIdentityRoutes(overrides: Partial<ChatIdentityRouteDep
     // which also proves the chat identity this link is for.
     if (!session?.user) {
       const provider = loginProviderForChatPlatform(claim.platform);
-      return c.redirect(loginContinuation(deps.origin(c.req.raw), token, provider), 302);
+      return c.redirect(loginContinuation(token, provider), 302);
     }
     const lobuAccount = sessionAccount(session.user);
     if (!(await signInProvesClaim(sql, session.user.id, claim))) {
@@ -438,14 +436,7 @@ export function createChatIdentityRoutes(overrides: Partial<ChatIdentityRouteDep
   routes.post(PATH, async (c) => {
     c.header('Cache-Control', 'no-store');
     c.header('Referrer-Policy', 'strict-origin');
-    const origin = deps.origin(c.req.raw);
-    // A browser form with the session cookie, from this origin only: a foreign
-    // page cannot set Origin, and a bearer token is not a person at a browser.
-    if (
-      c.req.header('authorization') ||
-      c.req.header('origin') !== origin ||
-      !sessionCookieCandidates(c.req.header('cookie')).length
-    )
+    if (!isSignedInBrowserFormPost(c.req.raw))
       return c.json({ error: 'Use the signed-in browser link page.' }, 403);
     const body = await c.req.parseBody().catch(() => ({}) as Record<string, unknown>);
     const token = typeof body.token === 'string' ? body.token : '';
@@ -462,11 +453,11 @@ export function createChatIdentityRoutes(overrides: Partial<ChatIdentityRouteDep
         return c.html(SWITCH_FAILED_PAGE, 502);
       }
       for (const cookie of cookies) c.header('Set-Cookie', cookie, { append: true });
-      return c.redirect(loginContinuation(origin, token, loginProviderForChatPlatform(claim.platform)), 303);
+      return c.redirect(loginContinuation(token, loginProviderForChatPlatform(claim.platform)), 303);
     }
 
     const session = await deps.session(c.req.raw, c.env);
-    if (!session?.user) return c.redirect(loginContinuation(origin, token), 303);
+    if (!session?.user) return c.redirect(loginContinuation(token), 303);
 
     const result = await redeemChatIdentityLink(token, session.user, body.join === '1');
     switch (result.status) {

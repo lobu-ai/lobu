@@ -74,7 +74,6 @@ test("the confirmation page preserves form Origin without leaking the token in R
   const origin = "https://cloud.example.test";
   const routes = createChatIdentityRoutes({
     session: async () => ({ user: { id: "user-link-notice" } }),
-    origin: () => origin,
   });
   const response = await routes.request(`${origin}/connect/chat-identity?token=synthetic-link`);
   expect(response.status).toBe(200);
@@ -103,7 +102,7 @@ test("failed account switching offers recovery without consuming the link", asyn
   const adopt = spyOn(subjectIdentities, "adoptChatIdentityOntoMember").mockResolvedValue("already-owned");
   const signOut = mock(async () => { throw new Error("synthetic sign-out failure"); });
   const origin = "https://cloud.example.test";
-  const routes = createChatIdentityRoutes({ signOut, origin: () => origin });
+  const routes = createChatIdentityRoutes({ signOut });
   const response = await routes.request(`${origin}/connect/chat-identity`, {
     method: "POST",
     headers: { origin, cookie: `${sessionCookieName(true)}=synthetic-session` },

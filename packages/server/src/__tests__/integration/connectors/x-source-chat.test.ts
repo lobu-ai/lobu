@@ -345,7 +345,6 @@ describe("X source chat", () => {
 
     const routes = createChatIdentityRoutes({
       session: async () => ({ user: member }),
-      origin: () => ORIGIN,
     });
     const response = await routes.request(`${ORIGIN}/connect/chat-identity`, {
       method: "POST",
