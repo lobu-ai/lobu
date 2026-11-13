@@ -79,6 +79,7 @@ interface DeviceMessage {
   quoted_id?: string;
   /** The device's verdict: the message @mentions the account or quotes it. */
   mentions_me?: boolean;
+  own_mention_jids?: string[];
 }
 
 let sql: ReturnType<typeof getTestDb>;
@@ -294,7 +295,7 @@ async function mintSourceClaim(targetOrgId: string, targetAgentId: string, userI
 }
 
 /** Redeem through the real source command path, using its connection-scoped SDK thread. */
-async function linkSourceGroup() {
+async function linkSourceGroup(address: { prefix: string; mentionsMe: boolean; ownMentionJids?: string[] } = { prefix: "", mentionsMe: true }) {
   const targetOrg = await createTestOrganization({ name: "Linked source-chat workspace" });
   await addUserToOrganization(ownerId, targetOrg.id, "admin");
   const targetAgent = await createTestAgent({ organizationId: targetOrg.id, ownerUserId: ownerId });
@@ -305,7 +306,8 @@ async function linkSourceGroup() {
   const id = `SYNTHLINK-${targetAgent.agentId}`;
   deviceMessages.push({
     id, chat_jid: GROUP_JID, sender_jid: GROUP_SENDER,
-    body: command, mentions_me: true, timestamp: sentAt,
+    body: `${address.prefix}${command}`, mentions_me: address.mentionsMe,
+    own_mention_jids: address.ownMentionJids ?? [], timestamp: sentAt,
   });
   await deliver(id, id, new Date(sentAt * 1000));
   await drain();
@@ -394,6 +396,44 @@ describe("WhatsApp Web source chat", () => {
 
   afterAll(cleanupTestDatabase);
 
+  it.each([
+    { name: "bare command", prefix: "", mentionsMe: false },
+    { name: "LID mention", prefix: "@99000000000001 ", mentionsMe: true, ownMentionJids: ["99000000000001@lid"] },
+    { name: "phone mention", prefix: "@15550000001 ", mentionsMe: true, ownMentionJids: ["15550000001@s.whatsapp.net"] },
+  ])("links a source group using a $name without starting an agent turn", async ({ prefix, mentionsMe, ownMentionJids }) => {
+    await insertAutomation("owner-reply", replyTo());
+    await linkSourceGroup({ prefix, mentionsMe, ownMentionJids });
+  }, 60_000);
+
+
+  it("accepts a bare link command even when the installation only replies to mentions", async () => {
+    await insertAutomation("mentions-only", replyTo({ mention_only: true }));
+    await linkSourceGroup({ prefix: "", mentionsMe: false });
+  }, 60_000);
+
+  it.each(["groups disabled", "sender denied", "old message", "missing time", "source policy"] as const)(
+    "keeps command admission closed for %s", async (gate) => {
+      await insertAutomation("owner-reply", replyTo());
+      await queue!.stop();
+      queue = null;
+      const timestamp = gate === "old message" ? BASE_TIME - 2 * 24 * 60 * 60 : BASE_TIME;
+      deviceMessages.push({ id: "SYNTHCOMMANDGATE", chat_jid: GROUP_JID, sender_jid: GROUP_SENDER,
+        body: "/help", timestamp });
+      await deliver("SYNTHCOMMANDGATE", "command-gate", gate === "missing time" ? null : new Date(timestamp * 1000));
+      await manager.warmConnection(String(connectionId));
+      const instance = manager.getInstance(String(connectionId))!;
+      if (gate === "groups disabled") instance.connection.settings = { ...instance.connection.settings, allowGroups: false };
+      if (gate === "sender denied") instance.connection.settings = { ...instance.connection.settings, allowFrom: [DM_JID] };
+      if (gate === "source policy") await upsertEntityApprovalPolicy(orgId, {
+        resourceClass: "connector_action", connectorKey: "whatsapp.web", operationCategory: "read", effects: { execute: "block" },
+      });
+      await startWorker();
+      await drain();
+      expect(enqueued).toHaveLength(0);
+      expect(sends).toHaveLength(0);
+      if (gate === "old message") expect(await dispositions()).toEqual(["older_than_reply_automation"]);
+      if (gate === "missing time") expect(await dispositions()).toEqual(["missing_source_time"]);
+    }, 60_000);
 
   it("routes an explicitly linked source group across workspaces before the owner wildcard", async () => {
     await insertAutomation("owner-reply", replyTo());
@@ -623,9 +663,12 @@ describe("WhatsApp Web source chat", () => {
     }
   }, 60_000);
 
-  it("retries a command's confirmation under the same send key", async () => {
+  it.each([
+    { chat_jid: DM_JID, body: "/clear" },
+    { chat_jid: GROUP_JID, sender_jid: GROUP_SENDER, body: "/help" },
+  ])("retries a command's confirmation under the same send key: $body", async (message) => {
     await insertAutomation("dm-reply", replyTo());
-    deviceMessages.push({ id: "SYNTHDM11", chat_jid: DM_JID, body: "/clear" });
+    deviceMessages.push({ id: "SYNTHDM11", ...message });
     failNext = "send";
 
     await deliver("SYNTHDM11");
@@ -766,8 +809,10 @@ describe("WhatsApp Web source chat", () => {
     expect(sends.map((send) => send.input.chat_jid)).toEqual([GROUP_JID]);
   }, 60_000);
 
-  it("answers an unlinked sender's group mention reply-only, with a notice but no link", async () => {
+  it("directs an unlinked member's group mention to DM linking, without posting a link", async () => {
     vi.useFakeTimers({ toFake: ["Date"], now: Date.now() });
+    const member = await createTestUser({ email: "wa-unlinked-member@example.test" });
+    await addUserToOrganization(member.id, orgId, "member");
     await insertAutomation("dm-reply", replyTo());
     deviceMessages.push({ id: "SYNTHGR9", chat_jid: GROUP_JID, sender_jid: STRANGER_JID, body: "hey bot", mentions_me: true });
 
@@ -776,7 +821,7 @@ describe("WhatsApp Web source chat", () => {
     expect(enqueued).toHaveLength(1);
     expect(sends).toHaveLength(1);
     expect(sends[0].input).toMatchObject({ chat_jid: GROUP_JID });
-    expect(String(sends[0].input.text)).toContain("I can't use this workspace's tools for you");
+    expect(String(sends[0].input.text)).toMatch(/direct/i);
     // Anyone reading the group could redeem a link, so none is posted there.
     expect(String(sends[0].input.text)).not.toContain("/connect/chat-identity?token=");
     const sender = whatsAppSender(STRANGER_JID);

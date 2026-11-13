@@ -403,6 +403,56 @@ export class MessageHandlerBridge {
     return stripped;
   }
 
+  /** App commands need no agent activation, but retain connection admission. */
+  async tryHandleEarlyCommand(
+    thread: { post: (content: unknown) => Promise<unknown> },
+    message: any,
+    routing: { channelId: string; conversationId: string; isGroup: boolean; teamId?: string }
+  ): Promise<boolean> {
+    const text = this.stripBotMention(typeof message.text === "string" ? message.text : "");
+    const userId = message.author?.userId ?? "unknown";
+    if (!this.commandDispatcher || !isEarlyDispatchableChatCommand(text) ||
+        !this.isInboundAllowed(userId, routing.isGroup)) return false;
+    // The dispatcher can render handler errors as a second reply. A failed
+    // post may already have reached the chat: prevent that fallback and let
+    // source ingress retry the original post with its durable send key.
+    let postFailure: { error: unknown } | undefined;
+    const handled = await this.commandDispatcher.tryHandleSlashText(text, {
+      platform: this.connection.platform,
+      userId,
+      ...routing,
+      connectionId: this.connection.id,
+      organizationId: this.connection.organizationId,
+      reply: createChatReply(async (content) => {
+        if (postFailure) throw postFailure.error;
+        try {
+          await thread.post(content);
+        } catch (error) {
+          postFailure = { error };
+          throw error;
+        }
+      }),
+    });
+    if (postFailure) throw postFailure.error;
+    return handled;
+  }
+
+  private isInboundAllowed(userId: string, isGroup: boolean): boolean {
+    if (!this.manager.has(this.connection.id)) {
+      logger.info({ connectionId: this.connection.id }, "Connection no longer active, dropping message");
+      return false;
+    }
+    if (!isSenderAllowed(this.connection.settings?.allowFrom, userId)) {
+      logger.info({ userId }, "Blocked by allowlist");
+      return false;
+    }
+    if (isGroup && this.connection.settings?.allowGroups === false) {
+      logger.info("Groups not allowed");
+      return false;
+    }
+    return true;
+  }
+
   /**
    * Reply at a routing dead end — an inbound message/interaction resolved to
    * no channel Automation and the connection has no owning agent — with a
@@ -508,15 +558,6 @@ export class MessageHandlerBridge {
       throw new Error("Interaction messages require explicit routing context");
     }
 
-    // Guard: drop messages if the connection was stopped/removed
-    if (!this.manager.has(connection.id)) {
-      logger.info(
-        { connectionId: connection.id },
-        "Connection no longer active, dropping message"
-      );
-      return;
-    }
-
     const platform = connection.platform;
     const userId = message.author?.userId ?? "unknown";
     const channelId =
@@ -555,17 +596,7 @@ export class MessageHandlerBridge {
       "Processing inbound message"
     );
 
-    // Gap 6: Allowlist check
-    if (!isSenderAllowed(connection.settings?.allowFrom, userId)) {
-      logger.info({ userId }, "Blocked by allowlist");
-      return;
-    }
-
-    // Gap 6: Group check
-    if (isGroup && connection.settings?.allowGroups === false) {
-      logger.info({ channelId }, "Groups not allowed");
-      return;
-    }
+    if (!this.isInboundAllowed(userId, isGroup)) return;
 
     // Subscribe to thread for follow-up messages
     if (source === "mention" || source === "dm") {
@@ -630,29 +661,9 @@ export class MessageHandlerBridge {
       // early path to commands whose complete implementation lives in the
       // dispatcher: /new and /clear have real state handling later in the
       // resolved path and must not be falsely acknowledged here.
-      const unroutedCommandText = this.stripBotMention(
-        typeof message.text === "string" ? message.text : ""
-      );
-      if (
-        this.commandDispatcher &&
-        isEarlyDispatchableChatCommand(unroutedCommandText)
-      ) {
-        const handled = await this.commandDispatcher.tryHandleSlashText(
-          unroutedCommandText,
-          {
-            platform,
-            userId,
-            channelId,
-            teamId,
-            isGroup,
-            conversationId,
-            connectionId: this.connection.id,
-            organizationId: this.connection.organizationId,
-            reply: createChatReply((content) => thread.post(content)),
-          }
-        );
-        if (handled) return;
-      }
+      if (await this.tryHandleEarlyCommand(thread, message, {
+        channelId, conversationId, teamId, isGroup,
+      })) return;
 
       // Linked channel but trigger filters rejected this message (e.g.
       // mention_only on a non-mention). The planner is the authority for
@@ -1280,8 +1291,9 @@ export class MessageHandlerBridge {
           return false;
         }
       }
-      const canLink = args.isDirect && !!args.organizationId &&
+      const supportsIdentityLink = !!args.organizationId &&
         chatIdentityLinkKey(platform, args.teamId, args.userId) !== null;
+      const canLink = args.isDirect && supportsIdentityLink;
       // A group notice must not suppress the private link, and an expired
       // link must be replaceable on the sender's next DM.
       const noticeKey = chatSenderLimitKey(canLink ? "link" : "notice", sender);
@@ -1327,7 +1339,8 @@ export class MessageHandlerBridge {
             : null;
         const joinUrl = slug ? `${webOrigin}/${encodeURIComponent(slug)}` : null;
         try {
-          await args.thread.post(chatAccessNotice(actor.access, joinUrl, linkUrl));
+          await args.thread.post(chatAccessNotice(actor.access, joinUrl, linkUrl,
+            !args.isDirect && supportsIdentityLink));
           logger.info(
             { platform, organizationId: args.organizationId, connectionId: this.connection.id, access: actor.access },
             "Posted the chat access notice to an unlinked sender"

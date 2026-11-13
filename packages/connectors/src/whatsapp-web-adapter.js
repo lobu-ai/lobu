@@ -33,7 +33,7 @@ export function whatsAppWebAdapterProgram() {
   // when this number moves: shipping a fix under the old number leaves every
   // already-open tab running the previous code with nothing to show for it.
   // Keep in lockstep with WHATSAPP_ADAPTER_VERSION in whatsapp-web-helpers.ts.
-  const ADAPTER_VERSION = 27;
+  const ADAPTER_VERSION = 28;
   const SOURCE_ERROR_ID = "whatsapp-web:source-observation-error";
   // Storage rows one `chat:` read examines; a whole personal history is
   // usually under this, so one read answers.
@@ -338,6 +338,23 @@ export function whatsAppWebAdapterProgram() {
       }
     }
     return false;
+  }
+
+  /** Actual self-mentions, excluding quotes of our messages and other people. */
+  async function ownMentionJids(row) {
+    const mentions = Array.isArray(row.mentionedJidList) ? row.mentionedJidList : [];
+    if (mentions.length === 0) return [];
+    const own = await ownJids();
+    const mentioned = new Set();
+    for (const value of mentions) {
+      const candidate = await canonicalJid(value);
+      for (const jid of [candidate.jid, candidate.lid]) {
+        if (typeof jid === "string" && /^[0-9]{5,32}@(s\.whatsapp\.net|lid)$/.test(jid) && own.has(jid)) {
+          mentioned.add(jid);
+        }
+      }
+    }
+    return [...mentioned].slice(0, 2);
   }
 
   /**
@@ -723,6 +740,7 @@ export function whatsAppWebAdapterProgram() {
       media_filename: row.filename ?? row.fileName ?? row.title ?? null,
       quoted_id: quotedId,
       mentions_me: await mentionsOwnAccount(row),
+      own_mention_jids: await ownMentionJids(row),
       is_forwarded: Boolean(row.isForwarded || Number(row.forwardingScore) > 0),
       is_starred: Boolean(row.star ?? row.isStarred),
       is_system_event: SYSTEM_TYPES.has(type),

@@ -18,6 +18,7 @@
  *      matching trigger wins); background targets are queued on the source
  *      signal, and a group reply needs the message to mention the bot (the
  *      platform's mention flag) or an Automation scoped to that group;
+ *      app commands run independently of agent activation;
  *   7. a message sent before a reply Automation's latest database update
  *      gets no reply from it (a device replays older references when a feed
  *      is subscribed again);
@@ -51,6 +52,7 @@ import { CHAT_SOURCE_INGRESS_QUEUE, type ChatSourceIngressJob } from "../../runs
 import { sourceFeedSubscriptions } from "../../runs/source-feed-subscriptions.js";
 import type { QueueJob } from "../infrastructure/queue/types.js";
 import type { ChatInstanceManager } from "./chat-instance-manager.js";
+import { isEarlyDispatchableChatCommand } from "./message-handler-bridge.js";
 import { getResponseStrategy } from "./platform-strategies/index.js";
 import { getPlatformDescriptor } from "./platforms/index.js";
 import { resolveChatTarget } from "./platforms/shared.js";
@@ -178,27 +180,23 @@ export async function handleChatSourceIngress(
     // or a trigger scoped to that group; mention_only was checked above.
     const eligible = replyTargets.filter((target) =>
       thread.isDM === true || isMention || target.trigger.match?.channel_id === parsed.channelId);
-    if (eligible.length === 0) {
+    const isCommand = isEarlyDispatchableChatCommand(message.text);
+    if (eligible.length === 0 && !isCommand) {
       return replyTargets.length === 0 ? "no_matching_reply_trigger" : "group_not_addressed";
     }
     if (!signal.occurred_at) return "missing_source_time";
+    // Commands belong to the installation, not an agent trigger. They still
+    // require a current authorized subscriber and the same replay cutoff.
+    const ageCheckedIds = isCommand
+      ? candidates
+      : [...new Set([...eligible, ...plan.replyTargets].map((target) => target.automationId))];
     const current = new Set(
       (await sql<{ id: number | string }>`
         SELECT id FROM automations
-        WHERE id = ANY(${pgBigintArray([...new Set([...eligible, ...plan.replyTargets].map((target) => target.automationId))])}::bigint[])
+        WHERE id = ANY(${pgBigintArray(ageCheckedIds)}::bigint[])
           AND updated_at <= ${signal.occurred_at}::timestamptz
       `).map((row) => Number(row.id)),
     );
-    if (!plan.replyTargets.some((target) => current.has(target.automationId))) {
-      return "older_than_reply_automation";
-    }
-    // An explicit binding already suppressed competing replies, so an older
-    // message cannot fall back to the previous destination. Ordinary responders
-    // retain their oldest current match on retries.
-    const [replyTarget] = eligible
-      .filter((target) => current.has(target.automationId))
-      .sort((a, b) => a.automationId - b.automationId);
-    if (!replyTarget) return "older_than_reply_automation";
     const post = getResponseStrategy(instance.connection.platform).post;
     const ctx = {
       connectionId: runtimeId,
@@ -218,6 +216,27 @@ export async function handleChatSourceIngress(
           },
         })
       : thread;
+    if (isCommand && current.size > 0 && await instance.messageBridge.tryHandleEarlyCommand(
+      keyedThread, message, {
+        channelId: parsed.channelId,
+        conversationId: thread.id,
+        isGroup: thread.isDM !== true,
+      }
+    )) return "admitted";
+    if (eligible.length === 0) {
+      return current.size === 0 ? "older_than_reply_automation"
+        : replyTargets.length === 0 ? "no_matching_reply_trigger" : "group_not_addressed";
+    }
+    if (!plan.replyTargets.some((target) => current.has(target.automationId))) {
+      return "older_than_reply_automation";
+    }
+    // An explicit binding already suppressed competing replies, so an older
+    // message cannot fall back to the previous destination. Ordinary responders
+    // retain their oldest current match on retries.
+    const [replyTarget] = eligible
+      .filter((target) => current.has(target.automationId))
+      .sort((a, b) => a.automationId - b.automationId);
+    if (!replyTarget) return "older_than_reply_automation";
     await instance.messageBridge.handleAdmittedSourceMessage(keyedThread, message, {
       signal: hydrated,
       replyTargets: [replyTarget],

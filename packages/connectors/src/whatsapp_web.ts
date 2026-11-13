@@ -338,6 +338,7 @@ function normalizedSearchResults(
       is_group: message.is_group,
       quoted_id: message.quoted_id ?? null,
       mentions_me: message.mentions_me === true,
+      own_mention_jids: message.own_mention_jids ?? [],
     });
   }
   return rows;
@@ -363,7 +364,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
     name: "WhatsApp",
     description:
       "Personal WhatsApp messages read live from WhatsApp Web in the paired Owletto Chrome without importing message history. Automations react to new-message references and read content on demand. Search, draft, send, edit, react to, and revoke messages.",
-    version: "2.3.0",
+    version: "2.3.1",
     faviconDomain: "whatsapp.com",
     authSchema: { methods: [{ type: "browser", mode: "live" }] },
     browser: {
@@ -462,7 +463,21 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
               type: "string",
               enum: ["whatsapp_fts", "loaded_model_fallback"],
             },
-            results: { type: "array", items: { type: "object" } },
+            results: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  own_mention_jids: {
+                    type: "array",
+                    maxItems: 2,
+                    uniqueItems: true,
+                    items: { type: "string", pattern: "^[0-9]{5,32}@(s\\.whatsapp\\.net|lid)$" },
+                    description: "Verified phone/LID JIDs of the paired account actually @mentioned; empty for quotes alone. Original text is preserved.",
+                  },
+                },
+              },
+            },
             hasMore: { type: "boolean" },
           },
         },
@@ -710,6 +725,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
         { name: "is_group", type: "boolean" },
         { name: "quoted_id", type: "string" },
         { name: "mentions_me", type: "boolean" },
+        { name: "own_mention_jids", type: "array" },
       ],
       nextCursor: response.nextCursor,
       hasMore: response.hasMore,

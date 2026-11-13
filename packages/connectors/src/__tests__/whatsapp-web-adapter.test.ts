@@ -679,23 +679,39 @@ describe("whatsAppWebAdapterProgram mentions of the own account", () => {
   }
 
   it("flags a mention of the account's phone number", async () => {
-    expect((await normalized({ mentionedJidList: [wid(OTHER), wid(ME_PN)] })).mentions_me).toBe(true);
+    const row = await normalized({ mentionedJidList: [wid(OTHER), wid(ME_PN), wid(ME_PN)] });
+    expect(row.mentions_me).toBe(true);
+    expect(row.own_mention_jids).toEqual(["447000000000@s.whatsapp.net"]);
   });
 
   it("flags a mention of the account's lid", async () => {
-    expect((await normalized({ mentionedJidList: [wid(ME_LID)] })).mentions_me).toBe(true);
+    const row = await normalized({ mentionedJidList: [wid(ME_LID)] });
+    expect(row.mentions_me).toBe(true);
+    expect(row.own_mention_jids).toEqual([ME_LID]);
+  });
+
+  it("reports both verified identities once, preserving original message text", async () => {
+    const row = await normalized({ body: "hey @447000000000 @99000000000001", mentionedJidList: [
+      wid(ME_PN), wid(ME_LID), wid(ME_PN), wid(OTHER),
+    ] });
+    expect(row.body).toBe("hey @447000000000 @99000000000001");
+    expect(row.own_mention_jids).toEqual(["447000000000@s.whatsapp.net", ME_LID]);
   });
 
   it("flags a reply quoting the account's own message", async () => {
     const quoted = await normalized({ quotedStanzaID: "3EB0BOTSAID", quotedParticipant: wid(ME_PN) });
     expect(quoted.quoted_id).toBe("3EB0BOTSAID");
     expect(quoted.mentions_me).toBe(true);
+    expect(quoted.own_mention_jids).toEqual([]);
     expect((await normalized({ quotedStanzaID: "3EB0BOTSAID", quotedParticipant: wid(ME_LID) })).mentions_me)
       .toBe(true);
   });
 
   it("does not flag chatter that mentions or quotes someone else", async () => {
-    expect((await normalized({})).mentions_me).toBe(false);
+    const row = await normalized({ mentionedJidList: [wid(OTHER)] });
+    expect(row.mentions_me).toBe(false);
+    expect(row.own_mention_jids).toEqual([]);
+    expect((await normalized({})).own_mention_jids).toEqual([]);
     expect((await normalized({
       mentionedJidList: [wid(OTHER)],
       quotedStanzaID: "3EB0OTHER",
