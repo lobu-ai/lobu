@@ -42,7 +42,7 @@ export async function askUserQuestion(
     if (error) return error;
     hooks?.onPosted?.();
     return textResult(
-      "Question posted with buttons. Your turn is now ending — the user's click will arrive as a new inbound message that resumes this session. Do not call ask_user again."
+      "Question posted. Your turn is now ending — the user's answer will arrive as a new inbound message that resumes this session: a tapped option, or, on chats that cannot show buttons, a typed reply that may be just an option's number from the list (1 = your first option). Do not call ask_user again."
     );
   });
 }

@@ -48,6 +48,7 @@ import { getDb } from "../../db/client.js";
 import { insertAgentTurnResponse, lockAgentTurnConversation, lockAgentTurnRun, releaseNextAgentTurn } from "../../runs/agent-turn-inputs.js";
 import { resolveRunInitiator } from "../../tools/initiator.js";
 import { isHeadlessSource, resolveAutomationRunContext } from "../automation-run-session.js";
+import { getPlatformDescriptor } from "../connections/platforms/index.js";
 import { parseAutomationRunConversationId } from "../permissions/automation-run-intent.js";
 import type { AgentRuntimeSelection } from "../../lobu/stores/sandbox-store.js";
 import type { McpConfigService } from "../auth/mcp/config-service.js";
@@ -1128,10 +1129,12 @@ export async function enqueueAgentTurn(
         conversation_id: data.conversationId,
         platform: data.platform,
       },
-      // Follow-up chips only where a person is waiting on this reply: never an
-      // Automation run or another server-dispatched (headless) turn.
+      // Follow-up chips only where a person is waiting on this reply and can
+      // tap them: never an Automation run, another server-dispatched (headless)
+      // turn, or a platform that would render the buttons as an inert list.
       ...(!automationIntent &&
-      !isHeadlessSource(data.platformMetadata?.source)
+      !isHeadlessSource(data.platformMetadata?.source) &&
+      getPlatformDescriptor(data.platform)?.rendersActionButtons !== false
         ? { follow_ups: true as const }
         : {}),
     };

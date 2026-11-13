@@ -92,6 +92,9 @@ export function connectorChatPlatform(
 ): ChatPlatformDescriptor {
   return {
     connectorTransport: true,
+    // Replies are plain text sent through the connector; a card's buttons
+    // would arrive as an untappable list.
+    rendersActionButtons: false,
     parseSourceMessage: (adapter, row) =>
       (adapter as ConnectorChatAdapter<unknown>).parseSourceRow(row),
     createAdapter: async (_config, context) => {
