@@ -262,7 +262,33 @@ export function createDbClientFromEnv(_env: Env): DbClient {
 let dbSingleton: DbClient | null = null;
 let rawDbSingleton: Sql | null = null;
 
+/**
+ * Set by `shutdownDb()`. Server shutdown closes the pools while stragglers --
+ * a request still on a kept-alive socket, a background tick -- can still call
+ * `getDb()`; lazily re-creating the pool for them would dial Postgres from a
+ * process that is exiting and orphan the new connections.
+ */
+let dbShutDown = false;
+
+/** The database pools were shut down for process exit; nothing reopens them. */
+export class DbClosedError extends Error {
+  constructor() {
+    super('Database pool is shut down');
+    this.name = 'DbClosedError';
+  }
+}
+
+/** Whether `shutdownDb()` has run. */
+export function isDbShutDown(): boolean {
+  return dbShutDown;
+}
+
+function assertDbOpen(): void {
+  if (dbShutDown) throw new DbClosedError();
+}
+
 function ensureSingleton(): void {
+  assertDbOpen();
   if (dbSingleton) return;
   const url = process.env.DATABASE_URL;
   if (!url) {
@@ -284,10 +310,25 @@ export function getDb(): DbClient {
 }
 
 /**
- * Close and reset the singleton PostgreSQL client.
- * Primarily used by tests that need strict connection handoff between setup and workers.
+ * Close the pools for process exit. Any later `getDb()`, `getLockDb()` or
+ * readiness check throws `DbClosedError` instead of opening a new pool.
+ */
+export async function shutdownDb(): Promise<void> {
+  dbShutDown = true;
+  await endDbPools();
+}
+
+/**
+ * Close and reset the singleton PostgreSQL client so the next `getDb()` opens
+ * a fresh pool. Used by tests that need strict connection handoff between
+ * setup and workers, and to reopen after a test exercised `shutdownDb()`.
  */
 export async function closeDbSingleton(): Promise<void> {
+  await endDbPools();
+  dbShutDown = false;
+}
+
+async function endDbPools(): Promise<void> {
   if (rawDbSingleton?.end) {
     await rawDbSingleton.end();
   } else if (dbSingleton?.end) {
@@ -329,6 +370,7 @@ const READINESS_CHECK_TIMEOUT_MS = 2000;
  * client. Same separation `getLockDb()` uses for advisory locks.
  */
 function getReadinessDb(): Sql {
+  assertDbOpen();
   if (!readinessDbSingleton) {
     const url = process.env.DATABASE_URL;
     if (!url) {
@@ -410,6 +452,7 @@ let lockDbSingleton: Sql | null = null;
  * DB_POOL_MAX note in ci.yml).
  */
 export function getLockDb(): Sql {
+  assertDbOpen();
   if (!lockDbSingleton) {
     const url = process.env.DATABASE_URL;
     if (!url) {
