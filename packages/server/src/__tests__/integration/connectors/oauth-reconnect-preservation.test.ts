@@ -1117,13 +1117,18 @@ describe('OAuth reconnect preserves the existing connection until consent', () =
     const s = await seed();
     const sql = getTestDb();
     // A rejected refresh is revoking this connection but has not committed.
+    // It takes the profile, then the connection, as markGrantRejected does.
     let commitRevoke!: () => void;
+    let revokeHolds!: () => void;
     const revokeMayCommit = new Promise<void>((resolve) => { commitRevoke = resolve; });
+    const revokeHeld = new Promise<void>((resolve) => { revokeHolds = resolve; });
     const revoke = sql.begin(async (tx) => {
-      await tx`UPDATE connections SET status = 'revoked' WHERE id = ${s.connection.id}`;
       await tx`UPDATE auth_profiles SET status = 'revoked' WHERE id = ${s.profile.id}`;
+      await tx`UPDATE connections SET status = 'revoked' WHERE id = ${s.connection.id}`;
+      revokeHolds();
       await revokeMayCommit;
     });
+    await revokeHeld;
     // Reconciliation reads the profile as active, then waits on its lock.
     const reconcile = syncOAuthConnectionsForAuthProfile(s.org.id, s.profile.id);
     await waitForBlockedQueries('auth_profiles', 1);
@@ -1186,6 +1191,18 @@ describe('OAuth reconnect preserves the existing connection until consent', () =
     const [profile] = await sql`SELECT status, auth_data FROM auth_profiles WHERE id = ${s.profile.id}`;
     expect(profile.status).toBe('active');
     expect([...profile.auth_data.granted_scopes].sort()).toEqual([BASE, OLD, EXTRA].sort());
+  });
+
+  it('an owner cannot reactivate a connection whose grant the provider rejected without reconnecting', async () => {
+    const s = await seed();
+    const sql = getTestDb();
+    await sql`UPDATE account SET "accessToken" = NULL, "refreshToken" = NULL WHERE id = ${s.profile.account_id}`;
+    await sql`UPDATE auth_profiles SET status = 'revoked' WHERE id = ${s.profile.id}`;
+    await sql`UPDATE connections SET status = 'revoked' WHERE id = ${s.connection.id}`;
+    await expect(s.client.update({ connection_id: s.connection.id, status: 'active' })).rejects.toThrow('Reconnect the connection');
+    const [row] = await sql`SELECT c.status, ap.status AS profile_status FROM connections c
+      JOIN auth_profiles ap ON ap.id = c.auth_profile_id WHERE c.id = ${s.connection.id}`;
+    expect(row).toEqual({ status: 'revoked', profile_status: 'revoked' });
   });
 
   it('a rejected refresh racing a reconnect neither deadlocks nor revokes the renewed grant', async () => {
