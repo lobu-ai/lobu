@@ -78,12 +78,49 @@ export function boundedQuery<T = any>(
 }
 
 /**
+ * The caller-facing text of a failed member SQL read.
+ *
+ * Scope CTEs are inlined, so the planner may run a caller's predicate on a row
+ * before the scope predicate removes it, and a database error raised by that
+ * row's value quotes the value (`invalid input syntax for type integer: "…"`,
+ * `relation "…" does not exist`). Only an error Postgres raised while parsing
+ * the statement carries a `position`, and it can quote nothing but the
+ * caller's own SQL text. Every other database error, and every data exception
+ * (22xxx) or integrity violation (23xxx) whatever its origin, is reduced to its
+ * SQLSTATE. Errors that did not come from Postgres pass through unchanged.
+ */
+export function readQueryFailureMessage(error: unknown): string {
+  const message = getErrorMessage(error);
+  const pgCode = postgresErrorCode(error);
+  if (!pgCode) return message;
+  const position = (error as { position?: unknown }).position;
+  const sqlClass = pgCode.slice(0, 2);
+  const parseError = typeof position === 'string' && position !== '';
+  if (parseError && sqlClass !== '22' && sqlClass !== '23') return message;
+  return (
+    `The query failed while evaluating row values (SQLSTATE ${pgCode}). ` +
+    'The database error text is withheld because it can quote rows outside your access; ' +
+    'check the casts and functions applied to column values.'
+  );
+}
+
+/**
+ * A five-character SQLSTATE from Postgres. postgres.js reports its own
+ * failures with longer codes (`CONNECTION_CLOSED`), and an errno such as
+ * `EPIPE` is the one five-character shape that is not a SQLSTATE.
+ */
+function postgresErrorCode(error: unknown): string | undefined {
+  const code = (error as { code?: unknown } | null)?.code;
+  return typeof code === 'string' && code.length === 5 && !code.startsWith('E') ? code : undefined;
+}
+
+/**
  * Classify a failed member SQL read (`query_sql`, `client.query`) by SQLSTATE.
  * Both readers run under `boundedRead`, so they share this one mapping and
  * report the same code and message for the same statement.
  */
 export function classifyReadQueryFailure(error: unknown): { code: ToolErrorCode; message: string } {
-  const pgCode = (error as { code?: unknown } | null)?.code;
+  const pgCode = postgresErrorCode(error);
   if (pgCode === '57014') {
     return { code: 'UPSTREAM_TIMEOUT', message: 'Query exceeded the 5 second timeout.' };
   }
@@ -91,10 +128,13 @@ export function classifyReadQueryFailure(error: unknown): { code: ToolErrorCode;
   if (pgCode === '25006') {
     return { code: 'VALIDATION', message: 'Only read-only queries are allowed.' };
   }
-  const message = getErrorMessage(error);
+  const rawCode = (error as { code?: unknown } | null)?.code;
   return {
-    code: classifyToolError({ pgCode: typeof pgCode === 'string' ? pgCode : undefined, message }),
-    message,
+    code: classifyToolError({
+      pgCode: typeof rawCode === 'string' ? rawCode : undefined,
+      message: getErrorMessage(error),
+    }),
+    message: readQueryFailureMessage(error),
   };
 }
 

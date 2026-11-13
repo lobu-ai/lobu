@@ -736,7 +736,8 @@ jobs:
         shard: [1, 2, 3]
     services:
       postgres:
-        image: pgvector/pgvector:pg18
+        # PostgreSQL 18.6, pinned: a floating pg18 tag moved CI to 18.7 unannounced and changed query plans. Bump deliberately.
+        image: pgvector/pgvector:pg18@sha256:c29f30688a9ad961691bdf0ec1650717cc132a5814619d80f80463d6e4c42e47
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -947,7 +948,8 @@ jobs:
     timeout-minutes: 15
     services:
       postgres:
-        image: pgvector/pgvector:pg18
+        # PostgreSQL 18.6, pinned: a floating pg18 tag moved CI to 18.7 unannounced and changed query plans. Bump deliberately.
+        image: pgvector/pgvector:pg18@sha256:c29f30688a9ad961691bdf0ec1650717cc132a5814619d80f80463d6e4c42e47
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -1560,7 +1562,8 @@ jobs:
     timeout-minutes: 10
     services:
       postgres:
-        image: pgvector/pgvector:pg18
+        # PostgreSQL 18.6, pinned: a floating pg18 tag moved CI to 18.7 unannounced and changed query plans. Bump deliberately.
+        image: pgvector/pgvector:pg18@sha256:c29f30688a9ad961691bdf0ec1650717cc132a5814619d80f80463d6e4c42e47
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres

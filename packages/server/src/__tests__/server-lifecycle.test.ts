@@ -498,6 +498,53 @@ describe("buildWrapperApp", () => {
 		}
 	});
 
+	it("does not report a 5xx its caller left before receiving; a delivered 5xx still reports", async () => {
+		const { buildWrapperApp } = await import("../server-lifecycle");
+		const { default: logger } = await import("../utils/logger");
+		const { Hono } = await import("hono");
+		const captureMessage = logger.error as ReturnType<typeof vi.fn>;
+		const exporter = new InMemorySpanExporter();
+		await shutdownTracing();
+		initTracing({ serviceName: "caller-left-test", spanProcessors: [new SimpleSpanProcessor(exporter)] });
+		const httpResponseLogs = () =>
+			captureMessage.mock.calls.filter(([record]) => record?.source === "http_response");
+		const requestSpan = () => {
+			const span = exporter.getFinishedSpans().find((s) => s.kind === SpanKind.SERVER);
+			exporter.reset();
+			return span;
+		};
+		try {
+			// A read-tier tool runs under the request's signal and fails with a
+			// 5xx once its caller disconnects (manage_entity's source read).
+			const app = new Hono();
+			app.get("/source-read", async (c) => {
+				const signal = c.req.raw.signal;
+				if (!signal.aborted) await new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true }));
+				return c.json({ error: "Source record read exceeded the deadline" }, 500);
+			});
+			app.get("/delivered", (c) => c.json({ error: "db unreachable" }, 500));
+			const wrapper = buildWrapperApp({} as never, app);
+
+			captureMessage.mockClear();
+			const caller = new AbortController();
+			const abandoned = wrapper.request("/lobu/source-read", { signal: caller.signal });
+			caller.abort();
+			expect((await abandoned).status).toBe(500);
+			expect(httpResponseLogs()).toHaveLength(0);
+			const abandonedSpan = requestSpan();
+			expect(abandonedSpan?.status.code).not.toBe(SpanStatusCode.ERROR);
+			expect(abandonedSpan?.attributes["error.fingerprint"]).toBeUndefined();
+
+			// A 5xx delivered to a caller that is still waiting reports.
+			captureMessage.mockClear();
+			expect((await wrapper.request("/lobu/delivered")).status).toBe(500);
+			expect(httpResponseLogs()).toHaveLength(1);
+			expect(requestSpan()?.status.code).toBe(SpanStatusCode.ERROR);
+		} finally {
+			await shutdownTracing();
+		}
+	});
+
 	it("does NOT double-report when onError fires after post-response middleware", async () => {
 		const { buildWrapperApp } = await import("../server-lifecycle");
 		const { default: logger } = await import("../utils/logger");

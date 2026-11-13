@@ -28,6 +28,11 @@
         },
         {
           "type": "json",
+          "path": "packages/server/package.json",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
           "path": "packages/connector-sdk/package.json",
           "jsonpath": "$.version"
         },
