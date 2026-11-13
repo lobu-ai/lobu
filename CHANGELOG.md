@@ -1,5 +1,28 @@
 # Changelog
 
+## [24.11.0](https://github.com/lobu-ai/lobu/compare/lobu-v24.10.0...lobu-v24.11.0) (2026-11-13)
+
+
+### Features
+
+* ship configurable workspace Home and navigation ([#4913](https://github.com/lobu-ai/lobu/issues/4913)) ([4532ebf](https://github.com/lobu-ai/lobu/commit/4532ebfd83b986027b8de57ca02cb481e409a647))
+
+
+### Bug Fixes
+
+* **chat:** skip follow-up chips where buttons can't render ([#4907](https://github.com/lobu-ai/lobu/issues/4907)) ([eb7a398](https://github.com/lobu-ai/lobu/commit/eb7a39870e70b2affb6d9a0039dfc87047642d02))
+* **db:** let fenced member SQL plan with the real workspace size ([#4920](https://github.com/lobu-ai/lobu/issues/4920)) ([eae9c25](https://github.com/lobu-ai/lobu/commit/eae9c25e6040c6193b0963a5f0327068fa0e6441))
+* **db:** require schema usage for the member SQL role ([#4918](https://github.com/lobu-ai/lobu/issues/4918)) ([4b791f2](https://github.com/lobu-ai/lobu/commit/4b791f2b50a236f8ae66e49aa29e8391e5e5d6ae))
+* **embeddings:** cap a local forward pass at 4 texts so search queries stop waiting on backfills ([#4908](https://github.com/lobu-ai/lobu/issues/4908)) ([e89a649](https://github.com/lobu-ai/lobu/commit/e89a6494e3da1e54733d5bc7c2db4dd5421ce576))
+* **server:** fence member SQL with row-level security ([#4914](https://github.com/lobu-ai/lobu/issues/4914)) ([1264702](https://github.com/lobu-ai/lobu/commit/1264702a8e08e31f45adf4efe32daddfdb022c9a))
+* **server:** keep shared OAuth registrations out of the workspace purge cascade ([#4916](https://github.com/lobu-ai/lobu/issues/4916)) ([f18b8d9](https://github.com/lobu-ai/lobu/commit/f18b8d9af2357998d78aff952edf860c8e806fa5))
+* **server:** meter anonymous public page renders per IP ([#4909](https://github.com/lobu-ai/lobu/issues/4909)) ([930ac89](https://github.com/lobu-ai/lobu/commit/930ac89c30db95005b644dac3f3698e7147d468d))
+* **server:** one error boundary sends a route's own failure and records its cause ([#4904](https://github.com/lobu-ai/lobu/issues/4904)) ([3d16207](https://github.com/lobu-ai/lobu/commit/3d1620759b2fe4b8c6deebe0cb5a2bb5dc36de8a))
+* **server:** record a failed search recall as a tracked issue ([#4919](https://github.com/lobu-ai/lobu/issues/4919)) ([50c99d4](https://github.com/lobu-ai/lobu/commit/50c99d4fad414d5e2f79a944c4af887ba5e8e909))
+* **server:** run every member SQL read through the bounded runner ([#4912](https://github.com/lobu-ai/lobu/issues/4912)) ([22fea12](https://github.com/lobu-ai/lobu/commit/22fea12d2653ce8d3b5ac91c46a3b8df5ac4756c))
+* **views:** send only the shell document into each validation scenario ([#4915](https://github.com/lobu-ai/lobu/issues/4915)) ([a1abac0](https://github.com/lobu-ai/lobu/commit/a1abac0968308d0fef3aa229554bc4a13f31e06f))
+* **whatsapp:** derive the page adapter version from its source ([#4905](https://github.com/lobu-ai/lobu/issues/4905)) ([3273a8c](https://github.com/lobu-ai/lobu/commit/3273a8c64ad4ad44541cfbe3fe1c70452607c6aa))
+
 ## [24.10.0](https://github.com/lobu-ai/lobu/compare/lobu-v24.9.0...lobu-v24.10.0) (2026-11-13)
 
 
