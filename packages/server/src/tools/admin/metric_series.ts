@@ -27,7 +27,8 @@ import { type Static, Type } from '@sinclair/typebox';
 import { getDb } from '../../db/client';
 import { isReadQuery, validateAndScopeQuery } from '../../utils/execute-data-sources';
 import { ADMIN_ONLY_QUERYABLE_TABLES, SAFE_COLUMN_DEFS } from '../../utils/table-schema';
-import { classifyReadQueryFailure } from '../../utils/bounded-read';
+import { boundedQuery, classifyReadQueryFailure } from '../../utils/bounded-read';
+import { QUERY_SQL_STATEMENT_TIMEOUT_MS } from '../../utils/content-read-bounds';
 import { ToolUserError, toolErrorHttpStatus } from '../../utils/errors';
 import logger from '../../utils/logger';
 import type { ToolContext } from '../registry';
@@ -75,9 +76,6 @@ export const MetricSeriesSchema = Type.Object({
 });
 
 type MetricSeriesArgs = Static<typeof MetricSeriesSchema>;
-
-// Statement timeout in ms. Dashboards refresh frequently — keep tight.
-const STATEMENT_TIMEOUT_MS = 5000;
 
 // Hard cap on returned rows. Sparklines need ≤ ~365; anything orders of
 // magnitude larger is misuse or a runaway query, so refuse rather than ship
@@ -187,20 +185,17 @@ async function metricSeriesImpl(
   });
   const db = getDb();
 
-  // Run inside a transaction so SET LOCAL applies for the user query only.
-  // `SET LOCAL` doesn't accept prepared parameters, so the timeout literal is
-  // interpolated directly (safe — it's a module-level number).
+  // The member SQL runner: a read-only transaction (a data-modifying CTE passes
+  // the SELECT/WITH guard, so the database must refuse the write), the
+  // statement cap, and cancellation when the caller leaves.
   let rows: Record<string, unknown>[];
   try {
-    rows = (await db.begin(async (tx) => {
-      // READ ONLY first: a data-modifying CTE (`WITH x AS (DELETE … RETURNING …)
-      // SELECT …`) passes the SELECT/WITH guard, so the DB must refuse the write.
-      // Mirrors query_sql; without it this read-tier endpoint could mutate.
-      await tx.unsafe('SET TRANSACTION READ ONLY');
-      await tx.unsafe(`SET LOCAL statement_timeout = ${STATEMENT_TIMEOUT_MS}`);
-      return tx.unsafe(scopedSql, params as unknown[]);
+    rows = (await boundedQuery(db, scopedSql, params as unknown[], {
+      signal: ctx.abortSignal,
+      statementTimeoutMs: QUERY_SQL_STATEMENT_TIMEOUT_MS,
     })) as Record<string, unknown>[];
   } catch (err) {
+    if (ctx.abortSignal?.aborted) throw err;
     logger.warn({ err, orgId }, '[metric_series] query failed');
     // Same caller-facing text as query_sql: a database error can quote a row
     // the scope would have removed.
