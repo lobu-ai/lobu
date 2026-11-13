@@ -309,6 +309,39 @@ describe("whatsAppWebAdapterProgram send_message", () => {
     expect(sent).toEqual(["3EB0PLANNEDID"]);
   });
 
+  it("refuses the read-only service-announcement chat instead of waiting on a send that never settles", async () => {
+    const account = "447000000000@c.us";
+    const sent: unknown[] = [];
+    const modules: Record<string, any> = {
+      WAWebUserPrefsMeUser: { getMaybeMePnUser: () => account },
+      WAWebCollections: {
+        Chat: { _models: [{ id: { _serialized: "0@c.us" } }] },
+        Msg: { _models: [] },
+      },
+      WAWebSendTextMsgChatAction: {
+        createTextMsgData: async () => ({ id: msgId("SYNTHETIC") }),
+        addAndSendTextMsg: (...args: unknown[]) => {
+          sent.push(args);
+          return new Promise(() => {}); // WhatsApp never acks a send here.
+        },
+      },
+    };
+    const globals: Record<string, any> = {};
+    new Function(
+      "globalThis",
+      "window",
+      `(${whatsAppWebAdapterProgram.toString()})();`,
+    )(globals, { require: (name: string) => modules[name] });
+    const result = await globals.__owlettoWhatsAppAdapterV1.invoke({
+      op: "send_message",
+      adapter_version: WHATSAPP_ADAPTER_VERSION,
+      account_id: account,
+      input: { chat_jid: "0@s.whatsapp.net", text: "synthetic reply" },
+    });
+    expect(result.ok).toBe(false);
+    expect(sent).toEqual([]);
+  });
+
   it("still sends on a build that only offers the one-shot call", async () => {
     const adapter = installAdapter({
       sendTextMsgToChat: (_chat: unknown, text: string) => ({

@@ -33,7 +33,7 @@ export function whatsAppWebAdapterProgram() {
   // when this number moves: shipping a fix under the old number leaves every
   // already-open tab running the previous code with nothing to show for it.
   // Keep in lockstep with WHATSAPP_ADAPTER_VERSION in whatsapp-web-helpers.ts.
-  const ADAPTER_VERSION = 27;
+  const ADAPTER_VERSION = 28;
   const SOURCE_ERROR_ID = "whatsapp-web:source-observation-error";
   // Storage rows one `chat:` read examines; a whole personal history is
   // usually under this, so one read answers.
@@ -386,7 +386,7 @@ export function whatsAppWebAdapterProgram() {
     const key = row.id ?? model?.id;
     const id = rawId(key);
     const remote = widString(key?.remote ?? row.chatId ?? (key?.fromMe ? row.to : row.from));
-    if (!id || !remote || remote === "status@broadcast" || remote.endsWith("@newsletter") || SYSTEM_TYPES.has(row.type)) return null;
+    if (!id || !remote || isBroadcastOnlyJid(remote) || SYSTEM_TYPES.has(row.type)) return null;
     return { id, timestamp: unixSeconds(row), is_group: remote.endsWith("@g.us") };
   }
 
@@ -494,6 +494,21 @@ export function whatsAppWebAdapterProgram() {
       }
     }
     return [];
+  }
+
+  /**
+   * Chats that are feeds, not conversations: status updates, channels, and the
+   * read-only service-announcement chat (`0@c.us`, canonically
+   * `0@s.whatsapp.net`). Nobody can reply in them, so they never surface as
+   * messages and a send to one is refused instead of hanging.
+   */
+  function isBroadcastOnlyJid(jid) {
+    return (
+      jid === "status@broadcast" ||
+      jid.endsWith("@newsletter") ||
+      jid === "0@c.us" ||
+      jid === "0@s.whatsapp.net"
+    );
   }
 
   function widString(value) {
@@ -670,11 +685,7 @@ export function whatsAppWebAdapterProgram() {
     const authorRaw = row.author ?? key?.participant;
     const chatRaw = remoteRaw ?? (fromMe ? toRaw : fromRaw);
     const chat = await canonicalJid(chatRaw);
-    if (
-      !chat.jid ||
-      chat.jid === "status@broadcast" ||
-      chat.jid.endsWith("@newsletter")
-    ) {
+    if (!chat.jid || isBroadcastOnlyJid(chat.jid)) {
       return null;
     }
     const senderRaw = fromMe ? fromRaw : (authorRaw ?? fromRaw);
@@ -1091,7 +1102,7 @@ export function whatsAppWebAdapterProgram() {
       const key = keyModule.fromString(row.id);
       if (exactId !== null && key.id !== exactId) continue;
       const remote = widString(key.remote);
-      if (remote === "status@broadcast" || remote.endsWith("@newsletter")) continue;
+      if (isBroadcastOnlyJid(remote)) continue;
       const isGroup = remote.endsWith("@g.us");
       if ((chatFilter === "group" && !isGroup) || (chatFilter === "individual" && isGroup)) continue;
       selected.push(row);
@@ -1161,8 +1172,7 @@ export function whatsAppWebAdapterProgram() {
         const jid = (
           await canonicalJid(modelData(candidate).id ?? candidate?.id)
         ).jid;
-        if (!jid || jid === "status@broadcast" || jid.endsWith("@newsletter"))
-          continue;
+        if (!jid || isBroadcastOnlyJid(jid)) continue;
         const isGroup = jid.endsWith("@g.us");
         if (chatFilter === "group" ? isGroup : !isGroup) {
           scopedChats.push(candidate);
@@ -1294,6 +1304,9 @@ export function whatsAppWebAdapterProgram() {
   async function sendMessage(input, account) {
     const collections = requireFirst(["WAWebCollections"]);
     const chat = await resolveChat(collections, input);
+    const chatJid = (await canonicalJid(modelData(chat).id ?? chat?.id)).jid;
+    if (chatJid && isBroadcastOnlyJid(chatJid))
+      throw new Error(`WhatsApp chat ${chatJid} does not accept messages`);
     const text = String(input?.text ?? "");
     if (!text.trim()) throw new Error("text is required");
     const module = requireFirst(SEND_MODULES);
