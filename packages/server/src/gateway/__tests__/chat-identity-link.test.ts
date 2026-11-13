@@ -932,7 +932,7 @@ describe("Google Chat DM -> chat identity link -> member turn", () => {
     expect(await deliver(spaceMention("space-1", "status?"))).toBe(200);
     await waitFor(() => expect(created).toHaveLength(1));
     const notice = String(created[0]?.requestBody?.text);
-    expect(notice).toContain("Ask an admin of this workspace to invite you");
+    expect(notice).toMatch(/direct/i);
     expect(notice).not.toContain("/connect/chat-identity");
     expect(await claimCount()).toBe(0);
     expect(await deliver(directMessage("dm-after-group", "link me"))).toBe(200);

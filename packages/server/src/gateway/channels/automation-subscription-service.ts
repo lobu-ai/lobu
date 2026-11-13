@@ -39,6 +39,9 @@ interface ChatAutomationSubscription {
 }
 
 interface ChatRoutingOptions {
+	/** Reconcile a consumed claim inside its transaction against tagged links only. */
+	sql?: DbClient;
+	chatLinkOnly?: boolean;
 	crossOrganization?: boolean;
 	teamId?: string;
 }
@@ -168,6 +171,7 @@ async function loadChatAutomationSubscriptions(
 	filters: {
 		automationOrganizationId?: string;
 		includeAuthorizedChatLinks?: boolean;
+		chatLinkOnly?: boolean;
 		teamId?: string;
 		agentId?: string;
 		connectionId?: string;
@@ -245,6 +249,7 @@ async function loadChatAutomationSubscriptions(
 		FROM automation_message_subscriptions s
 		JOIN automations w ON w.id = s.automation_id
 		WHERE true
+		  ${filters.chatLinkOnly ? sql`AND w.tags @> ARRAY[${CHAT_LINK_TAG}]::text[]` : sql``}
 		  ${automationOrgFilter}
 		  ${agentFilter}
 		  ${connectionIdFilter}
@@ -270,8 +275,9 @@ export class AutomationSubscriptionService {
 		connectionOrganizationId: string,
 		options: ChatRoutingOptions = {},
 	): Promise<ChatAutomationSubscription | null> {
-		const sql = getDb();
+		const sql = options.sql ?? getDb();
 		const rows = await loadChatAutomationSubscriptions(sql, {
+			chatLinkOnly: options.chatLinkOnly,
 			automationOrganizationId: options.crossOrganization ? undefined : connectionOrganizationId,
 			includeAuthorizedChatLinks: !options.crossOrganization,
 			teamId: options.teamId,

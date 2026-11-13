@@ -1,8 +1,8 @@
 /**
  * Integration test: reads of a public workspace by callers outside it are
  * metered and refused with RATE_LIMITED past the limit — signed-in non-members
- * per account (300/min, over MCP, the only route open to them), anonymous
- * visitors per IP (60/min, over MCP and the public REST API). Members,
+ * per account (1200/min, over MCP, the only route open to them), anonymous
+ * visitors per IP (300/min, over MCP and the public REST API). Members,
  * internal calls and unknown IPs are never metered.
  */
 
@@ -57,14 +57,19 @@ describe('public read rate limit', () => {
     for (let i = 0; i < n; i++) await checkToolAccess('search_memory', { query: 'rents' }, ctx);
   };
 
-  const exhaust = (userId: string) => {
-    for (let i = 0; i < RateLimitPresets.PUBLIC_READ_PER_USER_MINUTE.limit; i++) {
+  const userLimit = RateLimitPresets.PUBLIC_READ_PER_USER_MINUTE.limit;
+  const ipLimit = RateLimitPresets.PUBLIC_READ_PER_IP_MINUTE.limit;
+
+  /** Spend `n` of the account's reads (default: all of them) without a request. */
+  const exhaust = (userId: string, n = userLimit) => {
+    for (let i = 0; i < n; i++) {
       getRateLimiter().checkLimit(`rate:public-read:user:${userId}`, RateLimitPresets.PUBLIC_READ_PER_USER_MINUTE);
     }
   };
 
-  const exhaustIP = (ip: string) => {
-    for (let i = 0; i < RateLimitPresets.PUBLIC_READ_PER_IP_MINUTE.limit; i++) {
+  /** Spend `n` of the IP's reads (default: all of them) without a request. */
+  const exhaustIP = (ip: string, n = ipLimit) => {
+    for (let i = 0; i < n; i++) {
       getRateLimiter().checkLimit(`rate:public-read:ip:${ip}`, RateLimitPresets.PUBLIC_READ_PER_IP_MINUTE);
     }
   };
@@ -168,21 +173,24 @@ describe('public read rate limit', () => {
   });
   afterEach(() => vi.useRealTimers());
 
-  it('refuses a signed-in non-member over MCP once the account is over 300/min', async () => {
+  it('refuses a signed-in non-member over MCP once the account is over 1200/min', async () => {
     await expect(search()).resolves.toBeDefined();
     exhaust(outsider.id);
-    await expect(search()).rejects.toThrow(/Public read limit reached: 300 requests per minute\. Join the workspace to lift it\. Try again in \d+s\./);
+    await expect(search()).rejects.toThrow(/Public read limit reached: 1200 requests per minute\. Join the workspace to lift it\. Try again in \d+s\./);
   });
 
-  it('meters per account, at 300/min', async () => {
-    await readTimes(callerIn({}), 300);
+  it('meters per account, at 1200/min', async () => {
+    exhaust(outsider.id, userLimit - 1);
+    await readTimes(callerIn({}), 1);
     await expect(readTimes(callerIn({}), 1)).rejects.toThrow(
       expect.objectContaining({ httpStatus: 429, code: 'RATE_LIMITED' })
     );
   });
 
-  it('meters anonymous public REST reads per IP, at 60/min', async () => {
-    for (let i = 0; i < 60; i++) expect(await publicRest('203.0.113.7')).toBe(200);
+  it('meters anonymous public REST reads per IP, at 300/min', async () => {
+    expect(await publicRest('203.0.113.7')).toBe(200);
+    exhaustIP('203.0.113.7', ipLimit - 2);
+    expect(await publicRest('203.0.113.7')).toBe(200);
     expect(await publicRest('203.0.113.7')).toBe(429);
     expect(await publicRest('203.0.113.8')).toBe(200);
   });
@@ -190,7 +198,7 @@ describe('public read rate limit', () => {
   it('answers a limited public read with Retry-After and a structured code', async () => {
     // The wait is a field, not prose: the web host renders a countdown from it
     // and the error classifies on `code`, so neither parses the message.
-    for (let i = 0; i < 60; i++) await publicRest('203.0.113.9');
+    exhaustIP('203.0.113.9');
     const response = await get(
       `/api/${org.slug}/public/knowledge/search?query=rents`,
       { headers: fromIP('203.0.113.9') }
@@ -212,12 +220,12 @@ describe('public read rate limit', () => {
     const sessionId = await anonymousSession('198.51.100.1');
     expect(await anonymousSearchError(sessionId, '198.51.100.1')).toBeNull();
     exhaustIP('198.51.100.2');
-    expect(await anonymousSearchError(sessionId, '198.51.100.2')).toMatch(/Public read limit reached: 60/);
+    expect(await anonymousSearchError(sessionId, '198.51.100.2')).toMatch(/Public read limit reached: 300 requests per minute\. Sign in/);
     expect(await anonymousSearchError(sessionId, '198.51.100.1')).toBeNull();
 
     // Attachment reads run read_knowledge too, so they follow the same IP.
     // The event has no attachment: an admitted read reports it unknown.
-    expect(await anonymousResourceError(sessionId, '198.51.100.2')).toMatch(/Public read limit reached: 60/);
+    expect(await anonymousResourceError(sessionId, '198.51.100.2')).toMatch(/Public read limit reached: 300/);
     expect(await anonymousResourceError(sessionId, '198.51.100.1')).toMatch(/Unknown resource/);
   });
 
@@ -242,8 +250,8 @@ describe('public read rate limit', () => {
 
   it('never meters members, internal calls, or an unknown anonymous IP', async () => {
     const anonymous = { userId: null, isAuthenticated: false, tokenType: 'anonymous' } as const;
-    await readTimes(callerIn({ memberRole: 'member' }), 400);
-    await readTimes(callerIn({ ...anonymous, clientIP: null }), 400);
-    await readTimes(callerIn({ ...anonymous, clientIP: 'unknown' }), 400);
+    await readTimes(callerIn({ memberRole: 'member' }), userLimit + 1);
+    await readTimes(callerIn({ ...anonymous, clientIP: null }), ipLimit + 1);
+    await readTimes(callerIn({ ...anonymous, clientIP: 'unknown' }), ipLimit + 1);
   });
 });

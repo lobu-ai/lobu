@@ -39,6 +39,8 @@ export interface WhatsAppMessage {
   quoted_id?: string | null;
   /** The message @mentions the account or quotes one of its messages. */
   mentions_me?: boolean;
+  /** Verified phone/LID identities of the paired account actually @mentioned. */
+  own_mention_jids?: string[];
   edited?: boolean;
   edit_timestamp?: number | null;
   revoked?: boolean;
@@ -139,6 +141,11 @@ export function normalizeRelayedMessage(
     from_me: fromMe,
     timestamp,
     occurred_at: new Date(timestamp * 1000).toISOString(),
+    own_mention_jids: Array.isArray(raw.own_mention_jids)
+      ? [...new Set(raw.own_mention_jids.map((jid: unknown) =>
+          typeof jid === "string" ? normalizeWhatsAppUserJid(jid) : null,
+        ).filter((jid: string | null): jid is string => jid !== null))].slice(0, 2)
+      : [],
   };
 }
 

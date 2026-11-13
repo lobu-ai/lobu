@@ -5694,7 +5694,7 @@ describe('existing team bot replay (single-workspace Slack, unlinked channel sen
     });
     expect(message?.platformMetadata?.senderVouched).toBeUndefined();
     await waitFor(() => expect(posts).toHaveBeenCalledTimes(1));
-    expect(String(posts.mock.calls[0]?.[1])).toContain('Ask an admin of this workspace to invite you');
+    expect(String(posts.mock.calls[0]?.[1])).toMatch(/direct/i);
   });
 });
 

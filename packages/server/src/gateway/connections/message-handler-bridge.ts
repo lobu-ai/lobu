@@ -8,6 +8,7 @@ import { randomUUID } from "node:crypto";
 import type { LegacyAutomationExecutionConfig } from "@lobu/core/contracts/tools/manage-automations";
 
 import {
+  type CommandContext,
   createLogger,
   createRootSpan,
   generateTraceId,
@@ -234,6 +235,23 @@ export function isEarlyDispatchableChatCommand(text: string): boolean {
   return ["help", "status", "link"].includes(command ?? "");
 }
 
+/** One reply an app command produced, kept so a retry can repeat it verbatim. */
+export type ChatCommandReply = {
+  text: string;
+  options?: Parameters<CommandContext["reply"]>[1];
+};
+
+/** Post an app command's replies in order, through the chat reply rendering. */
+export async function postChatCommandReplies(
+  thread: { post: (content: unknown) => Promise<unknown> },
+  replies: ChatCommandReply[]
+): Promise<void> {
+  const reply = createChatReply(async (content) => {
+    await thread.post(content);
+  });
+  for (const { text, options } of replies) await reply(text, options);
+}
+
 type MessageSource = "mention" | "dm" | "subscribed" | "interaction";
 
 type MessageRouting = {
@@ -404,6 +422,51 @@ export class MessageHandlerBridge {
   }
 
   /**
+   * App commands need no agent activation, but retain connection admission.
+   * Runs the command and returns its replies without posting them, or null
+   * when no app command ran. Keeping delivery outside the registry lets send
+   * failures reach the source queue; commands must reconcile committed effects
+   * on retry (`/link` does so in its claim transaction).
+   */
+  async runEarlyCommand(
+    message: any,
+    routing: { channelId: string; conversationId: string; isGroup: boolean; teamId?: string }
+  ): Promise<ChatCommandReply[] | null> {
+    const text = this.stripBotMention(typeof message.text === "string" ? message.text : "");
+    const userId = message.author?.userId ?? "unknown";
+    if (!this.commandDispatcher || !isEarlyDispatchableChatCommand(text) ||
+        !this.isInboundAllowed(userId, routing.isGroup)) return null;
+    const replies: ChatCommandReply[] = [];
+    const handled = await this.commandDispatcher.tryHandleSlashText(text, {
+      platform: this.connection.platform,
+      userId,
+      ...routing,
+      connectionId: this.connection.id,
+      organizationId: this.connection.organizationId,
+      reply: async (replyText, options) => {
+        replies.push(options ? { text: replyText, options } : { text: replyText });
+      },
+    });
+    return handled ? replies : null;
+  }
+
+  private isInboundAllowed(userId: string, isGroup: boolean): boolean {
+    if (!this.manager.has(this.connection.id)) {
+      logger.info({ connectionId: this.connection.id }, "Connection no longer active, dropping message");
+      return false;
+    }
+    if (!isSenderAllowed(this.connection.settings?.allowFrom, userId)) {
+      logger.info({ userId }, "Blocked by allowlist");
+      return false;
+    }
+    if (isGroup && this.connection.settings?.allowGroups === false) {
+      logger.info("Groups not allowed");
+      return false;
+    }
+    return true;
+  }
+
+  /**
    * Reply at a routing dead end — an inbound message/interaction resolved to
    * no channel Automation and the connection has no owning agent — with a
    * "link this chat" notice instead of dropping silently.
@@ -508,15 +571,6 @@ export class MessageHandlerBridge {
       throw new Error("Interaction messages require explicit routing context");
     }
 
-    // Guard: drop messages if the connection was stopped/removed
-    if (!this.manager.has(connection.id)) {
-      logger.info(
-        { connectionId: connection.id },
-        "Connection no longer active, dropping message"
-      );
-      return;
-    }
-
     const platform = connection.platform;
     const userId = message.author?.userId ?? "unknown";
     const channelId =
@@ -555,17 +609,7 @@ export class MessageHandlerBridge {
       "Processing inbound message"
     );
 
-    // Gap 6: Allowlist check
-    if (!isSenderAllowed(connection.settings?.allowFrom, userId)) {
-      logger.info({ userId }, "Blocked by allowlist");
-      return;
-    }
-
-    // Gap 6: Group check
-    if (isGroup && connection.settings?.allowGroups === false) {
-      logger.info({ channelId }, "Groups not allowed");
-      return;
-    }
+    if (!this.isInboundAllowed(userId, isGroup)) return;
 
     // Subscribe to thread for follow-up messages
     if (source === "mention" || source === "dm") {
@@ -630,28 +674,12 @@ export class MessageHandlerBridge {
       // early path to commands whose complete implementation lives in the
       // dispatcher: /new and /clear have real state handling later in the
       // resolved path and must not be falsely acknowledged here.
-      const unroutedCommandText = this.stripBotMention(
-        typeof message.text === "string" ? message.text : ""
-      );
-      if (
-        this.commandDispatcher &&
-        isEarlyDispatchableChatCommand(unroutedCommandText)
-      ) {
-        const handled = await this.commandDispatcher.tryHandleSlashText(
-          unroutedCommandText,
-          {
-            platform,
-            userId,
-            channelId,
-            teamId,
-            isGroup,
-            conversationId,
-            connectionId: this.connection.id,
-            organizationId: this.connection.organizationId,
-            reply: createChatReply((content) => thread.post(content)),
-          }
-        );
-        if (handled) return;
+      const commandReplies = await this.runEarlyCommand(message, {
+        channelId, conversationId, teamId, isGroup,
+      });
+      if (commandReplies) {
+        await postChatCommandReplies(thread, commandReplies);
+        return;
       }
 
       // Linked channel but trigger filters rejected this message (e.g.
@@ -1280,8 +1308,9 @@ export class MessageHandlerBridge {
           return false;
         }
       }
-      const canLink = args.isDirect && !!args.organizationId &&
+      const supportsIdentityLink = !!args.organizationId &&
         chatIdentityLinkKey(platform, args.teamId, args.userId) !== null;
+      const canLink = args.isDirect && supportsIdentityLink;
       // A group notice must not suppress the private link, and an expired
       // link must be replaceable on the sender's next DM.
       const noticeKey = chatSenderLimitKey(canLink ? "link" : "notice", sender);
@@ -1327,7 +1356,8 @@ export class MessageHandlerBridge {
             : null;
         const joinUrl = slug ? `${webOrigin}/${encodeURIComponent(slug)}` : null;
         try {
-          await args.thread.post(chatAccessNotice(actor.access, joinUrl, linkUrl));
+          await args.thread.post(chatAccessNotice(actor.access, joinUrl, linkUrl,
+            !args.isDirect && supportsIdentityLink));
           logger.info(
             { platform, organizationId: args.organizationId, connectionId: this.connection.id, access: actor.access },
             "Posted the chat access notice to an unlinked sender"

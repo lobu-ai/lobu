@@ -69,6 +69,9 @@ describe('query_sql function escape', () => {
     "SELECT query_to_xml('SELECT name FROM public.entities', true, false, '')::text AS x",
     "SELECT name FROM entities WHERE query_to_xml('SELECT name FROM public.entities', true, false, '')::text LIKE '%Other org secret%'",
     "SELECT table_to_xml('public.entities'::regclass, true, false, '')::text AS x",
+    // A Unicode-escaped identifier spells a forbidden name without its letters.
+    `SELECT 1 AS u, U&"query\\005Fto\\005Fxml"('SELECT name FROM public.entities', true, false, '')::text AS x`,
+    `SELECT 1 AS u, U&"set\\005Fconfig"('statement_timeout', '0', true) AS v`,
   ])('rejects %s without reading the other org', async (sqlText) => {
     const result = await run(sqlText);
     expect(result.error).toMatch(/not allowed/i);
