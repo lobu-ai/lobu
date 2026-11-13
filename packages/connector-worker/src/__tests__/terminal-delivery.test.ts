@@ -14,6 +14,9 @@ import { completeActionOnce } from '../daemon/terminal-delivery.js';
 
 type CompletePayload = Parameters<ExecutorClient['completeAction']>[0];
 
+// The production budget compressed: six attempts in 1.2s, 1ms initial backoff.
+const FAST = { deadlineMs: 1_200, backoffMs: 1 };
+
 const PAYLOAD = {
   run_id: 1,
   worker_id: 'wk-terminal-delivery',
@@ -37,14 +40,14 @@ describe('completeActionOnce', () => {
       if (calls.length === 1) return new Promise<void>(() => {});
     });
 
-    await completeActionOnce(client, PAYLOAD);
+    await completeActionOnce(client, PAYLOAD, FAST);
 
     expect(calls.length).toBe(2);
-    // The retry starts after the first attempt's HALF of the 15s budget, not
+    // The retry starts after the first attempt's sixth of the budget, not
     // after the whole of it: the split is what makes a second attempt possible.
-    expect(calls[1]).toBeGreaterThanOrEqual(7_000);
-    expect(calls[1]).toBeLessThan(14_000);
-  }, 30_000);
+    expect(calls[1]).toBeGreaterThanOrEqual(200);
+    expect(calls[1]).toBeLessThan(1_000);
+  });
 
   it('re-sends a payload the gateway rejected transiently', async () => {
     let attempts = 0;
@@ -53,7 +56,7 @@ describe('completeActionOnce', () => {
       if (attempts === 1) throw new Error('socket hang up');
     });
 
-    await completeActionOnce(client, PAYLOAD);
+    await completeActionOnce(client, PAYLOAD, FAST);
 
     expect(attempts).toBe(2);
   });
@@ -65,7 +68,7 @@ describe('completeActionOnce', () => {
       throw new WorkerDecodeError('unparseable completion payload');
     });
 
-    await expect(completeActionOnce(client, PAYLOAD)).rejects.toThrow(WorkerDecodeError);
+    await expect(completeActionOnce(client, PAYLOAD, FAST)).rejects.toThrow(WorkerDecodeError);
     expect(attempts).toBe(1);
   });
 
@@ -76,7 +79,7 @@ describe('completeActionOnce', () => {
       throw new Error(`ECONNRESET ${attempts}`);
     });
 
-    await expect(completeActionOnce(client, PAYLOAD)).rejects.toThrow('ECONNRESET 2');
-    expect(attempts).toBe(2);
+    await expect(completeActionOnce(client, PAYLOAD, FAST)).rejects.toThrow('ECONNRESET 6');
+    expect(attempts).toBe(6);
   });
 });

@@ -1,8 +1,8 @@
 /**
  * Bounded delivery of an immutable terminal outcome. Execution and failure
- * reporting share the retry loop; sync/action and agent-turn budgets differ.
- * WorkerDecodeError identifies an unreadable response, not an execution
- * failure, and is surfaced without retrying.
+ * reporting share the retry loop and its classification; sync/action and
+ * agent-turn budgets differ. WorkerDecodeError identifies an unreadable
+ * response, not an execution failure, and is surfaced without retrying.
  */
 import { WorkerDecodeError, WorkerHttpError } from './client.js';
 import type {
@@ -19,13 +19,23 @@ interface TerminalDeliveryPolicy {
   retriable: (error: unknown) => boolean;
 }
 
-/** Syncs/actions: two attempts in 15s, anything but an undecodable answer retried. */
+/**
+ * Syncs/actions ride out a gateway rollout: a dying replica answers 5xx or
+ * drops the connection, and an immediate retry would reach the same one. Six
+ * attempts back off 1s, 2s, 4s, 8s, 16s, all inside 90s -- the reaper writes
+ * a run off 120s after its last heartbeat, and the executor stops heartbeating
+ * up to 30s before delivery starts. A 4xx other than 429 is the gateway's
+ * answer and is not re-sent.
+ */
 const ACTION_DELIVERY: TerminalDeliveryPolicy = {
-  deadlineMs: 15_000,
-  attempts: 2,
-  backoffMs: 0,
-  retriable: (error) => !(error instanceof WorkerDecodeError),
+  deadlineMs: 90_000,
+  attempts: 6,
+  backoffMs: 1_000,
+  retriable: isRetriableDeliveryFailure,
 };
+
+/** Compresses a sync/action delivery budget; tests pass this to keep backoff fast. */
+type DeliveryTiming = Partial<Pick<TerminalDeliveryPolicy, 'deadlineMs' | 'backoffMs'>>;
 
 /**
  * Agent turns retry transient delivery failures across a short gateway outage.
@@ -111,16 +121,18 @@ async function deliverTerminal<T>(
 
 export async function completeSyncOnce(
   client: ExecutorClient,
-  payload: Parameters<ExecutorClient['complete']>[0]
+  payload: Parameters<ExecutorClient['complete']>[0],
+  timing: DeliveryTiming = {}
 ): Promise<void> {
-  await deliverTerminal(() => client.complete(payload), ACTION_DELIVERY);
+  await deliverTerminal(() => client.complete(payload), { ...ACTION_DELIVERY, ...timing });
 }
 
 export async function completeActionOnce(
   client: ExecutorClient,
-  payload: Parameters<ExecutorClient['completeAction']>[0]
+  payload: Parameters<ExecutorClient['completeAction']>[0],
+  timing: DeliveryTiming = {}
 ): Promise<void> {
-  await deliverTerminal(() => client.completeAction(payload), ACTION_DELIVERY);
+  await deliverTerminal(() => client.completeAction(payload), { ...ACTION_DELIVERY, ...timing });
 }
 
 export function completeAgentTurnOnce(

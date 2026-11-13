@@ -35,3 +35,4 @@ export {
   type DaemonStartOptions,
 } from './start.js';
 export { executeClaimedAutomationRun, UnexecutableRunError } from './execute-run.js';
+export { completeSyncOnce } from './terminal-delivery.js';
