@@ -20,6 +20,7 @@ import { boundedQuery, classifyReadQueryFailure } from "../utils/bounded-read";
 import { ToolUserError, toolErrorHttpStatus } from "../utils/errors";
 import { getOrganizationSlug } from "../utils/url-builder";
 import { isCompletePushdownResult, pushdownFailureError, runConnectorQuery } from "../lib/connector-pushdown";
+import { sourceCallerClass } from "../lib/source-admission";
 import { QUERY_SQL_STATEMENT_TIMEOUT_MS } from "../utils/content-read-bounds";
 import { METHOD_METADATA } from "./method-metadata";
 import { bindClientContext } from "./workspace-activity";
@@ -54,6 +55,8 @@ async function queryConnection(
 			connectionSlug,
 			query: querySql.trim(),
 			limit: CLIENT_QUERY_MAX_ROWS,
+			signal: ctx.abortSignal,
+			callerClass: sourceCallerClass(ctx),
 		});
 	} catch (err) {
 		throw pushdownFailureError(err, connectionSlug, "query");

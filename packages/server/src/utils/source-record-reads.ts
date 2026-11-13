@@ -84,11 +84,12 @@ function readFailure(feedId: number, error: unknown): SourceReadFailure {
  * (the source reader refuses an expired deadline before reaching the source),
  * so its stream stays in the cursor for an explicit retry.
  *
- * The bound is per request, not per process. A process-wide limiter would also
- * queue one viewer's page behind another's against the same 20s deadline,
- * turning load into timeouts on pages that would have succeeded, and a read
- * that never settled would hold its slot for every later request on that
- * replica. A page's own fan-out is the measured burst.
+ * This bound orders one page's own fan-out, the measured burst. Many pages at
+ * once are bounded again per connection by the replica-wide source admission
+ * (`lib/source-admission.ts`), which never queues a read past the point where
+ * it could still run: a full queue or a near deadline refuses at once instead
+ * of turning load into timeouts, and every admitted read's slot comes back
+ * because the executor's hard timeout and the caller's abort end the run.
  *
  * A failure the upstream marked transient by its preserved HTTP status is
  * retried once, after a short pause and only within the deadline. A withheld

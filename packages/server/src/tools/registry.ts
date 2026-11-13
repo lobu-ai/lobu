@@ -254,6 +254,12 @@ export interface ToolContext {
    * race stop waiting without cancelling the underlying work.
    */
   abortSignal?: AbortSignal;
+  /**
+   * Host wall-clock deadline of a bounded request, such as a public page
+   * render. A live connection pushdown reads it, and it can only shorten that
+   * read's own budget. Set by the host, never from tool arguments.
+   */
+  deadlineAt?: number;
   /** Original request URL, used to derive public-facing origin for URL generation */
   requestUrl?: string;
   /** PUBLIC_GATEWAY_URL env var fallback for URL generation when requestUrl is unreliable */

@@ -15,6 +15,7 @@ import { getDb, pgTextArray } from '../../db/client';
 import type { Env } from '../../index';
 import { resolveWindowQueryContext } from '../../automations/window-read-context';
 import { pushdownFailureError, runConnectorQuery } from '../../lib/connector-pushdown';
+import { sourceCallerClass } from '../../lib/source-admission';
 import { validateAndScopeQuery } from '../../utils/execute-data-sources';
 import logger from '../../utils/logger';
 import { boundedRead, cancellable, classifyReadQueryFailure } from '../../utils/bounded-read';
@@ -347,6 +348,12 @@ function errorResult(
 
 export const querySql = withValidatedArgs('query_sql', QuerySqlSchema, querySqlImpl);
 
+/** The sooner of two optional deadlines: the read's own and its host request's. */
+function earliestDeadline(read?: number, host?: number): number | undefined {
+  if (read === undefined) return host;
+  return host === undefined ? read : Math.min(read, host);
+}
+
 export async function querySqlImpl(
   args: QuerySqlArgs,
   env: unknown,
@@ -451,7 +458,9 @@ export async function querySqlImpl(
         query: baseSql,
         exactMatch: options?.exactMatch,
         selection: options?.selection,
-        deadlineAt: options?.deadlineAt,
+        deadlineAt: earliestDeadline(options?.deadlineAt, ctx.deadlineAt),
+        signal: ctx.abortSignal,
+        callerClass: sourceCallerClass(ctx),
         limit,
         offset,
         sort: args.sort_by
