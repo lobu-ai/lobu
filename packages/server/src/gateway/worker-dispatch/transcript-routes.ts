@@ -33,6 +33,7 @@ import {
 	AUTOMATION_RUN_SEGMENT,
 } from "../permissions/automation-run-intent.js";
 import { MAX_SNAPSHOT_BYTES } from "../services/transcript-snapshot.js";
+import { routeFailure } from "../../diagnostics.js";
 
 const logger = createLogger("worker-transcript");
 
@@ -279,7 +280,7 @@ export function createTranscriptRoutes(): Hono {
       logger.error(
         `Snapshot INSERT failed: ${getErrorMessage(err)}`
       );
-      return c.json({ error: "Internal error" }, 500);
+      throw routeFailure(c.json({ error: "Internal error" }, 500), err);
     }
   });
 
@@ -321,7 +322,7 @@ export function createTranscriptRoutes(): Hono {
       logger.error(
         `Snapshot DELETE failed: ${getErrorMessage(err)}`
       );
-      return c.json({ error: "Internal error" }, 500);
+      throw routeFailure(c.json({ error: "Internal error" }, 500), err);
     }
   });
 

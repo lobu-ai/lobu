@@ -12,6 +12,7 @@
  * reads the event; they diverge).
  */
 
+import { HTTPException } from "hono/http-exception";
 import { upsertEntityApprovalPolicy } from "../../authz/entity-policy";
 import postgres from "postgres";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -1328,7 +1329,7 @@ describe("worker completeActionRun card atomicity", () => {
 			status: "success",
 			action_output: { ok: true },
 		});
-		await completeActionRun(ctx);
+		await expect(completeActionRun(ctx)).rejects.toBeInstanceOf(HTTPException);
 		expect((result().body as { error?: string }).error).toMatch(
 			/terminal approval-event write failure/,
 		);
@@ -1358,7 +1359,7 @@ describe("worker completeActionRun card atomicity", () => {
 			status: "success",
 			action_output: { ok: true },
 		});
-		await completeActionRun(ctx);
+		await expect(completeActionRun(ctx)).rejects.toBeInstanceOf(HTTPException);
 		expect((result().body as { error?: string }).error).toMatch(
 			/approval card is missing/,
 		);

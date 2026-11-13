@@ -27,6 +27,7 @@
  * run's completion move the cursor.
  */
 
+import { HTTPException } from 'hono/http-exception';
 import { randomBytes } from 'node:crypto';
 import type { Context } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -757,7 +758,7 @@ describe('dry run exercises the real write path', () => {
         },
       ],
     });
-    await streamContent(ctx);
+    await expect(streamContent(ctx)).rejects.toBeInstanceOf(HTTPException);
 
     expect(result().status).toBe(500);
     expect((result().body as { dry_run?: boolean }).dry_run).toBeUndefined();

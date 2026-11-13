@@ -10,6 +10,7 @@
  * this file exists to catch, and its own response would not reveal either.
  */
 
+import { HTTPException } from 'hono/http-exception';
 import type { Context } from 'hono';
 import postgres from 'postgres';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -204,7 +205,7 @@ describe('feed page commit', () => {
       items: [item('first'), item('second')],
     });
 
-    await streamContent(ctx);
+    await expect(streamContent(ctx)).rejects.toBeInstanceOf(HTTPException);
 
     expect(result().status).toBe(500);
     // The page may be durable, so its artifacts must not be deleted.
@@ -253,7 +254,7 @@ describe('feed page commit', () => {
       items: [item('first')],
     });
 
-    await streamContent(ctx);
+    await expect(streamContent(ctx)).rejects.toBeInstanceOf(HTTPException);
 
     expect(result().status).toBe(500);
     expect(insert).toHaveBeenCalledTimes(attempts);
@@ -322,7 +323,7 @@ describe('feed page commit', () => {
       ],
     });
 
-    await streamContent(ctx);
+    await expect(streamContent(ctx)).rejects.toBeInstanceOf(HTTPException);
 
     expect(result().status).toBe(500);
     expect(await currentOriginIds(connectionId)).toEqual([]);

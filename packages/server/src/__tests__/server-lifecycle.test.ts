@@ -22,6 +22,7 @@
 
 import http from "node:http";
 import net from "node:net";
+import type { Context } from "hono";
 import { completeSyncOnce, WorkerClient } from "@lobu/connector-worker/daemon";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createSpan, currentTraceLogFields, initTracing, runInSpanContext, shutdownTracing, SpanKind, SpanStatusCode } from "@lobu/core";
@@ -262,25 +263,41 @@ describe("buildWrapperApp", () => {
 
 	it("records grouped, parameterized errors for returned and thrown failures", async () => {
 		const { buildWrapperApp } = await import("../server-lifecycle");
+		const { routeFailure } = await import("../diagnostics");
+		const { ToolUserError } = await import("../utils/errors");
 		const { Hono } = await import("hono");
+		const { HTTPException } = await import("hono/http-exception");
 		const exporter = new InMemorySpanExporter();
 		await shutdownTracing();
 		initTracing({ serviceName: "wrapper-failure-test", spanProcessors: [new SimpleSpanProcessor(exporter)] });
 		try {
 			const app = new Hono();
 			app.get("/returned", (c) => c.json({ error: "private-returned-error" }, 500));
+			// A route's own 5xx thrown with its failure keeps its response; the failure is the span's cause.
+			app.get("/captured", (c) => {
+				c.header("Retry-After", "60");
+				throw routeFailure(c.json({ error: "unavailable" }, 503), new ToolUserError("source timed out", 504, "UPSTREAM_TIMEOUT"));
+			});
+			// A thrown 4xx is the route's answer, not a server failure.
+			app.get("/conflict", () => {
+				throw new HTTPException(409, { res: Response.json({ error: "conflict" }, { status: 409 }) });
+			});
 			app.get("/thrown/:id", (c) => {
 				throw new Error(`lookup failed for private@example.test run ${c.req.param("id")}`);
 			});
 			app.all("/any", () => { throw new Error("any-method failure"); });
 			const wrapper = buildWrapperApp({} as never, app);
 			expect((await wrapper.request("/lobu/returned")).status).toBe(500);
+			const captured = await wrapper.request("/lobu/captured");
+			expect([captured.status, captured.headers.get("retry-after"), await captured.json()]).toEqual([503, "60", { error: "unavailable" }]);
+			const conflict = await wrapper.request("/lobu/conflict");
+			expect([conflict.status, await conflict.json()]).toEqual([409, { error: "conflict" }]);
 			expect((await wrapper.request("/lobu/any", { method: "PRIVATE_METHOD" })).status).toBe(500);
 			for (const id of ["run9f3a1c2e7b4d", "run0b8e6d5c4a3f"]) expect((await wrapper.request(`/lobu/thrown/${id}`)).status).toBe(500);
 			expect((await wrapper.request("/private-unmatched-path?token=private-query")).status).toBe(404);
 			expect((await wrapper.request("/unknown", { method: "PRIVATE_METHOD" })).status).toBe(404);
 			const requests = exporter.getFinishedSpans().filter((span) => span.kind === SpanKind.SERVER);
-			expect(requests).toHaveLength(6);
+			expect(requests).toHaveLength(8);
 			expect(requests.filter((span) => span.attributes["http.response.status_code"] === 500).map((span) => span.status.code)).toEqual([SpanStatusCode.ERROR, SpanStatusCode.ERROR, SpanStatusCode.ERROR, SpanStatusCode.ERROR]);
 			expect(requests.find((span) => span.attributes["http.route"] === "/lobu/any")?.attributes["error.grouping"]).toContain("_OTHER /lobu/any");
 			expect(requests.find((span) => span.attributes["http.response.status_code"] === 404)?.attributes["http.route"]).toBe("unmatched");
@@ -288,6 +305,8 @@ describe("buildWrapperApp", () => {
 
 			const returned = requests.find((span) => span.attributes["http.route"] === "/lobu/returned")!;
 			expect(returned.attributes).toMatchObject({ "exception.type": "HttpServerError", "error.kind": "system" });
+			expect(requests.find((span) => span.attributes["http.route"] === "/lobu/conflict")?.status.code).toBe(SpanStatusCode.UNSET);
+			expect(requests.find((span) => span.attributes["http.route"] === "/lobu/captured")?.attributes).toMatchObject({ "http.response.status_code": 503, "exception.type": "ToolUserError", "error.code": "UPSTREAM_TIMEOUT", "error.kind": "dependency" });
 			const thrown = requests.filter((span) => span.attributes["http.route"] === "/lobu/thrown/:id");
 			expect(thrown).toHaveLength(2);
 			for (const span of thrown) {
@@ -503,6 +522,7 @@ describe("buildWrapperApp", () => {
 
 	it("does not report a 5xx its caller left before receiving; a delivered 5xx still reports", async () => {
 		const { buildWrapperApp } = await import("../server-lifecycle");
+		const { routeFailure } = await import("../diagnostics");
 		const { default: logger } = await import("../utils/logger");
 		const { Hono } = await import("hono");
 		const captureMessage = logger.error as ReturnType<typeof vi.fn>;
@@ -520,32 +540,56 @@ describe("buildWrapperApp", () => {
 			// A read-tier tool runs under the request's signal and fails with a
 			// 5xx once its caller disconnects (manage_entity's source read).
 			const app = new Hono();
-			app.get("/source-read", async (c) => {
-				const signal = c.req.raw.signal;
-				if (!signal.aborted) await new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true }));
-				return c.json({ error: "Source record read exceeded the deadline" }, 500);
-			});
-			app.get("/delivered", (c) => c.json({ error: "db unreachable" }, 500));
-			const wrapper = buildWrapperApp({} as never, app);
+			// The route answers its 5xx either by returning it or by throwing it
+			// with its cause (`routeFailure`); both report the same way.
+			const answer = (c: Context, thrown: boolean, error: string) => {
+				const response = c.json({ error }, 500);
+				if (thrown) throw routeFailure(response, new Error(error));
+				return response;
+			};
+			for (const thrown of [false, true]) {
+				const app = new Hono();
+				app.get("/source-read", async (c) => {
+					const signal = c.req.raw.signal;
+					if (!signal.aborted) await new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true }));
+					return answer(c, thrown, "Source record read exceeded the deadline");
+				});
+				app.get("/delivered", (c) => answer(c, thrown, "db unreachable"));
+				const wrapper = buildWrapperApp({} as never, app);
 
-			captureMessage.mockClear();
-			const caller = new AbortController();
-			const abandoned = wrapper.request("/lobu/source-read", { signal: caller.signal });
-			caller.abort();
-			expect((await abandoned).status).toBe(500);
-			expect(httpResponseLogs()).toHaveLength(0);
-			const abandonedSpan = requestSpan();
-			expect(abandonedSpan?.status.code).not.toBe(SpanStatusCode.ERROR);
-			expect(abandonedSpan?.attributes["error.fingerprint"]).toBeUndefined();
+				captureMessage.mockClear();
+				const caller = new AbortController();
+				const abandoned = wrapper.request("/lobu/source-read", { signal: caller.signal });
+				caller.abort();
+				expect((await abandoned).status).toBe(500);
+				expect(captureMessage).not.toHaveBeenCalled();
+				const abandonedSpan = requestSpan();
+				expect(abandonedSpan?.status.code).not.toBe(SpanStatusCode.ERROR);
+				expect(abandonedSpan?.attributes["error.fingerprint"]).toBeUndefined();
 
-			// A 5xx delivered to a caller that is still waiting reports.
-			captureMessage.mockClear();
-			expect((await wrapper.request("/lobu/delivered")).status).toBe(500);
-			expect(httpResponseLogs()).toHaveLength(1);
-			expect(requestSpan()?.status.code).toBe(SpanStatusCode.ERROR);
+				// A 5xx delivered to a caller that is still waiting reports once.
+				captureMessage.mockClear();
+				expect((await wrapper.request("/lobu/delivered")).status).toBe(500);
+				expect(captureMessage).toHaveBeenCalledTimes(1);
+				expect(httpResponseLogs()).toHaveLength(1);
+				expect(requestSpan()?.status.code).toBe(SpanStatusCode.ERROR);
+			}
 		} finally {
 			await shutdownTracing();
 		}
+	});
+
+	it("answers a route that reached the closed database with the shutdown 503 and no error log", async () => {
+		const { buildWrapperApp } = await import("../server-lifecycle");
+		const { DbClosedError } = await import("../db/client");
+		const { default: logger } = await import("../utils/logger");
+		const { Hono } = await import("hono");
+		const captureMessage = logger.error as ReturnType<typeof vi.fn>;
+		const app = new Hono();
+		app.get("/closed", () => { throw new DbClosedError(); });
+		captureMessage.mockClear();
+		expect((await buildWrapperApp({} as never, app).request("/lobu/closed")).status).toBe(503);
+		expect(captureMessage).not.toHaveBeenCalled();
 	});
 
 	it("does NOT double-report when onError fires after post-response middleware", async () => {

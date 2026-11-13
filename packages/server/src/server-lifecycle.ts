@@ -17,6 +17,7 @@ import http from "node:http";
 import v8 from "node:v8";
 import { getRequestListener } from "@hono/node-server";
 import { type Context, Hono } from "hono";
+import { HTTPException } from "hono/http-exception";
 import { routePath } from "hono/route";
 import { pinoLogger } from "hono-pino";
 import { context, propagation, ROOT_CONTEXT } from "@opentelemetry/api";
@@ -51,6 +52,13 @@ import { initWorkspaceProvider } from "./workspace";
 
 /** Requests whose thrown error app.onError already recorded on the HTTP span. */
 const requestsWithRecordedError = new WeakSet<Request>();
+/** The failure behind a route's own 5xx response (`routeFailure`), by request. */
+const routeFailureCauses = new WeakMap<Request, unknown>();
+
+/** A thrown error the boundary did not answer itself (see `wrapper.onError`). */
+function unexpectedError(c: Context): Error | undefined {
+	return c.error instanceof HTTPException || c.error instanceof DbClosedError ? undefined : c.error;
+}
 
 /** Requests answered 503 because the database pools had shut down. */
 const requestsRefusedAfterDbShutdown = new WeakSet<Request>();
@@ -305,15 +313,17 @@ export function buildWrapperApp(
 				if (organizationId) span?.setAttribute("lobu.org_id", organizationId);
 				const ray = cloudflareRayId(c.req.header("cf-ray"));
 				if (ray) span?.setAttribute("cf_ray", ray);
-				// onError already recorded a thrown error on this span. A route that
-				// returned a 5xx itself has no error object, so record the status.
+				// onError already recorded a thrown error on this span. A 5xx a route
+				// answered itself records the failure it threw with the response
+				// (`routeFailure`); a bare returned 5xx can only record its status.
 				if (!requestsWithRecordedError.has(c.req.raw)) {
 					if (failed) {
 						recordError(span, thrown, { scope: name });
 					} else if (c.res.status >= 500 && !(await isUnreportedServerStatus(c))) {
 						recordError(
 							span,
-							{ name: "HttpServerError", message: `HTTP ${c.res.status}`, httpStatus: c.res.status },
+							routeFailureCauses.get(c.req.raw)
+								?? { name: "HttpServerError", message: `HTTP ${c.res.status}`, httpStatus: c.res.status },
 							{ scope: name },
 						);
 					}
@@ -325,8 +335,17 @@ export function buildWrapperApp(
 
 	// 4. Request logging belongs on the wrapper because `/lobu` and the main app
 	// are sibling mounts. Putting it inside only one child silently drops the
-	// other child's requests from the access log.
-	wrapper.use("*", pinoLogger({ pino: logger }));
+	// other child's requests from the access log. A thrown `HTTPException` (a
+	// route's own response, `routeFailure`) or `DbClosedError` (the shutdown
+	// 503) is answered, not unexpected: the route logged its own failure, so
+	// the access line reads as a completed request rather than a blank error.
+	wrapper.use("*", pinoLogger({
+		pino: logger,
+		http: {
+			onResLevel: (c) => (unexpectedError(c) ? "error" : "info"),
+			onResMessage: (c) => unexpectedError(c)?.message || "Request completed",
+		},
+	}));
 
 	// 5. Server-error capture. Two layers cover both shapes of failing route:
 	//   (a) routes that throw — handled by `app.onError` below.
@@ -372,6 +391,13 @@ export function buildWrapperApp(
 	// database after shutdown closed it gets the same 503 as the refusal above.
 	wrapper.onError((err, c) => {
 		if (err instanceof DbClosedError) return dbShutDownResponse(c);
+		// A route's own response, thrown with the failure behind it
+		// (`routeFailure`). Send it unchanged: the route logged its failure, and
+		// the span middleware records the cause unless the 5xx is unreportable.
+		if (err instanceof HTTPException) {
+			if (err.status >= 500) routeFailureCauses.set(c.req.raw, err.cause ?? err);
+			return err.getResponse();
+		}
 		// The HTTP span is still active here; give it the thrown error before
 		// the 500 response replaces it.
 		recordError(getCurrentSpan(), err, { scope: httpSpanName(c) });

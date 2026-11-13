@@ -40,6 +40,7 @@ import { setupRoutes } from "./connect/setup-routes";
 import { chatIdentityRoutes } from "./connect/chat-identity-routes";
 import { connectRoutes } from "./connect/routes";
 import { checkDatabaseReadiness, getDb } from "./db/client";
+import { routeFailure } from "./diagnostics";
 import * as invalidationEmitter from "./events/emitter";
 import { streamInvalidationEvents } from "./events/sse";
 import { invalidationSseAuth } from "./events/sse-invalidation-auth";
@@ -506,10 +507,10 @@ app.get("/health/ready", async (c) => {
 		await checkDatabaseReadiness();
 		return c.json({ status: "ok", service: "lobu-api" });
 	} catch (error) {
-		return c.json(
+		throw routeFailure(c.json(
 			{ status: "unready", service: "lobu-api", error: errorMessage(error) },
 			503,
-		);
+		), error);
 	}
 });
 
@@ -522,14 +523,14 @@ app.get("/health/scheduler", async (c) => {
 		const health = await getSchedulerHealth(c.env);
 		return c.json(health, health.healthy ? 200 : 503);
 	} catch (error) {
-		return c.json(
+		throw routeFailure(c.json(
 			{
 				healthy: false,
 				issues: ["Failed to check scheduler health"],
 				error: errorMessage(error),
 			},
 			500,
-		);
+		), error);
 	}
 });
 
@@ -1111,7 +1112,7 @@ async function handleContentDistribution(c: Context<{ Bindings: Env }>) {
 		);
 		return c.json({ distribution });
 	} catch (error) {
-		return c.json({ error: errorMessage(error) }, 500);
+		throw routeFailure(c.json({ error: errorMessage(error) }, 500), error);
 	}
 }
 
@@ -1935,7 +1936,7 @@ app.get("*", async (c) => {
 			logger.error({ error, path: requestPath }, "[public-pages] render failed");
 			c.header("Cache-Control", "no-store");
 			c.header("Retry-After", "60");
-			return c.text("Temporarily unavailable", 503);
+			throw routeFailure(c.text("Temporarily unavailable", 503), error);
 		}
 		if (publicPageModel) {
 			const template = await loadAnySpaHtmlTemplate();

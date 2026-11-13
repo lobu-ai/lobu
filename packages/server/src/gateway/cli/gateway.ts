@@ -71,6 +71,7 @@ import {
   setAuthProvider,
   verifySettingsSessionOrToken,
 } from "../routes/public/settings-auth.js";
+import { routeFailure } from "../../diagnostics.js";
 
 const logger = createLogger("gateway-startup");
 
@@ -403,7 +404,7 @@ export function createGatewayApp(
             return await handler({ c, mod, providerId });
           } catch (error) {
             logger.error(errorLabel, { error });
-            return c.json({ error: errorLabel }, 500);
+            throw routeFailure(c.json({ error: errorLabel }, 500), error);
           }
         };
 
