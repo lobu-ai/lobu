@@ -125,6 +125,7 @@ export async function runMetric(input: RunMetricInput): Promise<Record<string, u
     rows = await boundedQuery(sql, scoped.sql, scoped.params as unknown[], {
       signal: input.signal,
       statementTimeoutMs: QUERY_SQL_STATEMENT_TIMEOUT_MS,
+      fence: scoped.scope,
     });
   } catch (err) {
     if (input.signal?.aborted) throw err;
