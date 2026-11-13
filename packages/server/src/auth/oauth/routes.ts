@@ -49,6 +49,7 @@ import {
 import { getConfiguredPublicOrigin } from '../../utils/public-origin';
 import { resolveSession } from '../resolve-session';
 import { organizationLiveSql } from '../../workspace/deletion-state';
+import { routeFailure } from '../../diagnostics';
 
 const oauthRoutes = new Hono<{ Bindings: Env }>();
 const INVALID_DEVICE_CODE_MESSAGE = 'Invalid or expired user code';
@@ -552,7 +553,7 @@ oauthRoutes.post('/oauth/register', async (c) => {
       }
     } catch (err) {
       console.warn('[OAuth] Rate limit check failed:', err);
-      return c.json(createOAuthError('server_error', 'Registration temporarily unavailable'), 503);
+      throw routeFailure(c.json(createOAuthError('server_error', 'Registration temporarily unavailable'), 503), err);
     }
   }
 
@@ -616,7 +617,7 @@ oauthRoutes.post('/oauth/register', async (c) => {
     return c.json(client, 201);
   } catch (error) {
     console.error('[OAuth] Client registration failed:', error);
-    return c.json(createOAuthError('server_error', 'Registration failed'), 500);
+    throw routeFailure(c.json(createOAuthError('server_error', 'Registration failed'), 500), error);
   }
 });
 
@@ -1034,7 +1035,7 @@ oauthRoutes.post('/oauth/authorize/consent', requireAuth, async (c) => {
     return c.json({ redirect_url: redirectUrl.toString() });
   } catch (error) {
     console.error('[OAuth] Failed to create authorization code:', error);
-    return c.json(createOAuthError('server_error', 'Failed to create authorization code'), 500);
+    throw routeFailure(c.json(createOAuthError('server_error', 'Failed to create authorization code'), 500), error);
   }
 });
 
@@ -1163,7 +1164,7 @@ oauthRoutes.post('/oauth/device/email', async (c) => {
       }
     } catch (err) {
       console.warn('[OAuth] Device-email rate limit check failed:', err);
-      return c.json(createOAuthError('server_error', 'Temporarily unavailable'), 503);
+      throw routeFailure(c.json(createOAuthError('server_error', 'Temporarily unavailable'), 503), err);
     }
   }
 

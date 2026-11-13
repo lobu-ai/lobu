@@ -10,11 +10,17 @@
  *   segment, which the host already implies, so following them takes no 301.
  * - An anonymous render spends the visitor's per-IP public-read budget, so a
  *   crawler cannot fan out unmetered source reads through page loads.
+ * - The request span of a render-failure 503 reports the failure behind it. A bare
+ *   `HttpServerError: HTTP 503` hid a source outage as a system error.
  */
 
+import { initTracing, shutdownTracing, SpanKind } from '@lobu/core';
+import { InMemorySpanExporter, SimpleSpanProcessor } from '@opentelemetry/sdk-trace-node';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { app } from '../../../index';
+import { pushdownFailureError } from '../../../lib/connector-pushdown';
 import { buildPublicPageModel, buildSitemapEntries } from '../../../public-pages';
+import { buildWrapperApp } from '../../../server-lifecycle';
 import * as resolvePathModule from '../../../tools/resolve_path';
 import { ToolUserError } from '../../../utils/errors';
 import { getEnvFromProcess } from '../../../utils/env';
@@ -149,6 +155,47 @@ describe('public pages > crawler-facing responses', () => {
         );
         expect(response.status).toBe(503);
         expect(response.headers.get('cache-control')).toBe('no-store');
+      });
+    });
+
+    describe('the request span reports the failure behind the 503', () => {
+      afterEach(async () => {
+        vi.restoreAllMocks();
+        await shutdownTracing();
+      });
+
+      async function serverSpanOf(run: () => Promise<Response>) {
+        const exporter = new InMemorySpanExporter();
+        await shutdownTracing();
+        initTracing({ serviceName: 'public-pages-span-test', spanProcessors: [new SimpleSpanProcessor(exporter)] });
+        const response = await run();
+        // The deployed app sends the page route's own 503 unchanged.
+        expect([response.status, response.headers.get('cache-control'), response.headers.get('retry-after')])
+          .toEqual([503, 'no-store', '60']);
+        const spans = exporter.getFinishedSpans().filter((span) => span.kind === SpanKind.SERVER);
+        expect(spans).toHaveLength(1);
+        return spans[0].attributes;
+      }
+
+      const requestPage = () =>
+        buildWrapperApp(env, null, app).request(liveEntitySlug, { headers: { accept: 'text/html' } });
+
+      it('a source that refused the read is a dependency failure', async () => {
+        // The production shape: a source-backed record whose connector failed.
+        vi.spyOn(resolvePathModule, 'resolvePath').mockRejectedValue(
+          pushdownFailureError(new Error('synthetic_source_invalid_response'), 'synthetic-source', 'query')
+        );
+        expect(await serverSpanOf(requestPage)).toMatchObject({
+          'http.response.status_code': 503,
+          'exception.type': 'ToolUserError',
+          'error.code': 'UPSTREAM_5XX',
+          'error.kind': 'dependency',
+        });
+      });
+
+      it('a database failure keeps its own code', async () => {
+        const attributes = await serverSpanOf(() => withEntitiesUnavailable(requestPage));
+        expect(attributes).toMatchObject({ 'exception.type': 'PostgresError', 'error.code': '42P01' });
       });
     });
   });

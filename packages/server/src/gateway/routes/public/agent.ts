@@ -71,6 +71,7 @@ import {
   formatActivityAttentionBlock,
   listOrgActivity,
 } from "../../../tools/admin/manage_operations/activity-feed.js";
+import { routeFailure } from "../../../diagnostics.js";
 
 /** Cadence of the SSE keepalive. The client's transport watchdog is sized as a
  *  multiple of this; if you change it, change `SSE_PING_INTERVAL_MS` in
@@ -1589,7 +1590,7 @@ export function createAgentApi(config: AgentApiConfig): Hono {
         });
       } catch (error) {
         logger.error("Failed to send platform message", { error });
-        return c.json({ success: false, error: "Internal server error" }, 500);
+        throw routeFailure(c.json({ success: false, error: "Internal server error" }, 500), error);
       }
     }
 

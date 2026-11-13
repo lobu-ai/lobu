@@ -80,6 +80,7 @@ import {
 	type GithubOrgMember,
 	type TeamGraphResult,
 } from "./github-team-graph.js";
+import { routeFailure } from "../../../diagnostics.js";
 
 const logger = createLogger("app-install-routes");
 
@@ -1900,13 +1901,13 @@ export function createAppInstallRoutes(deps: AppInstallRouterDeps): Hono {
 				},
 				"GitHub App install callback failed",
 			);
-			return c.html(
+			throw routeFailure(c.html(
 				renderOAuthErrorPage(
 					"github_install_failed",
 					error instanceof Error ? error.message : "GitHub App install failed.",
 				),
 				500,
-			);
+			), error);
 		}
 	});
 
@@ -2193,7 +2194,7 @@ function mountOAuthCodeExchangeRoutes(
 				{ provider, error: String(error) },
 				"OAuth install failed to park as pending",
 			);
-			return c.html(
+			throw routeFailure(c.html(
 				renderOAuthErrorPage(
 					`${provider}_install_failed`,
 					error instanceof Error
@@ -2201,7 +2202,7 @@ function mountOAuthCodeExchangeRoutes(
 						: `${display} install failed.`,
 				),
 				500,
-			);
+			), error);
 		}
 	});
 }

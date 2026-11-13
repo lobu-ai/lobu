@@ -8,6 +8,7 @@ import { createLogger } from "@lobu/core";
 import { type Context, Hono } from "hono";
 import type { ChatInstanceManager } from "../../connections/chat-instance-manager.js";
 import type { PlatformConnection } from "../../connections/types.js";
+import { routeFailure } from "../../../diagnostics.js";
 
 const logger = createLogger("connection-routes");
 const LOCAL_TEST_PLATFORMS = ["slack", "telegram", "whatsapp"] as const;
@@ -58,7 +59,7 @@ export function createConnectionWebhookRoutes(
 			return await manager.handleWebhook(connectionId, c.req.raw);
     } catch (error) {
       logger.error({ connectionId, error: String(error) }, "Webhook error");
-      return c.json({ error: "Webhook processing failed" }, 500);
+      throw routeFailure(c.json({ error: "Webhook processing failed" }, 500), error);
     }
   });
 

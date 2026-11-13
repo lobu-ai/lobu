@@ -1,5 +1,7 @@
 /** Structured HTTP and MCP diagnostics, collected from server stdout. */
 import type { Context } from 'hono';
+import { HTTPException } from 'hono/http-exception';
+import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { ToolUserError } from './utils/errors';
 import logger from './utils/logger';
 
@@ -11,6 +13,17 @@ export function markErrorReported(c: Context): void {
 
 export function isErrorReported(c: Context): boolean {
   return Boolean(c.get(ERROR_REPORTED_FLAG as never));
+}
+
+/**
+ * A route's own error response, carrying the failure behind it. Throw it
+ * instead of returning the response: the app's error boundary sends the
+ * response unchanged and records `cause` on the request span, so the issue is
+ * grouped by what failed rather than as a bare `HttpServerError: HTTP <status>`.
+ * It does not log; the route still owns its log line.
+ */
+export function routeFailure(response: Response, cause: unknown): HTTPException {
+  return new HTTPException(response.status as ContentfulStatusCode, { res: response, cause });
 }
 
 /** Retain the original exception when a route catches it and returns a 5xx. */

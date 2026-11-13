@@ -21,6 +21,7 @@ import type { Env } from '../index';
 import { errorMessage, ToolUserError } from '../utils/errors';
 import logger from '../utils/logger';
 import { enqueueAutomationRunForAutomation } from '../automations/automation';
+import { routeFailure } from '../diagnostics';
 
 export async function triggerAutomationForDevice(c: Context<{ Bindings: Env }>) {
   const automationIdParam = c.req.param('automation_id');
@@ -69,7 +70,7 @@ export async function triggerAutomationForDevice(c: Context<{ Bindings: Env }>) 
     resolvedDeviceWorkerId = device.id;
   } catch (err) {
     logger.error({ error: errorMessage(err) }, '[triggerAutomationForDevice] device lookup failed');
-    return c.json({ error: 'Internal error' }, 500);
+    throw routeFailure(c.json({ error: 'Internal error' }, 500), err);
   }
 
   // Load the automation and enforce two checks:
@@ -147,6 +148,6 @@ export async function triggerAutomationForDevice(c: Context<{ Bindings: Env }>) 
       { error: errorMessage(err), automationId },
       '[triggerAutomationForDevice] enqueue failed'
     );
-    return c.json({ error: errorMessage(err) }, 500);
+    throw routeFailure(c.json({ error: errorMessage(err) }, 500), err);
   }
 }

@@ -13,6 +13,7 @@ import { authenticateWorker } from "./middleware.js";
 import type { WorkerContext } from "./types.js";
 import { captureSideEffect } from "./capture-mode.js";
 import { sendOncePerTurnInput } from "./turn-write-once.js";
+import { routeFailure } from "../../../diagnostics.js";
 
 const logger = createLogger("internal-audio-routes");
 
@@ -95,11 +96,11 @@ export function createAudioRoutes(
       });
     } catch (error) {
       logger.error("Audio synthesis error", { error });
-      return errorResponse(
+      throw routeFailure(errorResponse(
         c,
         error instanceof Error ? error.message : "Failed to synthesize audio",
         500
-      );
+      ), error);
     }
   });
 
@@ -139,7 +140,7 @@ export function createAudioRoutes(
       });
     } catch (error) {
       logger.error("Capabilities check error", { error });
-      return errorResponse(c, "Failed to check capabilities", 500);
+      throw routeFailure(errorResponse(c, "Failed to check capabilities", 500), error);
     }
   });
 

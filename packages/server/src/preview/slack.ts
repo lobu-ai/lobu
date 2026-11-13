@@ -19,6 +19,7 @@ import {
 	formatChatLink,
 } from "../gateway/commands/command-spelling";
 import { getPlatformDescriptor } from "../gateway/connections/platforms/index.js";
+import { routeFailure } from "../diagnostics";
 
 // Slack Preview lets people trying Lobu locally talk to their agent through the
 // hosted "Lobu Developer" Slack workspace before they have their own bot token.
@@ -285,7 +286,7 @@ export async function createPreviewClaim(c: Context<{ Bindings: Env }>) {
 				{ err: errorMessage(err), platform },
 				"[preview] create claim failed",
 			);
-			return c.json({ error: errorMessage(err) }, 500);
+			throw routeFailure(c.json({ error: errorMessage(err) }, 500), err);
 		}
 	}
 

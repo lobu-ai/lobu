@@ -23,6 +23,7 @@ import { authenticateWorker } from "./middleware.js";
 import type { WorkerContext } from "./types.js";
 import { captureSideEffect } from "./capture-mode.js";
 import { sendOncePerTurnInput } from "./turn-write-once.js";
+import { routeFailure } from "../../../diagnostics.js";
 
 const logger = createLogger("internal-interaction-routes");
 
@@ -215,7 +216,7 @@ export function createInteractionRoutes(
           error: getErrorMessage(error),
           stack: error instanceof Error ? error.stack : undefined,
         });
-        return errorResponse(c, "Failed to post question", 500);
+        throw routeFailure(errorResponse(c, "Failed to post question", 500), error);
       }
     }
   );

@@ -26,6 +26,7 @@ import { getChatInstanceManager } from '../lobu/gateway';
 import { escapeHtml } from '../utils/html';
 import logger from '../utils/logger';
 import { joinPublicOrganization } from '../workspace/join-public';
+import { routeFailure } from '../diagnostics';
 
 /**
  * One-click chat identity linking (see lobu/stores/chat-identity-link.ts).
@@ -450,7 +451,7 @@ export function createChatIdentityRoutes(overrides: Partial<ChatIdentityRouteDep
         cookies = await deps.signOut(c.req.raw, c.env);
       } catch (error) {
         logger.warn({ error }, 'Chat identity link could not sign the browser out to switch accounts');
-        return c.html(SWITCH_FAILED_PAGE, 502);
+        throw routeFailure(c.html(SWITCH_FAILED_PAGE, 502), error);
       }
       for (const cookie of cookies) c.header('Set-Cookie', cookie, { append: true });
       return c.redirect(loginContinuation(token, loginProviderForChatPlatform(claim.platform)), 303);

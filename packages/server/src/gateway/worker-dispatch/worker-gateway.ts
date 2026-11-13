@@ -35,6 +35,7 @@ import { agentTurnRunIdFromClaims, turnMarkerDeploymentFromClaims } from "../orc
 import type { InstructionService } from "../services/instruction-service.js";
 import type { AgentSettingsStore } from "../auth/settings/agent-settings-store.js";
 import { createTranscriptRoutes } from "./transcript-routes.js";
+import { routeFailure } from "../../diagnostics.js";
 
 const logger = createLogger("worker-gateway");
 
@@ -419,7 +420,7 @@ export class WorkerGateway {
       return c.json({ success: true });
     } catch (error) {
       logger.error(`Error handling worker response: ${error}`);
-      return c.json({ error: "Failed to process response" }, 500);
+      throw routeFailure(c.json({ error: "Failed to process response" }, 500), error);
     }
   }
 
@@ -612,7 +613,7 @@ export class WorkerGateway {
       });
     } catch (error) {
       logger.error("Failed to generate session context", { err: error });
-      return c.json({ error: "session_context_error" }, 500);
+      throw routeFailure(c.json({ error: "session_context_error" }, 500), error);
     }
   }
 

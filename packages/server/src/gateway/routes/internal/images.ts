@@ -12,6 +12,7 @@ import { authenticateWorker } from "./middleware.js";
 import type { WorkerContext } from "./types.js";
 import { captureSideEffect } from "./capture-mode.js";
 import { sendOncePerTurnInput } from "./turn-write-once.js";
+import { routeFailure } from "../../../diagnostics.js";
 
 const logger = createLogger("internal-image-routes");
 
@@ -93,7 +94,7 @@ export function createImageRoutes(
       });
     } catch (error) {
       logger.error("Image generation error", { error });
-      return errorResponse(c, "Failed to generate image", 500);
+      throw routeFailure(errorResponse(c, "Failed to generate image", 500), error);
     }
   });
 
@@ -125,7 +126,7 @@ export function createImageRoutes(
       });
     } catch (error) {
       logger.error("Image capabilities check error", { error });
-      return errorResponse(c, "Failed to check capabilities", 500);
+      throw routeFailure(errorResponse(c, "Failed to check capabilities", 500), error);
     }
   });
 
