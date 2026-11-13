@@ -25,6 +25,7 @@ import { type Handlers, toMarkdown } from "mdast-util-to-markdown";
 import {
   WHATSAPP_DM_SUFFIXES,
   WHATSAPP_GROUP_SUFFIX,
+  normalizeWhatsAppUserJid,
 } from "@lobu/connectors/whatsapp-web-identity";
 import { ConnectorChatAdapter } from "./connector-chat.js";
 
@@ -48,6 +49,7 @@ export interface WhatsAppWebMessageRow {
   content_kind?: string;
   /** The message @mentions the paired account or quotes one of its messages. */
   mentions_me?: boolean;
+  own_mention_jids?: string[];
 }
 
 /**
@@ -110,7 +112,18 @@ export class WhatsAppWebAdapter extends ConnectorChatAdapter<WhatsAppWebMessageR
   }
 
   parseMessage(raw: WhatsAppWebMessageRow): Message<WhatsAppWebMessageRow> {
-    const text = typeof raw.text === "string" ? raw.text : "";
+    let text = typeof raw.text === "string" ? raw.text : "";
+    // The connector verified these against the signed-in account. Keep raw
+    // source text intact; only the Chat SDK message loses its leading self-
+    // mentions. A quote alone and arbitrary numeric @mentions prove nothing.
+    const ownIds = new Set((Array.isArray(raw.own_mention_jids) ? raw.own_mention_jids : [])
+      .slice(0, 2).map((jid) => normalizeWhatsAppUserJid(jid))
+      .filter((jid): jid is string => jid !== null).map((jid) => jid.split("@")[0]));
+    while (true) {
+      const mention = /^\s*@([0-9]{5,32})(?=\s|$)\s*/.exec(text);
+      if (!mention || !ownIds.has(mention[1])) break;
+      text = text.slice(mention[0].length);
+    }
     const isGroup = raw.chat_jid.endsWith(GROUP_SUFFIX);
     const userId =
       raw.sender_jid ?? (!isGroup && raw.from_me !== true ? raw.chat_jid : "unknown");

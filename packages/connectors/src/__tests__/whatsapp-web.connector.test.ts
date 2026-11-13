@@ -195,7 +195,8 @@ describe("WhatsApp live source reads", () => {
     const page = makeDispatcher({
       probe: READY,
       read_messages: { ok: true, results: [
-        message("mention", { chat_jid: "120363000000000000@g.us", mentions_me: true }),
+        message("mention", { chat_jid: "120363000000000000@g.us", mentions_me: true,
+          body: "@15550000001 /help", own_mention_jids: ["15550000001@c.us", "invalid", "15550000001@c.us"] }),
         message("chatter", { chat_jid: "120363000000000000@g.us", mentions_me: false }),
         message("legacy"),
       ], hasMore: false },
@@ -210,6 +211,8 @@ describe("WhatsApp live source reads", () => {
       ["legacy", false],
     ]);
     expect(result.columns).toContainEqual({ name: "mentions_me", type: "boolean" });
+    expect(result.rows[0]).toMatchObject({ text: "@15550000001 /help", own_mention_jids: ["15550000001@s.whatsapp.net"] });
+    expect(result.rows.slice(1).map((row) => row.own_mention_jids)).toEqual([[], []]);
   });
 
   it("classifies each live row's content structurally", async () => {
