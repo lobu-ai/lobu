@@ -1,6 +1,7 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { atomicWriteFile } from "@lobu/core";
 
 export const LOBU_CONFIG_DIR = join(homedir(), ".config", "lobu");
 export const DEFAULT_CONTEXT_NAME = "lobu";
@@ -79,21 +80,35 @@ interface StoredContextConfig {
   contexts?: Record<string, StoredContextEntry>;
 }
 
+/**
+ * Only a missing file means "no contexts yet". An unreadable or corrupt file is
+ * an error: reading it as empty would report every context as unknown, and the
+ * next save would write that empty config over the user's contexts.
+ */
 export async function loadContextConfig(): Promise<LobuContextConfig> {
+  let raw: string;
   try {
-    const raw = await readFile(CONTEXTS_FILE, "utf-8");
-    const parsed = JSON.parse(raw) as StoredContextConfig;
-    return normalizeContextConfig(parsed);
-  } catch {
-    return normalizeContextConfig({});
+    raw = await readFile(CONTEXTS_FILE, "utf-8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return normalizeContextConfig({});
+    }
+    throw error;
   }
+  let parsed: StoredContextConfig;
+  try {
+    parsed = JSON.parse(raw) as StoredContextConfig;
+  } catch {
+    throw new Error(
+      `${CONTEXTS_FILE} is not valid JSON. Fix or delete it, then run \`lobu context list\`.`
+    );
+  }
+  return normalizeContextConfig(parsed);
 }
 
+/** Atomic, so a concurrent `lobu` process never reads a half-written file. */
 async function saveContextConfig(config: LobuContextConfig): Promise<void> {
-  await mkdir(LOBU_CONFIG_DIR, { recursive: true });
-  await writeFile(CONTEXTS_FILE, JSON.stringify(config, null, 2), {
-    mode: 0o600,
-  });
+  await atomicWriteFile(CONTEXTS_FILE, JSON.stringify(config, null, 2));
 }
 
 export async function getCurrentContextName(): Promise<string> {
