@@ -19,10 +19,15 @@
  * CTE referenced more than once, so a caller self-join (`... NOT EXISTS (SELECT
  * 1 FROM events s ...)`) used to copy every visible row of the organization
  * before applying the caller's own `id IN (...)`, and timed out at 5s on a
- * large workspace. Every scope CTE must be inlined into each reference.
+ * large workspace. Every scope CTE over a large table must be inlined into each
+ * reference. The small config tables whose scope predicate a caller predicate
+ * could outrank are materialized instead, and a failed read never echoes a
+ * database error that can quote a row outside the caller's scope.
  */
 
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import type { Env } from '../../../index';
+import { buildClientSDK } from '../../../sandbox/client-sdk';
 import { querySql } from '../../../tools/admin/query_sql';
 import { validateAndScopeQuery } from '../../../utils/execute-data-sources';
 import { QUERYABLE_TABLE_NAMES, SAFE_COLUMN_DEFS } from '../../../utils/table-schema';
@@ -33,6 +38,7 @@ import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import {
   addUserToOrganization,
   createTestAccessToken,
+  createTestConnection,
   createTestEvent,
   createTestOAuthClient,
   createTestOrganization,
@@ -260,7 +266,7 @@ describe('query_sql internal-path pagination contract', () => {
     expect(res.has_more).toBe(true);
   });
 
-  describe('org-scoping CTEs are inlined, never materialized', () => {
+  describe('org-scoping CTEs over large tables are inlined', () => {
     /** Plan node types of the scoped statement query_sql executes. */
     async function planNodeTypes(query: string): Promise<string[]> {
       const scoped = validateAndScopeQuery(query, orgId, {
@@ -280,13 +286,19 @@ describe('query_sql internal-path pagination contract', () => {
       return types;
     }
 
-    it('reads every scoped table referenced twice without a CTE scan', async () => {
+    it('materializes only the small config tables scoped through another relation', async () => {
       const materialized: string[] = [];
       for (const table of [...QUERYABLE_TABLE_NAMES].sort()) {
         const types = await planNodeTypes(`SELECT 1 FROM "${table}" a, "${table}" b LIMIT 1`);
         if (types.includes('CTE Scan')) materialized.push(table);
       }
-      expect(materialized).toEqual([]);
+      expect(materialized).toEqual([
+        'automation_versions',
+        'connections',
+        'entity_relationship_types',
+        'feeds',
+        'user',
+      ]);
     });
 
     it('answers an events self-join by id through the scope', async () => {
@@ -417,5 +429,204 @@ describe('query_sql internal-path pagination contract', () => {
       expect(errorLog).not.toHaveBeenCalled();
       errorLog.mockRestore();
     }, 30_000);
+  });
+
+  describe('a failed read never echoes rows outside the caller scope', () => {
+    // Synthetic values another organization (or another member) stores. An
+    // inlined scope CTE lets a cheap caller predicate run on a row before the
+    // scope predicate removes it, so a database error raised from that row's
+    // value must never reach the caller.
+    const OTHER_ORG_EVENT_MARKER = 'synthetic_other_org_event_marker_5d1e';
+    const OTHER_ORG_PROMPT_MARKER = 'synthetic_other_org_prompt_marker_9b3c';
+    const PRIVATE_CONNECTION_MARKER = 'synthetic_private_connection_marker_2a7f';
+    const OTHER_ORG_USER_MARKER = 'synthetic_other_org_user_marker_e48a';
+    const OTHER_ORG_RELATIONSHIP_MARKER = 'synthetic_other_org_relationship_marker_31f9';
+    const PRIVATE_EVENT_MARKER = 'synthetic_private_event_marker_6c0d';
+    const MARKERS = [
+      OTHER_ORG_EVENT_MARKER,
+      OTHER_ORG_PROMPT_MARKER,
+      OTHER_ORG_USER_MARKER,
+      OTHER_ORG_RELATIONSHIP_MARKER,
+      PRIVATE_CONNECTION_MARKER,
+      PRIVATE_EVENT_MARKER,
+    ];
+    let otherOrgEventId: number;
+    let otherOwnerId: string;
+    let privateConnectionId: number;
+    let privateEventId: number;
+    let privateOrgMemberCtx: ToolContext;
+
+    /** Every probe's failure text that names a value the caller cannot read. */
+    const leaks = (failures: Array<{ probe: string; message: unknown }>) =>
+      failures.filter(({ message }) => MARKERS.some((marker) => String(message ?? '').includes(marker)));
+
+    beforeAll(async () => {
+      const sql = getTestDb();
+      const otherOrg = await createTestOrganization({ name: 'QuerySqlOtherOrg', visibility: 'private' });
+      const otherOwner = await createTestUser({
+        email: 'qsql-other-owner@test.com',
+        name: OTHER_ORG_USER_MARKER,
+      });
+      otherOwnerId = otherOwner.id;
+      await addUserToOrganization(otherOwner.id, otherOrg.id, 'owner');
+      await sql`
+        INSERT INTO entity_relationship_types (id, slug, name, description, organization_id)
+        VALUES (
+          (SELECT COALESCE(MAX(id), 0) + 1 FROM entity_relationship_types), 'synthetic_probe_type',
+          'Probe', ${OTHER_ORG_RELATIONSHIP_MARKER}, ${otherOrg.id}
+        )
+      `;
+      otherOrgEventId = (
+        await createTestEvent({ organization_id: otherOrg.id, content: OTHER_ORG_EVENT_MARKER })
+      ).id;
+      // Each organization owns versions; the caller's own prompts cast cleanly,
+      // so only the other organization's row can raise. The caller's org needs
+      // enough Automations that the planner scans versions before the join.
+      const insertAutomation = async (organizationId: string, createdBy: string, prompt: string) => {
+        const [automation] = await sql`
+          INSERT INTO automations (
+            id, name, slug, organization_id, entity_ids, triggers, model_config, sources,
+            version, status, created_by, automation_group_id
+          ) VALUES (
+            (SELECT COALESCE(MAX(id), 0) + 1 FROM automations), 'Probe', ${`probe-${organizationId}`},
+            ${organizationId}, '{}'::bigint[], '[]'::jsonb, '{}'::jsonb, '[]'::jsonb, 1, 'active',
+            ${createdBy}, (SELECT COALESCE(MAX(id), 0) + 1 FROM automations)
+          )
+          RETURNING id
+        `;
+        await sql`
+          INSERT INTO automation_versions (
+            id, automation_id, version, name, prompt, version_sources, created_by
+          ) VALUES (
+            (SELECT COALESCE(MAX(id), 0) + 1 FROM automation_versions), ${automation.id}, 1,
+            'Probe', ${prompt}, '[]'::jsonb, ${createdBy}
+          )
+        `;
+      };
+      await insertAutomation(orgId, ownerId, '7');
+      await insertAutomation(otherOrg.id, otherOwner.id, OTHER_ORG_PROMPT_MARKER);
+      await sql`
+        INSERT INTO automations (
+          id, name, slug, organization_id, entity_ids, triggers, model_config, sources,
+          version, status, created_by, automation_group_id
+        )
+        SELECT base.n + g, 'Probe', 'probe-bulk-' || g, ${orgId}, '{}'::bigint[], '[]'::jsonb,
+          '{}'::jsonb, '[]'::jsonb, 1, 'active', ${ownerId}, base.n + g
+        FROM (SELECT MAX(id) AS n FROM automations) base, generate_series(1, 300) g
+      `;
+      await sql`
+        INSERT INTO automation_versions (id, automation_id, version, name, prompt, version_sources, created_by)
+        SELECT base.n + row_number() OVER (), a.id, 1, 'Probe', '7', '[]'::jsonb, ${ownerId}
+        FROM (SELECT MAX(id) AS n FROM automation_versions) base, automations a
+        WHERE a.slug LIKE 'probe-bulk-%'
+      `;
+      await sql`ANALYZE automations`;
+      await sql`ANALYZE automation_versions`;
+
+      // Within one organization: a private connection and its events are
+      // hidden from every member but the connection's creator.
+      const privateOrg = await createTestOrganization({ name: 'QuerySqlPrivateConnection' });
+      const creator = await createTestUser({ email: 'qsql-private-creator@test.com' });
+      await addUserToOrganization(creator.id, privateOrg.id, 'owner');
+      const member = await createTestUser({ email: 'qsql-private-member@test.com' });
+      await addUserToOrganization(member.id, privateOrg.id, 'member');
+      const connection = await createTestConnection({
+        organization_id: privateOrg.id,
+        connector_key: 'test',
+        display_name: PRIVATE_CONNECTION_MARKER,
+        created_by: creator.id,
+        visibility: 'private',
+      });
+      privateConnectionId = connection.id;
+      privateEventId = (
+        await createTestEvent({
+          organization_id: privateOrg.id,
+          connection_id: connection.id,
+          content: PRIVATE_EVENT_MARKER,
+        })
+      ).id;
+      privateOrgMemberCtx = {
+        ...ownerToolContext(privateOrg.id, member.id),
+        memberRole: 'member',
+        scopes: ['mcp:read'],
+      } as ToolContext;
+    });
+
+    const otherOrgProbes = () => [
+      `SELECT id FROM events WHERE id = ${otherOrgEventId} AND timezone(payload_text, now()) IS NULL`,
+      `SELECT id FROM events WHERE id = ${otherOrgEventId} AND payload_text::regclass IS NULL`,
+      'SELECT id FROM automation_versions WHERE prompt::int = 1',
+      `SELECT a.id FROM events a JOIN events b ON b.id = a.id
+        WHERE a.id = ${otherOrgEventId} AND timezone(a.payload_text, now()) IS NULL`,
+      `SELECT a.id FROM automation_versions a JOIN automation_versions b ON b.id = a.id
+        WHERE a.prompt::int = 1`,
+      `SELECT id FROM "user" WHERE id = '${otherOwnerId}' AND name::regclass IS NULL`,
+      `SELECT id FROM entity_relationship_types
+        WHERE slug = 'synthetic_probe_type' AND description::regclass IS NULL`,
+    ];
+
+    it('query_sql does not echo another organization’s values', async () => {
+      const failures = [];
+      for (const probe of otherOrgProbes()) {
+        const res = await querySql({ sql: probe }, {}, ownerCtx);
+        expect(res.rows).toEqual([]);
+        failures.push({ probe, message: res.error });
+      }
+      expect(leaks(failures)).toEqual([]);
+    });
+
+    it('client.query does not echo another organization’s values', async () => {
+      const sdk = buildClientSDK(ownerCtx, {} as Env, { mode: 'read' });
+      const failures = [];
+      for (const probe of otherOrgProbes()) {
+        const message = await sdk.query(probe).then(
+          (rows) => JSON.stringify(rows),
+          (error: Error) => error.message
+        );
+        failures.push({ probe, message });
+      }
+      expect(leaks(failures)).toEqual([]);
+    });
+
+    it('query_sql does not echo a value a member cannot see in their own organization', async () => {
+      const failures = [];
+      for (const probe of [
+        `SELECT id FROM connections WHERE id = ${privateConnectionId} AND display_name::regclass IS NULL`,
+        `SELECT id FROM events WHERE id = ${privateEventId} AND timezone(payload_text, now()) IS NULL`,
+      ]) {
+        const res = await querySql({ sql: probe }, {}, privateOrgMemberCtx);
+        expect(res.rows).toEqual([]);
+        failures.push({ probe, message: res.error });
+      }
+      expect(leaks(failures)).toEqual([]);
+    });
+
+    it('keeps the SQLSTATE and retryability of a data error the caller raised', async () => {
+      const res = await querySql({ sql: "SELECT ('x' || id)::int AS v FROM events" }, {}, ownerCtx);
+      expect(res.error).toContain('22P02');
+      expect(res.error_code).toBe('VALIDATION');
+      expect(res.retryable).toBe(false);
+    });
+
+    it('keeps a parse error that names only the caller’s own statement', async () => {
+      const res = await querySql({ sql: 'SELECT id FROM events WHERE id = now()' }, {}, ownerCtx);
+      expect(res.error).toContain('operator does not exist');
+      expect(res.error_code).toBe('VALIDATION');
+    });
+
+    it('filters a join-scoped config table to the organization before any caller predicate', async () => {
+      // A clean result, not merely a clean message: the caller predicate never
+      // sees another organization's version row, so it cannot raise on one.
+      const res = await querySql(
+        {
+          sql: `SELECT id FROM automation_versions
+            WHERE (CASE WHEN prompt = '${OTHER_ORG_PROMPT_MARKER}' THEN 1 / (id - id) ELSE 0 END) = 0`,
+        },
+        {},
+        ownerCtx
+      );
+      expect(res.error).toBeUndefined();
+      expect(res.rows.length).toBeGreaterThan(0);
+    });
   });
 });

@@ -17,6 +17,7 @@
 
 import { Dialect, ast, parse as parseSql } from '@polyglot-sql/sdk';
 import { type DbClient, pgTextArray } from '../db/client';
+import { readQueryFailureMessage } from './bounded-read';
 import { ToolUserError } from './errors';
 import logger from './logger';
 import { useLinkedOrgScope } from './linked-org-ids';
@@ -663,11 +664,23 @@ export function buildScopedQuery(
   const connectionRowVisibility = (alias: string): string =>
     ` ${compileConnectionRowVisibility(scope, alias)}`;
 
-  // Build CTEs. Every scope CTE is NOT MATERIALIZED: Postgres materializes a
-  // CTE the query references more than once, so a caller self-join would copy
-  // every visible row of the organization before the caller's own predicates
-  // (an `id IN (...)`, a bounded time range) could reach an index. Inlined, the
-  // scope predicates still apply to each reference.
+  // Build CTEs. A scope CTE over a large table is NOT MATERIALIZED: Postgres
+  // materializes a CTE the query references more than once, so a caller
+  // self-join would copy every visible row of the organization before the
+  // caller's own predicates (an `id IN (...)`, a bounded time range) could
+  // reach an index. Inlined, the scope predicates still apply to each reference.
+  //
+  // Inlining has a cost: the planner orders a relation's quals by cost, so a
+  // cheap caller predicate can run on a row before the scope predicate removes
+  // it, and a predicate that raises then reveals something about that row.
+  // Where the scope predicate sits on a JOINED relation (or is an OR that a
+  // one-operator caller predicate outranks), it cannot even run first. The
+  // small config tables with that shape are MATERIALIZED instead, so the scope
+  // is applied before any caller predicate sees a row: `automation_versions`
+  // (org on `automations`), `user` (org on `member`), `entity_relationship_types`
+  // (public-org arm on `organization`), `feeds` (visibility on `connections`)
+  // and `connections` (OR'd visibility). Caller-facing database errors are
+  // reduced to their SQLSTATE separately (`readQueryFailureMessage`).
   const ctes: string[] = [];
 
   // When safeColumns is provided, emit explicit column lists instead of SELECT *
@@ -795,7 +808,7 @@ export function buildScopedQuery(
       // it). The per-user predicate is the security boundary.
       // security-allowed: see block comment above the for-loop
       ctes.push(
-        `"${safeName}" AS NOT MATERIALIZED (SELECT ${sel(table, 'cn')} FROM public.connections cn WHERE cn.organization_id = ${orgP}` +
+        `"${safeName}" AS MATERIALIZED (SELECT ${sel(table, 'cn')} FROM public.connections cn WHERE cn.organization_id = ${orgP}` +
           connectionRowVisibility('cn') +
           ')'
       );
@@ -840,7 +853,7 @@ export function buildScopedQuery(
       // or in another org yields no row, so this stays fail-closed.
       // security-allowed: see block comment above the for-loop
       ctes.push(
-        `"${safeName}" AS NOT MATERIALIZED (SELECT ${sel(table, 'wv')} FROM public.automation_versions wv ` +
+        `"${safeName}" AS MATERIALIZED (SELECT ${sel(table, 'wv')} FROM public.automation_versions wv ` +
           'JOIN public.automations w ON w.id = wv.automation_id ' +
           `WHERE w.organization_id = ${orgP})`
       );
@@ -854,7 +867,7 @@ export function buildScopedQuery(
       );
     } else if (table === 'user') {
       ctes.push(
-        `"${safeName}" AS NOT MATERIALIZED (SELECT ${sel(table, 'u')} FROM public."user" u ` +
+        `"${safeName}" AS MATERIALIZED (SELECT ${sel(table, 'u')} FROM public."user" u ` +
           `JOIN public.member m ON m."userId" = u.id ` +
           `WHERE m."organizationId" = ${orgP})`
       );
@@ -904,7 +917,7 @@ export function buildScopedQuery(
       // principal's own), with no soft-delete coupling to the connection.
       // security-allowed: see block comment above the for-loop
       ctes.push(
-        `"${safeName}" AS NOT MATERIALIZED (SELECT ${sel(table, 'fd')} FROM public.feeds fd ` +
+        `"${safeName}" AS MATERIALIZED (SELECT ${sel(table, 'fd')} FROM public.feeds fd ` +
           `WHERE fd.organization_id = ${orgP} ` +
           // security-allowed: see block comment above the for-loop
           `AND EXISTS (SELECT 1 FROM public.connections fc ` +
@@ -959,7 +972,7 @@ export function buildScopedQuery(
     } else if (table === 'entity_relationship_types') {
       // security-allowed: see block comment above the for-loop
       ctes.push(
-        `"${safeName}" AS NOT MATERIALIZED (SELECT ${sel(table, 'rt')} FROM public.entity_relationship_types rt ` +
+        `"${safeName}" AS MATERIALIZED (SELECT ${sel(table, 'rt')} FROM public.entity_relationship_types rt ` +
           'LEFT JOIN public.organization o ON o.id = rt.organization_id ' +
           `WHERE rt.deleted_at IS NULL AND (rt.organization_id = ${orgP} OR o.visibility = 'public'))`
       );
@@ -1230,7 +1243,7 @@ export async function executeDataSources(
         results[name] = Array.isArray(rows) ? rows.slice(0, rowLimit) : [];
       } catch (err) {
 		if (options?.throwOnError) {
-			throw new Error(`Data source '${name}' failed: ${getErrorMessage(err)}`);
+			throw new Error(`Data source '${name}' failed: ${readQueryFailureMessage(err)}`);
 		}
         logger.warn(
           { error: getErrorMessage(err), dataSource: name },
