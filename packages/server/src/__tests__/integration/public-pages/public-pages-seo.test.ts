@@ -8,14 +8,21 @@
  *   stay listed) and dates each workspace by its newest type or entity.
  * - On an org subdomain (market.lobu.ai) rendered links drop the owner
  *   segment, which the host already implies, so following them takes no 301.
+ * - An anonymous render spends the visitor's per-IP public-read budget, so a
+ *   crawler cannot fan out unmetered source reads through page loads.
  */
 
-import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { app } from '../../../index';
 import { buildPublicPageModel, buildSitemapEntries } from '../../../public-pages';
 import * as resolvePathModule from '../../../tools/resolve_path';
 import { ToolUserError } from '../../../utils/errors';
 import { getEnvFromProcess } from '../../../utils/env';
+import {
+  getRateLimiter,
+  RateLimitPresets,
+  resetRateLimiterForTests,
+} from '../../../utils/rate-limiter';
 import { initWorkspaceProvider } from '../../../workspace';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import {
@@ -143,6 +150,50 @@ describe('public pages > crawler-facing responses', () => {
         expect(response.status).toBe(503);
         expect(response.headers.get('cache-control')).toBe('no-store');
       });
+    });
+  });
+
+  describe('anonymous render budget', () => {
+    const previousTrustedProxy = process.env.TRUSTED_PROXY;
+    const ipLimit = RateLimitPresets.PUBLIC_READ_PER_IP_MINUTE.limit;
+    const render = (ip: string) =>
+      app.request(liveEntitySlug, { headers: { accept: 'text/html', 'X-Forwarded-For': ip } }, env);
+    /** Spend `n` of the IP's public reads without a request. */
+    const spend = (ip: string, n: number) => {
+      for (let i = 0; i < n; i++) {
+        getRateLimiter().checkLimit(`rate:public-read:ip:${ip}`, RateLimitPresets.PUBLIC_READ_PER_IP_MINUTE);
+      }
+    };
+
+    beforeAll(() => {
+      process.env.TRUSTED_PROXY = '1';
+    });
+    afterAll(() => {
+      if (previousTrustedProxy === undefined) delete process.env.TRUSTED_PROXY;
+      else process.env.TRUSTED_PROXY = previousTrustedProxy;
+      resetRateLimiterForTests();
+    });
+    // The window is clock-aligned; a frozen clock keeps the test inside one.
+    beforeEach(() => {
+      resetRateLimiterForTests();
+      vi.useFakeTimers({ toFake: ['Date'], now: Date.now() });
+    });
+    afterEach(() => vi.useRealTimers());
+
+    it('each render spends one public read, and past the limit the page answers 429 no-store', async () => {
+      expect((await render('203.0.113.20')).status).toBe(200);
+      spend('203.0.113.20', ipLimit - 2);
+      expect((await render('203.0.113.20')).status).toBe(200);
+
+      const refused = await render('203.0.113.20');
+      expect(refused.status).toBe(429);
+      expect(refused.headers.get('cache-control')).toBe('no-store');
+      const retryAfter = Number(refused.headers.get('retry-after'));
+      expect(retryAfter).toBeGreaterThan(0);
+      expect(retryAfter).toBeLessThanOrEqual(60);
+
+      // The budget is per visitor: another address still renders.
+      expect((await render('203.0.113.21')).status).toBe(200);
     });
   });
 
