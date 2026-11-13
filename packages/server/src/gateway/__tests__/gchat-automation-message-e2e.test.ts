@@ -348,7 +348,7 @@ describe("Google Chat event -> chat Automation -> Google Chat reply", () => {
     });
     expect(created).toHaveLength(1);
     expect(created[0]?.parent).toBe(SPACE);
-    expect(String(created[0]?.requestBody?.text)).toContain("Ask an admin of this workspace to invite you");
+    expect(String(created[0]?.requestBody?.text)).toMatch(/direct/i);
     const [run] = await sql<{ action_input: Record<string, any> }[]>`
       SELECT action_input FROM runs WHERE run_type = 'chat_message'
     `;

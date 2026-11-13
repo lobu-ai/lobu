@@ -295,7 +295,8 @@ async function mintSourceClaim(targetOrgId: string, targetAgentId: string, userI
 }
 
 /** Redeem through the real source command path, using its connection-scoped SDK thread. */
-async function linkSourceGroup(address: { prefix: string; mentionsMe: boolean; ownMentionJids?: string[] } = { prefix: "", mentionsMe: true }) {
+async function linkSourceGroup(address: { prefix: string; mentionsMe: boolean; ownMentionJids?: string[] } = { prefix: "", mentionsMe: true },
+  options: { failFirstSend?: boolean } = {}) {
   const targetOrg = await createTestOrganization({ name: "Linked source-chat workspace" });
   await addUserToOrganization(ownerId, targetOrg.id, "admin");
   const targetAgent = await createTestAgent({ organizationId: targetOrg.id, ownerUserId: ownerId });
@@ -309,13 +310,19 @@ async function linkSourceGroup(address: { prefix: string; mentionsMe: boolean; o
     body: `${address.prefix}${command}`, mentions_me: address.mentionsMe,
     own_mention_jids: address.ownMentionJids ?? [], timestamp: sentAt,
   });
+  if (options.failFirstSend) failNext = "send";
   await deliver(id, id, new Date(sentAt * 1000));
   await drain();
   expect(enqueued).toHaveLength(0);
+  // A fresh manager retries redemption using only the durable claim receipt.
+  expect(sends.length).toBeGreaterThan(options.failFirstSend ? 1 : 0);
+  expect(new Set(sends.map((send) => send.idempotencyKey)).size).toBe(1);
+  expect(new Set(sends.map((send) => String(send.input.text))).size).toBe(1);
+  expect(String(sends[0]?.input.text)).toContain(targetAgent.agentId);
   const [binding] = await sql`SELECT id, triggers FROM automations WHERE organization_id = ${targetOrg.id}`;
   expect(binding?.triggers[0]?.match?.channel_id).toBe(GROUP_JID);
   sends = [];
-  return { targetOrgId: targetOrg.id, targetAgentId: targetAgent.agentId, bindingId: Number(binding.id), sentAt };
+  return { targetOrgId: targetOrg.id, targetAgentId: targetAgent.agentId, bindingId: Number(binding.id), sentAt, command };
 }
 
 describe("WhatsApp Web source chat", () => {
@@ -377,6 +384,8 @@ describe("WhatsApp Web source chat", () => {
       if (failNext === "send") {
         // The device may have sent it; only the acknowledgment was lost.
         failNext = null;
+        // Lose process-local connection/command state before queue retry.
+        manager = buildManager();
         throw new Error("synthetic send timeout");
       }
       return { action: "execute", status: "completed", output: { message_id: `SENT${sends.length}` } } as any;
@@ -405,6 +414,34 @@ describe("WhatsApp Web source chat", () => {
     await linkSourceGroup({ prefix, mentionsMe, ownMentionJids });
   }, 60_000);
 
+
+  it("reconciles a committed link after a failed confirmation but rejects another chat", async () => {
+    await insertAutomation("owner-reply", replyTo());
+    const linked = await linkSourceGroup({ prefix: "", mentionsMe: true }, { failFirstSend: true });
+    const [{ updated_at: updatedAt }] = await sql`SELECT updated_at FROM automations WHERE id = ${linked.bindingId}`;
+    const [{ payload, expires_at: expiresAt }] = await sql`SELECT payload, expires_at FROM oauth_states
+      WHERE scope = 'slack-preview-claim' AND payload->>'agentId' = ${linked.targetAgentId}`;
+    expect(payload.consumed).toMatchObject({ platform: "whatsapp.web", connectionId,
+      channelId: GROUP_JID, agentId: linked.targetAgentId });
+    for (const [index, chatJid] of [GROUP_JID, OTHER_GROUP_JID].entries()) {
+      const id = `SYNTHREPLAY${index}`;
+      deviceMessages.push({ id, chat_jid: chatJid, sender_jid: GROUP_SENDER,
+        body: linked.command, timestamp: linked.sentAt + index + 1 });
+      await deliver(id, id, new Date((linked.sentAt + index + 1) * 1000));
+      await drain();
+      expect(sends).toHaveLength(1);
+      if (chatJid === GROUP_JID) expect(String(sends[0]?.input.text)).toContain(linked.targetAgentId);
+      else expect(String(sends[0]?.input.text)).not.toContain(linked.targetAgentId);
+      sends = [];
+    }
+    const [binding] = await sql`SELECT updated_at, triggers FROM automations WHERE id = ${linked.bindingId}`;
+    expect(binding.updated_at).toEqual(updatedAt);
+    expect(binding.triggers[0].match.channel_id).toBe(GROUP_JID);
+    const [claim] = await sql`SELECT expires_at FROM oauth_states WHERE scope = 'slack-preview-claim'
+      AND payload->>'agentId' = ${linked.targetAgentId}`;
+    expect(claim.expires_at).toEqual(expiresAt);
+    expect(enqueued).toHaveLength(0);
+  }, 60_000);
 
   it("accepts a bare link command even when the installation only replies to mentions", async () => {
     await insertAutomation("mentions-only", replyTo({ mention_only: true }));
@@ -435,7 +472,7 @@ describe("WhatsApp Web source chat", () => {
       if (gate === "missing time") expect(await dispositions()).toEqual(["missing_source_time"]);
     }, 60_000);
 
-  it("routes an explicitly linked source group across workspaces before the owner wildcard", async () => {
+  it.each(["group request", "/help\nline2\nline3"])("routes a linked source group across workspaces when the command dispatcher declines: %j", async (body) => {
     await insertAutomation("owner-reply", replyTo());
     const { targetOrgId, targetAgentId, sentAt } = await linkSourceGroup();
     await addUserToOrganization(memberIds[1], targetOrgId, "member");
@@ -446,7 +483,7 @@ describe("WhatsApp Web source chat", () => {
       WHERE organization_id = ${targetOrgId} AND namespace = 'whatsapp_user_jid'`;
 
     deviceMessages.push(
-      { id: "SYNTHLINK2", chat_jid: GROUP_JID, sender_jid: GROUP_SENDER, body: "group request", timestamp: sentAt + 1 },
+      { id: "SYNTHLINK2", chat_jid: GROUP_JID, sender_jid: GROUP_SENDER, body, timestamp: sentAt + 1 },
       { id: "SYNTHLINK3", chat_jid: OTHER_GROUP_JID, sender_jid: GROUP_SENDER, body: "other group", mentions_me: true, timestamp: sentAt + 1 },
       { id: "SYNTHLINK4", chat_jid: DM_JID, body: "direct request", timestamp: sentAt + 1 },
     );

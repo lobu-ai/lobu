@@ -52,7 +52,10 @@ import { CHAT_SOURCE_INGRESS_QUEUE, type ChatSourceIngressJob } from "../../runs
 import { sourceFeedSubscriptions } from "../../runs/source-feed-subscriptions.js";
 import type { QueueJob } from "../infrastructure/queue/types.js";
 import type { ChatInstanceManager } from "./chat-instance-manager.js";
-import { isEarlyDispatchableChatCommand } from "./message-handler-bridge.js";
+import {
+  isEarlyDispatchableChatCommand,
+  postChatCommandReplies,
+} from "./message-handler-bridge.js";
 import { getResponseStrategy } from "./platform-strategies/index.js";
 import { getPlatformDescriptor } from "./platforms/index.js";
 import { resolveChatTarget } from "./platforms/shared.js";
@@ -187,9 +190,10 @@ export async function handleChatSourceIngress(
     if (!signal.occurred_at) return "missing_source_time";
     // Commands belong to the installation, not an agent trigger. They still
     // require a current authorized subscriber and the same replay cutoff.
-    const ageCheckedIds = isCommand
-      ? candidates
-      : [...new Set([...eligible, ...plan.replyTargets].map((target) => target.automationId))];
+    const ageCheckedIds = [...new Set([
+      ...(isCommand ? candidates : []),
+      ...[...eligible, ...plan.replyTargets].map((target) => target.automationId),
+    ])];
     const current = new Set(
       (await sql<{ id: number | string }>`
         SELECT id FROM automations
@@ -216,13 +220,19 @@ export async function handleChatSourceIngress(
           },
         })
       : thread;
-    if (isCommand && current.size > 0 && await instance.messageBridge.tryHandleEarlyCommand(
-      keyedThread, message, {
+    if (isCommand && candidates.some((id) => current.has(id))) {
+      const replies = await instance.messageBridge.runEarlyCommand(message, {
         channelId: parsed.channelId,
         conversationId: thread.id,
         isGroup: thread.isDM !== true,
+      });
+      if (replies) {
+        // /link reconciles an already-consumed claim in the claim transaction.
+        // A failed post must retry; there is no separate command checkpoint.
+        await postChatCommandReplies(keyedThread, replies);
+        return "admitted";
       }
-    )) return "admitted";
+    }
     if (eligible.length === 0) {
       return current.size === 0 ? "older_than_reply_automation"
         : replyTargets.length === 0 ? "no_matching_reply_trigger" : "group_not_addressed";

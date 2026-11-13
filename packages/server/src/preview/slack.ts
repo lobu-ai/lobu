@@ -98,6 +98,15 @@ interface ClaimPayload {
 	createdBy: string | null;
 	allowedSurfaces: SurfaceType[];
 	createdAt: number;
+	/** Receipt shares the binding transaction and the claim's original expiry. */
+	consumed?: {
+		platform: string;
+		connectionId: number;
+		channelId: string;
+		teamId: string | null;
+		surfaceType: SurfaceType;
+		agentId: string;
+	};
 }
 
 function codeHash(code: string): string {
@@ -320,7 +329,8 @@ async function upsertBinding(
 
 /**
  * Consume a `/lobu link` (a.k.a. `/link`) code and bind the originating chat to
- * the agent the code was minted for. One-time use; last link for a surface wins
+ * the agent the code was minted for. One binding per code; same-chat retries
+ * confirm that binding while it remains current. Last link for a surface wins
  * (re-linking just rebinds — there's no separate unlink step). Called from the
  * `link` chat command, so it never touches HTTP.
  *
@@ -352,6 +362,7 @@ export async function consumePreviewClaim(args: {
 		connectionOrganizationId,
 	} = args;
 	const sql = getDb();
+	const canonicalChannelId = getPlatformDescriptor(platform)?.canonicalChannelId?.(channelId) ?? channelId;
 
 	const result = await sql.begin(async (tx) => {
 		const claims = await tx<{ payload: ClaimPayload }>`
@@ -363,9 +374,17 @@ export async function consumePreviewClaim(args: {
 		`;
 		const claim = claims[0]?.payload;
 		if (!claim) return { status: "not_found" as const };
+		const consumed = claim.consumed;
+		if (consumed && (consumed.platform !== platform ||
+			consumed.channelId !== canonicalChannelId || consumed.teamId !== (teamId ?? null) ||
+			consumed.surfaceType !== surfaceType || consumed.agentId !== claim.agentId)) {
+			return { status: "not_found" as const };
+		}
+		const connectionMismatch = { status: consumed ? "not_found" as const : "connection_mismatch" as const };
 		let bindingConnectionId = claim.connectionId;
+		let bindingConnectionOrg = claim.connectionOrganizationId ?? claim.organizationId;
 		if (bindingConnectionId != null) {
-			if (!connectionId) return { status: "connection_mismatch" as const };
+			if (!connectionId) return connectionMismatch;
 			const claimedConnectionOrg = claim.connectionOrganizationId ?? claim.organizationId;
 			const matched = await tx`
 				SELECT 1 FROM connections
@@ -384,16 +403,16 @@ export async function consumePreviewClaim(args: {
 				(connectionOrganizationId && connectionOrganizationId !== claimedConnectionOrg) ||
 				(claimedConnectionOrg !== claim.organizationId &&
 					!(await canLinkChatOrganizations(tx, claim.createdBy, claim.organizationId, claimedConnectionOrg)))
-			) return { status: "connection_mismatch" as const };
+			) return connectionMismatch;
 		} else {
 			// A hosted claim may cross organizations only through the deliberately
 			// shared preview connection for the workspace handling the command. A normal
 			// managed/BYO installation must belong to the claimed agent's org: a hosted
 			// code has no grant for a specific foreign installation. That requires an
 			// explicitly connection-scoped code minted with authority over both orgs.
-			if (!connectionId) return { status: "connection_mismatch" as const };
-			const matched = await tx<{ id: number }>`
-				SELECT id FROM connections
+			if (!connectionId) return connectionMismatch;
+			const matched = await tx<{ id: number; organization_id: string }>`
+				SELECT id, organization_id FROM connections
 				WHERE slug = ${runtimeConnectionIdToSlug(connectionId)}
 					AND connector_key = ${platform}
 					AND credential_mode IS NOT NULL
@@ -413,11 +432,24 @@ export async function consumePreviewClaim(args: {
 				LIMIT 2
 			`;
 			if (matched.length !== 1)
-				return { status: "connection_mismatch" as const };
+				return connectionMismatch;
 			bindingConnectionId = matched[0].id;
+			bindingConnectionOrg = matched[0].organization_id;
 		}
 		if (!claim.allowedSurfaces.includes(surfaceType)) {
 			return { status: "surface_not_allowed" as const, surfaceType };
+		}
+		if (consumed) {
+			if (consumed.connectionId !== bindingConnectionId) return { status: "not_found" as const };
+			// Read the current routing projection, including current cross-org authority.
+			// Never recreate an archived link or overwrite a newer destination on replay.
+			const current = await new AutomationSubscriptionService().resolveForConnection(
+				connectionId!, canonicalChannelId, bindingConnectionOrg,
+				{ teamId, sql: tx, chatLinkOnly: true, crossOrganization: claim.connectionId == null },
+			);
+			return current?.agentId === consumed.agentId && current.organizationId === claim.organizationId
+				? { status: "bound" as const, agentId: consumed.agentId, organizationId: claim.organizationId }
+				: { status: "not_found" as const };
 		}
 		const linked = await upsertBinding(
 			tx,
@@ -432,7 +464,11 @@ export async function consumePreviewClaim(args: {
 		);
 		if (!linked) return { status: "link_authority_revoked" as const };
 		await tx`
-			DELETE FROM oauth_states
+			UPDATE oauth_states
+			SET payload = ${tx.json({ ...claim, consumed: {
+				platform, connectionId: bindingConnectionId, channelId: canonicalChannelId,
+				teamId: teamId ?? null, surfaceType, agentId: claim.agentId,
+			} })}
 			WHERE id = ${codeHash(code)} AND scope = ${CLAIM_SCOPE}
 		`;
 

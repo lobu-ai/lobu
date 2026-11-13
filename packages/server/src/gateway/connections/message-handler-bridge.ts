@@ -8,6 +8,7 @@ import { randomUUID } from "node:crypto";
 import type { LegacyAutomationExecutionConfig } from "@lobu/core/contracts/tools/manage-automations";
 
 import {
+  type CommandContext,
   createLogger,
   createRootSpan,
   generateTraceId,
@@ -234,6 +235,23 @@ export function isEarlyDispatchableChatCommand(text: string): boolean {
   return ["help", "status", "link"].includes(command ?? "");
 }
 
+/** One reply an app command produced, kept so a retry can repeat it verbatim. */
+export type ChatCommandReply = {
+  text: string;
+  options?: Parameters<CommandContext["reply"]>[1];
+};
+
+/** Post an app command's replies in order, through the chat reply rendering. */
+export async function postChatCommandReplies(
+  thread: { post: (content: unknown) => Promise<unknown> },
+  replies: ChatCommandReply[]
+): Promise<void> {
+  const reply = createChatReply(async (content) => {
+    await thread.post(content);
+  });
+  for (const { text, options } of replies) await reply(text, options);
+}
+
 type MessageSource = "mention" | "dm" | "subscribed" | "interaction";
 
 type MessageRouting = {
@@ -403,38 +421,33 @@ export class MessageHandlerBridge {
     return stripped;
   }
 
-  /** App commands need no agent activation, but retain connection admission. */
-  async tryHandleEarlyCommand(
-    thread: { post: (content: unknown) => Promise<unknown> },
+  /**
+   * App commands need no agent activation, but retain connection admission.
+   * Runs the command and returns its replies without posting them, or null
+   * when no app command ran. Keeping delivery outside the registry lets send
+   * failures reach the source queue; commands must reconcile committed effects
+   * on retry (`/link` does so in its claim transaction).
+   */
+  async runEarlyCommand(
     message: any,
     routing: { channelId: string; conversationId: string; isGroup: boolean; teamId?: string }
-  ): Promise<boolean> {
+  ): Promise<ChatCommandReply[] | null> {
     const text = this.stripBotMention(typeof message.text === "string" ? message.text : "");
     const userId = message.author?.userId ?? "unknown";
     if (!this.commandDispatcher || !isEarlyDispatchableChatCommand(text) ||
-        !this.isInboundAllowed(userId, routing.isGroup)) return false;
-    // The dispatcher can render handler errors as a second reply. A failed
-    // post may already have reached the chat: prevent that fallback and let
-    // source ingress retry the original post with its durable send key.
-    let postFailure: { error: unknown } | undefined;
+        !this.isInboundAllowed(userId, routing.isGroup)) return null;
+    const replies: ChatCommandReply[] = [];
     const handled = await this.commandDispatcher.tryHandleSlashText(text, {
       platform: this.connection.platform,
       userId,
       ...routing,
       connectionId: this.connection.id,
       organizationId: this.connection.organizationId,
-      reply: createChatReply(async (content) => {
-        if (postFailure) throw postFailure.error;
-        try {
-          await thread.post(content);
-        } catch (error) {
-          postFailure = { error };
-          throw error;
-        }
-      }),
+      reply: async (replyText, options) => {
+        replies.push(options ? { text: replyText, options } : { text: replyText });
+      },
     });
-    if (postFailure) throw postFailure.error;
-    return handled;
+    return handled ? replies : null;
   }
 
   private isInboundAllowed(userId: string, isGroup: boolean): boolean {
@@ -661,9 +674,13 @@ export class MessageHandlerBridge {
       // early path to commands whose complete implementation lives in the
       // dispatcher: /new and /clear have real state handling later in the
       // resolved path and must not be falsely acknowledged here.
-      if (await this.tryHandleEarlyCommand(thread, message, {
+      const commandReplies = await this.runEarlyCommand(message, {
         channelId, conversationId, teamId, isGroup,
-      })) return;
+      });
+      if (commandReplies) {
+        await postChatCommandReplies(thread, commandReplies);
+        return;
+      }
 
       // Linked channel but trigger filters rejected this message (e.g.
       // mention_only on a non-mention). The planner is the authority for
