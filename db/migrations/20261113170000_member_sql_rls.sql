@@ -21,8 +21,10 @@
 --     role to its workspace. A restrictive policy is ANDed with the planner's
 --     quals, so the events scope stays an index condition.
 -- The events scope is the write-time org bridge (`linked_org_ids`), the
--- indexable form. Every insert writes it; an event from before its backfill
--- (scripts/backfill-linked-org-ids.ts) reaches only its own workspace here.
+-- indexable form. Every insert writes it. Rows from before it carry NULL; the
+-- step below fills the bridge on each such row that reaches another
+-- workspace, so the policy admits every event the CTE bridge does. NULL rows
+-- with no other workspace stay NULL: `organization_id` already admits them.
 --
 -- Creating a role needs CREATEROLE. Where the migration role lacks it, a
 -- database administrator runs this once before deploying:
@@ -30,6 +32,26 @@
 --   GRANT lobu_member_sql TO <app role> WITH INHERIT FALSE, SET TRUE;
 
 SET LOCAL lock_timeout = '5s';
+
+-- One sequential scan of the NULL rows; it takes row locks only, so traffic
+-- continues. The expression is the insert path's (scripts/backfill-linked-org-ids.ts).
+SET LOCAL statement_timeout = '15min';
+UPDATE public.events e
+SET linked_org_ids = (
+  SELECT COALESCE(array_agg(DISTINCT x.o), '{}'::text[])
+  FROM (
+    SELECT ent.organization_id AS o FROM public.entities ent WHERE ent.id = ANY(e.entity_ids)
+    UNION ALL
+    SELECT c.organization_id AS o FROM public.connections c WHERE c.id = e.connection_id
+  ) x
+  WHERE x.o IS NOT NULL AND (x.o <> e.organization_id OR e.organization_id IS NULL)
+)
+WHERE e.linked_org_ids IS NULL
+  AND (
+    EXISTS (SELECT 1 FROM public.entities ent WHERE ent.id = ANY(e.entity_ids) AND ent.organization_id <> e.organization_id)
+    OR EXISTS (SELECT 1 FROM public.connections c WHERE c.id = e.connection_id AND c.organization_id <> e.organization_id)
+  );
+SET LOCAL statement_timeout TO DEFAULT;
 
 DO $role$
 BEGIN
