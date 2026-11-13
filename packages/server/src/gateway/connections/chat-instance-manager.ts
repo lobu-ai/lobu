@@ -21,6 +21,7 @@ import {
   resolveConnectionWebhookConfig,
 } from "../../connect/webhook-registration.js";
 import { getDb } from "../../db/client.js";
+import { unreadNotificationFilter } from "../../notifications/service.js";
 import { orgContext, tryGetOrgId } from "../../lobu/stores/org-context.js";
 import { slugToRuntimeConnectionId } from "../../lobu/stores/connections-projection.js";
 import { CommandDispatcher } from "../commands/command-dispatcher.js";
@@ -238,6 +239,7 @@ export async function resolveSlackHomeUserInbox(
       slackUserId,
     );
     if (!lobuUserId) return null;
+    const unread = unreadNotificationFilter(db, lobuUserId);
 
     const [itemRows, unreadRows, orgRows] = await Promise.all([
       db`
@@ -253,8 +255,12 @@ export async function resolveSlackHomeUserInbox(
       `,
       db`
         SELECT count(*)::int AS c
-        FROM notification_targets
-        WHERE user_id = ${lobuUserId} AND read_at IS NULL
+        FROM notification_targets t
+        JOIN events e ON e.id = t.event_id
+        ${unread.join}
+        WHERE t.user_id = ${lobuUserId}
+          AND ${unread.visible}
+          AND ${unread.unread}
       `,
       // The user's primary org slug, for the setup deep link to /{slug} (home).
       db`
