@@ -1,4 +1,5 @@
 import { classifyToolError, getErrorMessage, type ToolErrorCode } from '@lobu/core';
+import type { AuthzScope } from '../authz/scope';
 import type { DbClient, DbQuery } from '../db/client';
 import { ToolUserError, toolErrorHttpStatus } from './errors';
 import { isQueryCanceled } from './pg-errors';
@@ -37,6 +38,13 @@ export interface BoundedReadOptions {
   signal?: AbortSignal;
   /** Per-statement cap Postgres enforces, whatever the caller does. */
   statementTimeoutMs: number;
+  /**
+   * The workspace and principal member SQL is scoped to: the scope its CTEs
+   * were built from (`buildScopedQuery`). The transaction then reads as the
+   * `lobu_member_sql` role, whose row-level security policies apply the same
+   * tenancy before any caller predicate can see a row.
+   */
+  fence?: AuthzScope;
 }
 
 /**
@@ -62,6 +70,16 @@ export function boundedRead<T>(
   const transaction = sql.begin('read only', async (tx) => {
     options.signal?.throwIfAborted();
     await tx.unsafe(`SET LOCAL statement_timeout = ${timeoutMs}`);
+    if (options.fence) {
+      // Transaction-local, so the settings and the role end with this
+      // transaction on whichever pooled connection ran it.
+      await tx.unsafe(
+        `SELECT set_config('lobu.member_sql_org', $1, true),
+          set_config('lobu.member_sql_principal', $2, true),
+          set_config('role', 'lobu_member_sql', true)`,
+        [options.fence.organizationId, options.fence.principal ?? '']
+      );
+    }
     return run(tx);
   });
   return raceAbort(transaction, options.signal);
@@ -127,6 +145,14 @@ export function classifyReadQueryFailure(error: unknown): { code: ToolErrorCode;
   // read_only_sql_transaction: the statement tried to write.
   if (pgCode === '25006') {
     return { code: 'VALIDATION', message: 'Only read-only queries are allowed.' };
+  }
+  // insufficient_privilege: under the fence, the statement reached a relation
+  // or function outside the workspace tables (a sequence write, a system view).
+  if (pgCode === '42501') {
+    return {
+      code: 'VALIDATION',
+      message: 'Only read-only queries over the workspace tables are allowed; the query used a relation or function outside them.',
+    };
   }
   const rawCode = (error as { code?: unknown } | null)?.code;
   return {

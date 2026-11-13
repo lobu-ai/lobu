@@ -225,7 +225,7 @@ describe('entity list segment filter', () => {
       expect(status).toBe(400);
       const body = JSON.parse(text) as { error?: string; code?: string };
       expect(body.code).toBe('VALIDATION');
-      expect(body.error).toContain('Only read-only queries are allowed');
+      expect(body.error).toContain('Only read-only queries over the workspace tables are allowed');
       const [sequence] = await sql`SELECT last_value, is_called FROM entity_list_segment_probe`;
       expect(Number(sequence.last_value)).toBe(41);
       expect(sequence.is_called).toBe(false);
@@ -237,12 +237,12 @@ describe('entity list segment filter', () => {
   it('stops the segment query on the database when the caller leaves', async () => {
     const sql = getTestDb();
     // pg_stat_activity keeps only the first 1 KB of a statement, so match the
-    // listing statements' openings rather than the predicate deep inside them.
+    // scoped segment statement's opening rather than the predicate inside it.
     const running = async () =>
       (await sql`
         SELECT count(*)::int AS n FROM pg_stat_activity
         WHERE pid <> pg_backend_pid() AND datname = current_database() AND state = 'active'
-          AND (query LIKE 'SELECT e2.id FROM entities e2%' OR query LIKE 'SELECT CAST(COUNT(*) AS INTEGER) as total_count%')
+          AND query LIKE 'WITH "entities" AS%'
       `)[0].n as number;
     const until = async (done: () => Promise<boolean>, ms: number) => {
       const deadline = Date.now() + ms;

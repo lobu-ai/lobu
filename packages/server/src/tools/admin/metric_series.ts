@@ -168,7 +168,7 @@ async function metricSeriesImpl(
 
   // Members may chart their org's operational data; the auth/identity tables
   // (oauth_tokens, oauth_clients, user) stay admin-only.
-  const { sql: scopedSql, params } = validateAndScopeQuery(args.sql, orgId, {
+  const { sql: scopedSql, params, scope } = validateAndScopeQuery(args.sql, orgId, {
     // Emit the safe column allowlist (not SELECT *) so a member charting e.g.
     // `connections` can't pull credential columns the allowlist withholds.
     safeColumns: SAFE_COLUMN_DEFS,
@@ -193,6 +193,7 @@ async function metricSeriesImpl(
     rows = (await boundedQuery(db, scopedSql, params as unknown[], {
       signal: ctx.abortSignal,
       statementTimeoutMs: QUERY_SQL_STATEMENT_TIMEOUT_MS,
+      fence: scope,
     })) as Record<string, unknown>[];
   } catch (err) {
     if (ctx.abortSignal?.aborted) throw err;

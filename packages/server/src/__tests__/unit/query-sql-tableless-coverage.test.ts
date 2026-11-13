@@ -8,7 +8,7 @@ describe("buildScopedQuery tableless parameter coverage", () => {
       entityIds: [42],
     });
 
-    expect(scoped).toEqual({
+    expect({ sql: scoped.sql, params: scoped.params }).toEqual({
       sql: "SELECT 1 AS value",
       params: [],
     });
@@ -24,7 +24,7 @@ describe("buildScopedQuery tableless parameter coverage", () => {
       },
     );
 
-    expect(scoped).toEqual({
+    expect({ sql: scoped.sql, params: scoped.params }).toEqual({
       sql: "SELECT $1::bigint AS first_id, $1::bigint AS second_id",
       params: [42],
     });
@@ -40,7 +40,7 @@ describe("buildScopedQuery tableless parameter coverage", () => {
       },
     );
 
-    expect(scoped).toEqual({
+    expect({ sql: scoped.sql, params: scoped.params }).toEqual({
       sql: "SELECT $2::text AS name, $1 AS organization_id, $3::text AS missing",
       params: ["org_test", "Alpha", null],
     });

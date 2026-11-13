@@ -451,7 +451,7 @@ export function validateAndScopeQuery(
     /** Verified Automation window; supplied by the token resolver, never raw SQL. */
     window?: Pick<DataSourceContext, 'windowStart' | 'windowEnd' | 'entityIds' | 'excludeProducedByAutomationId'>;
   }
-): { sql: string; params: unknown[]; tableRefs: string[] } {
+): { sql: string; params: unknown[]; scope: AuthzScope; tableRefs: string[] } {
   const trimmed = rawSql.trim();
   if (!trimmed) {
     throw new ToolUserError('SQL query is required', 400, 'VALIDATION');
@@ -526,9 +526,15 @@ export function buildScopedQuery(
     /** Exclude $member entities from the entities (and entity-type-slug) CTEs. See validateAndScopeQuery. */
     excludeMemberEntities?: boolean;
   }
-): { sql: string; params: unknown[] } {
+): { sql: string; params: unknown[]; scope: AuthzScope } {
   const params: unknown[] = [];
   let idx = 0;
+  // The CTEs scope to this workspace and principal; the runner's row-level
+  // security fence (`boundedRead` `fence`) takes the same object.
+  const scope: AuthzScope = {
+    organizationId: context.organizationId,
+    principal: context.userId ?? null,
+  };
 
   // Organization scoping is mandatory for table-backed queries, but tableless
   // SELECTs bind it only when the query explicitly references the context value.
@@ -593,7 +599,7 @@ export function buildScopedQuery(
     throw new ToolUserError('Positional parameters ($1, $2, ...) are not allowed in data source queries', 400, 'VALIDATION');
   }
 
-  if (tableRefs.length === 0) return { sql: processedQuery, params };
+  if (tableRefs.length === 0) return { sql: processedQuery, params, scope };
   const orgP = bindOrganization();
 
   // Per-user connection visibility (S0). Applied to EVERY CTE on this seam that
@@ -604,10 +610,6 @@ export function buildScopedQuery(
   // both shapes through the one connection-visibility compiler keyed on an
   // AuthzScope; `principal` null (headless/service) yields org-visible-only,
   // fail-closed for private data.
-  const scope: AuthzScope = {
-    organizationId: context.organizationId,
-    principal: context.userId ?? null,
-  };
 
   // For a table holding events (alias has a `connection_id` col): restrict to
   // org-visible connections or the requesting user's own private ones.
@@ -1011,7 +1013,7 @@ export function buildScopedQuery(
   }
 
   // Combine CTEs with user query
-  if (ctes.length === 0) return { sql: processedQuery, params };
+  if (ctes.length === 0) return { sql: processedQuery, params, scope };
 
   const cteStr = `WITH ${ctes.join(',\n')}`;
   // Strip leading line/block comments before deciding how to merge: a
@@ -1026,7 +1028,7 @@ export function buildScopedQuery(
     ? `${cteStr},\n${body.replace(/^WITH\s+/i, '')}`
     : `${cteStr}\n${body}`;
 
-  return { sql: finalSql, params };
+  return { sql: finalSql, params, scope };
 }
 
 // ============================================
@@ -1212,11 +1214,12 @@ export async function executeDataSources(
         // query selects them. Without it the CTE fell back to SELECT *, leaking
         // every physical column. Entity-type slug CTEs (no allowlist entry) keep
         // their SELECT * — entity data is the template's intended payload.
-        let { sql: scopedQuery, params } = buildScopedQuery(query, tableRefs, context, {
+        const scoped = buildScopedQuery(query, tableRefs, context, {
           safeColumns: SAFE_COLUMN_DEFS,
           excludeWorkspaceAudit: options?.excludeWorkspaceAudit,
           excludeMemberEntities: options?.excludeMemberEntities,
         });
+        let { sql: scopedQuery, params } = scoped;
 
         // Validate param count matches placeholders in scoped query
         const placeholderMatches = scopedQuery.match(/\$(\d+)/g);
@@ -1243,6 +1246,7 @@ export async function executeDataSources(
 
         const rows = await boundedQuery(sql, scopedQuery, params, {
           statementTimeoutMs: QUERY_SQL_STATEMENT_TIMEOUT_MS,
+          fence: scoped.scope,
         });
 
         const rowLimit = MAX_DATA_SOURCE_ROWS + (options?.includeOverflowRow ? 1 : 0);

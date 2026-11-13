@@ -19,7 +19,7 @@ import { VIEW_PATH_MARKER } from "@lobu/core/contracts/tools/view-path";
 import type { AttributeFilter } from "@lobu/core/contracts/tools/collection-selection";
 import { attributeFilterSql, validateAttributeFilters } from "./attribute-filters";
 import { feedLinkedToBusinessEntitySql } from "../authz/channel-about";
-import { authzScopeFromToolContext } from "../authz/scope";
+import { type AuthzScope, authzScopeFromToolContext } from "../authz/scope";
 import type {
 	ValidatedEntityRowInsert,
 	ValidatedEntityRowPatch,
@@ -67,7 +67,7 @@ import {
 	getEntityHooks,
 } from "./entity-hooks";
 import { ToolUserError, toolErrorHttpStatus } from "./errors";
-import { boundedRead, cancellable, classifyReadQueryFailure } from "./bounded-read";
+import { boundedQuery, cancellable, classifyReadQueryFailure } from "./bounded-read";
 import { QUERY_SQL_STATEMENT_TIMEOUT_MS } from "./content-read-bounds";
 import { EntityPolicyDenialError } from "./entity-write-denial-audit";
 import { validateAndScopeQuery } from "./execute-data-sources";
@@ -2446,7 +2446,7 @@ export async function listEntities(
 	// Derived ("view") entity types have no rows in `entities` — their rows come
 	// from `backing_sql`. Return them in the standard list shape so the frontend
 	// renders them with the normal table (no derived-specific UI path).
-	let segmentFilter: { sql: string; params: unknown[] } | null = null;
+	let segmentIds: number[] | null = null;
 	if (filters.entity_type) {
 		// The type search path (the workspace's own type, then a public
 		// catalog's), so a catalog type's schema drives filters and segments.
@@ -2477,10 +2477,15 @@ export async function listEntities(
 					"VALIDATION",
 				);
 			}
-			segmentFilter = compileEntitySegmentFilter(
-				filters.entity_type,
-				etRows[0] ? Number(etRows[0].id) : null,
-				(etRows[0]?.metrics_config ?? null) as EntityMetrics | null,
+			segmentIds = await readEntitySegmentIds(
+				sql,
+				compileEntitySegmentFilter(
+					filters.entity_type,
+					etRows[0] ? Number(etRows[0].id) : null,
+					(etRows[0]?.metrics_config ?? null) as EntityMetrics | null,
+					filters.segment,
+					ctx,
+				),
 				filters.segment,
 				ctx,
 			);
@@ -2498,9 +2503,8 @@ export async function listEntities(
 	}
 
 	const conditions: string[] = ["{e}.deleted_at IS NULL", identityRootSql("{e}")];
-	// The scoped segment statement numbers its own placeholders from $1, so its
-	// params lead the list and every other filter binds after them.
-	const params: unknown[] = segmentFilter ? [...segmentFilter.params] : [];
+	// The segment's member ids bind first, as $1.
+	const params: unknown[] = segmentIds ? [pgBigintArray(segmentIds)] : [];
 	let paramIdx = params.length + 1;
 
 	// Organization filter
@@ -2540,8 +2544,8 @@ export async function listEntities(
 			)
 			// Every predicate must hold on one member, including the authored segment.
 			// Append authored SQL after alias substitution so literal text is untouched.
-			.concat(memberConditions.length || segmentFilter ? [identityMemberExistsSql(`${eAlias}.id`, 'member',
-				[...memberConditions, ...(segmentFilter ? [`member.id IN (${segmentFilter.sql})`] : [])].join(' AND '))] : [])
+			.concat(memberConditions.length || segmentIds ? [identityMemberExistsSql(`${eAlias}.id`, 'member',
+				[...memberConditions, ...(segmentIds ? ['member.id = ANY($1::bigint[])'] : [])].join(' AND '))] : [])
 			.join(" AND ");
 
 	const whereClause = renderWhere("e", "et");
@@ -2660,25 +2664,7 @@ export async function listEntities(
     }
     return { totalCountResult, result, hasMoreIds };
   };
-  // Parsing and scoping do not prevent function side effects or expensive
-  // expressions. Run authored predicates through the member SQL runner.
-  const { totalCountResult, result, hasMoreIds } = segmentFilter
-    ? await boundedRead(sql, { signal: ctx.abortSignal, statementTimeoutMs: QUERY_SQL_STATEMENT_TIMEOUT_MS }, fetchPage)
-        .catch((error: unknown) => {
-          if (ctx.abortSignal?.aborted) throw error;
-          // A SQLSTATE fault (bad cast, read-only violation, timeout) is the
-          // authored predicate's, not the server's; anything else rethrows.
-          // Its text is the query_sql text: a cast error quotes the row value,
-          // and the planner may evaluate the predicate before the scope.
-          const code = classifyToolError({ pgCode: (error as { code?: string } | null)?.code });
-          if (code !== 'VALIDATION' && code !== 'UPSTREAM_TIMEOUT') throw error;
-          throw new ToolUserError(
-            `Segment '${filters.segment}' failed: ${classifyReadQueryFailure(error).message}`,
-            toolErrorHttpStatus(code),
-            code,
-          );
-        })
-    : await fetchPage(sql);
+  const { totalCountResult, result, hasMoreIds } = await fetchPage(sql);
 
   const hasMore = hasMoreIds ?? result.length > limit;
   const entities = hasMore
@@ -2689,6 +2675,40 @@ export async function listEntities(
 
   const readableEntities = await filterEntityReadRows(sql, await attachEntityIdentities(sql, entities), readRestrictions);
   return { entities: readableEntities, hasMore, totalCount, limit, offset, sortBy, sortOrder: normalizedSortOrder };
+}
+
+/**
+ * The ids an entity segment matches. The predicate is org-authored SQL, so it
+ * runs alone through the member SQL runner: read-only, capped, cancelled with
+ * the caller, and fenced to the workspace by row-level security. The list
+ * query that uses the ids is the server's own and runs as the app.
+ */
+async function readEntitySegmentIds(
+	sql: DbClient,
+	segment: { sql: string; params: unknown[]; scope: AuthzScope },
+	segmentName: string,
+	ctx: ToolContext,
+): Promise<number[]> {
+	try {
+		const rows = await boundedQuery<{ id: number | string }>(sql, segment.sql, segment.params, {
+			signal: ctx.abortSignal,
+			statementTimeoutMs: QUERY_SQL_STATEMENT_TIMEOUT_MS,
+			fence: segment.scope,
+		});
+		return rows.map((row) => Number(row.id));
+	} catch (error) {
+		if (ctx.abortSignal?.aborted) throw error;
+		// A SQLSTATE fault (bad cast, read-only violation, timeout) is the
+		// authored predicate's, not the server's; anything else rethrows. Its
+		// text is the query_sql text: a cast error quotes the row value.
+		const code = classifyToolError({ pgCode: (error as { code?: string } | null)?.code });
+		if (code !== "VALIDATION" && code !== "UPSTREAM_TIMEOUT") throw error;
+		throw new ToolUserError(
+			`Segment '${segmentName}' failed: ${classifyReadQueryFailure(error).message}`,
+			toolErrorHttpStatus(code),
+			code,
+		);
+	}
 }
 
 /**
@@ -2705,7 +2725,7 @@ function compileEntitySegmentFilter(
 	metrics: EntityMetrics | null,
 	segmentName: string,
 	ctx: ToolContext,
-): { sql: string; params: unknown[] } {
+): { sql: string; params: unknown[]; scope: AuthzScope } {
 	const segment = metrics?.segments?.[segmentName];
 	if (entityTypeId === null || !segment) {
 		throw new ToolUserError(
@@ -2748,7 +2768,7 @@ function compileEntitySegmentFilter(
 			"VALIDATION",
 		);
 	}
-	return { sql: scoped.sql, params: scoped.params };
+	return { sql: scoped.sql, params: scoped.params, scope: scoped.scope };
 }
 
 /**
