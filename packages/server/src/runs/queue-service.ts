@@ -758,8 +758,11 @@ async function createAutomationRunWithClient(
     const versionSources = versionRows[0]?.version_sources ?? [];
     const sources = versionSources.length > 0 ? versionSources : versionRows[0]?.sources ?? [];
     const normalized = await normalizeAutomationSources(sql, params.organizationId, sources);
-    // Context-only scripts do not consume stored arrivals.
-    if (sources.length === 0 || normalized.some((source) => source.kind === 'event' || source.kind === 'feed')) {
+    // Context-only scripts do not consume stored arrivals, and neither does a
+    // code module without sources: it reads only what it queries. Installed
+    // legacy executors keep their frozen sourceless contract.
+    const legacySourceless = sources.length === 0 && !automationScript;
+    if (legacySourceless || normalized.some((source) => source.kind === 'event' || source.kind === 'feed')) {
       windowEnd = await boundScriptArrivalWindowEnd(sql, params.organizationId, params.windowStart, params.windowEnd);
     }
   }

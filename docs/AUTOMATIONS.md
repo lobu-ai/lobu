@@ -119,6 +119,13 @@ writes cannot advance the arrival mark. SDK effects are at-least-once: use
 skip code that may read additional SDK data. Device pins and model/CLI settings
 are rejected for code-only jobs.
 
+A code-only job has only the sources it declares: create adds no default
+all-events source, and its first window starts at creation rather than a
+lookback. With no sources, or only `context: true` sources, a window consumes no
+stored arrivals and runs once per schedule slot. An event or feed source caps a
+window at about 200 stored arrivals; the remainder becomes due on the next
+scheduler tick, so a backlog drains one window per tick and never back to back.
+
 `client.query(sql, { connection: "<slug>" })` runs the SQL live and read-only
 against that connection's source through its connector, with the same
 connection visibility as `query_sql({ connection })`. It returns at most one
