@@ -89,6 +89,7 @@ import { parseArgs as parseNodeArgs } from "node:util";
 import { provisionMemberAndCoreIdentities } from "../packages/server/src/auth/subject-identities";
 import { resolvableMemberClaimExists } from "../packages/server/src/authz/member-claim-predicate";
 import { getDb } from "../packages/server/src/db/client";
+import { organizationLiveSql } from "../packages/server/src/workspace/deletion-state";
 
 interface DriftRow {
   userId: string;
@@ -166,7 +167,8 @@ async function findDrift(org?: string): Promise<DriftRow[]> {
     FROM "member" m
     JOIN organization o ON o.id = m."organizationId"
     JOIN "user" u ON u.id = m."userId"
-    WHERE NOT ${resolvableMemberClaimExists(sql, sql`m."organizationId"`, sql`m."userId"`)}
+    WHERE ${sql.unsafe(organizationLiveSql("o"))}
+      AND NOT ${resolvableMemberClaimExists(sql, sql`m."organizationId"`, sql`m."userId"`)}
     ${org ? sql`AND m."organizationId" = ${org}` : sql``}
     ORDER BY o."createdAt" ASC
   `;

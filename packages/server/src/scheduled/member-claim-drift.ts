@@ -19,12 +19,17 @@
  *   2. `poison_claim` — a live `auth_user_id` claim that blocks the correct
  *      insert but points to the wrong entity shape or source.
  *
+ * Workspaces with a pending deletion are skipped: the purge hard-deletes their
+ * `$member` entities before the organization delete removes the `member` rows,
+ * and nobody can resolve into a deleting workspace anyway.
+ *
  * Read-only. Single-claimant per tick via the runs-queue (registered in
  * scheduled/jobs.ts), so multi-replica safe with no extra coordination.
  */
 
 import { resolvableMemberClaimExists } from "../authz/member-claim-predicate";
 import { getDb } from "../db/client";
+import { organizationLiveSql } from "../workspace/deletion-state";
 
 interface MemberClaimDriftResult {
 	/**
@@ -48,7 +53,9 @@ export async function runMemberClaimDriftCheck(): Promise<MemberClaimDriftResult
 	const missingRows = await sql<{ n: number }>`
     SELECT count(*)::int AS n
     FROM "member" m
-    WHERE NOT ${resolvableMemberClaimExists(sql, sql`m."organizationId"`, sql`m."userId"`)}
+    JOIN organization o ON o.id = m."organizationId"
+    WHERE ${sql.unsafe(organizationLiveSql("o"))}
+      AND NOT ${resolvableMemberClaimExists(sql, sql`m."organizationId"`, sql`m."userId"`)}
   `;
 
 	// Any live claim that blocks the correct insert without satisfying the gate.
@@ -58,13 +65,15 @@ export async function runMemberClaimDriftCheck(): Promise<MemberClaimDriftResult
     JOIN "member" m
       ON m."organizationId" = ei.organization_id
      AND m."userId" = ei.identifier
+    JOIN organization o ON o.id = m."organizationId"
     JOIN entities e
       ON e.id = ei.entity_id
      AND e.organization_id = ei.organization_id
     JOIN entity_types et
       ON et.id = e.entity_type_id
      AND et.organization_id = e.organization_id
-    WHERE ei.namespace = 'auth_user_id'
+    WHERE ${sql.unsafe(organizationLiveSql("o"))}
+      AND ei.namespace = 'auth_user_id'
       AND ei.scope_key IS NULL
       AND ei.deleted_at IS NULL
       AND (
