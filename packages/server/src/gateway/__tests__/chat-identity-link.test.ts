@@ -52,6 +52,7 @@ import {
 } from "../../lobu/stores/chat-identity.js";
 import { CHAT_IDENTITY_LINK_SCOPE, CHAT_IDENTITY_LINK_TTL_SECONDS, mintChatIdentityLink } from "../../lobu/stores/chat-identity-link.js";
 import { resolveMemberOrgsForUser } from "../../identity/member-orgs.js";
+import { __resetPublicOriginCachesForTests } from "../../utils/public-origin.js";
 import { resetRateLimiterForTests } from "../../utils/rate-limiter.js";
 import { __setChatInstanceManagerForTests } from "../../lobu/gateway.js";
 import { ChatInstanceManager } from "../connections/chat-instance-manager.js";
@@ -101,11 +102,12 @@ function routesAs(user: TestUser | null) {
       signOuts.push(request);
       return [SIGNED_OUT_COOKIE];
     },
-    origin: () => ORIGIN,
   });
 }
 
 const pageUrl = (token: string) => `${ORIGIN}/connect/chat-identity?token=${encodeURIComponent(token)}`;
+/** The link's own path: sign-in comes back to it on whichever host it was opened. */
+const linkPath = (token: string) => `/connect/chat-identity?${new URLSearchParams({ token })}`;
 
 function submit(user: TestUser | null, token: string, headers: Record<string, string> = browser) {
   return routesAs(user).request(`${ORIGIN}/connect/chat-identity`, {
@@ -264,8 +266,40 @@ describe("chat identity link routes", () => {
     expect(location.pathname).toBe("/auth/login");
     // Google Chat's login provider: signing in with it also proves the chat identity.
     expect(location.searchParams.get("provider")).toBe("google");
-    expect(location.searchParams.get("callbackUrl")).toContain(pageUrl(token));
+    expect(location.searchParams.get("callbackUrl")).toBe(linkPath(token));
     expect(await claimCount()).toBe(1);
+  });
+
+  test("a link opened on a per-org subdomain signs in and links on that subdomain", async () => {
+    const previous = process.env.PUBLIC_GATEWAY_URL;
+    // Prod shape: the canonical host is configured, and acme.<zone> is an alias.
+    process.env.PUBLIC_GATEWAY_URL = ORIGIN;
+    __resetPublicOriginCachesForTests();
+    try {
+      const subdomain = "https://acme.cloud.example.test";
+      // The page's own form, posted from the subdomain it was served on.
+      const token = (await mint())!;
+      const res = await routesAs(member).request(`${subdomain}/connect/chat-identity`, {
+        method: "POST",
+        headers: { ...browser, origin: subdomain },
+        body: new URLSearchParams({ token }).toString(),
+      });
+      expect(res.status).toBe(200);
+      expect(await res.text()).toContain("Chat account linked");
+      expect(await claimCount()).toBe(0);
+
+      // Signed out, login and the way back both stay on the subdomain.
+      const fresh = (await mint())!;
+      const signedOut = await routesAs(null).request(`${subdomain}${linkPath(fresh)}`);
+      expect(signedOut.status).toBe(302);
+      const login = new URL(signedOut.headers.get("location") ?? "", subdomain);
+      expect(login.origin).toBe(subdomain);
+      expect(login.searchParams.get("callbackUrl")).toBe(linkPath(fresh));
+    } finally {
+      if (previous === undefined) delete process.env.PUBLIC_GATEWAY_URL;
+      else process.env.PUBLIC_GATEWAY_URL = previous;
+      __resetPublicOriginCachesForTests();
+    }
   });
 
   test.each([
@@ -282,6 +316,8 @@ describe("chat identity link routes", () => {
     const token = (await mint())!;
     for (const headers of [
       { ...browser, origin: "https://evil.example" },
+      // Another workspace's per-org subdomain is another origin.
+      { ...browser, origin: "https://other.cloud.example.test" },
       { ...browser, origin: "null" },
       { cookie: browser.cookie, "content-type": browser["content-type"] },
       { ...browser, cookie: "" },
@@ -592,7 +628,7 @@ describe("chat identity link routes", () => {
     const location = res.headers.get("location") ?? "";
     // Back through the chat platform's own login, which proves the account.
     expect(location.startsWith("/auth/login?provider=google&callbackUrl=")).toBe(true);
-    expect(decodeURIComponent(location)).toContain(pageUrl(token));
+    expect(new URL(location, ORIGIN).searchParams.get("callbackUrl")).toBe(linkPath(token));
     expect(res.headers.getSetCookie()).toEqual([SIGNED_OUT_COOKIE]);
     expect(signOuts).toHaveLength(1);
     // Switching links nothing and keeps the link for the next account.
@@ -626,9 +662,9 @@ describe("chat identity link routes", () => {
       env,
     );
     expect(res.status).toBe(303);
-    const callback = new URL("/connect/chat-identity", origin);
-    callback.searchParams.set("token", token);
-    expect(res.headers.get("location")).toBe(`/auth/login?provider=google&callbackUrl=${encodeURIComponent(callback.toString())}`);
+    expect(res.headers.get("location")).toBe(
+      `/auth/login?${new URLSearchParams({ provider: "google", callbackUrl: linkPath(token) })}`,
+    );
     const cleared = res.headers.getSetCookie().find((c) => c.startsWith(`${session.cookieHeader.split("=", 1)[0]}=`));
     expect(cleared).toMatch(/Max-Age=0/i);
     expect(await getDb()`SELECT 1 FROM "session" WHERE id = ${session.sessionId}`).toHaveLength(0);
