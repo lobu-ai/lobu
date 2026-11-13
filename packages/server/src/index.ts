@@ -121,7 +121,7 @@ import {
 } from "./utils/cors-origin";
 import { isValidFrameAncestor } from "./utils/csp";
 import { getApplyContext } from "./utils/apply-context";
-import { errorMessage } from "./utils/errors";
+import { errorMessage, ToolUserError } from "./utils/errors";
 import { insertWorkspaceChangeEventInTransaction } from "./utils/insert-event";
 import logger from "./utils/logger";
 import { readMcpAppAsset, renderMcpAppTemplate } from "./utils/mcp-app-bundle";
@@ -135,6 +135,7 @@ import {
 	resolvePublicOrigin,
 } from "./utils/public-origin";
 import {
+	enforcePublicReadLimit,
 	getClientIP,
 	getRateLimiter,
 	RateLimitPresets,
@@ -1903,6 +1904,23 @@ app.get("*", async (c) => {
 		!hasSessionCookie &&
 		isSpaRoute
 	) {
+		// A render reads the workspace and its live sources like any anonymous
+		// public read, so it spends the same per-IP budget. Unmetered, one client
+		// fanned out enough source reads through page loads to trip a source's
+		// own rate limit for every visitor.
+		try {
+			enforcePublicReadLimit({
+				userId: null,
+				clientIP: getClientIP(c.req.raw, c.var.peerRemoteAddress),
+			});
+		} catch (error) {
+			if (!(error instanceof ToolUserError) || error.code !== "RATE_LIMITED") {
+				throw error;
+			}
+			c.header("Cache-Control", "no-store");
+			c.header("Retry-After", String(error.retryAfterSeconds ?? 60));
+			return c.text("Too many requests", 429);
+		}
 		let publicPageModel: Awaited<ReturnType<typeof buildPublicPageModel>>;
 		try {
 			publicPageModel = await buildPublicPageModel(
