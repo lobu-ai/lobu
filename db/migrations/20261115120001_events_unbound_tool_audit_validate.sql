@@ -10,6 +10,7 @@
 -- took 339 ms; not timed end to end. The statement timeout there is 60s. If it
 -- times out, run the statement by hand with `SET statement_timeout = 0` and
 -- record the version.
+-- squawk-ignore prefer-robust-stmts -- a single statement the runner wraps in its own transaction; validating twice is harmless
 ALTER TABLE public.events VALIDATE CONSTRAINT events_unbound_tool_audit_owned;
 
 -- migrate:down
