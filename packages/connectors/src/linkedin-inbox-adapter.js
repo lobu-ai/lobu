@@ -20,6 +20,12 @@ export function linkedInInboxProgram() {
   function fail(message) {
     throw new Error(`LinkedIn inbox: ${message}`);
   }
+  // A stop reason is durable evidence: keep the underlying failure instead of
+  // reporting only that the listener could not attach.
+  function errorDetail(error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return clean(message.replace(/^LinkedIn inbox: /, "")).slice(0, 300);
+  }
   function headers() {
     const cookie = document.cookie
       .split("; ")
@@ -1018,6 +1024,7 @@ export function linkedInInboxProgram() {
     clearTimeout(listener.timer);
     window.removeEventListener("message", listener.onReply);
     listeners.delete(listener.id);
+    listener.stopReason = reason;
     if (reason)
       post(listener, {
         id: `linkedin:${listener.feed}:source-observation-error`,
@@ -1053,10 +1060,10 @@ export function linkedInInboxProgram() {
         listener.batches = await batchesOf(feed, checkpoint, result);
       }
       if (active(listener)) post(listener, listener.batches[0]);
-    } catch {
+    } catch (error) {
       stop(
         listener,
-        "LinkedIn source observation failed; reconnect to recover without skipping changes"
+        `LinkedIn source observation failed (${errorDetail(error)}); reconnect to recover without skipping changes`
       );
     }
     if (active(listener))
@@ -1246,7 +1253,10 @@ export function linkedInInboxProgram() {
     window.addEventListener("message", listener.onReply);
     await poll(listener);
     if (!listeners.has(listener.id))
-      fail("Unable to attach source subscription");
+      fail(
+        "Unable to attach source subscription: " +
+          (listener.stopReason ?? "listener stopped")
+      );
     return { listening: true };
   }
   globalThis[key] = { version, read, listen, send, detach };

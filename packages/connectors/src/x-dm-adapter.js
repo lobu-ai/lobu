@@ -43,6 +43,16 @@ export function xDirectMessagesProgram() {
 		if (status !== undefined) error.status = status;
 		throw error;
 	}
+	// A stop reason is durable evidence: keep the underlying failure instead of
+	// reporting only that the listener could not attach.
+	function errorDetail(error) {
+		const message = error instanceof Error ? error.message : String(error);
+		return message
+			.replace(/^X direct messages: /, "")
+			.replace(/\s+/g, " ")
+			.trim()
+			.slice(0, 300);
+	}
 	function cookie(name) {
 		const raw = document.cookie
 			.split("; ")
@@ -525,6 +535,7 @@ export function xDirectMessagesProgram() {
 		clearTimeout(listener.timer);
 		window.removeEventListener("message", listener.onReply);
 		listeners.delete(listener.id);
+		listener.stopReason = reason;
 		if (reason)
 			post(listener, {
 				id: "x:live_messages:source-observation-error",
@@ -552,10 +563,10 @@ export function xDirectMessagesProgram() {
 			}
 			account(listener.account);
 			if (active(listener)) post(listener, listener.batches[0]);
-		} catch {
+		} catch (error) {
 			stop(
 				listener,
-				"X source observation failed; reconnect to recover without skipping messages",
+				`X source observation failed (${errorDetail(error)}); reconnect to recover without skipping messages`,
 			);
 		}
 		if (active(listener))
@@ -618,7 +629,10 @@ export function xDirectMessagesProgram() {
 		window.addEventListener("message", listener.onReply);
 		await poll(listener);
 		if (!listeners.has(listener.id))
-			fail("Unable to attach source subscription");
+			fail(
+				"Unable to attach source subscription: " +
+					(listener.stopReason ?? "listener stopped"),
+			);
 		return { listening: true };
 	}
 	// X serves at most 50 entries per notifications page (`count=50`); the
