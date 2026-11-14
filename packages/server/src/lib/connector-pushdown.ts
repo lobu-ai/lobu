@@ -33,6 +33,7 @@ import { ToolUserError, toolErrorHttpStatus } from '../utils/errors';
 import { findBundledConnectorFile } from '../utils/connector-catalog';
 import { resolveConnectorCodeForKey } from '../utils/ensure-connector-installed';
 import { mergeExecutionConfig, resolveExecutionAuth } from '../utils/execution-context';
+import { raceAbort } from '../utils/race-abort';
 import { isMetadataOnlyDeviceConnector, readDeviceFeed } from './device-feed-read';
 import { readSourceFeedFromAdapter } from './source-feed-adapters';
 import { createSourceReadBridge, sourceReadDeadlineError } from './source-read-bridge';
@@ -159,12 +160,12 @@ export async function runConnectorQuery(p: ConnectorQueryParams): Promise<Connec
   }
   const conn = connRows[0] as QueryConnection;
 
-  // Identical concurrent reads share one run. The key holds every input the
-  // run depends on. Caller identity is deliberately absent: each caller passed
-  // the visibility check above before joining, and the run's code and
-  // credentials come from the connection, never from the caller.
+  // Identical concurrent reads in the same admission class share one run.
+  // Members must not inherit an anonymous caller's queued slot or deadline.
+  // Caller identity is deliberately absent: each caller passed the visibility
+  // check above, and code and credentials come from the connection.
   const readKey = createHash('sha256').update(stableJson({
-    connectionId: Number(conn.id), connectorKey: conn.connector_key, query: p.query,
+    connectionId: Number(conn.id), connectorKey: conn.connector_key, callerClass: p.callerClass, query: p.query,
     exactMatch: p.exactMatch ?? null, selection: p.selection ?? null, limit: p.limit ?? null,
     offset: p.offset ?? null, sort: p.sort ?? null, config: p.config ?? null,
   })).digest('hex');
@@ -173,7 +174,7 @@ export async function runConnectorQuery(p: ConnectorQueryParams): Promise<Connec
     const slot = await sourceAdmission.acquire(Number(conn.id), { ...participant, signal });
     let rateLimited = false;
     try {
-      return await runAdmittedQuery(p, conn, deadlineAt, signal, () => { rateLimited = true; });
+      return await raceAbort(runAdmittedQuery(p, conn, deadlineAt, signal, () => { rateLimited = true; }), signal);
     } finally {
       slot.release({ rateLimited });
     }
@@ -188,10 +189,11 @@ async function runAdmittedQuery(
   signal: AbortSignal,
   onRateLimited: () => void,
 ): Promise<ConnectorQueryResult> {
-  const compiledCode = await resolveConnectorCodeForKey(
+  signal.throwIfAborted();
+  const compiledCode = await raceAbort(resolveConnectorCodeForKey(
     conn.connector_key,
     p.scope.organizationId
-  );
+  ), signal);
 
   const authParams = {
     organizationId: p.scope.organizationId,
@@ -202,9 +204,10 @@ async function runAdmittedQuery(
     logContext: { connection: p.connectionSlug },
     logMessage: 'Failed to resolve connector query credentials',
   };
-  let auth = await resolveExecutionAuth(authParams);
+  let auth = await raceAbort(resolveExecutionAuth(authParams), signal);
 
   const execute = async (resolved: typeof auth) => {
+    signal.throwIfAborted();
     const { credentials, connectionCredentials, sessionState, httpAuth, onHttpFetch } = resolved;
     return executeCompiledConnector({
       compiledCode,
@@ -244,6 +247,7 @@ async function runAdmittedQuery(
   try {
     result = await execute(auth);
   } catch (error) {
+    signal.throwIfAborted();
     // Only read-only queries reach this seam. A typed rejection can refresh the
     // exact token the provider refused; the credential service serializes token
     // rotation across replicas and reuses a concurrent refresh.
@@ -251,12 +255,12 @@ async function runAdmittedQuery(
     if (status === 429) onRateLimited();
     if (status === 401 && auth.credentials?.accessToken) {
       const rejectedAccessToken = auth.credentials.accessToken;
-      auth = await resolveExecutionAuth({ ...authParams, rejectedAccessToken });
+      auth = await raceAbort(resolveExecutionAuth({ ...authParams, rejectedAccessToken }), signal);
       if (!auth.credentials?.accessToken || auth.credentials.accessToken === rejectedAccessToken) throw error;
     } else {
       if (!isTransientUpstreamFailure(error)) throw error;
       if (deadlineAt - Date.now() <= PUSHDOWN_RETRY_BACKOFF_MS) throw error;
-      await new Promise(resolve => setTimeout(resolve, PUSHDOWN_RETRY_BACKOFF_MS));
+      await raceAbort(new Promise(resolve => setTimeout(resolve, PUSHDOWN_RETRY_BACKOFF_MS)), signal);
     }
     // One retry, sharing the original deadline rather than a fresh 30s budget.
     if (deadlineAt <= Date.now()) throw error;
@@ -403,10 +407,11 @@ export async function readSourceFeed(p: ReadSourceFeedParams): Promise<ReadSourc
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_resolve, reject) => {
     timer = setTimeout(() => {
-      controller.abort();
-      reject(browserLeased
+      const error = browserLeased
         ? new BrowserInterruptionError('timeout', `Browser source read ${p.feedId} timed out; no recovery handoff was issued.`)
-        : sourceReadDeadlineError(p.feedId));
+        : sourceReadDeadlineError(p.feedId);
+      controller.abort(error);
+      reject(error);
     }, timeoutMs);
   });
   try {
@@ -694,7 +699,7 @@ async function readSourceFeedWithinDeadline(
   });
   let rateLimited = false;
   try {
-    return await readLiveSourceFeed(p, feed, feedConfig, sourceRevision, sourceSubscription, finish, onBrowserLease);
+    return await raceAbort(readLiveSourceFeed(p, feed, feedConfig, sourceRevision, sourceSubscription, finish, onBrowserLease), p.signal);
   } catch (error) {
     rateLimited = (error as { httpStatus?: unknown } | null)?.httpStatus === 429;
     throw error;
@@ -713,7 +718,8 @@ async function readLiveSourceFeed(
   finish: (result: ReadSourceFeedResult) => ReadSourceFeedResult,
   onBrowserLease: () => void,
 ): Promise<ReadSourceFeedResult> {
-  const adapterResult = p.recoveryId ? null : await readSourceFeedFromAdapter({
+  remainingReadMs(p);
+  const adapterResult = p.recoveryId ? null : await raceAbort(readSourceFeedFromAdapter({
     organizationId: p.scope.organizationId,
     connectionId: Number(feed.connection_id),
     connectorKey: feed.connector_key,
@@ -729,18 +735,18 @@ async function readLiveSourceFeed(
     sort: p.sort,
     signal: p.signal,
     deadlineAt: p.deadlineAt,
-  });
+  }), p.signal);
   if (adapterResult) {
     return finish({ ...adapterResult, columns: adapterResult.columns ?? [] });
   }
 
-  const compiledCode = await resolveConnectorCodeForKey(
+  const compiledCode = await raceAbort(resolveConnectorCodeForKey(
     feed.connector_key,
     p.scope.organizationId,
     feed.pinned_version ?? feed.definition_version
-  );
+  ), p.signal);
 
-  const { credentials, connectionCredentials, sessionState, httpAuth, onHttpFetch } = await resolveExecutionAuth({
+  const { credentials, connectionCredentials, sessionState, httpAuth, onHttpFetch } = await raceAbort(resolveExecutionAuth({
     organizationId: p.scope.organizationId,
     connectionId: feed.connection_id,
     authProfileId: Number(feed.auth_profile_id) || null,
@@ -748,7 +754,7 @@ async function readLiveSourceFeed(
     credentialDb: getDb(),
     logContext: { feedId: String(p.feedId) },
     logMessage: 'Failed to resolve feed source-read credentials',
-  });
+  }), p.signal);
 
   // Same merge order as feed-sync / worker poll:
   // connection.config → credentials → feed config → egress.
@@ -758,7 +764,7 @@ async function readLiveSourceFeed(
     ...dbEgressConfig(),
   };
 
-  const timeoutMs = remainingReadMs(p);
+  remainingReadMs(p);
   // Bundled cloud code can change before its catalog version is refreshed.
   // Bind the read/recovery to the exact bytes passed to the executor below.
   const artifactHash = computeCodeHash(compiledCode);
@@ -785,7 +791,7 @@ async function readLiveSourceFeed(
         config,
         env: { ...dbEgressConfig(), ...httpEgressAllowHostsEnv() },
         sessionState,
-        browser: await connectionBrowserGrant(p.scope.organizationId, feed.connection_id, feed.pinned_version ?? feed.definition_version),
+        browser: await raceAbort(connectionBrowserGrant(p.scope.organizationId, feed.connection_id, feed.pinned_version ?? feed.definition_version), p.signal),
         credentials,
         httpAuth,
         limit: p.limit,
@@ -797,7 +803,7 @@ async function readLiveSourceFeed(
         onHttpFetch, signal: p.signal,
         onChromeDispatch: browser.onChromeDispatch,
       },
-      timeoutMs,
+      timeoutMs: remainingReadMs(p),
     });
 
     if (result.mode !== 'read') {

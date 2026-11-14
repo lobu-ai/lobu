@@ -158,6 +158,29 @@ describe('coalesced source reads', () => {
     expect(await led).toBe('rows');
   });
 
+  it('bounds stalled shared preparation by the original deadline even with a later joiner', async () => {
+    vi.useFakeTimers();
+    try {
+      const admission = new SourceAdmission();
+      let runSignal!: AbortSignal;
+      let finish!: (value: string) => void;
+      const start = async (signal: AbortSignal) => {
+        runSignal = signal;
+        return new Promise<string>((resolve) => { finish = resolve; });
+      };
+      const led = admission.coalesce('read', CONNECTION, { ...participant(), deadlineAt: Date.now() + 25 }, start).catch(error => error);
+      const joined = admission.coalesce('read', CONNECTION, participant(), start).catch(error => error);
+      await vi.advanceTimersByTimeAsync(30);
+      expect(await led).toMatchObject({ exitReason: 'timeout' });
+      expect(await joined).toMatchObject({ exitReason: 'timeout' });
+      expect(runSignal.aborted).toBe(true);
+      finish('late rows');
+      expect(await admission.coalesce('read', CONNECTION, participant(), async () => 'fresh rows')).toBe('fresh rows');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('aborts the shared run only when every participant has left', async () => {
     const admission = new SourceAdmission();
     let runSignal!: AbortSignal;

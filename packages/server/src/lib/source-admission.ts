@@ -22,8 +22,8 @@
  * - Waiting is bounded: a full queue or a deadline too close to run refuses at
  *   once, and a waiter leaves at its deadline minus the run budget or on abort.
  *   Nobody queues past the point where its run could still finish.
- * - A slot always comes back: every admitted run is bounded by the executor's
- *   hard timeout and the caller's abort signal, and the slot is released when
+ * - A slot always comes back: preparation and execution are bounded by the
+ *   read deadline and the caller's abort signal, and the slot is released when
  *   the run settles.
  * - A run the source answered with 429 halves the connection's limit here
  *   (floor 1); each later 30s interval without a 429 restores one slot.
@@ -31,6 +31,7 @@
 
 import { createSpan, ToolError, type ChatTurnAccess, type Span } from '@lobu/core';
 import { chatAccessOfToolContext, type DeviceAccessCaller } from '../authz/device-access';
+import { raceAbort } from '../utils/race-abort';
 import logger from '../utils/logger';
 
 /** Live source runs one connection may have in flight on this replica. */
@@ -111,7 +112,7 @@ interface SharedRead {
   promise: Promise<unknown>;
   participants: number;
   controller: AbortController;
-  /** The run's own deadline, which its executor timeout enforces. */
+  /** The run's own deadline, including preparation before executor startup. */
   deadlineAt: number;
 }
 
@@ -130,8 +131,9 @@ export class SourceAdmission {
    * Run `start` once for every concurrent caller with the same `key`. A caller
    * that finds the read already running joins it and takes no slot. Each
    * participant waits under its own deadline and abort signal and receives its
-   * own copy of the result; the shared run is aborted only when every
-   * participant has left. The entry is dropped when the run settles.
+   * own copy of the result; the shared run is aborted when every participant
+   * has left or its original deadline expires. The entry is dropped when the
+   * run settles.
    */
   async coalesce<T>(
     key: string,
@@ -148,7 +150,11 @@ export class SourceAdmission {
       const read: SharedRead = {
         participants: 0, controller, promise: Promise.resolve(), deadlineAt: participant.deadlineAt,
       };
-      read.promise = (async () => start(controller.signal))().finally(() => {
+      const timer = setTimeout(() => controller.abort(Object.assign(
+        new Error('source read timed out at the caller deadline'), { exitReason: 'timeout' as const },
+      )), Math.max(0, read.deadlineAt - Date.now()));
+      read.promise = raceAbort((async () => start(controller.signal))(), controller.signal).finally(() => {
+        clearTimeout(timer);
         if (this.reads.get(key) === read) this.reads.delete(key);
       });
       this.reads.set(key, read);
