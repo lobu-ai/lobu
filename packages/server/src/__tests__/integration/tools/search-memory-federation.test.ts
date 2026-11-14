@@ -90,7 +90,7 @@ describe('search_memory direct OAuth workspace federation', () => {
     sharedEvent = await createTestEvent({
       organization_id: orgA.id,
       entity_ids: [atlasA.id, atlasB.id],
-      content: 'scope needle shared bridge evidence',
+      content: 'scope needle shared evidence',
     });
     unrelatedEvent = await createTestEvent({
       organization_id: orgA.id,
@@ -405,24 +405,21 @@ describe('search_memory direct OAuth workspace federation', () => {
     expect(JSON.stringify(afterRevoke)).not.toContain(orgC.slug);
   });
 
-  it('deduplicates a bridge-visible exact event while preserving every visible workspace', async () => {
+  it('returns an exact event only from the workspace that owns it', async () => {
     const betaContext = context({
       organizationId: orgB.id,
       memberRole: 'admin',
       directSearchFederation: false,
     });
-    const bridgeRead = await getContent(
-      { content_ids: [sharedEvent.id], limit: 10 },
-      {} as Env,
-      betaContext
-    );
-    expect(bridgeRead.content.map((item) => item.id)).toContain(sharedEvent.id);
-    const foreignRead = await getContent(
-      { content_ids: [unrelatedEvent.id], limit: 10 },
-      {} as Env,
-      betaContext
-    );
-    expect(foreignRead.content).toEqual([]);
+    // Tagging a record of workspace B does not make workspace A's event readable in B.
+    for (const event of [sharedEvent, unrelatedEvent]) {
+      const foreignRead = await getContent(
+        { content_ids: [event.id], limit: 10 },
+        {} as Env,
+        betaContext
+      );
+      expect(foreignRead.content).toEqual([]);
+    }
 
     const exact = await search(
       { query: `event ${sharedEvent.id}`, include_public_catalogs: false },
@@ -431,7 +428,7 @@ describe('search_memory direct OAuth workspace federation', () => {
     );
     expect(exact.content?.map((item) => item.id)).toEqual([sharedEvent.id]);
     expect(exact.content?.[0]?.match_score).toBe(1);
-    expect(exact.content?.[0]?.workspace_slugs).toEqual([orgA.slug, orgB.slug].sort());
+    expect(exact.content?.[0]?.workspace_slugs).toEqual([orgA.slug]);
     expectValidSearchResult(exact);
 
     const phrase = await search(

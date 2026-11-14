@@ -7,7 +7,6 @@
 import { compileConnectionFkVisibility } from '../../authz/connection-visibility';
 import { compileResourceVisibility } from '../../authz/resource-visibility';
 import type { AuthzScope } from '../../authz/scope';
-import { useLinkedOrgScope } from '../linked-org-ids';
 import { validateNumericId } from '../sql-validation';
 
 /**
@@ -82,30 +81,17 @@ export function buildProducedByAutomationClause(
 }
 
 export interface OrgScopeWhere {
-  /** `AND (...)` fragment for a WHERE body, or '' when no scoping applies. */
+  /** `AND ...` fragment for a WHERE body, or '' when no scoping applies. */
   sql: string;
   params: Array<string | number | null>;
-  /**
-   * Bare, disjoint predicates whose union is `sql`, or null when the scope
-   * cannot be split (legacy bridge predicate, or no scoping).
-   */
-  branches: { direct: string; linked: string } | null;
 }
 
 /**
- * Build an org/workspace-scoping WHERE clause using EXISTS (no JOIN needed).
- * Returns an empty string when no scoping is needed (for example, entity_id is
- * set and the caller did not opt into strict organization scoping).
- * Assumes the query has `f` aliasing events and `c` aliasing connections.
- *
- * An event is in scope when ANY of these hold:
- *  - the event itself was stamped to the caller's org (`f.organization_id`),
- *  - one of its `entity_ids` belongs to the caller's org, or
- *  - the connection that produced it belongs to the caller's org.
- *
- * The bridge clauses cover events ingested into another org but cross-linked
- * to entities/connections here. Stand-alone events with no entity links and
- * no connection are still findable via the direct `f.organization_id` match.
+ * Build the workspace-scoping WHERE clause: an event is in scope when it is
+ * owned by the caller's organization (`f.organization_id`). Returns an empty
+ * fragment when no scoping is needed (for example, entity_id is set and the
+ * caller did not opt into strict organization scoping).
+ * Assumes the query has `f` aliasing events.
  */
 export function buildOrgScopeWhere(options: {
   entity_id?: number;
@@ -114,35 +100,11 @@ export function buildOrgScopeWhere(options: {
   baseParamIndex: number;
 }): OrgScopeWhere {
   if (!options.organization_id || (options.entity_id && !options.strict_organization_scope)) {
-    return { sql: '', params: [], branches: null };
+    return { sql: '', params: [] };
   }
-
-  const p = `$${options.baseParamIndex}::text`;
-  // Denormalized bridge (events.linked_org_ids, write-once at INSERT): folds
-  // the entity + connection branches into one GIN-indexed condition instead
-  // of per-row OR/EXISTS subplans. Gated until the one-time backfill is done.
-  if (useLinkedOrgScope()) {
-    const direct = `f.organization_id = ${p}`;
-    return {
-      sql: `AND (${direct} OR f.linked_org_ids @> ARRAY[${p}]::text[])`,
-      params: [options.organization_id],
-      // The same predicate as two DISJOINT arms. Their union is exactly `sql`;
-      // `IS DISTINCT FROM` keeps a row that matches both arms in one of them.
-      // Splitting the OR lets the direct arm use the ordered organization
-      // index; linked matches use their own scan before the top-N merge.
-      branches: {
-        direct,
-        linked: `f.linked_org_ids @> ARRAY[${p}]::text[] AND f.organization_id IS DISTINCT FROM ${p}`,
-      },
-    };
-  }
-  const directCond = `f.organization_id = ${p}`;
-  const entityCond = `EXISTS (SELECT 1 FROM entities ent_org WHERE ent_org.id = ANY(f.entity_ids) AND ent_org.organization_id = ${p})`;
-  const connCond = `c.organization_id = ${p}`;
   return {
-    sql: `AND (${directCond} OR ${entityCond} OR ${connCond})`,
+    sql: `AND f.organization_id = $${options.baseParamIndex}::text`,
     params: [options.organization_id],
-    branches: null,
   };
 }
 

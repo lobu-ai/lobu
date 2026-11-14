@@ -276,11 +276,9 @@ export async function applyEventPresentation(sql: DbClient, manifest: Manifest) 
       // Fail closed if the normal write funnel sanitizes or enriches content, or
       // a newly added field is not copied. Never bypass ingestion protections.
       for (const key of Object.keys(source)) {
-        // Empty legacy projections used NULL; the write funnel emits [].
-        // Compare this access set by membership, while every other field stays exact.
-        const value = (row: StoredEvent) => key === 'linked_org_ids'
-          ? [...((row[key] as string[] | null) ?? [])].sort() : row[key];
-        if (!CHANGED_FIELDS.has(key) && stableJson(value(source)) !== stableJson(value(successor))) {
+        // Retired column: the write funnel no longer sets it and nothing reads it.
+        if (key === 'linked_org_ids') continue;
+        if (!CHANGED_FIELDS.has(key) && stableJson(source[key]) !== stableJson(successor[key])) {
           throw new Error('Conversion would change preserved field: ' + key);
         }
       }

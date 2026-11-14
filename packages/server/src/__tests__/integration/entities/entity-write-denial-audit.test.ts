@@ -110,7 +110,7 @@ async function denialEvents(organizationId: string) {
 	return getTestDb()`
 		SELECT id, to_jsonb(entity_ids) AS entity_ids, origin_id, origin_type,
 		       title, payload_type, payload_text, payload_data, metadata,
-		       organization_id, to_jsonb(linked_org_ids) AS linked_org_ids,
+		       organization_id,
 		       automation_id, run_id, created_by, client_id
 		FROM events
 		WHERE organization_id = ${organizationId}
@@ -174,7 +174,6 @@ describe("manage_entity write-denial audit", () => {
 			payload_text: null,
 			payload_data: {},
 			organization_id: org.id,
-			linked_org_ids: [],
 		});
 		expect(events[0].metadata).toMatchObject({
 			category: "entity_write_denial",
@@ -233,7 +232,6 @@ describe("manage_entity write-denial audit", () => {
 		const events = await denialEvents(org.id);
 		expect(events).toHaveLength(1);
 		expect(events[0].entity_ids).toEqual([entity.id]);
-		expect(events[0].linked_org_ids).toEqual([]);
 		expect(events[0].metadata).toMatchObject({
 			category: "entity_write_denial",
 			denial_source: "policy",
@@ -276,7 +274,7 @@ describe("manage_entity write-denial audit", () => {
 
 		const events = await denialEvents(callerOrg.id);
 		expect(events).toHaveLength(1);
-		expect(events[0]).toMatchObject({ entity_ids: null, linked_org_ids: [] });
+		expect(events[0]).toMatchObject({ entity_ids: null });
 		expect(events[0].metadata).toMatchObject({
 			operation: "delete",
 			entity_id: publicEntity.id,

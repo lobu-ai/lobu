@@ -282,7 +282,7 @@ export async function searchContentBySingleQuery(
   const entityFilterSQL = entityId != null
     ? `${searchEntityLinkSql} AND ($2::bigint IS NOT NULL)`
     : `($2::bigint IS NULL OR ${searchEntityLinkSql})`;
-  const standardFiltersFor = (orgScopeSql: string) => `${entityFilterSQL}
+  const standardFiltersSQL = `${entityFilterSQL}
           AND ${connectionCondition}
           AND ${feedCondition}
           AND ${runCondition}
@@ -320,8 +320,7 @@ export async function searchContentBySingleQuery(
           }
           ${classificationClause.sql}
           ${resourceClause.sql}
-          ${orgScopeSql}${entityTypesClause.sql}`;
-  const standardFiltersSQL = standardFiltersFor(orgScope.sql);
+          ${orgScope.sql}${entityTypesClause.sql}`;
 
   const textDocumentExpr = buildSearchDocumentExpr('f');
   const resultDocumentExpr = buildSearchDocumentExpr('fi');
@@ -363,8 +362,8 @@ export async function searchContentBySingleQuery(
     ? `(${textMatchExpr} OR ${bestSimSelect} >= ${minSimilarityParam})`
     : textMatchExpr;
 
-  const searchWhereFor = (orgScopeSql: string) => `${matchCondition}
-          AND ${standardFiltersFor(orgScopeSql)}`;
+  const searchWhereSQL = `${matchCondition}
+          AND ${standardFiltersSQL}`;
 
   // Text relevance in [0, 1]: half substring match, half full-text rank.
   // Normalization 32 maps rank to rank / (rank + 1), so repeated terms
@@ -511,26 +510,14 @@ export async function searchContentBySingleQuery(
           ORDER BY MIN(dist)
           LIMIT ${CANDIDATE_VECTOR_LIMIT}`);
     if (hasTextCandidates) {
-      // Keep direct and linked scope separately indexable, as on the exact
-      // path. Capping each disjoint arm then capping their union preserves the
-      // original global top-N while avoiding a global history scan for a term
-      // that is common elsewhere but rare in this organization.
-      const textScopeFilters = orgScope.branches
-        ? [orgScope.branches.direct, orgScope.branches.linked]
-          .map((scope) => standardFiltersFor(`AND ${scope}`))
-        : [standardFiltersSQL];
-      const textCandidates = (matchSql: string, rankSql: string) => `SELECT id FROM (
-          ${textScopeFilters.map((filters) => `(SELECT ce.id AS id, ${rankSql} AS rank
+      const textCandidates = (matchSql: string, rankSql: string) => `SELECT ce.id AS id
             FROM events ce
             JOIN current_event_records f ON f.id = ce.id
             ${candidateFilterJoins}
             WHERE ${matchSql}
-              AND ${filters}
+              AND ${standardFiltersSQL}
             ORDER BY ${rankSql} DESC, ce.id + 0 DESC
-            LIMIT ${CANDIDATE_VECTOR_LIMIT})`).join('\n          UNION ALL\n          ')}
-        ) text_candidates
-        ORDER BY rank DESC, id DESC
-        LIMIT ${CANDIDATE_VECTOR_LIMIT}`;
+            LIMIT ${CANDIDATE_VECTOR_LIMIT}`;
       // fulltext GIN — `@@` is index-served. Rank the STORED search_tsv before
       // the cap so the strongest matches survive CANDIDATE_VECTOR_LIMIT; this
       // costs a top-N sort over FTS-matching rows in the organization.
@@ -563,15 +550,7 @@ export async function searchContentBySingleQuery(
           AND ($6::int IS NOT NULL)
           AND iwf.run_id = $6::int
         WHERE ${whereSql}`;
-  // Disjoint org-scope arms preserve exact totals without deduplication and let
-  // the planner use the direct-org and linked-org indexes independently.
-  // Entity-scoped reads keep one predicate.
-  const exactBranches = entityId == null ? orgScope.branches : null;
-  const exactFilteredIdsBody = exactBranches
-    ? `(${filteredIdsSelect(searchWhereFor(`AND ${exactBranches.direct}`))})
-        UNION ALL
-        (${filteredIdsSelect(searchWhereFor(`AND ${exactBranches.linked}`))})`
-    : filteredIdsSelect(searchWhereFor(orgScope.sql));
+  const exactFilteredIdsBody = filteredIdsSelect(searchWhereSQL);
   const nonDateFilteredIdsCteSql = `filtered_ids AS (
         ${
           useCandidatePath

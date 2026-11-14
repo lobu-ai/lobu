@@ -240,11 +240,9 @@ describe('QUERYABLE_SCHEMA vs database (drift detection)', () => {
     // which doesn't expose the column — and never usefully can: the Stage-2
     // flip makes the view `WHERE superseded_by IS NULL`, so through the view
     // the column is always NULL. Lineage queries belong on the raw table.
-    // linked_org_ids: internal org-scope bridge (migration 20260804170000). The
-    // view exposes it so eventOrgScope can use the GIN-indexed containment
-    // predicate, but the raw array is not a user query surface — scoping is
-    // enforced by the typed tools, not by callers probing which other orgs an
-    // event bridges to.
+    // linked_org_ids: retired org-scope bridge (migration 20260804170000). No
+    // longer written or read; the view keeps projecting it until the column
+    // is dropped in the release after 20261114120000.
     events: new Set(['superseded_by', 'linked_org_ids']),
     connections: new Set(['credentials']),
     // Large per-connector JSONB blobs — too big and structure-dependent to expose
@@ -265,9 +263,8 @@ describe('QUERYABLE_SCHEMA vs database (drift detection)', () => {
     device_workers: new Set(['user_id', 'connector_manifests']),
     oauth_clients: new Set(['client_secret', 'client_secret_expires_at']),
     // granted_organization_ids / authorization_grant_type: internal grant
-    // snapshot and issuing-flow provenance (migrations 20260827110000/-02),
-    // same class as events.linked_org_ids — enforcement inputs for the typed
-    // OAuth verifier, not a user query surface.
+    // snapshot and issuing-flow provenance (migrations 20260827110000/-02):
+    // enforcement inputs for the typed OAuth verifier, not a user query surface.
     oauth_tokens: new Set([
       'token_hash',
       'granted_organization_ids',

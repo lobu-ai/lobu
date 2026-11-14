@@ -179,7 +179,7 @@ async function resolvePublicPath(
       // history inside entityLinkMatchSql, starving the shared database pool.
       const systemRows = await getDb().unsafe<{ id: number }>(
         `WITH preview_events AS MATERIALIZED (
-           SELECT id, organization_id, entity_ids, metadata, linked_org_ids
+           SELECT id, organization_id, entity_ids, metadata
            FROM events WHERE id IN (${eventIds.join(',')})
          )
          SELECT DISTINCT ev.id

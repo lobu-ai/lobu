@@ -45,7 +45,6 @@ describe.each([null, 'synthetic-tenant'])('entity identity recall with scope %s 
   let ownIdentityEventId: number;
   let ownDirectEventId: number;
   let crossOrgDirectEventId: number;
-  let bridgedIdentityEventId: number;
   let foreignConnectorEventId: number;
   let foreignNoteEventId: number;
   const identityMetadata = {
@@ -148,20 +147,6 @@ describe.each([null, 'synthetic-tenant'])('entity identity recall with scope %s 
         })
       ).id
     );
-    // A connection shared into Org A bridges this Org B event; Org A may see it.
-    bridgedIdentityEventId = Number(
-      (
-        await createTestEvent({
-          entity_ids: [],
-          connection_id: connectionB.id,
-          content: 'Org B event bridged into Org A carrying the shared identifier.',
-          occurred_at: new Date('2025-07-06T10:00:00Z'),
-          organization_id: orgB.id,
-          metadata: identityMetadata,
-        })
-      ).id
-    );
-    await sql`UPDATE events SET linked_org_ids = ARRAY[${orgA.id}]::text[] WHERE id = ${bridgedIdentityEventId}`;
     crossOrgDirectEventId = Number(
       (
         await createTestEvent({
@@ -175,9 +160,8 @@ describe.each([null, 'synthetic-tenant'])('entity identity recall with scope %s 
     );
   });
 
-  function expectAllowedEvents(ids: number[], bridged = true) {
+  function expectAllowedEvents(ids: number[]) {
     const allowed = [ownIdentityEventId, ownDirectEventId, crossOrgDirectEventId];
-    if (bridged) allowed.push(bridgedIdentityEventId);
     expect([...ids].sort((a, b) => a - b)).toEqual(allowed.sort((a, b) => a - b));
     expect(ids).not.toContain(foreignConnectorEventId);
     expect(ids).not.toContain(foreignNoteEventId);
@@ -211,15 +195,14 @@ describe.each([null, 'synthetic-tenant'])('entity identity recall with scope %s 
   it('get_content rejects foreign identity matches and preserves direct attribution', async () => {
     const ctx = ownerToolContext(orgAId, userAId);
     const listed = await getContent({ entity_id: entityAId, limit: 50 }, {} as Env, ctx);
-    // Org A cannot see Org B's connection, so connection visibility hides the bridged event.
-    expectAllowedEvents(listed.content.map((item) => Number(item.id)), false);
+    expectAllowedEvents(listed.content.map((item) => Number(item.id)));
 
     const scored = await getContent(
       { entity_id: entityAId, sort_by: 'score', limit: 50 },
       {} as Env,
       ctx
     );
-    expectAllowedEvents(scored.content.map((item) => Number(item.id)), false);
+    expectAllowedEvents(scored.content.map((item) => Number(item.id)));
   });
 
   it('content-distribution excludes foreign identity matches and counts direct attribution', async () => {
@@ -231,6 +214,6 @@ describe.each([null, 'synthetic-tenant'])('entity identity recall with scope %s 
       distribution: Array<{ date: string; count: number }>;
     };
     const byDate = Object.fromEntries(body.distribution.map((row) => [row.date, row.count]));
-    expect(byDate).toEqual({ '2025-07-01': 1, '2025-07-02': 1, '2025-07-05': 1, '2025-07-06': 1 });
+    expect(byDate).toEqual({ '2025-07-01': 1, '2025-07-02': 1, '2025-07-05': 1 });
   });
 });

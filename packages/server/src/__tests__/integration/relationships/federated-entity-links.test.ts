@@ -348,11 +348,10 @@ describe('public source type identity across workspaces', () => {
       expect(publisherView.counts_by_type).toEqual([]);
       expect(JSON.stringify(publisherView)).not.toContain('Reader note');
       expect(ids(await stranger.owner.entities.listLinks({ entity_id: 'k1', entity_type: a.typeId }))).not.toContain(edge);
-      const audits = await getTestDb()`SELECT organization_id, linked_org_ids FROM events WHERE metadata->>'relationshipId' = ${String(edge)}`;
+      const audits = await getTestDb()`SELECT organization_id FROM events WHERE metadata->>'relationshipId' = ${String(edge)}`;
       expect(audits.length).toBeGreaterThan(0);
       for (const audit of audits) {
         expect(audit.organization_id).toBe(reader.org.id);
-        expect(audit.linked_org_ids ?? []).not.toContain(a.owner.org.id);
       }
       expect(await getTestDb()`SELECT 1 FROM entities WHERE entity_type_id = ${a.typeId}`).toHaveLength(0);
       const readerSql = await querySqlImpl({ sql: 'SELECT id FROM entity_relationships' }, {}, ownerToolContext(reader.org.id, reader.users.owner.id));

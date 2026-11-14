@@ -162,21 +162,17 @@ export function emit(organizationId: string, event: InvalidationEvent): void {
 }
 
 /**
- * Invalidate content caches for an event's organization and every
- * organization it is linked into. Run it on the SAME handle that wrote the
- * event so the notification commits or rolls back with the write.
+ * Invalidate content caches for an event's organization. Run it on the SAME
+ * handle that wrote the event so the notification commits or rolls back with
+ * the write.
  */
 export async function notifyEventContentChanged(sql: DbClient, eventId: number): Promise<void> {
   await sql`
     SELECT pg_notify(
       ${CHANNEL},
-      json_build_object('org', o.org, 'keys', json_build_array(${CONTENT_INVALIDATION_KEY}::text))::text
+      json_build_object('org', e.organization_id, 'keys', json_build_array(${CONTENT_INVALIDATION_KEY}::text))::text
     )
-    FROM (
-      SELECT e.organization_id AS org FROM events e WHERE e.id = ${eventId}
-      UNION
-      SELECT unnest(e.linked_org_ids) FROM events e WHERE e.id = ${eventId}
-    ) o
-    WHERE o.org IS NOT NULL
+    FROM events e
+    WHERE e.id = ${eventId} AND e.organization_id IS NOT NULL
   `;
 }

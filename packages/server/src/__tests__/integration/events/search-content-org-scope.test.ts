@@ -1,18 +1,10 @@
 /**
  * Integration test: org-scoping in `searchContentByText`.
  *
- * The original bug: an event saved with `f.organization_id = caller` but
- * empty `entity_ids` and no connection was invisible to `search_memory`,
- * because the org-scope clause required either an entity bridge or
- * (only when entity_ids was empty) a connection bridge. The fix turns the
- * clause into a triple-OR: direct org match OR entity bridge OR connection
- * bridge. This test pins all four cases plus the cross-org isolation
- * guarantee.
- *
- * NOTE: this file uses vitest. CI does not currently run the vitest
- * integration suite (see CLAUDE memory: "vitest CI gap"); the test runs
- * locally against the dev Postgres and acts as a regression record until
- * vitest is wired into CI.
+ * An org-wide read returns exactly the events the caller's organization owns
+ * (`f.organization_id`), whether or not they carry entity links or a
+ * connection. An event owned by another organization stays out, including one
+ * that tags a record of the caller's organization.
  */
 
 import { beforeAll, describe, expect, it } from 'vitest';
@@ -114,9 +106,8 @@ describe('searchContentByText > org-scope visibility', () => {
       })
     ).id;
 
-    // 5. Cross-linked event: stamped to otherOrg but its entity_ids points
-    //    at callerEntity. Pre-existing entity-bridge logic says caller
-    //    sees it. Pin that this contract didn't regress.
+    // 5. Cross-linked event: owned by otherOrg but its entity_ids points at
+    //    callerEntity. It stays in otherOrg.
     crossLinkedFromOtherEventId = (
       await createTestEvent({
         organization_id: otherOrg.id,
@@ -166,16 +157,16 @@ describe('searchContentByText > org-scope visibility', () => {
     expect(ids.has(foreignEventId)).toBe(false);
   });
 
-  it('keeps cross-linked events (other org stamping, our entity) visible via the entity bridge', async () => {
+  it('keeps an event another org owns out, even when it tags our entity', async () => {
     const result = await searchContentByText(null, {
       organization_id: callerOrg.id,
       limit: 50,
     });
     const ids = new Set(result.content.map((c) => c.id));
-    expect(ids.has(crossLinkedFromOtherEventId)).toBe(true);
+    expect(ids.has(crossLinkedFromOtherEventId)).toBe(false);
   });
 
-  it('the other org sees only its own + cross-linked rows, not caller-only events', async () => {
+  it('the other org sees only the events it owns', async () => {
     const result = await searchContentByText(null, {
       organization_id: otherOrg.id,
       limit: 50,

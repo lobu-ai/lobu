@@ -119,7 +119,7 @@ const EFFECTIVE_AT_SQL = 'COALESCE(f.occurred_at, f.created_at)';
 
 /**
  * The redundant `since`/`until` restatement on EFFECTIVE_AT_SQL, for the date
- * feed's direct-org arm only (see buildDateCandidateSetSql). Each param is a
+ * feed's org-wide reads only (see buildDateCandidateSetSql). Each param is a
  * `$N::timestamptz` slot that may bind NULL, or null when the caller has none.
  */
 export function buildEffectiveAtRangeSql(
