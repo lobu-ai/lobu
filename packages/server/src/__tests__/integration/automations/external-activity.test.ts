@@ -352,6 +352,21 @@ describe('external Automation activity', () => {
     expect(counts).toEqual({ total: 2, skipped: 1 });
   });
 
+  it('treats a changed timestamp in a context source as new, so a clock-driven window is not skipped', async () => {
+    // A context source carrying only the run time is how an Automation asks to
+    // run on every tick. Timestamps reach the fingerprint as Date values.
+    const id = await createExternal({ triggers: SKIPPING_SCHEDULE,
+      sources: [{ name: 'run_context', query: 'SELECT CURRENT_TIMESTAMP AS observed_at', context: true }] });
+    const first = await api.automations.claimNextWindow({ automation_id: id });
+    expect(first).toMatchObject({ status: 'claimed' });
+    await api.automations.completeWindow({ automation_id: id, run_id: first.run_id,
+      window_token: first.context.window_token, extracted_data: { signals: [] } });
+    await sql`UPDATE automations SET next_run_at = NOW() - INTERVAL '1 minute' WHERE id = ${Number(id)}`;
+    const second = await api.automations.claimNextWindow({ automation_id: id });
+    expect(second).not.toMatchObject({ skipped_unchanged: true });
+    expect(second.run_id).not.toBe(first.run_id);
+  });
+
   it('claims a late-arriving old event after a skipped window without losing arrival progress', async () => {
     const id = await createExternal({ triggers: SKIPPING_SCHEDULE, sources: CONTENT_SOURCE });
     await expect(api.automations.claimNextWindow({ automation_id: id })).resolves.toMatchObject({ status: 'completed' });
