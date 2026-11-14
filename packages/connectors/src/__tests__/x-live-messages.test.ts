@@ -848,18 +848,21 @@ describe("X live_messages observe", () => {
 			return body;
 		});
 		const browser = page(x);
-		await expect(
-			connector().definition.feeds.live_messages.observe({
-				feedKey: "live_messages",
-				sessionState: { account_id: SELF },
-				config: {},
-				credentials: null,
-				checkpoint: {
-					x_dm: { account: SELF, cursor: "cursor-0", started_at: 1 },
-				},
-				browser: browser.dispatcher,
-			}),
-		).rejects.toThrow("Unable to attach");
+		const observed = connector().definition.feeds.live_messages.observe({
+			feedKey: "live_messages",
+			sessionState: { account_id: SELF },
+			config: {},
+			credentials: null,
+			checkpoint: {
+				x_dm: { account: SELF, cursor: "cursor-0", started_at: 1 },
+			},
+			browser: browser.dispatcher,
+		});
+		await expect(observed).rejects.toThrow("Unable to attach");
+		await expect(observed).rejects.toThrow("Inbox update cursor is unavailable");
+		expect(browser.posts.at(-1).record.source_error).toContain(
+			"Inbox update cursor is unavailable",
+		);
 		expect(browser.posts.every((post) => !post.record.checkpoint)).toBe(true);
 	});
 

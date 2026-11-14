@@ -870,6 +870,40 @@ describe("LinkedIn source adapter", () => {
     }
   });
 
+  test("a failed observation keeps the provider failure in its source error and attach error", async () => {
+    const { dom, api } = adapter(async (url) => {
+      if (url === "/voyager/api/me")
+        return {
+          ok: true,
+          json: async () => ({
+            miniProfile: { entityUrn: "urn:li:fs_miniProfile:synthetic-self" },
+          }),
+        };
+      throw new Error("synthetic provider failure");
+    });
+    const sent: any[] = [];
+    dom.window.postMessage = (message: unknown) => {
+      sent.push(message);
+    };
+    try {
+      const failure = await api
+        .listen({
+          expected_account: "urn:li:fs_miniProfile:synthetic-self",
+          feed: "live_messages",
+          bridge_id: "synthetic-bridge",
+          token: "synthetic-token",
+        })
+        .catch((error: Error) => error);
+      expect(failure.message).toContain("Unable to attach source subscription");
+      expect(failure.message).toContain("synthetic provider failure");
+      expect(sent.at(-1).record.source_error).toContain(
+        "synthetic provider failure"
+      );
+    } finally {
+      dom.window.close();
+    }
+  });
+
   test("an empty inbox still checks that the signed-in account did not change", async () => {
     let accountReads = 0;
     const { dom, api } = adapter(async (url) => ({
