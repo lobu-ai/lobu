@@ -203,8 +203,20 @@ async function resolvePublicPath(
   return resolved;
 }
 
-function buildToolContext(requestUrl: string, organizationId: string): ToolContext {
-  return publicVisitorContext(organizationId, { requestUrl, baseUrl: getPublicOrigin(requestUrl) });
+/**
+ * One render's whole budget for its live source reads. A source read admitted
+ * this late still fits the 30s pushdown cap, and a render that cannot get a read
+ * started in time answers a retryable 503 instead of holding the request open.
+ */
+const PUBLIC_RENDER_DEADLINE_MS = 20_000;
+
+function buildToolContext(requestUrl: string, organizationId: string, signal?: AbortSignal): ToolContext {
+  return publicVisitorContext(organizationId, {
+    requestUrl,
+    baseUrl: getPublicOrigin(requestUrl),
+    abortSignal: signal,
+    deadlineAt: Date.now() + PUBLIC_RENDER_DEADLINE_MS,
+  });
 }
 
 function escapeAttribute(value: string): string {
@@ -464,11 +476,10 @@ async function getPublicEntityType(
 async function getPublicEntityTypeList(
   organizationId: string,
   env: Env,
-  requestUrl: string,
+  ctx: ToolContext,
   entityTypeSlug: string
 ): Promise<PublicEntityListResult> {
   const sql = getDb();
-  const ctx = buildToolContext(requestUrl, organizationId);
 
   const [result, entityTypeRow] = await Promise.all([
     listEntities(
@@ -1029,7 +1040,9 @@ export async function buildPublicPageModel(
   path: string,
   env: Env,
   requestUrl: string,
-  subdomainOrg?: string | null
+  subdomainOrg?: string | null,
+  /** The request's lifetime: a visitor who leaves stops the render's source reads. */
+  signal?: AbortSignal
 ): Promise<PublicPageModel | null> {
   const rawPath = `/${path.replace(/^\/+|\/+$/g, '')}`;
   // Global routes on org subdomains belong to the SPA. Prefixing them first
@@ -1054,7 +1067,7 @@ export async function buildPublicPageModel(
   const organization = await getPublicOrganizationBySlug(ownerSlug);
   if (!organization) return null;
 
-  const toolCtx = buildToolContext(requestUrl, organization.id);
+  const toolCtx = buildToolContext(requestUrl, organization.id, signal);
   // Canonical and structured-data URLs stay absolute on the public origin;
   // only the links rendered into the page follow the host.
   const localPath: LocalPath = (target) => stripSubdomainPrefix(target, subdomainOrg);
@@ -1082,7 +1095,7 @@ export async function buildPublicPageModel(
       }
       const [ownerResolvedPath, entityList] = await Promise.all([
         resolvePublicPath({ path: `/${organization.slug}`, include_bootstrap: true }, env, toolCtx),
-        getPublicEntityTypeList(organization.id, env, requestUrl, entityTypeDefinition.slug),
+        getPublicEntityTypeList(organization.id, env, toolCtx, entityTypeDefinition.slug),
       ]);
       const entityType: PublicEntityTypeDetails = {
         ...entityTypeDefinition,

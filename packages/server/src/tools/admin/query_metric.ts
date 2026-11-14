@@ -11,6 +11,7 @@
 
 import { type Static, Type } from '@sinclair/typebox';
 import type { Env } from '../../index';
+import { sourceCallerClass } from '../../lib/source-admission';
 import { runMetric } from '../../metrics/run-metric';
 import { canReadWorkspaceIdentity, isAdminOrOwnerRole } from '../access-control';
 import type { ToolContext } from '../registry';
@@ -54,6 +55,7 @@ async function queryMetricImpl(
     entityId: args.entity_id,
     userId: authzScopeFromToolContext(ctx).principal,
     signal: ctx.abortSignal,
+    callerClass: sourceCallerClass(ctx),
     // Workspace-identity audit rows are owner/admin/system-only; ordinary
     // members must not move a declared metric by counting lifecycle events.
     excludeWorkspaceAudit: !canReadWorkspaceIdentity(ctx),
