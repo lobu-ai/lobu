@@ -620,8 +620,6 @@ export const EVENT_SUPERSEDE_RULES = {
   search_tsv: 'version',
   identity_ns: 'chain',
   identity_key: 'chain',
-  // Retired: no longer written or read. The entry goes with the column drop.
-  linked_org_ids: 'version',
 } as const satisfies Record<string, 'chain' | 'lineage' | 'version'>;
 
 type SupersedeRules = typeof EVENT_SUPERSEDE_RULES;

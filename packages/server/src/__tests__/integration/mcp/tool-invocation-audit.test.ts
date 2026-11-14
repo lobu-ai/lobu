@@ -987,21 +987,20 @@ describe('tool invocation audit coverage', () => {
     expect(replayed).toEqual(retained);
   });
 
-  it('rejects unattributed or workspace-linked events without a workspace', async () => {
+  it('rejects unattributed or attributed events without a workspace', async () => {
     const sql = getDb();
     await expect(sql`
       INSERT INTO events (semantic_type, origin_type)
       VALUES ('audit', 'tool_invocation')
     `).rejects.toMatchObject({ code: '23514' });
     for (const shape of [
-      "'content', 'tool_invocation', NULL, NULL, NULL",
-      "'audit', NULL, NULL, NULL, NULL",
-      "'audit', 'tool_invocation', ARRAY[1]::bigint[], NULL, NULL",
-      "'audit', 'tool_invocation', NULL, ARRAY['other-workspace']::text[], NULL",
-      "'audit', 'tool_invocation', NULL, NULL, 1",
+      "'content', 'tool_invocation', NULL, NULL",
+      "'audit', NULL, NULL, NULL",
+      "'audit', 'tool_invocation', ARRAY[1]::bigint[], NULL",
+      "'audit', 'tool_invocation', NULL, 1",
     ]) {
       await expect(sql.unsafe(`
-        INSERT INTO events (created_by, semantic_type, origin_type, entity_ids, linked_org_ids, connection_id)
+        INSERT INTO events (created_by, semantic_type, origin_type, entity_ids, connection_id)
         VALUES ($1, ${shape})
       `, [ownerId])).rejects.toMatchObject({ code: '23514' });
     }

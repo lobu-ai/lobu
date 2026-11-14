@@ -240,10 +240,7 @@ describe('QUERYABLE_SCHEMA vs database (drift detection)', () => {
     // which doesn't expose the column — and never usefully can: the Stage-2
     // flip makes the view `WHERE superseded_by IS NULL`, so through the view
     // the column is always NULL. Lineage queries belong on the raw table.
-    // linked_org_ids: retired org-scope bridge (migration 20260804170000). No
-    // longer written or read; the view keeps projecting it until the column
-    // is dropped in the release after 20261114120000.
-    events: new Set(['superseded_by', 'linked_org_ids']),
+    events: new Set(['superseded_by']),
     connections: new Set(['credentials']),
     // Large per-connector JSONB blobs — too big and structure-dependent to expose
     // via raw SQL. Callers should hit the typed connector handler instead.
