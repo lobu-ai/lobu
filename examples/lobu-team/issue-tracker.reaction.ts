@@ -83,6 +83,8 @@ export interface IssueRecord {
   escalated_at?: string;
   resolved_in_release?: string;
   ignore_until?: string;
+  /** The stored 24h count, which only refreshes while the fingerprint is active. */
+  seen_24h?: number;
   /** Soft-deleted: its slug stays taken, so the fingerprint stays suppressed. */
   deleted?: boolean;
 }
@@ -317,37 +319,34 @@ export function planIssueChanges(
 
   for (const issue of byFingerprint.values()) {
     if (seen.has(issue.fingerprint) || issue.deleted) continue;
+    const quietFor = now.getTime() - ms(issue.last_seen);
+    // Counters only refresh while a fingerprint is active (seen in the last two
+    // hours). Once a day has passed with no sighting the 24h count is exactly
+    // zero, so clear it once instead of letting the last value rank it forever.
+    const counts =
+      (issue.seen_24h ?? 0) > 0 && quietFor >= DAY ? { seen_24h: 0 } : {};
+    let metadata: Record<string, unknown> | null = null;
     const stamp = stampResolution(issue, now);
     if (stamp) {
-      changes.push({
-        action: "update",
-        id: issue.id,
-        fingerprint: issue.fingerprint,
-        metadata: stamp,
-      });
-      continue;
-    }
-    const quietFor = now.getTime() - ms(issue.last_seen);
-    if (
+      metadata = stamp;
+    } else if (
       ["new", "ongoing", "escalating", "regressed"].includes(issue.status) &&
       quietFor >= RULES.resolveAfterQuietDays * DAY
     ) {
-      changes.push({
-        action: "update",
-        id: issue.id,
-        fingerprint: issue.fingerprint,
-        metadata: {
-          status: "resolved",
-          resolved_at: now.toISOString(),
-          resolution: "auto",
-        },
-      });
+      metadata = {
+        status: "resolved",
+        resolved_at: now.toISOString(),
+        resolution: "auto",
+      };
     } else if (issue.status === "escalating") {
+      metadata = { status: ageStatus(issue, now) };
+    }
+    if (metadata || Object.keys(counts).length > 0) {
       changes.push({
         action: "update",
         id: issue.id,
         fingerprint: issue.fingerprint,
-        metadata: { status: ageStatus(issue, now) },
+        metadata: { ...metadata, ...counts },
       });
     }
   }
@@ -469,6 +468,7 @@ function toIssue(row: Record<string, unknown>): IssueRecord | null {
     escalated_at: str(m.escalated_at) || undefined,
     resolved_in_release: str(m.resolved_in_release) || undefined,
     ignore_until: str(m.ignore_until) || undefined,
+    seen_24h: m.seen_24h === undefined ? undefined : num(m.seen_24h),
     deleted: row.deleted === true,
   };
 }

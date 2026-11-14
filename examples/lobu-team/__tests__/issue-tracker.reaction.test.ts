@@ -285,6 +285,34 @@ describe("issue lifecycle", () => {
     ]);
   });
 
+  test("a quiet issue's 24h count drops to zero a day after its last sighting", () => {
+    // Counters refresh only for fingerprints seen in the last two hours, so a
+    // quiet issue would keep its last seen_24h and outrank live ones forever.
+    expect(plan([], [issue({ last_seen: ago(25), seen_24h: 197 })])).toEqual([
+      {
+        action: "update",
+        id: 7,
+        fingerprint: FP(1),
+        metadata: { seen_24h: 0 },
+      },
+    ]);
+    expect(plan([], [issue({ last_seen: ago(5), seen_24h: 197 })])).toEqual([]);
+    expect(plan([], [issue({ last_seen: ago(25), seen_24h: 0 })])).toEqual([]);
+    expect(
+      plan(
+        [],
+        [issue({ status: "escalating", last_seen: ago(25), seen_24h: 40 })]
+      )
+    ).toEqual([
+      {
+        action: "update",
+        id: 7,
+        fingerprint: FP(1),
+        metadata: { status: "ongoing", seen_24h: 0 },
+      },
+    ]);
+  });
+
   test("open issues quiet for two weeks auto-resolve; others are left alone", () => {
     const quiet = ago(24 * RULES.resolveAfterQuietDays);
     expect(
