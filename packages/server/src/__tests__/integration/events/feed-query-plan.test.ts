@@ -14,9 +14,14 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { DbClient } from '../../../db/client';
 import { listContentInternal } from '../../../utils/content-search/list-path';
-import { searchContentBySingleQuery } from '../../../utils/content-search/search-path';
+import { runBoundedRecallQuery, searchContentBySingleQuery } from '../../../utils/content-search/search-path';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
-import { createTestOrganization } from '../../setup/test-fixtures';
+import {
+  createTestConnection,
+  createTestConnectorDefinition,
+  createTestOrganization,
+  createTestUser,
+} from '../../setup/test-fixtures';
 
 const FEED_EVENTS = 3_000;
 const OTHER_EVENTS = 60_000;
@@ -67,12 +72,12 @@ interface PlanNode {
   Plans?: PlanNode[];
 }
 
-async function planOf({ query, params }: CapturedQuery, analyze = false): Promise<PlanNode[]> {
+async function planOf({ query, params }: CapturedQuery, analyze = false, recall = false): Promise<PlanNode[]> {
   const sql = getTestDb() as unknown as DbClient;
-  const rows = await sql.unsafe<{ 'QUERY PLAN': { Plan: PlanNode }[] }>(
-    `EXPLAIN (${analyze ? 'ANALYZE, BUFFERS, TIMING OFF, ' : ''}FORMAT JSON) ${query}`,
-    params
-  );
+  const explain = `EXPLAIN (${analyze ? 'ANALYZE, BUFFERS, TIMING OFF, ' : ''}FORMAT JSON) ${query}`;
+  const rows = (recall
+    ? await runBoundedRecallQuery(sql, explain, params)
+    : await sql.unsafe(explain, params)) as unknown as { 'QUERY PLAN': { Plan: PlanNode }[] }[];
   const nodes: PlanNode[] = [];
   const visit = (node: PlanNode) => {
     nodes.push(node);
@@ -218,4 +223,68 @@ describe('activity feed queries stay organization-bounded', () => {
       expect(examined).toBeLessThanOrEqual(FEED_EVENTS);
     }
   });
+
+  it('vector recall keeps its distance index with visibility and bookkeeping filters', async () => {
+    const sql = getTestDb();
+    const user = await createTestUser({ email: 'vector-plan@example.com' });
+    const owner = await createTestUser({ email: 'vector-plan-owner@example.com' });
+    await createTestConnectorDefinition({ key: 'vector-plan-source', name: 'Vector plan source' });
+    const privateConnection = await createTestConnection({
+      organization_id: feedOrgId,
+      connector_key: 'vector-plan-source',
+      created_by: owner.id,
+      visibility: 'private',
+      createDefaultFeed: false,
+    });
+    // Vary distances independently of organization/id order. Both organizations
+    // share one ANN index, as in production. Over 600 nearer own rows are either
+    // private or bookkeeping: filtering after the chunk cap loses visible hits.
+    await sql`
+      INSERT INTO event_embeddings (event_id, embedding_model, embedding)
+      SELECT id, 'Xenova/bge-base-en-v1.5',
+        (CASE WHEN organization_id = ${feedOrgId} AND
+            (origin_id LIKE 'own-1%' OR origin_id LIKE 'own-2%')
+          THEN '[1,0,0' || repeat(',0', 765) || ']'
+          ELSE '[1,' || (sin(id * 0.731) * 0.5 + 0.5)::text || ',' ||
+            (cos(id * 0.137) * 0.5)::text || repeat(',0', 765) || ']'
+          END)::vector
+      FROM events
+    `;
+    await sql`UPDATE events SET semantic_type = 'audit', origin_type = 'tool_invocation'
+      WHERE organization_id = ${feedOrgId} AND origin_id LIKE 'own-1%'`;
+    await sql`UPDATE events SET connection_id = ${privateConnection.id}
+      WHERE organization_id = ${feedOrgId} AND origin_id LIKE 'own-2%'`;
+    await sql.begin(async (tx) => {
+      await tx`SET LOCAL maintenance_work_mem = '512MB'`;
+      await tx`REINDEX INDEX idx_events_embedding`;
+    });
+    await sql`ANALYZE event_embeddings`;
+    await sql`ANALYZE events`;
+
+    const captured: CapturedQuery[] = [];
+    const result = await searchContentBySingleQuery(
+      capturingClient(sql, captured),
+      'zz', // no text arms: every returned result must come from vector recall
+      {
+        organization_id: feedOrgId,
+        visibility_scope: { organizationId: feedOrgId, userId: user.id },
+        exclude_internal_ops: true,
+        exclude_recall_bookkeeping: true,
+        sort_by: 'score',
+        limit: 30,
+        include_total: false,
+        approximate_candidate_search: true,
+        query_embedding: Array.from({ length: 768 }, (_, i) => i === 0 ? 1 : 0),
+      }
+    );
+    expect(result.content).toHaveLength(30);
+    expect(result.content.every((row) => row.origin_id.startsWith('own-') &&
+      !row.origin_id.startsWith('own-1') && !row.origin_id.startsWith('own-2'))).toBe(true);
+    const search = captured.find((c) => /search_candidates AS/.test(c.query));
+    if (!search) throw new Error('search did not issue a candidate query');
+    const plan = await planOf(search, true, true);
+    expect(plan.some((node) => node['Index Name'] === 'idx_events_embedding')).toBe(true);
+    const embeddingScans = plan.filter((node) => node['Relation Name'] === 'event_embeddings');
+    expect(embeddingScans.some((node) => node['Node Type'] === 'Seq Scan')).toBe(false);
+  }, 120_000);
 });

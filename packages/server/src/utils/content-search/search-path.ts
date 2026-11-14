@@ -550,13 +550,21 @@ export async function searchContentBySingleQuery(
     // ... LIMIT is the index-served part; the outer GROUP BY runs over the small
     // over-fetched set. Downstream filters applied before the LIMIT so a filtered
     // recall doesn't discard everything after an unfiltered pick.
+    // Keep the visibility/anti-join predicates in a parameterized event lookup.
+    // Flattening them into the ANN join can make the planner scan and sort all
+    // scoped embeddings instead of walking the distance index. OFFSET 0 keeps
+    // this lookup keyed by each index candidate without moving filters past LIMIT.
     branches.push(`SELECT id FROM (
             SELECT emb.event_id AS id, (emb.embedding <=> ${vecParam}) AS dist
             FROM event_embeddings emb
-            JOIN current_event_records f ON f.id = emb.event_id
-            ${candidateFilterJoins}
-            WHERE ${standardFiltersSQL}
-              AND ${modelScopeFor('emb')}
+            JOIN LATERAL (
+              SELECT f.id
+              FROM current_event_records f
+              ${candidateFilterJoins}
+              WHERE f.id = emb.event_id AND ${standardFiltersSQL}
+              OFFSET 0
+            ) visible_event ON true
+            WHERE ${modelScopeFor('emb')}
               AND (1 - (emb.embedding <=> ${vecParam})) >= ${minSimilarityParam}
             ORDER BY emb.embedding <=> ${vecParam}
             LIMIT ${CANDIDATE_VECTOR_LIMIT * 3}
