@@ -15,7 +15,7 @@ import { ToolUserError } from '../../../utils/errors';
 import { isUniqueViolation } from '../../../utils/pg-errors';
 import { nextRunAt } from '../../../utils/cron';
 import { intervals } from '../../../config/intervals';
-import { recordChangeEvent, recordLifecycleEvent } from '../../../utils/insert-event';
+import { recordChangeEvent, recordLifecycleEvent, stableJson } from '../../../utils/insert-event';
 import { insertToolConfigChange } from '../helpers/config-audit';
 import logger from '../../../utils/logger';
 import { buildAutomationUrl, getOrganizationSlug, getPublicWebUrl } from '../../../utils/url-builder';
@@ -98,21 +98,6 @@ function stripChatLinkTriggers(triggers: unknown): unknown {
   });
 }
 
-function canonicalizeJson(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonicalizeJson);
-  if (value !== null && typeof value === 'object') {
-    const out: Record<string, unknown> = {};
-    for (const key of Object.keys(value as Record<string, unknown>).sort()) {
-      out[key] = canonicalizeJson((value as Record<string, unknown>)[key]);
-    }
-    return out;
-  }
-  return value;
-}
-
-function stableJson(value: unknown): string {
-  return JSON.stringify(canonicalizeJson(value ?? null));
-}
 
 // ============================================
 // handleCreate

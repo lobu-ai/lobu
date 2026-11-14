@@ -226,6 +226,11 @@ export interface InsertedEvent {
 /** Key-order-independent JSON serialization for semantic equality checks. */
 export function stableJson(value: unknown): string {
   if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  // Honor toJSON as JSON.stringify does. A Date has no enumerable keys, so
+  // without this every timestamp (Postgres returns them as Date) would
+  // serialize as {} and two different instants would compare equal.
+  const toJSON = (value as { toJSON?: unknown }).toJSON;
+  if (typeof toJSON === 'function') return stableJson(toJSON.call(value));
   if (Array.isArray(value)) return `[${value.map((item) => stableJson(item)).join(',')}]`;
   const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) =>
     a.localeCompare(b)
