@@ -1,14 +1,11 @@
 /**
- * Org-wide activity feed paging: the disjoint-arm candidate set and the
- * `include_total` opt-out.
+ * Org-wide activity feed paging and the `include_total` opt-out.
  *
- * Under LOBU_LINKED_ORG_SCOPE the date feed no longer scans one OR predicate;
- * it reads the direct-org arm and the linked-org arm as separate ordered,
- * LIMITed scans and merges them. These tests pin that the merge is invisible:
- * every page (first, `before` cursor, `after` cursor) returns exactly the ids
- * and order of one ordered scan over the OR predicate, including linked rows,
- * NULL-occurred_at rows ranked by created_at, and a row that matches BOTH arms
- * (which must appear once).
+ * The feed shows the events its organization owns and nothing else: another
+ * organization's rows on the same timeline never appear, including one that
+ * tags a record of the feed organization. Every page (first, `before` cursor,
+ * `after` cursor) returns exactly the ids and order of one ordered scan,
+ * including NULL-occurred_at rows ranked by created_at.
  *
  * They also pin `include_total`: omitted keeps the exact total; `false`
  * returns `total: null` with a has_more that is still right on the date feed,
@@ -24,6 +21,7 @@ import { initWorkspaceProvider } from '../../../workspace';
 import { cleanupTestDatabase } from '../../setup/test-db';
 import {
   addUserToOrganization,
+  createTestEntity,
   createTestEvent,
   createTestOrganization,
   createTestUser,
@@ -31,18 +29,14 @@ import {
 
 const HOUR = 3_600_000;
 
-describe('org-wide feed paging (disjoint org-scope arms + include_total)', () => {
+describe('org-wide feed paging (owner-only scope + include_total)', () => {
   let feedOrg: Awaited<ReturnType<typeof createTestOrganization>>;
   let otherOrg: Awaited<ReturnType<typeof createTestOrganization>>;
   let feedUserId: string;
   /** Every id the feed org may see, in feed order (newest effective time first). */
   let expectedDesc: number[];
-  let bothArmsId: number;
-  let linkedIds: number[];
-  const previousFlag = process.env.LOBU_LINKED_ORG_SCOPE;
 
   beforeAll(async () => {
-    process.env.LOBU_LINKED_ORG_SCOPE = '1';
     await initWorkspaceProvider();
     await cleanupTestDatabase();
 
@@ -54,46 +48,33 @@ describe('org-wide feed paging (disjoint org-scope arms + include_total)', () =>
 
     const base = Date.now() - 100 * HOUR;
     const sql = getDb();
-    // Interleave direct and linked rows on one timeline so a page boundary
-    // always splits both arms. Two rows share an occurred_at to exercise the
-    // id tiebreaker.
-    const plan: Array<{ org: 'feed' | 'other'; linked: boolean; at: number }> = [];
-    for (let i = 0; i < 14; i++) {
-      plan.push({ org: i % 3 === 0 ? 'other' : 'feed', linked: i % 3 === 0, at: base + i * HOUR });
-    }
-    plan.push({ org: 'feed', linked: false, at: base + 5 * HOUR });
-    // A foreign row with no link: must never appear.
-    plan.push({ org: 'other', linked: false, at: base + 7 * HOUR });
+    // Two rows share an occurred_at to exercise the id tiebreaker.
+    const plan: Array<{ org: 'feed' | 'other'; at: number; entity_id?: number }> = [];
+    for (let i = 0; i < 14; i++) plan.push({ org: 'feed', at: base + i * HOUR });
+    plan.push({ org: 'feed', at: base + 5 * HOUR });
+    // Another organization's rows on the same timeline must never appear, not
+    // even one that tags a record of the feed organization.
+    for (const i of [0, 3, 7, 12]) plan.push({ org: 'other', at: base + i * HOUR });
+    const feedEntity = await createTestEntity({ name: 'Feed Paging Record', organization_id: feedOrg.id });
+    plan.push({ org: 'other', at: base + 9 * HOUR, entity_id: feedEntity.id });
 
-    const created: Array<{ id: number; org: 'feed' | 'other'; linked: boolean }> = [];
+    const created: Array<{ id: number; org: 'feed' | 'other' }> = [];
     for (const [i, row] of plan.entries()) {
       const event = await createTestEvent({
         organization_id: row.org === 'feed' ? feedOrg.id : otherOrg.id,
+        ...(row.entity_id ? { entity_id: row.entity_id } : {}),
         content: `feed paging row ${i} searchable-marker`,
         occurred_at: new Date(row.at),
         created_at: new Date(row.at),
       });
-      created.push({ id: event.id, org: row.org, linked: row.linked });
+      created.push({ id: event.id, org: row.org });
     }
-    linkedIds = created.filter((r) => r.linked).map((r) => r.id);
-    await sql`
-      UPDATE events SET linked_org_ids = ARRAY[${feedOrg.id}]::text[]
-      WHERE id = ANY(${`{${linkedIds.join(',')}}`}::bigint[])
-    `;
-    await sql`
-      UPDATE events SET linked_org_ids = '{}'::text[]
-      WHERE id = ANY(${`{${created.filter((r) => !r.linked).map((r) => r.id).join(',')}}`}::bigint[])
-    `;
-    // A direct row that ALSO lists its own org as linked: it satisfies both
-    // arms and must be returned once.
-    bothArmsId = created[1].id;
-    await sql`UPDATE events SET linked_org_ids = ARRAY[${feedOrg.id}]::text[] WHERE id = ${bothArmsId}`;
     // A NULL-occurred_at row ranks by created_at (the effective time).
     await sql`UPDATE events SET occurred_at = NULL WHERE id = ${created[4].id}`;
 
     const rows = await sql`
       SELECT id FROM current_event_records f
-      WHERE (f.organization_id = ${feedOrg.id} OR f.linked_org_ids @> ARRAY[${feedOrg.id}]::text[])
+      WHERE f.organization_id = ${feedOrg.id}
         AND (f.occurred_at IS NULL OR f.occurred_at <= now())
       ORDER BY COALESCE(f.occurred_at, f.created_at) DESC, f.id DESC
     `;
@@ -101,8 +82,6 @@ describe('org-wide feed paging (disjoint org-scope arms + include_total)', () =>
   }, 60_000);
 
   afterAll(async () => {
-    if (previousFlag === undefined) delete process.env.LOBU_LINKED_ORG_SCOPE;
-    else process.env.LOBU_LINKED_ORG_SCOPE = previousFlag;
     await cleanupTestDatabase();
   });
 
@@ -114,11 +93,8 @@ describe('org-wide feed paging (disjoint org-scope arms + include_total)', () =>
     id: row.id,
   });
 
-  it('fixture covers linked rows, a both-arms row, and excludes foreign rows', () => {
-    // 10 direct (one also self-linked) + 5 linked; the unlinked foreign row is out.
+  it('fixture holds the fifteen rows the feed organization owns', () => {
     expect(expectedDesc.length).toBe(15);
-    for (const id of linkedIds) expect(expectedDesc).toContain(id);
-    expect(expectedDesc.filter((id) => id === bothArmsId)).toHaveLength(1);
   });
 
   it('walks every before-cursor page in exactly the single-scan order', async () => {
@@ -137,7 +113,7 @@ describe('org-wide feed paging (disjoint org-scope arms + include_total)', () =>
     expect(seen).toEqual(expectedDesc);
   });
 
-  it('a since window counts both arms exactly once', async () => {
+  it('a since window keeps the exact total', async () => {
     const sql = getDb();
     const [{ min }] = await sql`
       SELECT MIN(occurred_at) AS min FROM events WHERE id = ANY(${`{${expectedDesc.join(',')}}`}::bigint[])
@@ -145,14 +121,12 @@ describe('org-wide feed paging (disjoint org-scope arms + include_total)', () =>
     const since = new Date(new Date(min).getTime() + 6.5 * HOUR).toISOString();
     const rows = await sql`
       SELECT id FROM current_event_records f
-      WHERE (f.organization_id = ${feedOrg.id} OR f.linked_org_ids @> ARRAY[${feedOrg.id}]::text[])
+      WHERE f.organization_id = ${feedOrg.id}
         AND f.occurred_at <= now() AND f.occurred_at >= ${since}::timestamptz
       ORDER BY COALESCE(f.occurred_at, f.created_at) DESC, f.id DESC
     `;
     const windowed = rows.map((r) => Number(r.id));
-    // Keep matches from both arms while excluding part of the history.
-    expect(windowed.some((id) => linkedIds.includes(id))).toBe(true);
-    expect(windowed.some((id) => !linkedIds.includes(id))).toBe(true);
+    expect(windowed.length).toBeGreaterThan(0);
     expect(windowed.length).toBeLessThan(expectedDesc.length);
 
     const page = await feed({ since, limit: 50 });
@@ -271,7 +245,7 @@ describe('org-wide feed paging (disjoint org-scope arms + include_total)', () =>
     expect(seen).toEqual(expectedAsc);
   });
 
-  it.each([true, false])('paginates text search across both org arms with cursors and include_total=%s', async (includeTotal) => {
+  it.each([true, false])('paginates text search with cursors and include_total=%s', async (includeTotal) => {
     const options = {
       organization_id: feedOrg.id,
       sort_by: 'date' as const,
@@ -308,7 +282,7 @@ describe('org-wide feed paging (disjoint org-scope arms + include_total)', () =>
     expect(newer.page.has_newer).toBe(true);
   });
 
-  it('keeps the exact search total across both org arms on an empty offset page', async () => {
+  it('keeps the exact search total on an empty offset page', async () => {
     const page = await searchContentByText('searchable-marker', {
       organization_id: feedOrg.id,
       sort_by: 'score',

@@ -620,6 +620,7 @@ export const EVENT_SUPERSEDE_RULES = {
   search_tsv: 'version',
   identity_ns: 'chain',
   identity_key: 'chain',
+  // Retired: no longer written or read. The entry goes with the column drop.
   linked_org_ids: 'version',
 } as const satisfies Record<string, 'chain' | 'lineage' | 'version'>;
 
@@ -925,8 +926,7 @@ export async function insertEvent(
       semantic_type, client_id, created_by,
       interaction_type, interaction_status, interaction_input_schema, interaction_input,
       interaction_output, interaction_error, supersedes_event_id,
-      identity_ns, identity_key,
-      linked_org_ids
+      identity_ns, identity_key
     ) VALUES (
       ${entityIdsValue}::bigint[],
       ${params.organizationId},
@@ -962,21 +962,7 @@ export async function insertEvent(
       ${params.interactionError ?? null},
       ${supersedesEventId},
       ${lineage.identity_ns},
-      ${lineage.identity_key},
-      (
-        SELECT COALESCE(array_agg(DISTINCT x.o), '{}'::text[])
-        FROM (
-          SELECT ent.organization_id AS o
-          FROM public.entities ent
-          WHERE ent.id = ANY(${entityIdsValue}::bigint[])
-          UNION ALL
-          SELECT c.organization_id AS o
-          FROM public.connections c
-          WHERE c.id = ${lineage.connection_id}
-        ) x
-        WHERE x.o IS NOT NULL
-          AND (x.o <> ${params.organizationId}::text OR ${params.organizationId}::text IS NULL)
-      )
+      ${lineage.identity_key}
     )
     RETURNING id, entity_ids, origin_id, title, semantic_type, created_at
   `;

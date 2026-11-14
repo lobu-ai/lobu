@@ -55,28 +55,38 @@ describe('#2214 classification_filters', () => {
               'audit', NOW(), NOW())
       RETURNING id
     `;
-    const entityBridgeEvent = await createTestEvent({
-      organization_id: otherOrg.id,
+    const entityEvent = await createTestEvent({
+      organization_id: org.id,
       entity_id: entity.id,
       origin_id: 'cls-repro-entity',
-      title: 'entity bridge row',
-      content: 'entity bridge row',
+      title: 'entity row',
+      content: 'entity row',
     });
-    const connectionBridgeEvent = await createTestEvent({
-      organization_id: otherOrg.id,
+    const connectionEvent = await createTestEvent({
+      organization_id: org.id,
       connection_id: connection.id,
       entity_ids: [],
       origin_id: 'cls-repro-connection',
-      title: 'connection bridge row',
-      content: 'connection bridge row',
+      title: 'connection row',
+      content: 'connection row',
     });
-    const foreignEvent = await createTestEvent({
-      organization_id: otherOrg.id,
-      entity_id: otherEntity.id,
-      origin_id: 'cls-repro-foreign',
-      title: 'foreign row',
-      content: 'foreign row',
-    });
+    // Owned by another organization: out of scope, even when tagging our entity.
+    const foreignEvents = [
+      await createTestEvent({
+        organization_id: otherOrg.id,
+        entity_id: otherEntity.id,
+        origin_id: 'cls-repro-foreign',
+        title: 'foreign row',
+        content: 'foreign row',
+      }),
+      await createTestEvent({
+        organization_id: otherOrg.id,
+        entity_id: entity.id,
+        origin_id: 'cls-repro-foreign-tagged',
+        title: 'foreign tagged row',
+        content: 'foreign tagged row',
+      }),
+    ];
     await createTestEvent({
       organization_id: org.id,
       entity_ids: [],
@@ -96,10 +106,10 @@ describe('#2214 classification_filters', () => {
 
     expectedEventIds = [
       directOrgEvent.id,
-      entityBridgeEvent.id,
-      connectionBridgeEvent.id,
+      entityEvent.id,
+      connectionEvent.id,
     ];
-    for (const eventId of [...expectedEventIds, foreignEvent.id]) {
+    for (const eventId of [...expectedEventIds, ...foreignEvents.map((event) => event.id)]) {
       await sql`
         INSERT INTO event_classifications (event_id, classifier_id, automation_id, run_id,
                                            "values", confidences, source, is_manual)
@@ -120,7 +130,7 @@ describe('#2214 classification_filters', () => {
     } as ToolContext;
   });
 
-  it('applies classification filters across every organization-scope path', async () => {
+  it('applies classification filters to unattached, entity-linked and connection-sourced rows', async () => {
     const result = await getContent(
       { classification_filters: { 'repro-kind': ['alpha'] }, limit: 100 } as never,
       {} as never,
@@ -142,7 +152,7 @@ describe('#2214 classification_filters', () => {
   });
 
   describe.each(['date', 'score'] as const)('%s-sorted text search', (sort_by) => {
-    it('applies classification filters across every organization-scope path', async () => {
+    it('applies classification filters to unattached, entity-linked and connection-sourced rows', async () => {
       const result = await getContent(
         { query: 'row', sort_by, classification_filters: { 'repro-kind': ['alpha'] }, limit: 100 },
         {} as never,

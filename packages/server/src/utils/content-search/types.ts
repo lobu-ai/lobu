@@ -11,15 +11,6 @@ export interface ContentSearchOptions {
   // Entity filtering
   entity_id?: number;
   organization_id?: string; // Required when entity_id is omitted (org-wide mode)
-  /**
-   * Keep the organization fence even when entity_id is present. Direct MCP
-   * search uses this for conjunctive `{ entity_id, query }` recall so a public
-   * or foreign entity id can never widen content search into another tenant.
-   * Other legacy readers retain their existing entity-id-only semantics unless
-   * they opt in explicitly.
-   */
-  strict_organization_scope?: boolean;
-
   connection_ids?: number[]; // Array of connection IDs to filter by
   feed_ids?: number[]; // Array of feed IDs to filter by
   run_ids?: number[]; // Array of run IDs (events.run_id) to filter by

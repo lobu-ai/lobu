@@ -88,42 +88,16 @@ describe('buildScopedQuery events CTE — per-user connection visibility (S0)', 
 });
 
 
-describe('buildScopedQuery org scope — denormalized linked_org_ids seam', () => {
-  it('flag off (default): legacy OR/EXISTS bridge over entities + connection', () => {
-    delete process.env.LOBU_LINKED_ORG_SCOPE;
-    const { sql } = buildScopedQuery('SELECT * FROM events', ['events'], {
-      organizationId: 'org_test',
-    });
-    expect(sql).toContain('EXISTS (SELECT 1 FROM public.entities ent');
-    expect(sql).toContain('EXISTS (SELECT 1 FROM public.connections con');
-    expect(sql).not.toContain('linked_org_ids');
-  });
-
-  it('flag on: events CTE uses the GIN-indexed containment predicate', () => {
-    process.env.LOBU_LINKED_ORG_SCOPE = '1';
-    try {
-      const { sql } = buildScopedQuery('SELECT * FROM events', ['events'], {
-        organizationId: 'org_test',
-      });
-      expect(sql).toContain('ev.linked_org_ids @> ARRAY[');
-      expect(sql).not.toContain('EXISTS (SELECT 1 FROM public.entities ent');
-      expect(sql).not.toContain('EXISTS (SELECT 1 FROM public.connections con');
-    } finally {
-      delete process.env.LOBU_LINKED_ORG_SCOPE;
-    }
-  });
-
-  it('flag on: event_classifications visibility EXISTS uses the same seam', () => {
-    process.env.LOBU_LINKED_ORG_SCOPE = '1';
-    try {
-      const { sql } = buildScopedQuery(
-        'SELECT excerpts FROM event_classifications',
-        ['event_classifications'],
-        { organizationId: 'org_test' }
-      );
-      expect(sql).toContain('ev.linked_org_ids @> ARRAY[');
-    } finally {
-      delete process.env.LOBU_LINKED_ORG_SCOPE;
+describe('buildScopedQuery org scope', () => {
+  it('scopes events and their classifications to the owning organization only', () => {
+    for (const [query, table] of [
+      ['SELECT * FROM events', 'events'],
+      ['SELECT excerpts FROM event_classifications', 'event_classifications'],
+    ] as const) {
+      const { sql } = buildScopedQuery(query, [table], { organizationId: 'org_test' });
+      expect(sql).toContain('ev.organization_id = $1');
+      expect(sql).not.toContain('linked_org_ids');
+      expect(sql).not.toContain('public.entities ent');
     }
   });
 

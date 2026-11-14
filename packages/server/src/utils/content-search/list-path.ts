@@ -68,17 +68,17 @@ import {
  * `candidate_set/result_set` vs `result_set` CTE pair, param indexing, dedup,
  * and the response shape — is identical, so it lives here.
  *
- * `orgScope` stays structured rather than pre-spliced into `whereExpr`:
- * org-wide date feeds merge separately limited direct and linked candidates
- * (see `buildDateCandidateSetSql`). Only the direct arm has an ordered index.
+ * `orgScope` stays separate from `whereExpr` so an org-wide read can restate
+ * its date bounds on the indexed recency key next to the organization
+ * predicate (`orgWideRangeSql`).
  */
 async function executeListQuery(args: {
   sql: DbClient;
   joinSql: string;
   whereExpr: string;
   orgScope: OrgScopeWhere;
-  /** Redundant since/until bound on the indexed recency key; direct arm only. */
-  directArmRangeSql: string;
+  /** Redundant since/until bound on the indexed recency key; org-wide reads only. */
+  orgWideRangeSql: string;
   countParams: any[];
   entityId: number | null;
   threadEntityLinkSqlForP: string | undefined;
@@ -104,18 +104,15 @@ async function executeListQuery(args: {
     });
   const whereExpr = `${args.whereExpr} ${args.orgScope.sql}`;
 
-  const countFrom = (scopeSql: string) => `FROM current_event_records f
+  // An org-wide read carries `f.organization_id = $org`; the range bound then
+  // becomes an index condition after it on idx_events_live_org_effective_date.
+  // Entity-scoped reads are narrowed by the entity link instead.
+  const orgWide = args.entityId == null && args.orgScope.sql !== '';
+  const orgWideRangeSql = orgWide ? args.orgWideRangeSql : '';
+  const countSql = `SELECT COUNT(*) as total FROM current_event_records f
       LEFT JOIN connections c ON c.id = f.connection_id
       ${joinSql}
-      WHERE ${args.whereExpr} ${scopeSql}`;
-  // Sum the same disjoint arms as buildDateCandidateSetSql so the planner can
-  // use each arm's index. Entity-scoped reads keep their single predicate.
-  const countBranches = args.entityId == null ? args.orgScope.branches : null;
-  const countSql = countBranches
-    ? `SELECT
-        (SELECT COUNT(*) ${countFrom(`AND ${countBranches.direct} ${args.directArmRangeSql}`)})
-        + (SELECT COUNT(*) ${countFrom(`AND ${countBranches.linked}`)}) AS total`
-    : `SELECT COUNT(*) as total ${countFrom(args.orgScope.sql)}`;
+      WHERE ${whereExpr} ${orgWideRangeSql}`;
 
   const cursorClause = buildDateCursorClause(
     args.cursor,
@@ -145,19 +142,9 @@ async function executeListQuery(args: {
   if (args.useDateFeed) {
     const candidateSetSql = buildDateCandidateSetSql({
       joinSql,
-      whereExpr: args.whereExpr,
-      // Entity-scoped feeds are already narrowed by the entity link; keep their
-      // scope (normally empty) as one predicate.
-      orgScope: args.entityId == null ? args.orgScope : { ...args.orgScope, branches: null },
+      whereExpr,
       cursorSql: cursorClause.sql,
-      // Same params, keyed on the fenced linked arm's output alias.
-      linkedCursorSql: buildDateCursorClause(
-        args.cursor,
-        'COALESCE(l.occurred_at, l.created_at)',
-        'l.id',
-        countParams.length + 1
-      ).sql,
-      directArmRangeSql: `${cursorClause.rangeSql} ${args.directArmRangeSql}`,
+      rangeSql: orgWide ? `${cursorClause.rangeSql} ${orgWideRangeSql}` : '',
       cursor: args.cursor,
       limitParam: `$${limitIdx}`,
     });
@@ -293,72 +280,34 @@ async function executeListQuery(args: {
  * Body of the date feed's `candidate_set` CTE: the newest (or, after an
  * `after` cursor, oldest) `limitParam` matching ids in cursor order.
  *
- * When the org scope splits into disjoint arms, each arm is its own ordered,
- * LIMITed scan and the arms merge under the same order and LIMIT. That is the
- * same row set as one scan over their OR — the arms are disjoint and each
- * keeps its own top-N, so the global top-N is inside their union — but the
- * direct arm now carries `f.organization_id = $org` as an index condition on
- * idx_events_live_org_effective_date, which also matches the ORDER BY. The
- * direct scan can stop after enough rows pass the remaining filters.
+ * `whereExpr` is the full WHERE body including the org scope. On an org-wide
+ * read `f.organization_id = $org` is an index condition on
+ * idx_events_live_org_effective_date, which also matches the ORDER BY, so the
+ * scan can stop after enough rows pass the remaining filters.
  */
 export function buildDateCandidateSetSql(args: {
   joinSql: string;
   whereExpr: string;
-  orgScope: OrgScopeWhere | null;
   cursorSql: string;
-  /** `cursorSql` over alias `l`, applied above the linked arm's fence. */
-  linkedCursorSql: string;
   /**
-   * Bounds implied by the filters/cursor, restated on the indexed recency key.
-   * Only the direct arm gets them: there they become an index condition after
-   * `organization_id`. Linked rows span organizations, so these bounds can
-   * instead encourage a skip scan across the entire (org, time) index.
+   * Bounds implied by the filters/cursor, restated on the indexed recency key
+   * so they become an index condition after `organization_id`. Empty unless
+   * the read is org-wide.
    */
-  directArmRangeSql: string;
+  rangeSql: string;
   cursor: ReturnType<typeof resolveDateCursor>;
   limitParam: string;
 }): string {
-  const arm = (scopeSql: string) => `SELECT
+  return `SELECT
           f.id,
           f.occurred_at,
           f.created_at
         FROM current_event_records f
         LEFT JOIN connections c ON c.id = f.connection_id
         ${args.joinSql}
-        WHERE ${args.whereExpr} ${scopeSql}
+        WHERE ${args.whereExpr} ${args.rangeSql}
           ${args.cursorSql}
         ORDER BY ${buildDateCandidateOrderBy(args.cursor, 'f')}
-        LIMIT ${args.limitParam}`;
-
-  const branches = args.orgScope?.branches;
-  if (!branches) return arm(args.orgScope?.sql ?? '');
-
-  // Keep cursor bounds above the linked-row scan with an OFFSET 0 fence.
-  // Otherwise the planner can combine the linked_org_ids GIN bitmap with
-  // a skip scan of the whole (org, time) index. Linked matches still need sorting.
-  const linkedArm = `SELECT l.id, l.occurred_at, l.created_at
-        FROM (
-          SELECT
-            f.id,
-            f.occurred_at,
-            f.created_at
-          FROM current_event_records f
-          LEFT JOIN connections c ON c.id = f.connection_id
-          ${args.joinSql}
-          WHERE ${args.whereExpr} AND ${branches.linked}
-          OFFSET 0
-        ) l
-        WHERE TRUE ${args.linkedCursorSql}
-        ORDER BY ${buildDateCandidateOrderBy(args.cursor, 'l')}
-        LIMIT ${args.limitParam}`;
-
-  return `SELECT u.id, u.occurred_at, u.created_at
-        FROM (
-          (${arm(`AND ${branches.direct} ${args.directArmRangeSql}`)})
-          UNION ALL
-          (${linkedArm})
-        ) u
-        ORDER BY ${buildDateCandidateOrderBy(args.cursor, 'u')}
         LIMIT ${args.limitParam}`;
 }
 
@@ -445,7 +394,7 @@ export async function listContentInternal(
 
     const baseConditions: string[] = [];
     const baseParams: any[] = [];
-    let orgScope: OrgScopeWhere = { sql: '', params: [], branches: null };
+    let orgScope: OrgScopeWhere = { sql: '', params: [] };
 
     // Pre-built entity-link fragment for thread_meta's recursive walk.
     // When entity_id is set we use the trimmed UNION; otherwise threadMeta
@@ -464,6 +413,7 @@ export async function listContentInternal(
         scopes: entityScopes,
         alias: 'f',
         baseParamIndex: baseParams.length + 1,
+        ownerOrganizationId: organizationId,
       });
       baseConditions.push(link.sql);
       baseParams.push(...link.params);
@@ -476,21 +426,21 @@ export async function listContentInternal(
         // emitted by the outer `link` already in baseParams. We re-bind them
         // by reusing the same $N slots.
         baseParamIndex: baseParams.length - link.params.length + 1,
+        ownerOrganizationId: organizationId,
       }).sql;
-    } else if (organizationId) {
-      // Keep classification-filtered listings on the same direct/entity/
-      // connection org scope as the standard listing path.
-      // The predicate itself is handed to executeListQuery structurally (see
-      // `orgScope` there); only its params take their slot here.
-      orgScope = buildOrgScopeWhere({
-        organization_id: organizationId,
-        baseParamIndex: baseParams.length + 1,
-      });
-      baseParams.push(...orgScope.params);
-      // Avoid treating the organization id in $1 as a bigint entity id while
-      // walking parent threads.
+    } else {
+      // Avoid treating $1 as a bigint entity id while walking parent threads.
       threadEntityLinkSql = 'TRUE';
     }
+    // Keep classification-filtered listings on the same owner scope as the
+    // standard listing path. The predicate itself is handed to
+    // executeListQuery structurally (see `orgScope` there); only its params
+    // take their slot here.
+    orgScope = buildOrgScopeWhere({
+      organization_id: organizationId,
+      baseParamIndex: baseParams.length + 1,
+    });
+    baseParams.push(...orgScope.params);
 
     baseConditions.push(connectionFilterClause);
     baseConditions.push(feedFilterClause);
@@ -560,6 +510,7 @@ export async function listContentInternal(
     ];
     const entityTypesClause = buildEntityTypesFilterClause({
       entity_types: options.entity_types,
+      entity_id: entityId,
       organization_id: organizationId,
       baseParamIndex: filterParamsBeforeEntityTypes.length + 1,
     });
@@ -570,7 +521,7 @@ export async function listContentInternal(
       joinSql: '',
       whereExpr: `${whereSql} ${excludeClause.sql}${producedClause.sql}${analyzedClause.sql} ${visibilityClause.sql}${entityTypesClause.sql} ${futureClause.sql}`,
       orgScope,
-      directArmRangeSql: buildEffectiveAtRangeSql(sinceParam, untilParam),
+      orgWideRangeSql: buildEffectiveAtRangeSql(sinceParam, untilParam),
       countParams: allFilterParams,
       entityId: entityId ?? null,
       threadEntityLinkSqlForP: threadEntityLinkSql,
@@ -608,6 +559,7 @@ export async function listContentInternal(
       scopes: entityScopes,
       alias: 'f',
       baseParamIndex: standardParams.length + 1,
+      ownerOrganizationId: organizationId,
     });
     standardEntityLinkSql = link.sql;
     standardEntityLinkParams = link.params;
@@ -618,6 +570,7 @@ export async function listContentInternal(
       scopes: entityScopes,
       alias: 'p',
       baseParamIndex: standardParams.length + 1,
+      ownerOrganizationId: organizationId,
     }).sql;
   } else {
     // Org-wide / no-entity path keeps the legacy 7-branch UNION because the
@@ -631,7 +584,6 @@ export async function listContentInternal(
 
   const paramsAfterEntityLink = [...standardParams, ...standardEntityLinkParams];
   const orgScope = buildOrgScopeWhere({
-    entity_id: entityId,
     organization_id: organizationId,
     baseParamIndex: paramsAfterEntityLink.length + 1,
   });
@@ -662,6 +614,7 @@ export async function listContentInternal(
   const paramsBeforeEntityTypes = [...paramsBeforeVisibility, ...visibilityClause.params];
   const entityTypesClause = buildEntityTypesFilterClause({
     entity_types: options.entity_types,
+    entity_id: entityId,
     organization_id: organizationId,
     baseParamIndex: paramsBeforeEntityTypes.length + 1,
   });
@@ -703,7 +656,7 @@ export async function listContentInternal(
           ${entityTypesClause.sql} ${resourceClause.sql} ${futureClause.sql}`,
     orgScope,
     // $3/$4 are buildStandardParams' since/until slots.
-    directArmRangeSql: buildEffectiveAtRangeSql('$3::timestamptz', '$4::timestamptz'),
+    orgWideRangeSql: buildEffectiveAtRangeSql('$3::timestamptz', '$4::timestamptz'),
     countParams,
     threadEntityLinkSqlForP: standardEntityLinkSqlForP,
     needClassifications,

@@ -1057,10 +1057,7 @@ async function fetchContentSnippets(
     {
       organization_id: gate.organizationId,
       signal,
-      ...(entityId != null && {
-        entity_id: entityId,
-        strict_organization_scope: true,
-      }),
+      ...(entityId != null && { entity_id: entityId }),
       ...(excludeWorkspaceAudit && { exclude_workspace_audit: true }),
       ...(excludeOperationalTrail && { exclude_operational_trail: true }),
       // Recall is a memory surface, not an ops console: internal tool-invocation
@@ -1719,7 +1716,7 @@ async function searchImpl(
   }
 
   // An explicit public entity is global reference data, so resolve it once.
-  // Every granted workspace may then search only its own/bridged events for
+  // Every granted workspace may then search only its own events for
   // that already-authorized id without repeatedly querying the public catalog.
   const publicEntity =
     args.entity_id && (args.include_public_catalogs ?? true)

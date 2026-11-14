@@ -356,20 +356,7 @@ async function getContentImpl(
             ON et.id = e.entity_type_id
            AND et.deleted_at IS NULL
           WHERE ev.id = ANY(${pgBigintArray(args.content_ids)}::bigint[])
-            AND (
-              ev.organization_id = ${ctx.organizationId}
-              OR ev.linked_org_ids @> ARRAY[${ctx.organizationId}]::text[]
-              OR EXISTS (
-                SELECT 1 FROM entities scoped_entity
-                WHERE scoped_entity.id = ANY(ev.entity_ids)
-                  AND scoped_entity.organization_id = ${ctx.organizationId}
-              )
-              OR EXISTS (
-                SELECT 1 FROM connections scoped_connection
-                WHERE scoped_connection.id = ev.connection_id
-                  AND scoped_connection.organization_id = ${ctx.organizationId}
-              )
-            )
+            AND ev.organization_id = ${ctx.organizationId}
         `;
         requestedRecords.push(...eventTypeRows.flatMap(row => row.id === null ? [] : [{ id: row.id }]));
         for (const row of eventTypeRows) {
@@ -731,7 +718,7 @@ async function getContentImpl(
 
       const searchOptions = {
         entity_id: args.entity_id,
-        organization_id: !args.entity_id ? ctx.organizationId : undefined,
+        organization_id: ctx.organizationId,
         connection_ids: effectiveConnectionIds,
         feed_ids: args.feed_ids,
         run_ids: args.run_ids,

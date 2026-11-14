@@ -365,14 +365,6 @@ describe('historical event presentation conversion', () => {
     expect((await stored(conversion.eventId)).occurred_at).toEqual((await stored(Number(source.id))).occurred_at);
   });
 
-  it('accepts nullable historical empty organization projections without widening access', async () => {
-    const { org, id } = await fixture();
-    await getDb()`UPDATE events SET linked_org_ids = NULL WHERE id = ${id}`;
-    const [result] = await applyEventPresentation(getDb(), await previewEventPresentation(getDb(), org.id, [id]));
-    expect((await stored(result.eventId)).linked_org_ids).toEqual([]);
-    expect((await stored(id)).linked_org_ids).toBeNull();
-  });
-
   it('runs CLI preview, apply and retry against the isolated test database', async () => {
     const { org, id } = await fixture();
     const directory = mkdtempSync(join(tmpdir(), 'event-conversion-cli-'));

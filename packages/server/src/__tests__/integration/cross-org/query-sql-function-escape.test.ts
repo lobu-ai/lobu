@@ -58,7 +58,14 @@ describe('query_sql function escape', () => {
     await addUserToOrganization(user.id, mine.id, 'member');
     organizationId = mine.id;
     userId = user.id;
-    await createTestEntity({ name: 'Home record', organization_id: mine.id });
+    const homeRecord = await createTestEntity({ name: 'Home record', organization_id: mine.id });
+    // Another workspace's event that tags a home record stays in that workspace.
+    await createTestEvent({
+      organization_id: other.id,
+      entity_id: Number(homeRecord.id),
+      content: 'Other org note on a home record',
+      title: 'Other org note on a home record',
+    });
     otherEntityId = Number((await createTestEntity({ name: 'Other org secret', organization_id: other.id })).id);
     await createTestEvent({ organization_id: mine.id, content: 'Home event', title: 'Home event' });
     otherEventId = Number(

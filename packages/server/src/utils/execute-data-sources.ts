@@ -21,7 +21,6 @@ import { boundedQuery, readQueryFailureMessage } from './bounded-read';
 import { QUERY_SQL_STATEMENT_TIMEOUT_MS } from './content-read-bounds';
 import { ToolUserError } from './errors';
 import logger from './logger';
-import { useLinkedOrgScope } from './linked-org-ids';
 import {
   compileConnectionFkVisibility,
   compileConnectionRowVisibility,
@@ -631,31 +630,19 @@ export function buildScopedQuery(
     return ` ${vis.sql}`;
   };
 
-  // Tenancy predicate for an events table (alias has `organization_id`,
-  // `entity_ids`, `connection_id`). Mirrors buildOrgScopeWhere in
-  // content-search.ts: an event is in scope if it was stamped to the caller's
-  // org directly, OR any of its entity_ids belong to the caller's org, OR it
-  // came in through a connection in the caller's org.
+  // Tenancy predicate for an events table (alias has `organization_id`).
+  // Mirrors buildOrgScopeWhere in content-search.ts: an event is in scope when
+  // the caller's org owns it.
   //
-  // Shared by `events` and `event_classifications` on purpose. These were two
-  // hand-written predicates and they drifted: the classifications CTE only ever
-  // implemented the middle disjunct (an entity join), so labels on an
-  // entity-less event were invisible while the event itself was queryable in
-  // the same breath. A classification must be visible exactly when its event
-  // is, and one expression is the only way to keep that true.
+  // Shared by `events` and `event_classifications` on purpose: a
+  // classification must be visible exactly when its event is, and one
+  // expression is the only way to keep that true.
   //
   // Written as ONE template literal on purpose: `+`-joining SQL fragments trips
   // the check-security-patterns string-concat guard, and this fragment is far
   // enough from the whitelisted for-loop below that no `security-allowed:`
   // annotation covers it. Keep it concat-free rather than allowlisting it.
-  const eventOrgScope = (alias: string): string => useLinkedOrgScope()
-    ? `(${alias}.organization_id = ${orgP}
-      OR ${alias}.linked_org_ids @> ARRAY[${orgP}]::text[])`
-    : `(${alias}.organization_id = ${orgP}
-      OR EXISTS (SELECT 1 FROM public.entities ent
-        WHERE ent.id = ANY(${alias}.entity_ids) AND ent.organization_id = ${orgP})
-      OR EXISTS (SELECT 1 FROM public.connections con
-        WHERE con.id = ${alias}.connection_id AND con.organization_id = ${orgP}))`;
+  const eventOrgScope = (alias: string): string => `${alias}.organization_id = ${orgP}`;
 
   // Per-channel membership gate for the `channel_messages` table (alias has
   // `connection_id` + `channel_id`): on an ACL-enforced Slack connection, restrict
