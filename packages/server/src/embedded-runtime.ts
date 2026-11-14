@@ -612,7 +612,7 @@ export async function startEmbeddedRuntime(): Promise<EmbeddedRuntime> {
 			preListenHooks: buildLocalBootstrapHooks(),
 			// The lifecycle has registered its SIGTERM/SIGINT handlers by now.
 			postListenHooks: [releaseSignalHooks],
-			// Runs after stopLobuGateway + closeDbSingleton so gateway connections
+			// Runs after stopLobuGateway + shutdownDb so gateway connections
 			// release before the embeddings child + PG child are stopped. Restore
 			// ancestor ownership/modes only after postgres no longer needs them.
 			extraTeardown: [

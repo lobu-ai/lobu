@@ -31,10 +31,10 @@ import {
   messageTitle,
   normalizeRelayedMessage,
   type ObservationCheckpoint,
+  WHATSAPP_ADAPTER_INSTALL,
   WHATSAPP_ADAPTER_VERSION,
   WHATSAPP_ORIGIN,
 } from "./whatsapp-web-helpers.js";
-import { whatsAppWebAdapterProgram } from "./whatsapp-web-adapter.js";
 
 /**
  * How long a run waits for WhatsApp Web to finish hydrating before giving up.
@@ -119,7 +119,7 @@ async function adapterInstalled(
     tab_id: tabId,
     expression: `(() => {
       const a = globalThis.__owlettoWhatsAppAdapterV1;
-      return !!a && typeof a.invoke === 'function' && a.version === ${WHATSAPP_ADAPTER_VERSION};
+      return !!a && typeof a.invoke === 'function' && a.version === ${JSON.stringify(WHATSAPP_ADAPTER_VERSION)};
     })()`,
     await_promise: false,
   });
@@ -144,7 +144,7 @@ async function injectAdapter(
     exception?: unknown;
   }>("evaluate", {
     tab_id: tabId,
-    expression: `(${whatsAppWebAdapterProgram.toString()})()`,
+    expression: WHATSAPP_ADAPTER_INSTALL,
     await_promise: false,
   });
   if (result.exception) {
@@ -338,6 +338,7 @@ function normalizedSearchResults(
       is_group: message.is_group,
       quoted_id: message.quoted_id ?? null,
       mentions_me: message.mentions_me === true,
+      own_mention_jids: message.own_mention_jids ?? [],
     });
   }
   return rows;
@@ -363,7 +364,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
     name: "WhatsApp",
     description:
       "Personal WhatsApp messages read live from WhatsApp Web in the paired Owletto Chrome without importing message history. Automations react to new-message references and read content on demand. Search, draft, send, edit, react to, and revoke messages.",
-    version: "2.3.0",
+    version: "2.3.1",
     faviconDomain: "whatsapp.com",
     authSchema: { methods: [{ type: "browser", mode: "live" }] },
     browser: {
@@ -371,9 +372,9 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
       accountProbe: {
         url: `${WHATSAPP_ORIGIN}/`,
         expression: `(async () => {
-          (${whatsAppWebAdapterProgram.toString()})();
+          ${WHATSAPP_ADAPTER_INSTALL};
           for (let i = 0; i < 40; i++) {
-            const identity = await globalThis.__owlettoWhatsAppAdapterV1.invoke({ op: "account_identity", adapter_version: ${WHATSAPP_ADAPTER_VERSION} });
+            const identity = await globalThis.__owlettoWhatsAppAdapterV1.invoke({ op: "account_identity", adapter_version: ${JSON.stringify(WHATSAPP_ADAPTER_VERSION)} });
             if (identity?.accountId) return identity;
             await new Promise(resolve => setTimeout(resolve, 250));
           }
@@ -462,7 +463,21 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
               type: "string",
               enum: ["whatsapp_fts", "loaded_model_fallback"],
             },
-            results: { type: "array", items: { type: "object" } },
+            results: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  own_mention_jids: {
+                    type: "array",
+                    maxItems: 2,
+                    uniqueItems: true,
+                    items: { type: "string", pattern: "^[0-9]{5,32}@(s\\.whatsapp\\.net|lid)$" },
+                    description: "Verified phone/LID JIDs of the paired account actually @mentioned; empty for quotes alone. Original text is preserved.",
+                  },
+                },
+              },
+            },
             hasMore: { type: "boolean" },
           },
         },
@@ -710,6 +725,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
         { name: "is_group", type: "boolean" },
         { name: "quoted_id", type: "string" },
         { name: "mentions_me", type: "boolean" },
+        { name: "own_mention_jids", type: "array" },
       ],
       nextCursor: response.nextCursor,
       hasMore: response.hasMore,

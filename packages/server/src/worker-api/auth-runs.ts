@@ -15,6 +15,7 @@ import { getDb } from '../db/client';
 import type { Env } from '../index';
 import { errorMessage } from '../utils/errors';
 import { resolveSession } from '../auth/resolve-session';
+import { routeFailure } from '../diagnostics';
 
 /**
  * GET /api/auth-runs/active?connection_id=X
@@ -54,7 +55,7 @@ export async function getActiveAuthRun(c: Context<{ Bindings: Env }>) {
 
     return c.json({ run_id: rows[0]?.id ?? null });
   } catch (err: unknown) {
-    return c.json({ error: errorMessage(err) }, 500);
+    throw routeFailure(c.json({ error: errorMessage(err) }, 500), err);
   }
 }
 
@@ -144,7 +145,7 @@ export async function getAuthRun(c: Context<{ Bindings: Env }>) {
         : null,
     });
   } catch (err: unknown) {
-    return c.json({ error: errorMessage(err) }, 500);
+    throw routeFailure(c.json({ error: errorMessage(err) }, 500), err);
   }
 }
 
@@ -214,6 +215,6 @@ export async function postAuthSignal(c: Context<{ Bindings: Env }>) {
 
     return c.json({ success: true });
   } catch (err: unknown) {
-    return c.json({ error: errorMessage(err) }, 500);
+    throw routeFailure(c.json({ error: errorMessage(err) }, 500), err);
   }
 }

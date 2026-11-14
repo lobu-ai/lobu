@@ -53,6 +53,7 @@ async function queryMetricImpl(
     segment: args.segment,
     entityId: args.entity_id,
     userId: authzScopeFromToolContext(ctx).principal,
+    signal: ctx.abortSignal,
     // Workspace-identity audit rows are owner/admin/system-only; ordinary
     // members must not move a declared metric by counting lifecycle events.
     excludeWorkspaceAudit: !canReadWorkspaceIdentity(ctx),

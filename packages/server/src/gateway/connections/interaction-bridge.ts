@@ -571,18 +571,16 @@ export function registerInteractionBridge(
           label: prompt.title,
         })
       );
-      const card = Card({ children: [Actions(buttons)] });
-      // Platforms without card support get a numbered list. Each line shows the
-      // title only — the message can be a full sentence and would bury the list.
-      const fallbackText = event.prompts
-        .map((prompt, i) => `${i + 1}. ${prompt.title}`)
-        .join("\n");
-      await postWithFallback(
-        thread,
-        { card, fallbackText },
-        connectionId,
-        "suggestion interaction"
-      );
+      // No text fallback: chips are only asked for where buttons render
+      // (`rendersActionButtons`), and a list nobody can tap is worse than none.
+      try {
+        await thread.post({ card: Card({ children: [Actions(buttons)] }) });
+      } catch (error) {
+        logger.warn(
+          { connectionId, suggestionId: event.id, error: String(error) },
+          "Failed to post suggestion interaction",
+        );
+      }
     }
   );
 

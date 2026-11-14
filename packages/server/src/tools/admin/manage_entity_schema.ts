@@ -2391,7 +2391,7 @@ async function rtHandleListRules(
   // No slug: every rule this caller can see, in one read. The Data hub's schema
   // map needs the rules for every relationship type at once, so the per-type
   // form cost one request per type — ~16 metered public reads on a cold load of
-  // a large workspace, against a 60/minute anonymous budget.
+  // a large workspace, all charged to the per-minute anonymous budget.
   if (!args.slug) {
     const sql = getDb();
     const rules = await sql`

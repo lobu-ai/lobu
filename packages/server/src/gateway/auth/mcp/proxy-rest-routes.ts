@@ -24,6 +24,7 @@ import {
 	upstreamErrorMessage,
 } from "./proxy-upstream.js";
 import type { McpTool } from "./tool-cache.js";
+import { routeFailure } from "../../../diagnostics.js";
 
 const logger = createLogger("mcp-proxy");
 
@@ -77,12 +78,12 @@ async function handleListToolsAuthenticated(
 		return c.json({ tools, instructions });
 	} catch (error) {
 		logger.error("Failed to list tools", { mcpId, error });
-		return c.json(
+		throw routeFailure(c.json(
 			{
 				error: `Failed to connect to MCP '${mcpId}': ${error instanceof Error ? error.message : "Unknown error"}`,
 			},
 			502,
-		);
+		), error);
 	}
 }
 
@@ -263,14 +264,14 @@ async function handleCallToolAuthenticated(
 			);
 		}
 		logger.error("Failed to call tool", { mcpId, toolName, error });
-		return c.json(
+		throw routeFailure(c.json(
 			{
 				content: [],
 				isError: true,
 				error: `Failed to connect to MCP '${mcpId}': ${error instanceof Error ? error.message : "Unknown error"}`,
 			},
 			502,
-		);
+		), error);
 	}
 }
 

@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { hasRequiredMcpScope } from "../auth/tool-access";
 import { mcpAuth } from "../auth/middleware";
 import { getDb, pgTextArray } from "../db/client";
+import { unreadNotificationFilter } from "../notifications/service";
 import type { Env } from "../index";
 
 /**
@@ -86,6 +87,7 @@ routes.get("/", mcpAuth, async (c) => {
 		return c.json({ error: "Invalid activity kind" }, 400);
 	}
 	const sql = getDb();
+	const unread = unreadNotificationFilter(sql, userId);
 	// A workspace lists only activity attributed to it at write time, ordered
 	// by its own last call there. Unfiltered (account) reads list every row
 	// with a null organizationId, which clients route to the account reader.
@@ -107,10 +109,12 @@ routes.get("/", mcpAuth, async (c) => {
           e.metadata->>'mcp_session_id'
         ) AS activity_id,
         count(*)::integer AS unread_notification_count
-      FROM public.notification_targets target
-      JOIN public.events e ON e.id = target.event_id
-      WHERE target.user_id = ${userId}
-        AND target.read_at IS NULL
+      FROM public.notification_targets t
+      JOIN public.events e ON e.id = t.event_id
+      ${unread.join}
+      WHERE t.user_id = ${userId}
+        AND ${unread.visible}
+        AND ${unread.unread}
         AND e.client_id IS NOT NULL
         AND COALESCE(
           e.metadata->>'mcp_conversation_id',

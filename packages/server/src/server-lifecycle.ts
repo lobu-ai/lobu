@@ -17,10 +17,11 @@ import http from "node:http";
 import v8 from "node:v8";
 import { getRequestListener } from "@hono/node-server";
 import { type Context, Hono } from "hono";
+import { HTTPException } from "hono/http-exception";
 import { routePath } from "hono/route";
 import { pinoLogger } from "hono-pino";
 import { context, propagation, ROOT_CONTEXT } from "@opentelemetry/api";
-import { closeDbSingleton } from "./db/client";
+import { DbClosedError, isDbShutDown, shutdownDb } from "./db/client";
 import { mountViteDev } from "./dev-vite";
 import { isShuttingDown, markShuttingDown } from "./lifecycle-state";
 import type { Env } from "./index";
@@ -51,6 +52,28 @@ import { initWorkspaceProvider } from "./workspace";
 
 /** Requests whose thrown error app.onError already recorded on the HTTP span. */
 const requestsWithRecordedError = new WeakSet<Request>();
+/** The failure behind a route's own 5xx response (`routeFailure`), by request. */
+const routeFailureCauses = new WeakMap<Request, unknown>();
+
+/** A thrown error the boundary did not answer itself (see `wrapper.onError`). */
+function unexpectedError(c: Context): Error | undefined {
+	return c.error instanceof HTTPException || c.error instanceof DbClosedError ? undefined : c.error;
+}
+
+/** Requests answered 503 because the database pools had shut down. */
+const requestsRefusedAfterDbShutdown = new WeakSet<Request>();
+
+/**
+ * The answer to a request that needs the database after shutdown closed it.
+ * A 503 with `Retry-After` is retriable for every client, and closing the
+ * connection sends the retry to a replica that is still serving.
+ */
+function dbShutDownResponse(c: Context): Response {
+	requestsRefusedAfterDbShutdown.add(c.req.raw);
+	c.header("Retry-After", "1");
+	c.header("Connection", "close");
+	return c.json({ error: "Server is shutting down" }, 503);
+}
 
 /**
  * Readiness probes intentionally 503 `{status:"draining"}` during the
@@ -62,6 +85,19 @@ async function isReadinessDrain(c: Context): Promise<boolean> {
 	if (c.req.path !== "/health/ready" || c.res.status !== 503) return false;
 	const body: unknown = await c.res.clone().json().catch(() => null);
 	return typeof body === "object" && body !== null && (body as { status?: unknown }).status === "draining";
+}
+
+/**
+ * Whether a returned 5xx is not a server failure to report: the readiness
+ * drain, the shutdown refusal after the database closed, or a response its
+ * caller disconnected before receiving. A read-tier tool runs under the
+ * request's signal, so the caller leaving is what made it fail (#4833 applies
+ * the same rule to the tool span and failure log). A real
+ * failure behind it is still logged where it happened; thrown errors still
+ * report through onError.
+ */
+async function isUnreportedServerStatus(c: Context): Promise<boolean> {
+	return c.req.raw.signal.aborted || requestsRefusedAfterDbShutdown.has(c.req.raw) || (await isReadinessDrain(c));
 }
 
 type ServerMode = "postgres" | "embedded-postgres";
@@ -193,7 +229,8 @@ export function reportBootFailure(err: unknown): never {
  *      logger below and all route work inherit its trace/span ids)
  *   4. request logger             (covers both `/lobu` and the main app)
  *   5. structured 5xx response capture (for inner-catch returns that never throw)
- *   6. `app.onError` for thrown exceptions
+ *   6. database-shutdown refusal  (503 once the pools closed for exit)
+ *   7. `app.onError` for thrown exceptions
  *
  * Route mounts:
  *   - `/lobu` → `lobuApp` (only when non-null)
@@ -276,15 +313,17 @@ export function buildWrapperApp(
 				if (organizationId) span?.setAttribute("lobu.org_id", organizationId);
 				const ray = cloudflareRayId(c.req.header("cf-ray"));
 				if (ray) span?.setAttribute("cf_ray", ray);
-				// onError already recorded a thrown error on this span. A route that
-				// returned a 5xx itself has no error object, so record the status.
+				// onError already recorded a thrown error on this span. A 5xx a route
+				// answered itself records the failure it threw with the response
+				// (`routeFailure`); a bare returned 5xx can only record its status.
 				if (!requestsWithRecordedError.has(c.req.raw)) {
 					if (failed) {
 						recordError(span, thrown, { scope: name });
-					} else if (c.res.status >= 500 && !(await isReadinessDrain(c))) {
+					} else if (c.res.status >= 500 && !(await isUnreportedServerStatus(c))) {
 						recordError(
 							span,
-							{ name: "HttpServerError", message: `HTTP ${c.res.status}`, httpStatus: c.res.status },
+							routeFailureCauses.get(c.req.raw)
+								?? { name: "HttpServerError", message: `HTTP ${c.res.status}`, httpStatus: c.res.status },
 							{ scope: name },
 						);
 					}
@@ -296,8 +335,17 @@ export function buildWrapperApp(
 
 	// 4. Request logging belongs on the wrapper because `/lobu` and the main app
 	// are sibling mounts. Putting it inside only one child silently drops the
-	// other child's requests from the access log.
-	wrapper.use("*", pinoLogger({ pino: logger }));
+	// other child's requests from the access log. A thrown `HTTPException` (a
+	// route's own response, `routeFailure`) or `DbClosedError` (the shutdown
+	// 503) is answered, not unexpected: the route logged its own failure, so
+	// the access line reads as a completed request rather than a blank error.
+	wrapper.use("*", pinoLogger({
+		pino: logger,
+		http: {
+			onResLevel: (c) => (unexpectedError(c) ? "error" : "info"),
+			onResMessage: (c) => unexpectedError(c)?.message || "Request completed",
+		},
+	}));
 
 	// 5. Server-error capture. Two layers cover both shapes of failing route:
 	//   (a) routes that throw — handled by `app.onError` below.
@@ -315,7 +363,7 @@ export function buildWrapperApp(
 			} catch {
 				// response wasn't JSON; ignore
 			}
-			if (await isReadinessDrain(c)) return;
+			if (await isUnreportedServerStatus(c)) return;
 			const message =
 				(body &&
 				typeof body === "object" &&
@@ -330,9 +378,26 @@ export function buildWrapperApp(
 		}
 	});
 
-	// 6. Catch-all error handler for thrown exceptions that bubble past route
-	// catches. Preserves the original stack trace.
+	// 6. Once shutdown closed the database pools, nothing a route does can
+	// succeed, and most routes catch the failure into their own 500. Refuse the
+	// request before it reaches one so the caller sees a retriable 503.
+	wrapper.use("*", async (c, next) => {
+		if (isDbShutDown()) return dbShutDownResponse(c);
+		return next();
+	});
+
+	// 7. Catch-all error handler for thrown exceptions that bubble past route
+	// catches. Preserves the original stack trace. A route that reached the
+	// database after shutdown closed it gets the same 503 as the refusal above.
 	wrapper.onError((err, c) => {
+		if (err instanceof DbClosedError) return dbShutDownResponse(c);
+		// A route's own response, thrown with the failure behind it
+		// (`routeFailure`). Send it unchanged: the route logged its failure, and
+		// the span middleware records the cause unless the 5xx is unreportable.
+		if (err instanceof HTTPException) {
+			if (err.status >= 500) routeFailureCauses.set(c.req.raw, err.cause ?? err);
+			return err.getResponse();
+		}
 		// The HTTP span is still active here; give it the thrown error before
 		// the 500 response replaces it.
 		recordError(getCurrentSpan(), err, { scope: httpSpanName(c) });
@@ -569,8 +634,10 @@ export function createServerLifecycle(
 			//      holds postgres.js connections that must be released before
 			//      mode-specific db teardown runs.
 			await safe("stopLobuGateway", () => stopLobuGateway());
-			//   g. Close the postgres.js singleton pool.
-			await safe("closeDbSingleton", () => closeDbSingleton());
+			//   g. Close the postgres.js pools for good: a straggler that still
+			//      calls getDb() gets DbClosedError (served as a 503 above), not a
+			//      freshly dialed pool.
+			await safe("shutdownDb", () => shutdownDb());
 			//   h. Mode-specific teardown (embedded kills embeddings child, stops
 			//      socket server, closes the in-process db).
 			for (let i = 0; i < extraTeardown.length; i++) {

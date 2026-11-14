@@ -2,6 +2,7 @@
 
 import { createLogger } from "@lobu/core";
 import { Hono } from "hono";
+import { redactedFailure, routeFailure } from "../../../diagnostics.js";
 import {
   ArtifactStorageError,
   type ArtifactStore,
@@ -47,10 +48,10 @@ export function createPublicFileRoutes(artifactStore: ArtifactStore): Hono {
       logger.error("Artifact storage unavailable during download", {
         code: error instanceof ArtifactStorageError ? error.code : "UNKNOWN",
       });
-      return c.json(
+      throw routeFailure(c.json(
         { success: false, error: "File storage temporarily unavailable" },
         503
-      );
+      ), redactedFailure(error));
     }
     if (!artifact) {
       return c.json({ success: false, error: "File not found" }, 404);

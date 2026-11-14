@@ -7,6 +7,7 @@
  */
 
 import type { Context } from "hono";
+import { HTTPException } from "hono/http-exception";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { SettingsTokenPayload } from "../../auth/settings/token-service.js";
 import { verifySettingsSession } from "../public/settings-auth.js";
@@ -16,6 +17,7 @@ import {
   type AgentOwnershipResult,
   verifyOwnedAgentAccess,
 } from "./agent-ownership.js";
+import { routeFailure } from "../../../diagnostics.js";
 
 /**
  * Return a standard JSON error response with the shape `{ error: message }`.
@@ -153,7 +155,9 @@ export async function withOwnedAgent(
 
     return await handler({ session, agentId, access });
   } catch (error) {
+    // The handler's own response, thrown with its failure (`routeFailure`).
+    if (error instanceof HTTPException) throw error;
     options.logger.error(options.errorLabel, { error, agentId });
-    return errorResponse(c, "Internal server error", 500);
+    throw routeFailure(errorResponse(c, "Internal server error", 500), error);
   }
 }

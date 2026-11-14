@@ -65,7 +65,8 @@ This design turns those steps into the product's delete.
 3. **`workspace-purge` task.** It is resumable and lease-fenced with a heartbeat, like other queue tasks. Every step is idempotent, so a lost lease just resumes.
    1. Delete `events` in batches. Each batch is its own transaction with `SET LOCAL lobu.allow_event_delete = 'on'`; embeddings, classifications and other event children cascade per batch.
    2. Delete the workspace's rows in every org-scoped table without a cascading foreign key (the list above).
-   3. `DELETE FROM organization`. The remaining cascade is small by now and fits easily inside the statement timeout.
+   3. Settle the OAuth registrations homed in the workspace, so the organization delete cannot cascade into other workspaces. See "OAuth registrations" under "Implementation notes".
+   4. `DELETE FROM organization`. Only the workspace's own remaining rows cascade, which is small by now and fits easily inside the statement timeout.
 4. **Completion.** The audit trail records start, progress (rows removed) and finish.
 
 ### Guard against future orphans
@@ -139,9 +140,56 @@ failure like the 2026-10-15 500 is no longer silent.
   identity associations are retired through the governed unlink path (a live
   one blocks both entity and organization deletes), then entities leaf-first
   (`parent_id` is `ON DELETE RESTRICT`; authorization edges need the ACL
-  switch), then `organization`, then the explicit no-FK tables.
+  switch), then the OAuth registrations homed in the workspace, then
+  `organization`, then the explicit no-FK tables.
   `device_workers` must follow the organization delete because
   `automations.device_worker_id` references it.
+- **OAuth registrations.** `oauth_clients.organization_id` is only the first
+  workspace that authorized a registration (`touchClientActivity` sets it
+  once). One registration, such as a CLI login, then holds grants for many
+  workspaces through `granted_organization_ids`. Its foreign key to
+  `organization` cascades, `oauth_tokens`, both code tables and `mcp_sessions`
+  cascade from the registration, and `events.client_id` is set to NULL. So
+  "the remaining cascade is small" was false. On 2026-11-13 a purge failed all
+  20 attempts: the workspace was the home of two registrations that other
+  workspaces used. Each attempt spent its 60 seconds on the organization
+  delete, rewriting about 760,000 of those workspaces' events in one
+  statement, and was cancelled. Had it finished, it would also have deleted
+  both registrations and every token issued through them.
+
+  The purge now settles each registration homed in the workspace before the
+  organization row, one per lease-fenced transaction
+  (`releaseClientHomedInOrganization` in `auth/oauth/clients.ts`):
+  1. It revokes the workspace's own grants with the connected-app revoke
+     (`revokeClientForOrganization`). Tokens bound to the workspace are
+     revoked. Its entry is removed from multi-workspace tokens and codes, and
+     one left with no workspace is revoked or deleted. Its codes and MCP
+     sessions are deleted.
+  2. If a live token, an unexpired code, a live MCP session or any event still
+     names the registration, it clears `organization_id`. Other workspaces'
+     tokens keep working, their events keep `client_id`, and the next workspace
+     to use the registration adopts it.
+  3. Otherwise it deletes the registration. No event names it, so the
+     `events.client_id` action has nothing to rewrite.
+
+  No statement scales with a registration's event history. The event check is
+  a first-row probe of `idx_events_client_id`, run with sequential scans
+  disabled so its cost does not depend on planner statistics. The transaction
+  holds the registration's row lock, which token issuance and event writes for
+  that registration wait on, so it has to stay this short.
+
+  A detached registration keeps its tokens, codes and sessions for other
+  workspaces. It also keeps the revoked token rows that were bound to the
+  deleted workspace: the organization delete sets their `organization_id` to
+  NULL, and every read that honours a token requires `revoked_at IS NULL`.
+  Nothing live names the deleted workspace.
+
+  Registrations homed elsewhere are not visited. Their rows for the deleted
+  workspace follow the existing foreign keys: `organization_id` is set to NULL
+  on tokens and codes, and sessions cascade. An entry left in
+  `granted_organization_ids` names an organization id that no longer exists,
+  and workspace access is resolved by joining `organization` and `member`, so
+  it grants nothing.
 - **Explicit list.** Re-derived from the schema: the list above plus
   `agent_users`, `grants`, `automation_reactions` and `sandboxes`.
 - **Durable record.** The task's `runs` row carries no `organization_id`

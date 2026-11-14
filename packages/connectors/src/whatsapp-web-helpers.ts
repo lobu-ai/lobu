@@ -7,6 +7,7 @@
  * that live reads and searches return. These helpers do not ingest events.
  */
 
+import { whatsAppWebAdapterProgram } from "./whatsapp-web-adapter.js";
 import {
   normalizeWhatsAppUserJid,
   WHATSAPP_GROUP_SUFFIX,
@@ -14,7 +15,42 @@ import {
   WHATSAPP_PHONE_SERVER,
 } from "./whatsapp-web-identity.js";
 
-export const WHATSAPP_ADAPTER_VERSION = 27;
+/**
+ * A short fingerprint of a program's source (cyrb53, base 36). It only has to
+ * tell two program texts apart, so a non-cryptographic hash is enough, and it
+ * runs synchronously wherever the connector does.
+ */
+function sourceFingerprint(source: string): string {
+  let h1 = 0xdeadbeef;
+  let h2 = 0x41c6ce57;
+  for (let index = 0; index < source.length; index++) {
+    const code = source.charCodeAt(index);
+    h1 = Math.imul(h1 ^ code, 2654435761);
+    h2 = Math.imul(h2 ^ code, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507);
+  h1 ^= Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507);
+  h2 ^= Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36);
+}
+
+/**
+ * The page adapter's expression and version, both derived from the program
+ * text this build injects. An open tab keeps a resident adapter only while the
+ * versions match, so any change to the program reaches every open tab without
+ * a hand-maintained number two concurrent changes could both claim.
+ */
+export function whatsAppAdapterInstall(
+  source: string = whatsAppWebAdapterProgram.toString()
+): { version: string; expression: string } {
+  const version = `src-${sourceFingerprint(source)}`;
+  return { version, expression: `(${source})(${JSON.stringify(version)})` };
+}
+
+const ADAPTER_INSTALL = whatsAppAdapterInstall();
+export const WHATSAPP_ADAPTER_VERSION = ADAPTER_INSTALL.version;
+export const WHATSAPP_ADAPTER_INSTALL = ADAPTER_INSTALL.expression;
 export const WHATSAPP_ORIGIN = "https://web.whatsapp.com";
 
 export type ChatFilter = "all" | "individual" | "group";
@@ -39,6 +75,8 @@ export interface WhatsAppMessage {
   quoted_id?: string | null;
   /** The message @mentions the account or quotes one of its messages. */
   mentions_me?: boolean;
+  /** Verified phone/LID identities of the paired account actually @mentioned. */
+  own_mention_jids?: string[];
   edited?: boolean;
   edit_timestamp?: number | null;
   revoked?: boolean;
@@ -114,10 +152,13 @@ export function normalizeRelayedMessage(
   const timestamp = timestampOf(raw);
   if (timestamp <= 0) return null;
   const chatJid = canonicalizeJid(raw.chat_jid);
+  // Status updates, channels and the read-only service-announcement chat
+  // (`0@c.us`) are feeds nobody can reply in; the page adapter drops them too.
   if (
     !chatJid ||
     chatJid === "status@broadcast" ||
-    chatJid.endsWith("@newsletter")
+    chatJid.endsWith("@newsletter") ||
+    chatJid === `0@${WHATSAPP_PHONE_SERVER}`
   ) {
     return null;
   }
@@ -136,6 +177,11 @@ export function normalizeRelayedMessage(
     from_me: fromMe,
     timestamp,
     occurred_at: new Date(timestamp * 1000).toISOString(),
+    own_mention_jids: Array.isArray(raw.own_mention_jids)
+      ? [...new Set(raw.own_mention_jids.map((jid: unknown) =>
+          typeof jid === "string" ? normalizeWhatsAppUserJid(jid) : null,
+        ).filter((jid: string | null): jid is string => jid !== null))].slice(0, 2)
+      : [],
   };
 }
 

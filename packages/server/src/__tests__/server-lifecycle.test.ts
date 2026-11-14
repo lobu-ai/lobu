@@ -6,10 +6,13 @@
  * #948 + the #943 7-hygiene catch-up):
  *
  *   1. Middleware ordering on the Hono wrapper:
- *      peer-address stash → env-inject → HTTP span → request logger → structured-5xx-capture → onError
+ *      peer-address stash → env-inject → HTTP span → request logger → structured-5xx-capture
+ *      → database-shutdown refusal → onError
  *   2. Route mounts: `/lobu` mounted only when lobuApp is non-null; `/` always.
- *   3. Shutdown drains in-flight requests before gateway/db teardown, and a
- *      kept-alive connection cannot carry a worker's completion into it.
+ *   3. Shutdown drains in-flight requests before gateway/db teardown, a
+ *      kept-alive connection cannot carry a worker's completion into it, and a
+ *      request that reaches the closed database gets a retriable 503 the
+ *      worker's completion delivery rides out.
  *   4. `serializeBootError` walks nested cause chains and never returns `{}`.
  *
  * The wrapper-app and serializer assertions exercise real code paths, and the
@@ -19,7 +22,8 @@
 
 import http from "node:http";
 import net from "node:net";
-import { WorkerClient } from "@lobu/connector-worker/daemon";
+import type { Context } from "hono";
+import { completeSyncOnce, WorkerClient } from "@lobu/connector-worker/daemon";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createSpan, currentTraceLogFields, initTracing, runInSpanContext, shutdownTracing, SpanKind, SpanStatusCode } from "@lobu/core";
 import { InMemorySpanExporter, SimpleSpanProcessor } from "@opentelemetry/sdk-trace-node";
@@ -41,7 +45,7 @@ afterAll(() => vi.resetModules());
 // the real exports costs nothing.
 vi.mock("../db/client", async (importOriginal) => ({
 	...((await importOriginal()) as Record<string, unknown>),
-	closeDbSingleton: vi.fn(async () => {}),
+	shutdownDb: vi.fn(async () => {}),
 }));
 vi.mock("../dev-vite", () => ({ mountViteDev: vi.fn(async () => null) }));
 vi.mock("../workspace", () => ({
@@ -259,25 +263,41 @@ describe("buildWrapperApp", () => {
 
 	it("records grouped, parameterized errors for returned and thrown failures", async () => {
 		const { buildWrapperApp } = await import("../server-lifecycle");
+		const { routeFailure } = await import("../diagnostics");
+		const { ToolUserError } = await import("../utils/errors");
 		const { Hono } = await import("hono");
+		const { HTTPException } = await import("hono/http-exception");
 		const exporter = new InMemorySpanExporter();
 		await shutdownTracing();
 		initTracing({ serviceName: "wrapper-failure-test", spanProcessors: [new SimpleSpanProcessor(exporter)] });
 		try {
 			const app = new Hono();
 			app.get("/returned", (c) => c.json({ error: "private-returned-error" }, 500));
+			// A route's own 5xx thrown with its failure keeps its response; the failure is the span's cause.
+			app.get("/captured", (c) => {
+				c.header("Retry-After", "60");
+				throw routeFailure(c.json({ error: "unavailable" }, 503), new ToolUserError("source timed out", 504, "UPSTREAM_TIMEOUT"));
+			});
+			// A thrown 4xx is the route's answer, not a server failure.
+			app.get("/conflict", () => {
+				throw new HTTPException(409, { res: Response.json({ error: "conflict" }, { status: 409 }) });
+			});
 			app.get("/thrown/:id", (c) => {
 				throw new Error(`lookup failed for private@example.test run ${c.req.param("id")}`);
 			});
 			app.all("/any", () => { throw new Error("any-method failure"); });
 			const wrapper = buildWrapperApp({} as never, app);
 			expect((await wrapper.request("/lobu/returned")).status).toBe(500);
+			const captured = await wrapper.request("/lobu/captured");
+			expect([captured.status, captured.headers.get("retry-after"), await captured.json()]).toEqual([503, "60", { error: "unavailable" }]);
+			const conflict = await wrapper.request("/lobu/conflict");
+			expect([conflict.status, await conflict.json()]).toEqual([409, { error: "conflict" }]);
 			expect((await wrapper.request("/lobu/any", { method: "PRIVATE_METHOD" })).status).toBe(500);
 			for (const id of ["run9f3a1c2e7b4d", "run0b8e6d5c4a3f"]) expect((await wrapper.request(`/lobu/thrown/${id}`)).status).toBe(500);
 			expect((await wrapper.request("/private-unmatched-path?token=private-query")).status).toBe(404);
 			expect((await wrapper.request("/unknown", { method: "PRIVATE_METHOD" })).status).toBe(404);
 			const requests = exporter.getFinishedSpans().filter((span) => span.kind === SpanKind.SERVER);
-			expect(requests).toHaveLength(6);
+			expect(requests).toHaveLength(8);
 			expect(requests.filter((span) => span.attributes["http.response.status_code"] === 500).map((span) => span.status.code)).toEqual([SpanStatusCode.ERROR, SpanStatusCode.ERROR, SpanStatusCode.ERROR, SpanStatusCode.ERROR]);
 			expect(requests.find((span) => span.attributes["http.route"] === "/lobu/any")?.attributes["error.grouping"]).toContain("_OTHER /lobu/any");
 			expect(requests.find((span) => span.attributes["http.response.status_code"] === 404)?.attributes["http.route"]).toBe("unmatched");
@@ -285,6 +305,8 @@ describe("buildWrapperApp", () => {
 
 			const returned = requests.find((span) => span.attributes["http.route"] === "/lobu/returned")!;
 			expect(returned.attributes).toMatchObject({ "exception.type": "HttpServerError", "error.kind": "system" });
+			expect(requests.find((span) => span.attributes["http.route"] === "/lobu/conflict")?.status.code).toBe(SpanStatusCode.UNSET);
+			expect(requests.find((span) => span.attributes["http.route"] === "/lobu/captured")?.attributes).toMatchObject({ "http.response.status_code": 503, "exception.type": "ToolUserError", "error.code": "UPSTREAM_TIMEOUT", "error.kind": "dependency" });
 			const thrown = requests.filter((span) => span.attributes["http.route"] === "/lobu/thrown/:id");
 			expect(thrown).toHaveLength(2);
 			for (const span of thrown) {
@@ -498,6 +520,78 @@ describe("buildWrapperApp", () => {
 		}
 	});
 
+	it("does not report a 5xx its caller left before receiving; a delivered 5xx still reports", async () => {
+		const { buildWrapperApp } = await import("../server-lifecycle");
+		const { routeFailure } = await import("../diagnostics");
+		const { default: logger } = await import("../utils/logger");
+		const { Hono } = await import("hono");
+		const captureMessage = logger.error as ReturnType<typeof vi.fn>;
+		const exporter = new InMemorySpanExporter();
+		await shutdownTracing();
+		initTracing({ serviceName: "caller-left-test", spanProcessors: [new SimpleSpanProcessor(exporter)] });
+		const httpResponseLogs = () =>
+			captureMessage.mock.calls.filter(([record]) => record?.source === "http_response");
+		const requestSpan = () => {
+			const span = exporter.getFinishedSpans().find((s) => s.kind === SpanKind.SERVER);
+			exporter.reset();
+			return span;
+		};
+		try {
+			// A read-tier tool runs under the request's signal and fails with a
+			// 5xx once its caller disconnects (manage_entity's source read).
+			const app = new Hono();
+			// The route answers its 5xx either by returning it or by throwing it
+			// with its cause (`routeFailure`); both report the same way.
+			const answer = (c: Context, thrown: boolean, error: string) => {
+				const response = c.json({ error }, 500);
+				if (thrown) throw routeFailure(response, new Error(error));
+				return response;
+			};
+			for (const thrown of [false, true]) {
+				const app = new Hono();
+				app.get("/source-read", async (c) => {
+					const signal = c.req.raw.signal;
+					if (!signal.aborted) await new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true }));
+					return answer(c, thrown, "Source record read exceeded the deadline");
+				});
+				app.get("/delivered", (c) => answer(c, thrown, "db unreachable"));
+				const wrapper = buildWrapperApp({} as never, app);
+
+				captureMessage.mockClear();
+				const caller = new AbortController();
+				const abandoned = wrapper.request("/lobu/source-read", { signal: caller.signal });
+				caller.abort();
+				expect((await abandoned).status).toBe(500);
+				expect(captureMessage).not.toHaveBeenCalled();
+				const abandonedSpan = requestSpan();
+				expect(abandonedSpan?.status.code).not.toBe(SpanStatusCode.ERROR);
+				expect(abandonedSpan?.attributes["error.fingerprint"]).toBeUndefined();
+
+				// A 5xx delivered to a caller that is still waiting reports once.
+				captureMessage.mockClear();
+				expect((await wrapper.request("/lobu/delivered")).status).toBe(500);
+				expect(captureMessage).toHaveBeenCalledTimes(1);
+				expect(httpResponseLogs()).toHaveLength(1);
+				expect(requestSpan()?.status.code).toBe(SpanStatusCode.ERROR);
+			}
+		} finally {
+			await shutdownTracing();
+		}
+	});
+
+	it("answers a route that reached the closed database with the shutdown 503 and no error log", async () => {
+		const { buildWrapperApp } = await import("../server-lifecycle");
+		const { DbClosedError } = await import("../db/client");
+		const { default: logger } = await import("../utils/logger");
+		const { Hono } = await import("hono");
+		const captureMessage = logger.error as ReturnType<typeof vi.fn>;
+		const app = new Hono();
+		app.get("/closed", () => { throw new DbClosedError(); });
+		captureMessage.mockClear();
+		expect((await buildWrapperApp({} as never, app).request("/lobu/closed")).status).toBe(503);
+		expect(captureMessage).not.toHaveBeenCalled();
+	});
+
 	it("does NOT double-report when onError fires after post-response middleware", async () => {
 		const { buildWrapperApp } = await import("../server-lifecycle");
 		const { default: logger } = await import("../utils/logger");
@@ -563,12 +657,12 @@ describe("shutdown ordering (live drain)", () => {
 			shuttingDown = true;
 		});
 		vi.spyOn(lifecycleState, "isShuttingDown").mockImplementation(() => shuttingDown);
-		const { closeDbSingleton } = await import("../db/client");
+		const { shutdownDb } = await import("../db/client");
 		const { stopLobuGateway } = await import("../lobu/gateway");
 		vi.mocked(stopLobuGateway).mockImplementation(async () => {
 			events.push("gateway-stopped");
 		});
-		vi.mocked(closeDbSingleton).mockImplementation(async () => {
+		vi.mocked(shutdownDb).mockImplementation(async () => {
 			await closeDb();
 			events.push("db-closed");
 		});
@@ -598,6 +692,54 @@ describe("shutdown ordering (live drain)", () => {
 			extraTeardown,
 		}).start();
 		return { port, exited };
+	}
+
+	// A sync run claimed by `workerId`, as the worker holds it while delivering.
+	async function insertClaimedSyncRun(workerId: string, slug: string): Promise<number> {
+		const sql = getTestDb();
+		const org = await createTestOrganization();
+		const [connection] = await sql`
+			INSERT INTO connections (organization_id, connector_key, status, visibility, slug, created_at, updated_at)
+			VALUES (${org.id}, 'chrome', 'active', 'org', ${slug}, NOW(), NOW()) RETURNING id`;
+		const [run] = await sql`
+			INSERT INTO runs (organization_id, run_type, connection_id, connector_key, connector_version,
+				status, claimed_by, claimed_at, created_at)
+			VALUES (${org.id}, 'sync', ${connection.id}, 'chrome', '0.2.0', 'running', ${workerId}, NOW(), NOW())
+			RETURNING id`;
+		return Number(run.id);
+	}
+
+	// The real completion handler, mounted once on the shared main app. The next
+	// `failingCompletions` requests reach the database after shutdown closed it.
+	const completion = { failing: 0, requests: 0, mounted: false };
+	async function mountWorkerCompletion() {
+		if (completion.mounted) return;
+		completion.mounted = true;
+		const { app: mainApp } = await import("../index");
+		const { completeWorkerJob } = await import("../worker-api");
+		const { DbClosedError } = await import("../db/client");
+		mainApp.post("/api/workers/complete", (c) => {
+			completion.requests++;
+			if (completion.failing > 0) {
+				completion.failing--;
+				throw new DbClosedError();
+			}
+			return completeWorkerJob(c as never);
+		});
+	}
+
+	function postRaw(port: number, path: string, body: unknown) {
+		return new Promise<{ status: number; headers: http.IncomingHttpHeaders }>((resolve, reject) => {
+			const req = http.request(
+				{ host: "127.0.0.1", port, path, method: "POST", headers: { "content-type": "application/json" } },
+				(res) => {
+					res.resume();
+					res.on("end", () => resolve({ status: res.statusCode ?? 0, headers: res.headers }));
+				},
+			);
+			req.on("error", reject);
+			req.end(JSON.stringify(body));
+		});
 	}
 
 	it(
@@ -733,15 +875,7 @@ describe("shutdown ordering (live drain)", () => {
 			// CONNECTION_ENDED from the closing pool.
 			const sql = getTestDb();
 			const workerId = "synthetic-draining-worker";
-			const org = await createTestOrganization();
-			const [connection] = await sql`
-				INSERT INTO connections (organization_id, connector_key, status, visibility, slug, created_at, updated_at)
-				VALUES (${org.id}, 'chrome', 'active', 'org', 'synthetic-drain', NOW(), NOW()) RETURNING id`;
-			const [run] = await sql`
-				INSERT INTO runs (organization_id, run_type, connection_id, connector_key, connector_version,
-					status, claimed_by, claimed_at, created_at)
-				VALUES (${org.id}, 'sync', ${connection.id}, 'chrome', '0.2.0', 'running', ${workerId}, NOW(), NOW())
-				RETURNING id`;
+			const runId = await insertClaimedSyncRun(workerId, "synthetic-drain");
 
 			// Teardown closes the real pool while another request's transaction
 			// keeps it open, as in production, and holds there.
@@ -756,14 +890,12 @@ describe("shutdown ordering (live drain)", () => {
 					await releaseTeardown.promise;
 				});
 				await open.promise;
-				const closed = db.closeDbSingleton();
+				const closed = db.shutdownDb();
 				poolClosing.resolve();
 				await Promise.all([inflight, closed]);
 			};
 			const { Hono } = await import("hono");
-			const { app: mainApp } = await import("../index");
-			const { completeWorkerJob } = await import("../worker-api");
-			mainApp.post("/api/workers/complete", completeWorkerJob);
+			await mountWorkerCompletion();
 			const busy = deferred();
 			const lobuApp = new Hono();
 			lobuApp.post("/busy", async (c) => {
@@ -784,16 +916,103 @@ describe("shutdown ordering (live drain)", () => {
 				await poolClosing.promise;
 				const client = new WorkerClient({ apiUrl: baseUrl, workerId, capabilities: {} });
 				const delivery = await client
-					.complete({ run_id: Number(run.id), worker_id: workerId, status: "failed", error_message: "synthetic failure" })
+					.complete({ run_id: runId, worker_id: workerId, status: "failed", error_message: "synthetic failure" })
 					.then(() => null, (error: unknown) => error);
 				// The connection is gone, so the worker's retry opens a new one that the
 				// Service routes to a ready replica; nothing reached the closing pool.
 				expect(delivery, String(delivery)).toBeInstanceOf(TypeError);
 				expect((delivery as { cause?: { code?: string } }).cause?.code).toBe("ECONNREFUSED");
-				const [after] = await sql`SELECT status FROM runs WHERE id = ${run.id}`;
+				const [after] = await sql`SELECT status FROM runs WHERE id = ${runId}`;
 				expect(after.status).toBe("running");
 			} finally {
 				releaseTeardown.resolve();
+				await exited;
+				// Later suites in this shard share the pool module.
+				await db.closeDbSingleton();
+			}
+		},
+		20_000,
+	);
+
+	it(
+		"answers a request that reaches the server after database shutdown with a retriable 503 and does not reopen the pool",
+		async () => {
+			// A request still on an open connection after teardown closed the pools
+			// used to be served by a freshly re-created pool on an exiting process,
+			// or got a 500 from the route's own catch.
+			const sql = getTestDb();
+			const workerId = "synthetic-late-worker";
+			const runId = await insertClaimedSyncRun(workerId, "synthetic-late");
+			const db = await vi.importActual<typeof import("../db/client")>("../db/client");
+			await mountWorkerCompletion();
+			const { Hono } = await import("hono");
+			const { port, exited } = await bootLifecycle(new Hono(), {}, []);
+			await db.shutdownDb();
+			try {
+				completion.requests = 0;
+				const late = await postRaw(port, "/api/workers/complete",
+					{ run_id: runId, worker_id: workerId, status: "failed", error_message: "synthetic failure" });
+				expect(late.status).toBe(503);
+				expect(late.headers["retry-after"]).toBe("1");
+				expect(late.headers.connection).toBe("close");
+				// Refused before the route ran, and no pool was opened for it.
+				expect(completion.requests).toBe(0);
+				expect(() => db.getDb()).toThrow(db.DbClosedError);
+				expect(() => db.getLockDb()).toThrow(db.DbClosedError);
+				const [after] = await sql`SELECT status FROM runs WHERE id = ${runId}`;
+				expect(after.status).toBe("running");
+			} finally {
+				await db.closeDbSingleton();
+				process.emit("SIGTERM");
+				await exited;
+			}
+		},
+		20_000,
+	);
+
+	it(
+		"delivers a completion exactly once through retriable shutdown 503s and stops at a 4xx",
+		async () => {
+			const sql = getTestDb();
+			const workerId = "synthetic-retrying-worker";
+			const runId = await insertClaimedSyncRun(workerId, "synthetic-retry");
+			await mountWorkerCompletion();
+			const { Hono } = await import("hono");
+			const { port, exited } = await bootLifecycle(new Hono(), {}, []);
+			const client = new WorkerClient({ apiUrl: `http://127.0.0.1:${port}`, workerId, capabilities: {} });
+			const fast = { backoffMs: 1 };
+			const payload = { run_id: runId, worker_id: workerId, status: "failed" as const, error_message: "synthetic failure" };
+			try {
+				// Two attempts reach a replica whose database already shut down.
+				completion.failing = 2;
+				completion.requests = 0;
+				await completeSyncOnce(client, payload, fast);
+				expect(completion.requests).toBe(3);
+				const [landed] = await sql`SELECT status, error_message, completed_at FROM runs WHERE id = ${runId}`;
+				expect(landed.status).toBe("failed");
+				expect(landed.error_message).toBe("synthetic failure");
+
+				// A repeat of a delivery that already landed is fenced, not re-applied.
+				completion.requests = 0;
+				await completeSyncOnce(client, payload, fast);
+				expect(completion.requests).toBe(1);
+				const [repeat] = await sql`SELECT completed_at FROM runs WHERE id = ${runId}`;
+				expect(repeat.completed_at).toEqual(landed.completed_at);
+
+				// A 4xx is the gateway's answer: surfaced after one attempt.
+				const rejectedRunId = await insertClaimedSyncRun(workerId, "synthetic-rejected");
+				completion.requests = 0;
+				const rejected = await completeSyncOnce(client, {
+					run_id: rejectedRunId, worker_id: workerId, status: "success",
+					checkpoint: { source_ack: { binding_id: "", epoch: "", records: [] } },
+				}, fast).then(() => null, (error: unknown) => error);
+				expect((rejected as { status?: number } | null)?.status, String(rejected)).toBe(400);
+				expect(completion.requests).toBe(1);
+				const [untouched] = await sql`SELECT status FROM runs WHERE id = ${rejectedRunId}`;
+				expect(untouched.status).toBe("running");
+			} finally {
+				completion.failing = 0;
+				process.emit("SIGTERM");
 				await exited;
 			}
 		},

@@ -5,7 +5,7 @@
  */
 
 import postgres from 'postgres';
-import { afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { type DbClient, getDb, PROD_PG_VALUE_OPTIONS } from '../../../db/client';
 import { getMetricsText } from '../../../gateway/metrics/prometheus';
 import { search } from '../../../tools/search';
@@ -25,6 +25,30 @@ import {
   seedSystemEntityTypes,
 } from '../../setup/test-fixtures';
 
+/**
+ * Read the serialized log stream the way the issue tracker does: an error-level
+ * record that carries a fingerprint is one occurrence of an issue.
+ */
+function trackIssues(): () => Array<Record<string, unknown>> {
+  const lines: string[] = [];
+  vi.spyOn(process.stdout, 'write').mockImplementation((chunk, encodingOrCallback, callback) => {
+    lines.push(String(chunk));
+    const done = typeof encodingOrCallback === 'function' ? encodingOrCallback : callback;
+    if (done) queueMicrotask(done);
+    return true;
+  });
+  return () =>
+    lines
+      .flatMap((line) => {
+        try {
+          return [JSON.parse(line) as Record<string, unknown>];
+        } catch {
+          return [];
+        }
+      })
+      .filter((record) => record.level === 'error' && typeof record.error_fingerprint === 'string');
+}
+
 describe('recall query budget', () => {
   let releaseLock: (() => void) | null = null;
   let lockTx: Promise<void> | null = null;
@@ -36,6 +60,7 @@ describe('recall query budget', () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     releaseLock?.();
     try {
       await lockTx;
@@ -119,9 +144,11 @@ describe('recall query budget', () => {
         sort_by: 'score',
         approximate_candidate_search: true,
       });
-      await expect(direct).rejects.toMatchObject({ code: '57014' });
+      const timeout = (await direct.catch((error: unknown) => error)) as Error;
+      expect(timeout).toMatchObject({ code: '57014' });
       expect(timeoutFailures()).toBe(failuresBefore + 1);
 
+      const issues = trackIssues();
       const startedAt = Date.now();
       const result = await search(
         { query: 'budget probe', include_content: true },
@@ -134,6 +161,21 @@ describe('recall query budget', () => {
       expect(result.coverage?.status).toBe('partial');
       expect(result.coverage?.local_sources).not.toContain('events');
       expect(timeoutFailures()).toBe(failuresBefore + 2);
+
+      // The search answered, so nothing threw to a span: the lost recall has
+      // to reach the issue tracker as its own record, classified as ours.
+      const recorded = issues();
+      expect(recorded).toHaveLength(1);
+      expect(recorded[0]).toMatchObject({
+        error_kind: 'system',
+        error_code: '57014',
+        organization_id: org.id,
+      });
+      // One issue however Postgres words it, for any query in any workspace:
+      // nothing that varies per occurrence is part of what gets hashed.
+      for (const varying of [timeout.message, 'budget probe', org.id, org.slug]) {
+        expect(recorded[0].error_grouping).not.toContain(varying);
+      }
     },
     CANDIDATE_QUERY_TIMEOUT_MS * 5
   );

@@ -30,6 +30,7 @@
  * authorizeRunForWorker's read, in the TOCTOU window before the UPDATE).
  */
 
+import { HTTPException } from 'hono/http-exception';
 import type { Context } from 'hono';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import logger from '../../utils/logger';
@@ -304,7 +305,7 @@ describe('completeWorkerJob status guard (late-completion-after-timeout)', () =>
       error_message: 'expected failure',
     });
 
-    await completeWorkerJob(ctx);
+    await expect(completeWorkerJob(ctx)).rejects.toBeInstanceOf(HTTPException);
 
     expect(result().status).toBe(500);
     expect(terminalFailureLogs()).toHaveLength(0);

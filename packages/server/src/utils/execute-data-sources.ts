@@ -17,6 +17,8 @@
 
 import { Dialect, ast, parse as parseSql } from '@polyglot-sql/sdk';
 import { type DbClient, pgTextArray } from '../db/client';
+import { boundedQuery, readQueryFailureMessage } from './bounded-read';
+import { QUERY_SQL_STATEMENT_TIMEOUT_MS } from './content-read-bounds';
 import { ToolUserError } from './errors';
 import logger from './logger';
 import { useLinkedOrgScope } from './linked-org-ids';
@@ -114,7 +116,6 @@ function isForbiddenQueryFunction(name: string): boolean {
   );
 }
 export const MAX_DATA_SOURCE_ROWS = 1000;
-const QUERY_TIMEOUT_MS = 5000;
 
 type SqlNode = ast.Expression;
 
@@ -165,7 +166,15 @@ function assertNoForbiddenFunctions(root: unknown): void {
     const functionNode = record.function as Record<string, unknown> | undefined;
     const methodNode = record.method_call as Record<string, unknown> | undefined;
     const name = identName(functionNode?.name) ?? identName(methodNode?.method);
-    if (name && isForbiddenQueryFunction(name)) {
+    // A quoted function name is refused outright. Postgres spells identifiers
+    // with Unicode escapes (`U&"set\005Fconfig"`), which the parser reads as
+    // `u & "set\005Fconfig"(…)`: `name` is the escaped text while the database
+    // calls `set_config`. Every escaped spelling is quoted, and caller SQL has
+    // no need to quote a function name. A schema-qualified call is a
+    // `method_call` whose flag sits on the method identifier.
+    const methodName = methodNode?.method as Record<string, unknown> | undefined;
+    const quoted = functionNode?.quoted === true || methodName?.quoted === true;
+    if (name && (quoted || isForbiddenQueryFunction(name))) {
       throw new ToolUserError(`Function '${name}' is not allowed in read-only queries.`, 400, 'VALIDATION');
     }
     for (const child of Object.values(record)) stack.push(child);
@@ -442,7 +451,7 @@ export function validateAndScopeQuery(
     /** Verified Automation window; supplied by the token resolver, never raw SQL. */
     window?: Pick<DataSourceContext, 'windowStart' | 'windowEnd' | 'entityIds' | 'excludeProducedByAutomationId'>;
   }
-): { sql: string; params: unknown[]; tableRefs: string[] } {
+): { sql: string; params: unknown[]; scope: AuthzScope; tableRefs: string[] } {
   const trimmed = rawSql.trim();
   if (!trimmed) {
     throw new ToolUserError('SQL query is required', 400, 'VALIDATION');
@@ -517,9 +526,15 @@ export function buildScopedQuery(
     /** Exclude $member entities from the entities (and entity-type-slug) CTEs. See validateAndScopeQuery. */
     excludeMemberEntities?: boolean;
   }
-): { sql: string; params: unknown[] } {
+): { sql: string; params: unknown[]; scope: AuthzScope } {
   const params: unknown[] = [];
   let idx = 0;
+  // The CTEs scope to this workspace and principal; the runner's row-level
+  // security fence (`boundedRead` `fence`) takes the same object.
+  const scope: AuthzScope = {
+    organizationId: context.organizationId,
+    principal: context.userId ?? null,
+  };
 
   // Organization scoping is mandatory for table-backed queries, but tableless
   // SELECTs bind it only when the query explicitly references the context value.
@@ -584,7 +599,7 @@ export function buildScopedQuery(
     throw new ToolUserError('Positional parameters ($1, $2, ...) are not allowed in data source queries', 400, 'VALIDATION');
   }
 
-  if (tableRefs.length === 0) return { sql: processedQuery, params };
+  if (tableRefs.length === 0) return { sql: processedQuery, params, scope };
   const orgP = bindOrganization();
 
   // Per-user connection visibility (S0). Applied to EVERY CTE on this seam that
@@ -595,10 +610,6 @@ export function buildScopedQuery(
   // both shapes through the one connection-visibility compiler keyed on an
   // AuthzScope; `principal` null (headless/service) yields org-visible-only,
   // fail-closed for private data.
-  const scope: AuthzScope = {
-    organizationId: context.organizationId,
-    principal: context.userId ?? null,
-  };
 
   // For a table holding events (alias has a `connection_id` col): restrict to
   // org-visible connections or the requesting user's own private ones.
@@ -663,7 +674,23 @@ export function buildScopedQuery(
   const connectionRowVisibility = (alias: string): string =>
     ` ${compileConnectionRowVisibility(scope, alias)}`;
 
-  // Build CTEs
+  // Build CTEs. A scope CTE over a large table is NOT MATERIALIZED: Postgres
+  // materializes a CTE the query references more than once, so a caller
+  // self-join would copy every visible row of the organization before the
+  // caller's own predicates (an `id IN (...)`, a bounded time range) could
+  // reach an index. Inlined, the scope predicates still apply to each reference.
+  //
+  // Inlining has a cost: the planner orders a relation's quals by cost, so a
+  // cheap caller predicate can run on a row before the scope predicate removes
+  // it, and a predicate that raises then reveals something about that row.
+  // Where the scope predicate sits on a JOINED relation (or is an OR that a
+  // one-operator caller predicate outranks), it cannot even run first. The
+  // small config tables with that shape are MATERIALIZED instead, so the scope
+  // is applied before any caller predicate sees a row: `automation_versions`
+  // (org on `automations`), `user` (org on `member`), `entity_relationship_types`
+  // (public-org arm on `organization`), `feeds` (visibility on `connections`)
+  // and `connections` (OR'd visibility). Caller-facing database errors are
+  // reduced to their SQLSTATE separately (`readQueryFailureMessage`).
   const ctes: string[] = [];
 
   // When safeColumns is provided, emit explicit column lists instead of SELECT *
@@ -764,7 +791,7 @@ export function buildScopedQuery(
       const memberPredicate = options?.excludeMemberEntities ? ` AND et.slug <> '$member'` : '';
       // security-allowed: see block comment above this for-loop
       ctes.push(
-        `"${safeName}" AS (SELECT ${selEntitiesJoined('e', 'et')} ` +
+        `"${safeName}" AS NOT MATERIALIZED (SELECT ${selEntitiesJoined('e', 'et')} ` +
           `FROM public.entities e ` +
           `JOIN public.entity_types et ON et.id = e.entity_type_id ` +
           `WHERE e.organization_id = ${orgP}${memberPredicate})`
@@ -774,7 +801,7 @@ export function buildScopedQuery(
       // query_sql consistent with what search_memory/get_content surface.
       // security-allowed: see block comment above the for-loop
       let eventsCte =
-        `"${safeName}" AS (SELECT ${sel(table, 'ev')} FROM ${eventTable} ev ` +
+        `"${safeName}" AS NOT MATERIALIZED (SELECT ${sel(table, 'ev')} FROM ${eventTable} ev ` +
         `WHERE ${eventOrgScope('ev')}`;
 
       eventsCte += eventReadPredicate('ev');
@@ -791,7 +818,7 @@ export function buildScopedQuery(
       // it). The per-user predicate is the security boundary.
       // security-allowed: see block comment above the for-loop
       ctes.push(
-        `"${safeName}" AS (SELECT ${sel(table, 'cn')} FROM public.connections cn WHERE cn.organization_id = ${orgP}` +
+        `"${safeName}" AS MATERIALIZED (SELECT ${sel(table, 'cn')} FROM public.connections cn WHERE cn.organization_id = ${orgP}` +
           connectionRowVisibility('cn') +
           ')'
       );
@@ -809,7 +836,7 @@ export function buildScopedQuery(
       // cross-org visibility the way an EXISTS over a joined table could).
       // security-allowed: see block comment above the for-loop
       ctes.push(
-        `"${safeName}" AS (SELECT ${sel(table, 'i')} FROM public.automations i ` +
+        `"${safeName}" AS NOT MATERIALIZED (SELECT ${sel(table, 'i')} FROM public.automations i ` +
           `WHERE i.organization_id = ${orgP})`
       );
     } else if (table === 'event_classifications') {
@@ -822,7 +849,7 @@ export function buildScopedQuery(
       // events (the same leak the events CTE closes, on the joined table).
       // security-allowed: eventTable is an internal fixed table name.
       ctes.push(
-        `"${safeName}" AS (SELECT ${sel(table, 'ec')} FROM public.event_classifications ec WHERE EXISTS (` +
+        `"${safeName}" AS NOT MATERIALIZED (SELECT ${sel(table, 'ec')} FROM public.event_classifications ec WHERE EXISTS (` +
           `SELECT 1 FROM ${eventTable} ev ` +
           `WHERE ev.id = ec.event_id AND ${eventOrgScope('ev')}` +
           eventReadPredicate('ev') +
@@ -836,21 +863,21 @@ export function buildScopedQuery(
       // or in another org yields no row, so this stays fail-closed.
       // security-allowed: see block comment above the for-loop
       ctes.push(
-        `"${safeName}" AS (SELECT ${sel(table, 'wv')} FROM public.automation_versions wv ` +
+        `"${safeName}" AS MATERIALIZED (SELECT ${sel(table, 'wv')} FROM public.automation_versions wv ` +
           'JOIN public.automations w ON w.id = wv.automation_id ' +
           `WHERE w.organization_id = ${orgP})`
       );
     } else if (table === 'oauth_clients') {
       ctes.push(
-        `"${safeName}" AS (SELECT ${sel(table)} FROM public.oauth_clients WHERE organization_id = ${orgP})`
+        `"${safeName}" AS NOT MATERIALIZED (SELECT ${sel(table)} FROM public.oauth_clients WHERE organization_id = ${orgP})`
       );
     } else if (table === 'oauth_tokens') {
       ctes.push(
-        `"${safeName}" AS (SELECT ${sel(table)} FROM public.oauth_tokens WHERE organization_id = ${orgP})`
+        `"${safeName}" AS NOT MATERIALIZED (SELECT ${sel(table)} FROM public.oauth_tokens WHERE organization_id = ${orgP})`
       );
     } else if (table === 'user') {
       ctes.push(
-        `"${safeName}" AS (SELECT ${sel(table, 'u')} FROM public."user" u ` +
+        `"${safeName}" AS MATERIALIZED (SELECT ${sel(table, 'u')} FROM public."user" u ` +
           `JOIN public.member m ON m."userId" = u.id ` +
           `WHERE m."organizationId" = ${orgP})`
       );
@@ -879,7 +906,7 @@ export function buildScopedQuery(
       const principalP = bindPrincipal();
       // security-allowed: see block comment above the for-loop
       ctes.push(
-        `"${safeName}" AS (SELECT ${sel(table, 'dw')} FROM public.device_workers dw ` +
+        `"${safeName}" AS NOT MATERIALIZED (SELECT ${sel(table, 'dw')} FROM public.device_workers dw ` +
           `WHERE dw.user_id = ${principalP} ` +
           `AND (dw.organization_id = ${orgP} OR dw.organization_id IS NULL))`
       );
@@ -900,7 +927,7 @@ export function buildScopedQuery(
       // principal's own), with no soft-delete coupling to the connection.
       // security-allowed: see block comment above the for-loop
       ctes.push(
-        `"${safeName}" AS (SELECT ${sel(table, 'fd')} FROM public.feeds fd ` +
+        `"${safeName}" AS MATERIALIZED (SELECT ${sel(table, 'fd')} FROM public.feeds fd ` +
           `WHERE fd.organization_id = ${orgP} ` +
           // security-allowed: see block comment above the for-loop
           `AND EXISTS (SELECT 1 FROM public.connections fc ` +
@@ -921,7 +948,7 @@ export function buildScopedQuery(
       //      channels require member_of; stale/enforced fail closed.
       // security-allowed: see block comment above the for-loop
       let cmCte =
-        `"${safeName}" AS (SELECT ${sel(table, 'cm')} FROM public.channel_messages cm ` +
+        `"${safeName}" AS NOT MATERIALIZED (SELECT ${sel(table, 'cm')} FROM public.channel_messages cm ` +
         `WHERE cm.organization_id = ${orgP}`;
       // security-allowed: see block comment above the for-loop
       cmCte +=
@@ -943,19 +970,19 @@ export function buildScopedQuery(
       ctes.push(cmCte);
     } else if (table === 'connector_definitions') {
       ctes.push(
-        `"${safeName}" AS (SELECT ${sel(table)} FROM public.connector_definitions WHERE organization_id = ${orgP})`
+        `"${safeName}" AS NOT MATERIALIZED (SELECT ${sel(table)} FROM public.connector_definitions WHERE organization_id = ${orgP})`
       );
     } else if (table === 'entity_relationships') {
       // security-allowed: see block comment above the for-loop
       ctes.push(
         // Live source endpoint visibility is enforced by the entity API. Raw SQL cannot
         // bypass it, even to infer a hidden source key through counts or joins.
-        `"${safeName}" AS (SELECT ${sel(table)} FROM public.entity_relationships WHERE organization_id = ${orgP} AND deleted_at IS NULL AND from_entity_id IS NOT NULL AND to_entity_id IS NOT NULL)`
+        `"${safeName}" AS NOT MATERIALIZED (SELECT ${sel(table)} FROM public.entity_relationships WHERE organization_id = ${orgP} AND deleted_at IS NULL AND from_entity_id IS NOT NULL AND to_entity_id IS NOT NULL)`
       );
     } else if (table === 'entity_relationship_types') {
       // security-allowed: see block comment above the for-loop
       ctes.push(
-        `"${safeName}" AS (SELECT ${sel(table, 'rt')} FROM public.entity_relationship_types rt ` +
+        `"${safeName}" AS MATERIALIZED (SELECT ${sel(table, 'rt')} FROM public.entity_relationship_types rt ` +
           'LEFT JOIN public.organization o ON o.id = rt.organization_id ' +
           `WHERE rt.deleted_at IS NULL AND (rt.organization_id = ${orgP} OR o.visibility = 'public'))`
       );
@@ -965,7 +992,7 @@ export function buildScopedQuery(
       // member/admin SQL and view templates cannot enumerate identity claims.
       // security-allowed: see block comment above the for-loop
       ctes.push(
-        `"${safeName}" AS (SELECT ${sel(table, 'ei')} FROM public.entity_identities ei ` +
+        `"${safeName}" AS NOT MATERIALIZED (SELECT ${sel(table, 'ei')} FROM public.entity_identities ei ` +
           `WHERE ei.organization_id = ${orgP})`
       );
     } else {
@@ -977,7 +1004,7 @@ export function buildScopedQuery(
       const slugMemberPredicate = options?.excludeMemberEntities ? ` AND et.slug <> '$member'` : '';
       // security-allowed: see block comment above the for-loop
       ctes.push(
-        `"${safeName}" AS (SELECT ${selEntitiesJoined('e', 'et')} ` +
+        `"${safeName}" AS NOT MATERIALIZED (SELECT ${selEntitiesJoined('e', 'et')} ` +
           `FROM public.entities e ` +
           `JOIN public.entity_types et ON et.id = e.entity_type_id ` +
           `WHERE e.organization_id = ${orgP} AND et.slug = $${idx}${slugMemberPredicate})`
@@ -986,7 +1013,7 @@ export function buildScopedQuery(
   }
 
   // Combine CTEs with user query
-  if (ctes.length === 0) return { sql: processedQuery, params };
+  if (ctes.length === 0) return { sql: processedQuery, params, scope };
 
   const cteStr = `WITH ${ctes.join(',\n')}`;
   // Strip leading line/block comments before deciding how to merge: a
@@ -1001,7 +1028,7 @@ export function buildScopedQuery(
     ? `${cteStr},\n${body.replace(/^WITH\s+/i, '')}`
     : `${cteStr}\n${body}`;
 
-  return { sql: finalSql, params };
+  return { sql: finalSql, params, scope };
 }
 
 // ============================================
@@ -1187,11 +1214,12 @@ export async function executeDataSources(
         // query selects them. Without it the CTE fell back to SELECT *, leaking
         // every physical column. Entity-type slug CTEs (no allowlist entry) keep
         // their SELECT * — entity data is the template's intended payload.
-        let { sql: scopedQuery, params } = buildScopedQuery(query, tableRefs, context, {
+        const scoped = buildScopedQuery(query, tableRefs, context, {
           safeColumns: SAFE_COLUMN_DEFS,
           excludeWorkspaceAudit: options?.excludeWorkspaceAudit,
           excludeMemberEntities: options?.excludeMemberEntities,
         });
+        let { sql: scopedQuery, params } = scoped;
 
         // Validate param count matches placeholders in scoped query
         const placeholderMatches = scopedQuery.match(/\$(\d+)/g);
@@ -1216,17 +1244,16 @@ export async function executeDataSources(
           }
         }
 
-        const rows = await sql.begin(async (tx) => {
-          await tx.unsafe('SET TRANSACTION READ ONLY');
-          await tx.unsafe(`SET LOCAL statement_timeout = '${QUERY_TIMEOUT_MS}'`);
-          return tx.unsafe(scopedQuery, params);
+        const rows = await boundedQuery(sql, scopedQuery, params, {
+          statementTimeoutMs: QUERY_SQL_STATEMENT_TIMEOUT_MS,
+          fence: scoped.scope,
         });
 
         const rowLimit = MAX_DATA_SOURCE_ROWS + (options?.includeOverflowRow ? 1 : 0);
         results[name] = Array.isArray(rows) ? rows.slice(0, rowLimit) : [];
       } catch (err) {
 		if (options?.throwOnError) {
-			throw new Error(`Data source '${name}' failed: ${getErrorMessage(err)}`);
+			throw new Error(`Data source '${name}' failed: ${readQueryFailureMessage(err)}`);
 		}
         logger.warn(
           { error: getErrorMessage(err), dataSource: name },

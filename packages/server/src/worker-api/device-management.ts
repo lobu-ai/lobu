@@ -22,7 +22,7 @@ import {
 } from '../auth/tokens';
 import { getDb, parsePgTextArray, pgBigintArray } from '../db/client';
 import type { Env } from '../index';
-import { captureServerError } from '../diagnostics';
+import { captureServerError, routeFailure } from '../diagnostics';
 import { errorMessage } from '../utils/errors';
 import { recordLifecycleEvent } from '../utils/insert-event';
 import logger from '../utils/logger';
@@ -226,7 +226,7 @@ export async function listDeviceWorkers(c: Context<{ Bindings: Env }>) {
   } catch (err: unknown) {
     logger.error({ error: errorMessage(err) }, '[listDeviceWorkers] Error');
     captureServerError(c, err, 'listDeviceWorkers', 500);
-    return c.json({ error: errorMessage(err) }, 500);
+    throw routeFailure(c.json({ error: errorMessage(err) }, 500), err);
   }
 }
 
@@ -656,7 +656,7 @@ export async function mintDeviceChildToken(c: Context<{ Bindings: Env }>) {
   } catch (err) {
     logger.error({ err: errorMessage(err) }, '[mintDeviceChildToken] failed');
     captureServerError(c, err, 'mintDeviceChildToken', 500);
-    return c.json({ error: errorMessage(err) }, 500);
+    throw routeFailure(c.json({ error: errorMessage(err) }, 500), err);
   }
 }
 
@@ -816,7 +816,7 @@ export async function updateDeviceWorkerOrg(c: Context<{ Bindings: Env }>) {
     return c.json({ ok: true, ...(hasLabel ? { label: nextLabel ?? null } : {}) });
   } catch (err: unknown) {
     logger.error({ error: errorMessage(err) }, '[updateDeviceWorkerOrg] Error');
-    return c.json({ error: errorMessage(err) }, 500);
+    throw routeFailure(c.json({ error: errorMessage(err) }, 500), err);
   }
 }
 
@@ -951,6 +951,6 @@ export async function deleteDeviceWorker(c: Context<{ Bindings: Env }>) {
     return c.json({ ok: true });
   } catch (err: unknown) {
     logger.error({ error: errorMessage(err) }, '[deleteDeviceWorker] Error');
-    return c.json({ error: errorMessage(err) }, 500);
+    throw routeFailure(c.json({ error: errorMessage(err) }, 500), err);
   }
 }

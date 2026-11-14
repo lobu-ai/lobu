@@ -579,7 +579,10 @@ export async function notifyConnectionPermissionRequest(params: {
 	orgId: string;
 	connectionId: number;
 	connectorKey: string;
+	/** `grant_rejected`: the provider rejected an existing grant, so the account must consent again. */
+	reason?: "setup" | "grant_rejected";
 }): Promise<void> {
+	const grantRejected = params.reason === "grant_rejected";
 	const sql = getDb();
 	const [connection] = await sql`
 		SELECT c.created_by, c.display_name
@@ -592,13 +595,17 @@ export async function notifyConnectionPermissionRequest(params: {
 	await sendNotification(params.orgId, [connection.created_by], {
 		type: "connection_permission_request",
 		title: `Connection "${connection.display_name ?? params.connectorKey}" needs authorization`,
-		body: "Connect your account to finish setting up this connection.",
+		body: grantRejected
+			? "Its account authorization expired or was revoked. Reconnect it to restore access."
+			: "Connect your account to finish setting up this connection.",
 		ownerUserId: connection.created_by,
 		deliveryScope: "targeted",
 		semanticType: CONNECTION_AUTHORIZATION_KIND,
 		payloadData: {
 			connector: params.connectorKey,
-			status: "Waiting for OAuth authorization",
+			status: grantRejected
+				? "Authorization expired"
+				: "Waiting for OAuth authorization",
 		},
 		resourceType: "connection",
 		resourceId: String(params.connectionId),

@@ -9,6 +9,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { AutomationSource } from '@lobu/core/contracts/tools/manage-automations';
 import { dispatchPendingAutomationRuns, materializeDueAutomationRuns } from '../../../automations/automation';
+import { DEFAULT_AUTOMATION_SOURCE_QUERY } from '../../../automations/source-refs';
 import { runAutomationScriptTask } from '../../../automations/script-task';
 import type { DbClient } from '../../../db/client';
 import type { Env } from '../../../index';
@@ -33,7 +34,11 @@ async function seedAutomation(executor: 'script' | 'agent', skipIfUnchanged = fa
     name: 'Window Bound',
     managed_agent_id: agent.agentId,
     triggers: [{ kind: 'schedule', cron: '*/5 * * * *', execution: 'window', skip_if_unchanged: skipIfUnchanged }],
-    ...(sources ? { sources } : skipIfUnchanged ? { sources: [{ name: 'empty', query: 'SELECT id FROM events WHERE false' }] } : {}),
+    ...(sources
+      ? { sources }
+      : skipIfUnchanged
+        ? { sources: [{ name: 'empty', query: 'SELECT id FROM events WHERE false' }] }
+        : executor === 'script' ? { sources: [{ name: 'arrivals', query: 'SELECT id FROM events' }] } : {}),
     ...(executor === 'script'
       ? { reaction_script: 'export default async () => ({});' }
       : { prompt: 'Summarize the window.' }),
@@ -130,6 +135,43 @@ describe('script executor window bound', () => {
     const tasks = await sql`SELECT id FROM runs WHERE parent_run_id = ${run.runId} AND action_key = 'automation-script'`;
     expect(tasks).toHaveLength(1);
     expect(await materializeDueAutomationRuns(TEST_ENV)).toMatchObject({ runsCreated: 0 });
+  });
+
+  it.each([
+    ['a sourceless code-only job', 'script', [], false],
+    ['an event-sourced code-only job', 'script', undefined, false],
+    ['an analysis Automation', 'agent', undefined, true],
+  ] as const)('creates %s with only its authored sources and the right first window', async (_label, executor, sources, looksBack) => {
+    const seed = await seedAutomation(executor, false, sources ? [...sources] : undefined);
+    const sql = getTestDb();
+    const [row] = await sql`
+      SELECT a.sources, v.version_sources, a.next_window_start < a.created_at - interval '6 days' AS looks_back
+      FROM automations a JOIN automation_versions v ON v.id = a.current_version_id
+      WHERE a.id = ${seed.automationId}
+    `;
+    const expected = executor === 'agent'
+      ? [{ name: 'content', query: DEFAULT_AUTOMATION_SOURCE_QUERY }]
+      : sources ?? [{ name: 'arrivals', query: 'SELECT id FROM events' }];
+    expect(row.sources).toEqual(expected);
+    expect(row.version_sources).toEqual(expected);
+    // Code runs side effects per window, so it starts at creation rather than
+    // replaying the lookback the way an analysis Automation reads history.
+    expect(row.looks_back).toBe(looksBack);
+  });
+
+  it('keeps a sourceless code-only window whole: it consumes no stored arrivals', async () => {
+    const seed = await seedAutomation('script', false, []);
+    await seedArrivals(seed.orgId, 250);
+    const run = await createAutomationRun({
+      organizationId: seed.orgId,
+      automationId: seed.automationId,
+      windowStart: WINDOW_START,
+      windowEnd: WINDOW_END,
+      dispatchSource: 'scheduled',
+    });
+    expect(await claimedWindow(run.runId)).toEqual({ start: WINDOW_START, end: WINDOW_END });
+    const [row] = await getTestDb()`SELECT approved_input FROM runs WHERE id = ${run.runId}`;
+    expect(row.approved_input.window_truncated).toBeUndefined();
   });
 
   it('keeps mixed context and event sources bounded', async () => {
@@ -338,10 +380,11 @@ describe('script executor window bound', () => {
     expect((await claimedWindow(run.runId)).end).toBe(WINDOW_END);
   });
 
-  it.each(['scheduled', 'manual'] as const)('starts the next window as soon as a truncated %s window completes', async (dispatchSource) => {
+  it.each(['scheduled', 'manual'] as const)('leaves the rest of a truncated %s window to the next scheduler tick', async (dispatchSource) => {
     const seed = await seedAutomation('script');
     const stamps = await seedArrivals(seed.orgId, 250);
-    await getTestDb()`UPDATE automations SET next_window_start = ${WINDOW_START}::timestamptz WHERE id = ${seed.automationId}`;
+    const sql = getTestDb();
+    await sql`UPDATE automations SET next_window_start = ${WINDOW_START}::timestamptz WHERE id = ${seed.automationId}`;
     const run = await createAutomationRun({
       organizationId: seed.orgId,
       agentId: seed.agentId,
@@ -353,19 +396,25 @@ describe('script executor window bound', () => {
 
     await completeScriptRun(seed.orgId, seed.automationId, run.runId);
 
-    // The mark moved to where the window stopped, and the remainder is already
-    // dispatched rather than waiting for the next scheduler tick.
-    expect((await scheduleState(seed.automationId)).next_window_start).toBe(stamps[200].toISOString());
-    const [next] = await getTestDb()`
+    // The mark moved to where the window stopped and the Automation is due, but
+    // completion starts nothing itself: a backlog drains one window per tick.
+    expect(await scheduleState(seed.automationId)).toEqual({ next_window_start: stamps[200].toISOString(), due: true });
+    const started = await sql`
       SELECT id FROM runs WHERE automation_id = ${seed.automationId}
-        AND run_type = 'automation' AND status = 'running'
+        AND run_type = 'automation' AND id <> ${run.runId}
     `;
-    expect(next).toBeDefined();
+    expect(started).toHaveLength(0);
+
+    expect(await materializeDueAutomationRuns(TEST_ENV)).toMatchObject({ runsCreated: 1 });
+    const [next] = await sql`
+      SELECT id FROM runs WHERE automation_id = ${seed.automationId}
+        AND run_type = 'automation' AND status = 'pending'
+    `;
     const nextWindow = await claimedWindow(Number(next.id));
     expect(nextWindow.start).toBe(stamps[200].toISOString());
     // Count the seeded backlog separately from recent configuration events.
     expect(await arrivalsIn(seed.orgId, { start: nextWindow.start, end: WINDOW_END })).toBe(50);
-    await executeScriptTask(seed.orgId, seed.automationId, Number(next.id));
+    await completeScriptRun(seed.orgId, seed.automationId, Number(next.id));
     expect(await scheduleState(seed.automationId)).toEqual({ next_window_start: nextWindow.end, due: false });
     expect(await materializeDueAutomationRuns(TEST_ENV)).toMatchObject({ runsCreated: 0 });
   });

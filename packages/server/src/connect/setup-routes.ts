@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import type { Env } from '../index';
 import { createAuth } from '../auth';
-import { resolveSession, sessionCookieCandidates } from '../auth/resolve-session';
+import { isSignedInBrowserFormPost, resolveSession } from '../auth/resolve-session';
 import { findExistingPersonalOrg } from '../auth/personal-org-provisioning';
 import { resolveBaseUrl } from '../auth/base-url';
 import { getDb } from '../db/client';
@@ -12,12 +12,13 @@ import { handleConnectManaged } from '../tools/admin/manage_connections/handlers
 import { escapeHtml } from '../utils/html';
 import { renderLobuPage, renderOAuthErrorPage } from '../gateway/auth/oauth-templates';
 
-/** Back to the offer the visitor chose, so signing in never dead-ends. */
-function loginContinuation(origin: string, org: string, connector: string): string {
-  const callback = new URL('/connect/managed', origin);
-  callback.searchParams.set('org', org);
-  callback.searchParams.set('connector', connector);
-  return `/auth/login?callbackUrl=${encodeURIComponent(callback.toString())}`;
+/**
+ * Back to the offer the visitor chose, so signing in never dead-ends. A path,
+ * so the visitor stays on the host they started on, a per-org subdomain included.
+ */
+function loginContinuation(org: string, connector: string): string {
+  const callbackUrl = `/connect/managed?${new URLSearchParams({ org, connector })}`;
+  return `/auth/login?${new URLSearchParams({ callbackUrl })}`;
 }
 
 /** Every dead end a human can reach needs a way back into the product. */
@@ -79,7 +80,7 @@ export function createSetupRoutes(deps: SetupRouteDeps = DEFAULT_DEPS) {
     }
     const session = await deps.session(c.req.raw, c.env);
     if (!session?.user) {
-      return c.redirect(loginContinuation(deps.origin(c.req.raw), org, connector), 302);
+      return c.redirect(loginContinuation(org, connector), 302);
     }
     return c.html(
       renderLobuPage({
@@ -90,13 +91,8 @@ export function createSetupRoutes(deps: SetupRouteDeps = DEFAULT_DEPS) {
   });
 
   setupRoutes.post('/connect/managed', async (c) => {
-    const origin = deps.origin(c.req.raw);
     // Better Auth also accepts bearer sessions; this form must use its browser cookie.
-    if (
-      c.req.header('authorization') ||
-      c.req.header('origin') !== origin ||
-      !sessionCookieCandidates(c.req.header('cookie')).length
-    )
+    if (!isSignedInBrowserFormPost(c.req.raw))
       return c.json({ error: 'Use the signed-in browser setup page.' }, 403);
     // Validated before the session read so an expired cookie can be sent back
     // through login with the offer intact.
@@ -117,7 +113,7 @@ export function createSetupRoutes(deps: SetupRouteDeps = DEFAULT_DEPS) {
     // consent page whose session simply expired while it sat open. 303, not
     // 302, because /auth/login only serves GET and only 303 *specifies* the
     // method change -- 302 leaves it to de-facto browser convention.
-    if (!session?.user) return c.redirect(loginContinuation(origin, org, connector), 303);
+    if (!session?.user) return c.redirect(loginContinuation(org, connector), 303);
     const home = await deps.home(session.user.id);
     if (!home)
       return c.html(
@@ -143,7 +139,7 @@ export function createSetupRoutes(deps: SetupRouteDeps = DEFAULT_DEPS) {
         grantedOrganizationIds: null,
         directSearchFederation: false,
         requestUrl: c.req.url,
-        baseUrl: origin,
+        baseUrl: deps.origin(c.req.raw),
       }
     );
     if ('error' in result)

@@ -4,8 +4,9 @@
  * This task removes a requested workspace's rows in the background
  * (docs/design/workspace-deletion.md).
  * One FK cascade from `organization` cannot do it: a large workspace's
- * `events` → `event_embeddings` cascade outlives the statement timeout, and a
- * handful of org-scoped tables have no FK to `organization` at all.
+ * `events` → `event_embeddings` cascade outlives the statement timeout, a
+ * handful of org-scoped tables have no FK to `organization` at all, and the
+ * cascade through `oauth_clients` reaches other workspaces' tokens and events.
  *
  * Every step is idempotent and keyed only on the organization id, so a lost
  * lease or a crash simply resumes: the next attempt finds fewer rows. Each
@@ -13,6 +14,7 @@
  * task never has two holders deleting at once.
  */
 
+import { releaseClientHomedInOrganization } from '../auth/oauth/clients';
 import { type DbClient, getDb } from '../db/client';
 import { hardDeleteEntityRows } from '../utils/entity-management';
 import { IDENTITY_DECISION_METADATA_KEY } from '../utils/relationship-claims';
@@ -143,7 +145,7 @@ export async function runWorkspacePurgeTask(
   // Progress belongs to the durable task, including batches from prior claims.
   const counts: PurgeCounts = { ...lease.removed };
   const batch = (step: string, fn: (tx: DbClient) => Promise<number>) =>
-    fencedBatch(sql, ctx.taskRunId, owner, counts, step, fn);
+    fencedBatch(sql, ctx.taskRunId, owner, counts, async (tx) => ({ [step]: await fn(tx) }));
 
   logger.info(
     { event: 'workspace_purge_started', organizationId, taskRunId: ctx.taskRunId, resumed: !org },
@@ -226,7 +228,24 @@ export async function runWorkspacePurgeTask(
       })) > 0
     );
 
-    // 6. The organization row. What still cascades is small by now.
+    // 6. OAuth registrations homed here. `oauth_clients.organization_id` is
+    //    only the first workspace that authorized a registration, yet the
+    //    organization delete cascades through it into every workspace's tokens
+    //    and `events.client_id`. So each one is settled first: this workspace's
+    //    grants are revoked, then the registration is deleted if nothing else
+    //    uses it and detached if something does. One registration per
+    //    transaction, so the mutex it shares with token issuance is held
+    //    briefly. Events are already gone (step 1), so an event that still
+    //    names a registration belongs to another workspace.
+    while (
+      (await fencedBatch(sql, ctx.taskRunId, owner, counts, async (tx): Promise<PurgeCounts> => {
+        const outcome = await releaseClientHomedInOrganization(tx, organizationId);
+        if (outcome === null) return {};
+        return outcome === 'deleted' ? { oauth_clients: 1 } : { oauth_clients_detached: 1 };
+      })) > 0
+    );
+
+    // 7. The organization row. What still cascades is small by now.
     await batch('organization', (tx) =>
       withAclPrivilege(tx, async () => {
         const deleted = await tx`DELETE FROM organization WHERE id = ${organizationId}`;
@@ -235,12 +254,12 @@ export async function runWorkspacePurgeTask(
     );
   }
 
-  // 7. Tables the organization delete does not reach.
+  // 8. Tables the organization delete does not reach.
   for (const table of WORKSPACE_PURGE_UNLINKED_TABLES) {
     while ((await batch(table, (tx) => deleteBatchByOrganization(tx, table, organizationId))) > 0);
   }
 
-  // 8. The public namespace entry. It is keyed by `ref_id`, not
+  // 9. The public namespace entry. It is keyed by `ref_id`, not
   //    `organization_id`, so it is neither cascaded from `organization` nor
   //    part of the batch tables above. One row per workspace at most.
   await batch('namespace', async (tx) => {
@@ -267,14 +286,15 @@ export async function runWorkspacePurgeTask(
  * heartbeat. Progress is written onto the task row in the same transaction:
  * the row outlives the
  * organization (it carries no `organization_id`), so it is the durable record.
+ * A batch reports its rows per step, so one that settles rows more than one
+ * way counts each outcome; the total is returned.
  */
 async function fencedBatch(
   sql: DbClient,
   taskRunId: number,
   owner: string,
   counts: PurgeCounts,
-  step: string,
-  fn: (tx: DbClient) => Promise<number>,
+  fn: (tx: DbClient) => Promise<PurgeCounts>,
 ): Promise<number> {
   return sql.begin(async (tx) => {
     const held = await tx`
@@ -283,9 +303,13 @@ async function fencedBatch(
       FOR NO KEY UPDATE
     `;
     if (held.length === 0) throw new WorkspacePurgeLeaseLostError(taskRunId);
-    const removed = await fn(tx);
+    let removed = 0;
+    for (const [step, rows] of Object.entries(await fn(tx))) {
+      if (rows <= 0) continue;
+      counts[step] = (counts[step] ?? 0) + rows;
+      removed += rows;
+    }
     if (removed > 0) {
-      counts[step] = (counts[step] ?? 0) + removed;
       await tx`
         UPDATE runs
         SET action_output = COALESCE(action_output, '{}'::jsonb)

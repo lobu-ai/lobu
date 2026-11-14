@@ -3,7 +3,7 @@
  *   create, update, delete, create_from_version
  */
 
-import { assertAutomationModuleConfiguration } from '../../../automations/preparation';
+import { assertAutomationModuleConfiguration, automationModuleHasAnalysis } from '../../../automations/preparation';
 import { getDb, parsePgTextArray } from '../../../db/client';
 import {
   assertAutomationConfigVersion,
@@ -152,19 +152,37 @@ export async function handleCreate(
   // here so both input forms meet the same contract.
   assertOutputsShape(outputs);
 
+  const triggerWrite = resolveAutomationTriggerWrite({
+    triggers: args.triggers,
+  });
+  const reactionScript = args.reaction_script?.trim() ? args.reaction_script : null;
+  const reactionScriptCompiled = reactionScript
+    ? await compileReactionScript(reactionScript)
+    : null;
+  const reactionInputSchema = reactionScript
+    ? await extractReactionInputSchema(reactionScript)
+    : null;
+  // A code-only job runs side effects once per window and reads only what its
+  // module queries, so it gets neither an implicit source nor a first window
+  // that replays history.
+  const codeOnly = reactionScriptCompiled !== null && !automationModuleHasAnalysis({
+    prompt: args.prompt, skills: args.skills, outputs,
+    reaction_input_schema: reactionInputSchema, triggers: triggerWrite.triggers,
+  });
+
   // Build sources array. Sources are authored two ways and merged here:
   //   1. `@`-mention tokens in the prompt (the owletto composer's primary path)
   //      — the backend derives them so the UI sends only the raw prompt.
   //   2. explicit `args.sources` (API callers / legacy).
-  // If neither yields anything, fall back to a default all-events source.
-  // `create_version` deliberately does NOT derive (see version-actions.ts):
-  // an existing prompt's prose must not silently re-author the Automation's
-  // source set during an otherwise unrelated version bump.
+  // If neither yields anything, analysis falls back to a default all-events
+  // source. `create_version` deliberately does NOT derive (see
+  // version-actions.ts): an existing prompt's prose must not silently re-author
+  // the Automation's source set during an otherwise unrelated version bump.
   const promptSources = automationSourcesFromPrompt(args.prompt ?? '');
   const explicitSources = args.sources ?? [];
   const merged = mergePromptSources(explicitSources, promptSources);
   const sources: Array<{ name: string; query: string }> =
-    merged.length > 0
+    merged.length > 0 || codeOnly
       ? merged
       : [
           {
@@ -255,9 +273,6 @@ export async function handleCreate(
     sources,
     entityId ? [entityId] : [],
   );
-  const triggerWrite = resolveAutomationTriggerWrite({
-    triggers: args.triggers,
-  });
   assertAutomationOutputsUseWindowExecution(triggerWrite.triggers, outputs);
   await assertAutomationTriggerConnections(sql, organizationId, triggerWrite.triggers);
   // Check trigger compatibility independently of assignment authorization.
@@ -319,14 +334,6 @@ export async function handleCreate(
       409
     );
   }
-
-  const reactionScript = args.reaction_script?.trim() ? args.reaction_script : null;
-  const reactionScriptCompiled = reactionScript
-    ? await compileReactionScript(reactionScript)
-    : null;
-  const reactionInputSchema = reactionScript
-    ? await extractReactionInputSchema(reactionScript)
-    : null;
 
   if (reactionScriptCompiled) {
     assertAutomationModuleConfiguration({ ...args, outputs, reaction_input_schema: reactionInputSchema }, await inspectAutomationScriptExports(reactionScriptCompiled));
@@ -408,7 +415,7 @@ export async function handleCreate(
         ${reactionScript}, ${reactionScriptCompiled},
         ${reactionInputSchema ? tx.json(reactionInputSchema) : null},
         date_trunc('milliseconds', current_timestamp) + interval '1 millisecond'
-          - make_interval(secs => ${intervals.automationFirstWindowLookbackMs / 1000})
+          - make_interval(secs => ${codeOnly ? 0 : intervals.automationFirstWindowLookbackMs / 1000})
       )
     `;
 
@@ -1126,6 +1133,12 @@ export async function handleCreateFromVersion(
     }
   }
 
+  // Same first-window rule as create: code-only clones start at creation.
+  const cloneCodeOnly = Boolean(version.reaction_script_compiled) && !automationModuleHasAnalysis({
+    prompt: version.prompt as string | null, skills: version.skills as unknown[] | null,
+    outputs: clonedOutputs, reaction_input_schema: version.reaction_input_schema, triggers: cloneTriggers,
+  });
+
   const createdBy = ctx.userId ?? 'system';
   const created: Array<{
     automation_id: string;
@@ -1235,7 +1248,7 @@ export async function handleCreateFromVersion(
             ${(version.reaction_script_compiled as string | null) ?? null},
             ${toJsonParam(tx, version.reaction_input_schema)},
             date_trunc('milliseconds', current_timestamp) + interval '1 millisecond'
-              - make_interval(secs => ${intervals.automationFirstWindowLookbackMs / 1000})
+              - make_interval(secs => ${cloneCodeOnly ? 0 : intervals.automationFirstWindowLookbackMs / 1000})
           )
         `;
 

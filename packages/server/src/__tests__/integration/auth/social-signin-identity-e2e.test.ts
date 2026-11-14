@@ -26,6 +26,7 @@ import { clearAuthCacheForTests, createAuth } from "../../../auth/index";
 import { authStateVerificationIdentifier } from "../../../auth/oauth-organization-context";
 import { createAuthProfile } from "../../../utils/auth-profiles";
 import { getEnvFromProcess } from "../../../utils/env";
+import { __resetPublicOriginCachesForTests } from "../../../utils/public-origin";
 import { initWorkspaceProvider } from "../../../workspace";
 import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
 import { createTestOrganization } from "../../setup/test-fixtures";
@@ -238,7 +239,12 @@ describe("X identity-only login through the real Better Auth handler", () => {
     await cleanupTestDatabase();
     clearAuthCacheForTests();
     clearLoginProviderCachesForTests();
-    for (const key of ["BETTER_AUTH_SECRET", "TWITTER_CLIENT_ID", "TWITTER_CLIENT_SECRET"]) backup[key] = process.env[key];
+    for (const key of ["BETTER_AUTH_SECRET", "TWITTER_CLIENT_ID", "TWITTER_CLIENT_SECRET", "PUBLIC_GATEWAY_URL", "AUTH_COOKIE_DOMAIN"]) {
+      backup[key] = process.env[key];
+    }
+    delete process.env.PUBLIC_GATEWAY_URL;
+    delete process.env.AUTH_COOKIE_DOMAIN;
+    __resetPublicOriginCachesForTests();
     process.env.BETTER_AUTH_SECRET = "a".repeat(64);
     process.env.TWITTER_CLIENT_ID = "synthetic-x-client";
     process.env.TWITTER_CLIENT_SECRET = "synthetic-x-secret";
@@ -249,11 +255,28 @@ describe("X identity-only login through the real Better Auth handler", () => {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
     }
+    __resetPublicOriginCachesForTests();
     clearAuthCacheForTests();
     clearLoginProviderCachesForTests();
   });
 
-  it.each([true, false])("creates a session without a source connection (confirmed email: %s)", async (hasEmail) => {
+  it.each([
+    { hasEmail: true, page: ORIGIN, authOrigin: ORIGIN, back: `${ORIGIN}/acme` },
+    { hasEmail: false, page: ORIGIN, authOrigin: ORIGIN, back: `${ORIGIN}/acme` },
+    // A per-org subdomain page signs in through the canonical host's callback
+    // and must land back on the subdomain page it started from.
+    {
+      hasEmail: true,
+      page: "https://acme.lobu.example",
+      authOrigin: "https://app.lobu.example",
+      back: "https://acme.lobu.example/connect/chat-identity?token=synthetic-link",
+    },
+  ])("creates a session without a source connection (confirmed email: $hasEmail, page: $page)", async ({ hasEmail, page, authOrigin, back }) => {
+    if (authOrigin !== page) {
+      process.env.PUBLIC_GATEWAY_URL = authOrigin;
+      process.env.AUTH_COOKIE_DOMAIN = ".lobu.example";
+      __resetPublicOriginCachesForTests();
+    }
     const sql = getTestDb();
     const org = await createTestOrganization({ name: "Acme", slug: "acme", visibility: "public" });
     await sql`INSERT INTO connector_definitions
@@ -262,10 +285,10 @@ describe("X identity-only login through the real Better Auth handler", () => {
         ${sql.json(xDefinition.authSchema)}, true, 'active', now(), now())`;
 
     // Exercise the actual connector declaration, not a copied OAuth fixture.
-    const startRequest = new Request(`${ORIGIN}/api/auth/sign-in/social`, {
+    const startRequest = new Request(`${page}/api/auth/sign-in/social`, {
       method: "POST",
-      headers: { "content-type": "application/json", origin: ORIGIN, referer: `${ORIGIN}/acme` },
-      body: JSON.stringify({ provider: "twitter", callbackURL: `${ORIGIN}/acme` }),
+      headers: { "content-type": "application/json", origin: page, referer: `${page}/acme` },
+      body: JSON.stringify({ provider: "twitter", callbackURL: back }),
     });
     const auth = await createAuth(getEnvFromProcess(), startRequest.clone());
     const start = await auth.handler(startRequest);
@@ -276,7 +299,7 @@ describe("X identity-only login through the real Better Auth handler", () => {
     expect(authorize.searchParams.get("scope")?.split(" ")).toEqual(X_SCOPES);
     expect(authorize.searchParams.get("code_challenge_method")).toBe("S256");
     expect(authorize.searchParams.get("code_challenge")).toBeTruthy();
-    expect(authorize.searchParams.get("redirect_uri")).toBe(`${ORIGIN}/api/auth/callback/twitter`);
+    expect(authorize.searchParams.get("redirect_uri")).toBe(`${authOrigin}/api/auth/callback/twitter`);
 
     const requests: string[] = [];
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
@@ -288,7 +311,7 @@ describe("X identity-only login through the real Better Auth handler", () => {
         const form = new URLSearchParams(await request.text());
         expect(form.get("code")).toBe("synthetic-code");
         expect(form.get("code_verifier")).toBeTruthy();
-        expect(form.get("redirect_uri")).toBe(`${ORIGIN}/api/auth/callback/twitter`);
+        expect(form.get("redirect_uri")).toBe(`${authOrigin}/api/auth/callback/twitter`);
         return Response.json({ access_token: "synthetic-access", token_type: "bearer", scope: X_SCOPES.join(" "), expires_in: 7200 });
       }
       expect(target.pathname).toBe("/2/users/me");
@@ -316,10 +339,10 @@ describe("X identity-only login through the real Better Auth handler", () => {
       .map((line) => JSON.parse(line) as Record<string, unknown>);
     stdout.mockRestore();
     expect(finish.status).toBe(302);
-    expect(finish.headers.get("location")).toBe(`${ORIGIN}/acme`);
+    expect(finish.headers.get("location")).toBe(back);
     const sessionCookie = cookies(finish);
     expect(sessionCookie).toContain("session_token=");
-    const sessionResponse = await callbackAuth.handler(new Request(`${ORIGIN}/api/auth/get-session`, {
+    const sessionResponse = await callbackAuth.handler(new Request(`${authOrigin}/api/auth/get-session`, {
       headers: { cookie: sessionCookie },
     }));
     const session = await sessionResponse.json() as { user: { id: string; email: string; emailVerified: boolean } };

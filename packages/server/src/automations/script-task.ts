@@ -3,10 +3,9 @@ import type { Env } from '../index';
 import { getDb, pgBigintArray } from '../db/client';
 import { AUTOMATION_SCRIPT_TASK } from '../scheduled/task-definitions';
 import { classifyRunOutcome } from '../runs/run-outcome';
-import logger from '../utils/logger';
 import { advanceAutomationArrivalMark } from '../utils/window-utils';
 import { advanceAutomationScheduleAfterSuccessfulWindow } from './schedule-cursor';
-import { dispatchNextPendingAutomationRuns, startDueAutomationWindow } from './automation';
+import { dispatchNextPendingAutomationRuns } from './automation';
 import { executeAutomationScript } from './reaction-executor';
 import { reactionErrorIsNonTransient } from './reaction-task';
 import { markAutomationRunFailed } from './run-completion';
@@ -120,8 +119,7 @@ export async function runAutomationScriptTask(
     }
     throw new Error(error ?? 'Automation script failed');
   }
-  let completedNow = false;
-  const backlogDue = await sql.begin(async (tx) => {
+  const completedNow = await sql.begin(async (tx) => {
     // Match completeWindow's Automation-before-run lock order and pin the
     // optional reaction decision to the same transaction as completion.
     const [automation] = await tx`
@@ -141,8 +139,6 @@ export async function runAutomationScriptTask(
       RETURNING id
     `;
     if (!completed) return false;
-    completedNow = true;
-    let expedited = false;
     if (input.dispatch_source !== 'event') {
       const markMoved = await advanceAutomationArrivalMark(
         tx,
@@ -154,15 +150,16 @@ export async function runAutomationScriptTask(
         tx,
         payload.automationId
       );
-      // Resume actual backlog progress promptly, but never pull a later cursor
-      // back, and leave historical replays on the normal cadence.
+      // Make actual backlog progress due on the next scheduler tick instead of
+      // the next cron slot, but never pull a later cursor back, and leave
+      // historical replays on the normal cadence. Completion never starts the
+      // next window itself: back-to-back windows would run a side-effecting
+      // script as fast as the sandbox returns.
       if (markMoved && input.window_truncated === true && nextTick) {
-        const due = await tx`
+        await tx`
           UPDATE automations SET next_run_at = current_timestamp
           WHERE id = ${payload.automationId} AND next_run_at <= ${nextTick}::timestamptz
-          RETURNING id
         `;
-        expedited = due.length > 0;
       }
     }
     if (!module && automation?.reaction_script_compiled) {
@@ -172,22 +169,8 @@ export async function runAutomationScriptTask(
         String(automation.reaction_script_compiled)
       );
     }
-    return expedited;
+    return true;
   });
-  // A backlog drains one window per scheduler tick otherwise, so start the
-  // next window now. The window is committed; a failure here only leaves it
-  // to the next tick.
-  if (backlogDue) {
-    try {
-      await startDueAutomationWindow(env, payload.automationId, sql);
-    } catch (error) {
-      logger.warn(
-        { error, automationId: payload.automationId },
-        '[automation] Next backlog window left to the scheduler tick'
-      );
-    }
-  } else if (completedNow) {
-    // A run queued behind this one is claimable only now that it committed.
-    await dispatchNextPendingAutomationRuns([payload.automationId], sql);
-  }
+  // A run queued behind this one is claimable only now that it committed.
+  if (completedNow) await dispatchNextPendingAutomationRuns([payload.automationId], sql);
 }

@@ -406,6 +406,7 @@ export function buildClientSDK(
 				rows = await boundedQuery(getDb(), boundedSql, scoped.params as unknown[], {
 					signal: workspaceCtx.abortSignal,
 					statementTimeoutMs: QUERY_SQL_STATEMENT_TIMEOUT_MS,
+					fence: scoped.scope,
 				});
 			} catch (error) {
 				// A caller that left keeps the abort reason `boundedQuery` threw.

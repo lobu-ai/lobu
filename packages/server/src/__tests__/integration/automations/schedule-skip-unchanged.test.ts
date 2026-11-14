@@ -54,7 +54,11 @@ describe("scheduled Automation unchanged gate", () => {
 				return query;
 			},
 			get(target, key) {
-				if (key === 'begin' || key === 'savepoint') return (callback: (tx: DbClient) => Promise<unknown>) => target[key]((tx) => callback(observe(tx)));
+				// Forward both begin forms: `begin(fn)` and `begin('read only', fn)`.
+				if (key === 'begin' || key === 'savepoint') return (...args: unknown[]) => {
+					const callback = args.pop() as (tx: DbClient) => Promise<unknown>;
+					return (target[key] as (...a: unknown[]) => Promise<unknown>)(...args, (tx: DbClient) => callback(observe(tx)));
+				};
 				return Reflect.get(target, key);
 			},
 		});
@@ -143,7 +147,11 @@ describe("scheduled Automation unchanged gate", () => {
 				return query;
 			},
 			get(target, key) {
-				if (key === 'begin' || key === 'savepoint') return (callback: (tx: DbClient) => Promise<unknown>) => target[key]((tx) => callback(observe(tx)));
+				// Forward both begin forms: `begin(fn)` and `begin('read only', fn)`.
+				if (key === 'begin' || key === 'savepoint') return (...args: unknown[]) => {
+					const callback = args.pop() as (tx: DbClient) => Promise<unknown>;
+					return (target[key] as (...a: unknown[]) => Promise<unknown>)(...args, (tx: DbClient) => callback(observe(tx)));
+				};
 				return Reflect.get(target, key);
 			},
 		});

@@ -165,9 +165,9 @@ describe("DM bare-code message → real consume→bind (previewMode)", () => {
 
       // Claim consumed + binding written under the canonical slack:<id> key.
       const remaining = await sql`
-        SELECT 1 FROM oauth_states WHERE id = ${codeHash(code)}
+        SELECT payload FROM oauth_states WHERE id = ${codeHash(code)}
       `;
-      expect(remaining.length).toBe(0);
+      expect(remaining[0]?.payload.consumed).toMatchObject({ platform: "slack", channelId: canonical, agentId });
       const binding = await listTestAutomationSubscriptions({
         platform: "slack",
         channelId: canonical,
@@ -298,11 +298,11 @@ describe("DM /lobu link <code> — real consume→bind chain", () => {
 			expect(replies.join("\n")).toContain("Linked this chat to agent");
 			expect(replies.join("\n")).toContain(agentId);
 
-			// Claim consumed (one-time use).
+			// The consumed receipt remains scoped to this chat until the original expiry.
 			const remaining = await sql`
-        SELECT 1 FROM oauth_states WHERE id = ${codeHash(code)}
+        SELECT payload FROM oauth_states WHERE id = ${codeHash(code)}
       `;
-			expect(remaining.length).toBe(0);
+			expect(remaining[0]?.payload.consumed).toMatchObject({ platform: "slack", channelId: canonical, agentId });
 
 			// Binding written under the canonical slack:<id> key, scoped to team+agent.
 			const binding = await listTestAutomationSubscriptions({

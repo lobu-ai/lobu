@@ -47,6 +47,7 @@ import type {
 	ConnectorWebhookSchema,
 } from "@lobu/connector-sdk";
 import { type DbClient, getDb } from "../../../db/client.js";
+import { routeFailure } from "../../../diagnostics.js";
 import {
 	type ConnectorRecordJob,
 	deliverConnectorWebhook,
@@ -619,7 +620,7 @@ export function createAppWebhookRoutes(deps: AppWebhookRouterDeps): Hono {
 					{ provider: providerName, error: String(error) },
 					"[app-webhook] handleDelivery failed",
 				);
-				return json(500, { error: "Failed to handle delivery" });
+				throw routeFailure(json(500, { error: "Failed to handle delivery" }), error);
 			}
 		}
 
@@ -677,7 +678,7 @@ export function createAppWebhookRoutes(deps: AppWebhookRouterDeps): Hono {
 				{ provider: providerName, installationId: install.id, error: String(error) },
 				"[app-webhook] onDelivery trigger failed",
 			);
-			return json(500, { error: "Failed to handle delivery" });
+			throw routeFailure(json(500, { error: "Failed to handle delivery" }), error);
 		}
 	});
 

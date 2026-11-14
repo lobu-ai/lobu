@@ -1557,6 +1557,70 @@ function connectionAuthorizationSql(sql: DbClient, userId: string) {
 	};
 }
 
+/**
+ * Approval notifications point at proposal events; this resolves the run so
+ * reads see its current approval state rather than an emitted snapshot.
+ * `pending` mirrors the connection-visibility predicate every content read
+ * applies (compileConnectionFkVisibility): the card is reviewable only when
+ * its connection is live, org-visible, and (for private) owned by the reader.
+ * A deleted or invisible connection means the card can never be opened, so
+ * the approval is undecidable.
+ */
+function approvalDecisionSql(sql: DbClient, userId: string) {
+	return {
+		join: sql`LEFT JOIN events pe
+      ON COALESCE(e.metadata->>'notification_type', 'generic') = 'action_approval_needed'
+     AND e.metadata->>'resource_type' = 'event'
+     AND e.metadata->>'resource_id' ~ '^[0-9]+$'
+     AND pe.id = (e.metadata->>'resource_id')::bigint
+     AND pe.organization_id = e.organization_id
+     AND pe.interaction_type = 'approval'
+    LEFT JOIN runs ar
+      ON ar.organization_id = e.organization_id
+     AND ar.id = pe.run_id
+    LEFT JOIN connections pc
+      ON pc.id = pe.connection_id
+     AND pc.organization_id = e.organization_id
+     AND pc.deleted_at IS NULL
+     AND (
+       pc.visibility = 'org'
+       OR (${userId}::text IS NOT NULL AND pc.created_by = ${userId}::text)
+     )`,
+		isApproval: sql`ar.id IS NOT NULL`,
+		pending: sql`(ar.approval_status = 'pending' AND (pe.connection_id IS NULL OR pc.id IS NOT NULL))`,
+	};
+}
+
+/**
+ * Unread, and still something the reader can act on. A connection
+ * authorization request or an approval stops counting once it is resolved
+ * (authorized, decided, expired, or unreachable); it stays in history.
+ */
+function unreadSql(
+	sql: DbClient,
+	authorization: ReturnType<typeof connectionAuthorizationSql>,
+	approval: ReturnType<typeof approvalDecisionSql>,
+) {
+	return sql`(t.read_at IS NULL
+		AND ((${authorization.isRequest}) IS NOT TRUE OR ${authorization.pending})
+		AND ((${approval.isApproval}) IS NOT TRUE OR ${approval.pending}))`;
+}
+
+/**
+ * What every unread notification read shares: the joins, the reader's
+ * visibility, and "unread and still actionable". Queries alias the target
+ * `t` and its event `e`.
+ */
+export function unreadNotificationFilter(sql: DbClient, userId: string) {
+	const authorization = connectionAuthorizationSql(sql, userId);
+	const approval = approvalDecisionSql(sql, userId);
+	return {
+		join: sql`${authorization.join} ${approval.join}`,
+		visible: sql`(${authorization.visible})`,
+		unread: unreadSql(sql, authorization, approval),
+	};
+}
+
 export async function listNotifications(opts: {
 	organizationId: string;
 	userId: string;
@@ -1579,6 +1643,8 @@ export async function listNotifications(opts: {
 	const mcpActivityId = opts.mcpActivityId?.trim() || null;
 	const attentionOnly = opts.attentionOnly ?? false;
 	const authorization = connectionAuthorizationSql(sql, opts.userId);
+	const approval = approvalDecisionSql(sql, opts.userId);
+	const unread = unreadSql(sql, authorization, approval);
 	// The attention read reorders rows (see ORDER BY), which would make a keyset
 	// cursor skip notifications. It is a single bounded read by contract; fail
 	// loudly rather than paginate an order the cursor does not match.
@@ -1600,8 +1666,7 @@ export async function listNotifications(opts: {
 				AND browser_run.expires_at > current_timestamp)
 		)
 	) OR (
-		ar.approval_status = 'pending'
-		AND (pe.connection_id IS NULL OR pc.id IS NOT NULL)
+		${approval.pending}
 	) OR (
 		${authorization.isRequest} AND ${authorization.pending}
 	), false)`;
@@ -1771,44 +1836,20 @@ export async function listNotifications(opts: {
         NULLIF(source_run.approved_input->>'device_worker_id', '')
       )
      AND device_worker.organization_id = e.organization_id
-    -- Approval notifications point at proposal events; resolve the run here so
-    -- consumers see its current approval state rather than an emitted snapshot.
-    LEFT JOIN events pe
-      ON COALESCE(e.metadata->>'notification_type', 'generic') = 'action_approval_needed'
-     AND e.metadata->>'resource_type' = 'event'
-     AND e.metadata->>'resource_id' ~ '^[0-9]+$'
-     AND pe.id = (e.metadata->>'resource_id')::bigint
-     AND pe.organization_id = e.organization_id
-     AND pe.interaction_type = 'approval'
-    LEFT JOIN runs ar
-      ON ar.organization_id = e.organization_id
-     AND ar.id = pe.run_id
+    ${approval.join}
     LEFT JOIN automations approval_automation
       ON approval_automation.id = ar.automation_id
      AND approval_automation.organization_id = e.organization_id
-    -- Mirrors the connection-visibility predicate every content read applies
-    -- (compileConnectionFkVisibility): the card counts as reviewable only when
-    -- its connection is live, org-visible, and (for private) owned by the
-    -- reader. A deleted or invisible connection means the card can never be
-    -- opened, so the approval is undecidable.
-    LEFT JOIN connections pc
-      ON pc.id = pe.connection_id
-     AND pc.organization_id = e.organization_id
-     AND pc.deleted_at IS NULL
-     AND (
-       pc.visibility = 'org'
-       OR (${opts.userId}::text IS NOT NULL AND pc.created_by = ${opts.userId}::text)
-     )
     WHERE e.organization_id = ${opts.organizationId}
       AND t.user_id = ${opts.userId}
       AND (${authorization.visible})
       AND (${cursor}::bigint IS NULL OR e.id < ${cursor})
-      AND (${!unreadOnly} OR (t.read_at IS NULL AND ((${authorization.isRequest}) IS NOT TRUE OR ${authorization.pending})))
+      AND (${!unreadOnly} OR ${unread})
       ${
 				attentionOnly
 					? sql`AND (
         CASE WHEN ${authorization.isRequest} THEN ${authorization.pending}
-          ELSE t.read_at IS NULL OR ${pendingDecision} END
+          ELSE ${unread} OR ${pendingDecision} END
       )`
 					: sql``
 			}
@@ -1856,17 +1897,16 @@ export async function getUnreadCount(
 	userId: string,
 ): Promise<number> {
 	const sql = getDb();
-	const authorization = connectionAuthorizationSql(sql, userId);
+	const filter = unreadNotificationFilter(sql, userId);
 	const rows = (await sql`
     SELECT COUNT(*)::int AS count
     FROM notification_targets t
     JOIN events e ON e.id = t.event_id
-    ${authorization.join}
+    ${filter.join}
     WHERE e.organization_id = ${organizationId}
       AND t.user_id = ${userId}
-      AND t.read_at IS NULL
-      AND (${authorization.visible})
-      AND ((${authorization.isRequest}) IS NOT TRUE OR ${authorization.pending})
+      AND ${filter.visible}
+      AND ${filter.unread}
   `) as unknown as Array<{ count: number }>;
 	return rows[0].count;
 }

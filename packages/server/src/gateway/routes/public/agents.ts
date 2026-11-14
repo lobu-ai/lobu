@@ -24,6 +24,7 @@ import {
   requireSession,
   withOwnedAgent,
 } from "../shared/helpers.js";
+import { routeFailure } from "../../../diagnostics.js";
 
 const logger = createLogger("agent-routes");
 
@@ -175,7 +176,7 @@ export function createAgentRoutes(config: AgentRoutesConfig): Hono {
       });
     } catch (error) {
       logger.error("Failed to create agent", { error });
-      return errorResponse(c, "Internal server error", 500);
+      throw routeFailure(errorResponse(c, "Internal server error", 500), error);
     }
   });
 
@@ -209,7 +210,7 @@ export function createAgentRoutes(config: AgentRoutesConfig): Hono {
       return c.json({ agents });
     } catch (error) {
       logger.error("Failed to list agents", { error });
-      return errorResponse(c, "Failed to list agents", 500);
+      throw routeFailure(errorResponse(c, "Failed to list agents", 500), error);
     }
   });
 

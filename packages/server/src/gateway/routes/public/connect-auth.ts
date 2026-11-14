@@ -11,6 +11,7 @@ import {
   verifySettingsSession,
   verifySettingsToken,
 } from "./settings-auth.js";
+import { routeFailure } from "../../../diagnostics.js";
 
 const logger = createLogger("connect-auth-routes");
 const AUTH_REQUEST_TTL_SECONDS = 10 * 60;
@@ -161,13 +162,13 @@ export function createConnectAuthRoutes(config: ConnectAuthRoutesConfig): Hono {
       return c.redirect(authUrl);
     } catch (error) {
       logger.error("Failed to start browser OAuth handoff", { error });
-      return c.html(
+      throw routeFailure(c.html(
         renderPage(
           "OAuth Login Failed",
           "The gateway could not start the browser OAuth flow."
         ),
         500
-      );
+      ), error);
     }
   });
 
@@ -261,13 +262,13 @@ export function createConnectAuthRoutes(config: ConnectAuthRoutesConfig): Hono {
       return c.redirect(connectState.returnUrl);
     } catch (error) {
       logger.error("Failed to complete browser OAuth handoff", { error });
-      return c.html(
+      throw routeFailure(c.html(
         renderPage(
           "OAuth Login Failed",
           "The gateway could not complete the browser OAuth flow."
         ),
         500
-      );
+      ), error);
     }
   });
 

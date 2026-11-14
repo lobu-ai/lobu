@@ -5,6 +5,7 @@ import {
   CHAT_SENDER_NOT_LINKED,
   isConfinedChatTurn,
 } from "../../orchestration/chat-turn-actor.js";
+import { routeFailure } from "../../../diagnostics.js";
 
 /**
  * Shared worker authentication middleware for internal routes.
@@ -51,7 +52,7 @@ export const authenticateWorker = async (
       if (error instanceof StaleAgentTurnAttemptError) {
         return c.json({ error: error.message }, 409);
       }
-      return c.json({ error: "Could not record the tool call for this turn; it was not executed" }, 503);
+      throw routeFailure(c.json({ error: "Could not record the tool call for this turn; it was not executed" }, 503), error);
     }
   }
   c.set("worker", tokenData);

@@ -83,7 +83,7 @@ describe("injected page programs survive bundling", () => {
 			const names = Object.keys(page);
 			const run = new Function(
 				...names,
-				`"use strict"; return (${source})();`,
+				`"use strict"; return (${source})("synthetic-version");`,
 			) as (...args: unknown[]) => unknown;
 			run(...names.map((name) => page[name as keyof typeof page]));
 

@@ -1,7 +1,11 @@
 import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { whatsAppWebAdapterProgram } from "../whatsapp-web-adapter.js";
-import { WHATSAPP_ADAPTER_VERSION } from "../whatsapp-web-helpers.js";
+import {
+  WHATSAPP_ADAPTER_INSTALL,
+  WHATSAPP_ADAPTER_VERSION,
+  whatsAppAdapterInstall,
+} from "../whatsapp-web-helpers.js";
 
 function bindAccount(adapter: any, account: string) {
   const invoke = adapter.invoke;
@@ -76,12 +80,12 @@ describe("whatsAppWebAdapterProgram serialisation", () => {
 
     const run = new Function(
       ...Object.keys(page),
-      `"use strict";(${source})();`
+      `"use strict";${WHATSAPP_ADAPTER_INSTALL};`
     );
     expect(() => run(...Object.values(page))).not.toThrow();
 
     const installed = globals.__owlettoWhatsAppAdapterV1 as
-      | { version: number; invoke: unknown }
+      | { version: string; invoke: unknown }
       | undefined;
     expect(installed).toBeDefined();
     expect(typeof installed?.invoke).toBe("function");
@@ -154,7 +158,7 @@ describe("whatsAppWebAdapterProgram serialisation", () => {
       .filter((line) => !line.startsWith("//"))
       .filter((line) => line !== "}");
 
-    const allowed = /^export function whatsAppWebAdapterProgram\(\) \{$/;
+    const allowed = /^export function whatsAppWebAdapterProgram\(adapterVersion\) \{$/;
     const offenders = topLevel.filter((line) => !allowed.test(line));
     expect(offenders).toEqual([]);
   });
@@ -210,7 +214,7 @@ describe("whatsAppWebAdapterProgram send_message", () => {
     };
     const run = new Function(
       ...Object.keys(page),
-      `"use strict";(${whatsAppWebAdapterProgram.toString()})();`,
+      `"use strict";${WHATSAPP_ADAPTER_INSTALL};`,
     );
     run(...Object.values(page));
     return bindAccount(globals.__owlettoWhatsAppAdapterV1, "447000000000@c.us");
@@ -238,7 +242,7 @@ describe("whatsAppWebAdapterProgram send_message", () => {
     new Function(
       "globalThis",
       "window",
-      `(${whatsAppWebAdapterProgram.toString()})();`,
+      `${WHATSAPP_ADAPTER_INSTALL};`,
     )(globals, { require: (name: string) => modules[name] });
     const request = globals.__owlettoWhatsAppAdapterV1.invoke({
       op: "send_message",
@@ -270,7 +274,7 @@ describe("whatsAppWebAdapterProgram send_message", () => {
     new Function(
       "globalThis",
       "window",
-      `(${whatsAppWebAdapterProgram.toString()})();`,
+      `${WHATSAPP_ADAPTER_INSTALL};`,
     )(globals, { require: (name: string) => modules[name] });
     const result = await globals.__owlettoWhatsAppAdapterV1.invoke({
       op: "draft_message",
@@ -309,6 +313,39 @@ describe("whatsAppWebAdapterProgram send_message", () => {
     expect(sent).toEqual(["3EB0PLANNEDID"]);
   });
 
+  it("refuses the read-only service-announcement chat instead of waiting on a send that never settles", async () => {
+    const account = "447000000000@c.us";
+    const sent: unknown[] = [];
+    const modules: Record<string, any> = {
+      WAWebUserPrefsMeUser: { getMaybeMePnUser: () => account },
+      WAWebCollections: {
+        Chat: { _models: [{ id: { _serialized: "0@c.us" } }] },
+        Msg: { _models: [] },
+      },
+      WAWebSendTextMsgChatAction: {
+        createTextMsgData: async () => ({ id: msgId("SYNTHETIC") }),
+        addAndSendTextMsg: (...args: unknown[]) => {
+          sent.push(args);
+          return new Promise(() => {}); // WhatsApp never acks a send here.
+        },
+      },
+    };
+    const globals: Record<string, any> = {};
+    new Function(
+      "globalThis",
+      "window",
+      `${WHATSAPP_ADAPTER_INSTALL};`,
+    )(globals, { require: (name: string) => modules[name] });
+    const result = await globals.__owlettoWhatsAppAdapterV1.invoke({
+      op: "send_message",
+      adapter_version: WHATSAPP_ADAPTER_VERSION,
+      account_id: account,
+      input: { chat_jid: "0@s.whatsapp.net", text: "synthetic reply" },
+    });
+    expect(result.ok).toBe(false);
+    expect(sent).toEqual([]);
+  });
+
   it("still sends on a build that only offers the one-shot call", async () => {
     const adapter = installAdapter({
       sendTextMsgToChat: (_chat: unknown, text: string) => ({
@@ -342,7 +379,7 @@ describe("whatsAppWebAdapterProgram connection readiness", () => {
       "window",
       "document",
       "Date",
-      `(${whatsAppWebAdapterProgram.toString()})();`,
+      `${WHATSAPP_ADAPTER_INSTALL};`,
     )(
       globals,
       { require: (name: string) => modules[name] ?? null },
@@ -506,7 +543,7 @@ describe("whatsAppWebAdapterProgram message actions", () => {
     };
     const run = new Function(
       ...Object.keys(page),
-      `"use strict";(${whatsAppWebAdapterProgram.toString()})();`,
+      `"use strict";${WHATSAPP_ADAPTER_INSTALL};`,
     );
     run(...Object.values(page));
     return { adapter: bindAccount(
@@ -664,7 +701,7 @@ describe("whatsAppWebAdapterProgram mentions of the own account", () => {
     };
     const run = new Function(
       ...Object.keys(page),
-      `"use strict";(${whatsAppWebAdapterProgram.toString()})();`,
+      `"use strict";${WHATSAPP_ADAPTER_INSTALL};`,
     );
     run(...Object.values(page));
     const result = await globals.__owlettoWhatsAppAdapterV1.invoke({
@@ -679,23 +716,39 @@ describe("whatsAppWebAdapterProgram mentions of the own account", () => {
   }
 
   it("flags a mention of the account's phone number", async () => {
-    expect((await normalized({ mentionedJidList: [wid(OTHER), wid(ME_PN)] })).mentions_me).toBe(true);
+    const row = await normalized({ mentionedJidList: [wid(OTHER), wid(ME_PN), wid(ME_PN)] });
+    expect(row.mentions_me).toBe(true);
+    expect(row.own_mention_jids).toEqual(["447000000000@s.whatsapp.net"]);
   });
 
   it("flags a mention of the account's lid", async () => {
-    expect((await normalized({ mentionedJidList: [wid(ME_LID)] })).mentions_me).toBe(true);
+    const row = await normalized({ mentionedJidList: [wid(ME_LID)] });
+    expect(row.mentions_me).toBe(true);
+    expect(row.own_mention_jids).toEqual([ME_LID]);
+  });
+
+  it("reports both verified identities once, preserving original message text", async () => {
+    const row = await normalized({ body: "hey @447000000000 @99000000000001", mentionedJidList: [
+      wid(ME_PN), wid(ME_LID), wid(ME_PN), wid(OTHER),
+    ] });
+    expect(row.body).toBe("hey @447000000000 @99000000000001");
+    expect(row.own_mention_jids).toEqual(["447000000000@s.whatsapp.net", ME_LID]);
   });
 
   it("flags a reply quoting the account's own message", async () => {
     const quoted = await normalized({ quotedStanzaID: "3EB0BOTSAID", quotedParticipant: wid(ME_PN) });
     expect(quoted.quoted_id).toBe("3EB0BOTSAID");
     expect(quoted.mentions_me).toBe(true);
+    expect(quoted.own_mention_jids).toEqual([]);
     expect((await normalized({ quotedStanzaID: "3EB0BOTSAID", quotedParticipant: wid(ME_LID) })).mentions_me)
       .toBe(true);
   });
 
   it("does not flag chatter that mentions or quotes someone else", async () => {
-    expect((await normalized({})).mentions_me).toBe(false);
+    const row = await normalized({ mentionedJidList: [wid(OTHER)] });
+    expect(row.mentions_me).toBe(false);
+    expect(row.own_mention_jids).toEqual([]);
+    expect((await normalized({})).own_mention_jids).toEqual([]);
     expect((await normalized({
       mentionedJidList: [wid(OTHER)],
       quotedStanzaID: "3EB0OTHER",
@@ -714,7 +767,7 @@ describe("whatsAppWebAdapterProgram version", () => {
     const globals = { __owlettoWhatsAppAdapterV1: resident };
     const install = new Function(
       "globalThis",
-      `(${whatsAppWebAdapterProgram.toString()})();`
+      `${WHATSAPP_ADAPTER_INSTALL};`
     );
 
     install(globals);
@@ -728,21 +781,19 @@ describe("whatsAppWebAdapterProgram version", () => {
     expect(detached).toBe(1);
   });
 
-  // The connector reuses a resident adapter whenever its version matches, so a
-  // fix shipped without bumping this number leaves every open
-  // WhatsApp tab running the old program. The two constants live in different
-  // files (one is page source, one is connector source); nothing but this test
-  // keeps them in step.
-  it("declares the same version the connector negotiates", () => {
-    // Read the file rather than `toString()`: the bundler inlines this const,
-    // so the serialised program no longer contains the identifier.
-    const source = readFileSync(
-      new URL("../whatsapp-web-adapter.js", import.meta.url),
-      "utf8"
-    );
-    const declared = source.match(/ADAPTER_VERSION = (\d+);/)?.[1];
-    expect(declared).toBeDefined();
-    expect(Number(declared)).toBe(WHATSAPP_ADAPTER_VERSION);
+  // Two changes to the program that each forgot (or both took the same) manual
+  // version bump left open tabs running whichever program arrived first.
+  it("replaces a resident adapter whenever the program text changes", () => {
+    const edited = whatsAppWebAdapterProgram
+      .toString()
+      .replace("WhatsApp adapter was replaced;", "WhatsApp adapter was replaced (edited);");
+    expect(edited).not.toBe(whatsAppWebAdapterProgram.toString());
+    const globals: Record<string, any> = {};
+    const install = (expression: string) => new Function("globalThis", expression)(globals);
+    install(whatsAppAdapterInstall().expression);
+    const resident = globals.__owlettoWhatsAppAdapterV1;
+    install(whatsAppAdapterInstall(edited).expression);
+    expect(globals.__owlettoWhatsAppAdapterV1).not.toBe(resident);
   });
 });
 
@@ -779,7 +830,7 @@ describe("WhatsApp source observation", () => {
         }
       },
     };
-    new Function("globalThis", "window", "location", `(${whatsAppWebAdapterProgram.toString()})();`)(globals, window, { origin: "https://web.whatsapp.com" });
+    new Function("globalThis", "window", "location", `${WHATSAPP_ADAPTER_INSTALL};`)(globals, window, { origin: "https://web.whatsapp.com" });
     const adapter = globals.__owlettoWhatsAppAdapterV1;
     return {
       posts, handlers,
@@ -791,7 +842,7 @@ describe("WhatsApp source observation", () => {
       },
       replace: () => {
         globals.__owlettoWhatsAppAdapterV1.version--;
-    new Function("globalThis", "window", "location", `(${whatsAppWebAdapterProgram.toString()})();`)(globals, window, { origin: "https://web.whatsapp.com" });
+    new Function("globalThis", "window", "location", `${WHATSAPP_ADAPTER_INSTALL};`)(globals, window, { origin: "https://web.whatsapp.com" });
       },
       publish: (batch: unknown) => adapter.invoke({ op: "publish_changes",
           account_id: "15550000001@c.us",

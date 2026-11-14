@@ -19,6 +19,7 @@ import { authenticateWorker } from "./middleware.js";
 import { captureSideEffect } from "./capture-mode.js";
 import { sendOncePerTurnInput } from "./turn-write-once.js";
 import type { WorkerContext } from "./types.js";
+import { routeFailure } from "../../../diagnostics.js";
 
 const logger = createLogger("file-routes");
 // The wire body carries multipart boundaries, part headers, and the other
@@ -232,7 +233,7 @@ export function createFileRoutes(
         error: getErrorMessage(error),
         stack: error instanceof Error ? error.stack : undefined,
       });
-      return errorResponse(c, "Failed to upload file", 500);
+      throw routeFailure(errorResponse(c, "Failed to upload file", 500), error);
     }
   });
 
@@ -366,7 +367,7 @@ export function createFileRoutes(
         error: getErrorMessage(error),
         stack: error instanceof Error ? error.stack : undefined,
       });
-      return errorResponse(c, "Failed to batch upload files", 500);
+      throw routeFailure(errorResponse(c, "Failed to batch upload files", 500), error);
     }
   });
 

@@ -55,6 +55,23 @@ export function sessionCookieCandidates(
 }
 
 /**
+ * A form POST from a signed-in browser page this server rendered. It carries
+ * a session cookie and no bearer credential (a bearer token is not a person at
+ * a browser), and its `Origin` is the host the request was addressed to, which
+ * on a per-org subdomain is that subdomain, or the configured public origin. A
+ * foreign page cannot set `Origin`, and a sandboxed frame sends `null`.
+ */
+export function isSignedInBrowserFormPost(request: Request): boolean {
+  const origin = request.headers.get('origin');
+  if (!origin || request.headers.has('authorization')) return false;
+  if (!sessionCookieCandidates(request.headers.get('cookie')).length) return false;
+  return (
+    origin === resolveBaseUrl({ request, skipEnvOverride: true }) ||
+    origin === resolveBaseUrl({ request })
+  );
+}
+
+/**
  * `user`, not `user && session`: four call sites (auth/middleware.ts,
  * auth/oauth/routes.ts, connect/routes.ts, worker-api/auth-runs.ts) check
  * `user` alone, so a stricter test would reject on a duplicated jar what they

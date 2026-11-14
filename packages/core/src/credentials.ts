@@ -136,7 +136,10 @@ export async function readContextCredential<
  * one. (Last-writer-wins on the rename; we don't merge, but neither writer can
  * corrupt the store.)
  */
-async function atomicWriteFile(file: string, data: string): Promise<void> {
+export async function atomicWriteFile(
+  file: string,
+  data: string
+): Promise<void> {
   await mkdir(dirname(file), { recursive: true });
   const tmp = join(
     dirname(file),

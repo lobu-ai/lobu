@@ -40,6 +40,7 @@ import { setupRoutes } from "./connect/setup-routes";
 import { chatIdentityRoutes } from "./connect/chat-identity-routes";
 import { connectRoutes } from "./connect/routes";
 import { checkDatabaseReadiness, getDb } from "./db/client";
+import { routeFailure } from "./diagnostics";
 import * as invalidationEmitter from "./events/emitter";
 import { streamInvalidationEvents } from "./events/sse";
 import { invalidationSseAuth } from "./events/sse-invalidation-auth";
@@ -121,7 +122,7 @@ import {
 } from "./utils/cors-origin";
 import { isValidFrameAncestor } from "./utils/csp";
 import { getApplyContext } from "./utils/apply-context";
-import { errorMessage } from "./utils/errors";
+import { errorMessage, ToolUserError } from "./utils/errors";
 import { insertWorkspaceChangeEventInTransaction } from "./utils/insert-event";
 import logger from "./utils/logger";
 import { readMcpAppAsset, renderMcpAppTemplate } from "./utils/mcp-app-bundle";
@@ -135,6 +136,7 @@ import {
 	resolvePublicOrigin,
 } from "./utils/public-origin";
 import {
+	enforcePublicReadLimit,
 	getClientIP,
 	getRateLimiter,
 	RateLimitPresets,
@@ -505,10 +507,10 @@ app.get("/health/ready", async (c) => {
 		await checkDatabaseReadiness();
 		return c.json({ status: "ok", service: "lobu-api" });
 	} catch (error) {
-		return c.json(
+		throw routeFailure(c.json(
 			{ status: "unready", service: "lobu-api", error: errorMessage(error) },
 			503,
-		);
+		), error);
 	}
 });
 
@@ -521,14 +523,14 @@ app.get("/health/scheduler", async (c) => {
 		const health = await getSchedulerHealth(c.env);
 		return c.json(health, health.healthy ? 200 : 503);
 	} catch (error) {
-		return c.json(
+		throw routeFailure(c.json(
 			{
 				healthy: false,
 				issues: ["Failed to check scheduler health"],
 				error: errorMessage(error),
 			},
 			500,
-		);
+		), error);
 	}
 });
 
@@ -1110,7 +1112,7 @@ async function handleContentDistribution(c: Context<{ Bindings: Env }>) {
 		);
 		return c.json({ distribution });
 	} catch (error) {
-		return c.json({ error: errorMessage(error) }, 500);
+		throw routeFailure(c.json({ error: errorMessage(error) }, 500), error);
 	}
 }
 
@@ -1903,6 +1905,23 @@ app.get("*", async (c) => {
 		!hasSessionCookie &&
 		isSpaRoute
 	) {
+		// A render reads the workspace and its live sources like any anonymous
+		// public read, so it spends the same per-IP budget. Unmetered, one client
+		// fanned out enough source reads through page loads to trip a source's
+		// own rate limit for every visitor.
+		try {
+			enforcePublicReadLimit({
+				userId: null,
+				clientIP: getClientIP(c.req.raw, c.var.peerRemoteAddress),
+			});
+		} catch (error) {
+			if (!(error instanceof ToolUserError) || error.code !== "RATE_LIMITED") {
+				throw error;
+			}
+			c.header("Cache-Control", "no-store");
+			c.header("Retry-After", String(error.retryAfterSeconds ?? 60));
+			return c.text("Too many requests", 429);
+		}
 		let publicPageModel: Awaited<ReturnType<typeof buildPublicPageModel>>;
 		try {
 			publicPageModel = await buildPublicPageModel(
@@ -1917,7 +1936,7 @@ app.get("*", async (c) => {
 			logger.error({ error, path: requestPath }, "[public-pages] render failed");
 			c.header("Cache-Control", "no-store");
 			c.header("Retry-After", "60");
-			return c.text("Temporarily unavailable", 503);
+			throw routeFailure(c.text("Temporarily unavailable", 503), error);
 		}
 		if (publicPageModel) {
 			const template = await loadAnySpaHtmlTemplate();

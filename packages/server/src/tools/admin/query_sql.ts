@@ -10,7 +10,7 @@ import { type Static, Type } from '@sinclair/typebox';
 import type { QueryContext } from '@lobu/connector-sdk';
 import { parseCollectionSelection } from '@lobu/core/contracts/tools/collection-selection';
 import { attributeFilterSql } from '../../utils/attribute-filters';
-import { authzScopeFromToolContext } from '../../authz/scope';
+import { type AuthzScope, authzScopeFromToolContext } from '../../authz/scope';
 import { getDb, pgTextArray } from '../../db/client';
 import type { Env } from '../../index';
 import { resolveWindowQueryContext } from '../../automations/window-read-context';
@@ -485,6 +485,7 @@ export async function querySqlImpl(
   // Validate, parse, and org-scope the query
   let scopedSql: string;
   let params: unknown[];
+  let scope: AuthzScope;
   let tableRefs: string[];
   try {
     const scoped = validateAndScopeQuery(baseSql, targetOrgId, {
@@ -504,6 +505,7 @@ export async function querySqlImpl(
     });
     scopedSql = scoped.sql;
     params = scoped.params;
+    scope = scoped.scope;
     tableRefs = scoped.tableRefs;
   } catch (err) {
     return fail(getErrorMessage(err), err instanceof ToolUserError ? err.code : undefined);
@@ -584,6 +586,7 @@ export async function querySqlImpl(
     const result = await boundedRead(getDb(), {
       signal,
       statementTimeoutMs: QUERY_SQL_STATEMENT_TIMEOUT_MS,
+      fence: scope,
     }, async (tx) => {
       const data = await cancellable(tx.unsafe(dataSql, params), signal);
       const rows = Array.isArray(data) ? (data as Array<Record<string, unknown>>) : [];

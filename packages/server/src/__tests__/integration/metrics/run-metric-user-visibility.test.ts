@@ -33,12 +33,25 @@ const METRICS = {
       against: 'aliases',
       where: "semantic_type='transaction' AND connector_key='revolut'",
     },
+    // Authored SQL that would run far past any request: a measure's predicates
+    // are org-written, so the statement cap is the only bound.
+    slow_txns: {
+      by: 'alias',
+      field: "metadata->>'description'",
+      against: 'aliases',
+      where: "semantic_type='transaction' AND (SELECT count(*) FROM generate_series(1, 2000000000)) > 0",
+    },
   },
   measures: {
     txn_count: {
       eventSet: 'txns',
       agg: 'count',
       description: 'Number of matched transactions.',
+    },
+    slow_count: {
+      eventSet: 'slow_txns',
+      agg: 'count',
+      description: 'Matched transactions behind an unbounded predicate.',
     },
   },
 };
@@ -138,4 +151,12 @@ describe('runMetric — per-user connection visibility (M0 deny-test)', () => {
   it('headless (no user) counts org-visible only — fails closed on private', async () => {
     expect(await count(null)).toBe(1);
   });
+
+  it('stops an authored measure at the member SQL statement timeout', async () => {
+    const started = Date.now();
+    await expect(
+      runMetric({ organizationId: orgId, entityType: 'vendor', measure: 'slow_count', userId: userAId })
+    ).rejects.toMatchObject({ code: 'UPSTREAM_TIMEOUT' });
+    expect(Date.now() - started).toBeLessThan(20_000);
+  }, 30_000);
 });

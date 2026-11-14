@@ -171,6 +171,15 @@ describe('validateAndScopeQuery — parser-bypass regressions', () => {
     ["SELECT pg_log_backend_memory_contexts(1)"],
     ["SELECT PG_CATALOG.PG_STAT_GET_ACTIVITY(NULL)"],
     ["SELECT current_setting('server_version')"],
+    [String.raw`SELECT 1 AS u, U&"set\005Fconfig"('lobu.acl_write', 'on', true)`],
+    [String.raw`SELECT 1 AS u, U&"query\005Fto\005Fxml"('SELECT 1', true, false, '')`],
+    [String.raw`SELECT 1 AS u, U&"pg\005Fsleep"(10)`],
+    [String.raw`SELECT 1 AS u, U&"query\+00005Fto\005Fxml"('SELECT 1', true, false, '')`],
+    [String.raw`SELECT id, 1 AS u FROM entities WHERE (U&"query\005Fto\005Fxml"('SELECT 1', true, false, ''))::text <> ''`],
+    [String.raw`SELECT pg_catalog."query\005Fto\005Fxml"('SELECT 1', true, false, '')`],
+    [String.raw`SELECT 1 AS u, pg_catalog.U&"query\005Fto\005Fxml"('SELECT 1', true, false, '')`],
+    ['SELECT "custom_function"(name) FROM entities'],
+    ['SELECT public."custom_function"(name) FROM entities'],
   ])('rejects %s', (sql) => {
     expect(() => scopeAsMember(sql)).toThrow(/not allowed/i);
   });
@@ -179,6 +188,8 @@ describe('validateAndScopeQuery — parser-bypass regressions', () => {
     ["SELECT lower(name), to_char(created_at, 'YYYY'), date_trunc('day', created_at) FROM entities"],
     ["SELECT coalesce(metadata->>'tier', 'none'), jsonb_array_length(coalesce(metadata->'tags', '[]'::jsonb)) FROM entities"],
     ["SELECT count(*), max(created_at), log(2, 8), to_tsvector(name) FROM entities GROUP BY 4"],
+    ['SELECT "lower"(name) AS "set_config" FROM entities'],
+    [String.raw`SELECT 'U&"query\005Fto\005Fxml"' AS sample`],
   ])('still allows ordinary functions: %s', (sql) => {
     expect(() => scopeAsMember(sql)).not.toThrow();
   });
@@ -213,8 +224,8 @@ describe('validateAndScopeQuery — parser-bypass regressions', () => {
     // complete walk catches it so it gets its own org-scoped CTE rather than
     // reading every org's events.
     const out = scopeAsMember('SELECT id, (SELECT count(*) FROM events) AS n FROM entities');
-    expect(out.sql).toMatch(/"events"\s+AS\s+\(/i);
-    expect(out.sql).toMatch(/"entities"\s+AS\s+\(/i);
+    expect(out.sql).toMatch(/"events"\s+AS\s+NOT\s+MATERIALIZED\s+\(/i);
+    expect(out.sql).toMatch(/"entities"\s+AS\s+NOT\s+MATERIALIZED\s+\(/i);
   });
 
   it('rejects a CTE whose name shadows a real table (fail-closed)', () => {
@@ -236,7 +247,7 @@ describe('validateAndScopeQuery — parser-bypass regressions', () => {
 
   it('still allows an ordinary (non-colliding) CTE name', () => {
     const out = scopeAsMember('WITH recent AS (SELECT id FROM events) SELECT * FROM recent');
-    expect(out.sql).toMatch(/"events"\s+AS\s+\(/i);
+    expect(out.sql).toMatch(/"events"\s+AS\s+NOT\s+MATERIALIZED\s+\(/i);
   });
 });
 
@@ -325,7 +336,7 @@ describe('validateAndScopeQuery — ORDER BY/GROUP BY alias + leading-comment WI
   it('emits a single WITH for a leading-comment WITH query (valid SQL)', () => {
     const out = scopeAsMember('-- note\nWITH recent AS (SELECT id FROM events) SELECT * FROM recent');
     expect((out.sql.match(/\bWITH\b/gi) || []).length).toBe(1);
-    expect(out.sql).toMatch(/"events"\s+AS\s+\(/i);
+    expect(out.sql).toMatch(/"events"\s+AS\s+NOT\s+MATERIALIZED\s+\(/i);
   });
 });
 

@@ -1,4 +1,5 @@
 import { getDb, type DbClient } from '../db/client';
+import { withTransaction } from '../db/transaction';
 import { assertOAuthAccountGrant, oauthAccountAppMismatch, oauthAccountGrantError, oauthAccountOwnershipError } from '../authz/oauth-account-ownership';
 import { getAuthProfileById, updateAuthProfile } from './auth-profiles';
 import { getOAuthAuthMethods, normalizeConnectorAuthSchema } from './connector-auth';
@@ -138,16 +139,6 @@ export async function syncOAuthConnectionsForAuthProfile(
     return;
   }
 
-  const [accountRow] = await sql`
-    SELECT scope, "accountId"
-    FROM "account"
-    WHERE id = ${authProfile.account_id}
-    LIMIT 1
-  `;
-  const accountGrantedScopes = normalizeScopeList(
-    (accountRow as { scope?: string | null } | undefined)?.scope
-  );
-
   const [connectorRow] = await sql`
     SELECT auth_schema, feeds_schema
     FROM connector_definitions
@@ -167,40 +158,29 @@ export async function syncOAuthConnectionsForAuthProfile(
   const feedsSchema =
     (connectorRow as { feeds_schema?: Record<string, unknown> } | undefined)?.feeds_schema ??
     null;
-  // Shared social-login accounts need per-connector attribution. Isolated
-  // connector accounts keep their own grants, including scopes removed from
-  // the manifest. Reconnect separately filters which scopes to request again.
   const declaredScopes = declaredOAuthScopes(oauthMethod, feedsSchema);
-  const isolatedAccount = (accountRow as { accountId?: string } | undefined)?.accountId
-    ?.startsWith('lobu-connector:');
-  const grantedScopes = isolatedAccount
-    ? accountGrantedScopes
-    : accountGrantedScopes.filter((scope) => hasAllScopes(declaredScopes, [scope]));
-  // Optional permissions affect the capabilities that declare them, not the
-  // health of every operation/feed backed by this account.
-  const connectorScopesOk = hasAllScopes(
-    grantedScopes,
-    normalizeScopeList(oauthMethod?.requiredScopes)
-  );
-
-  const currentGrantedScopes = normalizeScopeList(authProfile.auth_data?.granted_scopes);
-  const nextProfileStatus = connectorScopesOk ? 'active' : 'pending_auth';
-  if (
-    authProfile.status !== nextProfileStatus ||
-    currentGrantedScopes.join(' ') !== grantedScopes.join(' ')
-  ) {
-    await updateAuthProfile({
-      organizationId,
-      slug: authProfile.slug,
-      authData: {
-        ...(authProfile.auth_data ?? {}),
-        granted_scopes: grantedScopes,
-      },
-      status: nextProfileStatus,
-      accountId: authProfile.account_id,
-      provider: authProfile.provider,
-    });
-  }
+  const requiredScopes = normalizeScopeList(oauthMethod?.requiredScopes);
+  // The account's current grant. Read again under the profile lock below,
+  // since a consent may replace it after this first read.
+  const readGrant = async (db: DbClient, accountId: string) => {
+    const [accountRow] = await db<{ scope: string | null; accountId: string }>`
+      SELECT scope, "accountId"
+      FROM "account"
+      WHERE id = ${accountId}
+      LIMIT 1
+    `;
+    const accountGrantedScopes = normalizeScopeList(accountRow?.scope);
+    // Shared social-login accounts need per-connector attribution. Isolated
+    // connector accounts keep their own grants, including scopes removed from
+    // the manifest. Reconnect separately filters which scopes to request again.
+    const grantedScopes = accountRow?.accountId?.startsWith('lobu-connector:')
+      ? accountGrantedScopes
+      : accountGrantedScopes.filter((scope) => hasAllScopes(declaredScopes, [scope]));
+    // Optional permissions affect the capabilities that declare them, not the
+    // health of every operation/feed backed by this account.
+    return { grantedScopes, connectorScopesOk: hasAllScopes(grantedScopes, requiredScopes) };
+  };
+  const { grantedScopes, connectorScopesOk } = await readGrant(sql, authProfile.account_id);
 
   const feedRows = await sql`
     SELECT f.id, f.feed_key, f.status, f.last_error, c.id AS connection_id
@@ -265,29 +245,67 @@ export async function syncOAuthConnectionsForAuthProfile(
     }
   }
 
-  const connectionRows = await sql`
-    SELECT id, status
-    FROM connections
-    WHERE organization_id = ${organizationId}
-      AND auth_profile_id = ${authProfileId}
-      AND deleted_at IS NULL
-    ORDER BY id
-  `;
-
-  for (const row of connectionRows as Array<{ id: number; status: string }>) {
-    // A paused connection was stopped for a lifecycle reason (uninstall,
-    // unpair, channel removal), not a credential one — renewing the grant must
-    // not silently restart it. 'revoked' IS a credential failure, so a fresh
-    // grant is exactly what recovers it.
-    if (row.status === 'paused') continue;
-    const nextConnectionStatus = connectorScopesOk ? 'active' : 'pending_auth';
-    await sql`
-      UPDATE connections
-      SET status = ${nextConnectionStatus},
-          account_id = ${connectionAccountStamp(sql, { organizationId,
-            connectorKey: sql`connections.connector_key`, connectionId: row.id, account: authProfile.account_id })},
-          updated_at = NOW()
-      WHERE id = ${row.id}
+  // Lock the profile, then its connections: the order consent and a rejected
+  // refresh take. Decide from the profile as it is now, since either may have
+  // committed after the read above.
+  await withTransaction(undefined, async (tx) => {
+    const [current] = await tx<{
+      slug: string;
+      status: string;
+      auth_data: Record<string, unknown> | null;
+      account_id: string | null;
+      provider: string | null;
+    }>`
+      SELECT slug, status, auth_data, account_id, provider
+      FROM auth_profiles
+      WHERE id = ${authProfileId}
+        AND organization_id = ${organizationId}
+      FOR UPDATE
     `;
-  }
+    // A rebind since the read above reconciles with its own account's scopes.
+    if (!current?.account_id || current.account_id !== authProfile.account_id) return;
+
+    // A profile revoked because the provider rejected its grant stays revoked:
+    // stored scopes still look sufficient, but only a reconnect, which sets the
+    // profile active before reconciling, recovers it.
+    const grant = await readGrant(tx, current.account_id);
+    const nextStatus =
+      current.status === 'revoked' ? 'revoked' : grant.connectorScopesOk ? 'active' : 'pending_auth';
+    const currentGrantedScopes = normalizeScopeList(current.auth_data?.granted_scopes);
+    if (current.status !== nextStatus || currentGrantedScopes.join(' ') !== grant.grantedScopes.join(' ')) {
+      await updateAuthProfile({
+        organizationId,
+        slug: current.slug,
+        authData: { ...(current.auth_data ?? {}), granted_scopes: grant.grantedScopes },
+        status: nextStatus,
+        accountId: current.account_id,
+        provider: current.provider,
+      }, tx);
+    }
+
+    const connectionRows = await tx<{ id: number; status: string }>`
+      SELECT id, status
+      FROM connections
+      WHERE organization_id = ${organizationId}
+        AND auth_profile_id = ${authProfileId}
+        AND deleted_at IS NULL
+      ORDER BY id
+      FOR UPDATE
+    `;
+    for (const row of connectionRows) {
+      // A paused connection was stopped for a lifecycle reason (uninstall,
+      // unpair, channel removal), not a credential one — renewing the grant
+      // must not silently restart it. 'revoked' IS a credential failure, so a
+      // fresh grant is exactly what recovers it.
+      if (row.status === 'paused') continue;
+      await tx`
+        UPDATE connections
+        SET status = ${nextStatus},
+            account_id = ${connectionAccountStamp(tx, { organizationId,
+              connectorKey: tx`connections.connector_key`, connectionId: row.id, account: current.account_id })},
+            updated_at = NOW()
+        WHERE id = ${row.id}
+      `;
+    }
+  });
 }

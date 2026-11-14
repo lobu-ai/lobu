@@ -11,6 +11,9 @@ import { randomUUID } from "node:crypto";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { materializeDueAutomationRuns } from "../../../automations/automation";
 import { clearAuthCacheForTests, createAuth } from "../../../auth/index";
+import { OAuthProvider } from "../../../auth/oauth/provider";
+import { resolveGrantedWorkspaceTarget } from "../../../auth/oauth/workspace-grants";
+import { parsePgTextArray, pgTextArray } from "../../../db/client";
 import { app, type Env } from "../../../index";
 import { resolveDefaultOrgId } from "../../../lobu/gateway";
 import { createPostgresAgentConnectionStore } from "../../../lobu/stores/postgres-stores";
@@ -34,9 +37,11 @@ import {
 import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
 import {
 	addUserToOrganization,
+	createTestAccessToken,
 	createTestAgent,
 	createTestEntity,
 	createTestEvent,
+	createTestOAuthClient,
 	createTestOrganization,
 	insertChatConnectionRow,
 } from "../../setup/test-fixtures";
@@ -368,6 +373,178 @@ describe("workspace purge", () => {
 		expect(await sql`SELECT 1 FROM organization WHERE id = ${target.organizationId}`).toHaveLength(0);
 		expect(await sql`SELECT 1 FROM entity_relationships WHERE organization_id = ${reader.id}`).toHaveLength(0);
 		expect(await sql`SELECT 1 FROM entities WHERE id = ${own.id}`).toHaveLength(1);
+	});
+
+	it("keeps an OAuth registration other workspaces use and deletes one only it used", async () => {
+		const sql = getTestDb();
+		const target = await signUpOwnerWithWorkspace("oauth-home");
+		const other = await createTestOrganization();
+		await addUserToOrganization(target.userId, other.id, "owner");
+		const provider = new OAuthProvider(sql, "http://localhost", true);
+		const shared = await createTestOAuthClient({
+			client_name: "Shared registration",
+			grant_types: ["authorization_code", "urn:ietf:params:oauth:grant-type:device_code", "refresh_token"],
+		});
+		const historic = await createTestOAuthClient({ client_name: "Historic registration" });
+		const solo = await createTestOAuthClient({ client_name: "Solo registration" });
+		// A registration is homed in the first workspace that authorizes it; a
+		// later workspace only adds grants.
+		for (const client of [shared, historic, solo]) {
+			await provider.clientsStore.touchClientActivity({
+				clientId: client.client_id,
+				organizationId: target.organizationId,
+				userId: target.userId,
+			});
+		}
+		await provider.clientsStore.touchClientActivity({
+			clientId: shared.client_id,
+			organizationId: other.id,
+			userId: target.userId,
+		});
+		const homes = await sql`
+			SELECT DISTINCT organization_id FROM oauth_clients
+			WHERE id IN (${shared.client_id}, ${historic.client_id}, ${solo.client_id})
+		`;
+		expect(homes.map((row) => row.organization_id)).toEqual([target.organizationId]);
+
+		const targetToken = await createTestAccessToken(target.userId, target.organizationId, shared.client_id);
+		const otherToken = await createTestAccessToken(target.userId, other.id, shared.client_id);
+		const bothToken = await createTestAccessToken(target.userId, other.id, shared.client_id, {
+			grantedOrganizationIds: [other.id, target.organizationId],
+		});
+		await createTestAccessToken(target.userId, target.organizationId, historic.client_id);
+		await createTestAccessToken(target.userId, target.organizationId, solo.client_id);
+		// One grant bound to the deleted workspace and one for the other workspace
+		// that also names it, as an authorization code and as a device code.
+		const grants = [
+			{ primary: target.organizationId, granted: [target.organizationId] },
+			{ primary: other.id, granted: [other.id, target.organizationId] },
+		];
+		for (const grant of grants) {
+			await provider.createAuthorizationCode(
+				{
+					client_id: shared.client_id,
+					redirect_uri: shared.redirect_uris[0],
+					response_type: "code",
+					code_challenge: "synthetic-challenge",
+					code_challenge_method: "S256",
+					scope: "mcp:read",
+					resource: "http://localhost/mcp",
+				},
+				target.userId,
+				grant.primary,
+				grant.granted,
+			);
+			const device = await provider.createDeviceAuthorization(shared.client_id, "mcp:read", "http://localhost/mcp");
+			if ("error" in device) throw new Error(device.error);
+			expect(await provider.claimDeviceCodeForUser(device.user_code, target.userId)).toBeTruthy();
+			expect(
+				await provider.approveDeviceCode(device.user_code, target.userId, grant.primary, undefined, grant.granted),
+			).toBe(device.user_code);
+		}
+		await sql`
+			INSERT INTO mcp_sessions (
+				session_id, user_id, client_id, organization_id, member_role,
+				is_authenticated, scoped_to_org, expires_at
+			) VALUES
+				('purge-oauth-target-session', ${target.userId}, ${shared.client_id}, ${target.organizationId},
+				 'owner', true, true, NOW() + INTERVAL '1 hour'),
+				('purge-oauth-other-session', ${target.userId}, ${shared.client_id}, ${other.id},
+				 'owner', true, true, NOW() + INTERVAL '1 hour')
+		`;
+		await sql`
+			INSERT INTO events (organization_id, title, payload_text, origin_id, client_id)
+			SELECT org.id, 'call ' || g, 'body ' || g, 'oauth-' || org.id || '-' || g, ${shared.client_id}
+			FROM (VALUES (${target.organizationId}), (${other.id})) AS org(id), generate_series(1, 3) g
+		`;
+		// No live grant outside the deleted workspace, only another workspace's
+		// past events.
+		await sql`
+			INSERT INTO events (organization_id, title, payload_text, origin_id, client_id)
+			VALUES
+				(${target.organizationId}, 'solo call', 'body', 'oauth-solo', ${solo.client_id}),
+				(${other.id}, 'historic call', 'body', 'oauth-historic', ${historic.client_id})
+		`;
+
+		const deleted = await call("/organization/delete", { organizationId: target.organizationId }, target.token);
+		expect(deleted.status).toBe(200);
+		const [task] = await pendingPurgeTask(target.organizationId);
+		await claimPurgeTask(task.id, "test-holder");
+		const counts = await runWorkspacePurgeTask(
+			{ organizationId: target.organizationId },
+			{ taskRunId: task.id, claimedBy: "test-holder" },
+		);
+		expect(await sql`SELECT 1 FROM organization WHERE id = ${target.organizationId}`).toHaveLength(0);
+
+		// The other workspace keeps the registration, its grants, its session and
+		// the attribution of its events. Only the deleted workspace's entry in a
+		// multi-workspace grant is gone.
+		const [registration] = await sql`
+			SELECT organization_id FROM oauth_clients WHERE id = ${shared.client_id}
+		`;
+		const otherAuth = await provider.verifyAccessToken(otherToken.token);
+		const bothAuth = await provider.verifyAccessToken(bothToken.token);
+		const [{ attributed }] = await sql`
+			SELECT count(*)::int AS attributed FROM events
+			WHERE organization_id = ${other.id} AND client_id = ${shared.client_id}
+		`;
+		const [historicRegistration] = await sql`
+			SELECT r.organization_id, e.client_id AS event_client_id
+			FROM events e LEFT JOIN oauth_clients r ON r.id = ${historic.client_id}
+			WHERE e.origin_id = 'oauth-historic'
+		`;
+		const keptSessions = await sql`
+			SELECT session_id FROM mcp_sessions WHERE client_id = ${shared.client_id}
+		`;
+		const keptCodes = await sql`
+			SELECT granted_organization_ids FROM oauth_authorization_codes WHERE client_id = ${shared.client_id}
+			UNION ALL
+			SELECT granted_organization_ids FROM oauth_device_codes WHERE client_id = ${shared.client_id}
+		`;
+		expect({
+			registration: registration ? { home: registration.organization_id } : "deleted",
+			otherTokenGrants: otherAuth?.grantedOrganizationIds ?? "rejected",
+			bothTokenGrants: bothAuth?.grantedOrganizationIds ?? "rejected",
+			otherEventsAttributed: attributed,
+			sessions: keptSessions.map((row) => row.session_id),
+			codeGrants: keptCodes.map((row) => parsePgTextArray(row.granted_organization_ids as string | null)),
+			historic: historicRegistration,
+		}).toEqual({
+			registration: { home: null },
+			otherTokenGrants: [other.id],
+			bothTokenGrants: [other.id],
+			otherEventsAttributed: 3,
+			sessions: ["purge-oauth-other-session"],
+			codeGrants: [[other.id], [other.id]],
+			historic: { organization_id: null, event_client_id: historic.client_id },
+		});
+		// The kept token still opens the other workspace through the live path.
+		const reachable = await resolveGrantedWorkspaceTarget({
+			sql,
+			userId: target.userId,
+			grantedOrganizationIds: otherAuth?.grantedOrganizationIds ?? [],
+			slugOrId: other.id,
+		});
+		expect(reachable?.id).toBe(other.id);
+
+		// Nothing still grants the deleted workspace: no live token is bound to
+		// it or names it, and no code or session for it survives.
+		const namesTarget = sql`(
+			organization_id = ${target.organizationId}
+			OR granted_organization_ids @> ${pgTextArray([target.organizationId])}::text[]
+		)`;
+		expect(await provider.verifyAccessToken(targetToken.token)).toBeNull();
+		expect(await sql`SELECT id FROM oauth_tokens WHERE revoked_at IS NULL AND ${namesTarget}`).toHaveLength(0);
+		expect(await sql`SELECT code FROM oauth_authorization_codes WHERE ${namesTarget}`).toHaveLength(0);
+		expect(await sql`SELECT device_code FROM oauth_device_codes WHERE ${namesTarget}`).toHaveLength(0);
+		expect(
+			await sql`SELECT session_id FROM mcp_sessions WHERE organization_id = ${target.organizationId}`,
+		).toHaveLength(0);
+
+		// The registration only the deleted workspace used goes with it.
+		expect(await sql`SELECT 1 FROM oauth_clients WHERE id = ${solo.client_id}`).toHaveLength(0);
+		expect(await sql`SELECT 1 FROM oauth_tokens WHERE client_id = ${solo.client_id}`).toHaveLength(0);
+		expect(counts).toMatchObject({ oauth_clients: 1, oauth_clients_detached: 2 });
 	});
 
 	it("resumes after losing its lease mid-batch and completes", async () => {

@@ -105,6 +105,7 @@ import {
 import { authorizeRunForWorker } from "./shared";
 import { classifyRunOutcome } from "../runs/run-outcome";
 import { runLeaseFence, runOwnerFence } from "../runs/run-lease";
+import { routeFailure } from '../diagnostics';
 
 type DbClient = ReturnType<typeof getDb>;
 type SqlFragment = ReturnType<DbClient>;
@@ -427,7 +428,7 @@ export async function heartbeat(c: Context<{ Bindings: Env }>) {
 			...(steer.length > 0 ? { steer } : {}),
 		});
 	} catch (err: unknown) {
-		return c.json({ error: errorMessage(err) }, 500);
+		throw routeFailure(c.json({ error: errorMessage(err) }, 500), err);
 	}
 }
 
@@ -1266,7 +1267,7 @@ export async function streamContent(c: Context<{ Bindings: Env }>) {
 		const message = browserRun ? sanitizeBrowserText(rawMessage) : rawMessage;
 		const stack = browserRun ? sanitizeBrowserText(rawStack) : rawStack;
 		console.error("[stream] Error:", message, stack);
-		return c.json({ error: message, stack }, 500);
+		throw routeFailure(c.json({ error: message, stack }, 500), err);
 	}
 }
 
@@ -1626,7 +1627,7 @@ export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
 		return c.json({ success: true });
 	} catch (err: unknown) {
 		logger.error({ error: errorMessage(err) }, "[completeWorkerJob] Error");
-		return c.json({ error: errorMessage(err) }, 500);
+		throw routeFailure(c.json({ error: errorMessage(err) }, 500), err);
 	}
 }
 
@@ -2258,7 +2259,7 @@ export async function fetchEventsForEmbedding(c: Context<{ Bindings: Env }>) {
 			})),
 		});
 	} catch (err: unknown) {
-		return c.json({ error: errorMessage(err) }, 500);
+		throw routeFailure(c.json({ error: errorMessage(err) }, 500), err);
 	}
 }
 
@@ -2393,7 +2394,7 @@ export async function completeEmbeddings(c: Context<{ Bindings: Env }>) {
 		return c.json({ success: failed === 0, updated, failed });
 	} catch (err: unknown) {
 		logger.error({ error: errorMessage(err) }, "[completeEmbeddings] Error");
-		return c.json({ error: errorMessage(err) }, 500);
+		throw routeFailure(c.json({ error: errorMessage(err) }, 500), err);
 	}
 }
 
@@ -2418,7 +2419,7 @@ export async function emitAuthArtifact(c: Context<{ Bindings: Env }>) {
 
 		return c.json({ success: true });
 	} catch (err: unknown) {
-		return c.json({ error: errorMessage(err) }, 500);
+		throw routeFailure(c.json({ error: errorMessage(err) }, 500), err);
 	}
 }
 
@@ -2451,7 +2452,7 @@ export async function pollAuthSignal(c: Context<{ Bindings: Env }>) {
 
 		return c.json(consumed ? { signal: consumed } : {});
 	} catch (err: unknown) {
-		return c.json({ error: errorMessage(err) }, 500);
+		throw routeFailure(c.json({ error: errorMessage(err) }, 500), err);
 	}
 }
 
@@ -2573,7 +2574,7 @@ export async function completeAuthRun(c: Context<{ Bindings: Env }>) {
 		return c.json({ success: true });
 	} catch (err: unknown) {
 		logger.error({ error: errorMessage(err) }, "[completeAuthRun] Error");
-		return c.json({ error: errorMessage(err) }, 500);
+		throw routeFailure(c.json({ error: errorMessage(err) }, 500), err);
 	}
 }
 
@@ -2710,6 +2711,6 @@ export async function completeActionRun(c: Context<{ Bindings: Env }>) {
 	} catch (err: unknown) {
 		await deleteMaterializedArtifacts(publishedActionArtifactIds);
 		logger.error({ error: errorMessage(err) }, "[completeActionRun] Error");
-		return c.json({ error: errorMessage(err) }, 500);
+		throw routeFailure(c.json({ error: errorMessage(err) }, 500), err);
 	}
 }

@@ -174,8 +174,8 @@ describe('connector continuation through worker HTTP and Postgres', () => {
       { generateEmbeddings: false, timeoutMs: 20000 });
     const result = await execute(claimed);
     expect(result.itemsCollected).toBe(fixture.first);
-    expect(completions).toHaveLength(2);
-    expect(completions[0]).toEqual(completions[1]);
+    expect(completions).toHaveLength(fault === 'exhausted' ? 6 : 2);
+    for (const completion of completions) expect(completion).toEqual(completions[0]);
     expect(completions[0]).toMatchObject({ status: 'success', more: true, items_collected: fixture.first });
     const [run] = await sql`SELECT status FROM runs WHERE id = ${claimed.run_id!}`;
     const [storedFeed] = await sql`SELECT checkpoint, consecutive_failures, last_error FROM feeds WHERE id = ${feed.id}`;

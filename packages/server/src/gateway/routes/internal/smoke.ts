@@ -77,6 +77,7 @@ import {
 import { Hono } from "hono";
 import { getDb } from "../../../db/client.js";
 import { constantTimeEqual } from "../../../utils/constant-time-equal.js";
+import { routeFailure } from "../../../diagnostics.js";
 
 const logger = createLogger("smoke-dispatch");
 
@@ -312,7 +313,7 @@ export function createSmokeRoutes(): Hono {
       logger.error(
         `Smoke dispatch INSERT failed: ${getErrorMessage(err)}`
       );
-      return c.json({ error: "Internal error" }, 500);
+      throw routeFailure(c.json({ error: "Internal error" }, 500), err);
     }
   });
 

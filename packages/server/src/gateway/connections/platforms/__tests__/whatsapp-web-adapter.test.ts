@@ -306,6 +306,25 @@ describe("WhatsApp Web source rows", () => {
     expect(adapter.parseSourceRow(source({ mentions_me: true }))?.message?.isMention).toBe(false);
   });
 
+  test.each([
+    ["@15550000001 /link ABC123", [DM_JID], "/link ABC123"],
+    ["  @90000000000001  /help", [LID_JID], "/help"],
+    ["@15550000001 @90000000000001 /status", [DM_JID, LID_JID], "/status"],
+    ["@15550000001 /help", [], "@15550000001 /help"],
+    ["@15550000002 /help", [DM_JID], "@15550000002 /help"],
+    ["@155500000010 /help", [DM_JID], "@155500000010 /help"],
+    ["@15550000001suffix /help", [DM_JID], "@15550000001suffix /help"],
+    ["@15550000001 /help", ["15550000001@g.us"], "@15550000001 /help"],
+    ["hello @15550000001", [DM_JID], "hello @15550000001"],
+  ])("normalizes only a verified leading self-mention: %s (%j)", (text, ownMentionJids, expected) => {
+    const { adapter } = harness([]);
+    const raw = source({ text, own_mention_jids: ownMentionJids, mentions_me: true, chat_jid: GROUP_JID });
+    const message = adapter.parseSourceRow(raw)?.message;
+    expect(message?.text).toBe(expected);
+    expect(message?.raw).toBe(raw);
+    expect(message?.raw.text).toBe(text);
+  });
+
   test("nothing answers our own, unverified, revoked, system, media-only or broadcast rows", () => {
     const { adapter } = harness([]);
     for (const overrides of [

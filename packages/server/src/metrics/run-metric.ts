@@ -8,7 +8,9 @@ import type { EntityMetrics } from "@lobu/connector-sdk";
 import { authzScopeFromToolContext } from "../authz/scope";
 import { getDb } from "../db/client";
 import { isCompletePushdownResult, pushdownFailureError, runConnectorQuery } from "../lib/connector-pushdown";
-import { ToolUserError } from "../utils/errors";
+import { boundedQuery, classifyReadQueryFailure } from "../utils/bounded-read";
+import { QUERY_SQL_STATEMENT_TIMEOUT_MS } from "../utils/content-read-bounds";
+import { ToolUserError, toolErrorHttpStatus } from "../utils/errors";
 import { validateAndScopeQuery } from "../utils/execute-data-sources";
 import { type ColumnDef, SAFE_COLUMN_DEFS } from "../utils/table-schema";
 import { compileDerivedMetricSql, compileMetricSql } from "./compiler";
@@ -62,6 +64,8 @@ interface RunMetricInput {
    * `userId` (a null principal sees org-visible connections only).
    */
   isAdmin?: boolean;
+  /** The caller's lifetime: its abort cancels the running statement. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -114,11 +118,23 @@ export async function runMetric(input: RunMetricInput): Promise<Record<string, u
     excludeMemberEntities: input.excludeMemberEntities,
   });
 
-  const rows = await sql.begin(async (tx: typeof sql) => {
-    await tx`SET TRANSACTION READ ONLY`;
-    return tx.unsafe(scoped.sql, scoped.params as unknown[]);
-  });
-  return rows as unknown as Record<string, unknown>[];
+  let rows: unknown;
+  try {
+    // Measures and segments are org-authored SQL, so they get the member SQL
+    // statement cap, not only a read-only transaction.
+    rows = await boundedQuery(sql, scoped.sql, scoped.params as unknown[], {
+      signal: input.signal,
+      statementTimeoutMs: QUERY_SQL_STATEMENT_TIMEOUT_MS,
+      fence: scoped.scope,
+    });
+  } catch (err) {
+    if (input.signal?.aborted) throw err;
+    // Same caller-facing text as query_sql: a database error can quote a row
+    // the scope would have removed.
+    const failure = classifyReadQueryFailure(err);
+    throw new ToolUserError(failure.message, toolErrorHttpStatus(failure.code), failure.code);
+  }
+  return rows as Record<string, unknown>[];
 }
 
 /**

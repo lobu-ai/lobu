@@ -319,7 +319,7 @@ describe("Slack Preview claims + channel Automations", () => {
     expect(rows[0]).toMatchObject({ channel_id: "telegram:12345", team_id: null });
   });
 
-  test("consume binds the Slack channel to the agent and is one-time-use", async () => {
+  test("consume binds once and confirms retries only in the same chat", async () => {
     const code = await createClaim(AGENT_ID);
     const bound = await consumeSlack({
       code,
@@ -343,10 +343,59 @@ describe("Slack Preview claims + channel Automations", () => {
       team_id: TEAM_ID,
     });
 
-    // Claim consumed; replay fails.
-    expect(
-      await consumeSlack({ code, teamId: TEAM_ID, channelId: "D123" })
-    ).toEqual({ status: "not_found" });
+    // Replaying this same chat confirms its current binding without rewriting it.
+    const [before] = await getDb()`SELECT updated_at FROM automations WHERE id = ${rows[0]!.automation_id}`;
+    expect(await consumeSlack({ code, teamId: TEAM_ID, channelId: "D123" })).toMatchObject({
+      status: "bound", agentId: AGENT_ID, organizationId: ORG_ID,
+    });
+    const [after] = await getDb()`SELECT updated_at FROM automations WHERE id = ${rows[0]!.automation_id}`;
+    expect(after.updated_at).toEqual(before.updated_at);
+    expect(await consumeSlack({ code, teamId: TEAM_ID, channelId: "D_OTHER" })).toEqual({ status: "not_found" });
+    expect(await consumeSlack({ code, teamId: "T_OTHER", channelId: "D123" })).toEqual({ status: "not_found" });
+    expect(await consumePreviewClaim({ code, platform: "telegram", channelId: "slack:D123",
+      surfaceType: "dm", connectionId: CLAIM_TELEGRAM_CONNECTION, connectionOrganizationId: ORG_ID,
+    })).toEqual({ status: "not_found" });
+    expect(await consumePreviewClaim({ code, platform: "slack", channelId: canonicalSlackChannelId("D123"),
+      teamId: TEAM_ID, surfaceType: "dm", connectionId: FOREIGN_SLACK_CONNECTION,
+      connectionOrganizationId: FOREIGN_ORG_ID,
+    })).toEqual({ status: "not_found" });
+  });
+
+  test("a consumed code cannot restore a replaced or archived binding or outlive its expiry", async () => {
+    const code = await createClaim(AGENT_ID);
+    expect(await consumeSlack({ code, teamId: TEAM_ID, channelId: "D123" })).toMatchObject({ status: "bound" });
+    const replacement = await createClaim(OTHER_AGENT_ID);
+    expect(await consumeSlack({ code: replacement, teamId: TEAM_ID, channelId: "D123" }))
+      .toMatchObject({ status: "bound", agentId: OTHER_AGENT_ID });
+    expect(await consumeSlack({ code, teamId: TEAM_ID, channelId: "D123" })).toEqual({ status: "not_found" });
+    await clearChatAutomations();
+    expect(await consumeSlack({ code: replacement, teamId: TEAM_ID, channelId: "D123" })).toEqual({ status: "not_found" });
+    const expiring = await createClaim(AGENT_ID);
+    expect(await consumeSlack({ code: expiring, teamId: TEAM_ID, channelId: "D123" })).toMatchObject({ status: "bound" });
+    await getDb()`UPDATE oauth_states SET expires_at = now() - interval '1 second' WHERE scope = 'slack-preview-claim'`;
+    expect(await consumeSlack({ code: expiring, teamId: TEAM_ID, channelId: "D123" })).toEqual({ status: "not_found" });
+  });
+
+  test("a failed consumed-receipt write rolls the binding back and leaves the claim redeemable", async () => {
+    const code = await createClaim(AGENT_ID);
+    const sql = getDb();
+    await sql.unsafe(`
+      CREATE FUNCTION synthetic_fail_claim_receipt() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'synthetic claim receipt outage'; END $$;
+      CREATE TRIGGER synthetic_fail_claim_receipt BEFORE UPDATE OF payload ON oauth_states
+        FOR EACH ROW WHEN (NEW.scope = 'slack-preview-claim')
+        EXECUTE FUNCTION synthetic_fail_claim_receipt();
+    `);
+    try {
+      await expect(consumeSlack({ code, teamId: TEAM_ID, channelId: "D123" })).rejects.toThrow();
+      expect(await listTestAutomationSubscriptions({ platform: "slack" })).toHaveLength(0);
+      const [claim] = await sql`SELECT payload FROM oauth_states WHERE scope = 'slack-preview-claim'`;
+      expect(claim.payload.consumed).toBeUndefined();
+    } finally {
+      await sql.unsafe(`DROP TRIGGER synthetic_fail_claim_receipt ON oauth_states;
+        DROP FUNCTION synthetic_fail_claim_receipt();`);
+    }
+    expect(await consumeSlack({ code, teamId: TEAM_ID, channelId: "D123" })).toMatchObject({ status: "bound" });
   });
 
   test("a hosted code crosses orgs only through a boolean-marked preview connection", async () => {
@@ -397,6 +446,10 @@ describe("Slack Preview claims + channel Automations", () => {
       connectionOrganizationId: FOREIGN_ORG_ID,
     });
     expect(hosted).toMatchObject({ status: "bound", agentId: AGENT_ID });
+    expect(await consumePreviewClaim({
+      code, platform: "slack", teamId: "T_HOSTED", channelId: canonicalSlackChannelId("CHOSTED"),
+      surfaceType: "channel", connectionId: FOREIGN_PREVIEW_CONNECTION, connectionOrganizationId: FOREIGN_ORG_ID,
+    })).toEqual(hosted);
     const subscriptions = await listTestAutomationSubscriptions({
       platform: "slack",
     });

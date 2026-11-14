@@ -406,6 +406,7 @@ export function chatAccessNotice(
   access: "reply_only" | "public_visitor",
   joinUrl: string | null,
   linkUrl: string | null,
+  canLinkInDirectMessage = false,
 ): string {
   if (access === "public_visitor") {
     const lead = "I can only use this workspace's public knowledge for you.";
@@ -413,6 +414,9 @@ export function chatAccessNotice(
     return joinUrl ? `${lead} Join the workspace to do more: ${joinUrl}` : lead;
   }
   const lead = "I can't use this workspace's tools for you yet.";
+  if (!linkUrl && canLinkInDirectMessage) {
+    return `${lead} If you're a member, message me directly to connect your Lobu account.`;
+  }
   return linkUrl
     ? `${lead} If you're a member, connect your Lobu account: ${linkUrl}`
     : `${lead} Ask an admin of this workspace to invite you.`;

@@ -74,6 +74,7 @@ import {
 	ensureOAuthInferenceProvider,
 	getOrgDefaultModel,
 } from "./stores/provider-secrets";
+import { routeFailure } from "../diagnostics";
 
 const routes = new Hono<{ Bindings: Env }>();
 
@@ -1487,7 +1488,7 @@ routes.patch("/:agentId/config", async (c) => {
 				try {
 					await reconcileAgentAuthProfiles(agentId, user.id, authProfiles);
 				} catch (error) {
-					return c.json(
+					throw routeFailure(c.json(
 						{
 							error:
 								error instanceof Error
@@ -1495,7 +1496,7 @@ routes.patch("/:agentId/config", async (c) => {
 									: "Failed to persist auth profiles",
 						},
 						503
-					);
+					), error);
 				}
 			}
 		}

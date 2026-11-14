@@ -9,11 +9,12 @@
  * module shapes are load-bearing.
  *
  * How it gets into the page: the connector serialises this function with
- * Function.prototype.toString() and runs `(<source>)()` through the generic
- * chrome `evaluate` op, which executes in the page's MAIN world. That is the
- * same mechanism the extension used with chrome.scripting.executeScript({func}),
- * minus the extension. The adapter is idempotent and self-versioning
- * (__owlettoWhatsAppAdapterV1 + ADAPTER_VERSION), so re-injecting is safe.
+ * Function.prototype.toString() and runs `(<source>)("<version>")` through the
+ * generic chrome `evaluate` op, which executes in the page's MAIN world. That is
+ * the same mechanism the extension used with chrome.scripting.executeScript({func}),
+ * minus the extension. The version is a fingerprint of that exact source,
+ * computed by the connector (WHATSAPP_ADAPTER_INSTALL in whatsapp-web-helpers.ts),
+ * so the adapter is idempotent per program text and re-injecting is safe.
  *
  * INVARIANT — every binding this function needs must live INSIDE it. A constant
  * hoisted to module scope would vanish from toString() output and the page would
@@ -26,14 +27,14 @@
  * and cost a @ts-nocheck plus a set of `declare const` shims.
  */
 
-export function whatsAppWebAdapterProgram() {
+export function whatsAppWebAdapterProgram(adapterVersion) {
   const GLOBAL_KEY = "__owlettoWhatsAppAdapterV1";
-  // Bumped whenever the program changes at all, not only its RPC surface.
-  // A WhatsApp tab outlives a deploy, so the resident adapter is replaced only
-  // when this number moves: shipping a fix under the old number leaves every
-  // already-open tab running the previous code with nothing to show for it.
-  // Keep in lockstep with WHATSAPP_ADAPTER_VERSION in whatsapp-web-helpers.ts.
-  const ADAPTER_VERSION = 27;
+  // A WhatsApp tab outlives a deploy, so a resident adapter is replaced only
+  // when this version differs. The connector derives it from this program's
+  // own source, so any change to the program replaces it with no manual bump.
+  const ADAPTER_VERSION = adapterVersion;
+  if (typeof ADAPTER_VERSION !== "string" || !ADAPTER_VERSION)
+    throw new Error("WhatsApp adapter must be installed with its content version");
   const SOURCE_ERROR_ID = "whatsapp-web:source-observation-error";
   // Storage rows one `chat:` read examines; a whole personal history is
   // usually under this, so one read answers.
@@ -340,6 +341,23 @@ export function whatsAppWebAdapterProgram() {
     return false;
   }
 
+  /** Actual self-mentions, excluding quotes of our messages and other people. */
+  async function ownMentionJids(row) {
+    const mentions = Array.isArray(row.mentionedJidList) ? row.mentionedJidList : [];
+    if (mentions.length === 0) return [];
+    const own = await ownJids();
+    const mentioned = new Set();
+    for (const value of mentions) {
+      const candidate = await canonicalJid(value);
+      for (const jid of [candidate.jid, candidate.lid]) {
+        if (typeof jid === "string" && /^[0-9]{5,32}@(s\.whatsapp\.net|lid)$/.test(jid) && own.has(jid)) {
+          mentioned.add(jid);
+        }
+      }
+    }
+    return [...mentioned].slice(0, 2);
+  }
+
   /**
    * Module names for each write op, most-current first.
    *
@@ -386,7 +404,7 @@ export function whatsAppWebAdapterProgram() {
     const key = row.id ?? model?.id;
     const id = rawId(key);
     const remote = widString(key?.remote ?? row.chatId ?? (key?.fromMe ? row.to : row.from));
-    if (!id || !remote || remote === "status@broadcast" || remote.endsWith("@newsletter") || SYSTEM_TYPES.has(row.type)) return null;
+    if (!id || !remote || isBroadcastOnlyJid(remote) || SYSTEM_TYPES.has(row.type)) return null;
     return { id, timestamp: unixSeconds(row), is_group: remote.endsWith("@g.us") };
   }
 
@@ -494,6 +512,21 @@ export function whatsAppWebAdapterProgram() {
       }
     }
     return [];
+  }
+
+  /**
+   * Chats that are feeds, not conversations: status updates, channels, and the
+   * read-only service-announcement chat (`0@c.us`, canonically
+   * `0@s.whatsapp.net`). Nobody can reply in them, so they never surface as
+   * messages and a send to one is refused instead of hanging.
+   */
+  function isBroadcastOnlyJid(jid) {
+    return (
+      jid === "status@broadcast" ||
+      jid.endsWith("@newsletter") ||
+      jid === "0@c.us" ||
+      jid === "0@s.whatsapp.net"
+    );
   }
 
   function widString(value) {
@@ -670,11 +703,7 @@ export function whatsAppWebAdapterProgram() {
     const authorRaw = row.author ?? key?.participant;
     const chatRaw = remoteRaw ?? (fromMe ? toRaw : fromRaw);
     const chat = await canonicalJid(chatRaw);
-    if (
-      !chat.jid ||
-      chat.jid === "status@broadcast" ||
-      chat.jid.endsWith("@newsletter")
-    ) {
+    if (!chat.jid || isBroadcastOnlyJid(chat.jid)) {
       return null;
     }
     const senderRaw = fromMe ? fromRaw : (authorRaw ?? fromRaw);
@@ -723,6 +752,7 @@ export function whatsAppWebAdapterProgram() {
       media_filename: row.filename ?? row.fileName ?? row.title ?? null,
       quoted_id: quotedId,
       mentions_me: await mentionsOwnAccount(row),
+      own_mention_jids: await ownMentionJids(row),
       is_forwarded: Boolean(row.isForwarded || Number(row.forwardingScore) > 0),
       is_starred: Boolean(row.star ?? row.isStarred),
       is_system_event: SYSTEM_TYPES.has(type),
@@ -1091,7 +1121,7 @@ export function whatsAppWebAdapterProgram() {
       const key = keyModule.fromString(row.id);
       if (exactId !== null && key.id !== exactId) continue;
       const remote = widString(key.remote);
-      if (remote === "status@broadcast" || remote.endsWith("@newsletter")) continue;
+      if (isBroadcastOnlyJid(remote)) continue;
       const isGroup = remote.endsWith("@g.us");
       if ((chatFilter === "group" && !isGroup) || (chatFilter === "individual" && isGroup)) continue;
       selected.push(row);
@@ -1161,8 +1191,7 @@ export function whatsAppWebAdapterProgram() {
         const jid = (
           await canonicalJid(modelData(candidate).id ?? candidate?.id)
         ).jid;
-        if (!jid || jid === "status@broadcast" || jid.endsWith("@newsletter"))
-          continue;
+        if (!jid || isBroadcastOnlyJid(jid)) continue;
         const isGroup = jid.endsWith("@g.us");
         if (chatFilter === "group" ? isGroup : !isGroup) {
           scopedChats.push(candidate);
@@ -1294,6 +1323,9 @@ export function whatsAppWebAdapterProgram() {
   async function sendMessage(input, account) {
     const collections = requireFirst(["WAWebCollections"]);
     const chat = await resolveChat(collections, input);
+    const chatJid = (await canonicalJid(modelData(chat).id ?? chat?.id)).jid;
+    if (chatJid && isBroadcastOnlyJid(chatJid))
+      throw new Error(`WhatsApp chat ${chatJid} does not accept messages`);
     const text = String(input?.text ?? "");
     if (!text.trim()) throw new Error("text is required");
     const module = requireFirst(SEND_MODULES);
@@ -1531,7 +1563,7 @@ export function whatsAppWebAdapterProgram() {
 
   async function invoke(request) {
     try {
-      if (Number(request?.adapter_version) !== ADAPTER_VERSION) {
+      if (request?.adapter_version !== ADAPTER_VERSION) {
         return {
           ok: false,
           error: {

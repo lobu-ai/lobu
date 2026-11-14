@@ -14,6 +14,7 @@ import { Hono as HonoApp } from "hono";
 import { createAuth } from "../auth";
 import { authenticatePat, extractPatBearer } from "../auth/pat-auth";
 import { getDb } from "../db/client";
+import { routeFailure } from "../diagnostics";
 import { ApiPlatform } from "../gateway/api/platform";
 import { createGatewayApp } from "../gateway/cli/gateway";
 import {
@@ -271,8 +272,8 @@ export function createLobuOrgContextMiddleware() {
 			let resolvedOrg: { id: string } | null;
 			try {
 				resolvedOrg = await getOrgBySlug(orgHeader);
-			} catch {
-				return c.json({ error: "Unable to resolve organization" }, 503);
+			} catch (error) {
+				throw routeFailure(c.json({ error: "Unable to resolve organization" }, 503), error);
 			}
 			if (!resolvedOrg) {
 				return c.json({ error: `Unknown organization "${orgHeader}"` }, 404);
@@ -320,11 +321,11 @@ export function createLobuOrgContextMiddleware() {
 		if (!orgId) {
 			try {
 				orgId = await resolveDefaultOrgId(user.id);
-			} catch {
-				return c.json(
+			} catch (error) {
+				throw routeFailure(c.json(
 					{ error: "Unable to resolve organization membership" },
 					503,
-				);
+				), error);
 			}
 			if (!orgId) {
 				return c.json({ error: "No organization membership found" }, 404);

@@ -10,6 +10,7 @@ import {
 } from "@lobu/core";
 import type { Context } from "hono";
 import { Hono } from "hono";
+import { HTTPException } from "hono/http-exception";
 import { getDb } from "../../db/client.js";
 import { resolveUrlInvariant } from "../auth/inference-invariant.js";
 import { extractJwtAccountId } from "../auth/oauth/client.js";
@@ -35,6 +36,7 @@ import {
 import type { SecretStore } from "../secrets/index.js";
 import { getClientIP } from "../../utils/rate-limiter.js";
 import { classifyProviderHealthStatus } from "./provider-health-status.js";
+import { redactedFailure, routeFailure } from "../../diagnostics.js";
 
 /**
  * Caller-supplied resolver: agentId → orgId of the agent's owning org.
@@ -528,6 +530,8 @@ export class SecretProxy {
     try {
       return await this.forward(c);
     } catch (error) {
+      // forward() already answered with its own failure response.
+      if (error instanceof HTTPException) throw error;
       // JSON.stringify(Error) renders `{}` (Error has no enumerable props),
       // which hid the real failure behind "Secret proxy error: {}" (#1176).
       // Extract the fields explicitly (same { err } shape as
@@ -545,7 +549,7 @@ export class SecretProxy {
         },
         "Secret proxy error"
       );
-      return c.json({ error: "Internal proxy error" }, 500);
+      throw routeFailure(c.json({ error: "Internal proxy error" }, 500), error);
     }
   }
 
@@ -888,10 +892,10 @@ export class SecretProxy {
           { urlAgentId, err: String(err) },
           "agentOrgResolver failed — rejecting request to preserve org isolation"
         );
-        return c.json(
+        throw routeFailure(c.json(
           { error: "Service Unavailable: failed to resolve agent organization" },
           503
-        );
+        ), err);
       }
     }
 
@@ -1224,7 +1228,7 @@ export class SecretProxy {
         { method, provider: resolvedSlug },
         "Custom provider request failed"
       );
-      return c.json({ error: "Internal proxy error" }, 500);
+      throw routeFailure(c.json({ error: "Internal proxy error" }, 500), redactedFailure(error));
     }
 
     if (!response.ok) {

@@ -401,7 +401,7 @@ describe("platform-neutral chat link-code routing", () => {
       expect(String(installed.thread.post.mock.calls[1]?.[0])).toContain("Retire its Automation");
       const [existing] = await sql`SELECT id, created_by FROM automations`;
       expect(existing.created_by).toBe(ownerId);
-      expect(await sql`SELECT id FROM oauth_states`).toHaveLength(1);
+      expect(await sql`SELECT id FROM oauth_states WHERE NOT (payload ? 'consumed')`).toHaveLength(1);
       await installed.send("The old authorization must remain revoked");
       expect(await sql`SELECT id FROM runs WHERE run_type = 'chat_message'`).toHaveLength(0);
       await sql`UPDATE automations SET status = 'archived' WHERE id = ${existing.id}`;
@@ -413,7 +413,7 @@ describe("platform-neutral chat link-code routing", () => {
       });
     });
 
-    test(`${platform}: a code is single use and revoked admin access stops an existing link`, async () => {
+    test(`${platform}: a consumed code confirms its current chat and revoked admin access stops the link`, async () => {
       const installed = await install(platform, SOURCE_ORG);
       const response = await createPreviewClaim(claimContext({
         platform, agent_id: AGENT_ID, connection_id: installed.id,
@@ -421,11 +421,17 @@ describe("platform-neutral chat link-code routing", () => {
       const { code } = await response.json();
       await installed.send(`/link ${code}`);
       const sql = getDb();
-      expect(await sql`SELECT id FROM oauth_states`).toHaveLength(0);
+      const [claim] = await sql`SELECT payload FROM oauth_states`;
+      expect(claim.payload.consumed).toMatchObject({ platform, agentId: AGENT_ID, connectionId: installed.id });
+      const [before] = await sql`SELECT updated_at FROM automations`;
       await installed.send(`/link ${code}`);
-      expect(String(installed.thread.post.mock.calls[1]?.[0])).toContain("invalid or expired");
+      expect(String(installed.thread.post.mock.calls[1]?.[0])).toContain(AGENT_ID);
+      const [after] = await sql`SELECT updated_at FROM automations`;
+      expect(after.updated_at).toEqual(before.updated_at);
       expect(await sql`SELECT id FROM automations`).toHaveLength(1);
       await sql`DELETE FROM member WHERE "userId" = ${ownerId} AND "organizationId" = ${SOURCE_ORG}`;
+      await installed.send(`/link ${code}`);
+      expect(String(installed.thread.post.mock.calls.at(-1)?.[0])).not.toContain(AGENT_ID);
       await installed.send("This must not run after access was revoked");
       expect(await sql`SELECT id FROM runs WHERE run_type = 'chat_message'`).toHaveLength(0);
       expect(await resolveChatUserIdentity(platform, platform === "slack" ? "T_CODE_WORKSPACE" : undefined, "provider-code-redeemer")).toBeNull();

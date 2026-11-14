@@ -9,9 +9,12 @@
  *  2. Predicate parity: with LOBU_LINKED_ORG_SCOPE=1 an org-scoped feed shows
  *     exactly the bridge-visible events the legacy OR/EXISTS predicate shows —
  *     including them when linked, excluding them when not.
+ *  3. Member SQL, which reads through row-level security keyed on the
+ *     column, sees the same bridged events in both modes.
  */
 
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { querySql } from "../../../tools/admin/query_sql";
 import { getContent } from "../../../tools/get_content";
 import type { ToolContext } from "../../../tools/registry";
 import { insertEvent } from "../../../utils/insert-event";
@@ -175,6 +178,21 @@ describe("events.linked_org_ids + LOBU_LINKED_ORG_SCOPE parity", () => {
 		expect(ids.has(connLinkedEventId)).toBe(true);
 		expect(ids.has(plainEventId)).toBe(false);
 		expect(ids.has(selfLinkedEventId)).toBe(false);
+	});
+
+	it.each([
+		["off", undefined],
+		["on", "1"],
+	])("member SQL (flag %s) sees exactly the bridged events", async (_mode, flag) => {
+		if (flag) process.env.LOBU_LINKED_ORG_SCOPE = flag;
+		const result = (await querySql({ sql: "SELECT id FROM events" }, {} as never, orgBCtx())) as {
+			rows?: Array<{ id: number | string }>;
+			error?: string;
+		};
+		expect(result.error).toBeUndefined();
+		expect(new Set(result.rows?.map((row) => Number(row.id)))).toEqual(
+			new Set([linkedEventId, connLinkedEventId]),
+		);
 	});
 
 	it("denormalized predicate (flag on) is parity with the legacy bridge", async () => {

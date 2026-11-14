@@ -1,3 +1,4 @@
+import { HTTPException } from 'hono/http-exception';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -324,7 +325,7 @@ describe('MCP media resources', () => {
         },
       ],
     });
-    await streamContent(failedInsert.ctx);
+    await expect(streamContent(failedInsert.ctx)).rejects.toBeInstanceOf(HTTPException);
     expect(failedInsert.result().status).toBe(500);
     expect((await readdir(artifactsDir)).sort()).toEqual(artifactsBeforeFailedInsert);
   });
@@ -493,7 +494,7 @@ describe('MCP media resources', () => {
           ],
         },
       });
-    await completeActionRun(rollback.ctx);
+    await expect(completeActionRun(rollback.ctx)).rejects.toBeInstanceOf(HTTPException);
     expect(rollback.result().status).toBe(500);
     expect((rollback.result().body as { error?: string }).error).toContain(
       'approval card is missing'

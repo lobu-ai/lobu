@@ -64,10 +64,27 @@ describe('managed setup browser handoff', () => {
     // The redirect is session-dependent, so it must not be cached.
     expect(res.headers.get('cache-control')).toBe('no-store');
     // The offer must survive the round trip, or the visitor returns to a blank handoff.
-    expect(decodeURIComponent(location)).toContain(
-      'https://cloud.example/connect/managed?org=public-provider&connector=mail'
+    expect(new URL(location, 'https://cloud.example').searchParams.get('callbackUrl')).toBe(
+      '/connect/managed?org=public-provider&connector=mail'
     );
     expect(f.calls()).toBe(0);
+  });
+  test('a per-org subdomain keeps the visitor on that host through consent and login', async () => {
+    const subdomainUrl = 'https://acme.cloud.example/connect/managed?org=public-provider&connector=mail';
+    const signedIn = fixture();
+    const post = (origin: string) =>
+      signedIn.app.request(subdomainUrl, { method: 'POST', headers: { ...headers, origin } });
+    // The page's own form, posted from the subdomain it was served on.
+    expect((await post('https://acme.cloud.example')).status).toBe(200);
+    expect(signedIn.calls()).toBe(1);
+    // Another workspace's subdomain is another origin.
+    expect((await post('https://other.cloud.example')).status).toBe(403);
+    expect(signedIn.calls()).toBe(1);
+
+    const signedOut = await fixture({ session: async () => null }).app.request(subdomainUrl);
+    const login = new URL(signedOut.headers.get('location') ?? '', 'https://acme.cloud.example');
+    expect(login.origin).toBe('https://acme.cloud.example');
+    expect(login.searchParams.get('callbackUrl')).toBe('/connect/managed?org=public-provider&connector=mail');
   });
   test('stale offer cannot start authorization', async () => {
     const f = fixture({ resolveOffer: async () => null });
@@ -109,9 +126,9 @@ describe('managed setup browser handoff', () => {
     // consent page whose session expired while it sat open. 303 so the method
     // change to GET is specified rather than left to browser convention.
     expect(res.status).toBe(303);
-    expect(decodeURIComponent(res.headers.get('location') ?? '')).toContain(
-      'https://cloud.example/connect/managed?org=public-provider&connector=mail'
-    );
+    expect(
+      new URL(res.headers.get('location') ?? '', 'https://cloud.example').searchParams.get('callbackUrl')
+    ).toBe('/connect/managed?org=public-provider&connector=mail');
     expect(f.calls()).toBe(0);
   });
   test('an incomplete setup link renders a page rather than JSON', async () => {

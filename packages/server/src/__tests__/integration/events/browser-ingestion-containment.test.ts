@@ -1,3 +1,4 @@
+import { HTTPException } from 'hono/http-exception';
 import type { Context } from 'hono';
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Env } from '../../../index';
@@ -508,7 +509,9 @@ describe('browser ingestion containment', () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const logSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
     try {
-      await streamContent(failed.ctx);
+      // A 500 is thrown with its response for the app's error boundary to send.
+      const thrown = await streamContent(failed.ctx).then(() => undefined, (error: unknown) => error);
+      expect(thrown instanceof HTTPException).toBe(field !== 'payload_type');
       expect(failed.result().status).toBe(field === 'payload_type' ? 422 : 500);
       expect(JSON.stringify(failed.result().body)).not.toContain(raw);
       expect(JSON.stringify(errorSpy.mock.calls)).not.toContain(raw);
