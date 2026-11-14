@@ -291,7 +291,8 @@ migrations. They are declared `lobu:no-quiesce`, because 24.11 code does not
 touch the column, so an install that jumps from 24.10 or earlier keeps its old
 pods serving while the column disappears: every event insert from those pods
 fails with `column "linked_org_ids" of relation "events" does not exist` until
-the rollout replaces them. Reads are unaffected unless `LOBU_LINKED_ORG_SCOPE`
-was set. If you cannot stop at 24.11, scale the app and worker deployments to
-zero before the upgrade. Fresh installs replay every migration and need no
+the rollout replaces them, and so do the reads that name the column (opening an
+event by id, record timelines through an identity match, public page previews,
+and every org-wide read when `LOBU_LINKED_ORG_SCOPE` was set). If you cannot
+stop at 24.11, scale the app and worker deployments to zero before the upgrade. Fresh installs replay every migration and need no
 action.
