@@ -36,20 +36,87 @@ const STOPWORDS = [
 const STOPWORDS_SET = new Set(STOPWORDS);
 
 /**
- * Build a `tsquery` *string* (OR of clean lexemes, e.g. `"project | codename"`)
- * from a free-text query — the JS mirror of NORMALIZED_QUERY_SQL/TSQUERY_SQL.
- * Returning a plain string lets callers bind it as a parameter to
- * `to_tsquery('english', $N)` so Postgres can use the fulltext GIN index
- * (the in-SQL CASE+regexp form is opaque to the planner). Returns `null` when
- * nothing usable survives normalization.
+ * The clean words of a free-text query (`[a-z0-9]+`, stopwords removed) — the
+ * JS mirror of NORMALIZED_QUERY_SQL/TSQUERY_SQL. Joined with ` | ` they form a
+ * tsquery string callers bind to `to_tsquery('english', $N)`, so Postgres can
+ * use the fulltext GIN index (the in-SQL CASE+regexp form is opaque to the
+ * planner). The characters kept cannot form tsquery syntax.
  */
-export function buildTsqueryString(queryText: string): string | null {
-  const tokens = queryText
+export function tsqueryTokens(queryText: string): string[] {
+  return queryText
     .toLowerCase()
     .replace(/[^a-z0-9\s]+/g, ' ')
     .split(/\s+/)
     .filter((t) => t.length > 0 && !STOPWORDS_SET.has(t));
-  return tokens.length > 0 ? tokens.join(' | ') : null;
+}
+
+/**
+ * Most event rows the fulltext candidate arm may have to rank for one query.
+ * The arm ranks EVERY row matching the OR of the query's words before keeping
+ * its top N, so its cost is the sum of each word's matches: one word that is in
+ * a fifth of a large workspace's events took the arm alone past the recall
+ * timeout. On production a query cut to about 100k estimated matches ranked in
+ * under two seconds, leaving the whole recall statement near half its budget.
+ */
+export const CANDIDATE_TEXT_MATCH_BUDGET = 100_000;
+
+/** One query word with the `events.search_tsv` statistics for its lexemes. */
+export interface QueryWordFrequency {
+  token: string;
+  /** The word's english lexemes; empty for a word the parser drops. */
+  lexemes: string[];
+  /** Highest share of rows holding one of its lexemes, if any is a most-common element. */
+  frequency: number | null;
+  /** Lowest share among the most-common elements; null when the column has no statistics. */
+  floor_frequency: number | null;
+  /** The planner's row count for `events`. */
+  total_rows: number;
+}
+
+/**
+ * Choose the query words the fulltext candidate arm searches for, so the rows
+ * it ranks stay within `budget`.
+ *
+ * Each word's matches are estimated from the column statistics the planner
+ * itself uses: a most-common lexeme by its recorded share, any other lexeme at
+ * half the smallest recorded share (the planner's own default for an element
+ * missing from the list). The rarest words are kept first, the way relevance
+ * weighs words by how few documents hold them; the dropped common words still
+ * score every candidate through the full query, and the vector and substring
+ * arms still find rows that only they match. Without statistics nothing can be
+ * estimated, so every word is kept.
+ */
+export function selectCandidateWords(
+  tokens: string[],
+  frequencies: QueryWordFrequency[],
+  budget: number = CANDIDATE_TEXT_MATCH_BUDGET
+): string[] {
+  const stats = frequencies[0];
+  if (!stats || stats.floor_frequency == null || !(stats.total_rows > 0)) return tokens;
+  const unlistedFrequency = stats.floor_frequency / 2;
+  const seen = new Set<string>();
+  const estimated: Array<{ token: string; rows: number; position: number }> = [];
+  for (const word of frequencies) {
+    // A word the parser drops matches nothing; one that stems like an earlier
+    // word adds nothing to the query.
+    const key = [...word.lexemes].sort().join(' ');
+    if (word.lexemes.length === 0 || seen.has(key)) continue;
+    seen.add(key);
+    estimated.push({
+      token: word.token,
+      rows: (word.frequency ?? unlistedFrequency) * stats.total_rows,
+      position: estimated.length,
+    });
+  }
+  estimated.sort((a, b) => a.rows - b.rows || a.position - b.position);
+  const kept = new Set<string>();
+  let rows = 0;
+  for (const word of estimated) {
+    if (rows + word.rows > budget) break;
+    rows += word.rows;
+    kept.add(word.token);
+  }
+  return tokens.filter((token) => kept.has(token));
 }
 
 // NOTE: the final `regexp_replace(..., '\\s+', ' ', 'g')` collapses ALL

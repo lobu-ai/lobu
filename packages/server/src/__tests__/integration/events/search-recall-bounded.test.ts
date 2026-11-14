@@ -14,7 +14,11 @@ import {
   CANDIDATE_IVFFLAT_PROBES,
   CANDIDATE_QUERY_TIMEOUT_MS,
 } from '../../../utils/content-search/fts';
-import { runBoundedRecallQuery } from '../../../utils/content-search/search-path';
+import {
+  runBoundedRecallQuery,
+  selectFulltextCandidateTsquery,
+} from '../../../utils/content-search/search-path';
+import { insertEvent } from '../../../utils/insert-event';
 import { initWorkspaceProvider } from '../../../workspace';
 import { cleanupTestDatabase } from '../../setup/test-db';
 import {
@@ -100,6 +104,39 @@ describe('recall query budget', () => {
     } finally {
       await sql.end();
     }
+  });
+
+  it('cuts the fulltext candidate words to the match budget from the column statistics', async () => {
+    const org = await createTestOrganization({ name: 'Recall Words Org' });
+    const occurredAt = new Date('2026-01-01T00:00:00Z');
+    const seed = (key: string, content: string) =>
+      insertEvent({
+        entityIds: [],
+        organizationId: org.id,
+        originId: `recall-words-${key}`,
+        title: `Recall words ${key}`,
+        content,
+        occurredAt,
+        semanticType: 'content',
+        originType: 'content',
+      });
+    for (let i = 0; i < 60; i++) await seed(`common-${i}`, 'zephyrcommon routine status');
+    await seed('rare', 'zephyrcommon quillrare finding');
+    // The planner's statistics, which the lookup reads, exist once analyzed.
+    await getDb().unsafe('ANALYZE events');
+
+    const sql = getDb();
+    const words = (query: string, budget: number) =>
+      selectFulltextCandidateTsquery(sql, query, undefined, budget);
+    // Both words fit a generous budget, in query order.
+    expect(await words('zephyrcommon quillrare', 1_000_000)).toBe('zephyrcommon | quillrare');
+    // 'zephyrcommon' is in nearly every row, too many to rank under a budget of
+    // ten; the rare word alone remains.
+    expect(await words('zephyrcommon quillrare', 10)).toBe('quillrare');
+    // Nothing fits, so the fulltext arm does not run.
+    expect(await words('zephyrcommon', 10)).toBeNull();
+    // Stopwords alone leave nothing to search for.
+    expect(await words('the of a', 1_000_000)).toBeNull();
   });
 
   it(
