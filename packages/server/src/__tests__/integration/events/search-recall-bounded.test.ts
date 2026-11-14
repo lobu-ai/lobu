@@ -137,6 +137,14 @@ describe('recall query budget', () => {
     expect(await words('zephyrcommon', 10)).toBeNull();
     // Stopwords alone leave nothing to search for.
     expect(await words('the of a', 1_000_000)).toBeNull();
+    // Unlisted lexemes use half the minimum frequency, not the last listed
+    // lexeme's frequency (zephyrcommon is both last and common in this fixture).
+    expect.soft(await words('unlistedlexeme', 10)).toBe('unlistedlexeme');
+    // Production returns text[] as raw array literals. Distinct anagrams must
+    // survive deduplication, while empty and equivalent lexemes still collapse.
+    expect.soft(await words('cat act', 1_000_000)).toBe('cat | act');
+    expect.soft(await words('and', 1_000_000)).toBeNull();
+    expect(await words('running runs run', 1_000_000)).toBe('running');
   });
 
   it(

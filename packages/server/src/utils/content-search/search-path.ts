@@ -122,11 +122,11 @@ const QUERY_WORD_FREQUENCY_SQL = `
     SELECT t.token, tsvector_to_array(to_tsvector('english', t.token)) AS lexemes
     FROM unnest($1::text[]) AS t(token)
   )
-  SELECT w.token, w.lexemes,
+  SELECT w.token, to_json(w.lexemes) AS lexemes,
     (SELECT max(e.freq) FROM stats, unnest(stats.elems, stats.freqs) AS e(elem, freq)
       WHERE e.elem = ANY(w.lexemes)) AS frequency,
-    -- Element frequencies are followed by their minimum, maximum and the null share.
-    (SELECT stats.freqs[cardinality(stats.freqs) - 2] FROM stats) AS floor_frequency,
+    -- tsvector element frequencies are followed by their minimum and maximum.
+    (SELECT stats.freqs[cardinality(stats.elems) + 1] FROM stats) AS floor_frequency,
     (SELECT c.reltuples FROM pg_class c WHERE c.oid = 'events'::regclass) AS total_rows
   FROM words w`;
 
