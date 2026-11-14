@@ -38,9 +38,11 @@ import {
   CANDIDATE_VECTOR_LIMIT,
   COLLAPSE_POOL_FACTOR,
   COLLAPSE_POOL_MAX,
+  type QueryWordFrequency,
   TSQUERY_SQL,
   buildSearchDocumentExpr,
-  buildTsqueryString,
+  selectCandidateWords,
+  tsqueryTokens,
 } from './fts';
 import {
   RECALL_BOOKKEEPING_EXCLUSION_SQL,
@@ -100,6 +102,55 @@ export async function runBoundedRecallQuery(
     });
     throw error;
   }
+}
+
+/**
+ * Each query word's english lexemes with the `events.search_tsv` statistics
+ * the planner keeps for them (`pg_stats.most_common_elems`), plus the table's
+ * row estimate. A role without access to the statistics gets no frequency
+ * rows, and then every word is kept.
+ */
+const QUERY_WORD_FREQUENCY_SQL = `
+  WITH stats AS MATERIALIZED (
+    SELECT s.most_common_elems::text::text[] AS elems, s.most_common_elem_freqs AS freqs
+    FROM pg_stats s
+    JOIN pg_class c ON c.oid = 'events'::regclass
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE s.schemaname = n.nspname AND s.tablename = c.relname AND s.attname = 'search_tsv'
+  ),
+  words AS (
+    SELECT t.token, tsvector_to_array(to_tsvector('english', t.token)) AS lexemes
+    FROM unnest($1::text[]) AS t(token)
+  )
+  SELECT w.token, to_json(w.lexemes) AS lexemes,
+    (SELECT max(e.freq) FROM stats, unnest(stats.elems, stats.freqs) AS e(elem, freq)
+      WHERE e.elem = ANY(w.lexemes)) AS frequency,
+    -- tsvector element frequencies are followed by their minimum and maximum.
+    (SELECT stats.freqs[cardinality(stats.elems) + 1] FROM stats) AS floor_frequency,
+    (SELECT c.reltuples FROM pg_class c WHERE c.oid = 'events'::regclass) AS total_rows
+  FROM words w`;
+
+/**
+ * The tsquery string for recall's fulltext candidate arm: the query's words cut
+ * to `CANDIDATE_TEXT_MATCH_BUDGET` (see `selectCandidateWords`), or null when no
+ * word fits and the arm should not run.
+ */
+export async function selectFulltextCandidateTsquery(
+  sql: DbClient,
+  queryText: string,
+  signal?: AbortSignal,
+  budget?: number
+): Promise<string | null> {
+  const tokens = tsqueryTokens(queryText);
+  if (tokens.length === 0) return null;
+  const frequencies = (await runBoundedRecallQuery(
+    sql,
+    QUERY_WORD_FREQUENCY_SQL,
+    [pgTextArray(tokens)],
+    signal
+  )) as QueryWordFrequency[];
+  const words = selectCandidateWords(tokens, frequencies, budget);
+  return words.length > 0 ? words.join(' | ') : null;
 }
 
 export async function searchContentBySingleQuery(
@@ -478,6 +529,9 @@ export async function searchContentBySingleQuery(
     effectiveOffset === 0 &&
     hasEmbedding;
   const hasTextCandidates = useCandidatePath && trimmedQuery.length >= 3;
+  const fulltextTsquery = hasTextCandidates
+    ? await selectFulltextCandidateTsquery(sql, trimmedQuery, options.signal)
+    : null;
   let searchCandidatesCteSql = '';
   if (useCandidatePath) {
     // $tsq is appended last in queryParams; offsetParamIdx is the current tail
@@ -521,11 +575,15 @@ export async function searchContentBySingleQuery(
             LIMIT ${CANDIDATE_VECTOR_LIMIT}`;
       // fulltext GIN — `@@` is index-served. Rank the STORED search_tsv before
       // the cap so the strongest matches survive CANDIDATE_VECTOR_LIMIT; this
-      // costs a top-N sort over FTS-matching rows in the organization.
-      branches.push(textCandidates(
-        `ce.search_tsv @@ to_tsquery('english', $${tsqueryParamIdx})`,
-        `ts_rank_cd(ce.search_tsv, to_tsquery('english', $${tsqueryParamIdx}))`
-      ));
+      // costs a top-N sort over every FTS-matching row, which is why the
+      // searched words are first cut to the match budget. Words too common for
+      // that budget leave no fulltext arm at all.
+      if (fulltextTsquery !== null) {
+        branches.push(textCandidates(
+          `ce.search_tsv @@ to_tsquery('english', $${tsqueryParamIdx})`,
+          `ts_rank_cd(ce.search_tsv, to_tsquery('english', $${tsqueryParamIdx}))`
+        ));
+      }
       // trigram GIN — preserves the payload substring match (exact strings, ids).
       // Sort the equivalent id expression so LIMIT cannot favor a backwards
       // primary-key scan through unrelated history. The explicit sort permits
@@ -726,10 +784,9 @@ export async function searchContentBySingleQuery(
     ...cursorClause.params,
     ...(useDateFeed ? [fetchLimit] : [includeTotal ? limit : limit + 1, effectiveOffset]),
   ];
-  if (hasTextCandidates) {
-    // $tsq for the fulltext candidate branch. null (all-stopword query) →
-    // to_tsquery('english', NULL) → `@@ NULL` → that branch matches nothing.
-    queryParams.push(buildTsqueryString(trimmedQuery));
+  if (fulltextTsquery !== null) {
+    // $tsq for the fulltext candidate branch, the last slot.
+    queryParams.push(fulltextTsquery);
   }
 
   let rawRows: any[];

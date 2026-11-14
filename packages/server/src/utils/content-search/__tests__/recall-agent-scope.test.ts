@@ -56,11 +56,16 @@ describe('recall candidate routing', () => {
         approximate_candidate_search: true,
         agent_id: agentId,
       });
-      expect(queries).toHaveLength(4);
-      expect(queries[0]).toBe(`SET LOCAL statement_timeout = ${CANDIDATE_QUERY_TIMEOUT_MS}`);
-      expect(queries[1]).toBe(`SET LOCAL ivfflat.probes = ${CANDIDATE_IVFFLAT_PROBES}`);
-      expect(queries[2]).toBe('SET LOCAL ivfflat.iterative_scan = off');
-      expect(queries[3]).toContain('WITH RECURSIVE');
+      // Workspace-wide recall first reads its words' statistics in its own
+      // bounded transaction; both transactions carry the recall budget.
+      const transactions = agentId ? [queries] : [queries.slice(0, 4), queries.slice(4)];
+      expect(queries).toHaveLength(transactions.length * 4);
+      for (const statements of transactions) {
+        expect(statements[0]).toBe(`SET LOCAL statement_timeout = ${CANDIDATE_QUERY_TIMEOUT_MS}`);
+        expect(statements[1]).toBe(`SET LOCAL ivfflat.probes = ${CANDIDATE_IVFFLAT_PROBES}`);
+        expect(statements[2]).toBe('SET LOCAL ivfflat.iterative_scan = off');
+      }
+      expect(queries.at(-1)).toContain('WITH RECURSIVE');
     }
   );
 
