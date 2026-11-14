@@ -158,7 +158,7 @@ describe('workspace-event exact-input read policy', () => {
     ).rejects.toThrow(/Policy denies reading entities of type '\$member'/);
   });
 
-  it('applies entity-type policy to exact events linked from another workspace', async () => {
+  it('applies entity-type policy to an exact event, and never returns one another workspace owns', async () => {
     const producerOrg = await createTestOrganization({ name: 'Linked Event Producer Org' });
     const consumerOrg = await createTestOrganization({ name: 'Linked Event Consumer Org' });
     const owner = await createTestUser({ email: 'linked-event-consumer@test.example.com' });
@@ -175,6 +175,12 @@ describe('workspace-event exact-input read policy', () => {
       created_by: owner.id,
     });
     const event = await createTestEvent({
+      organization_id: consumerOrg.id,
+      entity_id: secret.id,
+      semantic_type: 'risk_detected',
+      content: 'Confidential trigger payload',
+    });
+    const foreignEvent = await createTestEvent({
       organization_id: producerOrg.id,
       entity_id: secret.id,
       semantic_type: 'risk_detected',
@@ -211,5 +217,15 @@ describe('workspace-event exact-input read policy', () => {
         ctx
       )
     ).rejects.toThrow(/Policy denies reading entities of type 'secret'/);
+
+    // Tagging this workspace's record does not make a foreign event readable here.
+    const foreign = (await executeTool(
+      'read_knowledge',
+      { content_ids: [foreignEvent.id], limit: 1 },
+      TEST_ENV,
+      ctx
+    )) as { content: unknown[]; total: number };
+    expect(foreign.content).toEqual([]);
+    expect(foreign.total).toBe(0);
   });
 });

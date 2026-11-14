@@ -48,10 +48,13 @@ export const STANDARD_IDENTITY_NAMESPACES: readonly string[] = [
  * Events are append-only, so (2) is how connector-driven auto-linking is
  * surfaced at read time — `entity_ids` is never mutated post-insert.
  *
- * Identity branches only match events owned by the entity's organization. An
- * identifier is a bare value any organization can claim on its own entity, so
- * matching on it alone would recall another organization's events. Direct
- * `entity_ids` attribution is the explicit cross-org link and stays as is.
+ * Every branch matches events owned by one organization only: an event is
+ * visible in the workspace that owns it and nowhere else. Identity branches
+ * stay inside the entity's organization, because an identifier is a bare value
+ * any organization can claim on its own entity. The direct `entity_ids` branch
+ * stays inside the reading organization (`buildEntityLinkUnion`'s
+ * `ownerOrganizationId`), which defaults to the entity's own; another
+ * organization tagging this entity does not put its events on this timeline.
  *
  * The shared `identity_members` CTE resolves the component once for all
  * attribution branches. `entity_link_ids` materializes their candidate-id union.
@@ -75,8 +78,12 @@ function ownedByOrgSql(orgSql: string): string {
 // an already-selected preview can supply a bounded CTE instead of expanding
 // each entity's complete event history behind the materialization barrier.
 export function entityLinkMatchSql(paramRef: string, alias = 'f', eventSource = 'events'): string {
-  const directBranch = `SELECT e2.id FROM ${eventSource} e2
-    WHERE e2.entity_ids && ARRAY(SELECT id FROM identity_members)`;
+  const entityOrgSql = '(SELECT organization_id FROM identity_members LIMIT 1)';
+  const directBranch = directEntityLinkBranch(
+    'ARRAY(SELECT id FROM identity_members)',
+    entityOrgSql,
+    eventSource
+  );
 
   const standardBranches = STANDARD_IDENTITY_NAMESPACES.map(
     (ns) => `SELECT e2.id FROM ${eventSource} e2
@@ -86,7 +93,7 @@ export function entityLinkMatchSql(paramRef: string, alias = 'f', eventSource = 
        AND ei.deleted_at IS NULL
       WHERE e2.metadata ? '${ns}'
         AND e2.metadata->>'${ns}' = ei.identifier
-        AND ${ownedByOrgSql('(SELECT organization_id FROM identity_members LIMIT 1)')}
+        AND ${ownedByOrgSql(entityOrgSql)}
         AND COALESCE((e2.metadata->'${IDENTITY_SCOPE_BY_NAMESPACE_METADATA_KEY}')->>'${ns}', '${ORGANIZATION_SCOPE_PROJECTION}') = COALESCE(ei.scope_key, '${ORGANIZATION_SCOPE_PROJECTION}')`
   );
 
@@ -98,12 +105,18 @@ export function entityLinkMatchSql(paramRef: string, alias = 'f', eventSource = 
   ) SELECT id FROM entity_link_ids)`;
 }
 
-/** Match the IDs of the current identity component. */
-function directEntityLinkBranch(entityRef: string): string {
-  return `SELECT e2.id FROM events e2
-    WHERE e2.entity_ids && ARRAY(
-      ${identityMemberIdsSql(entityRef)}
-    )`;
+/**
+ * Events owned by `orgSql` that tag a member of `membersSql` (a bigint[] expression).
+ *
+ * The owner check is written `organization_id || ''` so it stays a filter on
+ * the rows the `entity_ids` GIN scan returns. As a plain equality the planner
+ * ANDs in a bitmap of the organization's whole history: 414 ms against 13 ms
+ * for a 97-event record in an organization holding two thirds of the table.
+ */
+function directEntityLinkBranch(membersSql: string, orgSql: string, eventSource = 'events'): string {
+  return `SELECT e2.id FROM ${eventSource} e2
+    WHERE e2.entity_ids && ${membersSql}
+      AND e2.organization_id || '' = ${orgSql}`;
 }
 
 /**
@@ -171,12 +184,15 @@ export function buildEntityLinkUnion(opts: {
   scopes: EntityIdentityScope[];
   alias?: string;
   baseParamIndex: number;
+  /** See {@link buildEntityLinkBranches}. */
+  ownerOrganizationId?: string;
 }): { sql: string; params: string[] } {
   const alias = opts.alias ?? 'f';
   const { branches, params } = buildEntityLinkBranches({
     entityIdLiteral: opts.entityIdLiteral,
     scopes: opts.scopes,
     baseParamIndex: opts.baseParamIndex,
+    ownerOrganizationId: opts.ownerOrganizationId,
   });
   return {
     sql: `${alias}.id IN (WITH entity_link_ids AS MATERIALIZED (\n    ${branches.join('\n    UNION\n    ')}\n  ) SELECT id FROM entity_link_ids)`,
@@ -201,21 +217,36 @@ export function buildEntityLinkBranches(opts: {
    * has no identity edges (its own whole group) to skip graph traversal.
    */
   directMembersSql?: string;
+  /**
+   * The organization reading the timeline, bound as the first param. Pass it
+   * when the reader is workspace-scoped and the entity may belong elsewhere (a
+   * public catalog record), so the reader's own events that tag it still
+   * match. Defaults to the entity's organization.
+   */
+  ownerOrganizationId?: string;
 }): { branches: string[]; params: string[] } {
-  const direct = opts.directMembersSql
-    ? `SELECT e2.id FROM events e2 WHERE e2.entity_ids && ${opts.directMembersSql}`
-    : directEntityLinkBranch(`${opts.entityIdLiteral}::bigint`);
   const params: string[] = [];
   let paramIndex = opts.baseParamIndex;
+  // Identity probes stay inside the entity's organization (see
+  // entityLinkMatchSql), derived from the entity rather than the caller.
+  const entityOrgSql = `(SELECT organization_id FROM entities WHERE id = ${opts.entityIdLiteral}::bigint)`;
+  let ownerOrgSql = entityOrgSql;
+  if (opts.ownerOrganizationId) {
+    params.push(opts.ownerOrganizationId);
+    ownerOrgSql = `$${paramIndex}::text`;
+    paramIndex += 1;
+  }
+  const direct = directEntityLinkBranch(
+    opts.directMembersSql ??
+      `ARRAY(\n      ${identityMemberIdsSql(`${opts.entityIdLiteral}::bigint`)}\n    )`,
+    ownerOrgSql
+  );
 
   // Skip namespaces we have no backing index for (e.g. anything outside
   // STANDARD_IDENTITY_NAMESPACES) — they'd seq-scan events. The fetch helper
   // already filters to the standard list, but we double-check here so a
   // future caller that builds scopes manually can't blow up the scan.
   const indexed = new Set<string>(STANDARD_IDENTITY_NAMESPACES);
-  // Identity probes stay inside the entity's organization (see
-  // entityLinkMatchSql), derived from the entity rather than the caller.
-  const entityOrgSql = `(SELECT organization_id FROM entities WHERE id = ${opts.entityIdLiteral}::bigint)`;
   const scopeBranches: string[] = [];
   for (const scope of opts.scopes) {
     if (!indexed.has(scope.namespace)) continue;

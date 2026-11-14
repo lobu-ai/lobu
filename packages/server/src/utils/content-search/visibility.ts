@@ -88,18 +88,16 @@ export interface OrgScopeWhere {
 
 /**
  * Build the workspace-scoping WHERE clause: an event is in scope when it is
- * owned by the caller's organization (`f.organization_id`). Returns an empty
- * fragment when no scoping is needed (for example, entity_id is set and the
- * caller did not opt into strict organization scoping).
+ * owned by the caller's organization (`f.organization_id`), for org-wide and
+ * entity-scoped reads alike. Returns an empty fragment only when the caller
+ * names no organization.
  * Assumes the query has `f` aliasing events.
  */
 export function buildOrgScopeWhere(options: {
-  entity_id?: number;
   organization_id?: string;
-  strict_organization_scope?: boolean;
   baseParamIndex: number;
 }): OrgScopeWhere {
-  if (!options.organization_id || (options.entity_id && !options.strict_organization_scope)) {
+  if (!options.organization_id) {
     return { sql: '', params: [] };
   }
   return {

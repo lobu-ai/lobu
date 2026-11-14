@@ -174,9 +174,7 @@ export async function searchContentBySingleQuery(
   // they bump orgScope to $14. Keep this in step with buildStandardParams: the two
   // param lists are positional mirrors, so an added slot shifts BOTH.
   const orgScope = buildOrgScopeWhere({
-    entity_id: entityId,
     organization_id: options.organization_id,
-    strict_organization_scope: options.strict_organization_scope,
     baseParamIndex: 14,
   });
   // Exclude-automation param slot sits immediately after orgScope so its $N index
@@ -211,6 +209,7 @@ export async function searchContentBySingleQuery(
   const entityTypesParamIdx = visibilityParamIdx + visibilityClause.params.length;
   const entityTypesClause = buildEntityTypesFilterClause({
     entity_types: options.entity_types,
+    entity_id: entityId,
     organization_id: options.organization_id,
     baseParamIndex: entityTypesParamIdx,
   });
@@ -227,6 +226,7 @@ export async function searchContentBySingleQuery(
       scopes: searchEntityScopes,
       alias: 'f',
       baseParamIndex: entityLinkParamIdx,
+      ownerOrganizationId: options.organization_id,
     });
     searchEntityLinkSql = link.sql;
     searchEntityLinkParams = link.params;
@@ -235,6 +235,7 @@ export async function searchContentBySingleQuery(
       scopes: searchEntityScopes,
       alias: 'p',
       baseParamIndex: entityLinkParamIdx,
+      ownerOrganizationId: options.organization_id,
     }).sql;
   } else {
     // Org-wide path keeps the legacy 7-branch UNION; outer NULL check

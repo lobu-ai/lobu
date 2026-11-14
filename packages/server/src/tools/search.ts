@@ -1057,10 +1057,7 @@ async function fetchContentSnippets(
     {
       organization_id: gate.organizationId,
       signal,
-      ...(entityId != null && {
-        entity_id: entityId,
-        strict_organization_scope: true,
-      }),
+      ...(entityId != null && { entity_id: entityId }),
       ...(excludeWorkspaceAudit && { exclude_workspace_audit: true }),
       ...(excludeOperationalTrail && { exclude_operational_trail: true }),
       // Recall is a memory surface, not an ops console: internal tool-invocation

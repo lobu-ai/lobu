@@ -1,15 +1,17 @@
 /**
  * Org-wide event filter: limit to events linked to entities of given type slugs.
+ * A read scoped to one entity already names its record, so the filter is skipped.
  */
 
 import { pgTextArray } from '../../db/client';
 
 export function buildEntityTypesFilterClause(options: {
   entity_types?: string[];
+  entity_id?: number | null;
   organization_id?: string;
   baseParamIndex: number;
 }): { sql: string; predicate: string; params: unknown[] } {
-  if (!options.entity_types?.length || !options.organization_id) {
+  if (!options.entity_types?.length || !options.organization_id || options.entity_id != null) {
     return { sql: '', predicate: '', params: [] };
   }
 

@@ -1,12 +1,12 @@
 /**
- * Identity-graph recall must stay inside the entity's organization.
+ * Entity-scoped reads must stay inside the entity's organization.
  *
  * An entity's identity claim (`entity_identities`) links events that carry the
  * same identifier in `events.metadata->>'<namespace>'`. Any organization can
  * stamp any identifier value on its own entity, so a match on the identifier
  * alone would surface another organization's events (connector rows and saved
- * notes alike) through entity-scoped reads. Direct `entity_ids` attribution
- * remains an explicit cross-org bridge.
+ * notes alike) through entity-scoped reads. The same holds for another
+ * organization's event that tags this entity directly in `entity_ids`.
  */
 
 import { beforeAll, describe, expect, it } from 'vitest';
@@ -44,7 +44,7 @@ describe.each([null, 'synthetic-tenant'])('entity identity recall with scope %s 
   let entityAId: number;
   let ownIdentityEventId: number;
   let ownDirectEventId: number;
-  let crossOrgDirectEventId: number;
+  let foreignDirectEventId: number;
   let foreignConnectorEventId: number;
   let foreignNoteEventId: number;
   const identityMetadata = {
@@ -147,7 +147,7 @@ describe.each([null, 'synthetic-tenant'])('entity identity recall with scope %s 
         })
       ).id
     );
-    crossOrgDirectEventId = Number(
+    foreignDirectEventId = Number(
       (
         await createTestEvent({
           entity_id: entityA.id,
@@ -161,13 +161,14 @@ describe.each([null, 'synthetic-tenant'])('entity identity recall with scope %s 
   });
 
   function expectAllowedEvents(ids: number[]) {
-    const allowed = [ownIdentityEventId, ownDirectEventId, crossOrgDirectEventId];
+    const allowed = [ownIdentityEventId, ownDirectEventId];
     expect([...ids].sort((a, b) => a - b)).toEqual(allowed.sort((a, b) => a - b));
     expect(ids).not.toContain(foreignConnectorEventId);
     expect(ids).not.toContain(foreignNoteEventId);
+    expect(ids).not.toContain(foreignDirectEventId);
   }
 
-  it('entityLinkMatchSql rejects foreign identity matches and preserves direct attribution', async () => {
+  it('entityLinkMatchSql returns only events the organization owns', async () => {
     const rows = await getTestDb().unsafe<{ id: number | string }[]>(
       `SELECT f.id FROM events f WHERE ${entityLinkMatchSql('$1::bigint', 'f')}`,
       [entityAId]
@@ -175,7 +176,7 @@ describe.each([null, 'synthetic-tenant'])('entity identity recall with scope %s 
     expectAllowedEvents(rows.map((row) => Number(row.id)));
   });
 
-  it('buildEntityLinkUnion rejects foreign identity matches and preserves direct attribution', async () => {
+  it('buildEntityLinkUnion returns only events the organization owns', async () => {
     const sql = getTestDb();
     const scopes = await fetchEntityIdentityScopes(sql, entityAId);
     expect(scopes).toEqual([{ namespace: 'slack_user_id', identifier: SHARED_IDENTIFIER, scopeKey }]);
@@ -192,7 +193,7 @@ describe.each([null, 'synthetic-tenant'])('entity identity recall with scope %s 
     expectAllowedEvents(rows.map((row) => Number(row.id)));
   });
 
-  it('get_content rejects foreign identity matches and preserves direct attribution', async () => {
+  it('get_content returns only events the organization owns', async () => {
     const ctx = ownerToolContext(orgAId, userAId);
     const listed = await getContent({ entity_id: entityAId, limit: 50 }, {} as Env, ctx);
     expectAllowedEvents(listed.content.map((item) => Number(item.id)));
@@ -205,7 +206,19 @@ describe.each([null, 'synthetic-tenant'])('entity identity recall with scope %s 
     expectAllowedEvents(scored.content.map((item) => Number(item.id)));
   });
 
-  it('content-distribution excludes foreign identity matches and counts direct attribution', async () => {
+  it('every listed event opens by id, and a foreign event tagging the entity does not', async () => {
+    const ctx = ownerToolContext(orgAId, userAId);
+    const listed = await getContent({ entity_id: entityAId, limit: 50 }, {} as Env, ctx);
+    const listedIds = listed.content.map((item) => Number(item.id));
+    const opened = await getContent({ content_ids: listedIds, limit: 50 }, {} as Env, ctx);
+    expect(opened.content.map((item) => Number(item.id)).sort((a, b) => a - b)).toEqual(
+      [...listedIds].sort((a, b) => a - b)
+    );
+    const foreign = await getContent({ content_ids: [foreignDirectEventId], limit: 50 }, {} as Env, ctx);
+    expect(foreign.content).toEqual([]);
+  });
+
+  it('content-distribution counts only events the organization owns', async () => {
     const response = await get(`/api/${orgASlug}/entities/${entityAId}/content-distribution`, {
       token: tokenA,
     });
@@ -214,6 +227,6 @@ describe.each([null, 'synthetic-tenant'])('entity identity recall with scope %s 
       distribution: Array<{ date: string; count: number }>;
     };
     const byDate = Object.fromEntries(body.distribution.map((row) => [row.date, row.count]));
-    expect(byDate).toEqual({ '2025-07-01': 1, '2025-07-02': 1, '2025-07-05': 1 });
+    expect(byDate).toEqual({ '2025-07-01': 1, '2025-07-02': 1 });
   });
 });

@@ -413,6 +413,7 @@ export async function listContentInternal(
         scopes: entityScopes,
         alias: 'f',
         baseParamIndex: baseParams.length + 1,
+        ownerOrganizationId: organizationId,
       });
       baseConditions.push(link.sql);
       baseParams.push(...link.params);
@@ -425,21 +426,21 @@ export async function listContentInternal(
         // emitted by the outer `link` already in baseParams. We re-bind them
         // by reusing the same $N slots.
         baseParamIndex: baseParams.length - link.params.length + 1,
+        ownerOrganizationId: organizationId,
       }).sql;
-    } else if (organizationId) {
-      // Keep classification-filtered listings on the same direct/entity/
-      // connection org scope as the standard listing path.
-      // The predicate itself is handed to executeListQuery structurally (see
-      // `orgScope` there); only its params take their slot here.
-      orgScope = buildOrgScopeWhere({
-        organization_id: organizationId,
-        baseParamIndex: baseParams.length + 1,
-      });
-      baseParams.push(...orgScope.params);
-      // Avoid treating the organization id in $1 as a bigint entity id while
-      // walking parent threads.
+    } else {
+      // Avoid treating $1 as a bigint entity id while walking parent threads.
       threadEntityLinkSql = 'TRUE';
     }
+    // Keep classification-filtered listings on the same owner scope as the
+    // standard listing path. The predicate itself is handed to
+    // executeListQuery structurally (see `orgScope` there); only its params
+    // take their slot here.
+    orgScope = buildOrgScopeWhere({
+      organization_id: organizationId,
+      baseParamIndex: baseParams.length + 1,
+    });
+    baseParams.push(...orgScope.params);
 
     baseConditions.push(connectionFilterClause);
     baseConditions.push(feedFilterClause);
@@ -509,6 +510,7 @@ export async function listContentInternal(
     ];
     const entityTypesClause = buildEntityTypesFilterClause({
       entity_types: options.entity_types,
+      entity_id: entityId,
       organization_id: organizationId,
       baseParamIndex: filterParamsBeforeEntityTypes.length + 1,
     });
@@ -557,6 +559,7 @@ export async function listContentInternal(
       scopes: entityScopes,
       alias: 'f',
       baseParamIndex: standardParams.length + 1,
+      ownerOrganizationId: organizationId,
     });
     standardEntityLinkSql = link.sql;
     standardEntityLinkParams = link.params;
@@ -567,6 +570,7 @@ export async function listContentInternal(
       scopes: entityScopes,
       alias: 'p',
       baseParamIndex: standardParams.length + 1,
+      ownerOrganizationId: organizationId,
     }).sql;
   } else {
     // Org-wide / no-entity path keeps the legacy 7-branch UNION because the
@@ -580,7 +584,6 @@ export async function listContentInternal(
 
   const paramsAfterEntityLink = [...standardParams, ...standardEntityLinkParams];
   const orgScope = buildOrgScopeWhere({
-    entity_id: entityId,
     organization_id: organizationId,
     baseParamIndex: paramsAfterEntityLink.length + 1,
   });
@@ -611,6 +614,7 @@ export async function listContentInternal(
   const paramsBeforeEntityTypes = [...paramsBeforeVisibility, ...visibilityClause.params];
   const entityTypesClause = buildEntityTypesFilterClause({
     entity_types: options.entity_types,
+    entity_id: entityId,
     organization_id: organizationId,
     baseParamIndex: paramsBeforeEntityTypes.length + 1,
   });

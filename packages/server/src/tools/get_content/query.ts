@@ -66,7 +66,6 @@ export async function buildExactIdScopeWhere(
   const params: Array<string | number | null> = [];
   const orgScope = buildOrgScopeWhere({
     organization_id: opts.organizationId,
-    strict_organization_scope: true,
     baseParamIndex: opts.baseParamIndex + params.length,
   });
   params.push(...orgScope.params);
@@ -84,6 +83,7 @@ export async function buildExactIdScopeWhere(
       scopes,
       alias: 'f',
       baseParamIndex: opts.baseParamIndex + params.length,
+      ownerOrganizationId: opts.organizationId,
     });
     entityFilter = ` AND ${link.sql}`;
     params.push(...link.params);

@@ -718,7 +718,7 @@ async function getContentImpl(
 
       const searchOptions = {
         entity_id: args.entity_id,
-        organization_id: !args.entity_id ? ctx.organizationId : undefined,
+        organization_id: ctx.organizationId,
         connection_ids: effectiveConnectionIds,
         feed_ids: args.feed_ids,
         run_ids: args.run_ids,
