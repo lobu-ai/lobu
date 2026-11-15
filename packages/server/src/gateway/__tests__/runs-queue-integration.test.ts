@@ -27,7 +27,7 @@ import {
   InMemorySpanExporter,
   SimpleSpanProcessor,
 } from "@opentelemetry/sdk-trace-node";
-import { RunsQueue } from "../infrastructure/queue/runs-queue.js";
+import { RunsQueue, sweepCompletedRuns } from "../infrastructure/queue/runs-queue.js";
 import type { QueueJob } from "../infrastructure/queue/types.js";
 import { getDb } from "../../db/client.js";
 import {
@@ -517,6 +517,44 @@ describe("RunsQueue — graceful shutdown", () => {
 });
 
 describe("RunsQueue — startup recovery scan", () => {
+  test("expired accepted work retains a failed outcome instead of disappearing", async () => {
+    if (!queue) throw new Error("queue not started");
+    const runId = Number(await queue.send("messages", { messageId: "synthetic-expired" }, { expireInSeconds: 300 }));
+    const sql = getDb();
+    await sql`UPDATE runs SET expires_at = now() - interval '1 minute' WHERE id = ${runId}`;
+    await sweepCompletedRuns();
+    const [retained] = await sql`SELECT status, completed_at, error_message, action_input
+      FROM runs WHERE id = ${runId}`;
+    expect(retained?.status).toBe("failed");
+    expect(retained?.completed_at).not.toBeNull();
+    expect(retained?.error_message).toBeTruthy();
+    expect(retained?.action_input).toEqual({ messageId: "synthetic-expired" });
+  });
+
+  test("repeated admission crashes consume the existing attempt budget and retain a terminal outcome", async () => {
+    if (!queue) throw new Error("queue not started");
+    const runId = Number(await queue.send("messages", { messageId: "synthetic-crash" }, { retryLimit: 3 }));
+    const sql = getDb();
+    for (let crash = 1; crash <= 3; crash++) {
+      await queue.stop();
+      queue = null;
+      // The process died after SKIP LOCKED admission, before arming a turn marker.
+      await sql`UPDATE runs SET status = 'claimed', claimed_by = 'synthetic-crashed-gateway',
+        claimed_at = now() - interval '20 minutes' WHERE id = ${runId}`;
+      queue = new RunsQueue();
+      await queue.start();
+      const [recovered] = await sql`SELECT status, attempts, claimed_by, completed_at, error_message
+        FROM runs WHERE id = ${runId}`;
+      expect(Number(recovered.attempts)).toBe(crash);
+      expect(recovered.claimed_by).toBeNull();
+      expect(recovered.status).toBe(crash < 3 ? "pending" : "failed");
+      if (crash === 3) {
+        expect(recovered.completed_at).not.toBeNull();
+        expect(recovered.error_message).toBeTruthy();
+      }
+    }
+  });
+
   test("recovers stale gateway claims", async () => {
     if (!queue) throw new Error("queue not started");
     // Stop the live queue first so we can manipulate rows freely.

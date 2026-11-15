@@ -123,6 +123,41 @@ export function backoffSeconds(attempt: number): number {
   return Math.min(seconds, MAX_BACKOFF_SECONDS);
 }
 
+function recordQueueFailures(rows: Array<{ run_type: string | null; queue_name: string | null }>): void {
+  for (const row of rows) {
+    incrementCounter("lobu_runs_failed_total", {
+      run_type: row.run_type ?? "unknown",
+      queue: row.queue_name ?? "unknown",
+    });
+  }
+}
+
+/** A lost claimant consumes the same failure budget as a thrown handler. */
+async function recoverStaleQueueClaims(thresholdMs: number, includeRunning: boolean): Promise<number> {
+  const sql = getDb();
+  const exhausted = sql`COALESCE(attempts, 0) + 1 >= COALESCE(max_attempts, 3)`;
+  const rows = await sql`
+    UPDATE public.runs
+    SET status = CASE WHEN ${exhausted} THEN 'failed' ELSE 'pending' END,
+        attempts = COALESCE(attempts, 0) + 1,
+        completed_at = CASE WHEN ${exhausted} THEN now() ELSE NULL END,
+        error_message = CASE WHEN ${exhausted}
+          THEN 'Queue claim expired after exhausting its attempt budget' ELSE error_message END,
+        claimed_at = NULL,
+        claimed_by = NULL,
+        run_at = now()
+    WHERE ${includeRunning ? sql`status IN ('claimed', 'running')` : sql`status = 'claimed'`}
+      AND run_type IN ('chat_message', 'schedule', 'agent_run', 'internal', 'task')
+      -- Human approvals have a separate inline lease/reconciliation owner.
+      AND COALESCE(approval_status, 'auto') = 'auto'
+      AND (${includeRunning ? sql`claimed_at IS NULL OR` : sql``}
+           claimed_at < now() - (${thresholdMs}::int * interval '1 millisecond'))
+    RETURNING id, status, run_type, queue_name
+  `;
+  recordQueueFailures(rows.filter((row) => row.status === 'failed'));
+  return rows.length;
+}
+
 /**
  * Insert one lobu-queue job inside the caller's transaction, so the job and
  * the caller's own writes commit (and its wakeup NOTIFY fires) together.
@@ -290,28 +325,12 @@ export class RunsQueue implements IMessageQueue {
 
   /** At startup, reset rows orphaned by a hard crash. */
   private async recoverStaleClaimedRowsOnStartup(): Promise<void> {
-    const sql = getDb();
     try {
       const recoveryWindowMs = intervals.runsClaimVisibilityTimeoutMs * 2;
-      const result = await sql`
-        UPDATE public.runs
-        SET status = 'pending',
-            claimed_at = NULL,
-            claimed_by = NULL,
-            run_at = now()
-        WHERE status IN ('claimed', 'running')
-          AND run_type IN ('chat_message', 'schedule', 'agent_run', 'internal', 'task')
-          -- RunsQueue work uses the 'auto' default. Human-approved rows have
-          -- a separate inline lease and reconciliation path that must retain
-          -- their running state across a gateway restart.
-          AND COALESCE(approval_status, 'auto') = 'auto'
-          AND (claimed_at IS NULL
-               OR claimed_at < now() - (${recoveryWindowMs}::int * interval '1 millisecond'))
-        RETURNING id
-      `;
-      if (result.count > 0) {
+      const count = await recoverStaleQueueClaims(recoveryWindowMs, true);
+      if (count > 0) {
         logger.warn(
-          `Startup recovery: reclaimed ${result.count} stale runs orphaned by crash`,
+          `Startup recovery: recovered ${count} stale runs orphaned by crash`,
         );
       }
     } catch (err) {
@@ -782,12 +801,7 @@ export class RunsQueue implements IMessageQueue {
     // dead-letter record (kept FAILED_RUNS_RETENTION_DAYS); this counter is the
     // aggregate, alertable signal the log alone never provided — a
     // user-facing reply (run_type='chat_message') here was silently dropped.
-    if (row) {
-      incrementCounter("lobu_runs_failed_total", {
-        run_type: row.run_type ?? "unknown",
-        queue: row.queue_name ?? "unknown",
-      });
-    }
+    if (row) recordQueueFailures([{ run_type: row.run_type ?? null, queue_name: row.queue_name ?? null }]);
     // Per-run terminal failures remain warnings to avoid an alert per failed run.
     // The aggregate "we have failed runs" signal lives on lobu_runs_failed_total.
     logger.warn(`Run ${runId} failed after retries: ${message}`);
@@ -913,26 +927,13 @@ export class RunsQueue implements IMessageQueue {
       if (this.staleSweepInFlight) return;
       this.staleSweepInFlight = true;
       try {
-        const sql = getDb();
-        // Threshold comes from intervals.ts, which guarantees a positive
-        // integer (parseEnvInt rounds and falls back on bad input), so it is
-        // safe to inline as a SQL literal — no placeholders needed.
+        // Both recovery paths use the configured claim visibility deadline.
         const thresholdMs = intervals.runsClaimVisibilityTimeoutMs;
-        const result = await sql.unsafe(
-          `UPDATE public.runs
-           SET status = 'pending',
-               claimed_at = NULL,
-               claimed_by = NULL,
-               run_at = now()
-           WHERE status = 'claimed'
-             AND run_type IN ('chat_message', 'schedule', 'agent_run', 'internal', 'task')
-             AND claimed_at < now() - (${thresholdMs} * interval '1 millisecond')
-           RETURNING id`,
-        );
-        if (result.count > 0) {
+        const count = await recoverStaleQueueClaims(thresholdMs, false);
+        if (count > 0) {
           // Reclamation is operational housekeeping; retain a warning for diagnosis.
           logger.warn(
-            `Reclaimed ${result.count} stale runs (claimed > ${
+            `Recovered ${count} stale runs (claimed > ${
               thresholdMs / 1000
             }s ago)`,
           );
@@ -952,7 +953,7 @@ export class RunsQueue implements IMessageQueue {
 }
 
 /**
- * Delete expired runs rows AND completed/failed lobu-queue runs older than
+ * Terminalize expired pending work and delete terminal lobu-queue runs older than
  * the configured retention window. Called from the periodic ephemeral-table
  * sweep. RUNS_RETENTION_DAYS env override (defaults to 30).
  */
@@ -977,17 +978,18 @@ export async function sweepCompletedRuns(): Promise<number> {
   let total = 0;
 
   const expired = await sql`
-    WITH d AS (
-      DELETE FROM runs
+      UPDATE runs
+      SET status = 'failed', completed_at = now(),
+          claimed_at = NULL, claimed_by = NULL,
+          error_message = 'Queue job expired before completion'
       WHERE expires_at IS NOT NULL
         AND expires_at <= now()
         AND status = 'pending'
         AND run_type IN ('chat_message', 'schedule', 'agent_run', 'internal', 'task')
-      RETURNING id
-    )
-    SELECT count(*)::int AS count FROM d
+      RETURNING run_type, queue_name
   `;
-  total += Number((expired[0] as { count?: number } | undefined)?.count ?? 0);
+  recordQueueFailures(expired);
+  total += expired.length;
 
   const aged = await sql`
     WITH d AS (

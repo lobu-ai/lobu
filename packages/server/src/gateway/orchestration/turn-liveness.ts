@@ -525,8 +525,8 @@ export async function hasLiveTurnForDeployment(
  * such a sibling, so the lane always makes progress.
  *
  * `expires_at` mirrors `claimOne`'s eligibility exactly: an expired row will
- * never be claimed again (the expired-pending cleanup deletes it and the
- * durable-input replay re-enqueues the turn), so it must not fence its
+ * never be claimed again (cleanup retains it as failed, allowing durable-input
+ * replay while its turn marker is live), so it must not fence its
  * siblings forever.
  */
 export async function hasOlderQueuedTurn(jobRunId: number): Promise<boolean> {
