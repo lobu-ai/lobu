@@ -747,7 +747,17 @@ async function createAutomationRunWithClient(
       ? Number(versionRows[0].current_version_id)
       : null;
 
-  const automationScript = await snapshotAutomationScript(sql, params.automationId, params.organizationId);
+  let admissionFailure: string | undefined;
+  let automationScript: Awaited<ReturnType<typeof snapshotAutomationScript>>;
+  try {
+    automationScript = await snapshotAutomationScript(sql, params.automationId, params.organizationId);
+  } catch (error) {
+    // Stored script/configuration refusals are terminal scheduled attempts,
+    // just like invalid sources below. Database and infrastructure failures
+    // must still roll back so the same due cursor remains retryable.
+    if (params.dispatchSource !== 'scheduled' || !(error instanceof ToolUserError) || error.httpStatus !== 422) throw error;
+    admissionFailure = error.message;
+  }
   const executor = automationScript?.has_analysis === false
     ? { kind: 'script' as const, source: automationScript.source }
     : versionRows[0]?.execution_config?.executor
@@ -755,8 +765,7 @@ async function createAutomationRunWithClient(
       // not transfer already-queued work to that agent.
       ?? (!params.agentId && !params.deviceWorkerId ? { kind: 'external' as const } : undefined);
   let windowEnd = params.windowEnd;
-  let admissionFailure: string | undefined;
-  if (executor?.kind === 'script' && params.dispatchSource !== 'event') {
+  if (admissionFailure === undefined && executor?.kind === 'script' && params.dispatchSource !== 'event') {
     // Match source reads: a nonempty version source list wins; otherwise use
     // the assignment's sources. Freeze the resulting bounds with this run.
     const versionSources = versionRows[0]?.version_sources ?? [];
