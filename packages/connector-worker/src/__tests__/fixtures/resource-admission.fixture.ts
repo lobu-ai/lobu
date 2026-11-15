@@ -1,15 +1,74 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { test } from 'node:test';
-import { WorkerClient } from '../../daemon/client.js';
+import { WorkerClient, type PollResponse } from '../../daemon/client.js';
+import { executeRun } from '../../daemon/executor.js';
 import { WorkerPollLoop } from '../../daemon/poll-loop.js';
 import { ResourceAdmission } from '../../daemon/resource-admission.js';
 import { createResourceSampler } from '../../daemon/resources.js';
+import { IsolateExecutor } from '../../executor/isolate.js';
 import { loadIsolatedVm } from '../../isolate/load.js';
 import type { IvmIsolate } from '../../isolate/ivm-types.js';
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 const MIB = 1024 * 1024;
+
+for (const [label, runType, accepted] of [
+  ['unsupported', 'synthetic_future_lane', false],
+  ['empty', '', false],
+  ['null', null, false],
+  ['explicit sync', 'sync', true],
+  ['legacy omitted', undefined, true],
+] as const) {
+  test(`${label} run kind received over HTTP ${accepted ? 'executes sync' : 'cannot execute sync'}`, async () => {
+    const completed: Array<{ status: string; error_message?: string; error?: string }> = [];
+    let streamedItems = 0;
+    let polled = false;
+    const server = createServer(async (req, res) => {
+      res.setHeader('content-type', 'application/json');
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) chunks.push(Buffer.from(chunk));
+      const body = JSON.parse(Buffer.concat(chunks).toString() || '{}');
+      if (req.url === '/api/workers/poll') {
+        polled = true;
+        res.end(JSON.stringify({ run_id: 91, run_type: runType, connector_key: 'synthetic-dispatch',
+          feed_key: 'items', feed_id: 9, config: {}, compiled_code: `module.exports.default = class {
+            execute() {}
+            async sync(ctx) { await ctx.commit([{ origin_id: 'synthetic-side-effect', origin_type: 'test',
+              occurred_at: '2026-01-01T00:00:00Z', payload_type: 'text', payload_text: 'unexpected sync' }], {});
+              return { status: 'complete' }; }
+          };` }));
+      } else if (req.url === '/api/workers/stream') {
+        streamedItems += body.items?.length ?? 0;
+        res.end('{}');
+      } else if (req.url === '/api/workers/complete') {
+        completed.push(body);
+        res.end('{}');
+      } else { res.end('{}'); }
+    });
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    assert.ok(address && typeof address !== 'string');
+    const client = new WorkerClient({ apiUrl: `http://127.0.0.1:${address.port}`,
+      workerId: 'synthetic-run-kind-worker', capabilities: {} });
+    try {
+      const job = await client.poll(1);
+      assert.equal(polled, true);
+      const result = await executeRun(client, job as PollResponse, {}, {
+        executor: new IsolateExecutor({ timeoutMs: 5_000 }), generateEmbeddings: false,
+      });
+      assert.equal(completed.length, 1);
+      assert.equal(completed[0].status, accepted ? 'success' : 'failed');
+      assert.equal(streamedItems, accepted ? 1 : 0);
+      assert.equal(result.itemsCollected, accepted ? 1 : 0);
+      if (accepted) assert.equal(result.error, undefined);
+      else assert.match(result.error ?? '', /unsupported.*run.*type/i);
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+    }
+  });
+}
 
 test('native isolate CPU pauses admission and idle time restores it', async () => {
   const ivm = await loadIsolatedVm();
