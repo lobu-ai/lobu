@@ -16,6 +16,11 @@ const FIRST_FACTOR_PATHS = new Set([
 	"/sign-in/email", "/sign-in/username", "/sign-in/phone-number", "/phone-number/verify",
 	"/passkey/verify-authentication", "/magic-link/verify",
 ]);
+type AccountSecurityContext = { accountSecurityIncoming?: Awaited<ReturnType<typeof getAuthoritativeSessionFromCtx>> };
+
+function isFirstFactorPath(path?: string): boolean {
+	return !!path && (FIRST_FACTOR_PATHS.has(path) || path.startsWith("/callback/") || path.startsWith("/oauth2/callback/"));
+}
 
 /** A local return path only; never forward an OAuth provider's external URL. */
 function localCallback(value: string | null, base: string): string {
@@ -38,10 +43,19 @@ export function accountSecurity(): BetterAuthPlugin {
 	const challenge = native.hooks.after[0]!;
 	return {
 		...native,
+		init() {
+			return { options: { databaseHooks: { session: { create: { before: async (session, ctx) => {
+				const incoming = (ctx?.context as AccountSecurityContext | undefined)?.accountSecurityIncoming;
+				if (!incoming || incoming.user.id !== session.userId || isFirstFactorPath(ctx?.path) || VERIFIED_PATHS.has(ctx?.path ?? "")) return;
+				// Replacing a session is not authentication. Carry its original age
+				// and credential provenance into every non-login replacement at insert.
+				return { data: { ...session, createdAt: incoming.session.createdAt, userAgent: incoming.session.userAgent } };
+			} } } } } };
+		},
 		hooks: {
 			before: [{ matcher: () => true, handler: createAuthMiddleware(async (ctx) => {
 				const incoming = await getAuthoritativeSessionFromCtx(ctx);
-				(ctx.context as typeof ctx.context & { accountSecurityIncoming: typeof incoming }).accountSecurityIncoming = incoming;
+				(ctx.context as typeof ctx.context & AccountSecurityContext).accountSecurityIncoming = incoming;
 				// No client, including a direct HTTP caller, may mint a bypass cookie.
 				if (ctx.path?.startsWith("/two-factor/") && (ctx.body?.trustDevice || ctx.body?.disableSession)) {
 					throw new APIError("BAD_REQUEST", { code: "INVALID_TWO_FACTOR_OPTIONS", message: "Remembered devices are not supported." });
@@ -76,7 +90,7 @@ export function accountSecurity(): BetterAuthPlugin {
 				}
 			}) }],
 			after: [{ matcher: () => true, handler: createAuthMiddleware(async (ctx) => {
-				const incoming = (ctx.context as typeof ctx.context & { accountSecurityIncoming: Awaited<ReturnType<typeof getAuthoritativeSessionFromCtx>> }).accountSecurityIncoming;
+				const incoming = (ctx.context as typeof ctx.context & AccountSecurityContext).accountSecurityIncoming;
 				const created = ctx.context.newSession;
 				const failed = isAPIError(ctx.context.returned) && ctx.context.returned.statusCode >= 400;
 				if (failed) return;
@@ -98,8 +112,11 @@ export function accountSecurity(): BetterAuthPlugin {
 					}
 					if (!created) return;
 					if (ctx.path === "/two-factor/verify-totp" && incoming && !incoming.user.twoFactorEnabled && created.user.twoFactorEnabled) {
-						const sessions = await ctx.context.internalAdapter.listSessions(created.user.id);
-						await Promise.all(sessions.filter((session) => session.token !== created.session.token).map((session) => ctx.context.internalAdapter.deleteSession(session.token)));
+						// Sessions are database-backed; delete by owner without the
+						// adapter's default listing limit, including expired rows.
+						await ctx.context.adapter.deleteMany({ model: "session", where: [
+							{ field: "userId", value: created.user.id }, { field: "token", operator: "ne", value: created.session.token },
+						] });
 					}
 				} catch (error) {
 					// A failed replay reservation or revocation must not leave the
@@ -110,7 +127,7 @@ export function accountSecurity(): BetterAuthPlugin {
 					}
 					throw error;
 				}
-				const firstFactor = FIRST_FACTOR_PATHS.has(ctx.path ?? "") || ctx.path?.startsWith("/callback/") || ctx.path?.startsWith("/oauth2/callback/");
+				const firstFactor = isFirstFactorPath(ctx.path);
 				if (created.user.twoFactorEnabled && !VERIFIED_PATHS.has(ctx.path ?? "") &&
 					(firstFactor || incoming?.user.id !== created.user.id)) {
 					const returned = ctx.context.returned;

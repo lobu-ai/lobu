@@ -161,7 +161,8 @@ describe("account security through Better Auth HTTP", () => {
 		const replacement = await owner.request("/two-factor/generate-backup-codes", { password });
 		expect(replacement.response.status).toBe(200);
 		expect(replacement.body.backupCodes).toHaveLength(10);
-		expect((await owner.request("/change-password", { currentPassword: password, newPassword: `${password}-new` })).response.status).toBe(200);
+		expect((await owner.request("/change-password", { currentPassword: password, newPassword: `${password}-new`, revokeOtherSessions: true })).response.status).toBe(200);
+		expect((await owner.request("/two-factor/get-totp-uri", { password: `${password}-new` })).response.status).toBe(200);
 		const login = new Browser(auth);
 		expect((await login.request("/sign-in/email", { email: "factor@example.test", password: `${password}-new` })).body.twoFactorRedirect).toBe(true);
 		expect((await login.request("/two-factor/verify-backup-code", { code: codes[0] })).response.status).toBe(401);
@@ -176,12 +177,33 @@ describe("account security through Better Auth HTTP", () => {
 		const { owner, userId } = await enrolled();
 		const sql = getTestDb();
 		await sql`UPDATE session SET "userAgent" = ${TOKEN_DERIVED_SESSION_USER_AGENT} WHERE "userId" = ${userId}`;
-		for (const [path, body] of [
-			["/two-factor/disable", { password }], ["/two-factor/generate-backup-codes", { password }],
-			["/passkey/generate-register-options", undefined], ["/passkey/update-passkey", { id: "synthetic-key", name: "Synthetic" }],
-		] as const) {
-			expect((await owner.request(path, body)).response.status, path).toBe(403);
+		let currentPassword = password;
+		for (let rotation = 0; rotation < 2; rotation++) {
+			const newPassword = `${currentPassword}-rotated`;
+			expect((await owner.request("/change-password", { currentPassword, newPassword, revokeOtherSessions: true })).response.status).toBe(200);
+			currentPassword = newPassword;
+			for (const [path, body] of [
+				["/two-factor/disable", { password: currentPassword }], ["/two-factor/generate-backup-codes", { password: currentPassword }],
+				["/passkey/generate-register-options", undefined], ["/passkey/update-passkey", { id: "synthetic-key", name: "Synthetic" }],
+			] as const) {
+				expect((await owner.request(path, body)).response.status, path).toBe(403);
+			}
+			expect((await owner.request("/get-session")).body.session.userAgent).toBe(TOKEN_DERIVED_SESSION_USER_AGENT);
 		}
+	});
+
+	it("keeps the original authentication age when rotating a stale human session", async () => {
+		const { owner, userId } = await enrolled();
+		const sql = getTestDb();
+		await sql`UPDATE session SET "createdAt" = NOW() - INTERVAL '16 minutes' WHERE "userId" = ${userId}`;
+		const before = (await owner.request("/get-session")).body.session;
+		expect((await owner.request("/change-password", { currentPassword: password, newPassword: `${password}-new`, revokeOtherSessions: true })).response.status).toBe(200);
+		const after = (await owner.request("/get-session")).body.session;
+		expect(after.token).not.toBe(before.token);
+		expect(after.createdAt).toBe(before.createdAt);
+		const management = await owner.request("/two-factor/disable", { password: `${password}-new` });
+		expect(management.response.status).toBe(403);
+		expect(management.body.code).toBe("SESSION_NOT_FRESH");
 	});
 
 	it("lets a recent passwordless owner enroll while retaining password checks for credential accounts", async () => {
@@ -220,6 +242,7 @@ describe("account security through Better Auth HTTP", () => {
 		const { owner, userId } = await enrolled();
 		const sql = getTestDb();
 		await sql`UPDATE session SET "userAgent" = ${TOKEN_DERIVED_SESSION_USER_AGENT} WHERE "userId" = ${userId}`;
+		expect((await owner.request("/change-password", { currentPassword: password, newPassword: `${password}-new`, revokeOtherSessions: true })).response.status).toBe(200);
 		const app = new Hono<{ Bindings: Env }>().route("/", oauthRoutes);
 		const call = (path: string, body?: Record<string, unknown>) => app.fetch(new Request(`${origin}${path}`, {
 			method: body ? "POST" : "GET", headers: { origin, cookie: owner.cookieHeader, "content-type": "application/json" },
@@ -376,10 +399,22 @@ describe("account security through Better Auth HTTP", () => {
 		const userId = signup.body.user.id;
 		const other = new Browser(auth);
 		expect((await other.request("/sign-in/email", { email: "security-owner@example.test", password })).response.status).toBe(200);
+		const bystander = new Browser(auth);
+		expect((await bystander.request("/sign-up/email", { email: "bystander@example.test", password, name: "Synthetic bystander" })).response.status).toBe(200);
 		const enabled = await owner.request("/two-factor/enable", { password });
 		expect(enabled.response.status).toBe(200);
 		expect(enabled.body.backupCodes).toHaveLength(10);
 		const sql = getTestDb();
+		// Expired rows also fill Better Auth's default 100-row session listing.
+		await sql`INSERT INTO session (id, token, "userId", "expiresAt", "createdAt", "updatedAt")
+			SELECT 'synthetic-expired-' || n, 'synthetic-expired-token-' || n, ${userId}, NOW() - INTERVAL '1 day', NOW(), NOW()
+			FROM generate_series(1, 105) AS n`;
+		await sql`INSERT INTO session (id, token, "userId", "expiresAt", "createdAt", "updatedAt")
+			SELECT 'synthetic-active-' || n, 'synthetic-active-token-' || n, ${userId}, NOW() + INTERVAL '1 day', NOW(), NOW()
+			FROM generate_series(1, 105) AS n`;
+		const retained = new Browser(auth);
+		const retainedHeaders = { authorization: "Bearer synthetic-active-token-105" };
+		expect((await retained.request("/get-session", undefined, retainedHeaders)).body.user.id).toBe(userId);
 		expect((await sql`SELECT "twoFactorEnabled" FROM "user" WHERE id = ${userId}`)[0]?.twoFactorEnabled).toBe(false);
 		const stored = (await sql`SELECT secret, "backupCodes", verified FROM "twoFactor" WHERE "userId" = ${userId}`)[0]!;
 		expect(stored.verified).toBe(false);
@@ -387,7 +422,10 @@ describe("account security through Better Auth HTTP", () => {
 		expect(stored.backupCodes).not.toContain(enabled.body.backupCodes[0]);
 		const verified = await owner.request("/two-factor/verify-totp", { code: totp(enabled.body.totpURI) });
 		expect(verified.response.status).toBe(200);
+		expect((await retained.request("/get-session", undefined, retainedHeaders)).body).toBeNull();
 		expect((await other.request("/get-session")).body).toBeNull();
+		expect(await sql`SELECT id FROM session WHERE "userId" = ${userId}`).toHaveLength(1);
+		expect((await bystander.request("/get-session")).body.user.email).toBe("bystander@example.test");
 		expect((await owner.request("/get-session")).body.user.twoFactorEnabled).toBe(true);
 		await owner.request("/sign-out", {});
 		const login = new Browser(auth);
