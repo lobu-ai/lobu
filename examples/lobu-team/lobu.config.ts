@@ -294,12 +294,13 @@ const issueTracker = defineAutomation({
 const productFeedbackInbox = defineConnection({
   slug: "product-feedback-inbox",
   connector: "webhook",
+  credentialMode: "byo",
   name: "Product feedback inbox",
   config: {
     token: secret("PRODUCT_FEEDBACK_INBOX_TOKEN"),
     semanticType: "product.feedback",
     titlePath: "/subject",
-    searchable: "false",
+    searchable: false,
   },
 });
 
