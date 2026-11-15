@@ -284,6 +284,28 @@ it("files silent overdue work in owned scope and requires successful recovery", 
     status: "resolved",
     triage_summary: "Keep this investigation",
   });
+  // Auth propagation pauses feeds before they necessarily fail. A healthy
+  // connection with a manually paused feed stays quiet, but unavailable
+  // connections must still reach the repair queue with zero failures.
+  await sql`UPDATE feeds SET status='paused',next_run_at=NULL WHERE id=${feed.id}`;
+  await run();
+  expect((await issues()).entities).toHaveLength(2);
+  for (const status of ["pending_auth", "revoked", "error"]) {
+    await sql`UPDATE connections SET status=${status} WHERE id=${connection.id}`;
+    await run();
+    items = (await issues()).entities;
+    expect(items).toHaveLength(3);
+    const connectionIssue = items.find((i) =>
+      String(i.metadata?.culprit).endsWith(`:connection:${connection.id}`)
+    )!;
+    expect(connectionIssue.metadata).toMatchObject({ status: "new" });
+    expect(JSON.parse(String(connectionIssue.metadata?.message))).toMatchObject(
+      {
+        problem: "connection_unavailable",
+        status,
+      }
+    );
+  }
   // Losing ownership must fail closed, never resolve the now-invisible outage.
   await sql`UPDATE member SET role = 'member' WHERE "organizationId" = ${org.id} AND "userId" = ${user.id}`;
   await expect(run()).rejects.toThrow(/ownership|scope/i);

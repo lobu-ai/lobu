@@ -60,7 +60,8 @@ WITH owned AS (
     AND (c.visibility = 'org' OR c.created_by = ${quote(scope.ownerUserId)})
     AND EXISTS (SELECT 1 FROM feeds f WHERE f.connection_id = c.id
       AND f.organization_id = c.organization_id AND f.deleted_at IS NULL
-      AND (f.status = 'active' OR f.consecutive_failures >= 3))
+      -- Auth propagation can pause feeds without incrementing failures.
+      AND (f.status IN ('active', 'paused') OR f.consecutive_failures >= 3))
 )
 SELECT workspace, kind, resource_id, name, state,
   md5('workspace-health:v1:' || org_id || ':' || kind || ':' || resource_id) AS fingerprint
