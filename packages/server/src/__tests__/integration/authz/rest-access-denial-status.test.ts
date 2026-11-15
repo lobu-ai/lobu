@@ -4,14 +4,14 @@
  * access denial is pinned here; a malformed call keeps its 400.
  */
 import { beforeEach, describe, expect, it } from 'vitest';
-import { cleanupTestDatabase } from '../../setup/test-db';
+import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import {
   addUserToOrganization,
   createTestOrganization,
   createTestPAT,
   createTestUser,
 } from '../../setup/test-fixtures';
-import { post } from '../../setup/test-helpers';
+import { get, post, testRequest } from '../../setup/test-helpers';
 
 describe('REST access denials answer 403', () => {
   let org: Awaited<ReturnType<typeof createTestOrganization>>;
@@ -67,5 +67,37 @@ describe('REST access denials answer 403', () => {
       body: { action: 'not_a_real_action' },
     });
     expect(response.status).toBe(400);
+  });
+
+  it.each(['wrapper', 'proxy'] as const)('returns a safe server error for a database failure through the REST %s', async (route) => {
+    const { token } = await createTestPAT(ownerId, org.id, { scope: 'mcp:read mcp:write mcp:admin' });
+    const call = () => route === 'wrapper'
+      ? get(`/api/${org.slug}/automations`, { token })
+      : post(`/api/${org.slug}/manage_automations`, { token, body: { action: 'list' } });
+    expect((await call()).status).toBe(200);
+    const sql = getTestDb();
+    await sql`ALTER TABLE automations RENAME TO test_unavailable_automations`;
+    try {
+      const failed = await call();
+      expect(failed.status).toBe(500);
+      const parsed = await failed.json();
+      expect(parsed).toMatchObject({ error: expect.any(String) });
+      const body = JSON.stringify(parsed);
+      expect(body).not.toContain('automations');
+      expect(body).not.toContain('SELECT');
+    } finally {
+      await sql`ALTER TABLE test_unavailable_automations RENAME TO automations`;
+    }
+    expect((await call()).status).toBe(200);
+  });
+
+  it.each(['{', 'null', '[]', '42', '"text"'])('keeps invalid request JSON %s as a client error', async (rawBody) => {
+    const { token } = await createTestPAT(ownerId, org.id, { scope: 'mcp:read mcp:write mcp:admin' });
+    for (const route of ['manage_automations', 'events/1/actions/vote']) {
+      const response = await testRequest('POST', `/api/${org.slug}/${route}`, { token, rawBody,
+        headers: { 'content-type': 'application/json' } });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({ error: expect.any(String) });
+    }
   });
 });

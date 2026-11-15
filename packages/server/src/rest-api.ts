@@ -17,9 +17,11 @@ import {
 } from "./auth/tool-access";
 import { getScopedConnectorDefinition } from "./catalog/connector-definitions";
 import { listOrgInstalled } from "./catalog/installed";
-import { getDb, parsePgTextArray } from "./db/client";
+import { DbClosedError, getDb, parsePgTextArray } from "./db/client";
+import { captureServerError, routeFailure } from "./diagnostics";
 import { streamInvalidationEvents } from "./events/sse";
 import { fixedActionArgs } from "./http/rest-tool-routes";
+import { parseJsonBody } from "./gateway/routes/shared/helpers";
 import type { Env } from "./index";
 import { invokeTemplateEventAction } from "./interactions/template-event-actions";
 import { invokeViewAction } from "./interactions/template-event-actions";
@@ -50,7 +52,6 @@ import {
 	type ToolContext,
 } from "./tools/registry";
 import {
-	errorMessage,
 	parsePositiveIntegerId,
 	ToolNotRegisteredError,
 	ToolUserError,
@@ -203,7 +204,19 @@ function restErrorResponse(
 	if (error instanceof AccessDeniedError) {
 		return c.json({ error: error.message }, 403);
 	}
-	return c.json({ error: errorMessage(error) }, 400);
+	// Preserve the shutdown boundary's existing 503 handling.
+	if (error instanceof DbClosedError) throw error;
+	captureServerError(c, error, "rest_api", 500);
+	throw routeFailure(c.json({ error: "Internal server error" }, 500), error);
+}
+
+async function parseRestJsonObject<T extends object>(c: Context): Promise<T | Response> {
+	const body = await parseJsonBody(c);
+	if (body instanceof Response) return body;
+	if (!body || typeof body !== "object" || Array.isArray(body)) {
+		return c.json({ error: "Request body must be an object" }, 400);
+	}
+	return body as T;
 }
 
 /**
@@ -363,7 +376,8 @@ export async function restToolProxy(
 		if (!isRestDispatchTool(toolName)) {
 			throw new ToolNotRegisteredError(toolName);
 		}
-		const args: Record<string, unknown> = explicitArgs ?? (await c.req.json());
+		const args = explicitArgs ?? (await parseRestJsonObject<Record<string, unknown>>(c));
+		if (args instanceof Response) return args;
 		const authCtx = await resolveRestToolAuthContext(c);
 		const result = await executeTool(toolName, args, c.env, authCtx, c.req.raw.signal);
 		return c.json(toJsonSafe(toRestPublicToolResult(toolName, result)));
@@ -403,10 +417,11 @@ export async function restInvokeEventAction(c: Context<{ Bindings: Env }>) {
 			throw new ToolUserError("event_id and action are required", 400);
 		}
 		const eventId = parsePositiveIntegerId(rawEventId, "event_id");
-		const body = await c.req.json<{
+		const body = await parseRestJsonObject<{
 			value?: unknown;
 			interaction_id?: unknown;
-		}>();
+		}>(c);
+		if (body instanceof Response) return body;
 		if (body.value !== undefined && body.value !== null && typeof body.value !== "string") {
 			throw new ToolUserError("value must be a string or null", 400);
 		}
@@ -575,13 +590,14 @@ export async function restInvokeViewAction(c: Context<{ Bindings: Env }>) {
 		if (!isValidViewKey(key) || !action) {
 			throw new ToolUserError("view key and action are required", 400);
 		}
-		const body = await c.req.json<{
+		const body = await parseRestJsonObject<{
 			value?: unknown;
 			interaction_id?: unknown;
 			scope?: unknown;
 			expected?: unknown;
 			expected_content_hash?: unknown;
-		}>();
+		}>(c);
+		if (body instanceof Response) return body;
 		if (
 			body.value !== undefined &&
 			body.value !== null &&
@@ -924,7 +940,7 @@ export async function publicRestGetConnector(c: Context<{ Bindings: Env }>) {
 		const sql = getDb();
 		const connectorKey = c.req.param("connectorKey");
 		if (!connectorKey) {
-			throw new Error("Connector key is required");
+			throw new ToolUserError("Connector key is required", 400);
 		}
 
 		const connector = await getScopedConnectorDefinition({
@@ -1017,7 +1033,7 @@ export async function publicRestGetOrganization(c: Context<{ Bindings: Env }>) {
       LIMIT 1
     `;
 		const org = rows[0];
-		if (!org) throw new Error("Organization not found");
+		if (!org) throw new ToolUserError("Organization not found", 404);
 
 		const [{ count: agent_count }] = await sql<{ count: number }>`
       SELECT COUNT(*)::int AS count FROM agents
@@ -1090,7 +1106,8 @@ export async function restUpdateContentClassification(
 	try {
 		const contentId = parseInt(c.req.param("id") ?? "", 10);
 		const classifierSlug = c.req.param("classifier_slug");
-		const body = await c.req.json<{ value: string | null }>();
+		const body = await parseRestJsonObject<{ value: string | null }>(c);
+		if (body instanceof Response) return body;
 
 		if (Number.isNaN(contentId)) {
 			return c.json({ error: "Invalid content ID" }, 400);
