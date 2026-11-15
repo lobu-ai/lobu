@@ -31,6 +31,34 @@ describe('REST access denials answer 403', () => {
 
   const deleteAgent = { action: 'delete', agent_id: 'synthetic-agent' };
 
+  it('keeps write-rule refusals actionable without committing the rejected entity', async () => {
+    const { token } = await createTestPAT(ownerId, org.id, { scope: 'mcp:read mcp:write mcp:admin' });
+    const schema = await post(`/api/${org.slug}/manage_entity_schema`, {
+      token,
+      body: {
+        schema_type: 'entity_type', action: 'create', slug: 'invoice', name: 'Invoice',
+        rules_source: `export default (row) => {
+          if (row.op === 'create' && row.next.status !== 'draft') {
+            row.deny('an invoice is created in draft, not ' + row.next.status);
+          }
+        };`,
+      },
+    });
+    expect(schema.status).toBe(200);
+    const create = (status: string) => post(`/api/${org.slug}/manage_entity`, {
+      token, body: { action: 'create', entity_type: 'invoice', name: `Invoice ${status}`, metadata: { status } },
+    });
+    const refused = await create('posted');
+    expect({ status: refused.status, body: await refused.json() }).toMatchObject({
+      status: 400, body: { error: expect.stringContaining('an invoice is created in draft, not posted') },
+    });
+    expect((await create('draft')).status).toBe(200);
+    const sql = getTestDb();
+    const rows = await sql`SELECT e.name FROM entities e JOIN entity_types t ON t.id = e.entity_type_id
+      WHERE e.organization_id = ${org.id} AND t.slug = 'invoice'`;
+    expect(rows.map((row) => row.name)).toEqual(['Invoice draft']);
+  });
+
   it('refuses an admin action for a PAT without mcp:admin with 403', async () => {
     const { token } = await createTestPAT(ownerId, org.id, { scope: 'mcp:read mcp:write' });
     const response = await post(`/api/${org.slug}/manage_agents`, { token, body: deleteAgent });

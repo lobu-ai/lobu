@@ -18,6 +18,7 @@ import {
 import { getScopedConnectorDefinition } from "./catalog/connector-definitions";
 import { listOrgInstalled } from "./catalog/installed";
 import { DbClosedError, getDb, parsePgTextArray } from "./db/client";
+import { EntityRowValidationError } from "./authz/entity-row-validation";
 import { captureServerError, routeFailure } from "./diagnostics";
 import { streamInvalidationEvents } from "./events/sse";
 import { fixedActionArgs } from "./http/rest-tool-routes";
@@ -205,6 +206,9 @@ function restErrorResponse(
 		return c.json({ error: error.message }, 403);
 	}
 	if (error instanceof ToolNotRegisteredError) {
+		return c.json({ error: error.message }, 400);
+	}
+	if (error instanceof EntityRowValidationError) {
 		return c.json({ error: error.message }, 400);
 	}
 	// Preserve the shutdown boundary's existing 503 handling.
