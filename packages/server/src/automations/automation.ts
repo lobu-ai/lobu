@@ -882,32 +882,40 @@ export async function materializeDueAutomationRuns(
 			// whole cron period.
 			const pending = await computePendingWindow(sql, automation.id);
 			if (pending.windowEnd <= pending.windowStart) return "skipped";
-			let unchangedWindow: Awaited<ReturnType<typeof inspectUnchangedWindow>>;
+			let unchangedWindow: Awaited<ReturnType<typeof inspectUnchangedWindow>> = null;
+			let sourceFailure: string | undefined;
 			try {
 				unchangedWindow = await inspectUnchangedWindow(sql, automation, pending);
 			} catch (error) {
-				const errorMessage = error instanceof Error ? error.message : String(error);
-				// Source inspection is real scheduled work. Persist its failure and
-				// policy effects atomically, without exposing a pending run to dispatch.
-				return sql.begin(async (tx) => {
-					const [due] = await tx`
+				sourceFailure = error instanceof Error ? error.message : String(error);
+			}
+			return sql.begin(async (tx) => {
+				// Serialize admission and terminal outcomes for this exact due cursor.
+				// Failed windows retain their arrival mark, so that mark alone cannot
+				// fence overlapping scheduler passes from counting the same failure.
+				const [due] = await tx`
             SELECT id FROM automations
             WHERE id = ${automation.id} AND status = 'active'
               AND next_run_at = ${automation.next_run_at}::text::timestamptz
               AND next_run_at <= current_timestamp
             FOR UPDATE
           `;
-					// Another pass advanced this due cursor or the owner paused it.
-					if (!due) return "skipped" as const;
-					const admitted = await enqueueAutomationRunForRecord(
-						sql, automation, "scheduled", undefined, tx, pending,
-					);
-					if (!admitted.created) return "skipped" as const;
+				if (!due) return "skipped" as const;
+				const admitted = await enqueueAutomationRunForRecord(
+					sql, automation, "scheduled", unchangedWindow?.sourceFingerprint, tx, pending,
+				);
+				if (!admitted.created) return "skipped" as const;
+				// Permanent script-source admission failures are already terminal and
+				// accounted for by the queue, in this same transaction.
+				if (admitted.status === "failed") return "created" as const;
+				if (sourceFailure !== undefined) {
+					// Source inspection is real scheduled work. Persist its failure and
+					// policy effects without exposing a pending run to dispatch.
 					const [failed] = await tx`
             UPDATE runs SET status = 'failed',
               outcome = ${classifyRunOutcome({ status: "failed", executionStarted: false })},
               completed_at = current_timestamp,
-              error_message = ${errorMessage}
+              error_message = ${sourceFailure}
             WHERE id = ${admitted.runId} AND status = 'pending'
             RETURNING approved_input->'executor'->>'kind' AS executor_kind
           `;
@@ -917,52 +925,26 @@ export async function materializeDueAutomationRuns(
 					});
 					await advanceScheduleAfterTerminalFailure(tx, automation.id, "scheduled");
 					return "created" as const;
-				});
-			}
-			const sourceFingerprint = unchangedWindow?.sourceFingerprint;
-			if (unchangedWindow?.unchanged) {
-				// Admit and complete a no-op in one transaction so no dispatcher can
-				// claim it between creation and cursor advancement. Lock the row
-				// first, in the same order as claim-next-window, so a concurrent
-				// claim cannot deadlock against the pending run's unique index.
-				await sql.begin(async (tx) => {
-					await tx`SELECT id FROM automations WHERE id = ${automation.id} FOR UPDATE`;
-					const skippedRun = await enqueueAutomationRunForRecord(
-						sql,
-						automation,
-						"scheduled",
-						sourceFingerprint,
-						tx,
-						pending,
-					);
-					// A reused run belongs to its existing dispatcher. A superseded
-					// window belongs to the completion that already moved the mark.
-					if (!skippedRun.created) return;
-					// Script windows may have been shortened at admission.
+				}
+				if (unchangedWindow?.unchanged) {
+					// Admission and completion share this transaction so no dispatcher
+					// can claim a pending no-op. Book the range admission actually saved.
 					const completed = await completeSkippedAutomationRun(
 						tx,
 						automation.id,
-						skippedRun.windowStart,
-						skippedRun.windowEnd,
-						skippedRun.runId,
+						admitted.windowStart,
+						admitted.windowEnd,
+						admitted.runId,
 					);
 					if (completed) await advanceAutomationScheduleAfterSuccessfulWindow(tx, automation.id);
-				});
-				logger.info(
-					{ automationId: automation.id, empty: unchangedWindow.empty },
-					"[automation] Skipped unchanged Automation sources before agent dispatch"
-				);
-				return "skipped";
-			}
-			const result = await enqueueAutomationRunForRecord(
-				sql,
-				automation,
-				"scheduled",
-				sourceFingerprint,
-				undefined,
-				pending,
-			);
-			return result.created ? "created" : "skipped";
+					logger.info(
+						{ automationId: automation.id, empty: unchangedWindow.empty },
+						"[automation] Skipped unchanged Automation sources before agent dispatch"
+					);
+					return "skipped" as const;
+				}
+				return "created" as const;
+			});
 		},
 		onError: async (automation, error) => {
 			logger.error(

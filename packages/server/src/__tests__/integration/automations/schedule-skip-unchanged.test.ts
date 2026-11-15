@@ -6,7 +6,7 @@ import { materializeDueAutomationRuns } from "../../../automations/automation";
 import { automationArrivalHorizon } from "../../../utils/window-utils";
 import { initWorkspaceProvider } from "../../../workspace";
 import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
-import { createTestAgent, createTestEvent, seedOwnerContext } from "../../setup/test-fixtures";
+import { createTestAgent, createTestConnection, createTestEvent, seedOwnerContext } from "../../setup/test-fixtures";
 
 describe("scheduled Automation unchanged gate", () => {
 	beforeAll(async () => {
@@ -15,6 +15,95 @@ describe("scheduled Automation unchanged gate", () => {
 
 	beforeEach(async () => {
 		await cleanupTestDatabase();
+	});
+
+	async function seedDeletedFeedScript(skipIfUnchanged: boolean) {
+		const { org, user, ctx } = await seedOwnerContext();
+		const agent = await createTestAgent({ organizationId: org.id, ownerUserId: user.id });
+		const connection = await createTestConnection({ organization_id: org.id, connector_key: "synthetic.scheduler" });
+		const sql = getTestDb();
+		const [feed] = await sql`SELECT id FROM feeds WHERE connection_id = ${connection.id}`;
+		const created = await manageAutomations({
+			action: "create", slug: "deleted-feed-script", name: "Deleted feed script",
+			managed_agent_id: agent.agentId,
+			reaction_script: "export default async () => ({ checked: true });",
+			sources: [{ name: "content", query: `@feed:${feed.id}` }],
+			triggers: [{ kind: "schedule", cron: "* * * * *", execution: "window", skip_if_unchanged: skipIfUnchanged }],
+		}, {} as Env, ctx) as { automation_id: string };
+		await sql`UPDATE feeds SET deleted_at = now() WHERE id = ${feed.id}`;
+		await sql`UPDATE automations SET next_run_at = now() - interval '1 minute' WHERE id = ${created.automation_id}`;
+		const [initial] = await sql`SELECT next_run_at, next_window_start FROM automations WHERE id = ${created.automation_id}`;
+		return { sql, automationId: created.automation_id, initial };
+	}
+
+	it.each([true, false])("durably fails deleted-feed script admission with skip_if_unchanged=%s", async (skipIfUnchanged) => {
+		const { sql, automationId, initial } = await seedDeletedFeedScript(skipIfUnchanged);
+		await sql.unsafe(`CREATE FUNCTION synthetic_reject_admission_failure() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'Synthetic failure-accounting outage'; END $$`);
+		await sql.unsafe(`CREATE TRIGGER synthetic_reject_admission_failure BEFORE UPDATE OF consecutive_scheduled_failures
+      ON automations FOR EACH ROW EXECUTE FUNCTION synthetic_reject_admission_failure()`);
+		try {
+			await materializeDueAutomationRuns({} as Env, sql);
+			expect(await sql`SELECT id FROM runs WHERE automation_id = ${automationId}`).toHaveLength(0);
+			const [state] = await sql`SELECT next_run_at, next_window_start, consecutive_scheduled_failures
+				FROM automations WHERE id = ${automationId}`;
+			expect(state).toMatchObject({ ...initial, consecutive_scheduled_failures: 0 });
+		} finally {
+			await sql.unsafe('DROP TRIGGER synthetic_reject_admission_failure ON automations');
+			await sql.unsafe('DROP FUNCTION synthetic_reject_admission_failure()');
+		}
+
+		for (let attempt = 1; attempt <= 5; attempt++) {
+			await sql`UPDATE automations SET next_run_at = now() - interval '1 minute' WHERE id = ${automationId}`;
+			await Promise.all([
+				materializeDueAutomationRuns({} as Env, sql),
+				materializeDueAutomationRuns({} as Env, sql),
+			]);
+			const runs = await sql`SELECT status, outcome, error_message, completed_at, approved_input FROM runs
+				WHERE automation_id = ${automationId} AND run_type = 'automation' ORDER BY id`;
+			expect(runs).toHaveLength(attempt);
+			expect(runs.at(-1)).toMatchObject({ status: "failed", outcome: "infra_error",
+				approved_input: { dispatch_source: "scheduled", executor: { kind: "script" } } });
+			expect(runs.at(-1).error_message).toContain("did not match any feed");
+			expect(runs.at(-1).completed_at).not.toBeNull();
+			expect(await sql`SELECT id FROM runs WHERE automation_id = ${automationId} AND run_type = 'task'`).toHaveLength(0);
+			const [state] = await sql`SELECT next_window_start, next_run_at, consecutive_scheduled_failures,
+				schedule_auto_paused_at FROM automations WHERE id = ${automationId}`;
+			expect(state.next_window_start).toEqual(initial.next_window_start);
+			expect(state.consecutive_scheduled_failures).toBe(attempt);
+			if (attempt === 5) {
+				expect(state.next_run_at).toBeNull();
+				expect(state.schedule_auto_paused_at).not.toBeNull();
+			} else {
+				expect(new Date(state.next_run_at).getTime()).toBeGreaterThan(Date.now());
+				expect(await materializeDueAutomationRuns({} as Env, sql)).toMatchObject({ dueAutomations: 0 });
+			}
+		}
+	});
+
+	it("retries an uncommitted database failure during script source normalization", async () => {
+		const { sql, automationId, initial } = await seedDeletedFeedScript(true);
+		const unavailable = (client: DbClient): DbClient => new Proxy(client, {
+			apply(target, self, args) {
+				const text = Array.isArray(args[0]) ? args[0].join('') : '';
+				if (text.includes('FROM feeds f')) return target`SELECT 1 / 0`;
+				return Reflect.apply(target, self, args);
+			},
+			get(target, key) {
+				if (key === 'begin' || key === 'savepoint') return (...args: unknown[]) => {
+					const callback = args.pop() as (tx: DbClient) => Promise<unknown>;
+					return (target[key] as (...a: unknown[]) => Promise<unknown>)(...args, (tx: DbClient) => callback(unavailable(tx)));
+				};
+				return Reflect.get(target, key);
+			},
+		});
+		await materializeDueAutomationRuns({} as Env, unavailable(sql));
+		expect(await sql`SELECT id FROM runs WHERE automation_id = ${automationId}`).toHaveLength(0);
+		const [state] = await sql`SELECT next_run_at, next_window_start, consecutive_scheduled_failures
+			FROM automations WHERE id = ${automationId}`;
+		expect(state).toMatchObject({ ...initial, consecutive_scheduled_failures: 0 });
+		await materializeDueAutomationRuns({} as Env, sql);
+		expect(await sql`SELECT status FROM runs WHERE automation_id = ${automationId}`).toEqual([{ status: "failed" }]);
 	});
 
 	it("records source-read failures without advancing arrivals and applies the scheduled failure budget", async () => {
