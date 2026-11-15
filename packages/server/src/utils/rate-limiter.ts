@@ -171,12 +171,15 @@ export class RateLimiter {
    * spent. FAILS OPEN like the rest of the module: when Postgres is
    * unavailable (error, backoff, missing table) the decision falls back to
    * this request's cached count instead of rejecting solely for the DB error.
+   * An optional transaction shares the caller's connection and commit/rollback.
    */
-  async consume(key: string, config: RateLimitConfig): Promise<ConsumedRateLimitResult> {
+  async consume(key: string, config: RateLimitConfig, db?: DbClient): Promise<ConsumedRateLimitResult> {
     const { state, now } = this.countLocally(key, config);
     // Other requests can increment this window while the DB write is pending.
     const fallbackCount = Math.max(state.localCount, state.sharedCount + 1);
-    const shared = await this.incrementShared(key, state.windowStart);
+    // Transactional callers must reuse their connection: borrowing another
+    // pool slot here deadlocks when concurrent transactions fill the pool.
+    const shared = await this.incrementShared(key, state.windowStart, db);
     if (shared !== null && shared > state.sharedCount) state.sharedCount = shared;
     return {
       ...this.result(shared ?? fallbackCount, config, now, state.windowStart),
@@ -251,13 +254,13 @@ export class RateLimiter {
   }
 
   /**
-   * Awaited cluster-wide increment for {@link consume}. Returns the committed
-   * count, or null when Postgres is unavailable (the caller fails open).
+   * Awaited cluster-wide increment for {@link consume}. A supplied transaction
+   * owns its commit; returns null when Postgres is unavailable (fails open).
    */
-  private async incrementShared(key: string, windowStartSec: number): Promise<number | null> {
+  private async incrementShared(key: string, windowStartSec: number, db?: DbClient): Promise<number | null> {
     if (Date.now() < this.dbBackoffUntilMs) return null;
     try {
-      return await upsertSharedCount(getDb(), key, windowStartSec);
+      return await upsertSharedCount(db ?? getDb(), key, windowStartSec);
     } catch (err) {
       this.noteDbFailure(err);
       return null;

@@ -424,9 +424,14 @@ describe('published notification inboxes', () => {
   });
 
   it('deduplicates concurrent retries and refuses changed content for the same key', async () => {
-    const { sdk, args } = await fixture();
-    const receipts = await Promise.all(Array.from({ length: 5 }, () => sdk.notifications.submit(args)));
+    const { sdk, args, sender, receiver } = await fixture();
+    // Fill both the default application pool (20) and CI's smaller pool (5).
+    // Admission must not need an additional connection while holding one.
+    const receipts = await Promise.all(Array.from({ length: 20 }, () => sdk.notifications.submit(args)));
     expect(new Set(receipts.map((r) => r.receipt)).size).toBe(1);
+    const admissions = await getTestDb()<{ count: number }>`SELECT count FROM rate_limit_counters
+      WHERE key = ${`notification-inbox:${sender.org.id}:${receiver.org.id}`}`;
+    expect(admissions.reduce((total, row) => total + row.count, 0)).toBe(1);
     await expect(sdk.notifications.submit({ ...args, body: 'Different report' })).rejects.toMatchObject({ httpStatus: 409 });
     const race = await Promise.allSettled([
       sdk.notifications.submit({ ...args, idempotency_key: 'conflicting-race' }),

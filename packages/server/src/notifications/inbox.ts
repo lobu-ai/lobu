@@ -91,15 +91,6 @@ export async function submitNotificationInbox(input: InboxSubmitInput, ctx: Tool
       }
       return { status: 'received' as const, receipt: String(prior) };
     }
-    const limit = await getRateLimiter().consume(`notification-inbox:${ctx.organizationId}:${receiver.organization_id}`, {
-      limit: 30, windowSeconds: 60, errorMessage: 'Inbox submission rate limit exceeded',
-    });
-    if (!limit.countedInDb) throw new ToolUserError('Inbox admission is temporarily unavailable', 503, 'UPSTREAM_UNAVAILABLE');
-    if (!limit.allowed) {
-      const error = new ToolUserError('Inbox submission rate limit exceeded', 429, 'RATE_LIMITED');
-      error.retryAfterSeconds = limit.resetInSeconds;
-      throw error;
-    }
     const admins = await tx<{ userId: string }>`SELECT "userId" FROM "member"
       WHERE "organizationId" = ${receiver.organization_id} AND role IN ('owner', 'admin')`;
     if (!admins.length) throw new ToolUserError('Published inbox has no available administrators', 404, 'NOT_FOUND');
@@ -115,6 +106,18 @@ export async function submitNotificationInbox(input: InboxSubmitInput, ctx: Tool
         WHERE id = ${notification.eventId} AND organization_id = ${receiver.organization_id}`;
       if (stored?.metadata.inbox_fingerprint !== fingerprint)
         throw new ToolUserError('Idempotency key already belongs to a different report', 409, 'PRECONDITION_FAILED');
+    } else {
+      // Count only the unique event winner. Denial rolls back its event,
+      // targets and delivery task together with this shared admission.
+      const limit = await getRateLimiter().consume(`notification-inbox:${ctx.organizationId}:${receiver.organization_id}`, {
+        limit: 30, windowSeconds: 60, errorMessage: 'Inbox submission rate limit exceeded',
+      }, tx);
+      if (!limit.countedInDb) throw new ToolUserError('Inbox admission is temporarily unavailable', 503, 'UPSTREAM_UNAVAILABLE');
+      if (!limit.allowed) {
+        const error = new ToolUserError('Inbox submission rate limit exceeded', 429, 'RATE_LIMITED');
+        error.retryAfterSeconds = limit.resetInSeconds;
+        throw error;
+      }
     }
     // Event, admin targets and Automation activation commit together. The
     // existing queue and trigger delivery ids make all downstream retries safe.
