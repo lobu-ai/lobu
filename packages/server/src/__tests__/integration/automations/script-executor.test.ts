@@ -529,6 +529,27 @@ describe('Automation script executor', () => {
     });
   });
 
+  it('leaves a replacement dispatcher claim untouched during script handoff', async () => {
+    const { workspace, automationId, agentId } = await seedScriptAutomation();
+    const sql = getTestDb();
+    const queued = await createAutomationRun({
+      organizationId: workspace.org.id, automationId, agentId,
+      windowStart: '2026-01-01T00:00:00.000Z',
+      windowEnd: '2026-01-01T00:20:00.000Z', dispatchSource: 'event',
+    });
+    const [claim] = await sql`UPDATE runs SET status = 'claimed', claimed_by = 'lobu-dispatcher', claimed_at = now()
+      WHERE id = ${queued.runId} RETURNING claimed_at::text`;
+    await sql`UPDATE runs SET claimed_at = claimed_at + interval '1 microsecond', error_message = 'Replacement claim'
+      WHERE id = ${queued.runId}`;
+
+    expect(await enqueueAutomationScript(sql as never, {
+      organizationId: workspace.org.id, automationId, sourceRunId: queued.runId,
+    }, { claimedAt: claim.claimed_at, claimedBy: 'lobu-dispatcher', status: 'claimed' })).toBe(false);
+    const [run] = await sql`SELECT status, claimed_by, error_message FROM runs WHERE id = ${queued.runId}`;
+    expect(run).toMatchObject({ status: 'claimed', claimed_by: 'lobu-dispatcher', error_message: 'Replacement claim' });
+    expect(await sql`SELECT id FROM runs WHERE parent_run_id = ${queued.runId}`).toHaveLength(0);
+  });
+
   it('hands off a script without reversing the Automation-before-run lock order', async () => {
     const { workspace, automationId, agentId } = await seedScriptAutomation();
     const sql = getTestDb();
@@ -537,7 +558,7 @@ describe('Automation script executor', () => {
       windowStart: '2026-01-01T00:00:00.000Z',
       windowEnd: '2026-01-01T00:20:00.000Z', dispatchSource: 'event',
     });
-    await sql`UPDATE runs SET status = 'claimed', claimed_by = 'lobu-dispatcher', claimed_at = now() WHERE id = ${queued.runId}`;
+    const [claim] = await sql`UPDATE runs SET status = 'claimed', claimed_by = 'lobu-dispatcher', claimed_at = now() WHERE id = ${queued.runId} RETURNING claimed_at::text`;
     let handoff: Promise<{ value?: boolean; error?: unknown }> | undefined;
     let manualError: unknown;
     try {
@@ -547,7 +568,7 @@ describe('Automation script executor', () => {
         await tx`SELECT id FROM automations WHERE id = ${automationId} FOR UPDATE`;
         handoff = enqueueAutomationScript(sql as never, {
           organizationId: workspace.org.id, automationId, sourceRunId: queued.runId,
-        }).then(value => ({ value }), error => ({ error }));
+        }, { claimedAt: claim.claimed_at, claimedBy: 'lobu-dispatcher', status: 'claimed' }).then(value => ({ value }), error => ({ error }));
         // Observe actual database contention, not a timing-dependent promise race.
         const deadline = Date.now() + 5_000;
         let blocked = false;

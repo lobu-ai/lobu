@@ -55,6 +55,21 @@ export function runLeaseFence(sql: DbClient, claimedBy: string) {
 	return sql`AND status = 'running' AND claimed_by = ${claimedBy}`;
 }
 
+export interface RunClaim {
+	claimedBy: string;
+	/** Exact Postgres text, retaining the microseconds a JS Date would lose. */
+	claimedAt: string;
+	status: "claimed" | "running";
+}
+
+/** A shared owner name needs its claim timestamp to distinguish later holders. */
+export function runClaimFence(sql: DbClient, claim: RunClaim) {
+	// Bind as text first: postgres.js's timestamptz serializer converts strings
+	// through Date and discards microseconds before Postgres sees the parameter.
+	return sql`AND status = ${claim.status} AND claimed_by = ${claim.claimedBy}
+		AND claimed_at = ${claim.claimedAt}::text::timestamptz`;
+}
+
 /**
  * Fence a write on the owner ALONE, leaving the run's status out of it. Two
  * callers need that: recovery paths finalizing a run they did not claim
