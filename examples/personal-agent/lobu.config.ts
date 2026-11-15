@@ -10,6 +10,7 @@ import {
   defineSkill,
   every,
   reactionFromFile,
+  viewFromFile,
 } from "@lobu/cli/config";
 import { duplicateCandidateQuery } from "./duplicate-report.reaction.ts";
 import type DuplicateReportReaction from "./duplicate-report.reaction.ts";
@@ -596,6 +597,7 @@ export default defineConfig({
   // Capture, review and identity definitions may also be managed through the
   // SDK. Applying this example must preserve those independently owned objects.
   prune: false,
+  views: [viewFromFile("./views/property-gateway.tsx")],
   connectors: [
     connectorFromFile<typeof MidasConnector>("./midas.connector.ts"),
     connectorFromFile<typeof RevolutTransactionsConnector>(
