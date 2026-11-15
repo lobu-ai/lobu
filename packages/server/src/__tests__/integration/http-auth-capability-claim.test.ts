@@ -4,6 +4,7 @@ import type { Env } from '../../index';
 import { materializeDueFeeds, type DueFeedClaimContext } from '../../scheduled/check-due-feeds';
 import * as executionContext from '../../utils/execution-context';
 import { persistAuthCredentials } from '../../utils/auth-credential-secrets';
+import { createAuthProfile } from '../../utils/auth-profiles';
 import { cleanupTestDatabase, getTestDb } from '../setup/test-db';
 import { createTestConnection, createTestConnectorDefinition, createTestPAT, seedOwnerContext } from '../setup/test-fixtures';
 import { post } from '../setup/test-helpers';
@@ -160,6 +161,56 @@ describe('gateway HTTP authentication capability negotiation', () => {
 
 describe('fleet credential delivery boundary', () => {
   beforeEach(async () => { await cleanupTestDatabase(); });
+
+  it.each(['sync', 'action'] as const)('dispatches an OAuth %s token while retaining app credentials gateway-side', async (runType) => {
+    const seeded = await seedPendingRun(false);
+    const sql = getTestDb();
+    const [connection] = await sql`SELECT created_by, auth_profile_id FROM connections WHERE id = ${seeded.connectionId}`;
+    const appCredentials = { SYNTHETIC_CLIENT_ID: 'synthetic-oauth-client', SYNTHETIC_CLIENT_SECRET: 'synthetic-oauth-secret' };
+    await sql`UPDATE connector_definitions SET auth_schema = ${sql.json({ methods: [{
+      type: 'oauth', provider: 'synthetic', clientIdKey: 'SYNTHETIC_CLIENT_ID', clientSecretKey: 'SYNTHETIC_CLIENT_SECRET',
+      tokenUrl: 'https://provider.example.test/token',
+    }] })}, actions_schema = ${sql.json({ inspect: { name: 'Inspect', kind: 'read' } })}
+      WHERE organization_id = ${seeded.orgId} AND key = ${seeded.connectorKey}`;
+    const app = await createAuthProfile({
+      organizationId: seeded.orgId, connectorKey: seeded.connectorKey, displayName: 'Synthetic OAuth app',
+      profileKind: 'oauth_app', provider: 'synthetic', authData: appCredentials,
+      status: 'active', createdBy: connection.created_by,
+    });
+    const accountId = `synthetic-oauth-account-${seeded.orgId}`;
+    await sql`INSERT INTO account (id, "accountId", "providerId", "userId", "accessToken", "refreshToken", "accessTokenExpiresAt", "createdAt", "updatedAt")
+      VALUES (${accountId}, ${accountId}, 'synthetic', ${connection.created_by}, 'synthetic-oauth-access', 'synthetic-oauth-refresh',
+        NOW() + INTERVAL '1 hour', NOW(), NOW())`;
+    await sql`UPDATE auth_profiles SET profile_kind = 'oauth_account', provider = 'synthetic', account_id = ${accountId},
+      auth_data = ${sql.json({ app_auth_profile_id: app.id })} WHERE id = ${connection.auth_profile_id}`;
+    await sql`UPDATE connections SET app_auth_profile_id = ${app.id}, account_id = ${accountId} WHERE id = ${seeded.connectionId}`;
+    const [feed] = await sql`SELECT id FROM feeds WHERE connection_id = ${seeded.connectionId} LIMIT 1`;
+    await sql`UPDATE runs SET run_type = ${runType}, feed_id = ${runType === 'sync' ? feed.id : null},
+      action_key = ${runType === 'action' ? 'inspect' : null},
+      policy_principal_kind = 'user', policy_principal_id = ${connection.created_by}, created_by_user_id = ${connection.created_by}
+      WHERE id = ${seeded.runId}`;
+    if (runType === 'action') {
+      const [policy] = await sql`INSERT INTO write_approval_policies (organization_id, resource_class, connector_key)
+        VALUES (${seeded.orgId}, 'connector_action', ${seeded.connectorKey}) RETURNING id`;
+      await sql`INSERT INTO write_policy_action_effects (policy_id, action, effect) VALUES (${policy.id}, 'execute', 'auto')`;
+    }
+
+    const response = await poll(true);
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body).toMatchObject({ run_id: seeded.runId, run_type: runType,
+      credentials: { provider: 'synthetic', accessToken: 'synthetic-oauth-access' } });
+    expect(body.connection_credentials).toBeUndefined();
+    expect(body.previous_credentials).toBeUndefined();
+    const serialized = JSON.stringify(body);
+    for (const secret of [...Object.values(appCredentials), 'synthetic-oauth-refresh']) {
+      expect(serialized.includes(secret)).toBe(false);
+    }
+    const [storedApp] = await sql`SELECT auth_data FROM auth_profiles WHERE id = ${app.id}`;
+    expect(storedApp.auth_data).toEqual(appCredentials);
+    const [storedFeed] = await sql`SELECT consecutive_failures FROM feeds WHERE id = ${feed.id}`;
+    expect(storedFeed.consecutive_failures).toBe(0);
+  });
 
   async function credentialRun(kind: 'env' | 'browser_session' | 'interactive', previousOnly = false, legacy = false) {
     const seeded = await seedPendingRun(false);

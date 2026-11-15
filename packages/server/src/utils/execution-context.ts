@@ -172,22 +172,16 @@ export async function resolveExecutionAuth(
   // paths: the worker sync poll (worker-api/poll.ts) and source reads
   // (lib/connector-pushdown.ts). Non-ref entries (scope bookkeeping)
   // pass through untouched.
-  const connectionCredentials = {
-    ...(appAuthProfile
-      ? await resolveAuthCredentials({
-          organizationId: params.organizationId,
-          authProfileId: appAuthProfile.id,
-          authData: appAuthProfile.auth_data ?? {},
-        })
-      : {}),
-    ...(authProfile?.profile_kind === 'env'
+  // OAuth app credentials are consumed gateway-side for token refresh above;
+  // they must never become part of the connector's execution envelope.
+  const connectionCredentials =
+    authProfile?.profile_kind === 'env'
       ? await resolveAuthCredentials({
           organizationId: params.organizationId,
           authProfileId: authProfile.id,
           authData: authProfile.auth_data ?? {},
         })
-      : {}),
-  };
+      : {};
   const sessionState =
     authProfile?.profile_kind === 'browser_session' || authProfile?.profile_kind === 'interactive'
       ? ((authProfile.auth_data as Record<string, unknown>) ?? null)
