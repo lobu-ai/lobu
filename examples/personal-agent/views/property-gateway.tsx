@@ -7,7 +7,6 @@ import {
   Link,
   SearchField,
   SelectField,
-  TruncatedNotice,
 } from "@lobu/views/components";
 
 export const view = defineView({
@@ -186,7 +185,6 @@ export default function PropertyGateway() {
           onPage: setPage,
         }}
       />
-      {read.truncated && <TruncatedNotice />}
     </EntityListPage>
   );
 }
