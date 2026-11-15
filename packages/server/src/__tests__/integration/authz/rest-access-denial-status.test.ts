@@ -69,6 +69,13 @@ describe('REST access denials answer 403', () => {
     expect(response.status).toBe(400);
   });
 
+  it.each(['synthetic_unknown_tool', 'invoke_view_action'])('keeps an unsupported REST tool %s as an actionable client error', async (toolName) => {
+    const { token } = await createTestPAT(ownerId, org.id);
+    const response = await post(`/api/${org.slug}/${toolName}`, { token, body: {} });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: expect.stringContaining(toolName) });
+  });
+
   it.each(['wrapper', 'proxy'] as const)('returns a safe server error for a database failure through the REST %s', async (route) => {
     const { token } = await createTestPAT(ownerId, org.id, { scope: 'mcp:read mcp:write mcp:admin' });
     const call = () => route === 'wrapper'

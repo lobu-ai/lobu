@@ -204,10 +204,17 @@ function restErrorResponse(
 	if (error instanceof AccessDeniedError) {
 		return c.json({ error: error.message }, 403);
 	}
+	if (error instanceof ToolNotRegisteredError) {
+		return c.json({ error: error.message }, 400);
+	}
 	// Preserve the shutdown boundary's existing 503 handling.
 	if (error instanceof DbClosedError) throw error;
+	const response = c.json({ error: "Internal server error" }, 500);
+	// Match the HTTP boundary's suppression for abandoned requests. Write
+	// failures still get their handler-level diagnostics after a disconnect.
+	if (c.req.raw.signal.aborted) return response;
 	captureServerError(c, error, "rest_api", 500);
-	throw routeFailure(c.json({ error: "Internal server error" }, 500), error);
+	throw routeFailure(response, error);
 }
 
 async function parseRestJsonObject<T extends object>(c: Context): Promise<T | Response> {
