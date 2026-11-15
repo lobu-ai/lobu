@@ -35,6 +35,8 @@ interface ResolvedExecutionAuth {
   credentials: ExecutionOAuthCredentials | null;
   connectionCredentials: Record<string, string>;
   sessionState: Record<string, unknown> | null;
+  /** True only for the allowlisted identity metadata of a live browser profile. */
+  sessionStateIsPublic?: boolean;
   httpAuth?: boolean;
   onHttpFetch?: (request: ConnectorHttpRequest, signal?: AbortSignal) => Promise<ConnectorHttpResponse>;
 }
@@ -182,15 +184,26 @@ export async function resolveExecutionAuth(
           authData: authProfile.auth_data ?? {},
         })
       : {};
-  const sessionState =
+  let sessionState =
     authProfile?.profile_kind === 'browser_session' || authProfile?.profile_kind === 'interactive'
       ? ((authProfile.auth_data as Record<string, unknown>) ?? null)
       : null;
+  const sessionStateIsPublic = authProfile?.profile_kind === 'browser_session' && sessionState?.mode === 'live';
+  if (sessionStateIsPublic) {
+    // Live browser credentials stay on the paired device. Only verified account
+    // identity is execution state; never forward cookies or unknown auth fields.
+    sessionState = {
+      mode: 'live',
+      ...(typeof sessionState?.account_id === 'string' ? { account_id: sessionState.account_id } : {}),
+      ...(typeof sessionState?.verified_at === 'string' ? { verified_at: sessionState.verified_at } : {}),
+    };
+  }
 
   return {
     credentials,
     connectionCredentials,
     sessionState,
+    sessionStateIsPublic,
   };
 }
 
