@@ -722,7 +722,7 @@ describe('connector-health alerter', () => {
     expect(row.unhealthy_alerted_at).not.toBeNull();
   });
 
-  // Rule A must stay sensitive to a SINGLE bad run. Narrowing its numerator to
+  // Unpinned Rule A must stay sensitive to a SINGLE bad run. Narrowing its numerator to
   // persistent failures (the degraded rule's stricter count) would let a
   // connection whose every expected feed just failed report healthy until the
   // consecutive counters climbed to the threshold — silence during exactly the
@@ -1171,6 +1171,72 @@ describe('connector-health alerter', () => {
       SELECT unhealthy_alerted_at FROM connections WHERE id = ${napping.id}
     `) as unknown as Array<{ unhealthy_alerted_at: Date | null }>;
     expect(row.unhealthy_alerted_at).toBeNull();
+  });
+
+  it.each([1, 2])('does not page for %i transient device-feed failures', async (failures) => {
+    const device = await seedDeviceWorker({
+      orgId, userId, workerId: `worker-transient-${failures}`, lastSeenAt: new Date(),
+    });
+    const connection = await seedConnection({
+      orgId, userId, connectorKey: 'apple.reminders',
+      slug: `device-transient-${failures}`, createdAt: OLD, deviceWorkerId: device,
+    });
+    await seedFeed({
+      orgId, connectionId: connection.id, feedKey: 'reminders',
+      schedule: '*/5 * * * *', lastSyncStatus: 'failed', lastSyncAt: new Date(),
+      consecutiveFailures: failures, lastError: 'worker_heartbeat_lost',
+    });
+
+    const result = await runConnectorHealthCheck();
+    expect(reasonFor(result.details, connection.id)).toBeUndefined();
+    const [row] = await getTestDb()`
+      SELECT unhealthy_alerted_at FROM connections WHERE id = ${connection.id}
+    `;
+    expect(row.unhealthy_alerted_at).toBeNull();
+  });
+
+  it('keeps a persistent device failure episode through claims until a successful sync', async () => {
+    const sql = getTestDb();
+    const device = await seedDeviceWorker({
+      orgId, userId, workerId: 'worker-persistent-failure', lastSeenAt: new Date(),
+    });
+    const connection = await seedConnection({
+      orgId, userId, connectorKey: 'apple.reminders',
+      slug: 'device-persistent-failure', createdAt: OLD, deviceWorkerId: device,
+    });
+    await seedFeed({
+      orgId, connectionId: connection.id, feedKey: 'reminders',
+      schedule: '*/5 * * * *', lastSyncStatus: 'failed', lastSyncAt: new Date(),
+      consecutiveFailures: cfg.failureThreshold, lastError: 'worker_heartbeat_lost',
+    });
+    const marker = async () => (await sql`
+      SELECT unhealthy_alerted_at FROM connections WHERE id = ${connection.id}
+    `)[0].unhealthy_alerted_at;
+
+    expect(reasonFor((await runConnectorHealthCheck()).details, connection.id)).toBe(
+      'all_feeds_failing',
+    );
+    const alertedAt = await marker();
+    expect(alertedAt).not.toBeNull();
+
+    // poll.ts claims a retry without resetting the failure budget.
+    await sql`
+      UPDATE feeds SET last_sync_status = 'pending', last_error = NULL
+      WHERE connection_id = ${connection.id}
+    `;
+    const retrying = await runConnectorHealthCheck();
+    expect(reasonFor(retrying.details, connection.id)).toBe('all_feeds_failing');
+    expect(retrying.newlyAlerted).toBe(0);
+    expect(await marker()).toEqual(alertedAt);
+
+    await sql`
+      UPDATE feeds SET last_sync_status = 'success', last_sync_at = NOW(),
+        consecutive_failures = 0, last_error = NULL
+      WHERE connection_id = ${connection.id}
+    `;
+    const recovered = await runConnectorHealthCheck();
+    expect(reasonFor(recovered.details, connection.id)).toBeUndefined();
+    expect(await marker()).toBeNull();
   });
 
   // Device-backed source listeners have no sync lifecycle to reveal an outage.

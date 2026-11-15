@@ -112,8 +112,9 @@ export function isBrowserAuthExpiredError(lastError: string | null | undefined):
 }
 
 /**
- * A feed is "failing" if its most recent sync failed OR it has accumulated at
- * least this many consecutive failures.
+ * Device-pinned feeds must accumulate this many consecutive failures before
+ * paging for sync failures. Unpinned feeds also count a single latest failure.
+ * Stalled schedules and long-silent devices remain independent failing signals.
  */
 const FAILURE_THRESHOLD = 3;
 
@@ -535,8 +536,8 @@ interface ClassifiedFeed {
    *  is not operator-paused-clean, and is not waiting on human
    *  sign-in. Only these count toward the expected denominator and Rules A/C. */
   expected: boolean;
-  /** Expected feed that is currently failing: last attempt failed, a failure
-   *  episode is underway, its pinned device has been silent past
+  /** Expected feed that is currently failing: an unpinned last attempt failed,
+   *  failures reached the threshold, its pinned device has been silent past
    *  `cfg.deviceOfflineHours`, OR its schedule kept running with nothing
    *  finishing for `cfg.stallGraceHours`. */
   failing: boolean;
@@ -639,13 +640,13 @@ function classifyFeed(
   const stallState = expected ? feedStallState(row, cfg, nowMs) : null;
   const stalled = stallState === 'stalled';
 
-  // Failing: a single most-recent-run failure counts (Rule A must stay
-  // sensitive to one bad run), past the persistent threshold, the pinned
-  // device went silent, OR the schedule stalled. Auto-paused feeds with cf > 0
-  // are symptoms and count.
+  // A device can disappear between claim and completion without its source
+  // failing. Require persistence before paging for those feeds; unpinned
+  // feeds retain immediate failure detection. Long-silent devices and stalled
+  // schedules still count independently, including with no failure budget used.
   const failing =
     expected &&
-    (row.last_sync_status === 'failed' ||
+    ((!row.device_pinned && row.last_sync_status === 'failed') ||
       cf >= cfg.failureThreshold ||
       deviceStale ||
       stalled);
@@ -822,8 +823,8 @@ function classify(
   }
 
   // Rule A: every feed the operator still EXPECTS to run is failing. The
-  // numerator counts a single bad run so a connection whose every expected feed
-  // just failed is not silent until the counters climb.
+  // numerator counts a single bad run for unpinned feeds; device-pinned feeds
+  // require persistence or an independent device/schedule outage signal.
   let reason: UnhealthyReason;
   if (failingExpectedCount === expectedCount) {
     reason = 'all_feeds_failing';
