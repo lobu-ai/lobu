@@ -1340,7 +1340,12 @@ async function handleDelete(
 	}
 	// A deferred force delete must not queue a proposal that cannot be applied.
 	if (force && deleteDecision.outcome === "defer") {
-		const preview = await deleteEntity(entityId, force, env, ctx, { dryRun: true });
+		// Preview the approval replay's scoped grant: `$deleted` escalations are
+		// approvable, while denies and escalations on other fields still refuse.
+		const preview = await deleteEntity(entityId, force, env, ctx, {
+			dryRun: true,
+			approvedFields: [RESERVED_COLUMN_NAMES.softDelete],
+		});
 		if (preview.refused) throw new ToolUserError(preview.message, 400, "VALIDATION");
 	}
 	if (deleteDecision.outcome === "defer") {
