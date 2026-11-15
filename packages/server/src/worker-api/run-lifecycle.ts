@@ -61,7 +61,7 @@ import { notifyBrowserAuthExpired } from "../notifications/triggers";
 import { supersedeActionEvent } from "../tools/admin/approval-events";
 import {
 	type AuthProfileKind,
-	getAuthProfileById,
+	type AuthProfileRow,
 	getBrowserSessionReadiness,
 } from "../utils/auth-profiles";
 import { toSecretRefAuthData } from "../utils/auth-credential-secrets";
@@ -176,7 +176,7 @@ async function readRunCompletionFlags(
  * Failure-paused feeds require an explicit `manage_feeds` update.
  */
 async function reactivateProfileCascade(
-	sql: DbClient,
+	tx: DbClient,
 	authProfileId: number,
 	organizationId: string,
 	profileKind: AuthProfileKind | null,
@@ -198,16 +198,15 @@ async function reactivateProfileCascade(
 	// auth_data row (or vice versa).
 	const isSessionStateProfile =
 		profileKind === "browser_session" || profileKind === "interactive";
-	await sql.begin(async (tx) => {
-		const nextAuthData = isSessionStateProfile
-			? authData.credentials
-			: await toSecretRefAuthData({
-					organizationId,
-					authProfileId,
-					credentials: authData.credentials,
-					db: tx,
-				});
-		await tx`
+	const nextAuthData = isSessionStateProfile
+		? authData.credentials
+		: await toSecretRefAuthData({
+				organizationId,
+				authProfileId,
+				credentials: authData.credentials,
+				db: tx,
+			});
+	await tx`
       UPDATE auth_profiles
       SET auth_data = ${tx.json(nextAuthData)},
           metadata = (${tx.json(authData.metadata)}::jsonb - 'http')
@@ -216,18 +215,18 @@ async function reactivateProfileCascade(
           updated_at = current_timestamp
       WHERE id = ${authProfileId}
     `;
-		await tx`
+	await tx`
       UPDATE connections
       SET status = 'active', updated_at = current_timestamp
       WHERE auth_profile_id = ${authProfileId}
         AND status = 'pending_auth'
         AND deleted_at IS NULL
     `;
-		// A feed the failure policy paused stays paused (#3700): only
-		// `manage_feeds` resumes it. Resumed feeds keep their failure history.
-		// A feed with no cron stays manual (#2021): resuming it must not invent
-		// a run.
-		await tx`
+	// A feed the failure policy paused stays paused (#3700): only
+	// `manage_feeds` resumes it. Resumed feeds keep their failure history.
+	// A feed with no cron stays manual (#2021): resuming it must not invent
+	// a run.
+	await tx`
       UPDATE feeds f
       SET status = 'active',
           next_run_at = CASE WHEN f.schedule IS NULL THEN f.next_run_at
@@ -242,7 +241,148 @@ async function reactivateProfileCascade(
         AND f.status = 'paused'
         AND f.consecutive_failures < ${feedBackoff.pauseThreshold}
     `;
-	});
+}
+
+async function readCompletionAuthProfile(sql: DbClient, organizationId: string, id: number) {
+	const rows = (await sql`
+    SELECT id, profile_kind, auth_data, slug FROM auth_profiles
+    WHERE organization_id = ${organizationId} AND id = ${id}
+    FOR UPDATE
+  `) as Array<Pick<AuthProfileRow, 'id' | 'profile_kind' | 'auth_data' | 'slug'>>;
+	return rows[0] ?? null;
+}
+
+/** Caller owns the run/feed/profile transaction; notifications follow commit. */
+async function persistSyncAuthUpdate(
+	tx: DbClient,
+	req: CompleteRequest,
+	connectionId: number | null,
+): Promise<Parameters<typeof notifyBrowserAuthExpired>[0] | undefined> {
+	// Persist refreshed browser auth data on the auth profile.
+	//
+	// Deliberately NOT gated on dry_run: this is credential liveness, not
+	// ingested data. Session-state connectors (browser cookies, Baileys creds)
+	// rotate their tokens on every real connect — the connector genuinely ran,
+	// so discarding the rotation would leave the profile holding invalidated
+	// credentials and break the next REAL sync. "Persist nothing" means the
+	// workspace's data, never the auth state the run consumed.
+	if (req.status === "success" && req.auth_update && connectionId) {
+		const connectionRows = (await tx`
+        SELECT c.organization_id, c.connector_key, c.auth_profile_id
+        FROM connections c
+        WHERE c.id = ${connectionId}
+        LIMIT 1
+      `) as Array<{
+			organization_id: string;
+			connector_key: string;
+			auth_profile_id: number | null;
+		}>;
+
+		const connection = connectionRows[0];
+		const authProfile =
+			connection?.auth_profile_id != null
+				? await readCompletionAuthProfile(
+						tx,
+						connection.organization_id,
+						connection.auth_profile_id
+					)
+				: null;
+
+		if (authProfile?.profile_kind === "browser_session" &&
+        (authProfile.auth_data?.mode === 'live' || req.auth_update.mode === 'live')) {
+        // Live identity is established only by the gateway's browser probe.
+        // A worker completion can neither replace it nor turn a cookie profile into one.
+        logger.warn({ run_id: req.run_id }, '[completeWorkerJob] ignored worker update to gateway-owned browser identity');
+      } else if (authProfile?.profile_kind === "browser_session") {
+			const nextAuthData = {
+				...(authProfile.auth_data ?? {}),
+				...req.auth_update,
+			};
+			const nextStatus = (
+				await getBrowserSessionReadiness(
+					nextAuthData,
+					connection.connector_key
+				)
+			).usable
+				? "active"
+				: "pending_auth";
+
+			await tx`
+            UPDATE auth_profiles
+            SET auth_data = ${tx.json(nextAuthData)},
+                status = ${nextStatus},
+                updated_at = current_timestamp
+            WHERE id = ${authProfile.id}
+          `;
+
+			// Routine cookie rotations leave active connections alone. Recovery
+			// claims only pending_auth rows, so concurrent completions cannot
+			// overwrite an operator pause after the first recovery commits.
+			if (nextStatus === "active") {
+				const recovered = (await tx`
+              UPDATE connections
+              SET status = 'active', updated_at = current_timestamp
+              WHERE auth_profile_id = ${authProfile.id}
+                AND status = 'pending_auth'
+                AND deleted_at IS NULL
+              RETURNING id
+            `) as Array<{ id: number }>;
+				for (const recoveredConnection of recovered) {
+					await resumeFeedsForRecoveredConnections(tx, {
+						connectionId: recoveredConnection.id,
+					});
+				}
+				return;
+			}
+
+			await tx`
+            UPDATE connections
+            SET status = 'pending_auth', updated_at = current_timestamp
+            WHERE auth_profile_id = ${authProfile.id}
+              AND deleted_at IS NULL
+          `;
+			await pauseFeedsForInactiveConnections(tx, { authProfileId: authProfile.id });
+
+			if (nextStatus === "pending_auth") {
+				return {
+					orgId: connection.organization_id,
+					connectionId,
+					connectorKey: connection.connector_key,
+					authProfileSlug: authProfile.slug,
+				};
+			}
+		} else if (authProfile?.profile_kind === "interactive") {
+			// Interactive profiles (e.g. WhatsApp/Baileys) manage their own session
+			// tokens. Merge the connector's auth_update into auth_data. A sentinel
+			// { creds: null } wipes the profile and forces re-pair.
+			const update = (req.auth_update ?? {}) as Record<string, unknown>;
+			const wiped = update.creds === null;
+			const nextAuthData = wiped
+				? {}
+				: { ...(authProfile.auth_data ?? {}), ...update };
+			const nextStatus = wiped ? "pending_auth" : "active";
+
+			await tx`
+          UPDATE auth_profiles
+          SET auth_data = ${tx.json(nextAuthData)},
+              status = ${nextStatus},
+              updated_at = current_timestamp
+          WHERE id = ${authProfile.id}
+        `;
+
+			if (wiped) {
+				await tx`
+            UPDATE connections
+            SET status = 'pending_auth',
+                updated_at = current_timestamp
+            WHERE auth_profile_id = ${authProfile.id}
+              AND deleted_at IS NULL
+          `;
+				await pauseFeedsForInactiveConnections(tx, { authProfileId: authProfile.id });
+			}
+		}
+	}
+	return undefined;
 }
 
 /**
@@ -1338,7 +1478,7 @@ export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
 		// double-applies (consecutive_failures, items_collected, next_run_at,
 		// auth_data). The failed path also stamps exit diagnostics.
 		//
-		// The terminal transition and the feed's sync bookkeeping (outcome,
+		// The terminal transition, credential rotation and feed bookkeeping (outcome,
 		// failure budget, FINAL checkpoint, next_run_at) commit together: apart,
 		// a crash between them left a completed run whose feed never advanced or
 		// reset, or a failed run that never counted against its feed. The run row
@@ -1474,7 +1614,8 @@ export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
 	      `;
 				}
 			}
-			return { runRows, recordedFailure };
+			const expiredBrowserAuth = await persistSyncAuthUpdate(tx, req, runRows[0]?.connection_id ?? null);
+			return { runRows, recordedFailure, expiredBrowserAuth };
 		});
 
 		if (finalized === null) {
@@ -1495,131 +1636,8 @@ export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
 		logRunFailure(runRows[0]);
 		await announceFeedAutoPause(finalized.recordedFailure);
 
-		// Persist refreshed browser auth data on the auth profile.
-		//
-		// Deliberately NOT gated on dry_run: this is credential liveness, not
-		// ingested data. Session-state connectors (browser cookies, Baileys creds)
-		// rotate their tokens on every real connect — the connector genuinely ran,
-		// so discarding the rotation would leave the profile holding invalidated
-		// credentials and break the next REAL sync. "Persist nothing" means the
-		// workspace's data, never the auth state the run consumed.
-		const connectionId = runRows[0]?.connection_id;
-		if (req.status === "success" && req.auth_update && connectionId) {
-			const connectionRows = (await sql`
-        SELECT c.organization_id, c.connector_key, c.auth_profile_id
-        FROM connections c
-        WHERE c.id = ${connectionId}
-        LIMIT 1
-      `) as Array<{
-				organization_id: string;
-				connector_key: string;
-				auth_profile_id: number | null;
-			}>;
-
-			const connection = connectionRows[0];
-			const authProfile =
-				connection?.auth_profile_id != null
-					? await getAuthProfileById(
-							connection.organization_id,
-							connection.auth_profile_id
-						)
-					: null;
-
-			if (authProfile?.profile_kind === "browser_session" &&
-        (authProfile.auth_data?.mode === 'live' || req.auth_update.mode === 'live')) {
-        // Live identity is established only by the gateway's browser probe.
-        // A worker completion can neither replace it nor turn a cookie profile into one.
-        logger.warn({ run_id: req.run_id }, '[completeWorkerJob] ignored worker update to gateway-owned browser identity');
-      } else if (authProfile?.profile_kind === "browser_session") {
-				const nextAuthData = {
-					...(authProfile.auth_data ?? {}),
-					...req.auth_update,
-				};
-				const nextStatus = (
-					await getBrowserSessionReadiness(
-						nextAuthData,
-						connection.connector_key
-					)
-				).usable
-					? "active"
-					: "pending_auth";
-
-				await sql.begin(async (tx) => {
-					await tx`
-            UPDATE auth_profiles
-            SET auth_data = ${tx.json(nextAuthData)},
-                status = ${nextStatus},
-                updated_at = current_timestamp
-            WHERE id = ${authProfile.id}
-          `;
-
-					// Routine cookie rotations leave active connections alone. Recovery
-					// claims only pending_auth rows, so concurrent completions cannot
-					// overwrite an operator pause after the first recovery commits.
-					if (nextStatus === "active") {
-						const recovered = (await tx`
-              UPDATE connections
-              SET status = 'active', updated_at = current_timestamp
-              WHERE auth_profile_id = ${authProfile.id}
-                AND status = 'pending_auth'
-                AND deleted_at IS NULL
-              RETURNING id
-            `) as Array<{ id: number }>;
-						for (const recoveredConnection of recovered) {
-							await resumeFeedsForRecoveredConnections(tx, {
-								connectionId: recoveredConnection.id,
-							});
-						}
-						return;
-					}
-
-					await tx`
-            UPDATE connections
-            SET status = 'pending_auth', updated_at = current_timestamp
-            WHERE auth_profile_id = ${authProfile.id}
-              AND deleted_at IS NULL
-          `;
-					await pauseFeedsForInactiveConnections(tx, { authProfileId: authProfile.id });
-				});
-
-				if (nextStatus === "pending_auth") {
-					notifyBrowserAuthExpired({
-						orgId: connection.organization_id,
-						connectionId,
-						connectorKey: connection.connector_key,
-						authProfileSlug: authProfile.slug,
-					}).catch(() => {});
-				}
-			} else if (authProfile?.profile_kind === "interactive") {
-				// Interactive profiles (e.g. WhatsApp/Baileys) manage their own session
-				// tokens. Merge the connector's auth_update into auth_data. A sentinel
-				// { creds: null } wipes the profile and forces re-pair.
-				const update = (req.auth_update ?? {}) as Record<string, unknown>;
-				const wiped = update.creds === null;
-				const nextAuthData = wiped
-					? {}
-					: { ...(authProfile.auth_data ?? {}), ...update };
-				const nextStatus = wiped ? "pending_auth" : "active";
-
-				await sql`
-          UPDATE auth_profiles
-          SET auth_data = ${sql.json(nextAuthData)},
-              status = ${nextStatus},
-              updated_at = current_timestamp
-          WHERE id = ${authProfile.id}
-        `;
-
-				if (wiped) {
-					await sql`
-            UPDATE connections
-            SET status = 'pending_auth',
-                updated_at = current_timestamp
-            WHERE auth_profile_id = ${authProfile.id}
-              AND deleted_at IS NULL
-          `;
-					await pauseFeedsForInactiveConnections(sql, { authProfileId: authProfile.id });
-				}
-			}
+		if (finalized.expiredBrowserAuth) {
+			notifyBrowserAuthExpired(finalized.expiredBrowserAuth).catch(() => {});
 		}
 
 		if (req.status === "success") logger.info({ run_id: req.run_id, status: req.status }, "Run completed");
@@ -2490,30 +2508,73 @@ export async function completeAuthRun(c: Context<{ Bindings: Env }>) {
 		// Atomic terminal transition with the shared F2 guard (see finalizeRun), so
 		// a late/reaped completion is a no-op rather than resurrecting the run and
 		// double-applying the auth_profile/connection/feed side effects below. The
-		// failed path also clears auth_signal and stamps exit diagnostics.
-		const runRows = (await finalizeRun(sql, {
-			runId: req.run_id,
-			workerId: req.worker_id,
-			status: req.status === "failed" ? "failed" : "completed",
-			extraSet:
-				req.status === "failed"
-					? sql`,
-          error_message = ${req.error_message ?? null},
-          auth_signal = NULL,
-          output_tail = ${req.output_tail ?? null},
-          exit_code = ${req.exit_code ?? null},
-          exit_signal = ${req.exit_signal ?? null},
-          exit_reason = ${req.exit_reason ?? null}`
-					: sql`,
-          error_message = ${req.error_message ?? null},
-          auth_signal = NULL`,
-			returning: sql`id, status, run_type, connector_key, exit_reason, exit_code, exit_signal, auth_profile_id, organization_id`,
-		})) as unknown as Array<Parameters<typeof logRunFailure>[0] & {
-			auth_profile_id: number | null;
-			organization_id: string;
-		}>;
+		// failed path also clears auth_signal and stamps exit diagnostics. Profile,
+		// secret and connection/feed writes commit with the terminal transition.
+		const runRows = await sql.begin(async (tx) => {
+			const updatedRuns = (await finalizeRun(tx, {
+				runId: req.run_id,
+				workerId: req.worker_id,
+				status: req.status === "failed" ? "failed" : "completed",
+				extraSet:
+					req.status === "failed"
+						? tx`,
+	          error_message = ${req.error_message ?? null},
+	          auth_signal = NULL,
+	          output_tail = ${req.output_tail ?? null},
+	          exit_code = ${req.exit_code ?? null},
+	          exit_signal = ${req.exit_signal ?? null},
+	          exit_reason = ${req.exit_reason ?? null}`
+						: tx`,
+	          error_message = ${req.error_message ?? null},
+	          auth_signal = NULL`,
+				returning: tx`id, status, run_type, connector_key, exit_reason, exit_code, exit_signal, auth_profile_id, organization_id`,
+			})) as unknown as Array<Parameters<typeof logRunFailure>[0] & {
+				auth_profile_id: number | null;
+				organization_id: string;
+			}>;
 
-		if (runRows.length === 0) {
+			if (updatedRuns.length === 0) return null;
+
+			const runRows = updatedRuns;
+			const authProfileId = runRows[0]?.auth_profile_id ?? null;
+			const organizationId = runRows[0]?.organization_id;
+
+			if (
+				req.status === "success" &&
+				authProfileId &&
+				req.credentials &&
+				organizationId
+			) {
+				// The profile kind decides whether the returned credentials are
+				// secret-ref'd (bearer kinds) or written through as session state
+				// (browser_session / interactive) — see reactivateProfileCascade.
+				const authProfile = await readCompletionAuthProfile(
+					tx,
+					organizationId,
+					authProfileId
+				);
+				await reactivateProfileCascade(
+					tx,
+					authProfileId,
+					organizationId,
+					authProfile?.profile_kind ?? null,
+					{
+						credentials: req.credentials,
+						metadata: req.metadata ?? {},
+					}
+				);
+			} else if (req.status === "failed" && authProfileId) {
+				await tx`
+	        UPDATE auth_profiles
+	        SET status = 'error',
+	            updated_at = current_timestamp
+	        WHERE id = ${authProfileId}
+	      `;
+			}
+			return updatedRuns;
+		});
+
+		if (runRows === null) {
 			// Already finalized (timeout race) or not the claimant. Skip all
 			// auth_profile/connection/feed side effects and ack idempotently.
 			logger.info(
@@ -2528,43 +2589,8 @@ export async function completeAuthRun(c: Context<{ Bindings: Env }>) {
 		}
 
 		logRunFailure(runRows[0]);
-		const authProfileId = runRows[0]?.auth_profile_id ?? null;
-		const organizationId = runRows[0]?.organization_id;
-
-		if (
-			req.status === "success" &&
-			authProfileId &&
-			req.credentials &&
-			organizationId
-		) {
-			// The profile kind decides whether the returned credentials are
-			// secret-ref'd (bearer kinds) or written through as session state
-			// (browser_session / interactive) — see reactivateProfileCascade.
-			const authProfile = await getAuthProfileById(
-				organizationId,
-				authProfileId
-			);
-			await reactivateProfileCascade(
-				sql,
-				authProfileId,
-				organizationId,
-				authProfile?.profile_kind ?? null,
-				{
-					credentials: req.credentials,
-					metadata: req.metadata ?? {},
-				}
-			);
-
-			if (organizationId) {
-				emit(organizationId, { keys: ["connections", "auth-profiles"] });
-			}
-		} else if (req.status === "failed" && authProfileId) {
-			await sql`
-        UPDATE auth_profiles
-        SET status = 'error',
-            updated_at = current_timestamp
-        WHERE id = ${authProfileId}
-      `;
+		if (req.status === "success" && req.credentials && runRows[0]?.auth_profile_id) {
+			emit(runRows[0].organization_id, { keys: ["connections", "auth-profiles"] });
 		}
 
 		if (req.status === "success") logger.info(

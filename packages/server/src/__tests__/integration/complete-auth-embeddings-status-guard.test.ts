@@ -152,6 +152,37 @@ describe('completeAuthRun status guard (late-completion-after-timeout)', () => {
     await cleanupTestDatabase();
   });
 
+  it.each(['success', 'failed'])('rolls back %s terminalization when auth persistence fails, then accepts a retry', async (status) => {
+    const org = await createTestOrganization();
+    const profileId = await insertPendingAuthProfile(org.id);
+    const runId = await insertRunningAuthRun(org.id, profileId);
+    const sql = getTestDb();
+    const body = { run_id: runId, worker_id: WORKER_ID, status,
+      credentials: { access_token: 'synthetic-rotation' } };
+    await sql`ALTER TABLE auth_profiles ADD CONSTRAINT synthetic_reject_auth_rotation
+      CHECK (status = 'pending_auth') NOT VALID`;
+    try {
+      await expect(completeAuthRun(mockWorkerCtx(body).ctx)).rejects.toThrow();
+      const [run] = await sql`SELECT status, completed_at FROM runs WHERE id = ${runId}`;
+      expect(run).toEqual({ status: 'running', completed_at: null });
+      const [profile] = await sql`SELECT status, auth_data FROM auth_profiles WHERE id = ${profileId}`;
+      expect(profile).toEqual({ status: 'pending_auth', auth_data: {} });
+      const [secrets] = await sql`SELECT count(*)::int AS count FROM agent_secrets WHERE organization_id = ${org.id}`;
+      expect(secrets.count).toBe(0);
+    } finally {
+      await sql`ALTER TABLE auth_profiles DROP CONSTRAINT synthetic_reject_auth_rotation`;
+    }
+    const retry = mockWorkerCtx(body);
+    await completeAuthRun(retry.ctx);
+    expect(retry.result().body).toEqual({ success: true });
+    const [run] = await sql`SELECT status FROM runs WHERE id = ${runId}`;
+    expect(run.status).toBe(status === 'success' ? 'completed' : 'failed');
+    const [profile] = await sql`SELECT status, auth_data FROM auth_profiles WHERE id = ${profileId}`;
+    expect(profile.status).toBe(status === 'success' ? 'active' : 'error');
+    if (status === 'success') expect(parseSecretRef(profile.auth_data.access_token)).toBeTruthy();
+    else expect(profile.auth_data).toEqual({});
+  });
+
   it('does NOT resurrect a reaped auth run or re-activate the auth profile on late success', async () => {
     const org = await createTestOrganization();
     const profileId = await insertPendingAuthProfile(org.id);
