@@ -490,6 +490,27 @@ describe("approval-run transition atomicity", () => {
 		expect(card?.interaction_status).toBe("approved");
 	});
 
+	it.each(['approve', 'reject'] as const)('malformed builder %s leaves its run and card pending and recoverable', async (action) => {
+		const sql = getTestDb();
+		const runId = await seedAgentAskRun(orgId, userId);
+		await sql`UPDATE runs SET action_input = '{}'::jsonb WHERE id = ${runId}`;
+		const result = await manageOperations({ action, run_id: runId }, {} as Env, humanCtx)
+			.catch((error: Error) => ({ error: error.message }));
+		expect(result.error).toBeTruthy();
+		const [run] = await sql`SELECT approval_status, status, claimed_by, claimed_at, completed_at, action_output
+			FROM runs WHERE id = ${runId} AND organization_id = ${orgId}`;
+		expect(run).toEqual({ approval_status: 'pending', status: 'pending', claimed_by: null,
+			claimed_at: null, completed_at: null, action_output: null });
+		expect((await currentApprovalCard(runId, orgId))?.interaction_status).toBe('pending');
+		await sql`UPDATE runs SET action_input = ${sql.json({ question: 'Synthetic recovery?', input_schema: { type: 'object' } })}
+			WHERE id = ${runId}`;
+		const retry = await manageOperations(action === 'approve'
+			? { action, run_id: runId, input: { decision: 'synthetic' } }
+			: { action, run_id: runId }, {} as Env, humanCtx);
+		expect(retry.error).toBeUndefined();
+		expect((await currentApprovalCard(runId, orgId))?.interaction_status).toBe(action === 'approve' ? 'completed' : 'rejected');
+	});
+
 	it("builder completion card failure does NOT convert a successful apply into a business failure", async () => {
 		const sql = getTestDb();
 		const runId = await seedAgentAskRun(orgId, userId);
