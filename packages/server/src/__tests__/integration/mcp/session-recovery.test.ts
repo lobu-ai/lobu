@@ -23,6 +23,7 @@ import {
   createTestAccessToken,
   createTestOAuthClient,
   createTestOrganization,
+  createTestPAT,
   createTestUser,
   seedSystemEntityTypes,
 } from '../../setup/test-fixtures';
@@ -49,8 +50,8 @@ describe('MCP session recovery', () => {
   });
 
   /** Initialize a session and return its id (does the notifications/initialized handshake). */
-  async function initSession(opts: { token?: string; orgSlug: string }): Promise<string> {
-    const path = `/mcp/${opts.orgSlug}`;
+  async function initSession(opts: { token?: string; orgSlug?: string }): Promise<string> {
+    const path = opts.orgSlug ? `/mcp/${opts.orgSlug}` : '/mcp';
     const res = await post(path, {
       body: {
         jsonrpc: '2.0',
@@ -80,8 +81,8 @@ describe('MCP session recovery', () => {
     await getTestDb()`DELETE FROM mcp_sessions WHERE session_id = ${sessionId}`;
   }
 
-  function toolsList(sessionId: string, opts: { token?: string; orgSlug: string }) {
-    return post(`/mcp/${opts.orgSlug}`, {
+  function toolsList(sessionId: string, opts: { token?: string; orgSlug?: string }) {
+    return post(opts.orgSlug ? `/mcp/${opts.orgSlug}` : '/mcp', {
       body: { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} },
       headers: { 'mcp-session-id': sessionId, 'X-MCP-Format': 'json' },
       token: opts.token,
@@ -92,6 +93,22 @@ describe('MCP session recovery', () => {
     const rows = await getTestDb()`SELECT 1 FROM mcp_sessions WHERE session_id = ${sessionId}`;
     return rows.length > 0;
   }
+
+  it('requires fresh PAT authority instead of treating a transport session id as a credential', async () => {
+    const { token } = await createTestPAT(user.id, org.id);
+    const sessionId = await initSession({ token });
+    const response = await post('/mcp', {
+      headers: { 'mcp-session-id': sessionId },
+      body: {
+        jsonrpc: '2.0', id: 1, method: 'tools/call',
+        params: { name: 'query_sql', arguments: { sql: 'SELECT 1 AS missing_pat_probe' } },
+      },
+    });
+
+    expect(response.status).toBe(401);
+    expect(await sessionRowExists(sessionId)).toBe(true);
+    expect((await toolsList(sessionId, { token })).status).toBe(200);
+  });
 
   it('recovers from the persisted row after only the in-memory transport is gone (replica hop)', async () => {
     const { token } = await createTestAccessToken(user.id, org.id, client.client_id);

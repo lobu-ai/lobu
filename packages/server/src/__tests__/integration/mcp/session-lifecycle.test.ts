@@ -419,20 +419,20 @@ describe('MCP active transport lifetime', () => {
     const ctrl = new AbortController();
     if (ending === 'pre-aborted HTTP') ctrl.abort();
     const pending = app.fetch(request('POST', ctrl.signal, { jsonrpc: '2.0', id: 2, method: 'ping' }), env);
-    const refresh = vi.spyOn(McpSessionStore.prototype, 'refreshActivity');
     try {
       await started.promise;
       if (ending === 'deleted shared row') {
         await store.deleteSession(sessionId);
         await vi.advanceTimersByTimeAsync(15_000);
         await vi.waitFor(() => { expect(vi.getTimerCount()).toBe(0); });
-        expect(refresh).toHaveBeenCalledTimes(1);
         expect(await store.getSession(sessionId)).toBeNull();
-        refresh.mockClear();
+      } else {
+        await ageRow();
       }
+      const before = await store.getSession(sessionId);
       expect(vi.getTimerCount()).toBe(0);
       await vi.advanceTimersByTimeAsync(45_000);
-      expect(refresh).not.toHaveBeenCalled();
+      expect(await store.getSession(sessionId)).toEqual(before);
     } finally {
       release.resolve();
       expect((await pending).status).toBe(200);
@@ -514,10 +514,8 @@ describe('MCP active transport lifetime', () => {
         await vi.waitFor(() => { expect(returned).toBe(true); });
         expect(ctrl.signal.aborted).toBe(false);
         expect(settled).toBe(false); // SDK suppresses the cancelled JSON response.
-        const refresh = vi.spyOn(McpSessionStore.prototype, 'refreshActivity');
         if (ending !== 'DELETE') await ageRow();
         await vi.advanceTimersByTimeAsync(45_000);
-        expect(refresh).not.toHaveBeenCalled();
         await store.deleteExpiredSessions();
         expect(await store.getSession(sessionId)).toBeNull();
       } finally {
