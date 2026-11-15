@@ -13,7 +13,7 @@ import { MEMBER_ENTITY_TYPE_SLUG } from '../tools/constants';
 import type { EntityIdentity } from '@lobu/core/contracts/tools/manage-entity';
 import { attachEntityIdentities, identityMemberExistsSql, identityMemberIdsSql, identityRootSql } from './entity-identity';
 import { type EntityReadRestrictions, entityReadPolicySql, entityReadRestrictions, filterEntityReadRows } from '../authz/entity-read-policy';
-import type { EntityMetrics } from "@lobu/connector-sdk";
+import { ACL_RESOURCE_TYPE_SLUG, type EntityMetrics } from "@lobu/connector-sdk";
 import { classifyToolError, getErrorMessage, slugify } from "@lobu/core";
 import { VIEW_PATH_MARKER } from "@lobu/core/contracts/tools/view-path";
 import type { AttributeFilter } from "@lobu/core/contracts/tools/collection-selection";
@@ -1817,12 +1817,31 @@ export interface ForceDeleteTreeReport {
   events_detached: number;
 }
 
+async function requireForceDeletableTree(sql: DbClient, entityIds: number[]): Promise<void> {
+  const resources = await sql`
+    SELECT e.id FROM entities e
+    JOIN entity_types et ON et.id = e.entity_type_id AND et.organization_id = e.organization_id
+    WHERE e.id = ANY(${pgBigintArray(entityIds)}::bigint[])
+      AND et.slug = ${ACL_RESOURCE_TYPE_SLUG}
+    LIMIT 1
+  `;
+  if (resources.length > 0) {
+    throw new ToolUserError(
+      'Cannot force-delete access resources or a tree containing them: removing their event links would remove visibility restrictions. Retire access resources without force instead.',
+      400,
+      'VALIDATION',
+    );
+  }
+}
+
 /**
  * Delete entity
  * Soft delete by default (sets deleted_at), hard delete with force=true.
  * A hard delete removes the tree + its relationships, deletes/detaches
  * dependent automations and feeds, and detaches (never deletes) event rows that
  * reference the tree. `dryRun` returns the dependency report without mutating.
+ * Trees containing access resources must be retired without force so their
+ * historical event restrictions survive.
  * Requires write access (entity must belong to user's organization)
  */
 export async function deleteEntity(
@@ -1928,6 +1947,7 @@ export async function deleteEntity(
   if (force) {
     const entityTreeIds = await loadEntityTreeIds(sql, entityId);
     const entityTreeIdsLiteral = pgBigintArray(entityTreeIds);
+    await requireForceDeletableTree(sql, entityTreeIds);
 
     // Preflight dependency report: what this delete removes vs. detaches.
     // An automation/feed whose entities all live inside the tree is deleted with
@@ -2025,6 +2045,8 @@ export async function deleteEntity(
         ORDER BY id
         FOR UPDATE
       `;
+      // Recheck under the same locks as deletion; the preflight is advisory.
+      await requireForceDeletableTree(tx, entityTreeIds);
       await validateEntityRowPatchGrantingApprovedFields({
         tx,
         ids: entityTreeIds,

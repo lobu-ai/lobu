@@ -14,10 +14,11 @@
  *      An unattributed row on a graphed connection stays fail-closed — a
  *      missing stamp is not proof of workspace visibility;
  *   3. it links to at least one access resource AND EVERY linked resource is
- *      satisfied by the caller: a live `member_of` edge from the caller's
+ *      satisfied by the caller: a live resource and `member_of` edge from the caller's
  *      `$member` entity to the resource whose claim is `manual`, or is owned
  *      by a connection whose ACL graph is currently enforced (`full` +
- *      `fresh` + in-window).
+ *      `fresh` + in-window). Retired resources remain requirements but cannot
+ *      satisfy membership, so retirement never publishes their content.
  *
  * Multiple linked resources mean ALL are required (AND). A derived summary of
  * two repos is readable only by a member of both — membership in one is not
@@ -102,19 +103,19 @@ export function compileResourceVisibility(
   // them across candidates. The chosen plan still depends on how each set
   // is consumed and on its estimated size.
 
-  // The org's access resources: live `$resource` entities. Scoped so the
+  // The org's access resources, including retired `$resource` entities. Scoped so the
   // coarse person→`company` (org) `member_of` edge never counts — org
-  // membership must NOT grant resource-level read. A missing, deleted, or
-  // non-resource link in `entity_ids` is not in this set, so it contributes no
-  // requirement.
+  // membership must NOT grant resource-level read. A soft-deleted resource
+  // still marks a requirement on existing events; dropping it from this set
+  // would turn connectionless derived content into ordinary workspace data.
+  // Missing and non-resource links still contribute no requirement.
   const resourceIds = `SELECT re.id
       FROM public.entities re
       JOIN public.entity_types ret
         ON ret.id = re.entity_type_id
         AND ret.organization_id = re.organization_id
         AND ret.slug = ${RESOURCE_TYPE_SQL}
-      WHERE re.organization_id = ${orgParam}
-        AND re.deleted_at IS NULL`;
+      WHERE re.organization_id = ${orgParam}`;
 
   // The resources the caller satisfies: a live `member_of` edge from the
   // caller's `$member` carries `manual` ownership, or ownership by a
@@ -136,6 +137,10 @@ export function compileResourceVisibility(
           ON rt.id = rr.relationship_type_id
           AND rt.organization_id = rr.organization_id
           AND rt.slug = 'member_of'
+        JOIN public.entities resource
+          ON resource.id = rr.to_entity_id
+          AND resource.organization_id = rr.organization_id
+          AND resource.deleted_at IS NULL
         WHERE rr.organization_id = ${orgParam}
           AND rr.deleted_at IS NULL
           AND rr.from_entity_id = ${memberSubquery}

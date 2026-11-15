@@ -16,6 +16,9 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import { pgBigintArray } from '../../../db/client';
 import type { DbClient } from '../../../db/client';
+import { querySql } from '../../../tools/admin/query_sql';
+import type { ToolContext } from '../../../tools/registry';
+import { search } from '../../../tools/search';
 import { ensureRelationshipType, upsertEdges } from '../../../utils/edge-writes';
 import { buildConnectionVisibilityClause } from '../../../utils/content-search/visibility';
 import {
@@ -23,6 +26,7 @@ import {
   RELATIONSHIP_CLAIMS_METADATA_KEY,
 } from '../../../utils/relationship-claims';
 import { withAclEdgeWrite } from '../../../utils/relationship-validation';
+import { initWorkspaceProvider } from '../../../workspace';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import {
   addUserToOrganization,
@@ -50,6 +54,9 @@ let readerId = '';
 let outsiderId = '';
 let withheldEventId = 0;
 let memberOfTypeId = 0;
+let grantedResourceId = 0;
+let grantedEventId = 0;
+let plainEventId = 0;
 /** Event id → whether an org member WITH the reader's grants may see it. */
 const expectedForReader = new Map<number, boolean>();
 /** Event id → whether an org member with NO grants may see it. */
@@ -63,7 +70,7 @@ async function insertEvent(opts: {
   const [row] = await sql.unsafe<{ id: string }[]>(
     `INSERT INTO events (organization_id, origin_id, title, payload_text, semantic_type,
        interaction_type, entity_ids, occurred_at, created_at)
-     VALUES ($1, gen_random_uuid()::text, 'gate-probe', 'gate-probe', 'content', $2,
+     VALUES ($1, gen_random_uuid()::text, 'gate-probe', 'gate-probe ' || gen_random_uuid()::text, 'content', $2,
        ${opts.entityIds === null ? 'NULL' : `$3::bigint[]`}, now(), now())
      RETURNING id`,
     (opts.entityIds === null
@@ -89,6 +96,7 @@ describe('resource visibility gate', () => {
   beforeAll(async () => {
     await cleanupTestDatabase();
     await seedSystemEntityTypes();
+    await initWorkspaceProvider();
     const sql = getTestDb();
     const org = await createTestOrganization({ name: 'Gate plan shape' });
     orgId = org.id;
@@ -110,6 +118,7 @@ describe('resource visibility gate', () => {
       VALUES (${org.id}, ${readerMember.id}, 'auth_user_id', ${reader.id}, 'auth:signup')
     `;
     const granted = await createTestEntity({ name: 'granted-repo', entity_type: '$resource', organization_id: org.id });
+    grantedResourceId = granted.id;
     const withheld = await createTestEntity({ name: 'withheld-repo', entity_type: '$resource', organization_id: org.id });
     const plain = await createTestEntity({ name: 'plain-company', organization_id: org.id });
     memberOfTypeId = await ensureRelationshipType({
@@ -147,6 +156,10 @@ describe('resource visibility gate', () => {
     ];
     for (const [entityIds, interactionType, reader_, outsider_] of cases) {
       const id = await insertEvent({ entityIds, interactionType });
+      if (interactionType === 'none' && entityIds?.length === 1) {
+        if (entityIds[0] === granted.id) grantedEventId = id;
+        if (entityIds[0] === plain.id) plainEventId = id;
+      }
       if (interactionType === 'none' && entityIds?.length === 1 && entityIds[0] === withheld.id) {
         withheldEventId = id;
       }
@@ -179,6 +192,49 @@ describe('resource visibility gate', () => {
       expect(visible).toEqual(want);
     }
   });
+
+  it.each(['recall', 'exact read', 'SQL'] as const)(
+    'keeps retired resources restricted through %s and restores only their audience',
+    async (readPath) => {
+      const sql = getTestDb();
+      const read = async (userId: string) => {
+        const ctx = { organizationId: orgId, userId, memberRole: 'member',
+          tokenType: 'oauth', isAuthenticated: true, scopedToOrg: true,
+          allowCrossOrg: false, scopes: ['mcp:read'] } as ToolContext;
+        if (readPath === 'SQL') {
+          const result = await querySql({ sql: `SELECT id FROM events WHERE id IN (${grantedEventId}, ${plainEventId})` }, {} as never, ctx);
+          return result.rows.map((row) => Number(row.id));
+        }
+        if (readPath === 'exact read') {
+          const ids: number[] = [];
+          for (const id of [grantedEventId, plainEventId]) {
+            const result = await search({ query: `memory ${id}`, include_content: true }, {} as never, ctx);
+            ids.push(...(result.content ?? []).map((row) => row.id));
+          }
+          return ids;
+        }
+        const result = await search({ query: 'gate-probe', include_content: true,
+          include_public_catalogs: false, content_limit: 50 }, {} as never, ctx);
+        return (result.content ?? []).map((row) => row.id);
+      };
+
+      expect(await read(readerId)).toEqual(expect.arrayContaining([grantedEventId, plainEventId]));
+      expect(await read(outsiderId)).not.toContain(grantedEventId);
+      await sql`UPDATE entities SET deleted_at = NOW() WHERE id = ${grantedResourceId}`;
+      try {
+        // Retirement is not publication, even if a prior membership edge remains.
+        for (const userId of [readerId, outsiderId]) {
+          const ids = await read(userId);
+          expect(ids).not.toContain(grantedEventId);
+          expect(ids).toContain(plainEventId);
+        }
+      } finally {
+        await sql`UPDATE entities SET deleted_at = NULL WHERE id = ${grantedResourceId}`;
+      }
+      expect(await read(readerId)).toContain(grantedEventId);
+      expect(await read(outsiderId)).not.toContain(grantedEventId);
+    },
+  );
 
   it('fails closed for a reader whose only grant is a federated member_of edge', async () => {
     const sql = getTestDb();

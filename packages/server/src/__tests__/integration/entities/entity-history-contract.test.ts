@@ -9,7 +9,7 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import { insertConnectionlessAuditEvent } from '../../../utils/insert-event';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
-import { createTestEvent } from '../../setup/test-fixtures';
+import { createTestEntity, createTestEvent } from '../../setup/test-fixtures';
 import { TestWorkspace } from '../../setup/test-mcp-client';
 
 async function waitForChangeEvent(entityId: number) {
@@ -252,6 +252,30 @@ describe('entity history contracts', () => {
     expect(eventRows).toHaveLength(1);
     expect(eventRows[0].still_linked).toBe(false);
   });
+
+  for (const nested of [false, true]) {
+    for (const dryRun of [false, true]) {
+      it(`refuses ${dryRun ? 'previewing' : 'applying'} force deletion of ${nested ? 'a tree containing' : 'a root'} access resource`, async () => {
+        const root = nested ? await workspace.owner.entities.create({ entity_type: 'brand', name: `Protected tree ${dryRun}` }) : null;
+        const resource = await createTestEntity({ entity_type: '$resource', name: `Protected audience ${nested} ${dryRun}`,
+          organization_id: workspace.org.id, ...(root ? { parent_id: root.entity.id } : {}) });
+        const event = await createTestEvent({ entity_id: resource.id,
+          organization_id: workspace.org.id, content: 'Confidential resource history' });
+
+        const [attempt] = await Promise.allSettled([workspace.owner.entities.delete({
+          entity_id: root?.entity.id ?? resource.id,
+          force_delete_tree: true, dry_run: dryRun,
+        })]);
+        const sql = getTestDb();
+        const resources = await sql`SELECT id FROM entities WHERE id = ${resource.id}`;
+        const events = await sql`SELECT (${resource.id} = ANY(entity_ids)) AS still_linked
+          FROM events WHERE id = ${event.id}`;
+        expect(resources).toHaveLength(1);
+        expect(events).toEqual([{ still_linked: true }]);
+        expect(attempt.status).toBe('rejected');
+      });
+    }
+  }
 
   it('force-deletes fresh entities whose own lifecycle produced platform change events (#2049)', async () => {
     await workspace.owner.entity_schema.createRelType({
