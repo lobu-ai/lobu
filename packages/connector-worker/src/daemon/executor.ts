@@ -593,22 +593,14 @@ async function executeActionRun(
         mode: 'action',
         browser: validatedBrowserGrant(job.browser_grant),
         httpAuth: job.http_auth,
-        // NOTE: unlike the gateway's inline action path (manage_operations
-        // `executeLocalActionInline`, which merges the connection's own config
-        // so an action can read e.g. a `restaurants_url`), this worker-fleet
-        // action path does not yet receive per-connection config (the poll
-        // response doesn't carry it). If a future connector needs config on the
-        // fleet path, plumb the connection config into the action poll response
-        // and merge it here.
-        //
         // Chrome: onChromeDispatch is wired the same as sync jobs so
         // prepare_comment / other extension-driving actions can stage UI via
         // the paired Owletto extension (parent_run_id = this action run).
         actionKey: action_key,
         actionInput: (action_input ?? {}) as Record<string, unknown>,
-        config: mergeEnv(env, job.connection_credentials, null),
+        config: mergeEnv(env, job.connection_credentials, job.config),
         env,
-        sessionState: null,
+        sessionState: (job.session_state ?? null) as Record<string, unknown> | null,
         credentials: credentials ?? null,
       },
       hooks: {
