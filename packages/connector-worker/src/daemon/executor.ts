@@ -287,8 +287,11 @@ export async function executeRun(
         return await executeEmbedBackfillRun(client, job, env, cfg);
       case 'auth':
         return await executeAuthRun(client, job, env, cfg);
-      default:
+      case 'sync':
+      case undefined:
         return await executeSyncRun(client, job, env, cfg);
+      default:
+        throw new Error('Unsupported worker run type');
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
