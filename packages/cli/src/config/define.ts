@@ -94,6 +94,8 @@ export type {
  * `entity_types.event_kinds` shape and a connector feed's `eventKinds`.
  */
 export interface EntityEventKind {
+  /** Publish this $member kind as a send-only notification inbox. Omitted means closed. */
+  inbox?: { accept_from: "authenticated_workspaces"; recipients: "admins" };
   /** Human description of the kind. */
   description?: string;
   /** JSON Schema for the event's metadata. Also the source of the default render template. */

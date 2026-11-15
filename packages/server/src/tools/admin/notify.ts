@@ -31,6 +31,8 @@ import type { ToolContext } from '../registry';
 import { action, defineActionTool } from './action-tool';
 import { withTurnIdempotencyKey } from '../turn-write-idempotency';
 
+import { listNotificationInboxes, submitNotificationInbox } from '../../notifications/inbox';
+
 // ============================================
 // Schema
 // ============================================
@@ -123,7 +125,23 @@ const SendAction = Type.Object({
 // Handler
 // ============================================
 
+const ListInboxesAction = Type.Object({
+  action: Type.Literal('list_inboxes'),
+  organization: Type.String({ minLength: 1, maxLength: 100 }),
+}, { additionalProperties: false });
+const SubmitAction = Type.Object({
+  action: Type.Literal('submit'),
+  organization: Type.String({ minLength: 1, maxLength: 100 }),
+  inbox: Type.String({ minLength: 1, maxLength: 100 }),
+  title: Type.String({ minLength: 1, maxLength: 200 }),
+  body: Type.Optional(Type.String({ maxLength: 1000 })),
+  data: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+  idempotency_key: Type.String({ minLength: 1, maxLength: 300 }),
+}, { additionalProperties: false });
+
 const notifyTool = defineActionTool('notify', {
+  list_inboxes: action(ListInboxesAction, (args, ctx) => listNotificationInboxes(args.organization, ctx)),
+  submit: action(SubmitAction, (args, ctx) => submitNotificationInbox(args, ctx)),
   // A turn repeating the same send for the same input message delivers once.
   send: action(SendAction, async (args, ctx) =>
     handleSend(await withTurnIdempotencyKey(ctx.agentTurn, 'notify.send', args), ctx)
@@ -131,7 +149,12 @@ const notifyTool = defineActionTool('notify', {
 });
 
 export const NotifySchema = notifyTool.schema;
-export const notify = notifyTool.run;
+// Preserve action-specific return types for existing internal notification callers.
+export const notify = notifyTool.run as {
+  (args: Static<typeof SendAction>, env: import('../../index').Env, ctx: ToolContext): ReturnType<typeof handleSend>;
+  (args: Static<typeof ListInboxesAction>, env: import('../../index').Env, ctx: ToolContext): ReturnType<typeof listNotificationInboxes>;
+  (args: Static<typeof SubmitAction>, env: import('../../index').Env, ctx: ToolContext): ReturnType<typeof submitNotificationInbox>;
+};
 
 async function handleSend(
   args: Static<typeof SendAction>,

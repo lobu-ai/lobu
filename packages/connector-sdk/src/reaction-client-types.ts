@@ -213,6 +213,8 @@ export interface ReactionClient {
      * surfaces its digest to a chat channel.
      */
     send(input: NotificationsSendInput): Promise<NotificationsSendResult>;
+    listInboxes(input: { organization: string }): Promise<{ inboxes: Array<{ key: string; description: string; input_schema: Record<string, unknown> }> }>;
+    submit(input: { organization: string; inbox: string; title: string; body?: string; data?: Record<string, unknown>; idempotency_key: string }): Promise<{ status: 'received'; receipt: string }>;
   };
 
   /**

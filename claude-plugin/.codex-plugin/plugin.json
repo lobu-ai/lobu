@@ -1,6 +1,6 @@
 {
   "name": "lobu",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Shared, permission-aware company context and governed actions through Lobu MCP.",
   "author": {
     "name": "Lobu",

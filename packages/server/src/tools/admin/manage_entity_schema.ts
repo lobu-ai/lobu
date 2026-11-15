@@ -970,6 +970,18 @@ function assertEventKindsAvoidPlatformVocabulary(
   }
 }
 
+/** An inbox is an org-owned $member kind, published only by its administrators. */
+function assertValidNotificationInboxes(eventKinds: Record<string, unknown> | null | undefined, slug: string, ctx: ToolContext): void {
+  if (!eventKinds) return;
+  for (const definition of Object.values(eventKinds)) {
+    if (!definition || typeof definition !== 'object' || !('inbox' in definition)) continue;
+    if (slug !== '$member') throw invalidSchema('Notification inboxes must be declared on $member');
+    if (ctx.memberRole !== 'owner' && ctx.memberRole !== 'admin') {
+      throw new ToolUserError('Only workspace owners or administrators can publish notification inboxes', 403);
+    }
+  }
+}
+
 const TEMPLATE_INTERACTION_NAME = /^[a-z][a-z0-9_-]{0,63}$/;
 
 /**
@@ -1349,6 +1361,7 @@ async function prepareEntityTypeCreate(
   // a derived type are classified ON READ (see etHandleGet), never persisted.
   assertValidMetricsConfig(args.metrics_config);
   assertEventKindsAvoidPlatformVocabulary(args.event_kinds);
+  assertValidNotificationInboxes(args.event_kinds, slug, ctx);
   assertValidEventKindInteractions(args.event_kinds);
   // Compile during validation so malformed rules never become approval cards;
   // apply-time validation repeats the check against the current proposal.
@@ -1477,6 +1490,7 @@ async function etHandleUpdate(
   assertValidMetricsConfig(args.metrics_config);
   assertValidBacking(args.backing);
   assertEventKindsAvoidPlatformVocabulary(args.event_kinds);
+  assertValidNotificationInboxes(args.event_kinds, slug, ctx);
   if (recordKeyColumn(args.metadata_schema ?? current.metadata_schema) &&
       !(args.backing === undefined ? current.backing_sql : args.backing?.sql)) throw invalidSchema('A stable source record key requires backing.sql');
   assertValidEventKindInteractions(args.event_kinds);

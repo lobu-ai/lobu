@@ -4,6 +4,7 @@ import { getDb, parsePgNumberArray, pgBigintArray } from '../db/client';
 import { createAutomationEventRun } from '../runs/queue-service';
 import { resolveAutomationExecutor } from '../tools/admin/manage_automations/executors';
 import { readAuditEventType } from '../utils/audit-event-type';
+import { loadInboxNotificationProducer } from '../notifications/inbox-provenance';
 import logger from '../utils/logger';
 import { dispatchAutomationRunsBestEffort } from './activation';
 import {
@@ -151,6 +152,10 @@ async function loadWorkspaceEvent(
       : [];
   const metadata =
     row.metadata && typeof row.metadata === 'object' ? row.metadata : {};
+  let producerAutomationId = row.automation_id == null ? null : Number(row.automation_id);
+  if (producerAutomationId == null && metadata.inbox_submission != null) {
+    producerAutomationId = await loadInboxNotificationProducer(organizationId, eventId, db);
+  }
   return {
     id: Number(row.id),
     semanticType: String(row.semantic_type),
@@ -159,8 +164,7 @@ async function loadWorkspaceEvent(
     entityIds,
     entityTypeSlugs: entityTypes.map((item) => String(item.slug)),
     occurredAt: new Date(row.occurred_at).toISOString(),
-    producerAutomationId:
-      row.automation_id == null ? null : Number(row.automation_id),
+    producerAutomationId,
   };
 }
 

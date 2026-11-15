@@ -47,6 +47,9 @@ import {
 } from "./action-card-state";
 
 interface CreateNotificationParams {
+	/** Server-stamped send-only inbox provenance; never accepted from notification data. */
+	inboxSubmission?: { organization_id: string; user_id: string | null; agent_id: string | null; automation_id: number | null; run_id: number | null; inbox: string };
+	inboxFingerprint?: string;
 	organizationId: string;
 	type:
 		| "action_approval_needed"
@@ -1425,6 +1428,7 @@ export async function createNotificationForUsers(
 
 	const metadata: Record<string, unknown> = {
 		notification_type: params.type,
+		...(params.inboxSubmission ? { inbox_submission: params.inboxSubmission, inbox_fingerprint: params.inboxFingerprint } : {}),
 		resource_type: params.resourceType ?? null,
 		resource_id: params.resourceId ?? null,
 		resource_url: params.resourceUrl ?? null,
@@ -1458,11 +1462,20 @@ export async function createNotificationForUsers(
 		if (prior !== null) return { created: false, eventId: prior };
 	}
 
-	metadata.delivery_request = await snapshotNotificationDelivery(params, sql);
+	// Inbox acceptance fixes the recipients to receiver admins. Producer
+	// attribution must not redirect their report to an Automation's chat target.
+	metadata.delivery_request = await snapshotNotificationDelivery(
+		params.inboxSubmission ? { ...params, automationId: null } : params,
+		sql,
+	);
 
 	let eventId: number;
 	try {
 		const persist = async (tx: DbClient) => {
+			const originId = randomUUID();
+			const eventMetadata = params.inboxSubmission
+				? { ...metadata, _lobu_inbox_origin_id: originId }
+				: metadata;
 			const event = await insertEvent(
 				{
 					entityIds: params.entityIds ?? [],
@@ -1471,13 +1484,13 @@ export async function createNotificationForUsers(
 					// is no upstream identity to carry. A fresh uuid gives every
 					// notification the stable identity the events contract expects
 					// without pretending the producer key is a source id.
-					originId: randomUUID(),
+					originId,
 					title: params.title,
 					content: params.body ?? null,
 					semanticType: params.semanticType ?? "notification",
 					payloadType: params.semanticType ? "empty" : "text",
 					payloadData: params.semanticType ? params.payloadData : undefined,
-					metadata,
+					metadata: eventMetadata,
 					clientId: params.mcpActivity?.clientId ?? null,
 					runId: params.runId ?? null,
 					automationId: params.automationId ?? null,

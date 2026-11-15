@@ -173,6 +173,15 @@ export const ManageEntitySchemaSchema = Type.Object({
         Type.Record(
           Type.String(),
           Type.Object({
+            inbox: Type.Optional(
+              Type.Object(
+                {
+                  accept_from: Type.Literal("authenticated_workspaces"),
+                  recipients: Type.Literal("admins"),
+                },
+                { additionalProperties: false }
+              )
+            ),
             description: Type.Optional(Type.String()),
             metadataSchema: Type.Optional(
               Type.Record(Type.String(), Type.Unknown())

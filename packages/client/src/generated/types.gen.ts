@@ -2166,6 +2166,10 @@ export type ManageEntitySchemaData = {
       [key: string]:
         | unknown
         | {
+            inbox?: {
+              accept_from: "authenticated_workspaces";
+              recipients: "admins";
+            };
             description?: string;
             metadataSchema?: {
               [key: string]: unknown;
@@ -5751,76 +5755,92 @@ export type ManageOperationsResponse =
   ManageOperationsResponses[keyof ManageOperationsResponses];
 
 export type NotifyData = {
-  body: {
-    action: "send";
-    /**
-     * Notification title
-     */
-    title: string;
-    /**
-     * Notification body text
-     */
-    body?: string;
-    /**
-     * Who to notify. 'admins' (default): org admins/owners. 'all': all org members. Or an array of specific user IDs.
-     */
-    recipients?: "admins" | "all" | Array<string>;
-    /**
-     * Relative URL to link the notification to (e.g. /acme/entities)
-     */
-    resource_url?: string;
-    /**
-     * HTTP(S) page for an explicit browser-side "Open" action in the current user tab.
-     */
-    browser_url?: string;
-    /**
-     * Page-activated operation run that will populate browser_url when its owner visits the page. The run must belong to the same workspace, target the same normalized URL, and be owned by one of the resolved recipients; delivery then narrows to that owner, since nobody else can activate it.
-     */
-    browser_handoff_run_id?: number;
-    /**
-     * Stable producer key. Repeating a send with the same key returns success without creating or delivering a duplicate.
-     */
-    idempotency_key?: string;
-    /**
-     * Connection ID for targeted delivery (e.g. Telegram bot connection). When set, notification is delivered through this specific bot connection.
-     */
-    connection_id?: string;
-    /**
-     * Structured payload. With `semantic_type`, this becomes the event's render data (bound to the kind's `jsonTemplate` in the Memory view) instead of being appended to the body. Without `semantic_type`, it is stored in the notification body as formatted JSON (legacy).
-     */
-    data?: {
-      [key: string]: unknown;
-    };
-    /**
-     * Event semantic type (kind) for this notification's content, validated against the org's `$member.event_kinds`. When set, the notification renders through the event-kind pipeline: `data` feeds the kind's `jsonTemplate` in the Memory/Events view, and the inbox keeps the markdown `body`. Mutually exclusive with `input_schema`.
-     */
-    semantic_type?: string;
-    /**
-     * A `chat` CardElement (built with the card primitives) for rich bot-connection delivery. When set, the bound channel gets this card instead of the markdown body.
-     */
-    card?: {
-      [key: string]: unknown;
-    };
-    /**
-     * Turn this notification into a QUESTION the recipient answers, instead of an FYI. Pass {} for a plain yes/no decision; a single required string-enum property for one-click options; or a flat object of primitive fields, scalar enums, string/scalar-enum arrays, and optional nullable anyOf wrappers for a form. Give each property a `title`. Nested objects, references, other combinators, constants, formats, patterns, and string/number/array constraints are unsupported and fail with HTTP 422 before a run is created. Read the answer with manage_operations get_run.
-     */
-    input_schema?: {
-      [key: string]: unknown;
-    };
-    /**
-     * Attribution source when notification is triggered by an Automation reaction
-     */
-    automation_source?: {
-      /**
-       * Automation that triggered this notification
-       */
-      automation_id: number;
-      /**
-       * Automation run that triggered this notification
-       */
-      run_id: number;
-    };
-  };
+  body:
+    | {
+        action: "list_inboxes";
+        organization: string;
+      }
+    | {
+        action: "submit";
+        organization: string;
+        inbox: string;
+        title: string;
+        body?: string;
+        data?: {
+          [key: string]: unknown;
+        };
+        idempotency_key: string;
+      }
+    | {
+        action: "send";
+        /**
+         * Notification title
+         */
+        title: string;
+        /**
+         * Notification body text
+         */
+        body?: string;
+        /**
+         * Who to notify. 'admins' (default): org admins/owners. 'all': all org members. Or an array of specific user IDs.
+         */
+        recipients?: "admins" | "all" | Array<string>;
+        /**
+         * Relative URL to link the notification to (e.g. /acme/entities)
+         */
+        resource_url?: string;
+        /**
+         * HTTP(S) page for an explicit browser-side "Open" action in the current user tab.
+         */
+        browser_url?: string;
+        /**
+         * Page-activated operation run that will populate browser_url when its owner visits the page. The run must belong to the same workspace, target the same normalized URL, and be owned by one of the resolved recipients; delivery then narrows to that owner, since nobody else can activate it.
+         */
+        browser_handoff_run_id?: number;
+        /**
+         * Stable producer key. Repeating a send with the same key returns success without creating or delivering a duplicate.
+         */
+        idempotency_key?: string;
+        /**
+         * Connection ID for targeted delivery (e.g. Telegram bot connection). When set, notification is delivered through this specific bot connection.
+         */
+        connection_id?: string;
+        /**
+         * Structured payload. With `semantic_type`, this becomes the event's render data (bound to the kind's `jsonTemplate` in the Memory view) instead of being appended to the body. Without `semantic_type`, it is stored in the notification body as formatted JSON (legacy).
+         */
+        data?: {
+          [key: string]: unknown;
+        };
+        /**
+         * Event semantic type (kind) for this notification's content, validated against the org's `$member.event_kinds`. When set, the notification renders through the event-kind pipeline: `data` feeds the kind's `jsonTemplate` in the Memory/Events view, and the inbox keeps the markdown `body`. Mutually exclusive with `input_schema`.
+         */
+        semantic_type?: string;
+        /**
+         * A `chat` CardElement (built with the card primitives) for rich bot-connection delivery. When set, the bound channel gets this card instead of the markdown body.
+         */
+        card?: {
+          [key: string]: unknown;
+        };
+        /**
+         * Turn this notification into a QUESTION the recipient answers, instead of an FYI. Pass {} for a plain yes/no decision; a single required string-enum property for one-click options; or a flat object of primitive fields, scalar enums, string/scalar-enum arrays, and optional nullable anyOf wrappers for a form. Give each property a `title`. Nested objects, references, other combinators, constants, formats, patterns, and string/number/array constraints are unsupported and fail with HTTP 422 before a run is created. Read the answer with manage_operations get_run.
+         */
+        input_schema?: {
+          [key: string]: unknown;
+        };
+        /**
+         * Attribution source when notification is triggered by an Automation reaction
+         */
+        automation_source?: {
+          /**
+           * Automation that triggered this notification
+           */
+          automation_id: number;
+          /**
+           * Automation run that triggered this notification
+           */
+          run_id: number;
+        };
+      };
   path: {
     /**
      * Organization slug (workspace identifier)
