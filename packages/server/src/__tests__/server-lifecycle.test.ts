@@ -683,6 +683,10 @@ describe("shutdown ordering (live drain)", () => {
 				scout.close(() => resolve(port));
 			});
 		});
+		// This harness replaces boot collaborators so shutdown can deliberately
+		// close the real pool. Cold-process bootstrap tests cover real auth init.
+		const auth = await import("../auth");
+		vi.spyOn(auth, "createAuth").mockResolvedValue({ $context: Promise.resolve({}) } as never);
 		const { createServerLifecycle } = await import("../server-lifecycle");
 		await createServerLifecycle({
 			mode: "postgres",

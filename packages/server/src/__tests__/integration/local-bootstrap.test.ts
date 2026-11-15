@@ -14,6 +14,8 @@
  *      never auto-provision users/orgs.
  */
 
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { INSTALL_OPERATOR_KIND } from '../../auth/install-operator';
 import { externalDbBootstrapHooks } from '../../local-bootstrap';
@@ -88,4 +90,78 @@ describe('externalDbBootstrapHooks', () => {
     expect(await countRows('user')).toBe(0);
     expect(await countRows('organization')).toBe(0);
   });
+});
+
+
+describe('production authentication bootstrap', () => {
+  // Cold processes exercise Better Auth's production validation rather than
+  // Vitest's test-mode bypass or a previously cached auth instance.
+  async function probe(secretEnv: Record<string, string>) {
+    const script = `
+      const { createServerLifecycle } = await import('./src/server-lifecycle.ts');
+      const { app } = await import('./src/index.ts');
+      const { createAuth } = await import('./src/auth/index.tsx');
+      let reachedPreListen = false;
+      let status;
+      let requestOrigin;
+      const stop = new Error('bootstrap probe complete');
+      try {
+        await createServerLifecycle({
+          mode: 'postgres', env: process.env, host: '127.0.0.1', port: 0,
+          databaseReadiness: async () => {},
+          preListenHooks: [async () => {
+            reachedPreListen = true;
+            const auth = await createAuth(process.env, new Request('https://synthetic-auth.example/mcp'));
+            requestOrigin = auth.options.baseURL;
+            const response = await app.fetch(new Request('http://127.0.0.1/mcp', {
+              method: 'POST', headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({jsonrpc:'2.0',id:1,method:'initialize',params:{}})
+            }), process.env);
+            status = response.status;
+            throw stop;
+          }]
+        }).start();
+      } catch (error) {
+        console.log('__BOOT_PROBE__' + JSON.stringify({
+          reachedPreListen, status, requestOrigin, error: error === stop ? null : error.message
+        }));
+        process.exit(0);
+      }
+    `;
+    const { stdout } = await promisify(execFile)(process.execPath,
+      ['--import', 'tsx', '--input-type=module', '-e', script], {
+        cwd: process.cwd(), timeout: 45_000, maxBuffer: 2 * 1024 * 1024,
+        env: {
+          PATH: process.env.PATH!, DATABASE_URL: process.env.DATABASE_URL!,
+          ENCRYPTION_KEY: process.env.ENCRYPTION_KEY!, NODE_ENV: 'production',
+          LOBU_SINGLE_USER: 'false', LOBU_DISABLE_EMBEDDED_WORKER: '1',
+          WORKER_PROXY_PORT: '0', JWT_SECRET: 'synthetic-bootstrap-jwt-secret',
+          BETTER_AUTH_SECRET: '', AUTH_SECRET: '', BETTER_AUTH_SECRETS: '',
+          ...secretEnv,
+        },
+      });
+    const marker = stdout.split('\n').find(line => line.startsWith('__BOOT_PROBE__'));
+    expect(marker, stdout).toBeDefined();
+    return JSON.parse(marker!.slice('__BOOT_PROBE__'.length));
+  }
+
+  it('refuses missing production auth secrets before the listener can start', async () => {
+    const result = await probe({});
+    expect(result.reachedPreListen).toBe(false);
+    expect(result.error).toContain('BETTER_AUTH_SECRET');
+  }, 60_000);
+
+  it('rejects malformed secret rotation before the listener can start', async () => {
+    const result = await probe({ BETTER_AUTH_SECRETS: 'invalid-rotation-entry' });
+    expect(result.reachedPreListen).toBe(false);
+    expect(result.error).toContain('BETTER_AUTH_SECRETS');
+  }, 60_000);
+
+  it.each([
+    { BETTER_AUTH_SECRET: 'synthetic-production-primary-secret-32-characters' },
+    { AUTH_SECRET: 'synthetic-production-legacy-secret-32-characters' },
+    { BETTER_AUTH_SECRETS: '2:synthetic-current-rotation-secret-32-characters,1:synthetic-previous-rotation-secret-32-characters' },
+  ])('accepts the existing configured auth secret forms: %j', async secretEnv => {
+    expect(await probe(secretEnv)).toEqual({ reachedPreListen: true, status: 401, requestOrigin: 'https://synthetic-auth.example', error: null });
+  }, 60_000);
 });
