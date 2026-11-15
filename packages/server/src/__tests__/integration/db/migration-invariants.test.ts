@@ -15,7 +15,10 @@
  */
 
 import { beforeAll, describe, expect, it } from 'vitest';
+import { fileURLToPath } from 'node:url';
+import { listMigrationFiles } from '../../../db/migration-loader';
 import { createAuthProfile, PendingAuthConflictError } from '../../../utils/auth-profiles';
+import { assertSchemaUpToDate } from '../../../utils/schema-version-check';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import {
   addUserToOrganization,
@@ -32,6 +35,30 @@ describe('migration invariants', () => {
   });
 
   describe('schema (DDL applied by the migration chain)', () => {
+    it.each(['baseline', 'older forward migration'])('refuses boot when the ledger lacks a required %s despite its current maximum', async (kind) => {
+      const sql = getTestDb();
+      const migrationsDir = fileURLToPath(new URL('../../../../../../db/migrations/', import.meta.url));
+      const required = listMigrationFiles(migrationsDir).map((file) => file.split('_')[0]);
+      const rollback = new Error('synthetic ledger rollback');
+      await expect(sql.begin(async (tx) => {
+        // The test harness applies SQL directly, without dbmate's ledger.
+        // Create it only inside this rolled-back fixture transaction.
+        await tx`CREATE TABLE IF NOT EXISTS public.schema_migrations (version text PRIMARY KEY)`;
+        await tx`DELETE FROM public.schema_migrations`;
+        await tx`INSERT INTO public.schema_migrations (version)
+          SELECT jsonb_array_elements_text(${tx.json(required)}::jsonb)`;
+        await expect(assertSchemaUpToDate(tx, { migrationsDir })).resolves.toBeUndefined();
+        await tx`INSERT INTO public.schema_migrations (version) VALUES ('99999999999999')`;
+        await expect(assertSchemaUpToDate(tx, { migrationsDir })).resolves.toBeUndefined();
+        const versions = await tx`SELECT version FROM schema_migrations ORDER BY version`;
+        expect(versions.length).toBeGreaterThan(2);
+        const missing = versions[kind === 'baseline' ? 0 : 1].version;
+        await tx`DELETE FROM schema_migrations WHERE version = ${missing}`;
+        await expect(assertSchemaUpToDate(tx, { migrationsDir })).rejects.toThrow(missing);
+        throw rollback;
+      })).rejects.toBe(rollback);
+    });
+
     it('auth_profiles has the per-user pending oauth_account unique index (#1121)', async () => {
       const sql = getTestDb();
       const rows = await sql<{ indexdef: string }[]>`
