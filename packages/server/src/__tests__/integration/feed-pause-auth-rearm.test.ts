@@ -97,7 +97,7 @@ async function waitForConnectionAudits(
 
 async function seedProfile(
   organizationId: string,
-  profileKind: 'browser_session' | 'oauth_account',
+  profileKind: 'browser_session' | 'oauth_account' | 'oauth_app' | 'interactive',
   status: 'active' | 'pending_auth'
 ): Promise<{ profileId: number; connectionId: number }> {
   const sql = getTestDb();
@@ -163,7 +163,8 @@ async function completeSyncWithAuthUpdate(
   organizationId: string,
   connectionId: number,
   feedId: number,
-  beforeComplete?: () => Promise<void>
+  beforeComplete?: () => Promise<void>,
+  authUpdate: Record<string, unknown> = USABLE_SESSION
 ): Promise<void> {
   const sql = getTestDb();
   const [run] = (await sql`
@@ -182,7 +183,7 @@ async function completeSyncWithAuthUpdate(
       worker_id: WORKER_ID,
       status: 'success',
       items_collected: 0,
-      auth_update: USABLE_SESSION,
+      auth_update: authUpdate,
     })
   );
   const [done] = (await sql`SELECT status FROM runs WHERE id = ${run.id}`) as Array<{
@@ -290,6 +291,100 @@ describe('auth-driven feed re-arm', () => {
   });
 
   describe('edits that leave a usable browser session usable', () => {
+    it('preserves a connection pause through an interactive credential wipe and re-pair', async () => {
+      const { org, ctx } = await seedOwnerContext();
+      const { profileId, connectionId } = await seedProfile(org.id, 'interactive', 'active');
+      const feedId = await seedFeed(org.id, connectionId, 'posts');
+      await completeSyncWithAuthUpdate(org.id, connectionId, feedId, async () => {
+        const paused = await manageConnections(
+          { action: 'update', connection_id: connectionId, status: 'paused' }, {} as Env, ctx
+        );
+        expect('error' in paused).toBe(false);
+      }, { creds: null });
+      expect(await readConnectionStatus(connectionId)).toBe('paused');
+
+      await completeFreshAuthRun(org.id, profileId);
+
+      expect(await readConnectionStatus(connectionId)).toBe('paused');
+      expect((await readFeed(feedId)).status).toBe('paused');
+    });
+
+    it.each(['browser_session', 'oauth_app'] as const)(
+      'preserves a connection pause when its %s profile is removed',
+      async (profileKind) => {
+        const { org, ctx } = await seedOwnerContext();
+        const { profileId, connectionId } = await seedProfile(org.id, profileKind, 'active');
+        if (profileKind === 'oauth_app') {
+          await getTestDb()`UPDATE connections SET auth_profile_id = NULL,
+            app_auth_profile_id = ${profileId} WHERE id = ${connectionId}`;
+        }
+        const paused = await manageConnections(
+          { action: 'update', connection_id: connectionId, status: 'paused' }, {} as Env, ctx
+        );
+        expect('error' in paused).toBe(false);
+
+        const removed = await manageAuthProfiles(
+          { action: 'delete_auth_profile', auth_profile_slug: 'auth-rearm', force: true }, {} as Env, ctx
+        );
+        expect('error' in removed).toBe(false);
+        expect(await readConnectionStatus(connectionId)).toBe('paused');
+      }
+    );
+
+    it('preserves a connection pause through OAuth app revocation and recovery', async () => {
+      const { org, ctx } = await seedOwnerContext();
+      const { profileId, connectionId } = await seedProfile(org.id, 'oauth_app', 'active');
+      await getTestDb()`UPDATE connections SET auth_profile_id = NULL,
+        app_auth_profile_id = ${profileId} WHERE id = ${connectionId}`;
+      const paused = await manageConnections(
+        { action: 'update', connection_id: connectionId, status: 'paused' }, {} as Env, ctx
+      );
+      expect('error' in paused).toBe(false);
+      for (const status of ['revoked', 'active'] as const) {
+        const changed = await manageAuthProfiles(
+          { action: 'update_auth_profile', auth_profile_slug: 'auth-rearm', status }, {} as Env, ctx
+        );
+        expect('error' in changed).toBe(false);
+        expect(await readConnectionStatus(connectionId)).toBe('paused');
+      }
+    });
+
+    it.each(['profile update', 'late sync completion'] as const)(
+      'preserves a connection pause through auth loss and recovery via %s',
+      async (entrypoint) => {
+        const { org, ctx } = await seedOwnerContext();
+        const { connectionId } = await seedProfile(org.id, 'browser_session', 'active');
+        const feedId = await seedFeed(org.id, connectionId, 'posts');
+        const expired = { cookies: [{ name: 'session_token', value: 'synthetic', expires: 1 }] };
+        const pause = async () => {
+          const result = await manageConnections(
+            { action: 'update', connection_id: connectionId, status: 'paused' }, {} as Env, ctx
+          );
+          expect('error' in result).toBe(false);
+          expect(await readConnectionStatus(connectionId)).toBe('paused');
+        };
+        if (entrypoint === 'profile update') {
+          await pause();
+          const result = await manageAuthProfiles(
+            { action: 'update_auth_profile', auth_profile_slug: 'auth-rearm', auth_data: expired },
+            {} as Env, ctx
+          );
+          expect('error' in result).toBe(false);
+        } else {
+          await completeSyncWithAuthUpdate(org.id, connectionId, feedId, pause, expired);
+        }
+        expect(await readConnectionStatus(connectionId)).toBe('paused');
+
+        const recovered = await manageAuthProfiles(
+          { action: 'update_auth_profile', auth_profile_slug: 'auth-rearm', auth_data: USABLE_SESSION },
+          {} as Env, ctx
+        );
+        expect('error' in recovered).toBe(false);
+        expect(await readConnectionStatus(connectionId)).toBe('paused');
+        expect((await readFeed(feedId)).status).toBe('paused');
+      }
+    );
+
     async function seedPausedSiblings(
       organizationId: string
     ): Promise<{ connectionId: number; broken: number; manual: number }> {

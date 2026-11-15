@@ -778,6 +778,7 @@ export async function revokeOAuthAppProfileAtomic(params: {
       WHERE organization_id = ${params.organizationId}
         AND app_auth_profile_id = ${params.profileId}
         AND deleted_at IS NULL
+        AND status <> 'paused'
     `;
 
     return profileRows[0] as AuthProfileRow;

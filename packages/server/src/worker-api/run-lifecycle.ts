@@ -348,6 +348,7 @@ async function persistSyncAuthUpdate(
             SET status = 'pending_auth', updated_at = current_timestamp
             WHERE auth_profile_id = ${authProfile.id}
               AND deleted_at IS NULL
+              AND status <> 'paused'
           `;
 			await pauseFeedsForInactiveConnections(tx, { authProfileId: authProfile.id });
 
@@ -385,6 +386,7 @@ async function persistSyncAuthUpdate(
                 updated_at = current_timestamp
             WHERE auth_profile_id = ${authProfile.id}
               AND deleted_at IS NULL
+              AND status <> 'paused'
           `;
 				await pauseFeedsForInactiveConnections(tx, { authProfileId: authProfile.id });
 			}
