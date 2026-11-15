@@ -22,7 +22,9 @@ import {
   type LegacyAutomationExecutionConfig,
   type AutomationSource,
 } from '@lobu/core/contracts/tools/manage-automations';
-import { normalizeAutomationSources } from '../automations/source-refs';
+import { AutomationSourceValidationError, normalizeAutomationSources } from '../automations/source-refs';
+import { recordAutomationRunFailure } from '../automations/scheduled-failure-policy';
+import { advanceScheduleAfterTerminalFailure } from '../automations/schedule-cursor';
 import type { ConnectorTriggerSignal } from '@lobu/connector-sdk';
 import {
   claimAutomationCooldown,
@@ -60,6 +62,7 @@ import { ACTIVE_RUN_STATUSES, runStatusLiteral } from '../utils/run-statuses';
 import { normalizePageActivationUrls } from './page-activation';
 import { newGatewayInlineOwner } from './run-lease';
 import { AUTOMATION_RUN_TYPES_PG } from "./run-types.js";
+import { classifyRunOutcome } from './run-outcome';
 
 import { notifyWorkerWork } from './worker-wakeup';
 
@@ -752,18 +755,27 @@ async function createAutomationRunWithClient(
       // not transfer already-queued work to that agent.
       ?? (!params.agentId && !params.deviceWorkerId ? { kind: 'external' as const } : undefined);
   let windowEnd = params.windowEnd;
+  let admissionFailure: string | undefined;
   if (executor?.kind === 'script' && params.dispatchSource !== 'event') {
     // Match source reads: a nonempty version source list wins; otherwise use
     // the assignment's sources. Freeze the resulting bounds with this run.
     const versionSources = versionRows[0]?.version_sources ?? [];
     const sources = versionSources.length > 0 ? versionSources : versionRows[0]?.sources ?? [];
-    const normalized = await normalizeAutomationSources(sql, params.organizationId, sources);
-    // Context-only scripts do not consume stored arrivals, and neither does a
-    // code module without sources: it reads only what it queries. Installed
-    // legacy executors keep their frozen sourceless contract.
-    const legacySourceless = sources.length === 0 && !automationScript;
-    if (legacySourceless || normalized.some((source) => source.kind === 'event' || source.kind === 'feed')) {
-      windowEnd = await boundScriptArrivalWindowEnd(sql, params.organizationId, params.windowStart, params.windowEnd);
+    try {
+      const normalized = await normalizeAutomationSources(sql, params.organizationId, sources);
+      // Context-only scripts do not consume stored arrivals, and neither does a
+      // code module without sources: it reads only what it queries. Installed
+      // legacy executors keep their frozen sourceless contract.
+      const legacySourceless = sources.length === 0 && !automationScript;
+      if (legacySourceless || normalized.some((source) => source.kind === 'event' || source.kind === 'feed')) {
+        windowEnd = await boundScriptArrivalWindowEnd(sql, params.organizationId, params.windowStart, params.windowEnd);
+      }
+    } catch (error) {
+      // A deleted or invalid source cannot become runnable by retrying this
+      // due cursor. Persist a terminal scheduled attempt, but leave database
+      // failures uncommitted so the next tick can retry them.
+      if (params.dispatchSource !== 'scheduled' || !(error instanceof AutomationSourceValidationError)) throw error;
+      admissionFailure = error.message;
     }
   }
 
@@ -812,6 +824,9 @@ async function createAutomationRunWithClient(
       automation_id,
       approval_status,
       status,
+      outcome,
+      error_message,
+      completed_at,
       approved_input,
       idempotency_key,
       target_device_worker_id,
@@ -821,7 +836,10 @@ async function createAutomationRunWithClient(
       'automation',
       ${params.automationId},
       'auto',
-      'pending',
+      ${admissionFailure === undefined ? 'pending' : 'failed'},
+      ${admissionFailure === undefined ? null : classifyRunOutcome({ status: 'failed', executionStarted: false })},
+      ${admissionFailure ?? null},
+      ${admissionFailure === undefined ? null : sql`current_timestamp`},
       ${sql.json(payload)},
       ${idempotencyKey},
       ${normalizedDeviceWorkerId == null ? null : sql`${normalizedDeviceWorkerId}::uuid`},
@@ -836,6 +854,14 @@ async function createAutomationRunWithClient(
   logger.info(
     `[queue] Created automation run ${runId} for automation ${params.automationId} (${params.dispatchSource})`
   );
+
+  if (admissionFailure !== undefined) {
+    await recordAutomationRunFailure(sql, params.automationId, {
+      dispatchSource: params.dispatchSource, executorKind: executor?.kind,
+    });
+    await advanceScheduleAfterTerminalFailure(sql, params.automationId, params.dispatchSource);
+    return { runId, status, created: true };
+  }
 
   if (automationScript?.has_prepare) await enqueueAutomationPreparation(sql, { organizationId: params.organizationId, automationId: params.automationId, sourceRunId: runId });
   await notifyWorkerWork(sql);

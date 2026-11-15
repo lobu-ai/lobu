@@ -37,7 +37,6 @@ import {
 } from "../utils/window-utils";
 import {
 	advanceScheduleAfterTerminalFailure,
-	advanceAutomationSchedule,
 	advanceAutomationScheduleAfterSuccessfulWindow,
 } from "./schedule-cursor";
 import {
@@ -68,6 +67,8 @@ type AutomationRunStatus =
 
 interface DueAutomationRow {
 	execution_config?: unknown;
+	/** Exact database cursor observed by the scheduled materializer. */
+	next_run_at?: string;
 	id: number;
 	organization_id: string;
 	managed_agent_id: string | null;
@@ -795,7 +796,7 @@ export async function materializeDueAutomationRuns(
 			// backstop.
 			const dueAutomations = await sql<DueAutomationRow>`
 				SELECT w.id, w.organization_id, w.managed_agent_id, w.schedule, w.triggers, w.execution_config,
-				       w.entity_ids, w.created_by, w.current_version_id,
+				       w.entity_ids, w.created_by, w.current_version_id, w.next_run_at::text,
                w.device_worker_id::text AS device_worker_id, w.agent_kind
         FROM automations w
         WHERE w.status = 'active'
@@ -885,71 +886,77 @@ export async function materializeDueAutomationRuns(
 			// whole cron period.
 			const pending = await computePendingWindow(sql, automation.id);
 			if (pending.windowEnd <= pending.windowStart) return "skipped";
-			const unchangedWindow = await inspectUnchangedWindow(sql, automation, pending);
-			const sourceFingerprint = unchangedWindow?.sourceFingerprint;
-			if (unchangedWindow?.unchanged) {
-				// Admit and complete a no-op in one transaction so no dispatcher can
-				// claim it between creation and cursor advancement. Lock the row
-				// first, in the same order as claim-next-window, so a concurrent
-				// claim cannot deadlock against the pending run's unique index.
-				await sql.begin(async (tx) => {
-					await tx`SELECT id FROM automations WHERE id = ${automation.id} FOR UPDATE`;
-					const skippedRun = await enqueueAutomationRunForRecord(
-						sql,
-						automation,
-						"scheduled",
-						sourceFingerprint,
-						tx,
-						pending,
-					);
-					// A reused run belongs to its existing dispatcher. A superseded
-					// window belongs to the completion that already moved the mark.
-					if (!skippedRun.created) return;
-					// Script windows may have been shortened at admission.
+			let unchangedWindow: Awaited<ReturnType<typeof inspectUnchangedWindow>> = null;
+			let sourceFailure: string | undefined;
+			try {
+				unchangedWindow = await inspectUnchangedWindow(sql, automation, pending);
+			} catch (error) {
+				sourceFailure = error instanceof Error ? error.message : String(error);
+			}
+			return sql.begin(async (tx) => {
+				// Serialize admission and terminal outcomes for this exact due cursor.
+				// Failed windows retain their arrival mark, so that mark alone cannot
+				// fence overlapping scheduler passes from counting the same failure.
+				const [due] = await tx`
+            SELECT id FROM automations
+            WHERE id = ${automation.id} AND status = 'active'
+              AND next_run_at = ${automation.next_run_at}::text::timestamptz
+              AND next_run_at <= current_timestamp
+            FOR UPDATE
+          `;
+				if (!due) return "skipped" as const;
+				const admitted = await enqueueAutomationRunForRecord(
+					sql, automation, "scheduled", unchangedWindow?.sourceFingerprint, tx, pending,
+				);
+				if (!admitted.created) return "skipped" as const;
+				// Permanent script-source admission failures are already terminal and
+				// accounted for by the queue, in this same transaction.
+				if (admitted.status === "failed") return "created" as const;
+				if (sourceFailure !== undefined) {
+					// Source inspection is real scheduled work. Persist its failure and
+					// policy effects without exposing a pending run to dispatch.
+					const [failed] = await tx`
+            UPDATE runs SET status = 'failed',
+              outcome = ${classifyRunOutcome({ status: "failed", executionStarted: false })},
+              completed_at = current_timestamp,
+              error_message = ${sourceFailure}
+            WHERE id = ${admitted.runId} AND status = 'pending'
+            RETURNING approved_input->'executor'->>'kind' AS executor_kind
+          `;
+					if (!failed) throw new Error('Scheduled source failure lost its admitted run');
+					await recordAutomationRunFailure(tx, automation.id, {
+						dispatchSource: "scheduled", executorKind: failed.executor_kind,
+					});
+					await advanceScheduleAfterTerminalFailure(tx, automation.id, "scheduled");
+					return "created" as const;
+				}
+				if (unchangedWindow?.unchanged) {
+					// Admission and completion share this transaction so no dispatcher
+					// can claim a pending no-op. Book the range admission actually saved.
 					const completed = await completeSkippedAutomationRun(
 						tx,
 						automation.id,
-						skippedRun.windowStart,
-						skippedRun.windowEnd,
-						skippedRun.runId,
+						admitted.windowStart,
+						admitted.windowEnd,
+						admitted.runId,
 					);
 					if (completed) await advanceAutomationScheduleAfterSuccessfulWindow(tx, automation.id);
-				});
-				logger.info(
-					{ automationId: automation.id, empty: unchangedWindow.empty },
-					"[automation] Skipped unchanged Automation sources before agent dispatch"
-				);
-				return "skipped";
-			}
-			const result = await enqueueAutomationRunForRecord(
-				sql,
-				automation,
-				"scheduled",
-				sourceFingerprint,
-				undefined,
-				pending,
-			);
-			return result.created ? "created" : "skipped";
+					logger.info(
+						{ automationId: automation.id, empty: unchangedWindow.empty },
+						"[automation] Skipped unchanged Automation sources before agent dispatch"
+					);
+					return "skipped" as const;
+				}
+				return "created" as const;
+			});
 		},
 		onError: async (automation, error) => {
 			logger.error(
 				{ error, automationId: automation.id },
 				"[automation] Failed to materialize due automation run"
 			);
-			// Don't leave next_run_at in the past — that would re-select this automation
-			// on every 60s tick. Push it forward per the automation's cron schedule.
-			// An unparseable schedule parks itself and does not throw; this catch
-			// exists for DATABASE errors, which would otherwise escape a hook that
-			// materializeDueItems does not guard and abort the tick for every org.
-			try {
-				await advanceAutomationSchedule(sql, automation.id);
-			} catch (advanceError) {
-				logger.error(
-					{ error: advanceError, automationId: automation.id },
-					"[automation] Failed to advance Automation schedule after materialization error"
-				);
-				// Leaving the cursor due lets a later tick retry.
-			}
+			// No durable outcome committed. Keep the due cursor so a later tick
+			// can retry rather than silently skip this window after a DB failure.
 		},
 	});
 

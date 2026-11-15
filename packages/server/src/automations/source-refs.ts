@@ -48,6 +48,9 @@ async function validateCustomSqlSource(
   );
 }
 
+/** Deterministic source configuration failure; database failures propagate unchanged. */
+export class AutomationSourceValidationError extends Error {}
+
 // 'channel' is a chat-transcript source (channel feed → channel_messages). It
 // is prompt CONTEXT, not events: its rows must never be signed as event
 // content_ids (channel_messages.id is not an events.id — complete_window links
@@ -82,9 +85,9 @@ const SAFE_CONNECTOR_RE = /^[a-zA-Z0-9._-]+$/;
 
 function assertSafeRefValue(label: string, value: string): string {
   const trimmed = value.trim();
-  if (!trimmed) throw new Error(`${label} reference is empty`);
+  if (!trimmed) throw new AutomationSourceValidationError(`${label} reference is empty`);
   if (!SAFE_REF_VALUE_RE.test(trimmed)) {
-    throw new Error(`${label} reference contains unsupported characters`);
+    throw new AutomationSourceValidationError(`${label} reference contains unsupported characters`);
   }
   return trimmed;
 }
@@ -92,7 +95,7 @@ function assertSafeRefValue(label: string, value: string): string {
 function assertSafeSlug(label: string, value: string): string {
   const trimmed = assertSafeRefValue(label, value);
   if (!SAFE_SLUG_RE.test(trimmed)) {
-    throw new Error(`${label} reference must be a plain slug`);
+    throw new AutomationSourceValidationError(`${label} reference must be a plain slug`);
   }
   return trimmed;
 }
@@ -146,7 +149,7 @@ export function parseAutomationSourceRef(query: string): AutomationSourceRef | n
 
   const match = REF_RE.exec(trimmed);
   if (!match) {
-    throw new Error(
+    throw new AutomationSourceValidationError(
       'source refs must use @feed:, @connection:, @connector:, @channel:, @entity:, or @metric:'
     );
   }
@@ -168,17 +171,17 @@ export function parseAutomationSourceRef(query: string): AutomationSourceRef | n
       const value = assertSafeRefValue('@metric', rawValue);
       const dot = value.indexOf('.');
       if (dot <= 0 || dot === value.length - 1) {
-        throw new Error('@metric refs must be shaped like @metric:<entity_type>.<measure>');
+        throw new AutomationSourceValidationError('@metric refs must be shaped like @metric:<entity_type>.<measure>');
       }
       const entityType = value.slice(0, dot);
       const measure = value.slice(dot + 1);
       if (!SAFE_SLUG_RE.test(entityType) || !SAFE_SLUG_RE.test(measure)) {
-        throw new Error('@metric entity type and measure must be plain identifiers');
+        throw new AutomationSourceValidationError('@metric entity type and measure must be plain identifiers');
       }
       return { type: 'metric', entityType, measure };
     }
     default:
-      throw new Error(`unsupported source ref @${type}:`);
+      throw new AutomationSourceValidationError(`unsupported source ref @${type}:`);
   }
 }
 
@@ -211,7 +214,7 @@ export function validateAutomationSourceRef(name: string, query: string): Automa
     return ref ? automationSourceKindForRef(ref) : null;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    throw new Error(`source "${name}": ${message}`);
+    throw new AutomationSourceValidationError(`source "${name}": ${message}`);
   }
 }
 
@@ -343,8 +346,8 @@ async function resolveConnectionId(
     ORDER BY id
     LIMIT 2
   `;
-  if (rows.length === 0) throw new Error(`@connection:${value} did not match any connection`);
-  if (rows.length > 1) throw new Error(`@connection:${value} matched more than one connection`);
+  if (rows.length === 0) throw new AutomationSourceValidationError(`@connection:${value} did not match any connection`);
+  if (rows.length > 1) throw new AutomationSourceValidationError(`@connection:${value} matched more than one connection`);
   return Number(rows[0].id);
 }
 
@@ -361,19 +364,19 @@ async function compileRefToQuery(
   switch (ref.type) {
     case 'feed': {
       const feeds = await resolveFeeds(sql, organizationId, ref.value);
-      if (feeds.length === 0) throw new Error(`@feed:${ref.value} did not match any feed`);
+      if (feeds.length === 0) throw new AutomationSourceValidationError(`@feed:${ref.value} did not match any feed`);
       const eventFeeds = feeds.filter((f) => f.store === 'events');
       const channelFeeds = feeds.filter((f) => f.store === 'channel_messages');
       if (eventFeeds.some((f) => f.operations.includes('read') && (f.readWindowAxis || !f.operations.includes('sync')))) {
         if (feeds.length !== 1) {
-          throw new Error(`@feed:${ref.value} matches multiple feeds; reference one feed for a live source.`);
+          throw new AutomationSourceValidationError(`@feed:${ref.value} matches multiple feeds; reference one feed for a live source.`);
         }
         return { query: null, kind: 'feed', feedId: feeds[0].id };
       }
       // Don't mix storage planes in one source: a single SELECT cannot span
       // both `events` and `channel_messages`.
       if (eventFeeds.length > 0 && channelFeeds.length > 0) {
-        throw new Error(
+        throw new AutomationSourceValidationError(
           `@feed:${ref.value} matched both event and channel-message stores; reference one feed`
         );
       }
@@ -399,7 +402,7 @@ async function compileRefToQuery(
     }
     case 'connector': {
       if (!SAFE_CONNECTOR_RE.test(ref.value)) {
-        throw new Error('@connector refs must be plain connector keys');
+        throw new AutomationSourceValidationError('@connector refs must be plain connector keys');
       }
       return {
         query: buildAutomationEventSelect(`connector_key = ${sqlString(ref.value)}`),
@@ -477,7 +480,7 @@ export async function resolveAutomationSourcesForSave(
         LIMIT 1
       `;
       if (exists.length === 0) {
-        throw new Error(
+        throw new AutomationSourceValidationError(
           `source "${source.name}": @entity:${ref.value} is not an entity type in this organization`
         );
       }
@@ -493,7 +496,7 @@ export async function resolveAutomationSourcesForSave(
         LIMIT 1
       `;
       if (rows.length === 0) {
-        throw new Error(
+        throw new AutomationSourceValidationError(
           `source "${source.name}": @metric:${ref.entityType}.${ref.measure} — entity type "${ref.entityType}" not found in this organization`
         );
       }
@@ -501,7 +504,7 @@ export async function resolveAutomationSourcesForSave(
         (rows[0].metrics_config as { measures?: Record<string, unknown> } | null) ?? {}
       ).measures ?? {};
       if (!(ref.measure in measures)) {
-        throw new Error(
+        throw new AutomationSourceValidationError(
           `source "${source.name}": @metric:${ref.entityType}.${ref.measure} — measure "${ref.measure}" is not declared on entity type "${ref.entityType}"`
         );
       }
@@ -517,7 +520,7 @@ export async function resolveAutomationSourcesForSave(
         LIMIT 1
       `;
       if (exists.length === 0) {
-        throw new Error(
+        throw new AutomationSourceValidationError(
           `source "${source.name}": @connector:${ref.value} — no connection in this organization uses connector key "${ref.value}"`
         );
       }
@@ -537,7 +540,7 @@ export async function normalizeAutomationSources(
   const seenNames = new Set<string>();
   for (const source of sources) {
     if (seenNames.has(source.name)) {
-      throw new Error(`Automation source name "${source.name}" is duplicated; source names must be unique`);
+      throw new AutomationSourceValidationError(`Automation source name "${source.name}" is duplicated; source names must be unique`);
     }
     seenNames.add(source.name);
   }
