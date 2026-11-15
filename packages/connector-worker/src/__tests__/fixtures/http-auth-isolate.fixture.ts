@@ -53,6 +53,35 @@ for (const mode of ['sync', 'action'] as const) {
   });
 }
 
+for (const context of ['config', 'session'] as const) {
+  test(`the daemon action preserves its already-authorized ${context} through the native isolate`, async () => {
+    const completed: Array<{ status: string; action_output?: unknown }> = [];
+    const client = {
+      id: 'synthetic-owner-device',
+      async heartbeat() { return { continue: true }; },
+      async completeAction(result: { status: string; action_output?: unknown }) { completed.push(result); },
+    } as unknown as ExecutorClient;
+    const output = context === 'config'
+      ? `{ region: ctx.config.REGION, profile: ctx.config.PROFILE_ONLY, connection: ctx.config.CONNECTION_ONLY, environment: ctx.config.ENV_ONLY }`
+      : `{ available: ctx.sessionState.synthetic === 'synthetic-session-state' }`;
+    const result = await executeRun(client, {
+      run_id: 74, run_type: 'action', connector_key: 'synthetic-context', action_key: 'read',
+      compiled_code: code(`return { success: true, output: ${output} };`),
+      config: { REGION: 'connection', CONNECTION_ONLY: true },
+      connection_credentials: { REGION: 'profile', PROFILE_ONLY: 'profile' },
+      session_state: { synthetic: 'synthetic-session-state' },
+    } as PollResponse, { REGION: 'environment', ENV_ONLY: 'environment' } as Parameters<typeof executeRun>[2], {
+      executor: new IsolateExecutor({ timeoutMs: 5_000 }), generateEmbeddings: false,
+    });
+    assert.equal(result.error, undefined);
+    assert.equal(completed.length, 1);
+    assert.equal(completed[0].status, 'success');
+    assert.deepEqual(completed[0].action_output, context === 'config'
+        ? { region: 'connection', profile: 'profile', connection: true, environment: 'environment' }
+        : { available: true });
+  });
+}
+
 test('bound fetch crosses the native isolate as bytes and exposes no host hook', async () => {
   let calls = 0;
   const result = await run(`
