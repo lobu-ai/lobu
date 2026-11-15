@@ -13,6 +13,7 @@
 export type ToolAccessLevel = "read" | "write" | "admin";
 
 export const MEMBER_WRITE_ACTIONS: Record<string, Set<string> | null> = {
+	notify: new Set(["submit"]),
 	save_memory: null,
 	// App-only approval decisions are already restricted to one encrypted,
 	// short-lived capability bound to the OAuth user, client, MCP session, org,
@@ -90,6 +91,7 @@ export const MEMBER_WRITE_ACTIONS: Record<string, Set<string> | null> = {
 };
 
 export const OWNER_ADMIN_ACTIONS: Record<string, Set<string>> = {
+	notify: new Set(["send"]),
 	manage_inference_providers: new Set([
 		"create",
 		"update",
@@ -193,6 +195,8 @@ export const OWNER_ADMIN_ACTIONS: Record<string, Set<string>> = {
 };
 
 export const PUBLIC_READ_ACTIONS: Record<string, Set<string> | null> = {
+	// The handler additionally requires an authenticated sending workspace.
+	notify: new Set(["list_inboxes"]),
 	resolve_path: null,
 	search_memory: null,
 	// SDK method discovery — safe to expose; surfaces no data.

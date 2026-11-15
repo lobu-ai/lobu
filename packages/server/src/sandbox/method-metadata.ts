@@ -537,6 +537,18 @@ export default async (_ctx, client) => {
 	},
 
 	// notifications
+  "notifications.listInboxes": {
+    summary: "Discover an organization's published send-only notification inboxes. Requires an authenticated sending workspace; grants no recipient-workspace access. Returns only published keys, descriptions and data schemas.",
+    access: "read",
+    signature: "notifications.listInboxes(input: { organization: string }): Promise<{ inboxes: { key: string; description: string; input_schema: object }[] }>",
+    example: "await client.notifications.listInboxes({ organization: 'support-team' });",
+  },
+  "notifications.submit": {
+    summary: "Submit an approved report to a published org-owned inbox from your current workspace. No sender connector, secret or recipient membership is required. Title is 1–200 characters, body at most 1000, schema-validated data at most 16 KiB, idempotency_key 1–300. Receipt confirms durable acceptance, not triage or resolution. Sending is rate-limited to 30 per minute per sending/receiving workspace. Never share secrets or unrelated private data. Obtain exact content consent or explicit unattended submission authorization first.",
+    access: "write",
+    signature: "notifications.submit(input: { organization: string; inbox: string; title: string; body?: string; data?: object; idempotency_key: string }): Promise<{ status: 'received'; receipt: string }>",
+    example: "await client.notifications.submit({ organization: 'support-team', inbox: 'support.report', title: 'Approved report', body: 'Reviewed description', idempotency_key: 'report-unique-key' });",
+  },
 	"notifications.list": {
 		summary:
 			"List the caller's in-app inbox notifications (same store as REST GET /notifications). Keyset-paginated by event id; optional unread_only filter. Returns `{ notifications, nextCursor }`.",

@@ -1113,10 +1113,10 @@ Memory:
       .option("--url <url>", "Server URL override")
       .addHelpText(
         "after",
-        "\nProduct feedback: discover a configured workspace-inbox in the sending workspace:\n" +
-          '  lobu call query_sdk --org <sending-workspace> --arg title="Find feedback inbox" --arg \'script=export default async (_ctx, client) => client.operations.listAvailable({ connector_key: "workspace-inbox" })\'\n' +
-          "Review the exact subject, body and references with the user before sending through run_sdk. Honor Auto/Ask/Block and wait for any required human approval. Keep credentials and unrelated private content out of reports.\n" +
-          "A receipt confirms the original report was stored as an event. Receiving Automations may link evidence to an existing issue; a receipt does not confirm triage or resolution. No ready inbox means an administrator must configure one.\n"
+        "\nProduct feedback: discover a published notification inbox from your sending workspace:\n" +
+          '  lobu call query_sdk --org <sending-workspace> --arg title="Find feedback inbox" --arg \'script=export default async (_ctx, client) => client.notifications.listInboxes({ organization: "<recipient-workspace>" })\'\n' +
+          "Review the exact title, body and references with the user before notifications.submit through run_sdk. Reuse the same idempotency key and input on retry. Keep credentials and unrelated private content out of reports.\n" +
+          "A receipt confirms the original report was stored as an event. Receiving Automations may link evidence to an existing issue; a receipt does not confirm triage or resolution. The receiving administrator publishes the inbox; no sender connector or shared secret is needed.\n"
       ),
     { org: true, json: true }
   ).action(

@@ -29,6 +29,7 @@ interface KindValidationResult {
 }
 
 export interface EventKindDefinition {
+  inbox?: { accept_from: 'authenticated_workspaces'; recipients: 'admins' };
   description?: string;
   metadataSchema?: Record<string, unknown>;
   /**

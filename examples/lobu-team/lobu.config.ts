@@ -9,9 +9,7 @@ import {
   defineEntityType,
   defineRelationshipType,
   every,
-  on,
   reactionFromFile,
-  secret,
   Type,
 } from "@lobu/cli/config";
 import type ClickHouseAnalyticsConnector from "./clickhouse-analytics.connector.ts";
@@ -309,16 +307,26 @@ const issueTracker = defineAutomation({
   ),
 });
 
-const productFeedbackInbox = defineConnection({
-  slug: "product-feedback-inbox",
-  connector: "webhook",
-  credentialMode: "byo",
-  name: "Product feedback inbox",
-  config: {
-    token: secret("PRODUCT_FEEDBACK_INBOX_TOKEN"),
-    semanticType: "product.feedback",
-    titlePath: "/subject",
-    searchable: false,
+const feedbackInbox = defineEntityType({
+  key: "$member",
+  eventKinds: {
+    observation: { description: "Evidence and triage observations." },
+    "product.feedback": {
+      description:
+        "Submit a reviewed Lobu product feedback report to Lobu Team.",
+      inbox: { accept_from: "authenticated_workspaces", recipients: "admins" },
+      metadataSchema: {
+        type: "object",
+        properties: {
+          references: {
+            type: "array",
+            maxItems: 5,
+            items: { type: "string", format: "uri", pattern: "^https?://" },
+          },
+        },
+        additionalProperties: false,
+      },
+    },
   },
 });
 
@@ -329,20 +337,19 @@ const feedbackTriage = defineAutomation({
   description:
     "Attach user reports to tasks and matching issues without changing telemetry lifecycle or counts.",
   triggers: [
-    on("webhook", "delivery.received", {
-      connection: productFeedbackInbox,
+    {
+      kind: "event",
+      source: "workspace",
+      event_types: ["product.feedback"],
       execution: "window",
       active_run: "queue",
-      output: "silent",
-    }),
+    },
   ],
-  // Preparation binds reports by delivery identity. A bounded context source
-  // avoids the default all-events arrival source and its timestamp membership.
-  // BYO connection rows use the agentconn- namespace for their stored slug.
+  // The preparation script reads the exact accepted event from its trigger.
   sources: {
-    inbox: context(`SELECT id AS connection_id, slug FROM connections
-      WHERE slug = 'agentconn-product-feedback-inbox' AND connector_key = 'webhook'
-        AND deleted_at IS NULL`),
+    inbox: context(
+      "SELECT id FROM events WHERE semantic_type = 'product.feedback' LIMIT 0"
+    ),
   },
   prompt: feedbackTriagePrompt,
   reaction: reactionFromFile<typeof FeedbackTriageReaction>(
@@ -450,15 +457,9 @@ export default defineConfig({
     companyCloudflareAccount,
     gmailOAuthApp,
   ],
-  entities: [task, issue, productUsers],
+  entities: [task, issue, productUsers, feedbackInbox],
   relationships: [trackedBy],
-  connections: [
-    analytics,
-    productActivityDb,
-    lobuTeamSlack,
-    companyCloudflare,
-    productFeedbackInbox,
-  ],
+  connections: [analytics, productActivityDb, lobuTeamSlack, companyCloudflare],
   // The external digest is maintained by scripts/configure-product-activity.ts.
   // Apply without prune: preserve its existing delivery agent and manual Automation.
   automations: [issueTracker, feedbackTriage],

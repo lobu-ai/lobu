@@ -47,6 +47,9 @@ import {
 } from "./action-card-state";
 
 interface CreateNotificationParams {
+	/** Server-stamped send-only inbox provenance; never accepted from notification data. */
+	inboxSubmission?: { organization_id: string; user_id: string | null; agent_id: string | null; automation_id: number | null; run_id: number | null; inbox: string };
+	inboxFingerprint?: string;
 	organizationId: string;
 	type:
 		| "action_approval_needed"
@@ -1425,6 +1428,7 @@ export async function createNotificationForUsers(
 
 	const metadata: Record<string, unknown> = {
 		notification_type: params.type,
+		...(params.inboxSubmission ? { inbox_submission: params.inboxSubmission, inbox_fingerprint: params.inboxFingerprint } : {}),
 		resource_type: params.resourceType ?? null,
 		resource_id: params.resourceId ?? null,
 		resource_url: params.resourceUrl ?? null,

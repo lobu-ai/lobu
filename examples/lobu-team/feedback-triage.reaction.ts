@@ -1,6 +1,5 @@
 import type {
   AutomationScriptContext,
-  ConnectorTriggerSignal,
   ReactionClient,
   ReactionContext,
 } from "@lobu/connector-sdk";
@@ -49,38 +48,28 @@ function id(value: unknown): number {
 
 interface ReportPointer {
   id: number;
-  connection_id: number;
   origin_id: string;
 }
 
-/** Freeze the queued delivery's durable identity before analysis. Event
- * windows use signal time, which need not equal the row's arrival timestamp.
- * Save only a pointer so large report bodies cannot exceed preparation limits.
- */
+/** Bind one accepted notification event by its durable trigger pointer. */
 export async function prepare(
   ctx: AutomationScriptContext,
   client: ReactionClient
 ): Promise<{ reports: ReportPointer[] }> {
   const signal = ctx.trigger_signals?.[0] as
-    | Partial<ConnectorTriggerSignal>
+    | { source?: string; event_type?: string; event_id?: number }
     | undefined;
   if (
     ctx.trigger_signals?.length !== 1 ||
-    signal?.connector_key !== "webhook" ||
-    signal.event_type !== "delivery.received" ||
-    typeof signal.resource_ref !== "string" ||
-    !signal.resource_ref ||
-    signal.resource_ref.length > 256
+    signal?.source !== "workspace" ||
+    signal.event_type !== "product.feedback"
   )
     throw new Error("Expected one queued feedback delivery");
   const reports = (await client.query(`
-    SELECT e.id, e.connection_id, e.origin_id
-    FROM events e JOIN connections c ON c.id = e.connection_id
-    WHERE c.id = ${id(signal.connection_id)}
-      AND c.slug = 'agentconn-product-feedback-inbox' AND c.connector_key = 'webhook'
-      AND c.deleted_at IS NULL AND e.semantic_type = 'product.feedback'
-      AND e.origin_id = ${literal(signal.resource_ref)}
-    LIMIT 2
+    SELECT id, origin_id FROM events
+    WHERE id = ${id(signal.event_id)} AND semantic_type = 'product.feedback'
+      AND metadata->'inbox_submission'->>'inbox' = 'product.feedback'
+    LIMIT 1
   `)) as ReportPointer[];
   if (reports.length !== 1)
     throw new Error("Feedback delivery is not accessible in this inbox");
@@ -115,19 +104,16 @@ export default async function triageFeedback(
   for (const decision of decisions) {
     const reportId = id(decision.report_id);
     const [report] = (await client.query(`
-      SELECT e.id, e.title, e.payload_data,
-        md5(e.connection_id::text || ':' || e.origin_id) AS report_key
-      FROM events e JOIN connections c ON c.id = e.connection_id
-      WHERE e.id = ${reportId} AND c.slug = 'agentconn-product-feedback-inbox'
-        AND c.connector_key = 'webhook' AND c.deleted_at IS NULL
-        AND e.semantic_type = 'product.feedback'
-        AND e.connection_id = ${id(pointer.connection_id)}
+      SELECT e.id, e.title,
+        md5(e.origin_id) AS report_key
+      FROM events e
+      WHERE e.id = ${reportId} AND e.semantic_type = 'product.feedback'
+        AND e.metadata->'inbox_submission'->>'inbox' = 'product.feedback'
         AND e.origin_id = ${literal(pointer.origin_id)}
       LIMIT 1
     `)) as Array<{
       id: number;
       title: string | null;
-      payload_data: { subject?: string };
       report_key: string;
     }>;
     if (!report || !/^[0-9a-f]{32}$/.test(report.report_key))
@@ -186,10 +172,7 @@ export default async function triageFeedback(
             const created = await client.entities.create({
               entity_type: "task",
               slug,
-              name: (typeof report.payload_data?.subject === "string"
-                ? report.payload_data.subject
-                : report.title || "Product feedback"
-              ).slice(0, 160),
+              name: (report.title || "Product feedback").slice(0, 160),
               metadata: {
                 kind: decision.kind,
                 status: "open",

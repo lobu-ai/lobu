@@ -1,6 +1,6 @@
 /** Integration coverage for kind-backed notification write, render, and filtering. */
 
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { createNotificationForUsers } from '../../../notifications/service';
 import { notify } from '../../../tools/admin/notify';
 import { getContent } from '../../../tools/get_content';
@@ -369,5 +369,165 @@ describe('notify > semantic_type (kind) payload', () => {
       LIMIT 1
     `;
     expect(rows[0].semantic_type).toBe('notification');
+  });
+});
+
+describe('published notification inboxes', () => {
+  async function fixture() {
+    const { buildClientSDK } = await import('../../../sandbox/client-sdk');
+    const { seedOwnerContext } = await import('../../setup/test-fixtures');
+    const sender = await seedOwnerContext({ orgName: 'Synthetic inbox sender' });
+    const receiver = await seedOwnerContext({ orgName: 'Synthetic inbox receiver' });
+    const receiverSdk = buildClientSDK(receiver.ctx, {} as never);
+    await ensureMemberEntityType(receiver.org.id);
+    await receiverSdk.entitySchema.updateType({ slug: '$member', event_kinds: {
+      'support.report': { description: 'Submit a support report',
+        inbox: { accept_from: 'authenticated_workspaces', recipients: 'admins' },
+        metadataSchema: { type: 'object', properties: { reference: { type: 'string' } }, additionalProperties: false } },
+      'private.note': { description: 'Never published' },
+    } } as never);
+    const sdk = buildClientSDK(sender.ctx, {} as never);
+    const args = { organization: receiver.org.slug, inbox: 'support.report', title: 'Operational pilot',
+      body: 'A synthetic report', data: { reference: 'https://example.com/reproduction' }, idempotency_key: 'synthetic-pilot' };
+    return { sender, receiver, receiverSdk, sdk, args };
+  }
+  it('discovers and accepts a report from a different workspace without a connection', async () => {
+    const { sender, receiver, receiverSdk, sdk, args } = await fixture();
+    const discovered = await sdk.notifications.listInboxes({ organization: receiver.org.slug });
+    expect(discovered.inboxes.map((inbox) => inbox.key)).toEqual(['support.report']);
+    const accepted = await sdk.notifications.submit(args);
+    expect(accepted).toEqual({ status: 'received', receipt: expect.any(String) });
+    expect(await sdk.notifications.submit(args)).toEqual(accepted);
+    const [event] = await getTestDb()`SELECT organization_id, connection_id, metadata, payload_data FROM events WHERE id = ${Number(accepted.receipt)}`;
+    expect(event.organization_id).toBe(receiver.org.id);
+    expect(event.connection_id).toBeNull();
+    expect(event.metadata.inbox_submission).toMatchObject({ organization_id: sender.org.id, user_id: sender.user.id, inbox: 'support.report' });
+    expect(event.payload_data).toEqual(args.data);
+    expect((await sdk.notifications.list()).notifications).toHaveLength(0);
+    expect((await receiverSdk.notifications.list()).notifications).toHaveLength(1);
+    expect(await sdk.query(`SELECT id FROM events WHERE id = ${Number(accepted.receipt)}`)).toHaveLength(0);
+    const tasks = await getTestDb()`SELECT id FROM runs WHERE action_key = 'activate-workspace-event' AND action_input->'payload'->>'eventId' = ${accepted.receipt}`;
+    expect(tasks).toHaveLength(1);
+  });
+
+  it('uses the authenticated MCP sandbox for discovery and submission', async () => {
+    const { sender, receiver, args } = await fixture();
+    const { TestMcpClient } = await import('../../setup/test-mcp-client');
+    const { createTestPAT } = await import('../../setup/test-fixtures');
+    const wire = new TestMcpClient({ token: (await createTestPAT(sender.user.id, sender.org.id, { scope: 'mcp:read mcp:write' })).token, orgSlug: sender.org.slug });
+    expect(await wire.querySdk(`export default async (_ctx, client) => client.notifications.listInboxes({ organization: ${JSON.stringify(receiver.org.slug)} })`))
+      .toMatchObject({ success: true, return_value: { inboxes: [{ key: 'support.report' }] } });
+    expect(await wire.runSdk(`export default async (_ctx, client) => client.notifications.submit(${JSON.stringify(args)})`))
+      .toMatchObject({ success: true, return_value: { status: 'received', receipt: expect.any(String) } });
+    expect(await wire.querySdk(`export default async (_ctx, client) => client.notifications.submit(${JSON.stringify(args)})`))
+      .toMatchObject({ success: false });
+  });
+
+  it('deduplicates concurrent retries and refuses changed content for the same key', async () => {
+    const { sdk, args } = await fixture();
+    const receipts = await Promise.all(Array.from({ length: 5 }, () => sdk.notifications.submit(args)));
+    expect(new Set(receipts.map((r) => r.receipt)).size).toBe(1);
+    await expect(sdk.notifications.submit({ ...args, body: 'Different report' })).rejects.toMatchObject({ httpStatus: 409 });
+    const race = await Promise.allSettled([
+      sdk.notifications.submit({ ...args, idempotency_key: 'conflicting-race' }),
+      sdk.notifications.submit({ ...args, idempotency_key: 'conflicting-race', body: 'Competing content' }),
+    ]);
+    expect(race.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+    expect(race.find((result) => result.status === 'rejected')).toMatchObject({ reason: { httpStatus: 409 } });
+  });
+
+  it('keeps server provenance separate from arbitrary untrusted report data', async () => {
+    const { sdk, receiverSdk, sender, args } = await fixture();
+    await receiverSdk.entitySchema.updateType({ slug: '$member', event_kinds: { 'support.report': {
+      inbox: { accept_from: 'authenticated_workspaces', recipients: 'admins' }, metadataSchema: { type: 'object' },
+    } } });
+    const forged = { organization_id: 'forged-workspace', user_id: 'forged-user' };
+    const accepted = await sdk.notifications.submit({ ...args, data: { inbox_submission: forged } });
+    const [report] = await getTestDb()`SELECT metadata, payload_data FROM events WHERE id = ${Number(accepted.receipt)}`;
+    expect(report.metadata.inbox_submission).toMatchObject({ organization_id: sender.org.id, user_id: sender.user.id });
+    expect(report.payload_data.inbox_submission).toEqual(forged);
+  });
+
+  it('enforces the persisted byte limit after schema coercion', async () => {
+    const { sdk, receiverSdk, args } = await fixture();
+    await receiverSdk.entitySchema.updateType({ slug: '$member', event_kinds: { 'support.report': {
+      inbox: { accept_from: 'authenticated_workspaces', recipients: 'admins' },
+      metadataSchema: { type: 'object', properties: { values: { type: 'array', items: { type: 'string' } } } },
+    } } });
+    await expect(sdk.notifications.submit({ ...args, data: { values: Array(5000).fill(1) } })).rejects.toMatchObject({ httpStatus: 422 });
+  });
+
+  it.each([
+    ['long title', { title: 'x'.repeat(201) }], ['long body', { body: 'x'.repeat(1001) }],
+    ['large UTF-8 data', { data: { reference: '界'.repeat(6000) } }], ['schema mismatch', { data: { unexpected: true } }],
+    ['caller recipients', { recipients: 'all' }], ['empty workspace', { organization: '' }], ['empty key', { idempotency_key: '' }],
+  ])('rejects invalid or recipient-controlled input: %s', async (_label, patch) => {
+    const { sdk, args } = await fixture();
+    await expect(sdk.notifications.submit({ ...args, ...patch } as never)).rejects.toThrow();
+  });
+
+  it('fails closed for an unpublished, missing or immediately revoked inbox', async () => {
+    const { sdk, receiverSdk, receiver, args } = await fixture();
+    await expect(sdk.notifications.submit({ ...args, inbox: 'private.note' })).rejects.toMatchObject({ httpStatus: 404 });
+    await expect(sdk.notifications.submit({ ...args, organization: 'nonexistent-synthetic-org' })).rejects.toMatchObject({ httpStatus: 404 });
+    await receiverSdk.entitySchema.updateType({ slug: '$member', event_kinds: { 'support.report': { description: 'Closed' } } });
+    expect(await sdk.notifications.listInboxes({ organization: receiver.org.slug })).toEqual({ inboxes: [] });
+    await expect(sdk.notifications.submit(args)).rejects.toMatchObject({ httpStatus: 404 });
+  });
+
+  it('allows ordinary sending members, denies read-only tokens and nonmembers', async () => {
+    const { buildClientSDK } = await import('../../../sandbox/client-sdk');
+    const { sender, sdk, args } = await fixture();
+    await expect(buildClientSDK({ ...sender.ctx, memberRole: null }, {} as never).notifications.submit(args)).rejects.toThrow(/membership/);
+    await expect(buildClientSDK({ ...sender.ctx, scopes: ['mcp:read'] }, {} as never).notifications.submit(args)).rejects.toThrow(/write|scope/i);
+    await getTestDb()`UPDATE "member" SET role = 'member' WHERE "organizationId" = ${sender.org.id} AND "userId" = ${sender.user.id}`;
+    expect(await buildClientSDK({ ...sender.ctx, memberRole: 'member' }, {} as never).notifications.submit(args)).toMatchObject({ status: 'received' });
+    expect(await sdk.notifications.listInboxes({ organization: args.organization })).toHaveProperty('inboxes');
+  });
+
+  it('publishes only workspace-owned kinds and requires a receiving administrator', async () => {
+    const { sdk, receiver, args } = await fixture();
+    const kinds = { 'support.report': { inbox: { accept_from: 'authenticated_workspaces', recipients: 'admins' } } };
+    await expect(sdk.entitySchema.createType({ slug: 'ordinary', name: 'Ordinary', event_kinds: kinds })).rejects.toThrow('$member');
+    const { buildClientSDK } = await import('../../../sandbox/client-sdk');
+    await expect(buildClientSDK({ ...receiver.ctx, memberRole: 'member' }, {} as never).entitySchema.updateType({ slug: '$member', event_kinds: kinds })).rejects.toThrow();
+    expect(await sdk.notifications.submit(args)).toMatchObject({ status: 'received' });
+  });
+
+  it('bounds new submissions across shared database admission while allowing an accepted retry', async () => {
+    const { sdk, args } = await fixture();
+    const now = vi.spyOn(Date, 'now').mockReturnValue(Date.now());
+    try {
+      const first = await sdk.notifications.submit(args);
+      for (let index = 1; index < 30; index++) {
+        await sdk.notifications.submit({ ...args, idempotency_key: `bounded-${index}` });
+      }
+      await expect(sdk.notifications.submit({ ...args, idempotency_key: 'over-limit' })).rejects.toMatchObject({ httpStatus: 429 });
+      expect(await sdk.notifications.submit(args)).toEqual(first);
+    } finally { now.mockRestore(); }
+  });
+
+  it('fails closed without receiving administrators and never accepts sender identity from data', async () => {
+    const { sdk, receiver, args } = await fixture();
+    await expect(sdk.notifications.submit({ ...args, data: { organization_id: 'forged-workspace' } })).rejects.toMatchObject({ httpStatus: 422 });
+    await getTestDb()`UPDATE "member" SET role = 'member' WHERE "organizationId" = ${receiver.org.id}`;
+    await expect(sdk.notifications.submit(args)).rejects.toMatchObject({ httpStatus: 404 });
+    expect(await getTestDb()`SELECT id FROM events WHERE organization_id = ${receiver.org.id} AND semantic_type = 'support.report'`).toHaveLength(0);
+  });
+
+  it('rolls back the event and admin targets when durable activation cannot be queued', async () => {
+    const { sdk, receiver, args } = await fixture();
+    const db = getTestDb();
+    await db`CREATE FUNCTION test_reject_inbox_activation() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+      IF NEW.action_key = 'activate-workspace-event' THEN RAISE EXCEPTION 'synthetic activation persistence failure'; END IF; RETURN NEW; END $$`;
+    await db`CREATE TRIGGER test_inbox_activation_failure BEFORE INSERT ON runs FOR EACH ROW EXECUTE FUNCTION test_reject_inbox_activation()`;
+    try {
+      await expect(sdk.notifications.submit(args)).rejects.toThrow('synthetic activation persistence failure');
+      expect(await db`SELECT id FROM events WHERE organization_id = ${receiver.org.id} AND semantic_type = 'support.report'`).toHaveLength(0);
+    } finally {
+      await db`DROP TRIGGER test_inbox_activation_failure ON runs`;
+      await db`DROP FUNCTION test_reject_inbox_activation()`;
+    }
+    expect(await sdk.notifications.submit(args)).toMatchObject({ status: 'received' });
   });
 });

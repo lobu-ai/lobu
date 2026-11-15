@@ -23,7 +23,7 @@ describe('manage_connections install_connector — catalog connector_id', () => 
     await cleanupTestDatabase();
   });
 
-  it.each(['hackernews', 'workspace-inbox'])('enables %s by catalog id and is idempotent', async (connectorKey) => {
+  it.each(['hackernews'])('enables %s by catalog id and is idempotent', async (connectorKey) => {
     const { org, ctx } = await seedOwnerContext({
       orgName: 'Catalog Connector Org',
       userName: 'Catalog Connector User',

@@ -52,6 +52,8 @@ export interface NotificationsListResult {
 }
 
 export interface NotificationsNamespace {
+  listInboxes(input: { organization: string }): Promise<import('../../notifications/inbox').InboxListing>;
+  submit(input: import('../../notifications/inbox').InboxSubmitInput): Promise<import('../../notifications/inbox').InboxReceipt>;
 	send(input: NotificationsSendInput): Promise<NotificationsSendResult>;
 	list(input?: NotificationsListInput): Promise<NotificationsListResult>;
 	/**
@@ -104,6 +106,8 @@ export function buildNotificationsNamespace(
 
 	return {
 		send: method("send"),
+		listInboxes: method("list_inboxes"),
+		submit: method("submit"),
 		async list(input) {
 			const userId = requireUserId(ctx);
 			return listNotifications({
