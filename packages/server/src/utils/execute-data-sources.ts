@@ -53,6 +53,7 @@ export interface DataSourceContext {
    * data — matching what search_memory/get_content already enforce.
    */
   userId?: string | null;
+  personalMemoryPrincipal?: string | null;
   /** When set, events CTE filters to events belonging to any of these entities */
   entityIds?: number[];
   query?: Record<string, string>;
@@ -426,6 +427,7 @@ export function validateAndScopeQuery(
      * yields org-visible-only (fail-closed for private data).
      */
     userId?: string | null;
+  personalMemoryPrincipal?: string | null;
     /**
      * Exclude workspace-identity audit events (metadata.category='workspace')
      * from the events and event_classifications CTEs. These rows record
@@ -498,7 +500,7 @@ export function validateAndScopeQuery(
     ...buildScopedQuery(
       trimmed,
       tableRefs,
-      { ...options?.window, organizationId, userId: options?.userId ?? null },
+      { ...options?.window, organizationId, userId: options?.userId ?? null, personalMemoryPrincipal: options?.personalMemoryPrincipal ?? null },
       options
     ),
     tableRefs,
@@ -533,6 +535,7 @@ export function buildScopedQuery(
   const scope: AuthzScope = {
     organizationId: context.organizationId,
     principal: context.userId ?? null,
+    personalMemoryPrincipal: context.personalMemoryPrincipal ?? null,
   };
 
   // Organization scoping is mandatory for table-backed queries, but tableless

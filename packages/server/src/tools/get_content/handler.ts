@@ -496,6 +496,7 @@ async function getContentImpl(
     const visibilityScope = {
       organizationId: ctx.organizationId,
       userId: authzScopeFromToolContext(ctx).principal,
+      personalMemoryPrincipal: authzScopeFromToolContext(ctx).personalMemoryPrincipal,
     };
 
     // Log incoming classification filters for debugging

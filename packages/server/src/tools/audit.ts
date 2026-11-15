@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { REDACTED_SENTINEL } from '@lobu/core';
 import { currentMcpActivityEventMetadata } from '../lobu/stores/mcp-client-conversations';
 import { getDb } from '../db/client';
+import { resolvePersonalMemoryResource } from '../authz/personal-memory';
 import { parsePositiveIntegerId, ToolUserError } from '../utils/errors';
 import { insertEvent, type InsertEventParams } from '../utils/insert-event';
 import logger from '../utils/logger';
@@ -49,7 +50,7 @@ interface ToolInvocationAuditParams {
   durationMs: number;
   ctx: Pick<ToolContext, 'userId' | 'tokenType' | 'clientId' | 'tokenName' | 'agentId' |
     'mcpSessionId' | 'mcpConversationId'> &
-    Partial<Pick<ToolContext, 'sourceContext' | 'actingRunId' | 'agentTurn'>> & { organizationId: string | null };
+    Partial<Pick<ToolContext, 'sourceContext' | 'actingRunId' | 'agentTurn' | 'personalMemoryPrincipal' | 'actingAutomationId'>> & { organizationId: string | null };
 }
 
 async function insertToolAuditEvent(params: InsertEventParams, ctx: ToolInvocationAuditParams['ctx']) {
@@ -386,8 +387,19 @@ export async function recordToolInvocationAudit(
       params.toolName === 'manage_automations'
         ? manageAutomationsIdentity(params.args as Record<string, unknown>)
         : null;
+    // Request-bearing tools and call headings can carry personal DM content
+    // in scripts, previews, traces and errors, including on failures. Generic
+    // audit summaries already omit free text. Gate each content-bearing copy
+    // with the save audience; failed resolution must never append it unscoped.
+    let entityIds: number[] = [];
+    if (params.ctx.sourceContext?.chatAccess === 'member' && CALL_HEADING_TOOLS.has(params.toolName)) {
+      if (!params.ctx.organizationId) throw new ToolUserError('A workspace is required for a personal audit.', 403, 'PERMISSION');
+      entityIds = [await resolvePersonalMemoryResource(getDb(), {
+        ...params.ctx, organizationId: params.ctx.organizationId, sourceContext: params.ctx.sourceContext,
+      })];
+    }
     await insertToolAuditEvent({
-      entityIds: [],
+      entityIds,
       organizationId: params.ctx.organizationId,
       originId: `tool_invocation:${params.toolName}:${Date.now()}:${randomUUID()}`,
       title: `${params.toolName} ${success ? 'completed' : 'failed'}`,

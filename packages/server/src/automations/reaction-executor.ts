@@ -133,6 +133,7 @@ export async function executeAutomationScript(options: ExecuteAutomationScriptOp
     actingAutomationId: context.window.automation_id,
     actingRunId: context.window.run_id,
     automationReadPrincipalId,
+    personalMemoryPrincipal: null,
     automationReadMemberRole,
     sourceContext: { source: AUTOMATION_RUN_SOURCE },
   };

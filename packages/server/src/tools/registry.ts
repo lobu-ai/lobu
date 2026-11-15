@@ -127,6 +127,8 @@ export interface ToolContext {
   mcpConversationId?: string | null;
   /** User ID from OAuth token, PAT, or session (null for anonymous public reads) */
   userId: string | null;
+  /** Auth-bound human reader; absent/null denies personal memory. Never a creator/owner fallback. */
+  personalMemoryPrincipal?: string | null;
   /** Caller's role in the organization (null for non-members reading a public workspace). */
   memberRole: string | null;
   /** Verified worker-token limit on admin-tier tools; retained by nested SDK calls. */

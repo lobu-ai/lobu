@@ -77,11 +77,13 @@ describe('connection-visibility compiler (M1 one-compiler)', () => {
       organizationId: 'o',
       principal: 'u',
       agentId: 'a',
+      personalMemoryPrincipal: null,
     });
     expect(authzScopeFromToolContext({ organizationId: 'o', userId: null })).toEqual({
       organizationId: 'o',
       principal: null,
       agentId: null,
+      personalMemoryPrincipal: null,
     });
   });
 
@@ -98,12 +100,27 @@ describe('connection-visibility compiler (M1 one-compiler)', () => {
       organizationId: 'org_test',
       principal: 'user_creator',
       agentId: 'agent_test',
+      personalMemoryPrincipal: null,
     });
     expect(compileConnectionFkVisibility(readScope, 1, 'ev').params).toEqual([
       'org_test', 'user_creator',
     ]);
     expect(ctx.userId).toBeNull();
     expect(ctx.actingAutomationId).toBe(42);
+  });
+
+  it('requires the verified caller for personal memory and never grants it to an Automation', () => {
+    const caller = { organizationId: 'org_test', userId: 'user_caller' };
+    expect(authzScopeFromToolContext(caller).personalMemoryPrincipal).toBeNull();
+    expect(authzScopeFromToolContext({ ...caller, personalMemoryPrincipal: 'user_other' }).personalMemoryPrincipal).toBeNull();
+    expect(authzScopeFromToolContext({ ...caller, personalMemoryPrincipal: 'user_caller' }).personalMemoryPrincipal).toBe('user_caller');
+    expect(authzScopeFromToolContext({
+      ...caller, actingAutomationId: 42, personalMemoryPrincipal: 'user_caller',
+    }).personalMemoryPrincipal).toBeNull();
+    expect(authzScopeFromToolContext({
+      organizationId: 'org_test', userId: null, automationReadPrincipalId: 'user_creator',
+      personalMemoryPrincipal: 'user_creator',
+    }).personalMemoryPrincipal).toBeNull();
   });
 
   it('keeps the authenticated caller ahead of the Automation creator', () => {
@@ -141,7 +158,7 @@ describe('connection-visibility compiler (M1 one-compiler)', () => {
     expect(viaAdapter.params.slice(0, viaCompiler.params.length)).toEqual(viaCompiler.params);
     // Plus the per-resource membership gate composed after it.
     expect(viaAdapter.sql).toContain('member_of');
-    expect(viaAdapter.params).toEqual(['org_test', 'user_a', 'org_test', 'user_a']);
+    expect(viaAdapter.params).toEqual(['org_test', 'user_a', 'org_test', 'user_a', null]);
   });
 
   it('the adapter still returns empty when no org is requested', () => {
