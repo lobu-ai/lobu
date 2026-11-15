@@ -23,7 +23,7 @@ import {
   createTestUser,
 } from '../../setup/test-fixtures';
 
-const FEED_EVENTS = 3_000;
+const FEED_EVENTS = 8_000;
 const OTHER_EVENTS = 60_000;
 
 interface CapturedQuery {
@@ -286,5 +286,57 @@ describe('activity feed queries stay organization-bounded', () => {
     expect(plan.some((node) => node['Index Name'] === 'idx_events_embedding')).toBe(true);
     const embeddingScans = plan.filter((node) => node['Relation Name'] === 'event_embeddings');
     expect(embeddingScans.some((node) => node['Node Type'] === 'Seq Scan')).toBe(false);
+
+    // A tiny eligible scope must not depend on landing in the nearest global
+    // IVFFlat lists. Its vectors are farther away than the unrelated history.
+    // Private and audit rows make the organization large, while only 24 rows
+    // are eligible: the decision must use the same visibility filters as recall.
+    const tinyOrg = await createTestOrganization({ name: 'Small Vector Plan Org' });
+    const hiddenConnection = await createTestConnection({
+      organization_id: tinyOrg.id,
+      connector_key: 'vector-plan-source',
+      created_by: owner.id,
+      visibility: 'private',
+      createDefaultFeed: false,
+    });
+    await sql`
+      WITH inserted AS (
+        INSERT INTO events (organization_id, semantic_type, origin_type, connection_id, payload_text, origin_id)
+        SELECT ${tinyOrg.id}, CASE WHEN g > 6024 THEN 'audit' ELSE 'content' END,
+          CASE WHEN g > 6024 THEN 'tool_invocation' ELSE NULL END,
+          CASE WHEN g BETWEEN 25 AND 6024 THEN ${hiddenConnection.id}::bigint ELSE NULL END,
+          'small scope row ' || g, 'small-' || g
+        FROM generate_series(1, 12024) AS g
+        RETURNING id, origin_id
+      )
+      INSERT INTO event_embeddings (event_id, embedding_model, embedding)
+      SELECT id, 'Xenova/bge-base-en-v1.5',
+        ('[' || (0.4 + substring(origin_id FROM 7)::int * 0.005)::text || ',1,0' || repeat(',0', 765) || ']')::vector
+      FROM inserted
+    `;
+    const smallOptions = {
+      organization_id: tinyOrg.id,
+      visibility_scope: { organizationId: tinyOrg.id, userId: user.id },
+      exclude_internal_ops: true,
+      exclude_recall_bookkeeping: true,
+      sort_by: 'score' as const,
+      limit: 10,
+      include_total: false,
+      query_embedding: Array.from({ length: 768 }, (_, i) => i === 0 ? 1 : 0),
+    };
+    const exact = await searchContentBySingleQuery(sql, '', smallOptions);
+    const smallCapture: CapturedQuery[] = [];
+    const approximate = await searchContentBySingleQuery(capturingClient(sql, smallCapture), '', {
+      ...smallOptions,
+      approximate_candidate_search: true,
+    });
+    expect(exact.content).toHaveLength(10);
+    expect(approximate.content.map((row) => row.id)).toEqual(exact.content.map((row) => row.id));
+    const smallQuery = smallCapture.find((c) => /search_candidates AS/.test(c.query));
+    if (!smallQuery) throw new Error('small scope did not issue a recall query');
+    const smallPlan = await planOf(smallQuery, true, true);
+    // No global vector scan should execute for a small eligible scope.
+    expect(smallPlan.filter((node) => node['Index Name'] === 'idx_events_embedding')
+      .every((node) => node['Actual Loops'] === 0)).toBe(true);
   }, 120_000);
 });

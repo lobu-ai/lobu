@@ -72,6 +72,14 @@ import {
   buildProducedByAutomationClause,
 } from './visibility';
 
+// Probe only this many eligible events before choosing the vector strategy.
+// Small scopes are cheaper and more complete through embedding primary keys;
+// a global IVFFlat probe can miss all of them among unrelated workspace rows.
+// Measured against the read-only production source: a 2,860-event permitted
+// scope took 0.84s exact versus 7.4s through the global index. A 4K window also
+// keeps the eligibility probe bounded for larger scopes that retain ANN.
+const EXACT_RECALL_SCOPE_LIMIT = 4096;
+
 /**
  * Run a recall query inside its own transaction with the recall budget applied
  * via `SET LOCAL`, cancelled with the caller. Database failures (including
@@ -543,6 +551,31 @@ export async function searchContentBySingleQuery(
             AND ($6::int IS NOT NULL)
             AND iwf.run_id = $6::int`;
     const branches: string[] = [];
+    // Count a bounded eligibility window, not workspace history or a planner
+    // estimate. Visibility and every recall filter apply before the probe cap,
+    // so a large workspace with a small permitted subset also gets exact recall.
+    // Both strategies run in the same statement and share its six-second cap.
+    const vectorScopeCtes = `vector_scope AS MATERIALIZED (
+        SELECT f.id
+        FROM current_event_records f
+        ${candidateFilterJoins}
+        WHERE ${standardFiltersSQL}
+        LIMIT ${EXACT_RECALL_SCOPE_LIMIT + 1}
+      ),
+      vector_scope_size AS MATERIALIZED (
+        SELECT COUNT(*) AS size FROM vector_scope
+      ),
+      `;
+    branches.push(`SELECT scoped.id FROM vector_scope scoped
+          CROSS JOIN LATERAL (
+            SELECT MIN(emb.embedding <=> ${vecParam}) AS dist
+            FROM event_embeddings emb
+            WHERE emb.event_id = scoped.id AND ${modelScopeFor('emb')}
+          ) nearest
+          WHERE (SELECT size FROM vector_scope_size) <= ${EXACT_RECALL_SCOPE_LIMIT}
+            AND (1 - nearest.dist) >= ${minSimilarityParam}
+          ORDER BY nearest.dist
+          LIMIT ${CANDIDATE_VECTOR_LIMIT}`);
     // ivfflat ANN — the only shape that index serves. Multi-vector: the ANN now
     // ranks CHUNK rows, so over-fetch chunks then collapse to distinct events by
     // their best (nearest) chunk, so N chunks of one event can't crowd the
@@ -564,7 +597,8 @@ export async function searchContentBySingleQuery(
               WHERE f.id = emb.event_id AND ${standardFiltersSQL}
               OFFSET 0
             ) visible_event ON true
-            WHERE ${modelScopeFor('emb')}
+            WHERE (SELECT size FROM vector_scope_size) > ${EXACT_RECALL_SCOPE_LIMIT}
+              AND ${modelScopeFor('emb')}
               AND (1 - (emb.embedding <=> ${vecParam})) >= ${minSimilarityParam}
             ORDER BY emb.embedding <=> ${vecParam}
             LIMIT ${CANDIDATE_VECTOR_LIMIT * 3}
@@ -601,7 +635,7 @@ export async function searchContentBySingleQuery(
     // Each branch has its own ORDER BY/LIMIT and must therefore be
     // parenthesized for the UNION to parse. `UNION` (not UNION ALL) dedupes
     // ids that several sources surface — cheap over ≤200 rows per branch.
-    searchCandidatesCteSql = `search_candidates AS (
+    searchCandidatesCteSql = `${vectorScopeCtes}search_candidates AS (
         ${branches.map((b) => `(${b})`).join('\n        UNION\n        ')}
       ),
       `;
