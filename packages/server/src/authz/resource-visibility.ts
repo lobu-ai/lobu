@@ -115,7 +115,17 @@ export function compileResourceVisibility(
         ON ret.id = re.entity_type_id
         AND ret.organization_id = re.organization_id
         AND ret.slug = ${RESOURCE_TYPE_SQL}
-      WHERE re.organization_id = ${orgParam}`;
+      WHERE re.organization_id = ${orgParam}
+        AND re.deleted_at IS NULL
+      UNION ALL
+      SELECT re.id
+      FROM public.entities re
+      JOIN public.entity_types ret
+        ON ret.id = re.entity_type_id
+        AND ret.organization_id = re.organization_id
+        AND ret.slug = ${RESOURCE_TYPE_SQL}
+      WHERE re.organization_id = ${orgParam}
+        AND re.deleted_at IS NOT NULL`;
 
   // The resources the caller satisfies: a live `member_of` edge from the
   // caller's `$member` carries `manual` ownership, or ownership by a

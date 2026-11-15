@@ -1338,6 +1338,11 @@ async function handleDelete(
 			tree: preview.tree,
 		};
 	}
+	// A deferred force delete must not queue a proposal that cannot be applied.
+	if (force && deleteDecision.outcome === "defer") {
+		const preview = await deleteEntity(entityId, force, env, ctx, { dryRun: true });
+		if (preview.refused) throw new ToolUserError(preview.message, 400, "VALIDATION");
+	}
 	if (deleteDecision.outcome === "defer") {
 		const res = await deleteDecision.deferred.queue(ctx, env);
 		return {

@@ -757,7 +757,7 @@ describe("entity row validation at the physical writer", () => {
 			expect(await readDeletedAt(member.id)).not.toBeNull();
 		}, 60_000);
 
-		it("carries force_delete_tree onto the card", async () => {
+		it("carries force_delete_tree onto the card and refuses a protected tree before queuing", async () => {
 			const { org, user, doc } = await seedEscalatingDoc();
 
 			const res = (await manageEntity(
@@ -771,6 +771,21 @@ describe("entity row validation at the physical writer", () => {
 				res.approval_run_id ?? -1,
 			);
 			expect(proposal.force_delete_tree).toBe(true);
+
+			await seedType(org.id, "$resource", null);
+			await createEntity({
+				entity_type: "$resource", name: "Protected audience", parent_id: doc.id,
+				organization_id: org.id, created_by: user.id,
+			} as Parameters<typeof createEntity>[0]);
+			const sql = getTestDb();
+			const before = await sql`SELECT id FROM runs WHERE organization_id = ${org.id}`;
+			await expect(manageEntity(
+				{ action: "delete", entity_id: doc.id, force_delete_tree: true },
+				TEST_ENV, ctxFor(org.id, { userId: user.id }),
+			)).rejects.toThrow(/Cannot force-delete access resources/);
+			const after = await sql`SELECT id FROM runs WHERE organization_id = ${org.id}`;
+			expect(after.map(row => row.id).sort()).toEqual(before.map(row => row.id).sort());
+			expect(await rowExists(doc.id)).toBe(true);
 		}, 60_000);
 
 		/**

@@ -1947,7 +1947,6 @@ export async function deleteEntity(
   if (force) {
     const entityTreeIds = await loadEntityTreeIds(sql, entityId);
     const entityTreeIdsLiteral = pgBigintArray(entityTreeIds);
-    await requireForceDeletableTree(sql, entityTreeIds);
 
     // Preflight dependency report: what this delete removes vs. detaches.
     // An automation/feed whose entities all live inside the tree is deleted with
@@ -1983,6 +1982,14 @@ export async function deleteEntity(
       feeds_detached: Number(preflight[0]?.feeds_detached || 0),
       events_detached: Number(preflight[0]?.events_detached || 0),
     };
+
+    try {
+      await requireForceDeletableTree(sql, entityTreeIds);
+    } catch (error) {
+      if (!opts?.dryRun || !(error instanceof ToolUserError)) throw error;
+      return { message: `Dry run: force delete would NOT run — ${error.message}`,
+        deleted: 0, dry_run: true, refused: true, tree: report };
+    }
 
     if (opts?.dryRun) {
       // Preview the RULE too, or the preview lies — the same reasoning the soft

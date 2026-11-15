@@ -272,7 +272,14 @@ describe('entity history contracts', () => {
           FROM events WHERE id = ${event.id}`;
         expect(resources).toHaveLength(1);
         expect(events).toEqual([{ still_linked: true }]);
-        expect(attempt.status).toBe('rejected');
+        if (dryRun) {
+          expect(attempt.status).toBe('fulfilled');
+          if (attempt.status === 'fulfilled') {
+            expect(attempt.value).toMatchObject({ dry_run: true, deleted_count: 0 });
+          }
+        } else {
+          expect(attempt.status).toBe('rejected');
+        }
       });
     }
   }

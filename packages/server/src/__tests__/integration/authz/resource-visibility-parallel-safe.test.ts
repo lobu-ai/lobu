@@ -40,6 +40,7 @@ interface PlanNode {
   'Node Type': string;
   'Relation Name'?: string;
   'Parallel Aware'?: boolean;
+  'Index Name'?: string;
   Plans?: PlanNode[];
 }
 
@@ -318,5 +319,30 @@ describe('resource visibility gate', () => {
     const eventScans = nodes.filter((n) => n['Relation Name'] === 'events');
     expect(eventScans.length).toBeGreaterThan(0);
     expect(eventScans.every((n) => n['Parallel Aware'] === true)).toBe(true);
+  });
+
+  it('uses type indexes for live and retired requirements in a large workspace', async () => {
+    const sql = getTestDb() as unknown as DbClient;
+    const indexes = await sql.begin(async (tx: DbClient) => {
+      // Both live and retired non-resource entities must be large enough that
+      // scanning the workspace is more expensive than finding its resources.
+      await tx.unsafe(`INSERT INTO entities
+        (name, slug, entity_type_id, organization_id, created_by, deleted_at)
+        SELECT 'plan filler', 'plan-filler-' || g, et.id, $1, $2,
+          CASE WHEN g % 2 = 0 THEN now() ELSE NULL END
+        FROM entity_types et CROSS JOIN generate_series(1, 20000) g
+        WHERE et.organization_id = $1 AND et.slug = 'brand'`, [orgId, readerId]);
+      await tx.unsafe('UPDATE entities SET deleted_at = now() WHERE id = $1', [grantedResourceId]);
+      await tx.unsafe('ANALYZE entities');
+      await tx.unsafe('ANALYZE entity_types');
+      const { query, params } = gatedQuery(readerId, 'f.id');
+      const plan = await tx.unsafe<{ 'QUERY PLAN': { Plan: PlanNode }[] }[]>(
+        `EXPLAIN (FORMAT JSON) ${query}`, params as never[],
+      );
+      await tx.unsafe('UPDATE entities SET deleted_at = NULL WHERE id = $1', [grantedResourceId]);
+      return flatten(plan[0]['QUERY PLAN'][0].Plan).map((node) => node['Index Name']);
+    });
+    expect(indexes).toContain('idx_entities_entity_type_id');
+    expect(indexes).toContain('idx_entities_retired_type_id');
   });
 });
