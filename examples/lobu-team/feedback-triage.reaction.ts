@@ -77,7 +77,7 @@ export async function prepare(
     SELECT e.id, e.connection_id, e.origin_id
     FROM events e JOIN connections c ON c.id = e.connection_id
     WHERE c.id = ${id(signal.connection_id)}
-      AND c.slug = 'product-feedback-inbox' AND c.connector_key = 'webhook'
+      AND c.slug = 'agentconn-product-feedback-inbox' AND c.connector_key = 'webhook'
       AND c.deleted_at IS NULL AND e.semantic_type = 'product.feedback'
       AND e.origin_id = ${literal(signal.resource_ref)}
     LIMIT 2
@@ -118,7 +118,7 @@ export default async function triageFeedback(
       SELECT e.id, e.title, e.payload_data,
         md5(e.connection_id::text || ':' || e.origin_id) AS report_key
       FROM events e JOIN connections c ON c.id = e.connection_id
-      WHERE e.id = ${reportId} AND c.slug = 'product-feedback-inbox'
+      WHERE e.id = ${reportId} AND c.slug = 'agentconn-product-feedback-inbox'
         AND c.connector_key = 'webhook' AND c.deleted_at IS NULL
         AND e.semantic_type = 'product.feedback'
         AND e.connection_id = ${id(pointer.connection_id)}
