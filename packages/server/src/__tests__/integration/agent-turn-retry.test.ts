@@ -19,6 +19,7 @@ import type { ProviderCatalogService } from '../../gateway/auth/provider-catalog
 import type { ModelProviderModule } from '../../gateway/modules/module-system';
 import { enqueueAgentTurn } from '../../gateway/orchestration/agent-turn-producer';
 import { retryInterruptedAgentTurn } from '../../gateway/orchestration/agent-turn-retry';
+import { reapStaleRuns } from '../../scheduled/check-stalled-executions';
 import { authenticateWorker } from '../../gateway/routes/internal/middleware';
 import { AGENT_TURN_TOOL_LOG_MAX } from '../../runs/agent-turn-inputs';
 import { isAuthorizationReadOnlyToolName } from '../../tools/registry';
@@ -154,6 +155,43 @@ describe('retry of an interrupted agent turn', () => {
     const retry = await produce(admitted!.action_input, admitted!.id);
     expect(retry.action_input.turn.message_id).toBe(message.messageId);
     expect(retry.action_input.turn.ephemeral_context).toBeUndefined();
+  });
+
+  it('recovers a stale turn despite a connector recovery failure, then retries that connector next sweep', async () => {
+    const sql = getTestDb();
+    const org = await createTestOrganization();
+    await produce(messageFor(org.id));
+    const { runId } = await claim('fleet-reaper-phase-failure');
+    await sql`UPDATE runs SET claimed_at = now() - interval '1 hour',
+      last_heartbeat_at = now() - interval '1 hour',
+      run_metadata = run_metadata || '{"turn_requeue_count": 1}'::jsonb WHERE id = ${runId}`;
+    const [connector] = await sql`INSERT INTO runs
+      (organization_id, run_type, status, claimed_by, claimed_at, last_heartbeat_at)
+      VALUES (${org.id}, 'auth', 'running', 'synthetic-connector-worker',
+        now() - interval '1 hour', now() - interval '1 hour') RETURNING id`;
+    await sql.unsafe(`CREATE FUNCTION test_reaper_connector_failure() RETURNS trigger AS $$
+      BEGIN
+        IF NEW.run_type = 'auth' THEN RAISE EXCEPTION 'synthetic connector recovery failure'; END IF;
+        RETURN NEW;
+      END;
+    $$ LANGUAGE plpgsql`);
+    await sql.unsafe(`CREATE TRIGGER test_reaper_connector_failure BEFORE UPDATE ON runs
+      FOR EACH ROW EXECUTE FUNCTION test_reaper_connector_failure()`);
+    try {
+      await expect(reapStaleRuns()).rejects.toThrow('synthetic connector recovery failure');
+      const [turn] = await sql`SELECT status, run_metadata FROM runs WHERE id = ${runId}`;
+      expect(turn).toMatchObject({ status: 'timeout', run_metadata: { turn_error_code: AgentErrorCode.WORKER_DIED } });
+      expect(await sql`SELECT id FROM runs WHERE organization_id = ${org.id}
+        AND queue_name = 'thread_response' AND action_input->>'messageId' = 'msg-retry'`).toHaveLength(1);
+      expect(await sql`SELECT status FROM runs WHERE id = ${connector.id}`).toEqual([{ status: 'running' }]);
+    } finally {
+      await sql.unsafe('DROP TRIGGER test_reaper_connector_failure ON runs');
+      await sql.unsafe('DROP FUNCTION test_reaper_connector_failure()');
+    }
+    await reapStaleRuns();
+    expect(await sql`SELECT status FROM runs WHERE id = ${connector.id}`).toEqual([{ status: 'timeout' }]);
+    expect(await sql`SELECT id FROM runs WHERE organization_id = ${org.id}
+      AND queue_name = 'thread_response' AND action_input->>'messageId' = 'msg-retry'`).toHaveLength(1);
   });
 
   it('lists two traced tools and one stamped-but-untraced tool in the retry note', async () => {
