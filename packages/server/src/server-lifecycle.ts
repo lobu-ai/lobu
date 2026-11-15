@@ -22,6 +22,7 @@ import { routePath } from "hono/route";
 import { pinoLogger } from "hono-pino";
 import { context, propagation, ROOT_CONTEXT } from "@opentelemetry/api";
 import { DbClosedError, isDbShutDown, shutdownDb } from "./db/client";
+import { createAuth } from "./auth";
 import { mountViteDev } from "./dev-vite";
 import { isShuttingDown, markShuttingDown } from "./lifecycle-state";
 import type { Env } from "./index";
@@ -484,6 +485,12 @@ export function createServerLifecycle(
 
 		// 2. Workspace provider — required before gateway boot.
 		await initWorkspaceProvider();
+
+		// Validate the same auth context requests use before starting background
+		// workers or accepting traffic. Better Auth initializes lazily; creating
+		// the instance alone leaves invalid secrets hidden behind green readiness.
+		// Keep request-derived origins out of the cache until a request arrives.
+		await (await createAuth(env, undefined, { cache: false })).$context;
 
 		// 3. Embedded Lobu gateway. Owns the public Agent API mounted at `/lobu`
 		// by `buildWrapperApp`.

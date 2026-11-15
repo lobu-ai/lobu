@@ -98,10 +98,11 @@ export function clearAuthCacheForTests(): void {
 export async function createAuth(
 	env: Env,
 	request?: Request,
+	options: { cache?: boolean } = {},
 ): Promise<ReturnType<typeof betterAuth>> {
 	const organizationId = (await resolveRequestOrganizationId(request)) ?? null;
 	const cacheKey = organizationId ?? "__system__";
-	const cached = authCache.get(cacheKey);
+	const cached = options.cache === false ? undefined : authCache.get(cacheKey);
 	if (cached) {
 		return cached;
 	}
@@ -1144,6 +1145,8 @@ export async function createAuth(
 	// betterAuth's inferred return narrows generics per call site (socialProviders
 	// shape, required-vs-optional database/secret); the cache stores the general
 	// Auth<BetterAuthOptions> shape, so widen via unknown.
-	authCache.set(cacheKey, auth as unknown as ReturnType<typeof betterAuth>);
+	if (options.cache !== false) {
+		authCache.set(cacheKey, auth as unknown as ReturnType<typeof betterAuth>);
+	}
 	return auth as unknown as ReturnType<typeof betterAuth>;
 }
