@@ -286,6 +286,54 @@ describe('chat turn principal: the verified sender, never the agent owner', () =
     return Number(row.entity_id);
   }
 
+  it.each(['save', 'preview', 'failed write', 'failed preview', 'failed read', 'failed SQL', 'rejected arguments'] as const)(
+    'keeps the entire content-bearing DM audit private for a %s', async (scenario) => {
+      const alice = await dmCaller();
+      const privateText = 'Zephyr private audit note';
+      const save = `await client.knowledge.save({content:${JSON.stringify(privateText)},semantic_type:'observation'})`;
+      const tool = scenario === 'failed read' ? 'query_sdk' : scenario === 'failed SQL' ? 'query_sql' : 'run_sdk';
+      const args = scenario === 'failed SQL'
+        ? { sql: `SELECT "${privateText}" FROM events`, title: privateText }
+        : {
+            script: `export default async (_ctx, client) => { ${scenario === 'failed read' ? '' : `${save};`}
+              ${scenario.startsWith('failed') ? `throw new Error(${JSON.stringify(privateText)});` : ''} }`,
+            title: privateText,
+            ...(scenario.includes('preview') ? { dry_run: true } : {}),
+            ...(scenario === 'rejected arguments' ? { timeout_ms: -1 } : {}),
+          };
+      const response = await alice(tool, args, true);
+      if (scenario === 'rejected arguments') expect(response.isError).toBe(true);
+      else if (tool !== 'query_sql') {
+        const result = response.structuredContent ?? JSON.parse(response.content[0].text);
+        expect(result.success).toBe(!scenario.startsWith('failed'));
+      }
+      const [audit] = await getTestDb()<{ id: number; payload_data: Record<string, any> }>`
+        SELECT id, payload_data FROM events WHERE organization_id = ${org.id}
+          AND origin_type = 'tool_invocation' AND payload_data->>'tool_name' = ${tool}
+        ORDER BY id DESC LIMIT 1
+      `;
+      expect(audit).toBeTruthy();
+      expect(audit.payload_data.title).toContain(privateText);
+      if (tool === 'run_sdk') {
+        expect(audit.payload_data.script_preview_redacted).toContain(privateText);
+        if (scenario !== 'rejected arguments') {
+          const trace = scenario.includes('preview') ? audit.payload_data.side_effect_preview : audit.payload_data.sdk_call_trace;
+          expect(JSON.stringify(trace)).toContain(privateText);
+        }
+      }
+      if (scenario.startsWith('failed')) expect(audit.payload_data.error.message.toLowerCase()).toContain(privateText.toLowerCase());
+      // Read the actual SQL-safe projection: hiding only `request` leaves
+      // titles, previews, traces and errors exposed unless the row is gated.
+      const query = { sql: `SELECT id, payload_data FROM events WHERE id = ${audit.id}` };
+      const own = await alice('query_sql', query);
+      expect(own.rows.map((row: { id: number }) => Number(row.id))).toEqual([Number(audit.id)]);
+      expect(JSON.stringify(own.rows[0].payload_data)).toContain(privateText);
+      const outsider = await createTestPAT(owner.id, org.id, { scope: 'mcp:read mcp:write mcp:admin' });
+      const hidden = await mcpToolsCall<any>('query_sql', query, { token: outsider.token, orgSlug: org.slug });
+      expect(hidden.rows).toEqual([]);
+    },
+  );
+
   it('creates one audience and one owner grant across concurrent DM saves and replays without exposing receipts', async () => {
     const alice = await dmCaller();
     const saves = await Promise.all(Array.from({ length: 6 }, (_, i) => alice('save_memory', {

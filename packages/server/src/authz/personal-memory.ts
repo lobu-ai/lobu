@@ -12,7 +12,8 @@ import { unvalidatedEntityRowInsert } from './entity-row-validation';
 const DENIED = 'A verified personal-memory audience is required for this direct-message save.';
 
 /** Trusted DM writer only. A revoked/retired audience is never silently recreated. */
-export async function resolvePersonalMemoryResource(db: DbClient, ctx: ToolContext): Promise<number> {
+export async function resolvePersonalMemoryResource(db: DbClient, ctx: Pick<ToolContext,
+  'organizationId' | 'userId' | 'personalMemoryPrincipal' | 'sourceContext' | 'actingAutomationId'>): Promise<number> {
   const owner = ctx.personalMemoryPrincipal;
   if (!owner || owner !== ctx.userId || ctx.sourceContext?.chatAccess !== 'member' || ctx.actingAutomationId != null) {
     throw new ToolUserError(DENIED, 403, 'PERMISSION');
