@@ -1,4 +1,10 @@
 import type { ReactionClient, ReactionContext } from "@lobu/connector-sdk";
+import {
+  HEALTH_PREFIX,
+  type HealthScope,
+  planHealthChanges,
+  readHealthSnapshot,
+} from "./workspace-health";
 
 /**
  * Promotes ClickHouse error fingerprints into `issue` records and runs their
@@ -76,6 +82,7 @@ export interface IssueRecord {
   id: number;
   fingerprint: string;
   status: IssueStatus;
+  culprit?: string;
   first_seen?: string;
   last_seen?: string;
   resolved_at?: string;
@@ -105,6 +112,7 @@ export type IssueChange =
       id: number;
       fingerprint: string;
       metadata: Record<string, unknown>;
+      expected?: Record<string, string | number | boolean | null>;
       alert?: AlertNotice;
     }
   | { action: "defer"; fingerprint: string; reason: "hourly_quota" };
@@ -199,6 +207,8 @@ export function planIssueChanges(
 ): IssueChange[] {
   const byFingerprint = new Map<string, IssueRecord>();
   for (const i of issues) {
+    // Current health has an explicit recovery proof, never a log-quiet timeout.
+    if (i.culprit?.startsWith(HEALTH_PREFIX)) continue;
     const held = byFingerprint.get(i.fingerprint);
     if (!held || (held.deleted && !i.deleted))
       byFingerprint.set(i.fingerprint, i);
@@ -460,6 +470,7 @@ function toIssue(row: Record<string, unknown>): IssueRecord | null {
   return {
     id: num(row.id),
     fingerprint,
+    culprit: str(m.culprit),
     status: (str(m.status) || "ongoing") as IssueStatus,
     first_seen: str(m.first_seen) || undefined,
     last_seen: str(m.last_seen) || undefined,
@@ -476,7 +487,8 @@ function toIssue(row: Record<string, unknown>): IssueRecord | null {
 export async function runIssueTracker(
   ctx: Pick<ReactionContext, "window">,
   client: ReactionClient,
-  dryRun: boolean
+  dryRun: boolean,
+  healthScope?: HealthScope
 ): Promise<Record<string, unknown>> {
   const now = new Date();
   const occurrences = (
@@ -503,10 +515,21 @@ export async function runIssueTracker(
     CREATED_LAST_HOUR_SQL
   )) as Array<{ n: number }>;
 
-  const changes = planIssueChanges(occurrences, issues, now, createdLastHour);
+  // Finish all reads before writing: source/ownership failures cannot close issues.
+  const health = healthScope
+    ? await readHealthSnapshot(client, healthScope)
+    : [];
+  const changes = [
+    ...planIssueChanges(occurrences, issues, now, createdLastHour),
+    ...planHealthChanges(health, issues, now),
+  ];
   const summary = {
     dry_run: dryRun,
     fingerprints: occurrences.length,
+    health_resources: health.filter((r) => r.kind !== "scope").length,
+    health_workspaces: health
+      .filter((r) => r.kind === "scope")
+      .map((r) => r.workspace),
     issues: issues.filter((i) => !i.deleted).length,
     created: changes.filter((c) => c.action === "create").length,
     updated: changes.filter((c) => c.action === "update").length,
@@ -566,6 +589,7 @@ async function applyChange(
     await client.entities.update({
       entity_id: change.id,
       metadata: change.metadata,
+      ...(change.expected ? { expected: change.expected } : {}),
       automation_source: source,
     });
   }
@@ -573,7 +597,22 @@ async function applyChange(
 
 export default async function trackIssues(
   ctx: ReactionContext,
-  client: ReactionClient
+  client: ReactionClient,
+  params?: { health?: Omit<HealthScope, "ownerUserId"> }
 ): Promise<Record<string, unknown>> {
-  return runIssueTracker(ctx, client, DRY_RUN);
+  let health: HealthScope | undefined;
+  if (params?.health) {
+    const id = Number(ctx.window.automation_id);
+    if (!Number.isSafeInteger(id) || id <= 0)
+      throw new Error("Invalid tracker identity");
+    const org = ctx.organization_id.replaceAll("'", "''");
+    const rows = (await client.query(
+      `SELECT created_by FROM automations WHERE id = ${id} AND organization_id = '${org}'`,
+      { connection: params.health.connection }
+    )) as Array<{ created_by: string }>;
+    if (rows.length !== 1 || !rows[0]?.created_by)
+      throw new Error("Tracker owner unavailable");
+    health = { ...params.health, ownerUserId: rows[0].created_by };
+  }
+  return runIssueTracker(ctx, client, DRY_RUN, health);
 }

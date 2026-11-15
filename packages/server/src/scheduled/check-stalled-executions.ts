@@ -259,7 +259,29 @@ export async function reapStaleRuns(): Promise<ReapStaleRunsResult> {
     }
 
     try {
-      // First, and independently of the staleness predicate below: a crashed
+      // Recover client replies before connector queries: a failed connector
+      // sweep must not leave an unrelated turn waiting for its terminal reply.
+      // Agent turns share the connector lanes' claim + heartbeat contract but
+      // not their terminal semantics: a crashed fleet worker leaves a client
+      // waiting on an authoritative turn's reply, so the sweep that times the
+      // run out also publishes the thread_response the completion route would
+      // have. A stale turn without recorded side-effecting tool activity is
+      // instead put back to `pending` once (logged and counted by the sweep
+      // itself, not here: it is not reaped). A shadow turn terminalizes silently.
+      let agentTurnsReaped = 0;
+      let agentTurnErrorsDelivered = 0;
+      try {
+        const swept = await sweepStaleAgentTurnRuns(thresholdSeconds);
+        agentTurnsReaped = swept.reaped;
+        agentTurnErrorsDelivered = swept.delivered;
+      } catch (err) {
+        logger.error(
+          { error: String(err) },
+          '[reaper] Failed to sweep stale agent turn runs'
+        );
+      }
+
+      // Independently of the staleness predicate below: a crashed
       // gateway leaves device source reads holding user rows. This is a
       // retention guarantee, not a queue-health one, so it runs even when
       // nothing else is stale.
@@ -617,26 +639,6 @@ export async function reapStaleRuns(): Promise<ReapStaleRunsResult> {
         dispatch_failures: unknown;
         timed_out_actions: unknown;
       }>;
-
-      // Agent turns share the connector lanes' claim + heartbeat contract but
-      // not their terminal semantics: a crashed fleet worker leaves a client
-      // waiting on an authoritative turn's reply, so the sweep that times the
-      // run out also publishes the thread_response the completion route would
-      // have. A stale turn without recorded side-effecting tool activity is
-      // instead put back to `pending` once (logged and counted by the sweep
-      // itself, not here: it is not reaped). A shadow turn terminalizes silently.
-      let agentTurnsReaped = 0;
-      let agentTurnErrorsDelivered = 0;
-      try {
-        const swept = await sweepStaleAgentTurnRuns(thresholdSeconds);
-        agentTurnsReaped = swept.reaped;
-        agentTurnErrorsDelivered = swept.delivered;
-      } catch (err) {
-        logger.error(
-          { error: String(err) },
-          '[reaper] Failed to sweep stale agent turn runs'
-        );
-      }
 
       const reapedRow = reaped[0];
       const reapedCount =

@@ -8,7 +8,7 @@ import { createAuthProfile, type AuthProfileKind } from '../../../utils/auth-pro
 import { createConnectToken } from '../../../utils/connect-tokens';
 import { initWorkspaceProvider } from '../../../workspace';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
-import { createTestConnection, createTestConnectorDefinition, createTestSession, seedOwnerContext } from '../../setup/test-fixtures';
+import { createTestConnection, createTestConnectorDefinition, createTestPAT, createTestSession, seedOwnerContext } from '../../setup/test-fixtures';
 
 const KEY = 'synthetic.auth-refresh';
 const WORKER = 'synthetic-auth-refresh-worker';
@@ -92,6 +92,11 @@ describe('auth refresh preserves failure pauses over HTTP', () => {
   it('validates an eligible feed, executes its connector in an isolate, and preserves failed siblings', async () => {
     const s = await seed();
     const sql = getTestDb();
+    // Raw env credentials may be delivered only to the connection owner's pinned device.
+    const [device] = await sql`INSERT INTO device_workers (user_id, worker_id, platform, capabilities, organization_id)
+      VALUES (${s.user.id}, ${WORKER}, 'macos', ${sql.json([])}, ${s.org.id}) RETURNING id`;
+    await sql`UPDATE connections SET device_worker_id = ${device.id}::uuid WHERE id = ${s.connection.id}`;
+    const pat = await createTestPAT(s.user.id, s.org.id, { scope: 'device_worker:run' });
     const code = await createIsolateConnectorCompiler().compileConnectorForIsolateFromSource(`
       import { ConnectorRuntime } from '@lobu/connector-sdk';
       export default class SyntheticConnector extends ConnectorRuntime {
@@ -119,9 +124,11 @@ describe('auth refresh preserves failure pauses over HTTP', () => {
 
     // Use the production worker client and executor: claim, isolate execution,
     // event/checkpoint streaming, and completion all cross the HTTP listener.
-    const client = new WorkerClient({ apiUrl: baseUrl, workerId: WORKER, authToken: TOKEN, capabilities: {} });
+    const client = new WorkerClient({ apiUrl: baseUrl, workerId: WORKER, authToken: pat.token,
+      platform: 'macos', capabilities: {} });
     const claimed = await client.poll(1);
     expect(Number(claimed.run_id)).toBe(Number(queued.run_id));
+    expect(claimed.connection_credentials?.API_KEY).toBe('synthetic-key');
     const result = await executeRun(client, claimed, {}, {
       generateEmbeddings: false, timeoutMs: 10000,
     });

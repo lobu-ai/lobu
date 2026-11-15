@@ -963,7 +963,7 @@ credentialRoutes.post('/local-init', async (c) => {
   // row exists and it gets minted credentials. See
   // docs/plans/install-operator-bootstrap.md.
   const userRows = (await sql`
-    SELECT id, email, name, principal_kind
+    SELECT id, email, name, principal_kind, "twoFactorEnabled"
       FROM "user"
      ORDER BY
        CASE WHEN principal_kind = 'install_operator' THEN 1 ELSE 0 END ASC,
@@ -974,6 +974,7 @@ credentialRoutes.post('/local-init', async (c) => {
     email: string;
     name: string;
     principal_kind: string;
+    twoFactorEnabled: boolean;
   }>;
 
   if (userRows.length === 0) {
@@ -1008,6 +1009,13 @@ credentialRoutes.post('/local-init', async (c) => {
   // Prefer the human (if any); fall back to the install_operator on a
   // fresh install where no signup has happened yet.
   const user = humanRows[0] ?? userRows[0]!;
+
+  if (user.twoFactorEnabled) {
+    return c.json({
+      error: 'two_factor_required',
+      error_description: 'Sign in through the browser and complete two-factor authentication before authorizing this client.',
+    }, 403);
+  }
 
   // Find the user's personal org (provisioned by databaseHooks.user.create.after).
   const org = await findExistingPersonalOrg(user.id, sql);

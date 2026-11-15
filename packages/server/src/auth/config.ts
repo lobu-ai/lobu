@@ -13,8 +13,10 @@ import {
 import { TtlCache } from "../utils/ttl-cache";
 import { safeParseUrl } from "./base-url";
 import { resolveOAuthCallbackOrganization } from "./oauth-organization-context";
+import { getAuthCaptcha } from "./abuse-protection";
 
 interface AuthConfig {
+	captcha: null | { provider: "cloudflare-turnstile"; siteKey: string; action: "auth" };
 	social: Record<string, boolean>;
 	/** Connector display metadata; keys mirror the enabled providers in `social`. */
 	socialMeta: Record<string, { name: string; faviconDomain: string | null }>;
@@ -643,7 +645,9 @@ export async function getAuthConfig(
 		hasUser = false;
 	}
 
+	const captcha = getAuthCaptcha(env);
 	return {
+		captcha: captcha ? { provider: captcha.provider, siteKey: captcha.siteKey, action: captcha.action } : null,
 		social,
 		socialMeta,
 		magicLink,

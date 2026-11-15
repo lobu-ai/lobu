@@ -9,13 +9,17 @@ import {
   defineEntityType,
   defineRelationshipType,
   every,
+  on,
   reactionFromFile,
+  secret,
   Type,
 } from "@lobu/cli/config";
 import type ClickHouseAnalyticsConnector from "./clickhouse-analytics.connector.ts";
 import type DataForSeoConnector from "./dataforseo.connector.ts";
 import type IssueTrackerReaction from "./issue-tracker.reaction.ts";
 import { productUsers } from "./product-users.ts";
+import type FeedbackTriageReaction from "./feedback-triage.reaction.ts";
+import { feedbackTriagePrompt } from "./feedback-triage.prompt.ts";
 
 // One backlog type for every kind of team work, written by people and agents.
 // The organic acquisition review Automation reads the `seo` kind as its backlog
@@ -276,11 +280,72 @@ const issueTracker = defineAutomation({
   // Five minutes after each quarter-hour issue_occurrences_hourly refresh.
   triggers: [every("12,27,42,57 * * * *", { skip_if_unchanged: false })],
   tags: ["observability", "issues"],
+  // Explicitly consented scope; the reaction rechecks ownership at each run.
+  // The external repair queue is installed by scripts/configure-issue-repair.ts.
   // The module reads ClickHouse and the issue records itself. A context-only
   // source keeps the default events source from pacing runs by arrivals.
   sources: { clock: context("SELECT CURRENT_TIMESTAMP AS observed_at") },
   reaction: reactionFromFile<typeof IssueTrackerReaction>(
-    "./issue-tracker.reaction.ts"
+    "./issue-tracker.reaction.ts",
+    {
+      health: {
+        connection: "lobu-product-activity-db",
+        workspaces: [
+          "buremba",
+          "business-ontology-lab",
+          "funeral-business",
+          "improvado-pilot",
+          "legal",
+          "lobu-cloud",
+          "lobu-team",
+          "market",
+          "peaka-demo",
+          "prodma-erp",
+          "support",
+          "ycombinator",
+        ],
+      },
+    }
+  ),
+});
+
+const productFeedbackInbox = defineConnection({
+  slug: "product-feedback-inbox",
+  connector: "webhook",
+  credentialMode: "byo",
+  name: "Product feedback inbox",
+  config: {
+    token: secret("PRODUCT_FEEDBACK_INBOX_TOKEN"),
+    semanticType: "product.feedback",
+    titlePath: "/subject",
+    searchable: false,
+  },
+});
+
+const feedbackTriage = defineAutomation({
+  agent: productOps,
+  slug: "product-feedback-triage",
+  name: "Product feedback triage",
+  description:
+    "Attach user reports to tasks and matching issues without changing telemetry lifecycle or counts.",
+  triggers: [
+    on("webhook", "delivery.received", {
+      connection: productFeedbackInbox,
+      execution: "window",
+      active_run: "queue",
+      output: "silent",
+    }),
+  ],
+  // Preparation binds reports by delivery identity. A bounded context source
+  // avoids the default all-events arrival source and its timestamp membership.
+  sources: {
+    inbox: context(`SELECT id AS connection_id, slug FROM connections
+      WHERE slug = 'product-feedback-inbox' AND connector_key = 'webhook'
+        AND deleted_at IS NULL`),
+  },
+  prompt: feedbackTriagePrompt,
+  reaction: reactionFromFile<typeof FeedbackTriageReaction>(
+    "./feedback-triage.reaction.ts"
   ),
 });
 
@@ -386,8 +451,14 @@ export default defineConfig({
   ],
   entities: [task, issue, productUsers],
   relationships: [trackedBy],
-  connections: [analytics, productActivityDb, lobuTeamSlack, companyCloudflare],
+  connections: [
+    analytics,
+    productActivityDb,
+    lobuTeamSlack,
+    companyCloudflare,
+    productFeedbackInbox,
+  ],
   // The external digest is maintained by scripts/configure-product-activity.ts.
   // Apply without prune: preserve its existing delivery agent and manual Automation.
-  automations: [issueTracker],
+  automations: [issueTracker, feedbackTriage],
 });
