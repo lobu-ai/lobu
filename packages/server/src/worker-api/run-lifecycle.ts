@@ -252,11 +252,38 @@ async function readCompletionAuthProfile(sql: DbClient, organizationId: string, 
 	return rows[0] ?? null;
 }
 
+/** Lock before feed bookkeeping; persistence uses this same profile snapshot. */
+async function readSyncCompletionAuthProfile(
+	tx: DbClient,
+	req: CompleteRequest,
+	connectionId: number | null,
+) {
+	if (req.status !== "success" || !req.auth_update || !connectionId) return null;
+	const connectionRows = (await tx`
+        SELECT c.organization_id, c.connector_key, c.auth_profile_id
+        FROM connections c
+        WHERE c.id = ${connectionId}
+        LIMIT 1
+      `) as Array<{
+		organization_id: string;
+		connector_key: string;
+		auth_profile_id: number | null;
+	}>;
+	const connection = connectionRows[0];
+	if (connection?.auth_profile_id == null) return null;
+	const authProfile = await readCompletionAuthProfile(
+		tx,
+		connection.organization_id,
+		connection.auth_profile_id
+	);
+	return authProfile ? { connectionId, connection, authProfile } : null;
+}
+
 /** Caller owns the run/feed/profile transaction; notifications follow commit. */
 async function persistSyncAuthUpdate(
 	tx: DbClient,
 	req: CompleteRequest,
-	connectionId: number | null,
+	auth: Awaited<ReturnType<typeof readSyncCompletionAuthProfile>>,
 ): Promise<Parameters<typeof notifyBrowserAuthExpired>[0] | undefined> {
 	// Persist refreshed browser auth data on the auth profile.
 	//
@@ -266,27 +293,8 @@ async function persistSyncAuthUpdate(
 	// so discarding the rotation would leave the profile holding invalidated
 	// credentials and break the next REAL sync. "Persist nothing" means the
 	// workspace's data, never the auth state the run consumed.
-	if (req.status === "success" && req.auth_update && connectionId) {
-		const connectionRows = (await tx`
-        SELECT c.organization_id, c.connector_key, c.auth_profile_id
-        FROM connections c
-        WHERE c.id = ${connectionId}
-        LIMIT 1
-      `) as Array<{
-			organization_id: string;
-			connector_key: string;
-			auth_profile_id: number | null;
-		}>;
-
-		const connection = connectionRows[0];
-		const authProfile =
-			connection?.auth_profile_id != null
-				? await readCompletionAuthProfile(
-						tx,
-						connection.organization_id,
-						connection.auth_profile_id
-					)
-				: null;
+	if (req.status === "success" && req.auth_update && auth) {
+		const { connectionId, connection, authProfile } = auth;
 
 		if (authProfile?.profile_kind === "browser_session" &&
         (authProfile.auth_data?.mode === 'live' || req.auth_update.mode === 'live')) {
@@ -1525,6 +1533,10 @@ export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
 
 			// Update the feed's sync state
 			const runRows = updatedRuns;
+			// Auth recovery and profile edits lock profile before feed. Take that
+			// same lock order here, while leaving the auth pause/recovery writes
+			// after feed bookkeeping so their scheduling changes remain authoritative.
+			const syncAuth = await readSyncCompletionAuthProfile(tx, req, runRows[0]?.connection_id ?? null);
 			const feedId = runRows[0]?.feed_id;
 			const isDry = runRows[0]?.dry_run === true;
 			const committedCheckpoint = runRows[0]?.committed_checkpoint === true;
@@ -1614,7 +1626,7 @@ export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
 	      `;
 				}
 			}
-			const expiredBrowserAuth = await persistSyncAuthUpdate(tx, req, runRows[0]?.connection_id ?? null);
+			const expiredBrowserAuth = await persistSyncAuthUpdate(tx, req, syncAuth);
 			return { runRows, recordedFailure, expiredBrowserAuth };
 		});
 
