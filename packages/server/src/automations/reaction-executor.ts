@@ -249,8 +249,16 @@ export async function inspectAutomationScriptExports(
     limits: { timeoutMs: 5_000 },
   });
   if (!result.success) {
+    // A sandbox host failure (no isolate runtime, an internal setup or compile
+    // failure, a host abort) says nothing about the stored script. Keep it out
+    // of the 422 refusal so callers treat it as infrastructure: scheduled
+    // admission rolls back and retries the same due cursor.
+    const error = result.error;
+    if (error?.code === 'INTERNAL' || error?.name === 'RuntimeUnavailable' || error?.name === 'AbortError') {
+      throw new Error(`Cannot inspect Automation script exports: ${error.name}: ${error.message}`);
+    }
     throw new ToolUserError(
-      result.error?.message ?? 'Cannot inspect Automation script exports.', 422,
+      error?.message ?? 'Cannot inspect Automation script exports.', 422,
     );
   }
   const exports = result.returnValue as { prepare?: string; reaction?: string };

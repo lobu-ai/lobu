@@ -1,9 +1,11 @@
-import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DbClient } from "../../../db/client";
 import type { Env } from "../../../index";
 import { manageAutomations } from "../../../tools/admin/manage_automations";
 import { materializeDueAutomationRuns } from "../../../automations/automation";
+import * as runScriptModule from "../../../sandbox/run-script";
 import { automationArrivalHorizon } from "../../../utils/window-utils";
+import { ToolUserError } from "../../../utils/errors";
 import { initWorkspaceProvider } from "../../../workspace";
 import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
 import { createTestAgent, createTestConnection, createTestEvent, seedOwnerContext } from "../../setup/test-fixtures";
@@ -17,7 +19,7 @@ describe("scheduled Automation unchanged gate", () => {
 		await cleanupTestDatabase();
 	});
 
-	async function seedDeletedFeedScript(skipIfUnchanged: boolean) {
+	async function seedInvalidScript(skipIfUnchanged: boolean, invalid = "deleted feed") {
 		const { org, user, ctx } = await seedOwnerContext();
 		const agent = await createTestAgent({ organizationId: org.id, ownerUserId: user.id });
 		const connection = await createTestConnection({ organization_id: org.id, connector_key: "synthetic.scheduler" });
@@ -30,14 +32,28 @@ describe("scheduled Automation unchanged gate", () => {
 			sources: [{ name: "content", query: `@feed:${feed.id}` }],
 			triggers: [{ kind: "schedule", cron: "* * * * *", execution: "window", skip_if_unchanged: skipIfUnchanged }],
 		}, {} as Env, ctx) as { automation_id: string };
-		await sql`UPDATE feeds SET deleted_at = now() WHERE id = ${feed.id}`;
+		if (invalid === "deleted feed") {
+			await sql`UPDATE feeds SET deleted_at = now() WHERE id = ${feed.id}`;
+		} else if (invalid === "invalid exports") {
+			await sql`UPDATE automations SET reaction_script_compiled = 'module.exports = { default: 42 };'
+				WHERE id = ${created.automation_id}`;
+		} else if (invalid === "code-only configuration") {
+			await sql`UPDATE automations SET execution_config = '{"model":"synthetic-model"}'::jsonb
+				WHERE id = ${created.automation_id}`;
+		} else {
+			await sql`UPDATE automations SET reaction_script_compiled = 'module.exports = { prepare: async () => ({}) };',
+				triggers = triggers || '[{"kind":"event","source":"workspace","event_kind":"synthetic.invalid","execution":"turn"}]'::jsonb
+				WHERE id = ${created.automation_id}`;
+		}
 		await sql`UPDATE automations SET next_run_at = now() - interval '1 minute' WHERE id = ${created.automation_id}`;
 		const [initial] = await sql`SELECT next_run_at, next_window_start FROM automations WHERE id = ${created.automation_id}`;
-		return { sql, automationId: created.automation_id, initial };
+		return { sql, ctx, automationId: created.automation_id, initial };
 	}
 
-	it.each([true, false])("durably fails deleted-feed script admission with skip_if_unchanged=%s", async (skipIfUnchanged) => {
-		const { sql, automationId, initial } = await seedDeletedFeedScript(skipIfUnchanged);
+	it.each([true, false].flatMap(skipIfUnchanged =>
+		["deleted feed", "invalid exports", "code-only configuration", "preparation configuration"].map(invalid => ({ skipIfUnchanged, invalid }))
+	))("durably fails $invalid admission with skip_if_unchanged=$skipIfUnchanged", async ({ skipIfUnchanged, invalid }) => {
+		const { sql, automationId, initial } = await seedInvalidScript(skipIfUnchanged, invalid);
 		await sql.unsafe(`CREATE FUNCTION synthetic_reject_admission_failure() RETURNS trigger LANGUAGE plpgsql AS $$
       BEGIN RAISE EXCEPTION 'Synthetic failure-accounting outage'; END $$`);
 		await sql.unsafe(`CREATE TRIGGER synthetic_reject_admission_failure BEFORE UPDATE OF consecutive_scheduled_failures
@@ -63,8 +79,14 @@ describe("scheduled Automation unchanged gate", () => {
 				WHERE automation_id = ${automationId} AND run_type = 'automation' ORDER BY id`;
 			expect(runs).toHaveLength(attempt);
 			expect(runs.at(-1)).toMatchObject({ status: "failed", outcome: "infra_error",
-				approved_input: { dispatch_source: "scheduled", executor: { kind: "script" } } });
-			expect(runs.at(-1).error_message).toContain("did not match any feed");
+				approved_input: { dispatch_source: "scheduled" } });
+			const expectedError = {
+				"deleted feed": "did not match any feed", "invalid exports": "Automation script must export",
+				"code-only configuration": "A code-only module uses sandbox limits",
+				"preparation configuration": "Preparation requires an owning native agent",
+			}[invalid];
+			expect(runs.at(-1).error_message).toContain(expectedError);
+			if (invalid === "deleted feed") expect(runs.at(-1).approved_input.executor).toMatchObject({ kind: "script" });
 			expect(runs.at(-1).completed_at).not.toBeNull();
 			expect(await sql`SELECT id FROM runs WHERE automation_id = ${automationId} AND run_type = 'task'`).toHaveLength(0);
 			const [state] = await sql`SELECT next_window_start, next_run_at, consecutive_scheduled_failures,
@@ -82,7 +104,7 @@ describe("scheduled Automation unchanged gate", () => {
 	});
 
 	it("retries an uncommitted database failure during script source normalization", async () => {
-		const { sql, automationId, initial } = await seedDeletedFeedScript(true);
+		const { sql, automationId, initial } = await seedInvalidScript(true);
 		const unavailable = (client: DbClient): DbClient => new Proxy(client, {
 			apply(target, self, args) {
 				const text = Array.isArray(args[0]) ? args[0].join('') : '';
@@ -104,6 +126,43 @@ describe("scheduled Automation unchanged gate", () => {
 		expect(state).toMatchObject({ ...initial, consecutive_scheduled_failures: 0 });
 		await materializeDueAutomationRuns({} as Env, sql);
 		expect(await sql`SELECT status FROM runs WHERE automation_id = ${automationId}`).toEqual([{ status: "failed" }]);
+	});
+
+	it.each([
+		{ name: "RuntimeUnavailable", message: "Synthetic isolate runtime outage" },
+		{ name: "CompileError", code: "INTERNAL" as const, message: "Synthetic compiler host outage" },
+	])("retries a $name sandbox host failure while inspecting the stored script", async (failure) => {
+		const { sql, ctx, automationId, initial } = await seedInvalidScript(true);
+		const outage = vi.spyOn(runScriptModule, "runScript").mockResolvedValue({
+			success: false, logs: [], durationMs: 0, sdkCalls: 0, skippedCalls: 0, traceDropped: 0, sdkCallTrace: [],
+			startedSideEffects: [], requiredMcpScopes: [], sideEffectPreview: [], error: failure,
+		});
+		let manualError: unknown;
+		try {
+			await materializeDueAutomationRuns({} as Env, sql);
+			manualError = await manageAutomations({ action: "trigger", automation_id: automationId }, {} as Env, ctx)
+				.then(() => undefined, (error: unknown) => error);
+		} finally {
+			outage.mockRestore();
+		}
+		expect(await sql`SELECT id FROM runs WHERE automation_id = ${automationId}`).toHaveLength(0);
+		const [state] = await sql`SELECT next_run_at, next_window_start, consecutive_scheduled_failures
+			FROM automations WHERE id = ${automationId}`;
+		expect(state).toMatchObject({ ...initial, consecutive_scheduled_failures: 0 });
+		// A host outage is not a refusal of the stored script on either path.
+		expect(manualError).toBeInstanceOf(Error);
+		expect(manualError).not.toBeInstanceOf(ToolUserError);
+		await materializeDueAutomationRuns({} as Env, sql);
+		expect(await sql`SELECT status FROM runs WHERE automation_id = ${automationId}`).toEqual([{ status: "failed" }]);
+		const [recovered] = await sql`SELECT consecutive_scheduled_failures FROM automations WHERE id = ${automationId}`;
+		expect(recovered.consecutive_scheduled_failures).toBe(1);
+	});
+
+	it("refuses a manual trigger of an invalid stored script without persisting an attempt", async () => {
+		const { sql, ctx, automationId } = await seedInvalidScript(true, "invalid exports");
+		await expect(manageAutomations({ action: "trigger", automation_id: automationId }, {} as Env, ctx))
+			.rejects.toMatchObject({ httpStatus: 422 });
+		expect(await sql`SELECT id FROM runs WHERE automation_id = ${automationId}`).toHaveLength(0);
 	});
 
 	it("records source-read failures without advancing arrivals and applies the scheduled failure budget", async () => {
