@@ -28,6 +28,7 @@ const EXPECTED_BUNDLED_CONNECTORS = [
 	"webhook",
 	"whatsapp",
 	"whatsapp.web",
+	"workspace-inbox",
 	"x",
 	"youtube",
 ];
@@ -97,6 +98,7 @@ describe("bundled connector lifecycle matrix", () => {
 			// Browser-backed connectors also expose the gateway's verification action.
 			"tiktok.web": 4,
 			"whatsapp.web": 7,
+			"workspace-inbox": 1,
 			// prepare_reply (public-reply draft) + send_message (DM reply) +
 			// set_like + set_follow + verification.
 			x: 5,
