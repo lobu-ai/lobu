@@ -1110,7 +1110,14 @@ Memory:
         collectOption
       )
       .option("--raw", "Emit compact JSON (default is pretty-printed)")
-      .option("--url <url>", "Server URL override"),
+      .option("--url <url>", "Server URL override")
+      .addHelpText(
+        "after",
+        "\nProduct feedback: discover a configured workspace-inbox in the sending workspace:\n" +
+          '  lobu call query_sdk --org <sending-workspace> --arg title="Find feedback inbox" --arg \'script=export default async (_ctx, client) => client.operations.listAvailable({ connector_key: "workspace-inbox" })\'\n' +
+          "Review the exact subject, body and references with the user before sending through run_sdk. Honor Auto/Ask/Block and wait for any required human approval. Keep credentials and unrelated private content out of reports.\n" +
+          "A receipt confirms the original report was stored as an event. Receiving Automations may link evidence to an existing issue; a receipt does not confirm triage or resolution. No ready inbox means an administrator must configure one.\n"
+      ),
     { org: true, json: true }
   ).action(
     async (
