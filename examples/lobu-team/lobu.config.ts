@@ -19,10 +19,7 @@ import type DataForSeoConnector from "./dataforseo.connector.ts";
 import type IssueTrackerReaction from "./issue-tracker.reaction.ts";
 import { productUsers } from "./product-users.ts";
 import type FeedbackTriageReaction from "./feedback-triage.reaction.ts";
-import {
-  feedbackReportsQuery,
-  feedbackTriagePrompt,
-} from "./feedback-triage.prompt.ts";
+import { feedbackTriagePrompt } from "./feedback-triage.prompt.ts";
 
 // One backlog type for every kind of team work, written by people and agents.
 // The organic acquisition review Automation reads the `seo` kind as its backlog
@@ -318,7 +315,13 @@ const feedbackTriage = defineAutomation({
       output: "silent",
     }),
   ],
-  sources: { reports: feedbackReportsQuery },
+  // Preparation binds reports by delivery identity. A bounded context source
+  // avoids the default all-events arrival source and its timestamp membership.
+  sources: {
+    inbox: context(`SELECT id AS connection_id, slug FROM connections
+      WHERE slug = 'product-feedback-inbox' AND connector_key = 'webhook'
+        AND deleted_at IS NULL`),
+  },
   prompt: feedbackTriagePrompt,
   reaction: reactionFromFile<typeof FeedbackTriageReaction>(
     "./feedback-triage.reaction.ts"

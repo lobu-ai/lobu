@@ -1,11 +1,19 @@
-import type { ReactionClient, ReactionContext } from "@lobu/connector-sdk";
+import type {
+  AutomationScriptContext,
+  ConnectorTriggerSignal,
+  ReactionClient,
+  ReactionContext,
+} from "@lobu/connector-sdk";
 
 export const input = {
   type: "object",
   properties: {
     reports: {
       type: "array",
-      maxItems: 100,
+      minItems: 1,
+      // The trigger queues one run per delivery. Keeping that boundary also
+      // bounds completion to at most eight SDK calls, below the 200-call quota.
+      maxItems: 1,
       items: {
         type: "object",
         properties: {
@@ -39,6 +47,46 @@ function id(value: unknown): number {
   return Number(value);
 }
 
+interface ReportPointer {
+  id: number;
+  connection_id: number;
+  origin_id: string;
+}
+
+/** Freeze the queued delivery's durable identity before analysis. Event
+ * windows use signal time, which need not equal the row's arrival timestamp.
+ * Save only a pointer so large report bodies cannot exceed preparation limits.
+ */
+export async function prepare(
+  ctx: AutomationScriptContext,
+  client: ReactionClient
+): Promise<{ reports: ReportPointer[] }> {
+  const signal = ctx.trigger_signals?.[0] as
+    | Partial<ConnectorTriggerSignal>
+    | undefined;
+  if (
+    ctx.trigger_signals?.length !== 1 ||
+    signal?.connector_key !== "webhook" ||
+    signal.event_type !== "delivery.received" ||
+    typeof signal.resource_ref !== "string" ||
+    !signal.resource_ref ||
+    signal.resource_ref.length > 256
+  )
+    throw new Error("Expected one queued feedback delivery");
+  const reports = (await client.query(`
+    SELECT e.id, e.connection_id, e.origin_id
+    FROM events e JOIN connections c ON c.id = e.connection_id
+    WHERE c.id = ${id(signal.connection_id)}
+      AND c.slug = 'product-feedback-inbox' AND c.connector_key = 'webhook'
+      AND c.deleted_at IS NULL AND e.semantic_type = 'product.feedback'
+      AND e.origin_id = ${literal(signal.resource_ref)}
+    LIMIT 2
+  `)) as ReportPointer[];
+  if (reports.length !== 1)
+    throw new Error("Feedback delivery is not accessible in this inbox");
+  return { reports };
+}
+
 /** The inbox belongs to this example. Shared runtime knows no feedback keys,
  * task/issue semantics, recipient identifiers, or reporting policy.
  */
@@ -47,34 +95,22 @@ export default async function triageFeedback(
   client: ReactionClient
 ): Promise<Record<string, unknown>> {
   const decisions = ctx.extracted_data.reports as Decision[];
-  if (!Array.isArray(decisions) || decisions.length > 100)
-    throw new Error("Expected a bounded feedback batch");
-  const start = new Date(ctx.window.window_start).toISOString();
-  const end = new Date(ctx.window.window_end).toISOString();
+  const expected = ctx.sources?.reports as ReportPointer[] | undefined;
+  if (
+    !Array.isArray(decisions) ||
+    decisions.length !== 1 ||
+    !Array.isArray(expected) ||
+    expected.length !== 1 ||
+    id(expected[0].id) !== id(decisions[0].report_id)
+  )
+    throw new Error(
+      "Expected every report in this inbox delivery exactly once"
+    );
+  const pointer = expected[0];
   const source = {
     automation_id: id(ctx.window.automation_id),
     run_id: id(ctx.window.run_id),
   };
-  const expected = (await client.query(`
-    SELECT e.id FROM events e JOIN connections c ON c.id = e.connection_id
-    WHERE c.slug = 'product-feedback-inbox' AND c.connector_key = 'webhook'
-      AND c.deleted_at IS NULL AND e.semantic_type = 'product.feedback'
-      AND e.created_at >= ${literal(start)}::timestamptz
-      AND e.created_at < ${literal(end)}::timestamptz
-    ORDER BY e.created_at, e.id LIMIT 101
-  `)) as Array<{ id: number }>;
-  const reportIds = new Set(
-    decisions.map((decision) => id(decision.report_id))
-  );
-  if (
-    expected.length > 100 ||
-    reportIds.size !== decisions.length ||
-    expected.length !== decisions.length ||
-    expected.some((report) => !reportIds.has(Number(report.id)))
-  )
-    throw new Error(
-      "Expected every report in this inbox and window exactly once; split windows larger than 100 reports"
-    );
   const results: Array<{ report_id: number; task_id: number }> = [];
   for (const decision of decisions) {
     const reportId = id(decision.report_id);
@@ -85,8 +121,8 @@ export default async function triageFeedback(
       WHERE e.id = ${reportId} AND c.slug = 'product-feedback-inbox'
         AND c.connector_key = 'webhook' AND c.deleted_at IS NULL
         AND e.semantic_type = 'product.feedback'
-        AND e.created_at >= ${literal(start)}::timestamptz
-        AND e.created_at < ${literal(end)}::timestamptz
+        AND e.connection_id = ${id(pointer.connection_id)}
+        AND e.origin_id = ${literal(pointer.origin_id)}
       LIMIT 1
     `)) as Array<{
       id: number;
@@ -95,7 +131,7 @@ export default async function triageFeedback(
       report_key: string;
     }>;
     if (!report || !/^[0-9a-f]{32}$/.test(report.report_key))
-      throw new Error("Feedback report is not in this inbox and window");
+      throw new Error("Feedback report is not in this inbox delivery");
     if (
       !decision.summary?.trim() ||
       decision.summary.length > 2000 ||
