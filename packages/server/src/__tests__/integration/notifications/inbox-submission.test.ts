@@ -3,9 +3,11 @@ import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { Env } from '../../../index';
 import { buildClientSDK } from '../../../sandbox/client-sdk';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
-import { createTestAgent, seedOwnerContext } from '../../setup/test-fixtures';
+import { addUserToOrganization, createTestAgent, createTestUser, seedOwnerContext } from '../../setup/test-fixtures';
 import { ensureMemberEntityType } from '../../../utils/member-entity-type';
 import { activateWorkspaceEventTask } from '../../../automations/workspace-event';
+import { deleteNotification } from '../../../notifications/service';
+import { MAX_WORKSPACE_EVENT_DEPTH, MAX_WORKSPACE_EVENT_CAUSAL_AUTOMATIONS } from '../../../automations/workspace-event-contract';
 import { dispatchPendingAutomationRuns } from '../../../automations/automation';
 import { runAutomationScriptTask } from '../../../automations/script-task';
 import * as preparationTasks from '../../../automations/preparation-task';
@@ -50,8 +52,8 @@ async function fixture() {
   return { sender, receiver, sdk, receiverSdk, automationId, sql, message };
 }
 
-async function activate(f: Awaited<ReturnType<typeof fixture>>, eventId: number) {
-  const [queued] = await f.sql`SELECT id, action_input FROM runs WHERE organization_id = ${f.receiver.org.id}
+async function activate(f: Awaited<ReturnType<typeof fixture>>, eventId: number, organizationId = f.receiver.org.id) {
+  const [queued] = await f.sql`SELECT id, action_input FROM runs WHERE organization_id = ${organizationId}
     AND action_key = 'activate-workspace-event' AND action_input->'payload'->>'eventId' = ${String(eventId)}`;
   expect(queued).toBeDefined();
   await activateWorkspaceEventTask(queued.action_input.payload);
@@ -70,16 +72,212 @@ async function prepareRun(f: Awaited<ReturnType<typeof fixture>>, runId: number)
   return run;
 }
 
+function automationSdk(f: Awaited<ReturnType<typeof fixture>>, automationId: number, runId: number, ctx = f.receiver.ctx) {
+  return buildClientSDK({ ...ctx, userId: null, memberRole: null, tokenType: 'session',
+    actingAutomationId: automationId, actingRunId: runId }, TEST_ENV);
+}
+
 describe('published notification inbox end to end', () => {
-  it('lets an authorized sending Automation submit through its real sandbox with stamped provenance', async () => {
+  it('preserves ancestry across A -> B -> A workspace inbox submissions', async () => {
+    const f = await fixture();
+    await ensureMemberEntityType(f.sender.org.id);
+    await f.sdk.entitySchema.updateType({ slug: '$member', event_kinds:
+      teamConfig.entities!.find((type) => type.key === '$member')!.eventKinds });
+    const agent = await createTestAgent({ organizationId: f.sender.org.id, ownerUserId: f.sender.user.id });
+    const created = await f.sdk.automations.create({ slug: 'synthetic-sending-subscriber', managed_agent_id: agent.agentId,
+      prompt: 'Submit a synthetic report.', triggers: [{ kind: 'event', source: 'workspace', event_types: ['product.feedback'],
+        execution: 'window', active_run: 'queue' }] });
+    const senderId = Number(created.automation_id);
+    const toSender = { ...f.message, organization: f.sender.org.slug };
+    const root = await f.receiverSdk.notifications.submit({ ...toSender, idempotency_key: 'cross-root' });
+    await activate(f, Number(root.receipt), f.sender.org.id);
+    const [senderRun] = await f.sql`SELECT id FROM runs WHERE automation_id = ${senderId} AND run_type = 'automation'`;
+    const report = await automationSdk(f, senderId, Number(senderRun.id), f.sender.ctx).notifications.submit({ ...f.message,
+      idempotency_key: `cross-report:${senderRun.id}` });
+    const [activation] = await f.sql`SELECT action_input FROM runs WHERE action_key = 'activate-workspace-event'
+      AND action_input->'payload'->>'eventId' = ${report.receipt}`;
+    expect(activation.action_input.payload).toMatchObject({ rootEventIds: [Number(root.receipt)],
+      causalAutomationIds: [senderId], depth: 2 });
+    await activate(f, Number(report.receipt));
+    const [receiverRun] = await f.sql`SELECT id, approved_input FROM runs
+      WHERE automation_id = ${f.automationId} AND run_type = 'automation'`;
+    expect(receiverRun.approved_input.trigger_signal).toMatchObject({ event_id: Number(report.receipt),
+      root_event_ids: [Number(root.receipt)], causal_automation_ids: [senderId], depth: 2 });
+    // Foreign roots correlate deliveries, but grant no source-event visibility.
+    expect(await f.receiverSdk.query(`SELECT id FROM events WHERE id = ${Number(root.receipt)}`)).toHaveLength(0);
+    const reply = await automationSdk(f, f.automationId, Number(receiverRun.id)).notifications.submit({ ...toSender,
+      idempotency_key: `cross-reply:${receiverRun.id}` });
+    const [replyActivation] = await f.sql`SELECT action_input FROM runs WHERE action_key = 'activate-workspace-event'
+      AND action_input->'payload'->>'eventId' = ${reply.receipt}`;
+    expect(replyActivation.action_input.payload).toMatchObject({ rootEventIds: [Number(root.receipt)],
+      causalAutomationIds: [senderId, f.automationId], depth: 3 });
+    await activate(f, Number(reply.receipt), f.sender.org.id);
+    for (const eventId of [report.receipt, reply.receipt]) {
+      const [event] = await f.sql`SELECT automation_id, run_id FROM events WHERE id = ${Number(eventId)}`;
+      expect(event).toEqual({ automation_id: null, run_id: null });
+    }
+    expect(await f.sql`SELECT id FROM runs WHERE automation_id = ${senderId} AND run_type = 'automation'`).toHaveLength(1);
+    expect(await f.sql`SELECT id FROM runs WHERE automation_id = ${f.automationId} AND run_type = 'automation'`).toHaveLength(1);
+  });
+
+  it.each(['depth', 'breadth', 'breadth-overflow'] as const)('retains cross-workspace reports and admin targets at the %s cap', async (cap) => {
+    const f = await fixture();
+    const admin = await createTestUser();
+    const member = await createTestUser();
+    await addUserToOrganization(admin.id, f.sender.org.id, 'admin');
+    await addUserToOrganization(member.id, f.sender.org.id, 'member');
+    await ensureMemberEntityType(f.sender.org.id);
+    await f.sdk.entitySchema.updateType({ slug: '$member', event_kinds:
+      teamConfig.entities!.find((type) => type.key === '$member')!.eventKinds });
+    const root = await f.sdk.notifications.submit({ ...f.message, idempotency_key: 'cross-cap-root' });
+    await activate(f, Number(root.receipt));
+    const [run] = await f.sql`SELECT id, approved_input FROM runs WHERE automation_id = ${f.automationId} AND run_type = 'automation'`;
+    const signal = run.approved_input.trigger_signals[0];
+    if (cap === 'depth') signal.depth = MAX_WORKSPACE_EVENT_DEPTH - 1;
+    else signal.causal_automation_ids = Array.from({ length: MAX_WORKSPACE_EVENT_CAUSAL_AUTOMATIONS - (cap === 'breadth' ? 1 : 0) },
+      (_, i) => f.automationId + i + 1);
+    await f.sql`UPDATE runs SET approved_input = ${f.sql.json({ ...run.approved_input,
+      trigger_signal: signal, trigger_signals: [signal] })} WHERE id = ${run.id}`;
+    const message = { ...f.message, organization: f.sender.org.slug, idempotency_key: `cross-cap:${run.id}` };
+    const sdk = automationSdk(f, f.automationId, Number(run.id));
+    const receipt = await sdk.notifications.submit(message);
+    expect(await sdk.notifications.submit(message)).toEqual(receipt);
+    const eventId = Number(receipt.receipt);
+    const [event] = await f.sql`SELECT automation_id, run_id, payload_data FROM events WHERE id = ${eventId}`;
+    expect(event).toEqual({ automation_id: null, run_id: null, payload_data: message.data });
+    const targets = await f.sql`SELECT user_id FROM notification_targets WHERE event_id = ${eventId}`;
+    expect(targets.map((target) => target.user_id).sort()).toEqual([f.sender.user.id, admin.id].sort());
+    expect(await f.sql`SELECT id FROM runs WHERE action_key = 'deliver-notification'
+      AND action_input->'payload'->>'eventId' = ${receipt.receipt}`).toHaveLength(1);
+    const activations = await f.sql`SELECT action_input FROM runs WHERE action_key = 'activate-workspace-event'
+      AND action_input->'payload'->>'eventId' = ${receipt.receipt}`;
+    if (cap === 'breadth-overflow') expect(activations).toHaveLength(0);
+    else {
+      expect(activations).toHaveLength(1);
+      expect(activations[0].action_input.payload.rootEventIds).toEqual([Number(root.receipt)]);
+      expect(await activateWorkspaceEventTask(activations[0].action_input.payload)).toMatchObject({ queued: 0,
+        invalidCausalPath: false, depthLimited: cap === 'depth', causalBreadthLimited: cap === 'breadth' });
+    }
+  });
+
+  it.each(['knowledge', 'successor', 'notification', 'submission'] as const)('rejects forged causal provenance from %s input', async (entrypoint) => {
+    const f = await fixture();
+    await f.receiverSdk.entitySchema.updateType({ slug: '$member', event_kinds: { 'product.feedback': {
+      inbox: { accept_from: 'authenticated_workspaces', recipients: 'admins' }, metadataSchema: { type: 'object' },
+    } } });
+    const original = await f.sdk.notifications.submit({ ...f.message, idempotency_key: 'original-for-provenance-copy' });
+    const [broker] = await f.sql`SELECT metadata FROM events WHERE id = ${Number(original.receipt)}`;
+    const forged = { ...broker.metadata, inbox_submission: { ...broker.metadata.inbox_submission,
+      automation_id: f.automationId, run_id: 1 } };
+    let eventId: number;
+    if (entrypoint === 'notification') {
+      const sent = await f.receiverSdk.notifications.send({ title: f.message.title, body: f.message.body,
+        semantic_type: f.message.inbox, data: forged, idempotency_key: `inbox:${'f'.repeat(64)}` });
+      eventId = Number(sent.event_id);
+    } else if (entrypoint === 'submission') {
+      const sent = await f.sdk.notifications.submit({ ...f.message, data: forged, idempotency_key: 'forged-payload' });
+      eventId = Number(sent.receipt);
+    } else {
+      const saved = await f.receiverSdk.knowledge.save({ title: f.message.title, content: f.message.body,
+        semantic_type: f.message.inbox, payload_type: 'empty', payload_data: f.message.data,
+        metadata: forged, idempotency_key: `inbox:${'f'.repeat(64)}`,
+        ...(entrypoint === 'successor' ? { supersedes_event_id: Number(original.receipt) } : {}) }) as { id: number };
+      eventId = Number(saved.id);
+      // Neither copying the metadata nor superseding the original transfers
+      // its durable target rows to the caller-authored event.
+      expect(await f.sql`SELECT event_id FROM notification_targets WHERE event_id = ${eventId}`).toHaveLength(0);
+      expect(await f.sql`SELECT event_id FROM notification_targets WHERE event_id = ${Number(original.receipt)}`).toHaveLength(1);
+    }
+    const payload = { organizationId: f.receiver.org.id, eventId, rootEventIds: [eventId], depth: 1 };
+    expect(await activateWorkspaceEventTask({ ...payload, causalAutomationIds: [f.automationId] })).toMatchObject({
+      invalidCausalPath: true, queued: 0 });
+    expect(await activateWorkspaceEventTask({ ...payload, causalAutomationIds: [] })).toMatchObject({
+      invalidCausalPath: false, queued: 1 });
+    expect(await f.sql`SELECT id FROM runs WHERE automation_id = ${f.automationId} AND run_type = 'automation'`).toHaveLength(1);
+  });
+
+  it('does not reactivate an Automation submitting to its own workspace inbox', async () => {
+    const f = await fixture();
+    const run = await queue.createAutomationRun({ organizationId: f.receiver.org.id, automationId: f.automationId,
+      windowStart: '2026-01-01T00:00:00.000Z', windowEnd: '2026-01-01T00:20:00.000Z', dispatchSource: 'manual' });
+    await f.sql`UPDATE automations SET delivery_target = '{"connection_id":999999,"channel_id":"slack:C_SYNTHETIC"}'::jsonb
+      WHERE id = ${f.automationId}`;
+    const sdk = automationSdk(f, f.automationId, run.runId);
+    const message = { ...f.message, idempotency_key: `self-report:${run.runId}` };
+    const receipt = await sdk.notifications.submit(message);
+    expect(await sdk.notifications.submit(message)).toEqual(receipt);
+    const eventId = Number(receipt.receipt);
+    await activate(f, eventId);
+    expect(await f.sql`SELECT id FROM runs WHERE automation_id = ${f.automationId} AND run_type = 'automation'`).toHaveLength(1);
+    const [event] = await f.sql`SELECT automation_id, run_id, metadata FROM events WHERE id = ${eventId}`;
+    expect(event).toMatchObject({ automation_id: f.automationId, run_id: run.runId });
+    expect(event.metadata.delivery_request).toMatchObject({ strictAutomationTarget: false, targets: [] });
+    const [activation] = await f.sql`SELECT action_input FROM runs WHERE action_key = 'activate-workspace-event'
+      AND action_input->'payload'->>'eventId' = ${String(eventId)}`;
+    expect(activation.action_input.payload).toMatchObject({ rootEventIds: [eventId],
+      causalAutomationIds: [f.automationId], depth: 1 });
+  });
+
+  it('inherits the producing run ancestry and stops indirect inbox re-entry', async () => {
+    const f = await fixture();
+    const agent = await createTestAgent({ organizationId: f.receiver.org.id, ownerUserId: f.receiver.user.id });
+    const created = await f.receiverSdk.automations.create({ slug: 'synthetic-upstream-reporter', managed_agent_id: agent.agentId,
+      prompt: 'Submit a synthetic report.', triggers: [{ kind: 'event', source: 'workspace', event_types: ['product.feedback'],
+        execution: 'window', active_run: 'queue' }] });
+    const upstreamId = Number(created.automation_id);
+    const upstreamRun = await queue.createAutomationRun({ organizationId: f.receiver.org.id, automationId: upstreamId,
+      windowStart: '2026-01-01T00:00:00.000Z', windowEnd: '2026-01-01T00:20:00.000Z', dispatchSource: 'manual' });
+    const root = await automationSdk(f, upstreamId, upstreamRun.runId).notifications.submit({ ...f.message,
+      idempotency_key: `upstream:${upstreamRun.runId}` });
+    await activate(f, Number(root.receipt));
+    const [consumerRun] = await f.sql`SELECT id FROM runs WHERE automation_id = ${f.automationId} AND run_type = 'automation'`;
+    const receipt = await automationSdk(f, f.automationId, Number(consumerRun.id)).notifications.submit({ ...f.message,
+      idempotency_key: `downstream:${consumerRun.id}` });
+    const [activation] = await f.sql`SELECT action_input FROM runs WHERE action_key = 'activate-workspace-event'
+      AND action_input->'payload'->>'eventId' = ${receipt.receipt}`;
+    expect(activation.action_input.payload).toMatchObject({ rootEventIds: [Number(root.receipt)],
+      causalAutomationIds: [upstreamId, f.automationId], depth: 2 });
+    await activate(f, Number(receipt.receipt));
+    expect(await f.sql`SELECT id FROM runs WHERE automation_id = ${f.automationId} AND run_type = 'automation'`).toHaveLength(1);
+    expect(await f.sql`SELECT id FROM runs WHERE automation_id = ${upstreamId} AND run_type = 'automation'`).toHaveLength(1);
+  });
+
+  it.each(['depth', 'breadth'] as const)('terminates inbox activation at the causal %s cap while retaining the report', async (cap) => {
+    const f = await fixture();
+    const root = await f.sdk.notifications.submit({ ...f.message, idempotency_key: 'cap-root' });
+    await activate(f, Number(root.receipt));
+    const [run] = await f.sql`SELECT id, approved_input FROM runs WHERE automation_id = ${f.automationId} AND run_type = 'automation'`;
+    const signal = run.approved_input.trigger_signals[0];
+    if (cap === 'depth') signal.depth = MAX_WORKSPACE_EVENT_DEPTH - 1;
+    else signal.causal_automation_ids = Array.from({ length: MAX_WORKSPACE_EVENT_CAUSAL_AUTOMATIONS }, (_, i) => f.automationId + i + 1);
+    await f.sql`UPDATE runs SET approved_input = ${f.sql.json({ ...run.approved_input,
+      trigger_signal: signal, trigger_signals: [signal] })} WHERE id = ${run.id}`;
+    const receipt = await automationSdk(f, f.automationId, Number(run.id)).notifications.submit({ ...f.message,
+      idempotency_key: `cap-report:${run.id}` });
+    expect(await f.sql`SELECT id FROM events WHERE id = ${Number(receipt.receipt)}`).toHaveLength(1);
+    const activations = await f.sql`SELECT action_input FROM runs WHERE action_key = 'activate-workspace-event'
+      AND action_input->'payload'->>'eventId' = ${receipt.receipt}`;
+    if (cap === 'depth') {
+      expect(activations).toHaveLength(1);
+      expect(await activateWorkspaceEventTask(activations[0].action_input.payload)).toMatchObject({ queued: 0, depthLimited: true });
+    } else expect(activations).toHaveLength(0);
+    expect(await f.sql`SELECT id FROM runs WHERE automation_id = ${f.automationId} AND run_type = 'automation'`).toHaveLength(1);
+  });
+
+  it.each(['ordinary', 'dismissed', 'nul-title', 'nul-body', 'nul-data'] as const)('lets a scheduled sending Automation submit through its real sandbox with %s provenance', async (scenario) => {
     const f = await fixture();
     const agent = await createTestAgent({ organizationId: f.sender.org.id, ownerUserId: f.sender.user.id });
-    const message = { ...f.message, idempotency_key: 'authorized-automation-report' };
+    const message = { ...f.message, idempotency_key: 'authorized-automation-report',
+      ...(scenario === 'nul-title' ? { title: 'Source\u0000 sync fails' } : {}),
+      ...(scenario === 'nul-body' ? { body: 'Synthetic\u0000 operational report' } : {}),
+      ...(scenario === 'nul-data' ? { data: { references: ['https://example.com/\u0000reproduction'] } } : {}),
+    };
     const created = await f.sdk.automations.create({ slug: 'synthetic-authorized-reporter', managed_agent_id: agent.agentId,
+      triggers: [{ kind: 'schedule', cron: '*/20 * * * *', execution: 'window', active_run: 'coalesce', skip_if_unchanged: false }],
       reaction_script: `export default async (_ctx, client) => client.notifications.submit(${JSON.stringify(message)});` });
     const automationId = Number(created.automation_id);
     const run = await queue.createAutomationRun({ organizationId: f.sender.org.id, automationId, agentId: agent.agentId,
-      windowStart: '2026-01-01T00:00:00.000Z', windowEnd: '2026-01-01T00:20:00.000Z', dispatchSource: 'manual' });
+      windowStart: '2026-01-01T00:00:00.000Z', windowEnd: '2026-01-01T00:20:00.000Z', dispatchSource: 'scheduled' });
     expect(await dispatchPendingAutomationRuns({ runIds: [run.runId] })).toMatchObject({ dispatched: 1, failed: 0 });
     const [task] = await f.sql`SELECT id FROM runs WHERE parent_run_id = ${run.runId} AND action_key = 'automation-script'`;
     await f.sql`UPDATE runs SET status = 'claimed' WHERE id = ${task.id}`;
@@ -92,6 +290,16 @@ describe('published notification inbox end to end', () => {
       automation_id: automationId, run_id: run.runId });
     expect(report.automation_id).toBeNull();
     expect(report.run_id).toBeNull();
+    const [activation] = await f.sql`SELECT action_input FROM runs WHERE action_key = 'activate-workspace-event'
+      AND action_input->'payload'->>'eventId' = ${String(report.id)}`;
+    expect(activation.action_input.payload).toMatchObject({ rootEventIds: [Number(report.id)],
+      causalAutomationIds: [automationId], depth: 1 });
+    expect(await activateWorkspaceEventTask({ ...activation.action_input.payload, causalAutomationIds: [] }))
+      .toMatchObject({ invalidCausalPath: true, queued: 0 });
+    if (scenario === 'dismissed') {
+      expect(await deleteNotification(f.receiver.org.id, f.receiver.user.id, Number(report.id))).toBe(true);
+      expect(await f.sql`SELECT event_id FROM notification_targets WHERE event_id = ${report.id}`).toHaveLength(0);
+    }
     await activate(f, Number(report.id));
     expect(await f.sql`SELECT id FROM runs WHERE automation_id = ${f.automationId} AND run_type = 'automation'`).toHaveLength(1);
   });

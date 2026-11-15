@@ -1,5 +1,4 @@
 /** Published, send-only workspace intake. Recipient authority stays in $member. */
-import { createHash } from 'node:crypto';
 import type { DbClient } from '../db/client';
 import { getDb } from '../db/client';
 import type { ToolContext } from '../tools/registry';
@@ -9,9 +8,11 @@ import { getAjv } from '../utils/ajv-singleton';
 import { exceedsValidationLimits } from '../utils/metadata-limits';
 import type { EventKindDefinition } from '../utils/event-kind-validation';
 import { getRateLimiter } from '../utils/rate-limiter';
-import { stableJson } from '../utils/insert-event';
-import { enqueueWorkspaceEventActivations } from '../automations/workspace-event-enqueue';
+import { enqueueWorkspaceEventActivations, loadRunEventCausality } from '../automations/workspace-event-enqueue';
+import { WorkspaceEventCausalityLimitError } from '../automations/workspace-event-contract';
+import logger from '../utils/logger';
 import { createNotificationForUsers, findNotificationByIdempotencyKey } from './service';
+import { inboxSubmissionDigest } from './inbox-provenance';
 
 export interface InboxSubmitInput {
   organization: string;
@@ -78,10 +79,9 @@ export async function submitNotificationInbox(input: InboxSubmitInput, ctx: Tool
       run_id: ctx.actingRunId ?? null, inbox: input.inbox };
     // Scope the producer key to the authenticated sending actor and inbox.
     // A receiver's other producers cannot collide with caller-selected keys.
-    const digest = (value: unknown) => createHash('sha256').update(stableJson(value)).digest('hex');
-    const key = `inbox:${digest([ctx.organizationId, ctx.userId, ctx.agentId ?? null,
+    const key = `inbox:${inboxSubmissionDigest([ctx.organizationId, ctx.userId, ctx.agentId ?? null,
       ctx.actingAutomationId ?? null, input.inbox, input.idempotency_key])}`;
-    const fingerprint = digest([input.title, input.body ?? '', data]);
+    const fingerprint = inboxSubmissionDigest([input.title, input.body ?? '', data]);
     const prior = await findNotificationByIdempotencyKey(receiver.organization_id, key, tx);
     if (prior !== null) {
       const [stored] = await tx<{ metadata: Record<string, unknown> }>`SELECT metadata FROM events
@@ -94,11 +94,16 @@ export async function submitNotificationInbox(input: InboxSubmitInput, ctx: Tool
     const admins = await tx<{ userId: string }>`SELECT "userId" FROM "member"
       WHERE "organizationId" = ${receiver.organization_id} AND role IN ('owner', 'admin')`;
     if (!admins.length) throw new ToolUserError('Published inbox has no available administrators', 404, 'NOT_FOUND');
+    // Local Automation outputs retain their producer. A foreign workspace's
+    // producer remains send-only provenance, not a receiver-owned run link.
+    const automationId = receiver.organization_id === ctx.organizationId ? ctx.actingAutomationId ?? null : null;
+    const runId = automationId == null ? null : ctx.actingRunId ?? null;
     const notification = await createNotificationForUsers(admins.map((admin) => admin.userId), {
       organizationId: receiver.organization_id, type: 'agent_message', title: input.title,
       body: input.body, semanticType: input.inbox, payloadData: data,
       idempotencyKey: key, deliveryScope: 'targeted',
       inboxSubmission: sender, inboxFingerprint: fingerprint,
+      automationId, runId,
     }, tx);
     if (notification.eventId === null) throw new Error('Inbox event was not persisted');
     if (!notification.created) {
@@ -121,8 +126,24 @@ export async function submitNotificationInbox(input: InboxSubmitInput, ctx: Tool
     }
     // Event, admin targets and Automation activation commit together. The
     // existing queue and trigger delivery ids make all downstream retries safe.
+    let inherited: Awaited<ReturnType<typeof loadRunEventCausality>> = null;
+    // Causality belongs to the authenticated sender even when its receiver
+    // cannot own the source Automation/run links.
+    const producerAutomationId = ctx.actingAutomationId ?? null;
+    if (producerAutomationId != null && ctx.actingRunId != null) {
+      try {
+        inherited = await loadRunEventCausality(ctx.organizationId, ctx.actingRunId, producerAutomationId, tx);
+      } catch (error) {
+        if (!(error instanceof WorkspaceEventCausalityLimitError)) throw error;
+        logger.warn({ eventId: notification.eventId, organizationId: receiver.organization_id, error: error.message },
+          '[notification-inbox] workspace-event causality cap reached; activation chain terminated');
+        return { status: 'received' as const, receipt: String(notification.eventId) };
+      }
+    }
     await enqueueWorkspaceEventActivations(tx, [{ organizationId: receiver.organization_id,
-      eventId: notification.eventId, rootEventIds: [notification.eventId], causalAutomationIds: [], depth: 1 }]);
+      eventId: notification.eventId, rootEventIds: inherited?.rootEventIds ?? [notification.eventId],
+      causalAutomationIds: inherited?.causalAutomationIds ?? (producerAutomationId == null ? [] : [producerAutomationId]),
+      depth: inherited?.depth ?? 1 }]);
     return { status: 'received' as const, receipt: String(notification.eventId) };
   });
 }
