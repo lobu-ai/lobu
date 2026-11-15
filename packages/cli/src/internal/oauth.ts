@@ -271,6 +271,18 @@ export async function refreshTokens(
   return parseTokenResponse(body.data);
 }
 
+/**
+ * A refresh that failed without the issuer rejecting the grant (`refreshTokens`
+ * throws these instead of returning null). The saved login may work again, so
+ * a caller that holds another usable credential can serve the request with it.
+ */
+export function isTransientRefreshFailure(error: unknown): boolean {
+  return (
+    error instanceof OAuthError &&
+    (error.code === "refresh_failed" || error.code === "invalid_token_response")
+  );
+}
+
 export async function fetchUserInfo(
   userinfoEndpoint: string,
   accessToken: string

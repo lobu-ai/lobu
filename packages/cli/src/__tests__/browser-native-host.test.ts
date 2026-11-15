@@ -35,6 +35,7 @@ import {
 import * as contextConfig from "../internal/context";
 import * as credentials from "../internal/credentials";
 import { loadDeviceState } from "../internal/device-state";
+import { refreshTokens } from "../internal/oauth";
 
 const RECORD = {
   name: "work",
@@ -485,6 +486,87 @@ describe("native host pairing reply", () => {
       sessionToken: null,
     });
     expect(mint).not.toHaveBeenCalled();
+  });
+
+  describe("while the token endpoint is temporarily down", () => {
+    const TOKEN_ENDPOINT = `${RECORD.gatewayOrigin}/oauth/token`;
+
+    /**
+     * An expired login whose refresh hits a 503: the real refresh grant runs,
+     * so the failure is the one `refreshTokens` raises for an outage.
+     */
+    function useRefreshOutage() {
+      spyOn(credentials, "getContextToken").mockImplementation(
+        async () =>
+          (
+            await refreshTokens(
+              TOKEN_ENDPOINT,
+              { clientId: "synthetic-client" },
+              "synthetic-refresh"
+            )
+          )?.accessToken ?? null
+      );
+      return spyOn(globalThis, "fetch").mockImplementation((async (
+        url: string
+      ) =>
+        url === TOKEN_ENDPOINT
+          ? new Response("Unavailable", { status: 503 })
+          : Response.json({
+              devices: [
+                {
+                  id: "device-1",
+                  worker_id: RECORD.workerId,
+                  platform: "chrome-extension",
+                  online: true,
+                },
+              ],
+            })) as typeof fetch);
+    }
+
+    test("pairing hands back the cached credential", async () => {
+      useBrowserRecord();
+      await cacheChild("owl_pat_cached");
+      useRefreshOutage();
+
+      const reply = await nativeHostReply(RECORD.name, { op: "pair" }, noLog);
+
+      expect(readNativePairResponse(reply)).toEqual({
+        gatewayUrl: RECORD.gatewayOrigin,
+        workerId: RECORD.workerId,
+        accessToken: "owl_pat_cached",
+        sessionToken: null,
+      });
+    });
+
+    test("device requests still use the browser's child credential", async () => {
+      useBrowserRecord();
+      await cacheChild("owl_pat_cached");
+      const fetch = useRefreshOutage();
+      const log = spyOn(console, "log").mockImplementation(() => undefined);
+
+      await browserListCommand({ json: true });
+
+      const deviceCalls = fetch.mock.calls.filter(
+        ([url]) => url !== TOKEN_ENDPOINT
+      ) as [string, RequestInit][];
+      expect(
+        deviceCalls.map(
+          ([, init]) => (init.headers as Record<string, string>).Authorization
+        )
+      ).toEqual(["Bearer owl_pat_cached"]);
+      expect(
+        JSON.parse(String(log.mock.calls[0]?.[0])).browsers[0].device
+      ).toBe("online");
+    });
+
+    test("without a cached credential, pairing reports the outage, not a missing login", async () => {
+      useBrowserRecord();
+      useRefreshOutage();
+
+      const reply = await nativeHostReply(RECORD.name, { op: "pair" }, noLog);
+
+      expect(String(reply.error)).toContain("HTTP 503");
+    });
   });
 
   test("a login the gateway refuses leaves the cached credential in place", async () => {
