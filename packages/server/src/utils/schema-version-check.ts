@@ -1,9 +1,8 @@
 /**
  * Boot-time schema-version assertion.
  *
- * Compares the highest migration version present in `db/migrations/` (what
- * this image expects to run against) with the highest version recorded in
- * the database's `schema_migrations` table. If the database is behind,
+ * Checks every migration version present in `db/migrations/` against the
+ * database's `schema_migrations` ledger. If a required migration is missing,
  * throws — the server boot path catches it, logs, and exits non-zero so the
  * pod fails readiness and Kubernetes refuses to route traffic.
  *
@@ -25,12 +24,12 @@ import logger from './logger';
 const MIGRATION_FILENAME_RE = /^(\d+)_[^/]+\.sql$/;
 
 /**
- * Find the largest version prefix (e.g. `20260516200000`) across files in
- * `migrationsDir`. Returns null if the directory is empty / unreadable —
+ * Read the required version prefixes from the image's migration files.
+ * Returns an empty list if the directory is empty / unreadable —
  * that case is treated as "no expectation" rather than failing closed, so a
  * dev environment without migrations checked out doesn't deadlock boot.
  */
-export function readExpectedSchemaVersion(migrationsDir: string): string | null {
+function readExpectedSchemaVersions(migrationsDir: string): string[] {
   let entries: string[];
   try {
     entries = readdirSync(migrationsDir);
@@ -39,31 +38,19 @@ export function readExpectedSchemaVersion(migrationsDir: string): string | null 
       { err, migrationsDir },
       '[schema-check] migrations directory not readable — skipping schema-version assertion'
     );
-    return null;
+    return [];
   }
 
   assertUniqueMigrationVersions(entries);
 
-  let max: string | null = null;
-  for (const name of entries) {
+  return entries.flatMap((name) => {
     const match = MIGRATION_FILENAME_RE.exec(name);
-    if (!match) continue;
-    const version = match[1];
-    if (max === null || version > max) max = version;
-  }
-  return max;
+    return match ? [match[1]!] : [];
+  }).sort();
 }
 
-/**
- * Query the highest applied version from the database. Returns null if the
- * `schema_migrations` table is empty (fresh install) — the caller decides
- * whether that's expected.
- */
-async function readAppliedSchemaVersion(sql: DbClient): Promise<string | null> {
-  const rows = (await sql`SELECT MAX(version) AS version FROM public.schema_migrations`) as Array<{
-    version: string | null;
-  }>;
-  return rows[0]?.version ?? null;
+export function readExpectedSchemaVersion(migrationsDir: string): string | null {
+  return readExpectedSchemaVersions(migrationsDir).at(-1) ?? null;
 }
 
 interface SchemaVersionMismatch {
@@ -108,7 +95,8 @@ export async function assertSchemaUpToDate(
   sql: DbClient,
   options: { migrationsDir: string }
 ): Promise<void> {
-  const expected = readExpectedSchemaVersion(options.migrationsDir);
+  const required = readExpectedSchemaVersions(options.migrationsDir);
+  const expected = required.at(-1) ?? null;
 
   if (expected === null && process.env.NODE_ENV === 'production') {
     const msg =
@@ -118,23 +106,27 @@ export async function assertSchemaUpToDate(
     throw new Error(msg);
   }
 
-  const applied = await readAppliedSchemaVersion(sql);
-  const result = compareSchemaVersions(expected, applied);
+  // A newer ledger entry can coexist with an unapplied older migration.
+  // Extra newer entries remain compatible with an older image.
+  const rows = (await sql`SELECT version FROM public.schema_migrations`) as Array<{ version: string }>;
+  const appliedVersions = new Set(rows.map((row) => row.version));
+  const applied = [...appliedVersions].sort().at(-1) ?? null;
+  const missing = required.filter((version) => !appliedVersions.has(version));
 
-  if (result.kind === 'mismatch') {
+  if (missing.length > 0) {
     const msg =
-      `[schema-check] database is behind the image. Expected migration ${result.expected} ` +
-      `to be applied, but the highest applied version is ${result.applied ?? '(none)'}. ` +
+      `[schema-check] database is behind the image. Missing required migrations: ${missing.join(', ')}. ` +
+      `The highest applied version is ${applied ?? '(none)'}. ` +
       `Run \`dbmate up\` against this database before rolling out this image.`;
     logger.error(
-      { expected: result.expected, applied: result.applied, migrationsDir: options.migrationsDir },
+      { expected, applied, missing, migrationsDir: options.migrationsDir },
       msg
     );
     throw new Error(msg);
   }
 
   logger.info(
-    { expected: result.expected, applied: result.applied },
+    { expected, applied },
     '[schema-check] schema version up to date'
   );
 }
