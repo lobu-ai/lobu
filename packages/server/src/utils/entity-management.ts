@@ -1747,7 +1747,7 @@ export async function getEntity(
   //   1. caller's own org (always readable)
   //   2. public-catalog entity (anyone reads, except `$member`)
   const visibility = buildConnectionVisibilityClause({
-    organizationId: ctx.organizationId, userId: ctx.userId, baseParamIndex: 3,
+    organizationId: ctx.organizationId, userId: ctx.userId, personalMemoryPrincipal: ctx.personalMemoryPrincipal, baseParamIndex: 3,
   }, 'ev');
   const params: unknown[] = [ctx.organizationId, entityId, ...visibility.params];
   const restrictions = opts?.readRestrictions ?? [];
@@ -2333,6 +2333,7 @@ async function batchTotalContentCounts(
 	opts: {
 		organizationId: string;
 		userId: string | null;
+		personalMemoryPrincipal?: string | null;
 		entityIds: number[];
 		/** Cancels the running statement and skips the rest. */
 		signal?: AbortSignal;
@@ -2394,7 +2395,7 @@ async function batchTotalContentCounts(
 	const params: unknown[] = [opts.organizationId];
 	const orgParam = "$1::text";
 	const visibility = buildConnectionVisibilityClause({
-		organizationId: opts.organizationId, userId: opts.userId, baseParamIndex: params.length + 1,
+		organizationId: opts.organizationId, userId: opts.userId, personalMemoryPrincipal: opts.personalMemoryPrincipal, baseParamIndex: params.length + 1,
 	}, 'e2');
 	params.push(...visibility.params);
 	const arms: string[] = [];
@@ -2605,7 +2606,7 @@ export async function listEntities(
 	const enrichParamCount = params.length;
 
   const visibility = buildConnectionVisibilityClause({
-    organizationId: ctx.organizationId, userId: ctx.userId, baseParamIndex: params.length + 1,
+    organizationId: ctx.organizationId, userId: ctx.userId, personalMemoryPrincipal: ctx.personalMemoryPrincipal, baseParamIndex: params.length + 1,
   }, 'ev');
   params.push(...visibility.params);
 
@@ -2684,6 +2685,7 @@ export async function listEntities(
       batchTotalContentCounts(db, {
         organizationId: ctx.organizationId,
         userId: ctx.userId ?? null,
+        personalMemoryPrincipal: ctx.personalMemoryPrincipal,
         entityIds: ids,
         signal: ctx.abortSignal,
       }),
@@ -2777,6 +2779,7 @@ function compileEntitySegmentFilter(
 			ctx.organizationId,
 			{
 				userId: authzScopeFromToolContext(ctx).principal,
+				personalMemoryPrincipal: authzScopeFromToolContext(ctx).personalMemoryPrincipal,
 				// Match metric SQL: the outer type gate does not authorize nested
 				// predicates to read protected member metadata.
 				excludeMemberEntities: !canReadWorkspaceIdentity(ctx),

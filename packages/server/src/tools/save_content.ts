@@ -19,8 +19,12 @@ import {
 import { Type } from '@sinclair/typebox';
 import { resolveAutomationAttribution } from '../automations/automation-source';
 import { hasRequiredMcpScope } from '../auth/tool-access';
+import { resolvePersonalMemoryResource } from '../authz/personal-memory';
+import { compileConnectionFkVisibility } from '../authz/connection-visibility';
+import { compileResourceVisibility } from '../authz/resource-visibility';
+import { authzScopeFromToolContext } from '../authz/scope';
 import { resolveChannelEntityId } from '../authz/channel-entity';
-import { type DbClient, getDb, parsePgNumberArray } from '../db/client';
+import { type DbClient, getDb, parsePgNumberArray, pgBigintArray } from '../db/client';
 import type { Env } from '../index';
 import { INTERACTIVE_EVENT_CARD_REFRESH_TASK } from '../scheduled/task-definitions';
 import { enqueueTasksInTransaction } from '../scheduled/task-scheduler';
@@ -277,6 +281,9 @@ async function saveContentImpl(
   // rejected. This is the single choke point for both the MCP tool and the
   // SDK delegate (`client.knowledge.save`).
   const isOrgGuidance = semanticType === GUIDANCE_SEMANTIC_TYPE;
+  if (isOrgGuidance && ctx.sourceContext?.chatAccess) {
+    throw new ToolUserError('Workspace guidance must be authored outside a chat conversation.', 422, 'VALIDATION');
+  }
   assertCanAuthorGuidance(semanticType, ctx.memberRole);
 
   const payloadType = args.payload_type ?? 'text';
@@ -315,6 +322,12 @@ async function saveContentImpl(
     args.idempotency_key && entityNames.length > 0
       ? await findIdempotentEvent(sql, ctx.organizationId, args.idempotency_key)
       : undefined;
+  if (storedSave) {
+    const gate = compileResourceVisibility(authzScopeFromToolContext(ctx), 3, 'e');
+    const allowed = await sql.unsafe(`SELECT e.id FROM events e WHERE e.organization_id = $1::text AND e.id = $2::bigint ${gate.sql}`,
+      [ctx.organizationId, storedSave.id, ...gate.params]);
+    if (!allowed.length) throw new ToolUserError('The saved memory is not readable by this caller.', 404, 'NOT_FOUND');
+  }
   const nameResolution = storedSave
     ? { entityIds: storedSave.entity_ids ?? [], unlinked: unlinkedFromMetadata(storedSave.metadata) }
     : await resolveEntityNameReferences(sql, entityNames, ctx);
@@ -443,6 +456,38 @@ async function saveContentImpl(
     finalEntityIds.push(channelEntityId);
   }
 
+  if (ctx.sourceContext?.chatAccess === 'member') {
+    const personalId = await resolvePersonalMemoryResource(sql, ctx);
+    if (!finalEntityIds.includes(personalId)) finalEntityIds.push(personalId);
+  } else if (ctx.sourceContext?.chatAccess && channelEntityId === null) {
+    throw new ToolUserError('This conversation has no verified memory audience.', 403, 'PERMISSION');
+  }
+
+  // Existing restrictions must survive an explicit replacement, and an
+  // idempotent receipt must never disclose another caller's saved payload.
+  const scope = authzScopeFromToolContext(ctx);
+  const conn = compileConnectionFkVisibility(scope, 2, 'e');
+  const resource = compileResourceVisibility(scope, 2 + conn.params.length, 'e');
+  async function requireReadableEvent(id: number): Promise<number[]> {
+    const rows = await sql.unsafe<{ entity_ids: unknown }>(`SELECT e.entity_ids FROM events e
+      WHERE e.organization_id = $1::text AND e.id = $${2 + conn.params.length + resource.params.length}::bigint
+      ${conn.sql} ${resource.sql}`, [ctx.organizationId, ...conn.params, ...resource.params, id]);
+    if (!rows.length) throw new ToolUserError('The memory was not found or is not readable by this caller.', 404, 'NOT_FOUND');
+    return parsePgNumberArray(rows[0].entity_ids);
+  }
+
+  async function inheritResourceRequirements(id: number): Promise<void> {
+    const inheritedIds = await requireReadableEvent(id);
+    const [requirements] = await sql<{ ids: unknown }>`
+      SELECT ARRAY(SELECT e.id FROM entities e JOIN entity_types et ON et.id = e.entity_type_id
+        AND et.organization_id = e.organization_id AND et.slug = '$resource'
+        WHERE e.organization_id = ${ctx.organizationId} AND e.id = ANY(${pgBigintArray(inheritedIds)}::bigint[])) AS ids
+    `;
+    for (const id of parsePgNumberArray(requirements.ids)) {
+      if (!finalEntityIds.includes(id)) finalEntityIds.push(id);
+    }
+  }
+
   // 5. Validate supersedes target exists and belongs to this org
   let supersedingEventId: number | undefined;
   if (args.supersedes_event_id) {
@@ -455,6 +500,7 @@ async function saveContentImpl(
       [args.supersedes_event_id],
       ctx.memberRole
     );
+    await inheritResourceRequirements(args.supersedes_event_id);
     const existing = await sql`
       SELECT id FROM events
       WHERE id = ${args.supersedes_event_id}
@@ -496,6 +542,7 @@ async function saveContentImpl(
   let parentOriginId: string | null = null;
   let parentSourceUrl: string | null = null;
   if (args.parent_event_id !== undefined) {
+    await inheritResourceRequirements(args.parent_event_id);
     const parentRows = await sql`
       SELECT origin_id, source_url
       FROM events
@@ -517,6 +564,16 @@ async function saveContentImpl(
       );
     }
     parentSourceUrl = parentRows[0].source_url ? String(parentRows[0].source_url) : null;
+  }
+
+  // Guidance is injected workspace-wide without a per-reader gate. A parent,
+  // replacement, or explicit link must not turn restricted inputs into it.
+  if (isOrgGuidance && finalEntityIds.length > 0) {
+    const [restricted] = await sql`SELECT e.id FROM entities e
+      JOIN entity_types et ON et.id = e.entity_type_id AND et.organization_id = e.organization_id
+      WHERE e.organization_id = ${ctx.organizationId} AND et.slug = '$resource'
+        AND e.id = ANY(${pgBigintArray(finalEntityIds)}::bigint[]) LIMIT 1`;
+    if (restricted) throw new ToolUserError('Workspace guidance cannot carry restricted resource requirements.', 422, 'VALIDATION');
   }
 
   // 6. Insert into events
@@ -566,6 +623,7 @@ async function saveContentImpl(
   let inserted = true;
   let persistedMetadata = eventMetadata;
   if (prior) {
+    await requireReadableEvent(prior.id);
     if (prior.semantic_type !== semanticType) {
       throw new ToolUserError(
         `Idempotency key '${args.idempotency_key}' already belongs to semantic type '${prior.semantic_type}'`,
@@ -713,6 +771,7 @@ async function saveContentImpl(
             409
           );
         }
+        await requireReadableEvent(winner.id);
         row = winner;
         inserted = false;
         persistedMetadata = winner.metadata;

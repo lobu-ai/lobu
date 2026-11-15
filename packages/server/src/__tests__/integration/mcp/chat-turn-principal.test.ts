@@ -30,13 +30,21 @@ import {
   addUserToOrganization,
   createTestAgent,
   createTestConnection,
+  createTestEntity,
+  createTestPAT,
   createTestOrganization,
   createTestUser,
   linkChatIdentityInGraph,
   seedSystemEntityTypes,
   insertAgentTurnRun,
 } from '../../setup/test-fixtures';
-import { post } from '../../setup/test-helpers';
+import { post, mcpToolsCall } from '../../setup/test-helpers';
+import { getConfiguredEmbeddingModel } from '../../../utils/embeddings';
+import { executeAutomationScript } from '../../../automations/reaction-executor';
+import { ensureRelationshipType, upsertEdges } from '../../../utils/edge-writes';
+import { applyEventAttributions } from '../../../utils/entity-link-upsert';
+import { withAclEdgeWrite } from '../../../utils/relationship-validation';
+import { PERSONAL_MEMORY_OWNER_NAMESPACE } from '../../../identity/personal-memory-identity';
 
 const AGENT_ID = 'chat-principal-agent';
 const TEAM_ID = 'T0PRINCIPAL';
@@ -118,11 +126,13 @@ async function openSession(orgSlug: string, token: string): Promise<{ status: nu
   return { status: response.status, sessionId, body };
 }
 
+let nextToolRequestId = 1;
+
 async function callTool(orgSlug: string, token: string, sessionId: string, name: string, args: Record<string, unknown>) {
   return post(`/mcp/${orgSlug}`, {
-    body: { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } },
+    body: { jsonrpc: '2.0', id: nextToolRequestId++, method: 'tools/call', params: { name, arguments: args } },
     token,
-    headers: { ...DIRECT_AUTH, 'mcp-session-id': sessionId },
+    headers: { ...DIRECT_AUTH, 'mcp-session-id': sessionId, 'X-MCP-Format': 'json' },
   });
 }
 
@@ -179,6 +189,308 @@ describe('chat turn principal: the verified sender, never the agent owner', () =
       WHERE organization_id = ${org.id} AND title = 'chat principal note'
     `;
     expect(rows).toEqual([{ created_by: linkedMember.id }]);
+  });
+
+  for (const platform of ['slack', 'whatsapp.web'] as const) {
+    for (const reader of ['other member DM', 'group'] as const) {
+      for (const readPath of ['text search', 'vector search', 'exact read', 'SQL'] as const) {
+        {
+          it(`personal memory: ${platform} DM is hidden from ${reader} through ${readPath}`, async () => {
+            const bob = await createTestUser({ email: 'memory-bob@example.test' });
+            await addUserToOrganization(bob.id, org.id, 'member');
+            const alicePlatformId = platform === 'slack' ? SENDER_PLATFORM_ID : '15550000001@s.whatsapp.net';
+            const bobPlatformId = platform === 'slack' ? 'U0MEMORYBOB' : '15550000002@s.whatsapp.net';
+            for (const [userId, platformUserId] of [[linkedMember.id, alicePlatformId], [bob.id, bobPlatformId]]) {
+              await linkChatIdentityInGraph({ organizationId: org.id, userId, platform, teamId: TEAM_ID, platformUserId });
+            }
+
+            async function caller(sender: string, isDirect: boolean) {
+              const message = slackChatMessage(org.id, sender, { isDirect });
+              message.platform = platform;
+              message.channelId = platform === 'slack' ? 'slack:C0PRINCIPAL'
+                : `whatsapp.web:${isDirect ? sender : '15550000000@g.us'}`;
+              message.conversationId = `${message.channelId}:${MESSAGE_ID}`;
+              if (platform === 'whatsapp.web') {
+                message.botId = platform;
+                message.platformMetadata = { connectionId: 'synthetic-whatsapp-memory', senderId: sender, isDirect };
+              }
+              const turnToken = await mintTurnToken(message, await insertAgentTurnRun(message));
+              expect(verifyWorkerToken(turnToken)).toMatchObject({
+                actorUserId: sender === alicePlatformId ? linkedMember.id : bob.id,
+                chatAccess: isDirect ? 'member' : 'org_shared',
+              });
+              const token = mintGatewayMcpToken(turnToken);
+              expect(token).toBeTruthy();
+              const session = await openSession(org.slug, token as string);
+              expect(session.status).toBe(200);
+              expect(session.sessionId).toBeTruthy();
+              return async (name: string, args: Record<string, unknown>) => {
+                const response = await callTool(org.slug, token as string, session.sessionId as string, name, args);
+                expect(response.status).toBe(200);
+                const body = await response.json();
+                expect(body.result?.isError, JSON.stringify(body)).not.toBe(true);
+                return body.result.structuredContent ?? JSON.parse(body.result.content[0].text);
+              };
+            }
+
+            const alice = await caller(alicePlatformId, true);
+            const saved = await alice('save_memory', {
+              content: 'Zephyr orchid budget is confidential to Alice.',
+              semantic_type: 'observation', title: 'Zephyr orchid budget',
+            });
+            const id = Number(saved.id);
+            expect(id).toBeGreaterThan(0);
+            const vector = [1, ...Array(767).fill(0)];
+            if (readPath === 'vector search') {
+              await getTestDb()`INSERT INTO event_embeddings (event_id, embedding, embedding_model)
+                VALUES (${id}, ${JSON.stringify(vector)}::vector, ${getConfiguredEmbeddingModel()})`;
+            }
+            const readArgs = readPath === 'SQL'
+              ? { sql: `SELECT id, payload_text FROM events WHERE id = ${id}`, title: 'Check synthetic private memory' }
+              : { query: readPath === 'exact read' ? `memory ${id}` : readPath === 'vector search' ? 'Unrelated semantic query' : 'Zephyr orchid budget',
+                  ...(readPath === 'vector search' ? { query_embedding: vector } : {}),
+                  include_content: true, include_connections: false, include_public_catalogs: false, content_limit: 6 };
+            const tool = readPath === 'SQL' ? 'query_sql' : 'search_memory';
+            const ids = (result: { rows?: { id: number }[]; content?: { id: number }[] }) =>
+              (readPath === 'SQL' ? result.rows ?? [] : result.content ?? []).map((row) => Number(row.id));
+            // This positive control rules out a recall miss or an inaccessible save.
+            const own = await alice(tool, readArgs);
+            expect(ids(own), JSON.stringify(own)).toContain(id);
+            const other = await caller(reader === 'group' ? alicePlatformId : bobPlatformId, reader !== 'group');
+            expect(ids(await other(tool, readArgs))).not.toContain(id);
+          });
+        }
+      }
+    }
+  }
+
+  async function dmCaller() {
+    const token = await chatTurnGatewayMcpToken(org.id);
+    const session = await openSession(org.slug, token);
+    expect(session.status).toBe(200);
+    return async (name: string, args: Record<string, unknown>, allowError = false): Promise<any> => {
+      const response = await callTool(org.slug, token, session.sessionId as string, name, args);
+      const body = await response.json();
+      expect(response.status, JSON.stringify(body)).toBe(200);
+      if (allowError) return body.result;
+      expect(body.result?.isError, JSON.stringify(body)).not.toBe(true);
+      return body.result.structuredContent ?? JSON.parse(body.result.content[0].text);
+    };
+  }
+
+  async function personalResource() {
+    const [row] = await getTestDb()<{ entity_id: number }>`SELECT entity_id FROM entity_identities
+      WHERE organization_id = ${org.id} AND namespace = ${PERSONAL_MEMORY_OWNER_NAMESPACE}
+        AND identifier = ${linkedMember.id} AND deleted_at IS NULL`;
+    return Number(row.entity_id);
+  }
+
+  it('creates one audience and one owner grant across concurrent DM saves and replays without exposing receipts', async () => {
+    const alice = await dmCaller();
+    const saves = await Promise.all(Array.from({ length: 6 }, (_, i) => alice('save_memory', {
+      content: `Concurrent private note ${i}`, semantic_type: 'observation', idempotency_key: `personal-note-${i}`,
+    })));
+    const resourceId = await personalResource();
+    expect(saves.every(row => row.entity_ids.includes(resourceId))).toBe(true);
+    const resources = await getTestDb()`SELECT id FROM entity_identities WHERE organization_id = ${org.id}
+      AND namespace = ${PERSONAL_MEMORY_OWNER_NAMESPACE} AND identifier = ${linkedMember.id} AND deleted_at IS NULL`;
+    expect(resources).toHaveLength(1);
+    const grants = await getTestDb()`SELECT id FROM entity_relationships WHERE organization_id = ${org.id}
+      AND to_entity_id = ${resourceId} AND deleted_at IS NULL`;
+    expect(grants).toHaveLength(1);
+    const replay = await alice('save_memory', { content: 'Concurrent private note 0', semantic_type: 'observation', idempotency_key: 'personal-note-0' });
+    expect(replay.id).toBe(saves[0].id);
+    expect(replay.created).toBe(false);
+
+    const pat = await createTestPAT(linkedMember.id, org.id, { scope: 'mcp:read mcp:write' });
+    const read = await mcpToolsCall<any>('query_sdk', { script: `export default async (_ctx, client) => await client.knowledge.read({content_ids:[${saves[0].id}]});` }, { token: pat.token, orgSlug: org.slug });
+    expect(read.success).toBe(true);
+    expect(read.return_value.content.map((row: { id: number }) => Number(row.id))).toContain(Number(saves[0].id));
+    // An administrator has no personal-read bypass, including receipt replays.
+    const outsider = await createTestPAT(owner.id, org.id, { scope: 'mcp:read mcp:write mcp:admin' });
+    const hidden = await mcpToolsCall<any>('search_memory', { query: `memory ${saves[0].id}` }, { token: outsider.token, orgSlug: org.slug });
+    expect((hidden.content ?? []).map((row: { id: number }) => Number(row.id))).not.toContain(Number(saves[0].id));
+    await expect(mcpToolsCall('save_memory', { content: 'Concurrent private note 0', semantic_type: 'observation', idempotency_key: 'personal-note-0' },
+      { token: outsider.token, orgSlug: org.slug })).rejects.toThrow();
+  });
+
+  it('preserves the private requirement when the owner replaces a memory from a non-chat client', async () => {
+    const saved = await (await dmCaller())('save_memory', { content: 'Private original', semantic_type: 'observation' });
+    const pat = await createTestPAT(linkedMember.id, org.id, { scope: 'mcp:read mcp:write' });
+    const replacement = await mcpToolsCall<any>('save_memory', { content: 'Private replacement', semantic_type: 'observation', supersedes_event_id: saved.id },
+      { token: pat.token, orgSlug: org.slug });
+    expect(replacement.entity_ids).toContain(await personalResource());
+    const outsider = await createTestPAT(owner.id, org.id, { scope: 'mcp:read mcp:write mcp:admin' });
+    const hidden = await mcpToolsCall<any>('query_sql', { sql: `SELECT id FROM events WHERE id IN (${saved.id}, ${replacement.id})` }, { token: outsider.token, orgSlug: org.slug });
+    expect(hidden.rows).toEqual([]);
+    await expect(mcpToolsCall('save_memory', { content: 'Unauthorized replacement', semantic_type: 'observation', supersedes_event_id: replacement.id },
+      { token: outsider.token, orgSlug: org.slug })).rejects.toThrow();
+  });
+
+  it('includes personal notes in owner entity counts and score listings while hiding them from other members', async () => {
+    const saved = await (await dmCaller())('save_memory', { content: 'Private scored note', semantic_type: 'observation' });
+    const resourceId = await personalResource();
+    const connection = await createTestConnection({ organization_id: org.id, connector_key: 'slack',
+      created_by: linkedMember.id, visibility: 'org' });
+    await getTestDb()`UPDATE events SET connection_id = ${connection.id} WHERE id = ${saved.id}`;
+    for (const [userId, expectedCount] of [[linkedMember.id, 1], [owner.id, 0]] as const) {
+      const pat = await createTestPAT(userId, org.id, { scope: 'mcp:read mcp:write' });
+      const result = await mcpToolsCall<any>('query_sdk', { script: `export default async (_ctx, client) => ({
+        listed: await client.entities.list({entity_type:'$resource'}),
+        sorted: await client.entities.list({entity_type:'$resource',sort_by:'total_content'}),
+        scored: await client.knowledge.read({entity_id:${resourceId},sort_by:'score'})
+      });` }, { token: pat.token, orgSlug: org.slug });
+      expect(result.success, JSON.stringify(result)).toBe(true);
+      for (const page of [result.return_value.listed, result.return_value.sorted]) {
+        expect(Number(page.entities.find((entity: { id: number }) => Number(entity.id) === resourceId).total_content)).toBe(expectedCount);
+      }
+      expect(result.return_value.scored.content.map((row: { id: number }) => Number(row.id)))
+        .toEqual(expectedCount ? [Number(saved.id)] : []);
+    }
+  });
+
+  it.each(['membership', 'resource', 'workspace membership'] as const)('revoking %s denies reads and new writes without healing the audience', async (revocation) => {
+    const alice = await dmCaller();
+    const saved = await alice('save_memory', { content: 'Revocable private memory', semantic_type: 'observation' });
+    const resourceId = await personalResource();
+    if (revocation === 'membership') {
+      await withAclEdgeWrite(getTestDb(), tx => tx`UPDATE entity_relationships SET deleted_at = now()
+        WHERE organization_id = ${org.id} AND to_entity_id = ${resourceId}`.then(() => undefined));
+    } else if (revocation === 'resource') {
+      await getTestDb()`UPDATE entities SET deleted_at = now() WHERE id = ${resourceId}`;
+    } else {
+      await getTestDb()`DELETE FROM "member" WHERE "organizationId" = ${org.id} AND "userId" = ${linkedMember.id}`;
+    }
+    if (revocation === 'workspace membership') {
+      expect((await openSession(org.slug, await chatTurnGatewayMcpToken(org.id))).status).toBe(403);
+    } else {
+      const read = await alice('search_memory', { query: `memory ${saved.id}` });
+      expect(read.content ?? []).toEqual([]);
+      expect((await alice('save_memory', { content: 'New private note after revocation', semantic_type: 'observation' }, true)).isError).toBe(true);
+    }
+  });
+
+  it('refuses unresolved group saves and DM guidance, including for an administrator', async () => {
+    await getTestDb()`UPDATE "member" SET role = 'admin' WHERE "organizationId" = ${org.id} AND "userId" = ${linkedMember.id}`;
+    const alice = await dmCaller();
+    expect((await alice('save_memory', { content: 'Private guidance must not enter all prompts', semantic_type: 'guidance' }, true)).isError).toBe(true);
+    const token = await chatTurnGatewayMcpToken(org.id, SENDER_PLATFORM_ID, { isDirect: false });
+    const session = await openSession(org.slug, token);
+    const response = await callTool(org.slug, token, session.sessionId as string, 'save_memory', { content: 'Unresolved group capture', semantic_type: 'observation' });
+    expect((await response.json()).result.isError).toBe(true);
+    expect(await getTestDb()`SELECT id FROM events WHERE organization_id = ${org.id} AND semantic_type IN ('guidance', 'observation')`).toHaveLength(0);
+    const privateNote = await alice('save_memory', { content: 'Restricted guidance source', semantic_type: 'observation' });
+    const pat = await createTestPAT(linkedMember.id, org.id, { scope: 'mcp:read mcp:write mcp:admin' });
+    await expect(mcpToolsCall('save_memory', { content: 'Do not publish private source as guidance', semantic_type: 'guidance', parent_event_id: privateNote.id },
+      { token: pat.token, orgSlug: org.slug })).rejects.toThrow();
+    expect(await getTestDb()`SELECT id FROM events WHERE organization_id = ${org.id} AND semantic_type = 'guidance'`).toHaveLength(0);
+  });
+
+  it('refuses connector and SDK attribution claims on the reserved owner namespace', async () => {
+    const entity = await createTestEntity({ organization_id: org.id, name: 'Synthetic attempted audience' });
+    await expect(applyEventAttributions({ connectorKey: 'synthetic-memory', orgId: org.id,
+      items: [{ origin_type: 'test', metadata: { owner: linkedMember.id } }],
+      rules: { test: [{ role: 'about', entityType: '$resource', autoCreate: true,
+        identities: [{ namespace: PERSONAL_MEMORY_OWNER_NAMESPACE, eventPath: 'metadata.owner', primary: true }] }] },
+    }, getTestDb())).rejects.toThrow();
+    const alice = await dmCaller();
+    const saved = await alice('save_memory', { content: 'Trusted audience despite forged metadata', semantic_type: 'observation',
+      metadata: { personalMemoryPrincipal: owner.id, lobu_personal_memory_owner: owner.id, audience: entity.id } });
+    expect(saved.entity_ids).toContain(await personalResource());
+    expect(saved.entity_ids).not.toContain(entity.id);
+  });
+
+  it('denies a creator Automation and its managed worker access to personal memory while retaining workspace reads', async () => {
+    await getTestDb()`UPDATE "member" SET role = 'admin' WHERE "organizationId" = ${org.id} AND "userId" = ${linkedMember.id}`;
+    await getTestDb()`UPDATE agents SET owner_user_id = ${linkedMember.id} WHERE organization_id = ${org.id} AND id = ${AGENT_ID}`;
+    const saved = await (await dmCaller())('save_memory', { content: 'Zephyr confidential creator memory', semantic_type: 'observation' });
+    const pat = await createTestPAT(linkedMember.id, org.id, { scope: 'mcp:read mcp:write mcp:admin' });
+    const publicNote = await mcpToolsCall<any>('save_memory', { content: 'Workspace note', semantic_type: 'observation' }, { token: pat.token, orgSlug: org.slug });
+    expect(publicNote.entity_ids).not.toContain(await personalResource());
+    const entity = await createTestEntity({ organization_id: org.id, name: 'Synthetic memory automation' });
+    const created = await mcpToolsCall<any>('run_sdk', { script: `export default async (_ctx, client) => await client.automations.create({entity_id:${entity.id},slug:'personal-memory-probe',name:'Personal memory probe',prompt:'Read allowed context',managed_agent_id:'${AGENT_ID}',sources:[{name:'content',query:'SELECT * FROM events'}]});` }, { token: pat.token, orgSlug: org.slug });
+    expect(created.success, JSON.stringify(created)).toBe(true);
+    const automationId = Number(created.return_value.automation_id);
+    const executed = await executeAutomationScript({
+      compiledScript: `export default async (_ctx, client) => ({
+        exact: await client.knowledge.read({content_ids:[${saved.id}]}),
+        recall: await client.knowledge.search({query:'Zephyr confidential creator memory',include_connections:false}),
+        rows: await client.query('SELECT id FROM events WHERE id IN (${saved.id},${publicNote.id})')
+      });`,
+      context: { window: { run_id: 1, automation_id: automationId, window_start: '2026-11-15T00:00:00Z', window_end: '2026-11-16T00:00:00Z' },
+        automation: { id: automationId, slug: 'personal-memory-probe', name: 'Personal memory probe', version: 1 },
+        organization_id: org.id, organization_slug: org.slug, entities: [], trigger_signals: [] }, env: {},
+    });
+    expect(executed.success, JSON.stringify(executed)).toBe(true);
+    const value = executed.returnValue as any;
+    expect(value.exact.content).toEqual([]);
+    expect(value.recall.content ?? []).toEqual([]);
+    expect(value.rows.map((row: { id: number }) => Number(row.id))).toEqual([Number(publicNote.id)]);
+    const worker = mintGatewayMcpToken(generateWorkerToken(linkedMember.id, 'synthetic-automation', 'agent-turn:synthetic', {
+      platform: 'api', channelId: 'synthetic-automation', source: 'automation-run', agentId: AGENT_ID, organizationId: org.id,
+    })) as string;
+    const session = await openSession(org.slug, worker);
+    expect(session.status).toBe(200);
+    const response = await callTool(org.slug, worker, session.sessionId as string, 'query_sql', {
+      sql: `SELECT id FROM events WHERE id IN (${saved.id},${publicNote.id})`,
+    });
+    const body = await response.json();
+    expect(body.result.isError, JSON.stringify(body)).not.toBe(true);
+    const rows = body.result.structuredContent ?? JSON.parse(body.result.content[0].text);
+    expect(rows.rows.map((row: { id: number }) => Number(row.id))).toEqual([Number(publicNote.id)]);
+  });
+
+  it('retains source requirements as well as the private owner requirement', async () => {
+    await getTestDb()`UPDATE "member" SET role = 'admin' WHERE "organizationId" = ${org.id} AND "userId" = ${linkedMember.id}`;
+    const source = await createTestEntity({ organization_id: org.id, entity_type: '$resource', name: 'Synthetic source audience' });
+    const [member] = await getTestDb()`SELECT entity_id FROM entity_identities WHERE organization_id = ${org.id}
+      AND namespace = 'auth_user_id' AND identifier = ${linkedMember.id} AND source_connector = 'auth:signup' AND deleted_at IS NULL`;
+    const typeId = await ensureRelationshipType({ organizationId: org.id, slug: 'member_of', name: 'Member of', description: 'Synthetic source grant', purpose: 'authorization' });
+    const [grantId] = await withAclEdgeWrite(getTestDb(), tx => upsertEdges({ db: tx, organizationId: org.id, relationshipTypeId: typeId,
+      pairs: [{ fromEntityId: Number(member.entity_id), toEntityId: source.id }], source: 'manual', createdBy: linkedMember.id, claimKey: 'manual', onConflict: 'ignore' }));
+    const alice = await dmCaller();
+    const saved = await alice('save_memory', { content: 'Source restricted private note', semantic_type: 'observation', entity_ids: [source.id] });
+    expect(saved.entity_ids).toEqual(expect.arrayContaining([source.id, await personalResource()]));
+    expect((await alice('search_memory', { query: `memory ${saved.id}` })).content.map((row: { id: number }) => Number(row.id))).toContain(Number(saved.id));
+    await withAclEdgeWrite(getTestDb(), tx => tx`UPDATE entity_relationships SET deleted_at = now() WHERE id = ${grantId}`.then(() => undefined));
+    expect((await alice('search_memory', { query: `memory ${saved.id}` })).content ?? []).toEqual([]);
+  });
+
+  it('does not promote a conflicting untrusted personal-owner identity', async () => {
+    const entity = await createTestEntity({ organization_id: org.id, entity_type: '$resource', name: 'Synthetic untrusted claim' });
+    await getTestDb()`INSERT INTO entity_identities (organization_id, entity_id, namespace, identifier, source_connector, scope_key)
+      VALUES (${org.id}, ${entity.id}, ${PERSONAL_MEMORY_OWNER_NAMESPACE}, ${linkedMember.id}, 'connector:synthetic', NULL)`;
+    const alice = await dmCaller();
+    const result = await alice('save_memory', { content: 'Do not publish when audience cannot resolve', semantic_type: 'observation' }, true);
+    expect(result.isError).toBe(true);
+    expect(await getTestDb()`SELECT id FROM events WHERE organization_id = ${org.id} AND semantic_type = 'observation'`).toHaveLength(0);
+    const [identity] = await getTestDb()`SELECT source_connector FROM entity_identities WHERE entity_id = ${entity.id}`;
+    expect(identity.source_connector).toBe('connector:synthetic');
+  });
+
+  it('applies the DM audience through SDK saves and re-resolves it after client.org', async () => {
+    const target = await createTestOrganization({ name: 'Synthetic target memory workspace' });
+    await addUserToOrganization(linkedMember.id, target.id, 'member');
+    await linkChatIdentityInGraph({ organizationId: target.id, userId: linkedMember.id, platform: 'slack', teamId: TEAM_ID, platformUserId: SENDER_PLATFORM_ID });
+    const alice = await dmCaller();
+    const result = await alice('run_sdk', { script: `export default async (_ctx, client) => {
+      const home = await client.knowledge.save({content:'SDK private home note',semantic_type:'observation'});
+      const other = await client.org('${target.slug}');
+      const foreign = await other.knowledge.save({content:'SDK private foreign note',semantic_type:'observation'});
+      return {home,foreign,rows:await other.query('SELECT id FROM events WHERE id = ' + foreign.id)};
+    };` });
+    expect(result.success, JSON.stringify(result)).toBe(true);
+    const homeId = await personalResource();
+    const [foreign] = await getTestDb()`SELECT entity_id FROM entity_identities WHERE organization_id = ${target.id}
+      AND namespace = ${PERSONAL_MEMORY_OWNER_NAMESPACE} AND identifier = ${linkedMember.id} AND deleted_at IS NULL`;
+    expect(Number(foreign.entity_id)).not.toBe(homeId);
+    expect(result.return_value.home.entity_ids).toContain(homeId);
+    expect(result.return_value.foreign.entity_ids).toContain(Number(foreign.entity_id));
+    expect(result.return_value.foreign.entity_ids).not.toContain(homeId);
+    expect(result.return_value.rows.map((row: { id: number }) => Number(row.id))).toContain(Number(result.return_value.foreign.id));
+    await getTestDb()`DELETE FROM "member" WHERE "organizationId" = ${target.id} AND "userId" = ${linkedMember.id}`;
+    const denied = await alice('query_sdk', { script: `export default async (_ctx, client) => (await client.org('${target.slug}')).knowledge.read({content_ids:[${result.return_value.foreign.id}]});` });
+    expect(denied.success).toBe(false);
   });
 
   async function seedConnections() {

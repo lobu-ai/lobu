@@ -1755,6 +1755,7 @@ export async function handleMcp(c: Context<{ Bindings: Env }>): Promise<Response
       // conversation is per request. The gateway may reuse the same upstream
       // MCP session across turns, so update only this request's snapshot.
       requestAuthCtx.sourceContext = freshCtx.sourceContext ?? null;
+      requestAuthCtx.personalMemoryPrincipal = freshCtx.personalMemoryPrincipal ?? null;
       requestAuthCtx.adminTools = freshCtx.adminTools ?? null;
       // Per request for the same reason: one upstream session can serve the
       // same sender's direct message and group turns, and only the former's

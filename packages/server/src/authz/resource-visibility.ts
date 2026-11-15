@@ -47,6 +47,7 @@ import { ACL_RESOURCE_TYPE_SLUG } from '@lobu/connector-sdk';
 import { CHAT_PLATFORMS } from '@lobu/core';
 import { enforcedConnectionsSelectSql } from './acl-state.js';
 import { aclConnectionIdSql } from './acl-observability.js';
+import { PERSONAL_MEMORY_OWNER_NAMESPACE, PERSONAL_MEMORY_IDENTITY_SOURCE } from '../identity/personal-memory-identity';
 import type { AuthzScope } from './scope.js';
 import {
   MANUAL_RELATIONSHIP_CLAIM_KEY,
@@ -65,7 +66,8 @@ const CHAT_PLATFORMS_SQL = CHAT_PLATFORMS.map((key) => `'${key}'`).join(', ');
 
 /**
  * Predicate for a table holding events (alias has `connection_id` + `entity_ids`).
- * Binds two params from `baseParamIndex`: the org id and the principal. Returns an
+ * Binds three params from `baseParamIndex`: org, source principal, and verified
+ * personal-memory principal. Returns an
  * `AND (...)` fragment (no leading space). Compose alongside
  * `compileConnectionFkVisibility` at the same seam.
  */
@@ -76,6 +78,7 @@ export function compileResourceVisibility(
 ): { sql: string; params: Array<string | null> } {
   const orgParam = `$${baseParamIndex}::text`;
   const userParam = `$${baseParamIndex + 1}::text`;
+  const humanParam = `$${baseParamIndex + 2}::text`;
 
   // The caller's verified `$member` entity — the `from` side of every
   // membership edge below.
@@ -155,6 +158,21 @@ export function compileResourceVisibility(
           AND rr.deleted_at IS NULL
           AND rr.from_entity_id = ${memberSubquery}
           AND (
+            NOT EXISTS (
+              SELECT 1 FROM public.entity_identities owner
+              WHERE owner.organization_id = ${orgParam} AND owner.entity_id = rr.to_entity_id
+                AND owner.namespace = '${PERSONAL_MEMORY_OWNER_NAMESPACE}'
+            )
+            OR (${humanParam} = ${userParam} AND EXISTS (
+              SELECT 1 FROM public.entity_identities owner
+              JOIN public."member" human ON human."organizationId" = owner.organization_id AND human."userId" = owner.identifier
+              WHERE owner.organization_id = ${orgParam} AND owner.entity_id = rr.to_entity_id
+                AND owner.namespace = '${PERSONAL_MEMORY_OWNER_NAMESPACE}' AND owner.scope_key IS NULL
+                AND owner.source_connector = '${PERSONAL_MEMORY_IDENTITY_SOURCE}' AND owner.deleted_at IS NULL
+                AND owner.identifier = ${humanParam}
+            ))
+          )
+          AND (
             (rr.metadata -> '${RELATIONSHIP_CLAIMS_METADATA_KEY}') ? '${MANUAL_RELATIONSHIP_CLAIM_KEY}'
             OR EXISTS (
               SELECT 1
@@ -228,5 +246,5 @@ export function compileResourceVisibility(
           OR ${tableAlias}.connection_id IN (${unstampedVisibleConnectionIds}))
       END)
     )`;
-  return { sql, params: [scope.organizationId, scope.principal] };
+  return { sql, params: [scope.organizationId, scope.principal, scope.personalMemoryPrincipal ?? null] };
 }

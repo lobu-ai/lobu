@@ -33,6 +33,7 @@ import type { ClassificationStatsRow, ContentRow, GetContentResult } from './typ
 interface VisibilityScope {
   organizationId: string;
   userId: string | null;
+  personalMemoryPrincipal?: string | null;
 }
 
 /** Shared shape returned by the direct list branches. */
@@ -92,6 +93,7 @@ export async function buildExactIdScopeWhere(
   const visibility = buildConnectionVisibilityClause({
     organizationId: opts.visibilityScope.organizationId,
     userId: opts.visibilityScope.userId,
+    personalMemoryPrincipal: opts.visibilityScope.personalMemoryPrincipal,
     baseParamIndex: opts.baseParamIndex + params.length,
   });
   params.push(...visibility.params);
@@ -612,6 +614,7 @@ export async function fetchIncludeSuperseded(opts: {
     {
       organizationId: visibilityScope.organizationId,
       userId: visibilityScope.userId,
+      personalMemoryPrincipal: visibilityScope.personalMemoryPrincipal,
       baseParamIndex: paramIndex,
     },
     'e'
@@ -816,6 +819,7 @@ export async function fetchClassificationStats(opts: {
   const statsVisibility = buildConnectionVisibilityClause({
     organizationId: visibilityScope.organizationId,
     userId: visibilityScope.userId,
+    personalMemoryPrincipal: visibilityScope.personalMemoryPrincipal,
     baseParamIndex: paramIndex,
   });
   if (statsVisibility.sql) {

@@ -28,6 +28,8 @@ import {
   type EventAttributionRule,
 } from '@lobu/connector-sdk';
 import { normalizeIdentifier } from '@lobu/connector-sdk/identity-normalize';
+import { PERSONAL_MEMORY_OWNER_NAMESPACE } from '../identity/personal-memory-identity';
+import { ToolUserError } from './errors';
 import { ensureResourceEntityType } from '../authz/acl-resource-type';
 import { type DbClient, getDb, pgBigintArray, pgTextArray } from '../db/client';
 import { normalizeConnectorIdentityValue } from '../identity/connector-identity-modules';
@@ -522,7 +524,12 @@ async function lookupMatches(
   // collision this exists to prevent.
   const wanted = new Map<string, ResolvedIdentity>();
   for (const arr of params.identities) {
-    for (const id of arr) wanted.set(identityKey(id), id);
+    for (const id of arr) {
+      if (id.namespace.trim() === PERSONAL_MEMORY_OWNER_NAMESPACE) {
+        throw new ToolUserError('Personal-memory owner identities are server-owned.', 403, 'PERMISSION');
+      }
+      wanted.set(identityKey(id), id);
+    }
   }
   if (wanted.size === 0) return new Map();
 
@@ -994,6 +1001,11 @@ export async function applyEventAttributions(
       : { rulesByKind: {}, relationshipsByKind: {} };
   if (Object.keys(plan.rulesByKind).length === 0) {
     return { ...empty, relationshipsByKind: plan.relationshipsByKind };
+  }
+  for (const rules of Object.values(plan.rulesByKind)) {
+    if (rules.some(rule => rule.identities.some(identity => identity.namespace.trim() === PERSONAL_MEMORY_OWNER_NAMESPACE))) {
+      throw new ToolUserError('Personal-memory owner identities are server-owned.', 403, 'PERMISSION');
+    }
   }
   const resolved = await withEntityWriteTransaction(db, (tx) =>
     resolveLinksByKind(

@@ -44,6 +44,7 @@ export async function resolveEventViewSubject(
       visibilityScope: {
         organizationId: ctx.organizationId,
         userId: authzScopeFromToolContext(ctx).principal,
+        personalMemoryPrincipal: authzScopeFromToolContext(ctx).personalMemoryPrincipal,
       },
       excludeWorkspaceAudit: !canReadWorkspaceIdentity(ctx),
       excludeOperationalTrail: isPublicReader(ctx),

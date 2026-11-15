@@ -130,6 +130,7 @@ export function buildConnectionVisibilityClause(
   options: {
     organizationId?: string;
     userId?: string | null;
+    personalMemoryPrincipal?: string | null;
     baseParamIndex: number;
   },
   tableAlias: string = 'f'
@@ -139,6 +140,7 @@ export function buildConnectionVisibilityClause(
   const scope: AuthzScope = {
     organizationId: options.organizationId,
     principal: options.userId ?? null,
+    personalMemoryPrincipal: options.personalMemoryPrincipal ?? null,
   };
   // Compose the two read gates: per-connection visibility AND per-resource
   // membership (the latter only constrains ACL-enforced connections). Resource
