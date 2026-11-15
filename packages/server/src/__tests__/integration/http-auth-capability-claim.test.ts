@@ -162,6 +162,42 @@ describe('gateway HTTP authentication capability negotiation', () => {
 describe('fleet credential delivery boundary', () => {
   beforeEach(async () => { await cleanupTestDatabase(); });
 
+  it.each(['sync', 'action'] as const)('dispatches a live-browser %s with public account state only', async (runType) => {
+    const seeded = await seedPendingRun(false);
+    const sql = getTestDb();
+    const [connection] = await sql`SELECT created_by, auth_profile_id FROM connections WHERE id = ${seeded.connectionId}`;
+    const [device] = await sql`INSERT INTO device_workers (user_id, worker_id, platform, capabilities, organization_id)
+      VALUES (${connection.created_by}, 'synthetic-live-browser', 'chrome-extension', ${sql.json(['browser.debugger'])}, ${seeded.orgId}) RETURNING id`;
+    const publicState = { mode: 'live', account_id: 'synthetic-account', verified_at: '2026-01-01T00:00:00.000Z' };
+    const sentinel = 'synthetic-live-profile-secret';
+    await sql`UPDATE auth_profiles SET profile_kind = 'browser_session', auth_data = ${sql.json({
+      ...publicState, cookies: [{ name: 'session', value: sentinel }], unexpected: { token: sentinel },
+    })} WHERE id = ${connection.auth_profile_id}`;
+    await sql`UPDATE connections SET device_worker_id = ${device.id}::uuid WHERE id = ${seeded.connectionId}`;
+    await sql`UPDATE connector_definitions SET actions_schema = ${sql.json({ inspect: { name: 'Inspect', kind: 'read' } })}
+      WHERE organization_id = ${seeded.orgId} AND key = ${seeded.connectorKey}`;
+    await sql`UPDATE runs SET run_type = ${runType}, action_key = ${runType === 'action' ? 'inspect' : null},
+      target_device_worker_id = ${device.id}::uuid, policy_principal_kind = 'user',
+      policy_principal_id = ${connection.created_by}, created_by_user_id = ${connection.created_by}
+      WHERE id = ${seeded.runId}`;
+    if (runType === 'action') {
+      const [policy] = await sql`INSERT INTO write_approval_policies (organization_id, resource_class, connector_key)
+        VALUES (${seeded.orgId}, 'connector_action', ${seeded.connectorKey}) RETURNING id`;
+      await sql`INSERT INTO write_policy_action_effects (policy_id, action, effect) VALUES (${policy.id}, 'execute', 'auto')`;
+    }
+
+    const response = await poll(true);
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.run_id).toBe(seeded.runId);
+    expect(body.session_state).toEqual(publicState);
+    expect(body.connection_credentials).toBeUndefined();
+    expect(body.previous_credentials).toBeUndefined();
+    expect(JSON.stringify(body).includes(sentinel)).toBe(false);
+    const [profile] = await sql`SELECT auth_data FROM auth_profiles WHERE id = ${connection.auth_profile_id}`;
+    expect(profile.auth_data.unexpected.token).toBe(sentinel);
+  });
+
   it.each(['sync', 'action'] as const)('dispatches an OAuth %s token while retaining app credentials gateway-side', async (runType) => {
     const seeded = await seedPendingRun(false);
     const sql = getTestDb();

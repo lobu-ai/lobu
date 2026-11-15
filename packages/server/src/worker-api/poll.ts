@@ -1847,7 +1847,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
   const connectionIsDevicePinned = row.connection_device_worker_id != null;
   const deliverConnectionAuth =
     !isDeviceOwnedRun && !!row.connection_id && (!isUserScopedWorker || connectionIsDevicePinned);
-  const { credentials, connectionCredentials, sessionState, httpAuth } = deliverConnectionAuth
+  const { credentials, connectionCredentials, sessionState, sessionStateIsPublic, httpAuth } = deliverConnectionAuth
     ? await resolveExecutionAuth({
         organizationId: row.organization_id,
         connectionId: row.connection_id!,
@@ -1861,6 +1861,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
         credentials: null,
         connectionCredentials: {},
         sessionState: null,
+        sessionStateIsPublic: undefined,
         httpAuth: undefined,
       };
 
@@ -1898,12 +1899,12 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
 
   // Resolving auth can observe a newer profile than the claim query. Enforce
   // this on the actual envelope, before any secret-bearing field is serialized.
-  // Public connection/feed config and the host-concealed access token remain
+  // Public config, allowlisted live-browser identity and the host-concealed access token remain
   // usable by fleet workers; durable credentials require a gateway proxy or
   // the already-authorized owner-device lane.
   if (!isUserScopedWorker && (
     Object.keys(connectionCredentials).length > 0 ||
-    (sessionState != null && Object.keys(sessionState).length > 0) ||
+    (sessionState != null && Object.keys(sessionState).length > 0 && !sessionStateIsPublic) ||
     previousCredentials != null
   )) {
     const message = 'Run requires gateway-proxied authentication or an explicitly pinned owner device';
