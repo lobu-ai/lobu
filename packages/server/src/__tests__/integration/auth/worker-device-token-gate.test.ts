@@ -6,6 +6,7 @@
  */
 
 import { beforeEach, describe, expect, it } from 'vitest';
+import { PersonalAccessTokenService } from '../../../auth/tokens';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import {
   createTestAccessToken,
@@ -74,5 +75,25 @@ describe('worker endpoints admit only device grants', () => {
     expect(
       await pollAs({ kind: 'oauth', scope: 'mcp:read device_worker:run profile:read', resource: null }, 'gate-oauth-device')
     ).toEqual({ status: 200, registered: true });
+  });
+
+  it('preserves account-scoped device grants without a workspace binding', async () => {
+    const { org, user } = await seedOwnerContext();
+    await getTestDb()`UPDATE organization SET metadata = ${JSON.stringify({ personal_org_for_user_id: user.id })} WHERE id = ${org.id}`;
+    const { token } = await new PersonalAccessTokenService(getTestDb()).create(
+      user.id,
+      null,
+      'Legacy device grant',
+      { scope: 'device_worker:run' },
+    );
+    const workerId = 'gate-account-pat-device';
+    const response = await post('/api/workers/poll', {
+      token,
+      body: { worker_id: workerId, platform: 'headless', app_version: 'test', capabilities: { 'os.shell': true } },
+    });
+
+    expect(response.status).toBe(200);
+    const workers = await getTestDb()`SELECT 1 FROM device_workers WHERE worker_id = ${workerId}`;
+    expect(workers).toHaveLength(1);
   });
 });

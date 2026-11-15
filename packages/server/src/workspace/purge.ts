@@ -248,6 +248,14 @@ export async function runWorkspacePurgeTask(
     // 7. The organization row. What still cascades is small by now.
     await batch('organization', (tx) =>
       withAclPrivilege(tx, async () => {
+        // Hold the organization lock before revoking: a concurrent PAT mint's
+        // FK check must finish before this update or fail after the delete.
+        // The FK otherwise detaches live PATs with ON DELETE SET NULL.
+        await tx`SELECT id FROM organization WHERE id = ${organizationId} FOR UPDATE`;
+        await tx`
+          UPDATE personal_access_tokens SET revoked_at = NOW(), updated_at = NOW()
+          WHERE organization_id = ${organizationId} AND revoked_at IS NULL
+        `;
         const deleted = await tx`DELETE FROM organization WHERE id = ${organizationId}`;
         return deleted.count;
       }),

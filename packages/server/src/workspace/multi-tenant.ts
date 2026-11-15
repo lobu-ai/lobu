@@ -549,6 +549,21 @@ export class MultiTenantProvider implements WorkspaceProvider {
         );
       }
 
+      // Deleting a workspace detaches its PATs via ON DELETE SET NULL. A
+      // detached PAT must not acquire another workspace from the request or
+      // an existing MCP session. Legacy device grants still use the unscoped
+      // account/worker endpoints, whose own middleware checks their scopes.
+      if (isPat && !authInfo.organizationId && (requestedOrgId || isMcpRoute || !isUnscopedRoute)) {
+        return c.json(
+          {
+            error: 'invalid_token',
+            error_description: 'PAT is not scoped to an organization — re-mint via `lobu token`',
+          },
+          401,
+          { 'WWW-Authenticate': bearerChallenge('invalid_token') }
+        );
+      }
+
       // RFC 8707-bound OAuth tokens are valid only for the exact MCP resource
       // named during authorization and cannot be replayed against REST routes.
       // Legacy unbound tokens remain accepted for the device/CLI compatibility
