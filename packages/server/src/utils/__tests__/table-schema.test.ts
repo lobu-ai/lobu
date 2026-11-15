@@ -61,6 +61,7 @@ describe('SAFE_COLUMN_DEFS', () => {
     const cols = colList('user');
     expect(cols).not.toContain('"email"');
     expect(cols).not.toContain('"phoneNumber"');
+    expect(cols).not.toContain('"twoFactorEnabled"');
   });
 
   it('should exclude embeddings from entities', () => {
@@ -276,7 +277,7 @@ describe('QUERYABLE_SCHEMA vs database (drift detection)', () => {
       'next_window_start',
       'last_completed_window_start',
     ]),
-    user: new Set(['email', 'phoneNumber', 'phoneNumberVerified']),
+    user: new Set(['email', 'phoneNumber', 'phoneNumberVerified', 'twoFactorEnabled']),
   };
 
   /**
