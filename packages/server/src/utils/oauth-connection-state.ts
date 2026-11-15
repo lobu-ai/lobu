@@ -114,7 +114,8 @@ export async function syncOAuthConnectionsForAuthProfile(
   if (!authProfile.account_id) {
     await sql`
       UPDATE connections
-      SET status = 'pending_auth', account_id = NULL, updated_at = NOW()
+      SET status = CASE WHEN status = 'paused' THEN status ELSE 'pending_auth' END,
+          account_id = NULL, updated_at = NOW()
       WHERE organization_id = ${organizationId}
         AND auth_profile_id = ${authProfileId}
         AND deleted_at IS NULL

@@ -288,6 +288,7 @@ async function syncConnectionsForOAuthAppProfile(
     WHERE organization_id = ${organizationId}
       AND app_auth_profile_id = ${authProfileId}
       AND deleted_at IS NULL
+      AND status <> 'paused'
   `;
 }
 
@@ -325,6 +326,7 @@ async function syncConnectionsForBrowserAuthProfile(
       WHERE organization_id = ${organizationId}
         AND auth_profile_id = ${authProfileId}
         AND deleted_at IS NULL
+        AND status <> 'paused'
     `;
     await pauseFeedsForInactiveConnections(tx, { authProfileId });
   });
@@ -870,6 +872,8 @@ async function handleDeleteAuthProfile(
         SET status = 'pending_auth', updated_at = NOW()
         WHERE organization_id = ${ctx.organizationId}
           AND auth_profile_id = ${existing.id}
+          AND deleted_at IS NULL
+          AND status <> 'paused'
       `;
       await tx`
         UPDATE feeds f
@@ -890,6 +894,7 @@ async function handleDeleteAuthProfile(
         WHERE organization_id = ${ctx.organizationId}
           AND app_auth_profile_id = ${existing.id}
           AND deleted_at IS NULL
+          AND status <> 'paused'
       `;
     }
 

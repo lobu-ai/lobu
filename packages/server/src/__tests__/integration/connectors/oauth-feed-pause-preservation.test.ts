@@ -46,7 +46,7 @@ type SeededFeed = {
 async function seedOAuthConnection(params: {
   grantedScopes: string[];
   feeds: SeededFeed[];
-  connectionStatus?: 'active' | 'pending_auth';
+  connectionStatus?: 'active' | 'pending_auth' | 'paused';
 }): Promise<{
   organizationId: string;
   authProfileId: number;
@@ -212,6 +212,22 @@ describe('OAuth feed pause preservation', () => {
 
   beforeEach(async () => {
     await cleanupTestDatabase();
+  });
+
+  it('preserves a connection pause when its OAuth account grant disappears', async () => {
+    const seeded = await seedOAuthConnection({
+      grantedScopes: [CONNECTOR_SCOPE, ALPHA_SCOPE],
+      feeds: [{ key: 'alpha', status: 'paused' }],
+      connectionStatus: 'paused',
+    });
+    const sql = getTestDb();
+    await sql`UPDATE auth_profiles SET account_id = NULL WHERE id = ${seeded.authProfileId}`;
+
+    await syncOAuthConnectionsForAuthProfile(seeded.organizationId, seeded.authProfileId);
+
+    const [connection] = await sql`SELECT status, account_id FROM connections WHERE id = ${seeded.connectionId}`;
+    expect(connection.status).toBe('paused');
+    expect(connection.account_id).toBeNull();
   });
 
   it('preserves an explicit pause made through manage_feeds', async () => {
