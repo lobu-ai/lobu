@@ -228,27 +228,17 @@ export async function revokeInMemoryMcpSessionsForClient(
 const mcpRequestContext = new AsyncLocalStorage<{
   rawJson: boolean;
   signal: AbortSignal;
-  /** This request's caller IP: a session can move between addresses. */
-  clientIP: string;
-  /**
-   * The agent turn this request's verified credential names. Per request,
-   * never on the session: the gateway reuses one upstream MCP session across a
-   * user's turns, so a session copy would key a write to another turn.
-   */
-  agentTurn: AgentTurnIdentity | null;
+  /** Verified authority and attribution belong to this HTTP request. */
+  authCtx: AuthContext;
   renewActivity?: () => Promise<boolean>;
 }>();
 
 /**
- * The session's auth context as of this request. Rate limits key on the
- * caller's address, and a session can move between addresses, so every path
- * that runs a tool takes this request's IP rather than the session's first.
- * The agent turn is per request for the same reason.
+ * A transport session may serve concurrent turns with different authority.
+ * Never read another request's role, scopes, sender reach or source context.
  */
-function forThisRequest<T extends AuthContext>(authCtx: T): T {
-  const store = mcpRequestContext.getStore();
-  if (!store) return authCtx;
-  return { ...authCtx, ...(store.clientIP ? { clientIP: store.clientIP } : {}), agentTurn: store.agentTurn };
+function forThisRequest(authCtx: AuthContext): AuthContext {
+  return mcpRequestContext.getStore()?.authCtx ?? authCtx;
 }
 
 class SessionServer extends Server {
@@ -457,14 +447,14 @@ function mcpAppResourceMeta(
 
 function createServerForContext(
   env: Env,
-  authCtx: SessionAuthContext,
+  sessionAuthCtx: SessionAuthContext,
   mcpAppsSupported: boolean
 ): Server {
   const server = new SessionServer(
     { name: 'lobu-mcp', version: '0.2.0' },
     {
       capabilities: { tools: {}, resources: {} },
-      ...(authCtx.instructions && { instructions: authCtx.instructions }),
+      ...(sessionAuthCtx.instructions && { instructions: sessionAuthCtx.instructions }),
     }
   );
 
@@ -472,6 +462,7 @@ function createServerForContext(
   // Admin flat tools stay dispatchable via tools/call and REST but are omitted
   // here so agents compose through query_sdk / run_sdk instead.
   server.setRequestHandler(ListToolsRequestSchema, async () => {
+    const authCtx = forThisRequest(sessionAuthCtx);
     // An account OAuth session advertises the scope-bounded SDK surface;
     // client.org(target) resolves membership again and every leaf method gates
     // against that target role.
@@ -539,7 +530,7 @@ function createServerForContext(
         name: meta.name,
         description: meta.description,
         mimeType: MCP_APP_MIME_TYPE,
-        _meta: mcpAppResourceMeta(authCtx, meta),
+        _meta: mcpAppResourceMeta(forThisRequest(sessionAuthCtx), meta),
       })),
       // Views share ONE loader resource. Per-view bundles are NOT listed:
       // hosts cache the id they capture at connect time, so the listed id
@@ -552,7 +543,7 @@ function createServerForContext(
         description:
           'Lobu views: React modules rendered in a sandboxed iframe. Open one with the open_view tool; actions use invoke_view_action.',
         mimeType: MCP_APP_MIME_TYPE,
-        _meta: mcpAppResourceMeta(authCtx, VIEWS_LOADER_META),
+        _meta: mcpAppResourceMeta(forThisRequest(sessionAuthCtx), VIEWS_LOADER_META),
       },
       ...Object.entries(MCP_SKILL_RESOURCES).map(([uri, meta]) => ({
         uri,
@@ -565,8 +556,9 @@ function createServerForContext(
 
   // resources/read — return the built bundle HTML for a `ui://` app resource.
   server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+    const authCtx = forThisRequest(sessionAuthCtx);
     const uri = request.params.uri;
-    const mediaResource = await readMcpAttachmentResource(uri, env, forThisRequest(authCtx));
+    const mediaResource = await readMcpAttachmentResource(uri, env, authCtx);
     if (mediaResource) return mediaResource;
     const skill = MCP_SKILL_RESOURCES[uri];
     if (skill) {
@@ -610,7 +602,7 @@ function createServerForContext(
         );
       }
       const workspace = await resolveViewWorkspace(
-        toAccountToolContext(forThisRequest(authCtx)), viewOrganization
+        toAccountToolContext(authCtx), viewOrganization
       );
       if (!workspace.memberRole) throw new AccessDeniedError('Workspace membership is required to read views.');
       const storedView = await getViewForDisplay(workspace.organizationId, viewKey);
@@ -664,6 +656,7 @@ function createServerForContext(
 
   // tools/call — access control + execution + formatting
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+    const authCtx = forThisRequest(sessionAuthCtx);
     const { name, arguments: args } = request.params;
     const compatApprovalCapability =
       name === 'resolve_approval'
@@ -678,7 +671,7 @@ function createServerForContext(
         ? stripCapabilityCompatMeta(args)
         : args;
     let callAuthCtx = {
-      ...forThisRequest(authCtx),
+      ...authCtx,
       mcpAppsSupported,
       mcpConversationId: hostConversationIdFromMeta(request.params._meta),
       mcpAppApprovalCapability:
@@ -1471,13 +1464,17 @@ async function handleTransportRequest(
   transport: WebStandardStreamableHTTPServerTransport,
   req: Request,
   clientIP: string,
-  agentTurn: AgentTurnIdentity | null
+  agentTurn: AgentTurnIdentity | null,
+  authCtx: AuthContext
 ): Promise<Response> {
   const response = await mcpRequestContext.run({
     rawJson: req.headers.get('x-mcp-format')?.toLowerCase() === 'json',
     signal: req.signal,
-    clientIP,
-    agentTurn: withTurnInputRun(agentTurn, req.headers.get(TURN_INPUT_RUN_HEADER)),
+    authCtx: {
+      ...authCtx,
+      ...(clientIP ? { clientIP } : {}),
+      agentTurn: withTurnInputRun(agentTurn, req.headers.get(TURN_INPUT_RUN_HEADER)),
+    },
     // Initialization has no persisted row yet and must not create one here.
     renewActivity: req.method === 'POST' && transport.sessionId
       ? () => refreshTransportActivity(transport) : undefined,
@@ -1657,12 +1654,15 @@ export async function handleMcp(c: Context<{ Bindings: Env }>): Promise<Response
     const session = sessions.get(sessionId)!;
     session.lastAccessedAt = Date.now();
 
-    // The transport session is routing state, not an OAuth credential. Require
-    // a freshly verified OAuth bearer on every request so token revocation and
+    // The transport session is routing state, not a credential. Require
+    // freshly verified authentication on every request so token revocation and
     // live membership changes cannot be bypassed with only mcp-session-id.
     // Keep the live session intact on a missing header: a compliant retry with
     // the same bearer can continue without an unnecessary re-initialize.
     const freshRequestAuthCtx = c.var.mcpIsAuthenticated ? extractAuthContext(c) : null;
+    if (session.authCtx.isAuthenticated && !freshRequestAuthCtx) {
+      return buildUnauthorizedResponse(req, 'Valid authentication is required on every authenticated MCP request.');
+    }
     // Never reuse live policy for capture, or mutate a concurrent capture's owner.
     const priorCapture = session.authCtx.executionMode === 'capture';
     const freshCapture = freshRequestAuthCtx?.executionMode === 'capture';
@@ -1681,11 +1681,10 @@ export async function handleMcp(c: Context<{ Bindings: Env }>): Promise<Response
 
     // The persisted row is the cross-replica revocation signal: revoking on any
     // pod DELETEs it. Refresh update-only and treat "no row" as revoked, so a
-    // live transport on another pod cannot keep serving a revoked client. This
-    // is deliberately a single atomic UPDATE rather than a check followed by an
-    // upsert — a revoke committing between those two would be undone by the
-    // write that follows it.
-    if (!(await refreshSessionState(sessionId, session.authCtx, session.lastAccessedAt))) {
+    // live transport on another pod cannot keep serving a revoked client.
+    // Renew activity without writing stale session authority over a newer
+    // request's binding; both refresh methods are update-only.
+    if (!(await mcpSessionStore.refreshActivity(sessionId))) {
       sessions.delete(sessionId);
       session.transport.close?.();
       return buildJsonRpcErrorResponse(
@@ -1700,13 +1699,15 @@ export async function handleMcp(c: Context<{ Bindings: Env }>): Promise<Response
       void deletePersistedSession(sessionId);
     };
 
+    const requestAuthCtx: SessionAuthContext = { ...session.authCtx };
+
     // Refresh authenticated session context on every request so role changes,
     // scope changes, and auth upgrades are reflected immediately.
     if (freshRequestAuthCtx) {
       const freshCtx = freshRequestAuthCtx;
 
-      if (session.authCtx.isAuthenticated) {
-        if (session.authCtx.userId && freshCtx.userId !== session.authCtx.userId) {
+      if (requestAuthCtx.isAuthenticated) {
+        if (requestAuthCtx.userId && freshCtx.userId !== requestAuthCtx.userId) {
           clearSession();
           return buildJsonRpcErrorResponse(
             'Session authentication changed. Re-initialize.',
@@ -1714,14 +1715,14 @@ export async function handleMcp(c: Context<{ Bindings: Env }>): Promise<Response
             400
           );
         }
-        if (session.authCtx.clientId && freshCtx.clientId !== session.authCtx.clientId) {
+        if (requestAuthCtx.clientId && freshCtx.clientId !== requestAuthCtx.clientId) {
           clearSession();
           return buildJsonRpcErrorResponse('Session client changed. Re-initialize.', null, 400);
         }
         // Grant stability only applies to an already-authenticated session; an
         // anonymous session upgrading in place legitimately gains its first
         // workspace snapshot below.
-        const oldGrantIds = session.authCtx.grantedOrganizationIds ?? [];
+        const oldGrantIds = requestAuthCtx.grantedOrganizationIds ?? [];
         const freshGrantIds = freshCtx.grantedOrganizationIds ?? [];
         if (
           oldGrantIds.length !== freshGrantIds.length ||
@@ -1736,63 +1737,71 @@ export async function handleMcp(c: Context<{ Bindings: Env }>): Promise<Response
         }
       }
 
-      session.authCtx.isAuthenticated = true;
-      session.authCtx.userId = freshCtx.userId;
-      session.authCtx.clientId = freshCtx.clientId;
-      session.authCtx.tokenName = freshCtx.tokenName ?? null;
-      session.authCtx.tokenType = freshCtx.tokenType;
+      requestAuthCtx.isAuthenticated = true;
+      requestAuthCtx.userId = freshCtx.userId;
+      requestAuthCtx.clientId = freshCtx.clientId;
+      requestAuthCtx.tokenName = freshCtx.tokenName ?? null;
+      requestAuthCtx.tokenType = freshCtx.tokenType;
       // `extractAuthContext` always yields a concrete scope array (real scopes
       // for token callers, the not-applicable sentinel for session/anonymous).
       // Assign it straight through — `hasRequiredMcpScope` fails closed on
       // null, so coercing to null would wrongly deny a valid refreshed session.
-      session.authCtx.scopes = freshCtx.scopes;
-      session.authCtx.grantedOrganizationIds = freshCtx.grantedOrganizationIds;
-      session.authCtx.directSearchFederation = freshCtx.directSearchFederation;
-      session.authCtx.allowCrossOrg = freshCtx.allowCrossOrg;
-      session.authCtx.tokenOrganizationId = freshCtx.tokenOrganizationId;
+      requestAuthCtx.scopes = freshCtx.scopes;
+      requestAuthCtx.grantedOrganizationIds = freshCtx.grantedOrganizationIds;
+      requestAuthCtx.directSearchFederation = freshCtx.directSearchFederation;
+      requestAuthCtx.allowCrossOrg = freshCtx.allowCrossOrg;
+      requestAuthCtx.tokenOrganizationId = freshCtx.tokenOrganizationId;
       // Identity belongs to the MCP session, but worker-originated source
       // conversation is per request. The gateway may reuse the same upstream
-      // MCP session across turns for the same user/agent, so keep the mutable
-      // auth context current before tools read ToolContext.sourceContext.
-      session.authCtx.sourceContext = freshCtx.sourceContext ?? null;
-      session.authCtx.adminTools = freshCtx.adminTools ?? null;
+      // MCP session across turns, so update only this request's snapshot.
+      requestAuthCtx.sourceContext = freshCtx.sourceContext ?? null;
+      requestAuthCtx.adminTools = freshCtx.adminTools ?? null;
       // Per request for the same reason: one upstream session can serve the
       // same sender's direct message and group turns, and only the former's
       // token carries the sender-workspace grant.
-      session.authCtx.chatSenderReach = freshCtx.chatSenderReach ?? null;
+      requestAuthCtx.chatSenderReach = freshCtx.chatSenderReach ?? null;
 
-      if (freshCtx.agentId && freshCtx.agentId !== session.authCtx.agentId) {
+      if (freshCtx.agentId && freshCtx.agentId !== requestAuthCtx.agentId) {
         clearSession();
         return buildJsonRpcErrorResponse('Session agent changed. Re-initialize.', null, 400);
       }
 
-      if (!session.authCtx.scopedToOrg && freshCtx.organizationId !== session.authCtx.organizationId) {
+      if (freshCtx.organizationId !== requestAuthCtx.organizationId) {
         clearSession();
-        return buildJsonRpcErrorResponse('Session workspace binding changed. Re-initialize.', null, 400);
+        return buildJsonRpcErrorResponse(
+          requestAuthCtx.scopedToOrg
+            ? 'Session organization changed. Re-initialize.'
+            : 'Session workspace binding changed. Re-initialize.',
+          null,
+          400
+        );
       }
-      restrictBoundIdentityWorkspaceAccess(session.authCtx);
+      restrictBoundIdentityWorkspaceAccess(requestAuthCtx);
 
-      if (session.authCtx.scopedToOrg) {
-        if (freshCtx.organizationId !== session.authCtx.organizationId) {
-          clearSession();
-          return buildJsonRpcErrorResponse(
-            'Session organization changed. Re-initialize.',
-            null,
-            400
-          );
-        }
+      // Commit identity upgrades synchronously before any further await, so a
+      // competing anonymous upgrade must validate against this binding. Keep
+      // request-specific authority out of the reusable session object.
+      Object.assign(session.authCtx, {
+        isAuthenticated: requestAuthCtx.isAuthenticated,
+        userId: requestAuthCtx.userId,
+        clientId: requestAuthCtx.clientId,
+        tokenType: requestAuthCtx.tokenType,
+        grantedOrganizationIds: requestAuthCtx.grantedOrganizationIds,
+      });
+
+      if (requestAuthCtx.scopedToOrg) {
         // `freshCtx` (scoped) carries a null memberRole — extractAuthContext
         // never looks up membership — so resolve it before it reaches the
         // role-gated tools, mirroring the unscoped branch below.
         await hydrateScopedMemberRole(c.env, freshCtx);
-        session.authCtx.memberRole = freshCtx.memberRole;
-      } else if (session.authCtx.organizationId && freshCtx.userId) {
-        session.authCtx.memberRole = await resolveMembershipRole(
+        requestAuthCtx.memberRole = freshCtx.memberRole;
+      } else if (requestAuthCtx.organizationId && freshCtx.userId) {
+        requestAuthCtx.memberRole = await resolveMembershipRole(
           c.env,
-          session.authCtx.organizationId,
+          requestAuthCtx.organizationId,
           freshCtx.userId
         );
-        if (!session.authCtx.memberRole) {
+        if (!requestAuthCtx.memberRole) {
           clearSession();
           return buildJsonRpcErrorResponse(
             'Your organization access changed. Re-initialize the session.',
@@ -1801,18 +1810,21 @@ export async function handleMcp(c: Context<{ Bindings: Env }>): Promise<Response
           );
         }
       }
-      session.authCtx.instructions = await buildSessionInstructions(session.authCtx);
+      requestAuthCtx.instructions = await buildSessionInstructions(requestAuthCtx);
     }
 
-    await recordMcpClientActivity(c.env, session.authCtx, req);
+    await recordMcpClientActivity(c.env, requestAuthCtx, req);
 
-    // `session.authCtx` may have been UPGRADED above (anonymous → authenticated,
-    // or a fresh org/role), so the row written by the refresh at the top of this
-    // branch is now stale — another replica recovering this session would use
-    // the old binding. Persist the upgrade, but update-only: an upsert here
-    // would re-INSERT a row deleted by a revoke that committed mid-request,
-    // resurrecting exactly the session the refresh exists to catch.
-    if (!(await refreshSessionState(sessionId, session.authCtx, session.lastAccessedAt))) {
+    // An older request must not undo an identity upgrade published while it
+    // awaited instructions. Persist the current session binding, while tools
+    // keep this request's isolated authority. Update-only preserves revocation.
+    if (!(await refreshSessionState(sessionId, {
+      ...requestAuthCtx,
+      isAuthenticated: session.authCtx.isAuthenticated,
+      userId: session.authCtx.userId,
+      clientId: session.authCtx.clientId,
+      tokenType: session.authCtx.tokenType,
+    }, session.lastAccessedAt))) {
       clearSession();
       return buildJsonRpcErrorResponse(
         'MCP session expired or not recognized. Start a new session by sending an initialize request — spec-compliant clients re-initialize automatically on 404.',
@@ -1822,7 +1834,7 @@ export async function handleMcp(c: Context<{ Bindings: Env }>): Promise<Response
     }
 
     // Anonymous root /mcp session: any follow-up GET or tool call must upgrade to auth.
-    if (!session.authCtx.organizationId && !session.authCtx.isAuthenticated) {
+    if (!requestAuthCtx.organizationId && !requestAuthCtx.isAuthenticated) {
       const toolCall = req.method === 'POST' ? await readToolCall(req) : null;
       if (req.method === 'GET' || toolCall) {
         // A denied call is not a dead session: the 401 challenge is what makes
@@ -1842,9 +1854,9 @@ export async function handleMcp(c: Context<{ Bindings: Env }>): Promise<Response
 
     // Anonymous public-org session: public reads are allowed, non-public calls must upgrade.
     if (
-      session.authCtx.organizationId &&
-      !session.authCtx.isAuthenticated &&
-      !session.authCtx.memberRole &&
+      requestAuthCtx.organizationId &&
+      !requestAuthCtx.isAuthenticated &&
+      !requestAuthCtx.memberRole &&
       req.method === 'POST'
     ) {
       const toolCall = await readToolCall(req);
@@ -1854,7 +1866,7 @@ export async function handleMcp(c: Context<{ Bindings: Env }>): Promise<Response
       }
     }
 
-    return handleTransportRequest(session.transport, req, clientIP, c.var.mcpAuthInfo?.agentTurn ?? null);
+    return handleTransportRequest(session.transport, req, clientIP, c.var.mcpAuthInfo?.agentTurn ?? null, requestAuthCtx);
   }
 
   // Stale session ID with non-initialize request → require a fresh initialize.
@@ -1900,7 +1912,7 @@ export async function handleMcp(c: Context<{ Bindings: Env }>): Promise<Response
             );
           }
           await recordMcpClientActivity(c.env, recoveredAuthCtx, req);
-          return handleTransportRequest(transport, req, clientIP, c.var.mcpAuthInfo?.agentTurn ?? null);
+          return handleTransportRequest(transport, req, clientIP, c.var.mcpAuthInfo?.agentTurn ?? null, recoveredAuthCtx);
         }
 
         await deletePersistedSession(sessionId);
@@ -1966,7 +1978,7 @@ export async function handleMcp(c: Context<{ Bindings: Env }>): Promise<Response
       () => randomUUID()
     );
     await server.connect(transport);
-    const response = await handleTransportRequest(transport, req, clientIP, c.var.mcpAuthInfo?.agentTurn ?? null);
+    const response = await handleTransportRequest(transport, req, clientIP, c.var.mcpAuthInfo?.agentTurn ?? null, authCtx);
     await persistSessionState(transport.sessionId, authCtx);
     return response;
   }

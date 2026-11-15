@@ -18,9 +18,10 @@
  */
 
 import { mintGatewayMcpToken, verifyWorkerToken, type MessagePayload } from '@lobu/core';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { upsertEntityApprovalPolicy } from '../../../authz/entity-policy';
 import { mintTurnToken } from '../../../gateway/orchestration/agent-turn-producer';
+import * as workspaceInstructions from '../../../utils/workspace-instructions';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import {
   addUserToOrganization,
@@ -106,10 +107,11 @@ async function openTurnSession(orgSlug: string, token: string) {
     token,
     headers: { ...DIRECT_AUTH, 'mcp-session-id': sessionId },
   });
-  return async (name: string, args: Record<string, unknown>) => {
+  let requestId = 0;
+  return async (name: string, args: Record<string, unknown>, requestToken = token) => {
     const call = await post(`/mcp/${orgSlug}`, {
-      body: { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } },
-      token,
+      body: { jsonrpc: '2.0', id: ++requestId, method: 'tools/call', params: { name, arguments: args } },
+      token: requestToken,
       headers: { ...DIRECT_AUTH, 'mcp-session-id': sessionId },
     });
     expect(call.status).toBe(200);
@@ -134,6 +136,8 @@ describe('chat turn: the sender\'s workspaces, reachable from a direct message o
   let foreign: Awaited<ReturnType<typeof createTestOrganization>>;
   let owner: Awaited<ReturnType<typeof createTestUser>>;
   let sender: Awaited<ReturnType<typeof createTestUser>>;
+
+  afterEach(() => vi.restoreAllMocks());
 
   beforeEach(async () => {
     await cleanupTestDatabase();
@@ -256,6 +260,50 @@ describe('chat turn: the sender\'s workspaces, reachable from a direct message o
     expect(viaSdk.text).not.toContain(personal.id);
     const viaSearch = await call('search_memory', { query: 'anything', workspace: personal.slug });
     expect(viaSearch.isError).toBe(true);
+  });
+
+  it('keeps a paused group request from borrowing a concurrent direct message workspace grant', async () => {
+    const groupToken = await gatewayToken(home.id, SENDER_PLATFORM_ID, { isDirect: false });
+    const dmToken = await gatewayToken(home.id, SENDER_PLATFORM_ID, { isDirect: true });
+    const call = await openTurnSession(home.slug, groupToken);
+    const buildInstructions = workspaceInstructions.buildWorkspaceInstructions;
+    let paused = false;
+    let resume!: () => void;
+    const gate = new Promise<void>(resolve => { resume = resolve; });
+    // Hold one real HTTP request at the async instruction read, after its
+    // credential was verified and before the MCP transport dispatches it.
+    vi.spyOn(workspaceInstructions, 'buildWorkspaceInstructions').mockImplementation(async (...args) => {
+      if (!paused) {
+        paused = true;
+        await gate;
+      }
+      return buildInstructions(...args);
+    });
+
+    const group = call('save_memory', {
+      org_slug: personal.slug,
+      content: 'A group request must not write to a personal workspace.',
+      semantic_type: 'note',
+      title: 'concurrent group isolation probe',
+      metadata: {},
+    });
+    try {
+      await vi.waitFor(() => expect(paused).toBe(true));
+      const dm = await call('query_sdk', sdk(
+        `return (await client.org('${personal.slug}')).organizations.current();`,
+      ), dmToken);
+      expect(dm.isError, dm.text).toBe(false);
+      expect(dm.text).toContain(personal.id);
+    } finally {
+      resume();
+    }
+
+    const denied = await group;
+    expect(denied.isError, denied.text).toBe(true);
+    const unauthorized = await getTestDb()`SELECT 1 FROM events WHERE title = 'concurrent group isolation probe'`;
+    expect(unauthorized).toHaveLength(0);
+    const sessions = await getTestDb()`SELECT user_id FROM mcp_sessions WHERE organization_id = ${home.id}`;
+    expect(sessions).toEqual([{ user_id: sender.id }]);
   });
 
   it('keeps a vouched org_shared sender in its own workspace', async () => {
