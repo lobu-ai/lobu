@@ -233,6 +233,11 @@ export interface AutomationScriptExports {
   has_reaction: boolean;
 }
 
+/** Host inspection failures must not consume a stored script's failure budget. */
+export class AutomationScriptInfrastructureError extends Error {
+  override name = 'AutomationScriptInfrastructureError';
+}
+
 /** Inspect exported functions without invoking either lifecycle handler or SDK. */
 export async function inspectAutomationScriptExports(
   compiledScript: string,
@@ -255,7 +260,7 @@ export async function inspectAutomationScriptExports(
     // admission rolls back and retries the same due cursor.
     const error = result.error;
     if (error?.code === 'INTERNAL' || error?.name === 'RuntimeUnavailable' || error?.name === 'AbortError') {
-      throw new Error(`Cannot inspect Automation script exports: ${error.name}: ${error.message}`);
+      throw new AutomationScriptInfrastructureError(`Cannot inspect Automation script exports: ${error.name}: ${error.message}`);
     }
     throw new ToolUserError(
       error?.message ?? 'Cannot inspect Automation script exports.', 422,
