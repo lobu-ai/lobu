@@ -13,6 +13,7 @@ import { materializeDueAutomationRuns } from "../../../automations/automation";
 import { clearAuthCacheForTests, createAuth } from "../../../auth/index";
 import { OAuthProvider } from "../../../auth/oauth/provider";
 import { resolveGrantedWorkspaceTarget } from "../../../auth/oauth/workspace-grants";
+import { PersonalAccessTokenService } from "../../../auth/tokens";
 import { parsePgTextArray, pgTextArray } from "../../../db/client";
 import { app, type Env } from "../../../index";
 import { resolveDefaultOrgId } from "../../../lobu/gateway";
@@ -46,6 +47,7 @@ import {
 	insertChatConnectionRow,
 } from "../../setup/test-fixtures";
 import { TestApiClient } from "../../setup/test-mcp-client";
+import { post } from "../../setup/test-helpers";
 
 const BASE = "http://localhost/api/auth";
 
@@ -333,6 +335,38 @@ describe("workspace purge", () => {
 
 		const [task] = await sql`SELECT action_output FROM runs WHERE id = ${tasks[0].id}`;
 		expect(task.action_output.removed.events).toBe(eventsBefore);
+	});
+
+	it("revokes workspace PATs before detaching them without revoking another workspace's PAT", async () => {
+		const sql = getTestDb();
+		const target = await signUpOwnerWithWorkspace("pat-scope");
+		const bystander = await createTestOrganization();
+		await addUserToOrganization(target.userId, bystander.id, "owner");
+		const tokens = new PersonalAccessTokenService(sql);
+		const targetPat = await tokens.create(target.userId, target.organizationId, "Deleted workspace");
+		const bystanderPat = await tokens.create(target.userId, bystander.id, "Other workspace");
+		const probe = (slug: string, token: string) => post(`/api/${slug}/query_sql`, {
+			token,
+			body: { sql: "SELECT 1 AS pat_scope_probe" },
+		});
+		expect((await probe(target.slug, targetPat.token)).status).toBe(200);
+		expect((await probe(bystander.slug, bystanderPat.token)).status).toBe(200);
+
+		const deleted = await call("/organization/delete", { organizationId: target.organizationId }, target.token);
+		expect(deleted.status).toBe(200);
+		const [task] = await pendingPurgeTask(target.organizationId);
+		await claimPurgeTask(task.id, "pat-purge-holder");
+		await runWorkspacePurgeTask(
+			{ organizationId: target.organizationId },
+			{ taskRunId: task.id, claimedBy: "pat-purge-holder" },
+		);
+
+		expect((await probe(bystander.slug, targetPat.token)).status).toBe(401);
+		expect((await probe(bystander.slug, bystanderPat.token)).status).toBe(200);
+		const [revoked] = await sql`SELECT organization_id, revoked_at FROM personal_access_tokens WHERE id = ${targetPat.id}`;
+		expect(revoked.organization_id).toBeNull();
+		expect(revoked.revoked_at).not.toBeNull();
+		expect(await tokens.verify(bystanderPat.token)).not.toBeNull();
 	});
 
 	it("removes other workspaces' edges to its public records, stored and source-backed alike", async () => {

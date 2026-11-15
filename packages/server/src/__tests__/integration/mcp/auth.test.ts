@@ -29,7 +29,7 @@ import {
   createTestUser,
   seedSystemEntityTypes,
 } from '../../setup/test-fixtures';
-import { del, get, mcpListTools, mcpRequest, mcpToolsCall, post, testRequest } from '../../setup/test-helpers';
+import { del, ensureMcpSession, get, mcpListTools, mcpRequest, mcpToolsCall, post, testRequest } from '../../setup/test-helpers';
 import { TestMcpClient } from '../../setup/test-mcp-client';
 
 async function verifyDeviceCode(userCode: string, cookie: string): Promise<void> {
@@ -1600,6 +1600,63 @@ describe('MCP Authentication', () => {
   });
 
   describe('Personal Access Token Authentication', () => {
+    it('rejects a detached PAT on an established workspace MCP session', async () => {
+      const { token } = await createTestPAT(user.id, org.id);
+      const sessionId = await ensureMcpSession({ token, orgSlug: org.slug });
+      await getTestDb()`
+        UPDATE personal_access_tokens SET organization_id = NULL
+        WHERE token_hash = ${hashToken(token)}
+      `;
+
+      const response = await post(`/mcp/${org.slug}`, {
+        token,
+        headers: { 'mcp-session-id': sessionId, 'mcp-protocol-version': MCP_PROTOCOL_VERSION },
+        body: {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: { name: 'query_sql', arguments: { sql: 'SELECT 1 AS pat_scope_probe' } },
+        },
+      });
+
+      expect(response.status).toBe(401);
+      expect((await response.json()).error).toBe('invalid_token');
+    });
+
+    it.each(['REST', 'workspace MCP', 'account MCP'] as const)(
+      'rejects a detached workspace PAT on %s',
+      async (route) => {
+        const { token } = await createTestPAT(user.id, org.id);
+        await getTestDb()`
+          UPDATE personal_access_tokens SET organization_id = NULL
+          WHERE token_hash = ${hashToken(token)}
+        `;
+
+        const response = await post(
+          route === 'REST' ? `/api/${org2.slug}/query_sql` : route === 'workspace MCP' ? `/mcp/${org2.slug}` : '/mcp',
+          {
+            token,
+            body: route === 'REST'
+              ? { sql: 'SELECT 1 AS pat_scope_probe' }
+              : {
+                  jsonrpc: '2.0',
+                  id: 1,
+                  method: 'initialize',
+                  params: {
+                    protocolVersion: MCP_PROTOCOL_VERSION,
+                    capabilities: {},
+                    clientInfo: { name: 'detached-pat-test', version: '1.0' },
+                  },
+                },
+          },
+        );
+
+        const body = await response.json();
+        expect(response.status, JSON.stringify(body)).toBe(401);
+        expect(body.error).toBe('invalid_token');
+      },
+    );
+
     it('should accept valid PAT (owl_pat_*)', async () => {
       const { token } = await createTestPAT(user.id, org.id);
 
