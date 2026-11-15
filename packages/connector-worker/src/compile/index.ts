@@ -46,10 +46,10 @@ export {
 } from '../runtime-deps.js';
 
 // Strict regex for connector_key: lowercase letters/digits, optional dots
-// for namespacing, underscores for word separators. Defense-in-depth even
+// for namespacing, hyphens/underscores for word separators. Defense-in-depth even
 // though keys come from a trusted DB column — we're about to use the value
 // to construct a filesystem path.
-const CONNECTOR_KEY_RE = /^[a-z][a-z0-9]*(?:[._][a-z0-9]+)*$/;
+const CONNECTOR_KEY_RE = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/;
 
 /**
  * Resolve a connector_key to a `.ts` source file under one of the supplied
