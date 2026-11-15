@@ -60,7 +60,7 @@ import {
 import { deviceManifestAdmissionError } from "../../../../runs/queue-service";
 import { isDelegatedBrowserAffinityConnector, selectedConnectorVersionArtifactSql } from "../../../../utils/connector-execution-placement";
 import { newGatewayInlineOwner, runLeaseFence } from "../../../../runs/run-lease";
-import { withFailureCode } from "../../../../utils/errors";
+import { ToolUserError, withFailureCode } from "../../../../utils/errors";
 import { executeOperationInline } from "./execute";
 /**
  * Durably persist a claimed run's apply/execution output in its OWN
@@ -432,7 +432,11 @@ async function claimBuilderRun(
 		action_key: string;
 	};
 	const handler = handlers.find((h) => h.actionKey === row.action_key);
-	if (!handler || !handler.isValidProposal(row.action_input)) return null;
+	if (!handler || !handler.isValidProposal(row.action_input)) {
+		// This was a recognized builder row, so falling through would commit
+		// its decision without updating the approval card. Roll back the claim.
+		throw new ToolUserError("The stored approval proposal is invalid. The approval remains pending.");
+	}
 	return {
 		handler,
 		proposal: row.action_input,
