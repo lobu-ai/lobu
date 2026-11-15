@@ -243,7 +243,7 @@ async function seedInvoice(
 
 /** A doc whose type asks for review of any delete. */
 async function seedEscalatingDoc() {
-	const { org, user } = await seedOrg("Escalating delete");
+	const { org, user, agent } = await seedOrg("Escalating delete");
 	await seedType(org.id, "doc", escalateDeleteCompiled);
 	const doc = await createEntity({
 		entity_type: "doc",
@@ -252,7 +252,7 @@ async function seedEscalatingDoc() {
 		created_by: user.id,
 		metadata: {},
 	} as Parameters<typeof createEntity>[0]);
-	return { org, user, doc };
+	return { org, user, agent, doc };
 }
 
 describe("entity row validation at the physical writer", () => {
@@ -757,20 +757,48 @@ describe("entity row validation at the physical writer", () => {
 			expect(await readDeletedAt(member.id)).not.toBeNull();
 		}, 60_000);
 
-		it("carries force_delete_tree onto the card", async () => {
-			const { org, user, doc } = await seedEscalatingDoc();
+		it.each(["human", "agent"] as const)("carries force_delete_tree onto the %s card and refuses a protected tree before queuing", async (principal) => {
+			const { org, user, agent, doc } = await seedEscalatingDoc();
+			const ctx = ctxFor(org.id, principal === "agent"
+				? { agentId: agent.agentId }
+				: { userId: user.id });
 
 			const res = (await manageEntity(
 				{ action: "delete", entity_id: doc.id, force_delete_tree: true },
 				TEST_ENV,
-				ctxFor(org.id, { userId: user.id }),
-			)) as { approval_run_id?: number };
+				ctx,
+			)) as { approval_queued?: boolean; approval_run_id?: number };
 
+			expect(res.approval_queued).toBe(true);
+			expect(await rowExists(doc.id)).toBe(true);
 			const proposal = await readRunActionInput(
 				org.id,
 				res.approval_run_id ?? -1,
 			);
 			expect(proposal.force_delete_tree).toBe(true);
+			await getTestDb().begin(async (tx) => {
+				await applyEntityChangeProposal(proposal as never, ctxFor(org.id, { userId: user.id }), TEST_ENV, tx);
+			});
+			expect(await rowExists(doc.id)).toBe(false);
+
+			const protectedDoc = await createEntity({
+				entity_type: "doc", name: "Protected document",
+				organization_id: org.id, created_by: user.id,
+			} as Parameters<typeof createEntity>[0]);
+			await seedType(org.id, "$resource", null);
+			await createEntity({
+				entity_type: "$resource", name: "Protected audience", parent_id: protectedDoc.id,
+				organization_id: org.id, created_by: user.id,
+			} as Parameters<typeof createEntity>[0]);
+			const sql = getTestDb();
+			const before = await sql`SELECT id FROM runs WHERE organization_id = ${org.id}`;
+			await expect(manageEntity(
+				{ action: "delete", entity_id: protectedDoc.id, force_delete_tree: true },
+				TEST_ENV, ctx,
+			)).rejects.toThrow(/Cannot force-delete access resources/);
+			const after = await sql`SELECT id FROM runs WHERE organization_id = ${org.id}`;
+			expect(after.map(row => row.id).sort()).toEqual(before.map(row => row.id).sort());
+			expect(await rowExists(protectedDoc.id)).toBe(true);
 		}, 60_000);
 
 		/**
@@ -779,8 +807,8 @@ describe("entity row validation at the physical writer", () => {
 		 * the moment it is approved, wasting a reviewer's decision. Those keep
 		 * failing closed.
 		 */
-		it("does NOT mint a card for an escalate naming another field", async () => {
-			const { org, user } = await seedOrg("Escalates elsewhere, tool");
+		it.each([false, true])("does NOT mint a card for an escalate naming another field (force=%s)", async (force) => {
+			const { org, user, agent } = await seedOrg("Escalates elsewhere, tool");
 			await seedType(org.id, "doc", escalateOtherFieldCompiled);
 			const doc = await createEntity({
 				entity_type: "doc",
@@ -792,9 +820,9 @@ describe("entity row validation at the physical writer", () => {
 
 			await expect(
 				manageEntity(
-					{ action: "delete", entity_id: doc.id },
+					{ action: "delete", entity_id: doc.id, force_delete_tree: force },
 					TEST_ENV,
-					ctxFor(org.id, { userId: user.id }),
+					ctxFor(org.id, force ? { agentId: agent.agentId } : { userId: user.id }),
 				),
 			).rejects.toThrow(/status/);
 
@@ -802,8 +830,8 @@ describe("entity row validation at the physical writer", () => {
 			expect(await countRuns(org.id)).toBe(0);
 		}, 60_000);
 
-		it("does NOT mint a card for an escalation with no fields", async () => {
-			const { org, user } = await seedOrg("Escalates no fields, tool");
+		it.each([false, true])("does NOT mint a card for an escalation with no fields (force=%s)", async (force) => {
+			const { org, user, agent } = await seedOrg("Escalates no fields, tool");
 			await seedType(org.id, "doc", escalateNoFieldsCompiled);
 			const doc = await createEntity({
 				entity_type: "doc",
@@ -815,25 +843,25 @@ describe("entity row validation at the physical writer", () => {
 
 			await expect(
 				manageEntity(
-					{ action: "delete", entity_id: doc.id },
+					{ action: "delete", entity_id: doc.id, force_delete_tree: force },
 					TEST_ENV,
-					ctxFor(org.id, { userId: user.id }),
+					ctxFor(org.id, force ? { agentId: agent.agentId } : { userId: user.id }),
 				),
-			).rejects.toThrow(/approval required/);
+			).rejects.toThrow(/review without a field/);
 
 			expect(await readDeletedAt(doc.id)).toBeNull();
 			expect(await countRuns(org.id)).toBe(0);
 		}, 60_000);
 
 		/** A deny is not an escalate. Approval can never launder an illegal state. */
-		it("does NOT mint a card for a deny", async () => {
-			const { org, user, invoice } = await seedInvoice("posted");
+		it.each([false, true])("does NOT mint a card for a deny (force=%s)", async (force) => {
+			const { org, user, agent, invoice } = await seedInvoice("posted");
 
 			await expect(
 				manageEntity(
-					{ action: "delete", entity_id: invoice.id },
+					{ action: "delete", entity_id: invoice.id, force_delete_tree: force },
 					TEST_ENV,
-					ctxFor(org.id, { userId: user.id }),
+					ctxFor(org.id, force ? { agentId: agent.agentId } : { userId: user.id }),
 				),
 			).rejects.toThrow(/posted is frozen: \$deleted is not writable/);
 
