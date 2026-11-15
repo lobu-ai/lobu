@@ -2,6 +2,13 @@
 
 ## [24.11.1](https://github.com/lobu-ai/lobu/compare/lobu-v24.11.0...lobu-v24.11.1) (2026-11-15)
 
+### Required upgrade step for self-hosted servers
+
+**Upgrading from 24.10 or earlier: fully deploy 24.11.0 first, including all app and worker replicas, before upgrading to 24.11.1.**
+
+24.11.1 includes migrations `20261115120000`, `20261115120001`, and `20261115120002`. They replace an audit constraint, drop `events.linked_org_ids`, and rebuild `current_event_records`. These migrations skip automatic quiescing. Older replicas still read and write the dropped column, so a direct rolling upgrade from 24.10 or earlier causes event reads and writes to fail until those replicas are replaced.
+
+If you cannot stage the upgrade through 24.11.0, scale all app and worker deployments to zero **before applying the 24.11.1 migrations**, and keep the old version stopped while deploying 24.11.1. This alternative requires downtime. Fresh installs need no additional step.
 
 ### Bug Fixes
 
