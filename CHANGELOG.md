@@ -1,5 +1,14 @@
 # Changelog
 
+## [24.11.1](https://github.com/lobu-ai/lobu/compare/lobu-v24.11.0...lobu-v24.11.1) (2026-11-15)
+
+
+### Bug Fixes
+
+* **auth:** preserve saved logins through transient refresh failures ([#4932](https://github.com/lobu-ai/lobu/issues/4932)) ([bb0b26e](https://github.com/lobu-ai/lobu/commit/bb0b26e0e3141d2103c435bcc3b136128e68d12b))
+* **search:** preserve vector index through recall visibility filters ([#4928](https://github.com/lobu-ai/lobu/issues/4928)) ([c7a070e](https://github.com/lobu-ai/lobu/commit/c7a070ef4f8db31ad6669502cddbf1d8d74119f5))
+* **search:** score small recall scopes exactly ([#4930](https://github.com/lobu-ai/lobu/issues/4930)) ([7845589](https://github.com/lobu-ai/lobu/commit/784558949da89f0357a08a5c2f117746510fdc58))
+
 ## [24.11.0](https://github.com/lobu-ai/lobu/compare/lobu-v24.10.0...lobu-v24.11.0) (2026-11-14)
 
 
