@@ -6,7 +6,7 @@ import { materializeDueAutomationRuns } from "../../../automations/automation";
 import { automationArrivalHorizon } from "../../../utils/window-utils";
 import { initWorkspaceProvider } from "../../../workspace";
 import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
-import { createTestAgent, seedOwnerContext } from "../../setup/test-fixtures";
+import { createTestAgent, createTestEvent, seedOwnerContext } from "../../setup/test-fixtures";
 
 describe("scheduled Automation unchanged gate", () => {
 	beforeAll(async () => {
@@ -15,6 +15,79 @@ describe("scheduled Automation unchanged gate", () => {
 
 	beforeEach(async () => {
 		await cleanupTestDatabase();
+	});
+
+	it("records source-read failures without advancing arrivals and applies the scheduled failure budget", async () => {
+		const { org, user, ctx } = await seedOwnerContext();
+		const agent = await createTestAgent({ organizationId: org.id, ownerUserId: user.id });
+		const created = await manageAutomations({
+			action: "create", slug: "source-cast-failure", name: "Source cast failure",
+			prompt: "Summarize counted arrivals.", managed_agent_id: agent.agentId,
+			sources: [{ name: "counted", query: "SELECT id FROM events WHERE (metadata->>'count')::integer > 0" }],
+			triggers: [{ kind: "schedule", cron: "* * * * *", execution: "window", skip_if_unchanged: true }],
+		}, {} as Env, ctx) as { automation_id: string };
+		const sql = getTestDb();
+		await createTestEvent({ organization_id: org.id, content: "An invalid numeric arrival", metadata: { count: "invalid" } });
+		const [initial] = await sql`SELECT next_window_start FROM automations WHERE id = ${created.automation_id}`;
+
+		for (let attempt = 1; attempt <= 5; attempt++) {
+			await sql`UPDATE automations SET next_run_at = now() - interval '1 minute' WHERE id = ${created.automation_id}`;
+			// Overlapping scheduler passes must persist and count only one failure
+			// for the observed due cursor, even while both read the broken source.
+			await Promise.all([materializeDueAutomationRuns(), materializeDueAutomationRuns()]);
+			const runs = await sql`SELECT status, outcome, error_message, completed_at, approved_input FROM runs
+				WHERE automation_id = ${created.automation_id} AND run_type = 'automation' ORDER BY id`;
+			expect(runs).toHaveLength(attempt);
+			expect(runs.at(-1)).toMatchObject({ status: "failed", outcome: "infra_error", approved_input: { dispatch_source: "scheduled" } });
+			expect(runs.at(-1).error_message).toContain("SQLSTATE 22P02");
+			expect(runs.at(-1).completed_at).not.toBeNull();
+			const [state] = await sql`SELECT next_window_start, next_run_at, consecutive_scheduled_failures,
+				schedule_auto_paused_at FROM automations WHERE id = ${created.automation_id}`;
+			expect(state.next_window_start).toEqual(initial.next_window_start);
+			expect(state.consecutive_scheduled_failures).toBe(attempt);
+			if (attempt === 5) {
+				expect(state.next_run_at).toBeNull();
+				expect(state.schedule_auto_paused_at).not.toBeNull();
+			} else {
+				expect(new Date(state.next_run_at).getTime()).toBeGreaterThan(Date.now());
+			}
+		}
+		expect(await materializeDueAutomationRuns()).toMatchObject({ dueAutomations: 0 });
+	});
+
+	it("rolls back source-failure admission when failure accounting cannot commit, then retries", async () => {
+		const { org, user, ctx } = await seedOwnerContext();
+		const agent = await createTestAgent({ organizationId: org.id, ownerUserId: user.id });
+		const created = await manageAutomations({
+			action: "create", slug: "source-failure-rollback", name: "Source failure rollback",
+			prompt: "Summarize counted arrivals.", managed_agent_id: agent.agentId,
+			sources: [{ name: "counted", query: "SELECT id FROM events WHERE (metadata->>'count')::integer > 0" }],
+			triggers: [{ kind: "schedule", cron: "* * * * *", execution: "window", skip_if_unchanged: true }],
+		}, {} as Env, ctx) as { automation_id: string };
+		const sql = getTestDb();
+		await createTestEvent({ organization_id: org.id, content: "Invalid count", metadata: { count: "invalid" } });
+		await sql`UPDATE automations SET next_run_at = now() - interval '1 minute' WHERE id = ${created.automation_id}`;
+		const [initial] = await sql`SELECT next_run_at, next_window_start FROM automations WHERE id = ${created.automation_id}`;
+		await sql.unsafe(`CREATE FUNCTION synthetic_reject_source_failure() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'Synthetic failure-accounting outage'; END $$`);
+		await sql.unsafe(`CREATE TRIGGER synthetic_reject_source_failure BEFORE UPDATE OF consecutive_scheduled_failures
+      ON automations FOR EACH ROW EXECUTE FUNCTION synthetic_reject_source_failure()`);
+		try {
+			await materializeDueAutomationRuns();
+			expect(await sql`SELECT id FROM runs WHERE automation_id = ${created.automation_id}`).toHaveLength(0);
+			const [state] = await sql`SELECT next_run_at, next_window_start, consecutive_scheduled_failures
+				FROM automations WHERE id = ${created.automation_id}`;
+			expect(state).toMatchObject({ ...initial, consecutive_scheduled_failures: 0 });
+		} finally {
+			await sql.unsafe('DROP TRIGGER synthetic_reject_source_failure ON automations');
+			await sql.unsafe('DROP FUNCTION synthetic_reject_source_failure()');
+		}
+		await materializeDueAutomationRuns();
+		const [run] = await sql`SELECT status FROM runs WHERE automation_id = ${created.automation_id}`;
+		expect(run.status).toBe("failed");
+		const [state] = await sql`SELECT consecutive_scheduled_failures, next_run_at > now() AS advanced
+			FROM automations WHERE id = ${created.automation_id}`;
+		expect(state).toMatchObject({ consecutive_scheduled_failures: 1, advanced: true });
 	});
 
 	it("prepares scheduled runs even when configured sources are empty", async () => {

@@ -109,6 +109,8 @@ export const SUPERSEDED_BY_ARRIVAL_MARK = "Superseded by the Automation arrival 
  */
 export function classifyRunOutcome(input: {
 	status: string;
+	/** A source/admission failure happened before any agent execution. */
+	executionStarted?: boolean;
 	errorCode?: string | null;
 	errorMessage?: string | null;
 }): RunOutcome | null {
@@ -126,6 +128,7 @@ export function classifyRunOutcome(input: {
 		default:
 			return null;
 	}
+	if (input.executionStarted === false) return "infra_error";
 
 	if (input.errorCode && KNOWN_AGENT_ERROR_CODES.has(input.errorCode)) {
 		return "infra_error";

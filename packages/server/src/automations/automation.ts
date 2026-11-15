@@ -37,7 +37,6 @@ import {
 } from "../utils/window-utils";
 import {
 	advanceScheduleAfterTerminalFailure,
-	advanceAutomationSchedule,
 	advanceAutomationScheduleAfterSuccessfulWindow,
 } from "./schedule-cursor";
 import {
@@ -67,6 +66,8 @@ type AutomationRunStatus =
 
 interface DueAutomationRow {
 	execution_config?: unknown;
+	/** Exact database cursor observed by the scheduled materializer. */
+	next_run_at?: string;
 	id: number;
 	organization_id: string;
 	managed_agent_id: string | null;
@@ -791,7 +792,7 @@ export async function materializeDueAutomationRuns(
 			// backstop.
 			const dueAutomations = await sql<DueAutomationRow>`
 				SELECT w.id, w.organization_id, w.managed_agent_id, w.schedule, w.triggers, w.execution_config,
-				       w.entity_ids, w.created_by, w.current_version_id,
+				       w.entity_ids, w.created_by, w.current_version_id, w.next_run_at::text,
                w.device_worker_id::text AS device_worker_id, w.agent_kind
         FROM automations w
         WHERE w.status = 'active'
@@ -881,7 +882,43 @@ export async function materializeDueAutomationRuns(
 			// whole cron period.
 			const pending = await computePendingWindow(sql, automation.id);
 			if (pending.windowEnd <= pending.windowStart) return "skipped";
-			const unchangedWindow = await inspectUnchangedWindow(sql, automation, pending);
+			let unchangedWindow: Awaited<ReturnType<typeof inspectUnchangedWindow>>;
+			try {
+				unchangedWindow = await inspectUnchangedWindow(sql, automation, pending);
+			} catch (error) {
+				const errorMessage = error instanceof Error ? error.message : String(error);
+				// Source inspection is real scheduled work. Persist its failure and
+				// policy effects atomically, without exposing a pending run to dispatch.
+				return sql.begin(async (tx) => {
+					const [due] = await tx`
+            SELECT id FROM automations
+            WHERE id = ${automation.id} AND status = 'active'
+              AND next_run_at = ${automation.next_run_at}::text::timestamptz
+              AND next_run_at <= current_timestamp
+            FOR UPDATE
+          `;
+					// Another pass advanced this due cursor or the owner paused it.
+					if (!due) return "skipped" as const;
+					const admitted = await enqueueAutomationRunForRecord(
+						sql, automation, "scheduled", undefined, tx, pending,
+					);
+					if (!admitted.created) return "skipped" as const;
+					const [failed] = await tx`
+            UPDATE runs SET status = 'failed',
+              outcome = ${classifyRunOutcome({ status: "failed", executionStarted: false })},
+              completed_at = current_timestamp,
+              error_message = ${errorMessage}
+            WHERE id = ${admitted.runId} AND status = 'pending'
+            RETURNING approved_input->'executor'->>'kind' AS executor_kind
+          `;
+					if (!failed) throw new Error('Scheduled source failure lost its admitted run');
+					await recordAutomationRunFailure(tx, automation.id, {
+						dispatchSource: "scheduled", executorKind: failed.executor_kind,
+					});
+					await advanceScheduleAfterTerminalFailure(tx, automation.id, "scheduled");
+					return "created" as const;
+				});
+			}
 			const sourceFingerprint = unchangedWindow?.sourceFingerprint;
 			if (unchangedWindow?.unchanged) {
 				// Admit and complete a no-op in one transaction so no dispatcher can
@@ -932,20 +969,8 @@ export async function materializeDueAutomationRuns(
 				{ error, automationId: automation.id },
 				"[automation] Failed to materialize due automation run"
 			);
-			// Don't leave next_run_at in the past — that would re-select this automation
-			// on every 60s tick. Push it forward per the automation's cron schedule.
-			// An unparseable schedule parks itself and does not throw; this catch
-			// exists for DATABASE errors, which would otherwise escape a hook that
-			// materializeDueItems does not guard and abort the tick for every org.
-			try {
-				await advanceAutomationSchedule(sql, automation.id);
-			} catch (advanceError) {
-				logger.error(
-					{ error: advanceError, automationId: automation.id },
-					"[automation] Failed to advance Automation schedule after materialization error"
-				);
-				// Leaving the cursor due lets a later tick retry.
-			}
+			// No durable outcome committed. Keep the due cursor so a later tick
+			// can retry rather than silently skip this window after a DB failure.
 		},
 	});
 

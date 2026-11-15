@@ -6,6 +6,13 @@ import {
 } from "../../../runs/run-outcome";
 
 describe("classifyRunOutcome", () => {
+	it("classifies pre-execution failures from their phase regardless of message", () => {
+		for (const errorMessage of [undefined, "bad source cast", "finished without calling completeWindow"]) {
+			expect(classifyRunOutcome({ status: "failed", executionStarted: false, errorMessage })).toBe("infra_error");
+		}
+		expect(classifyRunOutcome({ status: "failed", executionStarted: true, errorMessage: "bad source cast" })).toBe("agent_error");
+	});
+
 	it("marks completed runs scoreable", () => {
 		expect(classifyRunOutcome({ status: "completed" })).toBe("scoreable");
 	});
