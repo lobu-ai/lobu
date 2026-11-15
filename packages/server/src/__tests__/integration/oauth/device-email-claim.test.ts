@@ -91,6 +91,20 @@ describe('POST /oauth/device/email — agent account claim', () => {
     expect((await resNew.json()).status).toBe('pending');
   });
 
+  it('caps a recipient across headless requests without requiring CAPTCHA', async () => {
+    const email = 'synthetic-limited-recipient@example.test';
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const res = await post('/oauth/device/email', {
+        body: { user_code: await pendingUserCode(), email },
+        headers: { 'x-forwarded-for': `192.0.2.${attempt + 1}` },
+      });
+      expect(res.status).toBe(attempt < 3 ? 202 : 429);
+      if (attempt === 3) expect(Number(res.headers.get('retry-after'))).toBeGreaterThan(0);
+    }
+    const sql = getTestDb();
+    expect(await sql`SELECT id FROM verification WHERE value LIKE ${`%${email}%`}`).toHaveLength(3);
+  });
+
   it('rejects an unknown or expired user_code with 400 (the agent\'s own error)', async () => {
     const res = await post('/oauth/device/email', {
       body: { user_code: 'NOPE-NOPE', email: 'x@example.com' },

@@ -37,7 +37,7 @@ import {
 	normalizeHost,
 } from "../utils/public-origin";
 import { TtlCache } from "../utils/ttl-cache";
-import { logAuthObserved, noteUserCreated, withSignInScope } from "./auth-observed";
+import { noteUserCreated, withSignInScope } from "./auth-observed";
 import { resolveBaseUrl, safeParseUrl } from "./base-url";
 import {
 	buildGenericOAuthEntry,
@@ -58,6 +58,8 @@ import { workspaceDeletionPlugin } from "./organization-delete";
 import { findExistingPersonalOrg } from "./personal-org-provisioning";
 import { resolveSession } from "./resolve-session";
 import { persistLoginChatIdentity } from "./subject-identities";
+import { AUTH_CLIENT_IP_HEADER, authAbuseProtection, authRateLimitStorage, withTrustedAuthIP } from "./abuse-protection";
+import { accountSecurity } from "./account-security";
 
 function gravatarUrl(email: string): string {
 	const hash = createHash("md5")
@@ -228,6 +230,7 @@ export async function createAuth(
 		}),
 		baseURL: resolveBaseUrl({ request }),
 		basePath: "/api/auth",
+		disabledPaths: ["/two-factor/send-otp", "/two-factor/verify-otp"],
 
 		emailAndPassword: {
 			enabled: authConfig.emailPassword,
@@ -319,6 +322,7 @@ export async function createAuth(
 
 		// Plugins
 		plugins: [
+			authAbuseProtection(env),
 			// Self-describing login providers (Slack, …) that Better Auth has no
 			// built-in for. Same library + same downstream as `socialProviders`
 			// (account rows → the account.create hook → connector provisioning +
@@ -876,6 +880,7 @@ export async function createAuth(
 				rpName: "Lobu",
 				origin: null,
 			}),
+			accountSecurity(),
 		],
 
 		databaseHooks: {
@@ -978,13 +983,6 @@ export async function createAuth(
 								error,
 							);
 						});
-					},
-				},
-			},
-			session: {
-				create: {
-					after: async (session, context) => {
-						logAuthObserved(session, context);
 					},
 				},
 			},
@@ -1107,10 +1105,10 @@ export async function createAuth(
 		// onboarding (callers are already authenticated humans). Only paths
 		// this config actually serves are listed — there is no email
 		// verification sender, so /send-verification-email 400s before it can
-		// send. Enabled stays default (on in production). Note the store is
-		// in-memory: with N replicas the effective budget is N× — same posture
-		// as the rest of our limiters.
+		// send. Atomic shared counters enforce these limits across replicas;
+		// auth rejects unavailable storage rather than admitting local fallback.
 		rateLimit: {
+			customStorage: authRateLimitStorage(env.BETTER_AUTH_SECRET || "local-auth-rate-limit"),
 			customRules: {
 				"/sign-in/magic-link": { window: 3600, max: 10 },
 				"/request-password-reset": { window: 3600, max: 5 },
@@ -1119,6 +1117,7 @@ export async function createAuth(
 		},
 
 		advanced: {
+			ipAddress: { ipAddressHeaders: [AUTH_CLIENT_IP_HEADER] },
 			useSecureCookies:
 				runtimeNodeEnv === "production" ||
 				safeParseUrl(getConfiguredPublicOrigin())?.protocol === "https:",
@@ -1139,7 +1138,7 @@ export async function createAuth(
 		onAPIError: { onError: logUnhandledAuthEndpointError },
 	});
 	auth.handler = withAuthRequestScope(
-		withSignInScope(withGenericOAuthRoutes(auth.handler)),
+		withSignInScope(withTrustedAuthIP(withGenericOAuthRoutes(auth.handler))),
 	);
 	sessionApi = auth;
 	// betterAuth's inferred return narrows generics per call site (socialProviders

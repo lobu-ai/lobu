@@ -31,6 +31,7 @@ import {
   filterRequestedScopes,
   filterScopeByRole,
   isOAuthScopeGrantWithinRequest,
+  isTokenDerivedSession,
   narrowAuthorizationCodeScopes,
   NON_PUBLIC_OAUTH_SCOPES,
   normalizeOAuthScopeRequest,
@@ -734,6 +735,9 @@ oauthRoutes.get('/oauth/authorize', async (c) => {
     try {
       const session = await resolveSession(auth, c.req.raw.headers);
       if (session?.user) {
+        if (isTokenDerivedSession(session.session)) {
+          return c.json(createOAuthError('human_session_required', 'Sign in in your browser to authorize a new client'), 403);
+        }
         // User is logged in — auto-approve and redirect with code
         const code = await provider.createAuthorizationCode(params, session.user.id, null, []);
         const redirectUrl = new URL(params.redirect_uri);
@@ -823,6 +827,10 @@ oauthRoutes.post('/oauth/authorize/consent', requireAuth, async (c) => {
 
   if (!user || !session) {
     return c.json(createOAuthError('access_denied', 'Authentication required'), 401);
+  }
+
+  if (isTokenDerivedSession(session)) {
+    return c.json(createOAuthError('human_session_required', 'Sign in in your browser to authorize a new client'), 403);
   }
 
   if (!isAllowedConsentOrigin(c)) {
@@ -1155,11 +1163,15 @@ oauthRoutes.post('/oauth/device/email', async (c) => {
     try {
       const rateLimiter = getRateLimiter();
       const clientIP = getClientIP(c.req.raw, c.var.peerRemoteAddress);
-      const rateLimit = await rateLimiter.checkLimit(
+      const rateLimit = await rateLimiter.consume(
         `rate:oauth:device-email:${clientIP}`,
         RateLimitPresets.DEVICE_EMAIL_PER_IP_HOUR
       );
+      if (!rateLimit.countedInDb) {
+        return c.json(createOAuthError('server_error', 'Temporarily unavailable'), 503);
+      }
       if (!rateLimit.allowed) {
+        c.header('Retry-After', String(Math.max(1, rateLimit.resetInSeconds)));
         return c.json(createOAuthError('invalid_request', rateLimit.errorMessage), 429);
       }
     } catch (err) {
@@ -1217,6 +1229,10 @@ oauthRoutes.post('/oauth/device/email', async (c) => {
       headers: c.req.raw.headers,
     });
   } catch (err) {
+    if (isAPIError(err) && (err.statusCode === 429 || err.statusCode === 503)) {
+      if (err.headers) for (const [name, value] of new Headers(err.headers)) c.header(name, value);
+      return c.json(createOAuthError('temporarily_unavailable', 'Try again later'), err.statusCode);
+    }
     // Swallow: delivery failures and the install-operator carve-out must not
     // reveal whether the address is deliverable/registered. Logged, opaque 202.
     console.warn('[OAuth] Device-email magic link send failed (opaque):', err);
@@ -1296,6 +1312,10 @@ oauthRoutes.post('/oauth/device/approve', requireAuth, async (c) => {
 
   if (!user || !session) {
     return c.json(createOAuthError('access_denied', 'Authentication required'), 401);
+  }
+
+  if (isTokenDerivedSession(session)) {
+    return c.json(createOAuthError('human_session_required', 'Sign in in your browser to authorize a new client'), 403);
   }
 
   if (!isAllowedConsentOrigin(c)) {

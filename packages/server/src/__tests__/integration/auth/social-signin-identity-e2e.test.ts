@@ -30,6 +30,7 @@ import { __resetPublicOriginCachesForTests } from "../../../utils/public-origin"
 import { initWorkspaceProvider } from "../../../workspace";
 import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
 import { createTestOrganization } from "../../setup/test-fixtures";
+import { Browser, totp } from "../../setup/auth-browser";
 
 const ORIGIN = "http://localhost";
 const CLIENT_ID = "synthetic-reddit-client";
@@ -364,5 +365,26 @@ describe("X identity-only login through the real Better Auth handler", () => {
     expect(await sql`SELECT id FROM connections WHERE organization_id = ${org.id} AND connector_key = 'x'`).toHaveLength(0);
     expect(await sql`SELECT id FROM auth_profiles WHERE organization_id = ${org.id} AND profile_kind = 'oauth_account'`).toHaveLength(0);
     expect(await sql`SELECT id FROM feeds WHERE organization_id = ${org.id}`).toHaveLength(0);
+    if (hasEmail && page === ORIGIN) {
+      const owner = new Browser(callbackAuth);
+      // This is a social-only account: enrollment uses its fresh browser
+      // session and requires no newly invented password.
+      const setup = await owner.request("/two-factor/enable", {}, { cookie: sessionCookie });
+      expect(setup.response.status).toBe(200);
+      expect((await owner.request("/two-factor/verify-totp", { code: totp(setup.body.totpURI) }, { cookie: sessionCookie })).response.status).toBe(200);
+      const again = await callbackAuth.handler(new Request(`${page}/api/auth/sign-in/social`, {
+        method: "POST", headers: { "content-type": "application/json", origin: page },
+        body: JSON.stringify({ provider: "twitter", callbackURL: back }),
+      }));
+      const next = new URL((await again.json() as { url: string }).url);
+      const nextCallback = new URL(next.searchParams.get("redirect_uri")!);
+      nextCallback.searchParams.set("state", next.searchParams.get("state")!);
+      nextCallback.searchParams.set("code", "synthetic-code");
+      const pending = await callbackAuth.handler(new Request(nextCallback, { headers: { cookie: cookies(again) } }));
+      expect(pending.status).toBe(302);
+      expect(pending.headers.get("location")).toBe("/auth/two-factor?callbackUrl=%2Facme");
+      const anonymous = await callbackAuth.handler(new Request(`${page}/api/auth/get-session`, { headers: { cookie: cookies(pending) } }));
+      expect(await anonymous.json()).toBeNull();
+    }
   });
 });

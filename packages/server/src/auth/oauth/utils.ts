@@ -264,6 +264,7 @@ export function validateRedirectUri(uri: string): boolean {
 // ============================================
 
 export type OAuthErrorCode =
+  | 'human_session_required'
   | 'invalid_request'
   | 'invalid_client'
   | 'invalid_grant'

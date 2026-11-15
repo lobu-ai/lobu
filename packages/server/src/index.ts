@@ -16,6 +16,7 @@ import { cors } from "hono/cors";
 import { HTTPException } from "hono/http-exception";
 import { LOBU_LOGO_PNG_BASE64 } from "./assets/logo";
 import { createAuth } from "./auth";
+import { withAuthClientIP } from "./auth/abuse-protection";
 import { getAuthConfig as getAuthConfigFromEnv } from "./auth/config";
 import { mcpAuth } from "./auth/middleware";
 import { oauthRoutes } from "./auth/oauth/routes";
@@ -556,7 +557,7 @@ app.on(["GET", "POST"], "/api/auth/*", async (c) => {
 	}
 	// Empty-JSON guard, cookie-jar collapse and cookie-scope convergence:
 	// auth/resolve-session.ts.
-	return serveAuthRequest(auth, c.req.raw);
+	return withAuthClientIP(getClientIP(c.req.raw, c.var.peerRemoteAddress), () => serveAuthRequest(auth, c.req.raw));
 });
 
 /**
