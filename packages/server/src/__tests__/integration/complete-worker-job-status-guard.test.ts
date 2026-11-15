@@ -35,7 +35,7 @@ import type { Context } from 'hono';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import logger from '../../utils/logger';
 import type { Env } from '../../index';
-import { completeWorkerJob } from '../../worker-api';
+import { completeAuthRun, completeWorkerJob } from '../../worker-api';
 import { cleanupTestDatabase, getTestDb } from '../setup/test-db';
 import { createTestOrganization } from '../setup/test-fixtures';
 
@@ -141,6 +141,123 @@ describe('live browser identity ownership', () => {
 describe('completeWorkerJob status guard (late-completion-after-timeout)', () => {
   beforeEach(async () => {
     await cleanupTestDatabase();
+  });
+
+  it.each(['interactive', 'browser_session'])('serializes %s sync rotation behind concurrent auth recovery without deadlocking', async (profileKind) => {
+    const sql = getTestDb();
+    const org = await createTestOrganization();
+    const connectionId = await insertConnection(org.id);
+    const feedId = await insertFeed(org.id, connectionId);
+    const runId = await insertReapedRun(org.id, connectionId, feedId);
+    const [profile] = await sql`INSERT INTO auth_profiles
+      (organization_id, connector_key, slug, display_name, profile_kind, status)
+      VALUES (${org.id}, 'chrome', 'synthetic-concurrent-rotation', 'Synthetic rotation', ${profileKind}, 'pending_auth') RETURNING id`;
+    await sql`UPDATE connections SET auth_profile_id = ${profile.id}, status = 'pending_auth' WHERE id = ${connectionId}`;
+    await sql`UPDATE feeds SET status = 'paused', next_run_at = NULL WHERE id = ${feedId}`;
+    await sql`UPDATE runs SET status = 'running', completed_at = NULL WHERE id = ${runId}`;
+    const [authRun] = await sql`INSERT INTO runs
+      (organization_id, run_type, auth_profile_id, status, claimed_by, claimed_at)
+      VALUES (${org.id}, 'auth', ${profile.id}, 'running', ${WORKER_ID}, NOW()) RETURNING id`;
+    const credentials = profileKind === 'interactive'
+      ? { creds: { token: 'synthetic-pairing' } }
+      : { cookies: [{ name: 'session', value: 'synthetic-pairing' }] };
+    const authUpdate = profileKind === 'interactive'
+      ? { keys: { session: 'synthetic-rotation' } }
+      : { cookies: [{ name: 'session', value: 'synthetic-rotation' }] };
+    const auth = mockWorkerCtx({ run_id: authRun.id, worker_id: WORKER_ID, status: 'success', credentials });
+    const sync = mockWorkerCtx({ run_id: runId, worker_id: WORKER_ID, status: 'success',
+      items_collected: 2, checkpoint: { cursor: 'synthetic-next' }, auth_update: authUpdate });
+
+    // Queue auth first and sync second on a held profile lock. Before the fix,
+    // sync holds the feed while waiting here; auth then owns the profile and
+    // waits for that feed, so PostgreSQL aborts one successful completion.
+    const locked = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const blocker = sql.begin(async (tx) => {
+      await tx`SELECT id FROM auth_profiles WHERE id = ${profile.id} FOR UPDATE`;
+      locked.resolve();
+      await release.promise;
+    }).catch((error) => { locked.reject(error); throw error; });
+    const completions: Array<Promise<PromiseSettledResult<unknown>[]>> = [];
+    try {
+      await locked.promise;
+      const waitForProfileWaiters = async (expected: number) => {
+        for (let attempt = 0; attempt < 80; attempt++) {
+          const [row] = await sql`SELECT count(*)::int AS count FROM pg_stat_activity
+            WHERE datname = current_database() AND wait_event_type = 'Lock'
+              AND application_name = 'server' AND query LIKE '%FROM auth_profiles%'`;
+          if (row.count >= expected) return;
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        throw new Error(`Expected ${expected} completions waiting on the profile lock`);
+      };
+      completions.push(Promise.allSettled([completeAuthRun(auth.ctx)]));
+      await waitForProfileWaiters(1);
+      completions.push(Promise.allSettled([completeWorkerJob(sync.ctx)]));
+      await waitForProfileWaiters(2);
+    } finally {
+      release.resolve();
+      await blocker;
+      await Promise.all(completions);
+    }
+    expect((await Promise.all(completions)).flat()).toMatchObject([
+      { status: 'fulfilled' }, { status: 'fulfilled' },
+    ]);
+    expect(auth.result().body).toEqual({ success: true });
+    expect(sync.result().body).toEqual({ success: true });
+    const runs = await sql`SELECT status FROM runs WHERE id IN (${runId}, ${authRun.id})`;
+    expect(runs.map((run) => run.status)).toEqual(['completed', 'completed']);
+    const [saved] = await sql`SELECT status, auth_data FROM auth_profiles WHERE id = ${profile.id}`;
+    expect(saved).toEqual({ status: 'active', auth_data: { ...credentials, ...authUpdate } });
+    const [feed] = await sql`SELECT status, items_collected::int, consecutive_failures, checkpoint FROM feeds WHERE id = ${feedId}`;
+    expect(feed).toEqual({ status: 'active', items_collected: 12, consecutive_failures: 0,
+      checkpoint: { cursor: 'synthetic-next' } });
+  });
+
+  it.each([
+    { profileKind: 'interactive', dryRun: false },
+    { profileKind: 'browser_session', dryRun: false },
+    { profileKind: 'interactive', dryRun: true },
+    { profileKind: 'browser_session', dryRun: true },
+  ])('commits $profileKind auth rotation and feed completion together (dry=$dryRun)', async ({ profileKind, dryRun }) => {
+    const sql = getTestDb();
+    const org = await createTestOrganization();
+    const connectionId = await insertConnection(org.id);
+    const feedId = await insertFeed(org.id, connectionId);
+    const runId = await insertReapedRun(org.id, connectionId, feedId);
+    const [profile] = await sql`INSERT INTO auth_profiles
+      (organization_id, connector_key, slug, display_name, profile_kind, status)
+      VALUES (${org.id}, 'chrome', 'synthetic-rotation', 'Synthetic rotation', ${profileKind}, 'pending_auth') RETURNING id`;
+    await sql`UPDATE connections SET auth_profile_id = ${profile.id} WHERE id = ${connectionId}`;
+    await sql`UPDATE runs SET status = 'running', completed_at = NULL, dry_run = ${dryRun} WHERE id = ${runId}`;
+    const authUpdate = profileKind === 'interactive'
+      ? { creds: { token: 'synthetic-rotation' } }
+      : { cookies: [{ name: 'session', value: 'synthetic-rotation' }] };
+    const body = { run_id: runId, worker_id: WORKER_ID, status: 'success',
+      items_collected: 2, checkpoint: { cursor: 'synthetic-next' }, auth_update: authUpdate };
+    await sql`ALTER TABLE auth_profiles ADD CONSTRAINT synthetic_reject_sync_rotation
+      CHECK (auth_data = '{}'::jsonb) NOT VALID`;
+    try {
+      await expect(completeWorkerJob(mockWorkerCtx(body).ctx)).rejects.toThrow();
+      const [run] = await sql`SELECT status, checkpoint FROM runs WHERE id = ${runId}`;
+      expect(run).toEqual({ status: 'running', checkpoint: null });
+      const [feed] = await sql`SELECT items_collected::int, consecutive_failures, last_sync_status, checkpoint FROM feeds WHERE id = ${feedId}`;
+      expect(feed).toEqual({ items_collected: 10, consecutive_failures: 3, last_sync_status: 'failed', checkpoint: null });
+    } finally {
+      await sql`ALTER TABLE auth_profiles DROP CONSTRAINT synthetic_reject_sync_rotation`;
+    }
+    const retry = mockWorkerCtx(body);
+    await completeWorkerJob(retry.ctx);
+    expect(retry.result().body).toEqual({ success: true });
+    const [saved] = await sql`SELECT status, auth_data FROM auth_profiles WHERE id = ${profile.id}`;
+    expect(saved).toEqual({ status: 'active', auth_data: authUpdate });
+    const [feed] = await sql`SELECT items_collected::int, consecutive_failures, last_sync_status, checkpoint FROM feeds WHERE id = ${feedId}`;
+    expect(feed).toEqual(dryRun
+      ? { items_collected: 10, consecutive_failures: 3, last_sync_status: 'failed', checkpoint: null }
+      : { items_collected: 12, consecutive_failures: 0, last_sync_status: 'success', checkpoint: body.checkpoint });
+    await completeWorkerJob(mockWorkerCtx(body).ctx);
+    const [afterDuplicate] = await sql`SELECT items_collected::int FROM feeds WHERE id = ${feedId}`;
+    expect(afterDuplicate.items_collected).toBe(dryRun ? 10 : 12);
   });
 
   it('does NOT resurrect a reaped run or double-apply feed bookkeeping on late failed completion', async () => {
