@@ -484,16 +484,29 @@ describe("oauth", () => {
       expect(result).toBeNull();
     });
 
-    test("returns null when access_token is absent", async () => {
+    test("throws without invalidating the grant when access_token is absent", async () => {
       setFetch(() => jsonResponse({ refresh_token: "rt" }));
 
-      const result = await refreshTokens(
-        "https://issuer.example.com/token",
-        { clientId: "c" },
-        "old-refresh"
-      );
+      await expect(
+        refreshTokens(
+          "https://issuer.example.com/token",
+          { clientId: "c" },
+          "old-refresh"
+        )
+      ).rejects.toMatchObject({ code: "invalid_token_response" });
+    });
 
-      expect(result).toBeNull();
+    test("throws without invalidating the grant on a network failure", async () => {
+      globalThis.fetch = (() => {
+        throw new Error("offline");
+      }) as unknown as typeof fetch;
+      await expect(
+        refreshTokens(
+          "https://issuer.example.com/token",
+          { clientId: "c" },
+          "old-refresh"
+        )
+      ).rejects.toMatchObject({ code: "refresh_failed" });
     });
   });
 
