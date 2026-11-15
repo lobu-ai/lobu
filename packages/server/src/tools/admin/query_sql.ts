@@ -505,6 +505,7 @@ export async function querySqlImpl(
       // PRIVATE-connection events only when org-visible. Cross-org reuses the
       // same global user id, re-validated against the target org above.
       userId: authzScopeFromToolContext(ctx).principal,
+      personalMemoryPrincipal: authzScopeFromToolContext(ctx).personalMemoryPrincipal,
       // Workspace-identity audit rows are owner/admin/system-only; ordinary
       // members must not select their member/invitation lifecycle data via raw SQL.
       excludeWorkspaceAudit: !canReadWorkspaceIdentity(ctx),

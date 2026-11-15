@@ -14,6 +14,8 @@ export interface AuthzScope {
    * User id used for read visibility. `null` excludes private connections.
    */
   principal: string | null;
+  /** Verified human subject, distinct from an Automation creator read principal. */
+  personalMemoryPrincipal?: string | null;
   /** The durable agent identity when the read happens inside an agent run. */
   agentId?: string | null;
   /** Policy snapshot the read is compiled against. Reserved for M2+/M6. */
@@ -39,11 +41,15 @@ export function authzScopeFromToolContext(ctx: {
   userId: string | null;
   agentId?: string | null;
   automationReadPrincipalId?: string | null;
+  personalMemoryPrincipal?: string | null;
+  actingAutomationId?: number | null;
 }): AuthzScope {
   return {
     organizationId: ctx.organizationId,
     principal: ctx.userId ?? ctx.automationReadPrincipalId ?? null,
     agentId: ctx.agentId ?? null,
+    personalMemoryPrincipal: ctx.actingAutomationId == null && ctx.personalMemoryPrincipal === ctx.userId
+      ? ctx.personalMemoryPrincipal ?? null : null,
   };
 }
 

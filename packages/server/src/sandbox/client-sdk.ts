@@ -208,6 +208,7 @@ export async function resolveCrossOrgToolContext(
 		...ctx,
 		organizationId: member.id,
 		memberRole: member.role,
+		personalMemoryPrincipal: ctx.personalMemoryPrincipal === ctx.userId ? ctx.userId : null,
 	};
 }
 
@@ -268,6 +269,7 @@ async function resolveChatSenderWorkspace(
 		...ctx,
 		organizationId: member.id,
 		memberRole: member.role,
+		personalMemoryPrincipal: ctx.personalMemoryPrincipal === ctx.userId ? ctx.userId : null,
 		agentId: member.id === reach.homeOrganizationId ? reach.homeAgentId : null,
 	};
 }
@@ -390,6 +392,7 @@ export function buildClientSDK(
 			const scoped = validateAndScopeQuery(querySql, workspaceCtx.organizationId, {
 				window,
 				userId: authzScopeFromToolContext(workspaceCtx).principal,
+				personalMemoryPrincipal: authzScopeFromToolContext(workspaceCtx).personalMemoryPrincipal,
 				safeColumns: SAFE_COLUMN_DEFS,
 				restrictedTables: isAdminOrOwnerRole(memberReadRole(workspaceCtx))
 					? undefined

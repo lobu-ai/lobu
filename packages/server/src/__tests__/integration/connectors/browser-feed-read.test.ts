@@ -517,7 +517,7 @@ describe('compiled browser source reads', () => {
     })).rejects.toThrow('Stopped at source reader');
     expect(pageRead).toHaveBeenCalledWith(
       expect.objectContaining({ feed_id: feedId }), 30_000,
-      { organizationId: orgId, principal: userId, agentId: agent.agentId, chatAccess: 'member' },
+      { organizationId: orgId, principal: userId, agentId: agent.agentId, chatAccess: 'member', personalMemoryPrincipal: null },
       controller.signal, actingAutomationId,
     );
   });

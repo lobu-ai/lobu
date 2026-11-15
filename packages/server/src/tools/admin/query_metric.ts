@@ -54,6 +54,7 @@ async function queryMetricImpl(
     segment: args.segment,
     entityId: args.entity_id,
     userId: authzScopeFromToolContext(ctx).principal,
+    personalMemoryPrincipal: authzScopeFromToolContext(ctx).personalMemoryPrincipal,
     signal: ctx.abortSignal,
     callerClass: sourceCallerClass(ctx),
     // Workspace-identity audit rows are owner/admin/system-only; ordinary

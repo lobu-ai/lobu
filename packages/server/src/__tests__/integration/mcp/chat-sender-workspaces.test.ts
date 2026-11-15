@@ -20,6 +20,7 @@
 import { mintGatewayMcpToken, verifyWorkerToken, type MessagePayload } from '@lobu/core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { upsertEntityApprovalPolicy } from '../../../authz/entity-policy';
+import { provisionMemberAndCoreIdentities } from '../../../auth/subject-identities';
 import { mintTurnToken } from '../../../gateway/orchestration/agent-turn-producer';
 import * as workspaceInstructions from '../../../utils/workspace-instructions';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
@@ -151,6 +152,8 @@ describe('chat turn: the sender\'s workspaces, reachable from a direct message o
     await addUserToOrganization(owner.id, foreign.id, 'owner');
     await addUserToOrganization(sender.id, home.id, 'member');
     await addUserToOrganization(sender.id, personal.id, 'owner');
+    // Real memberships provision the trusted $member used by resource reads.
+    await provisionMemberAndCoreIdentities(personal.id, { userId: sender.id, email: 'chat-reach-sender@example.test' });
     await createTestAgent({ organizationId: home.id, agentId: AGENT_ID, ownerUserId: owner.id });
     await linkChatIdentityInGraph({
       organizationId: home.id,

@@ -58,6 +58,8 @@ export interface AuthContext {
    */
   tokenOrganizationId: string | null;
   userId: string | null;
+  /** Auth-bound human reader; absent/null denies personal memory. Never a creator/owner fallback. */
+  personalMemoryPrincipal?: string | null;
   memberRole: string | null;
   agentId: string | null;
   /** Trusted internal reaction provenance. Never populated from request input. */
@@ -176,6 +178,11 @@ export function extractAuthContext(c: Context<{ Bindings: Env }>): AuthContext {
     organizationId: requestPath === ACCOUNT_CONTENT_PATH ? null : c.var.organizationId,
     tokenOrganizationId,
     userId: mcpAuthInfo?.userId || c.var.session?.userId || null,
+    // Worker source context is signed; only a verified member DM carries a human reader.
+    personalMemoryPrincipal: mcpAuthInfo?.sourceContext != null
+      ? mcpAuthInfo.sourceContext.chatAccess === 'member' ? mcpAuthInfo.userId : null
+      : mcpAuthInfo?.scopes?.includes('device_worker:run') ? null
+        : mcpAuthInfo?.userId ?? c.var.session?.userId ?? null,
     memberRole: c.var.memberRole,
     agentId: mcpAuthInfo?.agentId ?? null,
     requestedAgentId: mcpAuthInfo?.agentId ?? null,
@@ -627,6 +634,7 @@ export function toAccountToolContext(authCtx: AuthContext): AccountToolContext {
   return {
     organizationId: authCtx.organizationId,
     userId: authCtx.userId,
+    personalMemoryPrincipal: authCtx.actingAutomationId == null ? authCtx.personalMemoryPrincipal ?? null : null,
     memberRole: authCtx.memberRole,
     adminTools: authCtx.adminTools ?? null,
     agentId: authCtx.agentId,
