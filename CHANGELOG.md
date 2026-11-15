@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Breaking compatibility notice: shared fleet credentials
+
+[#4942](https://github.com/lobu-ai/lobu/pull/4942) blocks worker poll dispatch
+when its envelope would expose durable environment credentials, browser or
+interactive session state, or previous auth credentials to a shared fleet
+worker. Affected syncs/actions now fail, and scheduled feeds can auto-pause after
+repeated failures. HTTP-proxied authentication, permitted OAuth access tokens and
+authorized owner-device execution remain available. Existing connections are not
+automatically migrated; raw PostgreSQL DSNs cannot use HTTP header bindings.
+See the [operator migration steps](docs/connector-authoring.md#upgrade-compatibility-fleet-credential-containment)
+before upgrading. This notice covers worker dispatch, not gateway inline paths.
+
 ## [24.11.1](https://github.com/lobu-ai/lobu/compare/lobu-v24.11.0...lobu-v24.11.1) (2026-11-15)
 
 ### Required upgrade step for self-hosted servers

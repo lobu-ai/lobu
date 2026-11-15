@@ -302,6 +302,36 @@ realtime subscriptions merely by implementing an on-demand `read` handler.
 - **No real credentials in code.** Secrets flow through `ctx.credentials` /
   `ctx.config`; workers never receive durable stored credentials.
 
+### Upgrade compatibility: fleet credential containment
+
+The worker-dispatch change in [#4942](https://github.com/lobu-ai/lobu/pull/4942)
+is a breaking compatibility change for connections that previously sent durable
+credentials to shared fleet workers. Poll dispatch now fails the run before
+sending an envelope containing resolved environment credentials, stored browser
+or interactive session state, or previous authentication credentials. Scheduled
+feed attempts use the existing failure accounting and can auto-pause after
+repeated failures. Updating worker pods alone does not restore these connections.
+
+Before upgrading, inventory fleet connections using those credential forms:
+
+- For HTTP APIs, use an HTTP-bound auth profile with explicit allowed hosts and
+  header bindings. Credentials stay on the gateway and are injected on authorized
+  HTTP requests; the worker receives proxied access. Existing OAuth access-token
+  dispatch remains supported; OAuth app client secrets stay on the gateway.
+- For connectors that require raw credentials or local sessions, use an explicitly
+  authorized owner device pinned to the connection in the same workspace. The
+  existing device ownership, capability and egress checks still apply.
+- Raw PostgreSQL DSNs cannot be converted into HTTP header bindings. Fleet
+  dispatch with a durable DSN remains blocked until a compatible execution path
+  is configured; do not work around the refusal by copying the DSN into code or
+  public connection configuration.
+
+Changing a connection's existing profile binding may require an owner to create
+and securely populate a new profile. There is no automatic stored-secret migration
+in this release. After reconfiguration, verify a connector operation and a
+scheduled sync, then explicitly resume any paused feeds. This guard covers worker
+poll dispatch; it does not claim to cover gateway inline SQL, reads or actions.
+
 ### Actions (write-back)
 
 Declare `actions` with an `inputSchema`, a `kind` (`read` or `write`), and
