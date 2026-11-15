@@ -250,8 +250,37 @@ export async function refreshTokens(
       ...(options.resource ? { resource: options.resource } : {}),
     })
   );
-  if (!body.ok || typeof body.data.access_token !== "string") return null;
+  if (!body.ok) {
+    const code = pickString(body.data, "error");
+    // Only an explicit OAuth rejection invalidates the saved grant. Transport,
+    // gateway, rate-limit and malformed-response failures say nothing about
+    // whether it can be used again; throwing keeps callers from deleting it.
+    if (
+      (body.status === 400 || body.status === 401) &&
+      (code === "invalid_grant" ||
+        code === "invalid_client" ||
+        code === "unauthorized_client")
+    ) {
+      return null;
+    }
+    throw new OAuthError(
+      "refresh_failed",
+      `Could not refresh your saved login (${body.status ? `HTTP ${body.status}` : "network unavailable"}). Your login was kept; try again shortly.`
+    );
+  }
   return parseTokenResponse(body.data);
+}
+
+/**
+ * A refresh that failed without the issuer rejecting the grant (`refreshTokens`
+ * throws these instead of returning null). The saved login may work again, so
+ * a caller that holds another usable credential can serve the request with it.
+ */
+export function isTransientRefreshFailure(error: unknown): boolean {
+  return (
+    error instanceof OAuthError &&
+    (error.code === "refresh_failed" || error.code === "invalid_token_response")
+  );
 }
 
 export async function fetchUserInfo(
@@ -348,10 +377,11 @@ async function postJson(
       errorMessage: `Network error: ${(err as Error).message}`,
     };
   }
-  const data = (await response.json().catch(() => ({}))) as Record<
-    string,
-    unknown
-  >;
+  const raw: unknown = await response.json().catch(() => ({}));
+  const data =
+    raw && typeof raw === "object" && !Array.isArray(raw)
+      ? (raw as Record<string, unknown>)
+      : {};
   if (response.ok) return { ok: true, status: response.status, data };
   const errorMessage =
     pickString(data, "error_description") ??

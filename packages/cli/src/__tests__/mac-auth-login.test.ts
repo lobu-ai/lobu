@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -107,6 +107,126 @@ async function runLogin(target: "mac" | "cli"): Promise<Captured> {
 }
 
 describe("Lobu for Mac sign-in identity", () => {
+  test("temporary refresh failures preserve the login and a later whoami recovers", async () => {
+    const scratch = await mkdtemp(join(tmpdir(), "lobu-mac-refresh-"));
+    const configDir = join(scratch, ".config", "lobu");
+    const credentialsFile = join(configDir, "credentials.json");
+    let response = () => new Response("Unavailable", { status: 503 });
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        if (new URL(request.url).pathname === "/token") return response();
+        return Response.json({ organizations: [] });
+      },
+    });
+    try {
+      await mkdir(configDir, { recursive: true });
+      const saved = JSON.stringify({
+        version: 2,
+        contexts: {
+          other: { accessToken: "unrelated-fixture-access" },
+          fixture: {
+            accessToken: "expired-fixture-access",
+            refreshToken: "fixture-refresh",
+            expiresAt: 1,
+            oauth: {
+              clientId: "fixture-client",
+              tokenEndpoint: `${server.url.origin}/token`,
+            },
+          },
+        },
+      });
+      await writeFile(credentialsFile, saved);
+      const preload = join(scratch, "isolate.ts");
+      await writeFile(
+        preload,
+        `import { mock } from "bun:test";
+        import * as os from "node:os";
+        mock.module("node:os", () => ({ ...os, homedir: () => ${JSON.stringify(scratch)} }));`
+      );
+      async function whoami() {
+        const child = spawn(
+          "bun",
+          [
+            "--preload",
+            preload,
+            macAuthEntry,
+            "whoami",
+            "--json",
+            "--context",
+            "fixture",
+          ],
+          {
+            stdio: ["ignore", "pipe", "pipe"],
+            env: {
+              ...process.env,
+              LOBU_API_URL: server.url.origin,
+              LOBU_API_TOKEN: "",
+              LOBU_CONTEXT: "fixture",
+            },
+          }
+        );
+        let stdout = "";
+        child.stdout.on("data", (chunk) => {
+          stdout += chunk;
+        });
+        child.stderr.resume();
+        const code = await new Promise<number | null>((done, reject) => {
+          child.on("error", reject);
+          child.on("close", done);
+        });
+        return { code, stdout };
+      }
+      for (const failure of [
+        () => new Response("Unavailable", { status: 503 }),
+        () =>
+          Response.json({ error: "temporarily_unavailable" }, { status: 400 }),
+        () => new Response("Rate limited", { status: 429 }),
+        () => Response.json({ error: "invalid_grant" }, { status: 500 }),
+        () => Response.json({ error: "invalid_request" }, { status: 400 }),
+        () => Response.json(null),
+        () => new Response("invalid json"),
+        () => Response.json({ refresh_token: "incomplete-response" }),
+      ]) {
+        response = failure;
+        const result = await whoami();
+        expect(result.code).not.toBe(0);
+        expect(result.stdout).toBe("");
+        expect(await readFile(credentialsFile, "utf8")).toBe(saved);
+      }
+      response = () =>
+        Response.json({
+          access_token: "fresh-fixture-access",
+          refresh_token: "rotated-fixture-refresh",
+          expires_in: 3600,
+        });
+      const recovered = await whoami();
+      expect(recovered.code).toBe(0);
+      expect(JSON.parse(recovered.stdout).loggedIn).toBe(true);
+      const updated = JSON.parse(await readFile(credentialsFile, "utf8"));
+      expect(updated.contexts.fixture.refreshToken).toBe(
+        "rotated-fixture-refresh"
+      );
+
+      // A definitive grant rejection still requires sign-in.
+      await writeFile(credentialsFile, saved);
+      response = () =>
+        Response.json({ error: "invalid_grant" }, { status: 400 });
+      const rejected = await whoami();
+      expect(rejected.code).toBe(0);
+      expect(JSON.parse(rejected.stdout).loggedIn).toBe(false);
+      const rejectedStore = JSON.parse(await readFile(credentialsFile, "utf8"));
+      expect(rejectedStore.contexts.fixture).toBeUndefined();
+      expect(rejectedStore.contexts.other.accessToken).toBe(
+        "unrelated-fixture-access"
+      );
+    } finally {
+      server.stop(true);
+      await rm(scratch, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   test("the bundled Mac auth helper registers as Lobu for Mac and returns the browser to the app", async () => {
     const { registration, deviceScope, stdout } = await runLogin("mac");
 

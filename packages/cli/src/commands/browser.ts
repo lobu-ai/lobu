@@ -22,6 +22,7 @@ import {
   resolveContext,
 } from "../internal/context.js";
 import { getContextToken } from "../internal/credentials.js";
+import { isTransientRefreshFailure } from "../internal/oauth.js";
 import {
   deleteDeviceState,
   loadDeviceState,
@@ -234,7 +235,10 @@ async function deviceBearers(record: BrowserRecord): Promise<string[]> {
   const live = await liveCredential(record);
   if (live) bearers.push(live.workerApiToken);
   if (await contextStillTargets(record)) {
-    const login = await getContextToken(record.context);
+    const login = await loginUnlessOutage(
+      () => getContextToken(record.context),
+      bearers.length > 0
+    );
     if (login) bearers.push(login);
   }
   if (bearers.length === 0) {
@@ -243,6 +247,25 @@ async function deviceBearers(record: BrowserRecord): Promise<string[]> {
     );
   }
   return bearers;
+}
+
+/**
+ * The context's login, or undefined without one. A refresh that failed only
+ * because the issuer was unreachable or answered badly keeps the saved login,
+ * and yields undefined only when the caller still holds the browser's own
+ * credential; with nothing to fall back on the failure is reported as-is
+ * instead of as a missing login.
+ */
+async function loginUnlessOutage(
+  resolve: () => Promise<string | null>,
+  canFallBack: boolean
+): Promise<string | undefined> {
+  try {
+    return (await resolve()) ?? undefined;
+  } catch (error) {
+    if (canFallBack && isTransientRefreshFailure(error)) return undefined;
+    throw error;
+  }
 }
 
 /**
@@ -314,9 +337,13 @@ async function credentialForBrowser(
     );
   }
   const live = await liveCredential(record);
-  const login = interactive
-    ? await requireInstallationLogin(record.context)
-    : ((await getContextToken(record.context)) ?? undefined);
+  const login = await loginUnlessOutage(
+    () =>
+      interactive
+        ? requireInstallationLogin(record.context)
+        : getContextToken(record.context),
+    live !== undefined
+  );
   if (!login) {
     if (live) return live;
     throw new Error(
