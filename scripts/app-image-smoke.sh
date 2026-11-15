@@ -73,6 +73,7 @@ note "boot"
 CID=$(docker run -d --network host \
   -e "DATABASE_URL=${DATABASE_URL}" \
   -e "JWT_SECRET=app-image-smoke-not-a-real-secret" \
+  -e "BETTER_AUTH_SECRET=$(openssl rand -base64 32)" \
   -e "ENCRYPTION_KEY=$(openssl rand -base64 32)" \
   -e "ALLOW_DB_CREATE=1" \
   -e "PORT=${APP_PORT}" \
