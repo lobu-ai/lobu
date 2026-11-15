@@ -45,6 +45,7 @@ import { ensureRelationshipType, upsertEdges } from '../../../utils/edge-writes'
 import { applyEventAttributions } from '../../../utils/entity-link-upsert';
 import { withAclEdgeWrite } from '../../../utils/relationship-validation';
 import { PERSONAL_MEMORY_OWNER_NAMESPACE } from '../../../identity/personal-memory-identity';
+import { compileResourceVisibility } from '../../../authz/resource-visibility';
 
 const AGENT_ID = 'chat-principal-agent';
 const TEAM_ID = 'T0PRINCIPAL';
@@ -328,17 +329,25 @@ describe('chat turn principal: the verified sender, never the agent owner', () =
   });
 
   it('includes personal notes in owner entity counts and score listings while hiding them from other members', async () => {
-    const saved = await (await dmCaller())('save_memory', { content: 'Private scored note', semantic_type: 'observation' });
+    const saved = await (await dmCaller())('save_memory', { content: 'Private scored note', semantic_type: 'observation',
+      metadata: { description: 'Private scored note' } });
     const resourceId = await personalResource();
     const connection = await createTestConnection({ organization_id: org.id, connector_key: 'slack',
       created_by: linkedMember.id, visibility: 'org' });
     await getTestDb()`UPDATE events SET connection_id = ${connection.id} WHERE id = ${saved.id}`;
+    const metrics = { eventSets: { notes: { by: 'alias', field: "metadata->>'description'", against: 'aliases',
+      where: "semantic_type='observation'" } }, measures: { note_count: { eventSet: 'notes', agg: 'count' } } };
+    await getTestDb()`UPDATE entities SET metadata = ${getTestDb().json({ aliases: ['Private scored note'] })} WHERE id = ${resourceId}`;
+    await getTestDb()`UPDATE entity_types SET metrics_config = ${getTestDb().json(metrics)}
+      WHERE organization_id = ${org.id} AND slug = '$resource'`;
     for (const [userId, expectedCount] of [[linkedMember.id, 1], [owner.id, 0]] as const) {
       const pat = await createTestPAT(userId, org.id, { scope: 'mcp:read mcp:write' });
       const result = await mcpToolsCall<any>('query_sdk', { script: `export default async (_ctx, client) => ({
         listed: await client.entities.list({entity_type:'$resource'}),
         sorted: await client.entities.list({entity_type:'$resource',sort_by:'total_content'}),
-        scored: await client.knowledge.read({entity_id:${resourceId},sort_by:'score'})
+        scored: await client.knowledge.read({entity_id:${resourceId},sort_by:'score'}),
+        metric: await client.metrics.query({entity_type:'$resource',entity_id:${resourceId},measure:'note_count'}),
+        series: await client.metrics.series({sql:'SELECT id FROM events WHERE id = ${saved.id}'})
       });` }, { token: pat.token, orgSlug: org.slug });
       expect(result.success, JSON.stringify(result)).toBe(true);
       for (const page of [result.return_value.listed, result.return_value.sorted]) {
@@ -346,10 +355,13 @@ describe('chat turn principal: the verified sender, never the agent owner', () =
       }
       expect(result.return_value.scored.content.map((row: { id: number }) => Number(row.id)))
         .toEqual(expectedCount ? [Number(saved.id)] : []);
+      expect(Number(result.return_value.metric.rows[0]?.note_count ?? 0)).toBe(expectedCount);
+      expect(result.return_value.series.rows.map((row: unknown[]) => Number(row[0])))
+        .toEqual(expectedCount ? [Number(saved.id)] : []);
     }
   });
 
-  it.each(['membership', 'resource', 'workspace membership'] as const)('revoking %s denies reads and new writes without healing the audience', async (revocation) => {
+  it.each(['membership', 'resource', 'owner identity', 'workspace membership'] as const)('revoking %s denies reads and new writes without healing the audience', async (revocation) => {
     const alice = await dmCaller();
     const saved = await alice('save_memory', { content: 'Revocable private memory', semantic_type: 'observation' });
     const resourceId = await personalResource();
@@ -358,6 +370,9 @@ describe('chat turn principal: the verified sender, never the agent owner', () =
         WHERE organization_id = ${org.id} AND to_entity_id = ${resourceId}`.then(() => undefined));
     } else if (revocation === 'resource') {
       await getTestDb()`UPDATE entities SET deleted_at = now() WHERE id = ${resourceId}`;
+    } else if (revocation === 'owner identity') {
+      await getTestDb()`UPDATE entity_identities SET deleted_at = now()
+        WHERE entity_id = ${resourceId} AND namespace = ${PERSONAL_MEMORY_OWNER_NAMESPACE}`;
     } else {
       await getTestDb()`DELETE FROM "member" WHERE "organizationId" = ${org.id} AND "userId" = ${linkedMember.id}`;
     }
@@ -367,6 +382,31 @@ describe('chat turn principal: the verified sender, never the agent owner', () =
       const read = await alice('search_memory', { query: `memory ${saved.id}` });
       expect(read.content ?? []).toEqual([]);
       expect((await alice('save_memory', { content: 'New private note after revocation', semantic_type: 'observation' }, true)).isError).toBe(true);
+    }
+  });
+
+  it('bounds the owner lookup when unrelated identity history grows', async () => {
+    await (await dmCaller())('save_memory', { content: 'Private plan probe', semantic_type: 'observation' });
+    const sql = getTestDb();
+    const filler = await createTestEntity({ name: 'Identity plan filler', organization_id: org.id });
+    await sql`INSERT INTO entity_identities
+      (organization_id, entity_id, namespace, identifier, source_connector, deleted_at)
+      SELECT ${org.id}, ${filler.id}, 'synthetic_plan_identity', 'identity-' || g, 'synthetic:plan',
+        CASE WHEN g % 2 = 0 THEN now() ELSE NULL END
+      FROM generate_series(1, 50000) g`;
+    await sql.unsafe('ANALYZE entity_identities');
+    const gate = compileResourceVisibility({ organizationId: org.id, principal: linkedMember.id,
+      personalMemoryPrincipal: null }, 2, 'e');
+    const plan = await sql.unsafe(`EXPLAIN (ANALYZE, FORMAT JSON) SELECT e.id FROM current_event_records e
+      WHERE e.organization_id = $1 ${gate.sql}`, [org.id, ...gate.params]);
+    const nodes: Record<string, any>[] = [];
+    const walk = (node: Record<string, any>) => { nodes.push(node); for (const child of node.Plans ?? []) walk(child); };
+    walk(plan[0]['QUERY PLAN'][0].Plan);
+    const identityScans = nodes.filter(node => node['Relation Name'] === 'entity_identities');
+    expect(identityScans.length).toBeGreaterThan(0);
+    for (const node of identityScans) {
+      const examined = (Number(node['Actual Rows'] ?? 0) + Number(node['Rows Removed by Filter'] ?? 0)) * Number(node['Actual Loops'] ?? 0);
+      expect(examined, JSON.stringify(node)).toBeLessThan(1000);
     }
   });
 
