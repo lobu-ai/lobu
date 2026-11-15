@@ -11,7 +11,8 @@
  * by `lobu-dispatcher` and then failed with "Embedded Lobu is not available."
  * — that claim is the observable proof it left the queue.
  */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { createServer } from 'node:http';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { dispatchNextPendingAutomationRuns } from '../../../automations/automation';
 import type { DbClient } from '../../../db/client';
 import { ApiResponseRenderer } from '../../../gateway/api/response-renderer';
@@ -226,5 +227,93 @@ describe('next pending Automation run dispatch on completion', () => {
     const followUp = await runState(h, followUpId);
     expect(followUp.status).toBe('pending');
     expect(followUp.claimed_by).toBeNull();
+  });
+});
+
+describe('Automation dispatcher ownership across HTTP waits', () => {
+  beforeEach(async () => {
+    await cleanupTestDatabase();
+  });
+
+  it.each([
+    ['cancelled', 200, 'session'],
+    ['reclaimed', 200, 'session'],
+    ['reclaimed', 503, 'session'],
+    ['unchanged', 200, 'session'],
+    ['unchanged', 503, 'session'],
+    ['reclaimed', 200, 'message'],
+  ] as const)('fences a %s run across HTTP %s at %s', async (transition, responseStatus, waitAt) => {
+    const h = await setup(`dispatch-fence-${transition}-${responseStatus}-${waitAt}`);
+    const runId = await insertFollowUp(h);
+    let sessionStarted!: () => void;
+    let releaseSession!: () => void;
+    const started = new Promise<void>(resolve => { sessionStarted = resolve; });
+    const released = new Promise<void>(resolve => { releaseSession = resolve; });
+    const delivered: string[] = [];
+    const server = createServer(async (request, response) => {
+      if (request.url === '/api/v1/agents') {
+        if (waitAt === 'session') {
+          sessionStarted();
+          await released;
+        }
+        response.writeHead(responseStatus, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ agentId: h.agentId, messagesUrl: `${baseUrl}/messages` }));
+      } else {
+        for await (const chunk of request) delivered.push(chunk.toString());
+        if (waitAt === 'message') {
+          sessionStarted();
+          await released;
+        }
+        response.writeHead(waitAt === 'message' ? 503 : 200).end('{}');
+      }
+    });
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const baseUrl = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    const priorUrl = process.env.DISPATCHER_URL;
+    let dispatch: Promise<unknown> | undefined;
+    try {
+      process.env.DISPATCHER_URL = baseUrl;
+      vi.resetModules();
+      vi.doMock('../../../lobu/gateway', async () => ({
+        ...await vi.importActual<typeof import('../../../lobu/gateway')>('../../../lobu/gateway'),
+        isLobuGatewayRunning: () => true,
+      }));
+      const { dispatchPendingAutomationRuns } = await import('../../../automations/automation');
+      dispatch = dispatchPendingAutomationRuns({ db: h.sql as unknown as DbClient, runIds: [runId] });
+      await started;
+      if (transition === 'cancelled') {
+        await h.sql`UPDATE runs SET status = 'cancelled', completed_at = now(), error_message = 'Cancelled during dispatch'
+          WHERE id = ${runId}`;
+      } else if (transition === 'reclaimed') {
+        // A different replica reclaims with the same dispatcher name. Preserve
+        // microseconds so an owner-only or JS-Date fence cannot pass this test.
+        await h.sql`UPDATE runs SET claimed_at = claimed_at + interval '1 microsecond', error_message = 'Replacement claim'
+          WHERE id = ${runId}`;
+      }
+      releaseSession();
+      const result = await dispatch;
+      const state = await runState(h, runId);
+      if (transition === 'unchanged') {
+        expect(state.status).toBe(responseStatus === 200 ? 'running' : 'failed');
+        expect(result).toMatchObject({ dispatched: responseStatus === 200 ? 1 : 0, failed: responseStatus === 503 ? 1 : 0 });
+      } else {
+        expect(state).toMatchObject({
+          status: transition === 'cancelled' ? 'cancelled' : waitAt === 'message' ? 'running' : 'claimed',
+          claimed_by: waitAt === 'message' ? `lobu:${h.agentId}` : 'lobu-dispatcher',
+          error_message: transition === 'cancelled' ? 'Cancelled during dispatch' : 'Replacement claim',
+        });
+        expect(result).toMatchObject({ reconciled: 1, dispatched: 0, failed: 0 });
+      }
+      expect(delivered.length).toBe(waitAt === 'message' || (transition === 'unchanged' && responseStatus === 200) ? 1 : 0);
+    } finally {
+      releaseSession();
+      await dispatch;
+      vi.doUnmock('../../../lobu/gateway');
+      vi.resetModules();
+      if (priorUrl === undefined) delete process.env.DISPATCHER_URL;
+      else process.env.DISPATCHER_URL = priorUrl;
+      server.closeAllConnections();
+      await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    }
   });
 });

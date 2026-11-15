@@ -2,6 +2,7 @@ import { type DbClient, getDb } from '../db/client';
 import { markAutomationRunFailed } from './run-completion';
 import { AUTOMATION_SCRIPT_TASK } from '../scheduled/task-definitions';
 import { enqueueTasksInTransaction } from '../scheduled/task-scheduler';
+import { runClaimFence, type RunClaim } from '../runs/run-lease';
 
 export interface AutomationScriptTaskPayload {
   organizationId: string;
@@ -12,7 +13,8 @@ export interface AutomationScriptTaskPayload {
 /** Transfer a dispatcher claim to the durable sandbox task in the same transaction. */
 export async function enqueueAutomationScript(
   sql: DbClient,
-  payload: AutomationScriptTaskPayload
+  payload: AutomationScriptTaskPayload,
+  claim: RunClaim
 ): Promise<boolean> {
   return sql.begin(async (tx) => {
     // The child task's automation_id FK needs a key-share lock on its parent.
@@ -30,6 +32,7 @@ export async function enqueueAutomationScript(
       WHERE id = ${payload.sourceRunId} AND organization_id = ${payload.organizationId}
         AND automation_id = ${payload.automationId} AND run_type = 'automation'
         AND status = 'claimed' AND claimed_by = 'lobu-dispatcher'
+        ${runClaimFence(tx, claim)}
         AND approved_input->'executor'->>'kind' = 'script'
       RETURNING id
     `;

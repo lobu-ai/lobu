@@ -47,6 +47,7 @@ import {
 import { recordAutomationRunFailure } from "./scheduled-failure-policy";
 import { completeSkippedAutomationRun, inspectUnchangedWindow } from "./unchanged-window";
 import { organizationIdLiveSql } from "../workspace/deletion-state";
+import { runClaimFence, type RunClaim } from "../runs/run-lease";
 import {
 	resolveAutomationRunsByMessageIds,
 } from "./run-completion";
@@ -87,6 +88,7 @@ interface ClaimedAutomationRunRow {
 	organization_id: string;
 	automation_id: number;
 	approved_input: unknown;
+	claim: RunClaim;
 }
 
 interface ActiveAutomationRunInfo {
@@ -378,9 +380,10 @@ export async function enqueueAutomationRunForAutomationInTransaction(
 async function markAutomationRunFailedIdempotent(
 	sql: DbClient,
 	runId: number,
-	message: string
-): Promise<void> {
-	await sql.begin(async (tx) => {
+	message: string,
+	claim: RunClaim
+): Promise<boolean> {
+	return sql.begin(async (tx) => {
 		const [failed] = await tx<{
 			automation_id: string | number | null;
 			run_type: string;
@@ -392,10 +395,10 @@ async function markAutomationRunFailedIdempotent(
           completed_at = current_timestamp,
           error_message = ${message}
       WHERE id = ${runId}
-        AND status = ANY(${runStatusLiteral(ACTIVE_RUN_STATUSES)}::text[])
+        ${runClaimFence(tx, claim)}
       RETURNING automation_id, run_type, approved_input->>'dispatch_source' AS dispatch_source
     `;
-		if (!failed) return;
+		if (!failed) return false;
 		// Same gate as the twin in run-completion.ts. The dispatch lane claims
 		// both run types, so every failure here — session creation, embedded Lobu
 		// unavailable, or message POST — can be an eval. An eval clones
@@ -409,6 +412,7 @@ async function markAutomationRunFailedIdempotent(
 				failed.dispatch_source
 			);
 		}
+		return true;
 	});
 }
 
@@ -1171,10 +1175,10 @@ async function getAutomationInstructions(
 
 async function failAutomationRun(
 	sql: DbClient,
-	runId: number,
+	run: ClaimedAutomationRunRow,
 	message: string
-): Promise<void> {
-	await markAutomationRunFailedIdempotent(sql, runId, message);
+): Promise<"failed" | "reconciled"> {
+	return (await markAutomationRunFailedIdempotent(sql, run.id, message, run.claim)) ? "failed" : "reconciled";
 }
 
 async function claimAutomationRun(
@@ -1237,12 +1241,16 @@ async function claimAutomationRun(
 			status: "claimed",
 		});
 		if (!claimed) return null;
+		const [claim] = await tx<{ claimed_at: string }>`
+      SELECT claimed_at::text FROM runs WHERE id = ${candidateId}
+    `;
 
 		return {
 			id: candidateId,
 			organization_id: String(candidate.organization_id),
 			automation_id: automationId,
 			approved_input: candidate.approved_input,
+			claim: { claimedAt: claim.claimed_at, claimedBy: "lobu-dispatcher", status: "claimed" },
 		};
 	});
 }
@@ -1300,19 +1308,17 @@ async function dispatchAutomationRun(
 ): Promise<"reconciled" | "dispatched" | "failed"> {
 	const payload = parseAutomationRunPayload(run.approved_input);
 	if (!payload) {
-		await failAutomationRun(
+		return failAutomationRun(
 			sql,
-			run.id,
+			run,
 			"Automation run is missing a valid dispatch payload."
 		);
-		return "failed";
 	}
 
 	if (payload.automation_script?.has_prepare) {
 		const [source] = await sql`SELECT run_type FROM runs WHERE id = ${run.id}`;
 		if (source?.run_type !== "automation") {
-			await failAutomationRun(sql, run.id, "Preparation is not supported for captured or evaluation windows.");
-			return "failed";
+			return failAutomationRun(sql, run, "Preparation is not supported for captured or evaluation windows.");
 		}
 	}
 
@@ -1324,14 +1330,13 @@ async function dispatchAutomationRun(
 			payload.agent_id
 		))
 	) {
-		await failAutomationRun(
+		return failAutomationRun(
 			sql,
-			run.id,
+			run,
 			payload.agent_id
 				? `Assigned agent "${payload.agent_id}" does not exist in this organization.`
 				: "Automation run has no assigned agent (device-pinned and manual-open runs do not dispatch server-side)."
 		);
-		return "failed";
 	}
 
 	if (payload.executor) {
@@ -1340,35 +1345,32 @@ async function dispatchAutomationRun(
 			source?.run_type !== "automation" ||
 			payload.executor.kind !== "script"
 		) {
-			await failAutomationRun(
+			return failAutomationRun(
 				sql,
-				run.id,
+				run,
 				"Script executors currently support live Automation runs; eval capture is unavailable."
 			);
-			return "failed";
 		}
 		return (await enqueueAutomationScript(sql, {
 			organizationId: run.organization_id,
 			automationId: run.automation_id,
 			sourceRunId: run.id,
-		}))
+		}, run.claim))
 			? "dispatched"
 			: "reconciled";
 	}
 
 	if (!isLobuGatewayRunning()) {
-		await failAutomationRun(sql, run.id, "Embedded Lobu is not available.");
-		return "failed";
+		return failAutomationRun(sql, run, "Embedded Lobu is not available.");
 	}
 
 	const serviceToken = await getLobuServiceToken(run.organization_id);
 	if (!serviceToken) {
-		await failAutomationRun(
+		return failAutomationRun(
 			sql,
-			run.id,
+			run,
 			"Failed to generate an embedded Lobu service token."
 		);
-		return "failed";
 	}
 
 	// Per-automation inference overrides live in automations.execution_config
@@ -1411,12 +1413,11 @@ async function dispatchAutomationRun(
 
 		if (!sessionResponse.ok) {
 			const body = await sessionResponse.text();
-			await failAutomationRun(
+			return failAutomationRun(
 				sql,
-				run.id,
+				run,
 				`Failed to create or resume Lobu agent session (${sessionResponse.status}): ${body || "unknown error"}`
 			);
-			return "failed";
 		}
 
 		const sessionBody = (await sessionResponse.json()) as {
@@ -1427,24 +1428,27 @@ async function dispatchAutomationRun(
 		const messagesUrl = sessionBody.messagesUrl?.trim();
 
 		if (!sessionAgentId || !messagesUrl) {
-			await failAutomationRun(
+			return failAutomationRun(
 				sql,
-				run.id,
+				run,
 				"Embedded Lobu returned an incomplete agent session."
 			);
-			return "failed";
 		}
 
 		// Mark the run 'running' with a durable message correlation BEFORE posting,
 		// so a late completion event arriving mid-POST has somewhere to land.
-		await sql`
+		const promoted = await sql`
       UPDATE runs
       SET status = 'running',
           claimed_by = ${`lobu:${payload.agent_id}`},
           dispatched_message_id = ${messageId},
           error_message = NULL
       WHERE id = ${run.id}
+        ${runClaimFence(sql, run.claim)}
+      RETURNING id
     `;
+		if (promoted.length === 0) return "reconciled";
+		run.claim = { ...run.claim, claimedBy: `lobu:${payload.agent_id}`, status: "running" };
 
 		const messageResponse = await fetch(messagesUrl, {
 			method: "POST",
@@ -1465,24 +1469,22 @@ async function dispatchAutomationRun(
 
 		if (!messageResponse.ok) {
 			const body = await messageResponse.text();
-			await failAutomationRun(
+			return failAutomationRun(
 				sql,
-				run.id,
+				run,
 				`Failed to enqueue Lobu Automation message (${messageResponse.status}): ${body || "unknown error"}`
 			);
-			return "failed";
 		}
 
 		return "dispatched";
 	} catch (error) {
-		await failAutomationRun(
+		return failAutomationRun(
 			sql,
-			run.id,
+			run,
 			error instanceof Error
 				? error.message
 				: "Unexpected Lobu dispatch failure."
 		);
-		return "failed";
 	}
 }
 
