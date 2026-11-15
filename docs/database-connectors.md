@@ -67,6 +67,17 @@ feed does not fail the whole batch. The per-feed timeout defaults to 10s and
 clamps at 30s. It aborts device and HTTP transports and tears down compiled
 connector runs at the deadline.
 
+## Fleet credential compatibility
+
+Worker poll dispatch rejects durable credentials on shared fleet workers,
+including a resolved PostgreSQL DSN. A worker's `db_egress_hardening` capability
+is a network-safety prerequisite, not permission to receive that DSN. The network
+rules below do not override credential containment. Review the
+[upgrade compatibility steps](connector-authoring.md#upgrade-compatibility-fleet-credential-containment)
+before upgrading an existing fleet database connection. HTTP-bound profiles
+cannot proxy a PostgreSQL wire connection. Gateway inline query execution is a
+separate path and is not covered by the poll-dispatch guard.
+
 ## SSRF / egress trust model
 
 The DB socket lives in the **connector isolate**, behind the worker egress
