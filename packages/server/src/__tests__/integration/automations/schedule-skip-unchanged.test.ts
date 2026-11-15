@@ -47,7 +47,7 @@ describe("scheduled Automation unchanged gate", () => {
 		}
 		await sql`UPDATE automations SET next_run_at = now() - interval '1 minute' WHERE id = ${created.automation_id}`;
 		const [initial] = await sql`SELECT next_run_at, next_window_start FROM automations WHERE id = ${created.automation_id}`;
-		return { sql, ctx, automationId: created.automation_id, initial };
+		return { sql, ctx, automationId: created.automation_id, feedId: feed.id, initial };
 	}
 
 	it.each([true, false].flatMap(skipIfUnchanged =>
@@ -163,6 +163,31 @@ describe("scheduled Automation unchanged gate", () => {
 		await expect(manageAutomations({ action: "trigger", automation_id: automationId }, {} as Env, ctx))
 			.rejects.toMatchObject({ httpStatus: 422 });
 		expect(await sql`SELECT id FROM runs WHERE automation_id = ${automationId}`).toHaveLength(0);
+	});
+
+	it.each([
+		{ name: "RuntimeUnavailable", message: "Synthetic isolate runtime outage" },
+		{ name: "CompileError", code: "INTERNAL" as const, message: "Synthetic compiler host outage" },
+	])("retries a transient $name inspection outage without charging a healthy script", async (failure) => {
+		const { sql, automationId, feedId, initial } = await seedInvalidScript(true);
+		await sql`UPDATE feeds SET deleted_at = NULL WHERE id = ${feedId}`;
+		const outage = vi.spyOn(runScriptModule, "runScript").mockResolvedValueOnce({
+			success: false, logs: [], durationMs: 0, sdkCalls: 0, skippedCalls: 0, traceDropped: 0, sdkCallTrace: [],
+			startedSideEffects: [], requiredMcpScopes: [], sideEffectPreview: [], error: failure,
+		});
+		try {
+			await materializeDueAutomationRuns({} as Env, sql);
+		} finally {
+			outage.mockRestore();
+		}
+		expect(await sql`SELECT id FROM runs WHERE automation_id = ${automationId}`).toHaveLength(0);
+		const [state] = await sql`SELECT next_run_at, next_window_start, consecutive_scheduled_failures
+			FROM automations WHERE id = ${automationId}`;
+		expect(state).toMatchObject({ ...initial, consecutive_scheduled_failures: 0 });
+		await materializeDueAutomationRuns({} as Env, sql);
+		expect(await sql`SELECT status FROM runs WHERE automation_id = ${automationId}`).toEqual([{ status: "pending" }]);
+		const [recovered] = await sql`SELECT consecutive_scheduled_failures FROM automations WHERE id = ${automationId}`;
+		expect(recovered.consecutive_scheduled_failures).toBe(0);
 	});
 
 	it("records source-read failures without advancing arrivals and applies the scheduled failure budget", async () => {

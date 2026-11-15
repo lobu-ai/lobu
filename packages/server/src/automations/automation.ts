@@ -45,6 +45,7 @@ import {
 } from "./script-enqueue";
 import { recordAutomationRunFailure } from "./scheduled-failure-policy";
 import { completeSkippedAutomationRun, inspectUnchangedWindow } from "./unchanged-window";
+import { AutomationScriptInfrastructureError } from "./reaction-executor";
 import { organizationIdLiveSql } from "../workspace/deletion-state";
 import { runClaimFence, type RunClaim } from "../runs/run-lease";
 import {
@@ -891,6 +892,7 @@ export async function materializeDueAutomationRuns(
 			try {
 				unchangedWindow = await inspectUnchangedWindow(sql, automation, pending);
 			} catch (error) {
+				if (error instanceof AutomationScriptInfrastructureError) throw error;
 				sourceFailure = error instanceof Error ? error.message : String(error);
 			}
 			return sql.begin(async (tx) => {
