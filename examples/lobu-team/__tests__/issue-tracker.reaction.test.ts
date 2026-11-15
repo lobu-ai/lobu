@@ -1,4 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { buildIssueRepair } from "../scripts/build-issue-repair";
 import {
   type IssueRecord,
   type Occurrence,
@@ -6,6 +11,11 @@ import {
   RULES,
   runIssueTracker,
 } from "../issue-tracker.reaction";
+import {
+  healthProblem,
+  planHealthChanges,
+  type HealthResource,
+} from "../workspace-health";
 
 const NOW = new Date("2026-11-04T12:00:00.000Z");
 const ago = (hours: number) =>
@@ -450,4 +460,134 @@ describe("runIssueTracker", () => {
     expect(lookup).toContain(`'${trace}'`);
     expect(lookup).not.toContain("not-a-trace-id");
   });
+});
+
+describe("workspace health conditions", () => {
+  const resource = (
+    state: HealthResource["state"],
+    kind: HealthResource["kind"] = "automation"
+  ): HealthResource => ({
+    workspace: "synthetic-owned",
+    kind,
+    resource_id: "42",
+    fingerprint: FP(42),
+    name: "Synthetic work",
+    state,
+  });
+  test("detects silent, paused and repeated failures without charging transient retries", () => {
+    expect(
+      healthProblem(resource({ triggers: [{}], next_run_at: ago(2) }), NOW)
+    ).toBe("overdue");
+    expect(
+      healthProblem(
+        resource({ triggers: [{}], next_run_at: ago(0.5), failures: 1 }),
+        NOW
+      )
+    ).toBeNull();
+    expect(
+      healthProblem(resource({ triggers: [{}], paused_at: ago(2) }), NOW)
+    ).toBe("schedule_auto_paused");
+    expect(
+      healthProblem(resource({ triggers: [], tags: ["manual"] }), NOW)
+    ).toBeNull();
+    expect(healthProblem(resource({ triggers: [] }), NOW)).toBeNull();
+    expect(healthProblem(resource({ triggers: [{}], failures: 3 }), NOW)).toBe(
+      "repeated_failures"
+    );
+    expect(
+      healthProblem(resource({ status: "active", failures: 1 }, "feed"), NOW)
+    ).toBeNull();
+    expect(
+      healthProblem(resource({ status: "paused", failures: 3 }, "feed"), NOW)
+    ).toBe("paused_after_failures");
+    expect(
+      healthProblem(resource({ status: "paused", failures: 0 }, "feed"), NOW)
+    ).toBeNull();
+    expect(
+      healthProblem(
+        resource({ status: "active", next_run_at: ago(2) }, "feed"),
+        NOW
+      )
+    ).toBeNull();
+    expect(
+      healthProblem(
+        resource(
+          { status: "active", schedule: "* * * * *", next_run_at: ago(2) },
+          "feed"
+        ),
+        NOW
+      )
+    ).toBe("overdue");
+    expect(
+      healthProblem(
+        resource({ status: "active", auth_status: "revoked" }, "connection"),
+        NOW
+      )
+    ).toBe("connection_unavailable");
+  });
+  test("ignores remain suppressed and telemetry quiet never resolves a health issue", () => {
+    const i = issue({
+      fingerprint: FP(42),
+      status: "ignored",
+      culprit: "workspace-health:synthetic-owned:automation:42",
+    });
+    const [change] = planHealthChanges(
+      [resource({ triggers: [], failures: 3 })],
+      [i],
+      NOW
+    );
+    expect(change).not.toHaveProperty("metadata.status");
+    expect(
+      plan([], [{ ...i, status: "ongoing", last_seen: ago(24 * 30) }])
+    ).toEqual([]);
+    expect(
+      planHealthChanges(
+        [resource({ triggers: [{}], success_at: ago(2) })],
+        [{ ...i, status: "ongoing" }],
+        NOW
+      )
+    ).toEqual([]);
+    expect(
+      planHealthChanges(
+        [resource({ triggers: [{}], success_at: ago(0.1) })],
+        [{ ...i, status: "ongoing" }],
+        NOW
+      )[0]
+    ).toMatchObject({ metadata: { status: "resolved" } });
+    expect(
+      planHealthChanges(
+        [resource({ triggers: [] })],
+        [{ ...i, deleted: true }],
+        NOW
+      )
+    ).toEqual([]);
+  });
+});
+
+test("installed bundles are portable across build-machine paths", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "foreign-build-machine-"));
+  try {
+    const entrypoint = join(directory, "foreign-entry.ts");
+    const source = fileURLToPath(
+      new URL("../issue-tracker.reaction.ts", import.meta.url)
+    );
+    await writeFile(entrypoint, `export * from ${JSON.stringify(source)};`);
+    const bundle = await buildIssueRepair(
+      {
+        ownerUserId: "synthetic-owner",
+        workspaces: ["synthetic-owned"],
+        connection: "synthetic-health",
+      },
+      entrypoint
+    );
+    const bytes = JSON.stringify(bundle);
+    for (const path of [directory, source]) {
+      expect(bytes).not.toContain(path);
+      expect(bytes).not.toContain(pathToFileURL(path).href);
+      expect(bytes).not.toContain(encodeURIComponent(path));
+    }
+    expect(bytes).not.toMatch(/foreign-build-machine|\/Users\/|\/home\//);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });

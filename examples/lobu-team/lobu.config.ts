@@ -280,11 +280,32 @@ const issueTracker = defineAutomation({
   // Five minutes after each quarter-hour issue_occurrences_hourly refresh.
   triggers: [every("12,27,42,57 * * * *", { skip_if_unchanged: false })],
   tags: ["observability", "issues"],
+  // Explicitly consented scope; the reaction rechecks ownership at each run.
+  // The external repair queue is installed by scripts/configure-issue-repair.ts.
   // The module reads ClickHouse and the issue records itself. A context-only
   // source keeps the default events source from pacing runs by arrivals.
   sources: { clock: context("SELECT CURRENT_TIMESTAMP AS observed_at") },
   reaction: reactionFromFile<typeof IssueTrackerReaction>(
-    "./issue-tracker.reaction.ts"
+    "./issue-tracker.reaction.ts",
+    {
+      health: {
+        connection: "lobu-product-activity-db",
+        workspaces: [
+          "buremba",
+          "business-ontology-lab",
+          "funeral-business",
+          "improvado-pilot",
+          "legal",
+          "lobu-cloud",
+          "lobu-team",
+          "market",
+          "peaka-demo",
+          "prodma-erp",
+          "support",
+          "ycombinator",
+        ],
+      },
+    }
   ),
 });
 
