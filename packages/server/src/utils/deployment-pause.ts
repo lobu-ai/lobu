@@ -35,6 +35,7 @@
 
 import { getDb } from '../db/client';
 import { parseApplyId } from './apply-context';
+import { ToolUserError } from './errors';
 
 export interface DeploymentPauseState {
   pausedAt: string | null;
@@ -66,14 +67,17 @@ export async function isRestorableDeployment(
 }
 
 /** Thrown when a paused org receives a mutating apply-run request. */
-export class DeploymentsPausedError extends Error {
+export class DeploymentsPausedError extends ToolUserError {
   readonly pause: DeploymentPauseState;
 
   constructor(pause: DeploymentPauseState) {
     super(
       `Deployments are paused for this organization — a rollback restored deployment ${
         pause.rollbackOf ?? '?'
-      }. Applying now would re-promote the config that was just rolled back. Reconcile your config repo, then run \`lobu apply --resume\`.`
+      }. Applying now would re-promote the config that was just rolled back. Reconcile your config repo, then run \`lobu apply --resume\`.`,
+      // Same status as checkApplyPause's direct-route refusal, so the REST tool
+      // proxy returns the actionable message instead of a 500.
+      409
     );
     this.name = 'DeploymentsPausedError';
     this.pause = pause;

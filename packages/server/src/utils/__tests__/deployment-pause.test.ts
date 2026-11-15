@@ -295,6 +295,9 @@ describe('promotions pause — the funnel decision', () => {
     }
 
     expect(caught).toBeInstanceOf(DeploymentsPausedError);
+    // The REST tool proxy maps this status; anything but a ToolUserError 4xx
+    // becomes an opaque 500 and the caller loses the `--resume` instruction.
+    expect(caught).toMatchObject({ httpStatus: 409 });
     const { getDb } = await import('../../db/client.js');
     const [row] = await getDb()`
       SELECT count(*)::int AS count

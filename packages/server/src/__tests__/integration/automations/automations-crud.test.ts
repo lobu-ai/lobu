@@ -450,7 +450,10 @@ describe('automation CRUD', () => {
         managed_agent_id: agentId,
         reaction_script: 'export default async function reaction() {',
       })
-    ).rejects.toThrow();
+    ).rejects.toMatchObject({
+      httpStatus: 422,
+      message: expect.stringContaining('ReactionCompiler compilation failed'),
+    });
 
     const [row] = await getTestDb()<{ id: number }[]>`
       SELECT id FROM automations WHERE slug = 'invalid-reaction-automation'
