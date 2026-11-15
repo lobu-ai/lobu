@@ -592,34 +592,30 @@ export class MultiTenantProvider implements WorkspaceProvider {
       // `c.get('user')` (e.g. POST /agents owner attribution) have a value.
       let bearerUser: { id: string; email: string; name: string; emailVerified: boolean } | null =
         null;
-      try {
-        const userRows = await sql`
-          SELECT id, email, name, "emailVerified"
-          FROM "user"
-          WHERE id = ${authInfo.userId}
-          LIMIT 1
-        `;
-        if (userRows.length > 0) {
-          const row = userRows[0] as {
-            id: string;
-            email: string;
-            name: string;
-            emailVerified: boolean | string | number | null;
-          };
-          bearerUser = {
-            id: row.id,
-            email: row.email ?? '',
-            name: row.name ?? '',
-            emailVerified:
-              typeof row.emailVerified === 'boolean'
-                ? row.emailVerified
-                : row.emailVerified === 't' ||
-                  row.emailVerified === 'true' ||
-                  row.emailVerified === 1,
-          };
-        }
-      } catch {
-        bearerUser = null;
+      const userRows = await sql`
+        SELECT id, email, name, "emailVerified"
+        FROM "user"
+        WHERE id = ${authInfo.userId}
+        LIMIT 1
+      `;
+      if (userRows.length > 0) {
+        const row = userRows[0] as {
+          id: string;
+          email: string;
+          name: string;
+          emailVerified: boolean | string | number | null;
+        };
+        bearerUser = {
+          id: row.id,
+          email: row.email ?? '',
+          name: row.name ?? '',
+          emailVerified:
+            typeof row.emailVerified === 'boolean'
+              ? row.emailVerified
+              : row.emailVerified === 't' ||
+                row.emailVerified === 'true' ||
+                row.emailVerified === 1,
+        };
       }
 
       let effectiveOrgId = requestedOrgId;
@@ -704,83 +700,80 @@ export class MultiTenantProvider implements WorkspaceProvider {
     //    `Authorization: Bearer <session-token>` via Better Auth's bearer
     //    plugin, which translates the header into a session lookup before
     //    `auth.api.getSession` runs below.
-    try {
-      const candidates = sessionCookieCandidates(c.req.header('Cookie'));
+    // Lookup failures are server errors; only a missing session means anonymous.
+    const candidates = sessionCookieCandidates(c.req.header('Cookie'));
 
-      // A duplicated session cookie no longer decides anything — resolveSession
-      // picks the live one regardless of order — but it still means the browser
-      // is carrying a twin that should not exist, and it is otherwise invisible.
-      // Log it so the source can be found. Why: auth/session-cookie-scope.ts.
-      if (candidates.length > 1) {
-        // Host and names both matter: the host says which origin planted the
-        // twin, and the names say whether it is a second scope of one name or a
-        // leftover of the other spelling — different causes, different fixes.
-        logger.warn(
-          `[MultiTenantProvider] ${candidates.length} session cookies in one request ` +
-            `(host=${c.req.header('host') || 'unknown'}, names=${candidates
-              .map((candidate) => candidate.name)
-              .join(',')}) — resolving on merit, but the jar should be ` +
-            'collapsed on next sign-in'
-        );
-      }
+    // A duplicated session cookie no longer decides anything — resolveSession
+    // picks the live one regardless of order — but it still means the browser
+    // is carrying a twin that should not exist, and it is otherwise invisible.
+    // Log it so the source can be found. Why: auth/session-cookie-scope.ts.
+    if (candidates.length > 1) {
+      // Host and names both matter: the host says which origin planted the
+      // twin, and the names say whether it is a second scope of one name or a
+      // leftover of the other spelling — different causes, different fixes.
+      logger.warn(
+        `[MultiTenantProvider] ${candidates.length} session cookies in one request ` +
+          `(host=${c.req.header('host') || 'unknown'}, names=${candidates
+            .map((candidate) => candidate.name)
+            .join(',')}) — resolving on merit, but the jar should be ` +
+          'collapsed on next sign-in'
+      );
+    }
 
-      // Session revocation is authorization state. Always ask Better Auth's
-      // Postgres-backed store so a logout/revocation on another replica takes
-      // effect on the next request here too.
-      const auth = await createAuth(c.env);
-      const session = await resolveSession(auth, c.req.raw.headers);
+    // Session revocation is authorization state. Always ask Better Auth's
+    // Postgres-backed store so a logout/revocation on another replica takes
+    // effect on the next request here too.
+    const auth = await createAuth(c.env);
+    const session = await resolveSession(auth, c.req.raw.headers);
 
-      if (session?.user && session.session) {
-        if (!requestedOrgId) {
-          if (isUnscopedRoute) {
-            return setContextAndContinue({
-              mcpIsAuthenticated: true,
-              organizationId: null,
-              memberRole: null,
-              user: session.user,
-              session: session.session,
-              authSource: 'session',
-            });
-          }
-          return c.json(
-            { error: 'invalid_request', error_description: 'Organization slug is required in URL' },
-            400
-          );
-        }
-
-        const role = await getMembershipRole(requestedOrgId, session.session.userId);
-        if (role) {
+    if (session?.user && session.session) {
+      if (!requestedOrgId) {
+        if (isUnscopedRoute) {
           return setContextAndContinue({
             mcpIsAuthenticated: true,
-            organizationId: requestedOrgId,
-            memberRole: role,
+            organizationId: null,
+            memberRole: null,
             user: session.user,
             session: session.session,
             authSource: 'session',
           });
         }
+        return c.json(
+          { error: 'invalid_request', error_description: 'Organization slug is required in URL' },
+          400
+        );
+      }
 
-        // Non-member: only allow through for public-readable endpoints
-        if (!allowOrgLevelPublicRead && !allowAnonymousPublicOrgMcp) {
-          return c.json(
-            {
-              error: 'forbidden',
-              error_description: 'You are not a member of this organization',
-            },
-            403
-          );
-        }
+      const role = await getMembershipRole(requestedOrgId, session.session.userId);
+      if (role) {
         return setContextAndContinue({
-          mcpIsAuthenticated: false,
+          mcpIsAuthenticated: true,
           organizationId: requestedOrgId,
-          memberRole: null,
+          memberRole: role,
           user: session.user,
           session: session.session,
           authSource: 'session',
         });
       }
-    } catch {
-      // Session validation failed, continue to anonymous
+
+      // Non-member: only allow through for public-readable endpoints
+      if (!allowOrgLevelPublicRead && !allowAnonymousPublicOrgMcp) {
+        return c.json(
+          {
+            error: 'forbidden',
+            error_description: 'You are not a member of this organization',
+          },
+          403
+        );
+      }
+      return setContextAndContinue({
+        mcpIsAuthenticated: false,
+        organizationId: requestedOrgId,
+        memberRole: null,
+        user: session.user,
+        session: session.session,
+        authSource: 'session',
+      });
     }
 
     // If the client sent `Authorization: Bearer …` and we got here, it

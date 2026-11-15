@@ -90,6 +90,46 @@ describe('MCP Authentication', () => {
     sessionCookie = session.cookieHeader;
   });
 
+  describe('Authentication infrastructure failures', () => {
+    it.each(['pat', 'oauth'] as const)('propagates a %s requester lookup failure instead of continuing without its user', async (kind) => {
+      const credential = kind === 'pat'
+        ? await createTestPAT(user.id, org.id)
+        : await createTestAccessToken(user.id, org.id, client.client_id);
+      const path = `/api/${org.slug}/clients`;
+      expect((await get(path, { token: credential.token })).status).toBe(200);
+      const sql = getTestDb();
+      await sql`ALTER TABLE "user" RENAME COLUMN "emailVerified" TO test_unavailable_verification`;
+      try {
+        const failed = await get(path, { token: credential.token });
+        expect(failed.status).toBe(500);
+        expect(await failed.text()).not.toContain('emailVerified');
+      } finally {
+        await sql`ALTER TABLE "user" RENAME COLUMN test_unavailable_verification TO "emailVerified"`;
+      }
+      expect((await get(path, { token: credential.token })).status).toBe(200);
+    });
+
+    it.each(['cookie', 'bearer'] as const)('preserves a valid %s session when membership lookup fails', async (transport) => {
+      const session = await createTestSession(user.id);
+      const credentials = transport === 'cookie' ? { cookie: session.cookieHeader } : { token: session.token };
+      const path = `/api/${org.slug}/clients`;
+      expect((await get(path, credentials)).status).toBe(200);
+      const sql = getTestDb();
+      await sql`ALTER TABLE "member" RENAME TO test_unavailable_membership`;
+      try {
+        const failed = await get(path, credentials);
+        expect(failed.status).toBe(500);
+        const body = await failed.text();
+        expect(body).not.toContain('member');
+        expect(body).not.toContain('SELECT');
+        expect(failed.headers.get('WWW-Authenticate')).toBeNull();
+      } finally {
+        await sql`ALTER TABLE test_unavailable_membership RENAME TO "member"`;
+      }
+      expect((await get(path, credentials)).status).toBe(200);
+    });
+  });
+
   describe('Unauthenticated Requests', () => {
     it('rejects an MCP authorization request that omits its RFC 8707 resource', async () => {
       const query = new URLSearchParams({
