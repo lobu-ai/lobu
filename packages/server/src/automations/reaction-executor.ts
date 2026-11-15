@@ -19,7 +19,7 @@ import { AUTOMATION_RUN_SOURCE } from '../gateway/automation-run-session';
 import type { Env } from '../index';
 import { buildClientSDK } from '../sandbox/client-sdk';
 import { runScript, scriptFailureTelemetry } from '../sandbox/run-script';
-import { compileSource } from '../utils/compiler-core';
+import { compileSource, SourceCompileError } from '../utils/compiler-core';
 import logger from '../utils/logger';
 import { ToolUserError } from '../utils/errors';
 import { getMembershipRole } from '../workspace/multi-tenant';
@@ -318,17 +318,26 @@ export async function compileReactionScript(source: string): Promise<string> {
   // runtime accept the same set of imports. Drift here used to externalize
   // `@lobu/reactions`, which the runtime recompile would then fail to
   // resolve.
-  const result = await compileSource(source, {
-    tmpPrefix: '.reaction-compile-',
-    label: 'ReactionCompiler',
-    buildOptions: {
-      format: 'cjs',
-      target: 'esnext',
-      platform: 'node',
-      external: [],
-    },
-  });
-  return result.compiledCode;
+  try {
+    const result = await compileSource(source, {
+      tmpPrefix: '.reaction-compile-',
+      label: 'ReactionCompiler',
+      buildOptions: {
+        format: 'cjs',
+        target: 'esnext',
+        platform: 'node',
+        external: [],
+      },
+    });
+    return result.compiledCode;
+  } catch (error) {
+    // A diagnostic located in the author's source is caller input, not a
+    // server failure: every save-time caller must return it to the author.
+    if (error instanceof SourceCompileError) {
+      throw new ToolUserError(error.message, 422);
+    }
+    throw error;
+  }
 }
 
 /**
@@ -355,9 +364,10 @@ export async function validateReactionDefaultExport(
   // runScript returns success=true with returnValue=null when the default
   // export is absent or not a function, so check both conditions.
   if (!result.success || !result.returnValue) {
-    throw new Error(
+    throw new ToolUserError(
       `${label} must export a default async function. ` +
         (result.error?.message ?? 'No default export found.'),
+      422,
     );
   }
 }

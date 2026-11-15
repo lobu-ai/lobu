@@ -20,7 +20,7 @@ import { Hono } from 'hono';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mcpAuth } from '../../../auth/middleware';
 import type { Env } from '../../../index';
-import { restToolProxy } from '../../../rest-api';
+import { publicRestSearchKnowledge, restSearchKnowledge, restToolProxy } from '../../../rest-api';
 import { initWorkspaceProvider } from '../../../workspace';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import {
@@ -99,7 +99,7 @@ describe('read cancellation', () => {
   beforeAll(async () => {
     await cleanupTestDatabase();
     await initWorkspaceProvider();
-    const org = await createTestOrganization({ name: 'Read Cancellation' });
+    const org = await createTestOrganization({ name: 'Read Cancellation', visibility: 'public' });
     orgSlug = org.slug;
     const user = await createTestUser({ email: 'read-cancellation@test.example.com' });
     await addUserToOrganization(user.id, org.id, 'owner');
@@ -107,6 +107,8 @@ describe('read cancellation', () => {
     await createTestEvent({ organization_id: org.id, content: 'synthetic feed item' });
     app = new Hono<{ Bindings: Env }>();
     app.post('/api/:orgSlug/:toolName', mcpAuth, (c) => restToolProxy(c));
+    app.get('/api/:orgSlug/knowledge/search', mcpAuth, restSearchKnowledge);
+    app.get('/api/:orgSlug/public/knowledge/search', publicRestSearchKnowledge);
   });
 
   afterEach(async () => {
@@ -159,14 +161,16 @@ describe('read cancellation', () => {
     expect(toolFailures('read_knowledge')).toEqual([]);
   });
 
-  it('does not record an abandoned search as a failed recall', async () => {
+  it.each(['proxy', 'wrapper', 'public wrapper'] as const)('does not record an abandoned search through the %s as a failed recall', async (route) => {
     const holderPid = await holdEventsLock();
     const caller = new AbortController();
     const response = app.fetch(
-      new Request(`http://localhost/api/${orgSlug}/search_memory`, {
-        method: 'POST',
+      new Request(route === 'proxy'
+        ? `http://localhost/api/${orgSlug}/search_memory`
+        : `http://localhost/api/${orgSlug}/${route === 'public wrapper' ? 'public/' : ''}knowledge/search?query=synthetic%20feed%20item`, {
+        method: route === 'proxy' ? 'POST' : 'GET',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: 'synthetic feed item', include_content: true }),
+        body: route === 'proxy' ? JSON.stringify({ query: 'synthetic feed item', include_content: true }) : undefined,
         signal: caller.signal,
       }),
       env
