@@ -30,6 +30,7 @@ import {
 } from "@lobu/core";
 import { intervals } from "../../../config/intervals.js";
 import { getDb, getDbListener, type DbClient } from "../../../db/client.js";
+import { isShuttingDown } from "../../../lifecycle-state.js";
 import { incrementCounter } from "../../metrics/prometheus.js";
 import { pruneTurnWriteReceipts } from "../../../tools/turn-write-idempotency.js";
 import {
@@ -501,7 +502,9 @@ export class RunsQueue implements IMessageQueue {
     // empty claims;
     // a NOTIFY for the channel cuts the sleep short.
     const loop = async () => {
-      while (!worker.stopped) {
+      // Readiness drain begins before queue.stop(): finish active handlers but
+      // leave new work for a replica that will remain available.
+      while (!worker.stopped && !isShuttingDown()) {
         if (worker.paused) {
           await this.sleep(intervals.runsPollIntervalMs, worker, () => {
             resolveWake = null;
@@ -526,11 +529,11 @@ export class RunsQueue implements IMessageQueue {
           } finally {
             worker.claiming -= 1;
           }
-          // `stop()` can flip these flags while the claim above is in flight.
+          // Shutdown can begin while the claim above is in flight.
           // There is no await between this check and `active += 1`, so a row
           // claimed by a queue that is going away is handed back rather than
           // started on a process that is exiting.
-          if (claimed && (worker.stopped || this.shuttingDown)) {
+          if (claimed && (worker.stopped || this.shuttingDown || isShuttingDown())) {
             await this.releaseClaim(claimed.runId);
             continue;
           }
