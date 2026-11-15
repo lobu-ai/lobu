@@ -181,6 +181,18 @@ lobu memory run search_memory '{"query":"Acme"}' --org <org-slug>
 
 Use `search_memory` first when the user asks about a specific entity or workspace memory. Use `save_memory` to persist durable memory. To update existing knowledge, search first, then save with `supersedes_event_id` so the old row is tombstoned rather than deleted.
 
+### Answering questions about a record
+
+Recent events can contain only counters or timestamp updates; a relevant linked record may hold the investigation, decision, or outcome. Use the existing read APIs to gather that context:
+
+1. Start with `search_memory` to resolve the record and its workspace. Discover the current signatures with `search_sdk`, then use `query_sdk` with the selected workspace's `entities.get` and `knowledge.read`. Event `entity_ids` identify records the event concerns; co-occurrence does not assert a relationship.
+2. When relationships could answer the question, call `entities.listLinks` on the resolved record or relevant event-linked records. Use relationship type and direction to select context relevant to the question, rather than expanding every event. Keep expansion to one hop and fetch at most five distinct related records in total with `entities.get`. Bound link pages too: start with `limit: 20` and inspect at most two pages total; use the returned offset/page metadata for stored records and `next_cursor` for source-backed records. Deduplicate records by workspace, type, and ID/key. If the budget ends while more results remain, say the context is partial.
+3. For stored event evidence in current-state questions, use live heads (`is_superseded: false`), not the first row of an exact-ID read: `content_ids` can return the supersede history before its current head. If no live head is returned, follow the returned pagination for at most two pages total, then report current evidence unavailable if it is still missing. Keep historical versions when the question asks what happened at an earlier time. An event ID identifies a stored version; a source item's stable identity is its connection/source plus `origin_id`.
+4. Preserve the meaning and direction of each relationship. Skip `acl_managed` links for ordinary business context unless the question concerns permissions. An identity association or a shared email address does not by itself verify the same human; a shared support mailbox can represent several people. Neither proves employment or collaboration. Fetch supporting evidence when that distinction matters, and distinguish a stored assertion from a verified source fact.
+5. Cite returned record/event URLs or source links for the answer. Treat `relationship_failures`, `record_failures`, unreadable linked records, and unfinished pages as coverage limits, not proof that no relationship or evidence exists. Respect the selected workspace and caller's access; do not switch workspaces or fall back to raw SQL to bypass a denied read. Manual claims and connector configuration ownership are not automatically supporting event evidence.
+
+For example, when asked what happened with an issue, follow an explicitly returned investigation/task relationship and read that record's conclusion as well as the issue's recent activity. Report a stored task's conclusion as recorded context; it does not independently prove that a repair is currently deployed. This workflow reads context only; it does not create links or merge records.
+
 ## MCP Client Setup
 
 Use the actual MCP URL for the user's runtime. Never hardcode a hosted URL unless the user explicitly asks for that instance.
