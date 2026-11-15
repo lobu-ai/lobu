@@ -57,8 +57,8 @@ function signInMethod(context: HookEndpointContext): string | null {
 }
 
 /**
- * `session.create.after`. Never throws: a log line must not fail or slow a
- * sign-in.
+ * Called after the final authentication factor, once a session is admitted.
+ * Never throws: a log line must not fail or slow a sign-in.
  */
 export function logAuthObserved(
 	session: { userId: string; activeOrganizationId?: string | null },
