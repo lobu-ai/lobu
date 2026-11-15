@@ -3,8 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Env } from '../../index';
 import { materializeDueFeeds, type DueFeedClaimContext } from '../../scheduled/check-due-feeds';
 import * as executionContext from '../../utils/execution-context';
+import { persistAuthCredentials } from '../../utils/auth-credential-secrets';
 import { cleanupTestDatabase, getTestDb } from '../setup/test-db';
-import { createTestConnection, createTestConnectorDefinition, seedOwnerContext } from '../setup/test-fixtures';
+import { createTestConnection, createTestConnectorDefinition, createTestPAT, seedOwnerContext } from '../setup/test-fixtures';
 import { post } from '../setup/test-helpers';
 
 async function seedConnection(bound: boolean, due = false) {
@@ -72,7 +73,7 @@ describe('gateway HTTP authentication capability negotiation', () => {
   beforeEach(async () => {
     await cleanupTestDatabase();
     vi.spyOn(executionContext, 'resolveExecutionAuth').mockResolvedValue({
-      credentials: null, connectionCredentials: { PUBLIC_URL: 'https://service.example.test' },
+      credentials: null, connectionCredentials: {},
       sessionState: null, httpAuth: true,
     });
   });
@@ -94,18 +95,21 @@ describe('gateway HTTP authentication capability negotiation', () => {
     const { runId } = await seedPendingRun(true);
     const response = await poll(true);
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({
+    const body = await response.json();
+    expect(body).toMatchObject({
       run_id: runId, http_auth: true, credentials: null,
-      connection_credentials: { PUBLIC_URL: 'https://service.example.test' },
     });
+    expect(body.connection_credentials).toBeUndefined();
   });
 
-  it('still delivers an ordinary env connection to an older worker', async () => {
+  it('still delivers public connection config to an older worker', async () => {
     vi.mocked(executionContext.resolveExecutionAuth).mockResolvedValue({
-      credentials: null, connectionCredentials: { PUBLIC_URL: 'https://service.example.test' }, sessionState: null,
+      credentials: null, connectionCredentials: {}, sessionState: null,
     });
-    const { runId } = await seedPendingRun(false);
-    expect(await (await poll(false)).json()).toMatchObject({ run_id: runId });
+    const { runId, connectionId } = await seedPendingRun(false);
+    await getTestDb()`UPDATE connections SET config = ${getTestDb().json({ PUBLIC_URL: 'https://service.example.test' })}
+      WHERE id = ${connectionId}`;
+    expect(await (await poll(false)).json()).toMatchObject({ run_id: runId, config: { PUBLIC_URL: 'https://service.example.test' } });
   });
 
   it('rechecks a binding introduced after claim selection before serializing credentials', async () => {
@@ -151,5 +155,66 @@ describe('gateway HTTP authentication capability negotiation', () => {
     expect((await materializeDueFeeds({} as Env, sql, { claimContext: context })).runsCreated).toBe(0);
     const [count] = await sql`SELECT count(*)::int AS count FROM runs WHERE connection_id = ${connectionId}`;
     expect(count.count).toBe(0);
+  });
+});
+
+describe('fleet credential delivery boundary', () => {
+  beforeEach(async () => { await cleanupTestDatabase(); });
+
+  async function credentialRun(kind: 'env' | 'browser_session' | 'interactive', previousOnly = false, legacy = false) {
+    const seeded = await seedPendingRun(false);
+    const sql = getTestDb();
+    const [profile] = await sql`SELECT auth_profile_id AS id FROM connections WHERE id = ${seeded.connectionId}`;
+    const sentinel = 'synthetic-durable-credential';
+    const state = kind === 'env' ? { DATABASE_URL: sentinel }
+      : kind === 'browser_session' ? { mode: 'cookies', cookies: [{ name: 'session', value: sentinel }] }
+      : { creds: { token: sentinel } };
+    await sql`UPDATE auth_profiles SET profile_kind = ${kind}, auth_data = ${sql.json(state)} WHERE id = ${profile.id}`;
+    if (kind === 'env' && !legacy) {
+      await persistAuthCredentials({ organizationId: seeded.orgId, authProfileId: profile.id, credentials: state });
+    }
+    if (previousOnly) {
+      await sql`UPDATE connections SET auth_profile_id = NULL WHERE id = ${seeded.connectionId}`;
+      await sql`UPDATE runs SET run_type = 'auth', auth_profile_id = ${profile.id} WHERE id = ${seeded.runId}`;
+    }
+    return { ...seeded, sentinel };
+  }
+
+  it.each([
+    { kind: 'env' as const, previousOnly: false, legacy: false },
+    { kind: 'env' as const, previousOnly: false, legacy: true },
+    { kind: 'browser_session' as const, previousOnly: false, legacy: false },
+    { kind: 'interactive' as const, previousOnly: false, legacy: false },
+    { kind: 'env' as const, previousOnly: true, legacy: false },
+  ])('refuses $kind credentials before fleet serialization (previous=$previousOnly, legacy=$legacy)', async ({ kind, previousOnly, legacy }) => {
+    const seeded = await credentialRun(kind, previousOnly, legacy);
+    const response = await poll(true);
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(JSON.stringify(body).includes(seeded.sentinel)).toBe(false);
+    expect(body).toMatchObject({ skipped_run_id: seeded.runId, error: expect.any(String) });
+    for (const field of ['run_id', 'connection_credentials', 'session_state', 'previous_credentials']) {
+      expect(body[field]).toBeUndefined();
+    }
+    const [run] = await getTestDb()`SELECT status FROM runs WHERE id = ${seeded.runId}`;
+    expect(run.status).toBe('failed');
+  });
+
+  it('preserves resolved credentials for the explicitly pinned owner device', async () => {
+    const seeded = await credentialRun('env');
+    const sql = getTestDb();
+    const [connection] = await sql`SELECT created_by FROM connections WHERE id = ${seeded.connectionId}`;
+    const workerId = 'synthetic-pinned-credential-device';
+    const [device] = await sql`INSERT INTO device_workers (user_id, worker_id, platform, capabilities, organization_id)
+      VALUES (${connection.created_by}, ${workerId}, 'macos', ${sql.json([])}, ${seeded.orgId}) RETURNING id`;
+    await sql`UPDATE connections SET device_worker_id = ${device.id}::uuid WHERE id = ${seeded.connectionId}`;
+    const pat = await createTestPAT(connection.created_by, seeded.orgId, { scope: 'device_worker:run' });
+    const response = await post('/api/workers/poll', {
+      token: pat.token, body: { worker_id: workerId, platform: 'macos', capabilities: {} },
+    });
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.run_id).toBe(seeded.runId);
+    expect(body.connection_credentials?.DATABASE_URL === seeded.sentinel).toBe(true);
   });
 });
