@@ -22,6 +22,7 @@
 
 import http from "node:http";
 import net from "node:net";
+import { spawn } from "node:child_process";
 import type { Context } from "hono";
 import { completeSyncOnce, WorkerClient } from "@lobu/connector-worker/daemon";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -862,6 +863,159 @@ describe("shutdown ordering (live drain)", () => {
 			expect(events[events.length - 1]).toBe("exit");
 			vi.restoreAllMocks();
 			expect((await import("../lifecycle-state")).isShuttingDown()).toBe(false);
+		},
+		20_000,
+	);
+
+	it(
+		"stops admitting queue work at SIGTERM while active work and HTTP requests drain",
+		async () => {
+			const { RunsQueue } = await import("../gateway/infrastructure/queue/runs-queue");
+			const queue = new RunsQueue();
+			await queue.start();
+			const events: string[] = [];
+			const finishJob = deferred();
+			const finishRequest = deferred();
+			const requestStarted = deferred();
+			const { Hono } = await import("hono");
+			const app = new Hono();
+			app.get("/queue-drain", async (c) => {
+				requestStarted.resolve();
+				await finishRequest.promise;
+				return c.json({ ok: true });
+			});
+			const { port, exited } = await bootLifecycle(app, {}, events, async () => {}, [() => queue.stop()]);
+			const request = fetch(`http://127.0.0.1:${port}/lobu/queue-drain`);
+			const handled: string[] = [];
+			const lane = "internal:shutdown-admission";
+			const survivors: Array<{ child: ReturnType<typeof spawn>; closed: Promise<number | null> }> = [];
+			let firstId = "";
+			try {
+				await requestStarted.promise;
+				firstId = await queue.send(lane, { tag: "active" });
+				await queue.work<{ tag: string }>(lane, async (job) => {
+					handled.push(job.data.tag);
+					if (job.data.tag === "active") await finishJob.promise;
+				});
+				await vi.waitFor(() => expect(handled).toEqual(["active"]));
+				process.emit("SIGTERM");
+				const pendingId = await queue.send(lane, { tag: "after-signal" });
+				const otherId = await queue.send(lane, { tag: "also-after-signal" });
+				finishJob.resolve();
+				const sql = getTestDb();
+				await vi.waitFor(async () => {
+					const [row] = await sql`SELECT status FROM runs WHERE id = ${firstId}`;
+					expect(row.status).toBe("completed");
+				});
+				await new Promise((resolve) => setTimeout(resolve, 250));
+				const [pending] = await sql`SELECT status, attempts, claimed_by FROM runs WHERE id = ${pendingId}`;
+				expect(pending).toMatchObject({ status: "pending", attempts: 0, claimed_by: null });
+				expect(handled).toEqual(["active"]);
+				expect(events).not.toContain("gateway-stopped");
+				// Two other processes keep their own readiness state and consume the
+				// durable work while this process is still draining its HTTP request.
+				const moduleUrl = new URL("../gateway/infrastructure/queue/runs-queue.ts", import.meta.url).href;
+				const script = `
+					const { RunsQueue } = await import(${JSON.stringify(moduleUrl)});
+					const queue = new RunsQueue();
+					await queue.start();
+					const release = new Promise(resolve => process.stdin.once('data', resolve));
+					process.once('SIGTERM', async () => { await queue.stop(); process.exit(0); });
+					await queue.work(${JSON.stringify(lane)}, async () => { await release; });
+				`;
+				for (let i = 0; i < 2; i++) {
+					const child = spawn("bun", ["-e", script], { env: process.env, stdio: ["pipe", "ignore", "ignore"] });
+					const closed = new Promise<number | null>((resolve) => {
+						child.once("error", () => resolve(-1));
+						child.once("exit", resolve);
+					});
+					survivors.push({ child, closed });
+				}
+				await vi.waitFor(async () => {
+					const rows = await sql`SELECT status, claimed_by FROM runs WHERE id IN (${pendingId}, ${otherId})`;
+					expect(rows.map((row) => row.status)).toEqual(["claimed", "claimed"]);
+					expect(new Set(rows.map((row) => row.claimed_by)).size).toBe(2);
+				}, { timeout: 5000 });
+				for (const { child } of survivors) child.stdin?.end("finish");
+				await vi.waitFor(async () => {
+					const rows = await sql`SELECT status, attempts FROM runs WHERE id IN (${pendingId}, ${otherId})`;
+					expect(rows).toHaveLength(2);
+					for (const row of rows) expect(row).toMatchObject({ status: "completed", attempts: 0 });
+				});
+			} finally {
+				for (const { child } of survivors) {
+					if (!child.stdin?.writableEnded) child.stdin?.end("finish");
+					child.kill("SIGTERM");
+				}
+				await Promise.all(survivors.map(({ closed }) => closed));
+				finishJob.resolve();
+				finishRequest.resolve();
+				expect((await request).status).toBe(200);
+				await exited;
+				await queue.stop();
+			}
+		},
+		20_000,
+	);
+
+	it(
+		"hands back a database claim that finishes after SIGTERM without starting its handler",
+		async () => {
+			const { RunsQueue } = await import("../gateway/infrastructure/queue/runs-queue");
+			const queue = new RunsQueue();
+			await queue.start();
+			const events: string[] = [];
+			const { Hono } = await import("hono");
+			const { exited } = await bootLifecycle(new Hono(), { SHUTDOWN_READINESS_DRAIN_MS: "1000" }, events, async () => {}, [() => queue.stop()]);
+			const sql = getTestDb();
+			const locked = deferred();
+			const unlock = deferred();
+			const lockKey = 21137215;
+			const lane = "internal:shutdown-claim-race";
+			const handled: string[] = [];
+			await sql.unsafe(`CREATE FUNCTION test_block_shutdown_claim() RETURNS trigger LANGUAGE plpgsql AS $$
+				BEGIN
+					IF NEW.queue_name = 'internal:shutdown-claim-race' AND NEW.status = 'claimed' THEN
+						PERFORM pg_advisory_xact_lock(21137215);
+					END IF;
+					RETURN NEW;
+				END $$`);
+			await sql.unsafe(`CREATE TRIGGER test_block_shutdown_claim BEFORE UPDATE ON runs
+				FOR EACH ROW EXECUTE FUNCTION test_block_shutdown_claim()`);
+			const heldLock = sql.begin(async (tx) => {
+				await tx`SELECT pg_advisory_xact_lock(${lockKey})`;
+				locked.resolve();
+				await unlock.promise;
+			});
+			try {
+				await locked.promise;
+				const id = await queue.send(lane, { tag: "racing-claim" });
+				await queue.work<{ tag: string }>(lane, async (job) => { handled.push(job.data.tag); });
+				await vi.waitFor(async () => {
+					const [row] = await sql`SELECT count(*)::int AS count FROM pg_locks
+						WHERE locktype = 'advisory' AND objid = ${lockKey}::oid AND NOT granted`;
+					expect(row.count).toBe(1);
+				});
+				process.emit("SIGTERM");
+				unlock.resolve();
+				await heldLock;
+				await vi.waitFor(async () => {
+					const [row] = await sql`SELECT count(*)::int AS count FROM pg_locks
+						WHERE locktype = 'advisory' AND objid = ${lockKey}::oid`;
+					expect(row.count).toBe(0);
+				});
+				await new Promise((resolve) => setTimeout(resolve, 250));
+				const [row] = await sql`SELECT status, attempts, claimed_by FROM runs WHERE id = ${id}`;
+				expect(row).toMatchObject({ status: "pending", attempts: 0, claimed_by: null });
+				expect(handled).toEqual([]);
+			} finally {
+				unlock.resolve();
+				await heldLock;
+				await exited;
+				await queue.stop();
+				await sql.unsafe("DROP TRIGGER test_block_shutdown_claim ON runs");
+				await sql.unsafe("DROP FUNCTION test_block_shutdown_claim()");
+			}
 		},
 		20_000,
 	);
