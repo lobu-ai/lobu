@@ -277,3 +277,22 @@ SELECT id, organization_id, tools_config FROM agents
 UPDATE agents SET tools_config = '{}'::jsonb
  WHERE tools_config IS NOT NULL AND tools_config <> '{}'::jsonb;
 ```
+
+### Dropping `events.linked_org_ids` (after 24.11.0)
+
+24.11.0 made event visibility owner-only and stopped reading and writing
+`events.linked_org_ids`. The release after it drops the column in three
+migrations: `20261115120000` adds the audit constraint without the column's
+term, `20261115120001` validates it, and `20261115120002` drops the column and
+rebuilds `current_event_records`.
+
+Upgrade through 24.11.x before taking the release that contains these
+migrations. They are declared `lobu:no-quiesce`, because 24.11 code does not
+touch the column, so an install that jumps from 24.10 or earlier keeps its old
+pods serving while the column disappears: every event insert from those pods
+fails with `column "linked_org_ids" of relation "events" does not exist` until
+the rollout replaces them, and so do the reads that name the column (opening an
+event by id, record timelines through an identity match, public page previews,
+and every org-wide read when `LOBU_LINKED_ORG_SCOPE` was set). If you cannot
+stop at 24.11, scale the app and worker deployments to zero before the upgrade. Fresh installs replay every migration and need no
+action.
