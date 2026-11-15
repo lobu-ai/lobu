@@ -338,9 +338,10 @@ const feedbackTriage = defineAutomation({
   ],
   // Preparation binds reports by delivery identity. A bounded context source
   // avoids the default all-events arrival source and its timestamp membership.
+  // BYO connection rows use the agentconn- namespace for their stored slug.
   sources: {
     inbox: context(`SELECT id AS connection_id, slug FROM connections
-      WHERE slug = 'product-feedback-inbox' AND connector_key = 'webhook'
+      WHERE slug = 'agentconn-product-feedback-inbox' AND connector_key = 'webhook'
         AND deleted_at IS NULL`),
   },
   prompt: feedbackTriagePrompt,

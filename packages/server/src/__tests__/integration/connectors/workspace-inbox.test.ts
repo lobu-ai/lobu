@@ -2,7 +2,6 @@ import { fileURLToPath } from 'node:url';
 import { readFile } from 'node:fs/promises';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import WorkspaceInboxConnector from '@lobu/connectors/workspace-inbox';
-import WebhookConnector from '@lobu/connectors/webhook';
 import { createIsolateConnectorCompiler } from '@lobu/connector-worker/compile';
 import { executeCompiledConnector } from '@lobu/connector-worker/executor/runtime';
 import { CONNECTOR_HTTP_AUTH_CAPABILITY } from '@lobu/core/contracts/worker/protocol';
@@ -55,6 +54,7 @@ beforeAll(async () => {
 }, 120000);
 beforeEach(async () => { await cleanupTestDatabase(); transport.mockReset(); });
 afterAll(async () => {
+  (await import('../../../lobu/gateway')).__setChatInstanceManagerForTests(null);
   vi.doUnmock('@lobu/connector-worker/egress');
   vi.resetModules();
   await cleanupTestDatabase();
@@ -107,10 +107,34 @@ async function fixture() {
     send_message: { ...action, input_schema: action.inputSchema },
   })} WHERE key = ${declaration.key}`;
   await sql`UPDATE connector_versions SET compiled_code = ${compiled} WHERE connector_key = ${declaration.key}`;
-  await createTestConnectorDefinition({ key: 'webhook', name: 'Inbound webhook', feeds_schema: {}, organization_id: receiver.org.id,
-    automation_events: new WebhookConnector().definition.automationEvents as Array<Record<string, unknown>> });
-  const inbox = await createTestConnection({ organization_id: receiver.org.id, connector_key: 'webhook',
-    slug: 'product-feedback-inbox', created_by: receiver.user.id, createDefaultFeed: false });
+  const { ChatInstanceManager } = await import('../../../gateway/connections/chat-instance-manager');
+  const { createPostgresAgentConnectionStore } = await import('../../../lobu/stores/postgres-stores');
+  const { PostgresSecretStore } = await import('../../../lobu/stores/postgres-secret-store');
+  const { SecretStoreRegistry } = await import('../../../gateway/secrets');
+  const { __setChatInstanceManagerForTests } = await import('../../../lobu/gateway');
+  const { manageConnections } = await import('../../../tools/admin/manage_connections');
+  const connectionStore = createPostgresAgentConnectionStore();
+  const postgresSecretStore = new PostgresSecretStore();
+  const secretStore = new SecretStoreRegistry(postgresSecretStore, { secret: postgresSecretStore });
+  const manager = new ChatInstanceManager();
+  Object.assign(manager, {
+    services: { getPublicGatewayUrl: () => '', getSecretStore: () => secretStore,
+      getConnectionStore: () => connectionStore,
+      getAutomationSubscriptionService: () => ({ resolveForConnection: async () => null }),
+      getCommandRegistry: () => undefined },
+    publicGatewayUrl: '', connectionStore,
+  });
+  __setChatInstanceManagerForTests(manager);
+  const installed = await manageConnections({ action: 'install_connector', connector_id: 'webhook' }, TEST_ENV, receiver.ctx);
+  expect('error' in installed ? installed.error : undefined).toBeUndefined();
+  const createdInbox = await manageConnections({ action: 'create', connector_key: 'webhook',
+    slug: 'product-feedback-inbox', config: { token: TOKEN, semanticType: 'product.feedback', titlePath: '/subject' } }, TEST_ENV, receiver.ctx);
+  if (!('connection' in createdInbox)) throw new Error(JSON.stringify(createdInbox));
+  const inbox = createdInbox.connection as { id: number; slug: string };
+  const triageSource = teamConfig.automations!.find((automation) => automation.slug === 'product-feedback-triage')!.sources!.inbox;
+  const sourceQuery = typeof triageSource === 'string' ? triageSource : triageSource.query;
+  const sourceRows = await sdkModule.buildClientSDK(receiver.ctx, TEST_ENV).query(sourceQuery);
+  expect(sourceRows).toMatchObject([{ connection_id: Number(inbox.id), slug: inbox.slug }]);
   const sending = await createTestConnection({ organization_id: sender.org.id, connector_key: declaration.key,
     created_by: sender.user.id, config: { inbox_url: URL }, createDefaultFeed: false });
   const profile = await profiles.createAuthProfile({
