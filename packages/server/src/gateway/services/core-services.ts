@@ -312,7 +312,7 @@ export class CoreServices {
 					pendingInteractions >
 				0
 			) {
-				logger.debug("Ephemeral table sweeper deleted expired rows");
+				logger.debug("Ephemeral table sweeper processed expired rows");
 			}
 		} catch (error) {
 			logger.warn(

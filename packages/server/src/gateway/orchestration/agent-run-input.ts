@@ -173,8 +173,8 @@ export async function listPendingAgentRunInputs(
   deploymentName: string,
 ): Promise<PendingAgentRunInput[]> {
   const sql = getDb();
-  // The replay exists to restore turns whose QUEUE ROW is gone (expired-pending
-  // cleanup deletes jobs a disconnected worker never claimed). A surviving row
+  // Replay restores turns with a missing or failed delivery row. Expiry now
+  // retains a failed row; older cleanup could delete it. A live receipt
   // means the queue still owns the turn: pending/claimed is the original job
   // awaiting delivery or a dispatch-gate deferral retry, completed is a
   // delivered turn the (reconnecting) worker is already running. Re-sending

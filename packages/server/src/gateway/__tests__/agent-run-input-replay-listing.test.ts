@@ -2,8 +2,8 @@
  * `listPendingAgentRunInputs` against real rows: which turns does a
  * reconnecting worker's `registerWorker` replay re-enqueue?
  *
- * The replay exists to restore turns whose queue row was expired-and-deleted
- * while the worker was offline. Any surviving row — the original job pending a
+ * Replay restores missing delivery rows and failed delivery attempts while
+ * the worker was offline. Any live receipt — the original job pending a
  * dispatch-gate deferral retry, the gate's own claimed job held across a
  * recycle, or a completed delivery receipt for a turn the reconnecting worker
  * is still running — means the queue owns the turn, and replaying over it

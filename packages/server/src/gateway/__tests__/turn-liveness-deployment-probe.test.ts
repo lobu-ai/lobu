@@ -264,7 +264,7 @@ describe("hasOlderQueuedTurn (FIFO fence)", () => {
 
   test("an expired earlier sibling does not fence", async () => {
     // An expired row will never be claimed again — the expired-pending cleanup
-    // deletes it and the durable-input replay re-enqueues its turn. Counting
+    // retains it as failed and live-marker replay can re-enqueue it. Counting
     // it would fence every later turn on the lane forever.
     await seedThreadJob({
       messageId: "m-A",
@@ -296,7 +296,7 @@ describe("hasOlderQueuedTurn (FIFO fence)", () => {
   });
 
   test("a replayed input (higher priority) fences even with a larger id", async () => {
-    // registerWorker re-enqueues expired-then-deleted turns at priority 10 —
+    // registerWorker re-enqueues replay-eligible failed/missing turns at priority 10 —
     // OLDER turns under a new, larger id. claimOne ranks priority first, so
     // the fence must too, or the replay-first ordering inverts.
     const me = await seedThreadJob({ messageId: "m-B", status: "claimed" });
