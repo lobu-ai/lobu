@@ -120,6 +120,9 @@ describe("account security through Better Auth HTTP", () => {
 	});
 
 	it("applies the account limit across client IPs and rejects unavailable shared enforcement", async () => {
+		// All eleven requests must belong to one fixed window, even when CI
+		// starts this test immediately before the minute rolls over.
+		vi.spyOn(Date, "now").mockReturnValue(Date.now());
 		const auth = await createAuth(getEnvFromProcess());
 		for (let attempt = 0; attempt < 11; attempt++) {
 			const result = await new Browser(auth, `192.0.2.${attempt + 1}`).request("/sign-in/email", { email: "unknown@example.test", password });
