@@ -9,8 +9,8 @@
 -- the validated replacement takes over the constraint's name.
 --
 -- The view is rebuilt because CREATE OR REPLACE VIEW cannot remove a column.
--- Grants on it are read before the drop and reapplied, so roles granted
--- outside the migrations keep their access.
+-- Table and surviving column grants, including grant options, are read before
+-- the drop and reapplied, so roles granted outside the migrations keep access.
 --
 -- OPERATIONAL COST: catalog-only, no row rewrite. ACCESS EXCLUSIVE on events
 -- and the view until the transaction commits, bounded by the 5s lock wait. Not
@@ -23,14 +23,31 @@ DECLARE
   stmt text;
 BEGIN
   SELECT COALESCE(array_agg(format(
-           'GRANT %s ON public.current_event_records TO %s',
+           'GRANT %s ON public.current_event_records TO %s%s',
            acl.privilege_type,
            CASE WHEN acl.grantee = 0 THEN 'PUBLIC'
-                ELSE quote_ident(pg_get_userbyid(acl.grantee)) END)), '{}')
+                ELSE quote_ident(pg_get_userbyid(acl.grantee)) END,
+           CASE WHEN acl.is_grantable THEN ' WITH GRANT OPTION' ELSE '' END)), '{}')
     INTO regrants
     FROM pg_class c
    CROSS JOIN LATERAL aclexplode(c.relacl) acl
    WHERE c.oid = to_regclass('public.current_event_records')
+     AND acl.grantee <> c.relowner;
+
+  SELECT regrants || COALESCE(array_agg(format(
+           'GRANT %s (%I) ON public.current_event_records TO %s%s',
+           acl.privilege_type,
+           a.attname,
+           CASE WHEN acl.grantee = 0 THEN 'PUBLIC'
+                ELSE quote_ident(pg_get_userbyid(acl.grantee)) END,
+           CASE WHEN acl.is_grantable THEN ' WITH GRANT OPTION' ELSE '' END)), '{}')
+    INTO regrants
+    FROM pg_class c
+    JOIN pg_attribute a ON a.attrelid = c.oid
+   CROSS JOIN LATERAL aclexplode(a.attacl) acl
+   WHERE c.oid = to_regclass('public.current_event_records')
+     AND a.attnum > 0 AND NOT a.attisdropped
+     AND a.attname <> 'linked_org_ids'
      AND acl.grantee <> c.relowner;
 
   DROP VIEW IF EXISTS public.current_event_records;

@@ -34,6 +34,7 @@ const actorMigration = "20260907183000_mcp_activity_actor_identity.sql";
 const contractMigration = "20260622310000_drop_classifier_version_id.sql";
 const retirementMigration =
   "20261009015900_retire_remaining_physical_merges.sql";
+const bridgeDropMigration = "20261115120002_drop_events_linked_org_ids.sql";
 
 function sqlFiles(dir) {
   return readdirSync(dir)
@@ -400,6 +401,101 @@ test("every precondition sidecar passes on the previous release's schema with no
   assert.equal(f.check().status, 3);
 });
 
+test("dropping the event bridge preserves surviving view privileges and grant options", async (t) => {
+  const f = await fixture(t);
+  copyHeadMigrations(f, (file) => file < bridgeDropMigration);
+  const boundary = f.migrate();
+  assert.equal(boundary.status, 0, boundary.output);
+
+  const suffix = randomUUID().replaceAll("-", "");
+  const columnReader = `migration_column_${suffix}`;
+  const tableReader = `migration_table_${suffix}`;
+  const delegate = `migration_delegate_${suffix}`;
+  t.after(async () => {
+    for (const role of [columnReader, tableReader, delegate]) {
+      await admin.unsafe(`DROP ROLE IF EXISTS ${role}`);
+    }
+  });
+  await f.sql.unsafe(`
+    CREATE ROLE ${columnReader};
+    CREATE ROLE ${tableReader};
+    CREATE ROLE ${delegate};
+    GRANT SELECT ON public.events TO ${columnReader};
+    GRANT SELECT (id) ON public.current_event_records TO ${columnReader} WITH GRANT OPTION;
+    GRANT UPDATE (title), SELECT (linked_org_ids) ON public.current_event_records TO ${columnReader};
+    GRANT SELECT (origin_id) ON public.current_event_records TO PUBLIC;
+    GRANT SELECT ON public.current_event_records TO ${tableReader} WITH GRANT OPTION;
+  `);
+  const grants = async () =>
+    Array.from(
+      await f.sql`
+    SELECT NULL::text AS column_name, acl.grantee, acl.privilege_type, acl.is_grantable
+      FROM pg_class c
+      CROSS JOIN LATERAL aclexplode(c.relacl) acl
+     WHERE c.oid = 'public.current_event_records'::regclass
+       AND acl.grantee <> c.relowner
+    UNION ALL
+    SELECT a.attname::text, acl.grantee, acl.privilege_type, acl.is_grantable
+      FROM pg_class c
+      JOIN pg_attribute a ON a.attrelid = c.oid
+      CROSS JOIN LATERAL aclexplode(a.attacl) acl
+     WHERE c.oid = 'public.current_event_records'::regclass
+       AND a.attnum > 0 AND NOT a.attisdropped
+       AND a.attname <> 'linked_org_ids'
+       AND acl.grantee <> c.relowner
+    ORDER BY column_name NULLS FIRST, grantee, privilege_type, is_grantable
+  `
+    );
+  const grantsBefore = await grants();
+  copyHeadMigrations(f);
+  const upgraded = f.upgrade();
+  assert.equal(upgraded.status, 0, upgraded.output);
+  assert.deepEqual(await grants(), grantsBefore);
+  assert.deepEqual(
+    Array.from(
+      await f.sql`SELECT column_name FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name IN ('events', 'current_event_records')
+        AND column_name = 'linked_org_ids'`
+    ),
+    []
+  );
+  await f.sql.begin(async (tx) => {
+    await tx.unsafe(`SET LOCAL ROLE ${columnReader}`);
+    await tx`SELECT id, origin_id FROM public.current_event_records LIMIT 0`;
+    await tx.unsafe(
+      `GRANT SELECT (id) ON public.current_event_records TO ${delegate}`
+    );
+  });
+  assert.deepEqual(
+    Array.from(
+      await f.sql`SELECT
+      has_column_privilege(${delegate}, 'public.current_event_records', 'id', 'SELECT') AS id,
+      has_table_privilege(${delegate}, 'public.current_event_records', 'SELECT') AS whole_table`
+    ),
+    [{ id: true, whole_table: false }]
+  );
+  await assert.rejects(
+    f.sql.begin(async (tx) => {
+      await tx.unsafe(`SET LOCAL ROLE ${columnReader}`);
+      await tx`SELECT payload_text FROM public.current_event_records LIMIT 0`;
+    }),
+    { code: "42501" }
+  );
+  await f.sql.begin(async (tx) => {
+    await tx.unsafe(`SET LOCAL ROLE ${tableReader}`);
+    await tx.unsafe(
+      `GRANT SELECT ON public.current_event_records TO ${delegate}`
+    );
+  });
+  assert.equal(
+    (
+      await f.sql`SELECT has_table_privilege(${delegate}, 'public.current_event_records', 'SELECT') AS allowed`
+    )[0].allowed,
+    true
+  );
+});
+
 test("a physical merge left in the database is retired onto its survivor during the upgrade", async (t) => {
   const f = await fixture(t);
   // The schema exactly as the retirement migration finds it: head's history up
@@ -536,7 +632,11 @@ test("a physical merge left in the database is retired onto its survivor during 
   const upgraded = f.upgrade();
   assert.equal(upgraded.status, 0, upgraded.output);
   assert.deepEqual(await snapshot(), expected);
-  assert.deepEqual(await otherEventColumns(), eventsBefore);
+  // The bridge column is intentionally retired; all surviving values stay intact.
+  assert.deepEqual(
+    await otherEventColumns(),
+    eventsBefore.map(({ linked_org_ids, ...rest }) => rest)
+  );
   assert.deepEqual(
     await rows(f.sql`SELECT EXISTS (SELECT 1 FROM information_schema.columns
       WHERE table_name = 'entities' AND column_name = 'merged_into') AS redirect_column`),
