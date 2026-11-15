@@ -50,7 +50,7 @@ const HTTP_HEADER_PATHS = [
 
 function censorHttpHeader(value: unknown, path: string[]): unknown {
   const headerName = path[path.length - 1];
-  return isSecretKey(headerName) || SIGNATURE_HTTP_HEADER_NAME_PATTERN.test(headerName)
+  return isSecretKey(headerName) || headerName.toLowerCase() === 'x-captcha-response' || SIGNATURE_HTTP_HEADER_NAME_PATTERN.test(headerName)
     ? '[redacted]'
     : value;
 }
