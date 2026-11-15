@@ -1831,7 +1831,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
   }
 
   // Credential delivery:
-  //  - trusted/anonymous fleet workers always resolve connection credentials;
+  //  - fleet workers receive only gateway-proxied auth or per-run access tokens;
   //  - a user-scoped device worker only gets real credentials when the run's
   //    connection is *explicitly pinned to a device* (connections.device_worker_id),
   //    which was authorized at bind time. A device connector reached via the
@@ -1842,8 +1842,8 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
   // token, and it stops at the worker HOST: the isolate lane replaces it with a
   // per-run placeholder before connector code sees it and swaps the value back
   // into the request header at `fetch`. The other secret-bearing fields below
-  // (`connection_credentials`, `previous_credentials`) still travel resolved
-  // and reach connector code as-is.
+  // (`connection_credentials`, `session_state`, `previous_credentials`) reach
+  // connector code as-is, so they are restricted to explicitly pinned devices.
   const connectionIsDevicePinned = row.connection_device_worker_id != null;
   const deliverConnectionAuth =
     !isDeviceOwnedRun && !!row.connection_id && (!isUserScopedWorker || connectionIsDevicePinned);
@@ -1895,6 +1895,23 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
     Object.keys(resolvedPreviousCredentials).length > 0
       ? resolvedPreviousCredentials
       : undefined;
+
+  // Resolving auth can observe a newer profile than the claim query. Enforce
+  // this on the actual envelope, before any secret-bearing field is serialized.
+  // Public connection/feed config and the host-concealed access token remain
+  // usable by fleet workers; durable credentials require a gateway proxy or
+  // the already-authorized owner-device lane.
+  if (!isUserScopedWorker && (
+    Object.keys(connectionCredentials).length > 0 ||
+    (sessionState != null && Object.keys(sessionState).length > 0) ||
+    previousCredentials != null
+  )) {
+    const message = 'Run requires gateway-proxied authentication or an explicitly pinned owner device';
+    await failClaimedWorkerRun({
+      runId: row.run_id, workerId: worker_id, errorMessage: message, chargeSyncFeed: true,
+    });
+    return c.json({ ...pollMetadata, next_poll_seconds: 1, skipped_run_id: row.run_id, error: message });
+  }
 
   let selectedActionInput = row.approved_input ?? row.action_input ?? undefined;
   if (row.run_type === 'action' && selectedActionInput) {
