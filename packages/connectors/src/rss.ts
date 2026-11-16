@@ -10,9 +10,12 @@
  */
 
 import {
+  assertNoMatch,
+  assertNoOffsetPaging,
   assertNoQuery,
+  assertNoSort,
+  assertNoWindow,
   assertPositiveReadLimit,
-  assertSnapshotSourceRead,
   type RuntimeConnectorDefinition,
   ConnectorRuntime,
   type EventEnvelope,
@@ -211,28 +214,39 @@ export default class RSSConnector extends ConnectorRuntime {
 
   /**
    * Live snapshot of what the configured feeds list right now. Unlike sync,
-   * nothing is dropped for having been seen before, so an item that stays on a
-   * ranking feed for days appears in every read. Fails closed when any feed
-   * URL fails: a snapshot missing one feed is not the current contents.
+   * nothing is dropped for having been seen before and no sync item cap
+   * applies, so an item that stays on a ranking feed for days appears in every
+   * read. Fails closed when any feed URL fails: a snapshot missing one feed is
+   * not the current contents.
+   *
+   * Pages continue with a connector cursor carrying the next position and a
+   * fingerprint of the item list. Every page refetches the feed, so a feed that
+   * changed between pages fails the read instead of mixing two editions.
    */
   private async readFeed(ctx: FeedReadContext): Promise<FeedReadResult> {
-    assertSnapshotSourceRead(ctx, 'RSS');
-    assertNoQuery(ctx, 'RSS source reads return the whole current feed and do not support queries');
+    const unsupported =
+      'RSS source reads return the whole current feed in document order; they do not support';
+    assertNoQuery(ctx, `${unsupported} queries`);
+    assertNoSort(ctx, `${unsupported} sorting`);
+    assertNoWindow(ctx, `${unsupported} time windows`);
+    assertNoMatch(ctx, `${unsupported} exact-match filters`);
+    assertNoOffsetPaging(ctx, `${unsupported} offsets; continue with the returned cursor`);
     assertPositiveReadLimit(ctx);
 
     const config = ctx.config as unknown as RSSConfig;
     const feedUrls = this.requireFeedUrls(config);
-    const { items, fetchErrors } = await this.fetchFeeds(
-      feedUrls,
-      config.max_items_per_feed ?? 100
-    );
+    const { items, fetchErrors } = await this.fetchFeeds(feedUrls, Number.POSITIVE_INFINITY);
     if (fetchErrors.length > 0) {
       throw new Error(
         `${fetchErrors.length} of ${feedUrls.length} feed URL(s) failed to fetch: ${this.describeErrors(fetchErrors)}`
       );
     }
 
-    const rows = items.slice(0, ctx.limit ?? items.length).map((item) => ({
+    const fingerprint = this.hashString(items.map((item) => item.id).join('\n'));
+    const start = ctx.cursor ? this.decodeReadCursor(ctx.cursor, fingerprint) : 0;
+    const end = Math.min(items.length, start + (ctx.limit ?? items.length));
+
+    const rows = items.slice(start, end).map((item) => ({
       id: item.id,
       title: item.title,
       link: item.link || null,
@@ -258,8 +272,21 @@ export default class RSSConnector extends ConnectorRuntime {
         { name: 'feed_published_at', type: 'timestamp' },
       ],
       total: items.length,
-      hasMore: rows.length < items.length,
+      ...(end < items.length ? { nextCursor: `${end}.${fingerprint}` } : { hasMore: false }),
     };
+  }
+
+  /** Resume position from a read cursor; rejects a cursor from another edition. */
+  private decodeReadCursor(cursor: string, fingerprint: string): number {
+    const separator = cursor.indexOf('.');
+    const position = Number(cursor.slice(0, separator));
+    if (separator < 1 || !Number.isSafeInteger(position) || position < 1) {
+      throw new Error('Invalid RSS read cursor');
+    }
+    if (cursor.slice(separator + 1) !== fingerprint) {
+      throw new Error('The feed changed since the previous page; restart the read from the first page');
+    }
+    return position;
   }
 
   private requireFeedUrls(config: RSSConfig): string[] {
