@@ -1,5 +1,5 @@
 /**
- * bun examples/common-crawl-market/scripts/benchmark.ts <companies.json> <report.json>
+ * bun examples/common-crawl-market/scripts/benchmark.ts <companies.json> <report.json> [--index-files]
  * Input: CrawlConfig["company"][], exported by a bounded read-only Market lookup.
  * No defaults containing live records. Output stays local; never calls a Lobu write API.
  * One ZipNum block/page, at most two pages per domain/crawl, six companies maximum.
@@ -7,7 +7,7 @@
  */
 import { writeFile, rename } from "node:fs/promises";
 import { resolve } from "node:path";
-import { file } from "bun";
+import { file, sleep } from "bun";
 import CommonCrawlConnector, {
   compareCaptures,
   type CrawlCheckpoint,
@@ -15,7 +15,9 @@ import CommonCrawlConnector, {
 } from "../common-crawl.connector";
 import type { EventEnvelope } from "@lobu/connector-sdk";
 
-const [input, output] = process.argv.slice(2);
+const [input, output, mode] = process.argv.slice(2);
+if (mode !== undefined && mode !== "--index-files")
+  throw new Error("Unknown benchmark mode");
 if (!input || !output || resolve(input) === resolve(output)) {
   throw new Error(
     "Usage: benchmark.ts <companies.json> <distinct-report.json>"
@@ -39,6 +41,7 @@ const samples: Array<{
   completed_rerun_events?: number;
   requests: Array<{
     url: string;
+    range?: string;
     status?: number;
     elapsed_ms: number;
     response_headers_ms?: number;
@@ -67,8 +70,17 @@ const save = async () => {
 };
 for (const company of companies) {
   for (const crawl of crawls) {
-    const config = { company, crawl };
-    const recorded = new Map<string, { status: number; text: string }>();
+    const config: CrawlConfig = {
+      company,
+      crawl,
+      ...(mode ? { index_access: "files" } : {}),
+    };
+    const recorded = new Map<
+      string,
+      { status: number; bytes: Uint8Array; headers: Headers }
+    >();
+    const requestKey = (url: string, init?: RequestInit) =>
+      `${url}\n${new Headers(init?.headers).get("Range") ?? ""}`;
     const sample: (typeof samples)[number] = {
       config,
       elapsed_ms: 0,
@@ -81,9 +93,12 @@ for (const company of companies) {
     const fetcher = async (url: string, init?: RequestInit) => {
       const start = performance.now();
       try {
+        // Space serial reads of the public index; replay never touches the provider.
+        if (sample.requests.length) await sleep(1000);
         const res = await fetch(url, init);
         const request = {
           url,
+          range: new Headers(init?.headers).get("Range") ?? undefined,
           status: res.status,
           elapsed_ms: performance.now() - start,
           response_headers_ms: performance.now() - start,
@@ -111,14 +126,15 @@ for (const company of companies) {
                 data.set(chunk, offset);
                 offset += chunk.length;
               }
-              recorded.set(url, {
+              recorded.set(requestKey(url, init), {
                 status: res.status,
-                text: new TextDecoder().decode(data),
+                bytes: data,
+                headers: res.headers,
               });
             },
           })
         );
-        return new Response(body, { status: res.status });
+        return new Response(body, { status: res.status, headers: res.headers });
       } catch (error) {
         sample.requests.push({
           url,
@@ -154,11 +170,14 @@ for (const company of companies) {
     const replayStarted = performance.now();
     try {
       // Run the same source pages through the real ConnectorRuntime entrypoint again.
-      const replay = new CommonCrawlConnector(async (url) => {
-        const response = recorded.get(url);
+      const replay = new CommonCrawlConnector(async (url, init) => {
+        const response = recorded.get(requestKey(url, init));
         if (!response)
           throw new Error("Replay requested an unrecorded source page");
-        return new Response(response.text, { status: response.status });
+        return new Response(new Uint8Array(response.bytes), {
+          status: response.status,
+          headers: response.headers,
+        });
       });
       const replayed: EventEnvelope[] = [];
       let checkpoint: CrawlCheckpoint | null = null;
@@ -212,11 +231,6 @@ for (const company of companies) {
       sample.error = String(error);
     }
     sample.replay_ms = performance.now() - replayStarted;
-    for (const request of sample.requests) {
-      const response = recorded.get(request.url);
-      if (response)
-        request.bytes = new TextEncoder().encode(response.text).length;
-    }
     console.log(
       JSON.stringify({
         domain: company.domain,

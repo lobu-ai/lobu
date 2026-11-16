@@ -1,4 +1,5 @@
 import type { Context } from "hono";
+import { gzipSync } from "node:zlib";
 import { beforeEach, expect, it } from "vitest";
 import type { Env } from "../../../packages/server/src/index";
 import { streamContent } from "../../../packages/server/src/worker-api";
@@ -41,7 +42,7 @@ it("stores replayed and incremental capture observations through the worker entr
   };
   let failFirstPage = true;
   let paginationUnavailable = false;
-  const connector = new CommonCrawlConnector(async (input) => {
+  let connector = new CommonCrawlConnector(async (input) => {
     const url = new URL(input);
     if (
       config.company.domain === "empty.example" ||
@@ -147,4 +148,56 @@ it("stores replayed and incremental capture observations through the worker entr
   expect(emptyCrawl.checkpoint).toMatchObject({ pages: 0, next_page: 0 });
   await sync(emptyCrawl.checkpoint);
   expect(await stored()).toEqual(rows); // no-captures never removes earlier evidence
+  // Switch source access through the same worker ingestion entrypoint. The
+  // observation identity and payload must not depend on how CDX was retrieved.
+  config.company.domain = "example.com";
+  config.crawl = "CC-MAIN-2026-43";
+  config.index_access = "files";
+  const body = gzipSync(
+    `com,example)/ 20261006120000 ${JSON.stringify({
+      url: "http://example.com:8080/",
+      status: "200",
+      mime: "text/html",
+      digest: "SYNTHETIC",
+      filename: `crawl-data/${config.crawl}/segments/synthetic/warc/part.warc.gz`,
+      offset: "100",
+      length: "456",
+    })}\n`
+  );
+  const index = new TextEncoder().encode(
+    `com,example)/ 20261006120000\tcdx-00000.gz\t0\t${body.length}\t1\n`
+  );
+  let failBlock = true;
+  connector = new CommonCrawlConnector(async (input, init) => {
+    const data = input.endsWith("cluster.idx") ? index : body;
+    if (data === body && failBlock)
+      return new Response("unavailable", { status: 503 });
+    const match = new Headers(init?.headers)
+      .get("Range")!
+      .match(/^bytes=(\d+)-(\d+)$/)!;
+    const start = Number(match[1]),
+      end = Math.min(Number(match[2]), data.length - 1);
+    return new Response(data.slice(start, end + 1), {
+      status: 206,
+      headers: { "Content-Range": `bytes ${start}-${end}/${data.length}` },
+    });
+  });
+  await expect(sync(null)).rejects.toThrow("range HTTP 503");
+  const [filePlan] =
+    await sql`SELECT checkpoint FROM feeds WHERE id = ${feed.id}`;
+  expect(filePlan.checkpoint).toMatchObject({
+    pages: 1,
+    next_page: 0,
+    blocks: [{ file: "cdx-00000.gz" }],
+  });
+  expect(await stored()).toEqual(rows);
+  failBlock = false;
+  await sync(filePlan.checkpoint);
+  expect(await stored()).toEqual(rows);
+  const [fileComplete] =
+    await sql`SELECT checkpoint FROM feeds WHERE id = ${feed.id}`;
+  expect(fileComplete.checkpoint.next_page).toBe(1);
+  await sync(null); // same captures via a fresh file lookup do not supersede API evidence
+  await sync(fileComplete.checkpoint);
+  expect(await stored()).toEqual(rows);
 });

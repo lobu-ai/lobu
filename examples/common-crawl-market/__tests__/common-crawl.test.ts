@@ -445,3 +445,231 @@ describe("Common Crawl feed spike", () => {
     );
   });
 });
+
+function fileSource(
+  blocks: ReturnType<typeof capture>[][],
+  transform: (bytes: Uint8Array) => Uint8Array = (x) => x
+) {
+  const bodies = new Map<string, Uint8Array>();
+  const entries: string[] = [];
+  blocks.forEach((rows, i) => {
+    const name = `cdx-${String(i).padStart(5, "0")}.gz`;
+    const body = transform(
+      Bun.gzipSync(
+        rows
+          .map(
+            ({ urlkey, timestamp, ...row }) =>
+              `${urlkey} ${timestamp} ${JSON.stringify(row)}\n`
+          )
+          .join("")
+      )
+    );
+    bodies.set(name, body);
+    entries.push(
+      `${rows[0]!.urlkey} ${rows[0]!.timestamp}\t${name}\t0\t${body.length}\t${i + 1}\n`
+    );
+  });
+  bodies.set("cluster.idx", new TextEncoder().encode(entries.join("")));
+  return async (input: string, init?: RequestInit) => {
+    const body = bodies.get(new URL(input).pathname.split("/").at(-1)!);
+    if (!body)
+      return new Response("Query service unavailable", { status: 504 });
+    const range = new Headers(init?.headers)
+      .get("Range")
+      ?.match(/^bytes=(\d+)-(\d+)$/);
+    if (!range) throw new Error("Expected bounded range");
+    const start = Number(range[1]),
+      end = Math.min(Number(range[2]), body.length - 1);
+    return new Response(body.slice(start, end + 1), {
+      status: 206,
+      headers: { "Content-Range": `bytes ${start}-${end}/${body.length}` },
+    });
+  };
+}
+
+describe("direct index file mode", () => {
+  const files = { ...config, index_access: "files" as const };
+  test("recovers through range reads, keeps API identities and resumes one block at a time", async () => {
+    const rows = [
+      capture(),
+      capture({
+        url: "https://a_b.example.com:8443/",
+        urlkey: "com,example,a_b:8443)/",
+        offset: "789",
+      }),
+    ];
+    const connector = new CommonCrawlConnector(
+      fileSource([
+        [
+          capture({
+            urlkey: "com,aaa)/",
+            url: "https://aaa.com/",
+            offset: "1",
+          }),
+          rows[0]!,
+        ],
+        [rows[1]!],
+        [
+          capture({
+            urlkey: "com,zzz)/",
+            url: "https://zzz.com/",
+            offset: "2",
+          }),
+        ],
+      ])
+    );
+    const first = await run(connector, null, files);
+    expect(first.status).toBe("more");
+    const second = await run(connector, first.checkpoint, files);
+    expect(second.status).toBe("complete");
+    const api = await run(new CommonCrawlConnector(source([rows])));
+    expect([...first.events, ...second.events]).toEqual(api.events);
+    expect((await run(connector, second.checkpoint, files)).events).toEqual([]);
+    expect((await run(connector, null, files)).events).toEqual(first.events);
+  });
+  test("plans normalized SURT hosts but matches only the original company hostname", async () => {
+    const rows = [
+      capture({ url: "https://www2.example.com/" }),
+      capture({ url: "https://example.com/", offset: "2" }),
+    ];
+    const result = await run(
+      new CommonCrawlConnector(
+        fileSource([
+          rows,
+          [
+            capture({
+              urlkey: "com,example,blog)/",
+              url: "https://blog.example.com/",
+              offset: "3",
+            }),
+          ],
+          [
+            capture({
+              urlkey: "com,zzz)/",
+              url: "https://zzz.com/",
+              offset: "4",
+            }),
+          ],
+        ])
+      ),
+      null,
+      { ...files, company: { ...config.company, domain: "www2.example.com" } }
+    );
+    expect(result.events.map((e) => e.source_url)).toEqual([
+      "https://www2.example.com/",
+    ]);
+  });
+  test("unrelated large index blocks do not prevent a bounded company read", async () => {
+    const fetcher = fileSource([
+      [capture()],
+      [capture({ urlkey: "com,zzz)/", url: "https://zzz.com/" })],
+    ]);
+    const result = await run(
+      new CommonCrawlConnector(async (input, init) => {
+        const r = await fetcher(input, init);
+        if (!input.endsWith("cluster.idx")) return r;
+        const body = (await r.text()).replace(
+          /(cdx-00001.gz\t0\t)\d+/,
+          "$11229550"
+        );
+        const bytes = new TextEncoder().encode(body);
+        return new Response(bytes, {
+          status: 206,
+          headers: {
+            "Content-Range": `bytes 0-${bytes.length - 1}/${bytes.length}`,
+          },
+        });
+      }),
+      null,
+      files
+    );
+    expect(result.events.length).toBe(1);
+  });
+  test("binary-searches a large secondary index and covers first, last and absent domains", async () => {
+    const blocks = Array.from({ length: 400 }, (_, i) => [
+      capture({
+        urlkey: `com,d${String(i).padStart(3, "0")})/`,
+        url: `https://d${String(i).padStart(3, "0")}.com/`,
+        offset: String(i),
+      }),
+    ]);
+    for (const domain of [
+      "d000.com",
+      "d199.com",
+      "d399.com",
+      "absent.com",
+      "zzzz.com",
+    ]) {
+      const result = await run(
+        new CommonCrawlConnector(fileSource(blocks)),
+        null,
+        { ...files, company: { ...config.company, domain } }
+      );
+      const events = [...result.events];
+      if (result.status === "more")
+        events.push(
+          ...(
+            await run(
+              new CommonCrawlConnector(fileSource(blocks)),
+              result.checkpoint,
+              { ...files, company: { ...config.company, domain } }
+            )
+          ).events
+        );
+      expect(events.length).toBe(domain.startsWith("d") ? 1 : 0);
+    }
+  });
+  test("rejects oversized expansion, concatenated gzip and malformed CDXJ blocks", async () => {
+    for (const transform of [
+      (_: Uint8Array) => Bun.gzipSync("x".repeat(8 * 1024 * 1024 + 1)),
+      (b: Uint8Array) => new Uint8Array([...b, ...b]),
+      (_: Uint8Array) => Bun.gzipSync("invalid CDXJ\n"),
+      (b: Uint8Array) =>
+        Bun.gzipSync(new TextDecoder().decode(Bun.gunzipSync(b)).trimEnd()),
+    ])
+      await expect(
+        run(
+          new CommonCrawlConnector(fileSource([[capture()]], transform)),
+          null,
+          files
+        )
+      ).rejects.toThrow();
+  });
+  test("rejects unbounded, shifted, truncated and corrupt range responses without capture commits", async () => {
+    for (const corrupt of ["status", "range", "truncate", "gzip"]) {
+      const fetcher = fileSource([[capture()]]);
+      let collected = 0;
+      const connector = new CommonCrawlConnector(async (input, init) => {
+        const res = await fetcher(input, init);
+        if (corrupt === "status")
+          return new Response("whole file", { status: 200 });
+        if (corrupt === "range")
+          return new Response(await res.arrayBuffer(), {
+            status: 206,
+            headers: { "Content-Range": "bytes 1-2/3" },
+          });
+        if (corrupt === "truncate")
+          return new Response("x", { status: 206, headers: res.headers });
+        if (input.endsWith(".gz")) {
+          const bytes = new Uint8Array(await res.arrayBuffer());
+          bytes[bytes.length - 8] ^= 1;
+          return new Response(bytes, { status: 206, headers: res.headers });
+        }
+        return res;
+      });
+      await expect(
+        connector.sync({
+          feedKey: "captures",
+          config: files,
+          checkpoint: null,
+          credentials: null,
+          entityIds: [],
+          commit: async (events) => {
+            collected += events.length;
+          },
+        })
+      ).rejects.toThrow();
+      expect(collected).toBe(0);
+    }
+  });
+});
