@@ -20,7 +20,8 @@ import {
   createTestUser,
 } from '../../setup/test-fixtures';
 import { TestApiClient } from '../../setup/test-mcp-client';
-import { cleanupTestDatabase } from '../../setup/test-db';
+import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
+import { ensureMemberEntityType } from '../../../utils/member-entity-type';
 import { post } from '../../setup/test-helpers';
 
 interface ListedEntity {
@@ -261,5 +262,150 @@ describe('entity list parent filter over HTTP', () => {
     const foreign = await list({ parent_id: foreignParentId });
     expect(foreign.metadata?.total_count).toBe(0);
     expect(foreign.entities).toEqual([]);
+  });
+});
+
+describe('entity list sort by a declared metadata field', () => {
+  let orgSlug: string;
+  let ownerCookie: string;
+  let memberCookie: string;
+  const ids: Record<string, number> = {};
+
+  beforeAll(async () => {
+    await cleanupTestDatabase();
+    const org = await createTestOrganization({ name: 'EntityMetadataSort Org' });
+    orgSlug = org.slug;
+    const ownerUser = await createTestUser({ email: 'metadata-sort-owner@test.example.com' });
+    const memberUser = await createTestUser({ email: 'metadata-sort-member@test.example.com' });
+    await addUserToOrganization(ownerUser.id, org.id, 'owner');
+    await addUserToOrganization(memberUser.id, org.id, 'member');
+    ownerCookie = (await createTestSession(ownerUser.id)).cookieHeader;
+    memberCookie = (await createTestSession(memberUser.id)).cookieHeader;
+    const owner = await TestApiClient.for({ organizationId: org.id, userId: ownerUser.id, memberRole: 'owner' });
+
+    await owner.entity_schema.createType({
+      slug: 'synthetic-ticket',
+      name: 'Synthetic ticket',
+      metadata_schema: {
+        type: 'object',
+        properties: {
+          due_at: { type: 'string', format: 'date-time' },
+          due_day: { type: 'string', format: 'date' },
+          points: { type: ['integer', 'null'] },
+          urgent: { type: 'boolean' },
+          stage: { type: 'string', enum: ['new', 'open', 'done'] },
+          tier: { type: 'string' },
+          tags: { type: 'array', items: { type: 'string' } },
+          extra: { type: 'object' },
+        },
+      },
+      metrics_config: {
+        segments: { not_done: { description: 'Open work.', where: "metadata->>'stage' <> 'done'", on: 'entity' } },
+      },
+    });
+    const rows: Array<[string, Record<string, unknown>]> = [
+      ['t1', { due_at: '2026-03-01T10:00:00Z', due_day: '2026-03-02', points: 5, urgent: true, stage: 'open', tier: 'a' }],
+      // 12:00+05:00 is 07:00Z: earlier than t1 as an instant, later as text.
+      ['t2', { due_at: '2026-03-01T12:00:00+05:00', due_day: '2026-01-15', points: 10, urgent: false, stage: 'new', tier: 'a' }],
+      ['t3', { due_at: '2026-02-01T00:00:00Z', points: 5, stage: 'done', tier: 'b' }],
+      ['t4', { points: -1, stage: 'done', tier: 'a' }],
+      ['t5', { due_at: '2026-03-01T10:00:00Z', points: 2, stage: 'open', tier: 'a' }],
+      ['t6', { stage: 'open', tier: 'a' }],
+      ['t7', { stage: 'done', tier: 'b' }],
+    ];
+    for (const [name, metadata] of rows) {
+      const created = (await owner.entities.create({ entity_type: 'synthetic-ticket', name, metadata })) as {
+        entity: { id: number };
+      };
+      ids[name] = created.entity.id;
+    }
+    // Rows written before the schema typed these fields hold values that do
+    // not parse as the declared type; they sort as missing, never as errors.
+    const sql = getTestDb();
+    await sql`UPDATE entities SET metadata = metadata || ${sql.json({ due_at: 'not a date', due_day: '2026-02-30', points: '7', urgent: 'yes' })} WHERE id = ${ids.t6}`;
+    await sql`UPDATE entities SET metadata = metadata || ${sql.json({ due_at: 'now', due_day: 'today' })} WHERE id = ${ids.t7}`;
+
+    await ensureMemberEntityType(org.id);
+    for (const [name, email] of [['Zed Member', 'a-member@test.example.com'], ['Amy Member', 'z-member@test.example.com']]) {
+      await createTestEntity({ name, organization_id: org.id, entity_type: '$member' });
+      await sql`UPDATE entities SET metadata = ${sql.json({ email, status: 'active', role: 'member' })}
+        WHERE organization_id = ${org.id} AND name = ${name}`;
+    }
+
+    await owner.entity_schema.createType({
+      slug: 'synthetic-derived-ticket',
+      name: 'Synthetic derived ticket',
+      backing: { sql: "SELECT * FROM (VALUES ('b', 20), ('a', 10), ('c', 30)) AS rows(slug, amount)" },
+    });
+  }, 60_000);
+
+  afterAll(cleanupTestDatabase);
+
+  async function list(body: Record<string, unknown>, cookie = ownerCookie) {
+    return post(`/api/${orgSlug}/manage_entity`, { cookie, body: { action: 'list', ...body } });
+  }
+  async function names(body: Record<string, unknown>, cookie = ownerCookie): Promise<string[]> {
+    const response = await list({ entity_type: 'synthetic-ticket', limit: 50, ...body }, cookie);
+    expect(response.status).toBe(200);
+    return ((await response.json()) as ListResult).entities?.map((e) => e.name) ?? [];
+  }
+
+  it('orders by the schema type with missing and unparseable values last, ties by id', async () => {
+    expect(await names({ sort_by: 'metadata.due_at', sort_order: 'asc' })).toEqual(['t3', 't2', 't1', 't5', 't4', 't6', 't7']);
+    expect(await names({ sort_by: 'metadata.due_at', sort_order: 'desc' })).toEqual(['t1', 't5', 't2', 't3', 't4', 't6', 't7']);
+    expect(await names({ sort_by: 'metadata.due_day', sort_order: 'asc' })).toEqual(['t2', 't1', 't3', 't4', 't5', 't6', 't7']);
+    expect(await names({ sort_by: 'metadata.points', sort_order: 'asc' })).toEqual(['t4', 't5', 't1', 't3', 't2', 't6', 't7']);
+    expect(await names({ sort_by: 'metadata.urgent', sort_order: 'desc' })).toEqual(['t1', 't2', 't3', 't4', 't5', 't6', 't7']);
+    expect(await names({ sort_by: 'metadata.stage', sort_order: 'asc' })).toEqual(['t3', 't4', 't7', 't2', 't1', 't5', 't6']);
+  });
+
+  it('walks offset pages in one stable order and echoes the sort key', async () => {
+    const seen: string[] = [];
+    for (const offset of [0, 3, 6]) {
+      const response = await list({ entity_type: 'synthetic-ticket', sort_by: 'metadata.due_at', sort_order: 'desc', limit: 3, offset });
+      const body = (await response.json()) as ListResult;
+      expect(body.metadata).toMatchObject({ total_count: 7, has_more: offset < 6, sort_by: 'metadata.due_at', sort_order: 'desc' });
+      seen.push(...(body.entities?.map((e) => e.name) ?? []));
+    }
+    expect(seen).toEqual(['t1', 't5', 't2', 't3', 't4', 't6', 't7']);
+  });
+
+  it('applies attribute filters and segments before ordering', async () => {
+    const filters = [{ field: 'tier', op: 'eq', value: 'a' }];
+    expect(await names({ sort_by: 'metadata.due_at', sort_order: 'asc', filters })).toEqual(['t2', 't1', 't5', 't4', 't6']);
+    expect(await names({ sort_by: 'metadata.due_at', sort_order: 'asc', filters, segment: 'not_done', limit: 2, offset: 2 })).toEqual(['t5', 't6']);
+  });
+
+  it('rejects sort keys the list cannot honour instead of falling back to created_at', async () => {
+    for (const [body, pattern] of [
+      [{ entity_type: 'synthetic-ticket', sort_by: 'metadata.missing' }, /not declared/],
+      [{ entity_type: 'synthetic-ticket', sort_by: 'metadata.tags' }, /scalar/],
+      [{ entity_type: 'synthetic-ticket', sort_by: 'metadata.extra' }, /scalar/],
+      [{ entity_type: 'synthetic-ticket', sort_by: 'updated_at' }, /sort_by/],
+      [{ sort_by: 'metadata.due_at' }, /entity_type/],
+    ] as const) {
+      const response = await list(body);
+      expect(response.status).toBe(400);
+      expect(String(((await response.json()) as { error?: string }).error)).toMatch(pattern);
+    }
+  });
+
+  it('sorts $member by email only for callers who can see emails', async () => {
+    const forbidden = await list({ entity_type: '$member', sort_by: 'metadata.email' }, memberCookie);
+    expect(forbidden.status).toBe(403);
+    const byStatus = await list({ entity_type: '$member', sort_by: 'metadata.status' }, memberCookie);
+    expect(byStatus.status).toBe(200);
+    const owner = await list({ entity_type: '$member', sort_by: 'metadata.email', sort_order: 'asc' });
+    expect(owner.status).toBe(200);
+    const listed = ((await owner.json()) as ListResult).entities?.map((e) => e.name) ?? [];
+    expect(listed.filter((name) => name.endsWith('Member'))).toEqual(['Zed Member', 'Amy Member']);
+  });
+
+  it('passes a metadata sort to a derived type as its projected column', async () => {
+    const response = await list({ entity_type: 'synthetic-derived-ticket', sort_by: 'metadata.amount', sort_order: 'desc' });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as ListResult & { entities: Array<{ slug: string }> };
+    expect(body.entities.map((e) => e.slug)).toEqual(['c', 'b', 'a']);
+    expect(body.metadata?.sort_by).toBe('metadata.amount');
   });
 });

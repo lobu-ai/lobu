@@ -1319,7 +1319,7 @@ export type ManageEntityData = {
          */
         offset?: number;
         /**
-         * [list] Sort by column (name, created_at, domain, total_content, active_connections, automations_count, children_count)
+         * [list] Sort key: name, created_at, domain, total_content, active_connections, automations_count, children_count, or metadata.<field> for a scalar property declared in entity_type's metadata_schema (requires entity_type; missing or unparseable values sort last). Other keys are rejected.
          */
         sort_by?: string;
         /**

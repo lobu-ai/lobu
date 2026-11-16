@@ -426,6 +426,35 @@ describe('entity schema CRUD', () => {
       await owner.entity_schema.deleteType({ slug: 'collection-asset' });
     });
 
+    it('accepts a collection sort only on a built-in key or a declared scalar property', async () => {
+      const properties = {
+        due_at: { type: 'string', format: 'date-time' },
+        tags: { type: 'array', items: { type: 'string' } },
+      };
+      const sortedBy = (field: string, presetField = field) => ({
+        type: 'object',
+        properties,
+        'x-lobu-collection': {
+          table: { sort: { field, order: 'asc' } },
+          presets: [{ key: 'due', label: 'Due', selection: {}, table: { sort: { field: presetField, order: 'desc' } } }],
+        },
+      });
+      await owner.entity_schema.createType({ slug: 'sorted-asset', name: 'Sorted asset', metadata_schema: sortedBy('due_at', 'total_content') });
+      for (const schema of [sortedBy('missing'), sortedBy('due_at', 'tags')]) {
+        await expect(owner.entity_schema.createType({ slug: 'unsorted-asset', name: 'Unsorted asset', metadata_schema: schema }))
+          .rejects.toThrow(/metadata_schema.x-lobu-collection: Sort field/);
+        await expect(owner.entity_schema.updateType({ slug: 'sorted-asset', metadata_schema: schema }))
+          .rejects.toThrow(/metadata_schema.x-lobu-collection: Sort field/);
+      }
+      // A derived list sorts by projected columns its schema need not declare.
+      await owner.entity_schema.createType({
+        slug: 'sorted-view', name: 'Sorted view', metadata_schema: sortedBy('amount'),
+        backing: { sql: "SELECT * FROM (VALUES ('a', 1)) AS rows(slug, amount)" },
+      });
+      await owner.entity_schema.deleteType({ slug: 'sorted-view' });
+      await owner.entity_schema.deleteType({ slug: 'sorted-asset' });
+    });
+
     it('lists user-created types alongside system types', async () => {
       await owner.entity_schema.createType({ slug: 'lst-asset', name: 'Lst' });
       const list = (await owner.entity_schema.listTypes()) as {

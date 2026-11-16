@@ -100,7 +100,7 @@ export const METHOD_METADATA: Record<string, MethodMetadata> = {
 	},
 	"entities.list": {
 		summary:
-			"List entities in the current organization with optional filters. Returns `{ action, entities, metadata }` where `entities` is the page and `metadata` carries `total_count`, `has_more`, `limit`, `offset`.",
+			"List entities in the current organization with optional filters. Returns `{ action, entities, metadata }` where `entities` is the page and `metadata` carries `total_count`, `has_more`, `limit`, `offset`. `sort_by` takes a built-in key (name, created_at, domain, total_content, active_connections, automations_count, children_count) or `metadata.<field>` for a scalar property declared on `entity_type`.",
 		access: "read",
 		signature:
 			"entities.list(input?: { entity_type?: string; parent_id?: number | null; search?: string; filters?: Array<{ field: string; op: 'eq' | 'neq'; value: string | number | boolean | null } | { field: string; op: 'lt' | 'lte' | 'gt' | 'gte'; value: string | number }>; segment?: string; limit?: number; offset?: number; sort_by?: string; sort_order?: 'asc' | 'desc' }): Promise<unknown>",
