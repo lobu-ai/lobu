@@ -35,7 +35,7 @@ import {
 	type ConnectorDeriveFeedContext,
 } from "../automations/connector-derived";
 import { materializeConnectorAutomationSignal } from "../automations/connector-signal";
-import { feedBackoff, feedRetryAtSql } from "../connectors/feed-backoff";
+import { feedRetryAtSql } from "../connectors/feed-backoff";
 import {
 	FeedPageUnavailableError,
 	lockFeedPage,
@@ -49,10 +49,6 @@ import {
 import { parseDependencyUnavailableError } from "../connectors/dependency-unavailable";
 import { getDb, parsePgNumberArray } from "../db/client";
 import { isTransientDbError, noteDbConnRetry } from "../db/with-retry";
-import {
-	pauseFeedsForInactiveConnections,
-	resumeFeedsForRecoveredConnections,
-} from "../feeds/auth-readiness-feeds";
 import { eventArtifactBinding } from "../gateway/files/artifact-store";
 import { emit } from "../events/emitter";
 import { parseJsonBody } from "../gateway/routes/shared/helpers";
@@ -170,10 +166,8 @@ async function readRunCompletionFlags(
 }
 
 /**
- * Reactivate the auth profile + the paused connections/feeds linked to it
- * after a successful auth run. Connections leave `pending_auth`, paused feeds
- * below the failure-pause threshold resume with `next_run_at` seeded.
- * Failure-paused feeds require an explicit `manage_feeds` update.
+ * Reactivate the auth profile and connections awaiting it after a successful
+ * auth run. Feed lifecycle and due cursors are independent of auth readiness.
  */
 async function reactivateProfileCascade(
 	tx: DbClient,
@@ -221,25 +215,6 @@ async function reactivateProfileCascade(
       WHERE auth_profile_id = ${authProfileId}
         AND status = 'pending_auth'
         AND deleted_at IS NULL
-    `;
-	// A feed the failure policy paused stays paused (#3700): only
-	// `manage_feeds` resumes it. Resumed feeds keep their failure history.
-	// A feed with no cron stays manual (#2021): resuming it must not invent
-	// a run.
-	await tx`
-      UPDATE feeds f
-      SET status = 'active',
-          next_run_at = CASE WHEN f.schedule IS NULL THEN f.next_run_at
-                             ELSE COALESCE(f.next_run_at, NOW()) END,
-          updated_at = current_timestamp
-      FROM connections c
-      WHERE f.connection_id = c.id
-        AND c.auth_profile_id = ${authProfileId}
-        AND c.status = 'active'
-        AND c.deleted_at IS NULL
-        AND f.deleted_at IS NULL
-        AND f.status = 'paused'
-        AND f.consecutive_failures < ${feedBackoff.pauseThreshold}
     `;
 }
 
@@ -327,19 +302,13 @@ async function persistSyncAuthUpdate(
 			// claims only pending_auth rows, so concurrent completions cannot
 			// overwrite an operator pause after the first recovery commits.
 			if (nextStatus === "active") {
-				const recovered = (await tx`
+				await tx`
               UPDATE connections
               SET status = 'active', updated_at = current_timestamp
               WHERE auth_profile_id = ${authProfile.id}
                 AND status = 'pending_auth'
                 AND deleted_at IS NULL
-              RETURNING id
-            `) as Array<{ id: number }>;
-				for (const recoveredConnection of recovered) {
-					await resumeFeedsForRecoveredConnections(tx, {
-						connectionId: recoveredConnection.id,
-					});
-				}
+            `;
 				return;
 			}
 
@@ -350,7 +319,6 @@ async function persistSyncAuthUpdate(
               AND deleted_at IS NULL
               AND status <> 'paused'
           `;
-			await pauseFeedsForInactiveConnections(tx, { authProfileId: authProfile.id });
 
 			if (nextStatus === "pending_auth") {
 				return {
@@ -388,7 +356,6 @@ async function persistSyncAuthUpdate(
               AND deleted_at IS NULL
               AND status <> 'paused'
           `;
-				await pauseFeedsForInactiveConnections(tx, { authProfileId: authProfile.id });
 			}
 		}
 	}
@@ -1536,8 +1503,7 @@ export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
 			// Update the feed's sync state
 			const runRows = updatedRuns;
 			// Auth recovery and profile edits lock profile before feed. Take that
-			// same lock order here, while leaving the auth pause/recovery writes
-			// after feed bookkeeping so their scheduling changes remain authoritative.
+			// same lock order here. Auth readiness never changes feed lifecycle.
 			const syncAuth = await readSyncCompletionAuthProfile(tx, req, runRows[0]?.connection_id ?? null);
 			const feedId = runRows[0]?.feed_id;
 			const isDry = runRows[0]?.dry_run === true;

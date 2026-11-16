@@ -674,15 +674,18 @@ async function handleCreateFeed(
         'This connection is consent-only (holds an OAuth grant for delegation) and cannot have feeds.',
     };
   }
-  // A `pending_auth` connection is OK — the feed is created `paused` (the
-  // `feeds.status` CHECK only allows active|paused|error). OAuth reconciliation
-  // marks that system-owned pause so a later eligible grant can resume it.
+  // Enabled feeds may wait on connection auth without losing lifecycle intent.
+  // OAuth's existing per-feed scope hold is reconciled separately below.
   if (conn.status !== 'active' && conn.status !== 'pending_auth') {
     return {
       error: `Connection is ${conn.status}, must be active or pending_auth to create feeds`,
     };
   }
-  const feedInitialStatus = conn.status === 'active' ? 'active' : 'paused';
+  const authProfile = Number(conn.auth_profile_id)
+    ? await getAuthProfileById(organizationId, Number(conn.auth_profile_id))
+    : null;
+  const systemScopePaused = conn.status === 'pending_auth' && authProfile?.profile_kind === 'oauth_account';
+  const feedInitialStatus = systemScopePaused ? 'paused' : 'active';
 
   const feedsSchema = conn.feeds_schema;
   if (feedsSchema && !feedsSchema[args.feed_key]) {
@@ -767,7 +770,7 @@ async function handleCreateFeed(
     }
   }
 
-  // Don't schedule a first run for a feed whose connection is still pending auth.
+  // Keep the cron cursor while connection readiness defers admission.
   const nextRunAtVal =
     schedule && feedInitialStatus === 'active'
       ? nextRunAt(schedule, new Date(), timezone)
@@ -791,13 +794,6 @@ async function handleCreateFeed(
     entityIds: args.entity_ids ?? null,
     feedsSchema,
   });
-
-  const authProfile = Number(conn.auth_profile_id)
-    ? await getAuthProfileById(organizationId, Number(conn.auth_profile_id))
-    : null;
-  const systemScopePaused =
-    feedInitialStatus === 'paused' &&
-    authProfile?.profile_kind === 'oauth_account';
 
   const inserted = await sql.begin(async (tx) => {
   const rows = await tx`
@@ -1140,7 +1136,7 @@ async function handleTriggerFeed(
   const { organizationId } = ctx;
 
   const feedRows = await sql`
-    SELECT f.id, f.status, f.connection_id, c.connector_key
+    SELECT f.id, f.status, f.connection_id, c.connector_key, c.status AS connection_status
     FROM feeds f
     JOIN connections c ON c.id = f.connection_id
     WHERE f.id = ${args.feed_id} AND f.organization_id = ${organizationId} AND c.deleted_at IS NULL AND f.deleted_at IS NULL
@@ -1150,13 +1146,17 @@ async function handleTriggerFeed(
     return { error: 'Feed not found' };
   }
 
-  const feed = feedRows[0] as { status: string };
+  const feed = feedRows[0] as { status: string; connection_status: string };
   const dryRun = args.dry_run === true;
   // A dry run is the safe validation lane for a paused feed: it executes the
   // connector but leaves feed state, checkpoints, and collected data untouched.
   // Persistent runs still require an active feed.
   if (feed.status !== 'active' && !(dryRun && feed.status === 'paused')) {
     return { error: `Feed is ${feed.status}, must be active to trigger sync` };
+  }
+
+  if (!dryRun && feed.connection_status !== 'active') {
+    return { error: `Connection is ${feed.connection_status}, must be active to trigger sync` };
   }
 
   const created = await createSyncRun(args.feed_id, env, undefined, { dryRun });

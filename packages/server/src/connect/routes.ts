@@ -25,8 +25,6 @@ import { createMiddleware } from 'hono/factory';
 import { createAuth } from '../auth';
 import { resolveSharedOAuthCallbackRequest } from '../auth/oauth-organization-context';
 import { getDb } from '../db/client';
-import { feedBackoff, shouldHardPauseFeed } from '../connectors/feed-backoff';
-import { resumeFeedsForRecoveredConnections } from '../feeds/auth-readiness-feeds';
 import type { Env } from '../index';
 import {
   ensureUniqueAuthProfileSlug,
@@ -248,7 +246,7 @@ connectRoutes.post('/:token/validate', requireConnectToken, async (c) => {
 
   const sql = getDb();
 
-  // Prefer a feed that validation may resume; failure pauses need manage_feeds.
+  // Prefer an enabled feed. Validation never resumes an operator pause.
   const feedRows = await sql`
     SELECT
       f.id,
@@ -256,7 +254,7 @@ connectRoutes.post('/:token/validate', requireConnectToken, async (c) => {
       f.config
     FROM feeds f
     WHERE connection_id = ${connectionId} AND f.deleted_at IS NULL
-    ORDER BY (f.status = 'paused' AND f.consecutive_failures >= ${feedBackoff.pauseThreshold}) ASC,
+    ORDER BY (f.status = 'active') DESC,
              f.id ASC
     LIMIT 1
   `;
@@ -355,18 +353,17 @@ connectRoutes.post('/:token/validate', requireConnectToken, async (c) => {
           : describeSyncRunSkip(queued.reason);
       throw new HTTPException(409, { res: c.json({ error }, 409) });
     }
-    // Enqueue holds the feed lock until commit. A failure pause observed here
+    // Enqueue holds the feed lock until commit. Any pause observed here
     // rolls back the run and credentials before either becomes visible.
     const [current] = await tx`
-      SELECT status, consecutive_failures FROM feeds
+      SELECT status FROM feeds
       WHERE id = ${feedId} AND deleted_at IS NULL
     `;
-    if (!current || (current.status === 'paused' && shouldHardPauseFeed(Number(current.consecutive_failures)))) {
+    if (!current || current.status !== 'active') {
       throw new HTTPException(409, { res: c.json({
-        error: 'Resume a feed paused after repeated failures before validating this connection.',
+        error: 'Resume a paused feed before validating this connection.',
       }, 409) });
     }
-    await resumeFeedsForRecoveredConnections(tx, { connectionId });
     return queued;
   });
 
@@ -501,8 +498,6 @@ connectRoutes.post('/:token/complete', requireConnectToken, async (c) => {
         AND organization_id = ${tokenRow.organization_id}
     `;
 
-    await resumeFeedsForRecoveredConnections(tx, { connectionId: Number(tokenRow.connection_id) });
-
     // Mark token as completed
     await tx`
       UPDATE connect_tokens
@@ -521,7 +516,7 @@ connectRoutes.post('/:token/complete', requireConnectToken, async (c) => {
 
 /**
  * POST /connect/:token/cancel
- * Cancel validation: clear credentials, pause feeds, cancel pending runs.
+ * Cancel validation: clear credentials and cancel pending runs.
  * Allows the user to retry with new credentials.
  */
 connectRoutes.post('/:token/cancel', requireConnectToken, async (c) => {
@@ -555,13 +550,6 @@ connectRoutes.post('/:token/cancel', requireConnectToken, async (c) => {
             updated_at = NOW()
         WHERE id = ${tokenRow.connection_id}
           AND organization_id = ${tokenRow.organization_id}
-      `;
-
-      await tx`
-        UPDATE feeds
-        SET status = 'paused',
-            updated_at = NOW()
-        WHERE connection_id = ${tokenRow.connection_id}
       `;
 
       await tx`
@@ -1127,9 +1115,6 @@ async function handleOAuthCallback(
         `;
       }
 
-      if (!tokenRow.auth_profile_id) {
-        await resumeFeedsForRecoveredConnections(tx, { connectionId: Number(tokenRow.connection_id) });
-      }
     }
 
     await tx`

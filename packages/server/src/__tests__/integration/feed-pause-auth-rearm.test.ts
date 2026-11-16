@@ -26,16 +26,19 @@
 
 import type { Context } from 'hono';
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { materializeDueFeeds } from '../../scheduled/check-due-feeds';
+import { getSchedulerHealth } from '../../scheduled/scheduler-health';
 import { feedBackoff } from '../../connectors/feed-backoff';
 import { applyFeedSyncFailure } from '../../connectors/feed-sync-failure';
 import type { DbClient } from '../../db/client';
 import type { Env } from '../../index';
 import { manageAuthProfiles } from '../../tools/admin/manage_auth_profiles';
 import { manageConnections } from '../../tools/admin/manage_connections';
+import { manageFeeds } from '../../tools/admin/manage_feeds';
 import { completeAuthRun, completeWorkerJob } from '../../worker-api';
 import { initWorkspaceProvider } from '../../workspace';
 import { cleanupTestDatabase, getTestDb } from '../setup/test-db';
-import { createTestOrganization, seedOwnerContext } from '../setup/test-fixtures';
+import { createTestConnectorDefinition, createTestOrganization, seedOwnerContext } from '../setup/test-fixtures';
 
 const WORKER_ID = 'worker-auth-rearm';
 const USABLE_SESSION = {
@@ -97,7 +100,7 @@ async function waitForConnectionAudits(
 
 async function seedProfile(
   organizationId: string,
-  profileKind: 'browser_session' | 'oauth_account' | 'oauth_app' | 'interactive',
+  profileKind: 'browser_session' | 'oauth_account' | 'oauth_app' | 'interactive' | 'env',
   status: 'active' | 'pending_auth'
 ): Promise<{ profileId: number; connectionId: number }> {
   const sql = getTestDb();
@@ -274,7 +277,7 @@ describe('auth-driven feed re-arm', () => {
       expect(after.next_run_at).toBeNull();
     });
 
-    it('still resumes feeds paused by an expired session once the session is usable again', async () => {
+    it('leaves legacy paused feeds paused when the session becomes usable again', async () => {
       const org = await createTestOrganization();
       const { connectionId } = await seedProfile(org.id, 'browser_session', 'pending_auth');
       const syncing = await seedFeed(org.id, connectionId, 'posts', { status: 'paused' });
@@ -284,10 +287,63 @@ describe('auth-driven feed re-arm', () => {
 
       for (const feedId of [syncing, sibling]) {
         const after = await readFeed(feedId);
-        expect(after.status).toBe('active');
-        expect(after.next_run_at).not.toBeNull();
+        expect(after.status).toBe('paused');
+        if (feedId === sibling) expect(after.next_run_at).toBeNull();
       }
     });
+  });
+
+  it.each(['profile update', 'late sync completion'] as const)(
+    'preserves enabled and manually paused feed state through auth loss/recovery via %s',
+    async (entrypoint) => {
+      const { org, ctx } = await seedOwnerContext();
+      const { connectionId } = await seedProfile(org.id, 'browser_session', 'active');
+      const syncing = await seedFeed(org.id, connectionId, 'posts');
+      const manual = await seedFeed(org.id, connectionId, 'manual', { status: 'paused' });
+      const enabled = await seedFeed(org.id, connectionId, 'enabled', { schedule: null });
+      // A no-cron feed may have an outstanding notification to service after auth recovers.
+      await getTestDb()`UPDATE feeds SET next_run_at = NOW() WHERE id = ${enabled}`;
+      const before = await readFeed(enabled);
+      const expired = { cookies: [{ name: 'session_token', value: 'synthetic', expires: 1 }] };
+      if (entrypoint === 'profile update') {
+        expect(await manageAuthProfiles({ action: 'update_auth_profile', auth_profile_slug: 'auth-rearm',
+          auth_data: expired }, {} as Env, ctx)).not.toHaveProperty('error');
+      } else {
+        await completeSyncWithAuthUpdate(org.id, connectionId, syncing, undefined, expired);
+      }
+      expect(await readConnectionStatus(connectionId)).toBe('pending_auth');
+      expect(await readFeed(enabled)).toEqual(before);
+      expect((await readFeed(manual)).status).toBe('paused');
+
+      expect(await manageAuthProfiles({ action: 'update_auth_profile', auth_profile_slug: 'auth-rearm',
+        auth_data: USABLE_SESSION }, {} as Env, ctx)).not.toHaveProperty('error');
+      expect(await readConnectionStatus(connectionId)).toBe('active');
+      expect(await readFeed(enabled)).toEqual(before);
+      expect((await readFeed(manual)).status).toBe('paused');
+    }
+  );
+
+  it.each([null, '*/5 * * * *'])('keeps a new non-OAuth feed enabled while auth gates admission (schedule=%s)', async schedule => {
+    const { org, ctx } = await seedOwnerContext();
+    const { profileId, connectionId } = await seedProfile(org.id, 'browser_session', 'pending_auth');
+    await createTestConnectorDefinition({ key: 'browser-test', name: 'Synthetic pending feed',
+      organization_id: org.id, feeds_schema: { items: { operations: ['sync'] } } });
+    const created = await manageFeeds({ action: 'create_feed', connection_id: connectionId,
+      feed_key: 'items', ...(schedule ? { schedule } : {}) }, {} as Env, ctx);
+    expect(created).not.toHaveProperty('error');
+    if (!('feed' in created)) throw new Error('Expected a created feed');
+    const id = Number(created.feed.id);
+    expect(await readFeed(id)).toMatchObject({ status: 'active' });
+    expect((await readFeed(id)).next_run_at === null).toBe(schedule === null);
+    await getTestDb()`UPDATE feeds SET next_run_at = NOW() - interval '2 hours' WHERE id = ${id}`;
+    const before = await readFeed(id);
+    expect((await getSchedulerHealth({} as Env)).metrics.overdueFeeds).toBe(0);
+    expect(await materializeDueFeeds({} as Env, getTestDb())).toMatchObject({ runsCreated: 0 });
+    expect(await manageFeeds({ action: 'trigger_feed', feed_id: id }, {} as Env, ctx)).toHaveProperty('error');
+    expect(await getTestDb()`SELECT id FROM runs WHERE feed_id = ${id}`).toHaveLength(0);
+    await completeFreshAuthRun(org.id, profileId);
+    expect(await readFeed(id)).toEqual(before);
+    expect(await materializeDueFeeds({} as Env, getTestDb())).toMatchObject({ runsCreated: 1 });
   });
 
   describe('edits that leave a usable browser session usable', () => {
@@ -404,6 +460,30 @@ describe('auth-driven feed re-arm', () => {
       }
     }
 
+    it('binding a usable auth profile changes readiness without resuming a manual feed pause', async () => {
+      const { org, ctx } = await seedOwnerContext();
+      const { connectionId, manual } = await seedPausedSiblings(org.id);
+      const sql = getTestDb();
+      await sql`INSERT INTO auth_profiles (organization_id, connector_key, slug, display_name, profile_kind, status, auth_data)
+        VALUES (${org.id}, 'browser-test', 'usable-replacement', 'Synthetic replacement', 'browser_session', 'active', ${sql.json(USABLE_SESSION)})`;
+      await sql`UPDATE connections SET status = 'pending_auth' WHERE id = ${connectionId}`;
+      expect(await manageConnections({ action: 'update', connection_id: connectionId,
+        auth_profile_slug: 'usable-replacement' }, {} as Env, ctx)).not.toHaveProperty('error');
+      expect(await readConnectionStatus(connectionId)).toBe('active');
+      expect((await readFeed(manual)).status).toBe('paused');
+    });
+
+    it.each(['active', 'paused'])('deleting a browser profile preserves a feed that is %s', async status => {
+      const { org, ctx } = await seedOwnerContext();
+      const { connectionId } = await seedProfile(org.id, 'browser_session', 'active');
+      const feedId = await seedFeed(org.id, connectionId, 'items', { status });
+      const before = await readFeed(feedId);
+      expect(await manageAuthProfiles({ action: 'delete_auth_profile', auth_profile_slug: 'auth-rearm', force: true },
+        {} as Env, ctx)).not.toHaveProperty('error');
+      expect(await readConnectionStatus(connectionId)).toBe('pending_auth');
+      expect(await readFeed(feedId)).toEqual(before);
+    });
+
     it('manage_auth_profiles update does not resume paused feeds', async () => {
       const { org, ctx } = await seedOwnerContext();
       const { broken, manual } = await seedPausedSiblings(org.id);
@@ -475,6 +555,69 @@ describe('auth-driven feed re-arm', () => {
   });
 
   describe('auth run completion', () => {
+    it.each(['active', 'pending_auth'] as const)(
+      'preserves an explicit feed pause when authenticating an %s profile',
+      async (profileStatus) => {
+        const { org, ctx } = await seedOwnerContext();
+        const { profileId, connectionId } = await seedProfile(org.id, 'env', profileStatus);
+        const sql = getTestDb();
+        await sql`
+          INSERT INTO connector_definitions
+            (organization_id, key, name, version, auth_schema, feeds_schema, automation_events, status)
+          VALUES (${org.id}, 'browser-test', 'Synthetic auth recovery', '1.0.0',
+            ${sql.json({ methods: [] })},
+            ${sql.json({ default: { name: 'Default', operations: ['sync'] } })},
+            ${sql.json([])}, 'active')
+        `;
+        const feedId = await seedFeed(org.id, connectionId, 'default');
+        const paused = await manageFeeds(
+          { action: 'update_feed', feed_id: feedId, status: 'paused' }, {} as Env, ctx
+        );
+        expect(paused).toMatchObject({ action: 'update_feed' });
+        const before = await readFeed(feedId);
+        expect(before.status).toBe('paused');
+
+        await completeFreshAuthRun(org.id, profileId);
+
+        expect(await readConnectionStatus(connectionId)).toBe('active');
+        const after = await readFeed(feedId);
+        expect(after.status).toBe('paused');
+        expect(after.next_run_at).toEqual(before.next_run_at);
+      }
+    );
+
+    it('keeps a manual pause committed while auth recovery waits on the profile lock', async () => {
+      const { org, ctx } = await seedOwnerContext();
+      const { profileId, connectionId } = await seedProfile(org.id, 'env', 'pending_auth');
+      const sql = getTestDb();
+      await createTestConnectorDefinition({ key: 'browser-test', name: 'Synthetic concurrent pause',
+        organization_id: org.id, feeds_schema: { items: { operations: ['sync'] } } });
+      const feedId = await seedFeed(org.id, connectionId, 'items');
+      // Seed before the profile lock: a new run's FK also takes a profile lock.
+      const [run] = await sql`INSERT INTO runs (organization_id, run_type, status,
+        claimed_by, claimed_at, auth_profile_id)
+        VALUES (${org.id}, 'auth', 'running', ${WORKER_ID}, NOW(), ${profileId}) RETURNING id`;
+      let completion: Promise<void> | undefined;
+      try {
+        await sql.begin(async tx => {
+          await tx`SELECT id FROM auth_profiles WHERE id = ${profileId} FOR UPDATE`;
+          completion = completeAuthRun(ctxFor({ run_id: run.id, worker_id: WORKER_ID,
+            status: 'success', credentials: { api_key: 'synthetic' }, metadata: {} })).then(() => {});
+          await expect.poll(async () => (await sql`SELECT pid FROM pg_stat_activity
+            WHERE datname = current_database() AND wait_event_type = 'Lock'
+              AND query LIKE '%FROM auth_profiles%'`).length, { timeout: 5000 }).toBeGreaterThan(0);
+          expect(await manageFeeds({ action: 'update_feed', feed_id: feedId, status: 'paused' },
+            {} as Env, ctx)).not.toHaveProperty('error');
+        });
+        await completion;
+        expect(await sql`SELECT status FROM runs WHERE id = ${run.id}`).toEqual([{ status: 'completed' }]);
+        expect(await readConnectionStatus(connectionId)).toBe('active');
+        expect(await readFeed(feedId)).toMatchObject({ status: 'paused', next_run_at: null });
+      } finally {
+        await completion;
+      }
+    });
+
     it('does not invent a run for a paused feed with no schedule', async () => {
       const org = await createTestOrganization();
       const { profileId, connectionId } = await seedProfile(org.id, 'oauth_account', 'active');
@@ -486,7 +629,7 @@ describe('auth-driven feed re-arm', () => {
       await completeFreshAuthRun(org.id, profileId);
 
       const after = await readFeed(feedId);
-      expect(after.status).toBe('active');
+      expect(after.status).toBe('paused');
       expect(after.next_run_at).toBeNull();
     });
 

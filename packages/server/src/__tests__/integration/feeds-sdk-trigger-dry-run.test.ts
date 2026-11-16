@@ -84,9 +84,11 @@ describe('client.feeds.trigger dry_run', () => {
     expect(runs[0].dry_run).toBe(true);
   });
 
-  it('allows a dry run while the feed stays paused with its checkpoint intact', async () => {
+  it.each(['active', 'pending_auth'])('allows a dry run on a paused feed while its connection is %s', async connectionStatus => {
     const sql = getTestDb();
     const { feedId, ctx } = await seedFeed('rss-sdk-paused-dry', 'paused');
+    await sql`UPDATE connections SET status = ${connectionStatus}
+      WHERE id = (SELECT connection_id FROM feeds WHERE id = ${feedId})`;
 
     const feeds = buildFeedsNamespace(ctx, {} as Env);
     await feeds.trigger({ feed_id: feedId, dry_run: true });
