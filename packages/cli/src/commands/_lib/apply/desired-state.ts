@@ -1359,6 +1359,7 @@ export async function loadDesiredStateFromConfig(
   // The bodies are no longer folded into `prompt`: the prompt is the author's
   // task statement (or empty), and skills ride alongside as pinned files.
   for (const automation of state.automations) {
+    if (automation.skills === undefined) continue;
     automation.skillSnapshots = resolveAutomationSkills(
       automation,
       automation.agent ? (skillsByAgentId.get(automation.agent) ?? []) : []
