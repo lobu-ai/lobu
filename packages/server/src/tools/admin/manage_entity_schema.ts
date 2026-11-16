@@ -26,7 +26,8 @@ import {
   type RelationshipTypeRuleRow,
 } from '@lobu/core/contracts/tools/manage-entity-schema';
 import { Value } from '@sinclair/typebox/value';
-import { COLLECTION_PRESENTATION_KEY, collectionSortFieldError, parseCollectionPresentation } from '@lobu/core/contracts/tools/collection-presentation';
+import { COLLECTION_PRESENTATION_KEY, parseCollectionPresentation } from '@lobu/core/contracts/tools/collection-presentation';
+import { collectionSortFieldError } from '@lobu/core/contracts/tools/entity-list-sort';
 import { validateEntityMetrics } from '@lobu/connector-sdk';
 import { isPlatformEventType, platformEventKinds } from '../../automations/platform-event-catalog';
 import { compileEntityRule } from '../../authz/entity-rule-executor';

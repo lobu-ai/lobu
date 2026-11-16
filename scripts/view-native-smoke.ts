@@ -14,6 +14,7 @@ import {
   viewRuntimeScript,
 } from "../packages/server/src/views/views";
 import { readMcpAppAsset } from "../packages/server/src/utils/mcp-app-bundle";
+import { isPublicReadable } from "../packages/server/src/auth/tool-access";
 
 const source = `import { useState } from "react";
 import { defineView, sql, tool, useHost, useQuery } from "@lobu/views";
@@ -87,6 +88,104 @@ export default function Proof() {
     </EntityListPage>
   </main>;
 }`;
+// The `/<type>` collection inside a view, read-only, with its fail-closed cases.
+const collectionSource = `import { useState } from "react";
+import { defineView } from "@lobu/views";
+import { EntityCollection } from "@lobu/views/components";
+export const view = defineView({ key: "collection-proof", attach: [{ workspace: true }] });
+export default function CollectionProof() {
+  const [selection, setSelection] = useState(null);
+  const [layout, setLayout] = useState("");
+  const [opened, setOpened] = useState("");
+  return <main>
+    <section data-testid="collection"><EntityCollection entityType="matter" onSelectionChange={setSelection} onLayoutChange={setLayout} /></section>
+    <p data-testid="selection">{JSON.stringify(selection)}</p>
+    <p data-testid="layout">{layout}</p>
+    <section data-testid="open-matters"><EntityCollection entityType="matter" preset="open" title="Open matters" allowedLayouts={["table"]} controls={{ presets: false }} onOpenRecord={entity => setOpened(entity.name)} /></section>
+    <p data-testid="opened">{opened}</p>
+    <section data-testid="viewer-preset"><EntityCollection entityType="case" preset="mine" title="My cases" /></section>
+    <section data-testid="unknown-preset"><EntityCollection entityType="case" preset="missing" title="Missing filter" /></section>
+    <section data-testid="bad-selection"><EntityCollection entityType="case" defaultSelection={{ filters: [{ field: "status", op: "like", value: "x" }] }} title="Bad selection" /></section>
+  </main>;
+}`;
+const collectionStatus = {
+  type: "string",
+  enum: ["open", "closed"],
+  "x-lobu": { role: "workflowState" },
+  "x-table-column": true,
+  title: "Status",
+};
+const collectionTypes = {
+  matter: {
+    slug: "matter",
+    name: "Matter",
+    metadata_schema: {
+      properties: {
+        status: collectionStatus,
+        due_at: {
+          type: "string",
+          format: "date",
+          "x-table-column": true,
+          title: "Due",
+        },
+      },
+      "x-lobu-collection": {
+        presets: [
+          {
+            key: "open",
+            label: "Open matters",
+            selection: {
+              filters: [{ field: "status", op: "eq", value: "open" }],
+            },
+            // A metadata sort: the collection still reads.
+            table: { sort: { field: "due_at", order: "asc" } },
+          },
+          {
+            key: "mine",
+            label: "My matters",
+            selection: {},
+            viewer: { field: "owner_email" },
+          },
+        ],
+      },
+    },
+  },
+  case: {
+    slug: "case",
+    name: "Case",
+    metadata_schema: {
+      properties: { status: collectionStatus },
+      "x-lobu-collection": {
+        presets: [
+          {
+            key: "mine",
+            label: "My cases",
+            selection: {},
+            viewer: { field: "owner_email" },
+          },
+        ],
+      },
+    },
+  },
+};
+const collectionRows = [
+  {
+    id: 11,
+    entity_type: "matter",
+    name: "Acme v. Beta",
+    slug: "acme-v-beta",
+    metadata: { status: "open", due_at: "2026-12-01" },
+    created_at: "2026-01-01",
+  },
+  {
+    id: 12,
+    entity_type: "matter",
+    name: "Gamma estate",
+    slug: "gamma-estate",
+    metadata: { status: "closed", due_at: "2026-11-01" },
+    created_at: "2026-01-02",
+  },
+];
 assertPortableArtifact(
   resolve("packages/owletto/dist-mcp-apps/view-native"),
   process.cwd()
@@ -95,12 +194,20 @@ const compiled = await compileView({
   entrypoint: "index.tsx",
   files: { "index.tsx": source },
 });
+const compiledCollection = await compileView({
+  entrypoint: "index.tsx",
+  files: { "index.tsx": collectionSource },
+});
 const runtime = await viewRuntimeScript();
 const errors: string[] = [];
 const calls: Record<string, unknown>[] = [];
+const toolCalls: Array<{ name: string; arguments: Record<string, unknown> }> =
+  [];
 let origin: string;
 let shell: string;
 let hostHtml: string;
+/** Collection proof shells: with native components, and without them. */
+const collectionShells: Record<string, string> = {};
 const server = createServer(async (request, response) => {
   try {
     const pathname = new URL(request.url!, "http://localhost").pathname;
@@ -117,9 +224,20 @@ const server = createServer(async (request, response) => {
       return;
     }
     response.setHeader("Content-Type", "text/html");
-    hostHtml = `<!doctype html><html><body><iframe sandbox="allow-scripts" style="width:900px;height:700px"></iframe><script>
+    // `/collection/<principal>` hosts the collection proof. A visitor's host
+    // admits only what the server lets a public visitor read.
+    const collectionPage = /^\/collection\/(member|visitor|fallback)$/.exec(
+      pathname
+    )?.[1];
+    const pageShell = collectionPage
+      ? collectionShells[collectionPage === "fallback" ? "fallback" : "native"]
+      : shell;
+    const html = `<!doctype html><html><body><iframe sandbox="allow-scripts" style="width:900px;height:700px"></iframe><script>
       const frame = document.querySelector('iframe');
       let failedOnce = false;
+      const visitor = ${JSON.stringify(collectionPage === "visitor")};
+      const collectionTypes = ${JSON.stringify(collectionTypes)};
+      const collectionRows = ${JSON.stringify(collectionRows)};
       const send = message => frame.contentWindow.postMessage({jsonrpc:'2.0',...message},'*');
       window.sendContext = ctx => send({method:'ui/notifications/host-context-changed',params:ctx});
       window.addEventListener('message', async event => {
@@ -133,11 +251,23 @@ const server = createServer(async (request, response) => {
           send({method:'ui/notifications/tool-input',params:{arguments:{organization:'fixture-workspace',params:{},scope:{}}}});
           return;
         }
-        if(method === 'lobu/open-record') result = {mode:'peek'};
+        if(method === 'lobu/open-record') { window.openedRecord = params; result = {mode:'peek'}; }
         if(method === 'ui/open-link') window.openedLink = params.url;
         if(method === 'tools/call') {
           if (await window.reportCall?.(params)) window.sorted = true;
           const input = params.arguments;
+          if(visitor && !(await window.admitVisitor(params))) {
+            send({id,result:{isError:true,structuredContent:{error:{code:'FORBIDDEN'}},content:[{type:'text',text:'Sign in to read this'}]}}); return;
+          }
+          if(params.name === 'manage_entity_schema') {
+            send({id,result:{structuredContent:{entity_type:collectionTypes[input.slug] ?? null}}}); return;
+          }
+          if(params.name === 'manage_entity' && collectionTypes[input.entity_type]) {
+            const rows = collectionRows.filter(row => row.entity_type === input.entity_type
+              && (input.filters ?? []).every(f => f.op === 'eq' ? row.metadata[f.field] === f.value : true)
+              && (!input.search || row.name.toLowerCase().includes(input.search.toLowerCase())));
+            send({id,result:{structuredContent:{action:'list',entities:input.parent_id === null ? rows.slice(0, input.limit) : rows,metadata:{page_size:input.limit,has_more:false,total_count:rows.length}}}}); return;
+          }
           if(params.name === 'manage_automations') {
             const archived = input.automation_id === '43';
             result = {structuredContent:{automations:archived && input.status === 'active' ? [] : [{automation_id:input.automation_id,name:archived?'Archived example':'Saved automation',status:archived?'archived':'active',triggers:[]}]}};
@@ -163,9 +293,10 @@ const server = createServer(async (request, response) => {
         }
         send({id,result});
       });
-      frame.srcdoc = ${JSON.stringify(shell).replaceAll("<", "\\u003c")};
+      frame.srcdoc = ${JSON.stringify(pageShell).replaceAll("<", "\\u003c")};
     </script></body></html>`;
-    response.end(hostHtml);
+    if (!collectionPage) hostHtml = html;
+    response.end(html);
   } catch (error) {
     response.statusCode = 500;
     console.error("Native view smoke server failed", error);
@@ -199,6 +330,32 @@ assert(
   shell.includes("/mcp-apps/view-native/assets/app.js"),
   "Build native view artifacts before running this smoke"
 );
+collectionShells.native = renderViewShell(
+  {
+    key: "collection-proof",
+    name: "Collection proof",
+    description: "",
+    source_code: collectionSource,
+    compiled_code: compiledCollection,
+    content_hash: "synthetic-collection",
+    source_files: null,
+    dependencies: null,
+    source_complete: true,
+    compile_config_hash: null,
+    attach: [],
+    params: {},
+    actions: {},
+    last_writer: "fixture",
+    updated_at: "2026-01-01",
+  },
+  `${origin}/fixture-workspace/`,
+  runtime
+);
+// A host that does not load native components (plain MCP hosts).
+collectionShells.fallback = collectionShells.native
+  .replace(/<link rel="stylesheet" href="[^"]*\/view-native\/[^"]*">/, "")
+  .replace(/<script src="[^"]*\/view-native\/[^"]*"><\/script>/, "");
+assert(!collectionShells.fallback.includes("/mcp-apps/view-native/"));
 const executablePath = [
   "/usr/bin/google-chrome-stable",
   "/usr/bin/google-chrome",
@@ -208,11 +365,184 @@ const browser = await chromium.launch({
   ...(executablePath ? { executablePath } : {}),
 });
 const page = await browser.newPage();
+/** The native collection in a view frame, as a member and as a public
+ * visitor whose host admits only public reads; then on a host without native
+ * components. Every case reads only the type and its list. */
+async function proveCollection(principal: "member" | "visitor" | "fallback") {
+  const first = toolCalls.length;
+  await page.evaluate(() => {
+    (window as unknown as { openedRecord?: unknown }).openedRecord = undefined;
+  });
+  await page.goto(`${origin}/collection/${principal}`);
+  const frame = page.frameLocator("iframe");
+  const collection = frame.getByTestId("collection");
+  const native = principal !== "fallback";
+  const record = (name: string) =>
+    native
+      ? collection.getByRole("link", { name, exact: true })
+      : collection.getByRole("button", { name, exact: true });
+  await Promise.race([
+    record("Acme v. Beta").waitFor(),
+    frame
+      .locator("[data-lobu-render-error]")
+      .waitFor()
+      .then(async () => {
+        throw new Error(
+          (await frame.locator("[data-lobu-render-error]").textContent()) ??
+            "Collection view failed to render"
+        );
+      }),
+  ]);
+  // Fail closed: an alert, never rows, and no list read of that type.
+  for (const [id, message] of [
+    ["viewer-preset", "unavailable"],
+    ["unknown-preset", "unavailable"],
+    ["bad-selection", "Invalid collection"],
+  ] as const)
+    await frame
+      .getByTestId(id)
+      .getByRole("alert")
+      .filter({ hasText: message })
+      .waitFor();
+  const openMatters = frame.getByTestId("open-matters");
+  await openMatters.getByText("Acme v. Beta", { exact: true }).waitFor();
+  assert.equal(await openMatters.getByText("Gamma estate").count(), 0);
+  // A view's own handler wins over the host peek.
+  await openMatters.getByText("Acme v. Beta", { exact: true }).click();
+  await frame
+    .getByTestId("opened")
+    .filter({ hasText: "Acme v. Beta" })
+    .waitFor();
+  assert.equal(
+    await page.evaluate(
+      () => (window as unknown as { openedRecord?: unknown }).openedRecord
+    ),
+    undefined
+  );
+  const opened = async (entityId: number) => {
+    await page.waitForFunction(() =>
+      Boolean((window as unknown as { openedRecord?: unknown }).openedRecord)
+    );
+    assert.deepEqual(
+      await page.evaluate(
+        () => (window as unknown as { openedRecord?: unknown }).openedRecord
+      ),
+      { record: { entity_id: entityId, entity_type: "matter" }, mode: "peek" }
+    );
+    await page.evaluate(() => {
+      (window as unknown as { openedRecord?: unknown }).openedRecord =
+        undefined;
+    });
+  };
+  if (native) {
+    assert.equal(
+      await openMatters.getByRole("group", { name: "Record layout" }).count(),
+      0
+    );
+    assert.equal(
+      await openMatters.getByTitle("Choose saved filter").count(),
+      0
+    );
+    // A workflow field auto-picks the board: read-only, and a card opens the
+    // host's peek.
+    assert.equal(
+      await collection.getByTestId("shape-board").getAttribute("aria-pressed"),
+      "true"
+    );
+    await collection
+      .getByRole("heading", { name: "Board", exact: true })
+      .waitFor();
+    assert.equal(
+      await collection.getByRole("button", { name: /^Drag / }).count(),
+      0
+    );
+    assert.equal(
+      await collection.getByRole("button", { name: /^Add/ }).count(),
+      0
+    );
+    await record("Acme v. Beta").click();
+    await opened(11);
+    await collection.getByTestId("shape-table").click();
+    await frame.getByTestId("layout").filter({ hasText: "table" }).waitFor();
+  }
+  await record("Gamma estate").click();
+  await opened(12);
+  if (native) {
+    // A saved filter, then search, through the same controls as the app.
+    await collection.getByTitle("Choose saved filter").click();
+    assert.equal(
+      await frame.getByRole("button", { name: "My matters" }).count(),
+      0
+    );
+    await frame
+      .getByRole("button", { name: "Open matters", exact: true })
+      .click();
+    await frame
+      .getByTestId("selection")
+      .filter({ hasText: '"status"' })
+      .waitFor();
+    await collection.getByText("Gamma estate").waitFor({ state: "detached" });
+    await collection
+      .getByRole("searchbox", { name: "Search matter" })
+      .fill("acme");
+    await collection
+      .getByRole("link", { name: "Acme v. Beta", exact: true })
+      .waitFor();
+    await frame
+      .getByTestId("selection")
+      .filter({ hasText: '"acme"' })
+      .waitFor();
+    for (
+      const deadline = Date.now() + 5_000;
+      !toolCalls.some((call) => call.arguments.search === "acme") &&
+      Date.now() < deadline;
+    )
+      await page.waitForTimeout(50);
+  }
+  const seen = toolCalls.slice(first);
+  assert(seen.length > 0, "the collection read through the host");
+  for (const call of seen) {
+    assert(
+      (call.name === "manage_entity_schema" &&
+        call.arguments?.action === "get") ||
+        (call.name === "manage_entity" && call.arguments?.action === "list"),
+      `unexpected collection read ${JSON.stringify(call)}`
+    );
+    if (principal === "visitor")
+      assert(
+        isPublicReadable(call.name, call.arguments),
+        `visitor read ${call.name}`
+      );
+    assert.notEqual(
+      call.name === "manage_entity" ? call.arguments.entity_type : undefined,
+      "case",
+      "a failed selection never reads its records"
+    );
+  }
+  if (native)
+    assert(
+      seen.some(
+        (call) =>
+          call.name === "manage_entity" &&
+          call.arguments.search === "acme" &&
+          JSON.stringify(call.arguments.filters) ===
+            JSON.stringify([{ field: "status", op: "eq", value: "open" }])
+      ),
+      "search and preset reach the list read"
+    );
+}
+
 try {
   await page.exposeFunction(
+    "admitVisitor",
+    (call: { name: string; arguments: Record<string, unknown> }) =>
+      isPublicReadable(call.name, call.arguments)
+  );
+  await page.exposeFunction(
     "reportCall",
-    (call: { arguments: Record<string, unknown> }) => {
+    (call: { name: string; arguments: Record<string, unknown> }) => {
       calls.push(call.arguments);
+      toolCalls.push(call);
       return call.arguments.sort_by === "name";
     }
   );
@@ -551,6 +881,10 @@ try {
     "data"
   );
   assert.deepEqual(errors, []);
+  await proveCollection("member");
+  await proveCollection("visitor");
+  await proveCollection("fallback");
+  assert.deepEqual(errors, []);
   // Optional review artifact: the exact compiled fixture and native runtime,
   // fully inlined with synthetic host replies. No service or workspace needed.
   const exampleArg = process.argv.indexOf("--example-dir");
@@ -618,7 +952,7 @@ document.getElementById('demo-wide').onclick=()=>document.querySelector('iframe'
     assert.deepEqual(errors, []);
   }
   console.log(
-    "PASS: shared resource references, read-only definition diffs and snapshots, list/record pages, SQL and TypeScript rows, responsive details, tabs, peek, pagination, query states and live theme in an opaque browser sandbox"
+    "PASS: shared resource references, the native entity collection (member, public visitor, fallback host), read-only definition diffs and snapshots, list/record pages, SQL and TypeScript rows, responsive details, tabs, peek, pagination, query states and live theme in an opaque browser sandbox"
   );
 } catch (error) {
   console.error({

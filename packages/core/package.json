@@ -189,6 +189,12 @@
       "import": "./dist/contracts/tools/manage-entity-schema.js",
       "require": "./dist/contracts/tools/manage-entity-schema.js"
     },
+    "./contracts/tools/entity-list-sort": {
+      "types": "./dist/contracts/tools/entity-list-sort.d.ts",
+      "bun": "./src/contracts/tools/entity-list-sort.ts",
+      "import": "./dist/contracts/tools/entity-list-sort.js",
+      "require": "./dist/contracts/tools/entity-list-sort.js"
+    },
     "./contracts/tools/collection-presentation": {
       "types": "./dist/contracts/tools/collection-presentation.d.ts",
       "bun": "./src/contracts/tools/collection-presentation.ts",
