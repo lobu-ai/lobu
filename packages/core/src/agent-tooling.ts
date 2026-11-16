@@ -25,6 +25,22 @@ import { Type } from "@sinclair/typebox";
  */
 export const TURN_INPUT_RUN_HEADER = "x-lobu-turn-input-run";
 
+export const SKILL_DIRECTORY_NAME_MAX_CHARS = 128;
+
+/** Materialized skill directory; ordinary agent skills may use a path as their name. */
+export function skillDirectoryName(name: string): string | null {
+  const segment = name.trim().split("/").filter(Boolean).pop();
+  if (
+    !segment ||
+    segment === "." ||
+    segment === ".." ||
+    segment.length > SKILL_DIRECTORY_NAME_MAX_CHARS
+  ) {
+    return null;
+  }
+  return /^[a-zA-Z0-9._-]+$/.test(segment) ? segment : null;
+}
+
 export {
   CUSTOM_TOOL_METADATA,
   type CustomToolMetadata,

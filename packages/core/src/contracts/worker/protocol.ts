@@ -27,6 +27,7 @@
 
 import { type Static, Type } from "@sinclair/typebox";
 import { SUGGESTION_LIMITS } from "../../suggestions";
+import { SKILL_DIRECTORY_NAME_MAX_CHARS } from "../../agent-tooling";
 import { ConnectorOperationRequestSchema } from "../tools/manage-operations";
 
 export const CONNECTOR_HTTP_AUTH_CAPABILITY = "http_auth";
@@ -518,7 +519,10 @@ export const AgentTurnPollPayloadSchema = Type.Object({
     skills: Type.Optional(
       Type.Array(
         Type.Object({
-          name: Type.String({ minLength: 1, maxLength: 128 }),
+          name: Type.String({
+            minLength: 1,
+            maxLength: SKILL_DIRECTORY_NAME_MAX_CHARS,
+          }),
           content: Type.String({ maxLength: MAX_TURN_SKILL_CHARS }),
         }),
         { maxItems: 64 }

@@ -21,7 +21,7 @@
 
 import type { AgentTool, AgentMessage } from '@mariozechner/pi-agent-core';
 import { mcpToolResult, toolImageBudget, type ToolImageBudget, type ToolResult } from '@lobu/plugin-toolkit';
-import { FOLLOW_UP_SUGGESTIONS_PROMPT, parseFollowUpSuggestions, TURN_INPUT_RUN_HEADER, type SuggestedPrompt } from '@lobu/core/agent-tooling';
+import { FOLLOW_UP_SUGGESTIONS_PROMPT, parseFollowUpSuggestions, skillDirectoryName, TURN_INPUT_RUN_HEADER, type SuggestedPrompt } from '@lobu/core/agent-tooling';
 import { createGatewayTools } from './gateway-tools.js';
 import { createTurnMediaTools } from './media-tools.js';
 import { createTurnMemoryHooks, type TurnMemory } from './memory.js';
@@ -303,18 +303,6 @@ function baseName(name: string): string {
 }
 
 /**
- * A skill's directory name, or null when the name is not one.
- *
- * `.` and `..` are refused explicitly so a skill cannot collapse onto
- * `.skills/` itself or its parent.
- */
-function skillDirName(name: string): string | null {
-  const segment = (name || '').trim().split('/').filter(Boolean).pop() ?? '';
-  if (segment === '.' || segment === '..') return null;
-  return /^[a-zA-Z0-9._-]+$/.test(segment) ? segment : null;
-}
-
-/**
  * Put the turn's attachments and skills in the filesystem before the model runs.
  *
  * The host already resolved every byte, so seeding is only a write into the
@@ -327,7 +315,7 @@ async function seedWorkspace(workspace: AgentWorkspace, input: AgentTurnInput): 
     seeds.push({ path: `${INPUT_DIR}/${baseName(file.name)}`, data: file.data });
   }
   for (const skill of input.skills ?? []) {
-    const dir = skillDirName(skill.name);
+    const dir = skillDirectoryName(skill.name);
     if (!dir) {
       console.warn(`Skipping skill with invalid name: ${skill.name}`);
       continue;
@@ -379,7 +367,7 @@ function describeFiles(files: AgentTurnInput['files'], canRead: boolean): string
 function describeSkills(skills: AgentTurnInput['skills'], canRead: boolean): string {
   if (!skills || skills.length === 0 || !canRead) return '';
   const named = skills
-    .map((skill) => ({ dir: skillDirName(skill.name), name: skill.name }))
+    .map((skill) => ({ dir: skillDirectoryName(skill.name), name: skill.name }))
     .filter((entry): entry is { dir: string; name: string } => entry.dir !== null);
   if (named.length === 0) return '';
   const listing = named

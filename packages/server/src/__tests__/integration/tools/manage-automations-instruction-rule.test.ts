@@ -14,7 +14,8 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import type { Env } from "../../../index";
 import type { AuthContext } from "../../../tools/execute";
-import { executeTool } from "../../../tools/execute";
+import { executeTool, toToolContext } from "../../../tools/execute";
+import { buildAgentsNamespace } from "../../../sandbox/namespaces/agents";
 import { initWorkspaceProvider } from "../../../workspace";
 import { cleanupTestDatabase } from "../../setup/test-db";
 import {
@@ -94,6 +95,52 @@ describe("manage_automations — instruction-presence rule", () => {
 		`;
 	});
 
+	it.each(["rubric", "x".repeat(128), ".", "..", "x".repeat(129)])("accepts only pinned skill names that can become worker files: %s", async (name) => {
+		await buildAgentsNamespace(toToolContext(ownerCtx), TEST_ENV).update({
+			agent_id: agentId,
+			settings: { skillsConfig: { skills: [
+				{ repo: "synthetic/unsafe-name", name, enabled: true, content: "Required instructions" },
+				{ repo: "file/ir-runbook", name: "ir-runbook", enabled: true, content: "Run the instruction-rule workflow." },
+			] } },
+		});
+		const create = executeTool("manage_automations", {
+			action: "create", slug: `unsafe-skill-${name.length}`, managed_agent_id: agentId,
+			skills: [{ name, content: "Required instructions" }],
+		}, TEST_ENV, ownerCtx);
+		if (name === "." || name === ".." || name.length > 128) {
+			await expect(create).rejects.toMatchObject({ httpStatus: 422 });
+		} else {
+			await expect(create).resolves.toMatchObject({ action: "create", version: 1 });
+		}
+	});
+
+	it.each([
+		{ label: "UTF-8 boundary", skills: [{ name: "utf8", content: "é".repeat(16_384) }], valid: true },
+		{ label: "UTF-8 overflow", skills: [{ name: "utf8", content: "é".repeat(16_385) }], valid: false },
+		{ label: "maximum count and bytes", skills: Array.from({ length: 5 }, (_, i) => ({ name: `pin-${i}`, content: i === 0 ? "é".repeat(16_382) : "x" })), valid: true },
+		{ label: "duplicate", skills: [{ name: "utf8", content: "First." }, { name: "utf8", content: "Second." }], valid: false },
+	])("validates saved snapshots with the dispatch constraints: $label", async ({ skills, valid }) => {
+		await buildAgentsNamespace(toToolContext(ownerCtx), TEST_ENV).update({
+			agent_id: agentId,
+			settings: { skillsConfig: { skills: [
+				...skills.filter((skill, i) => skills.findIndex((other) => other.name === skill.name) === i)
+					.map((skill) => ({ ...skill, repo: `synthetic/${skill.name}`, enabled: true })),
+				{ repo: "file/ir-runbook", name: "ir-runbook", enabled: true, content: "Run the instruction-rule workflow." },
+			] } },
+		});
+		const create = executeTool("manage_automations", {
+			action: "create", slug: `snapshot-bounds-${valid}-${skills.length}`, managed_agent_id: agentId, skills,
+		}, TEST_ENV, ownerCtx);
+		if (valid) {
+			const saved = await create as { automation_id: string };
+			const sql = getTestDb();
+			const [version] = await sql`SELECT skills FROM automation_versions WHERE automation_id = ${Number(saved.automation_id)}`;
+			expect(version.skills).toEqual(skills);
+		} else {
+			await expect(create).rejects.toMatchObject({ httpStatus: 422 });
+		}
+	});
+
 	it("creates an event-turn Automation with NO prompt (built-in default applies)", async () => {
 		const created = (await executeTool(
 			"manage_automations",
@@ -170,6 +217,12 @@ describe("manage_automations — instruction-presence rule", () => {
 				content: "Run the instruction-rule workflow.",
 			},
 		]);
+		const [before] = await sql`SELECT current_version_id FROM automations WHERE id = ${Number(created.automation_id)}`;
+		await executeTool("manage_automations", {
+			action: "update", automation_id: created.automation_id!, tags: ["updated"],
+		}, TEST_ENV, ownerCtx);
+		const [after] = await sql`SELECT current_version_id FROM automations WHERE id = ${Number(created.automation_id)}`;
+		expect(after.current_version_id).toBe(before.current_version_id);
 
 		const versioned = (await executeTool(
 			"manage_automations",
@@ -192,6 +245,16 @@ describe("manage_automations — instruction-presence rule", () => {
 		`;
 		expect(v2.prompt).toBe("");
 		expect(v2.skills).toEqual(v1.skills);
+		await executeTool("manage_automations", {
+			action: "create_version", automation_id: created.automation_id!,
+			prompt: "Use the task statement alone", skills: [], set_as_current: true,
+		}, TEST_ENV, ownerCtx);
+		const [cleared] = await sql`
+			SELECT version.skills FROM automations automation
+			JOIN automation_versions version ON version.id = automation.current_version_id
+			WHERE automation.id = ${Number(created.automation_id)}
+		`;
+		expect(cleared.skills).toEqual([]);
 	});
 
 	const REACTION_SCRIPT = `export const input = {

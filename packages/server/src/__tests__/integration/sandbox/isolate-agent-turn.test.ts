@@ -890,16 +890,20 @@ describe("agent turn on the isolate lane", () => {
 		expect(JSON.stringify(first.messages)).toContain("/workspace/input/folder\\\\report.csv");
 	}, 120_000);
 
-	it("seeds an enabled skill as .skills/<name>/SKILL.md", async () => {
+	it.each([
+		["triage", "triage"],
+		["x".repeat(128), "x".repeat(128)],
+		["owner/triage", "triage"],
+	])("seeds an enabled skill as a readable file: %s", async (name, directory) => {
 		hits = [];
 		const body = "# Triage\n\nAlways label the issue before replying.\n";
 		toolScript = [
-			{ id: "toolu_k1", name: "read", input: { file_path: "/workspace/.skills/triage/SKILL.md" } },
+			{ id: "toolu_k1", name: "read", input: { file_path: `/workspace/.skills/${directory}/SKILL.md` } },
 		];
 		armFirstDeltaGate();
 		const run = await runTurn(
 			turnJob({
-				skills: [{ name: "triage", content: body }],
+				skills: [{ name, content: body }],
 				tools: {
 					gatewayUrl: `http://127.0.0.1:${port}/lobu`,
 					definitions: [],
