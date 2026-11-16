@@ -525,6 +525,21 @@ describe('source feed notifications', () => {
     }
   });
 
+  it.each(['pending_auth', 'paused', 'revoked'])('does not charge a late listener setup failure after the connection becomes %s', async status => {
+    const { sql, notice, task, connection } = await subscribedFixture();
+    const before = (await sql`SELECT status, next_run_at, consecutive_failures, last_error FROM feeds WHERE id = ${notice.feed_id}`)[0];
+    const lookup = vi.spyOn(subscriptions, 'sourceFeedSubscriptions').mockImplementationOnce(async () => {
+      await sql`UPDATE connections SET status = ${status} WHERE id = ${connection.id}`;
+      throw new Error('Synthetic late setup failure');
+    });
+    try {
+      await expect(runSourceFeedListener(task)).rejects.toThrow('Synthetic late setup failure');
+      expect((await sql`SELECT status, next_run_at, consecutive_failures, last_error FROM feeds WHERE id = ${notice.feed_id}`)[0]).toEqual(before);
+    } finally {
+      lookup.mockRestore();
+    }
+  });
+
   it('delivers reference batches directly to existing coalescing subscriptions without a source runner', async () => {
     const { sql, org, device, notice, automationId } = await subscribedFixture();
     await sql`UPDATE connector_definitions SET feeds_schema = ${sql.json({ items: {

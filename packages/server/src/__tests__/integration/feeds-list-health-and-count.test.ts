@@ -490,6 +490,41 @@ describe("list_feeds health filter and true total", () => {
 		]);
 	});
 
+	it.each(["pending_auth", "revoked", "error"])(
+		"does not report an enabled feed waiting on a %s connection as overdue",
+		async (connectionStatus) => {
+			const conn = await createTestConnection({
+				organization_id: orgId,
+				connector_key: "hackernews",
+				status: connectionStatus,
+				createDefaultFeed: false,
+			});
+			const sql = getTestDb();
+			// Scheduled admission requires an active connection, so this feed's
+			// due cursor stays in the past until the connection is ready again.
+			await sql`
+				INSERT INTO feeds (
+					organization_id, connection_id, feed_key, status, schedule,
+					next_run_at, last_sync_status, last_sync_at, consecutive_failures,
+					entity_ids, created_at, updated_at
+				) VALUES (
+					${orgId}, ${conn.id}, 'scheduled-overdue', 'active', '0 * * * *',
+					current_timestamp - interval '2 hours', 'success',
+					current_timestamp - interval '3 hours', 0, ARRAY[]::bigint[], NOW(), NOW()
+				)
+			`;
+			const listed = await runList({ connection_id: conn.id });
+			expect(listed.feeds).toHaveLength(1);
+			expect(listed.feeds[0].attention).not.toBe("overdue");
+			expect(
+				(await runList({ connection_id: conn.id, health: "failing" })).feeds,
+			).toHaveLength(0);
+			expect(
+				(await runList({ connection_id: conn.id, health: "healthy" })).feeds,
+			).toHaveLength(1);
+		},
+	);
+
 	// Counting a feed's stored events scans its whole history, so a plain list
 	// never pays for it; a caller that shows the number asks.
 	it("counts each feed's events only when asked", async () => {

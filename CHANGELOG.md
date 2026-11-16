@@ -14,6 +14,18 @@ automatically migrated; raw PostgreSQL DSNs cannot use HTTP header bindings.
 See the [operator migration steps](docs/connector-authoring.md#upgrade-compatibility-fleet-credential-containment)
 before upgrading. This notice covers worker dispatch, not gateway inline paths.
 
+### Compatibility notice: feeds keep their state through authentication changes
+
+[#4975](https://github.com/lobu-ai/lobu/pull/4975) stops connection
+authentication loss and recovery from pausing or resuming feeds. An enabled feed
+now stays enabled while its connection waits for authentication, and runs again
+once the connection is ready; an operator pause is never undone by
+re-authentication. Feeds that earlier versions paused during an authentication
+outage cannot be told apart from operator pauses, so they stay paused after
+upgrading. Find them with `list_feeds` (`status: "paused"`) and resume each one
+you want with `update_feed` (`status: "active"`). Re-entering credentials
+through a connect link needs at least one enabled feed on the connection.
+
 ## [24.11.1](https://github.com/lobu-ai/lobu/compare/lobu-v24.11.0...lobu-v24.11.1) (2026-11-15)
 
 ### Required upgrade step for self-hosted servers

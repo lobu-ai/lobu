@@ -486,7 +486,7 @@ export async function reapStaleRuns(): Promise<ReapStaleRunsResult> {
           FROM lost_syncs
           WHERE feeds.id = lost_syncs.feed_id
           RETURNING feeds.id AS feed_id, lost_syncs.run_id,
-                    feeds.consecutive_failures, feeds.status, feeds.deleted_at
+                    feeds.consecutive_failures, feeds.status, feeds.deleted_at, feeds.connection_id
         ),
         retries AS (
           INSERT INTO public.runs (
@@ -502,6 +502,9 @@ export async function reapStaleRuns(): Promise<ReapStaleRunsResult> {
             t.target_device_worker_id, 'pending', 'auto', current_timestamp
           FROM timed_out t
           JOIN charged_feeds f ON f.run_id = t.id
+          JOIN public.connections c ON c.id = f.connection_id
+            AND c.organization_id = t.organization_id
+            AND c.status = 'active' AND c.deleted_at IS NULL
           -- The charged row is the synchronization point for retry eligibility:
           -- consecutive_failures = 1 means the feed was healthy before this
           -- timeout, while its returned status/deletion state incorporates a

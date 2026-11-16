@@ -65,7 +65,7 @@ async function seed(kind: AuthProfileKind = 'env', attach = true) {
       ${feedBackoff.pauseThreshold}, NOW() - INTERVAL '1 day', 'synthetic sync failure') RETURNING id`;
   const [healthy] = await sql`INSERT INTO feeds
     (organization_id, connection_id, feed_key, status, schedule)
-    VALUES (${owner.org.id}, ${connection.id}, 'healthy', 'paused', '*/5 * * * *') RETURNING id`;
+    VALUES (${owner.org.id}, ${connection.id}, 'healthy', 'active', '*/5 * * * *') RETURNING id`;
   const [manual] = await sql`INSERT INTO feeds
     (organization_id, connection_id, feed_key, status, schedule)
     VALUES (${owner.org.id}, ${connection.id}, 'manual', 'paused', NULL) RETURNING id`;
@@ -120,7 +120,7 @@ describe('auth refresh preserves failure pauses over HTTP', () => {
     expect(validation.status, JSON.stringify(queued)).toBe(200);
     expect(Number(queued.feed_id)).toBe(s.healthy);
     expect(await feed(s.broken)).toEqual(before);
-    expect((await feed(s.manual)).next_run_at).toBeNull();
+    expect(await feed(s.manual)).toMatchObject({ status: 'paused', next_run_at: null });
 
     // Use the production worker client and executor: claim, isolate execution,
     // event/checkpoint streaming, and completion all cross the HTTP listener.
@@ -159,7 +159,7 @@ describe('auth refresh preserves failure pauses over HTTP', () => {
   it('rejects validation with no eligible feed until an explicit human feed resume', async () => {
     const s = await seed();
     const sql = getTestDb();
-    await sql`UPDATE feeds SET consecutive_failures = ${feedBackoff.pauseThreshold},
+    await sql`UPDATE feeds SET status = 'paused', consecutive_failures = ${feedBackoff.pauseThreshold},
       first_failure_at = NOW() - INTERVAL '1 day', last_error = 'synthetic sync failure'
       WHERE connection_id = ${s.connection.id}`;
     const before = await feed(s.broken);
@@ -180,6 +180,52 @@ describe('auth refresh preserves failure pauses over HTTP', () => {
     expect(retry.status, await retry.text()).toBe(200);
   });
 
+  it('requires explicit resume of a manually or legacy-paused validation feed and never resumes siblings', async () => {
+    const s = await seed();
+    const sql = getTestDb();
+    // Also the shape older auth propagation left behind: paused, no failures, no due cursor.
+    await sql`UPDATE feeds SET status = 'paused', next_run_at = NULL WHERE id = ${s.healthy}`;
+    const before = await feed(s.healthy);
+    const response = await post(`/connect/${s.token}/validate`, { credentials: { API_KEY: 'synthetic-key' } });
+    expect(response.status, await response.text()).toBe(409);
+    expect(await feed(s.healthy)).toEqual(before);
+    expect(await sql`SELECT id FROM runs WHERE connection_id = ${s.connection.id}`).toHaveLength(0);
+    expect(await sql`SELECT auth_data FROM auth_profiles WHERE id = ${s.profile.id}`).toEqual([{ auth_data: {} }]);
+
+    // The existing list surface shows the pause; the existing resume action ends it.
+    const session = await createTestSession(s.user.id);
+    const listed = await post(`/api/${s.org.slug}/manage_feeds`, {
+      action: 'list_feeds', connection_id: s.connection.id, status: 'paused',
+    }, session.cookieHeader);
+    const listBody = await listed.json();
+    expect(listed.status, JSON.stringify(listBody)).toBe(200);
+    expect(listBody.feeds.map((f: { id: number }) => Number(f.id)).sort())
+      .toEqual([s.broken, s.healthy, s.manual].sort());
+    const resumed = await post(`/api/${s.org.slug}/manage_feeds`, {
+      action: 'update_feed', feed_id: s.healthy, status: 'active',
+    }, session.cookieHeader);
+    expect(resumed.status, await resumed.text()).toBe(200);
+    const retry = await post(`/connect/${s.token}/validate`, { credentials: { API_KEY: 'synthetic-key' } });
+    const queued = await retry.json();
+    expect(retry.status, JSON.stringify(queued)).toBe(200);
+    expect(Number(queued.feed_id)).toBe(s.healthy);
+    expect(await feed(s.manual)).toMatchObject({ status: 'paused', next_run_at: null });
+  });
+
+  it('cancels validation without changing enabled or paused feed lifecycle', async () => {
+    const s = await seed();
+    const sql = getTestDb();
+    await sql`UPDATE feeds SET next_run_at = NOW() WHERE id = ${s.healthy}`;
+    const before = await feed(s.healthy);
+    const manual = await feed(s.manual);
+    const runId = await runningRun(s);
+    const cancelled = await post(`/connect/${s.token}/cancel`, {});
+    expect(cancelled.status, await cancelled.text()).toBe(200);
+    expect(await feed(s.healthy)).toEqual(before);
+    expect(await feed(s.manual)).toEqual(manual);
+    expect(await sql`SELECT status FROM runs WHERE id = ${runId}`).toEqual([{ status: 'cancelled' }]);
+  });
+
   it('browser-session recovery and fresh auth completion keep the failure pause', async () => {
     const s = await seed('browser_session');
     const before = await feed(s.broken);
@@ -189,7 +235,7 @@ describe('auth refresh preserves failure pauses over HTTP', () => {
     expect(response.status, await response.text()).toBe(200);
     expect(await feed(s.broken)).toEqual(before);
     expect((await feed(s.healthy)).status).toBe('active');
-    expect((await feed(s.manual)).next_run_at).toBeNull();
+    expect(await feed(s.manual)).toMatchObject({ status: 'paused', next_run_at: null });
     const auth = await post('/api/workers/complete-auth', { run_id: await runningRun(s, 'auth'),
       worker_id: WORKER, status: 'success', credentials });
     expect(auth.status, await auth.text()).toBe(200);
@@ -235,7 +281,7 @@ describe('auth refresh preserves failure pauses over HTTP', () => {
     expect(await sql`SELECT name FROM agent_secrets WHERE organization_id = ${s.org.id}`).toHaveLength(0);
   });
 
-  it('rechecks a concurrent failure pause before committing validation', async () => {
+  it.each(['manual', 'failure'])('rechecks a concurrent %s pause before committing validation', async pauseKind => {
     const s = await seed();
     const sql = getTestDb();
     let pending: Promise<Response> | undefined;
@@ -243,7 +289,7 @@ describe('auth refresh preserves failure pauses over HTTP', () => {
       await sql.begin(async tx => {
         // The HTTP request sees the previously eligible row until it takes
         // its lock. Committing this failure must make its recheck reject.
-        await tx`UPDATE feeds SET consecutive_failures = ${feedBackoff.pauseThreshold},
+        await tx`UPDATE feeds SET status = 'paused', consecutive_failures = ${pauseKind === 'failure' ? feedBackoff.pauseThreshold : 0},
           first_failure_at = NOW(), last_error = 'concurrent failure'
           WHERE id = ${s.healthy}`;
         pending = post(`/connect/${s.token}/validate`, { credentials: { API_KEY: 'synthetic-key' } });
@@ -278,13 +324,13 @@ describe('auth refresh preserves failure pauses over HTTP', () => {
     let triggerFinished = false;
     try {
       await sql.begin(async tx => {
-        // Hold recovery at a sibling while a competing enqueue reaches the DB.
-        await tx`SELECT id FROM feeds WHERE id = ${s.manual} FOR UPDATE`;
+        // Hold validation's feed update while a competing trigger reaches admission.
+        await tx`SELECT id FROM feeds WHERE id = ${s.healthy} FOR UPDATE`;
         validation = post(`/connect/${s.token}/validate`, { credentials: { API_KEY: 'synthetic-key' } });
         await expect.poll(async () => {
           const rows = await sql`SELECT pid FROM pg_stat_activity
             WHERE datname = current_database() AND wait_event_type = 'Lock'
-              AND query LIKE '%UPDATE feeds f%status = ''active''%'`;
+              AND query LIKE '%UPDATE feeds f%next_run_at%'`;
           return rows.length;
         }, { timeout: 5000, interval: 20 }).toBeGreaterThan(0);
         trigger = post(`/api/${s.org.slug}/manage_feeds`, {
@@ -302,15 +348,12 @@ describe('auth refresh preserves failure pauses over HTTP', () => {
       const triggerBody = await triggered.json();
       expect(triggered.status, JSON.stringify(triggerBody)).toBe(200);
       const validationBody = await validated.json();
-      expect([200, 409], JSON.stringify(validationBody)).toContain(validated.status);
-      if (validated.status === 200) {
-        expect(triggerBody).toMatchObject({ triggered: false, reason: 'already_active' });
-      } else {
-        expect(triggerBody).toMatchObject({ triggered: true, ...(dryRun ? { dry_run: true } : {}) });
-      }
+      expect(validated.status, JSON.stringify(validationBody)).toBe(200);
+      if (dryRun) expect(triggerBody).toMatchObject({ triggered: false, reason: 'already_active' });
+      else expect(triggerBody.error).toContain('pending_auth');
       expect(await feed(s.broken)).toEqual(before);
       expect(await sql`SELECT dry_run FROM runs WHERE feed_id = ${s.healthy}`)
-        .toEqual([{ dry_run: triggerBody.triggered && dryRun }]);
+        .toEqual([{ dry_run: false }]);
     } finally {
       await Promise.allSettled([validation, trigger]);
     }
@@ -343,6 +386,6 @@ describe('auth refresh preserves failure pauses over HTTP', () => {
     expect(connection.auth_profile_id).not.toBeNull();
     expect(await feed(s.broken)).toEqual(before);
     expect((await feed(s.healthy)).status).toBe('active');
-    expect((await feed(s.manual)).next_run_at).toBeNull();
+    expect(await feed(s.manual)).toMatchObject({ status: 'paused', next_run_at: null });
   });
 });

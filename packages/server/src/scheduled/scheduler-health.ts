@@ -87,6 +87,7 @@ export async function getSchedulerHealth(_env: Env): Promise<SchedulerHealthStat
       WITH scheduling AS (
         SELECT
           f.status,
+          c.status = 'active' AND c.deleted_at IS NULL AS connection_ready,
           f.next_run_at,
           (
             (
@@ -144,11 +145,11 @@ export async function getSchedulerHealth(_env: Env): Promise<SchedulerHealthStat
       SELECT
         CAST(SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS INTEGER) as active_feeds,
         CAST(SUM(CASE
-          WHEN status = 'active' AND next_run_at < current_timestamp AND NOT device_deferred
+          WHEN status = 'active' AND connection_ready AND next_run_at < current_timestamp AND NOT device_deferred
             THEN 1 ELSE 0
         END) AS INTEGER) as overdue_feeds,
         MAX(CASE
-          WHEN status = 'active' AND next_run_at < current_timestamp AND NOT device_deferred
+          WHEN status = 'active' AND connection_ready AND next_run_at < current_timestamp AND NOT device_deferred
             THEN EXTRACT(EPOCH FROM (current_timestamp - next_run_at)) / 3600.0
           ELSE NULL
         END) as max_overdue_hours

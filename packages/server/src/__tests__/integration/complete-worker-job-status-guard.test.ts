@@ -210,7 +210,7 @@ describe('completeWorkerJob status guard (late-completion-after-timeout)', () =>
     const [saved] = await sql`SELECT status, auth_data FROM auth_profiles WHERE id = ${profile.id}`;
     expect(saved).toEqual({ status: 'active', auth_data: { ...credentials, ...authUpdate } });
     const [feed] = await sql`SELECT status, items_collected::int, consecutive_failures, checkpoint FROM feeds WHERE id = ${feedId}`;
-    expect(feed).toEqual({ status: 'active', items_collected: 12, consecutive_failures: 0,
+    expect(feed).toEqual({ status: 'paused', items_collected: 12, consecutive_failures: 0,
       checkpoint: { cursor: 'synthetic-next' } });
   });
 

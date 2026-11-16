@@ -2066,7 +2066,6 @@ export async function handleUpdate(
 
   // biome-ignore lint/suspicious/noExplicitAny: postgres.js row shape
   let updated: any[];
-  let previousConnectionStatus: string;
   try {
     // Row-locked restore→write. The `existing` snapshot at the top of this
     // handler is read WITHOUT a lock, and many awaits (auth-profile lookups,
@@ -2106,7 +2105,7 @@ export async function handleUpdate(
           AND deleted_at IS NULL
         FOR UPDATE
       `;
-      if (lockedRows.length === 0) return { rows: [], previousStatus: null };
+      if (lockedRows.length === 0) return { rows: [] };
       if (lockedRows[0].auth_profile_id !== existing.auth_profile_id ||
         lockedRows[0].app_auth_profile_id !== existing.app_auth_profile_id) {
         return { denial: withFailureCode({ error: 'Connection authentication configuration changed during the update. Refresh and try again.' }, "VALIDATION") };
@@ -2250,16 +2249,15 @@ export async function handleUpdate(
         ...(args.visibility !== undefined ? ['visibility'] : []),
       ];
       await insertToolConfigChange(ctx, { resourceKind: "connection", resourceId: args.connection_id, op: "updated", summary: `Connection '${finalRows[0].display_name ?? finalRows[0].slug ?? args.connection_id}' updated`, before: lockedRows[0] as Record<string, unknown>, state: finalRows[0] as Record<string, unknown>, changedFields }, tx);
-      return { rows, previousStatus: String(lockedRows[0].status) };
+      return { rows };
     });
     if ("denial" in updateOutcome && updateOutcome.denial) {
       return updateOutcome.denial;
     }
     updated = updateOutcome.rows;
-    if (updated.length === 0 || updateOutcome.previousStatus === null) {
+    if (updated.length === 0) {
       return withFailureCode({ error: "Connection not found" }, "NOT_FOUND");
     }
-    previousConnectionStatus = updateOutcome.previousStatus;
   } catch (err) {
     if (isConnectionSlugUniqueViolation(err) && updateExplicitSlug) {
 			return withFailureCode({
@@ -2318,16 +2316,9 @@ export async function handleUpdate(
     status: string;
   };
 
-  // Metadata edits and credential detachment must preserve operator-paused feeds.
-  // An explicit status cascades to feeds, but activation still preserves a
-  // failure-policy pause. A status derived from a newly bound auth profile
-  // moves feeds only when the connection actually changed readiness. A feed
-  // with no cron stays manual (#2021).
-  const shouldCascadeStatus =
-    args.status !== undefined ||
-    (!authSelection.pendingLiveBrowser && effectiveSelectedAuthProfile?.auth_data?.mode !== 'live' && !explicitlyNoAuth &&
-      effectiveStatus !== null &&
-      updatedConnection.status !== previousConnectionStatus);
+  // Only an explicit connection lifecycle choice cascades to its feeds.
+  // Auth-derived readiness changes must preserve each feed's lifecycle state.
+  const shouldCascadeStatus = args.status !== undefined;
   if (shouldCascadeStatus) {
     if (mapConnectionStatusToFeedStatus(updatedConnection.status) === "active") {
       await resumeFeedsForRecoveredConnections(sql, { connectionId: updatedConnection.id });

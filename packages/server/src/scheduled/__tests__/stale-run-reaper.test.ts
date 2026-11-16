@@ -1151,6 +1151,19 @@ describe("reapStaleRuns — a lost claimed sync is charged to its feed", () => {
 		});
 	});
 
+	test.each(["pending_auth", "paused", "revoked", "deleted"])("does not retry a lost sync after its connection becomes %s", async (status) => {
+		const feedId = 8182;
+		await seedScheduledFeed(feedId, 0);
+		const runId = await seedLostSync(feedId);
+		await getDb()`UPDATE connections SET status = ${status === "deleted" ? "active" : status},
+      deleted_at = ${status === "deleted" ? new Date() : null} WHERE id = ${feedId}`;
+		const result = await reapStaleRuns();
+		expect(result.retriesCreated).toBe(0);
+		expect(await statusOf(runId)).toBe("timeout");
+		expect(await feedHealth(feedId)).toMatchObject({ consecutive_failures: 1, status: "active" });
+		expect(await getDb()`SELECT id FROM runs WHERE feed_id = ${feedId} AND status = 'pending'`).toHaveLength(0);
+	});
+
 	test("a feed that was already failing backs off instead of retrying immediately", async () => {
 		const feedId = 8282;
 		await seedScheduledFeed(feedId, 2);

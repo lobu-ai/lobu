@@ -54,10 +54,6 @@ import { getScopedConnectorDefinition } from "../../catalog/connector-definition
 import { ensureConnectorInstalled } from '../../utils/ensure-connector-installed';
 import { callerIsAdmin } from './helpers/db-helpers';
 import {
-  pauseFeedsForInactiveConnections,
-  resumeFeedsForRecoveredConnections,
-} from '../../feeds/auth-readiness-feeds';
-import {
   getEnvKeyMethods,
   getOAuthCredentialKeys,
   getOAuthMethods,
@@ -293,7 +289,7 @@ async function syncConnectionsForOAuthAppProfile(
 }
 
 /**
- * Mirror browser-session readiness onto dependent connections and feeds. On
+ * Mirror browser-session readiness onto dependent connections. On
  * recovery, only connections still marked pending_auth move; routine refreshes
  * leave active and manually paused connections alone.
  */
@@ -305,18 +301,14 @@ async function syncConnectionsForBrowserAuthProfile(
 ): Promise<void> {
   await withTransaction(transaction, async (tx) => {
     if (active) {
-      const recovered = (await tx`
+      await tx`
         UPDATE connections
         SET status = 'active', updated_at = NOW()
         WHERE organization_id = ${organizationId}
           AND auth_profile_id = ${authProfileId}
           AND status = 'pending_auth'
           AND deleted_at IS NULL
-        RETURNING id
-      `) as Array<{ id: number }>;
-      for (const connection of recovered) {
-        await resumeFeedsForRecoveredConnections(tx, { connectionId: connection.id });
-      }
+      `;
       return;
     }
 
@@ -328,7 +320,6 @@ async function syncConnectionsForBrowserAuthProfile(
         AND deleted_at IS NULL
         AND status <> 'paused'
     `;
-    await pauseFeedsForInactiveConnections(tx, { authProfileId });
   });
 }
 
@@ -865,7 +856,7 @@ async function handleDeleteAuthProfile(
     `;
 
     if (existing.profile_kind === 'browser_session') {
-      // Pause dependent connections + their feeds (mirrors
+      // Block dependent connections without changing feed lifecycle (mirrors
       // syncConnectionsForBrowserAuthProfile, inlined for tx locality).
       await tx`
         UPDATE connections
@@ -874,16 +865,6 @@ async function handleDeleteAuthProfile(
           AND auth_profile_id = ${existing.id}
           AND deleted_at IS NULL
           AND status <> 'paused'
-      `;
-      await tx`
-        UPDATE feeds f
-        SET status = 'paused',
-            next_run_at = NULL,
-            updated_at = NOW()
-        FROM connections c
-        WHERE f.connection_id = c.id
-          AND c.organization_id = ${ctx.organizationId}
-          AND c.auth_profile_id = ${existing.id}
       `;
     }
 

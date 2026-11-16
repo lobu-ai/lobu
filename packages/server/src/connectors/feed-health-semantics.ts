@@ -55,9 +55,8 @@
  *     `next_run_at <= now`. Two writers of that column are REPEATING and can
  *     sustain a cadence: the cron (re-stamped at every run completion) and an
  *     app-webhook delivery. The rest are one-shot episodic re-arms tied to a
- *     lifecycle moment — device auto-wire's first stamp, auth-completion and
- *     browser-reauth resume (`run-lifecycle`), connect (`connect/routes`), and
- *     auth-profile activation (`manage_auth_profiles`). Each fires once and
+ *     lifecycle moment, such as device auto-wire's first stamp; connection
+ *     auth recovery never re-arms a feed. Each fires once and
  *     `run-lifecycle` nulls the column again when that run completes, because
  *     there is no cron to compute the next one from. So a feed with neither
  *     repeating writer cannot hold a cadence however many episodic re-arms it

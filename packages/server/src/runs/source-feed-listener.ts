@@ -34,6 +34,9 @@ export async function recordSourceFeedFailure(
     next_run_at = ${feedRetryAtSql(sql, sql`consecutive_failures`)}
     WHERE id = ${task.feedId} AND organization_id = ${task.organizationId}
       AND status = 'active' AND deleted_at IS NULL
+      AND EXISTS (SELECT 1 FROM connections c
+        WHERE c.id = feeds.connection_id AND c.organization_id = feeds.organization_id
+          AND c.status = 'active' AND c.deleted_at IS NULL)
       ${config === undefined ? sql`` : sql`AND COALESCE(config, '{}'::jsonb) = ${sql.json(config)}::jsonb`}`;
 }
 

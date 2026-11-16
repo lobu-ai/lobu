@@ -410,11 +410,8 @@ describe('completeAuthRun feed reactivation', () => {
   });
 
   it.each([
-    { failures: 0, expectedStatus: 'active' },
-    { failures: feedBackoff.pauseThreshold - 1, expectedStatus: 'active' },
-    { failures: feedBackoff.pauseThreshold, expectedStatus: 'paused' },
-    { failures: feedBackoff.pauseThreshold + 1, expectedStatus: 'paused' },
-  ])('leaves a paused feed with $failures failures $expectedStatus after auth succeeds', async ({ failures, expectedStatus }) => {
+    0, feedBackoff.pauseThreshold - 1, feedBackoff.pauseThreshold, feedBackoff.pauseThreshold + 1,
+  ])('leaves a paused feed with %s failures unchanged after auth succeeds', async (failures) => {
     const org = await createTestOrganization();
     const profileId = await insertPendingAuthProfile(org.id, { connectorKey: 'github' });
     const runId = await insertRunningAuthRun(org.id, profileId);
@@ -460,13 +457,7 @@ describe('completeAuthRun feed reactivation', () => {
       SELECT status, next_run_at, consecutive_failures, first_failure_at, last_error
       FROM feeds WHERE connection_id = ${connection.id}
     `;
-    expect(after.status).toBe(expectedStatus);
-    if (expectedStatus === 'paused') {
-      expect(after).toEqual(before);
-    } else {
-      expect(after.next_run_at).not.toBeNull();
-      expect(after).toEqual({ ...before, status: 'active', next_run_at: after.next_run_at });
-    }
+    expect(after).toEqual(before);
   });
 });
 
