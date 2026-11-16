@@ -17,6 +17,7 @@ import { ACL_RESOURCE_TYPE_SLUG, type EntityMetrics } from "@lobu/connector-sdk"
 import { classifyToolError, getErrorMessage, slugify } from "@lobu/core";
 import { VIEW_PATH_MARKER } from "@lobu/core/contracts/tools/view-path";
 import type { AttributeFilter } from "@lobu/core/contracts/tools/collection-selection";
+import { ENTITY_LIST_METADATA_SORT_PREFIX, ENTITY_LIST_SORT_KEYS, entityMetadataSortType, type EntityMetadataSortType } from "@lobu/core/contracts/tools/collection-presentation";
 import { attributeFilterSql, validateAttributeFilters } from "./attribute-filters";
 import { feedLinkedToBusinessEntitySql } from "../authz/channel-about";
 import { type AuthzScope, authzScopeFromToolContext } from "../authz/scope";
@@ -44,7 +45,7 @@ import {
 import { type DbClient, getDb, pgBigintArray, pgTextArray } from "../db/client";
 import type { Env } from "../index";
 import { entitySegmentPredicate } from "../metrics/compiler";
-import { canReadWorkspaceIdentity } from "../tools/access-control";
+import { canReadWorkspaceIdentity, memberReadRole } from "../tools/access-control";
 import { querySqlImpl } from "../tools/admin/query_sql";
 import type { ToolContext } from "../tools/registry";
 import {
@@ -76,6 +77,7 @@ import { isUniqueViolation } from "./pg-errors";
 import { requireWriteAccess } from "./organization-access";
 import { readEntityStamps } from "./entity-stamps";
 import { RESERVED_ENTITY_TYPE_SLUGS } from "./reserved";
+import { canSeeMemberEmail, resolveMemberSchemaFieldsFromSchema } from "./member-entity-type";
 import {
 	invalidateOrgAcl,
 	lockOrgForAclInvalidation,
@@ -2472,11 +2474,22 @@ export async function listEntities(
 	if (filters.filters?.length && !filters.entity_type) {
 		throw new ToolUserError("Attribute filters require entity_type", 400, "VALIDATION");
 	}
+	const metadataSortField = filters.sort_by?.startsWith(ENTITY_LIST_METADATA_SORT_PREFIX)
+		? filters.sort_by.slice(ENTITY_LIST_METADATA_SORT_PREFIX.length)
+		: null;
+	if (metadataSortField !== null && !filters.entity_type) {
+		throw new ToolUserError(
+			`sort_by '${filters.sort_by}' requires entity_type: a metadata field is declared on one entity type.`,
+			400,
+			"VALIDATION",
+		);
+	}
 
 	// Derived ("view") entity types have no rows in `entities` — their rows come
 	// from `backing_sql`. Return them in the standard list shape so the frontend
 	// renders them with the normal table (no derived-specific UI path).
 	let segmentIds: number[] | null = null;
+	let typeSchema: unknown;
 	if (filters.entity_type) {
 		// The type search path (the workspace's own type, then a public
 		// catalog's), so a catalog type's schema drives filters and segments.
@@ -2498,6 +2511,7 @@ export async function listEntities(
       LIMIT 1
     `;
 		const backingSql = etRows[0]?.backing_sql as string | null | undefined;
+		typeSchema = etRows[0]?.metadata_schema;
 		if (filters.filters?.length) validateAttributeFilters(filters.filters, etRows[0]?.metadata_schema);
 		if (filters.segment) {
 			if (backingSql) {
@@ -2521,14 +2535,17 @@ export async function listEntities(
 			);
 		}
 		if (backingSql) {
-			return listDerivedEntities(
+			// A derived row's metadata IS its projected columns, so a metadata
+			// sort names the column directly.
+			const derived = await listDerivedEntities(
 				filters.entity_type,
 				backingSql,
 				(etRows[0]?.backing_source as string | null | undefined) ?? undefined,
-				{ limit, offset, search: filters.search, filters: filters.filters, sort_by: filters.sort_by, sort_order: filters.sort_order },
+				{ limit, offset, search: filters.search, filters: filters.filters, sort_by: metadataSortField ?? filters.sort_by, sort_order: filters.sort_order },
 				ctx,
 				recordKeyColumn(etRows[0]?.metadata_schema),
 			);
+			return { ...derived, sortBy: filters.sort_by ?? derived.sortBy };
 		}
 	}
 
@@ -2580,23 +2597,14 @@ export async function listEntities(
 
 	const whereClause = renderWhere("e", "et");
 
-	const sortColumnMap: Record<string, string> = {
-		name: "e.name",
-		domain: "e.metadata->>'domain'",
-		created_at: "e.created_at",
-		total_content: "total_content",
-		active_connections: "active_connections",
-		automations_count: "automations_count",
-		children_count: "children_count",
-	};
-
-	const sortBy =
-		filters.sort_by && sortColumnMap[filters.sort_by]
-			? filters.sort_by
-			: "created_at";
+	const sortBy = filters.sort_by ?? "created_at";
+	const sortSql = metadataSortField !== null
+		? metadataSortSql(metadataSortField, typeSchema, filters.entity_type as string, ctx)
+		: builtinSortSql(sortBy);
 	const normalizedSortOrder = filters.sort_order === "asc" ? "asc" : "desc";
-	const sortOrderSql = normalizedSortOrder === "asc" ? "ASC" : "DESC";
-	const orderBy = `${sortColumnMap[sortBy]} ${sortOrderSql}, e.id ASC`;
+	// A metadata value can be missing or unparseable; those rows go last both ways.
+	const sortOrderSql = `${normalizedSortOrder === "asc" ? "ASC" : "DESC"}${metadataSortField !== null ? " NULLS LAST" : ""}`;
+	const orderBy = `${sortSql("e")} ${sortOrderSql}, e.id ASC`;
 
 	// Each statement binds only the parameter prefix its placeholders use:
 	// filters, then enrichment policies, then event visibility.
@@ -2610,7 +2618,7 @@ export async function listEntities(
   }, 'ev');
   params.push(...visibility.params);
 
-  const plainSort = sortBy === 'name' || sortBy === 'created_at' || sortBy === 'domain';
+  const plainSort = metadataSortField !== null || sortBy === 'name' || sortBy === 'created_at' || sortBy === 'domain';
 
 	const baseQuery = `
     FROM entities e
@@ -2636,7 +2644,7 @@ export async function listEntities(
   const pageIdQuery = `SELECT e2.id FROM entities e2
           JOIN entity_types et2 ON et2.id = e2.entity_type_id
           WHERE ${renderWhere('e2', 'et2')}
-          ORDER BY ${sortColumnMap[sortBy].replace(/^e\./, 'e2.')} ${sortOrderSql}, e2.id ASC
+          ORDER BY ${sortSql('e2')} ${sortOrderSql}, e2.id ASC
           LIMIT ${limit + 1} OFFSET ${offset}`;
   // Enrichment joins each produce at most one row per entity, so the total
   // needs only the filters.
@@ -2706,6 +2714,81 @@ export async function listEntities(
 
   const readableEntities = await filterEntityReadRows(sql, await attachEntityIdentities(sql, entities), readRestrictions);
   return { entities: readableEntities, hasMore, totalCount, limit, offset, sortBy, sortOrder: normalizedSortOrder };
+}
+
+/** The fixed sort keys of a stored list, as SQL over the entity alias. */
+function builtinSortSql(sortBy: string): (alias: string) => string {
+	switch (sortBy as (typeof ENTITY_LIST_SORT_KEYS)[number]) {
+		case "name": return (alias) => `${alias}.name`;
+		case "domain": return (alias) => `${alias}.metadata->>'domain'`;
+		case "created_at": return (alias) => `${alias}.created_at`;
+		// Computed per-row counts, selected under these names by the list query.
+		case "total_content":
+		case "active_connections":
+		case "automations_count":
+		case "children_count":
+			return () => sortBy;
+		default:
+			throw new ToolUserError(
+				`Unknown sort_by '${sortBy}'. Use one of ${ENTITY_LIST_SORT_KEYS.join(", ")}, or ${ENTITY_LIST_METADATA_SORT_PREFIX}<field> for a declared scalar property of entity_type.`,
+				400,
+				"VALIDATION",
+			);
+	}
+}
+
+/**
+ * Order by a declared scalar metadata property, typed by the schema. A value
+ * that does not parse as the declared type orders as NULL instead of failing
+ * the read: legacy rows and other writers can hold any JSON.
+ */
+function metadataSortSql(field: string, schema: unknown, entityType: string, ctx: ToolContext): (alias: string) => string {
+	const properties = schema && typeof schema === "object"
+		? (schema as { properties?: Record<string, unknown> }).properties
+		: undefined;
+	if (!properties || !Object.hasOwn(properties, field)) {
+		throw new ToolUserError(
+			`sort_by '${ENTITY_LIST_METADATA_SORT_PREFIX}${field}': '${field}' is not declared in ${entityType} metadata_schema.properties`,
+			400,
+			"VALIDATION",
+		);
+	}
+	const type = entityMetadataSortType(properties[field]);
+	if (!type) {
+		throw new ToolUserError(
+			`sort_by '${ENTITY_LIST_METADATA_SORT_PREFIX}${field}': '${field}' is not a scalar property (string, number, integer, boolean, or string enum)`,
+			400,
+			"VALIDATION",
+		);
+	}
+	// Ordering reveals values the response redacts, so it needs the same read.
+	if (
+		entityType === MEMBER_ENTITY_TYPE_SLUG &&
+		field === resolveMemberSchemaFieldsFromSchema(schema as Record<string, unknown>).emailField &&
+		!canSeeMemberEmail(memberReadRole(ctx))
+	) {
+		throw new ToolUserError("Sorting members by email requires workspace administrator access", 403);
+	}
+	// A declared key, inlined as a literal: every statement of the list binds
+	// its own parameter prefix, and the sort appears in two of them.
+	const key = `'${field.replaceAll("'", "''")}'`;
+	return (alias) => typedMetadataSql(`${alias}.metadata->${key}`, `${alias}.metadata->>${key}`, type);
+}
+
+function typedMetadataSql(json: string, text: string, type: EntityMetadataSortType): string {
+	switch (type) {
+		case "timestamptz":
+		case "date":
+			// A leading digit keeps 'now', 'today' and 'infinity', which Postgres
+			// accepts as date input, from ordering as moving or extreme values.
+			return `(CASE WHEN jsonb_typeof(${json}) = 'string' AND ascii(${text}) BETWEEN 48 AND 57 AND pg_input_is_valid(${text}, '${type}') THEN (${text})::${type} END)`;
+		case "numeric":
+			return `(CASE WHEN jsonb_typeof(${json}) = 'number' THEN (${text})::numeric END)`;
+		case "boolean":
+			return `(CASE WHEN jsonb_typeof(${json}) = 'boolean' THEN (${text})::boolean END)`;
+		case "text":
+			return `(CASE WHEN jsonb_typeof(${json}) = 'string' THEN ${text} END)`;
+	}
 }
 
 /**

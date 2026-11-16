@@ -26,7 +26,7 @@ import {
   type RelationshipTypeRuleRow,
 } from '@lobu/core/contracts/tools/manage-entity-schema';
 import { Value } from '@sinclair/typebox/value';
-import { COLLECTION_PRESENTATION_KEY, parseCollectionPresentation } from '@lobu/core/contracts/tools/collection-presentation';
+import { COLLECTION_PRESENTATION_KEY, collectionSortFieldError, parseCollectionPresentation } from '@lobu/core/contracts/tools/collection-presentation';
 import { validateEntityMetrics } from '@lobu/connector-sdk';
 import { isPlatformEventType, platformEventKinds } from '../../automations/platform-event-catalog';
 import { compileEntityRule } from '../../authz/entity-rule-executor';
@@ -1060,7 +1060,8 @@ function assertValidEventKindInteractions(
 }
 
 function validateEntityMetadataSchemaConfig(
-  metadataSchema: Record<string, unknown> | undefined
+  metadataSchema: Record<string, unknown> | undefined,
+  derived: boolean
 ): void {
   if (!metadataSchema || typeof metadataSchema !== 'object' || Array.isArray(metadataSchema)) {
     return;
@@ -1083,10 +1084,20 @@ function validateEntityMetadataSchemaConfig(
   }
 
   if (metadataSchema[COLLECTION_PRESENTATION_KEY] !== undefined) {
+    let presentation;
     try {
-      parseCollectionPresentation(metadataSchema[COLLECTION_PRESENTATION_KEY]);
+      presentation = parseCollectionPresentation(metadataSchema[COLLECTION_PRESENTATION_KEY]);
     } catch (error) {
       throw invalidSchema(`metadata_schema.${COLLECTION_PRESENTATION_KEY}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    // A stored list sorts by a built-in key or a declared scalar property; a
+    // derived list sorts by whatever its backing SQL projects.
+    if (!derived) {
+      const properties = metadataSchema.properties as Record<string, unknown> | undefined;
+      for (const table of [presentation.table, ...(presentation.presets ?? []).map((preset) => preset.table)]) {
+        const error = table?.sort && collectionSortFieldError(table.sort.field, properties);
+        if (error) throw invalidSchema(`metadata_schema.${COLLECTION_PRESENTATION_KEY}: ${error}`);
+      }
     }
   }
 
@@ -1353,7 +1364,7 @@ async function prepareEntityTypeCreate(
     );
   }
 
-  validateEntityMetadataSchemaConfig(args.metadata_schema);
+  validateEntityMetadataSchemaConfig(args.metadata_schema, !!args.backing?.sql);
   assertValidBacking(args.backing);
   if (recordKeyColumn(args.metadata_schema) && !args.backing?.sql) throw invalidSchema('A stable source record key requires backing.sql');
 
@@ -1485,7 +1496,10 @@ async function etHandleUpdate(
 
   const beforePayload = { ...current } as Record<string, unknown>;
   if (args.metadata_schema !== undefined) {
-    validateEntityMetadataSchemaConfig(args.metadata_schema);
+    validateEntityMetadataSchemaConfig(
+      args.metadata_schema,
+      !!(args.backing === undefined ? current.backing_sql : args.backing?.sql)
+    );
   }
   assertValidMetricsConfig(args.metrics_config);
   assertValidBacking(args.backing);
