@@ -22,9 +22,21 @@
  * through `lobu apply`, which bundles the project's own `node_modules`.
  */
 
-import type { CSSProperties, MouseEvent, ReactNode, RefObject } from "react";
-import { useEffect, useId, useRef, useState } from "react";
-import { resolveViewHref, useHost } from "./api.js";
+import type { CollectionSelection } from "@lobu/core/contracts/tools/collection-selection";
+import type {
+  ComponentType,
+  CSSProperties,
+  MouseEvent,
+  ReactNode,
+  RefObject,
+} from "react";
+import { createElement, useEffect, useId, useRef, useState } from "react";
+import { resolveViewHref, tool, useHost, useQuery } from "./api.js";
+import {
+  type EntityCollectionProps,
+  NATIVE_COMPONENT_GLOBAL,
+  type ViewEntity,
+} from "./native.js";
 
 const FONT_STACK =
   'var(--font-sans, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif)';
@@ -1126,6 +1138,259 @@ export function formatCompact(value: number): string {
   if (abs >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
   if (abs >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
   return String(value);
+}
+
+/* ------------------------------------------------------------------ */
+/* EntityCollection                                                    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The native collection where the host supplies native components; anywhere
+ * else a plain table over the same `manage_entity_schema get` and
+ * `manage_entity list` reads. See `EntityCollectionProps`.
+ */
+export function EntityCollection(props: EntityCollectionProps) {
+  const native = (
+    globalThis as unknown as Record<
+      string,
+      Partial<Record<string, ComponentType<EntityCollectionProps>>> | undefined
+    >
+  )[NATIVE_COMPONENT_GLOBAL]?.EntityCollection;
+  if (native) return createElement(native, props);
+  // A new selection starts the fallback table at its first page.
+  const key = JSON.stringify([
+    props.entityType,
+    props.preset,
+    props.selection ?? props.defaultSelection,
+  ]);
+  return createElement(CollectionTable, { ...props, key });
+}
+
+const SELECTION_KEYS = new Set(["search", "filters", "segment"]);
+const FIELD = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const MAX_PAGE_SIZE = 500;
+
+function plainFilter(filter: unknown): boolean {
+  if (!filter || typeof filter !== "object") return false;
+  const { field, op, value, ...rest } = filter as Record<string, unknown>;
+  if (
+    Object.keys(rest).length ||
+    typeof field !== "string" ||
+    !FIELD.test(field)
+  )
+    return false;
+  if (op === "eq" || op === "neq")
+    return (
+      value === null || ["string", "number", "boolean"].includes(typeof value)
+    );
+  return (
+    (op === "lt" || op === "lte" || op === "gt" || op === "gte") &&
+    (typeof value === "string" || typeof value === "number")
+  );
+}
+
+/** The selection contract checked without the schema library the native
+ *  build carries, so a malformed selection is an error, never a wider read. */
+function plainSelection(raw: unknown): CollectionSelection {
+  const valid =
+    !!raw &&
+    typeof raw === "object" &&
+    !Array.isArray(raw) &&
+    Object.entries(raw).every(([key, value]) =>
+      key === "filters"
+        ? Array.isArray(value) && value.length <= 32 && value.every(plainFilter)
+        : SELECTION_KEYS.has(key) && typeof value === "string"
+    );
+  if (!valid) throw new Error("Invalid collection selection");
+  return raw as CollectionSelection;
+}
+
+/** The selection a fallback table reads. A saved filter it cannot resolve on
+ *  its own (a viewer or relative-date preset) is an error, never every row. */
+function fallbackSelection(
+  schema: Record<string, unknown> | undefined,
+  preset: string | undefined,
+  selection: CollectionSelection | undefined
+): CollectionSelection {
+  if (preset !== undefined) {
+    const presets = (
+      schema?.["x-lobu-collection"] as { presets?: unknown } | undefined
+    )?.presets;
+    const found = Array.isArray(presets)
+      ? (presets as Array<Record<string, unknown>>).find(
+          (item) => item?.key === preset
+        )
+      : undefined;
+    if (!found || found.viewer !== undefined)
+      throw new Error(
+        "This saved filter is unavailable. Choose another filter."
+      );
+    if (selection !== undefined) return plainSelection(selection);
+    if (found.relativeDate !== undefined)
+      throw new Error("This saved filter needs the native collection.");
+    return plainSelection(found.selection ?? {});
+  }
+  return plainSelection(selection ?? {});
+}
+
+function CollectionTable(props: EntityCollectionProps) {
+  const host = useHost();
+  const [page, setPage] = useState(1);
+  const type = useQuery<{
+    entity_type?: {
+      name?: string;
+      metadata_schema?: Record<string, unknown> | string | null;
+    } | null;
+  }>(
+    tool("manage_entity_schema", {
+      schema_type: "entity_type",
+      action: "get",
+      slug: props.entityType,
+    })
+  );
+  const rawSchema = type.data?.entity_type?.metadata_schema;
+  let schema: Record<string, unknown> | undefined;
+  let selection: CollectionSelection | undefined;
+  let invalid: string | undefined;
+  try {
+    schema =
+      typeof rawSchema === "string"
+        ? JSON.parse(rawSchema)
+        : (rawSchema ?? undefined);
+    selection = fallbackSelection(
+      schema,
+      props.preset,
+      props.selection ?? props.defaultSelection
+    );
+  } catch (error) {
+    invalid = error instanceof Error ? error.message : String(error);
+  }
+  const pageSize = Math.min(
+    Math.max(1, Math.floor(props.pageSize ?? 50) || 50),
+    MAX_PAGE_SIZE
+  );
+  const ready = !!type.data?.entity_type && !invalid;
+  const list = useQuery<{
+    entities: ViewEntity[];
+    metadata?: { has_more?: boolean; total_count?: number };
+  }>(
+    ready
+      ? tool("manage_entity", {
+          action: "list",
+          entity_type: props.entityType,
+          search: selection?.search?.trim() || undefined,
+          filters: selection?.filters?.length ? selection.filters : undefined,
+          segment: selection?.segment,
+          limit: pageSize,
+          offset: (page - 1) * pageSize,
+        })
+      : null
+  );
+  const properties =
+    (schema?.properties as
+      | Record<string, Record<string, unknown> | undefined>
+      | undefined) ?? {};
+  const columns: TableColumn<ViewEntity>[] = [
+    {
+      key: "name",
+      header: "Name",
+      render: (entity) => (
+        <button
+          type="button"
+          onClick={() =>
+            props.onOpenRecord
+              ? props.onOpenRecord(entity)
+              : void host
+                  .openRecord(
+                    {
+                      entity_id: entity.id ?? entity.slug,
+                      entity_type: entity.entity_type,
+                    },
+                    { mode: "peek" }
+                  )
+                  .catch((error) =>
+                    console.error("[lobu-views] record not opened", error)
+                  )
+          }
+          style={{
+            border: 0,
+            padding: 0,
+            background: "transparent",
+            font: "inherit",
+            cursor: "pointer",
+            textAlign: "left",
+            color: "var(--color-text-info, #2563eb)",
+          }}
+        >
+          {entity.name}
+        </button>
+      ),
+    },
+    ...Object.entries(properties)
+      .filter(([, prop]) => prop?.["x-table-column"] === true)
+      .map(([key, prop]) => ({
+        key,
+        header: String(prop?.["x-table-label"] ?? prop?.title ?? key),
+        render: (entity: ViewEntity) => {
+          const value = entity.metadata?.[key];
+          return value === null || value === undefined
+            ? ""
+            : typeof value === "object"
+              ? JSON.stringify(value)
+              : String(value);
+        },
+      })),
+  ];
+  const error =
+    invalid ??
+    type.error ??
+    (type.data && !type.data.entity_type ? "Entity type not found." : null) ??
+    list.error;
+  const rows = list.data?.entities ?? [];
+  return (
+    <section style={INK} aria-label={props.entityType}>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 8,
+          marginBottom: 8,
+        }}
+      >
+        <h2 style={{ margin: 0, fontSize: 16 }}>
+          {props.title ?? type.data?.entity_type?.name ?? props.entityType}
+        </h2>
+        {props.actions}
+      </div>
+      {error ? (
+        <ErrorState
+          message={error}
+          onRetry={
+            invalid
+              ? undefined
+              : () => (type.error ? type.refetch() : list.refetch())
+          }
+        />
+      ) : !list.loading && list.data && rows.length === 0 && props.empty ? (
+        props.empty
+      ) : (
+        <DataTable
+          columns={columns}
+          rows={rows}
+          keyOf={(entity, index) => String(entity.id ?? entity.slug ?? index)}
+          loading={type.loading || list.loading || !list.data}
+          emptyText="No records."
+          pagination={{
+            page,
+            pageSize,
+            total: list.data?.metadata?.total_count,
+            onPage: setPage,
+          }}
+        />
+      )}
+    </section>
+  );
 }
 
 export * from "./native.js";

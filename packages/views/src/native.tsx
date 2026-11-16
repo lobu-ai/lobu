@@ -6,6 +6,7 @@ import {
   type ReactNode,
   type ComponentProps,
 } from "react";
+import type { CollectionSelection } from "@lobu/core/contracts/tools/collection-selection";
 import type { ValueFormat } from "@lobu/core/json-template";
 
 export interface ViewEntity {
@@ -159,6 +160,49 @@ export interface EntityListPageProps {
   empty?: ReactNode;
 }
 
+export type CollectionLayout = "table" | "board";
+
+/**
+ * One entity type's native collection, as on its `/<type>` page: saved
+ * filters (`x-lobu-collection` presets), search, filter chips, the segment
+ * chip and the table/board switch, read through the view broker with the
+ * visiting user's access. Read-only: no create, board moves or preset saving.
+ * An invalid selection, an unknown preset or a viewer preset (no identity
+ * crosses into a view) renders an error, never unfiltered rows. Hosts without
+ * native components render a plain table over the same read.
+ */
+export interface EntityCollectionProps {
+  entityType: string;
+  /** A saved filter's key; `selection` beside it edits that preset. */
+  preset?: string;
+  /** Controlled `{ search, filters, segment }`. */
+  selection?: CollectionSelection;
+  defaultSelection?: CollectionSelection;
+  onSelectionChange?(next: CollectionSelection): void;
+  /** Else the type's default layout, then the workflow auto-pick. */
+  layout?: CollectionLayout;
+  defaultLayout?: CollectionLayout;
+  /** One entry hides the switcher; board needs a workflow-state field. */
+  allowedLayouts?: readonly CollectionLayout[];
+  onLayoutChange?(layout: CollectionLayout): void;
+  /** `false` hides every control; an object hides the ones set to false. */
+  controls?:
+    | boolean
+    | {
+        search?: boolean;
+        filters?: boolean;
+        segments?: boolean;
+        presets?: boolean;
+      };
+  /** Table rows per page: default 50, at most 500. */
+  pageSize?: number;
+  /** Default: the native record peek. */
+  onOpenRecord?(entity: ViewEntity): void;
+  title?: ReactNode;
+  actions?: ReactNode;
+  empty?: ReactNode;
+}
+
 /** Shared record body; callers provide activity, views and authorized actions. */
 export interface EntityRecordPageProps {
   entity: ViewEntity;
@@ -238,6 +282,7 @@ export interface NativeComponentProps {
   ConnectorReference: ConnectorReferenceProps;
   JsonDiff: JsonDiffProps;
   EntityListPage: EntityListPageProps;
+  EntityCollection: EntityCollectionProps;
   EntityRecordPage: EntityRecordPageProps;
   EntityTableView: EntityTableViewProps;
   RecordSpecSheet: {
@@ -296,6 +341,7 @@ export const NATIVE_COMPONENT_NAMES = [
   "ConnectorReference",
   "JsonDiff",
   "EntityListPage",
+  "EntityCollection",
   "EntityRecordPage",
   "EntityTableView",
   "RecordSpecSheet",
