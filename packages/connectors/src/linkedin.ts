@@ -3125,7 +3125,6 @@ export default class LinkedInConnector extends ConnectorRuntime<
                 "^(?:[A-Za-z0-9_-]+=*|urn:li:msg_conversation:\\((?:urn:li:fsd_profile:[A-Za-z0-9_-]+|urn:li:fsd_pageMailbox:[0-9]+),[A-Za-z0-9_-]+=*\\))$",
               maxLength: 500,
               title: "Conversation",
-              readOnly: true,
               description:
                 "The row's thread_id (the member's own inbox) or its full conversation_id (the inbox it names).",
             },
@@ -3135,7 +3134,6 @@ export default class LinkedInConnector extends ConnectorRuntime<
               minLength: 1,
               maxLength: 300,
               title: "Idempotency key",
-              readOnly: true,
               description: "One reply per key: a retry returns the first send.",
             },
           },
