@@ -181,8 +181,20 @@ describe('external MCP claim then completion', () => {
     expect(new Date(after.next_window_start).toISOString()).toBe(claimed.context.window_end);
   });
 
-  it('hands the claimer the run-pinned prompt and skills, not a later edit', async () => {
-    const skills = [{ name: 'signal-rubric', content: 'Score each signal from 1 to 5.' }];
+  it.each([
+    { label: 'normal', skills: [{ name: 'frozen', content: 'Frozen instructions.' }], readable: true },
+    { label: 'empty', skills: [], readable: true },
+    { label: 'maximum name', skills: [{ name: 'x'.repeat(128), content: 'Frozen instructions.' }], readable: true },
+    { label: 'dot', skills: [{ name: '.', content: 'Frozen instructions.' }], readable: false },
+    { label: 'parent', skills: [{ name: '..', content: 'Frozen instructions.' }], readable: false },
+    { label: 'long name', skills: [{ name: 'x'.repeat(129), content: 'Frozen instructions.' }], readable: false },
+    { label: 'maximum UTF-8 bytes', skills: [{ name: 'utf8', content: 'é'.repeat(16_384) }], readable: true },
+    { label: 'maximum count and bytes', skills: Array.from({ length: 5 }, (_, i) => ({ name: `pin-${i}`, content: i === 0 ? 'é'.repeat(16_382) : 'x' })), readable: true },
+    { label: 'excess UTF-8 bytes', skills: [{ name: 'utf8', content: 'é'.repeat(16_385) }], readable: false },
+    { label: 'legacy oversized body', skills: [{ name: 'oversized', content: 'x'.repeat(64_001) }], readable: false },
+    { label: 'legacy excess count', skills: Array.from({ length: 65 }, (_, i) => ({ name: `pin-${i}`, content: 'Frozen instructions.' })), readable: false },
+    { label: 'duplicate names', skills: [{ name: 'same', content: 'First.' }, { name: 'same', content: 'Second.' }], readable: false },
+  ])('delivers readable frozen pins or fails the external claim: $label', async ({ label, skills, readable }) => {
     await sql`
       UPDATE automation_versions
       SET skills = ${sql.json(skills)}
@@ -192,6 +204,26 @@ describe('external MCP claim then completion', () => {
       SELECT current_version_id FROM automations WHERE id = ${automationId}
     `;
 
+    if (!readable) {
+      await expect(api.automations.claimNextWindow({ automation_id: String(automationId) }))
+        .rejects.toMatchObject({ httpStatus: 409 });
+      const [failed] = await sql`SELECT status, error_message FROM runs WHERE automation_id = ${automationId}`;
+      expect(failed).toMatchObject({ status: 'failed', error_message: expect.stringContaining('malformed pinned skills') });
+      if (label === 'legacy oversized body') {
+        await api.automations.createVersion({
+          automation_id: String(automationId), prompt: 'Repaired instructions.', skills: [],
+        });
+        const repaired = await api.automations.claimNextWindow({ automation_id: String(automationId) });
+        expect(repaired.context.instructions).toMatchObject({ prompt: 'Repaired instructions.', skills: [] });
+        await api.automations.completeWindow({
+          automation_id: String(automationId), run_id: repaired.run_id,
+          window_token: repaired.context.window_token, extracted_data: { signals: [] },
+        });
+        const [original] = await sql`SELECT skills FROM automation_versions WHERE id = ${pinned.current_version_id}`;
+        expect(original.skills).toEqual(skills);
+      }
+      return;
+    }
     const claimed = await api.automations.claimNextWindow({
       automation_id: String(automationId), lease_seconds: 1800,
     });

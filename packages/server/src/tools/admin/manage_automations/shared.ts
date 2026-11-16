@@ -2,6 +2,7 @@
  * Shared types, utilities, and helpers used across manage_automations sub-handlers.
  */
 
+import { validateAutomationSkillSnapshots } from "../../../automations/skill-snapshots";
 import type { DbClient } from '../../../db/client';
 import { getDb } from '../../../db/client';
 import { ToolUserError } from '../../../utils/errors';
@@ -246,35 +247,8 @@ export async function assertAutomationSkillsResolve(
   skills: Array<{ name: string; content: string }>
 ): Promise<void> {
   if (skills.length === 0) return;
-  if (skills.length > 5) {
-    throw new ToolUserError('An Automation may pin at most 5 skills.', 422);
-  }
-  const invalidName = skills.find(
-    (skill) => !/^[a-zA-Z0-9._-]+$/.test(skill.name)
-  );
-  if (invalidName) {
-    throw new ToolUserError(
-      `Skill "${invalidName.name}" cannot be pinned: names may contain only letters, numbers, ".", "_", and "-".`,
-      422
-    );
-  }
-  const empty = skills.find((skill) => !skill.content.trim());
-  if (empty) {
-    throw new ToolUserError(
-      `Skill "${empty.name}" cannot be pinned because its body is empty.`,
-      422
-    );
-  }
-  const totalBytes = skills.reduce(
-    (sum, skill) => sum + Buffer.byteLength(skill.content, 'utf8'),
-    0
-  );
-  if (totalBytes > 32 * 1024) {
-    throw new ToolUserError(
-      `Pinned Automation skills contain ${totalBytes} bytes of text; the maximum is 32768 bytes (32KB).`,
-      422
-    );
-  }
+  const snapshotError = validateAutomationSkillSnapshots(skills);
+  if (snapshotError) throw new ToolUserError(snapshotError, 422);
 
   const rows = await sql`
     SELECT skills_config
@@ -305,16 +279,6 @@ export async function assertAutomationSkillsResolve(
       `Skill${unknown.length > 1 ? 's' : ''} ${unknown.map((n) => `"${n}"`).join(', ')} ` +
         `${unknown.length > 1 ? 'are' : 'is'} not enabled in agent ${agentId}'s skill library. ` +
         `Enable ${unknown.length > 1 ? 'them' : 'it'} on the agent, or remove ${unknown.length > 1 ? 'them' : 'it'} from this Automation.`,
-      422
-    );
-  }
-
-  const duplicates = skills
-    .map((skill) => skill.name)
-    .filter((name, index, all) => all.indexOf(name) !== index);
-  if (duplicates.length > 0) {
-    throw new ToolUserError(
-      `Skill "${duplicates[0]}" is listed more than once. Each skill may be pinned once per Automation.`,
       422
     );
   }

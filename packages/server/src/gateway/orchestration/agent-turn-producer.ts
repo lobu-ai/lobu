@@ -41,6 +41,7 @@ import {
   resolveSdkCompat,
   verifyWorkerToken,
 } from "@lobu/core";
+import { skillDirectoryName } from "@lobu/core/agent-tooling";
 import type { AgentTurnPollPayload } from "@lobu/core/contracts/worker/protocol";
 import { getModel, type Model } from "@mariozechner/pi-ai";
 import { SettingsManager } from "@mariozechner/pi-coding-agent";
@@ -120,7 +121,6 @@ const TURN_MESSAGE_CHARS = 32_000;
  */
 const TURN_SKILLS_MAX = 64;
 const TURN_SKILL_CHARS = 64_000;
-const TURN_SKILL_NAME_CHARS = 128;
 const compactionDefaults = SettingsManager.inMemory().getCompactionSettings();
 
 /**
@@ -385,15 +385,6 @@ function workspaceInstructions(
     );
   }
   return lines.join("\n");
-}
-
-/** A safe final path segment for one seeded skill directory. */
-function skillDirectoryName(name: string): string | null {
-  const segment = name.trim().split('/').filter(Boolean).pop();
-  if (!segment || segment === '.' || segment === '..' || segment.length > TURN_SKILL_NAME_CHARS) {
-    return null;
-  }
-  return /^[a-zA-Z0-9._-]+$/.test(segment) ? segment : null;
 }
 
 /** Whether this tool manifest has a command that can open seeded files. */
@@ -1143,12 +1134,11 @@ export async function enqueueAgentTurn(
     // + run (all derived from the canonical conversation id) and throws on a
     // missing version, so a pinned run fails rather than silently falling back
     // to live skills.
-    const skills = (
-      automationContext?.skills ??
-      (settings?.skillsConfig?.skills ?? [])
-        .filter((skill) => skill.enabled && skill.content)
-        .map((skill) => ({ name: skill.name, content: skill.content! }))
-    )
+    // Pinned snapshots passed the save constraints at read; never rename or
+    // drop any of their instructions through the live-library normalization.
+    const skills = automationContext?.skills ?? (settings?.skillsConfig?.skills ?? [])
+      .filter((skill) => skill.enabled && skill.content)
+      .map((skill) => ({ name: skill.name, content: skill.content! }))
       .flatMap((skill) => {
         // An oversized skill is DROPPED, never truncated. A skill is authored
         // instructions, so slicing one mid-sentence would hand the model a

@@ -625,6 +625,33 @@ describe("loadDesiredStateFromConfig", () => {
     ).rejects.toThrow(/names may contain only/);
   });
 
+  test.each([
+    "rubric",
+    "x".repeat(128),
+    ".",
+    "..",
+    "x".repeat(129),
+  ])("preflights Automation skill directory names: %s", async (name) => {
+    dir = mkdtempSync(join(import.meta.dir, "skill-name-"));
+    writeFileSync(
+      join(dir, "lobu.config.ts"),
+      `
+import { defineAgent, defineConfig, defineAutomation, defineSkill } from "@lobu/cli/config";
+const name = ${JSON.stringify(name)};
+const a = defineAgent({ id: "a", skills: [defineSkill({ name, content: "Required instructions" })] });
+export default defineConfig({ agents: [a], automations: [defineAutomation({ agent: a, slug: "w", skills: [name] })] });
+`
+    );
+    const load = loadDesiredStateFromConfig({ cwd: dir });
+    if (name === "." || name === ".." || name.length > 128) {
+      await expect(load).rejects.toThrow(/cannot pin skill/);
+    } else {
+      expect((await load).state.automations[0]?.skillSnapshots).toEqual([
+        { name, content: "Required instructions" },
+      ]);
+    }
+  });
+
   test("rejects pinned skill text over the 32KB cap", async () => {
     dir = mkdtempSync(join(import.meta.dir, "cap-"));
     writeFileSync(
