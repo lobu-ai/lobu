@@ -39,6 +39,8 @@ it("stores replayed and incremental capture observations through the worker entr
       source_url: "https://graph.example.test/company/1",
     },
   };
+  let failFirstPage = true;
+  let paginationUnavailable = false;
   const connector = new CommonCrawlConnector(async (input) => {
     const url = new URL(input);
     if (
@@ -50,8 +52,11 @@ it("stores replayed and incremental capture observations through the worker entr
         { status: 404 }
       );
     if (url.searchParams.has("showNumPages"))
-      return Response.json({ pages: 3, pageSize: 1 });
+      return paginationUnavailable
+        ? new Response("unavailable", { status: 504 })
+        : Response.json({ pages: 3, pageSize: 1 });
     const page = Number(url.searchParams.get("page"));
+    if (failFirstPage) return new Response("unavailable", { status: 504 });
     return new Response(
       JSON.stringify({
         urlkey: "com,example)/",
@@ -98,7 +103,14 @@ it("stores replayed and incremental capture observations through the worker entr
   };
   const stored = () =>
     sql`SELECT origin_id, payload_text, metadata, occurred_at, superseded_by FROM events WHERE connection_id = ${connection.id} ORDER BY origin_id`;
-  await sync(null);
+  await expect(sync(null)).rejects.toThrow("page 0 HTTP 504");
+  expect(await stored()).toEqual([]);
+  const [planned] =
+    await sql`SELECT checkpoint FROM feeds WHERE id = ${feed.id}`;
+  expect(planned.checkpoint).toMatchObject({ pages: 3, next_page: 0 });
+  failFirstPage = false;
+  paginationUnavailable = true;
+  await sync(planned.checkpoint);
   const first = await stored();
   expect(first).toHaveLength(1);
   expect(first[0].metadata).toMatchObject({
@@ -108,6 +120,7 @@ it("stores replayed and incremental capture observations through the worker entr
   });
   const [saved] = await sql`SELECT checkpoint FROM feeds WHERE id = ${feed.id}`;
   expect(saved.checkpoint.next_page).toBe(1);
+  paginationUnavailable = false;
   await sync(null); // lost acknowledgment / explicit recollect
   expect(await stored()).toEqual(first); // includes historical rows: no silent supersede
   await sync(saved.checkpoint);

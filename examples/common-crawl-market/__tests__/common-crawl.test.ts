@@ -69,6 +69,40 @@ async function run(
 }
 
 describe("Common Crawl feed spike", () => {
+  test("retains validated pagination across a failed or truncated first page", async () => {
+    for (const failure of [
+      new Response("gateway timeout", { status: 504 }),
+      new Response('{"url": "truncated'),
+    ]) {
+      let saved: CrawlCheckpoint | null = null;
+      const stored: EventEnvelope[] = [];
+      const broken = new CommonCrawlConnector(source([[capture()]], failure));
+      await expect(
+        broken.sync({
+          feedKey: "captures",
+          config,
+          checkpoint: null,
+          credentials: null,
+          entityIds: [],
+          commit: async (events, next) => {
+            stored.push(...events);
+            saved = next;
+          },
+        })
+      ).rejects.toThrow();
+      expect(stored).toEqual([]);
+      expect(saved).toMatchObject({ next_page: 0, pages: 1 });
+      const resumed = new CommonCrawlConnector(async (input) => {
+        if (new URL(input).searchParams.has("showNumPages"))
+          return new Response("pagination is now unavailable", { status: 504 });
+        return new Response(JSON.stringify(capture()));
+      });
+      const result = await run(resumed, saved);
+      expect(result.status).toBe("complete");
+      expect(result.events).toHaveLength(1);
+      expect(result.checkpoint?.next_page).toBe(1);
+    }
+  });
   test("deduplicates identical page rows but rejects conflicting capture identities", async () => {
     expect(
       (await run(new CommonCrawlConnector(source([[capture(), capture()]]))))
@@ -344,6 +378,7 @@ describe("Common Crawl feed spike", () => {
         credentials: null,
         entityIds: [],
         commit: async (events) => {
+          if (!events.length) return;
           attempted = events;
           throw new Error("synthetic commit failure");
         },

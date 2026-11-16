@@ -166,26 +166,34 @@ for (const company of companies) {
       const committedPages = sample.checkpoint
         ? Math.max(1, sample.checkpoint.next_page)
         : 0;
-      for (let page = 0; page < committedPages; page++) {
-        const result = await replay.sync({
-          feedKey: "captures",
-          config,
-          checkpoint,
-          credentials: null,
-          entityIds: [],
-          commit: async (events, next) => {
-            replayed.push(...events);
-            checkpoint = next;
-          },
-        });
-        if (result.status === "complete") break;
+      let replayError: unknown;
+      try {
+        for (let page = 0; page < committedPages; page++) {
+          const result = await replay.sync({
+            feedKey: "captures",
+            config,
+            checkpoint,
+            credentials: null,
+            entityIds: [],
+            commit: async (events, next) => {
+              replayed.push(...events);
+              checkpoint = next;
+            },
+          });
+          if (result.status === "complete") break;
+        }
+      } catch (error) {
+        replayError = error;
       }
       sample.replay_identical =
         sample.checkpoint !== null &&
         JSON.stringify(checkpoint) === JSON.stringify(sample.checkpoint) &&
         JSON.stringify(replayed) === JSON.stringify(sample.events);
       if (sample.checkpoint && !sample.replay_identical)
-        throw new Error("Replay changed capture identities or provenance");
+        throw (
+          replayError ??
+          new Error("Replay changed capture identities or provenance")
+        );
       if (sample.status === "complete") {
         sample.completed_rerun_events = 0;
         await replay.sync({
