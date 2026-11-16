@@ -62,6 +62,8 @@ export interface SchemaProperty {
 }
 
 interface MetadataTableProperty {
+  // JSON Schema type; a scalar type makes a stored metadata column sortable.
+  type?: string;
   title?: string;
   description?: string;
   enum?: string[];

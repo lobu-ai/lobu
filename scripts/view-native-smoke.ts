@@ -81,7 +81,7 @@ export default function Proof() {
       controls={<><input aria-label="Search" value={search} onChange={e => {setSearch(e.target.value);setPage(0);}} /><p>Collection controls</p></>}
       loading={result.loading} error={result.error} onRetry={result.refetch}
       empty={<p>No matching records</p>}
-      table={result.data?.entities.length ? {entities:result.data.entities,owner:"fixture-workspace",isDerived:false,hasAnyParents:false,linkedEntityLookups:{},measureColumns:[],sorting,onSortingChange:setSorting,page,pageSize:2,totalCount:4,hasMore:result.data.metadata.has_more,pageTitle:"Records",onPrevPage:()=>setPage(p=>p-1),onNextPage:()=>setPage(p=>p+1)} : undefined} />
+      table={result.data?.entities.length ? {entities:result.data.entities,owner:"fixture-workspace",isDerived:false,schema:{properties:{due_at:{type:"string",format:"date-time","x-table-column":true,"x-table-label":"Due"}}},hasAnyParents:false,linkedEntityLookups:{},measureColumns:[],sorting,onSortingChange:setSorting,page,pageSize:2,totalCount:4,hasMore:result.data.metadata.has_more,pageTitle:"Records",onPrevPage:()=>setPage(p=>p-1),onNextPage:()=>setPage(p=>p+1)} : undefined} />
     <EntityListPage title="Custom data" controls={<p>Custom query results</p>}>
       <DataTable caption="Computed query results" rows={customRows} columns={[{key:"label",header:"Source"},{key:"amount",header:"Amount"}]} keyOf={row=>row.key} />
     </EntityListPage>
@@ -159,7 +159,7 @@ const server = createServer(async (request, response) => {
           }
           if(input.search === 'loading') return;
           if(input.search === 'error' && !failedOnce) { failedOnce = true; result={isError:true,structuredContent:{error:{code:'UPSTREAM_TIMEOUT'}},content:[{type:'text',text:'Upstream unavailable'}]}; }
-          else result={structuredContent:{action:'list',entities:input.search==='empty'?[]:[{id:1,entity_type:'fixture',name:'Native row '+(input.offset+1),slug:'row',metadata:{},created_at:'2026-01-01'}],metadata:{page_size:2,has_more:input.offset===0}}};
+          else result={structuredContent:{action:'list',entities:input.search==='empty'?[]:[{id:1,entity_type:'fixture',name:'Native row '+(input.offset+1),slug:'row',metadata:{due_at:'2026-03-01T10:00:00Z'},created_at:'2026-01-01'}],metadata:{page_size:2,has_more:input.offset===0}}};
         }
         send({id,result});
       });
@@ -426,6 +426,19 @@ try {
   await frame.getByRole("button", { name: /Name/ }).click();
   await page.waitForFunction(
     () => (window as unknown as { sorted: boolean }).sorted === true
+  );
+  await frame.getByTestId("state").filter({ hasText: "data" }).waitFor();
+  // A stored metadata column's id is a valid list sort key, so a View that
+  // passes the clicked id straight through as sort_by lists successfully.
+  const sortedCalls = calls.length;
+  const sortedBy = () => calls.slice(sortedCalls).map((call) => call.sort_by);
+  await frame.getByRole("button", { name: /^Due/ }).click();
+  const deadline = Date.now() + 10_000;
+  while (!sortedBy().includes("metadata.due_at") && Date.now() < deadline)
+    await new Promise((settle) => setTimeout(settle, 50));
+  assert(
+    sortedBy().includes("metadata.due_at"),
+    `metadata header sorted with ${JSON.stringify(sortedBy())}`
   );
   await frame.getByTestId("state").filter({ hasText: "data" }).waitFor();
   await page.evaluate(() =>
