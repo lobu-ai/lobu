@@ -52,6 +52,7 @@ import {
 } from "./linkedin-inbox.js";
 import { prepareLinkedInDraft } from "./linkedin-drafts.js";
 import { LINKEDIN_HOME_URL } from "./linkedin-browser-script.js";
+import { getPublicLinkedIn } from "./linkedin-public.js";
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -2861,6 +2862,9 @@ export default class LinkedInConnector extends ConnectorRuntime<
           type: "browser",
           mode: "live",
         },
+        // Anonymous public reads are available without an attached browser.
+        // Browser-only feeds/actions still explicitly require a browser grant.
+        { type: "none" },
         // Keep browser first: connection setup uses the first authenticated
         // method, while sign-in independently discovers OAuth loginScopes.
         {
@@ -3082,6 +3086,18 @@ export default class LinkedInConnector extends ConnectorRuntime<
       },
     },
     actions: {
+      get_public_company: {
+        key: "get_public_company",
+        name: "Get public company",
+        description: "Read a known publicly accessible LinkedIn company profile without a browser.",
+        inputSchema: { type: "object", required: ["url"], properties: { url: { type: "string" } }, additionalProperties: false },
+      },
+      get_public_person: {
+        key: "get_public_person",
+        name: "Get public person",
+        description: "Read a known publicly accessible LinkedIn person profile without a browser.",
+        inputSchema: { type: "object", required: ["url"], properties: { url: { type: "string" } }, additionalProperties: false },
+      },
       set_like: {
         key: "set_like",
         name: "Set like",
@@ -3386,6 +3402,16 @@ export default class LinkedInConnector extends ConnectorRuntime<
   };
 
   async execute(ctx: ActionContext): Promise<ActionResult> {
+    if (ctx.actionKey === "get_public_company" || ctx.actionKey === "get_public_person") {
+      try {
+        const kind = ctx.actionKey === "get_public_company" ? "company" : "person";
+        const output = await getPublicLinkedIn(kind, String(ctx.input.url ?? ""), this.fetchImpl);
+        return { success: true, output };
+      } catch (error) {
+        return { success: false, error: error instanceof Error ? error.message : String(error) };
+      }
+    }
+
     try {
       if (ctx.actionKey === "set_like") {
         if (typeof ctx.input.liked !== "boolean") {

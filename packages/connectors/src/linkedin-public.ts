@@ -1,5 +1,3 @@
-import { ConnectorRuntime, type RuntimeConnectorDefinition, type ActionContext, type ActionResult } from '@lobu/connector-sdk';
-
 type PublicKind = 'Person' | 'Organization';
 const BASE = 'https://www.linkedin.com';
 const MAX_BYTES = 2_000_000;
@@ -51,28 +49,3 @@ export async function getPublicLinkedIn(kind: 'company' | 'person', input: strin
   return { ...record, source_url: url, fetched_at: new Date().toISOString() };
 }
 
-export default class LinkedInPublicConnector extends ConnectorRuntime {
-  readonly definition: RuntimeConnectorDefinition = {
-    key: 'linkedin.public',
-    name: 'LinkedIn Public',
-    description: 'Read public LinkedIn person and company structured data without an account.',
-    version: '0.1.0',
-    faviconDomain: 'linkedin.com',
-    authSchema: { methods: [{ type: 'none' }] },
-    feeds: {},
-    actions: {
-      get_company: { key: 'get_company', name: 'Get public company', description: 'Fetch a known public company URL or slug.', inputSchema: { type: 'object', required: ['url'], properties: { url: { type: 'string' } } } },
-      get_person: { key: 'get_person', name: 'Get public person', description: 'Fetch a known public person URL or slug.', inputSchema: { type: 'object', required: ['url'], properties: { url: { type: 'string' } } } },
-    },
-  };
-  async execute(ctx: ActionContext): Promise<ActionResult> {
-    const kind = ctx.actionKey === 'get_company' ? 'company' : ctx.actionKey === 'get_person' ? 'person' : null;
-    if (!kind) return { success: false, error: 'Unknown action' };
-    try {
-      const record = await getPublicLinkedIn(kind, String(ctx.input.url ?? ''));
-      return { success: true, output: record };
-    } catch (error) {
-      return { success: false, error: error instanceof Error ? error.message : String(error) };
-    }
-  }
-}

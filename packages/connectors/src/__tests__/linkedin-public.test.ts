@@ -26,3 +26,21 @@ describe('linkedin.public', () => {
     expect(getPublicLinkedIn('company', 'example', fakeFetch as typeof fetch)).rejects.toThrow('restricted');
   });
 });
+
+test('existing LinkedIn connector can read public person without browser binding', async () => {
+  const { default: LinkedInConnector } = await import('../linkedin');
+  const fakeFetch = async () => new Response(person, { status: 200, headers: { 'content-type': 'text/html' } });
+  const connector = new LinkedInConnector(fakeFetch as typeof fetch);
+  expect(connector.definition.key).toBe('linkedin');
+  expect(connector.definition.authSchema?.methods?.some(method => method.type === 'none')).toBe(true);
+  const result = await connector.execute({ actionKey: 'get_public_person', input: { url: 'example' } } as any);
+  expect(result.success).toBe(true);
+  expect(result.output?.name).toBe('Example');
+});
+
+test('browser-only actions do not silently fall back to public access', async () => {
+  const { default: LinkedInConnector } = await import('../linkedin');
+  const connector = new LinkedInConnector();
+  const result = await connector.execute({ actionKey: 'set_like', input: { liked: true, post_url: 'invalid' } } as any);
+  expect(result.success).toBe(false);
+});
