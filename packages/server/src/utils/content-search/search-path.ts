@@ -582,8 +582,11 @@ export async function searchContentBySingleQuery(
     // their best (nearest) chunk, so N chunks of one event can't crowd the
     // candidate set down to a handful of distinct events. The inner ORDER BY
     // ... LIMIT is the index-served part; the outer GROUP BY runs over the small
-    // over-fetched set. Downstream filters applied before the LIMIT so a filtered
-    // recall doesn't discard everything after an unfiltered pick.
+    // over-fetched set. Visibility and model filters stay before that LIMIT.
+    // Apply the similarity floor after it: distances are increasing, so every
+    // qualifying row precedes every rejected row. Filtering first makes the
+    // index exhaust its probes trying to fill the cap when too few rows qualify,
+    // including heap/vector reads for unrelated workspace candidates.
     // Keep the visibility/anti-join predicates in a parameterized event lookup.
     // Flattening them into the ANN join can make the planner scan and sort all
     // scoped embeddings instead of walking the distance index. OFFSET 0 keeps
@@ -600,10 +603,10 @@ export async function searchContentBySingleQuery(
             ) visible_event ON true
             WHERE (SELECT size FROM vector_scope_size) > ${EXACT_RECALL_SCOPE_LIMIT}
               AND ${modelScopeFor('emb')}
-              AND (1 - (emb.embedding <=> ${vecParam})) >= ${minSimilarityParam}
             ORDER BY emb.embedding <=> ${vecParam}
             LIMIT ${CANDIDATE_VECTOR_LIMIT * 3}
           ) ann
+          WHERE (1 - dist) >= ${minSimilarityParam}
           GROUP BY id
           ORDER BY MIN(dist)
           LIMIT ${CANDIDATE_VECTOR_LIMIT}`);
