@@ -221,6 +221,84 @@ async function runApply(
 }
 
 describe("apply wire payloads: undeclared fields are never sent", () => {
+  test.each([
+    ["runtime update", "", "", "update", true],
+    [
+      "new version inheriting skills",
+      ', name: "Renamed"',
+      "",
+      "create_version",
+      true,
+    ],
+    ["explicit skill clearing", "", ", skills: []", "create_version", true],
+    ["fresh create", "", "", "create", false],
+  ] as const)("Automation %s preserves omission and sends explicit clearing", async (_label, name, skills, action, exists) => {
+    const dir =
+      mkProject(`import { defineConfig, defineAgent, defineAutomation } from "@lobu/cli/config";
+export default defineConfig({
+  agents: [defineAgent({ id: "triage", name: "Triage" })],
+  automations: [defineAutomation({ slug: "digest", agent: "triage", prompt: "Summarize arrivals", tags: ["updated"]${name}${skills} })],
+});`);
+    const { fetchStub } = makeFetch();
+    const writes: Record<string, unknown>[] = [];
+    let remoteExists = exists;
+    const remote = {
+      automation_id: "71",
+      slug: "digest",
+      name: "Digest",
+      managed_agent_id: "triage",
+      prompt: "Summarize arrivals",
+      tags: ["old"],
+      skills: exists
+        ? [{ name: "rubric", content: "Keep these frozen instructions." }]
+        : [],
+    };
+    const fetchAutomation = (async (url, init) => {
+      const body = typeof init?.body === "string" ? JSON.parse(init.body) : {};
+      if (String(url).includes("/automations?")) {
+        return Response.json({ automations: remoteExists ? [remote] : [] });
+      }
+      if (String(url).includes("/manage_automations")) {
+        writes.push(body);
+        remoteExists = true;
+        for (const key of ["tags", "name", "skills"] as const) {
+          if (body[key] !== undefined)
+            Object.assign(remote, { [key]: body[key] });
+        }
+        return Response.json({
+          action: body.action,
+          automation_id: "71",
+          version: 2,
+          status: "active",
+        });
+      }
+      return fetchStub(url, init);
+    }) as typeof fetch;
+    await runApply(dir, fetchAutomation);
+    expect(writes.map((body) => body.action)).toContain(action);
+    expect(writes.filter((body) => body.action === "create")).toHaveLength(
+      exists ? 0 : 1
+    );
+    const versionWrites = writes.filter(
+      (body) => body.action === "create_version"
+    );
+    if (skills) {
+      expect(versionWrites).toHaveLength(1);
+      expect(versionWrites[0]?.skills).toEqual([]);
+    } else {
+      expect(versionWrites).toHaveLength(name ? 1 : 0);
+      for (const body of writes) expect(body).not.toHaveProperty("skills");
+    }
+    expect(remote.skills).toEqual(
+      skills || !exists
+        ? []
+        : [{ name: "rubric", content: "Keep these frozen instructions." }]
+    );
+    writes.length = 0;
+    await runApply(dir, fetchAutomation);
+    expect(writes).toEqual([]);
+  });
+
   test("authored connector updates carry the catalog version through the shared source-update action", async () => {
     const dir =
       mkProject(`import { defineConfig, connectorFromFile } from "@lobu/cli/config";

@@ -724,7 +724,7 @@ function mapAutomation(automation: Automation): DesiredAutomation {
     // pure and cannot read skill files. "" is legitimate for an Automation whose
     // whole job is its skills, and for event-turn Automations with neither.
     prompt: automation.prompt ?? "",
-    ...(automation.skills?.length ? { skills: automation.skills } : {}),
+    ...(automation.skills !== undefined ? { skills: automation.skills } : {}),
     ...(automation.outputs !== undefined
       ? {
           outputs:
