@@ -3124,14 +3124,18 @@ export default class LinkedInConnector extends ConnectorRuntime<
               pattern:
                 "^(?:[A-Za-z0-9_-]+=*|urn:li:msg_conversation:\\((?:urn:li:fsd_profile:[A-Za-z0-9_-]+|urn:li:fsd_pageMailbox:[0-9]+),[A-Za-z0-9_-]+=*\\))$",
               maxLength: 500,
+              title: "Conversation",
+              readOnly: true,
               description:
                 "The row's thread_id (the member's own inbox) or its full conversation_id (the inbox it names).",
             },
-            text: { type: "string", minLength: 1, maxLength: 3000 },
+            text: { type: "string", title: "Message", minLength: 1, maxLength: 3000 },
             idempotency_key: {
               type: "string",
               minLength: 1,
               maxLength: 300,
+              title: "Idempotency key",
+              readOnly: true,
               description: "One reply per key: a retry returns the first send.",
             },
           },
