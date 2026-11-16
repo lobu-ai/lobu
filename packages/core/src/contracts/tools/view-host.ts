@@ -18,6 +18,13 @@ export function isViewRead(
       args?.action === "list_links"
     );
   }
+  if (tool === "manage_feeds") {
+    return (
+      args?.action === "list_feeds" ||
+      args?.action === "read_feed" ||
+      args?.action === "read_feeds"
+    );
+  }
   if (tool === "manage_automations") return args?.action === "list";
   if (tool === "manage_agents") return args?.action === "get";
   if (tool === "manage_connections") return args?.action === "list";
