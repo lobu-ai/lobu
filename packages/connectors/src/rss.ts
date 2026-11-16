@@ -2,14 +2,22 @@
  * RSS / Atom Connector (V1 runtime)
  *
  * Fetches and parses RSS 2.0 and Atom feeds. Supports multiple feed URLs,
- * deduplication via checkpoint, and HTML entity decoding.
+ * deduplication via checkpoint, and HTML entity decoding. Sync stores only
+ * items it has not seen before; a source read returns the feed's current items
+ * in document order, which is the only way to see what a ranking-style feed
+ * (trending lists, charts) lists right now.
  * No external XML parsing dependencies — uses regex-based parsing.
  */
 
 import {
+  assertNoQuery,
+  assertPositiveReadLimit,
+  assertSnapshotSourceRead,
   type RuntimeConnectorDefinition,
   ConnectorRuntime,
   type EventEnvelope,
+  type FeedReadContext,
+  type FeedReadResult,
   type SyncContext,
   type SyncResult,
   validatePublicUrl,
@@ -25,8 +33,18 @@ interface RSSFeedItem {
   link: string;
   content: string;
   author: string;
-  publishedAt: Date;
+  /** Null when the source states no (parseable) publication time. */
+  publishedAt: Date | null;
   feedUrl: string;
+  /** 1-based position of the item in its feed document. */
+  position: number;
+  /** Channel-level pubDate/lastBuildDate (RSS) or feed `updated` (Atom). */
+  feedPublishedAt: Date | null;
+}
+
+interface FeedFetchError {
+  url: string;
+  error: string;
 }
 
 interface RSSCheckpoint {
@@ -48,7 +66,7 @@ export default class RSSConnector extends ConnectorRuntime {
     key: 'rss',
     name: 'RSS / Atom',
     description: 'Fetches and parses RSS 2.0 and Atom feeds to collect articles.',
-    version: '1.0.1',
+    version: '1.1.0',
     faviconDomain: 'rss.com',
     authSchema: {
       methods: [{ type: 'none' }],
@@ -58,7 +76,9 @@ export default class RSSConnector extends ConnectorRuntime {
         key: 'articles',
         name: 'Feed Articles',
         sync: (ctx) => this.syncFeed(ctx),
-        description: 'Articles from RSS/Atom feeds.',
+        read: (ctx) => this.readFeed(ctx),
+        description:
+          'Articles from RSS/Atom feeds. Sync stores items not seen before; a source read returns every item the feed lists right now, in document order.',
         configSchema: {
           type: 'object',
           required: ['feed_urls'],
@@ -107,43 +127,31 @@ export default class RSSConnector extends ConnectorRuntime {
 
   private async syncFeed(ctx: SyncContext): Promise<SyncResult> {
     const config = ctx.config as unknown as RSSConfig;
-    const feedUrls = config.feed_urls;
-    if (!feedUrls || !Array.isArray(feedUrls) || feedUrls.length === 0) {
-      throw new Error('feed_urls is required and must be a non-empty array.');
-    }
-
-    const maxItemsPerFeed = config.max_items_per_feed ?? 100;
+    const feedUrls = this.requireFeedUrls(config);
     const checkpoint = (ctx.checkpoint as RSSCheckpoint | null) ?? {
       last_item_ids: [],
     };
     const seenIds = new Set<string>(checkpoint.last_item_ids ?? []);
 
-    const allItems: RSSFeedItem[] = [];
-    const fetchErrors: Array<{ url: string; error: string }> = [];
-
-    for (const feedUrl of feedUrls) {
-      try {
-        const items = await this.fetchAndParseFeed(feedUrl, maxItemsPerFeed);
-        allItems.push(...items);
-      } catch (err) {
-        fetchErrors.push({
-          url: feedUrl,
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
+    const { items: allItems, fetchErrors } = await this.fetchFeeds(
+      feedUrls,
+      config.max_items_per_feed ?? 100
+    );
 
     // A run where every configured feed failed must fail — a "completed" run
     // with 0 items is indistinguishable from a genuinely empty feed.
     if (fetchErrors.length === feedUrls.length) {
       throw new Error(
-        `All ${feedUrls.length} feed URL(s) failed to fetch: ` +
-          fetchErrors.map((e) => `${e.url} (${e.error})`).join('; ')
+        `All ${feedUrls.length} feed URL(s) failed to fetch: ${this.describeErrors(fetchErrors)}`
       );
     }
 
+    // Items without a stated publication time are stamped with the fetch time.
+    const fetchedAt = new Date();
+    const occurredAt = (item: RSSFeedItem) => item.publishedAt ?? fetchedAt;
+
     // Sort by occurred_at descending
-    allItems.sort((a, b) => b.publishedAt.getTime() - a.publishedAt.getTime());
+    allItems.sort((a, b) => occurredAt(b).getTime() - occurredAt(a).getTime());
 
     // Deduplicate against checkpoint
     const events: EventEnvelope[] = [];
@@ -161,7 +169,7 @@ export default class RSSConnector extends ConnectorRuntime {
         payload_text: item.content,
         author_name: item.author || undefined,
         source_url: item.link || undefined,
-        occurred_at: item.publishedAt,
+        occurred_at: occurredAt(item),
         origin_type: 'article',
         metadata: {
           feed_url: item.feedUrl,
@@ -195,6 +203,94 @@ export default class RSSConnector extends ConnectorRuntime {
         }),
       },
     };
+  }
+
+  // -------------------------------------------------------------------------
+  // read
+  // -------------------------------------------------------------------------
+
+  /**
+   * Live snapshot of what the configured feeds list right now. Unlike sync,
+   * nothing is dropped for having been seen before, so an item that stays on a
+   * ranking feed for days appears in every read. Fails closed when any feed
+   * URL fails: a snapshot missing one feed is not the current contents.
+   */
+  private async readFeed(ctx: FeedReadContext): Promise<FeedReadResult> {
+    assertSnapshotSourceRead(ctx, 'RSS');
+    assertNoQuery(ctx, 'RSS source reads return the whole current feed and do not support queries');
+    assertPositiveReadLimit(ctx);
+
+    const config = ctx.config as unknown as RSSConfig;
+    const feedUrls = this.requireFeedUrls(config);
+    const { items, fetchErrors } = await this.fetchFeeds(
+      feedUrls,
+      config.max_items_per_feed ?? 100
+    );
+    if (fetchErrors.length > 0) {
+      throw new Error(
+        `${fetchErrors.length} of ${feedUrls.length} feed URL(s) failed to fetch: ${this.describeErrors(fetchErrors)}`
+      );
+    }
+
+    const rows = items.slice(0, ctx.limit ?? items.length).map((item) => ({
+      id: item.id,
+      title: item.title,
+      link: item.link || null,
+      content: item.content,
+      author: item.author || null,
+      published_at: item.publishedAt?.toISOString() ?? null,
+      feed_url: item.feedUrl,
+      position: item.position,
+      feed_published_at: item.feedPublishedAt?.toISOString() ?? null,
+    }));
+
+    return {
+      rows,
+      columns: [
+        { name: 'id', type: 'string' },
+        { name: 'title', type: 'string' },
+        { name: 'link', type: 'string' },
+        { name: 'content', type: 'string' },
+        { name: 'author', type: 'string' },
+        { name: 'published_at', type: 'timestamp' },
+        { name: 'feed_url', type: 'string' },
+        { name: 'position', type: 'integer' },
+        { name: 'feed_published_at', type: 'timestamp' },
+      ],
+      total: items.length,
+      hasMore: rows.length < items.length,
+    };
+  }
+
+  private requireFeedUrls(config: RSSConfig): string[] {
+    const feedUrls = config.feed_urls;
+    if (!feedUrls || !Array.isArray(feedUrls) || feedUrls.length === 0) {
+      throw new Error('feed_urls is required and must be a non-empty array.');
+    }
+    return feedUrls;
+  }
+
+  private async fetchFeeds(
+    feedUrls: string[],
+    maxItemsPerFeed: number
+  ): Promise<{ items: RSSFeedItem[]; fetchErrors: FeedFetchError[] }> {
+    const items: RSSFeedItem[] = [];
+    const fetchErrors: FeedFetchError[] = [];
+    for (const feedUrl of feedUrls) {
+      try {
+        items.push(...(await this.fetchAndParseFeed(feedUrl, maxItemsPerFeed)));
+      } catch (err) {
+        fetchErrors.push({
+          url: feedUrl,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    return { items, fetchErrors };
+  }
+
+  private describeErrors(fetchErrors: FeedFetchError[]): string {
+    return fetchErrors.map((e) => `${e.url} (${e.error})`).join('; ');
   }
 
   // -------------------------------------------------------------------------
@@ -250,6 +346,10 @@ export default class RSSConnector extends ConnectorRuntime {
 
   private parseRSS(xml: string, feedUrl: string, maxItems: number): RSSFeedItem[] {
     const items: RSSFeedItem[] = [];
+    const channelHeader = this.headerBefore(xml, 'item');
+    const channelDate =
+      this.extractTag(channelHeader, 'pubDate') ?? this.extractTag(channelHeader, 'lastBuildDate');
+    const feedPublishedAt = channelDate ? this.parseDate(channelDate) : null;
     const itemRegex = /<item[\s>]([\s\S]*?)<\/item>/gi;
     let match: RegExpExecArray | null;
 
@@ -268,7 +368,7 @@ export default class RSSConnector extends ConnectorRuntime {
       const id = guid || this.hashString(`${title ?? ''}|${link ?? ''}`);
       const content = contentEncoded || description || '';
 
-      const publishedAt = pubDate ? this.parseDate(pubDate) : new Date();
+      const publishedAt = pubDate ? this.parseDate(pubDate) : null;
 
       items.push({
         id,
@@ -278,6 +378,8 @@ export default class RSSConnector extends ConnectorRuntime {
         author: this.decodeEntities(this.stripHtml(author)),
         publishedAt,
         feedUrl,
+        position: items.length + 1,
+        feedPublishedAt,
       });
     }
 
@@ -290,6 +392,8 @@ export default class RSSConnector extends ConnectorRuntime {
 
   private parseAtom(xml: string, feedUrl: string, maxItems: number): RSSFeedItem[] {
     const items: RSSFeedItem[] = [];
+    const feedUpdated = this.extractTag(this.headerBefore(xml, 'entry'), 'updated');
+    const feedPublishedAt = feedUpdated ? this.parseDate(feedUpdated) : null;
     const entryRegex = /<entry[\s>]([\s\S]*?)<\/entry>/gi;
     let match: RegExpExecArray | null;
 
@@ -305,7 +409,7 @@ export default class RSSConnector extends ConnectorRuntime {
       const author = this.extractAtomAuthor(block);
 
       const externalId = id || this.hashString(`${title ?? ''}|${link ?? ''}`);
-      const publishedAt = published ? this.parseDate(published) : new Date();
+      const publishedAt = published ? this.parseDate(published) : null;
 
       items.push({
         id: externalId,
@@ -315,6 +419,8 @@ export default class RSSConnector extends ConnectorRuntime {
         author: this.decodeEntities(this.stripHtml(author)),
         publishedAt,
         feedUrl,
+        position: items.length + 1,
+        feedPublishedAt,
       });
     }
 
@@ -324,6 +430,12 @@ export default class RSSConnector extends ConnectorRuntime {
   // -------------------------------------------------------------------------
   // XML extraction helpers
   // -------------------------------------------------------------------------
+
+  /** The document up to its first `<tagName>` element: the channel/feed header. */
+  private headerBefore(xml: string, tagName: string): string {
+    const match = new RegExp(`<${tagName}[\\s>]`, 'i').exec(xml);
+    return match ? xml.slice(0, match.index) : xml;
+  }
 
   /** Extract text content from an XML tag. Handles CDATA and regular text. */
   private extractTag(block: string, tagName: string): string | null {
@@ -447,10 +559,10 @@ export default class RSSConnector extends ConnectorRuntime {
       .trim();
   }
 
-  /** Parse a date string, falling back to current time. */
-  private parseDate(dateStr: string): Date {
+  /** Parse a date string; null when it is not a valid date. */
+  private parseDate(dateStr: string): Date | null {
     const parsed = new Date(dateStr);
-    return Number.isNaN(parsed.getTime()) ? new Date() : parsed;
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
   }
 
   /** Simple hash of a string, returned as a hex string. */
