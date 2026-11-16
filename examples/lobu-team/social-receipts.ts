@@ -9,6 +9,21 @@ import type {
   SourceReader,
 } from "./external-social-evidence";
 
+function relativeAgeWindow(text: unknown, run: any) {
+  if (typeof text !== "string") return undefined;
+  const match = /^(\d{1,3})(m|h|d)\s*•(?:\s*Edited\s*•)?\s*$/.exec(text);
+  if (!match) return undefined;
+  const amount = Number(match[1]);
+  const unit = match[2] === "d" ? 86400000 : match[2] === "h" ? 3600000 : 60000;
+  // Allow a whole displayed unit on either side (rounding/truncation), and
+  // use server receipt bounds rather than the browser's wall clock. A range
+  // touching the seven-day boundary stays unknown; this is never occurred_at.
+  return {
+    start: Date.parse(run.created_at) - (amount + 1) * unit,
+    end: Date.parse(run.completed_at) - Math.max(0, amount - 1) * unit,
+  };
+}
+
 /** Reject malformed retained rows before either counting or matching excerpts.
  * Empty text is valid: the reader returns it for media-only posts. */
 function assertSourcePosts(posts: SourcePost[]): SourcePost[] {
@@ -140,7 +155,16 @@ function readPostsFromOperation(
   if (!Number.isSafeInteger(skipped) || skipped < 0)
     throw new Error("Malformed browser skipped-card count");
   return {
-    posts: value.posts as SourcePost[],
+    posts: (value.posts as SourcePost[]).map(
+      (p) =>
+        p && {
+          ...p,
+          relative_age_window:
+            platform === "linkedin" && policy.company_linkedin_path
+              ? relativeAgeWindow(p.relative_age, run)
+              : undefined,
+        }
+    ),
     limitations: skipped ? [`${skipped} skipped browser cards.`] : [],
   };
 }
@@ -300,7 +324,16 @@ export async function verifyCoverage(
     c.posts_read = posts.size;
     c.recent_posts_read = [...posts.values()].filter((p) => {
       const t = Date.parse(p.occurred_at ?? "");
-      return Number.isFinite(t) && t >= end - 7 * 86400000 && t <= end;
+      if (Number.isFinite(t)) return t >= end - 7 * 86400000 && t <= end;
+      const range = p.relative_age_window;
+      return (
+        range &&
+        Number.isFinite(range.start) &&
+        Number.isFinite(range.end) &&
+        range.start <= range.end &&
+        range.start >= end - 7 * 86400000 &&
+        range.end <= end
+      );
     }).length;
     const incomplete =
       textless ||
@@ -321,7 +354,7 @@ export async function verifyCoverage(
       c.status = "partial";
     else c.status = "read";
     c.detail =
-      `Verified ${posts.size} unique text posts; ${c.recent_posts_read} dated within seven days. ${incomplete ? "Incomplete text, unknown dates or unread media. " : ""}${c.continuation_pending !== false ? "Continuation remains. " : ""}${platformIssues.join("; ")}`.trim();
+      `Verified ${posts.size} unique text posts; ${c.recent_posts_read} within seven days by exact date or bounded visible age. ${incomplete ? "Incomplete text, unknown exact dates or unread media. " : ""}${c.continuation_pending !== false ? "Continuation remains. " : ""}${platformIssues.join("; ")}`.trim();
     issues.push(...platformIssues);
   }
 }

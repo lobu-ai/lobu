@@ -53,7 +53,13 @@ export function readSocialTimelinePage(options: {
         ? '[data-testid="tweetText"]'
         : ".update-components-text, .feed-shared-inline-show-more-text"
     );
-    const time = card.querySelector("time");
+    // LinkedIn cards also contain comment times and embedded repost headers.
+    // Keep the visible age only when a single post header owns it; never
+    // manufacture an absolute timestamp from an activity ID or a comment.
+    const time = x ? card.querySelector("time") : null;
+    const ageHeaders = x
+      ? []
+      : [...card.querySelectorAll(".update-components-actor__sub-description")];
     const url = x
       ? time?.closest("a")?.href?.split("?")[0]
       : `https://www.linkedin.com/feed/update/${card.getAttribute("data-urn")}`;
@@ -93,6 +99,10 @@ export function readSocialTimelinePage(options: {
         (a: any) => a.href.split("?")[0]
       ),
       occurred_at: time?.dateTime || null,
+      ...(!x && {
+        relative_age:
+          ageHeaders.length === 1 ? ageHeaders[0].innerText.trim() : null,
+      }),
       truncated: !body || !expanded,
       media_unread: Boolean(
         card.querySelector(
