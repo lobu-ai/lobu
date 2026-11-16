@@ -5,16 +5,20 @@ import {
   type SyncResult,
 } from "@lobu/connector-sdk";
 
-// Local spike only: no registration, credentials, graph writes or new platform contracts.
+import { IndexFiles, checkBlocks, type IndexBlock } from "./index-files";
+
+// Example-owned spike: no registration, credentials, graph writes or new platform contracts.
 // A company is an explicit source-backed Market candidate, not an inferred owner.
 export interface CrawlConfig {
   crawl: string;
+  index_access?: "files";
   company: { id: string; name: string; domain: string; source_url: string };
 }
 export interface CrawlCheckpoint {
   scope: string;
   next_page: number;
   pages: number;
+  blocks?: IndexBlock[];
 }
 interface Capture {
   urlkey: string;
@@ -50,6 +54,8 @@ function host(value: string): string {
 function checkedConfig(config: CrawlConfig): CrawlConfig {
   if (!/^CC-MAIN-20\d{2}-\d{2}$/.test(config.crawl))
     throw new Error("Explicit crawl ID required");
+  if (config.index_access !== undefined && config.index_access !== "files")
+    throw new Error("Invalid index access mode");
   const company = config.company;
   if (!company?.id || !company.name || !company.source_url)
     throw new Error("Market source evidence required");
@@ -67,6 +73,7 @@ function checkedConfig(config: CrawlConfig): CrawlConfig {
     throw new Error("Invalid company source reference");
   return {
     crawl: config.crawl,
+    ...(config.index_access ? { index_access: config.index_access } : {}),
     company: {
       id: company.id,
       name: company.name,
@@ -206,7 +213,7 @@ export default class CommonCrawlConnector extends ConnectorRuntime<
   readonly definition = {
     key: "common-crawl-market-spike",
     name: "Common Crawl Market spike",
-    version: "0.1.1",
+    version: "0.1.2",
     authSchema: { methods: [{ type: "none" as const }] },
     feeds: {
       captures: {
@@ -273,6 +280,20 @@ export default class CommonCrawlConnector extends ConnectorRuntime<
         checkpoint.next_page > checkpoint.pages)
     )
       throw new Error("Invalid crawl checkpoint");
+    const files =
+      config.index_access === "files"
+        ? new IndexFiles(config.crawl, this.fetcher)
+        : null;
+    if (checkpoint && files) {
+      checkBlocks(checkpoint.blocks!);
+      if (checkpoint.pages !== checkpoint.blocks!.length)
+        throw new Error("Invalid index file checkpoint");
+    }
+    if (!checkpoint && files) {
+      const blocks = await files.plan(config.company.domain);
+      checkpoint = { scope, next_page: 0, pages: blocks.length, blocks };
+      if (blocks.length) await ctx.commit([], checkpoint);
+    }
     if (!checkpoint) {
       const metadata = await this.request(indexUrl(config), "pagination");
       const info =
@@ -294,22 +315,31 @@ export default class CommonCrawlConnector extends ConnectorRuntime<
       await ctx.commit([], checkpoint);
       return { status: "complete" };
     }
-    const url = indexUrl(config, checkpoint.next_page);
-    const text = await this.request(url, `page ${checkpoint.next_page}`);
-    const lines = text === null ? [] : text.trim().split("\n");
-    if ((text !== null && !text.trim()) || lines.length > MAX_RECORDS)
-      throw new Error("Empty or oversized CDX page; coverage unknown");
-    const captures = lines.map((line, index) => {
-      let row: unknown;
-      try {
-        row = JSON.parse(line);
-      } catch {
-        throw new Error(
-          `Invalid CDX JSON at page ${checkpoint.next_page}, line ${index + 1}; coverage unknown`
-        );
-      }
-      return parseCapture(row, config);
-    });
+    let captures: Capture[];
+    if (files) {
+      const rows = await files.captures(
+        checkpoint.blocks![checkpoint.next_page]!,
+        config.company.domain
+      );
+      captures = rows.map((row) => parseCapture(row, config));
+    } else {
+      const url = indexUrl(config, checkpoint.next_page);
+      const text = await this.request(url, `page ${checkpoint.next_page}`);
+      const lines = text === null ? [] : text.trim().split("\n");
+      if ((text !== null && !text.trim()) || lines.length > MAX_RECORDS)
+        throw new Error("Empty or oversized CDX page; coverage unknown");
+      captures = lines.map((line, index) => {
+        let row: unknown;
+        try {
+          row = JSON.parse(line);
+        } catch {
+          throw new Error(
+            `Invalid CDX JSON at page ${checkpoint.next_page}, line ${index + 1}; coverage unknown`
+          );
+        }
+        return parseCapture(row, config);
+      });
+    }
     const events: EventEnvelope[] = [];
     const identities = new Map<string, string>();
     for (const capture of captures) {

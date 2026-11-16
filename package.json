@@ -48,6 +48,7 @@
     "@daytonaio/sdk": "^0.205.1",
     "@types/bun": "1.2.11",
     "@types/node": "20.19.9",
+    "fflate": "0.8.3",
     "husky": "^9.1.7",
     "jscpd": "^4.0.5",
     "knip": "^5.66.3",
