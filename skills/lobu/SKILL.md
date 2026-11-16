@@ -356,7 +356,8 @@ Import reusable UI from **`@lobu/views/components`**. Discover this kit with `se
 
 | Need | Component and minimum input |
 | --- | --- |
-| Complete entity list | `EntityListPage title={title} table={tableProps}` |
+| A type's collection as on its `/<type>` page: saved filters, search, filter chips, segment, table/board, record peek | `EntityCollection entityType={type}` |
+| Complete entity list over rows you read | `EntityListPage title={title} table={tableProps}` |
 | SQL, computed TypeScript or local rows | `EntityListPage title={title}` with `DataTable columns={columns} rows={rows} keyOf={keyOf}` as children |
 | Complete record body | `EntityRecordPage entity={entity} owner={workspace} schema={schema}` |
 | Entity table or individual fields | `EntityTableView`, `RecordSpecSheet`, `SchemaValue`, `EntityAvatar` |
@@ -369,6 +370,8 @@ Import reusable UI from **`@lobu/views/components`**. Discover this kit with `se
 | Optional technical details | `JsonDiff before={current} after={proposed}` inside collapsed `<details>` |
 
 The host supplies native JS/CSS, React and live theme. Do not copy product markup or bundle a second React. Exported prop types describe the shared contracts. Use `Button`, `Badge`, `Card`, chart and state components for surrounding UI.
+
+**EntityCollection is the native collection.** It reads the type (`manage_entity_schema get`) and its records (`manage_entity list`) through the view broker with the visiting user's access, so a public visitor sees what public reads allow. Props: `entityType`, optional `preset` (a key from the type's `x-lobu-collection` presets), `selection` / `defaultSelection` / `onSelectionChange` (`{ search, filters, segment }`; a selection beside `preset` edits it), `layout` / `defaultLayout` / `allowedLayouts` / `onLayoutChange` (`"table" | "board"`; default is the type's own, board needs a workflow-state field, one allowed layout hides the switcher), `controls` (`false`, or `{ search, filters, segments, presets }` to hide some), `pageSize` (default 50, max 500), `onOpenRecord(entity)` (default: the native peek), `title`, `actions`, `empty`. It is read-only: no create, board moves or preset saving. An invalid selection, an unknown preset, or a viewer preset (no identity crosses into a view) renders an error, never unfiltered rows. Hosts without native components render a plain table over the same reads. Use it before composing `EntityListPage` and `EntityTableView` yourself.
 
 **Page bodies are controlled.** Supply data and slots; they fetch nothing and authorize no writes. `EntityListPage` accepts `title`, optional `actions`/`controls`, and either `table: EntityTableViewProps` or `children`. Its `loading`, `error`, `onRetry` and `empty` affect only results, keeping controls mounted. Native table props include rows, schema, linked lookups, sorting and pagination; honor `metadata.has_more`. For SQL/TypeScript rows use `DataTable`, without inventing entity IDs or types. `EntityRecordPage` renders the native title/avatar and schema fields; `actions`, `details`, `summary`, and `children` supply editing, links, activity and tabs. Default `layout="record"` adapts to width; `layout="content"` retains the header while children own the layout. A `null` title/details/summary hides that slot. Preserve zero and false.
 
