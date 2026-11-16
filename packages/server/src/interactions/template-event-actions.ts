@@ -3,6 +3,7 @@ import type { ViewActionDecl } from "@lobu/core/contracts/tools/manage-views";
 import {
 	attachesToEntityType,
 	isEventAttachment,
+	matchesRecord,
 } from "@lobu/core/contracts/tools/view-attach";
 import {
 	collectTemplateActionInvocations,
@@ -43,6 +44,9 @@ import { AUDIT_SEMANTIC_TYPE } from "../tools/constants";
 import { resolveEventViewSubject } from "../views/event-subject";
 import type { Env } from "../index";
 import type { ToolContext } from "../tools/registry";
+import { updateRelationship } from "../tools/admin/manage_entity";
+import type { RelationshipRow } from "@lobu/core/contracts/tools/manage-entity";
+import { RELATIONSHIP_SELECT, RELATIONSHIP_JOINS, readableRelationships } from "../utils/relationship-reads";
 
 const TEMPLATE_EVENT_ACTION_PREFIX = "event-action";
 const ACTION_NAME = /^[a-z][a-z0-9_-]{0,63}$/;
@@ -76,11 +80,11 @@ export interface InvokeTemplateEventActionParams
 	source?: TemplateActionSource;
 }
 
-/** Entity fields a view action committed, server-stamped fields included. */
-export interface ViewActionApplied {
+/** Entity or relationship fields a view action committed. */
+export type ViewActionApplied = {
 	entity_id: number;
 	fields: Record<string, unknown>;
-}
+} | { relationship_id: number; fields: Record<string, unknown> };
 
 /** Proposed field values the mutation gate held for an approval. */
 export interface ViewActionPendingApproval {
@@ -294,15 +298,17 @@ async function appendViewAction(
 	const emits =
 		typeof declared?.emits === "string" && declared.emits ? declared.emits : null;
 	const updates = declaredUpdates(declared);
-	if (!emits && !updates) {
+	const updatesLink = declared?.updatesLink;
+	if (updates && updatesLink) throw new ToolUserError("updates and updatesLink are mutually exclusive", 400);
+	if (!emits && !updates && !updatesLink) {
 		throw new ToolUserError(
 			`View "${params.viewKey}" does not declare action "${params.action}"`,
 			403,
 		);
 	}
-	if (!updates && params.expected !== undefined) {
+	if (!updates && !updatesLink && params.expected !== undefined) {
 		throw new ToolUserError(
-			"expected applies only to a view action that updates an entity.",
+			"expected applies only to a view action that updates an entity or relationship.",
 			400,
 		);
 	}
@@ -317,8 +323,9 @@ async function appendViewAction(
 		throw new ToolUserError("This event has been replaced. Reopen it before submitting.", 409);
 	}
 	const target = updates ? await resolveViewWriteTarget(params, view, updates) : null;
+	const linkTarget = updatesLink ? await resolveViewLinkWriteTarget(params, view, updatesLink) : null;
 	const entityIds = [
-		...new Set([...(subject?.entity_ids ?? []), ...(target ? [target.entityId] : [])]),
+		...new Set([...(subject?.entity_ids ?? []), ...(target ? [target.entityId] : []), ...(linkTarget?.entityIds ?? [])]),
 	];
 
 	const interactionEnvelope = {
@@ -363,7 +370,8 @@ async function appendViewAction(
 	// The entity write, its change event and the receipt commit together: a
 	// failed precondition, a denial or a lost receipt race leaves none of them.
 	const committed = await getDb().begin(async (tx) => {
-		const write = target ? await applyViewWrite(tx, params, view, target) : null;
+		const write = target ? await applyViewWrite(tx, params, view, target)
+			: linkTarget ? await applyViewLinkWrite(tx, params, view, linkTarget) : null;
 		const inserted = await insertConnectionlessWorkspaceEvent(
 			{
 				entityIds,
@@ -408,6 +416,53 @@ async function appendViewAction(
 }
 
 type ViewActionUpdates = NonNullable<ViewActionDecl["updates"]>;
+type ViewActionLinkUpdates = NonNullable<ViewActionDecl["updatesLink"]>;
+
+interface ViewLinkWriteTarget {
+	relationshipId: number;
+	set: Record<string, unknown>;
+	entityIds: number[];
+	declaration: ViewActionLinkUpdates;
+}
+
+function checkViewLinkTarget(view: StoredView, declaration: ViewActionLinkUpdates, row: RelationshipRow): void {
+	if (row.relationship_type_slug !== declaration.relationshipType || row.from_entity_type !== declaration.fromEntityType || row.to_entity_type !== declaration.toEntityType) {
+		throw new ToolUserError("Relationship does not match the declared action types", 403);
+	}
+	for (const [type, id] of [[row.from_entity_type, row.from_entity_id], [row.to_entity_type, row.to_entity_id]] as const) {
+		if (!type || !view.attach.some(attachment =>
+			("collection" in attachment && attachment.collection === type) ||
+			matchesRecord(attachment, { type, id }))) {
+			throw new ToolUserError("View does not attach to this relationship endpoint", 403);
+		}
+	}
+}
+
+async function resolveViewLinkWriteTarget(params: InvokeViewActionParams, view: StoredView, declaration: ViewActionLinkUpdates): Promise<ViewLinkWriteTarget> {
+	if (!params.caller) throw new ToolUserError("A signed-in Lobu user is required for relationship updates", 401);
+	if (![declaration.relationshipType, declaration.fromEntityType, declaration.toEntityType].every(value => typeof value === "string" && value.length > 0) || !Array.isArray(declaration.fields) || declaration.fields.length === 0 || declaration.fields.length > 50 || !declaration.fields.every(field => typeof field === "string" && field.length > 0)) {
+		throw new ToolUserError("Invalid relationship action declaration", 400);
+	}
+	const value = params.value ?? {};
+	const id = value.relationship_id;
+	if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0) throw new ToolUserError("value.relationship_id must name one relationship", 400);
+	if (!value.set || typeof value.set !== "object" || Array.isArray(value.set)) throw new ToolUserError("value.set must be an object", 400);
+	const set = { ...value.set as Record<string, unknown> };
+	if (Object.keys(set).some(field => !declaration.fields.includes(field))) throw new ToolUserError("Action does not declare these relationship fields", 403);
+	const db = getDb();
+	const rows = await db.unsafe<RelationshipRow>(`SELECT ${RELATIONSHIP_SELECT} ${RELATIONSHIP_JOINS} WHERE r.id = $1 AND r.organization_id = $2 AND r.deleted_at IS NULL`, [id, params.organizationId]);
+	const [row] = await readableRelationships(rows, params.caller.ctx, await entityReadRestrictions(db, params.caller.ctx));
+	if (!row) throw new ToolUserError("Relationship not found or not readable", 404);
+	checkViewLinkTarget(view, declaration, row);
+	return { relationshipId: id, set, declaration, entityIds: [row.from_entity_id, row.to_entity_id].filter((id): id is number => typeof id === "number") };
+}
+
+async function applyViewLinkWrite(tx: DbClient, params: InvokeViewActionParams, view: StoredView, target: ViewLinkWriteTarget): Promise<ViewWrite> {
+	const updated = await updateRelationship({ action: "update_link", relationship_id: target.relationshipId, set: target.set, expected: params.expected }, params.caller!.ctx, {
+		sql: tx, check: row => checkViewLinkTarget(view, target.declaration, row),
+	});
+	return { result: { applied: { relationship_id: target.relationshipId, fields: Object.fromEntries(Object.keys(target.set).map(field => [field, updated.relationship.metadata?.[field] ?? null])) } } };
+}
 
 function declaredUpdates(declared: ViewActionDecl | undefined): ViewActionUpdates | null {
 	const updates = declared?.updates;

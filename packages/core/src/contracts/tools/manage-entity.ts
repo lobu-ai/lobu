@@ -335,6 +335,22 @@ export const UpdateLinkAction = Type.Object({
   confidence: Type.Optional(Confidence),
   source: Type.Optional(RelationshipSource),
   metadata: Type.Optional(Metadata),
+  set: Type.Optional(
+    Type.Record(Type.String(), Type.Unknown(), {
+      minProperties: 1,
+      maxProperties: MAX_EXPECTED_FIELDS,
+      description:
+        "Shallow-merge these relationship metadata fields; null removes a field. Requires matching expected keys; incompatible with metadata, confidence and source. Legacy metadata replaces the whole visible object.",
+    })
+  ),
+  expected: Type.Optional(
+    Type.Record(Type.String(), Type.Unknown(), {
+      minProperties: 1,
+      maxProperties: MAX_EXPECTED_FIELDS,
+      description:
+        "Required with set: the exact same keys and their last-read values. Null matches an absent field. A mismatch returns 409 PRECONDITION_FAILED and writes nothing.",
+    })
+  ),
 });
 
 export const ListLinksAction = Type.Object({

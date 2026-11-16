@@ -26,14 +26,14 @@ export const InvokeViewActionSchema = Type.Object(
 		value: Type.Optional(
 			Type.Record(Type.String(), Type.Unknown(), {
 				description:
-					"Action payload, e.g. the record id the button names. An action that updates an entity takes { entity_id, set: { field: value } }.",
+					"Action payload. Entity updates take { entity_id, set: { field: value } }; relationship updates take { relationship_id, set: { field: value } }.",
 			})
 		),
 		expected: Type.Optional(
 			Type.Record(Type.String(), Type.Unknown(), {
 				maxProperties: 50,
 				description:
-					"For an action that updates an entity: metadata field -> the value the view read. Checked under the row lock; a mismatch writes nothing and fails 409 PRECONDITION_FAILED.",
+					"For entity or relationship updates: metadata field -> the value the view read. Relationship patches require the same keys as set, with null for an absent field. Checked under the row lock; a mismatch writes nothing and fails 409 PRECONDITION_FAILED.",
 			})
 		),
 		interaction_id: Type.String({ minLength: 1, maxLength: 256 }),
@@ -55,7 +55,10 @@ const viewActionEntityFields = (description: string) =>
 export const InvokeViewActionResultSchema = Type.Object({
 	...InvokeEventActionResultSchema.properties,
 	applied: Type.Optional(
-		viewActionEntityFields("Entity fields the action committed, server-stamped fields included."),
+		Type.Union([
+			viewActionEntityFields("Entity fields the action committed, server-stamped fields included."),
+			Type.Object({ relationship_id: Type.Integer(), fields: Type.Record(Type.String(), Type.Unknown()) }),
+		]),
 	),
 	pending_approval: Type.Optional(
 		viewActionEntityFields("Proposed field values held for an approval instead of written."),

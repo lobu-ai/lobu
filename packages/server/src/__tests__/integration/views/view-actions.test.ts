@@ -599,6 +599,74 @@ describe("view actions", () => {
 		expect((removed as ToolUserError).httpStatus).toBe(403);
 	});
 
+	it("patches relationship fields through a declared view with stale-write protection and Undo", async () => {
+		const from = await createTestEntity({ name: "Synthetic initiative", entity_type: "initiative", organization_id: orgId });
+		const to = await createTestEntity({ name: "Synthetic contact", entity_type: "contact", organization_id: orgId });
+		await executeTool("manage_entity_schema", {
+			schema_type: "relationship_type", action: "create", slug: "evaluates", name: "Evaluates",
+			metadata_schema: { $id: "https://example.test/evaluates.schema.json", type: "object", additionalProperties: false, properties: {
+				review: { type: "string", enum: ["open", "skipped"] },
+				note: { type: "string", maxLength: 100 }, rank: { type: "integer" }, label: { type: "string" },
+			} },
+		}, TEST_ENV, ownerCtx);
+		const linked = await executeTool("manage_entity", {
+			action: "link", from_entity_id: from.id, to_entity_id: to.id,
+			relationship_type_slug: "evaluates", metadata: { review: "open", note: "", rank: 7 },
+		}, TEST_ENV, ownerCtx) as { relationship: { id: number } };
+		const relationshipId = linked.relationship.id;
+		await executeTool("manage_views", {
+			action: "set", source_code: viewModule({
+				key: "relationship-review", attach: [{ collection: "initiative" }, { collection: "contact" }],
+				actions: { review: { updatesLink: { relationshipType: "evaluates", fromEntityType: "initiative", toEntityType: "contact", fields: ["review", "note", "label"] } } },
+			}, VIEW_SOURCE),
+		}, TEST_ENV, ownerCtx);
+		const invoke = (set: Record<string, unknown>, expected: Record<string, unknown>, interaction_id: string) =>
+			executeTool("invoke_view_action", { view: "relationship-review", action: "review", value: { relationship_id: relationshipId, set }, expected, interaction_id }, TEST_ENV, memberCtx);
+		const skipped = await invoke({ review: "skipped" }, { review: "open" }, "edge-skip");
+		expect(skipped).toMatchObject({ applied: { relationship_id: relationshipId, fields: { review: "skipped" } } });
+		expect(await invoke({ review: "skipped" }, { review: "open" }, "edge-skip")).toMatchObject({ created: false });
+		await expect(invoke({ review: "open" }, { review: "open" }, "edge-stale")).rejects.toMatchObject({ httpStatus: 409, code: "PRECONDITION_FAILED" });
+		await expect(invoke({ rank: 99 }, { rank: 7 }, "edge-undeclared")).rejects.toMatchObject({ httpStatus: 403 });
+		await expect(invoke({ review: "invalid" }, { review: "skipped" }, "edge-schema")).rejects.toMatchObject({ httpStatus: 400 });
+		await expect(invoke({ review: "open" }, {}, "edge-no-precondition")).rejects.toMatchObject({ httpStatus: 400 });
+		await expect(executeTool("manage_entity", { action: "update_link", relationship_id: relationshipId,
+			set: { note: "Feedback" }, expected: { note: "" }, metadata: {},
+		}, TEST_ENV, ownerCtx)).rejects.toMatchObject({ httpStatus: 400 });
+		await executeTool("manage_entity", { action: "update_link", relationship_id: relationshipId,
+			set: { note: "Feedback" }, expected: { note: "" },
+		}, TEST_ENV, ownerCtx);
+		await expect(executeTool("manage_entity", { action: "update_link", relationship_id: relationshipId,
+			set: { note: "Stale feedback" }, expected: { note: "" },
+		}, TEST_ENV, ownerCtx)).rejects.toMatchObject({ httpStatus: 409, code: "PRECONDITION_FAILED" });
+		const foreign = await createTestOrganization({ name: "Other relationship workspace" });
+		await addUserToOrganization(ownerId, foreign.id, "owner");
+		const foreignCtx = { ...ownerCtx, organizationId: foreign.id, tokenOrganizationId: foreign.id };
+		await executeTool("manage_views", {
+			action: "set", source_code: viewModule({ key: "foreign-review", attach: [{ collection: "initiative" }, { collection: "contact" }],
+				actions: { review: { updatesLink: { relationshipType: "evaluates", fromEntityType: "initiative", toEntityType: "contact", fields: ["review"] } } },
+			}, VIEW_SOURCE),
+		}, TEST_ENV, foreignCtx);
+		await expect(executeTool("invoke_view_action", {
+			view: "foreign-review", action: "review", value: { relationship_id: relationshipId, set: { review: "open" } },
+			expected: { review: "skipped" }, interaction_id: "edge-cross-workspace",
+		}, TEST_ENV, foreignCtx)).rejects.toMatchObject({ httpStatus: 404 });
+		await expect(executeTool("invoke_view_action", {
+			view: "relationship-review", action: "review", value: { relationship_id: relationshipId, set: { review: "open" } },
+			expected: { review: "skipped" }, interaction_id: "edge-readonly",
+		}, TEST_ENV, readOnlyMemberCtx)).rejects.toThrow(/read-only/i);
+		await invoke({ review: "open" }, { review: "skipped" }, "edge-undo");
+		const [edge] = await getTestDb()`SELECT metadata FROM entity_relationships WHERE id = ${relationshipId}`;
+		expect(edge.metadata).toMatchObject({ review: "open", note: "Feedback", rank: 7 });
+		const [receiptCount] = await getTestDb()`SELECT count(*)::int AS n FROM events WHERE organization_id = ${orgId} AND origin_type = 'view_interaction'`;
+		expect(receiptCount.n).toBe(2);
+		// A field absent before the patch reads as null; undoing with null removes it.
+		expect(await invoke({ label: "Lead" }, { label: null }, "edge-label")).toMatchObject({ applied: { fields: { label: "Lead" } } });
+		expect(await invoke({ label: null }, { label: "Lead" }, "edge-label-undo")).toMatchObject({ applied: { fields: { label: null } } });
+		const [undone] = await getTestDb()`SELECT metadata FROM entity_relationships WHERE id = ${relationshipId}`;
+		expect(undone.metadata).not.toHaveProperty("label");
+		expect(undone.metadata).toMatchObject({ review: "open", note: "Feedback", rank: 7 });
+	});
+
 	describe("entity updates", () => {
 		const DEAL_SCHEMA = {
 			type: "object",

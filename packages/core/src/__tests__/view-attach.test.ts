@@ -21,6 +21,15 @@ describe("view attachment matching shared by server and web", () => {
     expect(matchesRecord({ record: "deal", id: 7 }, record)).toBe(true);
     expect(matchesRecord({ record: "deal", id: 8 }, record)).toBe(false);
     expect(matchesRecord({ record: "company", id: 7 }, record)).toBe(false);
+    expect(
+      matchesRecord(
+        { record: "deal", id: 7 },
+        { type: "deal", id: "source-key" }
+      )
+    ).toBe(false);
+    expect(
+      matchesRecord({ record: "deal" }, { type: "deal", id: "source-key" })
+    ).toBe(true);
   });
 
   test("collection and record attachments name different pages", () => {

@@ -190,6 +190,14 @@ export interface ActionDef {
    *  view must attach to `entityType`. Stamped (x-lobu-stamps) fields are
    *  server-owned and refused. */
   updates?: { entityType: string; fields: string[] };
+  /** Patch one existing relationship with `{ relationship_id, set }` and
+   * matching expected keys. Both endpoint types must appear in attach. */
+  updatesLink?: {
+    relationshipType: string;
+    fromEntityType: string;
+    toEntityType: string;
+    fields: string[];
+  };
 }
 
 export interface ActionOptions {

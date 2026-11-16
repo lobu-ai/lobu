@@ -210,7 +210,7 @@ export default async (_ctx, client) => {
 		access: "write",
 	},
 	"entities.updateLink": {
-		summary: "Update metadata / confidence on an existing relationship.",
+		summary: "Update an existing relationship. metadata replaces the entire visible object (legacy); set shallow-merges named fields and requires expected with the same 1-50 keys. set cannot combine with metadata, confidence or source. Null in expected matches an absent field; stale values fail 409 PRECONDITION_FAILED without writes.",
 		access: "write",
 	},
 	"entities.listLinks": {
