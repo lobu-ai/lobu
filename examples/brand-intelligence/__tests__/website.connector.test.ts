@@ -273,3 +273,118 @@ test("consent-banner changes do not change source identity or re-emit unchanged 
   expect(second.events).toEqual([]);
   expect(second.checkpoint.hashes).toEqual(first.checkpoint.hashes);
 });
+
+function stripTime({ occurred_at: _occurredAt, ...event }: any) {
+  return event;
+}
+
+async function read(
+  html: string,
+  config: any,
+  query: unknown = url,
+  page: any = {}
+) {
+  const connector = new WebsiteConnector();
+  const fetched: string[] = [];
+  connector.fetchPage = async (requested: string) => {
+    fetched.push(requested);
+    return { html, finalUrl: url };
+  };
+  const result = await connector.read({
+    feedKey: "pages",
+    query,
+    config,
+    ...page,
+  });
+  return { result, fetched };
+}
+
+for (const parseSections of [false, true]) {
+  test(`a source read of one URL returns the rows its sync emits (sections=${parseSections})`, async () => {
+    const html = document(
+      `<main><h1>Reporting</h1><p>${business}</p><h2>Pricing</h2><p>Plans start free for small teams of analysts.</p></main>${banner()}`
+    );
+    const synced = await sync(html, parseSections);
+    const { result, fetched } = await read(html, {
+      parse_sections: parseSections,
+    });
+    expect(fetched).toEqual([url]);
+    expect(result.rows.length).toBeGreaterThan(0);
+    expect(result.rows.map(stripTime)).toEqual(synced.events.map(stripTime));
+    expect(result.hasMore).toBe(false);
+  });
+}
+
+test("a source read pages one page's section rows by limit and offset", async () => {
+  const html = document(
+    `<main><h1>Reporting</h1><p>${business}</p><h2>Pricing</h2><p>Plans start free for small teams of analysts.</p></main>`
+  );
+  const all = (await read(html, {})).result.rows;
+  expect(all).toHaveLength(2);
+  const first = (await read(html, {}, url, { limit: 1 })).result;
+  expect(first.rows.map(stripTime)).toEqual([stripTime(all[0])]);
+  expect(first.hasMore).toBe(true);
+  const second = (await read(html, {}, url, { limit: 1, offset: 1 })).result;
+  expect(second.rows.map(stripTime)).toEqual([stripTime(all[1])]);
+  expect(second.hasMore).toBe(false);
+});
+
+test("a source read of a consent-only page returns no rows", async () => {
+  const { result } = await read(document(banner()), { parse_sections: false });
+  expect(result.rows).toEqual([]);
+  expect(result.hasMore).toBe(false);
+});
+
+test("a source read rejects anything but one http(s) URL before fetching", async () => {
+  for (const query of [
+    undefined,
+    "",
+    "posthog.com",
+    " https://site.example/",
+    `${url} https://other.example/`,
+    "ftp://site.example/file",
+    "javascript:alert(1)",
+  ]) {
+    const connector = new WebsiteConnector();
+    let fetched = false;
+    connector.fetchPage = async () => {
+      fetched = true;
+      return { html: "", finalUrl: url };
+    };
+    const error = await connector
+      .read({ feedKey: "pages", query, config: {} })
+      .then(
+        () => null,
+        (e: any) => e
+      );
+    expect(error?.status).toBe(400);
+    expect(fetched).toBe(false);
+  }
+});
+
+test("page fetch failures carry the upstream status for typed read errors", async () => {
+  const realFetch = globalThis.fetch;
+  try {
+    for (const [response, status] of [
+      [new Response("gone", { status: 404 }), 404],
+      [new Response("busy", { status: 503 }), 503],
+      [
+        new Response("%PDF", {
+          headers: { "content-type": "application/pdf" },
+        }),
+        415,
+      ],
+    ] as const) {
+      globalThis.fetch = (async () => response) as unknown as typeof fetch;
+      const error = await new WebsiteConnector()
+        .read({ feedKey: "pages", query: url, config: {} })
+        .then(
+          () => null,
+          (e: any) => e
+        );
+      expect(error?.status).toBe(status);
+    }
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
