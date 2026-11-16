@@ -206,7 +206,7 @@ export default class CommonCrawlConnector extends ConnectorRuntime<
   readonly definition = {
     key: "common-crawl-market-spike",
     name: "Common Crawl Market spike",
-    version: "0.1.0",
+    version: "0.1.1",
     authSchema: { methods: [{ type: "none" as const }] },
     feeds: {
       captures: {
@@ -224,11 +224,14 @@ export default class CommonCrawlConnector extends ConnectorRuntime<
     },
   };
 
-  private async request(url: string): Promise<string | null> {
+  private async request(url: string, stage: string): Promise<string | null> {
     // Serial requests, fixed provider host, no redirects, automatic retries or WARC downloads.
     const response = await this.fetcher(url, {
       redirect: "error",
       signal: AbortSignal.timeout(20000),
+      headers: {
+        "User-Agent": "LobuCommonCrawl/0.1 (+https://github.com/lobu-ai/lobu)",
+      },
     });
     if (response.status === 404) {
       const body = await boundedText(response);
@@ -243,11 +246,13 @@ export default class CommonCrawlConnector extends ConnectorRuntime<
       } catch {
         // Non-JSON error responses leave coverage unknown as well.
       }
-      throw new Error("Common Crawl HTTP 404; coverage unknown");
+      throw new Error(`Common Crawl ${stage} HTTP 404; coverage unknown`);
     }
     if (!response.ok) {
       await response.body?.cancel();
-      throw new Error(`Common Crawl HTTP ${response.status}; coverage unknown`);
+      throw new Error(
+        `Common Crawl ${stage} HTTP ${response.status}; coverage unknown`
+      );
     }
     return boundedText(response);
   }
@@ -269,7 +274,7 @@ export default class CommonCrawlConnector extends ConnectorRuntime<
     )
       throw new Error("Invalid crawl checkpoint");
     if (!checkpoint) {
-      const metadata = await this.request(indexUrl(config));
+      const metadata = await this.request(indexUrl(config), "pagination");
       const info =
         metadata === null ? { pages: 0, pageSize: 1 } : JSON.parse(metadata);
       if (
@@ -280,19 +285,31 @@ export default class CommonCrawlConnector extends ConnectorRuntime<
       )
         throw new Error("Invalid CDX pagination metadata");
       checkpoint = { scope, next_page: 0, pages: info.pages };
+      // The crawl is pinned. Retain its validated page plan even if page zero
+      // fails, so retries do not depend on another pagination request. No
+      // captures have been accepted and next_page must remain zero here.
+      if (checkpoint.pages > 0) await ctx.commit([], checkpoint);
     }
     if (checkpoint.next_page === checkpoint.pages) {
       await ctx.commit([], checkpoint);
       return { status: "complete" };
     }
     const url = indexUrl(config, checkpoint.next_page);
-    const text = await this.request(url);
+    const text = await this.request(url, `page ${checkpoint.next_page}`);
     const lines = text === null ? [] : text.trim().split("\n");
     if ((text !== null && !text.trim()) || lines.length > MAX_RECORDS)
       throw new Error("Empty or oversized CDX page; coverage unknown");
-    const captures = lines.map((line) =>
-      parseCapture(JSON.parse(line), config)
-    );
+    const captures = lines.map((line, index) => {
+      let row: unknown;
+      try {
+        row = JSON.parse(line);
+      } catch {
+        throw new Error(
+          `Invalid CDX JSON at page ${checkpoint.next_page}, line ${index + 1}; coverage unknown`
+        );
+      }
+      return parseCapture(row, config);
+    });
     const events: EventEnvelope[] = [];
     const identities = new Map<string, string>();
     for (const capture of captures) {
