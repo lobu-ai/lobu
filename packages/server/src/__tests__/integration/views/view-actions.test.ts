@@ -604,9 +604,9 @@ describe("view actions", () => {
 		const to = await createTestEntity({ name: "Synthetic contact", entity_type: "contact", organization_id: orgId });
 		await executeTool("manage_entity_schema", {
 			schema_type: "relationship_type", action: "create", slug: "evaluates", name: "Evaluates",
-			metadata_schema: { type: "object", additionalProperties: false, properties: {
+			metadata_schema: { $id: "https://example.test/evaluates.schema.json", type: "object", additionalProperties: false, properties: {
 				review: { type: "string", enum: ["open", "skipped"] },
-				note: { type: "string", maxLength: 100 }, rank: { type: "integer" },
+				note: { type: "string", maxLength: 100 }, rank: { type: "integer" }, label: { type: "string" },
 			} },
 		}, TEST_ENV, ownerCtx);
 		const linked = await executeTool("manage_entity", {
@@ -617,7 +617,7 @@ describe("view actions", () => {
 		await executeTool("manage_views", {
 			action: "set", source_code: viewModule({
 				key: "relationship-review", attach: [{ collection: "initiative" }, { collection: "contact" }],
-				actions: { review: { updatesLink: { relationshipType: "evaluates", fromEntityType: "initiative", toEntityType: "contact", fields: ["review", "note"] } } },
+				actions: { review: { updatesLink: { relationshipType: "evaluates", fromEntityType: "initiative", toEntityType: "contact", fields: ["review", "note", "label"] } } },
 			}, VIEW_SOURCE),
 		}, TEST_ENV, ownerCtx);
 		const invoke = (set: Record<string, unknown>, expected: Record<string, unknown>, interaction_id: string) =>
@@ -659,6 +659,12 @@ describe("view actions", () => {
 		expect(edge.metadata).toMatchObject({ review: "open", note: "Feedback", rank: 7 });
 		const [receiptCount] = await getTestDb()`SELECT count(*)::int AS n FROM events WHERE organization_id = ${orgId} AND origin_type = 'view_interaction'`;
 		expect(receiptCount.n).toBe(2);
+		// A field absent before the patch reads as null; undoing with null removes it.
+		expect(await invoke({ label: "Lead" }, { label: null }, "edge-label")).toMatchObject({ applied: { fields: { label: "Lead" } } });
+		expect(await invoke({ label: null }, { label: "Lead" }, "edge-label-undo")).toMatchObject({ applied: { fields: { label: null } } });
+		const [undone] = await getTestDb()`SELECT metadata FROM entity_relationships WHERE id = ${relationshipId}`;
+		expect(undone.metadata).not.toHaveProperty("label");
+		expect(undone.metadata).toMatchObject({ review: "open", note: "Feedback", rank: 7 });
 	});
 
 	describe("entity updates", () => {

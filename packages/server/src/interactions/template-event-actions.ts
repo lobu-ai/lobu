@@ -3,6 +3,7 @@ import type { ViewActionDecl } from "@lobu/core/contracts/tools/manage-views";
 import {
 	attachesToEntityType,
 	isEventAttachment,
+	matchesRecord,
 } from "@lobu/core/contracts/tools/view-attach";
 import {
 	collectTemplateActionInvocations,
@@ -429,7 +430,9 @@ function checkViewLinkTarget(view: StoredView, declaration: ViewActionLinkUpdate
 		throw new ToolUserError("Relationship does not match the declared action types", 403);
 	}
 	for (const [type, id] of [[row.from_entity_type, row.from_entity_id], [row.to_entity_type, row.to_entity_id]] as const) {
-		if (!type || !attachesToEntityType(view.attach, type, typeof id === "number" ? id : undefined)) {
+		if (!type || !view.attach.some(attachment =>
+			("collection" in attachment && attachment.collection === type) ||
+			matchesRecord(attachment, { type, id }))) {
 			throw new ToolUserError("View does not attach to this relationship endpoint", 403);
 		}
 	}

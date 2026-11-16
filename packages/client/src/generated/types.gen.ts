@@ -1522,6 +1522,18 @@ export type ManageEntityData = {
         metadata?: {
           [key: string]: unknown;
         };
+        /**
+         * Shallow-merge these relationship metadata fields; null removes a field. Requires matching expected keys; incompatible with metadata, confidence and source. Legacy metadata replaces the whole visible object.
+         */
+        set?: {
+          [key: string]: unknown;
+        };
+        /**
+         * Required with set: the exact same keys and their last-read values. Null matches an absent field. A mismatch returns 409 PRECONDITION_FAILED and writes nothing.
+         */
+        expected?: {
+          [key: string]: unknown;
+        };
       }
     | {
         /**
@@ -7872,6 +7884,15 @@ export type ManageViewsResponses = {
               | unknown
               | {
                   /**
+                   * Patch allowed fields on one existing relationship; both endpoint types must appear in attach. Requires value { relationship_id, set } and matching expected keys.
+                   */
+                  updatesLink?: {
+                    relationshipType: string;
+                    fromEntityType: string;
+                    toEntityType: string;
+                    fields: Array<string>;
+                  };
+                  /**
                    * Event kind appended when the action fires, e.g. 'deal.won'.
                    */
                   emits?: string;
@@ -7989,6 +8010,15 @@ export type ManageViewsResponses = {
             [key: string]:
               | unknown
               | {
+                  /**
+                   * Patch allowed fields on one existing relationship; both endpoint types must appear in attach. Requires value { relationship_id, set } and matching expected keys.
+                   */
+                  updatesLink?: {
+                    relationshipType: string;
+                    fromEntityType: string;
+                    toEntityType: string;
+                    fields: Array<string>;
+                  };
                   /**
                    * Event kind appended when the action fires, e.g. 'deal.won'.
                    */
@@ -8114,6 +8144,15 @@ export type ManageViewsResponses = {
             [key: string]:
               | unknown
               | {
+                  /**
+                   * Patch allowed fields on one existing relationship; both endpoint types must appear in attach. Requires value { relationship_id, set } and matching expected keys.
+                   */
+                  updatesLink?: {
+                    relationshipType: string;
+                    fromEntityType: string;
+                    toEntityType: string;
+                    fields: Array<string>;
+                  };
                   /**
                    * Event kind appended when the action fires, e.g. 'deal.won'.
                    */

@@ -1803,12 +1803,21 @@ export async function updateRelationship(
 			const before = (visibleMetadataBefore ?? {}) as Record<string, unknown>;
 			const mismatched = Object.keys(patch).filter(key => !isDeepStrictEqual(before[key] ?? null, args.expected![key]));
 			if (mismatched.length) throw new ToolUserError("Relationship fields changed since they were read", 409, "PRECONDITION_FAILED", { mismatched_fields: mismatched });
-			metadata = { ...before, ...patch };
+			// Null removes a field, matching expected's absent-is-null rule so an
+			// Undo can restore a field that was absent before the patch.
+			metadata = Object.fromEntries(
+				Object.entries({ ...before, ...patch }).filter(([key]) => !(key in patch) || patch[key] !== null),
+			);
 			if (exceedsValidationLimits(metadata)) throw new ToolUserError("Relationship metadata exceeds size/nesting limits", 400);
 			const [type] = await tx`SELECT metadata_schema FROM entity_relationship_types WHERE id = ${edge.relationship_type_id}`;
 			if (type?.metadata_schema) {
-				const validate = relationshipPatchAjv.compile(type.metadata_schema);
-				if (!validate(metadata)) throw new ToolUserError(`Metadata validation failed: ${validate.errors?.map(formatAjvError).join("; ")}`, 400);
+				try {
+					const validate = relationshipPatchAjv.compile(type.metadata_schema);
+					if (!validate(metadata)) throw new ToolUserError(`Metadata validation failed: ${validate.errors?.map(formatAjvError).join("; ")}`, 400);
+				} finally {
+					// DB reads mint a new object each time; do not retain it or its $id.
+					relationshipPatchAjv.removeSchema(type.metadata_schema);
+				}
 			}
 		}
 		const metadataChanged =

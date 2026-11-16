@@ -340,7 +340,7 @@ export const UpdateLinkAction = Type.Object({
       minProperties: 1,
       maxProperties: MAX_EXPECTED_FIELDS,
       description:
-        "Shallow-merge these relationship metadata fields. Requires matching expected keys; incompatible with metadata, confidence and source. Legacy metadata replaces the whole visible object.",
+        "Shallow-merge these relationship metadata fields; null removes a field. Requires matching expected keys; incompatible with metadata, confidence and source. Legacy metadata replaces the whole visible object.",
     })
   ),
   expected: Type.Optional(
