@@ -2512,7 +2512,10 @@ export async function listEntities(
     `;
 		const backingSql = etRows[0]?.backing_sql as string | null | undefined;
 		typeSchema = etRows[0]?.metadata_schema;
-		if (filters.filters?.length) validateAttributeFilters(filters.filters, etRows[0]?.metadata_schema);
+		if (filters.filters?.length) {
+			validateAttributeFilters(filters.filters, etRows[0]?.metadata_schema);
+			assertMemberEmailReadable(filters.entity_type, filters.filters.map((f) => f.field), etRows[0]?.metadata_schema, ctx, "Filtering");
+		}
 		if (filters.segment) {
 			if (backingSql) {
 				throw new ToolUserError(
@@ -2738,6 +2741,25 @@ function builtinSortSql(sortBy: string): (alias: string) => string {
 }
 
 /**
+ * Ordering or filtering by a value the response redacts reveals it: equality
+ * confirms a guess and a range narrows it a character at a time. Both need the
+ * read that returns the value.
+ */
+function assertMemberEmailReadable(
+	entityType: string,
+	fields: string[],
+	schema: unknown,
+	ctx: ToolContext,
+	verb: "Sorting" | "Filtering",
+): void {
+	if (entityType !== MEMBER_ENTITY_TYPE_SLUG || canSeeMemberEmail(memberReadRole(ctx))) return;
+	const { emailField } = resolveMemberSchemaFieldsFromSchema(schema as Record<string, unknown>);
+	if (fields.includes(emailField)) {
+		throw new ToolUserError(`${verb} members by email requires workspace administrator access`, 403);
+	}
+}
+
+/**
  * Order by a declared scalar metadata property, typed by the schema. A value
  * that does not parse as the declared type orders as NULL instead of failing
  * the read: legacy rows and other writers can hold any JSON.
@@ -2761,14 +2783,7 @@ function metadataSortSql(field: string, schema: unknown, entityType: string, ctx
 			"VALIDATION",
 		);
 	}
-	// Ordering reveals values the response redacts, so it needs the same read.
-	if (
-		entityType === MEMBER_ENTITY_TYPE_SLUG &&
-		field === resolveMemberSchemaFieldsFromSchema(schema as Record<string, unknown>).emailField &&
-		!canSeeMemberEmail(memberReadRole(ctx))
-	) {
-		throw new ToolUserError("Sorting members by email requires workspace administrator access", 403);
-	}
+	assertMemberEmailReadable(entityType, [field], schema, ctx, "Sorting");
 	// A declared key, inlined as a literal: every statement of the list binds
 	// its own parameter prefix, and the sort appears in two of them.
 	const key = `'${field.replaceAll("'", "''")}'`;
