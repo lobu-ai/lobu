@@ -26,7 +26,7 @@ import {
 } from '../auth/oauth/workspace-grants';
 import { canReadWorkspaceIdentity, isInProcessSystemCall, isPublicReader, memberReadRole } from './access-control';
 import { AUDIT_SEMANTIC_TYPE, MEMBER_ENTITY_TYPE_SLUG } from './constants';
-import { canSeeMemberEmail, canSeeMemberList, redactMemberEmail } from '../utils/member-entity-type';
+import { canSeeMemberEmail, canSeeMemberList, redactMemberEmail, resolveMemberSchemaFieldsFromSchema } from '../utils/member-entity-type';
 import { type AuthzScope, authzScopeFromToolContext } from '../authz/scope';
 import { compileConnectionRowVisibility } from '../authz/connection-visibility';
 import { getDb, pgTextArray } from '../db/client';
@@ -2024,8 +2024,16 @@ async function searchWorkspaceImpl(
     `[search] Querying entities for "${query ?? '(vector)'}" (entity_type=${args.entity_type}, fuzzy=${args.fuzzy}, market=${args.market}, has_embedding=${!!args.query_embedding})`
   );
 
+  // Matching a member on an email the response redacts confirms that email, so
+  // callers who cannot read member emails match members by name only.
+  const hiddenMemberEmailField = canSeeMemberEmail(memberReadRole(ctx))
+    ? null
+    : resolveMemberSchemaFieldsFromSchema(
+        args.metadata_filter ? await loadMemberMetadataSchema(ctx.organizationId) : null
+      ).emailField;
+
   let [results, recall] = await Promise.all([
-    queryEntities(query, args, env, connectionScope, readRestrictions),
+    queryEntities(query, args, env, connectionScope, readRestrictions, hiddenMemberEmailField),
     recallFor(),
   ]);
 
@@ -2040,7 +2048,8 @@ async function searchWorkspaceImpl(
         args,
         env,
         connectionScope,
-        readRestrictions
+        readRestrictions,
+        hiddenMemberEmailField
       );
       if (results.length > 0) {
         logger.info(
@@ -2171,6 +2180,7 @@ async function queryEntities(
   _env: Env,
   scope: AuthzScope,
   readRestrictions: EntityReadRestrictions,
+  hiddenMemberEmailField: string | null,
 ) {
   const sql = getDb();
   const fuzzyEnabled = args.fuzzy ?? true;
@@ -2206,9 +2216,12 @@ async function queryEntities(
   // above the email's actual owner). Identity rows are tenant-private, so the
   // EXISTS is scoped to the caller's org - cross-org public entities never
   // match it, which is correct: their identifiers aren't the caller's to query.
+  const memberSlugIdx = hiddenMemberEmailField === null ? null : addParam(MEMBER_ENTITY_TYPE_SLUG);
+  const hiddenMemberEmailIdentitySql =
+    memberSlugIdx === null ? '' : ` AND NOT (ei.namespace = 'email' AND et.slug = $${memberSlugIdx})`;
   const identifierExactSql =
     queryParamIdx !== null
-      ? `EXISTS (SELECT 1 FROM entity_identities ei WHERE ei.entity_id = e.id AND ei.organization_id = $${orgParamIdx} AND lower(ei.identifier) = lower($${queryParamIdx}) AND ei.deleted_at IS NULL)`
+      ? `EXISTS (SELECT 1 FROM entity_identities ei WHERE ei.entity_id = e.id AND ei.organization_id = $${orgParamIdx} AND lower(ei.identifier) = lower($${queryParamIdx}) AND ei.deleted_at IS NULL${hiddenMemberEmailIdentitySql})`
       : 'FALSE';
 
   // Query match condition: text match OR vector match
@@ -2295,6 +2308,7 @@ async function queryEntities(
   if (args.metadata_filter) {
     for (const [key, value] of Object.entries(args.metadata_filter)) {
       conditions.push(`e.metadata->>'${key.replace(/'/g, "''")}' = $${addParam(value)}`);
+      if (memberSlugIdx !== null && key === hiddenMemberEmailField) conditions.push(`et.slug <> $${memberSlugIdx}`);
     }
   }
 

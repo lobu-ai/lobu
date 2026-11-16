@@ -49,7 +49,7 @@ describe('$member privacy contract', () => {
       ON CONFLICT DO NOTHING
     `;
 
-    await sql`
+    const [plain] = await sql`
       INSERT INTO entities (
         name, slug, entity_type_id, organization_id, metadata, created_by, created_at, updated_at
       ) VALUES (
@@ -61,6 +61,12 @@ describe('$member privacy contract', () => {
         ${owner.id},
         NOW(), NOW()
       )
+      RETURNING id
+    `;
+    // Sign-in records the address as an identity, as subject-identities does.
+    await sql`
+      INSERT INTO entity_identities (organization_id, entity_id, namespace, identifier, source_connector)
+      VALUES (${org.id}, ${plain.id}, 'email', ${MEMBER_EMAIL}, 'test')
     `;
   });
 
@@ -93,5 +99,46 @@ describe('$member privacy contract', () => {
     const ownerBody = await ownerResponse.json();
     const ownerHit = ownerBody.entities.find((e: any) => e.name === 'Plain Member');
     expect(ownerHit.metadata.email).toBe(MEMBER_EMAIL);
+  });
+
+  it('does not let a regular member test email values through attribute filters', async () => {
+    const filtered = (cookie: string, op: string, value: string) =>
+      post(`/api/${orgSlug}/manage_entity`, {
+        body: { action: 'list', entity_type: '$member', filters: [{ field: 'email', op, value }] },
+        cookie,
+      });
+    // Equality confirms a guess; a range narrows the address a character at a time.
+    for (const [op, value] of [['eq', MEMBER_EMAIL], ['gte', 'plain'], ['lt', 'plain-n']] as const) {
+      const response = await filtered(memberCookie, op, value);
+      expect(response.status).toBe(403);
+    }
+
+    const owner = await filtered(ownerCookie, 'eq', MEMBER_EMAIL);
+    expect(owner.status).toBe(200);
+    const ownerBody = await owner.json();
+    expect(ownerBody.entities.map((e: any) => e.name)).toEqual(['Plain Member']);
+  });
+
+  it('does not let a regular member confirm an email through search_memory', async () => {
+    const search = async (cookie: string, body: Record<string, unknown>) => {
+      const response = await post(`/api/${orgSlug}/search_memory`, {
+        body: { include_public_catalogs: false, ...body },
+        cookie,
+      });
+      expect(response.status).toBe(200);
+      const result = await response.json();
+      // One hit comes back as `entity`, several as `matches`.
+      return [result.entity, ...(result.matches ?? [])].filter(Boolean).map((e: any) => e.name);
+    };
+    const byIdentity = { query: MEMBER_EMAIL, fuzzy: false };
+    const byMetadata = { query: 'Plain Member', metadata_filter: { email: MEMBER_EMAIL } };
+
+    expect(await search(memberCookie, byIdentity)).not.toContain('Plain Member');
+    expect(await search(memberCookie, byMetadata)).not.toContain('Plain Member');
+    // The name stays searchable; only the email is withheld.
+    expect(await search(memberCookie, { query: 'Plain Member' })).toContain('Plain Member');
+
+    expect(await search(ownerCookie, byIdentity)).toContain('Plain Member');
+    expect(await search(ownerCookie, byMetadata)).toContain('Plain Member');
   });
 });
