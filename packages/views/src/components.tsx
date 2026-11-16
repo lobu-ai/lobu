@@ -1166,9 +1166,28 @@ export function EntityCollection(props: EntityCollectionProps) {
   return createElement(CollectionTable, { ...props, key });
 }
 
-const SELECTION_KEYS = new Set(["search", "filters", "segment"]);
-const FIELD = /^[A-Za-z_][A-Za-z0-9_]*$/;
+// The fallback checks core's CollectionSelectionSchema by hand, bounds
+// included: the schema library behind it would add ~227 KB to every view's
+// runtime. A malformed selection must fail closed, never widen the read.
+const FIELD = /^[A-Za-z_][A-Za-z0-9_]{0,119}$/;
 const MAX_PAGE_SIZE = 500;
+const MAX_FILTERS = 32;
+const MAX_VALUE = 2000;
+// The fixed sorts a stored entity list accepts; anything else lists newest first.
+const STORED_SORTS = new Set([
+  "name",
+  "created_at",
+  "total_content",
+  "active_connections",
+  "automations_count",
+  "children_count",
+]);
+
+function plainValue(value: unknown, nullable: boolean): boolean {
+  if (typeof value === "string") return value.length <= MAX_VALUE;
+  if (typeof value === "number") return Number.isFinite(value);
+  return nullable && (value === null || typeof value === "boolean");
+}
 
 function plainFilter(filter: unknown): boolean {
   if (!filter || typeof filter !== "object") return false;
@@ -1179,18 +1198,19 @@ function plainFilter(filter: unknown): boolean {
     !FIELD.test(field)
   )
     return false;
-  if (op === "eq" || op === "neq")
-    return (
-      value === null || ["string", "number", "boolean"].includes(typeof value)
-    );
+  if (op === "eq" || op === "neq") return plainValue(value, true);
   return (
     (op === "lt" || op === "lte" || op === "gt" || op === "gte") &&
-    (typeof value === "string" || typeof value === "number")
+    plainValue(value, false)
   );
 }
 
-/** The selection contract checked without the schema library the native
- *  build carries, so a malformed selection is an error, never a wider read. */
+function boundedString(value: unknown, min: number, max: number): boolean {
+  return (
+    typeof value === "string" && value.length >= min && value.length <= max
+  );
+}
+
 function plainSelection(raw: unknown): CollectionSelection {
   const valid =
     !!raw &&
@@ -1198,39 +1218,72 @@ function plainSelection(raw: unknown): CollectionSelection {
     !Array.isArray(raw) &&
     Object.entries(raw).every(([key, value]) =>
       key === "filters"
-        ? Array.isArray(value) && value.length <= 32 && value.every(plainFilter)
-        : SELECTION_KEYS.has(key) && typeof value === "string"
+        ? Array.isArray(value) &&
+          value.length <= MAX_FILTERS &&
+          value.every(plainFilter)
+        : key === "search"
+          ? boundedString(value, 0, 512)
+          : key === "segment" && boundedString(value, 1, 120)
     );
   if (!valid) throw new Error("Invalid collection selection");
   return raw as CollectionSelection;
 }
 
-/** The selection a fallback table reads. A saved filter it cannot resolve on
- *  its own (a viewer or relative-date preset) is an error, never every row. */
-function fallbackSelection(
+interface FallbackTable {
+  columns?: string[];
+  sort?: { field: string; order: "asc" | "desc" };
+}
+
+function plainTable(raw: unknown): FallbackTable {
+  const table = (raw && typeof raw === "object" ? raw : {}) as Record<
+    string,
+    unknown
+  >;
+  const sort = table.sort as Record<string, unknown> | undefined;
+  return {
+    columns: Array.isArray(table.columns)
+      ? table.columns.filter((c): c is string => typeof c === "string")
+      : undefined,
+    sort:
+      sort &&
+      typeof sort.field === "string" &&
+      FIELD.test(sort.field) &&
+      (sort.order === "asc" || sort.order === "desc")
+        ? { field: sort.field, order: sort.order }
+        : undefined,
+  };
+}
+
+/** What a fallback table reads and shows: the preset's selection and table
+ *  (or the type's default table). A saved filter it cannot resolve on its
+ *  own (a viewer or relative-date preset) is an error, never every row. */
+function fallbackCollection(
   schema: Record<string, unknown> | undefined,
   preset: string | undefined,
   selection: CollectionSelection | undefined
-): CollectionSelection {
-  if (preset !== undefined) {
-    const presets = (
-      schema?.["x-lobu-collection"] as { presets?: unknown } | undefined
-    )?.presets;
-    const found = Array.isArray(presets)
-      ? (presets as Array<Record<string, unknown>>).find(
-          (item) => item?.key === preset
-        )
-      : undefined;
-    if (!found || found.viewer !== undefined)
-      throw new Error(
-        "This saved filter is unavailable. Choose another filter."
-      );
-    if (selection !== undefined) return plainSelection(selection);
-    if (found.relativeDate !== undefined)
-      throw new Error("This saved filter needs the native collection.");
-    return plainSelection(found.selection ?? {});
-  }
-  return plainSelection(selection ?? {});
+): { selection: CollectionSelection; table: FallbackTable } {
+  const presentation = schema?.["x-lobu-collection"] as
+    | { presets?: unknown; table?: unknown }
+    | undefined;
+  if (preset === undefined)
+    return {
+      selection: plainSelection(selection ?? {}),
+      table: plainTable(presentation?.table),
+    };
+  const presets = presentation?.presets;
+  const found = Array.isArray(presets)
+    ? (presets as Array<Record<string, unknown>>).find(
+        (item) => item?.key === preset
+      )
+    : undefined;
+  if (!found || found.viewer !== undefined)
+    throw new Error("This saved filter is unavailable. Choose another filter.");
+  if (selection === undefined && found.relativeDate !== undefined)
+    throw new Error("This saved filter needs the native collection.");
+  return {
+    selection: plainSelection(selection ?? found.selection ?? {}),
+    table: plainTable(found.table ?? presentation?.table),
+  };
 }
 
 function CollectionTable(props: EntityCollectionProps) {
@@ -1240,6 +1293,7 @@ function CollectionTable(props: EntityCollectionProps) {
     entity_type?: {
       name?: string;
       metadata_schema?: Record<string, unknown> | string | null;
+      backing_sql?: string | null;
     } | null;
   }>(
     tool("manage_entity_schema", {
@@ -1251,17 +1305,18 @@ function CollectionTable(props: EntityCollectionProps) {
   const rawSchema = type.data?.entity_type?.metadata_schema;
   let schema: Record<string, unknown> | undefined;
   let selection: CollectionSelection | undefined;
+  let table: FallbackTable = {};
   let invalid: string | undefined;
   try {
     schema =
       typeof rawSchema === "string"
         ? JSON.parse(rawSchema)
         : (rawSchema ?? undefined);
-    selection = fallbackSelection(
+    ({ selection, table } = fallbackCollection(
       schema,
       props.preset,
       props.selection ?? props.defaultSelection
-    );
+    ));
   } catch (error) {
     invalid = error instanceof Error ? error.message : String(error);
   }
@@ -1270,6 +1325,13 @@ function CollectionTable(props: EntityCollectionProps) {
     MAX_PAGE_SIZE
   );
   const ready = !!type.data?.entity_type && !invalid;
+  // The native collection's order: a derived type sorts by its own columns; a
+  // stored type takes only the fixed sorts and otherwise lists newest first.
+  const sort = type.data?.entity_type?.backing_sql
+    ? table.sort
+    : table.sort && STORED_SORTS.has(table.sort.field)
+      ? table.sort
+      : { field: "created_at", order: "desc" as const };
   const list = useQuery<{
     entities: ViewEntity[];
     metadata?: { has_more?: boolean; total_count?: number };
@@ -1281,6 +1343,8 @@ function CollectionTable(props: EntityCollectionProps) {
           search: selection?.search?.trim() || undefined,
           filters: selection?.filters?.length ? selection.filters : undefined,
           segment: selection?.segment,
+          sort_by: sort?.field,
+          sort_order: sort?.order,
           limit: pageSize,
           offset: (page - 1) * pageSize,
         })
@@ -1327,7 +1391,11 @@ function CollectionTable(props: EntityCollectionProps) {
       ),
     },
     ...Object.entries(properties)
-      .filter(([, prop]) => prop?.["x-table-column"] === true)
+      .filter(
+        ([key, prop]) =>
+          prop?.["x-table-column"] === true &&
+          (!table.columns || table.columns.includes(key))
+      )
       .map(([key, prop]) => ({
         key,
         header: String(prop?.["x-table-label"] ?? prop?.title ?? key),

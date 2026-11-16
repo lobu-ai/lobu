@@ -23,6 +23,7 @@ const SCHEMA = {
       "x-table-column": true,
       title: "Status",
     },
+    due_at: { type: "string", "x-table-column": true, title: "Due" },
   },
   "x-lobu-collection": {
     presets: [
@@ -31,6 +32,12 @@ const SCHEMA = {
         label: "Open matters",
         selection: { filters: [{ field: "status", op: "eq", value: "open" }] },
         table: { sort: { field: "due_at", order: "asc" } },
+      },
+      {
+        key: "by-name",
+        label: "By name",
+        selection: {},
+        table: { columns: ["status"], sort: { field: "name", order: "asc" } },
       },
       {
         key: "mine",
@@ -248,6 +255,29 @@ describe("EntityCollection without native components", () => {
     });
   });
 
+  test("lists in the preset's order with the preset's columns", async () => {
+    await mount({ entityType: "matter", preset: "by-name" });
+    expect(host.lists()).toEqual([
+      expect.objectContaining({ sort_by: "name", sort_order: "asc" }),
+    ]);
+    expect([...el.querySelectorAll("th")].map((th) => th.textContent)).toEqual([
+      "Name",
+      "Status",
+    ]);
+  });
+
+  test("a stored type lists newest first when the preset sorts by an attribute", async () => {
+    await mount({ entityType: "matter", preset: "open" });
+    expect(host.lists()).toEqual([
+      expect.objectContaining({ sort_by: "created_at", sort_order: "desc" }),
+    ]);
+    expect([...el.querySelectorAll("th")].map((th) => th.textContent)).toEqual([
+      "Name",
+      "Status",
+      "Due",
+    ]);
+  });
+
   test("a selection beside a preset edits it", async () => {
     await mount({
       entityType: "matter",
@@ -264,6 +294,29 @@ describe("EntityCollection without native components", () => {
     ["an unknown preset", { preset: "missing" }],
     ["a relative-date preset it cannot resolve alone", { preset: "this-week" }],
     ["a selection with an unknown key", { selection: { filter: [] } as never }],
+    ["an empty segment", { selection: { segment: "" } }],
+    ["an over-long segment", { selection: { segment: "s".repeat(121) } }],
+    ["an over-long search", { selection: { search: "q".repeat(513) } }],
+    [
+      "an over-long filter value",
+      {
+        selection: {
+          filters: [{ field: "status", op: "eq", value: "v".repeat(2001) }],
+        },
+      },
+    ],
+    [
+      "too many filters",
+      {
+        selection: {
+          filters: Array.from({ length: 33 }, () => ({
+            field: "status",
+            op: "eq" as const,
+            value: "open",
+          })),
+        },
+      },
+    ],
     [
       "filters that are not a list",
       { defaultSelection: { filters: "status=open" } as never },
