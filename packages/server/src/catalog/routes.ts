@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { mcpAuth } from "../auth/middleware";
+import { extractAuthContext, toToolContext } from "../tools/execute";
 import type { Env } from "../index";
 import { orgContext } from "../lobu/stores/org-context";
 import {
@@ -60,6 +61,7 @@ orgInstalledRoutes.get("/agents/:agentId/installed", async (c) => {
 	const installed = await listAgentInstalled(
 		agentId,
 		kinds as AgentInstalledKind[],
+		toToolContext(extractAuthContext(c)),
 		{ includeCatalog },
 	);
 	return c.json({ installed });
