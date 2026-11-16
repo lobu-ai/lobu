@@ -23,7 +23,13 @@ const SCHEMA = {
       "x-table-column": true,
       title: "Status",
     },
-    due_at: { type: "string", "x-table-column": true, title: "Due" },
+    due_at: {
+      type: "string",
+      format: "date-time",
+      "x-table-column": true,
+      title: "Due",
+    },
+    tags: { type: "array", items: { type: "string" } },
   },
   "x-lobu-collection": {
     presets: [
@@ -38,6 +44,12 @@ const SCHEMA = {
         label: "By name",
         selection: {},
         table: { columns: ["status"], sort: { field: "name", order: "asc" } },
+      },
+      {
+        key: "by-tags",
+        label: "By tags",
+        selection: {},
+        table: { sort: { field: "tags", order: "asc" } },
       },
       {
         key: "mine",
@@ -266,15 +278,25 @@ describe("EntityCollection without native components", () => {
     ]);
   });
 
-  test("a stored type lists newest first when the preset sorts by an attribute", async () => {
+  test("a stored type sorts by a declared date field as the native collection does", async () => {
     await mount({ entityType: "matter", preset: "open" });
     expect(host.lists()).toEqual([
-      expect.objectContaining({ sort_by: "created_at", sort_order: "desc" }),
+      expect.objectContaining({
+        sort_by: "metadata.due_at",
+        sort_order: "asc",
+      }),
     ]);
     expect([...el.querySelectorAll("th")].map((th) => th.textContent)).toEqual([
       "Name",
       "Status",
       "Due",
+    ]);
+  });
+
+  test("a stored type lists newest first when the preset sorts by a non-scalar field", async () => {
+    await mount({ entityType: "matter", preset: "by-tags" });
+    expect(host.lists()).toEqual([
+      expect.objectContaining({ sort_by: "created_at", sort_order: "desc" }),
     ]);
   });
 

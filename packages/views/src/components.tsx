@@ -23,6 +23,11 @@
  */
 
 import type { CollectionSelection } from "@lobu/core/contracts/tools/collection-selection";
+import {
+  collectionSortFieldError,
+  ENTITY_LIST_METADATA_SORT_PREFIX,
+  ENTITY_LIST_SORT_KEYS,
+} from "@lobu/core/contracts/tools/entity-list-sort";
 import type {
   ComponentType,
   CSSProperties,
@@ -1173,15 +1178,27 @@ const FIELD = /^[A-Za-z_][A-Za-z0-9_]{0,119}$/;
 const MAX_PAGE_SIZE = 500;
 const MAX_FILTERS = 32;
 const MAX_VALUE = 2000;
-// The fixed sorts a stored entity list accepts; anything else lists newest first.
-const STORED_SORTS = new Set([
-  "name",
-  "created_at",
-  "total_content",
-  "active_connections",
-  "automations_count",
-  "children_count",
-]);
+
+function storedListSort(
+  sort: FallbackTable["sort"],
+  properties: unknown
+): { field: string; order: "asc" | "desc" } {
+  const declared =
+    properties && typeof properties === "object" && !Array.isArray(properties)
+      ? (properties as Record<string, unknown>)
+      : undefined;
+  if (!sort || collectionSortFieldError(sort.field, declared))
+    return { field: "created_at", order: "desc" };
+  const builtin = (ENTITY_LIST_SORT_KEYS as readonly string[]).includes(
+    sort.field
+  );
+  return {
+    field: builtin
+      ? sort.field
+      : `${ENTITY_LIST_METADATA_SORT_PREFIX}${sort.field}`,
+    order: sort.order,
+  };
+}
 
 function plainValue(value: unknown, nullable: boolean): boolean {
   if (typeof value === "string") return value.length <= MAX_VALUE;
@@ -1326,12 +1343,11 @@ function CollectionTable(props: EntityCollectionProps) {
   );
   const ready = !!type.data?.entity_type && !invalid;
   // The native collection's order: a derived type sorts by its own columns; a
-  // stored type takes only the fixed sorts and otherwise lists newest first.
+  // stored type takes a built-in key or a declared scalar property
+  // (`metadata.<field>`) and otherwise lists newest first.
   const sort = type.data?.entity_type?.backing_sql
     ? table.sort
-    : table.sort && STORED_SORTS.has(table.sort.field)
-      ? table.sort
-      : { field: "created_at", order: "desc" as const };
+    : storedListSort(table.sort, schema?.properties);
   const list = useQuery<{
     entities: ViewEntity[];
     metadata?: { has_more?: boolean; total_count?: number };

@@ -17,7 +17,7 @@ import { ACL_RESOURCE_TYPE_SLUG, type EntityMetrics } from "@lobu/connector-sdk"
 import { classifyToolError, getErrorMessage, slugify } from "@lobu/core";
 import { VIEW_PATH_MARKER } from "@lobu/core/contracts/tools/view-path";
 import type { AttributeFilter } from "@lobu/core/contracts/tools/collection-selection";
-import { ENTITY_LIST_METADATA_SORT_PREFIX, ENTITY_LIST_SORT_KEYS, entityMetadataSortType, type EntityMetadataSortType } from "@lobu/core/contracts/tools/collection-presentation";
+import { ENTITY_LIST_METADATA_SORT_PREFIX, ENTITY_LIST_SORT_KEYS, entityMetadataSortType, type EntityMetadataSortType } from "@lobu/core/contracts/tools/entity-list-sort";
 import { attributeFilterSql, validateAttributeFilters } from "./attribute-filters";
 import { feedLinkedToBusinessEntitySql } from "../authz/channel-about";
 import { type AuthzScope, authzScopeFromToolContext } from "../authz/scope";
