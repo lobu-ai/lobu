@@ -5,6 +5,8 @@
  * Supports sitemap.xml discovery or explicit URL list.
  * Converts HTML → Markdown, splits into hierarchical sections.
  * Tracks changes between syncs via content hashing.
+ * The `pages` feed also reads ONE public URL live (`query`), returning the same
+ * rows a sync of that URL would emit, without persisting them.
  *
  * Server-side rendered HTML only. The connector runs in a V8 isolate with no
  * browser behind it, so a page whose content is painted by client-side JS
@@ -19,11 +21,28 @@ import {
   type RuntimeConnectorDefinition,
   ConnectorRuntime,
   type EventEnvelope,
+  type FeedReadContext,
+  type FeedReadResult,
   sleep,
   type SyncContext,
   type SyncResult,
   validatePublicUrl,
 } from "@lobu/connector-sdk";
+
+interface ExtractedPage {
+  finalUrl: string;
+  markdown: string;
+  meta: { title?: string; description?: string; ogImage?: string };
+  contentHash: string;
+}
+
+/**
+ * A failure carrying an HTTP status. The isolate forwards `status`, and the
+ * platform classifies it into the read result's typed `error_code`.
+ */
+function sourceError(status: number, message: string): Error {
+  return Object.assign(new Error(message), { status });
+}
 
 interface PageSection {
   heading: string;
@@ -52,7 +71,7 @@ export default class WebsiteConnector extends ConnectorRuntime {
     name: "Website",
     description:
       "Fetches web pages over HTTP. Supports sitemap.xml for auto-discovery. Converts to markdown sections and tracks changes.",
-    version: "2.1.1",
+    version: "2.2.0",
     faviconDomain: "google.com",
     authSchema: {
       methods: [{ type: "none" }],
@@ -60,9 +79,11 @@ export default class WebsiteConnector extends ConnectorRuntime {
     feeds: {
       pages: {
         sync: (ctx) => this.syncFeed(ctx),
+        read: (ctx) => this.readPage(ctx),
         key: "pages",
         name: "Web Pages",
-        description: "Scrape and parse web pages into structured content.",
+        description:
+          "Scrape and parse web pages into structured content. A source read takes one public http(s) page URL as query and returns that page's rows, the same rows a sync of that URL emits, without crawling or a sitemap.",
         configSchema: {
           type: "object",
           properties: {
@@ -239,75 +260,28 @@ export default class WebsiteConnector extends ConnectorRuntime {
       const url = urls[i];
       try {
         validatePublicUrl(url);
-        const { html, finalUrl } = await this.fetchPage(url);
-        const meta = this.extractMeta(html);
-        const markdown = this.deduplicateMarkdown(
-          this.turndown.turndown(html).trim()
-        );
-        if (!markdown) continue;
-        const contentHash = this.hash(markdown);
+        const page = await this.extractPage(url);
+        if (!page) continue;
 
-        if (previousHashes[url] === contentHash) {
-          newHashes[url] = contentHash;
+        if (previousHashes[url] === page.contentHash) {
+          newHashes[url] = page.contentHash;
           continue;
         }
-        newHashes[url] = contentHash;
+        newHashes[url] = page.contentHash;
 
-        if (parseSections) {
-          const sections = this.parseSections(markdown);
-          for (let si = 0; si < sections.length; si++) {
-            const section = sections[si];
-            const sectionHash = this.hash(section.content);
-            const sectionKey = `${url}#${section.anchor}`;
-
-            if (previousHashes[sectionKey] === sectionHash) {
-              newHashes[sectionKey] = sectionHash;
-              continue;
-            }
-            newHashes[sectionKey] = sectionHash;
-            const parentKey = section.parentAnchor
-              ? `${url}#${section.parentAnchor}`
-              : undefined;
-            events.push({
-              origin_id: `web_section_${this.hash(sectionKey)}`,
-              title: section.heading,
-              payload_text: section.content,
-              source_url: `${finalUrl}#${section.anchor}`,
-              occurred_at: new Date(),
-              origin_type: "section",
-              semantic_type: "section",
-              score: 50,
-              origin_parent_id: parentKey
-                ? `web_section_${this.hash(parentKey)}`
-                : undefined,
-              metadata: {
-                heading: section.heading,
-                heading_level: section.level,
-                anchor: section.anchor,
-                section_index: si,
-                page_url: finalUrl,
-                content_hash: sectionHash,
-              },
-            });
+        for (const { key, hash, event } of this.pageEvents(
+          url,
+          page,
+          parseSections
+        )) {
+          // Only sections carry their own unchanged-content skip; the page
+          // event's skip is the page-level hash above.
+          if (key !== url && previousHashes[key] === hash) {
+            newHashes[key] = hash;
+            continue;
           }
-        } else {
-          events.push({
-            origin_id: `web_page_${this.hash(url)}`,
-            title: meta.title || finalUrl,
-            payload_text: markdown,
-            source_url: finalUrl,
-            occurred_at: new Date(),
-            origin_type: "page",
-            semantic_type: "page",
-            score: 50,
-            metadata: {
-              content_hash: contentHash,
-              meta_title: meta.title,
-              meta_description: meta.description,
-              og_image: meta.ogImage,
-              word_count: markdown.split(/\s+/).length,
-            },
-          });
+          newHashes[key] = hash;
+          events.push(event);
         }
       } catch {
         // Best-effort per-URL fetch; continue with remaining URLs.
@@ -327,6 +301,145 @@ export default class WebsiteConnector extends ConnectorRuntime {
       metadata: { pages_scraped: urls.length, events_created: events.length },
     };
   }
+  /**
+   * Source read: `query` is exactly one public http(s) URL. Fetches that page
+   * only (no sitemap, no other URLs, no inter-page delay) and returns the rows
+   * a sync of the same URL would emit under this feed's config, so identity
+   * (`origin_id`), text and `content_hash` agree across both operations. The
+   * platform's read deadline bounds the call: it aborts the host fetch and
+   * ends the isolate, and the per-page cap below never exceeds the longest
+   * read budget. A page with no content returns no rows.
+   */
+  private async readPage(ctx: FeedReadContext): Promise<FeedReadResult> {
+    const url = typeof ctx.query === "string" ? ctx.query : "";
+    let parsed: URL | undefined;
+    try {
+      parsed = new URL(url);
+    } catch {
+      parsed = undefined;
+    }
+    if (
+      !url ||
+      url !== url.trim() ||
+      /\s/.test(url) ||
+      !parsed ||
+      (parsed.protocol !== "https:" && parsed.protocol !== "http:")
+    ) {
+      throw sourceError(
+        400,
+        "Website read query must be exactly one http(s) page URL"
+      );
+    }
+    try {
+      validatePublicUrl(url);
+    } catch (error) {
+      throw sourceError(
+        400,
+        error instanceof Error ? error.message : String(error)
+      );
+    }
+    const page = await this.extractPage(url);
+    const parseSections = (ctx.config.parse_sections as boolean) ?? true;
+    const rows = page
+      ? this.pageEvents(url, page, parseSections).map(({ event }) => event)
+      : [];
+    const offset = Math.max(0, Math.trunc(ctx.offset ?? 0));
+    const limit = Math.max(1, Math.trunc(ctx.limit ?? rows.length));
+    return {
+      rows: rows.slice(offset, offset + limit) as unknown as Record<
+        string,
+        unknown
+      >[],
+      total: rows.length,
+      hasMore: offset + limit < rows.length,
+    };
+  }
+
+  /** Fetch one page and extract its markdown, or null when it has no content. */
+  private async extractPage(url: string): Promise<ExtractedPage | null> {
+    const { html, finalUrl } = await this.fetchPage(url);
+    const markdown = this.deduplicateMarkdown(
+      this.turndown.turndown(html).trim()
+    );
+    if (!markdown) return null;
+    return {
+      finalUrl,
+      markdown,
+      meta: this.extractMeta(html),
+      contentHash: this.hash(markdown),
+    };
+  }
+
+  /**
+   * The events one page yields, each with the checkpoint key and hash a sync
+   * records for it. Identity derives from the requested URL, never the
+   * redirect target, so a sync and a read of the same URL agree.
+   */
+  private pageEvents(
+    url: string,
+    page: ExtractedPage,
+    parseSections: boolean
+  ): { key: string; hash: string; event: EventEnvelope }[] {
+    const { finalUrl, markdown, meta, contentHash } = page;
+    if (!parseSections) {
+      return [
+        {
+          key: url,
+          hash: contentHash,
+          event: {
+            origin_id: `web_page_${this.hash(url)}`,
+            title: meta.title || finalUrl,
+            payload_text: markdown,
+            source_url: finalUrl,
+            occurred_at: new Date(),
+            origin_type: "page",
+            semantic_type: "page",
+            score: 50,
+            metadata: {
+              content_hash: contentHash,
+              meta_title: meta.title,
+              meta_description: meta.description,
+              og_image: meta.ogImage,
+              word_count: markdown.split(/\s+/).length,
+            },
+          },
+        },
+      ];
+    }
+    return this.parseSections(markdown).map((section, si) => {
+      const sectionHash = this.hash(section.content);
+      const sectionKey = `${url}#${section.anchor}`;
+      const parentKey = section.parentAnchor
+        ? `${url}#${section.parentAnchor}`
+        : undefined;
+      return {
+        key: sectionKey,
+        hash: sectionHash,
+        event: {
+          origin_id: `web_section_${this.hash(sectionKey)}`,
+          title: section.heading,
+          payload_text: section.content,
+          source_url: `${finalUrl}#${section.anchor}`,
+          occurred_at: new Date(),
+          origin_type: "section",
+          semantic_type: "section",
+          score: 50,
+          origin_parent_id: parentKey
+            ? `web_section_${this.hash(parentKey)}`
+            : undefined,
+          metadata: {
+            heading: section.heading,
+            heading_level: section.level,
+            anchor: section.anchor,
+            section_index: si,
+            page_url: finalUrl,
+            content_hash: sectionHash,
+          },
+        },
+      };
+    });
+  }
+
   /**
    * Fetch one page's HTML.
    *
@@ -350,11 +463,17 @@ export default class WebsiteConnector extends ConnectorRuntime {
         },
       });
       if (!response.ok) {
-        throw new Error(`Page fetch failed: HTTP ${response.status}`);
+        throw sourceError(
+          response.status,
+          `Page fetch failed: HTTP ${response.status}`
+        );
       }
       const contentType = response.headers.get("content-type") ?? "";
       if (contentType && !/\b(html|xml)\b/i.test(contentType)) {
-        throw new Error(`Page is not HTML (content-type: ${contentType})`);
+        throw sourceError(
+          415,
+          `Page is not HTML (content-type: ${contentType})`
+        );
       }
       return { html: await response.text(), finalUrl: response.url || url };
     } finally {
