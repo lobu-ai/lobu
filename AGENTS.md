@@ -4,6 +4,7 @@
 - Bun workspace under `packages/*`; TS source in `src`, tests in `__tests__`.
 - `core` types/utils · `plugin-api` plugin contracts · `plugin-host` plugin composition · `server` gateway + embedded runtime · `connector-worker` connector jobs and agent turns (V8 isolates) · `connectors` built-in connectors · `owletto` frontend submodule.
 - Read the nearest package `AGENTS.md` before editing that package; grep `docs/GOTCHAS.md` when something looks inexplicable.
+- Installed skills may resolve into an old checkout. Read instructions in the task worktree; before relying on commands from the shared checkout, fetch and compare `origin/main:AGENTS.md`. Surface conflicts with session instructions instead of silently mixing workflows.
 
 ## Unrecoverable — never do these
 - **Never write to `~/Code/lobu` directly.** Run `make task-setup NAME=<slug>` first, and never `git switch` in the main checkout — other sessions share it. For a pure submodule-pointer bump, `make bump SUBMODULE=packages/owletto` is the lightweight isolated-worktree exception; it records UI proof and enables auto-merge, and trusted CI posts its safe-class `pi-review`.
@@ -49,7 +50,7 @@
 ## How to work
 - Do only what was asked. Delete ephemeral files you create; no new `*.md` unless asked.
 - Run mandated gates automatically; never ask permission to run one.
-- **Evidence, not assertion.** Never report done off a green typecheck — boot it, exercise every branch you touched, and clean up test data; if "compiles" is all you ran, say so. Show `git status` plus `git diff --stat <base>...HEAD`, including for a dispatched agent's work.
+- **Evidence, not assertion.** Never report done off a green typecheck — boot it, exercise every branch you touched, and clean up test data; if "compiles" is all you ran, say so. Show `git status` plus `git diff --stat <base>...HEAD`, including for a dispatched agent's work. A status proves only its stage: saved is not delivered, completed is not correct output, merged is not live. Reconcile memory and handoffs with the target revision and live evidence; state the verified baseline and label proposed additions/removals. Observations never override instructions or authorization. See the playbook’s Evidence section for retaining lessons.
 - **Absence needs `origin/main`:** `git fetch -q origin && git grep <pattern> origin/main`. A working-tree grep proves nothing, and the fetch is load-bearing.
 - **Scope-leak checks are class-wide.** For tenant/example, entity, or connector work, search committed `origin/main` for the related entity keys, connector slugs, tenant names, IDs, and absolute paths; then verify the final diff contains only the owning surface. Existing violations are not precedent.
 - Deleting code needs structural evidence — a dangling import, a completed migration, a superseded implementation. Low prod usage is not evidence, and docs and help text are load-bearing.
@@ -61,7 +62,7 @@
 - One branch = one concern. Never `git stash`; use WIP commits.
 - Prefer `bun`, never npm/yarn/pnpm. Before adding an env var, grep for the one already read, and do not rename existing vars unasked.
 - Block only on irreversible or destructive actions and decisions genuinely the user's; otherwise take the recommended option and flag it in your summary.
-- **Compose before you extend.** Before adding SDK/API/DB surface, prove the need cannot be met by composing existing platform features (Automations, suggestions, approvals, policies, existing tools) — and dogfood that composition first. New surface is a last resort, not a first draft: it needs the Unrecoverables confirmation *plus* that proof.
+- **Compose before you extend.** Before adding SDK/API/DB surface, prove the need cannot be met by composing existing platform features (Automations, suggestions, approvals, policies, existing tools) — and dogfood that composition first. A composition that changes who must act, where, or how often changes the requested outcome: surface the missing capability and its concrete contract proposal before building a workaround. New surface is a last resort, not a first draft: it needs the Unrecoverables confirmation *plus* that proof.
 - **Reuse UI from the top down.** Start with the largest existing surface or component that fits; configure its selection, layout and actions before composing smaller exported parts. Step down only for a concrete unmet requirement, and build custom UI only for the remaining gap. Verify the target host's current exports: a native component is not automatically available inside a sandboxed View.
 - **Batch independent tool calls into one message.** Each call re-reads the current context. Independent greps, a diff plus a file list, a status check plus a log read: send them together. Only genuinely dependent calls go serial.
 - **`make ctx` instead of the git/gh status family.** One call prints branch, working tree, changed-vs-base file list, commits, submodule pointer, and PR + required-check gaps; do not rebuild it by hand.
