@@ -333,6 +333,7 @@ jobs:
           bun test examples/personal-agent --timeout 30000
           bun test examples/brand-intelligence --timeout 30000
           bun test examples/lobu-team --timeout 30000
+          bun test examples/common-crawl-market --timeout 30000
 
       - name: Upload coverage
         if: always()
