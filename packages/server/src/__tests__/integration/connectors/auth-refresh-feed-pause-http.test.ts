@@ -180,16 +180,36 @@ describe('auth refresh preserves failure pauses over HTTP', () => {
     expect(retry.status, await retry.text()).toBe(200);
   });
 
-  it('requires explicit resume of a manually paused validation feed and never resumes siblings', async () => {
+  it('requires explicit resume of a manually or legacy-paused validation feed and never resumes siblings', async () => {
     const s = await seed();
     const sql = getTestDb();
-    await sql`UPDATE feeds SET status = 'paused' WHERE id = ${s.healthy}`;
+    // Also the shape older auth propagation left behind: paused, no failures, no due cursor.
+    await sql`UPDATE feeds SET status = 'paused', next_run_at = NULL WHERE id = ${s.healthy}`;
     const before = await feed(s.healthy);
     const response = await post(`/connect/${s.token}/validate`, { credentials: { API_KEY: 'synthetic-key' } });
     expect(response.status, await response.text()).toBe(409);
     expect(await feed(s.healthy)).toEqual(before);
     expect(await sql`SELECT id FROM runs WHERE connection_id = ${s.connection.id}`).toHaveLength(0);
     expect(await sql`SELECT auth_data FROM auth_profiles WHERE id = ${s.profile.id}`).toEqual([{ auth_data: {} }]);
+
+    // The existing list surface shows the pause; the existing resume action ends it.
+    const session = await createTestSession(s.user.id);
+    const listed = await post(`/api/${s.org.slug}/manage_feeds`, {
+      action: 'list_feeds', connection_id: s.connection.id, status: 'paused',
+    }, session.cookieHeader);
+    const listBody = await listed.json();
+    expect(listed.status, JSON.stringify(listBody)).toBe(200);
+    expect(listBody.feeds.map((f: { id: number }) => Number(f.id)).sort())
+      .toEqual([s.broken, s.healthy, s.manual].sort());
+    const resumed = await post(`/api/${s.org.slug}/manage_feeds`, {
+      action: 'update_feed', feed_id: s.healthy, status: 'active',
+    }, session.cookieHeader);
+    expect(resumed.status, await resumed.text()).toBe(200);
+    const retry = await post(`/connect/${s.token}/validate`, { credentials: { API_KEY: 'synthetic-key' } });
+    const queued = await retry.json();
+    expect(retry.status, JSON.stringify(queued)).toBe(200);
+    expect(Number(queued.feed_id)).toBe(s.healthy);
+    expect(await feed(s.manual)).toMatchObject({ status: 'paused', next_run_at: null });
   });
 
   it('cancels validation without changing enabled or paused feed lifecycle', async () => {

@@ -269,8 +269,11 @@ async function handleListFeeds(
     const sourceOnly = sql`(${readOnly}) AND NOT (${webhookDriven})`;
     // Listener setup uses the failure counter, never the legacy sync attempt status.
     const failedSync = sql`NOT (${readOnly}) AND f.last_sync_status = 'failed'`;
+    // Scheduled admission requires an active connection, so a feed waiting on
+    // connection readiness keeps a stale due cursor; that is not a late sync.
     const overdue = sql`
       ${selectedOperations} @> '["sync"]'::jsonb
+      AND c.status = 'active'
       AND COALESCE(f.schedule, '') <> ''
       AND f.next_run_at IS NOT NULL
       AND f.next_run_at < now() - interval '1 hour'

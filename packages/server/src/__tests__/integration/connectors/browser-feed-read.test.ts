@@ -1002,7 +1002,7 @@ describe('compiled browser source reads', () => {
       .toEqual([{profile_kind:'browser_session',status:'active'}]);
   });
 
-  it('lets a member revoke their live account while preserving its identity and pausing feeds', async () => {
+  it('lets a member revoke their live account while preserving its identity and feed lifecycle', async () => {
     const profile = await ensureLiveBrowserProfile({ organizationId: orgId, connectorKey: SOURCE_KEY, deviceWorkerId: deviceId, userId });
     const sql = getTestDb();
     await sql`UPDATE auth_profiles SET status = 'active', auth_data = ${sql.json({ mode: 'live', account_id: 'fixture-account' })} WHERE id = ${profile.id}`;
@@ -1013,7 +1013,7 @@ describe('compiled browser source reads', () => {
     expect(revoked).toMatchObject({ action: 'update_auth_profile', auth_profile: { status: 'revoked' } });
     expect((await sql`SELECT status, auth_data FROM auth_profiles WHERE id = ${profile.id}`)[0]).toMatchObject({ status: 'revoked', auth_data: { account_id: 'fixture-account' } });
     expect((await sql`SELECT status FROM connections WHERE id = ${connectionId}`)[0].status).toBe('pending_auth');
-    expect((await sql`SELECT status FROM feeds WHERE id = ${feedId}`)[0].status).toBe('paused');
+    expect((await sql`SELECT status FROM feeds WHERE id = ${feedId}`)[0].status).toBe('active');
     expect(await manageAuthProfiles({ action: 'update_auth_profile', auth_profile_slug: profile.slug, status: 'active' }, {} as Env, member)).toMatchObject({ error: expect.stringContaining('gateway-owned') });
   });
 
