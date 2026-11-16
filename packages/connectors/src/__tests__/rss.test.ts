@@ -156,8 +156,9 @@ test('source read pages with its own cursor and ignores the sync item cap', asyn
   expect(second).toMatchObject({ total: 3, hasMore: false });
   expect(second.nextCursor).toBeUndefined();
 
-  // A new edition between pages must not be stitched onto the old one.
-  xml = RANKING_XML.replace('acme/beta', 'acme/delta');
+  // A new edition between pages must not be stitched onto the old one, even
+  // when it keeps every item id (no <guid>, same title and link).
+  xml = RANKING_XML.replace('Mon, 16 Nov 2026', 'Tue, 17 Nov 2026').replace('>Third<', '>Third, updated<');
   await expect(connector.read({ ...base, limit: 2, cursor: first.nextCursor })).rejects.toThrow(
     /feed changed since the previous page/
   );

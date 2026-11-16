@@ -220,7 +220,7 @@ export default class RSSConnector extends ConnectorRuntime {
    * not the current contents.
    *
    * Pages continue with a connector cursor carrying the next position and a
-   * fingerprint of the item list. Every page refetches the feed, so a feed that
+   * SHA-256 of every returned row. Every page refetches the feed, so a feed that
    * changed between pages fails the read instead of mixing two editions.
    */
   private async readFeed(ctx: FeedReadContext): Promise<FeedReadResult> {
@@ -242,11 +242,7 @@ export default class RSSConnector extends ConnectorRuntime {
       );
     }
 
-    const fingerprint = this.hashString(items.map((item) => item.id).join('\n'));
-    const start = ctx.cursor ? this.decodeReadCursor(ctx.cursor, fingerprint) : 0;
-    const end = Math.min(items.length, start + (ctx.limit ?? items.length));
-
-    const rows = items.slice(start, end).map((item) => ({
+    const allRows = items.map((item) => ({
       id: item.id,
       title: item.title,
       link: item.link || null,
@@ -257,6 +253,12 @@ export default class RSSConnector extends ConnectorRuntime {
       position: item.position,
       feed_published_at: item.feedPublishedAt?.toISOString() ?? null,
     }));
+    // Covers every returned field, so an edition that keeps item ids but
+    // changes content or dates still invalidates an earlier page's cursor.
+    const fingerprint = await this.sha256Hex(JSON.stringify(allRows));
+    const start = ctx.cursor ? this.decodeReadCursor(ctx.cursor, fingerprint) : 0;
+    const end = Math.min(allRows.length, start + (ctx.limit ?? allRows.length));
+    const rows = allRows.slice(start, end);
 
     return {
       rows,
@@ -271,9 +273,14 @@ export default class RSSConnector extends ConnectorRuntime {
         { name: 'position', type: 'integer' },
         { name: 'feed_published_at', type: 'timestamp' },
       ],
-      total: items.length,
-      ...(end < items.length ? { nextCursor: `${end}.${fingerprint}` } : { hasMore: false }),
+      total: allRows.length,
+      ...(end < allRows.length ? { nextCursor: `${end}.${fingerprint}` } : { hasMore: false }),
     };
+  }
+
+  private async sha256Hex(value: string): Promise<string> {
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
+    return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
   }
 
   /** Resume position from a read cursor; rejects a cursor from another edition. */
