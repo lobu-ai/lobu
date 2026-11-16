@@ -254,6 +254,14 @@ describe('activity feed queries stay organization-bounded', () => {
       WHERE organization_id = ${feedOrgId} AND origin_id LIKE 'own-1%'`;
     await sql`UPDATE events SET connection_id = ${privateConnection.id}
       WHERE organization_id = ${feedOrgId} AND origin_id LIKE 'own-2%'`;
+    // One visible exact match; all other exact vectors belong to the excluded
+    // private/audit rows. A high similarity floor must not make ANN read every
+    // lower-scoring embedding in an attempt to fill its candidate limit.
+    await sql`
+      UPDATE event_embeddings SET embedding = ('[1' || repeat(',0', 767) || ']')::vector
+      WHERE event_id = (SELECT id FROM events
+        WHERE organization_id = ${feedOrgId} AND origin_id = 'own-3')
+    `;
     await sql.begin(async (tx) => {
       await tx`SET LOCAL maintenance_work_mem = '512MB'`;
       await tx`REINDEX INDEX idx_events_embedding`;
@@ -286,6 +294,31 @@ describe('activity feed queries stay organization-bounded', () => {
     expect(plan.some((node) => node['Index Name'] === 'idx_events_embedding')).toBe(true);
     const embeddingScans = plan.filter((node) => node['Relation Name'] === 'event_embeddings');
     expect(embeddingScans.some((node) => node['Node Type'] === 'Seq Scan')).toBe(false);
+
+    const strictCapture: CapturedQuery[] = [];
+    const strict = await searchContentBySingleQuery(capturingClient(sql, strictCapture), '', {
+      organization_id: feedOrgId,
+      visibility_scope: { organizationId: feedOrgId, userId: user.id },
+      exclude_internal_ops: true,
+      exclude_recall_bookkeeping: true,
+      sort_by: 'score',
+      limit: 30,
+      include_total: false,
+      approximate_candidate_search: true,
+      query_embedding: Array.from({ length: 768 }, (_, i) => i === 0 ? 1 : 0),
+      min_similarity: 1,
+    });
+    expect(strict.content.map((row) => row.origin_id)).toEqual(['own-3']);
+    const strictQuery = strictCapture.find((c) => /search_candidates AS/.test(c.query));
+    if (!strictQuery) throw new Error('strict recall did not issue a candidate query');
+    const strictPlan = await planOf(strictQuery, true, true);
+    const strictScans = strictPlan.filter((node) => node['Index Name'] === 'idx_events_embedding');
+    expect(strictScans.some((node) => (node['Actual Loops'] ?? 0) > 0)).toBe(true);
+    // Every embedding has the requested model. Index candidates should only
+    // be filtered by visibility, never exhaust the probe to find enough rows
+    // above the similarity floor; lower distances already sort first.
+    expect(strictScans.reduce((sum, node) => sum +
+      (node['Rows Removed by Filter'] ?? 0) * (node['Actual Loops'] ?? 0), 0)).toBe(0);
 
     // A tiny eligible scope must not depend on landing in the nearest global
     // IVFFlat lists. Its vectors are farther away than the unrelated history.
