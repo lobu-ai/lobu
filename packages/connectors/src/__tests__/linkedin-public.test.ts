@@ -44,3 +44,19 @@ test('browser-only actions do not silently fall back to public access', async ()
   const result = await connector.execute({ actionKey: 'set_like', input: { liked: true, post_url: 'invalid' } } as any);
   expect(result.success).toBe(false);
 });
+
+test('browser-only operation requires a browser even with a valid post URL', async () => {
+  const { default: LinkedInConnector } = await import('../linkedin');
+  const connector = new LinkedInConnector();
+  const result = await connector.execute({ actionKey: 'set_like', input: { liked: true, post_url: 'https://www.linkedin.com/feed/update/urn:li:activity:1234567890123456789/' } } as any);
+  expect(result.success).toBe(false);
+  expect(result.error).toContain('Browser setup is required');
+});
+
+test('mixed auth still resolves a browser grant for browser sessions', async () => {
+  const { resolveBrowserRequirement } = await import('@lobu/connector-sdk');
+  const { default: LinkedInConnector } = await import('../linkedin');
+  const browser = new LinkedInConnector().definition.browser;
+  expect(resolveBrowserRequirement(browser, 'browser')).not.toBeNull();
+  expect(resolveBrowserRequirement(browser, 'none')).toBeNull();
+});
