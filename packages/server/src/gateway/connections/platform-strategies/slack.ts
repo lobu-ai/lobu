@@ -7,6 +7,7 @@
 
 import { createLogger } from "@lobu/core";
 import type { ThreadResponsePayload } from "../../infrastructure/queue/index.js";
+import { QueueTerminalError } from "../../infrastructure/queue/types.js";
 import { AsyncPushIterator } from "./async-push-iterator.js";
 import type {
   PlatformResponseStrategy,
@@ -239,37 +240,30 @@ export class SlackResponseStrategy implements PlatformResponseStrategy {
     if (!text.trim()) return;
 
     const cleaned = stripEmptyLinks(decodeHtmlEntities(text));
+    let handled: boolean;
     try {
-      const handled = await postSlackMarkdown(
+      handled = await postSlackMarkdown(
         instance,
         channelId,
         payload.conversationId,
         cleaned
       );
-      if (handled) {
-        logger.info(
-          { connectionId, channelId, length: cleaned.length },
-          "Posted Slack response via markdown_text with paragraph chunking"
-        );
-      } else if (stream?.target) {
-        // Adapter unavailable — fall back to the SDK so we still deliver.
-        await stream.target.post(cleaned);
-      }
     } catch (error) {
-      logger.warn(
-        { connectionId, error: String(error) },
-        "Slack markdown_text post failed; falling back to SDK"
-      );
-      if (stream?.target) {
-        try {
-          await stream.target.post(cleaned);
-        } catch (fallbackError) {
-          logger.warn(
-            { connectionId, error: String(fallbackError) },
-            "SDK fallback post also failed"
-          );
-        }
+      throw new QueueTerminalError("Slack response delivery failed", { cause: error });
+    }
+    if (!handled) {
+      // Fall back only before a send was attempted. Reposting after a rejected
+      // request can duplicate accepted chunks or an unacknowledged message.
+      if (!stream?.target) throw new Error("No Slack response delivery target");
+      try {
+        await stream.target.post(cleaned);
+      } catch (error) {
+        throw new QueueTerminalError("Slack response delivery failed", { cause: error });
       }
     }
+    logger.info(
+      { connectionId, channelId, length: cleaned.length },
+      "Posted Slack response with paragraph chunking or SDK fallback"
+    );
   }
 }

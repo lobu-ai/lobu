@@ -186,11 +186,7 @@ describe("Slack completion delivery (cross-replica #1087/#1099)", () => {
     expect(target.post.mock.calls).toEqual([["<b> cite done"]]);
   });
 
-  // CURRENT (known gap): chunk posts carry no receipts and failure is not
-  // per-chunk. When a later chunk fails, the strategy re-posts the WHOLE
-  // cleaned body through the SDK target, so the chunks that already landed are
-  // duplicated (platform-strategies/slack.ts).
-  test("a failure after the first chunk re-posts the entire body through the SDK", async () => {
+  test("a failure after the first chunk surfaces without re-posting accepted chunks", async () => {
     let calls = 0;
     const postMessage = mock(async () => {
       calls += 1;
@@ -203,7 +199,7 @@ describe("Slack completion delivery (cross-replica #1087/#1099)", () => {
     const target = { post: mock(async () => undefined) };
     const para = "z".repeat(6_000);
     const body = `${para}\n\n${para}`;
-    await strategy.handleCompletion({
+    await expect(strategy.handleCompletion({
       ctx: ctx(instance),
       payload: payload({ finalText: body }),
       stream: {
@@ -212,10 +208,37 @@ describe("Slack completion delivery (cross-replica #1087/#1099)", () => {
         wasFullyReplaced: false,
         target,
       } as unknown as StreamState,
-    });
+    })).rejects.toThrow("Slack response delivery failed");
     expect(postMessage).toHaveBeenCalledTimes(2);
     expect((postMessage.mock.calls[0] as any[])[0].markdown_text).toBe(para);
-    // The first chunk already reached Slack, yet the fallback sends all of it again.
-    expect(target.post.mock.calls).toEqual([[body]]);
+    expect(target.post.mock.calls).toEqual([]);
+  });
+
+  test("a rejected post without a local stream is a delivery failure", async () => {
+    const instance = {
+      chat: { getAdapter: () => ({ client: { chat: {
+        postMessage: async () => { throw new Error("channel_not_found"); },
+      } } }) },
+    };
+    await expect(strategy.handleCompletion({
+      ctx: ctx(instance), payload: payload({ finalText: "answer" }), stream: null,
+    })).rejects.toThrow("Slack response delivery failed");
+  });
+
+  test("a failed SDK fallback is not reported as delivery success", async () => {
+    await expect(strategy.handleCompletion({
+      ctx: ctx({ chat: { getAdapter: () => undefined } }),
+      payload: payload({ finalText: "answer" }),
+      stream: { buffer: "", streamFailed: true, target: {
+        post: async () => { throw new Error("provider unavailable"); },
+      } } as unknown as StreamState,
+    })).rejects.toThrow("Slack response delivery failed");
+  });
+
+  test("no adapter and no fallback cannot silently complete a reply", async () => {
+    await expect(strategy.handleCompletion({
+      ctx: ctx({ chat: { getAdapter: () => undefined } }),
+      payload: payload({ finalText: "answer" }), stream: null,
+    })).rejects.toThrow("No Slack response delivery target");
   });
 });

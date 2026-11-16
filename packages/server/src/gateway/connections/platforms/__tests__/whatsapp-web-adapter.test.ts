@@ -449,8 +449,12 @@ describe("WhatsApp Web gateway delivery", () => {
   });
 
   test("redelivered error and guardrail notices reuse their first operation", async () => {
-    const first = gateway();
-    const second = gateway();
+    const sent = (): ConnectorChatOperationOutcome[] => [
+      { status: "completed", output: { sent: true, message_id: "RAWOUT1" } },
+      { status: "completed", output: { sent: true, message_id: "RAWOUT2" } },
+    ];
+    const first = gateway(sent());
+    const second = gateway(sent());
     for (const { bridge } of [first, second]) {
       (bridge as any).scanTerminalOutput = async () => ({ guardrail: "test", reason: "blocked" });
       await bridge.handleCompletion({ ...payload, finalText: "secret" }, "s");

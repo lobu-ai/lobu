@@ -36,6 +36,7 @@ import { pruneTurnWriteReceipts } from "../../../tools/turn-write-idempotency.js
 import {
   isDeferralError,
   QueueRoutingRetryError,
+  QueueTerminalError,
   type IMessageQueue,
   type JobHandler,
   type QueueJob,
@@ -712,7 +713,8 @@ export class RunsQueue implements IMessageQueue {
       if (isDeferralError(err)) {
         span?.setAttribute("lobu.run_deferred", true);
       } else {
-        const finalAttempt = claimed.attempts + 1 >= claimed.maxAttempts;
+        const finalAttempt =
+          err instanceof QueueTerminalError || claimed.attempts + 1 >= claimed.maxAttempts;
         span?.setAttribute(
           "lobu.run_final_attempt",
           finalAttempt,
@@ -723,7 +725,11 @@ export class RunsQueue implements IMessageQueue {
           recordError(span, err, { scope: `run ${worker.queueName}` });
         }
       }
-      if (isDeferralError(err)) {
+      if (err instanceof QueueTerminalError) {
+        // The provider may already have accepted part or all of the delivery.
+        // Keep the failed row for reconciliation instead of sending it again.
+        await this.markFailed(claimed.runId, err);
+      } else if (isDeferralError(err)) {
         // Waiting, not failing — reschedule without consuming an attempt
         // (see isDeferralError in types.ts for the contract).
         await this.scheduleRetry(
@@ -807,7 +813,7 @@ export class RunsQueue implements IMessageQueue {
     if (row) recordQueueFailures([{ run_type: row.run_type ?? null, queue_name: row.queue_name ?? null }]);
     // Per-run terminal failures remain warnings to avoid an alert per failed run.
     // The aggregate "we have failed runs" signal lives on lobu_runs_failed_total.
-    logger.warn(`Run ${runId} failed after retries: ${message}`);
+    logger.warn(`Run ${runId} failed: ${message}`);
   }
 
   private async scheduleRetry(

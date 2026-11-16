@@ -19,6 +19,7 @@
 
 import { createLogger } from "@lobu/core";
 import type { ThreadResponsePayload } from "../../infrastructure/queue/index.js";
+import { QueueTerminalError } from "../../infrastructure/queue/types.js";
 import { AsyncPushIterator } from "./async-push-iterator.js";
 import { SlackResponseStrategy } from "./slack.js";
 import { getPlatformDescriptor } from "../platforms/index.js";
@@ -153,6 +154,7 @@ class DefaultResponseStrategy implements PlatformResponseStrategy {
           { connectionId, error: String(error) },
           "Non-streaming fallback post failed"
         );
+        throw new QueueTerminalError("Response fallback delivery failed", { cause: error });
       }
     }
   }

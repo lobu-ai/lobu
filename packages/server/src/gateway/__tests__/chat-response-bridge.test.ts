@@ -85,6 +85,29 @@ const basePayload = {
 };
 
 describe("ChatResponseBridge — error delivery and replica routing", () => {
+  test("a failed error reply propagates instead of completing an unseen response", async () => {
+    const { manager } = createHarness({
+      post: async () => { throw new Error("provider unavailable"); },
+    });
+    const bridge = new ChatResponseBridge(manager as any);
+    await expect(bridge.handleError(
+      { ...basePayload, error: "worker failed" }, "s"
+    )).rejects.toThrow();
+  });
+
+  test("failed stream and fallback propagate and do not store an unseen answer", async () => {
+    const { manager, conversationState } = createHarness({
+      post: async () => { throw new Error("provider unavailable"); },
+    });
+    const bridge = new ChatResponseBridge(manager as any);
+    await bridge.handleDelta({ ...basePayload, delta: "answer" }, "s");
+    await expect(bridge.handleCompletion(
+      { ...basePayload, finalText: "answer" }, "s"
+    )).rejects.toThrow();
+    const history = await conversationState.getHistory("conn-1", "123", "123");
+    expect(history).toHaveLength(0);
+  });
+
   test("handleError gives a native turn's worker failure a Retry button", async () => {
     // WORKER_DIED on an agent turn (it carries `turnRunId`): the card's button
     // is the `turn-retry:` action the interaction bridge turns into a retry.
