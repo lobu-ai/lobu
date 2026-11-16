@@ -170,6 +170,11 @@ function validateViewDefinition(def: ViewDefinitionRecord): void {
       );
     }
     const target = decl.updates?.entityType;
+    for (const endpoint of decl.updatesLink ? [decl.updatesLink.fromEntityType, decl.updatesLink.toEntityType] : []) {
+      if (!attachesToEntityType(def.attach, endpoint)) {
+        throw new ToolUserError(`Action '${name}' updates a relationship, but the view does not attach to '${endpoint}'`, 400);
+      }
+    }
     if (target !== undefined && !attachesToEntityType(def.attach, target)) {
       throw new ToolUserError(
         `Action '${name}' updates '${target}', but the view does not attach to that type: add { collection: '${target}' } or { record: '${target}' } to attach`,

@@ -8,6 +8,44 @@ const module = (
   `${importLine}\nexport const view = defineView(${def});\nexport default function V() { return null; }\n`;
 
 describe("readViewDefinition", () => {
+  test("bounds relationship action grants and excludes competing entity writes", () => {
+    const link = {
+      relationshipType: "evaluates",
+      fromEntityType: "initiative",
+      toEntityType: "contact",
+      fields: ["review"],
+    };
+    const source = (action: unknown) =>
+      module(
+        JSON.stringify({
+          key: "review",
+          attach: [],
+          actions: { review: action },
+        })
+      );
+    expect(
+      readViewDefinition(source({ updatesLink: link })).actions.review
+        .updatesLink
+    ).toEqual(link);
+    expect(() =>
+      readViewDefinition(
+        source({
+          updatesLink: link,
+          updates: { entityType: "contact", fields: ["review"] },
+        })
+      )
+    ).toThrow("mutually exclusive");
+    for (const fields of [
+      [],
+      ["review", "review"],
+      Array.from({ length: 51 }, (_, i) => `field_${i}`),
+    ]) {
+      expect(() =>
+        readViewDefinition(source({ updatesLink: { ...link, fields } }))
+      ).toThrow();
+    }
+  });
+
   test("reads every declared field and applies the defaults", () => {
     expect(
       readViewDefinition(

@@ -21,6 +21,8 @@ import { decideIdentityAssociation, type IdentityAssociationInput } from "../../
 import { type EntityReadRestrictions, entityReadRestrictions, filterEntityReadRows } from "../../authz/entity-read-policy";
 import { deriveToolActorSource } from '../../utils/apply-context';
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
+import { createAjv, formatAjvError } from "@lobu/core/ajv";
 
 import {
 	ApprovalAttribution,
@@ -1743,6 +1745,31 @@ async function handleUpdateLink(
 	args: Static<typeof UpdateLinkAction>,
 	ctx: ToolContext,
 ): Promise<ManageEntityResult> {
+	return updateRelationship(args, ctx);
+}
+
+// A patch cannot coerce unrelated fields while validating the merged document.
+const relationshipPatchAjv = createAjv({ allErrors: false, strict: false, coerceTypes: false });
+
+/** Shared SDK/view mutation path; an outer receipt transaction may own the commit. */
+export async function updateRelationship(
+	args: Static<typeof UpdateLinkAction>,
+	ctx: ToolContext,
+	options: { sql?: DbClient; check?: (edge: RelationshipRow) => void } = {},
+): Promise<Extract<ManageEntityResult, { action: "update_link" }>> {
+	const patch = args.set;
+	if (patch !== undefined) {
+		if (args.metadata !== undefined || args.confidence !== undefined || args.source !== undefined || !args.expected) {
+			throw new ToolUserError("set requires expected and cannot be combined with metadata, confidence or source", 400);
+		}
+		const keys = Object.keys(patch);
+		if (keys.length === 0 || keys.length > 50 || !isDeepStrictEqual(keys.sort(), Object.keys(args.expected).sort()) || exceedsValidationLimits(patch) || exceedsValidationLimits(args.expected)) {
+			throw new ToolUserError("set and expected must have the same 1-50 keys within metadata size limits", 400);
+		}
+		assertNoReservedRelationshipMetadata(patch);
+	} else if (args.expected !== undefined) {
+		throw new ToolUserError("expected requires set", 400);
+	}
 	const relationshipId = await resolveRelationshipId(args, ctx, "update_link");
 	// Authorize the exact response before mutating. Unlink by id deliberately
 	// remains available without reading a disconnected source.
@@ -1750,9 +1777,9 @@ async function handleUpdateLink(
 	const [authorized] = await readableRelationships(readable, ctx, await entityReadRestrictions(getDb(), ctx));
 	if (!authorized) throw new ToolUserError('Relationship not found or not readable', 404);
 
-  const sql = getDb();
+  const sql = options.sql ?? getDb();
 
-	const updated = await sql.begin(async (tx) => {
+	const mutate = async (tx: DbClient) => {
 		await lockOrganizationForSemanticEvent(tx, ctx.organizationId);
 		const edge = await lockEdgeForMutation(
 			tx,
@@ -1761,19 +1788,36 @@ async function handleUpdateLink(
 			"update_link",
 		);
 		if (edge.purpose === "identity") throw new ToolUserError("updateLink does not support identity associations; use unlink", 409);
+		const lockedRows = await tx.unsafe<RelationshipRow>(`SELECT ${RELATIONSHIP_SELECT} ${RELATIONSHIP_JOINS} WHERE r.id = $1`, [relationshipId]);
+		const [lockedReadable] = await readableRelationships(lockedRows, ctx, await entityReadRestrictions(tx, ctx));
+		if (!lockedReadable) throw new ToolUserError("Relationship not found or not readable", 404);
+		options.check?.(lockedReadable);
 		assertManualRelationshipMutationAllowed(edge, "updated");
 		validateConfidence(args.confidence);
 		validateSource(args.source);
-		const hasMetadata = args.metadata !== undefined;
+		const hasMetadata = args.metadata !== undefined || patch !== undefined;
 		assertNoReservedRelationshipMetadata(args.metadata);
 		const visibleMetadataBefore = relationshipMetadataWithoutClaims(edge.metadata);
+		let metadata = args.metadata;
+		if (patch !== undefined) {
+			const before = (visibleMetadataBefore ?? {}) as Record<string, unknown>;
+			const mismatched = Object.keys(patch).filter(key => !isDeepStrictEqual(before[key] ?? null, args.expected![key]));
+			if (mismatched.length) throw new ToolUserError("Relationship fields changed since they were read", 409, "PRECONDITION_FAILED", { mismatched_fields: mismatched });
+			metadata = { ...before, ...patch };
+			if (exceedsValidationLimits(metadata)) throw new ToolUserError("Relationship metadata exceeds size/nesting limits", 400);
+			const [type] = await tx`SELECT metadata_schema FROM entity_relationship_types WHERE id = ${edge.relationship_type_id}`;
+			if (type?.metadata_schema) {
+				const validate = relationshipPatchAjv.compile(type.metadata_schema);
+				if (!validate(metadata)) throw new ToolUserError(`Metadata validation failed: ${validate.errors?.map(formatAjvError).join("; ")}`, 400);
+			}
+		}
 		const metadataChanged =
 			hasMetadata &&
-			stableJson(visibleMetadataBefore) !== stableJson(args.metadata ?? null);
+			stableJson(visibleMetadataBefore) !== stableJson(metadata ?? null);
 		// Check the locked pre-image so concurrent updates cannot move a reconciled
 		// edge out of the scope that retires it.
 		validateReconciledEdgeUpdate(edge.source, args.source, metadataChanged);
-		const metadataJson = hasMetadata ? tx.json(args.metadata) : null;
+		const metadataJson = hasMetadata ? tx.json(metadata) : null;
 		const updatedRows = await tx<{
 			metadata: unknown;
 			confidence: number | null;
@@ -1833,7 +1877,8 @@ async function handleUpdateLink(
 			);
 		}
 		return relationship[0];
-	});
+	};
+	const updated = options.sql ? await mutate(options.sql) : await sql.begin(mutate);
 
 	return { action: "update_link", relationship: {
 		...updated,

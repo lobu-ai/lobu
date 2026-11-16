@@ -68,9 +68,18 @@ export function readViewDefinition(js: string): ViewDefinitionRecord {
   }
   const def = raw as ViewDefinitionDecl;
   for (const [name, action] of Object.entries(def.actions ?? {})) {
-    if (action.emits === undefined && action.updates === undefined) {
+    if (action.updates && action.updatesLink) {
       throw new Error(
-        `defineView.actions.${name}: declare emits, updates, or both`
+        `defineView.actions.${name}: updates and updatesLink are mutually exclusive`
+      );
+    }
+    if (
+      action.emits === undefined &&
+      action.updates === undefined &&
+      action.updatesLink === undefined
+    ) {
+      throw new Error(
+        `defineView.actions.${name}: declare emits, updates, or updatesLink`
       );
     }
   }

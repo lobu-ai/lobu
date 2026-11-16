@@ -138,6 +138,25 @@ const VIEW_ACTION_MAX_UPDATE_FIELDS = 50;
 // required (checked by `readViewDefinition`). A removed action stops working on
 // the next read because the check runs against the CURRENT view row.
 export const ViewActionDeclSchema = Type.Object({
+  updatesLink: Type.Optional(
+    Type.Object(
+      {
+        relationshipType: Type.String({ minLength: 1, maxLength: 128 }),
+        fromEntityType: Type.String({ minLength: 1, maxLength: 128 }),
+        toEntityType: Type.String({ minLength: 1, maxLength: 128 }),
+        fields: Type.Array(Type.String({ minLength: 1, maxLength: 128 }), {
+          minItems: 1,
+          maxItems: VIEW_ACTION_MAX_UPDATE_FIELDS,
+          uniqueItems: true,
+        }),
+      },
+      {
+        additionalProperties: false,
+        description:
+          "Patch allowed fields on one existing relationship; both endpoint types must appear in attach. Requires value { relationship_id, set } and matching expected keys.",
+      }
+    )
+  ),
   emits: Type.Optional(
     Type.String({
       minLength: 1,
