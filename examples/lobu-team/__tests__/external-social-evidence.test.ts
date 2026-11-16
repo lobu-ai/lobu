@@ -497,6 +497,42 @@ test("a receipt cannot be reused for another platform or an ungranted workspace"
   await expect(other.run()).rejects.toThrow("out-of-scope");
 });
 
+test("relative coverage cannot borrow a browser clock or an input-supplied age window", async () => {
+  for (const platform of ["x", "linkedin"]) {
+    const h = fixture();
+    h.data.findings = [];
+    h.data.briefings[0]!.metadata.coverage[0].platform = platform;
+    Object.assign(h.source.output.value, {
+      platform,
+      page_url: "https://www.linkedin.com/company/synthetic/admin/feed/",
+      observed_at: new Date(now + 86400000).toISOString(),
+      posts: [
+        {
+          ...post,
+          occurred_at: null,
+          relative_age: platform === "x" ? "2d •" : "unknown",
+          relative_age_window: { start: now - 1000, end: now },
+        },
+      ],
+    });
+    await verifySocialEvidence(
+      h.client,
+      {
+        ...policy,
+        platforms: [platform],
+        receipt_workspaces: { [platform]: [policy.workspace] },
+        company_linkedin_path:
+          platform === "linkedin"
+            ? "/company/synthetic/admin/feed/"
+            : undefined,
+      },
+      10,
+      h.data
+    );
+    expect(h.data.briefings[0]!.metadata.coverage[0].recent_posts_read).toBe(0);
+  }
+});
+
 test("serialized reaction preserves preflight coverage and result identities", async () => {
   const h = fixture();
   h.source.output.value.posts = [{ ...post, media_unread: true }];
@@ -749,6 +785,93 @@ test("browser snapshot accepts label whitespace, returns full text and rejects h
     root.document = originalDocument;
     root.location = originalLocation;
   }
+});
+
+test("company snapshot preserves only an unambiguous post-header age, never comment dates", () => {
+  const root = globalThis as any;
+  const originalDocument = root.document;
+  const originalLocation = root.location;
+  let headers = [{ innerText: "3d • Edited •\n " }];
+  const card = {
+    getAttribute: () => "urn:li:activity:123",
+    querySelectorAll: () => headers,
+    querySelector: (selector: string) =>
+      selector === "time"
+        ? { dateTime: post.occurred_at }
+        : selector.startsWith(".update-components-text")
+          ? {
+              innerText: post.text,
+              querySelector: () => null,
+              querySelectorAll: () => [],
+            }
+          : null,
+  };
+  try {
+    root.document = {
+      visibilityState: "visible",
+      title: "Synthetic: Company Page Admin",
+      body: { innerText: "Comment as Synthetic" },
+      querySelectorAll: () => [card],
+    };
+    root.location = {
+      origin: "https://www.linkedin.com",
+      pathname: "/company/synthetic/admin/feed/",
+      href: "https://www.linkedin.com/company/synthetic/admin/feed/",
+    };
+    const read = () =>
+      readSocialTimelinePage({
+        platform: "linkedin",
+        account_path: "",
+        page_path: root.location.pathname,
+        company_name: "Synthetic",
+      }).posts[0];
+    expect(read()).toMatchObject({
+      occurred_at: null,
+      relative_age: "3d • Edited •",
+    });
+    headers = [{ innerText: "2d •" }, { innerText: "2d •" }];
+    expect(read()).toMatchObject({ occurred_at: null, relative_age: null });
+    headers = [];
+    expect(read()).toMatchObject({ occurred_at: null, relative_age: null });
+  } finally {
+    root.document = originalDocument;
+    root.location = originalLocation;
+  }
+});
+
+test.each([
+  ["2d •", 1],
+  ["3d • Edited •", 1],
+  ["4h •", 1],
+  ["15m •", 1],
+  ["6d •", 0],
+  ["7d •", 0],
+  ["1w •", 0],
+  ["Sponsored", 0],
+  ["2d unrelated text", 0],
+  [null, 0],
+])("company receipt bounds relative age %j without inventing an exact timestamp", async (relative_age, recent) => {
+  const h = fixture();
+  const page = "/company/synthetic/admin/feed/";
+  const bound = {
+    ...policy,
+    platforms: ["linkedin"],
+    receipt_workspaces: { linkedin: [policy.workspace] },
+    company_linkedin_path: page,
+  };
+  h.data.findings = [];
+  h.data.briefings[0]!.metadata.coverage[0].platform = "linkedin";
+  Object.assign(h.source.output.value, {
+    platform: "linkedin",
+    page_url: `https://www.linkedin.com${page}`,
+    posts: [{ ...post, occurred_at: null, relative_age }],
+  });
+  await verifySocialEvidence(h.client, bound, 10, h.data);
+  expect(h.data.briefings[0]!.metadata.coverage[0]).toMatchObject({
+    recent_posts_read: recent,
+    status: "partial",
+  });
+  expect(h.source.output.value.posts[0]!.occurred_at).toBeNull();
 });
 
 test("an unknown window or source run fails with a named error, not a crash", async () => {

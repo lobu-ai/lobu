@@ -13,6 +13,9 @@ export type SourcePost = {
   author_url?: string;
   mentioned_profiles?: string[];
   occurred_at: string | null;
+  relative_age?: string | null;
+  // Derived only from the retained operation's server timestamps, not input.
+  relative_age_window?: { start: number; end: number };
   truncated: boolean;
   media_unread: boolean;
 };
