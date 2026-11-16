@@ -88,3 +88,107 @@ test('all feeds healthy → no failure keys in metadata', async () => {
   expect(result.metadata?.feeds_failed).toBeUndefined();
   expect(result.metadata?.fetch_errors).toBeUndefined();
 });
+
+// Ranking feeds (GitHub Trending mirrors, charts) re-list the same items every
+// edition, often without <guid> or item dates. Sync dedupes them away, so the
+// only way to see what the feed lists NOW is a source read.
+const RANKING_XML = `<?xml version="1.0"?>
+<rss version="2.0"><channel><title>Daily Trending</title>
+<pubDate>Mon, 16 Nov 2026 07:38:17 GMT</pubDate>
+<item><title>acme/alpha</title><link>https://github.com/acme/alpha</link><description>First</description></item>
+<item><title>acme/beta</title><link>https://github.com/acme/beta</link><description>Second</description></item>
+<item><title>acme/gamma</title><link>https://github.com/acme/gamma</link><description>Third</description></item>
+</channel></rss>`;
+
+test('source read lists every current item in document order, even after sync has seen them', async () => {
+  globalThis.fetch = (async () => new Response(RANKING_XML, { status: 200 })) as typeof fetch;
+  const connector = new RSSConnector();
+  const first = await runSync(connector, ctxFor(['https://trending.example.com/daily.xml']));
+  const second = await runSync(connector, {
+    ...ctxFor(['https://trending.example.com/daily.xml']),
+    checkpoint: first.checkpoint,
+  });
+  // The next edition re-lists all three; sync reports none of them.
+  expect(second.events).toHaveLength(0);
+
+  const read = await connector.read({
+    feedKey: 'articles',
+    config: { feed_urls: ['https://trending.example.com/daily.xml'] },
+    credentials: null,
+  });
+
+  expect(read.rows.map((r: { title: string }) => r.title)).toEqual([
+    'acme/alpha',
+    'acme/beta',
+    'acme/gamma',
+  ]);
+  expect(read.rows.map((r: { position: number }) => r.position)).toEqual([1, 2, 3]);
+  expect(read.rows[0]).toMatchObject({
+    link: 'https://github.com/acme/alpha',
+    feed_url: 'https://trending.example.com/daily.xml',
+    // The items state no date; the read must not invent one.
+    published_at: null,
+    feed_published_at: '2026-11-16T07:38:17.000Z',
+  });
+  expect(read).toMatchObject({ total: 3, hasMore: false });
+  expect(read.nextCursor).toBeUndefined();
+});
+
+test('source read pages with its own cursor and ignores the sync item cap', async () => {
+  let xml = RANKING_XML;
+  globalThis.fetch = (async () => new Response(xml, { status: 200 })) as typeof fetch;
+  const connector = new RSSConnector();
+  // max_items_per_feed bounds what sync stores, not what the feed lists.
+  const base = {
+    feedKey: 'articles',
+    config: { feed_urls: ['https://trending.example.com/daily.xml'], max_items_per_feed: 1 },
+    credentials: null,
+  };
+
+  const first = await connector.read({ ...base, limit: 2 });
+  expect(first.rows.map((r: { title: string }) => r.title)).toEqual(['acme/alpha', 'acme/beta']);
+  expect(first.total).toBe(3);
+  expect(typeof first.nextCursor).toBe('string');
+
+  const second = await connector.read({ ...base, limit: 2, cursor: first.nextCursor });
+  expect(second.rows.map((r: { title: string }) => r.title)).toEqual(['acme/gamma']);
+  expect(second.rows[0].position).toBe(3);
+  expect(second).toMatchObject({ total: 3, hasMore: false });
+  expect(second.nextCursor).toBeUndefined();
+
+  // A new edition between pages must not be stitched onto the old one, even
+  // when it keeps every item id (no <guid>, same title and link).
+  xml = RANKING_XML.replace('Mon, 16 Nov 2026', 'Tue, 17 Nov 2026').replace('>Third<', '>Third, updated<');
+  await expect(connector.read({ ...base, limit: 2, cursor: first.nextCursor })).rejects.toThrow(
+    /feed changed since the previous page/
+  );
+  await expect(connector.read({ ...base, cursor: 'not-a-cursor' })).rejects.toThrow(
+    /Invalid RSS read cursor/
+  );
+});
+
+test('source read fails closed when any feed URL fails, and rejects offsets, windows and queries', async () => {
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = typeof input === 'string' ? input : input.toString();
+    return new URL(url).hostname === 'ok.example.com'
+      ? new Response(RANKING_XML, { status: 200 })
+      : new Response('boom', { status: 503, statusText: 'Service Unavailable' });
+  }) as typeof fetch;
+  const connector = new RSSConnector();
+  const base = { feedKey: 'articles', credentials: null };
+
+  // A snapshot missing one feed is not the current contents.
+  await expect(
+    connector.read({
+      ...base,
+      config: { feed_urls: ['https://ok.example.com/feed.xml', 'https://down.example.com/feed.xml'] },
+    })
+  ).rejects.toThrow(/1 of 2 feed URL\(s\) failed.*down\.example\.com.*503/);
+
+  const config = { feed_urls: ['https://ok.example.com/feed.xml'] };
+  await expect(connector.read({ ...base, config, offset: 10 })).rejects.toThrow(/offsets/);
+  await expect(
+    connector.read({ ...base, config, window: { start: '2026-11-01T00:00:00Z', end: '2026-11-02T00:00:00Z' } })
+  ).rejects.toThrow(/time windows/);
+  await expect(connector.read({ ...base, config, query: 'alpha' })).rejects.toThrow(/queries/);
+});
