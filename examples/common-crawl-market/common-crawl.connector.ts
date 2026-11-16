@@ -31,17 +31,16 @@ type Fetcher = (url: string, init?: RequestInit) => Promise<Response>;
 const MAX_BYTES = 8 * 1024 * 1024;
 const MAX_RECORDS = 5000;
 
+function captureHost(url: URL): string {
+  if (!/^https?:$/.test(url.protocol) || url.username || url.password)
+    throw new Error("Expected an HTTP(S) URL without credentials");
+  return url.hostname.toLowerCase().replace(/\.$/, "");
+}
+
 function host(value: string): string {
   const url = new URL(value.includes("://") ? value : `https://${value}`);
-  if (
-    !/^https?:$/.test(url.protocol) ||
-    url.username ||
-    url.password ||
-    url.port
-  ) {
-    throw new Error("Expected an HTTP(S) domain without credentials or port");
-  }
-  const name = url.hostname.toLowerCase().replace(/\.$/, "");
+  const name = captureHost(url);
+  if (url.port) throw new Error("Expected a domain without port");
   if (!/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z][a-z0-9-]*$/.test(name)) {
     throw new Error("Expected a DNS domain");
   }
@@ -165,7 +164,9 @@ function parseCapture(value: unknown, config: CrawlConfig): Capture {
   )
     throw new Error("Invalid WARC location");
   captureDate(c.timestamp);
-  const hostname = host(c.url);
+  // Captured URLs can contain ports and underscore subdomains. Keep their exact
+  // source URL while matching the parsed hostname; strict DNS rules are for config.
+  const hostname = captureHost(new URL(c.url));
   if (
     hostname !== config.company.domain &&
     !hostname.endsWith(`.${config.company.domain}`)
@@ -223,12 +224,27 @@ export default class CommonCrawlConnector extends ConnectorRuntime<
     },
   };
 
-  private async request(url: string): Promise<string> {
+  private async request(url: string): Promise<string | null> {
     // Serial requests, fixed provider host, no redirects, automatic retries or WARC downloads.
     const response = await this.fetcher(url, {
       redirect: "error",
       signal: AbortSignal.timeout(20000),
     });
+    if (response.status === 404) {
+      const body = await boundedText(response);
+      // pywb has no typed error code beyond 404. Recognize its exact JSON
+      // no-captures message for this query, not generic missing routes/collections.
+      // https://github.com/commoncrawl/cdx_toolkit/blob/main/cdx_toolkit/__init__.py
+      try {
+        const error = JSON.parse(body);
+        const expected = `No Captures found for: ${new URL(url).searchParams.get("url")}`;
+        if (error?.error === expected || error?.message === expected)
+          return null;
+      } catch {
+        // Non-JSON error responses leave coverage unknown as well.
+      }
+      throw new Error("Common Crawl HTTP 404; coverage unknown");
+    }
     if (!response.ok) {
       await response.body?.cancel();
       throw new Error(`Common Crawl HTTP ${response.status}; coverage unknown`);
@@ -253,7 +269,9 @@ export default class CommonCrawlConnector extends ConnectorRuntime<
     )
       throw new Error("Invalid crawl checkpoint");
     if (!checkpoint) {
-      const info = JSON.parse(await this.request(indexUrl(config)));
+      const metadata = await this.request(indexUrl(config));
+      const info =
+        metadata === null ? { pages: 0, pageSize: 1 } : JSON.parse(metadata);
       if (
         !Number.isSafeInteger(info.pages) ||
         info.pages < 0 ||
@@ -269,8 +287,8 @@ export default class CommonCrawlConnector extends ConnectorRuntime<
     }
     const url = indexUrl(config, checkpoint.next_page);
     const text = await this.request(url);
-    const lines = text.trim().split("\n");
-    if (!text.trim() || lines.length > MAX_RECORDS)
+    const lines = text === null ? [] : text.trim().split("\n");
+    if ((text !== null && !text.trim()) || lines.length > MAX_RECORDS)
       throw new Error("Empty or oversized CDX page; coverage unknown");
     const captures = lines.map((line) =>
       parseCapture(JSON.parse(line), config)
@@ -306,7 +324,7 @@ export default class CommonCrawlConnector extends ConnectorRuntime<
           index_url: `https://index.commoncrawl.org/${config.crawl}-index?${new URLSearchParams({ url: capture.url, matchType: "exact", output: "json" })}`,
           warc_url: `https://data.commoncrawl.org/${capture.filename}`,
           match:
-            host(capture.url) === config.company.domain
+            captureHost(new URL(capture.url)) === config.company.domain
               ? "exact_host"
               : "subdomain",
         },

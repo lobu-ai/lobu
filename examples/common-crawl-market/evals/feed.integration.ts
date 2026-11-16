@@ -41,13 +41,21 @@ it("stores replayed and incremental capture observations through the worker entr
   };
   const connector = new CommonCrawlConnector(async (input) => {
     const url = new URL(input);
+    if (
+      config.company.domain === "empty.example" ||
+      url.searchParams.get("page") === "1"
+    )
+      return Response.json(
+        { message: `No Captures found for: ${url.searchParams.get("url")}` },
+        { status: 404 }
+      );
     if (url.searchParams.has("showNumPages"))
-      return Response.json({ pages: 2, pageSize: 1 });
+      return Response.json({ pages: 3, pageSize: 1 });
     const page = Number(url.searchParams.get("page"));
     return new Response(
       JSON.stringify({
         urlkey: "com,example)/",
-        url: "https://example.com/",
+        url: page ? "https://a_b.example.com/" : "http://example.com:8080/",
         timestamp: page ? "20261007120000" : "20261006120000",
         status: "200",
         mime: "text/html",
@@ -103,10 +111,15 @@ it("stores replayed and incremental capture observations through the worker entr
   await sync(null); // lost acknowledgment / explicit recollect
   expect(await stored()).toEqual(first); // includes historical rows: no silent supersede
   await sync(saved.checkpoint);
+  expect(await stored()).toEqual(first); // empty block commits progress without losing captures
+  const [emptyPage] =
+    await sql`SELECT checkpoint FROM feeds WHERE id = ${feed.id}`;
+  expect(emptyPage.checkpoint.next_page).toBe(2);
+  await sync(emptyPage.checkpoint);
   expect(await stored()).toHaveLength(2);
   const [completed] =
     await sql`SELECT checkpoint FROM feeds WHERE id = ${feed.id}`;
-  expect(completed.checkpoint.next_page).toBe(2);
+  expect(completed.checkpoint.next_page).toBe(3);
   await sync(completed.checkpoint);
   expect(await stored()).toHaveLength(2);
   config.crawl = "CC-MAIN-2026-39"; // new source collection, same URLs: separate observations
@@ -114,4 +127,11 @@ it("stores replayed and incremental capture observations through the worker entr
   const rows = await stored();
   expect(rows).toHaveLength(3);
   expect(rows.every((row) => row.superseded_by === null)).toBe(true);
+  config.company.domain = "empty.example";
+  await sync(completed.checkpoint);
+  const [emptyCrawl] =
+    await sql`SELECT checkpoint FROM feeds WHERE id = ${feed.id}`;
+  expect(emptyCrawl.checkpoint).toMatchObject({ pages: 0, next_page: 0 });
+  await sync(emptyCrawl.checkpoint);
+  expect(await stored()).toEqual(rows); // no-captures never removes earlier evidence
 });

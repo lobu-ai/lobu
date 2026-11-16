@@ -163,7 +163,10 @@ for (const company of companies) {
       const replayed: EventEnvelope[] = [];
       let checkpoint: CrawlCheckpoint | null = null;
       // A later upstream failure does not prevent replaying earlier committed pages.
-      for (let page = 0; page < (sample.checkpoint?.next_page ?? 0); page++) {
+      const committedPages = sample.checkpoint
+        ? Math.max(1, sample.checkpoint.next_page)
+        : 0;
+      for (let page = 0; page < committedPages; page++) {
         const result = await replay.sync({
           feedKey: "captures",
           config,
@@ -179,6 +182,7 @@ for (const company of companies) {
       }
       sample.replay_identical =
         sample.checkpoint !== null &&
+        JSON.stringify(checkpoint) === JSON.stringify(sample.checkpoint) &&
         JSON.stringify(replayed) === JSON.stringify(sample.events);
       if (sample.checkpoint && !sample.replay_identical)
         throw new Error("Replay changed capture identities or provenance");

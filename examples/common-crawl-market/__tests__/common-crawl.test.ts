@@ -187,10 +187,106 @@ describe("Common Crawl feed spike", () => {
       "https://example.com.evil.test/",
       "https://example.com@evil.test/",
       "file:///example.com",
+      "https://user:secret@example.com/",
+      "https://a_b.example.com.evil.test:8080/",
     ]) {
       await expect(
         run(new CommonCrawlConnector(source([[capture({ url })]])))
       ).rejects.toThrow();
+    }
+  });
+
+  test("preserves in-domain captures with ports and underscore subdomains", async () => {
+    const urls = [
+      "http://example.com:8080/",
+      "https://a_b.example.com/",
+      "https://a_b.example.com:8443/path",
+      "https://example.com/",
+    ];
+    const connector = new CommonCrawlConnector(
+      source([urls.map((url, i) => capture({ url, offset: String(i) }))])
+    );
+    const result = await run(connector);
+    expect(result.status).toBe("complete");
+    expect(result.events.map((e) => e.source_url)).toEqual(urls);
+    expect(result.events.map((e) => e.metadata?.match)).toEqual([
+      "exact_host",
+      "subdomain",
+      "subdomain",
+      "exact_host",
+    ]);
+    expect((await run(connector)).events).toEqual(result.events);
+    expect((await run(connector, result.checkpoint)).events).toEqual([]);
+  });
+
+  test("confirmed no-captures metadata completes and persists an empty checkpoint", async () => {
+    for (const key of ["error", "message"]) {
+      const connector = new CommonCrawlConnector(async (input) =>
+        Response.json(
+          {
+            [key]: `No Captures found for: ${new URL(input).searchParams.get("url")}`,
+          },
+          { status: 404 }
+        )
+      );
+      const result = await run(connector);
+      expect(result.status).toBe("complete");
+      expect(result.events).toEqual([]);
+      expect(result.checkpoint).toMatchObject({ pages: 0, next_page: 0 });
+      expect((await run(connector, result.checkpoint)).events).toEqual([]);
+    }
+  });
+
+  test("an empty index block advances only that page and retains later captures", async () => {
+    const pages = source([[capture()], [], [capture({ offset: "999" })]]);
+    const connector = new CommonCrawlConnector(async (input) => {
+      const url = new URL(input);
+      if (url.searchParams.get("page") === "1")
+        return Response.json(
+          { error: "No Captures found for: example.com" },
+          { status: 404 }
+        );
+      return pages(input);
+    });
+    const first = await run(connector);
+    const empty = await run(connector, first.checkpoint);
+    expect(empty.status).toBe("more");
+    expect(empty.events).toEqual([]);
+    expect(empty.checkpoint?.next_page).toBe(2);
+    const last = await run(connector, empty.checkpoint);
+    expect(last.status).toBe("complete");
+    expect(last.events).toHaveLength(1);
+    expect(last.events[0]?.origin_id).not.toBe(first.events[0]?.origin_id);
+  });
+
+  test("unrecognized or mismatched 404 bodies cannot commit empty coverage", async () => {
+    for (const body of [
+      "",
+      "<html>Not found</html>",
+      "{",
+      JSON.stringify({ error: "No such collection" }),
+      JSON.stringify({ error: "No Captures found for: unrelated.example" }),
+      JSON.stringify({
+        error: "No Captures found for: example.com",
+        detail: "proxy",
+      }),
+    ]) {
+      let committed = false;
+      await expect(
+        new CommonCrawlConnector(
+          async () => new Response(body, { status: 404 })
+        ).sync({
+          feedKey: "captures",
+          config,
+          checkpoint: null,
+          credentials: null,
+          entityIds: [],
+          commit: async () => {
+            committed = true;
+          },
+        })
+      ).rejects.toThrow("coverage unknown");
+      expect(committed).toBe(false);
     }
   });
 
