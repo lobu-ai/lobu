@@ -74,6 +74,9 @@ export const TERMINAL_DELIVERY_SEND_OPTS: QueueOptions = {
  */
 export class QueueRoutingRetryError extends Error {}
 
+/** A handler attempted a non-idempotent side effect that is unsafe to repeat. */
+export class QueueTerminalError extends Error {}
+
 /**
  * A handler-thrown error carrying `deferral: true` asks the queue to
  * reschedule the job WITHOUT consuming an attempt: the job is waiting on an

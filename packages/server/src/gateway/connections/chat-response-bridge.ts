@@ -40,6 +40,7 @@ import {
   type OutputGuardrailTrip,
 } from "../guardrails/output-scan.js";
 import type { ThreadResponsePayload } from "../infrastructure/queue/index.js";
+import { QueueTerminalError } from "../infrastructure/queue/types.js";
 import {
   buildCtaCardPayload,
   extractSettingsLinkButtons,
@@ -352,6 +353,9 @@ export class ChatResponseBridge implements ResponseRenderer {
           "Adapter stream errored during completion"
         );
       }
+      // Retain the local snapshot for delivery, but release it even if sending
+      // fails. Do not remove a newer stream opened while this one drained.
+      if (this.streams.get(key) === stream) this.streams.delete(key);
     }
 
     // Deliver when this replica has a local stream OR when this is a post-once
@@ -447,7 +451,6 @@ export class ChatResponseBridge implements ResponseRenderer {
         "Failed to deliver withheld final text"
       );
     }
-    if (stream) this.streams.delete(key);
 
     const conversationState =
       this.manager.getInstance(connectionId)?.conversationState;
@@ -853,9 +856,8 @@ export class ChatResponseBridge implements ResponseRenderer {
   }
 
   /**
-   * Resolve the payload's target and post `content` to it, swallowing and
-   * logging any failure. Shared by the guardrail-block and error-fallback
-   * paths — a delivery failure here must never throw back into the consumer.
+   * Surface failed guardrail/error deliveries. Only strategies with durable
+   * post idempotency can safely retry an attempted send.
    */
   private async postToPayloadTarget(
     payload: ThreadResponsePayload,
@@ -863,11 +865,14 @@ export class ChatResponseBridge implements ResponseRenderer {
     content: unknown,
     logMessage: string
   ): Promise<void> {
+    const target = await this.resolveTargetForPayload(ctx, payload);
+    if (!target) throw new Error("No response delivery target");
     try {
-      const target = await this.resolveTargetForPayload(ctx, payload);
-      if (target) await this.postContent(ctx, payload, target, content);
+      await this.postContent(ctx, payload, target, content);
     } catch (err) {
       logger.error({ connectionId: ctx.connectionId, err: String(err) }, logMessage);
+      if (ctx.strategy.post) throw err;
+      throw new QueueTerminalError("Response delivery failed", { cause: err });
     }
   }
 

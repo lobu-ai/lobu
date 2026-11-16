@@ -30,6 +30,7 @@ import {
 import { RunsQueue, sweepCompletedRuns } from "../infrastructure/queue/runs-queue.js";
 import type { QueueJob } from "../infrastructure/queue/types.js";
 import { getDb } from "../../db/client.js";
+import { getResponseStrategy } from "../connections/platform-strategies/index.js";
 import {
   ensureDbForGatewayTests,
   resetTestDatabase,
@@ -625,6 +626,77 @@ function isDeliveryPathLog(args: unknown[]): boolean {
       )
   );
 }
+
+describe("RunsQueue — chat delivery failures", () => {
+  test.each(["rejected", "partial", "ambiguous", "fallback"] as const)(
+    "retains %s delivery as failed without repeating an unsafe send",
+    async (mode) => {
+      if (!queue) throw new Error("queue not started");
+      const paragraph = "z".repeat(6_000);
+      const text = mode === "partial" ? `${paragraph}\n\n${paragraph}` : "answer";
+      const accepted: string[] = [];
+      let sends = 0;
+      const post = async (body: string) => {
+        sends += 1;
+        if (mode === "rejected" || (mode === "partial" && sends === 2)) {
+          throw new Error("synthetic provider rejection");
+        }
+        accepted.push(body);
+        if (mode === "ambiguous" || mode === "fallback") {
+          throw new Error("synthetic acknowledgment lost");
+        }
+        return { ok: true };
+      };
+      const strategy = getResponseStrategy("slack");
+      const renderer = {
+        handleCompletion: (data: any) => strategy.handleCompletion({
+          ctx: {
+            connectionId: "synthetic-slack-connection",
+            channelId: "slack:C_TEST_DELIVERY",
+            platform: "slack",
+            instance: { chat: { getAdapter: () => mode === "fallback" ? undefined : {
+              client: { chat: { postMessage: (input: { markdown_text: string }) => post(input.markdown_text) } },
+            } } },
+          },
+          payload: data,
+          stream: mode === "fallback" ? {
+            buffer: "", streamFailed: true, target: { post },
+          } as any : null,
+        }),
+      };
+      const registry = {
+        get: () => ({ getResponseRenderer: () => renderer }),
+      } as unknown as PlatformRegistry;
+      const consumer = new UnifiedThreadResponseConsumer(queue, registry, new SseManager());
+      try {
+        const runId = await queue.send("thread_response", {
+          messageId: "synthetic-delivery-message",
+          conversationId: "slack:C_TEST_DELIVERY",
+          channelId: "slack:C_TEST_DELIVERY",
+          userId: "synthetic-user", teamId: "synthetic-team", platform: "slack",
+          timestamp: Date.now(), processedMessageIds: ["synthetic-delivery-message"],
+          finalText: text,
+        }, { retryLimit: 5, retryDelay: 0 });
+        await consumer.start();
+        let outcome: { status: string; attempts: number; error_message: string | null } | undefined;
+        const deadline = Date.now() + 5_000;
+        while (Date.now() < deadline) {
+          [outcome] = await getDb()<{
+            status: string; attempts: number; error_message: string | null;
+          }>`SELECT status, attempts, error_message FROM runs WHERE id = ${runId}`;
+          if (outcome?.status === "completed" || outcome?.status === "failed") break;
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        expect(outcome).toMatchObject({ status: "failed", attempts: 1 });
+        expect(outcome?.error_message).toContain("Slack response delivery failed");
+        expect(sends).toBe(mode === "partial" ? 2 : 1);
+        expect(accepted).toEqual(mode === "rejected" ? [] : [mode === "partial" ? paragraph : text]);
+      } finally {
+        await consumer.stop();
+      }
+    }
+  );
+});
 
 describe("RunsQueue — disconnected API delivery", () => {
   test.each([false, true])("preserves bounded owner retries and genuine renderer failures (renderer fails: %s)", async (rendererFails) => {
