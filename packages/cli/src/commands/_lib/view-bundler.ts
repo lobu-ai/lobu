@@ -152,11 +152,13 @@ export function assertBundlePortable(
       );
     }
   }
-  const encoded = decodedCode.match(/file:\/\/[^"'\s]*/gi) ?? [];
+  const encoded = decodedCode.match(/file:\/\/[^"'`\s]*/gi) ?? [];
   for (const url of encoded) {
-    // A browser bundle has no business with file URLs: any of them embeds a
-    // build-machine path (or its encoding), so reject the bundle outright
-    // rather than trying to tell ours from a legitimate one.
+    // Libraries may compare origins against the bare protocol marker. It has
+    // no machine path; trailing escapes belong to an embedded string's quote.
+    if (/^file:\/\/\\*$/i.test(url)) continue;
+    // A URL with a host or path still leaks machine state, including foreign
+    // build-machine paths that the checkout checks above cannot recognize.
     throw new Error(
       `view bundle embeds a file URL ${JSON.stringify(url)} — bundles must be portable`
     );

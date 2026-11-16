@@ -73,6 +73,17 @@ export default function Pipeline() {
 `;
 
 describe("bundleViewFromFile", () => {
+  test("bundles protocol markers in code and embedded worker source", async () => {
+    const worker = "const origins = ['file://', 'null'];";
+    const entry = mkView({
+      "views/deal/pipeline.tsx": `import { defineView } from "@lobu/views";
+export const view = defineView({ key: "protocols", attach: [] });
+export default function Protocols() {
+  return ['file://', ${JSON.stringify(worker)}].join(' ');
+}`,
+    });
+    expect((await bundleFixture(entry)).definition.key).toBe("protocols");
+  });
   test("rejects a native component that the installed runtime does not export", async () => {
     const entry = mkView({
       "views/deal/pipeline.tsx": `import { defineView } from "@lobu/views";
@@ -250,6 +261,30 @@ export default function Bad() { return null; }
 });
 
 describe("assertBundlePortable", () => {
+  test.each([
+    'const protocol = "file://";',
+    "const protocol = `file://`;",
+    'const protocol = "file%3A%2F%2F";',
+    `const worker = ${JSON.stringify('const origin = "file://";')};`,
+  ])("allows bare protocol markers: %s", (code) => {
+    expect(() =>
+      assertBundlePortable(code, "/synthetic-builder/view.tsx")
+    ).not.toThrow();
+  });
+
+  test.each([
+    "file:///opt/foreign-builder/project/view.tsx",
+    "file:///C:/foreign-builder/project/view.tsx",
+    "file://build-host/share/project/view.tsx",
+    "file%3A%2F%2F%2Fopt%2Fforeign-builder%2Fview.tsx",
+  ])("rejects foreign build-machine file URLs: %s", (url) => {
+    expect(() =>
+      assertBundlePortable(
+        `const path = ${JSON.stringify(url)};`,
+        "/synthetic-builder/view.tsx"
+      )
+    ).toThrow("must be portable");
+  });
   test("rejects embedded checkout paths and encoded file URLs", () => {
     const entry = "/Users/someone/Code/lobu-proj/views/a.tsx";
     expect(() => assertBundlePortable(`var x = "${entry}";`, entry)).toThrow(
