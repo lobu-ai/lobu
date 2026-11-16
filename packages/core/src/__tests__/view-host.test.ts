@@ -17,4 +17,23 @@ describe("isViewRead", () => {
     expect(isViewRead("manage_entity", { action: "list" })).toBe(true);
     expect(isViewRead("manage_entity", { action: "create" })).toBe(false);
   });
+
+  it("admits feed reads without admitting feed mutations or missing actions", () => {
+    for (const action of ["list_feeds", "read_feed", "read_feeds"]) {
+      expect(isViewRead("manage_feeds", { action })).toBe(true);
+    }
+    for (const action of [
+      "create_feed",
+      "update_feed",
+      "delete_feed",
+      "trigger_feed",
+      "unknown",
+      "",
+      null,
+    ]) {
+      expect(isViewRead("manage_feeds", { action })).toBe(false);
+    }
+    expect(isViewRead("manage_feeds", {})).toBe(false);
+    expect(isViewRead("manage_feeds", undefined)).toBe(false);
+  });
 });
