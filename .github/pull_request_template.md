@@ -3,7 +3,8 @@
 
 ## Test plan
 <!-- Check only what you actually ran. See AGENTS.md → "Ship a change". -->
-- [ ] Intended files staged explicitly, then `make pr-full` clean (full Linux CI graph; `make pre-pr` only as local fallback)
+- [ ] Intended files staged explicitly; `make pre-pr` passed before commit/push
+- [ ] GitHub CI passed for the exact PR head (canonical full graph; `make pr-full` is optional)
 - [ ] Tests run: `make test-unit` / `make test-integration` / targeted `bun test <path>`
 - [ ] Bug fix: red→fix→green outputs pasted below
 - [ ] If bot runtime changed: ran `./scripts/test-bot.sh` or relevant eval

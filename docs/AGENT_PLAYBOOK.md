@@ -38,6 +38,10 @@ Mechanical traps (build, SQL, testing, submodule, browser) live in `docs/GOTCHAS
 
 ## Evidence
 
+**Recall and handoffs are leads, not current-state proof.** Distinguish proposed, accepted, implemented, and live-verified claims, with a date or revision. Reconcile conflicts against the intended target revision and running system; differences between code and the deployed system may be real. Preserve historical rationale without presenting it as current implementation. A newer observation does not override instructions, authorization, or safety rules. If an installed skill and the repository disagree, surface the exact conflict before following a copied procedure.
+
+**Retain a lesson only if it changes future action.** After a correction or unexpected verification failure, identify the trigger, mistaken assumption, verified cause, changed action, and source evidence. An apology or reviewer suggestion alone is not proof. Search for an existing lesson and correct or supersede it rather than duplicating it; keep historical decisions historical. Prefer an executable safeguard for mechanical failures, package guidance or `GOTCHAS.md` for local traps, and root rules only for contributor-wide boundaries. Private incidents belong in authorized Lobu memory; publishing to a team workspace needs an explicit authorized destination. Link to canonical repo guidance instead of copying it. Do not retain task summaries, temporary state, code inventories, or generic wishes. No durable lesson is a valid result. Keep evidence references short; assess recurrence per task, not per review thread, and measure outcomes rather than retrieval counts.
+
 **Red→fix→green.** Both outputs belong in the PR body. If you cannot reproduce the bug, that is a reportable dead end — a speculative fix costs more than the bug.
 
 **Mutation checks.** A test that passes after you break the code proves nothing. Assert the old pattern exists, make a countable source change, confirm the focused test fails, then restore and rerun green.
