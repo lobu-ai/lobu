@@ -25,6 +25,8 @@
  */
 
 import { beforeAll, describe, expect, it } from "vitest";
+import { generateWorkerToken, mintGatewayMcpToken } from "@lobu/core";
+import { get } from "../../setup/test-helpers";
 import {
 	evaluateEntityMutation,
 	resolveActingPrincipal,
@@ -38,11 +40,14 @@ import { orgContext } from "../../../lobu/stores/org-context";
 import type { AuthContext } from "../../../tools/execute";
 import { executeTool, toToolContext } from "../../../tools/execute";
 import { buildAgentsNamespace } from "../../../sandbox/namespaces/agents";
+import { buildCatalogNamespace } from "../../../sandbox/namespaces/catalog";
 import { initWorkspaceProvider } from "../../../workspace";
 import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
 import {
 	addUserToOrganization,
 	createTestAgent,
+	createTestAccessToken,
+	createTestOAuthClient,
 	createTestOrganization,
 	createTestUser,
 } from "../../setup/test-fixtures";
@@ -722,7 +727,7 @@ describe("manage_agents — builder gate e2e", () => {
 		expect(row?.id).toBe("system-bot");
 	});
 
-	it("agent principal: agent_config read deny filters list and blocks get", async () => {
+	it("agent principal: agent_config read deny filters list and blocks get and installed metadata", async () => {
 		const sql = getTestDb();
 		await executeTool(
 			"manage_agents",
@@ -780,6 +785,53 @@ describe("manage_agents — builder gate e2e", () => {
 			agentCtx,
 		)) as { agent?: { id: string } };
 		expect(got.agent?.id).toBe("visible-bot");
+
+		const skillsConfig = { skills: [{ repo: "synthetic/private", name: "private-rubric", enabled: true, description: "Hidden agent metadata", content: "Hidden instructions" }] };
+		await buildAgentsNamespace(toToolContext(ownerCtx), TEST_ENV).update({
+			agent_id: "hidden-bot", settings: { skillsConfig },
+		});
+		await buildAgentsNamespace(toToolContext(ownerCtx), TEST_ENV).update({
+			agent_id: "visible-bot", settings: { skillsConfig },
+		});
+		const catalog = buildCatalogNamespace(toToolContext(agentCtx), TEST_ENV);
+		const denied = await Promise.allSettled([
+			orgContext.run({ organizationId: orgId }, () => catalog.listInstalled({ agent_id: "hidden-bot", kinds: ["skills"] })),
+			orgContext.run({ organizationId: orgId }, () => executeTool("manage_catalog", {
+			action: "list_installed", agent_id: "hidden-bot", kinds: ["skills"], include_catalog: true,
+			}, TEST_ENV, agentCtx)),
+		]);
+		expect(await orgContext.run({ organizationId: orgId }, () => catalog.listInstalled({ agent_id: "visible-bot", kinds: ["skills"] }))).toMatchObject({
+			installed: { skills: { items: [{ name: "private-rubric" }] } },
+		});
+		expect(await orgContext.run({ organizationId: orgId }, () => executeTool("manage_catalog", { action: "list_installed", agent_id: "hidden-bot", kinds: ["skills"] }, TEST_ENV, ownerCtx))).toMatchObject({
+			installed: { skills: { items: [{ name: "private-rubric" }] } },
+		});
+		const [org] = await sql`SELECT slug FROM organization WHERE id = ${orgId}`;
+		const oauth = await createTestOAuthClient();
+		const { token } = await createTestAccessToken(ownerId, orgId, oauth.client_id, { scope: "mcp:read" });
+		const rest = await get(`/api/${org.slug}/installed/agents/hidden-bot/installed?kinds=skills`, { token });
+		expect(rest.status).toBe(200);
+		expect(await rest.json()).toMatchObject({ installed: { skills: { items: [{ name: "private-rubric" }] } } });
+		// REST accepts human credentials; a worker's signed principal enters through MCP.
+		const workerToken = mintGatewayMcpToken(generateWorkerToken(ownerId, "catalog-fixture", "catalog-fixture", {
+			agentId: "builder-agent", organizationId: orgId, platform: "api", source: "internal", channelId: "api-catalog-fixture",
+		}));
+		expect(workerToken).toBeTruthy();
+		const workerRest = await get(`/api/${org.slug}/installed/agents/hidden-bot/installed?kinds=skills`, {
+			token: workerToken!, headers: { "X-Lobu-Memory-Direct-Auth": "1" },
+		});
+		expect(workerRest.status).toBe(401);
+		const foreignOrg = await createTestOrganization({ name: "Catalog isolation fixture" });
+		await createTestAgent({ organizationId: foreignOrg.id, ownerUserId: ownerId, agentId: "foreign-only" });
+		await sql`UPDATE agents SET skills_config = ${sql.json(skillsConfig)}
+			WHERE organization_id = ${foreignOrg.id} AND id = 'foreign-only'`;
+		expect(await catalog.listInstalled({ agent_id: "foreign-only", kinds: ["skills"] })).toEqual({ action: "list_installed", installed: {} });
+		const foreignRest = await get(`/api/${org.slug}/installed/agents/foreign-only/installed?kinds=skills`, { token });
+		expect(foreignRest.status).toBe(200);
+		expect(await foreignRest.json()).toEqual({ installed: {} });
+		for (const result of denied) {
+			expect(result).toMatchObject({ status: "rejected", reason: { httpStatus: 403 } });
+		}
 	});
 
 	it("a non-admin member cannot call admin-tier write actions", async () => {

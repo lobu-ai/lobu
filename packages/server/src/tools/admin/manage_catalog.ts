@@ -85,7 +85,7 @@ async function handleListInstalled(
 	if (args.agent_id && resolvedAgentKinds.length > 0) {
 		Object.assign(
 			installed,
-			await listAgentInstalled(args.agent_id, resolvedAgentKinds, listOptions),
+			await listAgentInstalled(args.agent_id, resolvedAgentKinds, ctx, listOptions),
 		);
 	}
 
