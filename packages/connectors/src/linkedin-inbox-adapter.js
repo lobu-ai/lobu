@@ -1213,7 +1213,7 @@ export function linkedInInboxProgram() {
       if (shown) return sent(shown);
       await new Promise((resolve) => setTimeout(resolve, 1000));
     }
-    fail("LinkedIn accepted the message but it did not appear in the conversation; retry the same operation run to reconcile");
+    fail("LinkedIn accepted the message but it did not appear in the conversation; delivery is uncertain. Check the conversation before sending again");
   }
   // A lookup shows conversations as the person on the other side. A value is
   // a thread id of the member's own inbox or a full conversation URN of an

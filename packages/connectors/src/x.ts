@@ -4229,7 +4229,7 @@ export default class XConnector extends ConnectorRuntime {
 				kind: "write",
 				name: "Send DM reply",
 				description:
-					"Requires an X connection authenticated through your paired Chrome browser. Send a text reply into an exact existing X direct message conversation and confirm it appears there. This direct send is approved only for answering DMs on bot accounts the owner operates; public replies and posts stay draft-only through prepare_reply. Sends at most once per operation run: on retry, reuse the operations.execute idempotency_key so the retry is the same run. The browser can recognise an earlier send only while its request ID is on the latest conversation page; matching recent text without a request ID is refused.",
+					"Requires an X connection authenticated through your paired Chrome browser. Send a text reply into an exact existing X direct message conversation and confirm it appears there. This direct send is approved only for answering DMs on bot accounts the owner operates; public replies and posts stay draft-only through prepare_reply. Sends at most once per operation run: repeating operations.execute with the same idempotency_key returns that run's result instead of sending again. A run that fails because delivery is uncertain is not retried; check the conversation before starting a new send. The browser can recognise an earlier send only while its request ID is on the latest conversation page; matching recent text without a request ID is refused.",
 				annotations: {
 					destructiveHint: false,
 					idempotentHint: false,

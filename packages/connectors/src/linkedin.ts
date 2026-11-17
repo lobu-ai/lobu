@@ -3109,7 +3109,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
         name: "Send direct message reply",
         kind: "write",
         description:
-          "Send a text reply into an exact existing LinkedIn direct-message conversation and confirm it appears there. Pass a member-inbox row's thread_id, or a row's full conversation_id to reply from the inbox the message came from (a company page the signed-in member administers). This direct send is approved only for answering direct messages on accounts the owner operates; group conversations are refused, and posts, comments and other messages stay draft-only through prepare_message, prepare_post and prepare_comment. Sends at most once per operation run: a retry of the same run returns the earlier message instead of sending again, so pass operations.execute's idempotency_key to make a repeated call the same run.",
+          "Send a text reply into an exact existing LinkedIn direct-message conversation and confirm it appears there. Pass a member-inbox row's thread_id, or a row's full conversation_id to reply from the inbox the message came from (a company page the signed-in member administers). This direct send is approved only for answering direct messages on accounts the owner operates; group conversations are refused, and posts, comments and other messages stay draft-only through prepare_message, prepare_post and prepare_comment. Sends at most once per operation run: repeating operations.execute with the same idempotency_key returns that run's result instead of sending again. A run that fails because delivery is uncertain is not retried; check the conversation before starting a new send.",
         annotations: {
           openWorldHint: true,
           destructiveHint: false,
