@@ -9,7 +9,7 @@ const { linkedInDraftUrl, prepareLinkedInDraft } =
 const { fillLinkedInDraft } = await import("../linkedin-draft-page.js");
 const threadUrl = "https://www.linkedin.com/messaging/thread/synthetic-thread/";
 
-function draftPage(html: string, url = threadUrl) {
+function draftPage(html: string, url = threadUrl, target = url) {
   const dom = new JSDOM(html, { url, runScripts: "outside-only" });
   dom.window.HTMLElement.prototype.getClientRects = () =>
     [{ width: 100, height: 100 }] as any;
@@ -31,13 +31,16 @@ function draftPage(html: string, url = threadUrl) {
     clicks,
     fill: (kind: string, body: string) =>
       dom.window.eval(
-        `(${fillLinkedInDraft.toString()})(${linkedInScriptArgument({ kind, url, body })})`
+        `(${fillLinkedInDraft.toString()})(${linkedInScriptArgument({ kind, url: target, body })})`
       ),
   };
 }
 
-const composer =
-  '<div class="msg-conversation-listitem--active"><a href="/messaging/thread/synthetic-thread/">Alex Example</a></div><div class="msg-thread"><form class="msg-form"><div tabindex="0" role="textbox" contenteditable="true"></div><button>Send</button></form></div>';
+// Current LinkedIn markup: the selected list item carries no thread href; only the
+// open thread's header names the counterpart.
+const conversation = (listName: string, threadName = listName) =>
+  `<li class="msg-conversation-listitem"><div class="msg-conversation-listitem__link msg-conversations-container__convo-item-link--active"><img alt="${listName}"><h3 class="msg-conversation-listitem__participant-names">${listName}</h3></div></li><div class="msg-thread"><h2 class="msg-entity-lockup__entity-title">${threadName}</h2><form class="msg-form"><div tabindex="0" role="textbox" contenteditable="true"></div><button>Send</button></form></div>`;
+const composer = conversation("Alex Example");
 
 describe("LinkedIn human-submitted drafts", () => {
   test("browser arguments round-trip as data without escaping a script context", () => {
@@ -82,10 +85,8 @@ describe("LinkedIn human-submitted drafts", () => {
       'contenteditable="true">Existing draft</div>'
     ),
     composer + composer,
-    composer.replace(
-      'href="/messaging/thread/synthetic-thread/"',
-      'href="/messaging/thread/different-thread/"'
-    ),
+    conversation("Alex Example", "Sam Example"),
+    composer.replace("convo-item-link--active", "convo-item-link"),
     composer.replace(
       "</form>",
       '<div class="msg-form__attachment">attachment</div></form>'
@@ -94,6 +95,27 @@ describe("LinkedIn human-submitted drafts", () => {
     const { dom, fill, clicks } = draftPage(html);
     try {
       await expect(fill("prepare_message", "Hello")).rejects.toThrow();
+      expect(clicks).toEqual([]);
+    } finally {
+      dom.window.close();
+    }
+  });
+  test("refuses a conversation other than the requested thread", async () => {
+    // The list and header carry no thread identity, so the exact URL is what
+    // ties the draft to the requested conversation.
+    const { dom, fill, clicks } = draftPage(
+      composer,
+      "https://www.linkedin.com/messaging/thread/other-thread/",
+      threadUrl
+    );
+    try {
+      await expect(fill("prepare_message", "Hello")).rejects.toThrow(
+        "not the requested draft target"
+      );
+      expect(
+        dom.window.document.querySelector('[contenteditable="true"]')
+          ?.textContent
+      ).toBe("");
       expect(clicks).toEqual([]);
     } finally {
       dom.window.close();
