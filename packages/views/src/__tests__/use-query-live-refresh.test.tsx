@@ -10,7 +10,8 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { JSDOM } from "jsdom";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { defineView, Provider, useQuery } from "../api.js";
+import { defineView, Provider, useAction, useQuery } from "../api.js";
+import type { ActionResult } from "../api.js";
 import { ViewBridge } from "../bridge.js";
 
 interface Seen {
@@ -21,6 +22,9 @@ interface Seen {
 
 let latest: Seen | null = null;
 let refetch: (() => void) | null = null;
+let runAction: (() => Promise<ActionResult>) | null = null;
+/** Test seam: shorten the live refresh window so a test does not sleep 15 s. */
+let liveRefreshIntervalMs = 15_000;
 
 function StringProbe({
   script,
@@ -36,6 +40,12 @@ function StringProbe({
   return null;
 }
 
+function ActionProbe() {
+  const save = useAction("save");
+  runAction = () => save({});
+  return null;
+}
+
 class FakeParent {
   posted: Array<Record<string, unknown>> = [];
   postMessage(message: unknown): void {
@@ -46,7 +56,11 @@ class FakeParent {
   }
 }
 
-const DEF = defineView({ key: "liveprobe", attach: [] });
+const DEF = defineView({
+  key: "liveprobe",
+  attach: [],
+  actions: { save: { emits: "probe.saved" } },
+});
 const seen: Seen[] = [];
 
 let dom: JSDOM;
@@ -69,8 +83,13 @@ async function tick(): Promise<void> {
 
 function renderProbe(script: string | null, live?: boolean): void {
   root?.render(
-    <Provider def={DEF} bridge={bridge ?? undefined}>
+    <Provider
+      def={DEF}
+      bridge={bridge ?? undefined}
+      liveRefreshIntervalMs={liveRefreshIntervalMs}
+    >
       <StringProbe script={script} live={live} />
+      <ActionProbe />
     </Provider>
   );
 }
@@ -78,6 +97,8 @@ function renderProbe(script: string | null, live?: boolean): void {
 beforeEach(() => {
   latest = null;
   refetch = null;
+  runAction = null;
+  liveRefreshIntervalMs = 15_000;
   seen.length = 0;
   dom = new JSDOM("<!doctype html><html><body></body></html>", {
     url: "https://views.test/",
@@ -154,6 +175,17 @@ function answer(call: Record<string, unknown>, count: number): void {
   });
 }
 
+async function dataChanged(): Promise<void> {
+  await act(async () => {
+    hostSend({
+      jsonrpc: "2.0",
+      method: "lobu/notifications/data-changed",
+      params: {},
+    });
+    await tick();
+  });
+}
+
 describe("useQuery live refresh", () => {
   test("a host data-changed notification re-reads in the background", async () => {
     await ready();
@@ -187,6 +219,9 @@ describe("useQuery live refresh", () => {
   });
 
   test("a burst of data changes during a re-read costs one follow-up read", async () => {
+    // Zero window isolates the in-flight coalescing this test covers; the
+    // time floor itself is covered by the window tests below.
+    liveRefreshIntervalMs = 0;
     await ready();
     await act(async () => {
       answer(parent.toolsCalls()[0], 1);
@@ -356,5 +391,108 @@ describe("useQuery live refresh", () => {
       await tick();
     });
     expect(latest).toEqual({ loading: false, data: { count: 3 }, error: null });
+  });
+
+  test("changes inside the refresh window collapse into one trailing read", async () => {
+    liveRefreshIntervalMs = 200;
+    await ready();
+    await act(async () => {
+      answer(parent.toolsCalls()[0], 1);
+      await tick();
+    });
+    await dataChanged();
+    expect(parent.toolsCalls()).toHaveLength(2);
+    await act(async () => {
+      answer(parent.toolsCalls()[1], 2);
+      await tick();
+    });
+    await dataChanged();
+    await dataChanged();
+    // Both changes are inside the window: the trailing read waits for it.
+    expect(parent.toolsCalls()).toHaveLength(2);
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    });
+    expect(parent.toolsCalls()).toHaveLength(3);
+    await act(async () => {
+      answer(parent.toolsCalls()[2], 3);
+      await tick();
+    });
+    expect(latest).toEqual({ loading: false, data: { count: 3 }, error: null });
+  });
+
+  test("a hidden frame defers its reads until it is visible", async () => {
+    // Zero window isolates visibility from the time floor.
+    liveRefreshIntervalMs = 0;
+    await ready();
+    await act(async () => {
+      answer(parent.toolsCalls()[0], 1);
+      await tick();
+    });
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => "hidden",
+    });
+    await dataChanged();
+    await dataChanged();
+    expect(parent.toolsCalls()).toHaveLength(1);
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => "visible",
+    });
+    await act(async () => {
+      document.dispatchEvent(new dom.window.Event("visibilitychange"));
+      await tick();
+      await tick();
+    });
+    expect(parent.toolsCalls()).toHaveLength(2);
+  });
+
+  test("a committed action reads immediately inside the refresh window", async () => {
+    liveRefreshIntervalMs = 60_000;
+    await ready();
+    await act(async () => {
+      answer(parent.toolsCalls()[0], 1);
+      await tick();
+    });
+    // A data change opens the window with a leading read.
+    await dataChanged();
+    expect(parent.toolsCalls()).toHaveLength(2);
+    await act(async () => {
+      answer(parent.toolsCalls()[1], 2);
+      await tick();
+    });
+
+    const action = runAction;
+    expect(action).not.toBeNull();
+    let pending!: Promise<ActionResult>;
+    await act(async () => {
+      pending = action!();
+      await tick();
+    });
+    const actionCall = parent.toolsCalls().find((call) => {
+      const params = call.params as { name?: string } | undefined;
+      return params?.name === "invoke_view_action";
+    });
+    expect(actionCall).toBeDefined();
+
+    let result: ActionResult | null = null;
+    await act(async () => {
+      hostSend({
+        jsonrpc: "2.0",
+        id: (actionCall as { id: number }).id,
+        result: { structuredContent: { success: true }, content: [] },
+      });
+      result = await pending;
+      await tick();
+      await tick();
+    });
+    expect(result?.ok).toBe(true);
+    // The action's refresh bypasses the 60 s window.
+    const reads = parent.toolsCalls().filter((call) => {
+      const params = call.params as { name?: string } | undefined;
+      return params?.name === "query_sdk";
+    });
+    expect(reads).toHaveLength(3);
   });
 });
