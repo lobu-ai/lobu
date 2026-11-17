@@ -9,7 +9,7 @@ const { linkedInDraftUrl, prepareLinkedInDraft } =
 const { fillLinkedInDraft } = await import("../linkedin-draft-page.js");
 const threadUrl = "https://www.linkedin.com/messaging/thread/synthetic-thread/";
 
-function draftPage(html: string, url = threadUrl) {
+function draftPage(html: string, url = threadUrl, target = url) {
   const dom = new JSDOM(html, { url, runScripts: "outside-only" });
   dom.window.HTMLElement.prototype.getClientRects = () =>
     [{ width: 100, height: 100 }] as any;
@@ -31,7 +31,7 @@ function draftPage(html: string, url = threadUrl) {
     clicks,
     fill: (kind: string, body: string) =>
       dom.window.eval(
-        `(${fillLinkedInDraft.toString()})(${linkedInScriptArgument({ kind, url, body })})`
+        `(${fillLinkedInDraft.toString()})(${linkedInScriptArgument({ kind, url: target, body })})`
       ),
   };
 }
@@ -95,6 +95,27 @@ describe("LinkedIn human-submitted drafts", () => {
     const { dom, fill, clicks } = draftPage(html);
     try {
       await expect(fill("prepare_message", "Hello")).rejects.toThrow();
+      expect(clicks).toEqual([]);
+    } finally {
+      dom.window.close();
+    }
+  });
+  test("refuses a conversation other than the requested thread", async () => {
+    // The list and header carry no thread identity, so the exact URL is what
+    // ties the draft to the requested conversation.
+    const { dom, fill, clicks } = draftPage(
+      composer,
+      "https://www.linkedin.com/messaging/thread/other-thread/",
+      threadUrl
+    );
+    try {
+      await expect(fill("prepare_message", "Hello")).rejects.toThrow(
+        "not the requested draft target"
+      );
+      expect(
+        dom.window.document.querySelector('[contenteditable="true"]')
+          ?.textContent
+      ).toBe("");
       expect(clicks).toEqual([]);
     } finally {
       dom.window.close();
