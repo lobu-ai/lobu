@@ -10,7 +10,8 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { JSDOM } from "jsdom";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { defineView, Provider, useQuery } from "../api.js";
+import { defineView, Provider, useAction, useQuery } from "../api.js";
+import type { ActionResult } from "../api.js";
 import { ViewBridge } from "../bridge.js";
 
 interface Seen {
@@ -21,6 +22,9 @@ interface Seen {
 
 let latest: Seen | null = null;
 let refetch: (() => void) | null = null;
+let runAction: (() => Promise<ActionResult>) | null = null;
+/** Test seam: shorten the live refresh window so a test does not sleep 15 s. */
+let liveRefreshIntervalMs = 15_000;
 
 function StringProbe({
   script,
@@ -36,6 +40,12 @@ function StringProbe({
   return null;
 }
 
+function ActionProbe() {
+  const save = useAction("save");
+  runAction = () => save({});
+  return null;
+}
+
 class FakeParent {
   posted: Array<Record<string, unknown>> = [];
   postMessage(message: unknown): void {
@@ -46,7 +56,11 @@ class FakeParent {
   }
 }
 
-const DEF = defineView({ key: "liveprobe", attach: [] });
+const DEF = defineView({
+  key: "liveprobe",
+  attach: [],
+  actions: { save: { emits: "probe.saved" } },
+});
 const seen: Seen[] = [];
 
 let dom: JSDOM;
@@ -69,8 +83,13 @@ async function tick(): Promise<void> {
 
 function renderProbe(script: string | null, live?: boolean): void {
   root?.render(
-    <Provider def={DEF} bridge={bridge ?? undefined}>
+    <Provider
+      def={DEF}
+      bridge={bridge ?? undefined}
+      liveRefreshIntervalMs={liveRefreshIntervalMs}
+    >
       <StringProbe script={script} live={live} />
+      <ActionProbe />
     </Provider>
   );
 }
@@ -78,6 +97,8 @@ function renderProbe(script: string | null, live?: boolean): void {
 beforeEach(() => {
   latest = null;
   refetch = null;
+  runAction = null;
+  liveRefreshIntervalMs = 15_000;
   seen.length = 0;
   dom = new JSDOM("<!doctype html><html><body></body></html>", {
     url: "https://views.test/",
@@ -114,9 +135,9 @@ afterEach(async () => {
   dom.window.close();
 });
 
-async function ready(live?: boolean): Promise<void> {
+async function ready(live?: boolean, script = "return 1"): Promise<void> {
   await act(async () => {
-    renderProbe("return 1", live);
+    renderProbe(script, live);
     await tick();
   });
   expect(parent.toolsCalls()).toHaveLength(0);
@@ -143,14 +164,29 @@ async function ready(live?: boolean): Promise<void> {
   });
 }
 
-function answer(call: Record<string, unknown>, count: number): void {
+function answerValue(call: Record<string, unknown>, value: unknown): void {
   hostSend({
     jsonrpc: "2.0",
     id: (call as { id: number }).id,
     result: {
-      structuredContent: { success: true, return_value: { count } },
+      structuredContent: { success: true, return_value: value },
       content: [],
     },
+  });
+}
+
+function answer(call: Record<string, unknown>, count: number): void {
+  answerValue(call, { count });
+}
+
+async function dataChanged(): Promise<void> {
+  await act(async () => {
+    hostSend({
+      jsonrpc: "2.0",
+      method: "lobu/notifications/data-changed",
+      params: {},
+    });
+    await tick();
   });
 }
 
@@ -187,6 +223,9 @@ describe("useQuery live refresh", () => {
   });
 
   test("a burst of data changes during a re-read costs one follow-up read", async () => {
+    // Zero window isolates the in-flight coalescing this test covers; the
+    // time floor itself is covered by the window tests below.
+    liveRefreshIntervalMs = 0;
     await ready();
     await act(async () => {
       answer(parent.toolsCalls()[0], 1);
@@ -356,5 +395,288 @@ describe("useQuery live refresh", () => {
       await tick();
     });
     expect(latest).toEqual({ loading: false, data: { count: 3 }, error: null });
+  });
+
+  test("changes inside the refresh window collapse into one trailing read", async () => {
+    liveRefreshIntervalMs = 200;
+    await ready();
+    await act(async () => {
+      answer(parent.toolsCalls()[0], 1);
+      await tick();
+    });
+    await dataChanged();
+    expect(parent.toolsCalls()).toHaveLength(2);
+    await act(async () => {
+      answer(parent.toolsCalls()[1], 2);
+      await tick();
+    });
+    await dataChanged();
+    await dataChanged();
+    // Both changes are inside the window: the trailing read waits for it.
+    expect(parent.toolsCalls()).toHaveLength(2);
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    });
+    expect(parent.toolsCalls()).toHaveLength(3);
+    await act(async () => {
+      answer(parent.toolsCalls()[2], 3);
+      await tick();
+    });
+    expect(latest).toEqual({ loading: false, data: { count: 3 }, error: null });
+  });
+
+  test("a hidden frame defers its reads until it is visible", async () => {
+    // Zero window isolates visibility from the time floor.
+    liveRefreshIntervalMs = 0;
+    await ready();
+    await act(async () => {
+      answer(parent.toolsCalls()[0], 1);
+      await tick();
+    });
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => "hidden",
+    });
+    await dataChanged();
+    await dataChanged();
+    expect(parent.toolsCalls()).toHaveLength(1);
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => "visible",
+    });
+    await act(async () => {
+      document.dispatchEvent(new dom.window.Event("visibilitychange"));
+      await tick();
+      await tick();
+    });
+    expect(parent.toolsCalls()).toHaveLength(2);
+    await act(async () => {
+      answer(parent.toolsCalls()[1], 2);
+      await tick();
+    });
+  });
+
+  test("a committed action reads immediately inside the refresh window", async () => {
+    liveRefreshIntervalMs = 60_000;
+    await ready();
+    await act(async () => {
+      answer(parent.toolsCalls()[0], 1);
+      await tick();
+    });
+    // A data change opens the window with a leading read.
+    await dataChanged();
+    expect(parent.toolsCalls()).toHaveLength(2);
+    await act(async () => {
+      answer(parent.toolsCalls()[1], 2);
+      await tick();
+    });
+
+    const action = runAction;
+    expect(action).not.toBeNull();
+    let pending!: Promise<ActionResult>;
+    await act(async () => {
+      pending = action!();
+      await tick();
+    });
+    const actionCall = parent.toolsCalls().find((call) => {
+      const params = call.params as { name?: string } | undefined;
+      return params?.name === "invoke_view_action";
+    });
+    expect(actionCall).toBeDefined();
+
+    let result: ActionResult | null = null;
+    await act(async () => {
+      hostSend({
+        jsonrpc: "2.0",
+        id: (actionCall as { id: number }).id,
+        result: { structuredContent: { success: true }, content: [] },
+      });
+      result = await pending;
+      await tick();
+      await tick();
+    });
+    expect(result?.ok).toBe(true);
+    // The action's refresh bypasses the 60 s window.
+    const reads = parent.toolsCalls().filter((call) => {
+      const params = call.params as { name?: string } | undefined;
+      return params?.name === "query_sdk";
+    });
+    expect(reads).toHaveLength(3);
+    await act(async () => {
+      answer(reads[2], 3);
+      await tick();
+    });
+  });
+
+  test("an owed follow-up waits for a visible frame", async () => {
+    // Zero window: the data change bumps immediately while the first read is
+    // still in flight, which leaves one follow-up owed.
+    liveRefreshIntervalMs = 0;
+    await ready();
+    await dataChanged();
+    expect(parent.toolsCalls()).toHaveLength(1);
+
+    // Hide before the in-flight read settles; its settle must not start the
+    // owed read into a hidden frame.
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => "hidden",
+    });
+    await act(async () => {
+      document.dispatchEvent(new dom.window.Event("visibilitychange"));
+      await tick();
+    });
+    await act(async () => {
+      answer(parent.toolsCalls()[0], 1);
+      await tick();
+      await tick();
+    });
+    expect(parent.toolsCalls()).toHaveLength(1);
+
+    // Visible: the preserved follow-up runs.
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => "visible",
+    });
+    await act(async () => {
+      document.dispatchEvent(new dom.window.Event("visibilitychange"));
+      await tick();
+      await tick();
+    });
+    expect(parent.toolsCalls()).toHaveLength(2);
+    await act(async () => {
+      answer(parent.toolsCalls()[1], 2);
+      await tick();
+    });
+    expect(latest?.data).toEqual({ count: 2 });
+  });
+
+  test("a key change while hidden drops the superseded in-flight result", async () => {
+    liveRefreshIntervalMs = 0;
+    await ready(undefined, "return 2");
+    await act(async () => {
+      answerValue(parent.toolsCalls()[0], { count: 2, query: "return 2" });
+      await tick();
+    });
+    expect(latest).toEqual({
+      loading: false,
+      data: { count: 2, query: "return 2" },
+      error: null,
+    });
+
+    // Switch to "return 1" while visible; its read stays in flight.
+    await act(async () => {
+      renderProbe("return 1");
+      await tick();
+    });
+    expect(parent.toolsCalls()).toHaveLength(2);
+    const inFlight = parent.toolsCalls()[1];
+
+    // Hide, then switch back to "return 2" before the "return 1" read settles.
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => "hidden",
+    });
+    await act(async () => {
+      document.dispatchEvent(new dom.window.Event("visibilitychange"));
+      await tick();
+    });
+    await act(async () => {
+      renderProbe("return 2");
+      await tick();
+    });
+    expect(parent.toolsCalls()).toHaveLength(2);
+
+    // The superseded "return 1" answer must not paint onto "return 2".
+    await act(async () => {
+      answerValue(inFlight, { count: 1, query: "return 1" });
+      await tick();
+      await tick();
+    });
+    expect(latest?.loading).toBe(true);
+    expect(latest?.data).not.toEqual({ count: 1, query: "return 1" });
+
+    // Visible: the current key reads and paints.
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => "visible",
+    });
+    await act(async () => {
+      document.dispatchEvent(new dom.window.Event("visibilitychange"));
+      await tick();
+      await tick();
+    });
+    expect(parent.toolsCalls()).toHaveLength(3);
+    await act(async () => {
+      answerValue(parent.toolsCalls()[2], { count: 2, query: "return 2" });
+      await tick();
+    });
+    expect(latest).toEqual({
+      loading: false,
+      data: { count: 2, query: "return 2" },
+      error: null,
+    });
+  });
+
+  test("a visible frame before the old key read settles still reads the new key", async () => {
+    liveRefreshIntervalMs = 0;
+    await ready(undefined, "return 2");
+    await act(async () => {
+      answerValue(parent.toolsCalls()[0], { count: 2, query: "return 2" });
+      await tick();
+    });
+    await act(async () => {
+      renderProbe("return 1");
+      await tick();
+    });
+    expect(parent.toolsCalls()).toHaveLength(2);
+    const oldRead = parent.toolsCalls()[1];
+
+    // Hide, switch back to "return 2", then show before the old read settles.
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => "hidden",
+    });
+    await act(async () => {
+      document.dispatchEvent(new dom.window.Event("visibilitychange"));
+      await tick();
+    });
+    await act(async () => {
+      renderProbe("return 2");
+      await tick();
+    });
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => "visible",
+    });
+    await act(async () => {
+      document.dispatchEvent(new dom.window.Event("visibilitychange"));
+      await tick();
+      await tick();
+    });
+    // The visibility flush cannot start while the old read is in flight.
+    expect(parent.toolsCalls()).toHaveLength(2);
+
+    // The old read settles visible: the owed current-key read must start.
+    await act(async () => {
+      answerValue(oldRead, { count: 1, query: "return 1" });
+      await tick();
+      await tick();
+    });
+    expect(parent.toolsCalls()).toHaveLength(3);
+    const currentRead = parent.toolsCalls()[2];
+    expect(
+      (currentRead.params as { arguments?: { script?: string } }).arguments
+        ?.script
+    ).toBe("return 2");
+    await act(async () => {
+      answerValue(currentRead, { count: 2, query: "return 2" });
+      await tick();
+    });
+    expect(latest).toEqual({
+      loading: false,
+      data: { count: 2, query: "return 2" },
+      error: null,
+    });
   });
 });
