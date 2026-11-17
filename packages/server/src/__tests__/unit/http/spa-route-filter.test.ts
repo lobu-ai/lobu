@@ -17,13 +17,6 @@ describe('SPA route filter', () => {
   it.each([
     '/legal',
     '/legal/',
-    '/legal//',
-    '/legal/data/..',
-  ])('keeps the standalone legal page excluded at %s', (requestPath) => {
-    expect(isExcludedSpaPath(requestPath)).toBe(true);
-  });
-
-  it.each([
     '/legal/data',
     '/legal/data/-/views/case-register',
     '/legal/events/123',

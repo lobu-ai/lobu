@@ -2,7 +2,7 @@
  * Integration test: a workspace can never take a slug the platform routes own.
  *
  * Server routes are registered ahead of the SPA fallback, so a workspace
- * slugged after one (`/legal`) had its root page replaced by the server's
+ * slugged after one (`/connect`) has its root page replaced by the server's
  * response. RESERVED_PATHS is the contract, and the `org_slug_not_reserved`
  * CHECK is its only enforcement for workspace create and rename.
  */
@@ -40,7 +40,7 @@ describe('reserved workspace slugs', () => {
     expect(enforced.sort()).toEqual([...RESERVED_PATHS].sort());
   });
 
-  it.each(['legal', 'connect', 'catalog', 'memory'])('refuses a workspace slugged %s', async (slug) => {
+  it.each(['connect', 'catalog', 'internal', 'memory'])('refuses a workspace slugged %s', async (slug) => {
     await expect(createTestOrganization({ name: `Reserved ${slug}`, slug })).rejects.toThrow(
       /org_slug_not_reserved/
     );

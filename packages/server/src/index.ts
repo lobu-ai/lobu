@@ -620,47 +620,6 @@ app.get("/logo.png", (c) => {
 });
 
 /**
- * Legal/Terms endpoint for ChatGPT connector validation
- */
-app.get("/legal", (c) => {
-	return c.html(`<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Legal Information - Lobu</title>
-  <style>
-    body { font-family: system-ui, -apple-system, sans-serif; max-width: 800px; margin: 40px auto; padding: 0 20px; line-height: 1.6; }
-    h1 { color: #333; }
-    h2 { color: #555; margin-top: 30px; }
-    p { color: #666; }
-  </style>
-</head>
-<body>
-  <h1>Lobu</h1>
-  <p>Legal Information and Terms of Service</p>
-
-  <h2>Service Description</h2>
-  <p>This is an AI-powered MCP server for collecting customer content and building searchable workspace knowledge across multiple platforms including Reddit, Trustpilot, App Stores, Google Maps, GitHub, Hacker News, and more.</p>
-
-  <h2>Data Collection</h2>
-  <p>This service collects publicly available user events from various platforms. All data is collected in accordance with each platform's terms of service and API usage policies.</p>
-
-  <h2>Privacy</h2>
-  <p>We process publicly available content data. No personal information is collected beyond what is publicly visible on the source platforms.</p>
-
-  <h2>Usage Terms</h2>
-  <p>This service is provided as-is for research and intelligence purposes. Users are responsible for ensuring their use of insights complies with applicable laws and regulations.</p>
-
-  <h2>Contact</h2>
-  <p>For questions or concerns, please contact: support@example.com</p>
-
-  <p style="margin-top: 40px; font-size: 0.9em; color: #999;">Last updated: ${new Date().toISOString().split("T")[0]}</p>
-</body>
-</html>`);
-});
-
-/**
  * REST API endpoints for ChatGPT Custom Actions and lightweight wrappers.
  * Agent and internal tools are exposed through the generic
  * /api/:orgSlug/:toolName proxy; MCP Apps presentation tools stay MCP-only.

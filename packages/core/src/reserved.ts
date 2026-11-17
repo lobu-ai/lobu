@@ -102,7 +102,6 @@ export const RESERVED_PATHS = [
   // Top-level server routes registered ahead of the SPA fallback: a workspace
   // with one of these slugs would have its pages shadowed by the server's
   // response.
-  "legal",
   "connect",
   "catalog",
   "internal",

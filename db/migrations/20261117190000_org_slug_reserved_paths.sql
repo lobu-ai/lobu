@@ -3,14 +3,14 @@
 
 -- Workspace slugs must avoid every name in RESERVED_PATHS (packages/core/src/reserved.ts).
 -- The CHECK had drifted to a 19-name subset, so workspaces could take owner-route and
--- server-route names; a workspace slugged after a top-level server route (/legal) had its
--- root page shadowed. integration/workspace/reserved-workspace-slugs.test.ts keeps the two in sync.
+-- server-route names, and a workspace slugged after a top-level server route has its pages
+-- shadowed by the server's response. integration/workspace/reserved-workspace-slugs.test.ts keeps the two in sync.
 ALTER TABLE "organization"
   DROP CONSTRAINT IF EXISTS org_slug_not_reserved;
 ALTER TABLE "organization"
   -- squawk-ignore prefer-robust-stmts -- the migration runner owns the transaction
   ADD CONSTRAINT org_slug_not_reserved CHECK (slug <> ALL (ARRAY[
-    'activity', 'agents', 'connectors', 'data', 'memory', 'members', 'settings', 'events', 'automations', 'connections', 'sources', 'environments', 'infrastructure', 'inference-providers', 'devices', 'auth', 'api', 'inbox', 'templates', 'help', 'account', 'me', 'admin', 'health', 'login', 'logout', 'signup', 'register', 'contents', 'entity-types', 'www', 'mcp', 'static', 'assets', 'cdn', 'docs', 'mail', 'connector', 'oauth', 'orgs', 'slack', 'dashboard', 'legal', 'connect', 'catalog', 'internal', 'mcp-apps'
+    'activity', 'agents', 'connectors', 'data', 'memory', 'members', 'settings', 'events', 'automations', 'connections', 'sources', 'environments', 'infrastructure', 'inference-providers', 'devices', 'auth', 'api', 'inbox', 'templates', 'help', 'account', 'me', 'admin', 'health', 'login', 'logout', 'signup', 'register', 'contents', 'entity-types', 'www', 'mcp', 'static', 'assets', 'cdn', 'docs', 'mail', 'connector', 'oauth', 'orgs', 'slack', 'dashboard', 'connect', 'catalog', 'internal', 'mcp-apps'
   ]::text[])) NOT VALID;
 ALTER TABLE "organization"
   -- squawk-ignore prefer-robust-stmts -- the migration runner owns the transaction
