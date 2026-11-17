@@ -730,6 +730,7 @@ export async function handleExecute(
 		agentId: ctx.agentId,
 		explicitAutomationId: args.automation_source?.automation_id ?? null,
 		sessionAutomationId: ctx.actingAutomationId ?? null,
+		appId: ctx.appPrincipalId ?? null,
 	});
 	const policy = await resolveConnectorPolicy({
 		organizationId: ctx.organizationId,

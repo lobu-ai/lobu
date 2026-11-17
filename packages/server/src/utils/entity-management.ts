@@ -35,10 +35,10 @@ import {
 	deferEntityFieldChange,
 	type DeferredMutation,
 	type MutationAttribution,
-	type MutationPrincipalKind,
 	runMutationGate,
 } from "../authz/entity-mutation-gate";
 import {
+	type EntityPolicyPrincipalKind,
 	mutationPrincipalId,
 	automationIdFromPrincipalId,
 } from "../authz/entity-policy";
@@ -286,7 +286,7 @@ interface EntityUpdateOptions {
 		after: CreatedEntity,
 		tx: DbClient,
 	) => Promise<void>;
-	policyPrincipalKind?: MutationPrincipalKind;
+	policyPrincipalKind?: EntityPolicyPrincipalKind;
 	/**
 	 * A declared view action invoked by the signed-in user. The caller
 	 * (`invokeViewAction`) authorized this write from the CURRENT view row, which
@@ -1336,7 +1336,7 @@ export async function updateEntity(
 			};
 		}
 		if (!isHumanEdit) {
-			const principalKind: MutationPrincipalKind =
+			const principalKind: EntityPolicyPrincipalKind =
 				opts?.policyPrincipalKind ?? "agent";
 			const fieldOwners = {
 				...(Object.fromEntries(

@@ -222,6 +222,8 @@ export interface AuthInfo {
   /** Issuing OAuth flow; absent on PATs and legacy OAuth rows. */
   authorizationGrantType?: 'authorization_code' | 'device_code' | null;
   clientId: string;
+  /** Connected-app policy key from `deriveAppPrincipalId`; set on OAuth access tokens and PATs. */
+  appPrincipalId?: string;
   /** The personal access token's own name; set only on a PAT. */
   tokenName?: string;
   scopes: string[];

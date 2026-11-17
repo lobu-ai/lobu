@@ -33,12 +33,32 @@ function serializeRule(policy: EntityApprovalPolicy) {
   };
 }
 
-async function readSnapshot(org: string, tx?: DbClient) {
+/** No query = the org rules; `principal_kind=app` (optionally with one app key) = rules for connected apps. */
+type CollectionPrincipal = { principalKind: "app" | null; principalId: string | null };
+
+const APP_KEY_PREFIXES = ["web:", "client:", "local:", "pat:"];
+
+function collectionPrincipal(c: Context): CollectionPrincipal | string {
+  const kind = c.req.query("principal_kind");
+  const id = c.req.query("principal_id");
+  if (kind === undefined) return id === undefined ? { principalKind: null, principalId: null } : "principal_id requires principal_kind=app.";
+  if (kind !== "app") return "principal_kind must be 'app'; agent rules are managed on the agent.";
+  if (id === undefined) return { principalKind: "app", principalId: null };
+  if (id.length > 255 || id.trim() !== id || !APP_KEY_PREFIXES.some(prefix => id.startsWith(prefix) && id.length > prefix.length)) {
+    return "principal_id must be an app key: web:<domain>, client:<id>, local:<name> or pat:<id>.";
+  }
+  return { principalKind: "app", principalId: id };
+}
+
+async function readSnapshot(org: string, principal: CollectionPrincipal, tx?: DbClient) {
   const policies = (await listEntityApprovalPolicies(org, "connector_action", tx))
-    .filter(p => p.principalKind === null && p.effects.execute !== undefined)
+    .filter(p => p.principalKind === principal.principalKind && (principal.principalKind === null || p.principalId === principal.principalId) &&
+      p.effects.execute !== undefined)
     .sort((a, b) => scopeKey(a).localeCompare(scopeKey(b)));
   // Include stored identity and delivery: changing either invalidates a previously reviewed plan.
-  const revision = createHash("sha256").update(JSON.stringify(policies.map(serializeEntityApprovalPolicy))).digest("hex");
+  // An app collection also binds its principal, so a plan cannot move between collections.
+  const reviewed = JSON.stringify(policies.map(serializeEntityApprovalPolicy));
+  const revision = createHash("sha256").update(principal.principalKind === null ? reviewed : JSON.stringify([principal, reviewed])).digest("hex");
   return { policies, revision, rules: policies.map(serializeRule) };
 }
 
@@ -46,7 +66,9 @@ async function readSnapshot(org: string, tx?: DbClient) {
 export async function readConnectorPolicyCollection(c: Context) {
   const denied = requireHumanWorkspaceAdmin(c, { acceptPolicyToken: true });
   if (denied) return denied;
-  const { revision, rules } = await readSnapshot(c.get("organizationId")!);
+  const principal = collectionPrincipal(c);
+  if (typeof principal === "string") return c.json({ error: "invalid_request", message: principal }, 400);
+  const { revision, rules } = await readSnapshot(c.get("organizationId")!, principal);
   return c.json({ revision, rules });
 }
 
@@ -55,6 +77,8 @@ export async function replaceConnectorPolicyCollection(c: Context) {
   const denied = requireHumanWorkspaceAdmin(c, { acceptPolicyToken: true });
   if (denied) return denied;
   const org = c.get("organizationId")!;
+  const principal = collectionPrincipal(c);
+  if (typeof principal === "string") return c.json({ error: "invalid_request", message: principal }, 400);
   let revision: string;
   let policies: EntityApprovalPolicyInput[];
   try {
@@ -77,7 +101,9 @@ export async function replaceConnectorPolicyCollection(c: Context) {
       const parsed = parsePolicy({ ...scope, resource_class: "connector_action", effects: { execute: effect } }, false);
       // The collection is the whole desired state, so an omitted note clears it.
       const checked = validatePolicyKindAndNote({ ...parsed, kind: kind as ConnectorPolicyKind | undefined, note: (note ?? null) as string | null });
-      const policy = { ...parsed, kind: checked.kind, note: checked.note ?? null };
+      // An app rule can only tighten what the app's user may do, so it is always a guardrail.
+      if (principal.principalKind === "app" && checked.kind !== "guardrail") throw new Error("A rule for an app must be a guardrail; use a workspace grant to allow.");
+      const policy = { ...parsed, ...principal, kind: checked.kind, note: checked.note ?? null };
       const key = scopeKey(policy);
       if (scopes.has(key)) throw new Error("Duplicate policy scope.");
       scopes.add(key);
@@ -86,7 +112,7 @@ export async function replaceConnectorPolicyCollection(c: Context) {
   } catch (error) {
     return c.json({ error: "invalid_request", message: (error as Error).message }, 400);
   }
-  const current = await readSnapshot(org);
+  const current = await readSnapshot(org, principal);
   if (revision !== current.revision) return c.json({ error: "policy_conflict", message: "Policies changed. Reload and review the current rules before applying." }, 409);
   const unchanged = new Map(current.policies.map(policy => [scopeKey(policy), policy.effects.execute]));
   // Retained rules survive catalog removal; new grants still need a live target.
@@ -97,14 +123,14 @@ export async function replaceConnectorPolicyCollection(c: Context) {
     if (targetError) return c.json({ error: "invalid_request", message: targetError }, 400);
   }
   const result = await withConnectorPolicyTransaction(org, async tx => {
-    const before = await readSnapshot(org, tx);
+    const before = await readSnapshot(org, principal, tx);
     if (revision !== before.revision) return c.json({ error: "policy_conflict", message: "Policies changed. Reload and review the current rules before applying." }, 409);
     const desired = new Set(policies.map(scopeKey));
     for (const policy of policies) await upsertEntityApprovalPolicy(org, policy, tx);
     for (const old of before.policies) {
       if (!desired.has(scopeKey(old))) await deleteEntityApprovalPolicy({ ...old, organizationId: org }, tx);
     }
-    const { revision: nextRevision, rules } = await readSnapshot(org, tx);
+    const { revision: nextRevision, rules } = await readSnapshot(org, principal, tx);
     return c.json({ revision: nextRevision, rules });
   });
   if (result.status === 200) invalidationEmitter.emit(org, { keys: ["write-permissions", "agent-permissions"] });

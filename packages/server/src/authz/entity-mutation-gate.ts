@@ -40,6 +40,7 @@
 
 import type { ApprovalAttribution } from "@lobu/core/contracts/interaction-envelope";
 import type { DbClient } from "../db/client";
+import type { EntityPolicyPrincipalKind } from "./entity-policy";
 import type { Env } from "../index";
 import type { ToolContext } from "../tools/registry";
 import type { EntityData } from "../utils/entity-management";
@@ -49,8 +50,6 @@ import {
 	buildFieldChangeDeferral,
 } from "./approval-interceptor";
 
-export type MutationPrincipalKind = "user" | "agent" | "automation";
-
 /** Attribution for a deferred (queued-for-approval) mutation. */
 export type MutationAttribution = ApprovalAttribution;
 
@@ -59,7 +58,7 @@ export type FieldOwner = "human" | "none";
 
 interface EntityMutationBase {
 	organizationId: string;
-	principalKind: MutationPrincipalKind;
+	principalKind: EntityPolicyPrincipalKind;
 	/** Caller's DbClient or open transaction — interceptors query policy on it. */
 	sql: DbClient;
 	/** Attribution + automation id used by an interceptor to label a deferral. */

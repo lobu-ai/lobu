@@ -1390,7 +1390,7 @@ export async function createConnectorOperationRun(params: {
    * approve time against the principal that queued it, not the approver (sol
    * review #5). Null for a human requester (no per-principal policy applies).
    */
-  policyPrincipalKind?: 'agent' | 'automation' | 'user' | null;
+  policyPrincipalKind?: 'agent' | 'automation' | 'user' | 'app' | null;
   policyPrincipalId?: string | null;
   /** Trusted user who initiated the operation, used for downstream visibility checks. */
   createdByUserId?: string | null;

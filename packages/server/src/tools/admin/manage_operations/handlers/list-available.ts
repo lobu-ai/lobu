@@ -731,6 +731,7 @@ export async function handleListAvailable(
     userId: ctx.userId,
     agentId: ctx.agentId,
     sessionAutomationId: ctx.actingAutomationId ?? null,
+    appId: ctx.appPrincipalId ?? null,
   });
 	// Apply policy to the complete catalog before pagination.
 	const catalogConnectorKey =
@@ -759,7 +760,8 @@ export async function handleListAvailable(
 		(targetsByConnector.get(operation.connector_key) ?? []).filter((target) =>
 			operation.discovery_connection_ids === undefined || operation.discovery_connection_ids.includes(target.connection_id),
 		);
-	const hideBlocked = actor.kind !== "user";
+	// An app acts with its user's authority, so like its user it still sees what it cannot run.
+	const hideBlocked = actor.kind !== "user" && actor.kind !== "app";
 	const policyVisible = full.operations.filter((operation) => {
 		if (!hideBlocked) return true;
 		const targets = operationTargets(operation);

@@ -602,6 +602,7 @@ export async function createExpiredAccessToken(
 // ============================================
 
 interface TestPAT {
+  id: number;
   token: string;
   userId: string;
   organizationId: string;
@@ -635,15 +636,16 @@ export async function createTestPAT(
   const tokenHash = hashToken(token);
   const tokenPrefix = token.substring(0, 12);
 
-  await sql`
+  const [row] = await sql<{ id: number }[]>`
     INSERT INTO personal_access_tokens (
       token_hash, token_prefix, user_id, organization_id, name, scope, created_at, updated_at
     ) VALUES (
       ${tokenHash}, ${tokenPrefix}, ${userId}, ${organizationId}, ${options?.name ?? 'Test PAT'}, ${options?.scope ?? null}, NOW(), NOW()
     )
+    RETURNING id
   `;
 
-  return { token, userId, organizationId };
+  return { id: Number(row.id), token, userId, organizationId };
 }
 
 // ============================================
