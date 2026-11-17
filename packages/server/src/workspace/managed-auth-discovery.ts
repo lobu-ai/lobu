@@ -1,12 +1,27 @@
 import { getDb, pgTextArray } from '../db/client';
 
+/**
+ * Slugs of the workspaces that lend their OAuth apps to other Lobu users
+ * (`LOBU_MANAGED_AUTH_ORGS`, comma-separated). Being public with an OAuth app
+ * is not enough: a public workspace with its own app is an ordinary workspace
+ * whose connections sync, so only a workspace named here is offered for
+ * `connect_managed` and has its OAuth grants stamped consent-only.
+ */
+export function managedAuthProviderSlugs(): string[] {
+  return (process.env.LOBU_MANAGED_AUTH_ORGS ?? '')
+    .split(',')
+    .map((slug) => slug.trim().toLowerCase())
+    .filter(Boolean);
+}
+
 interface ManagedAuthConnectorOffer {
   connector_key: string;
   provider: string;
 }
 
 /**
- * List OAuth connectors backed by an active managed app in public orgs.
+ * List OAuth connectors backed by an active managed app in the public
+ * workspaces named in `LOBU_MANAGED_AUTH_ORGS`.
  *
  * This mirrors runtime auth selection: only a connector whose first declared
  * oauth/env_keys/browser method is OAuth is offered. The profile resolver's
@@ -17,7 +32,8 @@ interface ManagedAuthConnectorOffer {
 export async function listManagedAuthConnectorOffers(
   organizationIds: string[],
 ): Promise<Map<string, ManagedAuthConnectorOffer[]>> {
-  if (organizationIds.length === 0) return new Map();
+  const providerSlugs = managedAuthProviderSlugs();
+  if (organizationIds.length === 0 || providerSlugs.length === 0) return new Map();
 
   const sql = getDb();
   const rows = (await sql`
@@ -43,6 +59,7 @@ export async function listManagedAuthConnectorOffers(
     WHERE d.organization_id = ANY(${pgTextArray(organizationIds)}::text[])
       AND d.status = 'active'
       AND o.visibility = 'public'
+      AND lower(o.slug) = ANY(${pgTextArray(providerSlugs)}::text[])
       AND preferred_method.method->>'type' = 'oauth'
       AND NULLIF(preferred_method.method->>'provider', '') IS NOT NULL
       AND EXISTS (

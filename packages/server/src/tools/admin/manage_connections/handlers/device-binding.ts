@@ -11,6 +11,7 @@ import {
   describeDeviceLastSeen,
 } from '../../../../utils/device-liveness';
 import type { ScopedConnectorDefinitionRow } from '../../../../catalog/connector-definitions';
+import { managedAuthProviderSlugs } from '../../../../workspace/managed-auth-discovery';
 
 // ============================================
 // Managed-connector detection (public-org delegation)
@@ -27,10 +28,11 @@ import type { ScopedConnectorDefinitionRow } from '../../../../catalog/connector
  * cloud never syncs a copy — the managed connector's data lives only on the
  * member's local instance.
  *
- * Signal (the cleanest available, no new schema): the org is public AND the
+ * Signal: the org is public, is named in `LOBU_MANAGED_AUTH_ORGS`, AND the
  * connector resolves to an org-level managed `oauth_app` profile for the OAuth
- * method's provider. We only mark consent-only on the OAuth path — env-key /
- * browser connectors aren't delegated this way.
+ * method's provider. Any other public workspace with its own OAuth app is an
+ * ordinary workspace whose connections sync. We only mark consent-only on the
+ * OAuth path — env-key / browser connectors aren't delegated this way.
  */
 export async function isManagedPublicOrgConnect(params: {
   organizationId: string;
@@ -39,9 +41,11 @@ export async function isManagedPublicOrgConnect(params: {
 }): Promise<boolean> {
   const sql = getDb();
   const orgRows = (await sql`
-    SELECT visibility FROM "organization" WHERE id = ${params.organizationId} LIMIT 1
-  `) as unknown as Array<{ visibility: string | null }>;
-  if (orgRows[0]?.visibility !== 'public') return false;
+    SELECT slug, visibility FROM "organization" WHERE id = ${params.organizationId} LIMIT 1
+  `) as unknown as Array<{ slug: string; visibility: string | null }>;
+  const org = orgRows[0];
+  if (org?.visibility !== 'public') return false;
+  if (!managedAuthProviderSlugs().includes(org.slug.toLowerCase())) return false;
 
   const managedApp = await getPrimaryAuthProfileForKind({
     organizationId: params.organizationId,

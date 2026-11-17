@@ -2,7 +2,8 @@
  * Managed-connector connection-token endpoint.
  *
  * Public-org managed connectors: a managed connector lives in a PUBLIC org
- * (`organization.visibility = 'public'`) with a managed `oauth_app`. A user
+ * (`organization.visibility = 'public'`) named in `LOBU_MANAGED_AUTH_ORGS`,
+ * with a managed `oauth_app`. A user
  * JOINS that org (a `member` row) and CONNECTS normally — consent against the
  * managed app mints a connection OWNED by them (`connections.created_by`). The
  * managed client secret + refresh token stay in the cloud and never leave it.

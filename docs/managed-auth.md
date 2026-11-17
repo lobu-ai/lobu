@@ -30,6 +30,12 @@ no feeds, so the cloud never syncs the user's data.
 A connector gains managed auth by being added to a public org's offer — there is
 no `managedBy` declaration in connector source.
 
+Only the public workspaces named in the server's `LOBU_MANAGED_AUTH_ORGS`
+(comma-separated slugs; prod sets `lobu-cloud`) make offers. Any other public
+workspace with its own OAuth app is an ordinary workspace: its connections are
+not consent-only and can sync. With the setting unset, no workspace offers
+managed auth.
+
 ### 2. Use it (every run, locally)
 
 The local connection opts in through its **config**, not through the connector:
@@ -95,7 +101,7 @@ The other failure shapes, so a 404 is not your only suspect:
 ## If the connector is not offered as managed
 
 Then there is no managed path, and adding one is a product decision (it publishes
-the connector to everyone who joins that public org, under Lobu's OAuth client,
+the connector to everyone who joins a public org named in `LOBU_MANAGED_AUTH_ORGS`, under Lobu's OAuth client,
 with whatever verification tier its scopes demand). For local development
 against such a connector, register the local callback on the provider's client
 instead:

@@ -14,11 +14,14 @@
  *      `config.consent_only = true` and has zero feeds.
  *   2. PRIVATE org with the same setup → an ordinary connection (no
  *      consent_only), so the managed-only rule is scoped to public orgs.
+ *   2b. PUBLIC org with its own app that is NOT named in
+ *      `LOBU_MANAGED_AUTH_ORGS` → an ordinary connection that can have feeds:
+ *      only a named provider workspace lends its app.
  *   3. The feed guard holds end-to-end: creating a feed on the resulting
  *      consent-only connection is rejected.
  */
 
-import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { Env } from '../../../index';
 import { manageConnections } from '../../../tools/admin/manage_connections';
 import { manageFeeds } from '../../../tools/admin/manage_feeds';
@@ -45,6 +48,8 @@ async function seedManagedConnector(opts: {
   /** Managed oauth_app state: 'active' (default) | 'revoked' | 'absent'. */
   appState?: 'active' | 'revoked' | 'absent';
   envCredentialKeys?: { clientId: string; clientSecret: string };
+  /** Name the org in LOBU_MANAGED_AUTH_ORGS (default true). */
+  provider?: boolean;
 }) {
   const appState = opts.appState ?? 'active';
   const { org, user, ctx } = await seedOwnerContext({
@@ -52,6 +57,7 @@ async function seedManagedConnector(opts: {
     userName: 'Connecting Member',
     visibility: opts.visibility,
   });
+  if (opts.provider ?? true) process.env.LOBU_MANAGED_AUTH_ORGS = org.slug;
 
   const connectorKey = 'demo.oauth';
   await createTestConnectorDefinition({
@@ -99,6 +105,10 @@ describe('Stage 3 — managed-connect creates a consent-only connection', () => 
 
   beforeEach(async () => {
     await cleanupTestDatabase();
+  });
+
+  afterEach(() => {
+    delete process.env.LOBU_MANAGED_AUTH_ORGS;
   });
 
   it('a managed connector in a PUBLIC org yields a consent_only connection with no feeds', async () => {
@@ -196,6 +206,54 @@ describe('Stage 3 — managed-connect creates a consent-only connection', () => 
     // Not a public org → not managed → no consent_only marking.
     expect(connRows[0]?.config?.consent_only).toBeUndefined();
   });
+
+  it.each([
+    ['its own active OAuth app', 'active'],
+    ['an app provisioned from server env on first connect', 'absent'],
+  ] as const)(
+    'a PUBLIC org not named in LOBU_MANAGED_AUTH_ORGS with %s is an ordinary connection that can have feeds',
+    async (_label, appState) => {
+      const envCredentialKeys = {
+        clientId: 'ORDINARY_PUBLIC_CLIENT_ID',
+        clientSecret: 'ORDINARY_PUBLIC_CLIENT_SECRET',
+      };
+      const { ctx, connectorKey } = await seedManagedConnector({
+        visibility: 'public',
+        appState,
+        envCredentialKeys,
+        provider: false,
+      });
+      process.env.LOBU_MANAGED_AUTH_ORGS = 'some-other-provider';
+      process.env[envCredentialKeys.clientId] = 'ordinary-client';
+      process.env[envCredentialKeys.clientSecret] = 'ordinary-secret';
+
+      try {
+        const result = (await manageConnections(
+          { action: 'connect', connector_key: connectorKey },
+          TEST_ENV,
+          ctx
+        )) as { connection_id?: number; error?: string };
+        expect(result.error).toBeUndefined();
+        expect(result.connection_id).toBeDefined();
+
+        const sql = getTestDb();
+        const connRows = (await sql`
+          SELECT config FROM connections WHERE id = ${result.connection_id} LIMIT 1
+        `) as unknown as Array<{ config: Record<string, unknown> | null }>;
+        expect(connRows[0]?.config?.consent_only).toBeUndefined();
+
+        const feedResult = (await manageFeeds(
+          { action: 'create_feed', connection_id: result.connection_id, feed_key: 'items' },
+          TEST_ENV,
+          ctx
+        )) as { error?: string };
+        expect(feedResult.error).toBeUndefined();
+      } finally {
+        delete process.env[envCredentialKeys.clientId];
+        delete process.env[envCredentialKeys.clientSecret];
+      }
+    }
+  );
 
   it('a PUBLIC org whose managed oauth_app is REVOKED is NOT treated as managed (no consent_only connection)', async () => {
     // T3: the public-org signal alone is not enough — there must be an ACTIVE
