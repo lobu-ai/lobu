@@ -5285,7 +5285,11 @@ export type ManageOperationsData = {
         /**
          * Filter by operation backend type
          */
-        backend?: "local_action" | "mcp_tool" | "http_operation";
+        backend?:
+          | "local_action"
+          | "mcp_tool"
+          | "http_operation"
+          | "chat_transport";
         /**
          * Data-driven search over connector name/key, operation name/key, description, and input-schema property names/terms. A query like 'github create issue' returns matching capabilities across every installed connector (including ones with no connection yet).
          */
