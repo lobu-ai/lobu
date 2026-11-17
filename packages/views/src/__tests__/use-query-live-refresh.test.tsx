@@ -446,6 +446,10 @@ describe("useQuery live refresh", () => {
       await tick();
     });
     expect(parent.toolsCalls()).toHaveLength(2);
+    await act(async () => {
+      answer(parent.toolsCalls()[1], 2);
+      await tick();
+    });
   });
 
   test("a committed action reads immediately inside the refresh window", async () => {
@@ -494,5 +498,9 @@ describe("useQuery live refresh", () => {
       return params?.name === "query_sdk";
     });
     expect(reads).toHaveLength(3);
+    await act(async () => {
+      answer(reads[2], 3);
+      await tick();
+    });
   });
 });

@@ -120,6 +120,18 @@ function shownPart(element: HTMLElement, box: Box): Box {
 /** Longest a transition or animation keeps the per-frame sync running. */
 const MOTION_LIMIT_MS = 5_000;
 
+/** rAF is absent outside a browser (jsdom, SSR); a timeout keeps the
+ *  scheduler measuring instead of throwing from inside a MutationObserver. */
+const requestFrame = (callback: FrameRequestCallback): number =>
+  typeof requestAnimationFrame === "function"
+    ? requestAnimationFrame(callback)
+    : (setTimeout(() => callback(performance.now()), 16) as unknown as number);
+
+const cancelFrame = (id: number): void => {
+  if (typeof cancelAnimationFrame === "function") cancelAnimationFrame(id);
+  else clearTimeout(id as unknown as ReturnType<typeof setTimeout>);
+};
+
 /**
  * The slots of one frame. A change that can move a slot — the page's DOM, a
  * resize, any scroll, an image load, a transition or animation — schedules
@@ -229,7 +241,7 @@ export class EmbedRegistry {
       observer?.disconnect();
       mutations?.disconnect();
       this.observer = null;
-      if (this.frame) cancelAnimationFrame(this.frame);
+      if (this.frame) cancelFrame(this.frame);
       this.frame = 0;
     };
   }
@@ -291,7 +303,7 @@ export class EmbedRegistry {
 
   schedule(): void {
     if (this.frame || this.unsupported || !this.connected) return;
-    this.frame = requestAnimationFrame(() => {
+    this.frame = requestFrame(() => {
       this.frame = 0;
       void this.sync();
       // Mid-motion a slot moves every frame without any other signal.
