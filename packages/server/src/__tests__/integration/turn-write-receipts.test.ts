@@ -466,6 +466,15 @@ describe('send_message: a reply in the asking conversation vs a post elsewhere',
     expect(posted).not.toHaveBeenCalled();
   });
 
+  it('a post elsewhere to a bound channel with no rule is sent', async () => {
+    const res = await call('/internal/conversations/send', (await turn('p3-norule-1')).token, { target: channelTarget, text: 'no rule' });
+    const body = await res.json();
+    expect(res.status, JSON.stringify(body)).toBe(200);
+    expect(body).toMatchObject({ deliveredInBand: false, run_id: expect.any(Number) });
+    expect(posted).toHaveBeenCalledTimes(1);
+    expect((await sendRuns()).find((run) => run.id === body.run_id)).toMatchObject({ status: 'completed', approval_status: 'auto' });
+  });
+
   it('an allowed post elsewhere is sent and recorded as a completed run', async () => {
     await rule('auto');
     const res = await call('/internal/conversations/send', (await turn('p3-auto-1')).token, { target: channelTarget, text: 'allowed' });
