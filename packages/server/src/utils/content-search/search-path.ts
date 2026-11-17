@@ -8,7 +8,7 @@ import type { Env } from '../../index';
 import { type DbClient, pgTextArray } from '../../db/client';
 import { incrementCounter } from '../../gateway/metrics/prometheus';
 import { boundedQuery, boundedRead, cancellable } from '../bounded-read';
-import { CONTENT_READ_STATEMENT_TIMEOUT_MS } from '../content-read-bounds';
+import { CONTENT_READ_STATEMENT_TIMEOUT_MS, CONTENT_RECALL_SNIPPET_CHARS } from '../content-read-bounds';
 import {
   buildConnectionFilter,
   buildFeedFilter,
@@ -160,6 +160,34 @@ export async function selectFulltextCandidateTsquery(
   const words = selectCandidateWords(tokens, frequencies, budget);
   return words.length > 0 ? words.join(' | ') : null;
 }
+
+// This projection runs after result_set's limit, never while finding/ranking
+// candidates. A body-weight intersection keeps absent or title-only query terms
+// from making the headline's AND query fall back to the document head.
+// Headline word limits do not bound characters: the private marker lets us
+// retain the first matched word even after a very long preceding token.
+const RECALL_SNIPPET_SQL = `CASE WHEN f.content_length > ${CONTENT_RECALL_SNIPPET_CHARS} AND length($1) > 0 THEN (
+  WITH body_words AS MATERIALIZED (
+    SELECT tsvector_to_array(ts_filter(f.search_tsv, '{B}'::"char"[])) AS words
+  ), matched_query AS MATERIALIZED (
+    SELECT string_agg(quote_literal(q.word), ' & ')::tsquery AS query
+    FROM unnest(tsvector_to_array(to_tsvector('english', $1))) q(word), body_words b
+    WHERE q.word = ANY(b.words)
+  ), marker AS MATERIALIZED (
+    SELECT gen_random_uuid()::text AS value
+  ), headline AS MATERIALIZED (
+    SELECT ts_headline('english', f.payload_text, q.query,
+      'MaxFragments=1,MaxWords=45,MinWords=10,StartSel="' || m.value || '",StopSel=""') AS text,
+      m.value AS marker
+    FROM matched_query q, marker m
+    WHERE q.query IS NOT NULL AND strpos(f.payload_text, m.value) = 0
+  )
+  SELECT left(
+    replace(substring(h.text FROM greatest(1, strpos(h.text, h.marker) - 100)), h.marker, ''),
+    ${CONTENT_RECALL_SNIPPET_CHARS}
+  )
+  FROM headline h WHERE strpos(h.text, h.marker) > 0
+) END`;
 
 export async function searchContentBySingleQuery(
   sql: DbClient,
@@ -494,7 +522,9 @@ export async function searchContentBySingleQuery(
 
   const searchFinalSelect = buildFinalSelect({
     withClassifications: !!needClassifications,
-    extraColumns: searchExtraColumns,
+    extraColumns: searchExtraColumns + (options.include_recall_snippet
+      ? `, ${RECALL_SNIPPET_SQL} AS recall_snippet`
+      : ''),
     orderBy: orderByExpr,
   });
 

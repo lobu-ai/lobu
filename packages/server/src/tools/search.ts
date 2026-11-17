@@ -37,6 +37,7 @@ import {
   connectionLinkedToBusinessEntitySql,
 } from '../authz/channel-about';
 import { entityLinkMatchSql, searchContentByText } from '../utils/content-search';
+import { CONTENT_RECALL_SNIPPET_CHARS } from '../utils/content-read-bounds';
 import { resolveBoundChannelRows, stripPlatformPrefix } from '../gateway/channels/bound-channels';
 import { filterChannelsForRequester } from '../authz/channel-visibility';
 import { redactConnectionRows } from '../utils/connection-config-redaction';
@@ -1096,6 +1097,7 @@ async function fetchContentSnippets(
       // default is a chronological date feed).
       sort_by: 'score',
       approximate_candidate_search: true,
+      include_recall_snippet: true,
       // Recall discards `total` and only needs the top snippets: skip the
       // unbounded `full_count` over all workspace events.
       include_total: false,
@@ -1112,6 +1114,10 @@ async function fetchContentSnippets(
     // keep the (non-nullable) `text_content` schema field honest: "" is the
     // correct representation of no text, so structuredContent stays valid.
     const text = c.payload_text ?? '';
+    // Postgres counts code points; preserve the existing UTF-16 response cap
+    // without ending a passage on half of a surrogate pair.
+    const passage = c.recall_snippet?.slice(0, CONTENT_RECALL_SNIPPET_CHARS)
+      .replace(/[\uD800-\uDBFF]$/, '');
     // `platform` is COALESCE(events.connector_key, connections.connector_key):
     // system rows (e.g. "Connection needs authorization") have neither, so it
     // can be null. Fall back to 'lobu' — same as toExactContentSnippet — to
@@ -1120,7 +1126,11 @@ async function fetchContentSnippets(
     return {
       id: c.id,
       title: c.title,
-      text_content: text.length > 500 ? `${text.slice(0, 500)}...` : text,
+      text_content: passage != null
+        ? `…${passage}…`
+        : text.length > CONTENT_RECALL_SNIPPET_CHARS
+          ? `${text.slice(0, CONTENT_RECALL_SNIPPET_CHARS)}...`
+          : text,
       author_name: c.author_name,
       source_url: c.source_url,
       platform,
