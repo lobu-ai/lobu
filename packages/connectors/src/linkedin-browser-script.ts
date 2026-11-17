@@ -11,3 +11,14 @@ export function linkedInScriptArgument(value: unknown): string {
   // Parsing also preserves JSON object keys such as __proto__ as plain data.
   return `JSON.parse(${literal})`;
 }
+
+/** LinkedIn origins a scrape window or action tab is allowed to touch. */
+export const LINKEDIN_ALLOWED_ORIGINS = ["linkedin.com", "*.linkedin.com"];
+
+/** A landed path that means the paired Chrome is signed out. */
+export const LINKEDIN_LOGGED_OUT_WHEN = {
+  pathRegex: "/(login|authwall|uas/login|checkpoint|signup)\\b",
+} as const;
+
+export const LINKEDIN_LOGGED_OUT_ERROR =
+  "Not logged into LinkedIn. Sign in to linkedin.com in the paired Chrome profile, then retry.";

@@ -150,6 +150,8 @@ function assertExpectedScrapeSite(
  * it selects that site's sticky anchor and serializes work on that anchor.
  * There is no way to target a user's own tab: the extension refuses any scrape
  * against a tab it does not lease or hold as that site's anchor.
+ * `focus` brings the scrape to the front: a page that lazy-loads on scroll
+ * stops loading in a window Chrome is not drawing.
  */
 export async function extensionDomScrape<TItem>(opts: {
   dispatcher: ChromeActionDispatcher;
@@ -164,6 +166,9 @@ export async function extensionDomScrape<TItem>(opts: {
     cs_scrape: true,
     persistent: opts.persistent ?? false,
     focus: opts.focus ?? false,
+    // The extension reads `window_focused` for a one-shot scrape window and
+    // `focus` for a persistent tab.
+    window_focused: opts.focus ?? false,
     url: opts.url,
     scrape_config: opts.config,
     allowed_origins: opts.allowedOrigins,

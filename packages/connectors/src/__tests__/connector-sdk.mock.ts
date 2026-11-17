@@ -284,6 +284,7 @@ export function connectorSdkMock() {
         cs_scrape: true,
         persistent: opts.persistent ?? false,
         focus: opts.focus ?? false,
+        window_focused: opts.focus ?? false,
         url: opts.url,
         scrape_config: opts.config,
         allowed_origins: opts.allowedOrigins,

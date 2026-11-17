@@ -2043,7 +2043,7 @@ describe("LinkedInConnector home_feed", () => {
       actionTextRegex: "^Copy link(?: to post)?$",
     });
     expect(cfg.fields.post_media.take).toBe("objectAll");
-    expect(cfg.fields.post_media.selector).toContain("profile-displayphoto");
+    expect(cfg.fields.post_media.selector).toContain('[src*="/profile-"]');
     expect(cfg.fields.comment_media.take).toBe("objectAll");
     expect(cfg.fields.reaction_count_text.selector).toContain(
       "social-details-social-counts"
@@ -3495,7 +3495,7 @@ describe("prepare_comment helpers", () => {
     expect(action?.inputSchema?.properties).not.toHaveProperty(
       "browser_connection_id"
     );
-    expect(c.definition.version).toBe("3.23.0");
+    expect(c.definition.version).toBe("3.24.0");
     expect(String(action?.description ?? "")).toMatch(
       /NEVER opens a tab or submits/i
     );
