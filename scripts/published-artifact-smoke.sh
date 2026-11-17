@@ -368,41 +368,44 @@ fi
 #    different packaging path from the worker bundle above, and the one every
 #    MCP client (Claude, ChatGPT, the SDK) actually talks to.
 # ---------------------------------------------------------------------------
-note "MCP (memory server + admin tool dispatch) from the installed artifact"
+note "MCP memory server and REST admin tools from the installed artifact"
 
 MCP_OUT="$WORK/mcp.log"
 
 ( cd "$PROJ" && timeout 60 "$LOBU_BIN" memory health -c local ) > "$MCP_OUT" 2>&1
-if grep -qF "ok: true" "$MCP_OUT"; then
+MCP_RC=$?
+if [ "$MCP_RC" -eq 0 ] && grep -qF "ok: true" "$MCP_OUT"; then
   pass "lobu memory health (MCP server reachable)"
 else
-  fail "lobu memory health did not report ok"; tail -15 "$MCP_OUT" >&2
+  fail "lobu memory health failed or did not report ok (exit=$MCP_RC)"; tail -15 "$MCP_OUT" >&2
 fi
 
 # Listing tools proves the server registered its tool schemas, not merely that
 # the process is up — an empty registry still answers a health check.
 ( cd "$PROJ" && timeout 60 "$LOBU_BIN" memory run -c local ) > "$MCP_OUT" 2>&1
-if grep -qE "[0-9]+ tool\(s\)" "$MCP_OUT"; then
+MCP_RC=$?
+if [ "$MCP_RC" -eq 0 ] && grep -qE '^[[:space:]]*[1-9][0-9]* tool\(s\)[[:space:]]*$' "$MCP_OUT"; then
   pass "lobu memory run (tools registered: $(grep -oE '[0-9]+ tool\(s\)' "$MCP_OUT" | head -1))"
 else
-  fail "lobu memory run listed no tools"; tail -15 "$MCP_OUT" >&2
+  fail "lobu memory run failed or listed no tools (exit=$MCP_RC)"; tail -15 "$MCP_OUT" >&2
 fi
 
-# A real tool INVOCATION, not just discovery — round-trips request and response
-# through the MCP transport.
+# The local context dispatches this admin command through the REST API. The
+# daemon harness below separately exercises real MCP memory tool invocations.
 ( cd "$PROJ" && timeout 60 "$LOBU_BIN" call manage_feeds -c local --arg "action=list_feeds" ) > "$MCP_OUT" 2>&1
 MCP_RC=$?
 if [ "$MCP_RC" -eq 0 ]; then
-  pass "lobu call manage_feeds list_feeds (MCP tool invocation)"
+  pass "lobu call manage_feeds list_feeds (REST tool invocation)"
 else
-  fail "MCP tool invocation failed (exit=$MCP_RC)"; tail -15 "$MCP_OUT" >&2
+  fail "REST tool invocation failed (exit=$MCP_RC)"; tail -15 "$MCP_OUT" >&2
 fi
 
 ( cd "$PROJ" && timeout 60 "$LOBU_BIN" call --list -c local ) > "$MCP_OUT" 2>&1
-if grep -qE "tool\(s\)" "$MCP_OUT"; then
+MCP_RC=$?
+if [ "$MCP_RC" -eq 0 ] && grep -qE '^[[:space:]]*[1-9][0-9]* tool\(s\)[[:space:]]*$' "$MCP_OUT"; then
   pass "lobu call --list (admin tool surface)"
 else
-  fail "lobu call --list exposed no tools"; tail -15 "$MCP_OUT" >&2
+  fail "lobu call --list failed or exposed no tools (exit=$MCP_RC)"; tail -15 "$MCP_OUT" >&2
 fi
 
 # The CLI quickstart above exercises an agent worker. Device command execution
