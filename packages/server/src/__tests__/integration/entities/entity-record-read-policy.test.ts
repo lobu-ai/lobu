@@ -234,6 +234,13 @@ describe('per-record entity read envelope', () => {
     });
     await h.deny(deniedPlace);
     const created = await h.human.automations.create({ slug: 'sql-read-block', prompt: 'Anything.', managed_agent_id: h.principal.agentId }) as { automation_id: string };
+    // The Automation's lifecycle event is written fire-and-forget after create
+    // returns; snapshot the org's events only once it has landed.
+    await vi.waitFor(async () => {
+      const [row] = await getTestDb()`
+        SELECT 1 FROM events WHERE organization_id = ${h.workspace.org.id} AND origin_type = 'automation_created'`;
+      expect(row).toBeDefined();
+    });
     const base = {
       organizationId: h.workspace.org.id, userId: h.workspace.users.owner.id, memberRole: 'owner', agentId: h.principal.agentId,
       isAuthenticated: true, clientId: null, scopes: ['mcp:read', 'mcp:write'], tokenType: 'oauth', scopedToOrg: true, allowCrossOrg: false,
