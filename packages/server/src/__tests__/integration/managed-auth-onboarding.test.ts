@@ -4,7 +4,7 @@
  * managed OAuth offer, joins it, and creates their own consent-only grant.
  */
 
-import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { localSetupOption, publicSetupOptions } from '../../connect/setup-options';
 import { primeAppInstallationMethods, getPrimedBundledMethod } from '../../gateway/installation/app-install-credentials';
 import { setupRoutes } from '../../connect/setup-routes';
@@ -133,6 +133,11 @@ describe('managed-auth onboarding', () => {
 
   beforeEach(async () => {
     await cleanupTestDatabase();
+    process.env.LOBU_MANAGED_AUTH_ORGS = 'managed-connectors';
+  });
+
+  afterEach(() => {
+    delete process.env.LOBU_MANAGED_AUTH_ORGS;
   });
 
   it('offers a configured bundled app before the catalog connector is installed', async () => {

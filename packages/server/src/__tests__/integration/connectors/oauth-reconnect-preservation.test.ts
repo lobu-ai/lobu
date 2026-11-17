@@ -86,7 +86,7 @@ async function waitForBlockedQueries(table: 'account' | 'auth_profiles' | 'conne
 
 describe('OAuth reconnect preserves the existing connection until consent', () => {
   beforeAll(async () => { await cleanupTestDatabase(); await initWorkspaceProvider(); });
-  afterEach(() => { globalThis.fetch = originalFetch; });
+  afterEach(() => { globalThis.fetch = originalFetch; delete process.env.LOBU_MANAGED_AUTH_ORGS; });
 
   it.each(['owner', 'provider'] as const)('rejects a mismatched grant %s before creating or updating a profile', async (target) => {
     const s = await seed();
@@ -325,6 +325,7 @@ describe('OAuth reconnect preserves the existing connection until consent', () =
     const sql = getTestDb();
     const before = await state(s.connection.id);
     await sql`UPDATE "organization" SET visibility = 'public' WHERE id = ${s.org.id}`;
+    process.env.LOBU_MANAGED_AUTH_ORGS = s.org.slug;
     await sql`UPDATE auth_profiles SET is_default_for_connector = false WHERE id = ${s.otherApp.id}`;
     await sql`UPDATE auth_profiles SET is_default_for_connector = true WHERE id = ${s.app.id}`;
     const args = { connector_key: KEY, managed_by_org: s.org.slug };

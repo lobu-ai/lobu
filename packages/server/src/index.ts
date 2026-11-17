@@ -600,7 +600,8 @@ app.route("/connect", connectRoutes);
 
 /**
  * Managed-connector connection-token route — PAT-gated. A managed connector
- * lives in a PUBLIC org with a managed `oauth_app`; a user joins it and
+ * lives in a PUBLIC org named in `LOBU_MANAGED_AUTH_ORGS` with a managed
+ * `oauth_app`; a user joins it and
  * connects normally (a connection owned by them). Their LOCAL Lobu fetches a
  * fresh access token for its OWN user's connection via POST
  * /oauth/connection-token, authenticating with the user's cloud PAT. The
