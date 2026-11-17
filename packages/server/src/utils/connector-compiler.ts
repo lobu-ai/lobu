@@ -12,6 +12,7 @@ import { type CompileResult, computeCodeHash, extractMetadata } from './compiler
 import { isReservedConnectorKey } from './reserved';
 import { validateConnectorRelationshipDeclarations } from './connector-relationship-declarations';
 import { connectorIdentityScopeDeclarations } from './connector-identity-scopes';
+import { validateConnectorLookupDeclarations } from './connector-lookup-declarations';
 
 export interface ConnectorMetadata {
   key: string;
@@ -244,4 +245,5 @@ export function validateConnectorMetadata(metadata: ConnectorMetadata): void {
   }
   connectorIdentityScopeDeclarations(metadata);
   validateConnectorRelationshipDeclarations(metadata);
+  validateConnectorLookupDeclarations(metadata);
 }

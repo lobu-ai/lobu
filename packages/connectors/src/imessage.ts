@@ -726,6 +726,7 @@ export default class IMessageConnector extends ConnectorRuntime {
             minLength: 1,
             maxLength: MAX_SEND_LENGTH,
             description: 'Message body to send.',
+            'x-multiline': true,
           },
         },
         ['text'],

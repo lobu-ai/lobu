@@ -113,14 +113,10 @@ export abstract class ConnectorChatAdapter<Row>
    */
   abstract parseSourceRow(row: Record<string, unknown>): ConnectorChatSourceMessage<Row>;
   /**
-   * The connector's `send_message` input for one reply. `idempotencyKey` is the
-   * operation's key, for connectors whose send also dedupes on its own input.
+   * The connector's `send_message` input for one reply. A send dedupes on its
+   * operation run, which the reply's idempotency key keeps the same on retry.
    */
-  protected abstract sendInput(
-    chatId: string,
-    text: string,
-    idempotencyKey: string,
-  ): Record<string, unknown>;
+  protected abstract sendInput(chatId: string, text: string): Record<string, unknown>;
   /** The raw row a completed `send_message` stands for; its `id` is the raw message id. */
   protected abstract sentRow(
     chatId: string,
@@ -225,7 +221,7 @@ export abstract class ConnectorChatAdapter<Row>
       const key = index === 0 ? idempotencyKey : `${idempotencyKey}:${index}`;
       const outcome = await this.options.execute({
         operationKey: "send_message",
-        input: this.sendInput(chatId, part, key),
+        input: this.sendInput(chatId, part),
         idempotencyKey: key,
       });
       if (outcome.status !== "completed") {

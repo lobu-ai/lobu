@@ -303,7 +303,7 @@ export default class HerdrConnector extends ConnectorRuntime {
         'write',
         {
           target,
-          text: { type: 'string', minLength: 1, maxLength: 10000 },
+          text: { type: 'string', minLength: 1, maxLength: 10000, 'x-multiline': true },
           wait: { type: 'boolean', default: false },
           timeout_ms: timeout,
           until,

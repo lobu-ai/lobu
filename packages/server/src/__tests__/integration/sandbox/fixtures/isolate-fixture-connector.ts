@@ -71,7 +71,7 @@ export default class IsolateFixtureConnector extends ConnectorRuntime<Record<str
 			return { success: true, output: { observation } };
 		}
 		if (ctx.actionKey === "fail") return { success: false, error: "fixture action failed" };
-		return { success: true, output: { echoed: ctx.input, configKeys: Object.keys(ctx.config).sort() } };
+		return { success: true, output: { echoed: ctx.input, configKeys: Object.keys(ctx.config).sort(), runId: ctx.run.id } };
 	}
 
 	async authenticate(ctx: AuthContext): Promise<AuthResult> {

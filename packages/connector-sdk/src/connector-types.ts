@@ -1429,6 +1429,8 @@ export interface ActionContext {
   browser?: ChromeActionDispatcher;
   /** Action key to execute */
   actionKey: string;
+  /** The operation run executing this action. Stable across retries and re-claims of the same run. */
+  run: { id: string };
   /** Action input parameters */
   input: Record<string, unknown>;
   /** OAuth credentials (if applicable) */

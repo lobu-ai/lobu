@@ -353,9 +353,14 @@ function read(dispatcher: unknown, extra: Record<string, unknown> = {}) {
 	});
 }
 
-function send(dispatcher: unknown, input: Record<string, unknown>) {
+// `run` stands for the operation run executing the send (ctx.run.id).
+function send(
+	dispatcher: unknown,
+	{ run = "synthetic-run", ...input }: Record<string, unknown>,
+) {
 	return connector().execute({
 		actionKey: "send_message",
+		run: { id: String(run) },
 		sessionState: { account_id: SELF },
 		input,
 		credentials: null,
@@ -397,14 +402,13 @@ describe("X live_messages contract", () => {
 		});
 	});
 
-	test("send_message is a DM-only write that requires an idempotency key", () => {
+	test("send_message is a DM-only write keyed on its operation run", () => {
 		const action = connector().definition.actions.send_message;
 		expect(action.kind).toBe("write");
-		expect(action.inputSchema.required).toEqual([
-			"conversation_id",
-			"text",
-			"idempotency_key",
-		]);
+		expect(action.inputSchema.required).toEqual(["conversation_id", "text"]);
+		// A caller still passing the removed input-level key fails the schema.
+		expect(action.inputSchema.additionalProperties).toBe(false);
+		expect(action.inputSchema.properties.idempotency_key).toBeUndefined();
 		expect(action.description).toContain("prepare_reply");
 		expect(action.annotations.idempotentHint).toBe(false);
 	});
@@ -660,7 +664,7 @@ describe("X live_messages observe", () => {
 		const result = await send(browser.dispatcher, {
 			conversation_id: DM,
 			text: "synthetic",
-			idempotency_key: "synthetic-wrong-account",
+			run: "synthetic-wrong-account",
 		});
 		expect(result.success).toBe(false);
 		expect(result.error).toMatch(/account/);
@@ -961,7 +965,7 @@ describe("X send_message", () => {
 		const result = await send(page(x).dispatcher, {
 			conversation_id: DM,
 			text: "thanks for writing",
-			idempotency_key: "synthetic-op-1",
+			run: "synthetic-op-1",
 		});
 		expect(result).toMatchObject({
 			success: true,
@@ -984,14 +988,14 @@ describe("X send_message", () => {
 		);
 	});
 
-	test("deduplicates a retry whose request id is still on the latest page", async () => {
+	test("deduplicates a retry of the same run whose request id is still on the latest page", async () => {
 		const x = fakeX();
 		seed(x);
 		const { dispatcher } = page(x);
 		const input = {
 			conversation_id: DM,
 			text: "only once",
-			idempotency_key: "synthetic-op-2",
+			run: "synthetic-op-2",
 		};
 		await send(dispatcher, input);
 		const retry = await send(dispatcher, input);
@@ -1001,8 +1005,8 @@ describe("X send_message", () => {
 			message_id: "9001",
 		});
 		expect(x.sends()).toHaveLength(1);
-		// A different key is a different send.
-		await send(dispatcher, { ...input, idempotency_key: "synthetic-op-3" });
+		// A new run is a different send under a different request id.
+		await send(dispatcher, { ...input, run: "synthetic-op-3" });
 		expect(x.sends()).toHaveLength(2);
 	});
 
@@ -1016,7 +1020,7 @@ describe("X send_message", () => {
 			send(browser.dispatcher, {
 				conversation_id: DM,
 				text: "join here https://example.com/link",
-				idempotency_key: "synthetic-over-capacity",
+				run: "synthetic-over-capacity",
 			}),
 		);
 		expect(result).toMatchObject({
@@ -1047,7 +1051,7 @@ describe("X send_message", () => {
 			send(browser.dispatcher, {
 				conversation_id: DM,
 				text: "join here https://example.com/link",
-				idempotency_key: "synthetic-over-capacity-landed",
+				run: "synthetic-over-capacity-landed",
 			}),
 		);
 		expect(result).toMatchObject({
@@ -1073,7 +1077,7 @@ describe("X send_message", () => {
 			send(browser.dispatcher, {
 				conversation_id: DM,
 				text: "synthetic reply",
-				idempotency_key: "synthetic-retry-account-switch",
+				run: "synthetic-retry-account-switch",
 			}),
 		);
 		expect(result.success).toBe(false);
@@ -1113,7 +1117,7 @@ describe("X send_message", () => {
 				send(browser.dispatcher, {
 					conversation_id: DM,
 					text: "synthetic reply",
-					idempotency_key: "synthetic-retry-deadline",
+					run: "synthetic-retry-deadline",
 				}),
 			);
 			expect(result.success).toBe(false);
@@ -1138,7 +1142,7 @@ describe("X send_message", () => {
 			send(browser.dispatcher, {
 				conversation_id: DM,
 				text: "synthetic reply",
-				idempotency_key: "synthetic-non-retryable",
+				run: "synthetic-non-retryable",
 			}),
 		);
 		expect(result.success).toBe(false);
@@ -1163,7 +1167,7 @@ describe("X send_message", () => {
 			send(browser.dispatcher, {
 				conversation_id: DM,
 				text: "synthetic reply",
-				idempotency_key: "synthetic-uncertain-delivery",
+				run: "synthetic-uncertain-delivery",
 			}),
 		);
 		expect(result.success).toBe(false);
@@ -1185,7 +1189,7 @@ describe("X send_message", () => {
 			send(browser.dispatcher, {
 				conversation_id: DM,
 				text: "join here https://example.com/link",
-				idempotency_key: "synthetic-over-capacity-exhausted",
+				run: "synthetic-over-capacity-exhausted",
 			}),
 		);
 		expect(result.success).toBe(false);
@@ -1203,7 +1207,7 @@ describe("X send_message", () => {
 		const result = await send(browser.dispatcher, {
 			conversation_id: DM,
 			text: "hi",
-			idempotency_key: "synthetic-switched",
+			run: "synthetic-switched",
 		});
 		expect(result.success).toBe(false);
 		expect(result.error).toContain("account changed");
@@ -1217,7 +1221,7 @@ describe("X send_message", () => {
 		const input = {
 			conversation_id: DM,
 			text: "only once",
-			idempotency_key: "synthetic-op-4",
+			run: "synthetic-op-4",
 		};
 		await send(dispatcher, input);
 		const retry = await send(dispatcher, input);
@@ -1232,7 +1236,7 @@ describe("X send_message", () => {
 		const result = await send(page(x).dispatcher, {
 			conversation_id: DM,
 			text: "unseen",
-			idempotency_key: "synthetic-op-5",
+			run: "synthetic-op-5",
 		});
 		expect(result.success).toBe(false);
 		expect(result.error).toContain("not visible");
@@ -1243,7 +1247,7 @@ describe("X send_message", () => {
 		const result = await send(page(x).dispatcher, {
 			conversation_id: "4000-5000",
 			text: "hi",
-			idempotency_key: "synthetic-op-6",
+			run: "synthetic-op-6",
 		});
 		expect(result.success).toBe(false);
 		expect(result.error).toContain("does not belong");
@@ -1255,18 +1259,19 @@ describe("X send_message", () => {
 		const result = await send(page(x).dispatcher, {
 			conversation_id: `${SELF}-7777`,
 			text: "hi",
-			idempotency_key: "synthetic-op-7",
+			run: "synthetic-op-7",
 		});
 		expect(result.success).toBe(false);
 		expect(result.error).toContain("HTTP 404");
 		expect(x.sends()).toHaveLength(0);
 	});
 
-	test("requires an idempotency key", async () => {
+	test("requires a run id", async () => {
 		const x = fakeX();
 		const result = await send(page(x).dispatcher, {
 			conversation_id: DM,
 			text: "hi",
+			run: "",
 		});
 		expect(result.success).toBe(false);
 		expect(x.sends()).toHaveLength(0);
@@ -1278,7 +1283,7 @@ describe("X send_message", () => {
 		const result = await send(page(x).dispatcher, {
 			conversation_id: DM,
 			text,
-			idempotency_key: "synthetic-op-8",
+			run: "synthetic-op-8",
 		});
 		expect(result.success).toBe(true);
 		expect(JSON.parse(String(x.sends()[0].init?.body)).text).toBe(text);

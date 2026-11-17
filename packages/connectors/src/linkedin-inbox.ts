@@ -59,7 +59,7 @@ async function readyTab(browser: ChromeActionDispatcher): Promise<number> {
 async function invoke<T>(
   browser: ChromeActionDispatcher,
   tabId: number,
-  op: "read" | "listen" | "send",
+  op: "read" | "listen" | "send" | "lookup",
   input: Record<string, unknown>
 ): Promise<T> {
   const result = await browser.dispatch<{ value?: T; exception?: unknown }>(
@@ -81,8 +81,8 @@ async function invoke<T>(
  * Send one text reply into an existing direct-message conversation from the
  * scrape-owned tab, without opening the inbox. A full conversation URN sends
  * from the inbox it names (a company page's, for a page feed's row). The page program refuses group
- * or unknown conversations, dedupes on `idempotency_key`, and returns only once
- * the message shows in the conversation.
+ * or unknown conversations, sends at most once per operation run (`ctx.run.id`),
+ * and returns only once the message shows in the conversation.
  */
 export async function sendLinkedInMessage(
   ctx: ActionContext
@@ -98,7 +98,37 @@ export async function sendLinkedInMessage(
         expected_account: expectedAccount,
         conversation_id: ctx.input.conversation_id,
         text: ctx.input.text,
-        idempotency_key: ctx.input.idempotency_key,
+        run_id: ctx.run.id,
+      }
+    );
+    return { success: true, output };
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+/**
+ * Show direct-message conversations as the person on the other side (name,
+ * headline, photo) for `send_message.conversation_id`'s lookup. Read-only: it
+ * reads the conversation list from the scrape-owned tab, never the inbox page.
+ */
+export async function lookupLinkedInConversations(
+  ctx: ActionContext
+): Promise<ActionResult> {
+  try {
+    const expectedAccount = savedAccount(ctx);
+    const browser = requireBrowser(ctx);
+    const output = await invoke<Record<string, unknown>>(
+      browser,
+      await readyTab(browser),
+      "lookup",
+      {
+        expected_account: expectedAccount,
+        values: ctx.input.values,
+        query: ctx.input.query,
       }
     );
     return { success: true, output };

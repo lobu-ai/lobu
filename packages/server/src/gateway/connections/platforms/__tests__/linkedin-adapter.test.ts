@@ -83,7 +83,6 @@ describe("LinkedIn adapter", () => {
       input: {
         conversation_id: THREAD,
         text: expect.stringContaining("Yes — see the doc (https://example.test/doc)"),
-        idempotency_key: "chat-post:101:m1:hash",
       },
       idempotencyKey: "chat-post:101:m1:hash",
     }]);
@@ -112,7 +111,7 @@ describe("LinkedIn adapter", () => {
     const sent = await adapter.postMessage(threadId, "Happy to help.", "page-key");
     expect(calls).toEqual([{
       operationKey: "send_message",
-      input: { conversation_id: pageConversation, text: "Happy to help.", idempotency_key: "page-key" },
+      input: { conversation_id: pageConversation, text: "Happy to help." },
       idempotencyKey: "page-key",
     }]);
     expect(sent).toMatchObject({
@@ -137,9 +136,9 @@ describe("LinkedIn adapter", () => {
     const first = `${"a".repeat(2000)}\n\n${"b".repeat(998)}`;
     const second = "c".repeat(1500);
     await adapter.postMessage(`linkedin:101:${THREAD}`, `${first}\n\n${second}`, "reply-key");
-    expect(calls.map((call) => [call.input.text, call.idempotencyKey, call.input.idempotency_key])).toEqual([
-      [first, "reply-key", "reply-key"],
-      [second, "reply-key:1", "reply-key:1"],
+    expect(calls.map((call) => [call.input.text, call.idempotencyKey])).toEqual([
+      [first, "reply-key"],
+      [second, "reply-key:1"],
     ]);
     for (const call of calls) expect(String(call.input.text).length).toBeLessThanOrEqual(3000);
   });

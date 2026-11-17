@@ -597,6 +597,7 @@ async function executeActionRun(
         // prepare_comment / other extension-driving actions can stage UI via
         // the paired Owletto extension (parent_run_id = this action run).
         actionKey: action_key,
+        runId: String(run_id),
         actionInput: (action_input ?? {}) as Record<string, unknown>,
         config: mergeEnv(env, job.connection_credentials, job.config),
         env,

@@ -147,13 +147,9 @@ export class LinkedInAdapter extends ConnectorChatAdapter<LinkedInMessageRow> {
     };
   }
 
-  /** The connector derives LinkedIn's client origin token from the operation key. */
-  protected sendInput(
-    threadId: string,
-    text: string,
-    idempotencyKey: string,
-  ): Record<string, unknown> {
-    return { conversation_id: conversationOf(threadId), text, idempotency_key: idempotencyKey };
+  /** The connector derives LinkedIn's client origin token from the operation run. */
+  protected sendInput(threadId: string, text: string): Record<string, unknown> {
+    return { conversation_id: conversationOf(threadId), text };
   }
 
   protected sentRow(

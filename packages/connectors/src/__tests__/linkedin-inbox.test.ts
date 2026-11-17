@@ -94,7 +94,7 @@ describe("LinkedIn source adapter", () => {
     try {
       for (const feedKey of ["notifications", "live_messages"])
         await expect(readLinkedInInbox({ ...context, feedKey } as any)).rejects.toThrow("saved account");
-      expect(await sendLinkedInMessage({ ...context, input: { conversation_id: "synthetic-thread", text: "Synthetic reply", idempotency_key: "synthetic-key" } } as any)).toMatchObject({ success: false, error: expect.stringContaining("saved account") });
+      expect(await sendLinkedInMessage({ ...context, run: { id: "1" }, input: { conversation_id: "synthetic-thread", text: "Synthetic reply" } } as any)).toMatchObject({ success: false, error: expect.stringContaining("saved account") });
       expect(sourceReads).toBe(0);
     } finally { dom.window.close(); }
   });
@@ -1602,7 +1602,7 @@ describe("LinkedIn direct messages", () => {
       const sent = await api.send({ expected_account: "urn:li:fs_miniProfile:synthetic-self",
         conversation_id: "2-synthetic-dm==",
         text: "Yes, here.",
-        idempotency_key: "page-six",
+        run_id: "page-six",
       });
       expect(sent).toMatchObject({ sent: true, conversation_id: "2-synthetic-dm==" });
       expect(posts).toHaveLength(1);
@@ -1611,41 +1611,52 @@ describe("LinkedIn direct messages", () => {
     }
   });
 
-  test("send_message sends once per idempotency key and confirms the message appears", async () => {
+  test("send_message sends once per operation run and confirms the message appears", async () => {
     const messages: Record<string, any[]> = { [DM]: [INBOUND] };
-    const { api, dom, posts } = messenger({
+    const { dom, posts } = messenger({
       conversations: [{ entityUrn: DM, groupChat: false }],
       messages,
     });
+    const browser = { dispatch: async (op: string, input: any) => op === "navigate" ? { tab_id: 42 } : { value: await dom.window.eval(input.expression) } };
+    // The connector's own entrypoint: the send-once token comes from ctx.run.id.
+    const send = (runId: string) =>
+      new LinkedInConnector().execute({
+        actionKey: "send_message",
+        run: { id: runId },
+        input: { conversation_id: "2-synthetic-dm==", text: "Yes, around all afternoon." },
+        browser,
+        sessionState: { account_id: "urn:li:fs_miniProfile:synthetic-self" },
+        credentials: null,
+        config: {},
+      } as any);
     try {
-      const input = { expected_account: "urn:li:fs_miniProfile:synthetic-self",
-        conversation_id: "2-synthetic-dm==",
-        text: "Yes, around all afternoon.",
-        idempotency_key: "chat-post:1:turn-1:abc",
-      };
-      const first = await api.send(input);
+      const first = await send("101");
       expect(first).toMatchObject({
-        sent: true,
-        message_id: `urn:li:msg_message:(${SELF},sent-1)`,
-        conversation_id: "2-synthetic-dm==",
+        success: true,
+        output: {
+          sent: true,
+          message_id: `urn:li:msg_message:(${SELF},sent-1)`,
+          conversation_id: "2-synthetic-dm==",
+        },
       });
       expect(posts).toHaveLength(1);
       expect(posts[0].message.conversationUrn).toBe(DM);
       expect(posts[0].mailboxUrn).toBe(SELF);
       expect(JSON.stringify(posts[0])).not.toContain("synthetic-csrf");
-      // A retry of the same key adopts the first send.
-      const retry = await api.send(input);
-      expect(retry).toMatchObject({ already_sent: true, message_id: first.message_id });
+      // A retry or re-claim of the same run carries the same token and adopts the first send.
+      const retry = await send("101");
+      expect(retry).toMatchObject({ success: true, output: { already_sent: true, message_id: first.output?.message_id } });
       expect(posts).toHaveLength(1);
-      // A different key is a different reply.
-      await api.send({ ...input, idempotency_key: "chat-post:1:turn-2:def" });
+      // A new run is a new reply under a new token.
+      expect(await send("102")).toMatchObject({ success: true, output: { sent: true } });
       expect(posts).toHaveLength(2);
+      expect(posts[1].message.originToken).not.toBe(posts[0].message.originToken);
     } finally {
       dom.window.close();
     }
   });
 
-  test("without echoed tokens, provider deduplication retries a key but preserves distinct replies", async () => {
+  test("without echoed tokens, provider deduplication retries a run but preserves distinct replies", async () => {
     const { api, dom, posts } = messenger({
       conversations: [{ entityUrn: DM, groupChat: false }],
       messages: { [DM]: [INBOUND] },
@@ -1655,11 +1666,11 @@ describe("LinkedIn direct messages", () => {
       const input = { expected_account: "urn:li:fs_miniProfile:synthetic-self",
         conversation_id: "2-synthetic-dm==",
         text: "On my way.",
-        idempotency_key: "k1",
+        run_id: "k1",
       };
       const first = await api.send(input);
       expect(await api.send(input)).toMatchObject({ message_id: first.message_id });
-      const second = await api.send({ ...input, idempotency_key: "k2" });
+      const second = await api.send({ ...input, run_id: "k2" });
       expect(second.message_id).not.toBe(first.message_id);
       expect(posts.every((post) => post.dedupeByClientGeneratedToken === true)).toBe(true);
     } finally {
@@ -1667,7 +1678,7 @@ describe("LinkedIn direct messages", () => {
     }
   });
 
-  test("concurrent attempts of one key confirm the same provider message", async () => {
+  test("concurrent attempts of one run confirm the same provider message", async () => {
     const messages: Record<string, any[]> = { [DM]: [INBOUND] };
     const { api, dom, posts } = messenger({
       conversations: [{ entityUrn: DM, groupChat: false }],
@@ -1677,7 +1688,7 @@ describe("LinkedIn direct messages", () => {
       const input = { expected_account: "urn:li:fs_miniProfile:synthetic-self",
         conversation_id: "2-synthetic-dm==",
         text: "hi",
-        idempotency_key: "same-key",
+        run_id: "same-key",
       };
       const [first, second] = await Promise.all([api.send(input), api.send(input)]);
       expect(first.message_id).toBe(second.message_id);
@@ -1700,7 +1711,7 @@ describe("LinkedIn direct messages", () => {
     });
     try {
       await expect(
-        api.send({ expected_account: "urn:li:fs_miniProfile:synthetic-self", conversation_id: threadId, text: "hi", idempotency_key: "k" })
+        api.send({ expected_account: "urn:li:fs_miniProfile:synthetic-self", conversation_id: threadId, text: "hi", run_id: "k" })
       ).rejects.toThrow(error);
       expect(posts).toHaveLength(0);
     } finally {
@@ -1716,7 +1727,7 @@ describe("LinkedIn direct messages", () => {
     });
     try {
       await expect(
-        api.send({ expected_account: "urn:li:fs_miniProfile:synthetic-self", conversation_id: "2-synthetic-dm==", text: "hi", idempotency_key: "k" })
+        api.send({ expected_account: "urn:li:fs_miniProfile:synthetic-self", conversation_id: "2-synthetic-dm==", text: "hi", run_id: "k" })
       ).rejects.toThrow("did not appear");
       expect(posts).toHaveLength(1);
     } finally {
@@ -1802,7 +1813,7 @@ describe("LinkedIn page inboxes", () => {
       });
       try {
         await expect(api.read({ expected_account: "urn:li:fs_miniProfile:synthetic-self", feed: "live_messages", inbox: PAGE })).rejects.toThrow();
-        await expect(api.send({ expected_account: "urn:li:fs_miniProfile:synthetic-self", conversation_id: PAGE_DM, text: "hi", idempotency_key: "key" })).rejects.toThrow();
+        await expect(api.send({ expected_account: "urn:li:fs_miniProfile:synthetic-self", conversation_id: PAGE_DM, text: "hi", run_id: "key" })).rejects.toThrow();
         expect(calls.some((url) => url.includes("messengerConversations."))).toBe(false);
         expect(posts).toHaveLength(0);
       } finally {
@@ -1826,7 +1837,7 @@ describe("LinkedIn page inboxes", () => {
     });
     const { api, dom, posts } = messenger(options);
     try {
-      await expect(api.send({ expected_account: "urn:li:fs_miniProfile:synthetic-self", conversation_id: PAGE_DM, text: "hi", idempotency_key: "key" }))
+      await expect(api.send({ expected_account: "urn:li:fs_miniProfile:synthetic-self", conversation_id: PAGE_DM, text: "hi", run_id: "key" }))
         .rejects.toThrow("account changed");
       expect(posts).toHaveLength(0);
     } finally {
@@ -1900,7 +1911,7 @@ describe("LinkedIn page inboxes", () => {
         api.read({ expected_account: "urn:li:fs_miniProfile:synthetic-self", feed: "live_messages", inbox: PAGE, limit: 20 })
       ).rejects.toThrow("does not administer");
       await expect(
-        api.send({ expected_account: "urn:li:fs_miniProfile:synthetic-self", conversation_id: PAGE_DM, text: "hi", idempotency_key: "k" })
+        api.send({ expected_account: "urn:li:fs_miniProfile:synthetic-self", conversation_id: PAGE_DM, text: "hi", run_id: "k" })
       ).rejects.toThrow("does not administer");
       expect(calls.some((url) => url.includes("messengerConversations."))).toBe(false);
       expect(posts).toHaveLength(0);
@@ -1922,7 +1933,7 @@ describe("LinkedIn page inboxes", () => {
       messages: { [PAGE_DM]: [PAGE_INBOUND], [DM]: [INBOUND] },
     });
     try {
-      const input = { expected_account: "urn:li:fs_miniProfile:synthetic-self", conversation_id: PAGE_DM, text: "Happy to help.", idempotency_key: "page-key" };
+      const input = { expected_account: "urn:li:fs_miniProfile:synthetic-self", conversation_id: PAGE_DM, text: "Happy to help.", run_id: "page-key" };
       const first = await api.send(input);
       expect(first).toMatchObject({ sent: true, conversation_id: PAGE_DM });
       expect(posts[0]).toMatchObject({
@@ -1932,16 +1943,102 @@ describe("LinkedIn page inboxes", () => {
       expect(await api.send(input)).toMatchObject({ already_sent: true, message_id: first.message_id });
       expect(posts).toHaveLength(1);
       // The member's own conversation URN is the member inbox.
-      await api.send({ expected_account: "urn:li:fs_miniProfile:synthetic-self", conversation_id: DM, text: "Hi", idempotency_key: "member-key" });
+      await api.send({ expected_account: "urn:li:fs_miniProfile:synthetic-self", conversation_id: DM, text: "Hi", run_id: "member-key" });
       expect(posts[1]).toMatchObject({ mailboxUrn: SELF, message: { conversationUrn: DM } });
       await expect(
         api.send({ expected_account: "urn:li:fs_miniProfile:synthetic-self",
           conversation_id: "urn:li:msg_conversation:(urn:li:fsd_profile:someone-else,2-synthetic-dm==)",
           text: "Hi",
-          idempotency_key: "k",
+          run_id: "k",
         })
       ).rejects.toThrow("another LinkedIn account");
       expect(posts).toHaveLength(2);
+    } finally {
+      dom.window.close();
+    }
+  });
+
+  test("lookup_conversations shows direct conversations as the person on the other side, read-only", async () => {
+    const person = (id: string, first: string, last: string, extra: Record<string, unknown> = {}) => ({
+      hostIdentityUrn: `urn:li:fsd_profile:${id}`,
+      participantType: { member: { firstName: { text: first }, lastName: { text: last }, ...extra } },
+    });
+    const self = person("synthetic-self", "Self", "Member");
+    const alex = person("ACoAASyntheticAlex", "Alex", "Example", {
+      headline: { text: "Synthetic founder" },
+      profilePicture: {
+        rootUrl: "https://media.example.test/synthetic/",
+        artifacts: [
+          { width: 800, fileIdentifyingUrlPathSegment: "800.jpg" },
+          { width: 50, fileIdentifyingUrlPathSegment: "50.jpg" },
+          { width: 100, fileIdentifyingUrlPathSegment: "100.jpg" },
+        ],
+      },
+    });
+    // No headline, and a photo that is not https: neither is shown.
+    const sam = person("ACoAASyntheticSam", "Sam", "Sample", {
+      profilePicture: { rootUrl: "http://media.example.test/", artifacts: [{ width: 100, fileIdentifyingUrlPathSegment: "s.jpg" }] },
+    });
+    const pat = person("ACoAASyntheticPat", "Pat", "Visitor");
+    const DM_TWO = `urn:li:msg_conversation:(${SELF},2-synthetic-dm-two==)`;
+    const { dom, posts, calls } = messenger({
+      administers: [PAGE],
+      conversations: [
+        { entityUrn: GROUP, groupChat: true, conversationParticipants: [self, alex, sam] },
+        { entityUrn: DM, groupChat: false, conversationParticipants: [self, alex] },
+        { entityUrn: DM_TWO, groupChat: false, conversationParticipants: [self, sam] },
+        { entityUrn: PAGE_DM, groupChat: false, conversationParticipants: [{ hostIdentityUrn: PAGE, participantType: { organization: {} } }, pat] },
+      ],
+      messages: {},
+    });
+    const browser = { dispatch: async (op: string, input: any) => op === "navigate" ? { tab_id: 42 } : { value: await dom.window.eval(input.expression) } };
+    const lookup = (input: Record<string, unknown>) =>
+      new LinkedInConnector().execute({
+        actionKey: "lookup_conversations",
+        run: { id: "201" },
+        input,
+        browser,
+        sessionState: { account_id: "urn:li:fs_miniProfile:synthetic-self" },
+        credentials: null,
+        config: {},
+      } as any);
+    try {
+      // Both accepted value forms resolve; each item echoes the value it was given.
+      expect(await lookup({
+        values: [
+          "2-synthetic-dm==",
+          PAGE_DM,
+          "2-synthetic-group==",
+          "urn:li:msg_conversation:(urn:li:fsd_profile:someone-else,2-synthetic-dm==)",
+          "not a conversation",
+          "2-synthetic-absent==",
+        ],
+      })).toEqual({
+        success: true,
+        output: {
+          items: [
+            {
+              value: "2-synthetic-dm==",
+              label: "Alex Example",
+              description: "Synthetic founder",
+              image_url: "https://media.example.test/synthetic/100.jpg",
+            },
+            { value: PAGE_DM, label: "Pat Visitor" },
+          ],
+        },
+      });
+      // A name search matches the member inbox's direct conversations only.
+      expect(await lookup({ query: " SAM " })).toEqual({
+        success: true,
+        output: { items: [{ value: "2-synthetic-dm-two==", label: "Sam Sample" }] },
+      });
+      // Neither lists the recent direct conversations, newest first.
+      expect((await lookup({})).output?.items).toEqual([
+        expect.objectContaining({ value: "2-synthetic-dm==", label: "Alex Example" }),
+        expect.objectContaining({ value: "2-synthetic-dm-two==", label: "Sam Sample" }),
+      ]);
+      expect(posts).toHaveLength(0);
+      expect(calls.some((url) => url.includes("messengerMessages."))).toBe(false);
     } finally {
       dom.window.close();
     }
@@ -1992,15 +2089,22 @@ describe("LinkedIn page inboxes", () => {
 });
 
 describe("LinkedIn chat declarations", () => {
-  test("message.created can answer its source and send_message is a keyed direct send", () => {
+  test("message.created can answer its source and send_message is a run-keyed direct send", () => {
     const definition = new LinkedInConnector().definition;
     expect(
       definition.automationEvents?.find((event) => event.key === "message.created")
     ).toMatchObject({ capabilities: { replyToSource: true } });
     const send = definition.actions?.send_message;
     expect(send?.inputSchema).toMatchObject({
-      required: ["conversation_id", "text", "idempotency_key"],
+      required: ["conversation_id", "text"],
+      properties: {
+        conversation_id: { "x-lookup": { operation: "lookup_conversations" } },
+        text: { "x-multiline": true },
+      },
     });
+    // A caller still passing the removed input-level key fails the schema.
+    expect((send?.inputSchema as any).additionalProperties).toBe(false);
+    expect(definition.actions?.lookup_conversations?.kind).toBe("read");
     expect(send?.description).toContain("approved only for answering direct messages");
     expect(send?.description).toContain("draft-only");
     const pattern = new RegExp(

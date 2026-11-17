@@ -3876,7 +3876,7 @@ export default class XConnector extends ConnectorRuntime {
 		name: "X (Twitter)",
 		description:
 			"Fetches tweets, browser-visible like history, bookmarks, and DMs through the X API v2 or the paired Owletto Chrome extension, reads the chronological Following timeline live through the X API, captures notification references and the accounts you follow, reads and answers DMs live in the paired browser, and likes posts or follows accounts there. Links social actors into the person and company graph.",
-		version: "3.17.2",
+		version: "3.18.0",
 		faviconDomain: "x.com",
 		browser: {
 			origins: ["https://x.com", "https://twitter.com"],
@@ -4229,7 +4229,7 @@ export default class XConnector extends ConnectorRuntime {
 				kind: "write",
 				name: "Send DM reply",
 				description:
-					"Requires an X connection authenticated through your paired Chrome browser. Send a text reply into an exact existing X direct message conversation and confirm it appears there. This direct send is approved only for answering DMs on bot accounts the owner operates; public replies and posts stay draft-only through prepare_reply. On retry, reuse both this input's idempotency_key and the enclosing operations.execute idempotency_key. The browser can recognise an earlier send only while its request ID is on the latest conversation page; matching recent text without a request ID is refused.",
+					"Requires an X connection authenticated through your paired Chrome browser. Send a text reply into an exact existing X direct message conversation and confirm it appears there. This direct send is approved only for answering DMs on bot accounts the owner operates; public replies and posts stay draft-only through prepare_reply. Sends at most once per operation run: on retry, reuse the operations.execute idempotency_key so the retry is the same run. The browser can recognise an earlier send only while its request ID is on the latest conversation page; matching recent text without a request ID is refused.",
 				annotations: {
 					destructiveHint: false,
 					idempotentHint: false,
@@ -4237,7 +4237,7 @@ export default class XConnector extends ConnectorRuntime {
 				},
 				inputSchema: {
 					type: "object",
-					required: ["conversation_id", "text", "idempotency_key"],
+					required: ["conversation_id", "text"],
 					additionalProperties: false,
 					properties: {
 						conversation_id: {
@@ -4246,13 +4246,11 @@ export default class XConnector extends ConnectorRuntime {
 							description:
 								"Exact X DM conversation ID, the conversation_id of a live_messages row.",
 						},
-						text: { type: "string", minLength: 1, maxLength: 10000 },
-						idempotency_key: {
+						text: {
 							type: "string",
 							minLength: 1,
-							maxLength: 200,
-							description:
-								"Stable key used to derive X's client request ID. Reuse it and the enclosing operation's idempotency_key on retry; browser deduplication only checks the latest conversation page.",
+							maxLength: 10000,
+							"x-multiline": true,
 						},
 					},
 				},
@@ -4287,6 +4285,7 @@ export default class XConnector extends ConnectorRuntime {
 						body: {
 							type: "string",
 							minLength: 1,
+							"x-multiline": true,
 							description:
 								"Draft reply text, left in the composer for the user to edit/send. Deliberately uncapped: X counts URLs as 23 and CJK/emoji as 2, so a code-unit cap here would reject drafts X accepts. The action reports X's own verdict as submit_blocked.",
 						},
@@ -4392,7 +4391,7 @@ export default class XConnector extends ConnectorRuntime {
 					{
 						conversation_id: ctx.input.conversation_id,
 						text: ctx.input.text,
-						idempotency_key: ctx.input.idempotency_key,
+						run_id: ctx.run.id,
 					},
 					accountId,
 				);

@@ -100,7 +100,7 @@ describe('manage_connections connector source lifecycle (#2045)', () => {
       expect((await extractConnectorMetadata(code)).key).toBe(key);
       expect(code).toContain('from imported file');
       const executed = await new IsolateExecutor({ timeoutMs: 10_000 }).execute(code, {
-        mode: 'action', actionKey: 'probe', actionInput: {}, config: {}, credentials: null, sessionState: null, env: {},
+        mode: 'action', actionKey: 'probe', runId: '1', actionInput: {}, config: {}, credentials: null, sessionState: null, env: {},
       });
       expect(executed).toEqual({ mode: 'action', output: { marker: 'from imported file' } });
       expect(await get()).toMatchObject({ source_complete: true, source_files: artifact.sourceFiles });

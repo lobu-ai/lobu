@@ -73,7 +73,7 @@ describe('HTTP delivery using env profiles', () => {
           config: ctx.config, credential: ctx.credentials
         }}; }
       };`, {
-        mode: 'action', actionKey: 'read', actionInput: {}, config: auth.connectionCredentials,
+        mode: 'action', actionKey: 'read', runId: String(run.id), actionInput: {}, config: auth.connectionCredentials,
         credentials: auth.credentials, sessionState: auth.sessionState, env: {}, httpAuth: auth.httpAuth,
       }, { onHttpFetch: (request, signal) => client.httpFetch(Number(run.id), request, signal) });
       expect(result).toEqual({ mode: 'action', output: { text: 'ok', config: {}, credential: null } });

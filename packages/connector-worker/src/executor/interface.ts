@@ -45,6 +45,8 @@ export type ExecutorJob = {
   | {
       mode: 'action';
       actionKey: string;
+      /** The operation run executing this action; surfaced to the connector as `ctx.run.id`. */
+      runId: string;
       actionInput: Record<string, unknown>;
       config: Record<string, unknown>;
       credentials: SyncCredentials | null;

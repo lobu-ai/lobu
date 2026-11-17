@@ -105,7 +105,6 @@ describe("XAdapter sends", () => {
       input: {
         conversation_id: DM,
         text: "Hi see the docs (https://example.com/docs)\n\n- one\n- two",
-        idempotency_key: "op-key-1",
       },
       idempotencyKey: "op-key-1",
     }]);
