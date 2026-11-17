@@ -605,7 +605,7 @@ describe("read_company", () => {
               <div><p>Headquarters</p><p>Sample City</p></div>
               <div><p>Type</p><p>Privately Held</p></div>
               <div><p>Founded</p><p>2020</p></div>
-              <div><p>Specialties</p><p>Fixtures, Testing</p></div>
+              <div><p>Specialties</p><p>Fixtures , Testing</p></div>
             </section>
           </main>`,
       })
@@ -640,6 +640,31 @@ describe("read_company", () => {
         search_url:
           "https://www.linkedin.com/search/results/people/?network=%5B%22F%22%5D&currentCompany=%5B%224242%22%5D",
       },
+    });
+  });
+
+  test("reads the top card facts of a company without a tagline", async () => {
+    // Without a tagline LinkedIn nests the facts row beside the heading.
+    const { result } = await runAction(
+      "read_company",
+      { company_url: "https://www.linkedin.com/company/no-tagline/" },
+      () => ({
+        html: `
+          <main>
+            <div componentkey="pages.topCard.5151">
+              <div><div><h2>No Tagline Co</h2><div><p>Financial Services</p><p>·</p><p>Sample Town</p><p>·</p><p>10K followers</p><p>·</p><p><a href="https://www.linkedin.com/search/results/people/?currentCompany=%5B%225151%22%5D">11-50 employees</a></p></div></div></div>
+            </div>
+            <section><h2>Overview</h2><p>A company with no tagline.</p></section>
+          </main>`,
+      })
+    );
+    expect(result.success).toBe(true);
+    expect(result.output).toMatchObject({
+      name: "No Tagline Co",
+      tagline: null,
+      industry: "Financial Services",
+      headquarters: "Sample Town",
+      followers: 10000,
     });
   });
 });

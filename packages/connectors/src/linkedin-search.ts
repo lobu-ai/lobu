@@ -1123,8 +1123,10 @@ const COMPANY_ABOUT_CONFIG = {
     name: { selector: `${TOP_CARD} h2, h1`, take: "text" },
     top_card: { selector: TOP_CARD, take: "attr", attr: "componentkey" },
     tagline: { selector: `${TOP_CARD} div:has(> h2) + p`, take: "text" },
+    // The facts row follows the heading's wrapper when the company has a
+    // tagline, and sits beside the heading itself when it has none.
     top_facts: {
-      selector: `${TOP_CARD} div:has(> h2) ~ div > p`,
+      selector: `${TOP_CARD} div:has(> h2) ~ div > p, ${TOP_CARD} h2 ~ div > p`,
       take: "objectAll",
       parts: { t: { take: "text" } },
     },
@@ -1235,7 +1237,10 @@ function parseCompanyAbout(row: Row | undefined): Row {
     founded: facts.founded,
     type: facts.type,
     specialties: facts.specialties
-      ? facts.specialties.split(/,\s*/).filter(Boolean)
+      ? facts.specialties
+          .split(",")
+          .map((specialty) => specialty.trim())
+          .filter(Boolean)
       : [],
     phone: facts.phone,
     followers: followersLine ? parseFollowerCount(followersLine) : null,
