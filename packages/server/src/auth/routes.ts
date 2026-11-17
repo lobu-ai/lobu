@@ -27,8 +27,8 @@ import type { AuthInfo } from './oauth/types';
 import {
   AVAILABLE_PAT_SCOPES,
   canMintWebSession,
+  CONNECTED_APP_PAT_SCOPES,
   DEFAULT_SCOPES_STRING,
-  HUMAN_MINTED_PAT_SCOPES,
   isTokenDerivedSession,
   TOKEN_DERIVED_SESSION_USER_AGENT,
 } from './oauth/scopes';
@@ -224,12 +224,14 @@ credentialRoutes.post('/:orgSlug/tokens', mcpAuth, async (c) => {
   try {
     const scope = normalizePatScope(body.scope);
     if (!isInteractiveWebSession(c)) {
-      const humanOnly = scope
+      const sessionOnly = scope
         ?.split(' ')
-        .find((s) => (HUMAN_MINTED_PAT_SCOPES as readonly string[]).includes(s));
-      if (humanOnly) {
+        .find((s) => !(CONNECTED_APP_PAT_SCOPES as readonly string[]).includes(s));
+      if (sessionOnly) {
         return c.json(
-          { error: `Granting ${humanOnly} requires an owner/admin web session from a browser sign-in` },
+          {
+            error: `Granting ${sessionOnly} requires an owner/admin web session from a browser sign-in; connected apps and tokens can mint only ${CONNECTED_APP_PAT_SCOPES.join(', ')}`,
+          },
           403
         );
       }

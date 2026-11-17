@@ -85,6 +85,18 @@ export const AVAILABLE_PAT_SCOPES = [
 ] as const;
 
 /**
+ * The PAT scopes a connected app, a token, or a token-derived session may mint.
+ * Every other PAT scope (`mcp:admin` and the human-minted ones) needs an
+ * owner/admin web session from a browser sign-in.
+ */
+export const CONNECTED_APP_PAT_SCOPES = [
+  'mcp:read',
+  'mcp:write',
+  'profile:read',
+  'connections:token',
+] as const;
+
+/**
  * The least-privilege scope a token must carry to fetch a managed connector's
  * access token via POST /oauth/connection-token.
  *
