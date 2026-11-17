@@ -12,21 +12,37 @@ export async function fillLinkedInDraft(input) {
     getComputedStyle(element).visibility !== "hidden";
   let editor;
   if (input.kind === "prepare_message") {
+    // LinkedIn renders no thread href in the conversation list, so the exact
+    // location.href check above pins the thread, and the single selected list
+    // item must name the same counterpart as the open thread's header.
+    const name = (element) =>
+      (element?.textContent ?? "").replace(/\s+/g, " ").trim();
     const selected = [
       ...document.querySelectorAll(
-        '.msg-conversation-listitem--active a[href*="/messaging/thread/"], a[aria-current="page"][href*="/messaging/thread/"]'
+        ".msg-conversations-container__convo-item-link--active"
       ),
-    ].filter(
-      (link) =>
-        visible(link) &&
-        new URL(link.href).pathname === new URL(input.url).pathname
-    );
-    if (selected.length !== 1)
-      fail("The selected conversation does not match the requested recipient");
+    ].filter(visible);
     const threads = [...document.querySelectorAll(".msg-thread")].filter(
       visible
     );
     if (threads.length !== 1) fail("Exactly one conversation must be open");
+    const headers = [
+      ...threads[0].querySelectorAll(".msg-entity-lockup__entity-title"),
+    ].filter(visible);
+    const selectedName =
+      selected.length === 1
+        ? name(
+            selected[0].querySelector(
+              ".msg-conversation-listitem__participant-names"
+            )
+          )
+        : "";
+    if (
+      !selectedName ||
+      headers.length !== 1 ||
+      name(headers[0]) !== selectedName
+    )
+      fail("The selected conversation does not match the requested recipient");
     const editors = [
       ...threads[0].querySelectorAll(
         '.msg-form [contenteditable="true"][role="textbox"]'

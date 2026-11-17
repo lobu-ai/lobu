@@ -36,8 +36,11 @@ function draftPage(html: string, url = threadUrl) {
   };
 }
 
-const composer =
-  '<div class="msg-conversation-listitem--active"><a href="/messaging/thread/synthetic-thread/">Alex Example</a></div><div class="msg-thread"><form class="msg-form"><div tabindex="0" role="textbox" contenteditable="true"></div><button>Send</button></form></div>';
+// Current LinkedIn markup: the selected list item carries no thread href; only the
+// open thread's header names the counterpart.
+const conversation = (listName: string, threadName = listName) =>
+  `<li class="msg-conversation-listitem"><div class="msg-conversation-listitem__link msg-conversations-container__convo-item-link--active"><img alt="${listName}"><h3 class="msg-conversation-listitem__participant-names">${listName}</h3></div></li><div class="msg-thread"><h2 class="msg-entity-lockup__entity-title">${threadName}</h2><form class="msg-form"><div tabindex="0" role="textbox" contenteditable="true"></div><button>Send</button></form></div>`;
+const composer = conversation("Alex Example");
 
 describe("LinkedIn human-submitted drafts", () => {
   test("browser arguments round-trip as data without escaping a script context", () => {
@@ -82,10 +85,8 @@ describe("LinkedIn human-submitted drafts", () => {
       'contenteditable="true">Existing draft</div>'
     ),
     composer + composer,
-    composer.replace(
-      'href="/messaging/thread/synthetic-thread/"',
-      'href="/messaging/thread/different-thread/"'
-    ),
+    conversation("Alex Example", "Sam Example"),
+    composer.replace("convo-item-link--active", "convo-item-link"),
     composer.replace(
       "</form>",
       '<div class="msg-form__attachment">attachment</div></form>'
