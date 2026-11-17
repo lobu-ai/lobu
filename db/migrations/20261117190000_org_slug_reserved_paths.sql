@@ -23,4 +23,7 @@ ALTER TABLE "organization"
   -- squawk-ignore prefer-robust-stmts -- the migration runner owns the transaction
   ADD CONSTRAINT org_slug_not_reserved CHECK (slug <> ALL (ARRAY[
     'settings', 'auth', 'api', 'templates', 'help', 'account', 'admin', 'health', 'login', 'logout', 'signup', 'register', 'www', 'mcp', 'static', 'assets', 'cdn', 'docs', 'mail'
-  ]::text[]));
+  ]::text[])) NOT VALID;
+ALTER TABLE "organization"
+  -- squawk-ignore prefer-robust-stmts -- the migration runner owns the transaction
+  VALIDATE CONSTRAINT org_slug_not_reserved;
