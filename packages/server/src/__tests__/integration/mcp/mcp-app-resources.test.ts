@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { MCP_PROTOCOL_VERSION } from '@lobu/core';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { hashToken } from '../../../auth/oauth/utils';
+import { upsertEntityApprovalPolicy } from '../../../authz/entity-policy';
 import { getDb } from '../../../db/client';
 import type { Env } from '../../../index';
 import { LOBU_INTERACTION_RESOURCE_URI } from '../../../mcp-app-resource-uris';
@@ -19,12 +20,26 @@ import {
   createTestAccessToken,
   createTestAgent,
   createTestConnection,
+  createTestConnectorDefinition,
   createTestOAuthClient,
   createTestOrganization,
   createTestUser,
   seedSystemEntityTypes,
 } from '../../setup/test-fixtures';
 import { get, post } from '../../setup/test-helpers';
+
+// The shared client is a hosted web app (claude.ai/ChatGPT shape): https
+// redirect, tokens from the authorization-code flow.
+const HOSTED_REDIRECT_URI = 'https://chat.example.test/oauth/callback';
+
+function createHostedAccessToken(
+  ...[userId, organizationId, clientId, options]: Parameters<typeof createTestAccessToken>
+) {
+  return createTestAccessToken(userId, organizationId, clientId, {
+    authorizationGrantType: 'authorization_code',
+    ...options,
+  });
+}
 
 const STUB_EXTERNAL_HTML =
   '<!doctype html><html><head><link rel="stylesheet" href="./assets/app.css?v=css123"><script defer src="./assets/app.js?v=js123"></script></head><body data-test="mcp-app-external-stub">external</body></html>';
@@ -80,9 +95,9 @@ describe('MCP App resources — ui:// serving (host-authored view)', () => {
       ownerUserId: owner.id,
       agentId: 'mcp-app-render-agent',
     });
-    client = await createTestOAuthClient();
+    client = await createTestOAuthClient({ redirect_uris: [HOSTED_REDIRECT_URI] });
     token = (
-      await createTestAccessToken(owner.id, org.id, client.client_id, {
+      await createHostedAccessToken(owner.id, org.id, client.client_id, {
         scope: 'mcp:admin mcp:write mcp:read profile:read',
       })
     ).token;
@@ -892,7 +907,7 @@ describe('MCP App resources — ui:// serving (host-authored view)', () => {
     });
     await addUserToOrganization(memberUser.id, org.id, 'member');
     const memberToken = (
-      await createTestAccessToken(memberUser.id, org.id, client.client_id, {
+      await createHostedAccessToken(memberUser.id, org.id, client.client_id, {
         scope: 'mcp:read',
       })
     ).token;
@@ -924,7 +939,7 @@ describe('MCP App resources — ui:// serving (host-authored view)', () => {
     });
     // Token bound to the public org, but the user is deliberately NOT a member.
     const visitorToken = (
-      await createTestAccessToken(visitor.id, publicOrg.id, client.client_id, {
+      await createHostedAccessToken(visitor.id, publicOrg.id, client.client_id, {
         scope: 'mcp:read',
       })
     ).token;
@@ -994,7 +1009,7 @@ describe('MCP App resources — ui:// serving (host-authored view)', () => {
     });
     // Token bound to the public org, but the user is deliberately NOT a member.
     const visitorToken = (
-      await createTestAccessToken(visitor.id, publicOrg.id, client.client_id, {
+      await createHostedAccessToken(visitor.id, publicOrg.id, client.client_id, {
         scope: 'mcp:read',
       })
     ).token;
@@ -1137,8 +1152,188 @@ describe('MCP App resources — ui:// serving (host-authored view)', () => {
     expect(settled).toMatchObject({ approval_status: 'rejected' });
   });
 
+  let askConnectorCount = 0;
+
+  /** Queue a connector write under an Ask policy through a real MCP session. */
+  async function queueAskConnectorWrite(options: {
+    sessionToken: string;
+    advertiseMcpApps: boolean;
+  }) {
+    const connectorKey = `fixture.ask-write-${++askConnectorCount}`;
+    await createTestConnectorDefinition({
+      key: connectorKey,
+      name: 'Ask write fixture',
+      organization_id: org.id,
+    });
+    await getDb()`
+      UPDATE connector_definitions
+      SET actions_schema = ${getDb().json({ run: { name: 'Run', kind: 'write' } })}
+      WHERE organization_id = ${org.id} AND key = ${connectorKey}
+    `;
+    const connection = await createTestConnection({
+      organization_id: org.id,
+      connector_key: connectorKey,
+      created_by: owner.id,
+      createDefaultFeed: false,
+    });
+    await upsertEntityApprovalPolicy(org.id, {
+      resourceClass: 'connector_action',
+      connectionId: connection.id,
+      effects: { execute: 'approval' },
+    });
+
+    const sessionId = await initSession(`/mcp/${org.slug}`, {
+      sessionToken: options.sessionToken,
+      advertiseMcpApps: options.advertiseMcpApps,
+    });
+    const call = async (id: string, name: string, args: Record<string, unknown>) => {
+      const response = await post(`/mcp/${org.slug}`, {
+        body: { jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } },
+        headers: { 'mcp-session-id': sessionId, 'mcp-protocol-version': MCP_PROTOCOL_VERSION },
+        token: options.sessionToken,
+      });
+      expect(response.status).toBe(200);
+      return (await response.json()).result;
+    };
+
+    const queued = await call('ask-execute', 'manage_operations', {
+      action: 'execute',
+      connection_id: connection.id,
+      operation_key: 'run',
+      input: { command: 'requested' },
+    });
+    expect(queued?.isError).not.toBe(true);
+    expect(queued?.structuredContent).toMatchObject({ status: 'pending_approval' });
+    const runId = Number(queued.structuredContent.run_id);
+    expect(runId).toBeGreaterThan(0);
+
+    const readRun = async () => {
+      const [run] = await getDb()<{ approval_status: string; action_input: unknown }>`
+        SELECT approval_status, action_input FROM runs
+        WHERE id = ${runId} AND organization_id = ${org.id}
+      `;
+      return run;
+    };
+    return { call, runId, readRun };
+  }
+
+  it('approves a connector write from the card of a hosted authorization-code client', async () => {
+    const { call, runId, readRun } = await queueAskConnectorWrite({
+      sessionToken: token,
+      advertiseMcpApps: true,
+    });
+
+    const view = await call('hosted-get', 'get_approval', { run_id: runId });
+    expect(view?.isError).not.toBe(true);
+    const capability = view?._meta?.['lobu/approval-capability'];
+    expect(typeof capability).toBe('string');
+    expect(view?.structuredContent?.actions).toEqual([
+      expect.objectContaining({ id: 'approve', tool: 'resolve_approval' }),
+      expect.objectContaining({ id: 'reject', tool: 'resolve_approval' }),
+      expect.objectContaining({ id: 'review', variant: 'outline' }),
+    ]);
+
+    const decision = await call('hosted-approve', 'resolve_approval', {
+      run_id: runId,
+      decision: 'approve',
+      _meta: { 'lobu/approval-capability': capability },
+    });
+    expect(decision?.isError).not.toBe(true);
+    expect(await readRun()).toMatchObject({
+      approval_status: 'approved',
+      action_input: { command: 'requested' },
+    });
+  });
+
+  it.each([
+    {
+      shape: 'loopback-redirect',
+      redirectUris: ['http://127.0.0.1:33418/callback'],
+      grantType: 'authorization_code' as const,
+    },
+    {
+      shape: 'localhost https-redirect',
+      redirectUris: [HOSTED_REDIRECT_URI, 'https://localhost:8443/callback'],
+      grantType: 'authorization_code' as const,
+    },
+    {
+      shape: 'device-flow',
+      redirectUris: [HOSTED_REDIRECT_URI],
+      grantType: 'device_code' as const,
+    },
+    {
+      shape: 'legacy ungranted',
+      redirectUris: [HOSTED_REDIRECT_URI],
+      grantType: null,
+    },
+  ])(
+    'refuses a $shape client approving the connector write it queued under Ask, even when it advertises Apps',
+    async ({ redirectUris, grantType }) => {
+      const localClient = await createTestOAuthClient({ redirect_uris: redirectUris });
+      const localToken = (
+        await createTestAccessToken(owner.id, org.id, localClient.client_id, {
+          scope: 'mcp:admin mcp:write mcp:read profile:read',
+          authorizationGrantType: grantType,
+        })
+      ).token;
+      // The bearer sits on the user's machine, so whatever claims to render
+      // the card is the same program that queued the write.
+      const { call, runId, readRun } = await queueAskConnectorWrite({
+        sessionToken: localToken,
+        advertiseMcpApps: true,
+      });
+
+      const view = await call('local-get', 'get_approval', { run_id: runId });
+      expect(view?.isError).not.toBe(true);
+      expect(view?._meta?.['lobu/approval-capability']).toBeUndefined();
+      expect(view?.structuredContent?.actions).toEqual([
+        expect.objectContaining({ id: 'review', variant: 'primary' }),
+      ]);
+
+      const decision = await call('local-resolve', 'resolve_approval', {
+        run_id: runId,
+        decision: 'approve',
+        input: { command: 'replaced-by-requester' },
+      });
+      expect(decision?.isError).toBe(true);
+      expect(await readRun()).toMatchObject({
+        approval_status: 'pending',
+        action_input: { command: 'requested' },
+      });
+    }
+  );
+
+  it('refuses a card capability once its client no longer registers only hosted redirects', async () => {
+    const hostedClient = await createTestOAuthClient({ redirect_uris: [HOSTED_REDIRECT_URI] });
+    const hostedToken = (
+      await createHostedAccessToken(owner.id, org.id, hostedClient.client_id, {
+        scope: 'mcp:admin mcp:write mcp:read profile:read',
+      })
+    ).token;
+    const { call, runId, readRun } = await queueAskConnectorWrite({
+      sessionToken: hostedToken,
+      advertiseMcpApps: true,
+    });
+    const view = await call('rereg-get', 'get_approval', { run_id: runId });
+    const capability = view?._meta?.['lobu/approval-capability'];
+    expect(typeof capability).toBe('string');
+
+    await getDb()`
+      UPDATE oauth_clients
+      SET redirect_uris = ARRAY[${HOSTED_REDIRECT_URI}, 'http://localhost:3000/callback']::text[]
+      WHERE id = ${hostedClient.client_id}
+    `;
+    const decision = await call('rereg-approve', 'resolve_approval', {
+      run_id: runId,
+      decision: 'approve',
+      _meta: { 'lobu/approval-capability': capability },
+    });
+    expect(decision?.isError).toBe(true);
+    expect(await readRun()).toMatchObject({ approval_status: 'pending' });
+  });
+
   it('renders an explicitly targeted approval in the sole granted workspace', async () => {
-    const token = (await createTestAccessToken(owner.id, null, client.client_id, {
+    const token = (await createHostedAccessToken(owner.id, null, client.client_id, {
       scope: 'mcp:read mcp:write mcp:admin', grantedOrganizationIds: [org.id],
     })).token;
     const sessionId = await initSession('/mcp', { sessionToken: token });
@@ -1196,7 +1391,7 @@ describe('MCP App resources — ui:// serving (host-authored view)', () => {
     await addUserToOrganization(owner.id, otherOrg.id, 'member');
     await addUserToOrganization(owner.id, targetOrg.id, 'owner');
     const crossOrgToken = (
-      await createTestAccessToken(owner.id, null, client.client_id, {
+      await createHostedAccessToken(owner.id, null, client.client_id, {
         scope: 'mcp:read mcp:write mcp:admin',
       })
     ).token;
@@ -1383,7 +1578,7 @@ describe('MCP App resources — ui:// serving (host-authored view)', () => {
     });
     await addUserToOrganization(unrelatedMember.id, org.id, 'member');
     const memberWriteToken = (
-      await createTestAccessToken(unrelatedMember.id, org.id, client.client_id, {
+      await createHostedAccessToken(unrelatedMember.id, org.id, client.client_id, {
         scope: 'mcp:read mcp:write profile:read',
       })
     ).token;
@@ -1439,7 +1634,7 @@ describe('MCP App resources — ui:// serving (host-authored view)', () => {
     // requiring mcp:admin here would render working controls that can never
     // resolve in those hosts.
     const writeToken = (
-      await createTestAccessToken(owner.id, org.id, client.client_id, {
+      await createHostedAccessToken(owner.id, org.id, client.client_id, {
         scope: 'mcp:read mcp:write profile:read',
       })
     ).token;
@@ -2384,7 +2579,7 @@ describe('MCP App resources — ui:// serving (host-authored view)', () => {
     });
     await addUserToOrganization(member.id, org.id, 'member');
     const memberToken = (
-      await createTestAccessToken(member.id, org.id, client.client_id, {
+      await createHostedAccessToken(member.id, org.id, client.client_id, {
         scope: 'mcp:read profile:read',
       })
     ).token;
@@ -2444,7 +2639,7 @@ describe('MCP App resources — ui:// serving (host-authored view)', () => {
 
   it('retains the initialized public resource URL in a later scope challenge', async () => {
     const readlessToken = (
-      await createTestAccessToken(owner.id, org.id, client.client_id, {
+      await createHostedAccessToken(owner.id, org.id, client.client_id, {
         scope: 'profile:read',
       })
     ).token;
@@ -2488,7 +2683,7 @@ describe('MCP App resources — ui:// serving (host-authored view)', () => {
     // along in the SAME `_meta`, merged rather than overwritten, so the app
     // never sees a role-less error result and falls back to a stale role.
     const readlessToken = (
-      await createTestAccessToken(owner.id, org.id, client.client_id, {
+      await createHostedAccessToken(owner.id, org.id, client.client_id, {
         scope: 'profile:read',
       })
     ).token;

@@ -232,6 +232,8 @@ export interface ToolContext {
   tokenDerivedSession?: boolean;
   /** The personal access token's name on a PAT call; null otherwise. */
   tokenName?: string | null;
+  /** OAuth flow that issued this bearer; null for legacy rows and non-OAuth callers. */
+  authorizationGrantType?: 'authorization_code' | 'device_code' | null;
   /** OAuth scopes granted to this MCP/tool session, when applicable. */
   scopes?: string[] | null;
   tokenType: TokenType;

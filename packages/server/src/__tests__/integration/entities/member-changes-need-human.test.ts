@@ -44,9 +44,13 @@ describe('member changes need a human', () => {
     const [entity] = await getTestDb()`SELECT entity_id FROM entity_identities WHERE organization_id = ${org.id} AND namespace = 'auth_user_id' AND identifier = ${memberUser.id}`;
     member = { userId: memberUser.id, memberId, entityId: Number(entity.entity_id) };
 
-    const client = await createTestOAuthClient();
+    // Hosted web client shape: the only kind that receives the in-card approval capability.
+    const client = await createTestOAuthClient({
+      redirect_uris: ['https://chat.example.test/oauth/callback'],
+    });
     ({ token: adminToken } = await createTestAccessToken(ownerUser.id, org.id, client.client_id, {
       scope: 'mcp:read mcp:write mcp:admin profile:read',
+      authorizationGrantType: 'authorization_code',
     }));
   });
 
