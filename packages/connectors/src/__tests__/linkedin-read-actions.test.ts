@@ -285,6 +285,7 @@ describe("read_profile", () => {
         <p><a href="${profileUrl}overlay/contact-info/">Contact info</a></p>
         <p>500+</p>
         <p>connections</p>
+        <p><a href="https://">Malformed link</a></p>
         <p><a href="https://www.linkedin.com/safety/go/?url=https%3A%2F%2Ffixture.example%2F&amp;urlhash=x">Visit my website</a></p>
         <p><a href="https://www.linkedin.com/search/results/people/?connectionOf=fixture"><strong>Mutual One</strong> and <strong>Mutual Two</strong> are mutual connections</a></p>
       </section>

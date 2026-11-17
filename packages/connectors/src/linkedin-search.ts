@@ -205,6 +205,14 @@ export function withLineBreaks(text: string, html: unknown): string {
 }
 
 /** Outbound links render as `linkedin.com/safety/go/?url=<target>`. */
+function isLinkedInRedirect(href: string): boolean {
+  try {
+    return new URL(href, "https://www.linkedin.com").pathname.startsWith("/safety/go");
+  } catch {
+    return false;
+  }
+}
+
 export function decodeLinkedInRedirect(href: string): string | null {
   let url: URL;
   try {
@@ -237,7 +245,7 @@ function parseCount(text: string): number {
 
 /**
  * "A, B & 5 other mutual connections" / "A is a mutual connection" /
- * "Filiz & 12 other connections work here": the named people plus "N other".
+ * "Alex & 12 other connections work here": the named people plus "N other".
  */
 function countNamedConnections(text: string, named: number): number {
   const others = text.match(/(\d[\d,]*)\s+others?\b/i)?.[1];
@@ -889,7 +897,7 @@ function parseProfileSections(rows: Row[]): Row {
     names.split(/,\s*|\s+and\s+/).filter(Boolean)
   );
   const website = links
-    .filter((link) => new URL(link.href, "https://www.linkedin.com").pathname.startsWith("/safety/go"))
+    .filter((link) => isLinkedInRedirect(link.href))
     .map((link) => decodeLinkedInRedirect(link.href))
     .find(Boolean);
   return {
@@ -977,7 +985,7 @@ export async function readLinkedInProfile(
 // ── search_companies ───────────────────────────────────────────
 
 /**
- * "Uzay & 1 other connection work here" / "Shivam Kumar follows this page":
+ * "Sam & 1 other connection work here" / "Jordan Lee follows this page":
  * the viewer's connections at (or following) a company.
  */
 function networkConnections(

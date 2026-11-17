@@ -3956,7 +3956,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
         key: "search_posts",
         name: "Search posts",
         description:
-          "Search LinkedIn posts in the paired Chrome browser and return one page of up to 10 posts without storing any events. Each post has its URL, posted timestamp (and the relative time LinkedIn shows), edited flag, author (name, headline, profile or company URL, connection degree, verified and premium badges), body, hashtags, mentioned people and companies, outbound links, media (images, and videos with a thumbnail), and reaction, comment and repost counts. Read-only.",
+          "Search LinkedIn posts in the paired Chrome browser and return one page of up to 10 posts without storing any events. Each post has its URL, posted timestamp (and the relative time LinkedIn shows), edited flag, author (name, headline, profile or company URL, connection degree, verified and premium badges), body, hashtags, mentioned people and companies, outbound links, media (images, and videos with a thumbnail), and reaction, comment and repost counts. Results load only while Chrome draws the page, so the search window comes to the front for the read: about 15 seconds for page 1, longer for later pages. Read-only.",
         kind: "read",
         annotations: {
           openWorldHint: true,
