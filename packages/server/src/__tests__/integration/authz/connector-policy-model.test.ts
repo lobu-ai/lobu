@@ -7,6 +7,7 @@ import {
 	resolveConnectorPolicy,
 	upsertEntityApprovalPolicy,
 } from "../../../authz/entity-policy";
+import { connectorPolicyNoteSuffix, explainConnectorPolicy } from "../../../authz/connector-policy";
 import { qualifiedOperationKey } from "../../../tools/admin/manage_operations/handlers/shared";
 import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
 import {
@@ -289,8 +290,14 @@ describe("org connector policy scopes", () => {
 	it("guardrails apply after the narrowest grant, only tighten, and fail closed", async () => {
 		const exact = await save({
 			operationKey: qualifiedOperationKey(operation.connector_key, operation.operation_key),
+			note: "Safe to run unattended",
 			effects: { execute: "auto" },
 		});
+		// A device owner's hold over an Auto grant is not explained by that grant's note.
+		const allowed = await decide();
+		expect(allowed).toMatchObject({ effect: "auto", rules: [{ id: exact.id, note: "Safe to run unattended" }] });
+		expect(explainConnectorPolicy(allowed, true).reason).toBe("device_owner");
+		expect(connectorPolicyNoteSuffix(explainConnectorPolicy(allowed, true))).toBe("");
 		// A grant and a guardrail can share one scope.
 		const hold = await save({ connectorKey: operation.connector_key, kind: "guardrail", note: "Review fixture writes", effects: { execute: "approval" } });
 		const sameScopeGrant = await save({ connectorKey: operation.connector_key, effects: { execute: "auto" } });

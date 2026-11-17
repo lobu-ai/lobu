@@ -507,7 +507,7 @@ async function resolveConnectionCardEntityIds(
 
 function pendingApprovalMessage(
 	operationName: string,
-	policy: Pick<ConnectorPolicyExplanation, "rules"> | null,
+	policy: ConnectorPolicyExplanation | null,
 ): string {
 	return `Operation '${operationName}' requires approval${policy ? connectorPolicyNoteSuffix(policy) : ""}. Share the approval_url with the user to confirm.`;
 }

@@ -80,10 +80,17 @@ export function explainConnectorPolicy(
 	};
 }
 
-/** `: <note>` from the first deciding rule that carries one, else "". */
+/**
+ * `: <note>` from the first deciding rule that carries one, else "". A device
+ * owner's hold is not explained by policy: its rules are the Auto grants that
+ * allowed the run, so their notes never explain the hold.
+ */
 export function connectorPolicyNoteSuffix(
-	policy: Pick<ConnectorPolicyResult, "rules">,
+	policy: Pick<ConnectorPolicyResult, "rules"> & {
+		reason?: ConnectorPolicyExplanation["reason"];
+	},
 ): string {
+	if (policy.reason === "device_owner") return "";
 	const note = policy.rules.find((rule) => rule.note)?.note;
 	return note ? `: ${note}` : "";
 }

@@ -24,6 +24,8 @@ function request(method: string, route: string, body?: unknown, token?: string) 
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
 }
+// Rule ids are stored identity; scope assertions compare the rest.
+const withoutIds = (rules: Array<Record<string, unknown>>) => rules.map(({ id: _id, ...rule }) => rule);
 async function snapshot(token?: string) {
   const response = await request("GET", path(), undefined, token);
   expect(response.status).toBe(200);
@@ -56,7 +58,7 @@ describe("connector policy collection", () => {
     await upsertEntityApprovalPolicy(org.id, { resourceClass: "connector_action", principalKind: "agent", principalId: "policy-owner-fixture", effects: { execute: "deny" } });
     await upsertEntityApprovalPolicy(org.id, { resourceClass: "connector_action", operationCategory: "read", effects: { execute: "auto" }, approvalChannelId: "synthetic-channel" });
     const before = await snapshot();
-    expect(before.rules).toEqual([{ operation_category: "read", effect: "auto" }]);
+    expect(withoutIds(before.rules)).toEqual([{ operation_category: "read", effect: "auto" }]);
     const input = { revision: before.revision, rules: [{ effect: "approval" }, { operation_category: "read", effect: "auto" }] };
     const saved = await request("PUT", path(), input);
     expect(saved.status).toBe(200);
@@ -78,13 +80,59 @@ describe("connector policy collection", () => {
     expect((await snapshot()).rules).toEqual([]);
   });
 
+  it("manages guardrails beside grants on one scope, with notes, and rejects an auto guardrail", async () => {
+    const note = "Never send credentials through a connector";
+    const before = await snapshot();
+    const created = await request("PUT", path(), { revision: before.revision, rules: [{ effect: "auto" }, { effect: "deny", kind: "guardrail", note: `  ${note}  ` }] });
+    expect(created.status).toBe(200);
+    const saved = await created.json();
+    const grant = saved.rules.find((rule: { kind?: string }) => rule.kind === undefined);
+    const guardrail = saved.rules.find((rule: { kind?: string }) => rule.kind === "guardrail");
+    expect(grant).toEqual({ id: expect.any(Number), effect: "auto" });
+    expect(guardrail).toEqual({ id: expect.any(Number), effect: "deny", kind: "guardrail", note });
+    expect(await snapshot()).toEqual(saved);
+    const stored = (await listEntityApprovalPolicies(org.id, "connector_action")).find(p => p.id === guardrail.id);
+    expect(stored).toMatchObject({ kind: "guardrail", note, effects: { execute: "deny" } });
+
+    // Echoing the collection, ids included, is a no-op that keeps both rows.
+    const echoed = await request("PUT", path(), { revision: saved.revision, rules: [...saved.rules].reverse() });
+    expect(echoed.status).toBe(200);
+    expect(await echoed.json()).toEqual(saved);
+
+    for (const rules of [
+      [grant, { effect: "auto", kind: "guardrail" }],
+      [grant, { ...guardrail, effect: "auto" }],
+      [grant, { ...guardrail, kind: "invented" }],
+      [grant, { ...guardrail, note: "x".repeat(281) }],
+      [grant, { ...guardrail, note: 7 }],
+      [grant, { ...guardrail, id: "forged" }],
+    ]) {
+      const rejected = await request("PUT", path(), { revision: saved.revision, rules });
+      expect(rejected.status).toBe(400);
+      expect(await snapshot()).toEqual(saved);
+    }
+    const autoGuardrail = await request("PUT", path(), { revision: saved.revision, rules: [grant, { ...guardrail, effect: "auto" }] });
+    expect(await autoGuardrail.json()).toEqual({ error: "invalid_request", message: "A guardrail can only require approval or block; use a grant to allow." });
+
+    // Editing the guardrail keeps its row; an omitted note clears it.
+    const softened = await request("PUT", path(), { revision: saved.revision, rules: [grant, { effect: "approval", kind: "guardrail" }] });
+    expect(softened.status).toBe(200);
+    const afterEdit = await softened.json();
+    expect(afterEdit.rules).toEqual(expect.arrayContaining([grant, { id: guardrail.id, effect: "approval", kind: "guardrail" }]));
+
+    // Dropping the guardrail leaves the same-scope grant in place.
+    const dropped = await request("PUT", path(), { revision: afterEdit.revision, rules: [grant] });
+    expect(dropped.status).toBe(200);
+    expect((await dropped.json()).rules).toEqual([grant]);
+  });
+
   it("rejects a stale plan after another collection edit", async () => {
     const before = await snapshot();
     expect((await request("PUT", path(), { revision: before.revision, rules: [{ effect: "deny" }] })).status).toBe(200);
     const stale = await request("PUT", path(), { revision: before.revision, rules: [] });
     expect(stale.status).toBe(409);
     expect(await stale.json()).toMatchObject({ error: "policy_conflict" });
-    expect((await snapshot()).rules).toContainEqual({ effect: "deny" });
+    expect(withoutIds((await snapshot()).rules)).toContainEqual({ effect: "deny" });
   });
 
   it.each(["action", "connection", "connector"] as const)("preserves unchanged rules for a removed %s without accepting new grants", async target => {
@@ -107,14 +155,15 @@ describe("connector policy collection", () => {
     const edited = await request("PUT", path(), { revision: before.revision, rules: [...before.rules, { effect: "deny" }] });
     expect(edited.status).toBe(200);
     const after = await edited.json();
-    expect(after.rules).toEqual(expect.arrayContaining([...before.rules, { effect: "deny" }]));
+    expect(after.rules).toEqual(expect.arrayContaining(before.rules));
+    expect(withoutIds(after.rules)).toContainEqual({ effect: "deny" });
     const changed = await request("PUT", path(), { revision: after.revision, rules: [{ ...scope, effect: "approval" }, { effect: "deny" }] });
     expect(changed.status).toBe(400);
     expect(await snapshot()).toEqual(after);
     const removed = await request("PUT", path(), { revision: after.revision, rules: [{ effect: "deny" }] });
     expect(removed.status).toBe(200);
     const withoutRetired = await removed.json();
-    expect(withoutRetired.rules).toEqual([{ effect: "deny" }]);
+    expect(withoutIds(withoutRetired.rules)).toEqual([{ effect: "deny" }]);
     const stale = await request("PUT", path(), { revision: after.revision, rules: after.rules });
     expect(stale.status).toBe(409);
     expect(await stale.json()).toMatchObject({ error: "policy_conflict" });
@@ -243,7 +292,7 @@ describe("connector policy collection", () => {
     expect(minted.status).toBe(201);
     const { token } = await minted.json();
     expect((await request("PUT", path(), { revision: before.revision, rules: [{ effect: "auto" }] }, token.token)).status).toBe(200);
-    expect((await snapshot(token.token)).rules).toEqual([{ effect: "auto" }]);
+    expect(withoutIds((await snapshot(token.token)).rules)).toEqual([{ effect: "auto" }]);
     const other = await createTestOrganization();
     await addUserToOrganization(owner.id, other.id, "owner");
     expect((await request("GET", `/api/${other.slug}/write-permissions/connector-actions`, undefined, token.token)).status).toBe(403);
