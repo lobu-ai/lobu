@@ -532,6 +532,23 @@ export async function assertOutputEntityTypesExist(
   }
 }
 
+/**
+ * An Automation with no entity scope links each event row through the row's
+ * own entity_ids, and the write path validates the kind against those types.
+ * Authoring therefore accepts a kind any of the workspace's entity types
+ * declares; a row that names no entity still fails at write time.
+ */
+async function workspaceEntityTypeDeclaresKind(organizationId: string, kind: string): Promise<boolean> {
+  const rows = await getDb()`
+    SELECT 1 FROM entity_types
+    WHERE organization_id = ${organizationId}
+      AND deleted_at IS NULL
+      AND event_kinds ? ${kind}
+    LIMIT 1
+  `;
+  return rows.length > 0;
+}
+
 /** Validate declared event kinds at authoring time when the org has a registry. */
 export async function assertOutputEventTypesExist(
   organizationId: string,
@@ -551,7 +568,8 @@ export async function assertOutputEventTypesExist(
       entityIds.length > 0 ? entityIds : undefined,
       registry
     );
-    if (!validation.valid) {
+    if (!validation.valid && !(entityIds.length === 0 &&
+      await workspaceEntityTypeDeclaresKind(organizationId, event.trim()))) {
       throw new ToolUserError(
         `Invalid event type '${event}' in outputs.${name}: ${validation.errors.join(' ')}`,
         422
