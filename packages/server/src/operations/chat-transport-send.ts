@@ -53,23 +53,18 @@ export function chatTransportRunMetadata(
 }
 
 /**
- * The thread handle a later turn replies into. Prefer the adapter's returned
- * thread id (root) when it carries one (reply in an existing thread); fall
- * back to the new message id (the root of a freshly opened thread). Telegram's
- * message id is `${chatId}:${n}`, so strip the redundant channel prefix, or the
- * handle encodes a 4-segment id its own 3-part decode rejects.
+ * The thread handle a later turn replies into: the thread the adapter reports
+ * the post landed in. A post the adapter reports at channel level (a Telegram
+ * DM, WhatsApp, a new Teams or Google Chat message) gets no handle. A handle
+ * built from its message id would name a thread the platform cannot post
+ * into, and a send never degrades to channel level, so the follow-up would
+ * fail.
  */
 export function threadHandleForPost(
   target: AddressableTarget,
   sent: { messageId: string; threadId: string },
 ): string | undefined {
-  const rawRoot =
-    typeof sent.threadId === "string" && sent.threadId.split(":")[2]
-      ? sent.threadId.split(":")[2]
-      : sent.messageId;
-  const threadRoot = rawRoot.startsWith(`${target.channelId}:`)
-    ? rawRoot.slice(target.channelId.length + 1)
-    : rawRoot;
+  const threadRoot = typeof sent.threadId === "string" ? sent.threadId.split(":")[2] : undefined;
   return threadRoot ? threadHandleForMessage(target, threadRoot) : undefined;
 }
 

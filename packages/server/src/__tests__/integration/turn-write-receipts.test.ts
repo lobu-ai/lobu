@@ -473,6 +473,16 @@ describe('send_message: a reply in the asking conversation vs a post elsewhere',
     expect(body).toMatchObject({ messageId: 'synthetic-post', deliveredInBand: false, run_id: expect.any(Number) });
     expect(posted).toHaveBeenCalledTimes(1);
     expect((await sendRuns()).find((run) => run.id === body.run_id)).toMatchObject({ status: 'completed', approval_status: 'auto' });
+
+    // A post the adapter reports at channel level (a Telegram DM, WhatsApp)
+    // returns no thread handle: one built from its message id would name a
+    // thread the platform cannot post into.
+    posted.mockResolvedValueOnce({ messageId: 'synthetic-post', threadId: 'slack:C_RECEIPTS' });
+    const threadless = await call('/internal/conversations/send', (await turn('p3-auto-2')).token, { target: channelTarget, text: 'allowed again' });
+    const threadlessBody = await threadless.json();
+    expect(threadless.status, JSON.stringify(threadlessBody)).toBe(200);
+    expect(threadlessBody.thread).toBeUndefined();
+    expect(body.thread).toEqual(expect.any(String));
   });
 
   it('a stale or missing connector definition is synced before the send is evaluated', async () => {
