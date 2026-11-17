@@ -9,6 +9,7 @@ import type { Static } from "@sinclair/typebox";
 import { readGrantedScopesFromAuthData } from "../../../../auth/oauth/scopes";
 import { resolveAutomationConnectionVisibilityUserId } from "../../../../authz/automation-connection-visibility";
 import { compileConnectionRowVisibility } from "../../../../authz/connection-visibility";
+import { type ConnectorPolicyExplanation, connectorPolicyNoteSuffix, explainConnectorPolicy } from "../../../../authz/connector-policy";
 import { type ActingPrincipal, resolveActingPrincipal, resolveConnectorPolicy } from "../../../../authz/entity-policy";
 import { applyRunConnectorPolicyAtClaim } from "../../../../authz/operation-run-policy";
 import { authzScopeFromToolContext } from "../../../../authz/scope";
@@ -504,6 +505,13 @@ async function resolveConnectionCardEntityIds(
 		: rawEntityIds.map(Number);
 }
 
+function pendingApprovalMessage(
+	operationName: string,
+	policy: Pick<ConnectorPolicyExplanation, "rules"> | null,
+): string {
+	return `Operation '${operationName}' requires approval${policy ? connectorPolicyNoteSuffix(policy) : ""}. Share the approval_url with the user to confirm.`;
+}
+
 /** Return the durable approval card after admission or a policy change. */
 async function pendingApprovalResult(
 	runId: number,
@@ -511,8 +519,8 @@ async function pendingApprovalResult(
 	ctx: ToolContext,
 ): Promise<ManageOperationsResult> {
 	const sql = getDb();
-	const eventRows = await sql<{ id: number }>`
-		SELECT id
+	const eventRows = await sql<{ id: number; policy: ConnectorPolicyExplanation | null }>`
+		SELECT id, metadata->'policy' AS policy
 		FROM events
 		WHERE organization_id = ${ctx.organizationId}
 		  AND run_id = ${runId}
@@ -520,6 +528,7 @@ async function pendingApprovalResult(
 		ORDER BY id DESC
 		LIMIT 1
 	`;
+	const policy = eventRows[0]?.policy ?? null;
 	const { ownerSlug: orgSlug, baseUrl } = await getOrgUrlContext(ctx);
 	const approvalUrl = buildResourcePermalink(
 		orgSlug,
@@ -532,7 +541,8 @@ async function pendingApprovalResult(
 		...(eventRows[0] ? { event_id: Number(eventRows[0].id) } : {}),
 		approval_url: approvalUrl,
 		status: "pending_approval",
-		message: `Operation '${operationName}' requires approval. Share the approval_url with the user to confirm.`,
+		message: pendingApprovalMessage(operationName, policy),
+		...(policy ? { policy } : {}),
 	};
 }
 
@@ -729,7 +739,10 @@ export async function handleExecute(
 		sql,
 	});
 	if (policy.effect === "deny") {
-		return withFailureCode({ error: `Policy blocks '${operation.operation_key}' for this principal.` }, "PERMISSION");
+		return withFailureCode({
+			error: `Policy blocks '${operation.operation_key}' for this principal${connectorPolicyNoteSuffix(policy) || "."}`,
+			policy: explainConnectorPolicy(policy),
+		}, "PERMISSION");
 	}
 	// A device-pinned connection runs on one member's own machine
 	// (authz/device-access.ts). Block above still wins; `ask_owner` queues for
@@ -772,6 +785,7 @@ export async function handleExecute(
 		if (control) runMetadata = { ...runMetadata, browser_recovery_control: control };
 	}
 	const shouldQueue = policy.effect === "approval" || deviceAccess === "ask_owner";
+	const policyExplanation = explainConnectorPolicy(policy, deviceAccess === "ask_owner");
 	const activation = args.activation
 		? {
 				kind: args.activation.kind,
@@ -926,6 +940,7 @@ export async function handleExecute(
 					connection_name:
 						connection.display_name ?? connection.connector_key,
 					run_id: createdRunId,
+					policy: policyExplanation,
 					initiator: {
 						kind: initiator.initiatorKind,
 						...initiator.initiatorRef,
@@ -976,7 +991,8 @@ export async function handleExecute(
 			event_id: eventId,
 			approval_url: approvalUrl,
 			status: "pending_approval",
-			message: `Operation '${operation.name}' requires approval. Share the approval_url with the user to confirm.`,
+			message: pendingApprovalMessage(operation.name, policyExplanation),
+			policy: policyExplanation,
 		};
 	}
 

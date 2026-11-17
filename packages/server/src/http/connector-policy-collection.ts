@@ -43,7 +43,9 @@ function serializeRule(policy: EntityApprovalPolicy) {
 
 async function readSnapshot(org: string, tx?: DbClient) {
   const policies = (await listEntityApprovalPolicies(org, "connector_action", tx))
-    .filter(p => p.principalKind === null && p.effects.execute !== undefined)
+    // Guardrails are not part of this grant collection: a PUT that echoes the
+    // grants back must neither delete nor convert them.
+    .filter(p => p.principalKind === null && p.kind === "grant" && p.effects.execute !== undefined)
     .sort((a, b) => scopeKey(a).localeCompare(scopeKey(b)));
   // Include stored identity and delivery: changing either invalidates a previously reviewed plan.
   const revision = createHash("sha256").update(JSON.stringify(policies.map(serializeEntityApprovalPolicy))).digest("hex");

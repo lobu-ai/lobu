@@ -76,7 +76,7 @@ describe("org connector policy scopes", () => {
 		const inspect = () => resolveConnectorPolicy({ organizationId: freshOrg.id, connectionId: null, operation: { ...operation, kind: "read" }, actor: human });
 		expect(await inspect()).toMatchObject({ effect: "auto", ruleIds: [readRule!.id], reason: "matched_rule" });
 		expect(await deleteEntityApprovalPolicy({ organizationId: freshOrg.id, resourceClass: "connector_action", operationCategory: "read" })).toBe(true);
-		for (let i = 0; i < 2; i++) expect(await inspect()).toEqual({ effect: "approval", ruleIds: [], reason: "default_approval" });
+		for (let i = 0; i < 2; i++) expect(await inspect()).toEqual({ effect: "approval", ruleIds: [], rules: [], reason: "default_approval" });
 		expect(await listEntityApprovalPolicies(freshOrg.id, "connector_action")).toEqual([]);
 	});
 
@@ -84,6 +84,7 @@ describe("org connector policy scopes", () => {
 		expect(await decide()).toEqual({
 			effect: "approval",
 			ruleIds: [],
+			rules: [],
 			reason: "default_approval",
 		});
 		expect((await decide(agent)).effect).toBe("approval");
@@ -124,6 +125,7 @@ describe("org connector policy scopes", () => {
 		expect(await decide(agent)).toEqual({
 			effect: "auto",
 			ruleIds: [rule.id],
+			rules: [{ id: rule.id, kind: "grant" }],
 			reason: "matched_rule",
 		});
 		expect(
@@ -237,6 +239,7 @@ describe("org connector policy scopes", () => {
 		expect(await decide()).toEqual({
 			effect: "approval",
 			ruleIds: [rule.id],
+			rules: [{ id: rule.id, kind: "grant" }],
 			reason: "matched_rule",
 		});
 		for (const destructiveHint of [false, true]) {
@@ -278,8 +281,46 @@ describe("org connector policy scopes", () => {
 		expect(await decide({ ...agent, ownerResolved: false })).toEqual({
 			effect: "deny",
 			ruleIds: [],
+			rules: [],
 			reason: "unresolved_principal",
 		});
+	});
+
+	it("guardrails apply after the narrowest grant, only tighten, and fail closed", async () => {
+		const exact = await save({
+			operationKey: qualifiedOperationKey(operation.connector_key, operation.operation_key),
+			effects: { execute: "auto" },
+		});
+		// A grant and a guardrail can share one scope.
+		const hold = await save({ connectorKey: operation.connector_key, kind: "guardrail", note: "Review fixture writes", effects: { execute: "approval" } });
+		const sameScopeGrant = await save({ connectorKey: operation.connector_key, effects: { execute: "auto" } });
+		expect(sameScopeGrant.id).not.toBe(hold.id);
+		expect(await decide()).toEqual({
+			effect: "approval",
+			ruleIds: [hold.id],
+			rules: [{ id: hold.id, kind: "guardrail", note: "Review fixture writes" }],
+			reason: "guardrail",
+		});
+		// A guardrail's Ask never loosens a grant's Block.
+		const block = await save({ connectionId, effects: { execute: "deny" } });
+		expect(await decide()).toMatchObject({ effect: "deny", ruleIds: [block.id], reason: "matched_rule" });
+		await deleteEntityApprovalPolicy({ organizationId: orgId, resourceClass: "connector_action", connectionId });
+
+		// A principal guardrail binds that agent and its Automations only.
+		await save({ principalKind: "agent", principalId: agent.id, kind: "guardrail", effects: { execute: "deny" } });
+		expect((await decide(agent)).effect).toBe("deny");
+		expect((await decide({ kind: "automation", id: "automation:123", ownerAgentId: agent.id, ownerResolved: true })).effect).toBe("deny");
+		expect((await decide()).effect).toBe("approval");
+
+		// Writes reject a guardrail that would allow, or one outside connector actions.
+		await expect(save({ kind: "guardrail", effects: { execute: "auto" } })).rejects.toThrow(/only require approval or block/);
+		await expect(upsertEntityApprovalPolicy(orgId, { resourceClass: "entity", kind: "guardrail", entityTypeSlug: "x", createMode: "deny" }))
+			.rejects.toThrow(/Only connector action rules/);
+		// A stored Auto on a guardrail (only reachable by a direct write) reads as Block.
+		await getTestDb()`UPDATE write_policy_action_effects SET effect = 'auto' WHERE policy_id = ${hold.id}`;
+		expect(await decide()).toMatchObject({ effect: "deny", reason: "guardrail", rules: [{ id: hold.id, kind: "guardrail" }] });
+		expect(await deleteEntityApprovalPolicy({ organizationId: orgId, resourceClass: "connector_action", connectorKey: operation.connector_key, kind: "guardrail" })).toBe(true);
+		expect(await decide()).toMatchObject({ effect: "auto", ruleIds: [exact.id], reason: "matched_rule" });
 	});
 
 	it("scopes never cross tenants, including direct database writes", async () => {

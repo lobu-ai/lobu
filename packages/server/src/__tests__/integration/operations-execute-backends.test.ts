@@ -1028,6 +1028,65 @@ describe("operations.execute backend lifecycle", () => {
 		});
 	});
 
+	it("applies a broad guardrail over a narrower Auto grant and explains the decision", async () => {
+		const sql = getTestDb();
+		const note = "Never send credentials through this connector";
+		const guardrail = await upsertEntityApprovalPolicy(orgId, {
+			resourceClass: "connector_action", connectorKey: LOCAL, kind: "guardrail", note,
+			effects: { execute: "deny" },
+		});
+		try {
+			const blocked = await manageOperations({
+				action: "execute", connection_id: localConnectionId, operation_key: "echo",
+				input: { value: "guardrail-blocked" },
+			}, {} as Env, ctx);
+			expect(blocked).toEqual({
+				error: `Policy blocks 'echo' for this principal: ${note}`,
+				policy: { reason: "guardrail", rules: [{ id: guardrail.id, kind: "guardrail", note }] },
+			});
+
+			await upsertEntityApprovalPolicy(orgId, {
+				resourceClass: "connector_action", connectorKey: LOCAL, kind: "guardrail", note,
+				effects: { execute: "approval" },
+			});
+			const held = await manageOperations({
+				action: "execute", connection_id: localConnectionId, operation_key: "echo",
+				input: { value: "guardrail-held" }, idempotency_key: "operation-backend-test:guardrail-held",
+			}, {} as Env, ctx) as { status: string; run_id: number; message: string; policy: unknown };
+			const policy = { reason: "guardrail", rules: [{ id: guardrail.id, kind: "guardrail", note }] };
+			expect(held).toMatchObject({ status: "pending_approval", policy });
+			expect(held.message).toContain(note);
+			const [card] = await sql`
+				SELECT metadata->'policy' AS policy FROM current_event_records
+				WHERE organization_id = ${orgId} AND run_id = ${held.run_id} AND interaction_type = 'approval'
+			`;
+			expect(card.policy).toEqual(policy);
+			const replay = await manageOperations({
+				action: "execute", connection_id: localConnectionId, operation_key: "echo",
+				input: { value: "guardrail-held" }, idempotency_key: "operation-backend-test:guardrail-held",
+			}, {} as Env, ctx);
+			expect(replay).toMatchObject({ status: "pending_approval", run_id: held.run_id, policy });
+
+			// The approver edits the input; the policy, guardrails included, is
+			// evaluated again before dispatch, and a guardrail that now blocks wins.
+			await upsertEntityApprovalPolicy(orgId, {
+				resourceClass: "connector_action", connectorKey: LOCAL, kind: "guardrail", note,
+				effects: { execute: "deny" },
+			});
+			const approved = await manageOperations({
+				action: "approve", run_id: held.run_id, input: { value: "guardrail-edited" },
+			}, {} as Env, ctx);
+			expect(approved).toEqual({
+				error: `Policy now blocks 'echo' for the requesting principal: ${note}. The approval was cancelled.`,
+				policy: { reason: "guardrail", rules: [{ id: guardrail.id, kind: "guardrail", note }] },
+			});
+			const [run] = await sql`SELECT status, approval_status FROM runs WHERE id = ${held.run_id}`;
+			expect(run).toMatchObject({ status: "cancelled", approval_status: "rejected" });
+		} finally {
+			await sql`DELETE FROM write_approval_policies WHERE id = ${guardrail.id}`;
+		}
+	});
+
 	it("replays one pending approval and does not create another approval event", async () => {
 		const execute = () =>
 			manageOperations(
