@@ -537,10 +537,12 @@ Memory:
 
   context
     .command("list")
-    .description("List configured contexts")
+    .description(
+      "List configured contexts and the workspaces each login can reach"
+    )
     .option(
       "--json",
-      "Print JSON: each context's name, URL, and whether credentials are stored"
+      "Print JSON: each context's name, URL, login state, and granted workspaces"
     )
     .action(async (options: { json?: boolean }) => {
       const { contextListCommand } = await import("./commands/context.js");

@@ -24,7 +24,9 @@ export {
 export { parseEnvContent } from "./env-file.js";
 export {
   apiBaseFromContextUrl,
+  type ContextWorkspaceAccess,
   listOrganizations,
+  readContextWorkspaceAccess,
   resolveApiClient,
 } from "./api-client.js";
 export {

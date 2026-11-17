@@ -6,6 +6,7 @@ import {
   type ResolvedContext,
   validateOrgSlug as validateOrgSlugShared,
 } from "./context.js";
+import { credentialCanRefresh, credentialNeedsRefresh } from "@lobu/core";
 import { getToken, loadCredentials } from "./credentials.js";
 import { extractApiError, fetchWithRetry, parseJsonResponse } from "./http.js";
 
@@ -281,9 +282,72 @@ async function getOrganizationsFromUserInfo(
     options.useStoredUserInfoEndpoint === false
       ? null
       : await loadCredentials(contextName);
-  const endpoint =
-    creds?.oauth?.userinfoEndpoint ?? `${apiBaseUrl}/oauth/userinfo`;
-  const response = await fetchWithRetry(
+  const response = await requestUserInfo(
+    creds?.oauth?.userinfoEndpoint ?? `${apiBaseUrl}/oauth/userinfo`,
+    token,
+    { fetchImpl }
+  );
+  if (!response.ok) return [];
+  return parseUserInfoOrganizations(await response.json().catch(() => null));
+}
+
+/**
+ * What one context's stored login reaches right now. `ok` lists the
+ * workspaces its grant covers (server-side `/oauth/userinfo` `organizations`);
+ * every other state says why that list is unknown, so a caller never renders
+ * "no workspaces" for a login it could not read.
+ */
+export type ContextWorkspaceAccess =
+  | { state: "ok"; workspaces: OrganizationInfo[] }
+  | { state: "logged_out" }
+  | { state: "expired"; refreshable: boolean }
+  | { state: "rejected"; status: number }
+  | { state: "unreachable" }
+  | { state: "error"; status: number };
+
+/**
+ * Read a context's live workspace grant from its own stored login. It never
+ * refreshes the token: contexts share one credentials file whose writes are
+ * read-modify-write, so parallel refreshes would drop rotated refresh tokens.
+ * It also ignores `LOBU_API_TOKEN`, which belongs to the active target only.
+ */
+export async function readContextWorkspaceAccess(
+  context: { name: string; url: string },
+  options: { fetchImpl?: typeof fetch; timeoutMs?: number } = {}
+): Promise<ContextWorkspaceAccess> {
+  const creds = await loadCredentials(context.name);
+  if (!creds) return { state: "logged_out" };
+  if (credentialNeedsRefresh(creds, 0)) {
+    return { state: "expired", refreshable: credentialCanRefresh(creds) };
+  }
+
+  let response: Response;
+  try {
+    response = await requestUserInfo(
+      creds.oauth?.userinfoEndpoint ??
+        `${apiBaseFromContextUrl(context.url)}/oauth/userinfo`,
+      creds.accessToken,
+      { fetchImpl: options.fetchImpl, timeoutMs: options.timeoutMs, retries: 0 }
+    );
+  } catch {
+    return { state: "unreachable" };
+  }
+  if (response.status === 401 || response.status === 403) {
+    return { state: "rejected", status: response.status };
+  }
+  const data = response.ok ? await response.json().catch(() => null) : null;
+  if (!data || typeof data !== "object") {
+    return { state: "error", status: response.status };
+  }
+  return { state: "ok", workspaces: parseUserInfoOrganizations(data) };
+}
+
+function requestUserInfo(
+  endpoint: string,
+  token: string,
+  options: { fetchImpl?: typeof fetch; timeoutMs?: number; retries?: number }
+): Promise<Response> {
+  return fetchWithRetry(
     endpoint,
     {
       headers: {
@@ -291,14 +355,13 @@ async function getOrganizationsFromUserInfo(
         Authorization: `Bearer ${token}`,
       },
     },
-    { fetchImpl }
+    options
   );
-  if (!response.ok) return [];
-  const data = (await response.json().catch(() => null)) as Record<
-    string,
-    unknown
-  > | null;
-  if (!data) return [];
+}
+
+function parseUserInfoOrganizations(raw: unknown): OrganizationInfo[] {
+  if (!raw || typeof raw !== "object") return [];
+  const data = raw as Record<string, unknown>;
   const orgs = Array.isArray(data.organizations) ? data.organizations : [];
   // The server exposes the personal-org slug both top-level and per-entry; use
   // whichever is present so device clients (Owletto Mac/Chrome) can target the

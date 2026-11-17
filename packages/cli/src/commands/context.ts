@@ -1,31 +1,42 @@
 import chalk from "chalk";
 import {
+  type ContextWorkspaceAccess,
   addContext,
   getCurrentContextName,
   loadContextConfig,
-  loadCredentials,
+  readContextWorkspaceAccess,
   removeContext,
   resolveContext,
   setCurrentContext,
 } from "../internal/index.js";
 import type { LobuServerConfig } from "../internal/context.js";
 
+/** Per-context bound so one hung or stopped server never stalls the list. */
+const CONTEXT_USERINFO_TIMEOUT_MS = 3_000;
+
 export async function contextListCommand(
   options: { json?: boolean } = {}
 ): Promise<void> {
   const config = await loadContextConfig();
   const currentContext = await getCurrentContextName();
+  const entries = Object.entries(config.contexts);
+  const access = await Promise.all(
+    entries.map(([name, context]) =>
+      readContextWorkspaceAccess(
+        { name, url: context.url },
+        { timeoutMs: CONTEXT_USERINFO_TIMEOUT_MS }
+      )
+    )
+  );
 
   if (options.json) {
-    // Stored credentials may be expired; listing must not refresh them.
-    const contexts = await Promise.all(
-      Object.entries(config.contexts).map(async ([name, context]) => ({
-        name,
-        url: context.url,
-        current: name === currentContext,
-        loggedIn: (await loadCredentials(name)) !== null,
-      }))
-    );
+    const contexts = entries.map(([name, context], index) => ({
+      name,
+      url: context.url,
+      current: name === currentContext,
+      loggedIn: access[index]!.state !== "logged_out",
+      access: access[index]!,
+    }));
     process.stdout.write(
       `${JSON.stringify({ current: currentContext, contexts }, null, 2)}\n`
     );
@@ -33,10 +44,11 @@ export async function contextListCommand(
   }
 
   console.log(chalk.bold("\n  Lobu contexts"));
-  for (const [name, context] of Object.entries(config.contexts)) {
+  entries.forEach(([name, context], index) => {
     const marker = name === currentContext ? chalk.green(" *") : "  ";
     console.log(`${marker} ${name}  ${chalk.dim(context.url)}`);
-  }
+    console.log(`      ${formatWorkspaceAccess(name, access[index]!)}`);
+  });
 
   if (process.env.LOBU_CONTEXT || process.env.LOBU_API_URL) {
     console.log(chalk.dim("\n  Environment override is active."));
@@ -49,6 +61,36 @@ export async function contextListCommand(
   }
 
   console.log();
+}
+
+function formatWorkspaceAccess(
+  name: string,
+  access: ContextWorkspaceAccess
+): string {
+  switch (access.state) {
+    case "ok":
+      return access.workspaces.length > 0
+        ? `workspaces: ${access.workspaces.map((org) => org.slug).join(", ")}`
+        : chalk.yellow("no workspaces granted to this login");
+    case "logged_out":
+      return chalk.dim(`not logged in (lobu login -c ${name})`);
+    case "expired":
+      return access.refreshable
+        ? chalk.yellow(
+            `access token expired; the next command on ${name} refreshes it`
+          )
+        : chalk.red(
+            `access token expired and cannot be refreshed (lobu login -c ${name})`
+          );
+    case "rejected":
+      return chalk.red(
+        `login rejected, HTTP ${access.status} (lobu login -c ${name} --force)`
+      );
+    case "unreachable":
+      return chalk.dim("server unreachable");
+    case "error":
+      return chalk.red(`workspace lookup failed, HTTP ${access.status}`);
+  }
 }
 
 export async function contextCurrentCommand(): Promise<void> {
