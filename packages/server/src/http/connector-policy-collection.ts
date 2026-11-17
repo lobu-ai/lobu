@@ -1,12 +1,13 @@
 import { createHash } from "node:crypto";
 import type { Context } from "hono";
-import { canonicalConnectorPolicyScope } from "../authz/connector-policy";
+import { type ConnectorPolicyKind, canonicalConnectorPolicyScope } from "../authz/connector-policy";
 import {
   deleteEntityApprovalPolicy,
   type EntityApprovalPolicy,
   type EntityApprovalPolicyInput,
   listEntityApprovalPolicies,
   upsertEntityApprovalPolicy,
+  validatePolicyKindAndNote,
   withConnectorPolicyTransaction,
 } from "../authz/entity-policy";
 import type { DbClient } from "../db/client";
@@ -15,24 +16,26 @@ import { parsePolicy, requireHumanWorkspaceAdmin, serializeEntityApprovalPolicy,
 
 function scopeKey(policy: EntityApprovalPolicyInput) {
   const scope = canonicalConnectorPolicyScope(policy);
-  return JSON.stringify([scope.connectorKey, scope.connectionId, policy.operationKey ?? null, scope.operationCategory]);
+  // A grant and a guardrail may share one scope; kind is part of the rule's identity.
+  return JSON.stringify([scope.connectorKey, scope.connectionId, policy.operationKey ?? null, scope.operationCategory, policy.kind ?? "grant"]);
 }
 
 function serializeRule(policy: EntityApprovalPolicy) {
   return {
+    id: policy.id,
     ...(policy.connectorKey === null ? {} : { connector_key: policy.connectorKey }),
     ...(policy.connectionId === null ? {} : { connection_id: policy.connectionId }),
     ...(policy.operationKey === null ? {} : { operation_key: policy.operationKey }),
     ...(policy.operationCategory === null ? {} : { operation_category: policy.operationCategory }),
     effect: policy.effects.execute,
+    ...(policy.kind === "grant" ? {} : { kind: policy.kind }),
+    ...(policy.note === null ? {} : { note: policy.note }),
   };
 }
 
 async function readSnapshot(org: string, tx?: DbClient) {
   const policies = (await listEntityApprovalPolicies(org, "connector_action", tx))
-    // Guardrails are not part of this grant collection: a PUT that echoes the
-    // grants back must neither delete nor convert them.
-    .filter(p => p.principalKind === null && p.kind === "grant" && p.effects.execute !== undefined)
+    .filter(p => p.principalKind === null && p.effects.execute !== undefined)
     .sort((a, b) => scopeKey(a).localeCompare(scopeKey(b)));
   // Include stored identity and delivery: changing either invalidates a previously reviewed plan.
   const revision = createHash("sha256").update(JSON.stringify(policies.map(serializeEntityApprovalPolicy))).digest("hex");
@@ -65,11 +68,16 @@ export async function replaceConnectorPolicyCollection(c: Context) {
     const scopes = new Set<string>();
     policies = body.rules.map((rule: unknown) => {
       if (!rule || typeof rule !== "object" || Array.isArray(rule) ||
-        Object.keys(rule).some(key => !["connector_key", "connection_id", "operation_key", "operation_category", "effect"].includes(key))) {
-        throw new Error("A rule accepts only connector_key, connection_id, operation_key, operation_category, and effect.");
+        Object.keys(rule).some(key => !["id", "connector_key", "connection_id", "operation_key", "operation_category", "effect", "kind", "note"].includes(key))) {
+        throw new Error("A rule accepts only id, connector_key, connection_id, operation_key, operation_category, effect, kind, and note.");
       }
-      const { effect, ...scope } = rule as Record<string, unknown>;
-      const policy = parsePolicy({ ...scope, resource_class: "connector_action", effects: { execute: effect } }, false);
+      // `id` is read-only: clients echo it back, but scope and kind identify the rule.
+      const { id, effect, kind, note, ...scope } = rule as Record<string, unknown>;
+      if (id !== undefined && !(Number.isSafeInteger(id) && (id as number) > 0)) throw new Error("id must be a positive integer.");
+      const parsed = parsePolicy({ ...scope, resource_class: "connector_action", effects: { execute: effect } }, false);
+      // The collection is the whole desired state, so an omitted note clears it.
+      const checked = validatePolicyKindAndNote({ ...parsed, kind: kind as ConnectorPolicyKind | undefined, note: (note ?? null) as string | null });
+      const policy = { ...parsed, kind: checked.kind, note: checked.note ?? null };
       const key = scopeKey(policy);
       if (scopes.has(key)) throw new Error("Duplicate policy scope.");
       scopes.add(key);

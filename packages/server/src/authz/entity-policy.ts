@@ -236,6 +236,21 @@ function normalizePolicyNote(value: unknown): string | null | undefined {
 }
 
 /**
+ * Validate a rule's kind and note. Only connector action rules can be
+ * guardrails, and a guardrail can only tighten, so it never stores `auto`.
+ */
+export function validatePolicyKindAndNote(
+	input: Pick<EntityApprovalPolicyInput, "resourceClass" | "kind" | "note" | "effects">,
+): { kind: ConnectorPolicyKind; note: string | null | undefined } {
+	const kind = normalizePolicyKind(input.kind);
+	if (kind === "guardrail" && input.resourceClass !== "connector_action")
+		throw new Error("Only connector action rules can be guardrails.");
+	if (kind === "guardrail" && input.effects?.execute === "auto")
+		throw new Error("A guardrail can only require approval or block; use a grant to allow.");
+	return { kind, note: normalizePolicyNote(input.note) };
+}
+
+/**
  * The stored effect a policy attaches to `action`, or the class default if the
  * policy declares no row for that action. A policy is a SPARSE override: a scope
  * that sets only `execute` (or only `delete`) leaves the other actions at their
@@ -1200,12 +1215,7 @@ export async function upsertEntityApprovalPolicy(
 	const fieldPath =
 		resourceClass === "entity" ? input.fieldPath?.trim() || null : null;
 	const entityId = resourceClass === "entity" ? (input.entityId ?? null) : null;
-	const kind = normalizePolicyKind(input.kind);
-	if (kind === "guardrail" && resourceClass !== "connector_action")
-		throw new Error("Only connector action rules can be guardrails.");
-	if (kind === "guardrail" && input.effects?.execute === "auto")
-		throw new Error("A guardrail can only require approval or block; use a grant to allow.");
-	const note = normalizePolicyNote(input.note);
+	const { kind, note } = validatePolicyKindAndNote({ ...input, resourceClass });
 	const effectSet = actionEffectSetForInput(resourceClass, input);
 	const approvalConnectionId = input.approvalConnectionId?.trim() || null;
 	const approvalChannelId = input.approvalChannelId?.trim() || null;

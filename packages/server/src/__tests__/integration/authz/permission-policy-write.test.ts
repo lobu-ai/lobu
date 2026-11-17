@@ -447,8 +447,8 @@ describe("permission policy HTTP writes", () => {
 		const scope = { resource_class: "connector_action", connection_id: connection.id, operation_category: "write" };
 		const saved = await orgRules([{ connection_id: connection.id, operation_category: "write", effect: "auto" }]);
 		expect(saved.status).toBe(200);
-		expect((await saved.json()).rules).toEqual([{ connection_id: connection.id, operation_category: "write", effect: "auto" }]);
 		const policy = (await listEntityApprovalPolicies(org.id, "connector_action")).find(row => row.connectionId === connection.id)!;
+		expect((await saved.json()).rules).toEqual([{ id: policy.id, connection_id: connection.id, operation_category: "write", effect: "auto" }]);
 		const input = { connection_id: String(connection.id), operation_key: "classify", agent_id: agentId };
 		const inspect = () => request("GET", input, { explain: true });
 		expect(await (await inspect()).json()).toEqual({ effect: "auto", rule_ids: [policy.id], reason: "matched_rule" });
