@@ -35,7 +35,8 @@ const MAX_LOCAL_NAME = 255 - "local:".length;
 /**
  * The one derivation of a connected app's policy key, computed where the token
  * is verified and never read off a request field. A hosted web client is named
- * by the registrable domain its redirects share; one whose redirects span
+ * by the registrable domain its redirects share (private suffixes such as
+ * vercel.app count, so tenants on one host stay apart); one whose redirects span
  * domains is named by its client id. A client that holds its bearer locally
  * (device flow, loopback, or a legacy row without a grant type) is named by the
  * client name it registered: self-asserted, which is safe only because app
@@ -57,7 +58,7 @@ export function deriveAppPrincipalId(
 		? (token.redirectUris ?? []).map(hostedRedirectHost)
 		: [];
 	if (hosts.length > 0 && hosts.every((host) => host !== null)) {
-		const domains = new Set(hosts.map((host) => getDomain(host as string) ?? host));
+		const domains = new Set(hosts.map((host) => getDomain(host as string, { allowPrivateDomains: true }) ?? host));
 		return domains.size === 1 ? `web:${[...domains][0]}` : `client:${token.clientId}`;
 	}
 	const name = token.clientName?.trim();

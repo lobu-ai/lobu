@@ -47,6 +47,8 @@ function collectionPrincipal(c: Context): CollectionPrincipal | string {
   if (id.length > 255 || id.trim() !== id || !APP_KEY_PREFIXES.some(prefix => id.startsWith(prefix) && id.length > prefix.length)) {
     return "principal_id must be an app key: web:<domain>, client:<id>, local:<name> or pat:<id>.";
   }
+  // Derived web keys are lowercase; a mixed-case rule would never match a caller.
+  if (id.startsWith("web:") && id !== id.toLowerCase()) return "A web: app key must be lowercase.";
   return { principalKind: "app", principalId: id };
 }
 

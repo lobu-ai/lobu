@@ -365,7 +365,10 @@ describe("connected app caller identity", () => {
     const spanning = await oauthToken(["https://a.example.com/cb", "https://b.example.net/cb"]);
     const device = await oauthToken([], "device_code", "  Synthetic CLI  ");
     const nameless = await oauthToken(["http://127.0.0.1:8123/cb"], "authorization_code", null);
+    // A private public suffix keeps tenants on one host apart.
+    const tenant = await oauthToken(["https://synthetic-tenant.vercel.app/cb"]);
     for (const [key, token] of [
+      ["web:synthetic-tenant.vercel.app", tenant.token],
       [`pat:${pat.id}`, pat.token],
       [`client:${spanning.clientId}`, spanning.token],
       ["local:Synthetic CLI", device.token],
@@ -380,7 +383,7 @@ describe("connected app caller identity", () => {
     }
   });
 
-  it("lets the user cancel a run their app is holding", async () => {
+  it("lets the user cancel a run their app is holding, but not another user of the same app", async () => {
     const member = await createTestUser();
     await addUserToOrganization(member.id, org.id, "member");
     const client = await createTestOAuthClient({ redirect_uris: ["https://app.example.com/callback"] });
@@ -388,6 +391,16 @@ describe("connected app caller identity", () => {
     await setRules(appPath("web:example.com"), [{ effect: "approval", kind: "guardrail" }]);
     const held = await execute(token);
     expect(held.body.status).toBe("pending_approval");
+
+    // The app key is shared by every user of the app, so it confers no ownership.
+    const otherMember = await createTestUser();
+    await addUserToOrganization(otherMember.id, org.id, "member");
+    const sameApp = await createTestAccessToken(otherMember.id, org.id, client.client_id, { scope: "mcp:read mcp:write", authorizationGrantType: "authorization_code" });
+    const refused = await request("POST", `/api/${org.slug}/manage_operations`, { action: "cancel", run_id: held.body.run_id }, sameApp.token);
+    expect(await refused.json()).toMatchObject({ error: expect.stringContaining("Only the requester") });
+    const [stillHeld] = await getTestDb()`SELECT status FROM runs WHERE id = ${held.body.run_id}`;
+    expect(stillHeld.status).toBe("pending");
+
     cookie = (await createTestSession(member.id)).cookieHeader;
     const cancelled = await request("POST", `/api/${org.slug}/manage_operations`, { action: "cancel", run_id: held.body.run_id });
     expect(await cancelled.json()).toMatchObject({ cancelled: true });
@@ -401,7 +414,7 @@ describe("connected app caller identity", () => {
     }
     const grant = await request("PUT", appPath("web:example.com"), { revision: empty.revision, rules: [{ effect: "deny" }] });
     expect(await grant.json()).toMatchObject({ message: "A rule for an app must be a guardrail; use a workspace grant to allow." });
-    for (const query of ["?principal_kind=agent&principal_id=x", "?principal_id=web:example.com", "?principal_kind=app&principal_id=example.com", "?principal_kind=app&principal_id=%20web:example.com"]) {
+    for (const query of ["?principal_kind=agent&principal_id=x", "?principal_id=web:example.com", "?principal_kind=app&principal_id=example.com", "?principal_kind=app&principal_id=%20web:example.com", "?principal_kind=app&principal_id=web:Example.com"]) {
       expect((await request("GET", `${path()}${query}`)).status, query).toBe(400);
     }
     expect(withoutIds((await snapshot()).rules)).toEqual([{ effect: "auto" }]);
