@@ -15,6 +15,7 @@ import {
   isReplyInAskingConversation,
   parseConversationRef,
 } from "../../conversations/conversation-ref.js";
+import { getPlatformDescriptor } from "../../connections/platforms/index.js";
 import {
   ChatTransportUnavailableError,
   outboundChatTextError,
@@ -377,7 +378,10 @@ export function createConversationsRoutes(): Hono<WorkerContext> {
         },
         { connectionId: target.connectionId, channelKey: target.channelKey, threadId }
       );
-      if (!reply) {
+      // Connector-transport platforms already deliver through their own
+      // connector operation as the connection owner; they move onto agent
+      // identity separately, so only Chat SDK transports become runs here.
+      if (!reply && !getPlatformDescriptor(target.platform)?.connectorTransport) {
         return await sendAsOperation(c, { ...worker, organizationId, agentId }, target, threadId, text);
       }
 
@@ -402,9 +406,9 @@ export function createConversationsRoutes(): Hono<WorkerContext> {
           throw error;
         }
         logger.info(
-          `agent ${agentId} replied in ${target.platform}/${target.channelId}${threadId ? " (thread)" : ""} via ${target.connectionId}`
+          `agent ${agentId} ${reply ? "replied" : "posted"} in ${target.platform}/${target.channelId}${threadId ? " (thread)" : ""} via ${target.connectionId}`
         );
-        // The reply landed in the conversation that triggered the run, so the
+        // A reply landed in the conversation that triggered the run, so the
         // user has ALREADY read the agent's answer, and the terminal
         // `finalText` the worker is about to emit is a report about it —
         // posting that too is the double-message. The worker's conversation
@@ -413,7 +417,7 @@ export function createConversationsRoutes(): Hono<WorkerContext> {
         return c.json({
           messageId: sent.messageId || null,
           thread: threadHandleForPost(target, sent),
-          deliveredInBand: true,
+          deliveredInBand: reply,
         });
       });
     } catch (error) {
