@@ -21,12 +21,15 @@
  *   - connector-sourced (connection_id IS NOT NULL) guidance is NOT injected
  *   - authorship gate: non-admin members and system contexts are rejected at
  *     save time; owners/admins are accepted
+ *   - guidance saved by a connected app (PAT, OAuth bearer, token-derived
+ *     session) is held for approval and reaches no prompt until approved
  */
 
 import postgres from 'postgres';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { PROD_PG_VALUE_OPTIONS } from '../../../db/client';
 import { deleteContent } from '../../../tools/delete_content';
+import { type AuthContext, executeTool } from '../../../tools/execute';
 import { saveContent } from '../../../tools/save_content';
 import type { ToolContext } from '../../../tools/registry';
 import {
@@ -42,13 +45,18 @@ import { initWorkspaceProvider } from '../../../workspace';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import {
   addUserToOrganization,
+  createTestAccessToken,
   createTestConnection,
   createTestEvent,
+  createTestOAuthClient,
   createTestOrganization,
+  createTestPAT,
+  createTestSession,
   createTestUser,
   ownerToolContext,
   seedSystemEntityTypes,
 } from '../../setup/test-fixtures';
+import { postForm, testRequest } from '../../setup/test-helpers';
 
 const env = {} as never;
 
@@ -935,5 +943,100 @@ describe('org-wide guidance context', () => {
     expect(block!.length).toBeLessThanOrEqual(ORG_GUIDANCE_CHAR_BUDGET);
     expect(block!.endsWith(ORG_GUIDANCE_TRUNCATION_MARKER)).toBe(true);
     expect(block!.split(ORG_GUIDANCE_TRUNCATION_MARKER.trim()).length).toBe(2);
+  });
+});
+
+/**
+ * Guidance lands in every agent's system prompt, so guidance from anything but
+ * a person's own web session (a PAT, a connected app's OAuth bearer, a session
+ * exchanged from a token) is held as a pending approval through save_memory's
+ * REST entrypoint, and no agent sees it until an owner approves.
+ */
+describe('org-wide guidance from a connected app is held for approval', () => {
+  let orgId: string;
+  let orgSlug: string;
+  let ownerAuth: AuthContext;
+  let cookie: string;
+  const callers: Record<string, () => Promise<string>> = {};
+
+  beforeAll(async () => {
+    await initWorkspaceProvider();
+    const org = await createTestOrganization({ name: 'Held Guidance Org' });
+    orgId = org.id;
+    orgSlug = org.slug;
+    const owner = await createTestUser({ name: 'Held Guidance Owner' });
+    await addUserToOrganization(owner.id, org.id, 'owner');
+    ownerAuth = {
+      organizationId: org.id,
+      tokenOrganizationId: org.id,
+      userId: owner.id,
+      memberRole: 'owner',
+      agentId: null,
+      requestedAgentId: null,
+      isAuthenticated: true,
+      clientId: null,
+      scopes: ['mcp:read', 'mcp:write', 'mcp:admin'],
+      tokenType: 'oauth',
+      requestUrl: `http://localhost/api/${org.id}`,
+      baseUrl: '',
+      scopedToOrg: true,
+      allowCrossOrg: false,
+    };
+    cookie = (await createTestSession(owner.id)).cookieHeader;
+    const pat = (await createTestPAT(owner.id, org.id, { scope: 'mcp:read mcp:write mcp:admin' })).token;
+    const client = await createTestOAuthClient();
+    const oauth = (
+      await createTestAccessToken(owner.id, org.id, client.client_id, { scope: 'mcp:read mcp:write mcp:admin' })
+    ).token;
+    callers['admin PAT'] = async () => pat;
+    callers['OAuth bearer'] = async () => oauth;
+    callers['token-derived session'] = async () => {
+      const exchange = await postForm('/api/extension-session', { token: pat });
+      expect(exchange.status).toBe(200);
+      return ((await exchange.json()) as { session_token: string }).session_token;
+    };
+  });
+
+  const saveGuidance = (content: string, auth: { token?: string; cookie?: string }) =>
+    testRequest('POST', `/api/${orgSlug}/save_memory`, {
+      ...auth,
+      body: { content, semantic_type: GUIDANCE_SEMANTIC_TYPE },
+    });
+
+  it.each(['admin PAT', 'OAuth bearer', 'token-derived session'])(
+    '%s: guidance is held and reaches no prompt until an owner approves it',
+    async (caller) => {
+      const content = `Held guidance via ${caller}.`;
+      const res = await saveGuidance(content, { token: await callers[caller]!() });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { status?: string; run_id?: number; id?: number };
+      expect(body.status).toBe('pending_approval');
+      expect(body.id).toBeUndefined();
+      expect(typeof body.run_id).toBe('number');
+
+      const sql = getTestDb();
+      const [run] = await sql`SELECT approval_status FROM runs WHERE id = ${body.run_id!}`;
+      expect(run).toMatchObject({ approval_status: 'pending' });
+      const stored = await sql`
+        SELECT id FROM events
+        WHERE organization_id = ${orgId} AND semantic_type = ${GUIDANCE_SEMANTIC_TYPE}
+          AND payload_text = ${content}
+      `;
+      expect(stored).toHaveLength(0);
+      expect((await loadOrgGuidanceBlock(orgId)) ?? '').not.toContain(content);
+
+      await executeTool('manage_operations', { action: 'approve', run_id: body.run_id }, env, ownerAuth);
+      expect(await loadOrgGuidanceBlock(orgId)).toContain(content);
+    }
+  );
+
+  it("an owner's web session saves guidance directly", async () => {
+    const content = 'Direct guidance from the owner web session.';
+    const res = await saveGuidance(content, { cookie });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { status?: string; id?: number };
+    expect(body.status).toBeUndefined();
+    expect(typeof body.id).toBe('number');
+    expect(await loadOrgGuidanceBlock(orgId)).toContain(content);
   });
 });

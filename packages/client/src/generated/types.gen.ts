@@ -449,43 +449,56 @@ export type SaveMemoryResponses = {
   /**
    * Successful response
    */
-  200: {
-    id: number;
-    entity_ids: Array<number>;
-    title: string | null;
-    semantic_type: string;
-    payload_type?: "text" | "markdown" | "json_template" | "media" | "empty";
-    payload_text?: string | null;
-    payload_data?: {
-      [key: string]: unknown;
-    };
-    payload_template?: {
-      [key: string]: unknown;
-    } | null;
-    attachments?: Array<unknown>;
-    source_url?: string | null;
-    created_at: string;
-    supersedes_event_id?: number;
-    view_url?: string;
-    durable_at: string;
-    indexing_status: "pending" | "completed";
-    searchable: boolean;
-    created: boolean;
-    metadata: {
-      [key: string]: unknown;
-    };
-    exact_read: {
-      method: "client.knowledge.read";
-      content_ids: [unknown];
-    };
-    /**
-     * Names from entity_ids that were not linked: no readable record has that exact name, or several do.
-     */
-    unlinked: Array<{
-      name: string;
-      reason: "not_found" | "ambiguous" | "not_writable";
-    }>;
-  };
+  200:
+    | {
+        id: number;
+        entity_ids: Array<number>;
+        title: string | null;
+        semantic_type: string;
+        payload_type?:
+          | "text"
+          | "markdown"
+          | "json_template"
+          | "media"
+          | "empty";
+        payload_text?: string | null;
+        payload_data?: {
+          [key: string]: unknown;
+        };
+        payload_template?: {
+          [key: string]: unknown;
+        } | null;
+        attachments?: Array<unknown>;
+        source_url?: string | null;
+        created_at: string;
+        supersedes_event_id?: number;
+        view_url?: string;
+        durable_at: string;
+        indexing_status: "pending" | "completed";
+        searchable: boolean;
+        created: boolean;
+        metadata: {
+          [key: string]: unknown;
+        };
+        exact_read: {
+          method: "client.knowledge.read";
+          content_ids: [unknown];
+        };
+        /**
+         * Names from entity_ids that were not linked: no readable record has that exact name, or several do.
+         */
+        unlinked: Array<{
+          name: string;
+          reason: "not_found" | "ambiguous" | "not_writable";
+        }>;
+      }
+    | {
+        status: "pending_approval";
+        run_id: number;
+        event_id: number;
+        approval_url?: string;
+        message: string;
+      };
 };
 
 export type SaveMemoryResponse = SaveMemoryResponses[keyof SaveMemoryResponses];

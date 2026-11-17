@@ -18,6 +18,7 @@ import {
 } from '@lobu/core/contracts/tools/save-memory';
 import { Type } from '@sinclair/typebox';
 import { resolveAutomationAttribution } from '../automations/automation-source';
+import { isHumanDecision } from '../auth/direct-user-context';
 import { hasRequiredMcpScope } from '../auth/tool-access';
 import { resolvePersonalMemoryResource } from '../authz/personal-memory';
 import { compileConnectionFkVisibility } from '../authz/connection-visibility';
@@ -26,8 +27,16 @@ import { authzScopeFromToolContext } from '../authz/scope';
 import { resolveChannelEntityId } from '../authz/channel-entity';
 import { type DbClient, getDb, parsePgNumberArray, pgBigintArray } from '../db/client';
 import type { Env } from '../index';
+import {
+  currentMcpActivityAttribution,
+  currentMcpActivityEventMetadata,
+} from '../lobu/stores/mcp-client-conversations';
+import { orgContext } from '../lobu/stores/org-context';
+import { resolveActionOrigin } from '../notifications/action-origin';
+import { notifyActionApprovalNeeded } from '../notifications/triggers';
 import { INTERACTIVE_EVENT_CARD_REFRESH_TASK } from '../scheduled/task-definitions';
 import { enqueueTasksInTransaction } from '../scheduled/task-scheduler';
+import { ApprovalKind, approvalContext, normalApprovalImpact } from '../utils/approval-context';
 import { ToolUserError } from '../utils/errors';
 import { validateSaveContentSemanticType } from '../utils/event-kind-validation';
 import { getConfiguredEmbeddingModel, needsEmbeddingSql } from '../utils/embeddings';
@@ -49,13 +58,16 @@ import {
   resolveEntityNameReferences,
 } from '../utils/entity-name-references';
 import { isUniqueViolation } from '../utils/pg-errors';
+import { buildResourcePermalink } from '../utils/url-builder';
 import { trackAutomationReaction } from '../utils/automation-reactions';
 import { isSystemContext, workspaceScopeDenialMessage } from './access-control';
+import { resolveApprovalChatOrigin } from './admin/approval-delivery';
+import { resolveRunInitiator } from './initiator';
 import { MEMBER_ENTITY_TYPE_SLUG } from './constants';
 import type { ToolContext } from './registry';
 import { withTurnIdempotencyKey } from './turn-write-idempotency';
 import { withValidatedArgs } from './validate-args';
-import { buildEventViewUrl } from './view-urls';
+import { buildEventViewUrl, getOrgUrlContext } from './view-urls';
 import { eventClientId } from '../auth/event-client-id';
 
 // Leave headroom below the 512 KiB MCP App snapshot ceiling for the receipt,
@@ -136,7 +148,7 @@ async function findIdempotentEvent(
 // Result Type
 // ============================================
 
-export const SaveContentResultSchema = Type.Object({
+const SavedContentResultSchema = Type.Object({
   id: Type.Integer(),
   entity_ids: Type.Array(Type.Integer()),
   title: Type.Union([Type.String(), Type.Null()]),
@@ -176,6 +188,20 @@ export const SaveContentResultSchema = Type.Object({
   ),
 });
 
+/** Guidance from a connected app, held until an owner/admin approves it. */
+const HeldGuidanceResultSchema = Type.Object({
+  status: Type.Literal('pending_approval'),
+  run_id: Type.Integer(),
+  event_id: Type.Integer(),
+  approval_url: Type.Optional(Type.String()),
+  message: Type.String(),
+});
+
+export const SaveContentResultSchema = Type.Union([
+  SavedContentResultSchema,
+  HeldGuidanceResultSchema,
+]);
+
 interface SaveContentResult {
   id: number;
   entity_ids: number[];
@@ -214,6 +240,144 @@ interface SaveContentResult {
   unlinked: UnlinkedEntityName[];
 }
 
+interface HeldGuidanceResult {
+  status: 'pending_approval';
+  run_id: number;
+  event_id: number;
+  approval_url?: string;
+  message: string;
+}
+
+/** `runs.action_key` of guidance held for approval. */
+export const SAVE_MEMORY_GUIDANCE_ACTION_KEY = 'save_memory_guidance';
+
+/** The held save_memory arguments a guidance approval applies. */
+export interface HeldGuidanceProposal {
+  args: SaveContentArgs;
+}
+
+export function isHeldGuidanceProposal(proposal: unknown): proposal is HeldGuidanceProposal {
+  const args = (proposal as HeldGuidanceProposal | null)?.args;
+  return args != null && typeof args === 'object' && args.semantic_type === GUIDANCE_SEMANTIC_TYPE;
+}
+
+/** One-line description of held guidance for approval cards and run summaries. */
+export function describeHeldGuidance(proposal: HeldGuidanceProposal): string {
+  const label = proposal.args.title?.trim() || proposal.args.content?.trim() || GUIDANCE_SEMANTIC_TYPE;
+  return label.length > 80 ? `${label.slice(0, 77)}...` : label;
+}
+
+/**
+ * Apply held guidance once an owner/admin approves it. The approver's own
+ * session saves it, so it passes the authorship gate and becomes visible to
+ * agents only now.
+ */
+export function applyHeldGuidanceProposal(
+  proposal: HeldGuidanceProposal,
+  ctx: ToolContext,
+  env: Env
+): Promise<SaveContentResult | HeldGuidanceResult> {
+  return saveContent(proposal.args, env, ctx);
+}
+
+/**
+ * Queue guidance from a connected app (anything but a person's own session) as
+ * a pending approval. Nothing is written to `events` as guidance, so no agent
+ * prompt carries it until a person approves the run.
+ */
+async function holdGuidanceForApproval(
+  args: SaveContentArgs,
+  ctx: ToolContext
+): Promise<HeldGuidanceResult> {
+  const proposal: HeldGuidanceProposal = { args };
+  const label = `Workspace guidance: ${describeHeldGuidance(proposal)}`;
+  const initiator = resolveRunInitiator(ctx);
+  const sql = getDb();
+  const { runId, eventId } = await orgContext.run({ organizationId: ctx.organizationId }, () =>
+    sql.begin(async (tx) => {
+      const inserted = await tx`
+        INSERT INTO runs (
+          organization_id, run_type, action_key, action_input,
+          created_by_user_id, initiator_kind, initiator_ref,
+          approval_status, status, created_at
+        ) VALUES (
+          ${ctx.organizationId}, 'internal', ${SAVE_MEMORY_GUIDANCE_ACTION_KEY},
+          ${tx.json(proposal as unknown as Record<string, unknown>)},
+          ${initiator.createdByUserId},
+          ${initiator.initiatorKind},
+          ${tx.json(initiator.initiatorRef)},
+          'pending', 'pending', current_timestamp
+        )
+        RETURNING id
+      `;
+      const heldRunId = Number((inserted[0] as { id: unknown }).id);
+      const event = await insertEvent(
+        {
+          entityIds: [],
+          organizationId: ctx.organizationId,
+          originId: `run_${heldRunId}_pending`,
+          title: `${label} — pending approval`,
+          content: `Connected app requested: ${label}`,
+          semanticType: 'operation',
+          runId: heldRunId,
+          interactionType: 'approval',
+          interactionStatus: 'pending',
+          interactionInput: proposal as unknown as Record<string, unknown>,
+          metadata: {
+            ...approvalContext(ApprovalKind.Memory, normalApprovalImpact()),
+            tool: 'save_memory',
+            action_key: SAVE_MEMORY_GUIDANCE_ACTION_KEY,
+            proposal,
+            review_fields: [
+              ...(args.title ? [{ key: 'title', value: args.title }] : []),
+              { key: 'guidance', value: args.content },
+              ...(args.supersedes_event_id != null
+                ? [{ key: 'supersedes_event_id', value: args.supersedes_event_id }]
+                : []),
+            ],
+            initiator: { kind: initiator.initiatorKind, ...initiator.initiatorRef },
+            status: 'pending_approval',
+            ...currentMcpActivityEventMetadata(ctx),
+          },
+          authorName: ctx.clientId ?? 'connected app',
+          clientId: eventClientId(ctx),
+        },
+        { sql: tx }
+      );
+      return { runId: heldRunId, eventId: Number(event.id) };
+    })
+  );
+
+  const { ownerSlug, baseUrl } = await getOrgUrlContext(ctx);
+  const approvalUrl = buildResourcePermalink(ownerSlug, { kind: 'run', runId }, baseUrl);
+  const chatOrigin = await resolveApprovalChatOrigin(ctx);
+  const actionOrigin = await resolveActionOrigin(ctx);
+  notifyActionApprovalNeeded({
+    orgId: ctx.organizationId,
+    runId,
+    actionKey: SAVE_MEMORY_GUIDANCE_ACTION_KEY,
+    connectionName: label,
+    eventId,
+    approvalUrl,
+    connectionId: chatOrigin.connectionId,
+    channelId: chatOrigin.channelId,
+    teamId: chatOrigin.teamId,
+    requesterUserId: ctx.userId ?? null,
+    mcpActivity: currentMcpActivityAttribution(ctx),
+    actionOrigin,
+  }).catch((error) => logger.error(error, 'Failed to send guidance approval notification'));
+
+  return {
+    status: 'pending_approval',
+    run_id: runId,
+    event_id: eventId,
+    ...(approvalUrl ? { approval_url: approvalUrl } : {}),
+    message: approvalUrl
+      ? `Workspace guidance is waiting for approval by a workspace owner or admin; agents will not see it until then. Call get_approval with run_id ${runId} to show the confirmation, or give the user approval_url.`
+      : `Workspace guidance is waiting for approval by a workspace owner or admin; agents will not see it until then. Call get_approval with run_id ${runId} to show the confirmation.`,
+  };
+}
+
 /** Server-owned receipt of the names a save could not link. */
 const UNLINKED_ENTITY_NAMES_KEY = '_lobu_unlinked_entity_names';
 
@@ -243,7 +407,7 @@ async function saveContentImpl(
   input: SaveContentArgs,
   _env: Env,
   ctx: ToolContext
-): Promise<SaveContentResult> {
+): Promise<SaveContentResult | HeldGuidanceResult> {
   // A turn that repeats this save for the same input message (a re-run, a
   // redelivered message) replays the first memory instead of storing a second.
   const args = await withTurnIdempotencyKey(ctx.agentTurn, 'save_memory', input);
@@ -574,6 +738,14 @@ async function saveContentImpl(
       WHERE e.organization_id = ${ctx.organizationId} AND et.slug = '$resource'
         AND e.id = ANY(${pgBigintArray(finalEntityIds)}::bigint[]) LIMIT 1`;
     if (restricted) throw new ToolUserError('Workspace guidance cannot carry restricted resource requirements.', 422, 'VALIDATION');
+  }
+
+  // A connected app, agent or Automation holding an owner's credential is not
+  // the owner deciding. Its guidance is held, after every check above, until a
+  // person approves it; approval re-runs this save as the approver. A replay of
+  // guidance already stored under the same idempotency key returns that receipt.
+  if (isOrgGuidance && !prior && !isHumanDecision(ctx)) {
+    return holdGuidanceForApproval(args, ctx);
   }
 
   // 6. Insert into events

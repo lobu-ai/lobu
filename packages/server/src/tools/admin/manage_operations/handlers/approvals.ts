@@ -53,6 +53,13 @@ import {
 	type ManageAutomationsProposal,
 } from "../../manage_automations";
 import {
+	applyHeldGuidanceProposal,
+	describeHeldGuidance,
+	type HeldGuidanceProposal,
+	isHeldGuidanceProposal,
+	SAVE_MEMORY_GUIDANCE_ACTION_KEY,
+} from "../../../save_content";
+import {
 	applyManageEntitySchemaProposal,
 	isManageEntitySchemaProposal,
 	MANAGE_ENTITY_SCHEMA_ACTION_KEY,
@@ -344,6 +351,16 @@ function getBuilderApprovalHandlers(): BuilderApprovalHandler[] {
 				const proposal = p as StoredManageEntitySchemaProposal;
 				return `${proposal.action} ${String(proposal.args.slug)}`;
 			},
+		},
+		{
+			// Workspace guidance a connected app saved: applied as the approver's
+			// own save, so agents see it only from this point on.
+			actionKey: SAVE_MEMORY_GUIDANCE_ACTION_KEY,
+			nounLabel: "Guidance",
+			isValidProposal: isHeldGuidanceProposal,
+			apply: (p, ctx, env) =>
+				applyHeldGuidanceProposal(p as HeldGuidanceProposal, ctx, env),
+			describe: (p) => describeHeldGuidance(p as HeldGuidanceProposal),
 		},
 		{
 			// An agent-authored ask. Unlike the builder families there is no held
