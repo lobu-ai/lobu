@@ -26,7 +26,7 @@ import { executeTool } from "../../../tools/execute";
 import { ensureMemberEntityType } from "../../../utils/member-entity-type";
 import { primeMemberEventKinds } from "../../../utils/event-kind-validation";
 import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
-import { createTestAgent } from "../../setup/test-fixtures";
+import { createTestAgent, createTestEntity } from "../../setup/test-fixtures";
 import { TestWorkspace } from "../../setup/test-mcp-client";
 
 const TEST_ENV: Env = {
@@ -388,6 +388,28 @@ describe("manage_automations reference validation", () => {
 				ctx
 			)
 		).rejects.toThrow(/Invalid event type 'not_a_registered_kind'/i);
+	});
+
+	it("an Automation with no entity scope may output a kind an entity type declares", async () => {
+		await executeTool("manage_entity_schema", {
+			schema_type: "entity_type", action: "create", slug: "filing", name: "Filing",
+			event_kinds: { filed_update: {} },
+		}, TEST_ENV, ctx);
+		const created = await executeTool("manage_automations", {
+			action: "create", slug: "filed-updates", prompt: "File updates against their filing.",
+			managed_agent_id: agentId, outputs: { updates: { event: "filed_update" } },
+		}, TEST_ENV, ctx) as { automation_id: string };
+		expect(Number(created.automation_id)).toBeGreaterThan(0);
+
+		// A scoped Automation keeps its rows on its own entities, so the kind
+		// must be declared by that entity's type or $member.
+		const company = await createTestEntity({
+			name: "Scoped company", entity_type: "company", organization_id: workspace.org.id,
+		});
+		await expect(executeTool("manage_automations", {
+			action: "create", slug: "scoped-filed-updates", prompt: "File updates.",
+			managed_agent_id: agentId, entity_id: company.id, outputs: { updates: { event: "filed_update" } },
+		}, TEST_ENV, ctx)).rejects.toThrow(/Invalid event type 'filed_update'/i);
 	});
 
 	it("accepts a just-registered output kind despite a stale cache", async () => {
