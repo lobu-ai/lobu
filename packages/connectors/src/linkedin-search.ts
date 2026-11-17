@@ -182,11 +182,15 @@ const MULTILINE_HTML = { selector: "p:has(br)", take: "html" } as const;
  */
 export function withLineBreaks(text: string, html: unknown): string {
   if (typeof html !== "string" || !text) return text;
+  // Drop tags until none remain, so one tag split by another cannot reassemble.
+  // A tag skips a ">" inside a double-quoted attribute value.
+  let plain = html.replace(/<br\s*\/?>/gi, "\n");
+  for (let previous = ""; plain !== previous; ) {
+    previous = plain;
+    plain = plain.replace(/<(?:[^>"]|"[^"]*")*>/g, "");
+  }
   const multiline = stripMore(
-    html
-      .replace(/<br\s*\/?>/gi, "\n")
-      // A tag, skipping a ">" inside a double-quoted attribute value.
-      .replace(/<(?:[^>"]|"[^"]*")*>/g, "")
+    plain
       .replace(
         /&(amp|lt|gt|nbsp);/g,
         (_entity, name: string) => HTML_TEXT_ENTITIES[name]
