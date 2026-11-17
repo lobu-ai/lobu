@@ -43,7 +43,7 @@ import {
 } from "./write-action-manifest";
 
 export type EntityPolicyDecision = "allow" | "deny" | "require_approval";
-export type EntityPolicyPrincipalKind = "user" | "agent" | "automation";
+export type EntityPolicyPrincipalKind = "user" | "agent" | "automation" | "app";
 export type EntityMutationAction = "read" | "create" | "update" | "delete";
 /** Stored policy effects: automatic execution, human approval, or a hard block. */
 export type EntityMutationMode = "auto" | "approval" | "deny";
@@ -72,8 +72,11 @@ export function isWriteResourceClass(
 	);
 }
 
-/** A non-human principal a policy row may target. NULL principal = any of this kind. */
-export type PolicyPrincipalKind = "agent" | "automation";
+/**
+ * A non-human principal a policy row may target. NULL principal = any of this kind.
+ * `app` ids come only from `deriveAppPrincipalId` (`auth/app-principal.ts`).
+ */
+export type PolicyPrincipalKind = "agent" | "automation" | "app";
 
 export interface EntityApprovalDeliveryTarget {
 	connectionId: string | null;
@@ -216,7 +219,7 @@ function normalizeResourceClass(value: unknown): WriteResourceClass {
 }
 
 function normalizePrincipalKind(value: unknown): PolicyPrincipalKind | null {
-	return value === "agent" || value === "automation" ? value : null;
+	return value === "agent" || value === "automation" || value === "app" ? value : null;
 }
 
 function normalizePolicyKind(value: unknown): ConnectorPolicyKind {
@@ -481,6 +484,8 @@ export async function resolveActingPrincipal(
 		agentId?: string | null;
 		explicitAutomationId?: number | null;
 		sessionAutomationId?: number | null;
+		/** The verified token's connected-app key (`ToolContext.appPrincipalId`). */
+		appId?: string | null;
 	},
 ): Promise<ActingPrincipal> {
 	// The trusted SESSION automation (stamped by the reaction executor) always wins and
@@ -510,6 +515,11 @@ export async function resolveActingPrincipal(
 			return automationPrincipal(args.explicitAutomationId, owner);
 		}
 		// Caller-controlled tag that isn't this agent's own automation — ignore it.
+	}
+	// An OAuth or PAT caller with no agent and no Automation acts as its app, which
+	// keeps its user's baseline: only rules naming apps can restrict it.
+	if (!args.agentId && args.appId) {
+		return { kind: "app", id: args.appId, ownerAgentId: null, ownerResolved: true };
 	}
 	const kind = classifyMutationPrincipal({
 		userId: args.userId,
@@ -682,6 +692,23 @@ function foldEffectForDecision(
 	action: WriteAction,
 ): EntityMutationMode {
 	return foldEffectForAction(candidates, resourceClass, action);
+}
+
+/**
+ * A connected app starts from its user's baseline (everything allowed). Unlike the
+ * class defaults that bind agents and Automations, only rows naming apps and storing
+ * this action can tighten it, so an app with no app rules behaves exactly as today.
+ */
+function foldAppEffect(
+	candidates: EntityApprovalPolicyRow[],
+	action: WriteAction,
+): EntityMutationMode {
+	let folded: EntityMutationMode = "auto";
+	for (const row of candidates) {
+		const stored = row.principal_kind === "app" ? row.effects[action] : undefined;
+		if (stored !== undefined) folded = moreRestrictive(folded, stored);
+	}
+	return folded;
 }
 
 /**
@@ -920,7 +947,9 @@ export async function evaluateEntityMutation(args: {
 	// floor, blanket, and type-scoped rows — folds max-restrictive.
 	const forEntity = candidates.filter((row) => row.field_path === null);
 	const decision = modeToDecision(
-		foldEffectForDecision(forEntity, "entity", args.action),
+		args.principalKind === "app"
+			? foldAppEffect(forEntity, args.action)
+			: foldEffectForDecision(forEntity, "entity", args.action),
 	);
 	// Reads never queue: approval is treated as deny (stricter than auto, no inbox).
 	if (args.action === "read" && decision === "require_approval") return "deny";
@@ -937,7 +966,8 @@ export async function loadEntityReadRestrictions(args: {
   if (args.principalKind === 'user') return [];
   if (args.ownerResolved === false) return [{ entity_type_slug: null, entity_id: null }];
   const rows = await loadCandidatePolicies({ ...args, principalKind: args.principalKind, allEntityScopes: true });
-  return rows.filter(row => row.field_path === null && row.effects.read !== undefined && row.effects.read !== 'auto')
+  return rows.filter(row => (args.principalKind !== 'app' || row.principal_kind === 'app') &&
+    row.field_path === null && row.effects.read !== undefined && row.effects.read !== 'auto')
     .map(row => ({ entity_type_slug: row.entity_type_slug, entity_id: row.entity_id === null ? null : Number(row.entity_id) }));
 }
 
@@ -1004,7 +1034,9 @@ export async function resolveWriteEffect(args: {
 		targetAgentId: args.targetAgentId ?? null,
 		sql: args.sql,
 	});
-	return foldEffectForDecision(candidates, args.resourceClass, args.action);
+	return args.principalKind === "app"
+		? foldAppEffect(candidates, args.action)
+		: foldEffectForDecision(candidates, args.resourceClass, args.action);
 }
 
 /**
@@ -1057,6 +1089,11 @@ export async function evaluateEntityFieldUpdates(args: {
 		const forField = candidates.filter(
 			(row) => row.field_path === null || row.field_path === field,
 		);
+		if (args.principalKind === "app") {
+			// An app edits with its user's authority, so human-owned fields stay open to it.
+			decisions[field] = modeToDecision(foldAppEffect(forField, "update"));
+			continue;
+		}
 		const policyDecision = modeToDecision(
 			foldEffectForDecision(forField, "entity", "update"),
 		);
@@ -1402,6 +1439,9 @@ export async function resolveStoredActingPrincipal(
 ): Promise<ActingPrincipal> {
 	if (principalKind === "user") {
 		return { kind: "user", id: null, ownerAgentId: null, ownerResolved: true };
+	}
+	if (principalKind === "app" && principalId !== null) {
+		return { kind: "app", id: principalId, ownerAgentId: null, ownerResolved: true };
 	}
 	if (principalKind === "agent") {
 		return { kind: "agent", id: principalId, ownerAgentId: null,

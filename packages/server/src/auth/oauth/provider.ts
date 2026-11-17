@@ -5,8 +5,9 @@
  * Supports PKCE, token exchange, and refresh tokens.
  */
 
-import { type DbClient, pgTextArray } from '../../db/client';
+import { type DbClient, parsePgTextArray, pgTextArray } from '../../db/client';
 import logger from '../../utils/logger';
+import { deriveAppPrincipalId } from '../app-principal';
 import { findExistingPersonalOrg } from '../personal-org-provisioning';
 import { PersonalAccessTokenService } from '../tokens';
 import { organizationLiveSql } from '../../workspace/deletion-state';
@@ -526,9 +527,10 @@ export class OAuthProvider {
     const tokenHash = hashToken(token);
 
     const result = await this.sql`
-      SELECT t.*, u.email, u.name as user_name
+      SELECT t.*, u.email, u.name as user_name, c.redirect_uris AS client_redirect_uris, c.client_name
       FROM oauth_tokens t
       JOIN "user" u ON t.user_id = u.id
+      LEFT JOIN oauth_clients c ON c.id = t.client_id
       WHERE t.token_hash = ${tokenHash}
         AND t.token_type = 'access'
         AND t.revoked_at IS NULL
@@ -540,6 +542,9 @@ export class OAuthProvider {
     const tokenData = result[0] as StoredOAuthToken & {
       email: string;
       user_name: string;
+      // text[] arrives as its raw literal: the pool runs with fetch_types off.
+      client_redirect_uris: string | null;
+      client_name: string | null;
     };
 
     const scopes = parseScopes(tokenData.scope);
@@ -558,6 +563,13 @@ export class OAuthProvider {
       ),
       authorizationGrantType: tokenData.authorization_grant_type,
       clientId: tokenData.client_id,
+      appPrincipalId: deriveAppPrincipalId({
+        kind: 'oauth',
+        clientId: tokenData.client_id,
+        clientName: tokenData.client_name,
+        authorizationGrantType: tokenData.authorization_grant_type,
+        redirectUris: parsePgTextArray(tokenData.client_redirect_uris),
+      }),
       scopes,
       expiresAt: Math.floor(new Date(tokenData.expires_at).getTime() / 1000),
       resource: tokenData.resource || undefined,

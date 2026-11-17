@@ -234,6 +234,8 @@ export interface ToolContext {
   tokenName?: string | null;
   /** OAuth flow that issued this bearer; null for legacy rows and non-OAuth callers. */
   authorizationGrantType?: 'authorization_code' | 'device_code' | null;
+  /** Connected-app policy key derived at token verification (`auth/app-principal.ts`); null for sessions, agents and workers. */
+  appPrincipalId?: string | null;
   /** OAuth scopes granted to this MCP/tool session, when applicable. */
   scopes?: string[] | null;
   tokenType: TokenType;

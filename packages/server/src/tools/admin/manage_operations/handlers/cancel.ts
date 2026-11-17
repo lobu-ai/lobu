@@ -19,6 +19,7 @@ export async function handleCancel(
     userId: ctx.userId,
     agentId: ctx.agentId,
     sessionAutomationId: ctx.actingAutomationId,
+    appId: ctx.appPrincipalId ?? null,
   });
   const human = !ctx.agentId && ctx.actingAutomationId == null && !!ctx.userId;
   const admin = human && await callerIsAdmin(sql, ctx);
@@ -35,10 +36,12 @@ export async function handleCancel(
       FOR UPDATE
     `;
     if (!run) return withFailureCode({ error: 'Operation run not found' }, 'NOT_FOUND');
-    const ownsPrincipal = actor.ownerResolved && actor.id != null &&
+    // An app key is shared by every user of that app, so it never confers ownership on its own.
+    const ownsPrincipal = actor.kind !== 'app' && actor.ownerResolved && actor.id != null &&
       run.policy_principal_kind === actor.kind && run.policy_principal_id === actor.id;
+    // A connected app acts with its user's authority: the user, through any of their apps, owns its runs.
     const ownsUserRun = human && run.created_by_user_id === ctx.userId &&
-      (run.policy_principal_kind == null || run.policy_principal_kind === 'user');
+      (run.policy_principal_kind == null || run.policy_principal_kind === 'user' || run.policy_principal_kind === 'app');
     if (!admin && !ownsPrincipal && !ownsUserRun) {
       return withFailureCode({ error: 'Only the requester or a workspace administrator can cancel this operation.' }, 'PERMISSION');
     }

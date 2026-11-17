@@ -7,6 +7,7 @@
  */
 
 import type { DbClient } from '../db/client';
+import { deriveAppPrincipalId } from './app-principal';
 import type { AuthInfo, PATCreateResponse, PATListItem, StoredPAT } from './oauth/types';
 import { AVAILABLE_SCOPES, HUMAN_MINTED_PAT_SCOPES } from './oauth/scopes';
 import { calculateExpiry, generatePAT, getPATPrefix, hashToken, parseScopes } from './oauth/utils';
@@ -148,6 +149,7 @@ export class PersonalAccessTokenService {
       organizationId: pat.organization_id,
       grantedOrganizationIds: null,
       clientId: `pat_${pat.id}`,
+      appPrincipalId: deriveAppPrincipalId({ kind: 'pat', patId: pat.id }),
       scopes: parseScopes(pat.scope, [...AVAILABLE_SCOPES, ...HUMAN_MINTED_PAT_SCOPES]),
       expiresAt: pat.expires_at
         ? Math.floor(new Date(pat.expires_at).getTime() / 1000)

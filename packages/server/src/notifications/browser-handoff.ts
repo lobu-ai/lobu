@@ -18,7 +18,7 @@ type HandoffSource = {
 	action_input: Record<string, unknown> | null;
 	automation_id: number | null;
 	parent_run_id: number | null;
-	policy_principal_kind: "agent" | "automation" | "user" | null;
+	policy_principal_kind: "agent" | "automation" | "user" | "app" | null;
 	policy_principal_id: string | null;
 	status: string;
 	approval_status: string;

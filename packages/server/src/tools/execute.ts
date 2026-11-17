@@ -75,6 +75,8 @@ export interface AuthContext {
   tokenName?: string | null;
   /** OAuth flow that issued this bearer; null for legacy rows and non-OAuth callers. */
   authorizationGrantType?: 'authorization_code' | 'device_code' | null;
+  /** Connected-app policy key derived at token verification (`auth/app-principal.ts`); null for sessions, agents and workers. */
+  appPrincipalId?: string | null;
   /** Caller IP of the current HTTP request; unset for internal calls. */
   clientIP?: string | null;
   scopes?: string[] | null;
@@ -194,6 +196,7 @@ export function extractAuthContext(c: Context<{ Bindings: Env }>): AuthContext {
     tokenDerivedSession: isTokenDerivedSession(c.var.session),
     tokenName: mcpAuthInfo?.tokenName ?? null,
     authorizationGrantType: mcpAuthInfo?.authorizationGrantType ?? null,
+    appPrincipalId: mcpAuthInfo?.appPrincipalId ?? null,
     clientIP: getClientIP(c.req.raw, c.var.peerRemoteAddress),
     // Token callers (oauth/pat) carry real MCP scopes — pass them straight
     // through so `hasRequiredMcpScope` gates on the actual grant. Session and
@@ -649,6 +652,7 @@ export function toAccountToolContext(authCtx: AuthContext): AccountToolContext {
     tokenDerivedSession: authCtx.tokenDerivedSession ?? false,
     tokenName: authCtx.tokenName ?? null,
     authorizationGrantType: authCtx.authorizationGrantType ?? null,
+    appPrincipalId: authCtx.appPrincipalId ?? null,
     scopes: authCtx.scopes,
     tokenType: authCtx.tokenType,
     scopedToOrg: authCtx.scopedToOrg,
