@@ -99,6 +99,13 @@ export const RESERVED_PATHS = [
   "orgs",
   "slack",
   "dashboard",
+  // Top-level server routes registered ahead of the SPA fallback: a workspace
+  // with one of these slugs would have its pages shadowed by the server's
+  // response.
+  "connect",
+  "catalog",
+  "internal",
+  "mcp-apps",
 ] as const;
 
 export const RESERVED_PATHS_SET: ReadonlySet<string> = new Set(RESERVED_PATHS);
