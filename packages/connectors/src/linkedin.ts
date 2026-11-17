@@ -53,7 +53,22 @@ import {
   type LinkedInInboxCheckpoint,
 } from "./linkedin-inbox.js";
 import { prepareLinkedInDraft } from "./linkedin-drafts.js";
-import { LINKEDIN_HOME_URL } from "./linkedin-browser-script.js";
+import {
+  LinkedInInputError,
+  readLinkedInCompany,
+  readLinkedInProfile,
+  readSearchPage,
+  requiredText as requireLinkedInText,
+  runAction as runLinkedInReadAction,
+  searchLinkedInCompanies,
+  searchLinkedInPeople,
+} from "./linkedin-search.js";
+import {
+  LINKEDIN_ALLOWED_ORIGINS,
+  LINKEDIN_HOME_URL,
+  LINKEDIN_LOGGED_OUT_ERROR,
+  LINKEDIN_LOGGED_OUT_WHEN,
+} from "./linkedin-browser-script.js";
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -417,9 +432,6 @@ interface HomeFeedCommentCoverage {
   timedOut?: boolean;
 }
 
-/** LinkedIn origins the cs_scrape window is allowed to touch. */
-const LINKEDIN_ALLOWED_ORIGINS = ["linkedin.com", "*.linkedin.com"];
-
 const HOME_FEED_COMMENT_COUNT_TEXT_SELECTOR =
   ':scope:not([id^="replaceableComment_"]) div:has(+ hr + div button[aria-label="Open reactions menu"]):not([id^="replaceableComment_"] *) > div:last-child > div:first-child, .social-details-social-counts__comments, .social-details-social-counts__comments-count';
 const HOME_FEED_COMMENT_COUNT_LABEL_SELECTOR =
@@ -504,9 +516,7 @@ const HOME_FEED_SCRAPE_DEADLINE_MS = 25_000;
 const HOME_FEED_SCRAPE_CONFIG = {
   // Current LinkedIn pages scroll inside <main>, not document/window.
   scroll: { max: 8, stall: 3, waitMs: 1500, deep: true },
-  loggedOutWhen: {
-    pathRegex: "/(login|authwall|uas/login|checkpoint|signup)\\b",
-  },
+  loggedOutWhen: LINKEDIN_LOGGED_OUT_WHEN,
   rowSelector:
     'div[componentkey^="expanded"][componentkey*="FeedType_MAIN_FEED_RELEVANCE"], [id^="replaceableComment_urn:li:comment:"]',
   expandRows: {
@@ -801,8 +811,7 @@ async function readMyLinkedInActivity(
   if (!profile.loggedIn) {
     return {
       success: false,
-      error:
-        "Not logged into LinkedIn. Sign in to linkedin.com in the paired Chrome profile, then retry.",
+      error: LINKEDIN_LOGGED_OUT_ERROR,
     };
   }
   const slug = linkedInProfileSlugFromUrl(profile.landedUrl);
@@ -837,8 +846,7 @@ async function readMyLinkedInActivity(
     if (!loggedIn) {
       return {
         success: false,
-        error:
-          "Not logged into LinkedIn. Sign in to linkedin.com in the paired Chrome profile, then retry.",
+        error: LINKEDIN_LOGGED_OUT_ERROR,
       };
     }
     for (const event of buildHomeFeedEvents(rows, new Date())) {
@@ -905,8 +913,7 @@ async function readHomeFeed(ctx: ActionContext): Promise<ActionResult> {
   if (!loggedIn) {
     return {
       success: false,
-      error:
-        "Not logged into LinkedIn. Sign in to linkedin.com in the paired Chrome profile, then retry.",
+      error: LINKEDIN_LOGGED_OUT_ERROR,
     };
   }
   const items: Array<Record<string, unknown>> = [];
@@ -932,6 +939,162 @@ async function readHomeFeed(ctx: ActionContext): Promise<ActionResult> {
     success: true,
     output: { count: items.length, skipped, items },
   };
+}
+
+const SEARCH_POSTS_PAGE_SIZE = 10;
+const SEARCH_POSTS_FEED_TYPE = "FeedType_FLAGSHIP_SEARCH";
+/** "now", "3m", "2h", "5d", "1w", "3mo", "1yr", optionally "• Edited". */
+const POSTED_TIME_RE = /^(?:now|\d+\s?(?:s|m|h|d|w|mo|y|yr)s?)(?:\s*•.*)?$/i;
+
+type SearchPostRow = HomeFeedRow & {
+  lines?: Array<{ t?: string }>;
+  action_reactions?: string;
+  action_comments?: string;
+};
+
+/** Search cards print counts inside the action buttons ("\u200b" when none). */
+function searchActionCount(raw: string | undefined): number {
+  return parseLinkedInCompactCount((raw ?? "").replace(/\u200b/g, ""));
+}
+
+/**
+ * Content search renders the same post cards as the home feed under its own
+ * FeedType. LinkedIn ignores `page` on this surface and loads results by
+ * infinite scroll, so page N scrolls until N pages of posts have rendered.
+ */
+async function searchLinkedInPosts(ctx: ActionContext): Promise<ActionResult> {
+  return runLinkedInReadAction(ctx, (input) => {
+    const keywords = requireLinkedInText(input, "keywords");
+    const sort = input.sort ?? "relevant";
+    if (sort !== "relevant" && sort !== "recent")
+      throw new LinkedInInputError('sort must be "relevant" or "recent"');
+    const page = readSearchPage(input);
+    return async (dispatcher) => {
+      const params = new URLSearchParams({
+        keywords,
+        origin: "GLOBAL_SEARCH_HEADER",
+        sortBy: JSON.stringify([
+          sort === "recent" ? "date_posted" : "relevance",
+        ]),
+      });
+      const url = `https://www.linkedin.com/search/results/content/?${params}`;
+      const baseConfig = myActivityScrapeConfig(
+        SEARCH_POSTS_FEED_TYPE,
+        Math.min(20, page * 2)
+      );
+      const { items: rows, loggedIn } = await extensionDomScrape<SearchPostRow>(
+        {
+          dispatcher,
+          url,
+          config: {
+            ...baseConfig,
+            // Search results carry no inline comment rows worth reading.
+            rowSelector: `div[componentkey^="expanded"][componentkey*="${SEARCH_POSTS_FEED_TYPE}"]`,
+            fields: {
+              ...baseConfig.fields,
+              lines: {
+                selector: "p",
+                take: "objectAll",
+                parts: { t: { take: "text" } },
+              },
+              action_reactions: {
+                selector: '[aria-label^="Reaction button state:"]',
+                take: "text",
+              },
+              action_comments: {
+                selector: '[aria-label="Comment"]',
+                take: "text",
+              },
+            },
+          },
+          parseRows: (raw) =>
+            (raw as SearchPostRow[]).map((row) => ({
+              ...row,
+              body: stripMyActivityChrome(row.body ?? ""),
+              post_identity: decodeHomeFeedPostIdentity(row.post_identity),
+            })),
+          allowedOrigins: LINKEDIN_ALLOWED_ORIGINS,
+          persistent: false,
+        }
+      );
+      if (!loggedIn) return null;
+      // Card paragraphs run author, degree, headline, posted time, then the
+      // commentary; link previews and dialog chrome follow it.
+      const cards = new Map<
+        string,
+        {
+          posted: string;
+          body?: string;
+          reactions: number;
+          comments: number;
+          links: HomeFeedLink[];
+        }
+      >();
+      for (const row of rows) {
+        const postUrl = normalizeLinkedInPostUrl(row.post_identity ?? "");
+        const lines = (row.lines ?? []).map((line) =>
+          (line?.t ?? "").replace(/\s+/g, " ").trim()
+        );
+        const timeIndex = lines.findIndex((line) => POSTED_TIME_RE.test(line));
+        if (!postUrl || timeIndex < 0 || cards.has(postUrl)) continue;
+        cards.set(postUrl, {
+          posted: lines[timeIndex].replace(/\s*•.*$/, ""),
+          body: lines[timeIndex + 1]?.replace(/\s*…\s*more$/, ""),
+          reactions: searchActionCount(row.action_reactions),
+          comments: searchActionCount(row.action_comments),
+          links: row.links ?? [],
+        });
+      }
+      const posts = buildHomeFeedEvents(rows, new Date())
+        .filter((event) => event.origin_type === "post" && event.source_url)
+        .slice(
+          (page - 1) * SEARCH_POSTS_PAGE_SIZE,
+          page * SEARCH_POSTS_PAGE_SIZE
+        )
+        .map((event) => {
+          const metadata = (event.metadata ?? {}) as Record<string, unknown>;
+          const card = cards.get(event.source_url ?? "");
+          const counter = (key: "reactions" | "comments") =>
+            Math.max(
+              typeof metadata[key] === "number" ? metadata[key] : 0,
+              card?.[key] ?? 0
+            );
+          const author = event.author_name ?? null;
+          // Search cards label some author links "View <Name>’ profile",
+          // which the feed's name matcher does not pair with the author.
+          const authorSlug =
+            author &&
+            !metadata.author_profile_url &&
+            !metadata.author_company_url
+              ? card?.links
+                  .filter((link) => link.name?.includes(author))
+                  .map((link) => normalizeLinkedInSlug(link.href))
+                  .find(Boolean)
+              : undefined;
+          const profileUrl =
+            typeof metadata.author_profile_url === "string"
+              ? metadata.author_profile_url
+              : authorSlug
+                ? `https://www.linkedin.com/in/${authorSlug}`
+                : undefined;
+          return {
+            post_url: event.source_url,
+            author: {
+              name: author,
+              ...(profileUrl ? { profile_url: profileUrl } : {}),
+              ...(typeof metadata.author_company_url === "string"
+                ? { company_url: metadata.author_company_url }
+                : {}),
+            },
+            body: card?.body ?? event.payload_text ?? "",
+            posted_time: card?.posted ?? null,
+            reactions: counter("reactions"),
+            comments: counter("comments"),
+          };
+        });
+      return { page, sort, search_url: url, count: posts.length, posts };
+    };
+  });
 }
 
 /**
@@ -2860,7 +3023,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
     name: "LinkedIn",
     description:
       "Read LinkedIn feeds, notifications, and recent inbox messages through paired Chrome. Subscribe to source changes, store 1:1 message history on the people you talk to, answer direct messages, and prepare message, post, or comment drafts for human submission.",
-    version: "3.23.0",
+    version: "3.24.0",
     faviconDomain: "linkedin.com",
     // Live feeds bind a signed-in Chrome account.
     browser: {
@@ -3498,6 +3661,173 @@ export default class LinkedInConnector extends ConnectorRuntime<
           },
         },
       },
+      search_people: {
+        key: "search_people",
+        name: "Search people",
+        description:
+          "Search LinkedIn members in the paired Chrome browser and return one page of results (name, headline, location, profile URL, connection degree, current position when shown) without storing any events. `location` is resolved to LinkedIn's location filter through its location lookup; when no location matches, it is added to the keywords instead and `location_filter.applied` reports \"keywords\". Read-only.",
+        kind: "read",
+        annotations: {
+          openWorldHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+        },
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["keywords"],
+          properties: {
+            keywords: {
+              type: "string",
+              minLength: 1,
+              maxLength: 200,
+              description: "Free-text search terms.",
+            },
+            title: {
+              type: "string",
+              maxLength: 200,
+              description: "Filter by job title text.",
+            },
+            company: {
+              type: "string",
+              maxLength: 200,
+              description: "Filter by company name text.",
+            },
+            location: {
+              type: "string",
+              maxLength: 200,
+              description:
+                'Place name, e.g. "London". Applied as LinkedIn\'s location filter when it resolves, otherwise folded into keywords.',
+            },
+            network: {
+              type: "array",
+              items: { type: "string", enum: ["1st", "2nd", "3rd"] },
+              description: "Restrict to these connection degrees.",
+            },
+            page: {
+              type: "integer",
+              minimum: 1,
+              maximum: 10,
+              description: "1-based results page (default 1).",
+            },
+          },
+        },
+      },
+      read_profile: {
+        key: "read_profile",
+        name: "Read profile",
+        description:
+          "Read one LinkedIn member profile in the paired Chrome browser: name, headline, location, about, connection degree, current and past positions (up to 15 each) and education (up to 10). Returns without storing any events. Read-only.",
+        kind: "read",
+        annotations: {
+          openWorldHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+        },
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["profile_url"],
+          properties: {
+            profile_url: {
+              type: "string",
+              maxLength: 200,
+              description: "Member profile URL, linkedin.com/in/<slug>.",
+            },
+          },
+        },
+      },
+      search_companies: {
+        key: "search_companies",
+        name: "Search companies",
+        description:
+          "Search LinkedIn company pages in the paired Chrome browser and return one page of results (name, industry, location, followers, company URL) without storing any events. Read-only.",
+        kind: "read",
+        annotations: {
+          openWorldHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+        },
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["keywords"],
+          properties: {
+            keywords: {
+              type: "string",
+              minLength: 1,
+              maxLength: 200,
+              description: "Free-text search terms.",
+            },
+            page: {
+              type: "integer",
+              minimum: 1,
+              maximum: 10,
+              description: "1-based results page (default 1).",
+            },
+          },
+        },
+      },
+      read_company: {
+        key: "read_company",
+        name: "Read company",
+        description:
+          "Read a LinkedIn company page's About tab in the paired Chrome browser: about, industry, company size, headquarters, website and followers. Returns without storing any events. Read-only.",
+        kind: "read",
+        annotations: {
+          openWorldHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+        },
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["company_url"],
+          properties: {
+            company_url: {
+              type: "string",
+              maxLength: 200,
+              description: "Company page URL, linkedin.com/company/<slug>.",
+            },
+          },
+        },
+      },
+      search_posts: {
+        key: "search_posts",
+        name: "Search posts",
+        description:
+          "Search LinkedIn posts in the paired Chrome browser and return one page of up to 10 posts (post URL, author, body, posted time as LinkedIn shows it, reaction and comment counts) without storing any events. Read-only.",
+        kind: "read",
+        annotations: {
+          openWorldHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+        },
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["keywords"],
+          properties: {
+            keywords: {
+              type: "string",
+              minLength: 1,
+              maxLength: 200,
+              description: "Free-text search terms.",
+            },
+            sort: {
+              type: "string",
+              enum: ["relevant", "recent"],
+              description: 'Result order (default "relevant").',
+            },
+            page: {
+              type: "integer",
+              minimum: 1,
+              maximum: 10,
+              description: "1-based results page (default 1).",
+            },
+          },
+        },
+      },
     },
   };
 
@@ -3542,6 +3872,21 @@ export default class LinkedInConnector extends ConnectorRuntime<
       }
       if (ctx.actionKey === "read_home_feed") {
         return await readHomeFeed(ctx);
+      }
+      if (ctx.actionKey === "search_people") {
+        return await searchLinkedInPeople(ctx);
+      }
+      if (ctx.actionKey === "read_profile") {
+        return await readLinkedInProfile(ctx);
+      }
+      if (ctx.actionKey === "search_companies") {
+        return await searchLinkedInCompanies(ctx);
+      }
+      if (ctx.actionKey === "read_company") {
+        return await readLinkedInCompany(ctx);
+      }
+      if (ctx.actionKey === "search_posts") {
+        return await searchLinkedInPosts(ctx);
       }
       if (
         ctx.actionKey !== "prepare_comment" &&
