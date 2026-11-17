@@ -71,8 +71,6 @@ import {
   resolveAutomationTriggerWrite,
 } from '../../../automations/triggers';
 import {
-  chatBindingConnectionIds,
-  reconcileBindingSendGrants,
   syncAutomationChannelFeeds,
   syncAutomationChannelFeedsBestEffort,
 } from '../../../automations/channel-subscriptions';
@@ -473,13 +471,6 @@ export async function handleCreate(
           ],
         }, tx);
       }
-      if (organizationId) {
-        await reconcileBindingSendGrants({
-          organizationId,
-          connectionIds: chatBindingConnectionIds(triggerWrite.triggers),
-          sql: tx,
-        });
-      }
     });
   } catch (err) {
     // The slug precheck above is not a lock: two concurrent replicas can both
@@ -863,14 +854,6 @@ export async function handleUpdate(
     committedRequestedFields = committedChangedFields.filter((f) => requestedFields.includes(f));
     committedOrgId = (updatedRow?.organization_id as string | null) ?? locked.organization_id;
     committedBeforeTriggers = locked.triggers ?? [];
-    await reconcileBindingSendGrants({
-      organizationId: committedOrgId,
-      connectionIds: chatBindingConnectionIds(
-        committedBeforeTriggers,
-        updatedRow?.triggers as AutomationTrigger[] | undefined,
-      ),
-      sql: tx,
-    });
   });
 
   if (committedNoOp) {
@@ -964,11 +947,6 @@ export async function handleDelete(
           state: null,
           changedFields: ['status'],
         }, tx);
-        await reconcileBindingSendGrants({
-          organizationId: automation.organization_id as string,
-          connectionIds: chatBindingConnectionIds(automation.triggers as AutomationTrigger[] | undefined),
-          sql: tx,
-        });
       });
 
       if (!automation) {
@@ -1337,13 +1315,6 @@ export async function handleCreateFromVersion(
           after: Array.isArray(cloneTriggers)
             ? (cloneTriggers as AutomationTrigger[])
             : [],
-          sql: tx,
-        });
-        await reconcileBindingSendGrants({
-          organizationId,
-          connectionIds: chatBindingConnectionIds(
-            Array.isArray(cloneTriggers) ? (cloneTriggers as AutomationTrigger[]) : [],
-          ),
           sql: tx,
         });
       }
