@@ -617,4 +617,66 @@ describe("useQuery live refresh", () => {
       error: null,
     });
   });
+
+  test("a visible frame before the old key read settles still reads the new key", async () => {
+    liveRefreshIntervalMs = 0;
+    await ready(undefined, "return 2");
+    await act(async () => {
+      answerValue(parent.toolsCalls()[0], { count: 2, query: "return 2" });
+      await tick();
+    });
+    await act(async () => {
+      renderProbe("return 1");
+      await tick();
+    });
+    expect(parent.toolsCalls()).toHaveLength(2);
+    const oldRead = parent.toolsCalls()[1];
+
+    // Hide, switch back to "return 2", then show before the old read settles.
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => "hidden",
+    });
+    await act(async () => {
+      document.dispatchEvent(new dom.window.Event("visibilitychange"));
+      await tick();
+    });
+    await act(async () => {
+      renderProbe("return 2");
+      await tick();
+    });
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => "visible",
+    });
+    await act(async () => {
+      document.dispatchEvent(new dom.window.Event("visibilitychange"));
+      await tick();
+      await tick();
+    });
+    // The visibility flush cannot start while the old read is in flight.
+    expect(parent.toolsCalls()).toHaveLength(2);
+
+    // The old read settles visible: the owed current-key read must start.
+    await act(async () => {
+      answerValue(oldRead, { count: 1, query: "return 1" });
+      await tick();
+      await tick();
+    });
+    expect(parent.toolsCalls()).toHaveLength(3);
+    const currentRead = parent.toolsCalls()[2];
+    expect(
+      (currentRead.params as { arguments?: { script?: string } }).arguments
+        ?.script
+    ).toBe("return 2");
+    await act(async () => {
+      answerValue(currentRead, { count: 2, query: "return 2" });
+      await tick();
+    });
+    expect(latest).toEqual({
+      loading: false,
+      data: { count: 2, query: "return 2" },
+      error: null,
+    });
+  });
 });

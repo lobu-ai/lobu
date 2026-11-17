@@ -643,7 +643,7 @@ export function useQuery<T = unknown>(
     const settle = () => {
       if (reading.current !== seq) return;
       reading.current = 0;
-      if (owed.current && lastRead.current?.key === key) {
+      if (owed.current) {
         if (documentHidden()) return;
         owed.current = false;
         setFollowUp((n) => n + 1);
