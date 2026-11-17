@@ -307,11 +307,8 @@ describe("X source chat", () => {
     expect(reply.input).toEqual({
       conversation_id: DM,
       text: "Reply from the agent",
-      idempotency_key: reply.idempotencyKey,
     });
     expect(reply.idempotencyKey).toBeTruthy();
-    // Every send carries the key from which the connector derives X's request id.
-    for (const send of sends) expect(send.input.idempotency_key).toBe(send.idempotencyKey);
   }, 60_000);
 
   it("redeems an X DM link and answers the next DM as that workspace's member", async () => {

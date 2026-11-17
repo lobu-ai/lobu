@@ -228,6 +228,7 @@ async function executeLocalActionInline(
 					operation.backend_config.backend === "local_action"
 						? operation.backend_config.actionKey
 						: operation.operation_key,
+				runId: String(runId),
 				actionInput,
 				// Merge the connection's own config (e.g. a Deliveroo connection's
 				// `restaurants_url`) into the action config, the way a sync merges its

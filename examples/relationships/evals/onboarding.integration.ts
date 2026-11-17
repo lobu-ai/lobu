@@ -178,6 +178,7 @@ describe("LinkedIn URL artifact", () => {
       {
         mode: "action",
         actionKey: "prepare_comment",
+        runId: "1",
         actionInput: {
           post_url: "https://www.linkedin.com/feed/",
           body: "Synthetic draft",

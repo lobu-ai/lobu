@@ -402,7 +402,6 @@ describe("LinkedIn source chat", () => {
       conversation_id: DM_THREAD,
       // LinkedIn renders no markdown.
       text: "Yes, around all afternoon.",
-      idempotency_key: sends[0].idempotencyKey,
     });
     expect(sends[0].idempotencyKey).toMatch(/^chat-post:/);
   }, 60_000);
@@ -424,7 +423,6 @@ describe("LinkedIn source chat", () => {
     expect(sends[0].input).toEqual({
       conversation_id: `urn:li:msg_conversation:(${PAGE},${DM_THREAD})`,
       text: "Happy to help.",
-      idempotency_key: sends[0].idempotencyKey,
     });
   }, 60_000);
 
@@ -437,7 +435,6 @@ describe("LinkedIn source chat", () => {
     await drain();
     expect(sends.length).toBeGreaterThan(1);
     expect(new Set(sends.map((send) => send.idempotencyKey)).size).toBe(1);
-    expect(new Set(sends.map((send) => send.input.idempotency_key)).size).toBe(1);
   }, 60_000);
 
   it("does not answer a redelivered reference twice", async () => {

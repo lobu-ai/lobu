@@ -366,7 +366,7 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
           properties: {
             to: { type: 'string', description: 'Recipient email address.' },
             subject: { type: 'string', description: 'Email subject line.' },
-            body: { type: 'string', description: 'Email body (plain text).' },
+            body: { type: 'string', description: 'Email body (plain text).', 'x-multiline': true },
             cc: { type: 'string', description: 'CC recipients (comma-separated).' },
             bcc: { type: 'string', description: 'BCC recipients (comma-separated).' },
           },
@@ -382,7 +382,7 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
           properties: {
             to: { type: 'string', description: 'Recipient email address.' },
             subject: { type: 'string', description: 'Email subject line.' },
-            body: { type: 'string', description: 'Email body (plain text).' },
+            body: { type: 'string', description: 'Email body (plain text).', 'x-multiline': true },
             cc: { type: 'string', description: 'CC recipients (comma-separated).' },
             bcc: { type: 'string', description: 'BCC recipients (comma-separated).' },
             thread_id: {
@@ -401,7 +401,7 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
           required: ['thread_id', 'body'],
           properties: {
             thread_id: { type: 'string', description: 'Thread ID to reply to.' },
-            body: { type: 'string', description: 'Reply body (plain text).' },
+            body: { type: 'string', description: 'Reply body (plain text).', 'x-multiline': true },
             to: {
               type: 'string',
               description: 'Override recipient (defaults to original sender).',

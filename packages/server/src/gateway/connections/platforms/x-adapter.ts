@@ -113,13 +113,9 @@ export class XAdapter extends ConnectorChatAdapter<XMessageRow> {
     };
   }
 
-  /** The connector derives X's client request id from the operation key. */
-  protected sendInput(
-    conversationId: string,
-    text: string,
-    idempotencyKey: string,
-  ): Record<string, unknown> {
-    return { conversation_id: conversationId, text, idempotency_key: idempotencyKey };
+  /** The connector derives X's client request id from the operation run. */
+  protected sendInput(conversationId: string, text: string): Record<string, unknown> {
+    return { conversation_id: conversationId, text };
   }
 
   protected sentRow(

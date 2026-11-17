@@ -8,7 +8,7 @@ import { IsolateExecutor, type IsolateExecutorOptions } from '../../executor/iso
 import type { ExecutionHooks, ExecutorJob } from '../../executor/interface.js';
 
 const job: ExecutorJob = {
-  mode: 'action', actionKey: 'read', actionInput: {}, config: {},
+  mode: 'action', actionKey: 'read', runId: '1', actionInput: {}, config: {},
   credentials: null, sessionState: null, env: {}, httpAuth: true,
 };
 const reply = (body = ''): ConnectorHttpResponse => ({

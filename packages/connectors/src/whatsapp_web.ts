@@ -498,7 +498,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
             chat_jid: { type: "string" },
             chat_name: { type: "string" },
             self_chat: { type: "boolean", const: true },
-            text: { type: "string", minLength: 1, maxLength: 65536 },
+            text: { type: "string", minLength: 1, maxLength: 65536, "x-multiline": true },
           },
           anyOf: [
             { required: ["chat_jid"] },
@@ -529,7 +529,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
             chat_jid: { type: "string" },
             chat_name: { type: "string" },
             self_chat: { type: "boolean", const: true },
-            text: { type: "string", minLength: 1, maxLength: 65536 },
+            text: { type: "string", minLength: 1, maxLength: 65536, "x-multiline": true },
           },
           anyOf: [
             { required: ["chat_jid"] },
@@ -560,7 +560,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
               type: "string",
               description: "Raw WhatsApp message key.id.",
             },
-            text: { type: "string", minLength: 1, maxLength: 65536 },
+            text: { type: "string", minLength: 1, maxLength: 65536, "x-multiline": true },
           },
         },
         outputSchema: {

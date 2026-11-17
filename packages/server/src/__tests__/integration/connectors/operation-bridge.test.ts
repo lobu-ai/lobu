@@ -16,6 +16,7 @@ let code: string;
 const job = {
   mode: "action" as const,
   actionKey: "run",
+  runId: "1",
   actionInput: request,
   config: {},
   credentials: null,

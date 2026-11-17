@@ -307,12 +307,11 @@ export function xDirectMessagesProgram() {
 			.map((byte) => byte.toString(16).padStart(2, "0"))
 			.join("");
 	}
-	// X's client request id, derived from the caller's idempotency key so a
-	// retried send carries the same id and can recognise its earlier attempt.
-	async function requestIdOf(self, conversationId, idempotencyKey) {
-		const hex = await digest(
-			JSON.stringify([self, conversationId, idempotencyKey]),
-		);
+	// X's client request id, derived from the operation run so a retry or
+	// re-claim of the same run carries the same id and can recognise its
+	// earlier attempt.
+	async function requestIdOf(self, conversationId, runId) {
+		const hex = await digest(JSON.stringify([self, conversationId, runId]));
 		return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-${((Number.parseInt(hex[16], 16) & 3) | 8).toString(16)}${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 	}
 	// An outgoing message on the latest page that is this send's earlier attempt.
@@ -351,10 +350,9 @@ export function xDirectMessagesProgram() {
 			fail("The conversation does not belong to the signed-in account");
 		const text = typeof input.text === "string" ? input.text : "";
 		if (!text.trim()) fail("text is required");
-		const idempotencyKey =
-			typeof input.idempotency_key === "string" ? input.idempotency_key : "";
-		if (!idempotencyKey) fail("idempotency_key is required");
-		const requestId = await requestIdOf(self, conversationId, idempotencyKey);
+		const runId = typeof input.run_id === "string" ? input.run_id : "";
+		if (!runId) fail("run_id is required");
+		const requestId = await requestIdOf(self, conversationId, runId);
 		const delivered = (prior) => ({
 			sent: true,
 			deduplicated: true,

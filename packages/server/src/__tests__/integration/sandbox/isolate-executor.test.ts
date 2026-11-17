@@ -709,6 +709,7 @@ describe("isolate lane: fixture connector", () => {
 		const action = await runIsolate(fixtureIsolateCode, {
 			mode: "action",
 			actionKey: "dispatch",
+			runId: "41",
 			actionInput: { tab: 3 },
 			config: {},
 			browser: { origins: ["https://example.com"] },
@@ -733,17 +734,19 @@ describe("isolate lane: fixture connector", () => {
 		const ok = await runIsolate(fixtureIsolateCode, {
 			mode: "action",
 			actionKey: "echo",
+			runId: "42",
 			actionInput: { a: 1, nested: { b: [1, 2] } },
 			config: { k: "v" },
 			credentials: null,
 			sessionState: null,
 			env: {},
 		});
-		expect(ok.result).toEqual({ mode: "action", output: { echoed: { a: 1, nested: { b: [1, 2] } }, configKeys: ["k"] } });
+		expect(ok.result).toEqual({ mode: "action", output: { echoed: { a: 1, nested: { b: [1, 2] } }, configKeys: ["k"], runId: "42" } });
 
 		const failed = await failIsolate(fixtureIsolateCode, {
 			mode: "action",
 			actionKey: "fail",
+			runId: "43",
 			actionInput: {},
 			config: {},
 			credentials: null,

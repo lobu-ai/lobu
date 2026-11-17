@@ -1096,14 +1096,12 @@ export function linkedInInboxProgram() {
     }
   }
   // Direct send, approved ONLY for replying to direct messages on accounts the
-  // owner operates. One reply per idempotency key: the key becomes LinkedIn's
-  // client origin token, so a retry finds the first attempt instead of sending
-  // again. Group or unknown conversations are refused.
+  // owner operates. One reply per operation run: the run id becomes LinkedIn's
+  // client origin token, so a retry or re-claim of the same run finds the first
+  // attempt instead of sending again. Group or unknown conversations are refused.
   const SEND_RECONFIRM_ATTEMPTS = 5;
-  async function originTokenOf(mailbox, conversation, idempotencyKey) {
-    const hex = await digest(
-      JSON.stringify([mailbox, conversation, idempotencyKey])
-    );
+  async function originTokenOf(mailbox, conversation, runId) {
+    const hex = await digest(JSON.stringify([mailbox, conversation, runId]));
     // UUID-shaped (version 4 / variant bits set), like LinkedIn's own tokens.
     return [
       hex.slice(0, 8),
@@ -1121,19 +1119,18 @@ export function linkedInInboxProgram() {
       .map((byte) => alphabet[byte & 63])
       .join("");
   }
+  const THREAD_ID = /^[A-Za-z0-9_-]+=*$/;
+  const CONVERSATION_URN =
+    /^urn:li:msg_conversation:\((urn:li:fsd_profile:[A-Za-z0-9_-]+|urn:li:fsd_pageMailbox:[0-9]+),([A-Za-z0-9_-]+=*)\)$/;
   // `conversation_id` is a thread id of the member's own inbox, or a full
   // conversation URN whose mailbox names the inbox the reply leaves from: the
   // member's own or a page the member administers.
   async function sendTarget(given, expected) {
-    if (typeof given === "string" && /^[A-Za-z0-9_-]+=*$/.test(given)) {
+    if (typeof given === "string" && THREAD_ID.test(given)) {
       const member = await boundAccount(expected);
       return { inbox: { mailbox: member, member, page: false }, thread: given };
     }
-    const match =
-      typeof given === "string" &&
-      given.match(
-        /^urn:li:msg_conversation:\((urn:li:fsd_profile:[A-Za-z0-9_-]+|urn:li:fsd_pageMailbox:[0-9]+),([A-Za-z0-9_-]+=*)\)$/
-      );
+    const match = typeof given === "string" && given.match(CONVERSATION_URN);
     if (!match)
       fail(
         "conversation_id must be a LinkedIn conversation thread id or conversation URN"
@@ -1151,9 +1148,8 @@ export function linkedInInboxProgram() {
     const text = typeof input.text === "string" ? input.text.trim() : "";
     if (!text || text.length > 3000)
       fail("text must contain 1-3000 characters");
-    const idempotencyKey = input.idempotency_key;
-    if (typeof idempotencyKey !== "string" || !idempotencyKey)
-      fail("idempotency_key is required");
+    const runId = input.run_id;
+    if (typeof runId !== "string" || !runId) fail("run_id is required");
     const conversation = `urn:li:msg_conversation:(${mailbox},${thread})`;
     const recent = await searchConversations(
       mailbox,
@@ -1163,7 +1159,7 @@ export function linkedInInboxProgram() {
       fail("The conversation is not in the inbox; not sending");
     if (groupOf(recent) !== false)
       fail("send_message only answers direct messages; this conversation is a group or its membership is unknown");
-    const originToken = await originTokenOf(mailbox, conversation, idempotencyKey);
+    const originToken = await originTokenOf(mailbox, conversation, runId);
     const sent = (message) => ({
       sent: true,
       message_id: message.entityUrn,
@@ -1217,7 +1213,142 @@ export function linkedInInboxProgram() {
       if (shown) return sent(shown);
       await new Promise((resolve) => setTimeout(resolve, 1000));
     }
-    fail("LinkedIn accepted the message but it did not appear in the conversation; retry with the same idempotency_key to reconcile");
+    fail("LinkedIn accepted the message but it did not appear in the conversation; delivery is uncertain. Check the conversation before sending again");
+  }
+  // A lookup shows conversations as the person on the other side. A value is
+  // a thread id of the member's own inbox or a full conversation URN of an
+  // inbox the member reads; `query` matches that person's name among the
+  // member inbox's recent conversations; neither lists the recent ones. Groups,
+  // other accounts' conversations and values not found in the walked window
+  // are left out, never guessed.
+  const LOOKUP_PAGES = 10;
+  const LOOKUP_ITEMS = 20;
+  function lookupTarget(value, member) {
+    if (typeof value !== "string") return null;
+    if (THREAD_ID.test(value))
+      return {
+        mailbox: member,
+        conversation: `urn:li:msg_conversation:(${member},${value})`,
+      };
+    const match = value.match(CONVERSATION_URN);
+    if (!match || (match[1] !== member && !PAGE_MAILBOX.test(match[1])))
+      return null;
+    return { mailbox: match[1], conversation: value };
+  }
+  // LinkedIn's signed photo URL: root plus one rendition. The smallest at
+  // least 100px wide suits a chip; otherwise the largest there is.
+  function photoOf(picture) {
+    const root = picture?.rootUrl;
+    const artifacts = (
+      Array.isArray(picture?.artifacts) ? picture.artifacts : []
+    )
+      .filter(
+        (artifact) =>
+          typeof artifact?.fileIdentifyingUrlPathSegment === "string" &&
+          Number.isFinite(artifact.width)
+      )
+      .sort((a, b) => a.width - b.width);
+    if (typeof root !== "string" || !artifacts.length) return undefined;
+    const artifact =
+      artifacts.find((candidate) => candidate.width >= 100) ??
+      artifacts[artifacts.length - 1];
+    try {
+      const url = new URL(`${root}${artifact.fileIdentifyingUrlPathSegment}`);
+      return url.protocol === "https:" ? url.href : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+  // The member on the other side of a direct conversation; the inbox's own
+  // identity and page participants are not that person.
+  function counterpartOf(conversation, mailbox) {
+    const participants = Array.isArray(conversation?.conversationParticipants)
+      ? conversation.conversationParticipants
+      : [];
+    for (const participant of participants) {
+      const member = participant?.participantType?.member;
+      if (!member || participant.hostIdentityUrn === mailbox) continue;
+      const label = clean(
+        `${member.firstName?.text ?? ""} ${member.lastName?.text ?? ""}`
+      );
+      if (!label) continue;
+      const description = clean(member.headline?.text);
+      const imageUrl = photoOf(member.profilePicture);
+      return {
+        label,
+        ...(description ? { description } : {}),
+        ...(imageUrl ? { image_url: imageUrl } : {}),
+      };
+    }
+    return null;
+  }
+  async function lookup(input) {
+    const member = await boundAccount(input.expected_account);
+    const values = Array.isArray(input.values)
+      ? input.values.slice(0, LOOKUP_ITEMS)
+      : [];
+    const query = clean(input.query).toLowerCase();
+    const listing = !!query || !values.length;
+    const wanted = [];
+    for (const value of values) {
+      const target = lookupTarget(value, member);
+      if (target) wanted.push({ value, ...target });
+    }
+    const mailboxes = new Set(wanted.map((target) => target.mailbox));
+    if (listing) mailboxes.add(member);
+    const found = new Map();
+    const recent = [];
+    for (const mailbox of mailboxes) {
+      if (mailbox !== member) await assertAdministers(mailbox);
+      const pending = () =>
+        wanted.some(
+          (target) =>
+            target.mailbox === mailbox && !found.has(target.conversation)
+        );
+      let cursor;
+      for (let page = 0; page < LOOKUP_PAGES; page++) {
+        const source = await conversationsPage(mailbox, cursor);
+        for (const conversation of source.elements) {
+          if (typeof conversation?.entityUrn !== "string") continue;
+          found.set(conversation.entityUrn, conversation);
+          if (mailbox === member) recent.push(conversation);
+        }
+        const enough =
+          mailbox !== member ||
+          (!query && (values.length || recent.length >= LOOKUP_ITEMS));
+        if (!pending() && enough) break;
+        cursor = source.metadata?.nextCursor;
+        if (typeof cursor !== "string" || !cursor || cursor.length > 4096)
+          break;
+      }
+    }
+    const items = [];
+    const shown = new Set();
+    const add = (value, conversation, mailbox, filter) => {
+      if (
+        items.length >= LOOKUP_ITEMS ||
+        !conversation ||
+        shown.has(conversation.entityUrn) ||
+        groupOf(conversation) !== false
+      )
+        return;
+      const person = counterpartOf(conversation, mailbox);
+      if (!person || (filter && !person.label.toLowerCase().includes(filter)))
+        return;
+      shown.add(conversation.entityUrn);
+      items.push({ value, ...person });
+    };
+    for (const target of wanted)
+      add(target.value, found.get(target.conversation), target.mailbox, "");
+    if (listing)
+      for (const conversation of recent) {
+        const match = conversation.entityUrn.match(CONVERSATION_URN);
+        if (match?.[1] === member)
+          add(match[2], conversation, member, query);
+      }
+    if ((await account()) !== member)
+      fail("LinkedIn account changed during conversation lookup");
+    return { items };
   }
   async function listen(input) {
     if (!input.bridge_id || !input.token)
@@ -1259,5 +1390,5 @@ export function linkedInInboxProgram() {
       );
     return { listening: true };
   }
-  globalThis[key] = { version, read, listen, send, detach };
+  globalThis[key] = { version, read, listen, send, lookup, detach };
 }

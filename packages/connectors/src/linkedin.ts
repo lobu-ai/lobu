@@ -46,6 +46,7 @@ import {
 import { setLinkedInLike } from "./linkedin-like.js";
 import {
   observeLinkedInInbox,
+  lookupLinkedInConversations,
   readLinkedInInbox,
   sendLinkedInMessage,
   type LinkedInInboxCheckpoint,
@@ -2830,7 +2831,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
     name: "LinkedIn",
     description:
       "Read LinkedIn feeds, notifications, and recent inbox messages through paired Chrome. Subscribe to source changes, answer direct messages, and prepare message, post, or comment drafts for human submission.",
-    version: "3.21.0",
+    version: "3.22.0",
     faviconDomain: "linkedin.com",
     // Live feeds bind a signed-in Chrome account.
     browser: {
@@ -3108,7 +3109,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
         name: "Send direct message reply",
         kind: "write",
         description:
-          "Send a text reply into an exact existing LinkedIn direct-message conversation and confirm it appears there. Pass a member-inbox row's thread_id, or a row's full conversation_id to reply from the inbox the message came from (a company page the signed-in member administers). This direct send is approved only for answering direct messages on accounts the owner operates; group conversations are refused, and posts, comments and other messages stay draft-only through prepare_message, prepare_post and prepare_comment. A retry with the same idempotency_key returns the earlier message instead of sending again.",
+          "Send a text reply into an exact existing LinkedIn direct-message conversation and confirm it appears there. Pass a member-inbox row's thread_id, or a row's full conversation_id to reply from the inbox the message came from (a company page the signed-in member administers). This direct send is approved only for answering direct messages on accounts the owner operates; group conversations are refused, and posts, comments and other messages stay draft-only through prepare_message, prepare_post and prepare_comment. Sends at most once per operation run: repeating operations.execute with the same idempotency_key returns that run's result instead of sending again. A run that fails because delivery is uncertain is not retried; check the conversation before starting a new send.",
         annotations: {
           openWorldHint: true,
           destructiveHint: false,
@@ -3116,7 +3117,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
         },
         inputSchema: {
           type: "object",
-          required: ["conversation_id", "text", "idempotency_key"],
+          required: ["conversation_id", "text"],
           additionalProperties: false,
           properties: {
             conversation_id: {
@@ -3127,14 +3128,58 @@ export default class LinkedInConnector extends ConnectorRuntime<
               title: "Conversation",
               description:
                 "The row's thread_id (the member's own inbox) or its full conversation_id (the inbox it names).",
+              "x-lookup": { operation: "lookup_conversations" },
             },
-            text: { type: "string", title: "Message", minLength: 1, maxLength: 3000 },
-            idempotency_key: {
+            text: {
               type: "string",
+              title: "Message",
               minLength: 1,
-              maxLength: 300,
-              title: "Idempotency key",
-              description: "One reply per key: a retry returns the first send.",
+              maxLength: 3000,
+              "x-multiline": true,
+            },
+          },
+        },
+      },
+      lookup_conversations: {
+        key: "lookup_conversations",
+        name: "Look up conversations",
+        description:
+          "Show LinkedIn direct-message conversations as the person on the other side: name, headline and profile photo, read from the conversation list in the paired Chrome browser. Pass values (thread_id or full conversation_id, as send_message takes) to resolve those conversations, query to match a person's name among recent member-inbox conversations, or neither for the recent ones. Group conversations and values not found among recent conversations are left out. Read-only.",
+        kind: "read",
+        annotations: {
+          openWorldHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+        },
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            values: {
+              type: "array",
+              maxItems: 20,
+              items: { type: "string", maxLength: 500 },
+            },
+            query: { type: "string", maxLength: 200 },
+          },
+        },
+        outputSchema: {
+          type: "object",
+          required: ["items"],
+          properties: {
+            items: {
+              type: "array",
+              maxItems: 20,
+              items: {
+                type: "object",
+                required: ["value", "label"],
+                properties: {
+                  value: { type: "string" },
+                  label: { type: "string" },
+                  description: { type: "string" },
+                  image_url: { type: "string", format: "uri" },
+                },
+              },
             },
           },
         },
@@ -3156,7 +3201,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
           additionalProperties: false,
           properties: {
             conversation_url: { type: "string", format: "uri" },
-            body: { type: "string", minLength: 1, maxLength: 3000 },
+            body: { type: "string", minLength: 1, maxLength: 3000, "x-multiline": true },
           },
         },
       },
@@ -3175,7 +3220,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
           required: ["body"],
           additionalProperties: false,
           properties: {
-            body: { type: "string", minLength: 1, maxLength: 3000 },
+            body: { type: "string", minLength: 1, maxLength: 3000, "x-multiline": true },
           },
         },
       },
@@ -3214,6 +3259,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
                 "Draft comment text. Left in the composer for the user to edit/send.",
               minLength: 1,
               maxLength: 3000,
+              "x-multiline": true,
             },
             reason: {
               type: "string",
@@ -3284,6 +3330,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
               description: "Expected comment text (the staged draft).",
               minLength: 1,
               maxLength: 3000,
+              "x-multiline": true,
             },
             author_hint: {
               type: "string",
@@ -3413,6 +3460,9 @@ export default class LinkedInConnector extends ConnectorRuntime<
       }
       if (ctx.actionKey === "send_message") {
         return await sendLinkedInMessage(ctx);
+      }
+      if (ctx.actionKey === "lookup_conversations") {
+        return await lookupLinkedInConversations(ctx);
       }
       if (
         ctx.actionKey === "prepare_message" ||

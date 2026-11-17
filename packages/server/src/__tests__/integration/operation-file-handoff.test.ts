@@ -129,7 +129,7 @@ describe('multipart file → operation approval → connector execution', () => 
     expect(job.run_id).toBe(runId);
     const executed = await executeCompiledConnector({
       compiledCode: job.compiled_code,
-      job: { mode: 'action', actionKey: job.action_key, actionInput: job.action_input, config: job.config ?? {}, env: {}, credentials: {} },
+      job: { mode: 'action', actionKey: job.action_key, runId: String(job.run_id), actionInput: job.action_input, config: job.config ?? {}, env: {}, credentials: {} },
       allowedDomains: [],
     });
     expect(executed.mode).toBe('action');
@@ -165,7 +165,7 @@ describe('multipart file → operation approval → connector execution', () => 
     expect(job.action_input.image.base64).toBe(Buffer.from('photo-bytes').toString('base64'));
     const executed = await executeCompiledConnector({
       compiledCode: job.compiled_code,
-      job: { mode: 'action', actionKey: job.action_key, actionInput: job.action_input, config: job.config ?? {}, env: {}, credentials: {} },
+      job: { mode: 'action', actionKey: job.action_key, runId: String(job.run_id), actionInput: job.action_input, config: job.config ?? {}, env: {}, credentials: {} },
       allowedDomains: [],
     });
     expect(executed.mode).toBe('action');
@@ -264,7 +264,7 @@ describe('multipart file → operation approval → connector execution', () => 
     expect(job.run_id).toBe(queued.run_id);
     const executed = await executeCompiledConnector({
       compiledCode: job.compiled_code,
-      job: { mode: 'action', actionKey: job.action_key, actionInput: job.action_input, config: { uploadUrl }, env: {}, credentials: {} },
+      job: { mode: 'action', actionKey: job.action_key, runId: String(job.run_id), actionInput: job.action_input, config: { uploadUrl }, env: {}, credentials: {} },
       allowedDomains: ['127.0.0.1'],
     });
     expect(executed).toMatchObject({ mode: 'action', output: {

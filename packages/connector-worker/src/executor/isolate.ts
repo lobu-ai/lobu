@@ -289,6 +289,7 @@ const GUEST_RUNNER = String.raw`
       var actionResult = await instance.execute({
         operations: operations(),
         actionKey: job.actionKey,
+        run: { id: String(job.runId) },
         input: job.actionInput,
         browser: job.browser ? chromeDispatcher() : undefined,
         sessionState: Object.assign({}, job.sessionState || {}),

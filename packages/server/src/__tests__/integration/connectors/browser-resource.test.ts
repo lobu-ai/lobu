@@ -16,7 +16,7 @@ export default defineConnector({
  }
 });`;
 let code: string;
-const job = { mode: 'action' as const, actionKey: 'inspect', actionInput: {}, config: {}, credentials: null,
+const job = { mode: 'action' as const, actionKey: 'inspect', runId: '1', actionInput: {}, config: {}, credentials: null,
  sessionState: null, env: {} };
 
 describe('browser resource host contract', () => {
