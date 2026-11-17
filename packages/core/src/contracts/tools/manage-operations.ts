@@ -435,8 +435,35 @@ export const NotificationDeliverySchema = Type.Object({
 
 export type NotificationDelivery = Static<typeof NotificationDeliverySchema>;
 
+/** Why a connector operation was held or blocked, and the rules that decided it. */
+export const OperationPolicyExplanationSchema = Type.Object({
+  reason: Type.Union([
+    Type.Literal("matched_rule"),
+    Type.Literal("guardrail"),
+    Type.Literal("default_approval"),
+    Type.Literal("device_owner"),
+    Type.Literal("unresolved_principal"),
+    Type.Literal("parent_approval"),
+    Type.Literal("unavailable_operation"),
+  ]),
+  rules: Type.Array(
+    Type.Object({
+      id: Type.Integer(),
+      kind: Type.Union([Type.Literal("grant"), Type.Literal("guardrail")]),
+      note: Type.Optional(Type.String()),
+    })
+  ),
+});
+
+export type OperationPolicyExplanation = Static<
+  typeof OperationPolicyExplanationSchema
+>;
+
 export const ManageOperationsResultSchema = Type.Union([
-  Type.Object({ error: Type.String() }),
+  Type.Object({
+    error: Type.String(),
+    policy: Type.Optional(OperationPolicyExplanationSchema),
+  }),
   Type.Object({
     action: Type.Literal("list_available"),
     // AvailableOperation is a typed descriptor; modeled as unknown so the
@@ -454,6 +481,7 @@ export const ManageOperationsResultSchema = Type.Union([
     approval_url: Type.Optional(Type.String()),
     status: Type.Literal("pending_approval"),
     message: Type.String(),
+    policy: Type.Optional(OperationPolicyExplanationSchema),
   }),
   Type.Object({
     action: Type.Literal("execute"),

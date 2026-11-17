@@ -151,6 +151,7 @@ describe("personal org default connector policy", () => {
 			expect(await decide(organizationId, kind)).toEqual({
 				effect: "auto",
 				ruleIds: [rules[0].id],
+				rules: [{ id: rules[0].id, kind: "grant" }],
 				reason: "matched_rule",
 			});
 		}
@@ -170,6 +171,7 @@ describe("personal org default connector policy", () => {
 			expect(await decide(organizationId, kind)).toEqual({
 				effect: "approval",
 				ruleIds: [],
+				rules: [],
 				reason: "default_approval",
 			});
 		}

@@ -9,7 +9,7 @@ import { operationCardLabel, supersedeActionEvent } from '../tools/admin/approva
 import { connectorApprovalMetadata } from '../operations/operation-run-card';
 import { type ActionApprovalNotificationContext, notifyActionApprovalNeeded } from '../notifications/triggers';
 import { insertEvent } from '../utils/insert-event';
-import type { ConnectorPolicyResult } from './connector-policy';
+import { type ConnectorPolicyResult, connectorPolicyNoteSuffix, explainConnectorPolicy } from './connector-policy';
 import { resolveActingPrincipal, resolveConnectorPolicy, resolveStoredActingPrincipal } from './entity-policy';
 import { compileConnectionRowVisibility } from './connection-visibility';
 import { feedDefinitionSelection } from '../connectors/feed-definition-selection';
@@ -38,7 +38,7 @@ type PolicyRun = {
 };
 
 const unavailable = (): ConnectorPolicyResult => ({
-  effect: 'deny', ruleIds: [], reason: 'unavailable_operation',
+  effect: 'deny', ruleIds: [], rules: [], reason: 'unavailable_operation',
 });
 
 async function loadPolicyRun(sql: DbClient, organizationId: string, runId: number, lock = false): Promise<PolicyRun | null> {
@@ -96,7 +96,7 @@ async function resolveSourceReadAccess(sql: DbClient, organizationId: string, ru
     if (policy.effect !== 'auto') return { ...policy, effect: 'deny' };
   }
   return await isSourceReadFeedStillReadable(sql, organizationId, run)
-    ? { effect: 'auto', ruleIds: [], reason: 'parent_approval' } : unavailable();
+    ? { effect: 'auto', ruleIds: [], rules: [], reason: 'parent_approval' } : unavailable();
 }
 // Recovery checks source visibility and current policy without reviving the old
 // timed run or inheriting its authority for a new Chrome operation.
@@ -153,7 +153,7 @@ export async function resolveRunConnectorPolicy(params: {
   if (childPolicy.effect === 'deny') return childPolicy;
   // The running parent already received authority for its implementation steps.
   // A new Ask does not interrupt each scroll; an explicit child Block still vetoes.
-  return { effect: 'auto', ruleIds: childPolicy.ruleIds, reason: 'parent_approval' };
+  return { effect: 'auto', ruleIds: childPolicy.ruleIds, rules: childPolicy.rules, reason: 'parent_approval' };
 }
 
 /** Run inside the caller's claim transaction, before any external execution. */
@@ -175,8 +175,8 @@ export async function applyRunConnectorPolicyAtClaim(params: {
 
   const blocked = policy.effect === 'deny';
   const message = blocked
-    ? 'Current policy blocks this operation.'
-    : 'Current policy requires human approval before this operation can run.';
+    ? `Current policy blocks this operation${connectorPolicyNoteSuffix(policy) || '.'}`
+    : `Current policy requires human approval before this operation can run${connectorPolicyNoteSuffix(policy) || '.'}`;
   const [changed] = await sql`
     UPDATE runs SET approval_status = ${blocked ? 'rejected' : 'pending'},
       status = ${blocked ? 'cancelled' : 'pending'}, error_message = ${blocked ? message : null},
@@ -199,7 +199,7 @@ export async function applyRunConnectorPolicyAtClaim(params: {
   const status = blocked ? 'rejected' : 'pending_approval';
   const title = (operation: string) => `${operation} — ${blocked ? 'blocked by policy' : 'pending approval'}`;
   const metadata = {
-    policy_reason: policy.reason, policy_rule_ids: policy.ruleIds,
+    policy: explainConnectorPolicy(policy),
     ...(resolved ? connectorApprovalMetadata(connectionName, resolved.operation, run.action_input ?? {}) : {}),
   };
   let cardId = await supersedeActionEvent(runId, organizationId, status, title, message, metadata, null, sql);

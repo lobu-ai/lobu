@@ -38,6 +38,8 @@ export function serializeEntityApprovalPolicy(policy: EntityApprovalPolicy) {
 		// The full per-action effect map (incl. deny/execute), for the
 		// agent Permissions UI which the create/update/delete triple can't express.
 		effects: policy.effects,
+		kind: policy.kind,
+		note: policy.note,
 		approval_connection_id: policy.deliveryTarget.connectionId,
 		approval_channel_id: policy.deliveryTarget.channelId,
 		approval_team_id: policy.deliveryTarget.teamId,

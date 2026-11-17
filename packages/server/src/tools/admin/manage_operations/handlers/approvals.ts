@@ -1,4 +1,5 @@
 import { IdentityAssociationStaleError, rememberIdentityRejection } from "../../../../utils/identity-association";
+import { connectorPolicyNoteSuffix, explainConnectorPolicy } from "../../../../authz/connector-policy";
 import { lockIdentityOrganization } from "../../../../utils/relationship-validation";
 import { hasDelegatedIdentity, isHumanDecision } from "../../../../auth/direct-user-context";
 
@@ -1363,14 +1364,16 @@ export async function handleApprove(
 		if (admissionError) return withFailureCode({ error: admissionError }, "VALIDATION");
 	}
 
-	// Recheck the persisted requesting principal, not the human approver.
+	// Recheck the persisted requesting principal, not the human approver,
+	// guardrails included, before any (possibly edited) input is dispatched.
 	const policy = await resolveRunConnectorPolicy({
 		organizationId: ctx.organizationId,
 		runId: args.run_id,
 		sql,
 	});
 	if (policy?.effect === "deny") {
-		const why = `Policy now blocks '${pendingRun.action_key}' for the requesting principal.`;
+		const why = `Policy now blocks '${pendingRun.action_key}' for the requesting principal${connectorPolicyNoteSuffix(policy)}.`;
+		const explanation = explainConnectorPolicy(policy);
 		const reviewer = await resolveReviewer(ctx);
 		// The claim re-asserts `approval_status = 'pending'`, so a run approved
 		// concurrently (or otherwise no longer pending) matches ZERO rows. In
@@ -1393,7 +1396,7 @@ export async function handleApprove(
 				"rejected",
 				(operation) => `${operation} — blocked by policy`,
 				why,
-				{ reject_reason: why },
+				{ reject_reason: why, policy: explanation },
 				reviewer,
 				tx,
 			);
@@ -1406,7 +1409,7 @@ export async function handleApprove(
 					"The approval was already decided while this request was in flight. Refresh before acting.",
 			}, "VALIDATION");
 		}
-		return withFailureCode({ error: `${why} The approval was cancelled.` }, "PERMISSION");
+		return withFailureCode({ error: `${why} The approval was cancelled.`, policy: explanation }, "PERMISSION");
 	}
 
 	const approvedInput = args.input ?? pendingRun.action_input ?? {};

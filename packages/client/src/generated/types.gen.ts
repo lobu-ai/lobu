@@ -5573,6 +5573,21 @@ export type ManageOperationsResponses = {
   200:
     | {
         error: string;
+        policy?: {
+          reason:
+            | "matched_rule"
+            | "guardrail"
+            | "default_approval"
+            | "device_owner"
+            | "unresolved_principal"
+            | "parent_approval"
+            | "unavailable_operation";
+          rules: Array<{
+            id: number;
+            kind: "grant" | "guardrail";
+            note?: string;
+          }>;
+        };
       }
     | {
         action: "list_available";
@@ -5588,6 +5603,21 @@ export type ManageOperationsResponses = {
         approval_url?: string;
         status: "pending_approval";
         message: string;
+        policy?: {
+          reason:
+            | "matched_rule"
+            | "guardrail"
+            | "default_approval"
+            | "device_owner"
+            | "unresolved_principal"
+            | "parent_approval"
+            | "unavailable_operation";
+          rules: Array<{
+            id: number;
+            kind: "grant" | "guardrail";
+            note?: string;
+          }>;
+        };
       }
     | {
         action: "execute";
