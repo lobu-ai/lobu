@@ -31,6 +31,7 @@ import {
 	IntegrationConnector,
 } from "@lobu/connector-sdk";
 import { CHAT_AUTOMATION_EVENTS } from "./chat-automation-events.js";
+import { CHAT_TRANSPORT_ACTIONS } from "./chat-transport-actions.js";
 
 /**
  * Bot scopes requested by `/slack/install`. The Slack manifest does not drive
@@ -84,6 +85,7 @@ export default class SlackConnector extends IntegrationConnector {
 			"Connect a Slack workspace to Lobu. Mention the bot, DM it, or run /lobu in any channel to drive a sandboxed agent.",
 		version: "1.0.0",
 		automationEvents: CHAT_AUTOMATION_EVENTS,
+		actions: CHAT_TRANSPORT_ACTIONS,
 		faviconDomain: "slack.com",
     webhook: {
       // App-level delivery: one webhook is configured ONCE on the Slack app, and

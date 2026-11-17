@@ -18,6 +18,8 @@
  * into components and compare those.
  */
 
+import { parseAutomationRunConversationId } from "../permissions/automation-run-intent.js";
+
 export interface ConversationRef {
   /** `${platform}:${channelId}` — the conversation's channel. */
   channelKey: string;
@@ -53,4 +55,33 @@ export function conversationRefsMatch(
 ): boolean {
   if (!a || !b) return false;
   return a.channelKey === b.channelKey && a.threadId === b.threadId;
+}
+
+/**
+ * THE decision whether a post is a reply in the conversation that asked for
+ * it. Everything else an agent posts goes through policy as an operation run.
+ *
+ * `asking` comes from the worker's signed token, never from the model: the
+ * thread the gateway routes this turn's replies to (`responseThreadId`), else
+ * the turn's own conversation. `post` is the resolved destination: the route's
+ * `threadId` is a full `platform:channel:root` thread id and is compared by
+ * its parsed root, so `slack:C:ts` and the asking `slack:C:ts` agree. An
+ * Automation turn has no asking conversation, so nothing it posts is a reply.
+ */
+export function isReplyInAskingConversation(
+  asking: {
+    connectionId?: string;
+    conversationId: string;
+    responseThreadId?: string;
+  },
+  post: { connectionId: string; channelKey: string; threadId?: string }
+): boolean {
+  if (!asking.connectionId || asking.connectionId !== post.connectionId) {
+    return false;
+  }
+  if (parseAutomationRunConversationId(asking.conversationId)) return false;
+  return conversationRefsMatch(
+    parseConversationRef(post.threadId ?? post.channelKey),
+    parseConversationRef(asking.responseThreadId ?? asking.conversationId)
+  );
 }

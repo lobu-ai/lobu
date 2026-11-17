@@ -497,11 +497,10 @@ function buildAvailableOperation(args: {
 	});
 	// Capability gate (#2033 item 2): a local_action op whose compiled runtime
 	// does NOT override execute() is declared in the catalog but would throw
-	// "Actions not supported" at execution. Report it unsupported here so
-	// readiness agrees with execution — regardless of connection status.
-	const executeUnsupported =
-		operation.backend === "local_action" &&
-		(operation as OperationDescriptor).supports_execute === false;
+	// "Actions not supported" at execution, and a chat_transport op is only run
+	// by an agent's send_message. Report both unsupported here so readiness
+	// agrees with execution — regardless of connection status.
+	const executeUnsupported = (operation as OperationDescriptor).supports_execute === false;
 	const base = executeUnsupported
 		? { readyTarget: undefined as ExecutionTarget | undefined, executable: false, readiness: "unsupported" }
 		: resolveOperationReadiness(targets);

@@ -28,6 +28,7 @@ export const BackendLiteral = Type.Union(
     Type.Literal("local_action"),
     Type.Literal("mcp_tool"),
     Type.Literal("http_operation"),
+    Type.Literal("chat_transport"),
   ],
   { description: "Filter by operation backend type" }
 );

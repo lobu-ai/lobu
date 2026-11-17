@@ -1,5 +1,5 @@
 export type OperationKind = 'read' | 'write';
-export type OperationBackend = 'local_action' | 'mcp_tool' | 'http_operation';
+export type OperationBackend = 'local_action' | 'mcp_tool' | 'http_operation' | 'chat_transport';
 
 export interface OperationAnnotations {
   destructiveHint?: boolean;
@@ -34,6 +34,16 @@ interface LocalActionBackendConfig {
   actionKey: string;
 }
 
+/**
+ * A connector action the gateway's chat transport delivers through the
+ * connection's chat adapter (`ActionDefinition.delivery: 'chat_transport'`).
+ * Its runs are created by an agent's `send_message`, never by a direct execute.
+ */
+interface ChatTransportBackendConfig {
+  backend: 'chat_transport';
+  actionKey: string;
+}
+
 interface McpToolBackendConfig {
   backend: 'mcp_tool';
   toolName: string;
@@ -51,6 +61,7 @@ interface HttpOperationBackendConfig {
 
 export type OperationBackendConfig =
   | LocalActionBackendConfig
+  | ChatTransportBackendConfig
   | McpToolBackendConfig
   | HttpOperationBackendConfig;
 

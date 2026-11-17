@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { createLogger } from "@lobu/core";
+import { createLogger, type WorkerTokenData } from "@lobu/core";
+import { TURN_INPUT_RUN_HEADER } from "@lobu/core/agent-tooling";
 import { Hono, type Context } from "hono";
 import { getDb } from "../../../db/client.js";
 import { CHAT_SENDER_NOT_LINKED, isConfinedChatTurn } from "../../orchestration/chat-turn-actor.js";
@@ -7,13 +8,29 @@ import {
   resolveAddressableTargets,
   resolveAuthorizedTarget,
   resolveAuthorizedThread,
-  threadHandleForMessage,
   type AddressableTarget,
 } from "../../conversations/authorization.js";
 import {
   conversationRefsMatch,
+  isReplyInAskingConversation,
   parseConversationRef,
 } from "../../conversations/conversation-ref.js";
+import {
+  ChatTransportUnavailableError,
+  outboundChatTextError,
+  postToChatTarget,
+  threadHandleForPost,
+} from "../../../operations/chat-transport-send.js";
+import { handleExecute } from "../../../tools/admin/manage_operations/handlers/execute.js";
+import {
+  agentTurnIdentityFromClaims,
+  withTurnIdempotencyKey,
+  withTurnInputRun,
+} from "../../../tools/turn-write-idempotency.js";
+import { ensureConnectorDeclaresOperation } from "../../../utils/ensure-connector-installed.js";
+import { parseAutomationRunConversationId } from "../../permissions/automation-run-intent.js";
+import { resolveAutomationRunContext } from "../../automation-run-session.js";
+import type { Env } from "../../../index.js";
 import { stripPlatformPrefix } from "../../channels/bound-channels.js";
 import { getChatInstanceManager } from "../../../lobu/gateway.js";
 import { presentStoredEventToConversation } from "../../../notifications/service.js";
@@ -34,12 +51,8 @@ import { routeFailure } from "../../../diagnostics.js";
 
 const logger = createLogger("conversations-routes");
 
-const MAX_CONTENT_LENGTH = 4000;
-// Refuse mass-mentions: both the human-written `@channel` form (anywhere, not
-// just after whitespace) and Slack's actual broadcast tokens `<!channel>` /
-// `<!here>` / `<!everyone>` / `<!subteam^…>`.
-const MASS_MENTION =
-  /@(channel|here|everyone)\b|<!(channel|here|everyone|subteam)\b/i;
+/** The operation every chat connector declares for an agent's posts elsewhere. */
+const SEND_MESSAGE_OPERATION = "send_message";
 
 /** Public (model-facing) shape of an addressable conversation. */
 function toPublicTarget(t: AddressableTarget): {
@@ -54,6 +67,175 @@ function toPublicTarget(t: AddressableTarget): {
     platform: t.platform,
     label: t.label ?? t.channelId,
   };
+}
+
+/** The signed worker as a tool caller: the agent, never a human user. */
+function workerToolContext(worker: WorkerTokenData & { organizationId: string; agentId: string }): ToolContext {
+  return {
+    organizationId: worker.organizationId,
+    // Chat platform user ids are not Lobu user-row ids. Keep durable
+    // attribution on the signed agent and retain the platform principal only
+    // inside the trusted source context.
+    userId: null,
+    memberRole: null,
+    agentId: worker.agentId,
+    sourceContext: {
+      platform: worker.platform,
+      connectionId: worker.connectionId,
+      channelId: worker.channelId,
+      conversationId: worker.conversationId,
+      teamId: worker.teamId,
+      userId: worker.userId,
+      source: worker.source,
+      // Resolve sender evidence from the signed turn, never caller input.
+      ...(worker.runId ? { turnRunId: worker.runId } : {}),
+    },
+    isAuthenticated: true,
+    clientId: "lobu-worker",
+    scopes: null,
+    tokenType: "session",
+    scopedToOrg: true,
+    allowCrossOrg: false,
+    grantedOrganizationIds: null,
+    directSearchFederation: false,
+  } satisfies ToolContext;
+}
+
+const NOT_SENT = "Not sent";
+
+/**
+ * Send somewhere other than the asking conversation: the connection's
+ * `send_message` operation, admitted by connector policy for the session's
+ * Automation (when this turn runs one) or the agent. The run is keyed on the
+ * turn input and the resolved arguments, so a repeated call answers with the
+ * same run instead of queueing or posting twice.
+ */
+async function sendAsOperation(
+  c: Context<WorkerContext>,
+  worker: WorkerTokenData & { organizationId: string; agentId: string },
+  target: AddressableTarget,
+  threadId: string | undefined,
+  text: string
+): Promise<Response> {
+  const { organizationId, agentId } = worker;
+  // A hosted-preview binding reaches another workspace's connection, whose
+  // policy and approvers this workspace does not own.
+  if (target.crossOrg) {
+    return errorResponse(
+      c,
+      `${NOT_SENT}: this conversation is on another workspace's connection, so the agent may only reply where it was asked.`,
+      403
+    );
+  }
+  const ctx = workerToolContext(worker);
+  const turn = withTurnInputRun(
+    agentTurnIdentityFromClaims(worker),
+    c.req.header(TURN_INPUT_RUN_HEADER)
+  );
+  ctx.agentTurn = turn;
+  const automation = parseAutomationRunConversationId(worker.conversationId ?? "");
+  if (automation) {
+    try {
+      // Throws unless the run is this agent's managed Automation's, in this org.
+      await resolveAutomationRunContext({
+        conversationId: worker.conversationId as string,
+        organizationId,
+        agentId,
+      });
+    } catch {
+      return errorResponse(c, `${NOT_SENT}: this turn's Automation run could not be verified.`, 403);
+    }
+    ctx.actingAutomationId = automation.automationId;
+    ctx.actingRunId = automation.runId;
+  }
+  // Policy needs the platform's connector definition to name the operation,
+  // so install or re-sync it first. Without it nothing can admit the send, so
+  // it is refused, not posted.
+  if (!(await ensureConnectorDeclaresOperation({
+    organizationId,
+    connectorKey: target.platform,
+    operationKey: SEND_MESSAGE_OPERATION,
+  }))) {
+    return errorResponse(
+      c,
+      `${NOT_SENT}: the ${target.platform} connector is not installed in this workspace.`,
+      503
+    );
+  }
+  const threadRoot = parseConversationRef(threadId)?.threadId;
+  const sendArgs: {
+    action: "execute";
+    connection_id: number;
+    operation_key: string;
+    input: Record<string, unknown>;
+    idempotency_key?: string;
+  } = {
+    action: "execute",
+    connection_id: target.connectionDbId,
+    operation_key: SEND_MESSAGE_OPERATION,
+    input: {
+      channel_id: target.channelId,
+      ...(threadRoot ? { thread_id: threadRoot } : {}),
+      text,
+    },
+  };
+  const args = await withTurnIdempotencyKey(turn, "conversations.send", sendArgs);
+  return await sendOncePerTurnInput(c, worker, "conversations.send", args, async () => {
+    const result = (await handleExecute(args, ctx, {} as Env, undefined, {
+      agent_id: agentId,
+    })) as Record<string, unknown>;
+    const runId = typeof result.run_id === "number" ? result.run_id : undefined;
+    if ("error" in result) {
+      const code = (result as { error_code?: string }).error_code;
+      const status = code === "PERMISSION" ? 403 : code === "NOT_FOUND" ? 404 : 422;
+      return c.json(
+        { error: `${NOT_SENT}: ${String(result.error)}`, ...(code ? { code } : {}) },
+        status
+      );
+    }
+    switch (result.status) {
+      case "completed": {
+        const output = (result.output ?? {}) as { message_id?: string | null; thread?: string };
+        logger.info(
+          `agent ${agentId} sent to ${target.platform}/${target.channelId}${threadRoot ? " (thread)" : ""} via run ${runId}`
+        );
+        return c.json({
+          messageId: output.message_id ?? null,
+          thread: output.thread,
+          // Not the asking conversation: the turn still answers its sender.
+          deliveredInBand: false,
+          run_id: runId,
+        });
+      }
+      case "pending_approval":
+        return c.json(
+          {
+            error: `Held for approval (run ${runId}): ${String(result.approval_url ?? "")}. Not sent; do not resend.`,
+            code: "PENDING_APPROVAL",
+            run_id: runId,
+            approval_url: result.approval_url ?? null,
+          },
+          409
+        );
+      case "in_progress":
+        return c.json(
+          {
+            error: `This message is already being sent (run ${runId}). Do not resend.`,
+            code: "IN_PROGRESS",
+            run_id: runId,
+          },
+          409
+        );
+      default:
+        return c.json(
+          {
+            error: `${NOT_SENT}: ${String(result.error_message ?? result.message ?? `operation ${String(result.status)}`)}`,
+            run_id: runId,
+          },
+          422
+        );
+    }
+  });
 }
 
 /**
@@ -142,12 +324,20 @@ export function createConversationsRoutes(): Hono<WorkerContext> {
   });
 
   // POST /conversations/send { target, text }
+  //
+  // A reply in the conversation that asked is the turn answering its sender:
+  // it posts directly. Anything else is the agent speaking somewhere new, so it
+  // runs as the connection's `send_message` operation under the org's connector
+  // policy (Auto/Ask/Block, approval, audit), acting as the session's Automation
+  // when there is one, else the agent.
   router.post("/conversations/send", authenticateWorker, async (c) => {
     try {
       const worker = getVerifiedWorker(c);
       if (!worker.agentId || !worker.organizationId) {
         return errorResponse(c, "Token missing agent/org context", 403);
       }
+      const agentId = worker.agentId;
+      const organizationId = worker.organizationId;
       const body = (await c.req.json().catch(() => null)) as {
         target?: string;
         text?: string;
@@ -156,40 +346,20 @@ export function createConversationsRoutes(): Hono<WorkerContext> {
       if (!body?.target || !text) {
         return errorResponse(c, "target and text are required", 400);
       }
-      if (text.length > MAX_CONTENT_LENGTH) {
-        return errorResponse(
-          c,
-          `Message too long (max ${MAX_CONTENT_LENGTH} chars)`,
-          400
-        );
-      }
-      if (MASS_MENTION.test(text)) {
-        return errorResponse(
-          c,
-          "Mass mentions (@channel/@here/@everyone) are not allowed",
-          400
-        );
-      }
+      const textError = outboundChatTextError(text);
+      if (textError) return errorResponse(c, textError, 400);
 
       // `target` is either a channel handle (top-level post) or a thread handle
       // from a prior send (reply in that thread). A thread handle re-authorizes
       // its own channel subscription, so try it first; fall back to channel.
       let target: AddressableTarget;
       let threadId: string | undefined;
-      const asThread = await resolveAuthorizedThread(
-        worker.agentId,
-        worker.organizationId,
-        body.target
-      );
+      const asThread = await resolveAuthorizedThread(agentId, organizationId, body.target);
       if (asThread) {
         target = asThread.target;
         threadId = asThread.threadId;
       } else {
-        const resolved = await resolveAuthorizedTarget(
-          worker.agentId,
-          worker.organizationId,
-          body.target
-        );
+        const resolved = await resolveAuthorizedTarget(agentId, organizationId, body.target);
         if (!resolved) {
           return errorResponse(c, "Not authorized for this conversation", 403);
         }
@@ -204,93 +374,51 @@ export function createConversationsRoutes(): Hono<WorkerContext> {
       });
       if (captured) return captured;
 
+      const reply = isReplyInAskingConversation(
+        {
+          connectionId: worker.connectionId,
+          conversationId: worker.conversationId,
+          responseThreadId: worker.responseThreadId,
+        },
+        { connectionId: target.connectionId, channelKey: target.channelKey, threadId }
+      );
+      if (!reply) {
+        return await sendAsOperation(c, { ...worker, organizationId, agentId }, target, threadId, text);
+      }
+
       // A turn that repeats this post for the same input message (a re-run,
       // a redelivered message, a repeated call) posts once; the repeat gets
       // the first post's answer.
-      const signed = { organizationId: worker.organizationId, agentId: worker.agentId };
       return await sendOncePerTurnInput(c, worker, "conversations.send", {
         connectionId: target.connectionId,
         channelId: target.channelId,
         threadId: threadId ?? null,
         text,
       }, async () => {
-        const manager = getChatInstanceManager();
-        if (!manager?.postToConversation) {
+        let sent: { messageId: string; threadId: string };
+        try {
+          sent = await postToChatTarget({ organizationId, agentId, target, threadId, text });
+        } catch (error) {
           // Refused before anything was posted: release the receipt so the
           // same input can deliver once the gateway is back.
-          throw new ToolUserError("Chat instance manager unavailable", 503);
+          if (error instanceof ChatTransportUnavailableError) {
+            throw new ToolUserError(error.message, 503);
+          }
+          throw error;
         }
-        const sent = (await manager.postToConversation(target.connectionId, {
-          platform: target.platform,
-          channelKey: target.channelKey,
-          channelId: target.channelId,
-          threadId,
-          content: { markdown: text },
-          // Follow the thread we just posted into so replies (e.g. lunch orders)
-          // come back to us and land in the transcript.
-          subscribe: true,
-        })) as { messageId: string; threadId: string };
-
         logger.info(
-          `agent ${signed.agentId} sent to ${target.platform}/${target.channelId}${threadId ? " (thread)" : ""} via ${target.connectionId}`
+          `agent ${agentId} replied in ${target.platform}/${target.channelId}${threadId ? " (thread)" : ""} via ${target.connectionId}`
         );
-
-        // Persist the bot's own post into the transcript (with the real platform
-        // message id) so read_conversation includes it AND the inbound echo of
-        // this message dedups against it.
-        if (sent.messageId) {
-          captureChannelMessage({
-            organizationId: signed.organizationId,
-            connectionId: target.connectionId,
-            platform: target.platform,
-            channelId: target.channelId,
-            threadId: threadId ?? null,
-            platformMessageId: sent.messageId,
-            authorId: signed.agentId,
-            authorName: signed.agentId,
-            // Bot's own post — no sender attribution; team_id is not in scope here.
-            teamId: null,
-            isBot: true,
-            text,
-            occurredAt: new Date(),
-          });
-        }
-
-        // A thread handle lets a later run reply into this message's thread.
-        // Prefer the adapter's returned thread id (root) when it carries one
-        // (reply-in-existing-thread); fall back to the new message id (the root
-        // of a freshly-opened thread). Telegram's message id is `${chatId}:${n}`,
-        // so strip the redundant channel prefix — else the thread handle encodes a
-        // 4-segment `platform:channel:chatId:n` that its own 3-part decode rejects
-        // (and createThread can't resolve). No-op for ids that aren't prefixed
-        // (e.g. a Slack `ts`).
-        const rawRoot =
-          typeof sent.threadId === "string" && sent.threadId.split(":")[2]
-            ? sent.threadId.split(":")[2]
-            : sent.messageId;
-        const threadRoot = rawRoot.startsWith(`${target.channelId}:`)
-          ? rawRoot.slice(target.channelId.length + 1)
-          : rawRoot;
-        const threadHandle = threadRoot
-          ? threadHandleForMessage(target, threadRoot)
-          : undefined;
-        // Did this post land in the very conversation that triggered the run?
-        // If so the user has ALREADY read the agent's answer, and the terminal
-        // `finalText` the worker is about to emit is a report about it — posting
-        // that too is the double-message. The comparison can only happen here:
-        // the model holds an opaque handle, and only this route has resolved it
-        // to concrete channel/thread coordinates. The worker's own conversation
+        // A reply landed in the conversation that triggered the run, so the
+        // user has ALREADY read the agent's answer, and the terminal
+        // `finalText` the worker is about to emit is a report about it —
+        // posting that too is the double-message. The worker's conversation
         // comes from its signed token, so the model cannot spoof a match to
         // silence its own reply.
-        const deliveredInBand = conversationRefsMatch(
-          { channelKey: target.channelKey, ...(threadId ? { threadId } : {}) },
-          parseConversationRef(worker.conversationId)
-        );
-
         return c.json({
           messageId: sent.messageId || null,
-          thread: threadHandle,
-          deliveredInBand,
+          thread: threadHandleForPost(target, sent),
+          deliveredInBand: true,
         });
       });
     } catch (error) {
@@ -478,34 +606,7 @@ export function createConversationsRoutes(): Hono<WorkerContext> {
           },
         },
         {} as never,
-        {
-          organizationId: worker.organizationId,
-          // Chat platform user ids are not Lobu user-row ids. Keep durable
-          // creator attribution on the signed agent and retain the platform
-          // principal only inside the trusted delivery context.
-          userId: null,
-          memberRole: null,
-          agentId: worker.agentId,
-          sourceContext: {
-            platform: worker.platform,
-            connectionId: worker.connectionId,
-            channelId: worker.channelId,
-            conversationId: worker.conversationId,
-            teamId: worker.teamId,
-            userId: worker.userId,
-            source: worker.source,
-            // Resolve sender evidence from the signed turn, never caller input.
-            ...(worker.runId ? { turnRunId: worker.runId } : {}),
-          },
-          isAuthenticated: true,
-          clientId: "lobu-worker",
-          scopes: null,
-          tokenType: "session",
-          scopedToOrg: true,
-          allowCrossOrg: false,
-          grantedOrganizationIds: null,
-          directSearchFederation: false,
-        } satisfies ToolContext
+        workerToolContext({ ...worker, organizationId: worker.organizationId, agentId: worker.agentId })
       );
       if (schedule.error) {
         return errorResponse(c, schedule.error, 422);
@@ -535,7 +636,11 @@ export function createConversationsRoutes(): Hono<WorkerContext> {
       c: Context<WorkerContext>,
       target: MessageTarget,
       body: Record<string, unknown>
-    ) => Promise<Response>
+    ) => Promise<Response>,
+    // Edit rewrites what the agent said. In the asking conversation that is
+    // the turn revising its reply; anywhere else it would publish new text
+    // without the policy a send there goes through, so it is refused.
+    opts: { askingConversationOnly?: boolean } = {}
   ) {
     return async (c: Context<WorkerContext>): Promise<Response> => {
       try {
@@ -591,11 +696,17 @@ export function createConversationsRoutes(): Hono<WorkerContext> {
             messageId: message,
           };
         }
-        if (isConfinedChatTurn(worker)) {
+        const confined = isConfinedChatTurn(worker);
+        if (confined || opts.askingConversationOnly) {
+          const refusal = confined
+            ? CHAT_SENDER_NOT_LINKED
+            : `Only messages in the conversation that asked can be ${label}ed; send a new message instead.`;
           const source = parseConversationRef(worker.responseThreadId ?? worker.conversationId);
-          if (!source || target.connectionId !== worker.connectionId ||
-              !conversationRefsMatch(parseConversationRef(target.threadId), source)) {
-            return errorResponse(c, CHAT_SENDER_NOT_LINKED, 403);
+          if (!source || !isReplyInAskingConversation(
+            { connectionId: worker.connectionId, conversationId: worker.conversationId, responseThreadId: worker.responseThreadId },
+            { connectionId: target.connectionId, channelKey: target.threadId }
+          )) {
+            return errorResponse(c, refusal, 403);
           }
           // Handles authorize a channel, and message IDs can name any message
           // in it. Verify the message too, or a forged ID can mutate a sibling
@@ -612,7 +723,7 @@ export function createConversationsRoutes(): Hono<WorkerContext> {
             if (!row || !conversationRefsMatch(
               parseConversationRef(row.thread_id ?? source.channelKey), source
             )) {
-              return errorResponse(c, CHAT_SENDER_NOT_LINKED, 403);
+              return errorResponse(c, refusal, 403);
             }
           }
         }
@@ -657,21 +768,8 @@ export function createConversationsRoutes(): Hono<WorkerContext> {
     authenticateWorker,
     messageRoute("edit", async (c, target, body) => {
       const text = typeof body.text === "string" ? body.text.trim() : "";
-      if (!text) return errorResponse(c, "text is required", 400);
-      if (text.length > MAX_CONTENT_LENGTH) {
-        return errorResponse(
-          c,
-          `Message too long (max ${MAX_CONTENT_LENGTH} chars)`,
-          400
-        );
-      }
-      if (MASS_MENTION.test(text)) {
-        return errorResponse(
-          c,
-          "Mass mentions (@channel/@here/@everyone) are not allowed",
-          400
-        );
-      }
+      const textError = outboundChatTextError(text);
+      if (textError) return errorResponse(c, textError, 400);
       const manager = getChatInstanceManager();
       if (!manager?.editMessage) {
         return errorResponse(c, "Chat instance manager unavailable", 503);
@@ -682,7 +780,7 @@ export function createConversationsRoutes(): Hono<WorkerContext> {
         text,
       });
       return c.json({ ok: true });
-    })
+    }, { askingConversationOnly: true })
   );
 
   // POST /conversations/delete { thread, message } — bot's own messages only.

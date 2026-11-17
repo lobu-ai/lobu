@@ -74,6 +74,29 @@ async function createSdkThread(
 }
 
 /**
+ * Resolve exactly the thread `threadId` names, or throw. For a post that must
+ * land where it was addressed (an upload, an approved send) a channel-level
+ * fallback would put the message somewhere nobody approved.
+ */
+export async function resolveExactChatThread(
+  chat: any,
+  platform: string,
+  threadId: string
+): Promise<any> {
+  const hasCreateThread =
+    !!chat.getAdapter?.(platform) &&
+    typeof (chat as any).createThread === "function";
+  if (!hasCreateThread) {
+    throw new Error(`Chat instance has no createThread for ${platform}`);
+  }
+  const thread = await createSdkThread(chat, platform, threadId, undefined);
+  if (!thread) {
+    throw new Error(`Unable to resolve ${platform} thread ${threadId}`);
+  }
+  return thread;
+}
+
+/**
  * Resolve a Chat-SDK post target (Thread or Channel) for an outbound message.
  * One resolver shared by the response bridge, the interaction bridge, and the
  * file-upload handler.
@@ -192,23 +215,7 @@ export async function postFileToChatTarget(
   const platform = instance.connection.platform;
 
   if (target.threadId) {
-    const hasCreateThread =
-      !!chat.getAdapter?.(platform) &&
-      typeof (chat as any).createThread === "function";
-    if (!hasCreateThread) {
-      throw new Error(`Chat instance has no createThread for ${platform}`);
-    }
-    const thread = await createSdkThread(
-      chat,
-      platform,
-      target.threadId,
-      undefined
-    );
-    if (!thread) {
-      throw new Error(
-        `Unable to resolve ${platform} thread ${target.threadId} for upload`
-      );
-    }
+    const thread = await resolveExactChatThread(chat, platform, target.threadId);
     return thread.post(postable);
   }
 

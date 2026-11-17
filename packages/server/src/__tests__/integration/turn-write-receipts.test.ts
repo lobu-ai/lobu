@@ -12,7 +12,7 @@ import { TURN_INPUT_RUN_HEADER } from '@lobu/core/agent-tooling';
 import { Hono } from 'hono';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mintTurnToken } from '../../gateway/orchestration/agent-turn-producer';
-import { resolveAddressableTargets } from '../../gateway/conversations/authorization';
+import { resolveAddressableTargets, threadHandleForMessage } from '../../gateway/conversations/authorization';
 import { createAudioRoutes } from '../../gateway/routes/internal/audio';
 import { createConversationsRoutes } from '../../gateway/routes/internal/conversations';
 import { createFileRoutes } from '../../gateway/routes/internal/files';
@@ -22,9 +22,14 @@ import { ImageGenerationService } from '../../gateway/services/image-generation-
 import { TranscriptionService } from '../../gateway/services/transcription-service';
 import { __setChatInstanceManagerForTests } from '../../lobu/gateway';
 import { pruneTurnWriteReceipts } from '../../tools/turn-write-idempotency';
+import { ensureConnectorInstalled } from '../../utils/ensure-connector-installed';
 import * as entityHooks from '../../utils/entity-hooks';
 import { initWorkspaceProvider } from '../../workspace';
 import { __setLocalFrontendForTests } from '../../utils/public-origin';
+import type { Env } from '../../index';
+import { manageOperations } from '../../tools/admin/manage_operations';
+import { handleExecute } from '../../tools/admin/manage_operations/handlers/execute';
+import { qualifiedOperationKey } from '../../tools/admin/manage_operations/handlers/shared';
 import { createTestAutomationSubscription } from '../setup/automation-subscriptions';
 import { cleanupTestDatabase, getTestDb } from '../setup/test-db';
 import {
@@ -36,6 +41,7 @@ import {
   insertAgentTurnRun,
   insertChatConnectionRow,
   linkChatIdentityInGraph,
+  ownerToolContext,
   seedSystemEntityTypes,
 } from '../setup/test-fixtures';
 import { post } from '../setup/test-helpers';
@@ -47,7 +53,11 @@ const SENDER = 'U0RECEIPTS';
 const CONVERSATION = 'slack:C_RECEIPTS:1787292000.000100';
 
 let org: Awaited<ReturnType<typeof createTestOrganization>>;
+let owner: Awaited<ReturnType<typeof createTestUser>>;
+/** The thread the turns are asked in: a send there is the turn's reply. */
 let target: string;
+/** The bound channel at top level: a send there is a post elsewhere. */
+let channelTarget: string;
 const posted = vi.fn(async () => ({ messageId: 'synthetic-post', threadId: CONVERSATION }));
 const question = vi.fn(async () => ({ id: 'synthetic-question' }));
 const generate = vi.fn(async () => ({ imageBuffer: Buffer.from('png'), mimeType: 'image/png', provider: 'fixture' }));
@@ -108,7 +118,7 @@ beforeAll(async () => {
   await initWorkspaceProvider();
   await seedSystemEntityTypes();
   org = await createTestOrganization();
-  const owner = await createTestUser();
+  owner = await createTestUser();
   await addUserToOrganization(owner.id, org.id, 'owner');
   await linkChatIdentityInGraph({ organizationId: org.id, userId: owner.id, platform: 'slack', teamId: TEAM, platformUserId: SENDER });
   await createTestAgent({ organizationId: org.id, agentId: AGENT, ownerUserId: owner.id });
@@ -118,7 +128,9 @@ beforeAll(async () => {
     INSERT INTO entity_types (organization_id, slug, name, created_at, updated_at)
     VALUES (${org.id}, 'company', 'Company', now(), now())
   `;
-  [target] = (await resolveAddressableTargets(AGENT, org.id)).map((item) => item.handle);
+  const [channel] = await resolveAddressableTargets(AGENT, org.id);
+  channelTarget = channel!.handle;
+  target = threadHandleForMessage(channel!, '1787292000.000100');
   __setChatInstanceManagerForTests({ postToConversation: posted });
   app.route('/lobu', createInteractionRoutes({ postQuestion: question } as never));
   app.route('/lobu', createImageRoutes({ generate } as never));
@@ -385,5 +397,150 @@ describe('turn write receipts over the real media services', () => {
     const retry = await mediaCall(path, (await turn(`receipts-${path}-unconfigured`)).token, body);
     expect(retry.status, await retry.clone().text()).toBe(200);
     expect(provider).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('send_message: a reply in the asking conversation vs a post elsewhere', () => {
+  const sql = () => getTestDb();
+  async function rule(effect: 'auto' | 'approval' | 'deny', kind: 'grant' | 'guardrail' = 'grant') {
+    const [policy] = await sql()<{ id: number }>`
+      INSERT INTO write_approval_policies (organization_id, resource_class, principal_kind, principal_id, operation_key, connector_key, kind)
+      VALUES (${org.id}, 'connector_action', NULL, NULL, ${qualifiedOperationKey('slack', 'send_message')}, 'slack', ${kind}) RETURNING id
+    `;
+    await sql()`INSERT INTO write_policy_action_effects (policy_id, action, effect) VALUES (${policy!.id}, 'execute', ${effect})`;
+  }
+  const sendRuns = () => sql()<{ id: number; status: string; approval_status: string; action_input: Record<string, unknown> }>`
+    SELECT id, status, approval_status, action_input FROM runs
+    WHERE organization_id = ${org.id} AND action_key = 'send_message' ORDER BY id
+  `;
+
+  beforeEach(async () => {
+    await sql()`DELETE FROM write_approval_policies WHERE organization_id = ${org.id} AND connector_key = 'slack'`;
+  });
+
+  it('a reply into the asking thread posts directly and is reported as delivered in band', async () => {
+    const res = await call('/internal/conversations/send', (await turn('p3-reply-1')).token, { target, text: 'in the thread' });
+    const body = await res.json();
+    expect(res.status, JSON.stringify(body)).toBe(200);
+    expect(posted).toHaveBeenCalledTimes(1);
+    expect(body.deliveredInBand).toBe(true);
+    expect(await sendRuns()).toHaveLength(0);
+  });
+
+  it('a post elsewhere that a guardrail holds waits for approval, posts once when approved, and a repeat answers with the run', async () => {
+    await rule('approval', 'guardrail');
+    const asked = await turn('p3-ask-1');
+    const held = await call('/internal/conversations/send', asked.token, { target: channelTarget, text: 'to the whole channel' });
+    const heldBody = await held.json();
+    expect(held.status, JSON.stringify(heldBody)).toBe(409);
+    expect(heldBody).toMatchObject({ code: 'PENDING_APPROVAL', run_id: expect.any(Number) });
+    expect(heldBody.error).toBe(`Held for approval (run ${heldBody.run_id}): ${heldBody.approval_url}. Not sent; do not resend.`);
+    expect(posted).not.toHaveBeenCalled();
+    const [run] = await sendRuns();
+    // The stored destination is the bare channel id the approver reads.
+    expect(run).toMatchObject({ id: heldBody.run_id, approval_status: 'pending' });
+    expect(run!.action_input).toEqual({ channel_id: 'C_RECEIPTS', text: 'to the whole channel' });
+
+    // Asking again for the same input finds the same held run.
+    const again = await call('/internal/conversations/send', (await turn('p3-ask-1')).token, { target: channelTarget, text: 'to the whole channel' });
+    expect(again.status).toBe(409);
+    expect((await again.json()).run_id).toBe(heldBody.run_id);
+    expect(await sendRuns()).toHaveLength(1);
+
+    const approved = (await manageOperations({ action: 'approve', run_id: heldBody.run_id }, {} as Env, ownerToolContext(org.id, owner.id))) as Record<string, unknown>;
+    expect(approved.error, JSON.stringify(approved)).toBeUndefined();
+    expect(posted).toHaveBeenCalledTimes(1);
+    expect(posted).toHaveBeenCalledWith(CONNECTION, expect.objectContaining({ channelId: 'C_RECEIPTS', threadId: undefined, threadFallback: false }));
+    expect((await sendRuns())[0]).toMatchObject({ status: 'completed' });
+
+    const repeat = await call('/internal/conversations/send', (await turn('p3-ask-1')).token, { target: channelTarget, text: 'to the whole channel' });
+    expect(repeat.status, await repeat.clone().text()).toBe(200);
+    expect(await repeat.json()).toMatchObject({ run_id: heldBody.run_id, deliveredInBand: false });
+    expect(posted).toHaveBeenCalledTimes(1);
+  });
+
+  it('a blocked post elsewhere is refused and nothing is posted', async () => {
+    await rule('deny', 'guardrail');
+    const res = await call('/internal/conversations/send', (await turn('p3-block-1')).token, { target: channelTarget, text: 'blocked' });
+    expect(res.status, await res.clone().text()).toBe(403);
+    expect(posted).not.toHaveBeenCalled();
+  });
+
+  it('a post elsewhere to a bound channel with no rule is sent', async () => {
+    const res = await call('/internal/conversations/send', (await turn('p3-norule-1')).token, { target: channelTarget, text: 'no rule' });
+    const body = await res.json();
+    expect(res.status, JSON.stringify(body)).toBe(200);
+    expect(body).toMatchObject({ deliveredInBand: false, run_id: expect.any(Number) });
+    expect(posted).toHaveBeenCalledTimes(1);
+    expect((await sendRuns()).find((run) => run.id === body.run_id)).toMatchObject({ status: 'completed', approval_status: 'auto' });
+  });
+
+  it('an allowed post elsewhere is sent and recorded as a completed run', async () => {
+    await rule('auto');
+    const res = await call('/internal/conversations/send', (await turn('p3-auto-1')).token, { target: channelTarget, text: 'allowed' });
+    const body = await res.json();
+    expect(res.status, JSON.stringify(body)).toBe(200);
+    expect(body).toMatchObject({ messageId: 'synthetic-post', deliveredInBand: false, run_id: expect.any(Number) });
+    expect(posted).toHaveBeenCalledTimes(1);
+    expect((await sendRuns()).find((run) => run.id === body.run_id)).toMatchObject({ status: 'completed', approval_status: 'auto' });
+
+    // A post the adapter reports at channel level (a Telegram DM, WhatsApp)
+    // returns no thread handle: one built from its message id would name a
+    // thread the platform cannot post into.
+    posted.mockResolvedValueOnce({ messageId: 'synthetic-post', threadId: 'slack:C_RECEIPTS' });
+    const threadless = await call('/internal/conversations/send', (await turn('p3-auto-2')).token, { target: channelTarget, text: 'allowed again' });
+    const threadlessBody = await threadless.json();
+    expect(threadless.status, JSON.stringify(threadlessBody)).toBe(200);
+    expect(threadlessBody.thread).toBeUndefined();
+    expect(body.thread).toEqual(expect.any(String));
+  });
+
+  it('a stale or missing connector definition is synced before the send is evaluated', async () => {
+    await rule('auto');
+    await ensureConnectorInstalled({ organizationId: org.id, connectorKey: 'slack' });
+    // Installed before the platform declared send_message.
+    await sql()`UPDATE connector_definitions SET actions_schema = actions_schema - 'send_message' WHERE organization_id = ${org.id} AND key = 'slack' AND status = 'active'`;
+    const stale = await call('/internal/conversations/send', (await turn('p3-stale-1')).token, { target: channelTarget, text: 'after a stale definition' });
+    expect(stale.status, await stale.clone().text()).toBe(200);
+    // No active definition at all.
+    await sql()`UPDATE connector_definitions SET status = 'archived' WHERE organization_id = ${org.id} AND key = 'slack' AND status = 'active'`;
+    const missing = await call('/internal/conversations/send', (await turn('p3-stale-2')).token, { target: channelTarget, text: 'after no definition' });
+    expect(missing.status, await missing.clone().text()).toBe(200);
+    expect(posted).toHaveBeenCalledTimes(2);
+  });
+
+  it('send_message is not directly executable as an operation', async () => {
+    await rule('auto');
+    const [connection] = await sql()<{ id: number }>`SELECT id FROM connections WHERE organization_id = ${org.id} AND slug = ${`agentconn-${CONNECTION}`}`;
+    const result = await handleExecute(
+      { action: 'execute', connection_id: Number(connection!.id), operation_key: 'send_message', input: { channel_id: 'C_RECEIPTS', text: 'direct' } },
+      ownerToolContext(org.id, owner.id), {} as Env,
+    );
+    expect((result as { error_code?: string }).error_code).toBe('VALIDATION');
+    expect(posted).not.toHaveBeenCalled();
+  });
+
+  it('edit is refused outside the asking conversation', async () => {
+    const editManager = vi.fn(async () => undefined);
+    __setChatInstanceManagerForTests({ postToConversation: posted, editMessage: editManager } as never);
+    try {
+      const res = await call('/internal/conversations/edit', (await turn('p3-edit-1')).token, { thread: channelTarget, message: '1787292999.000200', text: 'rewritten' });
+      expect(res.status, await res.clone().text()).toBe(403);
+      expect(editManager).not.toHaveBeenCalled();
+    } finally {
+      __setChatInstanceManagerForTests({ postToConversation: posted });
+    }
+  });
+
+  it("a post on another workspace's hosted-preview connection is refused", async () => {
+    const host = await createTestOrganization();
+    await insertChatConnectionRow({ id: 'p3-preview-conn', organizationId: host.id, agentId: null, platform: 'slack', settings: { previewMode: true }, metadata: {} });
+    await createTestAutomationSubscription({ organizationId: org.id, agentId: AGENT, connectionSlug: 'agentconn-p3-preview-conn', platform: 'slack', channelId: 'slack:C_PREVIEW' });
+    const preview = (await resolveAddressableTargets(AGENT, org.id)).find((item) => item.channelId === 'C_PREVIEW');
+    expect(preview?.crossOrg).toBe(true);
+    await rule('auto');
+    const res = await call('/internal/conversations/send', (await turn('p3-preview-1')).token, { target: preview!.handle, text: 'borrowed' });
+    expect(res.status, await res.clone().text()).toBe(403);
+    expect(posted).not.toHaveBeenCalled();
   });
 });

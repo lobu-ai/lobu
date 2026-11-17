@@ -1,16 +1,18 @@
 import type { CatalogEntry, InstalledItem } from "./types";
 import { withConnectorInstallability } from "./responses";
 
-function actionCountsFromSchema(actionsSchema: unknown): { reads: number; writes: number } {
-	if (!actionsSchema || typeof actionsSchema !== "object") return { reads: 0, writes: 0 };
+function actionCountsFromSchema(actionsSchema: unknown): { reads: number; writes: number; chatTransport: number } {
+	if (!actionsSchema || typeof actionsSchema !== "object") return { reads: 0, writes: 0, chatTransport: 0 };
 	let reads = 0;
 	let writes = 0;
+	let chatTransport = 0;
 	for (const action of Object.values(actionsSchema)) {
-		const def = action as { kind?: unknown; annotations?: { readOnlyHint?: unknown } };
+		const def = action as { kind?: unknown; delivery?: unknown; annotations?: { readOnlyHint?: unknown } };
 		if (def?.kind === "read" || def?.annotations?.readOnlyHint === true) reads += 1;
 		else writes += 1;
+		if (def?.delivery === "chat_transport") chatTransport += 1;
 	}
-	return { reads, writes };
+	return { reads, writes, chatTransport };
 }
 
 function sortConnectorItems(items: InstalledItem[]): InstalledItem[] {
@@ -70,7 +72,8 @@ export function mergeConnectorInstalledWithCatalog(
 					total: actionCount,
 					reads: actionCounts.reads,
 					writes: actionCounts.writes,
-					local_action: actionCount,
+					local_action: actionCount - actionCounts.chatTransport,
+					chat_transport: actionCounts.chatTransport,
 					mcp_tool: 0,
 					http_operation: 0,
 				},

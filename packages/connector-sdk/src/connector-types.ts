@@ -851,6 +851,15 @@ export interface ActionDefinition {
   inputSchema?: Record<string, unknown>;
   /** JSON Schema for action output */
   outputSchema?: Record<string, unknown>;
+  /**
+   * Who delivers the action. Absent: the connector's own `execute()`.
+   * `'chat_transport'`: the gateway's chat transport posts it through the
+   * connection's chat adapter, so the connector declares the action (and its
+   * policy surface) without a second poster. Such an action is listed but is
+   * not directly executable; an agent's `send_message` creates its runs. Its
+   * input schema marks the destination field with `x-lobu-destination: true`.
+   */
+  delivery?: 'chat_transport';
 }
 
 // =============================================================================

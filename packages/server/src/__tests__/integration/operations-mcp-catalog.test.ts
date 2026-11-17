@@ -137,7 +137,7 @@ describe("connection-scoped MCP catalog", () => {
 		]);
 		for (const operation of broad.operations) expect(operation.execution_targets).toHaveLength(1);
 		const summaries = await getOperationsSummaryBatch(owner.org.id, [KEY], owner.user.id);
-		expect(summaries.get(KEY)).toEqual({ total: broad.total, reads: 1, writes: 1, mcp_tool: 2, local_action: 0, http_operation: 0 });
+		expect(summaries.get(KEY)).toEqual({ total: broad.total, reads: 1, writes: 1, mcp_tool: 2, local_action: 0, chat_transport: 0, http_operation: 0 });
 	});
 
 	it("paginates after merging shared tools and applying action readiness", async () => {

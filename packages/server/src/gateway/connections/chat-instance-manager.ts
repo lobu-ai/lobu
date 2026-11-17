@@ -49,6 +49,7 @@ import type { ChatRuntimeConfig, ChatRuntimeDeps } from "./platforms/types.js";
 import {
   disableSdkMessageHistory,
   resolveChatTarget,
+  resolveExactChatThread,
 } from "./platforms/shared.js";
 import { SlackConnectionCoordinator } from "./slack-connection-coordinator.js";
 import {
@@ -1089,6 +1090,12 @@ export class ChatInstanceManager {
        * send_message; a one-off notify does NOT subscribe.
        */
       subscribe?: boolean;
+      /**
+       * `false`: a `threadId` that cannot be resolved or posted into fails the
+       * send instead of landing at channel level. send_message sets it, since a
+       * reply or an approved send must appear exactly where it was addressed.
+       */
+      threadFallback?: boolean;
 		},
   ): Promise<{ messageId: string; threadId: string }> {
     const running = await this.ensureConnectionRunning(connectionId);
@@ -1098,11 +1105,14 @@ export class ChatInstanceManager {
 				`No active chat instance for connection ${connectionId} (could not start it on this pod)`,
       );
     }
-    const target = await resolveChatTarget(instance.chat, opts.platform, {
-      channelId: opts.channelId,
-      conversationId: opts.threadId,
-      responseThreadId: opts.threadId,
-    });
+    const exactThread = opts.threadId !== undefined && opts.threadFallback === false;
+    const target = exactThread && opts.threadId
+      ? await resolveExactChatThread(instance.chat, opts.platform, opts.threadId)
+      : await resolveChatTarget(instance.chat, opts.platform, {
+          channelId: opts.channelId,
+          conversationId: opts.threadId,
+          responseThreadId: opts.threadId,
+        });
     if (!target) {
       throw new Error(
 				`Could not resolve target ${opts.channelKey}${opts.threadId ? ` (thread ${opts.threadId})` : ""} for connection ${connectionId}`,
@@ -1119,7 +1129,7 @@ export class ChatInstanceManager {
       // which has no message threads) must not fail the whole send — fall back
       // to a channel-level post so the message still lands. Only retry when we
       // actually targeted a thread; a plain channel-post failure is real.
-      if (!opts.threadId) throw err;
+      if (!opts.threadId || exactThread) throw err;
       logger.debug(
         { connectionId, threadId: opts.threadId, err: String(err) },
 				"threaded post failed; retrying at channel level",

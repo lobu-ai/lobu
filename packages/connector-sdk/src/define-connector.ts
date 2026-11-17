@@ -180,6 +180,7 @@ function buildDefinition(spec: ConnectorSpec): RuntimeConnectorDefinition {
             annotations: action.annotations,
             inputSchema: action.inputSchema,
             outputSchema: action.outputSchema,
+            ...(action.delivery ? { delivery: action.delivery } : {}),
           },
         ],
       ),

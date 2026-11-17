@@ -67,6 +67,10 @@ import {
 } from "../../../../worker-api/browser-action-context";
 import { requestSourceAttribution } from "../../../../worker-api/device-source-attribution";
 import { operationTurnOrigin } from "../../../../operations/operation-outcome-followup";
+import {
+	type ChatTransportRunMetadata,
+	deliverChatTransportSend,
+} from "../../../../operations/chat-transport-send";
 import { resolveRunInitiator } from "../../../initiator";
 import type { ToolContext } from "../../../registry";
 import { getOrgUrlContext } from "../../../view-urls";
@@ -456,6 +460,21 @@ async function executeOperationInlineBackend(
 			options.claimedBy,
 		);
 	}
+	if (operation.backend === "chat_transport") {
+		try {
+			const delivered = await deliverChatTransportSend({
+				organizationId,
+				connectionId: connection.id,
+				input: actionInput,
+				runMetadata: options.runMetadata,
+			});
+			return delivered.ok
+				? completeRunInline(runId, organizationId, delivered.output, deferTerminalWrite, options.claimedBy)
+				: failRunInline(runId, organizationId, delivered.error, deferTerminalWrite, options.claimedBy);
+		} catch (error) {
+			return failRunInline(runId, organizationId, getErrorMessage(error), deferTerminalWrite, options.claimedBy);
+		}
+	}
 	if (operation.backend === "mcp_tool") {
 		return executeMcpToolInline(
 			runId,
@@ -608,6 +627,11 @@ export async function handleExecute(
 		actor: ActingPrincipal;
 		assertActive: (sql: DbClient) => Promise<void>;
 	},
+	/**
+	 * Set only by the conversations send route: the agent whose bindings fence
+	 * a `chat_transport` run. No other caller can run such an operation.
+	 */
+	chatTransport?: ChatTransportRunMetadata,
 ): Promise<ManageOperationsResult> {
 	const sql = getDb();
 	const browserContext = deriveBrowserActionContext(ctx);
@@ -664,6 +688,14 @@ export async function handleExecute(
 	}
 
 	const { connection, operation } = resolved;
+	if (operation.backend === "chat_transport") {
+		if (!chatTransport || delegation) {
+			return withFailureCode({
+				error: `Operation '${operation.operation_key}' is delivered by the chat transport: an agent's send_message creates it. It is not directly executable.`,
+			}, "VALIDATION");
+		}
+		runMetadata = { ...runMetadata, chat_transport: chatTransport };
+	}
 	// A delegated call cannot recurse into another compiled connector or bypass
 	// the browser adapter's origin/account/page-activation restrictions.
 	if (
