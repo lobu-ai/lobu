@@ -1068,8 +1068,9 @@ function normalizeLinkedInEntityUrl(href: string): string | null {
   } catch {
     return null;
   }
+  const host = url.hostname;
   const match = url.pathname.match(/^\/(in|company|showcase|school)\/([^/]+)/);
-  return url.hostname.endsWith("linkedin.com") && match
+  return (host === "linkedin.com" || host.endsWith(".linkedin.com")) && match
     ? `https://www.linkedin.com/${match[1]}/${match[2]}/`
     : null;
 }

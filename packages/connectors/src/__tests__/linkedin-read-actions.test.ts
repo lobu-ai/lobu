@@ -662,7 +662,7 @@ describe("search_posts", () => {
         ? card(
             1,
             '<img src="https://media.licdn.com/dms/image/v2/A/feedshare-shrink_480/0/1?e=1" alt="Fixture chart"><img src="https://media.licdn.com/dms/image/v2/B/profile-framedphoto-shrink_100_100/0/1?e=1" alt="Open to work"><button aria-label="Reaction button state: no reaction">1,234</button><button aria-label="Comment">56</button><button aria-label="Repost">7</button>',
-            'Synthetic post body number 1 about <a aria-label="View company: Example Labs" href="https://www.linkedin.com/company/example-labs/?trk=x">Example Labs</a> #fixtures <a href="https://www.linkedin.com/safety/go/?url=https%3A%2F%2Ffixture.example%2Fpost&amp;urlhash=x">https://fixture.example/post</a>'
+            'Synthetic post body number 1 about <a aria-label="View company: Example Labs" href="https://www.linkedin.com/company/example-labs/?trk=x">Example Labs</a> #fixtures <a href="https://evillinkedin.com/in/lookalike/">Lookalike</a> <a href="https://www.linkedin.com/safety/go/?url=https%3A%2F%2Ffixture.example%2Fpost&amp;urlhash=x">https://fixture.example/post</a>'
           )
         : card(
             i + 1,
@@ -697,7 +697,7 @@ describe("search_posts", () => {
         verified: true,
         premium: false,
       },
-      body: "Synthetic post body number 1 about Example Labs #fixtures https://fixture.example/post",
+      body: "Synthetic post body number 1 about Example Labs #fixtures Lookalike https://fixture.example/post",
       hashtags: ["#fixtures"],
       mentions: [
         {
