@@ -42,9 +42,12 @@ then the feature map. `AUTOMATIONS.md` holds the Automation primitive contract;
 
 Stored records use a positive integer `entity_id`. A source-backed type declares
 its durable projected key with root `metadata_schema: { "x-lobu-record-key": "id" }`.
-Its records use a verbatim string `entity_id` plus `entity_type`; even `"007"`
-stays a source key. Views without that declaration return `id: null` and remain
-read-only views. Reads never create stored rows.
+In `lobu.config` that column is `backing.recordKey`; `lobu apply` writes the
+annotation. Omitting `recordKey` leaves a key already stored on the type in
+place, including under prune. Its records use a verbatim string `entity_id`
+plus `entity_type`; even `"007"` stays a source key. Views without that
+declaration return `id: null` and remain read-only views. Reads never create
+stored rows.
 
 Declared keys use `exactMatch.verbatim: true` on connector queries. A connector
 must advertise both `queryCapabilities.exactMatch` and `queryCapabilities.verbatimExactMatch`;

@@ -607,6 +607,122 @@ export default defineConfig({
   });
 });
 
+describe("apply wire payloads: backing.recordKey", () => {
+  const sql = "SELECT id, name FROM places";
+  const config = (recordKey: string | undefined, prune = false) => {
+    const key =
+      recordKey === undefined
+        ? ""
+        : `, recordKey: ${JSON.stringify(recordKey)}`;
+    return `import { defineAgent, defineConfig, defineEntityType } from "@lobu/cli/config";
+export default defineConfig({
+  ${prune ? "prune: true," : ""}
+  agents: [defineAgent({ id: "triage", name: "Triage", dir: "./agents/triage" })],
+  entities: [defineEntityType({
+    key: "place",
+    name: "Place",
+    backing: { sql: ${JSON.stringify(sql)}, connection: "warehouse"${key} },
+  })],
+});
+`;
+  };
+  const livePlace = (key?: string) => ({
+    id: 4,
+    slug: "place",
+    name: "Place",
+    organization_id: "org_1",
+    backing_sql: sql,
+    backing_source: "warehouse",
+    metadata_schema: {
+      type: "object",
+      properties: { name: { type: "string" } },
+      required: ["name"],
+      "x-other": true,
+      ...(key ? { "x-lobu-record-key": key } : {}),
+    },
+  });
+  const entityWrites = (calls: WireCall[]) =>
+    calls
+      .filter((c) => c.url.includes("/manage_entity_schema"))
+      .map((c) => c.body)
+      .filter((b) => b.action === "create" || b.action === "update");
+
+  test("create sends the record key and backing in one call", async () => {
+    const dir = mkProject(config("id"));
+    const { fetchStub, calls } = makeFetch();
+    await runApply(dir, fetchStub, "memory");
+    const writes = entityWrites(calls);
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toMatchObject({
+      action: "create",
+      slug: "place",
+      backing: { sql, connection: "warehouse" },
+      metadata_schema: { "x-lobu-record-key": "id", type: "object" },
+    });
+  });
+
+  test("an update sets the key and keeps live properties and other extensions", async () => {
+    const dir = mkProject(config("id"));
+    const { fetchStub, calls } = makeFetch([], REMOTE_CONNECTION, [
+      livePlace("slug"),
+    ]);
+    await runApply(dir, fetchStub, "memory");
+    const writes = entityWrites(calls);
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toMatchObject({
+      action: "update",
+      metadata_schema: {
+        "x-lobu-record-key": "id",
+        "x-other": true,
+        type: "object",
+        properties: { name: { type: "string" } },
+        required: ["name"],
+      },
+      backing: { sql, connection: "warehouse" },
+    });
+  });
+
+  test("a key that already matches sends nothing", async () => {
+    const dir = mkProject(config("id"));
+    const { fetchStub, calls } = makeFetch([], REMOTE_CONNECTION, [
+      livePlace("id"),
+    ]);
+    await runApply(dir, fetchStub, "memory");
+    expect(entityWrites(calls)).toEqual([]);
+  });
+
+  test("omitting the key under prune does not clear a live key", async () => {
+    const dir = mkProject(
+      config(undefined, true).replace('name: "Place"', 'name: "Places"')
+    );
+    const { fetchStub, calls } = makeFetch([], REMOTE_CONNECTION, [
+      livePlace("id"),
+    ]);
+    await runApply(dir, fetchStub, "memory");
+    const writes = entityWrites(calls);
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toMatchObject({
+      action: "update",
+      name: "Places",
+      metadata_schema: { "x-lobu-record-key": "id", "x-other": true },
+    });
+  });
+
+  test("a name change that does not rebuild the schema leaves the live key untouched", async () => {
+    const dir = mkProject(
+      config(undefined).replace('name: "Place"', 'name: "Places"')
+    );
+    const { fetchStub, calls } = makeFetch([], REMOTE_CONNECTION, [
+      livePlace("id"),
+    ]);
+    await runApply(dir, fetchStub, "memory");
+    const writes = entityWrites(calls);
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toMatchObject({ action: "update", name: "Places" });
+    expect(writes[0]).not.toHaveProperty("metadata_schema");
+  });
+});
+
 describe("apply --only scopes provider keys to the agents family", () => {
   function configWithProviderKey(withEntity: boolean): string {
     return `import { defineAgent, defineConfig, defineEntityType } from "@lobu/cli/config";

@@ -594,6 +594,43 @@ describe("mapProjectToDesiredState", () => {
     expect(byKey.company?.backing).toBeUndefined();
   });
 
+  test("maps backing.recordKey onto the desired type, not into backing", () => {
+    const place = defineEntityType({
+      key: "place",
+      name: "Place",
+      backing: {
+        sql: "SELECT id, name FROM places",
+        connection: "warehouse",
+        recordKey: "id",
+      },
+    });
+    const state = mapProjectToDesiredState(
+      defineConfig({ agents: [], entities: [place] })
+    );
+    expect(state.memorySchema.entityTypes[0]).toMatchObject({
+      slug: "place",
+      recordKey: "id",
+      backing: {
+        sql: "SELECT id, name FROM places",
+        connection: "warehouse",
+      },
+    });
+    expect(state.memorySchema.entityTypes[0]?.backing).not.toHaveProperty(
+      "recordKey"
+    );
+  });
+
+  test("rejects an invalid backing.recordKey at load time", () => {
+    const bad = defineEntityType({
+      key: "place",
+      name: "Place",
+      backing: { sql: "SELECT id FROM places", recordKey: "not a column" },
+    });
+    expect(() =>
+      mapProjectToDesiredState(defineConfig({ agents: [], entities: [bad] }))
+    ).toThrow(/place.*invalid backing\.recordKey/i);
+  });
+
   test("maps a declared entity's metrics; non-metric entities carry none", () => {
     const company = defineEntityType({
       key: "company",

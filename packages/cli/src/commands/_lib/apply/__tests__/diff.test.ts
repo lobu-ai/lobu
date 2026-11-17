@@ -449,6 +449,61 @@ describe("apply diff — memory schema", () => {
     expect(converged.counts.update).toBe(0);
   });
 
+  test("recordKey is config-owned when declared and unmanaged when omitted", () => {
+    const backing = { sql: "SELECT id, name FROM places" };
+    const declared: DesiredState = {
+      agents: [],
+      memorySchema: {
+        entityTypes: [
+          { slug: "place", name: "Place", backing, recordKey: "id" },
+        ],
+        relationshipTypes: [],
+      },
+      automations: [],
+      requiredSecrets: [],
+    };
+    const remoteWith = (key?: string): RemoteSnapshot => ({
+      ...emptyRemote(),
+      entityTypes: [
+        {
+          slug: "place",
+          name: "Place",
+          backing,
+          ...(key ? { schemaExtras: { "x-lobu-record-key": key } } : {}),
+        },
+      ],
+    });
+
+    expect(
+      computeDiff(declared, remoteWith("id")).rows.find((r) => r.id === "place")
+        ?.verb
+    ).toBe("noop");
+
+    const missing = computeDiff(declared, remoteWith());
+    const missingRow = missing.rows.find((r) => r.id === "place");
+    expect(missingRow?.verb).toBe("update");
+    expect(missingRow?.changedFields).toEqual(["recordKey"]);
+
+    const changed = computeDiff(declared, remoteWith("slug"));
+    expect(changed.rows.find((r) => r.id === "place")?.changedFields).toEqual([
+      "recordKey",
+    ]);
+
+    const omitted: DesiredState = {
+      agents: [],
+      memorySchema: {
+        entityTypes: [{ slug: "place", name: "Place", backing }],
+        relationshipTypes: [],
+      },
+      automations: [],
+      requiredSecrets: [],
+    };
+    for (const prune of [false, true]) {
+      const plan = computeDiff(omitted, remoteWith("id"), { prune });
+      expect(plan.rows.find((r) => r.id === "place")?.verb).toBe("noop");
+    }
+  });
+
   test("a policy-only declaration with a populated remote schema is noop on repeat apply", () => {
     const declared = {
       "x-lobu-resolution": {

@@ -931,6 +931,38 @@ describe("three-way edge cases", () => {
     expect(row?.verb).toBe("noop");
     expect(plan.counts.drift).toBe(0);
   });
+
+  test("an omitted recordKey stays unmanaged under prune when a baseline is recorded", () => {
+    const desired = buildState([taskType()]);
+    const keyed = remoteTask(1, {
+      schemaExtras: { "x-lobu-record-key": "id" },
+    });
+    const remote = emptyRemote();
+    remote.entityTypes = [keyed];
+    const plan = computeDiff(desired, remote, {
+      orgId: "org-1",
+      baseline: baselineFor([keyed], [1]),
+      prune: true,
+    });
+    const row = plan.rows.find((r) => r.kind === "entity-type");
+    expect(row?.verb).toBe("noop");
+    expect(plan.counts.drift).toBe(0);
+  });
+
+  test("a declared recordKey change against an unchanged remote converges", () => {
+    const backing = { sql: "SELECT id FROM tasks" };
+    const desired = buildState([taskType({ backing, recordKey: "id" })]);
+    const remote = emptyRemote();
+    remote.entityTypes = [remoteTask(1, { backing })];
+    const plan = computeDiff(desired, remote, {
+      orgId: "org-1",
+      baseline: baselineFor([remoteTask(1, { backing })], [1]),
+    });
+    const row = plan.rows.find((r) => r.kind === "entity-type");
+    expect(row?.verb).toBe("update");
+    expect(row?.changedFields).toContain("recordKey");
+    expect(plan.counts.drift).toBe(0);
+  });
 });
 
 describe("Automation three-way attribution", () => {

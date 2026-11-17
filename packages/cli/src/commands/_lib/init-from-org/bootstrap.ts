@@ -18,6 +18,7 @@ import { randomBytes } from "node:crypto";
 import { chmod, mkdir, writeFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import type { AgentSettings } from "@lobu/core";
+import { RECORD_KEY_ANNOTATION } from "@lobu/core/contracts/entity-reference";
 import { resolvedEventExecution } from "@lobu/core/contracts/tools/manage-automations";
 import chalk from "chalk";
 import { UNRESOLVED_MODEL_SUFFIX } from "../../../config/index.js";
@@ -434,9 +435,25 @@ function emitEntityType(
       `collection: ${emitValue(e.schemaExtras["x-lobu-collection"], 1)}`
     );
   }
+  // A declared record key lives on `backing`, which requires the view SQL. Emit
+  // that backing only when the key is present, so the generated config owns the
+  // key. Keyless views keep the pre-existing backing round-trip gap.
+  const recordKey = e.schemaExtras?.[RECORD_KEY_ANNOTATION];
+  if (e.backing && typeof recordKey === "string") {
+    fields.push(
+      `backing: ${emitValue(
+        {
+          sql: e.backing.sql,
+          ...(e.backing.connection ? { connection: e.backing.connection } : {}),
+          recordKey,
+        },
+        1
+      )}`
+    );
+  }
   // Declared metrics round-trip as the four top-level fields on defineEntityType
   // (not nested under `metrics`). Without this, `init --from-org` → `apply` would
-  // diff metrics as a change and wipe them. (NOTE: `backing` has the same
+  // diff metrics as a change and wipe them. (NOTE: keyless `backing` has the same
   // pre-existing round-trip gap — tracked separately, not fixed here.)
   if (e.metrics?.eventSets) {
     fields.push(`eventSets: ${emitValue(e.metrics.eventSets, 1)}`);

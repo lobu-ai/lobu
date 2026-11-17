@@ -21,6 +21,10 @@ import {
 import { AgentSettingsPatchSchema } from "@lobu/core/contracts/agent-settings";
 import { parseCollectionPresentation } from "@lobu/core/contracts/tools/collection-presentation";
 import {
+  RECORD_KEY_ANNOTATION,
+  recordKeyColumn,
+} from "@lobu/core/contracts/entity-reference";
+import {
   AutomationExecutionConfigSchema,
   ManageAutomationsSchema,
   normalizeWorkspaceEventTrigger,
@@ -402,6 +406,16 @@ function mapEntityType(entity: EntityType): DesiredEntityType {
       `entity type "${entity.key}" has an empty backing.sql`
     );
   }
+  const recordKey = entity.backing?.recordKey;
+  if (recordKey !== undefined) {
+    try {
+      recordKeyColumn({ [RECORD_KEY_ANNOTATION]: recordKey });
+    } catch (error) {
+      throw new ValidationError(
+        `entity type "${entity.key}" has invalid backing.recordKey: ${(error as Error).message}`
+      );
+    }
+  }
   // Declared metrics, included only when present so a non-metric type never
   // churns the diff (mirrors `backing`). The four fields round-trip verbatim.
   const metrics =
@@ -452,6 +466,7 @@ function mapEntityType(entity: EntityType): DesiredEntityType {
     ...(entity.collection !== undefined
       ? { collection: parseCollectionPresentation(entity.collection) }
       : {}),
+    ...(recordKey !== undefined ? { recordKey } : {}),
     // Event kinds included only when declared so a type with none compares equal
     // on both sides and never churns the diff (mirrors `backing`/`metrics`).
     ...(entity.eventKinds && Object.keys(entity.eventKinds).length > 0

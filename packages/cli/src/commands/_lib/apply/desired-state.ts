@@ -63,6 +63,13 @@ export interface DesiredEntityType extends EntityTypeDisplayFields {
    */
   collection?: CollectionPresentation;
   /**
+   * The `x-lobu-record-key` metadata_schema key, lowered from the config's
+   * `backing.recordKey`. Config-owned when declared; when omitted it is never
+   * diffed or cleared, even under prune, because clearing a key turns every
+   * record's id into null.
+   */
+  recordKey?: string;
+  /**
    * Event kinds (semantic types) for events linked to this type, keyed by
    * semantic_type — `{ description?, metadataSchema?, jsonTemplate? }`. Present
    * only when the type declares them; absent ⇒ never churns the diff. Persisted

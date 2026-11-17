@@ -70,6 +70,15 @@ export interface EntityBacking {
    * tables that exist in the bound connection's database.
    */
   connection?: string;
+  /**
+   * Column of `sql` that durably and uniquely identifies a row, written as the
+   * type's `x-lobu-record-key`. Declaring it makes records addressable by a
+   * string `entity_id` (get, record links) instead of a read-only view. Two
+   * commitments: the bound connector must support verbatim exact match, and the
+   * key cannot change while any link to the type exists. Omitted ⇒ apply leaves
+   * an existing key alone, even under prune.
+   */
+  recordKey?: string;
 }
 
 // ---------------------------------------------------------------------------
