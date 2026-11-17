@@ -611,6 +611,14 @@ export function useQuery<T = unknown>(
     // an in-flight settle, refetch(), or key change can land here hidden; keep
     // one owed read for the next visible transition.
     if (live && documentHidden()) {
+      // A key change still moves the hook even though the read waits: drop
+      // any in-flight result for the previous key and show loading. Otherwise
+      // the old read's show() would paint its rows onto the new query with
+      // loading false.
+      if (lastRead.current?.key !== key) {
+        lastRead.current = null;
+        setState((s) => (s.loading ? s : { ...s, loading: true }));
+      }
       owed.current = true;
       return;
     }

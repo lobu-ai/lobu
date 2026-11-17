@@ -135,9 +135,9 @@ afterEach(async () => {
   dom.window.close();
 });
 
-async function ready(live?: boolean): Promise<void> {
+async function ready(live?: boolean, script = "return 1"): Promise<void> {
   await act(async () => {
-    renderProbe("return 1", live);
+    renderProbe(script, live);
     await tick();
   });
   expect(parent.toolsCalls()).toHaveLength(0);
@@ -164,15 +164,19 @@ async function ready(live?: boolean): Promise<void> {
   });
 }
 
-function answer(call: Record<string, unknown>, count: number): void {
+function answerValue(call: Record<string, unknown>, value: unknown): void {
   hostSend({
     jsonrpc: "2.0",
     id: (call as { id: number }).id,
     result: {
-      structuredContent: { success: true, return_value: { count } },
+      structuredContent: { success: true, return_value: value },
       content: [],
     },
   });
+}
+
+function answer(call: Record<string, unknown>, count: number): void {
+  answerValue(call, { count });
 }
 
 async function dataChanged(): Promise<void> {
@@ -545,5 +549,72 @@ describe("useQuery live refresh", () => {
       await tick();
     });
     expect(latest?.data).toEqual({ count: 2 });
+  });
+
+  test("a key change while hidden drops the superseded in-flight result", async () => {
+    liveRefreshIntervalMs = 0;
+    await ready(undefined, "return 2");
+    await act(async () => {
+      answerValue(parent.toolsCalls()[0], { count: 2, query: "return 2" });
+      await tick();
+    });
+    expect(latest).toEqual({
+      loading: false,
+      data: { count: 2, query: "return 2" },
+      error: null,
+    });
+
+    // Switch to "return 1" while visible; its read stays in flight.
+    await act(async () => {
+      renderProbe("return 1");
+      await tick();
+    });
+    expect(parent.toolsCalls()).toHaveLength(2);
+    const inFlight = parent.toolsCalls()[1];
+
+    // Hide, then switch back to "return 2" before the "return 1" read settles.
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => "hidden",
+    });
+    await act(async () => {
+      document.dispatchEvent(new dom.window.Event("visibilitychange"));
+      await tick();
+    });
+    await act(async () => {
+      renderProbe("return 2");
+      await tick();
+    });
+    expect(parent.toolsCalls()).toHaveLength(2);
+
+    // The superseded "return 1" answer must not paint onto "return 2".
+    await act(async () => {
+      answerValue(inFlight, { count: 1, query: "return 1" });
+      await tick();
+      await tick();
+    });
+    expect(latest?.loading).toBe(true);
+    expect(latest?.data).not.toEqual({ count: 1, query: "return 1" });
+
+    // Visible: the current key reads and paints.
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => "visible",
+    });
+    await act(async () => {
+      document.dispatchEvent(new dom.window.Event("visibilitychange"));
+      await tick();
+      await tick();
+    });
+    expect(parent.toolsCalls()).toHaveLength(3);
+    await act(async () => {
+      answerValue(parent.toolsCalls()[2], { count: 2, query: "return 2" });
+      await tick();
+    });
+    expect(latest).toEqual({
+      loading: false,
+      data: { count: 2, query: "return 2" },
+      error: null,
+    });
   });
 });
