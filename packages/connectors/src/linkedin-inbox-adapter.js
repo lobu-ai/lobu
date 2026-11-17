@@ -1261,7 +1261,7 @@ export function linkedInInboxProgram() {
   }
   // The member on the other side of a direct conversation; the inbox's own
   // identity and page participants are not that person.
-  function counterpartOf(conversation, mailbox) {
+  function counterpartMemberOf(conversation, mailbox) {
     const participants = Array.isArray(conversation?.conversationParticipants)
       ? conversation.conversationParticipants
       : [];
@@ -1271,16 +1271,21 @@ export function linkedInInboxProgram() {
       const label = clean(
         `${member.firstName?.text ?? ""} ${member.lastName?.text ?? ""}`
       );
-      if (!label) continue;
-      const description = clean(member.headline?.text);
-      const imageUrl = photoOf(member.profilePicture);
-      return {
-        label,
-        ...(description ? { description } : {}),
-        ...(imageUrl ? { image_url: imageUrl } : {}),
-      };
+      if (label) return { participant, member, label };
     }
     return null;
+  }
+  function counterpartOf(conversation, mailbox) {
+    const counterpart = counterpartMemberOf(conversation, mailbox);
+    if (!counterpart) return null;
+    const { member, label } = counterpart;
+    const description = clean(member.headline?.text);
+    const imageUrl = photoOf(member.profilePicture);
+    return {
+      label,
+      ...(description ? { description } : {}),
+      ...(imageUrl ? { image_url: imageUrl } : {}),
+    };
   }
   async function lookup(input) {
     const member = await boundAccount(input.expected_account);
@@ -1350,6 +1355,60 @@ export function linkedInInboxProgram() {
       fail("LinkedIn account changed during conversation lookup");
     return { items };
   }
+  // One page of the member inbox's direct conversations, for stored history.
+  // Conversations whose last activity is not after `after` (ms) were stored by
+  // an earlier walk and are skipped; LinkedIn lists the inbox by activity, so
+  // a page that ends on one ends the walk (a pinned conversation on top does
+  // not). Groups, and conversations whose group-ness or other member is not
+  // shown, are never stored. Each kept conversation contributes its recent
+  // message page, not its full history, and every row carries the member on
+  // the other side, so a reply sent from this inbox belongs to that person too.
+  async function history(input) {
+    const inbox = await inboxOf(undefined, input.expected_account);
+    const after = Number.isFinite(input.after) ? input.after : null;
+    const page = input.page ?? undefined;
+    if (page !== undefined && (typeof page !== "string" || !page || page.length > 4096))
+      fail("Invalid direct message history cursor");
+    const source = await conversationsPage(inbox.mailbox, page);
+    const rows = [];
+    let newest = null;
+    let stale = false;
+    for (const conversation of source.elements) {
+      const activity = conversation?.lastActivityAt;
+      if (typeof conversation?.entityUrn !== "string" || !Number.isFinite(activity))
+        fail("Conversation identity or activity time is unavailable");
+      newest = newest === null ? activity : Math.max(newest, activity);
+      stale = after !== null && activity <= after;
+      if (stale || groupOf(conversation) !== false) continue;
+      const counterpart = counterpartMemberOf(conversation, inbox.mailbox);
+      const counterpartId = counterpart?.participant.hostIdentityUrn;
+      const memberId = memberIdOf(counterpartId);
+      const slug = slugOf(counterpart?.member.profileUrl);
+      if (!memberId && !slug) continue;
+      for (const row of await messagesPage(conversation.entityUrn, inbox, false)) {
+        if (row.content_kind === "system") continue;
+        rows.push({
+          ...row,
+          counterpart_id: counterpartId,
+          counterpart_member_id: memberId,
+          counterpart_slug: slug,
+          counterpart_name: counterpart.label,
+        });
+      }
+    }
+    const next = source.metadata?.nextCursor;
+    if ((await account()) !== inbox.member)
+      fail("LinkedIn account changed during the history read");
+    return {
+      account: inbox.member,
+      rows,
+      newest,
+      next:
+        !stale && typeof next === "string" && next && next.length <= 4096
+          ? next
+          : null,
+    };
+  }
   async function listen(input) {
     if (!input.bridge_id || !input.token)
       fail("Source subscription binding is required");
@@ -1390,5 +1449,5 @@ export function linkedInInboxProgram() {
       );
     return { listening: true };
   }
-  globalThis[key] = { version, read, listen, send, lookup, detach };
+  globalThis[key] = { version, read, listen, send, lookup, history, detach };
 }
