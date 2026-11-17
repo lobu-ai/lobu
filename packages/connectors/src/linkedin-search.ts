@@ -27,6 +27,8 @@ const MAX_PAGE = 10;
 const MAX_POSITIONS = 15;
 const MAX_EDUCATION = 10;
 const MAX_ABOUT_CHARS = 4000;
+const MAX_DESCRIPTION_CHARS = 2000;
+const MAX_SKILLS = 50;
 
 /** LinkedIn's people-search connection-degree facet values. */
 const NETWORK_FACETS = { "1st": "F", "2nd": "S", "3rd": "O" } as const;
@@ -154,6 +156,72 @@ function nonEmpty(value: string | undefined | null): string | null {
   return value ? value : null;
 }
 
+/** LinkedIn's "… more" expander text, rendered inside clamped paragraphs. */
+function stripMore(text: string): string {
+  return text.replace(/\s*…\s*(?:see\s+)?more$/i, "").trim();
+}
+
+/** Outbound links render as `linkedin.com/safety/go/?url=<target>`. */
+export function decodeLinkedInRedirect(href: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(href, "https://www.linkedin.com");
+  } catch {
+    return null;
+  }
+  if (url.pathname.startsWith("/safety/go")) {
+    const target = url.searchParams.get("url");
+    return target && /^https?:\/\//i.test(target) ? target : null;
+  }
+  return url.protocol === "https:" || url.protocol === "http:"
+    ? url.href
+    : null;
+}
+
+function linkList(value: unknown): Array<{ href: string; text: string }> {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((part) => ({
+      href: cleanText((part as Row | null)?.h),
+      text: cleanText((part as Row | null)?.t),
+    }))
+    .filter((link) => link.href.length > 0);
+}
+
+function parseCount(text: string): number {
+  return Number.parseInt(text.replace(/[,.]/g, ""), 10);
+}
+
+/**
+ * "A, B & 5 other mutual connections" / "A is a mutual connection" /
+ * "Filiz & 12 other connections work here": the named people plus "N other".
+ */
+function countNamedConnections(text: string, named: number): number {
+  const others = text.match(/(\d[\d,]*)\s+others?\b/i)?.[1];
+  return named + (others ? parseCount(others) : 0);
+}
+
+const WORKPLACE_TYPES = new Set(["hybrid", "remote", "on-site"]);
+
+/** "London, UK · Hybrid" → location + workplace type; "Remote" alone too. */
+function splitWorkplace(line: string | undefined): {
+  location: string | null;
+  workplace_type: string | null;
+} {
+  if (!line) return { location: null, workplace_type: null };
+  const parts = line.split(/\s+·\s+/);
+  const last = parts.at(-1) ?? "";
+  if (WORKPLACE_TYPES.has(last.toLowerCase())) {
+    return {
+      location: nonEmpty(parts.slice(0, -1).join(" · ")),
+      workplace_type: last,
+    };
+  }
+  return { location: line, workplace_type: null };
+}
+
+const DURATION_RE = /^\d+\s+(?:yrs?|mos?)\b/i;
+
 /** LinkedIn's "30M followers" / "1,234 followers" → 30000000 / 1234. */
 function parseFollowerCount(text: string): number | null {
   const match = text.match(/([\d.,]+)\s*([KMB])?\+?\s+followers?\b/i);
@@ -256,6 +324,11 @@ const PEOPLE_SEARCH_CONFIG = {
     profile_url: { selector: 'a[href*="/in/"]', take: "attr", attr: "href" },
     name: { selector: 'p > a[href*="/in/"]', take: "text" },
     name_line: { selector: 'p:has(> a[href*="/in/"])', take: "text" },
+    verified: {
+      selector: 'p > a[href*="/in/"] [role="img"][aria-label]',
+      take: "attr",
+      attr: "aria-label",
+    },
     headline: { selector: 'p:has(> a[href*="/in/"]) + div', take: "text" },
     location: {
       selector: 'p:has(> a[href*="/in/"]) + div + div',
@@ -265,8 +338,38 @@ const PEOPLE_SEARCH_CONFIG = {
       selector: '[componentkey^="SearchResultssnippet_"]',
       take: "text",
     },
+    // The shared-connections line links each named mutual connection and,
+    // past two, a canned search for the rest.
+    mutual_line: {
+      selector:
+        'p:has(> span > a[href*="/in/"]), p:has(> span > a[href*="connectionOf"])',
+      take: "text",
+    },
+    mutual_people: {
+      selector: 'p > span > a[href*="/in/"]',
+      take: "objectAll",
+      parts: { h: { take: "attr", attr: "href" }, t: { take: "text" } },
+    },
+    mutual_search: {
+      selector: 'a[href*="connectionOf"]',
+      take: "attr",
+      attr: "href",
+    },
   },
 };
+
+function mutualConnections(
+  line: string,
+  people: Array<{ name: string; profile_url: string | null }>,
+  searchUrl: string
+): Row | null {
+  if (!/\bmutual connections?\b/i.test(line)) return null;
+  return {
+    count: countNamedConnections(line, people.length),
+    people,
+    search_url: searchUrl ? decodeLinkedInRedirect(searchUrl) : null,
+  };
+}
 
 function parsePeopleRows(rows: Row[]): Row[] {
   const seen = new Set<string>();
@@ -279,14 +382,27 @@ function parsePeopleRows(rows: Row[]): Row[] {
     const name =
       cleanText(row.name) || nameLine.replace(/\s*[·•].*$/, "").trim();
     const snippet = cleanText(row.snippet);
-    const current = snippet.match(/^Current:\s*(.+)$/i)?.[1];
+    const [, label, value] = snippet.match(/^(Current|Past):\s*(.+)$/i) ?? [];
+    const mutual = mutualConnections(
+      cleanText(row.mutual_line),
+      linkList(row.mutual_people).map((link) => ({
+        name: link.text,
+        profile_url: canonicalProfileUrl(link.href),
+      })),
+      cleanText(row.mutual_search)
+    );
     people.push({
       name: nonEmpty(name),
       headline: nonEmpty(cleanText(row.headline)),
       location: nonEmpty(cleanText(row.location)),
       profile_url: profileUrl,
       degree: degreeOf(nameLine),
-      ...(current ? { current_position: current } : snippet ? { snippet } : {}),
+      verified: cleanText(row.verified).toLowerCase() === "verified",
+      current_position:
+        label?.toLowerCase() === "current" ? nonEmpty(value) : null,
+      past_position: label?.toLowerCase() === "past" ? nonEmpty(value) : null,
+      snippet: label ? null : nonEmpty(snippet),
+      mutual_connections: mutual,
     });
   }
   return people;
@@ -376,42 +492,97 @@ const PROFILE_CONFIG = {
       take: "objectAll",
       parts: { t: { take: "text" } },
     },
+    links: {
+      selector: "a[href]",
+      take: "objectAll",
+      parts: { h: { take: "attr", attr: "href" }, t: { take: "text" } },
+    },
+    mutual_names: {
+      selector: 'a[href*="connectionOf"] strong',
+      take: "objectAll",
+      parts: { t: { take: "text" } },
+    },
   },
 };
 
 // The main profile only renders Experience and Education when their lazy
 // anchors scroll into a visible viewport, so read the details pages instead.
+const DETAIL_LINES = {
+  lines: { selector: "p", take: "objectAll", parts: { t: { take: "text" } } },
+  // Long descriptions are the only paragraphs that wrap their text in a span.
+  spans: {
+    selector: "p > span",
+    take: "objectAll",
+    parts: { t: { take: "text" } },
+  },
+  org_url: {
+    selector: 'a[href*="/company/"], a[href*="/school/"]',
+    take: "attr",
+    attr: "href",
+  },
+} as const;
+
 const EDUCATION_CONFIG = {
   scroll: { max: 2, stall: 1, waitMs: 2500, deep: true },
   rowSelector: 'main [componentkey*="EducationDetailsSection"] [componentkey]',
   requireFields: ["lines"],
   id: { source: "field", field: "text" },
-  fields: {
-    text: { take: "text" },
-    lines: { selector: "p", take: "objectAll", parts: { t: { take: "text" } } },
-  },
+  fields: { text: { take: "text" }, ...DETAIL_LINES },
 };
 
 const EXPERIENCE_CONFIG = {
   scroll: { max: 2, stall: 1, waitMs: 2500, deep: true },
   id: { source: "field", field: "text" },
-  // Single-role entries are keyed collection items with no role list; a
-  // company with several roles renders each role as an <li> under its header.
+  // A company with several roles renders one header entry with each role as
+  // an <li>; single-role entries have no list. Rows arrive in document order,
+  // so each role list follows its company header.
   rowSelector: [
-    'main [componentkey^="entity-collection-item"]:not(:has(li))',
+    'main [componentkey^="entity-collection-item"]',
     'main [componentkey^="entity-collection-item"] li',
   ].join(", "),
   fields: {
     text: { take: "text" },
-    lines: { selector: "p", take: "objectAll", parts: { t: { take: "text" } } },
-    company_url: {
-      selector: 'a[href*="/company/"], a[href*="/school/"]',
-      take: "attr",
-      attr: "href",
+    ...DETAIL_LINES,
+    // Paragraphs inside role items; on a header row they are its roles' lines.
+    role_lines: {
+      selector: "li p",
+      take: "objectAll",
+      parts: { t: { take: "text" } },
     },
     group_company: {
       closestSelector: '[componentkey^="entity-collection-item"]',
       firstLine: true,
+    },
+  },
+};
+
+const SKILLS_CONFIG = {
+  scroll: { max: 3, stall: 1, waitMs: 2500, deep: true },
+  // The escaped "(" is the same selector to Chrome; JSDOM needs the escape.
+  rowSelector: 'main [componentkey^="com.linkedin.sdui.profile.skill\\("]',
+  requireFields: ["name"],
+  id: { source: "field", field: "name" },
+  fields: {
+    name: { selector: "p", take: "text" },
+    lines: { selector: "p", take: "objectAll", parts: { t: { take: "text" } } },
+  },
+};
+
+// Only rendered for 1st-degree connections and the viewer's own profile;
+// anyone else's overlay URL redirects back to the profile.
+const CONTACT_CONFIG = {
+  scroll: { max: 0, stall: 0, waitMs: 2000 },
+  rowSelector: '[componentkey*="ContactInfoDetailSection"] [componentkey]',
+  requireFields: ["label"],
+  id: { source: "field", field: "text" },
+  fields: {
+    text: { take: "text" },
+    label: { selector: "p", take: "text" },
+    lines: { selector: "p", take: "objectAll", parts: { t: { take: "text" } } },
+    links: {
+      selector: "a[href]",
+      take: "objectAll",
+      parts: { h: { take: "attr", attr: "href" }, t: { take: "text" } },
     },
   },
 };
@@ -421,50 +592,213 @@ const DATE_RANGE_RE =
 const YEAR_RANGE_RE =
   /^(?:[A-Z][a-z]{2,8}\.? )?\d{4}(?:\s*[-–]\s*(?:(?:[A-Z][a-z]{2,8}\.? )?\d{4}|Present))?$/;
 
-/** One experience row → {title, company, employment_type, dates, duration}. */
-function parseExperienceRow(row: Row): Row | null {
+/** The joined long-text spans, minus the role's "Present" badge. */
+function descriptionOf(row: Row): string | null {
+  const text = lineTexts(row.spans)
+    .filter((line) => line !== "Present")
+    .map(stripMore)
+    .join(" ")
+    .trim();
+  return nonEmpty(text.slice(0, MAX_DESCRIPTION_CHARS));
+}
+
+type GroupHeader = {
+  company: string;
+  employment_type: string | null;
+  location: string | null;
+  workplace_type: string | null;
+  company_url: string | null;
+};
+
+/** A multi-role company header: name, "Full-time · 6 yrs", location. */
+function parseGroupHeader(row: Row): GroupHeader | null {
+  const lines = lineTexts(row.lines);
+  const header = lines.slice(0, lines.length - lineTexts(row.role_lines).length);
+  if (!header[0]) return null;
+  const facts = (header[1] ?? "").split(/\s+·\s+/).filter(Boolean);
+  const type = facts.find((fact) => !DURATION_RE.test(fact));
+  return {
+    company: header[0],
+    employment_type: type ?? null,
+    ...splitWorkplace(header[2]),
+    company_url: canonicalCompanyUrl(cleanText(row.org_url)),
+  };
+}
+
+/** One role: title, company, dates, location, description. */
+function parseExperienceRow(
+  row: Row,
+  group: GroupHeader | undefined
+): Row | null {
   const lines = lineTexts(row.lines);
   const title = lines[0];
   if (!title) return null;
+  const description = descriptionOf(row);
   const dateIndex = lines.findIndex((line) => DATE_RANGE_RE.test(line));
-  const group = cleanText(row.group_company);
-  let company: string | undefined;
-  let employmentType: string | undefined;
-  if (group) {
-    // Grouped roles: the company is the header of the enclosing entry.
-    company = group;
-  } else if (dateIndex !== 1 && lines[1]) {
+  let company = group?.company ?? null;
+  let employmentType = group?.employment_type ?? null;
+  if (!group && dateIndex !== 1 && lines[1]) {
     const [name, type] = lines[1].split(/\s+·\s+/);
-    company = name;
-    employmentType = type;
+    company = nonEmpty(name);
+    employmentType = nonEmpty(type);
   }
   const [dates, duration] =
     dateIndex >= 0 ? lines[dateIndex].split(/\s+·\s+/) : [];
+  // The location, when listed, is the first plain line after the dates.
+  const spans = new Set(lineTexts(row.spans));
+  const locationLine =
+    dateIndex >= 0
+      ? lines
+          .slice(dateIndex + 1)
+          .find(
+            (line) =>
+              line !== "Present" && !spans.has(line) && !/^Skills:/i.test(line)
+          )
+      : undefined;
+  const skillsLine = lines.find((line) => /^Skills:/i.test(line));
+  const place = locationLine
+    ? splitWorkplace(locationLine)
+    : {
+        location: group?.location ?? null,
+        workplace_type: group?.workplace_type ?? null,
+      };
   return {
     title,
-    company: nonEmpty(company ?? null),
-    ...(employmentType ? { employment_type: employmentType } : {}),
+    company,
+    employment_type: employmentType,
     dates: nonEmpty(dates ?? null),
-    ...(duration ? { duration } : {}),
+    duration: nonEmpty(duration ?? null),
     is_current: /present/i.test(dates ?? ""),
-    company_url: canonicalCompanyUrl(cleanText(row.company_url)),
+    ...place,
+    description,
+    skills: skillsLine
+      ? skillsLine
+          .replace(/^Skills:\s*/i, "")
+          .split(/\s+·\s+/)
+          .filter(Boolean)
+      : [],
+    company_url:
+      canonicalCompanyUrl(cleanText(row.org_url)) ?? group?.company_url ?? null,
   };
+}
+
+function parseExperienceRows(rows: Row[]): Row[] {
+  const groups = new Map<string, GroupHeader>();
+  const positions: Row[] = [];
+  for (const row of rows) {
+    const groupName = cleanText(row.group_company);
+    if (!groupName && lineTexts(row.role_lines).length > 0) {
+      const header = parseGroupHeader(row);
+      if (header) groups.set(header.company, header);
+      continue;
+    }
+    const position = parseExperienceRow(
+      row,
+      groupName
+        ? (groups.get(groupName) ?? {
+            company: groupName,
+            employment_type: null,
+            location: null,
+            workplace_type: null,
+            company_url: null,
+          })
+        : undefined
+    );
+    if (position) positions.push(position);
+  }
+  return positions;
 }
 
 function parseEducationRow(row: Row): Row | null {
   const lines = lineTexts(row.lines);
   const school = lines[0];
   if (!school) return null;
+  const spans = new Set(lineTexts(row.spans));
   const dateIndex = lines.findIndex((line) => YEAR_RANGE_RE.test(line));
-  const degree =
-    lines[1] && dateIndex !== 1 && !/:\s*$/.test(lines[1])
+  const labelled = (label: string) =>
+    nonEmpty(
+      lines
+        .find((line) => line.startsWith(`${label}:`))
+        ?.slice(label.length + 1)
+        .trim() ?? null
+    );
+  const degreeLine =
+    lines[1] &&
+    dateIndex !== 1 &&
+    !spans.has(lines[1]) &&
+    !/^[A-Z][a-z ]+:/.test(lines[1])
       ? lines[1]
       : undefined;
+  // LinkedIn joins the degree and the field of study with a comma.
+  const comma = degreeLine?.indexOf(", ") ?? -1;
   return {
     school,
-    degree: nonEmpty(degree ?? null),
+    degree: nonEmpty(comma > 0 ? degreeLine?.slice(0, comma) : degreeLine),
+    field_of_study: comma > 0 ? nonEmpty(degreeLine?.slice(comma + 2)) : null,
     dates: dateIndex >= 0 ? lines[dateIndex] : null,
+    grade: labelled("Grade"),
+    activities: labelled("Activities and societies"),
+    description: descriptionOf(row),
+    school_url: canonicalCompanyUrl(cleanText(row.org_url)),
   };
+}
+
+function parseSkills(rows: Row[]): Row[] {
+  const seen = new Set<string>();
+  const skills: Row[] = [];
+  for (const row of rows) {
+    const name = cleanText(row.name);
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    const endorsements = lineTexts(row.lines)
+      .map((line) => line.match(/^(\d[\d,]*)\s+endorsements?$/i)?.[1])
+      .find(Boolean);
+    skills.push({
+      name,
+      endorsements: endorsements ? parseCount(endorsements) : 0,
+    });
+  }
+  return skills.slice(0, MAX_SKILLS);
+}
+
+/** Contact overlay entries: a label paragraph followed by its value(s). */
+function parseContactInfo(rows: Row[]): Row {
+  const info: Row = {
+    email: null,
+    phone: null,
+    websites: [],
+    birthday: null,
+    connected_since: null,
+    address: null,
+  };
+  for (const row of rows) {
+    const label = cleanText(row.label).toLowerCase();
+    const values = lineTexts(row.lines).slice(1);
+    const links = linkList(row.links);
+    if (label === "website" || label === "websites") {
+      info.websites = links.flatMap((link) => {
+        const url = decodeLinkedInRedirect(link.href);
+        if (!url) return [];
+        const kind = values
+          .find((value) => value.includes(link.text))
+          ?.slice(link.text.length)
+          .match(/^\s*\(([^)]+)\)/)?.[1];
+        return [{ url, type: kind ?? null }];
+      });
+    } else if (label === "email") {
+      const mail = links.find((link) => link.href.startsWith("mailto:"));
+      info.email = mail ? mail.href.slice("mailto:".length) : nonEmpty(values[0]);
+    } else if (label === "phone") {
+      info.phone = nonEmpty(values.join(", "));
+    } else if (label === "birthday") {
+      info.birthday = nonEmpty(values[0]);
+    } else if (label === "connected") {
+      info.connected_since = nonEmpty(values[0]);
+    } else if (label === "address") {
+      info.address = nonEmpty(values.join(", "));
+    }
+  }
+  return info;
 }
 
 /** Top card + About from the main profile page's `section` rows. */
@@ -475,12 +809,11 @@ function parseProfileSections(rows: Row[]): Row {
   const degreeLine = lineTexts(top?.visible_lines).find((line) =>
     DEGREE_RE.test(line.replace(/^[·•]\s*/, ""))
   );
+  const pronouns = lines.find((line) => /^[A-Za-z]+\/[A-Za-z]+$/.test(line));
   // Drop the degree badges and the optional pronoun line ("She/Her") that
   // LinkedIn renders between the name and the headline.
   const content = lines.filter(
-    (line) =>
-      !/^[·•]\s*(1st|2nd|3rd\+?|You)$/i.test(line) &&
-      !/^[A-Za-z]+\/[A-Za-z]+$/.test(line)
+    (line) => !/^[·•]\s*(1st|2nd|3rd\+?|You)$/i.test(line) && line !== pronouns
   );
   // The location is the line before the "· Contact info" separator.
   const separator = content.findIndex((line) => line === "·");
@@ -491,12 +824,47 @@ function parseProfileSections(rows: Row[]): Row {
     (longest, line) => (line.length > longest.length ? line : longest),
     ""
   );
+  // "500+" / "connections" render as two paragraphs.
+  const connectionsIndex = lines.findIndex((line) =>
+    /^connections?$/i.test(line)
+  );
+  const connections =
+    connectionsIndex > 0 && /^[\d,]+\+?$/.test(lines[connectionsIndex - 1])
+      ? lines[connectionsIndex - 1]
+      : null;
+  // Creators show followers on the top card, everyone else in Activity.
+  const followersLine = rows
+    .flatMap((row) => lineTexts(row.lines))
+    .find((line) => /^[\d,.]+[KMB]?\+?\s+followers?$/i.test(line));
+  const links = linkList(top?.links);
+  const mutualLink = links.find((link) => link.href.includes("connectionOf"));
+  const mutualNames = lineTexts(top?.mutual_names).flatMap((names) =>
+    names.split(/,\s*|\s+and\s+/).filter(Boolean)
+  );
+  const website = links
+    .filter((link) => new URL(link.href, "https://www.linkedin.com").pathname.startsWith("/safety/go"))
+    .map((link) => decodeLinkedInRedirect(link.href))
+    .find(Boolean);
   return {
     name: nonEmpty(name),
+    pronouns: nonEmpty(pronouns),
     headline: nonEmpty(content[0] ?? null),
     location: separator > 0 ? content[separator - 1] : null,
     degree: degreeOf(degreeLine),
-    about: nonEmpty(aboutText.slice(0, MAX_ABOUT_CHARS)),
+    followers: followersLine ? parseFollowerCount(followersLine) : null,
+    connections,
+    mutual_connections: mutualLink
+      ? {
+          count: countNamedConnections(mutualLink.text, mutualNames.length),
+          people: mutualNames.map((mutual) => ({
+            name: mutual,
+            profile_url: null,
+          })),
+          search_url: decodeLinkedInRedirect(mutualLink.href),
+        }
+      : null,
+    website: website ?? null,
+    about: nonEmpty(stripMore(aboutText).slice(0, MAX_ABOUT_CHARS)),
   };
 }
 
@@ -513,27 +881,34 @@ export async function readLinkedInProfile(
       const main = await scrape(dispatcher, profileUrl, PROFILE_CONFIG);
       if (!main.loggedIn) return null;
       const landed = canonicalProfileUrl(main.landedUrl) ?? profileUrl;
-      const experience = await scrape(
-        dispatcher,
-        `${landed}details/experience/`,
-        EXPERIENCE_CONFIG
-      );
-      if (!experience.loggedIn) return null;
-      const positions = experience.rows
-        .map(parseExperienceRow)
-        .filter((row): row is Row => row !== null);
-      const schools = await scrape(
-        dispatcher,
-        `${landed}details/education/`,
-        EDUCATION_CONFIG
-      );
-      if (!schools.loggedIn) return null;
+      const top = parseProfileSections(main.rows);
+      // A missing degree badge means the viewer's own profile.
+      const readContact = top.degree === "1st" || top.degree === null;
+      const [experience, schools, skills, contact] = await Promise.all([
+        scrape(dispatcher, `${landed}details/experience/`, EXPERIENCE_CONFIG),
+        scrape(dispatcher, `${landed}details/education/`, EDUCATION_CONFIG),
+        scrape(dispatcher, `${landed}details/skills/`, SKILLS_CONFIG),
+        readContact
+          ? scrape(dispatcher, `${landed}overlay/contact-info/`, CONTACT_CONFIG)
+          : null,
+      ]);
+      if (
+        !experience.loggedIn ||
+        !schools.loggedIn ||
+        !skills.loggedIn ||
+        contact?.loggedIn === false
+      )
+        return null;
+      const positions = parseExperienceRows(experience.rows);
       const education = schools.rows
         .map(parseEducationRow)
         .filter((row): row is Row => row !== null);
       return {
         profile_url: landed,
-        ...parseProfileSections(main.rows),
+        ...top,
+        contact_info: contact?.rows.length
+          ? parseContactInfo(contact.rows)
+          : null,
         current_positions: positions
           .filter((row) => row.is_current)
           .slice(0, MAX_POSITIONS),
@@ -541,12 +916,33 @@ export async function readLinkedInProfile(
           .filter((row) => !row.is_current)
           .slice(0, MAX_POSITIONS),
         education: education.slice(0, MAX_EDUCATION),
+        skills: parseSkills(skills.rows),
       };
     };
   });
 }
 
 // ── search_companies ───────────────────────────────────────────
+
+/**
+ * "Uzay & 1 other connection work here" / "Shivam Kumar follows this page":
+ * the viewer's connections at (or following) a company.
+ */
+function networkConnections(
+  link: { href: string; text: string } | undefined
+): Row | null {
+  if (!link?.text) return null;
+  const names = link.text
+    .replace(/\s+(?:works?|follows?)\b.*$/i, "")
+    .split(/\s+&\s+\d/)[0];
+  return {
+    count: countNamedConnections(
+      link.text,
+      names.split(/,\s*|\s+and\s+/).filter(Boolean).length
+    ),
+    search_url: decodeLinkedInRedirect(link.href),
+  };
+}
 
 // A card's header is the name <p> (holding the company link) followed by one
 // sibling <div><p> per fact: industry, then location when the company lists one.
@@ -565,10 +961,32 @@ const COMPANY_SEARCH_CONFIG = {
       attr: "href",
     },
     name: { selector: COMPANY_NAME },
+    verified: {
+      selector: '[role="img"][aria-label="Verified organization"]',
+      take: "attr",
+      attr: "aria-label",
+    },
     facts: {
       selector: 'p:has(> a[href*="/company/"]) ~ div > p, p:has(> a[href*="/showcase/"]) ~ div > p',
       take: "objectAll",
       parts: { t: { take: "text" } },
+    },
+    // Paragraphs without links: the facts and the company summary.
+    plain_lines: {
+      selector: "p:not(:has(a))",
+      take: "objectAll",
+      parts: { t: { take: "text" } },
+    },
+    network: {
+      selector:
+        'a[href*="SHARED_CONNECTIONS"], a[href*="showInNetworkFollowers"]',
+      take: "objectAll",
+      parts: { h: { take: "attr", attr: "href" }, t: { take: "text" } },
+    },
+    follow_state: {
+      selector: 'button[aria-label^="Follow"]',
+      take: "attr",
+      attr: "aria-label",
     },
     lines: { selector: "p", take: "objectAll", parts: { t: { take: "text" } } },
   },
@@ -585,11 +1003,22 @@ function parseCompanyRows(rows: Row[]): Row[] {
     const followersLine = lineTexts(row.lines).find((line) =>
       /\bfollowers?$/i.test(line)
     );
+    const summary = lineTexts(row.plain_lines).find(
+      (line) => !facts.includes(line) && !/\bfollowers?$/i.test(line)
+    );
+    const network = linkList(row.network)[0];
+    const connections = networkConnections(network);
+    const working = /\bwork(?:s)? here\b/i.test(network?.text ?? "");
     companies.push({
       name: nonEmpty(cleanText(row.name)),
       industry: nonEmpty(facts[0] ?? null),
       location: nonEmpty(facts[1] ?? null),
+      summary: nonEmpty(stripMore(summary ?? "").replace(/\.\.\.$/, "…")),
       followers: followersLine ? parseFollowerCount(followersLine) : null,
+      verified: cleanText(row.verified) !== "",
+      following: /^Following\b/i.test(cleanText(row.follow_state)),
+      connections_working_here: working ? connections : null,
+      connections_following: working ? null : connections,
       company_url: companyUrl,
     });
   }
@@ -620,13 +1049,45 @@ export async function searchLinkedInCompanies(
 
 // ── read_company ───────────────────────────────────────────────
 
+const TOP_CARD = '[componentkey^="pages.topCard."]';
+
+// One row: the whole page. The top card carries the tagline, the follower and
+// employee counts and the viewer's network; the About tab's Overview section
+// lists the description followed by labelled facts.
 const COMPANY_ABOUT_CONFIG = {
   scroll: { max: 1, stall: 1, waitMs: 2500 },
-  rowSelector: "main section",
-  id: { source: "field", field: "text" },
+  rowSelector: "main",
+  requireFields: ["name"],
+  id: { source: "field", field: "name" },
   fields: {
-    text: { take: "text" },
-    heading: { selector: "h1, h2", take: "text" },
+    name: { selector: `${TOP_CARD} h2, h1`, take: "text" },
+    top_card: { selector: TOP_CARD, take: "attr", attr: "componentkey" },
+    tagline: { selector: `${TOP_CARD} div:has(> h2) + p`, take: "text" },
+    top_facts: {
+      selector: `${TOP_CARD} div:has(> h2) ~ div > p`,
+      take: "objectAll",
+      parts: { t: { take: "text" } },
+    },
+    top_lines: {
+      selector: `${TOP_CARD} p`,
+      take: "objectAll",
+      parts: { t: { take: "text" } },
+    },
+    network: {
+      selector: `${TOP_CARD} a[href*="network="]`,
+      take: "objectAll",
+      parts: { h: { take: "attr", attr: "href" }, t: { take: "text" } },
+    },
+    follow_state: {
+      selector: `${TOP_CARD} button[aria-label^="Follow"]`,
+      take: "attr",
+      attr: "aria-label",
+    },
+    top_website: {
+      selector: `${TOP_CARD} a[href*="/safety/go"]`,
+      take: "attr",
+      attr: "href",
+    },
     lines: {
       selector: "h2, h3, p, dt, dd",
       take: "objectAll",
@@ -637,36 +1098,95 @@ const COMPANY_ABOUT_CONFIG = {
 
 const COMPANY_FACTS = {
   website: "website",
+  "verified page": "verified_since",
   industry: "industry",
   "company size": "company_size",
   headquarters: "headquarters",
   founded: "founded",
   type: "type",
   specialties: "specialties",
+  phone: "phone",
 } as const;
 
-/** The About tab's first section: name, overview, then labelled facts. */
-function parseCompanyAbout(rows: Row[]): Row {
-  const top = rows.find((row) => cleanText(row.heading)) ?? rows[0];
-  const lines = lineTexts(top?.lines);
+function companyFactKey(line: string) {
+  return COMPANY_FACTS[line.toLowerCase() as keyof typeof COMPANY_FACTS];
+}
+
+/** The top card, then the Overview section's description and labelled facts. */
+function parseCompanyAbout(row: Row | undefined): Row {
+  const lines = lineTexts(row?.lines);
   const facts: Record<string, string | null> = Object.fromEntries(
     Object.values(COMPANY_FACTS).map((key) => [key, null])
   );
-  lines.forEach((line, index) => {
-    const key = COMPANY_FACTS[line.toLowerCase() as keyof typeof COMPANY_FACTS];
-    const value = lines[index + 1];
+  const overview = lines.indexOf("Overview");
+  const body = overview >= 0 ? lines.slice(overview + 1) : [];
+  body.forEach((line, index) => {
+    const key = companyFactKey(line);
+    const value = body[index + 1];
     if (key && value && facts[key] === null) facts[key] = value;
   });
-  const overview = lines.findIndex((line) => line === "Overview");
-  const followersLine = lines.find((line) => /\bfollowers?$/i.test(line));
+  // The description runs until the highlights or the first labelled fact.
+  const firstFact = body.findIndex((line) => companyFactKey(line));
+  const highlightsStart = body.findIndex((line) =>
+    line.startsWith("Highlights from ")
+  );
+  const aboutEnd = [highlightsStart, firstFact].filter((i) => i >= 0);
+  const about = body
+    .slice(0, aboutEnd.length ? Math.min(...aboutEnd) : 1)
+    .join("\n\n")
+    .slice(0, MAX_ABOUT_CHARS);
+  const highlights =
+    highlightsStart >= 0
+      ? body.slice(
+          highlightsStart + 1,
+          firstFact > highlightsStart ? firstFact : undefined
+        )
+      : [];
+  const sizeIndex = body.findIndex(
+    (line) => companyFactKey(line) === "company_size"
+  );
+  const membersLine =
+    sizeIndex >= 0
+      ? body
+          .slice(sizeIndex + 2, sizeIndex + 4)
+          .find((line) => /associated members?$/i.test(line))
+      : undefined;
+  const topFacts = lineTexts(row?.top_facts).filter((line) => line !== "·");
+  const followersLine = topFacts.find((line) => /\bfollowers?$/i.test(line));
+  const employeesLine = topFacts.find((line) => /\bemployees?$/i.test(line));
+  const topLocation = topFacts.find(
+    (line, index) =>
+      index > 0 && line !== followersLine && line !== employeesLine
+  );
+  const companyId = cleanText(row?.top_card).match(/topCard\.(\d+)/)?.[1];
+  const topWebsite = decodeLinkedInRedirect(cleanText(row?.top_website));
   return {
-    name: nonEmpty(cleanText(top?.heading)),
-    about:
-      overview >= 0
-        ? nonEmpty((lines[overview + 1] ?? "").slice(0, MAX_ABOUT_CHARS))
-        : null,
-    ...facts,
+    company_id: companyId ?? null,
+    name: nonEmpty(cleanText(row?.name)),
+    tagline: nonEmpty(cleanText(row?.tagline)),
+    about: nonEmpty(about),
+    website: facts.website ?? (cleanText(row?.top_website) ? topWebsite : null),
+    industry: facts.industry ?? nonEmpty(topFacts[0] ?? null),
+    company_size: facts.company_size,
+    employees_on_linkedin: membersLine ? parseCount(membersLine) : null,
+    headquarters: facts.headquarters ?? nonEmpty(topLocation ?? null),
+    founded: facts.founded,
+    type: facts.type,
+    specialties: facts.specialties
+      ? facts.specialties.split(/,\s*/).filter(Boolean)
+      : [],
+    phone: facts.phone,
     followers: followersLine ? parseFollowerCount(followersLine) : null,
+    verified: facts.verified_since !== null,
+    verified_since: facts.verified_since,
+    highlights:
+      highlights.length > 0
+        ? highlights
+        : lineTexts(row?.top_lines).filter((line) =>
+            line.startsWith("Ranked on LinkedIn")
+          ),
+    following: /^Following\b/i.test(cleanText(row?.follow_state)),
+    connections_working_here: networkConnections(linkList(row?.network)[0]),
   };
 }
 
@@ -688,7 +1208,7 @@ export async function readLinkedInCompany(
       if (!loggedIn) return null;
       return {
         company_url: canonicalCompanyUrl(landedUrl) ?? companyUrl,
-        ...parseCompanyAbout(rows),
+        ...parseCompanyAbout(rows[0]),
       };
     };
   });

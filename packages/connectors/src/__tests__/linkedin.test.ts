@@ -2043,7 +2043,7 @@ describe("LinkedInConnector home_feed", () => {
       actionTextRegex: "^Copy link(?: to post)?$",
     });
     expect(cfg.fields.post_media.take).toBe("objectAll");
-    expect(cfg.fields.post_media.selector).toContain("profile-displayphoto");
+    expect(cfg.fields.post_media.selector).toContain('[src*="/profile-"]');
     expect(cfg.fields.comment_media.take).toBe("objectAll");
     expect(cfg.fields.reaction_count_text.selector).toContain(
       "social-details-social-counts"

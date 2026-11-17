@@ -54,6 +54,7 @@ import {
 } from "./linkedin-inbox.js";
 import { prepareLinkedInDraft } from "./linkedin-drafts.js";
 import {
+  decodeLinkedInRedirect,
   LinkedInInputError,
   readLinkedInCompany,
   readLinkedInProfile,
@@ -649,10 +650,11 @@ const HOME_FEED_SCRAPE_CONFIG = {
       },
     },
     post_media: {
-      // Profile photos and company logos are identities, not post attachments.
+      // Profile photos (plain, "open to work" framed, backgrounds) and company
+      // logos are identities, not post attachments.
       // The final :not keeps media inside a nested visible comment off the post.
       selector:
-        ':scope:not([id^="replaceableComment_"]) img[src*="media.licdn.com/dms/image/"]:not([src*="profile-displayphoto"]):not([src*="company-logo"]):not([id^="replaceableComment_"] img)',
+        ':scope:not([id^="replaceableComment_"]) img[src*="media.licdn.com/dms/image/"]:not([src*="/profile-"]):not([src*="company-logo"]):not([id^="replaceableComment_"] img)',
       take: "objectAll",
       parts: {
         url: { take: "attr", attr: "src" },
@@ -661,7 +663,7 @@ const HOME_FEED_SCRAPE_CONFIG = {
     },
     comment_media: {
       selector:
-        ':scope[id^="replaceableComment_"] img[src*="media.licdn.com/dms/image/"]:not([src*="profile-displayphoto"]):not([src*="company-logo"])',
+        ':scope[id^="replaceableComment_"] img[src*="media.licdn.com/dms/image/"]:not([src*="/profile-"]):not([src*="company-logo"])',
       take: "objectAll",
       parts: {
         url: { take: "attr", attr: "src" },
@@ -950,11 +952,126 @@ type SearchPostRow = HomeFeedRow & {
   lines?: Array<{ t?: string }>;
   action_reactions?: string;
   action_comments?: string;
+  action_reposts?: string;
+  author_badge?: string;
+  body_links?: Array<{ h?: string }>;
+  mentions?: Array<{ h?: string; t?: string }>;
+  video?: string;
 };
 
 /** Search cards print counts inside the action buttons ("\u200b" when none). */
 function searchActionCount(raw: string | undefined): number {
   return parseLinkedInCompactCount((raw ?? "").replace(/\u200b/g, ""));
+}
+
+/**
+ * LinkedIn activity, share and ugcPost ids carry their creation time in the
+ * top 41 bits (milliseconds since the Unix epoch).
+ */
+export function linkedInPostedAt(postUrl: string): string | null {
+  const id = postUrl.match(/urn:li:(?:activity|share|ugcPost):(\d{16,20})/)?.[1];
+  if (!id) return null;
+  const ms = Number(BigInt(id) >> 22n);
+  return ms > Date.UTC(2003, 0, 1) && ms < Date.now() + 86_400_000
+    ? new Date(ms).toISOString()
+    : null;
+}
+
+// The body paragraph is the card's direct <p> after the "Feed post" heading;
+// the author header's paragraphs live inside nested divs.
+const SEARCH_POST_BODY = "h2 ~ p[componentkey]";
+const SEARCH_POST_DEGREE_RE = /^[·•]\s*(1st|2nd|3rd)\+?$/i;
+
+type SearchPostCard = {
+  posted: string;
+  edited: boolean;
+  headline: string | null;
+  degree: string | null;
+  verified: boolean;
+  premium: boolean;
+  body?: string;
+  reactions: number;
+  comments: number;
+  reposts: number;
+  links: HomeFeedLink[];
+  body_links: string[];
+  mentions: Array<{ name: string; url: string }>;
+  media: Array<Record<string, unknown>>;
+};
+
+function searchPostCard(
+  row: SearchPostRow,
+  lines: string[],
+  timeIndex: number
+): SearchPostCard {
+  const degreeIndex = lines.findIndex((line) =>
+    SEARCH_POST_DEGREE_RE.test(line)
+  );
+  // Between the name (or degree badge) and the posted time: the headline,
+  // a follower count, or a creator's "Visit my website" link.
+  const header = lines.slice(degreeIndex >= 0 ? degreeIndex + 1 : 1, timeIndex);
+  const headline = header.find(
+    (line) => line !== "Visit my website" && !/\bfollowers?$/i.test(line)
+  );
+  const badge = (row.author_badge ?? "").trim();
+  const mentions = new Map<string, { name: string; url: string }>();
+  for (const mention of row.mentions ?? []) {
+    const url = normalizeLinkedInEntityUrl(mention.h ?? "");
+    const name = (mention.t ?? "").replace(/\s+/g, " ").trim();
+    if (url && name && !mentions.has(url)) mentions.set(url, { name, url });
+  }
+  const bodyLinks = [
+    ...new Set(
+      (row.body_links ?? [])
+        .map((link) => decodeLinkedInRedirect(link.h ?? ""))
+        .filter((url): url is string => Boolean(url))
+    ),
+  ];
+  return {
+    posted: lines[timeIndex].replace(/\s*•.*$/, ""),
+    edited: /\bEdited\b/i.test(lines[timeIndex]),
+    headline: headline ?? null,
+    degree:
+      lines[degreeIndex]?.match(SEARCH_POST_DEGREE_RE)?.[1]?.toLowerCase() ??
+      null,
+    verified: /\bVerified\b/.test(badge),
+    premium: /\bPremium\b/.test(badge),
+    body: lines[timeIndex + 1]?.replace(/\s*…\s*more$/, ""),
+    reactions: searchActionCount(row.action_reactions),
+    comments: searchActionCount(row.action_comments),
+    reposts: searchActionCount(row.action_reposts),
+    links: row.links ?? [],
+    body_links: bodyLinks,
+    mentions: [...mentions.values()],
+    media: searchPostMedia(row),
+  };
+}
+
+/** Images, plus a video entry whose cover frame is its thumbnail. */
+function searchPostMedia(row: SearchPostRow): Array<Record<string, unknown>> {
+  const images = normalizeHomeFeedMedia(row.post_media);
+  if (!row.video) return images;
+  const cover = images.find((image) =>
+    String(image.url).includes("/videocover-")
+  );
+  return [
+    ...images.filter((image) => image !== cover),
+    { kind: "video", thumbnail_url: cover?.url ?? null },
+  ];
+}
+
+/** A mention's /in/, /company/ or /showcase/ link, without tracking params. */
+function normalizeLinkedInEntityUrl(href: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(href, "https://www.linkedin.com");
+  } catch {
+    return null;
+  }
+  const match = url.pathname.match(/^\/(in|company|showcase|school)\/([^/]+)/);
+  return url.hostname.endsWith("linkedin.com") && match
+    ? `https://www.linkedin.com/${match[1]}/${match[2]}/`
+    : null;
 }
 
 /**
@@ -1005,6 +1122,35 @@ async function searchLinkedInPosts(ctx: ActionContext): Promise<ActionResult> {
                 selector: '[aria-label="Comment"]',
                 take: "text",
               },
+              action_reposts: {
+                selector: 'button[aria-label="Repost"]',
+                take: "text",
+              },
+              // "Name Verified Profile 3rd+" / "Name Premium Profile 2nd".
+              author_badge: {
+                selector:
+                  'a[href*="/in/"] div[aria-label], a[href*="/company/"] div[aria-label]',
+                take: "attr",
+                attr: "aria-label",
+              },
+              body_links: {
+                selector: `${SEARCH_POST_BODY} a[href*="/safety/go"]`,
+                take: "objectAll",
+                parts: { h: { take: "attr", attr: "href" } },
+              },
+              mentions: {
+                selector: `${SEARCH_POST_BODY} a[href*="/in/"], ${SEARCH_POST_BODY} a[href*="/company/"], ${SEARCH_POST_BODY} a[href*="/showcase/"]`,
+                take: "objectAll",
+                parts: {
+                  h: { take: "attr", attr: "href" },
+                  t: { take: "text" },
+                },
+              },
+              video: {
+                selector: '[aria-label="Video Player"]',
+                take: "attr",
+                attr: "aria-label",
+              },
             },
           },
           parseRows: (raw) =>
@@ -1020,16 +1166,7 @@ async function searchLinkedInPosts(ctx: ActionContext): Promise<ActionResult> {
       if (!loggedIn) return null;
       // Card paragraphs run author, degree, headline, posted time, then the
       // commentary; link previews and dialog chrome follow it.
-      const cards = new Map<
-        string,
-        {
-          posted: string;
-          body?: string;
-          reactions: number;
-          comments: number;
-          links: HomeFeedLink[];
-        }
-      >();
+      const cards = new Map<string, SearchPostCard>();
       for (const row of rows) {
         const postUrl = normalizeLinkedInPostUrl(row.post_identity ?? "");
         const lines = (row.lines ?? []).map((line) =>
@@ -1037,13 +1174,7 @@ async function searchLinkedInPosts(ctx: ActionContext): Promise<ActionResult> {
         );
         const timeIndex = lines.findIndex((line) => POSTED_TIME_RE.test(line));
         if (!postUrl || timeIndex < 0 || cards.has(postUrl)) continue;
-        cards.set(postUrl, {
-          posted: lines[timeIndex].replace(/\s*•.*$/, ""),
-          body: lines[timeIndex + 1]?.replace(/\s*…\s*more$/, ""),
-          reactions: searchActionCount(row.action_reactions),
-          comments: searchActionCount(row.action_comments),
-          links: row.links ?? [],
-        });
+        cards.set(postUrl, searchPostCard(row, lines, timeIndex));
       }
       const posts = buildHomeFeedEvents(rows, new Date())
         .filter((event) => event.origin_type === "post" && event.source_url)
@@ -1052,9 +1183,10 @@ async function searchLinkedInPosts(ctx: ActionContext): Promise<ActionResult> {
           page * SEARCH_POSTS_PAGE_SIZE
         )
         .map((event) => {
+          const postUrl = event.source_url ?? "";
           const metadata = (event.metadata ?? {}) as Record<string, unknown>;
-          const card = cards.get(event.source_url ?? "");
-          const counter = (key: "reactions" | "comments") =>
+          const card = cards.get(postUrl);
+          const counter = (key: "reactions" | "comments" | "reposts") =>
             Math.max(
               typeof metadata[key] === "number" ? metadata[key] : 0,
               card?.[key] ?? 0
@@ -1076,20 +1208,35 @@ async function searchLinkedInPosts(ctx: ActionContext): Promise<ActionResult> {
               ? metadata.author_profile_url
               : authorSlug
                 ? `https://www.linkedin.com/in/${authorSlug}`
-                : undefined;
+                : null;
+          const body = card?.body ?? event.payload_text ?? "";
           return {
-            post_url: event.source_url,
+            post_url: postUrl,
+            posted_at: linkedInPostedAt(postUrl),
+            posted_time: card?.posted ?? null,
+            edited: card?.edited ?? false,
             author: {
               name: author,
-              ...(profileUrl ? { profile_url: profileUrl } : {}),
-              ...(typeof metadata.author_company_url === "string"
-                ? { company_url: metadata.author_company_url }
-                : {}),
+              headline: card?.headline ?? null,
+              profile_url: profileUrl,
+              company_url:
+                typeof metadata.author_company_url === "string"
+                  ? metadata.author_company_url
+                  : null,
+              degree: card?.degree ?? null,
+              verified: card?.verified ?? false,
+              premium: card?.premium ?? false,
             },
-            body: card?.body ?? event.payload_text ?? "",
-            posted_time: card?.posted ?? null,
+            body,
+            hashtags: [
+              ...new Set(body.match(/#[\p{L}\p{N}_]+/gu) ?? []),
+            ],
+            mentions: card?.mentions ?? [],
+            links: card?.body_links ?? [],
+            media: card?.media ?? [],
             reactions: counter("reactions"),
             comments: counter("comments"),
+            reposts: counter("reposts"),
           };
         });
       return { page, sort, search_url: url, count: posts.length, posts };
@@ -1602,7 +1749,7 @@ function normalizeHomeFeedMedia(raw: unknown): Array<Record<string, unknown>> {
         url.hostname === "media.licdn.com" ||
         url.hostname.endsWith(".licdn.com")
       ) ||
-      /(?:profile-displayphoto|company-logo)/i.test(url.pathname) ||
+      /\/(?:profile-|company-logo)/i.test(url.pathname) ||
       seen.has(url.href)
     ) {
       continue;
@@ -3665,7 +3812,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
         key: "search_people",
         name: "Search people",
         description:
-          "Search LinkedIn members in the paired Chrome browser and return one page of results (name, headline, location, profile URL, connection degree, current position when shown) without storing any events. `location` is resolved to LinkedIn's location filter through its location lookup; when no location matches, it is added to the keywords instead and `location_filter.applied` reports \"keywords\". Read-only.",
+          "Search LinkedIn members in the paired Chrome browser and return one page of results without storing any events. Each person has name, headline, location, profile URL, connection degree, verified badge, current or past position when LinkedIn shows one (otherwise the matching snippet), and mutual connections (count, the named people with profile URLs, and a search URL for all of them). `location` is resolved to LinkedIn's location filter through its location lookup; when no location matches, it is added to the keywords instead and `location_filter.applied` reports \"keywords\". Read-only.",
         kind: "read",
         annotations: {
           openWorldHint: true,
@@ -3717,7 +3864,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
         key: "read_profile",
         name: "Read profile",
         description:
-          "Read one LinkedIn member profile in the paired Chrome browser: name, headline, location, about, connection degree, current and past positions (up to 15 each) and education (up to 10). Returns without storing any events. Read-only.",
+          "Read one LinkedIn member profile in the paired Chrome browser: name, pronouns, headline, location, about, connection degree, followers, connection count, website, mutual connections, current and past positions (up to 15 each, with company, employment type, dates, duration, location, workplace type, description and company URL), education (up to 10, with degree, field of study, dates, grade, activities and description) and skills (up to 50, with endorsement counts). Contact info (email, phone, websites, birthday, address, connected since) is read only for 1st-degree connections and your own profile, when LinkedIn shows it. Returns without storing any events. Read-only.",
         kind: "read",
         annotations: {
           openWorldHint: true,
@@ -3741,7 +3888,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
         key: "search_companies",
         name: "Search companies",
         description:
-          "Search LinkedIn company pages in the paired Chrome browser and return one page of results (name, industry, location, followers, company URL) without storing any events. Read-only.",
+          "Search LinkedIn company pages in the paired Chrome browser and return one page of results without storing any events. Each company has name, industry, location, summary, followers, verified badge, whether you follow it, your connections who work there or follow it (count and search URL), and company URL. Read-only.",
         kind: "read",
         annotations: {
           openWorldHint: true,
@@ -3772,7 +3919,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
         key: "read_company",
         name: "Read company",
         description:
-          "Read a LinkedIn company page's About tab in the paired Chrome browser: about, industry, company size, headquarters, website and followers. Returns without storing any events. Read-only.",
+          "Read a LinkedIn company page's About tab in the paired Chrome browser: company ID, name, tagline, about, website, industry, company size, members on LinkedIn, headquarters, founded, type, specialties, phone, followers, verified page date, highlights, whether you follow it, and your connections who work there. Returns without storing any events. Read-only.",
         kind: "read",
         annotations: {
           openWorldHint: true,
@@ -3796,7 +3943,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
         key: "search_posts",
         name: "Search posts",
         description:
-          "Search LinkedIn posts in the paired Chrome browser and return one page of up to 10 posts (post URL, author, body, posted time as LinkedIn shows it, reaction and comment counts) without storing any events. Read-only.",
+          "Search LinkedIn posts in the paired Chrome browser and return one page of up to 10 posts without storing any events. Each post has its URL, posted timestamp (and the relative time LinkedIn shows), edited flag, author (name, headline, profile or company URL, connection degree, verified and premium badges), body, hashtags, mentioned people and companies, outbound links, media (images, and videos with a thumbnail), and reaction, comment and repost counts. Read-only.",
         kind: "read",
         annotations: {
           openWorldHint: true,
