@@ -407,20 +407,20 @@ export default async (_ctx, client) => {
 	},
 	"agents.create": {
 		summary:
-			"Create an agent (queued for approval when invoked by an agent principal). Requires admin tier + agent_config create.",
+			"Create an agent. An agent principal is held for approval only when a policy rule asks. Requires admin tier + agent_config create.",
 		access: "admin",
 		example:
 			"await client.agents.create({ agent_id: 'researcher', name: 'Researcher' });",
 	},
 	"agents.update": {
 		summary:
-			"Patch agent fields and settings (may queue for approval). Omitted settings are unchanged; supplied settings objects/arrays replace that setting. Pass expected_revision from agents.get to reject stale writes with 409 before applying or queuing approval. Write identity via identity_md; updatedAt is read-only. Use settings.models for the full ordered model list, or default_model to change its first entry while preserving fallbacks (empty string clears the list). Do not send both. Requires admin tier + agent_config update.",
+			"Patch agent fields and settings. An agent principal is held for approval only when a policy rule asks. Omitted settings are unchanged; supplied settings objects/arrays replace that setting. Pass expected_revision from agents.get to reject stale writes with 409 before applying or queuing approval. Write identity via identity_md; updatedAt is read-only. Use settings.models for the full ordered model list, or default_model to change its first entry while preserving fallbacks (empty string clears the list). Do not send both. Requires admin tier + agent_config update.",
 		access: "admin",
 		example: "await client.agents.update({ agent_id: 'researcher', settings: { skillsConfig: { skills: [{ repo: 'example/skills', name: 'triage', enabled: true, content: 'Read the queue.' }] } } });",
 	},
 	"agents.delete": {
 		summary:
-			"Delete an agent (may queue for approval). Requires admin tier + agent_config delete.",
+			"Delete an agent. Agent principals are blocked unless a policy rule allows it. Requires admin tier + agent_config delete.",
 		access: "admin",
 		signature:
 			"agents.delete(agent_id: string): Promise<unknown> // or agents.delete({ agent_id })",
