@@ -30,6 +30,7 @@ import { attachMcpResultMeta } from './mcp-result-meta';
 import {
   type McpAppCapabilityBinding,
   canIssueMcpAppCapability,
+  isHostedWebClient,
   isMcpAppCapabilityBinding,
   issueMcpAppCapability,
   MCP_APP_CAPABILITY_MAX_LENGTH,
@@ -730,36 +731,39 @@ function isApprovalCapability(value: unknown): value is ApprovalCapability {
   );
 }
 
-function canIssueApprovalCapability(
-  row: ApprovalContentItem,
-  status: string,
-  ctx: ToolContext
-): ctx is ToolContext & {
+type ApprovalCapabilityHost = ToolContext & {
   userId: string;
   clientId: string;
   mcpSessionId: string;
-} {
-  // Deliberately NOT gated on `ctx.mcpAppsSupported`. That flag answers "did
-  // the client announce the Apps extension", which is a different question
-  // from "can this client render a card and call back through it" — claude.ai
-  // renders while announcing nothing, so gating here left its card showing
-  // Approve/Reject it could never obtain the right to press.
+};
+
+async function approvalCapabilityHost(
+  row: ApprovalContentItem,
+  status: string,
+  ctx: ToolContext
+): Promise<ApprovalCapabilityHost | null> {
+  // Deliberately NOT gated on `ctx.mcpAppsSupported`: claude.ai renders the
+  // card while announcing nothing, and any script can announce the extension,
+  // so the flag separates neither direction. Hiding `resolve_approval` from
+  // `tools/list` does not stop a caller from invoking it either.
   //
-  // This widens who receives the capability without widening what it reaches:
-  // the token stays bound to org/user/client/session with a TTL, and
-  // `resolve_approval` stays absent from `tools/list` for a non-declaring
-  // client, so the model cannot invoke it — only the rendered card can, via
-  // `tools/call`. The conditions kept below are the ones carrying real weight.
-  return (
-    status === 'pending' &&
-    canIssueMcpAppCapability(ctx) &&
-    !belongsToApprovalBatch(row)
-  );
+  // The capability is the proof that a human pressed Approve, so it goes only
+  // to hosted web clients (`isHostedWebClient`), whose bearer never reaches the
+  // model or a local program. A device-flow or loopback client could otherwise
+  // queue a write and approve it in the next call; it gets "Review in Lobu".
+  if (
+    status !== 'pending' ||
+    !canIssueMcpAppCapability(ctx) ||
+    belongsToApprovalBatch(row)
+  ) {
+    return null;
+  }
+  return (await isHostedWebClient(ctx)) ? ctx : null;
 }
 
 function issueApprovalCapability(
   row: ApprovalContentItem,
-  ctx: ToolContext & { userId: string; clientId: string; mcpSessionId: string }
+  ctx: ApprovalCapabilityHost
 ): string {
   return issueMcpAppCapability(
     { v: 2, runId: row.run_id, eventId: row.id },
@@ -836,13 +840,14 @@ async function buildApprovalView(runId: number, env: Env, ctx: ToolContext): Pro
     ''
   );
   const actions: LobuView['actions'] = [];
+  const capabilityHost = await approvalCapabilityHost(row, status, ctx);
+  const appCanResolve = capabilityHost !== null;
   if (status === 'pending') {
     const { ownerSlug, baseUrl } = await getOrgUrlContext(ctx);
     const href = buildResourcePermalink(ownerSlug, { kind: 'run', runId }, baseUrl);
     if (!href || href.length > ACTION_HREF_MAX_LENGTH || !/^https?:\/\//i.test(href)) {
       throw new ToolUserError('The Lobu review link is unavailable for this workspace.', 500);
     }
-    const appCanResolve = canIssueApprovalCapability(row, status, ctx);
     if (appCanResolve) {
       actions.push(
         {
@@ -905,8 +910,8 @@ async function buildApprovalView(runId: number, env: Env, ctx: ToolContext): Pro
     // A cross-org card is rendered for the target workspace. Keep the app's
     // role display aligned with the same target context that authored actions.
     'lobu/member-role': ctx.memberRole,
-    ...(canIssueApprovalCapability(row, status, ctx)
-      ? { 'lobu/approval-capability': issueApprovalCapability(row, ctx) }
+    ...(capabilityHost
+      ? { 'lobu/approval-capability': issueApprovalCapability(row, capabilityHost) }
       : {}),
   });
 }
@@ -936,16 +941,22 @@ const resolveApprovalImpl = async (
   ctx: AccountToolContext
 ): Promise<LobuView> => {
   const capability = readApprovalCapability(ctx.mcpAppApprovalCapability);
-  // Drops `ctx.mcpAppsSupported` for the same reason issuance does — and it
-  // has to drop it in the SAME change, or a card holding a freshly-issued
-  // capability gets a 403 on every press. What remains authenticates the round
-  // trip: the capability must name this run and still be bound to the calling
-  // host — `mcpAppCapabilityMatchesHost` re-checks user, client and expiry.
+  // Not gated on `ctx.mcpAppsSupported`, for the same reason issuance is not.
+  // The capability must name this run and still be bound to the calling host
+  // (`mcpAppCapabilityMatchesHost` re-checks user, client and expiry), and the
+  // caller must still be a hosted web client: issuance alone is not enough,
+  // since a client's registration or token can change while a card is open.
   if (
     capability.runId !== args.run_id ||
     !mcpAppCapabilityMatchesHost(capability, ctx)
   ) {
     throw new ToolUserError('The MCP App approval capability is stale or does not match.', 403);
+  }
+  if (!(await isHostedWebClient(ctx))) {
+    throw new ToolUserError(
+      'Approving from an app card requires a hosted web client. Review this request in Lobu.',
+      403
+    );
   }
 
   // The encrypted card capability carries the authoritative workspace. An

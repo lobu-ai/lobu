@@ -1741,6 +1741,7 @@ export async function handleMcp(c: Context<{ Bindings: Env }>): Promise<Response
       requestAuthCtx.userId = freshCtx.userId;
       requestAuthCtx.clientId = freshCtx.clientId;
       requestAuthCtx.tokenName = freshCtx.tokenName ?? null;
+      requestAuthCtx.authorizationGrantType = freshCtx.authorizationGrantType ?? null;
       requestAuthCtx.tokenType = freshCtx.tokenType;
       // `extractAuthContext` always yields a concrete scope array (real scopes
       // for token callers, the not-applicable sentinel for session/anonymous).

@@ -73,20 +73,27 @@ describe("MCP entitySchema.createType approval", () => {
 		await addUserToOrganization(owner.id, org.id, "owner");
 		await addUserToOrganization(member.id, org.id, "member");
 
-		const oauthClient = await createTestOAuthClient();
+		// A hosted web client (https redirect, authorization-code tokens) is the
+		// only kind that receives the in-card approval capability.
+		const oauthClient = await createTestOAuthClient({
+			redirect_uris: ["https://chat.example.test/oauth/callback"],
+		});
 		memberToken = (
 			await createTestAccessToken(member.id, org.id, oauthClient.client_id, {
 				scope: "mcp:read mcp:write profile:read",
+				authorizationGrantType: "authorization_code",
 			})
 		).token;
 		ownerWriteToken = (
 			await createTestAccessToken(owner.id, org.id, oauthClient.client_id, {
 				scope: "mcp:read mcp:write profile:read",
+				authorizationGrantType: "authorization_code",
 			})
 		).token;
 		ownerAdminToken = (
 			await createTestAccessToken(owner.id, org.id, oauthClient.client_id, {
 				scope: "mcp:read mcp:write mcp:admin profile:read",
+				authorizationGrantType: "authorization_code",
 			})
 		).token;
 

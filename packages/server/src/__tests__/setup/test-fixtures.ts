@@ -534,6 +534,8 @@ export async function createTestAccessToken(
     scope?: string;
     resource?: string | null;
     grantedOrganizationIds?: string[] | null;
+    /** Defaults to the legacy NULL, or device_code when the scope requires it. */
+    authorizationGrantType?: 'authorization_code' | 'device_code' | null;
   },
 ): Promise<TestAccessToken> {
   const sql = getTestDb();
@@ -544,11 +546,14 @@ export async function createTestAccessToken(
   const scope = options?.scope || 'mcp:read mcp:write';
   // Only the device-code flow can mint private scopes — mirrored by the
   // oauth_tokens_private_scopes_require_device_grant check constraint.
-  const grantType = scope
+  const requiresDeviceGrant = scope
     .split(/\s+/)
-    .some((s) => (NON_PUBLIC_OAUTH_SCOPES as readonly string[]).includes(s))
-    ? 'device_code'
-    : null;
+    .some((s) => (NON_PUBLIC_OAUTH_SCOPES as readonly string[]).includes(s));
+  const grantType = options?.authorizationGrantType !== undefined
+    ? options.authorizationGrantType
+    : requiresDeviceGrant
+      ? 'device_code'
+      : null;
 
   const grantedOrganizationIds = options?.grantedOrganizationIds === undefined
     ? [organizationId]
