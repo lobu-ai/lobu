@@ -30,6 +30,7 @@ import {
 import {
 	explainPermissionPolicy,
 	permissionPolicyCatalog,
+	requireHumanWorkspaceAdmin,
 	requireOrganizationSettingsAdmin,
 	serializeEntityApprovalPolicy,
 	writePermissionPolicy,
@@ -1312,44 +1313,9 @@ app.on(
 );
 
 app.patch("/api/:orgSlug/organization/visibility", mcpAuth, async (c) => {
-	const organizationId = c.get("organizationId");
-	const memberRole = c.get("memberRole");
-
-	if (!organizationId) {
-		return c.json({ error: "Organization context required" }, 401);
-	}
-
-	if (memberRole !== "owner" && memberRole !== "admin") {
-		return c.json(
-			{
-				error: "forbidden",
-				message: "Workspace visibility requires owner or admin access.",
-			},
-			403,
-		);
-	}
-
-	const authSource = c.get("authSource");
-	if (authSource === "pat") {
-		return c.json(
-			{
-				error: "forbidden",
-				message: "Use OAuth or a web session to change workspace visibility.",
-			},
-			403,
-		);
-	}
-
-	const scopes = c.get("mcpAuthInfo")?.scopes ?? [];
-	if (authSource === "oauth" && !scopes.includes("mcp:admin")) {
-		return c.json(
-			{
-				error: "forbidden",
-				message: "Workspace visibility changes require mcp:admin scope.",
-			},
-			403,
-		);
-	}
+	const authError = requireHumanWorkspaceAdmin(c);
+	if (authError) return authError;
+	const organizationId = c.get("organizationId")!;
 
 	let body: { visibility?: unknown };
 	try {

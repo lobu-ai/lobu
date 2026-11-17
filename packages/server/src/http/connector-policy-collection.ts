@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
 import type { Context } from "hono";
-import { isTokenDerivedSession, POLICY_WRITE_SCOPE } from "../auth/oauth/scopes";
 import { canonicalConnectorPolicyScope } from "../authz/connector-policy";
 import {
   deleteEntityApprovalPolicy,
@@ -12,19 +11,7 @@ import {
 } from "../authz/entity-policy";
 import type { DbClient } from "../db/client";
 import * as invalidationEmitter from "../events/emitter";
-import { parsePolicy, serializeEntityApprovalPolicy, validateConnectorPolicyTarget } from "./permission-policy-write";
-
-function authorize(c: Context) {
-  const org = c.get("organizationId");
-  if (!org || !c.get("user")?.id) return c.json({ error: "unauthorized" }, 401);
-  if (!["owner", "admin"].includes(c.get("memberRole") ?? "")) return c.json({ error: "forbidden" }, 403);
-  const auth = c.get("mcpAuthInfo");
-  if (c.get("authSource") === "session" && !auth && !isTokenDerivedSession(c.get("session"))) return null;
-  if (c.get("authSource") === "pat" && auth?.organizationId === org &&
-    auth.scopes.includes(POLICY_WRITE_SCOPE) && !auth.agentId && !auth.workerId &&
-    !auth.scopes.includes("device_worker:run")) return null;
-  return c.json({ error: "forbidden", message: "Use an owner/admin web session or an explicitly granted policies:write token." }, 403);
-}
+import { parsePolicy, requireHumanWorkspaceAdmin, serializeEntityApprovalPolicy, validateConnectorPolicyTarget } from "./permission-policy-write";
 
 function scopeKey(policy: EntityApprovalPolicyInput) {
   const scope = canonicalConnectorPolicyScope(policy);
@@ -52,7 +39,7 @@ async function readSnapshot(org: string, tx?: DbClient) {
 
 /** Saved rules only: catalog metadata belongs to the existing inspection endpoint. */
 export async function readConnectorPolicyCollection(c: Context) {
-  const denied = authorize(c);
+  const denied = requireHumanWorkspaceAdmin(c, { acceptPolicyToken: true });
   if (denied) return denied;
   const { revision, rules } = await readSnapshot(c.get("organizationId")!);
   return c.json({ revision, rules });
@@ -60,7 +47,7 @@ export async function readConnectorPolicyCollection(c: Context) {
 
 /** Replace the org's connector rules as one compare-and-swap, preserving every other policy class/principal. */
 export async function replaceConnectorPolicyCollection(c: Context) {
-  const denied = authorize(c);
+  const denied = requireHumanWorkspaceAdmin(c, { acceptPolicyToken: true });
   if (denied) return denied;
   const org = c.get("organizationId")!;
   let revision: string;

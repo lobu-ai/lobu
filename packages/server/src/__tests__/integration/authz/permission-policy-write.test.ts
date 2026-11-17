@@ -56,6 +56,7 @@ let org: Awaited<ReturnType<typeof createTestOrganization>>;
 let cookie: string;
 let oauth: string;
 let pat: string;
+let ownerId: string;
 
 function request(
 	method: string,
@@ -105,6 +106,7 @@ beforeEach(async () => {
 	await deleteEntityApprovalPolicy({ organizationId: org.id, resourceClass: "connector_action", operationCategory: "read" });
 	const user = await createTestUser();
 	await addUserToOrganization(user.id, org.id, "owner");
+	ownerId = user.id;
 	cookie = (await createTestSession(user.id)).cookieHeader;
 	const client = await createTestOAuthClient();
 	oauth = (
@@ -170,23 +172,29 @@ describe("permission policy HTTP writes", () => {
 		expect((await listEntityApprovalPolicies(org.id, "connector_action"))[0].effects.execute).toBe("deny");
 	});
 
-	it("preserves OAuth admin access for other policy classes", async () => {
-		const headers = { Authorization: `Bearer ${oauth}` };
-		for (const resource_class of ["entity", "entity_schema", "agent_config"]) {
-			const body = {
-				resource_class,
-				effects: {
-					[resource_class === "entity_schema" ? "update_type" : "update"]:
-						"approval",
-				},
-				...(resource_class === "entity"
-					? { entity_type_slug: "policy_fixture" }
-					: {}),
-			};
-			expect((await request("PUT", body, { headers })).status).toBe(200);
-			expect(await (await request("DELETE", body, { headers })).json()).toEqual(
-				{ deleted: true },
-			);
+	it("accepts only a person for entity, entity_schema, and agent_config policy writes", async () => {
+		const exchange = await postForm("/api/extension-session", { token: pat });
+		expect(exchange.status).toBe(200);
+		const { session_token } = await exchange.json();
+		const policyPat = (await createTestPAT(ownerId, org.id, { scope: "policies:write" })).token;
+		for (const agent of [undefined, agentId]) {
+			for (const resource_class of ["entity", "entity_schema", "agent_config"]) {
+				const body = {
+					resource_class,
+					effects: { [resource_class === "entity_schema" ? "update_type" : "update"]: "auto" },
+					...(resource_class === "entity" ? { entity_type_slug: "policy_fixture" } : {}),
+				};
+				for (const token of [oauth, pat, session_token, policyPat]) {
+					const headers = { Authorization: `Bearer ${token}` };
+					const put = await request("PUT", body, { agent, headers });
+					expect(put.status).toBe(403);
+					expect((await put.json()).message).toContain("web session");
+					expect((await request("DELETE", body, { agent, headers })).status).toBe(403);
+				}
+				expect((await listEntityApprovalPolicies(org.id, resource_class as "entity")).length).toBe(0);
+				expect((await request("PUT", body, { agent })).status).toBe(200);
+				expect(await (await request("DELETE", body, { agent })).json()).toEqual({ deleted: true });
+			}
 		}
 	});
 
