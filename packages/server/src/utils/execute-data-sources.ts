@@ -988,12 +988,18 @@ export function buildScopedQuery(
         `"${safeName}" AS NOT MATERIALIZED (SELECT ${sel(table)} FROM public.connector_definitions WHERE organization_id = ${orgP})`
       );
     } else if (table === 'entity_relationships') {
+      const relationshipReadPredicate = readPolicy((target) =>
+        linkedEntitiesReadPolicySql(
+          readRestrictions,
+          'ARRAY[entity_relationships.from_entity_id, entity_relationships.to_entity_id]',
+          target
+        )
+      );
       // security-allowed: see block comment above the for-loop
       ctes.push(
         // Live source endpoint visibility is enforced by the entity API. Raw SQL cannot
         // bypass it, even to infer a hidden source key through counts or joins.
-        `"${safeName}" AS NOT MATERIALIZED (SELECT ${sel(table)} FROM public.entity_relationships WHERE organization_id = ${orgP} AND deleted_at IS NULL AND from_entity_id IS NOT NULL AND to_entity_id IS NOT NULL` +
-          `${readPolicy((target) => linkedEntitiesReadPolicySql(readRestrictions, 'ARRAY[entity_relationships.from_entity_id, entity_relationships.to_entity_id]', target))})`
+        `"${safeName}" AS NOT MATERIALIZED (SELECT ${sel(table)} FROM public.entity_relationships WHERE organization_id = ${orgP} AND deleted_at IS NULL AND from_entity_id IS NOT NULL AND to_entity_id IS NOT NULL${relationshipReadPredicate})`
       );
     } else if (table === 'entity_relationship_types') {
       // security-allowed: see block comment above the for-loop
