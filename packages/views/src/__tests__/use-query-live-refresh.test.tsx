@@ -503,4 +503,47 @@ describe("useQuery live refresh", () => {
       await tick();
     });
   });
+
+  test("an owed follow-up waits for a visible frame", async () => {
+    // Zero window: the data change bumps immediately while the first read is
+    // still in flight, which leaves one follow-up owed.
+    liveRefreshIntervalMs = 0;
+    await ready();
+    await dataChanged();
+    expect(parent.toolsCalls()).toHaveLength(1);
+
+    // Hide before the in-flight read settles; its settle must not start the
+    // owed read into a hidden frame.
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => "hidden",
+    });
+    await act(async () => {
+      document.dispatchEvent(new dom.window.Event("visibilitychange"));
+      await tick();
+    });
+    await act(async () => {
+      answer(parent.toolsCalls()[0], 1);
+      await tick();
+      await tick();
+    });
+    expect(parent.toolsCalls()).toHaveLength(1);
+
+    // Visible: the preserved follow-up runs.
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => "visible",
+    });
+    await act(async () => {
+      document.dispatchEvent(new dom.window.Event("visibilitychange"));
+      await tick();
+      await tick();
+    });
+    expect(parent.toolsCalls()).toHaveLength(2);
+    await act(async () => {
+      answer(parent.toolsCalls()[1], 2);
+      await tick();
+    });
+    expect(latest?.data).toEqual({ count: 2 });
+  });
 });

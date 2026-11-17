@@ -19,6 +19,13 @@
  */
 export const LIVE_REFRESH_MIN_INTERVAL_MS = 15_000;
 
+/** True when the top-level document is hidden; an iframe inherits it. */
+export function documentHidden(): boolean {
+  return (
+    typeof document !== "undefined" && document.visibilityState === "hidden"
+  );
+}
+
 export interface DataChangeGate {
   /** Subscribe to `visibilitychange`; idempotent. */
   start(): void;
@@ -39,9 +46,6 @@ export function createDataChangeGate(
   let pending = false;
   let listening = false;
 
-  const hidden = () =>
-    typeof document !== "undefined" && document.visibilityState === "hidden";
-
   const clearTimer = () => {
     if (timer === null) return;
     clearTimeout(timer);
@@ -56,7 +60,7 @@ export function createDataChangeGate(
   };
 
   const notify = () => {
-    if (hidden()) {
+    if (documentHidden()) {
       // Do not spend a read on a frame nobody is looking at. Keep one
       // "something changed" bit for the next visibility change.
       pending = true;
@@ -79,7 +83,17 @@ export function createDataChangeGate(
   };
 
   const onVisibilityChange = () => {
-    if (hidden() || !pending) return;
+    if (documentHidden()) {
+      // A trailing read scheduled while visible must not run in a frame
+      // nobody is looking at. Keep it as the one pending bit for the next
+      // visible transition instead of dropping the change.
+      if (timer !== null) {
+        pending = true;
+        clearTimer();
+      }
+      return;
+    }
+    if (!pending) return;
     pending = false;
     clearTimer();
     fire();

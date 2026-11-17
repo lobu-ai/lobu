@@ -30,9 +30,13 @@ afterEach(() => {
   delete (globalThis as { document?: unknown }).document;
 });
 
-function setVisible(): void {
-  visibility = "visible";
+function setVisibility(next: "visible" | "hidden"): void {
+  visibility = next;
   for (const listener of [...listeners]) listener();
+}
+
+function setVisible(): void {
+  setVisibility("visible");
 }
 
 test("reads immediately when the window is idle", () => {
@@ -80,6 +84,22 @@ test("hiding cancels a scheduled trailing read", async () => {
   gate.notify();
   visibility = "hidden";
   gate.notify();
+  await sleep(70);
+  expect(reads).toBe(1);
+  setVisible();
+  expect(reads).toBe(2);
+  gate.stop();
+});
+
+test("a visibility change alone cancels a scheduled trailing read", async () => {
+  let reads = 0;
+  const gate = createDataChangeGate(() => reads++, 40);
+  gate.start();
+  gate.notify();
+  gate.notify();
+  expect(reads).toBe(1);
+  // Hide without another notify: the scheduled trailing read must not fire.
+  setVisibility("hidden");
   await sleep(70);
   expect(reads).toBe(1);
   setVisible();

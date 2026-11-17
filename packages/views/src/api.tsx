@@ -83,6 +83,7 @@ import {
 import { EmbedProvider, EmbedRegistry } from "./embed.js";
 import {
   createDataChangeGate,
+  documentHidden,
   LIVE_REFRESH_MIN_INTERVAL_MS,
 } from "./live-gate.js";
 
@@ -239,6 +240,8 @@ interface ViewRuntime {
   theme: "light" | "dark";
   /** Bumped when the host reports a workspace data change; live reads re-run. */
   dataVersion: number;
+  /** False while the top-level document is hidden; live reads pause. */
+  visible: boolean;
   /** Read live queries now, outside the refresh window (a committed action). */
   refreshData: () => void;
   callTool: (
@@ -568,6 +571,15 @@ export function useQuery<T = unknown>(
   const reading = useRef(0);
   const owed = useRef(false);
   const [followUp, setFollowUp] = useState(0);
+  // A follow-up owed when the frame hid waits for the next visible frame. The
+  // in-flight read may settle into a hidden tab, and that settle must not
+  // spend a read nobody is looking at.
+  useEffect(() => {
+    if (!rt.ready || !live || !rt.visible) return;
+    if (!owed.current || reading.current !== 0) return;
+    owed.current = false;
+    setFollowUp((n) => n + 1);
+  }, [rt.ready, rt.visible, live]);
   const key =
     query === null
       ? null
@@ -595,6 +607,13 @@ export function useQuery<T = unknown>(
     ) {
       return;
     }
+    // Live reads wait for a visible frame. The gate pauses host changes, but
+    // an in-flight settle, refetch(), or key change can land here hidden; keep
+    // one owed read for the next visible transition.
+    if (live && documentHidden()) {
+      owed.current = true;
+      return;
+    }
     const last = lastRead.current;
     const background =
       last?.key === key &&
@@ -617,6 +636,7 @@ export function useQuery<T = unknown>(
       if (reading.current !== seq) return;
       reading.current = 0;
       if (owed.current && lastRead.current?.key === key) {
+        if (documentHidden()) return;
         owed.current = false;
         setFollowUp((n) => n + 1);
       }
@@ -954,6 +974,7 @@ export function Provider({
   const [displayMode, setDisplayMode] = useState<DisplayMode>("inline");
   const [container, setContainer] = useState<Container>({});
   const [dataVersion, setDataVersion] = useState(0);
+  const [visible, setVisible] = useState(() => !documentHidden());
   // One timer per view, not per query: a data change re-reads the whole view
   // together, inside one bounded window.
   const dataGate = useMemo(
@@ -964,6 +985,12 @@ export function Provider({
       ),
     [liveRefreshIntervalMs]
   );
+  useEffect(() => {
+    const onVisibilityChange = () => setVisible(!documentHidden());
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () =>
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+  }, []);
   const bridgeRef = useRef<ViewBridge | null>(bridge ?? null);
   if (bridge) bridgeRef.current = bridge;
   if (bridgeRef.current === null) bridgeRef.current = new ViewBridge();
@@ -1131,6 +1158,7 @@ export function Provider({
       setParams,
       theme,
       dataVersion,
+      visible,
       refreshData: dataGate.force,
       callTool,
       openLink,
@@ -1148,6 +1176,7 @@ export function Provider({
       setParams,
       theme,
       dataVersion,
+      visible,
       dataGate,
       callTool,
       openLink,
