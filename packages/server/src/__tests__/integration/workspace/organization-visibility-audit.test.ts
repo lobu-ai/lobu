@@ -13,6 +13,8 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import {
   addUserToOrganization,
+  createTestAccessToken,
+  createTestOAuthClient,
   createTestOrganization,
   createTestSession,
   createTestUser,
@@ -24,6 +26,7 @@ describe('workspace visibility > audit trail', () => {
   let ownerId: string;
   let ownerCookie: string;
   let memberCookie: string;
+  let ownerOAuthToken: string;
 
   beforeAll(async () => {
     await cleanupTestDatabase();
@@ -35,6 +38,12 @@ describe('workspace visibility > audit trail', () => {
     ownerId = owner.id;
     ownerCookie = (await createTestSession(owner.id)).cookieHeader;
     memberCookie = (await createTestSession(member.id)).cookieHeader;
+    const client = await createTestOAuthClient();
+    ownerOAuthToken = (
+      await createTestAccessToken(owner.id, org.id, client.client_id, {
+        scope: 'mcp:read mcp:write mcp:admin',
+      })
+    ).token;
   });
 
   function setVisibility(cookie: string, visibility: 'public' | 'private') {
@@ -92,6 +101,18 @@ describe('workspace visibility > audit trail', () => {
   it('a refused change writes no event', async () => {
     const response = await setVisibility(memberCookie, 'public');
     expect(response.status).toBe(403);
+    expect(await visibilityEvents()).toHaveLength(2);
+  });
+
+  it("refuses an owner's OAuth app bearer even with mcp:admin", async () => {
+    const response = await testRequest('PATCH', `/api/${org.slug}/organization/visibility`, {
+      body: { visibility: 'public' },
+      token: ownerOAuthToken,
+    });
+    expect(response.status).toBe(403);
+    expect((await response.json()).message).toContain('web session');
+    const [row] = await getTestDb()`SELECT visibility FROM organization WHERE id = ${org.id}`;
+    expect(row!.visibility).toBe('private');
     expect(await visibilityEvents()).toHaveLength(2);
   });
 

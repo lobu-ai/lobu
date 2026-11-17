@@ -1867,7 +1867,7 @@ describe('MCP Authentication', () => {
       }
     });
 
-    it('refuses a PAT where a route accepts only OAuth or a web session, even with mcp:admin', async () => {
+    it('refuses PATs and OAuth apps where a route accepts only a web session, even with mcp:admin', async () => {
       const session = await createTestSession(sourceOwner.id);
       const adminPat = (
         await createTestPAT(sourceOwner.id, sourceOrg.id, { scope: 'mcp:read mcp:write mcp:admin' })
@@ -1876,7 +1876,7 @@ describe('MCP Authentication', () => {
       const adminOauth = await oauthBearer(sourceOwner.id, sourceOrg.id, 'mcp:read mcp:write mcp:admin');
 
       expect((await keepWorkspacePrivate(sourceOrg, { cookie: session.cookieHeader })).status).toBe(200);
-      expect((await keepWorkspacePrivate(sourceOrg, { token: adminOauth })).status).toBe(200);
+      expect((await keepWorkspacePrivate(sourceOrg, { token: adminOauth })).status).toBe(403);
       expect((await keepWorkspacePrivate(sourceOrg, { token: oauth })).status).toBe(403);
       expect((await keepWorkspacePrivate(sourceOrg, { token: adminPat })).status).toBe(403);
     });

@@ -1,5 +1,5 @@
 import type { Context } from "hono";
-import { isTokenDerivedSession } from "../auth/oauth/scopes";
+import { isTokenDerivedSession, POLICY_WRITE_SCOPE } from "../auth/oauth/scopes";
 import { canonicalConnectorPolicyScope, CONNECTOR_POLICY_CATEGORIES, type ConnectorPolicyCategory } from "../authz/connector-policy";
 import {
 	deleteEntityApprovalPolicy,
@@ -86,6 +86,31 @@ export async function requireOrganizationSettingsAdmin(c: Context) {
 	}
 
 	return null;
+}
+
+/**
+ * Workspace changes only a person may make: an owner/admin's own web session,
+ * not one exchanged from a token. OAuth apps, PATs, and agent/worker tokens are
+ * refused even with `mcp:admin`, so a connected app cannot widen its own
+ * access. `acceptPolicyToken` also admits a `policies:write` PAT, which only
+ * such a session can mint; it is scoped to organization connector rules and
+ * never reaches other settings.
+ */
+export function requireHumanWorkspaceAdmin(c: Context, { acceptPolicyToken = false } = {}) {
+	const org = c.get("organizationId");
+	if (!org || !c.get("user")?.id) return c.json({ error: "unauthorized" }, 401);
+	if (!["owner", "admin"].includes(c.get("memberRole") ?? "")) return c.json({ error: "forbidden" }, 403);
+	const auth = c.get("mcpAuthInfo");
+	if (c.get("authSource") === "session" && !auth && !isTokenDerivedSession(c.get("session"))) return null;
+	if (acceptPolicyToken && c.get("authSource") === "pat" && auth?.organizationId === org &&
+		auth.scopes.includes(POLICY_WRITE_SCOPE) && !auth.agentId && !auth.workerId &&
+		!auth.scopes.includes("device_worker:run")) return null;
+	return c.json({
+		error: "forbidden",
+		message: acceptPolicyToken
+			? "Use an owner/admin web session or an explicitly granted policies:write token."
+			: "This change requires an owner/admin web session; connected apps and tokens cannot make it.",
+	}, 403);
 }
 
 async function agentExists(organizationId: string, agentId: string) {
@@ -212,7 +237,7 @@ export async function validateConnectorPolicyTarget(
 
 /** Both org and agent policy writes share validation, authority, and persistence. */
 export async function writePermissionPolicy(c: Context) {
-	const authError = await requireOrganizationSettingsAdmin(c);
+	const authError = requireHumanWorkspaceAdmin(c);
 	if (authError) return authError;
 	const organizationId = c.get("organizationId");
 	if (!organizationId) return c.json({ error: "Organization context required" }, 401);
@@ -234,19 +259,6 @@ export async function writePermissionPolicy(c: Context) {
 	const agentId = c.req.param("agentId") ?? null;
 	if (policy.resourceClass === "connector_action" && !agentId) {
 		return invalid(c, "Manage organization connector rules through /write-permissions/connector-actions.");
-	}
-	// Only human administrators can change agent connector restrictions.
-	if (
-		policy.resourceClass === "connector_action" &&
-		(c.get("authSource") !== "session" || !c.get("user")?.id || c.get("mcpAuthInfo") || isTokenDerivedSession(c.get("session")))
-	) {
-		return c.json(
-			{
-				error: "forbidden",
-				message: "Changing agent connector restrictions requires a human web session.",
-			},
-			403,
-		);
 	}
 	policy.principalKind = agentId ? "agent" : null;
 	policy.principalId = agentId;
