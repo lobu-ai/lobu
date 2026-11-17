@@ -346,22 +346,40 @@ describe("read_profile", () => {
 });
 
 describe("search_companies", () => {
-  test("parses names, facts and follower counts", async () => {
+  test("parses names, facts and follower counts; never a summary as location", async () => {
     const { result } = await runAction(
       "search_companies",
       { keywords: "fixtures", page: 3 },
       () => ({
         html: `
           <main>
-            <div role="listitem">
-              <a href="https://www.linkedin.com/company/example-labs/"></a>
-              <p>Example Labs</p><p>Software Development</p><p>Sample City</p>
-              <p>Fixture Person &amp; 3 other connections follow this page · 74,153 followers</p>
-            </div>
-            <div role="listitem">
-              <a href="https://www.linkedin.com/showcase/sample-showcase/?trk=x"></a>
-              <p>Sample Showcase</p><p>Research</p><p>Sample Town</p><p>1.2K followers</p>
-            </div>
+            <div role="listitem"><div>
+              <div>
+                <p><a href="https://www.linkedin.com/company/example-labs/">Example Labs</a></p>
+                <div><p>Software Development</p></div>
+                <div><p>Sample City</p></div>
+              </div>
+              <div><p>Example Labs builds fixtures.</p>
+                <div><p><a href="https://www.linkedin.com/in/fixture-person/">Fixture Person &amp; 3 other connections</a> · 74,153 followers</p></div>
+              </div>
+            </div></div>
+            <div role="listitem"><div>
+              <div>
+                <p><a href="https://www.linkedin.com/showcase/sample-showcase/?trk=x">Sample Showcase</a></p>
+                <div><p>Research</p></div>
+                <div><p>Sample Town</p></div>
+              </div>
+              <div><p>1.2K followers</p></div>
+            </div></div>
+            <div role="listitem"><div>
+              <div>
+                <p><a href="https://www.linkedin.com/company/no-location/">No Location Co</a></p>
+                <div><p>Research Services</p></div>
+              </div>
+              <div><p>No Location Co is a research company.</p>
+                <div><p>5,577,706 followers</p></div>
+              </div>
+            </div></div>
             <div role="listitem"><p>Ad without a company link</p></div>
           </main>`,
       })
@@ -384,6 +402,13 @@ describe("search_companies", () => {
         location: "Sample Town",
         followers: 1200,
         company_url: "https://www.linkedin.com/showcase/sample-showcase/",
+      },
+      {
+        name: "No Location Co",
+        industry: "Research Services",
+        location: null,
+        followers: 5577706,
+        company_url: "https://www.linkedin.com/company/no-location/",
       },
     ]);
   });

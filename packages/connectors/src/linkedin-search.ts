@@ -548,6 +548,11 @@ export async function readLinkedInProfile(
 
 // ── search_companies ───────────────────────────────────────────
 
+// A card's header is the name <p> (holding the company link) followed by one
+// sibling <div><p> per fact: industry, then location when the company lists one.
+// The summary and follower line live in a separate subtree, so reading facts by
+// position over every <p> would take the summary as a missing location.
+const COMPANY_NAME = 'p:has(> a[href*="/company/"]), p:has(> a[href*="/showcase/"])';
 const COMPANY_SEARCH_CONFIG = {
   scroll: { max: 1, stall: 1, waitMs: 2500 },
   rowSelector: 'main [role="listitem"]',
@@ -558,6 +563,12 @@ const COMPANY_SEARCH_CONFIG = {
       selector: 'a[href*="/company/"], a[href*="/showcase/"]',
       take: "attr",
       attr: "href",
+    },
+    name: { selector: COMPANY_NAME },
+    facts: {
+      selector: 'p:has(> a[href*="/company/"]) ~ div > p, p:has(> a[href*="/showcase/"]) ~ div > p',
+      take: "objectAll",
+      parts: { t: { take: "text" } },
     },
     lines: { selector: "p", take: "objectAll", parts: { t: { take: "text" } } },
   },
@@ -570,14 +581,14 @@ function parseCompanyRows(rows: Row[]): Row[] {
     const companyUrl = canonicalCompanyUrl(cleanText(row.company_url));
     if (!companyUrl || seen.has(companyUrl)) continue;
     seen.add(companyUrl);
-    // Cards render name, industry, location, then summary and followers.
-    const lines = lineTexts(row.lines);
-    const followersLine = lines.find((line) => /\bfollowers?$/i.test(line));
-    const details = lines.filter((line) => line !== followersLine);
+    const facts = lineTexts(row.facts);
+    const followersLine = lineTexts(row.lines).find((line) =>
+      /\bfollowers?$/i.test(line)
+    );
     companies.push({
-      name: nonEmpty(details[0] ?? null),
-      industry: nonEmpty(details[1] ?? null),
-      location: nonEmpty(details[2] ?? null),
+      name: nonEmpty(cleanText(row.name)),
+      industry: nonEmpty(facts[0] ?? null),
+      location: nonEmpty(facts[1] ?? null),
       followers: followersLine ? parseFollowerCount(followersLine) : null,
       company_url: companyUrl,
     });
