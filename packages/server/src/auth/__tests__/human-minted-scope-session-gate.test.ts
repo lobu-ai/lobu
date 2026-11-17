@@ -11,13 +11,17 @@ import {
 } from '../../__tests__/setup/test-fixtures';
 import { get, post, postForm } from '../../__tests__/setup/test-helpers';
 import { clearAuthCacheForTests } from '../index';
-import { HUMAN_MINTED_PAT_SCOPES } from '../oauth/scopes';
+import { AVAILABLE_PAT_SCOPES, CONNECTED_APP_PAT_SCOPES } from '../oauth/scopes';
 
-// A token-holder can turn an `mcp:admin` PAT or device-code grant into a web
-// session (`canMintWebSession`). That session must not then mint a scope only a
-// person may grant, or an agent holding the token escalates past the human
-// gate on POST /api/:org/tokens. A person's own sign-in still can.
-describe('human-minted PAT scopes require an interactive web session', () => {
+// A connected app holding an owner's `mcp:admin` bearer, or a web session it
+// derived from one (`canMintWebSession`), must not mint a PAT with authority
+// beyond CONNECTED_APP_PAT_SCOPES, or an agent holding the token escalates past
+// the human gate on POST /api/:org/tokens. A person's own sign-in still can.
+const WEB_SESSION_ONLY_PAT_SCOPES = AVAILABLE_PAT_SCOPES.filter(
+  (scope) => !(CONNECTED_APP_PAT_SCOPES as readonly string[]).includes(scope)
+);
+
+describe('admin and human-minted PAT scopes require an interactive web session', () => {
   beforeEach(async () => {
     clearAuthCacheForTests();
     await cleanupTestDatabase();
@@ -89,7 +93,16 @@ describe('human-minted PAT scopes require an interactive web session', () => {
     });
   }
 
-  const tokenDerivedSessions: Array<[string, (owner: Owner) => Promise<{ token: string } | { cookie: string }>]> = [
+  async function adminOAuthBearer(owner: Owner): Promise<{ token: string }> {
+    const client = await createTestOAuthClient();
+    const { token } = await createTestAccessToken(owner.userId, owner.orgId, client.client_id, {
+      scope: 'mcp:read mcp:write mcp:admin profile:read',
+    });
+    return { token };
+  }
+
+  const nonSessionCallers: Array<[string, (owner: Owner) => Promise<{ token: string } | { cookie: string }>]> = [
+    ["an owner's OAuth app bearer with mcp:admin", adminOAuthBearer],
     ['an mcp:admin PAT exchanged at /extension-session', async (o) => bearerSession(await adminPat(o))],
     ['an mcp:admin device-code grant exchanged at /extension-session', async (o) => bearerSession(await adminDeviceGrant(o))],
     ['an mcp:admin PAT exchanged at /exchange-token', async (o) => cookieSession(await adminPat(o))],
@@ -100,8 +113,14 @@ describe('human-minted PAT scopes require an interactive web session', () => {
     ['the Chrome sibling session from /me/devices/mint-child-token', chromeSiblingSession],
   ];
 
-  describe.each(HUMAN_MINTED_PAT_SCOPES.map((scope) => [scope]))('%s', (scope) => {
-    it.each(tokenDerivedSessions)('refuses a session derived from %s', async (_label, derive) => {
+  it('keeps admin and human-minted scopes out of what a connected app may mint', () => {
+    expect(WEB_SESSION_ONLY_PAT_SCOPES).toEqual(
+      expect.arrayContaining(['mcp:admin', 'policies:write', 'entities:manual_edit'])
+    );
+  });
+
+  describe.each(WEB_SESSION_ONLY_PAT_SCOPES.map((scope) => [scope]))('%s', (scope) => {
+    it.each(nonSessionCallers)('refuses %s', async (_label, derive) => {
       const owner = await seedOwner('hm-derived');
       const auth = await derive(owner);
 
@@ -109,12 +128,12 @@ describe('human-minted PAT scopes require an interactive web session', () => {
       expect(refused.status).toBe(403);
       expect(((await refused.json()) as { error?: string }).error).toContain(scope);
       const rows = await getTestDb()`
-        SELECT 1 FROM personal_access_tokens WHERE user_id = ${owner.userId} AND ${scope} = ANY(string_to_array(scope, ' '))
+        SELECT 1 FROM personal_access_tokens WHERE user_id = ${owner.userId} AND name = ${`synthetic ${scope}`}
       `;
       expect(rows).toHaveLength(0);
 
-      // The session is still a working web session for everything else.
-      const ordinary = await mintPat(owner, auth, 'mcp:read');
+      // The caller can still mint an ordinary token it already holds.
+      const ordinary = await mintPat(owner, auth, 'mcp:read mcp:write');
       expect(ordinary.status).toBe(201);
     });
 
@@ -131,5 +150,49 @@ describe('human-minted PAT scopes require an interactive web session', () => {
       const hopped = await cookieSession(signedIn.token);
       expect((await mintPat(owner, hopped, scope)).status).toBe(201);
     });
+  });
+
+  describe('a minted token is never wider than the token minting it', () => {
+    async function oauthBearer(owner: Owner, scope: string): Promise<{ token: string }> {
+      const client = await createTestOAuthClient();
+      return {
+        token: (await createTestAccessToken(owner.userId, owner.orgId, client.client_id, { scope })).token,
+      };
+    }
+
+    async function storedNames(owner: Owner): Promise<string[]> {
+      const rows = await getTestDb()`SELECT name FROM personal_access_tokens WHERE user_id = ${owner.userId}`;
+      return rows.map((row) => String(row.name));
+    }
+
+    it('lets an OAuth app mint the connected-app scopes it already holds', async () => {
+      const owner = await seedOwner('subset-held');
+      const auth = await oauthBearer(owner, `mcp:admin ${CONNECTED_APP_PAT_SCOPES.join(' ')}`);
+      const res = await mintPat(owner, auth, CONNECTED_APP_PAT_SCOPES.join(' '));
+      expect(res.status).toBe(201);
+    });
+
+    it.each(['profile:read', 'connections:token'])(
+      'refuses an OAuth app minting %s it does not hold',
+      async (scope) => {
+        const owner = await seedOwner('subset-wider');
+        const auth = await oauthBearer(owner, 'mcp:read mcp:write mcp:admin');
+        const refused = await mintPat(owner, auth, `mcp:read ${scope}`);
+        expect(refused.status).toBe(403);
+        expect(((await refused.json()) as { error?: string }).error).toContain(scope);
+        expect(await storedNames(owner)).not.toContain(`synthetic mcp:read ${scope}`);
+      }
+    );
+
+    it.each(nonSessionCallers.slice(1))(
+      'refuses connections:token from %s, which records no scopes of its own',
+      async (_label, derive) => {
+        const owner = await seedOwner('subset-derived');
+        const auth = await derive(owner);
+        const refused = await mintPat(owner, auth, 'connections:token');
+        expect(refused.status).toBe(403);
+        expect(await storedNames(owner)).not.toContain('synthetic connections:token');
+      }
+    );
   });
 });

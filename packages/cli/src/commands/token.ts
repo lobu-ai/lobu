@@ -70,10 +70,6 @@ export async function tokenCreateCommand(
           name: "Read + Write — typical for CI scripts and MCP clients",
         },
         {
-          value: "mcp:read mcp:write mcp:admin",
-          name: "Read + Write + Admin — full workspace access (agent CRUD, config patches)",
-        },
-        {
           value: "mcp:read",
           name: "Read only — search and query, no mutations",
         },

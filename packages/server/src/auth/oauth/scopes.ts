@@ -18,7 +18,8 @@ export const AVAILABLE_SCOPES = [
   // (POST /oauth/connection-token). Deliberately NOT in DEFAULT_SCOPES so a
   // broad member PAT cannot mint managed-connection access tokens — the local
   // instance's LOBU_CLOUD_PAT must be minted explicitly with this scope
-  // (`lobu token create --scope connections:token`).
+  // (`lobu token create --scope connections:token`), by a caller whose own
+  // token already holds it (see CONNECTED_APP_PAT_SCOPES).
   'connections:token',
 ] as const;
 
@@ -82,6 +83,21 @@ export const AVAILABLE_PAT_SCOPES = [
   'profile:read',
   'connections:token',
   ...HUMAN_MINTED_PAT_SCOPES,
+] as const;
+
+/**
+ * The PAT scopes a connected app, a token, or a token-derived session may mint,
+ * and only those its own token already holds: a minted PAT is never wider than
+ * the token minting it (`mcp:admin` implies `mcp:write` implies `mcp:read`). A
+ * token-derived session records no scopes, so it holds only the defaults. Every
+ * other PAT scope (`mcp:admin` and the human-minted ones) needs an owner/admin
+ * web session from a browser sign-in.
+ */
+export const CONNECTED_APP_PAT_SCOPES = [
+  'mcp:read',
+  'mcp:write',
+  'profile:read',
+  'connections:token',
 ] as const;
 
 /**
