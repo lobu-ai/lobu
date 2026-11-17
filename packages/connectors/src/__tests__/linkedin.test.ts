@@ -3056,6 +3056,7 @@ describe("LinkedInConnector feed dispatch", () => {
     const def = new LinkedInConnector().definition;
     expect(Object.keys(def.feeds).sort()).toEqual([
       "company_updates",
+      "direct_messages",
       "home_feed",
       "jobs",
       "live_messages",
@@ -3494,7 +3495,7 @@ describe("prepare_comment helpers", () => {
     expect(action?.inputSchema?.properties).not.toHaveProperty(
       "browser_connection_id"
     );
-    expect(c.definition.version).toBe("3.22.0");
+    expect(c.definition.version).toBe("3.23.0");
     expect(String(action?.description ?? "")).toMatch(
       /NEVER opens a tab or submits/i
     );

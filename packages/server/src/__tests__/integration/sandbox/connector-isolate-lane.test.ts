@@ -303,6 +303,7 @@ describe("linkedin: live browser connector", () => {
 			// key on — pin them so a dropped or renamed feed fails this suite.
 			expect(out.feeds).toEqual([
 				"company_updates",
+				"direct_messages",
 				"home_feed",
 				"jobs",
 				"live_messages",

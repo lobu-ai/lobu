@@ -49,6 +49,7 @@ import {
   lookupLinkedInConversations,
   readLinkedInInbox,
   sendLinkedInMessage,
+  syncLinkedInDirectMessages,
   type LinkedInInboxCheckpoint,
 } from "./linkedin-inbox.js";
 import { prepareLinkedInDraft } from "./linkedin-drafts.js";
@@ -183,6 +184,34 @@ const LINKEDIN_POST_AUTHOR_ATTRIBUTIONS: EventAttributionRule[] = [
     },
   },
   LINKEDIN_COMPANY_AUTHOR_ATTRIBUTION,
+];
+
+/**
+ * Link every stored 1:1 message to the member on the other side, whoever sent
+ * it, so that person's page holds both sides of the conversation. The member
+ * id and slug match equal-weight, like a post author's, so a person known by
+ * either one is found and a sighting with both unions them. A real contact, so
+ * mint on no match.
+ */
+const LINKEDIN_DIRECT_MESSAGE_ATTRIBUTIONS: EventAttributionRule[] = [
+  {
+    role: "about",
+    autoCreate: true,
+    target: {
+      entityType: "person",
+      titlePath: "metadata.counterpart_name",
+      identities: [
+        {
+          namespace: LINKEDIN_IDENTITY.MEMBER_ID,
+          eventPath: "metadata.counterpart_member_id",
+        },
+        {
+          namespace: LINKEDIN_IDENTITY.SLUG,
+          eventPath: "metadata.counterpart_slug",
+        },
+      ],
+    },
+  },
 ];
 
 /**
@@ -2830,8 +2859,8 @@ export default class LinkedInConnector extends ConnectorRuntime<
     key: "linkedin",
     name: "LinkedIn",
     description:
-      "Read LinkedIn feeds, notifications, and recent inbox messages through paired Chrome. Subscribe to source changes, answer direct messages, and prepare message, post, or comment drafts for human submission.",
-    version: "3.22.0",
+      "Read LinkedIn feeds, notifications, and recent inbox messages through paired Chrome. Subscribe to source changes, store 1:1 message history on the people you talk to, answer direct messages, and prepare message, post, or comment drafts for human submission.",
+    version: "3.23.0",
     faviconDomain: "linkedin.com",
     // Live feeds bind a signed-in Chrome account.
     browser: {
@@ -2907,6 +2936,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
         description:
           "Catch-up reached the end of what LinkedIn exposes, so earlier changes at this conversation or notification position may be missing.",
       },
+      { key: "message", label: "Direct Message" },
       { key: "post", label: "Post" },
       { key: "comment", label: "Comment" },
       { key: "job_posting", label: "Job Posting" },
@@ -2948,6 +2978,43 @@ export default class LinkedInConnector extends ConnectorRuntime<
           "source.gap": {
             description:
               "A conversation's recent message page may hide older catch-up messages",
+          },
+        },
+      },
+      direct_messages: {
+        sync: (ctx) => syncLinkedInDirectMessages(ctx),
+        key: "direct_messages",
+        name: "Direct Messages",
+        description:
+          "Store your 1:1 inbox messages, both sides, on the person you are talking to; group conversations are skipped. Runs only on the feed's schedule or a manual run, never by itself. Each run reads one page of conversations without marking anything seen, from the most recent activity down to what the previous pass stored (at most five pages), and keeps each changed conversation's recent message page, not its full history.",
+        eventKinds: {
+          message: {
+            description: "A message in a 1:1 LinkedIn conversation",
+            attributions: LINKEDIN_DIRECT_MESSAGE_ATTRIBUTIONS,
+            metadataSchema: {
+              type: "object",
+              properties: {
+                conversation_id: { type: "string" },
+                content_kind: {
+                  type: "string",
+                  description: "text, media (attachments) or revoked (recalled).",
+                },
+                has_attachments: { type: "boolean" },
+                from_me: {
+                  type: "boolean",
+                  description: "Whether the signed-in member sent the message.",
+                },
+                sender_member_id: { type: "string" },
+                sender_slug: { type: "string" },
+                sender_name: { type: "string" },
+                counterpart_member_id: {
+                  type: "string",
+                  description: "Member id of the person on the other side.",
+                },
+                counterpart_slug: { type: "string" },
+                counterpart_name: { type: "string" },
+              },
+            },
           },
         },
       },

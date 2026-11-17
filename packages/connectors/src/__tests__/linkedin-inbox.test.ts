@@ -1734,6 +1734,187 @@ describe("LinkedIn direct messages", () => {
       dom.window.close();
     }
   }, 15_000);
+
+  test("direct_messages stores both sides of 1:1 conversations on the other member, skips groups, and re-syncs without duplicates", async () => {
+    const participant = (id: string, first: string, last: string, profileUrl?: string) => ({
+      hostIdentityUrn: `urn:li:fsd_profile:${id}`,
+      participantType: { member: { firstName: { text: first }, lastName: { text: last }, ...(profileUrl ? { profileUrl } : {}) } },
+    });
+    const self = participant("synthetic-self", "Self", "Member");
+    const alex = participant("ACoAASyntheticPeer", "Alex", "Example", "https://www.linkedin.com/in/alex-example-synthetic");
+    // A member-id profile URL names no slug; the member id alone identifies Sam.
+    const sam = participant("ACoAASyntheticSam", "Sam", "Sample", "https://www.linkedin.com/in/ACoAASyntheticSam");
+    const DM_SAM = `urn:li:msg_conversation:(${SELF},2-synthetic-dm-sam==)`;
+    const UNKNOWN = `urn:li:msg_conversation:(${SELF},2-synthetic-unknown==)`;
+    const reply = {
+      entityUrn: `urn:li:msg_message:(${SELF},2-synthetic-reply)`,
+      deliveredAt: 1700000000200,
+      body: { text: "Yes, here." },
+      sender: self,
+    };
+    const conversations: Array<Record<string, any>> = [
+      { entityUrn: GROUP, groupChat: true, conversationParticipants: [self, alex, sam], lastActivityAt: 1700000000400 },
+      { entityUrn: DM, groupChat: false, conversationParticipants: [self, alex], lastActivityAt: 1700000000200 },
+      { entityUrn: UNKNOWN, lastActivityAt: 1700000000150 },
+      { entityUrn: DM_SAM, groupChat: false, conversationParticipants: [self, sam], lastActivityAt: 1700000000100 },
+    ];
+    const messages: Record<string, any[]> = {
+      [DM]: [
+        reply,
+        INBOUND,
+        { ...INBOUND, entityUrn: `urn:li:msg_message:(${SELF},2-synthetic-system)`, messageBodyRenderFormat: "SYSTEM", sender: alex },
+      ],
+      [DM_SAM]: [{ entityUrn: `urn:li:msg_message:(${SELF},2-synthetic-sam)`, deliveredAt: 1700000000100, body: { text: "Hello" }, sender: sam }],
+      [GROUP]: [{ ...INBOUND, entityUrn: `urn:li:msg_message:(${SELF},2-synthetic-group-msg)` }],
+      [UNKNOWN]: [{ ...INBOUND, entityUrn: `urn:li:msg_message:(${SELF},2-synthetic-unknown-msg)` }],
+    };
+    const { dom, calls, posts } = messenger({ conversations, messages });
+    const browser = { dispatch: async (op: string, input: any) => op === "navigate" ? { tab_id: 42 } : { value: await dom.window.eval(input.expression) } };
+    const stored = new Map<string, any>();
+    let checkpoint: any = null;
+    const sync = async () => {
+      const committed: any[] = [];
+      const result = await new LinkedInConnector().sync({
+        feedKey: "direct_messages",
+        browser,
+        sessionState: { account_id: "urn:li:fs_miniProfile:synthetic-self" },
+        checkpoint,
+        config: {},
+        credentials: null,
+        entityIds: [],
+        commit: async (events: any[], next: any) => {
+          committed.push(...events);
+          // The platform keys stored events by origin_id.
+          for (const event of events) stored.set(event.origin_id, event);
+          checkpoint = next;
+        },
+      } as any);
+      return { result, committed };
+    };
+    try {
+      const first = await sync();
+      expect(first.result.status).toBe("complete");
+      expect(first.committed.map((event) => event.origin_id)).toEqual([
+        reply.entityUrn,
+        INBOUND.entityUrn,
+        `urn:li:msg_message:(${SELF},2-synthetic-sam)`,
+      ]);
+      // Both sides of the conversation carry the same thread and the other member.
+      expect(first.committed[0]).toMatchObject({
+        origin_type: "message",
+        origin_parent_id: "2-synthetic-dm==",
+        payload_text: "Yes, here.",
+        author_name: "Self Member",
+        source_url: "https://www.linkedin.com/messaging/thread/2-synthetic-dm==/",
+        metadata: {
+          conversation_id: DM,
+          from_me: true,
+          sender_member_id: "synthetic-self",
+          content_kind: "text",
+          counterpart_member_id: "ACoAASyntheticPeer",
+          counterpart_slug: "alex-example-synthetic",
+          counterpart_name: "Alex Example",
+        },
+      });
+      expect(first.committed[1]).toMatchObject({
+        origin_parent_id: "2-synthetic-dm==",
+        author_name: "Alex Example",
+        occurred_at: new Date(INBOUND.deliveredAt),
+        metadata: {
+          from_me: false,
+          sender_member_id: "ACoAASyntheticPeer",
+          sender_slug: "alex-example-synthetic",
+          counterpart_member_id: "ACoAASyntheticPeer",
+          counterpart_slug: "alex-example-synthetic",
+        },
+      });
+      expect(first.committed[2].metadata).toMatchObject({
+        counterpart_member_id: "ACoAASyntheticSam",
+        counterpart_name: "Sam Sample",
+      });
+      expect(first.committed[2].metadata.counterpart_slug).toBeUndefined();
+      // Groups and conversations of unknown group-ness are never read.
+      const read = (conversation: string) => calls.filter((url) => url.includes("messengerMessages.") && url.includes(encodeURIComponent(conversation)));
+      expect(read(GROUP)).toHaveLength(0);
+      expect(read(UNKNOWN)).toHaveLength(0);
+      expect(checkpoint).toEqual({ linkedin_direct_messages: { account: SELF, after: 1700000000400 } });
+
+      // Nothing changed: the next pass reads the conversation list only.
+      const before = calls.length;
+      const quiet = await sync();
+      expect(quiet.committed).toEqual([]);
+      expect(calls.slice(before).some((url) => url.includes("messengerMessages."))).toBe(false);
+
+      // A new message re-reads only its conversation; the page's earlier
+      // messages come back with the same ids and add nothing.
+      const later = { ...INBOUND, entityUrn: `urn:li:msg_message:(${SELF},2-synthetic-later)`, deliveredAt: 1700000000500, body: { text: "Thanks!" } };
+      messages[DM].unshift(later);
+      conversations[1].lastActivityAt = 1700000000500;
+      const next = await sync();
+      expect(new Set(next.committed.map((event) => event.metadata.conversation_id))).toEqual(new Set([DM]));
+      expect([...stored.keys()].sort()).toEqual([
+        INBOUND.entityUrn,
+        later.entityUrn,
+        reply.entityUrn,
+        `urn:li:msg_message:(${SELF},2-synthetic-sam)`,
+      ].sort());
+      expect(checkpoint.linkedin_direct_messages.after).toBe(1700000000500);
+      expect(posts).toHaveLength(0);
+    } finally {
+      dom.window.close();
+    }
+  });
+
+  test("a direct_messages walk pages the inbox one page per run, stops at its page budget, and keeps live_messages read-only", async () => {
+    const peer = (index: number) => ({
+      hostIdentityUrn: `urn:li:fsd_profile:ACoAASyntheticPeer${index}`,
+      participantType: { member: { firstName: { text: "Peer" }, lastName: { text: String(index) } } },
+    });
+    // 120 direct conversations: six of LinkedIn's twenty-per-page pages.
+    const conversations = Array.from({ length: 120 }, (_, index) => ({
+      entityUrn: `urn:li:msg_conversation:(${SELF},2-synthetic-walk-${index}==)`,
+      groupChat: false,
+      conversationParticipants: [peer(index)],
+      lastActivityAt: 1700000001000 - index,
+    }));
+    const { dom, calls } = messenger({ conversations, messages: {} });
+    const browser = { dispatch: async (op: string, input: any) => op === "navigate" ? { tab_id: 42 } : { value: await dom.window.eval(input.expression) } };
+    const connector = new LinkedInConnector();
+    let checkpoint: any = null;
+    const sync = (feedKey = "direct_messages") =>
+      connector.sync({
+        feedKey,
+        browser,
+        sessionState: { account_id: "urn:li:fs_miniProfile:synthetic-self" },
+        checkpoint,
+        config: {},
+        credentials: null,
+        entityIds: [],
+        commit: async (_events: any[], next: any) => {
+          checkpoint = next;
+        },
+      } as any);
+    const listPages = () => calls.filter((url) => url.includes("messengerConversations.")).length;
+    try {
+      const statuses: string[] = [];
+      for (let run = 0; run < 5; run++) {
+        statuses.push((await sync()).status);
+        expect(listPages()).toBe(run + 1);
+      }
+      // Five pages end the walk; the sixth page is never read.
+      expect(statuses).toEqual(["more", "more", "more", "more", "complete"]);
+      expect(checkpoint).toEqual({ linkedin_direct_messages: { account: SELF, after: 1700000001000 } });
+      expect((await sync()).status).toBe("complete");
+      expect(listPages()).toBe(6);
+      await expect(sync("live_messages")).rejects.toThrow("does not support sync");
+      expect(connector.definition.feeds.live_messages).toMatchObject({
+        webhook: { mode: "trigger", events: ["message.created", "source.gap"] },
+      });
+      expect(connector.definition.feeds.live_messages.sync).toBeUndefined();
+    } finally {
+      dom.window.close();
+    }
+  });
 });
 
 const PAGE = "urn:li:fsd_pageMailbox:900001";
