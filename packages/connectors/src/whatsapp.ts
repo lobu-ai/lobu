@@ -3,12 +3,14 @@ import {
 	IntegrationConnector,
 } from "@lobu/connector-sdk";
 import { CHAT_AUTOMATION_EVENTS } from "./chat-automation-events.js";
+import { CHAT_TRANSPORT_ACTIONS } from "./chat-transport-actions.js";
 
 export default class WhatsAppConnector extends IntegrationConnector {
 	readonly definition: ConnectorDefinition = {
 		key: "whatsapp",
 		kind: "integration",
 		automationEvents: CHAT_AUTOMATION_EVENTS,
+		actions: CHAT_TRANSPORT_ACTIONS,
 		name: "WhatsApp Cloud",
 		description: "Connect a WhatsApp Cloud API phone number to Lobu.",
 		version: "1.0.0",

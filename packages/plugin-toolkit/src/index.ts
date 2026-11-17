@@ -148,11 +148,12 @@ export function withErrorHandling<T extends ToolResult = TextResult>(
 
 export async function parseErrorBody(
   response: Response
-): Promise<{ error?: string }> {
+): Promise<{ error?: string; code?: string }> {
   return response
     .json()
     .catch(() => ({ error: response.statusText })) as Promise<{
     error?: string;
+    code?: string;
   }>;
 }
 
@@ -166,7 +167,12 @@ export async function gatewayFetch<T>(
     timeoutMs?: number;
   } = {},
   errorPrefix: string
-): Promise<{ data?: T; error?: TextResult }> {
+): Promise<{
+  data?: T;
+  error?: TextResult;
+  errorCode?: string;
+  errorMessage?: string;
+}> {
   let response: Response;
   try {
     response = await createGatewayClient({
@@ -188,7 +194,13 @@ export async function gatewayFetch<T>(
   if (!response.ok) {
     const body = await parseErrorBody(response);
     logger.error(`${errorPrefix}: ${response.status}`, body);
-    return { error: textResult(`Error: ${body.error || errorPrefix}`) };
+    return {
+      error: textResult(`Error: ${body.error || errorPrefix}`),
+      // The gateway's typed refusal code, for callers that answer one
+      // differently from a failure.
+      ...(typeof body.code === "string" ? { errorCode: body.code } : {}),
+      ...(typeof body.error === "string" ? { errorMessage: body.error } : {}),
+    };
   }
   return { data: (await response.json()) as T };
 }

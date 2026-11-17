@@ -42,6 +42,10 @@ interface BoundChannelRow {
   channel_id: string;
   team_id: string | null;
   created_at: Date;
+  /** Stored `connections.id` of the posting connection. */
+  connection_db_id: number | string;
+  /** Served by another org's hosted-preview connection (branch B). */
+  cross_org: boolean;
 }
 
 export async function resolveBoundChannelRows(
@@ -82,14 +86,15 @@ export async function resolveBoundChannelRows(
   // settings/metadata → `config.{settings,chatMetadata}`, teamId →
   // `external_tenant_id`. Chat rows carry `credential_mode IS NOT NULL`.
   return (await sql`
-    SELECT id, platform, channel_id, team_id, created_at FROM (
+    SELECT id, platform, channel_id, team_id, created_at, connection_db_id, cross_org FROM (
       SELECT DISTINCT ON (id, platform, channel_id)
-        id, platform, channel_id, team_id, created_at
+        id, platform, channel_id, team_id, created_at, connection_db_id, cross_org
       FROM (
         -- (A) the org's own connections. connection_id is the sole routing key.
         SELECT
           b.runtime_connection_id AS id,
-          b.platform, b.channel_id, b.team_id, b.created_at
+          b.platform, b.channel_id, b.team_id, b.created_at,
+          b.connection_id AS connection_db_id, false AS cross_org
         FROM automation_message_subscriptions b
         WHERE b.connection_organization_id = ${organizationId}
           AND b.organization_id = ${organizationId}
@@ -107,7 +112,9 @@ export async function resolveBoundChannelRows(
         -- the same workspace as the binding.
         SELECT
           b.runtime_connection_id AS id,
-          b.platform, b.channel_id, b.team_id, b.created_at
+          b.platform, b.channel_id, b.team_id, b.created_at,
+          b.connection_id AS connection_db_id,
+          b.connection_organization_id IS DISTINCT FROM ${organizationId} AS cross_org
         FROM automation_message_subscriptions b
         WHERE b.organization_id = ${organizationId}
           AND b.connection_status = 'active'

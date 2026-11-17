@@ -32,6 +32,14 @@ export interface AddressableTarget {
   platform: string;
   /** Chat SDK connection that owns the post (preview conn for cross-org). */
   connectionId: string;
+  /** Stored `connections.id` of that connection. */
+  connectionDbId: number;
+  /**
+   * Served by another org's hosted-preview connection. Such a binding may carry
+   * a reply, never a post elsewhere: the operation run that gates one belongs
+   * to the connection's org, not the agent's.
+   */
+  crossOrg: boolean;
   /** Platform-native (unprefixed) channel id. */
   channelId: string;
   /** `${platform}:${channelId}` for postMessageToChannel. */
@@ -115,6 +123,8 @@ export async function resolveAddressableTargets(
       kind: "channel" as const,
       platform: row.platform,
       connectionId: row.id,
+      connectionDbId: Number(row.connection_db_id),
+      crossOrg: row.cross_org === true,
       channelId,
       channelKey: `${row.platform}:${channelId}`,
       ...(row.team_id ? { teamId: row.team_id } : {}),

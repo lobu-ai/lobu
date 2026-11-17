@@ -148,7 +148,7 @@ export async function sendMessage(
         "Error: target (a conversation/thread handle) and text are required."
       );
     }
-    const { data, error } = await gatewayFetch<{
+    const { data, error, errorCode, errorMessage } = await gatewayFetch<{
       messageId: string | null;
       thread?: string;
       deliveredInBand?: boolean;
@@ -158,6 +158,11 @@ export async function sendMessage(
       { method: "POST", body: JSON.stringify(args) },
       "Failed to send message"
     );
+    // A send outside this conversation waits for a person to approve it. That
+    // is an outcome, not a failure: retrying would only ask again.
+    if (errorCode === "PENDING_APPROVAL" && errorMessage) {
+      return textResult(errorMessage);
+    }
     if (error) return error;
     const threadNote = data!.thread
       ? ` To reply in this message's thread later, send to target="${data!.thread}".`

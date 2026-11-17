@@ -500,25 +500,36 @@ function getLocalActionOperations(
 	// supported so nothing regresses; only an explicit `false` marks the op
 	// unsupported (#2033 item 2).
 	const executeSupported = supportsExecute !== false;
-	return Object.entries(actionsSchema).map(([key, def]) => ({
-		connector_key: connectorKey,
-		connector_name: connectorName,
-		operation_key: key,
-		name: def.name ?? humanizeOperationKey(key),
-		description: def.description,
-		kind: getLocalActionKind(def),
-		backend: "local_action",
-		required_scopes: normalizeRequiredScopes(def.requiredScopes),
-		annotations: normalizeAnnotations(def.annotations),
-		input_schema: def.input_schema ?? def.inputSchema,
-		output_schema: def.output_schema ?? def.outputSchema,
-		// Verification runs in the gateway; ordinary actions still need execute().
-		supports_execute: executeSupported || (hasBrowser && key === BROWSER_VERIFY_OPERATION),
-		backend_config: {
+	return Object.entries(actionsSchema).map(([key, def]): OperationDescriptor => {
+		const common = {
+			connector_key: connectorKey,
+			connector_name: connectorName,
+			operation_key: key,
+			name: def.name ?? humanizeOperationKey(key),
+			description: def.description,
+			kind: getLocalActionKind(def),
+			required_scopes: normalizeRequiredScopes(def.requiredScopes),
+			annotations: normalizeAnnotations(def.annotations),
+			input_schema: def.input_schema ?? def.inputSchema,
+			output_schema: def.output_schema ?? def.outputSchema,
+		};
+		// The chat transport delivers it; only an agent's send_message runs it.
+		if (def.delivery === "chat_transport") {
+			return {
+				...common,
+				backend: "chat_transport",
+				supports_execute: false,
+				backend_config: { backend: "chat_transport", actionKey: key },
+			};
+		}
+		return {
+			...common,
 			backend: "local_action",
-			actionKey: key,
-		},
-	}));
+			// Verification runs in the gateway; ordinary actions still need execute().
+			supports_execute: executeSupported || (hasBrowser && key === BROWSER_VERIFY_OPERATION),
+			backend_config: { backend: "local_action", actionKey: key },
+		};
+	});
 }
 
 function dedupeOperations(
@@ -526,6 +537,7 @@ function dedupeOperations(
 ): OperationDescriptor[] {
 	const priority: Record<OperationDescriptor["backend"], number> = {
 		local_action: 0,
+		chat_transport: 0,
 		mcp_tool: 1,
 		http_operation: 2,
 	};
@@ -750,9 +762,10 @@ async function withPinnedDeviceOperations(
       ))
   `;
 	const nativeKeys = new Set(rows.filter((row) => row.manifest !== null).map((row) => row.connector_key));
-	const retained = operations.filter((op) => op.backend !== "local_action" || !nativeKeys.has(op.connector_key));
+	const declared = (op: OperationDescriptor) => op.backend === "local_action" || op.backend === "chat_transport";
+	const retained = operations.filter((op) => !declared(op) || !nativeKeys.has(op.connector_key));
 	for (const key of nativeKeys) {
-		const base = operations.filter((op) => op.connector_key === key && op.backend === "local_action");
+		const base = operations.filter((op) => op.connector_key === key && declared(op));
 		const candidates: OperationDescriptor[] = [];
 		for (const row of rows.filter((target) => target.connector_key === key)) {
 			const local = row.manifest
@@ -776,7 +789,7 @@ export async function listOperations(params: {
 	connectionId?: number;
 	entityId?: number;
 	kind?: "read" | "write";
-	backend?: "local_action" | "mcp_tool" | "http_operation";
+	backend?: OperationDescriptor["backend"];
 	includeInputSchema?: boolean;
 	includeOutputSchema?: boolean;
 	limit?: number;
@@ -948,6 +961,7 @@ type OperationsSummary = {
 	reads: number;
 	writes: number;
 	local_action: number;
+	chat_transport: number;
 	mcp_tool: number;
 	http_operation: number;
 };
@@ -957,6 +971,7 @@ export const EMPTY_SUMMARY: OperationsSummary = {
 	reads: 0,
 	writes: 0,
 	local_action: 0,
+	chat_transport: 0,
 	mcp_tool: 0,
 	http_operation: 0,
 };

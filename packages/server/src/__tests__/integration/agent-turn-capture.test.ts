@@ -117,7 +117,7 @@ describe('native capture over HTTP and Postgres', () => {
       }),
       buildCredentialPlaceholder: (_agentId: string, context: { workerToken: string }) => context.workerToken,
     };
-    const message = { userId: 'U0CAPTURE', conversationId: 'capture-conversation', messageId: 'capture-message', channelId: 'C_CAPTURE',
+    const message = { userId: 'U0CAPTURE', conversationId: 'slack:C_CAPTURE', messageId: 'capture-message', channelId: 'C_CAPTURE',
       agentId: AGENT, organizationId: org.id, platform: 'slack', messageText: 'Capture tool attempts',
       // This suite's baseline `token` must be a CAPTURE credential, so the run
       // asks for capture the only way that works: `platformMetadata`, which is
@@ -163,7 +163,7 @@ describe('native capture over HTTP and Postgres', () => {
       ['/internal/conversations/send', { target, text: 'synthetic message' }, 'conversations.send'],
       ['/internal/conversations/present-event', { eventId: 123 }, 'conversations.present-event'],
       ['/internal/conversations/schedule-followup', { runAt: new Date(Date.now() + 60_000).toISOString(), prompt: 'synthetic followup', idempotencyKey: 'capture-followup' }, 'conversations.schedule-followup'],
-      ...['react', 'edit', 'delete'].map((action): [string, unknown, string] => [`/internal/conversations/${action}`, { thread: target, message: 'synthetic-message', emoji: 'check', text: 'synthetic edit' }, `conversations.${action}`]),
+      ...['react', 'edit', 'delete'].map((action): [string, unknown, string] => [`/internal/conversations/${action}`, { thread: target, message: 'capture-message', emoji: 'check', text: 'synthetic edit' }, `conversations.${action}`]),
     ];
     for (const [suffix, field, action] of [['upload', 'file', 'files.upload'], ['upload-batch', 'files', 'files.upload_batch']]) {
       const form = new FormData(); form.append(field, new File(['synthetic'], 'capture.txt'));

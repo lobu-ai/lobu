@@ -71,13 +71,25 @@ describe("bundled connector lifecycle matrix", () => {
 
 	it("keeps every bundled action connector in the executable local-action matrix", async () => {
 		const definitions = await listCatalogConnectorDefinitions();
+		const isChatTransport = (raw: unknown) =>
+			(raw as { delivery?: unknown }).delivery === "chat_transport";
 		const actionCounts = Object.fromEntries(
 			definitions
-				.filter((definition) => definition.actions_schema)
 				.map((definition) => [
 					definition.key,
-					Object.keys(definition.actions_schema ?? {}).length,
-				]),
+					Object.values(definition.actions_schema ?? {}).filter((raw) => !isChatTransport(raw)).length,
+				] as const)
+				.filter(([, count]) => count > 0),
+		);
+		// Chat platforms the gateway's chat transport delivers for: their one
+		// action is the agent's out-of-conversation send_message.
+		const chatTransport = definitions
+			.filter((definition) => Object.values(definition.actions_schema ?? {}).some(isChatTransport))
+			.map((definition) => [definition.key, Object.keys(definition.actions_schema ?? {})]);
+		expect(Object.fromEntries(chatTransport)).toEqual(
+			Object.fromEntries(
+				["discord", "gchat", "slack", "teams", "telegram", "whatsapp"].map((key) => [key, ["send_message"]]),
+			),
 		);
 		expect(actionCounts).toEqual({
 			github: 6,
