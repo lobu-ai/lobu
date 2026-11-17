@@ -64,7 +64,7 @@ import { AgentSettingsStore } from '../../gateway/auth/settings/agent-settings-s
 import { createPostgresAgentConfigStore } from '../../lobu/stores/postgres-stores';
 import { buildAgentsNamespace } from '../../sandbox/namespaces/agents';
 import type { ProviderCatalogService } from '../../gateway/auth/provider-catalog';
-import type { McpConfigService } from '../../gateway/auth/mcp/config-service';
+import { McpConfigService } from '../../gateway/auth/mcp/config-service';
 import type { ModelProviderModule } from '../../gateway/modules/module-system';
 import { cleanupTestDatabase, getTestDb } from '../setup/test-db';
 import {
@@ -593,6 +593,119 @@ describe('agent turn producer', () => {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }
   }, 30_000);
+
+  it('captures memory through the real MCP mount and recalls it in a fresh conversation', async () => {
+    await seedSystemEntityTypes();
+    const org = await createTestOrganization();
+    const owner = await createTestUser();
+    await addUserToOrganization(owner.id, org.id, 'owner');
+    await createTestAgent({ organizationId: org.id, agentId: AGENT_ID, ownerUserId: owner.id });
+    const previousDispatcher = process.env.DISPATCHER_URL;
+    const requests: Array<Record<string, any>> = [];
+    const steps: string[] = [];
+    const serverErrors: string[] = [];
+    const configService = new McpConfigService({
+      lobuMemory: { resolveOrgSlug: async (_agentId, organizationId) => {
+        if (!organizationId) return null;
+        const [row] = await getTestDb()`SELECT slug FROM organization WHERE id = ${organizationId}`;
+        return row?.slug ?? null;
+      } },
+    });
+    const proxy = new McpProxy(configService, { isReadOnlyLobuTool: isAuthorizationReadOnlyToolName });
+    const app = new Hono();
+    app.onError((error, c) => { serverErrors.push(String(error)); return c.json({ error: String(error) }, 500); });
+    app.use('/lobu/mcp/*', async (c, next) => {
+      const name = c.req.path.split('/').at(-1);
+      if (name === 'search_memory' || name === 'save_memory') steps.push(name);
+      await next();
+    });
+    app.route('/lobu/mcp', proxy.getApp());
+    // Only inference is scripted. Discovery, authorization, save, search and
+    // worker lifecycle requests reach the actual gateway and test Postgres.
+    app.post('/lobu/api/proxy/compatible/*', async (c) => {
+      requests.push(await c.req.json());
+      steps.push('provider');
+      return c.body(`data: ${JSON.stringify({
+        id: 'synthetic-memory-answer', object: 'chat.completion.chunk', created: 1, model: 'compatible-model',
+        choices: [{ index: 0, delta: { role: 'assistant', content: 'Acknowledged.' }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+      })}\n\ndata: [DONE]\n\n`, 200, { 'content-type': 'text/event-stream' });
+    });
+    app.post('*', async (c) => {
+      const response = await post(c.req.path, {
+        rawBody: await c.req.text(),
+        headers: { ...c.req.header(), 'accept-encoding': 'identity' },
+        env: { WORKER_API_TOKEN: 'synthetic-memory-fleet', EMBEDDINGS_SERVICE_URL: undefined },
+      });
+      return new Response(await response.text(), { status: response.status, headers: response.headers });
+    });
+    const server = serve({ fetch: app.fetch, port: 0, hostname: '127.0.0.1' });
+    if (!server.listening) await new Promise<void>((resolve) => server.once('listening', resolve));
+    try {
+      const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      process.env.DISPATCHER_URL = `${origin}/lobu`;
+      const provider = new ApiKeyProviderModule({
+        providerId: 'compatible', providerDisplayName: 'Synthetic provider', providerIconUrl: '',
+        envVarName: 'SYNTHETIC_PROVIDER_API_KEY', sdkCompat: 'openai',
+        upstreamBaseUrl: 'https://provider.example.test/v1',
+      });
+      const client = new WorkerClient({
+        apiUrl: origin, workerId: 'synthetic-memory-worker', authToken: 'synthetic-memory-fleet',
+        capabilities: { agent_turn: true },
+      });
+      const firstMessage = 'The Cerulean sentinel deadline is Tuesday.';
+      const prompts = [firstMessage, 'Cerulean sentinel deadline'];
+      for (const [index, prompt] of prompts.entries()) {
+        const conversationId = `synthetic-memory-conversation-${index}`;
+        expect(await enqueueMessage({
+          ...messageFor(org.id), userId: owner.id, messageId: `synthetic-memory-message-${index}`,
+          conversationId, messageText: prompt, platformMetadata: { source: 'internal' },
+          agentOptions: { model: 'compatible/compatible-model' },
+        }, {
+          agentSettings: settingsStore, gatewayUrl: `${origin}/lobu`,
+          catalog: catalogFor(provider), mcp: { configService, proxy },
+        })).toBeUndefined();
+        const run = (await agentTurnRuns()).at(-1)!;
+        const job = await client.poll();
+        expect(job.run_id).toBe(Number(run.id));
+        // Nothing from the first native session is supplied to the next one.
+        expect((job.payload as { turn: { session_jsonl: string } }).turn.session_jsonl).toBe('');
+        const result = await executeRun(client, job, {}, {
+          executor: new IsolateExecutor({ allowedDomains: ['127.0.0.1'], timeoutMs: 20_000 }),
+          timeoutMs: 20_000,
+        });
+        expect(result.error).toBeUndefined();
+        expect(serverErrors).toEqual([]);
+        expect((await runRow(Number(run.id))).status).toBe('completed');
+        const captures = await getTestDb()`
+          SELECT id, payload_text, metadata FROM events
+          WHERE organization_id = ${org.id} AND semantic_type = 'observation'
+            AND payload_data->>'conversation_id' = ${conversationId}
+        `;
+        expect(captures).toHaveLength(1);
+        expect(captures[0].metadata.agent_id).toBe(AGENT_ID);
+        expect(captures[0].payload_text).toContain(prompt);
+        expect(captures[0].payload_text).not.toContain('<lobu-memory>');
+        if (index === 1) {
+          const remembered = JSON.stringify(requests[1].messages);
+          expect(requests[1].messages.filter((message: { role: string }) => message.role === 'user')).toHaveLength(1);
+          expect(remembered).toContain('<lobu-memory>');
+          expect(remembered).toContain(firstMessage);
+          expect(captures[0].payload_text).not.toContain('Tuesday');
+          const snapshot = (await runRow(Number(run.id))).action_input.result?.session_jsonl;
+          expect(snapshot).toEqual(expect.any(String));
+          expect(snapshot).not.toContain('Tuesday');
+        }
+      }
+      expect(requests).toHaveLength(2);
+      expect(steps).toEqual(['search_memory', 'provider', 'save_memory', 'search_memory', 'provider', 'save_memory']);
+    } finally {
+      if (previousDispatcher === undefined) delete process.env.DISPATCHER_URL;
+      else process.env.DISPATCHER_URL = previousDispatcher;
+      server.closeAllConnections();
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  }, 60_000);
 
   it('delivers an empty provider response as a Slack error through the isolate and durable outbox', async () => {
     const serverErrors: string[] = [];
@@ -1224,6 +1337,12 @@ describe('agent turn producer', () => {
   it('hands the turn its tools, its one credential being a worker token both gateway routes accept', async () => {
     const org = await createTestOrganization();
     const fixture = mcpFixture();
+    fixture.mcp.configService = new McpConfigService({
+      lobuMemory: {
+        resolveOrgSlug: async (_agentId, organizationId) =>
+          organizationId === org.id ? org.slug : null,
+      },
+    });
     const message = messageFor(org.id);
     message.platformMetadata = { connectionId: 'conn-turn' };
     await enqueueMessage(message, {
@@ -1235,10 +1354,16 @@ describe('agent turn producer', () => {
 
     const [run] = await agentTurnRuns();
     const envelope = run.action_input as {
-      turn: { tools?: Record<string, unknown>; system_prompt: string };
+      turn: { tools?: Record<string, unknown>; system_prompt: string; memory?: { mcp_id: string; agent_id: string } };
       credential: string;
     };
     expect(Value.Check(AgentTurnPollPayloadSchema, { turn: envelope.turn })).toBe(true);
+    // Derive the mount through the real config service so a producer-side
+    // identifier mismatch cannot silently disable automatic recall/capture.
+    expect(envelope.turn.memory).toEqual({ mcp_id: 'lobu-memory', agent_id: AGENT_ID });
+    expect(await fixture.mcp.configService.getHttpServer(
+      envelope.turn.memory!.mcp_id, AGENT_ID, org.id,
+    )).toMatchObject({ id: 'lobu-memory', internal: true });
 
     // The credential is a worker token minted for THIS agent, user, org and
     // conversation: the secret proxy binds it to the agent in the proxy URL and
@@ -1773,14 +1898,15 @@ describe('agent turn producer', () => {
       gatewayUrl: GATEWAY_URL,
     };
     let produced = 0;
-    const standardToolsOnly = async () => {
+    const standardToolsOnly = async (memory?: { mcp_id: string; agent_id: string }) => {
       const rows = await agentTurnRuns();
       produced += 1;
       expect(rows).toHaveLength(produced);
       const turn = rows[produced - 1].action_input.turn as { tools?: { definitions: unknown[]; builtin?: string[] } };
       // Workspace tools ship independently of MCP discovery.
-      // No memory server is configured, so recall/capture hooks stay absent.
-      expect((turn as { memory?: unknown }).memory).toBeUndefined();
+      // A configured memory mount survives discovery failure; no mount
+      // leaves hooks absent. Recall/capture call the server independently.
+      expect((turn as { memory?: unknown }).memory).toEqual(memory);
       expect(turn.tools?.definitions).toEqual([]);
       expect(turn.tools?.builtin).toEqual(['bash', 'read', 'write', 'edit', 'grep', 'ls', 'find']);
     };
@@ -1800,7 +1926,7 @@ describe('agent turn producer', () => {
 
     // Discovery failed: the turn still receives the standard tools.
     await enqueueMessage(messageFor(org.id), { ...base, mcp: mcpFixture({ fail: true }).mcp });
-    await standardToolsOnly();
+    await standardToolsOnly({ mcp_id: 'lobu-memory', agent_id: AGENT_ID });
   });
 
   it('uses provider-owned metadata for a model missing from the bundled registry', async () => {
@@ -4923,7 +5049,7 @@ describe('agent turn reaper', () => {
     ['a workspace tool an MCP server also publishes', 'write', 'write'],
   ])('terminalizes a dead turn that already ran %s, as before', async (_kind, tool, alsoPublish) => {
     const workerId = 'fleet-died-after-tool';
-    const runId = await claimedTurnRun(workerId, 'api', { mcp: mcpFixture({ serverId: 'lobu', alsoPublish }).mcp });
+    const runId = await claimedTurnRun(workerId, 'api', { mcp: mcpFixture({ alsoPublish }).mcp });
     const beat = await postAsFleet('/api/workers/heartbeat', {
       run_id: runId, worker_id: workerId,
       turn_tool_events: [{ tool_call_id: 'call-1', name: tool, is_error: false, output: 'ok' }],
@@ -4997,7 +5123,7 @@ describe('agent turn reaper', () => {
     app.post('/lobu/internal/effect', authenticateWorker, (c) => { effects(); return c.json({ ok: true }); });
     app.get('/lobu/internal/read', authenticateWorker, (c) => { effects(); return c.json({ ok: true }); });
     const proxy = new McpProxy({
-      getHttpServer: async (id: string) => ({ id, internal: id === 'lobu', upstreamUrl: 'http://127.0.0.1:9/unreachable' }),
+      getHttpServer: async (id: string) => ({ id, internal: id === 'lobu-memory', upstreamUrl: 'http://127.0.0.1:9/unreachable' }),
     } as never, { isReadOnlyLobuTool: isAuthorizationReadOnlyToolName });
     app.route('/lobu/mcp', proxy.getApp());
     return { app, effects };
@@ -5041,10 +5167,10 @@ describe('agent turn reaper', () => {
   // of an effect, so the reaper tick re-runs the turn and it completes.
   it.each([
     ['a GET read', 'GET', '/lobu/internal/read', 'read_conversation'],
-    ['a read-only Lobu tool', 'POST', '/lobu/mcp/lobu/tools/query_sql', 'query_sql'],
+    ['a read-only Lobu tool', 'POST', '/lobu/mcp/lobu-memory/tools/query_sql', 'query_sql'],
   ] as const)('still re-runs an attempt that only made %s', async (_kind, method, path, tool) => {
     const workerId = 'fleet-read-only';
-    const runId = await claimedTurnRun(workerId, 'api', { mcp: mcpFixture({ serverId: 'lobu' }).mcp });
+    const runId = await claimedTurnRun(workerId, 'api', { mcp: mcpFixture().mcp });
     const credential = await credentialOf(runId);
     const { app } = gatewayRoutes();
     await call(app, method, path, credential);

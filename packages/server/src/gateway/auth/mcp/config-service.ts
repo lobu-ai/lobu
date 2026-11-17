@@ -4,7 +4,7 @@ import { chatTurnAccessOf } from "../../orchestration/chat-turn-actor.js";
 import { getRevokedTokenStore } from "../revoked-token-store.js";
 
 const logger = createLogger("mcp-config-service");
-const LOBU_MEMORY_MCP_ID = "lobu-memory";
+export const LOBU_MEMORY_MCP_ID = "lobu-memory";
 
 interface HttpMcpServerConfig {
   id: string;
