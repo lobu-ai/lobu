@@ -28,11 +28,13 @@ import {
   AVAILABLE_PAT_SCOPES,
   canMintWebSession,
   CONNECTED_APP_PAT_SCOPES,
+  DEFAULT_SCOPES,
   DEFAULT_SCOPES_STRING,
   isTokenDerivedSession,
   TOKEN_DERIVED_SESSION_USER_AGENT,
 } from './oauth/scopes';
 import { PersonalAccessTokenService, recordAccessTokenEvent } from './tokens';
+import { hasRequiredMcpScope } from './tool-access';
 
 const credentialRoutes = new Hono<{ Bindings: Env }>();
 
@@ -174,6 +176,21 @@ function isInteractiveWebSession(c: Context<{ Bindings: Env }>): boolean {
   );
 }
 
+/**
+ * The scopes a non-interactive caller already holds: its bearer token's, or,
+ * for a token-derived web session (which records none), the MCP read/write
+ * access every web session carries.
+ */
+function heldScopes(c: Context<{ Bindings: Env }>): readonly string[] {
+  return c.get('mcpAuthInfo')?.scopes ?? DEFAULT_SCOPES;
+}
+
+function holdsScope(held: readonly string[], scope: string): boolean {
+  if (scope === 'mcp:read') return hasRequiredMcpScope('read', held);
+  if (scope === 'mcp:write') return hasRequiredMcpScope('write', held);
+  return held.includes(scope);
+}
+
 function normalizePatScope(scope: unknown): string | undefined {
   if (scope === undefined || scope === null || scope === '') return DEFAULT_PAT_SCOPE;
   if (typeof scope !== 'string') {
@@ -224,13 +241,24 @@ credentialRoutes.post('/:orgSlug/tokens', mcpAuth, async (c) => {
   try {
     const scope = normalizePatScope(body.scope);
     if (!isInteractiveWebSession(c)) {
-      const sessionOnly = scope
-        ?.split(' ')
-        .find((s) => !(CONNECTED_APP_PAT_SCOPES as readonly string[]).includes(s));
+      const requested = scope?.split(' ') ?? [];
+      const sessionOnly = requested.find(
+        (s) => !(CONNECTED_APP_PAT_SCOPES as readonly string[]).includes(s)
+      );
       if (sessionOnly) {
         return c.json(
           {
             error: `Granting ${sessionOnly} requires an owner/admin web session from a browser sign-in; connected apps and tokens can mint only ${CONNECTED_APP_PAT_SCOPES.join(', ')}`,
+          },
+          403
+        );
+      }
+      const held = heldScopes(c);
+      const wider = requested.find((s) => !holdsScope(held, s));
+      if (wider) {
+        return c.json(
+          {
+            error: `Granting ${wider} requires a caller that already holds it; a minted token cannot be wider than the token minting it`,
           },
           403
         );

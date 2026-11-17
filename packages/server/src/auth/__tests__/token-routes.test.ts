@@ -101,8 +101,9 @@ describe('org-scoped token creation route', () => {
     const user = await createTestUser({ email: 'token-conn@test.example.com' });
     await addUserToOrganization(user.id, org.id, 'owner');
     const client = await createTestOAuthClient();
+    // `lobu login` requests connections:token, and a mint never exceeds the minter.
     const { token: oauthToken } = await createTestAccessToken(user.id, org.id, client.client_id, {
-      scope: 'mcp:read mcp:write mcp:admin profile:read',
+      scope: 'mcp:read mcp:write mcp:admin profile:read connections:token',
     });
 
     const response = await post(`/api/${org.slug}/tokens`, {

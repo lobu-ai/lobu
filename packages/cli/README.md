@@ -251,7 +251,7 @@ Most cloud subcommands accept `-c` / `--context <name>`; resource commands also 
 
 PATs (`owl_pat_*`) authenticate CLI and CI calls, but they are narrower than an interactive login:
 
-- **A PAT cannot mint further tokens.** `lobu token create` (`POST /api/<org>/tokens`) rejects PAT-authenticated calls; minting requires a web session or an OAuth login carrying `mcp:admin`, plus org owner/admin role.
+- **A PAT cannot mint further tokens.** `lobu token create` (`POST /api/<org>/tokens`) rejects PAT-authenticated calls; minting requires a web session or an OAuth login carrying `mcp:admin`, plus org owner/admin role. An OAuth login mints only `mcp:read`, `mcp:write`, `profile:read`, and `connections:token`, and only scopes it already holds; `mcp:admin` and the policy/manual-edit scopes need a browser sign-in.
 - **`lobu org list` and `lobu whoami` show nothing under a default PAT.** Both read `/oauth/userinfo`, which requires the `profile:read` scope, and `token create` only offers `mcp:*` scopes. Pass `--scope "mcp:read mcp:write profile:read"` at mint time if a token needs identity/org discovery.
 - **Mutations require `mcp:admin`.** Agent CRUD, `agent config patch`, provider and sandbox changes, and `lobu apply` all require a token with the `mcp:admin` scope (and owner/admin membership in the org); a default `mcp:read mcp:write` PAT is rejected with a 403 naming the missing scope. Read-only routes accept `mcp:read`.
 
