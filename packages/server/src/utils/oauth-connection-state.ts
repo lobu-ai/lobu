@@ -9,6 +9,7 @@ import {
   getFeedRequiredScopes,
   hasAllScopes,
   normalizeScopeList,
+  withOfflineAccessEvidence,
 } from '../auth/oauth/scopes';
 import {
   feedOperations,
@@ -164,13 +165,17 @@ export async function syncOAuthConnectionsForAuthProfile(
   // The account's current grant. Read again under the profile lock below,
   // since a consent may replace it after this first read.
   const readGrant = async (db: DbClient, accountId: string) => {
-    const [accountRow] = await db<{ scope: string | null; accountId: string }>`
-      SELECT scope, "accountId"
+    const [accountRow] = await db<{ scope: string | null; accountId: string; hasRefreshToken: boolean }>`
+      SELECT scope, "accountId", "refreshToken" IS NOT NULL AS "hasRefreshToken"
       FROM "account"
       WHERE id = ${accountId}
       LIMIT 1
     `;
-    const accountGrantedScopes = normalizeScopeList(accountRow?.scope);
+    const accountGrantedScopes = withOfflineAccessEvidence(
+      normalizeScopeList(accountRow?.scope),
+      accountRow?.hasRefreshToken === true,
+      declaredScopes
+    );
     // Shared social-login accounts need per-connector attribution. Isolated
     // connector accounts keep their own grants, including scopes removed from
     // the manifest. Reconnect separately filters which scopes to request again.
