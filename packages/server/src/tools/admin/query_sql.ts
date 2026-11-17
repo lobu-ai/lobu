@@ -12,6 +12,7 @@ import { parseCollectionSelection } from '@lobu/core/contracts/tools/collection-
 import { attributeFilterSql } from '../../utils/attribute-filters';
 import { type AuthzScope, authzScopeFromToolContext } from '../../authz/scope';
 import { getDb, pgTextArray } from '../../db/client';
+import { entityReadRestrictions } from '../../authz/entity-read-policy';
 import type { Env } from '../../index';
 import { resolveWindowQueryContext } from '../../automations/window-read-context';
 import { pushdownFailureError, runConnectorQuery } from '../../lib/connector-pushdown';
@@ -496,6 +497,7 @@ export async function querySqlImpl(
   let params: unknown[];
   let scope: AuthzScope;
   let tableRefs: string[];
+  const readRestrictions = await entityReadRestrictions(getDb(), ctx);
   try {
     const scoped = validateAndScopeQuery(baseSql, targetOrgId, {
       window,
@@ -512,6 +514,8 @@ export async function querySqlImpl(
       // $member entity rows carry PII reserved by the manage_entity read
       // policy; ordinary members must not bypass it via raw SQL.
       excludeMemberEntities: !canReadWorkspaceIdentity(ctx),
+      // Records an agent or Automation may not read stay out of raw SQL too.
+      entityReadRestrictions: readRestrictions,
     });
     scopedSql = scoped.sql;
     params = scoped.params;

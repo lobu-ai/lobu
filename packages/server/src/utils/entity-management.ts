@@ -2532,6 +2532,7 @@ export async function listEntities(
 					(etRows[0]?.metrics_config ?? null) as EntityMetrics | null,
 					filters.segment,
 					ctx,
+					readRestrictions,
 				),
 				filters.segment,
 				ctx,
@@ -2854,6 +2855,7 @@ function compileEntitySegmentFilter(
 	metrics: EntityMetrics | null,
 	segmentName: string,
 	ctx: ToolContext,
+	readRestrictions: EntityReadRestrictions,
 ): { sql: string; params: unknown[]; scope: AuthzScope } {
 	const segment = metrics?.segments?.[segmentName];
 	if (entityTypeId === null || !segment) {
@@ -2881,6 +2883,7 @@ function compileEntitySegmentFilter(
 				// Match metric SQL: the outer type gate does not authorize nested
 				// predicates to read protected member metadata.
 				excludeMemberEntities: !canReadWorkspaceIdentity(ctx),
+				entityReadRestrictions: readRestrictions,
 			},
 		);
 	} catch (error) {

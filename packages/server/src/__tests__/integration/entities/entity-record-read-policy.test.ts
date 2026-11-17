@@ -6,6 +6,11 @@ import { upsertEntityApprovalPolicy } from '../../../authz/entity-policy';
 import { countEntitiesOfType, getEntityCountsByTypes } from '../../../utils/entity-management';
 import type { UnifiedSearchResult } from '../../../tools/search';
 import * as entityIdentity from '../../../utils/entity-identity';
+import { querySql } from '../../../tools/admin/query_sql';
+import { buildClientSDK } from '../../../sandbox/client-sdk';
+import { metricSeries } from '../../../tools/admin/metric_series';
+import type { ToolContext } from '../../../tools/registry';
+import type { Env } from '../../../index';
 
 async function fixture() {
   const workspace = await TestWorkspace.create({ name: 'Record read policy' });
@@ -212,5 +217,64 @@ describe('per-record entity read envelope', () => {
     await expect(h.agent.entities.get({ entity_id: id })).rejects.toThrow(/not found|denies reading/i);
     await h.deny(id, { effects: { read: 'auto' } });
     expect((await h.agent.entities.get({ entity_id: id })).entity.id).toBe(id);
+  });
+  it('applies type and record read blocks to every SQL read path an agent or Automation reaches', async () => {
+    const h = await fixture();
+    await h.human.entity_schema.createType({ slug: 'place', name: 'Place' });
+    await h.human.entity_schema.createRelType({ slug: 'located_at', name: 'Located at' });
+    const blockedAsset = await h.create('Blocked asset');
+    const place = (await createTestEntity({ name: 'Visible place', entity_type: 'place', organization_id: h.workspace.org.id })).id;
+    const deniedPlace = (await createTestEntity({ name: 'Denied place', entity_type: 'place', organization_id: h.workspace.org.id })).id;
+    await h.human.entities.link({ from_entity_id: place, to_entity_id: blockedAsset, relationship_type_slug: 'located_at' });
+    const blockedEvent = await createTestEvent({ organization_id: h.workspace.org.id, entity_id: blockedAsset, content: 'blocked asset history' });
+    const mixedEvent = await createTestEvent({ organization_id: h.workspace.org.id, entity_ids: [place, blockedAsset], content: 'mixed history' });
+    const visibleEvent = await createTestEvent({ organization_id: h.workspace.org.id, entity_id: place, content: 'visible place history' });
+    await upsertEntityApprovalPolicy(h.workspace.org.id, {
+      principalKind: 'agent', principalId: h.principal.agentId, entityTypeSlug: 'asset', effects: { read: 'deny' },
+    });
+    await h.deny(deniedPlace);
+    const created = await h.human.automations.create({ slug: 'sql-read-block', prompt: 'Anything.', managed_agent_id: h.principal.agentId }) as { automation_id: string };
+    const base = {
+      organizationId: h.workspace.org.id, userId: h.workspace.users.owner.id, memberRole: 'owner', agentId: h.principal.agentId,
+      isAuthenticated: true, clientId: null, scopes: ['mcp:read', 'mcp:write'], tokenType: 'oauth', scopedToOrg: true, allowCrossOrg: false,
+    };
+    const callers = {
+      agent: base as unknown as ToolContext,
+      automation: { ...base, actingAutomationId: Number(created.automation_id) } as unknown as ToolContext,
+    };
+    const statements = {
+      entities: 'SELECT id FROM entities ORDER BY id',
+      events: 'SELECT id FROM events ORDER BY id',
+      relationships: 'SELECT id FROM entity_relationships ORDER BY id',
+    };
+    // Every event that links a blocked record (lifecycle and link events included) stays hidden.
+    const orgEvents = (await getTestDb()<Array<{ id: unknown }>>`
+      SELECT id FROM events WHERE organization_id = ${h.workspace.org.id} ORDER BY id`).map(row => Number(row.id));
+    const readableEvents = (await getTestDb()<Array<{ id: unknown }>>`
+      SELECT id FROM events WHERE organization_id = ${h.workspace.org.id}
+        AND NOT (COALESCE(entity_ids, '{}') && ARRAY[${blockedAsset}, ${deniedPlace}]::bigint[])
+      ORDER BY id`).map(row => Number(row.id));
+    expect(readableEvents).toContain(visibleEvent.id);
+    const expected = { entities: [place], events: readableEvents, relationships: [] };
+    const seen: Record<string, number[]> = {};
+    const want: Record<string, number[]> = {};
+    for (const [caller, ctx] of Object.entries(callers)) {
+      const client = buildClientSDK(ctx, {} as Env);
+      for (const [name, sql] of Object.entries(statements)) {
+        const paths = {
+          query_sql: async () => (await querySql({ sql }, {} as Env, ctx) as { rows: Array<{ id: unknown }> }).rows.map(row => Number(row.id)),
+          'client.query': async () => (await client.query(sql) as Array<{ id: unknown }>).map(row => Number(row.id)),
+          metric_series: async () => (await metricSeries({ sql }, {} as Env, ctx)).rows.map(row => Number((row as unknown[])[0])),
+        };
+        for (const [path, run] of Object.entries(paths)) {
+          seen[`${caller} ${path} ${name}`] = await run();
+          want[`${caller} ${path} ${name}`] = expected[name as keyof typeof expected];
+        }
+      }
+    }
+    expect(seen).toEqual(want);
+    const humanEvents = (await querySql({ sql: statements.events }, {} as Env, { ...base, agentId: null } as unknown as ToolContext) as { rows: Array<{ id: unknown }> }).rows.map(row => Number(row.id));
+    expect(humanEvents).toEqual(orgEvents);
+    expect(humanEvents).toEqual(expect.arrayContaining([blockedEvent.id, mixedEvent.id]));
   });
 });

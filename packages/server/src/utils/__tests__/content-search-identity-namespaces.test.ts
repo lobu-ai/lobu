@@ -31,7 +31,7 @@ describe('content-search identity namespace registry bridge', () => {
 
   it('shares one identity traversal across the direct and namespace branches', () => {
     const sql = entityLinkMatchSql('$1::bigint', 'f');
-    expect(sql.match(/FROM entities seed/g)).toHaveLength(1);
+    expect(sql.match(/FROM public\.entities seed/g)).toHaveLength(1);
     expect(sql).toContain('e2.entity_ids && ARRAY(SELECT id FROM identity_members)');
     expect(sql.match(/ei.entity_id IN \(SELECT id FROM identity_members\)/g))
       .toHaveLength(STANDARD_IDENTITY_NAMESPACES.length);

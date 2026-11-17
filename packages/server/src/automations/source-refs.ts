@@ -43,6 +43,8 @@ async function validateCustomSqlSource(
     {
       throwOnError: true,
       validateEntitySlugs: true,
+      // LIMIT 0 plans and type-checks the source; no row reaches the author.
+      entityReadRestrictions: [],
       wrapQuery: (scopedSql) => `SELECT * FROM (${scopedSql}) AS _validate LIMIT 0`,
     }
   );

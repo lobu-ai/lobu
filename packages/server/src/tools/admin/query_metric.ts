@@ -16,6 +16,8 @@ import { runMetric } from '../../metrics/run-metric';
 import { canReadWorkspaceIdentity, isAdminOrOwnerRole } from '../access-control';
 import type { ToolContext } from '../registry';
 import { authzScopeFromToolContext } from '../../authz/scope';
+import { entityReadRestrictions } from '../../authz/entity-read-policy';
+import { getDb } from '../../db/client';
 import { withValidatedArgs } from '../validate-args';
 
 export const QueryMetricSchema = Type.Object({
@@ -48,6 +50,7 @@ async function queryMetricImpl(
   }
   const rows = await runMetric({
     organizationId: ctx.organizationId,
+    entityReadRestrictions: await entityReadRestrictions(getDb(), ctx),
     entityType: args.entity_type,
     measure: args.measure,
     by: args.by,
