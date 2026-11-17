@@ -63,6 +63,7 @@ import {
   runAction as runLinkedInReadAction,
   searchLinkedInCompanies,
   searchLinkedInPeople,
+  withLineBreaks,
 } from "./linkedin-search.js";
 import {
   LINKEDIN_ALLOWED_ORIGINS,
@@ -956,6 +957,7 @@ type SearchPostRow = HomeFeedRow & {
   author_badge?: string;
   body_links?: Array<{ h?: string }>;
   mentions?: Array<{ h?: string; t?: string }>;
+  body_html?: string;
   video?: string;
 };
 
@@ -1020,6 +1022,7 @@ function searchPostCard(
     const name = (mention.t ?? "").replace(/\s+/g, " ").trim();
     if (url && name && !mentions.has(url)) mentions.set(url, { name, url });
   }
+  const bodyLine = lines[timeIndex + 1]?.replace(/\s*…\s*more$/, "");
   const bodyLinks = [
     ...new Set(
       (row.body_links ?? [])
@@ -1036,7 +1039,10 @@ function searchPostCard(
       null,
     verified: /\bVerified\b/.test(badge),
     premium: /\bPremium\b/.test(badge),
-    body: lines[timeIndex + 1]?.replace(/\s*…\s*more$/, ""),
+    body:
+      bodyLine === undefined
+        ? undefined
+        : withLineBreaks(bodyLine, row.body_html),
     reactions: searchActionCount(row.action_reactions),
     comments: searchActionCount(row.action_comments),
     reposts: searchActionCount(row.action_reposts),
@@ -1096,9 +1102,11 @@ async function searchLinkedInPosts(ctx: ActionContext): Promise<ActionResult> {
         ]),
       });
       const url = `https://www.linkedin.com/search/results/content/?${params}`;
+      // Each scroll loads about three more results; stall ends it early
+      // once LinkedIn has no more.
       const baseConfig = myActivityScrapeConfig(
         SEARCH_POSTS_FEED_TYPE,
-        Math.min(20, page * 2)
+        page * 4 + 1
       );
       const { items: rows, loggedIn } = await extensionDomScrape<SearchPostRow>(
         {
@@ -1147,6 +1155,7 @@ async function searchLinkedInPosts(ctx: ActionContext): Promise<ActionResult> {
                   t: { take: "text" },
                 },
               },
+              body_html: { selector: SEARCH_POST_BODY, take: "html" },
               video: {
                 selector: '[aria-label="Video Player"]',
                 take: "attr",
@@ -1162,6 +1171,9 @@ async function searchLinkedInPosts(ctx: ActionContext): Promise<ActionResult> {
             })),
           allowedOrigins: LINKEDIN_ALLOWED_ORIGINS,
           persistent: false,
+          // Results load only while Chrome draws the page; a window behind
+          // others stalled at 3 of 10 posts.
+          focus: true,
         }
       );
       if (!loggedIn) return null;

@@ -161,6 +161,45 @@ function stripMore(text: string): string {
   return text.replace(/\s*…\s*(?:see\s+)?more$/i, "").trim();
 }
 
+// innerHTML escapes only these in text; `&quot;` appears in attributes alone.
+const HTML_TEXT_ENTITIES: Record<string, string> = {
+  amp: "&",
+  lt: "<",
+  gt: ">",
+  nbsp: " ",
+};
+
+/**
+ * The first paragraph with a line break. The scraper's `text` read collapses
+ * every newline to a space; its `html` read keeps the `<br>`s.
+ */
+const MULTILINE_HTML = { selector: "p:has(br)", take: "html" } as const;
+
+/**
+ * `text` with the line breaks of `html` restored. The html only supplies the
+ * formatting: when it is a different element (its text differs), `text` is
+ * returned unchanged.
+ */
+export function withLineBreaks(text: string, html: unknown): string {
+  if (typeof html !== "string" || !text) return text;
+  const multiline = stripMore(
+    html
+      .replace(/<br\s*\/?>/gi, "\n")
+      // A tag, skipping a ">" inside a double-quoted attribute value.
+      .replace(/<(?:[^>"]|"[^"]*")*>/g, "")
+      .replace(
+        /&(amp|lt|gt|nbsp);/g,
+        (_entity, name: string) => HTML_TEXT_ENTITIES[name]
+      )
+      .split("\n")
+      .map(cleanText)
+      .join("\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim()
+  );
+  return cleanText(multiline) === cleanText(text) ? multiline : text;
+}
+
 /** Outbound links render as `linkedin.com/safety/go/?url=<target>`. */
 export function decodeLinkedInRedirect(href: string): string | null {
   let url: URL;
@@ -502,6 +541,7 @@ const PROFILE_CONFIG = {
       take: "objectAll",
       parts: { t: { take: "text" } },
     },
+    multiline_html: MULTILINE_HTML,
   },
 };
 
@@ -520,6 +560,7 @@ const DETAIL_LINES = {
     take: "attr",
     attr: "href",
   },
+  multiline_html: MULTILINE_HTML,
 } as const;
 
 const EDUCATION_CONFIG = {
@@ -599,7 +640,9 @@ function descriptionOf(row: Row): string | null {
     .map(stripMore)
     .join(" ")
     .trim();
-  return nonEmpty(text.slice(0, MAX_DESCRIPTION_CHARS));
+  return nonEmpty(
+    withLineBreaks(text, row.multiline_html).slice(0, MAX_DESCRIPTION_CHARS)
+  );
 }
 
 type GroupHeader = {
@@ -864,7 +907,12 @@ function parseProfileSections(rows: Row[]): Row {
         }
       : null,
     website: website ?? null,
-    about: nonEmpty(stripMore(aboutText).slice(0, MAX_ABOUT_CHARS)),
+    about: nonEmpty(
+      withLineBreaks(stripMore(aboutText), about?.multiline_html).slice(
+        0,
+        MAX_ABOUT_CHARS
+      )
+    ),
   };
 }
 
@@ -1093,6 +1141,7 @@ const COMPANY_ABOUT_CONFIG = {
       take: "objectAll",
       parts: { t: { take: "text" } },
     },
+    multiline_html: MULTILINE_HTML,
   },
 };
 
@@ -1133,6 +1182,7 @@ function parseCompanyAbout(row: Row | undefined): Row {
   const aboutEnd = [highlightsStart, firstFact].filter((i) => i >= 0);
   const about = body
     .slice(0, aboutEnd.length ? Math.min(...aboutEnd) : 1)
+    .map((paragraph) => withLineBreaks(paragraph, row?.multiline_html))
     .join("\n\n")
     .slice(0, MAX_ABOUT_CHARS);
   const highlights =

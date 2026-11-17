@@ -114,6 +114,7 @@ describe('extensionDomScrape', () => {
     ).rejects.toThrow(/cs_scrape returned no result/);
     expect(log[0].input.persistent).toBe(true);
     expect(log[0].input.focus).toBe(true);
+    expect(log[0].input.window_focused).toBe(true);
   });
 
   test('fails loudly when the scrape result reports a different site', async () => {

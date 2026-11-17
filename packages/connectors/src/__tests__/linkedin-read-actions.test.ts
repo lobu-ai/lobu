@@ -7,12 +7,14 @@ import { connectorSdkMock } from "./connector-sdk.mock";
 mock.module("@lobu/connector-sdk", connectorSdkMock);
 
 let LinkedInConnector: any;
+let withLineBreaks: (text: string, html: unknown) => string;
 let genericScrape: (
   config: Record<string, unknown>
 ) => Promise<Record<string, unknown>>;
 
 beforeAll(async () => {
   LinkedInConnector = (await import("../linkedin")).default;
+  withLineBreaks = (await import("../linkedin-search")).withLineBreaks;
   genericScrape = (await import("../../../owletto/apps/chrome/tools.js"))
     .genericScrape;
 });
@@ -58,7 +60,10 @@ async function runAction(
         Object.defineProperty(dom.window.HTMLElement.prototype, "innerText", {
           configurable: true,
           get() {
-            return this.textContent ?? "";
+            // As in a browser, a <br> reads as a newline.
+            const copy = this.cloneNode(true) as HTMLElement;
+            for (const br of copy.querySelectorAll("br")) br.replaceWith("\n");
+            return copy.textContent ?? "";
           },
         });
         dom.window.scrollTo = () => undefined;
@@ -286,7 +291,7 @@ describe("read_profile", () => {
       <section>
         <h2>About</h2>
         <p>About</p>
-        <p>A synthetic summary that is longer than its section label.</p>
+        <p>A synthetic summary that is longer<br>than its section label.</p>
       </section>
       <section><h2>Activity</h2><p>1,474 followers</p></section>
     </main>`;
@@ -300,7 +305,7 @@ describe("read_profile", () => {
             <p>Jan 2022 - Present · 4 yrs</p>
             <p>Sample City · Hybrid</p>
           </a>
-          <div><p><span>Leads the fixture platform.</span></p></div>
+          <div><p><span>Leads the fixture platform.<br><br>Owns the &lt;harness&gt; &amp; its CI.</span></p></div>
           <p>Skills: Testing · Fixtures</p>
         </div>
         <div componentkey="entity-collection-item-2">
@@ -380,7 +385,7 @@ describe("read_profile", () => {
           "https://www.linkedin.com/search/results/people/?connectionOf=fixture",
       },
       website: "https://fixture.example/",
-      about: "A synthetic summary that is longer than its section label.",
+      about: "A synthetic summary that is longer\nthan its section label.",
       contact_info: {
         email: "alpha@fixture.example",
         phone: "+1 555 0100 (Mobile)",
@@ -399,7 +404,8 @@ describe("read_profile", () => {
           is_current: true,
           location: "Sample City",
           workplace_type: "Hybrid",
-          description: "Leads the fixture platform.",
+          description:
+            "Leads the fixture platform.\n\nOwns the <harness> & its CI.",
           skills: ["Testing", "Fixtures"],
           company_url: "https://www.linkedin.com/company/example-labs/",
         },
@@ -589,7 +595,7 @@ describe("read_company", () => {
             </div>
             <section>
               <h2>Overview</h2>
-              <p>Example Labs builds synthetic fixtures for tests.</p>
+              <p>Example Labs builds synthetic fixtures<br>for tests.</p>
               <p>A second overview paragraph.</p>
               <div><p>Website</p></div><a href="https://www.linkedin.com/safety/go/?url=https%3A%2F%2Fexample.com%2F"><p>https://example.com/</p></a>
               <div><p>Verified page</p><p>April 7, 2026</p></div>
@@ -613,7 +619,7 @@ describe("read_company", () => {
       name: "Example Labs",
       tagline: "Synthetic fixtures for every test.",
       about:
-        "Example Labs builds synthetic fixtures for tests.\n\nA second overview paragraph.",
+        "Example Labs builds synthetic fixtures\nfor tests.\n\nA second overview paragraph.",
       website: "https://example.com/",
       industry: "Software Development",
       company_size: "11-50 employees",
@@ -662,7 +668,7 @@ describe("search_posts", () => {
         ? card(
             1,
             '<img src="https://media.licdn.com/dms/image/v2/A/feedshare-shrink_480/0/1?e=1" alt="Fixture chart"><img src="https://media.licdn.com/dms/image/v2/B/profile-framedphoto-shrink_100_100/0/1?e=1" alt="Open to work"><button aria-label="Reaction button state: no reaction">1,234</button><button aria-label="Comment">56</button><button aria-label="Repost">7</button>',
-            'Synthetic post body number 1 about <a aria-label="View company: Example Labs" href="https://www.linkedin.com/company/example-labs/?trk=x">Example Labs</a> #fixtures <a href="https://evillinkedin.com/in/lookalike/">Lookalike</a> <a href="https://www.linkedin.com/safety/go/?url=https%3A%2F%2Ffixture.example%2Fpost&amp;urlhash=x">https://fixture.example/post</a>'
+            'Synthetic post body number 1 about <a aria-label="View company: Example Labs" href="https://www.linkedin.com/company/example-labs/?trk=x">Example Labs</a> #fixtures<br><br><a href="https://evillinkedin.com/in/lookalike/">Lookalike</a> <a href="https://www.linkedin.com/safety/go/?url=https%3A%2F%2Ffixture.example%2Fpost&amp;urlhash=x">https://fixture.example/post</a>'
           )
         : card(
             i + 1,
@@ -697,7 +703,7 @@ describe("search_posts", () => {
         verified: true,
         premium: false,
       },
-      body: "Synthetic post body number 1 about Example Labs #fixtures Lookalike https://fixture.example/post",
+      body: "Synthetic post body number 1 about Example Labs #fixtures\n\nLookalike https://fixture.example/post",
       hashtags: ["#fixtures"],
       mentions: [
         {
@@ -749,5 +755,17 @@ describe("search_posts", () => {
       "Synthetic post body number 11 about fixtures",
       "Synthetic post body number 12 about fixtures",
     ]);
+  });
+});
+
+describe("withLineBreaks", () => {
+  test("restores the html's line breaks only for the same text", () => {
+    const html =
+      '<span data-x="a > b">One&nbsp;line</span><br> <br><br><br>Two &amp; <a href="/in/x/">three</a><button><span>…</span><span> more</span></button>';
+    expect(withLineBreaks("One line Two & three", html)).toBe(
+      "One line\n\nTwo & three"
+    );
+    expect(withLineBreaks("Another paragraph", html)).toBe("Another paragraph");
+    expect(withLineBreaks("One line", undefined)).toBe("One line");
   });
 });
