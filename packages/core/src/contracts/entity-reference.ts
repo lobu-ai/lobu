@@ -1,5 +1,5 @@
 /** Source-backed types opt into durable addressing by declaring one projected key. */
-const RECORD_KEY_ANNOTATION = "x-lobu-record-key";
+export const RECORD_KEY_ANNOTATION = "x-lobu-record-key";
 
 export function recordKeyColumn(schema: unknown): string | null {
   if (!schema || typeof schema !== "object") return null;

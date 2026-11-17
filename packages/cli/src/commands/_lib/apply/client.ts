@@ -7,6 +7,7 @@ import {
   isPendingToolApproval,
 } from "@lobu/core";
 import type { FlatActionInput } from "@lobu/core/contracts/tools/action-input";
+import { RECORD_KEY_ANNOTATION } from "@lobu/core/contracts/entity-reference";
 import type {
   AuthProfileCreateInput,
   AuthProfileUpdateInput,
@@ -967,6 +968,7 @@ export class ApplyClient {
       metrics,
       resolutionPolicy,
       collection,
+      recordKey,
       rulesSource,
     } = entity;
     const payload: Record<string, unknown> = { slug };
@@ -980,6 +982,7 @@ export class ApplyClient {
       required !== undefined ||
       resolutionPolicy !== undefined ||
       collection !== undefined ||
+      recordKey !== undefined ||
       clearFacets?.has("collection") ||
       clearFacets?.has("properties") ||
       clearFacets?.has("required") ||
@@ -998,6 +1001,7 @@ export class ApplyClient {
           (collection !== undefined || clearFacets?.has("collection"))
         )
           continue;
+        if (key === RECORD_KEY_ANNOTATION && recordKey !== undefined) continue;
         // The resolution policy is config-owned when declared, and removed under
         // prune — either way the declared/cleared value wins over out-of-band.
         if (
@@ -1041,6 +1045,9 @@ export class ApplyClient {
         ...(resolutionPolicy ?? {}),
         ...(collection !== undefined
           ? { "x-lobu-collection": collection }
+          : {}),
+        ...(recordKey !== undefined
+          ? { [RECORD_KEY_ANNOTATION]: recordKey }
           : {}),
         type: "object",
         properties: effectiveProperties ?? {},

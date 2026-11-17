@@ -1,5 +1,6 @@
 import type { NavigationConfig } from "@lobu/core/contracts/tools/navigation";
 import { type AgentSettings, isSystemEntityType } from "@lobu/core";
+import { RECORD_KEY_ANNOTATION } from "@lobu/core/contracts/entity-reference";
 import type {
   InferenceCapabilityBlock,
   InferenceModality,
@@ -741,6 +742,14 @@ function diffEntityType(
             : prune && r.schemaExtras?.["x-lobu-collection"] !== undefined,
       },
       {
+        // Record key — config-owned when declared. Never a removal, even under
+        // prune: clearing it would turn every record's id into null.
+        name: "recordKey",
+        changed: (d, r) =>
+          d.recordKey !== undefined &&
+          d.recordKey !== r.schemaExtras?.[RECORD_KEY_ANNOTATION],
+      },
+      {
         // Write rules — prune-aware, like eventKinds. Compares SOURCE, never the
         // compiled artifact: the server owns compilation, so a compiler change
         // must not read as a rule change.
@@ -924,6 +933,12 @@ function compareEntityTypeThreeWay(
       attribution: attribution?.schemaExtras?.["x-lobu-collection"],
     },
     {
+      field: "recordKey",
+      desired: desired.recordKey,
+      remote: remote.schemaExtras?.[RECORD_KEY_ANNOTATION],
+      attribution: attribution?.schemaExtras?.[RECORD_KEY_ANNOTATION],
+    },
+    {
       field: "rules",
       desired: desired.rulesSource?.sourceCode,
       remote: remote.rulesSource ?? undefined,
@@ -957,6 +972,8 @@ function compareEntityTypeThreeWay(
   return classifyThreeWay(
     triples.filter((t) => {
       if (t.desired !== undefined) return true;
+      // An omitted record key is unmanaged even under prune (never cleared).
+      if (t.field === "recordKey") return false;
       if (
         !prune &&
         (omittableOutsidePrune.has(t.field) ||
@@ -1315,6 +1332,8 @@ export const effectiveEntityTypeAfterApply = (
   if (d.resolutionPolicy) Object.assign(schemaExtras, d.resolutionPolicy);
   if (d.collection !== undefined)
     schemaExtras["x-lobu-collection"] = d.collection;
+  if (d.recordKey !== undefined)
+    schemaExtras[RECORD_KEY_ANNOTATION] = d.recordKey;
   const inherit = <T>(declared: T | undefined, live: T | undefined) =>
     declared !== undefined ? declared : prune ? undefined : live;
   // Declared keys win; outside prune the remote-only keys survive the rebuild.

@@ -198,6 +198,17 @@ function fullOrgRoutes(): Record<
             },
           },
           { slug: "pilot", name: "Pilot" },
+          {
+            slug: "place",
+            name: "Place",
+            backing_sql: "SELECT id, name FROM places",
+            backing_source: "warehouse",
+            metadata_schema: {
+              type: "object",
+              properties: {},
+              "x-lobu-record-key": "id",
+            },
+          },
         ],
         relationship_types: [
           {
@@ -387,7 +398,18 @@ describe("lobu init --from-org", () => {
     expect(state.memorySchema.entityTypes.map((e) => e.slug)).toEqual([
       "lead",
       "pilot",
+      "place",
     ]);
+    expect(source).toContain('recordKey: "id"');
+    expect(state.memorySchema.entityTypes[2]).toEqual({
+      slug: "place",
+      name: "Place",
+      backing: {
+        sql: "SELECT id, name FROM places",
+        connection: "warehouse",
+      },
+      recordKey: "id",
+    });
     expect(state.memorySchema.entityTypes[0]).toEqual({
       slug: "lead",
       name: "Lead",
