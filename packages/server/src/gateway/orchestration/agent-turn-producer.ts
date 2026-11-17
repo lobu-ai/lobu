@@ -51,7 +51,7 @@ import { isHeadlessSource, resolveAutomationRunContext } from "../automation-run
 import { getPlatformDescriptor } from "../connections/platforms/index.js";
 import { parseAutomationRunConversationId } from "../permissions/automation-run-intent.js";
 import type { AgentRuntimeSelection } from "../../lobu/stores/sandbox-store.js";
-import type { McpConfigService } from "../auth/mcp/config-service.js";
+import { LOBU_MEMORY_MCP_ID, type McpConfigService } from "../auth/mcp/config-service.js";
 import type { McpProxy } from "../auth/mcp/proxy.js";
 import type { AgentSettingsStore } from "../auth/settings/agent-settings-store.js";
 import type { ProviderCatalogService } from "../auth/provider-catalog.js";
@@ -223,13 +223,6 @@ const WORKSPACE_TOOLS: readonly BuiltinTool[] = ["bash", "read", "write", "edit"
  */
 const MEDIA_TOOLS = ["upload_file", "generate_image", "generate_audio"] as const;
 
-/**
- * The MCP server `@lobu/plugin-memory`'s two hooks call. Lobu's own server,
- * which every agent on this lane already reaches — the hooks are not a second
- * integration, they are two more calls on the route the turn already uses.
- */
-const MEMORY_MCP_ID = "lobu";
-const AUTOMATION_MEMORY_MCP_ID = "lobu-memory";
 const AUTOMATION_REQUIRED_TOOLS = ["query_sdk", "run_sdk"] as const;
 
 export interface AgentTurnDeps {
@@ -835,7 +828,7 @@ async function resolveTurnTools(
     instructions,
     failedServers,
     // Memory hooks call the server directly, independently of tool discovery.
-    hasMemoryServer: servers.some((server) => server.id === MEMORY_MCP_ID),
+    hasMemoryServer: servers.some((server) => server.id === LOBU_MEMORY_MCP_ID),
   };
 }
 
@@ -1096,11 +1089,11 @@ export async function enqueueAgentTurn(
     }
 
     if (automationContext?.requiresWindowCompletion) {
-      if (failedServers.includes(AUTOMATION_MEMORY_MCP_ID)) {
+      if (failedServers.includes(LOBU_MEMORY_MCP_ID)) {
         return { error: "Automation tool discovery failed for lobu-memory. Check its connection and authentication before retrying." };
       }
       const available = new Set(tools?.definitions
-        .filter((tool) => tool.mcp_id === AUTOMATION_MEMORY_MCP_ID).map((tool) => tool.name));
+        .filter((tool) => tool.mcp_id === LOBU_MEMORY_MCP_ID).map((tool) => tool.name));
       const missing = AUTOMATION_REQUIRED_TOOLS.filter((name) => !available.has(name));
       if (missing.length > 0) {
         return { error: `Automation required tools are unavailable from lobu-memory: ${missing.join(", ")}. Restore the memory tool mount before retrying.` };
@@ -1291,7 +1284,7 @@ export async function enqueueAgentTurn(
       // `@lobu/plugin-memory`'s own two hooks over the MCP route the turn
       // already uses.
       ...(hasMemoryServer
-        ? { memory: { mcp_id: MEMORY_MCP_ID, agent_id: data.agentId } }
+        ? { memory: { mcp_id: LOBU_MEMORY_MCP_ID, agent_id: data.agentId } }
         : {}),
       // DENY-ALL. A connector's allowlist defaults open; an agent turn's does
       // not. The gateway is the only host this turn has any business
