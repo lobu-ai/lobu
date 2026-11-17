@@ -284,6 +284,42 @@ describe('OAuth reconnect preserves the existing connection until consent', () =
     expect(row.slug.length).toBeLessThanOrEqual(80);
   });
 
+  // Microsoft's identity platform issues a refresh token for `offline_access`
+  // but leaves that scope out of the token response's `scope`.
+  it.each([
+    ['activates', 'synthetic-refresh-token', 'active'],
+    ['keeps pending', undefined, 'pending_auth'],
+  ] as const)('%s a required offline_access grant evidenced by refresh token %s', async (_label, refreshToken, expected) => {
+    const s = await seed();
+    const sql = getTestDb();
+    const offlineKey = 'synthetic.offline-access';
+    await createTestConnectorDefinition({
+      key: offlineKey, name: 'Synthetic offline OAuth', organization_id: s.org.id,
+      auth_schema: { methods: [{ type: 'oauth', provider: 'synthetic', requiredScopes: [BASE, 'offline_access'],
+        clientIdKey: 'client_id', clientSecretKey: 'client_secret', authorizationUrl: 'https://provider.example/authorize',
+        tokenUrl: 'https://provider.example/token', userinfoUrl: 'https://provider.example/userinfo' }] },
+    });
+    const app = await createAuthProfile({ organizationId: s.org.id, connectorKey: offlineKey,
+      displayName: 'Offline app', profileKind: 'oauth_app', provider: 'synthetic',
+      authData: { client_id: 'synthetic-offline-client', client_secret: 'synthetic-offline-secret' },
+      status: 'active', createdBy: s.user.id });
+    const result = await s.client.connect({ connector_key: offlineKey, app_auth_profile_slug: app.slug }) as
+      { connection_id: number; connect_url: string };
+    const token = new URL(result.connect_url).pathname.split('/').at(-3)!;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      if (url === 'https://provider.example/token') {
+        return Response.json({ access_token: 'synthetic-offline-token', scope: BASE, ...(refreshToken ? { refresh_token: refreshToken } : {}) });
+      }
+      if (url === 'https://provider.example/userinfo') return Response.json({ id: 'synthetic-offline-user' });
+      return originalFetch(input, init);
+    }) as typeof fetch;
+    await connectRoutes.request(`/oauth/callback?state=${token}&code=synthetic-offline-code`, {}, {} as Env);
+    const [row] = await sql`SELECT c.status, ap.status AS profile_status FROM connections c
+      JOIN auth_profiles ap ON ap.id = c.auth_profile_id WHERE c.id = ${result.connection_id}`;
+    expect(row).toEqual({ status: expected, profile_status: expected });
+  });
+
   it('keeps ordinary connections and feeds intact when managed OAuth is enabled', async () => {
     const s = await seed();
     const sql = getTestDb();

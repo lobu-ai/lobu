@@ -377,6 +377,27 @@ function equivalentScopes(scope: string): string[] {
   }
 }
 
+/**
+ * A stored grant's scopes, counting OIDC `offline_access` when the connector
+ * declares it and the grant holds a refresh token. The refresh token is the
+ * evidence of that scope: Microsoft's identity platform issues one but omits
+ * `offline_access` from the token response's `scope`, so the recorded string
+ * alone never satisfies a connector that requires it. Undeclared, it is not
+ * added: providers such as Google issue refresh tokens without that scope and
+ * reject it when a reconnect requests it back.
+ */
+export function withOfflineAccessEvidence(
+  scopes: string[],
+  hasRefreshToken: boolean,
+  declaredScopes: readonly string[]
+): string[] {
+  return hasRefreshToken &&
+    declaredScopes.includes('offline_access') &&
+    !scopes.includes('offline_access')
+    ? [...scopes, 'offline_access']
+    : scopes;
+}
+
 export function hasAllScopes(granted: Iterable<string>, required: Iterable<string>): boolean {
   const grantedSet = new Set<string>();
   for (const scope of granted) {
