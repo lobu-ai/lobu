@@ -343,3 +343,40 @@ export async function ensureConnectorInstalled(params: {
     return false;
   }
 }
+
+/**
+ * Ensure the org's active definition for `connectorKey` declares
+ * `operationKey`, installing it when absent and re-syncing it from the bundled
+ * source when it predates the operation (the hourly refresh would converge it
+ * later; a caller that needs the operation now cannot wait). Same single write
+ * path as install and refresh. False when the connector cannot provide it.
+ */
+export async function ensureConnectorDeclaresOperation(params: {
+  organizationId: string;
+  connectorKey: string;
+  operationKey: string;
+}): Promise<boolean> {
+  if (!(await ensureConnectorInstalled(params))) return false;
+  const declares = async () =>
+    (
+      await getDb()`
+        SELECT 1 FROM connector_definitions
+        WHERE key = ${params.connectorKey}
+          AND organization_id = ${params.organizationId}
+          AND status = 'active'
+          AND actions_schema ? ${params.operationKey}
+        LIMIT 1
+      `
+    ).length > 0;
+  if (await declares()) return true;
+  try {
+    if (!(await upsertBundledConnectorForOrg(params))) return false;
+  } catch (err) {
+    logger.error(
+      { connector_key: params.connectorKey, operation_key: params.operationKey, err },
+      'Failed to re-sync bundled connector definition'
+    );
+    return false;
+  }
+  return declares();
+}

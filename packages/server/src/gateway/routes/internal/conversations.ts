@@ -28,7 +28,7 @@ import {
   withTurnIdempotencyKey,
   withTurnInputRun,
 } from "../../../tools/turn-write-idempotency.js";
-import { ensureConnectorInstalled } from "../../../utils/ensure-connector-installed.js";
+import { ensureConnectorDeclaresOperation } from "../../../utils/ensure-connector-installed.js";
 import { parseAutomationRunConversationId } from "../../permissions/automation-run-intent.js";
 import { resolveAutomationRunContext } from "../../automation-run-session.js";
 import type { Env } from "../../../index.js";
@@ -149,9 +149,14 @@ async function sendAsOperation(
     ctx.actingAutomationId = automation.automationId;
     ctx.actingRunId = automation.runId;
   }
-  // Policy needs the platform's connector definition to name the operation.
-  // Without it nothing can admit the send, so it is refused, not posted.
-  if (!(await ensureConnectorInstalled({ organizationId, connectorKey: target.platform }))) {
+  // Policy needs the platform's connector definition to name the operation,
+  // so install or re-sync it first. Without it nothing can admit the send, so
+  // it is refused, not posted.
+  if (!(await ensureConnectorDeclaresOperation({
+    organizationId,
+    connectorKey: target.platform,
+    operationKey: SEND_MESSAGE_OPERATION,
+  }))) {
     return errorResponse(
       c,
       `${NOT_SENT}: the ${target.platform} connector is not installed in this workspace.`,

@@ -22,6 +22,7 @@ import { ImageGenerationService } from '../../gateway/services/image-generation-
 import { TranscriptionService } from '../../gateway/services/transcription-service';
 import { __setChatInstanceManagerForTests } from '../../lobu/gateway';
 import { pruneTurnWriteReceipts } from '../../tools/turn-write-idempotency';
+import { ensureConnectorInstalled } from '../../utils/ensure-connector-installed';
 import * as entityHooks from '../../utils/entity-hooks';
 import { initWorkspaceProvider } from '../../workspace';
 import { __setLocalFrontendForTests } from '../../utils/public-origin';
@@ -472,6 +473,20 @@ describe('send_message: a reply in the asking conversation vs a post elsewhere',
     expect(body).toMatchObject({ messageId: 'synthetic-post', deliveredInBand: false, run_id: expect.any(Number) });
     expect(posted).toHaveBeenCalledTimes(1);
     expect((await sendRuns()).find((run) => run.id === body.run_id)).toMatchObject({ status: 'completed', approval_status: 'auto' });
+  });
+
+  it('a stale or missing connector definition is synced before the send is evaluated', async () => {
+    await rule('auto');
+    await ensureConnectorInstalled({ organizationId: org.id, connectorKey: 'slack' });
+    // Installed before the platform declared send_message.
+    await sql()`UPDATE connector_definitions SET actions_schema = actions_schema - 'send_message' WHERE organization_id = ${org.id} AND key = 'slack' AND status = 'active'`;
+    const stale = await call('/internal/conversations/send', (await turn('p3-stale-1')).token, { target: channelTarget, text: 'after a stale definition' });
+    expect(stale.status, await stale.clone().text()).toBe(200);
+    // No active definition at all.
+    await sql()`UPDATE connector_definitions SET status = 'archived' WHERE organization_id = ${org.id} AND key = 'slack' AND status = 'active'`;
+    const missing = await call('/internal/conversations/send', (await turn('p3-stale-2')).token, { target: channelTarget, text: 'after no definition' });
+    expect(missing.status, await missing.clone().text()).toBe(200);
+    expect(posted).toHaveBeenCalledTimes(2);
   });
 
   it('send_message is not directly executable as an operation', async () => {
