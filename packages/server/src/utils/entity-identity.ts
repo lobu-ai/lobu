@@ -4,17 +4,20 @@ import { ToolUserError } from './errors';
 
 /**
  * One edge predicate for every identity read; ordinary and ACL edges never group records.
+ * Tables are schema-qualified because scoped SQL embeds these fragments beside
+ * org-scope CTEs named `entities` / `entity_relationships`, which an unqualified
+ * reference would bind to instead of the base table.
  * Callers must pin an endpoint to `entityAlias.id`, so endpoint-to-endpoint
  * organization/type equality also enforces equality with that entity.
  * Keeping these predicates independent of the recursive member avoids giving
  * the planner a correlated same-type scan as an alternative to endpoint probes.
  */
-function identityEdgesSql(entityAlias: string, edgeSource = 'entity_relationships'): string {
+function identityEdgesSql(entityAlias: string, edgeSource = 'public.entity_relationships'): string {
   return `SELECT ir.from_entity_id, ir.to_entity_id
     FROM ${edgeSource} ir
-    JOIN entity_relationship_types it ON it.id = ir.relationship_type_id
-    JOIN entities source ON source.id = ir.from_entity_id
-    JOIN entities target ON target.id = ir.to_entity_id
+    JOIN public.entity_relationship_types it ON it.id = ir.relationship_type_id
+    JOIN public.entities source ON source.id = ir.from_entity_id
+    JOIN public.entities target ON target.id = ir.to_entity_id
     WHERE ir.organization_id = ${entityAlias}.organization_id AND ir.deleted_at IS NULL
       AND it.organization_id = ir.organization_id AND it.purpose = 'identity'
       AND it.deleted_at IS NULL AND it.status = 'active'
@@ -40,22 +43,22 @@ export function identityMemberIdsSql(entityRef: string): string {
  * The CTE must be named `identity_members` — the body self-references it.
  */
 export function identityMembersCteBody(seedRef: string): string {
-  return `SELECT seed.id, seed.organization_id, seed.entity_type_id FROM entities seed
+  return `SELECT seed.id, seed.organization_id, seed.entity_type_id FROM public.entities seed
     WHERE seed.id = ${seedRef}
     UNION
     SELECT next.id, next.organization_id, next.entity_type_id
     FROM identity_members member
     JOIN LATERAL (${identityEdgesSql('member', `(${incidentEdgesSql('member.id')})`)}) edge ON true
-    JOIN entities next ON next.id = CASE WHEN edge.from_entity_id = member.id
+    JOIN public.entities next ON next.id = CASE WHEN edge.from_entity_id = member.id
       THEN edge.to_entity_id ELSE edge.from_entity_id END`;
 }
 
 /** Endpoint-indexable candidates; identityEdgesSql applies liveness and identity checks. */
 function incidentEdgesSql(memberId: string): string {
   const columns = 'incident.organization_id, incident.relationship_type_id, incident.from_entity_id, incident.to_entity_id, incident.deleted_at';
-  return `SELECT ${columns} FROM entity_relationships incident WHERE incident.from_entity_id = ${memberId}
+  return `SELECT ${columns} FROM public.entity_relationships incident WHERE incident.from_entity_id = ${memberId}
       UNION ALL
-      SELECT ${columns} FROM entity_relationships incident WHERE incident.to_entity_id = ${memberId}`;
+      SELECT ${columns} FROM public.entity_relationships incident WHERE incident.to_entity_id = ${memberId}`;
 }
 
 /**
@@ -67,13 +70,13 @@ function incidentEdgesSql(memberId: string): string {
  */
 export function identityMemberExistsSql(entityRef: string, memberAlias: string, memberPredicate: string): string {
   return `EXISTS (SELECT 1 FROM (${identityMemberIdsSql(entityRef)}) identity_member
-    JOIN entities ${memberAlias} ON ${memberAlias}.id = identity_member.id
+    JOIN public.entities ${memberAlias} ON ${memberAlias}.id = identity_member.id
     WHERE ${memberPredicate})`;
 }
 
 export function identityRootIdSql(entityRef: string): string {
   return `(SELECT root.id FROM (${identityMemberIdsSql(entityRef)}) identity_member
-    JOIN entities root ON root.id = identity_member.id
+    JOIN public.entities root ON root.id = identity_member.id
     WHERE ${identityRootSql('root')})`;
 }
 

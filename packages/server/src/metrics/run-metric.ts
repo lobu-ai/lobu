@@ -7,6 +7,7 @@
 import type { EntityMetrics } from "@lobu/connector-sdk";
 import { authzScopeFromToolContext } from "../authz/scope";
 import { getDb } from "../db/client";
+import type { EntityReadRestrictions } from "../authz/entity-read-policy";
 import { isCompletePushdownResult, pushdownFailureError, runConnectorQuery } from "../lib/connector-pushdown";
 import type { SourceCallerClass } from "../lib/source-admission";
 import { boundedQuery, classifyReadQueryFailure } from "../utils/bounded-read";
@@ -58,6 +59,8 @@ interface RunMetricInput {
    * callers set false explicitly.
    */
   excludeMemberEntities: boolean;
+  /** The reader's whole-record read restrictions (`entityReadRestrictions`). REQUIRED. */
+  entityReadRestrictions: EntityReadRestrictions;
   /**
    * Owner/admin connection bypass for a connection-backed type, decided exactly
    * as `query_sql` decides it for a derived record read
@@ -121,6 +124,7 @@ export async function runMetric(input: RunMetricInput): Promise<Record<string, u
     personalMemoryPrincipal: input.personalMemoryPrincipal ?? null,
     excludeWorkspaceAudit: input.excludeWorkspaceAudit,
     excludeMemberEntities: input.excludeMemberEntities,
+    entityReadRestrictions: input.entityReadRestrictions,
   });
 
   let rows: unknown;

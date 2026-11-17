@@ -29,6 +29,12 @@ import { compileChannelMessagesVisibility } from '../authz/channel-messages-visi
 import { compileResourceVisibility } from '../authz/resource-visibility';
 import type { AuthzScope } from '../authz/scope';
 import {
+  type EntityReadRestrictions,
+  entityReadPolicySql,
+  eventReadPolicySql,
+  linkedEntitiesReadPolicySql,
+} from '../authz/entity-read-policy';
+import {
   ADMIN_ONLY_QUERYABLE_TABLES,
   buildColumnList,
   type ColumnDef,
@@ -449,6 +455,13 @@ export function validateAndScopeQuery(
      * same as automation prompts served to public readers.
      */
     excludeMemberEntities: boolean;
+    /**
+     * The caller's whole-record read restrictions (`entityReadRestrictions`):
+     * records an agent or Automation may not read, and every event, relationship
+     * and identity row linked to one, are withheld from the scope CTEs. Humans
+     * resolve to none. REQUIRED for the same reason as excludeMemberEntities.
+     */
+    entityReadRestrictions: EntityReadRestrictions;
     /** Verified Automation window; supplied by the token resolver, never raw SQL. */
     window?: Pick<DataSourceContext, 'windowStart' | 'windowEnd' | 'entityIds' | 'excludeProducedByAutomationId'>;
   }
@@ -526,10 +539,20 @@ export function buildScopedQuery(
     excludeWorkspaceAudit?: boolean;
     /** Exclude $member entities from the entities (and entity-type-slug) CTEs. See validateAndScopeQuery. */
     excludeMemberEntities?: boolean;
+    /** Whole-record read restrictions. See validateAndScopeQuery. */
+    entityReadRestrictions?: EntityReadRestrictions;
   }
 ): { sql: string; params: unknown[]; scope: AuthzScope } {
   const params: unknown[] = [];
   let idx = 0;
+  const readRestrictions = options?.entityReadRestrictions ?? [];
+  // AND one entity-read-policy compiler predicate (it pushes its own params).
+  const readPolicy = (compile: (target: unknown[]) => string): string => {
+    if (readRestrictions.length === 0) return '';
+    const predicate = compile(params);
+    idx = params.length;
+    return ` AND ${predicate}`;
+  };
   // The CTEs scope to this workspace and principal; the runner's row-level
   // security fence (`boundedRead` `fence`) takes the same object.
   const scope: AuthzScope = {
@@ -761,6 +784,7 @@ export function buildScopedQuery(
 
     predicate += eventConnVisibility(alias);
     predicate += eventResourceVisibility(alias);
+    predicate += readPolicy((target) => eventReadPolicySql(readRestrictions, alias, target));
 
     return predicate;
   };
@@ -779,12 +803,13 @@ export function buildScopedQuery(
       // $member rows carry PII reserved by the manage_entity read policy;
       // exclude them for non-admin readers just like workspace-audit events.
       const memberPredicate = options?.excludeMemberEntities ? ` AND et.slug <> '$member'` : '';
+      const readPredicate = readPolicy((target) => entityReadPolicySql(readRestrictions, 'e', target));
       // security-allowed: see block comment above this for-loop
       ctes.push(
         `"${safeName}" AS NOT MATERIALIZED (SELECT ${selEntitiesJoined('e', 'et')} ` +
           `FROM public.entities e ` +
           `JOIN public.entity_types et ON et.id = e.entity_type_id ` +
-          `WHERE e.organization_id = ${orgP}${memberPredicate})`
+          `WHERE e.organization_id = ${orgP}${memberPredicate}${readPredicate})`
       );
     } else if (table === 'events') {
       // Tenancy via eventOrgScope, shared with event_classifications — keeps
@@ -967,7 +992,8 @@ export function buildScopedQuery(
       ctes.push(
         // Live source endpoint visibility is enforced by the entity API. Raw SQL cannot
         // bypass it, even to infer a hidden source key through counts or joins.
-        `"${safeName}" AS NOT MATERIALIZED (SELECT ${sel(table)} FROM public.entity_relationships WHERE organization_id = ${orgP} AND deleted_at IS NULL AND from_entity_id IS NOT NULL AND to_entity_id IS NOT NULL)`
+        `"${safeName}" AS NOT MATERIALIZED (SELECT ${sel(table)} FROM public.entity_relationships WHERE organization_id = ${orgP} AND deleted_at IS NULL AND from_entity_id IS NOT NULL AND to_entity_id IS NOT NULL` +
+          `${readPolicy((target) => linkedEntitiesReadPolicySql(readRestrictions, 'ARRAY[entity_relationships.from_entity_id, entity_relationships.to_entity_id]', target))})`
       );
     } else if (table === 'entity_relationship_types') {
       // security-allowed: see block comment above the for-loop
@@ -983,7 +1009,8 @@ export function buildScopedQuery(
       // security-allowed: see block comment above the for-loop
       ctes.push(
         `"${safeName}" AS NOT MATERIALIZED (SELECT ${sel(table, 'ei')} FROM public.entity_identities ei ` +
-          `WHERE ei.organization_id = ${orgP})`
+          `WHERE ei.organization_id = ${orgP}` +
+          `${readPolicy((target) => linkedEntitiesReadPolicySql(readRestrictions, 'ARRAY[ei.entity_id]', target))})`
       );
     } else {
       // Treat as entity_type slug — uses entities columns. The $member
@@ -991,13 +1018,15 @@ export function buildScopedQuery(
       // bypass the entities-table predicate above.
       idx++;
       params.push(table);
+      const slugP = `$${idx}`;
       const slugMemberPredicate = options?.excludeMemberEntities ? ` AND et.slug <> '$member'` : '';
+      const slugReadPredicate = readPolicy((target) => entityReadPolicySql(readRestrictions, 'e', target));
       // security-allowed: see block comment above the for-loop
       ctes.push(
         `"${safeName}" AS NOT MATERIALIZED (SELECT ${selEntitiesJoined('e', 'et')} ` +
           `FROM public.entities e ` +
           `JOIN public.entity_types et ON et.id = e.entity_type_id ` +
-          `WHERE e.organization_id = ${orgP} AND et.slug = $${idx}${slugMemberPredicate})`
+          `WHERE e.organization_id = ${orgP} AND et.slug = ${slugP}${slugMemberPredicate}${slugReadPredicate})`
       );
     }
   }
@@ -1129,7 +1158,7 @@ export async function executeDataSources(
   dataSources: DataSourceInput,
   context: DataSourceContext,
   sql: DbClient,
-  options?: {
+  options: {
     /** Transform the scoped SQL before execution (e.g. wrap for ID-only extraction or pagination). */
     wrapQuery?: (
       scopedSql: string,
@@ -1146,6 +1175,8 @@ export async function executeDataSources(
     excludeWorkspaceAudit?: boolean;
     /** Exclude $member entities from the entities (and entity-type-slug) CTEs. See validateAndScopeQuery. */
     excludeMemberEntities?: boolean;
+    /** The reader's whole-record read restrictions. See validateAndScopeQuery. */
+    entityReadRestrictions: EntityReadRestrictions;
   }
 ): Promise<Record<string, unknown[]>> {
   const results: Record<string, unknown[]> = {};
@@ -1208,6 +1239,7 @@ export async function executeDataSources(
           safeColumns: SAFE_COLUMN_DEFS,
           excludeWorkspaceAudit: options?.excludeWorkspaceAudit,
           excludeMemberEntities: options?.excludeMemberEntities,
+          entityReadRestrictions: options?.entityReadRestrictions,
         });
         let { sql: scopedQuery, params } = scoped;
 

@@ -25,6 +25,7 @@
 
 import { type Static, Type } from '@sinclair/typebox';
 import { getDb } from '../../db/client';
+import { entityReadRestrictions } from '../../authz/entity-read-policy';
 import { isReadQuery, validateAndScopeQuery } from '../../utils/execute-data-sources';
 import { ADMIN_ONLY_QUERYABLE_TABLES, SAFE_COLUMN_DEFS } from '../../utils/table-schema';
 import { boundedQuery, classifyReadQueryFailure } from '../../utils/bounded-read';
@@ -168,6 +169,7 @@ async function metricSeriesImpl(
 
   // Members may chart their org's operational data; the auth/identity tables
   // (oauth_tokens, oauth_clients, user) stay admin-only.
+  const readRestrictions = await entityReadRestrictions(getDb(), ctx);
   const { sql: scopedSql, params, scope } = validateAndScopeQuery(args.sql, orgId, {
     // Emit the safe column allowlist (not SELECT *) so a member charting e.g.
     // `connections` can't pull credential columns the allowlist withholds.
@@ -183,6 +185,8 @@ async function metricSeriesImpl(
     // $member entity rows carry PII reserved by the manage_entity read
     // policy; ordinary members must not bypass it via raw SQL.
     excludeMemberEntities: !canReadWorkspaceIdentity(ctx),
+    // Records an agent or Automation may not read cannot move its charts.
+    entityReadRestrictions: readRestrictions,
   });
   const db = getDb();
 

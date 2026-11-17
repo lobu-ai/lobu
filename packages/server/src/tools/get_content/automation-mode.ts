@@ -48,6 +48,7 @@ import type { GetContentResult } from './types';
 import { parseJson, parseRecordArray, toNullableScore } from './types';
 import { stableJson } from '../../utils/insert-event';
 import { sourceReadScopeFromToolContext } from '../../authz/scope';
+import { entityReadRestrictions } from '../../authz/entity-read-policy';
 
 // ============================================
 // Content Query (inlined from automation-content-query)
@@ -185,6 +186,8 @@ async function queryContentData(
   exceedsRowLimit: boolean;
 }> {
   const page = params.page;
+  // The reader's record read blocks, never the requested Automation's authority.
+  const readRestrictions = await entityReadRestrictions(sql, params);
   const queryContext: DataSourceContext = {
     organizationId: params.organizationId,
     userId: params.userId,
@@ -237,6 +240,7 @@ async function queryContentData(
     throwOnError: params.throwOnSourceError,
     includeOverflowRow: true,
     excludeWorkspaceAudit: params.excludeWorkspaceAudit,
+    entityReadRestrictions: readRestrictions,
     wrapQuery: page
       ? (scopedQuery, queryParams, sourceName) => {
           const isEventSource = eventSourceNames.has(sourceName);
@@ -384,6 +388,7 @@ async function queryContentData(
           // here — same reason this site leaves the member default to the
           // declared measure rather than the reader-driven SQL rule.
           excludeMemberEntities: false,
+          entityReadRestrictions: readRestrictions,
         });
       } catch (err) {
         if (params.throwOnSourceError) throw err;
@@ -429,6 +434,7 @@ async function queryContentData(
       // Totals must respect the same workspace-audit boundary as the returned
       // rows, else an ordinary member infers audit rows from the count.
       excludeWorkspaceAudit: params.excludeWorkspaceAudit,
+      entityReadRestrictions: readRestrictions,
     });
     for (const rows of Object.values(statsResults)) {
       const row = rows[0] as { c?: number; ch?: string | number } | undefined;

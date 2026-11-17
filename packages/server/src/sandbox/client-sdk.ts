@@ -6,6 +6,7 @@
 
 import type { Env } from "../index";
 import { getDb } from "../db/client";
+import { entityReadRestrictions } from "../authz/entity-read-policy";
 import { validateAndScopeQuery } from "../utils/execute-data-sources";
 import { resolveWindowQueryContext } from "../automations/window-read-context";
 import { canReadWorkspaceIdentity, CrossOrgAccessDenied, isAdminOrOwnerRole, memberReadRole, requireWorkspaceContext } from "../tools/access-control";
@@ -386,6 +387,7 @@ export function buildClientSDK(
 			const window = options?.window_token
 				? await resolveWindowQueryContext(options.window_token, env, workspaceCtx, getDb())
 				: undefined;
+			const readRestrictions = await entityReadRestrictions(getDb(), workspaceCtx);
 			// The callers here are user-authored code (run_sdk, Automation
 			// scripts), so the allowlisted columns always apply and member data
 			// follows the caller's role, or an Automation script's creator role.
@@ -403,6 +405,8 @@ export function buildClientSDK(
 				// $member entity rows carry PII reserved by the manage_entity
 				// read policy; ordinary members must not bypass it via raw SQL.
 				excludeMemberEntities: !canReadWorkspaceIdentity(workspaceCtx),
+				// The calling agent's or Automation's record read blocks.
+				entityReadRestrictions: readRestrictions,
 			});
 			// Outer LIMIT caps rows at the source so a broad SELECT can't
 			// materialize an unbounded result set host-side.

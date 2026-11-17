@@ -6,7 +6,9 @@ import { type ActingPrincipal, loadEntityReadRestrictions, resolveActingPrincipa
 export type EntityReadRestrictions = Awaited<ReturnType<typeof loadEntityReadRestrictions>>;
 
 /** Request-local snapshot of bounded configuration, never cached across requests or replicas. */
-export async function entityReadRestrictions(db: DbClient, ctx: ToolContext, actor?: ActingPrincipal): Promise<EntityReadRestrictions> {
+export async function entityReadRestrictions(
+  db: DbClient, ctx: Pick<ToolContext, 'organizationId' | 'userId' | 'agentId' | 'actingAutomationId'>, actor?: ActingPrincipal,
+): Promise<EntityReadRestrictions> {
   const principal = actor ?? await resolveActingPrincipal(db, {
     organizationId: ctx.organizationId, userId: ctx.userId, agentId: ctx.agentId,
     sessionAutomationId: ctx.actingAutomationId,
@@ -23,13 +25,34 @@ export function entityReadPolicySql(restrictions: EntityReadRestrictions, entity
   if (restrictions.length === 0) return 'TRUE';
   if (restrictions.some(row => row.entity_type_slug === null && row.entity_id === null)) return 'FALSE';
   params.push(JSON.stringify(restrictions));
+  // Schema-qualified: scoped SQL places this beside org-scope CTEs named `entities`.
   return `NOT EXISTS (
-    SELECT 1 FROM entities read_member JOIN entity_types read_type ON read_type.id = read_member.entity_type_id
+    SELECT 1 FROM public.entities read_member JOIN public.entity_types read_type ON read_type.id = read_member.entity_type_id
     CROSS JOIN jsonb_to_recordset($${params.length}::text::jsonb) AS read_denial(entity_type_slug text, entity_id bigint)
     WHERE read_member.id IN (${identityMemberIdsSql(`${entityAlias}.id`)})
       AND (read_denial.entity_type_slug IS NULL OR read_denial.entity_type_slug = read_type.slug)
       AND (read_denial.entity_id IS NULL OR read_denial.entity_id = read_member.id)
   )`;
+}
+
+/** Trusted bigint[] SQL expression only. True when every linked record is readable
+ * under {@link entityReadPolicySql}; a row that links a withheld record is withheld too.
+ */
+export function linkedEntitiesReadPolicySql(restrictions: EntityReadRestrictions, entityIdsSql: string, params: unknown[]): string {
+  if (restrictions.length === 0) return 'TRUE';
+  return `NOT EXISTS (SELECT 1 FROM public.entities read_linked
+    WHERE read_linked.id = ANY(${entityIdsSql}) AND NOT (${entityReadPolicySql(restrictions, 'read_linked', params)}))`;
+}
+
+/** Trusted SQL alias only. An event is readable when every record it links is; an
+ * unlinked event falls under the workspace-wide `$member` envelope, as read_knowledge does.
+ */
+export function eventReadPolicySql(restrictions: EntityReadRestrictions, eventAlias: string, params: unknown[]): string {
+  if (restrictions.length === 0) return 'TRUE';
+  if (restrictions.some(row => row.entity_type_slug === null && row.entity_id === null)) return 'FALSE';
+  const linked = linkedEntitiesReadPolicySql(restrictions, `${eventAlias}.entity_ids`, params);
+  const unlinkedDenied = restrictions.some(row => row.entity_id === null && row.entity_type_slug === '$member');
+  return unlinkedDenied ? `(cardinality(${eventAlias}.entity_ids) > 0 AND ${linked})` : linked;
 }
 
 /** Batch presentation guard for exact hits and linked rows, including identity descriptors. */
