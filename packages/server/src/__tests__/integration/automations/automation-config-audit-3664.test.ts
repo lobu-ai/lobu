@@ -23,6 +23,7 @@ import {
 } from '../../setup/test-fixtures';
 import { TestApiClient } from '../../setup/test-mcp-client';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
+import { upsertEntityApprovalPolicy } from '../../../authz/entity-policy';
 
 const TEST_ENV: Env = {
   ENVIRONMENT: 'test',
@@ -659,6 +660,12 @@ describe('automation config audit #3664', () => {
       baseUrl: '',
       scopedToOrg: true,
       allowCrossOrg: false,
+    });
+    await upsertEntityApprovalPolicy(orgId, {
+      resourceClass: 'agent_config',
+      principalKind: 'agent',
+      principalId: agentId,
+      effects: { update: 'approval' },
     });
     const agentCtx = baseCtx(agentId, userId);
     agentCtx.mcpSessionId = 'session-approval-3664';

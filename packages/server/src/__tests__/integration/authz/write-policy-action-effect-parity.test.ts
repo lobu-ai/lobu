@@ -157,15 +157,14 @@ describe("write-policy action/effect decision parity", () => {
 		expect(await resolveWritePolicyDecision({ ...base, action: "delete" })).toBe("deny");
 	});
 
-	it("agent_config: no row uses the class defaults (create/update approval, delete deny)", async () => {
+	it("agent_config: no row uses the class defaults (create/update auto, delete deny)", async () => {
 		const base = {
 			organizationId: orgId,
 			resourceClass: "agent_config" as const,
 			principalKind: "agent" as const,
 		};
-		expect(await resolveWritePolicyDecision({ ...base, action: "create" })).toBe(
-			"require_approval",
-		);
+		expect(await resolveWritePolicyDecision({ ...base, action: "create" })).toBe("allow");
+		expect(await resolveWritePolicyDecision({ ...base, action: "update" })).toBe("allow");
 		expect(await resolveWritePolicyDecision({ ...base, action: "delete" })).toBe("deny");
 	});
 
@@ -194,13 +193,13 @@ describe("write-policy action/effect decision parity", () => {
 		})).effect).toBe("deny");
 	});
 
-	it("connector_action: unmatched writes require approval", async () => {
+	it("connector_action: unmatched writes run automatically", async () => {
 		expect((await resolveConnectorPolicy({
 			organizationId: orgId,
 			connectionId: null,
 			operation: { connector_key: "demo.policy", operation_key: "send", kind: "write" },
 			actor: { kind: "agent", id: null, ownerAgentId: null, ownerResolved: true },
-		})).effect).toBe("approval");
+		})).effect).toBe("auto");
 	});
 
 	it("the permissions-PUT input guards reject payloads that would erase/mis-target a row (codex-11)", async () => {

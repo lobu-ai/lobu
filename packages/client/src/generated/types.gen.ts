@@ -3831,7 +3831,7 @@ export type ManageAgentsData = {
       }
     | {
         /**
-         * Create an agent owned by the caller (queued for approval).
+         * Create an agent owned by the caller. An agent caller is held for approval only when a policy rule asks.
          */
         action: "create";
         /**
@@ -3857,7 +3857,7 @@ export type ManageAgentsData = {
       }
     | {
         /**
-         * Patch agent fields (queued for approval).
+         * Patch agent fields. An agent caller is held for approval only when a policy rule asks.
          */
         action: "update";
         /**
@@ -3934,7 +3934,7 @@ export type ManageAgentsData = {
       }
     | {
         /**
-         * Delete an agent (queued for approval).
+         * Delete an agent. Agent callers are blocked unless a policy rule allows it.
          */
         action: "delete";
         /**
@@ -5577,7 +5577,7 @@ export type ManageOperationsResponses = {
           reason:
             | "matched_rule"
             | "guardrail"
-            | "default_approval"
+            | "default_auto"
             | "device_owner"
             | "unresolved_principal"
             | "parent_approval"
@@ -5607,7 +5607,7 @@ export type ManageOperationsResponses = {
           reason:
             | "matched_rule"
             | "guardrail"
-            | "default_approval"
+            | "default_auto"
             | "device_owner"
             | "unresolved_principal"
             | "parent_approval"

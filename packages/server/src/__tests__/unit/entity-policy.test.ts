@@ -214,7 +214,7 @@ describe("evaluateEntityMutation", () => {
 		).toBe("allow");
 	});
 
-	test("default policy: agent delete requires approval, create is auto", async () => {
+	test("default policy: with no rule an automation's delete and an agent's create apply", async () => {
 		const sql = stubSql([]);
 		expect(
 			await evaluateEntityMutation({
@@ -224,7 +224,7 @@ describe("evaluateEntityMutation", () => {
 				entityTypeSlug: "task",
 				sql,
 			}),
-		).toBe("require_approval");
+		).toBe("allow");
 		expect(
 			await evaluateEntityMutation({
 				organizationId: ORG,
@@ -315,7 +315,8 @@ describe("evaluateEntityMutation", () => {
 				sql,
 			}),
 		).toBe("deny");
-		// An agent (different kind) is not matched by an automation-kind row.
+		// An agent (different kind) is not matched by an automation-kind row, so
+		// it gets the class default.
 		expect(
 			await evaluateEntityMutation({
 				organizationId: ORG,
@@ -325,7 +326,7 @@ describe("evaluateEntityMutation", () => {
 				entityTypeSlug: "task",
 				sql,
 			}),
-		).toBe("require_approval");
+		).toBe("allow");
 	});
 
 	test("peer overrides fold most-restrictive: a per-type auto cannot loosen a per-agent approval", async () => {
@@ -445,17 +446,19 @@ describe("resolveWritePolicyDecision (agent_config)", () => {
 		).toBe("allow");
 	});
 
-	test("default: agent create/update queue approval, delete is denied", async () => {
+	test("default: agent create/update apply, delete is denied", async () => {
 		const sql = stubSql([]);
-		expect(
-			await resolveWritePolicyDecision({
-				organizationId: ORG,
-				resourceClass: "agent_config",
-				principalKind: "agent",
-				action: "create",
-				sql,
-			}),
-		).toBe("require_approval");
+		for (const action of ["create", "update"] as const) {
+			expect(
+				await resolveWritePolicyDecision({
+					organizationId: ORG,
+					resourceClass: "agent_config",
+					principalKind: "agent",
+					action,
+					sql,
+				}),
+			).toBe("allow");
+		}
 		expect(
 			await resolveWritePolicyDecision({
 				organizationId: ORG,
@@ -467,14 +470,14 @@ describe("resolveWritePolicyDecision (agent_config)", () => {
 		).toBe("deny");
 	});
 
-	test("an org policy row can loosen the agent_config default to auto", async () => {
+	test("an org policy row can loosen the agent_config delete default to auto", async () => {
 		expect(
 			await resolveWritePolicyDecision({
 				organizationId: ORG,
 				resourceClass: "agent_config",
 				principalKind: "agent",
-				action: "update",
-				sql: stubSql([{ resource_class: "agent_config", update_mode: "auto" }]),
+				action: "delete",
+				sql: stubSql([{ resource_class: "agent_config", delete_mode: "auto" }]),
 			}),
 		).toBe("allow");
 	});
@@ -487,9 +490,9 @@ describe("resolveWritePolicyDecision (agent_config)", () => {
 				resourceClass: "agent_config",
 				principalKind: "agent",
 				action: "update",
-				sql: stubSql([{ resource_class: "entity", update_mode: "auto" }]),
+				sql: stubSql([{ resource_class: "entity", update_mode: "deny" }]),
 			}),
-		).toBe("require_approval");
+		).toBe("allow");
 	});
 });
 

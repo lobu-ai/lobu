@@ -440,7 +440,7 @@ export const OperationPolicyExplanationSchema = Type.Object({
   reason: Type.Union([
     Type.Literal("matched_rule"),
     Type.Literal("guardrail"),
-    Type.Literal("default_approval"),
+    Type.Literal("default_auto"),
     Type.Literal("device_owner"),
     Type.Literal("unresolved_principal"),
     Type.Literal("parent_approval"),

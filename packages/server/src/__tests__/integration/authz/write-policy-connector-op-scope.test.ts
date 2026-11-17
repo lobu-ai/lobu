@@ -61,13 +61,13 @@ describe("connector_action per-operation scope", () => {
 		expect(await execFor(orgId, "demo.first", "send")).toBe("deny");
 	});
 
-	it("unmatched writes default to Ask", async () => {
+	it("unmatched writes default to Auto", async () => {
 		await upsertEntityApprovalPolicy(orgId, {
 			resourceClass: "connector_action",
-			operationKey: qualifiedOperationKey("demo.first", "send"), effects: { execute: "auto" },
+			operationKey: qualifiedOperationKey("demo.first", "send"), effects: { execute: "approval" },
 		});
-		expect(await execFor(orgId, "demo.first", "inspect")).toBe("approval");
-		expect(await execFor(orgId, "demo.first", "send")).toBe("auto");
+		expect(await execFor(orgId, "demo.first", "inspect")).toBe("auto");
+		expect(await execFor(orgId, "demo.first", "send")).toBe("approval");
 	});
 
 	it("an exact org Auto overrides the broader org Block for that operation", async () => {

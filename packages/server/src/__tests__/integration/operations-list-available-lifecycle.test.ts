@@ -1094,9 +1094,9 @@ describe("operations.listAvailable — capability discovery DTO", () => {
 	});
 });
 
-it("reports Ask for an unmatched write operation", async () => {
-	const { org, user } = await setupOwner("Ops Default Ask Org");
-	await seedConnector(org.id, KEY_READY, "Default Ask Connector");
+it("reports Auto for an unmatched write operation", async () => {
+	const { org, user } = await setupOwner("Ops Default Auto Org");
+	await seedConnector(org.id, KEY_READY, "Default Auto Connector");
 	await createTestConnection({
 		organization_id: org.id,
 		connector_key: KEY_READY,
@@ -1105,5 +1105,5 @@ it("reports Ask for an unmatched write operation", async () => {
 	const { operations } = await listAll(org.id, user.id, {
 		connector_key: KEY_READY,
 	});
-	expect(getOperation(operations, "create_issue").policy).toMatchObject({ effect: "approval", reason: "default_approval" });
+	expect(getOperation(operations, "create_issue").policy).toMatchObject({ effect: "auto", reason: "default_auto" });
 });

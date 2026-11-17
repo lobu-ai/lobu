@@ -200,6 +200,53 @@ describe("manage_entity write-denial audit", () => {
 		expect(stored).not.toContain(secretValue);
 	});
 
+	it("applies an agent's entity delete with no rule and holds it under an approval rule", async () => {
+		const org = await createTestOrganization({ name: "Default Delete Org" });
+		const user = await createTestUser();
+		await addUserToOrganization(user.id, org.id, "owner");
+		const agent = await createTestAgent({
+			organizationId: org.id,
+			ownerUserId: user.id,
+		});
+		const ctx = agentContext(org.id, user.id, agent.agentId);
+		const unruled = await createTestEntity({
+			organization_id: org.id,
+			entity_type: "brand",
+			name: "Deleted with no rule",
+			created_by: user.id,
+		});
+
+		const applied = await manageEntity(
+			{ action: "delete", entity_id: unruled.id },
+			env,
+			ctx,
+		);
+		expect(applied).toMatchObject({ success: true });
+		expect(applied).not.toHaveProperty("approval_queued");
+		const [tombstoned] = await getTestDb()`
+			SELECT deleted_at FROM entities WHERE id = ${unruled.id}
+		`;
+		expect(tombstoned.deleted_at).not.toBeNull();
+
+		await policyEffect(org.id, agent.agentId, "delete", "approval");
+		const held = await createTestEntity({
+			organization_id: org.id,
+			entity_type: "brand",
+			name: "Held by an approval rule",
+			created_by: user.id,
+		});
+		const queued = await manageEntity(
+			{ action: "delete", entity_id: held.id },
+			env,
+			ctx,
+		);
+		expect(queued).toMatchObject({ success: false, approval_queued: true });
+		const [live] = await getTestDb()`
+			SELECT deleted_at FROM entities WHERE id = ${held.id}
+		`;
+		expect(live.deleted_at).toBeNull();
+	});
+
 	it("persists an anchored delete denial while leaving the entity live", async () => {
 		const org = await createTestOrganization({ name: "Denied Delete Audit Org" });
 		const user = await createTestUser();

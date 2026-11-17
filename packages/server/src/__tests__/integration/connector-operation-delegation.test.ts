@@ -95,6 +95,7 @@ describe("connector delegation through the public operation lifecycle", () => {
   beforeEach(cleanupTestDatabase);
   it("preserves child Ask, requester, approval card and idempotent replay", async () => {
     const { params, org, agent } = await fixture();
+    await upsertEntityApprovalPolicy(org.id, { resourceClass: "connector_action", connectorKey: "os.shell", effects: { execute: "approval" } });
     const result = await executeConnectorOperation(params);
     expect(result).toMatchObject({ status: "pending_approval" });
     if (!("run_id" in result)) throw new Error(JSON.stringify(result));

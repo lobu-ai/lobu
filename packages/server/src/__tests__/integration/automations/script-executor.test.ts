@@ -20,6 +20,7 @@ import { TaskScheduler } from '../../../scheduled/task-scheduler';
 import { AUTOMATION_PREPARATION_TASK, AUTOMATION_SCRIPT_TASK } from '../../../scheduled/task-definitions';
 import type { AutomationScriptTaskPayload } from '../../../automations/script-enqueue';
 import { assertAutomationScriptExecutor } from '../../../automations/script-config';
+import { upsertEntityApprovalPolicy } from '../../../authz/entity-policy';
 import { runAutomationPreparationTask, reconcileAutomationPreparationRuns } from '../../../automations/preparation-task';
 import { claimPendingAutomationRun } from '../../../runs/queue-service';
 import { ensureMemberEntityType } from '../../../utils/member-entity-type';
@@ -310,6 +311,7 @@ describe('Automation script executor', () => {
       await client.automations.update({ automation_id: String(ctx.automation.id), tags: ['approval-fixture'] });
       return { finance_snapshot: [{ total: 42 }] };
     }`);
+    await upsertEntityApprovalPolicy(seed.workspace.org.id, { resourceClass: 'agent_config', effects: { update: 'approval' } });
     await seed.prepare();
     const [run] = await seed.sql`SELECT status, error_message, run_metadata FROM runs WHERE id = ${seed.runId}`;
     expect(run.status).toBe('failed');

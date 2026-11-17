@@ -65,7 +65,8 @@ export const GetAgentAction = Type.Object({
 
 export const CreateAgentAction = Type.Object({
   action: Type.Literal("create", {
-    description: "Create an agent owned by the caller (queued for approval).",
+    description:
+      "Create an agent owned by the caller. An agent caller is held for approval only when a policy rule asks.",
   }),
   agent_id: AgentId,
   name: AgentFields.name,
@@ -82,7 +83,8 @@ export const AgentConfigRevisionSchema = Type.String({
 
 export const UpdateAgentAction = Type.Object({
   action: Type.Literal("update", {
-    description: "Patch agent fields (queued for approval).",
+    description:
+      "Patch agent fields. An agent caller is held for approval only when a policy rule asks.",
   }),
   agent_id: AgentId,
   name: Type.Optional(AgentFields.name),
@@ -95,7 +97,8 @@ export const UpdateAgentAction = Type.Object({
 
 export const DeleteAgentAction = Type.Object({
   action: Type.Literal("delete", {
-    description: "Delete an agent (queued for approval).",
+    description:
+      "Delete an agent. Agent callers are blocked unless a policy rule allows it.",
   }),
   agent_id: AgentId,
 });

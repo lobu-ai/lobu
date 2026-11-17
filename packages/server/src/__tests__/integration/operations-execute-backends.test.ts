@@ -225,6 +225,10 @@ describe("operations.execute backend lifecycle", () => {
 		secondMcpConnectionId = secondMcp.id;
 		httpConnectionId = http.id;
 		for (const [connectorKey, keys] of [[LOCAL, ["echo", "stage_browser", "download"]], [MCP, ["remote_echo"]], [HTTP, ["create_item", "get_repo", "get_content", "get_environment"]]] as const) {
+			// Every other action of these connectors asks, so the approval cases have something to hold.
+			await upsertEntityApprovalPolicy(orgId, {
+				resourceClass: "connector_action", connectorKey, effects: { execute: "approval" },
+			});
 			for (const operationKey of keys) await upsertEntityApprovalPolicy(orgId, {
 				resourceClass: "connector_action", operationKey: `${connectorKey}::${operationKey}`, effects: { execute: "auto" },
 			});

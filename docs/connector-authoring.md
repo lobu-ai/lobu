@@ -363,11 +363,11 @@ Browser operations continue through `ctx.browser`, which additionally enforces
 declared origins, account binding and interactive page activation.
 
 The organization chooses Auto, Ask, or Block through its connector policies.
-Unmatched actions require approval. Declaring an action as non-destructive does
-not make it Auto: add an explicit policy for that connector or operation when
-automatic execution is intended. OpenAPI-imported POST operations remain writes,
-even for side-effect-free APIs such as classification; an explicit Auto policy
-authorizes those calls without provider-specific runtime code.
+Unmatched actions run automatically (Auto). To hold or block an action, add an
+Ask or Block rule, or a guardrail that no narrower Auto rule can override.
+Declaring an action as destructive does not hold it: holds come only from
+policy. OpenAPI-imported POST operations remain writes, even for
+side-effect-free APIs such as classification.
 
 Manage organization connector rules as a collection at
 `/api/<workspace>/write-permissions/connector-actions`. `GET` returns only saved
@@ -378,7 +378,7 @@ new rules and changed decisions require valid targets.
 The generic single-rule write endpoint rejects organization connector rules.
 Agent restrictions and other policy classes retain their existing APIs and are
 preserved by collection replacements. An empty `rules` array removes
-organization connector rules, so unmatched actions require Ask.
+organization connector rules, so every action runs Auto.
 
 Each rule has an `effect` (`auto`, `approval`, or `deny`) and optional scope:
 `connector_key` or `connection_id`, plus `operation_category` or `operation_key`

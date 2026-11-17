@@ -319,10 +319,14 @@ export function defaultEntityApprovalPolicy(
 		entityTypeSlug: null,
 		fieldPath: null,
 		entityId: null,
-		createMode: "auto",
-		updateMode: "auto",
-		deleteMode: "approval",
-		effects: { create: "auto", update: "auto", delete: "approval" },
+		createMode: defaultEffectFor("entity", "create"),
+		updateMode: defaultEffectFor("entity", "update"),
+		deleteMode: defaultEffectFor("entity", "delete"),
+		effects: {
+			create: defaultEffectFor("entity", "create"),
+			update: defaultEffectFor("entity", "update"),
+			delete: defaultEffectFor("entity", "delete"),
+		},
 		kind: "grant",
 		note: null,
 		deliveryTarget: {
@@ -1162,10 +1166,10 @@ function actionEffectSetForInput(
 	resourceClass: WriteResourceClass,
 	input: EntityApprovalPolicyInput,
 ): Array<{ action: WriteAction; effect: EntityMutationMode }> {
+	// An effect this class does not declare fails closed. Falling back to the
+	// class default would turn an unrecognised hold into Auto.
 	const clamp = (action: WriteAction, effect: EntityMutationMode) =>
-		isLegalActionEffect(resourceClass, action, effect)
-			? effect
-			: defaultEffectFor(resourceClass, action);
+		isLegalActionEffect(resourceClass, action, effect) ? effect : "deny";
 	// Raw effects map wins when provided (the agent Permissions path). Persist ONLY
 	// the actions the caller named — this is a SPARSE override, so an omitted action
 	// must NOT get an explicit row that pins it to the class default. A stored row
@@ -1189,15 +1193,15 @@ function actionEffectSetForInput(
 	return [
 		{
 			action: "create",
-			effect: clamp("create", normalizeMode(input.createMode, "auto")),
+			effect: clamp("create", normalizeMode(input.createMode, defaultEffectFor(resourceClass, "create"))),
 		},
 		{
 			action: "update",
-			effect: clamp("update", normalizeMode(input.updateMode, "auto")),
+			effect: clamp("update", normalizeMode(input.updateMode, defaultEffectFor(resourceClass, "update"))),
 		},
 		{
 			action: "delete",
-			effect: clamp("delete", normalizeMode(input.deleteMode, "approval")),
+			effect: clamp("delete", normalizeMode(input.deleteMode, defaultEffectFor(resourceClass, "delete"))),
 		},
 	];
 }

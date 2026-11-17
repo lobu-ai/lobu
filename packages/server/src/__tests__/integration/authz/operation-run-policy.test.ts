@@ -34,6 +34,7 @@ const connectorKey = 'policy-dispatch-fixture';
 let organizationId: string;
 let connectionId: number;
 let ownerId: string;
+let askConnectorRuleId: number;
 
 async function approvalNotifications() {
   return sql`SELECT e.id, e.metadata, e.payload_data FROM events e
@@ -92,6 +93,10 @@ describe('operation policy at durable dispatch', () => {
       scroll: { name: 'Scroll', kind: 'write' },
     })} WHERE organization_id = ${organizationId} AND key = ${connectorKey}`;
     connectionId = (await createTestConnection({ organization_id: organizationId, connector_key: connectorKey, createDefaultFeed: false })).id;
+    // These cases exercise held runs, so the fixture connector asks unless a narrower rule says otherwise.
+    askConnectorRuleId = (await upsertEntityApprovalPolicy(organizationId, {
+      resourceClass: 'connector_action', connectorKey, effects: { execute: 'approval' },
+    })).id;
   });
   afterAll(cleanupTestDatabase);
   afterEach(() => __setChatInstanceManagerForTests(null));
@@ -295,6 +300,29 @@ describe('operation policy at durable dispatch', () => {
     expect(post.mock.calls[0]?.slice(0, 2)).toEqual(['late-approval-chat', 'slack:C_LATE']);
     const [delivered] = await sql`SELECT metadata FROM events WHERE id = ${notification.id}`;
     expect(delivered.metadata.delivery[0].attempts.at(-1).status).toBe('provider_accepted');
+  });
+
+  it('runs an owner agent\'s unruled write without asking, while a guardrail still holds it', async () => {
+    await sql`DELETE FROM write_approval_policies WHERE id = ${askConnectorRuleId}`;
+    const agent = await createTestAgent({ organizationId, agentId: 'unruled-write-agent', ownerUserId: ownerId });
+    const execute = async () => await handleExecute({
+      action: 'execute', connection_id: connectionId, operation_key: 'perform', input: {},
+    }, {
+      organizationId, userId: ownerId, agentId: agent.agentId, memberRole: 'owner',
+      isAuthenticated: true, tokenType: 'session', scopedToOrg: true,
+      baseUrl: 'https://gateway.example.test/lobu',
+    } as ToolContext, {} as Env) as { run_id: number; status: string };
+    // Admitted without a hold: the run goes straight to its backend.
+    const ran = await execute();
+    expect(ran.status).not.toBe('pending_approval');
+    expect(await state(ran.run_id)).toMatchObject({ approval_status: 'auto' });
+    expect(await approvalNotifications()).toHaveLength(0);
+    await upsertEntityApprovalPolicy(organizationId, {
+      resourceClass: 'connector_action', kind: 'guardrail', connectorKey, effects: { execute: 'approval' },
+    });
+    const held = await execute();
+    expect(held.status).toBe('pending_approval');
+    expect(await state(held.run_id)).toMatchObject({ approval_status: 'pending' });
   });
 
   it('the inline executor parks and notifies before invoking its backend', async () => {

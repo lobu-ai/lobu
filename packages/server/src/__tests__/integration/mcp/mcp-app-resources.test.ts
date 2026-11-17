@@ -1515,6 +1515,12 @@ describe('MCP App resources — ui:// serving (host-authored view)', () => {
   });
 
   it('returns approval data without UI and resolves it only with the hidden app capability', async () => {
+    await upsertEntityApprovalPolicy(org.id, {
+      resourceClass: 'agent_config',
+      principalKind: 'agent',
+      principalId: actingAgent.agentId,
+      effects: { create: 'approval' },
+    });
     const creationSessionId = await initSession(`/mcp/${org.slug}`, {
       agentId: actingAgent.agentId,
     });

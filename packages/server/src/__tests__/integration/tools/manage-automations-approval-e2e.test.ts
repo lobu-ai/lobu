@@ -4,9 +4,10 @@
  * WRITE definition actions (create/update/delete/create_version/…) route through
  * the same `agent_config` write-gate class as manage_agents:
  *   - A HUMAN member applies immediately — no run, no approval card.
- *   - An AGENT-driven write follows the org policy (default: create/update queue
- *     a pending `runs` row + approval event; delete is denied). Approving via
- *     manage_operations applies the held mutation and supersedes the pending card.
+ *   - An AGENT-driven write follows the org policy. With no rule create/update
+ *     apply and delete is denied; an approval rule (set in beforeAll here) queues
+ *     a pending `runs` row + approval event. Approving via manage_operations
+ *     applies the held mutation and supersedes the pending card.
  *
  * Covers:
  *   - agent create → pending_approval (NOT 403), no automation row yet
@@ -142,6 +143,12 @@ describe("manage_automations — builder gate e2e", () => {
 			agentId
 		);
 		agentCtx.mcpSessionId = "session-manage-automations";
+		// These tests exercise the approval queue, which an explicit rule turns on:
+		// with no rule an agent's create/update applies directly.
+		await upsertEntityApprovalPolicy(org.id, {
+			resourceClass: "agent_config",
+			effects: { create: "approval", update: "approval" },
+		});
 	});
 
 	it.each([

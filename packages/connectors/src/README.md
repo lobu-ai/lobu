@@ -380,8 +380,8 @@ Actions let connectors write back to external services (e.g. create a GitHub
 issue). Define them in the `actions` record passed to `defineConnector`. The
 record key becomes the action key. Declare what the operation does; the
 organization controls approval through Auto, Ask, or Block policies. An action
-with no matching policy requires approval. A non-destructive hint does not grant
-automatic execution:
+with no matching policy runs automatically; add an Ask or Block rule, or a
+guardrail, to hold it. A destructive hint does not hold an action by itself:
 
 ```typescript
 interface ConnectorActionSpec {

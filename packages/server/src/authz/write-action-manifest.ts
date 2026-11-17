@@ -53,9 +53,9 @@ interface ClassManifest {
 
 /**
  * Per-class legal actions/effects + no-row defaults. Defaults are stated
- * EXPLICITLY for every legal action (never an implicit `auto`) — an implicit
- * default would be a silent security downgrade for a class like agent_config
- * whose delete must default to deny.
+ * EXPLICITLY for every legal action, so an action a class does not declare
+ * resolves to deny rather than an implicit `auto`. Holds and blocks come from
+ * explicit rules; the defaults below are what applies when none matches.
  */
 export const WRITE_ACTION_MANIFEST: Readonly<
 	Record<WriteResourceClass, ClassManifest>
@@ -65,13 +65,14 @@ export const WRITE_ACTION_MANIFEST: Readonly<
 		// the read gate — you can't "queue" a read for human review usefully).
 		actions: ["read", "create", "update", "delete"],
 		effects: ["auto", "approval", "deny"],
-		// Matches the historical entity default (create/update auto, delete approval).
-		// read defaults auto so existing agents keep unrestricted org-entity access.
+		// With no matching rule an agent reads and writes entities directly. Entity
+		// delete is a soft delete (tombstone), so an Ask or Block rule is how a
+		// workspace holds it.
 		defaultEffect: {
 			read: "auto",
 			create: "auto",
 			update: "auto",
-			delete: "approval",
+			delete: "auto",
 		},
 	},
 	agent_config: {
@@ -81,24 +82,24 @@ export const WRITE_ACTION_MANIFEST: Readonly<
 		// first-class handoff path exists.
 		actions: ["read", "create", "update", "delete"],
 		effects: ["auto", "approval", "deny"],
-		// An agent editing agent definitions is high-trust: create/update queue an
-		// approval, delete is denied outright (a human must delete an agent).
-		// read defaults auto so existing agents keep unrestricted peer visibility.
+		// With no matching rule an agent reads, creates and updates agents directly.
+		// Delete stays denied: deleting an agent is a hard delete that cascades its
+		// bindings, connections and grants, so a human deletes agents.
 		// Target exceptions only tighten (max-restrictive fold): use default auto +
 		// per-target deny to blacklist; a per-target auto cannot open a blanket deny.
 		defaultEffect: {
 			read: "auto",
-			create: "approval",
-			update: "approval",
+			create: "auto",
+			update: "auto",
 			delete: "deny",
 		},
 	},
 	connector_action: {
-		// All operations use org policy; category rules can grant reads Auto.
+		// All operations use org policy; an action no rule matches runs Auto.
 		actions: ["execute"],
 		effects: ["auto", "approval", "deny"],
 		defaultEffect: {
-			execute: "approval",
+			execute: "auto",
 		},
 	},
 	entity_schema: {

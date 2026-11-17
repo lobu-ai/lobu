@@ -124,12 +124,12 @@ describe("write-gate floor + single-envelope semantics", () => {
 		).toBe("deny");
 	});
 
-	it("class default is a starting point: an explicit row loosens agent_config update to auto", async () => {
-		// Default agent_config update is `approval`. An explicit org row sets auto.
+	it("class default is a starting point: an explicit row loosens agent_config delete to auto", async () => {
+		// Default agent_config delete is `deny`. An explicit org row sets auto.
 		await seedPolicy({
 			orgId,
 			resourceClass: "agent_config",
-			effects: [{ action: "update", effect: "auto" }],
+			effects: [{ action: "delete", effect: "auto" }],
 		});
 		expect(
 			await resolveWritePolicyDecision({
@@ -137,21 +137,22 @@ describe("write-gate floor + single-envelope semantics", () => {
 				resourceClass: "agent_config",
 				principalKind: "agent",
 				principalId: "agent-1",
-				action: "update",
+				action: "delete",
 			}),
 		).toBe("allow");
 	});
 
-	it("no row → class default applies (agent_config update = approval)", async () => {
-		expect(
-			await resolveWritePolicyDecision({
+	it("no row → class default applies (agent_config update = auto, delete = deny)", async () => {
+		const decide = (action: "update" | "delete") =>
+			resolveWritePolicyDecision({
 				organizationId: orgId,
 				resourceClass: "agent_config",
 				principalKind: "agent",
 				principalId: "agent-1",
-				action: "update",
-			}),
-		).toBe("require_approval");
+				action,
+			});
+		expect(await decide("update")).toBe("allow");
+		expect(await decide("delete")).toBe("deny");
 	});
 
 	it("chat and automation share one envelope: same agent policy binds both modes", async () => {
@@ -379,7 +380,7 @@ describe("write-gate floor + single-envelope semantics", () => {
 				entityTypeSlug: "person",
 			}),
 		).toBe("allow");
-		// delete default = approval → require_approval (NOT deny from the field row).
+		// delete default = auto → allow (NOT deny from the field row).
 		expect(
 			await evaluateEntityMutation({
 				organizationId: orgId,
@@ -388,7 +389,7 @@ describe("write-gate floor + single-envelope semantics", () => {
 				action: "delete",
 				entityTypeSlug: "person",
 			}),
-		).toBe("require_approval");
+		).toBe("allow");
 	});
 
 	it("a sparse effects input persists ONLY the named actions (untouched stay abstaining)", async () => {
