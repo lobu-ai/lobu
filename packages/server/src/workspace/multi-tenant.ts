@@ -6,6 +6,7 @@ import {
 import { getAuthConfig as getAuthConfigFromEnv } from '../auth/config';
 import { createAuth } from '../auth/index';
 import { OAuthProvider } from '../auth/oauth/provider';
+import { formatUngrantedMemberMessage } from '../auth/oauth/workspace-grants';
 import {
   buildMcpBearerChallenge,
   getMcpResourceForRequest,
@@ -138,11 +139,13 @@ export class MultiTenantProvider implements WorkspaceProvider {
         },
         404
       );
-    const oauthWorkspaceUnavailable = () =>
+    const oauthWorkspaceUnavailable = (
+      description = 'Workspace is not available for this authorization'
+    ) =>
       c.json(
         {
           error: 'forbidden',
-          error_description: 'Workspace is not available for this authorization',
+          error_description: description,
         },
         403
       );
@@ -670,7 +673,13 @@ export class MultiTenantProvider implements WorkspaceProvider {
         isMcpRoute;
 
       if (!oauthTargetGranted && !allowPublicOrgWithoutMembership) {
-        return oauthWorkspaceUnavailable();
+        // A live member whose grant predates the membership gets the
+        // re-consent fix. Everyone else keeps the answer an unknown slug
+        // gets, so the grant gate never confirms a workspace exists.
+        const memberSlug = role ? await getLiveOrganizationSlug(effectiveOrgId) : null;
+        return memberSlug
+          ? oauthWorkspaceUnavailable(formatUngrantedMemberMessage(memberSlug))
+          : oauthWorkspaceUnavailable();
       }
 
       if (!role && !allowPublicOrgWithoutMembership) {

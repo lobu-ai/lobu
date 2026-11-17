@@ -11,6 +11,7 @@ import { createHash } from 'node:crypto';
 import { MCP_PROTOCOL_VERSION } from '@lobu/core';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { createAuthorizationIntent } from '../../../auth/oauth/authorization-intent';
+import { formatUngrantedMemberMessage } from '../../../auth/oauth/workspace-grants';
 import { hashToken } from '../../../auth/oauth/utils';
 import { parsePgTextArray } from '../../../db/client';
 import { clearInMemoryMcpSessionsForTests } from '../../../mcp-handler';
@@ -592,33 +593,39 @@ describe('MCP Authentication', () => {
       });
       expect(grantedRead.status).toBe(200);
 
-      const ungrantedRead = await post(`/api/${org2.slug}/search_memory`, {
-        body: {
-          query: 'oauth-rest-ungranted-probe',
-          include_public_catalogs: false,
-        },
-        token,
-      });
+      // The caller is a member of org2 but the grant predates it: the denial
+      // names the workspace with the re-consent fix. A workspace the caller
+      // does not belong to and an unknown slug stay indistinguishable.
+      const foreignOrg = await createTestOrganization({ name: 'Foreign Grant Org' });
+      const ungrantedMember = {
+        error: 'forbidden',
+        error_description: formatUngrantedMemberMessage(org2.slug),
+      };
+      const unavailable = {
+        error: 'forbidden',
+        error_description: 'Workspace is not available for this authorization',
+      };
+      const restRead = (slug: string) =>
+        post(`/api/${slug}/search_memory`, {
+          body: { query: 'oauth-rest-ungranted-probe', include_public_catalogs: false },
+          token,
+        });
+
+      const ungrantedRead = await restRead(org2.slug);
       const ungrantedWrite = await post(`/api/${org2.slug}/save_memory`, {
         body: {},
         token,
       });
       expect(ungrantedRead.status).toBe(403);
       expect(ungrantedWrite.status).toBe(403);
-      const unavailable = {
-        error: 'forbidden',
-        error_description: 'Workspace is not available for this authorization',
-      };
-      const ungrantedReadBody = await ungrantedRead.json();
-      expect(ungrantedReadBody).toEqual(unavailable);
-      expect(await ungrantedWrite.json()).toEqual(unavailable);
+      expect(await ungrantedRead.json()).toEqual(ungrantedMember);
+      expect(await ungrantedWrite.json()).toEqual(ungrantedMember);
 
-      const unknownRead = await post('/api/unknown-oauth-workspace/search_memory', {
-        body: { query: 'oauth-rest-unknown-probe', include_public_catalogs: false },
-        token,
-      });
-      expect(unknownRead.status).toBe(ungrantedRead.status);
-      expect(await unknownRead.json()).toEqual(ungrantedReadBody);
+      for (const slug of [foreignOrg.slug, 'unknown-oauth-workspace']) {
+        const denied = await restRead(slug);
+        expect(denied.status).toBe(403);
+        expect(await denied.json()).toEqual(unavailable);
+      }
 
       const initializeBody = {
         jsonrpc: '2.0',
@@ -634,15 +641,13 @@ describe('MCP Authentication', () => {
         body: initializeBody,
         token,
       });
-      const unknownMcp = await post('/mcp/unknown-oauth-workspace', {
-        body: initializeBody,
-        token,
-      });
-      const ungrantedMcpBody = await ungrantedMcp.json();
       expect(ungrantedMcp.status).toBe(403);
-      expect(ungrantedMcpBody).toEqual(unavailable);
-      expect(unknownMcp.status).toBe(ungrantedMcp.status);
-      expect(await unknownMcp.json()).toEqual(ungrantedMcpBody);
+      expect(await ungrantedMcp.json()).toEqual(ungrantedMember);
+      for (const slug of [foreignOrg.slug, 'unknown-oauth-workspace']) {
+        const denied = await post(`/mcp/${slug}`, { body: initializeBody, token });
+        expect(denied.status).toBe(403);
+        expect(await denied.json()).toEqual(unavailable);
+      }
 
       const { token: mcpBoundToken } = await createAccountAccessToken(
         user.id,
@@ -1766,7 +1771,7 @@ describe('MCP Authentication', () => {
       expect(response.status).toBe(403);
       expect(await response.json()).toEqual({
         error: 'forbidden',
-        error_description: 'Workspace is not available for this authorization',
+        error_description: formatUngrantedMemberMessage(org2.slug),
       });
     });
 
