@@ -340,11 +340,14 @@ describe('chat turn: the sender\'s workspaces, reachable from a direct message o
     const connection = await createTestConnection({
       organization_id: personal.id, connector_key: CONNECTOR_KEY, created_by: sender.id, visibility: 'private',
     });
-    // The personal workspace blocks one action. The other has no rule there,
-    // so its default (ask) applies, even though the home workspace would run
-    // the same action without asking. Neither runs here.
+    // The personal workspace asks for one action and blocks the other, even
+    // though the home workspace would run the first without asking. Neither
+    // runs here.
     await upsertEntityApprovalPolicy(home.id, {
       resourceClass: 'connector_action', operationKey: `${CONNECTOR_KEY}::echo`, effects: { execute: 'auto' },
+    });
+    await upsertEntityApprovalPolicy(personal.id, {
+      resourceClass: 'connector_action', operationKey: `${CONNECTOR_KEY}::echo`, effects: { execute: 'approval' },
     });
     await upsertEntityApprovalPolicy(personal.id, {
       resourceClass: 'connector_action', operationKey: `${CONNECTOR_KEY}::wipe`, effects: { execute: 'deny' },

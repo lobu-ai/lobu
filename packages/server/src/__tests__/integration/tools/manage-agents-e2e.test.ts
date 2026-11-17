@@ -7,10 +7,10 @@
  * write-gate class. The decision is per-principal:
  *   - A HUMAN member applies immediately — no run, no approval card. Role
  *     restrictions for humans live in the tool-access tier (admin-only).
- *   - An AGENT-driven write follows the org policy (default: create/update queue
- *     a pending `runs` row + approval card, applied on approve / cancelled on
- *     reject; delete is denied). This is the durable runs/events primitive that
- *     manage_operations uses.
+ *   - An AGENT-driven write follows the org policy. With no rule create/update
+ *     apply and delete is denied; an approval rule queues a pending `runs` row +
+ *     approval card, applied on approve / cancelled on reject. This is the
+ *     durable runs/events primitive that manage_operations uses.
  *
  * Covers:
  *   - human owner: create/update/delete apply immediately.
@@ -28,6 +28,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import {
 	evaluateEntityMutation,
 	resolveActingPrincipal,
+	upsertEntityApprovalPolicy,
 } from "../../../authz/entity-policy";
 import type { Env } from "../../../index";
 import {
@@ -136,6 +137,92 @@ describe("manage_agents — builder gate e2e", () => {
 		);
 		agentCtx.mcpSessionId = "session-manage-agents";
 		memberCtx = baseCtx(org.id, member.id, "member", ["mcp:read", "mcp:write"]);
+		// The held-flow tests below exercise the approval gate, which an explicit
+		// rule turns on: with no rule an agent's create/update applies directly.
+		await upsertEntityApprovalPolicy(org.id, {
+			resourceClass: "agent_config",
+			effects: { create: "approval", update: "approval" },
+		});
+	});
+
+	it("with no rule an agent creates and updates agents directly; explicit rules hold and block", async () => {
+		const org = await createTestOrganization({ name: "manage_agents default auto" });
+		await addUserToOrganization(ownerId, org.id, "owner");
+		await createTestAgent({
+			organizationId: org.id,
+			agentId: "default-builder",
+			ownerUserId: ownerId,
+		});
+		const ctx = baseCtx(
+			org.id,
+			ownerId,
+			"owner",
+			["mcp:read", "mcp:write", "mcp:admin"],
+			"default-builder",
+		);
+
+		const created = (await executeTool(
+			"manage_agents",
+			{ action: "create", agent_id: "direct-bot", name: "Direct Bot" },
+			TEST_ENV,
+			ctx,
+		)) as { status?: string };
+		expect(created.status).not.toBe("pending_approval");
+		expect(await agentExists(org.id, "direct-bot")).toBe(true);
+
+		const updated = (await executeTool(
+			"manage_agents",
+			{ action: "update", agent_id: "direct-bot", name: "Renamed Bot" },
+			TEST_ENV,
+			ctx,
+		)) as { status?: string };
+		expect(updated.status).not.toBe("pending_approval");
+		const [row] = await getTestDb()`
+			SELECT name FROM agents WHERE organization_id = ${org.id} AND id = 'direct-bot'
+		`;
+		expect(row?.name).toBe("Renamed Bot");
+
+		// Deleting an agent is a hard delete, so it stays denied without a rule.
+		await expect(
+			executeTool(
+				"manage_agents",
+				{ action: "delete", agent_id: "direct-bot" },
+				TEST_ENV,
+				ctx,
+			),
+		).rejects.toThrow();
+		expect(await agentExists(org.id, "direct-bot")).toBe(true);
+
+		await upsertEntityApprovalPolicy(org.id, {
+			resourceClass: "agent_config",
+			effects: { create: "approval", update: "approval" },
+		});
+		const held = (await executeTool(
+			"manage_agents",
+			{ action: "create", agent_id: "held-bot", name: "Held Bot" },
+			TEST_ENV,
+			ctx,
+		)) as PendingApproval;
+		expect(held.status).toBe("pending_approval");
+		expect(await agentExists(org.id, "held-bot")).toBe(false);
+
+		await upsertEntityApprovalPolicy(org.id, {
+			resourceClass: "agent_config",
+			targetAgentId: "direct-bot",
+			effects: { update: "deny" },
+		});
+		await expect(
+			executeTool(
+				"manage_agents",
+				{ action: "update", agent_id: "direct-bot", name: "Blocked" },
+				TEST_ENV,
+				ctx,
+			),
+		).rejects.toThrow();
+		const [unchanged] = await getTestDb()`
+			SELECT name FROM agents WHERE organization_id = ${org.id} AND id = 'direct-bot'
+		`;
+		expect(unchanged?.name).toBe("Renamed Bot");
 	});
 
 

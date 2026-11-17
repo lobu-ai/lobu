@@ -9,6 +9,7 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { upsertEntityApprovalPolicy } from "../../authz/entity-policy";
 import type { Env } from "../../index";
 import { reapStaleRuns } from "../../scheduled/check-stalled-executions";
 import { manageOperations } from "../../tools/admin/manage_operations";
@@ -66,6 +67,12 @@ describe("stale-run reaper claim clock for approved action runs", () => {
 			})}
 			WHERE organization_id = ${orgId} AND key = ${CONNECTOR}
 		`;
+		// The action is held only because a rule asks: unruled actions run Auto.
+		await upsertEntityApprovalPolicy(orgId, {
+			resourceClass: "connector_action",
+			connectorKey: CONNECTOR,
+			effects: { execute: "approval" },
+		});
 		const conn = await createTestConnection({
 			organization_id: orgId,
 			connector_key: CONNECTOR,

@@ -915,7 +915,7 @@ function orgGated<A>(
  * Route one agent write through the `agent_config` write-gate class. The policy
  * decides per (principal, action): a human member applies immediately, an
  * agent/automation-driven write follows the org's policy (default: create/update
- * queue an approval, delete is denied). `require_approval` → queue a pending run
+ * apply, delete is denied). `require_approval` → queue a pending run
  * + card; `allow` → run the apply* handler now; `deny` → refuse.
  */
 async function dispatchAgentWrite(

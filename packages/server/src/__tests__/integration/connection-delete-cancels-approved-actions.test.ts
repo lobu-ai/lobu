@@ -10,6 +10,7 @@
  */
 
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { upsertEntityApprovalPolicy } from "../../authz/entity-policy";
 import type { Env } from "../../index";
 import { manageConnections } from "../../tools/admin/manage_connections";
 import { manageOperations } from "../../tools/admin/manage_operations";
@@ -66,6 +67,12 @@ describe("connection delete cancels approved-but-unclaimed action runs", () => {
 			})}
 			WHERE organization_id = ${orgId} AND key = ${CONNECTOR}
 		`;
+		// The action is held only because a rule asks: unruled actions run Auto.
+		await upsertEntityApprovalPolicy(orgId, {
+			resourceClass: "connector_action",
+			connectorKey: CONNECTOR,
+			effects: { execute: "approval" },
+		});
 	});
 
 	async function queueAndApprove(connectionId: number): Promise<number> {

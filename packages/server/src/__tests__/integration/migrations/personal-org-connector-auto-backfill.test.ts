@@ -35,13 +35,16 @@ async function connectorRules(organizationId: string) {
   `;
 }
 
-const writeEffect = async (organizationId: string) =>
-  (await resolveConnectorPolicy({
+/** A write matches no read seed, so it runs by default; the backfilled rule matches it. */
+const writeDecision = async (organizationId: string) => {
+  const { effect, reason } = await resolveConnectorPolicy({
     organizationId,
     connectionId: null,
     operation: { connector_key: 'demo.browser', operation_key: 'navigate', kind: 'write' },
     actor,
-  })).effect;
+  });
+  return { effect, reason };
+};
 
 describe('personal org connector auto policy backfill', () => {
   beforeEach(cleanupTestDatabase);
@@ -82,17 +85,17 @@ describe('personal org connector auto policy backfill', () => {
     const keptOrgs = [team, emptyOwner, malformed, extraRule, edited, askReads, noted];
     const before = new Map<string, unknown>();
     for (const org of keptOrgs) before.set(org, await connectorRules(org));
-    expect(await writeEffect(untouched)).toBe('approval');
+    expect(await writeDecision(untouched)).toEqual({ effect: 'auto', reason: 'default_auto' });
 
     await sql.unsafe(migration);
 
     const [rule] = await connectorRules(untouched);
     expect(rule).toMatchObject({ operation_category: null, operation_key: null, note: null, effects: 'execute=auto' });
     expect(await connectorRules(untouched)).toHaveLength(1);
-    expect(await writeEffect(untouched)).toBe('auto');
+    expect(await writeDecision(untouched)).toEqual({ effect: 'auto', reason: 'matched_rule' });
     for (const org of keptOrgs) expect(await connectorRules(org)).toEqual(before.get(org));
-    expect(await writeEffect(team)).toBe('approval');
-    expect(await writeEffect(extraRule)).toBe('approval');
+    expect(await writeDecision(team)).toEqual({ effect: 'auto', reason: 'default_auto' });
+    expect(await writeDecision(extraRule)).toEqual({ effect: 'auto', reason: 'default_auto' });
 
     const afterFirst = await connectorRules(untouched);
     await sql.unsafe(migration);

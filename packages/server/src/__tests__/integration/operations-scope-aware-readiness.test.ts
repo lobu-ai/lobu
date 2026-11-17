@@ -1,6 +1,7 @@
 /** Active connections still need per-action OAuth scope readiness. */
 
 import { beforeAll, describe, expect, it } from "vitest";
+import { upsertEntityApprovalPolicy } from "../../authz/entity-policy";
 import type { Env } from "../../index";
 import { buildConnectionsNamespace } from "../../sandbox/namespaces/connections";
 import { manageOperations } from "../../tools/admin/manage_operations";
@@ -258,7 +259,13 @@ describe("operation readiness respects OAuth scopes", () => {
 		expect(op.readiness).toBe("ready");
 	});
 
-	it("keeps Calendar mutations approval-gated while get_event executes as a read", async () => {
+	it("holds Calendar mutations under a write Ask rule while get_event executes as a read", async () => {
+		await upsertEntityApprovalPolicy(orgId, {
+			resourceClass: "connector_action",
+			connectorKey: CONNECTOR_KEY,
+			operationCategory: "write",
+			effects: { execute: "approval" },
+		});
 		for (const operationKey of [
 			"create_event",
 			"update_event",

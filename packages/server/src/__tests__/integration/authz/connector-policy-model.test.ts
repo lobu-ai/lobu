@@ -69,7 +69,7 @@ describe("org connector policy scopes", () => {
 	});
 	afterAll(cleanupTestDatabase);
 
-	it("new orgs receive a visible Reads Auto rule, and deleting it restores Ask without reseeding", async () => {
+	it("new orgs receive a visible Reads Auto rule, and deleting it falls back to the Auto default without reseeding", async () => {
 		const freshOrg = await createTestOrganization();
 		const policies = await listEntityApprovalPolicies(freshOrg.id, "connector_action");
 		const readRule = policies.find((policy) => policy.operationCategory === "read");
@@ -77,18 +77,18 @@ describe("org connector policy scopes", () => {
 		const inspect = () => resolveConnectorPolicy({ organizationId: freshOrg.id, connectionId: null, operation: { ...operation, kind: "read" }, actor: human });
 		expect(await inspect()).toMatchObject({ effect: "auto", ruleIds: [readRule!.id], reason: "matched_rule" });
 		expect(await deleteEntityApprovalPolicy({ organizationId: freshOrg.id, resourceClass: "connector_action", operationCategory: "read" })).toBe(true);
-		for (let i = 0; i < 2; i++) expect(await inspect()).toEqual({ effect: "approval", ruleIds: [], rules: [], reason: "default_approval" });
+		for (let i = 0; i < 2; i++) expect(await inspect()).toEqual({ effect: "auto", ruleIds: [], rules: [], reason: "default_auto" });
 		expect(await listEntityApprovalPolicies(freshOrg.id, "connector_action")).toEqual([]);
 	});
 
-	it("defaults to Ask for humans and agents, including reads until a rule grants them Auto", async () => {
+	it("defaults to Auto for humans and agents, reads and writes, until a rule asks", async () => {
 		expect(await decide()).toEqual({
-			effect: "approval",
+			effect: "auto",
 			ruleIds: [],
 			rules: [],
-			reason: "default_approval",
+			reason: "default_auto",
 		});
-		expect((await decide(agent)).effect).toBe("approval");
+		expect((await decide(agent)).effect).toBe("auto");
 		const read = { ...operation, kind: "read" as const };
 		expect(
 			(
@@ -99,8 +99,8 @@ describe("org connector policy scopes", () => {
 					actor: agent,
 				})
 			).effect,
-		).toBe("approval");
-		await save({ operationCategory: "read", effects: { execute: "auto" } });
+		).toBe("auto");
+		await save({ operationCategory: "write", effects: { execute: "approval" } });
 		expect(
 			(
 				await resolveConnectorPolicy({
@@ -111,7 +111,7 @@ describe("org connector policy scopes", () => {
 				})
 			).effect,
 		).toBe("auto");
-		expect((await decide(agent)).effect).toBe("approval");
+		expect(await decide(agent)).toMatchObject({ effect: "approval", reason: "matched_rule" });
 	});
 
 	it("an explicit classification Auto rule permits a conservatively typed write", async () => {
@@ -130,9 +130,8 @@ describe("org connector policy scopes", () => {
 			reason: "matched_rule",
 		});
 		expect(
-			(await decide(agent, { ...operation, connector_key: "other-fixture" }))
-				.effect,
-		).toBe("approval");
+			await decide(agent, { ...operation, connector_key: "other-fixture" }),
+		).toMatchObject({ effect: "auto", ruleIds: [], reason: "default_auto" });
 	});
 
 	it("canonicalizes exact actions and requires exceptions to narrow both target and action", async () => {
@@ -255,6 +254,7 @@ describe("org connector policy scopes", () => {
 	});
 
 	it("agent restrictions cannot loosen org policy and still bind their Automation", async () => {
+		await save({ effects: { execute: "approval" } });
 		await save({
 			principalKind: "agent",
 			principalId: agent.id,
@@ -334,9 +334,9 @@ describe("org connector policy scopes", () => {
 		const other = await createTestOrganization();
 		await upsertEntityApprovalPolicy(other.id, {
 			resourceClass: "connector_action",
-			effects: { execute: "auto" },
+			effects: { execute: "deny" },
 		});
-		expect((await decide()).effect).toBe("approval");
+		expect(await decide()).toMatchObject({ effect: "auto", reason: "default_auto" });
 		await expect(
 			upsertEntityApprovalPolicy(other.id, {
 				resourceClass: "connector_action",

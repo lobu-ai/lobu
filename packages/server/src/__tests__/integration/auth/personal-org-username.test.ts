@@ -169,10 +169,10 @@ describe("personal org default connector policy", () => {
 		).toHaveLength(0);
 		for (const kind of ["read", "write"] as const) {
 			expect(await decide(organizationId, kind)).toEqual({
-				effect: "approval",
+				effect: "auto",
 				ruleIds: [],
 				rules: [],
-				reason: "default_approval",
+				reason: "default_auto",
 			});
 		}
 	});
@@ -194,7 +194,8 @@ describe("personal org default connector policy", () => {
 			effects: { execute: "auto" },
 		});
 		expect((await decide(orgId, "read")).effect).toBe("auto");
-		expect((await decide(orgId, "write")).effect).toBe("approval");
+		// The seeded rule covers reads only; writes fall through to the Auto default.
+		expect(await decide(orgId, "write")).toMatchObject({ effect: "auto", reason: "default_auto" });
 	});
 });
 

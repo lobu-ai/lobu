@@ -422,7 +422,7 @@ describe("permission policy HTTP writes", () => {
 		expect((await listEntityApprovalPolicies(org.id, "connector_action")).find((row) => row.operationKey === key))
 			.toMatchObject({ connectorKey: "policy-fixture-a", connectionId: null });
 		expect(await resolve("policy-fixture-a")).toBe("deny");
-		expect(await resolve("policy-fixture-b")).toBe("approval");
+		expect(await resolve("policy-fixture-b")).toBe("auto");
 		expect((await request("PUT", {
 			...connectorPolicy,
 			operation_key: qualifiedOperationKey("policy-fixture-a", "read"),
@@ -456,7 +456,7 @@ describe("permission policy HTTP writes", () => {
 		expect(await (await inspect()).json()).toMatchObject({ effect: "deny", reason: "matched_rule" });
 		expect(await (await request("DELETE", scope, { agent: agentId })).json()).toEqual({ deleted: true });
 		expect((await orgRules([])).status).toBe(200);
-		expect(await (await inspect()).json()).toEqual({ effect: "approval", rule_ids: [], reason: "default_approval" });
+		expect(await (await inspect()).json()).toEqual({ effect: "auto", rule_ids: [], reason: "default_auto" });
 	});
 
 	it("rejects foreign connections, invalid scope combinations, and mismatched operation targets", async () => {

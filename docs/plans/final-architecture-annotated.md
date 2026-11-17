@@ -47,7 +47,7 @@
 > `gateAutomationWrite` now sends `require_approval` decisions to
 > `queueAutomationWriteForApproval`, which persists a pending internal run and approval event.
 > The implementation lives in `packages/server/src/tools/admin/manage_automations.ts`; the
-> `agent_config` approval default remains in `packages/server/src/authz/write-action-manifest.ts`.
+> `agent_config` class defaults live in `packages/server/src/authz/write-action-manifest.ts`.
 > This landed in #1903; do not re-implement it.
 >
 > **WI-0.2 — Slack identity → member mapping on the message-enqueue path (critical/security).**

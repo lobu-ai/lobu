@@ -7,6 +7,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { fileInputSchema } from '@lobu/connector-sdk';
 import { executeCompiledConnector } from '@lobu/connector-worker/executor/runtime';
 import * as egress from '@lobu/connector-worker/egress';
+import { upsertEntityApprovalPolicy } from '../../authz/entity-policy';
 import { app, type Env } from '../../index';
 import * as gateway from '../../lobu/gateway';
 import { ArtifactStore } from '../../gateway/files/artifact-store';
@@ -86,6 +87,8 @@ describe('multipart file → operation approval → connector execution', () => 
       module.exports = { ConnectorRuntime };
     `} WHERE connector_key = ${CONNECTOR}`;
     connectionId = (await createTestConnection({ organization_id: ctx.organizationId, connector_key: CONNECTOR, created_by: ctx.userId!, visibility: 'private' })).id;
+    // Uploads wait for a human because a rule asks: unruled actions run Auto.
+    await upsertEntityApprovalPolicy(ctx.organizationId, { resourceClass: 'connector_action', connectorKey: CONNECTOR, effects: { execute: 'approval' } });
     receiver = createServer(async (request, response) => {
       try {
         const chunks: Buffer[] = [];

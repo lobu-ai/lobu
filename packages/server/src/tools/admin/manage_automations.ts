@@ -210,10 +210,9 @@ async function manageAutomationsImpl(
   // SQL source, reaction). Gate its create/update/delete under the `agent_config`
   // write class, exactly like editing an agent. A human member applies immediately
   // (resolveWritePolicyDecision returns 'allow' for users); a non-human principal
-  // follows the org policy (default: create/update need approval, delete denied).
-  // This closes the two-step self-escalation: an agent whose own agent_config
-  // writes require approval can no longer freely mint an automation to escape its
-  // envelope.
+  // follows the org policy (default: create/update apply, delete denied).
+  // This closes the two-step self-escalation: an agent whose agent_config writes
+  // a rule holds can no longer freely mint an automation to escape its envelope.
   //
   // TOCTOU: gateAutomationWrite's escalation guard reads the affected automation owners
   // (resolveEffectiveAutomationOwners) and the mutation writes them, but on SEPARATE

@@ -54,7 +54,7 @@ export interface ConnectorPolicyResult {
 	reason:
 		| "matched_rule"
 		| "guardrail"
-		| "default_approval"
+		| "default_auto"
 		| "unresolved_principal"
 		| "parent_approval"
 		| "unavailable_operation";
@@ -161,9 +161,8 @@ export function evaluateConnectorPolicy(args: {
 	const grants = matches.filter((rule) => rule.kind === "grant");
 	const orgRules = grants.filter((rule) => rule.principalKind === null);
 	const decisive = orgRules.filter((rule) => !orgRules.some((other) => moreSpecific(other, rule)));
-	let effect: ConnectorPolicyResult["effect"] = decisive.length
-		? "auto"
-		: "approval";
+	// With no matching rule the action runs: holds come from rules, never from silence.
+	let effect: ConnectorPolicyResult["effect"] = "auto";
 	const namesActor = (rule: EntityApprovalPolicy) =>
 		rule.principalKind === null ||
 		(rule.principalKind === args.actor.kind &&
@@ -216,6 +215,6 @@ export function evaluateConnectorPolicy(args: {
 			? "guardrail"
 			: ordered.length
 				? "matched_rule"
-				: "default_approval",
+				: "default_auto",
 	};
 }
