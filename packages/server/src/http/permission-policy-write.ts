@@ -1,5 +1,5 @@
 import type { Context } from "hono";
-import { isTokenDerivedSession, POLICY_WRITE_SCOPE } from "../auth/oauth/scopes";
+import { isInteractiveWebSession, POLICY_WRITE_SCOPE } from "../auth/oauth/scopes";
 import { canonicalConnectorPolicyScope, CONNECTOR_POLICY_CATEGORIES, type ConnectorPolicyCategory } from "../authz/connector-policy";
 import {
 	deleteEntityApprovalPolicy,
@@ -103,7 +103,7 @@ export function requireHumanWorkspaceAdmin(c: Context, { acceptPolicyToken = fal
 	if (!org || !c.get("user")?.id) return c.json({ error: "unauthorized" }, 401);
 	if (!["owner", "admin"].includes(c.get("memberRole") ?? "")) return c.json({ error: "forbidden" }, 403);
 	const auth = c.get("mcpAuthInfo");
-	if (c.get("authSource") === "session" && !auth && !isTokenDerivedSession(c.get("session"))) return null;
+	if (isInteractiveWebSession(c)) return null;
 	if (acceptPolicyToken && c.get("authSource") === "pat" && auth?.organizationId === org &&
 		auth.scopes.includes(POLICY_WRITE_SCOPE) && !auth.agentId && !auth.workerId &&
 		!auth.scopes.includes("device_worker:run")) return null;

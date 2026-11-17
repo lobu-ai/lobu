@@ -950,7 +950,7 @@ export async function executePlan(
     if (row.kind !== "settings") continue;
     const desired = ctx.state.agents.find((a) => a.metadata.agentId === row.id);
     if (!desired) continue;
-    await ctx.client.patchAgentSettings(row.id, desired.settings);
+    const held = await ctx.client.patchAgentSettings(row.id, desired.settings);
     printText(
       renderProgress(
         row.verb,
@@ -959,6 +959,13 @@ export async function executePlan(
         row.changedFields ? `(${row.changedFields.join(", ")})` : undefined
       )
     );
+    if (held) {
+      printText(
+        chalk.yellow(
+          `    Waiting for approval by a workspace owner or admin: ${held.approval_url ?? `run ${held.run_id}`}`
+        )
+      );
+    }
   }
 
   // Automations are applied after connections so declarative connection slugs

@@ -662,6 +662,28 @@ async function queueWriteForApproval(
   ctx: ToolContext,
   env: Env
 ): Promise<ManageAgentsResult> {
+  return (await holdWrite(args, ctx, env)).result;
+}
+
+/**
+ * Hold an agent settings update from a caller that is not a person's own web
+ * session (PATCH /agents/:agentId/config). Same pending run and approval card
+ * as {@link queueWriteForApproval}; the HTTP caller also gets the review link.
+ */
+export async function queueAgentUpdateForApproval(
+  args: UpdateArgs,
+  ctx: ToolContext,
+  env: Env
+): Promise<{ run_id: number; event_id: number; approval_url?: string }> {
+  const { runId, eventId, approvalUrl } = await holdWrite(args, ctx, env);
+  return { run_id: runId, event_id: eventId, ...(approvalUrl ? { approval_url: approvalUrl } : {}) };
+}
+
+async function holdWrite(
+  args: WriteArgs,
+  ctx: ToolContext,
+  env: Env
+): Promise<{ result: ManageAgentsResult; runId: number; eventId: number; approvalUrl: string | undefined }> {
   const proposal = buildProposal(args);
   // create needs an owner to attribute the new agent to — fail at request time
   // rather than after the human approves an unattributable create.
@@ -830,7 +852,7 @@ async function queueWriteForApproval(
     logger.error(error, 'Failed to send manage_agents approval notification')
   );
 
-  return {
+  const result: ManageAgentsResult = {
     action: proposal.action,
     run_id: runId,
     event_id: eventId,
@@ -843,6 +865,7 @@ async function queueWriteForApproval(
     proposal,
     current,
   };
+  return { result, runId, eventId, approvalUrl };
 }
 
 /**

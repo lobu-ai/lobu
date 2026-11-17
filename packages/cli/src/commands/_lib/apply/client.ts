@@ -63,6 +63,13 @@ export interface RemoteAgent {
   description?: string;
 }
 
+/** An agent settings patch the server held for an owner's approval. */
+export interface HeldAgentSettings {
+  status: "pending_approval";
+  run_id: number;
+  approval_url?: string;
+}
+
 export interface RemoteDeployment {
   id: number;
   applyId: string;
@@ -636,18 +643,27 @@ export class ApplyClient {
     }
   }
 
+  /**
+   * Returns the held proposal when the server queued the patch for an owner's
+   * approval (a token caller, e.g. `lobu apply` with a PAT) instead of
+   * applying it; null when it was applied.
+   */
   async patchAgentSettings(
     agentId: string,
     settings: Partial<AgentSettings>
-  ): Promise<void> {
+  ): Promise<HeldAgentSettings | null> {
     const revision = this.agentRevisions.get(agentId);
-    await this.request(
+    const { body } = await this.request<Partial<HeldAgentSettings> | undefined>(
       "PATCH",
       `/api/${this.orgSlug}/agents/${encodeURIComponent(agentId)}/config`,
       settings,
       undefined,
       revision ? { "If-Match": revision } : undefined
     );
+    return body?.status === "pending_approval" &&
+      typeof body.run_id === "number"
+      ? (body as HeldAgentSettings)
+      : null;
   }
 
   /**

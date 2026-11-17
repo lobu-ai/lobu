@@ -22,6 +22,9 @@ import {
 	SetInferenceProviderCapabilityAction,
 	UpdateInferenceProviderAction,
 } from "@lobu/core/contracts/tools/manage-inference-providers";
+import { UpdateAgentAction } from "@lobu/core/contracts/tools/manage-agents";
+import { isInteractiveWebSession } from "../auth/oauth/scopes";
+import { queueAgentUpdateForApproval } from "../tools/admin/manage_agents";
 import {
 	manageInferenceProviders,
 	providerAuditTransaction,
@@ -388,13 +391,67 @@ async function reconcileAgentAuthProfiles(
 	}
 }
 
-/** True if the submitted profile list contains at least one fresh credential. */
-function hasFreshCredential(profiles: AuthProfile[]): boolean {
-	return profiles.some(
-		(profile) =>
-			typeof profile.credential === "string" &&
-			profile.credential.trim().length > 0
-	);
+/**
+ * Hold a settings patch from a caller that is not a person's own web session.
+ * The patch becomes the same pending manage_agents update an agent would
+ * propose (validated and revision-checked now, applied on approval), and the
+ * response carries the run and its review link instead of `success`.
+ */
+async function holdAgentConfigPatch(
+	c: any,
+	agentId: string,
+	updates: Record<string, unknown>
+): Promise<Response> {
+	// `updatedAt` is store-owned and `authProfiles` are user-scoped rows, not
+	// settings: a `config get` → edit → patch round trip carries both, and only
+	// a fresh credential in a profile is a change this caller cannot make.
+	const { authProfiles, identityMd, updatedAt: _updatedAt, ...settings } =
+		updates;
+	if (
+		Array.isArray(authProfiles) &&
+		authProfiles.some(
+			(profile) =>
+				typeof profile?.credential === "string" &&
+				profile.credential.trim().length > 0
+		)
+	) {
+		return c.json(
+			{ error: "Setting agent auth profiles requires a web session" },
+			403
+		);
+	}
+	const ifMatch = c.req.header("If-Match") as string | undefined;
+	const expectedRevision =
+		ifMatch?.startsWith('"') && ifMatch.endsWith('"')
+			? ifMatch.slice(1, -1)
+			: ifMatch;
+	try {
+		const args = validateToolArgs("manage_agents", UpdateAgentAction, {
+			action: "update",
+			agent_id: agentId,
+			...(identityMd !== undefined ? { identity_md: identityMd } : {}),
+			...(Object.keys(settings).length > 0 ? { settings } : {}),
+			...(expectedRevision ? { expected_revision: expectedRevision } : {}),
+		}) as Parameters<typeof queueAgentUpdateForApproval>[0];
+		const held = await queueAgentUpdateForApproval(
+			args,
+			toToolContext(extractAuthContext(c)),
+			c.env
+		);
+		return c.json({
+			status: "pending_approval",
+			...held,
+			message: `Update of agent "${agentId}" is waiting for approval by a workspace owner or admin.`,
+		});
+	} catch (error) {
+		if (error instanceof ToolUserError) {
+			return c.json(
+				{ error: error.message },
+				error.httpStatus as ContentfulStatusCode
+			);
+		}
+		throw error;
+	}
 }
 
 // ── List agents ──────────────────────────────────────────────────────────────
@@ -1412,10 +1469,41 @@ routes.patch("/:agentId/config", async (c) => {
 	if (denied) return denied;
 	const { agentId } = c.req.param();
 	const updates = await c.req.json();
+	if (!updates || typeof updates !== "object" || Array.isArray(updates)) {
+		return c.json(
+			{
+				error: "invalid_settings",
+				error_description: "The settings patch must be a JSON object.",
+			},
+			400
+		);
+	}
 
 	if (!(await configStore.hasAgent(agentId))) {
 		return c.json({ error: "Agent not found" }, 404);
 	}
+
+	// Atomic cutover: the legacy model fields are GONE. An old client (pre-PR4
+	// CLI, stale web build) that still sends them would have its restricted
+	// declaration silently dropped to `models = NULL` = allow-all — a silent
+	// access widening. Reject loudly so the operator upgrades instead.
+	for (const legacyField of LEGACY_MODEL_FIELDS) {
+		if (legacyField in updates) {
+			return c.json(
+				{
+					error: "legacy_model_field",
+					error_description: `This server no longer accepts "${legacyField}". The agent's model configuration is now a single ordered "models" list of explicit "<provider>/<model>" refs. Upgrade your client (CLI / web) and send "models" instead.`,
+					field: legacyField,
+				},
+				400
+			);
+		}
+	}
+
+	// Only a person's own web session applies directly. A connected app, a
+	// token, or a session exchanged from one gets the same held proposal as an
+	// agent-driven manage_agents update, applied once a person approves it.
+	if (!isInteractiveWebSession(c)) return holdAgentConfigPatch(c, agentId, updates);
 
 	return getDb().begin(async (tx) => {
 		const orgId = c.get("organizationId") as string;
@@ -1456,48 +1544,20 @@ routes.patch("/:agentId/config", async (c) => {
 			authProfiles?: AuthProfile[];
 		} & Record<string, unknown>;
 
-		// Atomic cutover: the legacy model fields are GONE. An old client (pre-PR4
-		// CLI, stale web build) that still sends them would have its restricted
-		// declaration silently dropped to `models = NULL` = allow-all — a silent
-		// access widening. Reject loudly so the operator upgrades instead.
-		for (const legacyField of LEGACY_MODEL_FIELDS) {
-			if (legacyField in settingsUpdates) {
-				return c.json(
+		const userId = c.get("user")?.id;
+		if (Array.isArray(authProfiles) && userId) {
+			try {
+				await reconcileAgentAuthProfiles(agentId, userId, authProfiles);
+			} catch (error) {
+				throw routeFailure(c.json(
 					{
-						error: "legacy_model_field",
-						error_description: `This server no longer accepts "${legacyField}". The agent's model configuration is now a single ordered "models" list of explicit "<provider>/<model>" refs. Upgrade your client (CLI / web) and send "models" instead.`,
-						field: legacyField,
+						error:
+							error instanceof Error
+								? error.message
+								: "Failed to persist auth profiles",
 					},
-					400
-				);
-			}
-		}
-
-		if (Array.isArray(authProfiles)) {
-			const user = c.get("user");
-			if (!user?.id) {
-				// Admin-PAT callers (`lobu apply`) manage declared-agent credentials
-				// out of band; reject only if they actually tried to set one here.
-				if (hasFreshCredential(authProfiles)) {
-					return c.json(
-						{ error: "Setting agent auth profiles requires a web session" },
-						403
-					);
-				}
-			} else {
-				try {
-					await reconcileAgentAuthProfiles(agentId, user.id, authProfiles);
-				} catch (error) {
-					throw routeFailure(c.json(
-						{
-							error:
-								error instanceof Error
-									? error.message
-									: "Failed to persist auth profiles",
-						},
-						503
-					), error);
-				}
+					503
+				), error);
 			}
 		}
 

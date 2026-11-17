@@ -372,6 +372,17 @@ expect_fail_grep "lobu agent update (no flags -> graceful)" "at least one" "$PRO
 # config get --output, then round-trip that config back through patch (always valid).
 expect_grep "lobu agent config get --output -c local" "Wrote" "$PROJ" agent config get smoke-agent -c local --output "$RUN_DIR/agent-config.json"
 expect_grep "lobu agent config patch -c local" "Updated config" "$PROJ" agent config patch smoke-agent -c local --file "$RUN_DIR/agent-config.json"
+# A token caller (an mcp:admin PAT, as CI's `lobu apply` uses) gets the same
+# patch held for an owner's approval instead of applied.
+runlobu "$PROJ" token create -c local --scope "mcp:read mcp:write mcp:admin" --name smoke-admin-token --raw
+ADMIN_PAT="$(tail -1 "$OUT" | tr -d '[:space:]')"
+if [ "$RC" -eq 0 ] && [ -n "$ADMIN_PAT" ]; then
+  export LOBU_API_TOKEN="$ADMIN_PAT"
+  expect_grep "lobu agent config patch (token -> held for approval)" "waiting for approval" "$PROJ" agent config patch smoke-agent -c local --file "$RUN_DIR/agent-config.json"
+  unset LOBU_API_TOKEN
+else
+  softfail "lobu token create --scope mcp:admin --raw (exit=$RC)"
+fi
 expect_fail_grep "lobu agent delete (no --yes -> graceful)" "Refusing to delete" "$PROJ" agent delete smoke-agent -c local
 expect_grep "lobu agent delete --yes -c local" "Deleted agent" "$PROJ" agent delete smoke-agent -c local --yes
 

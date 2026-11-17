@@ -157,13 +157,23 @@ export async function agentConfigPatchCommand(
     process.exit(1);
   }
   const { client, orgSlug } = await resolveApiClient(options);
-  const result = await client.patch<unknown>(
-    `/api/${orgSlug}/agents/${encodeURIComponent(agentId)}/config`,
-    updates
-  );
+  const result = await client.patch<{
+    status?: string;
+    run_id?: number;
+    approval_url?: string;
+  }>(`/api/${orgSlug}/agents/${encodeURIComponent(agentId)}/config`, updates);
 
   if (options.json) {
     printJson(result);
+    return;
+  }
+  if (result?.status === "pending_approval") {
+    // Token callers' patches are held until a workspace owner or admin approves.
+    console.log(
+      chalk.yellow(
+        `\n  Config change for ${agentId} is waiting for approval by a workspace owner or admin: ${result.approval_url ?? `run ${result.run_id}`}\n`
+      )
+    );
     return;
   }
   console.log(chalk.green(`\n  Updated config for ${agentId}.\n`));

@@ -30,6 +30,7 @@ import {
   CONNECTED_APP_PAT_SCOPES,
   DEFAULT_SCOPES,
   DEFAULT_SCOPES_STRING,
+  isInteractiveWebSession,
   isTokenDerivedSession,
   TOKEN_DERIVED_SESSION_USER_AGENT,
 } from './oauth/scopes';
@@ -162,18 +163,6 @@ function authorizeTokenCreation(c: Context<{ Bindings: Env }>) {
   }
 
   return { user, organizationId };
-}
-
-/**
- * A person's own browser sign-in: not a PAT/OAuth bearer, not an MCP session,
- * and not a web session minted from a token (`isTokenDerivedSession`).
- */
-function isInteractiveWebSession(c: Context<{ Bindings: Env }>): boolean {
-  return (
-    c.get('authSource') === 'session' &&
-    !c.get('mcpAuthInfo') &&
-    !isTokenDerivedSession(c.get('session'))
-  );
 }
 
 /**

@@ -42,10 +42,15 @@ import { initWorkspaceProvider } from "../../../workspace";
 import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
 import {
 	addUserToOrganization,
+	createTestAccessToken,
 	createTestAgent,
+	createTestOAuthClient,
 	createTestOrganization,
+	createTestPAT,
+	createTestSession,
 	createTestUser,
 } from "../../setup/test-fixtures";
+import { postForm, testRequest } from "../../setup/test-helpers";
 
 const TEST_ENV: Env = {
 	ENVIRONMENT: "test",
@@ -1003,5 +1008,129 @@ describe("manage_agents — model config (#2047)", () => {
 		expect(upd.model.source).toBe("org_default");
 		expect(upd.model.not_runnable).toBe(false);
 		expect(upd.model.effective_model).toBe("myco/myco-large");
+	});
+});
+
+/**
+ * PATCH /agents/:agentId/config from anything other than a person's own web
+ * session (an mcp:admin PAT such as `lobu apply`, a connected app's OAuth
+ * bearer, or a session exchanged from a token) is held as the same pending
+ * manage_agents update an agent proposes; an owner web session still applies
+ * directly.
+ */
+describe("agent config PATCH — non-session callers are held for approval", () => {
+	let orgSlug: string;
+	let ownerCtx: AuthContext;
+	let cookie: string;
+	const callers: Record<string, () => Promise<string>> = {};
+
+	beforeAll(async () => {
+		await cleanupTestDatabase();
+		await initWorkspaceProvider();
+		const org = await createTestOrganization({ name: "agent config hold e2e" });
+		orgSlug = org.slug;
+		const owner = await createTestUser({ email: "ach-owner@test.com" });
+		await addUserToOrganization(owner.id, org.id, "owner");
+		ownerCtx = {
+			organizationId: org.id,
+			tokenOrganizationId: org.id,
+			userId: owner.id,
+			memberRole: "owner",
+			agentId: null,
+			requestedAgentId: null,
+			isAuthenticated: true,
+			clientId: null,
+			scopes: ["mcp:read", "mcp:write", "mcp:admin"],
+			tokenType: "oauth",
+			requestUrl: `http://localhost/api/${org.id}`,
+			baseUrl: "",
+			scopedToOrg: true,
+			allowCrossOrg: false,
+		};
+		cookie = (await createTestSession(owner.id)).cookieHeader;
+		const pat = (await createTestPAT(owner.id, org.id, { scope: "mcp:read mcp:write mcp:admin" })).token;
+		const client = await createTestOAuthClient();
+		const oauth = (await createTestAccessToken(owner.id, org.id, client.client_id, { scope: "mcp:read mcp:write mcp:admin" })).token;
+		callers["admin PAT"] = async () => pat;
+		callers["OAuth bearer"] = async () => oauth;
+		callers["token-derived session"] = async () => {
+			const exchange = await postForm("/api/extension-session", { token: pat });
+			expect(exchange.status).toBe(200);
+			return (await exchange.json()).session_token;
+		};
+		for (const agentId of ["held-pat", "held-oauth", "held-session", "held-guard", "direct-bot"]) {
+			await createTestAgent({ organizationId: org.id, agentId, ownerUserId: owner.id });
+		}
+	});
+
+	const configPath = (agentId: string) => `/api/${orgSlug}/agents/${agentId}/config`;
+	const soulOf = async (agentId: string) =>
+		((await (await testRequest("GET", configPath(agentId), { cookie })).json()) as { soulMd?: string }).soulMd;
+
+	it.each([
+		["admin PAT", "held-pat"],
+		["OAuth bearer", "held-oauth"],
+		["token-derived session", "held-session"],
+	])("%s: the patch is held, not applied, until an owner approves it", async (caller, agentId) => {
+		const token = await callers[caller]!();
+		const res = await testRequest("PATCH", configPath(agentId), {
+			token,
+			body: { soulMd: `Held via ${caller}` },
+		});
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as PendingApproval & { success?: boolean };
+		expect(body.status).toBe("pending_approval");
+		expect(body.success).toBeUndefined();
+		expect(typeof body.run_id).toBe("number");
+		expect(await soulOf(agentId)).not.toBe(`Held via ${caller}`);
+
+		const sql = getTestDb();
+		const [run] = await sql`SELECT action_key, approval_status FROM runs WHERE id = ${body.run_id}`;
+		expect(run).toMatchObject({ action_key: "manage_agents", approval_status: "pending" });
+
+		await executeTool("manage_operations", { action: "approve", run_id: body.run_id }, TEST_ENV, ownerCtx);
+		expect(await soulOf(agentId)).toBe(`Held via ${caller}`);
+	});
+
+	it("refuses credentials and stale revisions from a non-session caller without queueing a run", async () => {
+		const token = await callers["admin PAT"]!();
+		const sql = getTestDb();
+		const [{ count: before }] = await sql`SELECT count(*)::int AS count FROM runs WHERE action_key = 'manage_agents'`;
+		const profiles = await testRequest("PATCH", configPath("held-guard"), {
+			token,
+			body: { soulMd: "With a key", authProfiles: [{ id: "p1", provider: "openai", credential: "sk-fresh" }] },
+		});
+		expect(profiles.status).toBe(403);
+		const stale = await testRequest("PATCH", configPath("held-guard"), {
+			token,
+			body: { soulMd: "Stale" },
+			headers: { "If-Match": `"${"0".repeat(64)}"` },
+		});
+		expect(stale.status).toBe(409);
+		const [{ count: after }] = await sql`SELECT count(*)::int AS count FROM runs WHERE action_key = 'manage_agents'`;
+		expect(after).toBe(before);
+	});
+
+	it("an owner web session still applies the patch directly", async () => {
+		const res = await testRequest("PATCH", configPath("direct-bot"), {
+			cookie,
+			body: { soulMd: "Applied directly" },
+			headers: { Origin: "http://localhost" },
+		});
+		expect(res.status).toBe(200);
+		expect(await res.json()).toEqual({ success: true });
+		expect(await soulOf("direct-bot")).toBe("Applied directly");
+	});
+
+	it("a config get → edit → patch round trip through a token is held, not refused", async () => {
+		const token = await callers["admin PAT"]!();
+		const current = (await (await testRequest("GET", configPath("held-guard"), { token })).json()) as Record<string, unknown>;
+		expect(current).toHaveProperty("authProfiles");
+		const res = await testRequest("PATCH", configPath("held-guard"), {
+			token,
+			body: { ...current, soulMd: "Round trip" },
+		});
+		expect(res.status).toBe(200);
+		expect(((await res.json()) as PendingApproval).status).toBe("pending_approval");
 	});
 });

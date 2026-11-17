@@ -5,6 +5,7 @@
  * that normalize, compare, and persist scope lists across auth_data records.
  */
 
+import type { Context } from 'hono';
 import type { AuthInfo } from './types';
 
 /** All available scopes (including device-flow-only grants). */
@@ -564,4 +565,16 @@ export function isTokenDerivedSession(
   session: { userAgent?: string | null } | null | undefined
 ): boolean {
   return session?.userAgent === TOKEN_DERIVED_SESSION_USER_AGENT;
+}
+
+/**
+ * A person's own browser sign-in: not a PAT/OAuth bearer, not an MCP session,
+ * and not a web session minted from a token ({@link isTokenDerivedSession}).
+ */
+export function isInteractiveWebSession(c: Context): boolean {
+  return (
+    c.get('authSource') === 'session' &&
+    !c.get('mcpAuthInfo') &&
+    !isTokenDerivedSession(c.get('session'))
+  );
 }
