@@ -10,6 +10,7 @@ import {
 	runtimeConnectionIdToSlug,
 	runtimeConnectionPredicate,
 } from "../../lobu/stores/connections-projection.js";
+import { reconcileBindingSendGrants } from "../../automations/channel-subscriptions.js";
 import { requireOrgId } from "../../lobu/stores/org-context.js";
 import { getNextNumericId } from "../../tools/admin/helpers/db-helpers.js";
 import {
@@ -578,7 +579,14 @@ export class AutomationSubscriptionService {
 			`;
 			return true;
 		};
-		const linked = options.sql ? await write(sql) : await sql.begin(write);
+		const linkAndGrant = async (tx: DbClient): Promise<boolean> => {
+			const linked = await write(tx);
+			if (linked) {
+				await reconcileBindingSendGrants({ organizationId, connectionIds: [options.connectionId], sql: tx });
+			}
+			return linked;
+		};
+		const linked = options.sql ? await linkAndGrant(sql) : await sql.begin(linkAndGrant);
 		if (!linked) return false;
 
 		await resolveChannelFeedId({
@@ -626,6 +634,7 @@ export class AutomationSubscriptionService {
 				SET status = 'archived', updated_at = current_timestamp
 				WHERE id = ANY(${pgBigintArray(rows.map((row) => row.id))}::bigint[])
 			`;
+			await reconcileBindingSendGrants({ organizationId: orgId, connectionIds: [connectionId], sql: tx });
 			const native = nativeChannelIdFromAny(channelId);
 			const canonicalChannelId = `${archived.platform}:${native}`;
 			if (
@@ -702,6 +711,11 @@ export class AutomationSubscriptionService {
 					SET status = 'archived', updated_at = current_timestamp
 					WHERE id = ANY(${pgBigintArray(rows.map((row) => row.automation_id))}::bigint[])
 				`;
+				await reconcileBindingSendGrants({
+					organizationId: orgId,
+					connectionIds: rows.map((row) => Number(row.connection_id)),
+					sql: tx,
+				});
 			}
 			for (const row of rows) {
 				if (

@@ -9,8 +9,10 @@
 
 import { mintGatewayMcpToken, type MessagePayload } from '@lobu/core';
 import { TURN_INPUT_RUN_HEADER } from '@lobu/core/agent-tooling';
+import { readFile } from 'node:fs/promises';
 import { Hono } from 'hono';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { AutomationSubscriptionService } from '../../gateway/channels/automation-subscription-service';
 import { mintTurnToken } from '../../gateway/orchestration/agent-turn-producer';
 import { resolveAddressableTargets, threadHandleForMessage } from '../../gateway/conversations/authorization';
 import { createAudioRoutes } from '../../gateway/routes/internal/audio';
@@ -30,6 +32,7 @@ import type { Env } from '../../index';
 import { manageOperations } from '../../tools/admin/manage_operations';
 import { handleExecute } from '../../tools/admin/manage_operations/handlers/execute';
 import { qualifiedOperationKey } from '../../tools/admin/manage_operations/handlers/shared';
+import { BINDING_SEND_GRANT_NOTE } from '../../automations/channel-subscriptions';
 import { createTestAutomationSubscription } from '../setup/automation-subscriptions';
 import { cleanupTestDatabase, getTestDb } from '../setup/test-db';
 import {
@@ -532,5 +535,99 @@ describe('send_message: a reply in the asking conversation vs a post elsewhere',
     const res = await call('/internal/conversations/send', (await turn('p3-preview-1')).token, { target: preview!.handle, text: 'borrowed' });
     expect(res.status, await res.clone().text()).toBe(403);
     expect(posted).not.toHaveBeenCalled();
+  });
+});
+
+describe('send_message: binding an agent to a channel allows its posts there', () => {
+  const sql = () => getTestDb();
+  const subscriptions = new AutomationSubscriptionService();
+  const BOUND_CONNECTION = 'p3-binding-connection';
+  let receiptsConnectionId: number;
+  let boundConnectionId: number;
+
+  const sendGrants = (connectionId: number) => sql()<{ note: string | null; effect: string }>`
+    SELECT p.note, e.effect FROM write_approval_policies p
+    JOIN write_policy_action_effects e ON e.policy_id = p.id AND e.action = 'execute'
+    WHERE p.organization_id = ${org.id} AND p.connection_id = ${connectionId}
+      AND p.operation_key = ${qualifiedOperationKey('slack', 'send_message')} AND p.kind = 'grant'
+  `;
+  async function send(handle: string, turnId: string) {
+    const res = await call('/internal/conversations/send', (await turn(turnId)).token, { target: handle, text: `post for ${turnId}` });
+    return { status: res.status, body: await res.json() };
+  }
+  async function handleFor(channelId: string) {
+    const found = (await resolveAddressableTargets(AGENT, org.id)).find((item) => item.channelId === channelId);
+    expect(found, `agent is bound to ${channelId}`).toBeDefined();
+    return found!.handle;
+  }
+  async function replayMigration() {
+    const file = await readFile(new URL('../../../../../db/migrations/20261117120000_binding_send_message_grants.sql', import.meta.url), 'utf8');
+    await sql().unsafe(file.slice(file.indexOf('-- migrate:up'), file.indexOf('-- migrate:down')));
+  }
+
+  beforeAll(async () => {
+    await insertChatConnectionRow({ id: BOUND_CONNECTION, organizationId: org.id, agentId: AGENT, platform: 'slack' });
+    const rows = await sql()<{ id: number; slug: string }>`
+      SELECT id, slug FROM connections WHERE organization_id = ${org.id} AND slug IN ${sql()([`agentconn-${CONNECTION}`, `agentconn-${BOUND_CONNECTION}`])}
+    `;
+    receiptsConnectionId = Number(rows.find((row) => row.slug === `agentconn-${CONNECTION}`)!.id);
+    boundConnectionId = Number(rows.find((row) => row.slug === `agentconn-${BOUND_CONNECTION}`)!.id);
+  });
+
+  beforeEach(async () => {
+    await sql()`DELETE FROM write_approval_policies WHERE organization_id = ${org.id}`;
+  });
+
+  it('an existing binding: the deploy migration grants its connection, so the post completes', async () => {
+    const before = await send(channelTarget, 'p3-bind-existing-1');
+    expect(before.status, JSON.stringify(before.body)).toBe(409);
+    await replayMigration();
+    await replayMigration();
+    expect(await sendGrants(receiptsConnectionId)).toEqual([{ note: BINDING_SEND_GRANT_NOTE, effect: 'auto' }]);
+    const after = await send(channelTarget, 'p3-bind-existing-2');
+    expect(after.status, JSON.stringify(after.body)).toBe(200);
+    expect(posted).toHaveBeenCalledTimes(1);
+  });
+
+  it('a new binding completes, a guardrail still holds, and unbinding the last agent removes only its own grant', async () => {
+    await subscriptions.createChatAutomation(AGENT, 'slack', 'C_BOUND', TEAM, { organizationId: org.id, connectionId: boundConnectionId });
+    expect(await sendGrants(boundConnectionId)).toEqual([{ note: BINDING_SEND_GRANT_NOTE, effect: 'auto' }]);
+    const handle = await handleFor('C_BOUND');
+    const bound = await send(handle, 'p3-bind-new-1');
+    expect(bound.status, JSON.stringify(bound.body)).toBe(200);
+    expect(posted).toHaveBeenCalledTimes(1);
+
+    // A guardrail on the same connection beats the binding's grant.
+    const [guardrail] = await sql()<{ id: number }>`
+      INSERT INTO write_approval_policies (organization_id, resource_class, operation_key, connection_id, kind, note)
+      VALUES (${org.id}, 'connector_action', ${qualifiedOperationKey('slack', 'send_message')}, ${boundConnectionId}, 'guardrail', 'Ask before posting')
+      RETURNING id
+    `;
+    await sql()`INSERT INTO write_policy_action_effects (policy_id, action, effect) VALUES (${guardrail!.id}, 'execute', 'approval')`;
+    const guarded = await send(handle, 'p3-bind-new-2');
+    expect(guarded.status, JSON.stringify(guarded.body)).toBe(409);
+    expect(guarded.body.code).toBe('PENDING_APPROVAL');
+    await sql()`DELETE FROM write_approval_policies WHERE id = ${guardrail!.id}`;
+
+    // Unbinding the last agent removes the grant the binding wrote...
+    expect(await subscriptions.archiveChatAutomation(AGENT, 'C_BOUND', boundConnectionId, org.id)).toBe(true);
+    expect(await sendGrants(boundConnectionId)).toEqual([]);
+    // ...so a binding that did not come through the bind path is held again.
+    await createTestAutomationSubscription({ organizationId: org.id, agentId: AGENT, connectionSlug: `agentconn-${BOUND_CONNECTION}`, platform: 'slack', channelId: 'slack:C_BOUND_RAW' });
+    const held = await send(await handleFor('C_BOUND_RAW'), 'p3-bind-new-3');
+    expect(held.status, JSON.stringify(held.body)).toBe(409);
+    expect(posted).toHaveBeenCalledTimes(1);
+    await sql()`UPDATE automations SET status = 'archived' WHERE organization_id = ${org.id} AND triggers @> ${sql().json([{ match: { channel_id: 'C_BOUND_RAW' } }])}`;
+
+    // A rule a person wrote at the same scope is never removed by an unbind.
+    const [personal] = await sql()<{ id: number }>`
+      INSERT INTO write_approval_policies (organization_id, resource_class, operation_key, connection_id, kind)
+      VALUES (${org.id}, 'connector_action', ${qualifiedOperationKey('slack', 'send_message')}, ${boundConnectionId}, 'grant')
+      RETURNING id
+    `;
+    await sql()`INSERT INTO write_policy_action_effects (policy_id, action, effect) VALUES (${personal!.id}, 'execute', 'approval')`;
+    await subscriptions.createChatAutomation(AGENT, 'slack', 'C_BOUND', TEAM, { organizationId: org.id, connectionId: boundConnectionId });
+    await subscriptions.archiveChatAutomation(AGENT, 'C_BOUND', boundConnectionId, org.id);
+    expect(await sendGrants(boundConnectionId)).toEqual([{ note: null, effect: 'approval' }]);
   });
 });

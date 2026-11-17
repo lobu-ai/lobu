@@ -40,7 +40,11 @@ import {
   automationTriggersEqual,
   resolveAutomationTriggerWrite,
 } from '../../../automations/triggers';
-import { syncAutomationChannelFeedsBestEffort } from '../../../automations/channel-subscriptions';
+import {
+  chatBindingConnectionIds,
+  reconcileBindingSendGrants,
+  syncAutomationChannelFeedsBestEffort,
+} from '../../../automations/channel-subscriptions';
 
 // ============================================
 // handleCreateVersion
@@ -489,6 +493,13 @@ export async function handleCreateVersion(
           ...(touchesCadenceForAudit ? ['triggers'] : []),
         ],
       }, tx);
+      if (setAsCurrent && triggersChanged) {
+        await reconcileBindingSendGrants({
+          organizationId: versionOrganizationId,
+          connectionIds: chatBindingConnectionIds(previousTriggers, triggerWrite.triggers),
+          sql: tx,
+        });
+      }
     }
   });
 
