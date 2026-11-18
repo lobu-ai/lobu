@@ -464,32 +464,22 @@ async function _resolvePath(
   for (let i = 0; i < parsedSegments.length; i += 1) {
     const segment = parsedSegments[i]!;
     const isLeaf = i === parsedSegments.length - 1;
+    const lookupSegment = isLeaf ? queryLeafEntityRow : queryPathEntityRow;
+
+    let row = await lookupSegment(sql, workspace.id, segment, parentId);
+    if (row.length === 0 && i === 0) {
+      // List rows only know their immediate parent, so a link to a record three
+      // or more levels deep starts mid-chain. Anchor the first segment on its
+      // unique non-root record and prepend that record's ancestry.
+      const ancestry = await resolveNonRootAncestry(sql, workspace.id, segment);
+      if (ancestry) {
+        resolvedPath.push(...ancestry);
+        parentId = ancestry[ancestry.length - 1]!.id as number;
+        row = await lookupSegment(sql, workspace.id, segment, parentId);
+      }
+    }
 
     if (!isLeaf) {
-      // Lightweight query for intermediate path entities – no COUNT subqueries, no template joins.
-      // Cross-org tolerance: a tenant path can traverse into a public-catalog entity.
-      // $member is per-tenant — never fall back to a public catalog's $member row, since
-      // member-redaction uses the caller's workspace role, not the resolved entity's org.
-      const row = await sql`
-        SELECT e.id, et.slug AS entity_type, e.slug, e.name, e.parent_id
-        FROM entities e
-        JOIN entity_types et ON et.id = e.entity_type_id
-        LEFT JOIN organization eo ON eo.id = e.organization_id
-        WHERE (
-            e.organization_id = ${workspace.id}
-            OR (eo.visibility = 'public' AND et.slug <> ${MEMBER_ENTITY_TYPE_SLUG})
-          )
-          AND e.deleted_at IS NULL
-          AND et.slug = ${segment.entity_type}
-          AND e.slug = ${segment.slug}
-          AND (
-            (${parentId}::bigint IS NULL AND e.parent_id IS NULL)
-            OR e.parent_id = ${parentId}
-          )
-        ORDER BY (e.organization_id = ${workspace.id}) DESC, e.id ASC
-        LIMIT 1
-      `;
-
       if (row.length === 0) {
         throw new ToolUserError(
           `Entity not found for ${segment.entity_type}/${segment.slug}`,
@@ -507,43 +497,6 @@ async function _resolvePath(
       parentId = entityRow.id;
       continue;
     }
-
-    // Leaf entity: fetch core data (without expensive COUNT subqueries).
-    // Cross-org tolerance: same widening as the intermediate query, excluding $member.
-    // View templates are retired: the detail page renders the schema-derived
-    // auto-default (or a view, resolved by the client from `manage_views`), so
-    // this query carries no template joins and the tab/template fields below
-    // stay at their empty values.
-    const row = await sql`
-        SELECT
-          e.id,
-          et.slug AS entity_type,
-          e.slug,
-          e.name,
-          e.parent_id,
-          e.metadata,
-          e.field_controls,
-          e.created_at,
-          NULL as json_template,
-          NULL as json_template_version,
-          et.metadata_schema as entity_type_metadata_schema
-        FROM entities e
-        JOIN entity_types et ON et.id = e.entity_type_id
-        LEFT JOIN organization eo ON eo.id = e.organization_id
-        WHERE (
-            e.organization_id = ${workspace.id}
-            OR (eo.visibility = 'public' AND et.slug <> ${MEMBER_ENTITY_TYPE_SLUG})
-          )
-          AND e.deleted_at IS NULL
-          AND et.slug = ${segment.entity_type}
-          AND e.slug = ${segment.slug}
-          AND (
-            (${parentId}::bigint IS NULL AND e.parent_id IS NULL)
-            OR e.parent_id = ${parentId}
-          )
-        ORDER BY (e.organization_id = ${workspace.id}) DESC, e.id ASC
-        LIMIT 1
-      `;
 
     if (row.length === 0) {
       // The slug isn't a stored entity. It may be a row of a DERIVED ("view")
@@ -739,6 +692,153 @@ type DbClient = ReturnType<typeof getDb>;
 
 function toVersionNumber(v: unknown): number | null {
   return v ? Number(v) : null;
+}
+
+type PathSegment = { entity_type: string; slug: string };
+
+// Cross-org tolerance: a tenant path can traverse into a public-catalog entity.
+// $member is per-tenant — never fall back to a public catalog's $member row, since
+// member-redaction uses the caller's workspace role, not the resolved entity's org.
+// Every segment lookup and the non-root anchor share this one scope.
+function readableEntitySql(sql: DbClient, workspaceId: string) {
+  return sql`(
+    e.organization_id = ${workspaceId}
+    OR (eo.visibility = 'public' AND et.slug <> ${MEMBER_ENTITY_TYPE_SLUG})
+  )`;
+}
+
+/** Lightweight lookup for intermediate path entities – no COUNT subqueries, no template joins. */
+function queryPathEntityRow(
+  sql: DbClient,
+  workspaceId: string,
+  segment: PathSegment,
+  parentId: number | null
+) {
+  return sql`
+    SELECT e.id, et.slug AS entity_type, e.slug, e.name, e.parent_id
+    FROM entities e
+    JOIN entity_types et ON et.id = e.entity_type_id
+    LEFT JOIN organization eo ON eo.id = e.organization_id
+    WHERE ${readableEntitySql(sql, workspaceId)}
+      AND e.deleted_at IS NULL
+      AND et.slug = ${segment.entity_type}
+      AND e.slug = ${segment.slug}
+      AND (
+        (${parentId}::bigint IS NULL AND e.parent_id IS NULL)
+        OR e.parent_id = ${parentId}
+      )
+    ORDER BY (e.organization_id = ${workspaceId}) DESC, e.id ASC
+    LIMIT 1
+  `;
+}
+
+/**
+ * Leaf entity: core data without expensive COUNT subqueries. View templates
+ * are retired: the detail page renders the schema-derived auto-default (or a
+ * view, resolved by the client from `manage_views`), so this query carries no
+ * template joins and the tab/template fields stay at their empty values.
+ */
+function queryLeafEntityRow(
+  sql: DbClient,
+  workspaceId: string,
+  segment: PathSegment,
+  parentId: number | null
+) {
+  return sql`
+    SELECT
+      e.id,
+      et.slug AS entity_type,
+      e.slug,
+      e.name,
+      e.parent_id,
+      e.metadata,
+      e.field_controls,
+      e.created_at,
+      NULL as json_template,
+      NULL as json_template_version,
+      et.metadata_schema as entity_type_metadata_schema
+    FROM entities e
+    JOIN entity_types et ON et.id = e.entity_type_id
+    LEFT JOIN organization eo ON eo.id = e.organization_id
+    WHERE ${readableEntitySql(sql, workspaceId)}
+      AND e.deleted_at IS NULL
+      AND et.slug = ${segment.entity_type}
+      AND e.slug = ${segment.slug}
+      AND (
+        (${parentId}::bigint IS NULL AND e.parent_id IS NULL)
+        OR e.parent_id = ${parentId}
+      )
+    ORDER BY (e.organization_id = ${workspaceId}) DESC, e.id ASC
+    LIMIT 1
+  `;
+}
+
+// Write-time hierarchy guard caps depth at 10 and rejects cycles; the walk
+// carries its own bound so it terminates regardless.
+const MAX_ANCESTOR_DEPTH = 16;
+
+/**
+ * Anchor a first path segment that is not a root record: find its unique
+ * readable non-root record and return that record's ancestors, root first.
+ * Uniqueness follows the segment lookups' preference — a workspace-owned
+ * record beats a public-catalog one; two candidates in the same tier are
+ * ambiguous. Returns null (the caller 404s) when there is no candidate, the
+ * candidates are ambiguous, or the ancestry does not reach a readable,
+ * undeleted root.
+ */
+async function resolveNonRootAncestry(
+  sql: DbClient,
+  workspaceId: string,
+  segment: PathSegment
+): Promise<ResolvedPathEntity[] | null> {
+  const anchors = await sql`
+    SELECT e.parent_id, (e.organization_id = ${workspaceId}) AS own
+    FROM entities e
+    JOIN entity_types et ON et.id = e.entity_type_id
+    LEFT JOIN organization eo ON eo.id = e.organization_id
+    WHERE ${readableEntitySql(sql, workspaceId)}
+      AND e.deleted_at IS NULL
+      AND et.slug = ${segment.entity_type}
+      AND e.slug = ${segment.slug}
+      AND e.parent_id IS NOT NULL
+    ORDER BY (e.organization_id = ${workspaceId}) DESC, e.id ASC
+    LIMIT 2
+  `;
+  if (anchors.length === 0) return null;
+  if (anchors.length > 1 && anchors[0]!.own === anchors[1]!.own) return null;
+
+  const ancestors = await sql`
+    WITH RECURSIVE chain AS (
+      SELECT id, parent_id, 1 AS depth
+      FROM entities
+      WHERE id = ${anchors[0]!.parent_id}::bigint
+      UNION ALL
+      SELECT p.id, p.parent_id, c.depth + 1
+      FROM entities p
+      JOIN chain c ON p.id = c.parent_id
+      WHERE c.depth < ${MAX_ANCESTOR_DEPTH}
+    )
+    SELECT
+      e.id,
+      et.slug AS entity_type,
+      e.slug,
+      e.name,
+      e.parent_id,
+      (${readableEntitySql(sql, workspaceId)} AND e.deleted_at IS NULL) AS readable
+    FROM chain c
+    JOIN entities e ON e.id = c.id
+    JOIN entity_types et ON et.id = e.entity_type_id
+    LEFT JOIN organization eo ON eo.id = e.organization_id
+    ORDER BY c.depth DESC
+  `;
+  if (ancestors.length === 0 || ancestors[0]!.parent_id !== null) return null;
+  if (ancestors.some((row) => row.readable !== true)) return null;
+  return ancestors.map((row) => ({
+    id: row.id as number,
+    entity_type: String(row.entity_type),
+    slug: String(row.slug),
+    name: String(row.name),
+  }));
 }
 
 /**
