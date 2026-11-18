@@ -297,6 +297,8 @@ run_reviewer_inline() {
           --json-schema "$(cat "$SCHEMA_FILE")" \
           --output-format text \
           --no-session-persistence \
+          --strict-mcp-config \
+          --mcp-config '{"mcpServers":{}}' \
           --tools Bash,Read,Grep,LS \
           --permission-mode bypassPermissions < /dev/null > "$raw_file"
       ;;
