@@ -26,7 +26,7 @@ BEGIN
   PERFORM lobu_workspace_path_lock(NEW.organization_id);
   IF EXISTS (SELECT 1 FROM entity_types
              WHERE organization_id = NEW.organization_id AND slug = NEW.key AND deleted_at IS NULL) THEN
-    RAISE EXCEPTION 'Workspace view "%" would share the path of the entity type with that slug', NEW.key
+    RAISE EXCEPTION 'Workspace view "%" would share /%, the path of the entity type with that slug; rename the view or the type', NEW.key, NEW.key
       USING ERRCODE = 'unique_violation', CONSTRAINT = 'workspace_path_unique';
   END IF;
   RETURN NEW;
@@ -45,7 +45,7 @@ BEGIN
   IF EXISTS (SELECT 1 FROM views
              WHERE organization_id = NEW.organization_id AND key = NEW.slug
                AND attach @> '[{"workspace": true}]'::jsonb) THEN
-    RAISE EXCEPTION 'Entity type "%" would share the path of the workspace view with that key', NEW.slug
+    RAISE EXCEPTION 'Entity type "%" would share /%, the path of the workspace view with that key; rename the view or the type', NEW.slug, NEW.slug
       USING ERRCODE = 'unique_violation', CONSTRAINT = 'workspace_path_unique';
   END IF;
   RETURN NEW;
