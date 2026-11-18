@@ -156,8 +156,10 @@ const STATIC_TEXT_CONTENT_TYPES: Record<string, string> = {
 	".js": "application/javascript; charset=utf-8",
 	".json": "application/json; charset=utf-8",
 	".map": "application/json; charset=utf-8",
+	".mjs": "application/javascript; charset=utf-8",
 	".svg": "image/svg+xml",
 	".txt": "text/plain; charset=utf-8",
+	".webmanifest": "application/manifest+json; charset=utf-8",
 	".xml": "application/xml; charset=utf-8",
 };
 
@@ -179,6 +181,10 @@ const APP_ROOT = path.resolve(
 );
 
 let webDistDirectoryCache: string | null | undefined;
+
+export function __resetWebDistDirectoryForTests(): void {
+	webDistDirectoryCache = undefined;
+}
 
 async function resolveWebDistDirectory(): Promise<string | null> {
 	if (webDistDirectoryCache !== undefined) {
