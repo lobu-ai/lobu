@@ -108,14 +108,23 @@ function workspaceHostOrigin(
   slug: string,
   publicOrigin: string
 ): string | null {
-  if (extractSubdomainOrg(requestHost, getSubdomainZone(), RESERVED_SUBDOMAINS) !== slug) {
-    return null;
-  }
+  if (!requestHost) return null;
+  let url: URL;
   try {
-    return new URL(`${new URL(publicOrigin).protocol}//${requestHost}`).origin;
+    url = new URL(`${new URL(publicOrigin).protocol}//${requestHost}`);
   } catch {
     return null;
   }
+  // Judge the host the URL parser actually produced, never the raw header:
+  // `acme.lobu.ai:443@evil.example` reads as `acme` to a prefix split but
+  // parses as userinfo plus `evil.example`.
+  if (url.username || url.password || url.pathname !== '/' || url.search || url.hash) {
+    return null;
+  }
+  if (extractSubdomainOrg(url.hostname, getSubdomainZone(), RESERVED_SUBDOMAINS) !== slug) {
+    return null;
+  }
+  return url.origin;
 }
 
 /**

@@ -843,6 +843,11 @@ describe('views resources + open_view + invoke_view_action', () => {
 			// the configured public origin.
 			expect(await workspaceRoot('app.zone.test')).toBe(`https://app.zone.test/${org.slug}/`);
 			expect(await workspaceRoot('elsewhere.example')).toBe(`https://app.zone.test/${org.slug}/`);
+			// A Host that only starts with the workspace's subdomain must not
+			// smuggle another origin in as userinfo or a path.
+			for (const crafted of [`${org.slug}.zone.test:443@evil.example`, `${org.slug}.zone.test/evil.example`]) {
+				expect(await workspaceRoot(crafted)).toBe(`https://app.zone.test/${org.slug}/`);
+			}
 		} finally {
 			for (const [key, value] of [['PUBLIC_GATEWAY_URL', saved.gateway], ['AUTH_COOKIE_DOMAIN', saved.zone]] as const) {
 				if (value === undefined) delete process.env[key];
