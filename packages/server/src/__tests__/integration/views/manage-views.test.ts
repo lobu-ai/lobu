@@ -1026,4 +1026,92 @@ export default function Broken() { return <NonexistentNativeTable />; }`)).rejec
 		expect((err as ToolUserError).httpStatus).toBe(422);
 		expect((err as ToolUserError).message).toContain("not among the view's source files");
 	});
+
+	it("keeps a workspace view's top-level path apart from every live entity type slug", async () => {
+		const sql = getTestDb();
+		const WORKSPACE = { attach: [{ workspace: true }] };
+		const createType = (slug: string) =>
+			executeTool(
+				"manage_entity_schema",
+				{ schema_type: "entity_type", action: "create", slug, name: slug },
+				TEST_ENV,
+				ownerCtx
+			);
+		const refused = async (p: Promise<unknown>, status: number, code: string) => {
+			const err = await p.catch((e) => e);
+			expect(err).toBeInstanceOf(ToolUserError);
+			expect((err as ToolUserError).httpStatus).toBe(status);
+			expect((err as ToolUserError).message).toContain(code);
+		};
+
+		// A view takes the path first: the type that would share it is refused.
+		await setView(SIMPLE_SOURCE, { key: "accounts", ...WORKSPACE });
+		await refused(createType("accounts"), 409, "[workspace_path_taken]");
+
+		// A type takes it first: neither a new workspace view nor a page view
+		// re-attached to the workspace may take it.
+		await createType("deal");
+		await refused(setView(SIMPLE_SOURCE, { key: "deal", ...WORKSPACE }), 409, "[workspace_path_taken]");
+		await setView(SIMPLE_SOURCE, { key: "deal", attach: [{ collection: "deal" }] });
+		await refused(setView(SIMPLE_SOURCE, { key: "deal", ...WORKSPACE }), 409, "[workspace_path_taken]");
+		expect((await getView(orgId, "deal"))?.attach).toEqual([{ collection: "deal" }]);
+
+		// A route the app owns is never a workspace view's path.
+		await refused(setView(SIMPLE_SOURCE, { key: "settings", ...WORKSPACE }), 400, "[workspace_path_reserved]");
+
+		// A deleted type frees its slug; restoring it while a view holds the path
+		// is refused by the database, whichever writer tries.
+		await sql`UPDATE entity_types SET deleted_at = now() WHERE organization_id = ${orgId} AND slug = 'deal'`;
+		await setView(SIMPLE_SOURCE, { key: "deal", ...WORKSPACE });
+		const restore = await sql`
+      UPDATE entity_types SET deleted_at = NULL WHERE organization_id = ${orgId} AND slug = 'deal'
+    `.catch((e) => e);
+		expect(restore).toMatchObject({ code: "23505", constraint_name: "workspace_path_unique" });
+
+		// Another workspace's type never clashes.
+		const other = await createTestOrganization({ name: "other views org" });
+		await sql`INSERT INTO entity_types (organization_id, slug, name) VALUES (${other.id}, 'accounts', 'Accounts')`;
+	});
+
+	it("serializes a workspace view and an entity type racing for one path", async () => {
+		const sql = getTestDb();
+		await setView(SIMPLE_SOURCE, { key: "seed" });
+		let release!: () => void;
+		const held = new Promise<void>((r) => {
+			release = r;
+		});
+		let inserted!: () => void;
+		const viewInserted = new Promise<void>((r) => {
+			inserted = r;
+		});
+		// The view's transaction holds the path, uncommitted.
+		const viewTx = sql.begin(async (tx) => {
+			await tx`
+        INSERT INTO views (organization_id, key, name, source_code, compiled_code, content_hash, attach, last_writer)
+        SELECT organization_id, 'race', 'Race', source_code, compiled_code, content_hash,
+               '[{"workspace": true}]'::jsonb, last_writer
+        FROM views WHERE organization_id = ${orgId} AND key = 'seed'
+      `;
+			inserted();
+			await held;
+		});
+		await viewInserted;
+		let settled = false;
+		const typeInsert = sql`
+      INSERT INTO entity_types (organization_id, slug, name) VALUES (${orgId}, 'race', 'Race')
+    `.then(
+			() => ({ ok: true as const }),
+			(e) => ({ ok: false as const, e })
+		).finally(() => {
+			settled = true;
+		});
+		// The type's check waits on the view's lock instead of reading past it.
+		await new Promise((r) => setTimeout(r, 300));
+		expect(settled).toBe(false);
+		release();
+		await viewTx;
+		const result = await typeInsert;
+		expect(result.ok).toBe(false);
+		expect(!result.ok && result.e).toMatchObject({ code: "23505", constraint_name: "workspace_path_unique" });
+	});
 });

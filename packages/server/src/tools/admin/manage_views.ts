@@ -32,7 +32,12 @@ import {
 import type { Static } from '@sinclair/typebox';
 import { emit } from '../../events/emitter';
 import { getDb, pgTextArray } from '../../db/client';
-import { attachesToEntityType, isEventAttachment } from '@lobu/core/contracts/tools/view-attach';
+import {
+  attachesToEntityType,
+  hasWorkspaceAttachment,
+  isEventAttachment,
+} from '@lobu/core/contracts/tools/view-attach';
+import { isReservedEntityTypeSlug } from '@lobu/core/reserved';
 import type { ViewDefinitionRecord } from '@lobu/core/contracts/tools/view-definition';
 import { ToolUserError } from '../../utils/errors';
 import {
@@ -116,6 +121,14 @@ function validateViewSource(args: Static<typeof SetViewAction>): void {
  * and filter options of the declared type, action and event-kind names.
  */
 function validateViewDefinition(def: ViewDefinitionRecord): void {
+  // A workspace view is served at /<org>/<key>, so its key must not be a name
+  // the app routes own. A clash with an entity type is the database's call.
+  if (hasWorkspaceAttachment(def.attach) && isReservedEntityTypeSlug(def.key)) {
+    throw new ToolUserError(
+      `[workspace_path_reserved] '${def.key}' is a reserved route name; a workspace view needs another key`,
+      400
+    );
+  }
   for (const [name, decl] of Object.entries(def.params)) {
     if (isShellOwnedParam(name)) {
       throw new ToolUserError(

@@ -53,11 +53,12 @@ export const ViewAttachmentSchema = Type.Union(
       },
       { additionalProperties: false }
     ),
-    // The Data hub: a tab at /data/-/views/<key>.
+    // A top-level page of the workspace, at /<key>.
     Type.Object(
       {
         workspace: Type.Literal(true, {
-          description: "A tab on the Data hub, at /data/-/views/<key>.",
+          description:
+            "A top-level page of the workspace, at /<key>. The key must not equal an entity type slug or a reserved route name.",
         }),
       },
       { additionalProperties: false }

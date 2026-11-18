@@ -543,9 +543,9 @@ describe('views resources + open_view + invoke_view_action', () => {
 				.structuredContent.url
 		).pathname;
 
-	it('open_view sends an unscoped workspace view to its Data hub tab', async () => {
+	it('open_view sends an unscoped workspace view to its top-level page', async () => {
 		await setAttachedView('hub', [{ workspace: true }, { collection: 'company' }]);
-		expect(await openPath({ key: 'hub' })).toBe('/views-org/data/-/views/hub');
+		expect(await openPath({ key: 'hub' })).toBe('/views-org/hub');
 		const opened = await rpc('tools/call', { name: 'open_view', arguments: { key: 'hub', scope: {} } });
 		expect(opened.structuredContent.scope).toEqual({});
 	});

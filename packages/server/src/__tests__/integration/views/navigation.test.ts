@@ -185,8 +185,8 @@ describe("workspace navigation", () => {
 			{
 				id: "views",
 				items: [
-					{ id: "view:pipeline", label: "Pipeline", href: "/nav-org/data/-/views/pipeline", children: [] },
-					{ id: "view:queue", label: "Work Queue", href: "/nav-org/data/-/views/queue", children: [] },
+					{ id: "view:pipeline", label: "Pipeline", href: "/nav-org/pipeline", children: [] },
+					{ id: "view:queue", label: "Work Queue", href: "/nav-org/queue", children: [] },
 				],
 			},
 		]);
@@ -211,7 +211,7 @@ describe("workspace navigation", () => {
 		expect(json.sections[0].label).toBe("Work");
 		// Typed scalars survive, including false, 0 and Unicode.
 		expect(pipeline.label).toBe("Pipeline");
-		expect(new URL(pipeline.href ?? "", "http://x").pathname).toBe("/nav-org/data/-/views/pipeline");
+		expect(new URL(pipeline.href ?? "", "http://x").pathname).toBe("/nav-org/pipeline");
 		expect(Object.fromEntries(new URL(pipeline.href ?? "", "http://x").searchParams)).toEqual({
 			stage: "Ünï & co",
 			open: "false",
@@ -222,7 +222,7 @@ describe("workspace navigation", () => {
 			["acme", "Acme", "/nav-org/deal/acme-renewal"],
 			["acme-card", "Deal Card", "/nav-org/deal/acme-renewal/-/views/deal-card"],
 		]);
-		expect(reports).toMatchObject({ label: "Reports", children: [{ id: "queue", href: "/nav-org/data/-/views/queue" }] });
+		expect(reports).toMatchObject({ label: "Reports", children: [{ id: "queue", href: "/nav-org/queue" }] });
 		expect(reports.href).toBeUndefined();
 		expect(docs).toMatchObject({ href: "https://docs.example/guide", external: true });
 		expect(won).toMatchObject({ href: "/nav-org/deal?stage=won" });
@@ -426,13 +426,13 @@ describe("workspace navigation", () => {
 		expect(node).toMatchObject({
 			id: "deepest",
 			label: "Deepest",
-			href: "/nav-org/data/-/views/bulk-0500",
+			href: "/nav-org/bulk-0500",
 		});
 		expect(JSON.stringify(json.sections)).not.toContain("Gone");
 		expect(deep.items[1].children).toHaveLength(300);
 		expect(deep.items[1].children[299]).toMatchObject({
 			label: "Bulk 0299",
-			href: "/nav-org/data/-/views/bulk-0299",
+			href: "/nav-org/bulk-0299",
 		});
 	});
 
