@@ -1003,11 +1003,12 @@ function guestRunner(errorTokenReader: string, referenceErrorCheck: string): str
       value: __result === undefined ? null : __result,
     });
   } catch (error) {
-    // Conditional environment guidance, never an attribution based on exception text.
-    // Keep the original error envelope and stack unchanged, and do not install timers.
+    // Public wrappers omit console logs. Put fixed conditional help in the
+    // existing message field, never matching customer text or exposing logs.
+    let __delayGuidance = '';
     try {
       if (${referenceErrorCheck}(error)) {
-        __emitConsole('warn', ['If this script needs a delay, use await ctx.sleep(ms) (0-30000ms, abort-aware). Node/browser timers such as setTimeout are unavailable.']);
+        __delayGuidance = 'If this script needs a delay, use await ctx.sleep(ms) (0-30000ms, abort-aware). Node/browser timers such as setTimeout are unavailable. ';
       }
     } catch {}
 	const __safeErrorField = (key, fallback) => {
@@ -1034,7 +1035,7 @@ function guestRunner(errorTokenReader: string, referenceErrorCheck: string): str
       ok: false,
       error: {
 		name: __safeErrorField('name', 'Error'),
-		message: __safeErrorField('message', __safeThrownValue()),
+		message: __delayGuidance + __safeErrorField('message', __safeThrownValue()),
 		stack: __safeErrorField('stack', undefined),
 		...(__details === undefined ? {} : { details: __details }),
 		...(__classificationToken === undefined
