@@ -1492,6 +1492,133 @@ describe('Gmail attachment download', () => {
     expect(result.output.attachments[0].filename).toBe('att-png');
     expect(result.output.attachments[0].mime_type).toBe('application/octet-stream');
   });
+
+  test('the thread feed lists each file attachment to open from Gmail, never inline images', async () => {
+    const part = (
+      mimeType: string,
+      filename: string,
+      attachmentId: string,
+      headers: Array<{ name: string; value: string }> = []
+    ) => ({ mimeType, filename, headers, body: { attachmentId, size: 2048 } });
+    const thread = {
+      id: 'thread-files',
+      historyId: '1',
+      messages: [
+        {
+          id: 'message-one',
+          threadId: 'thread-files',
+          internalDate: '1783558800000',
+          snippet: 'Invoice attached',
+          payload: {
+            mimeType: 'multipart/mixed',
+            headers: [{ name: 'Subject', value: 'Invoice' }],
+            parts: [
+              {
+                mimeType: 'multipart/related',
+                parts: [
+                  { mimeType: 'text/html', body: { data: Buffer.from('<p>Hi</p>').toString('base64url'), size: 9 } },
+                  // A signature image the HTML body embeds is not a file.
+                  part('image/png', 'signature.png', 'att-signature', [
+                    { name: 'Content-ID', value: '<signature@example.com>' },
+                    { name: 'Content-Disposition', value: 'inline; filename="signature.png"' },
+                  ]),
+                  part('image/gif', 'spacer.gif', 'att-spacer', [
+                    { name: 'Content-ID', value: '<spacer@example.com>' },
+                  ]),
+                ],
+              },
+              // Gmail stamps a Content-ID on ordinary attachments too.
+              part('application/pdf', 'invoice.pdf', 'att-invoice', [
+                { name: 'Content-Disposition', value: 'attachment; filename="invoice.pdf"' },
+                { name: 'Content-ID', value: '<f_invoice>' },
+              ]),
+            ],
+          },
+        },
+        {
+          id: 'message-two',
+          threadId: 'thread-files',
+          internalDate: '1783562400000',
+          snippet: 'Photo',
+          payload: {
+            mimeType: 'multipart/mixed',
+            headers: [],
+            parts: [
+              { mimeType: 'text/plain', body: { data: Buffer.from('Photo.').toString('base64url'), size: 6 } },
+              // Some clients send a dropped-in PDF inline; it is still a file.
+              part('application/pdf', 'scan.pdf', 'att-scan', [
+                { name: 'Content-Disposition', value: 'inline; filename="scan.pdf"' },
+              ]),
+              part('IMAGE/JPEG', 'photo.jpg', 'att-photo'),
+            ],
+          },
+        },
+      ],
+    };
+    const plainThread = {
+      id: 'thread-plain',
+      historyId: '1',
+      messages: [{
+        id: 'message-plain',
+        threadId: 'thread-plain',
+        internalDate: '1783558800000',
+        snippet: 'No files',
+        payload: { mimeType: 'text/plain', headers: [], body: { data: Buffer.from('Hi').toString('base64url'), size: 2 } },
+      }],
+    };
+    const byId = new Map([[thread.id, thread], [plainThread.id, plainThread]]);
+    let current = thread;
+    const connector = new GmailConnector();
+    connector.createClient = () => ({
+      raw: async (url: string) => {
+        const path = new URL(url).pathname;
+        const threadId = path.match(/\/threads\/([^/]+)$/)?.[1];
+        if (threadId) current = byId.get(threadId) ?? thread;
+        const body = path.endsWith('/threads')
+          ? { threads: [...byId.keys()].map((id) => ({ id, historyId: '1', snippet: 's' })) }
+          : threadResource(url, current as ReturnType<typeof toThreadResponse>);
+        return { ok: true, status: 200, text: async () => '', json: async () => body };
+      },
+    });
+
+    const result = await runSync(connector, {
+      feedKey: 'threads',
+      config: {},
+      credentials: { accessToken: 'synthetic-token' },
+      checkpoint: {},
+    });
+    const events = result.events as Array<{ origin_id: string; attachments?: unknown[] }>;
+    const open = (messageId: string, attachmentId: string, filename: string, mimeType: string) => ({
+      operation: 'download_attachment',
+      input: { message_id: messageId, attachment_id: attachmentId, filename, mime_type: mimeType },
+    });
+
+    expect(events.find((event) => event.origin_id === 'thread-files')?.attachments).toEqual([
+      {
+        kind: 'file',
+        filename: 'invoice.pdf',
+        mime_type: 'application/pdf',
+        size_bytes: 2048,
+        open: open('message-one', 'att-invoice', 'invoice.pdf', 'application/pdf'),
+      },
+      {
+        kind: 'file',
+        filename: 'scan.pdf',
+        mime_type: 'application/pdf',
+        size_bytes: 2048,
+        open: open('message-two', 'att-scan', 'scan.pdf', 'application/pdf'),
+      },
+      {
+        kind: 'image',
+        filename: 'photo.jpg',
+        mime_type: 'image/jpeg',
+        size_bytes: 2048,
+        open: open('message-two', 'att-photo', 'photo.jpg', 'image/jpeg'),
+      },
+    ]);
+    // No files, no attachment list: the row stays what it was before.
+    expect(events.find((event) => event.origin_id === 'thread-plain')).not.toHaveProperty('attachments');
+  });
 });
 
 describe('Gmail threads larger than the per-response transport cap', () => {

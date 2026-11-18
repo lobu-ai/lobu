@@ -309,6 +309,48 @@ describe('feed page commit', () => {
     expect(await feedCheckpoint(feedId)).toEqual({ cursor: 'page-1' });
   });
 
+  it('stores a file that opens from its source as metadata only, and a replay changes nothing', async () => {
+    const { connectionId, runId } = await seed();
+    // A feed names the file and the read operation that fetches it; there are
+    // no bytes to publish, so nothing may be materialized or rewritten.
+    const sourceFile = {
+      kind: 'file',
+      filename: 'invoice.pdf',
+      mime_type: 'application/pdf',
+      size_bytes: 52000,
+      open: {
+        operation: 'download_attachment',
+        // Input values are strings or numbers, stored as given.
+        input: { message_id: 'message-1', attachment_id: 'attachment-1', part: 2 },
+      },
+    };
+    const page = (cursor: string) => ({
+      run_id: runId,
+      worker_id: WORKER_ID,
+      checkpoint: { cursor },
+      items: [
+        item('mail-with-file', {
+          occurred_at: '2026-01-02T10:00:00.000Z',
+          attachments: [sourceFile],
+        }),
+      ],
+    });
+
+    const first = mockWorkerCtx(page('page-1'));
+    await streamContent(first.ctx);
+    expect(first.result().status).toBe(200);
+    // The same file synced again is the same event, not a new version.
+    const replay = mockWorkerCtx(page('page-2'));
+    await streamContent(replay.ctx);
+    expect(replay.result().status).toBe(200);
+
+    const rows = await getTestDb()<{ attachments: unknown; superseded_by: number | null }[]>`
+      SELECT attachments, superseded_by FROM events
+      WHERE connection_id = ${connectionId} AND origin_id = 'mail-with-file'
+    `;
+    expect(rows).toEqual([{ attachments: [sourceFile], superseded_by: null }]);
+  });
+
   it('stores none of a page and keeps the old cursor when one of its items fails to insert', async () => {
     const { connectionId, feedId, runId } = await seed();
     const { ctx, result } = mockWorkerCtx({
