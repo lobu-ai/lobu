@@ -387,5 +387,9 @@ describe('external derived record lookup', () => {
     expect(collection.has_more).toBe(true);
     const ordinary = await querySqlImpl({ sql: 'SELECT 1', connection: 'count-source', limit: 1 }, {}, context);
     expect(ordinary.rows[0].collection).toBe(false);
+    // The source reported no total for this read: total_count stays absent
+    // rather than echoing the page size, and has_more still paginates.
+    expect(ordinary).not.toHaveProperty('total_count');
+    expect(ordinary.has_more).toBe(true);
   });
 });

@@ -106,7 +106,7 @@ function decodedSegment(segment: string): string {
 }
 
 /** `https://www.linkedin.com/in/<slug>/` for a member profile URL, else null. */
-function canonicalProfileUrl(raw: string | undefined): string | null {
+export function canonicalProfileUrl(raw: string | undefined): string | null {
   if (!raw) return null;
   let url: URL;
   try {
@@ -120,7 +120,7 @@ function canonicalProfileUrl(raw: string | undefined): string | null {
 }
 
 /** `https://www.linkedin.com/company/<slug-or-id>/` for a company URL, else null. */
-function canonicalCompanyUrl(raw: string | undefined): string | null {
+export function canonicalCompanyUrl(raw: string | undefined): string | null {
   if (!raw) return null;
   let url: URL;
   try {
