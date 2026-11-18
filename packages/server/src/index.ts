@@ -156,8 +156,10 @@ const STATIC_TEXT_CONTENT_TYPES: Record<string, string> = {
 	".js": "application/javascript; charset=utf-8",
 	".json": "application/json; charset=utf-8",
 	".map": "application/json; charset=utf-8",
+	".mjs": "application/javascript; charset=utf-8",
 	".svg": "image/svg+xml",
 	".txt": "text/plain; charset=utf-8",
+	".webmanifest": "application/manifest+json; charset=utf-8",
 	".xml": "application/xml; charset=utf-8",
 };
 
@@ -171,6 +173,8 @@ const STATIC_BINARY_CONTENT_TYPES: Record<string, string> = {
 	".webp": "image/webp",
 	".woff": "font/woff",
 	".woff2": "font/woff2",
+	".ttf": "font/ttf",
+	".eot": "application/vnd.ms-fontobject",
 };
 
 const APP_ROOT = path.resolve(
@@ -179,6 +183,10 @@ const APP_ROOT = path.resolve(
 );
 
 let webDistDirectoryCache: string | null | undefined;
+
+export function __resetWebDistDirectoryForTests(): void {
+	webDistDirectoryCache = undefined;
+}
 
 async function resolveWebDistDirectory(): Promise<string | null> {
 	if (webDistDirectoryCache !== undefined) {
@@ -255,6 +263,19 @@ async function loadFallbackSpaHtmlTemplate(): Promise<string | null> {
 
 async function loadAnySpaHtmlTemplate(): Promise<string | null> {
 	return (await loadSpaHtmlTemplate()) ?? (await loadFallbackSpaHtmlTemplate());
+}
+
+/**
+ * A request for a typed static asset is a file request, never an SPA page.
+ * One table decides both, so an asset type can't be served yet still be
+ * metered as an anonymous page render.
+ */
+function isStaticAssetPath(requestPath: string): boolean {
+	const extension = path.extname(requestPath).toLowerCase();
+	return (
+		Object.hasOwn(STATIC_TEXT_CONTENT_TYPES, extension) ||
+		Object.hasOwn(STATIC_BINARY_CONTENT_TYPES, extension)
+	);
 }
 
 function getContentTypeForStaticFile(filePath: string): string {
@@ -1826,10 +1847,7 @@ app.get("*", async (c) => {
 	const acceptsHtml = acceptHeader.includes("text/html");
 	const acceptsGenericResponse = !acceptHeader || acceptHeader.includes("*/*");
 	const hasSessionCookie = hasBetterAuthSessionCookie(c.req.header("cookie"));
-	const hasFileExtension =
-		/\.(?:js|css|html|json|map|png|jpe?g|gif|svg|ico|webp|avif|woff2?|ttf|eot|txt|xml)$/i.test(
-			requestPath,
-		);
+	const hasFileExtension = isStaticAssetPath(requestPath);
 	const isSpaRoute = !hasFileExtension && !isExcludedSpaPath(requestPath);
 	// Generic signed-in requests still need the SPA shell; otherwise they would fall through to the
 	// JSON status response after skipping anonymous public SSR.
