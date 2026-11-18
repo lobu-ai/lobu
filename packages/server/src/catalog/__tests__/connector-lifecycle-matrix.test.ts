@@ -102,7 +102,7 @@ describe("bundled connector lifecycle matrix", () => {
 			"google.gmail": 73,
 			herdr: 12,
 			imessage: 4,
-			linkedin: 15,
+			linkedin: 20,
 			"market.quotes": 2,
 			// outlook's first actions: list_attachments + download_attachment.
 			"microsoft.outlook": 2,
