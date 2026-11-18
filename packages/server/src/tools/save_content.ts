@@ -16,6 +16,7 @@ import {
   type UnlinkedEntityName,
   UnlinkedEntityNameSchema,
 } from '@lobu/core/contracts/tools/save-memory';
+import { isReservedMetadataKey } from '@lobu/core/reserved';
 import { Type } from '@sinclair/typebox';
 import { resolveAutomationAttribution } from '../automations/automation-source';
 import { hasRequiredMcpScope } from '../auth/tool-access';
@@ -591,7 +592,7 @@ async function saveContentImpl(
   // from caller input so a member cannot forge audit discriminators
   // (_lobu_workspace_audit) or idempotency keys by supplying them as metadata.
   for (const key of Object.keys(callerMetadata)) {
-    if (key.startsWith('_lobu_')) delete callerMetadata[key];
+    if (isReservedMetadataKey(key)) delete callerMetadata[key];
   }
   // Memory scope, stamped from the BOUND context rather than caller metadata.
   //
