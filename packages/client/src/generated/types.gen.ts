@@ -819,7 +819,10 @@ export type QuerySqlResponses = {
       name: string;
       type: string;
     }>;
-    total_count: number;
+    /**
+     * Total rows the query matches. Absent when an external source did not report a total; use has_more to paginate.
+     */
+    total_count?: number;
     has_more: boolean;
     /**
      * Rows fetched for this page but omitted by the serialized response-size ceiling. When rows are present, continue from offset + rows.length rather than offset + limit. If no bounded row fits, query_sql returns a VALIDATION error and the projection must be narrowed.
@@ -8810,7 +8813,7 @@ export type ResolvePathResponses = {
         description: string | null;
         icon: string | null;
         color: string | null;
-        entity_count: number;
+        entity_count?: number;
       }>;
       total_content: number;
       recent_content: Array<{

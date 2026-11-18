@@ -45,6 +45,14 @@ import {
 } from "./linkedin-identity.js";
 import { setLinkedInLike } from "./linkedin-like.js";
 import {
+  DAILY_CONNECTION_REQUEST_LIMIT,
+  listLinkedInSentInvitations,
+  removeLinkedInConnection,
+  sendLinkedInConnectionRequest,
+  setLinkedInFollow,
+  withdrawLinkedInConnectionRequest,
+} from "./linkedin-network.js";
+import {
   observeLinkedInInbox,
   lookupLinkedInConversations,
   readLinkedInInbox,
@@ -3182,8 +3190,8 @@ export default class LinkedInConnector extends ConnectorRuntime<
     key: "linkedin",
     name: "LinkedIn",
     description:
-      "Read LinkedIn feeds, notifications, and recent inbox messages through paired Chrome. Subscribe to source changes, store 1:1 message history on the people you talk to, answer direct messages, and prepare message, post, or comment drafts for human submission.",
-    version: "3.24.0",
+      "Read LinkedIn feeds, notifications, and recent inbox messages through paired Chrome. Subscribe to source changes, store 1:1 message history on the people you talk to, answer direct messages, manage your network (connection requests, follows), and prepare message, post, or comment drafts for human submission.",
+    version: "3.25.0",
     faviconDomain: "linkedin.com",
     // Live feeds bind a signed-in Chrome account.
     browser: {
@@ -3492,6 +3500,224 @@ export default class LinkedInConnector extends ConnectorRuntime<
             liked: { type: "boolean" },
           },
           additionalProperties: false,
+        },
+      },
+      send_connection_request: {
+        key: "send_connection_request",
+        name: "Send connection request",
+        kind: "write",
+        description:
+          `Send a LinkedIn connection request to one member, with an optional note, and verify it is pending after reload. A member already connected or with a pending request is unchanged. Refuses when LinkedIn offers no Connect option (code not_connectable), asks for the member's email and none was given (email_required), or reports its own invitation limit (invitation_limit_reached), and stops at ${DAILY_CONNECTION_REQUEST_LIMIT} requests per account per UTC day from one browser (daily_limit_reached). Choosing whom to invite belongs to the calling Automation or agent.`,
+        annotations: {
+          openWorldHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+        },
+        inputSchema: {
+          type: "object",
+          required: ["profile_url"],
+          additionalProperties: false,
+          properties: {
+            profile_url: {
+              type: "string",
+              format: "uri",
+              title: "Profile",
+              description:
+                "The member's LinkedIn profile URL, e.g. https://www.linkedin.com/in/<slug>/.",
+            },
+            note: {
+              type: "string",
+              title: "Note",
+              maxLength: 300,
+              "x-multiline": true,
+              description: "Optional personal note sent with the invitation.",
+            },
+            email: {
+              type: "string",
+              title: "Email",
+              maxLength: 254,
+              description:
+                "The member's email address, only when LinkedIn requires it to connect.",
+            },
+          },
+        },
+        outputSchema: {
+          type: "object",
+          properties: {
+            url: { type: "string" },
+            name: { type: "string" },
+            relation: {
+              type: "string",
+              enum: ["connected", "pending", "none", "unavailable"],
+            },
+            degree: { type: ["string", "null"] },
+            following: { type: ["boolean", "null"] },
+            changed: { type: "boolean" },
+            verified: { type: "boolean" },
+            requests_sent_today: { type: "number" },
+          },
+        },
+      },
+      withdraw_connection_request: {
+        key: "withdraw_connection_request",
+        name: "Withdraw connection request",
+        kind: "write",
+        description:
+          "Withdraw the pending LinkedIn connection request sent to one member and verify it is gone after reload. A member without a pending request is unchanged. LinkedIn may block re-inviting the same member for a few weeks after a withdrawal.",
+        annotations: {
+          openWorldHint: true,
+          destructiveHint: true,
+          idempotentHint: true,
+        },
+        inputSchema: {
+          type: "object",
+          required: ["profile_url"],
+          additionalProperties: false,
+          properties: {
+            profile_url: {
+              type: "string",
+              format: "uri",
+              title: "Profile",
+              description:
+                "The member's LinkedIn profile URL, e.g. https://www.linkedin.com/in/<slug>/.",
+            },
+          },
+        },
+        outputSchema: {
+          type: "object",
+          properties: {
+            url: { type: "string" },
+            name: { type: "string" },
+            relation: {
+              type: "string",
+              enum: ["connected", "pending", "none", "unavailable"],
+            },
+            degree: { type: ["string", "null"] },
+            following: { type: ["boolean", "null"] },
+            changed: { type: "boolean" },
+            verified: { type: "boolean" },
+          },
+        },
+      },
+      remove_connection: {
+        key: "remove_connection",
+        name: "Remove connection",
+        kind: "write",
+        description:
+          "Remove one member from your LinkedIn connections and verify after reload. A member who is not a connection is unchanged. The member is not notified; reconnecting needs a new request they must accept.",
+        annotations: {
+          openWorldHint: true,
+          destructiveHint: true,
+          idempotentHint: true,
+        },
+        inputSchema: {
+          type: "object",
+          required: ["profile_url"],
+          additionalProperties: false,
+          properties: {
+            profile_url: {
+              type: "string",
+              format: "uri",
+              title: "Profile",
+              description:
+                "The member's LinkedIn profile URL, e.g. https://www.linkedin.com/in/<slug>/.",
+            },
+          },
+        },
+        outputSchema: {
+          type: "object",
+          properties: {
+            url: { type: "string" },
+            name: { type: "string" },
+            relation: {
+              type: "string",
+              enum: ["connected", "pending", "none", "unavailable"],
+            },
+            degree: { type: ["string", "null"] },
+            following: { type: ["boolean", "null"] },
+            changed: { type: "boolean" },
+            verified: { type: "boolean" },
+          },
+        },
+      },
+      set_follow: {
+        key: "set_follow",
+        name: "Set follow",
+        kind: "write",
+        description:
+          "Follow or unfollow one LinkedIn member or company page as the connected account and verify it after reload. An already-matching target is unchanged. Following never sends a connection request. Selection and budgets belong to the calling Automation or agent.",
+        annotations: {
+          openWorldHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+        },
+        inputSchema: {
+          type: "object",
+          required: ["target_url", "following"],
+          additionalProperties: false,
+          properties: {
+            target_url: {
+              type: "string",
+              format: "uri",
+              title: "Member or company",
+              description:
+                "A LinkedIn member profile (https://www.linkedin.com/in/<slug>/) or company page (https://www.linkedin.com/company/<slug>/) URL.",
+            },
+            following: { type: "boolean" },
+          },
+        },
+        outputSchema: {
+          type: "object",
+          properties: {
+            url: { type: "string" },
+            name: { type: "string" },
+            relation: {
+              type: "string",
+              enum: ["connected", "pending", "none", "unavailable"],
+            },
+            degree: { type: ["string", "null"] },
+            following: { type: ["boolean", "null"] },
+            changed: { type: "boolean" },
+            verified: { type: "boolean" },
+          },
+        },
+      },
+      list_sent_invitations: {
+        key: "list_sent_invitations",
+        name: "List sent invitations",
+        kind: "read",
+        description:
+          "List the connection requests you have sent that are still pending, newest first: member name, headline, profile URL and when it was sent, read from LinkedIn's sent-invitations page in the paired Chrome browser. Read-only.",
+        annotations: {
+          openWorldHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+        },
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            limit: { type: "integer", minimum: 1, maximum: 200, default: 50 },
+          },
+        },
+        outputSchema: {
+          type: "object",
+          properties: {
+            invitations: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  name: { type: "string" },
+                  headline: { type: ["string", "null"] },
+                  profile_url: { type: ["string", "null"] },
+                  sent: { type: ["string", "null"] },
+                },
+              },
+            },
+            total: { type: ["number", "null"] },
+            truncated: { type: "boolean" },
+          },
         },
       },
       send_message: {
@@ -4017,6 +4243,21 @@ export default class LinkedInConnector extends ConnectorRuntime<
       }
       if (ctx.actionKey === "send_message") {
         return await sendLinkedInMessage(ctx);
+      }
+      if (ctx.actionKey === "send_connection_request") {
+        return await sendLinkedInConnectionRequest(ctx);
+      }
+      if (ctx.actionKey === "withdraw_connection_request") {
+        return await withdrawLinkedInConnectionRequest(ctx);
+      }
+      if (ctx.actionKey === "remove_connection") {
+        return await removeLinkedInConnection(ctx);
+      }
+      if (ctx.actionKey === "set_follow") {
+        return await setLinkedInFollow(ctx);
+      }
+      if (ctx.actionKey === "list_sent_invitations") {
+        return await listLinkedInSentInvitations(ctx);
       }
       if (ctx.actionKey === "lookup_conversations") {
         return await lookupLinkedInConversations(ctx);

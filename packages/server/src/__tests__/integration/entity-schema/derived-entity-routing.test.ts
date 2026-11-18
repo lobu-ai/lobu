@@ -136,7 +136,8 @@ describe('derived entity routing (list + resolve_path)', () => {
     // Policy: the entity LIST runs the backing SQL anyway (it needs the rows),
     // so it reports the exact total via a single-pass window count. Schema
     // list/get and the resolve_path bootstrap must NOT re-run the backing SQL
-    // just for a badge count — those hot paths report 0 for derived types.
+    // just for a badge count — those hot paths leave entity_count ABSENT for
+    // derived types, never a 0 the type did not report.
     const list = (await api.entities.list({ entity_type: 'spend-vendor' })) as {
       entities: unknown[];
       metadata?: { total_count?: number };
@@ -148,24 +149,26 @@ describe('derived entity routing (list + resolve_path)', () => {
       entity_types?: Array<{ slug: string; entity_count?: number }>;
     };
     const spend = types.entity_types?.find((t) => t.slug === 'spend-vendor');
-    expect(spend?.entity_count).toBe(0);
+    expect(spend).toBeDefined();
+    expect(spend).not.toHaveProperty('entity_count');
 
     const got = (await api.entity_schema.getType('spend-vendor')) as {
       entity_type?: { entity_count?: number; backing_sql?: string | null };
     };
     expect(got.entity_type?.backing_sql).toBeTruthy();
-    expect(got.entity_type?.entity_count).toBe(0);
+    expect(got.entity_type).not.toHaveProperty('entity_count');
 
     const resolved = (await resolvePath({
       path: `/${orgSlug}`,
       include_bootstrap: true,
     })) as {
-      bootstrap?: { entity_types?: Array<{ slug: string; entity_count: number }> };
+      bootstrap?: { entity_types?: Array<{ slug: string; entity_count?: number }> };
     };
     const bootstrapType = resolved.bootstrap?.entity_types?.find(
       (type) => type.slug === 'spend-vendor'
     );
-    expect(bootstrapType?.entity_count).toBe(0);
+    expect(bootstrapType).toBeDefined();
+    expect(bootstrapType).not.toHaveProperty('entity_count');
   });
 
   it('keeps type lists available when a connector-backed derived count fails', async () => {
@@ -182,18 +185,20 @@ describe('derived entity routing (list + resolve_path)', () => {
       entity_types?: Array<{ slug: string; entity_count?: number }>;
     };
     const missing = types.entity_types?.find((type) => type.slug === 'missing-derived-source');
-    expect(missing?.entity_count).toBe(0);
+    expect(missing).toBeDefined();
+    expect(missing).not.toHaveProperty('entity_count');
 
     const resolved = (await resolvePath({
       path: `/${orgSlug}`,
       include_bootstrap: true,
     })) as {
-      bootstrap?: { entity_types?: Array<{ slug: string; entity_count: number }> };
+      bootstrap?: { entity_types?: Array<{ slug: string; entity_count?: number }> };
     };
     const bootstrapType = resolved.bootstrap?.entity_types?.find(
       (type) => type.slug === 'missing-derived-source'
     );
-    expect(bootstrapType?.entity_count).toBe(0);
+    expect(bootstrapType).toBeDefined();
+    expect(bootstrapType).not.toHaveProperty('entity_count');
   });
 
   it('resolve_path resolves a derived row by slug into a read-only entity', async () => {

@@ -1101,8 +1101,15 @@ function formatQuerySqlResult(result: any): string {
     });
   }
 
+  // An external source may report no total. The page size is not a total, so
+  // say how many rows came back and let `has_more` carry pagination.
+  const rowSummary =
+    typeof total_count === 'number'
+      ? `**Rows**: ${total_count}`
+      : `**Rows returned**: ${rows?.length ?? 0} • **Has More**: ${result.has_more ? 'Yes' : 'No'}`;
+
   // Wrap in code block for easy copying
-  return `# 💾 SQL Query Results (CSV)\n\n**Rows**: ${total_count} • **Time**: ${execution_time_ms}ms\n\n\`\`\`csv\n${csv}\`\`\`\n\n*Copy the CSV above and paste into Excel/Google Sheets*`;
+  return `# 💾 SQL Query Results (CSV)\n\n${rowSummary} • **Time**: ${execution_time_ms}ms\n\n\`\`\`csv\n${csv}\`\`\`\n\n*Copy the CSV above and paste into Excel/Google Sheets*`;
 }
 
 /**
