@@ -874,6 +874,113 @@ describe("sandbox runtime", () => {
     expect(Date.now() - started).toBeGreaterThanOrEqual(10);
   });
 
+  it("adds conditional delay guidance for an unavailable timer without changing its error", async () => {
+    const result = await runScript({
+      source: "export default async () => { setTimeout(() => {}, 1); };",
+      sdk: stubSDK(),
+    });
+    expect(result.success).toBe(false);
+    expect(result.error).toMatchObject({
+      name: "ScriptError",
+      code: "VALIDATION",
+      message: "setTimeout is not defined",
+    });
+    expect(result.error?.stack).toContain("ReferenceError: setTimeout is not defined");
+    expect(result.error).not.toHaveProperty("retryable");
+    expect(result.logs).toEqual([
+      expect.objectContaining({
+        level: "warn",
+        message: "If this script needs a delay, use await ctx.sleep(ms) (0-30000ms, abort-aware). Node/browser timers such as setTimeout are unavailable.",
+      }),
+    ]);
+  });
+
+  it.each([
+    'const error = new Error("setTimeout is not defined private-value"); error.name = "ReferenceError"; throw error;',
+    'throw new TypeError("setTimeout is not defined private-value");',
+  ])("does not infer a timer failure from customer error text: %s", async (body) => {
+    const result = await runScript({
+      source: `export default async () => { ${body} };`,
+      sdk: stubSDK(),
+    });
+    expect(result.success).toBe(false);
+    expect(result.error?.message).toBe("setTimeout is not defined private-value");
+    expect(result.logs).toEqual([]);
+  });
+
+  it("preserves the error fields and stack while adding only fixed conditional help", async () => {
+    const result = await runScript({
+      source: `export default async () => {
+        const error = new ReferenceError("private-value");
+        error.stack = "stable-private-stack";
+        throw error;
+      };`,
+      sdk: stubSDK(),
+    });
+    expect(result.error).toEqual({
+      name: "ScriptError",
+      code: "VALIDATION",
+      message: "private-value",
+      stack: "stable-private-stack",
+    });
+    expect(result.logs).toHaveLength(1);
+    expect(result.logs[0]?.message).toContain("If this script needs a delay");
+    expect(JSON.stringify(result.logs)).not.toContain("private-value");
+    expect(JSON.stringify(result.logs)).not.toContain("stable-private-stack");
+  });
+
+  it("keeps timer absence observable and permits a script-local timer binding", async () => {
+    const result = await runScript({
+      source: `export default async (ctx) => {
+        const absent = typeof setTimeout;
+        const local = (() => { const setTimeout = () => 9; return setTimeout(); })();
+        await ctx.sleep(0);
+        return { absent, local };
+      };`,
+      sdk: stubSDK(),
+    });
+    expect(result.success).toBe(true);
+    expect(result.returnValue).toEqual({ absent: "undefined", local: 9 });
+    expect(result.logs).toEqual([]);
+  });
+
+  it("keeps the original error after the console log cap suppresses optional help", async () => {
+    const result = await runScript({
+      source: `export default async () => {
+        console.log("x".repeat(70000));
+        const error = new ReferenceError("original-error");
+        error.stack = "original-stack";
+        throw error;
+      };`,
+      sdk: stubSDK(),
+    });
+    expect(result.success).toBe(false);
+    expect(result.error).toEqual({
+      name: "ScriptError", code: "VALIDATION",
+      message: "original-error", stack: "original-stack",
+    });
+    expect(result.logs).toHaveLength(1);
+    expect(result.logs[0]?.message).toContain("console output truncated");
+    expect(result.logs[0]?.message).not.toContain("ctx.sleep");
+  });
+
+  it("does not replace the original error if the guest console bridge throws", async () => {
+    const result = await runScript({
+      source: `export default async () => {
+        __emitConsole = () => { throw new Error("broken-console"); };
+        const error = new ReferenceError("original-error");
+        error.stack = "original-stack";
+        throw error;
+      };`,
+      sdk: stubSDK(),
+    });
+    expect(result.error).toEqual({
+      name: "ScriptError", code: "VALIDATION",
+      message: "original-error", stack: "original-stack",
+    });
+    expect(result.logs).toEqual([]);
+  });
+
   it("rejects a sleep longer than the per-call limit", async () => {
     const stubSdk = { log: () => undefined } as unknown as ClientSDK;
     const result = await runScript({
