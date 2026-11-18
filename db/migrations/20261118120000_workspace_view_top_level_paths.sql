@@ -1,5 +1,5 @@
 -- migrate:up
--- lobu:no-quiesce  (adds row triggers only: the in-transaction check below proves no stored row breaks the invariant, and old code that tries to create a clash is refused, which is the intent)
+-- lobu:quiesce old view writers accept a workspace view key that is a reserved app route or a live entity type slug, and the new /<key> route cannot serve either
 
 -- A workspace view (one whose attach list holds {"workspace": true}) is served at
 -- /<org>/<key>, the same path as an entity type's list page. So within one
@@ -50,24 +50,6 @@ BEGIN
   END IF;
   RETURN NEW;
 END $$;
-
--- Old replicas keep serving while this runs, and their view and entity type
--- writers do not check the other table, so a clash can land after the
--- precondition passed. Block writes to both tables until the triggers commit,
--- then check again: no clash can exist once they are in place.
-LOCK TABLE views, entity_types IN SHARE ROW EXCLUSIVE MODE;
-
-DO $workspace_view_paths$
-BEGIN
-  IF EXISTS (
-    SELECT 1 FROM views v
-    JOIN entity_types et ON et.organization_id = v.organization_id AND et.slug = v.key
-    WHERE v.attach @> '[{"workspace": true}]'::jsonb AND et.deleted_at IS NULL
-  ) THEN
-    RAISE EXCEPTION 'A workspace view key equals a live entity type slug in the same organization; rename the view before upgrading (see db/migrations/preconditions/20261118120000_workspace_view_top_level_paths.sql)';
-  END IF;
-END
-$workspace_view_paths$;
 
 DROP TRIGGER IF EXISTS views_workspace_path_guard ON views;
 CREATE TRIGGER views_workspace_path_guard
