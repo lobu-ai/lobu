@@ -1434,6 +1434,13 @@ async function etHandleCreate(
         409
       );
     }
+    // A workspace view already serves /<org>/<slug> (database guard).
+    if (isUniqueViolation(err, 'workspace_path_unique')) {
+      throw new ToolUserError(
+        `[workspace_path_taken] Workspace view '${slug}' already uses this path; rename the view or pick another slug`,
+        409
+      );
+    }
     throw err;
   }
 

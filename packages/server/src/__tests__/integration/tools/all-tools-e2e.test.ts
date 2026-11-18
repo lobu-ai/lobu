@@ -371,7 +371,7 @@ describe("all agent MCP tools — registry-driven e2e (model-free)", () => {
 			"manage_views",
 			{
 				action: "set",
-				// A Data hub tab, so the unscoped open resolves to a page.
+				// A workspace view, so the unscoped open resolves to its top-level page.
 				source_code: viewModule({ key: "coverage-board", attach: [{ workspace: true }] }),
 			},
 			TEST_ENV,

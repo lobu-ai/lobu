@@ -13,6 +13,7 @@ import { executeTool, type AuthContext } from '../../../tools/execute';
 import type { Env } from '../../../index';
 import { primeMemberEventKinds } from '../../../utils/event-kind-validation';
 import { ensureMemberEntityType } from '../../../utils/member-entity-type';
+import { __resetPublicOriginCachesForTests } from '../../../utils/public-origin';
 import { LOBU_VIEWS_RESOURCE_URI, serverCompileStamp } from '../../../views/views';
 import { initWorkspaceProvider } from '../../../workspace';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
@@ -542,9 +543,9 @@ describe('views resources + open_view + invoke_view_action', () => {
 				.structuredContent.url
 		).pathname;
 
-	it('open_view sends an unscoped workspace view to its Data hub tab', async () => {
+	it('open_view sends an unscoped workspace view to its top-level page', async () => {
 		await setAttachedView('hub', [{ workspace: true }, { collection: 'company' }]);
-		expect(await openPath({ key: 'hub' })).toBe('/views-org/data/-/views/hub');
+		expect(await openPath({ key: 'hub' })).toBe('/views-org/hub');
 		const opened = await rpc('tools/call', { name: 'open_view', arguments: { key: 'hub', scope: {} } });
 		expect(opened.structuredContent.scope).toEqual({});
 	});
@@ -818,6 +819,42 @@ describe('views resources + open_view + invoke_view_action', () => {
 
 		const missing = await get(`/api/${org.slug}/views/gone/shell`, { token });
 		expect(missing.status).toBe(404);
+	});
+
+	it("stamps the workspace's own subdomain as the link root when the shell is fetched there", async () => {
+		const saved = { gateway: process.env.PUBLIC_GATEWAY_URL, zone: process.env.AUTH_COOKIE_DOMAIN };
+		process.env.PUBLIC_GATEWAY_URL = 'https://app.zone.test';
+		process.env.AUTH_COOKIE_DOMAIN = '.zone.test';
+		__resetPublicOriginCachesForTests();
+		const workspaceRoot = async (host: string) => {
+			const response = await get(`/api/${org.slug}/views/board/shell`, { token, headers: { host } });
+			expect(response.status).toBe(200);
+			const html = await response.text();
+			const marker = 'name="lobu-workspace" content="';
+			const start = html.indexOf(marker) + marker.length;
+			return html.slice(start, html.indexOf('"', start));
+		};
+		try {
+			// On the workspace's own host, a record link must resolve to that
+			// host: the web app keeps same-origin links in the workspace (peek)
+			// and sends every other origin to a new tab.
+			expect(await workspaceRoot(`${org.slug}.zone.test`)).toBe(`https://${org.slug}.zone.test/${org.slug}/`);
+			// The canonical host, and a host that is not this workspace's, keep
+			// the configured public origin.
+			expect(await workspaceRoot('app.zone.test')).toBe(`https://app.zone.test/${org.slug}/`);
+			expect(await workspaceRoot('elsewhere.example')).toBe(`https://app.zone.test/${org.slug}/`);
+			// A Host that only starts with the workspace's subdomain must not
+			// smuggle another origin in as userinfo or a path.
+			for (const crafted of [`${org.slug}.zone.test:443@evil.example`, `${org.slug}.zone.test/evil.example`]) {
+				expect(await workspaceRoot(crafted)).toBe(`https://app.zone.test/${org.slug}/`);
+			}
+		} finally {
+			for (const [key, value] of [['PUBLIC_GATEWAY_URL', saved.gateway], ['AUTH_COOKIE_DOMAIN', saved.zone]] as const) {
+				if (value === undefined) delete process.env[key];
+				else process.env[key] = value;
+			}
+			__resetPublicOriginCachesForTests();
+		}
 	});
 
 	/** Mark board's bundle as built by an older server compiler. */

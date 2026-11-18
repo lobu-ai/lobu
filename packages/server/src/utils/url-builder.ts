@@ -12,9 +12,12 @@ import {
 import { INFERENCE_ROW_KEY_PREFIX } from '@lobu/core/reserved';
 import { getLiveOrganizationSlug } from '../workspace/organization-slug';
 import {
+  extractSubdomainOrg,
   getConfiguredPublicOrigin,
+  getSubdomainZone,
   HOSTED_UI_FALLBACK_ORIGIN,
   hasLocalFrontend,
+  RESERVED_SUBDOMAINS,
 } from './public-origin';
 
 function normalizeBaseUrl(baseUrl?: string): string | undefined {
@@ -81,14 +84,47 @@ export async function getOrganizationSlug(
  * The workspace root a view's relative links resolve against
  * (`<web origin>/<org slug>/`). The shell carries it, so every host — the web
  * app, Claude, any MCP Apps host — receives an absolute URL to open.
+ *
+ * A shell fetched on the workspace's own subdomain (`acme.lobu.ai`) gets that
+ * host as its origin: the web app opens a same-origin link inside the
+ * workspace (peek or navigation) and any other origin in a new tab, so the
+ * canonical origin would send every record link out of the workspace.
+ * `requestHost` is the raw Host header; any other host keeps the configured
+ * public origin.
  */
 export async function viewWorkspaceUrl(
   organizationId: string,
-  requestUrl: string
+  requestUrl: string,
+  requestHost?: string
 ): Promise<string> {
-  const origin = getPublicWebUrl(requestUrl) ?? new URL(requestUrl).origin;
   const slug = (await getOrganizationSlug(organizationId)) ?? organizationId;
+  const publicOrigin = getPublicWebUrl(requestUrl) ?? new URL(requestUrl).origin;
+  const origin = workspaceHostOrigin(requestHost, slug, publicOrigin) ?? publicOrigin;
   return `${origin}/${encodeURIComponent(slug)}/`;
+}
+
+function workspaceHostOrigin(
+  requestHost: string | undefined,
+  slug: string,
+  publicOrigin: string
+): string | null {
+  if (!requestHost) return null;
+  let url: URL;
+  try {
+    url = new URL(`${new URL(publicOrigin).protocol}//${requestHost}`);
+  } catch {
+    return null;
+  }
+  // Judge the host the URL parser actually produced, never the raw header:
+  // `acme.lobu.ai:443@evil.example` reads as `acme` to a prefix split but
+  // parses as userinfo plus `evil.example`.
+  if (url.username || url.password || url.pathname !== '/' || url.search || url.hash) {
+    return null;
+  }
+  if (extractSubdomainOrg(url.hostname, getSubdomainZone(), RESERVED_SUBDOMAINS) !== slug) {
+    return null;
+  }
+  return url.origin;
 }
 
 /**
