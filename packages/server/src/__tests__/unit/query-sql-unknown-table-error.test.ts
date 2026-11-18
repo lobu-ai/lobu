@@ -90,6 +90,28 @@ describe('query_sql unknown-table errors are never rendered as an empty result',
     expect(md).not.toMatch(/error/i);
   });
 
+  it('formatter reports the returned page, not a total, when the source reported none', () => {
+    // An external source may omit `total`; `query_sql` then leaves `total_count`
+    // absent and `has_more` is the only pagination signal the caller gets.
+    const page = {
+      rows: [{ a: 'x' }, { a: 'y' }, { a: 'z' }],
+      columns: [{ name: 'a', type: 'text' }],
+      execution_time_ms: 7,
+    };
+    const more = formatToolResult('query_sql', { ...page, has_more: true });
+    const last = formatToolResult('query_sql', { ...page, has_more: false });
+
+    for (const md of [more, last]) {
+      expect(md).not.toContain('undefined');
+      expect(md).toMatch(/\b3\b/);
+    }
+    expect(more).not.toBe(last);
+
+    // A reported total is still rendered as the total, not the page size.
+    const counted = formatToolResult('query_sql', { ...page, total_count: 40, has_more: true });
+    expect(counted).toContain('40');
+  });
+
   it('flags a soft-error result so the MCP boundary can set isError', () => {
     expect(isSoftErrorResult({ rows: [], error: "Unknown table 'conversations'" })).toBe(true);
     // A successful empty result must NOT be flagged.

@@ -163,13 +163,14 @@ export async function queryDerivedEntityView(
 /**
  * Display count for one entity type: canonical stored roots, or the derived
  * view's `total_count` from {@link queryDerivedEntityView} (same path as list).
- * A failed derived query returns 0 so a broken view cannot poison type lists.
+ * A derived count is undefined when its source reports no total or the query
+ * fails, so a broken view cannot poison type lists with a fabricated 0.
  */
 export async function countEntitiesOfType(
 	type: EntityTypeCountInput,
 	ctx: ToolContext,
   readRestrictions?: EntityReadRestrictions,
-): Promise<number> {
+): Promise<number | undefined> {
   const restrictions = readRestrictions ?? await entityReadRestrictions(getDb(), ctx);
   if (restrictions.some(rule => rule.entity_id === null && (rule.entity_type_slug === null || rule.entity_type_slug === type.slug))) return 0;
 	if (type.backing_sql) {
@@ -180,7 +181,7 @@ export async function countEntitiesOfType(
 				{ limit: 1, offset: 0 },
 				ctx,
 			);
-			if (!result.error) return Number(result.total_count) || 0;
+			if (!result.error) return result.total_count;
 			logger.warn(
 				{ err: result.error, entityType: type.slug },
 				"Failed to count derived entity type rows",
@@ -191,7 +192,7 @@ export async function countEntitiesOfType(
 				"Failed to count derived entity type rows",
 			);
 		}
-		return 0;
+		return undefined;
 	}
 	const params: unknown[] = [ctx.organizationId, type.id];
 	const readPredicate = entityReadPolicySql(restrictions, 'e', params);
@@ -239,7 +240,8 @@ export async function getEntityCountsByTypes(
 	if (derived.length > 0) {
 		await Promise.all(
 			derived.map(async (t) => {
-				counts.set(t.id, await countEntitiesOfType(t, ctx, restrictions));
+				const count = await countEntitiesOfType(t, ctx, restrictions);
+				if (count !== undefined) counts.set(t.id, count);
 			}),
 		);
 	}
@@ -2442,7 +2444,8 @@ export async function listEntities(
 ): Promise<{
   entities: CreatedEntity[];
   hasMore: boolean;
-  totalCount: number;
+  /** Absent for a derived type whose backing source reports no total. */
+  totalCount?: number;
   limit: number;
   offset: number;
   sortBy: string;
@@ -2953,7 +2956,8 @@ async function listDerivedEntities(
 ): Promise<{
   entities: CreatedEntity[];
   hasMore: boolean;
-  totalCount: number;
+  /** Absent when the backing source reports no total. */
+  totalCount?: number;
   limit: number;
   offset: number;
   sortBy: string;

@@ -150,7 +150,12 @@ export const QuerySqlResultSchema = Type.Object({
       type: Type.String(),
     })
   ),
-  total_count: Type.Integer(),
+  total_count: Type.Optional(
+    Type.Integer({
+      description:
+        'Total rows the query matches. Absent when an external source did not report a total; use has_more to paginate.',
+    })
+  ),
   has_more: Type.Boolean(),
   omitted_rows: Type.Optional(
     Type.Integer({
@@ -177,7 +182,8 @@ interface QuerySqlResult {
   sql?: string;
   rows: Record<string, unknown>[];
   columns: { name: string; type: string }[];
-  total_count: number;
+  /** Absent when an external source reported no total. */
+  total_count?: number;
   has_more: boolean;
   omitted_rows?: number;
   truncated_columns?: string[];
@@ -235,7 +241,7 @@ function finalizeQuerySqlResult(
     ...(result.title ? { title: result.title } : {}),
     rows: [],
     columns: [],
-    total_count: totalCount,
+    ...(totalCount !== undefined ? { total_count: totalCount } : {}),
     has_more: false,
     ...(result.rows.length > 0 ? { omitted_rows: result.rows.length } : {}),
     execution_time_ms: result.execution_time_ms,
@@ -474,7 +480,9 @@ export async function querySqlImpl(
           sql: baseSql,
           rows: r.rows,
           columns: r.columns,
-          total_count: r.total ?? r.rows.length,
+          // A source that reports no total leaves it absent; the page size is
+          // not a total, and has_more still drives pagination.
+          ...(r.total !== undefined ? { total_count: r.total } : {}),
           has_more: r.total !== undefined ? offset + limit < r.total : r.rows.length >= limit,
           execution_time_ms: Date.now() - startTime,
         },
