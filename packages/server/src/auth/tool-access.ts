@@ -227,7 +227,7 @@ export const PUBLIC_READ_ACTIONS: Record<string, Set<string> | null> = {
 		"get_feedback",
 	]),
 	manage_classifiers: new Set(["list"]),
-	// A public workspace publishes its views too: the Data hub's tabs and the
+	// A public workspace publishes its views too: its top-level view pages and the
 	// rendered view are part of what a visitor came to see, and gating them
 	// behind membership made a shared demo link render an empty pane.
 	//

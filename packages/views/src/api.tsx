@@ -149,7 +149,7 @@ export interface ParamDef {
  * - `{ collection: "deal", when? }` — a tab on the deal list page. `when`
  *   equalities must all be present in scope.collection.filters; they control
  *   discoverability, never authorization.
- * - `{ workspace: true }` — a tab on the Data hub.
+ * - `{ workspace: true }` — a top-level page of the workspace, at `/<key>`.
  * - `{ event: "deal.won", type? }` — one event's page, optionally only when
  *   the event links an entity of `type`.
  */
