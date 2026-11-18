@@ -910,7 +910,6 @@ function mapRowToEntityType(row: Record<string, unknown>): EntityTypeRow {
     ...(row as unknown as EntityTypeRow),
     // Sole platform signal: $ prefix ($member, $resource). Not created_by.
     is_system: slug.startsWith('$'),
-    entity_count: Number(row.entity_count) || 0,
   };
 }
 
@@ -1217,7 +1216,7 @@ async function etHandleList(
   // Stored + derived counts share one path with list/detail (entity-management).
   // Derived types are excluded here: their backing SQL is expensive (multi-second
   // on large event tables) and this list endpoint is called on every page load —
-  // a live badge count is not worth that. They report entity_count 0.
+  // a live badge count is not worth that. Their entity_count stays absent.
   const counts = await getEntityCountsByTypes(
     mappedTypes
       .filter((t) => t.backing_sql == null)
@@ -1231,7 +1230,7 @@ async function etHandleList(
   );
 
   const entityTypes = mappedTypes.map((mapped) => {
-    mapped.entity_count = counts.get(Number(mapped.id)) || 0;
+    if (mapped.backing_sql == null) mapped.entity_count = counts.get(Number(mapped.id)) ?? 0;
     return mapped;
   });
 
@@ -1297,18 +1296,14 @@ async function etHandleGet(
   // Derived counts run the full backing SQL (multi-second on large event
   // tables) and this endpoint is called on every entity page open. The page
   // header shows the list response's total_count instead, so derived types
-  // report 0 here. Same policy as the schema list + resolve_path bootstrap.
-  mapped.entity_count = mapped.backing_sql
-    ? 0
-    : await countEntitiesOfType(
-        {
-          id: Number(mapped.id),
-          slug: mapped.slug,
-          backing_sql: mapped.backing_sql,
-          backing_source: mapped.backing_source,
-        },
-        ctx
-      );
+  // leave entity_count absent here. Same policy as the schema list +
+  // resolve_path bootstrap.
+  if (!mapped.backing_sql) {
+    mapped.entity_count = await countEntitiesOfType(
+      { id: Number(mapped.id), slug: mapped.slug, backing_sql: null, backing_source: null },
+      ctx
+    );
+  }
   // Classify the view's measure columns on read (never persisted).
   if (mapped.backing_sql) mapped.measure_columns = measureColumns(mapped.backing_sql);
   // View templates are retired: type views resolve client-side from
@@ -1440,7 +1435,8 @@ async function etHandleCreate(
   if (inserted.length === 0) throw new Error('Failed to create entity type');
 
   const created = mapRowToEntityType(inserted[0] as Record<string, unknown>);
-  created.entity_count = 0;
+  // A new stored type has no entities yet; a derived type's count is never computed.
+  if (!created.backing_sql) created.entity_count = 0;
 
   await recordAudit(
     sql,
@@ -1595,17 +1591,12 @@ async function etHandleUpdate(
   const result = mapRowToEntityType(updated[0] as Record<string, unknown>);
   // Same policy as get/list: never run a derived backing SQL just to echo a
   // count back from a schema update.
-  result.entity_count = result.backing_sql
-    ? 0
-    : await countEntitiesOfType(
-        {
-          id: Number(result.id),
-          slug: result.slug,
-          backing_sql: result.backing_sql,
-          backing_source: result.backing_source,
-        },
-        ctx
-      );
+  if (!result.backing_sql) {
+    result.entity_count = await countEntitiesOfType(
+      { id: Number(result.id), slug: result.slug, backing_sql: null, backing_source: null },
+      ctx
+    );
+  }
 
   await recordAudit(
     sql,

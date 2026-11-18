@@ -161,7 +161,8 @@ const BootstrapEntityTypeSummarySchema = Type.Object({
   description: Type.Union([Type.String(), Type.Null()]),
   icon: Type.Union([Type.String(), Type.Null()]),
   color: Type.Union([Type.String(), Type.Null()]),
-  entity_count: Type.Integer(),
+  /** Absent for derived types: their backing SQL is never run for a badge. */
+  entity_count: Type.Optional(Type.Integer()),
 });
 
 /**
@@ -906,8 +907,9 @@ async function listEntityTypes(
   // Stored-type counts only. Derived types would re-run their full backing
   // SQL (e.g. the subscription report: 2-5s, authz-wrapped, list + count) on
   // every resolve_path call just for a bootstrap badge; the agent context does
-  // not need it. Same policy as manage_entity_schema list/get and the entity
-  // list: the exact row count stays available from the derived list response.
+  // not need it, so a derived type's entity_count is left absent. Same policy
+  // as manage_entity_schema list/get and the entity list: the exact row count
+  // stays available from the derived list response.
   const counts = await getEntityCountsByTypes(
     rows
       .filter((row) => row.backing_sql == null)
@@ -927,7 +929,7 @@ async function listEntityTypes(
     description: row.description ? String(row.description) : null,
     icon: row.icon ? String(row.icon) : null,
     color: row.color ? String(row.color) : null,
-    entity_count: counts.get(Number(row.id)) || 0,
+    ...(row.backing_sql == null ? { entity_count: counts.get(Number(row.id)) ?? 0 } : {}),
   }));
 }
 
