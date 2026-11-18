@@ -874,7 +874,7 @@ describe("sandbox runtime", () => {
     expect(Date.now() - started).toBeGreaterThanOrEqual(10);
   });
 
-  it("adds conditional delay guidance for an unavailable timer without changing its error", async () => {
+  it("delivers conditional timer guidance through the production public-result filter", async () => {
     const result = await runScript({
       source: "export default async () => { setTimeout(() => {}, 1); };",
       sdk: stubSDK(),
@@ -883,16 +883,19 @@ describe("sandbox runtime", () => {
     expect(result.error).toMatchObject({
       name: "ScriptError",
       code: "VALIDATION",
-      message: "setTimeout is not defined",
+      message: expect.stringContaining("setTimeout is not defined"),
     });
     expect(result.error?.stack).toContain("ReferenceError: setTimeout is not defined");
     expect(result.error).not.toHaveProperty("retryable");
-    expect(result.logs).toEqual([
-      expect.objectContaining({
-        level: "warn",
-        message: "If this script needs a delay, use await ctx.sleep(ms) (0-30000ms, abort-aware). Node/browser timers such as setTimeout are unavailable.",
-      }),
-    ]);
+    const publicResult = toMcpPublicSdkScriptResult({ ...result, error: result.error }) as Record<string, unknown>;
+    expect(validateToolResult(SdkScriptResultSchema, publicResult)).not.toBeNull();
+    expect(publicResult.error).toMatchObject({
+      name: "ScriptError", code: "VALIDATION",
+      message: expect.stringContaining("await ctx.sleep(ms)"),
+    });
+    expect(JSON.stringify(publicResult)).not.toContain('"logs"');
+    expect(JSON.stringify(publicResult)).not.toContain('"stack"');
+    expect(result.logs).toEqual([]);
   });
 
   it.each([
@@ -920,11 +923,11 @@ describe("sandbox runtime", () => {
     expect(result.error).toEqual({
       name: "ScriptError",
       code: "VALIDATION",
-      message: "private-value",
+      message: expect.stringContaining("private-value"),
       stack: "stable-private-stack",
     });
-    expect(result.logs).toHaveLength(1);
-    expect(result.logs[0]?.message).toContain("If this script needs a delay");
+    expect(result.error?.message).toContain("If this script needs a delay");
+    expect(result.logs).toEqual([]);
     expect(JSON.stringify(result.logs)).not.toContain("private-value");
     expect(JSON.stringify(result.logs)).not.toContain("stable-private-stack");
   });
@@ -944,7 +947,7 @@ describe("sandbox runtime", () => {
     expect(result.logs).toEqual([]);
   });
 
-  it("keeps the original error after the console log cap suppresses optional help", async () => {
+  it("keeps caller-visible guidance after the console log cap fills", async () => {
     const result = await runScript({
       source: `export default async () => {
         console.log("x".repeat(70000));
@@ -957,11 +960,12 @@ describe("sandbox runtime", () => {
     expect(result.success).toBe(false);
     expect(result.error).toEqual({
       name: "ScriptError", code: "VALIDATION",
-      message: "original-error", stack: "original-stack",
+      message: expect.stringContaining("original-error"), stack: "original-stack",
     });
     expect(result.logs).toHaveLength(1);
     expect(result.logs[0]?.message).toContain("console output truncated");
     expect(result.logs[0]?.message).not.toContain("ctx.sleep");
+    expect(result.error?.message).toContain("await ctx.sleep(ms)");
   });
 
   it("does not replace the original error if the guest console bridge throws", async () => {
@@ -976,9 +980,20 @@ describe("sandbox runtime", () => {
     });
     expect(result.error).toEqual({
       name: "ScriptError", code: "VALIDATION",
-      message: "original-error", stack: "original-stack",
+      message: expect.stringContaining("original-error"), stack: "original-stack",
     });
     expect(result.logs).toEqual([]);
+  });
+
+  it("keeps guidance visible and bounded for oversized ReferenceErrors at the public boundary", async () => {
+    const result = await runScript({
+      source: 'export default async () => { throw new ReferenceError("x".repeat(30000)); };',
+      sdk: stubSDK(),
+    });
+    const publicResult = toMcpPublicSdkScriptResult({ ...result, error: result.error }) as { error: { message: string } };
+    expect(publicResult.error.message).toContain("await ctx.sleep(ms)");
+    expect(Buffer.byteLength(publicResult.error.message, "utf8")).toBeLessThanOrEqual(MAX_SCRIPT_ERROR_MESSAGE_BYTES);
+    expect(validateToolResult(SdkScriptResultSchema, publicResult)).not.toBeNull();
   });
 
   it("rejects a sleep longer than the per-call limit", async () => {
