@@ -180,6 +180,61 @@ describe('MicrosoftOutlookConnector runtime', () => {
       Object.keys(connector.definition.feeds.calendar.eventKinds)
     ).toContain(result.events[0].origin_type);
   });
+
+  test('lists each file attachment to open from Outlook, read with the page and never its bytes', async () => {
+    const urls: string[] = [];
+    const file = (id: string, name: string, contentType: string, extra: Record<string, unknown> = {}) => ({
+      '@odata.type': '#microsoft.graph.fileAttachment',
+      id,
+      name,
+      contentType,
+      size: 4096,
+      isInline: false,
+      ...extra,
+    });
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      urls.push(typeof input === 'string' ? input : input.toString());
+      return Response.json({
+        value: [
+          {
+            ...graphMessage('with-files'),
+            hasAttachments: true,
+            attachments: [
+              file('att-report', 'report.pdf', 'application/pdf'),
+              // A signature image the body embeds is not a file.
+              file('att-logo', 'logo.png', 'image/png', { isInline: true }),
+              file('att-chart', 'chart.png', 'image/png'),
+              // A cloud link has no bytes for download_attachment to fetch.
+              { ...file('att-link', 'deck.pptx', 'application/vnd.ms-powerpoint'), '@odata.type': '#microsoft.graph.referenceAttachment' },
+            ],
+          },
+          { ...graphMessage('plain'), attachments: [] },
+        ],
+      });
+    }) as typeof fetch;
+
+    const connector = new MicrosoftOutlookConnector();
+    const result = await runSync(connector, {
+      feedKey: 'messages',
+      config: { max_results: 10, lookback_days: 30 },
+      credentials: { accessToken: 'token' },
+      checkpoint: {},
+    });
+
+    expect(urls).toHaveLength(1);
+    expect(new URL(urls[0]).searchParams.get('$expand')).toBe(
+      'attachments($select=id,name,contentType,size,isInline)'
+    );
+    const open = (attachmentId: string) => ({
+      operation: 'download_attachment',
+      input: { message_id: 'with-files', attachment_id: attachmentId },
+    });
+    expect(result.events[0].attachments).toEqual([
+      { kind: 'file', filename: 'report.pdf', mime_type: 'application/pdf', size_bytes: 4096, open: open('att-report') },
+      { kind: 'image', filename: 'chart.png', mime_type: 'image/png', size_bytes: 4096, open: open('att-chart') },
+    ]);
+    expect(result.events[1]).not.toHaveProperty('attachments');
+  });
 });
 
 describe('Outlook attachment download', () => {

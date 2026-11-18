@@ -21,6 +21,7 @@ import {
   type SyncContext,
   type SyncResult,
 } from '@lobu/connector-sdk';
+import { type SourceFileAttachment, sourceFileAttachment } from './source-file-attachment';
 
 // ---------------------------------------------------------------------------
 // Microsoft Graph API types
@@ -57,6 +58,8 @@ interface GraphMessage {
   isRead: boolean;
   webLink: string;
   parentFolderId: string;
+  /** Expanded on the feed's list call, metadata only (never `contentBytes`). */
+  attachments?: GraphAttachment[];
 }
 
 interface GraphEvent {
@@ -117,6 +120,33 @@ function formatRecipients(
   recipients: Array<{ emailAddress: { name: string; address: string } }>
 ): string {
   return recipients.map((r) => r.emailAddress.name || r.emailAddress.address).join(', ');
+}
+
+const FILE_ATTACHMENT_TYPE = '#microsoft.graph.fileAttachment';
+
+/**
+ * The files a message carries, kept in Outlook: each entry names the message
+ * and attachment that download_attachment fetches when someone opens it.
+ * Inline parts (a signature image the body draws) are not files, and only a
+ * file attachment has bytes to fetch; a reference attachment is a cloud link
+ * and an item attachment is an embedded message.
+ */
+function messageFileAttachments(message: GraphMessage): SourceFileAttachment[] {
+  return (message.attachments ?? [])
+    .filter(
+      (attachment) =>
+        !attachment.isInline &&
+        (attachment['@odata.type'] ?? FILE_ATTACHMENT_TYPE) === FILE_ATTACHMENT_TYPE
+    )
+    .map((attachment) =>
+      sourceFileAttachment({
+        filename: attachment.name ?? attachment.id,
+        mimeType: attachment.contentType ?? 'application/octet-stream',
+        sizeBytes: attachment.size,
+        operation: 'download_attachment',
+        input: { message_id: message.id, attachment_id: attachment.id },
+      })
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -262,7 +292,7 @@ export default class MicrosoftOutlookConnector extends ConnectorRuntime {
         kind: 'read',
         name: 'List Attachments',
         description:
-          "List a message's attachments with their IDs, names, types and sizes. The feed only reports `has_attachments`, so this is how an agent learns what to download.",
+          "List a message's attachments with their IDs, names, types and sizes, including inline images and cloud links the feed's file list leaves out. Use it to learn what to download.",
         requiredScopes: ['Mail.Read'],
         inputSchema: {
           type: 'object',
@@ -484,29 +514,36 @@ export default class MicrosoftOutlookConnector extends ConnectorRuntime {
       `?$top=${this.PAGE_SIZE}` +
       '&$orderby=receivedDateTime desc' +
       `&$filter=receivedDateTime ge ${window.start} and receivedDateTime lt ${window.end}` +
-      '&$select=id,conversationId,subject,bodyPreview,from,toRecipients,ccRecipients,receivedDateTime,sentDateTime,hasAttachments,importance,isRead,webLink';
+      '&$select=id,conversationId,subject,bodyPreview,from,toRecipients,ccRecipients,receivedDateTime,sentDateTime,hasAttachments,importance,isRead,webLink' +
+      // Attachment names ride on the page itself: one request per page, not
+      // one per message, and the selected fields leave the bytes behind.
+      '&$expand=attachments($select=id,name,contentType,size,isInline)';
 
     return this.walkPages<GraphMessage>(ctx, http, {
       window,
       firstUrl,
       maxResults: (config.max_results as number) ?? 50,
-      toEvent: (msg) => ({
-        origin_id: `outlook_msg_${msg.id}`,
-        title: msg.subject,
-        payload_text: msg.bodyPreview || msg.subject,
-        author_name: msg.from?.emailAddress?.name || msg.from?.emailAddress?.address,
-        source_url: msg.webLink,
-        occurred_at: new Date(msg.receivedDateTime),
-        origin_type: 'email',
-        metadata: {
-          from: msg.from?.emailAddress?.address,
-          to: formatRecipients(msg.toRecipients ?? []),
-          cc: formatRecipients(msg.ccRecipients ?? []),
-          importance: msg.importance,
-          has_attachments: msg.hasAttachments,
-          is_read: msg.isRead,
-        },
-      }),
+      toEvent: (msg) => {
+        const attachments = messageFileAttachments(msg);
+        return {
+          origin_id: `outlook_msg_${msg.id}`,
+          title: msg.subject,
+          payload_text: msg.bodyPreview || msg.subject,
+          ...(attachments.length > 0 ? { attachments } : {}),
+          author_name: msg.from?.emailAddress?.name || msg.from?.emailAddress?.address,
+          source_url: msg.webLink,
+          occurred_at: new Date(msg.receivedDateTime),
+          origin_type: 'email',
+          metadata: {
+            from: msg.from?.emailAddress?.address,
+            to: formatRecipients(msg.toRecipients ?? []),
+            cc: formatRecipients(msg.ccRecipients ?? []),
+            importance: msg.importance,
+            has_attachments: msg.hasAttachments,
+            is_read: msg.isRead,
+          },
+        };
+      },
       // The next window starts where this one ended.
       completed: { last_sync_at: window.end },
     });

@@ -29,6 +29,7 @@ import gmailDiscovery from './_google/discovery/gmail_v1.json';
 import { GOOGLE_API_POLICIES } from './_google/policies';
 import TurndownService from 'turndown';
 import { syncGmailReferences, type GmailReferenceState } from './google_gmail_references';
+import { sourceFileAttachment } from './source-file-attachment';
 
 /**
  * Supported Gmail API methods as actions, compiled from the pinned Discovery
@@ -590,10 +591,31 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
               '', body,
             ].join('\n'));
           }
+          // Files stay in Gmail: each entry names the message and attachment
+          // id that download_attachment fetches when someone opens it.
+          const attachments = messages.flatMap((message) =>
+            this.collectAttachments(message.payload, { filesOnly: true }).map((file) =>
+              sourceFileAttachment({
+                filename: file.filename,
+                mimeType: file.mime_type,
+                sizeBytes: file.size_bytes,
+                operation: 'download_attachment',
+                input: {
+                  message_id: message.id,
+                  attachment_id: file.attachment_id,
+                  // The attachment endpoint returns bare bytes; the name and
+                  // media type live on the MIME part and must be passed back.
+                  filename: file.filename,
+                  mime_type: file.mime_type.toLowerCase(),
+                },
+              })
+            )
+          );
           events.push({
             origin_id: thread.id,
             title: this.getHeader(firstMessage, 'Subject') || '(no subject)',
             payload_text: messageTexts.join('\n\n---\n\n'),
+            ...(attachments.length > 0 ? { attachments } : {}),
             author_name: attribution.from,
             source_url: `https://mail.google.com/mail/u/0/#inbox/${thread.id}`,
             occurred_at: occurredAt,
@@ -1285,12 +1307,13 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
    * what that one discards: a part with a filename is skipped there as "not
    * body text", which is precisely what makes it an attachment here.
    *
-   * Inline parts (an embedded signature image) are included: they are real
-   * bytes a caller may want, and Gmail does not mark them differently enough
-   * to filter on without also dropping legitimate attachments.
+   * Inline parts (an embedded signature image) are included by default: they
+   * are real bytes an agent may want. `filesOnly` drops them for the event's
+   * file list, where a signature logo on every mail would bury the invoice.
    */
   private collectAttachments(
-    payload: GmailMessagePayload
+    payload: GmailMessagePayload,
+    { filesOnly = false }: { filesOnly?: boolean } = {}
   ): Array<{ attachment_id: string; filename: string; mime_type: string; size_bytes: number }> {
     const found: Array<{
       attachment_id: string;
@@ -1299,7 +1322,7 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
       size_bytes: number;
     }> = [];
     const walk = (part: GmailMessagePayload): void => {
-      if (part.body?.attachmentId && part.filename) {
+      if (part.body?.attachmentId && part.filename && !(filesOnly && this.isEmbeddedImage(part))) {
         found.push({
           attachment_id: part.body.attachmentId,
           filename: part.filename,
@@ -1311,6 +1334,23 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
     };
     walk(payload);
     return found;
+  }
+
+  /**
+   * An image the HTML body draws, not a file the sender attached.
+   *
+   * Such parts are marked inline, or carry a Content-ID for the body's `cid:`
+   * reference with no disposition at all. Gmail also stamps a Content-ID on
+   * ordinary attachments, so a part declared `attachment` always counts as a
+   * file. Only images are dropped: some clients send a dropped-in PDF inline,
+   * and it is still the document the mail is about.
+   */
+  private isEmbeddedImage(part: GmailMessagePayload): boolean {
+    if (!part.mimeType.toLowerCase().startsWith('image/')) return false;
+    const header = (name: string) => part.headers?.find((h) => h.name.toLowerCase() === name)?.value;
+    const disposition = header('content-disposition')?.split(';', 1)[0].trim().toLowerCase();
+    if (disposition === 'inline') return true;
+    return !disposition && header('content-id') !== undefined;
   }
 
   /**
