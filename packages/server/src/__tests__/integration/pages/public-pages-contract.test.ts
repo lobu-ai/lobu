@@ -196,6 +196,10 @@ describe.skipIf(!WEB_AVAILABLE)('public page contract', () => {
     );
     expect(body).toContain('Tracked public brands');
     expect(body).toContain('Brand launch feedback');
+    // A derived type's count is never computed on the workspace page, so it
+    // renders as Live instead of a fabricated "0 entities".
+    expect(body).toMatch(/Brand Directory<\/strong>\s*<span[^>]*>Live<\/span>/);
+    expect(body).not.toMatch(/Brand Directory<\/strong>\s*<span[^>]*>0 entities/);
   });
 
   it('renders public entity pages and real 404 HTML for missing pages', async () => {

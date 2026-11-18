@@ -246,6 +246,139 @@ describe('resolve_path contract', () => {
 });
 
 /**
+ * List rows carry only the immediate parent, so a record three levels deep is
+ * linked by the suffix `<parent_type>/<parent>/<type>/<slug>`. A first segment
+ * that is not a root anchors on its unique record in scope; the response path
+ * carries the full ancestry.
+ */
+describe('resolve_path deep record anchors', () => {
+  let fixture: Pick<Fixture, 'orgSlug' | 'token'>;
+
+  async function resolveStatus(path: string): Promise<number> {
+    const response = await post(`/api/${fixture.orgSlug}/resolve_path`, {
+      body: { path },
+      token: fixture.token,
+    });
+    return response.status;
+  }
+
+  async function seedChain(orgId: string, userId: string, chain: Array<[string, string]>) {
+    const sql = getTestDb();
+    let parentId: number | null = null;
+    const ids: number[] = [];
+    for (const [entityType, slug] of chain) {
+      const rows = await sql`
+        INSERT INTO entities (organization_id, entity_type_id, name, slug, parent_id, created_by)
+        SELECT ${orgId}, et.id, ${slug}, ${slug}, ${parentId}, ${userId}
+        FROM entity_types et
+        WHERE et.organization_id = ${orgId} AND et.slug = ${entityType}
+        RETURNING id
+      `;
+      parentId = Number(rows[0]!.id);
+      ids.push(parentId);
+    }
+    return ids;
+  }
+
+  async function seedTypes(orgId: string) {
+    const sql = getTestDb();
+    await sql`
+      INSERT INTO entity_types (organization_id, slug, name, created_at, updated_at)
+      VALUES
+        (${orgId}, 'binder', 'Binder', NOW(), NOW()),
+        (${orgId}, 'revision', 'Revision', NOW(), NOW()),
+        (${orgId}, 'review-check', 'Review check', NOW(), NOW())
+    `;
+  }
+
+  beforeAll(async () => {
+    await cleanupTestDatabase();
+    const org = await createTestOrganization({ name: 'Deep Path Org', slug: 'deep-path' });
+    const user = await createTestUser({ email: 'deep-path@test.example.com' });
+    await addUserToOrganization(user.id, org.id, 'owner');
+    await seedTypes(org.id);
+    await seedChain(org.id, user.id, [
+      ['binder', 'binder-one'],
+      ['revision', 'rev-a'],
+      ['review-check', 'check-one'],
+    ]);
+    // Same revision slug under two binders: the suffix cannot pick one.
+    await seedChain(org.id, user.id, [
+      ['binder', 'binder-two'],
+      ['revision', 'rev-shared'],
+      ['review-check', 'check-two'],
+    ]);
+    await seedChain(org.id, user.id, [
+      ['binder', 'binder-three'],
+      ['revision', 'rev-shared'],
+      ['review-check', 'check-three'],
+    ]);
+
+    // A private workspace holding its own copy of `rev-a` and a record that
+    // exists only there.
+    const other = await createTestOrganization({ name: 'Deep Path Other', slug: 'deep-path-other' });
+    const otherUser = await createTestUser({ email: 'deep-path-other@test.example.com' });
+    await addUserToOrganization(otherUser.id, other.id, 'owner');
+    await seedTypes(other.id);
+    await seedChain(other.id, otherUser.id, [
+      ['binder', 'binder-one'],
+      ['revision', 'rev-a'],
+      ['review-check', 'check-one'],
+    ]);
+    await seedChain(other.id, otherUser.id, [
+      ['binder', 'foreign-binder'],
+      ['revision', 'foreign-rev'],
+      ['review-check', 'foreign-check'],
+    ]);
+
+    const oauthClient = await createTestOAuthClient();
+    fixture = {
+      orgSlug: org.slug,
+      token: (await createTestAccessToken(user.id, org.id, oauthClient.client_id)).token,
+    };
+  });
+
+  it('resolves a two-level suffix of a three-level chain with the full ancestry', async () => {
+    const resolved = (await resolvePath(fixture, {
+      path: `/${fixture.orgSlug}/revision/rev-a/review-check/check-one`,
+    })) as {
+      entity?: { slug: string; entity_type: string };
+      path?: Array<{ entity_type: string; slug: string }>;
+    };
+    expect(resolved.entity).toMatchObject({ entity_type: 'review-check', slug: 'check-one' });
+    expect(resolved.path?.map((p) => `${p.entity_type}/${p.slug}`)).toEqual([
+      'binder/binder-one',
+      'revision/rev-a',
+      'review-check/check-one',
+    ]);
+
+    const full = (await resolvePath(fixture, {
+      path: `/${fixture.orgSlug}/binder/binder-one/revision/rev-a/review-check/check-one`,
+    })) as { entity?: { id: number } };
+    expect(full.entity?.id).toBe((resolved.entity as { id?: number }).id);
+  });
+
+  it('anchors a single non-root segment on its unique record', async () => {
+    const resolved = (await resolvePath(fixture, {
+      path: `/${fixture.orgSlug}/review-check/check-one`,
+    })) as { path?: Array<{ slug: string }> };
+    expect(resolved.path?.map((p) => p.slug)).toEqual(['binder-one', 'rev-a', 'check-one']);
+  });
+
+  it('keeps an ambiguous non-root anchor a 404', async () => {
+    expect(await resolveStatus(`/${fixture.orgSlug}/revision/rev-shared/review-check/check-two`)).toBe(404);
+    expect(await resolveStatus(`/${fixture.orgSlug}/revision/rev-shared`)).toBe(404);
+  });
+
+  it('never anchors on a record in another private workspace', async () => {
+    expect(
+      await resolveStatus(`/${fixture.orgSlug}/revision/foreign-rev/review-check/foreign-check`)
+    ).toBe(404);
+    expect(await resolveStatus(`/${fixture.orgSlug}/review-check/foreign-check`)).toBe(404);
+  });
+});
+
+/**
  * `resolve_path.counts` drives nav badges and onboarding states, so a wrong
  * number tells someone their workspace is set up when it isn't.
  */

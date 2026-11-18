@@ -37,7 +37,8 @@ interface PublicEntityTypeDetails {
   description: string | null;
   icon: string | null;
   color: string | null;
-  entity_count: number;
+  /** Absent for a derived type whose source reports no total. */
+  entity_count?: number;
   metadata_schema: Record<string, unknown> | null;
 }
 
@@ -65,7 +66,7 @@ interface PublicEntityListResult {
   metadata: {
     page_size: number;
     has_more: boolean;
-    total_count: number;
+    total_count?: number;
     limit: number;
     offset: number;
     sort_by: string;
@@ -259,6 +260,11 @@ const COUNT_PLURALS: Record<string, string> = { entity: 'entities' };
 function formatCountLabel(value: number, singular: string): string {
   const plural = COUNT_PLURALS[singular] ?? `${singular}s`;
   return `${value} ${value === 1 ? singular : plural}`;
+}
+
+/** A derived type with no computed count reads from its source live. */
+function formatEntityCountLabel(value: number | undefined): string {
+  return value === undefined ? 'Live' : formatCountLabel(value, 'entity');
 }
 
 function formatDate(value: string | null | undefined): string | null {
@@ -582,7 +588,7 @@ function buildWorkspaceModel(
         (bootstrap?.entity_types ?? []).map((entityType) => ({
           href: `/${organization.slug}/${entityType.slug}`,
           title: entityType.name,
-          meta: formatCountLabel(entityType.entity_count, 'entity'),
+          meta: formatEntityCountLabel(entityType.entity_count),
           body: entityType.description ? snippet(entityType.description, 140) : null,
         })),
         localPath
@@ -657,10 +663,13 @@ function buildEntityTypeModel(params: {
   const origin = getPublicOrigin(params.requestUrl);
   const canonicalPath = `/${params.organization.slug}/${params.entityType.slug}`;
   const canonicalUrl = absoluteUrl(canonicalPath, origin);
-  const countLabel = formatCountLabel(params.entityType.entity_count, 'entity');
+  const entityCount = params.entityType.entity_count;
+  const countLabel = formatEntityCountLabel(entityCount);
   const description = truncateText(
     params.entityType.description?.trim() ||
-      `${params.entityType.name} in ${params.organization.name}. ${countLabel} publicly visible in this workspace.`,
+      `${params.entityType.name} in ${params.organization.name}.${
+        entityCount === undefined ? '' : ` ${countLabel} publicly visible in this workspace.`
+      }`,
     180
   );
 
@@ -1196,9 +1205,10 @@ export async function buildPublicPageModel(
         resolvePublicPath({ path: `/${organization.slug}`, include_bootstrap: true }, env, toolCtx),
         getPublicEntityTypeList(organization.id, env, toolCtx, entityTypeDefinition.slug),
       ]);
+      const totalCount = entityList.metadata.total_count;
       const entityType: PublicEntityTypeDetails = {
         ...entityTypeDefinition,
-        entity_count: entityList.metadata.total_count,
+        ...(totalCount !== undefined ? { entity_count: totalCount } : {}),
       };
       return applyBootstrapStrip(
         buildEntityTypeModel({
