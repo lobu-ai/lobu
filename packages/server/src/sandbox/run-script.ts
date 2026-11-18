@@ -783,11 +783,14 @@ function isBareScriptBodyDiagnostic(
 
 function guestPreamble(
 	errorTokenReader: string,
+	referenceErrorCheck: string,
 	crossOrgDenialToken: string,
 	ctxMisuseToken: string,
 ): string {
 	return `
-const { client, ctx, takeErrorToken: ${errorTokenReader} } = (() => {
+const { client, ctx, takeErrorToken: ${errorTokenReader}, isReferenceError: ${referenceErrorCheck} } = (() => {
+const __referenceErrorPrototype = ReferenceError.prototype;
+const __hasPrototype = Function.prototype.call.bind(Object.prototype.isPrototypeOf);
 const __hostSdkDispatch = __sdk_dispatch;
 const __hostSleep = __sleep;
 const __hostFail = __fail;
@@ -952,6 +955,9 @@ return {
       }
     },
   }),
+  isReferenceError(error) {
+    try { return __hasPrototype(__referenceErrorPrototype, error); } catch { return false; }
+  },
   takeErrorToken(error) {
     const trusted = __readTrustedError(error);
     __forgetTrustedError(error);
@@ -979,7 +985,7 @@ const exports = module.exports;
 `;
 }
 
-function guestRunner(errorTokenReader: string): string {
+function guestRunner(errorTokenReader: string, referenceErrorCheck: string): string {
 	return `
 (async () => {
   try {
@@ -997,6 +1003,13 @@ function guestRunner(errorTokenReader: string): string {
       value: __result === undefined ? null : __result,
     });
   } catch (error) {
+    // Conditional environment guidance, never an attribution based on exception text.
+    // Keep the original error envelope and stack unchanged, and do not install timers.
+    try {
+      if (${referenceErrorCheck}(error)) {
+        __emitConsole('warn', ['If this script needs a delay, use await ctx.sleep(ms) (0-30000ms, abort-aware). Node/browser timers such as setTimeout are unavailable.']);
+      }
+    } catch {}
 	const __safeErrorField = (key, fallback) => {
 	  try {
 		const value = error?.[key];
@@ -1740,8 +1753,9 @@ export async function runScript(
 		}
 
 		const errorTokenReader = `__lobu_take_error_token_${randomUUID().replaceAll("-", "")}`;
+		const referenceErrorCheck = `__lobu_is_reference_error_${randomUUID().replaceAll("-", "")}`;
 		const script = await isolate.compileScript(
-			`${guestPreamble(errorTokenReader, trustErrorClassification("PERMISSION"), trustErrorClassification("VALIDATION"))}\n${compiled}\n${options.extractExport ? EXTRACT_RUNNER : guestRunner(errorTokenReader)}`,
+			`${guestPreamble(errorTokenReader, referenceErrorCheck, trustErrorClassification("PERMISSION"), trustErrorClassification("VALIDATION"))}\n${compiled}\n${options.extractExport ? EXTRACT_RUNNER : guestRunner(errorTokenReader, referenceErrorCheck)}`,
 		).catch((error: unknown) => {
 			// Outside an ESM package, esbuild accepts a bare return as CommonJS.
 			// V8 rejects it at compilation and exposes no diagnostic code beyond
