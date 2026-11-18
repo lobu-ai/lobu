@@ -31,11 +31,17 @@ interface Member {
  */
 function linkedIn(
   member: Partial<Member> = {},
-  options: { emailRequired?: boolean; persist?: boolean; signedIn?: string } = {}
+  options: {
+    emailRequired?: boolean;
+    persist?: boolean;
+    signedIn?: string;
+    company?: { following: boolean };
+    sentTotal?: number;
+  } = {}
 ) {
   const world = {
     member: { relation: "none", following: false, ...member } as Member,
-    company: { following: false },
+    company: { following: false, ...options.company },
     invitationsSent: 0,
     foreignClicks: [] as string[],
   };
@@ -49,6 +55,32 @@ function linkedIn(
     return (this.isConnected && !this.closest("[hidden]") ? [{ width: 1 }] : []) as any;
   };
   win.scrollTo = () => {};
+  // Web Locks: one queue per browser, shared by every tab.
+  let tail: Promise<unknown> = Promise.resolve();
+  let lockWaiters = 0;
+  const holdLock = () => {
+    let release!: () => void;
+    const prior = tail;
+    tail = prior.then(() => new Promise<void>((resolve) => (release = resolve)));
+    return () => release();
+  };
+  Object.defineProperty(win.navigator, "locks", {
+    value: {
+      request: async (_name: string, work: () => Promise<unknown>) => {
+        const prior = tail;
+        let release!: () => void;
+        tail = new Promise<void>((resolve) => (release = resolve));
+        lockWaiters++;
+        await prior;
+        lockWaiters--;
+        try {
+          return await work();
+        } finally {
+          release();
+        }
+      },
+    },
+  });
   doc.cookie = 'JSESSIONID="ajax:0000000000000000001"; path=/';
   (win as any).fetch = async (url: string) =>
     url === "/voyager/api/me"
@@ -240,7 +272,7 @@ ${options.emailRequired ? '<label>Email <input name="email" type="email"></label
         ["bo-sample", "Bo Sample", "Founder", "1 week ago"],
       ];
       doc.body.innerHTML = `<main>
-<nav><a href="https://www.linkedin.com/mynetwork/invitation-manager/sent/">People 2</a></nav>
+<nav><a href="https://www.linkedin.com/mynetwork/invitation-manager/sent/">People ${options.sentTotal ?? 2}</a></nav>
 <ul>${rows
         .map(
           ([slug, name, headline, when]) => `<li>
@@ -290,7 +322,7 @@ ${options.emailRequired ? '<label>Email <input name="email" type="email"></label
   const tabsClosed = () =>
     calls.filter((call) => call.key === "close_tab").length ===
     calls.filter((call) => call.key === "navigate" && call.input.new_tab).length;
-  return { world, win, calls, ctx, run, tabsClosed };
+  return { world, win, calls, ctx, run, tabsClosed, holdLock, lockWaiters: () => lockWaiters };
 }
 
 test(
@@ -379,6 +411,22 @@ test(
     );
     expect(nextDay).toMatchObject({ success: true, output: { requests_sent_today: 1 } });
 
+    // Another tab spends the last request while this send waits for the lock.
+    const racing = linkedIn();
+    const counter = `lobu.linkedin.connection_requests.${ACCOUNT}.2030-01-02`;
+    racing.win.localStorage.setItem(counter, String(network.DAILY_CONNECTION_REQUEST_LIMIT - 1));
+    const release = racing.holdLock();
+    const pending = network.sendLinkedInConnectionRequest(
+      racing.ctx("send_connection_request", { profile_url: PROFILE }) as any,
+      day
+    );
+    while (!racing.lockWaiters()) await new Promise((resolve) => setTimeout(resolve, 20));
+    racing.win.localStorage.setItem(counter, String(network.DAILY_CONNECTION_REQUEST_LIMIT));
+    release();
+    expect(await pending).toMatchObject({ success: false, output: { code: "daily_limit_reached" } });
+    expect(racing.world.invitationsSent).toBe(0);
+    expect(racing.tabsClosed()).toBe(true);
+
     const closed = linkedIn({ relation: "unavailable" });
     const refused = await closed.run("send_connection_request", { profile_url: PROFILE });
     expect(refused).toMatchObject({ success: false, output: { code: "not_connectable" } });
@@ -456,10 +504,16 @@ test(
 test(
   "refuses to act as a different signed-in account",
   async () => {
-    const li = linkedIn({}, { signedIn: "urn:li:fs_miniProfile:ACoSOMEONEELSE" });
+    const li = linkedIn(
+      {},
+      { signedIn: "urn:li:fs_miniProfile:ACoSOMEONEELSE", company: { following: true } }
+    );
     for (const [action, input] of [
       ["set_follow", { target_url: PROFILE, following: true }],
       ["send_connection_request", { profile_url: PROFILE }],
+      // Already in the requested state: still not reported for another account.
+      ["set_follow", { target_url: COMPANY, following: true }],
+      ["list_sent_invitations", {}],
     ] as const) {
       const result = await li.run(action, input);
       expect(result.success).toBe(false);
@@ -492,6 +546,12 @@ test(
         truncated: true,
       },
     });
+    const all = await li.run("list_sent_invitations", { limit: 2 });
+    expect(all.output).toMatchObject({ total: 2, truncated: false });
+    // Loading stops at the limit; LinkedIn's count shows more exist.
+    const more = await linkedIn({}, { sentTotal: 3 }).run("list_sent_invitations", { limit: 2 });
+    expect(more.output).toMatchObject({ total: 3, truncated: true });
+    expect(more.output.invitations).toHaveLength(2);
     expect(li.tabsClosed()).toBe(true);
   },
   SLOW

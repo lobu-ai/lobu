@@ -52,7 +52,7 @@ export type LinkedInNetworkRequest =
       account: string;
       following: boolean;
     }
-  | { op: "list"; limit: number };
+  | { op: "list"; limit: number; account: string };
 
 /** The signed-in account and its daily invitation allowance. */
 interface InvitationBudget {
@@ -266,7 +266,7 @@ export function buildLinkedInNetworkExpression(
       await assertAccount();
       const limited = dailyLimit();
       if (limited) return limited;
-      const used = sentToday();
+      if (!navigator.locks) throw new Error('This browser cannot count connection requests safely');
       const dialog = await wait(() => dialogs()[0] || null, 'LinkedIn invitation dialog did not open', 50);
       const sendBare = buttonNamed(dialog, ['Send without a note'])[0];
       const addNote = buttonNamed(dialog, ['Add a note'])[0];
@@ -300,8 +300,19 @@ export function buildLinkedInNetworkExpression(
       }
       if (!send) throw new Error('LinkedIn send button was not found');
       await wait(() => enabled(send), 'LinkedIn kept the send button disabled');
-      // Count the attempt before clicking: an uncertain send still spends budget.
-      localStorage.setItem(counterKey(), String(used + 1));
+      // Reserve the request under a lock shared by every tab of this browser, so
+      // concurrent sends cannot pass the cap together. The reservation is made
+      // before clicking: an uncertain send still spends budget.
+      const reserved = await navigator.locks.request('lobu.linkedin.connection_requests', async () => {
+        if (dailyLimit()) return 0;
+        const used = sentToday() + 1;
+        localStorage.setItem(counterKey(), String(used));
+        return used;
+      });
+      if (!reserved) {
+        await dismiss(dialog);
+        return dailyLimit();
+      }
       click(send);
       await wait(() => !dialogs().some(d => d === dialog || d.contains(send)), 'LinkedIn invitation dialog did not close');
       const after = dialogs()[0];
@@ -310,10 +321,11 @@ export function buildLinkedInNetworkExpression(
         await dismiss(after);
         throw new Error('LinkedIn showed a dialog after sending; check the invitation: ' + message);
       }
-      return { name: req.name, relation: 'pending', following: null, changed: true, requests_sent_today: used + 1 };
+      return { name: req.name, relation: 'pending', following: null, changed: true, requests_sent_today: reserved };
     }
 
     if (req.op === 'list') {
+      await assertAccount();
       const rows = () => [...document.querySelectorAll('main a[aria-label^="Withdraw invitation sent to "]')].filter(shown).map(link => {
         let row = link.parentElement;
         while (row && row !== document.body && !row.querySelector('a[href*="/in/"]')) row = row.parentElement;
@@ -342,7 +354,11 @@ export function buildLinkedInNetworkExpression(
       const tab = [...document.querySelectorAll('main a[href*="/invitation-manager/sent/"]')].map(text).find(t => t.startsWith('People'));
       const total = tab ? Number(tab.slice('People'.length).trim().split(' ')[0].split(',').join('')) : NaN;
       const all = rows();
-      return { invitations: all.slice(0, req.limit), total: Number.isFinite(total) ? total : null, truncated: all.length > req.limit };
+      const invitations = all.slice(0, req.limit);
+      // Loading stops once the limit is reached, so LinkedIn's own count is what
+      // shows whether more invitations exist.
+      const more = all.length > req.limit || (Number.isFinite(total) && total > invitations.length);
+      return { invitations, total: Number.isFinite(total) ? total : null, truncated: more };
     }
 
     /**
@@ -361,8 +377,9 @@ export function buildLinkedInNetworkExpression(
 
     if (req.kind === 'company') {
       const { controls, state } = await companyState();
-      if (req.op === 'read' || state.following === req.following) return { ...state, changed: false };
+      if (req.op === 'read') return { ...state, changed: false };
       await assertAccount();
+      if (state.following === req.following) return { ...state, changed: false };
       click(req.following ? controls.follow : controls.unfollow);
       if (!req.following) await confirm(['Unfollow']);
       return shows(async () => (await companyState()).state, now => now.following === req.following);
@@ -757,9 +774,14 @@ export function listLinkedInSentInvitations(
         `limit must be an integer from 1 to ${MAX_LISTED_INVITATIONS}`
       );
     const limit = (raw as number | undefined) ?? DEFAULT_LISTED_INVITATIONS;
+    const account = savedAccount(ctx);
     const browser = requireBrowser(ctx);
     const output = await inScratchTab(browser, SENT_INVITATIONS_URL, (tabId) =>
-      evaluate<Record<string, unknown>>(browser, tabId, { op: "list", limit })
+      evaluate<Record<string, unknown>>(browser, tabId, {
+        op: "list",
+        limit,
+        account,
+      })
     );
     return { success: true, output };
   });
