@@ -172,6 +172,39 @@ describe('access graph member resolution', () => {
     expect(edgeFroms).toEqual([]);
   });
 
+  it('fails loudly when a workspace view holds the path of the person type it must create', async () => {
+    const org = await createTestOrganization({ name: 'View Holds Person Org' });
+    const user = await createTestUser();
+    await addUserToOrganization(user.id, org.id, 'owner');
+    const gh = await createTestConnection({
+      organization_id: org.id,
+      connector_key: 'github',
+      slug: CONN,
+      created_by: user.id,
+    });
+    const sql = getTestDb();
+    await sql`
+      INSERT INTO views (organization_id, key, name, source_code, content_hash, attach, last_writer)
+      VALUES (${org.id}, 'person', 'People', 'export default () => null', 'h',
+              '[{"workspace": true}]'::jsonb, 'test')
+    `;
+
+    // Members resolve only as `person`, so skipping the type would leave every
+    // member unresolved and recall failing closed with no visible cause. The
+    // sync must stop with the clash instead.
+    await expect(
+      buildGraph({
+        organizationId: org.id,
+        connectionId: String(gh.id),
+        repos: [{ fullName: 'acme/widgets', collaborators: [{ id: 601, login: 'pat' }] }],
+      })
+    ).rejects.toMatchObject({ code: '23505', constraint_name: 'workspace_path_unique' });
+    const types = await sql`
+      SELECT 1 FROM entity_types WHERE organization_id = ${org.id} AND slug = 'person'
+    `;
+    expect(types).toHaveLength(0);
+  });
+
   it('does not construct ACL edges from a tenant-scoped lookalike claim', async () => {
     const { org, user } = await seedOrg('Tenant lookalike ACL org');
     const gh = await createTestConnection({

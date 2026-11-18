@@ -11,6 +11,11 @@ import type {
 } from "@lobu/connector-sdk";
 import type { AgentSettings } from "@lobu/core";
 import { createAjv } from "@lobu/core/ajv";
+import { hasWorkspaceAttachment } from "@lobu/core/contracts/tools/view-attach";
+import {
+  isReservedEntityTypeSlug,
+  normalizeEntityTypeSlug,
+} from "@lobu/core/reserved";
 import type { CollectionPresentation } from "@lobu/core/contracts/tools/collection-presentation";
 import type {
   AutomationEventTrigger,
@@ -1024,7 +1029,8 @@ const VIEW_SOURCE_MAX_BYTES = 1_000_000;
  */
 async function resolveViewSources(
   sources: ViewSource[],
-  cwd: string
+  cwd: string,
+  entityTypeSlugs: ReadonlySet<string>
 ): Promise<DesiredView[]> {
   const baseDir = resolve(cwd);
   const views: DesiredView[] = [];
@@ -1084,6 +1090,21 @@ async function resolveViewSources(
       );
     }
     seen.add(key);
+    // A workspace view is served at /<org>/<key>, the path an entity type's
+    // list page uses, so its key must be neither a reserved route name nor a
+    // declared entity type (the server refuses both; fail before any push).
+    if (hasWorkspaceAttachment(attach)) {
+      if (isReservedEntityTypeSlug(key)) {
+        throw new ValidationError(
+          `view "${key}" (${rel}) is a workspace view, served at /<org>/${key}, but "${key}" is a reserved route name; pick another key`
+        );
+      }
+      if (entityTypeSlugs.has(key)) {
+        throw new ValidationError(
+          `view "${key}" (${rel}) is a workspace view, served at /<org>/${key}, the same path as entity type "${key}"; rename one of them`
+        );
+      }
+    }
     // Hash EXACTLY what the server will store: the declaration comes from
     // the same reader the server runs on save (defaults applied there), plus
     // the digest of the bundle produced above (which carries the relative
@@ -1408,7 +1429,15 @@ export async function loadDesiredStateFromConfig(
     // Views are neither agents nor memory: a targeted apply skips them too.
     // Bundled here so the diff key is the server's hash (same function, same
     // inputs); executePlan ships these artifacts verbatim.
-    state.views = await resolveViewSources(typedProject.views ?? [], opts.cwd);
+    state.views = await resolveViewSources(
+      typedProject.views ?? [],
+      opts.cwd,
+      new Set(
+        (state.memorySchema?.entityTypes ?? []).map((et) =>
+          normalizeEntityTypeSlug(et.slug)
+        )
+      )
+    );
   }
   // Surface load-time warnings to `lobu apply` (which prints them). #1010's
   // "ignored connectors because [memory] is disabled" case is obsolete here —

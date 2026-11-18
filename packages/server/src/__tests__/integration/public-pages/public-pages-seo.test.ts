@@ -25,7 +25,11 @@ import { InMemorySpanExporter, SimpleSpanProcessor } from '@opentelemetry/sdk-tr
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { app } from '../../../index';
 import { pushdownFailureError } from '../../../lib/connector-pushdown';
-import { buildPublicPageModel, buildSitemapEntries } from '../../../public-pages';
+import {
+  buildPublicPageModel,
+  buildSitemapEntries,
+  legacyWorkspaceViewRedirect,
+} from '../../../public-pages';
 import { buildWrapperApp } from '../../../server-lifecycle';
 import { querySqlImpl } from '../../../tools/admin/query_sql';
 import * as resolvePathModule from '../../../tools/resolve_path';
@@ -112,6 +116,76 @@ describe('public pages > crawler-facing responses', () => {
       const home = entries.find((entry) => entry.loc === `${ORIGIN}/${org.slug}`);
       expect(home?.lastmod).not.toMatch(/^2024-01-02/);
       expect(home?.lastmod && home.lastmod >= '2026-10-01').toBe(true);
+    });
+  });
+
+  describe('workspace views at the top level', () => {
+    beforeAll(async () => {
+      const sql = getTestDb();
+      for (const [key, attach] of [
+        ['how-it-works', [{ workspace: true }]],
+        ['city-card', [{ record: 'city' }]],
+      ] as const) {
+        await sql`
+          INSERT INTO views (organization_id, key, name, description, source_code, content_hash, attach, last_writer)
+          VALUES (${org.id}, ${key}, ${key === 'how-it-works' ? 'How it works' : 'City card'},
+                  ${key === 'how-it-works' ? 'What the market tracks and why.' : ''},
+                  'export default () => null', ${`hash-${key}`}, ${sql.json(attach as never)}, 'test')
+        `;
+      }
+    });
+
+    it('renders a workspace view at its own path, on the canonical host and the subdomain', async () => {
+      const path = `/${org.slug}/how-it-works`;
+      const model = await buildPublicPageModel(path, env, `${ORIGIN}${path}`);
+      expect(model?.status).toBe(200);
+      expect(model?.title).toContain('How it works');
+      expect(model?.description).toBe('What the market tracks and why.');
+      expect(model?.canonicalUrl).toMatch(new RegExp(`/${org.slug}/how-it-works$`));
+      expect(model?.bootstrap).toMatchObject({ path, ownerSlug: org.slug, kind: 'workspace' });
+
+      const onSubdomain = await buildPublicPageModel(
+        '/how-it-works',
+        env,
+        'https://seo-market.example.test/how-it-works',
+        org.slug
+      );
+      expect(onSubdomain?.status).toBe(200);
+      expect(onSubdomain?.canonicalUrl).toMatch(new RegExp(`/${org.slug}/how-it-works$`));
+    });
+
+    it('keeps a view attached elsewhere, or no view at all, off the top level', async () => {
+      for (const key of ['city-card', 'nowhere']) {
+        const path = `/${org.slug}/${key}`;
+        expect((await buildPublicPageModel(path, env, `${ORIGIN}${path}`))?.status).toBe(404);
+      }
+    });
+
+    it('lists the workspace view in the sitemap', async () => {
+      const locs = (await buildSitemapEntries(ORIGIN)).map((entry) => entry.loc);
+      expect(locs).toContain(`${ORIGIN}/${org.slug}/how-it-works`);
+      expect(locs).not.toContain(`${ORIGIN}/${org.slug}/city-card`);
+    });
+
+    it('moves the old view path to the new one, query intact', async () => {
+      const response = await app.request(
+        `/${org.slug}/data/-/views/how-it-works?region=emea`,
+        { headers: { accept: 'text/html' } },
+        env
+      );
+      expect(response.status).toBe(301);
+      expect(response.headers.get('location')).toBe(`/${org.slug}/how-it-works?region=emea`);
+
+      expect(legacyWorkspaceViewRedirect('/data/-/views/how-it-works', org.slug)).toBe('/how-it-works');
+      for (const [path, sub] of [
+        ['/api/data/-/views/x', null],
+        [`/${org.slug}/data/-/views`, null],
+        [`/${org.slug}/data/-/views/x/y`, null],
+        [`/${org.slug}/city/-/views/x`, null],
+        [`/${org.slug}/data/-/views/x`, org.slug],
+      ] as const) {
+        expect(legacyWorkspaceViewRedirect(path, sub)).toBeNull();
+      }
     });
   });
 

@@ -7873,7 +7873,7 @@ export type ManageViewsResponses = {
               }
             | {
                 /**
-                 * A tab on the Data hub, at /data/-/views/<key>.
+                 * A top-level page of the workspace, at /<key>. The key must not equal an entity type slug or a reserved route name.
                  */
                 workspace: true;
               }
@@ -8000,7 +8000,7 @@ export type ManageViewsResponses = {
               }
             | {
                 /**
-                 * A tab on the Data hub, at /data/-/views/<key>.
+                 * A top-level page of the workspace, at /<key>. The key must not equal an entity type slug or a reserved route name.
                  */
                 workspace: true;
               }
@@ -8134,7 +8134,7 @@ export type ManageViewsResponses = {
               }
             | {
                 /**
-                 * A tab on the Data hub, at /data/-/views/<key>.
+                 * A top-level page of the workspace, at /<key>. The key must not equal an entity type slug or a reserved route name.
                  */
                 workspace: true;
               }
