@@ -44,6 +44,7 @@ import { compileGoogleActions, executeGoogleAction, oauthScopes } from './_googl
 import type { DiscoveryDocument } from './_google/discovery';
 import driveDiscovery from './_google/discovery/drive_v3.json';
 import { GOOGLE_API_POLICIES } from './_google/policies';
+import { sourceFileAttachment } from './source-file-attachment';
 
 /**
  * Supported Drive API methods as actions, compiled from the pinned Discovery
@@ -1199,12 +1200,30 @@ export default class GoogleDriveConnector extends ConnectorRuntime<
     const sizeBytes = parseSize(file.size);
     const owner = personLabel(file.owners?.[0]);
     const lastModifiedBy = personLabel(file.lastModifyingUser);
+    // The file stays in Drive: the event names it so download_file can fetch
+    // it when someone opens it. Only stored files qualify, which download_file
+    // returns byte for byte. A Google Doc, Sheet or Slides deck would come back
+    // as a plain-text export the event already carries; the real document
+    // opens in Google through `source_url`. Folders and shortcuts are native
+    // too and hold no file.
+    const attachments = file.mimeType && !isGoogleNative(file.mimeType)
+      ? [
+          sourceFileAttachment({
+            filename: file.name ?? file.id,
+            mimeType: file.mimeType,
+            sizeBytes,
+            operation: 'download_file',
+            input: { file_id: file.id },
+          }),
+        ]
+      : undefined;
 
     return {
       origin_id: file.id,
       origin_type: 'drive_file',
       title: file.name ?? '(untitled)',
       payload_text: payloadText,
+      ...(attachments ? { attachments } : {}),
       author_name: owner,
       source_url: file.webViewLink,
       occurred_at: Number.isNaN(occurredAt.getTime()) ? new Date() : occurredAt,

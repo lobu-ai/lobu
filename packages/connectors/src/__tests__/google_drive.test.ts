@@ -779,6 +779,57 @@ describe('GoogleDriveConnector sync content inlining', () => {
     expect(result.events[0].metadata.content_included).toBe(false);
     expect(drive.trace).not.toContain('media');
   });
+
+  test('a stored file lists itself to open from Drive; a Google-native doc does not', async () => {
+    const connector = new GoogleDriveConnector();
+    const drive = fakeDrive([
+      startToken('T'),
+      filesList([
+        {
+          files: [
+            driveFile('report', { name: 'report.pdf', mimeType: 'application/pdf', size: '52000' }),
+            driveFile('photo', { name: 'photo.png', mimeType: 'image/png', size: '9000' }),
+            driveFile('notes', { name: 'Notes', mimeType: DOC_MIME, size: undefined }),
+          ],
+        },
+      ]),
+    ]);
+    connector.client = () => drive.client;
+
+    const result = await runSync(connector, {
+      feedKey: 'files',
+      config: { include_content: false },
+      credentials: { accessToken: 'tok' },
+      checkpoint: {},
+    });
+
+    const byId = new Map(
+      result.events.map((event: { origin_id: string }) => [event.origin_id, event])
+    );
+    expect(byId.get('report')?.attachments).toEqual([
+      {
+        kind: 'file',
+        filename: 'report.pdf',
+        mime_type: 'application/pdf',
+        size_bytes: 52000,
+        open: { operation: 'download_file', input: { file_id: 'report' } },
+      },
+    ]);
+    expect(byId.get('photo')?.attachments).toEqual([
+      {
+        kind: 'image',
+        filename: 'photo.png',
+        mime_type: 'image/png',
+        size_bytes: 9000,
+        open: { operation: 'download_file', input: { file_id: 'photo' } },
+      },
+    ]);
+    // A Doc only exports as plain text, which the event already carries; the
+    // document itself opens in Google through source_url.
+    expect(byId.get('notes')).not.toHaveProperty('attachments');
+    // Listing a file never fetches it.
+    expect(drive.trace).not.toContain('media');
+  });
 });
 
 describe('GoogleDriveConnector query construction', () => {
