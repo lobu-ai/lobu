@@ -1114,4 +1114,36 @@ export default function Broken() { return <NonexistentNativeTable />; }`)).rejec
 		expect(result.ok).toBe(false);
 		expect(!result.ok && result.e).toMatchObject({ code: "23505", constraint_name: "workspace_path_unique" });
 	});
+
+	it("refuses to install the path guards over a clash an old replica wrote after the precondition", async () => {
+		const dir = resolve(import.meta.dirname, "../../../../../../db/migrations");
+		const file = "20261118120000_workspace_view_top_level_paths.sql";
+		const up = loadMigrationUpSection(dir, file);
+		const down = loadMigrationDownSection(dir, file);
+		await setView(SIMPLE_SOURCE, { key: "seed" });
+		const rolledBack = new Error("roll back");
+		const outcome = await getTestDb()
+			.begin(async (sql) => {
+				// The deploy does not quiesce, so a pre-upgrade replica can store a
+				// clashing view and type between the precondition and the guards.
+				await sql.unsafe(down);
+				await sql`INSERT INTO entity_types (organization_id, slug, name) VALUES (${orgId}, 'late', 'Late')`;
+				await sql`
+          INSERT INTO views (organization_id, key, name, source_code, compiled_code, content_hash, attach, last_writer)
+          SELECT organization_id, 'late', 'Late', source_code, compiled_code, content_hash,
+                 '[{"workspace": true}]'::jsonb, last_writer
+          FROM views WHERE organization_id = ${orgId} AND key = 'seed'
+        `;
+				const refused = await sql.savepoint((sp) => sp.unsafe(up)).catch((e) => e);
+				expect(refused).toBeInstanceOf(Error);
+				expect((refused as Error).message).toContain("workspace view key equals a live entity type slug");
+				// Without the clash the same migration applies and replays.
+				await sql`DELETE FROM views WHERE organization_id = ${orgId} AND key = 'late'`;
+				await sql.unsafe(up);
+				await sql.unsafe(up);
+				throw rolledBack;
+			})
+			.catch((e) => e);
+		expect(outcome).toBe(rolledBack);
+	});
 });
