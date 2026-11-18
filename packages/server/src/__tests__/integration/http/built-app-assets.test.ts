@@ -15,6 +15,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { __resetWebDistDirectoryForTests, app } from '../../../index';
+import { getRateLimiter, RateLimitPresets } from '../../../utils/rate-limiter';
 
 /** Every extension `packages/owletto` writes into its dist, with the type a browser needs. */
 const BUILT_ASSETS: Array<[file: string, mediaType: string]> = [
@@ -32,6 +33,7 @@ const BUILT_ASSETS: Array<[file: string, mediaType: string]> = [
 describe('built web app assets', () => {
   let distDir: string;
   const previousDistDir = process.env.WEB_DIST_DIR;
+  const previousTrustedProxy = process.env.TRUSTED_PROXY;
 
   beforeAll(async () => {
     distDir = await mkdtemp(path.join(tmpdir(), 'built-app-assets-'));
@@ -39,18 +41,36 @@ describe('built web app assets', () => {
     await writeFile(path.join(distDir, 'index.html'), '<html><head></head><body></body></html>');
     for (const [file] of BUILT_ASSETS) await writeFile(path.join(distDir, file), 'x');
     process.env.WEB_DIST_DIR = distDir;
+    process.env.TRUSTED_PROXY = '1';
     __resetWebDistDirectoryForTests();
   });
 
   afterAll(async () => {
     if (previousDistDir === undefined) delete process.env.WEB_DIST_DIR;
     else process.env.WEB_DIST_DIR = previousDistDir;
+    if (previousTrustedProxy === undefined) delete process.env.TRUSTED_PROXY;
+    else process.env.TRUSTED_PROXY = previousTrustedProxy;
     __resetWebDistDirectoryForTests();
     await rm(distDir, { recursive: true, force: true });
   });
 
   it.each(BUILT_ASSETS)('serves %s as %s', async (file, mediaType) => {
     const response = await app.request(`http://localhost/${file}`);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')?.split(';')[0]).toBe(mediaType);
+  });
+
+  // An asset is a file request, not an anonymous page render: a visitor who
+  // has spent their public-read budget must still load the page's scripts.
+  it.each(BUILT_ASSETS)('serves %s to an anonymous visitor past the page-read limit', async (file, mediaType) => {
+    const clientIP = '203.0.113.9';
+    const preset = RateLimitPresets.PUBLIC_READ_PER_IP_MINUTE;
+    for (let i = 0; i < preset.limit; i++) {
+      getRateLimiter().checkLimit(`rate:public-read:ip:${clientIP}`, preset);
+    }
+    const response = await app.request(`http://localhost/${file}`, {
+      headers: { accept: '*/*', 'x-forwarded-for': clientIP },
+    });
     expect(response.status).toBe(200);
     expect(response.headers.get('content-type')?.split(';')[0]).toBe(mediaType);
   });
