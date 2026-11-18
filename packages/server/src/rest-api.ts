@@ -490,7 +490,7 @@ async function respondWithViewShell(
 	}
 	const html = renderViewShell(
 		view,
-		await viewWorkspaceUrl(organizationId, c.req.url),
+		await viewWorkspaceUrl(organizationId, c.req.url, c.req.header("host")),
 		await viewRuntimeScript()
 	);
 	c.header("Content-Type", "text/plain; charset=utf-8");

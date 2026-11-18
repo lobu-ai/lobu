@@ -46,6 +46,7 @@ import * as ViewComponents from '@lobu/views/components';
 import { VALIDATION_MAX_BYTES, VALIDATION_TIMEOUT_MS, validationIdentity, type ValidationRequest, type ValidationScenario } from './validation-contract';
 import { getDb } from '../db/client';
 import { ToolUserError } from '../utils/errors';
+import { isUniqueViolation } from '../utils/pg-errors';
 import logger from '../utils/logger';
 import { readMcpAppAsset } from '../utils/mcp-app-bundle';
 
@@ -292,7 +293,17 @@ export async function setView(
     RETURNING key, name, description, source_code, compiled_code, content_hash,
       source_files, dependencies, source_complete, compile_config_hash,
       attach, params, actions, resources, last_writer, updated_at
-  `;
+  `.catch((err: unknown) => {
+    // A workspace view is served at /<org>/<key>; the database refuses one
+    // whose key is a live entity type's slug.
+    if (isUniqueViolation(err, 'workspace_path_unique')) {
+      throw new ToolUserError(
+        `[workspace_path_taken] Entity type '${input.key}' already uses this path; give the workspace view another key`,
+        409
+      );
+    }
+    throw err;
+  });
   if (!rows[0]) throw new ToolUserError('View changed while the candidate was being validated; retry against the current version', 409);
   return { view: mapViewRow(rows[0]), written: true };
   });

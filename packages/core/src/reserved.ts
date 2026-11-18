@@ -19,6 +19,17 @@ export function isSystemEntityType(et: { slug?: string | null }): boolean {
   return typeof et.slug === "string" && et.slug.startsWith("$");
 }
 
+// ── Event metadata ──────────────────────────────────────────────────────────
+
+/**
+ * True when an event metadata key is server-owned bookkeeping (idempotency
+ * keys, audit stamps). Sole signal: key starts with `_lobu_`. Writers strip
+ * these from caller input; readers keep them out of human-facing views.
+ */
+export function isReservedMetadataKey(key: string): boolean {
+  return key.startsWith("_lobu_");
+}
+
 // ── Route / path reserved names ─────────────────────────────────────────────
 
 /**

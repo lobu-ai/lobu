@@ -28,7 +28,7 @@ import {
   type ResolvedNavigationSection,
 } from '@lobu/core/contracts/tools/navigation';
 import { hasWorkspaceAttachment } from '@lobu/core/contracts/tools/view-attach';
-import { viewPathSuffix } from '@lobu/core/contracts/tools/view-path';
+import { viewPathSuffix, workspaceViewPath } from '@lobu/core/contracts/tools/view-path';
 import { getDb, pgTextArray } from '../db/client';
 import type { Env } from '../index';
 import { memberReadRole } from '../tools/access-control';
@@ -301,7 +301,7 @@ function defaultSections(lookup: Lookup): ResolvedNavigationSection[] {
     .map((view) => ({
       id: `view:${view.key}`,
       label: view.name,
-      href: `/${lookup.orgSlug}/data${viewPathSuffix(view.key)}`,
+      href: workspaceViewPath(lookup.orgSlug, view.key),
       children: [],
     }));
   return items.length > 0 ? [{ id: 'views', items }] : [];

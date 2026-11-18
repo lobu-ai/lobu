@@ -11,6 +11,7 @@ import {
 import { entityLinkMatchSql } from './utils/content-search';
 import { ToolUserError } from './utils/errors';
 import { escapeHtml } from './utils/html';
+import { VIEW_PATH_MARKER, workspaceViewPath } from '@lobu/core/contracts/tools/view-path';
 import {
   getConfiguredPublicOrigin,
   getConfiguredSubdomainZone,
@@ -911,6 +912,92 @@ function buildEntityModel(
   };
 }
 
+interface PublicWorkspaceView {
+  key: string;
+  name: string;
+  description: string;
+  updated_at: string | null;
+}
+
+/**
+ * A workspace view serves /<org>/<key>. The database keeps its key apart from
+ * every live entity type slug, so the type lookup and this one never both hit.
+ * Views carry no per-view visibility: a public workspace shows all of them.
+ */
+async function getPublicWorkspaceView(
+  organizationId: string,
+  key: string
+): Promise<PublicWorkspaceView | null> {
+  const sql = getDb();
+  const rows = await sql.unsafe<PublicWorkspaceView>(
+    `
+      SELECT key, name, description, updated_at::text AS updated_at
+      FROM views
+      WHERE organization_id = $1
+        AND key = $2
+        AND attach @> '[{"workspace": true}]'::jsonb
+      LIMIT 1
+    `,
+    [organizationId, key]
+  );
+  return rows[0] ?? null;
+}
+
+function buildWorkspaceViewModel(params: {
+  organization: PublicOrganization;
+  view: PublicWorkspaceView;
+  ownerResolvedPath: ResolvePathResult;
+  requestUrl: string;
+  localPath: LocalPath;
+}): PublicPageModel {
+  const origin = getPublicOrigin(params.requestUrl);
+  const canonicalPath = workspaceViewPath(params.organization.slug, params.view.key);
+  const canonicalUrl = absoluteUrl(canonicalPath, origin);
+  const description = truncateText(
+    params.view.description.trim() || `${params.view.name} in ${params.organization.name}.`,
+    180
+  );
+  return {
+    status: 200,
+    title: `${params.view.name} | ${params.organization.name} | Lobu`,
+    description,
+    canonicalUrl,
+    robots: 'index,follow,max-image-preview:large',
+    openGraphImage: params.organization.logo,
+    structuredData: [
+      buildStructuredBreadcrumbs(origin, [
+        { label: params.organization.name, href: `/${params.organization.slug}` },
+        { label: params.view.name, href: canonicalPath },
+      ]),
+      {
+        '@context': 'https://schema.org',
+        '@type': 'WebPage',
+        name: params.view.name,
+        description,
+        url: canonicalUrl,
+      },
+    ],
+    bodyHtml: renderPublicShell(
+      params.view.name,
+      params.organization.name,
+      description,
+      [],
+      [
+        { label: params.organization.name, href: `/${params.organization.slug}` },
+        { label: params.view.name },
+      ],
+      params.localPath
+    ),
+    bootstrap: {
+      path: canonicalPath,
+      ownerSlug: params.organization.slug,
+      kind: 'workspace',
+      ownerResolvedPath: params.ownerResolvedPath,
+    },
+    cacheControl: PUBLIC_HTML_CACHE_CONTROL,
+  };
+}
+
 function buildNotFoundModel(
   organization: PublicOrganization,
   requestUrl: string,
@@ -1088,6 +1175,18 @@ export async function buildPublicPageModel(
     if (segments.length === 2) {
       const entityTypeDefinition = await getPublicEntityType(organization.id, segments[1]!);
       if (!entityTypeDefinition) {
+        const view = await getPublicWorkspaceView(organization.id, segments[1]!);
+        if (view) {
+          const ownerResolvedPath = await resolvePublicPath(
+            { path: `/${organization.slug}`, include_bootstrap: true },
+            env,
+            toolCtx
+          );
+          return applyBootstrapStrip(
+            buildWorkspaceViewModel({ organization, view, ownerResolvedPath, requestUrl, localPath }),
+            subdomainOrg
+          );
+        }
         return applyBootstrapStrip(
           buildNotFoundModel(organization, requestUrl, normalizedPath, localPath),
           subdomainOrg
@@ -1161,6 +1260,24 @@ export async function buildPublicPageModel(
     }
     throw error;
   }
+}
+
+/**
+ * Workspace views used to live on the Data hub at `/<org>/data/-/views/<key>`
+ * (`/data/-/views/<key>` on an org subdomain). Links to that form sit in chat
+ * history and bookmarks, so it redirects to the view's own `/<org>/<key>` page.
+ */
+export function legacyWorkspaceViewRedirect(
+  path: string,
+  subdomainOrg: string | null | undefined
+): string | null {
+  const segments = path.split('/').filter(Boolean);
+  const [owner, ...rest] = subdomainOrg ? [null, ...segments] : segments;
+  if (owner && RESERVED_PATHS_SET.has(owner)) return null;
+  if (rest.length !== 4) return null;
+  const [hub, marker, views, key] = rest;
+  if (hub !== 'data' || marker !== VIEW_PATH_MARKER || views !== 'views' || !key) return null;
+  return owner ? workspaceViewPath(owner, key) : `/${key}`;
 }
 
 export function renderPublicPageTemplate(templateHtml: string, model: PublicPageModel): string {
@@ -1272,10 +1389,26 @@ export async function buildSitemapEntries(origin: string): Promise<SitemapEntry[
     []
   );
 
-  // `organization` has no update timestamp; its page changes when the types and
-  // entities it lists do, so it is as fresh as the newest of those.
+  const viewRows = await sql.unsafe<{
+    organization_slug: string;
+    key: string;
+    updated_at: string | null;
+  }>(
+    `
+      SELECT o.slug AS organization_slug, v.key, v.updated_at::text AS updated_at
+      FROM "organization" o
+      JOIN views v ON v.organization_id = o.id
+      WHERE o.visibility = 'public'
+        AND v.attach @> '[{"workspace": true}]'::jsonb
+      ORDER BY o.slug ASC, v.key ASC
+    `,
+    []
+  );
+
+  // `organization` has no update timestamp; its page changes when the types,
+  // views and entities it lists do, so it is as fresh as the newest of those.
   const latestByOrganization = new Map<string, string>();
-  for (const row of [...typeRows, ...entityRows]) {
+  for (const row of [...typeRows, ...viewRows, ...entityRows]) {
     const current = latestByOrganization.get(row.organization_slug);
     if (row.updated_at && (!current || new Date(row.updated_at) > new Date(current))) {
       latestByOrganization.set(row.organization_slug, row.updated_at);
@@ -1289,6 +1422,10 @@ export async function buildSitemapEntries(origin: string): Promise<SitemapEntry[
     })),
     ...typeRows.map((row) => ({
       loc: absoluteUrl(`/${row.organization_slug}/${row.entity_type_slug}`, origin),
+      lastmod: formatDate(row.updated_at),
+    })),
+    ...viewRows.map((row) => ({
+      loc: absoluteUrl(workspaceViewPath(row.organization_slug, row.key), origin),
       lastmod: formatDate(row.updated_at),
     })),
     ...entityRows.map((row) => ({
