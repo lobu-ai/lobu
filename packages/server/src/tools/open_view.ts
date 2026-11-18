@@ -9,7 +9,10 @@ import {
 import type { Env } from "../index";
 import { ToolUserError } from "../utils/errors";
 import { resolvePublicOrigin } from "../utils/public-origin";
-import { viewPathSuffix } from "@lobu/core/contracts/tools/view-path";
+import {
+	viewPathSuffix,
+	workspaceViewPath,
+} from "@lobu/core/contracts/tools/view-path";
 import { viewScopeShapeError } from "@lobu/core/contracts/tools/view-scope";
 import { getOrganizationSlug } from "../utils/url-builder";
 import { getView, LOBU_VIEWS_RESOURCE_URI, viewResourceUri, type StoredView } from "../views/views";
@@ -195,7 +198,7 @@ export function viewPagePath(
 		);
 	}
 	if (hasWorkspaceAttachment(view.attach)) {
-		return `/${orgSlug}/data${suffix}`;
+		return workspaceViewPath(orgSlug, view.key);
 	}
 	// A collection tab is a useful error hint, never an inferred frame scope.
 	const collections = [

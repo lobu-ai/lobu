@@ -165,6 +165,42 @@ describe("view desired state", () => {
     );
   });
 
+  test("a workspace view key never takes a declared entity type's path or a reserved route", async () => {
+    const workspaceView = (key: string) =>
+      VIEW_SOURCE.replace('key: "pipeline"', `key: "${key}"`).replace(
+        'attach: [{ collection: "deal" }]',
+        "attach: [{ workspace: true }]"
+      );
+    const config = `import { defineAgent, defineConfig, defineEntityType, viewFromFile } from "@lobu/cli/config";
+export default defineConfig({
+  agents: [defineAgent({ id: "triage", name: "Triage" })],
+  entities: [defineEntityType({ key: "deal", name: "Deal" })],
+  views: [viewFromFile("./views/page.tsx")],
+});
+`;
+    const clash = mkProject({
+      "lobu.config.ts": config,
+      "views/page.tsx": workspaceView("deal"),
+    });
+    await expect(loadDesiredStateFromConfig({ cwd: clash })).rejects.toThrow(
+      "entity type"
+    );
+    const reserved = mkProject({
+      "lobu.config.ts": config,
+      "views/page.tsx": workspaceView("settings"),
+    });
+    await expect(loadDesiredStateFromConfig({ cwd: reserved })).rejects.toThrow(
+      "reserved"
+    );
+    // A view attached to the type's own pages may share its key.
+    const tab = mkProject({
+      "lobu.config.ts": config,
+      "views/page.tsx": VIEW_SOURCE.replace('key: "pipeline"', 'key: "deal"'),
+    });
+    const { state } = await loadDesiredStateFromConfig({ cwd: tab });
+    expect(state.views?.map((v) => v.key)).toEqual(["deal"]);
+  });
+
   test("a targeted apply skips views", async () => {
     const dir = mkProject({
       "lobu.config.ts": configWithViews("./views/deal/pipeline.tsx"),

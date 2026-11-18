@@ -93,6 +93,7 @@ import {
 	buildSitemapXml,
 	PUBLIC_XML_CACHE,
 	injectRuntimeConfig,
+	legacyWorkspaceViewRedirect,
 	renderPublicPageTemplate,
 } from "./public-pages";
 import {
@@ -452,6 +453,13 @@ app.use("/*", async (c, next) => {
 			const stripped = path.slice(prefix.length) || "/";
 			const url = new URL(c.req.url);
 			return c.redirect(`${stripped}${url.search}`, 301);
+		}
+	}
+
+	if (c.req.method === "GET" || c.req.method === "HEAD") {
+		const target = legacyWorkspaceViewRedirect(c.req.path, sub);
+		if (target) {
+			return c.redirect(`${target}${new URL(c.req.url).search}`, 301);
 		}
 	}
 
