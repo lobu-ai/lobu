@@ -895,15 +895,28 @@ type ResolutionRecord = Pick<
 const MAX_SAME_KEY_RECORDS = 10;
 
 /**
+ * Every character String.prototype.trim removes (ECMAScript WhiteSpace and
+ * LineTerminator), so SQL trimming agrees with normalizeScalar's trim().
+ */
+const JS_TRIM_CHARACTERS =
+  '\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006' +
+  '\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff';
+
+/**
  * SQL rendering of a resolution normalizer over a text expression, so the
  * candidate read narrows on the same normalized values the rule compares.
  * A phone value is only valid when made of digits and `+() .-`
  * (normalizeScalar), so removing those characters leaves its digits.
  */
-function normalizedValueSql(normalizer: EntityResolutionRule['normalizer'], value: string): string {
-  if (normalizer === 'phone') return `translate(btrim(${value}), '+() .-', '')`;
-  if (normalizer === 'email') return `lower(btrim(${value}))`;
-  return `btrim(${value})`;
+function normalizedValueSql(
+  normalizer: EntityResolutionRule['normalizer'],
+  value: string,
+  trimCharacters: string
+): string {
+  const trimmed = `btrim(${value}, ${trimCharacters})`;
+  if (normalizer === 'phone') return `translate(${trimmed}, '+() .-', '')`;
+  if (normalizer === 'email') return `lower(${trimmed})`;
+  return trimmed;
 }
 
 /**
@@ -924,7 +937,7 @@ async function findSameKeyRecords(
   if (others.length === 0) return [];
   const topRecord = { id: top.id, metadata: top.metadata, identities: topInput.identities };
 
-  const params: unknown[] = [pgTextArray(others.map((target) => target.id))];
+  const params: unknown[] = [pgTextArray(others.map((target) => target.id)), JS_TRIM_CHARACTERS];
   const conditions: string[] = [];
   for (const rule of topInput.rules) {
     // Narrow on the rule's first field; composite keys are verified in full
@@ -946,7 +959,7 @@ async function findSameKeyRecords(
     const namespace = `$${params.length}`;
     params.push(pgTextArray(values));
     const keys = `$${params.length}::text[]`;
-    const stored = (value: string) => normalizedValueSql(rule.normalizer, value);
+    const stored = (value: string) => normalizedValueSql(rule.normalizer, value, '$2::text');
     // Scalars and array elements alike, as normalizedResolutionRuleKeys reads them.
     conditions.push(`(et.metadata_schema->'x-lobu-resolution'->'rules' @> ${declared} AND (
       EXISTS (

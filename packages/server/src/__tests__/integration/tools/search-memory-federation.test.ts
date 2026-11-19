@@ -281,13 +281,14 @@ describe('search_memory direct OAuth workspace federation', () => {
       UPDATE entity_types SET metadata_schema = ${sql.json(profileRule)}
       WHERE slug = 'person' AND organization_id IN (${orgA.id}, ${orgB.id}, ${orgC.id})
     `;
-    // Each workspace stores the key its own way: padded, inside an array, or
-    // with different phone punctuation. The declared normalizer decides.
+    // Each workspace stores the key its own way: padded with any whitespace
+    // trim() removes, inside an array, or with different phone punctuation.
+    // The declared normalizer decides.
     const stored: [number, Record<string, unknown>][] = [
       [alpha.id, { profile_url: ' https://profiles.example.test/ines ', phone: '+1 415 555 0123' }],
-      [beta.id, { profile_url: ['https://profiles.example.test/other', 'https://profiles.example.test/ines'] }],
+      [beta.id, { profile_url: ['https://profiles.example.test/other', '\thttps://profiles.example.test/ines\n'] }],
       [hidden.id, { profile_url: 'https://profiles.example.test/ines' }],
-      [gamma.id, { phone: '+1 (415) 555-0123' }],
+      [gamma.id, { phone: '\u00a0+1 (415) 555-0123' }],
     ];
     for (const [id, metadata] of stored) {
       await sql`UPDATE entities SET metadata = ${sql.json(metadata)} WHERE id = ${id}`;
