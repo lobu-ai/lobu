@@ -920,6 +920,26 @@ function normalizedValueSql(
 }
 
 /**
+ * normalizeScalar reads a JSON number the way JavaScript does: as the nearest
+ * double, printed by String(). jsonb keeps the written scale (`1042.0`), so
+ * the candidate read compares that same double instead: float8 parses the
+ * numeric to it and prints the same shortest digits in plain notation.
+ */
+function normalizedNumberMatchSql(
+  normalizer: EntityResolutionRule['normalizer'],
+  value: string,
+  keys: string,
+  numericKeys: string
+): string {
+  const double = `(${value} #>> '{}')::float8`;
+  if (normalizer === 'exact') return `${double} = ANY(${numericKeys})`;
+  // A phone's 15-digit limit keeps it below 1e15, where float8 prints plainly.
+  if (normalizer === 'phone') return `translate(${double}::text, '-.', '') = ANY(${keys})`;
+  // No number passes the email check.
+  return 'false';
+}
+
+/**
  * Records in the caller's other granted workspaces that share a declared
  * resolution key with the top match, whatever they are named. This read only
  * narrows candidates by the top match's normalized values; sameRecordGroups
@@ -959,16 +979,25 @@ async function findSameKeyRecords(
     const namespace = `$${params.length}`;
     params.push(pgTextArray(values));
     const keys = `$${params.length}::text[]`;
+    let numericKeys = '';
+    if (rule.normalizer === 'exact') {
+      params.push(`{${values.map(Number).filter(Number.isFinite).join(',')}}`);
+      numericKeys = `$${params.length}::float8[]`;
+    }
     const stored = (value: string) => normalizedValueSql(rule.normalizer, value, '$2::text');
     // Scalars and array elements alike, as normalizedResolutionRuleKeys reads them.
     conditions.push(`(et.metadata_schema->'x-lobu-resolution'->'rules' @> ${declared} AND (
       EXISTS (
-        SELECT 1 FROM jsonb_array_elements_text(
+        SELECT 1 FROM jsonb_array_elements(
           CASE jsonb_typeof(e.metadata #> ${path})
             WHEN 'array' THEN e.metadata #> ${path}
             ELSE jsonb_build_array(e.metadata #> ${path})
           END) AS stored(value)
-        WHERE ${stored('stored.value')} = ANY(${keys})
+        WHERE CASE jsonb_typeof(stored.value)
+          WHEN 'string' THEN ${stored("stored.value #>> '{}'")} = ANY(${keys})
+          WHEN 'number' THEN ${normalizedNumberMatchSql(rule.normalizer, 'stored.value', keys, numericKeys)}
+          ELSE false
+        END
       )
       OR e.id IN (
         SELECT i.entity_id FROM entity_identities i

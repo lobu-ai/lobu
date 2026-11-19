@@ -258,6 +258,8 @@ describe('search_memory direct OAuth workspace federation', () => {
       [orgB, 'Marlowe Research Profile'],
       [orgC, 'Ungranted Marlowe Profile'],
       [orgB, 'Marlowe Phone Contact'],
+      [orgB, 'Marlowe Member Record'],
+      [orgB, 'Marlowe Numeric Phone'],
     ] as const) {
       people.push(
         await createTestEntity({
@@ -268,12 +270,13 @@ describe('search_memory direct OAuth workspace federation', () => {
         })
       );
     }
-    const [alpha, beta, hidden, gamma] = people;
+    const [alpha, beta, hidden, gamma, delta, epsilon] = people;
     const profileRule = {
       'x-lobu-resolution': {
         rules: [
           { fields: ['profile_url'], normalizer: 'exact', onMatch: 'review' },
           { fields: ['phone'], normalizer: 'phone', onMatch: 'review' },
+          { fields: ['member_number'], normalizer: 'exact', onMatch: 'review' },
         ],
       },
     };
@@ -285,13 +288,24 @@ describe('search_memory direct OAuth workspace federation', () => {
     // trim() removes, inside an array, or with different phone punctuation.
     // The declared normalizer decides.
     const stored: [number, Record<string, unknown>][] = [
-      [alpha.id, { profile_url: ' https://profiles.example.test/ines ', phone: '+1 415 555 0123' }],
+      [
+        alpha.id,
+        { profile_url: ' https://profiles.example.test/ines ', phone: '+1 415 555 0123', member_number: 1042 },
+      ],
       [beta.id, { profile_url: ['https://profiles.example.test/other', '\thttps://profiles.example.test/ines\n'] }],
       [hidden.id, { profile_url: 'https://profiles.example.test/ines' }],
       [gamma.id, { phone: '\u00a0+1 (415) 555-0123' }],
     ];
     for (const [id, metadata] of stored) {
       await sql`UPDATE entities SET metadata = ${sql.json(metadata)} WHERE id = ${id}`;
+    }
+    // JSON numbers keep their written scale in jsonb; JavaScript reads both as
+    // the same number. Raw text so the trailing zeroes survive.
+    for (const [id, json] of [
+      [delta.id, '{"member_number": 1042.0}'],
+      [epsilon.id, '{"phone": 14155550123.00}'],
+    ] as const) {
+      await sql`UPDATE entities SET metadata = ${json}::text::jsonb WHERE id = ${id}`;
     }
 
     const args = {
@@ -305,10 +319,12 @@ describe('search_memory direct OAuth workspace federation', () => {
 
     expect(result.entity?.id).toBe(alpha.id);
     expect(result.matches.map((entity) => entity.id)).not.toContain(beta.id);
-    expect(result.suggestion).toContain('likely the same person (matching phone, profile_url)');
+    expect(result.suggestion).toContain('likely the same person (matching member_number, phone, profile_url)');
     expect(result.suggestion).toContain(`id ${alpha.id} in ${orgA.slug}`);
     expect(result.suggestion).toContain(`id ${beta.id} in ${orgB.slug}`);
     expect(result.suggestion).toContain(`id ${gamma.id} in ${orgB.slug}`);
+    expect(result.suggestion).toContain(`id ${delta.id} in ${orgB.slug}`);
+    expect(result.suggestion).toContain(`id ${epsilon.id} in ${orgB.slug}`);
     // Only granted workspaces are consulted.
     expect(JSON.stringify(result)).not.toContain(orgC.slug);
     expect(result.suggestion).not.toContain(`id ${hidden.id}`);
@@ -322,6 +338,7 @@ describe('search_memory direct OAuth workspace federation', () => {
     expect(undeclared.suggestion ?? '').not.toContain('the same person');
     expect(undeclared.suggestion ?? '').not.toContain(`id ${beta.id}`);
     expect(undeclared.suggestion ?? '').not.toContain(`id ${gamma.id}`);
+    expect(undeclared.suggestion ?? '').not.toContain(`id ${delta.id}`);
   });
 
   it('calls an auto_link match the same record only when no declared unique key or scoped claim conflicts', async () => {
