@@ -3,7 +3,7 @@
  *
  * An Automation that re-proposes the same field every run must not stack a new
  * approval card per run: while a card for those fields awaits a decision, every
- * later proposal reuses it. A withdrawn proposal settles as expired, never as a
+ * later proposal reuses it. A withdrawn proposal settles as withdrawn, never as a
  * human rejection, and only its proposer or a workspace admin may withdraw it.
  */
 
@@ -140,7 +140,7 @@ describe("one open proposal per record field set", () => {
 describe("withdrawing a pending proposal", () => {
 	beforeEach(cleanupTestDatabase);
 
-	it("lets the proposer withdraw it as expired, not rejected, and records who", async () => {
+	it("lets the proposer withdraw it, not reject it, and records who", async () => {
 		const { org, proposer, agentCtx, propose } = await fixture();
 		const { runId } = await propose({ draft: "Recap" });
 
@@ -154,14 +154,14 @@ describe("withdrawing a pending proposal", () => {
 		const [run] = await getTestDb()`
 			SELECT status, approval_status FROM runs WHERE id = ${runId}
 		`;
-		expect(run).toMatchObject({ status: "cancelled", approval_status: "expired" });
+		expect(run).toMatchObject({ status: "cancelled", approval_status: "withdrawn" });
 		const [card] = await getTestDb()`
 			SELECT interaction_status, metadata FROM current_event_records
 			WHERE run_id = ${runId} AND interaction_type = 'approval'
 		`;
 		expect(card?.interaction_status).toBe("rejected");
 		expect(card?.metadata).toMatchObject({
-			approval_status: "expired",
+			approval_status: "withdrawn",
 			withdrawn_by: { principal_kind: "agent", principal_id: proposer.agentId },
 		});
 		expect(await pendingCards(org.id)).toHaveLength(0);
