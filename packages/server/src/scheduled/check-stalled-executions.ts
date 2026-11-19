@@ -585,7 +585,7 @@ export async function reapStaleRuns(): Promise<ReapStaleRunsResult> {
             })}
           ) run_cv ON true
           WHERE t.stale_status = 'pending'
-            AND t.stale_approval_status <> 'check'
+            AND t.stale_approval_status IS DISTINCT FROM 'check'
         )
         SELECT
           (SELECT count(*)::int FROM timed_out) AS reaped,
@@ -637,7 +637,7 @@ export async function reapStaleRuns(): Promise<ReapStaleRunsResult> {
              )),
              '[]'::json
            )
-           FROM timed_out WHERE run_type = 'action' AND stale_approval_status <> 'check'
+           FROM timed_out WHERE run_type = 'action' AND stale_approval_status IS DISTINCT FROM 'check'
           ) AS timed_out_actions
       `) as unknown as Array<{
         reaped: number;
