@@ -447,6 +447,7 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
       download_attachment: {
         key: 'download_attachment',
         kind: 'read',
+        outputFiles: 'source-copy',
         name: 'Download Attachment',
         description:
           'Download one attachment from a Gmail message. The bytes are published as an attachment with a `download_url` a device can fetch, and small text files are ALSO returned inline as `content`. Get `attachment_id` from `get_thread`, which lists each message\'s attachments.',

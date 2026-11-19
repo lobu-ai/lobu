@@ -527,7 +527,11 @@ function getLocalActionOperations(
 			backend: "local_action",
 			// Verification runs in the gateway; ordinary actions still need execute().
 			supports_execute: executeSupported || (hasBrowser && key === BROWSER_VERIFY_OPERATION),
-			backend_config: { backend: "local_action", actionKey: key },
+			backend_config: {
+				backend: "local_action",
+				actionKey: key,
+				...(def.outputFiles === "source-copy" ? { outputFiles: "source-copy" as const } : {}),
+			},
 		};
 	});
 }

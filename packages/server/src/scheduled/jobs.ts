@@ -242,6 +242,16 @@ function registerMaintenanceTasks(
     { cron: '*/5 * * * *' },
   );
 
+  // Copies of source files (outputFiles: 'source-copy') expire with their
+  // links; the artifact volume is shared by every replica, so one sweep covers it.
+  scheduler.register(
+    'sweep-expired-artifacts',
+    async () => {
+      await coreServices.getArtifactStore().sweepExpired();
+    },
+    { cron: '17 * * * *' },
+  );
+
   scheduler.register(
     'check-stalled-executions',
     async () => {

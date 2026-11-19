@@ -860,6 +860,13 @@ export interface ActionDefinition {
    * input schema marks the destination field with `x-lobu-destination: true`.
    */
   delivery?: 'chat_transport';
+  /**
+   * What the files this action returns are. Absent: new content the run keeps.
+   * `'source-copy'`: a copy of a file that still lives in the connected source
+   * (an email attachment, a Drive file). The gateway stores it only as long as
+   * its download link lasts, then deletes it; reopening re-runs the action.
+   */
+  outputFiles?: 'source-copy';
 }
 
 // =============================================================================

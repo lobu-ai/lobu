@@ -78,6 +78,7 @@ import {
 import { insertEvent, recordLifecycleEvent } from "../utils/insert-event";
 import logger from "../utils/logger";
 import { logRunFailure } from "../runs/log-run-failure";
+import { getOperationForConnection } from "../operations/connector-operations";
 import { reconcileConnectorRelationshipClaims } from "../utils/relationship-claims";
 import { stripNul, stripNulDeep } from "../utils/strip-nul";
 import {
@@ -163,6 +164,20 @@ async function readRunCompletionFlags(
 		sourceRead: isSourceFeedRead(rows[0]?.run_metadata),
 		agentTurn: rows[0]?.agent_turn === true,
 	};
+}
+
+/** The `outputFiles` declaration of the connector action a run executed. */
+async function readRunActionOutputFiles(
+	sql: DbClient,
+	runId: number
+): Promise<"source-copy" | undefined> {
+	const [run] = (await sql`
+    SELECT organization_id, connection_id, action_key FROM runs WHERE id = ${runId} LIMIT 1
+  `) as unknown as Array<{ organization_id: string; connection_id: number | null; action_key: string | null }>;
+	if (!run?.connection_id || !run.action_key) return undefined;
+	const resolved = await getOperationForConnection(run.organization_id, run.connection_id, run.action_key, sql);
+	const backendConfig = resolved?.operation.backend_config;
+	return backendConfig?.backend === "local_action" ? backendConfig.outputFiles : undefined;
 }
 
 /**
@@ -2619,7 +2634,11 @@ export async function completeActionRun(c: Context<{ Bindings: Env }>) {
 			req.error_message = sanitizeBrowserText(req.error_message) ?? undefined;
 		}
 		const materializedActionOutput = req.action_output && !sourceRead
-			? await materializeActionOutputAttachments(req.run_id, req.action_output)
+			? await materializeActionOutputAttachments(req.run_id, req.action_output, {
+					outputFiles: Array.isArray(req.action_output.attachments)
+						? await readRunActionOutputFiles(sql, req.run_id)
+						: undefined,
+				})
 			: undefined;
 		// Source rows travel through the run to its waiter; attachments must not
 		// become durable artifacts before the transient payload is scrubbed.

@@ -32,6 +32,8 @@ export interface AvailableOperation {
 interface LocalActionBackendConfig {
   backend: 'local_action';
   actionKey: string;
+  /** The action's `outputFiles` declaration (see the connector SDK's ActionDefinition). */
+  outputFiles?: 'source-copy';
 }
 
 /**

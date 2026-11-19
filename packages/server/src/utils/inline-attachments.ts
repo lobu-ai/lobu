@@ -25,6 +25,7 @@ import { getLobuCoreServices } from "../lobu/gateway";
 import {
   runArtifactBinding,
   parseRunArtifactBinding,
+  SOURCE_COPY_RETAIN_MS,
   type ArtifactStore,
 } from "../gateway/files/artifact-store";
 import { resolvePublicGatewayUrl } from "./public-origin";
@@ -152,7 +153,8 @@ function publicGatewayUrl(): string {
  */
 export async function materializeInlineAttachments<T extends StreamItemLike>(
   items: T[],
-  bindingForItem?: (item: T) => string | undefined
+  bindingForItem?: (item: T) => string | undefined,
+  options?: { retainMs?: number }
 ): Promise<{
   items: T[];
   pendingTranscriptions: AudioTranscriptionCandidate[];
@@ -236,6 +238,7 @@ export async function materializeInlineAttachments<T extends StreamItemLike>(
           contentType: mime,
           publicGatewayUrl: baseUrl,
           binding: bindingForItem?.(item),
+          retainMs: options?.retainMs,
         });
         publishedArtifactIds.push(published.artifactId);
       } catch (error) {
@@ -271,10 +274,15 @@ export async function materializeInlineAttachments<T extends StreamItemLike>(
   return { items: out, pendingTranscriptions, publishedArtifactIds, rejected };
 }
 
-/** Materialize connector-style attachments returned by a device action. */
+/**
+ * Materialize connector-style attachments returned by a device action.
+ * `outputFiles: 'source-copy'` (the action's declaration) keeps the stored
+ * copies only as long as their links, since the file still lives in its source.
+ */
 export async function materializeActionOutputAttachments(
   runId: number,
-  actionOutput: Record<string, unknown>
+  actionOutput: Record<string, unknown>,
+  options?: { outputFiles?: "source-copy" }
 ): Promise<{
   output: Record<string, unknown>;
   publishedArtifactIds: string[];
@@ -324,7 +332,10 @@ export async function materializeActionOutputAttachments(
   const { items, publishedArtifactIds, rejected } =
     await materializeInlineAttachments(
       [{ id: `action:${runId}`, attachments }],
-      () => runArtifactBinding(runId)
+      () => runArtifactBinding(runId),
+      options?.outputFiles === "source-copy"
+        ? { retainMs: SOURCE_COPY_RETAIN_MS }
+        : undefined
     );
   return {
     output: {

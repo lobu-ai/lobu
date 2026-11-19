@@ -115,6 +115,7 @@ async function completeRunInline(
 	output: Record<string, unknown>,
 	deferTerminalWrite: boolean,
 	claimedBy: string,
+	operation: OperationDescriptor,
 ): Promise<InlineExecutionResult> {
 	// Same NUL strip as failRunInline — `output` is connector- or upstream-MCP-
 	// produced and lands in the jsonb `action_output` column. Sanitize before
@@ -126,7 +127,12 @@ async function completeRunInline(
 	// the database AND in the requester's context instead of behind a
 	// download_url. A connector that returns no `attachments` array is untouched.
 	const { output: materialized, publishedArtifactIds } =
-		await materializeActionOutputAttachments(runId, sanitized);
+		await materializeActionOutputAttachments(runId, sanitized, {
+			outputFiles:
+				operation.backend_config.backend === "local_action"
+					? operation.backend_config.outputFiles
+					: undefined,
+		});
 	if (!deferTerminalWrite) {
 		// Terminalize the run and supersede its dispatch card in ONE transaction,
 		// so the ledger can never disagree with the run it describes. `materialized`
@@ -292,6 +298,7 @@ async function executeLocalActionInline(
 			result.output,
 			deferTerminalWrite,
 			claimedBy,
+			operation,
 		);
 	} catch (error) {
 		return failRunInline(
@@ -365,6 +372,7 @@ async function executeMcpToolInline(
 		} as Record<string, unknown>,
 		deferTerminalWrite,
 		claimedBy,
+		operation,
 	);
 }
 
@@ -469,7 +477,7 @@ async function executeOperationInlineBackend(
 				runMetadata: options.runMetadata,
 			});
 			return delivered.ok
-				? completeRunInline(runId, organizationId, delivered.output, deferTerminalWrite, options.claimedBy)
+				? completeRunInline(runId, organizationId, delivered.output, deferTerminalWrite, options.claimedBy, operation)
 				: failRunInline(runId, organizationId, delivered.error, deferTerminalWrite, options.claimedBy);
 		} catch (error) {
 			return failRunInline(runId, organizationId, getErrorMessage(error), deferTerminalWrite, options.claimedBy);

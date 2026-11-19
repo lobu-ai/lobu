@@ -532,4 +532,34 @@ describe("ArtifactStore durable filesystem backend", () => {
 
     expect(await fs.readdir(join(env.artifactsDir, ".trash"))).toHaveLength(1);
   });
+
+  test("replicas sweeping the shared volume at once delete each expired artifact once", async () => {
+    const replicas = [
+      new ArtifactStore(env.artifactsDir),
+      new ArtifactStore(env.artifactsDir),
+    ];
+    const publish = (retainMs?: number) =>
+      replicas[0]!.publish({
+        buffer: Buffer.from("source-bytes"),
+        filename: "notice.pdf",
+        publicGatewayUrl: "https://lobu.example.com",
+        retainMs,
+      });
+    const due = await Promise.all([publish(1_000), publish(1_000)]);
+    const later = await publish(60_000);
+    const kept = await publish();
+    const now = Date.now() + 1_000;
+
+    const results = await Promise.all(
+      replicas.map((replica) => replica.sweepExpired(now)),
+    );
+
+    expect(results.reduce((sum, result) => sum + result.deleted, 0)).toBeGreaterThanOrEqual(2);
+    const entries = await fs.readdir(env.artifactsDir);
+    for (const { artifactId } of due) expect(entries).not.toContain(artifactId);
+    expect(entries).toContain(later.artifactId);
+    expect(entries).toContain(kept.artifactId);
+    expect(await fs.readdir(join(env.artifactsDir, ".expiring"))).toHaveLength(1);
+    expect(await fs.readdir(join(env.artifactsDir, ".trash"))).toEqual([]);
+  });
 });
