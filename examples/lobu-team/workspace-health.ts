@@ -222,7 +222,10 @@ export async function readHealthSnapshot(
   const owned = new Set(
     rows.filter((r) => r.kind === "scope").map((r) => r.workspace)
   );
-  if (scope.workspaces.some((s) => !owned.has(s)))
-    throw new Error("Health scope ownership changed or snapshot is incomplete");
+  const missing = scope.workspaces.filter((s) => !owned.has(s));
+  if (missing.length > 0)
+    throw new Error(
+      `Health scope workspaces are no longer owned: ${missing.join(", ")}`
+    );
   return rows;
 }
