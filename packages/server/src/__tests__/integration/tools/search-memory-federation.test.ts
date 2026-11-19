@@ -250,6 +250,53 @@ describe('search_memory direct OAuth workspace federation', () => {
     expect(undeclared.suggestion).toContain('Pass workspace to narrow');
   });
 
+  it('calls an auto_link match the same record only when no other declared unique key conflicts', async () => {
+    const sql = getTestDb();
+    const alpha = await createTestEntity({
+      name: 'Juno Halberd',
+      entity_type: 'person',
+      organization_id: orgA.id,
+      created_by: user.id,
+    });
+    const beta = await createTestEntity({
+      name: 'Juno Halberd',
+      entity_type: 'person',
+      organization_id: orgB.id,
+      created_by: user.id,
+    });
+    const uniqueRules = {
+      'x-lobu-resolution': {
+        rules: [
+          { fields: ['email'], normalizer: 'email', onMatch: 'auto_link' },
+          { fields: ['account_id'], normalizer: 'exact', onMatch: 'auto_link' },
+        ],
+      },
+    };
+    await sql`
+      UPDATE entity_types SET metadata_schema = ${sql.json(uniqueRules)}
+      WHERE slug = 'person' AND organization_id IN (${orgA.id}, ${orgB.id})
+    `;
+    const setMetadata = (id: number, accountId: string) =>
+      sql`UPDATE entities SET metadata = ${sql.json({ email: 'juno@example.test', account_id: accountId })} WHERE id = ${id}`;
+    const args = {
+      query: 'Juno Halberd',
+      fuzzy: false,
+      include_content: false,
+      include_public_catalogs: false,
+      limit: 10,
+    } as const;
+
+    await setMetadata(alpha.id, 'acct-1');
+    await setMetadata(beta.id, 'acct-2');
+    const conflicting = await search(args, {} as Env, context());
+    expect(conflicting.suggestion).toContain('likely the same person (matching email)');
+
+    await setMetadata(beta.id, 'acct-1');
+    const agreeing = await search(args, {} as Env, context());
+    expect(agreeing.suggestion).toContain('These are the same person (matching account_id, email)');
+    expect(agreeing.suggestion).not.toContain('Pass workspace to narrow');
+  });
+
   it('never reports a false global miss when one workspace shard is unavailable', async () => {
     const targets = [
       { id: orgA.id, slug: orgA.slug, name: orgA.name, role: 'owner', personal: false },

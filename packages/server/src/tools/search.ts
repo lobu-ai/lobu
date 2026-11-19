@@ -31,7 +31,7 @@ import { type AuthzScope, authzScopeFromToolContext } from '../authz/scope';
 import { compileConnectionRowVisibility } from '../authz/connection-visibility';
 import { getDb, pgBigintArray, pgTextArray } from '../db/client';
 import type { EntityResolutionRule } from '@lobu/core/contracts/tools/manage-entity-schema';
-import { normalizedResolutionRuleKeys, readEntityResolutionRules } from '../entity-resolution/policy';
+import { assessIdentityGroups, normalizedResolutionRuleKeys, readEntityResolutionRules } from '../entity-resolution/policy';
 import type { Env } from '../index';
 import type { ContentItem } from '@lobu/connector-sdk';
 import {
@@ -881,16 +881,16 @@ function sameRecordGroups(
   tie: readonly Entity[],
   rulesById: ReadonlyMap<number, readonly EntityResolutionRule[]>
 ): SameRecordGroup[] {
-  const keyed = new Map<string, { id: number; rule: EntityResolutionRule }[]>();
+  const ruleKey = (rule: EntityResolutionRule) => JSON.stringify([rule.fields, rule.normalizer]);
+  const keyed = new Map<string, number[]>();
   for (const match of tie) {
     for (const rule of rulesById.get(match.id) ?? []) {
-      const ruleKey = JSON.stringify([rule.fields, rule.normalizer]);
       for (const value of normalizedResolutionRuleKeys(
         { id: match.id, metadata: match.metadata },
         rule
       )) {
-        const key = `${ruleKey}\u0000${value}`;
-        keyed.set(key, [...(keyed.get(key) ?? []), { id: match.id, rule }]);
+        const key = `${ruleKey(rule)}\u0000${value}`;
+        keyed.set(key, [...(keyed.get(key) ?? []), match.id]);
       }
     }
   }
@@ -901,25 +901,42 @@ function sameRecordGroups(
     while (parent.get(current) !== current) current = parent.get(current) as number;
     return current;
   };
-  const shared = [...keyed.values()].filter((entries) => new Set(entries.map((e) => e.id)).size > 1);
-  for (const entries of shared) {
-    for (const entry of entries) parent.set(root(entry.id), root(entries[0].id));
-  }
-  const evidence = new Map<number, { fields: Set<string>; review: boolean }>();
-  for (const entries of shared) {
-    const group = evidence.get(root(entries[0].id)) ?? { fields: new Set(), review: false };
-    for (const entry of entries) {
-      for (const field of entry.rule.fields) group.fields.add(field);
-      if (entry.rule.onMatch !== 'auto_link') group.review = true;
-    }
-    evidence.set(root(entries[0].id), group);
+  for (const ids of keyed.values()) {
+    for (const id of ids) parent.set(root(id), root(ids[0]));
   }
 
-  return [...evidence.entries()].map(([groupRoot, group]) => ({
-    members: tie.filter((match) => root(match.id) === groupRoot),
-    fields: [...group.fields].sort(),
-    decision: group.review ? 'review' : 'auto_link',
-  }));
+  const groups: SameRecordGroup[] = [];
+  for (const groupRoot of new Set(tie.map((match) => root(match.id)))) {
+    const members = tie.filter((match) => root(match.id) === groupRoot);
+    if (members.length < 2) continue;
+    // Judge the group under the rules every member's type declares, with the
+    // weaker onMatch when they disagree. The shared assessment then applies
+    // the same contract as duplicate discovery: a populated, conflicting
+    // auto_link key downgrades a match to review.
+    const memberRules = members.map((match) => rulesById.get(match.id) ?? []);
+    const rules = memberRules[0].flatMap((rule) => {
+      const declared = memberRules.map((own) => own.find((other) => ruleKey(other) === ruleKey(rule)));
+      if (declared.some((other) => other === undefined)) return [];
+      const onMatch = declared.every((other) => other?.onMatch === 'auto_link') ? 'auto_link' : 'review';
+      return [{ ...rule, onMatch } as EntityResolutionRule];
+    });
+    const [first, ...rest] = members;
+    const toRecord = (match: Entity) => ({ id: match.id, metadata: match.metadata });
+    const assessment = assessIdentityGroups({
+      metadataSchema: { 'x-lobu-resolution': { rules } },
+      left: [toRecord(first)],
+      right: rest.map(toRecord),
+    });
+    // A chain linked through a rule only some members declare proves nothing
+    // under the rules they all share; make no claim about it.
+    if (assessment.evidence.length === 0) continue;
+    groups.push({
+      members,
+      fields: [...new Set(assessment.evidence.map((item) => item.kind))].sort(),
+      decision: assessment.decision,
+    });
+  }
+  return groups;
 }
 
 function crossWorkspaceTieSuggestion(
