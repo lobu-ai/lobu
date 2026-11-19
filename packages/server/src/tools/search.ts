@@ -851,7 +851,7 @@ async function loadResolutionInputs(
   entityIds: readonly number[]
 ): Promise<Map<number, ResolutionInput>> {
   const inputs = new Map<number, ResolutionInput>();
-  if (entityIds.length < 2) return inputs;
+  if (entityIds.length === 0) return inputs;
   const db = getDb();
   const rows = await db<{ id: number | string; organization_id: string; resolution: unknown }>`
     SELECT e.id, e.organization_id, et.metadata_schema->'x-lobu-resolution' AS resolution
@@ -885,22 +885,121 @@ async function loadResolutionInputs(
   return inputs;
 }
 
+/** What same-record resolution reads from a search match or a key-matched record. */
+type ResolutionRecord = Pick<
+  Entity,
+  'id' | 'type' | 'metadata' | 'workspace_slug' | 'organization_slug'
+>;
+
+/** Upper bound on records one declared-key lookup may name in guidance. */
+const MAX_SAME_KEY_RECORDS = 10;
+
+/**
+ * Records in the caller's other granted workspaces that share a declared
+ * resolution key with the top match, whatever they are named. This read only
+ * narrows candidates by the top match's normalized values; sameRecordGroups
+ * still requires both entity types to declare the same rule and re-checks
+ * normalized keys and scoped claims before anything is called the same.
+ */
+async function findSameKeyRecords(
+  top: Entity | undefined,
+  topInput: ResolutionInput | undefined,
+  targets: readonly GrantedMemberWorkspace[],
+  ctx: AccountToolContext
+): Promise<ResolutionRecord[]> {
+  if (!top || !topInput || topInput.rules.length === 0) return [];
+  const others = targets.filter((target) => target.slug !== top.workspace_slug);
+  if (others.length === 0) return [];
+  const topRecord = { id: top.id, metadata: top.metadata, identities: topInput.identities };
+
+  const params: unknown[] = [pgTextArray(others.map((target) => target.id))];
+  const conditions: string[] = [];
+  for (const rule of topInput.rules) {
+    // Narrow on the rule's first field; composite keys are verified in full
+    // afterwards, from each record's own values.
+    const values = [
+      ...new Set(
+        normalizedResolutionRuleKeys(topRecord, rule).map(
+          (key) => (JSON.parse(key) as [string, string | null][])[0][0]
+        )
+      ),
+    ];
+    if (values.length === 0) continue;
+    // sql.json: a JSON.stringify string bound to ::jsonb arrives as a jsonb string.
+    params.push(getDb().json([{ fields: rule.fields, normalizer: rule.normalizer }]));
+    const declared = `$${params.length}::jsonb`;
+    params.push(pgTextArray(rule.fields[0].split('.')));
+    const path = `$${params.length}::text[]`;
+    params.push(rule.fields[0]);
+    const namespace = `$${params.length}`;
+    params.push(pgTextArray(values));
+    const keys = `$${params.length}::text[]`;
+    conditions.push(`(et.metadata_schema->'x-lobu-resolution'->'rules' @> ${declared} AND (
+      btrim(e.metadata #>> ${path}) = ANY(${keys})
+      OR lower(btrim(e.metadata #>> ${path})) = ANY(${keys})
+      OR e.id IN (
+        SELECT i.entity_id FROM entity_identities i
+        WHERE i.organization_id = ANY($1::text[]) AND i.deleted_at IS NULL
+          AND i.namespace = ${namespace} AND i.identifier = ANY(${keys})
+      )))`);
+  }
+  if (conditions.length === 0) return [];
+
+  const rows = await getDb().unsafe<{
+    id: number | string;
+    organization_id: string;
+    type: string;
+    metadata: Record<string, unknown> | null;
+  }>(
+    `SELECT e.id, e.organization_id, et.slug AS type, e.metadata
+     FROM entities e
+     JOIN entity_types et ON et.id = e.entity_type_id
+     WHERE e.organization_id = ANY($1::text[])
+       AND e.deleted_at IS NULL AND et.deleted_at IS NULL
+       AND (${conditions.join(' OR ')})
+     ORDER BY e.id
+     LIMIT ${MAX_SAME_KEY_RECORDS * 2}`,
+    params
+  );
+
+  const records: ResolutionRecord[] = [];
+  for (const target of others) {
+    const own = rows.filter((row) => row.organization_id === target.id);
+    if (own.length === 0) continue;
+    // Each workspace's own read restrictions apply, exactly as on its shard.
+    const readable = await filterEntitiesByReadPolicy(
+      { ...ctx, organizationId: target.id, memberRole: target.role, allowCrossOrg: false },
+      own.map((row) => ({ ...row, id: Number(row.id), entity_type: row.type }))
+    );
+    for (const row of readable) {
+      records.push({
+        id: row.id,
+        type: row.type,
+        metadata: row.metadata ?? {},
+        workspace_slug: target.slug,
+        organization_slug: target.slug,
+      });
+    }
+  }
+  return records.slice(0, MAX_SAME_KEY_RECORDS);
+}
+
 interface SameRecordGroup {
-  members: Entity[];
+  members: ResolutionRecord[];
   fields: string[];
   decision: EntityResolutionRule['onMatch'];
 }
 
 /**
- * Group tied records that share a normalized key under a rule both entity
- * types declare with the same fields and normalizer. A rule declared on only
- * one side never identifies anything: a key is identity only by agreement.
+ * Group records that share a normalized key under a rule both entity types
+ * declare with the same fields and normalizer. A rule declared on only one
+ * side never identifies anything: a key is identity only by agreement.
  */
 function sameRecordGroups(
-  tie: readonly Entity[],
+  tie: readonly ResolutionRecord[],
   inputs: ReadonlyMap<number, ResolutionInput>
 ): SameRecordGroup[] {
-  const toRecord = (match: Entity) => ({
+  const toRecord = (match: ResolutionRecord) => ({
     id: match.id,
     metadata: match.metadata,
     identities: inputs.get(match.id)?.identities ?? [],
@@ -959,14 +1058,9 @@ function sameRecordGroups(
   return groups;
 }
 
-function crossWorkspaceTieSuggestion(
-  name: string,
-  tie: readonly Entity[],
-  groups: readonly SameRecordGroup[]
-): string {
-  const narrow = 'Pass workspace to narrow before acting.';
-  if (groups.length === 0) return `Found "${name}" in more than one workspace. ${narrow}`;
-  const lines = [`Found "${name}" in more than one workspace.`];
+/** One sentence per same-record group, then how to use them. */
+function sameRecordGuidance(groups: readonly SameRecordGroup[]): string[] {
+  const lines: string[] = [];
   for (const group of groups) {
     const types = new Set(group.members.map((match) => match.type));
     const noun = types.size === 1 ? group.members[0].type : 'record';
@@ -983,8 +1077,19 @@ function crossWorkspaceTieSuggestion(
   lines.push(
     'Read each of them for the full picture; pass workspace only to choose where to write.'
   );
-  const grouped = groups.reduce((count, group) => count + group.members.length, 0);
-  if (grouped < tie.length) {
+  return lines;
+}
+
+function crossWorkspaceTieSuggestion(
+  name: string,
+  tie: readonly ResolutionRecord[],
+  groups: readonly SameRecordGroup[]
+): string {
+  const narrow = 'Pass workspace to narrow before acting.';
+  if (groups.length === 0) return `Found "${name}" in more than one workspace. ${narrow}`;
+  const lines = [`Found "${name}" in more than one workspace.`, ...sameRecordGuidance(groups)];
+  const grouped = new Set(groups.flatMap((group) => group.members.map((member) => member.id)));
+  if (tie.some((match) => !grouped.has(match.id))) {
     lines.push(`Other matches with this name are separate records. ${narrow}`);
   }
   return lines.join(' ');
@@ -995,7 +1100,10 @@ export function mergeFederatedSearchResults(
   targets: readonly GrantedMemberWorkspace[],
   settled: readonly PromiseSettledResult<UnifiedSearchResult>[],
   callerMax?: ToolAccessLevel,
-  resolutionInputs: ReadonlyMap<number, ResolutionInput> = new Map()
+  /** Resolution inputs for the top match, its name tie, and sameKeyRecords. */
+  resolutionInputs: ReadonlyMap<number, ResolutionInput> = new Map(),
+  /** Records elsewhere sharing a declared key with the top match (findSameKeyRecords). */
+  sameKeyRecords: readonly ResolutionRecord[] = []
 ): UnifiedSearchResult {
   const fulfilled = fulfilledShards(settled);
   if (fulfilled.length === 0) {
@@ -1008,6 +1116,15 @@ export function mergeFederatedSearchResults(
   const top = allMatches[0] ?? null;
   const topNameMatches = crossWorkspaceTopTie(allMatches);
   const ambiguousTop = topNameMatches.length > 0;
+  // A name tie is judged as a whole; otherwise only the top match's own
+  // group matters. Either way a record found only by its declared key joins.
+  const resolutionCandidates = deduplicateBy<ResolutionRecord>(
+    [...(ambiguousTop ? topNameMatches : top ? [top] : []), ...sameKeyRecords],
+    (record) => String(record.id)
+  );
+  const groups = sameRecordGroups(resolutionCandidates, resolutionInputs).filter(
+    (group) => ambiguousTop || group.members.some((member) => member.id === top?.id)
+  );
   // Treat cross-workspace exact-name ambiguity like LIMIT ... WITH TIES. The
   // ordinary global limit still bounds unrelated results, but it must not hide
   // the candidates the caller needs in order to choose a workspace safely.
@@ -1123,20 +1240,21 @@ export function mergeFederatedSearchResults(
     // coaching for an entity that may exist in the unavailable workspace.
     discovery_status: hasAnyResult ? 'complete' : status === 'partial' ? 'discovering' : 'not_found',
     suggestion: ambiguousTop
-      ? crossWorkspaceTieSuggestion(
-          top?.name ?? '',
-          topNameMatches,
-          sameRecordGroups(topNameMatches, resolutionInputs)
-        )
-      : status === 'partial'
-        ? coverage.reason === 'query_embedding_unavailable'
-          ? QUERY_EMBEDDING_UNAVAILABLE_SUGGESTION
-          : workspaceCoverage.some((entry) => entry.status === 'unavailable')
-            ? 'Search returned partial results; one or more granted workspaces was temporarily unavailable.'
-            : PARTIAL_RECALL_SUGGESTION
-        : matches.length === 0 && !hasAnyRecall
-          ? buildEmptySearchSuggestion(args.query ?? null, args, coverage, callerMax)
-          : selectedResult?.suggestion,
+      ? crossWorkspaceTieSuggestion(top?.name ?? '', topNameMatches, groups)
+      : [
+          ...(groups.length > 0 ? sameRecordGuidance(groups) : []),
+          status === 'partial'
+            ? coverage.reason === 'query_embedding_unavailable'
+              ? QUERY_EMBEDDING_UNAVAILABLE_SUGGESTION
+              : workspaceCoverage.some((entry) => entry.status === 'unavailable')
+                ? 'Search returned partial results; one or more granted workspaces was temporarily unavailable.'
+                : PARTIAL_RECALL_SUGGESTION
+            : matches.length === 0 && !hasAnyRecall
+              ? buildEmptySearchSuggestion(args.query ?? null, args, coverage, callerMax)
+              : selectedResult?.suggestion,
+        ]
+          .filter((line): line is string => Boolean(line))
+          .join(' ') || undefined,
     ...(entity && selectedResult?.view_url ? { view_url: selectedResult.view_url } : {}),
     metadata: {
       total_matches: allMatches.length,
@@ -1955,13 +2073,28 @@ async function searchImpl(
       logger.warn({ err: getErrorMessage(item.reason) }, '[search] workspace shard failed');
     }
   }
-  const tie = crossWorkspaceTopTie(rankFederatedMatches(fulfilledShards(settled)));
+  const ranked = rankFederatedMatches(fulfilledShards(settled));
+  const tie = crossWorkspaceTopTie(ranked);
+  const top = ranked[0];
+  const resolutionInputs = await loadResolutionInputs(
+    [...new Set([...(top ? [top.id] : []), ...tie.map((match) => match.id)])]
+  );
+  const sameKeyRecords = await findSameKeyRecords(
+    top,
+    top ? resolutionInputs.get(top.id) : undefined,
+    targets,
+    ctx
+  );
+  const keyedInputs = await loadResolutionInputs(
+    sameKeyRecords.map((record) => record.id).filter((id) => !resolutionInputs.has(id))
+  );
   return mergeFederatedSearchResults(
     args,
     targets,
     settled,
     guidanceAccessTier(ctx, highestGrantedRole(targets)),
-    await loadResolutionInputs(tie.map((match) => match.id))
+    new Map([...resolutionInputs, ...keyedInputs]),
+    sameKeyRecords
   );
 }
 

@@ -250,6 +250,67 @@ describe('search_memory direct OAuth workspace federation', () => {
     expect(undeclared.suggestion).toContain('Pass workspace to narrow');
   });
 
+  it('names a granted record that shares a declared key with the top match under a different name', async () => {
+    const sql = getTestDb();
+    const people = [];
+    for (const [org, name] of [
+      [orgA, 'Ines Marlowe'],
+      [orgB, 'Marlowe Research Profile'],
+      [orgC, 'Ungranted Marlowe Profile'],
+    ] as const) {
+      people.push(
+        await createTestEntity({
+          name,
+          entity_type: 'person',
+          organization_id: org.id,
+          created_by: user.id,
+        })
+      );
+    }
+    const [alpha, beta, hidden] = people;
+    const profileRule = {
+      'x-lobu-resolution': {
+        rules: [{ fields: ['profile_url'], normalizer: 'exact', onMatch: 'review' }],
+      },
+    };
+    await sql`
+      UPDATE entity_types SET metadata_schema = ${sql.json(profileRule)}
+      WHERE slug = 'person' AND organization_id IN (${orgA.id}, ${orgB.id}, ${orgC.id})
+    `;
+    for (const person of people) {
+      await sql`UPDATE entities
+        SET metadata = ${sql.json({ profile_url: ' https://profiles.example.test/ines ' })}
+        WHERE id = ${person.id}`;
+    }
+
+    const args = {
+      query: 'Ines Marlowe',
+      fuzzy: false,
+      include_content: false,
+      include_public_catalogs: false,
+      limit: 10,
+    } as const;
+    const result = await search(args, {} as Env, context());
+
+    expect(result.entity?.id).toBe(alpha.id);
+    expect(result.matches.map((entity) => entity.id)).not.toContain(beta.id);
+    expect(result.suggestion).toContain('likely the same person (matching profile_url)');
+    expect(result.suggestion).toContain(`id ${alpha.id} in ${orgA.slug}`);
+    expect(result.suggestion).toContain(`id ${beta.id} in ${orgB.slug}`);
+    // Only granted workspaces are consulted.
+    expect(JSON.stringify(result)).not.toContain(orgC.slug);
+    expect(result.suggestion).not.toContain(`id ${hidden.id}`);
+    expectValidSearchResult(result);
+
+    // The other workspace must declare the same rule for its value to count.
+    await sql`UPDATE entity_types SET metadata_schema = '{}'::jsonb
+      WHERE slug = 'person' AND organization_id = ${orgB.id}`;
+    const undeclared = await search(args, {} as Env, context());
+    expect(undeclared.entity?.id).toBe(alpha.id);
+    expect(undeclared.suggestion ?? '').not.toContain('the same person');
+    expect(undeclared.suggestion ?? '').not.toContain(`id ${beta.id}`);
+  });
+
   it('calls an auto_link match the same record only when no declared unique key or scoped claim conflicts', async () => {
     const sql = getTestDb();
     const alpha = await createTestEntity({
