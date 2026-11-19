@@ -250,6 +250,111 @@ describe('search_memory direct OAuth workspace federation', () => {
     expect(undeclared.suggestion).toContain('Pass workspace to narrow');
   });
 
+  it('names a granted record that shares a declared key with the top match under a different name', async () => {
+    const sql = getTestDb();
+    const people = [];
+    for (const [org, name] of [
+      [orgA, 'Ines Marlowe'],
+      [orgB, 'Marlowe Research Profile'],
+      [orgC, 'Ungranted Marlowe Profile'],
+      [orgB, 'Marlowe Phone Contact'],
+      [orgB, 'Marlowe Member Record'],
+      [orgB, 'Marlowe Numeric Phone'],
+      [orgB, 'Marlowe Fractional Phone'],
+      [orgB, 'Marlowe Mail Contact'],
+    ] as const) {
+      people.push(
+        await createTestEntity({
+          name,
+          entity_type: 'person',
+          organization_id: org.id,
+          created_by: user.id,
+        })
+      );
+    }
+    const [alpha, beta, hidden, gamma, delta, epsilon, zeta, eta] = people;
+    const profileRule = {
+      'x-lobu-resolution': {
+        rules: [
+          { fields: ['profile_url'], normalizer: 'exact', onMatch: 'review' },
+          { fields: ['phone'], normalizer: 'phone', onMatch: 'review' },
+          { fields: ['member_number'], normalizer: 'exact', onMatch: 'review' },
+          { fields: ['email'], normalizer: 'email', onMatch: 'review' },
+        ],
+      },
+    };
+    await sql`
+      UPDATE entity_types SET metadata_schema = ${sql.json(profileRule)}
+      WHERE slug = 'person' AND organization_id IN (${orgA.id}, ${orgB.id}, ${orgC.id})
+    `;
+    // Each workspace stores the key its own way: padded with any whitespace
+    // trim() removes, inside an array, or with different phone punctuation.
+    // The declared normalizer decides.
+    const stored: [number, Record<string, unknown>][] = [
+      [
+        alpha.id,
+        {
+          profile_url: ' https://profiles.example.test/ines ',
+          phone: ['+1 415 555 0123', '0.00001415555'],
+          member_number: 1042,
+          email: 'ines.k@example.test',
+        },
+      ],
+      [beta.id, { profile_url: ['https://profiles.example.test/other', '\thttps://profiles.example.test/ines\n'] }],
+      [hidden.id, { profile_url: 'https://profiles.example.test/ines' }],
+      [gamma.id, { phone: '\u00a0+1 (415) 555-0123' }],
+      // toLowerCase() maps the Kelvin sign to an ASCII k.
+      [eta.id, { email: 'INES.\u212a@EXAMPLE.TEST' }],
+    ];
+    for (const [id, metadata] of stored) {
+      await sql`UPDATE entities SET metadata = ${sql.json(metadata)} WHERE id = ${id}`;
+    }
+    // JSON numbers keep their written scale in jsonb; JavaScript reads both as
+    // the same number. Raw text so the trailing zeroes survive.
+    for (const [id, json] of [
+      [delta.id, '{"member_number": 1042.0}'],
+      [epsilon.id, '{"phone": 14155550123.00}'],
+      // String() prints this plainly; float8 prints it in scientific notation.
+      [zeta.id, '{"phone": 0.00001415555}'],
+    ] as const) {
+      await sql`UPDATE entities SET metadata = ${json}::text::jsonb WHERE id = ${id}`;
+    }
+
+    const args = {
+      query: 'Ines Marlowe',
+      fuzzy: false,
+      include_content: false,
+      include_public_catalogs: false,
+      limit: 10,
+    } as const;
+    const result = await search(args, {} as Env, context());
+
+    expect(result.entity?.id).toBe(alpha.id);
+    expect(result.matches.map((entity) => entity.id)).not.toContain(beta.id);
+    expect(result.suggestion).toContain('likely the same person (matching email, member_number, phone, profile_url)');
+    expect(result.suggestion).toContain(`id ${alpha.id} in ${orgA.slug}`);
+    expect(result.suggestion).toContain(`id ${beta.id} in ${orgB.slug}`);
+    expect(result.suggestion).toContain(`id ${gamma.id} in ${orgB.slug}`);
+    expect(result.suggestion).toContain(`id ${delta.id} in ${orgB.slug}`);
+    expect(result.suggestion).toContain(`id ${epsilon.id} in ${orgB.slug}`);
+    expect(result.suggestion).toContain(`id ${zeta.id} in ${orgB.slug}`);
+    expect(result.suggestion).toContain(`id ${eta.id} in ${orgB.slug}`);
+    // Only granted workspaces are consulted.
+    expect(JSON.stringify(result)).not.toContain(orgC.slug);
+    expect(result.suggestion).not.toContain(`id ${hidden.id}`);
+    expectValidSearchResult(result);
+
+    // The other workspace must declare the same rule for its value to count.
+    await sql`UPDATE entity_types SET metadata_schema = '{}'::jsonb
+      WHERE slug = 'person' AND organization_id = ${orgB.id}`;
+    const undeclared = await search(args, {} as Env, context());
+    expect(undeclared.entity?.id).toBe(alpha.id);
+    expect(undeclared.suggestion ?? '').not.toContain('the same person');
+    expect(undeclared.suggestion ?? '').not.toContain(`id ${beta.id}`);
+    expect(undeclared.suggestion ?? '').not.toContain(`id ${gamma.id}`);
+    expect(undeclared.suggestion ?? '').not.toContain(`id ${delta.id}`);
+  });
+
   it('calls an auto_link match the same record only when no declared unique key or scoped claim conflicts', async () => {
     const sql = getTestDb();
     const alpha = await createTestEntity({
