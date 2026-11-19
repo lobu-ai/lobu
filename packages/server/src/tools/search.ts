@@ -895,6 +895,18 @@ type ResolutionRecord = Pick<
 const MAX_SAME_KEY_RECORDS = 10;
 
 /**
+ * SQL rendering of a resolution normalizer over a text expression, so the
+ * candidate read narrows on the same normalized values the rule compares.
+ * A phone value is only valid when made of digits and `+() .-`
+ * (normalizeScalar), so removing those characters leaves its digits.
+ */
+function normalizedValueSql(normalizer: EntityResolutionRule['normalizer'], value: string): string {
+  if (normalizer === 'phone') return `translate(btrim(${value}), '+() .-', '')`;
+  if (normalizer === 'email') return `lower(btrim(${value}))`;
+  return `btrim(${value})`;
+}
+
+/**
  * Records in the caller's other granted workspaces that share a declared
  * resolution key with the top match, whatever they are named. This read only
  * narrows candidates by the top match's normalized values; sameRecordGroups
@@ -934,13 +946,21 @@ async function findSameKeyRecords(
     const namespace = `$${params.length}`;
     params.push(pgTextArray(values));
     const keys = `$${params.length}::text[]`;
+    const stored = (value: string) => normalizedValueSql(rule.normalizer, value);
+    // Scalars and array elements alike, as normalizedResolutionRuleKeys reads them.
     conditions.push(`(et.metadata_schema->'x-lobu-resolution'->'rules' @> ${declared} AND (
-      btrim(e.metadata #>> ${path}) = ANY(${keys})
-      OR lower(btrim(e.metadata #>> ${path})) = ANY(${keys})
+      EXISTS (
+        SELECT 1 FROM jsonb_array_elements_text(
+          CASE jsonb_typeof(e.metadata #> ${path})
+            WHEN 'array' THEN e.metadata #> ${path}
+            ELSE jsonb_build_array(e.metadata #> ${path})
+          END) AS stored(value)
+        WHERE ${stored('stored.value')} = ANY(${keys})
+      )
       OR e.id IN (
         SELECT i.entity_id FROM entity_identities i
         WHERE i.organization_id = ANY($1::text[]) AND i.deleted_at IS NULL
-          AND i.namespace = ${namespace} AND i.identifier = ANY(${keys})
+          AND i.namespace = ${namespace} AND ${stored('i.identifier')} = ANY(${keys})
       )))`);
   }
   if (conditions.length === 0) return [];
