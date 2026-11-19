@@ -250,7 +250,7 @@ describe('search_memory direct OAuth workspace federation', () => {
     expect(undeclared.suggestion).toContain('Pass workspace to narrow');
   });
 
-  it('calls an auto_link match the same record only when no other declared unique key conflicts', async () => {
+  it('calls an auto_link match the same record only when no declared unique key or scoped claim conflicts', async () => {
     const sql = getTestDb();
     const alpha = await createTestEntity({
       name: 'Juno Halberd',
@@ -295,6 +295,18 @@ describe('search_memory direct OAuth workspace federation', () => {
     const agreeing = await search(args, {} as Env, context());
     expect(agreeing.suggestion).toContain('These are the same person (matching account_id, email)');
     expect(agreeing.suggestion).not.toContain('Pass workspace to narrow');
+
+    // The same metadata value claimed under different identity scopes names
+    // two accounts, not one: the scoped claim wins over its metadata mirror.
+    await sql`
+      INSERT INTO entity_identities (
+        organization_id, entity_id, namespace, identifier, source_connector, scope_key
+      ) VALUES
+        (${orgA.id}, ${alpha.id}, 'account_id', 'acct-1', 'seed', 'tenant-one'),
+        (${orgB.id}, ${beta.id}, 'account_id', 'acct-1', 'seed', 'tenant-two')
+    `;
+    const scoped = await search(args, {} as Env, context());
+    expect(scoped.suggestion).toContain('likely the same person (matching email)');
   });
 
   it('never reports a false global miss when one workspace shard is unavailable', async () => {

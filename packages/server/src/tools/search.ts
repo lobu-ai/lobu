@@ -31,7 +31,8 @@ import { type AuthzScope, authzScopeFromToolContext } from '../authz/scope';
 import { compileConnectionRowVisibility } from '../authz/connection-visibility';
 import { getDb, pgBigintArray, pgTextArray } from '../db/client';
 import type { EntityResolutionRule } from '@lobu/core/contracts/tools/manage-entity-schema';
-import { assessIdentityGroups, normalizedResolutionRuleKeys, readEntityResolutionRules } from '../entity-resolution/policy';
+import { assessIdentityGroups, normalizedResolutionRuleKeys, readEntityResolutionRules, type ResolutionIdentity } from '../entity-resolution/policy';
+import { loadLiveEntityIdentities } from '../entity-resolution/identities';
 import type { Env } from '../index';
 import type { ContentItem } from '@lobu/connector-sdk';
 import {
@@ -833,37 +834,55 @@ function crossWorkspaceTopTie(ranked: readonly Entity[]): Entity[] {
   return workspaces.size > 1 ? tie : [];
 }
 
+/** What one tied record contributes to same-record resolution. */
+interface ResolutionInput {
+  rules: EntityResolutionRule[];
+  /** Live identity claims, so scoped values never compare as unscoped. */
+  identities: ResolutionIdentity[];
+}
+
 /**
- * The resolution rules each record's own entity type declares. Every id here
- * is a match the caller was already authorized to read, so this reveals
- * nothing new; it only lets the merge compare records under tenant-declared
- * identity rules instead of under a key hardcoded in shared code.
+ * The resolution rules each record's own entity type declares, plus the
+ * record's live identity claims. Every id here is a match the caller was
+ * already authorized to read; the claims only shape comparison keys and are
+ * never rendered. Rules come from tenant schemas, never from shared code.
  */
-async function loadResolutionRulesByEntityId(
+async function loadResolutionInputs(
   entityIds: readonly number[]
-): Promise<Map<number, EntityResolutionRule[]>> {
-  const rulesById = new Map<number, EntityResolutionRule[]>();
-  if (entityIds.length < 2) return rulesById;
-  const rows = await getDb()<{ id: number | string; resolution: unknown }>`
-    SELECT e.id, et.metadata_schema->'x-lobu-resolution' AS resolution
+): Promise<Map<number, ResolutionInput>> {
+  const inputs = new Map<number, ResolutionInput>();
+  if (entityIds.length < 2) return inputs;
+  const db = getDb();
+  const rows = await db<{ id: number | string; organization_id: string; resolution: unknown }>`
+    SELECT e.id, e.organization_id, et.metadata_schema->'x-lobu-resolution' AS resolution
     FROM entities e
     JOIN entity_types et ON et.id = e.entity_type_id
     WHERE e.id = ANY(${pgBigintArray([...entityIds])}::bigint[])
       AND et.metadata_schema->'x-lobu-resolution' IS NOT NULL
   `;
+  const idsByOrganization = new Map<string, number[]>();
   for (const row of rows) {
     try {
-      rulesById.set(
+      const rules = readEntityResolutionRules({ 'x-lobu-resolution': row.resolution });
+      inputs.set(Number(row.id), { rules, identities: [] });
+      idsByOrganization.set(row.organization_id, [
+        ...(idsByOrganization.get(row.organization_id) ?? []),
         Number(row.id),
-        readEntityResolutionRules({ 'x-lobu-resolution': row.resolution })
-      );
+      ]);
     } catch (error) {
       // Schema writes validate the policy; an unreadable one only costs this
       // read its same-record hint, never the search itself.
       if (!(error instanceof ToolUserError)) throw error;
     }
   }
-  return rulesById;
+  for (const [organizationId, ids] of idsByOrganization) {
+    const identities = await loadLiveEntityIdentities(db, { organizationId, entityIds: ids });
+    for (const [id, claims] of identities) {
+      const input = inputs.get(id);
+      if (input) input.identities = claims;
+    }
+  }
+  return inputs;
 }
 
 interface SameRecordGroup {
@@ -879,16 +898,18 @@ interface SameRecordGroup {
  */
 function sameRecordGroups(
   tie: readonly Entity[],
-  rulesById: ReadonlyMap<number, readonly EntityResolutionRule[]>
+  inputs: ReadonlyMap<number, ResolutionInput>
 ): SameRecordGroup[] {
+  const toRecord = (match: Entity) => ({
+    id: match.id,
+    metadata: match.metadata,
+    identities: inputs.get(match.id)?.identities ?? [],
+  });
   const ruleKey = (rule: EntityResolutionRule) => JSON.stringify([rule.fields, rule.normalizer]);
   const keyed = new Map<string, number[]>();
   for (const match of tie) {
-    for (const rule of rulesById.get(match.id) ?? []) {
-      for (const value of normalizedResolutionRuleKeys(
-        { id: match.id, metadata: match.metadata },
-        rule
-      )) {
+    for (const rule of inputs.get(match.id)?.rules ?? []) {
+      for (const value of normalizedResolutionRuleKeys(toRecord(match), rule)) {
         const key = `${ruleKey(rule)}\u0000${value}`;
         keyed.set(key, [...(keyed.get(key) ?? []), match.id]);
       }
@@ -913,7 +934,7 @@ function sameRecordGroups(
     // weaker onMatch when they disagree. The shared assessment then applies
     // the same contract as duplicate discovery: a populated, conflicting
     // auto_link key downgrades a match to review.
-    const memberRules = members.map((match) => rulesById.get(match.id) ?? []);
+    const memberRules = members.map((match) => inputs.get(match.id)?.rules ?? []);
     const rules = memberRules[0].flatMap((rule) => {
       const declared = memberRules.map((own) => own.find((other) => ruleKey(other) === ruleKey(rule)));
       if (declared.some((other) => other === undefined)) return [];
@@ -921,7 +942,6 @@ function sameRecordGroups(
       return [{ ...rule, onMatch } as EntityResolutionRule];
     });
     const [first, ...rest] = members;
-    const toRecord = (match: Entity) => ({ id: match.id, metadata: match.metadata });
     const assessment = assessIdentityGroups({
       metadataSchema: { 'x-lobu-resolution': { rules } },
       left: [toRecord(first)],
@@ -975,7 +995,7 @@ export function mergeFederatedSearchResults(
   targets: readonly GrantedMemberWorkspace[],
   settled: readonly PromiseSettledResult<UnifiedSearchResult>[],
   callerMax?: ToolAccessLevel,
-  resolutionRulesByEntityId: ReadonlyMap<number, readonly EntityResolutionRule[]> = new Map()
+  resolutionInputs: ReadonlyMap<number, ResolutionInput> = new Map()
 ): UnifiedSearchResult {
   const fulfilled = fulfilledShards(settled);
   if (fulfilled.length === 0) {
@@ -1106,7 +1126,7 @@ export function mergeFederatedSearchResults(
       ? crossWorkspaceTieSuggestion(
           top?.name ?? '',
           topNameMatches,
-          sameRecordGroups(topNameMatches, resolutionRulesByEntityId)
+          sameRecordGroups(topNameMatches, resolutionInputs)
         )
       : status === 'partial'
         ? coverage.reason === 'query_embedding_unavailable'
@@ -1941,7 +1961,7 @@ async function searchImpl(
     targets,
     settled,
     guidanceAccessTier(ctx, highestGrantedRole(targets)),
-    await loadResolutionRulesByEntityId(tie.map((match) => match.id))
+    await loadResolutionInputs(tie.map((match) => match.id))
   );
 }
 
