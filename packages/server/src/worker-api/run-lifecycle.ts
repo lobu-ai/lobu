@@ -78,7 +78,7 @@ import {
 import { insertEvent, recordLifecycleEvent } from "../utils/insert-event";
 import logger from "../utils/logger";
 import { logRunFailure } from "../runs/log-run-failure";
-import { getOperationForConnection } from "../operations/connector-operations";
+import { getLocalActionOutputFiles } from "../operations/connector-operations";
 import { reconcileConnectorRelationshipClaims } from "../utils/relationship-claims";
 import { stripNul, stripNulDeep } from "../utils/strip-nul";
 import {
@@ -175,9 +175,7 @@ async function readRunActionOutputFiles(
     SELECT organization_id, connection_id, action_key FROM runs WHERE id = ${runId} LIMIT 1
   `) as unknown as Array<{ organization_id: string; connection_id: number | null; action_key: string | null }>;
 	if (!run?.connection_id || !run.action_key) return undefined;
-	const resolved = await getOperationForConnection(run.organization_id, run.connection_id, run.action_key, sql);
-	const backendConfig = resolved?.operation.backend_config;
-	return backendConfig?.backend === "local_action" ? backendConfig.outputFiles : undefined;
+	return getLocalActionOutputFiles(run.organization_id, run.connection_id, run.action_key, sql);
 }
 
 /**

@@ -291,8 +291,31 @@ describe('multipart file → operation approval → connector execution', () => 
   it('keeps a device-run source-copy file only as long as its link', async () => {
     const queued = await manageOperations({ action: 'execute', connection_id: connectionId, operation_key: 'fetch_copy', input: {} }, {} as Env, ctx) as { run_id: number };
     const before = Date.now();
-    await completeUpload(queued.run_id);
-    const [run] = await getTestDb()`SELECT action_output FROM runs WHERE id = ${queued.run_id}`;
+    const sql = getTestDb();
+    const approval = await post(`/api/${orgSlug}/manage_operations`, { cookie, body: { action: 'approve', run_id: queued.run_id } });
+    expect(await approval.json()).toMatchObject({ approved: true });
+    const workerId = 'file-handoff-test-worker';
+    const job = await (await post('/api/workers/poll', { body: { worker_id: workerId, capabilities: {} } })).json();
+    expect(job.run_id).toBe(queued.run_id);
+    const executed = await executeCompiledConnector({
+      compiledCode: job.compiled_code,
+      job: { mode: 'action', actionKey: job.action_key, runId: String(job.run_id), actionInput: job.action_input, config: {}, env: {}, credentials: {} },
+      allowedDomains: [],
+    });
+    if (executed.mode !== 'action') throw new Error('Expected connector action');
+    // An upstream MCP outage while the device runs the action must not stop it
+    // from completing: completion reads the action's declaration, never discovery.
+    await sql`UPDATE connector_definitions SET mcp_config = ${sql.json({ upstream_url: 'http://127.0.0.1:9/mcp' })}
+      WHERE organization_id = ${ctx.organizationId} AND key = ${CONNECTOR}`;
+    try {
+      const completed = await post('/api/workers/complete-action', { body: {
+        run_id: queued.run_id, worker_id: workerId, status: 'success', action_output: executed.output,
+      } });
+      expect(await completed.json()).toMatchObject({ success: true });
+    } finally {
+      await sql`UPDATE connector_definitions SET mcp_config = NULL WHERE organization_id = ${ctx.organizationId} AND key = ${CONNECTOR}`;
+    }
+    const [run] = await sql`SELECT action_output FROM runs WHERE id = ${queued.run_id}`;
     const [attachment] = run.action_output.attachments as Array<Record<string, unknown>>;
     expect(attachment).toMatchObject({ filename: 'notice.pdf', size_bytes: 'source-bytes'.length });
     const metadata = await store.inspect(String(attachment.artifact_id));
