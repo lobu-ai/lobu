@@ -29,7 +29,10 @@ import { AUDIT_SEMANTIC_TYPE, MEMBER_ENTITY_TYPE_SLUG } from './constants';
 import { canSeeMemberEmail, canSeeMemberList, redactMemberEmail, resolveMemberSchemaFieldsFromSchema } from '../utils/member-entity-type';
 import { type AuthzScope, authzScopeFromToolContext } from '../authz/scope';
 import { compileConnectionRowVisibility } from '../authz/connection-visibility';
-import { getDb, pgTextArray } from '../db/client';
+import { getDb, pgBigintArray, pgTextArray } from '../db/client';
+import type { EntityResolutionRule } from '@lobu/core/contracts/tools/manage-entity-schema';
+import { assessIdentityGroups, normalizedResolutionRuleKeys, readEntityResolutionRules, type ResolutionIdentity } from '../entity-resolution/policy';
+import { loadLiveEntityIdentities } from '../entity-resolution/identities';
 import type { Env } from '../index';
 import type { ContentItem } from '@lobu/connector-sdk';
 import {
@@ -808,36 +811,203 @@ function buildEmptySearchSuggestion(
   return lines.join('\n');
 }
 
+function fulfilledShards(
+  settled: readonly PromiseSettledResult<UnifiedSearchResult>[]
+): UnifiedSearchResult[] {
+  return settled.flatMap((item) => (item.status === 'fulfilled' ? [item.value] : []));
+}
+
+function rankFederatedMatches(fulfilled: readonly UnifiedSearchResult[]): Entity[] {
+  return deduplicateBy(
+    fulfilled.flatMap((result) => result.matches),
+    (entity) => String(entity.id)
+  ).sort((a, b) => b.match_score - a.match_score);
+}
+
+/** Exact-name matches of the top hit, when they span more than one workspace. */
+function crossWorkspaceTopTie(ranked: readonly Entity[]): Entity[] {
+  const top = ranked[0];
+  if (!top) return [];
+  const name = top.name.trim().toLocaleLowerCase();
+  const tie = ranked.filter((match) => match.name.trim().toLocaleLowerCase() === name);
+  const workspaces = new Set(tie.map((match) => match.workspace_slug).filter(Boolean));
+  return workspaces.size > 1 ? tie : [];
+}
+
+/** What one tied record contributes to same-record resolution. */
+interface ResolutionInput {
+  rules: EntityResolutionRule[];
+  /** Live identity claims, so scoped values never compare as unscoped. */
+  identities: ResolutionIdentity[];
+}
+
+/**
+ * The resolution rules each record's own entity type declares, plus the
+ * record's live identity claims. Every id here is a match the caller was
+ * already authorized to read; the claims only shape comparison keys and are
+ * never rendered. Rules come from tenant schemas, never from shared code.
+ */
+async function loadResolutionInputs(
+  entityIds: readonly number[]
+): Promise<Map<number, ResolutionInput>> {
+  const inputs = new Map<number, ResolutionInput>();
+  if (entityIds.length < 2) return inputs;
+  const db = getDb();
+  const rows = await db<{ id: number | string; organization_id: string; resolution: unknown }>`
+    SELECT e.id, e.organization_id, et.metadata_schema->'x-lobu-resolution' AS resolution
+    FROM entities e
+    JOIN entity_types et ON et.id = e.entity_type_id
+    WHERE e.id = ANY(${pgBigintArray([...entityIds])}::bigint[])
+      AND et.metadata_schema->'x-lobu-resolution' IS NOT NULL
+  `;
+  const idsByOrganization = new Map<string, number[]>();
+  for (const row of rows) {
+    try {
+      const rules = readEntityResolutionRules({ 'x-lobu-resolution': row.resolution });
+      inputs.set(Number(row.id), { rules, identities: [] });
+      idsByOrganization.set(row.organization_id, [
+        ...(idsByOrganization.get(row.organization_id) ?? []),
+        Number(row.id),
+      ]);
+    } catch (error) {
+      // Schema writes validate the policy; an unreadable one only costs this
+      // read its same-record hint, never the search itself.
+      if (!(error instanceof ToolUserError)) throw error;
+    }
+  }
+  for (const [organizationId, ids] of idsByOrganization) {
+    const identities = await loadLiveEntityIdentities(db, { organizationId, entityIds: ids });
+    for (const [id, claims] of identities) {
+      const input = inputs.get(id);
+      if (input) input.identities = claims;
+    }
+  }
+  return inputs;
+}
+
+interface SameRecordGroup {
+  members: Entity[];
+  fields: string[];
+  decision: EntityResolutionRule['onMatch'];
+}
+
+/**
+ * Group tied records that share a normalized key under a rule both entity
+ * types declare with the same fields and normalizer. A rule declared on only
+ * one side never identifies anything: a key is identity only by agreement.
+ */
+function sameRecordGroups(
+  tie: readonly Entity[],
+  inputs: ReadonlyMap<number, ResolutionInput>
+): SameRecordGroup[] {
+  const toRecord = (match: Entity) => ({
+    id: match.id,
+    metadata: match.metadata,
+    identities: inputs.get(match.id)?.identities ?? [],
+  });
+  const ruleKey = (rule: EntityResolutionRule) => JSON.stringify([rule.fields, rule.normalizer]);
+  const keyed = new Map<string, number[]>();
+  for (const match of tie) {
+    for (const rule of inputs.get(match.id)?.rules ?? []) {
+      for (const value of normalizedResolutionRuleKeys(toRecord(match), rule)) {
+        const key = `${ruleKey(rule)}\u0000${value}`;
+        keyed.set(key, [...(keyed.get(key) ?? []), match.id]);
+      }
+    }
+  }
+
+  const parent = new Map(tie.map((match) => [match.id, match.id]));
+  const root = (id: number): number => {
+    let current = id;
+    while (parent.get(current) !== current) current = parent.get(current) as number;
+    return current;
+  };
+  for (const ids of keyed.values()) {
+    for (const id of ids) parent.set(root(id), root(ids[0]));
+  }
+
+  const groups: SameRecordGroup[] = [];
+  for (const groupRoot of new Set(tie.map((match) => root(match.id)))) {
+    const members = tie.filter((match) => root(match.id) === groupRoot);
+    if (members.length < 2) continue;
+    // Judge the group under the rules every member's type declares, with the
+    // weaker onMatch when they disagree. The shared assessment then applies
+    // the same contract as duplicate discovery: a populated, conflicting
+    // auto_link key downgrades a match to review.
+    const memberRules = members.map((match) => inputs.get(match.id)?.rules ?? []);
+    const rules = memberRules[0].flatMap((rule) => {
+      const declared = memberRules.map((own) => own.find((other) => ruleKey(other) === ruleKey(rule)));
+      if (declared.some((other) => other === undefined)) return [];
+      const onMatch = declared.every((other) => other?.onMatch === 'auto_link') ? 'auto_link' : 'review';
+      return [{ ...rule, onMatch } as EntityResolutionRule];
+    });
+    const [first, ...rest] = members;
+    const assessment = assessIdentityGroups({
+      metadataSchema: { 'x-lobu-resolution': { rules } },
+      left: [toRecord(first)],
+      right: rest.map(toRecord),
+    });
+    // A chain linked through a rule only some members declare proves nothing
+    // under the rules they all share; make no claim about it.
+    if (assessment.evidence.length === 0) continue;
+    groups.push({
+      members,
+      fields: [...new Set(assessment.evidence.map((item) => item.kind))].sort(),
+      decision: assessment.decision,
+    });
+  }
+  return groups;
+}
+
+function crossWorkspaceTieSuggestion(
+  name: string,
+  tie: readonly Entity[],
+  groups: readonly SameRecordGroup[]
+): string {
+  const narrow = 'Pass workspace to narrow before acting.';
+  if (groups.length === 0) return `Found "${name}" in more than one workspace. ${narrow}`;
+  const lines = [`Found "${name}" in more than one workspace.`];
+  for (const group of groups) {
+    const types = new Set(group.members.map((match) => match.type));
+    const noun = types.size === 1 ? group.members[0].type : 'record';
+    const records = group.members
+      .map((match) => `id ${match.id} in ${match.workspace_slug ?? match.organization_slug ?? 'a public catalog'}`)
+      .join(', ');
+    const matching = `matching ${group.fields.join(', ')}`;
+    lines.push(
+      group.decision === 'auto_link'
+        ? `These are the same ${noun} (${matching}): ${records}.`
+        : `These are likely the same ${noun} (${matching}); confirm from the records before treating them as one: ${records}.`
+    );
+  }
+  lines.push(
+    'Read each of them for the full picture; pass workspace only to choose where to write.'
+  );
+  const grouped = groups.reduce((count, group) => count + group.members.length, 0);
+  if (grouped < tie.length) {
+    lines.push(`Other matches with this name are separate records. ${narrow}`);
+  }
+  return lines.join(' ');
+}
+
 export function mergeFederatedSearchResults(
   args: SearchArgs,
   targets: readonly GrantedMemberWorkspace[],
   settled: readonly PromiseSettledResult<UnifiedSearchResult>[],
-  callerMax?: ToolAccessLevel
+  callerMax?: ToolAccessLevel,
+  resolutionInputs: ReadonlyMap<number, ResolutionInput> = new Map()
 ): UnifiedSearchResult {
-  const fulfilled = settled.flatMap((item) => (item.status === 'fulfilled' ? [item.value] : []));
+  const fulfilled = fulfilledShards(settled);
   if (fulfilled.length === 0) {
     throw new ToolUserError('Search is temporarily unavailable for this connection.', 503);
   }
 
   const entityLimit = resolveEntityLimit(args);
   const contentLimit = Math.min(args.content_limit ?? 5, 50);
-  const allMatches = deduplicateBy(
-    fulfilled.flatMap((result) => result.matches),
-    (entity) => String(entity.id)
-  ).sort((a, b) => b.match_score - a.match_score);
+  const allMatches = rankFederatedMatches(fulfilled);
   const top = allMatches[0] ?? null;
-  const topNameMatches = top
-    ? allMatches.filter(
-        (match) => match.name.trim().toLocaleLowerCase() === top.name.trim().toLocaleLowerCase()
-      )
-    : [];
-  const ambiguousTop =
-    top !== null &&
-    new Set(
-      topNameMatches
-        .map((match) => match.workspace_slug)
-        .filter((slug): slug is string => Boolean(slug))
-    ).size > 1;
+  const topNameMatches = crossWorkspaceTopTie(allMatches);
+  const ambiguousTop = topNameMatches.length > 0;
   // Treat cross-workspace exact-name ambiguity like LIMIT ... WITH TIES. The
   // ordinary global limit still bounds unrelated results, but it must not hide
   // the candidates the caller needs in order to choose a workspace safely.
@@ -953,7 +1123,11 @@ export function mergeFederatedSearchResults(
     // coaching for an entity that may exist in the unavailable workspace.
     discovery_status: hasAnyResult ? 'complete' : status === 'partial' ? 'discovering' : 'not_found',
     suggestion: ambiguousTop
-      ? `Found "${top?.name}" in more than one workspace. Pass workspace to narrow before acting.`
+      ? crossWorkspaceTieSuggestion(
+          top?.name ?? '',
+          topNameMatches,
+          sameRecordGroups(topNameMatches, resolutionInputs)
+        )
       : status === 'partial'
         ? coverage.reason === 'query_embedding_unavailable'
           ? QUERY_EMBEDDING_UNAVAILABLE_SUGGESTION
@@ -1781,11 +1955,13 @@ async function searchImpl(
       logger.warn({ err: getErrorMessage(item.reason) }, '[search] workspace shard failed');
     }
   }
+  const tie = crossWorkspaceTopTie(rankFederatedMatches(fulfilledShards(settled)));
   return mergeFederatedSearchResults(
     args,
     targets,
     settled,
-    guidanceAccessTier(ctx, highestGrantedRole(targets))
+    guidanceAccessTier(ctx, highestGrantedRole(targets)),
+    await loadResolutionInputs(tie.map((match) => match.id))
   );
 }
 

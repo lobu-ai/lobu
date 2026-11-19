@@ -185,6 +185,130 @@ describe('search_memory direct OAuth workspace federation', () => {
     expect(result.suggestion).toContain('Pass workspace to narrow');
   });
 
+  it('names cross-workspace ties that share a key both types declare as the same record', async () => {
+    const sql = getTestDb();
+    // Sequential: the fixture creates the missing type on first use. Slugs are
+    // unique per workspace, so the second Beta namesake is renamed after insert.
+    const people = [];
+    for (const [org, name] of [
+      [orgA, 'Wren Calloway'],
+      [orgB, 'Wren Calloway'],
+      [orgB, 'Wren Calloway Namesake'],
+    ] as const) {
+      people.push(
+        await createTestEntity({
+          name,
+          entity_type: 'person',
+          organization_id: org.id,
+          created_by: user.id,
+        })
+      );
+    }
+    const [alpha, beta, betaOther] = people;
+    await sql`UPDATE entities SET name = 'Wren Calloway' WHERE id = ${betaOther.id}`;
+    const profileRule = {
+      'x-lobu-resolution': {
+        rules: [{ fields: ['profile_url'], normalizer: 'exact', onMatch: 'review' }],
+      },
+    };
+    await sql`
+      UPDATE entity_types SET metadata_schema = ${sql.json(profileRule)}
+      WHERE slug = 'person' AND organization_id IN (${orgA.id}, ${orgB.id})
+    `;
+    const setProfile = (id: number, url: string) =>
+      sql`UPDATE entities SET metadata = ${sql.json({ profile_url: url })} WHERE id = ${id}`;
+    await setProfile(alpha.id, 'https://profiles.example.test/wren');
+    await setProfile(beta.id, 'https://profiles.example.test/wren');
+    await setProfile(betaOther.id, 'https://profiles.example.test/wren-other');
+
+    const args = {
+      query: 'Wren Calloway',
+      fuzzy: false,
+      include_content: false,
+      include_public_catalogs: false,
+      limit: 10,
+    } as const;
+    const result = await search(args, {} as Env, context());
+
+    expect(result.matches.map((entity) => entity.id).sort()).toEqual(
+      [alpha.id, beta.id, betaOther.id].sort()
+    );
+    expect(result.entity).toBeNull();
+    expect(result.suggestion).toContain('likely the same person');
+    expect(result.suggestion).toContain(`id ${alpha.id} in ${orgA.slug}`);
+    expect(result.suggestion).toContain(`id ${beta.id} in ${orgB.slug}`);
+    expect(result.suggestion).toContain('profile_url');
+    expect(result.suggestion).not.toContain(`id ${betaOther.id}`);
+    expect(result.suggestion).toContain('Pass workspace to narrow');
+    expectValidSearchResult(result);
+
+    // A key only identifies a record under a rule both workspaces declare.
+    await sql`UPDATE entity_types SET metadata_schema = '{}'::jsonb
+      WHERE slug = 'person' AND organization_id = ${orgB.id}`;
+    const undeclared = await search(args, {} as Env, context());
+    expect(undeclared.suggestion).not.toContain('the same person');
+    expect(undeclared.suggestion).toContain('Pass workspace to narrow');
+  });
+
+  it('calls an auto_link match the same record only when no declared unique key or scoped claim conflicts', async () => {
+    const sql = getTestDb();
+    const alpha = await createTestEntity({
+      name: 'Juno Halberd',
+      entity_type: 'person',
+      organization_id: orgA.id,
+      created_by: user.id,
+    });
+    const beta = await createTestEntity({
+      name: 'Juno Halberd',
+      entity_type: 'person',
+      organization_id: orgB.id,
+      created_by: user.id,
+    });
+    const uniqueRules = {
+      'x-lobu-resolution': {
+        rules: [
+          { fields: ['email'], normalizer: 'email', onMatch: 'auto_link' },
+          { fields: ['account_id'], normalizer: 'exact', onMatch: 'auto_link' },
+        ],
+      },
+    };
+    await sql`
+      UPDATE entity_types SET metadata_schema = ${sql.json(uniqueRules)}
+      WHERE slug = 'person' AND organization_id IN (${orgA.id}, ${orgB.id})
+    `;
+    const setMetadata = (id: number, accountId: string) =>
+      sql`UPDATE entities SET metadata = ${sql.json({ email: 'juno@example.test', account_id: accountId })} WHERE id = ${id}`;
+    const args = {
+      query: 'Juno Halberd',
+      fuzzy: false,
+      include_content: false,
+      include_public_catalogs: false,
+      limit: 10,
+    } as const;
+
+    await setMetadata(alpha.id, 'acct-1');
+    await setMetadata(beta.id, 'acct-2');
+    const conflicting = await search(args, {} as Env, context());
+    expect(conflicting.suggestion).toContain('likely the same person (matching email)');
+
+    await setMetadata(beta.id, 'acct-1');
+    const agreeing = await search(args, {} as Env, context());
+    expect(agreeing.suggestion).toContain('These are the same person (matching account_id, email)');
+    expect(agreeing.suggestion).not.toContain('Pass workspace to narrow');
+
+    // The same metadata value claimed under different identity scopes names
+    // two accounts, not one: the scoped claim wins over its metadata mirror.
+    await sql`
+      INSERT INTO entity_identities (
+        organization_id, entity_id, namespace, identifier, source_connector, scope_key
+      ) VALUES
+        (${orgA.id}, ${alpha.id}, 'account_id', 'acct-1', 'seed', 'tenant-one'),
+        (${orgB.id}, ${beta.id}, 'account_id', 'acct-1', 'seed', 'tenant-two')
+    `;
+    const scoped = await search(args, {} as Env, context());
+    expect(scoped.suggestion).toContain('likely the same person (matching email)');
+  });
+
   it('never reports a false global miss when one workspace shard is unavailable', async () => {
     const targets = [
       { id: orgA.id, slug: orgA.slug, name: orgA.name, role: 'owner', personal: false },
