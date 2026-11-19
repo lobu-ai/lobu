@@ -27,6 +27,7 @@ function occ(overrides: Partial<Occurrence> = {}): Occurrence {
   return {
     fingerprint: FP(1),
     kind: "system",
+    source: "server",
     title: "Error: boom",
     culprit: "GET /x",
     message: "boom",
@@ -99,6 +100,34 @@ describe("issue creation gate", () => {
     ).toMatchObject({
       metadata: { priority: "high" },
     });
+  });
+
+  test("a request failing in browsers is an issue only when it spikes", () => {
+    const failed = occ({ source: "browser", kind: "dependency" });
+    expect(plan([{ ...failed, seen_24h: RULES.highMinSeen24h }], [])).toEqual(
+      []
+    );
+    expect(plan([{ ...failed, max_orgs: RULES.highMinOrgs }], [])).toEqual([]);
+    const spike = { ...failed, seen_2h: 40, seen_24h: 45, seen_14d: 60 };
+    expect(plan([spike], [])[0]).toMatchObject({
+      action: "create",
+      metadata: { status: "escalating", priority: "high" },
+    });
+    // A page defect in the browser keeps the system gate.
+    expect(plan([occ({ source: "browser" })], [])[0]?.action).toBe("create");
+  });
+
+  test("a cross-origin script error carries nothing to fix and is never an issue", () => {
+    const opaque = occ({
+      source: "browser",
+      title: "Error: Script error.",
+      message: RULES.opaqueBrowserError,
+      seen_24h: RULES.highMinSeen24h,
+    });
+    expect(plan([opaque], [])).toEqual([]);
+    expect(plan([{ ...opaque, source: "server" }], [])[0]?.action).toBe(
+      "create"
+    );
   });
 
   test("one system error on a sign-in or consent route is a high-priority issue", () => {
@@ -433,6 +462,23 @@ describe("runIssueTracker", () => {
               first_seen_at: ago(1),
               last_seen_at: ago(0.5),
             },
+            {
+              fingerprint: FP(3),
+              kind: "dependency",
+              issue_source: "browser",
+              issue_title: "TypeError: Load failed",
+              issue_culprit: "browser GET /api/:s/x",
+              seen_2h: 2,
+              seen_24h: 25,
+              seen_14d: 25,
+              max_orgs: 0,
+              max_users: 0,
+              releases_2h: [],
+              last_release: "rel",
+              sample_trace_id: "",
+              first_seen_at: ago(20),
+              last_seen_at: ago(0.5),
+            },
           ];
         if (text.includes("otel_traces"))
           return [{ trace_id: trace, request: "GET /connect/oauth/callback" }];
@@ -451,6 +497,7 @@ describe("runIssueTracker", () => {
         metadata?: Record<string, unknown>;
       }>;
     };
+    // The browser request failure has volume but no spike, so only FP(1) is new.
     expect(result.created).toBe(1);
     expect(result.changes[0]).toMatchObject({
       fingerprint: FP(1),

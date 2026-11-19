@@ -47,6 +47,11 @@ export const RULES = {
   /** escalating: the last two hours' hourly rate vs the prior 13 days. */
   escalateMinPerHour: 10,
   escalateFactor: 5,
+  /**
+   * The browser's whole report for an error thrown by a script from another
+   * origin: no type, message or stack survives, so it is never an issue.
+   */
+  opaqueBrowserError: "Script error.",
 } as const;
 
 export type IssueStatus =
@@ -57,11 +62,14 @@ export type IssueStatus =
   | "resolved"
   | "ignored";
 export type ErrorKind = "system" | "user" | "dependency";
+/** Where the occurrences were recorded: the server, or a visitor's browser. */
+export type ErrorSource = "server" | "browser";
 
 /** One fingerprint seen in the last two hours, with its trailing stats. */
 export interface Occurrence {
   fingerprint: string;
   kind: ErrorKind;
+  source: ErrorSource;
   title: string;
   culprit: string;
   message: string;
@@ -127,6 +135,13 @@ const blocksSignIn = (o: Occurrence) =>
   (RULES.signInRequest.test(o.culprit) || RULES.signInRequest.test(o.request));
 
 function passesGate(o: Occurrence): boolean {
+  if (o.source === "browser") {
+    if (o.message === RULES.opaqueBrowserError) return false;
+    // A request that failed in a browser is usually the visitor's network,
+    // and the server records its own failures. Only a spike, the shape of an
+    // outage the server cannot see, is an issue.
+    if (o.kind === "dependency") return isEscalating(o);
+  }
   if (blocksSignIn(o)) return true;
   return o.kind === "user"
     ? o.seen_24h >= RULES.userMinSeen24h || o.max_orgs >= RULES.userMinOrgs
@@ -370,6 +385,7 @@ const OCCURRENCES_SQL = `
 SELECT
   fingerprint,
   argMax(error_kind, last_seen) AS kind,
+  argMax(source, last_seen) AS issue_source,
   argMax(title, last_seen) AS issue_title,
   argMax(culprit, last_seen) AS issue_culprit,
   argMax(sample_message, last_seen) AS message,
@@ -445,6 +461,7 @@ function toOccurrence(row: Record<string, unknown>): Occurrence {
   return {
     fingerprint: str(row.fingerprint),
     kind: kind === "user" || kind === "dependency" ? kind : "system",
+    source: str(row.issue_source) === "browser" ? "browser" : "server",
     title: str(row.issue_title).slice(0, 200) || "Untitled error",
     culprit: str(row.issue_culprit),
     message: str(row.message).slice(0, 1000),
