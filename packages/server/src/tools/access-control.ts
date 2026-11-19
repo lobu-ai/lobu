@@ -87,7 +87,7 @@ interface MemberReadContext extends AccessControlContext {
  * member data never take the system bypass: they follow its creator (see
  * {@link memberReadRole}).
  */
-function isAutomationScriptCall(ctx: MemberReadContext): boolean {
+export function isAutomationScriptCall(ctx: MemberReadContext): boolean {
   return isInProcessSystemCall(ctx) && ctx.sourceContext?.source === AUTOMATION_RUN_SOURCE;
 }
 

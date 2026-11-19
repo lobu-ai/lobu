@@ -151,6 +151,8 @@ export async function getPastReactionsSummary(
         // Expiry means no decision. Keep it explicit so the model never learns
         // an unattended question as negative preference feedback.
         decision += ' — Question expired without a human decision (neutral)';
+      } else if (approval === 'withdrawn') {
+        decision += ' — Withdrawn before a human decision (neutral)';
       } else {
         decision += ' — Awaiting human decision';
       }

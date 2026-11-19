@@ -14,6 +14,7 @@ import {
 	handleRejectBatch,
 } from "./manage_operations/handlers/approvals";
 import { handleCancel } from "./manage_operations/handlers/cancel";
+import { handleConfirm } from "./manage_operations/handlers/confirm";
 import { handleExecute } from "./manage_operations/handlers/execute";
 import { handleListAvailable } from "./manage_operations/handlers/list-available";
 import {
@@ -25,6 +26,7 @@ import {
 	ApproveAction,
 	ApproveBatchAction,
 	CancelAction,
+	ConfirmAction,
 	ExecuteAction,
 	GetRunAction,
 	ListActivityAction,
@@ -67,6 +69,8 @@ const manageOperationsTool = defineActionTool("manage_operations", {
 	cancel: action(CancelAction, async (args, ctx) =>
 		settleApprovalResult(ctx, await handleCancel(args, ctx)),
 	),
+	// A held run's requester releases it; nothing is waiting on a card.
+	confirm: action(ConfirmAction, handleConfirm),
 	list_activity: action(ListActivityAction, handleListActivity),
 	approve: action(ApproveAction, async (args, ctx, env) =>
 		settleApprovalResult(ctx, await handleApprove(args, ctx, env)),

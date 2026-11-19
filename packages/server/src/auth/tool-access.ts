@@ -81,6 +81,8 @@ export const MEMBER_WRITE_ACTIONS: Record<string, Set<string> | null> = {
 		"reject_batch",
 		"execute",
 		"cancel",
+		// The handler admits only the run's own requester.
+		"confirm",
 	]),
 	// A member sends a message to their own agent's conversation. `send` runs the
 	// turn in the conversation's pinned sandbox; the handler binds the

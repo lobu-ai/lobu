@@ -38,7 +38,7 @@ import {
   type WorkspaceEventTriggerSignal,
 } from '../automations/workspace-event-contract';
 import { getDb } from '../db/client';
-import { DEVICE_ACTION_QUEUE_BUDGET_MS, DEVICE_BACKGROUND_ACTION_QUEUE_BUDGET_MS } from '../config/intervals';
+import { DEVICE_ACTION_QUEUE_BUDGET_MS, DEVICE_BACKGROUND_ACTION_QUEUE_BUDGET_MS, POLICY_CHECK_WINDOW_SECONDS } from '../config/intervals';
 import type { Env } from '../index';
 import { findBundledConnectorFile } from '../utils/connector-catalog';
 import {
@@ -1375,8 +1375,11 @@ export async function createConnectorOperationRun(params: {
    *               waits for a device worker to claim via /poll. Used
    *               for connectors with `runtime` set (chrome-extension,
    *               macos bridge, ios bridge). No gateway-side execution.
+   * - 'check'   → status='pending', approval='check'. Held by a Check
+   *               guardrail until the requesting agent confirms it; nobody
+   *               claims it. expires_at is the confirmation deadline.
    */
-  approvalMode: 'inline' | 'queued' | 'device';
+  approvalMode: 'inline' | 'queued' | 'device' | 'check';
   activation?: {
     kind: 'page_visit';
     urls: string[];
@@ -1426,7 +1429,9 @@ export async function createConnectorOperationRun(params: {
     );
   }
 
-  const approvalStatus = params.approvalMode === 'queued' ? 'pending' : 'auto';
+  const approvalStatus = params.approvalMode === 'queued'
+    ? 'pending'
+    : params.approvalMode === 'check' ? 'check' : 'auto';
   const status =
     params.activation || params.approvalMode !== 'inline' ? 'pending' : 'running';
   const inlineOwner =
@@ -1445,9 +1450,13 @@ export async function createConnectorOperationRun(params: {
   // execute immediately on the gateway and are already claimed. A run of
   // either mode that carries an activation parks pending until the user visits
   // a matching page; the caller's activation deadline is then the claim horizon.
+  // A Check run's deadline is the confirmation window; a page-activated one
+  // keeps its activation horizon. Confirmation sets the dispatch horizon.
   const expiresAtSeconds = params.activation
     ? params.activation.expiresInSeconds
-    : params.approvalMode === 'device'
+    : params.approvalMode === 'check'
+      ? POLICY_CHECK_WINDOW_SECONDS
+      : params.approvalMode === 'device'
       ? (params.runMetadata?.background === true
           ? DEVICE_BACKGROUND_ACTION_QUEUE_BUDGET_MS
           : DEVICE_ACTION_QUEUE_BUDGET_MS) / 1000

@@ -7,6 +7,7 @@
 
 import type {
 	OperationApproveInput,
+	OperationConfirmInput,
 	OperationExecuteInput,
 	OperationListAvailableInput,
 	OperationListRunsInput,
@@ -26,6 +27,7 @@ export interface OperationsNamespace {
 	listActivity(input?: OperationListActivityInput): Promise<unknown>;
 	getRun(run_id: number): Promise<unknown>;
 	cancel(run_id: number): Promise<unknown>;
+	confirm(input: OperationConfirmInput): Promise<unknown>;
 	approve(input: OperationApproveInput): Promise<unknown>;
 	reject(input: OperationRejectInput): Promise<unknown>;
 }
@@ -56,6 +58,7 @@ export function buildOperationsNamespace(
 		cancel: method("cancel", {
 			mapArgs: (run_id) => ({ run_id: idArg("operations.cancel", "run_id", run_id, "number") }),
 		}),
+		confirm: method("confirm"),
 		approve: method("approve"),
 		reject: method("reject"),
 	};

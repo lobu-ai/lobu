@@ -3,7 +3,7 @@ import { referenceCaptureTriggers } from '../automations/event-trigger';
 import type { AutomationTrigger } from '@lobu/core/contracts/tools/manage-automations';
 import { compileConnectionColumnVisibility } from '../authz/connection-visibility';
 import { listEntityApprovalPolicies, resolveActingPrincipal } from '../authz/entity-policy';
-import { evaluateConnectorPolicy } from '../authz/connector-policy';
+import { evaluateConnectorPolicy, runsWithoutHold } from '../authz/connector-policy';
 import type { DbClient } from '../db/client';
 import { feedDefinitionSelection } from '../connectors/feed-definition-selection';
 import { feedTriggerEligibilitySql } from '../connectors/feed-health-semantics';
@@ -87,7 +87,7 @@ export async function sourceFeedSubscriptions(
     });
     // Background subscriptions cannot grant themselves approval. A policy change
     // revokes the listener, delegated reads, and commit authority together.
-    if (policy.effect !== 'auto') continue;
+    if (!runsWithoutHold(policy.effect)) continue;
     hasCapture ||= referenceCaptureTriggers(Array.isArray(row.triggers) ? row.triggers : []).some(trigger =>
       trigger.connector_key === row.connector_key
       && (trigger.connection_id === undefined || trigger.connection_id === Number(row.connection_id))

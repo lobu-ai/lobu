@@ -34,6 +34,8 @@ const KNOWN: Record<string, string> = {
   'authz/scope.ts -> chatAccessOfToolContext': 'the ToolContext tier inputs (tokenType, sourceContext)',
   'tools/admin/manage_operations/handlers/execute.ts -> chatAccessOfToolContext': 'the execute ToolContext',
   'tools/admin/manage_operations/handlers/execute.ts -> decideDeviceAccess': 'that tier, for a device-pinned connection',
+  'tools/admin/manage_operations/handlers/confirm.ts -> chatAccessOfToolContext': 'the confirming ToolContext',
+  'tools/admin/manage_operations/handlers/confirm.ts -> decideDeviceAccess': 'that tier, re-read before releasing a Check on a device-pinned connection',
   'lib/connector-pushdown.ts -> decideDeviceAccess': 'SourceReadScope.chatAccess, for a device-backed feed',
   'lib/connector-pushdown.ts -> readDeviceFeed': 'after the gate above',
   'utils/entity-reference.ts -> chatAccessOfToolContext': 'the source read ToolContext (public visitor for a foreign type)',

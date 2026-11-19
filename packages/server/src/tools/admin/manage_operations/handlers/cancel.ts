@@ -49,21 +49,26 @@ export async function handleCancel(
       return { action: 'cancel', run_id: args.run_id, status: run.status, cancelled: false };
     }
     const message = 'Operation cancelled by requester or workspace administrator.';
-    // A withdrawn approval was never decided: settle it like the TTL sweep and
-    // connection delete do, so no reviewer surface keeps it actionable and it
-    // is never read back as a human rejection.
-    const withdrawnApproval = run.approval_status === 'pending';
+    // A withdrawn Ask or Check was never decided: settle it as `withdrawn`, so
+    // no reviewer surface keeps it actionable and it is never read back as a
+    // human rejection or as a lapsed request.
+    const withdrawn = run.approval_status === 'pending' || run.approval_status === 'check';
     await tx`
       UPDATE runs SET status = 'cancelled', completed_at = current_timestamp,
         outcome = NULL, error_message = ${message},
-        approval_status = ${withdrawnApproval ? 'expired' : run.approval_status}
+        approval_status = ${withdrawn ? 'withdrawn' : run.approval_status}
       WHERE id = ${args.run_id} AND organization_id = ${ctx.organizationId}
     `;
+    // A Check run has no card until it is confirmed: the withdrawn run row is
+    // its whole record.
+    if (run.approval_status === 'check') {
+      return { action: 'cancel', run_id: args.run_id, status: 'cancelled', cancelled: true };
+    }
     await supersedeActionEvent(args.run_id, ctx.organizationId,
-      withdrawnApproval ? 'rejected' : 'failed',
+      withdrawn ? 'rejected' : 'failed',
       (operation) => `${operation} — cancelled`, message,
-      withdrawnApproval
-        ? { run_status: 'cancelled', approval_status: 'expired', expiry_reason: message,
+      withdrawn
+        ? { run_status: 'cancelled', approval_status: 'withdrawn', expiry_reason: message,
             withdrawn_by: { principal_kind: actor.kind, principal_id: actor.id, user_id: ctx.userId ?? null } }
         : { run_status: 'cancelled', error_message: message },
       null, tx);

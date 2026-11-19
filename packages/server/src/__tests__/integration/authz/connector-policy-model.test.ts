@@ -320,7 +320,7 @@ describe("org connector policy scopes", () => {
 		expect((await decide()).effect).toBe("approval");
 
 		// Writes reject a guardrail that would allow, or one outside connector actions.
-		await expect(save({ kind: "guardrail", effects: { execute: "auto" } })).rejects.toThrow(/only require approval or block/);
+		await expect(save({ kind: "guardrail", effects: { execute: "auto" } })).rejects.toThrow(/only log, check, require approval or block/);
 		await expect(upsertEntityApprovalPolicy(orgId, { resourceClass: "entity", kind: "guardrail", entityTypeSlug: "x", createMode: "deny" }))
 			.rejects.toThrow(/Only connector action rules/);
 		// A stored Auto on a guardrail (only reachable by a direct write) reads as Block.
@@ -328,6 +328,28 @@ describe("org connector policy scopes", () => {
 		expect(await decide()).toMatchObject({ effect: "deny", reason: "guardrail", rules: [{ id: hold.id, kind: "guardrail" }] });
 		expect(await deleteEntityApprovalPolicy({ organizationId: orgId, resourceClass: "connector_action", connectorKey: operation.connector_key, kind: "guardrail" })).toBe(true);
 		expect(await decide()).toMatchObject({ effect: "auto", ruleIds: [exact.id], reason: "matched_rule" });
+	});
+
+	it("Log runs unattended, Check falls back to Ask for actors that cannot confirm, and both are guardrail-only", async () => {
+		const log = await save({ connectionId, kind: "guardrail", note: "Record fixture writes", effects: { execute: "log" } });
+		expect(await decide()).toMatchObject({ effect: "log", reason: "guardrail", rules: [{ id: log.id, kind: "guardrail" }] });
+		expect((await decide(agent)).effect).toBe("log");
+
+		const check = await save({ connectorKey: operation.connector_key, kind: "guardrail", note: "Only to people in the thread", effects: { execute: "check" } });
+		// The stricter guardrail explains the result; Log no longer does.
+		expect(await decide(agent)).toMatchObject({ effect: "check", rules: [{ id: check.id, note: "Only to people in the thread" }] });
+		expect((await decide({ kind: "app", id: "app:fixture", ownerAgentId: null, ownerResolved: true })).effect).toBe("check");
+		expect((await decide({ kind: "automation", id: "automation:1", ownerAgentId: agent.id, ownerResolved: true })).effect).toBe("check");
+		// Nobody can confirm for a person or a code-only Automation, so a person is asked.
+		expect(await decide()).toMatchObject({ effect: "approval", rules: [{ id: check.id }] });
+		expect((await decide({ kind: "automation", id: "automation:2", ownerAgentId: null, ownerResolved: true })).effect).toBe("approval");
+
+		// An Ask guardrail outranks Check; Check never releases an Ask.
+		const ask = await save({ operationKey: qualifiedOperationKey(operation.connector_key, operation.operation_key), kind: "guardrail", effects: { execute: "approval" } });
+		expect(await decide(agent)).toMatchObject({ effect: "approval", ruleIds: [ask.id] });
+
+		await expect(save({ connectionId, effects: { execute: "log" } })).rejects.toThrow(/guardrail modes/);
+		await expect(save({ connectionId, effects: { execute: "check" } })).rejects.toThrow(/guardrail modes/);
 	});
 
 	it("scopes never cross tenants, including direct database writes", async () => {

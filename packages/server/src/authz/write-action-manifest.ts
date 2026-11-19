@@ -37,10 +37,24 @@ export type WriteAction =
 	| "delete_relationship_type";
 
 /**
- * The decision a policy attaches to an action. `auto` applies inline; `approval`
- * queues a durable approval; `deny` blocks execution without queuing approval.
+ * The decision a policy attaches to an action, least to most strict. `auto`
+ * applies inline; `log` applies inline and records why on the activity;
+ * `check` holds the run until the requesting agent confirms it with a short
+ * statement; `approval` queues a durable human approval; `deny` blocks
+ * execution without queuing approval. `log` and `check` are guardrail-only
+ * connector effects.
  */
-export type WriteEffect = "auto" | "approval" | "deny";
+export const WRITE_EFFECTS = ["auto", "log", "check", "approval", "deny"] as const;
+export type WriteEffect = (typeof WRITE_EFFECTS)[number];
+
+export function isWriteEffect(value: unknown): value is WriteEffect {
+	return WRITE_EFFECTS.includes(value as WriteEffect);
+}
+
+/** Strictness of an effect; the strictest matching rule wins. */
+export function writeEffectRank(effect: WriteEffect): number {
+	return WRITE_EFFECTS.indexOf(effect);
+}
 
 interface ClassManifest {
 	/** The actions this class governs. An action outside this set is illegal for the class. */
@@ -96,8 +110,9 @@ export const WRITE_ACTION_MANIFEST: Readonly<
 	},
 	connector_action: {
 		// All operations use org policy; an action no rule matches runs Auto.
+		// `log` and `check` are legal only on guardrails (validatePolicyKindAndNote).
 		actions: ["execute"],
-		effects: ["auto", "approval", "deny"],
+		effects: ["auto", "log", "check", "approval", "deny"],
 		defaultEffect: {
 			execute: "auto",
 		},

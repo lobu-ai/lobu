@@ -97,9 +97,9 @@ function outcomeDetail(
 function outcomePhrase(cardStatus: string, approvalStatus: string): string {
 	if (cardStatus === "completed") return "was approved and completed";
 	if (cardStatus === "rejected") {
-		return approvalStatus === "expired"
-			? "was not approved: the approval request expired or was withdrawn"
-			: "was rejected";
+		if (approvalStatus === "expired") return "was not approved: the approval request expired";
+		if (approvalStatus === "withdrawn") return "was not approved: the request was withdrawn";
+		return "was rejected";
 	}
 	return approvalStatus === "approved" ? "was approved but failed" : "failed";
 }
@@ -134,7 +134,7 @@ export async function queueOperationOutcomeFollowup(
 		WHERE id = ${params.runId}
 			AND organization_id = ${params.organizationId}
 			AND run_type = 'action'
-			AND approval_status IN ('approved', 'rejected', 'expired')
+			AND approval_status IN ('approved', 'rejected', 'expired', 'withdrawn')
 			AND automation_id IS NULL
 			AND jsonb_typeof(run_metadata -> 'turn_origin') = 'object'
 			AND NOT (run_metadata ? 'turn_followup_queued_at')

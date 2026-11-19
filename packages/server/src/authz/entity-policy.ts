@@ -38,15 +38,16 @@ import { resolveEntityCreator } from "../utils/resolve-entity-creator";
 import {
 	WRITE_ACTION_MANIFEST,
 	type WriteAction,
+	type WriteEffect,
 	defaultEffectFor,
 	isLegalActionEffect,
+	isWriteEffect,
+	writeEffectRank,
 } from "./write-action-manifest";
 
 export type EntityPolicyDecision = "allow" | "deny" | "require_approval";
 export type EntityPolicyPrincipalKind = "user" | "agent" | "automation" | "app";
 export type EntityMutationAction = "read" | "create" | "update" | "delete";
-/** Stored policy effects: automatic execution, human approval, or a hard block. */
-export type EntityMutationMode = "auto" | "approval" | "deny";
 
 /**
  * Which class of write a policy row governs. `entity` is the original class;
@@ -100,16 +101,16 @@ export interface EntityApprovalPolicy extends Required<ConnectorPolicyScope> {
 	entityTypeSlug: string | null;
 	fieldPath: string | null;
 	entityId: number | null;
-	createMode: EntityMutationMode;
-	updateMode: EntityMutationMode;
-	deleteMode: EntityMutationMode;
+	createMode: WriteEffect;
+	updateMode: WriteEffect;
+	deleteMode: WriteEffect;
 	/**
 	 * The effect this policy attaches to each action it declares, from the child
 	 * write_policy_action_effects rows. The create/update/delete convenience
 	 * fields above mirror this map (entity/agent_config); connector_action carries
 	 * only `execute` here and leaves the mode fields at their class defaults.
 	 */
-	effects: Partial<Record<WriteAction, EntityMutationMode>>;
+	effects: Partial<Record<WriteAction, WriteEffect>>;
 	/** Grants fold narrowest-wins; guardrails (connector_action only) can only tighten. */
 	kind: ConnectorPolicyKind;
 	/** Human reason shown when this rule decides a held or blocked run. */
@@ -129,9 +130,9 @@ export interface EntityApprovalPolicyInput extends ConnectorPolicyScope {
 	entityTypeSlug?: string | null;
 	fieldPath?: string | null;
 	entityId?: number | null;
-	createMode?: EntityMutationMode;
-	updateMode?: EntityMutationMode;
-	deleteMode?: EntityMutationMode;
+	createMode?: WriteEffect;
+	updateMode?: WriteEffect;
+	deleteMode?: WriteEffect;
 	/**
 	 * A raw per-action effect map. When present it is the source of truth for the
 	 * persisted child rows (clamped to what the manifest declares legal for the
@@ -140,7 +141,7 @@ export interface EntityApprovalPolicyInput extends ConnectorPolicyScope {
 	 * triple (the legacy entity-settings path). Only actions the class governs are
 	 * written; an illegal (action, effect) is clamped to the class default.
 	 */
-	effects?: Partial<Record<WriteAction, EntityMutationMode>>;
+	effects?: Partial<Record<WriteAction, WriteEffect>>;
 	/** Defaults to `grant`. `guardrail` is connector_action only and never `auto`. */
 	kind?: ConnectorPolicyKind;
 	/** Omitted keeps the stored note on update; null or blank clears it. */
@@ -189,18 +190,8 @@ type EntityApprovalPolicyRow = {
 	approval_team_id: string | null;
 	approval_channel_name: string | null;
 	/** Child rows from write_policy_action_effects. */
-	effects: Partial<Record<WriteAction, EntityMutationMode>>;
+	effects: Partial<Record<WriteAction, WriteEffect>>;
 };
-
-export function isEntityMutationMode(
-	value: unknown,
-): value is EntityMutationMode {
-	return (
-		value === "auto" ||
-		value === "approval" ||
-		value === "deny"
-	);
-}
 
 /**
  * Coerce user INPUT to a caller-chosen default when it isn't a legal mode.
@@ -209,9 +200,9 @@ export function isEntityMutationMode(
  */
 function normalizeMode(
 	value: unknown,
-	fallback: EntityMutationMode,
-): EntityMutationMode {
-	return isEntityMutationMode(value) ? value : fallback;
+	fallback: WriteEffect,
+): WriteEffect {
+	return isWriteEffect(value) ? value : fallback;
 }
 
 function normalizeResourceClass(value: unknown): WriteResourceClass {
@@ -248,8 +239,11 @@ export function validatePolicyKindAndNote(
 	const kind = normalizePolicyKind(input.kind);
 	if (kind === "guardrail" && input.resourceClass !== "connector_action")
 		throw new Error("Only connector action rules can be guardrails.");
-	if (kind === "guardrail" && input.effects?.execute === "auto")
-		throw new Error("A guardrail can only require approval or block; use a grant to allow.");
+	const execute = input.effects?.execute;
+	if (kind === "guardrail" && execute === "auto")
+		throw new Error("A guardrail can only log, check, require approval or block; use a grant to allow.");
+	if (kind === "grant" && (execute === "log" || execute === "check"))
+		throw new Error("Log only and Check are guardrail modes.");
 	return { kind, note: normalizePolicyNote(input.note) };
 }
 
@@ -263,7 +257,7 @@ function effectForRowAction(
 	row: EntityApprovalPolicyRow,
 	resourceClass: WriteResourceClass,
 	action: WriteAction,
-): EntityMutationMode {
+): WriteEffect {
 	const stored = row.effects[action];
 	if (stored !== undefined) return stored;
 	return defaultEffectFor(resourceClass, action);
@@ -614,9 +608,10 @@ async function agentExistsInOrg(
  * Centralized so the create/delete and per-field update paths agree — and so a
  * future mode can never be read as `allow` by omission.
  */
-function modeToDecision(mode: EntityMutationMode): EntityPolicyDecision {
+function modeToDecision(mode: WriteEffect): EntityPolicyDecision {
 	if (mode === "deny") return "deny";
-	if (mode === "approval") return "require_approval";
+	// `check` is a connector-only effect; anywhere else it holds for a human.
+	if (mode === "approval" || mode === "check") return "require_approval";
 	return "allow";
 }
 
@@ -645,14 +640,12 @@ function principalSpecificity(row: EntityApprovalPolicyRow): number {
 }
 
 /** Restrictive rank of a single stored mode — higher = more restrictive. */
-function modeRestrictiveness(mode: EntityMutationMode): number {
-	if (mode === "deny") return 3;
-	if (mode === "approval") return 2;
-	return 1; // auto
+function modeRestrictiveness(mode: WriteEffect): number {
+	return writeEffectRank(mode);
 }
 
 /** The more restrictive effect wins within a principal's restrictions. */
-function moreRestrictive(a: EntityMutationMode, b: EntityMutationMode): EntityMutationMode {
+function moreRestrictive(a: WriteEffect, b: WriteEffect): WriteEffect {
 	return modeRestrictiveness(a) >= modeRestrictiveness(b) ? a : b;
 }
 
@@ -679,8 +672,8 @@ function foldEffectForAction(
 	candidates: EntityApprovalPolicyRow[],
 	resourceClass: WriteResourceClass,
 	action: WriteAction,
-): EntityMutationMode {
-	let folded: EntityMutationMode | null = null;
+): WriteEffect {
+	let folded: WriteEffect | null = null;
 	for (const row of candidates) {
 		const stored = row.effects[action];
 		if (stored === undefined) continue; // row abstains on this action
@@ -694,7 +687,7 @@ function foldEffectForDecision(
 	candidates: EntityApprovalPolicyRow[],
 	resourceClass: WriteResourceClass,
 	action: WriteAction,
-): EntityMutationMode {
+): WriteEffect {
 	return foldEffectForAction(candidates, resourceClass, action);
 }
 
@@ -706,8 +699,8 @@ function foldEffectForDecision(
 function foldAppEffect(
 	candidates: EntityApprovalPolicyRow[],
 	action: WriteAction,
-): EntityMutationMode {
-	let folded: EntityMutationMode = "auto";
+): WriteEffect {
+	let folded: WriteEffect = "auto";
 	for (const row of candidates) {
 		const stored = row.principal_kind === "app" ? row.effects[action] : undefined;
 		if (stored !== undefined) folded = moreRestrictive(folded, stored);
@@ -777,8 +770,8 @@ async function attachEffects(
 }
 
 /** Unknown/illegal stored effects deny; absent actions remain sparse overrides. */
-function normalizeStoredEffect(resourceClass: string, action: WriteAction, effect: unknown): EntityMutationMode {
-	return isEntityMutationMode(effect) && isLegalActionEffect(normalizeResourceClass(resourceClass), action, effect)
+function normalizeStoredEffect(resourceClass: string, action: WriteAction, effect: unknown): WriteEffect {
+	return isWriteEffect(effect) && isLegalActionEffect(normalizeResourceClass(resourceClass), action, effect)
 		? effect : "deny";
 }
 
@@ -1026,7 +1019,7 @@ export async function resolveWriteEffect(args: {
 	/** agent_config only: target agent id for read/update/delete. */
 	targetAgentId?: string | null;
 	sql?: DbClient;
-}): Promise<EntityMutationMode> {
+}): Promise<WriteEffect> {
 	if (args.principalKind === "user") return "auto";
 	if (args.ownerResolved === false) return "deny";
 	const candidates = await loadCandidatePolicies({
@@ -1165,10 +1158,10 @@ export async function listEntityApprovalPolicies(
 function actionEffectSetForInput(
 	resourceClass: WriteResourceClass,
 	input: EntityApprovalPolicyInput,
-): Array<{ action: WriteAction; effect: EntityMutationMode }> {
+): Array<{ action: WriteAction; effect: WriteEffect }> {
 	// An effect this class does not declare fails closed. Falling back to the
 	// class default would turn an unrecognised hold into Auto.
-	const clamp = (action: WriteAction, effect: EntityMutationMode) =>
+	const clamp = (action: WriteAction, effect: WriteEffect) =>
 		isLegalActionEffect(resourceClass, action, effect) ? effect : "deny";
 	// Raw effects map wins when provided (the agent Permissions path). Persist ONLY
 	// the actions the caller named — this is a SPARSE override, so an omitted action
@@ -1184,7 +1177,7 @@ function actionEffectSetForInput(
 			)
 			.map((action) => ({
 				action,
-				effect: clamp(action, input.effects?.[action] as EntityMutationMode),
+				effect: clamp(action, input.effects?.[action] as WriteEffect),
 			}));
 	}
 	if (resourceClass === "connector_action" || resourceClass === "entity_schema") {
@@ -1210,7 +1203,7 @@ function actionEffectSetForInput(
 async function writeActionEffects(
 	tx: DbClient,
 	policyId: number,
-	set: Array<{ action: WriteAction; effect: EntityMutationMode }>,
+	set: Array<{ action: WriteAction; effect: WriteEffect }>,
 ): Promise<void> {
 	await tx`DELETE FROM write_policy_action_effects WHERE policy_id = ${policyId}`;
 	for (const { action, effect } of set) {

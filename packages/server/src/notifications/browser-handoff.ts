@@ -1,6 +1,7 @@
 import { compileConnectionRowVisibility } from "../authz/connection-visibility";
 import { getDb, parsePgTextArray } from "../db/client";
 import { emit } from "../events/emitter";
+import { runClearedHold, runsWithoutHold } from "../authz/connector-policy";
 import { resolveRunConnectorPolicy } from "../authz/operation-run-policy";
 import { getOperationForConnection } from "../operations/connector-operations";
 import { validateOperationInput } from "../operations/input-validation";
@@ -125,7 +126,7 @@ export async function recreateBrowserHandoff(
 	if (!policy || policy.effect === "deny") {
 		throw new ToolUserError("Current policy blocks this draft operation.", 409);
 	}
-	if (policy.effect === "approval" && (!isReady(source) || source.approval_status !== "approved")) {
+	if (!runsWithoutHold(policy.effect) && (!isReady(source) || !runClearedHold(policy.effect, source))) {
 		throw new ToolUserError("Current policy requires approval. Request this draft again and approve it before visiting its page.", 409);
 	}
 	if (isReady(source)) {

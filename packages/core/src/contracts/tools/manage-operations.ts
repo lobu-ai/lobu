@@ -245,6 +245,15 @@ export const CancelAction = Type.Object({
   run_id: Type.Integer({ minimum: 1 }),
 });
 
+export const ConfirmAction = Type.Object({
+  action: Type.Literal("confirm", {
+    description:
+      "Release your own operation run held by a workspace check (status pending_check). The statement says, in one sentence, why the action meets the rule; it is recorded with the run. The input cannot change: cancel and execute again to correct it.",
+  }),
+  run_id: Type.Integer({ minimum: 1 }),
+  statement: Type.String({ minLength: 1, maxLength: 280 }),
+});
+
 /**
  * Unified workspace attention feed for Home UI + agent context.
  * Member-readable (same tier as list_runs). Optionally collapses adjacent
@@ -464,6 +473,14 @@ export const ManageOperationsResultSchema = Type.Union([
   Type.Object({
     error: Type.String(),
     policy: Type.Optional(OperationPolicyExplanationSchema),
+    /** Why operations.confirm refused: the run is not held by a check, its window lapsed, or the policy now asks a person. */
+    reason: Type.Optional(
+      Type.Union([
+        Type.Literal("not_pending_check"),
+        Type.Literal("check_expired"),
+        Type.Literal("policy_changed"),
+      ])
+    ),
   }),
   Type.Object({
     action: Type.Literal("list_available"),
@@ -483,6 +500,15 @@ export const ManageOperationsResultSchema = Type.Union([
     status: Type.Literal("pending_approval"),
     message: Type.String(),
     policy: Type.Optional(OperationPolicyExplanationSchema),
+  }),
+  Type.Object({
+    action: Type.Literal("execute"),
+    run_id: Type.Integer(),
+    /** Held by a workspace check: confirm or cancel before expires_at. */
+    status: Type.Literal("pending_check"),
+    expires_at: Type.String(),
+    message: Type.String(),
+    policy: OperationPolicyExplanationSchema,
   }),
   Type.Object({
     action: Type.Literal("execute"),
@@ -659,6 +685,7 @@ export const ManageOperationsSchema = Type.Union([
   ListRunsAction,
   GetRunAction,
   CancelAction,
+  ConfirmAction,
   ListActivityAction,
   ApproveAction,
   RejectAction,
@@ -690,3 +717,7 @@ export type OperationApproveInput = ActionInput<
   "approve"
 >;
 export type OperationRejectInput = ActionInput<ManageOperationsArgs, "reject">;
+export type OperationConfirmInput = ActionInput<
+  ManageOperationsArgs,
+  "confirm"
+>;

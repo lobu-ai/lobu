@@ -27,6 +27,7 @@ import { initWorkspaceProvider } from "../../workspace";
 import { cleanupTestDatabase, getTestDb } from "../setup/test-db";
 import {
 	addUserToOrganization,
+	createTestAgent,
 	createTestUser,
 	createTestConnection,
 	createTestConnectorDefinition,
@@ -332,11 +333,83 @@ describe("operation ledger under Auto policy", () => {
 		expect(await manageOperations({ action: "cancel", run_id: queued.run_id }, {} as Env, memberCtx)).toMatchObject({ status: "cancelled", cancelled: true });
 		// A withdrawn approval must leave every reviewer surface, not stay pending.
 		const [settled] = await getTestDb()`SELECT approval_status FROM runs WHERE id = ${queued.run_id}`;
-		expect(settled.approval_status).toBe("expired");
-		expect((await operationLedger(orgId, queued.run_id)).at(-1)).toMatchObject({ interaction_status: "rejected", metadata: { approval_status: "expired" } });
+		expect(settled.approval_status).toBe("withdrawn");
+		expect((await operationLedger(orgId, queued.run_id)).at(-1)).toMatchObject({ interaction_status: "rejected", metadata: { approval_status: "withdrawn" } });
 		expect(await manageOperations({ action: "reject", run_id: queued.run_id }, {} as Env, ctx)).toHaveProperty("error");
 		const polled = await post("/api/workers/poll", { body: { worker_id: workerId, platform: "macos", app_version: "0.1.0", label: workerId, capabilities: {} } });
 		expect(await polled.json()).not.toHaveProperty("run_id", queued.run_id);
+	});
+
+	it("a Check holds an agent's write until that agent confirms it, then records the statement", async () => {
+		const agent = await createTestAgent({ organizationId: orgId, ownerUserId: userId });
+		const agentCtx: ToolContext = { ...ctx, agentId: agent.agentId };
+		const sql = getTestDb();
+		const checkConn = await createTestConnection({ organization_id: orgId, connector_key: CONNECTOR, created_by: userId, visibility: "private" });
+		await sql`UPDATE connections SET auth_profile_id = (SELECT auth_profile_id FROM connections WHERE id = ${connectionId}) WHERE id = ${checkConn.id}`;
+		await upsertEntityApprovalPolicy(orgId, { resourceClass: "connector_action", connectionId: checkConn.id, effects: { execute: "auto" } });
+		await upsertEntityApprovalPolicy(orgId, {
+			resourceClass: "connector_action", connectionId: checkConn.id, kind: "guardrail",
+			principalKind: "agent", principalId: agent.agentId, note: "Only echo values the user asked for", effects: { execute: "check" },
+		});
+		const execute = (value: string) => manageOperations({ action: "execute", connection_id: checkConn.id, operation_key: "echo", input: { value } }, {} as Env, agentCtx) as Promise<Record<string, unknown> & { run_id: number }>;
+		const confirm = (runId: number, as: ToolContext = agentCtx) => manageOperations({ action: "confirm", run_id: runId, statement: "The user asked for this value." }, {} as Env, as) as Promise<Record<string, unknown>>;
+
+		// The person running the same write is outside the agent's guardrail.
+		expect(await manageOperations({ action: "execute", connection_id: checkConn.id, operation_key: "echo", input: { value: "person" } }, {} as Env, ctx)).toMatchObject({ status: "completed" });
+
+		const held = await execute("checked");
+		expect(held).toMatchObject({ status: "pending_check", policy: { reason: "guardrail", rules: [{ note: "Only echo values the user asked for" }] } });
+		expect(await operationLedger(orgId, held.run_id)).toEqual([]);
+		// Neither the person nor another agent can confirm the agent's own judgment.
+		expect(await confirm(held.run_id, ctx)).toHaveProperty("error");
+		expect(await confirm(held.run_id, { ...ctx, agentId: "synthetic-other-agent" })).toHaveProperty("error");
+		// A human approval is not a path around the check either.
+		expect(await manageOperations({ action: "approve", run_id: held.run_id }, {} as Env, ctx)).toHaveProperty("error");
+
+		expect(await confirm(held.run_id)).toMatchObject({ run_id: held.run_id, status: "completed" });
+		const [run] = await sql`SELECT approval_status, run_metadata FROM runs WHERE id = ${held.run_id}`;
+		expect(run.approval_status).toBe("auto");
+		expect(run.run_metadata.policy_check).toMatchObject({ statement: "The user asked for this value." });
+		const ledger = await operationLedger(orgId, held.run_id);
+		expect(ledger.map((row) => row.interaction_status)).toEqual(["approved", "completed"]);
+		expect(ledger[0].metadata.policy).toMatchObject({ check: { statement: "The user asked for this value." } });
+		expect(await confirm(held.run_id)).toMatchObject({ reason: "not_pending_check" });
+
+		// Cancel withdraws a held check without leaving a card behind.
+		const withdrawn = await execute("withdraw");
+		expect(await manageOperations({ action: "cancel", run_id: withdrawn.run_id }, {} as Env, agentCtx)).toMatchObject({ cancelled: true });
+		expect((await sql`SELECT approval_status FROM runs WHERE id = ${withdrawn.run_id}`)[0].approval_status).toBe("withdrawn");
+		expect(await operationLedger(orgId, withdrawn.run_id)).toEqual([]);
+
+		// An unconfirmed check expires and the reaper times it out without a card.
+		const expired = await execute("expire");
+		await sql`UPDATE runs SET expires_at = NOW() - interval '1 second' WHERE id = ${expired.run_id}`;
+		expect(await confirm(expired.run_id)).toMatchObject({ reason: "check_expired" });
+		await reapStaleRuns();
+		expect((await sql`SELECT status, error_message FROM runs WHERE id = ${expired.run_id}`)[0]).toMatchObject({ status: "timeout", error_message: "policy_check_not_confirmed" });
+		expect(await operationLedger(orgId, expired.run_id)).toEqual([]);
+
+		// A rule tightened while the run was held wins at confirm.
+		const tightened = await execute("tighten");
+		await upsertEntityApprovalPolicy(orgId, { resourceClass: "connector_action", connectionId: checkConn.id, kind: "guardrail", effects: { execute: "approval" } });
+		expect(await confirm(tightened.run_id)).toMatchObject({ reason: "policy_changed" });
+		expect((await sql`SELECT approval_status, status FROM runs WHERE id = ${tightened.run_id}`)[0]).toMatchObject({ approval_status: "withdrawn", status: "cancelled" });
+	});
+
+	it("a background device Check is not claimable until the agent confirms it", async () => {
+		const { deviceConn, workerId } = await backgroundDevice();
+		const agent = await createTestAgent({ organizationId: orgId, ownerUserId: userId });
+		const agentCtx: ToolContext = { ...ctx, agentId: agent.agentId };
+		await upsertEntityApprovalPolicy(orgId, {
+			resourceClass: "connector_action", connectionId: deviceConn.id, kind: "guardrail",
+			principalKind: "agent", principalId: agent.agentId, effects: { execute: "check" },
+		});
+		const held = await manageOperations({ action: "execute", connection_id: deviceConn.id, operation_key: "echo", input: { value: "device-check" }, background: true }, {} as Env, agentCtx) as { status: string; run_id: number };
+		expect(held.status).toBe("pending_check");
+		const poll = () => post("/api/workers/poll", { body: { worker_id: workerId, platform: "macos", app_version: "0.1.0", label: workerId, capabilities: {} } });
+		expect(await (await poll()).json()).not.toHaveProperty("run_id", held.run_id);
+		expect(await manageOperations({ action: "confirm", run_id: held.run_id, statement: "Requested by the user." }, {} as Env, agentCtx)).toMatchObject({ run_id: held.run_id, status: "in_progress" });
+		expect(await (await poll()).json()).toMatchObject({ run_id: held.run_id });
 	});
 
 	it("refuses background mode for inline operations before creating a run", async () => {
