@@ -915,7 +915,9 @@ function normalizedValueSql(
 ): string {
   const trimmed = `btrim(${value}, ${trimCharacters})`;
   if (normalizer === 'phone') return `translate(${trimmed}, '+() .-', '')`;
-  if (normalizer === 'email') return `lower(${trimmed})`;
+  // toLowerCase() maps the Kelvin sign to an ASCII k; every other character it
+  // lowers to ASCII is A-Z, and a non-ASCII result fails the email check.
+  if (normalizer === 'email') return `lower(translate(${trimmed}, '\u212a', 'k'))`;
   return trimmed;
 }
 
@@ -923,7 +925,7 @@ function normalizedValueSql(
  * normalizeScalar reads a JSON number the way JavaScript does: as the nearest
  * double, printed by String(). jsonb keeps the written scale (`1042.0`), so
  * the candidate read compares that same double instead: float8 parses the
- * numeric to it and prints the same shortest digits in plain notation.
+ * numeric to it.
  */
 function normalizedNumberMatchSql(
   normalizer: EntityResolutionRule['normalizer'],
@@ -933,8 +935,13 @@ function normalizedNumberMatchSql(
 ): string {
   const double = `(${value} #>> '{}')::float8`;
   if (normalizer === 'exact') return `${double} = ANY(${numericKeys})`;
-  // A phone's 15-digit limit keeps it below 1e15, where float8 prints plainly.
-  if (normalizer === 'phone') return `translate(${double}::text, '-.', '') = ANY(${keys})`;
+  // Both print the same shortest significant digits; float8 may write them as
+  // a mantissa and exponent where String() pads with zeroes, so compare the
+  // digits without the exponent or leading zeroes. sameRecordGroups verifies.
+  if (normalizer === 'phone') {
+    return `ltrim(translate(split_part(${double}::text, 'e', 1), '-.', ''), '0')
+      = ANY(SELECT ltrim(key, '0') FROM unnest(${keys}) AS key)`;
+  }
   // No number passes the email check.
   return 'false';
 }
