@@ -1,6 +1,7 @@
 import type { ReactionClient, ReactionContext } from "@lobu/connector-sdk";
 import {
   HEALTH_PREFIX,
+  type HealthResource,
   type HealthScope,
   planHealthChanges,
   readHealthSnapshot,
@@ -484,6 +485,14 @@ function toIssue(row: Record<string, unknown>): IssueRecord | null {
   };
 }
 
+/** Stable, short key for notification dedupe; the sandbox has no crypto module. */
+function stableHash(text: string): string {
+  let hash = 5381;
+  for (let i = 0; i < text.length; i++)
+    hash = ((hash << 5) + hash + text.charCodeAt(i)) >>> 0;
+  return hash.toString(36);
+}
+
 export async function runIssueTracker(
   ctx: Pick<ReactionContext, "window">,
   client: ReactionClient,
@@ -516,15 +525,25 @@ export async function runIssueTracker(
   )) as Array<{ n: number }>;
 
   // Finish all reads before writing: source/ownership failures cannot close issues.
-  const health = healthScope
-    ? await readHealthSnapshot(client, healthScope)
-    : [];
+  // The health sweep is supplementary. A failed or partial snapshot contributes
+  // zero health findings — it must never abort occurrence ingestion, and missing
+  // rows must never auto-resolve a health issue. Surface it once per day instead.
+  let health: HealthResource[] = [];
+  let healthError: string | null = null;
+  if (healthScope) {
+    try {
+      health = await readHealthSnapshot(client, healthScope);
+    } catch (error) {
+      healthError = error instanceof Error ? error.message : String(error);
+    }
+  }
   const changes = [
     ...planIssueChanges(occurrences, issues, now, createdLastHour),
     ...planHealthChanges(health, issues, now),
   ];
   const summary = {
     dry_run: dryRun,
+    health_error: healthError,
     fingerprints: occurrences.length,
     health_resources: health.filter((r) => r.kind !== "scope").length,
     health_workspaces: health
@@ -537,6 +556,24 @@ export async function runIssueTracker(
     alerts: changes.filter((c) => c.action !== "defer" && c.alert).length,
   };
   if (dryRun) return { ...summary, changes: changes.slice(0, 50) };
+
+  if (healthError) {
+    try {
+      await client.notifications.send({
+        title: "Issue tracker health sweep failed",
+        body: `Occurrence ingestion continued. ${healthError}`.slice(0, 1500),
+        recipients: "admins",
+        // One notice per distinct failure per day, not one per 15-minute run.
+        idempotency_key: `issue-tracker-health:${ctx.window.automation_id}:${stableHash(healthError)}:${now.toISOString().slice(0, 10)}`,
+        automation_source: {
+          automation_id: ctx.window.automation_id,
+          run_id: ctx.window.run_id,
+        },
+      });
+    } catch {
+      // Delivery is best effort; the run summary still carries health_error.
+    }
+  }
 
   const source = {
     automation_id: ctx.window.automation_id,

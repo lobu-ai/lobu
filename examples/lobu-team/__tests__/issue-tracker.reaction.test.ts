@@ -14,6 +14,7 @@ import {
 import {
   healthProblem,
   planHealthChanges,
+  readHealthSnapshot,
   type HealthResource,
 } from "../workspace-health";
 
@@ -460,6 +461,69 @@ describe("runIssueTracker", () => {
     expect(lookup).toContain(`'${trace}'`);
     expect(lookup).not.toContain("not-a-trace-id");
   });
+
+  test("a failed health sweep never blocks occurrence ingestion", async () => {
+    const client = {
+      query: async (text: string) => {
+        if (text.includes("issue_occurrences_hourly"))
+          return [
+            {
+              fingerprint: FP(1),
+              kind: "system",
+              issue_title: "Error: boom",
+              issue_culprit: "GET /x",
+              seen_2h: 1,
+              seen_24h: RULES.systemMinSeen24h,
+              seen_14d: RULES.systemMinSeen24h,
+              max_orgs: 1,
+              max_users: 1,
+              releases_2h: ["rel-b"],
+              last_release: "rel-b",
+              sample_trace_id: "",
+              first_seen_at: ago(3),
+              last_seen_at: ago(0.1),
+            },
+          ];
+        if (text.includes("health_snapshot"))
+          throw new Error("health source unavailable");
+        if (text.includes("count(*)")) return [{ n: 0 }];
+        return [];
+      },
+    };
+    const result = (await runIssueTracker(
+      { window: { automation_id: 1, run_id: 1 } } as never,
+      client as never,
+      true,
+      {
+        ownerUserId: "synthetic-owner",
+        connection: "synthetic",
+        workspaces: ["kept"],
+      }
+    )) as {
+      created: number;
+      health_error: string | null;
+      changes: Array<{ action: string; fingerprint: string }>;
+    };
+    expect(result.health_error).toContain("health source unavailable");
+    expect(result.created).toBe(1);
+    expect(result.changes[0]).toMatchObject({
+      action: "create",
+      fingerprint: FP(1),
+    });
+  });
+});
+
+test("a missing scope workspace is named in the snapshot error", async () => {
+  const client = {
+    query: async () => [{ workspace: "kept", kind: "scope" }],
+  };
+  await expect(
+    readHealthSnapshot(client as never, {
+      ownerUserId: "synthetic-owner",
+      connection: "synthetic",
+      workspaces: ["kept", "removed"],
+    })
+  ).rejects.toThrow("Health scope workspaces are no longer owned: removed");
 });
 
 describe("workspace health conditions", () => {
