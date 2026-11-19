@@ -306,9 +306,17 @@ it("files silent overdue work in owned scope and requires successful recovery", 
       }
     );
   }
-  // Losing ownership must fail closed, never resolve the now-invisible outage.
+  // Losing ownership must fail closed: the now-invisible outage must stay
+  // open, but the health failure must not abort occurrence ingestion.
   await sql`UPDATE member SET role = 'member' WHERE "organizationId" = ${org.id} AND "userId" = ${user.id}`;
-  await expect(run()).rejects.toThrow(/ownership|scope/i);
+  const demoted = (await run()) as { health_error: string | null };
+  expect(demoted.health_error).toMatch(/ownership|scope/i);
+  items = (await issues()).entities;
+  expect(items).toHaveLength(3);
+  const stranded = items.find((i) =>
+    String(i.metadata?.culprit).endsWith(`:connection:${connection.id}`)
+  )!;
+  expect(stranded.metadata?.status).toBe("new");
 });
 
 it("keeps foreign work out and exposes the issue repair queue to external claims", async () => {
