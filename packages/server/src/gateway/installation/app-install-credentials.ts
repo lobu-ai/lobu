@@ -138,8 +138,14 @@ export interface BundledIntegrationConnector {
 	kind: "data" | "integration";
 	/** The app-installation auth method, when the connector declares one (github/slack). */
 	method: ConnectorAuthAppInstallation | null;
-	/** The declared webhook schema (signing scheme + routing + deliveryKind). */
-	webhookSchema: ConnectorWebhookSchema;
+	/**
+	 * The declared webhook schema (signing scheme + routing + deliveryKind), or
+	 * null for a connector discovered only through a hosted install method
+	 * (`installShape`) that declares no app-level webhook.
+	 */
+	webhookSchema: ConnectorWebhookSchema | null;
+	/** What a completed install delivers: the webhook's `deliveryKind`, default `'data'`. */
+	deliveryKind: "data" | "chat";
 	/**
 	 * Resolved Lobu App id (`provider_app_id`), read from the connector's declared
 	 * env-var name: the app-installation method's `appIdKey` (github), else its /
@@ -151,9 +157,16 @@ export interface BundledIntegrationConnector {
 	webhookSecretKey?: string;
 }
 
+function declaresHostedInstall(authSchema: unknown): boolean {
+	return getAppInstallationAuthMethods(
+		normalizeConnectorAuthSchema(authSchema),
+	).some((m) => !!m.installShape);
+}
+
 /**
  * Discover every bundled connector whose webhook declares
- * `delivery: 'app_installation'` and prime it, returning one
+ * `delivery: 'app_installation'`, or whose app-installation method declares a
+ * hosted `installShape`, and prime it, returning one
  * {@link BundledIntegrationConnector} per declaration. This is the single source
  * the gateway iterates to register app-webhook providers — no hardcoded
  * github/slack/jira/linear list, no provider-name branch. `provider` comes from
@@ -174,7 +187,7 @@ export async function primeBundledIntegrationConnectors(): Promise<
 	const declared = defs.filter(
 		(d) =>
 			(d.webhook as ConnectorWebhookSchema | null)?.delivery ===
-			"app_installation",
+				"app_installation" || declaresHostedInstall(d.auth_schema),
 	);
 	const candidates = declared.length > 0 ? declared : defs;
 	const result: BundledIntegrationConnector[] = [];
@@ -186,13 +199,15 @@ export async function primeBundledIntegrationConnectors(): Promise<
 		try {
 			const code = await compileConnectorForIsolateFromFile(file);
 			const metadata = await extractConnectorMetadata(code);
-			webhookSchema =
+			const declaredWebhook =
 				(metadata.webhook as ConnectorWebhookSchema | null) ?? null;
-			if (!webhookSchema || webhookSchema.delivery !== "app_installation") {
-				continue;
-			}
+			webhookSchema =
+				declaredWebhook?.delivery === "app_installation"
+					? declaredWebhook
+					: null;
 			const authSchema = normalizeConnectorAuthSchema(metadata.authSchema);
 			method = pickMethod(metadata.authSchema);
+			if (!webhookSchema && !method?.installShape) continue;
 			const oauth = getOAuthAuthMethods(authSchema)[0];
 			const provider = method?.provider ?? def.key;
 			// The Lobu App id (`provider_app_id`) is the GitHub App id when the
@@ -204,7 +219,7 @@ export async function primeBundledIntegrationConnectors(): Promise<
 				method?.appIdKey ??
 				method?.clientIdKey ??
 				oauth?.clientIdKey ??
-				webhookSchema.verification?.appIdKey;
+				webhookSchema?.verification?.appIdKey;
 			const appId = appIdKey ? process.env[appIdKey] : undefined;
 			const webhookSecretKey = method?.webhookSecretKey;
 			// Cache the resolved method for synchronous wiring accessors.
@@ -217,6 +232,7 @@ export async function primeBundledIntegrationConnectors(): Promise<
 				kind,
 				method,
 				webhookSchema,
+				deliveryKind: webhookSchema?.deliveryKind ?? "data",
 				...(appId ? { appId } : {}),
 				...(webhookSecretKey ? { webhookSecretKey } : {}),
 			});
@@ -234,6 +250,25 @@ export function clearBundledMethodCache(): void {
 }
 
 // ---- pure credential resolution -------------------------------------------
+
+/** Longest tenant value accepted before the declared pattern is evaluated. */
+const MAX_TENANT_LENGTH = 255;
+
+/**
+ * Compile a connector-declared `tenant.pattern` ONCE into a full-match
+ * predicate. The pattern is anchored as a whole (`^(?:pattern)$`), so a
+ * suffixed or prefixed value (`shop.myshopify.com.evil.test`) never matches.
+ */
+export function compileTenantMatcher(pattern: string): (value: string) => boolean {
+	const matcher = new RegExp(`^(?:${pattern})$`);
+	return (value) =>
+		value.length > 0 && value.length <= MAX_TENANT_LENGTH && matcher.test(value);
+}
+
+/** Substitute a validated tenant into a declared `{{tenant}}` URL template. */
+export function renderTenantUrl(template: string, tenant: string): string {
+	return template.split("{{tenant}}").join(tenant);
+}
 
 export interface ResolvedAppInstallCredentials {
 	appId?: string;

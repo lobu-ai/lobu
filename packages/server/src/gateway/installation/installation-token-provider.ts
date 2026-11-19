@@ -170,9 +170,19 @@ export class InMemoryInstallationTokenCache {
  */
 export class InstallationTokenRegistry {
   private readonly providers = new Map<string, InstallationTokenProvider>();
+  private fallback: InstallationTokenProvider | null = null;
 
   register(provider: InstallationTokenProvider): void {
     this.providers.set(provider.provider, provider);
+  }
+
+  /**
+   * The provider used when no provider-keyed strategy is registered: the
+   * generic declared-method renewal, which itself refuses installs whose
+   * connector declares no renewable method (`provider_unsupported`).
+   */
+  registerFallback(provider: InstallationTokenProvider): void {
+    this.fallback = provider;
   }
 
   get(provider: string): InstallationTokenProvider | undefined {
@@ -195,7 +205,7 @@ export class InstallationTokenRegistry {
         `App installation ${install.id} is '${install.status}', not 'active' — no token can be minted`
       );
     }
-    const provider = this.providers.get(install.provider);
+    const provider = this.providers.get(install.provider) ?? this.fallback;
     if (!provider) {
       throw new InstallationTokenError(
         "provider_unsupported",

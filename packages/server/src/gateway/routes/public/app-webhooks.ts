@@ -24,9 +24,12 @@
  * GitHub/Jira/Linear; `v0:{timestamp}:{body}` + freshness for Slack),
  * {@link verifyGoogleJwtWebhook} checks a declared provider-signed bearer
  * token (Google Chat), and {@link extractTenantFromSchema} reads the tenant
- * from the declared `routingKeyPath(s)` (+ optional `url-host` transform for
- * Jira). There is NO per-provider verify or extractor and NO provider-name
- * branch — one engine, one builder ({@link createDeclaredAppWebhookProvider}).
+ * from the declared `routingKeyHeader`, else `routingKeyPath(s)` (+ optional
+ * `url-host` transform for Jira). A verified delivery whose event type is a
+ * declared `uninstallEvents` entry revokes the routed install instead of
+ * dispatching. There is NO per-provider verify or extractor and NO
+ * provider-name branch — one engine, one builder
+ * ({@link createDeclaredAppWebhookProvider}).
  *
  * Delivery before the install callback: a provider may deliver before the
  * OAuth/install callback has written the `app_installations` row. That is NOT
@@ -52,6 +55,7 @@ import {
 	type ConnectorRecordJob,
 	deliverConnectorWebhook,
 	deliveryScalar,
+	readDeliveryEventType,
 	readDeliveryPath,
 } from "../../../connectors/webhook-delivery.js";
 import {
@@ -103,6 +107,12 @@ export interface AppWebhookProvider {
 	 * installation), in which case the router acks 200 without dispatching.
 	 */
 	extractTenant(rawBody: Uint8Array, headers: Headers): AppWebhookTenant | null;
+	/**
+	 * Optional: whether a verified delivery means the tenant removed the App
+	 * (its event type is a declared `uninstallEvents` entry). The router then
+	 * revokes the routed install instead of dispatching to feeds.
+	 */
+	isUninstall?(rawBody: Uint8Array, headers: Headers): boolean;
 	/**
 	 * Optional: the declared feed dispatch (see
 	 * {@link createDataWebhookDelivery}). `triggered` reports whether a feed was
@@ -164,8 +174,10 @@ function parseJson(rawBody: Uint8Array): unknown {
  * THE generic webhook verifier. Computes HMAC over the schema's rendered signing
  * base (`{body}` and `{timestamp}` substituted) with the declared
  * algorithm/prefix, compares constant-time against `signatureHeader`, and
- * optionally rejects stale timestamps. Pure over (rawBody, headers, secret) — no
- * I/O — so it is trivially multi-replica safe. Returns false on any miss.
+ * optionally rejects stale timestamps. The digest is hex unless the schema
+ * declares `signatureEncoding: 'base64'`. Pure over (rawBody, headers,
+ * secret) — no I/O — so it is trivially multi-replica safe. Returns false on any
+ * miss.
  *
  * Coverage by declaration alone (no provider branch):
  *  - GitHub/Jira/Linear: default base `{body}` → plain raw-body HMAC.
@@ -215,8 +227,10 @@ export function verifyDeclaredWebhook(
 	});
 	const base = Buffer.concat(parts);
 
-	const expectedHex = createHmac(algorithm, secret).update(base).digest("hex");
-	const expected = (prefix ?? "") + expectedHex;
+	const digest = createHmac(algorithm, secret)
+		.update(base)
+		.digest(schema.signatureEncoding ?? "hex");
+	const expected = (prefix ?? "") + digest;
 	const providedBuf = Buffer.from(provided, "utf8");
 	const expectedBuf = Buffer.from(expected, "utf8");
 	if (providedBuf.length !== expectedBuf.length) return false;
@@ -340,18 +354,27 @@ async function verifyGoogleJwtWebhook(
 }
 
 /**
- * THE generic tenant extractor. Reads the external tenant id from the body via
- * the schema's ordered `routingKeyPaths` (or single `routingKeyPath`), first
- * non-empty match wins, then applies the declared `routingKeyTransform`
- * (`url-host` → the value's URL host, for Jira's `self` URLs). Returns null when
- * no path resolves (e.g. an app-level ping) → the router acks without dispatching.
+ * THE generic tenant extractor. Reads the external tenant id from the declared
+ * `routingKeyHeader` when the delivery carries it, else from the body via the
+ * schema's ordered `routingKeyPaths` (or single `routingKeyPath`), first
+ * non-empty match wins, then applies the declared `routingKeyTransform` to the
+ * body value (`url-host` → the value's URL host, for Jira's `self` URLs).
+ * Returns null when nothing resolves (e.g. an app-level ping) → the router acks
+ * without dispatching.
  */
 export function extractTenantFromSchema(
 	rawBody: Uint8Array,
+	headers: Headers,
 	schema: ConnectorWebhookSchema,
 	providerAppId: string,
 	providerInstance = "cloud",
 ): AppWebhookTenant | null {
+	if (schema.routingKeyHeader) {
+		const externalTenantId = deliveryScalar(headers.get(schema.routingKeyHeader));
+		if (externalTenantId) {
+			return { providerInstance, providerAppId, externalTenantId };
+		}
+	}
 	const paths =
 		schema.routingKeyPaths ??
 		(schema.routingKeyPath ? [schema.routingKeyPath] : []);
@@ -407,6 +430,9 @@ export function createDeclaredAppWebhookProvider(options: {
 }): AppWebhookProvider {
 	const { provider, appId, webhookSchema, providerInstance } = options;
 	const verification = webhookSchema.verification;
+	const uninstallEvents = webhookSchema.uninstallEvents ?? [];
+	const uninstallEventType =
+		uninstallEvents.length > 0 ? webhookSchema.eventType : undefined;
 	if (!webhookSchema.signatureHeader && !verification) {
 		throw new Error(
 			`App-webhook provider "${provider}" requires a webhook signatureHeader ` +
@@ -428,14 +454,27 @@ export function createDeclaredAppWebhookProvider(options: {
 					verify: (rawBody: Uint8Array, headers: Headers, appWebhookSecret: string) =>
 						verifyDeclaredWebhook(rawBody, headers, appWebhookSecret, webhookSchema),
 				}),
-		extractTenant(rawBody) {
+		extractTenant(rawBody, headers) {
 			return extractTenantFromSchema(
 				rawBody,
+				headers,
 				webhookSchema,
 				appId,
 				providerInstance,
 			);
 		},
+		...(uninstallEventType
+			? {
+					isUninstall: (rawBody: Uint8Array, headers: Headers) => {
+						const eventType = readDeliveryEventType(
+							uninstallEventType,
+							headers,
+							parseJson(rawBody),
+						);
+						return eventType !== null && uninstallEvents.includes(eventType);
+					},
+				}
+			: {}),
 		...(options.onDelivery ? { onDelivery: options.onDelivery } : {}),
 		...(options.handleDelivery ? { handleDelivery: options.handleDelivery } : {}),
 	};
@@ -658,7 +697,28 @@ export function createAppWebhookRoutes(deps: AppWebhookRouterDeps): Hono {
 			return json(200, { ok: true, landed: false });
 		}
 
-		// 4. Dispatch to the feeds that declare the delivery's event (marked due
+		// 4. The tenant removed the App: revoke the install (no new token can be
+		//    minted, so its feeds stop; connections, feeds and events are kept)
+		//    and ack without dispatching. A redelivery re-resolves no active
+		//    install and is acked by step 3.
+		if (provider.isUninstall?.(rawBody, c.req.raw.headers)) {
+			try {
+				await deps.installationStore.revoke(install.id);
+			} catch (error) {
+				routeLogger.error(
+					{ provider: providerName, installationId: install.id, error: String(error) },
+					"[app-webhook] uninstall revoke failed",
+				);
+				throw routeFailure(json(500, { error: "Failed to handle delivery" }), error);
+			}
+			routeLogger.info(
+				{ provider: providerName, installationId: install.id },
+				"[app-webhook] uninstall delivery — installation revoked",
+			);
+			return json(200, { ok: true, revoked: true });
+		}
+
+		// 5. Dispatch to the feeds that declare the delivery's event (marked due
 		//    or recorded; the poll stays the canonical record and resolves
 		//    identity). A connector with no data hook, or a delivery no feed
 		//    declares, is acked with nothing triggered — nothing is stored raw.

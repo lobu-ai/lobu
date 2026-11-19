@@ -62,7 +62,8 @@ export async function publicSetupOptions(
   // allowlist here only duplicated those two facts, and drifted from them.
   const method = getPrimedBundledMethod(connectorKey, connectorKey);
   const creds = method ? resolveAppInstallCredentials(method) : null;
-  if (method?.installShape === 'oauth-code-exchange' && creds?.clientId && creds.clientSecret) {
+  // A tenant-scoped install (`method.tenant`) is a data connector, not chat.
+  if (method?.installShape === 'oauth-code-exchange' && !method.tenant && creds?.clientId && creds.clientSecret) {
     options.push({
       kind: 'hosted_chat',
       label: 'Use the hosted Lobu app',

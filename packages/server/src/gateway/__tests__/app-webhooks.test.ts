@@ -1124,7 +1124,7 @@ describe("extractTenantFromSchema (the single generic tenant extractor)", () => 
 			JSON.stringify({ installation: { id: 42 } }),
 		);
 		expect(
-			extractTenantFromSchema(raw, GITHUB_WEBHOOK_SCHEMA, "app-1"),
+			extractTenantFromSchema(raw, new Headers(), GITHUB_WEBHOOK_SCHEMA, "app-1"),
 		).toEqual({
 			providerInstance: "cloud",
 			providerAppId: "app-1",
@@ -1140,7 +1140,7 @@ describe("extractTenantFromSchema (the single generic tenant extractor)", () => 
 		const raw = new TextEncoder().encode(
 			JSON.stringify({ event: { team_id: "TEV" } }),
 		);
-		expect(extractTenantFromSchema(raw, schema, "app")?.externalTenantId).toBe(
+		expect(extractTenantFromSchema(raw, new Headers(), schema, "app")?.externalTenantId).toBe(
 			"TEV",
 		);
 	});
@@ -1150,13 +1150,13 @@ describe("extractTenantFromSchema (the single generic tenant extractor)", () => 
 			JSON.stringify({ issue: { self: "https://acme.atlassian.net/rest/x" } }),
 		);
 		expect(
-			extractTenantFromSchema(raw, JIRA_WEBHOOK_SCHEMA, "app")?.externalTenantId,
+			extractTenantFromSchema(raw, new Headers(), JIRA_WEBHOOK_SCHEMA, "app")?.externalTenantId,
 		).toBe("acme.atlassian.net");
 	});
 
 	test("no resolvable path → null (acked without landing)", () => {
 		const raw = new TextEncoder().encode(JSON.stringify({ zen: "x" }));
-		expect(extractTenantFromSchema(raw, GITHUB_WEBHOOK_SCHEMA, "app")).toBeNull();
+		expect(extractTenantFromSchema(raw, new Headers(), GITHUB_WEBHOOK_SCHEMA, "app")).toBeNull();
 	});
 });
 

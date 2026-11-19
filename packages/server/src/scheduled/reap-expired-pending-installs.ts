@@ -1,5 +1,5 @@
 /**
- * Expired unclaimed-Slack-install reaper.
+ * Expired unclaimed-install reaper (Slack installs + tenant data installs).
  *
  * A Slack-initiated install (marketplace / raw "Add to Slack") lands at the
  * OAuth callback with a bot token but no Lobu org, so it's parked as an org-less
@@ -20,6 +20,14 @@
  * authoritative claim: revocation runs only over the rows THIS caller actually
  * removed (RETURNING), so two overlapping runners never both revoke the same
  * token, and the token never outlives its row.
+ *
+ * Tenant data installs (an `oauth-code-exchange` method with a declared
+ * `tenant`, e.g. a merchant store) park their grant the same way: an org-less
+ * `pending` row whose metadata carries the encrypted grant as `tokens_enc`
+ * until the installer picks an org. An abandoned one is deleted after the same
+ * TTL, keyed on that structure rather than a provider name, with no remote
+ * revoke (a grant nobody claimed was never handed to a worker). A claimed setup
+ * row has `tokens_enc` dropped, so it never matches.
  */
 
 import { decrypt } from '@lobu/core';
@@ -85,10 +93,43 @@ export async function reapExpiredPendingSlackInstalls(
   return { expired: deleted.length };
 }
 
-/** Scheduled-task wrapper: run the reaper and log a summary. */
-export async function runReapExpiredPendingSlackInstalls(): Promise<void> {
-  const result = await reapExpiredPendingSlackInstalls();
-  if (result.expired > 0) {
-    logger.info({ ...result }, '[task] reap-expired-pending-installs completed');
+/**
+ * Delete org-less `pending` tenant data installs past the TTL that still park
+ * an unclaimed grant (`metadata.tokens_enc`). One bounded statement; the outer
+ * DELETE re-asserts every predicate so a row claimed between the scan and the
+ * delete (org bound, or `tokens_enc` dropped) is left alone.
+ */
+export async function reapExpiredPendingTenantInstalls(
+  ttlDays = 7,
+): Promise<{ expired: number }> {
+  const sql = getDb();
+  const deleted = (await sql`
+    DELETE FROM app_installations
+    WHERE id IN (
+      SELECT id FROM app_installations
+      WHERE organization_id IS NULL
+        AND status = 'pending'
+        AND jsonb_typeof(metadata->'tokens_enc') = 'string'
+        AND created_at < now() - (${ttlDays}::int * interval '1 day')
+      ORDER BY created_at ASC
+      LIMIT 500
+    )
+      AND organization_id IS NULL
+      AND status = 'pending'
+      AND jsonb_typeof(metadata->'tokens_enc') = 'string'
+    RETURNING id
+  `) as unknown as Array<{ id: string }>;
+  return { expired: deleted.length };
+}
+
+/** Scheduled-task wrapper: run both reapers and log a summary. */
+export async function runReapExpiredPendingInstalls(): Promise<void> {
+  const slack = await reapExpiredPendingSlackInstalls();
+  const tenant = await reapExpiredPendingTenantInstalls();
+  if (slack.expired > 0 || tenant.expired > 0) {
+    logger.info(
+      { slackExpired: slack.expired, tenantExpired: tenant.expired },
+      '[task] reap-expired-pending-installs completed',
+    );
   }
 }

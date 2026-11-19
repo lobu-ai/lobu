@@ -66,7 +66,7 @@ import { triggerEmbedBackfill } from './trigger-embed-backfill';
 import { logInstallTelemetryNotice, sendInstallPing } from '../telemetry/install-ping';
 import { runMemberClaimDriftCheck } from './member-claim-drift';
 import { runReapStaleDeviceWorkers } from './reap-stale-device-workers';
-import { runReapExpiredPendingSlackInstalls } from './reap-expired-pending-installs';
+import { runReapExpiredPendingInstalls } from './reap-expired-pending-installs';
 import { runExpirePendingApprovals } from './expire-pending-approvals';
 import { getDb, pgTextArray } from '../db/client';
 import {
@@ -449,17 +449,17 @@ function registerMaintenanceTasks(
     { cron: '0 3 * * *' },
   );
 
-  // Expired unclaimed-Slack-install reaper — deletes org-less `pending`
-  // app_installations rows older than 7 days (a marketplace / "Add to Slack"
-  // install the installer never claimed) after best-effort revoking the bot
-  // token, so an abandoned workspace doesn't leave a live credential lying
-  // around. Tightly scoped to pending slack rows; never touches active/claimed
-  // installs. Single-claimant per tick; pure Postgres (multi-replica safe).
+  // Expired unclaimed-install reaper — deletes org-less `pending`
+  // app_installations rows older than 7 days: a marketplace / "Add to Slack"
+  // install the installer never claimed (after best-effort revoking the bot
+  // token), and a tenant data install whose parked grant (`tokens_enc`) was
+  // never claimed, so an abandoned install doesn't leave a live credential
+  // lying around. Never touches active/claimed installs. Single-claimant per tick; pure Postgres (multi-replica safe).
   // Daily, off-peak, distinct minute from the device-worker reaper.
   scheduler.register(
     'reap-expired-pending-installs',
     async () => {
-      await runReapExpiredPendingSlackInstalls();
+      await runReapExpiredPendingInstalls();
     },
     { cron: '17 3 * * *' },
   );

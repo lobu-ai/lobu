@@ -56,6 +56,9 @@ const CONNECTOR_BUILTIN_IMPORTS: Record<string, string[]> = {
 	// Reaches its database over the isolate's Direct Sockets bridge, so it needs
 	// no transport builtin; what is left is all prelude-provided.
 	postgres: ["buffer", "events", "stream"],
+	// Short sha256 fingerprints for the products feed checkpoint (`createHash`
+	// comes from the prelude).
+	shopify: ["crypto"],
 };
 
 /**

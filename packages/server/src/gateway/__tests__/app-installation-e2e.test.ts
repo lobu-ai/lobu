@@ -29,15 +29,29 @@
 
 import { createHmac } from "node:crypto";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import type { ConnectorWebhookSchema } from "@lobu/connector-sdk";
+import type {
+	ConnectorAuthAppInstallation,
+	ConnectorWebhookSchema,
+} from "@lobu/connector-sdk";
 import GitHubConnector from "@lobu/connectors/github";
+import ShopifyConnector from "@lobu/connectors/shopify";
+import { claimPendingConnection } from "../connections/connection-claim.js";
+import {
+	getTenantDataInstall,
+	tenantInstallClaimProvider,
+} from "../connections/tenant-install-claim.js";
+import { primeAppInstallationMethods } from "../installation/app-install-credentials.js";
+import { RefreshTokenInstallationTokenProvider } from "../installation/refresh-token-installation-token-provider.js";
+import { createInstallRoutes } from "../routes/public/app-install.js";
 import { connectorRecordEnqueuer } from "../../connectors/webhook-delivery.js";
 import { RunsQueue } from "../infrastructure/queue/runs-queue.js";
 import {
 	createAppWebhookRoutes,
 	createDataWebhookDelivery,
 	createDeclaredAppWebhookProvider,
+	createDefaultAppWebhookSecretResolver,
 } from "../routes/public/app-webhooks.js";
+import type { SecretStore } from "../../secrets/index.js";
 import { createPostgresAppInstallationStore } from "../../lobu/stores/app-installation-store.js";
 
 /** GitHub's DECLARED webhook schema, read off the real connector definition. */
@@ -64,6 +78,7 @@ import {
 	resetTestDatabase,
 	seedAgentRow,
 	seedGithubConnectorDef,
+	seedOrgMembership,
 } from "./helpers/db-setup.js";
 
 // One Lobu GitHub App receiving deliveries for many installed tenants.
@@ -739,5 +754,658 @@ describe("app-installation e2e: unknown install (delivery before callback)", () 
 		expect(res.status).toBe(200);
 		expect((await res.json()).landed).toBe(false);
 		expect(await allEventCount()).toBe(0);
+	});
+});
+
+// ---- tenant-scoped data install (Shopify app) -------------------------------
+
+const SHOPIFY_METHOD = (
+	new ShopifyConnector().definition.authSchema as {
+		methods: ConnectorAuthAppInstallation[];
+	}
+).methods.find((m) => m.type === "app_installation") as ConnectorAuthAppInstallation;
+const SHOP = "acme-store.myshopify.com";
+const INSTALLER = "user-shop-installer";
+const SHOPIFY_ENV = {
+	SHOPIFY_CLIENT_ID: "shopify-e2e-client",
+	SHOPIFY_CLIENT_SECRET: "shopify-e2e-secret",
+};
+
+interface TokenCall {
+	url: string;
+	form: Record<string, string>;
+}
+
+/** A fake tenant token endpoint: records each call, answers with `respond`. */
+function fakeTokenEndpoint(
+	respond: (call: TokenCall) => Promise<Response> | Response,
+) {
+	const calls: TokenCall[] = [];
+	const fetchImpl = async (url: string, init: RequestInit) => {
+		const call = {
+			url,
+			form: Object.fromEntries(new URLSearchParams(String(init.body))),
+		};
+		calls.push(call);
+		return respond(call);
+	};
+	return { calls, fetchImpl };
+}
+
+function tokenResponse(access: string, refresh: string): Response {
+	return Response.json({
+		access_token: access,
+		refresh_token: refresh,
+		expires_in: 3600,
+		refresh_token_expires_in: 7_776_000,
+		scope: "read_orders,read_products,read_inventory,read_customers",
+	});
+}
+
+function buildShopifyInstallRouter(
+	fetchImpl: (url: string, init: RequestInit) => Promise<Response>,
+) {
+	return createInstallRoutes({
+		installationStore: createPostgresAppInstallationStore(),
+		resolveInstallOrgId: async () => null,
+		verifyInstallOrgAccess: async () => false,
+		verifyInstallOrgAdminAccess: async () => false,
+		getPublicGatewayUrl: () => "https://gateway.test",
+		integrations: [
+			{
+				connectorKey: "shopify",
+				provider: "shopify",
+				method: SHOPIFY_METHOD,
+				deliveryKind: "data",
+			},
+		],
+		resolveInstallUserId: (c) => c.req.header("x-test-user") ?? null,
+		fetchTenantTokenEndpoint: fetchImpl,
+	});
+}
+
+function startInstall(router: ReturnType<typeof createInstallRoutes>, shop: string) {
+	return router.request(
+		`https://gateway.test/shopify/install?shop=${encodeURIComponent(shop)}`,
+		{ headers: { "x-test-user": INSTALLER } },
+	);
+}
+
+/** Start an install and return the state the authorize redirect carries. */
+async function installState(
+	router: ReturnType<typeof createInstallRoutes>,
+): Promise<string> {
+	const res = await startInstall(router, SHOP);
+	expect(res.status).toBe(302);
+	const location = new URL(res.headers.get("location") as string, "https://gateway.test");
+	return location.searchParams.get("state") as string;
+}
+
+/**
+ * Shopify's callback signature, computed the way Shopify documents it: hex
+ * HMAC-SHA256 (client secret) over the other params sorted by key, `k=v`
+ * joined with `&`.
+ */
+function shopifyCallbackHmac(
+	params: Record<string, string>,
+	secret = SHOPIFY_ENV.SHOPIFY_CLIENT_SECRET,
+): string {
+	const message = Object.keys(params)
+		.sort()
+		.map((key) => `${key}=${params[key]}`)
+		.join("&");
+	return createHmac("sha256", secret).update(message).digest("hex");
+}
+
+/** A provider-signed callback (pass `hmac` explicitly to forge or omit it). */
+function callback(
+	router: ReturnType<typeof createInstallRoutes>,
+	params: Record<string, string>,
+	hmac: string | null = shopifyCallbackHmac(params),
+) {
+	const query = new URLSearchParams(params);
+	if (hmac !== null) query.set("hmac", hmac);
+	return router.request(`https://gateway.test/shopify/oauth_callback?${query}`);
+}
+
+const SHOPIFY_WEBHOOK_SCHEMA = new ShopifyConnector().definition
+	.webhook as ConnectorWebhookSchema;
+
+/**
+ * The Shopify app-webhook router built the way the gateway builds it: from the
+ * connector's declared schema, with the secret resolved through the method's
+ * declared `webhookSecretKey`.
+ */
+function buildShopifyWebhookRouter() {
+	return createAppWebhookRoutes({
+		installationStore: createPostgresAppInstallationStore(),
+		providers: [
+			createDeclaredAppWebhookProvider({
+				provider: "shopify",
+				appId: SHOPIFY_ENV.SHOPIFY_CLIENT_ID,
+				webhookSchema: SHOPIFY_WEBHOOK_SCHEMA,
+				providerInstance: SHOPIFY_METHOD.providerInstance,
+				onDelivery: createDataWebhookDelivery(
+					{ connectorKey: "shopify", webhookSchema: SHOPIFY_WEBHOOK_SCHEMA },
+					connectorRecordEnqueuer(queue),
+				),
+			}),
+		],
+		resolveAppWebhookSecret: createDefaultAppWebhookSecretResolver(
+			{ get: async () => null } as unknown as SecretStore,
+			{ shopify: SHOPIFY_METHOD.webhookSecretKey },
+		),
+	});
+}
+
+/** POST a Shopify app webhook; signs with base64 HMAC unless `signature` is given. */
+function shopifyWebhook(
+	router: ReturnType<typeof createAppWebhookRoutes>,
+	params: { topic: string; shop: string; body: string; signature?: string },
+) {
+	const signature =
+		params.signature ??
+		createHmac("sha256", SHOPIFY_ENV.SHOPIFY_CLIENT_SECRET)
+			.update(params.body)
+			.digest("base64");
+	return router.request("https://gateway.test/api/v1/app-webhooks/shopify", {
+		method: "POST",
+		headers: {
+			"content-type": "application/json",
+			"x-shopify-hmac-sha256": signature,
+			"x-shopify-topic": params.topic,
+			"x-shopify-shop-domain": params.shop,
+			"x-shopify-webhook-id": `wh-${params.topic}-${params.body.length}`,
+		},
+		body: params.body,
+	});
+}
+
+async function pendingShopifyRows(): Promise<any[]> {
+	const { getDb } = await import("../../db/client.js");
+	return getDb()`
+		SELECT id, organization_id, status, provider_app_id, external_tenant_id, metadata
+		FROM app_installations
+		WHERE provider = 'shopify' AND organization_id IS NULL
+	`;
+}
+
+/** Claim engine deps backed by the seeded `member` rows. */
+const CLAIM_DEPS = {
+	resolveMemberOrgs: async () => [],
+	resolveOrgIfMember: async (userId: string, orgSlugOrId: string) => {
+		const { getDb } = await import("../../db/client.js");
+		const [row] = await getDb()`
+			SELECT "organizationId" AS id FROM "member"
+			WHERE "userId" = ${userId} AND "organizationId" = ${orgSlugOrId}
+		`;
+		return (row?.id as string | undefined) ?? null;
+	},
+	resolveOrgSlug: async (organizationId: string) => organizationId,
+};
+
+/** Drive install → callback → claim into `organizationId`; returns the claim ref. */
+async function installAndClaim(organizationId: string): Promise<string> {
+	const { fetchImpl } = fakeTokenEndpoint(() =>
+		tokenResponse("shpat_initial", "shprt_initial"),
+	);
+	const router = buildShopifyInstallRouter(fetchImpl);
+	const state = await installState(router);
+	const res = await callback(router, { code: "code-1", shop: SHOP, state });
+	expect(res.status).toBe(302);
+	const ref = new URL(res.headers.get("location") as string, "https://gateway.test").searchParams.get(
+		"ref",
+	) as string;
+	const install = getTenantDataInstall("shopify");
+	expect(install).not.toBeNull();
+	const result = await claimPendingConnection(
+		tenantInstallClaimProvider(install as NonNullable<typeof install>, {
+			store: createPostgresAppInstallationStore(),
+		}),
+		CLAIM_DEPS,
+		{ userId: INSTALLER, ref, organizationId },
+	);
+	expect(result.status).toBe("ok");
+	return ref;
+}
+
+async function activeShopifyInstall(organizationId: string) {
+	const store = createPostgresAppInstallationStore();
+	const row = await store.getByTenantAndOrg(
+		{
+			provider: "shopify",
+			providerInstance: "cloud",
+			providerAppId: SHOPIFY_ENV.SHOPIFY_CLIENT_ID,
+			externalTenantId: SHOP,
+		},
+		organizationId,
+	);
+	expect(row?.status).toBe("active");
+	return row as NonNullable<typeof row>;
+}
+
+/** Replace the install's stored grant (e.g. with an already-expired token). */
+async function storeGrant(
+	organizationId: string,
+	authProfileId: number,
+	grant: Record<string, unknown>,
+): Promise<void> {
+	const { persistAuthCredentials } = await import(
+		"../../utils/auth-credential-secrets.js"
+	);
+	await persistAuthCredentials({ organizationId, authProfileId, credentials: grant });
+}
+
+async function storedGrant(
+	organizationId: string,
+	authProfileId: number,
+): Promise<Record<string, unknown>> {
+	const { getDb } = await import("../../db/client.js");
+	const { resolveAuthCredentials } = await import(
+		"../../utils/auth-credential-secrets.js"
+	);
+	const [row] = await getDb()`
+		SELECT auth_data FROM auth_profiles WHERE id = ${authProfileId}
+	`;
+	return resolveAuthCredentials({
+		organizationId,
+		authProfileId,
+		authData: row.auth_data,
+		appInstallationRenewal: true,
+	});
+}
+
+describe("app-installation e2e: tenant data install (Shopify app)", () => {
+	const savedEnv: Record<string, string | undefined> = {};
+	beforeEach(async () => {
+		for (const [key, value] of Object.entries(SHOPIFY_ENV)) {
+			savedEnv[key] = process.env[key];
+			process.env[key] = value;
+		}
+		await seedAgentRow(AGENT_A, { organizationId: ORG_A });
+		await seedOrgMembership(ORG_A, INSTALLER, "owner");
+	});
+	afterEach(() => {
+		for (const [key, value] of Object.entries(savedEnv)) {
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+	});
+
+	test("the start route rejects any shop that does not fully match the declared pattern", async () => {
+		const { calls, fetchImpl } = fakeTokenEndpoint(() =>
+			tokenResponse("unused", "unused"),
+		);
+		const router = buildShopifyInstallRouter(fetchImpl);
+		for (const shop of [
+			"evil.example.com",
+			`${SHOP}.evil.test`,
+			`${SHOP}/admin`,
+			`evil.test/${SHOP}`,
+			"-acme.myshopify.com",
+			".myshopify.com",
+			`user@${SHOP}`,
+		]) {
+			const res = await startInstall(router, shop);
+			expect(res.status, shop).toBe(400);
+		}
+		expect(calls).toHaveLength(0);
+
+		// Signed out: bounced to login with the install as the return target.
+		const anonymous = await router.request(
+			`https://gateway.test/shopify/install?shop=${SHOP}`,
+		);
+		expect(anonymous.status).toBe(302);
+		expect(anonymous.headers.get("location")).toContain(
+			encodeURIComponent(`/shopify/install?shop=${SHOP}`),
+		);
+
+		// A valid shop redirects to ITS OWN authorize host with comma-joined scopes.
+		const ok = await startInstall(router, SHOP);
+		expect(ok.status).toBe(302);
+		const location = new URL(ok.headers.get("location") as string);
+		expect(location.origin).toBe(`https://${SHOP}`);
+		expect(location.pathname).toBe("/admin/oauth/authorize");
+		expect(location.searchParams.get("client_id")).toBe(
+			SHOPIFY_ENV.SHOPIFY_CLIENT_ID,
+		);
+		expect(location.searchParams.get("scope")).toBe(
+			"read_orders,read_products,read_inventory,read_customers",
+		);
+		expect(location.searchParams.get("redirect_uri")).toBe(
+			"https://gateway.test/shopify/oauth_callback",
+		);
+		expect(location.searchParams.get("state")).toBeTruthy();
+	});
+
+	test("a callback whose shop differs from the state-bound shop is rejected and burns the state", async () => {
+		const { calls, fetchImpl } = fakeTokenEndpoint(() =>
+			tokenResponse("shpat_x", "shprt_x"),
+		);
+		const router = buildShopifyInstallRouter(fetchImpl);
+		const state = await installState(router);
+
+		const mismatched = await callback(router, {
+			code: "code-1",
+			shop: "other-store.myshopify.com",
+			state,
+		});
+		expect(mismatched.status).toBe(400);
+		// The state is one-time: replaying it with the right shop also fails.
+		const replay = await callback(router, { code: "code-1", shop: SHOP, state });
+		expect(replay.status).toBe(400);
+		expect(calls).toHaveLength(0);
+		expect(await pendingShopifyRows()).toHaveLength(0);
+	});
+
+	test("a callback with a missing or forged hmac is refused before the state is used or the code exchanged", async () => {
+		const { calls, fetchImpl } = fakeTokenEndpoint(() =>
+			tokenResponse("shpat_initial", "shprt_initial"),
+		);
+		const router = buildShopifyInstallRouter(fetchImpl);
+		const state = await installState(router);
+		const params = { code: "code-1", shop: SHOP, state, timestamp: "1700000000" };
+
+		const missing = await callback(router, params, null);
+		expect(missing.status).toBe(400);
+		const wrongSecret = await callback(
+			router,
+			params,
+			shopifyCallbackHmac(params, "not-the-client-secret"),
+		);
+		expect(wrongSecret.status).toBe(400);
+		// Signed for one code, replayed with another.
+		const tampered = await callback(
+			router,
+			{ ...params, code: "code-2" },
+			shopifyCallbackHmac(params),
+		);
+		expect(tampered.status).toBe(400);
+		expect(calls).toHaveLength(0);
+		expect(await pendingShopifyRows()).toHaveLength(0);
+
+		// None of them burned the state: the genuine callback still installs.
+		const genuine = await callback(router, params);
+		expect(genuine.status).toBe(302);
+		expect(calls).toHaveLength(1);
+		expect(await pendingShopifyRows()).toHaveLength(1);
+	});
+
+	test("install → callback parks an encrypted grant on an org-less pending row", async () => {
+		const { calls, fetchImpl } = fakeTokenEndpoint(() =>
+			tokenResponse("shpat_initial", "shprt_initial"),
+		);
+		const router = buildShopifyInstallRouter(fetchImpl);
+		const state = await installState(router);
+
+		const res = await callback(router, {
+			code: "code-1",
+			shop: SHOP,
+			state,
+			host: "aG9zdA",
+			timestamp: "1700000000",
+		});
+		expect(res.status).toBe(302);
+		const location = new URL(res.headers.get("location") as string, "https://gateway.test");
+		expect(location.pathname).toBe("/connector/shopify/connection");
+
+		// The code was exchanged at the SHOP's token endpoint, asking for an
+		// expiring (refreshable) offline token.
+		expect(calls).toHaveLength(1);
+		expect(calls[0].url).toBe(`https://${SHOP}/admin/oauth/access_token`);
+		expect(calls[0].form).toEqual({
+			client_id: SHOPIFY_ENV.SHOPIFY_CLIENT_ID,
+			client_secret: SHOPIFY_ENV.SHOPIFY_CLIENT_SECRET,
+			code: "code-1",
+			expiring: "1",
+		});
+
+		const rows = await pendingShopifyRows();
+		expect(rows).toHaveLength(1);
+		expect(rows[0].status).toBe("pending");
+		expect(rows[0].external_tenant_id).toBe(SHOP);
+		expect(rows[0].provider_app_id).toBe(SHOPIFY_ENV.SHOPIFY_CLIENT_ID);
+		expect(rows[0].metadata.external_id).toBe(location.searchParams.get("ref"));
+		expect(rows[0].metadata.installer_user_id).toBe(INSTALLER);
+		// Encrypted at rest: neither token appears in the row.
+		expect(typeof rows[0].metadata.tokens_enc).toBe("string");
+		expect(JSON.stringify(rows[0].metadata)).not.toContain("shpat_initial");
+		expect(JSON.stringify(rows[0].metadata)).not.toContain("shprt_initial");
+	});
+
+	test("claim binds the install into the org: active row + auth profile + connection", async () => {
+		const ref = await installAndClaim(ORG_A);
+		const { getDb } = await import("../../db/client.js");
+		const sql = getDb();
+
+		const active = await activeShopifyInstall(ORG_A);
+		expect(active.authProfileId).not.toBeNull();
+		expect(await storedGrant(ORG_A, active.authProfileId as number)).toMatchObject({
+			access_token: "shpat_initial",
+			refresh_token: "shprt_initial",
+		});
+
+		const connections = await sql`
+			SELECT connector_key, status, config FROM connections
+			WHERE organization_id = ${ORG_A} AND deleted_at IS NULL
+		`;
+		expect(connections).toHaveLength(1);
+		expect(connections[0].connector_key).toBe("shopify");
+		expect(connections[0].config).toMatchObject({
+			installation_ref: active.id,
+			shop: SHOP,
+		});
+
+		// The consumed setup row stays org-less and no longer carries the grant.
+		const [setup] = await pendingShopifyRows();
+		expect(setup.metadata.claimed).toBe(true);
+		expect(setup.metadata.tokens_enc).toBeUndefined();
+
+		// A second claim of the same ref is an idempotent no-op, not a duplicate.
+		const again = await claimPendingConnection(
+			tenantInstallClaimProvider(
+				getTenantDataInstall("shopify") as NonNullable<
+					ReturnType<typeof getTenantDataInstall>
+				>,
+				{ store: createPostgresAppInstallationStore() },
+			),
+			CLAIM_DEPS,
+			{ userId: INSTALLER, ref, organizationId: ORG_A },
+		);
+		expect(again.status).toBe("ok");
+		const [{ n }] = await sql`
+			SELECT count(*)::int AS n FROM connections WHERE organization_id = ${ORG_A}
+		`;
+		expect(n).toBe(1);
+	});
+
+	test("the claimed connection resolves a short-lived access token, never the refresh token", async () => {
+		await installAndClaim(ORG_A);
+		await primeAppInstallationMethods([
+			{ connectorKey: "shopify", provider: "shopify" },
+		]);
+		const { getDb } = await import("../../db/client.js");
+		const sql = getDb();
+		const [connection] = await sql`
+			SELECT id FROM connections WHERE organization_id = ${ORG_A}
+		`;
+		const { resolveExecutionAuth } = await import(
+			"../../utils/execution-context.js"
+		);
+		const result = await resolveExecutionAuth({
+			organizationId: ORG_A,
+			connectionId: Number(connection.id),
+			credentialDb: sql as any,
+		});
+		expect(result.credentials?.provider).toBe("shopify");
+		expect(result.credentials?.accessToken).toBe("shpat_initial");
+		expect(JSON.stringify(result)).not.toContain("shprt_initial");
+
+		// The worker-facing resolver refuses the install's profile outright.
+		const active = await activeShopifyInstall(ORG_A);
+		const [profile] = await sql`
+			SELECT auth_data FROM auth_profiles WHERE id = ${active.authProfileId}
+		`;
+		const { resolveAuthCredentials } = await import(
+			"../../utils/auth-credential-secrets.js"
+		);
+		await expect(
+			resolveAuthCredentials({
+				organizationId: ORG_A,
+				authProfileId: active.authProfileId as number,
+				authData: profile.auth_data,
+			}),
+		).rejects.toThrow("only available to gateway token renewal");
+	});
+
+	test("concurrent renewal on two pods makes ONE upstream refresh and persists the rotated token", async () => {
+		await installAndClaim(ORG_A);
+		await primeAppInstallationMethods([
+			{ connectorKey: "shopify", provider: "shopify" },
+		]);
+		const active = await activeShopifyInstall(ORG_A);
+		const authProfileId = active.authProfileId as number;
+		await storeGrant(ORG_A, authProfileId, {
+			access_token: "shpat_expired",
+			refresh_token: "shprt_r1",
+			expires_at: new Date(Date.now() - 60_000).toISOString(),
+		});
+
+		const { calls, fetchImpl } = fakeTokenEndpoint(async () => {
+			// Hold the row lock long enough for the other pod to queue behind it.
+			await new Promise((resolve) => setTimeout(resolve, 100));
+			return tokenResponse("shpat_r2", "shprt_r2");
+		});
+		const podA = new RefreshTokenInstallationTokenProvider({ fetchImpl });
+		const podB = new RefreshTokenInstallationTokenProvider({ fetchImpl });
+		const [a, b] = await Promise.all([
+			podA.mintToken(active),
+			podB.mintToken(active),
+		]);
+
+		expect(calls).toHaveLength(1);
+		expect(calls[0].url).toBe(`https://${SHOP}/admin/oauth/access_token`);
+		expect(calls[0].form).toEqual({
+			grant_type: "refresh_token",
+			refresh_token: "shprt_r1",
+			client_id: SHOPIFY_ENV.SHOPIFY_CLIENT_ID,
+			client_secret: SHOPIFY_ENV.SHOPIFY_CLIENT_SECRET,
+		});
+		expect(a.token).toBe("shpat_r2");
+		expect(b.token).toBe("shpat_r2");
+		expect(await storedGrant(ORG_A, authProfileId)).toMatchObject({
+			access_token: "shpat_r2",
+			refresh_token: "shprt_r2",
+		});
+	});
+
+	test("app webhooks verify the base64 signature, route by the shop header, and revoke on app/uninstalled", async () => {
+		await installAndClaim(ORG_A);
+		const active = await activeShopifyInstall(ORG_A);
+		const router = buildShopifyWebhookRouter();
+		// Order payloads carry no shop domain: only the header can route them.
+		const body = JSON.stringify({ id: 820982911946154500, total_price: "10.00" });
+
+		// Right key, wrong encoding (hex) and wrong key (base64) both fail closed.
+		const hexSigned = await shopifyWebhook(router, {
+			topic: "orders/create",
+			shop: SHOP,
+			body,
+			signature: createHmac("sha256", SHOPIFY_ENV.SHOPIFY_CLIENT_SECRET)
+				.update(body)
+				.digest("hex"),
+		});
+		expect(hexSigned.status).toBe(401);
+		const wrongKey = await shopifyWebhook(router, {
+			topic: "orders/create",
+			shop: SHOP,
+			body,
+			signature: createHmac("sha256", "not-the-client-secret").update(body).digest("base64"),
+		});
+		expect(wrongKey.status).toBe(401);
+
+		// A verified delivery for an unknown shop is acked without landing; the
+		// installed shop resolves its install (no feed declares the topic yet).
+		const unknownShop = await shopifyWebhook(router, {
+			topic: "orders/create",
+			shop: "other-store.myshopify.com",
+			body,
+		});
+		expect(unknownShop.status).toBe(200);
+		expect(await unknownShop.json()).toEqual({ ok: true, landed: false });
+		const routed = await shopifyWebhook(router, { topic: "orders/create", shop: SHOP, body });
+		expect(routed.status).toBe(200);
+		expect(await routed.json()).toEqual({ ok: true, triggered: false });
+
+		// The merchant removes the app: the install is revoked, the connection kept.
+		const uninstalled = await shopifyWebhook(router, {
+			topic: "app/uninstalled",
+			shop: SHOP,
+			body: JSON.stringify({ id: 548380009, domain: SHOP }),
+		});
+		expect(uninstalled.status).toBe(200);
+		expect(await uninstalled.json()).toEqual({ ok: true, revoked: true });
+		const { getDb } = await import("../../db/client.js");
+		const sql = getDb();
+		const [row] = await sql`SELECT status FROM app_installations WHERE id = ${active.id}`;
+		expect(row.status).toBe("revoked");
+		const [{ n }] = await sql`
+			SELECT count(*)::int AS n FROM connections
+			WHERE organization_id = ${ORG_A} AND deleted_at IS NULL
+		`;
+		expect(n).toBe(1);
+		// Later deliveries find no active install.
+		const after = await shopifyWebhook(router, { topic: "orders/create", shop: SHOP, body });
+		expect(await after.json()).toEqual({ ok: true, landed: false });
+	});
+
+	test("only an invalid_grant refresh marks the install error; a refused client does not", async () => {
+		await installAndClaim(ORG_A);
+		await primeAppInstallationMethods([
+			{ connectorKey: "shopify", provider: "shopify" },
+		]);
+		const active = await activeShopifyInstall(ORG_A);
+		await storeGrant(ORG_A, active.authProfileId as number, {
+			access_token: "shpat_expired",
+			refresh_token: "shprt_revoked",
+			expires_at: new Date(Date.now() - 60_000).toISOString(),
+		});
+		const { getDb } = await import("../../db/client.js");
+		const installStatus = async () =>
+			(
+				await getDb()`
+					SELECT status FROM app_installations WHERE id = ${active.id}
+				`
+			)[0].status;
+
+		// A misconfigured client secret must not mark every install broken.
+		const refusedClient = fakeTokenEndpoint(
+			() =>
+				new Response(JSON.stringify({ error: "invalid_client" }), {
+					status: 401,
+				}),
+		);
+		await expect(
+			new RefreshTokenInstallationTokenProvider({
+				fetchImpl: refusedClient.fetchImpl,
+			}).mintToken(active),
+		).rejects.toMatchObject({ reason: "exchange_failed", status: 401 });
+		expect(refusedClient.calls).toHaveLength(1);
+		expect(await installStatus()).toBe("active");
+
+		// RFC 6749 §5.2: an expired or revoked refresh token answers 400 invalid_grant.
+		const refusedGrant = fakeTokenEndpoint(
+			() =>
+				new Response(JSON.stringify({ error: "invalid_grant" }), {
+					status: 400,
+				}),
+		);
+		await expect(
+			new RefreshTokenInstallationTokenProvider({
+				fetchImpl: refusedGrant.fetchImpl,
+			}).mintToken(active),
+		).rejects.toMatchObject({ reason: "exchange_failed", status: 400 });
+		expect(refusedGrant.calls).toHaveLength(1);
+		expect(await installStatus()).toBe("error");
 	});
 });

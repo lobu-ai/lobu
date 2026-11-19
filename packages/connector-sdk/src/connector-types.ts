@@ -239,6 +239,13 @@ export interface ConnectorWebhookSchema {
   /** HMAC digest algorithm used to compute the signature. Default `sha256`. */
   algorithm?: 'sha256' | 'sha1';
   /**
+   * Encoding of the HMAC digest carried in {@link signatureHeader}: `'hex'`
+   * (default — GitHub, Slack, Jira, Linear) or `'base64'` (Shopify's
+   * `x-shopify-hmac-sha256`). The compared signature is
+   * `signaturePrefix + encode(HMAC(secret, renderedBase))`.
+   */
+  signatureEncoding?: 'hex' | 'base64';
+  /**
    * Prefix the provider prepends to the hex digest in the signature header,
    * e.g. `sha256=`. Stripped before the constant-time compare. Default none.
    */
@@ -321,6 +328,14 @@ export interface ConnectorWebhookSchema {
    */
   routingKeyPaths?: string[];
   /**
+   * `app_installation` mode only: request header carrying the external tenant id
+   * (Shopify `x-shopify-shop-domain`). Tried BEFORE {@link routingKeyPaths} /
+   * {@link routingKeyPath}; a missing or empty header falls through to them. The
+   * value must equal the install's `external_tenant_id` as stored by the install
+   * handshake. {@link routingKeyTransform} applies to body paths only.
+   */
+  routingKeyHeader?: string;
+  /**
    * `app_installation` mode only: transform applied to the value found at
    * {@link routingKeyPath} / {@link routingKeyPaths} before it becomes the tenant
    * id. `'url-host'` parses the value as a URL and uses its host (Jira: every
@@ -328,6 +343,16 @@ export interface ConnectorWebhookSchema {
    * Omit for the identity transform (the value IS the tenant id).
    */
   routingKeyTransform?: 'url-host';
+  /**
+   * `app_installation` mode only: event types (values read through
+   * {@link eventType}) that mean the tenant removed the App (Shopify
+   * `app/uninstalled`). A VERIFIED delivery of one of these marks the routed
+   * installation `revoked` instead of dispatching to feeds: no new token can be
+   * minted, so its feeds stop, while connections, feeds and stored events are
+   * kept. Requires {@link eventType}. Ignored for `deliveryKind: 'chat'`, whose
+   * adapter owns its own uninstall handling.
+   */
+  uninstallEvents?: string[];
 }
 
 // =============================================================================
@@ -463,16 +488,42 @@ export interface ConnectorAuthAppInstallation {
   /**
    * `oauth-code-exchange` only: the provider's OAuth authorize URL the install
    * start route redirects to (e.g. Slack `https://slack.com/oauth/v2/authorize`).
-   * Gateway-side; carries no secret.
+   * Gateway-side; carries no secret. May contain `{{tenant}}`, rendered from the
+   * validated {@link tenant} value (e.g. `https://{{tenant}}/admin/oauth/authorize`).
    */
   authorizeUrl?: string;
   /**
    * `oauth-code-exchange` only: the provider's token-exchange URL used to turn the
    * callback `code` into an access token (e.g. Slack
    * `https://slack.com/api/oauth.v2.access`). Gateway-side; the exchange runs WITH
-   * the client secret in core and never reaches connector/worker code.
+   * the client secret in core and never reaches connector/worker code. May
+   * contain `{{tenant}}` like {@link authorizeUrl}; a per-tenant install also
+   * renews its rotating refresh token here.
    */
   tokenUrl?: string;
+  /**
+   * `oauth-code-exchange` only: a PER-TENANT install, where the provider's OAuth
+   * host depends on the merchant/site (e.g. a Shopify shop). The install start
+   * route reads the tenant from query param `param` and rejects it unless it
+   * FULLY matches `pattern` (a regular expression, compiled once). The validated
+   * value is substituted for `{{tenant}}` in {@link authorizeUrl} /
+   * {@link tokenUrl}, bound into the OAuth state, and must equal the same param
+   * on the callback. Gateway-side; carries no secret.
+   *
+   * `callbackHmacParam` (optional): the install callback must carry this query
+   * param set to the hex HMAC-SHA256, keyed by the client secret, of every
+   * OTHER callback query param sorted by key and form-encoded as `k=v` pairs
+   * joined with `&` (spaces as `%20`) — Shopify's `hmac`. A missing or
+   * mismatched value is rejected (400) before the state is consumed or the code
+   * is exchanged.
+   */
+  tenant?: { param: string; pattern: string; callbackHmacParam?: string };
+  /**
+   * `oauth-code-exchange` tenant installs only: extra form fields sent with the
+   * install's code exchange at {@link tokenUrl}, never on token renewal (e.g.
+   * Shopify `{ expiring: '1' }` for an expiring offline token).
+   */
+  codeExchangeParams?: Record<string, string>;
   /**
    * Provider instance: `'cloud'` (default) for the public SaaS, a GitHub
    * Enterprise Server host, or an Atlassian site class. Lets one connector serve

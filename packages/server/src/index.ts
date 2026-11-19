@@ -56,6 +56,7 @@ import {
 } from "./gateway/connections/connection-claim";
 import { slackClaimProvider } from "./gateway/connections/slack-claim";
 import { googleChatClaimProvider } from "./gateway/connections/gchat-claim";
+import { getTenantDataInstall, tenantInstallClaimProvider } from "./gateway/connections/tenant-install-claim";
 import { resolveClaimingUserSlackIdentities } from "./gateway/connections/slack-claim-identities";
 import { createSlackWebApi } from "./gateway/connections/slack-web";
 import { inputFileRoutes } from "./http/input-file-routes";
@@ -1596,6 +1597,20 @@ const claimProviders = new Map<string, () => ClaimProvider>([
 	}],
 ]);
 
+// Fixed providers first; otherwise a mounted tenant data install (any connector
+// declaring a tenant-scoped oauth-code-exchange method) claims generically.
+function resolveClaimProvider(connector: string): (() => ClaimProvider) | undefined {
+	const fixed = claimProviders.get(connector);
+	if (fixed) return fixed;
+	const tenantInstall = getTenantDataInstall(connector);
+	if (!tenantInstall) return undefined;
+	return () => {
+		const core = getLobuCoreServices();
+		if (!core) throw new Error("Lobu core services unavailable");
+		return tenantInstallClaimProvider(tenantInstall, { store: core.getAppInstallationStore() }) as ClaimProvider;
+	};
+}
+
 // GET /api/connector/:connector/connection/claim-context?ref=… — the confirm
 // step's data. Runs the provider's authority guards with NO write and returns
 // the subject name + the claimer's orgs, so the SPA claim page can render
@@ -1603,7 +1618,7 @@ const claimProviders = new Map<string, () => ClaimProvider>([
 // a subject already bound, so the UI links to it instead of erroring on a
 // re-visited/spent link. Registered before the `/api/:orgSlug/:toolName` proxy.
 app.get("/api/connector/:connector/connection/claim-context", async (c) => {
-	const buildProvider = claimProviders.get(c.req.param("connector"));
+	const buildProvider = resolveClaimProvider(c.req.param("connector"));
 	if (!buildProvider) return c.json({ error: "unknown_provider" }, 404);
 	const provider = buildProvider();
 	const userId = await resolveClaimSessionUser(c.env, c.req.raw);
@@ -1639,7 +1654,7 @@ app.get("/api/connector/:connector/connection/claim-context", async (c) => {
 });
 
 app.post("/api/connector/:connector/connection/claim", async (c) => {
-	const buildProvider = claimProviders.get(c.req.param("connector"));
+	const buildProvider = resolveClaimProvider(c.req.param("connector"));
 	if (!buildProvider) return c.json({ error: "unknown_provider" }, 404);
 	const provider = buildProvider();
 	const userId = await resolveClaimSessionUser(c.env, c.req.raw);

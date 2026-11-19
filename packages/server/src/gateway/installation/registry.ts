@@ -11,6 +11,7 @@
 
 import { GitHubInstallationTokenProvider } from "./github-installation-token-provider.js";
 import { InstallationTokenRegistry } from "./installation-token-provider.js";
+import { RefreshTokenInstallationTokenProvider } from "./refresh-token-installation-token-provider.js";
 
 let registry: InstallationTokenRegistry | null = null;
 
@@ -21,6 +22,9 @@ export function getInstallationTokenRegistry(): InstallationTokenRegistry {
   if (!registry) {
     registry = new InstallationTokenRegistry();
     registry.register(new GitHubInstallationTokenProvider());
+    // Any connector declaring a tenant-scoped oauth-code-exchange method renews
+    // through the one generic refresh-token provider — no provider literal.
+    registry.registerFallback(new RefreshTokenInstallationTokenProvider());
   }
   return registry;
 }

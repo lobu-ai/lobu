@@ -81,6 +81,13 @@ import {
 	type TeamGraphResult,
 } from "./github-team-graph.js";
 import { routeFailure } from "../../../diagnostics.js";
+import { readUserId } from "./install-org.js";
+import {
+	mountTenantAppInstallRoutes,
+	providerDisplayName,
+	resolveOAuthInstallCallbackUrl,
+	type TenantInstallTokenFetch,
+} from "./tenant-app-install.js";
 
 const logger = createLogger("app-install-routes");
 
@@ -1965,37 +1972,6 @@ function oauthInstallStateStore(
 }
 
 /**
- * Resolve the OAuth callback URL for an oauth-code-exchange provider. Must stay
- * in sync with the provider's registered redirect URIs:
- * `<gateway-base>/{provider}/oauth_callback`. Behind the prod TLS-terminating
- * ingress `c.req.url` is the internal pod URL, so prefer the configured public
- * base; fall back to deriving the mount prefix from the request path on
- * self-host (single-origin).
- */
-function resolveOAuthInstallCallbackUrl(
-	gatewayBaseUrl: string | undefined,
-	requestUrl: string,
-	provider: string,
-): string {
-	if (gatewayBaseUrl) {
-		return `${gatewayBaseUrl.replace(/\/+$/, "")}/${provider}/oauth_callback`;
-	}
-	const url = new URL(requestUrl);
-	const prefix = url.pathname.replace(
-		new RegExp(`/${provider}/install/?$`),
-		"",
-	);
-	return `${url.origin}${prefix}/${provider}/oauth_callback`;
-}
-
-/** Capitalize a provider key for the success-page title ("slack" → "Slack"). */
-function providerDisplayName(provider: string): string {
-	return provider.length > 0
-		? provider[0].toUpperCase() + provider.slice(1)
-		: provider;
-}
-
-/**
  * Complete an oauth-code-exchange install by parking it as a pending, UNCLAIMED
  * install and returning its identity so the callback can prompt the user to
  * claim it (the org picker owns which tenant the workspace lands in — the
@@ -2260,6 +2236,10 @@ export interface InstallEngineDeps {
 	 * oauth-code-exchange connector.
 	 */
 	completeChatPendingInstall?: CompletePendingOAuthInstall;
+	/** The signed-in user starting a tenant data install (defaults to the auth bridge user). */
+	resolveInstallUserId?(c: import("hono").Context): string | null;
+	/** Token-endpoint fetch for tenant data installs (defaults to the pinned credentialed fetch). */
+	fetchTenantTokenEndpoint?: TenantInstallTokenFetch;
 }
 
 /**
@@ -2292,15 +2272,30 @@ export function createInstallRoutes(deps: InstallEngineDeps): Hono {
 		}
 
 		// oauth-code-exchange. Completion is dispatched by the connector's
-		// deliveryKind: a chat connector hands off to the chat adapter. A
-		// non-chat oauth-code-exchange connector has no completion wired yet, so
-		// skip it rather than mount a dead route.
+		// deliveryKind: a chat connector hands off to the chat adapter; a data
+		// connector declaring a `tenant` parks a pending install for the claim
+		// flow. Any other data connector has no completion, so skip it rather
+		// than mount a dead route.
 		const authorizeUrl = integration.method?.authorizeUrl;
 		if (!authorizeUrl) {
 			oauthInstallLogger.warn(
 				{ provider: integration.provider },
 				"Skipping oauth-code-exchange install routes: connector declares no authorizeUrl",
 			);
+			continue;
+		}
+		const method = integration.method;
+		if (integration.deliveryKind !== "chat" && method?.tenant) {
+			// A tenant-scoped data install: the code exchange parks the grant as a
+			// pending install the generic claim flow binds into an org.
+			mountTenantAppInstallRoutes(router, {
+				connectorKey: integration.connectorKey,
+				provider: integration.provider,
+				method: { ...method, tenant: method.tenant },
+				resolveInstallUserId: deps.resolveInstallUserId ?? readUserId,
+				getPublicGatewayUrl: deps.getPublicGatewayUrl,
+				fetchTokenEndpoint: deps.fetchTenantTokenEndpoint,
+			});
 			continue;
 		}
 		if (integration.deliveryKind !== "chat" || !deps.completeChatPendingInstall) {
