@@ -21,6 +21,7 @@ const EXPECTED_BUNDLED_CONNECTORS = [
 	"producthunt",
 	"reddit",
 	"rss",
+	"shopify",
 	"slack",
 	"teams",
 	"telegram",

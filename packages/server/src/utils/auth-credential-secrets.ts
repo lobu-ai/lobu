@@ -348,8 +348,24 @@ export async function resolveAuthCredentials(params: {
 	secretStore?: SecretStore;
 	/** Gateway egress only: checked against the persisted immutable binding. */
 	httpOrigin?: string;
+	/**
+	 * Gateway token renewal only. A profile linked from
+	 * `app_installations.auth_profile_id` holds a durable refresh token, so it
+	 * resolves solely for the installation's own renewal — never into a worker.
+	 */
+	appInstallationRenewal?: boolean;
 }): Promise<Record<string, string>> {
 	const profile = await getAuthProfileById(params.organizationId, params.authProfileId);
+	if (!params.appInstallationRenewal) {
+		const linked = await getDb()`
+			SELECT 1 FROM app_installations
+			WHERE auth_profile_id = ${params.authProfileId}
+			LIMIT 1
+		`;
+		if (linked.length > 0) {
+			throw new Error('App-installation credentials are only available to gateway token renewal');
+		}
+	}
 	const binding = readHttpAuthBinding(profile?.metadata);
 	if (binding && (params.httpOrigin !== binding.origin || profile?.status !== 'active')) {
 		throw new Error('HTTP-bound credentials are only available at their gateway destination');

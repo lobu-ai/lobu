@@ -463,16 +463,29 @@ export interface ConnectorAuthAppInstallation {
   /**
    * `oauth-code-exchange` only: the provider's OAuth authorize URL the install
    * start route redirects to (e.g. Slack `https://slack.com/oauth/v2/authorize`).
-   * Gateway-side; carries no secret.
+   * Gateway-side; carries no secret. May contain `{{tenant}}`, rendered from the
+   * validated {@link tenant} value (e.g. `https://{{tenant}}/admin/oauth/authorize`).
    */
   authorizeUrl?: string;
   /**
    * `oauth-code-exchange` only: the provider's token-exchange URL used to turn the
    * callback `code` into an access token (e.g. Slack
    * `https://slack.com/api/oauth.v2.access`). Gateway-side; the exchange runs WITH
-   * the client secret in core and never reaches connector/worker code.
+   * the client secret in core and never reaches connector/worker code. May
+   * contain `{{tenant}}` like {@link authorizeUrl}; a per-tenant install also
+   * renews its rotating refresh token here.
    */
   tokenUrl?: string;
+  /**
+   * `oauth-code-exchange` only: a PER-TENANT install, where the provider's OAuth
+   * host depends on the merchant/site (e.g. a Shopify shop). The install start
+   * route reads the tenant from query param `param` and rejects it unless it
+   * FULLY matches `pattern` (a regular expression, compiled once). The validated
+   * value is substituted for `{{tenant}}` in {@link authorizeUrl} /
+   * {@link tokenUrl}, bound into the OAuth state, and must equal the same param
+   * on the callback. Gateway-side; carries no secret.
+   */
+  tenant?: { param: string; pattern: string };
   /**
    * Provider instance: `'cloud'` (default) for the public SaaS, a GitHub
    * Enterprise Server host, or an Atlassian site class. Lets one connector serve

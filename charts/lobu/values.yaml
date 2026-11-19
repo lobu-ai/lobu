@@ -361,6 +361,8 @@ ingress:
 
 # Secret reference (must exist in namespace)
 # Contains: ENCRYPTION_KEY, BETTER_AUTH_SECRET, provider API keys, etc.
+# Optional hosted app installs read their client credentials from it too,
+# e.g. SHOPIFY_CLIENT_ID + SHOPIFY_CLIENT_SECRET for the Shopify app.
 secretName: ""
 
 # Database settings (for connecting to CNPG cluster)

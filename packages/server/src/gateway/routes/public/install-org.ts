@@ -10,7 +10,7 @@ import {
 const logger = createLogger("install-org");
 
 /** The authenticated user id stamped onto the request by `createLobuAuthBridge`. */
-function readUserId(c: Context): string | null {
+export function readUserId(c: Context): string | null {
   const user = c.get("user" as never) as { id?: string } | null | undefined;
   return typeof user?.id === "string" && user.id.length > 0 ? user.id : null;
 }

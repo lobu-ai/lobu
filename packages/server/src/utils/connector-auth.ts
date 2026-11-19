@@ -172,6 +172,18 @@ export function normalizeConnectorAuthSchema(value: unknown): ConnectorAuthSchem
           : undefined;
       const permissions = stringArray(method.permissions);
       const events = stringArray(method.events);
+      const rawTenant =
+        method.tenant && typeof method.tenant === 'object'
+          ? (method.tenant as Record<string, unknown>)
+          : null;
+      const tenant =
+        rawTenant &&
+        typeof rawTenant.param === 'string' &&
+        rawTenant.param.trim() &&
+        typeof rawTenant.pattern === 'string' &&
+        rawTenant.pattern
+          ? { param: rawTenant.param.trim(), pattern: rawTenant.pattern }
+          : undefined;
 
       methods.push({
         type: 'app_installation',
@@ -184,6 +196,7 @@ export function normalizeConnectorAuthSchema(value: unknown): ConnectorAuthSchem
             : undefined,
         authorizeUrl: typeof method.authorizeUrl === 'string' ? method.authorizeUrl : undefined,
         tokenUrl: typeof method.tokenUrl === 'string' ? method.tokenUrl : undefined,
+        ...(tenant ? { tenant } : {}),
         appIdKey: typeof method.appIdKey === 'string' ? method.appIdKey : undefined,
         privateKeyKey:
           typeof method.privateKeyKey === 'string' ? method.privateKeyKey : undefined,

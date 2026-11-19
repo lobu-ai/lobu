@@ -581,7 +581,8 @@ export function createGatewayApp(
       // Reference resolveAppInstallCredentials so the declared env-var contract
       // stays the single source of truth (validates the method's key names).
       if (integration.method) resolveAppInstallCredentials(integration.method);
-      if (!integration.appId) continue;
+      const webhookSchema = integration.webhookSchema;
+      if (!integration.appId || !webhookSchema) continue;
       declaredSecretEnvKeys[integration.provider] = integration.webhookSecretKey;
 
       // Per-KIND delivery, dispatched off the DECLARED `deliveryKind` — never a
@@ -589,7 +590,7 @@ export function createGatewayApp(
       // chat adapter for its provider (Slack, Google Chat); a `data` connector
       // dispatches them to the feeds that declare the delivery's event type
       // when its schema names an `eventType`, else acks with nothing triggered.
-      const deliveryKind = integration.webhookSchema.deliveryKind ?? "data";
+      const deliveryKind = integration.deliveryKind;
       const deliveryHooks: Pick<
         AppWebhookProvider,
         "onDelivery" | "handleDelivery"
@@ -602,7 +603,7 @@ export function createGatewayApp(
         });
       } else {
         const onDelivery = createDataWebhookDelivery(
-          integration,
+          { connectorKey: integration.connectorKey, webhookSchema },
           connectorRecordEnqueuer(coreServices.getQueue()),
         );
         if (onDelivery) deliveryHooks.onDelivery = onDelivery;
@@ -612,7 +613,7 @@ export function createGatewayApp(
         createDeclaredAppWebhookProvider({
           provider: integration.provider,
           appId: integration.appId,
-          webhookSchema: integration.webhookSchema,
+          webhookSchema,
           providerInstance: integration.method?.providerInstance,
           ...(publicGatewayUrl
             ? { endpointUrl: appWebhookUrl(publicGatewayUrl, integration.provider) }
@@ -654,7 +655,7 @@ export function createGatewayApp(
           connectorKey: integration.connectorKey,
           provider: integration.provider,
           method: integration.method,
-          deliveryKind: integration.webhookSchema.deliveryKind ?? "data",
+          deliveryKind: integration.deliveryKind,
         })),
         // EVERY oauth-code-exchange chat install (marketplace "Add to Slack" AND
         // logged-in installs) parks as pending, unclaimed — the claim flow's org
