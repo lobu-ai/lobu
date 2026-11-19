@@ -104,7 +104,8 @@ Select the intended context with lobu context use before apply. This standalone
 config has no credentials, devices, connections, schedules or Automations. Both
 it and the full personal example use prune:false. On an existing workspace,
 review the diff and compose custom person fields/rules rather than replacing
-them. Person matching here is review-only; same_source_account auto-grouping
+them. A shared LinkedIn profile URL links people automatically; slug, email
+and phone matches go to review. same_source_account auto-grouping
 requires the full provider/account_scope/canonical_source_account_key tuple.
 Contact-field evidence does not merge people. Existing reviewed holds remain.
 
