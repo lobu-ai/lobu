@@ -53,6 +53,20 @@ export function deliveryScalar(value: unknown): string | null {
 }
 
 /**
+ * The delivery's event type, read where the connector's `webhook.eventType`
+ * declares it (a request header or a dotted body path); null when absent.
+ */
+export function readDeliveryEventType(
+  declared: NonNullable<ConnectorWebhookSchema['eventType']>,
+  headers: Headers,
+  payload: unknown
+): string | null {
+  return 'header' in declared
+    ? deliveryScalar(headers.get(declared.header))
+    : deliveryScalar(readDeliveryPath(payload, declared.path));
+}
+
+/**
  * Whether a feed instance belongs to a delivery under its declared
  * `webhook.match`. No selector reaches every feed; a malformed selector (or a
  * missing, empty or non-scalar value on either side) never matches.
@@ -111,10 +125,7 @@ export async function deliverConnectorWebhook(params: {
   } catch {
     return { triggered: false };
   }
-  const eventType =
-    'header' in params.eventType
-      ? deliveryScalar(params.headers.get(params.eventType.header))
-      : deliveryScalar(readDeliveryPath(payload, params.eventType.path));
+  const eventType = readDeliveryEventType(params.eventType, params.headers, payload);
   if (!eventType) return { triggered: false };
 
   // Installation-bound (or the one registered) active connections, sync-capable

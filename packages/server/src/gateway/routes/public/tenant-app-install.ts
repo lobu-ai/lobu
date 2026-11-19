@@ -9,9 +9,11 @@
  *     declared pattern, binds `{tenant, installer}` into a one-time Postgres
  *     state nonce, and redirects to the tenant-rendered authorize URL.
  *   GET /{provider}/oauth_callback
- *     Consumes the state, requires the callback's tenant to equal the bound
- *     one, exchanges the code at the tenant-rendered token URL (pinned
- *     public-DNS, no-redirect fetch) and parks the grant ENCRYPTED on an
+ *     Verifies the declared callback HMAC (when the method declares
+ *     `tenant.callbackHmacParam`) before anything else, consumes the state,
+ *     requires the callback's tenant to equal the bound one, exchanges the
+ *     code (plus the method's declared `codeExchangeParams`) at the
+ *     tenant-rendered token URL (pinned public-DNS, no-redirect fetch) and parks the grant ENCRYPTED on an
  *     org-less pending `app_installations` row, then hands the installer to the
  *     generic claim page, where the org picker decides where it lands.
  *
@@ -20,7 +22,7 @@
  * Stateless across replicas: state and the pending row live in Postgres.
  */
 
-import { randomUUID } from "node:crypto";
+import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { createLogger, encrypt } from "@lobu/core";
 import { fetchCredentialedPublicUrl } from "@lobu/connector-worker/egress";
 import type { Context, Hono } from "hono";
@@ -85,6 +87,35 @@ function trimTrailingSlashes(value: string): string {
 	let end = value.length;
 	while (end > 0 && value[end - 1] === "/") end--;
 	return value.slice(0, end);
+}
+
+/**
+ * Verify a provider-signed install callback: `hmacParam` must hold the hex
+ * HMAC-SHA256 (keyed by the client secret) of every other query param, sorted
+ * by key and form-encoded as `k=v` pairs joined with `&`, spaces as `%20`
+ * (a provider-documented scheme; values are percent-encoded). Constant-time compare.
+ */
+export function verifyCallbackHmac(
+	query: URLSearchParams,
+	hmacParam: string,
+	clientSecret: string,
+): boolean {
+	const provided = query.get(hmacParam);
+	if (!provided) return false;
+	const signed = new URLSearchParams(
+		[...query.entries()]
+			.filter(([key]) => key !== hmacParam)
+			.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+	);
+	const expected = createHmac("sha256", clientSecret)
+		.update(signed.toString().replaceAll("+", "%20"))
+		.digest("hex");
+	const providedBuf = Buffer.from(provided, "utf8");
+	const expectedBuf = Buffer.from(expected, "utf8");
+	return (
+		providedBuf.length === expectedBuf.length &&
+		timingSafeEqual(providedBuf, expectedBuf)
+	);
 }
 
 interface TenantInstallState {
@@ -206,6 +237,23 @@ export function mountTenantAppInstallRoutes(
 				400,
 			);
 		}
+		const creds = resolveAppInstallCredentials(method);
+		if (!creds.clientId || !creds.clientSecret) return notConfigured(c);
+		// A provider-signed callback is checked first, so a forged one neither
+		// burns the state nor reaches the code exchange.
+		const hmacParam = method.tenant.callbackHmacParam;
+		if (
+			hmacParam &&
+			!verifyCallbackHmac(new URL(c.req.url).searchParams, hmacParam, creds.clientSecret)
+		) {
+			return c.html(
+				renderOAuthErrorPage(
+					"invalid_request",
+					`The ${display} callback signature is missing or invalid.`,
+				),
+				400,
+			);
+		}
 		// One-time: a replayed or forged callback finds no state and writes nothing.
 		const state = await stateStore.consume(rawState);
 		if (!state) {
@@ -220,17 +268,15 @@ export function mountTenantAppInstallRoutes(
 		if (c.req.query(param) !== state.tenant || !tenantMatches(state.tenant)) {
 			return invalidTenant(c);
 		}
-		const creds = resolveAppInstallCredentials(method);
-		if (!creds.clientId || !creds.clientSecret) return notConfigured(c);
 
 		const result = await requestTenantInstallToken(
 			fetchToken,
 			renderTenantUrl(tokenUrl, state.tenant),
 			{
+				...method.codeExchangeParams,
 				client_id: creds.clientId,
 				client_secret: creds.clientSecret,
 				code,
-				expiring: "1",
 			},
 		).catch((error: unknown) => {
 			logger.warn({ provider, error: String(error) }, "Tenant install code exchange failed");

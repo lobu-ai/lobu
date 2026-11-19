@@ -49,7 +49,9 @@ import {
 	createAppWebhookRoutes,
 	createDataWebhookDelivery,
 	createDeclaredAppWebhookProvider,
+	createDefaultAppWebhookSecretResolver,
 } from "../routes/public/app-webhooks.js";
+import type { SecretStore } from "../../secrets/index.js";
 import { createPostgresAppInstallationStore } from "../../lobu/stores/app-installation-store.js";
 
 /** GitHub's DECLARED webhook schema, read off the real connector definition. */
@@ -839,13 +841,84 @@ async function installState(
 	return location.searchParams.get("state") as string;
 }
 
+/**
+ * Shopify's callback signature, computed the way Shopify documents it: hex
+ * HMAC-SHA256 (client secret) over the other params sorted by key, `k=v`
+ * joined with `&`.
+ */
+function shopifyCallbackHmac(
+	params: Record<string, string>,
+	secret = SHOPIFY_ENV.SHOPIFY_CLIENT_SECRET,
+): string {
+	const message = Object.keys(params)
+		.sort()
+		.map((key) => `${key}=${params[key]}`)
+		.join("&");
+	return createHmac("sha256", secret).update(message).digest("hex");
+}
+
+/** A provider-signed callback (pass `hmac` explicitly to forge or omit it). */
 function callback(
 	router: ReturnType<typeof createInstallRoutes>,
 	params: Record<string, string>,
+	hmac: string | null = shopifyCallbackHmac(params),
 ) {
-	return router.request(
-		`https://gateway.test/shopify/oauth_callback?${new URLSearchParams(params)}`,
-	);
+	const query = new URLSearchParams(params);
+	if (hmac !== null) query.set("hmac", hmac);
+	return router.request(`https://gateway.test/shopify/oauth_callback?${query}`);
+}
+
+const SHOPIFY_WEBHOOK_SCHEMA = new ShopifyConnector().definition
+	.webhook as ConnectorWebhookSchema;
+
+/**
+ * The Shopify app-webhook router built the way the gateway builds it: from the
+ * connector's declared schema, with the secret resolved through the method's
+ * declared `webhookSecretKey`.
+ */
+function buildShopifyWebhookRouter() {
+	return createAppWebhookRoutes({
+		installationStore: createPostgresAppInstallationStore(),
+		providers: [
+			createDeclaredAppWebhookProvider({
+				provider: "shopify",
+				appId: SHOPIFY_ENV.SHOPIFY_CLIENT_ID,
+				webhookSchema: SHOPIFY_WEBHOOK_SCHEMA,
+				providerInstance: SHOPIFY_METHOD.providerInstance,
+				onDelivery: createDataWebhookDelivery(
+					{ connectorKey: "shopify", webhookSchema: SHOPIFY_WEBHOOK_SCHEMA },
+					connectorRecordEnqueuer(queue),
+				),
+			}),
+		],
+		resolveAppWebhookSecret: createDefaultAppWebhookSecretResolver(
+			{ get: async () => null } as unknown as SecretStore,
+			{ shopify: SHOPIFY_METHOD.webhookSecretKey },
+		),
+	});
+}
+
+/** POST a Shopify app webhook; signs with base64 HMAC unless `signature` is given. */
+function shopifyWebhook(
+	router: ReturnType<typeof createAppWebhookRoutes>,
+	params: { topic: string; shop: string; body: string; signature?: string },
+) {
+	const signature =
+		params.signature ??
+		createHmac("sha256", SHOPIFY_ENV.SHOPIFY_CLIENT_SECRET)
+			.update(params.body)
+			.digest("base64");
+	return router.request("https://gateway.test/api/v1/app-webhooks/shopify", {
+		method: "POST",
+		headers: {
+			"content-type": "application/json",
+			"x-shopify-hmac-sha256": signature,
+			"x-shopify-topic": params.topic,
+			"x-shopify-shop-domain": params.shop,
+			"x-shopify-webhook-id": `wh-${params.topic}-${params.body.length}`,
+		},
+		body: params.body,
+	});
 }
 
 async function pendingShopifyRows(): Promise<any[]> {
@@ -1025,6 +1098,39 @@ describe("app-installation e2e: tenant data install (Shopify app)", () => {
 		expect(await pendingShopifyRows()).toHaveLength(0);
 	});
 
+	test("a callback with a missing or forged hmac is refused before the state is used or the code exchanged", async () => {
+		const { calls, fetchImpl } = fakeTokenEndpoint(() =>
+			tokenResponse("shpat_initial", "shprt_initial"),
+		);
+		const router = buildShopifyInstallRouter(fetchImpl);
+		const state = await installState(router);
+		const params = { code: "code-1", shop: SHOP, state, timestamp: "1700000000" };
+
+		const missing = await callback(router, params, null);
+		expect(missing.status).toBe(400);
+		const wrongSecret = await callback(
+			router,
+			params,
+			shopifyCallbackHmac(params, "not-the-client-secret"),
+		);
+		expect(wrongSecret.status).toBe(400);
+		// Signed for one code, replayed with another.
+		const tampered = await callback(
+			router,
+			{ ...params, code: "code-2" },
+			shopifyCallbackHmac(params),
+		);
+		expect(tampered.status).toBe(400);
+		expect(calls).toHaveLength(0);
+		expect(await pendingShopifyRows()).toHaveLength(0);
+
+		// None of them burned the state: the genuine callback still installs.
+		const genuine = await callback(router, params);
+		expect(genuine.status).toBe(302);
+		expect(calls).toHaveLength(1);
+		expect(await pendingShopifyRows()).toHaveLength(1);
+	});
+
 	test("install → callback parks an encrypted grant on an org-less pending row", async () => {
 		const { calls, fetchImpl } = fakeTokenEndpoint(() =>
 			tokenResponse("shpat_initial", "shprt_initial"),
@@ -1036,7 +1142,6 @@ describe("app-installation e2e: tenant data install (Shopify app)", () => {
 			code: "code-1",
 			shop: SHOP,
 			state,
-			hmac: "unverified",
 			host: "aG9zdA",
 			timestamp: "1700000000",
 		});
@@ -1192,6 +1297,66 @@ describe("app-installation e2e: tenant data install (Shopify app)", () => {
 			access_token: "shpat_r2",
 			refresh_token: "shprt_r2",
 		});
+	});
+
+	test("app webhooks verify the base64 signature, route by the shop header, and revoke on app/uninstalled", async () => {
+		await installAndClaim(ORG_A);
+		const active = await activeShopifyInstall(ORG_A);
+		const router = buildShopifyWebhookRouter();
+		// Order payloads carry no shop domain: only the header can route them.
+		const body = JSON.stringify({ id: 820982911946154500, total_price: "10.00" });
+
+		// Right key, wrong encoding (hex) and wrong key (base64) both fail closed.
+		const hexSigned = await shopifyWebhook(router, {
+			topic: "orders/create",
+			shop: SHOP,
+			body,
+			signature: createHmac("sha256", SHOPIFY_ENV.SHOPIFY_CLIENT_SECRET)
+				.update(body)
+				.digest("hex"),
+		});
+		expect(hexSigned.status).toBe(401);
+		const wrongKey = await shopifyWebhook(router, {
+			topic: "orders/create",
+			shop: SHOP,
+			body,
+			signature: createHmac("sha256", "not-the-client-secret").update(body).digest("base64"),
+		});
+		expect(wrongKey.status).toBe(401);
+
+		// A verified delivery for an unknown shop is acked without landing; the
+		// installed shop resolves its install (no feed declares the topic yet).
+		const unknownShop = await shopifyWebhook(router, {
+			topic: "orders/create",
+			shop: "other-store.myshopify.com",
+			body,
+		});
+		expect(unknownShop.status).toBe(200);
+		expect(await unknownShop.json()).toEqual({ ok: true, landed: false });
+		const routed = await shopifyWebhook(router, { topic: "orders/create", shop: SHOP, body });
+		expect(routed.status).toBe(200);
+		expect(await routed.json()).toEqual({ ok: true, triggered: false });
+
+		// The merchant removes the app: the install is revoked, the connection kept.
+		const uninstalled = await shopifyWebhook(router, {
+			topic: "app/uninstalled",
+			shop: SHOP,
+			body: JSON.stringify({ id: 548380009, domain: SHOP }),
+		});
+		expect(uninstalled.status).toBe(200);
+		expect(await uninstalled.json()).toEqual({ ok: true, revoked: true });
+		const { getDb } = await import("../../db/client.js");
+		const sql = getDb();
+		const [row] = await sql`SELECT status FROM app_installations WHERE id = ${active.id}`;
+		expect(row.status).toBe("revoked");
+		const [{ n }] = await sql`
+			SELECT count(*)::int AS n FROM connections
+			WHERE organization_id = ${ORG_A} AND deleted_at IS NULL
+		`;
+		expect(n).toBe(1);
+		// Later deliveries find no active install.
+		const after = await shopifyWebhook(router, { topic: "orders/create", shop: SHOP, body });
+		expect(await after.json()).toEqual({ ok: true, landed: false });
 	});
 
 	test("only an invalid_grant refresh marks the install error; a refused client does not", async () => {

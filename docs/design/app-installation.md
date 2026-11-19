@@ -107,19 +107,29 @@ interface InstallationTokenProvider {
 1. **Provider verifier**, declared on the connector's `ConnectorWebhookSchema`: an HMAC signature (GitHub raw-body;
    Slack `v0:{ts}:{rawBody}` + timestamp freshness; Jira per app type), or a declared `verification` such as
    `google-jwt` (a Google-signed bearer token checked against the declared audiences and signers, for Google Chat).
+   The digest is hex unless the schema declares `signatureEncoding: 'base64'` (Shopify's `x-shopify-hmac-sha256`).
    Dispatch is on the declared type, never on the provider slug.
 2. **Provider tenant extractor** (plugin): pull `(provider_instance, provider_app_id, external_tenant_id)`
    from body/headers/site-URL (GitHub: `installation.id` + headers; Slack: `team_id`/`enterprise_id`, possibly
-   form-encoded under `payload`; Jira: cloudId/clientKey).
+   form-encoded under `payload`; Jira: cloudId/clientKey). A declared `routingKeyHeader` is tried before the body
+   paths (Shopify: `x-shopify-shop-domain`, equal to the install's `external_tenant_id`).
 3. Resolve `app_installations` (active) → `organization_id` → dispatch to the install's feeds that declare
    the delivery's event type (marked due, or recorded through the feed's `normalize`). A delivery no feed
    declares is acked with nothing triggered; nothing is stored raw. Multi-replica safe (stateless; Postgres-mediated).
+   A verified delivery whose declared `eventType` is in `uninstallEvents` (Shopify `app/uninstalled`) instead marks
+   the install `revoked`: no token can be minted, so its feeds stop; connections and history are kept.
 4. **Unknown tenant before callback:** buffer/ack-and-drop with a log (don't 500); reconcile on install callback.
 
 ### 4.4 Install/connect flow
 - UI: **"Install on GitHub"** for app_installation connectors. Callback (`installation_id`, `setup_action`)
   → upsert `app_installations` (+ credential `auth_profiles` row for the App secret/token refs) → create/link `connections`.
 - Idempotent upsert on the active-tenant invariant; handle `setup_action ∈ {install, update, request}`.
+- Tenant-scoped `oauth-code-exchange` installs (Shopify) declare `tenant.callbackHmacParam` when the provider signs
+  the callback: the hex HMAC-SHA256 (client secret) of the other query params, sorted and form-encoded, is checked
+  constant-time before the state is consumed or the code exchanged (missing/mismatched → 400). Provider-specific
+  form fields for the install code exchange only (Shopify `expiring=1`) come from `codeExchangeParams`.
+- The parked grant lives on an org-less `pending` row (`metadata.tokens_enc`) until claimed; the daily
+  `reap-expired-pending-installs` job deletes unclaimed ones after 7 days, alongside unclaimed Slack installs.
 
 ### 4.5 Auth methods + resolver precedence (DECIDED)
 For the GitHub/org connector the methods are: **`app_installation` (primary)** → existing **`env`** PAT

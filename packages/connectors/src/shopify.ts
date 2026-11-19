@@ -10,6 +10,7 @@
  * claimed connection carries the store host under `config.shop`.
  */
 
+import { createHash } from 'node:crypto';
 import {
   ConnectorRuntime,
   type EventAttributionRule,
@@ -50,6 +51,7 @@ interface ShopifyOrder {
 
 interface ShopifyVariant {
   id: string;
+  legacyResourceId: string;
   sku: string | null;
   displayName: string;
   price: string;
@@ -62,6 +64,18 @@ interface OrdersCheckpoint {
   updated_at_min?: string;
   after?: string | null;
   high_water?: string;
+}
+
+/**
+ * `seen` maps each variant's legacy id to a short hash of its fingerprint as of
+ * the last COMPLETE catalog walk; `walk` collects the same for the walk in
+ * progress and replaces `seen` when that walk ends, so variants deleted from
+ * the store drop out and the checkpoint stays bounded by the catalog size.
+ */
+interface VariantsCheckpoint {
+  seen?: Record<string, string>;
+  walk?: Record<string, string>;
+  after?: string | null;
 }
 
 interface PageInfo {
@@ -88,7 +102,7 @@ const VARIANTS_QUERY = `query Variants($first: Int!, $after: String) {
   productVariants(first: $first, after: $after, sortKey: ID) {
     pageInfo { hasNextPage endCursor }
     nodes {
-      id sku displayName price inventoryQuantity updatedAt
+      id legacyResourceId sku displayName price inventoryQuantity updatedAt
       product { id legacyResourceId title vendor status handle }
     }
   }
@@ -161,22 +175,44 @@ export default class ShopifyConnector extends ConnectorRuntime {
           providerInstance: 'cloud',
           // Standard Shopify OAuth on the merchant's own host: the generic
           // install engine validates the `shop` query param against `tenant`,
-          // renders `{{tenant}}` into both URLs, and exchanges the callback code
-          // for an expiring offline token. The gateway renews it with the
-          // rotating refresh token; neither the client secret nor the refresh
-          // token ever reaches connector code.
+          // checks the callback's `hmac` signature, renders `{{tenant}}` into
+          // both URLs, and exchanges the callback code for an expiring offline
+          // token (`expiring=1`). The gateway renews it with the rotating
+          // refresh token; neither the client secret nor the refresh token ever
+          // reaches connector code.
           installShape: 'oauth-code-exchange',
           authorizeUrl: 'https://{{tenant}}/admin/oauth/authorize',
           tokenUrl: 'https://{{tenant}}/admin/oauth/access_token',
-          tenant: { param: 'shop', pattern: '^[a-zA-Z0-9][a-zA-Z0-9-]*\\.myshopify\\.com$' },
+          tenant: {
+            param: 'shop',
+            pattern: '^[a-zA-Z0-9][a-zA-Z0-9-]*\\.myshopify\\.com$',
+            callbackHmacParam: 'hmac',
+          },
+          codeExchangeParams: { expiring: '1' },
           // The hosted Lobu Shopify app's client, declared as env-var NAMES.
+          // Shopify signs app webhooks with the client secret.
           clientIdKey: 'SHOPIFY_CLIENT_ID',
           clientSecretKey: 'SHOPIFY_CLIENT_SECRET',
+          webhookSecretKey: 'SHOPIFY_CLIENT_SECRET',
           permissions: ['read_orders', 'read_products', 'read_inventory', 'read_customers'],
           required: true,
           description: 'Install the Lobu app on your Shopify store to sync orders, products and inventory.',
         },
       ],
+    },
+    // App-level webhooks configured once on the Lobu Shopify app arrive at
+    // `/api/v1/app-webhooks/shopify`, signed with base64 HMAC-SHA256 over the
+    // raw body and routed by the shop domain header to the shop's install.
+    // `app/uninstalled` revokes the install: feeds stop, history is kept.
+    webhook: {
+      delivery: 'app_installation',
+      signatureHeader: 'x-shopify-hmac-sha256',
+      algorithm: 'sha256',
+      signatureEncoding: 'base64',
+      dedupeHeader: 'x-shopify-webhook-id',
+      eventType: { header: 'x-shopify-topic' },
+      routingKeyHeader: 'x-shopify-shop-domain',
+      uninstallEvents: ['app/uninstalled'],
     },
     feeds: {
       orders: {
@@ -326,8 +362,12 @@ export default class ShopifyConnector extends ConnectorRuntime {
   private async syncVariants(ctx: SyncContext): Promise<SyncResult> {
     const shop = this.shop(ctx);
     const token = this.token(ctx);
-    const seen = { ...((ctx.checkpoint as { seen?: Record<string, string> } | null)?.seen ?? {}) };
-    let after: string | null = (ctx.checkpoint as { after?: string | null } | null)?.after ?? null;
+    const checkpoint = ctx.checkpoint as VariantsCheckpoint | null;
+    // Change detection compares against the last complete walk; a resumed walk
+    // keeps what it already collected.
+    const seen = checkpoint?.seen ?? {};
+    let after: string | null = checkpoint?.after ?? null;
+    const walk: Record<string, string> = after ? { ...(checkpoint?.walk ?? {}) } : {};
 
     for (let page = 0; page < MAX_PAGES_PER_RUN; page++) {
       const data = await this.gql<{ productVariants: { pageInfo: PageInfo; nodes: ShopifyVariant[] } }>(
@@ -339,11 +379,15 @@ export default class ShopifyConnector extends ConnectorRuntime {
       const events: EventEnvelope[] = [];
       for (const v of data.productVariants.nodes) {
         const available = v.inventoryQuantity ?? 0;
-        // Only changed variants emit: the checkpoint remembers each variant's
-        // last price/stock/status/SKU fingerprint.
-        const fingerprint = `${v.price}|${available}|${v.product.status}|${v.sku ?? ''}`;
-        if (seen[v.id] === fingerprint) continue;
-        seen[v.id] = fingerprint;
+        // Only changed variants emit: the checkpoint remembers a short hash of
+        // each variant's last price/stock/status/SKU fingerprint.
+        const fingerprint = createHash('sha256')
+          .update(`${v.price}|${available}|${v.product.status}|${v.sku ?? ''}`)
+          .digest('hex')
+          .slice(0, 12);
+        const previous = walk[v.legacyResourceId] ?? seen[v.legacyResourceId];
+        walk[v.legacyResourceId] = fingerprint;
+        if (previous === fingerprint) continue;
         const sku = (v.sku ?? '').trim();
         const name = v.displayName.endsWith(' - Default Title') ? v.product.title : v.displayName;
         const adminUrl = `https://${shop}/admin/products/${v.product.legacyResourceId}`;
@@ -368,8 +412,11 @@ export default class ShopifyConnector extends ConnectorRuntime {
       }
       const pageInfo = data.productVariants.pageInfo;
       const next: string | null = pageInfo.hasNextPage ? pageInfo.endCursor : null;
-      await ctx.commit(events, { seen, after: next });
-      if (!next) return { status: 'complete' };
+      if (!next) {
+        await ctx.commit(events, { seen: walk, after: null });
+        return { status: 'complete' };
+      }
+      await ctx.commit(events, { seen, walk, after: next });
       after = next;
     }
     return { status: 'more' };

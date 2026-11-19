@@ -14,7 +14,10 @@ import {
   resetTestDatabase,
 } from '../../gateway/__tests__/helpers/db-setup';
 import type { SlackWebApi } from '../../gateway/connections/slack-web';
-import { reapExpiredPendingSlackInstalls } from '../reap-expired-pending-installs';
+import {
+  reapExpiredPendingSlackInstalls,
+  reapExpiredPendingTenantInstalls,
+} from '../reap-expired-pending-installs';
 
 const ORG_ID = 'pending-install-reaper-org';
 
@@ -171,5 +174,70 @@ describe('reapExpiredPendingSlackInstalls', () => {
     const result = await reapExpiredPendingSlackInstalls(7, throwingApi);
     expect(result.expired).toBe(1);
     expect(await pendingTeamIds()).toEqual([]);
+  });
+});
+
+describe('reapExpiredPendingTenantInstalls', () => {
+  /** Seed a tenant data install row (any provider) with the given shape. */
+  async function seedTenantRow(params: {
+    tenant: string;
+    ageDays: number;
+    status: 'pending' | 'active';
+    orgId: string | null;
+    metadata: Record<string, string | boolean>;
+  }): Promise<void> {
+    const sql = getDb();
+    // `sql.json` stores a jsonb object, the shape the install callback writes.
+    await sql`
+      INSERT INTO app_installations
+        (organization_id, provider, provider_instance, provider_app_id,
+         external_tenant_id, status, metadata, created_at, updated_at)
+      VALUES
+        (${params.orgId}, 'tenant-e2e', 'cloud', 'tenant-e2e-client',
+         ${params.tenant}, ${params.status}, ${sql.json(params.metadata)},
+         now() - (${params.ageDays}::int * interval '1 day'), now())
+    `;
+  }
+
+  async function tenantIds(): Promise<string[]> {
+    const sql = getDb();
+    const rows = (await sql`
+      SELECT external_tenant_id FROM app_installations
+      WHERE provider = 'tenant-e2e'
+      ORDER BY external_tenant_id
+    `) as unknown as Array<{ external_tenant_id: string }>;
+    return rows.map((r) => r.external_tenant_id);
+  }
+
+  test('deletes only expired unclaimed parked grants; Slack reaping is unaffected', async () => {
+    const parked = { installer_user_id: 'u-1', tokens_enc: encrypt('{"access_token":"t"}') };
+    // Expired, unclaimed parked grant — reaped.
+    await seedTenantRow({ tenant: 'stale.example', ageDays: 10, status: 'pending', orgId: null, metadata: parked });
+    // Fresh parked grant — kept.
+    await seedTenantRow({ tenant: 'fresh.example', ageDays: 1, status: 'pending', orgId: null, metadata: parked });
+    // Old claimed setup row (tokens_enc dropped) — kept.
+    await seedTenantRow({
+      tenant: 'claimed.example',
+      ageDays: 30,
+      status: 'pending',
+      orgId: null,
+      metadata: { installer_user_id: 'u-1', claimed: true },
+    });
+    // Old active, org-bound install — kept.
+    await seedTenantRow({ tenant: 'active.example', ageDays: 30, status: 'active', orgId: ORG_ID, metadata: parked });
+    // A stale Slack pending row alongside — still reaped by the Slack reaper.
+    await seedPending('T-STALE', 10, 'xoxb-stale-token');
+
+    const tenant = await reapExpiredPendingTenantInstalls(7);
+    expect(tenant.expired).toBe(1);
+    expect(await tenantIds()).toEqual(['active.example', 'claimed.example', 'fresh.example']);
+    // The tenant reaper never touches a Slack row (no `tokens_enc`).
+    expect(await pendingTeamIds()).toEqual(['T-STALE']);
+
+    const slack = fakeSlackApi();
+    expect((await reapExpiredPendingSlackInstalls(7, slack)).expired).toBe(1);
+    expect(slack.revoked).toEqual(['xoxb-stale-token']);
+    expect(await pendingTeamIds()).toEqual([]);
+    expect(await tenantIds()).toEqual(['active.example', 'claimed.example', 'fresh.example']);
   });
 });
