@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { buildIssueRepair } from "../scripts/build-issue-repair";
-import {
+import trackIssues, {
   type IssueRecord,
   type Occurrence,
   planIssueChanges,
@@ -510,6 +510,67 @@ describe("runIssueTracker", () => {
       action: "create",
       fingerprint: FP(1),
     });
+  });
+
+  test("the default entrypoint keeps ingesting when the owner lookup fails", async () => {
+    const notices: Array<{ title?: string }> = [];
+    const created: Array<{ entity_type?: string }> = [];
+    const client = {
+      query: async (text: string) => {
+        if (text.includes("SELECT created_by FROM automations"))
+          throw new Error(
+            "the source is busy (3 reads running, 4 waiting); retry in 5s"
+          );
+        if (text.includes("issue_occurrences_hourly"))
+          return [
+            {
+              fingerprint: FP(1),
+              kind: "system",
+              issue_title: "Error: boom",
+              issue_culprit: "GET /x",
+              seen_2h: 1,
+              seen_24h: RULES.systemMinSeen24h,
+              seen_14d: RULES.systemMinSeen24h,
+              max_orgs: 1,
+              max_users: 1,
+              releases_2h: ["rel-b"],
+              last_release: "rel-b",
+              sample_trace_id: "",
+              first_seen_at: ago(3),
+              last_seen_at: ago(0.1),
+            },
+          ];
+        if (text.includes("count(*)")) return [{ n: 0 }];
+        return [];
+      },
+      notifications: {
+        send: async (input: { title?: string }) => {
+          notices.push(input);
+          return { delivered: true };
+        },
+      },
+      entities: {
+        create: async (input: { entity_type?: string }) => {
+          created.push(input);
+          return { entity: { id: 1 } };
+        },
+        update: async () => ({}),
+      },
+    };
+    const result = (await trackIssues(
+      {
+        window: { automation_id: 1, run_id: 1 },
+        organization_id: "synthetic-org",
+      } as never,
+      client as never,
+      { health: { connection: "synthetic", workspaces: ["kept"] } }
+    )) as { created: number; health_error: string | null };
+    expect(result.health_error).toContain("the source is busy");
+    expect(result.created).toBe(1);
+    expect(created).toHaveLength(1);
+    expect(notices).toContainEqual(
+      expect.objectContaining({ title: "Issue tracker health sweep failed" })
+    );
   });
 });
 
