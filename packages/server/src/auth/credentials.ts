@@ -9,8 +9,8 @@ import type { DbClient } from '../db/client';
 import { oauthAccountAppMismatch, oauthAccountGrantError, oauthAccountOwnershipError } from '../authz/oauth-account-ownership';
 import { scrubDiagnosticValue } from '@lobu/core';
 import { fetchCredentialedPublicUrl } from '@lobu/connector-worker/egress';
-import { cancelResponseBody } from '../utils/bounded-response';
 import {
+  isOAuthGrantRejection,
   readConnectorOAuthResponse,
   withConnectorOAuthDeadline,
 } from '../utils/connector-oauth-http';
@@ -62,16 +62,6 @@ const GRANT_REJECTED = 'grant_rejected' as const;
 
 const OAUTH_GRANT_REJECTED_ERROR =
   'The provider rejected this account authorization (expired or revoked). Reconnect the connection to restore access.';
-
-/** The `error` code of an OAuth error response, or null. The body is never logged. */
-async function readOAuthErrorCode(response: Response): Promise<string | null> {
-  try {
-    const parsed = JSON.parse(await readConnectorOAuthResponse(response)) as { error?: unknown };
-    return typeof parsed?.error === 'string' ? parsed.error : null;
-  } catch {
-    return null;
-  }
-}
 
 /**
  * Drop the rejected grant's tokens from the account, so no later call retries
@@ -399,14 +389,10 @@ export class CredentialService {
           redirect: 'error',
           signal,
         });
-        // Only a 400/401 body carries the OAuth error code; cancel any other
-        // failure body. A read error must not hide the HTTP status or turn an
-        // expected rejection into error telemetry, and the body is never logged.
+        // A read error must not hide the HTTP status or turn an expected
+        // rejection into error telemetry.
         if (!response.ok) {
-          const grantRejected = (response.status === 400 || response.status === 401)
-            && await readOAuthErrorCode(response) === 'invalid_grant';
-          if (response.status !== 400 && response.status !== 401) await cancelResponseBody(response);
-          return { response, text: '', grantRejected };
+          return { response, text: '', grantRejected: await isOAuthGrantRejection(response) };
         }
         const text = await readConnectorOAuthResponse(response);
         return { response, text, grantRejected: false };

@@ -29,6 +29,7 @@ import {
 	resolveAuthCredentials,
 } from "../../utils/auth-credential-secrets.js";
 import {
+	isOAuthGrantRejection,
 	readConnectorOAuthResponse,
 	withConnectorOAuthDeadline,
 } from "../../utils/connector-oauth-http.js";
@@ -86,14 +87,18 @@ function parseTokenGrant(text: string): TenantInstallTokenGrant | null {
 
 /**
  * POST a form-encoded grant to a tenant token endpoint. A non-2xx response
- * resolves to its HTTP status (the body is discarded unread — never logged);
- * a 2xx without an access token throws.
+ * resolves to its HTTP status plus whether it rejected the grant itself
+ * (`invalid_grant`); its body is never logged. A 2xx without an access token
+ * throws.
  */
 export async function requestTenantInstallToken(
 	fetchImpl: TenantInstallTokenFetch,
 	tokenUrl: string,
 	form: Record<string, string>,
-): Promise<{ grant: TenantInstallTokenGrant } | { status: number }> {
+): Promise<
+	| { grant: TenantInstallTokenGrant }
+	| { status: number; grantRejected: boolean }
+> {
 	return withConnectorOAuthDeadline(async (signal) => {
 		const response = await fetchImpl(tokenUrl, {
 			method: "POST",
@@ -106,8 +111,10 @@ export async function requestTenantInstallToken(
 			signal,
 		});
 		if (!response.ok) {
-			await response.body?.cancel().catch(() => undefined);
-			return { status: response.status };
+			return {
+				status: response.status,
+				grantRejected: await isOAuthGrantRejection(response),
+			};
 		}
 		const grant = parseTokenGrant(await readConnectorOAuthResponse(response));
 		if (!grant) throw new Error("Token endpoint returned no access token");
@@ -130,7 +137,7 @@ function toMinted(grant: {
 
 type RenewalOutcome =
 	| { minted: MintedInstallationToken }
-	| { status: number | null };
+	| { status: number | null; grantRejected?: boolean };
 
 /** The bundled (deployment-trusted) method for an install, keyed by its stamped connector. */
 function defaultResolveMethod(
@@ -255,7 +262,7 @@ export class RefreshTokenInstallationTokenProvider
 				client_id: clientId,
 				client_secret: clientSecret,
 			});
-			if ("status" in result) return { status: result.status };
+			if ("status" in result) return result;
 			// Persist the rotated pair every time: the old refresh token is retired.
 			const next: TenantInstallTokenGrant = {
 				access_token: result.grant.access_token,
@@ -277,8 +284,9 @@ export class RefreshTokenInstallationTokenProvider
 			this.cache.set(cacheKey, outcome.minted);
 			return outcome.minted;
 		}
-		if (outcome.status === 401) {
-			// The grant itself was refused: the install needs a fresh consent.
+		if (outcome.grantRejected) {
+			// The grant itself was refused (expired or revoked): the install needs
+			// a fresh consent. A refused client (a misconfigured secret) is not.
 			await getDb()`
 				UPDATE app_installations
 				SET status = 'error', updated_at = now()

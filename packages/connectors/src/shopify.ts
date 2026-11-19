@@ -58,13 +58,20 @@ interface ShopifyVariant {
   product: { id: string; legacyResourceId: string; title: string; vendor: string; status: string; handle: string };
 }
 
+interface OrdersCheckpoint {
+  updated_at_min?: string;
+  after?: string | null;
+  high_water?: string;
+}
+
 interface PageInfo {
   hasNextPage: boolean;
   endCursor: string | null;
 }
 
-const ORDERS_QUERY = `query Orders($first: Int!, $query: String) {
-  orders(first: $first, query: $query, sortKey: UPDATED_AT) {
+const ORDERS_QUERY = `query Orders($first: Int!, $after: String, $query: String) {
+  orders(first: $first, after: $after, query: $query, sortKey: UPDATED_AT) {
+    pageInfo { hasNextPage endCursor }
     nodes {
       id legacyResourceId name createdAt processedAt updatedAt cancelledAt
       displayFinancialStatus displayFulfillmentStatus email
@@ -87,8 +94,6 @@ const VARIANTS_QUERY = `query Variants($first: Int!, $after: String) {
   }
 }`;
 
-const UNPAID_FINANCIAL_STATUSES = new Set(['PENDING', 'AUTHORIZED', 'PARTIALLY_PAID']);
-
 const ORDER_ATTRIBUTIONS: EventAttributionRule[] = [
   {
     role: 'about',
@@ -99,20 +104,22 @@ const ORDER_ATTRIBUTIONS: EventAttributionRule[] = [
       titlePath: 'metadata.entity_name',
       createWhen: { path: 'metadata.order_key', exists: true },
     },
+    // Traits use Shopify's own field names; a workspace maps them onto its own
+    // schema in its config, never here.
     traits: {
-      document_no: { eventPath: 'metadata.document_no', mergeStrategy: 'init_only' },
-      date: { eventPath: 'metadata.date', mergeStrategy: 'init_only' },
-      channel: { eventPath: 'metadata.channel', mergeStrategy: 'init_only' },
+      name: { eventPath: 'metadata.name', mergeStrategy: 'init_only' },
+      processed_at: { eventPath: 'metadata.processed_at', mergeStrategy: 'init_only' },
       currency: { eventPath: 'metadata.currency', mergeStrategy: 'overwrite' },
-      status: { eventPath: 'metadata.status', mergeStrategy: 'overwrite' },
-      hold_reason: { eventPath: 'metadata.hold_reason', mergeStrategy: 'overwrite' },
+      financial_status: { eventPath: 'metadata.financial_status', mergeStrategy: 'overwrite' },
+      fulfillment_status: { eventPath: 'metadata.fulfillment_status', mergeStrategy: 'overwrite' },
+      cancelled_at: { eventPath: 'metadata.cancelled_at', mergeStrategy: 'overwrite' },
       subtotal: { eventPath: 'metadata.subtotal', mergeStrategy: 'overwrite' },
-      vat_total: { eventPath: 'metadata.vat_total', mergeStrategy: 'overwrite' },
-      grand_total: { eventPath: 'metadata.grand_total', mergeStrategy: 'overwrite' },
-      buyer_name: { eventPath: 'metadata.buyer_name', mergeStrategy: 'prefer_non_empty' },
-      buyer_email: { eventPath: 'metadata.buyer_email', mergeStrategy: 'prefer_non_empty' },
-      shopify_lines: { eventPath: 'metadata.lines', mergeStrategy: 'overwrite' },
-      shopify_url: { eventPath: 'metadata.admin_url', mergeStrategy: 'init_only' },
+      total_tax: { eventPath: 'metadata.total_tax', mergeStrategy: 'overwrite' },
+      total: { eventPath: 'metadata.total', mergeStrategy: 'overwrite' },
+      customer_name: { eventPath: 'metadata.customer_name', mergeStrategy: 'prefer_non_empty' },
+      customer_email: { eventPath: 'metadata.customer_email', mergeStrategy: 'prefer_non_empty' },
+      line_items: { eventPath: 'metadata.line_items', mergeStrategy: 'overwrite' },
+      admin_url: { eventPath: 'metadata.admin_url', mergeStrategy: 'init_only' },
     },
   },
 ];
@@ -128,14 +135,13 @@ const VARIANT_ATTRIBUTIONS: EventAttributionRule[] = [
       createWhen: { path: 'metadata.sku_key', exists: true },
     },
     traits: {
-      title: { eventPath: 'metadata.title', mergeStrategy: 'init_only' },
-      code: { eventPath: 'metadata.sku', mergeStrategy: 'init_only' },
-      on_hand: { eventPath: 'metadata.available', mergeStrategy: 'init_only' },
-      brand: { eventPath: 'metadata.vendor', mergeStrategy: 'prefer_non_empty' },
-      shopify_available: { eventPath: 'metadata.available', mergeStrategy: 'overwrite' },
-      shopify_price: { eventPath: 'metadata.price', mergeStrategy: 'overwrite' },
-      shopify_status: { eventPath: 'metadata.status', mergeStrategy: 'overwrite' },
-      shopify_url: { eventPath: 'metadata.admin_url', mergeStrategy: 'init_only' },
+      title: { eventPath: 'metadata.title', mergeStrategy: 'overwrite' },
+      sku: { eventPath: 'metadata.sku', mergeStrategy: 'init_only' },
+      vendor: { eventPath: 'metadata.vendor', mergeStrategy: 'prefer_non_empty' },
+      available: { eventPath: 'metadata.available', mergeStrategy: 'overwrite' },
+      price: { eventPath: 'metadata.price', mergeStrategy: 'overwrite' },
+      status: { eventPath: 'metadata.status', mergeStrategy: 'overwrite' },
+      admin_url: { eventPath: 'metadata.admin_url', mergeStrategy: 'init_only' },
     },
   },
 ];
@@ -245,22 +251,32 @@ export default class ShopifyConnector extends ConnectorRuntime {
   private async syncOrders(ctx: SyncContext): Promise<SyncResult> {
     const shop = this.shop(ctx);
     const token = this.token(ctx);
-    let since = String(
-      (ctx.checkpoint as { updated_at_min?: string } | null)?.updated_at_min ?? '1970-01-01T00:00:00Z'
-    );
+    const checkpoint = ctx.checkpoint as OrdersCheckpoint | null;
+    // One walk pages a fixed `updated_at >= since` query by cursor, so orders
+    // sharing an updatedAt second never stall it. The cursor is only valid for
+    // that query, so it is persisted together with `since`; the watermark moves
+    // to the highest updatedAt seen once the walk reaches its last page.
+    const since = checkpoint?.updated_at_min ?? '1970-01-01T00:00:00Z';
+    let after = checkpoint?.after ?? null;
+    let highWater = checkpoint?.high_water ?? since;
 
-    // Pages walk the updated_at watermark (sorted ascending) rather than a cursor,
-    // so each committed page leaves a checkpoint the next run can resume from.
     for (let page = 0; page < MAX_PAGES_PER_RUN; page++) {
-      const data = await this.gql<{ orders: { nodes: ShopifyOrder[] } }>(shop, token, ORDERS_QUERY, {
-        first: PAGE_SIZE,
-        query: `updated_at:>='${since}'`,
-      });
+      const data = await this.gql<{ orders: { pageInfo: PageInfo; nodes: ShopifyOrder[] } }>(
+        shop,
+        token,
+        ORDERS_QUERY,
+        { first: PAGE_SIZE, after, query: `updated_at:>='${since}'` }
+      );
       const orders = data.orders.nodes;
       const events: EventEnvelope[] = orders.map((o) => this.orderEvent(shop, o));
-      since = orders.at(-1)?.updatedAt ?? since;
-      await ctx.commit(events, { updated_at_min: since });
-      if (orders.length < PAGE_SIZE) return { status: 'complete' };
+      for (const o of orders) if (o.updatedAt > highWater) highWater = o.updatedAt;
+      const { hasNextPage, endCursor } = data.orders.pageInfo;
+      if (!hasNextPage || !endCursor) {
+        await ctx.commit(events, { updated_at_min: highWater });
+        return { status: 'complete' };
+      }
+      after = endCursor;
+      await ctx.commit(events, { updated_at_min: since, after, high_water: highWater });
     }
     return { status: 'more' };
   }
@@ -269,14 +285,7 @@ export default class ShopifyConnector extends ConnectorRuntime {
     const buyer = o.customer?.displayName || '';
     const total = Number(o.totalPriceSet.shopMoney.amount);
     const currency = o.totalPriceSet.shopMoney.currencyCode;
-    const status = o.cancelledAt
-      ? 'cancelled'
-      : o.displayFulfillmentStatus === 'FULFILLED'
-        ? 'shipped'
-        : o.displayFulfillmentStatus === 'PARTIALLY_FULFILLED'
-          ? 'partially_shipped'
-          : 'confirmed';
-    const unpaid = !o.cancelledAt && UNPAID_FINANCIAL_STATUSES.has(o.displayFinancialStatus ?? '');
+    const status = o.cancelledAt ? 'cancelled' : (o.displayFulfillmentStatus ?? 'unknown').toLowerCase();
     const lines = o.lineItems.nodes.map((l) => ({
       sku: l.sku,
       name: l.name,
@@ -297,20 +306,18 @@ export default class ShopifyConnector extends ConnectorRuntime {
       metadata: {
         order_key: `${shop}/${o.legacyResourceId}`,
         entity_name: `${o.name} - ${buyer || 'Shopify customer'}`,
-        document_no: o.name,
-        date: (o.processedAt ?? o.createdAt).slice(0, 10),
-        channel: 'Shopify',
+        name: o.name,
+        processed_at: o.processedAt ?? o.createdAt,
         currency,
-        status,
-        hold_reason: unpaid ? 'Awaiting payment' : '',
-        subtotal: Number(o.subtotalPriceSet.shopMoney.amount),
-        vat_total: Number(o.totalTaxSet.shopMoney.amount),
-        grand_total: total,
-        buyer_name: buyer,
-        buyer_email: o.customer?.email ?? o.email ?? '',
         financial_status: o.displayFinancialStatus,
         fulfillment_status: o.displayFulfillmentStatus,
-        lines,
+        cancelled_at: o.cancelledAt,
+        subtotal: Number(o.subtotalPriceSet.shopMoney.amount),
+        total_tax: Number(o.totalTaxSet.shopMoney.amount),
+        total,
+        customer_name: buyer,
+        customer_email: o.customer?.email ?? o.email ?? '',
+        line_items: lines,
         admin_url: adminUrl,
       },
     };

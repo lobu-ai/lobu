@@ -1194,7 +1194,7 @@ describe("app-installation e2e: tenant data install (Shopify app)", () => {
 		});
 	});
 
-	test("a refused refresh (401) marks the install error and fails the mint", async () => {
+	test("only an invalid_grant refresh marks the install error; a refused client does not", async () => {
 		await installAndClaim(ORG_A);
 		await primeAppInstallationMethods([
 			{ connectorKey: "shopify", provider: "shopify" },
@@ -1205,19 +1205,42 @@ describe("app-installation e2e: tenant data install (Shopify app)", () => {
 			refresh_token: "shprt_revoked",
 			expires_at: new Date(Date.now() - 60_000).toISOString(),
 		});
-		const { calls, fetchImpl } = fakeTokenEndpoint(
-			() => new Response("{}", { status: 401 }),
-		);
-		const pod = new RefreshTokenInstallationTokenProvider({ fetchImpl });
-		await expect(pod.mintToken(active)).rejects.toMatchObject({
-			reason: "exchange_failed",
-			status: 401,
-		});
-		expect(calls).toHaveLength(1);
 		const { getDb } = await import("../../db/client.js");
-		const [row] = await getDb()`
-			SELECT status FROM app_installations WHERE id = ${active.id}
-		`;
-		expect(row.status).toBe("error");
+		const installStatus = async () =>
+			(
+				await getDb()`
+					SELECT status FROM app_installations WHERE id = ${active.id}
+				`
+			)[0].status;
+
+		// A misconfigured client secret must not mark every install broken.
+		const refusedClient = fakeTokenEndpoint(
+			() =>
+				new Response(JSON.stringify({ error: "invalid_client" }), {
+					status: 401,
+				}),
+		);
+		await expect(
+			new RefreshTokenInstallationTokenProvider({
+				fetchImpl: refusedClient.fetchImpl,
+			}).mintToken(active),
+		).rejects.toMatchObject({ reason: "exchange_failed", status: 401 });
+		expect(refusedClient.calls).toHaveLength(1);
+		expect(await installStatus()).toBe("active");
+
+		// RFC 6749 §5.2: an expired or revoked refresh token answers 400 invalid_grant.
+		const refusedGrant = fakeTokenEndpoint(
+			() =>
+				new Response(JSON.stringify({ error: "invalid_grant" }), {
+					status: 400,
+				}),
+		);
+		await expect(
+			new RefreshTokenInstallationTokenProvider({
+				fetchImpl: refusedGrant.fetchImpl,
+			}).mintToken(active),
+		).rejects.toMatchObject({ reason: "exchange_failed", status: 400 });
+		expect(refusedGrant.calls).toHaveLength(1);
+		expect(await installStatus()).toBe("error");
 	});
 });
