@@ -6,14 +6,16 @@ export const person = defineEntityType({
   description:
     "A real-world person linked across connectors via identities (x_user_id, x_handle, wa_jid, phone, email, linkedin_slug, …). Metadata holds connector traits and optional human notes — not a CRM form.",
   metadata: { icon: "user", color: "#8B5CF6" },
-  // Source observations do not automatically verify people. Existing person
-  // identity candidates always require review, including contact-field matches.
+  // A LinkedIn profile belongs to one person, so a shared profile URL or slug
+  // links records without review; two different profiles conflict and fall
+  // back to review. Email and phone stay review: one person often has several,
+  // and an auto_link rule treats any two different values as a conflict.
   resolutionPolicy: {
     rules: [
       { fields: ["email"], normalizer: "email", onMatch: "review" },
       { fields: ["phone"], normalizer: "phone", onMatch: "review" },
-      { fields: ["linkedin_url"], normalizer: "exact", onMatch: "review" },
-      { fields: ["linkedin_slug"], normalizer: "exact", onMatch: "review" },
+      { fields: ["linkedin_url"], normalizer: "exact", onMatch: "auto_link" },
+      { fields: ["linkedin_slug"], normalizer: "exact", onMatch: "auto_link" },
     ],
   },
   // Trait names must match connector EventAttributionRule.traits keys.
