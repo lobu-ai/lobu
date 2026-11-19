@@ -9,9 +9,9 @@ import type { Static } from "@sinclair/typebox";
 import { readGrantedScopesFromAuthData } from "../../../../auth/oauth/scopes";
 import { resolveAutomationConnectionVisibilityUserId } from "../../../../authz/automation-connection-visibility";
 import { compileConnectionRowVisibility } from "../../../../authz/connection-visibility";
-import { type ConnectorPolicyExplanation, connectorPolicyNoteSuffix, explainConnectorPolicy } from "../../../../authz/connector-policy";
+import { type ConnectorPolicyExplanation, type ConnectorPolicyResult, connectorPolicyNoteSuffix, explainConnectorPolicy } from "../../../../authz/connector-policy";
 import { type ActingPrincipal, resolveActingPrincipal, resolveConnectorPolicy } from "../../../../authz/entity-policy";
-import { applyRunConnectorPolicyAtClaim } from "../../../../authz/operation-run-policy";
+import { applyRunConnectorPolicyAtClaim, resolveRunConnectorPolicy } from "../../../../authz/operation-run-policy";
 import { authzScopeFromToolContext } from "../../../../authz/scope";
 import { type DbClient, getDb } from "../../../../db/client";
 import { chatAccessOfToolContext, DEVICE_ACCESS_REFUSED, decideDeviceAccess } from "../../../../authz/device-access";
@@ -72,6 +72,7 @@ import {
 	deliverChatTransportSend,
 } from "../../../../operations/chat-transport-send";
 import { resolveRunInitiator } from "../../../initiator";
+import { isAutomationScriptCall } from "../../../access-control";
 import type { ToolContext } from "../../../registry";
 import { getOrgUrlContext } from "../../../view-urls";
 import { waitForDeviceActionRun } from "../../device-action-wait";
@@ -512,7 +513,7 @@ async function executeOperationInlineBackend(
  * the queued and the non-queued card writes — both cards are the same family
  * and must link identically.
  */
-async function resolveConnectionCardEntityIds(
+export async function resolveConnectionCardEntityIds(
 	sql: DbClient,
 	connectionId: number,
 ): Promise<number[]> {
@@ -573,6 +574,111 @@ async function pendingApprovalResult(
 	};
 }
 
+/** A run held by a Check: its requester confirms or withdraws it. */
+async function pendingCheckResult(
+	runId: number,
+	operationName: string,
+	ctx: ToolContext,
+	held?: ConnectorPolicyExplanation,
+): Promise<ManageOperationsResult> {
+	const sql = getDb();
+	const [run] = await sql<{ expires_at: Date }>`
+		SELECT expires_at FROM runs WHERE id = ${runId} AND organization_id = ${ctx.organizationId}
+	`;
+	if (!run) throw new Error(`Check run ${runId} disappeared after creation.`);
+	// A replay explains the hold under the current policy, which confirm
+	// re-evaluates anyway.
+	const current = held ? null : await resolveRunConnectorPolicy({ organizationId: ctx.organizationId, runId, sql });
+	const policy = held ?? (current ? explainConnectorPolicy(current) : { reason: "guardrail" as const, rules: [] });
+	return {
+		action: "execute",
+		run_id: runId,
+		status: "pending_check",
+		expires_at: new Date(run.expires_at).toISOString(),
+		message: `Operation '${operationName}' is held by a workspace check${connectorPolicyNoteSuffix(policy) || "."} If this action meets the rule, call operations.confirm({ run_id: ${runId}, statement }) with one sentence saying why. Otherwise call operations.cancel(${runId}) and try a corrected version.`,
+		policy,
+	};
+}
+
+/**
+ * Write the ledger card of a run that no person decides: an Auto or Log run
+ * at execute, or a Check run its requester confirmed. A device run born
+ * failed (manifest admission) gets its terminal card here instead.
+ */
+export async function insertDispatchCard(
+	tx: DbClient,
+	p: {
+		ctx: ToolContext;
+		connection: ConnectionRow;
+		operation: OperationDescriptor;
+		input: Record<string, unknown>;
+		cardEntityIds: number[];
+		runId: number;
+		/** The deciding policy, plus the confirmation for a Check. */
+		policy: ConnectorPolicyResult & { check?: { statement: string; confirmed_at: string } };
+		/** Set when the run was born failed. */
+		failedMessage: string | null;
+	},
+): Promise<number> {
+	const { ctx, connection, operation, input, runId, policy } = p;
+	const bornFailed = p.failedMessage !== null;
+	const initiator = resolveRunInitiator(ctx);
+	const event = await insertEvent(
+		{
+			entityIds: p.cardEntityIds,
+			organizationId: ctx.organizationId,
+			originId: autoOperationCardOriginId(runId),
+			title: bornFailed
+				? `${operation.name} — failed`
+				: `${operation.name} — dispatched`,
+			content: bornFailed
+				? `Operation failed: ${operation.name}${p.failedMessage ? ` — ${p.failedMessage}` : ""}`
+				: `Operation dispatched: ${operation.name}`,
+			semanticType: "operation",
+			connectorKey: connection.connector_key,
+			connectionId: connection.id,
+			runId,
+			interactionType: "approval",
+			// Pre-approved by the organization policy: it granted this
+			// operation standing approval, which is the same fact
+			// `runs.approval_status='auto'` records. No decision is pending, so
+			// the chain starts one state later than a queued run's.
+			interactionStatus: bornFailed ? "failed" : "approved",
+			interactionError: bornFailed ? p.failedMessage : null,
+			interactionInputSchema:
+				(operation.input_schema as Record<string, unknown> | undefined) ??
+				null,
+			interactionInput: input,
+			metadata: {
+				operation_key: operation.operation_key,
+				operation_name: operation.name,
+				action_key: operation.operation_key,
+				action_name: operation.name,
+				operation_input: input,
+				action_input: input,
+				input_schema: operation.input_schema ?? null,
+				// No approval_context and no review_fields: nothing here is
+				// awaiting review, and offering review affordances for a decision
+				// that was already made by configuration would be a lie.
+				status: bornFailed ? "failed" : AUTO_APPROVED_CARD_STATUS,
+				policy,
+				...(p.failedMessage ? { error_message: p.failedMessage } : {}),
+				connection_name: connection.display_name ?? connection.connector_key,
+				run_id: runId,
+				initiator: {
+					kind: initiator.initiatorKind,
+					...initiator.initiatorRef,
+				},
+				...currentMcpActivityEventMetadata(ctx),
+			},
+			authorName: ctx.clientId ?? "agent",
+			clientId: eventClientId(ctx),
+		},
+		{ sql: tx },
+	);
+	return Number(event.id);
+}
+
 async function replayExistingOperationRun(
 	claim: Awaited<ReturnType<typeof createConnectorOperationRun>>,
 	operationName: string,
@@ -580,6 +686,9 @@ async function replayExistingOperationRun(
 ): Promise<ManageOperationsResult> {
 	if (claim.approvalStatus === "pending" && claim.status === "pending") {
 		return pendingApprovalResult(claim.runId, operationName, ctx);
+	}
+	if (claim.approvalStatus === "check" && claim.status === "pending") {
+		return pendingCheckResult(claim.runId, operationName, ctx);
 	}
 
 	if (claim.status === "completed") {
@@ -825,7 +934,14 @@ export async function handleExecute(
 			automationId: ctx.actingAutomationId, flowId: browserContext?.flow_id, connectionId: connection.id, action: operation.operation_key, input });
 		if (control) runMetadata = { ...runMetadata, browser_recovery_control: control };
 	}
-	const shouldQueue = policy.effect === "approval" || deviceAccess === "ask_owner";
+	// Only a caller that can judge and reach operations.confirm is held for a
+	// Check. A delegated connector step or a chat transport send has no confirm
+	// path, and an Automation script cannot judge, so its Check is asked of a
+	// person instead.
+	const canConfirm = !delegation && !chatTransport && !isAutomationScriptCall(ctx);
+	const shouldQueue = policy.effect === "approval" || deviceAccess === "ask_owner" ||
+		(policy.effect === "check" && !canConfirm);
+	const holdForCheck = !shouldQueue && policy.effect === "check";
 	const policyExplanation = explainConnectorPolicy(policy, deviceAccess === "ask_owner");
 	const activation = args.activation
 		? {
@@ -1037,6 +1153,36 @@ export async function handleExecute(
 		};
 	}
 
+	if (holdForCheck) {
+		// A Check run carries no card and no notification: nobody but its
+		// requester can act on it until it is confirmed.
+		const claim = await sql.begin(async (tx) => {
+			await delegation?.assertActive(tx);
+			return createConnectorOperationRun({
+				organizationId: ctx.organizationId,
+				connectionId: connection.id,
+				connectorKey: connection.connector_key,
+				operationKey: operation.operation_key,
+				operationInput: input,
+				approvalMode: "check",
+				activation,
+				requireCompiledCode: operation.backend === "local_action",
+				policyPrincipalKind: actor.kind,
+				policyPrincipalId: actor.id,
+				createdByUserId: activation ? visibilityUserId : ctx.userId,
+				automationId: ctx.actingAutomationId,
+				parentRunId: ctx.actingRunId,
+				runMetadata,
+				sdkBrowserContext,
+				idempotencyKey: args.idempotency_key,
+				db: tx,
+			});
+		});
+		await trackOperationReaction(claim.runId);
+		if (!claim.created) return replayExistingOperationRun(claim, operation.name, ctx);
+		return pendingCheckResult(claim.runId, operation.name, ctx, policyExplanation);
+	}
+
 	// Non-queued (auto) runs need no human decision, but they still belong in
 	// the operation ledger — an organization whose operations all resolve to
 	// `auto` must not end up with an empty audit trail. Run creation binds to
@@ -1071,69 +1217,46 @@ export async function handleExecute(
 		const createdRunId = createdRun.runId;
 		// A device run whose manifest admission fails is born terminal, so its
 		// only card IS the terminal one — there is nothing to supersede later.
-		const bornFailed = createdRun.status === "failed";
-		const initiator = resolveRunInitiator(ctx);
-		await insertEvent(
-			{
-				entityIds: cardEntityIds,
-				organizationId: ctx.organizationId,
-				originId: autoOperationCardOriginId(createdRunId),
-				title: bornFailed
-					? `${operation.name} — failed`
-					: `${operation.name} — dispatched`,
-				content: bornFailed
-					? `Operation failed: ${operation.name}${createdRun.errorMessage ? ` — ${createdRun.errorMessage}` : ""}`
-					: `Operation dispatched: ${operation.name}`,
-				semanticType: "operation",
-				connectorKey: connection.connector_key,
-				connectionId: args.connection_id,
-				runId: createdRunId,
-				interactionType: "approval",
-				// Pre-approved by the organization policy: it granted this
-				// operation standing approval, which is the same fact
-				// `runs.approval_status='auto'` records. No decision is pending, so
-				// the chain starts one state later than a queued run's.
-				interactionStatus: bornFailed ? "failed" : "approved",
-				interactionError: bornFailed ? createdRun.errorMessage : null,
-				interactionInputSchema:
-					(operation.input_schema as Record<string, unknown> | undefined) ??
-					null,
-				interactionInput: input,
-				metadata: {
-					operation_key: operation.operation_key,
-					operation_name: operation.name,
-					action_key: operation.operation_key,
-					action_name: operation.name,
-					operation_input: input,
-					action_input: input,
-					input_schema: operation.input_schema ?? null,
-					// No approval_context and no review_fields: nothing here is
-					// awaiting review, and offering review affordances for a decision
-					// that was already made by configuration would be a lie.
-					status: bornFailed ? "failed" : AUTO_APPROVED_CARD_STATUS,
-					policy,
-					...(bornFailed && createdRun.errorMessage
-						? { error_message: createdRun.errorMessage }
-						: {}),
-					connection_name: connection.display_name ?? connection.connector_key,
-					run_id: createdRunId,
-					initiator: {
-						kind: initiator.initiatorKind,
-						...initiator.initiatorRef,
-					},
-					...currentMcpActivityEventMetadata(ctx),
-				},
-				authorName: ctx.clientId ?? "agent",
-				clientId: eventClientId(ctx),
-			},
-			{ sql: tx },
-		);
+		await insertDispatchCard(tx, {
+			ctx, connection, operation, input, cardEntityIds, policy,
+			runId: createdRunId,
+			failedMessage: createdRun.status === "failed" ? createdRun.errorMessage ?? "" : null,
+		});
 		return createdRun;
 	});
 	if (!claim.created) {
 		await trackOperationReaction(claim.runId);
 		return replayExistingOperationRun(claim, operation.name, ctx);
 	}
+	return dispatchAdmittedRun({
+		claim, ctx, connection, operation, input, visibilityUserId, runMetadata,
+		device: approvalMode === "device",
+		activation: activation !== undefined,
+		background: args.background === true,
+		trackOperationReaction,
+	});
+}
+
+/**
+ * Dispatch a run that cleared policy: a page-activated run waits for its visit,
+ * a device run for its worker, and an inline run executes here. Execute calls
+ * this for an Auto or Log run; confirm calls it for a Check run it released.
+ */
+export async function dispatchAdmittedRun(p: {
+	claim: Awaited<ReturnType<typeof createConnectorOperationRun>>;
+	ctx: ToolContext;
+	connection: ConnectionRow;
+	operation: OperationDescriptor;
+	input: Record<string, unknown>;
+	visibilityUserId: string | null;
+	runMetadata: Record<string, unknown> | null | undefined;
+	device: boolean;
+	activation: boolean;
+	background: boolean;
+	trackOperationReaction: (runId: number) => Promise<void>;
+}): Promise<ManageOperationsResult> {
+	const { claim, ctx, connection, operation, input, visibilityUserId, runMetadata,
+		device, activation, background, trackOperationReaction } = p;
 	const runId = claim.runId;
 	if (activation) {
 		await trackOperationReaction(runId);
@@ -1150,8 +1273,8 @@ export async function handleExecute(
 	// post completion to /api/workers/complete-action. Poll runs.status
 	// here until it flips to completed/failed/timeout, or we hit the
 	// device-action timeout. Returns action_output on success.
-	if (approvalMode === "device") {
-		if (args.background) {
+	if (device) {
+		if (background) {
 			await trackOperationReaction(runId);
 			return claim.status === "pending"
 				? {

@@ -5,13 +5,12 @@ import {
 	deleteEntityApprovalPolicy,
 	type EntityApprovalPolicy,
 	type EntityApprovalPolicyInput,
-	isEntityMutationMode,
 	isWriteResourceClass,
 	resolveActingPrincipal,
 	resolveConnectorPolicy,
 	upsertEntityApprovalPolicy,
 } from "../authz/entity-policy";
-import { isLegalActionEffect, type WriteAction } from "../authz/write-action-manifest";
+import { isLegalActionEffect, isWriteEffect, type WriteAction } from "../authz/write-action-manifest";
 import { getDb } from "../db/client";
 import * as invalidationEmitter from "../events/emitter";
 import { getOperationForConnection, listOperations } from "../operations/connector-operations";
@@ -189,7 +188,7 @@ export function parsePolicy(input: Record<string, unknown>, deleting: boolean): 
 	policy.effects = {};
 	for (const [action, effect] of Object.entries(effects)) {
 		if (
-			!isEntityMutationMode(effect) ||
+			!isWriteEffect(effect) ||
 			!isLegalActionEffect(resourceClass, action as WriteAction, effect)
 		) {
 			throw new Error(`Illegal effect for ${resourceClass}: '${action}' = '${String(effect)}'.`);

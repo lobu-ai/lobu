@@ -945,7 +945,7 @@ export default async (_ctx, client) => {
 	},
 	"operations.execute": {
 		summary:
-			"Execute a connector action. OBJECT signature: execute({ connection_id: number, operation_key: string, input?: object, idempotency_key?: string, background?: boolean, automation_source?: { automation_id: number, run_id: number } }). connector_key is not accepted. operation_key is an opaque manifest identifier: copy it exactly from operations.listAvailable and never derive it from the display name. A durable idempotency_key replays the original run instead of repeating the external request. For device work, background: true returns run_id promptly and survives SDK deadlines; read operations.getRun(run_id) later or explicitly operations.cancel(run_id). Approval and queue expiry still apply. A foreground run that fails throws, and the error's details hold the failed result (run_id, error_message, and any output the action reported, such as a browser dialog blocking it), so catch it and read error.details.output instead of parsing the message; left uncaught, the run_sdk result's error.details carries the same value.",
+			"Execute a connector action. OBJECT signature: execute({ connection_id: number, operation_key: string, input?: object, idempotency_key?: string, background?: boolean, automation_source?: { automation_id: number, run_id: number } }). connector_key is not accepted. operation_key is an opaque manifest identifier: copy it exactly from operations.listAvailable and never derive it from the display name. A durable idempotency_key replays the original run instead of repeating the external request. For device work, background: true returns run_id promptly and survives SDK deadlines; read operations.getRun(run_id) later or explicitly operations.cancel(run_id). Approval and queue expiry still apply. A run held by a workspace check returns status 'pending_check' with run_id and expires_at: release it with operations.confirm or withdraw it with operations.cancel before then. A foreground run that fails throws, and the error's details hold the failed result (run_id, error_message, and any output the action reported, such as a browser dialog blocking it), so catch it and read error.details.output instead of parsing the message; left uncaught, the run_sdk result's error.details carries the same value.",
 		access: "external",
 		enforcedTier: "write",
 		cost: "expensive",
@@ -967,9 +967,17 @@ export default async (_ctx, client) => {
 		example: "const run = await client.operations.getRun(123);",
 	},
 	"operations.cancel": {
-		summary: "Cancel your connector operation or withdraw your pending approval proposal, or any of them as a workspace administrator. Stops future claims/results and signals a running worker on its next heartbeat. A withdrawn proposal settles as expired, never as a human rejection. Existing external effects are not undone.",
+		summary: "Cancel your connector operation or withdraw your pending approval proposal, or any of them as a workspace administrator. Stops future claims/results and signals a running worker on its next heartbeat. A withdrawn proposal or check settles as withdrawn, never as a human rejection. Existing external effects are not undone.",
 		access: "write",
 		signature: "operations.cancel(run_id: number): Promise<unknown>",
+	},
+	"operations.confirm": {
+		summary:
+			"Release your own operation run held by a workspace check (execute returned status 'pending_check'). Pass one sentence saying why the action meets the rule; it is recorded with the run. Only the requester can confirm, only before expires_at, and only with the held input: to change the input, cancel and execute again. The policy is re-read first: if it now asks a person, the run is withdrawn (reason 'policy_changed') and execute must be called again. Returns the same result as execute.",
+		access: "write",
+		signature: "operations.confirm(input: { run_id: number; statement: string }): Promise<unknown>",
+		example:
+			"await client.operations.confirm({ run_id: 123, statement: 'The recipient is the customer the user named, and no figures are included.' });",
 	},
 	"operations.approve": {
 		summary: "Approve a pending run that required human approval.",

@@ -302,6 +302,9 @@ export async function reapStaleRuns(): Promise<ReapStaleRunsResult> {
 
       const heartbeatErrorMessage = 'worker_heartbeat_lost';
       const claimErrorMessage = 'worker_claim_timeout';
+      // A run held for a Check that its requester never confirmed. No worker
+      // was ever allowed to claim it, so it is not a dispatch failure.
+      const checkExpiredErrorMessage = 'policy_check_not_confirmed';
 
       // Approval-gated action runs have a durable card, so their timeout must
       // supersede that card in the SAME transaction as the runs write. Process
@@ -444,7 +447,7 @@ export async function reapStaleRuns(): Promise<ReapStaleRunsResult> {
       // the lock.
       const reaped = (await reserved`
         WITH stale_candidates AS (
-          SELECT id, status AS stale_status
+          SELECT id, status AS stale_status, approval_status AS stale_approval_status
           FROM public.runs
           WHERE ${reserved.unsafe(staleWhereSql)}
             AND NOT (run_type = 'action' AND approval_status = 'approved')
@@ -456,6 +459,7 @@ export async function reapStaleRuns(): Promise<ReapStaleRunsResult> {
               outcome = ${classifyRunOutcome({ status: "timeout" })},
               completed_at = current_timestamp,
               error_message = CASE
+                WHEN c.stale_approval_status = 'check' THEN ${checkExpiredErrorMessage}
                 WHEN c.stale_status = 'pending' THEN ${claimErrorMessage}
                 ELSE ${heartbeatErrorMessage}
               END
@@ -464,7 +468,7 @@ export async function reapStaleRuns(): Promise<ReapStaleRunsResult> {
           RETURNING r.id, r.run_type, r.feed_id, r.connection_id, r.connector_key,
                     r.connector_version, r.organization_id, r.dry_run, r.created_at,
                     r.connector_artifact_hash, r.target_device_worker_id,
-                    r.action_key, c.stale_status
+                    r.action_key, c.stale_status, c.stale_approval_status
         ),
         lost_syncs AS (
           SELECT feed_id, id AS run_id
@@ -581,6 +585,7 @@ export async function reapStaleRuns(): Promise<ReapStaleRunsResult> {
             })}
           ) run_cv ON true
           WHERE t.stale_status = 'pending'
+            AND t.stale_approval_status <> 'check'
         )
         SELECT
           (SELECT count(*)::int FROM timed_out) AS reaped,
@@ -622,7 +627,7 @@ export async function reapStaleRuns(): Promise<ReapStaleRunsResult> {
           -- forever, so the ledger would disagree with the run it describes.
           -- Approval-gated action runs are excluded from this sweep entirely
           -- (see the stale_candidates predicate), so every action row reaped
-          -- here is an auto one.
+          -- here is an auto one. A run held for a Check never got a card.
           (SELECT coalesce(
              json_agg(json_build_object(
                'runId', id,
@@ -632,7 +637,7 @@ export async function reapStaleRuns(): Promise<ReapStaleRunsResult> {
              )),
              '[]'::json
            )
-           FROM timed_out WHERE run_type = 'action'
+           FROM timed_out WHERE run_type = 'action' AND stale_approval_status <> 'check'
           ) AS timed_out_actions
       `) as unknown as Array<{
         reaped: number;

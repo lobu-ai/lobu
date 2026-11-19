@@ -52,6 +52,10 @@ function parseEnvInterval(name: string, fallback: string): string {
 /** How long an unclaimed device action remains eligible for worker pickup. */
 export const DEVICE_ACTION_QUEUE_BUDGET_MS = 60_000;
 
+/** How long a write held by a Check guardrail waits for its requester to
+ *  confirm it before the stale-run sweep times it out. */
+export const POLICY_CHECK_WINDOW_SECONDS = 600;
+
 /** Ceiling on how long a foreground device action may stay queued behind its
  *  BUSY target device, measured from when it became claimable. A device whose
  *  slots are full keeps polling with zero capacity; each such poll renews the

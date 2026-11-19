@@ -112,7 +112,7 @@ describe("connector policy collection", () => {
       expect(await snapshot()).toEqual(saved);
     }
     const autoGuardrail = await request("PUT", path(), { revision: saved.revision, rules: [grant, { ...guardrail, effect: "auto" }] });
-    expect(await autoGuardrail.json()).toEqual({ error: "invalid_request", message: "A guardrail can only require approval or block; use a grant to allow." });
+    expect(await autoGuardrail.json()).toEqual({ error: "invalid_request", message: "A guardrail can only log, check, require approval or block; use a grant to allow." });
 
     // Editing the guardrail keeps its row; an omitted note clears it.
     const softened = await request("PUT", path(), { revision: saved.revision, rules: [grant, { effect: "approval", kind: "guardrail" }] });

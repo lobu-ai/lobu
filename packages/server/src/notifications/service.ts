@@ -753,7 +753,7 @@ export async function refreshApprovalNotificationCards(
 		) decision ON true
 		WHERE r.organization_id = ${organizationId}
 		  AND r.id = ANY(${pgBigintArray(ids)}::bigint[])
-		  AND r.approval_status IN ('approved', 'rejected', 'expired')
+		  AND r.approval_status IN ('approved', 'rejected', 'expired', 'withdrawn')
 	`;
 
 	const edits: Promise<void>[] = [];
@@ -767,11 +767,13 @@ export async function refreshApprovalNotificationCards(
 				: typeof decisionMetadata.reason === "string"
 					? decisionMetadata.reason
 					: null;
+		// A withdrawn request settles like a lapsed one: nobody decided it.
+		const undecided = row.approval_status === "expired" || row.approval_status === "withdrawn";
 		const resolution: ActionResolution = {
 			status:
 				row.approval_status === "approved"
 					? "approved"
-					: row.approval_status === "expired"
+					: undecided
 						? "expired"
 						: "rejected",
 			actorName:
@@ -779,7 +781,7 @@ export async function refreshApprovalNotificationCards(
 					? decisionMetadata.reviewed_by_name
 					: null,
 			resolvedAt: row.resolved_at,
-			detail: row.approval_status === "expired" ? expiredDetail : null,
+			detail: undecided ? expiredDetail : null,
 		};
 		const settled = settleActionCard(metadata.card, resolution);
 		const content: AdapterPostableMessage = {

@@ -69,6 +69,10 @@ export function connectionOperationsExecutor(
         output: (result.output ?? {}) as Record<string, unknown>,
       };
     }
+    // A member's send is asked of a person, never held for a Check.
+    if (result.status === "pending_check") {
+      throw new Error(`Connector chat run ${result.run_id} was held for a check it cannot confirm`);
+    }
     const error =
       ("error_message" in result && result.error_message) ||
       ("message" in result && result.message) ||

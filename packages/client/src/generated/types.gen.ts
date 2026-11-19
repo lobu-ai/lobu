@@ -5432,6 +5432,14 @@ export type ManageOperationsData = {
       }
     | {
         /**
+         * Release your own operation run held by a workspace check (status pending_check). The statement says, in one sentence, why the action meets the rule; it is recorded with the run. The input cannot change: cancel and execute again to correct it.
+         */
+        action: "confirm";
+        run_id: number;
+        statement: string;
+      }
+    | {
+        /**
          * Org attention feed: notifications + recent user-facing runs (Automation/sync/action/internal), with optional adjacent aggregation and deep-links for the UI and agent context.
          */
         action: "list_activity";
@@ -5595,6 +5603,7 @@ export type ManageOperationsResponses = {
             note?: string;
           }>;
         };
+        reason?: "not_pending_check" | "check_expired" | "policy_changed";
       }
     | {
         action: "list_available";
@@ -5611,6 +5620,28 @@ export type ManageOperationsResponses = {
         status: "pending_approval";
         message: string;
         policy?: {
+          reason:
+            | "matched_rule"
+            | "guardrail"
+            | "default_auto"
+            | "device_owner"
+            | "unresolved_principal"
+            | "parent_approval"
+            | "unavailable_operation";
+          rules: Array<{
+            id: number;
+            kind: "grant" | "guardrail";
+            note?: string;
+          }>;
+        };
+      }
+    | {
+        action: "execute";
+        run_id: number;
+        status: "pending_check";
+        expires_at: string;
+        message: string;
+        policy: {
           reason:
             | "matched_rule"
             | "guardrail"

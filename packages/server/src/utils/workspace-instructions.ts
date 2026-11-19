@@ -91,6 +91,7 @@ export const DIRECT_MCP_INSTRUCTIONS = [
   '- `run_sdk` can create, update, or delete workspace data and can invoke connector operations. Use it only for a user-requested action; use `query_sdk` for reads and `dry_run=true` to preview supported writes.',
   '- For connector operations, treat `operation_key` as an opaque manifest identifier: copy it exactly from `operations.listAvailable` and never derive it from the display name. If no returned operation matches, refresh discovery instead of inventing a key.',
   '- A policy-gated operation returns `status: "pending_approval"` and a `run_id`. Call `get_approval` with that run id to show the canonical review card. Treat a pending operation as waiting, not failed.',
+  '- A run held by a workspace check returns `status: "pending_check"` with a rule note and `expires_at`. Only you can release it: if the action meets the rule, call `operations.confirm` with one sentence saying why; otherwise call `operations.cancel` and correct it. A person never sees a check, so do not ask them to approve it.',
   '- Do not infer permission to store conversation details, preferences, personal information, relationships, or files merely because they were mentioned.',
   '- Do not request, expose, or return authentication secrets.',
   '',

@@ -9,7 +9,7 @@ import { operationCardLabel, supersedeActionEvent } from '../tools/admin/approva
 import { connectorApprovalMetadata } from '../operations/operation-run-card';
 import { type ActionApprovalNotificationContext, notifyActionApprovalNeeded } from '../notifications/triggers';
 import { insertEvent } from '../utils/insert-event';
-import { type ConnectorPolicyResult, connectorPolicyNoteSuffix, explainConnectorPolicy } from './connector-policy';
+import { type ConnectorPolicyResult, connectorPolicyNoteSuffix, explainConnectorPolicy, runClearedHold, runsWithoutHold } from './connector-policy';
 import { resolveActingPrincipal, resolveConnectorPolicy, resolveStoredActingPrincipal } from './entity-policy';
 import { compileConnectionRowVisibility } from './connection-visibility';
 import { feedDefinitionSelection } from '../connectors/feed-definition-selection';
@@ -93,7 +93,7 @@ async function resolveSourceReadAccess(sql: DbClient, organizationId: string, ru
       operation: { connector_key: run.connector_key ?? '', operation_key: DEVICE_FEED_READ_ACTION_KEY, kind: 'read' }, sql });
     // Source reads require current Auto authority and have no approval flow.
     // Return a veto so browser implementation steps cannot inherit an Ask.
-    if (policy.effect !== 'auto') return { ...policy, effect: 'deny' };
+    if (!runsWithoutHold(policy.effect)) return { ...policy, effect: 'deny' };
   }
   return await isSourceReadFeedStillReadable(sql, organizationId, run)
     ? { effect: 'auto', ruleIds: [], rules: [], reason: 'parent_approval' } : unavailable();
@@ -104,7 +104,7 @@ export async function sourceReadRecoveryAllowed(organizationId: string, runId: n
   const sql = getDb();
   const run = await loadPolicyRun(sql, organizationId, runId);
   return !!run && run.action_key === DEVICE_FEED_READ_ACTION_KEY && isSourceFeedRead(run.run_metadata)
-    && (await resolveSourceReadAccess(sql, organizationId, run)).effect === 'auto';
+    && runsWithoutHold((await resolveSourceReadAccess(sql, organizationId, run)).effect);
 }
 
 /** Resolve execution authority from persisted provenance, never from the worker's input. */
@@ -170,8 +170,9 @@ export async function applyRunConnectorPolicyAtClaim(params: {
     !(run.status === 'running' && params.claimedBy !== undefined && run.claimed_by === params.claimedBy))) return false;
   if (!['auto', 'approved'].includes(run.approval_status)) return false;
   const policy = await resolveRunConnectorPolicy(params);
-  if (policy === null || policy.effect === 'auto') return true;
-  if (policy.effect === 'approval' && run.approval_status === 'approved') return true;
+  if (policy === null || runClearedHold(policy.effect, run)) return true;
+  // An unconfirmed Check reaching a claim was admitted under a laxer policy.
+  // Its requester is no longer in the loop, so it parks for a person.
 
   const blocked = policy.effect === 'deny';
   const message = blocked

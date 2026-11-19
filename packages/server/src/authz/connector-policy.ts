@@ -1,6 +1,7 @@
 import type { AvailableOperation } from "../operations/types";
 import { qualifiedOperationKey } from "../tools/admin/manage_operations/handlers/shared";
 import type { ActingPrincipal, EntityApprovalPolicy } from "./entity-policy";
+import { type WriteEffect, writeEffectRank } from "./write-action-manifest";
 
 export const CONNECTOR_POLICY_CATEGORIES = [
 	"read",
@@ -47,7 +48,7 @@ export interface ConnectorPolicyRuleRef {
 }
 
 export interface ConnectorPolicyResult {
-	effect: "auto" | "approval" | "deny";
+	effect: WriteEffect;
 	ruleIds: number[];
 	/** The deciding rules: guardrails first, then grants, each by id. */
 	rules: ConnectorPolicyRuleRef[];
@@ -75,7 +76,7 @@ export function explainConnectorPolicy(
 	deviceOwner = false,
 ): ConnectorPolicyExplanation {
 	return {
-		reason: deviceOwner && policy.effect === "auto" ? "device_owner" : policy.reason,
+		reason: deviceOwner && runsWithoutHold(policy.effect) ? "device_owner" : policy.reason,
 		rules: policy.rules.map((rule) => ({ ...rule })),
 	};
 }
@@ -99,7 +100,6 @@ type PolicyOperation = Pick<
 	AvailableOperation,
 	"connector_key" | "operation_key" | "kind" | "annotations"
 >;
-const rank = { auto: 0, approval: 1, deny: 2 } as const;
 
 function matchesCategory(
 	category: ConnectorPolicyCategory | null,
@@ -130,6 +130,37 @@ function moreSpecific(a: EntityApprovalPolicy, b: EntityApprovalPolicy): boolean
 	if (actionA === 1 && actionB === 1 && a.operationCategory !== b.operationCategory)
 		return false;
 	return targetA >= targetB && actionA >= actionB && (targetA > targetB || actionA > actionB);
+}
+
+/** Auto and Log only run with no hold; Log differs only in what the card records. */
+export function runsWithoutHold(effect: WriteEffect): boolean {
+	return effect === "auto" || effect === "log";
+}
+
+/** `runs.run_metadata` key the confirm action stamps on a Check run it releases. */
+export const POLICY_CHECK_METADATA_KEY = "policy_check";
+
+/**
+ * Whether a run already cleared the hold its current policy asks for. A human
+ * approval clears Ask and Check; the requester's own confirmation clears only
+ * Check. Block is never cleared.
+ */
+export function runClearedHold(
+	effect: WriteEffect,
+	run: { approval_status: string; run_metadata: Record<string, unknown> | null },
+): boolean {
+	if (runsWithoutHold(effect)) return true;
+	if (run.approval_status === "approved") return effect === "approval" || effect === "check";
+	return effect === "check" && run.run_metadata?.[POLICY_CHECK_METADATA_KEY] != null;
+}
+
+/**
+ * Who may confirm a Check: an agent session, a connected app, or an Automation
+ * that runs an agent. People and code-only Automations get Ask instead.
+ */
+export function canConfirmCheck(actor: ActingPrincipal): boolean {
+	if (actor.kind === "agent" || actor.kind === "app") return true;
+	return actor.kind === "automation" && actor.ownerAgentId !== null;
 }
 
 /** Keep the narrowest matching grants, apply principal restrictions, then every matching guardrail. */
@@ -176,14 +207,14 @@ export function evaluateConnectorPolicy(args: {
 		(rule) => rule.principalKind !== null && namesActor(rule),
 	);
 	// Every matching guardrail applies after the grant fold. A guardrail can only
-	// hold or block: a stored `auto` (rejected on write) or any unrecognised
-	// effect fails closed to deny.
+	// log, check, hold or block: a stored `auto` (rejected on write) or any
+	// unrecognised effect fails closed to deny.
 	const guardrails = matches.filter(
 		(rule) => rule.kind !== "grant" && namesActor(rule),
 	);
 	let contributors: EntityApprovalPolicy[] = [];
 	const fold = (rule: EntityApprovalPolicy, candidate: ConnectorPolicyResult["effect"]) => {
-		if (rank[candidate] > rank[effect]) {
+		if (writeEffectRank(candidate) > writeEffectRank(effect)) {
 			effect = candidate;
 			contributors = [];
 		}
@@ -195,10 +226,15 @@ export function evaluateConnectorPolicy(args: {
 		fold(rule, stored === "auto" || stored === "approval" ? stored : "deny");
 	}
 	for (const rule of guardrails) {
-		const candidate = rule.effects.execute === "approval" ? "approval" : "deny";
+		const stored = rule.effects.execute;
+		let candidate: WriteEffect =
+			stored === "log" || stored === "check" || stored === "approval" ? stored : "deny";
+		// Only an agent can confirm its own Check. A person or an Automation
+		// without an agent has nobody to confirm it, so it is asked instead.
+		if (candidate === "check" && !canConfirmCheck(args.actor)) candidate = "approval";
 		// A guardrail only raises the result; an equally strict guardrail still
 		// explains it.
-		if (rank[candidate] >= rank[effect]) fold(rule, candidate);
+		if (writeEffectRank(candidate) >= writeEffectRank(effect)) fold(rule, candidate);
 	}
 	const ordered = [...contributors].sort(
 		(a, b) => Number(a.kind === "grant") - Number(b.kind === "grant") || a.id - b.id,

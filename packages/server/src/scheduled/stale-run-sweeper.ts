@@ -154,8 +154,9 @@ export function buildStaleRunWhereSql(spec: StaleRunSweepSpec): string {
 	const statusPredicate = spec.includePending
 		? `((status = 'pending'
          -- A run awaiting HUMAN approval is not worker-claimable; the
-         -- claim-timeout must never reap it (#2044). Only 'auto'/'approved'
-         -- pending rows are genuinely waiting for a worker.
+         -- claim-timeout must never reap it (#2044). 'auto'/'approved'
+         -- pending rows are waiting for a worker; a 'check' row always carries
+         -- its confirmation deadline in expires_at, so only that branch reaps it.
          AND approval_status <> 'pending'
          AND (
            -- A page-activated action may remain intentionally parked until its

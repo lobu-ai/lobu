@@ -2,6 +2,7 @@ export {
 	ApproveAction,
 	ApproveBatchAction,
 	CancelAction,
+	ConfirmAction,
 	ExecuteAction,
 	GetRunAction,
 	LIST_RUNS_DEFAULT_EXCLUDED_RUN_TYPES,
