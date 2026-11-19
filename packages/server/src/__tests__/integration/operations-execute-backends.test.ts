@@ -1,7 +1,7 @@
 import { upsertEntityApprovalPolicy } from "../../authz/entity-policy";
 import GoogleCalendarConnector from "@lobu/connectors/google_calendar";
 import { fileInputSchema } from "@lobu/connector-sdk";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MCP_PROTOCOL_VERSION, REDACTED_SENTINEL } from "@lobu/core";
@@ -132,6 +132,12 @@ describe("operations.execute backend lifecycle", () => {
 					kind: "read",
 					input_schema: { type: "object", properties: {} },
 				},
+				download_source_copy: {
+					name: "Download a source file",
+					kind: "read",
+					outputFiles: "source-copy",
+					input_schema: { type: "object", properties: {} },
+				},
 				delete_event: GOOGLE_CALENDAR_DELETE_ACTION,
 				stage_browser: {
 					name: "Stage browser",
@@ -157,7 +163,7 @@ describe("operations.execute backend lifecycle", () => {
 						if (ctx.input.value === 'nul-error') {
 							throw new Error('local\\u0000boom');
 						}
-						if (ctx.actionKey === 'download') {
+						if (ctx.actionKey === 'download' || ctx.actionKey === 'download_source_copy') {
 							return { success: true, output: {
 								name: 'report.pdf',
 								attachments: [{
@@ -224,7 +230,7 @@ describe("operations.execute backend lifecycle", () => {
 		mcpConnectionId = mcp.id;
 		secondMcpConnectionId = secondMcp.id;
 		httpConnectionId = http.id;
-		for (const [connectorKey, keys] of [[LOCAL, ["echo", "stage_browser", "download"]], [MCP, ["remote_echo"]], [HTTP, ["create_item", "get_repo", "get_content", "get_environment"]]] as const) {
+		for (const [connectorKey, keys] of [[LOCAL, ["echo", "stage_browser", "download", "download_source_copy"]], [MCP, ["remote_echo"]], [HTTP, ["create_item", "get_repo", "get_content", "get_environment"]]] as const) {
 			// Every other action of these connectors asks, so the approval cases have something to hold.
 			await upsertEntityApprovalPolicy(orgId, {
 				resourceClass: "connector_action", connectorKey, effects: { execute: "approval" },
@@ -637,6 +643,57 @@ describe("operations.execute backend lifecycle", () => {
 			const [run] = await getTestDb()`SELECT action_output FROM runs WHERE id = ${result.run_id}`;
 			expect(JSON.stringify(run.action_output)).not.toContain(INLINE_FILE_BYTES.toString("base64"));
 			expect(run.action_output.attachments[0].artifact_id).toBe(attachment.artifact_id);
+		} finally {
+			services.mockRestore();
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps a source-copy action's file only as long as its link", async () => {
+		const directory = await mkdtemp(join(tmpdir(), "lobu-source-copy-test-"));
+		const store = new ArtifactStore(directory);
+		const services = vi.spyOn(gateway, "getLobuCoreServices").mockReturnValue({ getArtifactStore: () => store });
+		try {
+			const execute = async (operation_key: string) => {
+				const result = (await manageOperations({
+					action: "execute", connection_id: localConnectionId, operation_key, input: {},
+				}, {} as Env, ctx)) as { run_id: number; status: string; output: Record<string, unknown> };
+				expect(result.status).toBe("completed");
+				const [attachment] = result.output.attachments as Array<Record<string, unknown>>;
+				return { runId: result.run_id, attachment, artifactId: String(attachment.artifact_id) };
+			};
+			const before = Date.now();
+			const copy = await execute("download_source_copy");
+			const kept = await execute("download");
+
+			const copyMetadata = await store.inspect(copy.artifactId);
+			expect(copyMetadata?.expiresAt).toBeGreaterThanOrEqual(before + 24 * 60 * 60 * 1000);
+			expect(copyMetadata?.expiresAt).toBeLessThanOrEqual(Date.now() + 24 * 60 * 60 * 1000);
+			expect((await store.inspect(kept.artifactId))?.expiresAt).toBeUndefined();
+			const expiresAt = copyMetadata!.expiresAt!;
+			const token = new URL(String(copy.attachment.download_url)).searchParams.get("token")!;
+			expect(store.validateDownloadToken(token, copy.artifactId).valid).toBe(true);
+
+			// Past expiry the copy reads as missing even before any sweep runs.
+			const clock = vi.spyOn(Date, "now").mockReturnValue(expiresAt);
+			expect(await store.read(copy.artifactId)).toBeNull();
+			clock.mockRestore();
+
+			expect(await store.sweepExpired(expiresAt - 1)).toEqual({ deleted: 0 });
+			expect(await store.sweepExpired(expiresAt)).toEqual({ deleted: 1 });
+			expect(await store.sweepExpired(expiresAt)).toEqual({ deleted: 0 });
+			expect(await readdir(directory)).not.toContain(copy.artifactId);
+			expect((await store.read(kept.artifactId))?.bytes).toEqual(INLINE_FILE_BYTES);
+
+			// The run still describes the file it returned.
+			const [run] = await getTestDb()`SELECT action_output FROM runs WHERE id = ${copy.runId}`;
+			expect(run.action_output.attachments[0]).toMatchObject({
+				artifact_id: copy.artifactId,
+				filename: "report.pdf",
+				mime_type: "application/pdf",
+				size_bytes: INLINE_FILE_BYTES.length,
+				sha256: copy.attachment.sha256,
+			});
 		} finally {
 			services.mockRestore();
 			await rm(directory, { recursive: true, force: true });

@@ -69,11 +69,19 @@ describe('multipart file → operation approval → connector execution', () => 
         image: fileInputSchema({ maxBytes: 5 * 1024 * 1024, contentTypes: ['image/png'] }),
         alt_text: { type: 'string' }, rank: { type: 'integer' },
       }, required: ['image'] },
+    }, fetch_copy: {
+      name: 'Fetch a source file', kind: 'read', outputFiles: 'source-copy',
+      input_schema: { type: 'object', properties: {} },
     } })} WHERE organization_id = ${ctx.organizationId} AND key = ${CONNECTOR}`;
     await sql`UPDATE connector_versions SET compiled_code = ${`
       class ConnectorRuntime {
         async sync() { return { items: [] }; }
         async execute(ctx) {
+          if (ctx.actionKey === 'fetch_copy') {
+            return { success: true, output: { attachments: [{
+              filename: 'notice.pdf', mime_type: 'application/pdf', data: Buffer.from('source-bytes').toString('base64'),
+            }] } };
+          }
           if (!ctx.config.uploadUrl) return { success: true, output: ctx.input };
           const { image, alt_text, rank } = ctx.input;
           const form = new FormData();
@@ -278,6 +286,42 @@ describe('multipart file → operation approval → connector execution', () => 
       run_id: queued.run_id, worker_id: workerId, status: 'success', action_output: executed.mode === 'action' ? executed.output : {},
     } });
     expect(await completed.json()).toMatchObject({ success: true });
+  });
+
+  it('keeps a device-run source-copy file only as long as its link', async () => {
+    const queued = await manageOperations({ action: 'execute', connection_id: connectionId, operation_key: 'fetch_copy', input: {} }, {} as Env, ctx) as { run_id: number };
+    const before = Date.now();
+    const sql = getTestDb();
+    const approval = await post(`/api/${orgSlug}/manage_operations`, { cookie, body: { action: 'approve', run_id: queued.run_id } });
+    expect(await approval.json()).toMatchObject({ approved: true });
+    const workerId = 'file-handoff-test-worker';
+    const job = await (await post('/api/workers/poll', { body: { worker_id: workerId, capabilities: {} } })).json();
+    expect(job.run_id).toBe(queued.run_id);
+    const executed = await executeCompiledConnector({
+      compiledCode: job.compiled_code,
+      job: { mode: 'action', actionKey: job.action_key, runId: String(job.run_id), actionInput: job.action_input, config: {}, env: {}, credentials: {} },
+      allowedDomains: [],
+    });
+    if (executed.mode !== 'action') throw new Error('Expected connector action');
+    // An upstream MCP outage while the device runs the action must not stop it
+    // from completing: completion reads the action's declaration, never discovery.
+    await sql`UPDATE connector_definitions SET mcp_config = ${sql.json({ upstream_url: 'http://127.0.0.1:9/mcp' })}
+      WHERE organization_id = ${ctx.organizationId} AND key = ${CONNECTOR}`;
+    try {
+      const completed = await post('/api/workers/complete-action', { body: {
+        run_id: queued.run_id, worker_id: workerId, status: 'success', action_output: executed.output,
+      } });
+      expect(await completed.json()).toMatchObject({ success: true });
+    } finally {
+      await sql`UPDATE connector_definitions SET mcp_config = NULL WHERE organization_id = ${ctx.organizationId} AND key = ${CONNECTOR}`;
+    }
+    const [run] = await sql`SELECT action_output FROM runs WHERE id = ${queued.run_id}`;
+    const [attachment] = run.action_output.attachments as Array<Record<string, unknown>>;
+    expect(attachment).toMatchObject({ filename: 'notice.pdf', size_bytes: 'source-bytes'.length });
+    const metadata = await store.inspect(String(attachment.artifact_id));
+    expect(metadata?.expiresAt).toBeGreaterThanOrEqual(before + 24 * 60 * 60 * 1000);
+    expect(await store.sweepExpired(metadata!.expiresAt!)).toEqual({ deleted: 1 });
+    expect(await store.inspect(String(attachment.artifact_id))).toBeNull();
   });
 
   it.each(['missing', 'substituted', 'inline-replaced'])('fails a %s file before handing the approved run to a worker', async (condition) => {

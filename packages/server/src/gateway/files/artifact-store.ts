@@ -10,6 +10,8 @@ const logger = baseLogger.child({ module: "artifact-store" });
 
 const DEFAULT_ARTIFACTS_DIR = path.join(os.tmpdir(), "lobu-artifacts");
 const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000;
+/** A copy of a file that still lives in its source is kept as long as its link. */
+export const SOURCE_COPY_RETAIN_MS = DEFAULT_TTL_MS;
 // Keep payload bytes separate from reserved metadata regardless of filename.
 const ARTIFACT_PAYLOAD_FILENAME = "content";
 const ARTIFACT_ID_PATTERN = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
@@ -17,6 +19,7 @@ const ARTIFACT_SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const ARTIFACT_METADATA_MAX_BYTES = 16 * 1024;
 export const MAX_ARTIFACT_BYTES = 50 * 1024 * 1024;
 const ARTIFACT_TRASH_DIRNAME = ".trash";
+const ARTIFACT_EXPIRY_DIRNAME = ".expiring";
 const DOWNLOAD_TOKEN_MAX_CHARS = 4096;
 
 export interface StoredArtifactMetadata {
@@ -28,6 +31,8 @@ export interface StoredArtifactMetadata {
   sha256: string;
   /** Immutable Lobu resource identity allowed to read this artifact internally. */
   binding?: string;
+  /** Epoch ms after which the artifact reads as missing and the sweep deletes it. */
+  expiresAt?: number;
 }
 
 interface PublishArtifactResult {
@@ -142,7 +147,10 @@ function isStoredArtifactMetadata(
     typeof metadata.sha256 === "string" &&
     ARTIFACT_SHA256_PATTERN.test(metadata.sha256) &&
     (metadata.binding === undefined ||
-      (typeof metadata.binding === "string" && metadata.binding.length <= 2048))
+      (typeof metadata.binding === "string" && metadata.binding.length <= 2048)) &&
+    (metadata.expiresAt === undefined ||
+      (typeof metadata.expiresAt === "number" &&
+        Number.isSafeInteger(metadata.expiresAt)))
   );
 }
 
@@ -212,6 +220,29 @@ async function syncDirectoryEntry(dirPath: string): Promise<void> {
   }
 }
 
+/**
+ * An expiring artifact's marker is named `<expiresAt>-<artifactId>`, so the
+ * sweep can tell which artifacts are due from a directory listing alone.
+ */
+function expiryMarkerName(expiresAt: number, artifactId: string): string {
+  return `${expiresAt}-${artifactId}`;
+}
+
+function parseExpiryMarkerName(
+  name: string,
+): { expiresAt: number; artifactId: string } | null {
+  const separator = name.indexOf("-");
+  if (separator <= 0) return null;
+  const expiresAt = Number(name.slice(0, separator));
+  const artifactId = name.slice(separator + 1);
+  if (!Number.isSafeInteger(expiresAt) || !ARTIFACT_ID_PATTERN.test(artifactId)) {
+    return null;
+  }
+  return name === expiryMarkerName(expiresAt, artifactId)
+    ? { expiresAt, artifactId }
+    : null;
+}
+
 function resolveArtifactsDir(baseDir: string | undefined): string {
   const configured = baseDir?.trim() || process.env.LOBU_ARTIFACTS_DIR?.trim();
   if (configured) return configured;
@@ -265,6 +296,10 @@ export class ArtifactStore {
     try {
       const parsed = JSON.parse(raw.toString("utf8")) as unknown;
       if (!isStoredArtifactMetadata(parsed, artifactId)) return null;
+      // Expired reads as missing even before the sweep has removed it.
+      if (parsed.expiresAt !== undefined && Date.now() >= parsed.expiresAt) {
+        return null;
+      }
       return { metadata: parsed, dirStat };
     } catch {
       return null;
@@ -297,6 +332,11 @@ export class ArtifactStore {
    */
   private trashDir(): string {
     return path.join(this.baseDir, ARTIFACT_TRASH_DIRNAME);
+  }
+
+  /** Same placement rule as {@link trashDir}; never a UUID, so never an artifact. */
+  private expiryDir(): string {
+    return path.join(this.baseDir, ARTIFACT_EXPIRY_DIRNAME);
   }
 
   private async drainTrash(): Promise<void> {
@@ -348,6 +388,11 @@ export class ArtifactStore {
     publicGatewayUrl: string;
     ttlMs?: number;
     binding?: string;
+    /**
+     * Keep the artifact only this long, then delete it. Its download link
+     * lasts exactly as long. Absent: the artifact is kept.
+     */
+    retainMs?: number;
   }): Promise<PublishArtifactResult> {
     if (params.buffer.length > MAX_ARTIFACT_BYTES) {
       throw new RangeError(
@@ -359,6 +404,9 @@ export class ArtifactStore {
     const contentType = params.contentType || "application/octet-stream";
     const createdAt = Date.now();
     const checksum = sha256(params.buffer);
+    const expiresAt =
+      params.retainMs === undefined ? undefined : createdAt + params.retainMs;
+    const ttlMs = params.retainMs ?? params.ttlMs;
     const metadata: StoredArtifactMetadata = {
       artifactId,
       filename,
@@ -367,6 +415,7 @@ export class ArtifactStore {
       createdAt,
       sha256: checksum,
       ...(params.binding ? { binding: params.binding } : {}),
+      ...(expiresAt === undefined ? {} : { expiresAt }),
     };
 
     const dir = this.artifactDir(artifactId);
@@ -375,6 +424,17 @@ export class ArtifactStore {
       // Also creates `baseDir` itself, which the non-recursive mkdir below
       // relies on: a first publish onto an empty mount must not ENOENT.
       await this.drainTrash();
+      if (expiresAt !== undefined) {
+        // Marker first: a crash after the artifact lands must still leave the
+        // sweep a way to find it. A marker without its artifact is harmless.
+        const expiryDir = this.expiryDir();
+        await fs.mkdir(expiryDir, { recursive: true, mode: 0o700 });
+        await writeDurableFile(
+          path.join(expiryDir, expiryMarkerName(expiresAt, artifactId)),
+          "",
+        );
+        await syncDirectoryEntry(expiryDir);
+      }
       // Exclusive: a collision on a freshly minted UUID means the directory is
       // not ours, so never adopt it.
       await fs.mkdir(dir, { recursive: false, mode: 0o700 });
@@ -419,7 +479,7 @@ export class ArtifactStore {
       downloadUrl: this.buildDownloadUrl(
         normalizeBaseUrl(params.publicGatewayUrl),
         artifactId,
-        params.ttlMs,
+        ttlMs,
         params.binding,
       ),
       sha256: checksum,
@@ -488,6 +548,36 @@ export class ArtifactStore {
       throw storageFailure("cleanup", error);
     }
     logger.info(`Deleted artifact ${artifactId}`);
+  }
+
+  /**
+   * Delete every artifact whose retention has run out. Safe to run from
+   * several servers at once: deletion is rename-then-remove and tolerates a
+   * concurrent loser, and a marker is removed only after its artifact is gone.
+   */
+  async sweepExpired(now = Date.now()): Promise<{ deleted: number }> {
+    const expiryDir = this.expiryDir();
+    let markers: string[];
+    try {
+      markers = await fs.readdir(expiryDir);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return { deleted: 0 };
+      throw storageFailure("cleanup", error);
+    }
+    let deleted = 0;
+    for (const marker of markers) {
+      const parsed = parseExpiryMarkerName(marker);
+      if (!parsed || parsed.expiresAt > now) continue;
+      try {
+        await this.quarantineAndDelete(parsed.artifactId);
+        await fs.rm(path.join(expiryDir, marker), { force: true });
+      } catch (error) {
+        throw storageFailure("cleanup", error);
+      }
+      deleted += 1;
+    }
+    if (deleted > 0) logger.info(`Deleted ${deleted} expired artifacts`);
+    return { deleted };
   }
 
   /**

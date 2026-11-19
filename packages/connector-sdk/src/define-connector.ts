@@ -181,6 +181,7 @@ function buildDefinition(spec: ConnectorSpec): RuntimeConnectorDefinition {
             inputSchema: action.inputSchema,
             outputSchema: action.outputSchema,
             ...(action.delivery ? { delivery: action.delivery } : {}),
+            ...(action.outputFiles ? { outputFiles: action.outputFiles } : {}),
           },
         ],
       ),

@@ -488,6 +488,13 @@ export function getLocalActionKind(def: Record<string, any>): "read" | "write" {
 		: "write";
 }
 
+/** An action definition's `outputFiles` declaration; only executable local actions have one. */
+function localActionOutputFiles(def: Record<string, any> | undefined): "source-copy" | undefined {
+	return def?.delivery !== "chat_transport" && def?.outputFiles === "source-copy"
+		? "source-copy"
+		: undefined;
+}
+
 function getLocalActionOperations(
 	connectorKey: string,
 	connectorName: string,
@@ -501,6 +508,7 @@ function getLocalActionOperations(
 	// unsupported (#2033 item 2).
 	const executeSupported = supportsExecute !== false;
 	return Object.entries(actionsSchema).map(([key, def]): OperationDescriptor => {
+		const outputFiles = localActionOutputFiles(def);
 		const common = {
 			connector_key: connectorKey,
 			connector_name: connectorName,
@@ -527,7 +535,11 @@ function getLocalActionOperations(
 			backend: "local_action",
 			// Verification runs in the gateway; ordinary actions still need execute().
 			supports_execute: executeSupported || (hasBrowser && key === BROWSER_VERIFY_OPERATION),
-			backend_config: { backend: "local_action", actionKey: key },
+			backend_config: {
+				backend: "local_action",
+				actionKey: key,
+				...(outputFiles ? { outputFiles } : {}),
+			},
 		};
 	});
 }
@@ -829,31 +841,29 @@ export async function listOperations(params: {
 	};
 }
 
-export async function getOperationForConnection(
+type ConnectionConnectorRow = ConnectorRow & {
+	id: number;
+	connector_key: string;
+	connector_version: string;
+	status: string;
+	auth_profile_id: number | null;
+	app_auth_profile_id: number | null;
+	display_name: string | null;
+	config: Record<string, unknown> | null;
+	device_worker_id: string | null;
+	device_platform: string | null;
+	connector_runtime: Record<string, unknown> | null;
+	connector_manifest_backed: boolean;
+	connector_manifest_hash: string | null;
+	connector_artifact_source_path: string | null;
+};
+
+/** The connection with the connector contract it runs (a device-pinned manifest wins). */
+async function readConnectionConnectorRow(
 	organizationId: string,
 	connectionId: number,
-	operationKey: string,
-	sql: DbClient = getDb(),
-): Promise<{
-	connection: {
-		id: number;
-		connector_key: string;
-		connector_version: string;
-		status: string;
-		auth_profile_id: number | null;
-		app_auth_profile_id: number | null;
-		display_name: string | null;
-		config: Record<string, unknown> | null;
-		device_worker_id: string | null;
-		device_platform: string | null;
-		connector_runtime: Record<string, unknown> | null;
-		connector_manifest_backed: boolean;
-		connector_manifest_hash: string | null;
-		connector_artifact_source_path: string | null;
-		name: string;
-	};
-	operation: OperationDescriptor;
-} | null> {
+	sql: DbClient,
+): Promise<ConnectionConnectorRow | null> {
 	const rows = await sql`
     SELECT
       c.id,
@@ -899,9 +909,33 @@ export async function getOperationForConnection(
     ORDER BY cd.updated_at DESC
     LIMIT 1
   `;
+	return (rows[0] as unknown as ConnectionConnectorRow | undefined) ?? null;
+}
 
-	if (rows.length === 0) return null;
-	const row = rows[0] as unknown as ConnectorRow & {
+/**
+ * A local action's `outputFiles` declaration, read from the connection's
+ * contract alone. Run completion uses this instead of
+ * {@link getOperationForConnection} so an upstream MCP outage can never stop a
+ * finished action from completing.
+ */
+export async function getLocalActionOutputFiles(
+	organizationId: string,
+	connectionId: number,
+	actionKey: string,
+	sql: DbClient = getDb(),
+): Promise<"source-copy" | undefined> {
+	const row = await readConnectionConnectorRow(organizationId, connectionId, sql);
+	const def = row?.actions_schema?.[actionKey];
+	return def && typeof def === "object" ? localActionOutputFiles(def) : undefined;
+}
+
+export async function getOperationForConnection(
+	organizationId: string,
+	connectionId: number,
+	operationKey: string,
+	sql: DbClient = getDb(),
+): Promise<{
+	connection: {
 		id: number;
 		connector_key: string;
 		connector_version: string;
@@ -916,7 +950,12 @@ export async function getOperationForConnection(
 		connector_manifest_backed: boolean;
 		connector_manifest_hash: string | null;
 		connector_artifact_source_path: string | null;
+		name: string;
 	};
+	operation: OperationDescriptor;
+} | null> {
+	const row = await readConnectionConnectorRow(organizationId, connectionId, sql);
+	if (!row) return null;
 	const operations = await buildConnectorOperations(
 		{
 			key: row.connector_key,
