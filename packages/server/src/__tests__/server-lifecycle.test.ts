@@ -367,6 +367,54 @@ describe("buildWrapperApp", () => {
 		}
 	});
 
+	it("reports a provider 5xx the model proxy relays as a dependency failure, response unchanged", async () => {
+		const { buildWrapperApp } = await import("../server-lifecycle");
+		const { SecretProxy } = await import("../gateway/proxy/secret-proxy");
+		const { Hono } = await import("hono");
+		const exporter = new InMemorySpanExporter();
+		await shutdownTracing();
+		initTracing({ serviceName: "proxy-relay-test", spanProcessors: [new SimpleSpanProcessor(exporter)] });
+		const upstream = http.createServer((req, res) => {
+			if (req.url?.startsWith("/stream")) {
+				res.writeHead(503, { "content-type": "text/event-stream", "retry-after": "7" });
+				res.end("data: overloaded\n\n");
+				return;
+			}
+			res.writeHead(req.url?.startsWith("/limited") ? 429 : 503, { "content-type": "application/json", "retry-after": "7" });
+			res.end(JSON.stringify({ error: { message: "The model is overloaded." } }));
+		});
+		await new Promise<void>((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+		try {
+			const port = (upstream.address() as net.AddressInfo).port;
+			const proxy = new SecretProxy({ defaultUpstreamUrl: `http://127.0.0.1:${port}` }, { get: async () => null } as never);
+			const app = new Hono();
+			app.route("/api/proxy", proxy.getApp());
+			const wrapper = buildWrapperApp({} as never, app);
+			const post = (path: string) => wrapper.request(`/lobu/api/proxy${path}`, { method: "POST", body: "{}" });
+
+			// The caller's SDK retries on the provider's own status, headers and body.
+			const unavailable = await post("/unavailable");
+			expect([unavailable.status, unavailable.headers.get("retry-after"), await unavailable.json()])
+				.toEqual([503, "7", { error: { message: "The model is overloaded." } }]);
+			const stream = await post("/stream");
+			expect([stream.status, stream.headers.get("content-type"), await stream.text()])
+				.toEqual([503, "text/event-stream", "data: overloaded\n\n"]);
+			expect((await post("/limited")).status).toBe(429);
+
+			const requests = exporter.getFinishedSpans().filter((span) => span.kind === SpanKind.SERVER);
+			expect(requests).toHaveLength(3);
+			// The provider failed, not this server: same typed failure as the outbound call's own span.
+			for (const span of requests.slice(0, 2)) {
+				expect(span.attributes).toMatchObject({ "http.response.status_code": 503, "exception.type": "UpstreamHttpError", "error.code": "UPSTREAM_5XX", "error.kind": "dependency" });
+			}
+			// A relayed 4xx is the provider's answer to the caller, not a failure to report.
+			expect(requests[2].status.code).toBe(SpanStatusCode.UNSET);
+		} finally {
+			await new Promise<void>((resolve) => upstream.close(() => resolve()));
+			await shutdownTracing();
+		}
+	});
+
 	it("attributes verified settings callers without treating worker agent ids as users", async () => {
 		const { buildWrapperApp } = await import("../server-lifecycle");
 		const { Hono } = await import("hono");
