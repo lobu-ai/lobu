@@ -37,6 +37,8 @@ function linkedIn(
     signedIn?: string;
     company?: { following: boolean };
     sentTotal?: number;
+    /** Accounts without an overflow menu see the relationship control in the header itself. */
+    header?: "menu" | "buttons" | "unrecognized";
   } = {}
 ) {
   const world = {
@@ -131,6 +133,38 @@ function linkedIn(
   const profileTop = () => {
     const top = doc.getElementById("top")!;
     doc.querySelector('[role="menu"]')?.remove();
+    if (options.header === "unrecognized") {
+      top.innerHTML = `
+<h2>Ada Example</h2>
+<button>Get in touch</button>
+<button>Ada Example's links</button>
+<button>Follow Ada</button>
+<a href="https://www.linkedin.com/company/acme-robotics/">Acme Robotics</a>
+<a href="https://www.linkedin.com/search/results/people/">Grace Hopper is a mutual connection</a>
+<a href="#" aria-label="Share Ada Example's profile"></a>`;
+      return;
+    }
+    if (options.header === "buttons") {
+      const action =
+        page.relation === "none"
+          ? `<a href="${INVITE}" aria-label="Invite Ada Example to connect">Connect</a>`
+          : page.relation === "pending"
+            ? '<button aria-label="Pending, click to withdraw invitation sent to Ada Example">Pending</button>'
+            : "";
+      top.innerHTML = `
+<h2>Ada Example</h2>
+<span>· ${page.relation === "connected" ? "1st" : "2nd"}</span>
+${action}
+<button>Message</button>`;
+      on(top, "a", () => world.foreignClicks.push("Connect header link"));
+      on(top, '[aria-label^="Pending"]', () =>
+        confirmDialog("Withdraw", () => {
+          store({ relation: "none", invitation: undefined });
+          profileTop();
+        })
+      );
+      return;
+    }
     top.innerHTML = `
 <h2>Ada Example</h2>
 <span>· ${page.relation === "connected" ? "1st" : "2nd"}</span>
@@ -485,6 +519,58 @@ test(
     const again = await connected.run("remove_connection", { profile_url: PROFILE });
     expect(again).toMatchObject({ success: true, output: { changed: false } });
     expect(connected.tabsClosed()).toBe(true);
+  },
+  SLOW
+);
+
+test(
+  "connects and withdraws from a header that shows Connect and Message but no More menu",
+  async () => {
+    const li = linkedIn({}, { header: "buttons" });
+    const sent = await li.run("send_connection_request", { profile_url: PROFILE });
+    expect(sent).toMatchObject({
+      success: true,
+      output: { name: "Ada Example", relation: "pending", changed: true, verified: true },
+    });
+    expect(li.world.invitationsSent).toBe(1);
+
+    const withdrawn = await li.run("withdraw_connection_request", { profile_url: PROFILE });
+    expect(withdrawn).toMatchObject({
+      success: true,
+      output: { relation: "none", changed: true, verified: true },
+    });
+    expect(li.world.member.relation).toBe("none");
+
+    // Removing needs the overflow menu; without one the connector says so.
+    const connected = linkedIn({ relation: "connected" }, { header: "buttons" });
+    const removed = await connected.run("remove_connection", { profile_url: PROFILE });
+    expect(removed.success).toBe(false);
+    expect(removed.error).toContain("no Remove connection option");
+    expect(li.world.foreignClicks).toEqual([]);
+    expect(li.tabsClosed()).toBe(true);
+    expect(connected.tabsClosed()).toBe(true);
+  },
+  SLOW
+);
+
+test(
+  "names the controls of an unrecognized header without naming the member",
+  async () => {
+    const li = linkedIn({}, { header: "unrecognized" });
+    const result = await li.run("send_connection_request", { profile_url: PROFILE });
+    expect(result.success).toBe(false);
+    expect(result.error).toContain(
+      'LinkedIn connect failed: LinkedIn profile header was not found; the page shows "Get in touch'
+    );
+    // One quoted value: error grouping replaces it, so every page layout
+    // groups under one message.
+    expect(result.error).toMatch(/LinkedIn profile header was not found; the page shows "[^"]*"$/);
+    expect(result.error).not.toContain("Ada");
+    // Links in a header name the member's company, school and other people.
+    expect(result.error).not.toContain("Acme");
+    expect(result.error).not.toContain("Grace");
+    expect(li.world.invitationsSent).toBe(0);
+    expect(li.tabsClosed()).toBe(true);
   },
   SLOW
 );
