@@ -37,7 +37,7 @@ function occ(overrides: Partial<Occurrence> = {}): Occurrence {
     seen_24h: RULES.systemMinSeen24h,
     seen_14d: RULES.systemMinSeen24h,
     max_orgs: 1,
-    max_users: 1,
+    max_users: RULES.highMinUsers,
     releases_2h: ["rel-b"],
     last_release: "rel-b",
     sample_trace_id: "trace",
@@ -96,7 +96,16 @@ describe("issue creation gate", () => {
     ).toMatchObject({
       metadata: { priority: "medium" },
     });
-    // One named user the error blocked is reach.
+    // One named user is still a single support case, not a page.
+    expect(
+      plan(
+        [occ({ seen_24h: RULES.systemMinSeen24h, max_users: 1, max_orgs: 0 })],
+        []
+      )[0]
+    ).toMatchObject({
+      metadata: { priority: "medium" },
+    });
+    // Two named users in an hour is reach: a tenth of daily actives.
     expect(
       plan(
         [
@@ -203,7 +212,7 @@ describe("issue creation gate", () => {
       action: "create",
       alert: { kind: "new_high", key: `issue-new:${FP(1)}` },
     });
-    expect(high?.alert?.body).toContain("1 user and 1 workspace affected");
+    expect(high?.alert?.body).toContain("2 users and 1 workspace affected");
     const [medium] = plan([occ({ max_users: 0, max_orgs: 0 })], []);
     expect(medium).toMatchObject({ action: "create" });
     expect(medium).not.toHaveProperty("alert");
