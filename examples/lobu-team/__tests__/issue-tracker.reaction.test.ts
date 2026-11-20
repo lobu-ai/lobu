@@ -247,6 +247,51 @@ describe("issue creation gate", () => {
     expect(escalated).not.toHaveProperty("alert");
   });
 
+  test("a gateway 5xx burst pages on volume, since no user or workspace reaches the server", () => {
+    // The real case: the gateway answered 390 worker polls with a 503 in one
+    // hour while the app had no ready pod, and the server recorded nothing.
+    const edge = {
+      source: "edge" as const,
+      title: "Traefik 503 at websecure-ci-env-ci-app-ci-example",
+      culprit: "edge traefik websecure-ci-env-ci-app-ci-example",
+      message: "POST /api/workers/poll",
+      max_users: 0,
+      max_orgs: 0,
+      sample_trace_id: "",
+      last_release: "",
+      releases_2h: [],
+    };
+    const n = RULES.edgeBurstMin2h;
+    const [burst] = plan(
+      [occ({ ...edge, seen_2h: n, seen_24h: n, seen_14d: n })],
+      []
+    );
+    expect(burst).toMatchObject({
+      action: "create",
+      metadata: { priority: "high", culprit: edge.culprit },
+      alert: {
+        kind: "new_high",
+        key: `issue-new:${FP(1)}`,
+        title: expect.stringContaining(`(${edge.message})`),
+        body: expect.stringContaining(String(n)),
+      },
+    });
+    expect(burst).not.toMatchObject({
+      alert: { body: expect.stringContaining("0 users") },
+    });
+    // A steady trickle, an origin refusing the odd request, is on the board
+    // but never pages.
+    const [trickle] = plan(
+      [occ({ ...edge, seen_2h: 4, seen_24h: 30, seen_14d: 30 })],
+      []
+    );
+    expect(trickle).toMatchObject({
+      action: "create",
+      metadata: { priority: "medium" },
+    });
+    expect(trickle).not.toHaveProperty("alert");
+  });
+
   test("the hourly quota defers the quietest new fingerprints", () => {
     const many = Array.from({ length: 7 }, (_, n) =>
       occ({ fingerprint: FP(n + 1), seen_24h: 10 + n })
@@ -541,6 +586,24 @@ describe("runIssueTracker", () => {
               first_seen_at: ago(20),
               last_seen_at: ago(0.5),
             },
+            {
+              fingerprint: FP(4),
+              kind: "system",
+              issue_source: "edge",
+              issue_title: "Cloudflare 521 at ci.example",
+              issue_culprit: "edge cloudflare ci.example",
+              message: "GET /ci/:id",
+              seen_2h: RULES.edgeBurstMin2h,
+              seen_24h: RULES.edgeBurstMin2h,
+              seen_14d: RULES.edgeBurstMin2h,
+              max_orgs: 0,
+              max_users: 0,
+              releases_2h: [],
+              last_release: "",
+              sample_trace_id: "",
+              first_seen_at: ago(1),
+              last_seen_at: ago(0.5),
+            },
           ];
         if (text.includes("otel_traces"))
           return [{ trace_id: trace, request: "GET /connect/oauth/callback" }];
@@ -559,12 +622,19 @@ describe("runIssueTracker", () => {
         metadata?: Record<string, unknown>;
       }>;
     };
-    // The browser request failure has volume but no spike, so only FP(1) is new.
-    expect(result.created).toBe(1);
+    // The browser request failure has volume but no spike, so only FP(1) and
+    // the gateway burst are new; the burst is high with nobody attached.
+    expect(result.created).toBe(2);
     expect(result.changes[0]).toMatchObject({
       fingerprint: FP(1),
       metadata: { priority: "high" },
     });
+    expect(result.changes).toContainEqual(
+      expect.objectContaining({
+        fingerprint: FP(4),
+        metadata: expect.objectContaining({ priority: "high" }),
+      })
+    );
     // Only well-formed trace ids reach the lookup.
     const lookup = sql.find((text) => text.includes("otel_traces"));
     expect(lookup).toContain(`'${trace}'`);

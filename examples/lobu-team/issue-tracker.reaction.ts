@@ -243,6 +243,11 @@ const CONNECTION = "lobu-analytics";
 /** The client.query row cap for Postgres reads. */
 const MAX_ISSUE_ROWS = 5000;
 const ENVIRONMENT = "summaries-prod";
+/**
+ * Cloudflare's own 5xx are recorded per zone, not per namespace: the product's
+ * zone is the one a visitor of this environment reaches.
+ */
+const EDGE_ZONE = "lobu.ai";
 
 export const RULES = {
   /** system/dependency: sightings in 24h, or distinct orgs in one hour. */
@@ -262,6 +267,12 @@ export const RULES = {
    */
   highMinUsers: 2,
   highMinOrgs: 3,
+  /**
+   * A 5xx the gateway answered itself never reached the server, so no user or
+   * workspace is attached and volume is the only reach there is. An origin
+   * refusing the odd request runs at a few an hour; an outage at hundreds.
+   */
+  edgeBurstMin2h: 20,
   /**
    * Sign-in and consent requests. A failure here locks a user out before they
    * reach the product, often once per person, so one sighting is an issue.
@@ -289,8 +300,11 @@ export type IssueStatus =
   | "resolved"
   | "ignored";
 export type ErrorKind = "system" | "user" | "dependency";
-/** Where the occurrences were recorded: the server, or a visitor's browser. */
-export type ErrorSource = "server" | "browser";
+/**
+ * Where the occurrences were recorded: the server, a visitor's browser, or a
+ * gateway (Traefik or Cloudflare) that answered a request with a 5xx itself.
+ */
+export type ErrorSource = "server" | "browser" | "edge";
 
 /** One fingerprint seen in the last two hours, with its trailing stats. */
 export interface Occurrence {
@@ -337,6 +351,8 @@ type AlertNotice = { kind: Alert; key: string; title: string; body: string };
 
 /** What a paged human needs first: how many people and workspaces it hit. */
 function alertBody(o: Occurrence): string {
+  if (o.source === "edge")
+    return `Fingerprint ${o.fingerprint}. ${o.seen_2h} gateway errors in the last 2 hours, ${o.seen_24h} in 24h. The requests never reached the server, so no user or workspace is attached. Open the issue record for occurrences and linked tasks.`;
   const users = o.max_users === 1 ? "1 user" : `${o.max_users} users`;
   const orgs = o.max_orgs === 1 ? "1 workspace" : `${o.max_orgs} workspaces`;
   return `Fingerprint ${o.fingerprint}. ${o.seen_24h} sightings in 24h, ${users} and ${orgs} affected. Open the issue record for occurrences and linked tasks.`;
@@ -389,6 +405,8 @@ function passesGate(o: Occurrence): boolean {
  */
 function priority(o: Occurrence): "high" | "medium" | "low" {
   if (o.kind === "user") return "low";
+  if (o.source === "edge")
+    return o.seen_2h >= RULES.edgeBurstMin2h ? "high" : "medium";
   return blocksSignIn(o) ||
     o.max_users >= RULES.highMinUsers ||
     o.max_orgs >= RULES.highMinOrgs
@@ -520,7 +538,8 @@ export function planIssueChanges(
               alert: {
                 kind: "new_high" as const,
                 key: `issue-new:${o.fingerprint}`,
-                title: `New high-priority issue: ${o.title} (${o.request || o.culprit})`,
+                // An edge culprit repeats the title; its sample request is new.
+                title: `New high-priority issue: ${o.title} (${o.request || (o.source === "edge" ? o.message : o.culprit)})`,
                 body: alertBody(o),
               },
             }
@@ -651,7 +670,7 @@ SELECT
   argMax(sample_trace_ids[1], last_seen) AS sample_trace_id
 FROM observability.issue_occurrences_hourly FINAL
 WHERE hour >= now() - INTERVAL 14 DAY
-  AND environment = '${ENVIRONMENT}'
+  AND (environment = '${ENVIRONMENT}' OR (source = 'edge' AND environment = '${EDGE_ZONE}'))
 GROUP BY fingerprint
 HAVING max(last_seen) >= now() - INTERVAL 2 HOUR
 ORDER BY seen_24h DESC, fingerprint
@@ -711,7 +730,10 @@ function toOccurrence(row: Record<string, unknown>): Occurrence {
   return {
     fingerprint: str(row.fingerprint),
     kind: kind === "user" || kind === "dependency" ? kind : "system",
-    source: str(row.issue_source) === "browser" ? "browser" : "server",
+    source:
+      row.issue_source === "browser" || row.issue_source === "edge"
+        ? row.issue_source
+        : "server",
     title: str(row.issue_title).slice(0, 200) || "Untitled error",
     culprit: str(row.issue_culprit),
     message: str(row.message).slice(0, 1000),
