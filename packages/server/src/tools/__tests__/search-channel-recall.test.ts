@@ -290,7 +290,7 @@ describe("search_memory channel recall", () => {
         .filter((record) => record.level === "error" && typeof record.error_fingerprint === "string");
       expect(issues).toHaveLength(1);
       expect(issues[0]).toMatchObject({
-        error_kind: "system",
+        error_kind: "dependency",
         error_code: "57014",
         organization_id: org.id,
       });
