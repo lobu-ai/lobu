@@ -831,6 +831,15 @@ export default defineConfig({
     }),
   ],
 });`);
+    // The list also returns other orgs' `$member` rows. This one has no org id
+    // (a public row) and comes FIRST, so a slug-only re-read would merge it and
+    // drop the owning org's kinds.
+    const foreignMember = {
+      id: 99,
+      slug: "$member",
+      name: "Member",
+      event_kinds: { fact: { description: "Foreign fact." } },
+    };
     const remoteMember = {
       id: 4,
       slug: "$member",
@@ -842,6 +851,7 @@ export default defineConfig({
       },
     };
     const { fetchStub, calls } = makeFetch([], REMOTE_CONNECTION, [
+      foreignMember,
       remoteMember,
     ]);
     await runApply(dir, fetchStub);

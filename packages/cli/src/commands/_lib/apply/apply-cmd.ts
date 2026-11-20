@@ -840,13 +840,18 @@ export async function executePlan(
     let desiredForWrite = entity;
     if (isSystemEntityType(entity) && entity.eventKinds !== undefined) {
       clearFacets.delete("eventKinds");
-      const fresh = (await ctx.client.listEntityTypes()).find(
-        (type) =>
-          type.slug === entity.slug &&
-          (row.remote?.organization_id === undefined ||
-            type.organization_id === undefined ||
-            type.organization_id === row.remote.organization_id)
-      );
+      // The schema list also returns OTHER orgs' rows for the same system
+      // slug (`$member` exists once per org), so a slug+org match can pick a
+      // foreign registry and drop this org's kinds. Bind the re-read to the
+      // exact row the diff selected by its persistent id; when the snapshot
+      // predates ids, fall back to that org-filtered snapshot unchanged.
+      const remoteId = row.remote?.id;
+      const fresh =
+        remoteId !== undefined
+          ? (await ctx.client.listEntityTypes()).find(
+              (type) => type.slug === entity.slug && type.id === remoteId
+            )
+          : undefined;
       desiredForWrite = {
         ...entity,
         eventKinds: {
