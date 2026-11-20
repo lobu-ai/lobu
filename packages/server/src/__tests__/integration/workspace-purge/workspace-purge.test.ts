@@ -470,6 +470,28 @@ describe("workspace purge", () => {
 			to_entity_id: beta,
 			relationship_type_slug: "competes-with",
 		})) as { relationship: { id: number } };
+		// The lender deletes and recreates its relationship type; the borrower's
+		// edge on the deleted one stays live, and linking the same pair again
+		// lands on the new one. Both edges move in one batch onto one copy.
+		await sql`
+			UPDATE entity_relationship_types SET status = 'archived', deleted_at = now()
+			WHERE organization_id = ${lender.organizationId} AND slug = 'competes-with'
+		`;
+		const [recreated] = await sql<{ id: number }[]>`
+			INSERT INTO entity_relationship_types (organization_id, slug, name, is_symmetric)
+			VALUES (${lender.organizationId}, 'competes-with', 'Competes with', true)
+			RETURNING id
+		`;
+		await sql`
+			INSERT INTO entity_relationship_type_rules (relationship_type_id, source_entity_type_slug, target_entity_type_slug)
+			VALUES (${recreated.id}, 'listed-company', 'listed-company')
+		`;
+		const relink = (await borrower.owner.entities.link({
+			from_entity_id: alpha,
+			to_entity_id: beta,
+			relationship_type_slug: "competes-with",
+		})) as { relationship: { id: number } };
+		expect(relink.relationship.id).not.toBe(link.relationship.id);
 		const retired = (await borrower.owner.entities.create({ entity_type: "listed-company", name: "Retired" })) as {
 			entity: { id: number };
 		};
@@ -536,11 +558,18 @@ describe("workspace purge", () => {
 			WHERE relationship_type_id = ${relCopies[0].id} AND deleted_at IS NULL
 		`;
 		expect(rules).toEqual([{ source_entity_type_slug: "listed-company", target_entity_type_slug: "listed-company" }]);
-		const [edge] = await sql`
-			SELECT relationship_type_id, deleted_at FROM entity_relationships WHERE id = ${link.relationship.id}
+		// One edge per pair stays live: the one on the type the lender kept.
+		const borrowerEdges = await sql`
+			SELECT id, relationship_type_id, deleted_at FROM entity_relationships
+			WHERE organization_id = ${borrower.org.id} ORDER BY id
 		`;
-		expect(Number(edge.relationship_type_id)).toBe(Number(relCopies[0].id));
-		expect(edge.deleted_at).toBeNull();
+		expect(borrowerEdges.map((row) => Number(row.relationship_type_id))).toEqual([
+			Number(relCopies[0].id),
+			Number(relCopies[0].id),
+		]);
+		const borrowerById = new Map(borrowerEdges.map((row) => [Number(row.id), row.deleted_at]));
+		expect(borrowerById.get(link.relationship.id)).not.toBeNull();
+		expect(borrowerById.get(relink.relationship.id)).toBeNull();
 
 		expect(await sql`SELECT 1 FROM entity_types WHERE organization_id = ${adopter.org.id}`).toHaveLength(1);
 		const adopterEntities = await sql`SELECT DISTINCT entity_type_id FROM entities WHERE id IN (${gamma}, ${delta})`;

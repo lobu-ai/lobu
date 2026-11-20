@@ -449,15 +449,37 @@ async function rehomeBorrowedRelationshipTypes(
   `;
   // A duplicate is judged by the borrower's two live-edge unique indexes:
   // stored pairs by endpoints, source edges by their full endpoint tuple.
+  // The endpoint columns are mutually exclusive per side, so one partition
+  // over all of them matches both indexes. Two live edges in this batch can
+  // land on the same own type (the lender recreated a type the borrower had
+  // already linked through); one stays live, preferring the edge on the
+  // lender's active type, and the rest are retired. EXISTS only sees edges
+  // already live on the own type before this statement.
   const moved = await tx`
+    WITH target AS (
+      SELECT r.id, own.id AS own_type_id,
+        r.deleted_at IS NULL AND row_number() OVER (
+          PARTITION BY own.id, r.deleted_at IS NULL,
+            r.from_entity_id, r.from_entity_type_id, r.from_source_key,
+            r.to_entity_id, r.to_entity_type_id, r.to_source_key
+          ORDER BY (t.status = 'active') DESC, r.id DESC
+        ) > 1 AS batch_duplicate
+      FROM entity_relationships r
+      JOIN entity_relationship_types t ON t.id = r.relationship_type_id
+      JOIN entity_relationship_types own
+        ON own.organization_id = r.organization_id AND own.slug = t.slug AND own.status = 'active'
+       AND own.id <> r.relationship_type_id
+      WHERE r.id = ANY(${ids}::bigint[])
+    )
     UPDATE entity_relationships r
-    SET relationship_type_id = own.id,
+    SET relationship_type_id = target.own_type_id,
         deleted_at = CASE
           WHEN r.deleted_at IS NOT NULL THEN r.deleted_at
+          WHEN target.batch_duplicate THEN now()
           WHEN r.from_entity_id IS NOT NULL AND r.to_entity_id IS NOT NULL AND EXISTS (
             SELECT 1 FROM entity_relationships live
             WHERE live.from_entity_id = r.from_entity_id AND live.to_entity_id = r.to_entity_id
-              AND live.relationship_type_id = own.id AND live.deleted_at IS NULL
+              AND live.relationship_type_id = target.own_type_id AND live.deleted_at IS NULL
           ) THEN now()
           WHEN (r.from_entity_id IS NULL OR r.to_entity_id IS NULL) AND EXISTS (
             SELECT 1 FROM entity_relationships live
@@ -468,17 +490,14 @@ async function rehomeBorrowedRelationshipTypes(
               AND COALESCE(live.to_entity_id, 0) = COALESCE(r.to_entity_id, 0)
               AND COALESCE(live.to_entity_type_id, 0) = COALESCE(r.to_entity_type_id, 0)
               AND COALESCE(live.to_source_key, '') = COALESCE(r.to_source_key, '')
-              AND live.relationship_type_id = own.id AND live.deleted_at IS NULL
+              AND live.relationship_type_id = target.own_type_id AND live.deleted_at IS NULL
               AND (live.from_entity_id IS NULL OR live.to_entity_id IS NULL)
           ) THEN now()
           ELSE NULL
         END,
         updated_at = now()
-    FROM entity_relationship_types t, entity_relationship_types own
-    WHERE r.id = ANY(${ids}::bigint[])
-      AND t.id = r.relationship_type_id
-      AND own.organization_id = r.organization_id AND own.slug = t.slug AND own.status = 'active'
-      AND own.id <> r.relationship_type_id
+    FROM target
+    WHERE r.id = target.id
   `;
   return { borrowed_relationship_types: copied.count, borrowed_type_relationships: moved.count };
 }
