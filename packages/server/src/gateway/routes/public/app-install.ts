@@ -1900,21 +1900,16 @@ export function createAppInstallRoutes(deps: AppInstallRouterDeps): Hono {
 					409,
 				);
 			}
-			logger.error(
-				{
-					organization_id: orgId,
-					installation_id: installationId,
-					error: getErrorMessage(error),
-				},
-				"GitHub App install callback failed",
-			);
-			throw routeFailure(c.html(
+			throw routeFailure(c, c.html(
 				renderOAuthErrorPage(
 					"github_install_failed",
 					error instanceof Error ? error.message : "GitHub App install failed.",
 				),
 				500,
-			), error);
+			), error, "GitHub App install callback failed", {
+				organization_id: orgId,
+				installation_id: installationId,
+			});
 		}
 	});
 
@@ -2166,11 +2161,7 @@ function mountOAuthCodeExchangeRoutes(
 				400,
 			);
 		} catch (error) {
-			oauthInstallLogger.error(
-				{ provider, error: String(error) },
-				"OAuth install failed to park as pending",
-			);
-			throw routeFailure(c.html(
+			throw routeFailure(c, c.html(
 				renderOAuthErrorPage(
 					`${provider}_install_failed`,
 					error instanceof Error
@@ -2178,7 +2169,7 @@ function mountOAuthCodeExchangeRoutes(
 						: `${display} install failed.`,
 				),
 				500,
-			), error);
+			), error, "OAuth install failed to park as pending", { provider });
 		}
 	});
 }

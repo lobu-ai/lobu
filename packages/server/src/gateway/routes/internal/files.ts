@@ -4,7 +4,6 @@ import { createHash } from "node:crypto";
 import { Readable } from "node:stream";
 import {
 	createLogger,
-	getErrorMessage,
 } from "@lobu/core";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
@@ -229,11 +228,8 @@ export function createFileRoutes(
       if (error instanceof Error && error.name === "BodyLimitError") {
         return errorResponse(c, "File exceeds the artifact storage limit", 413);
       }
-      logger.error("Failed to upload file", {
-        error: getErrorMessage(error),
-        stack: error instanceof Error ? error.stack : undefined,
-      });
-      throw routeFailure(errorResponse(c, "Failed to upload file", 500), error);
+      throw routeFailure(c, errorResponse(c, "Failed to upload file", 500), error,
+        "Failed to upload file");
     }
   });
 
@@ -363,11 +359,8 @@ export function createFileRoutes(
       if (error instanceof Error && error.name === "BodyLimitError") {
         return errorResponse(c, "File exceeds the artifact storage limit", 413);
       }
-      logger.error("Failed to batch upload files", {
-        error: getErrorMessage(error),
-        stack: error instanceof Error ? error.stack : undefined,
-      });
-      throw routeFailure(errorResponse(c, "Failed to batch upload files", 500), error);
+      throw routeFailure(c, errorResponse(c, "Failed to batch upload files", 500), error,
+        "Failed to batch upload files");
     }
   });
 

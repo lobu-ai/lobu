@@ -273,7 +273,7 @@ export function createLobuOrgContextMiddleware() {
 			try {
 				resolvedOrg = await getOrgBySlug(orgHeader);
 			} catch (error) {
-				throw routeFailure(c.json({ error: "Unable to resolve organization" }, 503), error);
+				throw routeFailure(c, c.json({ error: "Unable to resolve organization" }, 503), error);
 			}
 			if (!resolvedOrg) {
 				return c.json({ error: `Unknown organization "${orgHeader}"` }, 404);
@@ -322,7 +322,7 @@ export function createLobuOrgContextMiddleware() {
 			try {
 				orgId = await resolveDefaultOrgId(user.id);
 			} catch (error) {
-				throw routeFailure(c.json(
+				throw routeFailure(c, c.json(
 					{ error: "Unable to resolve organization membership" },
 					503,
 				), error);

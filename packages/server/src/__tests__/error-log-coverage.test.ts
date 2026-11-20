@@ -9,14 +9,14 @@ beforeEach(() => {
 
 describe('operational errors reach stdout', () => {
   it('retains the original caught route stack and marks the request to avoid duplicate capture', async () => {
-    const { captureServerError, isErrorReported } = await import('../diagnostics');
+    const { routeFailure, isErrorReported } = await import('../diagnostics');
     const app = new Hono();
     const error = new Error('synthetic handler failure');
     let reported = false;
     app.get('/synthetic', (c) => {
-      captureServerError(c, error, 'synthetic_route', 503);
+      const failure = routeFailure(c, c.json({ error: 'unavailable' }, 503), error);
       reported = isErrorReported(c);
-      return c.json({ error: 'unavailable' }, 503);
+      throw failure;
     });
     const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
     let output = '';
@@ -27,7 +27,7 @@ describe('operational errors reach stdout', () => {
       write.mockRestore();
     }
     const record = JSON.parse(output.trim());
-    expect(record).toMatchObject({ level: 'error', source: 'synthetic_route', res_status: 503 });
+    expect(record).toMatchObject({ level: 'error', source: 'route_failure', res_status: 503 });
     expect(record.error.stack).toContain('error-log-coverage.test.ts');
     expect(reported).toBe(true);
   });

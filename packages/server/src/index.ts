@@ -42,7 +42,7 @@ import { setupRoutes } from "./connect/setup-routes";
 import { chatIdentityRoutes } from "./connect/chat-identity-routes";
 import { connectRoutes } from "./connect/routes";
 import { checkDatabaseReadiness, getDb } from "./db/client";
-import { markErrorReported, routeFailure } from "./diagnostics";
+import { routeFailure } from "./diagnostics";
 import * as invalidationEmitter from "./events/emitter";
 import { streamInvalidationEvents } from "./events/sse";
 import { invalidationSseAuth } from "./events/sse-invalidation-auth";
@@ -128,7 +128,6 @@ import { isValidFrameAncestor } from "./utils/csp";
 import { getApplyContext } from "./utils/apply-context";
 import { errorMessage, ToolUserError } from "./utils/errors";
 import { insertWorkspaceChangeEventInTransaction } from "./utils/insert-event";
-import logger from "./utils/logger";
 import { readMcpAppAsset, renderMcpAppTemplate } from "./utils/mcp-app-bundle";
 import { generateOpenAPISpec } from "./utils/openapi-generator";
 import {
@@ -539,7 +538,7 @@ app.get("/health/ready", async (c) => {
 		await checkDatabaseReadiness();
 		return c.json({ status: "ok", service: "lobu-api" });
 	} catch (error) {
-		throw routeFailure(c.json(
+		throw routeFailure(c, c.json(
 			{ status: "unready", service: "lobu-api", error: errorMessage(error) },
 			503,
 		), error);
@@ -555,7 +554,7 @@ app.get("/health/scheduler", async (c) => {
 		const health = await getSchedulerHealth(c.env);
 		return c.json(health, health.healthy ? 200 : 503);
 	} catch (error) {
-		throw routeFailure(c.json(
+		throw routeFailure(c, c.json(
 			{
 				healthy: false,
 				issues: ["Failed to check scheduler health"],
@@ -1104,7 +1103,7 @@ async function handleContentDistribution(c: Context<{ Bindings: Env }>) {
 		);
 		return c.json({ distribution });
 	} catch (error) {
-		throw routeFailure(c.json({ error: errorMessage(error) }, 500), error);
+		throw routeFailure(c, c.json({ error: errorMessage(error) }, 500), error);
 	}
 }
 
@@ -1722,11 +1721,13 @@ app.post("/api/connector/:connector/connection/claim", async (c) => {
 		);
 	}
 	if (result.status === "claim_failed") {
-		logger.error(
-			{ connector: provider.provider, ref, err: result.message },
+		throw routeFailure(
+			c,
+			c.json({ error: "claim_failed", message: result.message }, 500),
+			result.message,
 			"Connection claim failed",
+			{ connector: provider.provider, ref },
 		);
-		return c.json({ error: "claim_failed", message: result.message }, 500);
 	}
 	if (result.status === "signin_required" || (result.status === "unauthenticated" && result.signinProvider)) {
 		return c.json(
@@ -1903,10 +1904,6 @@ app.get("*", async (c) => {
 			// Not a missing page — a transient failure. 503 + no-store tells
 			// crawlers and the CDN to come back, instead of caching a 404. A
 			// source refused at its live-read limit says when it will have room.
-			logger.error({ error, path: requestPath }, "[public-pages] render failed");
-			// This line is the failure's report; the generic 5xx log would add a
-			// second, causeless one.
-			markErrorReported(c);
 			c.header("Cache-Control", "no-store");
 			c.header(
 				"Retry-After",
@@ -1916,7 +1913,8 @@ app.get("*", async (c) => {
 						: 60,
 				),
 			);
-			throw routeFailure(c.text("Temporarily unavailable", 503), error);
+			throw routeFailure(c, c.text("Temporarily unavailable", 503), error,
+				"[public-pages] render failed", { path: requestPath });
 		}
 		if (publicPageModel) {
 			const template = await loadAnySpaHtmlTemplate();

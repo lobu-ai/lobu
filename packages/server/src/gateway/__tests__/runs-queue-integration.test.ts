@@ -286,7 +286,7 @@ describe("RunsQueue — run spans", () => {
       expect(failed.status.code).toBe(SpanStatusCode.ERROR);
       expect(failed.attributes).toMatchObject({
         "lobu.run_final_attempt": true,
-        "exception.type": "Error",
+        "exception.type": routingExhausted ? "QueueRoutingRetryError" : "Error",
         "exception.message": routingExhausted ? "synthetic routing exhaustion" : "synthetic handler failure",
         "error.kind": "system",
       });

@@ -59,6 +59,6 @@ export async function fetchWorkerHttp(c: Context<{ Bindings: Env }>) {
     }));
   } catch (error) {
     // A transport error can contain the authenticated URL or request headers.
-    throw routeFailure(c.json({ error: 'Gateway HTTP request failed' }, 502), redactedFailure(error));
+    throw routeFailure(c, c.json({ error: 'Gateway HTTP request failed' }, 502), redactedFailure(error));
   }
 }

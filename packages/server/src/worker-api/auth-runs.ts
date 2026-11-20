@@ -55,7 +55,7 @@ export async function getActiveAuthRun(c: Context<{ Bindings: Env }>) {
 
     return c.json({ run_id: rows[0]?.id ?? null });
   } catch (err: unknown) {
-    throw routeFailure(c.json({ error: errorMessage(err) }, 500), err);
+    throw routeFailure(c, c.json({ error: errorMessage(err) }, 500), err);
   }
 }
 
@@ -145,7 +145,7 @@ export async function getAuthRun(c: Context<{ Bindings: Env }>) {
         : null,
     });
   } catch (err: unknown) {
-    throw routeFailure(c.json({ error: errorMessage(err) }, 500), err);
+    throw routeFailure(c, c.json({ error: errorMessage(err) }, 500), err);
   }
 }
 
@@ -215,6 +215,6 @@ export async function postAuthSignal(c: Context<{ Bindings: Env }>) {
 
     return c.json({ success: true });
   } catch (err: unknown) {
-    throw routeFailure(c.json({ error: errorMessage(err) }, 500), err);
+    throw routeFailure(c, c.json({ error: errorMessage(err) }, 500), err);
   }
 }

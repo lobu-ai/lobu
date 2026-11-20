@@ -532,24 +532,10 @@ export class SecretProxy {
     } catch (error) {
       // forward() already answered with its own failure response.
       if (error instanceof HTTPException) throw error;
-      // JSON.stringify(Error) renders `{}` (Error has no enumerable props),
-      // which hid the real failure behind "Secret proxy error: {}" (#1176).
-      // Extract the fields explicitly (same { err } shape as
-      // packages/core/src/worker/auth.ts), including `cause` — undici wraps
-      // the underlying dispatch error there.
-      logger.error(
-        {
-          err:
-            error instanceof Error
-              ? { name: error.name, message: error.message, stack: error.stack }
-              : error,
-          cause: (error as { cause?: unknown })?.cause
-            ? String((error as { cause?: unknown }).cause)
-            : undefined,
-        },
-        "Secret proxy error"
-      );
-      throw routeFailure(c.json({ error: "Internal proxy error" }, 500), error);
+      // The error serializer keeps the stack and `cause` (undici wraps the
+      // underlying dispatch error there), so "Secret proxy error: {}" (#1176)
+      // cannot recur.
+      throw routeFailure(c, c.json({ error: "Internal proxy error" }, 500), error, "Secret proxy error");
     }
   }
 
@@ -888,14 +874,10 @@ export class SecretProxy {
         // org B's URL because the binding step lost its expected-org
         // anchor. The isolation invariant matters more than the brief
         // 503 window during a DB hiccup.
-        logger.error(
-          { urlAgentId, err: String(err) },
-          "agentOrgResolver failed — rejecting request to preserve org isolation"
-        );
-        throw routeFailure(c.json(
+        throw routeFailure(c, c.json(
           { error: "Service Unavailable: failed to resolve agent organization" },
           503
-        ), err);
+        ), err, "agentOrgResolver failed — rejecting request to preserve org isolation", { urlAgentId });
       }
     }
 
@@ -1224,11 +1206,8 @@ export class SecretProxy {
       if (!tenantUpstream) throw error;
       // Network exceptions can contain the custom URL or key; neither leaves
       // the credential boundary in logs or the response.
-      logger.error(
-        { method, provider: resolvedSlug },
-        "Custom provider request failed"
-      );
-      throw routeFailure(c.json({ error: "Internal proxy error" }, 500), redactedFailure(error));
+      throw routeFailure(c, c.json({ error: "Internal proxy error" }, 500), redactedFailure(error),
+        "Custom provider request failed", { method, provider: resolvedSlug });
     }
 
     if (!response.ok) {

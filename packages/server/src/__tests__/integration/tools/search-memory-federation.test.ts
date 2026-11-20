@@ -6,6 +6,7 @@
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createServer } from 'node:http';
 import { Value } from '@sinclair/typebox/value';
+import { describeError } from '@lobu/core';
 import type { Env } from '../../../index';
 import { getContent } from '../../../tools/get_content';
 import {
@@ -465,6 +466,20 @@ describe('search_memory direct OAuth workspace federation', () => {
     expect(partialHit.coverage).toMatchObject({ scope: 'all_granted', status: 'partial' });
     expect(JSON.stringify(partialHit)).not.toContain(orgC.slug);
     expectValidSearchResult(partialHit);
+
+    // Every shard down is a dependency outage: the 503 carries a typed code so
+    // the issue tracker files it as a dependency failure, not a user error.
+    let allFailed: unknown;
+    try {
+      mergeFederatedSearchResults({ query: 'Atlas Project' }, targets, [
+        { status: 'rejected', reason: failedReason },
+        { status: 'rejected', reason: failedReason },
+      ]);
+    } catch (error) {
+      allFailed = error;
+    }
+    expect(allFailed).toMatchObject({ httpStatus: 503, code: 'UPSTREAM_UNAVAILABLE' });
+    expect(describeError(allFailed, { scope: 'search' }).kind).toBe('dependency');
   });
 
   it('preserves entity-ID retry guidance across workspaces without hiding partial failures', async () => {

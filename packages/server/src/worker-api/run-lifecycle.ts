@@ -104,7 +104,7 @@ import {
 import { authorizeRunForWorker } from "./shared";
 import { classifyRunOutcome } from "../runs/run-outcome";
 import { runLeaseFence, runOwnerFence } from "../runs/run-lease";
-import { routeFailure } from '../diagnostics';
+import { redactedFailure, routeFailure } from '../diagnostics';
 
 type DbClient = ReturnType<typeof getDb>;
 type SqlFragment = ReturnType<DbClient>;
@@ -560,7 +560,7 @@ export async function heartbeat(c: Context<{ Bindings: Env }>) {
 			...(steer.length > 0 ? { steer } : {}),
 		});
 	} catch (err: unknown) {
-		throw routeFailure(c.json({ error: errorMessage(err) }, 500), err);
+		throw routeFailure(c, c.json({ error: errorMessage(err) }, 500), err);
 	}
 }
 
@@ -1398,8 +1398,9 @@ export async function streamContent(c: Context<{ Bindings: Env }>) {
 		const rawStack = err instanceof Error ? err.stack : undefined;
 		const message = browserRun ? sanitizeBrowserText(rawMessage) : rawMessage;
 		const stack = browserRun ? sanitizeBrowserText(rawStack) : rawStack;
-		console.error("[stream] Error:", message, stack);
-		throw routeFailure(c.json({ error: message, stack }, 500), err);
+		// A browser run's text can carry page content; only the sanitized copy is reported.
+		const cause = browserRun ? { ...redactedFailure(err), message, ...(stack ? { stack } : {}) } : err;
+		throw routeFailure(c, c.json({ error: message, stack }, 500), cause, "[stream] Error");
 	}
 }
 
@@ -1639,8 +1640,7 @@ export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
 
 		return c.json({ success: true });
 	} catch (err: unknown) {
-		logger.error({ error: errorMessage(err) }, "[completeWorkerJob] Error");
-		throw routeFailure(c.json({ error: errorMessage(err) }, 500), err);
+		throw routeFailure(c, c.json({ error: errorMessage(err) }, 500), err, "[completeWorkerJob] Error");
 	}
 }
 
@@ -2272,7 +2272,7 @@ export async function fetchEventsForEmbedding(c: Context<{ Bindings: Env }>) {
 			})),
 		});
 	} catch (err: unknown) {
-		throw routeFailure(c.json({ error: errorMessage(err) }, 500), err);
+		throw routeFailure(c, c.json({ error: errorMessage(err) }, 500), err);
 	}
 }
 
@@ -2406,8 +2406,7 @@ export async function completeEmbeddings(c: Context<{ Bindings: Env }>) {
 
 		return c.json({ success: failed === 0, updated, failed });
 	} catch (err: unknown) {
-		logger.error({ error: errorMessage(err) }, "[completeEmbeddings] Error");
-		throw routeFailure(c.json({ error: errorMessage(err) }, 500), err);
+		throw routeFailure(c, c.json({ error: errorMessage(err) }, 500), err, "[completeEmbeddings] Error");
 	}
 }
 
@@ -2432,7 +2431,7 @@ export async function emitAuthArtifact(c: Context<{ Bindings: Env }>) {
 
 		return c.json({ success: true });
 	} catch (err: unknown) {
-		throw routeFailure(c.json({ error: errorMessage(err) }, 500), err);
+		throw routeFailure(c, c.json({ error: errorMessage(err) }, 500), err);
 	}
 }
 
@@ -2465,7 +2464,7 @@ export async function pollAuthSignal(c: Context<{ Bindings: Env }>) {
 
 		return c.json(consumed ? { signal: consumed } : {});
 	} catch (err: unknown) {
-		throw routeFailure(c.json({ error: errorMessage(err) }, 500), err);
+		throw routeFailure(c, c.json({ error: errorMessage(err) }, 500), err);
 	}
 }
 
@@ -2594,8 +2593,7 @@ export async function completeAuthRun(c: Context<{ Bindings: Env }>) {
 		);
 		return c.json({ success: true });
 	} catch (err: unknown) {
-		logger.error({ error: errorMessage(err) }, "[completeAuthRun] Error");
-		throw routeFailure(c.json({ error: errorMessage(err) }, 500), err);
+		throw routeFailure(c, c.json({ error: errorMessage(err) }, 500), err, "[completeAuthRun] Error");
 	}
 }
 
@@ -2756,7 +2754,6 @@ export async function completeActionRun(c: Context<{ Bindings: Env }>) {
 		return c.json({ success: true });
 	} catch (err: unknown) {
 		await deleteMaterializedArtifacts(publishedActionArtifactIds);
-		logger.error({ error: errorMessage(err) }, "[completeActionRun] Error");
-		throw routeFailure(c.json({ error: errorMessage(err) }, 500), err);
+		throw routeFailure(c, c.json({ error: errorMessage(err) }, 500), err, "[completeActionRun] Error");
 	}
 }

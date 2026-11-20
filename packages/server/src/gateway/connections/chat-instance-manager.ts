@@ -1614,17 +1614,10 @@ export class ChatInstanceManager {
       return new Response("No webhook handler", { status: 404 });
     }
 
-    try {
-      return await webhookHandler(request, {
-        waitUntil: (task: Promise<unknown>) => this.trackWebhookTask(task),
-      });
-    } catch (error) {
-      logger.error(
-        { connectionId, platform, error: String(error) },
-				"Webhook handling failed",
-      );
-      return new Response("Internal error", { status: 500 });
-    }
+    // A handler fault propagates to the webhook route, which reports it once.
+    return await webhookHandler(request, {
+      waitUntil: (task: Promise<unknown>) => this.trackWebhookTask(task),
+    });
   }
 
   getServices(): CoreServices {

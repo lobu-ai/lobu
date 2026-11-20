@@ -16,16 +16,17 @@ import { getErrorMessage } from "@lobu/core";
  *   });
  */
 /**
- * Log level for an error caught in `routeAction`, or null to not log it.
- * ToolUserError is an expected client fault (the REST/MCP layer turns it into
- * a 4xx) — log it at `warn` so it stays diagnosable without paging or reaching
- * the error-log alerts. A read stopped because its caller disconnected throws
- * the request's abort reason; nobody is waiting for the answer, so it is not
- * logged, matching `executeTool`. Genuine handler faults log at `error`.
+ * Whether to note an error caught in `routeAction`. A ToolUserError is an
+ * expected client fault (the REST/MCP layer turns it into a 4xx); a `warn`
+ * keeps it diagnosable without reaching the error-log alerts. A read stopped
+ * because its caller disconnected throws the request's abort reason; nobody is
+ * waiting for the answer, so it is not noted, matching `executeTool`. Genuine
+ * handler faults are not logged here: the tool call boundary
+ * (`logToolCallFailure`) or the caller's own boundary records each failure
+ * once, under its issue fingerprint.
  */
-function errorLogLevel(error: unknown, ctx: ToolContext): 'warn' | 'error' | null {
-  if (ctx.abortSignal?.aborted) return null;
-  return error instanceof ToolUserError ? 'warn' : 'error';
+function shouldWarn(error: unknown, ctx: ToolContext): boolean {
+  return !ctx.abortSignal?.aborted && error instanceof ToolUserError;
 }
 
 async function enforceActionAccess(toolName: string, action: string, ctx: ToolContext): Promise<void> {
@@ -62,14 +63,7 @@ export async function routeAction<TResult>(
   try {
     return await handler();
   } catch (error) {
-    // ToolUserError is an expected client fault (bad input, not-found,
-    // permission denied, conflict) that the REST/MCP layer turns into a 4xx for
-    // the caller — it is NOT an operational error. Logging it at `error` both
-    // spams the error log and creates noisy alerts for routine 409/403
-    // outcomes. Log at `warn` so it stays diagnosable
-    // without paging; genuine handler faults still log at `error`.
-    const level = errorLogLevel(error, ctx);
-    if (level) logger[level](
+    if (shouldWarn(error, ctx)) logger.warn(
       {
         error,
         error_message: getErrorMessage(error),

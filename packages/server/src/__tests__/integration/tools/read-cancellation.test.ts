@@ -21,6 +21,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 import { mcpAuth } from '../../../auth/middleware';
 import type { Env } from '../../../index';
 import { publicRestSearchKnowledge, restSearchKnowledge, restToolProxy } from '../../../rest-api';
+import { buildWrapperApp } from '../../../server-lifecycle';
 import { initWorkspaceProvider } from '../../../workspace';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import {
@@ -360,6 +361,32 @@ describe('read cancellation', () => {
         msg: 'Tool call failed', tool_name: 'no_such_tool', error_class: 'ToolNotRegisteredError',
         error_code: 'VALIDATION', error_kind: 'user',
       }),
+    ]);
+  });
+
+  it('reports a timed-out search as one dependency issue, kind taken from its code', async () => {
+    // Through the production wrapper, whose response middleware would log any
+    // 5xx the route left unreported. Postgres cancelling the read stands in for
+    // the statement timeout; the caller is still waiting for the answer.
+    const wrapped = buildWrapperApp(env, null, app);
+    const holderPid = await holdEventsLock();
+    const pending = wrapped.fetch(
+      new Request(`http://localhost/api/${orgSlug}/knowledge/search?query=synthetic%20feed%20item`, {
+        headers: { Authorization: `Bearer ${token}` },
+      }),
+      env
+    );
+    const blocked = await waitFor(() => blockedReads(holderPid), 5000);
+    expect(blocked).not.toBeNull();
+    for (const pid of blocked ?? []) await getTestDb()`SELECT pg_cancel_backend(${pid})`;
+    await release?.();
+    release = null;
+    const response = await pending;
+
+    expect(response.status).toBe(500);
+    expect(await response.json()).toMatchObject({ code: 'UPSTREAM_TIMEOUT' });
+    expect(issues()).toEqual([
+      expect.objectContaining({ res_status: 500, error_code: 'UPSTREAM_TIMEOUT', error_kind: 'dependency' }),
     ]);
   });
 });

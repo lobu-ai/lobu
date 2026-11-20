@@ -22,7 +22,6 @@
 import type { WorkerTokenData } from "@lobu/core";
 import {
 	createLogger,
-	getErrorMessage,
 	verifyWorkerToken,
 } from "@lobu/core";
 import type { Context } from "hono";
@@ -277,10 +276,7 @@ export function createTranscriptRoutes(): Hono {
       );
       return c.json({ id: inserted[0]!.id });
     } catch (err) {
-      logger.error(
-        `Snapshot INSERT failed: ${getErrorMessage(err)}`
-      );
-      throw routeFailure(c.json({ error: "Internal error" }, 500), err);
+      throw routeFailure(c, c.json({ error: "Internal error" }, 500), err, "Snapshot INSERT failed");
     }
   });
 
@@ -319,10 +315,7 @@ export function createTranscriptRoutes(): Hono {
       );
       return c.json({ deleted: deleted.length });
     } catch (err) {
-      logger.error(
-        `Snapshot DELETE failed: ${getErrorMessage(err)}`
-      );
-      throw routeFailure(c.json({ error: "Internal error" }, 500), err);
+      throw routeFailure(c, c.json({ error: "Internal error" }, 500), err, "Snapshot DELETE failed");
     }
   });
 

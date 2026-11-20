@@ -36,6 +36,8 @@ import { assertEntityReadAllowed, manageEntity } from '../tools/admin/manage_ent
 import { MEMBER_ENTITY_TYPE_SLUG } from '../tools/constants';
 import { resolveViewParams, viewLinkQuery, viewPagePath } from '../tools/open_view';
 import type { ToolContext } from '../tools/registry';
+import { ToolUserError } from '../utils/errors';
+import logger from '../utils/logger';
 import { resolvePublicOrigin } from '../utils/public-origin';
 import { canSeeMemberList } from '../utils/member-entity-type';
 import { getOrganizationSlug } from '../utils/url-builder';
@@ -204,7 +206,14 @@ async function buildLookup(
     const ok = found
       ? await resolveEventViewSubject(found, event, env, ctx).then(
           () => true,
-          () => false
+          (error: unknown) => {
+            // An event the caller cannot see is an unresolved link. Any other
+            // fault is swallowed here, so this is its one report.
+            if (!(error instanceof ToolUserError) && !ctx.abortSignal?.aborted) {
+              logger.error({ error, view: key }, '[views] event link resolution failed');
+            }
+            return false;
+          }
         )
       : false;
     lookup.events.set(id, ok);

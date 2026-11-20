@@ -3,10 +3,7 @@
 import { createLogger } from "@lobu/core";
 import { Hono } from "hono";
 import { redactedFailure, routeFailure } from "../../../diagnostics.js";
-import {
-  ArtifactStorageError,
-  type ArtifactStore,
-} from "../../files/artifact-store.js";
+import type { ArtifactStore } from "../../files/artifact-store.js";
 
 const logger = createLogger("public-files");
 
@@ -45,13 +42,10 @@ export function createPublicFileRoutes(artifactStore: ArtifactStore): Hono {
         ...(validation.binding ? { binding: validation.binding } : {}),
       });
     } catch (error) {
-      logger.error("Artifact storage unavailable during download", {
-        code: error instanceof ArtifactStorageError ? error.code : "UNKNOWN",
-      });
-      throw routeFailure(c.json(
+      throw routeFailure(c, c.json(
         { success: false, error: "File storage temporarily unavailable" },
         503
-      ), redactedFailure(error));
+      ), redactedFailure(error), "Artifact storage unavailable during download");
     }
     if (!artifact) {
       return c.json({ success: false, error: "File not found" }, 404);

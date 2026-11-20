@@ -26,8 +26,10 @@ function mockWorkerCtx(body: unknown): {
 } {
   let captured: { body: unknown; status: number } = { body: undefined, status: 200 };
   const ctx = {
-    req: { json: async () => body },
+    req: { json: async () => body, method: 'POST', path: '/', raw: new Request('http://localhost/') },
     var: {},
+    get: () => undefined,
+    set: () => undefined,
     json: (value: unknown, status?: number) => {
       captured = { body: value, status: status ?? 200 };
       return captured as unknown as Response;

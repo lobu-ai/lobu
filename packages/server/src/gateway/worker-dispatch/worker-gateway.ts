@@ -419,8 +419,8 @@ export class WorkerGateway {
 
       return c.json({ success: true });
     } catch (error) {
-      logger.error(`Error handling worker response: ${error}`);
-      throw routeFailure(c.json({ error: "Failed to process response" }, 500), error);
+      throw routeFailure(c, c.json({ error: "Failed to process response" }, 500), error,
+        "Error handling worker response");
     }
   }
 
@@ -612,8 +612,8 @@ export class WorkerGateway {
         webOrigin: toPublicWebOrigin(this.publicGatewayUrl),
       });
     } catch (error) {
-      logger.error("Failed to generate session context", { err: error });
-      throw routeFailure(c.json({ error: "session_context_error" }, 500), error);
+      throw routeFailure(c, c.json({ error: "session_context_error" }, 500), error,
+        "Failed to generate session context");
     }
   }
 

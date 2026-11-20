@@ -316,6 +316,21 @@ describe('public pages > crawler-facing responses', () => {
           { msg: '[public-pages] render failed', code: 'UPSTREAM_UNAVAILABLE' },
         ]);
       });
+
+      it('is not written for a visitor who left: the render was cancelled, nothing failed', async () => {
+        const visitor = new AbortController();
+        vi.spyOn(resolvePathModule, 'resolvePath').mockImplementation(async () => {
+          visitor.abort();
+          throw new Error('render cancelled by the departed visitor');
+        });
+        const errorLog = vi.spyOn(logger, 'error');
+        const response = await buildWrapperApp(env, null, app).request(liveEntitySlug, {
+          headers: { accept: 'text/html' },
+          signal: visitor.signal,
+        });
+        expect(response.status).toBe(503);
+        expect(errorLog).not.toHaveBeenCalled();
+      });
     });
   });
 

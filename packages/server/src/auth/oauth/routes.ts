@@ -553,8 +553,8 @@ oauthRoutes.post('/oauth/register', async (c) => {
         return c.json(createOAuthError('invalid_request', rateLimit.errorMessage), 429);
       }
     } catch (err) {
-      console.warn('[OAuth] Rate limit check failed:', err);
-      throw routeFailure(c.json(createOAuthError('server_error', 'Registration temporarily unavailable'), 503), err);
+      throw routeFailure(c, c.json(createOAuthError('server_error', 'Registration temporarily unavailable'), 503), err,
+        '[OAuth] Rate limit check failed');
     }
   }
 
@@ -617,8 +617,8 @@ oauthRoutes.post('/oauth/register', async (c) => {
     const client = await provider.clientsStore.registerClient(metadata);
     return c.json(client, 201);
   } catch (error) {
-    console.error('[OAuth] Client registration failed:', error);
-    throw routeFailure(c.json(createOAuthError('server_error', 'Registration failed'), 500), error);
+    throw routeFailure(c, c.json(createOAuthError('server_error', 'Registration failed'), 500), error,
+      '[OAuth] Client registration failed');
   }
 });
 
@@ -1042,8 +1042,8 @@ oauthRoutes.post('/oauth/authorize/consent', requireAuth, async (c) => {
     // This is needed because fetch() doesn't handle cross-origin redirects well
     return c.json({ redirect_url: redirectUrl.toString() });
   } catch (error) {
-    console.error('[OAuth] Failed to create authorization code:', error);
-    throw routeFailure(c.json(createOAuthError('server_error', 'Failed to create authorization code'), 500), error);
+    throw routeFailure(c, c.json(createOAuthError('server_error', 'Failed to create authorization code'), 500), error,
+      '[OAuth] Failed to create authorization code');
   }
 });
 
@@ -1175,8 +1175,8 @@ oauthRoutes.post('/oauth/device/email', async (c) => {
         return c.json(createOAuthError('invalid_request', rateLimit.errorMessage), 429);
       }
     } catch (err) {
-      console.warn('[OAuth] Device-email rate limit check failed:', err);
-      throw routeFailure(c.json(createOAuthError('server_error', 'Temporarily unavailable'), 503), err);
+      throw routeFailure(c, c.json(createOAuthError('server_error', 'Temporarily unavailable'), 503), err,
+        '[OAuth] Device-email rate limit check failed');
     }
   }
 

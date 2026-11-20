@@ -1176,7 +1176,11 @@ export function mergeFederatedSearchResults(
 ): UnifiedSearchResult {
   const fulfilled = fulfilledShards(settled);
   if (fulfilled.length === 0) {
-    throw new ToolUserError('Search is temporarily unavailable for this connection.', 503);
+    throw new ToolUserError(
+      'Search is temporarily unavailable for this connection.',
+      503,
+      'UPSTREAM_UNAVAILABLE'
+    );
   }
 
   const entityLimit = resolveEntityLimit(args);

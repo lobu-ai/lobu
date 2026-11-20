@@ -469,11 +469,10 @@ export async function handleWebhookIngest(
 	const organizationId = stored.organizationId;
 	if (!organizationId) {
 		// Pre-Phase-C rows only; the storage layer requires org scoping today.
-		logger.error(
-			{ connectionId: stored.id },
-			"[webhook-ingest] connection has no organization_id — refusing delivery",
+		// The webhook route reports it once and answers 500.
+		throw new Error(
+			`[webhook-ingest] connection ${stored.id} has no organization_id — refusing delivery`,
 		);
-		return json(500, { error: "Connection is not org-scoped" });
 	}
 	const config = stored.config as WebhookIngestConfig;
 
@@ -754,11 +753,8 @@ export async function handleWebhookIngest(
 				return json(202, { ok: true, id: racedId, duplicate: true });
 			}
 		}
-		logger.error(
-			{ connectionId: stored.id, error: String(error) },
-			"[webhook-ingest] failed to persist delivery",
-		);
-		// Non-2xx so the provider retries; nothing was acked.
-		return json(500, { error: "Failed to persist delivery" });
+		// Nothing was acked: the webhook route reports it once and answers 500,
+		// so the provider retries.
+		throw error;
 	}
 }

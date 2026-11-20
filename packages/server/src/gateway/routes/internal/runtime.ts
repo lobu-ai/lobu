@@ -1,5 +1,6 @@
 import { createLogger } from "@lobu/core";
 import { Hono } from "hono";
+import { routeFailure } from "../../../diagnostics.js";
 import { resolveRuntimeCredentials } from "../../runtime/credentials.js";
 import { getGatewayRuntimeProvider } from "../../runtime/index.js";
 import { sanitizeNixPackages } from "../../runtime/packages.js";
@@ -219,34 +220,35 @@ export function createRuntimeRoutes(): Hono<WorkerContext> {
       // Reported as itself, with the upstream status it carries, rather than
       // inferred from the message text. See RuntimeInfrastructureError.
       if (error instanceof RuntimeInfrastructureError) {
-        logger.error(
-          {
-            err: error.message,
-            status: error.status,
-            retryable: error.retryable,
-            outcome: error.outcome,
-          },
-          "Runtime infrastructure failure"
-        );
-        return c.json(
-          {
-            error: error.message,
-            kind: "infrastructure" as const,
-            retryable: error.retryable,
-            outcome: error.outcome,
-          },
-          error.status === 429 ? 429 : 503
+        throw routeFailure(
+          c,
+          c.json(
+            {
+              error: error.message,
+              kind: "infrastructure" as const,
+              retryable: error.retryable,
+              outcome: error.outcome,
+            },
+            error.status === 429 ? 429 : 503
+          ),
+          error,
+          "Runtime infrastructure failure",
+          { status: error.status, retryable: error.retryable, outcome: error.outcome }
         );
       }
-      logger.error(
-        { err: error instanceof Error ? error.message : String(error) },
-        "Runtime exec failed"
-      );
-      return errorResponse(
+      const response = errorResponse(
         c,
         error instanceof Error ? error.message : "Runtime exec failed",
         error instanceof Error ? errorStatus(error) : 500
       );
+      if (response.status < 500) {
+        logger.warn(
+          { err: error instanceof Error ? error.message : String(error) },
+          "Runtime exec rejected"
+        );
+        return response;
+      }
+      throw routeFailure(c, response, error, "Runtime exec failed");
     }
   });
 

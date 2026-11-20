@@ -1488,7 +1488,7 @@ routes.patch("/:agentId/config", async (c) => {
 				try {
 					await reconcileAgentAuthProfiles(agentId, user.id, authProfiles);
 				} catch (error) {
-					throw routeFailure(c.json(
+					throw routeFailure(c, c.json(
 						{
 							error:
 								error instanceof Error

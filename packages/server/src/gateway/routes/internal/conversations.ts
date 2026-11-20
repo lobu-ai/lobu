@@ -262,8 +262,8 @@ export function createConversationsRoutes(): Hono<WorkerContext> {
       );
       return c.json({ conversations: targets.map(toPublicTarget) });
     } catch (error) {
-      logger.error(`list conversations failed: ${String(error)}`);
-      throw routeFailure(errorResponse(c, "Internal server error", 500), error);
+      throw routeFailure(c, errorResponse(c, "Internal server error", 500), error,
+        "list conversations failed");
     }
   });
 
@@ -318,8 +318,8 @@ export function createConversationsRoutes(): Hono<WorkerContext> {
       }
       return c.json({ messages: [], nextCursor: null, hasMore: false });
     } catch (error) {
-      logger.error(`read conversation failed: ${String(error)}`);
-      throw routeFailure(errorResponse(c, "Internal server error", 500), error);
+      throw routeFailure(c, errorResponse(c, "Internal server error", 500), error,
+        "read conversation failed");
     }
   });
 
@@ -422,8 +422,8 @@ export function createConversationsRoutes(): Hono<WorkerContext> {
         });
       });
     } catch (error) {
-      logger.error(`send conversation failed: ${String(error)}`);
-      throw routeFailure(errorResponse(c, "Internal server error", 500), error);
+      throw routeFailure(c, errorResponse(c, "Internal server error", 500), error,
+        "send conversation failed");
     }
   });
 
@@ -520,8 +520,8 @@ export function createConversationsRoutes(): Hono<WorkerContext> {
         });
       });
     } catch (error) {
-      logger.error(`present event failed: ${String(error)}`);
-      throw routeFailure(errorResponse(c, "Internal server error", 500), error);
+      throw routeFailure(c, errorResponse(c, "Internal server error", 500), error,
+        "present event failed");
     }
   });
 
@@ -613,8 +613,8 @@ export function createConversationsRoutes(): Hono<WorkerContext> {
       }
       return c.json({ scheduled: true, schedule: schedule.schedule });
     } catch (error) {
-      logger.error(`schedule followup failed: ${String(error)}`);
-      throw routeFailure(errorResponse(c, "Internal server error", 500), error);
+      throw routeFailure(c, errorResponse(c, "Internal server error", 500), error,
+        "schedule followup failed");
     }
   });
 
@@ -731,8 +731,8 @@ export function createConversationsRoutes(): Hono<WorkerContext> {
         if (captured) return captured;
         return await handler(c, target, body);
       } catch (error) {
-        logger.error(`${label} failed: ${String(error)}`);
-        throw routeFailure(errorResponse(c, "Internal server error", 500), error);
+        throw routeFailure(c, errorResponse(c, "Internal server error", 500), error,
+          `${label} failed`);
       }
     };
   }

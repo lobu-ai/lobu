@@ -403,8 +403,7 @@ export function createGatewayApp(
             if (!mod) return c.json({ error: "Unknown provider" }, 404);
             return await handler({ c, mod, providerId });
           } catch (error) {
-            logger.error(errorLabel, { error });
-            throw routeFailure(c.json({ error: errorLabel }, 500), error);
+            throw routeFailure(c, c.json({ error: errorLabel }, 500), error, errorLabel);
           }
         };
 
