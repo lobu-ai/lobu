@@ -164,41 +164,59 @@ export function buildLinkedInNetworkExpression(
 
     // ── Member profile ──────────────────────────────────────────
     const unfollowLabels = name => ['Following, click to unfollow ' + name, 'Following ' + name, 'Unfollow ' + name];
-    const hasMore = el => [...el.querySelectorAll('button')].some(b => shown(b) && text(b) === 'More');
-    /** The member's own header: the innermost section around the heading that names them. */
-    const profileCard = () => {
+    const moreButtons = el => [...el.querySelectorAll('button')]
+      .filter(b => shown(b) && (text(b) === 'More' || b.getAttribute('aria-label') === 'More actions'));
+    const memberLabels = name => ['Invite ' + name + ' to connect', 'Pending, click to withdraw invitation sent to ' + name,
+      'Follow ' + name, ...unfollowLabels(name)];
+    // Which actions the header shows varies by account (Recruiter seats add a More
+    // menu; others show Connect and Message only), so any member action marks it.
+    const isProfileCard = (el, name) => el.tagName === 'SECTION' && (moreButtons(el).length > 0
+      || labelled(el).some(c => memberLabels(name).includes(c.getAttribute('aria-label')))
+      || [...el.querySelectorAll('button, a')].some(c => shown(c) && text(c) === 'Message'));
+    const profileName = () => {
       let title = document.title;
       if (title.startsWith('(')) title = title.slice(title.indexOf(')') + 1).trim();
       const end = title.lastIndexOf(' | LinkedIn');
-      const name = end > 0 ? title.slice(0, end).trim() : '';
+      return end > 0 ? title.slice(0, end).trim() : '';
+    };
+    /** The member's own header: the innermost section around the heading that names them. */
+    const profileCard = () => {
+      const name = profileName();
       if (!name) return null;
       const heading = [...document.querySelectorAll('main h1, main h2')].find(h => shown(h) && text(h) === name);
       let card = heading;
-      while (card && !(card.tagName === 'SECTION' && hasMore(card))) card = card.parentElement;
+      while (card && !isProfileCard(card, name)) card = card.parentElement;
       if (!card) return null;
-      const more = [...card.querySelectorAll('button')].filter(b => shown(b) && text(b) === 'More');
-      if (more.length !== 1) throw new Error('LinkedIn profile menu is ambiguous');
+      const more = moreButtons(card);
+      if (more.length > 1) throw new Error('LinkedIn profile menu is ambiguous');
       const lines = text(card).split('\n').map(line => line.trim());
       const badge = lines.find(line => line === '· 1st' || line === '· 2nd' || line.startsWith('· 3rd'));
-      return { card, name, more: more[0], degree: badge ? badge.slice(2) : null };
+      return { card, name, more: more[0] || null, degree: badge ? badge.slice(2) : null };
     };
+    /** What the page offered instead, so a layout LinkedIn changed is diagnosable from the run alone. */
+    const controlsSeen = () => [...document.querySelectorAll('main button, main a[aria-label]')].filter(shown)
+      .map(el => text(el) || el.getAttribute('aria-label') || '').filter(Boolean).slice(0, 15).join(' · ');
     const openMenu = async more => {
+      if (!more) return null;
       if (more.getAttribute('aria-expanded') !== 'true') more.click();
       return wait(() => document.querySelectorAll('[role="menu"]').length
         ? [...document.querySelectorAll('[role="menu"]')].filter(shown)[0] : null,
         'LinkedIn profile menu did not open');
     };
     const closeMenu = async more => {
+      if (!more) return;
       if (more.getAttribute('aria-expanded') === 'true') more.click();
       await wait(() => more.getAttribute('aria-expanded') !== 'true', null, 10);
     };
-    /** The member's relationship and the controls that change it; the More menu is left open. */
+    /** The member's relationship and the controls that change it; a More menu, if any, is left open. */
     const profileState = async () => {
       assertPage();
-      const top = await wait(profileCard, 'LinkedIn profile header was not found');
-      if (!top.name) throw new Error('LinkedIn profile name was not found');
+      const top = await wait(profileCard, null);
+      if (!top)
+        throw new Error('LinkedIn profile header was not found for "' + profileName() + '"; the page shows: ' + controlsSeen());
       const menu = await openMenu(top.more);
-      const els = [...labelled(top.card), ...labelled(menu)];
+      const menuItems = menu ? labelled(menu) : [];
+      const els = [...labelled(top.card), ...menuItems];
       const one = label => {
         const found = findLabel(els, label);
         return found[0] || null;
@@ -208,7 +226,7 @@ export function buildLinkedInNetworkExpression(
         unfollow: unfollowLabels(top.name).map(one).find(Boolean) || null,
         invite: one('Invite ' + top.name + ' to connect'),
         pending: one('Pending, click to withdraw invitation sent to ' + top.name),
-        remove: labelled(menu).filter(el => el.getAttribute('aria-label') === 'Remove connection')[0] || null,
+        remove: menuItems.filter(el => el.getAttribute('aria-label') === 'Remove connection')[0] || null,
       };
       if (controls.follow && controls.unfollow) throw new Error('LinkedIn follow state is ambiguous');
       if ([controls.invite, controls.pending, controls.remove].filter(Boolean).length > 1)
