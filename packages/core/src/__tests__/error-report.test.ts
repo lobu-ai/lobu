@@ -330,6 +330,48 @@ describe("annotateErrorLogRecord", () => {
     expect(first.error_fingerprint).toBe(second.error_fingerprint);
   });
 
+  test("a thrown string in the error slot is the cause, not dropped", () => {
+    // pino passes a non-Error through its `err` serializer unchanged, and the
+    // console logger nests metadata under `data`; both shapes carry the cause.
+    const records: Record<string, unknown>[] = [
+      {
+        level: "error",
+        service: "svc",
+        msg: "manage_entity error:",
+        error: "Client connection prematurely closed.",
+      },
+      {
+        level: "error",
+        service: "svc",
+        message: "manage_entity error:",
+        data: { err: "Client connection prematurely closed." },
+      },
+      {
+        level: "error",
+        service: "svc",
+        msg: "manage_entity error:",
+        error: "Error: aborted",
+      },
+      {
+        level: "error",
+        service: "svc",
+        msg: "manage_entity error:",
+        error: "lookup failed for user@example.com with Bearer abc.def",
+      },
+    ];
+    for (const record of records) annotateErrorLogRecord(record);
+    const [pino, console, aborted, sensitive] = records;
+    expect(pino?.error_type).toBe("LoggedError");
+    expect(pino?.error_message).toBe(
+      "manage_entity error: Client connection prematurely closed."
+    );
+    expect(console?.error_fingerprint).toBe(pino?.error_fingerprint);
+    expect(aborted?.error_fingerprint).not.toBe(pino?.error_fingerprint);
+    expect(sensitive?.error_message).toBe(
+      "manage_entity error: lookup failed for <email> with <token>"
+    );
+  });
+
   test("a writer that described its error keeps the span's grouping", () => {
     // A value-free wrapper line ("Tool call failed") would otherwise group
     // every failure behind it as one generic issue.

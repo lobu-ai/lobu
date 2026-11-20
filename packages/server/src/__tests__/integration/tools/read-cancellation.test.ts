@@ -120,10 +120,10 @@ describe('read cancellation', () => {
     }
   });
 
-  async function holdEventsLock(): Promise<number> {
+  async function holdEventsLock(table: 'events' | 'entities' = 'events'): Promise<number> {
     const holder = await getTestDb().reserve();
     await holder`BEGIN`;
-    await holder`LOCK TABLE events IN ACCESS EXCLUSIVE MODE`;
+    await holder.unsafe(`LOCK TABLE ${table} IN ACCESS EXCLUSIVE MODE`);
     const [{ pid }] = await holder<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
     release = async () => {
       await holder`ROLLBACK`;
@@ -233,6 +233,43 @@ describe('read cancellation', () => {
       await new Promise((resolve) => server.close(resolve));
     }
     expect(toolFailures('read_knowledge')).toEqual([]);
+  });
+
+  it('does not log an admin read abandoned by a dropped connection as an issue', async () => {
+    // The node adapter aborts the request with a plain string reason
+    // ("Client connection prematurely closed."), which the cancelled read
+    // rethrows; the admin action router must treat it like executeTool does.
+    const server = http.createServer(getRequestListener((request) => app.fetch(request, env)));
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const { port } = server.address() as AddressInfo;
+      const holderPid = await holdEventsLock('entities');
+      const request = http.request({
+        host: '127.0.0.1',
+        port,
+        method: 'POST',
+        path: `/api/${orgSlug}/manage_entity`,
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      });
+      request.on('error', () => {});
+      request.end(JSON.stringify({ action: 'list', limit: 10 }));
+
+      const blocked = await waitFor(() => blockedReads(holderPid), 5000);
+      expect(blocked).not.toBeNull();
+
+      request.destroy();
+      const remaining = await waitFor(
+        async () => ((await blockedReads(holderPid)) === null ? [] : null),
+        3000
+      );
+      expect(remaining).toEqual([]);
+    } finally {
+      await release?.();
+      release = null;
+      server.closeAllConnections();
+      await new Promise((resolve) => server.close(resolve));
+    }
+    expect(issues()).toEqual([]);
   });
 
   it('keeps a real write failure visible after its caller leaves', async () => {
