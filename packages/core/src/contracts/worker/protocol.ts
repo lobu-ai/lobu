@@ -26,6 +26,7 @@
  */
 
 import { type Static, Type } from "@sinclair/typebox";
+import type { ToolErrorCode } from "../../connector-query-errors";
 import { SUGGESTION_LIMITS } from "../../suggestions";
 import { ConnectorOperationRequestSchema } from "../tools/manage-operations";
 
@@ -951,6 +952,14 @@ export const CompleteActionRequestSchema = Type.Object({
   status: Type.Union([Type.Literal("success"), Type.Literal("failed")]),
   action_output: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
   error_message: Type.Optional(Type.String()),
+  /**
+   * Why a `failed` action failed, as a typed code, when the worker can tell
+   * from structure (an exit code, an HTTP status, a page refusal). Typed as a
+   * `ToolErrorCode` for producers but carried as a plain string on the wire:
+   * the gateway ignores a value it does not know, so a worker on a newer
+   * catalog never fails its completion, and an older worker simply omits it.
+   */
+  error_code: Type.Optional(Type.Unsafe<ToolErrorCode>(Type.String())),
 });
 
 /** One event returned by `/fetch-events-for-embedding` for the worker to embed. */

@@ -8,6 +8,7 @@
  * TDZ and red-failed CI unit on main).
  */
 
+import { type ToolErrorCode, toToolErrorCode } from '@lobu/core';
 import { DEVICE_ACTION_QUEUE_BUDGET_MS } from '../../config/intervals';
 import { type DbClient, getDb } from '../../db/client';
 import { sourceReadScrubAssignments } from '../../lib/device-feed-read-protocol';
@@ -236,6 +237,8 @@ interface DeviceActionRunOutcome {
   error_message?: string;
   /** The run was cancelled rather than failed by the action, so no failure was recorded. */
   cancelled?: boolean;
+  /** The typed code the device reported with its failure, when it sent one. */
+  error_code?: ToolErrorCode;
 }
 
 interface WaitForDeviceActionRunOptions {
@@ -307,6 +310,7 @@ export async function waitForDeviceActionRunWithOptions(
   while (true) {
     const rows = (await sql`
       SELECT status, approval_status, action_output, error_message, claimed_at,
+        run_metadata->>'error_code' AS error_code,
         COALESCE(expires_at > now(), false) AS claim_horizon_open
       FROM runs
       WHERE id = ${runId} AND organization_id = ${organizationId}
@@ -317,6 +321,7 @@ export async function waitForDeviceActionRunWithOptions(
       action_output: unknown;
       error_message: string | null;
       claimed_at: Date | string | null;
+      error_code: string | null;
       claim_horizon_open: boolean;
     }>;
     const row = rows[0];
@@ -336,6 +341,7 @@ export async function waitForDeviceActionRunWithOptions(
       return { status: 'pending_approval' };
     }
     if (row.status === 'failed' || row.status === 'timeout' || row.status === 'cancelled') {
+      const errorCode = toToolErrorCode(row.error_code);
       return {
         status: row.status === 'timeout' ? 'timeout' : 'failed',
         output: row.action_output ?? {},
@@ -344,6 +350,7 @@ export async function waitForDeviceActionRunWithOptions(
             ? operationFailureMessage(runId, row.error_message)
             : row.error_message ?? `Run ${runId} ${row.status}`,
         ...(row.status === 'cancelled' ? { cancelled: true } : {}),
+        ...(errorCode ? { error_code: errorCode } : {}),
       };
     }
     // Still pending or running. Check the right deadline for this phase.

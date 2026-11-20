@@ -38,6 +38,15 @@ describe('operation failure grouping', () => {
     expect(report.code).toBe('browser_setup_required');
     expect(report.message).not.toContain('[lobu:');
   });
+
+  it.each([
+    ['ACTION_FAILED', 'user'],
+    ['UPSTREAM_TIMEOUT', 'dependency'],
+  ] as const)('takes a reported %s as the code and its kind', (errorCode, kind) => {
+    const report = describeOperationFailure({ ...failure, errorCode });
+    expect(report).toMatchObject({ code: errorCode, kind });
+    expect(report.fingerprint).not.toBe(describeOperationFailure(failure).fingerprint);
+  });
 });
 
 describe('operation failure recording', () => {
@@ -56,6 +65,17 @@ describe('operation failure recording', () => {
     });
     expect(output).not.toContain('profile header');
     expect(output).not.toContain('Message · Follow');
+  });
+
+  it('logs a typed failure under the fingerprint and kind the caller is given', () => {
+    const typed = { ...failure, errorCode: 'ACTION_FAILED' as const };
+    const output = capture(() => recordOperationFailure({ ...typed, runId: 43, organizationId: 'org-1' }));
+    const [record] = output.trim().split('\n').map((line) => JSON.parse(line));
+    expect(record).toMatchObject({
+      error_fingerprint: describeOperationFailure(typed).fingerprint,
+      error_kind: 'user',
+      error_code: 'ACTION_FAILED',
+    });
   });
 
   it('records only the run the agent called, not its child steps', () => {

@@ -262,6 +262,8 @@ describe('daemon-builtin os.shell', () => {
         process_stage: 'target_exit',
       },
     });
+    // A signal death is the host's to explain, not a refusal by the command.
+    expect(result).not.toHaveProperty('errorCode');
   });
 
   test('keeps short-lived command outcomes stable under process churn', async () => {
@@ -400,6 +402,7 @@ describe('daemon-builtin os.shell', () => {
     expect(Date.now() - started).toBeLessThan(5_500);
     expect(completions[0]?.status).toBe('failed');
     expect(completions[0]?.error_message).toStartWith('operation_execution_failed: Shell command timed out after ');
+    expect(completions[0]?.error_code).toBe('UPSTREAM_TIMEOUT');
     expect(completions[0]?.action_output).toMatchObject({
       stdout: '', stderr: '', timed_out: true, success: false,
     });
@@ -419,6 +422,7 @@ describe('daemon-builtin os.shell', () => {
     expect(completions).toHaveLength(1);
     expect(completions[0]).toMatchObject({
       status: 'failed',
+      error_code: 'ACTION_FAILED',
       action_output: { stdout: 'out', stderr: 'err', exit_code: 7, timed_out: false, success: false },
     });
   });
@@ -654,7 +658,7 @@ describe('daemon-builtin os.shell', () => {
       actionKey: 'run',
       input: { command: 'printf nope', timeout_ms: 150_001 },
     });
-    expect(badArgument).toMatchObject({ ok: false, code: 'invalid_operation_input' });
+    expect(badArgument).toMatchObject({ ok: false, code: 'invalid_operation_input', errorCode: 'VALIDATION' });
 
     // A cwd that exists but is a FILE clears the builtin's own checks and then
     // fails inside spawn with ENOTDIR. Reporting that as bad input would send
@@ -677,6 +681,7 @@ describe('daemon-builtin os.shell', () => {
           process_error_code: 'ENOTDIR',
         },
       });
+      expect(spawnFault).not.toHaveProperty('errorCode');
       if (!spawnFault.ok) {
         expect(spawnFault.error).toContain('Shell supervisor failed to start');
         expect(spawnFault.error).toContain('ENOTDIR');

@@ -46,6 +46,13 @@ export type ToolErrorCode =
    * setup or permission is missing (complete the setup).
    */
   | "PRECONDITION_FAILED"
+  /**
+   * The action ran and its target refused it: a shell command exited non-zero,
+   * the element to click was covered, the selector matched nothing, the tab
+   * was gone. Retrying the identical call meets the same refusal; change the
+   * input or the target's state first (HTTP 422).
+   */
+  | "ACTION_FAILED"
   // ── transient: the same call may succeed on retry ──
   /** Upstream throttled the request (HTTP 429 / too many requests). */
   | "RATE_LIMITED"
@@ -103,6 +110,11 @@ export const TOOL_ERRORS: Record<ToolErrorCode, ToolErrorSpec> = {
     retryable: false,
     message:
       "A required state is not met, so nothing ran; fix it before retrying.",
+  },
+  ACTION_FAILED: {
+    retryable: false,
+    message:
+      "The action ran and its target refused it; change the input or the target's state before retrying.",
   },
   RATE_LIMITED: {
     retryable: true,

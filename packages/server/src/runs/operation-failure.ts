@@ -3,6 +3,7 @@ import {
 	describeError,
 	type ErrorReport,
 	recordError,
+	type ToolErrorCode,
 } from "@lobu/core";
 import { parseDependencyUnavailableError } from "../connectors/dependency-unavailable";
 import logger from "../utils/logger";
@@ -27,6 +28,12 @@ export interface OperationFailure {
 	connectorKey: string;
 	operationKey: string;
 	errorMessage: string;
+	/**
+	 * The typed code the run recorded with its failure (a device reports one
+	 * when it can tell why). It sets the issue's code and kind, so a target's
+	 * refusal is not counted as a system fault.
+	 */
+	errorCode?: ToolErrorCode;
 }
 
 /**
@@ -47,8 +54,22 @@ export function operationFailureScope(
 	return `operation ${failure.connectorKey}.${failure.operationKey}`;
 }
 
-/** The failure as an error-shaped value: a dependency marker becomes its code. */
+/**
+ * The failure as an error-shaped value. A typed code is carried as the error's
+ * code and its kind follows from it; otherwise a dependency marker becomes the
+ * code.
+ */
 function operationFailureError(failure: OperationFailure) {
+	if (failure.errorCode) {
+		return {
+			error: {
+				name: "OperationFailed",
+				message: failure.errorMessage,
+				code: failure.errorCode,
+			},
+			options: { scope: operationFailureScope(failure) },
+		};
+	}
 	const dependency = parseDependencyUnavailableError(failure.errorMessage);
 	return {
 		error: {

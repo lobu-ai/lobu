@@ -959,7 +959,8 @@ describe('createConnectorOperationRun — ephemeral expires_at semantics', () =>
     const [row] = await sql`
       SELECT run_metadata FROM runs WHERE id = ${first.runId}
     `;
-    expect(row.run_metadata).toEqual({
+    // The fixture has no paired device, so the run also carries its refusal code.
+    expect(row.run_metadata).toMatchObject({
       unrelated: { preserved: true },
       browser_context: browserContext,
     });
