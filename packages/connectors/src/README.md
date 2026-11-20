@@ -565,6 +565,6 @@ For source-backed bundled connectors, the worker recompiles a `.ts` file after i
 | `producthunt` | env_keys | posts & comments | - |
 | `reddit` | oauth/none | posts, comments, user activity, home feed | - |
 | `rss` | none | articles | - |
-| `shopify` | app_installation | orders, products & inventory | - |
+| `shopify` | app_installation | orders (live read, never stored), products & inventory | - |
 | `x` | browser/oauth | tweets, own posts, likes, bookmarks, DMs, home timeline | prepare reply |
 | `youtube` | oauth (Google) | liked videos, playlists, subscriptions, videos | search, get_video, search_liked_videos, list_playlists, get_playlist |

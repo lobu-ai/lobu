@@ -6,7 +6,9 @@ let Gmail: typeof import('../google_gmail').default;
 let Drive: typeof import('../google_drive').default;
 let Linear: typeof import('../linear').default;
 let Jira: typeof import('../jira').default;
+let Shopify: typeof import('../shopify').default;
 beforeAll(async () => {
+  Shopify = (await import('../shopify')).default;
   Gmail = (await import('../google_gmail')).default;
   Drive = (await import('../google_drive')).default;
   Linear = (await import('../linear')).default;
@@ -140,5 +142,59 @@ describe('live source windows', () => {
     expect(query).toContain(JSON.stringify(window.start));
     expect(query).toContain(JSON.stringify(window.end));
     expect(query).toContain('lt:');
+  });
+  test('Shopify reads orders live, never syncs them, and keeps exact half-open bounds', async () => {
+    const c = new Shopify();
+    const orders = c.definition.feeds.orders;
+    expect(orders.sync).toBeUndefined();
+    expect(orders.readWindowAxis).toBe('updated_at');
+
+    const bodies: { query: string; variables: Record<string, unknown> }[] = [];
+    const order = (id: string, updatedAt: string) => ({
+      id: `gid://shopify/Order/${id}`, legacyResourceId: id, name: `#${id}`,
+      createdAt: window.start, processedAt: null, updatedAt, cancelledAt: null,
+      displayFinancialStatus: 'PAID', displayFulfillmentStatus: 'UNFULFILLED', email: null,
+      customer: { displayName: 'Synthetic Buyer', email: 'buyer@example.test' },
+      subtotalPriceSet: { shopMoney: { amount: '10.00', currencyCode: 'USD' } },
+      totalTaxSet: { shopMoney: { amount: '0.00', currencyCode: 'USD' } },
+      totalPriceSet: { shopMoney: { amount: '10.00', currencyCode: 'USD' } },
+      lineItems: { nodes: [{ sku: 'SKU-1', name: 'Pen', quantity: 2, originalUnitPriceSet: { shopMoney: { amount: '5.00', currencyCode: 'USD' } } }] },
+    });
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (_url: string, init: RequestInit) => {
+      bodies.push(JSON.parse(String(init.body)));
+      return Response.json({ data: { orders: {
+        pageInfo: { hasNextPage: true, endCursor: 'next-page' },
+        nodes: [order('2', '2026-01-01T12:00:00Z'), order('3', window.end)],
+      } } });
+    }) as typeof fetch;
+    try {
+      const result = await c.read({
+        feedKey: 'orders', config: { shop: 'demo-store.myshopify.com' }, credentials, window, limit: 2,
+      });
+      expect(result.rows.map((row) => row.name)).toEqual(['#2']);
+      expect(result.rows[0]).toMatchObject({ customer_name: 'Synthetic Buyer', total: 10, currency: 'USD' });
+      expect(result.window).toEqual({ ...window, axis: 'updated_at' });
+      expect(result.nextCursor).toBe('next-page');
+      expect(bodies[0].variables.first).toBe(2);
+      expect(bodies[0].variables.query).toContain("updated_at:>='2026-01-01T00:00:00Z'");
+      expect(bodies[0].variables.query).toContain("updated_at:<'2026-01-02T00:00:01Z'");
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  test('Shopify rejects an unfinished orders page without a cursor', async () => {
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () => Response.json({ data: { orders: {
+      pageInfo: { hasNextPage: true, endCursor: null }, nodes: [],
+    } } })) as typeof fetch;
+    try {
+      await expect(new Shopify().read({
+        feedKey: 'orders', config: { shop: 'demo-store.myshopify.com' }, credentials, window,
+      })).rejects.toThrow(/cursor|exhaustion/i);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
   });
 });
