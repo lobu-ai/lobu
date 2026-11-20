@@ -167,7 +167,7 @@ export const SdkScriptResultSchema = Type.Object({
         details: Type.Optional(
           Type.Unknown({
             description:
-              "Structured result of the failed SDK call when an uncaught ClientSdkActionError ended the script (the same value a catch block reads as error.details), redacted and size-bounded. For a failed operations.execute it holds run_id, error_message and any output the action reported, such as output.dialog for a browser action blocked by a JS dialog.",
+              "Structured result of the failed SDK call when an uncaught ClientSdkActionError ended the script (the same value a catch block reads as error.details), redacted and size-bounded. For a failed operations.execute it holds run_id, error_message, failure_fingerprint, next_action and any output the action reported, such as output.dialog for a browser action blocked by a JS dialog.",
           }),
         ),
       },

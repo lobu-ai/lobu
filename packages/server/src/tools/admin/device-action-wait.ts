@@ -11,6 +11,7 @@
 import { DEVICE_ACTION_QUEUE_BUDGET_MS } from '../../config/intervals';
 import { type DbClient, getDb } from '../../db/client';
 import { sourceReadScrubAssignments } from '../../lib/device-feed-read-protocol';
+import { operationFailureMessage } from '../../runs/operation-failure';
 import { classifyRunOutcome } from '../../runs/run-outcome';
 import { supersedeActionEvent } from './approval-events';
 import { clientUpdateHint } from '../../worker-api/client-version-floor';
@@ -233,6 +234,8 @@ interface DeviceActionRunOutcome {
   // scalar — so the completed output is `unknown`, not an object.
   output?: unknown;
   error_message?: string;
+  /** The run was cancelled rather than failed by the action, so no failure was recorded. */
+  cancelled?: boolean;
 }
 
 interface WaitForDeviceActionRunOptions {
@@ -336,7 +339,11 @@ export async function waitForDeviceActionRunWithOptions(
       return {
         status: row.status === 'timeout' ? 'timeout' : 'failed',
         output: row.action_output ?? {},
-        error_message: row.error_message ?? `Run ${runId} ${row.status}`,
+        error_message:
+          row.status === 'failed'
+            ? operationFailureMessage(runId, row.error_message)
+            : row.error_message ?? `Run ${runId} ${row.status}`,
+        ...(row.status === 'cancelled' ? { cancelled: true } : {}),
       };
     }
     // Still pending or running. Check the right deadline for this phase.
@@ -472,7 +479,11 @@ export async function waitForDeviceActionRunWithOptions(
       return {
         status: 'failed',
         output: final.action_output ?? {},
-        error_message: final.error_message ?? `Run ${runId} failed`,
+        error_message:
+          final.status === 'failed'
+            ? operationFailureMessage(runId, final.error_message)
+            : final.error_message ?? `Run ${runId} cancelled`,
+        ...(final.status === 'cancelled' ? { cancelled: true } : {}),
       };
     }
     // Shouldn't reach here, but fall through to timeout.

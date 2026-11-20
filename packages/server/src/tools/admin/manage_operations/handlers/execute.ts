@@ -45,6 +45,8 @@ import {
 	normalizePageActivationUrls,
 } from "../../../../runs/page-activation";
 import { createConnectorOperationRun } from "../../../../runs/queue-service";
+import { describeOperationFailure, operationFailureMessage } from "../../../../runs/operation-failure";
+import { failedOperationNextAction } from "../../../../operations/issue-inbox";
 import { getAuthProfileById } from "../../../../utils/auth-profiles";
 import { isCloudMode } from "../../../../utils/cloud-mode";
 import { findBundledConnectorFile } from "../../../../utils/connector-catalog";
@@ -681,9 +683,11 @@ export async function insertDispatchCard(
 
 async function replayExistingOperationRun(
 	claim: Awaited<ReturnType<typeof createConnectorOperationRun>>,
-	operationName: string,
+	connectorKey: string,
+	operation: OperationDescriptor,
 	ctx: ToolContext,
 ): Promise<ManageOperationsResult> {
+	const operationName = operation.name;
 	if (claim.approvalStatus === "pending" && claim.status === "pending") {
 		return pendingApprovalResult(claim.runId, operationName, ctx);
 	}
@@ -715,15 +719,18 @@ async function replayExistingOperationRun(
 			message: `Operation run ${claim.runId} is ${claim.status === "pending" ? "queued and waiting for execution" : "in progress"}. Read operations.getRun(${claim.runId}) for its result.`,
 		};
 	}
-	return {
-		action: "execute",
-		run_id: claim.runId,
-		status: "failed",
-		error_message:
-			claim.errorMessage ??
-			`Run ${claim.runId} ended with status '${claim.status}'.`,
-		...reportedOutput(claim.actionOutput),
-	};
+	// Only a run that failed was recorded as an issue occurrence; a cancelled
+	// or rejected run carries no fingerprint.
+	return failedExecuteResult(
+		claim.runId,
+		claim.status === "failed"
+			? operationFailureMessage(claim.runId, claim.errorMessage)
+			: claim.errorMessage ?? `Run ${claim.runId} ended with status '${claim.status}'.`,
+		claim.actionOutput,
+		connectorKey,
+		operation,
+		claim.status === "failed",
+	);
 }
 
 // The device waiter defaults missing output to {}. Omit that sentinel so a
@@ -732,6 +739,39 @@ function reportedOutput(output: unknown): { output?: unknown } {
 	if (output == null) return {};
 	if (typeof output === "object" && !Array.isArray(output) && Object.keys(output).length === 0) return {};
 	return { output };
+}
+
+/**
+ * A run that ended without a result, as the caller sees it. When `recorded`,
+ * the terminal write logged it as an issue occurrence and `failure_fingerprint`
+ * is the grouping key it used, so a report that cites it joins that issue.
+ * `next_action` says what to do instead of retrying.
+ */
+function failedExecuteResult(
+	runId: number,
+	errorMessage: string,
+	output: unknown,
+	connectorKey: string,
+	operation: OperationDescriptor,
+	recorded: boolean,
+): ManageOperationsResult {
+	return {
+		action: "execute",
+		run_id: runId,
+		status: "failed",
+		error_message: errorMessage,
+		...(recorded
+			? {
+					failure_fingerprint: describeOperationFailure({
+						connectorKey,
+						operationKey: operation.operation_key,
+						errorMessage,
+					}).fingerprint,
+				}
+			: {}),
+		next_action: failedOperationNextAction(recorded),
+		...reportedOutput(output),
+	};
 }
 
 // Device-bound execution inserts a pending run and waits for the device worker
@@ -1132,7 +1172,7 @@ export async function handleExecute(
 		});
 		if (!claim.created) {
 			await trackOperationReaction(claim.runId);
-			return replayExistingOperationRun(claim, operation.name, ctx);
+			return replayExistingOperationRun(claim, connection.connector_key, operation, ctx);
 		}
 		if (eventId == null) {
 			throw new Error("Created approval action run has no approval event.");
@@ -1179,7 +1219,7 @@ export async function handleExecute(
 			});
 		});
 		await trackOperationReaction(claim.runId);
-		if (!claim.created) return replayExistingOperationRun(claim, operation.name, ctx);
+		if (!claim.created) return replayExistingOperationRun(claim, connection.connector_key, operation, ctx);
 		return pendingCheckResult(claim.runId, operation.name, ctx, policyExplanation);
 	}
 
@@ -1226,7 +1266,7 @@ export async function handleExecute(
 	});
 	if (!claim.created) {
 		await trackOperationReaction(claim.runId);
-		return replayExistingOperationRun(claim, operation.name, ctx);
+		return replayExistingOperationRun(claim, connection.connector_key, operation, ctx);
 	}
 	return dispatchAdmittedRun({
 		claim, ctx, connection, operation, input, visibilityUserId, runMetadata,
@@ -1283,7 +1323,7 @@ export async function dispatchAdmittedRun(p: {
 						status: "in_progress",
 						message: `Operation run ${runId} is queued and waiting for ${connection.device_worker_id ? "the selected device" : "an eligible device"}. Read operations.getRun(${runId}) for its result.`,
 					}
-				: replayExistingOperationRun(claim, operation.name, ctx);
+				: replayExistingOperationRun(claim, connection.connector_key, operation, ctx);
 		}
 		// A script deadline that lands mid-wait reports this run and its phase
 		// (run_sdk reads ctx.deviceWaits at the deadline).
@@ -1317,25 +1357,28 @@ export async function dispatchAdmittedRun(p: {
 				error_message: result.error_message ?? "Device action run timed out.",
 			};
 		}
-		return {
-			action: "execute",
-			run_id: runId,
-			status: "failed",
-			error_message: result.error_message ?? "Device action run failed.",
-			...reportedOutput(result.output),
-		};
+		return failedExecuteResult(
+			runId,
+			operationFailureMessage(runId, result.error_message),
+			result.output,
+			connection.connector_key,
+			operation,
+			!result.cancelled,
+		);
 	}
 
 	if (claim.claimedBy === null) {
 		// Every inline run is claimed in the INSERT that creates it. A null owner
 		// means this row was not created for inline execution, and running it
 		// would write the outcome back with no lease to fence against.
-		return {
-			action: "execute",
-			run_id: runId,
-			status: "failed",
-			error_message: "Inline execution requires a claimed run.",
-		};
+		return failedExecuteResult(
+			runId,
+			"Inline execution requires a claimed run.",
+			undefined,
+			connection.connector_key,
+			operation,
+			false,
+		);
 	}
 	const result = await executeOperationInline(
 		runId,
@@ -1358,11 +1401,12 @@ export async function dispatchAdmittedRun(p: {
 		};
 	}
 	if (result.status === "pending_approval") return pendingApprovalResult(runId, operation.name, ctx);
-	return {
-		action: "execute",
-		run_id: runId,
-		status: "failed",
-		error_message: result.error_message,
-		...reportedOutput(result.output),
-	};
+	return failedExecuteResult(
+		runId,
+		result.error_message,
+		result.output,
+		connection.connector_key,
+		operation,
+		true,
+	);
 }

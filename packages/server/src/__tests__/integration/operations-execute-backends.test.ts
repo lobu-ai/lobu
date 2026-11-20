@@ -1411,21 +1411,42 @@ describe("operations.execute backend lifecycle", () => {
 
 	it("finalizes an upstream MCP run as failed when transport setup throws", async () => {
 		failedTransportCallCount = 0;
-		const result = await manageOperations(
-			{
-				action: "execute",
-				connection_id: mcpConnectionId,
-				operation_key: "remote_echo",
-				input: { fail_transport: true },
-			},
-			{} as Env,
-			ctx,
-		);
+		const write = vi.spyOn(process.stdout, "write");
+		let result: Awaited<ReturnType<typeof manageOperations>>;
+		let logged: string;
+		try {
+			result = await manageOperations(
+				{
+					action: "execute",
+					connection_id: mcpConnectionId,
+					operation_key: "remote_echo",
+					input: { fail_transport: true },
+				},
+				{} as Env,
+				ctx,
+			);
+			logged = write.mock.calls.map(([line]) => String(line)).join("");
+		} finally {
+			write.mockRestore();
+		}
 		expect(result).toMatchObject({
 			action: "execute",
 			status: "failed",
 			error_message: "upstream transport failed",
+			failure_fingerprint: expect.stringMatching(/^[0-9a-f]{32}$/),
+			next_action: expect.stringContaining("Retrying the same input rarely helps"),
 		});
+		// The terminal write recorded the failure under the fingerprint the caller got.
+		const recorded = logged
+			.split("\n")
+			.filter((line) => line.includes('"operation_failure"'))
+			.map((line) => JSON.parse(line.slice(line.indexOf("{"))));
+		expect(recorded).toEqual([
+			expect.objectContaining({
+				run_id: (result as { run_id: number }).run_id,
+				error_fingerprint: (result as { failure_fingerprint: string }).failure_fingerprint,
+			}),
+		]);
 		const [run] = await getTestDb()`
 			SELECT status, error_message
 			FROM runs
@@ -1438,6 +1459,47 @@ describe("operations.execute backend lifecycle", () => {
 		// A transport exception is ambiguous: the upstream may have executed the
 		// destructive action before the response was lost. Never retry it here.
 		expect(failedTransportCallCount).toBe(1);
+	});
+
+	it("records an approved run's failure under the fingerprint a replay returns, and gives a cancelled run none", async () => {
+		const policyKey = `${MCP}::remote_echo`;
+		await upsertEntityApprovalPolicy(orgId, { resourceClass: "connector_action", operationKey: policyKey, effects: { execute: "approval" } });
+		const execute = () => manageOperations({
+			action: "execute", connection_id: mcpConnectionId, operation_key: "remote_echo",
+			input: { fail_transport: true }, idempotency_key: "operation-backend-test:approved-failure",
+		}, {} as Env, ctx) as Promise<Record<string, unknown>>;
+		const write = vi.spyOn(process.stdout, "write");
+		let logged: string;
+		let runId: number;
+		try {
+			const queued = await execute();
+			expect(queued.status).toBe("pending_approval");
+			runId = queued.run_id as number;
+			await manageOperations({ action: "approve", run_id: runId }, {} as Env, ctx);
+			logged = write.mock.calls.map(([line]) => String(line)).join("");
+		} finally {
+			write.mockRestore();
+			await upsertEntityApprovalPolicy(orgId, { resourceClass: "connector_action", operationKey: policyKey, effects: { execute: "auto" } });
+		}
+		const recorded = logged
+			.split("\n")
+			.filter((line) => line.includes('"operation_failure"'))
+			.map((line) => JSON.parse(line.slice(line.indexOf("{"))));
+		expect(recorded).toEqual([expect.objectContaining({ run_id: runId })]);
+
+		const replay = await execute();
+		expect(replay).toMatchObject({
+			run_id: runId,
+			status: "failed",
+			failure_fingerprint: recorded[0].error_fingerprint,
+		});
+
+		// A cancelled run was never recorded; it is not a Lobu defect to report.
+		await getTestDb()`UPDATE runs SET status = 'cancelled' WHERE id = ${runId}`;
+		const cancelled = await execute();
+		expect(cancelled).toMatchObject({ run_id: runId, status: "failed" });
+		expect(cancelled).not.toHaveProperty("failure_fingerprint");
+		expect(cancelled.next_action).not.toContain("issue report");
 	});
 
 	it("discovers and executes an OpenAPI HTTP operation", async () => {

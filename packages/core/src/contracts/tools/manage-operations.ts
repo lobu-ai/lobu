@@ -533,6 +533,15 @@ export const ManageOperationsResultSchema = Type.Union([
     run_id: Type.Integer(),
     status: Type.Literal("failed"),
     error_message: Type.String(),
+    /**
+     * Issue grouping key of this failure; cite it when reporting the issue.
+     * Absent when the run was cancelled or rejected rather than failed.
+     */
+    failure_fingerprint: Type.Optional(
+      Type.String({ pattern: "^[0-9a-f]{32}$" })
+    ),
+    /** What to do instead of retrying, including where to report on this deployment. */
+    next_action: Type.String(),
     // Failure details (such as an open browser dialog) may be needed to recover.
     output: Type.Optional(Type.Unknown()),
   }),

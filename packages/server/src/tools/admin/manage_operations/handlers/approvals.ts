@@ -18,6 +18,7 @@ import { type DbClient, getDb, parsePgNumberArray, pgTextArray } from "../../../
 import type { Env } from "../../../../index";
 import { getOperationForConnection } from "../../../../operations/connector-operations";
 import { validateOperationInput } from "../../../../operations/input-validation";
+import { recordOperationFailure } from "../../../../runs/operation-failure";
 import { insertEvent } from "../../../../utils/insert-event";
 import { recordEntityWriteDenial } from "../../../../utils/entity-write-denial-audit";
 import logger from "../../../../utils/logger";
@@ -1545,6 +1546,15 @@ export async function handleApprove(
 				"The approval was already decided while this request was in flight. Refresh before acting.",
 		}, "VALIDATION");
 	}
+	// The deferred write is this run's only terminal write, so it records the
+	// failure; an execute replay of the run returns the same fingerprint.
+	recordOperationFailure({
+		runId: args.run_id,
+		organizationId: ctx.organizationId,
+		connectorKey: resolved.connection.connector_key,
+		operationKey: run.action_key,
+		errorMessage: result.error_message,
+	});
 	return {
 		action: "approve",
 		approved: true,
