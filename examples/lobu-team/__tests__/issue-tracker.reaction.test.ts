@@ -350,6 +350,16 @@ describe("issue lifecycle", () => {
     ).toMatchObject({
       metadata: { status: "regressed" },
     });
+    // A gateway's own answer carries no release, so it cannot wait for one:
+    // any occurrence after the resolution regresses, and a high one pages.
+    const unreleased = { releases_2h: [""], last_release: "" };
+    expect(plan([occ(unreleased)], [resolved])[0]).toMatchObject({
+      metadata: { status: "regressed" },
+      alert: { kind: "regressed" },
+    });
+    expect(
+      plan([occ({ ...unreleased, last_seen: ago(3) })], [resolved])[0]
+    ).not.toHaveProperty("metadata.status");
   });
 
   test("an occurrence from before the resolution is not a regression", () => {
@@ -590,8 +600,8 @@ describe("runIssueTracker", () => {
               fingerprint: FP(4),
               kind: "system",
               issue_source: "edge",
-              issue_title: "Cloudflare 521 at ci.example",
-              issue_culprit: "edge cloudflare ci.example",
+              issue_title: "Cloudflare 521 at app.ci.example",
+              issue_culprit: "edge cloudflare app.ci.example",
               message: "GET /ci/:id",
               seen_2h: RULES.edgeBurstMin2h,
               seen_24h: RULES.edgeBurstMin2h,

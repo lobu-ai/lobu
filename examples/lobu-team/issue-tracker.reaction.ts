@@ -244,10 +244,12 @@ const CONNECTION = "lobu-analytics";
 const MAX_ISSUE_ROWS = 5000;
 const ENVIRONMENT = "summaries-prod";
 /**
- * Cloudflare's own 5xx are recorded per zone, not per namespace: the product's
- * zone is the one a visitor of this environment reaches.
+ * Cloudflare's own 5xx are recorded per request host, not per namespace: the
+ * hosts a visitor of this environment reaches. app.lobu.ai is the app, and the
+ * apex serves the public MCP endpoint (lobu.ai/mcp) from the same origin.
+ * Every other host in the zone is another service or a scanner's guess.
  */
-const EDGE_ZONE = "lobu.ai";
+const EDGE_HOSTS = ["app.lobu.ai", "lobu.ai"];
 
 export const RULES = {
   /** system/dependency: sightings in 24h, or distinct orgs in one hour. */
@@ -561,10 +563,14 @@ export function planIssueChanges(
       const stamp = stampResolution(issue, now);
       // A fix release names where the error must stop. Until it is deployed,
       // the old release still emitting it is expected, not a regression.
+      // Occurrences that carry no release (a gateway's own answer) can never
+      // name it, so any one after the resolution is a regression.
       const after = ms(o.last_seen) > resolutionTime(issue);
-      const regressed = issue.resolved_in_release
-        ? after && o.releases_2h.includes(issue.resolved_in_release)
-        : after;
+      const releaseless = !o.last_release && !o.releases_2h.some(Boolean);
+      const regressed =
+        issue.resolved_in_release && !releaseless
+          ? after && o.releases_2h.includes(issue.resolved_in_release)
+          : after;
       if (stamp) {
         Object.assign(metadata, stamp);
       } else if (regressed) {
@@ -670,7 +676,8 @@ SELECT
   argMax(sample_trace_ids[1], last_seen) AS sample_trace_id
 FROM observability.issue_occurrences_hourly FINAL
 WHERE hour >= now() - INTERVAL 14 DAY
-  AND (environment = '${ENVIRONMENT}' OR (source = 'edge' AND environment = '${EDGE_ZONE}'))
+  AND (environment = '${ENVIRONMENT}'
+       OR (source = 'edge' AND environment IN (${EDGE_HOSTS.map((host) => `'${host}'`).join(", ")})))
 GROUP BY fingerprint
 HAVING max(last_seen) >= now() - INTERVAL 2 HOUR
 ORDER BY seen_24h DESC, fingerprint
