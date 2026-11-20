@@ -8,7 +8,8 @@
 
 import { describe, expect, it } from 'bun:test';
 import { isRetryable, ToolError, BrowserInterruptionError } from '@lobu/core';
-import { classifyPushdownFailure, isCompletePushdownResult } from '../../lib/connector-pushdown';
+import { classifyPushdownFailure, isCompletePushdownResult, pushdownFailureError } from '../../lib/connector-pushdown';
+import { ToolUserError } from '../../utils/errors';
 
 // Mirror of ConnectorExecutionError's surface: a message plus the propagated httpStatus.
 class ConnectorExecutionErrorLike extends Error {
@@ -79,6 +80,35 @@ describe('classifyPushdownFailure', () => {
     const code = classifyPushdownFailure(new BrowserInterruptionError('challenge_required', 'timeout is not challenge evidence'));
     expect(code).toBe('BROWSER_INTERRUPTED');
     expect(isRetryable(code)).toBe(false);
+  });
+});
+
+describe('pushdownFailureError', () => {
+  const expired = async () => {
+    const deadline = AbortSignal.timeout(1);
+    await new Promise((resolve) => deadline.addEventListener('abort', resolve, { once: true }));
+    return AbortSignal.any([new AbortController().signal, deadline]);
+  };
+
+  it('hands back the abort reason of a caller that left, not a failed source', () => {
+    // The node adapter's reason when the client socket closes.
+    const caller = new AbortController();
+    caller.abort('Client connection prematurely closed.');
+    const failure = pushdownFailureError(new Error('aborted'), 'synthetic-source', 'query', caller.signal);
+    expect(failure).toBe('Client connection prematurely closed.');
+  });
+
+  it('still reports a deadline composed onto the signal as the source failing', async () => {
+    const failure = pushdownFailureError(
+      Object.assign(new Error('redacted'), { exitReason: 'timeout' }), 'synthetic-source', 'query', await expired(),
+    );
+    expect(failure).toBeInstanceOf(ToolUserError);
+    expect(failure).toMatchObject({ code: 'UPSTREAM_TIMEOUT' });
+  });
+
+  it('reports a source failure while its caller is still waiting', () => {
+    const failure = pushdownFailureError(new Error('feed exploded'), 'synthetic-source', 'query', new AbortController().signal);
+    expect(failure).toMatchObject({ code: 'UPSTREAM_5XX', httpStatus: 500 });
   });
 });
 

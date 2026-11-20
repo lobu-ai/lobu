@@ -328,7 +328,8 @@ describe('public pages > crawler-facing responses', () => {
           headers: { accept: 'text/html' },
           signal: visitor.signal,
         });
-        expect(response.status).toBe(503);
+        // Nobody receives the status: it is recorded as the visitor's 499.
+        expect(response.status).toBe(499);
         expect(errorLog).not.toHaveBeenCalled();
       });
     });

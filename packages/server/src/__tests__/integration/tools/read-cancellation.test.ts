@@ -17,6 +17,8 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { getRequestListener } from '@hono/node-server';
 import { Hono } from 'hono';
+import { initTracing, shutdownTracing, SpanKind, SpanStatusCode } from '@lobu/core';
+import { InMemorySpanExporter, type ReadableSpan, SimpleSpanProcessor } from '@opentelemetry/sdk-trace-node';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mcpAuth } from '../../../auth/middleware';
 import type { Env } from '../../../index';
@@ -239,12 +241,19 @@ describe('read cancellation', () => {
     expect(toolFailures('read_knowledge')).toEqual([]);
   });
 
-  it('does not log an admin read abandoned by a dropped connection as an issue', async () => {
+  it('records an admin read abandoned by a dropped connection as a 499, not an issue', async () => {
     // The node adapter aborts the request with a plain string reason
     // ("Client connection prematurely closed."), which the cancelled read
     // rethrows; the admin action router must treat it like executeTool does.
-    const server = http.createServer(getRequestListener((request) => app.fetch(request, env)));
+    // Served through the production wrapper, whose span and access log record
+    // the status: nobody receives it, so it must not read as a server 500.
+    const exporter = new InMemorySpanExporter();
+    await shutdownTracing();
+    initTracing({ serviceName: 'read-cancellation-test', spanProcessors: [new SimpleSpanProcessor(exporter)] });
+    const wrapped = buildWrapperApp(env, null, app);
+    const server = http.createServer(getRequestListener((request) => wrapped.fetch(request, env)));
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    let requestSpan: ReadableSpan | null = null;
     try {
       const { port } = server.address() as AddressInfo;
       const holderPid = await holdEventsLock('entities');
@@ -267,12 +276,28 @@ describe('read cancellation', () => {
         3000
       );
       expect(remaining).toEqual([]);
+      requestSpan = await waitFor(
+        async () => exporter.getFinishedSpans().find((span) => span.kind === SpanKind.SERVER) ?? null,
+        3000
+      );
     } finally {
       await release?.();
       release = null;
       server.closeAllConnections();
       await new Promise((resolve) => server.close(resolve));
+      await shutdownTracing();
     }
+    expect(requestSpan?.attributes).toMatchObject({
+      'http.route': '/api/:orgSlug/:toolName',
+      'http.response.status_code': 499,
+    });
+    expect(requestSpan?.status.code).not.toBe(SpanStatusCode.ERROR);
+    expect(requestSpan?.attributes['error.fingerprint']).toBeUndefined();
+    const records = logLines.flatMap((line) => {
+      try { return [JSON.parse(line)]; } catch { return []; }
+    });
+    expect(records.filter((record) => record.source === 'route_failure' || record.source === 'http_response')).toEqual([]);
+    expect(records.filter((record) => record.res?.status !== undefined).map((record) => record.res.status)).toEqual([499]);
     expect(issues()).toEqual([]);
   });
 
@@ -280,10 +305,16 @@ describe('read cancellation', () => {
     const sql = getTestDb();
     await sql`ALTER TABLE events ADD CONSTRAINT synthetic_failed_write
       CHECK (payload_text IS DISTINCT FROM 'synthetic failed write') NOT VALID`;
+    const exporter = new InMemorySpanExporter();
+    await shutdownTracing();
+    initTracing({ serviceName: 'read-cancellation-test', spanProcessors: [new SimpleSpanProcessor(exporter)] });
     try {
       const holderPid = await holdEventsLock();
       const caller = new AbortController();
-      const pending = app.fetch(new Request(`http://localhost/api/${orgSlug}/save_memory`, {
+      // Through the production wrapper: a failure the tool boundary reported
+      // keeps its 5xx, and its cause on the request span, even though nobody
+      // is left to receive it.
+      const pending = buildWrapperApp(env, null, app).fetch(new Request(`http://localhost/api/${orgSlug}/save_memory`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ semantic_type: 'note', content: 'synthetic failed write' }),
@@ -298,7 +329,10 @@ describe('read cancellation', () => {
       await release?.();
       release = null;
       const response = await pending;
-      expect(response.status).toBeGreaterThanOrEqual(400);
+      expect(response.status).toBe(500);
+      expect(exporter.getFinishedSpans().find((span) => span.kind === SpanKind.SERVER)?.attributes).toMatchObject({
+        'http.response.status_code': 500, 'error.code': '23514',
+      });
       // One failure is one issue: the tool boundary's record, not a second
       // copy from the REST wrapper or the HTTP response middleware.
       expect(issues()).toEqual([
@@ -310,6 +344,7 @@ describe('read cancellation', () => {
     } finally {
       await release?.();
       release = null;
+      await shutdownTracing();
       await sql`ALTER TABLE events DROP CONSTRAINT synthetic_failed_write`;
     }
   });

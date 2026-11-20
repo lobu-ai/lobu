@@ -30,3 +30,17 @@ export function raceAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise
     else signal.addEventListener("abort", onAbort, { once: true });
   });
 }
+
+/**
+ * Whether `signal` stopped because its caller went away rather than because a
+ * deadline composed onto it expired. `AbortSignal.timeout` (alone or inside
+ * `AbortSignal.any`) aborts with a `TimeoutError`: the work took too long, a
+ * failure to report. Any other abort is the caller cancelling; rethrow
+ * `signal.reason` so the tool span, the failure log and the HTTP status all
+ * treat it as a cancellation instead of a failed dependency.
+ */
+export function isCallerAbort(signal: AbortSignal | undefined): boolean {
+  if (!signal?.aborted) return false;
+  const reason: unknown = signal.reason;
+  return !(reason instanceof Error && reason.name === "TimeoutError");
+}

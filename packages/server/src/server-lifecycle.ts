@@ -90,15 +90,31 @@ async function isReadinessDrain(c: Context): Promise<boolean> {
 
 /**
  * Whether a returned 5xx is not a server failure to report: the readiness
- * drain, the shutdown refusal after the database closed, or a response its
- * caller disconnected before receiving. A read-tier tool runs under the
- * request's signal, so the caller leaving is what made it fail (#4833 applies
- * the same rule to the tool span and failure log). A real
- * failure behind it is still logged where it happened; thrown errors still
- * report through onError.
+ * drain or the shutdown refusal after the database closed. A 5xx its caller
+ * left before receiving is already a 499 by the time this runs
+ * (`recordCallerAbortAs499`); thrown errors still report through onError.
  */
 async function isUnreportedServerStatus(c: Context): Promise<boolean> {
-	return c.req.raw.signal.aborted || requestsRefusedAfterDbShutdown.has(c.req.raw) || (await isReadinessDrain(c));
+	return requestsRefusedAfterDbShutdown.has(c.req.raw) || (await isReadinessDrain(c));
+}
+
+/** nginx's "client closed request": the caller disconnected before the answer. */
+const CLIENT_CLOSED_REQUEST = 499;
+
+/**
+ * Record a 5xx nobody received, with no failure reported for it, as a 499.
+ * A read-tier tool runs under the request's signal, so the caller leaving is
+ * what made it fail, and every layer already declines to report that (#4833
+ * applies the rule to the tool span and failure log, `routeFailure` to a
+ * cancelled read). A failure that was reported keeps its 5xx: a write that
+ * failed after its caller left (its database work does not follow the
+ * signal) or an unhandled throw. Runs inside the span, access log and 5xx
+ * capture middleware, so all three read the status set here.
+ */
+function recordCallerAbortAs499(c: Context): void {
+	if (c.res.status >= 500 && c.req.raw.signal.aborted && !isErrorReported(c)) {
+		c.res = new Response(null, { status: CLIENT_CLOSED_REQUEST });
+	}
 }
 
 type ServerMode = "postgres" | "embedded-postgres";
@@ -230,8 +246,10 @@ export function reportBootFailure(err: unknown): never {
  *      logger below and all route work inherit its trace/span ids)
  *   4. request logger             (covers both `/lobu` and the main app)
  *   5. structured 5xx response capture (for inner-catch returns that never throw)
- *   6. database-shutdown refusal  (503 once the pools closed for exit)
- *   7. `app.onError` for thrown exceptions
+ *   6. caller-abort 499          (an unreported 5xx nobody received; inside
+ *      3–5 so the span, access log and capture all read the 499)
+ *   7. database-shutdown refusal  (503 once the pools closed for exit)
+ *   8. `app.onError` for thrown exceptions
  *
  * Route mounts:
  *   - `/lobu` → `lobuApp` (only when non-null)
@@ -382,7 +400,14 @@ export function buildWrapperApp(
 		}
 	});
 
-	// 6. Once shutdown closed the database pools, nothing a route does can
+	// 6. A 5xx the caller disconnected before receiving is its 499. Inside the
+	// three middleware above so the span, access log and 5xx capture see it.
+	wrapper.use("*", async (c, next) => {
+		await next();
+		recordCallerAbortAs499(c);
+	});
+
+	// 7. Once shutdown closed the database pools, nothing a route does can
 	// succeed, and most routes catch the failure into their own 500. Refuse the
 	// request before it reaches one so the caller sees a retriable 503.
 	wrapper.use("*", async (c, next) => {
@@ -390,7 +415,7 @@ export function buildWrapperApp(
 		return next();
 	});
 
-	// 7. Catch-all error handler for thrown exceptions that bubble past route
+	// 8. Catch-all error handler for thrown exceptions that bubble past route
 	// catches. Preserves the original stack trace. A route that reached the
 	// database after shutdown closed it gets the same 503 as the refusal above.
 	wrapper.onError((err, c) => {

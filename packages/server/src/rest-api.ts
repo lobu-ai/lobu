@@ -19,7 +19,7 @@ import { getScopedConnectorDefinition } from "./catalog/connector-definitions";
 import { listOrgInstalled } from "./catalog/installed";
 import { DbClosedError, getDb, parsePgTextArray } from "./db/client";
 import { EntityRowValidationError } from "./authz/entity-row-validation";
-import { markErrorReported, routeFailure } from "./diagnostics";
+import { isErrorReported, markErrorReported, routeFailure } from "./diagnostics";
 import { streamInvalidationEvents } from "./events/sse";
 import { fixedActionArgs } from "./http/rest-tool-routes";
 import { parseJsonBody } from "./gateway/routes/shared/helpers";
@@ -187,6 +187,18 @@ function toolUserErrorBody(error: ToolUserError): Record<string, unknown> {
 	};
 }
 
+/**
+ * Whether a 5xx answer is the caller's own cancellation: it disconnected and
+ * no layer reported a failure. REST tool calls carry reads over POST, so the
+ * method cannot tell them apart; the tool boundary declines to log a read its
+ * caller abandoned, and the HTTP boundary records the answer as a 499. A
+ * write that failed after the disconnect was logged there, and still throws
+ * its cause below so the request span records it.
+ */
+function isCallerCancellation(c: Context<{ Bindings: Env }>): boolean {
+	return c.req.raw.signal.aborted && !isErrorReported(c);
+}
+
 function restErrorResponse(
 	c: Context<{ Bindings: Env }>,
 	thrown: unknown
@@ -204,7 +216,7 @@ function restErrorResponse(
 		);
 		// A 5xx answer (an upstream timeout or outage) is still a failure to
 		// report, as the error itself so its typed code sets the issue's kind.
-		if (error.httpStatus < 500 || c.req.raw.signal.aborted) return response;
+		if (error.httpStatus < 500 || isCallerCancellation(c)) return response;
 		throw routeFailure(c, response, error);
 	}
 	if (error instanceof AccessDeniedError) {
@@ -219,9 +231,7 @@ function restErrorResponse(
 	// Preserve the shutdown boundary's existing 503 handling.
 	if (error instanceof DbClosedError) throw error;
 	const response = c.json({ error: "Internal server error" }, 500);
-	// Match the HTTP boundary's suppression for abandoned requests: REST tool
-	// calls carry reads over POST, so the method does not tell them apart.
-	if (c.req.raw.signal.aborted) return response;
+	if (isCallerCancellation(c)) return response;
 	throw routeFailure(c, response, error);
 }
 

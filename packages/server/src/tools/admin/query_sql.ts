@@ -492,7 +492,7 @@ export async function querySqlImpl(
       // Both derived-entity read seams (`listDerivedEntities`,
       // `resolveDerivedLeaf`) handle only the SOFT error shape and let this
       // throw pass through, so a flat 502 showed them a blank page.
-      throw pushdownFailureError(err, args.connection, 'query');
+      throw pushdownFailureError(err, args.connection, 'query', ctx.abortSignal);
     }
   }
 

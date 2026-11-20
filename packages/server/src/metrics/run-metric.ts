@@ -186,7 +186,7 @@ async function runPushdownMetric(
       callerClass: input.callerClass ?? 'member',
     });
   } catch (err) {
-    throw pushdownFailureError(err, backingSource, "metric");
+    throw pushdownFailureError(err, backingSource, "metric", input.signal);
   }
   if (!isCompletePushdownResult(result)) {
     throw new ToolUserError(
