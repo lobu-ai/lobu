@@ -46,7 +46,7 @@ import {
 	createTestOrganization,
 	insertChatConnectionRow,
 } from "../../setup/test-fixtures";
-import { TestApiClient } from "../../setup/test-mcp-client";
+import { TestApiClient, TestWorkspace } from "../../setup/test-mcp-client";
 import { post } from "../../setup/test-helpers";
 
 const BASE = "http://localhost/api/auth";
@@ -271,6 +271,54 @@ async function claimPurgeTask(taskRunId: number, owner: string): Promise<void> {
 	`;
 }
 
+const LENDER_SCHEMA = { type: "object", properties: { ticker: { type: "string", title: "Ticker" } } };
+
+/** A public workspace whose entity and relationship types others can use. */
+async function seedPublicTypeLender(label: string) {
+	const sql = getTestDb();
+	const lender = await signUpOwnerWithWorkspace(label);
+	await sql`UPDATE organization SET visibility = 'public' WHERE id = ${lender.organizationId}`;
+	const [entityType] = await sql<{ id: number }[]>`
+		INSERT INTO entity_types (organization_id, slug, name, description, icon, metadata_schema)
+		VALUES (${lender.organizationId}, 'listed-company', 'Listed company', 'A company with public shares',
+		        'building', ${sql.json(LENDER_SCHEMA)})
+		RETURNING id
+	`;
+	const [relType] = await sql<{ id: number }[]>`
+		INSERT INTO entity_relationship_types (organization_id, slug, name, is_symmetric)
+		VALUES (${lender.organizationId}, 'competes-with', 'Competes with', true)
+		RETURNING id
+	`;
+	await sql`
+		INSERT INTO entity_relationship_type_rules (relationship_type_id, source_entity_type_slug, target_entity_type_slug)
+		VALUES (${relType.id}, 'listed-company', 'listed-company')
+	`;
+	return { ...lender, entityTypeId: Number(entityType.id) };
+}
+
+/** Two records created through the real fallback onto the public type. */
+async function createBorrowedPair(workspace: TestWorkspace): Promise<[number, number]> {
+	const ids: number[] = [];
+	for (const name of ["Alpha Corp", "Beta Corp"]) {
+		const created = (await workspace.owner.entities.create({ entity_type: "listed-company", name })) as {
+			entity: { id: number };
+		};
+		ids.push(created.entity.id);
+	}
+	return [ids[0], ids[1]];
+}
+
+async function deleteAndPurge(target: { organizationId: string; token: string }) {
+	const deleted = await call("/organization/delete", { organizationId: target.organizationId }, target.token);
+	expect(deleted.status).toBe(200);
+	const [task] = await pendingPurgeTask(target.organizationId);
+	await claimPurgeTask(task.id, "test-holder");
+	return runWorkspacePurgeTask(
+		{ organizationId: target.organizationId },
+		{ taskRunId: task.id, claimedBy: "test-holder" },
+	);
+}
+
 describe("workspace purge", () => {
 	const originalSecret = process.env.BETTER_AUTH_SECRET;
 
@@ -289,6 +337,8 @@ describe("workspace purge", () => {
 		const sql = getTestDb();
 		await sql`DROP TRIGGER IF EXISTS test_purge_steal_lease ON events`;
 		await sql`DROP FUNCTION IF EXISTS test_purge_steal_lease()`;
+		await sql`DROP TRIGGER IF EXISTS test_purge_fail_edge_repoint ON entity_relationships`;
+		await sql`DROP FUNCTION IF EXISTS test_purge_fail_edge_repoint()`;
 		if (originalSecret === undefined) delete process.env.BETTER_AUTH_SECRET;
 		else process.env.BETTER_AUTH_SECRET = originalSecret;
 		clearAuthCacheForTests();
@@ -407,6 +457,167 @@ describe("workspace purge", () => {
 		expect(await sql`SELECT 1 FROM organization WHERE id = ${target.organizationId}`).toHaveLength(0);
 		expect(await sql`SELECT 1 FROM entity_relationships WHERE organization_id = ${reader.id}`).toHaveLength(0);
 		expect(await sql`SELECT 1 FROM entities WHERE id = ${own.id}`).toHaveLength(1);
+	});
+
+	it("gives workspaces that borrowed its public types their own copies before deleting them", async () => {
+		const sql = getTestDb();
+		const lender = await seedPublicTypeLender("type-lender");
+		// A workspace that only ever used the public types.
+		const borrower = await TestWorkspace.create({ name: "Type borrower" });
+		const [alpha, beta] = await createBorrowedPair(borrower);
+		const link = (await borrower.owner.entities.link({
+			from_entity_id: alpha,
+			to_entity_id: beta,
+			relationship_type_slug: "competes-with",
+		})) as { relationship: { id: number } };
+		const retired = (await borrower.owner.entities.create({ entity_type: "listed-company", name: "Retired" })) as {
+			entity: { id: number };
+		};
+		await sql`UPDATE entities SET deleted_at = now() WHERE id = ${retired.entity.id}`;
+		const [before] = await sql`SELECT entity_type_id FROM entities WHERE id = ${alpha}`;
+		expect(Number(before.entity_type_id)).toBe(lender.entityTypeId);
+
+		// A workspace that borrowed first and later defined the same keys itself:
+		// it keeps its own types, and the edge already present on its own type
+		// retires the borrowed duplicate instead of colliding with it.
+		const adopter = await TestWorkspace.create({ name: "Type adopter" });
+		const [gamma, delta] = await createBorrowedPair(adopter);
+		const borrowedLink = (await adopter.owner.entities.link({
+			from_entity_id: gamma,
+			to_entity_id: delta,
+			relationship_type_slug: "competes-with",
+		})) as { relationship: { id: number } };
+		const [adopterType] = await sql<{ id: number }[]>`
+			INSERT INTO entity_types (organization_id, slug, name)
+			VALUES (${adopter.org.id}, 'listed-company', 'Own listed company') RETURNING id
+		`;
+		const [adopterRelType] = await sql<{ id: number }[]>`
+			INSERT INTO entity_relationship_types (organization_id, slug, name)
+			VALUES (${adopter.org.id}, 'competes-with', 'Own competes with') RETURNING id
+		`;
+		const ownLink = (await adopter.owner.entities.link({
+			from_entity_id: gamma,
+			to_entity_id: delta,
+			relationship_type_slug: "competes-with",
+		})) as { relationship: { id: number } };
+		expect(ownLink.relationship.id).not.toBe(borrowedLink.relationship.id);
+
+		const counts = await deleteAndPurge(lender);
+
+		expect(await sql`SELECT 1 FROM organization WHERE id = ${lender.organizationId}`).toHaveLength(0);
+		expect(await sql`SELECT 1 FROM entity_types WHERE organization_id = ${lender.organizationId}`).toHaveLength(0);
+		expect(
+			await sql`SELECT 1 FROM entity_relationship_types WHERE organization_id = ${lender.organizationId}`,
+		).toHaveLength(0);
+
+		const copies = await sql`
+			SELECT id, name, description, icon, metadata_schema FROM entity_types
+			WHERE organization_id = ${borrower.org.id} AND slug = 'listed-company'
+		`;
+		expect(copies).toHaveLength(1);
+		expect(copies[0]).toMatchObject({
+			name: "Listed company",
+			description: "A company with public shares",
+			icon: "building",
+			metadata_schema: LENDER_SCHEMA,
+		});
+		const borrowerEntities = await sql`
+			SELECT DISTINCT entity_type_id FROM entities WHERE id IN (${alpha}, ${beta}, ${retired.entity.id})
+		`;
+		expect(borrowerEntities.map((row) => Number(row.entity_type_id))).toEqual([Number(copies[0].id)]);
+		const relCopies = await sql`
+			SELECT id, name, is_symmetric FROM entity_relationship_types
+			WHERE organization_id = ${borrower.org.id} AND slug = 'competes-with'
+		`;
+		expect(relCopies).toHaveLength(1);
+		expect(relCopies[0]).toMatchObject({ name: "Competes with", is_symmetric: true });
+		const rules = await sql`
+			SELECT source_entity_type_slug, target_entity_type_slug FROM entity_relationship_type_rules
+			WHERE relationship_type_id = ${relCopies[0].id} AND deleted_at IS NULL
+		`;
+		expect(rules).toEqual([{ source_entity_type_slug: "listed-company", target_entity_type_slug: "listed-company" }]);
+		const [edge] = await sql`
+			SELECT relationship_type_id, deleted_at FROM entity_relationships WHERE id = ${link.relationship.id}
+		`;
+		expect(Number(edge.relationship_type_id)).toBe(Number(relCopies[0].id));
+		expect(edge.deleted_at).toBeNull();
+
+		expect(await sql`SELECT 1 FROM entity_types WHERE organization_id = ${adopter.org.id}`).toHaveLength(1);
+		const adopterEntities = await sql`SELECT DISTINCT entity_type_id FROM entities WHERE id IN (${gamma}, ${delta})`;
+		expect(adopterEntities.map((row) => Number(row.entity_type_id))).toEqual([adopterType.id]);
+		expect(
+			await sql`SELECT 1 FROM entity_relationship_types WHERE organization_id = ${adopter.org.id}`,
+		).toHaveLength(1);
+		const adopterEdges = await sql`
+			SELECT id, relationship_type_id, deleted_at FROM entity_relationships
+			WHERE organization_id = ${adopter.org.id} ORDER BY id
+		`;
+		expect(adopterEdges).toHaveLength(2);
+		expect(adopterEdges.map((row) => Number(row.relationship_type_id))).toEqual([adopterRelType.id, adopterRelType.id]);
+		const byId = new Map(adopterEdges.map((row) => [Number(row.id), row.deleted_at]));
+		expect(byId.get(borrowedLink.relationship.id)).not.toBeNull();
+		expect(byId.get(ownLink.relationship.id)).toBeNull();
+
+		expect(counts).toMatchObject({ borrowed_entity_types: 1, borrowed_relationship_types: 1 });
+	});
+
+	it("finishes copying borrowed types on a fresh request after the task gave up", async () => {
+		const sql = getTestDb();
+		const lender = await seedPublicTypeLender("type-lender-retry");
+		const borrower = await TestWorkspace.create({ name: "Type borrower retry" });
+		const [alpha, beta] = await createBorrowedPair(borrower);
+		const link = (await borrower.owner.entities.link({
+			from_entity_id: alpha,
+			to_entity_id: beta,
+			relationship_type_slug: "competes-with",
+		})) as { relationship: { id: number } };
+
+		// The edge repoint fails after the entity copies committed.
+		await sql.unsafe(`
+			CREATE FUNCTION test_purge_fail_edge_repoint() RETURNS trigger AS $$
+			BEGIN
+				RAISE EXCEPTION 'test-injected repoint failure';
+			END;
+			$$ LANGUAGE plpgsql
+		`);
+		await sql.unsafe(`
+			CREATE TRIGGER test_purge_fail_edge_repoint BEFORE UPDATE OF relationship_type_id ON entity_relationships
+			FOR EACH ROW EXECUTE FUNCTION test_purge_fail_edge_repoint()
+		`);
+		const deleted = await call("/organization/delete", { organizationId: lender.organizationId }, lender.token);
+		expect(deleted.status).toBe(200);
+		const [first] = await pendingPurgeTask(lender.organizationId);
+		await claimPurgeTask(first.id, "first-holder");
+		await expect(
+			runWorkspacePurgeTask({ organizationId: lender.organizationId }, { taskRunId: first.id, claimedBy: "first-holder" }),
+		).rejects.toThrow(/test-injected repoint failure/);
+		const [partial] = await sql`SELECT entity_type_id FROM entities WHERE id = ${alpha}`;
+		expect(Number(partial.entity_type_id)).not.toBe(lender.entityTypeId);
+		expect(await sql`SELECT 1 FROM organization WHERE id = ${lender.organizationId}`).toHaveLength(1);
+		await sql`DROP TRIGGER test_purge_fail_edge_repoint ON entity_relationships`;
+
+		// Attempts exhausted: the queue marks the row failed, and only a fresh
+		// request from the owner enqueues the purge again.
+		await sql`UPDATE runs SET status = 'failed', claimed_by = NULL WHERE id = ${first.id}`;
+		const again = await call("/organization/delete", { organizationId: lender.organizationId }, lender.token);
+		expect(again.status).toBe(200);
+		const [second] = await pendingPurgeTask(lender.organizationId);
+		expect(second.id).not.toBe(first.id);
+		await claimPurgeTask(second.id, "second-holder");
+		await runWorkspacePurgeTask(
+			{ organizationId: lender.organizationId },
+			{ taskRunId: second.id, claimedBy: "second-holder" },
+		);
+
+		expect(await sql`SELECT 1 FROM organization WHERE id = ${lender.organizationId}`).toHaveLength(0);
+		const copies = await sql`SELECT id FROM entity_types WHERE organization_id = ${borrower.org.id}`;
+		expect(copies).toHaveLength(1);
+		const entities = await sql`SELECT DISTINCT entity_type_id FROM entities WHERE id IN (${alpha}, ${beta})`;
+		expect(entities.map((row) => Number(row.entity_type_id))).toEqual([Number(copies[0].id)]);
+		const relCopies = await sql`SELECT id FROM entity_relationship_types WHERE organization_id = ${borrower.org.id}`;
+		expect(relCopies).toHaveLength(1);
+		const [edge] = await sql`SELECT relationship_type_id FROM entity_relationships WHERE id = ${link.relationship.id}`;
+		expect(Number(edge.relationship_type_id)).toBe(Number(relCopies[0].id));
 	});
 
 	it("keeps an OAuth registration other workspaces use and deletes one only it used", async () => {

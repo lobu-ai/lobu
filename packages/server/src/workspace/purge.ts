@@ -15,8 +15,8 @@
  */
 
 import { releaseClientHomedInOrganization } from '../auth/oauth/clients';
-import { type DbClient, getDb } from '../db/client';
-import { hardDeleteEntityRows } from '../utils/entity-management';
+import { type DbClient, getDb, pgBigintArray } from '../db/client';
+import { hardDeleteEntityRows, repointEntityRowsToOwnType } from '../utils/entity-management';
 import { IDENTITY_DECISION_METADATA_KEY } from '../utils/relationship-claims';
 import {
   lockIdentityOrganization,
@@ -228,7 +228,25 @@ export async function runWorkspacePurgeTask(
       })) > 0
     );
 
-    // 6. OAuth registrations homed here. `oauth_clients.organization_id` is
+    // 6. Types other workspaces borrowed. Creating an entity or link falls
+    //    back to a public workspace's type with that slug, so other
+    //    workspaces' rows can reference this workspace's types. The entity
+    //    reference restricts the type cascade (the purge could never finish)
+    //    and the relationship reference cascades (their edges would vanish),
+    //    so each borrower first gets its own copy of the type, or keeps the
+    //    same-slug type it already has, and its rows move onto it.
+    while (
+      (await fencedBatch(sql, ctx.taskRunId, owner, counts, (tx) =>
+        rehomeBorrowedEntityTypes(tx, organizationId),
+      )) > 0
+    );
+    while (
+      (await fencedBatch(sql, ctx.taskRunId, owner, counts, (tx) =>
+        withAclPrivilege(tx, () => rehomeBorrowedRelationshipTypes(tx, organizationId)),
+      )) > 0
+    );
+
+    // 7. OAuth registrations homed here. `oauth_clients.organization_id` is
     //    only the first workspace that authorized a registration, yet the
     //    organization delete cascades through it into every workspace's tokens
     //    and `events.client_id`. So each one is settled first: this workspace's
@@ -245,7 +263,7 @@ export async function runWorkspacePurgeTask(
       })) > 0
     );
 
-    // 7. The organization row. What still cascades is small by now.
+    // 8. The organization row. What still cascades is small by now.
     await batch('organization', (tx) =>
       withAclPrivilege(tx, async () => {
         // Hold the organization lock before revoking: a concurrent PAT mint's
@@ -262,12 +280,12 @@ export async function runWorkspacePurgeTask(
     );
   }
 
-  // 8. Tables the organization delete does not reach.
+  // 9. Tables the organization delete does not reach.
   for (const table of WORKSPACE_PURGE_UNLINKED_TABLES) {
     while ((await batch(table, (tx) => deleteBatchByOrganization(tx, table, organizationId))) > 0);
   }
 
-  // 9. The public namespace entry. It is keyed by `ref_id`, not
+  // 10. The public namespace entry. It is keyed by `ref_id`, not
   //    `organization_id`, so it is neither cascaded from `organization` nor
   //    part of the batch tables above. One row per workspace at most.
   await batch('namespace', async (tx) => {
@@ -327,6 +345,142 @@ async function fencedBatch(
     }
     return removed;
   });
+}
+
+/**
+ * Move one batch of other workspaces' entities off this workspace's types.
+ * Every row in the batch gets a target first: the borrower's live type with
+ * the same slug, copied from this workspace's type when it has none. Keying
+ * the copy on the borrower's unique slug makes a retry reuse it.
+ */
+async function rehomeBorrowedEntityTypes(tx: DbClient, organizationId: string): Promise<PurgeCounts> {
+  // Live and retired rows are read separately so each uses its partial index.
+  const rows = await tx<{ id: number }>`
+    SELECT id FROM (
+      (SELECT e.id FROM entity_types t
+       JOIN entities e ON e.entity_type_id = t.id
+       WHERE t.organization_id = ${organizationId} AND e.organization_id <> ${organizationId}
+         AND e.deleted_at IS NULL
+       LIMIT ${WORKSPACE_PURGE_BATCH_SIZE})
+      UNION ALL
+      (SELECT e.id FROM entity_types t
+       JOIN entities e ON e.entity_type_id = t.id
+       WHERE t.organization_id = ${organizationId} AND e.organization_id <> ${organizationId}
+         AND e.deleted_at IS NOT NULL
+       LIMIT ${WORKSPACE_PURGE_BATCH_SIZE})
+    ) borrowed
+    LIMIT ${WORKSPACE_PURGE_BATCH_SIZE}
+  `;
+  const ids = rows.map((row) => Number(row.id));
+  if (ids.length === 0) return {};
+  const copied = await tx`
+    INSERT INTO entity_types (
+      organization_id, slug, name, description, icon, color, metadata_schema,
+      event_kinds, metrics_config, rules_source, rules_compiled
+    )
+    SELECT DISTINCT ON (e.organization_id, t.slug)
+      e.organization_id, t.slug, t.name, t.description, t.icon, t.color, t.metadata_schema,
+      t.event_kinds, t.metrics_config, t.rules_source, t.rules_compiled
+    FROM entities e
+    JOIN entity_types t ON t.id = e.entity_type_id
+    WHERE e.id = ANY(${pgBigintArray(ids)}::bigint[])
+      AND NOT EXISTS (
+        SELECT 1 FROM entity_types own
+        WHERE own.organization_id = e.organization_id AND own.slug = t.slug AND own.deleted_at IS NULL
+      )
+    ORDER BY e.organization_id, t.slug, (t.deleted_at IS NULL) DESC, t.id DESC
+    ON CONFLICT (organization_id, slug) WHERE organization_id IS NOT NULL AND deleted_at IS NULL DO NOTHING
+  `;
+  const moved = await repointEntityRowsToOwnType({ tx, ids });
+  return { borrowed_entity_types: copied.count, borrowed_type_entities: moved.length };
+}
+
+/**
+ * Move one batch of other workspaces' relationships off this workspace's
+ * relationship types, copying each type (and its endpoint rules) to a
+ * borrower that has no active type with the same slug. A live edge that
+ * already exists on the borrower's own type is retired rather than
+ * duplicated; every edge keeps its row.
+ */
+async function rehomeBorrowedRelationshipTypes(
+  tx: DbClient,
+  organizationId: string,
+): Promise<PurgeCounts> {
+  const rows = await tx<{ id: number }>`
+    SELECT r.id FROM entity_relationship_types t
+    JOIN entity_relationships r ON r.relationship_type_id = t.id
+    WHERE t.organization_id = ${organizationId} AND r.organization_id <> ${organizationId}
+    LIMIT ${WORKSPACE_PURGE_BATCH_SIZE}
+  `;
+  if (rows.length === 0) return {};
+  const ids = pgBigintArray(rows.map((row) => Number(row.id)));
+  const [copied] = await tx<{ count: number }>`
+    WITH source AS (
+      SELECT DISTINCT ON (r.organization_id, t.slug)
+        r.organization_id, t.id AS source_type_id, t.slug, t.name, t.description,
+        t.metadata_schema, t.is_symmetric, t.metadata, t.purpose
+      FROM entity_relationships r
+      JOIN entity_relationship_types t ON t.id = r.relationship_type_id
+      WHERE r.id = ANY(${ids}::bigint[])
+        AND NOT EXISTS (
+          SELECT 1 FROM entity_relationship_types own
+          WHERE own.organization_id = r.organization_id AND own.slug = t.slug AND own.status = 'active'
+        )
+      ORDER BY r.organization_id, t.slug, (t.status = 'active') DESC, t.id DESC
+    ), copied AS (
+      INSERT INTO entity_relationship_types (
+        organization_id, slug, name, description, metadata_schema, is_symmetric, metadata, purpose
+      )
+      SELECT organization_id, slug, name, description, metadata_schema, is_symmetric, metadata, purpose
+      FROM source
+      ON CONFLICT (organization_id, slug) WHERE status = 'active' DO NOTHING
+      RETURNING id, organization_id, slug
+    ), copied_rules AS (
+      INSERT INTO entity_relationship_type_rules (
+        relationship_type_id, source_entity_type_slug, target_entity_type_slug
+      )
+      SELECT copied.id, rule.source_entity_type_slug, rule.target_entity_type_slug
+      FROM copied
+      JOIN source ON source.organization_id = copied.organization_id AND source.slug = copied.slug
+      JOIN entity_relationship_type_rules rule
+        ON rule.relationship_type_id = source.source_type_id AND rule.deleted_at IS NULL
+    )
+    SELECT count(*)::int AS count FROM copied
+  `;
+  // A duplicate is judged by the borrower's two live-edge unique indexes:
+  // stored pairs by endpoints, source edges by their full endpoint tuple.
+  const moved = await tx`
+    UPDATE entity_relationships r
+    SET relationship_type_id = own.id,
+        deleted_at = CASE
+          WHEN r.deleted_at IS NOT NULL THEN r.deleted_at
+          WHEN r.from_entity_id IS NOT NULL AND r.to_entity_id IS NOT NULL AND EXISTS (
+            SELECT 1 FROM entity_relationships live
+            WHERE live.from_entity_id = r.from_entity_id AND live.to_entity_id = r.to_entity_id
+              AND live.relationship_type_id = own.id AND live.deleted_at IS NULL
+          ) THEN now()
+          WHEN (r.from_entity_id IS NULL OR r.to_entity_id IS NULL) AND EXISTS (
+            SELECT 1 FROM entity_relationships live
+            WHERE live.organization_id = r.organization_id
+              AND COALESCE(live.from_entity_id, 0) = COALESCE(r.from_entity_id, 0)
+              AND COALESCE(live.from_entity_type_id, 0) = COALESCE(r.from_entity_type_id, 0)
+              AND COALESCE(live.from_source_key, '') = COALESCE(r.from_source_key, '')
+              AND COALESCE(live.to_entity_id, 0) = COALESCE(r.to_entity_id, 0)
+              AND COALESCE(live.to_entity_type_id, 0) = COALESCE(r.to_entity_type_id, 0)
+              AND COALESCE(live.to_source_key, '') = COALESCE(r.to_source_key, '')
+              AND live.relationship_type_id = own.id AND live.deleted_at IS NULL
+              AND (live.from_entity_id IS NULL OR live.to_entity_id IS NULL)
+          ) THEN now()
+          ELSE NULL
+        END,
+        updated_at = now()
+    FROM entity_relationship_types t, entity_relationship_types own
+    WHERE r.id = ANY(${ids}::bigint[])
+      AND t.id = r.relationship_type_id
+      AND own.organization_id = r.organization_id AND own.slug = t.slug AND own.status = 'active'
+      AND own.id <> r.relationship_type_id
+  `;
+  return { borrowed_relationship_types: copied.count, borrowed_type_relationships: moved.count };
 }
 
 /**

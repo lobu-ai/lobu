@@ -741,6 +741,32 @@ export async function hardDeleteEntityRows(params: {
 }
 
 /**
+ * Point an explicit, bounded set of entities at their own workspace's live
+ * type with the same slug as their current type. Rows whose workspace has no
+ * such type, or already use it, are left alone.
+ */
+export async function repointEntityRowsToOwnType(params: {
+	tx: DbClient;
+	ids: number[];
+}): Promise<number[]> {
+	if (params.ids.length === 0) return [];
+	const idsLiteral = pgBigintArray(params.ids);
+	const rows = await params.tx<{ id: number }>`
+    UPDATE entities e
+    SET entity_type_id = own.id
+    FROM entity_types current_type, entity_types own
+    WHERE e.id = ANY(${idsLiteral}::bigint[])
+      AND current_type.id = e.entity_type_id
+      AND own.organization_id = e.organization_id
+      AND own.slug = current_type.slug
+      AND own.deleted_at IS NULL
+      AND own.id <> e.entity_type_id
+    RETURNING e.id
+  `;
+	return rows.map((row) => Number(row.id)).sort((a, b) => a - b);
+}
+
+/**
  * Lock one live entity in the caller's transaction, apply the pure ownership
  * merge, and persist the resulting metadata and controls through the physical
  * row kernel. Callers remain responsible for audit events or approval delivery.
