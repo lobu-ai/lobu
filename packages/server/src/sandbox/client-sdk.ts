@@ -60,7 +60,7 @@ async function queryConnection(
 			callerClass: sourceCallerClass(ctx),
 		});
 	} catch (err) {
-		throw pushdownFailureError(err, connectionSlug, "query");
+		throw pushdownFailureError(err, connectionSlug, "query", ctx.abortSignal);
 	}
 	if (!isCompletePushdownResult(result)) {
 		throw new ToolUserError(

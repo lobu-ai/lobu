@@ -34,7 +34,7 @@ import { ToolUserError, toolErrorHttpStatus } from '../utils/errors';
 import { findBundledConnectorFile } from '../utils/connector-catalog';
 import { resolveConnectorCodeForKey } from '../utils/ensure-connector-installed';
 import { mergeExecutionConfig, resolveExecutionAuth } from '../utils/execution-context';
-import { raceAbort } from '../utils/race-abort';
+import { isCallerAbort, raceAbort } from '../utils/race-abort';
 import { isMetadataOnlyDeviceConnector, readDeviceFeed } from './device-feed-read';
 import { readSourceFeedFromAdapter } from './source-feed-adapters';
 import { createSourceReadBridge, sourceReadDeadlineError } from './source-read-bridge';
@@ -351,13 +351,18 @@ export function isCompletePushdownResult(result: ConnectorQueryResult): boolean 
  * The hard error every `runConnectorQuery` caller throws: a failed source query
  * is never a success-shaped empty result (#2042). Reported under the classified
  * code's status, not a flat 502 — the failing upstream is the connection's, and
- * a 502 body is the edge's to replace (see `toolErrorHttpStatus`).
+ * a 502 body is the edge's to replace (see `toolErrorHttpStatus`). When the
+ * query's caller left (`signal`, the one passed to `runConnectorQuery`), its
+ * abort reason is returned instead: nobody waits for the answer, and the source
+ * did not fail.
  */
 export function pushdownFailureError(
   err: unknown,
   connectionSlug: string,
   subject: 'query' | 'metric',
-): ToolUserError {
+  signal?: AbortSignal,
+): unknown {
+  if (isCallerAbort(signal)) return signal?.reason;
   const code = classifyPushdownFailure(err);
   const failure = new ToolUserError(
     `connection pushdown failed (connection=${connectionSlug}): ${getErrorMessage(err)}. ` +

@@ -7,7 +7,7 @@
  *
  *   1. Middleware ordering on the Hono wrapper:
  *      peer-address stash → env-inject → HTTP span → request logger → structured-5xx-capture
- *      → database-shutdown refusal → onError
+ *      → caller-abort 499 → database-shutdown refusal → onError
  *   2. Route mounts: `/lobu` mounted only when lobuApp is non-null; `/` always.
  *   3. Shutdown drains in-flight requests before gateway/db teardown, a
  *      kept-alive connection cannot carry a worker's completion into it, and a
@@ -521,7 +521,7 @@ describe("buildWrapperApp", () => {
 		}
 	});
 
-	it("does not report a read its caller left; a write that failed after it left, or a delivered 5xx, still reports", async () => {
+	it("records a read its caller left as a 499, not a reported 5xx; a write that failed after it left, or a delivered 5xx, still reports", async () => {
 		const { buildWrapperApp } = await import("../server-lifecycle");
 		const { routeFailure } = await import("../diagnostics");
 		const { default: logger } = await import("../utils/logger");
@@ -568,9 +568,11 @@ describe("buildWrapperApp", () => {
 				const caller = new AbortController();
 				const abandoned = wrapper.request("/lobu/source-read", { signal: caller.signal });
 				caller.abort();
-				expect((await abandoned).status).toBe(500);
+				// Nobody receives the status: it is recorded as the caller's 499, not a 500.
+				expect((await abandoned).status).toBe(499);
 				expect(captureMessage).not.toHaveBeenCalled();
 				const abandonedSpan = requestSpan();
+				expect(abandonedSpan?.attributes["http.response.status_code"]).toBe(499);
 				expect(abandonedSpan?.status.code).not.toBe(SpanStatusCode.ERROR);
 				expect(abandonedSpan?.attributes["error.fingerprint"]).toBeUndefined();
 
@@ -581,7 +583,9 @@ describe("buildWrapperApp", () => {
 				writer.abort();
 				expect((await write).status).toBe(500);
 				expect(captureMessage.mock.calls.map(([record]) => record?.source)).toEqual(["route_failure"]);
-				requestSpan();
+				expect(requestSpan()?.attributes).toMatchObject({
+					"http.response.status_code": 500, "exception.type": "Error", "exception.message": "pool exhausted",
+				});
 
 				// A 5xx delivered to a caller that is still waiting reports once.
 				captureMessage.mockClear();

@@ -4,7 +4,7 @@ import { chatAccessOfToolContext, decideDeviceAccess } from '../authz/device-acc
 import { publicVisitorContext } from '../authz/public-browse-context';
 import { authzScopeFromToolContext } from '../authz/scope';
 import { isAdminOrOwnerRole } from '../tools/access-control';
-import { raceAbort } from './race-abort';
+import { isCallerAbort, raceAbort } from './race-abort';
 import { recordKey, recordKeyColumn } from '@lobu/core/contracts/entity-reference';
 import { type EntityReadRestrictions, entityReadRestrictions, filterEntityReadRows } from '../authz/entity-read-policy';
 import { type DbClient, getDb } from '../db/client';
@@ -122,6 +122,9 @@ export async function resolveEntityReference(
     result = await raceAbort(queryDerivedEntityView(String(row.backing_sql), row.backing_source ?? undefined,
       { limit: 2, offset: 0 }, readContext, { exactSlug: id, keyColumn, preservePageRows: true }), ctx.abortSignal);
   } catch (error) {
+    // A caller that left gets its own abort reason back; only the deadline a
+    // reader composed onto the signal is the source taking too long.
+    if (isCallerAbort(ctx.abortSignal)) throw ctx.abortSignal?.reason;
     if (ctx.abortSignal?.aborted) throw new ToolUserError('Source record read exceeded the deadline', 500, 'UPSTREAM_TIMEOUT');
     if (error instanceof ToolUserError && error.code === 'VALIDATION') throw new SourceRecordReadError(error);
     throw error;

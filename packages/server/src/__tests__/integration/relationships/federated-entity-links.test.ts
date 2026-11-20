@@ -34,6 +34,20 @@ describe('typed references and authored source relationships', () => {
     await expect(ws.owner.entities.update({ entity_id: '007', entity_type: type, name: 'No copy' })).rejects.toThrow(/read.only/i);
   });
 
+  it('hands back a caller abort from a source record read, but reports its deadline as a timeout', async () => {
+    const context = ownerToolContext(ws.org.id, ws.users.owner.id);
+    // The node adapter's reason when the client socket closes.
+    const caller = new AbortController();
+    caller.abort('Client connection prematurely closed.');
+    await expect(entityReferences.resolveEntityReference('007', type, { ...context, abortSignal: caller.signal }))
+      .rejects.toBe('Client connection prematurely closed.');
+    const deadline = AbortSignal.timeout(1);
+    await new Promise(resolve => deadline.addEventListener('abort', resolve, { once: true }));
+    await expect(entityReferences.resolveEntityReference('007', type,
+      { ...context, abortSignal: AbortSignal.any([new AbortController().signal, deadline]) }))
+      .rejects.toMatchObject({ code: 'UPSTREAM_TIMEOUT', httpStatus: 500 });
+  });
+
   it('normalizes a stored reference type consistently across get and list_links', async () => {
     const got = await ws.owner.entities.get({ entity_id: stored, entity_type: 'Curated_Item' });
     expect(got.entity.id).toBe(stored);
