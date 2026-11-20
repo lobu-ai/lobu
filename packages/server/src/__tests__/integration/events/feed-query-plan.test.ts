@@ -224,6 +224,41 @@ describe('activity feed queries stay organization-bounded', () => {
     }
   });
 
+  it("agent-scoped recall reads the agent's rows, not the organization history", async () => {
+    const sql = getTestDb();
+    // A sliver of the organization carries the agent's memory scope. Recall
+    // for that agent must find it without reading every live organization row.
+    await sql`UPDATE events SET metadata = metadata || '{"agent_id":"plan-agent"}'::jsonb
+      WHERE organization_id = ${feedOrgId} AND origin_id LIKE 'own-79__'`;
+    await sql`ANALYZE events`;
+    const captured: CapturedQuery[] = [];
+    const result = await searchContentBySingleQuery(
+      capturingClient(sql, captured),
+      'plan-marker',
+      {
+        organization_id: feedOrgId,
+        agent_id: 'plan-agent',
+        sort_by: 'score',
+        limit: 30,
+        include_total: false,
+        approximate_candidate_search: true,
+        query_embedding: Array.from({ length: 768 }, (_, i) => i === 0 ? 1 : 0),
+      }
+    );
+    expect(result.content).toHaveLength(30);
+    expect(result.content.every((row) => /^own-79\d\d$/.test(row.origin_id))).toBe(true);
+    const search = captured.find((c) => /filtered_ids AS/.test(c.query));
+    if (!search) throw new Error('agent recall did not issue a search query');
+    const plan = await planOf(search, true, true);
+    expectOrgBounded(plan);
+    const examined = plan
+      .filter((node) => node['Relation Name'] === 'events')
+      .reduce((sum, node) => sum + ((node['Actual Rows'] ?? 0) + (node['Rows Removed by Filter'] ?? 0)
+        + (node['Rows Removed by Index Recheck'] ?? 0)) * (node['Actual Loops'] ?? 0), 0);
+    // 100 agent rows plus the final page's lookups; the organization has 8,000.
+    expect(examined).toBeLessThanOrEqual(500);
+  });
+
   it('vector recall keeps its distance index with visibility and bookkeeping filters', async () => {
     const sql = getTestDb();
     const user = await createTestUser({ email: 'vector-plan@example.com' });
