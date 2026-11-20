@@ -45,6 +45,8 @@ export function toolErrorHttpStatus(code: ToolErrorCode): number {
       return 403;
     case 'PRECONDITION_FAILED':
       return 409;
+    case 'ACTION_FAILED':
+      return 422;
     case 'RATE_LIMITED':
       return 429;
     case 'VALIDATION':

@@ -1,3 +1,4 @@
+import type { ToolErrorCode } from '@lobu/core/connector-query-errors';
 import { monitorActionRun } from '../action-monitor.js';
 import type { ExecutorClient, PollResponse } from '../client.js';
 import { log } from '../log.js';
@@ -11,7 +12,26 @@ export type DaemonBuiltinErrorCode =
 
 export type DaemonBuiltinResult =
   | { ok: true; output: Record<string, unknown> }
-  | { ok: false; code: DaemonBuiltinErrorCode; error: string; output?: Record<string, unknown> };
+  | {
+      ok: false;
+      code: DaemonBuiltinErrorCode;
+      error: string;
+      output?: Record<string, unknown>;
+      /** The gateway-facing code, when the failure's structure names its cause. */
+      errorCode?: ToolErrorCode;
+    };
+
+/**
+ * The typed cause of a failed shell run, from its exit structure. A command
+ * that ran and exited non-zero was refused by its target; one that ran out of
+ * its budget timed out. A spawn fault or a signal death is the host's, and
+ * stays unclassified.
+ */
+function shellFailureCode(output: ShellRunOutput): ToolErrorCode | undefined {
+  if (output.timed_out) return 'UPSTREAM_TIMEOUT';
+  if (output.process_error || output.exit_signal) return undefined;
+  return output.exit_code !== 0 ? 'ACTION_FAILED' : undefined;
+}
 
 function describeShellFailure(output: ShellRunOutput): string {
   if (output.timed_out) {
@@ -108,11 +128,13 @@ export async function executeDaemonBuiltin(params: {
   try {
     const output = await builtin(params.input, params.shutdownSignal, params.platform ?? 'headless');
     if (!output.success) {
+      const errorCode = shellFailureCode(output);
       return {
         ok: false,
         code: 'operation_execution_failed',
         error: describeShellFailure(output),
         output: { ...output },
+        ...(errorCode ? { errorCode } : {}),
       };
     }
     return { ok: true, output: { ...output } };
@@ -121,10 +143,12 @@ export async function executeDaemonBuiltin(params: {
     // reaching here -- a spawn failure, an ENOTDIR on a cwd that turned out to
     // be a file -- is an execution fault, and reporting it as bad input would
     // send the caller off to fix a payload that was fine.
+    const inputFault = error instanceof ShellInputError;
     return {
       ok: false,
-      code: error instanceof ShellInputError ? 'invalid_operation_input' : 'operation_execution_failed',
+      code: inputFault ? 'invalid_operation_input' : 'operation_execution_failed',
       error: error instanceof Error ? error.message : String(error),
+      ...(inputFault ? { errorCode: 'VALIDATION' as const } : {}),
     };
   }
 }
@@ -170,6 +194,7 @@ export async function executeDaemonBuiltinActionRun(
         status: 'failed',
         error_message: message,
         ...(result.output ? { action_output: result.output } : {}),
+        ...(result.errorCode ? { error_code: result.errorCode } : {}),
       });
       return { itemsCollected: 0, error: message };
     }

@@ -50,6 +50,7 @@ mock.module('../compile-connector.js', () => ({
 
 import { WorkerHttpError } from '../daemon/client.js';
 import { executeRun } from '../daemon/executor.js';
+import { ConnectorExecutionError } from '../executor/interface.js';
 
 function makeStubClient() {
   const client = {
@@ -288,5 +289,31 @@ describe('executor heartbeats (lobu#860)', () => {
     });
     expect(result.error).toContain('boom');
     expect(scheduledIntervals.length).toBe(0);
+  });
+
+  test('a failed action reports the code its execution error structure names, and none otherwise', async () => {
+    const reported: Array<Record<string, unknown>> = [];
+    const client = {
+      ...makeStubClient(),
+      async completeAction(req: Record<string, unknown>) {
+        reported.push(req);
+      },
+    };
+    const diagnostics = { exitCode: 1, exitSignal: null, outputTail: '', exitReason: 'error_message' as const };
+    executeCompiledConnectorMock.mockImplementationOnce(async () => {
+      throw new ConnectorExecutionError('Request failed', { ...diagnostics, httpStatus: 404 });
+    });
+    executeCompiledConnectorMock.mockImplementationOnce(async () => {
+      throw new ConnectorExecutionError('Connector threw', diagnostics);
+    });
+    for (const runId of [401, 402]) {
+      // biome-ignore lint/suspicious/noExplicitAny: minimal job and env
+      await executeRun(client as any, { run_id: runId, run_type: 'action', connector_key: 'fake', action_key: 'do_thing', action_input: {}, compiled_code: 'compiled-code' } as any, {} as any, {
+        executor: { execute: executeCompiledConnectorMock },
+      });
+    }
+    expect(reported[0]).toMatchObject({ run_id: 401, status: 'failed', error_code: 'NOT_FOUND' });
+    expect(reported[1]).toMatchObject({ run_id: 402, status: 'failed' });
+    expect(reported[1]).not.toHaveProperty('error_code');
   });
 });

@@ -3,7 +3,7 @@ import { BROWSER_VERIFY_OPERATION } from '@lobu/connector-sdk';
 import { connectionBrowserGrant } from '../../../../connectors/browser-resource';
 import { connectorRunEnv } from "@lobu/connector-worker/env";
 import { executeCompiledConnector } from "@lobu/connector-worker/executor/runtime";
-import { getErrorMessage } from "@lobu/core";
+import { getErrorMessage, type ToolErrorCode } from "@lobu/core";
 import { ExecuteAction, type ManageOperationsResult } from "../schemas";
 import type { Static } from "@sinclair/typebox";
 import { readGrantedScopesFromAuthData } from "../../../../auth/oauth/scopes";
@@ -721,7 +721,7 @@ async function replayExistingOperationRun(
 	}
 	// Only a run that failed was recorded as an issue occurrence; a cancelled
 	// or rejected run carries no fingerprint.
-	const failed = failedExecuteResult(
+	return failedExecuteResult(
 		claim.runId,
 		claim.status === "failed"
 			? operationFailureMessage(claim.runId, claim.errorMessage)
@@ -730,9 +730,8 @@ async function replayExistingOperationRun(
 		connectorKey,
 		operation,
 		claim.status === "failed",
+		claim.errorCode,
 	);
-	// A run refused at admission never reached a worker; its refusal is typed.
-	return claim.errorCode ? withFailureCode(failed, claim.errorCode) : failed;
 }
 
 // The device waiter defaults missing output to {}. Omit that sentinel so a
@@ -756,8 +755,10 @@ function failedExecuteResult(
 	connectorKey: string,
 	operation: OperationDescriptor,
 	recorded: boolean,
+	/** Why the run failed, when it recorded a typed code: an admission refusal or a device's report. */
+	errorCode?: ToolErrorCode | null,
 ): ManageOperationsResult {
-	return {
+	const failed: ManageOperationsResult = {
 		action: "execute",
 		run_id: runId,
 		status: "failed",
@@ -768,12 +769,14 @@ function failedExecuteResult(
 						connectorKey,
 						operationKey: operation.operation_key,
 						errorMessage,
+						...(errorCode ? { errorCode } : {}),
 					}).fingerprint,
 				}
 			: {}),
 		next_action: failedOperationNextAction(recorded),
 		...reportedOutput(output),
 	};
+	return errorCode ? withFailureCode(failed, errorCode) : failed;
 }
 
 // Device-bound execution inserts a pending run and waits for the device worker
@@ -1371,6 +1374,7 @@ export async function dispatchAdmittedRun(p: {
 			connection.connector_key,
 			operation,
 			!result.cancelled,
+			result.error_code,
 		);
 	}
 

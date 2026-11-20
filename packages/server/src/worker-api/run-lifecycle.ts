@@ -22,6 +22,7 @@ import type {
 	StreamBatch,
 } from "@lobu/core/contracts/worker/protocol";
 import { ContentItemSchema, FeedSourceAckSchema, HeartbeatRequestSchema } from "@lobu/core/contracts/worker/protocol";
+import { toToolErrorCode } from "@lobu/core";
 import { Value } from "@sinclair/typebox/value";
 import type { Context } from "hono";
 import {
@@ -2619,6 +2620,9 @@ export async function completeActionRun(c: Context<{ Bindings: Env }>) {
 			>;
 		}
 		if (req.error_message) req.error_message = stripNul(req.error_message);
+		// Only a failure carries a code, and only one the catalog knows: a worker
+		// on a newer catalog must not fail its own completion over it.
+		const errorCode = req.status === "failed" ? toToolErrorCode(req.error_code) : undefined;
 
 		// Same ownership check as the other /complete endpoints — a worker
 		// can only finalize runs it claimed. Without this, a leaked worker
@@ -2665,7 +2669,9 @@ export async function completeActionRun(c: Context<{ Bindings: Env }>) {
 				status: req.status === "success" ? "completed" : "failed",
 				extraSet: tx`,
 					action_output = ${actionOutput ? tx.json(actionOutput) : null},
-					error_message = ${req.error_message ?? null}`,
+					error_message = ${req.error_message ?? null}${errorCode
+						? tx`, run_metadata = COALESCE(run_metadata, '{}'::jsonb) || ${tx.json({ error_code: errorCode })}::jsonb`
+						: tx``}`,
 				returning: tx`id, status, connector_key, exit_reason, exit_code, exit_signal, organization_id, run_type, action_key, approval_status, parent_run_id`,
 			});
 			if (rows.length === 0) return rows;
@@ -2730,6 +2736,7 @@ export async function completeActionRun(c: Context<{ Bindings: Env }>) {
 				connectorKey: finalized.connector_key,
 				operationKey: finalized.action_key,
 				errorMessage: operationFailureMessage(finalized.id, req.error_message),
+				errorCode,
 				parentRunId: finalized.parent_run_id,
 			});
 		}

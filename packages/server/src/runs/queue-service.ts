@@ -26,7 +26,7 @@ import { AutomationSourceValidationError, normalizeAutomationSources } from '../
 import { recordAutomationRunFailure } from '../automations/scheduled-failure-policy';
 import { advanceScheduleAfterTerminalFailure } from '../automations/schedule-cursor';
 import type { ConnectorTriggerSignal } from '@lobu/connector-sdk';
-import type { ToolErrorCode } from '@lobu/core';
+import { type ToolErrorCode, toToolErrorCode } from '@lobu/core';
 import {
   claimAutomationCooldown,
   lockAutomationForActivation,
@@ -1439,7 +1439,10 @@ export async function createConnectorOperationRun(params: {
   approvalStatus: string;
   actionOutput: unknown;
   errorMessage: string | null;
-  /** Set only on a run this call created already refused at admission. */
+  /**
+   * The typed code a failed run recorded. On a run this call created, set only
+   * when admission refused it; on a replay, also the code its device reported.
+   */
   errorCode: ToolErrorCode | null;
   claimedBy: string | null;
 }> {
@@ -1553,13 +1556,17 @@ export async function createConnectorOperationRun(params: {
   const runMetadata = params.activation
     ? { ...browserMetadata, page_activation_identity: 'exact' }
     : browserMetadata;
-  const insertMetadata = params.sdkBrowserContext
+  const contextMetadata = params.sdkBrowserContext
     ? {
         ...runMetadata,
         browser_context:
           params.runMetadata?.browser_context ?? params.sdkBrowserContext,
       }
     : runMetadata;
+  // The refusal's code is stored with it, so a keyed replay reports it typed.
+  const insertMetadata = admissionError
+    ? { ...contextMetadata, error_code: admissionError.code }
+    : contextMetadata;
   const inserted = await sql<{
     id: number;
     status: string;
@@ -1742,7 +1749,7 @@ export async function createConnectorOperationRun(params: {
       approvalStatus: prior.approval_status,
       actionOutput: prior.action_output,
       errorMessage: prior.error_message,
-      errorCode: null,
+      errorCode: prior.status === 'failed' ? toToolErrorCode(prior.run_metadata?.error_code) ?? null : null,
       claimedBy: prior.claimed_by,
     };
   }

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { describeError } from '@lobu/core';
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Env } from '../../index';
 import { upsertEntityApprovalPolicy } from '../../authz/entity-policy';
 import { createConnectorOperationRun, createSyncRun } from '../../runs/queue-service';
@@ -296,19 +296,88 @@ describe('manifest-backed device pin admission', () => {
       await sql`UPDATE device_workers SET capabilities = '[]'::jsonb WHERE id = ${fixture.device.id}::uuid`;
     }
 
-    const result = (await runSdkScript(
+    const execute = () => runSdkScript(
       {
         script: `export default async (_ctx, client) => client.operations.execute({
           connection_id: ${fixture.connection.id}, operation_key: 'echo', input: {},
+          idempotency_key: 'admission-refusal',
         });`,
       },
       {} as Env,
       fixture.ctx,
-    )) as { success: boolean; error?: { name: string; code?: string } };
+    ) as Promise<{ success: boolean; error?: { name: string; code?: string } }>;
+    const result = await execute();
 
     expect(result.success).toBe(false);
     expect(result.error).toMatchObject({ name: 'ClientSdkActionError', code });
     expect(describeError(scriptFailureTelemetry(result.error!).error, { scope: 'tool run_sdk' }).kind).toBe(kind);
+    // A keyed replay returns the stored refusal with the same code.
+    expect((await execute()).error).toMatchObject({ name: 'ClientSdkActionError', code });
+  });
+
+  // A device that can tell why its action failed reports a typed code with
+  // the failure; run_sdk's span derives error.kind from it, and a keyed replay
+  // of the run reports it again. A code the gateway does not know is dropped.
+  // The run's issue occurrence takes the same code, and the replay hands back
+  // the fingerprint that occurrence was logged under.
+  it.each([
+    { reported: 'ACTION_FAILED', code: 'ACTION_FAILED', kind: 'user' },
+    { reported: 'NOT_A_TOOL_ERROR_CODE', code: 'INTERNAL', kind: 'system' },
+  ])('classifies a device failure reported as $reported as $kind', async ({ reported, code, kind }) => {
+    const fixture = await seedFixture();
+    const execute = () => runSdkScript(
+      {
+        script: `export default async (_ctx, client) => client.operations.execute({
+          connection_id: ${fixture.connection.id}, operation_key: 'echo', input: {},
+          idempotency_key: 'device-failure',
+        });`,
+      },
+      {} as Env,
+      fixture.ctx,
+    ) as Promise<{ success: boolean; error?: { name: string; code?: string } }>;
+
+    const execution = execute();
+    let runId: number | undefined;
+    for (let attempt = 0; attempt < 200 && runId === undefined; attempt++) {
+      runId = (await pollDevice(fixture.device, fixture.selected)).run_id;
+      if (runId === undefined) await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    expect(runId).toBeDefined();
+    const write = vi.spyOn(process.stdout, 'write');
+    let logged: string;
+    try {
+      const completion = await post('/api/workers/complete-action', {
+        body: {
+          run_id: runId,
+          worker_id: fixture.device.workerId,
+          status: 'failed',
+          error_message: 'The element to click is covered by another element.',
+          error_code: reported,
+        },
+      });
+      expect(completion.status).toBe(200);
+      logged = write.mock.calls.map(([line]) => String(line)).join('');
+    } finally {
+      write.mockRestore();
+    }
+    const result = await execution;
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatchObject({ name: 'ClientSdkActionError', code });
+    expect(describeError(scriptFailureTelemetry(result.error!).error, { scope: 'tool run_sdk' }).kind).toBe(kind);
+    expect((await execute()).error).toMatchObject({ name: 'ClientSdkActionError', code });
+
+    const recorded = logged
+      .split('\n')
+      .filter((line) => line.includes('"operation_failure"'))
+      .map((line) => JSON.parse(line.slice(line.indexOf('{'))));
+    expect(recorded).toEqual([expect.objectContaining({ run_id: runId, error_kind: kind })]);
+    const replay = await manageOperations(
+      { action: 'execute', connection_id: fixture.connection.id, operation_key: 'echo', input: {}, idempotency_key: 'device-failure' },
+      {} as Env,
+      fixture.ctx,
+    );
+    expect(replay).toMatchObject({ status: 'failed', failure_fingerprint: recorded[0].error_fingerprint });
   });
 
   it('records an in-flight device wait and its phase for a script deadline to report', async () => {
