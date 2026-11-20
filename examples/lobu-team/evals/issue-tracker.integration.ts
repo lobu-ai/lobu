@@ -10,10 +10,14 @@ import {
 } from "../../../packages/server/src/__tests__/setup/test-fixtures";
 import type { Env } from "../../../packages/server/src/index";
 import { buildClientSDK } from "../../../packages/server/src/sandbox/client-sdk";
-import trackIssues, { RULES, runIssueTracker } from "../issue-tracker.reaction";
+import trackIssues, {
+  healthSnapshotSql,
+  RULES,
+  readHealthSnapshot,
+  runIssueTracker,
+} from "../issue-tracker.reaction";
 import config from "../lobu.config";
 import { configureIssueRepair } from "../scripts/configure-issue-repair";
-import { healthSnapshotSql, readHealthSnapshot } from "../workspace-health";
 
 beforeEach(cleanupTestDatabase);
 
