@@ -66,6 +66,34 @@ describe("validateNavigationConfig", () => {
     expect(validateNavigationConfig(config)).toEqual([]);
   });
 
+  it("accepts a footer placement on a section and rejects any other value", () => {
+    const withPlacement = (placement?: unknown) => ({
+      schemaVersion: 1,
+      sections: [
+        {
+          id: "pins",
+          placement,
+          items: [
+            {
+              id: "slack",
+              label: "Slack",
+              target: {
+                kind: "link",
+                href: "https://acme.slack.com/app_redirect?channel=general",
+              },
+            },
+          ],
+        },
+      ],
+    });
+    expect(validateNavigationConfig(withPlacement("footer"))).toEqual([]);
+    expect(validateNavigationConfig(withPlacement("sidebar"))).toEqual([]);
+    expect(validateNavigationConfig(withPlacement(undefined))).toEqual([]);
+    expect(
+      validateNavigationConfig(withPlacement("top")).length
+    ).toBeGreaterThan(0);
+  });
+
   it("rejects duplicate ids across sections and levels", () => {
     const errors = validateNavigationConfig({
       schemaVersion: 1,

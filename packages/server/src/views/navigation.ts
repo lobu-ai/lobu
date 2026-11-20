@@ -327,7 +327,16 @@ export async function resolveNavigation(
   if (config === null) return defaultSections(lookup);
   return config.sections.flatMap((section) => {
     const items = resolveItems(section.items, lookup);
-    return items.length > 0 ? [{ id: section.id, ...(section.label ? { label: section.label } : {}), items }] : [];
+    return items.length > 0
+      ? [
+          {
+            id: section.id,
+            ...(section.label ? { label: section.label } : {}),
+            ...(section.placement ? { placement: section.placement } : {}),
+            items,
+          },
+        ]
+      : [];
   });
 }
 
