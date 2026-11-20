@@ -389,3 +389,79 @@ describe("ViewBridge loader handoff", () => {
     bridge.close();
   });
 });
+
+describe("ViewBridge error reports", () => {
+  const logs = (parent: FakeWindow) =>
+    parent.posted.filter(
+      (m) => (m as Record<string, unknown>).method === "notifications/message"
+    ) as Array<{ params: { level: string; data: Record<string, string> } }>;
+
+  function connectWith(
+    parent: FakeWindow,
+    guest: FakeWindow,
+    bridge: ViewBridge,
+    hostCapabilities: Record<string, unknown>
+  ): Promise<unknown> {
+    const connected = bridge.connect();
+    const init = parent.posted.find(
+      (m) => (m as Record<string, unknown>).method === "ui/initialize"
+    ) as { id: number };
+    guest.dispatch(
+      {
+        jsonrpc: "2.0",
+        id: init.id,
+        result: { hostContext: {}, hostCapabilities },
+      },
+      parent
+    );
+    return connected;
+  }
+
+  test("holds errors until the host advertises logging, then sends a bounded few", async () => {
+    const { guest, parent, bridge } = setup();
+    const stop = bridge.captureErrors(guest as unknown as Window);
+    const raise = (type: string, event: Record<string, unknown>) => {
+      for (const fn of [...(guest.listeners.get(type) ?? [])]) {
+        fn(event as never);
+      }
+    };
+    // A first render can throw before the handshake answers.
+    bridge.reportError(new TypeError("synthetic render failure"));
+    expect(logs(parent)).toHaveLength(0);
+    await connectWith(parent, guest, bridge, { logging: {} });
+    expect(logs(parent).map((m) => m.params)).toEqual([
+      {
+        level: "error",
+        logger: "lobu-views",
+        data: { name: "TypeError", message: "synthetic render failure" },
+      },
+    ] as never);
+    // A cross-origin script's opaque error carries nothing to report.
+    raise("error", { message: "Script error.", error: null });
+    raise("error", { error: new RangeError("x".repeat(5000)) });
+    raise("unhandledrejection", { reason: "synthetic rejection" });
+    expect(
+      logs(parent)
+        .slice(1)
+        .map((m) => m.params.data)
+    ).toEqual([
+      { name: "RangeError", message: "x".repeat(1000) },
+      { name: "Error", message: "synthetic rejection" },
+    ]);
+    // A view that throws in a loop stops at the document's cap.
+    for (let n = 0; n < 20; n++)
+      raise("error", { error: new Error(`loop ${n}`) });
+    expect(logs(parent)).toHaveLength(5);
+    stop();
+    bridge.close();
+  });
+
+  test("sends nothing to a host that does not take logs", async () => {
+    const { guest, parent, bridge } = setup();
+    bridge.reportError(new Error("before"));
+    await connectWith(parent, guest, bridge, {});
+    bridge.reportError(new Error("after"));
+    expect(logs(parent)).toHaveLength(0);
+    bridge.close();
+  });
+});

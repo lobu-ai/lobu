@@ -920,7 +920,11 @@ function applyHostStyles(ctx: HostContext): void {
  * a render that only failed for lack of scope retries once it arrives.
  */
 class RenderBoundary extends Component<
-  { resetKey: string; children: ReactNode },
+  {
+    resetKey: string;
+    onError: (error: unknown) => void;
+    children: ReactNode;
+  },
   { error: Error | null; resetKey: string }
 > {
   state = { error: null as Error | null, resetKey: this.props.resetKey };
@@ -940,6 +944,8 @@ class RenderBoundary extends Component<
 
   componentDidCatch(error: unknown) {
     console.error("[lobu-views] view failed to render", error);
+    // React keeps a caught render error from the window's error event.
+    this.props.onError(error);
   }
 
   render() {
@@ -1040,6 +1046,7 @@ export function Provider({
     const offCtx = b.onHostContext(adoptContext);
     const offData = b.onDataChanged(dataGate.notify);
     const offEmbeds = embeds.attach(b);
+    const offErrors = b.captureErrors(window);
     b.connect()
       .then((ctx) => {
         adoptContext(ctx);
@@ -1056,6 +1063,7 @@ export function Provider({
       offCtx();
       offData();
       offEmbeds();
+      offErrors();
       embeds.setConnected(false);
     };
   }, [def, embeds, dataGate]);
@@ -1082,6 +1090,11 @@ export function Provider({
     observer.observe(document.body);
     return () => observer.disconnect();
   }, []);
+
+  const reportRenderError = useCallback(
+    (error: unknown) => bridgeRef.current?.reportError(error),
+    []
+  );
 
   const setParams = useCallback(
     (patch: Partial<Params>) => {
@@ -1201,6 +1214,7 @@ export function Provider({
       <EmbedProvider registry={embeds}>
         <RenderBoundary
           resetKey={`${ready}:${JSON.stringify(scope)}:${JSON.stringify(params)}:${dataVersion}`}
+          onError={reportRenderError}
         >
           {children}
         </RenderBoundary>

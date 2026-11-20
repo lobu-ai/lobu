@@ -186,3 +186,42 @@ describe("size reporting", () => {
     expect(typeof sizes[0]?.params.height).toBe("number");
   });
 });
+
+describe("error reports", () => {
+  // React keeps a render error its boundary caught from the window's error
+  // event; the provider still tells a host that takes logs.
+  test("a view that fails to render reports it to the host", async () => {
+    function Broken(): never {
+      throw new TypeError("synthetic render failure");
+    }
+    await act(async () => {
+      root?.render(
+        <Provider def={DEF} bridge={bridge ?? undefined}>
+          <Broken />
+        </Provider>
+      );
+      await tick();
+    });
+    const init = parent.posted.find((m) => m.method === "ui/initialize") as
+      | { id: number }
+      | undefined;
+    await act(async () => {
+      hostSend({
+        jsonrpc: "2.0",
+        id: init?.id,
+        result: { hostContext: {}, hostCapabilities: { logging: {} } },
+      });
+      await tick();
+    });
+    expect(
+      container.querySelector("[data-lobu-render-error]")?.textContent
+    ).toContain("synthetic render failure");
+    const reports = parent.posted
+      .filter((m) => m.method === "notifications/message")
+      .map((m) => (m.params as { data: unknown }).data);
+    expect(reports[0]).toEqual({
+      name: "TypeError",
+      message: "synthetic render failure",
+    });
+  });
+});
