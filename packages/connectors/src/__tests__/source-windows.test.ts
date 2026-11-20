@@ -173,7 +173,11 @@ describe('live source windows', () => {
         feedKey: 'orders', config: { shop: 'demo-store.myshopify.com' }, credentials, window, limit: 2,
       });
       expect(result.rows.map((row) => row.name)).toEqual(['#2']);
-      expect(result.rows[0]).toMatchObject({ customer_name: 'Synthetic Buyer', total: 10, currency: 'USD' });
+      expect(result.rows[0]).toMatchObject({ total: 10, currency: 'USD' });
+      // Buyer identity is Level 2 protected customer data: never requested, never returned.
+      expect(bodies[0].query).not.toMatch(/\b(customer|email|phone|address)/i);
+      expect(JSON.stringify(result.rows)).not.toMatch(/Synthetic Buyer|buyer@example\.test|customer_/);
+      expect(JSON.stringify(c.definition.authSchema)).not.toContain('read_customers');
       expect(result.window).toEqual({ ...window, axis: 'updated_at' });
       expect(result.nextCursor).toBe('next-page');
       expect(bodies[0].variables.first).toBe(2);
