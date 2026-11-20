@@ -210,11 +210,15 @@ function registerMaintenanceTasks(
   // MCP session cleanup — drops expired session rows from the DB. Lives here
   // (cross-pod-coordinated) instead of as an mcp-handler module-level
   // setInterval. The IN-MEMORY part stays per-pod (see mcp-handler.ts).
-  // Anonymous install ping. The cron must be identical on every replica: the
-  // tick's idempotency key is what collapses N pods into one ping a day.
-  // Registered even when disabled so an already-queued tick still finds its
-  // handler; sendInstallPing re-checks the opt-out and does nothing.
+  // Anonymous install ping. The first boot of a UTC day claims the day and
+  // sends immediately, so a short-lived install still counts; the cron is the
+  // heartbeat for an install that was already running. Both paths share the
+  // day marker in `instance_identity`, so N replicas still send one ping a
+  // day. Registered even when disabled so an already-queued tick still finds
+  // its handler; sendInstallPing re-checks the opt-out and does nothing.
   logInstallTelemetryNotice();
+  // Best-effort: never delay readiness on the ping or its DB round trips.
+  void sendInstallPing();
   scheduler.register(INSTALL_PING_TASK, () => sendInstallPing(), { cron: '17 3 * * *' });
 
   scheduler.register(

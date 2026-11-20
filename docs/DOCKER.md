@@ -107,7 +107,7 @@ The server tells the frontend which mode is active at runtime, so this is a plai
 
 ## Anonymous usage telemetry
 
-A production server sends one anonymous ping a day to `https://telemetry.lobu.ai/v1/install`, so we can tell how many installs run which version. One ping goes out per installation, however many replicas you run. It contains:
+An installed server sends at most one anonymous ping a day to `https://telemetry.lobu.ai/v1/install`, so we can tell how many installs run which version. The first server start of a UTC day claims that day and sends it; if the server was already running, a daily heartbeat sends it instead (03:17 server time, UTC in production). One ping goes out per installation and UTC day, however many replicas you run; restarts against the same database within the day do not send again. It contains:
 
 - a random install id, generated on first use and stored in your database (`instance_identity`)
 - the Lobu version and git SHA, how it was deployed (`docker`, `helm`, `cli` or `mac`), OS and CPU architecture, and process uptime as a range
@@ -118,7 +118,7 @@ It never includes hostnames, URLs, emails, names, workspace or connector identif
 
 The ping is a single best-effort request with a 5 second timeout. A failure is ignored until the next day and never affects the server.
 
-To turn it off, set `LOBU_TELEMETRY=0` or `DO_NOT_TRACK=1`. It is already off when `NODE_ENV` is `development` or `test` and when `CI` is set. The server logs one line at startup while it is on. `LOBU_TELEMETRY_URL` sends the ping to a different endpoint instead.
+To turn it off, set `LOBU_TELEMETRY=0` or `DO_NOT_TRACK=1`. It is already off when `CI` is set, when `NODE_ENV` is `test`, and for `lobu run` from the Lobu source checkout; `LOBU_TELEMETRY=1` opts a checkout in. An installed `lobu run` counts even though it runs with `NODE_ENV=development`. The server logs one line at startup while it is on. `LOBU_TELEMETRY_URL` sends the ping to a different endpoint instead.
 
 ## Production checklist
 
