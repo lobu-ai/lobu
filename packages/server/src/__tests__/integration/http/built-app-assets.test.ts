@@ -15,6 +15,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { __resetWebDistDirectoryForTests, app } from '../../../index';
+import { getEnvFromProcess } from '../../../utils/env';
 import { getRateLimiter, RateLimitPresets } from '../../../utils/rate-limiter';
 
 /** Every extension `packages/owletto` writes into its dist, with the type a browser needs. */
@@ -73,5 +74,64 @@ describe('built web app assets', () => {
     });
     expect(response.status).toBe(200);
     expect(response.headers.get('content-type')?.split(';')[0]).toBe(mediaType);
+  });
+
+  // A tab still running an older release asks for chunks the current build no
+  // longer has. That must be a real 404 — never index.html or the discovery
+  // JSON with 200 — so the browser reports a load failure (which the app's
+  // stale-chunk reload handles) and the edge sees the miss. no-store keeps a
+  // replica that has not rolled out yet from pinning a 404 for a new chunk.
+  it.each([
+    ['a removed chunk', 'assets/index-gone.js', '*/*'],
+    ['a removed source map', 'assets/index-gone.js.map', '*/*'],
+    ['a removed chunk opened as a page', 'assets/index-gone.js', 'text/html'],
+    ['an extensionless assets path', 'assets/index-gone', 'text/html'],
+  ])('answers %s with 404', async (_case, file, accept) => {
+    const response = await app.request(`http://localhost/${file}`, {
+      headers: { accept, cookie: 'better-auth.session_token=synthetic' },
+    }, getEnvFromProcess());
+    expect(response.status).toBe(404);
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(response.headers.get('content-type') ?? '').not.toContain('text/html');
+  });
+
+  it('keeps the SPA fallback for client routes', async () => {
+    const response = await app.request('http://localhost/some-workspace/settings', {
+      headers: { accept: 'text/html', cookie: 'better-auth.session_token=synthetic' },
+    }, getEnvFromProcess());
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')?.split(';')[0]).toBe('text/html');
+  });
+
+  // On an org subdomain host the first segment is an entity type, so
+  // `/assets/<slug>` is the detail page of a type named `assets`.
+  describe('on an org subdomain host', () => {
+    const previousCookieDomain = process.env.AUTH_COOKIE_DOMAIN;
+    const host = 'acme.example.test';
+
+    beforeAll(() => {
+      process.env.AUTH_COOKIE_DOMAIN = '.example.test';
+    });
+
+    afterAll(() => {
+      if (previousCookieDomain === undefined) delete process.env.AUTH_COOKIE_DOMAIN;
+      else process.env.AUTH_COOKIE_DOMAIN = previousCookieDomain;
+    });
+
+    it('serves an entity page under an `assets` entity type', async () => {
+      const response = await app.request(`http://${host}/assets/laptop-1`, {
+        headers: { host, accept: 'text/html', cookie: 'better-auth.session_token=synthetic' },
+      }, getEnvFromProcess());
+      expect(response.status).toBe(200);
+      expect(response.headers.get('content-type')?.split(';')[0]).toBe('text/html');
+    });
+
+    it('still answers a removed chunk with 404', async () => {
+      const response = await app.request(`http://${host}/assets/index-gone.js`, {
+        headers: { host, accept: 'text/html', cookie: 'better-auth.session_token=synthetic' },
+      }, getEnvFromProcess());
+      expect(response.status).toBe(404);
+      expect(response.headers.get('cache-control')).toBe('no-store');
+    });
   });
 });

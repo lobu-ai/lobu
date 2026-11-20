@@ -278,6 +278,24 @@ function isStaticAssetPath(requestPath: string): boolean {
 	);
 }
 
+/**
+ * Vite's build output directory (`build.assetsDir`, default `assets`). Every
+ * file in it is content-hashed, so a path here names one exact file: when it
+ * is absent the answer is 404, never the SPA shell or the discovery JSON.
+ * On the canonical host `assets` is a reserved workspace slug, so no client
+ * route lives there. On an org subdomain host the first segment is an entity
+ * type, and `assets` is a valid one: there only a file-shaped path (hashed
+ * chunks always carry an extension) is a build asset.
+ */
+function isBuiltAssetPath(
+	requestPath: string,
+	subdomainOrg: string | null | undefined,
+): boolean {
+	const normalizedPath = path.posix.normalize(requestPath || "/");
+	if (!normalizedPath.startsWith("/assets/")) return false;
+	return !subdomainOrg || path.posix.extname(normalizedPath) !== "";
+}
+
 function getContentTypeForStaticFile(filePath: string): string {
 	const extension = path.extname(filePath).toLowerCase();
 	return (
@@ -1864,7 +1882,9 @@ app.get("*", async (c) => {
 	const acceptsGenericResponse = !acceptHeader || acceptHeader.includes("*/*");
 	const hasSessionCookie = hasBetterAuthSessionCookie(c.req.header("cookie"));
 	const hasFileExtension = isStaticAssetPath(requestPath);
-	const isSpaRoute = !hasFileExtension && !isExcludedSpaPath(requestPath);
+	const isBuiltAsset = isBuiltAssetPath(requestPath, c.get("subdomainOrg"));
+	const isSpaRoute =
+		!hasFileExtension && !isBuiltAsset && !isExcludedSpaPath(requestPath);
 	// Generic signed-in requests still need the SPA shell; otherwise they would fall through to the
 	// JSON status response after skipping anonymous public SSR.
 	const shouldServeSpaFallback =
@@ -1960,6 +1980,16 @@ app.get("*", async (c) => {
 			} catch {
 				// Fall through to SPA fallback and default response.
 			}
+		}
+
+		// Typically a tab still running an older release asking for a chunk this
+		// build no longer has. A real 404 lets the browser report a load failure
+		// (the app reloads onto the current release) and the edge see the miss.
+		// no-store: during a rolling deploy an old replica can 404 a new chunk,
+		// and a cached 404 would outlive the rollout.
+		if (isBuiltAsset) {
+			c.header("Cache-Control", "no-store");
+			return c.text("Not found", 404);
 		}
 
 		if (shouldServeSpaFallback) {
