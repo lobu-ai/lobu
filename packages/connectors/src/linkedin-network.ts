@@ -193,9 +193,17 @@ export function buildLinkedInNetworkExpression(
       const badge = lines.find(line => line === '· 1st' || line === '· 2nd' || line.startsWith('· 3rd'));
       return { card, name, more: more[0] || null, degree: badge ? badge.slice(2) : null };
     };
-    /** What the page offered instead, so a layout LinkedIn changed is diagnosable from the run alone. */
-    const controlsSeen = () => [...document.querySelectorAll('main button, main a[aria-label]')].filter(shown)
-      .map(el => text(el) || el.getAttribute('aria-label') || '').filter(Boolean).slice(0, 15).join(' · ');
+    /**
+     * What the page offered instead, so a layout LinkedIn changed is diagnosable from the run alone.
+     * Errors get copied into run logs and issue reports, so this keeps visible button text only
+     * (LinkedIn's aria-labels name people) and never includes the member's name.
+     */
+    const controlsSeen = () => {
+      const name = profileName();
+      return [...document.querySelectorAll('main button, main a')].filter(shown).map(text)
+        .filter(label => label && label.length <= 40 && !(name && label.includes(name)))
+        .slice(0, 15).join(' · ');
+    };
     const openMenu = async more => {
       if (!more) return null;
       if (more.getAttribute('aria-expanded') !== 'true') more.click();
@@ -213,7 +221,7 @@ export function buildLinkedInNetworkExpression(
       assertPage();
       const top = await wait(profileCard, null);
       if (!top)
-        throw new Error('LinkedIn profile header was not found for "' + profileName() + '"; the page shows: ' + controlsSeen());
+        throw new Error('LinkedIn profile header was not found; the page shows: ' + (controlsSeen() || 'no buttons'));
       const menu = await openMenu(top.more);
       const menuItems = menu ? labelled(menu) : [];
       const els = [...labelled(top.card), ...menuItems];

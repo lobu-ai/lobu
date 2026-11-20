@@ -38,7 +38,7 @@ function linkedIn(
     company?: { following: boolean };
     sentTotal?: number;
     /** Accounts without an overflow menu see the relationship control in the header itself. */
-    header?: "menu" | "buttons";
+    header?: "menu" | "buttons" | "unrecognized";
   } = {}
 ) {
   const world = {
@@ -133,6 +133,14 @@ function linkedIn(
   const profileTop = () => {
     const top = doc.getElementById("top")!;
     doc.querySelector('[role="menu"]')?.remove();
+    if (options.header === "unrecognized") {
+      top.innerHTML = `
+<h2>Ada Example</h2>
+<button>Get in touch</button>
+<button>Ada Example's links</button>
+<a href="#" aria-label="Share Ada Example's profile"></a>`;
+      return;
+    }
     if (options.header === "buttons") {
       const action =
         page.relation === "none"
@@ -538,6 +546,20 @@ test(
     expect(li.world.foreignClicks).toEqual([]);
     expect(li.tabsClosed()).toBe(true);
     expect(connected.tabsClosed()).toBe(true);
+  },
+  SLOW
+);
+
+test(
+  "names the controls of an unrecognized header without naming the member",
+  async () => {
+    const li = linkedIn({}, { header: "unrecognized" });
+    const result = await li.run("send_connection_request", { profile_url: PROFILE });
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("profile header was not found; the page shows: Get in touch");
+    expect(result.error).not.toContain("Ada");
+    expect(li.world.invitationsSent).toBe(0);
+    expect(li.tabsClosed()).toBe(true);
   },
   SLOW
 );
