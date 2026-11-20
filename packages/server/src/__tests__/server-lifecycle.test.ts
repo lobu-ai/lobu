@@ -521,7 +521,7 @@ describe("buildWrapperApp", () => {
 		}
 	});
 
-	it("does not report a 5xx its caller left before receiving; a delivered 5xx still reports", async () => {
+	it("does not report a read its caller left; a write that failed after it left, or a delivered 5xx, still reports", async () => {
 		const { buildWrapperApp } = await import("../server-lifecycle");
 		const { routeFailure } = await import("../diagnostics");
 		const { default: logger } = await import("../utils/logger");
@@ -556,6 +556,12 @@ describe("buildWrapperApp", () => {
 					return answer(c, thrown, "Source record read exceeded the deadline");
 				});
 				app.get("/delivered", (c) => answer(c, thrown, "db unreachable"));
+				// A write's database work does not follow the request's signal.
+				app.post("/write", async (c) => {
+					const signal = c.req.raw.signal;
+					if (!signal.aborted) await new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true }));
+					throw routeFailure(c, c.json({ error: "persist failed" }, 500), new Error("pool exhausted"));
+				});
 				const wrapper = buildWrapperApp({} as never, app);
 
 				captureMessage.mockClear();
@@ -567,6 +573,15 @@ describe("buildWrapperApp", () => {
 				const abandonedSpan = requestSpan();
 				expect(abandonedSpan?.status.code).not.toBe(SpanStatusCode.ERROR);
 				expect(abandonedSpan?.attributes["error.fingerprint"]).toBeUndefined();
+
+				// A write that failed after its caller left still failed: one record.
+				captureMessage.mockClear();
+				const writer = new AbortController();
+				const write = wrapper.request("/lobu/write", { method: "POST", signal: writer.signal });
+				writer.abort();
+				expect((await write).status).toBe(500);
+				expect(captureMessage.mock.calls.map(([record]) => record?.source)).toEqual(["route_failure"]);
+				requestSpan();
 
 				// A 5xx delivered to a caller that is still waiting reports once.
 				captureMessage.mockClear();

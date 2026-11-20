@@ -204,7 +204,7 @@ function restErrorResponse(
 		);
 		// A 5xx answer (an upstream timeout or outage) is still a failure to
 		// report, as the error itself so its typed code sets the issue's kind.
-		if (error.httpStatus < 500) return response;
+		if (error.httpStatus < 500 || c.req.raw.signal.aborted) return response;
 		throw routeFailure(c, response, error);
 	}
 	if (error instanceof AccessDeniedError) {
@@ -218,7 +218,11 @@ function restErrorResponse(
 	}
 	// Preserve the shutdown boundary's existing 503 handling.
 	if (error instanceof DbClosedError) throw error;
-	throw routeFailure(c, c.json({ error: "Internal server error" }, 500), error);
+	const response = c.json({ error: "Internal server error" }, 500);
+	// Match the HTTP boundary's suppression for abandoned requests: REST tool
+	// calls carry reads over POST, so the method does not tell them apart.
+	if (c.req.raw.signal.aborted) return response;
+	throw routeFailure(c, response, error);
 }
 
 async function parseRestJsonObject<T extends object>(c: Context): Promise<T | Response> {

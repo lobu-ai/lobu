@@ -25,8 +25,10 @@ export function isErrorReported(c: Context): boolean {
  * typed code and stack set the issue's fingerprint and kind — and marks the
  * request reported, so the HTTP response middleware does not add a second
  * record for the same failure. A route never logs the failure itself as well.
- * A request whose caller already left is not reported, matching the HTTP
- * boundary: the failure is that caller's cancellation, not an issue.
+ * A read (GET/HEAD) whose caller already left is not reported, matching the
+ * HTTP boundary: it was that caller's cancellation. A write is reported even
+ * then — its database work does not follow the request's signal, so it can
+ * fail on its own after the disconnect (pool saturation is the usual case).
  * `message` names the failure (default: the status and route template) and
  * `fields` add value-free context such as ids.
  */
@@ -34,7 +36,8 @@ export function routeFailure(
   c: Context, response: Response, cause: unknown,
   message?: string, fields?: Record<string, unknown>
 ): HTTPException {
-  if (!isErrorReported(c) && !c.req.raw.signal.aborted) {
+  const cancelledRead = c.req.raw.signal.aborted && (c.req.method === 'GET' || c.req.method === 'HEAD');
+  if (!isErrorReported(c) && !cancelledRead) {
     logger.error({ ...fields, error: cause, source: 'route_failure', http_method: c.req.method,
       res_status: response.status, path: c.req.path },
     message ?? `HTTP ${response.status} from ${c.req.method} ${routePath(c)}`);
