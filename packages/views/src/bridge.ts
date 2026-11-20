@@ -97,6 +97,26 @@ const PROTOCOL_VERSION = "2026-01-26";
  *  method; hosts that do not speak it simply never send it. */
 const DATA_CHANGED_NOTIFICATION = "lobu/notifications/data-changed";
 const DEFAULT_TIMEOUT_MS = 60_000;
+/** Errors one document reports, held or sent. A view that throws on every
+ *  render must not flood the host; the host applies its own cap too. */
+const MAX_ERROR_REPORTS = 5;
+const MAX_ERROR_NAME = 100;
+const MAX_ERROR_MESSAGE = 1000;
+
+/** What an unhandled error tells the host: its name and message, never a
+ *  stack (frames into an inlined bundle group nothing and carry its source). */
+function errorLogData(error: unknown): { name: string; message: string } {
+  const name =
+    error instanceof Error && typeof error.name === "string"
+      ? error.name
+      : "Error";
+  const message =
+    error instanceof Error ? String(error.message) : String(error);
+  return {
+    name: name.slice(0, MAX_ERROR_NAME),
+    message: message.slice(0, MAX_ERROR_MESSAGE),
+  };
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -137,6 +157,11 @@ export class ViewBridge {
   private workspace: string | null = null;
   private hostContext: HostContext = {};
   private didConnect = false;
+  /** The host advertised `logging` in its initialize result. */
+  private hostLogging = false;
+  private errorReports = 0;
+  /** Errors raised before the handshake answered whether the host logs. */
+  private heldErrors: Array<{ name: string; message: string }> = [];
   private handoff: ViewHandoff | null = null;
   private onMessage = (event: MessageEvent) => this.handleMessage(event);
   private listening = false;
@@ -266,10 +291,55 @@ export class ViewBridge {
     })) as Record<string, unknown>;
     const ctx = (result.hostContext ?? {}) as HostContext;
     this.hostContext = { ...this.hostContext, ...ctx };
+    this.hostLogging =
+      isRecord(result.hostCapabilities) &&
+      isRecord(result.hostCapabilities.logging);
     this.didConnect = true;
     this.notify({ method: "ui/notifications/initialized", params: {} });
+    const held = this.heldErrors;
+    this.heldErrors = [];
+    for (const data of held) this.sendErrorLog(data);
     this.adoptHandoff();
     return this.getHostContext();
+  }
+
+  /**
+   * Tell the host about an error the view did not handle, as the standard MCP
+   * `notifications/message` log at level `error`. Sent only to a host that
+   * advertises `logging`; one raised before the handshake waits for it. At
+   * most `MAX_ERROR_REPORTS` per document.
+   */
+  reportError(error: unknown): void {
+    if (this.errorReports >= MAX_ERROR_REPORTS) return;
+    this.errorReports++;
+    const data = errorLogData(error);
+    if (this.didConnect) this.sendErrorLog(data);
+    else this.heldErrors.push(data);
+  }
+
+  /** Report this document's uncaught errors and unhandled rejections. An
+   *  error event without an error object is a cross-origin script's opaque
+   *  "Script error." and carries nothing to report. */
+  captureErrors(target: Window): () => void {
+    const onError = (event: ErrorEvent) => {
+      if (event.error != null) this.reportError(event.error);
+    };
+    const onRejection = (event: PromiseRejectionEvent) =>
+      this.reportError(event.reason);
+    target.addEventListener("error", onError);
+    target.addEventListener("unhandledrejection", onRejection);
+    return () => {
+      target.removeEventListener("error", onError);
+      target.removeEventListener("unhandledrejection", onRejection);
+    };
+  }
+
+  private sendErrorLog(data: { name: string; message: string }): void {
+    if (!this.hostLogging) return;
+    this.notify({
+      method: "notifications/message",
+      params: { level: "error", logger: "lobu-views", data },
+    });
   }
 
   /**
