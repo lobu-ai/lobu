@@ -319,7 +319,8 @@ const notes = (maxItems: number) => ({
 const issueInbox = defineEntityType({
   key: "$member",
   eventKinds: {
-    observation: { description: "Evidence and triage observations." },
+    // `observation` and the other platform kinds are not redeclared here: this
+    // type is shared, and an apply only upserts the kinds a config owns.
     "product.issue": {
       description:
         "Report a Lobu bug, inconsistency, missing capability or docs gap to Lobu Team, like a GitHub issue: what you expected and what happened, run IDs and the failure_fingerprint of a failed run as evidence, what you checked and ruled out, alternatives you considered and a suggested fix. Cite run IDs instead of pasting private content, and leave out other people's personal details.",

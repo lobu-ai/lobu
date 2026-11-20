@@ -818,4 +818,44 @@ export default defineConfig({
       calls.find((c) => c.url.endsWith("/deployments"))?.body.counts
     ).toMatchObject({ create: 0, update: 0, delete: 0 });
   });
+
+  test("a system type write merges the live event kinds instead of replacing them", async () => {
+    const dir =
+      mkProject(`import { defineConfig, defineEntityType } from "@lobu/cli/config";
+export default defineConfig({
+  agents: [],
+  entities: [
+    defineEntityType({
+      key: "$member",
+      eventKinds: { "product.issue": { description: "Report a bug." } },
+    }),
+  ],
+});`);
+    const remoteMember = {
+      id: 4,
+      slug: "$member",
+      name: "Member",
+      organization_id: "org_1",
+      event_kinds: {
+        fact: { description: "A fact." },
+        observation: { description: "Platform observation." },
+      },
+    };
+    const { fetchStub, calls } = makeFetch([], REMOTE_CONNECTION, [
+      remoteMember,
+    ]);
+    await runApply(dir, fetchStub);
+    const write = calls.find(
+      (c) =>
+        c.url.includes("/manage_entity_schema") &&
+        c.body.schema_type === "entity_type" &&
+        c.body.slug === "$member" &&
+        (c.body.action === "update" || c.body.action === "create")
+    );
+    expect(write?.body.event_kinds).toEqual({
+      fact: { description: "A fact." },
+      observation: { description: "Platform observation." },
+      "product.issue": { description: "Report a bug." },
+    });
+  });
 });

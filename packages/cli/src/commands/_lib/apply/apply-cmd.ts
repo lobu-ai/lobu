@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { isSystemEntityType } from "@lobu/core";
 import chalk from "chalk";
 import { resolveContext } from "../../../internal/context.js";
 import { parseEnvContent } from "../../../internal/env-file.js";
@@ -829,9 +830,34 @@ export async function executePlan(
     ) {
       clearFacets.add("properties");
     }
+    // System types ($member, $resource) are shared with the platform and other
+    // projects. Write the live registry MERGED with the kinds this config
+    // declares, never a replacement: a whole-facet write would delete the
+    // platform defaults and every other project's kinds and inboxes. Re-read
+    // the row immediately before the write because the server writes $member
+    // itself and the plan snapshot predates the confirm prompt.
+    const entity = row.desired;
+    let desiredForWrite = entity;
+    if (isSystemEntityType(entity) && entity.eventKinds !== undefined) {
+      clearFacets.delete("eventKinds");
+      const fresh = (await ctx.client.listEntityTypes()).find(
+        (type) =>
+          type.slug === entity.slug &&
+          (row.remote?.organization_id === undefined ||
+            type.organization_id === undefined ||
+            type.organization_id === row.remote.organization_id)
+      );
+      desiredForWrite = {
+        ...entity,
+        eventKinds: {
+          ...(fresh?.eventKinds ?? row.remote?.eventKinds ?? {}),
+          ...entity.eventKinds,
+        },
+      };
+    }
     await ctx.client.upsertEntityType(
       row.verb,
-      row.desired,
+      desiredForWrite,
       row.remote?.schemaExtras,
       {
         properties: row.remote?.properties,
