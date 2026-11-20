@@ -1013,6 +1013,41 @@ describe("Automation three-way attribution", () => {
     expect(plan.counts.drift).toBe(0);
   });
 
+  test("no baseline entry: a declared reaction script is still pushed", () => {
+    const desired = buildState([]);
+    desired.automations = [
+      {
+        slug: "digest",
+        agent: "agent-a",
+        prompt: "Summarize",
+        reactionScript: {
+          sourcePath: "./digest.reaction.ts",
+          sourceCode: "export default () => {};",
+        },
+      } as any,
+    ];
+    const remote = emptyRemote();
+    remote.automations = [
+      {
+        slug: "digest",
+        automation_id: "b-1",
+        managed_agent_id: "agent-a",
+        name: "Digest",
+        prompt: "Summarize",
+      } as any,
+    ];
+    // Recorded baseline has no entry for `digest` — the reaction is write-only
+    // and cannot be compared, so it must re-push rather than noop.
+    const plan = computeDiff(desired, remote, {
+      orgId: "org-1",
+      baseline: baselineFor([], []),
+    });
+    const row = plan.rows.find((r) => r.kind === "automation");
+    expect(row?.verb).toBe("update");
+    expect(row?.changedFields).toEqual(["reaction_script"]);
+    expect(plan.counts.drift).toBe(0);
+  });
+
   test("remote agent reassignment → blocking drift (never silently overwritten)", () => {
     const desired = buildState([]);
     desired.automations = [desiredAutomation() as any];
@@ -1243,6 +1278,142 @@ describe("legacy org — no baseline was ever recorded", () => {
     );
     expect(blocking).toEqual([]);
     expect(plan.rows.find((r) => r.id === "task")?.verb).toBe("update");
+  });
+
+  test("no baseline: a system type may ADD a declared kind and keeps every live kind", () => {
+    const desired = buildState([
+      {
+        slug: "$member",
+        eventKinds: {
+          "product.issue": { description: "Report a bug." },
+        },
+      },
+    ]);
+    const remote = emptyRemote();
+    remote.entityTypes = [
+      {
+        id: 4,
+        slug: "$member",
+        name: "Member",
+        organization_id: "org-1",
+        eventKinds: {
+          fact: { description: "A fact." },
+          observation: {
+            description: "Platform observation.",
+            metadataSchema: {
+              type: "object",
+              properties: { source: { type: "string" } },
+            },
+          },
+        },
+      },
+    ] as RemoteSnapshot["entityTypes"];
+
+    const plan = computeDiff(desired, remote, {
+      prune: false,
+      baseline: baselineFor([], []),
+      orgId: "org-1",
+    });
+    const row = plan.rows.find((r) => r.id === "$member");
+    expect(row?.verb).toBe("update");
+    expect(plan.rows.some((r) => (r as { blocking?: boolean }).blocking)).toBe(
+      false
+    );
+
+    // The recorded baseline projects the MERGED registry: remote-only kinds
+    // survive, the declared kind lands, and no live kind is dropped.
+    const recorded = buildAttributionAndOwned(desired, remote, "org-1", false);
+    expect(recorded.attribution.entityTypes[0]?.eventKinds).toEqual({
+      fact: { description: "A fact." },
+      observation: {
+        description: "Platform observation.",
+        metadataSchema: {
+          type: "object",
+          properties: { source: { type: "string" } },
+        },
+      },
+      "product.issue": { description: "Report a bug." },
+    });
+  });
+
+  test("no baseline: rewriting a live system kind BLOCKS instead of overwriting it", () => {
+    const desired = buildState([
+      {
+        slug: "$member",
+        eventKinds: {
+          observation: { description: "Config description." },
+        },
+      },
+    ]);
+    const remote = emptyRemote();
+    remote.entityTypes = [
+      {
+        id: 4,
+        slug: "$member",
+        name: "Member",
+        organization_id: "org-1",
+        eventKinds: {
+          observation: {
+            description: "Platform observation.",
+            metadataSchema: {
+              type: "object",
+              properties: { source: { type: "string" } },
+            },
+          },
+        },
+      },
+    ] as RemoteSnapshot["entityTypes"];
+
+    const plan = computeDiff(desired, remote, {
+      prune: false,
+      baseline: baselineFor([], []),
+      orgId: "org-1",
+    });
+    const blocking = plan.rows.filter(
+      (r) => r.id === "$member" && (r as { blocking?: boolean }).blocking
+    );
+    expect(blocking).toHaveLength(1);
+  });
+
+  test("with a baseline, a remote-only system kind change is not remote-moved", () => {
+    const desired = buildState([
+      {
+        slug: "$member",
+        eventKinds: {
+          "product.issue": { description: "Report a bug." },
+        },
+      },
+    ]);
+    const recordedRemote = {
+      id: 4,
+      slug: "$member",
+      name: "Member",
+      organization_id: "org-1",
+      eventKinds: { fact: { description: "A fact." } },
+    } as RemoteSnapshot["entityTypes"][number];
+    const remote = emptyRemote();
+    remote.entityTypes = [
+      {
+        ...recordedRemote,
+        eventKinds: {
+          fact: { description: "A fact." },
+          "seo.review": { description: "Added by another project." },
+        },
+      },
+    ] as RemoteSnapshot["entityTypes"];
+    const baseline = baselineFor([recordedRemote], [4]);
+
+    const plan = computeDiff(desired, remote, {
+      prune: false,
+      baseline,
+      orgId: "org-1",
+    });
+    const row = plan.rows.find((r) => r.id === "$member");
+    expect(row?.verb).toBe("update");
+    expect(row?.changedFields).toEqual(["eventKinds.product.issue"]);
+    expect(plan.rows.some((r) => (r as { blocking?: boolean }).blocking)).toBe(
+      false
+    );
   });
 
   test("prune ON: an un-provable definition BLOCKS rather than being deleted", () => {

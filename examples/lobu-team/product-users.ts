@@ -44,4 +44,8 @@ export const productUsers = defineEntityType({
       "x-table-column": true,
     }),
   },
+  // The live row predates TypeBox's derived-required default. Declare the
+  // empty list explicitly so this config matches the row instead of proposing
+  // to make every column required on the next apply.
+  required: [],
 });

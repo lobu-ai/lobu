@@ -712,10 +712,21 @@ function diffEntityType(
         // present remote set is a removal (apply clears it). Omitted + no prune:
         // unmanaged, never churns — the out-of-band kinds are left alone.
         name: "eventKinds",
-        changed: (d, r) =>
-          d.eventKinds !== undefined
+        changed: (d, r) => {
+          // System types: only the declared kinds are config-owned. Remote-only
+          // kinds belong to the platform or another project and never churn or
+          // clear; a kind declared with the same definition is a noop.
+          if (isSystemEntityType(d)) {
+            if (d.eventKinds === undefined) return false;
+            return Object.entries(d.eventKinds).some(
+              ([kind, definition]) =>
+                !deepEqual(definition, r.eventKinds?.[kind])
+            );
+          }
+          return d.eventKinds !== undefined
             ? !deepEqual(d.eventKinds, r.eventKinds)
-            : prune && r.eventKinds !== undefined,
+            : prune && r.eventKinds !== undefined;
+        },
       },
       {
         // Resolution policy — prune-aware, like eventKinds. Declared: diff
@@ -914,12 +925,24 @@ function compareEntityTypeThreeWay(
       remote: remote.metrics,
       attribution: attribution?.metrics,
     },
-    {
-      field: "eventKinds",
-      desired: desired.eventKinds,
-      remote: remote.eventKinds,
-      attribution: attribution?.eventKinds,
-    },
+    // System types compare per declared kind: a remote-only kind belongs to
+    // the platform or another project, so a change there must not read as
+    // "remote moved" and block this config's own kind edits.
+    ...(isSystemEntityType(desired)
+      ? Object.entries(desired.eventKinds ?? {}).map(([kind, definition]) => ({
+          field: `eventKinds.${kind}`,
+          desired: definition,
+          remote: remote.eventKinds?.[kind],
+          attribution: attribution?.eventKinds?.[kind],
+        }))
+      : [
+          {
+            field: "eventKinds",
+            desired: desired.eventKinds,
+            remote: remote.eventKinds,
+            attribution: attribution?.eventKinds,
+          },
+        ]),
     {
       field: "resolutionPolicy",
       desired: desired.resolutionPolicy?.["x-lobu-resolution"],
@@ -1062,15 +1085,21 @@ function diffEntityTypeWithBaseline(
       effectiveEntityTypeAfterApply(desired, remote, prune),
       remoteEntityTypeFacets(remote)
     );
-    if (inSync) {
+    if (
+      inSync ||
+      (isSystemEntityType(desired) &&
+        !systemKindConflict(desired, remote, prune))
+    ) {
       return {
-        row: {
-          kind: "entity-type",
-          verb: "noop",
-          id: desired.slug,
-          desired,
-          remote,
-        },
+        row: isSystemEntityType(desired)
+          ? diffEntityType(desired, remote, prune)
+          : {
+              kind: "entity-type",
+              verb: "noop",
+              id: desired.slug,
+              desired,
+              remote,
+            },
         blocking: [],
       };
     }
@@ -1356,16 +1385,48 @@ export const effectiveEntityTypeAfterApply = (
     // Never cleared by omission, under prune or not.
     display[field] = d[field] !== undefined ? d[field] : r?.[field];
   }
+  // System types ($member, $resource) are shared: platform defaults and other
+  // projects write their own event kinds. A config declares only the kinds it
+  // owns, so declared kinds upsert over the live registry and nothing is ever
+  // removed by omission — under prune included, where a whole-facet replace
+  // would wipe the org's platform kinds and inboxes.
+  const systemEventKinds =
+    isSystemEntityType(d) && d.eventKinds !== undefined
+      ? { ...(r?.eventKinds ?? {}), ...d.eventKinds }
+      : undefined;
   return normalizeEntityFacets({
     ...display,
     required: d.required !== undefined ? d.required : prune ? [] : r?.required,
     properties,
     backing: inherit(d.backing, r?.backing),
     metrics: inherit(d.metrics, r?.metrics),
-    eventKinds: inherit(d.eventKinds, r?.eventKinds),
+    eventKinds: systemEventKinds ?? inherit(d.eventKinds, r?.eventKinds),
     schemaExtras,
   });
 };
+
+/**
+ * A system type with NO baseline attribution may only ADD declared event kinds.
+ * A declared kind that already exists remotely with a different definition is
+ * ambiguous — the platform, another project, or this config may have moved it —
+ * so it blocks instead of overwriting. Any non-kind facet follows the normal
+ * two-way rule.
+ */
+function systemKindConflict(
+  desired: DesiredEntityType,
+  remote: RemoteEntityType,
+  prune: boolean
+): boolean {
+  for (const [kind, definition] of Object.entries(desired.eventKinds ?? {})) {
+    const live = remote.eventKinds?.[kind];
+    if (live !== undefined && !deepEqual(definition, live)) return true;
+  }
+  const { eventKinds: _effectiveKinds, ...effectiveRest } =
+    effectiveEntityTypeAfterApply(desired, remote, prune);
+  const { eventKinds: _remoteKinds, ...remoteRest } =
+    remoteEntityTypeFacets(remote);
+  return !deepEqual(effectiveRest, remoteRest);
+}
 
 export interface RelationshipTypeFacets {
   purpose: string | undefined;
@@ -1589,14 +1650,21 @@ function diffAutomationWithBaseline(
       projectRemoteAutomation(remote)
     );
     if (inSync) {
+      // Reaction scripts are write-only (Automation lists omit them), so a
+      // declared reaction is ALWAYS re-pushed — including before the first
+      // baseline entry exists. Returning noop here recorded the Automation's
+      // ownership but silently left the previous script running.
       return {
-        row: {
-          kind: "automation",
-          verb: "noop",
-          id: desired.slug,
-          desired,
-          remote,
-        },
+        row:
+          desired.reactionScript !== undefined
+            ? diffAutomation(desired, remote)
+            : {
+                kind: "automation",
+                verb: "noop",
+                id: desired.slug,
+                desired,
+                remote,
+              },
         blocking: [],
       };
     }
