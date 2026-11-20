@@ -10,7 +10,7 @@ import {
 } from "../../../packages/server/src/__tests__/setup/test-fixtures";
 import type { Env } from "../../../packages/server/src/index";
 import { buildClientSDK } from "../../../packages/server/src/sandbox/client-sdk";
-import trackIssues, { runIssueTracker } from "../issue-tracker.reaction";
+import trackIssues, { RULES, runIssueTracker } from "../issue-tracker.reaction";
 import config from "../lobu.config";
 import { configureIssueRepair } from "../scripts/configure-issue-repair";
 import { healthSnapshotSql, readHealthSnapshot } from "../workspace-health";
@@ -37,7 +37,8 @@ function occurrenceRow(
     seen_24h: "4",
     seen_14d: "4",
     max_orgs: "1",
-    max_users: "1",
+    // Pageable reach: the regression below must clear the alert threshold.
+    max_users: String(RULES.highMinUsers),
     releases_2h: releases,
     last_release: releases.at(-1),
     sample_trace_id: "synthetic-trace",

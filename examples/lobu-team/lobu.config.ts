@@ -174,9 +174,9 @@ const count = (title: string) =>
   Type.Optional(Type.Unsafe({ type: "integer", minimum: 0, title }));
 
 // A production error group. The issue-tracker Automation creates one only when
-// a ClickHouse fingerprint passes its noise gate, and owns status and the
-// counters. Triage fields belong to the agents and people who investigate; the
-// work to fix it is a linked `task`.
+// a ClickHouse fingerprint passes its noise gate, and owns status, priority and
+// the counters. Triage fields belong to the agents and people who investigate;
+// the work to fix it is a linked `task`.
 const issue = defineEntityType({
   key: "issue",
   name: "Issue",

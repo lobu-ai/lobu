@@ -32,8 +32,14 @@ export const RULES = {
   userMinOrgs: 3,
   /** New issues per hour; the rest wait for a later run. */
   maxNewPerHour: 5,
-  /** high priority for a system/dependency issue at this volume or reach. */
-  highMinSeen24h: 20,
+  /**
+   * High priority — the only level that notifies — is earned by reach: two
+   * named users in an hour (a tenth of daily actives), or enough workspaces
+   * to be systemic. Sightings alone never qualify: one caller retrying or a
+   * crawler walking distinct URLs mints an occurrence per request with no
+   * user attached. Sign-in failures page on the first sighting.
+   */
+  highMinUsers: 2,
   highMinOrgs: 3,
   /**
    * Sign-in and consent requests. A failure here locks a user out before they
@@ -106,7 +112,14 @@ export interface IssueRecord {
 }
 
 export type Alert = "new_high" | "regressed" | "escalating";
-type AlertNotice = { kind: Alert; key: string; title: string };
+type AlertNotice = { kind: Alert; key: string; title: string; body: string };
+
+/** What a paged human needs first: how many people and workspaces it hit. */
+function alertBody(o: Occurrence): string {
+  const users = o.max_users === 1 ? "1 user" : `${o.max_users} users`;
+  const orgs = o.max_orgs === 1 ? "1 workspace" : `${o.max_orgs} workspaces`;
+  return `Fingerprint ${o.fingerprint}. ${o.seen_24h} sightings in 24h, ${users} and ${orgs} affected. Open the issue record for occurrences and linked tasks.`;
+}
 
 export type IssueChange =
   | {
@@ -148,10 +161,15 @@ function passesGate(o: Occurrence): boolean {
     : o.seen_24h >= RULES.systemMinSeen24h || o.max_orgs >= RULES.systemMinOrgs;
 }
 
+/**
+ * Priority ranks impact, never volume. `seen_24h` counts requests: one person
+ * retrying, or a crawler walking distinct URLs, inflates it with nobody
+ * attached. A named user or enough workspaces is someone actually blocked.
+ */
 function priority(o: Occurrence): "high" | "medium" | "low" {
   if (o.kind === "user") return "low";
   return blocksSignIn(o) ||
-    o.seen_24h >= RULES.highMinSeen24h ||
+    o.max_users >= RULES.highMinUsers ||
     o.max_orgs >= RULES.highMinOrgs
     ? "high"
     : "medium";
@@ -168,9 +186,14 @@ function isEscalating(o: Occurrence): boolean {
   );
 }
 
-/** Fields this job owns; triage and agent fields are never written here. */
+/**
+ * Fields this job owns: counters and the priority derived from them, which
+ * follows current reach so a stale high cannot keep paging. Triage and agent
+ * fields are never written here.
+ */
 function snapshot(o: Occurrence, now: Date): Record<string, unknown> {
   return {
+    priority: priority(o),
     last_seen: o.last_seen,
     seen_24h: o.seen_24h,
     seen_14d: o.seen_14d,
@@ -264,7 +287,6 @@ export function planIssueChanges(
           fingerprint: o.fingerprint,
           status: isEscalating(o) ? "escalating" : "new",
           kind: o.kind,
-          priority: level,
           culprit: o.culprit,
           ...(o.request ? { request: o.request } : {}),
           message: o.message,
@@ -278,6 +300,7 @@ export function planIssueChanges(
                 kind: "new_high" as const,
                 key: `issue-new:${o.fingerprint}`,
                 title: `New high-priority issue: ${o.title} (${o.request || o.culprit})`,
+                body: alertBody(o),
               },
             }
           : {}),
@@ -307,11 +330,13 @@ export function planIssueChanges(
       } else if (regressed) {
         set("regressed");
         metadata.regressed_at = now.toISOString();
-        alert = {
-          kind: "regressed",
-          key: `issue:${o.fingerprint}:regressed:${issue.resolved_at}`,
-          title: `Issue regressed: ${o.title}`,
-        };
+        if (priority(o) === "high")
+          alert = {
+            kind: "regressed",
+            key: `issue:${o.fingerprint}:regressed:${issue.resolved_at}`,
+            title: `Issue regressed: ${o.title}`,
+            body: alertBody(o),
+          };
       }
     } else if (isEscalating(o)) {
       if (issue.status !== "escalating") {
@@ -321,12 +346,16 @@ export function planIssueChanges(
         // The key is the stored escalation it follows, so a retry after a
         // failed write repeats the same key.
         const sinceLast = now.getTime() - ms(issue.escalated_at);
-        if (Number.isNaN(sinceLast) || sinceLast >= DAY) {
+        if (
+          priority(o) === "high" &&
+          (Number.isNaN(sinceLast) || sinceLast >= DAY)
+        ) {
           metadata.escalated_at = now.toISOString();
           alert = {
             kind: "escalating",
             key: `issue:${o.fingerprint}:escalating:${issue.escalated_at ?? "first"}`,
             title: `Issue escalating: ${o.title}`,
+            body: alertBody(o),
           };
         }
       }
@@ -632,7 +661,7 @@ async function applyChange(
   if (change.action !== "defer" && change.alert)
     await client.notifications.send({
       title: change.alert.title.slice(0, 160),
-      body: `Fingerprint ${change.fingerprint}. Open the issue record for its occurrences and linked tasks.`,
+      body: change.alert.body,
       recipients: "admins",
       idempotency_key: change.alert.key,
       automation_source: source,
