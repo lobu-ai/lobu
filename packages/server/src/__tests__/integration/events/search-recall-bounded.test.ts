@@ -127,7 +127,13 @@ describe('recall query budget', () => {
 
     const sql = getDb();
     const words = async (query: string, budget: number) =>
-      (await selectQueryTsqueries(sql, query, { candidateArm: true, budget })).candidates;
+      (
+        await selectQueryTsqueries(query, {
+          candidateArm: true,
+          budget,
+          read: (text, params) => runBoundedRecallQuery(sql, text, params),
+        })
+      ).candidates;
     // Both words fit a generous budget, in query order.
     expect(await words('zephyrcommon quillrare', 1_000_000)).toBe('zephyrcommon | quillrare');
     // 'zephyrcommon' is in nearly every row, too many to rank under a budget of
@@ -173,14 +179,17 @@ describe('recall query budget', () => {
 
       // The rare word comes last, after the prompt's repeated boilerplate.
       const prompt = `${Array.from({ length: 16 }, () => fillers.join(' ')).join('\n')} quillrarefinding`;
-      const result = await searchContentByText(prompt, {
-        organization_id: org.id,
-        limit: 5,
-        sort_by: 'score',
-        approximate_candidate_search: true,
-        include_total: false,
-      });
-      expect(result.content[0]?.origin_id).toBe('recall-long-rare');
+      // Recall and exact search each read the word statistics under their own bound.
+      for (const recall of [true, false]) {
+        const result = await searchContentByText(prompt, {
+          organization_id: org.id,
+          limit: 5,
+          sort_by: 'score',
+          approximate_candidate_search: recall,
+          include_total: false,
+        });
+        expect(result.content[0]?.origin_id).toBe('recall-long-rare');
+      }
     },
     CANDIDATE_QUERY_TIMEOUT_MS * 5
   );

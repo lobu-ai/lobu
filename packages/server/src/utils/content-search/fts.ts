@@ -65,6 +65,12 @@ export const CANDIDATE_TEXT_MATCH_BUDGET = 100_000;
  * the whole prompt, and a 1,241-word event-turn prompt ranked about 54ms per
  * row, past the recall timeout on a few hundred rows. Longer queries keep their
  * rarest words, the ones that tell their matches apart.
+ *
+ * The cut narrows every search with a longer query, exact search included: a
+ * row whose only fulltext match is a dropped word no longer matches, so exact
+ * totals shrink too (the substring and vector arms still match it). Without
+ * column statistics the first words are kept, and those can include words the
+ * english parser drops, leaving fewer real words.
  */
 export const QUERY_WORD_LIMIT = 32;
 

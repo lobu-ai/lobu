@@ -146,16 +146,19 @@ export interface QueryTsqueries {
   candidates: string | null;
 }
 
+/** Runs one read under the calling search's own bound. */
+export type BoundedSearchRead = (query: string, params: unknown[]) => Promise<unknown[]>;
+
 /**
  * The query's distinct words as tsquery strings (see `selectCandidateWords`).
  * The word statistics are read only for a query longer than `QUERY_WORD_LIMIT`
  * words or for the candidate arm, so a short query keeps every word without a
- * lookup.
+ * lookup. `read` is the caller's bound: recall's for recall, the exact read's
+ * otherwise.
  */
 export async function selectQueryTsqueries(
-  sql: DbClient,
   queryText: string,
-  options: { candidateArm: boolean; signal?: AbortSignal; budget?: number }
+  options: { candidateArm: boolean; read: BoundedSearchRead; budget?: number }
 ): Promise<QueryTsqueries> {
   const tokens = [...new Set(tsqueryTokens(queryText))];
   const tsquery = (words: string[]) => (words.length > 0 ? words.join(' | ') : null);
@@ -163,12 +166,9 @@ export async function selectQueryTsqueries(
   if (tokens.length === 0 || (!long && !options.candidateArm)) {
     return { ranked: tsquery(tokens), candidates: null };
   }
-  const frequencies = (await runBoundedRecallQuery(
-    sql,
-    QUERY_WORD_FREQUENCY_SQL,
-    [pgTextArray(tokens)],
-    options.signal
-  )) as QueryWordFrequency[];
+  const frequencies = (await options.read(QUERY_WORD_FREQUENCY_SQL, [
+    pgTextArray(tokens),
+  ])) as QueryWordFrequency[];
   const ranked = long
     ? selectCandidateWords(tokens, frequencies, Number.POSITIVE_INFINITY, QUERY_WORD_LIMIT)
     : tokens;
@@ -235,9 +235,15 @@ export async function searchContentBySingleQuery(
     effectiveOffset === 0 &&
     hasEmbedding;
   const hasTextCandidates = useCandidatePath && trimmedQuery.length >= 3;
-  const queryTsqueries = await selectQueryTsqueries(sql, trimmedQuery, {
+  // Recall opted into a bounded answer. Without a query embedding it cannot use
+  // the candidate path, but it still must not outlast the candidate budget.
+  const exactRead = { signal: options.signal, statementTimeoutMs: CONTENT_READ_STATEMENT_TIMEOUT_MS };
+  const read: BoundedSearchRead = options.approximate_candidate_search === true
+    ? (query, params) => runBoundedRecallQuery(sql, query, params, options.signal)
+    : (query, params) => boundedQuery(sql, query, params, exactRead);
+  const queryTsqueries = await selectQueryTsqueries(trimmedQuery, {
     candidateArm: hasTextCandidates,
-    signal: options.signal,
+    read,
   });
   const fulltextTsquery = queryTsqueries.candidates;
   // Clamp to [0, 1] so a caller can't produce an always-true / always-false
@@ -863,15 +869,7 @@ export async function searchContentBySingleQuery(
     queryParams.push(fulltextTsquery);
   }
 
-  let rawRows: any[];
-  // Recall opted into a bounded answer. Without a query embedding it cannot use
-  // the candidate path, but it still must not outlast the candidate budget.
-  const exactRead = { signal: options.signal, statementTimeoutMs: CONTENT_READ_STATEMENT_TIMEOUT_MS };
-  if (options.approximate_candidate_search === true) {
-    rawRows = await runBoundedRecallQuery(sql, querySQL, queryParams, options.signal);
-  } else {
-    rawRows = await boundedQuery(sql, querySQL, queryParams, exactRead);
-  }
+  const rawRows: any[] = await read(querySQL, queryParams);
 
   let emptyPageTotal: number | null = null;
   if (includeTotal && !useDateFeed && rawRows.length === 0 && effectiveOffset > 0) {
