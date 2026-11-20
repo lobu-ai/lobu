@@ -207,9 +207,11 @@ async function buildLookup(
       ? await resolveEventViewSubject(found, event, env, ctx).then(
           () => true,
           (error: unknown) => {
-            // An event the caller cannot see is an unresolved link. Any other
-            // fault is swallowed here, so this is its one report.
-            if (!(error instanceof ToolUserError) && !ctx.abortSignal?.aborted) {
+            // An event the caller cannot see (a 4xx) is an unresolved link. Any
+            // other fault, a 5xx dependency outage included, is swallowed here,
+            // so this is its one report.
+            const callerFault = error instanceof ToolUserError && error.httpStatus < 500;
+            if (!callerFault && !ctx.abortSignal?.aborted) {
               logger.error({ error, view: key }, '[views] event link resolution failed');
             }
             return false;
