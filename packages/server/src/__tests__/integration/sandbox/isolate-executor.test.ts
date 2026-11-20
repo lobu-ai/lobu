@@ -730,7 +730,7 @@ describe("isolate lane: fixture connector", () => {
 		});
 	});
 
-	it("returns action output and surfaces a failed action as an error", async () => {
+	it("returns action output and reports a refused action in the result", async () => {
 		const ok = await runIsolate(fixtureIsolateCode, {
 			mode: "action",
 			actionKey: "echo",
@@ -743,7 +743,7 @@ describe("isolate lane: fixture connector", () => {
 		});
 		expect(ok.result).toEqual({ mode: "action", output: { echoed: { a: 1, nested: { b: [1, 2] } }, configKeys: ["k"], runId: "42" } });
 
-		const failed = await failIsolate(fixtureIsolateCode, {
+		const refused = await runIsolate(fixtureIsolateCode, {
 			mode: "action",
 			actionKey: "fail",
 			runId: "43",
@@ -753,8 +753,7 @@ describe("isolate lane: fixture connector", () => {
 			sessionState: null,
 			env: {},
 		});
-		expect(failed.message).toContain("fixture action failed");
-		expect(failed.exitReason).toBe("error_message");
+		expect(refused.result).toEqual({ mode: "action", output: {}, error: "fixture action failed" });
 	});
 
 	it("runs authenticate with artifacts and signals over the hooks", async () => {
