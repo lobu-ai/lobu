@@ -85,7 +85,7 @@ export async function handleConfirm(
 			}, "NOT_FOUND");
 		}
 		const contractError = await heldRunContractError(tx, ctx.organizationId, run, resolved);
-		if (contractError) return withFailureCode({ error: contractError }, "VALIDATION");
+		if (contractError) return withFailureCode({ error: contractError.message }, contractError.code);
 
 		const settle = (approvalStatus: "rejected" | "withdrawn", why: string) => tx`
 			UPDATE runs
@@ -184,6 +184,7 @@ export async function handleConfirm(
 			approvalStatus: "auto",
 			actionOutput: null,
 			errorMessage: null,
+			errorCode: null,
 			claimedBy: released.claimed_by,
 		},
 		ctx,

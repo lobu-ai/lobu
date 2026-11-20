@@ -26,6 +26,7 @@ import { AutomationSourceValidationError, normalizeAutomationSources } from '../
 import { recordAutomationRunFailure } from '../automations/scheduled-failure-policy';
 import { advanceScheduleAfterTerminalFailure } from '../automations/schedule-cursor';
 import type { ConnectorTriggerSignal } from '@lobu/connector-sdk';
+import type { ToolErrorCode } from '@lobu/core';
 import {
   claimAutomationCooldown,
   lockAutomationForActivation,
@@ -346,6 +347,10 @@ async function resolveActiveConnectorVersion(
  * teammate who owns no advertising device matched no manifest source at all,
  * so every run on a perfectly healthy pin was refused with
  * DEVICE_CONNECTOR_MANIFEST_UNAVAILABLE.
+ *
+ * The code says whose move it is: setup the caller has not finished is a
+ * PRECONDITION_FAILED, and no online device serving the artifact is an
+ * unavailable dependency.
  */
 export async function deviceManifestAdmissionError(
   sql: DbClient,
@@ -355,13 +360,16 @@ export async function deviceManifestAdmissionError(
   connectorVersion: string,
   deviceWorkerId: string | null,
   artifact: { manifestBacked: boolean; manifestHash: string | null }
-): Promise<string | null> {
+): Promise<DeviceAdmissionRefusal | null> {
   const pinError = describeMissingBrowserExecutionPin(connectorKey, deviceWorkerId);
-  if (pinError) return pinError;
+  if (pinError) return { message: pinError, code: 'PRECONDITION_FAILED' };
   const browser = await connectionBrowserResource(organizationId, connectionId, connectorVersion, sql);
   if (browser && (!browser.deviceWorkerId || (browser.requirement.accountProbe &&
     (!browser.live || !browser.authProfileId || browser.profileDeviceId !== browser.deviceWorkerId)))) {
-    return 'Browser setup is required: select a paired Chrome profile and connect its account.';
+    return {
+      message: 'Browser setup is required: select a paired Chrome profile and connect its account.',
+      code: 'PRECONDITION_FAILED',
+    };
   }
   if (!artifact.manifestBacked) return null;
   const [row] = await sql<{
@@ -380,10 +388,10 @@ export async function deviceManifestAdmissionError(
     WHERE c.id = ${connectionId} AND c.organization_id = ${organizationId}
     LIMIT 1
   `;
-  if (!row) return DEVICE_CONNECTOR_MANIFEST_UNAVAILABLE;
+  if (!row) return MANIFEST_UNAVAILABLE;
   if (artifact.manifestHash == null) {
     return hashlessManifestArtifactMayBeClaimed(connectorKey, row.runtime)
-      ? null : DEVICE_CONNECTOR_MANIFEST_UNAVAILABLE;
+      ? null : MANIFEST_UNAVAILABLE;
   }
   const target = {
     ownerUserId: row.owner_user_id,
@@ -396,9 +404,20 @@ export async function deviceManifestAdmissionError(
   const readiness = findDeviceConnectorReadiness(index, target);
   if (readiness?.state === 'ready') return null;
   return readiness?.state === 'setup_required'
-    ? describeDeviceConnectorSetupRequired(readiness)
-    : DEVICE_CONNECTOR_MANIFEST_UNAVAILABLE;
+    ? { message: describeDeviceConnectorSetupRequired(readiness), code: 'PRECONDITION_FAILED' }
+    : MANIFEST_UNAVAILABLE;
 }
+
+/** Why a device run cannot be admitted, typed for the caller's error report. */
+export interface DeviceAdmissionRefusal {
+  message: string;
+  code: ToolErrorCode;
+}
+
+const MANIFEST_UNAVAILABLE: DeviceAdmissionRefusal = {
+  message: DEVICE_CONNECTOR_MANIFEST_UNAVAILABLE,
+  code: 'UPSTREAM_UNAVAILABLE',
+};
 
 /**
  * Why no sync run was queued. The reasons differ in remedy — `already_active`
@@ -574,7 +593,7 @@ async function createSyncRunWithClient(
     sql, feed.organization_id, feed.connection_id, feed.connector_key,
     connectorVersion, feed.device_worker_id, resolved
   );
-  if (admissionError) throw new ToolUserError(admissionError, 409);
+  if (admissionError) throw new ToolUserError(admissionError.message, 409);
   const browser = await connectionBrowserResource(feed.organization_id, feed.connection_id, connectorVersion, sql);
   const browserMetadata = browser ? { browser_binding: browserBindingSnapshot(browser) } : {};
 
@@ -1420,6 +1439,8 @@ export async function createConnectorOperationRun(params: {
   approvalStatus: string;
   actionOutput: unknown;
   errorMessage: string | null;
+  /** Set only on a run this call created already refused at admission. */
+  errorCode: ToolErrorCode | null;
   claimedBy: string | null;
 }> {
   const sql = params.db ?? getDb();
@@ -1576,7 +1597,7 @@ export async function createConnectorOperationRun(params: {
       ${params.activation ? pgTextArray(activationUrls) : null}::text[],
       ${insertMetadata == null ? null : sql.json(insertMetadata)},
       ${targetDeviceWorkerId == null ? null : sql`${targetDeviceWorkerId}::uuid`},
-      ${admissionError}, ${admissionError ? sql`current_timestamp` : null},
+      ${admissionError?.message ?? null}, ${admissionError ? sql`current_timestamp` : null},
       current_timestamp
     )
     ON CONFLICT (organization_id, action_idempotency_key)
@@ -1721,6 +1742,7 @@ export async function createConnectorOperationRun(params: {
       approvalStatus: prior.approval_status,
       actionOutput: prior.action_output,
       errorMessage: prior.error_message,
+      errorCode: null,
       claimedBy: prior.claimed_by,
     };
   }
@@ -1738,6 +1760,7 @@ export async function createConnectorOperationRun(params: {
     approvalStatus: row.approval_status,
     actionOutput: row.action_output,
     errorMessage: row.error_message,
+    errorCode: admissionError?.code ?? null,
     claimedBy: row.claimed_by,
   };
 }

@@ -1,6 +1,6 @@
 import type { DbClient } from "../../../../db/client";
 import type { getOperationForConnection } from "../../../../operations/connector-operations";
-import { deviceManifestAdmissionError } from "../../../../runs/queue-service";
+import { type DeviceAdmissionRefusal, deviceManifestAdmissionError } from "../../../../runs/queue-service";
 import { selectedConnectorVersionArtifactSql } from "../../../../utils/connector-execution-placement";
 
 /** A connector operation run held for a decision: an Ask or a Check. */
@@ -69,7 +69,7 @@ export async function heldRunContractError(
 	organizationId: string,
 	run: HeldOperationRun,
 	resolved: NonNullable<Awaited<ReturnType<typeof getOperationForConnection>>>,
-): Promise<string | null> {
+): Promise<DeviceAdmissionRefusal | null> {
 	if (run.connector_artifact_hash == null && resolved.connection.connector_manifest_hash == null) return null;
 	if (
 		run.connector_artifact_hash == null ||
@@ -77,7 +77,10 @@ export async function heldRunContractError(
 		run.connector_artifact_hash !== run.pinned_artifact_hash ||
 		run.connector_key !== resolved.connection.connector_key
 	) {
-		return "The connector contract changed since this run was queued. Re-run the operation.";
+		return {
+			message: "The connector contract changed since this run was queued. Re-run the operation.",
+			code: "VALIDATION",
+		};
 	}
 	return deviceManifestAdmissionError(
 		sql, organizationId, run.connection_id, run.connector_key,

@@ -721,7 +721,7 @@ async function replayExistingOperationRun(
 	}
 	// Only a run that failed was recorded as an issue occurrence; a cancelled
 	// or rejected run carries no fingerprint.
-	return failedExecuteResult(
+	const failed = failedExecuteResult(
 		claim.runId,
 		claim.status === "failed"
 			? operationFailureMessage(claim.runId, claim.errorMessage)
@@ -731,6 +731,8 @@ async function replayExistingOperationRun(
 		operation,
 		claim.status === "failed",
 	);
+	// A run refused at admission never reached a worker; its refusal is typed.
+	return claim.errorCode ? withFailureCode(failed, claim.errorCode) : failed;
 }
 
 // The device waiter defaults missing output to {}. Omit that sentinel so a
@@ -1324,6 +1326,11 @@ export async function dispatchAdmittedRun(p: {
 						message: `Operation run ${runId} is queued and waiting for ${connection.device_worker_id ? "the selected device" : "an eligible device"}. Read operations.getRun(${runId}) for its result.`,
 					}
 				: replayExistingOperationRun(claim, connection.connector_key, operation, ctx);
+		}
+		// Refused at admission: born terminal, so there is no worker to wait for.
+		if (claim.errorCode) {
+			await trackOperationReaction(runId);
+			return replayExistingOperationRun(claim, connection.connector_key, operation, ctx);
 		}
 		// A script deadline that lands mid-wait reports this run and its phase
 		// (run_sdk reads ctx.deviceWaits at the deadline).

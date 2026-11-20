@@ -1311,7 +1311,7 @@ export async function handleApprove(
 
 	// Approval must not reinterpret a pending run under a newer contract.
 	const contractError = await heldRunContractError(sql, ctx.organizationId, pendingRun, resolved);
-	if (contractError) return withFailureCode({ error: contractError }, "VALIDATION");
+	if (contractError) return withFailureCode({ error: contractError.message }, contractError.code);
 
 	// Recheck the persisted requesting principal, not the human approver,
 	// guardrails included, before any (possibly edited) input is dispatched.
