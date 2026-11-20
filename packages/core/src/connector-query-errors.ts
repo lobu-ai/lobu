@@ -48,9 +48,10 @@ export type ToolErrorCode =
   | "PRECONDITION_FAILED"
   /**
    * The action ran and its target refused it: a shell command exited non-zero,
-   * the element to click was covered, the selector matched nothing, the tab
-   * was gone. Retrying the identical call meets the same refusal; change the
-   * input or the target's state first (HTTP 422).
+   * the element to click was covered, the selector matched nothing. Retrying
+   * the identical call meets the same refusal; change the input or the
+   * target's state first (HTTP 422). A browser tab that closed is
+   * UPSTREAM_UNAVAILABLE, not this.
    */
   | "ACTION_FAILED"
   // ── transient: the same call may succeed on retry ──
@@ -62,7 +63,7 @@ export type ToolErrorCode =
   | "UPSTREAM_5XX"
   /** Network-level failure reaching the upstream (econnrefused/reset/dns/socket). */
   | "NETWORK"
-  /** Connector execution was unavailable (oom/crash) — retry once. */
+  /** Connector execution, or the browser tab or debugger it drives, was unavailable (oom/crash/closed) — retry once. */
   | "UPSTREAM_UNAVAILABLE"
   // ── fallback ──
   /** Unclassified failure. Non-retryable by default (don't mask real bugs behind retries). */
@@ -134,7 +135,8 @@ export const TOOL_ERRORS: Record<ToolErrorCode, ToolErrorSpec> = {
   },
   UPSTREAM_UNAVAILABLE: {
     retryable: true,
-    message: "The connector process was unavailable.",
+    message:
+      "The connector process, or the browser tab it drives, was unavailable.",
   },
   INTERNAL: {
     retryable: false,
