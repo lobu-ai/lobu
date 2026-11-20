@@ -20,7 +20,26 @@ type Proxied = {
   stalled: Promise<never>;
 };
 
-async function withProxiedDriver(driver: typeof postgres, run: (proxied: Proxied) => Promise<void>) {
+/** Re-frames the server's byte stream into whole protocol messages for `rewrite`. */
+function messageRewriter(rewrite: (message: Buffer) => Buffer) {
+  let pending = Buffer.alloc(0);
+  return (chunk: Buffer) => {
+    pending = Buffer.concat([pending, chunk]);
+    const out: Buffer[] = [];
+    while (pending.length >= 5 && pending.length >= 1 + pending.readUInt32BE(1)) {
+      const end = 1 + pending.readUInt32BE(1);
+      out.push(rewrite(pending.subarray(0, end)));
+      pending = pending.subarray(end);
+    }
+    return Buffer.concat(out);
+  };
+}
+
+async function withProxiedDriver(
+  driver: typeof postgres,
+  run: (proxied: Proxied) => Promise<void>,
+  rewriteServerMessage?: (message: Buffer) => Buffer
+) {
   await getTestDb()`SELECT 1`;
   const target = new URL(process.env.DATABASE_URL!);
   let downstream: net.Socket | undefined;
@@ -31,7 +50,13 @@ async function withProxiedDriver(driver: typeof postgres, run: (proxied: Proxied
     downstream = client;
     const upstream = net.connect(Number(target.port || 5432), target.hostname);
     sockets.push(client, upstream);
-    client.pipe(upstream).pipe(client);
+    if (rewriteServerMessage) {
+      const rewrite = messageRewriter(rewriteServerMessage);
+      client.pipe(upstream);
+      upstream.on('data', (chunk: Buffer) => client.write(rewrite(chunk)));
+    } else {
+      client.pipe(upstream).pipe(client);
+    }
     client.on('error', () => upstream.destroy());
     upstream.on('error', () => client.destroy());
   });
@@ -162,6 +187,73 @@ describe('Postgres transaction reservations under pipeline pressure', () => {
       // not escape as an unhandled rejection while preceding work drains.
       await Promise.all([...preceding, transaction]);
       expect((await sql`SELECT 1 AS reusable`)[0].reusable).toBe(1);
+    } finally {
+      await sql.end({ timeout: 0 });
+    }
+  });
+});
+
+describe('Postgres replies stay matched to their queries', () => {
+  it.each(drivers)('%s drops a connection whose replies it could not parse', async (_name, driver) => {
+    let corrupted = false;
+    // Repeat the marker statement's column description once, so the driver
+    // caches a two-column statement whose rows carry one column: the shape of
+    // a reply handed to the wrong query.
+    const duplicateMarkerColumns = (message: Buffer) => {
+      if (corrupted || message[0] !== 0x54 || !message.includes('desync_marker')) return message;
+      corrupted = true;
+      const fields = message.subarray(7);
+      const doubled = Buffer.concat([message.subarray(0, 7), fields, fields]);
+      doubled.writeUInt32BE(doubled.length - 1, 1);
+      doubled.writeUInt16BE(message.readUInt16BE(5) * 2, 5);
+      return doubled;
+    };
+    await withProxiedDriver(driver, async ({ sql, stalled }) => {
+      await expect(Promise.race([sql`SELECT 'v' AS desync_marker`, stalled])).rejects.toMatchObject({
+        code: 'ERR_OUT_OF_RANGE',
+      });
+      // The same statement on the same pool must not inherit that state.
+      expect(await Promise.race([sql`SELECT 'v' AS desync_marker`, stalled])).toEqual([{ desync_marker: 'v' }]);
+      expect(corrupted).toBe(true);
+    }, duplicateMarkerColumns);
+  });
+
+  it.each(drivers)('%s keeps a canceled pipelined query in line with its replies', async (_name, driver) => {
+    await getTestDb()`SELECT 1`;
+    const sql = driver(process.env.DATABASE_URL!, { max: 1, ...PROD_PG_VALUE_OPTIONS });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await sql`SELECT 1`;
+      const running = sql`SELECT pg_sleep(0.2)`.execute();
+      // Both are written behind `running` on the one connection. `canceled`
+      // is still running when its cancel request lands.
+      const canceled = sql`SELECT pg_sleep(0.5), 1 AS a, 2 AS b`.execute();
+      const behind = sql`SELECT 'behind' AS only`.execute();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      canceled.cancel();
+      const stalled = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('Canceled pipelined query never settled')), 3000);
+      });
+      await running;
+      await expect(Promise.race([canceled, stalled])).rejects.toMatchObject({ code: '57014' });
+      expect(await behind).toEqual([{ only: 'behind' }]);
+      expect(await sql`SELECT 'behind' AS only`).toEqual([{ only: 'behind' }]);
+    } finally {
+      clearTimeout(timer);
+      await sql.end({ timeout: 0 });
+    }
+  });
+
+  it.each(drivers)('%s starts the next result at row zero after a query fails mid-result', async (_name, driver) => {
+    await getTestDb()`SELECT 1`;
+    const sql = driver(process.env.DATABASE_URL!, { max: 1, ...PROD_PG_VALUE_OPTIONS });
+    try {
+      // Four rows reach the client before the error, as with a statement
+      // timeout or cancel during a large read.
+      await expect(
+        sql`SELECT CASE WHEN n < 5 THEN n ELSE 1 / (n - n) END AS n FROM generate_series(1, 100) n`
+      ).rejects.toMatchObject({ code: '22012' });
+      expect([...(await sql`SELECT 42 AS id`)]).toEqual([{ id: 42 }]);
     } finally {
       await sql.end({ timeout: 0 });
     }

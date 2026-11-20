@@ -1019,6 +1019,14 @@ export async function insertEvent(
         `Row was not persisted; check server logs for diagnostic context.`
     );
   }
+  if (inserted.id == null) {
+    // A row without the RETURNING columns is a reply that reached the wrong
+    // query. Fail here rather than as an undefined bind parameter downstream.
+    throw new Error(
+      `insertEvent: INSERT RETURNING row has no id (columns: ${Object.keys(inserted).join(', ') || 'none'}) ` +
+        `for connection_id=${params.connectionId}.`
+    );
+  }
 
     // Dual-write the denormalized supersession edge. `events.superseded_by`
     // holds the inverse of `supersedes_event_id`: we stamp the row we just
