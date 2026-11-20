@@ -46,7 +46,7 @@ describe('install telemetry ping', () => {
     received.length = 0;
   });
 
-  it('sends one bucketed, non-identifying ping with a stable install id', async () => {
+  it('sends one bucketed, non-identifying ping a day with a stable install id', async () => {
     const orgs = [
       await createTestOrganization({ name: 'Synthetic Telemetry Org' }),
       await createTestOrganization(),
@@ -56,10 +56,10 @@ describe('install telemetry ping', () => {
     await sendInstallPing(getDb(), env);
     await sendInstallPing(getDb(), env);
 
-    expect(received).toHaveLength(2);
-    const [first, second] = received;
+    // A second process on the same UTC day has nothing to claim.
+    expect(received).toHaveLength(1);
+    const [first] = received;
     expect(first.install_id).toMatch(/^[0-9a-f-]{36}$/);
-    expect(second.install_id).toBe(first.install_id);
     expect(first).toMatchObject({
       schema: 1,
       deploy_kind: 'helm',
@@ -73,6 +73,28 @@ describe('install telemetry ping', () => {
       expect(body).not.toContain(org.slug);
       expect(body).not.toContain(org.name);
     }
+
+    // The next UTC day claims and sends again with the same install id.
+    await getTestDb()`
+      UPDATE instance_identity
+         SET last_ping_day = (now() AT TIME ZONE 'UTC')::date - 1
+    `;
+    await sendInstallPing(getDb(), env);
+    expect(received).toHaveLength(2);
+    expect(received[1].install_id).toBe(first.install_id);
+  });
+
+  it('collapses concurrent replica boots into one request', async () => {
+    const env = { LOBU_TELEMETRY: '1', LOBU_TELEMETRY_URL: url, LOBU_DEPLOY_KIND: 'docker' };
+
+    await Promise.all([
+      sendInstallPing(getDb(), env),
+      sendInstallPing(getDb(), env),
+      sendInstallPing(getDb(), env),
+    ]);
+
+    expect(received).toHaveLength(1);
+    expect(await getTestDb()`SELECT 1 FROM instance_identity`).toHaveLength(1);
   });
 
   it('an unknown deploy kind is reported as other, never echoed', async () => {
@@ -91,7 +113,9 @@ describe('install telemetry ping', () => {
       { LOBU_CLOUD_MODE: '1', LOBU_TELEMETRY: '1' },
       { NODE_ENV: 'development' },
       { NODE_ENV: 'test' },
+      { NODE_ENV: 'test', LOBU_INSTALL_ORIGIN: 'install' },
       { NODE_ENV: 'production', CI: 'true' },
+      { NODE_ENV: 'production', LOBU_INSTALL_ORIGIN: 'checkout' },
     ]) {
       await sendInstallPing(getDb(), { ...env, LOBU_TELEMETRY_URL: url });
     }
@@ -100,9 +124,25 @@ describe('install telemetry ping', () => {
     expect(rows).toHaveLength(0);
   });
 
-  it('is on by default for a production process', () => {
+  it('counts installed runs and keeps contributor checkouts out', () => {
     expect(installTelemetryEnabled({ NODE_ENV: 'production' })).toBe(true);
     expect(installTelemetryEnabled({})).toBe(true);
+    // `lobu run` from an installed package is a real install even though the
+    // runtime labels the process development for local conveniences.
+    expect(
+      installTelemetryEnabled({ NODE_ENV: 'development', LOBU_INSTALL_ORIGIN: 'install' }),
+    ).toBe(true);
+    // `lobu run` from the monorepo is a contributor run.
+    expect(
+      installTelemetryEnabled({ NODE_ENV: 'production', LOBU_INSTALL_ORIGIN: 'checkout' }),
+    ).toBe(false);
+    // Explicit opt-in still wins for a checkout; DO_NOT_TRACK still wins over it.
+    expect(installTelemetryEnabled({ LOBU_INSTALL_ORIGIN: 'checkout', LOBU_TELEMETRY: '1' })).toBe(
+      true,
+    );
+    expect(
+      installTelemetryEnabled({ NODE_ENV: 'production', DO_NOT_TRACK: '1' }),
+    ).toBe(false);
   });
 
   it('a malformed LOBU_TELEMETRY_URL turns the ping off instead of failing boot', async () => {
@@ -115,9 +155,14 @@ describe('install telemetry ping', () => {
     expect(await getTestDb()`SELECT 1 FROM instance_identity`).toHaveLength(0);
   });
 
-  it('an unreachable endpoint resolves quietly', async () => {
+  it('a failed attempt consumes the day and stays quiet', async () => {
     await expect(
       sendInstallPing(getDb(), { LOBU_TELEMETRY: '1', LOBU_TELEMETRY_URL: 'http://127.0.0.1:9/v1/install' }),
     ).resolves.toBeUndefined();
+
+    // The day was claimed before the attempt, so a later call today — a
+    // replica boot or the heartbeat — does not retry it.
+    await sendInstallPing(getDb(), { LOBU_TELEMETRY: '1', LOBU_TELEMETRY_URL: url });
+    expect(received).toHaveLength(0);
   });
 });

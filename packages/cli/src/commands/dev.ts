@@ -396,6 +396,11 @@ export async function devCommand(
     LOBU_DEPLOY_KIND: "cli",
     ...mergedEnv,
     ...runtime.env,
+    // `lobu run` sets NODE_ENV=development for local conveniences even for an
+    // installed user, so telemetry cannot infer install origin from it. State
+    // the fact this process already knows: a Lobu monorepo checkout is a
+    // contributor run, anything else is an installed package.
+    LOBU_INSTALL_ORIGIN: enclosingRoot ? "checkout" : "install",
     LOBU_DEV_PROJECT_PATH: projectPath,
     // `lobu run` owns the local DB lifecycle for both backends. The embedded
     // path already migrates on boot; this flag tells the server bundle to also
