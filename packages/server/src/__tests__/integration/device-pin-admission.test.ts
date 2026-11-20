@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto';
+import { describeError } from '@lobu/core';
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { Env } from '../../index';
 import { upsertEntityApprovalPolicy } from '../../authz/entity-policy';
 import { createConnectorOperationRun, createSyncRun } from '../../runs/queue-service';
+import { scriptFailureTelemetry } from '../../sandbox/run-script';
 import { manageOperations } from '../../tools/admin/manage_operations';
 import '../../tools/registry';
 import { runSdkScript } from '../../tools/sdk_run';
@@ -273,6 +275,40 @@ describe('manifest-backed device pin admission', () => {
     } finally {
       clearTimeout(deadline);
     }
+  });
+
+  // The span a run_sdk failure records derives error.kind from this code, so a
+  // device that is offline or out of date reads as a dependency and a
+  // connection the caller has not finished setting up as the caller's fault.
+  it.each([
+    { refusal: 'an unpinned browser connection', code: 'PRECONDITION_FAILED', kind: 'user' },
+    { refusal: 'a device missing the required permission', code: 'PRECONDITION_FAILED', kind: 'user' },
+    { refusal: 'no device advertising the selected artifact', code: 'UPSTREAM_UNAVAILABLE', kind: 'dependency' },
+  ])('classifies an admission refusal for $refusal as $kind', async ({ refusal, code, kind }) => {
+    const fixture = await seedFixture(
+      refusal.startsWith('no device') ? manifest('0.9.0') : manifest(),
+    );
+    const sql = getTestDb();
+    if (refusal.startsWith('an unpinned')) {
+      await sql`UPDATE connections SET device_worker_id = NULL WHERE id = ${fixture.connection.id}`;
+    }
+    if (refusal.startsWith('a device missing')) {
+      await sql`UPDATE device_workers SET capabilities = '[]'::jsonb WHERE id = ${fixture.device.id}::uuid`;
+    }
+
+    const result = (await runSdkScript(
+      {
+        script: `export default async (_ctx, client) => client.operations.execute({
+          connection_id: ${fixture.connection.id}, operation_key: 'echo', input: {},
+        });`,
+      },
+      {} as Env,
+      fixture.ctx,
+    )) as { success: boolean; error?: { name: string; code?: string } };
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatchObject({ name: 'ClientSdkActionError', code });
+    expect(describeError(scriptFailureTelemetry(result.error!).error, { scope: 'tool run_sdk' }).kind).toBe(kind);
   });
 
   it('records an in-flight device wait and its phase for a script deadline to report', async () => {

@@ -943,7 +943,8 @@ export async function dispatchChromeActionToExtension(params: {
         const [live] = await tx`SELECT expires_at FROM runs WHERE id = ${parentRunId}
           AND organization_id = ${organizationId} AND status = 'running'
           AND expires_at > current_timestamp FOR UPDATE`;
-        if (!live || abortSignal?.aborted) throw new Error('The source read is no longer active.');
+        // The reader already left: nothing to enqueue and nothing broke.
+        if (!live || abortSignal?.aborted) return null;
         sourceDeadline = live.expires_at;
       }
       const child = await createConnectorOperationRun({
@@ -975,6 +976,13 @@ export async function dispatchChromeActionToExtension(params: {
       }
       return child;
     });
+    if (claim === null) {
+      logger.info(
+        { parent_run_id: parentRunId, action_key: actionKey },
+        '[dispatchChromeAction] source read ended before the step was enqueued'
+      );
+      return { status: 'failed', error_message: 'The source read is no longer active.' };
+    }
     runId = claim.runId;
   } catch (err) {
     if (err instanceof BrowserInterruptionError) return { status: 'failed', interruption: { reason: err.reason, message: err.message }, error_message: err.message };
