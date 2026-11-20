@@ -95,12 +95,11 @@ export function createAudioRoutes(
         });
       });
     } catch (error) {
-      logger.error("Audio synthesis error", { error });
-      throw routeFailure(errorResponse(
+      throw routeFailure(c, errorResponse(
         c,
         error instanceof Error ? error.message : "Failed to synthesize audio",
         500
-      ), error);
+      ), error, "Audio synthesis error");
     }
   });
 
@@ -139,8 +138,8 @@ export function createAudioRoutes(
         features: { transcription: true, synthesis: true },
       });
     } catch (error) {
-      logger.error("Capabilities check error", { error });
-      throw routeFailure(errorResponse(c, "Failed to check capabilities", 500), error);
+      throw routeFailure(c, errorResponse(c, "Failed to check capabilities", 500), error,
+        "Capabilities check error");
     }
   });
 

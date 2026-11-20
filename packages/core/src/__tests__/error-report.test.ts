@@ -232,6 +232,28 @@ describe("describeError grouping", () => {
     expect(describeError(null, { scope: "s" }).type).toBe("UnknownError");
   });
 
+  test("names a subclass that never sets `name` by its class, so distinct classes are distinct issues", () => {
+    class StoreUnavailable extends Error {}
+    class QuotaExceeded extends Error {}
+    const at = stack("Error: m", [
+      "readStore (/srv/packages/server/src/store.ts:10:5)",
+    ]);
+    const store = Object.assign(new StoreUnavailable("m"), { stack: at });
+    const quota = Object.assign(new QuotaExceeded("m"), { stack: at });
+    expect(describeError(store, { scope: "s" }).type).toBe("StoreUnavailable");
+    expect(describeError(store, { scope: "s" }).fingerprint).not.toBe(
+      describeError(quota, { scope: "s" }).fingerprint
+    );
+    // A class that names itself, and a plain Error, keep their name.
+    class Named extends Error {
+      override name = "NamedFailure";
+    }
+    expect(describeError(new Named("m"), { scope: "s" }).type).toBe(
+      "NamedFailure"
+    );
+    expect(describeError(new Error("m"), { scope: "s" }).type).toBe("Error");
+  });
+
   test("the recorded stacktrace holds frame locations only, never the message", () => {
     const report = describeError(
       {

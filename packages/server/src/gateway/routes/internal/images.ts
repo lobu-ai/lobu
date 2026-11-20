@@ -93,8 +93,8 @@ export function createImageRoutes(
         });
       });
     } catch (error) {
-      logger.error("Image generation error", { error });
-      throw routeFailure(errorResponse(c, "Failed to generate image", 500), error);
+      throw routeFailure(c, errorResponse(c, "Failed to generate image", 500), error,
+        "Image generation error");
     }
   });
 
@@ -125,8 +125,8 @@ export function createImageRoutes(
         features: { generation: true },
       });
     } catch (error) {
-      logger.error("Image capabilities check error", { error });
-      throw routeFailure(errorResponse(c, "Failed to check capabilities", 500), error);
+      throw routeFailure(c, errorResponse(c, "Failed to check capabilities", 500), error,
+        "Image capabilities check error");
     }
   });
 

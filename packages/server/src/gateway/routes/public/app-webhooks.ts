@@ -655,11 +655,8 @@ export function createAppWebhookRoutes(deps: AppWebhookRouterDeps): Hono {
 					method: c.req.raw.method,
 				});
 			} catch (error) {
-				routeLogger.error(
-					{ provider: providerName, error: String(error) },
-					"[app-webhook] handleDelivery failed",
-				);
-				throw routeFailure(json(500, { error: "Failed to handle delivery" }), error);
+				throw routeFailure(c, json(500, { error: "Failed to handle delivery" }), error,
+					"[app-webhook] handleDelivery failed", { provider: providerName });
 			}
 		}
 
@@ -705,11 +702,8 @@ export function createAppWebhookRoutes(deps: AppWebhookRouterDeps): Hono {
 			try {
 				await deps.installationStore.revoke(install.id);
 			} catch (error) {
-				routeLogger.error(
-					{ provider: providerName, installationId: install.id, error: String(error) },
-					"[app-webhook] uninstall revoke failed",
-				);
-				throw routeFailure(json(500, { error: "Failed to handle delivery" }), error);
+				throw routeFailure(c, json(500, { error: "Failed to handle delivery" }), error,
+					"[app-webhook] uninstall revoke failed", { provider: providerName, installationId: install.id });
 			}
 			routeLogger.info(
 				{ provider: providerName, installationId: install.id },
@@ -734,11 +728,8 @@ export function createAppWebhookRoutes(deps: AppWebhookRouterDeps): Hono {
 			});
 			return json(200, { ok: true, triggered });
 		} catch (error) {
-			routeLogger.error(
-				{ provider: providerName, installationId: install.id, error: String(error) },
-				"[app-webhook] onDelivery trigger failed",
-			);
-			throw routeFailure(json(500, { error: "Failed to handle delivery" }), error);
+			throw routeFailure(c, json(500, { error: "Failed to handle delivery" }), error,
+				"[app-webhook] onDelivery trigger failed", { provider: providerName, installationId: install.id });
 		}
 	});
 

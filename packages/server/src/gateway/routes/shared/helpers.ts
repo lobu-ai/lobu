@@ -93,10 +93,8 @@ export function getVerifiedWorker(
 interface WithOwnedAgentOptions {
   /** Ownership stores used by `verifyOwnedAgentAccess`. */
   access: AgentOwnershipConfig;
-  /** Logged on the unexpected-error 500 path, e.g. "Failed to delete agent". */
+  /** Reported on the unexpected-error 500 path, e.g. "Failed to delete agent". */
   errorLabel: string;
-  /** Logger used for the 500 path. Matches `createLogger`'s (message, meta). */
-  logger: { error: (message: string, meta?: unknown) => void };
   /** Status returned when ownership is denied (404 for agents, 403 elsewhere). */
   deniedStatus?: ContentfulStatusCode;
   /** Body message returned when ownership is denied. */
@@ -115,7 +113,7 @@ interface WithOwnedAgentOptions {
  *  - non-admin sessions run `verifyOwnedAgentAccess`; on denial the configured
  *    `deniedStatus`/`deniedMessage` is returned (default 404 / "Agent not found
  *    or not owned by you")
- *  - the handler runs inside a try/catch that logs `errorLabel` and returns
+ *  - the handler runs inside a try/catch that reports `errorLabel` and returns
  *    500 `Internal server error`
  *
  * The handler receives the resolved `{ session, agentId, access }` so callers
@@ -157,7 +155,6 @@ export async function withOwnedAgent(
   } catch (error) {
     // The handler's own response, thrown with its failure (`routeFailure`).
     if (error instanceof HTTPException) throw error;
-    options.logger.error(options.errorLabel, { error, agentId });
-    throw routeFailure(errorResponse(c, "Internal server error", 500), error);
+    throw routeFailure(c, errorResponse(c, "Internal server error", 500), error, options.errorLabel, { agentId });
   }
 }

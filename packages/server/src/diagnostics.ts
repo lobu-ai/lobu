@@ -1,8 +1,8 @@
 /** Structured HTTP diagnostics, collected from server stdout. */
 import type { Context } from 'hono';
 import { HTTPException } from 'hono/http-exception';
+import { routePath } from 'hono/route';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
-import { ToolUserError } from './utils/errors';
 import logger from './utils/logger';
 
 const ERROR_REPORTED_FLAG = 'diagnosticErrorReported';
@@ -16,13 +16,30 @@ export function isErrorReported(c: Context): boolean {
 }
 
 /**
- * A route's own error response, carrying the failure behind it. Throw it
- * instead of returning the response: the app's error boundary sends the
- * response unchanged and records `cause` on the request span, so the issue is
- * grouped by what failed rather than as a bare `HttpServerError: HTTP <status>`.
- * It does not log; the route still owns its log line.
+ * A route's own error response, carrying the failure behind it, reported once.
+ * Throw it instead of returning the response: the app's error boundary sends
+ * the response unchanged and records `cause` on the request span, so the issue
+ * is grouped by what failed rather than as a bare `HttpServerError: HTTP <status>`.
+ *
+ * It writes the request's one error record — `cause` as the error, so its type,
+ * typed code and stack set the issue's fingerprint and kind — and marks the
+ * request reported, so the HTTP response middleware does not add a second
+ * record for the same failure. A route never logs the failure itself as well.
+ * A request whose caller already left is not reported, matching the HTTP
+ * boundary: the failure is that caller's cancellation, not an issue.
+ * `message` names the failure (default: the status and route template) and
+ * `fields` add value-free context such as ids.
  */
-export function routeFailure(response: Response, cause: unknown): HTTPException {
+export function routeFailure(
+  c: Context, response: Response, cause: unknown,
+  message?: string, fields?: Record<string, unknown>
+): HTTPException {
+  if (!isErrorReported(c) && !c.req.raw.signal.aborted) {
+    logger.error({ ...fields, error: cause, source: 'route_failure', http_method: c.req.method,
+      res_status: response.status, path: c.req.path },
+    message ?? `HTTP ${response.status} from ${c.req.method} ${routePath(c)}`);
+    markErrorReported(c);
+  }
   return new HTTPException(response.status as ContentfulStatusCode, { res: response, cause });
 }
 
@@ -46,19 +63,11 @@ export function redactedFailure(error: unknown): {
     ? shape.stack.split('\n').filter((line) => line.trimStart().startsWith('at ')).join('\n')
     : '';
   return {
-    name: typeof shape.name === 'string' && shape.name ? shape.name : 'Error',
+    // A subclass that never sets `name` inherits "Error"; its class names it.
+    name: error instanceof Error && error.name === 'Error' ? error.constructor.name
+      : typeof shape.name === 'string' && shape.name ? shape.name : 'Error',
     message: 'details withheld at a credential boundary',
     ...(code ? { code } : {}),
     ...(frames ? { stack: frames } : {}),
   };
-}
-
-/** Retain the original exception when a route catches it and returns a 5xx. */
-export function captureServerError(
-  c: Context, error: unknown, source: string, httpStatus: number
-): void {
-  if (error instanceof ToolUserError || isErrorReported(c)) return;
-  logger.error({ error, source, http_method: c.req.method,
-    res_status: httpStatus, path: c.req.path }, 'HTTP handler failed');
-  markErrorReported(c);
 }

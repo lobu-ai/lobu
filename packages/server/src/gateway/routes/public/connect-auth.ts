@@ -1,5 +1,4 @@
 import { randomBytes } from "node:crypto";
-import { createLogger } from "@lobu/core";
 import { Hono } from "hono";
 import { getDb } from "../../../db/client.js";
 import { escapeHtml } from "../../../utils/html.js";
@@ -13,7 +12,6 @@ import {
 } from "./settings-auth.js";
 import { routeFailure } from "../../../diagnostics.js";
 
-const logger = createLogger("connect-auth-routes");
 const AUTH_REQUEST_TTL_SECONDS = 10 * 60;
 const CONNECT_OAUTH_TTL_SECONDS = 10 * 60;
 const SCOPE_CONNECT = "cli:auth:connect";
@@ -161,14 +159,13 @@ export function createConnectAuthRoutes(config: ConnectAuthRoutesConfig): Hono {
 
       return c.redirect(authUrl);
     } catch (error) {
-      logger.error("Failed to start browser OAuth handoff", { error });
-      throw routeFailure(c.html(
+      throw routeFailure(c, c.html(
         renderPage(
           "OAuth Login Failed",
           "The gateway could not start the browser OAuth flow."
         ),
         500
-      ), error);
+      ), error, "Failed to start browser OAuth handoff");
     }
   });
 
@@ -261,14 +258,13 @@ export function createConnectAuthRoutes(config: ConnectAuthRoutesConfig): Hono {
 
       return c.redirect(connectState.returnUrl);
     } catch (error) {
-      logger.error("Failed to complete browser OAuth handoff", { error });
-      throw routeFailure(c.html(
+      throw routeFailure(c, c.html(
         renderPage(
           "OAuth Login Failed",
           "The gateway could not complete the browser OAuth flow."
         ),
         500
-      ), error);
+      ), error, "Failed to complete browser OAuth handoff");
     }
   });
 

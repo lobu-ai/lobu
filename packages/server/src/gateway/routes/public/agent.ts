@@ -1589,8 +1589,8 @@ export function createAgentApi(config: AgentApiConfig): Hono {
           queued: result.queued || false,
         });
       } catch (error) {
-        logger.error("Failed to send platform message", { error });
-        throw routeFailure(c.json({ success: false, error: "Internal server error" }, 500), error);
+        throw routeFailure(c, c.json({ success: false, error: "Internal server error" }, 500), error,
+          "Failed to send platform message");
       }
     }
 

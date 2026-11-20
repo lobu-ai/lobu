@@ -450,8 +450,8 @@ export function createChatIdentityRoutes(overrides: Partial<ChatIdentityRouteDep
       try {
         cookies = await deps.signOut(c.req.raw, c.env);
       } catch (error) {
-        logger.warn({ error }, 'Chat identity link could not sign the browser out to switch accounts');
-        throw routeFailure(c.html(SWITCH_FAILED_PAGE, 502), error);
+        throw routeFailure(c, c.html(SWITCH_FAILED_PAGE, 502), error,
+          'Chat identity link could not sign the browser out to switch accounts');
       }
       for (const cookie of cookies) c.header('Set-Cookie', cookie, { append: true });
       return c.redirect(loginContinuation(token, loginProviderForChatPlatform(claim.platform)), 303);

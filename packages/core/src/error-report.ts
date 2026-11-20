@@ -304,16 +304,19 @@ export function describeError(
     error && typeof error === "object"
       ? (error as ErrorShape)
       : { message: String(error) };
+  // A subclass that never sets `name` inherits "Error"; its class is the type.
   const type =
-    typeof shape.name === "string" && shape.name
-      ? shape.name
-      : typeof shape.type === "string" && shape.type
-        ? shape.type
-        : error instanceof Error
-          ? error.constructor.name
-          : typeof error === "string"
-            ? "Message"
-            : "UnknownError";
+    error instanceof Error && error.name === "Error"
+      ? error.constructor.name
+      : typeof shape.name === "string" && shape.name
+        ? shape.name
+        : typeof shape.type === "string" && shape.type
+          ? shape.type
+          : error instanceof Error
+            ? error.constructor.name
+            : typeof error === "string"
+              ? "Message"
+              : "UnknownError";
   const code =
     typeof shape.code === "string" && isErrorCode(shape.code)
       ? shape.code

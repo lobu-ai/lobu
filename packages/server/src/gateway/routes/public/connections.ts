@@ -58,8 +58,8 @@ export function createConnectionWebhookRoutes(
       }
 			return await manager.handleWebhook(connectionId, c.req.raw);
     } catch (error) {
-      logger.error({ connectionId, error: String(error) }, "Webhook error");
-      throw routeFailure(c.json({ error: "Webhook processing failed" }, 500), error);
+      throw routeFailure(c, c.json({ error: "Webhook processing failed" }, 500), error, "Webhook error",
+        { connectionId });
     }
   });
 

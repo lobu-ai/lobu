@@ -282,11 +282,8 @@ export async function createPreviewClaim(c: Context<{ Bindings: Env }>) {
 			});
 		} catch (err: unknown) {
 			if ((err as { code?: string }).code === "23505") continue;
-			logger.error(
-				{ err: errorMessage(err), platform },
-				"[preview] create claim failed",
-			);
-			throw routeFailure(c.json({ error: errorMessage(err) }, 500), err);
+			throw routeFailure(c, c.json({ error: errorMessage(err) }, 500), err,
+				"[preview] create claim failed", { platform });
 		}
 	}
 

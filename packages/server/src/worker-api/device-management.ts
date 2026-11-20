@@ -22,7 +22,7 @@ import {
 } from '../auth/tokens';
 import { getDb, parsePgTextArray, pgBigintArray } from '../db/client';
 import type { Env } from '../index';
-import { captureServerError, routeFailure } from '../diagnostics';
+import { routeFailure } from '../diagnostics';
 import { errorMessage } from '../utils/errors';
 import { recordLifecycleEvent } from '../utils/insert-event';
 import logger from '../utils/logger';
@@ -224,9 +224,7 @@ export async function listDeviceWorkers(c: Context<{ Bindings: Env }>) {
   try {
     return c.json({ devices: await queryDeviceWorkers(userId) });
   } catch (err: unknown) {
-    logger.error({ error: errorMessage(err) }, '[listDeviceWorkers] Error');
-    captureServerError(c, err, 'listDeviceWorkers', 500);
-    throw routeFailure(c.json({ error: errorMessage(err) }, 500), err);
+    throw routeFailure(c, c.json({ error: errorMessage(err) }, 500), err, '[listDeviceWorkers] Error');
   }
 }
 
@@ -654,9 +652,7 @@ export async function mintDeviceChildToken(c: Context<{ Bindings: Env }>) {
       platform,
     });
   } catch (err) {
-    logger.error({ err: errorMessage(err) }, '[mintDeviceChildToken] failed');
-    captureServerError(c, err, 'mintDeviceChildToken', 500);
-    throw routeFailure(c.json({ error: errorMessage(err) }, 500), err);
+    throw routeFailure(c, c.json({ error: errorMessage(err) }, 500), err, '[mintDeviceChildToken] failed');
   }
 }
 
@@ -815,8 +811,7 @@ export async function updateDeviceWorkerOrg(c: Context<{ Bindings: Env }>) {
     }
     return c.json({ ok: true, ...(hasLabel ? { label: nextLabel ?? null } : {}) });
   } catch (err: unknown) {
-    logger.error({ error: errorMessage(err) }, '[updateDeviceWorkerOrg] Error');
-    throw routeFailure(c.json({ error: errorMessage(err) }, 500), err);
+    throw routeFailure(c, c.json({ error: errorMessage(err) }, 500), err, '[updateDeviceWorkerOrg] Error');
   }
 }
 
@@ -950,7 +945,6 @@ export async function deleteDeviceWorker(c: Context<{ Bindings: Env }>) {
     }
     return c.json({ ok: true });
   } catch (err: unknown) {
-    logger.error({ error: errorMessage(err) }, '[deleteDeviceWorker] Error');
-    throw routeFailure(c.json({ error: errorMessage(err) }, 500), err);
+    throw routeFailure(c, c.json({ error: errorMessage(err) }, 500), err, '[deleteDeviceWorker] Error');
   }
 }

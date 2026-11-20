@@ -19,7 +19,6 @@ import type { Context } from 'hono';
 import { getDb } from '../db/client';
 import type { Env } from '../index';
 import { errorMessage, ToolUserError } from '../utils/errors';
-import logger from '../utils/logger';
 import { enqueueAutomationRunForAutomation } from '../automations/automation';
 import { routeFailure } from '../diagnostics';
 
@@ -69,8 +68,8 @@ export async function triggerAutomationForDevice(c: Context<{ Bindings: Env }>) 
     }
     resolvedDeviceWorkerId = device.id;
   } catch (err) {
-    logger.error({ error: errorMessage(err) }, '[triggerAutomationForDevice] device lookup failed');
-    throw routeFailure(c.json({ error: 'Internal error' }, 500), err);
+    throw routeFailure(c, c.json({ error: 'Internal error' }, 500), err,
+      '[triggerAutomationForDevice] device lookup failed');
   }
 
   // Load the automation and enforce two checks:
@@ -144,10 +143,7 @@ export async function triggerAutomationForDevice(c: Context<{ Bindings: Env }>) 
         err.httpStatus as import("hono/utils/http-status").ContentfulStatusCode
       );
     }
-    logger.error(
-      { error: errorMessage(err), automationId },
-      '[triggerAutomationForDevice] enqueue failed'
-    );
-    throw routeFailure(c.json({ error: errorMessage(err) }, 500), err);
+    throw routeFailure(c, c.json({ error: errorMessage(err) }, 500), err,
+      '[triggerAutomationForDevice] enqueue failed', { automationId });
   }
 }

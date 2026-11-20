@@ -310,10 +310,7 @@ export function createSmokeRoutes(): Hono {
       );
       return c.json({ runId, idempotencyKey });
     } catch (err) {
-      logger.error(
-        `Smoke dispatch INSERT failed: ${getErrorMessage(err)}`
-      );
-      throw routeFailure(c.json({ error: "Internal error" }, 500), err);
+      throw routeFailure(c, c.json({ error: "Internal error" }, 500), err, "Smoke dispatch INSERT failed");
     }
   });
 

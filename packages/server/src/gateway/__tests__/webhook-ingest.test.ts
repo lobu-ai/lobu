@@ -273,11 +273,12 @@ describe("handleWebhookIngest auth", () => {
 	});
 
 	test("refuses an org-less row", async () => {
-		const res = await ingest(
-			storedRow({ organizationId: undefined }),
-			delivery({ a: 1 }, { headers: bearer }),
-		);
-		expect(res.status).toBe(500);
+		await expect(
+			ingest(
+				storedRow({ organizationId: undefined }),
+				delivery({ a: 1 }, { headers: bearer }),
+			),
+		).rejects.toThrow("has no organization_id");
 	});
 });
 

@@ -52,7 +52,7 @@ export const authenticateWorker = async (
       if (error instanceof StaleAgentTurnAttemptError) {
         return c.json({ error: error.message }, 409);
       }
-      throw routeFailure(c.json({ error: "Could not record the tool call for this turn; it was not executed" }, 503), error);
+      throw routeFailure(c, c.json({ error: "Could not record the tool call for this turn; it was not executed" }, 503), error);
     }
   }
   c.set("worker", tokenData);

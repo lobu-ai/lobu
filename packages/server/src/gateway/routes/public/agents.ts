@@ -175,8 +175,7 @@ export function createAgentRoutes(config: AgentRoutesConfig): Hono {
         settingsUrl: `/api/v1/agents/${encodeURIComponent(agentId)}/config`,
       });
     } catch (error) {
-      logger.error("Failed to create agent", { error });
-      throw routeFailure(errorResponse(c, "Internal server error", 500), error);
+      throw routeFailure(c, errorResponse(c, "Internal server error", 500), error, "Failed to create agent");
     }
   });
 
@@ -209,8 +208,7 @@ export function createAgentRoutes(config: AgentRoutesConfig): Hono {
 
       return c.json({ agents });
     } catch (error) {
-      logger.error("Failed to list agents", { error });
-      throw routeFailure(errorResponse(c, "Failed to list agents", 500), error);
+      throw routeFailure(c, errorResponse(c, "Failed to list agents", 500), error, "Failed to list agents");
     }
   });
 
@@ -226,7 +224,6 @@ export function createAgentRoutes(config: AgentRoutesConfig): Hono {
       {
         access: ownershipAccessConfig,
         errorLabel: "Failed to update agent",
-        logger,
       },
       async ({ agentId }) => {
         const body = await c.req.json<{

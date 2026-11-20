@@ -406,7 +406,6 @@ async function getContentImpl(
   const limit = args.limit || 50;
   const offset = args.offset || 0;
 
-  try {
     // If automation_id is provided, use automation mode: fetch content for all sources and generate window_token
     if (args.automation_id) {
       // Automation mode executes the Automation's authored SQL sources (which may
@@ -994,11 +993,6 @@ async function getContentImpl(
       });
     }
     return result;
-  } catch (error) {
-    // A caller that left is not a read failure.
-    if (!ctx.abortSignal?.aborted) logger.error({ err: error }, 'get_content error:');
-    throw error;
-  }
 }
 
 /**

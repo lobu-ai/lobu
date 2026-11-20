@@ -30,11 +30,11 @@
  * authorizeRunForWorker's read, in the TOCTOU window before the UPDATE).
  */
 
-import { HTTPException } from 'hono/http-exception';
-import type { Context } from 'hono';
+import { Hono, type Context } from 'hono';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import logger from '../../utils/logger';
 import type { Env } from '../../index';
+import { buildWrapperApp } from '../../server-lifecycle';
 import { completeAuthRun, completeWorkerJob } from '../../worker-api';
 import { cleanupTestDatabase, getTestDb } from '../setup/test-db';
 import { createTestOrganization } from '../setup/test-fixtures';
@@ -415,17 +415,24 @@ describe('completeWorkerJob status guard (late-completion-after-timeout)', () =>
          'running', ${WORKER_ID}, NOW(), NOW())
       RETURNING id
     `;
-    const { ctx, result } = mockWorkerCtx({
-      run_id: run.id,
-      worker_id: WORKER_ID,
-      status: 'failed',
-      error_message: 'expected failure',
+    // Through the real wrapper, so the route's failure log and the wrapper's
+    // unreported-5xx log meet on one request: the failure is ONE issue.
+    const app = new Hono<{ Bindings: Env }>();
+    app.post('/complete', (c) => completeWorkerJob(c));
+    const res = await buildWrapperApp({} as Env, null, app).request('/complete', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        run_id: run.id,
+        worker_id: WORKER_ID,
+        status: 'failed',
+        error_message: 'expected failure',
+      }),
     });
 
-    await expect(completeWorkerJob(ctx)).rejects.toBeInstanceOf(HTTPException);
-
-    expect(result().status).toBe(500);
+    expect(res.status).toBe(500);
     expect(terminalFailureLogs()).toHaveLength(0);
+    expect(vi.mocked(logger.error)).toHaveBeenCalledTimes(1);
     const [after] = await sql<{
       status: string;
       completed_at: Date | null;

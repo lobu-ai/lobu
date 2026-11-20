@@ -277,7 +277,7 @@ describe("buildWrapperApp", () => {
 			// A route's own 5xx thrown with its failure keeps its response; the failure is the span's cause.
 			app.get("/captured", (c) => {
 				c.header("Retry-After", "60");
-				throw routeFailure(c.json({ error: "unavailable" }, 503), new ToolUserError("source timed out", 504, "UPSTREAM_TIMEOUT"));
+				throw routeFailure(c, c.json({ error: "unavailable" }, 503), new ToolUserError("source timed out", 504, "UPSTREAM_TIMEOUT"));
 			});
 			// A thrown 4xx is the route's answer, not a server failure.
 			app.get("/conflict", () => {
@@ -545,7 +545,7 @@ describe("buildWrapperApp", () => {
 			// with its cause (`routeFailure`); both report the same way.
 			const answer = (c: Context, thrown: boolean, error: string) => {
 				const response = c.json({ error }, 500);
-				if (thrown) throw routeFailure(response, new Error(error));
+				if (thrown) throw routeFailure(c, response, new Error(error));
 				return response;
 			};
 			for (const thrown of [false, true]) {
@@ -572,7 +572,7 @@ describe("buildWrapperApp", () => {
 				captureMessage.mockClear();
 				expect((await wrapper.request("/lobu/delivered")).status).toBe(500);
 				expect(captureMessage).toHaveBeenCalledTimes(1);
-				expect(httpResponseLogs()).toHaveLength(1);
+				expect(httpResponseLogs()).toHaveLength(thrown ? 0 : 1);
 				expect(requestSpan()?.status.code).toBe(SpanStatusCode.ERROR);
 			}
 		} finally {
