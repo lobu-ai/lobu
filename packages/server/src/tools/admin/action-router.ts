@@ -16,12 +16,15 @@ import { getErrorMessage } from "@lobu/core";
  *   });
  */
 /**
- * Log level for an error caught in `routeAction`. ToolUserError is an expected
- * client fault (the REST/MCP layer turns it into a 4xx) — log it at `warn` so it
- * stays diagnosable without paging or reaching the error-log alerts. Genuine
- * handler faults log at `error`. Exported for direct unit testing.
+ * Log level for an error caught in `routeAction`, or null to not log it.
+ * ToolUserError is an expected client fault (the REST/MCP layer turns it into
+ * a 4xx) — log it at `warn` so it stays diagnosable without paging or reaching
+ * the error-log alerts. A read stopped because its caller disconnected throws
+ * the request's abort reason; nobody is waiting for the answer, so it is not
+ * logged, matching `executeTool`. Genuine handler faults log at `error`.
  */
-function errorLogLevel(error: unknown): 'warn' | 'error' {
+function errorLogLevel(error: unknown, ctx: ToolContext): 'warn' | 'error' | null {
+  if (ctx.abortSignal?.aborted) return null;
   return error instanceof ToolUserError ? 'warn' : 'error';
 }
 
@@ -65,7 +68,8 @@ export async function routeAction<TResult>(
     // spams the error log and creates noisy alerts for routine 409/403
     // outcomes. Log at `warn` so it stays diagnosable
     // without paging; genuine handler faults still log at `error`.
-    logger[errorLogLevel(error)](
+    const level = errorLogLevel(error, ctx);
+    if (level) logger[level](
       {
         error,
         error_message: getErrorMessage(error),

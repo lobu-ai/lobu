@@ -376,6 +376,27 @@ function findLoggedError(value: unknown, depth = 0): ErrorShape | null {
   return null;
 }
 
+/**
+ * A thrown string in a record's error slot: pino's `err` serializer passes a
+ * non-Error through unchanged, and the console logger nests metadata under
+ * `data`. An abort reason is the common case (the node adapter aborts a
+ * request with "Client connection prematurely closed.").
+ */
+function findLoggedErrorText(record: Record<string, unknown>): string | null {
+  const data = record.data;
+  const holders =
+    data && typeof data === "object" && !Array.isArray(data)
+      ? [record, data as Record<string, unknown>]
+      : [record];
+  for (const holder of holders) {
+    for (const key of ["err", "error"]) {
+      const value = holder[key];
+      if (typeof value === "string" && value.trim()) return value.trim();
+    }
+  }
+  return null;
+}
+
 const ERROR_LEVELS = new Set(["error", "fatal"]);
 
 /**
@@ -398,9 +419,19 @@ export function annotateErrorLogRecord(record: Record<string, unknown>): void {
       : typeof record.msg === "string"
         ? record.msg
         : "";
-  const report = describeError(logged ?? { name: "LoggedError", message }, {
-    scope: `log ${service}`,
-  });
+  // Without an error object, a thrown string is the cause: keep it next to the
+  // line's own text rather than titling the issue with the wrapper alone.
+  const thrownText = logged ? null : findLoggedErrorText(record);
+  const lead = message.trimEnd();
+  const described = thrownText
+    ? lead
+      ? `${lead}${lead.endsWith(":") ? "" : ":"} ${thrownText}`
+      : thrownText
+    : message;
+  const report = describeError(
+    logged ?? { name: "LoggedError", message: described },
+    { scope: `log ${service}` }
+  );
   Object.assign(record, errorReportLogFields(report));
 }
 
