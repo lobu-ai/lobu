@@ -225,12 +225,20 @@ const DEPENDENCY_TOOL_CODES = new Set([
 ]);
 
 /**
- * Derive the kind from structure only: a code or an HTTP status, never prose.
- * A SQLSTATE goes through the tool-error catalog, and only its dependency
- * answers are kept (a statement timeout or a dropped connection). The catalog
- * calls every other SQLSTATE the query author's fault, which is right for
- * `query_sql` but not for a server's own statement, so those stay system.
+ * Whether a SQLSTATE says the database could not serve the statement: a
+ * statement timeout (57014) or a lost connection (class 08). The tool-error
+ * catalog is the one SQLSTATE map; its retryability answer also covers class
+ * 40 (serialization failure, deadlock), but that is a conflict between the
+ * server's own transactions, so it stays system. The catalog calls every other
+ * SQLSTATE the query author's fault, which is right for `query_sql` but not
+ * for a server's own statement, so those stay system too.
  */
+function isDatabaseDependencyFailure(code: string): boolean {
+  if (code.startsWith("40")) return false;
+  return DEPENDENCY_TOOL_CODES.has(classifyToolError({ pgCode: code }));
+}
+
+/** Derive the kind from structure only: a code or an HTTP status, never prose. */
 export function classifyErrorKind(
   code: string | null,
   httpStatus: number | null
@@ -240,7 +248,7 @@ export function classifyErrorKind(
     if (
       DEPENDENCY_TOOL_CODES.has(code) ||
       code.startsWith("PROVIDER_") ||
-      DEPENDENCY_TOOL_CODES.has(classifyToolError({ pgCode: code }))
+      isDatabaseDependencyFailure(code)
     )
       return "dependency";
   }

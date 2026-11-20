@@ -268,7 +268,10 @@ describe("classifyErrorKind", () => {
       ).kind;
     expect(recall("57014")).toBe("dependency");
     expect(recall("08006")).toBe("dependency");
-    // The server's own SQL being wrong is still a server fault.
+    // The server's own SQL being wrong is still a server fault, and so is a
+    // deadlock or serialization failure between its own transactions.
+    expect(recall("40P01")).toBe("system");
+    expect(recall("40001")).toBe("system");
     expect(recall("42601")).toBe("system");
     expect(recall("23514")).toBe("system");
   });
