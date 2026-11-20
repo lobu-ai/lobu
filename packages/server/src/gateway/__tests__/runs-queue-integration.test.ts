@@ -262,10 +262,23 @@ describe("RunsQueue — run spans", () => {
         if (calls === 2) throw new QueueRoutingRetryError("synthetic owner-routing retry");
         throw routingExhausted ? new QueueRoutingRetryError("synthetic routing exhaustion") : new Error("synthetic handler failure");
       });
+      // Synthetic opaque ids: the run's org and creating user ride every span.
+      const orgId = "00000000-0000-4000-8000-0000000000b5";
+      const userId = "00000000-0000-4000-8000-0000000000a5";
+      const sql = getDb();
+      await sql`INSERT INTO organization (id, name, slug, visibility) VALUES (${orgId}, 'Span Synthetic', 'span-synthetic', 'private')`;
+      await sql`
+        INSERT INTO "user" (id, name, email, "emailVerified", "createdAt", "updatedAt")
+        VALUES (${userId}, 'Span owner', 'span-owner@example.test', false, now(), now())
+      `;
       await queue.send(
         "test-run-spans",
-        { platformMetadata: { traceparent: `00-${traceId}-${"cd".repeat(8)}-01` } },
-        { retryLimit: 2, retryDelay: 0 },
+        { organizationId: orgId, platformMetadata: { traceparent: `00-${traceId}-${"cd".repeat(8)}-01` } },
+        {
+          retryLimit: 2,
+          retryDelay: 0,
+          initiator: { initiatorKind: "user", initiatorRef: {}, createdByUserId: userId },
+        },
       );
       const spansFor = () =>
         exporter
@@ -284,6 +297,9 @@ describe("RunsQueue — run spans", () => {
       expect(deferred.status.code).not.toBe(SpanStatusCode.ERROR);
       expect(routing.status.code).not.toBe(SpanStatusCode.ERROR);
       expect(failed.status.code).toBe(SpanStatusCode.ERROR);
+      for (const span of [deferred, routing, failed]) {
+        expect(span.attributes).toMatchObject({ "lobu.org_id": orgId, "user.id": userId });
+      }
       expect(failed.attributes).toMatchObject({
         "lobu.run_final_attempt": true,
         "exception.type": routingExhausted ? "QueueRoutingRetryError" : "Error",

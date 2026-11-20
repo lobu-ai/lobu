@@ -27,6 +27,7 @@ process.once('message', async options => {
       name: span.name, traceId: span.spanContext().traceId, spanId: span.spanContext().spanId,
       parentSpanId: span.parentSpanContext?.spanId,
       serviceName: span.resource.attributes['service.name'], status: span.status.code,
+      orgId: span.attributes['lobu.org_id'],
     }));
     // Report completion before exporter shutdown. The unavailable-collector
     // case measures application progress, not how long a telemetry drain takes.

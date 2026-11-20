@@ -616,6 +616,8 @@ export class RunsQueue implements IMessageQueue {
     attempts: number;
     maxAttempts: number;
     retryDelaySeconds: number | null;
+    organizationId: string | null;
+    createdByUserId: string | null;
   } | null> {
     const sql = getDb();
     const claimedBy = this.claimedBy;
@@ -625,6 +627,8 @@ export class RunsQueue implements IMessageQueue {
       attempts: number | string;
       max_attempts: number | string;
       retry_delay_seconds: number | string | null;
+      organization_id: string | null;
+      created_by_user_id: string | null;
     }>`
       WITH next_run AS (
         SELECT id FROM public.runs
@@ -643,7 +647,8 @@ export class RunsQueue implements IMessageQueue {
           claimed_by = ${claimedBy}
       FROM next_run nr
       WHERE r.id = nr.id
-      RETURNING r.id, r.action_input, r.attempts, r.max_attempts, r.retry_delay_seconds
+      RETURNING r.id, r.action_input, r.attempts, r.max_attempts, r.retry_delay_seconds,
+        r.organization_id, r.created_by_user_id
     `;
     const row = rows[0];
     if (!row) return null;
@@ -661,6 +666,8 @@ export class RunsQueue implements IMessageQueue {
         row.retry_delay_seconds === null
           ? null
           : Number(row.retry_delay_seconds),
+      organizationId: row.organization_id,
+      createdByUserId: row.created_by_user_id,
     };
   }
 
@@ -672,6 +679,8 @@ export class RunsQueue implements IMessageQueue {
       attempts: number;
       maxAttempts: number;
       retryDelaySeconds: number | null;
+      organizationId: string | null;
+      createdByUserId: string | null;
     },
   ): Promise<void> {
     const job: QueueJob<unknown> = {
@@ -704,6 +713,10 @@ export class RunsQueue implements IMessageQueue {
         "lobu.run_type": worker.runType,
         "lobu.queue": worker.queueName,
         "lobu.attempt": claimed.attempts,
+        // The run's owning org and creating user, as the request span carries
+        // them, so a failed job counts toward the issue's affected orgs/users.
+        ...(claimed.organizationId ? { "lobu.org_id": claimed.organizationId } : {}),
+        ...(claimed.createdByUserId ? { "user.id": claimed.createdByUserId } : {}),
       },
     );
     try {

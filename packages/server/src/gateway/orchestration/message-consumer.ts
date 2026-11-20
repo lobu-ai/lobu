@@ -237,6 +237,9 @@ export class MessageConsumer {
       "lobu.job_id": jobId,
       "lobu.user_id": data?.userId || "unknown",
       "lobu.conversation_id": data?.conversationId || "unknown",
+      // The owning org, as request spans carry it, so a failed message job
+      // counts toward the issue's affected orgs.
+      ...(data?.organizationId ? { "lobu.org_id": data.organizationId } : {}),
     });
 
     // Get traceparent to pass to worker (for further context propagation)

@@ -13,6 +13,7 @@ export interface TransportSpan {
   parentSpanId?: string;
   serviceName?: string;
   status: number;
+  orgId?: string;
 }
 
 export async function unusedLoopbackPort(): Promise<number> {
@@ -131,6 +132,7 @@ export async function startTestCollector(binary: string) {
             name: span.name, traceId: span.traceId, spanId: span.spanId,
             parentSpanId: span.parentSpanId || undefined, serviceName,
             status: Number(span.status?.code ?? 0),
+            orgId: span.attributes?.find((attribute: any) => attribute.key === 'lobu.org_id')?.value?.stringValue,
           })));
         });
       });
