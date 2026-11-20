@@ -102,4 +102,36 @@ describe('built web app assets', () => {
     expect(response.status).toBe(200);
     expect(response.headers.get('content-type')?.split(';')[0]).toBe('text/html');
   });
+
+  // On an org subdomain host the first segment is an entity type, so
+  // `/assets/<slug>` is the detail page of a type named `assets`.
+  describe('on an org subdomain host', () => {
+    const previousCookieDomain = process.env.AUTH_COOKIE_DOMAIN;
+    const host = 'acme.example.test';
+
+    beforeAll(() => {
+      process.env.AUTH_COOKIE_DOMAIN = '.example.test';
+    });
+
+    afterAll(() => {
+      if (previousCookieDomain === undefined) delete process.env.AUTH_COOKIE_DOMAIN;
+      else process.env.AUTH_COOKIE_DOMAIN = previousCookieDomain;
+    });
+
+    it('serves an entity page under an `assets` entity type', async () => {
+      const response = await app.request(`http://${host}/assets/laptop-1`, {
+        headers: { host, accept: 'text/html', cookie: 'better-auth.session_token=synthetic' },
+      }, getEnvFromProcess());
+      expect(response.status).toBe(200);
+      expect(response.headers.get('content-type')?.split(';')[0]).toBe('text/html');
+    });
+
+    it('still answers a removed chunk with 404', async () => {
+      const response = await app.request(`http://${host}/assets/index-gone.js`, {
+        headers: { host, accept: 'text/html', cookie: 'better-auth.session_token=synthetic' },
+      }, getEnvFromProcess());
+      expect(response.status).toBe(404);
+      expect(response.headers.get('cache-control')).toBe('no-store');
+    });
+  });
 });

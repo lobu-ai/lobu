@@ -282,10 +282,18 @@ function isStaticAssetPath(requestPath: string): boolean {
  * Vite's build output directory (`build.assetsDir`, default `assets`). Every
  * file in it is content-hashed, so a path here names one exact file: when it
  * is absent the answer is 404, never the SPA shell or the discovery JSON.
- * `assets` is a reserved workspace slug, so no client route lives here.
+ * On the canonical host `assets` is a reserved workspace slug, so no client
+ * route lives there. On an org subdomain host the first segment is an entity
+ * type, and `assets` is a valid one: there only a file-shaped path (hashed
+ * chunks always carry an extension) is a build asset.
  */
-function isBuiltAssetPath(requestPath: string): boolean {
-	return path.posix.normalize(requestPath || "/").startsWith("/assets/");
+function isBuiltAssetPath(
+	requestPath: string,
+	subdomainOrg: string | null | undefined,
+): boolean {
+	const normalizedPath = path.posix.normalize(requestPath || "/");
+	if (!normalizedPath.startsWith("/assets/")) return false;
+	return !subdomainOrg || path.posix.extname(normalizedPath) !== "";
 }
 
 function getContentTypeForStaticFile(filePath: string): string {
@@ -1874,7 +1882,7 @@ app.get("*", async (c) => {
 	const acceptsGenericResponse = !acceptHeader || acceptHeader.includes("*/*");
 	const hasSessionCookie = hasBetterAuthSessionCookie(c.req.header("cookie"));
 	const hasFileExtension = isStaticAssetPath(requestPath);
-	const isBuiltAsset = isBuiltAssetPath(requestPath);
+	const isBuiltAsset = isBuiltAssetPath(requestPath, c.get("subdomainOrg"));
 	const isSpaRoute =
 		!hasFileExtension && !isBuiltAsset && !isExcludedSpaPath(requestPath);
 	// Generic signed-in requests still need the SPA shell; otherwise they would fall through to the
