@@ -13,6 +13,7 @@ import { searchContentByText } from '../../../utils/content-search';
 import {
   CANDIDATE_IVFFLAT_PROBES,
   CANDIDATE_QUERY_TIMEOUT_MS,
+  SUBSTRING_QUERY_MAX_CHARS,
 } from '../../../utils/content-search/fts';
 import {
   runBoundedRecallQuery,
@@ -193,6 +194,47 @@ describe('recall query budget', () => {
     },
     CANDIDATE_QUERY_TIMEOUT_MS * 5
   );
+
+  it('matches a literal substring only for a query within the substring bound', async () => {
+    // Only the substring arm can match this passage: its words are all
+    // stopwords, so there is no fulltext query, and recall's query vector is
+    // compared against a row with no embedding.
+    const org = await createTestOrganization({ name: 'Recall Substring Org' });
+    const stopwords = ['the', 'of', 'a', 'to', 'at', 'on', 'in', 'for'];
+    const passage = Array.from({ length: 80 }, (_, i) => stopwords[i % stopwords.length]).join(' -- ');
+    await insertEvent({
+      entityIds: [],
+      organizationId: org.id,
+      originId: 'recall-substring-passage',
+      title: 'Recall substring passage',
+      content: `Header -- ${passage} -- footer`,
+      occurredAt: new Date('2026-01-01T00:00:00Z'),
+      semanticType: 'content',
+      originType: 'content',
+    });
+    const embedding = Array.from({ length: 768 }, (_, i) => (i === 0 ? 1 : 0));
+    const found = async (query: string, recall: boolean) =>
+      (
+        await searchContentByText(query, {
+          organization_id: org.id,
+          limit: 5,
+          sort_by: 'score',
+          include_total: false,
+          approximate_candidate_search: recall,
+          ...(recall ? { query_embedding: embedding } : {}),
+        })
+      ).content.map((row) => row.origin_id);
+
+    const phrase = passage.slice(0, SUBSTRING_QUERY_MAX_CHARS);
+    const prompt = passage.slice(0, SUBSTRING_QUERY_MAX_CHARS + 1);
+    expect(passage.length).toBeGreaterThan(prompt.length);
+    for (const recall of [false, true]) {
+      // A phrase within the bound is still found verbatim, exact search included.
+      expect(await found(phrase, recall)).toEqual(['recall-substring-passage']);
+      // One character past it, the substring arm does not run.
+      expect(await found(prompt, recall)).toEqual([]);
+    }
+  });
 
   it(
     'reports partial coverage when embedding-less recall exceeds the budget',

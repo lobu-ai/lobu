@@ -68,11 +68,23 @@ export const CANDIDATE_TEXT_MATCH_BUDGET = 100_000;
  *
  * The cut narrows every search with a longer query, exact search included: a
  * row whose only fulltext match is a dropped word no longer matches, so exact
- * totals shrink too (the substring and vector arms still match it). Without
+ * totals shrink too (the vector arm still matches it). Without
  * column statistics the first words are kept, and those can include words the
  * english parser drops, leaving fewer real words.
  */
 export const QUERY_WORD_LIMIT = 32;
+
+/**
+ * Longest query the substring arm (`payload_text ILIKE '%query%'`) runs for.
+ * A literal substring finds exact strings: ids, addresses, error codes, a
+ * quoted phrase. A longer query is a passage or a whole prompt, which no row
+ * contains verbatim, yet the trigram index must still read the posting list of
+ * every trigram in it: on production a 64-character query read for 0.8s, a
+ * 256-character one for 1.8s, a 2,000-character one for 3.1s. Longer queries
+ * search by the vector and full-text arms only, exact search included. The
+ * same 200 characters bound entity name search.
+ */
+export const SUBSTRING_QUERY_MAX_CHARS = 200;
 
 /** One query word with the `events.search_tsv` statistics for its lexemes. */
 export interface QueryWordFrequency {

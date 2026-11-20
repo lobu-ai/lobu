@@ -58,6 +58,33 @@ describe("memory recall", () => {
     );
     expect(h.invoke.mock.calls[0]?.[3].query).toBe(prompt);
   });
+  test("searches an Automation event turn by its instructions, not the embedded event", async () => {
+    const h = harness();
+    const event = {
+      kind: "email.received",
+      subject: "Quarterly vendor report",
+      body: `${"Lorem ipsum dolor sit amet, consectetur adipiscing elit. ".repeat(540)}PAYLOAD_TAIL`,
+    };
+    // The dispatch layout: instructions first, then the event payload.
+    const prompt = [
+      "Run this Automation for the normalized connector event below.",
+      "",
+      "Automation instructions:",
+      "Flag vendor reports that mention a renewal deadline INSTRUCTION_END",
+      "",
+      "Incoming event(s):",
+      JSON.stringify([event], null, 2),
+    ].join("\n");
+    expect(prompt.length).toBeGreaterThan(30_000);
+    await h.recall(prompt);
+    const query = String(h.invoke.mock.calls[0]![3].query);
+    expect(query.length).toBeLessThanOrEqual(2000);
+    expect(query).toContain("INSTRUCTION_END");
+    expect(query).not.toContain("PAYLOAD_TAIL");
+    // The cut ends on a whole word of the prompt.
+    expect(prompt.startsWith(query)).toBe(true);
+    expect([" ", "\n"]).toContain(prompt[query.length]);
+  });
   test("skips empty input", async () => {
     const h = harness();
     await h.recall(" \n ");

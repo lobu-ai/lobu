@@ -148,6 +148,26 @@ export async function validateEmbeddingsService(env: Env): Promise<void> {
 }
 
 /**
+ * Most UTF-8 bytes of one text sent to the embeddings service. The service
+ * rejects a text over 32 KiB with HTTP 400 (`MAX_TEXT_BYTES` in
+ * @lobu/embeddings), which fails the whole request: a long search query then
+ * loses its vector arm and recall falls back to text-only ranking. The model
+ * reads only its first 512 tokens, a few KB, so the cut changes no vector. A
+ * hair under 32 KiB, as the connector worker's `MAX_EMBEDDING_TEXT_BYTES`.
+ */
+const MAX_EMBEDDING_TEXT_BYTES = 32 * 1024 - 256;
+
+/** The longest head of `text` within `maxBytes` of UTF-8, on a character boundary. */
+function truncateToBytes(text: string, maxBytes: number): string {
+  const bytes = Buffer.from(text, 'utf8');
+  if (bytes.length <= maxBytes) return text;
+  let end = maxBytes;
+  // Back up past continuation bytes (0b10xxxxxx) to the start of a character.
+  while (end > 0 && (bytes[end] & 0xc0) === 0x80) end--;
+  return bytes.subarray(0, end).toString('utf8');
+}
+
+/**
  * Generate embeddings for multiple texts via the embeddings service.
  *
  * @param texts - Array of texts to embed
@@ -184,7 +204,10 @@ export async function generateEmbeddings(
     const response = await fetch(`${url}/api/embeddings`, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ texts, model: requestedModel }),
+      body: JSON.stringify({
+        texts: texts.map((text) => truncateToBytes(text, MAX_EMBEDDING_TEXT_BYTES)),
+        model: requestedModel,
+      }),
       signal: controller.signal,
     });
 
