@@ -657,7 +657,7 @@ export type QuerySdkResponses = {
       code?: string;
       retryable?: boolean;
       /**
-       * Structured result of the failed SDK call when an uncaught ClientSdkActionError ended the script (the same value a catch block reads as error.details), redacted and size-bounded. For a failed operations.execute it holds run_id, error_message and any output the action reported, such as output.dialog for a browser action blocked by a JS dialog.
+       * Structured result of the failed SDK call when an uncaught ClientSdkActionError ended the script (the same value a catch block reads as error.details), redacted and size-bounded. For a failed operations.execute it holds run_id, error_message, failure_fingerprint, next_action and any output the action reported, such as output.dialog for a browser action blocked by a JS dialog.
        */
       details?: unknown;
     };
@@ -943,7 +943,7 @@ export type RunSdkResponses = {
       code?: string;
       retryable?: boolean;
       /**
-       * Structured result of the failed SDK call when an uncaught ClientSdkActionError ended the script (the same value a catch block reads as error.details), redacted and size-bounded. For a failed operations.execute it holds run_id, error_message and any output the action reported, such as output.dialog for a browser action blocked by a JS dialog.
+       * Structured result of the failed SDK call when an uncaught ClientSdkActionError ended the script (the same value a catch block reads as error.details), redacted and size-bounded. For a failed operations.execute it holds run_id, error_message, failure_fingerprint, next_action and any output the action reported, such as output.dialog for a browser action blocked by a JS dialog.
        */
       details?: unknown;
     };
@@ -5677,6 +5677,8 @@ export type ManageOperationsResponses = {
         run_id: number;
         status: "failed";
         error_message: string;
+        failure_fingerprint: string;
+        next_action: string;
         output?: unknown;
       }
     | {

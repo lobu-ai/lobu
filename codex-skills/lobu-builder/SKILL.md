@@ -79,9 +79,9 @@ Before building UI, inspect available native entity/event pages, existing views 
 
 Read **Custom Views** in the connected runtime's full Lobu skill before authoring: the `skill://lobu` MCP resource or `<runtime-origin>/api/skill/lobu` ([Lobu Cloud](https://app.lobu.ai/api/skill/lobu)). It covers attachments, bounded reads, actions, bundling, and browser verification. Use the selected runtime's guide so the contract matches its deployment.
 
-## Product feedback
+## Reporting Lobu issues
 
-Offer once to draft a report when a Lobu failure blocks the task. Show the exact title, body and safe references and obtain consent; errors alone are not permission to share. Unattended Automations need explicit submission authorization. Exclude secrets, unrelated private content and full transcripts.
+When Lobu looks broken, inconsistent, missing a capability or wrongly documented, offer once to draft an issue report the way you would on GitHub: what you expected and what happened, what you checked and ruled out, alternatives, a suggested fix, and evidence such as run IDs and a failed run's `failure_fingerprint`. Show the exact title, body and data and obtain consent; errors alone are not permission to share. Unattended Automations need explicit submission authorization. Exclude secrets, other people's personal details, unrelated private content and full transcripts. On Lobu Cloud the inbox is `product.issue` in the `lobu-team` workspace; a failed `operations.execute` result's `next_action` names it when the deployment has one.
 
 From the sending workspace, use `query_sdk` → `client.notifications.listInboxes({ organization: "<recipient-workspace>" })`. Use its returned inbox key and data schema. After consent call `run_sdk` → `client.notifications.submit({ organization, inbox, title, body, data, idempotency_key })`. No sender connector, shared secret or receiving-workspace membership is needed. Never switch into the receiver to send. Reuse the same key and unchanged input on retry. If no published inbox exists, retain the draft for receiving-admin setup.
 

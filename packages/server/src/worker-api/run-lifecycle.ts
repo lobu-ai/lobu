@@ -78,6 +78,7 @@ import {
 import { insertEvent, recordLifecycleEvent } from "../utils/insert-event";
 import logger from "../utils/logger";
 import { logRunFailure } from "../runs/log-run-failure";
+import { recordOperationFailure } from "../runs/operation-failure";
 import { getLocalActionOutputFiles } from "../operations/connector-operations";
 import { reconcileConnectorRelationshipClaims } from "../utils/relationship-claims";
 import { stripNul, stripNulDeep } from "../utils/strip-nul";
@@ -2665,7 +2666,7 @@ export async function completeActionRun(c: Context<{ Bindings: Env }>) {
 				extraSet: tx`,
 					action_output = ${actionOutput ? tx.json(actionOutput) : null},
 					error_message = ${req.error_message ?? null}`,
-				returning: tx`id, status, connector_key, exit_reason, exit_code, exit_signal, organization_id, run_type, action_key, approval_status`,
+				returning: tx`id, status, connector_key, exit_reason, exit_code, exit_signal, organization_id, run_type, action_key, approval_status, parent_run_id`,
 			});
 			if (rows.length === 0) return rows;
 
@@ -2716,7 +2717,22 @@ export async function completeActionRun(c: Context<{ Bindings: Env }>) {
 			return c.json({ success: false, reason: "already_finalized" });
 		}
 
-		logRunFailure(updatedRuns[0] as Parameters<typeof logRunFailure>[0]);
+		const finalized = updatedRuns[0] as Parameters<typeof logRunFailure>[0] & {
+			organization_id: string;
+			action_key: string | null;
+			parent_run_id: number | null;
+		};
+		logRunFailure(finalized);
+		if (finalized.status === "failed" && finalized.connector_key && finalized.action_key) {
+			recordOperationFailure({
+				runId: finalized.id,
+				organizationId: finalized.organization_id,
+				connectorKey: finalized.connector_key,
+				operationKey: finalized.action_key,
+				errorMessage: req.error_message ?? "",
+				parentRunId: finalized.parent_run_id,
+			});
+		}
 
 		// The transaction committed; from here these artifacts are durable run output.
 		publishedActionArtifactIds = [];

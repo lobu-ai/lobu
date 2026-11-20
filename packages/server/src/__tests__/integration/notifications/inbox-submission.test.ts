@@ -14,15 +14,25 @@ import * as preparationTasks from '../../../automations/preparation-task';
 import * as reactionTasks from '../../../automations/reaction-task';
 import * as queue from '../../../runs/queue-service';
 import { initWorkspaceProvider } from '../../../workspace';
-import triageFeedback from '../../../../../../examples/lobu-team/feedback-triage.reaction';
+import triageIssueReport from '../../../../../../examples/lobu-team/issue-triage.reaction';
 import teamConfig from '../../../../../../examples/lobu-team/lobu.config';
 import type { ReactionClient, ReactionContext } from '@lobu/connector-sdk';
 
-const TEST_ENV = { ENVIRONMENT: 'test', JWT_SECRET: 'synthetic-feedback-window-signing-secret' } as Env;
+const ISSUE_DATA = {
+  kind: 'bug',
+  expected: 'The authorized source sync completes.',
+  actual: 'The sync fails right after authorization.',
+  evidence: { run_ids: [101] },
+  diagnosis: { cause: 'Unknown', checked: ['The connection is active'], ruled_out: ['Expired credentials'] },
+  alternatives_considered: ['Reconnecting the source'],
+  suggested_fix: 'Keep the authorization result when the first sync starts.',
+  references: ['https://example.com/reproduction'],
+};
+const TEST_ENV = { ENVIRONMENT: 'test', JWT_SECRET: 'synthetic-issue-window-signing-secret' } as Env;
 let reactionSource: string;
 beforeAll(async () => {
   await initWorkspaceProvider();
-  reactionSource = await readFile(new URL('../../../../../../examples/lobu-team/feedback-triage.reaction.ts', import.meta.url), 'utf8');
+  reactionSource = await readFile(new URL('../../../../../../examples/lobu-team/issue-triage.reaction.ts', import.meta.url), 'utf8');
 });
 beforeEach(cleanupTestDatabase);
 
@@ -40,15 +50,15 @@ async function fixture() {
     await receiverSdk.entitySchema.createType({ slug: key, name: key, metadata_schema: { type: 'object', properties: entity.properties } });
   }
   const agent = await createTestAgent({ organizationId: receiver.org.id, ownerUserId: receiver.user.id });
-  const triage = teamConfig.automations!.find((automation) => automation.slug === 'product-feedback-triage')!;
-  const created = await receiverSdk.automations.create({ slug: 'synthetic-feedback-triage', managed_agent_id: agent.agentId,
+  const triage = teamConfig.automations!.find((automation) => automation.slug === 'product-issue-triage')!;
+  const created = await receiverSdk.automations.create({ slug: 'synthetic-issue-triage', managed_agent_id: agent.agentId,
     prompt: triage.prompt, triggers: triage.triggers,
     sources: Object.entries(triage.sources!).map(([name, source]) => ({ name, ...(typeof source === 'string' ? { query: source } : source) })),
     reaction_script: reactionSource,
   });
   const automationId = Number(created.automation_id);
-  const message = { organization: receiver.org.slug, inbox: 'product.feedback', title: 'Source sync fails',
-    body: 'Expected a successful sync; received a failure after authorization.', data: { references: ['https://example.com/reproduction'] } };
+  const message = { organization: receiver.org.slug, inbox: 'product.issue', title: 'Source sync fails',
+    body: 'Expected a successful sync; received a failure after authorization.', data: ISSUE_DATA };
   return { sender, receiver, sdk, receiverSdk, automationId, sql, message };
 }
 
@@ -63,7 +73,7 @@ async function activate(f: Awaited<ReturnType<typeof fixture>>, eventId: number,
 async function prepareRun(f: Awaited<ReturnType<typeof fixture>>, runId: number) {
   const [task] = await f.sql`SELECT id FROM runs WHERE parent_run_id = ${runId} AND action_key = 'automation-preparation'`;
   expect(task).toBeDefined();
-  await f.sql`UPDATE runs SET status = 'claimed', claimed_by = 'synthetic-feedback-preparation', claimed_at = now() WHERE id = ${task.id}`;
+  await f.sql`UPDATE runs SET status = 'claimed', claimed_by = 'synthetic-issue-preparation', claimed_at = now() WHERE id = ${task.id}`;
   await preparationTasks.runAutomationPreparationTask({ organizationId: f.receiver.org.id,
     automationId: f.automationId, sourceRunId: runId }, TEST_ENV, Number(task.id));
   const [run] = await f.sql`SELECT id, status, approved_input, run_metadata FROM runs WHERE id = ${runId}`;
@@ -85,7 +95,7 @@ describe('published notification inbox end to end', () => {
       teamConfig.entities!.find((type) => type.key === '$member')!.eventKinds });
     const agent = await createTestAgent({ organizationId: f.sender.org.id, ownerUserId: f.sender.user.id });
     const created = await f.sdk.automations.create({ slug: 'synthetic-sending-subscriber', managed_agent_id: agent.agentId,
-      prompt: 'Submit a synthetic report.', triggers: [{ kind: 'event', source: 'workspace', event_types: ['product.feedback'],
+      prompt: 'Submit a synthetic report.', triggers: [{ kind: 'event', source: 'workspace', event_types: ['product.issue'],
         execution: 'window', active_run: 'queue' }] });
     const senderId = Number(created.automation_id);
     const toSender = { ...f.message, organization: f.sender.org.slug };
@@ -162,7 +172,7 @@ describe('published notification inbox end to end', () => {
 
   it.each(['knowledge', 'successor', 'notification', 'submission'] as const)('rejects forged causal provenance from %s input', async (entrypoint) => {
     const f = await fixture();
-    await f.receiverSdk.entitySchema.updateType({ slug: '$member', event_kinds: { 'product.feedback': {
+    await f.receiverSdk.entitySchema.updateType({ slug: '$member', event_kinds: { 'product.issue': {
       inbox: { accept_from: 'authenticated_workspaces', recipients: 'admins' }, metadataSchema: { type: 'object' },
     } } });
     const original = await f.sdk.notifications.submit({ ...f.message, idempotency_key: 'original-for-provenance-copy' });
@@ -222,7 +232,7 @@ describe('published notification inbox end to end', () => {
     const f = await fixture();
     const agent = await createTestAgent({ organizationId: f.receiver.org.id, ownerUserId: f.receiver.user.id });
     const created = await f.receiverSdk.automations.create({ slug: 'synthetic-upstream-reporter', managed_agent_id: agent.agentId,
-      prompt: 'Submit a synthetic report.', triggers: [{ kind: 'event', source: 'workspace', event_types: ['product.feedback'],
+      prompt: 'Submit a synthetic report.', triggers: [{ kind: 'event', source: 'workspace', event_types: ['product.issue'],
         execution: 'window', active_run: 'queue' }] });
     const upstreamId = Number(created.automation_id);
     const upstreamRun = await queue.createAutomationRun({ organizationId: f.receiver.org.id, automationId: upstreamId,
@@ -270,7 +280,7 @@ describe('published notification inbox end to end', () => {
     const message = { ...f.message, idempotency_key: 'authorized-automation-report',
       ...(scenario === 'nul-title' ? { title: 'Source\u0000 sync fails' } : {}),
       ...(scenario === 'nul-body' ? { body: 'Synthetic\u0000 operational report' } : {}),
-      ...(scenario === 'nul-data' ? { data: { references: ['https://example.com/\u0000reproduction'] } } : {}),
+      ...(scenario === 'nul-data' ? { data: { ...ISSUE_DATA, references: ['https://example.com/\u0000reproduction'] } } : {}),
     };
     const created = await f.sdk.automations.create({ slug: 'synthetic-authorized-reporter', managed_agent_id: agent.agentId,
       triggers: [{ kind: 'schedule', cron: '*/20 * * * *', execution: 'window', active_run: 'coalesce', skip_if_unchanged: false }],
@@ -285,7 +295,7 @@ describe('published notification inbox end to end', () => {
     const [completed] = await f.sql`SELECT status, action_output FROM runs WHERE id = ${run.runId}`;
     expect(completed.status).toBe('completed');
     const [report] = await f.sql`SELECT id, metadata, automation_id, run_id FROM events
-      WHERE organization_id = ${f.receiver.org.id} AND semantic_type = 'product.feedback'`;
+      WHERE organization_id = ${f.receiver.org.id} AND semantic_type = 'product.issue'`;
     expect(report.metadata.inbox_submission).toMatchObject({ organization_id: f.sender.org.id,
       automation_id: automationId, run_id: run.runId });
     expect(report.automation_id).toBeNull();
@@ -322,7 +332,7 @@ describe('published notification inbox end to end', () => {
     } as ReactionContext;
     const client = f.receiverSdk as unknown as ReactionClient;
     expect(await f.sql.begin((tx) => queue.claimPendingAutomationRun(tx, { runId: Number(run.id),
-      automationId: f.automationId, claimedBy: 'synthetic-feedback-analysis', status: 'running' }))).toBe(true);
+      automationId: f.automationId, claimedBy: 'synthetic-issue-analysis', status: 'running' }))).toBe(true);
     const read = await f.receiverSdk.knowledge.read({ automation_id: f.automationId, run_id: Number(run.id) }) as {
       window_token: string; sources: Record<string, unknown[]>;
     };
@@ -340,24 +350,60 @@ describe('published notification inbox end to end', () => {
     const payload = { organizationId: f.receiver.org.id, automationId: f.automationId, sourceRunId: Number(run.id) };
     expect(await reactionTasks.runAutomationReactionTask(payload, TEST_ENV, Number(reaction.id))).toEqual({ status: 'success' });
     expect(await reactionTasks.runAutomationReactionTask(payload, TEST_ENV, Number(reaction.id))).toEqual({ status: 'success' });
-    const first = await triageFeedback(context, client);
-    expect(await triageFeedback(context, client)).toEqual(first);
+    const first = await triageIssueReport(context, client);
+    expect(await triageIssueReport(context, client)).toEqual(first);
     const alerts = await f.receiverSdk.notifications.list({ limit: 50 });
     expect(alerts.notifications).toHaveLength(2);
     const tasks = await f.sql`SELECT e.id FROM entities e JOIN entity_types t ON t.id = e.entity_type_id WHERE e.organization_id = ${f.receiver.org.id} AND t.slug = 'task'`;
     expect(tasks).toHaveLength(1);
-    const evidence = await f.sql`SELECT ${issue.entity.id}::bigint = ANY(entity_ids) AS linked_issue, payload_data FROM events WHERE organization_id = ${f.receiver.org.id} AND metadata ? '_lobu_idempotency_key' AND metadata->>'_lobu_idempotency_key' LIKE 'feedback-triage:%'`;
+    const evidence = await f.sql`SELECT ${issue.entity.id}::bigint = ANY(entity_ids) AS linked_issue, payload_data FROM events WHERE organization_id = ${f.receiver.org.id} AND metadata ? '_lobu_idempotency_key' AND metadata->>'_lobu_idempotency_key' LIKE 'issue-triage:%'`;
     expect(evidence).toHaveLength(1);
     expect(evidence[0].payload_data).toMatchObject({ report_id: receipt.id, verification: 'user_reported' });
     expect(evidence[0].linked_issue).toBe(true);
     const [unchanged] = await f.sql`SELECT metadata FROM entities WHERE id = ${issue.entity.id}`;
     expect(unchanged.metadata).toMatchObject({ seen_24h: 17, status: 'ongoing' });
     const outside = { ...context, extracted_data: { reports: [{ report_id: receipt.id + 1000000, summary: 'Outside report', kind: 'bug' }] } } as ReactionContext;
-    await expect(triageFeedback(outside, client)).rejects.toThrow('in this inbox');
-    await expect(triageFeedback({ ...context, extracted_data: { reports: [] } }, client)).rejects.toThrow('every report');
+    await expect(triageIssueReport(outside, client)).rejects.toThrow('in this inbox');
+    await expect(triageIssueReport({ ...context, extracted_data: { reports: [] } }, client)).rejects.toThrow('every report');
     const wrongIssue = { ...context, extracted_data: { reports: [{ report_id: receipt.id, summary: 'Reported failure', kind: 'bug', issue_id: tasks[0].id }] } } as ReactionContext;
     // An already persisted decision is replayed instead of rematched.
-    expect(await triageFeedback(wrongIssue, client)).toEqual(first);
+    expect(await triageIssueReport(wrongIssue, client)).toEqual(first);
+  });
+
+  it('accepts only reports in the published issue shape', async () => {
+    const f = await fixture();
+    const { kind: _kind, ...withoutKind } = ISSUE_DATA;
+    for (const data of [withoutKind, { ...ISSUE_DATA, severity: 'high' }, { ...ISSUE_DATA, evidence: { failure_fingerprint: 'linkedin-connect' } }])
+      await expect(f.sdk.notifications.submit({ ...f.message, data, idempotency_key: `bad-shape-${JSON.stringify(data).length}` }))
+        .rejects.toThrow('does not match the published inbox schema');
+    const listed = await f.sdk.notifications.listInboxes({ organization: f.receiver.org.slug });
+    expect(listed.inboxes).toEqual([expect.objectContaining({ key: 'product.issue',
+      input_schema: expect.objectContaining({ required: ['kind', 'expected', 'actual'] }) })]);
+  });
+
+  it('links a report that cites a failure fingerprint to that telemetry issue', async () => {
+    const f = await fixture();
+    const fingerprint = '0123456789abcdef0123456789abcdef';
+    const issue = await f.receiverSdk.entities.create({ entity_type: 'issue', name: 'OperationFailed in linkedin.send_connection_request',
+      slug: `issue-${fingerprint}`, metadata: { fingerprint, status: 'new', kind: 'system', seen_24h: 2 } });
+    if (!issue.entity) throw new Error('Missing issue');
+    const receipt = Number((await f.sdk.notifications.submit({ ...f.message, idempotency_key: 'fingerprinted-report',
+      data: { ...ISSUE_DATA, evidence: { run_ids: [101, 108], failure_fingerprint: fingerprint } } })).receipt);
+    await activate(f, receipt);
+    const [queued] = await f.sql`SELECT id FROM runs WHERE automation_id = ${f.automationId} AND run_type = 'automation'`;
+    const run = await prepareRun(f, Number(queued.id));
+    const context = { sources: run.run_metadata.preparation_sources, window: { automation_id: f.automationId, run_id: Number(run.id),
+      window_start: run.approved_input.window_start, window_end: run.approved_input.window_end },
+    // The model found no issue; the cited fingerprint still names it.
+    extracted_data: { reports: [{ report_id: receipt, summary: 'Reported connect failure; not yet reproduced.', kind: 'bug' }] } } as ReactionContext;
+    expect(await triageIssueReport(context, f.receiverSdk as unknown as ReactionClient))
+      .toMatchObject({ reports: [{ report_id: receipt, task_id: expect.any(Number) }] });
+    const [evidence] = await f.sql`SELECT ${issue.entity.id}::bigint = ANY(entity_ids) AS linked_issue, payload_data FROM events
+      WHERE organization_id = ${f.receiver.org.id} AND metadata->>'_lobu_idempotency_key' LIKE 'issue-triage:%'`;
+    expect(evidence.linked_issue).toBe(true);
+    expect(evidence.payload_data).toMatchObject({ issue_id: issue.entity.id, verification: 'user_reported' });
+    const [unchanged] = await f.sql`SELECT metadata FROM entities WHERE id = ${issue.entity.id}`;
+    expect(unchanged.metadata).toMatchObject({ seen_24h: 2, status: 'new' });
   });
 
   it('keeps burst deliveries in separate bounded runs, including reports larger than the preparation budget', async () => {
@@ -365,7 +411,7 @@ describe('published notification inbox end to end', () => {
     const receiptIds: number[] = [];
     for (let index = 0; index < 3; index++) {
       const receipt = await f.sdk.notifications.submit({ ...f.message, title: `Synthetic burst report ${index}`,
-        data: { references: ['https://example.com/' + 'a'.repeat(8000)] }, idempotency_key: `burst-${index}` });
+        data: { ...ISSUE_DATA, references: ['https://example.com/' + 'a'.repeat(8000)] }, idempotency_key: `burst-${index}` });
       receiptIds.push(Number(receipt.receipt));
       await activate(f, Number(receipt.receipt));
     }
@@ -380,11 +426,11 @@ describe('published notification inbox end to end', () => {
         window_start: run.approved_input.window_start, window_end: run.approved_input.window_end },
       extracted_data: { reports: [{ report_id: receiptIds[index], summary: 'Synthetic user-reported failure; verification pending.', kind: 'bug' }] } } as ReactionContext;
       const client = f.receiverSdk as unknown as ReactionClient;
-      await expect(triageFeedback({ ...context, extracted_data: { reports: receiptIds.map((report_id) => ({ report_id,
+      await expect(triageIssueReport({ ...context, extracted_data: { reports: receiptIds.map((report_id) => ({ report_id,
         summary: 'Cannot batch queued deliveries', kind: 'bug' })) } }, client)).rejects.toThrow('exactly once');
-      await expect(triageFeedback({ ...context, extracted_data: { reports: [{ report_id: receiptIds[(index + 1) % receiptIds.length],
+      await expect(triageIssueReport({ ...context, extracted_data: { reports: [{ report_id: receiptIds[(index + 1) % receiptIds.length],
         summary: 'Another queued delivery', kind: 'bug' }] } }, client)).rejects.toThrow('in this inbox');
-      expect(await triageFeedback(context, client)).toMatchObject({ reports: [{ report_id: receiptIds[index], task_id: expect.any(Number) }] });
+      expect(await triageIssueReport(context, client)).toMatchObject({ reports: [{ report_id: receiptIds[index], task_id: expect.any(Number) }] });
     }
     const tasks = await f.sql`SELECT e.id FROM entities e JOIN entity_types t ON t.id = e.entity_type_id
       WHERE e.organization_id = ${f.receiver.org.id} AND t.slug = 'task'`;

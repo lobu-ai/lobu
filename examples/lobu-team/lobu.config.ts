@@ -16,8 +16,8 @@ import type ClickHouseAnalyticsConnector from "./clickhouse-analytics.connector.
 import type DataForSeoConnector from "./dataforseo.connector.ts";
 import type IssueTrackerReaction from "./issue-tracker.reaction.ts";
 import { productUsers } from "./product-users.ts";
-import type FeedbackTriageReaction from "./feedback-triage.reaction.ts";
-import { feedbackTriagePrompt } from "./feedback-triage.prompt.ts";
+import type IssueTriageReaction from "./issue-triage.reaction.ts";
+import { issueTriagePrompt } from "./issue-triage.prompt.ts";
 
 // One backlog type for every kind of team work, written by people and agents.
 // The organic acquisition review Automation reads the `seo` kind as its backlog
@@ -307,40 +307,85 @@ const issueTracker = defineAutomation({
   ),
 });
 
-const feedbackInbox = defineEntityType({
+const notes = (maxItems: number) => ({
+  type: "array",
+  maxItems,
+  items: { type: "string", minLength: 1, maxLength: 300 },
+});
+
+// Agents and people report Lobu issues here from their own workspaces, the way
+// they would open a GitHub issue. Deployments name this inbox in
+// LOBU_ISSUE_INBOX, which points agents at it from failed operation runs.
+const issueInbox = defineEntityType({
   key: "$member",
   eventKinds: {
     observation: { description: "Evidence and triage observations." },
-    "product.feedback": {
+    "product.issue": {
       description:
-        "Submit a reviewed Lobu product feedback report to Lobu Team.",
+        "Report a Lobu bug, inconsistency, missing capability or docs gap to Lobu Team, like a GitHub issue: what you expected and what happened, run IDs and the failure_fingerprint of a failed run as evidence, what you checked and ruled out, alternatives you considered and a suggested fix. Cite run IDs instead of pasting private content, and leave out other people's personal details.",
       inbox: { accept_from: "authenticated_workspaces", recipients: "admins" },
       metadataSchema: {
         type: "object",
         properties: {
+          kind: {
+            enum: ["bug", "inconsistency", "feature", "docs"],
+            description:
+              "bug: Lobu failed. inconsistency: Lobu contradicts its docs or another surface. feature: a capability you needed is missing. docs: guidance is missing or wrong.",
+          },
+          expected: { type: "string", minLength: 1, maxLength: 1000 },
+          actual: { type: "string", minLength: 1, maxLength: 1000 },
+          evidence: {
+            type: "object",
+            properties: {
+              run_ids: {
+                type: "array",
+                maxItems: 20,
+                items: { type: "integer", minimum: 1 },
+              },
+              failure_fingerprint: {
+                type: "string",
+                pattern: "^[0-9a-f]{32}$",
+                description: "failure_fingerprint from a failed operation run.",
+              },
+              error_code: { type: "string", pattern: "^[A-Za-z0-9_]{1,64}$" },
+            },
+            additionalProperties: false,
+          },
+          diagnosis: {
+            type: "object",
+            properties: {
+              cause: { type: "string", minLength: 1, maxLength: 1000 },
+              checked: notes(10),
+              ruled_out: notes(10),
+            },
+            additionalProperties: false,
+          },
+          alternatives_considered: notes(10),
+          suggested_fix: { type: "string", minLength: 1, maxLength: 1000 },
           references: {
             type: "array",
             maxItems: 5,
             items: { type: "string", format: "uri", pattern: "^https?://" },
           },
         },
+        required: ["kind", "expected", "actual"],
         additionalProperties: false,
       },
     },
   },
 });
 
-const feedbackTriage = defineAutomation({
+const issueTriage = defineAutomation({
   agent: productOps,
-  slug: "product-feedback-triage",
-  name: "Product feedback triage",
+  slug: "product-issue-triage",
+  name: "Product issue triage",
   description:
-    "Attach user reports to tasks and matching issues without changing telemetry lifecycle or counts.",
+    "Attach reported Lobu issues to tasks and their telemetry issues without changing telemetry lifecycle or counts.",
   triggers: [
     {
       kind: "event",
       source: "workspace",
-      event_types: ["product.feedback"],
+      event_types: ["product.issue"],
       execution: "window",
       active_run: "queue",
     },
@@ -348,12 +393,12 @@ const feedbackTriage = defineAutomation({
   // The preparation script reads the exact accepted event from its trigger.
   sources: {
     inbox: context(
-      "SELECT id FROM events WHERE semantic_type = 'product.feedback' LIMIT 0"
+      "SELECT id FROM events WHERE semantic_type = 'product.issue' LIMIT 0"
     ),
   },
-  prompt: feedbackTriagePrompt,
-  reaction: reactionFromFile<typeof FeedbackTriageReaction>(
-    "./feedback-triage.reaction.ts"
+  prompt: issueTriagePrompt,
+  reaction: reactionFromFile<typeof IssueTriageReaction>(
+    "./issue-triage.reaction.ts"
   ),
 });
 
@@ -457,10 +502,10 @@ export default defineConfig({
     companyCloudflareAccount,
     gmailOAuthApp,
   ],
-  entities: [task, issue, productUsers, feedbackInbox],
+  entities: [task, issue, productUsers, issueInbox],
   relationships: [trackedBy],
   connections: [analytics, productActivityDb, lobuTeamSlack, companyCloudflare],
   // The external digest is maintained by scripts/configure-product-activity.ts.
   // Apply without prune: preserve its existing delivery agent and manual Automation.
-  automations: [issueTracker, feedbackTriage],
+  automations: [issueTracker, issueTriage],
 });

@@ -87,7 +87,7 @@ import {
 } from './views/views';
 import { resolvePublicOrigin } from './utils/public-origin';
 import { ToolUserError } from './utils/errors';
-import { buildWorkspaceInstructions, DIRECT_MCP_INSTRUCTIONS } from './utils/workspace-instructions';
+import { buildWorkspaceInstructions, directMcpInstructions } from './utils/workspace-instructions';
 import { listLiveGrantedMemberWorkspaces } from './auth/oauth/workspace-grants';
 import logger from './utils/logger';
 import { getClientIP } from './utils/rate-limiter';
@@ -1061,7 +1061,7 @@ async function buildSessionInstructions(authCtx: AuthContext): Promise<string | 
       : 'direct-mcp';
   const base = authCtx.organizationId
     ? ((await buildWorkspaceInstructions(authCtx.organizationId, { audience })) ?? '')
-    : DIRECT_MCP_INSTRUCTIONS;
+    : directMcpInstructions();
   if (
     authCtx.tokenType !== 'oauth' ||
     !authCtx.userId ||

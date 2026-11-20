@@ -119,9 +119,11 @@ npx @lobu/cli@latest login
 
 An external agent not using this CLI can drive the same flow over HTTP: read `<origin>/auth.md` (linked from the `agent_auth` block in `<origin>/.well-known/oauth-authorization-server`) for the endpoints. Today only the email user_claimed flow exists (no zero-touch ID-JAG). Never fabricate a token.
 
-## Product feedback and notification inboxes
+## Reporting Lobu issues and notification inboxes
 
-When a Lobu error blocks the task or the user gives product feedback, offer once to prepare a concise report. Show the exact title, body and references and obtain permission before sharing. An Automation may submit unattended only with explicit authorization for that content and recipient. Exclude credentials, unrelated private content and full transcripts. An error alone is not consent.
+When Lobu itself looks broken, inconsistent, missing a capability or wrongly documented, or the user gives product feedback, offer once to file an issue report the way you would on GitHub: what you expected and what happened, what you checked and ruled out, alternatives you considered, a suggested fix, and evidence such as run IDs and a failed run's `failure_fingerprint`. Show the exact title, body and data and obtain permission before sharing. An Automation may submit unattended only with explicit authorization for that content and recipient. Exclude credentials, other people's personal details, unrelated private content and full transcripts. An error alone is not consent.
+
+On Lobu Cloud, issue reports go to the `product.issue` inbox of the `lobu-team` workspace. A deployment that has an issue inbox names it in the MCP instructions and in the `next_action` of a failed `operations.execute` result. Its schema requires `kind` (`bug`, `inconsistency`, `feature` or `docs`), `expected` and `actual`, and accepts `evidence` (`run_ids`, `failure_fingerprint`, `error_code`), `diagnosis` (`cause`, `checked`, `ruled_out`), `alternatives_considered`, `suggested_fix` and `references`. A report citing a `failure_fingerprint` is linked to the issue Lobu tracks for that failure when one exists.
 
 Discover the recipient organization's published inboxes from your current sending workspace with `client.notifications.listInboxes({ organization: "<recipient-workspace>" })` through `query_sdk`. Use the returned inbox key and data schema; never switch into the receiving workspace or invent an inbox. No sender connector, recipient membership or shared secret is needed. An absent inbox means its administrator must publish it; keep the report as a draft.
 
@@ -133,7 +135,7 @@ CLI users use the same SDK through `lobu call`, selecting the sending context an
 
 ```bash
 lobu call query_sdk --context <context> --org <sending-workspace> \
-  --arg title='Find feedback inbox' \
+  --arg title='Find issue inbox' \
   --arg script='export default async (_ctx, client) => client.notifications.listInboxes({ organization: "<recipient-workspace>" })'
 ```
 

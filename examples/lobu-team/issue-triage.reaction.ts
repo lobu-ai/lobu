@@ -18,7 +18,7 @@ export const input = {
         properties: {
           report_id: { type: "integer", minimum: 1 },
           summary: { type: "string", minLength: 1, maxLength: 2000 },
-          kind: { enum: ["bug", "feature", "ops"] },
+          kind: { enum: ["bug", "feature", "ops", "content"] },
           task_id: { type: "integer", minimum: 1 },
           issue_id: { type: "integer", minimum: 1 },
         },
@@ -34,7 +34,7 @@ export const input = {
 interface Decision {
   report_id: number;
   summary: string;
-  kind: "bug" | "feature" | "ops";
+  kind: "bug" | "feature" | "ops" | "content";
   task_id?: number;
   issue_id?: number;
 }
@@ -62,24 +62,24 @@ export async function prepare(
   if (
     ctx.trigger_signals?.length !== 1 ||
     signal?.source !== "workspace" ||
-    signal.event_type !== "product.feedback"
+    signal.event_type !== "product.issue"
   )
-    throw new Error("Expected one queued feedback delivery");
+    throw new Error("Expected one queued issue report delivery");
   const reports = (await client.query(`
     SELECT id, origin_id FROM events
-    WHERE id = ${id(signal.event_id)} AND semantic_type = 'product.feedback'
-      AND metadata->'inbox_submission'->>'inbox' = 'product.feedback'
+    WHERE id = ${id(signal.event_id)} AND semantic_type = 'product.issue'
+      AND metadata->'inbox_submission'->>'inbox' = 'product.issue'
     LIMIT 1
   `)) as ReportPointer[];
   if (reports.length !== 1)
-    throw new Error("Feedback delivery is not accessible in this inbox");
+    throw new Error("Issue report is not accessible in this inbox");
   return { reports };
 }
 
-/** The inbox belongs to this example. Shared runtime knows no feedback keys,
+/** The inbox belongs to this example. Shared runtime knows no report keys,
  * task/issue semantics, recipient identifiers, or reporting policy.
  */
-export default async function triageFeedback(
+export default async function triageIssueReport(
   ctx: ReactionContext,
   client: ReactionClient
 ): Promise<Record<string, unknown>> {
@@ -105,26 +105,28 @@ export default async function triageFeedback(
     const reportId = id(decision.report_id);
     const [report] = (await client.query(`
       SELECT e.id, e.title,
-        md5(e.origin_id) AS report_key
+        md5(e.origin_id) AS report_key,
+        e.payload_data->'evidence'->>'failure_fingerprint' AS failure_fingerprint
       FROM events e
-      WHERE e.id = ${reportId} AND e.semantic_type = 'product.feedback'
-        AND e.metadata->'inbox_submission'->>'inbox' = 'product.feedback'
+      WHERE e.id = ${reportId} AND e.semantic_type = 'product.issue'
+        AND e.metadata->'inbox_submission'->>'inbox' = 'product.issue'
         AND e.origin_id = ${literal(pointer.origin_id)}
       LIMIT 1
     `)) as Array<{
       id: number;
       title: string | null;
       report_key: string;
+      failure_fingerprint: string | null;
     }>;
     if (!report || !/^[0-9a-f]{32}$/.test(report.report_key))
-      throw new Error("Feedback report is not in this inbox delivery");
+      throw new Error("Issue report is not in this inbox delivery");
     if (
       !decision.summary?.trim() ||
       decision.summary.length > 2000 ||
-      !["bug", "feature", "ops"].includes(decision.kind)
+      !["bug", "feature", "ops", "content"].includes(decision.kind)
     )
-      throw new Error("Invalid feedback triage");
-    const key = `feedback-triage:${report.report_key}`;
+      throw new Error("Invalid issue triage");
+    const key = `issue-triage:${report.report_key}`;
     // The producer key persists the first decision. Replays keep its task
     // instead of rematching the same report or creating another task.
     const previous = (await client.query(`
@@ -135,7 +137,22 @@ export default async function triageFeedback(
     `)) as Array<{ payload_data: { task_id?: number } }>;
     let taskId = previous[0]?.payload_data?.task_id;
     if (!taskId) {
-      const targets = [decision.task_id, decision.issue_id].filter(
+      // A cited failure fingerprint names its telemetry issue exactly; it wins
+      // over a model match. The schema pins the 32-hex shape, rechecked here.
+      let issueId = decision.issue_id;
+      if (
+        report.failure_fingerprint &&
+        /^[0-9a-f]{32}$/.test(report.failure_fingerprint)
+      ) {
+        const [tracked] = (await client.query(`
+          SELECT e.id FROM entities e
+          WHERE e.slug = ${literal(`issue-${report.failure_fingerprint}`)}
+            AND e.entity_type = 'issue' AND e.deleted_at IS NULL
+          LIMIT 1
+        `)) as Array<{ id: number }>;
+        if (tracked) issueId = id(Number(tracked.id));
+      }
+      const targets = [decision.task_id, issueId].filter(
         (value): value is number => value !== undefined
       );
       if (targets.length) {
@@ -145,7 +162,7 @@ export default async function triageFeedback(
         `)) as Array<{ id: number; entity_type: string }>;
         for (const [target, expected] of [
           [decision.task_id, "task"],
-          [decision.issue_id, "issue"],
+          [issueId, "issue"],
         ] as const) {
           if (
             target !== undefined &&
@@ -154,13 +171,13 @@ export default async function triageFeedback(
             )
           )
             throw new Error(
-              "Feedback target is not an accessible task or issue"
+              "Issue report target is not an accessible task or issue"
             );
         }
       }
       taskId = decision.task_id;
       if (!taskId) {
-        const slug = `feedback-${report.report_key}`;
+        const slug = `issue-report-${report.report_key}`;
         const find = () =>
           client.query(`
           SELECT e.id FROM entities e
@@ -172,14 +189,14 @@ export default async function triageFeedback(
             const created = await client.entities.create({
               entity_type: "task",
               slug,
-              name: (report.title || "Product feedback").slice(0, 160),
+              name: (report.title || "Lobu issue report").slice(0, 160),
               metadata: {
                 kind: decision.kind,
                 status: "open",
                 summary: decision.summary,
                 confidence: "hypothesis",
                 next_action:
-                  "Review the user report and verify or reproduce it before changing issue lifecycle or counts.",
+                  "Verify or reproduce the reported issue before changing issue lifecycle or counts.",
               },
               automation_source: source,
             });
@@ -189,7 +206,7 @@ export default async function triageFeedback(
                 : id(Number(created.entity.id));
             if (!taskId)
               throw new Error(
-                "Feedback task creation requires approval or did not complete"
+                "Issue report task creation requires approval or did not complete"
               );
           } catch (error) {
             // Concurrent retries meet on the same source-derived slug. Only
@@ -201,28 +218,28 @@ export default async function triageFeedback(
       }
       taskId = id(Number(taskId));
       const saved = await client.knowledge.save({
-        title: "User-reported product feedback",
+        title: "Reported Lobu issue",
         content: decision.summary,
         semantic_type: "observation",
-        entity_ids: [taskId, ...(decision.issue_id ? [decision.issue_id] : [])],
+        entity_ids: [taskId, ...(issueId ? [issueId] : [])],
         parent_event_id: reportId,
         idempotency_key: key,
         payload_data: {
           report_id: reportId,
           task_id: taskId,
-          issue_id: decision.issue_id ?? null,
+          issue_id: issueId ?? null,
           verification: "user_reported",
         },
         automation_source: source,
       });
       if (!saved || !Number.isSafeInteger(saved.id) || saved.id <= 0)
-        throw new Error("Feedback evidence was not saved");
+        throw new Error("Issue report evidence was not saved");
     }
     await client.notifications.send({
-      title: "Product feedback received",
-      body: "A user report has been attached to a team task. Review its source evidence before changing issue lifecycle or affected-user counts.",
+      title: "Lobu issue reported",
+      body: "A reported issue has been attached to a team task. Review its source evidence before changing issue lifecycle or affected-user counts.",
       recipients: "admins",
-      idempotency_key: `feedback-alert:${report.report_key}`,
+      idempotency_key: `issue-report-alert:${report.report_key}`,
       automation_source: source,
     });
     results.push({ report_id: reportId, task_id: id(Number(taskId)) });

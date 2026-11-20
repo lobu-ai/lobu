@@ -1411,21 +1411,42 @@ describe("operations.execute backend lifecycle", () => {
 
 	it("finalizes an upstream MCP run as failed when transport setup throws", async () => {
 		failedTransportCallCount = 0;
-		const result = await manageOperations(
-			{
-				action: "execute",
-				connection_id: mcpConnectionId,
-				operation_key: "remote_echo",
-				input: { fail_transport: true },
-			},
-			{} as Env,
-			ctx,
-		);
+		const write = vi.spyOn(process.stdout, "write");
+		let result: Awaited<ReturnType<typeof manageOperations>>;
+		let logged: string;
+		try {
+			result = await manageOperations(
+				{
+					action: "execute",
+					connection_id: mcpConnectionId,
+					operation_key: "remote_echo",
+					input: { fail_transport: true },
+				},
+				{} as Env,
+				ctx,
+			);
+			logged = write.mock.calls.map(([line]) => String(line)).join("");
+		} finally {
+			write.mockRestore();
+		}
 		expect(result).toMatchObject({
 			action: "execute",
 			status: "failed",
 			error_message: "upstream transport failed",
+			failure_fingerprint: expect.stringMatching(/^[0-9a-f]{32}$/),
+			next_action: expect.stringContaining("Retrying the same input rarely helps"),
 		});
+		// The terminal write recorded the failure under the fingerprint the caller got.
+		const recorded = logged
+			.split("\n")
+			.filter((line) => line.includes('"operation_failure"'))
+			.map((line) => JSON.parse(line.slice(line.indexOf("{"))));
+		expect(recorded).toEqual([
+			expect.objectContaining({
+				run_id: (result as { run_id: number }).run_id,
+				error_fingerprint: (result as { failure_fingerprint: string }).failure_fingerprint,
+			}),
+		]);
 		const [run] = await getTestDb()`
 			SELECT status, error_message
 			FROM runs

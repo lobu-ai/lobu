@@ -8,6 +8,7 @@ import { deepRedactSecrets, isSecretKey, REDACTED_SENTINEL } from "@lobu/core";
 import { getDb } from "../db/client";
 import { ApprovalKind, approvalContext, highApprovalImpact, normalApprovalImpact } from "../utils/approval-context";
 import type { OperationDescriptor } from "./types";
+import { recordOperationFailure } from "../runs/operation-failure";
 import { runLeaseFence } from "../runs/run-lease";
 import { supersedeActionEvent } from "../tools/admin/approval-events";
 
@@ -81,14 +82,18 @@ export async function terminalizeInlineOperationRun(
 	claimedBy: string,
 	terminal: InlineOperationTerminal,
 ): Promise<boolean> {
-	return getDb().begin(async (tx) => {
+	const failed = await getDb().begin(async (tx) => {
 		const output = terminal.output ?? null;
 		const errorMessage =
 			terminal.status === "failed" ? terminal.errorMessage : null;
 		// `action_output` is written only when this terminal carries one. A
 		// failure without output must leave the column alone rather than null
 		// out a payload an earlier phase of the same run already persisted.
-		const rows = await tx<{ action_key: string | null }>`
+		const rows = await tx<{
+			action_key: string | null;
+			connector_key: string | null;
+			parent_run_id: number | null;
+		}>`
 			UPDATE runs
 			SET status = ${terminal.status},
 			    completed_at = NOW(),
@@ -97,9 +102,9 @@ export async function terminalizeInlineOperationRun(
 			WHERE id = ${runId}
 			  AND organization_id = ${organizationId}
 			  ${runLeaseFence(tx, claimedBy)}
-			RETURNING action_key
+			RETURNING action_key, connector_key, parent_run_id
 		`;
-		if (rows.length === 0) return false;
+		if (rows.length === 0) return null;
 		await supersedeActionEvent(
 			runId,
 			organizationId,
@@ -118,6 +123,18 @@ export async function terminalizeInlineOperationRun(
 			null,
 			tx,
 		);
-		return true;
+		return rows[0];
 	});
+	if (!failed) return false;
+	if (terminal.status === "failed" && failed.connector_key && failed.action_key) {
+		recordOperationFailure({
+			runId,
+			organizationId,
+			connectorKey: failed.connector_key,
+			operationKey: failed.action_key,
+			errorMessage: terminal.errorMessage,
+			parentRunId: failed.parent_run_id,
+		});
+	}
+	return true;
 }
