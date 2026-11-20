@@ -36,6 +36,28 @@ beforeAll(async () => {
 });
 beforeEach(cleanupTestDatabase);
 
+/**
+ * Apply the example's `$member` declaration the way `lobu apply` does: merge
+ * its owned kinds over the platform defaults. A whole-registry replace would
+ * delete `observation` and the other built-ins, which the reaction writes.
+ */
+async function mergeTeamMemberKinds(
+  sdk: ReturnType<typeof buildClientSDK>,
+  organizationId: string
+): Promise<void> {
+  const sql = getTestDb();
+  const [row] = await sql`SELECT event_kinds FROM entity_types
+    WHERE organization_id = ${organizationId} AND slug = '$member'`;
+  const declaration = teamConfig.entities!.find((type) => type.key === '$member')!;
+  await sdk.entitySchema.updateType({
+    slug: '$member',
+    event_kinds: {
+      ...((row?.event_kinds ?? {}) as Record<string, unknown>),
+      ...declaration.eventKinds,
+    },
+  });
+}
+
 async function fixture() {
   const sender = await seedOwnerContext({ orgName: 'Synthetic sending workspace' });
   const receiver = await seedOwnerContext({ orgName: 'Synthetic receiving workspace' });
@@ -43,8 +65,7 @@ async function fixture() {
   const sdk = buildClientSDK(sender.ctx, TEST_ENV);
   const receiverSdk = buildClientSDK(receiver.ctx, TEST_ENV);
   await ensureMemberEntityType(receiver.org.id);
-  const declaration = teamConfig.entities!.find((type) => type.key === '$member')!;
-  await receiverSdk.entitySchema.updateType({ slug: '$member', event_kinds: declaration.eventKinds });
+  await mergeTeamMemberKinds(receiverSdk, receiver.org.id);
   for (const key of ['task', 'issue']) {
     const entity = teamConfig.entities!.find((type) => type.key === key)!;
     await receiverSdk.entitySchema.createType({ slug: key, name: key, metadata_schema: { type: 'object', properties: entity.properties } });
@@ -91,8 +112,7 @@ describe('published notification inbox end to end', () => {
   it('preserves ancestry across A -> B -> A workspace inbox submissions', async () => {
     const f = await fixture();
     await ensureMemberEntityType(f.sender.org.id);
-    await f.sdk.entitySchema.updateType({ slug: '$member', event_kinds:
-      teamConfig.entities!.find((type) => type.key === '$member')!.eventKinds });
+    await mergeTeamMemberKinds(f.sdk, f.sender.org.id);
     const agent = await createTestAgent({ organizationId: f.sender.org.id, ownerUserId: f.sender.user.id });
     const created = await f.sdk.automations.create({ slug: 'synthetic-sending-subscriber', managed_agent_id: agent.agentId,
       prompt: 'Submit a synthetic report.', triggers: [{ kind: 'event', source: 'workspace', event_types: ['product.issue'],
@@ -137,8 +157,7 @@ describe('published notification inbox end to end', () => {
     await addUserToOrganization(admin.id, f.sender.org.id, 'admin');
     await addUserToOrganization(member.id, f.sender.org.id, 'member');
     await ensureMemberEntityType(f.sender.org.id);
-    await f.sdk.entitySchema.updateType({ slug: '$member', event_kinds:
-      teamConfig.entities!.find((type) => type.key === '$member')!.eventKinds });
+    await mergeTeamMemberKinds(f.sdk, f.sender.org.id);
     const root = await f.sdk.notifications.submit({ ...f.message, idempotency_key: 'cross-cap-root' });
     await activate(f, Number(root.receipt));
     const [run] = await f.sql`SELECT id, approved_input FROM runs WHERE automation_id = ${f.automationId} AND run_type = 'automation'`;
