@@ -129,6 +129,30 @@ describe('Postgres writes after the server closes a connection', () => {
       expect(batches).toBe(1);
     });
   });
+
+  it.each(drivers)('%s runs the next query after the server terminates a running one', async (_name, driver) => {
+    await getTestDb()`SELECT 1`;
+    const sql = driver(process.env.DATABASE_URL!, { max: 1, ...PROD_PG_VALUE_OPTIONS });
+    try {
+      const [{ pid }] = await sql<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
+      const running = sql`SELECT pg_sleep(30)`.then(() => null, (err: unknown) => err);
+      for (;;) {
+        const [{ active }] = await getTestDb()<{ active: boolean }[]>`
+          SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = ${pid} AND state = 'active') AS active
+        `;
+        if (active) break;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      // The server sends a FATAL error for the running query and then closes
+      // the socket, so no ReadyForQuery follows that error.
+      await getTestDb()`SELECT pg_terminate_backend(${pid})`;
+      expect(await running).toBeInstanceOf(Error);
+      // The pool reconnects; the new connection owes nothing to the old one.
+      await expect(sql`SELECT 1 AS n`).resolves.toEqual([{ n: 1 }]);
+    } finally {
+      await sql.end({ timeout: 0 });
+    }
+  });
 });
 
 describe('Postgres cold connection reservations', () => {

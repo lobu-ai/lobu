@@ -1,5 +1,5 @@
 diff --git a/cf/src/connection.js b/cf/src/connection.js
-index 8e79170aeb13efe8c3c77ccede0cd3a115b5e1b5..6e4e01dd6057841b071f2d2b4ac5eccf2775eb18 100644
+index 8e79170aeb13efe8c3c77ccede0cd3a115b5e1b5..51a95f9bf7f6be5ba78fe15870c16b0b210c7209 100644
 --- a/cf/src/connection.js
 +++ b/cf/src/connection.js
 @@ -159,6 +159,14 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
@@ -83,7 +83,22 @@ index 8e79170aeb13efe8c3c77ccede0cd3a115b5e1b5..6e4e01dd6057841b071f2d2b4ac5eccf
    function errored(err) {
      stream && (stream.destroy(err), stream = null)
      query && queryError(query, err)
-@@ -551,6 +586,9 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -453,6 +488,14 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+       return reconnect()
+ 
+     !hadError && (query || sent.length) && error(Errors.connection('CONNECTION_CLOSED', options, socket))
++    // The running query was failed above or by the socket error. A FATAL
++    // error (the server terminating the backend) arrives with no
++    // ReadyForQuery after it, so its reply state is still set here; left in
++    // place, the next connection's startup ReadyForQuery failed the first
++    // query on it with the old connection's error.
++    query = results = errorResponse = null
++    result = new Result()
++    rows = 0
+     closedTime = performance.now()
+     hadError && options.shared.retries++
+     delay = (typeof backoff === 'function' ? backoff(options.shared.retries) : backoff) * 1000
+@@ -551,6 +594,9 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
  
      query = results = errorResponse = null
      result = new Result()
@@ -93,7 +108,7 @@ index 8e79170aeb13efe8c3c77ccede0cd3a115b5e1b5..6e4e01dd6057841b071f2d2b4ac5eccf
      connectTimer.cancel()
  
      if (initial) {
-@@ -566,14 +604,23 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -566,14 +612,23 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
          return fetchArrayTypes()
        }
  
@@ -121,6 +136,32 @@ index 8e79170aeb13efe8c3c77ccede0cd3a115b5e1b5..6e4e01dd6057841b071f2d2b4ac5eccf
  
      if (query)
        return // Consider opening if able and sent.length < 50
+@@ -839,15 +894,20 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+   }
+ 
+   async function PortalSuspended() {
++    // The cursor callback may run while the connection closes, which fails
++    // this query and clears it; only a cursor still running continues.
++    const cursor = query
+     try {
+-      const x = await Promise.resolve(query.cursorFn(result))
++      const x = await Promise.resolve(cursor.cursorFn(result))
++      if (query !== cursor)
++        return
+       rows = 0
+       x === CLOSE
+-        ? write(Close(query.portal))
+-        : (result = new Result(), write(Execute('', query.cursorRows)))
++        ? write(Close(cursor.portal))
++        : (result = new Result(), write(Execute('', cursor.cursorRows)))
+     } catch (err) {
+-      write(Sync)
+-      query.reject(err)
++      query === cursor && write(Sync)
++      cursor.reject(err)
+     }
+   }
+ 
 diff --git a/cf/src/query.js b/cf/src/query.js
 index 0d44a15cd9e42beaf11d4be6ccde60223e09508a..ac3b82552ca6dd9fe60682ad91901416f7ace191 100644
 --- a/cf/src/query.js
@@ -188,7 +229,7 @@ index 0d44a15cd9e42beaf11d4be6ccde60223e09508a..ac3b82552ca6dd9fe60682ad91901416
 +  return error
  }
 diff --git a/cjs/src/connection.js b/cjs/src/connection.js
-index 07f6716702ac888215c86ad6e0071aaf55ae519c..35511fad544a28f4fc4d322c2644cb4dbc7fac59 100644
+index 07f6716702ac888215c86ad6e0071aaf55ae519c..d39e0f74a7c6de91f03c683f81124cb17ad52e67 100644
 --- a/cjs/src/connection.js
 +++ b/cjs/src/connection.js
 @@ -157,6 +157,14 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
@@ -272,7 +313,22 @@ index 07f6716702ac888215c86ad6e0071aaf55ae519c..35511fad544a28f4fc4d322c2644cb4d
    function errored(err) {
      stream && (stream.destroy(err), stream = null)
      query && queryError(query, err)
-@@ -549,6 +584,9 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -451,6 +486,14 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+       return reconnect()
+ 
+     !hadError && (query || sent.length) && error(Errors.connection('CONNECTION_CLOSED', options, socket))
++    // The running query was failed above or by the socket error. A FATAL
++    // error (the server terminating the backend) arrives with no
++    // ReadyForQuery after it, so its reply state is still set here; left in
++    // place, the next connection's startup ReadyForQuery failed the first
++    // query on it with the old connection's error.
++    query = results = errorResponse = null
++    result = new Result()
++    rows = 0
+     closedTime = performance.now()
+     hadError && options.shared.retries++
+     delay = (typeof backoff === 'function' ? backoff(options.shared.retries) : backoff) * 1000
+@@ -549,6 +592,9 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
  
      query = results = errorResponse = null
      result = new Result()
@@ -282,7 +338,7 @@ index 07f6716702ac888215c86ad6e0071aaf55ae519c..35511fad544a28f4fc4d322c2644cb4d
      connectTimer.cancel()
  
      if (initial) {
-@@ -564,14 +602,23 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -564,14 +610,23 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
          return fetchArrayTypes()
        }
  
@@ -310,6 +366,32 @@ index 07f6716702ac888215c86ad6e0071aaf55ae519c..35511fad544a28f4fc4d322c2644cb4d
  
      if (query)
        return // Consider opening if able and sent.length < 50
+@@ -837,15 +892,20 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+   }
+ 
+   async function PortalSuspended() {
++    // The cursor callback may run while the connection closes, which fails
++    // this query and clears it; only a cursor still running continues.
++    const cursor = query
+     try {
+-      const x = await Promise.resolve(query.cursorFn(result))
++      const x = await Promise.resolve(cursor.cursorFn(result))
++      if (query !== cursor)
++        return
+       rows = 0
+       x === CLOSE
+-        ? write(Close(query.portal))
+-        : (result = new Result(), write(Execute('', query.cursorRows)))
++        ? write(Close(cursor.portal))
++        : (result = new Result(), write(Execute('', cursor.cursorRows)))
+     } catch (err) {
+-      write(Sync)
+-      query.reject(err)
++      query === cursor && write(Sync)
++      cursor.reject(err)
+     }
+   }
+ 
 diff --git a/cjs/src/query.js b/cjs/src/query.js
 index 45327f2fabcdbf8f8ec5020675012c310c04fee6..73f140e2d8f149f6f8defc200ed3b6abd6d3e40b 100644
 --- a/cjs/src/query.js
@@ -377,7 +459,7 @@ index 45327f2fabcdbf8f8ec5020675012c310c04fee6..73f140e2d8f149f6f8defc200ed3b6ab
 +  return error
  }
 diff --git a/src/connection.js b/src/connection.js
-index 1b1cccde43b4570d5d071d6ffaab2669b3c2065a..6ee756c4f09b9e48e555be3f1563caf94cc551b4 100644
+index 1b1cccde43b4570d5d071d6ffaab2669b3c2065a..10eb58c11b1885d005d971479416dbcfaf2f671e 100644
 --- a/src/connection.js
 +++ b/src/connection.js
 @@ -157,6 +157,14 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
@@ -461,7 +543,22 @@ index 1b1cccde43b4570d5d071d6ffaab2669b3c2065a..6ee756c4f09b9e48e555be3f1563caf9
    function errored(err) {
      stream && (stream.destroy(err), stream = null)
      query && queryError(query, err)
-@@ -549,6 +584,9 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -451,6 +486,14 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+       return reconnect()
+ 
+     !hadError && (query || sent.length) && error(Errors.connection('CONNECTION_CLOSED', options, socket))
++    // The running query was failed above or by the socket error. A FATAL
++    // error (the server terminating the backend) arrives with no
++    // ReadyForQuery after it, so its reply state is still set here; left in
++    // place, the next connection's startup ReadyForQuery failed the first
++    // query on it with the old connection's error.
++    query = results = errorResponse = null
++    result = new Result()
++    rows = 0
+     closedTime = performance.now()
+     hadError && options.shared.retries++
+     delay = (typeof backoff === 'function' ? backoff(options.shared.retries) : backoff) * 1000
+@@ -549,6 +592,9 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
  
      query = results = errorResponse = null
      result = new Result()
@@ -471,7 +568,7 @@ index 1b1cccde43b4570d5d071d6ffaab2669b3c2065a..6ee756c4f09b9e48e555be3f1563caf9
      connectTimer.cancel()
  
      if (initial) {
-@@ -564,14 +602,23 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -564,14 +610,23 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
          return fetchArrayTypes()
        }
  
@@ -499,6 +596,32 @@ index 1b1cccde43b4570d5d071d6ffaab2669b3c2065a..6ee756c4f09b9e48e555be3f1563caf9
  
      if (query)
        return // Consider opening if able and sent.length < 50
+@@ -837,15 +892,20 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+   }
+ 
+   async function PortalSuspended() {
++    // The cursor callback may run while the connection closes, which fails
++    // this query and clears it; only a cursor still running continues.
++    const cursor = query
+     try {
+-      const x = await Promise.resolve(query.cursorFn(result))
++      const x = await Promise.resolve(cursor.cursorFn(result))
++      if (query !== cursor)
++        return
+       rows = 0
+       x === CLOSE
+-        ? write(Close(query.portal))
+-        : (result = new Result(), write(Execute('', query.cursorRows)))
++        ? write(Close(cursor.portal))
++        : (result = new Result(), write(Execute('', cursor.cursorRows)))
+     } catch (err) {
+-      write(Sync)
+-      query.reject(err)
++      query === cursor && write(Sync)
++      cursor.reject(err)
+     }
+   }
+ 
 diff --git a/src/query.js b/src/query.js
 index 0d44a15cd9e42beaf11d4be6ccde60223e09508a..ac3b82552ca6dd9fe60682ad91901416f7ace191 100644
 --- a/src/query.js
