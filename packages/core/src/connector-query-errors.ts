@@ -39,9 +39,11 @@ export type ToolErrorCode =
    */
   | "MANUAL_EDIT_NOT_ALLOWED"
   /**
-   * `manage_entity update` sent `expected`, and at least one field's live value
-   * no longer matches it, so nothing was written (HTTP 409). Re-read and retry
-   * with the current values.
+   * A state the call requires is not met, so nothing ran; fix it before
+   * retrying (HTTP 409). E.g. `manage_entity update` sent `expected` and a
+   * field's live value no longer matches it (re-read and retry with the
+   * current values), or a device operation's browser is not paired or its
+   * setup or permission is missing (complete the setup).
    */
   | "PRECONDITION_FAILED"
   // ── transient: the same call may succeed on retry ──
@@ -100,7 +102,7 @@ export const TOOL_ERRORS: Record<ToolErrorCode, ToolErrorSpec> = {
   PRECONDITION_FAILED: {
     retryable: false,
     message:
-      "A field changed since it was read, so nothing was written; re-read it and retry with the current values.",
+      "A required state is not met, so nothing ran; fix it before retrying.",
   },
   RATE_LIMITED: {
     retryable: true,
