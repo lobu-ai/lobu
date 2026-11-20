@@ -1,7 +1,7 @@
 import { build } from "bun";
 import { fileURLToPath } from "node:url";
 import { issueRepairPrompt } from "../issue-repair.prompt";
-import type { HealthScope } from "../workspace-health";
+import type { HealthScope } from "../issue-tracker.reaction";
 
 /** Operator supplies live scope at installation. Bundled bytes contain no
  * build paths, secrets, or implicit tenant defaults. */

@@ -5,18 +5,16 @@ import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { buildIssueRepair } from "../scripts/build-issue-repair";
 import trackIssues, {
+  type HealthResource,
+  healthProblem,
   type IssueRecord,
   type Occurrence,
+  planHealthChanges,
   planIssueChanges,
   RULES,
+  readHealthSnapshot,
   runIssueTracker,
 } from "../issue-tracker.reaction";
-import {
-  healthProblem,
-  planHealthChanges,
-  readHealthSnapshot,
-  type HealthResource,
-} from "../workspace-health";
 
 const NOW = new Date("2026-11-04T12:00:00.000Z");
 const ago = (hours: number) =>
