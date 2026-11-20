@@ -70,6 +70,7 @@ async function blockedReads(holderPid: number): Promise<number[] | null> {
 describe('read cancellation', () => {
   let app: Hono<{ Bindings: Env }>;
   let orgSlug: string;
+  let feedEventId: number;
   let token: string;
   let readOnlyToken: string;
   let release: (() => Promise<void>) | null = null;
@@ -110,7 +111,7 @@ describe('read cancellation', () => {
     await addUserToOrganization(user.id, org.id, 'owner');
     token = (await createTestPAT(user.id, org.id)).token;
     readOnlyToken = (await createTestPAT(user.id, org.id, { scope: 'mcp:read' })).token;
-    await createTestEvent({ organization_id: org.id, content: 'synthetic feed item' });
+    feedEventId = (await createTestEvent({ organization_id: org.id, content: 'synthetic feed item' })).id;
     app = new Hono<{ Bindings: Env }>();
     app.post('/api/:orgSlug/:toolName', mcpAuth, (c) => restToolProxy(c));
     app.get('/api/:orgSlug/knowledge/search', mcpAuth, restSearchKnowledge);
@@ -368,6 +369,47 @@ describe('read cancellation', () => {
       ]);
     } finally {
       await sql`ALTER TABLE events DROP CONSTRAINT synthetic_failed_write`;
+    }
+  });
+
+  it('groups a failed statement by the server functions that issued it', async () => {
+    // The supersede check reads the target through `sql.unsafe`, and Postgres
+    // raises the error from the driver's socket handler, so only the stack
+    // captured where the statement was issued can name the code path.
+    const exporter = new InMemorySpanExporter();
+    await shutdownTracing();
+    initTracing({ serviceName: 'read-cancellation-test', spanProcessors: [new SimpleSpanProcessor(exporter)] });
+    try {
+      const holderPid = await holdEventsLock();
+      const pending = app.fetch(new Request(`http://localhost/api/${orgSlug}/save_memory`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ semantic_type: 'note', content: 'synthetic successor', supersedes_event_id: feedEventId }),
+      }), env);
+      const blocked = await waitFor(() => blockedReads(holderPid), 5000);
+      expect(blocked).not.toBeNull();
+      // Terminating the backend fails the statement (57P01, or ECONNRESET when
+      // the socket closes first); a cancel would come back as the tool
+      // boundary's own timeout error instead.
+      for (const pid of blocked ?? []) await getTestDb()`SELECT pg_terminate_backend(${pid})`;
+      await release?.();
+      release = null;
+      expect((await pending).status).toBe(500);
+
+      const toolSpan = exporter.getFinishedSpans().find((span) => span.name === 'tool save_memory');
+      expect(toolSpan?.attributes['exception.stacktrace']).toContain('at requireReadableEvent (');
+      expect(toolSpan?.attributes['error.grouping']).toContain('|frames:requireReadableEvent>inheritResourceRequirements');
+      // The tool's log record is the same issue as its span.
+      expect(issues()).toEqual([
+        expect.objectContaining({
+          tool_name: 'save_memory',
+          error_fingerprint: toolSpan?.attributes['error.fingerprint'],
+        }),
+      ]);
+    } finally {
+      await release?.();
+      release = null;
+      await shutdownTracing();
     }
   });
 

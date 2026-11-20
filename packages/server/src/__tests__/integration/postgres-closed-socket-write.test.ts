@@ -1,5 +1,6 @@
 import { createRequire } from 'node:module';
 import net from 'node:net';
+import { describeError } from '@lobu/core';
 import postgres from 'postgres';
 import { describe, expect, it } from 'vitest';
 import { PROD_PG_VALUE_OPTIONS } from '../../db/client';
@@ -254,6 +255,37 @@ describe('Postgres replies stay matched to their queries', () => {
         sql`SELECT CASE WHEN n < 5 THEN n ELSE 1 / (n - n) END AS n FROM generate_series(1, 100) n`
       ).rejects.toMatchObject({ code: '22012' });
       expect([...(await sql`SELECT 42 AS id`)]).toEqual([{ id: 42 }]);
+    } finally {
+      await sql.end({ timeout: 0 });
+    }
+  });
+});
+
+describe('Postgres errors name the code that issued the query', () => {
+  it.each(drivers)('%s records each failing call of a shared query from its own caller', async (_name, driver) => {
+    await getTestDb()`SELECT 1`;
+    const sql = driver(process.env.DATABASE_URL!, { max: 1, ...PROD_PG_VALUE_OPTIONS });
+    const failingRead = (db: postgres.Sql | postgres.TransactionSql) => db`SELECT 1 / (n - n) FROM generate_series(1, 1) n`;
+    async function readsDirectly() {
+      return failingRead(sql);
+    }
+    // The transaction callback is anonymous; the named function awaiting the
+    // transaction is the call site the issue groups by.
+    async function readsInTransaction() {
+      return await sql.begin(async (tx) => failingRead(tx));
+    }
+    async function readsUnsafe() {
+      return sql.unsafe('SELECT 1 / (n - n) FROM generate_series(1, 1) n');
+    }
+    const grouping = async (call: () => Promise<unknown>) => {
+      const error = await call().then(() => null, (err: unknown) => err);
+      expect(error).toMatchObject({ code: '22012' });
+      return describeError(error, { scope: 'test' }).grouping;
+    };
+    try {
+      expect(await grouping(readsDirectly)).toContain('|frames:failingRead>readsDirectly');
+      expect(await grouping(readsInTransaction)).toContain('|frames:failingRead>readsInTransaction');
+      expect(await grouping(readsUnsafe)).toContain('|frames:readsUnsafe');
     } finally {
       await sql.end({ timeout: 0 });
     }

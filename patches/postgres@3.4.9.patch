@@ -122,10 +122,43 @@ index 8e79170aeb13efe8c3c77ccede0cd3a115b5e1b5..6e4e01dd6057841b071f2d2b4ac5eccf
      if (query)
        return // Consider opening if able and sent.length < 50
 diff --git a/cf/src/query.js b/cf/src/query.js
-index 0d44a15cd9e42beaf11d4be6ccde60223e09508a..8737c30288a85290e9deb38d678d017b7a29be6f 100644
+index 0d44a15cd9e42beaf11d4be6ccde60223e09508a..ac3b82552ca6dd9fe60682ad91901416f7ace191 100644
 --- a/cf/src/query.js
 +++ b/cf/src/query.js
-@@ -50,7 +50,9 @@ export class Query extends Promise {
+@@ -1,6 +1,10 @@
+-const originCache = new Map()
+-    , originStackCache = new Map()
+-    , originError = Symbol('OriginError')
++const originError = Symbol('OriginError')
++
++// Frames kept from where a query is issued, the driver's own three included
++// (boundedError, the Query constructor, and sql or unsafe). It is captured
++// per query: one cached per template literal recorded only the first caller,
++// and an unsafe() query, which has no template to key on, recorded nothing.
++const originFrames = 16
+ 
+ export const CLOSE = {}
+ export class Query extends Promise {
+@@ -33,16 +37,11 @@ export class Query extends Promise {
+ 
+     this[originError] = this.handler.debug
+       ? new Error()
+-      : this.tagged && cachedError(this.strings)
++      : boundedError()
+   }
+ 
+   get origin() {
+-    return (this.handler.debug
+-      ? this[originError].stack
+-      : this.tagged && originStackCache.has(this.strings)
+-        ? originStackCache.get(this.strings)
+-        : originStackCache.set(this.strings, this[originError].stack).get(this.strings)
+-    ) || ''
++    return this[originError].stack || ''
+   }
+ 
+   static get [Symbol.species]() {
+@@ -50,7 +49,9 @@ export class Query extends Promise {
    }
  
    cancel() {
@@ -136,6 +169,24 @@ index 0d44a15cd9e42beaf11d4be6ccde60223e09508a..8737c30288a85290e9deb38d678d017b
    }
  
    simple() {
+@@ -161,13 +162,10 @@ export class Query extends Promise {
+   }
+ }
+ 
+-function cachedError(xs) {
+-  if (originCache.has(xs))
+-    return originCache.get(xs)
+-
++function boundedError() {
+   const x = Error.stackTraceLimit
+-  Error.stackTraceLimit = 4
+-  originCache.set(xs, new Error())
++  Error.stackTraceLimit = originFrames
++  const error = new Error()
+   Error.stackTraceLimit = x
+-  return originCache.get(xs)
++  return error
+ }
 diff --git a/cjs/src/connection.js b/cjs/src/connection.js
 index 07f6716702ac888215c86ad6e0071aaf55ae519c..35511fad544a28f4fc4d322c2644cb4dbc7fac59 100644
 --- a/cjs/src/connection.js
@@ -260,10 +311,43 @@ index 07f6716702ac888215c86ad6e0071aaf55ae519c..35511fad544a28f4fc4d322c2644cb4d
      if (query)
        return // Consider opening if able and sent.length < 50
 diff --git a/cjs/src/query.js b/cjs/src/query.js
-index 45327f2fabcdbf8f8ec5020675012c310c04fee6..d1dd2212c1ec93753bdc83f3bcb78c2e981740bc 100644
+index 45327f2fabcdbf8f8ec5020675012c310c04fee6..73f140e2d8f149f6f8defc200ed3b6abd6d3e40b 100644
 --- a/cjs/src/query.js
 +++ b/cjs/src/query.js
-@@ -50,7 +50,9 @@ const Query = module.exports.Query = class Query extends Promise {
+@@ -1,6 +1,10 @@
+-const originCache = new Map()
+-    , originStackCache = new Map()
+-    , originError = Symbol('OriginError')
++const originError = Symbol('OriginError')
++
++// Frames kept from where a query is issued, the driver's own three included
++// (boundedError, the Query constructor, and sql or unsafe). It is captured
++// per query: one cached per template literal recorded only the first caller,
++// and an unsafe() query, which has no template to key on, recorded nothing.
++const originFrames = 16
+ 
+ const CLOSE = module.exports.CLOSE = {}
+ const Query = module.exports.Query = class Query extends Promise {
+@@ -33,16 +37,11 @@ const Query = module.exports.Query = class Query extends Promise {
+ 
+     this[originError] = this.handler.debug
+       ? new Error()
+-      : this.tagged && cachedError(this.strings)
++      : boundedError()
+   }
+ 
+   get origin() {
+-    return (this.handler.debug
+-      ? this[originError].stack
+-      : this.tagged && originStackCache.has(this.strings)
+-        ? originStackCache.get(this.strings)
+-        : originStackCache.set(this.strings, this[originError].stack).get(this.strings)
+-    ) || ''
++    return this[originError].stack || ''
+   }
+ 
+   static get [Symbol.species]() {
+@@ -50,7 +49,9 @@ const Query = module.exports.Query = class Query extends Promise {
    }
  
    cancel() {
@@ -274,6 +358,24 @@ index 45327f2fabcdbf8f8ec5020675012c310c04fee6..d1dd2212c1ec93753bdc83f3bcb78c2e
    }
  
    simple() {
+@@ -161,13 +162,10 @@ const Query = module.exports.Query = class Query extends Promise {
+   }
+ }
+ 
+-function cachedError(xs) {
+-  if (originCache.has(xs))
+-    return originCache.get(xs)
+-
++function boundedError() {
+   const x = Error.stackTraceLimit
+-  Error.stackTraceLimit = 4
+-  originCache.set(xs, new Error())
++  Error.stackTraceLimit = originFrames
++  const error = new Error()
+   Error.stackTraceLimit = x
+-  return originCache.get(xs)
++  return error
+ }
 diff --git a/src/connection.js b/src/connection.js
 index 1b1cccde43b4570d5d071d6ffaab2669b3c2065a..6ee756c4f09b9e48e555be3f1563caf94cc551b4 100644
 --- a/src/connection.js
@@ -398,10 +500,43 @@ index 1b1cccde43b4570d5d071d6ffaab2669b3c2065a..6ee756c4f09b9e48e555be3f1563caf9
      if (query)
        return // Consider opening if able and sent.length < 50
 diff --git a/src/query.js b/src/query.js
-index 0d44a15cd9e42beaf11d4be6ccde60223e09508a..8737c30288a85290e9deb38d678d017b7a29be6f 100644
+index 0d44a15cd9e42beaf11d4be6ccde60223e09508a..ac3b82552ca6dd9fe60682ad91901416f7ace191 100644
 --- a/src/query.js
 +++ b/src/query.js
-@@ -50,7 +50,9 @@ export class Query extends Promise {
+@@ -1,6 +1,10 @@
+-const originCache = new Map()
+-    , originStackCache = new Map()
+-    , originError = Symbol('OriginError')
++const originError = Symbol('OriginError')
++
++// Frames kept from where a query is issued, the driver's own three included
++// (boundedError, the Query constructor, and sql or unsafe). It is captured
++// per query: one cached per template literal recorded only the first caller,
++// and an unsafe() query, which has no template to key on, recorded nothing.
++const originFrames = 16
+ 
+ export const CLOSE = {}
+ export class Query extends Promise {
+@@ -33,16 +37,11 @@ export class Query extends Promise {
+ 
+     this[originError] = this.handler.debug
+       ? new Error()
+-      : this.tagged && cachedError(this.strings)
++      : boundedError()
+   }
+ 
+   get origin() {
+-    return (this.handler.debug
+-      ? this[originError].stack
+-      : this.tagged && originStackCache.has(this.strings)
+-        ? originStackCache.get(this.strings)
+-        : originStackCache.set(this.strings, this[originError].stack).get(this.strings)
+-    ) || ''
++    return this[originError].stack || ''
+   }
+ 
+   static get [Symbol.species]() {
+@@ -50,7 +49,9 @@ export class Query extends Promise {
    }
  
    cancel() {
@@ -412,3 +547,21 @@ index 0d44a15cd9e42beaf11d4be6ccde60223e09508a..8737c30288a85290e9deb38d678d017b
    }
  
    simple() {
+@@ -161,13 +162,10 @@ export class Query extends Promise {
+   }
+ }
+ 
+-function cachedError(xs) {
+-  if (originCache.has(xs))
+-    return originCache.get(xs)
+-
++function boundedError() {
+   const x = Error.stackTraceLimit
+-  Error.stackTraceLimit = 4
+-  originCache.set(xs, new Error())
++  Error.stackTraceLimit = originFrames
++  const error = new Error()
+   Error.stackTraceLimit = x
+-  return originCache.get(xs)
++  return error
+ }
