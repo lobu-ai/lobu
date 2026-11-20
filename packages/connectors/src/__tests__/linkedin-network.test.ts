@@ -138,6 +138,9 @@ function linkedIn(
 <h2>Ada Example</h2>
 <button>Get in touch</button>
 <button>Ada Example's links</button>
+<button>Follow Ada</button>
+<a href="https://www.linkedin.com/company/acme-robotics/">Acme Robotics</a>
+<a href="https://www.linkedin.com/search/results/people/">Grace Hopper is a mutual connection</a>
 <a href="#" aria-label="Share Ada Example's profile"></a>`;
       return;
     }
@@ -563,6 +566,9 @@ test(
     // groups under one message.
     expect(result.error).toMatch(/LinkedIn profile header was not found; the page shows "[^"]*"$/);
     expect(result.error).not.toContain("Ada");
+    // Links in a header name the member's company, school and other people.
+    expect(result.error).not.toContain("Acme");
+    expect(result.error).not.toContain("Grace");
     expect(li.world.invitationsSent).toBe(0);
     expect(li.tabsClosed()).toBe(true);
   },

@@ -179,15 +179,25 @@ export function buildLinkedInNetworkExpression(
       const end = title.lastIndexOf(' | LinkedIn');
       return end > 0 ? title.slice(0, end).trim() : '';
     };
+    /** The member's full name and each part of it, longest first, as whole-word patterns. */
+    const namePatterns = () => {
+      const name = profileName();
+      if (!name) return [];
+      const parts = [name, ...name.split(/\s+/).filter(part => part.length > 1)];
+      return [...new Set(parts)].sort((a, b) => b.length - a.length)
+        .map(part => new RegExp('(^|[^\\p{L}])' + part.replace(/[.*+?^$(){}|[\]\\]/g, '\\$&') + '(?=$|[^\\p{L}])', 'gu'));
+    };
+    const namesMember = value => namePatterns().some(pattern => new RegExp(pattern.source, 'u').test(value));
     /**
      * Page text for an error message. Errors reach run logs, error grouping and
-     * agent-written issue reports, so the member's name is replaced, and the
-     * caller quotes the result so error grouping treats it as one value.
+     * agent-written issue reports, so the member's name and each part of it are
+     * replaced, and the caller quotes the result so error grouping treats it as
+     * one value. Other names the page text quotes are not recognised.
      */
     const quoted = value => {
-      const name = profileName();
-      const textValue = String(value).replace(/\s+/g, ' ').trim();
-      return '"' + (name ? textValue.split(name).join('the member') : textValue).replace(/"/g, "'").slice(0, 180) + '"';
+      let textValue = String(value).replace(/\s+/g, ' ').trim();
+      for (const pattern of namePatterns()) textValue = textValue.replace(pattern, '$1the member');
+      return '"' + textValue.replace(/"/g, "'").slice(0, 180) + '"';
     };
     /** The member's own header: the innermost section around the heading that names them. */
     const profileCard = () => {
@@ -205,15 +215,15 @@ export function buildLinkedInNetworkExpression(
     };
     /**
      * What the page offered instead, so a layout LinkedIn changed is diagnosable from the run alone.
-     * Errors get copied into run logs and issue reports, so this keeps visible button text only
-     * (LinkedIn's aria-labels name people) and never includes the member's name.
+     * Errors get copied into run logs and issue reports, so this lists the visible text of controls
+     * only: buttons and LinkedIn's invite and message links. Other links name the member's company,
+     * school and other people, aria-labels name people, and a label naming the member is dropped.
      */
-    const controlsSeen = () => {
-      const name = profileName();
-      return [...document.querySelectorAll('main button, main a')].filter(shown).map(text)
-        .filter(label => label && label.length <= 40 && !(name && label.includes(name)))
+    const controlsSeen = () =>
+      [...document.querySelectorAll('main button, main [role="button"], main a[href*="/preload/"], main a[href*="/messaging/"]')]
+        .filter(shown).map(text)
+        .filter(label => label && label.length <= 40 && !namesMember(label))
         .slice(0, 15).join(' · ') || 'no buttons';
-    };
     const openMenu = async more => {
       if (!more) return null;
       if (more.getAttribute('aria-expanded') !== 'true') more.click();
