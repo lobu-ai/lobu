@@ -4,6 +4,7 @@ import type { Env } from '../index';
 import { notifyWorkerWork } from '../runs/worker-wakeup';
 import { AUTOMATION_PREPARATION_TASK } from '../scheduled/task-definitions';
 import { ToolUserError } from '../utils/errors';
+import { QueueReportedError } from '../gateway/infrastructure/queue/types';
 import { executeAutomationScript } from './reaction-executor';
 import { reactionErrorIsNonTransient } from './reaction-task';
 import { markAutomationRunFailed } from './run-completion';
@@ -111,7 +112,8 @@ export async function runAutomationPreparationTask(
       await markAutomationRunFailed(sql, payload.sourceRunId, error ?? 'Automation preparation failed');
       return;
     }
-    throw new Error(error ?? 'Automation preparation failed');
+    // The executor already recorded this failure as its one error.
+    throw new QueueReportedError(error ?? 'Automation preparation failed');
   }
   const saved = await sql`
     UPDATE runs SET run_metadata = COALESCE(run_metadata, '{}'::jsonb) ||

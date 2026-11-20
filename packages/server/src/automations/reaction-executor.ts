@@ -203,14 +203,31 @@ export async function executeAutomationScript(options: ExecuteAutomationScriptOp
 
   // Group and classify on the sandbox's typed failure, so an upstream outage,
   // the script's own bug and a platform fault are separate issues instead of
-  // one "system" log line.
+  // one "system" log line. This is the failure's only error record: the task
+  // that retries it throws a QueueReportedError so the queue does not describe
+  // it again.
   const telemetry = scriptFailureTelemetry(result.error ?? { name: 'ScriptError', message: errorMessage });
-  const report = describeError(telemetry.error, {
-    scope: executionKind === 'reaction' ? 'automation reaction' : 'automation script',
+  const scope = executionKind === 'reaction' ? 'automation reaction' : 'automation script';
+  const classified = describeError(telemetry.error, {
+    scope,
     ...(telemetry.kind ? { kind: telemetry.kind } : {}),
   });
+  // A failure of the Automation's own code is its author's bug, so it is one
+  // issue per Automation, grouped on the typed failure alone: never a stack
+  // frame or a message, which can echo what the script passed (the full text
+  // stays in `error`). A platform or dependency failure stays one issue across
+  // Automations, so an outage escalates by the workspaces it reaches instead
+  // of splitting per Automation.
+  const report =
+    classified.kind === 'user'
+      ? describeError(
+          { name: classified.type, code: classified.code, message: 'Automation script failed' },
+          { scope: `${scope} ${context.window.automation_id}`, kind: 'user' }
+        )
+      : classified;
   logger.error(
     {
+      organization_id: context.organization_id,
       automation_id: context.window.automation_id,
       run_id: context.window.run_id,
       error: errorMessage,

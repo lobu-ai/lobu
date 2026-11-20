@@ -78,6 +78,13 @@ export class QueueRoutingRetryError extends Error {}
 export class QueueTerminalError extends Error {}
 
 /**
+ * A failure whose handler already wrote its one error record. The queue retries
+ * or fails the run as usual and marks the span failed, but does not describe it
+ * again: a second record would open a duplicate, generically grouped issue.
+ */
+export class QueueReportedError extends Error {}
+
+/**
  * A handler-thrown error carrying `deferral: true` asks the queue to
  * reschedule the job WITHOUT consuming an attempt: the job is waiting on an
  * external condition (e.g. the dispatch gate waiting out a prior turn on the
