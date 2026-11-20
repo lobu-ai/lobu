@@ -163,6 +163,9 @@ describe("operations.execute backend lifecycle", () => {
 						if (ctx.input.value === 'nul-error') {
 							throw new Error('local\\u0000boom');
 						}
+						if (ctx.input.value === 'page-unrecognized') {
+							return { success: false, error: 'LinkedIn profile header was not found', output: { code: 'page_unrecognized' } };
+						}
 						if (ctx.actionKey === 'download' || ctx.actionKey === 'download_source_copy') {
 							return { success: true, output: {
 								name: 'report.pdf',
@@ -1786,6 +1789,33 @@ describe("operations.execute backend lifecycle", () => {
 			WHERE id = ${(result as { run_id: number }).run_id}
 		`;
 		expect(run.error_message).toBe("localboom");
+	});
+
+	it("lets the agent finish a browser connector's action in Chrome only when it did not recognize the page", async () => {
+		const sql = getTestDb();
+		const execute = (value: string) =>
+			manageOperations(
+				{ action: "execute", connection_id: localConnectionId, operation_key: "echo", input: { value } },
+				{} as Env,
+				ctx,
+			);
+		await sql`UPDATE connector_definitions SET browser = NULL WHERE organization_id = ${orgId} AND key = ${LOCAL}`;
+		const plain = await execute("page-unrecognized");
+		await sql`UPDATE connector_definitions SET browser = ${sql.json({ origins: ["https://example.test"] })} WHERE organization_id = ${orgId} AND key = ${LOCAL}`;
+		const browser = await execute("page-unrecognized");
+		const other = await execute("nul-error");
+
+		expect(browser).toMatchObject({
+			status: "failed",
+			error_message: "LinkedIn profile header was not found",
+			failure_fingerprint: expect.stringMatching(/^[0-9a-f]{32}$/),
+			output: { code: "page_unrecognized" },
+			next_action: expect.stringContaining("this workspace's chrome connection"),
+		});
+		// The same refusal from a connector without a browser, and any other
+		// failure of a browser connector, keep the agent off raw browser steps.
+		expect(plain).toMatchObject({ status: "failed", next_action: expect.stringContaining("Do not substitute raw browser") });
+		expect(other).toMatchObject({ status: "failed", next_action: expect.stringContaining("Do not substitute raw browser") });
 	});
 
 	it("strips NUL from upstream MCP tool output", async () => {

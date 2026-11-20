@@ -93,22 +93,27 @@ async function failRunInline(
 	errorMsg: string,
 	deferTerminalWrite: boolean,
 	claimedBy: string,
+	output?: Record<string, unknown>,
 ): Promise<InlineExecutionResult> {
 	// Connector code, scraped pages and upstream MCP servers all reach here as
 	// raw text, so the message can carry NUL (0x00) that Postgres rejects (see
 	// streamContent). Strip it at the terminal write the local_action and
 	// mcp_tool backends share; executeHttpOperation sanitizes its own response.
 	const message = stripNul(errorMsg);
+	const reported =
+		output && Object.keys(output).length > 0
+			? (stripNulDeep(output) as Record<string, unknown>)
+			: undefined;
 	if (!deferTerminalWrite) {
 		const held = await terminalizeInlineOperationRun(
 			runId,
 			organizationId,
 			claimedBy,
-			{ status: "failed", errorMessage: message },
+			{ status: "failed", errorMessage: message, ...(reported ? { output: reported } : {}) },
 		);
 		if (!held) return { status: "failed", error_message: LOST_LEASE_MESSAGE };
 	}
-	return { status: "failed", error_message: message };
+	return { status: "failed", error_message: message, ...(reported ? { output: reported } : {}) };
 }
 
 // Update the run to completed status and return the output in one call.
@@ -294,6 +299,16 @@ async function executeLocalActionInline(
 
 		if (result.mode !== "action") {
 			throw new Error(`Expected action result, got mode=${result.mode}`);
+		}
+		if (result.error !== undefined) {
+			return failRunInline(
+				runId,
+				organizationId,
+				result.error,
+				deferTerminalWrite,
+				claimedBy,
+				result.output,
+			);
 		}
 		return completeRunInline(
 			runId,
@@ -773,7 +788,13 @@ function failedExecuteResult(
 					}).fingerprint,
 				}
 			: {}),
-		next_action: failedOperationNextAction(recorded),
+		next_action: failedOperationNextAction({
+			recorded,
+			pageUnrecognized:
+				operation.backend_config.backend === "local_action" &&
+				operation.backend_config.browser === true &&
+				(output as { code?: unknown } | null | undefined)?.code === "page_unrecognized",
+		}),
 		...reportedOutput(output),
 	};
 	return errorCode ? withFailureCode(failed, errorCode) : failed;

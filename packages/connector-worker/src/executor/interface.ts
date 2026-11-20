@@ -167,6 +167,11 @@ export type ExecutorResult =
   | {
       mode: 'action';
       output: Record<string, unknown>;
+      /**
+       * Set when the action returned `success: false`: its message. `output`
+       * then holds what it reported alongside, such as a refusal `code`.
+       */
+      error?: string;
     }
   | {
       mode: 'authenticate';

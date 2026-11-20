@@ -38,7 +38,7 @@ function linkedIn(
     company?: { following: boolean };
     sentTotal?: number;
     /** Accounts without an overflow menu see the relationship control in the header itself. */
-    header?: "menu" | "buttons" | "unrecognized";
+    header?: "menu" | "buttons" | "unrecognized" | "popup";
   } = {}
 ) {
   const world = {
@@ -142,6 +142,26 @@ function linkedIn(
 <a href="https://www.linkedin.com/company/acme-robotics/">Acme Robotics</a>
 <a href="https://www.linkedin.com/search/results/people/">Grace Hopper is a mutual connection</a>
 <a href="#" aria-label="Share Ada Example's profile"></a>`;
+      return;
+    }
+    if (options.header === "popup") {
+      // A recognizable header whose Connect option sits behind a menu button
+      // the connector does not know.
+      top.innerHTML = `
+<h2>Ada Example</h2>
+<span>· 2nd</span>
+<button aria-label="Follow Ada Example">Follow</button>
+<button aria-expanded="false" aria-haspopup="menu">Get in touch</button>`;
+      const opener = top.querySelector<HTMLElement>("[aria-haspopup]")!;
+      opener.onclick = () => {
+        world.foreignClicks.push("Get in touch");
+        doc.body.append(
+          html(
+            `<div role="menu"><a role="menuitem" href="${INVITE}"><div aria-label="Invite Ada Example to connect">Connect</div></a></div>`
+          )
+        );
+        opener.setAttribute("aria-expanded", "true");
+      };
       return;
     }
     if (options.header === "buttons") {
@@ -558,9 +578,9 @@ test(
   async () => {
     const li = linkedIn({}, { header: "unrecognized" });
     const result = await li.run("send_connection_request", { profile_url: PROFILE });
-    expect(result.success).toBe(false);
+    expect(result).toMatchObject({ success: false, output: { code: "page_unrecognized" } });
     expect(result.error).toContain(
-      'LinkedIn connect failed: LinkedIn profile header was not found; the page shows "Get in touch'
+      'LinkedIn profile header was not found; the page shows "Get in touch'
     );
     // One quoted value: error grouping replaces it, so every page layout
     // groups under one message.
@@ -570,6 +590,22 @@ test(
     expect(result.error).not.toContain("Acme");
     expect(result.error).not.toContain("Grace");
     expect(li.world.invitationsSent).toBe(0);
+    expect(li.tabsClosed()).toBe(true);
+  },
+  SLOW
+);
+
+test(
+  "says the page is unrecognized instead of not connectable when Connect may sit behind an unknown menu",
+  async () => {
+    const li = linkedIn({}, { header: "popup" });
+    const result = await li.run("send_connection_request", { profile_url: PROFILE });
+    expect(result).toMatchObject({ success: false, output: { code: "page_unrecognized" } });
+    expect(result.error).toContain('menu the connector does not know: "Get in touch"');
+    expect(result.error).not.toContain("only accept followers");
+    expect(result.error).not.toContain("Ada");
+    expect(li.world.invitationsSent).toBe(0);
+    expect(li.world.foreignClicks).toEqual([]);
     expect(li.tabsClosed()).toBe(true);
   },
   SLOW

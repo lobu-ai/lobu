@@ -296,8 +296,9 @@ const GUEST_RUNNER = String.raw`
         credentials: job.credentials,
         config: mergedConfig
       });
-      if (!actionResult || !actionResult.success) {
-        throw new Error((actionResult && actionResult.error) || ("Action '" + job.actionKey + "' failed"));
+      if (!actionResult) throw new Error("Action '" + job.actionKey + "' failed");
+      if (!actionResult.success) {
+        return { mode: 'action', output: actionResult.output || {}, error: actionResult.error || ("Action '" + job.actionKey + "' failed") };
       }
       return { mode: 'action', output: actionResult.output || {} };
     }

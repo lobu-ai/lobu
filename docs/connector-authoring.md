@@ -477,6 +477,23 @@ version: runs or feeds pinned to an older version fail closed after an upgrade a
 must use the active version before retrying. Exact-origin grants require Chrome
 extension 0.9.2 or newer; older extensions receive an update-required setup error.
 
+#### Refusals and unrecognized pages
+
+An action that stops on purpose returns `{ success: false, error, output: { code } }`
+instead of throwing. The run fails with `error` as its message, and `output`
+reaches the caller and the stored run, so agents branch on `code` rather than
+parsing the message. Name the business cases (`not_connectable`,
+`invitation_limit_reached`) after what the site said.
+
+When a browser action cannot find or tell apart the controls it needs before it
+has clicked anything, return `code: "page_unrecognized"` and describe what the
+page showed by its control labels. Never guess a business reason from a missing
+control. For a connector that declares `browser`, that code lets the caller's
+`next_action` offer to finish the same action once through the workspace's
+Chrome connection and report the page. Keep it for failures before any click:
+a failure after acting (a dialog that did not close, a state that did not
+change) may have changed the site, so throw.
+
 A local install cannot finish an `oauth` connect flow itself — the connector
 callback `<base>/connect/oauth/callback` is not a registered redirect for any
 localhost port. Use managed auth (`connect_managed` + `config.managedBy`); see
