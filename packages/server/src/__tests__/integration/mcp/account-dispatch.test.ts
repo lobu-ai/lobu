@@ -169,6 +169,9 @@ describe('account MCP dispatch', () => {
   it('searches grants even without an anchor and refuses untargeted writes/SQL', async () => {
     const result = await call('search_memory', { query: 'account dispatch probe' });
     expect(result.coverage?.scope).toBe('all_granted');
+    // A search with nothing to search for is the caller's mistake in every
+    // workspace, not a fan-out where each shard fails and the merge says 503.
+    await expect(call('search_memory', {})).rejects.toMatchObject({ httpStatus: 400 });
     await expect(call('save_memory', { content: 'No target' })).rejects.toThrow(/workspace|org_slug/i);
     await expect(call('query_sql', { sql: 'SELECT 1' })).rejects.toThrow(/workspace|org_slug/i);
   });

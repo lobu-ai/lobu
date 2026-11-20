@@ -27,7 +27,6 @@ import {
 } from '../auth/tool-access';
 import type { Env } from '../index';
 import { recordMcpConversationActivity } from '../lobu/stores/mcp-client-conversations';
-import { trackMCPToolCall } from '../diagnostics';
 import { parseApplyId } from '../utils/apply-context';
 import { assertDeploymentsNotPaused } from '../utils/deployment-pause';
 import { asReadTimeout } from '../utils/bounded-read';
@@ -356,8 +355,8 @@ export async function executeTool(
   return runInSpanContext(span, async () => {
     try {
       const result = await executeToolInSpan(toolName, args, env, authCtx, callerSignal, span, handlerRun);
-      // A read stopped because its caller left is not a failure (see
-      // trackMCPToolCall): nobody was waiting for the answer.
+      // A read stopped because its caller left is not a failure: nobody was
+      // waiting for the answer.
       if (handlerRun.signal?.aborted) return result;
       if (isSoftErrorResult(result)) {
         // Keep a structured failure's classification, including system errors.
@@ -514,14 +513,11 @@ async function executeToolInSpan(
           runId: toolContext.actingRunId ?? declaredSource?.runId ?? null,
         },
         () =>
-          trackMCPToolCall(toolName, () =>
-            isAccountContentRead(toolName, authCtx)
-              ? getAccountContent(args, env, authCtx)
-              : tool.scope === 'account'
-              ? tool.handler(args, env, toolContext)
-              : tool.handler(args, env, requireWorkspaceContext(toolContext)),
-            toolContext.abortSignal
-          )
+          isAccountContentRead(toolName, authCtx)
+            ? getAccountContent(args, env, authCtx)
+            : tool.scope === 'account'
+            ? tool.handler(args, env, toolContext)
+            : tool.handler(args, env, requireWorkspaceContext(toolContext))
       );
     // Auto-retry (lobu#2051 Item 2): only transient thrown ToolErrors, and only
     // for read/test tools on the allowlist. Mutations and run_sdk are never

@@ -31,25 +31,4 @@ describe('operational errors reach stdout', () => {
     expect(record.error.stack).toContain('error-log-coverage.test.ts');
     expect(reported).toBe(true);
   });
-
-  it('logs operational MCP failures and keeps expected caller errors quiet', async () => {
-    const { trackMCPToolCall } = await import('../diagnostics');
-    const { ToolUserError } = await import('../utils/errors');
-    const failure = new Error('synthetic MCP failure');
-    const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
-    let output = '';
-    try {
-      await expect(trackMCPToolCall('synthetic_tool', async () => { throw failure; })).rejects.toBe(failure);
-      await expect(trackMCPToolCall('synthetic_tool', async () => {
-        throw new ToolUserError('synthetic invalid input', 400);
-      })).rejects.toBeInstanceOf(ToolUserError);
-      output = write.mock.calls.map(([line]) => String(line)).join('');
-    } finally {
-      write.mockRestore();
-    }
-    const records = output.trim().split('\n').map((line) => JSON.parse(line));
-    expect(records).toHaveLength(1);
-    expect(records[0]).toMatchObject({ level: 'error', source: 'mcp_tool', tool_name: 'synthetic_tool' });
-    expect(records[0].error.stack).toContain('error-log-coverage.test.ts');
-  });
 });

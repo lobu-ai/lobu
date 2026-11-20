@@ -92,7 +92,7 @@ export async function runMetric(input: RunMetricInput): Promise<Record<string, u
     LIMIT 1
   `;
   if (found.length === 0) {
-    throw new Error(`entity type "${input.entityType}" not found`);
+    throw new ToolUserError(`entity type "${input.entityType}" not found`, 404, "NOT_FOUND");
   }
   const entityTypeId = Number(found[0].id);
   const metrics = (found[0].metrics_config ?? {}) as EntityMetrics;

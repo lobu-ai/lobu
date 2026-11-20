@@ -19,7 +19,7 @@ import { getScopedConnectorDefinition } from "./catalog/connector-definitions";
 import { listOrgInstalled } from "./catalog/installed";
 import { DbClosedError, getDb, parsePgTextArray } from "./db/client";
 import { EntityRowValidationError } from "./authz/entity-row-validation";
-import { captureServerError, routeFailure } from "./diagnostics";
+import { captureServerError, markErrorReported, routeFailure } from "./diagnostics";
 import { streamInvalidationEvents } from "./events/sse";
 import { fixedActionArgs } from "./http/rest-tool-routes";
 import { parseJsonBody } from "./gateway/routes/shared/helpers";
@@ -46,6 +46,7 @@ import {
 import { getContent } from "./tools/get_content";
 import { getAutomation } from "./tools/get_automation";
 import { toMcpPublicSdkScriptResult } from "./tools/sdk_run";
+import { isToolFailureLogged } from "./tools/tool-error-log";
 import {
 	getAllTools,
 	getTool,
@@ -396,6 +397,9 @@ export async function restToolProxy(
 		if (error instanceof ToolNotRegisteredError) {
 			logger.warn({ error, tool_name: error.toolName, source: "rest_proxy" }, "Requested tool is not registered");
 		}
+		// The tool boundary already logged this failure with its call id and
+		// issue fingerprint; the 5xx it becomes here is the same issue.
+		if (isToolFailureLogged(error)) markErrorReported(c);
 		return restErrorResponse(c, error);
 	}
 }

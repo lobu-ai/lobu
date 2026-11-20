@@ -43,6 +43,15 @@ function safeErrorCode(error: unknown): string | undefined {
 	return typeof code === "string" && SAFE_ERROR_CODE.test(code) ? code : undefined;
 }
 
+// Failures already recorded here, so a transport boundary that answers the
+// same error (the REST proxy's 5xx) does not report it a second time.
+const loggedFailures = new WeakSet<object>();
+
+/** Whether `logToolCallFailure` already recorded this failure. */
+export function isToolFailureLogged(error: unknown): boolean {
+	return typeof error === "object" && error !== null && loggedFailures.has(error);
+}
+
 /**
  * Log one line for a tool call that failed in a way the caller cannot fix.
  * A 4xx-class `ToolUserError` is the caller's answer, not a server failure
@@ -70,4 +79,5 @@ export function logToolCallFailure(args: {
 		},
 		"Tool call failed",
 	);
+	if (typeof error === "object" && error !== null) loggedFailures.add(error);
 }

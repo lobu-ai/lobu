@@ -15,6 +15,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { classifyToolError } from "./connector-query-errors";
 import { scrubDiagnosticValue } from "./utils/diagnostic-scrubber";
 
 /** Bump when grouping changes, so old and new fingerprints are never compared. */
@@ -223,14 +224,24 @@ const DEPENDENCY_TOOL_CODES = new Set([
   "UPSTREAM_UNAVAILABLE",
 ]);
 
-/** Derive the kind from structure only: a code or an HTTP status, never prose. */
+/**
+ * Derive the kind from structure only: a code or an HTTP status, never prose.
+ * A SQLSTATE goes through the tool-error catalog, and only its dependency
+ * answers are kept (a statement timeout or a dropped connection). The catalog
+ * calls every other SQLSTATE the query author's fault, which is right for
+ * `query_sql` but not for a server's own statement, so those stay system.
+ */
 export function classifyErrorKind(
   code: string | null,
   httpStatus: number | null
 ): ErrorKind {
   if (code) {
     if (USER_TOOL_CODES.has(code)) return "user";
-    if (DEPENDENCY_TOOL_CODES.has(code) || code.startsWith("PROVIDER_"))
+    if (
+      DEPENDENCY_TOOL_CODES.has(code) ||
+      code.startsWith("PROVIDER_") ||
+      DEPENDENCY_TOOL_CODES.has(classifyToolError({ pgCode: code }))
+    )
       return "dependency";
   }
   if (httpStatus != null) return httpStatus < 500 ? "user" : "system";

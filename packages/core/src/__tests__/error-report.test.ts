@@ -260,6 +260,19 @@ describe("classifyErrorKind", () => {
     expect(classifyErrorKind(null, null)).toBe("system");
   });
 
+  test("a database that cancelled or dropped the statement is a dependency", () => {
+    const recall = (code: string) =>
+      describeError(
+        { name: "PostgresError", message: "Local events recall failed", code },
+        { scope: "search_memory events recall" }
+      ).kind;
+    expect(recall("57014")).toBe("dependency");
+    expect(recall("08006")).toBe("dependency");
+    // The server's own SQL being wrong is still a server fault.
+    expect(recall("42601")).toBe("system");
+    expect(recall("23514")).toBe("system");
+  });
+
   test("a boundary that knows better overrides the derived kind", () => {
     expect(
       describeError({ name: "E", message: "m" }, { scope: "s", kind: "user" })

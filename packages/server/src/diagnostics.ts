@@ -1,4 +1,4 @@
-/** Structured HTTP and MCP diagnostics, collected from server stdout. */
+/** Structured HTTP diagnostics, collected from server stdout. */
 import type { Context } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
@@ -61,21 +61,4 @@ export function captureServerError(
   logger.error({ error, source, http_method: c.req.method,
     res_status: httpStatus, path: c.req.path }, 'HTTP handler failed');
   markErrorReported(c);
-}
-
-/**
- * Expected tool faults are returned to the caller; operational failures are
- * logged. A caller that left (`signal` aborted) is neither.
- */
-export async function trackMCPToolCall<T>(
-  toolName: string, handler: () => Promise<T>, signal?: AbortSignal
-): Promise<T> {
-  try {
-    return await handler();
-  } catch (error) {
-    if (!(error instanceof ToolUserError) && !signal?.aborted) {
-      logger.error({ error, tool_name: toolName, source: 'mcp_tool' }, 'MCP tool failed');
-    }
-    throw error;
-  }
 }
