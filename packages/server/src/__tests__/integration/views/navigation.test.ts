@@ -46,6 +46,7 @@ interface NavResult {
 	sections: Array<{
 		id: string;
 		label?: string;
+		placement?: string;
 		// biome-ignore lint/suspicious/noExplicitAny: assertions read nested fields
 		items: Array<Record<string, any>>;
 	}>;
@@ -226,6 +227,44 @@ describe("workspace navigation", () => {
 		expect(reports.href).toBeUndefined();
 		expect(docs).toMatchObject({ href: "https://docs.example/guide", external: true });
 		expect(won).toMatchObject({ href: "/nav-org/deal?stage=won" });
+	});
+
+	it("resolves a footer-placed section in document order for the sidebar to pin", async () => {
+		const config = {
+			schemaVersion: 1,
+			sections: [
+				{ id: "work", items: [{ id: "queue", target: { kind: "view", key: "queue" } }] },
+				{
+					id: "pins",
+					label: "Pinned",
+					placement: "footer",
+					items: [
+						{ id: "pipeline", target: { kind: "view", key: "pipeline" } },
+						{
+							id: "slack",
+							label: "Slack",
+							target: { kind: "link", href: "https://acme.slack.com/app_redirect?channel=general" },
+						},
+						{ id: "inbox", label: "Activity", target: { kind: "link", href: "events" } },
+					],
+				},
+			],
+		};
+		const saved = await write(0, config);
+		expect(saved.status, saved.json.error).toBe(200);
+		const { json } = await read(memberCookie);
+		expect(json.sections.map((section) => [section.id, section.placement])).toEqual([
+			["work", undefined],
+			["pins", "footer"],
+		]);
+		expect(json.sections[1]).toMatchObject({
+			label: "Pinned",
+			items: [
+				{ id: "pipeline", label: "Pipeline", href: "/nav-org/pipeline" },
+				{ id: "slack", label: "Slack", href: "https://acme.slack.com/app_redirect?channel=general", external: true },
+				{ id: "inbox", label: "Activity", href: "/nav-org/events" },
+			],
+		});
 	});
 
 	it("lets exactly one of two writers at the same revision win", async () => {

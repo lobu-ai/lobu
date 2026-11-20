@@ -7753,6 +7753,10 @@ export type ManageViewsData = {
              */
             id: string;
             label?: string;
+            /**
+             * 'sidebar' (default) renders in the scrolling workspace tree; 'footer' renders above Settings as a compact pin.
+             */
+            placement?: "sidebar" | "footer";
             items: Array<{
               /**
                * Stable id, unique across the whole document (sections and items). It names the menu entry, not its destination: two entries may open the same page.
@@ -8271,6 +8275,10 @@ export type ManageViewsResponses = {
              */
             id: string;
             label?: string;
+            /**
+             * 'sidebar' (default) renders in the scrolling workspace tree; 'footer' renders above Settings as a compact pin.
+             */
+            placement?: "sidebar" | "footer";
             items: Array<{
               /**
                * Stable id, unique across the whole document (sections and items). It names the menu entry, not its destination: two entries may open the same page.
@@ -8353,6 +8361,10 @@ export type ManageViewsResponses = {
         sections: Array<{
           id: string;
           label?: string;
+          /**
+           * 'sidebar' (default) renders in the scrolling workspace tree; 'footer' renders above Settings as a compact pin.
+           */
+          placement?: "sidebar" | "footer";
           items: Array<{
             id: string;
             label: string;
@@ -8377,6 +8389,10 @@ export type ManageViewsResponses = {
              */
             id: string;
             label?: string;
+            /**
+             * 'sidebar' (default) renders in the scrolling workspace tree; 'footer' renders above Settings as a compact pin.
+             */
+            placement?: "sidebar" | "footer";
             items: Array<{
               /**
                * Stable id, unique across the whole document (sections and items). It names the menu entry, not its destination: two entries may open the same page.

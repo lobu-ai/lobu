@@ -36,6 +36,20 @@ const NavigationIdSchema = Type.String({
     "Stable id, unique across the whole document (sections and items). It names the menu entry, not its destination: two entries may open the same page.",
 });
 const NavigationLabelSchema = Type.String({ minLength: 1, maxLength: 80 });
+/**
+ * Where a section renders: the scrolling workspace tree (the default) or the
+ * footer above the fixed workspace tools. A footer pin is still a normal menu
+ * entry — it opens a view, collection, record, event page or link like any
+ * other item — only its placement is different.
+ */
+export const NavigationPlacementSchema = Type.Union(
+  [Type.Literal("sidebar"), Type.Literal("footer")],
+  {
+    description:
+      "'sidebar' (default) renders in the scrolling workspace tree; 'footer' renders above Settings as a compact pin.",
+  }
+);
+export type NavigationPlacement = Static<typeof NavigationPlacementSchema>;
 const NavigationIconSchema = Type.String({
   pattern: "^[a-z0-9-]{1,40}$",
   description:
@@ -135,6 +149,7 @@ export const NavigationSectionSchema = Type.Object(
   {
     id: NavigationIdSchema,
     label: Type.Optional(NavigationLabelSchema),
+    placement: Type.Optional(NavigationPlacementSchema),
     items: Type.Array(NavigationItemSchema),
   },
   { additionalProperties: false }
@@ -142,6 +157,7 @@ export const NavigationSectionSchema = Type.Object(
 export interface NavigationSection {
   id: string;
   label?: string;
+  placement?: NavigationPlacement;
   items: NavigationItem[];
 }
 
@@ -155,7 +171,7 @@ export const NavigationConfigSchema = Type.Object(
   {
     additionalProperties: false,
     description:
-      "{ schemaVersion: 1, sections: [{ id, label?, items: [{ id, label?, icon?, target?, children? }] }] }. An item without a target is a labeled group; with both, the label opens the target and a separate control expands the children.",
+      "{ schemaVersion: 1, sections: [{ id, label?, placement?, items: [{ id, label?, icon?, target?, children? }] }] }. An item without a target is a labeled group; with both, the label opens the target and a separate control expands the children. A section's placement is 'sidebar' (default) or 'footer'.",
   }
 );
 export interface NavigationConfig {
@@ -176,6 +192,7 @@ export interface ResolvedNavigationItem {
 export interface ResolvedNavigationSection {
   id: string;
   label?: string;
+  placement?: NavigationPlacement;
   items: ResolvedNavigationItem[];
 }
 
@@ -194,6 +211,7 @@ const ResolvedItemSchema = Type.Object({
 export const ResolvedNavigationSectionSchema = Type.Object({
   id: Type.String(),
   label: Type.Optional(Type.String()),
+  placement: Type.Optional(NavigationPlacementSchema),
   items: Type.Array(ResolvedItemSchema),
 });
 
