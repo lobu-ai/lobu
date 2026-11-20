@@ -798,7 +798,7 @@ function tokenResponse(access: string, refresh: string): Response {
 		refresh_token: refresh,
 		expires_in: 3600,
 		refresh_token_expires_in: 7_776_000,
-		scope: "read_orders,read_products,read_inventory,read_customers",
+		scope: "read_orders,read_products,read_inventory",
 	});
 }
 
@@ -1070,7 +1070,7 @@ describe("app-installation e2e: tenant data install (Shopify app)", () => {
 			SHOPIFY_ENV.SHOPIFY_CLIENT_ID,
 		);
 		expect(location.searchParams.get("scope")).toBe(
-			"read_orders,read_products,read_inventory,read_customers",
+			"read_orders,read_products,read_inventory",
 		);
 		expect(location.searchParams.get("redirect_uri")).toBe(
 			"https://gateway.test/shopify/oauth_callback",

@@ -2,8 +2,9 @@
  * Shopify Connector (V1 runtime)
  *
  * Orders, products and inventory from a Shopify store via the GraphQL Admin
- * API. Orders, which carry buyer names and emails, are read live from Shopify
- * and never stored, so a shop's redaction requests have nothing to erase here;
+ * API. Orders are read live from Shopify and never stored, and the order query
+ * requests no buyer identity (name, email, phone, address), so the app stays at
+ * Level 1 protected customer data and redaction requests have nothing to erase;
  * products and inventory sync into memory. A workspace connects a store through the hosted Lobu Shopify app: the
  * gateway's generic install engine mounts `/shopify/install?shop=` +
  * `/shopify/oauth_callback` from the `app_installation` method below, exchanges
@@ -45,8 +46,6 @@ interface ShopifyOrder {
   cancelledAt: string | null;
   displayFinancialStatus: string | null;
   displayFulfillmentStatus: string;
-  email: string | null;
-  customer: { displayName: string | null; email: string | null } | null;
   subtotalPriceSet: Money;
   totalTaxSet: Money;
   totalPriceSet: Money;
@@ -88,8 +87,7 @@ const ORDERS_QUERY = `query Orders($first: Int!, $after: String, $query: String)
     pageInfo { hasNextPage endCursor }
     nodes {
       id legacyResourceId name createdAt processedAt updatedAt cancelledAt
-      displayFinancialStatus displayFulfillmentStatus email
-      customer { displayName email }
+      displayFinancialStatus displayFulfillmentStatus
       subtotalPriceSet { shopMoney { amount currencyCode } }
       totalTaxSet { shopMoney { amount currencyCode } }
       totalPriceSet { shopMoney { amount currencyCode } }
@@ -116,8 +114,6 @@ const ORDER_COLUMNS = [
   { name: 'cancelled_at', type: 'timestamp' },
   { name: 'financial_status', type: 'string' },
   { name: 'fulfillment_status', type: 'string' },
-  { name: 'customer_name', type: 'string' },
-  { name: 'customer_email', type: 'string' },
   { name: 'currency', type: 'string' },
   { name: 'subtotal', type: 'number' },
   { name: 'total_tax', type: 'number' },
@@ -152,7 +148,7 @@ export default class ShopifyConnector extends ConnectorRuntime {
   readonly definition: RuntimeConnectorDefinition = {
     key: 'shopify',
     name: 'Shopify',
-    version: '2.0.0',
+    version: '3.0.0',
     description: 'Reads orders live and syncs products and inventory from a Shopify store (GraphQL Admin API).',
     faviconDomain: 'shopify.com',
     authSchema: {
@@ -182,7 +178,7 @@ export default class ShopifyConnector extends ConnectorRuntime {
           clientIdKey: 'SHOPIFY_CLIENT_ID',
           clientSecretKey: 'SHOPIFY_CLIENT_SECRET',
           webhookSecretKey: 'SHOPIFY_CLIENT_SECRET',
-          permissions: ['read_orders', 'read_products', 'read_inventory', 'read_customers'],
+          permissions: ['read_orders', 'read_products', 'read_inventory'],
           required: true,
           description: 'Install the Lobu app on your Shopify store to read orders and sync products and inventory.',
         },
@@ -271,8 +267,8 @@ export default class ShopifyConnector extends ConnectorRuntime {
   }
 
   /**
-   * One page of orders straight from Shopify. Nothing is persisted: buyer data
-   * leaves Shopify only for the caller that asked.
+   * One page of orders straight from Shopify. Nothing is persisted, and no buyer
+   * identity is requested.
    */
   private async readOrders(ctx: FeedReadContext): Promise<FeedReadResult> {
     if (ctx.sort) throw new Error('Shopify orders are read newest update first; caller-defined sort is not supported.');
@@ -330,8 +326,6 @@ export default class ShopifyConnector extends ConnectorRuntime {
       cancelled_at: o.cancelledAt,
       financial_status: o.displayFinancialStatus,
       fulfillment_status: o.displayFulfillmentStatus,
-      customer_name: o.customer?.displayName ?? '',
-      customer_email: o.customer?.email ?? o.email ?? '',
       currency: o.totalPriceSet.shopMoney.currencyCode,
       subtotal: Number(o.subtotalPriceSet.shopMoney.amount),
       total_tax: Number(o.totalTaxSet.shopMoney.amount),
