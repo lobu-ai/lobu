@@ -14,7 +14,7 @@
  * every (prefix × core × suffix) combination must resolve, not throw.
  *
  * Harness: vitest + embedded Postgres, text-only (no EMBEDDINGS_SERVICE_URL), so
- * the fulltext TSQUERY_SQL branch is exercised on every query.
+ * the fulltext query branch is exercised on every query.
  */
 
 import { beforeAll, describe, expect, it } from 'vitest';

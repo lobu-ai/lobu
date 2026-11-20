@@ -36,11 +36,9 @@ const STOPWORDS = [
 const STOPWORDS_SET = new Set(STOPWORDS);
 
 /**
- * The clean words of a free-text query (`[a-z0-9]+`, stopwords removed) — the
- * JS mirror of NORMALIZED_QUERY_SQL/TSQUERY_SQL. Joined with ` | ` they form a
- * tsquery string callers bind to `to_tsquery('english', $N)`, so Postgres can
- * use the fulltext GIN index (the in-SQL CASE+regexp form is opaque to the
- * planner). The characters kept cannot form tsquery syntax.
+ * The clean words of a free-text query (`[a-z0-9]+`, stopwords removed).
+ * Joined with ` | ` they form a tsquery string callers bind to
+ * `to_tsquery('english', $N)`. The characters kept cannot form tsquery syntax.
  */
 export function tsqueryTokens(queryText: string): string[] {
   return queryText
@@ -60,6 +58,16 @@ export function tsqueryTokens(queryText: string): string[] {
  */
 export const CANDIDATE_TEXT_MATCH_BUDGET = 100_000;
 
+/**
+ * Most distinct words a query is matched and ranked by. `ts_rank_cd` scores a
+ * row by scanning the query's words against the row's positions, so its cost
+ * per row grows faster than the query's length: pre-turn recall searches with
+ * the whole prompt, and a 1,241-word event-turn prompt ranked about 54ms per
+ * row, past the recall timeout on a few hundred rows. Longer queries keep their
+ * rarest words, the ones that tell their matches apart.
+ */
+export const QUERY_WORD_LIMIT = 32;
+
 /** One query word with the `events.search_tsv` statistics for its lexemes. */
 export interface QueryWordFrequency {
   token: string;
@@ -74,25 +82,29 @@ export interface QueryWordFrequency {
 }
 
 /**
- * Choose the query words the fulltext candidate arm searches for, so the rows
- * it ranks stay within `budget`.
+ * Choose the rarest query words, at most `maxWords` of them, while the rows
+ * they match stay within `budget`: the fulltext candidate arm's words, and the
+ * words a long query is ranked by (`QUERY_WORD_LIMIT`).
  *
  * Each word's matches are estimated from the column statistics the planner
  * itself uses: a most-common lexeme by its recorded share, any other lexeme at
  * half the smallest recorded share (the planner's own default for an element
  * missing from the list). The rarest words are kept first, the way relevance
- * weighs words by how few documents hold them; the dropped common words still
- * score every candidate through the full query, and the vector and substring
- * arms still find rows that only they match. Without statistics nothing can be
- * estimated, so every word is kept.
+ * weighs words by how few documents hold them; words the candidate arm drops
+ * still score every candidate through the ranked words, and the vector and
+ * substring arms still find rows that only they match. Without statistics
+ * nothing can be estimated, so the first `maxWords` words are kept.
  */
 export function selectCandidateWords(
   tokens: string[],
   frequencies: QueryWordFrequency[],
-  budget: number = CANDIDATE_TEXT_MATCH_BUDGET
+  budget: number = CANDIDATE_TEXT_MATCH_BUDGET,
+  maxWords: number = Number.POSITIVE_INFINITY
 ): string[] {
   const stats = frequencies[0];
-  if (!stats || stats.floor_frequency == null || !(stats.total_rows > 0)) return tokens;
+  if (!stats || stats.floor_frequency == null || !(stats.total_rows > 0)) {
+    return tokens.slice(0, maxWords);
+  }
   const unlistedFrequency = stats.floor_frequency / 2;
   const seen = new Set<string>();
   const estimated: Array<{ token: string; rows: number; position: number }> = [];
@@ -112,22 +124,12 @@ export function selectCandidateWords(
   const kept = new Set<string>();
   let rows = 0;
   for (const word of estimated) {
-    if (rows + word.rows > budget) break;
+    if (kept.size >= maxWords || rows + word.rows > budget) break;
     rows += word.rows;
     kept.add(word.token);
   }
   return tokens.filter((token) => kept.has(token));
 }
-
-// NOTE: the final `regexp_replace(..., '\\s+', ' ', 'g')` collapses ALL
-// whitespace runs (incl. newlines/tabs) to a single space BEFORE trim. Postgres
-// `trim()` only strips spaces, so without this a query with a leading newline or
-// tab survives trim and the TSQUERY_SQL `\\s+ -> ' | '` step below turns it into
-// a leading ' | ' — which makes `to_tsquery` throw a syntax error (a multi-line
-// or content-derived read_knowledge query would 400). Collapsing first keeps the
-// OR-of-lexemes semantics while making the tsquery robust to arbitrary input.
-const NORMALIZED_QUERY_SQL = `trim(regexp_replace(regexp_replace(regexp_replace(lower($1), '\\m(${STOPWORDS.join('|')})\\M', ' ', 'g'), '[^a-z0-9\\s]+', ' ', 'g'), '\\s+', ' ', 'g'))`;
-export const TSQUERY_SQL = `CASE WHEN NULLIF(${NORMALIZED_QUERY_SQL}, '') IS NOT NULL THEN to_tsquery('english', regexp_replace(${NORMALIZED_QUERY_SQL}, '\\s+', ' | ', 'g')) ELSE NULL END`;
 
 export function buildSearchDocumentExpr(alias: string): string {
   // Reads the GENERATED STORED `search_tsv` column populated by the events
