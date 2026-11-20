@@ -1332,6 +1332,11 @@ export class IsolateExecutor implements SyncExecutor {
       if (!outcome.result || outcome.result.mode !== job.mode) {
         throw new Error(`result: expected mode '${job.mode}', got '${String(outcome.result?.mode)}'`);
       }
+      // A refusal's message is connector text, often an upstream body: redact it
+      // the way guestError redacts a thrown one.
+      if (outcome.result.mode === 'action' && typeof outcome.result.error === 'string') {
+        return { ...outcome.result, error: redactOutput(outcome.result.error) };
+      }
       return outcome.result;
     } finally {
       hooks?.signal?.removeEventListener('abort', onCancel);

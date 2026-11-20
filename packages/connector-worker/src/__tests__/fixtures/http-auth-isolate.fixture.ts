@@ -19,6 +19,18 @@ const code = (body: string) => `module.exports.default = class { sync() {} async
 const run = (body: string, hooks: ExecutionHooks, options: Partial<IsolateExecutorOptions> = {}, bound = true) =>
   new IsolateExecutor({ timeoutMs: 5_000, ...options }).execute(code(body), { ...job, httpAuth: bound }, hooks);
 
+test('a refusal keeps its output and has its message redacted like a thrown error', async () => {
+  const result = await run(
+    `return { success: false, error: 'Upstream 401: {"error":"bad","access_token":"sk-live-123"}', output: { code: 'page_unrecognized' } };`,
+    {}, {}, false,
+  );
+  assert.equal(result.mode, 'action');
+  assert.deepEqual(result.mode === 'action' && result.output, { code: 'page_unrecognized' });
+  const error = result.mode === 'action' ? result.error : undefined;
+  assert.ok(error?.startsWith('Upstream 401:'));
+  assert.ok(!error.includes('sk-live-123'), error);
+});
+
 for (const mode of ['sync', 'action'] as const) {
   test(`the ${mode} daemon path forwards the flag and current run hook`, async () => {
     const request: ConnectorHttpRequest = { url: 'https://service.example/read', method: 'GET', headers: {} };

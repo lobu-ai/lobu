@@ -273,9 +273,12 @@ export function buildLinkedInNetworkExpression(
         : controls.invite ? 'none' : 'unavailable';
       const following = controls.follow ? false : controls.unfollow ? true : null;
       // Menus in the header other than the More menu were never opened, so a
-      // Connect option behind one would go unseen.
-      const unknownMenus = [...top.card.querySelectorAll('[aria-haspopup], [aria-expanded]')]
-        .filter(el => shown(el) && el !== top.more).map(text).filter(Boolean);
+      // Connect option behind one would go unseen. Only popup openers count: a
+      // disclosure toggle (aria-expanded alone, such as "see more") hides no
+      // actions.
+      const unknownMenus = [...top.card.querySelectorAll('[aria-haspopup]:not([aria-haspopup="false"])')]
+        .filter(el => shown(el) && !(top.more && (el === top.more || el.contains(top.more) || top.more.contains(el))))
+        .map(text).filter(Boolean);
       return { top, controls, unknownMenus, state: { name: top.name, relation, degree: top.degree, following } };
     };
 

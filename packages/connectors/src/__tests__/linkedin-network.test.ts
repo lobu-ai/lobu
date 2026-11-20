@@ -175,7 +175,8 @@ function linkedIn(
 <h2>Ada Example</h2>
 <span>· ${page.relation === "connected" ? "1st" : "2nd"}</span>
 ${action}
-<button>Message</button>`;
+<button>Message</button>
+<button aria-expanded="false">…see more</button>`;
       on(top, "a", () => world.foreignClicks.push("Connect header link"));
       on(top, '[aria-label^="Pending"]', () =>
         confirmDialog("Withdraw", () => {
@@ -485,6 +486,14 @@ test(
     const refused = await closed.run("send_connection_request", { profile_url: PROFILE });
     expect(refused).toMatchObject({ success: false, output: { code: "not_connectable" } });
     expect(closed.tabsClosed()).toBe(true);
+
+    // A disclosure toggle in the header is not a menu that could hide Connect.
+    const toggled = linkedIn({ relation: "unavailable" }, { header: "buttons" });
+    expect(await toggled.run("send_connection_request", { profile_url: PROFILE })).toMatchObject({
+      success: false,
+      output: { code: "not_connectable" },
+    });
+    expect(toggled.world.foreignClicks).toEqual([]);
   },
   SLOW
 );
