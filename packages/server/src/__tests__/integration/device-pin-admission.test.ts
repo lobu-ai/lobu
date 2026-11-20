@@ -306,13 +306,68 @@ describe('manifest-backed device pin admission', () => {
       {} as Env,
       fixture.ctx,
     ) as Promise<{ success: boolean; error?: { name: string; code?: string } }>;
-    const result = await execute();
+    const write = vi.spyOn(process.stdout, 'write');
+    let logged: string;
+    let replay: Awaited<ReturnType<typeof manageOperations>>;
+    let result: Awaited<ReturnType<typeof execute>>;
+    try {
+      result = await execute();
 
-    expect(result.success).toBe(false);
-    expect(result.error).toMatchObject({ name: 'ClientSdkActionError', code });
-    expect(describeError(scriptFailureTelemetry(result.error!).error, { scope: 'tool run_sdk' }).kind).toBe(kind);
-    // A keyed replay returns the stored refusal with the same code.
-    expect((await execute()).error).toMatchObject({ name: 'ClientSdkActionError', code });
+      expect(result.success).toBe(false);
+      expect(result.error).toMatchObject({ name: 'ClientSdkActionError', code });
+      expect(describeError(scriptFailureTelemetry(result.error!).error, { scope: 'tool run_sdk' }).kind).toBe(kind);
+      // A keyed replay returns the stored refusal with the same code.
+      expect((await execute()).error).toMatchObject({ name: 'ClientSdkActionError', code });
+      replay = await manageOperations(
+        { action: 'execute', connection_id: fixture.connection.id, operation_key: 'echo', input: {}, idempotency_key: 'admission-refusal' },
+        {} as Env,
+        fixture.ctx,
+      );
+      logged = write.mock.calls.map(([line]) => String(line)).join('');
+    } finally {
+      write.mockRestore();
+    }
+
+    // The refusal is the run's issue occurrence, logged once under its typed
+    // code; replays hand back that fingerprint without logging it again.
+    const [run] = await sql`SELECT id FROM runs WHERE connection_id = ${fixture.connection.id} AND run_type = 'action'`;
+    const recorded = logged
+      .split('\n')
+      .filter((line) => line.includes('"operation_failure"'))
+      .map((line) => JSON.parse(line.slice(line.indexOf('{'))));
+    expect(recorded).toEqual([
+      expect.objectContaining({ run_id: Number(run.id), error_code: code, error_kind: kind }),
+    ]);
+    expect(replay).toMatchObject({ status: 'failed', failure_fingerprint: recorded[0].error_fingerprint });
+  });
+
+  it('records a background admission refusal under the fingerprint it returns', async () => {
+    const fixture = await seedFixture(manifest('0.9.0'));
+    const write = vi.spyOn(process.stdout, 'write');
+    let logged: string;
+    let result: Awaited<ReturnType<typeof manageOperations>>;
+    try {
+      result = await manageOperations(
+        { action: 'execute', connection_id: fixture.connection.id, operation_key: 'echo', input: {}, background: true },
+        {} as Env,
+        fixture.ctx,
+      );
+      logged = write.mock.calls.map(([line]) => String(line)).join('');
+    } finally {
+      write.mockRestore();
+    }
+    const recorded = logged
+      .split('\n')
+      .filter((line) => line.includes('"operation_failure"'))
+      .map((line) => JSON.parse(line.slice(line.indexOf('{'))));
+    expect(result).toMatchObject({ status: 'failed' });
+    expect(recorded).toEqual([
+      expect.objectContaining({
+        run_id: (result as { run_id: number }).run_id,
+        error_code: 'UPSTREAM_UNAVAILABLE',
+        error_fingerprint: (result as { failure_fingerprint: string }).failure_fingerprint,
+      }),
+    ]);
   });
 
   // A device that can tell why its action failed reports a typed code with

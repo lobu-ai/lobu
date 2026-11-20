@@ -45,7 +45,7 @@ import {
 	normalizePageActivationUrls,
 } from "../../../../runs/page-activation";
 import { createConnectorOperationRun } from "../../../../runs/queue-service";
-import { describeOperationFailure, operationFailureMessage } from "../../../../runs/operation-failure";
+import { describeOperationFailure, operationFailureMessage, recordOperationFailure } from "../../../../runs/operation-failure";
 import { failedOperationNextAction } from "../../../../operations/issue-inbox";
 import { getAuthProfileById } from "../../../../utils/auth-profiles";
 import { isCloudMode } from "../../../../utils/cloud-mode";
@@ -1319,6 +1319,24 @@ export async function dispatchAdmittedRun(p: {
 	// here until it flips to completed/failed/timeout, or we hit the
 	// device-action timeout. Returns action_output on success.
 	if (device) {
+		// Refused at admission: born terminal, so there is no worker to wait for
+		// and no terminal write to record it. Its creating transaction has
+		// committed, so this is where the refusal becomes its issue occurrence,
+		// under the fingerprint the result hands back. A keyed replay never gets
+		// here (it returns from the existing run), so it is recorded once.
+		if (claim.errorCode) {
+			recordOperationFailure({
+				runId,
+				organizationId: ctx.organizationId,
+				connectorKey: connection.connector_key,
+				operationKey: operation.operation_key,
+				errorMessage: operationFailureMessage(runId, claim.errorMessage),
+				errorCode: claim.errorCode,
+				parentRunId: ctx.actingRunId,
+			});
+			await trackOperationReaction(runId);
+			return replayExistingOperationRun(claim, connection.connector_key, operation, ctx);
+		}
 		if (background) {
 			await trackOperationReaction(runId);
 			return claim.status === "pending"
@@ -1329,11 +1347,6 @@ export async function dispatchAdmittedRun(p: {
 						message: `Operation run ${runId} is queued and waiting for ${connection.device_worker_id ? "the selected device" : "an eligible device"}. Read operations.getRun(${runId}) for its result.`,
 					}
 				: replayExistingOperationRun(claim, connection.connector_key, operation, ctx);
-		}
-		// Refused at admission: born terminal, so there is no worker to wait for.
-		if (claim.errorCode) {
-			await trackOperationReaction(runId);
-			return replayExistingOperationRun(claim, connection.connector_key, operation, ctx);
 		}
 		// A script deadline that lands mid-wait reports this run and its phase
 		// (run_sdk reads ctx.deviceWaits at the deadline).
