@@ -35,6 +35,7 @@ import { incrementCounter } from "../../metrics/prometheus.js";
 import { pruneTurnWriteReceipts } from "../../../tools/turn-write-idempotency.js";
 import {
   isDeferralError,
+  QueueReportedError,
   QueueRoutingRetryError,
   QueueTerminalError,
   type IMessageQueue,
@@ -721,6 +722,8 @@ export class RunsQueue implements IMessageQueue {
         );
         if (err instanceof QueueRoutingRetryError && !finalAttempt) {
           span?.setAttribute("lobu.run_routing_retry", true);
+        } else if (err instanceof QueueReportedError) {
+          span?.setStatus({ code: SpanStatusCode.ERROR });
         } else {
           recordError(span, err, { scope: `run ${worker.queueName}` });
         }

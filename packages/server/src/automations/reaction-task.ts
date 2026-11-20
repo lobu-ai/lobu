@@ -29,7 +29,8 @@ import type { Env, ReactionContext } from '@lobu/connector-sdk';
 import { getDb, pgBigintArray } from '../db/client';
 import { AUTOMATION_REACTION_TASK } from '../scheduled/task-definitions';
 import { reactionScriptResultFields, trackAutomationReaction } from '../utils/automation-reactions';
-import { getErrorMessage, type ToolErrorCode } from '@lobu/core';
+import { getErrorMessage } from '@lobu/core';
+import { QueueReportedError } from '../gateway/infrastructure/queue/types';
 import logger from '../utils/logger';
 import { executeReaction } from './reaction-executor';
 import type { AutomationReactionTaskPayload } from './reaction-enqueue';
@@ -59,17 +60,6 @@ export function reactionErrorIsNonTransient(error: string | undefined, retryable
       error
     )
   );
-}
-
-/**
- * A failure the scheduler should retry. It keeps the sandbox's typed code, so
- * the run's telemetry charges a script's own throw to its Automation and an
- * upstream outage to that dependency rather than to the platform.
- */
-class TransientReactionError extends Error {
-  constructor(message: string, readonly code: ToolErrorCode | undefined) {
-    super(message);
-  }
 }
 
 /** Outcome reported back to the scheduler log; failures are also tracked durably. */
@@ -237,18 +227,14 @@ export async function runAutomationReactionTask(
     return { status: 'success' };
   }
 
+  // The executor already recorded this failure as its one error.
   if (reactionErrorIsNonTransient(execResult.error, execResult.retryable)) {
-    logger.warn(
-      { automation_id: automationId, run_id: sourceRunId, error: execResult.error },
-      'Reaction script failed on a non-transient error; not retrying'
-    );
     return { status: 'failed', error: execResult.error };
   }
 
   // Transient: hand the retry decision to the scheduler, which owns the attempt
   // count and backoff. Throwing is the only way to signal that.
-  throw new TransientReactionError(
-    `Reaction script failed transiently for run ${sourceRunId}: ${getErrorMessage(execResult.error)}`,
-    execResult.code
+  throw new QueueReportedError(
+    `Reaction script failed transiently for run ${sourceRunId}: ${getErrorMessage(execResult.error)}`
   );
 }

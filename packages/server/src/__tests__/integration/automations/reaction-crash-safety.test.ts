@@ -10,19 +10,22 @@
  * window — plus the rehydration and retry classification the inline loop used to own.
  */
 
-import { describeError } from "@lobu/core";
+import { initTracing, shutdownTracing, SpanStatusCode } from "@lobu/core";
+import { InMemorySpanExporter, SimpleSpanProcessor } from "@opentelemetry/sdk-trace-node";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
 	automationReactionIdempotencyKey,
 	type AutomationReactionTaskPayload,
 } from "../../../automations/reaction-enqueue";
 import { runAutomationReactionTask } from "../../../automations/reaction-task";
+import { RunsQueue } from "../../../gateway/infrastructure/queue/runs-queue";
 import type { Env } from "../../../index";
 import { createAutomationRun } from "../../../runs/queue-service";
 import {
 	AUTOMATION_REACTION_TASK,
 	AUTOMATION_REACTION_TASK_QUEUE,
 } from "../../../scheduled/task-definitions";
+import { TaskScheduler } from "../../../scheduled/task-scheduler";
 import { computePendingWindow } from "../../../utils/window-utils";
 import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
 import { createTestAgent, createTestEntity } from "../../setup/test-fixtures";
@@ -152,6 +155,28 @@ function reactionTasks(sql: ReturnType<typeof getTestDb>, runId: number) {
       AND idempotency_key = ${automationReactionIdempotencyKey(runId)}
     ORDER BY id DESC
   `;
+}
+
+/** The structured server log records `fn` writes, in order. */
+async function captureLogRecords(fn: () => Promise<void>): Promise<Array<Record<string, unknown>>> {
+	const lines: string[] = [];
+	const write = process.stdout.write;
+	process.stdout.write = ((chunk: string | Uint8Array) => {
+		lines.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString());
+		return true;
+	}) as typeof process.stdout.write;
+	try {
+		await fn();
+	} finally {
+		process.stdout.write = write;
+	}
+	return lines.flatMap((chunk) => chunk.split("\n")).flatMap((line) => {
+		try {
+			return [JSON.parse(line) as Record<string, unknown>];
+		} catch {
+			return [];
+		}
+	});
 }
 
 describe("automation reaction crash safety", () => {
@@ -364,48 +389,111 @@ describe("automation reaction crash safety", () => {
 		);
 		await completeWindow(api, automationId, runId);
 		const [task] = await reactionTasks(sql, runId);
-		const outcome = await runAutomationReactionTask(
-			{ organizationId: workspace.org.id, automationId, sourceRunId: runId }, {} as Env, Number(task.id),
-		);
-		expect(outcome.status).toBe("failed");
-		const [logged] = await sql`SELECT tool_result FROM automation_reactions WHERE source_run_id = ${runId}`;
-		expect(logged.tool_result).toMatchObject({ success: false, error: "ValidationError: Synthetic configuration required" });
-	});
-
-	it("charges the script's own throw to the Automation in telemetry, without its text", async () => {
-		const { sql, automationId, runId, api, workspace } = await seedRunnableWindow(
-			'export default async () => { throw new Error("Synthetic private detail"); };',
-		);
-		await completeWindow(api, automationId, runId);
-		const [task] = await reactionTasks(sql, runId);
-		const lines: string[] = [];
-		const write = process.stdout.write;
-		process.stdout.write = ((chunk: string | Uint8Array) => {
-			lines.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString());
-			return true;
-		}) as typeof process.stdout.write;
-		let thrown: unknown;
-		try {
-			await runAutomationReactionTask(
+		let outcome: Awaited<ReturnType<typeof runAutomationReactionTask>> | undefined;
+		const records = await captureLogRecords(async () => {
+			outcome = await runAutomationReactionTask(
 				{ organizationId: workspace.org.id, automationId, sourceRunId: runId }, {} as Env, Number(task.id),
 			);
-		} catch (error) {
-			thrown = error;
-		} finally {
-			process.stdout.write = write;
-		}
-		// A plain throw still asks for a retry; the run span classifies that request.
-		expect(describeError(thrown, { scope: "run task" })).toMatchObject({ code: "VALIDATION", kind: "user" });
-		const records = lines.flatMap((line) => {
-			try {
-				return [JSON.parse(line) as Record<string, unknown>];
-			} catch {
-				return [];
-			}
 		});
-		const failure = records.find((record) => record.msg === "Reaction script execution failed");
-		expect(failure).toMatchObject({ error_kind: "user", error_code: "VALIDATION", error_type: "ScriptError" });
-		expect(String(failure?.error_message)).not.toContain("Synthetic private detail");
+		expect(outcome?.status).toBe("failed");
+		const [logged] = await sql`SELECT tool_result FROM automation_reactions WHERE source_run_id = ${runId}`;
+		expect(logged.tool_result).toMatchObject({ success: false, error: "ValidationError: Synthetic configuration required" });
+		// One error record, the Automation author's, counted against its workspace.
+		// A settled failure is not logged a second time as a warning.
+		const reported = records.filter((record) => record.automation_id === automationId && record.level !== "info" && record.level !== "debug");
+		expect(reported).toEqual([
+			expect.objectContaining({
+				level: "error",
+				organization_id: workspace.org.id,
+				error_kind: "user",
+				error_code: "VALIDATION",
+				error_type: "ValidationError",
+			}),
+		]);
+	});
+
+	it("records each failed attempt once, as an issue of its own Automation and workspace", async () => {
+		const script = 'export default async () => { throw new Error("Synthetic private detail"); };';
+		const first = await seedRunnableWindow(script);
+		const second = await seedRunnableWindow(script);
+		await completeWindow(first.api, first.automationId, first.runId);
+		await completeWindow(second.api, second.automationId, second.runId);
+		const [firstTask] = await reactionTasks(first.sql, first.runId);
+		const [secondTask] = await reactionTasks(second.sql, second.runId);
+		// A plain throw asks for a retry: let the first Automation fail twice, now.
+		await first.sql`UPDATE runs SET max_attempts = 2, retry_delay_seconds = 0 WHERE id = ${firstTask.id}`;
+		await second.sql`UPDATE runs SET max_attempts = 1 WHERE id = ${secondTask.id}`;
+		const taskIds = [Number(firstTask.id), Number(secondTask.id)];
+
+		const exporter = new InMemorySpanExporter();
+		await shutdownTracing();
+		initTracing({ serviceName: "reaction-failure-test", spanProcessors: [new SimpleSpanProcessor(exporter)] });
+		const queue = new RunsQueue();
+		const scheduler = new TaskScheduler(queue);
+		scheduler.register(AUTOMATION_REACTION_TASK, async (ctx) => {
+			await runAutomationReactionTask(ctx.payload as AutomationReactionTaskPayload, {} as Env, ctx.taskRunId, ctx.attempt);
+		});
+		let records: Array<Record<string, unknown>> = [];
+		let spans: ReturnType<InMemorySpanExporter["getFinishedSpans"]> = [];
+		try {
+			records = await captureLogRecords(async () => {
+				await queue.start();
+				await scheduler.start();
+				await expect
+					.poll(async () => (await first.sql`
+            SELECT count(*)::int AS n FROM runs WHERE id IN (${taskIds[0]}, ${taskIds[1]}) AND status = 'failed'
+          `)[0]?.n, { timeout: 15_000 })
+					.toBe(2);
+			});
+		} finally {
+			scheduler.stop();
+			await queue.stop();
+			// Shutting the exporter down clears what it collected.
+			spans = exporter.getFinishedSpans();
+			await shutdownTracing();
+		}
+
+		const failures = records.filter((record) => record.level === "error");
+		const forAutomation = (automationId: number) =>
+			failures.filter((record) => record.automation_id === automationId);
+		// One error record per failed attempt, and nothing else at error level.
+		expect(forAutomation(first.automationId)).toHaveLength(2);
+		expect(forAutomation(second.automationId)).toHaveLength(1);
+		expect(failures).toHaveLength(3);
+		for (const [seed, record] of [
+			...forAutomation(first.automationId).map((record) => [first, record] as const),
+			...forAutomation(second.automationId).map((record) => [second, record] as const),
+		]) {
+			// The script's own throw is its author's failure, counted against its workspace.
+			expect(record).toMatchObject({
+				organization_id: seed.workspace.org.id,
+				error_kind: "user",
+				error_code: "VALIDATION",
+				error_type: "ScriptError",
+			});
+			expect(String(record.error_message)).not.toContain("Synthetic private detail");
+		}
+		// Grouped by the Automation: its attempts are one issue, another
+		// Automation's identical bug is another, and the Automation is the only
+		// thing that tells the two apart (no run, task or workspace id).
+		const [firstA, firstB] = forAutomation(first.automationId);
+		const [secondA] = forAutomation(second.automationId);
+		expect(firstA.error_fingerprint).toBe(firstB.error_fingerprint);
+		expect(secondA.error_fingerprint).not.toBe(firstA.error_fingerprint);
+		const withoutAutomation = (grouping: unknown, automationId: number) =>
+			String(grouping).replace(` ${automationId}|`, " <automation>|");
+		expect(withoutAutomation(firstA.error_grouping, first.automationId)).toBe(
+			withoutAutomation(secondA.error_grouping, second.automationId),
+		);
+
+		// The queue still marks each failed run span, but leaves the issue to the
+		// handler's record instead of opening a second, generically grouped one.
+		const runSpans = spans.filter((span) => taskIds.includes(Number(span.attributes["lobu.run_id"])));
+		expect(runSpans).toHaveLength(3);
+		for (const span of runSpans) {
+			expect(span.status.code).toBe(SpanStatusCode.ERROR);
+			expect(span.attributes["error.fingerprint"]).toBeUndefined();
+		}
 	});
 
 	it("settles without retrying when the script fails deterministically", async () => {

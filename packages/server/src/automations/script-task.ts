@@ -6,6 +6,7 @@ import { classifyRunOutcome } from '../runs/run-outcome';
 import { advanceAutomationArrivalMark } from '../utils/window-utils';
 import { advanceAutomationScheduleAfterSuccessfulWindow } from './schedule-cursor';
 import { dispatchNextPendingAutomationRuns } from './automation';
+import { QueueReportedError } from '../gateway/infrastructure/queue/types';
 import { executeAutomationScript } from './reaction-executor';
 import { reactionErrorIsNonTransient } from './reaction-task';
 import { markAutomationRunFailed } from './run-completion';
@@ -117,7 +118,8 @@ export async function runAutomationScriptTask(
       }
       return;
     }
-    throw new Error(error ?? 'Automation script failed');
+    // The executor already recorded this failure as its one error.
+    throw new QueueReportedError(error ?? 'Automation script failed');
   }
   const completedNow = await sql.begin(async (tx) => {
     // Match completeWindow's Automation-before-run lock order and pin the
