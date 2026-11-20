@@ -295,14 +295,39 @@ describe('read cancellation', () => {
       release = null;
       const response = await pending;
       expect(response.status).toBeGreaterThanOrEqual(400);
-      expect(toolFailures('save_memory')).toEqual(expect.arrayContaining([
+      // One failure is one issue: the tool boundary's record, not a second
+      // copy from the REST wrapper or the HTTP response middleware.
+      expect(issues()).toEqual([
         expect.objectContaining({
-          call_id: expect.any(String), error_code: '23514', error_fingerprint: expect.any(String),
+          tool_name: 'save_memory', call_id: expect.any(String), error_code: '23514',
+          error_fingerprint: expect.any(String),
         }),
-      ]));
+      ]);
     } finally {
       await release?.();
       release = null;
+      await sql`ALTER TABLE events DROP CONSTRAINT synthetic_failed_write`;
+    }
+  });
+
+  it('reports a failed tool call its caller waited for as one issue', async () => {
+    const sql = getTestDb();
+    await sql`ALTER TABLE events ADD CONSTRAINT synthetic_failed_write
+      CHECK (payload_text IS DISTINCT FROM 'synthetic failed write') NOT VALID`;
+    try {
+      const response = await app.fetch(new Request(`http://localhost/api/${orgSlug}/save_memory`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ semantic_type: 'note', content: 'synthetic failed write' }),
+      }), env);
+      expect(response.status).toBe(500);
+      expect(issues()).toEqual([
+        expect.objectContaining({
+          msg: 'Tool call failed', tool_name: 'save_memory', error_code: '23514',
+          error_fingerprint: expect.any(String),
+        }),
+      ]);
+    } finally {
       await sql`ALTER TABLE events DROP CONSTRAINT synthetic_failed_write`;
     }
   });

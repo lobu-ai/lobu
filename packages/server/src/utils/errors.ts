@@ -66,7 +66,7 @@ export function toolErrorHttpStatus(code: ToolErrorCode): number {
 /**
  * Error class for client-input failures inside MCP/REST tools (bad path,
  * not-found, validation errors). Carries an HTTP status so the REST proxy
- * can return the right code, and is recognised by `trackMCPToolCall` to
+ * can return the right code, and is recognised by `logToolCallFailure` to
  * keep 4xx-class outcomes out of the error log.
  *
  * Optionally carries a structured `ToolErrorCode` (lobu#2051 Item 2). When a

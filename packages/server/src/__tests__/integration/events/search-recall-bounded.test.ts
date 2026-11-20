@@ -208,11 +208,12 @@ describe('recall query budget', () => {
       expect(timeoutFailures()).toBe(failuresBefore + 2);
 
       // The search answered, so nothing threw to a span: the lost recall has
-      // to reach the issue tracker as its own record, classified as ours.
+      // to reach the issue tracker as its own record. A statement timeout is
+      // the database refusing the work, so it is a dependency failure.
       const recorded = issues();
       expect(recorded).toHaveLength(1);
       expect(recorded[0]).toMatchObject({
-        error_kind: 'system',
+        error_kind: 'dependency',
         error_code: '57014',
         organization_id: org.id,
       });

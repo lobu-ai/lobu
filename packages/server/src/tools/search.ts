@@ -2005,6 +2005,13 @@ export async function gatherLocalRecall(
 
 export const search = withValidatedArgs('search_memory', SearchSchema, searchImpl);
 
+/** A search needs something to search for: a query, an entity id or an embedding. */
+function requireSearchSubject(args: SearchArgs): void {
+  if (!args.query && !args.entity_id && !args.query_embedding?.length) {
+    throw new ToolUserError('Must provide either query, entity_id, or query_embedding', 400);
+  }
+}
+
 async function searchImpl(
   args: SearchArgs,
   env: Env,
@@ -2041,6 +2048,9 @@ async function searchImpl(
     return result;
   }
 
+  // Refuse an empty search before the fan-out: every shard would reject it,
+  // and the merge reports an all-rejected fan-out as a 503 outage.
+  requireSearchSubject(args);
   const targets = await resolveFederatedTargets(args, ctx);
   if (targets.length === 0) {
     return emptyResult({
@@ -2217,10 +2227,7 @@ async function searchWorkspaceImpl(
     });
   }
 
-  // Validate: must have either query, ID, or embedding
-  if (!args.query && !args.entity_id && !args.query_embedding?.length) {
-    throw new ToolUserError('Must provide either query, entity_id, or query_embedding', 400);
-  }
+  requireSearchSubject(args);
 
   const readRestrictions = await entityReadRestrictions(getDb(), ctx);
 

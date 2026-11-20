@@ -19,6 +19,7 @@ import type { Env } from '../../../index';
 import type { ToolContext } from '../../../tools/registry';
 import { listMetrics } from '../../../tools/admin/list_metrics';
 import { queryMetric } from '../../../tools/admin/query_metric';
+import { ToolUserError } from '../../../utils/errors';
 
 const METRICS = {
   eventSets: {
@@ -97,6 +98,15 @@ describe('metric MCP tools', () => {
     )) as { rows: Record<string, unknown>[]; row_count: number };
     const gbp = res.rows.find((r) => r.currency === 'GBP');
     expect(Number(gbp?.spend)).toBeCloseTo(98.35, 2);
+  });
+
+  it('query_metric answers a caller mistake as a caller fault, not a server failure', async () => {
+    const undeclared = queryMetric({ entity_type: 'company', measure: 'no_such_measure' }, env, ctx);
+    await expect(undeclared).rejects.toBeInstanceOf(ToolUserError);
+    await expect(undeclared).rejects.toMatchObject({ httpStatus: 400, code: 'VALIDATION' });
+    const unknownType = queryMetric({ entity_type: 'no-such-type', measure: 'spend' }, env, ctx);
+    await expect(unknownType).rejects.toBeInstanceOf(ToolUserError);
+    await expect(unknownType).rejects.toMatchObject({ httpStatus: 404, code: 'NOT_FOUND' });
   });
 
   it('list_metrics surfaces the catalog', async () => {
