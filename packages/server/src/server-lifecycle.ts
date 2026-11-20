@@ -365,13 +365,16 @@ export function buildWrapperApp(
 				// response wasn't JSON; ignore
 			}
 			if (await isUnreportedServerStatus(c)) return;
+			// Named by the matched route template: issues group by message, so
+			// the raw path (a record id per crawled page) split one failing
+			// route into an issue per URL. The path stays a structured field.
 			const message =
 				(body &&
 				typeof body === "object" &&
 				"error" in body &&
 				typeof (body as { error?: unknown }).error === "string"
 					? (body as { error: string }).error
-					: null) ?? `HTTP ${c.res.status} from ${c.req.method} ${c.req.path}`;
+					: null) ?? `HTTP ${c.res.status} from ${c.req.method} ${routePath(c)}`;
 			logger.error({ source: "http_response", http_method: c.req.method,
 				res_status: c.res.status, path: c.req.path }, message);
 

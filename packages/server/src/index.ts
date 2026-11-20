@@ -42,7 +42,7 @@ import { setupRoutes } from "./connect/setup-routes";
 import { chatIdentityRoutes } from "./connect/chat-identity-routes";
 import { connectRoutes } from "./connect/routes";
 import { checkDatabaseReadiness, getDb } from "./db/client";
-import { routeFailure } from "./diagnostics";
+import { markErrorReported, routeFailure } from "./diagnostics";
 import * as invalidationEmitter from "./events/emitter";
 import { streamInvalidationEvents } from "./events/sse";
 import { invalidationSseAuth } from "./events/sse-invalidation-auth";
@@ -1904,6 +1904,9 @@ app.get("*", async (c) => {
 			// crawlers and the CDN to come back, instead of caching a 404. A
 			// source refused at its live-read limit says when it will have room.
 			logger.error({ error, path: requestPath }, "[public-pages] render failed");
+			// This line is the failure's report; the generic 5xx log would add a
+			// second, causeless one.
+			markErrorReported(c);
 			c.header("Cache-Control", "no-store");
 			c.header(
 				"Retry-After",
