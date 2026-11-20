@@ -6,6 +6,7 @@
  * through `scopeDenialMessage`, so the two paths cannot drift.
  */
 
+import type { ToolErrorCode } from '@lobu/core';
 import { hasRequiredMcpScope, type ToolAccessLevel } from '../auth/tool-access';
 import { AUTOMATION_RUN_SOURCE } from '../gateway/automation-run-session';
 import { ToolUserError } from '../utils/errors';
@@ -220,9 +221,12 @@ export async function workspaceScopeDenialMessage(
  * structure wire boundaries answer on (REST maps it to 403); the message only
  * renders it. Deliberately not a ToolUserError: `logToolCallFailure` drops a
  * sub-500 ToolUserError as an expected client fault, and a denial keeps the
- * tool-failure-log visibility it always had.
+ * tool-failure-log visibility it always had. Its `code` is what classifies
+ * that log line and the tool span as the caller's issue, not a server failure.
  */
 export class AccessDeniedError extends Error {
+  readonly code: ToolErrorCode = 'PERMISSION';
+
   constructor(message: string) {
     super(message);
     this.name = 'AccessDeniedError';

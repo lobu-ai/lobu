@@ -30,6 +30,7 @@ import {
   createTestPAT,
   createTestUser,
 } from '../../setup/test-fixtures';
+import { mcpRequest } from '../../setup/test-helpers';
 
 const env: Env = {
   ENVIRONMENT: 'test',
@@ -67,6 +68,7 @@ describe('read cancellation', () => {
   let app: Hono<{ Bindings: Env }>;
   let orgSlug: string;
   let token: string;
+  let readOnlyToken: string;
   let release: (() => Promise<void>) | null = null;
   let logLines: string[];
 
@@ -104,6 +106,7 @@ describe('read cancellation', () => {
     const user = await createTestUser({ email: 'read-cancellation@test.example.com' });
     await addUserToOrganization(user.id, org.id, 'owner');
     token = (await createTestPAT(user.id, org.id)).token;
+    readOnlyToken = (await createTestPAT(user.id, org.id, { scope: 'mcp:read' })).token;
     await createTestEvent({ organization_id: org.id, content: 'synthetic feed item' });
     app = new Hono<{ Bindings: Env }>();
     app.post('/api/:orgSlug/:toolName', mcpAuth, (c) => restToolProxy(c));
@@ -330,5 +333,33 @@ describe('read cancellation', () => {
     } finally {
       await sql`ALTER TABLE events DROP CONSTRAINT synthetic_failed_write`;
     }
+  });
+
+  it('reports a refused caller as a user issue, not a system failure', async () => {
+    // A read-only token asking for a write is refused by the access gate.
+    const denied = await app.fetch(new Request(`http://localhost/api/${orgSlug}/save_memory`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${readOnlyToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ semantic_type: 'note', content: 'refused write' }),
+    }), env);
+    expect(denied.status).toBe(403);
+    // A client asking for a tool name that does not exist.
+    const unknown = await mcpRequest<{ isError?: boolean; structuredContent?: unknown }>(
+      'tools/call',
+      { name: 'no_such_tool', arguments: {} },
+      { token, orgSlug },
+    );
+    expect(unknown.result?.isError).toBe(true);
+    expect(unknown.result?.structuredContent).toBeUndefined();
+    expect(issues()).toEqual([
+      expect.objectContaining({
+        msg: 'Tool call failed', tool_name: 'save_memory', error_class: 'AccessDeniedError',
+        error_code: 'PERMISSION', error_kind: 'user',
+      }),
+      expect.objectContaining({
+        msg: 'Tool call failed', tool_name: 'no_such_tool', error_class: 'ToolNotRegisteredError',
+        error_code: 'VALIDATION', error_kind: 'user',
+      }),
+    ]);
   });
 });

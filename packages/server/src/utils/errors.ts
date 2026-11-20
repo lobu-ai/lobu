@@ -140,9 +140,12 @@ export function parsePositiveIntegerId(value: string, fieldName: string): number
  * Thrown when a tool name reaches `executeTool` but is not registered. Indicates
  * registry/frontend drift (e.g. frontend `apiCall('foo', …)` references a name
  * the backend no longer registers). The REST proxy logs this as a warning so
- * the next drift is visible rather than a 400 the page swallows.
+ * the next drift is visible rather than a 400 the page swallows. Its `code`
+ * matches that 400: the caller named a tool that does not exist, so the failure
+ * is classified as the caller's issue, not a server failure.
  */
 export class ToolNotRegisteredError extends Error {
+  readonly code: ToolErrorCode = 'VALIDATION';
   readonly toolName: string;
 
   constructor(toolName: string) {
