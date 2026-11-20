@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import {
   embeddingModelSqlLiteral,
   generateEmbeddings,
+  generateQueryEmbedding,
   getConfiguredEmbeddingModel,
   resolveEmbeddingModel,
 } from '../../utils/embeddings';
@@ -68,6 +69,42 @@ describe('server generateEmbeddings model guard (Finding #3)', () => {
     stubFetch({ dimensions: 768, embeddings: [vec768()] });
     const out = await generateEmbeddings(['hi'], ENV);
     expect(out).toHaveLength(1);
+  });
+});
+
+describe('embedding input size', () => {
+  // The embeddings service's contract: 400 for any text over 32 KiB of UTF-8
+  // (MAX_TEXT_BYTES in @lobu/embeddings), otherwise one vector per text.
+  let received: string[] = [];
+  beforeEach(() => {
+    received = [];
+    globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+      const { texts } = JSON.parse(String(init?.body)) as { texts: string[] };
+      received = texts;
+      if (texts.some((text) => Buffer.byteLength(text.trim(), 'utf8') > 32 * 1024)) {
+        return new Response('{"error":"each text must be at most 32768 bytes"}', { status: 400 });
+      }
+      return new Response(JSON.stringify({ embeddings: texts.map(() => vec768()) }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as typeof globalThis.fetch;
+  });
+
+  it('embeds a query longer than the service accepts by its head', async () => {
+    // Three-byte characters, so a byte cut can split one.
+    const query = `Recall head ${'€'.repeat(12_000)}`;
+    expect(Buffer.byteLength(query, 'utf8')).toBeGreaterThan(32 * 1024);
+    expect(await generateQueryEmbedding(query, ENV)).toHaveLength(768);
+    const [sent] = received;
+    expect(query.startsWith(sent)).toBe(true);
+    expect(sent).not.toContain('\uFFFD');
+    expect(Buffer.byteLength(sent, 'utf8')).toBeLessThanOrEqual(32 * 1024);
+  });
+
+  it('sends a text within the limit unchanged', async () => {
+    await generateEmbeddings(['a short query'], ENV);
+    expect(received).toEqual(['a short query']);
   });
 });
 

@@ -39,6 +39,7 @@ import {
   COLLAPSE_POOL_FACTOR,
   COLLAPSE_POOL_MAX,
   QUERY_WORD_LIMIT,
+  SUBSTRING_QUERY_MAX_CHARS,
   type QueryWordFrequency,
   buildSearchDocumentExpr,
   selectCandidateWords,
@@ -436,10 +437,16 @@ export async function searchContentBySingleQuery(
 
   const textDocumentExpr = buildSearchDocumentExpr('f');
   const resultDocumentExpr = buildSearchDocumentExpr('fi');
+  // A query past SUBSTRING_QUERY_MAX_CHARS has no substring arm: no row holds
+  // it verbatim, and the trigram scan reads every trigram's matches to say so.
+  const substringMatchFor = (alias: string) =>
+    trimmedQuery.length <= SUBSTRING_QUERY_MAX_CHARS
+      ? `${alias}.payload_text ILIKE '%' || $1 || '%'`
+      : 'false';
   // Guard ILIKE/tsquery on non-empty $1 so an embedding-only call (trimmedQuery='')
   // doesn't degenerate to ILIKE '%%' (matches everything) — we want the vector
   // branch to be the sole filter in that case.
-  const substringMatchExpr = hasEmbedding ? 'text_match.substring_match' : `f.payload_text ILIKE '%' || $1 || '%'`;
+  const substringMatchExpr = hasEmbedding ? 'text_match.substring_match' : substringMatchFor('f');
   const textMatchExpr = `(LENGTH($1) > 0 AND (${substringMatchExpr} OR COALESCE(${textDocumentExpr} @@ ${queryTsquery}, false)))`;
   const vecParam = vectorParamIdx ? `$${vectorParamIdx}::vector` : 'NULL::vector';
   const minSimilarityParam = `$${minSimilarityParamIdx}::numeric`;
@@ -465,7 +472,7 @@ export async function searchContentBySingleQuery(
           WHERE emb.event_id = f.id AND ${modelScopeFor('emb')}
         ) chunk_score
         CROSS JOIN LATERAL (
-          SELECT (LENGTH($1) > 0 AND f.payload_text ILIKE '%' || $1 || '%') AS substring_match
+          SELECT (LENGTH($1) > 0 AND ${substringMatchFor('f')}) AS substring_match
           OFFSET 0
         ) text_match` : '';
   const bestSimSelect = hasEmbedding ? 'chunk_score.best_sim' : 'NULL';
@@ -480,7 +487,7 @@ export async function searchContentBySingleQuery(
   // Text relevance in [0, 1]: half substring match, half full-text rank.
   // Normalization 32 maps rank to rank / (rank + 1), so repeated terms
   // cannot overwhelm cosine similarity (which ranges from -1 to 1).
-  const rankedSubstringMatch = hasEmbedding ? 'fi.substring_match' : `fi.payload_text ILIKE '%' || $1 || '%'`;
+  const rankedSubstringMatch = hasEmbedding ? 'fi.substring_match' : substringMatchFor('fi');
   const textRankExpr = `
     (CASE WHEN LENGTH($1) > 0 AND ${rankedSubstringMatch} THEN 0.5 ELSE 0.0 END)
     + CASE WHEN LENGTH($1) > 0 THEN 0.5 * COALESCE(ts_rank_cd(${resultDocumentExpr}, ${queryTsquery}, 32), 0) ELSE 0 END
@@ -667,7 +674,9 @@ export async function searchContentBySingleQuery(
       // Sort the equivalent id expression so LIMIT cannot favor a backwards
       // primary-key scan through unrelated history. The explicit sort permits
       // filtered bitmap/index access before the same newest-id candidate cap.
-      branches.push(textCandidates(`ce.payload_text ILIKE '%' || $1 || '%'`, 'ce.id + 0'));
+      if (trimmedQuery.length <= SUBSTRING_QUERY_MAX_CHARS) {
+        branches.push(textCandidates(substringMatchFor('ce'), 'ce.id + 0'));
+      }
     }
     // Each branch has its own ORDER BY/LIMIT and must therefore be
     // parenthesized for the UNION to parse. `UNION` (not UNION ALL) dedupes

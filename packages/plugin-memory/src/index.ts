@@ -12,6 +12,27 @@ import type { ToolDefinition } from "@mariozechner/pi-coding-agent";
 
 const MEMORY_RECALL_LIMIT = 6;
 const MEMORY_TOOL_TIMEOUT_MS = 8_000;
+/**
+ * Most characters of a turn prompt that recall searches with. A search reads
+ * no further usefully: the embedding model's 512-token window is about 2,000
+ * English characters, the full-text arm ranks by at most 32 words, and a whole
+ * prompt is never a literal substring of a memory. Without the cut an
+ * Automation event turn searched with the entire event (tens of KB of email).
+ *
+ * The cut keeps the prompt's head, which is where intent sits: a chat turn's
+ * prompt is the person's own message, and an Automation dispatch states its
+ * instructions before the event payload it embeds.
+ */
+const RECALL_QUERY_MAX_CHARS = 2_000;
+
+function boundedRecallQuery(query: string): string {
+  if (query.length <= RECALL_QUERY_MAX_CHARS) return query;
+  // End on a whole word: a cut-off fragment looks like a rare word to the
+  // full-text arm, which prefers rare words, yet it matches nothing.
+  const head = query.slice(0, RECALL_QUERY_MAX_CHARS + 1);
+  const end = Math.max(head.lastIndexOf(" "), head.lastIndexOf("\n"));
+  return (end > 0 ? head.slice(0, end) : head.slice(0, -1)).trim();
+}
 
 function withoutRecall(text: string): string {
   return text
@@ -190,7 +211,7 @@ export function createMemoryPlugin(
             "lobu",
             "search_memory",
             {
-              query: recallQuery(prompt, event.messages),
+              query: boundedRecallQuery(recallQuery(prompt, event.messages)),
               include_content: true,
               content_limit: MEMORY_RECALL_LIMIT,
               include_connections: false,
