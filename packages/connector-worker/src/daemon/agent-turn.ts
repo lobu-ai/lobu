@@ -102,6 +102,9 @@ export async function executeAgentTurnRun(
     if (traceparent) {
       span = createChildSpan('agent_turn', traceparent, {
         'lobu.run_id': String(job.run_id ?? ''),
+        // The run's owning org, as the gateway's request spans carry it, so a
+        // failed turn counts toward the issue's affected orgs.
+        ...(job.organization_id ? { 'lobu.org_id': job.organization_id } : {}),
       });
     }
   } catch (error) {

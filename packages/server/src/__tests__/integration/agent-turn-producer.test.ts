@@ -5582,7 +5582,7 @@ describe('existing team bot replay (single-workspace Slack, unlinked channel sen
       } as never);
       consumer.setGuardrails(undefined, settingsStore);
       await consumer.start();
-      const { deliver, posts } = await startTeamBot('compatible/compatible-model');
+      const { org, deliver, posts } = await startTeamBot('compatible/compatible-model');
       responses = new UnifiedThreadResponseConsumer(new RunsQueue(), {} as never, {} as never);
       responses.setChatResponseBridge(new ChatResponseBridge(bridge!.manager as never));
       await responses.start();
@@ -5637,6 +5637,7 @@ describe('existing team bot replay (single-workspace Slack, unlinked channel sen
         name: span.name, traceId: span.spanContext().traceId, spanId: span.spanContext().spanId,
         parentSpanId: span.parentSpanContext?.spanId,
         serviceName: String(span.resource.attributes['service.name']), status: span.status.code,
+        orgId: span.attributes['lobu.org_id'] as string | undefined,
       }));
       await waitFor(async () => {
         const spans = collector ? await collector.spans() : [...memorySpans(), ...completed.spans];
@@ -5661,6 +5662,13 @@ describe('existing team bot replay (single-workspace Slack, unlinked channel sen
         expect(turn.serviceName).toBe('lobu-worker');
         expect(deliveries.every(span => span.serviceName === 'lobu-server')).toBe(true);
         expect(turn.status).toBe(providerFails ? 2 : 1);
+        // The background job and the worker's turn carry the run's org, so a
+        // failure in either counts toward the issue's affected orgs.
+        const jobRuns = spans.filter(span => span.name === 'run messages');
+        expect(jobRuns.length).toBeGreaterThanOrEqual(1);
+        expect(jobRuns.map(span => span.orgId)).toEqual(jobRuns.map(() => org.id));
+        expect(queue.orgId).toBe(org.id);
+        expect(turn.orgId).toBe(org.id);
       }, 10_000);
     } finally {
       const cleanupErrors: unknown[] = [];
