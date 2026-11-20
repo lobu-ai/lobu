@@ -262,12 +262,13 @@ jobs:
             VITE_ENVIRONMENT=production
 
       # Alloy symbolicates Faro stacks from this private bucket, keyed by the
-      # release the bundle reports (APP_GIT_SHA); a bucket lifecycle rule
-      # expires each release after 30 days. Upload before promotion so the maps
-      # exist before the release serves traffic. The token is Object Read &
+      # release the bundle reports (APP_GIT_SHA); a lifecycle rule on the whole
+      # bucket expires everything after 30 days. Upload before promotion so the
+      # maps exist before the release serves traffic. The token is Object Read &
       # Write on this bucket only. Without the secrets the build continues and
       # this release stays unsymbolicated; a configured upload that fails, fails.
       - name: Upload web source maps
+        id: upload_maps
         if: steps.submodule.outputs.stubbed != 'true'
         env:
           R2_ENDPOINT: ${{ secrets.SOURCEMAPS_R2_ENDPOINT }}
@@ -292,6 +293,25 @@ jobs:
             --content-type application/json --only-show-errors \
             --endpoint-url "$R2_ENDPOINT"
           echo "uploaded ${count} source maps for release ${GITHUB_SHA}"
+          echo "uploaded=true" >> "$GITHUB_OUTPUT"
+
+      # The zero-byte releases/<sha> marker is what Alloy's sync sidecar lists:
+      # it exists only once every map of this release is uploaded, so the
+      # sidecar copies each release exactly once and keeps only recent ones.
+      - name: Mark web source maps complete
+        if: steps.upload_maps.outputs.uploaded == 'true'
+        env:
+          R2_ENDPOINT: ${{ secrets.SOURCEMAPS_R2_ENDPOINT }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.SOURCEMAPS_R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.SOURCEMAPS_R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+        run: |
+          set -euo pipefail
+          aws s3api put-object --bucket lobu-sourcemaps --key "releases/${GITHUB_SHA}" \
+            --endpoint-url "$R2_ENDPOINT" > /dev/null
+          echo "marked source maps for release ${GITHUB_SHA} complete"
 
       - name: Make image public
         run: |
