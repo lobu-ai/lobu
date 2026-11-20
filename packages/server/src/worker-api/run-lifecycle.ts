@@ -78,7 +78,7 @@ import {
 import { insertEvent, recordLifecycleEvent } from "../utils/insert-event";
 import logger from "../utils/logger";
 import { logRunFailure } from "../runs/log-run-failure";
-import { recordOperationFailure } from "../runs/operation-failure";
+import { operationFailureMessage, recordOperationFailure } from "../runs/operation-failure";
 import { getLocalActionOutputFiles } from "../operations/connector-operations";
 import { reconcileConnectorRelationshipClaims } from "../utils/relationship-claims";
 import { stripNul, stripNulDeep } from "../utils/strip-nul";
@@ -2729,7 +2729,7 @@ export async function completeActionRun(c: Context<{ Bindings: Env }>) {
 				organizationId: finalized.organization_id,
 				connectorKey: finalized.connector_key,
 				operationKey: finalized.action_key,
-				errorMessage: req.error_message ?? "",
+				errorMessage: operationFailureMessage(finalized.id, req.error_message),
 				parentRunId: finalized.parent_run_id,
 			});
 		}

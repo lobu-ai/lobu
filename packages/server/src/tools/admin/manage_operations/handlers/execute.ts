@@ -45,7 +45,7 @@ import {
 	normalizePageActivationUrls,
 } from "../../../../runs/page-activation";
 import { createConnectorOperationRun } from "../../../../runs/queue-service";
-import { describeOperationFailure } from "../../../../runs/operation-failure";
+import { describeOperationFailure, operationFailureMessage } from "../../../../runs/operation-failure";
 import { failedOperationNextAction } from "../../../../operations/issue-inbox";
 import { getAuthProfileById } from "../../../../utils/auth-profiles";
 import { isCloudMode } from "../../../../utils/cloud-mode";
@@ -719,12 +719,17 @@ async function replayExistingOperationRun(
 			message: `Operation run ${claim.runId} is ${claim.status === "pending" ? "queued and waiting for execution" : "in progress"}. Read operations.getRun(${claim.runId}) for its result.`,
 		};
 	}
+	// Only a run that failed was recorded as an issue occurrence; a cancelled
+	// or rejected run carries no fingerprint.
 	return failedExecuteResult(
 		claim.runId,
-		claim.errorMessage ?? `Run ${claim.runId} ended with status '${claim.status}'.`,
+		claim.status === "failed"
+			? operationFailureMessage(claim.runId, claim.errorMessage)
+			: claim.errorMessage ?? `Run ${claim.runId} ended with status '${claim.status}'.`,
 		claim.actionOutput,
 		connectorKey,
 		operation,
+		claim.status === "failed",
 	);
 }
 
@@ -737,9 +742,10 @@ function reportedOutput(output: unknown): { output?: unknown } {
 }
 
 /**
- * A failed run as the caller sees it. `failure_fingerprint` is the issue
- * grouping key the terminal write recorded the failure under, so a report that
- * cites it joins that issue; `next_action` says what to do instead of retrying.
+ * A run that ended without a result, as the caller sees it. When `recorded`,
+ * the terminal write logged it as an issue occurrence and `failure_fingerprint`
+ * is the grouping key it used, so a report that cites it joins that issue.
+ * `next_action` says what to do instead of retrying.
  */
 function failedExecuteResult(
 	runId: number,
@@ -747,18 +753,23 @@ function failedExecuteResult(
 	output: unknown,
 	connectorKey: string,
 	operation: OperationDescriptor,
+	recorded: boolean,
 ): ManageOperationsResult {
 	return {
 		action: "execute",
 		run_id: runId,
 		status: "failed",
 		error_message: errorMessage,
-		failure_fingerprint: describeOperationFailure({
-			connectorKey,
-			operationKey: operation.operation_key,
-			errorMessage,
-		}).fingerprint,
-		next_action: failedOperationNextAction(),
+		...(recorded
+			? {
+					failure_fingerprint: describeOperationFailure({
+						connectorKey,
+						operationKey: operation.operation_key,
+						errorMessage,
+					}).fingerprint,
+				}
+			: {}),
+		next_action: failedOperationNextAction(recorded),
 		...reportedOutput(output),
 	};
 }
@@ -1348,10 +1359,11 @@ export async function dispatchAdmittedRun(p: {
 		}
 		return failedExecuteResult(
 			runId,
-			result.error_message ?? "Device action run failed.",
+			operationFailureMessage(runId, result.error_message),
 			result.output,
 			connection.connector_key,
 			operation,
+			!result.cancelled,
 		);
 	}
 
@@ -1365,6 +1377,7 @@ export async function dispatchAdmittedRun(p: {
 			undefined,
 			connection.connector_key,
 			operation,
+			false,
 		);
 	}
 	const result = await executeOperationInline(
@@ -1394,5 +1407,6 @@ export async function dispatchAdmittedRun(p: {
 		result.output,
 		connection.connector_key,
 		operation,
+		true,
 	);
 }

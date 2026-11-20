@@ -10,11 +10,13 @@ describe('issue inbox setting', () => {
   });
 
   it('names the inbox in next_action only when one is configured', () => {
-    const plain = failedOperationNextAction(null);
+    const plain = failedOperationNextAction(true, null);
     expect(plain).toContain('Retrying the same input rarely helps');
     expect(plain).not.toContain('notifications.submit');
-    const configured = failedOperationNextAction({ organization: 'lobu-team', inbox: 'product.issue' });
+    const configured = failedOperationNextAction(true, { organization: 'lobu-team', inbox: 'product.issue' });
     expect(configured).toContain('notifications.submit({ organization: "lobu-team", inbox: "product.issue"');
     expect(configured).toContain('data.evidence.failure_fingerprint');
+    // A cancelled or rejected run is not a Lobu defect.
+    expect(failedOperationNextAction(false, { organization: 'lobu-team', inbox: 'product.issue' })).toBe(plain);
   });
 });

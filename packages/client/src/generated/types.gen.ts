@@ -5677,7 +5677,7 @@ export type ManageOperationsResponses = {
         run_id: number;
         status: "failed";
         error_message: string;
-        failure_fingerprint: string;
+        failure_fingerprint?: string;
         next_action: string;
         output?: unknown;
       }

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { dependencyUnavailableError } from '../../connectors/dependency-unavailable';
-import { describeOperationFailure, recordOperationFailure } from '../operation-failure';
+import { describeOperationFailure, operationFailureMessage, recordOperationFailure } from '../operation-failure';
 
 const failure = {
   connectorKey: 'linkedin',
@@ -60,5 +60,11 @@ describe('operation failure recording', () => {
 
   it('records only the run the agent called, not its child steps', () => {
     expect(capture(() => recordOperationFailure({ ...failure, runId: 42, organizationId: 'org-1', parentRunId: 41 }))).toBe('');
+  });
+
+  it('gives a device run that failed without a message the text its caller sees', () => {
+    expect(operationFailureMessage(42, null)).toBe('Run 42 failed');
+    expect(operationFailureMessage(42, undefined)).toBe('Run 42 failed');
+    expect(operationFailureMessage(42, 'boom')).toBe('boom');
   });
 });

@@ -31,15 +31,16 @@ export function issueInboxCall(target: IssueInbox): string {
 }
 
 /**
- * Guidance returned with a failed operation run. The fingerprint is the
- * failure's issue grouping key; a report that cites it joins the issue the
- * tracker opened, or opens it.
+ * Guidance returned with a run that ended without a result. Only a recorded
+ * failure (one with a fingerprint, its issue grouping key) points at the issue
+ * inbox: a cancelled or rejected run is not a Lobu defect.
  */
 export function failedOperationNextAction(
+	recorded: boolean,
 	target: IssueInbox | null = issueInbox(),
 ): string {
 	const base =
 		"Retrying the same input rarely helps unless the error says the failure is temporary. Do not substitute raw browser or shell steps for this operation without the user's consent; tell the user what failed.";
-	if (!target) return base;
+	if (!recorded || !target) return base;
 	return `${base} If Lobu itself looks broken, offer the user a Lobu issue report: ${issueInboxCall(target)} with data.evidence.failure_fingerprint and the run IDs; notifications.listInboxes({ organization: "${target.organization}" }) returns the report schema. Leave out other people's personal details.`;
 }

@@ -29,6 +29,18 @@ export interface OperationFailure {
 	errorMessage: string;
 }
 
+/**
+ * The message a failed run is reported and fingerprinted under. A device worker
+ * may finish a run as failed without one; the waiter that answers the caller and
+ * the terminal write that records the failure must agree on the same text.
+ */
+export function operationFailureMessage(
+	runId: number,
+	errorMessage: string | null | undefined,
+): string {
+	return errorMessage ?? `Run ${runId} failed`;
+}
+
 export function operationFailureScope(
 	failure: Pick<OperationFailure, "connectorKey" | "operationKey">,
 ): string {
