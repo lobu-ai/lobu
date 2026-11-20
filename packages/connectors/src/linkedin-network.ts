@@ -179,6 +179,16 @@ export function buildLinkedInNetworkExpression(
       const end = title.lastIndexOf(' | LinkedIn');
       return end > 0 ? title.slice(0, end).trim() : '';
     };
+    /**
+     * Page text for an error message. Errors reach run logs, error grouping and
+     * agent-written issue reports, so the member's name is replaced, and the
+     * caller quotes the result so error grouping treats it as one value.
+     */
+    const quoted = value => {
+      const name = profileName();
+      const textValue = String(value).replace(/\s+/g, ' ').trim();
+      return '"' + (name ? textValue.split(name).join('the member') : textValue).replace(/"/g, "'").slice(0, 180) + '"';
+    };
     /** The member's own header: the innermost section around the heading that names them. */
     const profileCard = () => {
       const name = profileName();
@@ -202,7 +212,7 @@ export function buildLinkedInNetworkExpression(
       const name = profileName();
       return [...document.querySelectorAll('main button, main a')].filter(shown).map(text)
         .filter(label => label && label.length <= 40 && !(name && label.includes(name)))
-        .slice(0, 15).join(' · ');
+        .slice(0, 15).join(' · ') || 'no buttons';
     };
     const openMenu = async more => {
       if (!more) return null;
@@ -221,7 +231,7 @@ export function buildLinkedInNetworkExpression(
       assertPage();
       const top = await wait(profileCard, null);
       if (!top)
-        throw new Error('LinkedIn profile header was not found; the page shows: ' + (controlsSeen() || 'no buttons'));
+        throw new Error('LinkedIn profile header was not found; the page shows ' + quoted(controlsSeen()));
       const menu = await openMenu(top.more);
       const menuItems = menu ? labelled(menu) : [];
       const els = [...labelled(top.card), ...menuItems];
@@ -272,9 +282,9 @@ export function buildLinkedInNetworkExpression(
       if (!dialog) return;
       const button = buttonNamed(dialog, names)[0];
       if (!button) {
-        const message = text(dialog).slice(0, 300);
+        const message = quoted(text(dialog));
         await dismiss(dialog);
-        throw new Error('LinkedIn showed an unexpected dialog: ' + message);
+        throw new Error('LinkedIn showed an unexpected dialog ' + message);
       }
       click(button);
       await wait(() => !dialogs().includes(dialog), 'LinkedIn confirmation did not close');
@@ -343,9 +353,9 @@ export function buildLinkedInNetworkExpression(
       await wait(() => !dialogs().some(d => d === dialog || d.contains(send)), 'LinkedIn invitation dialog did not close');
       const after = dialogs()[0];
       if (after) {
-        const message = text(after).slice(0, 300);
+        const message = quoted(text(after));
         await dismiss(after);
-        throw new Error('LinkedIn showed a dialog after sending; check the invitation: ' + message);
+        throw new Error('LinkedIn showed a dialog after sending; check the invitation ' + message);
       }
       return { name: req.name, relation: 'pending', following: null, changed: true, requests_sent_today: reserved };
     }
@@ -398,7 +408,8 @@ export function buildLinkedInNetworkExpression(
         last = await readState().catch(error => ({ error: String(error && error.message || error) }));
         if (!last.error && test(last)) return { ...last, changed: true };
       }
-      throw new Error('LinkedIn did not show the change on ' + location.href + ': ' + JSON.stringify(last));
+      const seen = !last ? 'nothing' : last.error || 'relation ' + last.relation + ', following ' + last.following;
+      throw new Error('LinkedIn did not show the change; it last showed ' + quoted(seen));
     };
 
     if (req.kind === 'company') {
@@ -422,7 +433,7 @@ export function buildLinkedInNetworkExpression(
     await assertAccount();
 
     if (req.op === 'follow') {
-      if (state.following === null) throw new Error('LinkedIn shows no follow control for ' + state.name);
+      if (state.following === null) throw new Error('LinkedIn shows no follow control for this member');
       if (state.following === req.following) return done(false);
       click(req.following ? controls.follow : controls.unfollow);
       if (!req.following) await confirm(['Unfollow']);
@@ -438,7 +449,7 @@ export function buildLinkedInNetworkExpression(
 
     if (req.op === 'remove') {
       if (state.relation !== 'connected') return done(false);
-      if (!controls.remove) throw new Error('LinkedIn shows no Remove connection option for ' + state.name);
+      if (!controls.remove) throw new Error('LinkedIn shows no Remove connection option for this member');
       click(controls.remove);
       await confirm(['Remove', 'Remove connection']);
       return shows(profileNow, now => now.relation !== 'connected');
@@ -479,10 +490,15 @@ async function evaluate<T>(
       allowed_origins: LINKEDIN_ALLOWED_ORIGINS,
     }
   );
-  if (result.exception || !result.value)
-    throw new Error(
-      `LinkedIn ${request.op} failed: ${JSON.stringify(result.exception ?? "empty response")}`
-    );
+  if (result.exception || !result.value) {
+    // The page's own message already quotes its variable parts; quoting it
+    // again would make error grouping treat every failure as the same value.
+    const detail =
+      typeof result.exception === "string"
+        ? result.exception.replace(/^Error: /, "")
+        : JSON.stringify(result.exception ?? "empty response");
+    throw new Error(`LinkedIn ${request.op} failed: ${detail}`);
+  }
   return result.value;
 }
 
@@ -618,7 +634,7 @@ async function writeAndVerify(
     if (!reached(persisted))
       throw new Error(
         effect.uncertain ??
-          `LinkedIn ${target.op} did not persist after reload for ${persisted.name}`
+          `LinkedIn ${target.op} did not persist after reload`
       );
     const { requests_sent_today } = effect;
     return {

@@ -556,7 +556,12 @@ test(
     const li = linkedIn({}, { header: "unrecognized" });
     const result = await li.run("send_connection_request", { profile_url: PROFILE });
     expect(result.success).toBe(false);
-    expect(result.error).toContain("profile header was not found; the page shows: Get in touch");
+    expect(result.error).toContain(
+      'LinkedIn connect failed: LinkedIn profile header was not found; the page shows "Get in touch'
+    );
+    // One quoted value: error grouping replaces it, so every page layout
+    // groups under one message.
+    expect(result.error).toMatch(/LinkedIn profile header was not found; the page shows "[^"]*"$/);
     expect(result.error).not.toContain("Ada");
     expect(li.world.invitationsSent).toBe(0);
     expect(li.tabsClosed()).toBe(true);
