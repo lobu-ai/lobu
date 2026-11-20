@@ -655,7 +655,9 @@ export function planIssueChanges(
 }
 
 // Aliases must not reuse a column name: ClickHouse would substitute the
-// aggregate into the other aggregates that read that column.
+// aggregate into the other aggregates that read that column. The rollup
+// rewrites a key its recompute no longer produces with zero counts, and that
+// row's old first and last seen must not count.
 const OCCURRENCES_SQL = `
 SELECT
   fingerprint,
@@ -676,6 +678,7 @@ SELECT
   argMax(sample_trace_ids[1], last_seen) AS sample_trace_id
 FROM observability.issue_occurrences_hourly FINAL
 WHERE hour >= now() - INTERVAL 14 DAY
+  AND occurrences > 0
   AND (environment = '${ENVIRONMENT}'
        OR (source = 'edge' AND environment IN (${EDGE_HOSTS.map((host) => `'${host}'`).join(", ")})))
 GROUP BY fingerprint
