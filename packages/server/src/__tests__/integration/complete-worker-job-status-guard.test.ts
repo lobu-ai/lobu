@@ -43,9 +43,12 @@ const WORKER_ID = 'worker-late';
 
 beforeEach(() => { vi.spyOn(logger, 'warn'); vi.spyOn(logger, 'error'); });
 afterEach(() => vi.restoreAllMocks());
+// A failed feed sync logs its terminal failure as the sync issue occurrence.
+const TERMINAL_FAILURE_SOURCES = new Set(['run_completion', 'sync_failure']);
 function terminalFailureLogs() {
   return [...vi.mocked(logger.warn).mock.calls, ...vi.mocked(logger.error).mock.calls]
-    .filter(([record]) => record && typeof record === 'object' && 'source' in record && record.source === 'run_completion');
+    .filter(([record]) => record && typeof record === 'object' && 'source' in record
+      && TERMINAL_FAILURE_SOURCES.has(String(record.source)));
 }
 
 

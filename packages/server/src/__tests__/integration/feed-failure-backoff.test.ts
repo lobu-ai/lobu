@@ -74,6 +74,29 @@ function mockWorkerCtx(body: unknown): {
   return { ctx, result: () => captured };
 }
 
+/** The error-level server log records `fn` writes: what the issue rollup reads. */
+async function captureErrorRecords(fn: () => Promise<void>): Promise<Array<Record<string, unknown>>> {
+  const lines: string[] = [];
+  const write = process.stdout.write;
+  process.stdout.write = ((chunk: string | Uint8Array) => {
+    lines.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString());
+    return true;
+  }) as typeof process.stdout.write;
+  try {
+    await fn();
+  } finally {
+    process.stdout.write = write;
+  }
+  return lines.flatMap((chunk) => chunk.split('\n')).flatMap((line) => {
+    try {
+      const record = JSON.parse(line) as Record<string, unknown>;
+      return record.level === 'error' || record.level === 'fatal' ? [record] : [];
+    } catch {
+      return [];
+    }
+  });
+}
+
 async function insertConnection(
   organizationId: string,
   slug = 'chrome-backoff-test',
@@ -238,8 +261,18 @@ describe('feed failure backoff + auto-pause (#2033)', () => {
       error_message:
         '[lobu:dependency_unavailable:browser_offline] The selected browser is offline.',
     });
-    await completeWorkerJob(ctx);
+    const issues = await captureErrorRecords(async () => {
+      await completeWorkerJob(ctx);
+    });
     expect(result().body).toEqual({ success: true });
+    // Still an issue occurrence, charged to the dependency rather than to us.
+    expect(issues).toEqual([
+      expect.objectContaining({
+        source: 'sync_failure', run_id: runId, organization_id: org.id,
+        error_kind: 'dependency', error_code: 'browser_offline',
+        error_fingerprint: expect.any(String),
+      }),
+    ]);
 
     const after = (await sql`
       SELECT status, consecutive_failures, last_sync_status, last_sync_at,
@@ -312,6 +345,68 @@ describe('feed failure backoff + auto-pause (#2033)', () => {
       );
       expect(feed).toMatchObject({ status: 'active', consecutive_failures: priorFailures });
       expect(Number(feed.backoff_ms)).toBe(BASE_MS * 2 ** priorFailures);
+    });
+  });
+
+  describe('a failed sync as an issue occurrence', () => {
+    async function failSync(
+      organizationId: string, feedId: number, connId: number, body: Record<string, unknown>,
+    ) {
+      const runId = await insertRunningRun(organizationId, connId, feedId);
+      const { ctx, result } = mockWorkerCtx({
+        run_id: runId, worker_id: WORKER_ID, status: 'failed', items_collected: 0, ...body,
+      });
+      const issues = await captureErrorRecords(async () => {
+        await completeWorkerJob(ctx);
+      });
+      expect(result().body).toEqual({ success: true });
+      return { runId: Number(runId), issues };
+    }
+
+    it('records each failure once, under one fingerprint per feed, attributed to the org', async () => {
+      const org = await createTestOrganization();
+      const connId = await insertConnection(org.id);
+      const feedId = await insertFeed(org.id, connId, 0);
+      const first = await failSync(org.id, feedId, connId, {
+        error_message: 'Listing 1041 returned no rows', exit_reason: 'error_message',
+      });
+      const second = await failSync(org.id, feedId, connId, {
+        error_message: 'Listing 2207 returned no rows', exit_reason: 'error_message',
+      });
+      for (const { runId, issues } of [first, second]) {
+        expect(issues).toEqual([
+          expect.objectContaining({
+            source: 'sync_failure', run_id: runId, organization_id: org.id,
+            feed_id: feedId, error_kind: 'system', error_fingerprint: expect.any(String),
+          }),
+        ]);
+      }
+      expect(second.issues[0].error_fingerprint).toBe(first.issues[0].error_fingerprint);
+    });
+
+    it('charges a run the worker killed at its deadline to the dependency, once', async () => {
+      const org = await createTestOrganization();
+      const connId = await insertConnection(org.id);
+      const feedId = await insertFeed(org.id, connId, 0);
+      const { runId, issues } = await failSync(org.id, feedId, connId, {
+        error_message: 'Run exceeded its deadline', exit_reason: 'timeout', exit_signal: 'SIGKILL',
+      });
+      expect(issues).toEqual([
+        expect.objectContaining({
+          source: 'sync_failure', run_id: runId, error_kind: 'dependency',
+          error_code: 'UPSTREAM_TIMEOUT', error_fingerprint: expect.any(String),
+        }),
+      ]);
+    });
+
+    it('records nothing for a cancelled sync', async () => {
+      const org = await createTestOrganization();
+      const connId = await insertConnection(org.id);
+      const feedId = await insertFeed(org.id, connId, 0);
+      const { issues } = await failSync(org.id, feedId, connId, {
+        error_message: 'Cancelled by user', exit_reason: 'cancelled',
+      });
+      expect(issues).toEqual([]);
     });
   });
 

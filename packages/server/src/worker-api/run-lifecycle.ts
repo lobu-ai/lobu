@@ -80,6 +80,7 @@ import { insertEvent, recordLifecycleEvent } from "../utils/insert-event";
 import logger from "../utils/logger";
 import { logRunFailure } from "../runs/log-run-failure";
 import { operationFailureMessage, recordOperationFailure } from "../runs/operation-failure";
+import { recordSyncFailure, type SyncFailure } from "../runs/sync-failure";
 import { getLocalActionOutputFiles } from "../operations/connector-operations";
 import { reconcileConnectorRelationshipClaims } from "../utils/relationship-claims";
 import { stripNul, stripNulDeep } from "../utils/strip-nul";
@@ -1479,6 +1480,7 @@ export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
 		// (connectors/feed-page-commit.ts).
 		const finalized = await sql.begin(async (tx) => {
 			let recordedFailure: RecordedFeedSyncFailure | null = null;
+			let syncFailure: SyncFailure | null = null;
 			// The checkpoint write is CASE-guarded on `dry_run` and failure in SQL
 			// (rather than read-then-branch in JS) so the guard rides the same atomic
 			// UPDATE as the terminal transition: a dry run or failed stream never
@@ -1504,10 +1506,11 @@ export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
 						: tx`,
 	          items_collected = ${req.items_collected ?? 0},
 	          error_message = ${req.error_message ?? null},${dryGuardedCheckpoint}`,
-				returning: tx`id, status, run_type, connector_key, exit_reason, exit_code, exit_signal, feed_id, connection_id, dry_run, error_message, checkpoint IS NOT NULL AS committed_checkpoint`,
+				returning: tx`id, status, run_type, connector_key, exit_reason, exit_code, exit_signal, feed_id, connection_id, organization_id, dry_run, error_message, checkpoint IS NOT NULL AS committed_checkpoint`,
 			})) as unknown as Array<Parameters<typeof logRunFailure>[0] & {
 				feed_id: number | null;
 				connection_id: number | null;
+				organization_id: string;
 				dry_run: boolean;
 				error_message: string | null;
 				committed_checkpoint: boolean;
@@ -1546,11 +1549,29 @@ export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
 			//     that guarantee to buy uniformity. Not a trade worth making.
 			if (feedId && !isDry) {
 				const feedRows = (await tx`
-	      SELECT schedule, timezone FROM feeds WHERE id = ${feedId}
+	      SELECT schedule, timezone, feed_key FROM feeds WHERE id = ${feedId}
 	    `) as unknown as Array<{
 					schedule: string | null;
 					timezone: string | null;
+					feed_key: string;
 				}>;
+				const run = runRows[0];
+				// A failed sync is an issue occurrence, recorded after commit. A
+				// cancellation is a stop someone asked for, not a fault.
+				if (req.status === "failed" && run.exit_reason !== "cancelled" && run.connector_key && feedRows[0]) {
+					syncFailure = {
+						runId: Number(run.id),
+						organizationId: run.organization_id,
+						connectorKey: run.connector_key,
+						feedId: Number(feedId),
+						feedKey: feedRows[0].feed_key,
+						errorMessage: recordedError,
+						exitReason: run.exit_reason ?? null,
+						exitCode: run.exit_code ?? null,
+						exitSignal: run.exit_signal ?? null,
+						dependencyReason: dependencyUnavailable?.reason ?? null,
+					};
+				}
 
 				// No cron baseline for manual feeds; failures below arm a backoff retry.
 				const schedule = feedRows[0]?.schedule ?? null;
@@ -1611,7 +1632,7 @@ export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
 				}
 			}
 			const expiredBrowserAuth = await persistSyncAuthUpdate(tx, req, syncAuth);
-			return { runRows, recordedFailure, expiredBrowserAuth };
+			return { runRows, recordedFailure, syncFailure, expiredBrowserAuth };
 		});
 
 		if (finalized === null) {
@@ -1629,7 +1650,10 @@ export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
 			return c.json({ success: false, reason: "already_finalized" });
 		}
 		const { runRows } = finalized;
-		logRunFailure(runRows[0]);
+		// The sync failure record carries the run's exit diagnostics; logging the
+		// generic run failure too would count a crash or timeout twice.
+		if (finalized.syncFailure) recordSyncFailure(finalized.syncFailure);
+		else logRunFailure(runRows[0]);
 		await announceFeedAutoPause(finalized.recordedFailure);
 
 		if (finalized.expiredBrowserAuth) {
