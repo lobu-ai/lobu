@@ -66,7 +66,7 @@ describe("issue creation gate", () => {
     expect(plan([occ({ seen_24h: 1, max_orgs: 2 })], [])[0]?.action).toBe(
       "create"
     );
-    const [created] = plan([occ()], []);
+    const [created] = plan([occ({ max_users: 0, max_orgs: 0 })], []);
     expect(created).toMatchObject({
       action: "create",
       name: "Error: boom",
@@ -89,14 +89,39 @@ describe("issue creation gate", () => {
     });
   });
 
-  test("volume or reach makes a system issue high priority", () => {
+  test("reach makes a system issue high priority; volume alone does not", () => {
+    // One crawler walking distinct URLs: a sighting each, nobody attached.
     expect(
-      plan([occ({ seen_24h: RULES.highMinSeen24h })], [])[0]
+      plan([occ({ seen_24h: 500, max_users: 0, max_orgs: 0 })], [])[0]
+    ).toMatchObject({
+      metadata: { priority: "medium" },
+    });
+    // One named user the error blocked is reach.
+    expect(
+      plan(
+        [
+          occ({
+            seen_24h: RULES.systemMinSeen24h,
+            max_users: RULES.highMinUsers,
+            max_orgs: 0,
+          }),
+        ],
+        []
+      )[0]
     ).toMatchObject({
       metadata: { priority: "high" },
     });
     expect(
-      plan([occ({ kind: "dependency", max_orgs: RULES.highMinOrgs })], [])[0]
+      plan(
+        [
+          occ({
+            kind: "dependency",
+            max_users: 0,
+            max_orgs: RULES.highMinOrgs,
+          }),
+        ],
+        []
+      )[0]
     ).toMatchObject({
       metadata: { priority: "high" },
     });
@@ -104,9 +129,7 @@ describe("issue creation gate", () => {
 
   test("a request failing in browsers is an issue only when it spikes", () => {
     const failed = occ({ source: "browser", kind: "dependency" });
-    expect(plan([{ ...failed, seen_24h: RULES.highMinSeen24h }], [])).toEqual(
-      []
-    );
+    expect(plan([{ ...failed, seen_24h: 500 }], [])).toEqual([]);
     expect(plan([{ ...failed, max_orgs: RULES.highMinOrgs }], [])).toEqual([]);
     const spike = { ...failed, seen_2h: 40, seen_24h: 45, seen_14d: 60 };
     expect(plan([spike], [])[0]).toMatchObject({
@@ -122,7 +145,7 @@ describe("issue creation gate", () => {
       source: "browser",
       title: "Error: Script error.",
       message: RULES.opaqueBrowserError,
-      seen_24h: RULES.highMinSeen24h,
+      seen_24h: 500,
     });
     expect(plan([opaque], [])).toEqual([]);
     expect(plan([{ ...opaque, source: "server" }], [])[0]?.action).toBe(
@@ -175,14 +198,46 @@ describe("issue creation gate", () => {
   });
 
   test("a new high-priority issue alerts admins once; medium ones do not", () => {
-    const [high] = plan([occ({ seen_24h: RULES.highMinSeen24h })], []);
+    const [high] = plan([occ({ max_users: RULES.highMinUsers })], []);
     expect(high).toMatchObject({
       action: "create",
       alert: { kind: "new_high", key: `issue-new:${FP(1)}` },
     });
-    const [medium] = plan([occ()], []);
+    expect(high?.alert?.body).toContain("1 user and 1 workspace affected");
+    const [medium] = plan([occ({ max_users: 0, max_orgs: 0 })], []);
     expect(medium).toMatchObject({ action: "create" });
     expect(medium).not.toHaveProperty("alert");
+  });
+
+  test("an anonymous burst with no user or workspace never alerts", () => {
+    // The real case: a crawler walked 221 distinct public pages in seven
+    // seconds and source admission refused the reads. Volume was real; reach
+    // was zero, and paging on it woke someone for nothing.
+    const burst = occ({
+      seen_2h: 221,
+      seen_24h: 221,
+      seen_14d: 221,
+      max_users: 0,
+      max_orgs: 0,
+    });
+    const [change] = plan([burst], []);
+    expect(change).toMatchObject({
+      action: "create",
+      metadata: { priority: "medium" },
+    });
+    expect(change).not.toHaveProperty("alert");
+    // It still shows on the board, and an escalation without reach is a
+    // status change, not a page.
+    const spike = occ({
+      seen_2h: 40,
+      seen_24h: 45,
+      seen_14d: 60,
+      max_users: 0,
+      max_orgs: 0,
+    });
+    const [escalated] = plan([spike], [issue()]);
+    expect(escalated).toMatchObject({ metadata: { status: "escalating" } });
+    expect(escalated).not.toHaveProperty("alert");
   });
 
   test("the hourly quota defers the quietest new fingerprints", () => {
