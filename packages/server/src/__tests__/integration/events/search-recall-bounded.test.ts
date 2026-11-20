@@ -16,7 +16,7 @@ import {
 } from '../../../utils/content-search/fts';
 import {
   runBoundedRecallQuery,
-  selectFulltextCandidateTsquery,
+  selectQueryTsqueries,
 } from '../../../utils/content-search/search-path';
 import { insertEvent } from '../../../utils/insert-event';
 import { initWorkspaceProvider } from '../../../workspace';
@@ -126,8 +126,14 @@ describe('recall query budget', () => {
     await getDb().unsafe('ANALYZE events');
 
     const sql = getDb();
-    const words = (query: string, budget: number) =>
-      selectFulltextCandidateTsquery(sql, query, undefined, budget);
+    const words = async (query: string, budget: number) =>
+      (
+        await selectQueryTsqueries(query, {
+          candidateArm: true,
+          budget,
+          read: (text, params) => runBoundedRecallQuery(sql, text, params),
+        })
+      ).candidates;
     // Both words fit a generous budget, in query order.
     expect(await words('zephyrcommon quillrare', 1_000_000)).toBe('zephyrcommon | quillrare');
     // 'zephyrcommon' is in nearly every row, too many to rank under a budget of
@@ -146,6 +152,47 @@ describe('recall query budget', () => {
     expect.soft(await words('and', 1_000_000)).toBeNull();
     expect(await words('running runs run', 1_000_000)).toBe('running');
   });
+
+  it(
+    'ranks a prompt-length recall query by its rarest words within the budget',
+    async () => {
+      // Pre-turn recall sends the whole prompt, so an event turn can search with
+      // kilobytes of text. Every row is ranked against the query's words, and
+      // that ranking must not grow with the prompt.
+      const org = await createTestOrganization({ name: 'Recall Long Query Org' });
+      const fillers = Array.from({ length: 200 }, (_, i) => `fillerword${i}`);
+      const occurredAt = new Date('2026-01-01T00:00:00Z');
+      const seed = (key: string, content: string) =>
+        insertEvent({
+          entityIds: [],
+          organizationId: org.id,
+          originId: `recall-long-${key}`,
+          title: `Recall long ${key}`,
+          content,
+          occurredAt,
+          semanticType: 'content',
+          originType: 'content',
+        });
+      for (let i = 0; i < 300; i++) await seed(`common-${i}`, fillers.join(' '));
+      await seed('rare', `${fillers.join(' ')} quillrarefinding`);
+      await getDb().unsafe('ANALYZE events');
+
+      // The rare word comes last, after the prompt's repeated boilerplate.
+      const prompt = `${Array.from({ length: 16 }, () => fillers.join(' ')).join('\n')} quillrarefinding`;
+      // Recall and exact search each read the word statistics under their own bound.
+      for (const recall of [true, false]) {
+        const result = await searchContentByText(prompt, {
+          organization_id: org.id,
+          limit: 5,
+          sort_by: 'score',
+          approximate_candidate_search: recall,
+          include_total: false,
+        });
+        expect(result.content[0]?.origin_id).toBe('recall-long-rare');
+      }
+    },
+    CANDIDATE_QUERY_TIMEOUT_MS * 5
+  );
 
   it(
     'reports partial coverage when embedding-less recall exceeds the budget',

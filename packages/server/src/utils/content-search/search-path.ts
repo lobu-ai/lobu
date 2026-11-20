@@ -38,8 +38,8 @@ import {
   CANDIDATE_VECTOR_LIMIT,
   COLLAPSE_POOL_FACTOR,
   COLLAPSE_POOL_MAX,
+  QUERY_WORD_LIMIT,
   type QueryWordFrequency,
-  TSQUERY_SQL,
   buildSearchDocumentExpr,
   selectCandidateWords,
   tsqueryTokens,
@@ -138,27 +138,48 @@ const QUERY_WORD_FREQUENCY_SQL = `
     (SELECT c.reltuples FROM pg_class c WHERE c.oid = 'events'::regclass) AS total_rows
   FROM words w`;
 
+/** The tsquery strings a search binds, each null when it has no words. */
+export interface QueryTsqueries {
+  /** Every matched row is matched and ranked by these: at most `QUERY_WORD_LIMIT` distinct words. */
+  ranked: string | null;
+  /** Recall's fulltext candidate arm: the ranked words cut to `CANDIDATE_TEXT_MATCH_BUDGET`. */
+  candidates: string | null;
+}
+
+/** Runs one read under the calling search's own bound. */
+export type BoundedSearchRead = (query: string, params: unknown[]) => Promise<unknown[]>;
+
 /**
- * The tsquery string for recall's fulltext candidate arm: the query's words cut
- * to `CANDIDATE_TEXT_MATCH_BUDGET` (see `selectCandidateWords`), or null when no
- * word fits and the arm should not run.
+ * The query's distinct words as tsquery strings (see `selectCandidateWords`).
+ * The word statistics are read only for a query longer than `QUERY_WORD_LIMIT`
+ * words or for the candidate arm, so a short query keeps every word without a
+ * lookup. `read` is the caller's bound: recall's for recall, the exact read's
+ * otherwise.
  */
-export async function selectFulltextCandidateTsquery(
-  sql: DbClient,
+export async function selectQueryTsqueries(
   queryText: string,
-  signal?: AbortSignal,
-  budget?: number
-): Promise<string | null> {
-  const tokens = tsqueryTokens(queryText);
-  if (tokens.length === 0) return null;
-  const frequencies = (await runBoundedRecallQuery(
-    sql,
-    QUERY_WORD_FREQUENCY_SQL,
-    [pgTextArray(tokens)],
-    signal
-  )) as QueryWordFrequency[];
-  const words = selectCandidateWords(tokens, frequencies, budget);
-  return words.length > 0 ? words.join(' | ') : null;
+  options: { candidateArm: boolean; read: BoundedSearchRead; budget?: number }
+): Promise<QueryTsqueries> {
+  const tokens = [...new Set(tsqueryTokens(queryText))];
+  const tsquery = (words: string[]) => (words.length > 0 ? words.join(' | ') : null);
+  const long = tokens.length > QUERY_WORD_LIMIT;
+  if (tokens.length === 0 || (!long && !options.candidateArm)) {
+    return { ranked: tsquery(tokens), candidates: null };
+  }
+  const frequencies = (await options.read(QUERY_WORD_FREQUENCY_SQL, [
+    pgTextArray(tokens),
+  ])) as QueryWordFrequency[];
+  const ranked = long
+    ? selectCandidateWords(tokens, frequencies, Number.POSITIVE_INFINITY, QUERY_WORD_LIMIT)
+    : tokens;
+  if (!options.candidateArm) return { ranked: tsquery(ranked), candidates: null };
+  const rankedSet = new Set(ranked);
+  const candidates = selectCandidateWords(
+    ranked,
+    frequencies.filter((word) => rankedSet.has(word.token)),
+    options.budget
+  );
+  return { ranked: tsquery(ranked), candidates: tsquery(candidates) };
 }
 
 export async function searchContentBySingleQuery(
@@ -197,6 +218,34 @@ export async function searchContentBySingleQuery(
     queryEmbeddingUnavailable = queryEmbedding === null;
   }
   const hasEmbedding = queryEmbedding !== null;
+
+  // Exact org-wide search keeps using `exactFilteredIdsBody` so title-only matches,
+  // filtered result sets, totals, and offsets retain their historical semantics.
+  // The bounded candidate path is opt-in for recall/search_memory snippets: the
+  // caller ignores exact totals/pagination and only needs a small set of highly
+  // relevant rows under the agent recall timeout.
+  // A selective agent filter can make the global ANN candidate scan expensive.
+  // Keep agent recall on the exact org-scoped path, under the same timeout.
+  const useCandidatePath =
+    options.approximate_candidate_search === true &&
+    options.agent_id == null &&
+    entityId == null &&
+    options.organization_id != null &&
+    !useDateFeed &&
+    effectiveOffset === 0 &&
+    hasEmbedding;
+  const hasTextCandidates = useCandidatePath && trimmedQuery.length >= 3;
+  // Recall opted into a bounded answer. Without a query embedding it cannot use
+  // the candidate path, but it still must not outlast the candidate budget.
+  const exactRead = { signal: options.signal, statementTimeoutMs: CONTENT_READ_STATEMENT_TIMEOUT_MS };
+  const read: BoundedSearchRead = options.approximate_candidate_search === true
+    ? (query, params) => runBoundedRecallQuery(sql, query, params, options.signal)
+    : (query, params) => boundedQuery(sql, query, params, exactRead);
+  const queryTsqueries = await selectQueryTsqueries(trimmedQuery, {
+    candidateArm: hasTextCandidates,
+    read,
+  });
+  const fulltextTsquery = queryTsqueries.candidates;
   // Clamp to [0, 1] so a caller can't produce an always-true / always-false
   // predicate with an out-of-range value. Non-numeric input falls back to the
   // default. The parameter is still bound (not interpolated) below for defense
@@ -333,10 +382,12 @@ export async function searchContentBySingleQuery(
     classificationClause = { sql: `AND ${sourceOnly.clause}`, params: sourceOnly.params };
   }
   const baseParamIdx = classificationParamIdx + classificationClause.params.length;
-  const vectorParamIdx = hasEmbedding ? baseParamIdx : null;
+  // The query's ranked words, always bound (NULL when it has none).
+  const queryTsquery = `to_tsquery('english', $${baseParamIdx}::text)`;
+  const vectorParamIdx = hasEmbedding ? baseParamIdx + 1 : null;
   // Bind min_similarity as a numeric parameter after the vector slot (when
   // present) so a hostile float can't break out of the comparison expression.
-  const minSimilarityParamIdx = baseParamIdx + (hasEmbedding ? 1 : 0);
+  const minSimilarityParamIdx = baseParamIdx + 1 + (hasEmbedding ? 1 : 0);
 
   // As in buildStandardWhereSql, allow semi-joins while keeping the entity
   // parameter typed even when the link predicate inlines its id.
@@ -389,7 +440,7 @@ export async function searchContentBySingleQuery(
   // doesn't degenerate to ILIKE '%%' (matches everything) — we want the vector
   // branch to be the sole filter in that case.
   const substringMatchExpr = hasEmbedding ? 'text_match.substring_match' : `f.payload_text ILIKE '%' || $1 || '%'`;
-  const textMatchExpr = `(LENGTH($1) > 0 AND (${substringMatchExpr} OR COALESCE(${textDocumentExpr} @@ ${TSQUERY_SQL}, false)))`;
+  const textMatchExpr = `(LENGTH($1) > 0 AND (${substringMatchExpr} OR COALESCE(${textDocumentExpr} @@ ${queryTsquery}, false)))`;
   const vecParam = vectorParamIdx ? `$${vectorParamIdx}::vector` : 'NULL::vector';
   const minSimilarityParam = `$${minSimilarityParamIdx}::numeric`;
   // Vector-space integrity: only compare against rows stamped with the EXACT
@@ -432,7 +483,7 @@ export async function searchContentBySingleQuery(
   const rankedSubstringMatch = hasEmbedding ? 'fi.substring_match' : `fi.payload_text ILIKE '%' || $1 || '%'`;
   const textRankExpr = `
     (CASE WHEN LENGTH($1) > 0 AND ${rankedSubstringMatch} THEN 0.5 ELSE 0.0 END)
-    + CASE WHEN LENGTH($1) > 0 THEN 0.5 * COALESCE(ts_rank_cd(${resultDocumentExpr}, ${TSQUERY_SQL}, 32), 0) ELSE 0 END
+    + CASE WHEN LENGTH($1) > 0 THEN 0.5 * COALESCE(ts_rank_cd(${resultDocumentExpr}, ${queryTsquery}, 32), 0) ELSE 0 END
   `;
   let similarityExpr: string;
   let combinedScoreExpr: string;
@@ -508,9 +559,9 @@ export async function searchContentBySingleQuery(
     ? `${searchThreadCteSql},\n      ${latestClassificationsCteSql}`
     : searchThreadCteSql;
 
-  // When hasEmbedding, two params (vector + min_similarity) follow baseParamIdx;
-  // otherwise neither is bound, so the cursor params resume at baseParamIdx.
-  const cursorBaseParamIdx = baseParamIdx + (hasEmbedding ? 2 : 0);
+  // The ranked tsquery sits at baseParamIdx. When hasEmbedding, two params
+  // (vector + min_similarity) follow it; otherwise the cursor params come next.
+  const cursorBaseParamIdx = baseParamIdx + 1 + (hasEmbedding ? 2 : 0);
   const cursorClause = buildDateCursorClause(
     cursor,
     'COALESCE(fi.occurred_at, fi.created_at)',
@@ -522,25 +573,7 @@ export async function searchContentBySingleQuery(
   const validatedLimit = validateNumericId(limit, 'limit');
 
   // ── Recall-only index-driven candidate path ──────────────────────────────
-  // Exact org-wide search keeps using `exactFilteredIdsBody` so title-only matches,
-  // filtered result sets, totals, and offsets retain their historical semantics.
-  // The bounded candidate path is opt-in for recall/search_memory snippets: the
-  // caller ignores exact totals/pagination and only needs a small set of highly
-  // relevant rows under the agent recall timeout.
-  // A selective agent filter can make the global ANN candidate scan expensive.
-  // Keep agent recall on the exact org-scoped path, under the same timeout.
-  const useCandidatePath =
-    options.approximate_candidate_search === true &&
-    options.agent_id == null &&
-    entityId == null &&
-    options.organization_id != null &&
-    !useDateFeed &&
-    effectiveOffset === 0 &&
-    hasEmbedding;
-  const hasTextCandidates = useCandidatePath && trimmedQuery.length >= 3;
-  const fulltextTsquery = hasTextCandidates
-    ? await selectFulltextCandidateTsquery(sql, trimmedQuery, options.signal)
-    : null;
+  // (`useCandidatePath`, decided above.)
   let searchCandidatesCteSql = '';
   if (useCandidatePath) {
     // $tsq is appended last in queryParams; offsetParamIdx is the current tail
@@ -826,6 +859,7 @@ export async function searchContentBySingleQuery(
     ...searchEntityLinkParams,
     ...resourceClause.params,
     ...classificationClause.params,
+    queryTsqueries.ranked,
     ...(hasEmbedding ? [toVectorLiteral(queryEmbedding!), minSimilarity] : []),
     ...cursorClause.params,
     ...(useDateFeed ? [fetchLimit] : [includeTotal ? limit : limit + 1, effectiveOffset]),
@@ -835,15 +869,7 @@ export async function searchContentBySingleQuery(
     queryParams.push(fulltextTsquery);
   }
 
-  let rawRows: any[];
-  // Recall opted into a bounded answer. Without a query embedding it cannot use
-  // the candidate path, but it still must not outlast the candidate budget.
-  const exactRead = { signal: options.signal, statementTimeoutMs: CONTENT_READ_STATEMENT_TIMEOUT_MS };
-  if (options.approximate_candidate_search === true) {
-    rawRows = await runBoundedRecallQuery(sql, querySQL, queryParams, options.signal);
-  } else {
-    rawRows = await boundedQuery(sql, querySQL, queryParams, exactRead);
-  }
+  const rawRows: any[] = await read(querySQL, queryParams);
 
   let emptyPageTotal: number | null = null;
   if (includeTotal && !useDateFeed && rawRows.length === 0 && effectiveOffset > 0) {
