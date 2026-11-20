@@ -1013,6 +1013,41 @@ describe("Automation three-way attribution", () => {
     expect(plan.counts.drift).toBe(0);
   });
 
+  test("no baseline entry: a declared reaction script is still pushed", () => {
+    const desired = buildState([]);
+    desired.automations = [
+      {
+        slug: "digest",
+        agent: "agent-a",
+        prompt: "Summarize",
+        reactionScript: {
+          sourcePath: "./digest.reaction.ts",
+          sourceCode: "export default () => {};",
+        },
+      } as any,
+    ];
+    const remote = emptyRemote();
+    remote.automations = [
+      {
+        slug: "digest",
+        automation_id: "b-1",
+        managed_agent_id: "agent-a",
+        name: "Digest",
+        prompt: "Summarize",
+      } as any,
+    ];
+    // Recorded baseline has no entry for `digest` — the reaction is write-only
+    // and cannot be compared, so it must re-push rather than noop.
+    const plan = computeDiff(desired, remote, {
+      orgId: "org-1",
+      baseline: baselineFor([], []),
+    });
+    const row = plan.rows.find((r) => r.kind === "automation");
+    expect(row?.verb).toBe("update");
+    expect(row?.changedFields).toEqual(["reaction_script"]);
+    expect(plan.counts.drift).toBe(0);
+  });
+
   test("remote agent reassignment → blocking drift (never silently overwritten)", () => {
     const desired = buildState([]);
     desired.automations = [desiredAutomation() as any];

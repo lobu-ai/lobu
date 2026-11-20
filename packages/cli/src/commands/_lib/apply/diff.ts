@@ -1650,14 +1650,21 @@ function diffAutomationWithBaseline(
       projectRemoteAutomation(remote)
     );
     if (inSync) {
+      // Reaction scripts are write-only (Automation lists omit them), so a
+      // declared reaction is ALWAYS re-pushed — including before the first
+      // baseline entry exists. Returning noop here recorded the Automation's
+      // ownership but silently left the previous script running.
       return {
-        row: {
-          kind: "automation",
-          verb: "noop",
-          id: desired.slug,
-          desired,
-          remote,
-        },
+        row:
+          desired.reactionScript !== undefined
+            ? diffAutomation(desired, remote)
+            : {
+                kind: "automation",
+                verb: "noop",
+                id: desired.slug,
+                desired,
+                remote,
+              },
         blocking: [],
       };
     }
